@@ -32,9 +32,11 @@
 //       reads `inner_checkpoint` and idempotently SKIPS finished phases + REUSES
 //       the existing PR (never a duplicate). The workflow writes that checkpoint
 //       itself, mid-run, via an `agent()` Bash step (proto-2 C1: a workflow Bash
-//       step can persist to sqlite mid-run). Date.now()/new Date() are NOT
-//       available in a workflow script — timestamps are computed inside the Bash
-//       step via `date -u +%FT%TZ`.
+//       step can persist to sqlite mid-run) that invokes the checked-in
+//       `trident/checkpoint.sh` (P10: PRAGMA busy_timeout=5000 retry-under-lock,
+//       no LLM-transcribed SQL). Date.now()/new Date() are NOT available in a
+//       workflow script — timestamps are computed inside that script via
+//       `date -u +%FT%TZ`.
 //
 // HOW TO RUN: invoked by the `Workflow` tool with this file's path as
 // `scriptPath` (see `trident/inner-loop.ts`). The globals
@@ -96,6 +98,15 @@ const {
   // blocker. PRESENT → the codex reviewer runs `trident/codex-review.sh` with this
   // CODEX_HOME; an auth/call failure there is DEFERRED (never a silent APPROVE).
   codexHome = null,
+  // Checkpoint-writer script path (refactor P10). The sqlite UPDATEs behind
+  // checkpoint()/writeTerminalResult() live in the checked-in
+  // trident/checkpoint.sh (PRAGMA busy_timeout=5000 on the same connection, so
+  // writes retry up to 5s under lock instead of failing instantly) — the agent
+  // invokes the script instead of transcribing raw SQL. Threaded from the
+  // launcher (buildWorkflowArgs) like dbPath; a legacy caller that doesn't
+  // thread it falls back to the repo-of-record copy (same precedent as
+  // codex-review.sh below).
+  checkpointScript = null,
   // FABLE-ORCHESTRATOR model routing (SPEC § Fable-orchestrator, 2026-07-02).
   // The per-role model IDS, resolved from the single-source-of-truth registry
   // (runtime/models.ts) in the launcher (`buildWorkflowArgs`) and threaded in
@@ -109,6 +120,12 @@ const {
 // Is a per-project codex credential configured for this run? Absent → skip the
 // codex panelist entirely (no wasted agent) and synthesise Claude-only.
 const codexConfigured = typeof codexHome === 'string' && codexHome.length > 0
+
+// Resolved checkpoint-writer path (P10). Only ever used when dbPath && runId
+// are threaded (checkpoint()/writeTerminalResult() no-op otherwise), and the
+// launcher that threads those also threads checkpointScript — the repoPath
+// fallback covers only legacy callers.
+const checkpointSh = checkpointScript || `${repoPath}/trident/checkpoint.sh`
 
 // `pr` mode → push to origin + open/reuse a GitHub PR. `local` mode (the store
 // default when there is no GitHub origin or `gh` is unavailable) → commit on the
@@ -387,22 +404,26 @@ ${plan.implementationPlan}
 
 // C1 per-phase checkpoint — an `agent()` Bash step writes the inner-loop
 // checkpoint into `code_trident_runs` mid-run so a crash-relaunched FRESH
-// workflow can skip finished phases + reuse the PR. Timestamps are computed IN
-// the Bash step (`date -u +%FT%TZ`) because Date.now()/new Date() are not
-// available in a workflow script. No-ops when the launcher did not thread a
-// dbPath/runId (e.g. a dry source check).
+// workflow can skip finished phases + reuse the PR. The write goes through the
+// checked-in trident/checkpoint.sh (P10): PRAGMA busy_timeout=5000 on the same
+// connection makes the write retry up to 5s under lock (default busy_timeout=0
+// failed instantly — a lost write meant no resume state until the reaper), the
+// prompt carries field/value args instead of raw SQL for the LLM to
+// transcribe, and the script stamps `last_advanced_at` itself (`date -u
+// +%FT%TZ` — Date.now()/new Date() are not available in a workflow script).
+// UPDATE semantics are unchanged from the old inline SQL. No-ops when the
+// launcher did not thread a dbPath/runId (e.g. a dry source check).
 async function checkpoint(name, opts) {
   if (!dbPath || !runId) return
   const o = opts || {}
-  const sets = []
-  if (o.pr !== undefined && o.pr !== null) sets.push(`pr=${Number(o.pr)}`)
-  sets.push(`branch='${forgeBranch}'`)
-  sets.push(`inner_checkpoint='${name}'`)
-  sets.push(`subagent_status='running'`)
-  sets.push(`last_advanced_at='$(date -u +%FT%TZ)'`)
+  const fields = []
+  if (o.pr !== undefined && o.pr !== null) fields.push(`pr ${Number(o.pr)}`)
+  fields.push(`branch ${shSingleQuote(forgeBranch)}`)
+  fields.push(`inner_checkpoint ${shSingleQuote(name)}`)
+  fields.push(`subagent_status running`)
   await agent(
     `Checkpoint step (idempotent; must NOT fail the build). Run EXACTLY this single Bash command and nothing else, then report "checkpoint ${name} ok":
-sqlite3 "${dbPath}" "UPDATE code_trident_runs SET ${sets.join(', ')} WHERE id='${runId}'"`,
+bash ${shSingleQuote(checkpointSh)} ${shSingleQuote(dbPath)} ${shSingleQuote(runId)} ${fields.join(' ')}`,
     withModel({ label: `checkpoint:${name}`, phase: 'Build' }),
   )
 }
@@ -422,13 +443,18 @@ function shSingleQuote(s) {
 // by the OUTER loop against the `inner_checkpoint='argus-approved'` that the
 // synthesis-phase `checkpoint()` already wrote — this row is only the typed
 // payload, never the provenance of record. The JSON is written to a temp file
-// and pulled in via `readfile()` (CAST AS TEXT) so the JSON's own double quotes
-// can never break the double-quoted sqlite shell argument. No-ops when the
-// launcher did not thread a dbPath/runId (a dry source check).
+// and pulled in via the script's `inner_result_file` field, which keeps the
+// `readfile()` (CAST AS TEXT) indirection so the JSON's own double quotes can
+// never break the sqlite argument. The UPDATE itself runs through
+// trident/checkpoint.sh (P10: PRAGMA busy_timeout=5000 retry-under-lock, no
+// LLM-transcribed SQL — a lost terminal write meant no harvest until the 25m
+// reaper). No-ops when the launcher did not thread a dbPath/runId (a dry
+// source check).
 //
 // COLUMN CONSISTENCY (harvest-gap defense): `subagent_status` flips to
 // 'completed' ONLY inside a CASE guarded on the SAME `readfile()` actually
-// yielding non-empty text. If the temp file is missing/unreadable/empty at
+// yielding non-empty text (checkpoint.sh emits that exact CASE for
+// `inner_result_file`). If the temp file is missing/unreadable/empty at
 // UPDATE time, `inner_result` lands NULL and `subagent_status` is LEFT UNCHANGED
 // (stays 'running') — so a `completed` status can never be committed alongside a
 // null/unparseable result (which would strand the run at forge-init, the hang
@@ -440,19 +466,17 @@ async function writeTerminalResult(result) {
   const verdict = result.verdict === 'APPROVE' ? 'APPROVE' : 'REQUEST_CHANGES'
   const json = JSON.stringify(result)
   const tmp = `/tmp/trident-terminal-${runId}.json`
-  const sets = [
-    `inner_result=CAST(readfile('${tmp}') AS TEXT)`,
-    `inner_verdict='${verdict}'`,
-    `subagent_status=CASE WHEN length(CAST(readfile('${tmp}') AS TEXT)) > 0 THEN 'completed' ELSE subagent_status END`,
-    `branch='${forgeBranch}'`,
+  const fields = [
+    `inner_result_file ${shSingleQuote(tmp)}`,
+    `inner_verdict ${shSingleQuote(verdict)}`,
+    `branch ${shSingleQuote(forgeBranch)}`,
   ]
   if (result.prNumber !== undefined && result.prNumber !== null) {
-    sets.push(`pr=${Number(result.prNumber)}`)
+    fields.push(`pr ${Number(result.prNumber)}`)
   }
-  sets.push(`last_advanced_at='$(date -u +%FT%TZ)'`)
   await agent(
     `Terminal-result step (idempotent; must NOT fail the build). Run EXACTLY this single Bash command and nothing else, then report "terminal-result ok":
-printf '%s' ${shSingleQuote(json)} > ${tmp} && sqlite3 "${dbPath}" "UPDATE code_trident_runs SET ${sets.join(', ')} WHERE id='${runId}'"`,
+printf '%s' ${shSingleQuote(json)} > ${tmp} && bash ${shSingleQuote(checkpointSh)} ${shSingleQuote(dbPath)} ${shSingleQuote(runId)} ${fields.join(' ')}`,
     withModel({ label: 'terminal-result', phase: 'Synthesis' }),
   )
 }
