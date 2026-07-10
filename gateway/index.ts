@@ -351,9 +351,14 @@ export async function boot(options: BootOptions = {}): Promise<BootHandle> {
   // O4 / Sprint 19 — everything from here to the returned BootHandle is guarded:
   // a throw (listener bind, port assertion, sd_notify) runs bootFailureCleanup
   // so the DB handle, a composed graph's timers, and the ambient system_events
-  // sink are all released before the error propagates. `boundServerRef` lets the
-  // catch also stop a listener that DID bind before a later step threw.
-  let boundServerRef: BootServer | null = null
+  // sink are all released before the error propagates. `rawServerRef` captures
+  // the bound listener the INSTANT bindHttpListener returns (the socket is
+  // already OPEN then) so the catch can stop it even if a throw fires BEFORE the
+  // graceful-drain `boundServer` wrapper is built — critically the
+  // `server.port === undefined` assertion, which precedes `boundServer`. Without
+  // this, that assertion leaks the open socket into a systemd restart on the
+  // same port.
+  let rawServerRef: { stop: (force?: boolean) => void | Promise<void> } | null = null
   try {
   // Pick the http handler. Explicit BootOptions wins over composer output;
   // composer output wins over the default healthz stub. The chained-fetch
@@ -439,6 +444,11 @@ export async function boot(options: BootOptions = {}): Promise<BootHandle> {
       websocket: websocketHandler,
     }),
   })
+  // The socket is OPEN as of this line. Capture a stoppable ref BEFORE any
+  // subsequent throw (the port assertion below, sd_notify, watchdog wiring) so
+  // the init-failure catch always releases it. Error-path stop uses force:true
+  // (the graceful-drain semantics live on `boundServer` for the success path).
+  rawServerRef = server
   // Bun's typed surface marks `server.port` as `number | undefined` (TCP
   // sockets aren't required for every transport), but for a port-bound HTTP
   // server it's always set post-start. Assert at boot to keep the BootHandle
@@ -465,9 +475,8 @@ export async function boot(options: BootOptions = {}): Promise<BootHandle> {
       await server.stop(force)
     },
   }
-  // Track the bound listener so the init-failure guard can stop it if a later
-  // step (sd_notify, watchdog wiring) throws after the socket is already open.
-  boundServerRef = boundServer
+  // (rawServerRef already tracks the open socket for the init-failure guard,
+  // captured above the moment bindHttpListener returned.)
 
   // Best-effort READY=1; sdNotify is a no-op when NOTIFY_SOCKET is unset (dev
   // mode / macOS), and throws on real systemd error paths so a bricked notify
@@ -589,11 +598,12 @@ export async function boot(options: BootOptions = {}): Promise<BootHandle> {
   } catch (err) {
     // Any failure between the sink registration and the returned BootHandle
     // (listener bind rejection, port assertion, sd_notify READY throw) lands
-    // here. Stop a listener that already bound, then release the graph, sink,
-    // and DB via the shared cleanup so nothing leaks into a systemd restart.
-    if (boundServerRef !== null) {
+    // here. Force-stop the raw listener if the socket ever opened, then release
+    // the graph, sink, and DB via the shared cleanup so nothing leaks into a
+    // systemd restart.
+    if (rawServerRef !== null) {
       try {
-        await boundServerRef.stop({ force: true })
+        await rawServerRef.stop(true)
       } catch (stopErr) {
         console.error('http listener stop during init failure threw:', stopErr)
       }

@@ -384,6 +384,40 @@ describe('O4 — boot manages the ambient system_events sink lifecycle', () => {
     await rebind.stop(true)
   })
 
+  test('the PORT-ASSERTION failure STOPS the raw bound listener (the leak coordinator-Codex found)', async () => {
+    // The `server.port === undefined` assertion throws BEFORE the graceful
+    // `boundServer` wrapper is built. Before the fix, the catch's stop guard
+    // referenced a ref that wasn't set yet → the open socket leaked. Force
+    // Bun.serve to return a port-undefined server (a stoppable stub) and assert
+    // boot throws AND the raw server's stop() was called.
+    const root = mkdtempSync(join(tmpdir(), 'neutron-o4-portassert-'))
+    cleanups.push(root)
+    bootEnv(root)
+    delete process.env['NOTIFY_SOCKET']
+    registerSystemEventSink(null)
+
+    const bunMut = Bun as unknown as { serve: (...args: unknown[]) => unknown }
+    const origServe = bunMut.serve
+    let stopCalls = 0
+    bunMut.serve = () => ({
+      port: undefined, // trips the `server.port === undefined` assertion
+      stop: (_force?: boolean): void => {
+        stopCalls += 1
+      },
+    })
+    activeSpy = spyProjectDbClose()
+    const closeSpy = activeSpy
+    try {
+      await expect(boot({ port: 0, composer: goodComposer })).rejects.toThrow(/did not bind a port/)
+      // The raw listener was stopped (NOT leaked), and the shared cleanup ran.
+      expect(stopCalls).toBe(1)
+      expect(closeSpy.calls).toBe(1)
+      expect(resolveSystemEventSink()).toBeNull()
+    } finally {
+      bunMut.serve = origServe
+    }
+  })
+
   test('ownership-guarded: shutdown does NOT clobber a sibling sink registered after boot', async () => {
     const root = mkdtempSync(join(tmpdir(), 'neutron-o4-sink-own-'))
     cleanups.push(root)
