@@ -282,7 +282,16 @@ function splitTopLevelCommas(s: string): string[] {
   let inQuote = false
   for (let i = 0; i < s.length; i += 1) {
     const ch = s[i]
-    if (ch === '"' && s[i - 1] !== '\\') inQuote = !inQuote
+    if (ch === '"') {
+      // The quote is a real delimiter only when NOT escaped. render escapes
+      // `\`→`\\` and `"`→`\"`, so a delimiter quote is preceded by an EVEN
+      // run of backslashes; an odd run means the quote itself is escaped.
+      // (A naive `s[i-1] !== '\\'` check mis-reads a value ending in a
+      // literal backslash — rendered `\\"` — as an escaped quote.)
+      let bs = 0
+      for (let j = i - 1; j >= 0 && s[j] === '\\'; j -= 1) bs += 1
+      if (bs % 2 === 0) inQuote = !inQuote
+    }
     if (ch === ',' && !inQuote) {
       parts.push(cur)
       cur = ''

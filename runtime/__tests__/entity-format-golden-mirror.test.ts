@@ -121,6 +121,12 @@ describe('renderYamlFrontmatter / parseFrontmatter — inverse round trip on gol
     { slug: 'a', type: 'person', tags: [] },
     { slug: 'a', type: 'person', tags: ['x', 'y', 'z'] },
     { slug: 'a', type: 'person', tags: ['needs quoting: yes', 'true', '007'] },
+    // Backslash boundaries: an array item whose value ends in a literal
+    // backslash renders as `\\"` — a naive `s[i-1] !== '\\'` split mis-reads
+    // the closing quote as escaped and breaks the round trip (Codex).
+    { slug: 'a', type: 'person', tags: ['colon: \\', 'next'] },
+    { slug: 'a', type: 'person', tags: ['ends\\', 'and "quoted"', 'x'] },
+    { slug: 'a', type: 'person', tags: ['back\\slash: mid'] },
     { slug: 'a', type: 'person', nums: [1, 2, 3] },
   ]
 
