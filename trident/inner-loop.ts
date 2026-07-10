@@ -54,6 +54,7 @@ import type { SessionHandle } from '@neutronai/runtime/session-handle.ts'
 import type { TridentRun } from './store.ts'
 import { FABLE_MODEL, SONNET_MODEL, FAST_MODEL, getBestModel } from '@neutronai/runtime/models.ts'
 import { DEFAULT_SETTLE_TIMEOUT_MS } from './liveness.ts'
+import { fileURLToPath } from 'node:url'
 
 export interface InnerLoopInput {
   run: TridentRun
@@ -135,7 +136,15 @@ export interface BuildWorkflowFirerOptions {
 }
 
 /** The default abs path of the sibling inner-workflow script. */
-export const DEFAULT_INNER_WORKFLOW_PATH = new URL('./inner-workflow.mjs', import.meta.url).pathname
+export const DEFAULT_INNER_WORKFLOW_PATH = fileURLToPath(new URL('./inner-workflow.mjs', import.meta.url))
+
+/** The abs path of the sibling checkpoint-writer script (refactor P10). The
+ *  workflow's Bash checkpoint/terminal-result steps invoke it instead of
+ *  embedding raw sqlite SQL in the agent prompt; it prepends
+ *  `PRAGMA busy_timeout=5000;` on the same connection so checkpoint writes
+ *  retry under lock. Threaded via args (the workflow script has no module
+ *  resolution and the TARGET repo need not contain trident/). */
+export const CHECKPOINT_SCRIPT_PATH = fileURLToPath(new URL('./checkpoint.sh', import.meta.url))
 
 /**
  * The `--tools` surface the WARM fire substrate needs. Includes `Workflow` (the
@@ -188,6 +197,9 @@ export function buildWorkflowArgs(input: InnerLoopInput): Record<string, unknown
     branch: run.branch,
     dbPath: input.db_path,
     runId: run.id,
+    // The checked-in checkpoint-writer the workflow's Bash steps invoke for
+    // every code_trident_runs checkpoint/terminal-result UPDATE (P10).
+    checkpointScript: CHECKPOINT_SCRIPT_PATH,
     resumeCheckpoint: input.resume_checkpoint ?? null,
     // Per-project CODEX_HOME for the optional cross-model review; null → the
     // workflow treats codex as not-connected and reviews Claude-only.

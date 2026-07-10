@@ -165,6 +165,22 @@ describe('buildWorkflowFirer — fire mechanics over a fire seam', () => {
     expect(prompt).toContain('"runId":"run-9"')
   })
 
+  test('args thread the checked-in checkpointScript abs path (P10 — the workflow cannot resolve it itself)', async () => {
+    const { fire, calls } = fakeFire(() => ({ status: 'fired', error: null }))
+    const firer = buildWorkflowFirer({ fire })
+    await firer(input())
+    // Resolved via import.meta.url beside inner-loop.ts — the TARGET repo need
+    // not contain trident/, so the path must be threaded, never derived there.
+    const m = calls[0]!.prompt.match(/"checkpointScript":"([^"]*\/trident\/checkpoint\.sh)"/)
+    expect(m).not.toBeNull()
+    const threaded = m![1]!
+    // Must be a DECODED filesystem path, not a URL `.pathname` (which leaves
+    // spaces as `%20` etc.) — else `bash <path>` fails on any checkout dir
+    // containing a space. fileURLToPath decodes; new URL(...).pathname does not.
+    expect(threaded).not.toContain('%')
+    expect(threaded.startsWith('/')).toBe(true)
+  })
+
   test('args thread codexHome when a per-project CODEX_HOME is configured (cross-model review)', async () => {
     const { fire, calls } = fakeFire(() => ({ status: 'fired', error: null }))
     const firer = buildWorkflowFirer({ fire })

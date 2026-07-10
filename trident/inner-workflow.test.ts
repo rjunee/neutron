@@ -15,6 +15,10 @@ import { fileURLToPath } from 'node:url'
 
 const SRC = readFileSync(fileURLToPath(new URL('./inner-workflow.mjs', import.meta.url)), 'utf8')
 
+// The checked-in checkpoint-writer the workflow's Bash steps invoke (P10) —
+// its SQL is asserted here; its runtime behavior in checkpoint-sh.test.ts.
+const CHECKPOINT_SH = readFileSync(fileURLToPath(new URL('./checkpoint.sh', import.meta.url)), 'utf8')
+
 describe('inner-workflow.mjs — meta + phases', () => {
   test('exports a pure meta literal named trident-v2-inner with the three phases', () => {
     expect(SRC).toContain("name: 'trident-v2-inner'")
@@ -25,7 +29,7 @@ describe('inner-workflow.mjs — meta + phases', () => {
   })
 
   test('destructures the args contract with defaults', () => {
-    for (const key of ['repoPath', 'task', 'baseBranch', 'slug', 'maxRounds', 'ralph', 'prNumber', 'branch', 'dbPath', 'runId', 'resumeCheckpoint']) {
+    for (const key of ['repoPath', 'task', 'baseBranch', 'slug', 'maxRounds', 'ralph', 'prNumber', 'branch', 'dbPath', 'runId', 'checkpointScript', 'resumeCheckpoint']) {
       expect(SRC).toContain(key)
     }
   })
@@ -146,12 +150,28 @@ describe('inner-workflow.mjs — deterministic branch + worktree isolation', () 
 })
 
 describe('inner-workflow.mjs — per-phase SQLite checkpointing (C1)', () => {
-  test('a checkpoint Bash step UPDATEs code_trident_runs with date -u timestamps', () => {
-    expect(SRC).toContain('sqlite3 "${dbPath}"')
-    expect(SRC).toContain('UPDATE code_trident_runs SET')
-    expect(SRC).toContain("WHERE id='${runId}'")
-    // Timestamps computed IN the Bash step (Date.now unavailable in workflows).
-    expect(SRC).toContain('$(date -u +%FT%TZ)')
+  test('checkpoint Bash steps invoke the checked-in checkpoint.sh — no LLM-transcribed inline SQL (P10)', () => {
+    // Both write paths route through the script (threaded via args like
+    // dbPath, repo-of-record fallback), passing db + run id + field args.
+    expect(SRC).toContain('checkpointScript = null')
+    expect(SRC).toMatch(/const checkpointSh = checkpointScript \|\| `\$\{repoPath\}\/trident\/checkpoint\.sh`/)
+    expect(SRC).toContain('bash ${shSingleQuote(checkpointSh)} ${shSingleQuote(dbPath)} ${shSingleQuote(runId)}')
+    // The raw UPDATE no longer rides in an agent prompt for the LLM to
+    // transcribe (and mistranscribe) — it lives in checkpoint.sh.
+    expect(SRC).not.toContain('UPDATE code_trident_runs')
+    expect(SRC).not.toContain('sqlite3 "${dbPath}"')
+  })
+
+  test('checkpoint.sh hardens the write: busy_timeout on the SAME connection + same idempotent UPDATE + in-script timestamp', () => {
+    // busy_timeout is per-connection: the PRAGMA must share the sqlite3
+    // invocation with the UPDATE, so writes retry under lock (was 0 → a lost
+    // terminal write meant no harvest until the 25m reaper).
+    expect(CHECKPOINT_SH).toContain('PRAGMA busy_timeout=5000; UPDATE code_trident_runs SET')
+    expect(CHECKPOINT_SH).toContain("WHERE id='$(sql_quote \"$run\")'")
+    // Timestamps computed IN the script (Date.now unavailable in workflows);
+    // both legacy inline UPDATEs unconditionally stamped last_advanced_at.
+    expect(CHECKPOINT_SH).toContain('$(date -u +%FT%TZ)')
+    expect(CHECKPOINT_SH).toContain('last_advanced_at=')
   })
 
   test('checkpoints forge-done, argus-approved/argus-request-changes, and fix-round-N', () => {
@@ -348,11 +368,17 @@ describe('inner-workflow.mjs — mandatory worktree cleanup on ALL paths', () =>
 // harvests `inner_result` from the DB (no process/stdout). So the workflow must
 // persist its TYPED terminal result on EVERY terminal path — incl. a throw.
 describe('inner-workflow.mjs — exec-model terminal-result harvest signal', () => {
-  test('writes inner_result via readfile() CAST AS TEXT (JSON-safe sqlite write)', () => {
+  test('writes inner_result via checkpoint.sh inner_result_file → readfile() CAST AS TEXT (JSON-safe sqlite write)', () => {
     expect(SRC).toContain('async function writeTerminalResult(')
-    // readfile()+CAST dodges the JSON double-quotes vs the sqlite shell argument.
-    expect(SRC).toContain("inner_result=CAST(readfile(")
-    expect(SRC).toContain('AS TEXT)')
+    // The workflow passes the temp-file PATH; the readfile()+CAST that dodges
+    // the JSON double-quotes vs the sqlite argument lives in checkpoint.sh,
+    // together with the COLUMN-CONSISTENCY CASE (subagent_status flips to
+    // 'completed' ONLY when the SAME readfile() yields non-empty text).
+    expect(SRC).toContain('inner_result_file ${shSingleQuote(tmp)}')
+    expect(CHECKPOINT_SH).toContain("inner_result=CAST(readfile('$f') AS TEXT)")
+    expect(CHECKPOINT_SH).toContain(
+      "subagent_status=CASE WHEN length(CAST(readfile('$f') AS TEXT)) > 0 THEN 'completed' ELSE subagent_status END",
+    )
     // The harvest-ready signal is written on the SUCCESS path before returning.
     expect(SRC).toContain('await writeTerminalResult(terminalResult)')
     // …and on the RESUME-approved short-circuit.
