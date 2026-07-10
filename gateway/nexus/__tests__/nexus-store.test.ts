@@ -116,6 +116,14 @@ describe('NexusStore — schema init', () => {
         .map((r) => r.name)
       expect(indexes).toContain('idx_agent_nexus_events_kind_created')
       expect(indexes).toContain('idx_agent_nexus_events_created_at')
+      const triggers = db
+        .query<{ name: string }, []>(
+          "SELECT name FROM sqlite_master WHERE type='trigger' ORDER BY name",
+        )
+        .all()
+        .map((r) => r.name)
+      expect(triggers).toContain('agent_nexus_events_no_update')
+      expect(triggers).toContain('agent_nexus_events_no_delete')
     } finally {
       db.close()
     }
@@ -631,6 +639,31 @@ describe('NexusStore — taxonomy + caps enforcement', () => {
     await expect(
       h.store.appendEvent(PROJECT_ID, input({ refs })),
     ).rejects.toThrow(NexusStoreError)
+  })
+
+  it('append-only is enforced at the DATABASE: raw UPDATE and DELETE both fail', async () => {
+    const written = await h.store.appendEvent(PROJECT_ID, input({ body: 'immutable' }))
+    h.store.closeAll()
+    const db = new Database(sidecarPath(h.owner_home), {
+      create: false,
+      readwrite: true,
+    })
+    try {
+      expect(() =>
+        db.run(`UPDATE agent_nexus_events SET body = 'rewritten' WHERE id = ?`, [
+          written.id,
+        ]),
+      ).toThrow(/append-only/)
+      expect(() => db.run('DELETE FROM agent_nexus_events')).toThrow(/append-only/)
+      const row = db
+        .query<{ body: string }, [string]>(
+          'SELECT body FROM agent_nexus_events WHERE id = ?',
+        )
+        .get(written.id)
+      expect(row?.body).toBe('immutable')
+    } finally {
+      db.close()
+    }
   })
 
   it('schema CHECK constraints stop raw-SQL writers that bypass the store', async () => {

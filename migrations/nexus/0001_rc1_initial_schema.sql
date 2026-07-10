@@ -79,6 +79,24 @@ CREATE TABLE IF NOT EXISTS agent_nexus_events (
     created_at  INTEGER NOT NULL
 );
 
+-- Append-only is enforced AT THE DATABASE, not just by store-surface
+-- convention: any process can open the sidecar file directly, and the
+-- log's value as a cross-agent history depends on rows never being
+-- rewritten. Unlike the comments sidecar (whose materialised anchors
+-- projection legitimately DELETEs), nothing in the nexus design ever
+-- mutates an event row, so hard triggers cost nothing.
+CREATE TRIGGER IF NOT EXISTS agent_nexus_events_no_update
+BEFORE UPDATE ON agent_nexus_events
+BEGIN
+  SELECT RAISE(ABORT, 'agent_nexus_events is append-only (no UPDATE)');
+END;
+
+CREATE TRIGGER IF NOT EXISTS agent_nexus_events_no_delete
+BEFORE DELETE ON agent_nexus_events
+BEGIN
+  SELECT RAISE(ABORT, 'agent_nexus_events is append-only (no DELETE)');
+END;
+
 -- readRecent filters by kind + since and pages newest-first by
 -- (created_at, id) — created_at is the recency truth, the ULID id is
 -- only the tiebreak (ids usually sort chronologically too, but the
