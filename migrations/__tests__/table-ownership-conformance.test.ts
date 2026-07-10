@@ -79,13 +79,26 @@ function collectSourceFiles(root: string): string[] {
   return out
 }
 
+/**
+ * The table identifier as SQLite accepts it in DML (Codex round-3): bare,
+ * double-quoted, backtick-quoted, or bracket-quoted — each optionally
+ * schema-qualified (`main.projects`, `main."projects"`, ...). Bare form gets a
+ * trailing \b so `projects_x` never matches; quoted forms end at the closing
+ * quote. Single-quoted 'projects' is a string literal, not an identifier —
+ * deliberately unmatched.
+ */
+function tableToken(table: string): string {
+  return String.raw`(?:[\w"\x60\[\]]+\s*\.\s*)?(?:${table}\b|"${table}"|\x60${table}\x60|\[${table}\])`
+}
+
 /** SQL write statements against `table`, tolerant of multi-line literals. */
 function writePatterns(table: string): RegExp[] {
+  const t = tableToken(table)
   return [
-    new RegExp(String.raw`\binsert\s+(?:or\s+\w+\s+)?into\s+${table}\b`, 'i'),
-    new RegExp(String.raw`\bupdate\s+${table}\s+set\b`, 'i'),
-    new RegExp(String.raw`\bdelete\s+from\s+${table}\b`, 'i'),
-    new RegExp(String.raw`\breplace\s+into\s+${table}\b`, 'i'),
+    new RegExp(String.raw`\binsert\s+(?:or\s+\w+\s+)?into\s+${t}`, 'i'),
+    new RegExp(String.raw`\bupdate\s+${t}\s+set\b`, 'i'),
+    new RegExp(String.raw`\bdelete\s+from\s+${t}`, 'i'),
+    new RegExp(String.raw`\breplace\s+into\s+${t}`, 'i'),
   ]
 }
 
@@ -100,6 +113,35 @@ describe('table-ownership conformance (migrations/table-ownership.json)', () => 
     // ~2k source .ts files at time of writing; a broken root or an
     // over-aggressive prune must fail loudly, never pass on a near-empty scan.
     expect(sourceFiles.length).toBeGreaterThan(500)
+  })
+
+  test('matcher — quoted / schema-qualified identifier forms are caught (Codex r3)', () => {
+    const pats = writePatterns('projects')
+    const hits = [
+      'UPDATE projects SET x = 1',
+      'UPDATE "projects" SET x = 1',
+      'UPDATE `projects` SET x = 1',
+      'UPDATE [projects] SET x = 1',
+      'UPDATE main.projects SET x = 1',
+      'UPDATE main."projects" SET x = 1',
+      'INSERT INTO "projects" (id) VALUES (?)',
+      'INSERT OR IGNORE INTO `projects` (id) VALUES (?)',
+      'DELETE FROM [projects]',
+      'REPLACE INTO main.projects (id) VALUES (?)',
+      'insert\n  into\n  projects (id)',
+    ]
+    for (const sql of hits) {
+      expect(pats.some((re) => re.test(sql)), `must match: ${sql}`).toBe(true)
+    }
+    const misses = [
+      'UPDATE projects_archive SET x = 1', // different table (bare \b)
+      "SELECT * FROM projects WHERE id = ?", // read, not write
+      "UPDATE 'projects' SET x = 1", // string literal, not an identifier
+      'update the projects list in the UI', // prose (no SQL shape)
+    ]
+    for (const sql of misses) {
+      expect(pats.some((re) => re.test(sql)), `must NOT match: ${sql}`).toBe(false)
+    }
   })
 
   test('every mapped table exists in expected-schema.txt', () => {
