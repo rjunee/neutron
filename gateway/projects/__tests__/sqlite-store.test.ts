@@ -483,3 +483,60 @@ describe('SqliteProjectSettingsStore — archive + restore (0095)', () => {
     expect(await store.listArchived(OWNER)).toEqual([])
   })
 })
+
+describe('SqliteProjectSettingsStore — touchActivityIncludingArchived (P4 table-ownership)', () => {
+  // The method exists to preserve the Open composer's exact predicate
+  // (`deleted_at IS NULL` ONLY — no archived filter) after the inline SQL
+  // moved into the owning store. Pin the boundary split from `touchActivity`:
+  // active stamped, ARCHIVED stamped (the divergence), soft-deleted skipped,
+  // and best-effort never-throws.
+  const readActivity = (id: string): string | null =>
+    db
+      .prepare<{ last_activity_at: string | null }, [string]>(
+        `SELECT last_activity_at FROM projects WHERE id = ?`,
+      )
+      .get(id)?.last_activity_at ?? null
+
+  test('stamps an active row', async () => {
+    await store.get(OWNER, 'alpha')
+    await store.touchActivityIncludingArchived('alpha', '2030-01-01T00:00:00.000Z')
+    expect(readActivity('alpha')).toBe('2030-01-01T00:00:00.000Z')
+  })
+
+  test('stamps an ARCHIVED row — the divergence from touchActivity', async () => {
+    await store.get(OWNER, 'arch')
+    expect(await store.archive(OWNER, 'arch')).toBe(true)
+    // touchActivity (archived_at IS NULL predicate) must NOT stamp it…
+    await store.touchActivity('arch', '2030-01-01T00:00:00.000Z')
+    expect(readActivity('arch')).not.toBe('2030-01-01T00:00:00.000Z')
+    // …while the composer's variant MUST.
+    await store.touchActivityIncludingArchived('arch', '2030-01-02T00:00:00.000Z')
+    expect(readActivity('arch')).toBe('2030-01-02T00:00:00.000Z')
+  })
+
+  test('does NOT stamp a soft-deleted row', async () => {
+    await store.get(OWNER, 'gone')
+    const before = readActivity('gone')
+    await db.run(`UPDATE projects SET deleted_at = ? WHERE id = ?`, [
+      '2029-01-01T00:00:00.000Z',
+      'gone',
+    ])
+    await store.touchActivityIncludingArchived('gone', '2030-01-01T00:00:00.000Z')
+    expect(readActivity('gone')).toBe(before)
+  })
+
+  test('best-effort — a failing write is swallowed, never thrown', async () => {
+    // A store over a DB with NO projects table (no migrations applied): the
+    // UPDATE fails inside, and the method must not throw — activity stamping
+    // must never break a message turn.
+    const bareTmp = mkdtempSync(join(tmpdir(), 'neutron-projects-store-bare-'))
+    const bareDb = ProjectDb.open(join(bareTmp, 'bare.db'))
+    try {
+      const bareStore = new SqliteProjectSettingsStore(bareDb)
+      await bareStore.touchActivityIncludingArchived('anything')
+    } finally {
+      bareDb.close()
+      rmSync(bareTmp, { recursive: true, force: true })
+    }
+  })
+})
