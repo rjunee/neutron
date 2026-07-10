@@ -592,6 +592,16 @@ export class NexusStore {
   }
 
   private assertInput(input: AppendNexusEventInput): void {
+    // Top-level container guard BEFORE any field access — a null,
+    // undefined, array, or primitive payload (untyped caller / future
+    // JSON boundary) must be a typed error, not a raw TypeError from
+    // dereferencing `.actor_kind`.
+    if (typeof input !== 'object' || input === null || Array.isArray(input)) {
+      throw new NexusStoreError(
+        'invalid_input',
+        'appendEvent input must be an object',
+      )
+    }
     if (!isNexusActorKind(input.actor_kind)) {
       throw new NexusStoreError(
         'invalid_actor_kind',

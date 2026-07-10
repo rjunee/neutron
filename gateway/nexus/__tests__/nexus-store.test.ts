@@ -754,6 +754,14 @@ describe('NexusStore — taxonomy + caps enforcement', () => {
     await expect(bad({ refs: { kind: 'doc', ref: 'a' } })).rejects.toThrow(
       NexusStoreError,
     )
+    // Top-level payload shape guard: null / undefined / array / primitive.
+    const badTop = (v: unknown) =>
+      h.store.appendEvent(PROJECT_ID, v as unknown as AppendNexusEventInput)
+    await expect(badTop(null)).rejects.toThrow(NexusStoreError)
+    await expect(badTop(undefined)).rejects.toThrow(NexusStoreError)
+    await expect(badTop([])).rejects.toThrow(NexusStoreError)
+    await expect(badTop('nope')).rejects.toThrow(NexusStoreError)
+    await expect(badTop(42)).rejects.toThrow(NexusStoreError)
     // And none of these left a row behind.
     const events = await h.store.readRecent(PROJECT_ID)
     expect(events.length).toBe(0)
