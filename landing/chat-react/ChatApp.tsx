@@ -1944,9 +1944,12 @@ export function ChatApp({
             showPane={paneEligible === true}
             // Each surface scopes its pane to ITS OWN conversation's project (not
             // the globally-active one), so a kept-alive background surface never
-            // renders a foreign project's board. `__general__` maps to '' (the
-            // General/owner board).
-            paneProjectId={id === '__general__' ? '' : id}
+            // renders a foreign project's board. Derive the board scope from the
+            // authoritative NULLABLE `hostVm.projectId` (null General → '', the
+            // owner board), NOT from the `__general__` render-key sentinel: that
+            // sentinel is a validator-legal project id, so a project literally named
+            // `__general__` must fetch its OWN board, never General's (Codex P1).
+            paneProjectId={hostVm.projectId ?? ''}
             {...(paneOnOpenDoc !== undefined ? { paneOnOpenDoc } : {})}
           />
         )

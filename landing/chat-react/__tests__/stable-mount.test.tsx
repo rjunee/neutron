@@ -248,4 +248,110 @@ describe('W7 stable-mount — thread/composer/pane DOM instances survive a proje
       container.remove()
     }
   })
+
+  it('a project literally named `__general__` fetches ITS OWN board, not General (Codex P1 sentinel guard)', async () => {
+    const { createRoot } = await import('react-dom/client')
+    const { act } = await import('react')
+    const { InMemoryStore, WebChatSession } = await import('@neutronai/chat-core')
+    const { NeutronChatController } = await import('../controller.ts')
+    const { useNeutronChatVm } = await import('../useNeutronChat.ts')
+    const { useAttachmentDraft } = await import('../useAttachmentDraft.ts')
+    const { ChatApp } = await import('../ChatApp.tsx')
+    const React = await import('react')
+
+    // `__general__` is the internal render-key sentinel for the General surface AND
+    // a validator-legal project id — deriving the pane's board scope from the
+    // sentinel string (`id === '__general__' ? '' : id`) would send this project's
+    // pane to General's `.../projects/general/work-board`. Deriving from the
+    // nullable `hostVm.projectId` keeps it on its OWN board.
+    const SENTINEL = '__general__'
+    const boardUrls: string[] = []
+    const fetchImpl = async (url: string): Promise<Response> => {
+      if (url.includes('/work-board')) {
+        boardUrls.push(url)
+        return new Response(
+          JSON.stringify({ ok: true, items: [], project_id: SENTINEL }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        )
+      }
+      return new Response('not found', { status: 404 })
+    }
+
+    const sockets: Array<{ open: () => void; deliver: (o: unknown) => void }> = []
+    const makeSocket = () => {
+      const s = {
+        onopen: null as null | (() => void),
+        onmessage: null as null | ((ev: { data: unknown }) => void),
+        onclose: null,
+        onerror: null,
+        send: () => {},
+        close: () => {},
+        open() {
+          this.onopen?.()
+        },
+        deliver(o: unknown) {
+          this.onmessage?.({ data: JSON.stringify(o) })
+        },
+      }
+      sockets.push(s)
+      return s as never
+    }
+    const projects = [{ id: SENTINEL, label: 'Sentinel', emoji: '🧨' }]
+    const controller = new NeutronChatController({
+      projectId: SENTINEL,
+      projects,
+      createSession: (sinks) =>
+        new WebChatSession({
+          url: 'wss://t/ws/app/chat',
+          topic_id: TOPIC,
+          store: new InMemoryStore(),
+          createSocket: makeSocket,
+          onChange: sinks.onChange,
+          onStatus: sinks.onStatus,
+          onFrame: sinks.onFrame,
+        }),
+    })
+    const config = {
+      wsUrl: 'wss://t/ws/app/chat',
+      topicId: TOPIC,
+      userId: 'sam',
+      projectId: SENTINEL,
+      projects,
+      origin: 'https://sam.neutron.test',
+      deviceId: 'dev-test',
+      token: 'dev:sam',
+    }
+    function Harness(): React.JSX.Element {
+      const draft = useAttachmentDraft({ token: config.token })
+      const vm = useNeutronChatVm(controller)
+      return <ChatApp vm={vm} controller={controller} config={config} draft={draft} fetchImpl={fetchImpl} paneEligible />
+    }
+
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    try {
+      await act(async () => {
+        root.render(<Harness />)
+      })
+      await act(async () => {
+        sockets[0]!.open()
+        sockets[0]!.deliver(ready())
+        await tick()
+        await tick()
+      })
+
+      expect(boardUrls.length).toBeGreaterThan(0)
+      expect(
+        boardUrls.every((u) => u === `https://sam.neutron.test/api/app/projects/${SENTINEL}/work-board`),
+      ).toBe(true)
+      // Must NOT have collapsed to the General board.
+      expect(boardUrls.some((u) => u.includes('/projects/general/work-board'))).toBe(false)
+    } finally {
+      await act(async () => {
+        root.unmount()
+      })
+      container.remove()
+    }
+  })
 })
