@@ -76,9 +76,15 @@ export interface CreateRecordInput {
  * ASYNC by design — the durable write must go through the mutex-serialized
  * `ProjectDb.run`/`transaction` (not `runSync`), or a write could be absorbed
  * into a foreign open transaction and lost on its rollback (`store.ts` header).
- * So the sink is async, and `create`/`update`/`delete` `await` it BEFORE
- * mutating the in-memory map (persist-first). The spawn/watchdog/control call
- * graph is already async, so this adds no new async surface at the call sites.
+ * So the sink is async. `create`/`update` PUBLISH to the in-memory map
+ * SYNCHRONOUSLY (reserve-first), then `await` the durable write and roll the
+ * in-memory change back if it rejects — so a mutation is visible to concurrent
+ * readers immediately (the double-spawn guard + the watchdog's `failRun`
+ * re-read both depend on zero-await visibility) yet memory never diverges from
+ * the store on a write failure. `delete` removes AFTER a successful durable
+ * remove (a rejected remove leaves the row in BOTH, still in sync). The
+ * spawn/watchdog/control call graph is already async, so this adds no new async
+ * surface at the call sites.
  */
 export interface SubagentPersistence {
   /** Insert-or-replace the latest snapshot of a record. */
@@ -183,10 +189,31 @@ export class SubagentRegistry {
     // it to a past timestamp). Otherwise default to now().
     const last_event_at = patch.last_event_at ?? Date.now()
     const next: SubagentRecord = { ...cur, ...patch, last_event_at }
-    // Persist FIRST: a durable-write rejection leaves the in-memory record on its
-    // prior value rather than exposing an unpersisted new state.
-    if (this.persistence !== undefined) await this.persistence.persist(next)
+    // PUBLISH synchronously — before the (async) persist — exactly like `create`
+    // reserves its slot. This is a CORRECTNESS requirement, not a style choice:
+    // a persist-FIRST update leaves memory on the PRIOR status for the whole
+    // duration of the durable write, so a completion landing `finished` stays
+    // INVISIBLE while its persist is in flight. The watchdog's `failRun`
+    // re-reads the record AFTER awaiting its canceller (`control.ts`) precisely
+    // to avoid clobbering a concurrent finish — but a persist-first update hides
+    // that finish, so `failRun` would overwrite a legitimate `finished` with
+    // `crashed` and emit a false failure. Publishing synchronously restores the
+    // S3 (in-memory, zero-await) visibility the guard was written against, and —
+    // because the read+publish share one synchronous tick — two racing updates
+    // can never both build on the same stale base (the second reads the first's
+    // published value). If the durable write then REJECTS, roll our slot back to
+    // `cur` so memory never diverges from the store on failure — but ONLY if no
+    // later update has since superseded ours (identity guard), never clobbering a
+    // newer committed write with our stale prior value.
     this.byId.set(run_id, next)
+    if (this.persistence !== undefined) {
+      try {
+        await this.persistence.persist(next)
+      } catch (err) {
+        if (this.byId.get(run_id) === next) this.byId.set(run_id, cur)
+        throw err
+      }
+    }
     return next
   }
 

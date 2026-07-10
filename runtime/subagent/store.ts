@@ -16,8 +16,11 @@
  * transaction has committed or rolled back — never captured by it, and its
  * yielding busy-retry never stalls the event loop. Because these writes are
  * async, the registry's `SubagentPersistence` sink — and thus `create`/`update`/
- * `delete` — are async and `await` durability BEFORE mutating the in-memory map
- * (persist-first: a durable-write failure never leaves memory diverged).
+ * `delete` — are async. `create`/`update` publish to the in-memory map
+ * SYNCHRONOUSLY then `await` durability and roll back on rejection (so a
+ * concurrent reader sees a mutation immediately, yet memory never diverges from
+ * the store on failure — see `registry.ts`); `delete` removes after a
+ * successful durable remove.
  *
  * The store is a faithful PROJECTION of the in-memory `SubagentRecord`: every
  * field round-trips (epoch-ms timestamps stay INTEGER, the two small structured

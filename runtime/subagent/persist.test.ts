@@ -22,6 +22,7 @@ import {
 } from './registry.ts'
 import { SubagentRegistryStore } from './store.ts'
 import { sweepOrphanedDispatchesOnBoot } from './boot-sweep.ts'
+import { failRun, newControlState, registerCanceller } from './control.ts'
 
 let tmp: string
 let db: ProjectDb
@@ -202,8 +203,86 @@ describe('SubagentRegistryStore — migration + write-through', () => {
     await registry.create(dispatchInput({ run_id: 'run-flaky' })) // persisted while live
     live = false
     await expect(registry.update('run-flaky', { status: 'running' })).rejects.toThrow('db down')
-    // Prior value retained — not the unpersisted 'running'.
+    // Prior value retained — the synchronous publish is rolled back on rejection.
     expect(registry.byRunId('run-flaky')?.status).toBe('pending')
+  })
+})
+
+describe('async-persist update boundary — a landing completion stays visible', () => {
+  // Regression for the persist-first update hazard: with an ASYNC persistence
+  // sink, `update` must publish the new status to memory SYNCHRONOUSLY (then
+  // await + roll back on failure), NOT await the durable write first. A
+  // persist-first update hides a landing `finished` for the whole duration of
+  // its durable write, defeating the watchdog's `failRun` re-read guard. These
+  // tests block the durable `finished` write mid-flight and assert the finish is
+  // still visible / not clobbered — they fail against the old persist-first code.
+
+  // A persistence sink whose `finished` write BLOCKS until released, so the
+  // durable write for the completion is provably in flight during the assertion.
+  const gatedOnFinish = (): { sink: SubagentPersistence; release: () => void } => {
+    let release!: () => void
+    const gate = new Promise<void>((r) => {
+      release = r
+    })
+    const sink: SubagentPersistence = {
+      persist: async (rec) => {
+        if (rec.status === 'finished') await gate
+      },
+      remove: async () => {},
+    }
+    return { sink, release }
+  }
+
+  test('a completion is visible in memory while its durable persist is still in flight', async () => {
+    const { sink, release } = gatedOnFinish()
+    const reg = new SubagentRegistry(sink)
+    await reg.create(dispatchInput({ run_id: 'r' }))
+
+    // Completion lands; its durable persist is BLOCKED (still in flight).
+    const completion = reg.update('r', { status: 'finished', ended_at: 1 })
+    // No await of `completion` — the synchronous publish already ran.
+    expect(reg.byRunId('r')?.status).toBe('finished') // old persist-first: still 'pending'
+
+    release()
+    expect((await completion).status).toBe('finished')
+    expect(reg.byRunId('r')?.status).toBe('finished')
+  })
+
+  test('failRun does NOT clobber a finish whose persist is still in flight', async () => {
+    const { sink, release } = gatedOnFinish()
+    const reg = new SubagentRegistry(sink)
+    const control = newControlState(reg)
+    await reg.create(dispatchInput({ run_id: 'r' }))
+    await reg.update('r', { status: 'running' })
+
+    // A slow canceller keeps failRun parked so a completion can land during it.
+    let releaseCancel!: () => void
+    const cancelGate = new Promise<void>((r) => {
+      releaseCancel = r
+    })
+    registerCanceller(control, 'r', async () => {
+      await cancelGate
+    })
+
+    // failRun passes its first guard (running), then awaits the canceller.
+    const failing = failRun(control, 'r', 'stuck', 999)
+    await Promise.resolve()
+
+    // The real completion lands now; its durable persist is blocked, but the
+    // synchronous publish makes `finished` immediately visible.
+    const completion = reg.update('r', { status: 'finished', ended_at: 1 })
+    expect(reg.byRunId('r')?.status).toBe('finished')
+
+    // Release the canceller → failRun's post-await re-read runs. It must SEE the
+    // finish and decline (return false), not overwrite it with 'crashed'.
+    releaseCancel()
+    const clobbered = await failing
+    release()
+    await completion
+
+    expect(clobbered).toBe(false) // old persist-first: true (false failure emitted)
+    expect(reg.byRunId('r')?.status).toBe('finished') // finish preserved, not crashed
+    expect(reg.byRunId('r')?.failure_reason).toBeUndefined()
   })
 })
 
