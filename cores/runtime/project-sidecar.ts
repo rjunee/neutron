@@ -133,17 +133,54 @@ export function safeResolveProjectRoot(
 
   // (2) Filesystem containment — defeat SYMLINK escapes that the lexical
   //     check can't see (e.g. `Projects/proj-a` is a symlink to /tmp/out).
-  //     realpath the nearest EXISTING ancestor of the resolved root and
-  //     assert it stays inside the real boundary. If the boundary dir does
-  //     not exist yet there is no symlink target to escape into, so the
-  //     lexical check alone is authoritative.
+  assertWithinProjectsBoundary({
+    owner_home,
+    target: resolved,
+    project_id,
+    makeError,
+  })
+  return resolved
+}
+
+export interface AssertWithinProjectsBoundaryOptions {
+  /** The owner's home dir; `<owner_home>/Projects/` is the boundary. */
+  owner_home: string
+  /** The absolute path whose real location must stay inside the boundary. */
+  target: string
+  /** Carried into the thrown error for diagnostics. */
+  project_id: string
+  makeError?: PathTraversalErrorFactory
+}
+
+/**
+ * Assert that `target` — after resolving symlinks in its EXISTING components
+ * — stays inside `<owner_home>/Projects/`. This is the filesystem-level
+ * companion to the lexical check: it defeats a symlink placed at ANY depth
+ * (the project root OR a deeper `<root>/<sidecar>` / `<root>/code` dir) that
+ * points outside the boundary. `realpath`s the nearest existing ancestor of
+ * `target` and rejects when it escapes. If the boundary dir does not exist
+ * yet there is no symlink target to escape into, so this is a no-op.
+ *
+ * Callers MUST run this on the FINAL directory they are about to write to
+ * (after any `mkdir`, before opening a DB / invoking git) — not only on the
+ * project root — because `mkdir -p` over a pre-existing symlinked component
+ * silently follows it.
+ */
+export function assertWithinProjectsBoundary(
+  opts: AssertWithinProjectsBoundaryOptions,
+): void {
+  const owner_projects_dir = resolvePath(opts.owner_home, 'Projects')
+  const makeError: PathTraversalErrorFactory =
+    opts.makeError ??
+    ((pid, resolved_path, boundary) =>
+      new CorePathTraversalError(pid, resolved_path, boundary))
   let realBoundary: string
   try {
     realBoundary = realpathSync(owner_projects_dir)
   } catch {
-    return resolved
+    return
   }
-  let probe = resolved
+  let probe = resolvePath(opts.target)
   while (!existsSync(probe) && dirname(probe) !== probe) {
     probe = dirname(probe)
   }
@@ -151,15 +188,11 @@ export function safeResolveProjectRoot(
   try {
     realProbe = realpathSync(probe)
   } catch {
-    return resolved
+    return
   }
-  if (
-    realProbe !== realBoundary &&
-    !realProbe.startsWith(realBoundary + sep)
-  ) {
-    throw makeError(project_id, realProbe, owner_projects_dir)
+  if (realProbe !== realBoundary && !realProbe.startsWith(realBoundary + sep)) {
+    throw makeError(opts.project_id, realProbe, owner_projects_dir)
   }
-  return resolved
 }
 
 /** The safe-resolved paths handed to a Core's `buildHandle`. */
@@ -281,6 +314,17 @@ export class ProjectSidecarResolver<H> {
     if (!existsSync(sidecar_dir_path)) {
       mkdirSync(sidecar_dir_path, { recursive: true, mode: 0o700 })
     }
+    // Re-check the FINAL sidecar dir: a symlink at `<root>/<sidecar_dir>`
+    // pointing outside the boundary passes the root-level guard, and
+    // `mkdir -p` over a pre-existing symlink silently follows it. Reject
+    // BEFORE `buildHandle` opens the DB through that path.
+    const boundaryOpts: AssertWithinProjectsBoundaryOptions = {
+      owner_home: this.owner_home,
+      target: sidecar_dir_path,
+      project_id,
+    }
+    if (this.makeError !== undefined) boundaryOpts.makeError = this.makeError
+    assertWithinProjectsBoundary(boundaryOpts)
     const db_path = join(sidecar_dir_path, this.db_filename)
     return this.buildHandle({
       project_id,

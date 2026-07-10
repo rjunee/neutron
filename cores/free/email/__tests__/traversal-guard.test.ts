@@ -10,7 +10,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
-import { existsSync, mkdtempSync, rmSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -62,6 +62,21 @@ describe('EmailProjectCacheResolver — path-traversal guard (X4 [BEHAVIOR])', (
     const r = new EmailProjectCacheResolver({ owner_home: home })
     expect(() => r.pathFor('../../../etc/passwd')).toThrow(CorePathTraversalError)
     r.closeAll()
+  })
+
+  test('rejects a symlink at the FINAL email dir (below a real project root), no outside DB', async () => {
+    const outside = mkdtempSync(join(tmpdir(), 'email-deep-outside-'))
+    try {
+      // `proj-a` is a real dir but `proj-a/email` symlinks outside.
+      mkdirSync(join(home, 'Projects', 'proj-a'), { recursive: true })
+      symlinkSync(outside, join(home, 'Projects', 'proj-a', 'email'), 'dir')
+      const r = new EmailProjectCacheResolver({ owner_home: home })
+      await expect(r.resolve('proj-a')).rejects.toThrow(CorePathTraversalError)
+      expect(existsSync(join(outside, 'email-cache.db'))).toBe(false)
+      r.closeAll()
+    } finally {
+      rmSync(outside, { recursive: true, force: true })
+    }
   })
 
   test('accepts legit slugs + uuids (resolve identically, dir created)', async () => {

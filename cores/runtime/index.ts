@@ -42,7 +42,9 @@ export {
 export {
   CorePathTraversalError,
   ProjectSidecarResolver,
+  assertWithinProjectsBoundary,
   safeResolveProjectRoot,
+  type AssertWithinProjectsBoundaryOptions,
   type PathTraversalErrorFactory,
   type ProjectSidecarInit,
   type ProjectSidecarResolverOptions,

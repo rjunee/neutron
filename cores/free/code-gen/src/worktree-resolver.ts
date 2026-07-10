@@ -14,6 +14,7 @@ import { existsSync, mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 
 import {
+  assertWithinProjectsBoundary,
   safeResolveProjectRoot,
   type SafeResolveProjectRootOptions,
 } from '@neutronai/cores-runtime'
@@ -87,6 +88,16 @@ export async function resolveWorktree(
       `mkdir failed: ${err instanceof Error ? err.message : String(err)}`,
     )
   }
+
+  // 1b. Re-check the FINAL worktree dir: a symlink at `<root>/code` pointing
+  // outside the boundary passes the root-level guard, and `mkdir -p` over a
+  // pre-existing symlink silently follows it. Reject BEFORE using it as a
+  // git `cwd`. Throws `CorePathTraversalError`.
+  assertWithinProjectsBoundary({
+    owner_home: input.owner_home,
+    target: worktree_path,
+    project_id: input.project_id,
+  })
 
   // 2. Resolve settings — pull `default_branch`, `repo_slug`,
   // `gh_owner` from the per-project sidecar's `code_settings`. The

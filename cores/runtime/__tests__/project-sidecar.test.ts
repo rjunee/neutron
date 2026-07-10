@@ -248,4 +248,26 @@ describe('ProjectSidecarResolver — mechanics + guard', () => {
       rmSync(outside, { recursive: true, force: true })
     }
   })
+
+  test('rejects a symlink at the FINAL sidecar dir (below a real project root), no outside DB', async () => {
+    const outside = mkdtempSync(join(tmpdir(), 'sidecar-deep-outside-'))
+    try {
+      // Project root is a REAL dir, but `<root>/fake` (the sidecar dir) is a
+      // symlink pointing outside. The root-level guard passes; the FINAL-dir
+      // check must reject before the DB is opened.
+      mkdirSync(join(tmp, 'Projects', 'proj-a'), { recursive: true })
+      symlinkSync(outside, join(tmp, 'Projects', 'proj-a', 'fake'), 'dir')
+
+      const { resolver, state } = makeResolver()
+      await expect(resolver.resolve('proj-a')).rejects.toThrow(
+        CorePathTraversalError,
+      )
+      expect(state.builds).toBe(0)
+      // buildHandle never ran, so no `fake.db` was opened under the target.
+      expect(existsSync(join(outside, 'fake.db'))).toBe(false)
+      resolver.closeAll()
+    } finally {
+      rmSync(outside, { recursive: true, force: true })
+    }
+  })
 })

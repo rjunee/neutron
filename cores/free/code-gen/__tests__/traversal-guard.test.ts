@@ -9,7 +9,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
-import { existsSync, mkdtempSync, rmSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -88,5 +88,26 @@ describe('resolveWorktree — path-traversal guard (X4 [BEHAVIOR])', () => {
         resolveProjectRoot: () => '/etc',
       }),
     ).rejects.toThrow(CorePathTraversalError)
+  })
+
+  test('rejects a symlink at the FINAL worktree dir (below a real project root), no git op', async () => {
+    const outside = mkdtempSync(join(tmpdir(), 'codegen-worktree-outside-'))
+    try {
+      // `proj-a` is real but `proj-a/code` symlinks outside — the root guard
+      // passes; the final-dir check must reject before git touches it.
+      mkdirSync(join(tmp, 'Projects', 'proj-a'), { recursive: true })
+      symlinkSync(outside, join(tmp, 'Projects', 'proj-a', 'code'), 'dir')
+      await expect(
+        resolveWorktree({
+          owner_home: tmp,
+          project_id: 'proj-a',
+          gh_runner: stubGh,
+          git_runner: stubGit,
+          sidecar: stubSidecar,
+        }),
+      ).rejects.toThrow(CorePathTraversalError)
+    } finally {
+      rmSync(outside, { recursive: true, force: true })
+    }
   })
 })
