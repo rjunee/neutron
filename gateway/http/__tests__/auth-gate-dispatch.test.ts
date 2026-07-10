@@ -21,7 +21,7 @@
 import { describe, expect, test } from 'bun:test'
 import type { Server, WebSocketHandler } from 'bun'
 import { exportJWK, generateKeyPair, importJWK, type KeyLike } from 'jose'
-import { composeHttpHandler } from '../compose.ts'
+import { buildManagedAuthGate, composeHttpHandler } from '../compose.ts'
 import { signSessionCookie } from '@neutronai/landing/session-cookie.ts'
 import {
   issueStartToken,
@@ -70,13 +70,13 @@ describe('composeHttpHandler — auth-gate dispatch', () => {
         },
         websocket: NOOP_WS,
       },
-      authGate: {
+      gate: buildManagedAuthGate({
         project_slug: PROJECT_SLUG,
         cookie_secret: COOKIE_SECRET,
         resolveKey: async (kid) => (kid === km.kid ? km.publicKey : null),
         identity_public_base_url: IDENTITY_BASE_URL,
         verifyStartToken: verifyStartTokenCryptographic,
-      },
+      }),
       defaultHandler: () => new Response('default 404', { status: 404 }),
     })
     const res = await composed.fetch(
@@ -114,13 +114,13 @@ describe('composeHttpHandler — auth-gate dispatch', () => {
         },
         websocket: NOOP_WS,
       },
-      authGate: {
+      gate: buildManagedAuthGate({
         project_slug: PROJECT_SLUG,
         cookie_secret: COOKIE_SECRET,
         resolveKey: async (kid) => (kid === km.kid ? km.publicKey : null),
         identity_public_base_url: IDENTITY_BASE_URL,
         verifyStartToken: verifyStartTokenCryptographic,
-      },
+      }),
       defaultHandler: () => new Response('404', { status: 404 }),
     })
     const res = await composed.fetch(
@@ -148,13 +148,13 @@ describe('composeHttpHandler — auth-gate dispatch', () => {
         },
         websocket: NOOP_WS,
       },
-      authGate: {
+      gate: buildManagedAuthGate({
         project_slug: PROJECT_SLUG,
         cookie_secret: COOKIE_SECRET,
         resolveKey: async (kid) => (kid === km.kid ? km.publicKey : null),
         identity_public_base_url: IDENTITY_BASE_URL,
         verifyStartToken: verifyStartTokenCryptographic,
-      },
+      }),
       defaultHandler: () => new Response('404', { status: 404 }),
     })
     const res = await composed.fetch(
@@ -174,13 +174,13 @@ describe('composeHttpHandler — auth-gate dispatch', () => {
     const km = await makeKeyMaterial()
     let healthzCalled = false
     const composed = composeHttpHandler({
-      authGate: {
+      gate: buildManagedAuthGate({
         project_slug: PROJECT_SLUG,
         cookie_secret: COOKIE_SECRET,
         resolveKey: async (kid) => (kid === km.kid ? km.publicKey : null),
         identity_public_base_url: IDENTITY_BASE_URL,
         verifyStartToken: verifyStartTokenCryptographic,
-      },
+      }),
       defaultHandler: (req) => {
         if (new URL(req.url).pathname === '/healthz') {
           healthzCalled = true
@@ -207,13 +207,13 @@ describe('composeHttpHandler — auth-gate dispatch', () => {
         webhookCalled = true
         return new Response('{"ok":true}', { status: 200 })
       },
-      authGate: {
+      gate: buildManagedAuthGate({
         project_slug: PROJECT_SLUG,
         cookie_secret: COOKIE_SECRET,
         resolveKey: async (kid) => (kid === km.kid ? km.publicKey : null),
         identity_public_base_url: IDENTITY_BASE_URL,
         verifyStartToken: verifyStartTokenCryptographic,
-      },
+      }),
       defaultHandler: () => new Response('404', { status: 404 }),
     })
     const res = await composed.fetch(
@@ -240,13 +240,13 @@ describe('composeHttpHandler — auth-gate dispatch', () => {
           return null
         },
       },
-      authGate: {
+      gate: buildManagedAuthGate({
         project_slug: PROJECT_SLUG,
         cookie_secret: COOKIE_SECRET,
         resolveKey: async (kid) => (kid === km.kid ? km.publicKey : null),
         identity_public_base_url: IDENTITY_BASE_URL,
         verifyStartToken: verifyStartTokenCryptographic,
-      },
+      }),
       defaultHandler: () => new Response('404', { status: 404 }),
     })
     const res = await composed.fetch(
@@ -307,7 +307,7 @@ describe('composeHttpHandler — Argus r1 fix-pass (BLOCKER #1 + #2)', () => {
         },
         websocket: NOOP_WS,
       },
-      authGate: {
+      gate: buildManagedAuthGate({
         project_slug: PROJECT_SLUG,
         cookie_secret: COOKIE_SECRET,
         resolveKey: async (kid) => (kid === km.kid ? km.publicKey : null),
@@ -317,7 +317,7 @@ describe('composeHttpHandler — Argus r1 fix-pass (BLOCKER #1 + #2)', () => {
           mintCalled++
           return mintedToken
         },
-      },
+      }),
       defaultHandler: () => new Response('404', { status: 404 }),
     })
     const res = await composed.fetch(
@@ -360,7 +360,7 @@ describe('composeHttpHandler — Argus r1 fix-pass (BLOCKER #1 + #2)', () => {
         },
         websocket: NOOP_WS,
       },
-      authGate: {
+      gate: buildManagedAuthGate({
         project_slug: PROJECT_SLUG,
         cookie_secret: COOKIE_SECRET,
         resolveKey: async (kid) => (kid === km.kid ? km.publicKey : null),
@@ -370,7 +370,7 @@ describe('composeHttpHandler — Argus r1 fix-pass (BLOCKER #1 + #2)', () => {
           mintCalled++
           return mintedToken
         },
-      },
+      }),
       defaultHandler: () => new Response('404', { status: 404 }),
     })
     // Hop 1 — cookie-only /chat.
@@ -415,13 +415,13 @@ describe('composeHttpHandler — Argus r1 fix-pass (BLOCKER #1 + #2)', () => {
         },
         websocket: NOOP_WS,
       },
-      authGate: {
+      gate: buildManagedAuthGate({
         project_slug: PROJECT_SLUG,
         cookie_secret: COOKIE_SECRET,
         resolveKey: async (kid) => (kid === km.kid ? km.publicKey : null),
         identity_public_base_url: IDENTITY_BASE_URL,
         verifyStartToken: verifyStartTokenCryptographic,
-      },
+      }),
       defaultHandler: () => {
         defaultCalled++
         return new Response('SHOULD NOT REACH 404', { status: 404 })
@@ -454,13 +454,13 @@ describe('composeHttpHandler — Argus r1 fix-pass (BLOCKER #1 + #2)', () => {
         },
         websocket: NOOP_WS,
       },
-      authGate: {
+      gate: buildManagedAuthGate({
         project_slug: PROJECT_SLUG,
         cookie_secret: COOKIE_SECRET,
         resolveKey: async (kid) => (kid === km.kid ? km.publicKey : null),
         identity_public_base_url: IDENTITY_BASE_URL,
         verifyStartToken: verifyStartTokenCryptographic,
-      },
+      }),
       defaultHandler: () => {
         defaultCalled++
         return new Response('SHOULD NOT REACH 404', { status: 404 })
@@ -502,13 +502,13 @@ describe('composeHttpHandler — Argus r1 fix-pass (BLOCKER #1 + #2)', () => {
         },
         websocket: NOOP_WS,
       },
-      authGate: {
+      gate: buildManagedAuthGate({
         project_slug: PROJECT_SLUG,
         cookie_secret: COOKIE_SECRET,
         resolveKey: async (kid) => (kid === km.kid ? km.publicKey : null),
         identity_public_base_url: IDENTITY_BASE_URL,
         verifyStartToken: verifyStartTokenCryptographic,
-      },
+      }),
       defaultHandler: () => new Response('404', { status: 404 }),
     })
     const res = await composed.fetch(

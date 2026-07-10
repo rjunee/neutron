@@ -1220,7 +1220,13 @@ export function buildOpenGraphComposer(
     // claim-then-mint blocks are converged onto one shared helper there. The
     // composer-owned `readProjectRows` (also driving the live `projects_changed`
     // emit + topic rail) is threaded in as the bootstrap-injection reader.
-    const { openFetch } = buildOpenOwnerGate(wiringCtx, {
+    // C5b — take the unified `HttpGate` view of the owner gate (`gate`) instead
+    // of wiring `openFetch` as `landing_server.fetch`. Open now flows through
+    // the SAME `composition.auth_gate` seam as Managed: the gate is supplied as
+    // `auth_gate` below and `landing_server.fetch` points at the RAW landing
+    // surface. Behavior is unchanged — the gate routes `/chat` + SPA deep links
+    // to the (verbatim) `openFetch` and everything else to the ladder.
+    const { gate: openOwnerGate } = buildOpenOwnerGate(wiringCtx, {
       cookieSecret,
       startTokenAuth,
       consumedTokens,
@@ -2576,10 +2582,20 @@ export function buildOpenGraphComposer(
       skill_forge: { backend: skillForgeBackend },
       // Tear down the upload-session sweeper on shutdown.
       realmode_cleanups: realmodeCleanups,
+      // C5b — the RAW landing surface. The owner gate is no longer wired here;
+      // it flows through the unified `auth_gate` seam below (both modes). For
+      // every non-`/chat`, non-SPA path the pre-C5b `openFetch` was a pure
+      // `landing.fetch` passthrough, so the ladder serving the raw landing
+      // surface directly is behavior-identical.
       landing_server: {
-        fetch: openFetch,
+        fetch: landing.fetch.bind(landing),
         websocket: landing.websocket,
       },
+      // C5b — the ONE auth-gate seam, Open variant: the single-owner serving
+      // gate, supplied through the SAME `composition.auth_gate` field Managed
+      // uses. `gateway/composition.ts` routes the `{ kind: 'gate' }` variant
+      // straight onto the compose `gate` seam.
+      auth_gate: { kind: 'gate', gate: openOwnerGate },
       // P1b — mount the app-ws chat surface (the React client's real transport)
       // + the per-project Documents backend so the chat-react UI works
       // end-to-end. `gateway/composition.ts` forwards both into the compose.ts

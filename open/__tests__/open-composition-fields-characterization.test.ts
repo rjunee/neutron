@@ -56,6 +56,10 @@ const EXPECTED_COMPOSITION_KEYS = [
   'app_work_board_surface',
   'app_ws_surface',
   'approval_notifier',
+  // C5b — Open now supplies the single-owner gate through the unified
+  // `composition.auth_gate` seam (both modes flow through ONE seam) instead of
+  // wiring `openFetch` as `landing_server.fetch`.
+  'auth_gate',
   'chat_history_surface',
   'chat_topics_surface',
   'chunked_upload_handler',
