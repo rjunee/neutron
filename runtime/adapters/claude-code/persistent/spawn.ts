@@ -15,6 +15,11 @@ import { ChannelWedgedSpawnError, MAX_FLEET_RESPAWNS, buildChannelWedgeCapAlertT
 import { ensureClaudeTrust } from './ensure-claude-trust.ts'
 import { type InFlightGate, makeInFlightGate } from './in-flight-gate.ts'
 import { childByKey, pool, replToolBridgeRef, respawnGates, sink } from './pool-state.ts'
+import {
+  registerLiveProcessSafe,
+  touchLiveProcessSafe,
+  unregisterLiveProcessSafe,
+} from '@neutronai/tools/process-registry.ts'
 import { assertReplAlive } from './post-spawn-assertion.ts'
 import type { PtyChild } from './pty-host.ts'
 import { RATE_LIMIT_BANNER_SEVERITIES, createRateLimitBannerDetector } from './rate-limit-banner.ts'
@@ -330,6 +335,10 @@ async function spawnSession(
       session.ring.append(Buffer.from(chunk).toString('utf8'))
       const now = Date.now()
       session.lastDataAt = now
+      // F4 — feed the watchdog's live-process view: any child output is activity,
+      // so keep the ProcessRegistry entry fresh (stuck-agent = no activity past
+      // the threshold). Guarded no-op when no ambient registry is registered.
+      touchLiveProcessSafe(sessionKey)
       const target = scanChild
       if (target === undefined) return
       // Run the registered detectors against the ring and actuate the ones that
@@ -345,6 +354,17 @@ async function spawnSession(
   // Synchronous handle mirror so a respawn can detect alive-but-wedged without
   // awaiting the pool promise (Argus r3 BLOCKER 1). Newest spawn wins the key.
   childByKey.set(sessionKey, child)
+  // F4 — publish this child's PID into the watchdog's live-process view (the
+  // single PTY chokepoint serves BOTH the pooled REPL and the ephemeral/dispatch
+  // children, so ONE writer here covers every spawn site). UPSERT-safe against a
+  // respawn re-using `sessionKey`; unregistered in `child.exited` below. Guarded
+  // no-op when no ambient ProcessRegistry is registered (unit tests / LLM-less).
+  registerLiveProcessSafe({
+    name: sessionKey,
+    pid: child.pid,
+    tool_name: 'cc-repl',
+    meta: { session_id: sessionId, channel: channelName },
+  })
 
   // Master-table row #11: start the per-turn API-5xx dead-turn JSONL watcher for
   // THIS child's transcript. A mid-turn 5xx (`Overloaded`/`internal_server_error`
@@ -385,6 +405,12 @@ async function spawnSession(
     session.deadTurnWatcher = undefined
     // Stop the size-watchdog cadence — the child it watched is gone (row #13).
     session.sizeWatchdog?.stop()
+    // F4 — drop this child from the watchdog's live-process view now it has
+    // exited (a real subprocess exit, so the OS-liveness projection follows).
+    // IDENTITY-GUARDED like the `childByKey` cleanup below: only unregister when
+    // the entry still points at THIS child, so a concurrent respawn that
+    // re-registered `sessionKey` for a fresh child isn't clobbered.
+    if (childByKey.get(sessionKey) === child) unregisterLiveProcessSafe(sessionKey)
     sink.unregisterIf(sessionId, session)
     // Reclaim the temp config files now the child is gone (covers pool eviction,
     // crash, and shutdown — the ephemeral dispose path unlinks eagerly too).

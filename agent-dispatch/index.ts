@@ -43,7 +43,12 @@ export {
   type CancellableDispatchTurnOptions,
 } from './substrate-turn.ts'
 
-export { buildDispatchWatchdogNotifier, buildBootSweepReport } from './watchdog-report.ts'
+export {
+  buildDispatchWatchdogNotifier,
+  buildBootSweepReport,
+  scheduleDispatchLifecycleWatchdog,
+  LIFECYCLE_WATCHDOG_TICK_MS,
+} from './watchdog-report.ts'
 
 export { registerDispatchToolSurface, DISPATCH_AGENT_TOOL } from './tool.ts'
 

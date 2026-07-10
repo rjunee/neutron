@@ -16,8 +16,10 @@
  */
 
 import type { AgentWatchdogEvent, AgentWatchdogNotifier } from '@neutronai/runtime/subagent/watchdog.ts'
-import type { SubagentRecord } from '@neutronai/runtime/subagent/registry.ts'
+import type { SubagentRecord, SubagentRegistry } from '@neutronai/runtime/subagent/registry.ts'
+import type { ControlState } from '@neutronai/runtime/subagent/control.ts'
 import type { BootSweepReport } from '@neutronai/runtime/subagent/boot-sweep.ts'
+import { runLifecycleTick } from '@neutronai/runtime/subagent/lifecycle.ts'
 import { DISPATCH_KIND_BY_AGENT_KIND } from './prompts.ts'
 import type { DispatchReport, DispatchReporter } from './service.ts'
 
@@ -61,6 +63,63 @@ export function buildDispatchWatchdogNotifier(report: DispatchReporter): AgentWa
     } catch {
       // Best-effort — a report failure must not abort the watchdog tick.
     }
+  }
+}
+
+/** Default cadence for the scheduled lifecycle watchdog tick (60 s). */
+export const LIFECYCLE_WATCHDOG_TICK_MS = 60_000
+
+export interface ScheduleDispatchLifecycleWatchdogDeps {
+  registry: SubagentRegistry
+  control: ControlState
+  /** Report-back surface — a surfaced reap forwards here (same sink completions use). */
+  report: DispatchReporter
+  /** Tick cadence. Default {@link LIFECYCLE_WATCHDOG_TICK_MS}. */
+  interval_ms?: number
+  /** setInterval seam (tests inject a synchronous driver). Default `setInterval`. */
+  set_interval?: (fn: () => void, ms: number) => unknown
+  clear_interval?: (handle: unknown) => void
+}
+
+/**
+ * Schedule the subagent lifecycle watchdog (F4) — the tick that was NEVER
+ * scheduled. Runs `runLifecycleTick` on an interval in NOTIFY-ONLY mode: it
+ * DETECTS a stuck/dead dispatch and surfaces it through
+ * {@link buildDispatchWatchdogNotifier}, but reaps NOTHING — no canceller runs
+ * (nothing killed) and no record is transitioned (no control-flow change).
+ * Enforcement (killing a wedged dispatch after a VERIFIED threshold) is a
+ * separate flagged PR; the 5-min default stuck threshold is unverified for
+ * killing and here only gates a NOTIFICATION.
+ *
+ * The per-run `notified` ledger suppresses the every-tick repeat for a run that
+ * stays live (it is never transitioned, so it keeps being detected). A tick
+ * failure is swallowed so the interval keeps firing. Returns a `stop()` the
+ * caller wires into shutdown cleanup.
+ */
+export function scheduleDispatchLifecycleWatchdog(
+  deps: ScheduleDispatchLifecycleWatchdogDeps,
+): { stop: () => void } {
+  const notify = buildDispatchWatchdogNotifier(deps.report)
+  const notified = new Set<string>()
+  const setIv = deps.set_interval ?? ((fn: () => void, ms: number) => setInterval(fn, ms))
+  const clearIv = deps.clear_interval ?? ((handle: unknown) => clearInterval(handle as ReturnType<typeof setInterval>))
+  const handle = setIv(() => {
+    void runLifecycleTick({
+      registry: deps.registry,
+      watchdog: {
+        control: deps.control,
+        notify,
+        notify_only: true,
+        notified,
+      },
+    }).catch((err: unknown) => {
+      console.warn(
+        `[subagent-lifecycle] tick failed: ${err instanceof Error ? err.message : String(err)}`,
+      )
+    })
+  }, deps.interval_ms ?? LIFECYCLE_WATCHDOG_TICK_MS)
+  return {
+    stop: () => clearIv(handle),
   }
 }
 

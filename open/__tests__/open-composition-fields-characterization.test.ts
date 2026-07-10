@@ -79,6 +79,8 @@ const EXPECTED_COMPOSITION_KEYS = [
   // `memory_search` (renamed from `gbrain_search`; same MemoryStore wiring).
   'memory_search',
   'message_search',
+  // F4 — the gateway-tick hook that pulses the supervision-watchdog heartbeat.
+  'on_gateway_tick',
   'onboarding_import_running_cron',
   'platform',
   'project_slug',
@@ -89,6 +91,9 @@ const EXPECTED_COMPOSITION_KEYS = [
   'topic_handler',
   'trident',
   'trident_build_dispatch',
+  // F4 — the credential pool the substrate_cooldown_saturation detector watches
+  // (present when an LLM pool resolved; this characterization sets ANTHROPIC_API_KEY).
+  'watchdog_credential_pool',
   'watchdog_notifier',
   'work_board',
 ] as const

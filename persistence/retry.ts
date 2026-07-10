@@ -62,6 +62,19 @@ function jitterMs(): number {
   return WRITE_RETRY_MIN_MS + Math.random() * span
 }
 
+// F4 — process-wide count of busy-retry EXHAUSTIONS (a `withBusyRetry` that
+// burned its full budget and threw). This is the source the watchdog's
+// `db_lock_contention` detector reads (`watchdog/detectors.ts` `BusyRetryCounter`
+// via a monotonic-count delta over a window): a rising exhaustion count means
+// SQLite write contention is starving the write path. It is a pure observability
+// counter — it never changes the retry decision or throws.
+let busyRetryExhaustionTotal = 0
+
+/** Monotonic count of busy-retry exhaustions since process start (F4 watchdog). */
+export function busyRetryExhaustionCount(): number {
+  return busyRetryExhaustionTotal
+}
+
 /**
  * Run a synchronous DB operation with jittered retry on SQLITE_BUSY. The
  * callback itself is sync (`bun:sqlite` is sync), but the retry loop yields
@@ -86,5 +99,6 @@ export async function withBusyRetry<T>(fn: () => T): Promise<T> {
       }
     }
   }
+  busyRetryExhaustionTotal++
   throw new BusyRetryExhaustedError(WRITE_MAX_RETRIES, lastErr)
 }

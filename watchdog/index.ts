@@ -16,6 +16,8 @@ export type {
 
 export { AlertStore } from './alert-store.ts'
 
+export { HeartbeatPulse } from './heartbeat.ts'
+
 export {
   HeartbeatDetector,
   StuckAgentDetector,

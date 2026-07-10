@@ -280,6 +280,10 @@ export async function boot(options: BootOptions = {}): Promise<BootHandle> {
   let composedChainFetch:
     | ((req: Request, server: import('bun').Server<unknown>) => Response | Promise<Response>)
     | undefined
+  // F4 — the composition's periodic-tick hook (pulses the supervision-watchdog
+  // heartbeat). Captured from the composition below and invoked in the
+  // `WATCHDOG=1` setInterval so the heartbeat goes stale when the tick stops.
+  let onGatewayTick: (() => void) | undefined
   // Sprint 19 + O4 — release ALL boot-owned resources on ANY init failure after
   // the DB is open + the system_events sink is registered, so a systemd
   // Restart=always loop doesn't race a still-open SQLite handle, dangling
@@ -314,6 +318,9 @@ export async function boot(options: BootOptions = {}): Promise<BootHandle> {
       if (composition.realmode_cleanups !== undefined) {
         realmode_cleanups = composition.realmode_cleanups
       }
+      // F4 — capture the periodic-tick hook so the WATCHDOG setInterval can pulse
+      // the supervision-watchdog heartbeat.
+      onGatewayTick = composition.on_gateway_tick
       // ISSUE #32 — the boot shell used to inline the
       // `composition.app_xxx_surface → composeInput.appXxx` mapping
       // here, then call `composeHttpHandler(composeInput)` itself.
@@ -497,6 +504,15 @@ export async function boot(options: BootOptions = {}): Promise<BootHandle> {
       sdNotify('WATCHDOG=1')
     } catch (err) {
       console.error('sd_notify WATCHDOG=1 failed:', err)
+    }
+    // F4 — pulse the composition's supervision-watchdog heartbeat off this same
+    // tick (the one process-level liveness loop). GUARDED: a hook throw must
+    // never crash the tick or the process — the heartbeat detector then simply
+    // observes the pulse stop, which is the correct signal.
+    try {
+      onGatewayTick?.()
+    } catch (err) {
+      console.error('on_gateway_tick hook failed:', err)
     }
   }, WATCHDOG_INTERVAL_MS)
 

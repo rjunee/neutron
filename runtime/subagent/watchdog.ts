@@ -127,6 +127,35 @@ export interface AgentWatchdogDeps {
    * behaviour.
    */
   turn_progress_at?: (rec: SubagentRecord) => number | null
+  /**
+   * NOTIFY-ONLY mode (F4 — `[BEHAVIOR]` wire the watchdog, decision D-8 = wire).
+   *
+   * When `true`, the watchdog DETECTS a stuck/dead live record and NOTIFIES the
+   * `notify` sink, but does NOT reap it: it never invokes the run's canceller
+   * (nothing is killed) and never marks the record terminal (no `failRun`, so no
+   * control-flow change). The record stays live; a caller still awaiting it is
+   * unaffected. This is the mode the scheduled `runLifecycleTick` uses in F4 —
+   * enforcement (killing a wedged dispatch after a verified threshold) is a
+   * SEPARATE flagged PR, and the 5-min {@link DEFAULT_STUCK_THRESHOLD_MS} default
+   * is UNVERIFIED for killing.
+   *
+   * Because the record is never transitioned, `live()` keeps returning it, so a
+   * still-stuck run would be re-detected (and re-notified) every tick. Pass
+   * {@link AgentWatchdogDeps.notified} to suppress the repeat: a run_id already in
+   * the set is skipped, and a newly-surfaced one is added to it. Omitting the set
+   * notifies every tick (acceptable for a pure detector; the caller owns dedup).
+   *
+   * Default `false` — the legacy reaping behaviour (`failRun` + kill + surface),
+   * unchanged for every existing caller/test.
+   */
+  notify_only?: boolean
+  /**
+   * De-dup ledger for {@link notify_only} mode. A run_id present here is skipped
+   * (already notified); a newly-surfaced run_id is inserted. The caller (the
+   * scheduled tick closure) owns this set so the pure watchdog stays stateless.
+   * Ignored when `notify_only` is false.
+   */
+  notified?: Set<string>
 }
 
 export interface AgentWatchdogResult {
@@ -171,26 +200,33 @@ export async function runAgentWatchdog(deps: AgentWatchdogDeps): Promise<AgentWa
     }
     if (reason === undefined) continue
 
+    if (deps.notify_only === true) {
+      // NOTIFY-ONLY (F4): DETECT + NOTIFY, never reap. Do NOT call `failRun` —
+      // that would invoke the canceller (kill a wedged subprocess) and drive the
+      // record terminal (a control-flow change). The record stays live; nothing
+      // is killed. Suppress the every-tick repeat via the caller-owned `notified`
+      // ledger (the record is still live, so it re-detects until it completes on
+      // its own).
+      if (deps.notified?.has(rec.run_id) === true) continue
+      const event = buildEvent(rec, reason, now, progressAt, probedProgress)
+      surfaced.push(event)
+      deps.notified?.add(rec.run_id)
+      if (deps.notify) {
+        try {
+          // eslint-disable-next-line no-await-in-loop
+          await deps.notify(event)
+        } catch {
+          // Notifier is best-effort; a sink failure must not abort the tick.
+        }
+      }
+      continue
+    }
+
     // eslint-disable-next-line no-await-in-loop
     const transitioned = await failRun(deps.control, rec.run_id, reason, now)
     if (!transitioned) continue // raced to terminal already; don't double-surface
 
-    const event: AgentWatchdogEvent = {
-      run_id: rec.run_id,
-      agent_kind: rec.agent_kind,
-      instance_key: rec.instance_key,
-      reason,
-      last_event_at: rec.last_event_at,
-      detected_at: now,
-      age_ms: now - progressAt,
-    }
-    // Record the JSONL signal only when it actually overrode the in-memory clock,
-    // so the surfaced event shows the source-of-truth timestamp the decision used.
-    if (probedProgress !== null && probedProgress !== rec.last_event_at) {
-      event.turn_progress_at = probedProgress
-    }
-    if (rec.delivery_target !== undefined) event.delivery_target = rec.delivery_target
-    if (reason === 'process_dead' && rec.pid !== undefined) event.pid = rec.pid
+    const event = buildEvent(rec, reason, now, progressAt, probedProgress)
     surfaced.push(event)
 
     if (deps.notify) {
@@ -205,6 +241,37 @@ export async function runAgentWatchdog(deps: AgentWatchdogDeps): Promise<AgentWa
   }
 
   return { surfaced }
+}
+
+/**
+ * Build a surfaced {@link AgentWatchdogEvent} from a detected record. Shared by
+ * the enforcing and NOTIFY-ONLY paths so both report an identical shape — only
+ * the side-effects (reap vs. observe) differ.
+ */
+function buildEvent(
+  rec: SubagentRecord,
+  reason: WatchdogReason,
+  now: number,
+  progressAt: number,
+  probedProgress: number | null,
+): AgentWatchdogEvent {
+  const event: AgentWatchdogEvent = {
+    run_id: rec.run_id,
+    agent_kind: rec.agent_kind,
+    instance_key: rec.instance_key,
+    reason,
+    last_event_at: rec.last_event_at,
+    detected_at: now,
+    age_ms: now - progressAt,
+  }
+  // Record the JSONL signal only when it actually overrode the in-memory clock,
+  // so the surfaced event shows the source-of-truth timestamp the decision used.
+  if (probedProgress !== null && probedProgress !== rec.last_event_at) {
+    event.turn_progress_at = probedProgress
+  }
+  if (rec.delivery_target !== undefined) event.delivery_target = rec.delivery_target
+  if (reason === 'process_dead' && rec.pid !== undefined) event.pid = rec.pid
+  return event
 }
 
 function defaultPidAlive(pid: number): boolean {

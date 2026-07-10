@@ -132,3 +132,89 @@ export class ProcessRegistry {
     return this.records.size
   }
 }
+
+// ── Ambient live-process registry (F4) ──────────────────────────────────────
+//
+// The subprocess spawn sites that should feed child PIDs into the watchdog's
+// live-process view (`runtime/adapters/claude-code/persistent/spawn.ts` — the
+// single PTY chokepoint serving BOTH the pooled REPL and the ephemeral/dispatch
+// children) are deep in the runtime-adapter band and have NO dependency-injection
+// seam to the gateway module that owns the `ProcessRegistry`. So they reach it
+// through this process-wide ambient accessor — the SAME ambient-registry pattern
+// O4's `system_events` sink established (`persistence/system-events.ts`) for its
+// equally-scattered degrade sites.
+//
+// CONSISTENCY, NOT A SECOND TRUTH. The `ProcessRegistry` is a pure OS-process
+// LIVENESS PROJECTION the stuck/crashed detectors READ (+ the crashed detector
+// reaps dead entries as bookkeeping). It NEVER drives a dispatch's lifecycle —
+// that authority is P7's persisted `SubagentRegistry`. Entries are registered on
+// the real subprocess spawn and unregistered on its real exit, so this view
+// cannot diverge from the OS reality it observes.
+//
+// SINGLE-OWNER: neutron-open runs one gateway boot per OS process, so the stack
+// normally holds exactly one registry. It is a STACK (mirroring the O4 sink) only
+// so overlapping test boots tear down in any order without orphaning a live older
+// boot; production pushes once at boot and clears on shutdown.
+
+const ambientRegistryStack: ProcessRegistry[] = []
+
+/**
+ * Publish `registry` as the ambient live-process registry and return an
+ * idempotent deregister that removes THIS registry (by identity, from any stack
+ * position). The gateway's `process-registry` module pushes once at boot and
+ * clears on shutdown.
+ */
+export function pushAmbientProcessRegistry(registry: ProcessRegistry): () => void {
+  ambientRegistryStack.push(registry)
+  let removed = false
+  return (): void => {
+    if (removed) return
+    removed = true
+    const i = ambientRegistryStack.lastIndexOf(registry)
+    if (i !== -1) ambientRegistryStack.splice(i, 1)
+  }
+}
+
+/** The top (most-recently-pushed still-live) ambient registry, or null when none. */
+export function resolveAmbientProcessRegistry(): ProcessRegistry | null {
+  return ambientRegistryStack.length > 0
+    ? (ambientRegistryStack[ambientRegistryStack.length - 1] ?? null)
+    : null
+}
+
+/**
+ * Register a live child process into the ambient registry — GUARDED so it can
+ * NEVER throw into a spawn path. UPSERT semantics: an existing entry under
+ * `name` (e.g. a respawn re-using the same session key while the old child's
+ * exit handler hasn't fired yet) is replaced rather than colliding, so the
+ * live-process view tracks the newest child. A no-op when no ambient registry is
+ * registered (unit tests, sidecar tools, an LLM-less box).
+ */
+export function registerLiveProcessSafe(input: ProcessRegisterInput): void {
+  try {
+    const reg = resolveAmbientProcessRegistry()
+    if (reg === null) return
+    reg.unregister(input.name)
+    reg.register(input)
+  } catch {
+    // Observability write — must never perturb the spawn it observes.
+  }
+}
+
+/** Bump a live child's last-activity timestamp. Guarded + no-op when absent. */
+export function touchLiveProcessSafe(name: string): void {
+  try {
+    resolveAmbientProcessRegistry()?.touch(name)
+  } catch {
+    // swallow
+  }
+}
+
+/** Drop a live child (natural exit) WITHOUT signalling. Guarded + no-op when absent. */
+export function unregisterLiveProcessSafe(name: string): void {
+  try {
+    resolveAmbientProcessRegistry()?.unregister(name)
+  } catch {
+    // swallow
+  }
+}

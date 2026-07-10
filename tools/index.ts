@@ -26,5 +26,13 @@ export type {
   ApprovalManagerOptions,
 } from './approval.ts'
 
-export { ProcessRegistry, STUCK_PROCESS_INACTIVITY_MS } from './process-registry.ts'
+export {
+  ProcessRegistry,
+  STUCK_PROCESS_INACTIVITY_MS,
+  pushAmbientProcessRegistry,
+  resolveAmbientProcessRegistry,
+  registerLiveProcessSafe,
+  touchLiveProcessSafe,
+  unregisterLiveProcessSafe,
+} from './process-registry.ts'
 export type { ProcessRecord, ProcessRegisterInput } from './process-registry.ts'

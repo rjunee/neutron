@@ -44,6 +44,15 @@ export class WatchdogSupervisor {
     this.detectors.push(detector)
   }
 
+  /**
+   * The kinds of every registered detector, in registration order. Lets a wiring
+   * test assert the composer registered ALL SIX detectors (F4) rather than the
+   * former three — a registration regression the per-detector tests can't catch.
+   */
+  detectorKinds(): WatchdogDetector['kind'][] {
+    return this.detectors.map((d) => d.kind)
+  }
+
   start(): void {
     if (this.timer !== null) return
     this.timer = setInterval(() => {

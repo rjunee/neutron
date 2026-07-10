@@ -33,6 +33,17 @@ export interface MiscCompositionInput {
    */
   realmode_cleanups?: Array<() => void | Promise<void>>
   /**
+   * F4 — the gateway's periodic-tick hook. The boot shell invokes this INSIDE
+   * its systemd `WATCHDOG=1` `setInterval` (`gateway/index.ts`), the one
+   * process-level liveness loop, on every tick. The Open composer wires it to
+   * pulse the supervision watchdog's `HeartbeatPulse` (the real
+   * `heartbeat_tracker` source), so the heartbeat goes STALE the moment the
+   * gateway tick stops firing — replacing the never-stale `() => Date.now()`
+   * stub. Failure-safe: the boot shell guards the call so a hook throw never
+   * aborts the tick. Safe to omit (dev/test paths that don't drive a heartbeat).
+   */
+  on_gateway_tick?: () => void
+  /**
    * Trident v2 (Work Board Phase 2a exec-model) — drive the foundational
    * Forge→Argus→merge loop live. When `fire_inner_workflow` is supplied, the
    * `trident` module wires the REAL orchestrator `step`

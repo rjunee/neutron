@@ -66,6 +66,7 @@ export {
 export { PersistenceError, BusyRetryExhaustedError } from './errors.ts'
 export {
   withBusyRetry,
+  busyRetryExhaustionCount,
   isBusyError,
   WRITE_MAX_RETRIES,
   WRITE_RETRY_MIN_MS,
