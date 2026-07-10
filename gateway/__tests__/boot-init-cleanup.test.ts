@@ -360,6 +360,29 @@ describe('O4 — boot manages the ambient system_events sink lifecycle', () => {
     expect(closeSpy.calls).toBe(1)
   })
 
+  test('POST-bind failure STOPS the already-bound listener (port becomes rebindable)', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'neutron-o4-portstop-'))
+    cleanups.push(root)
+    bootEnv(root)
+    // Grab a free port, release it, then pin boot to it so we can prove the
+    // listener was stopped (the port is rebindable afterwards).
+    const probe = Bun.serve({ port: 0, fetch: () => new Response('probe') })
+    const port = probe.port
+    await probe.stop(true)
+    if (port === undefined) throw new Error('probe did not bind a port')
+
+    process.env['NOTIFY_SOCKET'] = join(root, 'nonexistent', 'bogus.sock')
+    registerSystemEventSink(null)
+    // boot binds `port`, then sdNotify('READY=1') throws → boundServerRef.stop()
+    // releases the socket before the error propagates.
+    await expect(boot({ port, composer: goodComposer })).rejects.toThrow(/sd_notify/)
+
+    // Proof the listener was stopped: the port rebinds cleanly.
+    const rebind = Bun.serve({ port, fetch: () => new Response('rebound') })
+    expect(rebind.port).toBe(port)
+    await rebind.stop(true)
+  })
+
   test('ownership-guarded: shutdown does NOT clobber a sibling sink registered after boot', async () => {
     const root = mkdtempSync(join(tmpdir(), 'neutron-o4-sink-own-'))
     cleanups.push(root)

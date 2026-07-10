@@ -156,6 +156,29 @@ describe('emitSystemEventSafe — NEVER throws / rejects', () => {
   })
 })
 
+describe('SystemEventsStore — drain flushes fire-and-forget writes', () => {
+  it('a fire-and-forget emit is durably written after drain() (no lost row at shutdown)', async () => {
+    // Mirror the production path: fire WITHOUT awaiting (as degrade sites do),
+    // then drain() — the row must be present before a subsequent db.close().
+    void emitSystemEventSafe(store, { event: 'gbrain_unavailable', ts: 1 })
+    expect(await store.drain()).toBeUndefined()
+    expect(countRows()).toBe(1)
+  })
+
+  it('drain() resolves immediately when there are no in-flight writes', async () => {
+    await expect(store.drain()).resolves.toBeUndefined()
+    expect(countRows()).toBe(0)
+  })
+
+  it('drain() awaits MULTIPLE concurrent fire-and-forget writes', async () => {
+    for (let i = 0; i < 5; i += 1) {
+      void emitSystemEventSafe(store, { event: 'cron_job_error', ts: i })
+    }
+    await store.drain()
+    expect(countRows()).toBe(5)
+  })
+})
+
 describe('ambient sink registry', () => {
   it('emitSystemEvent is a no-op when no sink is registered', async () => {
     registerSystemEventSink(null)

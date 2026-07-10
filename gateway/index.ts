@@ -301,8 +301,11 @@ export async function boot(options: BootOptions = {}): Promise<BootHandle> {
     // (composer threw before assignment). Each is awaited; a throwing one is
     // logged and does not stop the rest (drainRealmodeCleanups always resolves).
     await drainRealmodeCleanups(realmode_cleanups)
-    // Deregister THIS boot's sink from the stack BEFORE closing the DB it holds.
+    // Deregister THIS boot's sink (no NEW emit can target it), then FLUSH any
+    // in-flight journal write so a degrade fired just before init failure is
+    // durably persisted rather than dropped against the closed DB.
     clearOwnedSystemEventSink()
+    await systemEventSink.drain()
     db.close()
   }
   if (options.composer !== undefined) {
@@ -556,11 +559,12 @@ export async function boot(options: BootOptions = {}): Promise<BootHandle> {
     // in-flight queries on the auxiliary connections finish cleanly.
     // §F1 — drain (await) every cleanup, async ones included, BEFORE db.close().
     await drainRealmodeCleanups(realmode_cleanups)
-    // O4 — deregister THIS boot's system_events sink from the stack BEFORE
-    // db.close() so a post-shutdown degrade emit can't reference the closed DB.
-    // Identity-scoped, so a concurrent boot's sink is never removed. (Even if an
-    // emit raced in, emitSystemEventSafe swallows the write error — belt-and-braces.)
+    // O4 — deregister THIS boot's system_events sink from the stack (no NEW
+    // emit can target it — identity-scoped, so a concurrent boot's sink is never
+    // removed), then FLUSH any in-flight journal write so a degrade fired just
+    // before shutdown is durably persisted, not dropped against the closed DB.
     clearOwnedSystemEventSink()
+    await systemEventSink.drain()
     db.close()
     // Remove the process signal listeners this boot installed. `process.once`
     // auto-removes on FIRE, but a MANUAL shutdown() (tests, in-process

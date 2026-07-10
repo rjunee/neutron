@@ -122,6 +122,11 @@ export class SystemEventsStore implements SystemEventSink {
   private readonly db: ProjectDb
   private readonly uuid: () => string
   private readonly now: () => number
+  // In-flight INSERT promises. Degrade sites fire `record()` and DISCARD the
+  // promise (fire-and-forget), and `ProjectDb.withLock` schedules the write on
+  // a microtask — so a degrade emitted just before shutdown could otherwise hit
+  // a closed DB. Shutdown awaits {@link drain} to flush these first.
+  private readonly inflight = new Set<Promise<unknown>>()
 
   constructor(deps: SystemEventsStoreDeps) {
     this.db = deps.db
@@ -136,7 +141,10 @@ export class SystemEventsStore implements SystemEventSink {
     const module = input.module ?? 'system'
     const project_slug = input.project_slug ?? null
     const payload = input.payload ?? {}
-    await this.db.run(
+    // Register the write SYNCHRONOUSLY (before the first await) so a caller that
+    // fires-and-forgets and then triggers shutdown on the next tick is covered
+    // by drain(). Cleared on settle regardless of success/failure.
+    const write = this.db.run(
       `INSERT INTO system_events
          (id, ts, level, module, event_name, payload_json, project_slug, duration_ms)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -151,7 +159,22 @@ export class SystemEventsStore implements SystemEventSink {
         input.duration_ms ?? null,
       ],
     )
+    this.inflight.add(write)
+    void write.finally(() => this.inflight.delete(write))
+    await write
     return { id }
+  }
+
+  /**
+   * Await every in-flight {@link record} write (best-effort — a failed write
+   * settles too). Boot's shutdown / init-failure cleanup calls this BEFORE
+   * `db.close()` so a degrade event fired just before teardown is durably
+   * written rather than silently dropped against a closed DB.
+   */
+  async drain(): Promise<void> {
+    while (this.inflight.size > 0) {
+      await Promise.allSettled([...this.inflight])
+    }
   }
 
   /**
