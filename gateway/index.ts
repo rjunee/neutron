@@ -223,7 +223,15 @@ export async function boot(options: BootOptions = {}): Promise<BootHandle> {
   mkdirSync(dirname(dbPath), { recursive: true })
 
   const db = ProjectDb.open(dbPath)
-  applyMigrationsToProjectDb(db)
+  // Guard migration application: a malformed migration / write failure /
+  // incompatible existing schema must close the just-opened SQLite handle
+  // before propagating, so a systemd restart doesn't race a leaked handle.
+  try {
+    applyMigrationsToProjectDb(db)
+  } catch (err) {
+    db.close()
+    throw err
+  }
 
   // Resolve the owner slug BEFORE registering the journal sink: the resolver
   // does an unguarded readFileSync of `.url_slug`, so a throw here must not leak

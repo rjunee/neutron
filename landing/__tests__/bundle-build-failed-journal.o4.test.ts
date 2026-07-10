@@ -45,6 +45,8 @@ function makeStaticDir(mainTsx: string | null, prebuiltJs: string | null): strin
   return dir
 }
 
+const BROKEN_SRC = `import { nope } from './does-not-exist.ts'\nconsole.log(nope)\n`
+
 const dirs: string[] = []
 afterEach(() => {
   registerSystemEventSink(null)
@@ -52,21 +54,45 @@ afterEach(() => {
   dirs.length = 0
 })
 
-test('O4 — a failing bundle build 404s AND emits ONE bundle_build_failed row', async () => {
+test('O4 — repeated failing chat-react builds 404 but emit EXACTLY ONE row (edge-latched)', async () => {
   const { rows, sink } = fakeSink()
   registerSystemEventSink(sink)
-  // main.tsx imports a module that does not exist → Bun.build fails.
-  const dir = makeStaticDir(`import { nope } from './does-not-exist.ts'\nconsole.log(nope)\n`, null)
+  // main.tsx imports a module that does not exist → Bun.build fails. The failed
+  // build leaves the cache null, so each request REBUILDS — the latch is what
+  // keeps the journal to one row per failure episode.
+  const dir = makeStaticDir(BROKEN_SRC, null)
   dirs.push(dir)
 
   const handler = createLandingServer({ static_dir: dir })
-  const res = await handler.fetch(new Request('http://x.test/chat-react.js'), fakeServer)
-  expect(res.status).toBe(404) // degrade behaviour UNCHANGED
+  const r1 = await handler.fetch(new Request('http://x.test/chat-react.js'), fakeServer)
+  const r2 = await handler.fetch(new Request('http://x.test/chat-react.js'), fakeServer)
+  const r3 = await handler.fetch(new Request('http://x.test/chat-react.js'), fakeServer)
+  expect([r1.status, r2.status, r3.status]).toEqual([404, 404, 404]) // degrade unchanged
 
-  expect(rows.filter((r) => r.event === 'bundle_build_failed')).toHaveLength(1)
-  const row = rows.find((r) => r.event === 'bundle_build_failed')
-  expect(row).toMatchObject({ module: 'landing' })
-  expect(row?.payload).toMatchObject({ bundle: 'chat-react.js' })
+  const fails = rows.filter((r) => r.event === 'bundle_build_failed')
+  expect(fails).toHaveLength(1) // three rebuilds, ONE journal row
+  expect(fails[0]).toMatchObject({ module: 'landing' })
+  expect(fails[0]?.payload).toMatchObject({ bundle: 'chat-react.js' })
+}, 30_000)
+
+test('O4 — the invite.js branch is also edge-latched (repeated failure → one row)', async () => {
+  const { rows, sink } = fakeSink()
+  registerSystemEventSink(sink)
+  const dir = mkdtempSync(join(tmpdir(), 'o4-invite-'))
+  dirs.push(dir)
+  // Minimal static dir: chat-react.html is REQUIRED at construction; invite.ts
+  // is the broken bundle under test (invite_assets_dir defaults to static_dir).
+  writeFileSync(join(dir, 'chat-react.html'), '<div id="root"></div>')
+  writeFileSync(join(dir, 'invite.ts'), BROKEN_SRC)
+
+  const handler = createLandingServer({ static_dir: dir })
+  const r1 = await handler.fetch(new Request('http://x.test/invite.js'), fakeServer)
+  const r2 = await handler.fetch(new Request('http://x.test/invite.js'), fakeServer)
+  expect([r1.status, r2.status]).toEqual([404, 404])
+
+  const fails = rows.filter((r) => r.event === 'bundle_build_failed')
+  expect(fails).toHaveLength(1)
+  expect(fails[0]?.payload).toMatchObject({ bundle: 'invite.js' })
 }, 30_000)
 
 test('O4 — a prebuilt bundle (no build) serves 200 and emits NOTHING', async () => {

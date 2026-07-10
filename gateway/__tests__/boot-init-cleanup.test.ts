@@ -32,6 +32,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
+import { Database } from 'bun:sqlite'
 import { mkdirSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -468,6 +469,30 @@ describe('O4 — boot manages the ambient system_events sink lifecycle', () => {
     const closeSpy = activeSpy
     await expect(boot({ port: 0, composer: goodComposer })).rejects.toThrow()
     // DB opened then closed by the slug guard; sink never registered.
+    expect(closeSpy.calls).toBe(1)
+    expect(resolveSystemEventSink()).toBeNull()
+  })
+
+  test('migration failure closes the DB and registers NO sink (earliest post-open boundary)', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'neutron-o4-migfail-'))
+    cleanups.push(root)
+    const dbPath = join(root, 'owner.db')
+    // Pre-seed a `_migrations` table with a bogus schema (only `version`), so
+    // the runner's `INSERT INTO _migrations (version, name, applied_at)` throws
+    // ("no column named name") on the first unapplied migration.
+    const seed = new Database(dbPath)
+    seed.exec('CREATE TABLE _migrations (version INTEGER PRIMARY KEY)')
+    seed.close()
+
+    process.env['NEUTRON_DB_PATH'] = dbPath
+    process.env['NEUTRON_INSTANCE_SLUG'] = 'alice'
+    delete process.env['NOTIFY_SOCKET']
+    registerSystemEventSink(null)
+
+    activeSpy = spyProjectDbClose()
+    const closeSpy = activeSpy
+    await expect(boot({ port: 0, composer: goodComposer })).rejects.toThrow()
+    // The migration guard closed the opened handle; the sink was never reached.
     expect(closeSpy.calls).toBe(1)
     expect(resolveSystemEventSink()).toBeNull()
   })
