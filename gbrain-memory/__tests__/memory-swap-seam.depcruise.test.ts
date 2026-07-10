@@ -14,21 +14,26 @@
  *   (2) IMPORT-BAN — the `memory-backend-swap-seam` depcruise rule forbids a
  *       product module importing them (or any adapter / the stdio transport).
  *       Proven by the REJECT probe below.
- *   (3) NO WIRING LEAK — the ONE composition module allowed to import the
- *       transport (`build-gbrain-memory.ts`) keeps it a LOCAL and returns only
- *       the typed `MemoryStore`. Proven by the compile-time conditional-type
- *       probe in build-gbrain-memory.test.ts AND by the acquisition scan below,
- *       which asserts NO exempt/product-scope module exposes a raw transport on
- *       a PROVIDER surface (exported field / return type). A raw client named
- *       only as a function PARAMETER is a sink (it consumes a transport the
- *       caller already holds) — not a source — so it does not leak acquisition.
+ *   (3) NO WIRING LEAK / NO LAUNDERING — the composition module allowed to
+ *       import the transport (`build-gbrain-memory.ts`) keeps it a LOCAL and
+ *       returns only the typed `MemoryStore` (compile-time conditional-type
+ *       probe in build-gbrain-memory.test.ts). AND the acquisition scan below
+ *       asserts NONE of the files that can even NAME the sealed type (connect/ +
+ *       the two composer wiring files — the complete set, since depcruise blocks
+ *       everyone else) exposes it on a PROVIDER surface (exported value / return
+ *       type / public field) or RE-EXPORTS the type. connect/ is scanned like
+ *       everything else (no blanket exemption — that was the laundering hole): a
+ *       raw client named only as a PARAMETER or interface input field is a sink
+ *       (the caller supplies it) and is allowed; anything obtainable is flagged.
+ *       Alias resolution uses the TS type-CHECKER, so an aliased re-export
+ *       (`export type T = McpClient; export declare const x: T`) is caught.
  *
  * The depcruise probes are written + removed per test (afterEach), so the tree
  * stays clean even on failure.
  */
 import { afterEach, describe, expect, test } from 'bun:test'
 import { execFileSync } from 'node:child_process'
-import { readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { rmSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import ts from 'typescript'
@@ -36,9 +41,6 @@ import ts from 'typescript'
 const HERE = dirname(fileURLToPath(import.meta.url))
 const ROOT = join(HERE, '..', '..') // gbrain-memory/__tests__ → gbrain-memory → worktree root
 const CONFIG = join(ROOT, '.dependency-cruiser.cjs')
-
-/** Type names that ARE a raw op-capable transport (naming one on a provider surface = a leak). */
-const RAW_TRANSPORT_TYPES = new Set(['GBrainStdioMcpClient', 'McpClient'])
 
 const REJECT_REL = 'gateway/__ra5_seam_probe_reject__.ts'
 const PASS_REL = 'gateway/__ra5_seam_probe_pass__.ts'
@@ -113,52 +115,35 @@ describe('RA5 memory-backend-swap-seam rule (adversarial)', () => {
   })
 })
 
-// --- Acquisition-source scan (layer 3) ---------------------------------------
+// --- Acquisition-source scan (layer 3): NO provider of a raw transport --------
+//
+// COMPLETENESS. The ONLY files that can NAME the sealed transport type
+// (`McpClient` / `GBrainStdioMcpClient`) are the ones the depcruise import-ban
+// lets import gbrain-memory internals: gbrain-memory/ itself (the seam owner,
+// excluded here) plus connect/ and the two composer wiring files. Every other
+// module is blocked from importing the type, so it can obtain a transport ONLY
+// if one of THESE files hands it out (as a value, or by re-exporting the type
+// so a downstream module could name it). connect/ is NO LONGER blanket-exempt —
+// it is scanned with the same position rule as everything else, which closes
+// the laundering channel (a connect file re-exporting the type + exposing a
+// value). Scanning exactly this set is therefore complete.
+//
+// PROVIDER (FLAGGED) = an obtainable value or a type re-export: exported const/
+// var, function/method/getter return type, exported class PUBLIC field, exported
+// type-alias, or `export {…}` whose type resolves to the sealed transport.
+// SINK (ALLOWED) = a parameter or an interface input field: the caller supplies
+// the client (connect's `exportProjectGraphSnapshot(mcp: McpClient)` +
+// `ImportSharedProjectMemoryDeps.memory`). Alias resolution uses the TS
+// type-CHECKER (symbol origin), so `export type T = McpClient; export declare
+// const x: T` is caught by following T to its origin declaration — name-level
+// aliasing cannot evade it.
 
-/** True when `node` sits inside a function/method PARAMETER's type (a sink, not a source). */
-function isInsideParameterType(node: ts.Node): boolean {
-  for (let cur: ts.Node | undefined = node.parent; cur !== undefined; cur = cur.parent) {
-    if (ts.isParameter(cur)) return true
-    if (ts.isSourceFile(cur)) break
-  }
-  return false
-}
+const SEALED_TRANSPORT_ORIGINS = ['gbrain-memory/mcp-client.ts', 'gbrain-memory/gbrain-stdio-client.ts']
 
-/** True when `node` is inside a top-level declaration carrying the `export` modifier. */
-function isInsideExportedDecl(node: ts.Node): boolean {
-  let top: ts.Node = node
-  while (top.parent !== undefined && !ts.isSourceFile(top.parent)) top = top.parent
-  const mods = ts.canHaveModifiers(top) ? ts.getModifiers(top) : undefined
-  return mods?.some((m) => m.kind === ts.SyntaxKind.ExportKeyword) ?? false
-}
-
-/**
- * Every EXPORTED PROVIDER surface (exported interface field, type alias, return
- * type, exported const type) that names a raw transport type — i.e. hands a
- * caller a way to OBTAIN one. A raw type in a PARAMETER position is a sink
- * (consumes a transport the caller already has, e.g. connect's
- * `exportProjectGraphSnapshot(mcp: McpClient)`) and is NOT a leak.
- */
-function findRawTransportProviders(
-  fileName: string,
-  src: string,
-): Array<{ line: number; typeName: string }> {
-  const sf = ts.createSourceFile(fileName, src, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS)
-  const leaks: Array<{ line: number; typeName: string }> = []
-  const visit = (node: ts.Node): void => {
-    if (ts.isTypeReferenceNode(node)) {
-      const name = ts.isQualifiedName(node.typeName)
-        ? node.typeName.right.text
-        : node.typeName.text
-      if (RAW_TRANSPORT_TYPES.has(name) && isInsideExportedDecl(node) && !isInsideParameterType(node)) {
-        const { line } = sf.getLineAndCharacterOfPosition(node.getStart(sf))
-        leaks.push({ line: line + 1, typeName: name })
-      }
-    }
-    ts.forEachChild(node, visit)
-  }
-  visit(sf)
-  return leaks
+interface Leak {
+  file: string
+  line: number
+  kind: string
 }
 
 function trackedTsFiles(): string[] {
@@ -170,47 +155,237 @@ function isTestFile(p: string): boolean {
   return /(^|\/)__tests__\//.test(p) || /\.test\.[a-z]+$/.test(p) || /(^|\/)tests\//.test(p)
 }
 
-describe('RA5 acquisition boundary — no product-scope source of a raw transport (layer 3)', () => {
-  test('no module OUTSIDE gbrain-memory/ + connect/ exposes a raw transport on a provider surface', () => {
-    // Only the seam infra may hold/thread a raw transport: gbrain-memory/ (the
-    // seam owner) and connect/ (the federation mirror — it THREADS a
-    // caller-supplied client through input `Deps` fields + parameters, i.e.
-    // consumes one the caller already has; it never RETURNS one, and product
-    // can't reach it — connect/api is dynamic-import-gated). Both are exempt in
-    // the depcruise rule too. EVERY other module — product scope + the exempt
-    // composer wiring (build-gbrain-memory.ts, gbrain-sync-state-store.ts) —
-    // must expose ONLY the typed MemoryStore. A returned/field-typed raw client
-    // on a PROVIDER surface (not a parameter/input sink) is the exact
-    // `buildGBrainMemory().client` acquisition hole that was closed. depcruise's
-    // import-ban already stops a product module from even naming these types, so
-    // in practice the only non-exempt files that could reference them are the
-    // composer wiring — this asserts none of them PROVIDES one.
-    // NOTE: this is a SYNTACTIC scan (matches the type NAME as written), so a
-    // determined import-alias could evade it — but the ALIAS-PROOF structural
-    // authority is the compile-time conditional-type probe in
-    // build-gbrain-memory.test.ts, which checks the actual `GBrainMemoryWiring`
-    // shape regardless of how types are named. This scan is the broader belt.
-    const leaks: Array<{ file: string; line: number; typeName: string }> = []
-    for (const p of trackedTsFiles()) {
-      if (p.startsWith('gbrain-memory/')) continue // the seam owner may hold transports
-      if (p.startsWith('connect/')) continue // federation mirror: consumes (input), never provides
-      if (isTestFile(p)) continue
-      let src: string
-      try {
-        src = readFileSync(join(ROOT, p), 'utf8')
-      } catch {
-        continue // skip a raced/unreadable file rather than crash the suite
-      }
-      if (!src.includes('McpClient') && !src.includes('GBrainStdioMcpClient')) continue
-      for (const h of findRawTransportProviders(p, src)) {
-        leaks.push({ file: p, line: h.line, typeName: h.typeName })
+function loadCompilerOptions(): ts.CompilerOptions {
+  const read = ts.readConfigFile(join(ROOT, 'tsconfig.base.json'), ts.sys.readFile)
+  const parsed = ts.parseJsonConfigFileContent(read.config ?? {}, ts.sys, ROOT)
+  return { ...parsed.options, noEmit: true, skipLibCheck: true }
+}
+
+/** A symbol (following import aliases) that IS the sealed transport, by ORIGIN declaration. */
+function symbolIsSealedTransport(symbol: ts.Symbol | undefined, checker: ts.TypeChecker): boolean {
+  if (symbol === undefined) return false
+  let s = symbol
+  if ((s.flags & ts.SymbolFlags.Alias) !== 0) {
+    try {
+      s = checker.getAliasedSymbol(s)
+    } catch {
+      /* not an import alias */
+    }
+  }
+  const name = s.getName()
+  if (name !== 'McpClient' && name !== 'GBrainStdioMcpClient') return false
+  return (s.getDeclarations() ?? []).some((d) => {
+    const f = d.getSourceFile().fileName.replace(/\\/g, '/')
+    return SEALED_TRANSPORT_ORIGINS.some((o) => f.endsWith(o))
+  })
+}
+
+/**
+ * Does `type` (resolved through aliases / generics / unions / object fields)
+ * expose the sealed transport as an OBTAINABLE value? Bounded to avoid recursive
+ * types. Function-typed object members (e.g. `close: () => …`) are skipped —
+ * they are not transports.
+ */
+function typeExposesTransport(
+  type: ts.Type | undefined,
+  checker: ts.TypeChecker,
+  seen: Set<ts.Type>,
+  depth: number,
+): boolean {
+  if (type === undefined || depth > 4 || seen.has(type)) return false
+  seen.add(type)
+  if (symbolIsSealedTransport(type.aliasSymbol, checker)) return true
+  if (symbolIsSealedTransport(type.getSymbol(), checker)) return true
+  if (type.isUnionOrIntersection()) {
+    return type.types.some((t) => typeExposesTransport(t, checker, seen, depth + 1))
+  }
+  if ((type.flags & ts.TypeFlags.Object) !== 0) {
+    const obj = type as ts.ObjectType
+    if ((obj.objectFlags & ts.ObjectFlags.Reference) !== 0) {
+      for (const arg of checker.getTypeArguments(type as ts.TypeReference)) {
+        if (typeExposesTransport(arg, checker, seen, depth + 1)) return true
       }
     }
-    expect(
-      leaks,
-      `A module outside gbrain-memory/ PROVIDES a raw transport (acquisition leak) — ` +
-        `expose only the typed MemoryStore:\n` +
-        leaks.map((l) => `  ${l.file}:${l.line} → ${l.typeName}`).join('\n'),
-    ).toEqual([])
+    for (const prop of type.getProperties()) {
+      const decl = prop.valueDeclaration ?? prop.getDeclarations()?.[0]
+      if (decl === undefined) continue
+      const pType = checker.getTypeOfSymbolAtLocation(prop, decl)
+      if (pType.getCallSignatures().length > 0) continue // a method/fn field is not a transport
+      if (typeExposesTransport(pType, checker, seen, depth + 1)) return true
+    }
+  }
+  return false
+}
+
+function hasExportModifier(node: ts.Node): boolean {
+  const mods = ts.canHaveModifiers(node) ? ts.getModifiers(node) : undefined
+  return mods?.some((m) => m.kind === ts.SyntaxKind.ExportKeyword) ?? false
+}
+
+function isPublicClassMember(node: ts.ClassElement): boolean {
+  if (node.name !== undefined && ts.isPrivateIdentifier(node.name)) return false
+  const mods = ts.canHaveModifiers(node) ? ts.getModifiers(node) : undefined
+  return !(
+    mods?.some(
+      (m) =>
+        m.kind === ts.SyntaxKind.PrivateKeyword || m.kind === ts.SyntaxKind.ProtectedKeyword,
+    ) ?? false
+  )
+}
+
+/** Provider-position leaks in one source file (interfaces + params are sinks, not scanned). */
+function scanSourceForTransportProviders(sf: ts.SourceFile, checker: ts.TypeChecker): Leak[] {
+  const rel = ts.sys.resolvePath(sf.fileName).replace(ts.sys.resolvePath(ROOT) + '/', '')
+  const leaks: Leak[] = []
+  const fresh = () => new Set<ts.Type>()
+  const flag = (node: ts.Node, kind: string): void => {
+    const { line } = sf.getLineAndCharacterOfPosition(node.getStart(sf))
+    leaks.push({ file: rel, line: line + 1, kind })
+  }
+  for (const stmt of sf.statements) {
+    // Re-export of the sealed type: `export { McpClient }` / `export type { McpClient as X }`.
+    if (ts.isExportDeclaration(stmt) && stmt.exportClause && ts.isNamedExports(stmt.exportClause)) {
+      for (const spec of stmt.exportClause.elements) {
+        if (symbolIsSealedTransport(checker.getSymbolAtLocation(spec.name), checker)) {
+          flag(spec, 're-export of the sealed transport type')
+        }
+      }
+      continue
+    }
+    if (!hasExportModifier(stmt)) continue
+    if (ts.isTypeAliasDeclaration(stmt)) {
+      // `export type T = McpClient` (or an alias chain resolving to it) launders the type.
+      if (typeExposesTransport(checker.getTypeAtLocation(stmt.type), checker, fresh(), 0)) {
+        flag(stmt, 'exported type alias resolves to the sealed transport')
+      }
+    } else if (ts.isVariableStatement(stmt)) {
+      for (const d of stmt.declarationList.declarations) {
+        if (typeExposesTransport(checker.getTypeAtLocation(d.name), checker, fresh(), 0)) {
+          flag(d, 'exported const/var exposes the sealed transport')
+        }
+      }
+    } else if (ts.isFunctionDeclaration(stmt)) {
+      const sig = checker.getSignatureFromDeclaration(stmt)
+      if (sig && typeExposesTransport(checker.getReturnTypeOfSignature(sig), checker, fresh(), 0)) {
+        flag(stmt, 'exported function returns the sealed transport')
+      }
+    } else if (ts.isClassDeclaration(stmt)) {
+      for (const m of stmt.members) {
+        if (!isPublicClassMember(m)) continue
+        if (ts.isPropertyDeclaration(m)) {
+          if (typeExposesTransport(checker.getTypeAtLocation(m), checker, fresh(), 0)) {
+            flag(m, 'exported class public field exposes the sealed transport')
+          }
+        } else if (ts.isMethodDeclaration(m) || ts.isGetAccessorDeclaration(m)) {
+          const sig = checker.getSignatureFromDeclaration(m)
+          if (sig && typeExposesTransport(checker.getReturnTypeOfSignature(sig), checker, fresh(), 0)) {
+            flag(m, 'exported class public method/getter returns the sealed transport')
+          }
+        }
+      }
+    }
+  }
+  return leaks
+}
+
+/** Overlay a single virtual source over the real FS so a fixture resolves real imports. */
+function overlayProgram(virtualRel: string, content: string): { checker: ts.TypeChecker; sf: ts.SourceFile } {
+  const options = loadCompilerOptions()
+  const abs = ts.sys.resolvePath(join(ROOT, virtualRel))
+  const host = ts.createCompilerHost(options, true)
+  const baseGetSf = host.getSourceFile.bind(host)
+  const baseRead = host.readFile.bind(host)
+  const baseExists = host.fileExists.bind(host)
+  host.fileExists = (f) => ts.sys.resolvePath(f) === abs || baseExists(f)
+  host.readFile = (f) => (ts.sys.resolvePath(f) === abs ? content : baseRead(f))
+  host.getSourceFile = (f, lang, onErr, should) =>
+    ts.sys.resolvePath(f) === abs
+      ? ts.createSourceFile(f, content, lang, true, ts.ScriptKind.TS)
+      : baseGetSf(f, lang, onErr, should)
+  const program = ts.createProgram({ rootNames: [abs], options, host })
+  return { checker: program.getTypeChecker(), sf: program.getSourceFile(abs)! }
+}
+
+describe('RA5 acquisition boundary — no transport PROVIDER outside gbrain-memory/ (layer 3)', () => {
+  test(
+    'the only files that may name the transport expose ONLY the typed MemoryStore, never the raw transport',
+    () => {
+      // The complete set of files that can NAME the sealed type (per the depcruise
+      // import-ban exempt `from`s, minus gbrain-memory/ + tests): connect/ + the
+      // two composer wiring files. connect/ is scanned like everything else — the
+      // blanket exemption that let it launder the type is gone.
+      const scanned = trackedTsFiles().filter(
+        (p) =>
+          !isTestFile(p) &&
+          (p.startsWith('connect/') ||
+            p === 'gateway/realmode-composer/build-gbrain-memory.ts' ||
+            p === 'gateway/realmode-composer/gbrain-sync-state-store.ts'),
+      )
+      const rootNames = [...scanned, ...SEALED_TRANSPORT_ORIGINS].map((p) => join(ROOT, p))
+      const program = ts.createProgram({ rootNames, options: loadCompilerOptions() })
+      const checker = program.getTypeChecker()
+      const scannedAbs = new Set(scanned.map((p) => ts.sys.resolvePath(join(ROOT, p))))
+      const leaks: Leak[] = []
+      for (const sf of program.getSourceFiles()) {
+        if (!scannedAbs.has(ts.sys.resolvePath(sf.fileName))) continue
+        leaks.push(...scanSourceForTransportProviders(sf, checker))
+      }
+      expect(
+        leaks,
+        `A file outside gbrain-memory/ PROVIDES or re-exports the raw transport ` +
+          `(acquisition leak) — expose only the typed MemoryStore:\n` +
+          leaks.map((l) => `  ${l.file}:${l.line} — ${l.kind}`).join('\n'),
+      ).toEqual([])
+    },
+    120000,
+  )
+
+  test('FLAGS the exact laundering bypass: connect-scope alias re-export + provider const', () => {
+    const { checker, sf } = overlayProgram(
+      'connect/__ra5_launder_probe__.ts',
+      [
+        `import type { McpClient as I } from '@neutronai/gbrain-memory/mcp-client.ts'`,
+        `export type T = I`, // (a) re-export the sealed type via alias
+        `export declare const transport: T`, // (b) expose an obtainable value of it
+      ].join('\n'),
+    )
+    const kinds = scanSourceForTransportProviders(sf, checker).map((l) => l.kind)
+    expect(kinds).toContain('exported type alias resolves to the sealed transport')
+    expect(kinds).toContain('exported const/var exposes the sealed transport')
+  })
+
+  test('FLAGS a direct `export {…}` re-export of the sealed type', () => {
+    const { checker, sf } = overlayProgram(
+      'connect/__ra5_reexport_probe__.ts',
+      `export type { McpClient } from '@neutronai/gbrain-memory/mcp-client.ts'\n`,
+    )
+    expect(scanSourceForTransportProviders(sf, checker).map((l) => l.kind)).toContain(
+      're-export of the sealed transport type',
+    )
+  })
+
+  test('FLAGS a function/getter that RETURNS the transport (even wrapped in Promise)', () => {
+    const { checker, sf } = overlayProgram(
+      'connect/__ra5_return_probe__.ts',
+      [
+        `import type { McpClient } from '@neutronai/gbrain-memory/mcp-client.ts'`,
+        `export declare function getTransport(): Promise<McpClient>`,
+      ].join('\n'),
+    )
+    expect(scanSourceForTransportProviders(sf, checker).map((l) => l.kind)).toContain(
+      'exported function returns the sealed transport',
+    )
+  })
+
+  test('does NOT flag SINK positions: a param + an interface input field (caller supplies the client)', () => {
+    const { checker, sf } = overlayProgram(
+      'connect/__ra5_sink_probe__.ts',
+      [
+        `import type { McpClient } from '@neutronai/gbrain-memory/mcp-client.ts'`,
+        `export function consume(mcp: McpClient): void { void mcp }`,
+        `export interface Deps { memory: McpClient }`,
+      ].join('\n'),
+    )
+    expect(scanSourceForTransportProviders(sf, checker)).toEqual([])
   })
 })
