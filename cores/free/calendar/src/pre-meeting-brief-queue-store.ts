@@ -324,10 +324,19 @@ export class SqlitePreMeetingBriefQueueStore implements PreMeetingBriefQueueStor
     // Refactor X4 (security): reject traversal in the tool-supplied
     // `project_id` before any FS op. `sanitizeProjectId` already blocks `/`
     // and NUL via its charset, but bare `..`/`.` slip through it (both are
-    // in [A-Za-z0-9_.-]) and would escape `<owner_home>/Projects/`. The
-    // universal guard rejects those too — throws `CorePathTraversalError`.
+    // in [A-Za-z0-9_.-]) and would escape `<owner_home>/Projects/`. Two
+    // guard passes: (1) the raw `project_id` must map to a legit project
+    // ROOT — rejects bare `.` (the Projects/ dir itself) and `..` (escape);
+    // (2) route the ACTUAL `resolveProjectCalendarDir` callback THROUGH the
+    // guard so an override that returns an out-of-boundary dir is rejected
+    // too, using its boundary-checked return as the dir we `mkdir`. Both
+    // throw `CorePathTraversalError`.
     safeResolveProjectRoot({ owner_home: this.owner_home, project_id })
-    const dir = this.resolveProjectCalendarDir(project_id)
+    const dir = safeResolveProjectRoot({
+      owner_home: this.owner_home,
+      project_id,
+      resolveProjectRoot: this.resolveProjectCalendarDir,
+    })
     mkdirSync(dir, { recursive: true })
     const db_path = join(dir, CALENDAR_DB)
     // P3 shared open — previously busy_timeout only (same 100 ms value as

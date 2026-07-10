@@ -46,6 +46,26 @@ describe('Calendar queue store — path-traversal guard (X4 [BEHAVIOR])', () => 
     store.closeAll()
   })
 
+  test('rejects an override resolveProjectCalendarDir that escapes the boundary (no outside write)', async () => {
+    const outside = mkdtempSync(join(tmpdir(), 'calendar-escape-'))
+    try {
+      // A legit-looking `project_id` but an override that maps it OUTSIDE
+      // the boundary must still be rejected — the guard validates the actual
+      // callback result, not a parallel default path.
+      const store = new SqlitePreMeetingBriefQueueStore({
+        owner_home: home,
+        resolveProjectCalendarDir: () => join(outside, 'calendar'),
+      })
+      await expect(store.listPending('valid-id')).rejects.toThrow(
+        CorePathTraversalError,
+      )
+      expect(existsSync(join(outside, 'calendar'))).toBe(false)
+      store.closeAll()
+    } finally {
+      rmSync(outside, { recursive: true, force: true })
+    }
+  })
+
   test('accepts legit slugs + uuids', async () => {
     const store = new SqlitePreMeetingBriefQueueStore({ owner_home: home })
     for (const id of ['proj-a', '5f2c9e8a-2b1d-4c3e-9a7f-0b1c2d3e4f50']) {

@@ -53,11 +53,28 @@ export class CapabilityDeniedError extends Error {
   readonly core_id?: string
   readonly tool_name?: string
   readonly capability?: string
-  constructor(init: CapabilityDeniedErrorInit) {
-    super(init.message)
-    this.code = init.code
-    if (init.core_id !== undefined) this.core_id = init.core_id
-    if (init.tool_name !== undefined) this.tool_name = init.tool_name
-    if (init.capability !== undefined) this.capability = init.capability
+
+  // SDK-CONTRACT.md locks the historical secret-access constructor
+  // `(message, code = 'capability_denied')`. X4 unified this class with the
+  // tool-dispatch surface, which needs the extra context fields — so BOTH
+  // forms are supported: the locked positional `(message, code?)` for
+  // third-party Cores, and the richer options-object `({ code, message,
+  // core_id?, ... })` for the tool-dispatch path.
+  constructor(message: string, code?: CapabilityDeniedCode)
+  constructor(init: CapabilityDeniedErrorInit)
+  constructor(
+    arg: string | CapabilityDeniedErrorInit,
+    code: CapabilityDeniedCode = 'capability_denied',
+  ) {
+    if (typeof arg === 'string') {
+      super(arg)
+      this.code = code
+      return
+    }
+    super(arg.message)
+    this.code = arg.code
+    if (arg.core_id !== undefined) this.core_id = arg.core_id
+    if (arg.tool_name !== undefined) this.tool_name = arg.tool_name
+    if (arg.capability !== undefined) this.capability = arg.capability
   }
 }
