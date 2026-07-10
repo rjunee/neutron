@@ -296,6 +296,30 @@ describe('once', () => {
     expect(lines.map((l) => l.line)).toEqual(['[one] event=e', '[two] event=e'])
   })
 
+  test('separator-boundary (subsystem/key with a newline) does NOT collide for once', () => {
+    // (`a\nb`, `c`) and (`a`, `b\nc`) would share one joined key `a\nb\nc` under a
+    // string-concatenated state key; the nested map keeps them distinct so neither
+    // once() latch suppresses the other. Assert the isolation behaviorally (both
+    // fire) rather than the exact formatted text, which escapes the newline.
+    const { sink, lines } = capture()
+    createLogger('a\nb', { sink }).once('c').info('first')
+    createLogger('a', { sink }).once('b\nc').info('second')
+    expect(lines.length).toBe(2)
+    expect(lines.map((l) => l.line).join('|')).toContain('event=first')
+    expect(lines.map((l) => l.line).join('|')).toContain('event=second')
+  })
+
+  test('separator-boundary isolation also holds for rateLimited', () => {
+    let t = 0
+    const { sink, lines } = capture()
+    createLogger('a\nb', { sink, now: () => t }).rateLimited('c', 1000).info('first')
+    createLogger('a', { sink, now: () => t }).rateLimited('b\nc', 1000).info('second')
+    // Both fire in the same window — distinct pairs, no cross-suppression.
+    expect(lines.length).toBe(2)
+    expect(lines.map((l) => l.line).join('|')).toContain('event=first')
+    expect(lines.map((l) => l.line).join('|')).toContain('event=second')
+  })
+
   test('a level-suppressed emit does NOT burn the latch', () => {
     const { sink, lines } = capture()
     const log = createLogger('s', { sink })

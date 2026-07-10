@@ -218,19 +218,17 @@ const defaultSink = (level: LogLevel, line: string): void => {
 
 // ---------------------------------------------------------------------------
 // Per-PROCESS suppression state (module-level, like pool-state.ts's
-// `wedgeAlertState`), keyed `subsystem × key` with a newline separator —
-// subsystem tags are single-line by construction (they head every emitted
-// line), so a caller-supplied key can never collide across subsystems.
+// `wedgeAlertState`), keyed `subsystem × key` as a NESTED map — the two
+// dimensions are never concatenated into one string, so no subsystem/key
+// value (even one containing the formatter's separators or a newline) can
+// collide with a different pair. `('a\n b','c')` and `('a','b\n c')` stay
+// distinct, which a single joined key would conflate.
 // ---------------------------------------------------------------------------
 
-/** Keys that have fired their one allowed line. */
-const onceFired = new Set<string>()
-/** Per-key last-emit timestamp for `rateLimited` windows. */
-const rateLimitState = new Map<string, number>()
-
-function stateKey(subsystem: string, key: string): string {
-  return subsystem + '\n' + key
-}
+/** subsystem → set of keys that have fired their one allowed line. */
+const onceFired = new Map<string, Set<string>>()
+/** subsystem → (key → last-emit timestamp) for `rateLimited` windows. */
+const rateLimitState = new Map<string, Map<string, number>>()
 
 /**
  * TEST-ONLY: wipe all per-process `once` / `rateLimited` state so suites
@@ -278,25 +276,37 @@ export function createLogger(subsystem: string, options?: LoggerOptions): Logger
     debug: (event, fields) => emit('debug', event, fields),
 
     once(key: string): LogEmitter {
-      const sk = stateKey(subsystem, key)
       return gatedEmitter(
-        () => !onceFired.has(sk),
-        () => onceFired.add(sk),
+        () => !(onceFired.get(subsystem)?.has(key) ?? false),
+        () => {
+          let keys = onceFired.get(subsystem)
+          if (keys === undefined) {
+            keys = new Set<string>()
+            onceFired.set(subsystem, keys)
+          }
+          keys.add(key)
+        },
       )
     },
 
     clearOnce(key: string): void {
-      onceFired.delete(stateKey(subsystem, key))
+      onceFired.get(subsystem)?.delete(key)
     },
 
     rateLimited(key: string, ms: number): LogEmitter {
-      const sk = stateKey(subsystem, key)
       return gatedEmitter(
         () => {
-          const last = rateLimitState.get(sk)
+          const last = rateLimitState.get(subsystem)?.get(key)
           return last === undefined || clock() - last >= ms
         },
-        () => rateLimitState.set(sk, clock()),
+        () => {
+          let windows = rateLimitState.get(subsystem)
+          if (windows === undefined) {
+            windows = new Map<string, number>()
+            rateLimitState.set(subsystem, windows)
+          }
+          windows.set(key, clock())
+        },
       )
     },
   }
