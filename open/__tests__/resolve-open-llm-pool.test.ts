@@ -7,8 +7,11 @@
  * headline `curl | sh` flow — `claude setup-token`, which yields a
  * `CLAUDE_CODE_OAUTH_TOKEN` — booted the server LLM-less while the installer
  * reported success. `resolveOpenLlmPool` is the extracted, directly-testable
- * credential resolver that fixes it, mirroring the Managed resolver's
- * precedence (OAuth env wins over the shared ANTHROPIC_API_KEY env).
+ * credential resolver that fixes it. C6 (2026-07-09): it now walks the SHARED
+ * precedence table in `gateway/realmode-composer/resolve-llm-credentials.ts`
+ * (OAuth env wins over the ANTHROPIC_API_KEY env, then ambient) — the same
+ * tier helpers the Managed resolver consumes, so the two can no longer drift.
+ * Cross-mode parity is pinned in `credential-precedence-c6.test.ts`.
  */
 
 import { describe, expect, test } from 'bun:test'
