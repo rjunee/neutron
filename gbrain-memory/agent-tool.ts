@@ -30,14 +30,15 @@
  *
  * Read-only; gates on `read:memory`. A host whose memory backend is
  * unavailable (e.g. the `gbrain` binary is missing) degrades to an empty
- * result rather than a broken tool (mirrors the admin Memory tab's
- * best-effort read). Results are plain JSON the registry serialises into the
- * agent's `tool_result`.
+ * result rather than a broken tool — that fail-soft is owned by the
+ * `MemoryStore` implementation (the backend adapter), not decided here, so
+ * this surface stays free of backend-specific error handling. Results are
+ * plain JSON the registry serialises into the agent's `tool_result`.
  */
 
 import type { JsonSchemaDocument } from '@neutronai/core-sdk/types.ts'
 import type { ToolRegistry } from '@neutronai/tools/registry.ts'
-import { isGbrainBinaryMissingError, type MemoryStore } from './memory-store.ts'
+import type { MemoryStore } from './memory-store.ts'
 
 export const MEMORY_SEARCH_TOOL = 'memory_search'
 
@@ -139,16 +140,11 @@ export function registerMemorySearchToolSurface(
         typeof a.limit === 'number' && Number.isFinite(a.limit)
           ? Math.min(MAX_LIMIT, Math.max(1, Math.trunc(a.limit)))
           : DEFAULT_LIMIT
-      let rows: Awaited<ReturnType<MemoryStore['query']>>
-      try {
-        rows = await store.query({ query, limit })
-      } catch (err) {
-        // A host whose memory backend is unavailable (e.g. missing `gbrain`
-        // binary) degrades to "no memory" rather than a broken tool — mirror
-        // the admin Memory tab's best-effort read.
-        if (isGbrainBinaryMissingError(err)) return { results: [] }
-        throw err
-      }
+      // Backend-neutral: this tool depends only on `MemoryStore.query`. The
+      // fail-soft "unavailable backend → empty recall" policy lives inside the
+      // store implementation (the GBrain adapter owns its own unavailability
+      // mode), so nothing here references a backend-specific error (I2).
+      const rows = await store.query({ query, limit })
       // Backends may rank CHUNKS (GBrain's `search` does), so one entry can
       // surface multiple rows. Rows arrive score-descending, so keeping the
       // first per id yields the best chunk per entry — the agent wants

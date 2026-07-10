@@ -1,7 +1,8 @@
 export const __MODULE__ = '@neutronai/gbrain-memory' as const
 
-export type { MemoryStore, McpClient } from './memory-store.ts'
+export type { MemoryStore } from './memory-store.ts'
 export { GBrainUnavailableError, isGbrainBinaryMissingError } from './memory-store.ts'
+export type { McpClient } from './mcp-client.ts'
 export {
   GBrainSyncHook,
   type GBrainSyncHookOptions,

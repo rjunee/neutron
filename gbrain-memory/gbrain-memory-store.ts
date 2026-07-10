@@ -17,7 +17,8 @@
  * best-effort and must never throw the whole route.
  */
 
-import type { McpClient, MemoryStore } from './memory-store.ts'
+import { isGbrainBinaryMissingError, type MemoryStore } from './memory-store.ts'
+import type { McpClient } from './mcp-client.ts'
 
 export class GBrainMemoryStore implements MemoryStore {
   private readonly mcp: McpClient
@@ -36,6 +37,27 @@ export class GBrainMemoryStore implements MemoryStore {
   }
 
   async query(input: {
+    query: string
+    limit?: number
+    filter?: Record<string, unknown>
+  }): Promise<
+    Array<{ id: string; content: string; metadata: Record<string, unknown>; score: number }>
+  > {
+    try {
+      return await this.queryInner(input)
+    } catch (err) {
+      // RA5 fail-soft: a host whose GBrain binary is missing degrades recall to
+      // "no memory" rather than a broken read. Owning this here (the GBrain
+      // adapter that KNOWS its own unavailability mode) keeps the neutral
+      // consumers — the `memory_search` tool + the admin Memory tab — free of
+      // any backend-specific error handling (invariant I2). Other errors still
+      // propagate so real faults aren't masked.
+      if (isGbrainBinaryMissingError(err)) return []
+      throw err
+    }
+  }
+
+  private async queryInner(input: {
     query: string
     limit?: number
     filter?: Record<string, unknown>

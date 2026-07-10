@@ -27,8 +27,8 @@ import {
 import {
   GBrainUnavailableError,
   isGbrainBinaryMissingError,
-  type McpClient,
 } from './memory-store.ts'
+import type { McpClient } from './mcp-client.ts'
 import {
   GBrainVersionNotice,
   type GBrainUpgradeMode,

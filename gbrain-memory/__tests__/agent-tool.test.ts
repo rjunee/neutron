@@ -14,9 +14,9 @@ import { ToolRegistry, type ToolCallContext } from '@neutronai/tools/registry.ts
 import { GBrainMemoryStore } from '../gbrain-memory-store.ts'
 import {
   GBrainUnavailableError,
-  type McpClient,
   type MemoryStore,
 } from '../memory-store.ts'
+import type { McpClient } from '../mcp-client.ts'
 import { MEMORY_SEARCH_TOOL, registerMemorySearchToolSurface } from '../agent-tool.ts'
 
 const ctx: ToolCallContext = {

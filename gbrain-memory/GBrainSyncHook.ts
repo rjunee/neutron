@@ -39,7 +39,8 @@ import type { Triple } from '@neutronai/runtime/auto-link.ts'
 // entity-format codec — refactor P8 deleted the hand mirror that lived here.
 import { DIR_TO_KIND } from '@neutronai/runtime/entity-format.ts'
 import type { SyncHook } from '@neutronai/runtime/entity-writer.ts'
-import { GBrainUnavailableError, type McpClient, type MemoryStore } from './memory-store.ts'
+import { GBrainUnavailableError, type MemoryStore } from './memory-store.ts'
+import type { McpClient } from './mcp-client.ts'
 
 export interface GBrainSyncHookOptions {
   /**

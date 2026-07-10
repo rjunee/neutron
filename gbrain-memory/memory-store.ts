@@ -1,23 +1,24 @@
 /**
- * @neutronai/gbrain-memory — `MemoryStore` + `McpClient` interface surface.
+ * @neutronai/gbrain-memory — `MemoryStore` backend-neutral CONTRACT surface.
  *
  * The per-instance memory substrate is **GBrain** (`github.com/garrytan/gbrain`):
  * a Postgres-native (PGLite for OSS / Postgres for Managed) personal knowledge
  * brain. Neutron talks to it over GBrain's MCP (`gbrain serve`) — `put_page`,
  * `add_link`, `get_links`, `remove_link`, `search`, `get_stats`.
  *
- * These two interfaces are the seams the rest of Neutron programs against:
- *   - `MemoryStore` — the read/write recall surface the admin "Memory" tab uses.
- *   - `McpClient` — the raw GBrain MCP transport the `GBrainSyncHook` needs to
- *     reach the typed-edge graph (`add_link` / `get_links` / `remove_link`),
- *     which `MemoryStore` deliberately does not expose.
+ * This module is the BACKEND-NEUTRAL contract the rest of Neutron programs
+ * against — the read/write recall surface the admin "Memory" tab + the
+ * `memory_search` agent tool use. It exposes only typed methods
+ * (`add`/`query`/`delete`/`stats`); it deliberately does NOT expose the raw
+ * op-name transport. That transport (`McpClient.call(name, args)`) lives in the
+ * sibling `mcp-client.ts` as a BACKEND INTERNAL so no product module can name a
+ * raw GBrain op through this permitted seam (RA5 / invariant I2 — enforced by
+ * the depcruise `memory-backend-swap-seam` rule). A future backend swap
+ * re-implements `MemoryStore` (+ the `mcp-client.ts` transport + the
+ * `gbrain-memory/` adapters) rather than churning every call site again.
  *
- * They are substrate-neutral on purpose: GBrain is the store today, but a
- * future swap re-implements these two interfaces rather than churning every
- * call site again.
- *
- * **Cross-instance safety.** The caller is responsible for instantiating an
- * `McpClient` already scoped to the instance — the per-instance systemd unit sets
+ * **Cross-instance safety.** The caller is responsible for instantiating the
+ * transport already scoped to the instance — the per-instance systemd unit sets
  * `GBRAIN_BRAIN_ID` / `GBRAIN_SOURCE` before launching `gbrain serve` (see
  * `docs/architecture/memory-adapter-gbrain-2026-06-06.md`). Nothing here
  * cross-checks instance identity; the contract assumes the client is the right
@@ -62,20 +63,6 @@ export interface MemoryStore {
 
   /** Per-store stats — sized for monitoring + budget enforcement. */
   stats(): Promise<{ count: number; size_bytes: number }>
-}
-
-/**
- * Minimal MCP-client surface: a single `call(name, args)` that returns the
- * GBrain tool's response payload. Production wires `GBrainStdioMcpClient`
- * (spawns `gbrain serve`); tests wire an in-process client backed by a real
- * PGLite brain.
- *
- * The return is `unknown` because each GBrain MCP tool returns a different
- * shape (`get_links` returns edge rows, `add_link` returns an ack). Callers
- * narrow at the call site.
- */
-export interface McpClient {
-  call(name: string, args: Record<string, unknown>): Promise<unknown>
 }
 
 /**

@@ -183,22 +183,29 @@ module.exports = {
       comment:
         'RA5 (invariant I2): the memory backend must stay swappable behind the ' +
         'MemoryStore seam. Outside gbrain-memory/ itself, only the backend-neutral ' +
-        'contract files may be imported: memory-store.ts (MemoryStore/McpClient ' +
-        'interfaces) and agent-tool.ts (the memory_search tool, written purely ' +
-        'against MemoryStore). Everything else in gbrain-memory/ (GBrainMemoryStore, ' +
-        'GBrainSyncHook, the stdio client, brain init/doctor, the index barrel) is ' +
-        'backend INTERNALS. Exempt `from`s: connect/ (the shared-project memory ' +
-        'mirror federates at the backend level, per the RA5 spec) and the ONE ' +
-        'designated composition swap point, gateway/realmode-composer/' +
+        'contract files may be imported: memory-store.ts (the typed MemoryStore ' +
+        'interface + backend-unavailable helpers) and agent-tool.ts (the ' +
+        'memory_search tool, written purely against MemoryStore). Everything else ' +
+        'in gbrain-memory/ (GBrainMemoryStore, GBrainSyncHook, the RAW op-name ' +
+        'transport mcp-client.ts, the stdio client, brain init/doctor, the index ' +
+        'barrel) is backend INTERNALS. Exempt `from`s: connect/ (the shared-project ' +
+        'memory mirror federates at the backend level, per the RA5 spec) and the ' +
+        'ONE designated composition swap point, gateway/realmode-composer/' +
         'build-gbrain-memory.ts (+ its gbrain-sync-state sink, which persists ' +
         'backend-specific sync telemetry for that same wiring) — so swapping the ' +
-        'backend touches only buildGBrainMemory + gbrain-memory/. NOTE on the ' +
-        'gbrain MCP op names (put_page/add_link/get_links): depcruise sees import ' +
-        'edges, not call sites, so it cannot ban the strings themselves — but every ' +
-        'real op call needs an McpClient transport, which only these internals ' +
-        'provide, so this import ban IS the op-name ban (comments that merely ' +
-        'mention the op names, e.g. scribe/write-to-gbrain.ts + GBrainSyncHook ' +
-        'prose, are naturally unaffected).',
+        'backend touches only buildGBrainMemory + gbrain-memory/. WHY THIS BANS ' +
+        'RAW OP CALLS (put_page/add_link/get_links) even though depcruise sees ' +
+        'import edges, not call sites: the ONLY surface that can name a raw op is ' +
+        'McpClient.call(name, args), which lives in the NON-permitted internal ' +
+        'mcp-client.ts. The permitted contract files expose only typed MemoryStore ' +
+        'methods (add/query/delete/stats) — no way to name a raw op. So a product ' +
+        'module cannot obtain or call an McpClient without importing a banned ' +
+        'internal (mcp-client.ts / the stdio client / an adapter), which this rule ' +
+        'rejects. Comments that merely mention the op names (scribe/write-to-gbrain' +
+        '.ts + GBrainSyncHook prose) are import-invisible and unaffected. Proven by ' +
+        'the adversarial test gbrain-memory/__tests__/memory-swap-seam.depcruise' +
+        '.test.ts (planted product-module raw-op call rejected; permitted import + ' +
+        'comment prose pass).',
       severity: 'error',
       from: {
         pathNot: [
