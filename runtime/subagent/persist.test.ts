@@ -325,6 +325,84 @@ describe('mutex-serialized writes survive a concurrent foreign transaction rollb
   })
 })
 
+describe('markCrashed claim is EXACTLY-ONCE across SEPARATE connections (multi-process boot reap)', () => {
+  // The real multi-process scenario: two gateway processes (here, two DISTINCT
+  // ProjectDb connections on the SAME WAL db file — the in-process mutex does NOT
+  // span them) both boot-reap the same prior-process `running` orphan. The claim
+  // authority is the guarded UPDATE's affected-row COUNT: exactly one connection
+  // sees a matching row (changes===1 → true) and the other matches zero rows
+  // (already crashed → changes===0 → false). The prior bug returned `true`
+  // unconditionally, so BOTH connections would have fired the report sink.
+
+  async function seedRunningOrphan(run_id: string): Promise<void> {
+    const reg = new SubagentRegistry(new SubagentRegistryStore(db))
+    await reg.create(dispatchInput({ run_id }))
+    await reg.update(run_id, { status: 'running' })
+  }
+
+  test('two connections CONCURRENTLY claiming one running orphan → exactly ONE wins', async () => {
+    await seedRunningOrphan('orphan')
+    // Two distinct connections on the same file — as two OS processes would open.
+    const connA = ProjectDb.open(db.path)
+    const connB = ProjectDb.open(db.path)
+    try {
+      const storeA = new SubagentRegistryStore(connA)
+      const storeB = new SubagentRegistryStore(connB)
+      // Both race to claim the SAME live row. The guarded UPDATE's affected-row
+      // count is the authority: exactly one commits the transition (changes=1 →
+      // true); the other's UPDATE re-evaluates against the committed state and
+      // matches ZERO rows (changes=0 → false). The prior bug returned `true`
+      // unconditionally, so BOTH would have "won" and double-reported.
+      const [wonA, wonB] = await Promise.all([
+        storeA.markCrashed('orphan', 'process_dead', 111),
+        storeB.markCrashed('orphan', 'process_dead', 222),
+      ])
+
+      expect([wonA, wonB].filter(Boolean)).toHaveLength(1) // EXACTLY one winner
+      // Row is crashed exactly once (the loser's UPDATE was a no-op).
+      const row = new SubagentRegistryStore(db).get('orphan')
+      expect(row?.status).toBe('crashed')
+    } finally {
+      connA.close()
+      connB.close()
+    }
+  })
+
+  test('two boot sweeps over separate connections fire the report sink EXACTLY ONCE total', async () => {
+    await seedRunningOrphan('orphan2')
+    // Two processes booting simultaneously: each opens its own connection, each
+    // loadLive()s the orphan as running, and both race to reap it.
+    const connA = ProjectDb.open(db.path)
+    const connB = ProjectDb.open(db.path)
+    try {
+      const fired: string[] = []
+      const report = (rec: SubagentRecord): void => {
+        fired.push(rec.run_id)
+      }
+      const [sweptA, sweptB] = await Promise.all([
+        sweepOrphanedDispatchesOnBoot({
+          store: new SubagentRegistryStore(connA),
+          report,
+          now: () => 1,
+        }),
+        sweepOrphanedDispatchesOnBoot({
+          store: new SubagentRegistryStore(connB),
+          report,
+          now: () => 2,
+        }),
+      ])
+
+      // Both loaded the orphan as live, but only ONE claimed + reported it.
+      expect(sweptA.length + sweptB.length).toBe(1)
+      expect(fired).toEqual(['orphan2']) // EXACTLY ONCE total across both processes
+      expect(new SubagentRegistryStore(db).get('orphan2')?.status).toBe('crashed')
+    } finally {
+      connA.close()
+      connB.close()
+    }
+  })
+})
+
 describe('(a) a dispatched agent row persists across a simulated process restart', () => {
   test('a running dispatch survives; a fresh registry over the same db still sees it live', async () => {
     // Process 1: dispatch + drive to running.

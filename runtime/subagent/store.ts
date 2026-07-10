@@ -166,37 +166,47 @@ export class SubagentRegistryStore implements SubagentPersistence {
 
   /**
    * Drive a row terminal-`crashed` in the store (boot sweep). Sets `ended_at`
-   * and the `failure_reason`, and — critically — guards on the row still being
-   * LIVE (`WHERE status IN (pending, running)`) so the transition is idempotent:
-   * a re-run over an already-crashed row is a no-op, which is how the sweep
-   * guarantees it fires the report sink EXACTLY ONCE per orphan across repeated
-   * boots. Returns true iff this call performed the transition.
+   * and the `failure_reason`, guarded on the row still being LIVE
+   * (`WHERE status IN (pending, running)`). Returns true IFF THIS call performed
+   * the transition — the sole authority is the guarded UPDATE's affected-row
+   * COUNT, not a prior read.
    *
-   * Runs the guard-read + UPDATE in ONE `db.transaction` so the claim is atomic
-   * AND mutex-serialized: overlapping sweeps can't both observe the row live, and
-   * the write is never absorbed into a foreign transaction. `changes()` reports
-   * whether the guarded UPDATE actually hit a row.
+   * This is the exactly-once claim, correct even ACROSS separate connections /
+   * processes (the real multi-process boot-reap scenario). A single guarded
+   * UPDATE re-evaluates its `WHERE` against the current committed state at write
+   * time, so of N racers exactly ONE sees a matching row (changes === 1) and the
+   * rest match zero (changes === 0) — the row is already `crashed`. A prior
+   * guard-READ would be wrong here: two connections could each read `running`
+   * (on their own snapshot) and then both believe they won; the affected-row
+   * count is the only signal that reflects who actually committed the change.
+   *
+   * Wrapped in `db.transaction` so the write is mutex-serialized (never absorbed
+   * into a foreign transaction — `store.ts` header). The UPDATE goes through the
+   * ASYNC, busy-retrying `tx.run` (NOT `runSync`): under cross-connection write
+   * contention its retry YIELDS the event loop, so the lock-holder's COMMIT can
+   * land and the loser's UPDATE then re-evaluates against the committed state
+   * (matching zero rows) instead of dead-locking on a synchronous busy-wait. The
+   * UPDATE is the FIRST statement in the transaction (no prior read) so it never
+   * hits `SQLITE_BUSY_SNAPSHOT` — a fresh write always sees the latest committed
+   * state. `changes()` — read on the SAME connection, inside the SAME transaction,
+   * with no intervening statement — reports the guarded UPDATE's affected-row
+   * count. Only the winner (`changes > 0`) returns true, so the boot sweep fires
+   * the report sink exactly once; every loser returns false and does NOT report.
    */
   async markCrashed(
     run_id: string,
     reason: 'process_dead' | 'stuck',
     ended_at: number,
   ): Promise<boolean> {
-    return this.db.transaction((tx) => {
-      const before = tx.get<{ status: SubagentStatus }, [string]>(
-        `SELECT status FROM code_subagent_registry WHERE run_id = ?`,
-        [run_id],
-      )
-      if (before === null || (before.status !== 'pending' && before.status !== 'running')) {
-        return false
-      }
-      tx.runSync(
+    return this.db.transaction(async (tx) => {
+      await tx.run(
         `UPDATE code_subagent_registry
             SET status = 'crashed', failure_reason = ?, ended_at = ?, last_event_at = ?
           WHERE run_id = ? AND status IN ${LIVE_STATUS_SQL}`,
         [reason, ended_at, ended_at, run_id],
       )
-      return true
+      const row = tx.get<{ affected: number }, []>(`SELECT changes() AS affected`)
+      return (row?.affected ?? 0) > 0
     })
   }
 }
