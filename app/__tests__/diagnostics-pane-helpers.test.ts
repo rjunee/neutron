@@ -14,6 +14,7 @@ import {
   arr,
   diagnosticsReducer,
   initialDiagnosticsState,
+  shouldShowFullScreenLoader,
   str,
   type DiagnosticsState,
 } from '../lib/diagnostics-pane-helpers';
@@ -76,6 +77,24 @@ describe('diagnosticsReducer', () => {
     const fresh = diagnosticsReducer(started, { type: 'fetch-success', report: report('new') });
     expect(fresh.data?.project_slug).toBe('new');
     expect(fresh.error).toBeNull();
+  });
+});
+
+describe('shouldShowFullScreenLoader (initial load only — refresh keeps stale data on screen)', () => {
+  it('shows the full-screen spinner on the INITIAL load (loading + no data)', () => {
+    expect(shouldShowFullScreenLoader(initialDiagnosticsState)).toBe(true);
+  });
+  it('does NOT show it during a REFRESH (loading but data already present)', () => {
+    const refreshing: DiagnosticsState = { data: report('demo'), loading: true, error: null };
+    expect(shouldShowFullScreenLoader(refreshing)).toBe(false);
+  });
+  it('does NOT show it once loaded (idle with data)', () => {
+    const loaded: DiagnosticsState = { data: report('demo'), loading: false, error: null };
+    expect(shouldShowFullScreenLoader(loaded)).toBe(false);
+  });
+  it('does NOT show it on a failed initial load (not loading, has error)', () => {
+    const failed: DiagnosticsState = { data: null, loading: false, error: 'boom' };
+    expect(shouldShowFullScreenLoader(failed)).toBe(false);
   });
 });
 

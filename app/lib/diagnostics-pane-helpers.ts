@@ -46,6 +46,15 @@ export type DiagnosticsAction =
 export const initialDiagnosticsState: DiagnosticsState = { data: null, loading: true, error: null };
 
 /**
+ * The full-screen spinner is for the INITIAL load only. Once data has loaded, a
+ * refresh keeps the stale report on screen (the reducer retains `data` on
+ * `fetch-start`) so the report + Refresh control don't vanish mid-refresh.
+ */
+export function shouldShowFullScreenLoader(state: DiagnosticsState): boolean {
+  return state.loading && state.data === null;
+}
+
+/**
  * Pure reducer for the pane's load/refresh lifecycle. Key invariant: a REFRESH
  * FAILURE keeps the previously-loaded `data` (the pane shows stale data + an
  * error banner rather than blanking), and a fetch start clears any prior error

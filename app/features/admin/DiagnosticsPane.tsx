@@ -16,6 +16,7 @@ import {
   arr,
   diagnosticsReducer,
   initialDiagnosticsState,
+  shouldShowFullScreenLoader,
   str,
 } from '../../lib/diagnostics-pane-helpers';
 import { formatError } from './format';
@@ -82,7 +83,9 @@ export function DiagnosticsPane({ client }: { client: AdminClient }) {
     void fetchOne();
   }, [fetchOne]);
 
-  if (loading) {
+  // Full-screen spinner only on the INITIAL load; a refresh keeps the stale
+  // report + Refresh control on screen (the reducer retains `data`).
+  if (shouldShowFullScreenLoader({ data, loading, error })) {
     return (
       <View style={styles.centered}>
         <ActivityIndicator color="#cfcfcf" />
@@ -104,11 +107,13 @@ export function DiagnosticsPane({ client }: { client: AdminClient }) {
       <Pressable
         accessibilityRole="button"
         accessibilityLabel="Refresh diagnostics"
+        accessibilityState={{ disabled: loading, busy: loading }}
         testID="admin-diagnostics-refresh"
+        disabled={loading}
         onPress={() => void fetchOne()}
-        style={({ pressed }) => [styles.refreshBtn, pressed && styles.pressed]}
+        style={({ pressed }) => [styles.refreshBtn, (pressed || loading) && styles.pressed]}
       >
-        <Text style={styles.refreshLabel}>Refresh</Text>
+        <Text style={styles.refreshLabel}>{loading ? 'Refreshing…' : 'Refresh'}</Text>
       </Pressable>
 
       {error !== null ? <Text style={styles.bannerError}>{error}</Text> : null}
