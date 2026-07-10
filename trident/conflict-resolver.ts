@@ -44,6 +44,7 @@ import type { AgentSpec, Substrate } from '@neutronai/runtime/substrate.ts'
 import type { SessionHandle } from '@neutronai/runtime/session-handle.ts'
 import { getBestModel } from '@neutronai/runtime/models.ts'
 import type { MergeConflictResolver } from './merge.ts'
+import { DEFAULT_TIMEOUT_MS } from './liveness.ts'
 
 export interface BuildForgeConflictResolverOptions {
   /**
@@ -61,8 +62,6 @@ export interface BuildForgeConflictResolverOptions {
   /** Timer-clear seam (tests). Defaults to `clearTimeout`. */
   clear_timer?: (handle: unknown) => void
 }
-
-const DEFAULT_TIMEOUT_MS = 8 * 60_000
 
 /**
  * The built-in tool surface the resolver's CC subprocess needs to actually

@@ -53,6 +53,7 @@ import type { AgentSpec, Substrate } from '@neutronai/runtime/substrate.ts'
 import type { SessionHandle } from '@neutronai/runtime/session-handle.ts'
 import type { TridentRun } from './store.ts'
 import { FABLE_MODEL, SONNET_MODEL, FAST_MODEL, getBestModel } from '@neutronai/runtime/models.ts'
+import { DEFAULT_SETTLE_TIMEOUT_MS } from './liveness.ts'
 
 export interface InnerLoopInput {
   run: TridentRun
@@ -132,10 +133,6 @@ export interface BuildWorkflowFirerOptions {
    *  — generous for a cold-spawn fire turn; NOT the build budget. */
   settle_timeout_ms?: number
 }
-
-/** 3 min — the launching turn just fires `Workflow` + replies; a cold REPL spawn
- *  can take ~100s, so the settle budget sits comfortably above that. */
-const DEFAULT_SETTLE_TIMEOUT_MS = 3 * 60_000
 
 /** The default abs path of the sibling inner-workflow script. */
 export const DEFAULT_INNER_WORKFLOW_PATH = new URL('./inner-workflow.mjs', import.meta.url).pathname
