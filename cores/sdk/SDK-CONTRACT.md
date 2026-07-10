@@ -13,7 +13,7 @@ Cross-refs:
 - `docs/engineering-plan.md § D.10` — third-party auth + secrets, capability gating per § D.10.4
 - `docs/engineering-plan.md § E` — locked decision: npm-shape Core authoring with `"neutron"` section in `package.json`
 - internal design notes — reconciliation guard (1% drift, fail loud)
-- `core-sdk/types.ts` — the parallel P0 contract surface (closed-enum capability list); see "Relationship to `core-sdk/`" below.
+- `core-sdk/types.ts` — a one-release path-shim that re-exports this package's types (X3 merged the former parallel P0 surface in); see "Relationship to `core-sdk/`" below.
 
 ---
 
@@ -389,10 +389,21 @@ The P3 install pipeline will allocate the on-disk file + register the capability
 - `mountCoreRoutes(app, options)` shape (the four surfaces)
 - `ReconciliationGuard` + `runReconciliation` shape
 - `CapabilityDeniedError`, `PlatformJwtError`, `ReconciliationError` constructor + `code` shape
+- **Capability model — OPEN string + consulted known-set (locked by X3).** The
+  manifest schema validates the OPEN `<verb>:<resource>` shape and does NOT
+  reject a well-formed capability outside the platform-known set — third-party
+  / sidecar Cores legitimately declare capabilities the platform doesn't
+  enumerate (`connect:google-ads`, `read:notes.db`) and those still validate +
+  install. `KNOWN_CAPABILITIES` (`cores/sdk/manifest.ts`) is the platform-known
+  subset that X1's install-time gate CONSULTS (via `isKnownCapability()`) to
+  decide native enforceability — it is consulted, never used to reject. There
+  is no closed-enum schema rejection of unknown capabilities. (Any future
+  marketplace *curation* of third-party capabilities is a separate human /
+  policy review layer, not schema-level validation — it does not narrow this
+  schema.)
 
 **Not yet locked (may change between SDK 0.x and P3):**
 
-- Closed-enum vs open-string capability list — current SDK accepts `<verb>:<resource>` strings; the P3 install pipeline will refuse unknowns. `core-sdk/types.ts:NeutronCapability` is the closed enum the Cores marketplace will reject manifests against.
 - Audit-log shape — § D.10.5 names the columns; the SDK doesn't expose a read API yet.
 - Per-Core scheduler integration (`fetchSince` cadence, retry-on-fail backoff) — P3 detail; the Core registers schedules at install time.
 - WebSocket / SSE event shape for `/ws/*` — placeholder in the route helper; P3 ships the spec.
