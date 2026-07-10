@@ -35,23 +35,11 @@
  */
 
 import type { Triple } from '@neutronai/runtime/auto-link.ts'
+// DIR_TO_KIND (the inverse of the writer's KIND_TO_DIR) comes from the shared
+// entity-format codec — refactor P8 deleted the hand mirror that lived here.
+import { DIR_TO_KIND } from '@neutronai/runtime/entity-format.ts'
 import type { SyncHook } from '@neutronai/runtime/entity-writer.ts'
 import { GBrainUnavailableError, type McpClient, type MemoryStore } from './memory-store.ts'
-
-/**
- * Map the on-disk `entities/<dir>/` subdirectory name back to the entity kind
- * that produced it. Mirrors `KIND_TO_DIR` in `runtime/entity-writer.ts` —
- * duplicated by design because the sync hook treats the writer output path as
- * ground truth (the writer is upstream, not a peer module).
- */
-const DIR_TO_KIND: Readonly<Record<string, string>> = Object.freeze({
-  people: 'person',
-  companies: 'company',
-  projects: 'project',
-  meetings: 'meeting',
-  concepts: 'concept',
-  originals: 'original',
-})
 
 export interface GBrainSyncHookOptions {
   /**
@@ -492,8 +480,4 @@ export {
   extractRows as _extractRows,
   isEdgeMatch as _isEdgeMatch,
   isMissingPageError as _isMissingPageError,
-  // G3 (mirror-parity guardrail): expose the dir→kind map so a golden-
-  // roundtrip test can pin it as the exact inverse of `KIND_TO_DIR` in
-  // `runtime/entity-writer.ts` / `scribe/write-to-gbrain.ts`.
-  DIR_TO_KIND as _DIR_TO_KIND,
 }

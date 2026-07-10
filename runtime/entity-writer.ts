@@ -51,7 +51,29 @@
 import { promises as fs } from 'node:fs'
 import { resolve, sep } from 'node:path'
 import { extractTypedLinks, type Triple } from './auto-link.ts'
+import {
+  ENTITY_KINDS,
+  EntityWriteError,
+  KIND_TO_DIR,
+  ensureTrailingNewline,
+  extractCompiledTruth,
+  extractTimeline,
+  mergeTimeline,
+  renderEntityPage,
+  type EntityKind,
+  type TimelineEntry,
+} from './entity-format.ts'
 import { SLUG_REGEX } from './entity-slug.ts'
+
+// The page codec (render + parse + KIND_TO_DIR + extractCompiledTruth) lives
+// in the `./entity-format.ts` leaf (refactor P8). Re-export the shared
+// types/values so this module's existing callers keep their import surface.
+export {
+  ENTITY_KINDS,
+  EntityWriteError,
+  type EntityKind,
+  type TimelineEntry,
+}
 
 // NOTE: the content-sync quarantine guard (the old `assertPersistable` /
 // privacy-quarantine chain) was REMOVED with the Connect content-sync mesh
@@ -61,41 +83,6 @@ import { SLUG_REGEX } from './entity-slug.ts'
 // `receivingInstanceSlug` provenance fields are RETAINED on EntityWriteInput as
 // author attribution (forward-compatible with connect-spec §4 multi-author);
 // they no longer gate persistence.
-
-export type EntityKind =
-  | 'person'
-  | 'company'
-  | 'project'
-  | 'meeting'
-  | 'concept'
-  | 'original'
-
-export const ENTITY_KINDS: ReadonlyArray<EntityKind> = Object.freeze([
-  'person',
-  'company',
-  'project',
-  'meeting',
-  'concept',
-  'original',
-])
-
-const KIND_TO_DIR: Readonly<Record<EntityKind, string>> = Object.freeze({
-  person: 'people',
-  company: 'companies',
-  project: 'projects',
-  meeting: 'meetings',
-  concept: 'concepts',
-  original: 'originals',
-})
-
-export interface TimelineEntry {
-  /** ISO-8601 timestamp. Caller is responsible for time-zone conventions. */
-  ts: string
-  /** Source pointer: file path or external URI. Single-line, <512 chars. */
-  source: string
-  /** One-line body. Newlines flattened to spaces by the writer. */
-  body: string
-}
 
 export interface EntityWriteBody {
   /** YAML-serialisable frontmatter map. Validated against per-kind schema. */
@@ -214,25 +201,6 @@ export interface WriteEntityDeps {
    * runner output.
    */
   logSyncFailure?: (err: unknown, path: string) => void
-}
-
-export class EntityWriteError extends Error {
-  constructor(
-    public readonly code:
-      | 'invalid_kind'
-      | 'invalid_slug'
-      | 'invalid_frontmatter'
-      | 'invalid_timeline_entry'
-      | 'invalid_owner_data_dir'
-      | 'path_escape'
-      | 'symlink_rejected'
-      | 'read_failed'
-      | 'write_failed',
-    message: string,
-  ) {
-    super(message)
-    this.name = 'EntityWriteError'
-  }
 }
 
 /**
@@ -533,228 +501,6 @@ function validateTimelineEntry(e: TimelineEntry): void {
   }
 }
 
-/**
- * Render the final on-disk body. The order is locked:
- *
- *   1. `---\n` frontmatter open
- *   2. sorted-key YAML frontmatter
- *   3. `---\n\n` frontmatter close + blank line
- *   4. compiled-truth (with trailing newline normalised)
- *   5. `\n---\n\n## Timeline\n\n` separator
- *   6. timeline rows newest-first
- *
- * Deterministic so the roundtrip test can byte-compare.
- */
-function renderEntityPage(input: {
-  frontmatter: Record<string, unknown>
-  compiledTruth: string
-  timeline: TimelineEntry[]
-}): string {
-  const fm = renderYamlFrontmatter(input.frontmatter)
-  const compiled = ensureTrailingNewline(input.compiledTruth.trimEnd())
-  const sortedTimeline = [...input.timeline].sort((a, b) =>
-    a.ts < b.ts ? 1 : a.ts > b.ts ? -1 : 0,
-  )
-  const timeline =
-    sortedTimeline.length === 0
-      ? ''
-      : sortedTimeline
-          .map((e) => {
-            const flat = e.body.replace(/\n+/g, ' ').trim()
-            return `- ${e.ts} | ${e.source} | ${flat}\n`
-          })
-          .join('')
-  return `---\n${fm}---\n\n${compiled}\n---\n\n## Timeline\n\n${timeline}`
-}
-
-/**
- * Tiny deterministic YAML emitter — covers strings, numbers, booleans,
- * null, arrays-of-scalars, and one level of object nesting. Quotes
- * strings only when ambiguity requires it (contains `:`, `#`, leading
- * `-`, or YAML keywords). Sorts top-level keys lexicographically so
- * roundtrip writes are byte-stable.
- *
- * Not a full YAML implementation. Throws on unsupported shapes so the
- * caller catches schema drift early.
- */
-function renderYamlFrontmatter(fm: Record<string, unknown>): string {
-  const keys = Object.keys(fm).sort()
-  let out = ''
-  for (const k of keys) {
-    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(k)) {
-      throw new EntityWriteError(
-        'invalid_frontmatter',
-        `frontmatter key "${k}" is not a simple identifier`,
-      )
-    }
-    const v = fm[k]
-    out += `${k}: ${renderYamlValue(v)}\n`
-  }
-  return out
-}
-
-function renderYamlValue(v: unknown): string {
-  if (v === null) return '~'
-  if (v === undefined) return '~'
-  if (typeof v === 'boolean') return v ? 'true' : 'false'
-  if (typeof v === 'number') {
-    if (!Number.isFinite(v)) {
-      throw new EntityWriteError(
-        'invalid_frontmatter',
-        `non-finite number in frontmatter: ${v}`,
-      )
-    }
-    return String(v)
-  }
-  if (typeof v === 'string') return renderYamlString(v)
-  if (Array.isArray(v)) {
-    if (v.length === 0) return '[]'
-    const items = v.map((x) => {
-      if (
-        x === null ||
-        typeof x === 'boolean' ||
-        typeof x === 'number' ||
-        typeof x === 'string'
-      ) {
-        return renderYamlValue(x)
-      }
-      throw new EntityWriteError(
-        'invalid_frontmatter',
-        `arrays in frontmatter must be scalar — got ${typeof x}`,
-      )
-    })
-    return `[${items.join(', ')}]`
-  }
-  throw new EntityWriteError(
-    'invalid_frontmatter',
-    `unsupported frontmatter value type: ${typeof v}`,
-  )
-}
-
-const YAML_KEYWORDS = new Set([
-  'true',
-  'false',
-  'null',
-  '~',
-  'yes',
-  'no',
-  'on',
-  'off',
-])
-
-function renderYamlString(s: string): string {
-  if (s.length === 0) return '""'
-  if (s.includes('\n') || s.includes('\r')) {
-    throw new EntityWriteError(
-      'invalid_frontmatter',
-      'multi-line strings in frontmatter are not supported',
-    )
-  }
-  const needsQuotes =
-    /[:#\[\]{},&*!|>'"%@`]/.test(s) ||
-    /^[-?]/.test(s) ||
-    /^\s|\s$/.test(s) ||
-    YAML_KEYWORDS.has(s.toLowerCase()) ||
-    /^[+-]?[0-9]/.test(s)
-  if (!needsQuotes) return s
-  return `"${s.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`
-}
-
-/**
- * Pull the compiled-truth block out of an on-disk page. The renderer
- * emits the canonical shape `---\n<frontmatter>---\n\n<compiled>\n---\n\n##
- * Timeline\n\n...`; this helper scans for the second `---\n` (closing the
- * frontmatter), then for the `\n---\n\n## Timeline` separator (opening
- * the timeline). Everything in between is the compiled truth.
- *
- * Liberal parsing — if the page is hand-edited and doesn't match the
- * canonical shape, the helper returns the entire body (so a downstream
- * call to `extractTypedLinks` may include timeline references; that's a
- * larger surface than ideal but it's preferable to silently dropping
- * the previous-link set used for the removed-links diff).
- *
- * Used by the sync-hook removedLinks computation (Codex r2 P1).
- */
-function extractCompiledTruth(body: string): string {
-  // Find the frontmatter close: first `---\n` at column 0 after position 0.
-  // The page starts with `---\n`, so we look for the NEXT line-anchored `---\n`.
-  if (!body.startsWith('---\n')) return body
-  const fmEnd = body.indexOf('\n---\n', 4)
-  if (fmEnd === -1) return body
-  let afterFm = fmEnd + '\n---\n'.length
-  // The renderer emits `---\n\n${compiled}` — skip the separator blank line
-  // so the returned slice is the compiled truth alone, without leading
-  // structural whitespace.
-  if (body[afterFm] === '\n') afterFm += 1
-  // Find the timeline separator. Canonical form is `\n---\n\n## Timeline`.
-  // Be liberal with the whitespace between the `---` and the `## Timeline`.
-  const timelineMatch = body.slice(afterFm).match(
-    /\n---\n+##\s+Timeline\s*\n/i,
-  )
-  const end =
-    timelineMatch !== null && timelineMatch.index !== undefined
-      ? afterFm + timelineMatch.index
-      : body.length
-  return body.slice(afterFm, end)
-}
-
-/**
- * Pull existing timeline rows out of an on-disk page. Recognises the
- * `## Timeline` section header (case-insensitive) and parses lines of
- * the form `- <ts> | <source> | <body>`. Lines that don't match are
- * skipped — the writer is deliberately liberal in what it accepts since
- * existing pages may have been hand-edited.
- */
-function extractTimeline(body: string): TimelineEntry[] {
-  const lines = body.split('\n')
-  let i = 0
-  for (; i < lines.length; i += 1) {
-    if (/^##\s+timeline\s*$/i.test(lines[i]!.trim())) {
-      i += 1
-      break
-    }
-  }
-  if (i >= lines.length) return []
-  const entries: TimelineEntry[] = []
-  for (; i < lines.length; i += 1) {
-    const raw = lines[i]!
-    const m = raw.match(/^-\s*([^|]+?)\s*\|\s*([^|]+?)\s*\|\s*(.*)$/)
-    if (m === null) continue
-    entries.push({ ts: m[1]!.trim(), source: m[2]!.trim(), body: m[3]!.trim() })
-  }
-  return entries
-}
-
-/**
- * Merge a new entry into an existing timeline. Dedup on `(ts, source,
- * body)`; sort newest-first by `ts` (lexicographic ISO-8601 sort).
- */
-function mergeTimeline(
-  existing: TimelineEntry[],
-  next: TimelineEntry,
-): TimelineEntry[] {
-  const flatNext: TimelineEntry = {
-    ts: next.ts,
-    source: next.source,
-    body: next.body.replace(/\n+/g, ' ').trim(),
-  }
-  const key = (e: TimelineEntry) => `${e.ts}\x1f${e.source}\x1f${e.body}`
-  const seen = new Set<string>()
-  const merged: TimelineEntry[] = []
-  for (const e of [flatNext, ...existing]) {
-    const k = key(e)
-    if (seen.has(k)) continue
-    seen.add(k)
-    merged.push(e)
-  }
-  merged.sort((a, b) => (a.ts < b.ts ? 1 : a.ts > b.ts ? -1 : 0))
-  return merged
-}
-
-function ensureTrailingNewline(s: string): string {
-  return s.endsWith('\n') ? s : `${s}\n`
-}
-
 function isUnder(root: string, child: string): boolean {
   const r = resolve(root)
   const c = resolve(child)
@@ -801,15 +547,9 @@ function errMsg(err: unknown): string {
 }
 
 export {
-  // Exported for unit tests only. Not part of the public surface.
+  // Exported for unit tests only. Not part of the public surface. The codec
+  // pieces themselves live in (and are re-exported from) `./entity-format.ts`.
   renderEntityPage as _renderEntityPage,
-  renderYamlFrontmatter as _renderYamlFrontmatter,
-  extractTimeline as _extractTimeline,
   extractCompiledTruth as _extractCompiledTruth,
-  mergeTimeline as _mergeTimeline,
   diffTriples as _diffTriples,
-  // G3 (mirror-parity guardrail): expose the kind→dir map so a golden-
-  // roundtrip test can pin it against the hand mirrors in
-  // scribe/write-to-gbrain.ts and the inverse in gbrain-memory/GBrainSyncHook.ts.
-  KIND_TO_DIR as _KIND_TO_DIR,
 }
