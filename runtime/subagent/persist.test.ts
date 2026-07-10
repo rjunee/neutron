@@ -588,6 +588,52 @@ describe('terminal-write convergence: a restart never re-reports an already-term
     expect(reg.byRunId('r')).toBeUndefined()
     expect(realStore.get('r')).toBeNull()
   })
+
+  test('a terminal write that EXHAUSTS its retries CONVERGES on a later call once the store recovers', async () => {
+    // The durability-heal boundary: if every retry of a terminal write fails, the
+    // record is terminal in memory but the durable row is stale-live. A LATER
+    // `updateTerminal` must NOT falsely report `durable:true` off the in-memory
+    // terminal status — it must re-attempt the durable write and actually converge
+    // once the store recovers, else a restart re-reports the run.
+    const realStore = new SubagentRegistryStore(db)
+    let failFinished = true // fail ALL `finished` writes until flipped
+    const flaky: SubagentPersistence = {
+      persist: async (rec) => {
+        if (rec.status === 'finished' && failFinished) throw new Error('store down')
+        await realStore.persist(rec)
+      },
+      remove: (id) => realStore.remove(id),
+    }
+    const reg = new SubagentRegistry(flaky)
+    await reg.create(dispatchInput({ run_id: 'r' }))
+    await reg.update('r', { status: 'running' })
+
+    // First terminal transition: every retry fails → durable:false, memory
+    // finished, durable row stale-`running`.
+    const first = await reg.updateTerminal('r', { status: 'finished', ended_at: 5 })
+    expect(first.durable).toBe(false)
+    expect(reg.byRunId('r')?.status).toBe('finished')
+    expect(realStore.get('r')?.status).toBe('running') // durable stale
+
+    // Store recovers → a later terminal call must CONVERGE (not falsely claim
+    // durable without writing).
+    failFinished = false
+    const second = await reg.updateTerminal('r', { status: 'finished', ended_at: 5 })
+    expect(second.durable).toBe(true)
+    expect(realStore.get('r')?.status).toBe('finished') // durable now terminal
+
+    // A restart sweep no longer re-reports it.
+    const fired: string[] = []
+    const swept = await sweepOrphanedDispatchesOnBoot({
+      store: new SubagentRegistryStore(db, 'boot-restart'),
+      report: (r) => {
+        fired.push(r.run_id)
+      },
+      now: () => 1,
+    })
+    expect(swept).toHaveLength(0)
+    expect(fired).toEqual([])
+  })
 })
 
 describe('SubagentRegistryStore — malformed-row isolation', () => {

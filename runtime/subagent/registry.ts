@@ -364,9 +364,13 @@ export class SubagentRegistry {
       const cur = this.byId.get(run_id)
       if (cur === undefined) return { record: undefined, durable: false }
       // Already terminal → that outcome WINS (a cancellation must never overwrite a
-      // concurrent completion, nor vice-versa). No clobber, no re-persist.
+      // concurrent completion, nor vice-versa). No clobber of the patch — but the
+      // record may be terminal-IN-MEMORY yet NOT durable (a prior terminal write
+      // exhausted its retries), so CONVERGE the EXISTING terminal record rather
+      // than falsely claiming durability. Idempotent: if it is already durable the
+      // converge is a no-op.
       if (cur.status === 'finished' || cur.status === 'crashed' || cur.status === 'cancelled') {
-        return { record: cur, durable: true }
+        return { record: cur, durable: await this.convergeDurable(run_id, cur, attempts) }
       }
       // Publish the terminal patch synchronously. NOT via `update` — a terminal
       // live record must stay terminal even if the durable write later fails
@@ -374,31 +378,47 @@ export class SubagentRegistry {
       const last_event_at = patch.last_event_at ?? Date.now()
       const next: SubagentRecord = { ...cur, ...patch, last_event_at }
       this.byId.set(run_id, next)
+      return { record: next, durable: await this.convergeDurable(run_id, next, attempts) }
+    })
+  }
 
-      // CONVERGE the durable write. Retry a TRANSIENT store failure (a brief I/O
-      // blip / a lock the async busy-retry didn't outlast) so memory + store agree
-      // and a restart's boot sweep skips the now-terminal row. NEVER roll memory
-      // back (it is terminal + authoritative); if every retry fails return
-      // `durable:false` (store stale, degraded process).
-      if (this.persistence === undefined) {
-        this.lastPersisted.set(run_id, next)
-        return { record: next, durable: true }
-      }
-      for (let i = 0; i < attempts; i++) {
-        try {
+  /**
+   * Best-effort CONVERGE the durable store to `rec` (already published in memory),
+   * with bounded retry — the durability half of `updateTerminal`, called INSIDE
+   * its serialized step (so a concurrent `delete` can't interleave). Retries a
+   * TRANSIENT store failure (a brief I/O blip / a lock the async busy-retry didn't
+   * outlast). Returns whether the record is now durable. Idempotent: if `rec` is
+   * already the last durably-persisted snapshot (identity) it is a no-op — which
+   * is why a terminal record that FAILED to persist (memory terminal but
+   * `lastPersisted` still the pre-terminal snapshot) is re-attempted on a later
+   * call once the store recovers, instead of the transition being lost. Never
+   * rolls memory back (a terminal record stays terminal even when the store is
+   * stale — round 14).
+   */
+  private async convergeDurable(
+    run_id: string,
+    rec: SubagentRecord,
+    attempts: number,
+  ): Promise<boolean> {
+    if (this.persistence === undefined) {
+      this.lastPersisted.set(run_id, rec)
+      return true
+    }
+    if (this.lastPersisted.get(run_id) === rec) return true // already durable — no-op
+    for (let i = 0; i < attempts; i++) {
+      try {
+        // eslint-disable-next-line no-await-in-loop
+        await this.persistence.persist(rec)
+        this.lastPersisted.set(run_id, rec)
+        return true
+      } catch {
+        if (i < attempts - 1) {
           // eslint-disable-next-line no-await-in-loop
-          await this.persistence.persist(next)
-          this.lastPersisted.set(run_id, next)
-          return { record: next, durable: true }
-        } catch {
-          if (i < attempts - 1) {
-            // eslint-disable-next-line no-await-in-loop
-            await new Promise((r) => setTimeout(r, 5 * (i + 1)))
-          }
+          await new Promise((r) => setTimeout(r, 5 * (i + 1)))
         }
       }
-      return { record: next, durable: false }
-    })
+    }
+    return false // store still stale (degraded); a later call retries
   }
 
   byRunId(run_id: string): SubagentRecord | undefined {
