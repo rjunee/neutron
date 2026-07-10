@@ -497,8 +497,13 @@ test('cross-instance safety — claim under OWNER not visible to a different-ins
   // pointed at a different instance slug + the same owner_home would
   // hit the sidecar-mismatch error path. The structural guarantee:
   // claims are persisted under the test instance slug only.
-  const allClaims = harness.resolver
-    ['handles' as keyof ResearchStoreResolver as keyof unknown] as unknown
+  // X4 refactor: ResearchStoreResolver now WRAPS the shared
+  // ProjectSidecarResolver, so the per-instance handle cache moved from
+  // `resolver['handles']` to `resolver['inner']['handles']`.
+  const inner = harness.resolver[
+    'inner' as keyof ResearchStoreResolver
+  ] as unknown as { handles?: unknown }
+  const allClaims = inner.handles
   // Soft assertion — the cross-instance info-hiding is exhaustively
   // tested at unit level in claim-store.test.ts; here we just assert
   // the production composer didn't accidentally leak a wider scope.
