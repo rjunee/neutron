@@ -460,16 +460,21 @@ export class NexusStore {
     }
     if (this.generation !== startGeneration) {
       // A `closeAll()` (or several) happened during init. This handle
-      // belongs to a torn-down generation — close it and refuse to
-      // cache it. The caller still gets a usable handle for THIS write;
-      // it just isn't retained, so a later op re-inits cleanly under
-      // the current generation.
+      // belongs to a torn-down generation — close it, refuse to cache
+      // it, and ABORT the operation cleanly. Returning the handle would
+      // hand the caller a closed connection (its next `BEGIN IMMEDIATE`
+      // would throw a raw driver error); throwing a typed error is the
+      // honest outcome for "you closed the store mid-operation" and
+      // leaves nothing retained (no leak, no cache).
       try {
         handle.db.close()
       } catch {
         /* ignore */
       }
-      return handle
+      throw new NexusStoreError(
+        'store_closed',
+        'store was closed during initialization; operation aborted',
+      )
     }
     this.handles.set(cleaned, handle)
     return handle

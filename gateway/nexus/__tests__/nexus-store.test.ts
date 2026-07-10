@@ -153,7 +153,7 @@ describe('NexusStore — schema init', () => {
     expect(events.length).toBe(2)
   })
 
-  it('closeAll() DURING an in-flight ensureInit caches no live handle (generation guard)', async () => {
+  it('closeAll() DURING an in-flight ensureInit aborts it + caches no live handle (generation guard)', async () => {
     // Peek at the private lifecycle maps — the invariant under test is
     // internal (no handle retained past closeAll, no duplicate init).
     const internals = h.store as unknown as {
@@ -162,10 +162,10 @@ describe('NexusStore — schema init', () => {
     }
     // Kick off init, tear down before it resolves, THEN await it. The
     // continuation must observe the bumped generation, close its own
-    // connection, and refuse to cache it.
+    // connection, refuse to cache it, and abort the op cleanly.
     const p = h.store.ensureInit(PROJECT_ID)
     h.store.closeAll()
-    await p
+    await expect(p).rejects.toThrow(NexusStoreError)
     expect(internals.handles.size).toBe(0)
     expect(internals.initPromises.size).toBe(0)
 
@@ -177,15 +177,32 @@ describe('NexusStore — schema init', () => {
     expect(events.map((e) => e.id)).toEqual([written.id])
   })
 
+  it('closeAll() DURING an in-flight appendEvent aborts the write on a closed handle (not a raw driver error)', async () => {
+    const internals = h.store as unknown as { handles: Map<string, unknown> }
+    // Operation-level boundary: the append awaits openHandle before it
+    // touches the db, so a closeAll() landing in that window must abort
+    // the write with a typed NexusStoreError — NOT run BEGIN IMMEDIATE
+    // on a closed connection (Codex).
+    const p = h.store.appendEvent(PROJECT_ID, input({ body: 'racing-write' }))
+    h.store.closeAll()
+    await expect(p).rejects.toThrow(NexusStoreError)
+    expect(internals.handles.size).toBe(0)
+    // The store recovers: a later append succeeds and is the only row.
+    const ok = await h.store.appendEvent(PROJECT_ID, input({ body: 'recovered' }))
+    const events = await h.store.readRecent(PROJECT_ID)
+    expect(events.map((e) => e.id)).toEqual([ok.id])
+  })
+
   it('closeAll() racing init lets a concurrent op start a clean new generation', async () => {
     const internals = h.store as unknown as { handles: Map<string, unknown> }
-    // A: in-flight init. closeAll() invalidates A. B: a concurrent op
+    // A: in-flight init (aborts under closeAll). B: a concurrent op
     // started AFTER closeAll must init fresh (not race A's dead handle)
     // and its handle is the one retained.
     const a = h.store.ensureInit(PROJECT_ID)
     h.store.closeAll()
     const b = h.store.appendEvent(PROJECT_ID, input({ body: 'gen-2' }))
-    await Promise.all([a, b])
+    await expect(a).rejects.toThrow(NexusStoreError)
+    await b
     // Only B's live handle survives; A's was closed + dropped.
     expect(internals.handles.size).toBe(1)
     const events = await h.store.readRecent(PROJECT_ID)
