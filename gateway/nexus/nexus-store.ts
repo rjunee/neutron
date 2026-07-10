@@ -316,7 +316,11 @@ export class NexusStore {
     project_id: string,
     input: AppendNexusEventInput,
   ): Promise<AgentNexusEvent> {
-    const handle = await this.openHandle(project_id)
+    // Validate + serialize BEFORE opening the handle: `openHandle`
+    // creates + migrates the `<project>/.nexus/` sidecar on first
+    // touch, so validating after it would let a stream of rejected
+    // payloads (distinct valid project_ids) spawn unbounded sidecars.
+    // assertInput + serializeRefs are pure, so this reorder is safe.
     this.assertInput(input)
     const refs_json = serializeRefs(input.refs)
     if (
@@ -329,6 +333,7 @@ export class NexusStore {
       )
     }
 
+    const handle = await this.openHandle(project_id)
     const row: AgentNexusEvent = {
       id: this.ulid(),
       actor_kind: input.actor_kind,

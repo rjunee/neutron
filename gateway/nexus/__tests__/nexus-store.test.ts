@@ -767,6 +767,23 @@ describe('NexusStore — taxonomy + caps enforcement', () => {
     expect(events.length).toBe(0)
   })
 
+  it('invalid input rejected BEFORE the sidecar is created (no unbounded init)', async () => {
+    // Validation must precede openHandle, else a stream of rejected
+    // payloads on distinct project_ids spawns unbounded .nexus/ dbs
+    // (Codex). Use a FRESH project id and never read it (a read would
+    // itself init the sidecar).
+    const fresh = 'never-initialized'
+    const freshSidecar = join(h.owner_home, 'Projects', fresh, '.nexus', 'nexus.db')
+    await expect(
+      h.store.appendEvent(fresh, null as unknown as AppendNexusEventInput),
+    ).rejects.toThrow(NexusStoreError)
+    await expect(
+      h.store.appendEvent(fresh, input({ body: '' })),
+    ).rejects.toThrow(NexusStoreError)
+    expect(existsSync(freshSidecar)).toBe(false)
+    expect(existsSync(join(h.owner_home, 'Projects', fresh))).toBe(false)
+  })
+
   it('body cap: exactly-cap accepted, cap+1 rejected (byte boundary)', async () => {
     const atCap = await h.store.appendEvent(
       PROJECT_ID,
