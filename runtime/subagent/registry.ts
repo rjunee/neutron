@@ -109,6 +109,16 @@ export class SubagentRegistry {
    * never returning a run whose persist ultimately rejected (`awaitCreate`).
    */
   private readonly pendingCreate = new Map<string, Promise<void>>()
+  /**
+   * The last snapshot of each record whose durable write SUCCEEDED — the store's
+   * committed truth as this process last observed it. A failed `update` rolls
+   * `byId` back to THIS (not to its own captured predecessor, which may itself be
+   * another in-flight update's UNPERSISTED optimistic value): with two
+   * overlapping failing updates, restoring the optimistic predecessor would leave
+   * memory on a value neither update ever committed. Populated on every
+   * successful create/update persist; cleared on delete.
+   */
+  private readonly lastPersisted = new Map<string, SubagentRecord>()
 
   constructor(private readonly persistence?: SubagentPersistence) {}
 
@@ -151,6 +161,8 @@ export class SubagentRegistry {
       this.pendingCreate.set(input.run_id, durable)
       try {
         await durable
+        // Record the committed snapshot — the roll-back target for later updates.
+        this.lastPersisted.set(input.run_id, rec)
       } catch (err) {
         this.byId.delete(input.run_id)
         throw err
@@ -202,15 +214,25 @@ export class SubagentRegistry {
     // because the read+publish share one synchronous tick — two racing updates
     // can never both build on the same stale base (the second reads the first's
     // published value). If the durable write then REJECTS, roll our slot back to
-    // `cur` so memory never diverges from the store on failure — but ONLY if no
-    // later update has since superseded ours (identity guard), never clobbering a
-    // newer committed write with our stale prior value.
+    // the last DURABLE snapshot (`lastPersisted`) so memory never diverges from
+    // the store on failure — but ONLY if no later update has since superseded
+    // ours (identity guard), never clobbering a newer committed write. Rolling
+    // back to the captured `cur` would be WRONG under overlapping failures: `cur`
+    // may be a prior in-flight update's own UNPERSISTED optimistic value, so two
+    // failing updates could strand memory on a state neither committed. The last
+    // PERSISTED snapshot is the only correct roll-back target.
     this.byId.set(run_id, next)
     if (this.persistence !== undefined) {
       try {
         await this.persistence.persist(next)
+        this.lastPersisted.set(run_id, next)
       } catch (err) {
-        if (this.byId.get(run_id) === next) this.byId.set(run_id, cur)
+        if (this.byId.get(run_id) === next) {
+          const durable = this.lastPersisted.get(run_id)
+          // `durable` is always present here (create persisted before any update
+          // could run); the guard is defensive — never leave a wrong value.
+          if (durable !== undefined) this.byId.set(run_id, durable)
+        }
         throw err
       }
     }
@@ -270,6 +292,7 @@ export class SubagentRegistry {
     // store and the in-memory map (still in sync) rather than only the store.
     if (this.persistence !== undefined) await this.persistence.remove(run_id)
     this.byId.delete(run_id)
+    this.lastPersisted.delete(run_id)
   }
 
   /** Snapshot — used for tests + observability. */

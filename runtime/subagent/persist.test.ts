@@ -218,6 +218,44 @@ describe('SubagentRegistryStore — migration + write-through', () => {
     // Prior value retained — the synchronous publish is rolled back on rejection.
     expect(registry.byRunId('run-flaky')?.status).toBe('pending')
   })
+
+  test('two OVERLAPPING failing updates roll back to the last PERSISTED state (not an optimistic predecessor)', async () => {
+    // The create persists cleanly ('pending'); every LATER persist rejects
+    // ASYNCHRONOUSLY (yields a microtask BEFORE throwing) so both overlapping
+    // updates publish to memory before either's catch runs — a real interleave.
+    // (A synchronous throw would run each update fully sequentially, no overlap.)
+    let createDone = false
+    const failAfterCreate: SubagentPersistence = {
+      persist: async (_rec) => {
+        if (createDone) {
+          await Promise.resolve()
+          throw new Error('db down')
+        }
+        createDone = true
+      },
+      remove: async () => {},
+    }
+    const registry = new SubagentRegistry(failAfterCreate)
+    await registry.create(dispatchInput({ run_id: 'r' })) // persisted at 'pending'
+
+    // Fire TWO overlapping updates without awaiting between them: A publishes
+    // 'running' synchronously, then B reads that optimistic 'running' and
+    // publishes 'finished'. BOTH durable writes reject. A's rollback is a no-op
+    // (B superseded it in byId); B must roll back to the last PERSISTED snapshot
+    // ('pending'), NOT to its captured predecessor ('running', which A never
+    // committed). Restoring the predecessor would strand memory on 'running'
+    // while the store holds 'pending'.
+    // allSettled attaches rejection handlers to BOTH synchronously (avoids an
+    // unhandled-rejection escaping while awaiting the first).
+    const [ra, rb] = await Promise.allSettled([
+      registry.update('r', { status: 'running' }),
+      registry.update('r', { status: 'finished' }),
+    ])
+    expect(ra.status).toBe('rejected')
+    expect(rb.status).toBe('rejected')
+
+    expect(registry.byRunId('r')?.status).toBe('pending') // == the persisted truth
+  })
 })
 
 describe('async-persist update boundary — a landing completion stays visible', () => {
