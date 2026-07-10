@@ -611,3 +611,33 @@ test('latest view migration (0069) body matches onboarding-metrics-view.sql modu
   }
   expect(extractView(migration)).toBe(extractView(canonical))
 })
+
+test('listRecent bounds the read at the DB (ORDER BY ts DESC LIMIT), newest-first', async () => {
+  // Increasing clock so each emit gets a strictly larger ts.
+  let clock = 1000
+  const telemetry = new OnboardingTelemetry({
+    db,
+    uuid: deterministicUuid(),
+    now: () => (clock += 1),
+  })
+  // Emit 5 events for one instance (+ one for a different instance to prove scoping).
+  const payload = { time_to_wow_ms: 1, total_dollars: 0, wow_actions_fired: [] as string[] }
+  for (let i = 0; i < 5; i++) {
+    await telemetry.emit({ project_slug: 'inst', user_id: 'u', event: 'onboarding.completed', payload })
+  }
+  await telemetry.emit({ project_slug: 'other', user_id: 'u', event: 'onboarding.completed', payload })
+
+  // Bounded: at most `limit` rows come back, even though 5 exist.
+  const recent = telemetry.listRecent('inst', 2)
+  expect(recent.length).toBe(2)
+  // Newest-first: the two largest ts values, descending.
+  expect(recent[0]!.ts).toBeGreaterThan(recent[1]!.ts)
+  // And they ARE the newest two of the five (ts 1004 + 1005 with the +1-per-call clock).
+  const allAsc = telemetry.list('inst').map((e) => e.ts)
+  const newestTwo = allAsc.slice(-2).reverse()
+  expect(recent.map((e) => e.ts)).toEqual(newestTwo)
+  // Scoped to the instance — the 'other' row never appears.
+  expect(recent.every((e) => e.project_slug === 'inst')).toBe(true)
+  // limit <= 0 short-circuits to [].
+  expect(telemetry.listRecent('inst', 0)).toEqual([])
+})

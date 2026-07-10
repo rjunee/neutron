@@ -47,6 +47,8 @@ const LANDING_DIR = join(HERE, '..', '..', 'landing')
 const EXPECTED_COMPOSITION_KEYS = [
   'agent_dispatch',
   'app_codex_credential_surface',
+  // O5 — read-only diagnostics surface (`GET /api/app/admin/diagnostics`).
+  'app_diagnostics_surface',
   'app_docs_surface',
   'app_project_credentials_surface',
   'app_projects_surface',

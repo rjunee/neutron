@@ -116,6 +116,140 @@ export interface MintMaxReauthTokenResult {
   paste_url: string;
 }
 
+/**
+ * O5 — read-only diagnostics report (`GET /api/app/admin/diagnostics`).
+ * Client-side mirror of `gateway/diagnostics/diagnostics-report.ts`
+ * `DiagnosticsReport` (the app package cannot import the gateway type — same
+ * local-mirror pattern as `MemorySummary`). Every section carries `available`
+ * + an optional `note`; in-process-only sections (credentials) are
+ * `available: false` when read off-process.
+ */
+export interface DiagnosticsSection {
+  available: boolean;
+  note?: string;
+}
+export interface DiagnosticsReport {
+  generated_at: number;
+  project_slug: string;
+  gbrain: DiagnosticsSection & {
+    status?: string;
+    latch_reason?: string | null;
+    latched_at?: string | null;
+    last_success_at?: string | null;
+    deferred_count?: number;
+    updated_at?: string;
+  };
+  credentials: DiagnosticsSection & {
+    has_usable?: boolean;
+    soonest_cooldown_until?: number | null;
+  };
+  repl_sessions: DiagnosticsSection & {
+    registry_path?: string;
+    sessions?: Array<{
+      key: string;
+      session_id?: string;
+      channel_name?: string;
+      has_session?: boolean;
+      pid?: number;
+      model?: string;
+      age_ms?: number | null;
+      respawn_count?: number;
+      capped_at?: number | null;
+    }>;
+  };
+  cron_jobs: DiagnosticsSection & {
+    jobs?: Array<{
+      job_name: string;
+      last_run_at?: number | null;
+      last_run_status?: string | null;
+      last_run_error?: string | null;
+    }>;
+  };
+  import_jobs: DiagnosticsSection & {
+    jobs?: Array<{
+      job_id: string;
+      source?: string;
+      status?: string;
+      error_code?: string | null;
+      error_message?: string | null;
+    }>;
+  };
+  recent_events: DiagnosticsSection & {
+    events?: Array<{
+      ts?: number;
+      level?: string;
+      module?: string;
+      event?: string;
+    }>;
+  };
+}
+
+/** Sections with NO iterated collection — validated for object + boolean `available`. */
+const SCALAR_SECTIONS = ['gbrain', 'credentials'] as const;
+
+function isObject(x: unknown): x is Record<string, unknown> {
+  return x !== null && typeof x === 'object';
+}
+
+/**
+ * Sections the pane iterates. `collection` is the array field; `keyField`, when
+ * set, is the element property the pane uses as a React key AND dereferences,
+ * so it must be a string — an element missing it (or that is null / a primitive)
+ * would crash rendering and is DROPPED. Events have no key field (rendered by
+ * index) so any non-null object element is kept.
+ */
+const COLLECTION_SECTIONS: ReadonlyArray<{
+  section: string;
+  collection: string;
+  keyField: string | null;
+}> = [
+  { section: 'repl_sessions', collection: 'sessions', keyField: 'key' },
+  { section: 'cron_jobs', collection: 'jobs', keyField: 'job_name' },
+  { section: 'import_jobs', collection: 'jobs', keyField: 'job_id' },
+  { section: 'recent_events', collection: 'events', keyField: null },
+];
+
+/**
+ * Runtime-validate + NORMALIZE a diagnostics payload into a `DiagnosticsReport`,
+ * or `null` when it is missing / partial / wrong-shaped. Checks the scalar
+ * header (`generated_at`, `project_slug`) and every required section's boolean
+ * `available` (reject on violation), and for each iterated collection: rejects a
+ * present-but-non-array value, then DROPS structurally-malformed elements (null,
+ * primitives, or missing the string key the pane renders) so the pane can never
+ * deref a bad element (`e.ts` on `null`, `s.key` on a string, …). Returns a
+ * normalized copy — the input is not mutated.
+ *
+ * This guards element STRUCTURE; per-field scalar TYPE safety (e.g. a nested
+ * `model: {}`) is guaranteed at render by `str()` in `diagnostics-pane-helpers`,
+ * which coerces every dynamic `<Text>` child to a safe string.
+ */
+export function validateDiagnosticsReport(raw: unknown): DiagnosticsReport | null {
+  if (!isObject(raw)) return null;
+  if (typeof raw.generated_at !== 'number') return null;
+  if (typeof raw.project_slug !== 'string') return null;
+
+  for (const key of SCALAR_SECTIONS) {
+    const section = raw[key];
+    if (!isObject(section) || typeof section.available !== 'boolean') return null;
+  }
+
+  const normalized: Record<string, unknown> = { ...raw };
+  for (const { section, collection, keyField } of COLLECTION_SECTIONS) {
+    const s = raw[section];
+    if (!isObject(s) || typeof s.available !== 'boolean') return null;
+    const copy: Record<string, unknown> = { ...s };
+    const coll = s[collection];
+    if (coll !== undefined) {
+      if (!Array.isArray(coll)) return null; // gross shape violation → reject whole
+      copy[collection] = coll.filter(
+        (el) => isObject(el) && (keyField === null || typeof el[keyField] === 'string'),
+      );
+    }
+    normalized[section] = copy;
+  }
+  return normalized as unknown as DiagnosticsReport;
+}
+
 export interface AdminClientOptions {
   base_url: string;
   token: string;
@@ -171,6 +305,32 @@ export class AdminClient {
   async getConnectors(): Promise<ConnectorsSummary> {
     const res = await this.req<ConnectorsResponse>('/api/app/admin/connectors');
     return { configured: res.configured, connectors: res.connectors };
+  }
+
+  /**
+   * O5 — read-only diagnostics. Composes existing per-instance state (gbrain
+   * latch, credential-pool health, REPL registry, cron last-fire, import jobs,
+   * recent events) so the owner can answer "why is memory / chat / import
+   * broken?" from the admin tab. Owner-gated; no writes.
+   */
+  async getDiagnostics(): Promise<DiagnosticsReport> {
+    const res = await this.req<{ ok?: boolean; diagnostics?: unknown }>(
+      '/api/app/admin/diagnostics',
+    );
+    // Validate the FULL success envelope — require `ok === true` AND a
+    // fully-shaped report. The pane dereferences `generated_at`, `project_slug`,
+    // every section's boolean `available`, and iterates each collection with
+    // `.map()`. A 200 `{ ok:false }` or a missing/partial/wrong-shaped
+    // `diagnostics` must map to a typed error, not resolve and crash the pane.
+    const report = res.ok === true ? validateDiagnosticsReport(res.diagnostics) : null;
+    if (report === null) {
+      throw new AdminClientError(
+        'malformed_response',
+        'diagnostics response was missing a valid `diagnostics` payload',
+        200,
+      );
+    }
+    return report;
   }
 
   /** P7.4 Phase 2 — list per-project backups for the Backup sub-tab. */

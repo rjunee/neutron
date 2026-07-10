@@ -49,6 +49,7 @@ import { CoresClient } from '../lib/cores-client';
 import { PersonalityPane } from '../features/admin/PersonalityPane';
 import { GatewayPane } from '../features/admin/GatewayPane';
 import { MemoryPane } from '../features/admin/MemoryPane';
+import { DiagnosticsPane } from '../features/admin/DiagnosticsPane';
 import { CoresPane } from '../features/admin/CoresPane';
 import { BackupPane } from '../features/admin/BackupPane';
 import { MaxAccountPane } from '../features/admin/MaxAccountPane';
@@ -57,6 +58,7 @@ type AdminPaneKey =
   | 'personality'
   | 'gateway'
   | 'memory'
+  | 'diagnostics'
   | 'cores'
   | 'backup'
   | 'maxAccount';
@@ -70,6 +72,7 @@ const PANES: ReadonlyArray<PaneSpec> = [
   { key: 'personality', label: 'Personality' },
   { key: 'gateway', label: 'Gateway' },
   { key: 'memory', label: 'Memory' },
+  { key: 'diagnostics', label: 'Diagnostics' },
   { key: 'cores', label: 'Cores' },
   { key: 'backup', label: 'Backup' },
   { key: 'maxAccount', label: 'Max account' },
@@ -170,6 +173,8 @@ export default function AdminScreen() {
           <GatewayPane client={client} />
         ) : active === 'memory' ? (
           <MemoryPane client={client} />
+        ) : active === 'diagnostics' ? (
+          <DiagnosticsPane client={client} />
         ) : active === 'backup' ? (
           <BackupPane client={client} />
         ) : active === 'maxAccount' ? (

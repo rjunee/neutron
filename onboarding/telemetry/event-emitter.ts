@@ -534,46 +534,66 @@ export class OnboardingTelemetry {
    * Used by the m2-telemetry-roundtrip test + observability endpoint.
    */
   list(project_slug: string): PersistedOnboardingEvent[] {
-    interface Row {
-      id: string
-      ts: number
-      level: OnboardingEventLevel
-      project_slug: string
-      user_id: string
-      attempt_id: string
-      module: OnboardingEventModule
-      event_name: OnboardingEventName
-      payload_json: string
-      duration_ms: number | null
-    }
-    const rows = this.db
-      .all<Row, [string]>(
-        `SELECT id, ts, level, project_slug, user_id, attempt_id, module, event_name,
-                payload_json, duration_ms
-           FROM gateway_events
-          WHERE project_slug = ?
-          ORDER BY ts ASC, id ASC`,
-        [project_slug],
-      )
-    return rows.map((r) => {
-      const out: PersistedOnboardingEvent = {
-        id: r.id,
-        ts: r.ts,
-        level: r.level,
-        project_slug: r.project_slug,
-        user_id: r.user_id,
-        attempt_id: r.attempt_id,
-        module: r.module,
-        event: r.event_name,
-        payload: parseJsonColumn(r.payload_json, { onCorrupt: 'throw' }) as Record<
-          string,
-          unknown
-        >,
-      }
-      if (r.duration_ms !== null) out.duration_ms = r.duration_ms
-      return out
-    })
+    const rows = this.db.all<GatewayEventRow, [string]>(
+      `SELECT id, ts, level, project_slug, user_id, attempt_id, module, event_name,
+              payload_json, duration_ms
+         FROM gateway_events
+        WHERE project_slug = ?
+        ORDER BY ts ASC, id ASC`,
+      [project_slug],
+    )
+    return rows.map((r) => rowToPersistedEvent(r))
   }
+
+  /**
+   * Read-only convenience: the most-recent `limit` events for an instance,
+   * NEWEST FIRST. Unlike `list()` (which reads the ENTIRE unbounded history and
+   * is fine for the roundtrip test), this pushes `ORDER BY … DESC LIMIT ?` into
+   * the DB so a long-lived instance's diagnostics hit reads + parses at most
+   * `limit` rows. `limit <= 0` returns `[]`.
+   */
+  listRecent(project_slug: string, limit: number): PersistedOnboardingEvent[] {
+    if (!Number.isFinite(limit) || limit <= 0) return []
+    const rows = this.db.all<GatewayEventRow, [string, number]>(
+      `SELECT id, ts, level, project_slug, user_id, attempt_id, module, event_name,
+              payload_json, duration_ms
+         FROM gateway_events
+        WHERE project_slug = ?
+        ORDER BY ts DESC, id DESC
+        LIMIT ?`,
+      [project_slug, Math.floor(limit)],
+    )
+    return rows.map((r) => rowToPersistedEvent(r))
+  }
+}
+
+interface GatewayEventRow {
+  id: string
+  ts: number
+  level: OnboardingEventLevel
+  project_slug: string
+  user_id: string
+  attempt_id: string
+  module: OnboardingEventModule
+  event_name: OnboardingEventName
+  payload_json: string
+  duration_ms: number | null
+}
+
+function rowToPersistedEvent(r: GatewayEventRow): PersistedOnboardingEvent {
+  const out: PersistedOnboardingEvent = {
+    id: r.id,
+    ts: r.ts,
+    level: r.level,
+    project_slug: r.project_slug,
+    user_id: r.user_id,
+    attempt_id: r.attempt_id,
+    module: r.module,
+    event: r.event_name,
+    payload: parseJsonColumn(r.payload_json, { onCorrupt: 'throw' }) as Record<string, unknown>,
+  }
+  if (r.duration_ms !== null) out.duration_ms = r.duration_ms
+  return out
 }
 
 /**

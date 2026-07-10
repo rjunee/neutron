@@ -79,6 +79,7 @@ const EXPECTED_LADDER: ReadonlyArray<[string, string, string | null, boolean]> =
   ['app-connect-auth', 'appConnectAuth', 'app_connect_auth_surface', true],
   ['app-focus-current', 'appFocusCurrent', 'app_focus_current_surface', true],
   ['app-focus', 'appFocus', 'app_focus_surface', true],
+  ['app-diagnostics', 'appDiagnostics', 'app_diagnostics_surface', true],
   ['app-admin', 'appAdmin', 'app_admin_surface', true],
   ['app-persona', 'appPersona', 'app_persona_surface', true],
   ['app-devices', 'appDevices', 'app_devices_surface', true],
@@ -179,6 +180,7 @@ const DISCLAIMING_ORDER = [
   'app-connect-auth',
   'app-focus-current',
   'app-focus',
+  'app-diagnostics',
   'app-admin',
   'app-persona',
   'app-devices',
@@ -267,6 +269,7 @@ function fullyWiredInput(calls: string[]): ComposeHttpHandlerInput {
     appConnectAuth: disclaim('app-connect-auth'),
     appFocusCurrent: disclaim('app-focus-current'),
     appFocus: disclaim('app-focus'),
+    appDiagnostics: disclaim('app-diagnostics'),
     appAdmin: disclaim('app-admin'),
     appPersona: disclaim('app-persona'),
     appDevices: disclaim('app-devices'),
@@ -442,6 +445,7 @@ function fullComposition(): RouteSlotComposition {
     app_connect_auth_surface: { handler: h() },
     app_focus_surface: { handler: h() },
     app_focus_current_surface: { handler: h() },
+    app_diagnostics_surface: { handler: h() },
     app_admin_surface: { handler: h() },
     app_persona_surface: { handler: h() },
     app_devices_surface: { handler: h() },
@@ -485,6 +489,7 @@ const GATE_FIELDS: readonly (keyof RouteSlotComposition)[] = [
   'app_connect_auth_surface',
   'app_focus_surface',
   'app_focus_current_surface',
+  'app_diagnostics_surface',
   'app_admin_surface',
   'app_persona_surface',
   'app_devices_surface',
@@ -510,7 +515,7 @@ const GATE_FIELDS: readonly (keyof RouteSlotComposition)[] = [
 ]
 
 describe('C4 — generated gate = pre-C4 literal gate + the documented divergence fix', () => {
-  test('gate membership is exactly the pre-C4 31-field list + the 4 divergence-fix fields', () => {
+  test('gate membership is exactly the pre-C4 31-field list + O5 app_diagnostics_surface + the 4 divergence-fix fields', () => {
     expect(new Set(CHAINED_SURFACE_COMPOSITION_KEYS)).toEqual(new Set(GATE_FIELDS))
   })
 
