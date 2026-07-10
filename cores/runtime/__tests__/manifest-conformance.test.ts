@@ -24,6 +24,7 @@ import { join } from 'node:path'
 import { describe, expect, test } from 'bun:test'
 import {
   CapabilitySchema,
+  KNOWN_CAPABILITIES,
   NeutronManifestSchema,
   isKnownCapability,
   isValidSemverRange,
@@ -144,20 +145,58 @@ describe('bundled Core manifest conformance (X3 — one schema)', () => {
     })
   })
 
-  test('platform-known set is consulted, not enforced — every bundled capability that IS known round-trips', () => {
-    // Sanity that the known-set helper agrees with the closed list for the
-    // capabilities the bundled Cores actually declare (X1 gate consults this).
-    const allDeclared = new Set<string>()
+  test('KNOWN_CAPABILITIES is the authoritative platform-known set — drift trips this test', () => {
+    // Pin the full set so removing/adding an entry to the single source
+    // (cores/sdk/manifest.ts) fails here, not silently. This is the list
+    // X1's install gate consults via isKnownCapability().
+    const expected: string[] = [
+      'read:gmail',
+      'write:gmail',
+      'read:calendar',
+      'write:calendar',
+      'read:tasks',
+      'write:tasks',
+      'read:docs',
+      'write:docs',
+      'read:project_data',
+      'write:project_data',
+      'read:memory',
+      'write:memory',
+      'read:project.db',
+      'write:project.db',
+      'network:external',
+      'network:github',
+      'network:browse',
+      'fs:project_data',
+      'fs:cache',
+      'host:gh',
+      'agent:dispatch_subagent',
+      'mcp:tool_register',
+    ]
+    // Exact-set equality (order-insensitive) — a drop OR an add fails here.
+    const known: string[] = [...KNOWN_CAPABILITIES]
+    expect(known.slice().sort()).toEqual(expected.slice().sort())
+    // Each known capability is positively recognized AND satisfies the open shape.
+    for (const cap of expected) {
+      expect(isKnownCapability(cap)).toBe(true)
+      expect(CapabilitySchema.safeParse(cap).success).toBe(true)
+    }
+    // Negative: well-formed-but-unknown and malformed both behave correctly.
+    expect(isKnownCapability('connect:google-ads')).toBe(false) // open, not known
+    expect(isKnownCapability('not a capability')).toBe(false) // malformed
+    expect(isKnownCapability('read:gmail_extra')).toBe(false) // near-miss, not a member
+  })
+
+  test('every bundled-declared capability is either platform-known or a well-formed open cap — never rejected', () => {
     for (const slug of slugs) {
       const parsed = NeutronManifestSchema.parse(readNeutronBlock(slug))
-      for (const cap of parsed.capabilities) allDeclared.add(cap)
-      for (const tool of parsed.tools) allDeclared.add(tool.capability_required)
-    }
-    // Whatever the bundled Cores declare, each is either platform-known or a
-    // well-formed open capability — never rejected.
-    for (const cap of allDeclared) {
-      expect(CapabilitySchema.safeParse(cap).success).toBe(true)
-      expect(typeof isKnownCapability(cap)).toBe('boolean')
+      const declared = new Set<string>([
+        ...parsed.capabilities,
+        ...parsed.tools.map((t) => t.capability_required),
+      ])
+      for (const cap of declared) {
+        expect(CapabilitySchema.safeParse(cap).success).toBe(true)
+      }
     }
   })
 })
