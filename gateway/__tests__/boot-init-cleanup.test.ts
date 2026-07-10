@@ -400,6 +400,32 @@ describe('O4 — boot manages the ambient system_events sink lifecycle', () => {
     expect(resolveSystemEventSink()).toBeNull()
   })
 
+  test('overlapping boots, OLDEST-first shutdown: A removes itself, B stays live (no stale-DB sink)', async () => {
+    const rootA = mkdtempSync(join(tmpdir(), 'neutron-o4-sink-oa-'))
+    const rootB = mkdtempSync(join(tmpdir(), 'neutron-o4-sink-ob-'))
+    cleanups.push(rootA, rootB)
+    registerSystemEventSink(null)
+
+    bootEnv(rootA)
+    const handleA = await boot({ port: 0, composer: goodComposer })
+    const sinkA = resolveSystemEventSink()
+
+    bootEnv(rootB)
+    const handleB = await boot({ port: 0, composer: goodComposer })
+    const sinkB = resolveSystemEventSink()
+
+    // Oldest-first: A shuts down + closes ITS db → the stack drops A but keeps
+    // B on top (B's DB is still open). The resolver must NOT surface A's now-
+    // stale sink.
+    await handleA.shutdown()
+    expect(resolveSystemEventSink()).toBe(sinkB)
+    expect(resolveSystemEventSink()).not.toBe(sinkA)
+
+    // Then B shuts down → the stack empties.
+    await handleB.shutdown()
+    expect(resolveSystemEventSink()).toBeNull()
+  })
+
   test('init-failure DRAINS realmode_cleanups (post-composition failure)', async () => {
     const root = mkdtempSync(join(tmpdir(), 'neutron-o4-sink-drain-'))
     cleanups.push(root)

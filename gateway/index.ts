@@ -6,8 +6,7 @@ import { shutdownAllPersistentRepls } from '@neutronai/runtime/adapters/claude-c
 import {
   ProjectDb,
   SystemEventsStore,
-  registerSystemEventSink,
-  resolveSystemEventSink,
+  pushSystemEventSink,
 } from '@neutronai/persistence/index.ts'
 import { MAX_UPLOAD_BYTES_DEFAULT } from './upload/import-upload-handler.ts'
 // C2 OSS-split (2026-06-10) — the Managed production composer
@@ -231,19 +230,12 @@ export async function boot(options: BootOptions = {}): Promise<BootHandle> {
   // silent fail-soft / degrade site reaches this via the ambient registry
   // (persistence/system-events.ts) and emits a VISIBILITY-ONLY row; when this
   // registration hasn't run (unit tests, sidecar tools) each emit is a no-op.
-  // Save/restore discipline: capture whatever sink was registered before us so
-  // teardown RESTORES it (rather than nulling the registry). This keeps a
-  // still-live older boot's sink working when boots overlap and shut down
-  // newest-first (LIFO) — B's teardown restores A instead of orphaning it.
-  const priorSystemEventSink = resolveSystemEventSink()
+  // Push onto the ambient sink STACK and keep the identity-scoped deregister.
+  // Teardown removes exactly THIS sink (from any stack position), so overlapping
+  // boots tear down in any order without orphaning a live older boot or
+  // resurrecting a closed-DB sink — the stack top is always a live owner.
   const systemEventSink = new SystemEventsStore({ db })
-  registerSystemEventSink(systemEventSink)
-  // Ownership-guarded restore: only act when the ambient sink is still the one
-  // we registered, so a post-close degrade emit can't target this closed DB and
-  // a NEWER boot's sink is never clobbered (its own teardown owns that).
-  const clearOwnedSystemEventSink = (): void => {
-    if (resolveSystemEventSink() === systemEventSink) registerSystemEventSink(priorSystemEventSink)
-  }
+  const clearOwnedSystemEventSink = pushSystemEventSink(systemEventSink)
 
   const project_slug = resolveOwnerSlugFromConfig(config)
   const bootedAt = Date.now()
@@ -290,7 +282,7 @@ export async function boot(options: BootOptions = {}): Promise<BootHandle> {
     // (composer threw before assignment). Each is awaited; a throwing one is
     // logged and does not stop the rest (drainRealmodeCleanups always resolves).
     await drainRealmodeCleanups(realmode_cleanups)
-    // Restore the ambient sink (ownership-guarded) BEFORE closing the DB it holds.
+    // Deregister THIS boot's sink from the stack BEFORE closing the DB it holds.
     clearOwnedSystemEventSink()
     db.close()
   }
@@ -545,10 +537,10 @@ export async function boot(options: BootOptions = {}): Promise<BootHandle> {
     // in-flight queries on the auxiliary connections finish cleanly.
     // §F1 — drain (await) every cleanup, async ones included, BEFORE db.close().
     await drainRealmodeCleanups(realmode_cleanups)
-    // O4 — clear the ambient system_events sink BEFORE db.close() so a
-    // post-shutdown degrade emit can't reference the closed DB. Ownership-
-    // guarded so a sibling boot handle's sink is never clobbered. (Even if one
-    // raced in, emitSystemEventSafe swallows the write error — belt-and-braces.)
+    // O4 — deregister THIS boot's system_events sink from the stack BEFORE
+    // db.close() so a post-shutdown degrade emit can't reference the closed DB.
+    // Identity-scoped, so a concurrent boot's sink is never removed. (Even if an
+    // emit raced in, emitSystemEventSafe swallows the write error — belt-and-braces.)
     clearOwnedSystemEventSink()
     db.close()
   }

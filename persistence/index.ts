@@ -54,6 +54,7 @@ export {
   emitSystemEvent,
   emitSystemEventSafe,
   registerSystemEventSink,
+  pushSystemEventSink,
   resolveSystemEventSink,
   type SystemEventName,
   type SystemEventLevel,

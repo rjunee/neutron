@@ -258,27 +258,55 @@ export function emitSystemEventSafe(
 
 // ── Ambient sink registry ──────────────────────────────────────────────────
 //
-// Degrade sites live across every band and mostly lack a DI seam. The gateway
-// registers a single process-wide sink at boot; sites resolve it lazily. When
-// unset, the resolver returns null and every emit is a no-op.
+// Degrade sites live across every band and mostly lack a DI seam, so they reach
+// the sink through this process-wide registry. It is a STACK of live sinks:
+// `resolveSystemEventSink()` returns the TOP (most-recently registered still-
+// live) sink, or null when empty.
+//
+// The stack — rather than a single slot — makes overlapping boots safe to tear
+// down in ANY order. Each boot pushes its sink via `pushSystemEventSink` and
+// calls the returned deregister on shutdown, which removes THAT sink by
+// identity from wherever it sits. So neither a still-live older boot is
+// orphaned (newest-first shutdown) nor a closed-DB sink resurrected (oldest-
+// first shutdown): the top of the stack is always a live owner.
 
-let ambientSink: SystemEventSink | null = null
+const sinkStack: SystemEventSink[] = []
 
 /**
- * Register the process-wide {@link SystemEventSink}. The gateway calls this
- * ONCE at boot (gateway/index.ts, right after migrations apply). Idempotent —
- * last registration wins. Passing null clears it (used by tests + shutdown).
+ * Push a sink onto the ambient stack and return an idempotent deregister that
+ * removes THIS sink (by identity, from any position). The gateway pushes once
+ * at boot (right after migrations apply) and deregisters on shutdown / init
+ * failure. Ownership is by the returned closure, so overlapping boots tear down
+ * in any order without clobbering each other.
  */
-export function registerSystemEventSink(sink: SystemEventSink | null): void {
-  ambientSink = sink
+export function pushSystemEventSink(sink: SystemEventSink): () => void {
+  sinkStack.push(sink)
+  let removed = false
+  return (): void => {
+    if (removed) return
+    removed = true
+    const i = sinkStack.lastIndexOf(sink)
+    if (i !== -1) sinkStack.splice(i, 1)
+  }
 }
 
 /**
- * Resolve the process-wide sink, or null when none is registered. Degrade
- * sites call `emitSystemEventSafe(resolveSystemEventSink(), { … })`.
+ * Simple last-wins setter: REPLACE the entire stack with `sink` (or clear it
+ * when null). Kept for unit tests (register a fake, then `null` in afterEach)
+ * and non-boot callers that want single-slot semantics. Boot uses
+ * {@link pushSystemEventSink} instead so its lifecycle is identity-scoped.
+ */
+export function registerSystemEventSink(sink: SystemEventSink | null): void {
+  sinkStack.length = 0
+  if (sink !== null) sinkStack.push(sink)
+}
+
+/**
+ * Resolve the top live sink, or null when the stack is empty. Degrade sites
+ * call `emitSystemEventSafe(resolveSystemEventSink(), { … })`.
  */
 export function resolveSystemEventSink(): SystemEventSink | null {
-  return ambientSink
+  return sinkStack.length > 0 ? (sinkStack[sinkStack.length - 1] ?? null) : null
 }
 
 /**
@@ -290,5 +318,5 @@ export function emitSystemEvent(
   input: SystemEventInput,
   onError?: (err: unknown) => void,
 ): Promise<void> {
-  return emitSystemEventSafe(ambientSink, input, onError)
+  return emitSystemEventSafe(resolveSystemEventSink(), input, onError)
 }
