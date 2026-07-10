@@ -34,6 +34,7 @@
  */
 
 import type { OnboardingPhase } from './phase.ts'
+import { ALL_PHASES } from './phase.ts'
 import type { PhasePromptSpec } from './phase-prompts.ts'
 import { getOptionalKeyOffer } from '../optional-keys.ts'
 // Static fallback table for routing fields. Imported directly from its
@@ -174,102 +175,12 @@ export interface PhaseIntent {
   max_body_chars: number
 }
 
-/**
- * Per-phase intent table. Phases driven externally (identity_oauth,
- * import_running, persona_synthesizing, completed, failed)
- * map to null and are never LLM-generated — those advance via direct
- * state writes from other modules.
- */
-export const PHASE_INTENTS: Readonly<Record<string, PhaseIntent | null>> = {
-  // P2 v2 § 3.1 — signup captures user_first_name with a single
-  // free-text greeting.
-  signup: {
-    goal: "Greet the user warmly and capture their first name in one short free-text question.",
-    shape: 'free-text',
-    allowed_option_values: [],
-    max_body_chars: 200,
-  },
-  // P2 v2 § 3.4 — ai_substrate_offered branches the flow. Pick-only +
-  // freeform allowed so "just ChatGPT" shapes still route.
-  ai_substrate_offered: {
-    goal: 'Find out whether the user has prior ChatGPT or Claude conversations we can import.',
-    shape: 'pick-or-text',
-    allowed_option_values: ['chatgpt', 'claude', 'neither'],
-    max_body_chars: 240,
-  },
-  // P2 v2 § 3.5 — import_upload_pending. Body is the verbatim download
-  // instruction block; LLM may add a single warmth sentence and pick the
-  // correct block (ChatGPT vs Claude).
-  import_upload_pending: {
-    goal: 'Explain how to download the export and wait for the upload, keeping the step-list verbatim.',
-    shape: 'pick-or-text',
-    allowed_option_values: ['skip'],
-    max_body_chars: 1200,
-  },
-  // P2 v2 § 3.7 — import_analysis_presented. The wow moment — present
-  // analysis bullets and ask "anything I missed?".
-  import_analysis_presented: {
-    goal: 'Present the import analysis (projects, themes, interests) as bullets and ask what was missed.',
-    shape: 'free-text',
-    allowed_option_values: [],
-    max_body_chars: 1200,
-  },
-  // P2 v2 § 3.8 — work_interview_gap_fill. LLM picks the next-most-
-  // important missing required field and asks one conversational
-  // question per turn.
-  work_interview_gap_fill: {
-    goal: 'Ask one short conversational question that targets the highest-priority missing required field.',
-    shape: 'free-text',
-    allowed_option_values: [],
-    max_body_chars: 200,
-  },
-  // P2 v2 § 3.9 — personality_offered. LLM generates user-tuned
-  // personality suggestions; user picks, mixes, or describes their own.
-  personality_offered: {
-    goal: 'Ask the user what kind of personality the agent should have and offer three flavor suggestions tuned to their data.',
-    shape: 'free-text',
-    allowed_option_values: [],
-    max_body_chars: 320,
-  },
-  // P2 v2 § 3.10 — agent_name_chosen. LLM generates 3-5 names that
-  // echo personality + work themes.
-  //
-  // 2026-05-27: bumped max_body_chars from 280 → 480 because the bullet
-  // list of 5 names × ~35-char taglines + intro + "or type your own"
-  // line crosses ~300 chars routinely. The 280 cap silently failed the
-  // resolver's `parseLlmSpec` length check and forced the static
-  // fallback even when the model had produced a perfectly valid body.
-  agent_name_chosen: {
-    goal: 'Suggest 3-5 short, pronounceable agent names that echo the user personality and work themes. Your body MUST list each suggestion as a bullet line in the form `- <Name> — <one-line tagline>`.',
-    shape: 'free-text',
-    allowed_option_values: [],
-    max_body_chars: 480,
-  },
-  persona_reviewed: {
-    // P2 v2 § 3.14: post-persona transit — the final onboarding checkpoint.
-    // (K11e: the old `max_oauth_offered`/`wow_fired` walk steps after this were
-    // deleted; `persona_reviewed` now advances straight to `completed`. Any
-    // Max-OAuth credential attach happens via the post-completion gate page, not
-    // an in-conversation walk step — keep this goal free of the removed phases.)
-    goal: 'Acknowledge the synthesized persona and confirm the user is ready to finish — this is the final onboarding checkpoint before completion.',
-    shape: 'free-text',
-    allowed_option_values: [],
-    max_body_chars: 240,
-  },
-  // Phases driven externally — engine never asks the resolver for these.
-  identity_oauth: null,
-  instance_provisioned: null,
-  import_running: null,
-  persona_synthesizing: null,
-  completed: null,
-  failed: null,
-  // Special-cased phases — the engine builds these via dedicated
-  // builders (slug suggestion) and the resolver is bypassed entirely.
-  // Mapped to null so a stray call falls through cleanly to the
-  // static spec.
-  slug_chosen: null,
-  projects_proposed: null,
-}
+// PHASE_INTENTS + PHASE_KNOWLEDGE are DERIVED VIEWS over the single-source
+// `PHASE_DESCRIPTORS` table (D9d collapse, 2026-07). Both authored data sets
+// now live together in `PHASE_DESCRIPTORS[phase].{intent,knowledge}`; the two
+// exports are projected from there (declared just after the descriptor table
+// below) so every existing consumer + test keeps its byte-identical value.
+// Search for `PHASE_DESCRIPTORS` below for the authored intents.
 
 // ---------------------------------------------------------------------------
 // PHASE_KNOWLEDGE — P2-v3 S2 (2026-05-18)
@@ -1040,43 +951,209 @@ const PACK_PERSONA_REVIEWED: PhaseKnowledgePack = {
 }
 
 /**
- * Per-phase knowledge bundle the LLM router consults to (a) detect on-
- * topic vs tangential replies and (b) compose in-context answers. Null
- * for auto-skip / transit / terminal phases — the router is never
- * called on those (see design § 3.2). S2 hand-authors packs for 4
- * high-leverage user-visible phases; S3 covers the remaining 9.
+ * Single-source per-phase descriptor (D9d — 2026-07, the interview-engine
+ * table collapse). Each `OnboardingPhase` maps to EXACTLY ONE descriptor
+ * carrying both the outgoing prompt `intent` and the inbound-router
+ * `knowledge` pack. This replaces the two parallel per-phase lookup tables
+ * that used to live here (`PHASE_INTENTS` above + `PHASE_KNOWLEDGE` here);
+ * `PHASE_INTENTS` and `PHASE_KNOWLEDGE` are now DERIVED VIEWS projected off
+ * this table, so adding a phase touches ONE place and the compiler enforces
+ * completeness.
  *
- * Maintaining this as a parallel const (rather than embedding
- * `knowledge` in `PhaseIntent`) avoids dragging the knowledge bundle
- * through the OUTGOING prompt-spec resolver's token budget on every
- * emit.
+ * Exhaustiveness check: the `Readonly<Record<OnboardingPhase, PhaseDescriptor>>`
+ * annotation is a COMPILE-TIME barrier — a new `OnboardingPhase` fails to
+ * compile until it gets a descriptor entry here (and object-literal semantics
+ * forbid a duplicate key, so it is exactly one). A runtime `ALL_PHASES` guard
+ * below fails loudly at module load if a cast ever bypasses the type.
+ *
+ * INVARIANT (verbatim, was: "Maintaining this as a parallel const rather than
+ * embedding `knowledge` in `PhaseIntent`"): `intent` and `knowledge` stay
+ * SEPARATE FIELDS of the descriptor. The OUTGOING prompt-spec resolver reads
+ * ONLY `descriptor.intent` (`buildSystemPrompt(intent)`), so the knowledge
+ * bundle is never dragged through the resolver's token budget on every emit.
+ * Do NOT fold `knowledge` into `PhaseIntent`.
+ *
+ * Phases driven externally (identity_oauth, instance_provisioned,
+ * import_running, persona_synthesizing, completed, failed) map both fields to
+ * null and are never LLM-generated — they advance via direct state writes from
+ * other modules. The specially-cased phases (slug_chosen, projects_proposed)
+ * carry a null `intent` (the engine builds those specs via dedicated builders
+ * and bypasses the resolver) but a non-null `knowledge` pack (the inbound
+ * router still fires on them).
  */
-export const PHASE_KNOWLEDGE: Readonly<Record<OnboardingPhase, PhaseKnowledgePack | null>> = {
-  // S2 — hand-authored.
-  signup: PACK_SIGNUP,
-  ai_substrate_offered: PACK_AI_SUBSTRATE_OFFERED,
-  import_upload_pending: PACK_IMPORT_UPLOAD_PENDING,
-  personality_offered: PACK_PERSONALITY_OFFERED,
-
-  // S3 — hand-authored (2026-05-18). Covers the remaining user-input-bearing
-  // phases per the brief § 4. The externally-driven phases (identity_oauth,
-  // instance_provisioned, import_running, persona_synthesizing, completed,
-  // failed) stay forever-null because they don't accept routable text.
-  import_analysis_presented: PACK_IMPORT_ANALYSIS_PRESENTED,
-  work_interview_gap_fill: PACK_WORK_INTERVIEW_GAP_FILL,
-  agent_name_chosen: PACK_AGENT_NAME_CHOSEN,
-  slug_chosen: PACK_SLUG_CHOSEN,
-  projects_proposed: PACK_PROJECTS_PROPOSED,
-  persona_reviewed: PACK_PERSONA_REVIEWED,
-
-  // Forever-null — transit / terminal / external-driven phases.
-  identity_oauth: null,
-  instance_provisioned: null,
-  import_running: null,
-  persona_synthesizing: null,
-  completed: null,
-  failed: null,
+export interface PhaseDescriptor {
+  /**
+   * Outgoing prompt intent — what copy the LLM generates for this phase.
+   * Null for externally-driven / specially-cased phases the resolver is
+   * never asked to rephrase. See `PhaseIntent`.
+   */
+  readonly intent: PhaseIntent | null
+  /**
+   * Inbound-router knowledge pack — `why_we_ask` + `faqs` + few-shot
+   * anchors the router consults to classify tangents vs advances. Null for
+   * auto-skip / transit / terminal phases the router never fires on. See
+   * `PhaseKnowledgePack`.
+   */
+  readonly knowledge: PhaseKnowledgePack | null
 }
+
+export const PHASE_DESCRIPTORS: Readonly<Record<OnboardingPhase, PhaseDescriptor>> = {
+  // P2 v2 § 3.1 — signup captures user_first_name with a single free-text
+  // greeting.
+  signup: {
+    intent: {
+      goal: "Greet the user warmly and capture their first name in one short free-text question.",
+      shape: 'free-text',
+      allowed_option_values: [],
+      max_body_chars: 200,
+    },
+    knowledge: PACK_SIGNUP,
+  },
+  // P2 v2 § 3.4 — ai_substrate_offered branches the flow. Pick-only +
+  // freeform allowed so "just ChatGPT" shapes still route.
+  ai_substrate_offered: {
+    intent: {
+      goal: 'Find out whether the user has prior ChatGPT or Claude conversations we can import.',
+      shape: 'pick-or-text',
+      allowed_option_values: ['chatgpt', 'claude', 'neither'],
+      max_body_chars: 240,
+    },
+    knowledge: PACK_AI_SUBSTRATE_OFFERED,
+  },
+  // P2 v2 § 3.5 — import_upload_pending. Body is the verbatim download
+  // instruction block; LLM may add a single warmth sentence and pick the
+  // correct block (ChatGPT vs Claude).
+  import_upload_pending: {
+    intent: {
+      goal: 'Explain how to download the export and wait for the upload, keeping the step-list verbatim.',
+      shape: 'pick-or-text',
+      allowed_option_values: ['skip'],
+      max_body_chars: 1200,
+    },
+    knowledge: PACK_IMPORT_UPLOAD_PENDING,
+  },
+  // P2 v2 § 3.7 — import_analysis_presented. The wow moment — present
+  // analysis bullets and ask "anything I missed?".
+  import_analysis_presented: {
+    intent: {
+      goal: 'Present the import analysis (projects, themes, interests) as bullets and ask what was missed.',
+      shape: 'free-text',
+      allowed_option_values: [],
+      max_body_chars: 1200,
+    },
+    knowledge: PACK_IMPORT_ANALYSIS_PRESENTED,
+  },
+  // P2 v2 § 3.8 — work_interview_gap_fill. LLM picks the next-most-important
+  // missing required field and asks one conversational question per turn.
+  work_interview_gap_fill: {
+    intent: {
+      goal: 'Ask one short conversational question that targets the highest-priority missing required field.',
+      shape: 'free-text',
+      allowed_option_values: [],
+      max_body_chars: 200,
+    },
+    knowledge: PACK_WORK_INTERVIEW_GAP_FILL,
+  },
+  // P2 v2 § 3.9 — personality_offered. LLM generates user-tuned personality
+  // suggestions; user picks, mixes, or describes their own.
+  personality_offered: {
+    intent: {
+      goal: 'Ask the user what kind of personality the agent should have and offer three flavor suggestions tuned to their data.',
+      shape: 'free-text',
+      allowed_option_values: [],
+      max_body_chars: 320,
+    },
+    knowledge: PACK_PERSONALITY_OFFERED,
+  },
+  // P2 v2 § 3.10 — agent_name_chosen. LLM generates 3-5 names that echo
+  // personality + work themes.
+  //
+  // 2026-05-27: bumped max_body_chars from 280 → 480 because the bullet list
+  // of 5 names × ~35-char taglines + intro + "or type your own" line crosses
+  // ~300 chars routinely. The 280 cap silently failed the resolver's
+  // `parseLlmSpec` length check and forced the static fallback even when the
+  // model had produced a perfectly valid body.
+  agent_name_chosen: {
+    intent: {
+      goal: 'Suggest 3-5 short, pronounceable agent names that echo the user personality and work themes. Your body MUST list each suggestion as a bullet line in the form `- <Name> — <one-line tagline>`.',
+      shape: 'free-text',
+      allowed_option_values: [],
+      max_body_chars: 480,
+    },
+    knowledge: PACK_AGENT_NAME_CHOSEN,
+  },
+  // P2 v2 § 3.12 — slug_chosen. Specially-cased: the engine builds the slug
+  // suggestion spec via a dedicated builder and the resolver is bypassed, so
+  // `intent` is null. The inbound router still fires, so `knowledge` is set.
+  slug_chosen: {
+    intent: null,
+    knowledge: PACK_SLUG_CHOSEN,
+  },
+  // P2 v2 § 3.13 — projects_proposed. Specially-cased like slug_chosen —
+  // null `intent` (dedicated builder), non-null `knowledge` (router fires).
+  projects_proposed: {
+    intent: null,
+    knowledge: PACK_PROJECTS_PROPOSED,
+  },
+  // P2 v2 § 3.14 — persona_reviewed. Post-persona transit — the final
+  // onboarding checkpoint.
+  // (K11e: the old `max_oauth_offered`/`wow_fired` walk steps after this were
+  // deleted; `persona_reviewed` now advances straight to `completed`. Any
+  // Max-OAuth credential attach happens via the post-completion gate page, not
+  // an in-conversation walk step — keep this goal free of the removed phases.)
+  persona_reviewed: {
+    intent: {
+      goal: 'Acknowledge the synthesized persona and confirm the user is ready to finish — this is the final onboarding checkpoint before completion.',
+      shape: 'free-text',
+      allowed_option_values: [],
+      max_body_chars: 240,
+    },
+    knowledge: PACK_PERSONA_REVIEWED,
+  },
+  // Forever-null — transit / terminal / external-driven phases. The engine
+  // never asks the resolver for these AND the inbound router never fires on
+  // them; they advance via direct state writes from other modules.
+  identity_oauth: { intent: null, knowledge: null },
+  instance_provisioned: { intent: null, knowledge: null },
+  import_running: { intent: null, knowledge: null },
+  persona_synthesizing: { intent: null, knowledge: null },
+  completed: { intent: null, knowledge: null },
+  failed: { intent: null, knowledge: null },
+}
+
+// Module-load exhaustiveness barrier — the Record<OnboardingPhase> annotation
+// on PHASE_DESCRIPTORS already forces this at compile time; this runtime guard
+// makes a bypass (an errant cast) fail loudly in CI at import, never silently
+// at runtime against a real user.
+for (const phase of ALL_PHASES) {
+  if (!(phase in PHASE_DESCRIPTORS)) {
+    throw new Error(`PHASE_DESCRIPTORS is missing an entry for phase=${phase}`)
+  }
+}
+
+/**
+ * Per-phase intent table — DERIVED VIEW over `PHASE_DESCRIPTORS`. Kept as a
+ * `Record<string, …>` export (byte-identical to its pre-D9d shape) so every
+ * consumer + test that indexes `PHASE_INTENTS[phase]` and the `Object.keys`
+ * iteration in `allLlmEligiblePhases` are unchanged. Phases driven externally
+ * map to null and are never LLM-generated.
+ */
+const _phaseIntents: Record<string, PhaseIntent | null> = {}
+/**
+ * Per-phase knowledge bundle the LLM router consults to (a) detect on-topic vs
+ * tangential replies and (b) compose in-context answers — DERIVED VIEW over
+ * `PHASE_DESCRIPTORS`. Null for auto-skip / transit / terminal phases (the
+ * router is never called on those — see design § 3.2). Exhaustive over
+ * `OnboardingPhase` because the descriptor table is.
+ */
+const _phaseKnowledge: Partial<Record<OnboardingPhase, PhaseKnowledgePack | null>> = {}
+for (const phase of Object.keys(PHASE_DESCRIPTORS) as OnboardingPhase[]) {
+  _phaseIntents[phase] = PHASE_DESCRIPTORS[phase].intent
+  _phaseKnowledge[phase] = PHASE_DESCRIPTORS[phase].knowledge
+}
+export const PHASE_INTENTS: Readonly<Record<string, PhaseIntent | null>> = _phaseIntents
+export const PHASE_KNOWLEDGE: Readonly<Record<OnboardingPhase, PhaseKnowledgePack | null>> =
+  _phaseKnowledge as Record<OnboardingPhase, PhaseKnowledgePack | null>
 
 /**
  * Validate a `PhaseKnowledgePack` against the size caps + structural
@@ -1219,9 +1296,9 @@ export function validatePhaseKnowledgePack(
 // Module-load validation of every non-null pack. A bad pack throws at
 // import time so the bug surfaces in CI, never at runtime against a
 // real user.
-for (const [phase, pack] of Object.entries(PHASE_KNOWLEDGE)) {
-  if (pack !== null) {
-    validatePhaseKnowledgePack(pack, phase)
+for (const [phase, descriptor] of Object.entries(PHASE_DESCRIPTORS)) {
+  if (descriptor.knowledge !== null) {
+    validatePhaseKnowledgePack(descriptor.knowledge, phase)
   }
 }
 
