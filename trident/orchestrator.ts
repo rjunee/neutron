@@ -63,6 +63,7 @@ import {
 import { ARGUS_DIFF_LINE_LIMIT } from './prompts.ts'
 import { isTerminalPhase, type AdvanceOutcome } from './state-machine.ts'
 import type { TridentRun } from './store.ts'
+import { DEFAULT_MAX_INFLIGHT_MS, NO_ADVANCE_HANG_MS } from './liveness.ts'
 
 export interface TridentStep {
   (run: TridentRun): Promise<AdvanceOutcome>
@@ -181,8 +182,6 @@ export async function computeDiffLineCount(
   return total
 }
 
-const DEFAULT_MAX_INFLIGHT_MS = 2 * 60 * 60_000
-
 /**
  * Per-agent hang watchdog default (M1 trident-UX hardening, item 2). A
  * non-terminal run whose `last_advanced_at` has not moved for this long while a
@@ -197,7 +196,6 @@ const DEFAULT_MAX_INFLIGHT_MS = 2 * 60 * 60_000
  * A reaped run is recoverable (re-run resumes from the last checkpoint). Tune via
  * `no_advance_hang_ms`.
  */
-const NO_ADVANCE_HANG_MS = 25 * 60_000
 
 export function buildTridentOrchestrator(
   opts: BuildTridentOrchestratorOptions,

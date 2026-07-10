@@ -19,15 +19,9 @@
  */
 
 import type { TridentPhase, TridentRun } from './store.ts'
+import { STALLED_WARN_MS } from './liveness.ts'
 
-/**
- * A run whose `last_advanced_at` has not moved for longer than this while
- * non-terminal is shown with a "⚠️ stalled Nm" warning on its Plan item. This is
- * the DISPLAY warning threshold only — it is deliberately SHORTER than the
- * orchestrator's `NO_ADVANCE_HANG_MS` reap threshold (15m), so a stall is warned
- * about first and only reaped to `failed` if it persists.
- */
-export const STALLED_WARN_MS = 10 * 60_000
+export { STALLED_WARN_MS }
 
 /** Human-legible live phase of a bound run, for the Plan-item sub-label. */
 export type RunPhaseLabel =
