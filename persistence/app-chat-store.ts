@@ -11,9 +11,12 @@
  * The {@link AppChatMessageLog} interface is what the app-ws adapter depends
  * on, so the adapter stays DB-agnostic and unit-testable with an in-memory
  * fake; {@link AppChatStore} is the SQLite implementation wired in the
- * gateway composition.
+ * gateway composition. The per-topic seq/replay mechanics live in the shared
+ * {@link AppChatEventLogCore}; this wrapper owns the message schema and the
+ * `(topic_id, client_msg_id)` idempotency identity.
  */
 
+import { AppChatEventLogCore } from './app-chat-event-core.ts'
 import type { ProjectDb } from './db.ts'
 
 /** A persisted chat message as stored / replayed. */
@@ -90,15 +93,24 @@ interface MessageRow {
   created_at: number
 }
 
+const MESSAGE_COLUMNS = `topic_id, seq, message_id, role, body, client_msg_id, project_id,
+                    attachments_json, created_at`
+
 export interface AppChatStoreOptions {
   db: ProjectDb
 }
 
 export class AppChatStore implements AppChatMessageLog {
-  private readonly db: ProjectDb
+  private readonly core: AppChatEventLogCore<MessageRow, AppChatRow>
 
   constructor(opts: AppChatStoreOptions) {
-    this.db = opts.db
+    this.core = new AppChatEventLogCore<MessageRow, AppChatRow>({
+      db: opts.db,
+      table: 'app_chat_messages',
+      columns: MESSAGE_COLUMNS,
+      defaultReplayLimit: DEFAULT_REPLAY_LIMIT,
+      replay: { kind: 'row', toAggregate: rowFrom },
+    })
   }
 
   async append(input: AppChatAppendInput): Promise<AppChatAppendResult> {
@@ -109,29 +121,17 @@ export class AppChatStore implements AppChatMessageLog {
         ? JSON.stringify([...input.attachments])
         : null
 
-    return this.db.transaction<AppChatAppendResult>((tx) => {
+    return this.core.transaction<AppChatAppendResult>((tx) => {
       // Idempotency: a re-sent user message (offline-queue flush, double-tap,
       // HTTP-fallback racing the WS echo) collapses to the existing row.
       if (client_msg_id !== null) {
-        const existing = tx
-          .prepare<MessageRow, [string, string]>(
-            `SELECT topic_id, seq, message_id, role, body, client_msg_id, project_id,
-                    attachments_json, created_at
-               FROM app_chat_messages
-              WHERE topic_id = ? AND client_msg_id = ?`,
-          )
-          .get(input.topic_id, client_msg_id)
+        const existing = this.core.firstRowByKey(input.topic_id, 'client_msg_id', client_msg_id, tx)
         if (existing !== null) {
           return { row: rowFrom(existing), was_new: false }
         }
       }
 
-      const maxRow = tx
-        .prepare<{ max_seq: number | null }, [string]>(
-          `SELECT MAX(seq) AS max_seq FROM app_chat_messages WHERE topic_id = ?`,
-        )
-        .get(input.topic_id)
-      const seq = (maxRow?.max_seq ?? 0) + 1
+      const seq = this.core.nextTopicSeq(input.topic_id, tx)
 
       tx.runSync(
         `INSERT INTO app_chat_messages
@@ -171,28 +171,11 @@ export class AppChatStore implements AppChatMessageLog {
     after_seq: number,
     limit: number = DEFAULT_REPLAY_LIMIT,
   ): Promise<AppChatRow[]> {
-    const safe_after = Number.isFinite(after_seq) ? Math.max(0, Math.trunc(after_seq)) : 0
-    const safe_limit = Number.isFinite(limit) ? Math.max(1, Math.trunc(limit)) : DEFAULT_REPLAY_LIMIT
-    const rows = this.db
-      .prepare<MessageRow, [string, number, number]>(
-        `SELECT topic_id, seq, message_id, role, body, client_msg_id, project_id,
-                attachments_json, created_at
-           FROM app_chat_messages
-          WHERE topic_id = ? AND seq > ?
-          ORDER BY seq ASC
-          LIMIT ?`,
-      )
-      .all(topic_id, safe_after, safe_limit)
-    return rows.map(rowFrom)
+    return this.core.aggregatesAfter(topic_id, after_seq, limit)
   }
 
   async maxSeq(topic_id: string): Promise<number> {
-    const row = this.db
-      .prepare<{ max_seq: number | null }, [string]>(
-        `SELECT MAX(seq) AS max_seq FROM app_chat_messages WHERE topic_id = ?`,
-      )
-      .get(topic_id)
-    return row?.max_seq ?? 0
+    return this.core.maxTopicSeq(topic_id)
   }
 }
 

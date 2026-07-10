@@ -83,7 +83,9 @@ describe('AppChatStore — resume replay (WHERE seq > N ORDER BY seq)', () => {
       await store.append({ topic_id: TOPIC, message_id: `m${i}`, role: 'user', body: `${i}`, created_at: i })
     }
     expect((await store.replayAfter(TOPIC, -10)).map((r) => r.seq)).toEqual([1, 2, 3, 4])
+    expect((await store.replayAfter(TOPIC, 2.9)).map((r) => r.seq)).toEqual([3, 4]) // trunc, not round
     expect((await store.replayAfter(TOPIC, 0, 2)).map((r) => r.seq)).toEqual([1, 2])
+    expect((await store.replayAfter(TOPIC, 0, Number.NaN)).map((r) => r.seq)).toEqual([1, 2, 3, 4]) // falls back to default
   })
 
   it('round-trips project_id + attachments through a replay', async () => {
