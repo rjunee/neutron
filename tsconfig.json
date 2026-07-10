@@ -41,7 +41,8 @@
     "connect/**/*.ts",
     "watchdog/**/*.ts",
     "auth/**/*.ts",
-    "onboarding/**/*.ts"
+    "onboarding/**/*.ts",
+    "logger/**/*.ts"
   ],
   "exclude": ["node_modules", "dist"]
 }

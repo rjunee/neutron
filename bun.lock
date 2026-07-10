@@ -370,6 +370,9 @@
         "@types/react-dom": "~19.1.0",
       },
     },
+    "logger": {
+      "name": "@neutronai/logger",
+    },
     "mcp": {
       "name": "@neutronai/mcp",
       "dependencies": {
@@ -1031,6 +1034,8 @@
     "@neutronai/jwt-validator": ["@neutronai/jwt-validator@workspace:jwt-validator"],
 
     "@neutronai/landing": ["@neutronai/landing@workspace:landing"],
+
+    "@neutronai/logger": ["@neutronai/logger@workspace:logger"],
 
     "@neutronai/mcp": ["@neutronai/mcp@workspace:mcp"],
 

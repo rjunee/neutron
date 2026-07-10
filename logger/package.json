@@ -1,0 +1,6 @@
+{
+  "name": "@neutronai/logger",
+  "type": "module",
+  "main": "./index.ts",
+  "private": true
+}
