@@ -1,14 +1,16 @@
 /**
- * @neutronai/agent-dispatch — boot-reap ↔ production report-adapter wiring.
+ * @neutronai/agent-dispatch — boot-reap ↔ report-adapter unit contract.
  *
- * The runtime boot sweep (`runtime/subagent/boot-sweep.ts`) fires its report
- * through `buildDispatchWatchdogNotifier` in production (`open/composer.ts`).
- * That adapter SWALLOWS every `DispatchReporter` rejection internally
- * (`watchdog-report.ts`), so this end-to-end test proves the integrated
- * contract Codex flagged: even when the underlying `DispatchReporter` REJECTS,
- * the orphan is still durably claimed `crashed` (the surfacing that never
- * vanishes) and no rejection escapes the sweep. It also pins the adapter's
- * forge/argus skip end-to-end.
+ * This exercises the SHARED production adapter `buildBootSweepReport` (the exact
+ * function `open/composer.ts` wires as the boot sweep's report sink) against a
+ * real store, at the unit level. The COMPOSER-level "is it actually fired on
+ * boot" gate lives in `open/__tests__/open-subagent-boot-reap-wiring.test.ts`
+ * (which boots the real composer); this file pins the adapter's behaviour:
+ *   - the adapter SWALLOWS every `DispatchReporter` rejection internally
+ *     (`buildDispatchWatchdogNotifier`), so even a REJECTING reporter leaves the
+ *     orphan durably claimed `crashed` and no rejection escapes the sweep;
+ *   - a working reporter receives the crashed `DispatchReport` (sentinel→review);
+ *   - a forge/argus orphan is reaped but its report is SKIPPED (Trident owns it).
  */
 
 import { afterEach, beforeEach, expect, test } from 'bun:test'

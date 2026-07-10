@@ -91,7 +91,7 @@
 --
 -- Forward-only; no down-migration (Neutron OSS contract).
 
-CREATE TABLE code_subagent_registry (
+CREATE TABLE IF NOT EXISTS code_subagent_registry (
     run_id              TEXT PRIMARY KEY NOT NULL,
     instance_key        TEXT NOT NULL,
     agent_kind          TEXT NOT NULL
@@ -123,10 +123,10 @@ CREATE TABLE code_subagent_registry (
 
 -- The boot sweep scans only LIVE (in-flight) rows; a partial index keeps that
 -- query flat-cost as finished/crashed/cancelled rows pile up.
-CREATE INDEX idx_code_subagent_registry_live
+CREATE INDEX IF NOT EXISTS idx_code_subagent_registry_live
     ON code_subagent_registry (status)
     WHERE status IN ('pending', 'running');
 
 -- Owner-scoped enumeration (spawn caps + observability).
-CREATE INDEX idx_code_subagent_registry_owner
+CREATE INDEX IF NOT EXISTS idx_code_subagent_registry_owner
     ON code_subagent_registry (instance_key);

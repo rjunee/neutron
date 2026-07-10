@@ -7,9 +7,11 @@
  */
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { Database } from 'bun:sqlite'
 import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import {
@@ -45,6 +47,22 @@ const dispatchInput = (over: Partial<CreateRecordInput> = {}): CreateRecordInput
   ...(over.delivery_target !== undefined ? { delivery_target: over.delivery_target } : {}),
   ...(over.delegation_claims !== undefined ? { delegation_claims: over.delegation_claims } : {}),
   ...(over.spawn_key !== undefined ? { spawn_key: over.spawn_key } : {}),
+})
+
+describe('migration 0099 idempotency', () => {
+  test('the raw 0099 SQL re-applies cleanly (IF NOT EXISTS everywhere)', () => {
+    const here = dirname(fileURLToPath(import.meta.url))
+    const sql = readFileSync(
+      join(here, '..', '..', 'migrations', '0099_code_subagent_registry.sql'),
+      'utf8',
+    )
+    const fresh = new Database(':memory:')
+    fresh.exec(sql)
+    // Direct reapplication must NOT throw "table/index already exists"
+    // (migrations/AGENTS.md: idempotent, CREATE ... IF NOT EXISTS everywhere).
+    expect(() => fresh.exec(sql)).not.toThrow()
+    fresh.close()
+  })
 })
 
 describe('SubagentRegistryStore — migration + write-through', () => {
