@@ -14,21 +14,15 @@
  * - docs/engineering-plan.md § D.10.4 (capability-gated `secrets:` block,
  *   2026-05-06)
  *
- * Relationship to `core-sdk/`:
- * - `core-sdk/types.ts` is the prior P0 contract surface — strict literal
- *   capability union + a hand-written validator. It survives as the wire
- *   shape consumed by the (P3) install pipeline; this Zod schema is the
- *   author-facing surface a Core uses when it imports
- *   `@neutronai/cores-sdk` to build/validate its own manifest at boot.
- * - The two MUST stay shape-compatible. The lone difference is the
- *   capability list: `core-sdk` enumerates a fixed union, `cores-sdk`
- *   accepts the broader `<verb>:<resource>`-shaped string the Core author
- *   declares (a Core may declare a third-party connector capability that
- *   the closed enum doesn't yet name — `connect:google-ads`, etc.). The
- *   P3 install pipeline cross-checks against the closed enum and refuses
- *   unknown capabilities. SDK-side we accept the broader shape so a Core
- *   can build green against the SDK while marketplace registration
- *   surfaces the unknown-capability error.
+ * X3 — one manifest contract: this is the SINGLE manifest schema. The former
+ * `core-sdk/` hand validator + JSON-schema mirror (zero production callers)
+ * were deleted and `core-sdk/` reduced to a one-release path-shim that
+ * re-exports the types below. Capabilities: the schema validates the OPEN
+ * `<verb>:<resource>` string (a Core may declare a third-party / sidecar
+ * capability the platform doesn't enumerate — `connect:google-ads`,
+ * `read:notes.db`); the platform-KNOWN subset lives here too as
+ * `KNOWN_CAPABILITIES` + `isKnownCapability()`, consulted by X1's install
+ * gate but never used to reject an unknown-but-well-formed capability.
  */
 
 import { z } from 'zod'
@@ -45,13 +39,12 @@ import { z } from 'zod'
  *
  * Validated as a non-empty, lowercase string with at least one colon — this
  * schema checks SHAPE only (a Core may declare its own `<slug>.db` sidecar
- * cap, so the resource side stays open). The closed capability enum lives in
- * `core-sdk/types.ts:NeutronCapability`. Per § 2.3 (ZERO back-compat) the
- * retired pre-§2.3 shared-DB/data-dir aliases were removed from that enum +
- * types; Open ships no manifest declaring them. (Shape validation here does
- * NOT enumerate the retired forms — there is no runtime install-time
- * hard-reject of them; correctness rests on
- * the closed enum + the fact that no legacy manifest exists.)
+ * cap, so the resource side stays open). The platform-known subset is
+ * `KNOWN_CAPABILITIES` below. Per § 2.3 (ZERO back-compat) the retired
+ * pre-§2.3 shared-DB/data-dir aliases were removed; Open ships no manifest
+ * declaring them. (Shape validation here does NOT enumerate the retired
+ * forms — there is no runtime install-time hard-reject of them; correctness
+ * rests on the known set + the fact that no legacy manifest exists.)
  */
 
 export const CapabilitySchema = z
@@ -66,6 +59,82 @@ export const CapabilitySchema = z
   })
 
 export type Capability = z.infer<typeof CapabilitySchema>
+
+/**
+ * Known-platform capability set — the closed list of capabilities the
+ * PLATFORM itself implements and can gate natively. Folded in from the
+ * former `core-sdk/types.ts:NeutronCapability` union +
+ * `core-sdk/validator.ts:KNOWN_CAPABILITIES` (X3 — one manifest contract).
+ *
+ * CRITICAL — this set does NOT restrict what a Core may DECLARE. The
+ * manifest `CapabilitySchema` above stays deliberately OPEN: any well-formed
+ * `<verb>:<resource>` string validates, so third-party (and first-party
+ * sidecar) Cores can declare capabilities the platform doesn't enumerate
+ * (`connect:google-ads`, `read:notes.db`, `read:calendar_core.events`, …).
+ * Membership here only answers "is this a capability the platform knows how
+ * to enforce with a built-in gate?" — the enabler for X1's install-time
+ * capability gate. An unknown-but-well-formed capability is STILL a valid
+ * declaration and STILL installs; X1's gate treats platform-known vs
+ * platform-unknown differently, it does not reject the unknown.
+ *
+ * Adding a platform capability is a single edit here (the closed enum, the
+ * hand validator, and the JSON-schema mirror that used to need parallel
+ * edits are all gone — this is the one source).
+ */
+export const KNOWN_CAPABILITIES = [
+  'read:gmail',
+  'write:gmail',
+  'read:calendar',
+  'write:calendar',
+  'read:tasks',
+  'write:tasks',
+  'read:docs',
+  'write:docs',
+  'read:project_data',
+  'write:project_data',
+  'read:memory',
+  'write:memory',
+  'read:project.db',
+  'write:project.db',
+  'network:external',
+  'network:github',
+  'network:browse',
+  'fs:project_data',
+  'fs:cache',
+  'host:gh',
+  'agent:dispatch_subagent',
+  'mcp:tool_register',
+] as const
+
+/**
+ * A capability the platform implements + gates natively. Every member also
+ * satisfies `CapabilitySchema` (the open shape); this is the narrower,
+ * platform-known subset X1's gate consults. Formerly
+ * `core-sdk/types.ts:NeutronCapability`.
+ */
+export type KnownCapability = (typeof KNOWN_CAPABILITIES)[number]
+
+/**
+ * Back-compat alias for the one-release `@neutronai/core-sdk` path-shim.
+ * @deprecated import `KnownCapability` (or the open `Capability`) from
+ * `@neutronai/cores-sdk` instead.
+ */
+export type NeutronCapability = KnownCapability
+
+const KNOWN_CAPABILITY_SET: ReadonlySet<string> = new Set(KNOWN_CAPABILITIES)
+
+/**
+ * Is `cap` a platform-known capability (one the platform can enforce with a
+ * built-in gate)? This is the ENABLER X1 will consult from its install-time
+ * capability gate (X3 ships the set; X1 wires the gate — there is no
+ * production caller yet, only the conformance test). A `false` result does
+ * NOT mean the capability is invalid — a well-formed capability outside this
+ * set is a legitimate third-party/sidecar declaration that still validates +
+ * installs; it simply has no native platform gate.
+ */
+export function isKnownCapability(cap: string): cap is KnownCapability {
+  return KNOWN_CAPABILITY_SET.has(cap)
+}
 
 /**
  * Substrate tier a Core declares it supports.
@@ -170,9 +239,7 @@ export type UiComponentDef = z.infer<typeof UiComponentDefSchema>
 /**
  * Billing-hook declaration. v1 ships an empty array — billing
  * actually wires up in P3+ when the Cores marketplace adds usage-
- * based billing. Shape mirrors `core-sdk/types.ts:BillingHookDef`
- * so a manifest that parses through this schema also passes
- * `validateNeutronManifest()` on the install pipeline.
+ * based billing.
  */
 export const BillingModelSchema = z.enum([
   'flat_monthly',
@@ -212,6 +279,15 @@ export type BillingMeter = BillingHookDef
  * kinds it links from. `target_kinds: []` is allowed (warning-only —
  * the Core opts out of cross-project linking at install time).
  */
+/**
+ * Cross-project linked-source kind. Open string (folded from
+ * `core-sdk/types.ts:LinkedSourceKind`) — a Core declares any provider it
+ * integrates with (`shopify`, `google-ads`, `meta-ads`, …); the schema
+ * accepts any non-empty string. `KNOWN_LINKED_SOURCE_KINDS` (marketplace
+ * display) is intentionally NOT enforced here.
+ */
+export type LinkedSourceKind = string
+
 export const LinkedSourceScopeSchema = z.enum(['read', 'read_write'])
 export type LinkedSourceScope = z.infer<typeof LinkedSourceScopeSchema>
 
@@ -275,8 +351,49 @@ export type ManifestSecret = z.infer<typeof ManifestSecretSchema>
  * against the host's Core SDK version at install time; `neutronVersion`
  * names the Neutron host version this Core was built against.
  */
+const SEMVER_TERM_RE =
+  /^([\^~]|>=?|<=?|=)?\d+(\.\d+){0,2}(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$/
+
+/**
+ * Conservative semver-range syntax check. Folded in from the deleted
+ * `core-sdk/validator.ts:isValidSemverRange` (X3 — one manifest contract) so
+ * the single schema preserves the STRICTER of the two former behaviors: the
+ * hand validator rejected a malformed `compat.coreApi`, so the surviving
+ * schema must too (not silently loosen). Canonical npm-style grammar:
+ *   - bare wildcard (`*`)
+ *   - single term (`1.2.3`, `^1.2.3`, `>=1.2.3-rc.1`)
+ *   - space-joined intersections (`>=1 <2`, `>= 1.0.0 <2.0.0`)
+ *   - `||`-joined unions (`^1.0.0 || ^2.0.0`)
+ */
+export function isValidSemverRange(input: unknown): boolean {
+  if (typeof input !== 'string') return false
+  const trimmed = input.trim()
+  if (trimmed === '') return false
+  // npm tolerates whitespace between the comparator and the version
+  // (e.g. `>= 1.0.0`). Collapse it before splitting into terms. The
+  // lookahead requires a digit immediately after the whitespace so split
+  // comparators like `> =1.0.0` stay split and the per-term regex rejects.
+  const normalized = trimmed.replace(/([\^~]|>=?|<=?|=)\s+(?=\d)/g, '$1')
+  for (const orClause of normalized.split(/\s*\|\|\s*/)) {
+    const clause = orClause.trim()
+    if (clause === '') return false
+    if (clause === '*') continue
+    const terms = clause.split(/\s+/).filter((t) => t !== '')
+    if (terms.length === 0) return false
+    for (const term of terms) {
+      if (!SEMVER_TERM_RE.test(term)) return false
+    }
+  }
+  return true
+}
+
 export const NeutronCompatSchema = z.object({
-  coreApi: z.string().min(1, { message: 'compat.coreApi semver range required' }),
+  coreApi: z
+    .string()
+    .min(1, { message: 'compat.coreApi semver range required' })
+    .refine(isValidSemverRange, {
+      message: 'compat.coreApi must be a valid semver range',
+    }),
 })
 export type NeutronCompat = z.infer<typeof NeutronCompatSchema>
 
@@ -292,10 +409,8 @@ export type NeutronBuild = z.infer<typeof NeutronBuildSchema>
  * a Core's `package.json`. Array fields are required-but-may-be-empty
  * so that an absent declaration is intentional rather than accidental.
  *
- * `compat` + `build` are required to keep this schema shape-compatible
- * with the install-time validator in `core-sdk/validator.ts` — a
- * manifest that parses through `@neutronai/cores-sdk` MUST also pass
- * `validateNeutronManifest()` on the same input.
+ * `compat` + `build` are required. This is the single install-time +
+ * author-facing schema (X3 — the former `core-sdk/validator.ts` was deleted).
  *
  * The cross-field `route_mount` ⇒ `mount_path` invariant lives on the
  * schema itself via `superRefine`, so callers who use
@@ -360,4 +475,179 @@ export function safeParseManifest(
   | { success: true; data: NeutronManifest }
   | { success: false; error: z.ZodError } {
   return NeutronManifestSchema.safeParse(input)
+}
+
+/**
+ * Structured validation result — the legacy `ValidationResult` shape from the
+ * deleted `core-sdk/validator.ts`, retained for the one-release
+ * `@neutronai/core-sdk` barrel. `valid` is `true` iff `errors` is empty;
+ * warnings never flip the verdict.
+ */
+export interface ValidationError {
+  code: string
+  /** JSON-Pointer-ish path into the manifest, e.g. `/capabilities/2`. */
+  path: string
+  message: string
+}
+export interface ValidationWarning {
+  code: string
+  path: string
+  message: string
+}
+export interface ValidationResult {
+  valid: boolean
+  errors: ValidationError[]
+  warnings: ValidationWarning[]
+}
+
+/**
+ * Legacy error/warning codes, retained so `@neutronai/core-sdk` consumers that
+ * referenced `ERROR_CODES.REQUIRED_MISSING` etc. keep compiling. The codes are
+ * unchanged from the deleted `core-sdk/validator.ts`; the values behind them
+ * are now produced by mapping the single Zod schema's issues.
+ */
+export const ERROR_CODES = {
+  REQUIRED_MISSING: 'E_REQUIRED_MISSING',
+  TYPE_MISMATCH: 'E_TYPE_MISMATCH',
+  UNKNOWN_CAPABILITY: 'E_UNKNOWN_CAPABILITY',
+  INVALID_SEMVER: 'E_INVALID_SEMVER',
+  INVALID_TIER_SUPPORT: 'E_INVALID_TIER_SUPPORT',
+  INVALID_LINKED_SOURCE: 'E_INVALID_LINKED_SOURCE',
+} as const
+
+export const WARNING_CODES = {
+  EMPTY_TARGET_KINDS: 'W_EMPTY_TARGET_KINDS',
+  UNKNOWN_LINKED_SOURCE_KIND: 'W_UNKNOWN_LINKED_SOURCE_KIND',
+} as const
+
+/**
+ * Known linked-source kinds — informational (marketplace display + the
+ * `W_UNKNOWN_LINKED_SOURCE_KIND` warning below). NOT enforced: `kind` is a
+ * free-form string per § A.3.5, so first-party Cores declare novel providers
+ * (`shopify`, `google-ads`) that still validate.
+ */
+export const KNOWN_LINKED_SOURCE_KINDS = [
+  'gmail',
+  'calendar',
+  'tasks',
+  'docs',
+  'memory',
+  'custom',
+] as const
+
+// The remaining KNOWN_* enumerations are DERIVED from the Zod enums above, so
+// there is exactly one source of truth for each closed set (a drift is
+// impossible — they ARE the schema's option lists).
+export const KNOWN_TIER_SUPPORTS = TierSupportSchema.options
+export const KNOWN_INSTALL_SCOPES = InstallScopeSchema.options
+export const KNOWN_LINKED_SOURCE_SCOPES = LinkedSourceScopeSchema.options
+export const KNOWN_LINKED_SOURCE_TARGET_KINDS = LinkedSourceTargetKindSchema.options
+export const KNOWN_BILLING_MODELS = BillingModelSchema.options
+export const KNOWN_UI_SURFACES = UiComponentSurfaceSchema.options
+export const KNOWN_MANIFEST_SECRET_KINDS = ManifestSecretKindSchema.options
+
+/** Map a Zod issue to the closest legacy `ERROR_CODES` value. */
+function legacyErrorCode(issue: z.ZodIssue): string {
+  const path = issue.path.map(String)
+  const inCapability =
+    path.includes('capabilities') || path.includes('capability_required')
+  const inTier = path.includes('tier_support')
+  const inCoreApi = path.includes('coreApi')
+
+  // Linked-source FIELD issues map to E_INVALID_LINKED_SOURCE regardless of
+  // the Zod issue code — matching the deleted hand validator, whose
+  // `validateLinkedSources` returned that code for a missing/empty/non-string
+  // `kind`, a missing/invalid `scope`, and any invalid `target_kinds[]`
+  // MEMBER. The `target_kinds` array ITSELF being absent or the wrong type,
+  // an item that isn't an object, and `/linked_sources` itself being
+  // missing/non-array all stayed TYPE_MISMATCH / REQUIRED_MISSING there, so
+  // those fall through to the generic mapping below.
+  const lsIdx = path.indexOf('linked_sources')
+  if (lsIdx !== -1) {
+    const field = path[lsIdx + 2] // linked_sources, <i>, <field>, [<memberIdx>]
+    if (field === 'kind' || field === 'scope') {
+      return ERROR_CODES.INVALID_LINKED_SOURCE
+    }
+    if (field === 'target_kinds' && path.length > lsIdx + 3) {
+      // A member index follows `target_kinds` → an invalid array MEMBER.
+      return ERROR_CODES.INVALID_LINKED_SOURCE
+    }
+    // else: the target_kinds array itself, an item-level object issue, or the
+    // linked_sources array itself — fall through to generic type/required.
+  }
+
+  switch (issue.code) {
+    case 'invalid_type':
+      // Zod reports `received: 'undefined'` for a missing required field.
+      return (issue as z.ZodInvalidTypeIssue).received === 'undefined'
+        ? ERROR_CODES.REQUIRED_MISSING
+        : ERROR_CODES.TYPE_MISMATCH
+    case 'invalid_enum_value':
+      if (inTier) return ERROR_CODES.INVALID_TIER_SUPPORT
+      return ERROR_CODES.TYPE_MISMATCH
+    case 'invalid_string':
+      return inCapability ? ERROR_CODES.UNKNOWN_CAPABILITY : ERROR_CODES.TYPE_MISMATCH
+    case 'custom':
+      if (inCoreApi) return ERROR_CODES.INVALID_SEMVER
+      return ERROR_CODES.TYPE_MISMATCH
+    case 'too_small':
+      if (inCoreApi) return ERROR_CODES.INVALID_SEMVER
+      if (inTier) return ERROR_CODES.INVALID_TIER_SUPPORT
+      return ERROR_CODES.TYPE_MISMATCH
+    default:
+      return ERROR_CODES.TYPE_MISMATCH
+  }
+}
+
+/** Advisory warnings the schema does not encode (warnings never fail validity). */
+function collectWarnings(input: unknown): ValidationWarning[] {
+  const warnings: ValidationWarning[] = []
+  if (typeof input !== 'object' || input === null) return warnings
+  const sources = (input as Record<string, unknown>)['linked_sources']
+  if (!Array.isArray(sources)) return warnings
+  const knownKinds = new Set<string>(KNOWN_LINKED_SOURCE_KINDS)
+  sources.forEach((raw, i) => {
+    if (typeof raw !== 'object' || raw === null) return
+    const src = raw as Record<string, unknown>
+    const kind = src['kind']
+    if (typeof kind === 'string' && kind.length > 0 && !knownKinds.has(kind)) {
+      warnings.push({
+        code: WARNING_CODES.UNKNOWN_LINKED_SOURCE_KIND,
+        path: `/linked_sources/${i}/kind`,
+        message: `kind ${JSON.stringify(kind)} is not in the known set (${KNOWN_LINKED_SOURCE_KINDS.join(', ')})`,
+      })
+    }
+    if (Array.isArray(src['target_kinds']) && src['target_kinds'].length === 0) {
+      warnings.push({
+        code: WARNING_CODES.EMPTY_TARGET_KINDS,
+        path: `/linked_sources/${i}/target_kinds`,
+        message:
+          'empty target_kinds means the Core opts out of cross-project linking for this source',
+      })
+    }
+  })
+  return warnings
+}
+
+/**
+ * Structural manifest validator — GENERATED from the single Zod schema (X3).
+ * The 650-line hand validator was deleted; validity is decided ONLY by
+ * `safeParseManifest` (one validation implementation), then Zod issues are
+ * mapped to the legacy `ERROR_CODES` and the two advisory warnings the schema
+ * doesn't encode are layered on. Returns the legacy discriminated
+ * `ValidationResult` (never throws) for the one-release `@neutronai/core-sdk`
+ * barrel. New code SHOULD use `safeParseManifest` / `NeutronManifestSchema`.
+ */
+export function validateNeutronManifest(input: unknown): ValidationResult {
+  const warnings = collectWarnings(input)
+  const result = safeParseManifest(input)
+  if (result.success) {
+    return { valid: true, errors: [], warnings }
+  }
+  const errors: ValidationError[] = result.error.issues.map((issue) => ({
+    code: legacyErrorCode(issue),
+    path: `/${issue.path.map(String).join('/')}`,
+    message: issue.message,
+  }))
+  return { valid: false, errors, warnings }
 }

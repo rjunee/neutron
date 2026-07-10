@@ -31,7 +31,7 @@
  *   JSON-serialisable data; throws bubble up as `error` events.
  */
 
-import type { JsonSchemaDocument, NeutronCapability } from '@neutronai/core-sdk/types.ts'
+import type { Capability, JsonSchemaDocument } from '@neutronai/core-sdk/types.ts'
 
 export type ApprovalPolicy = 'auto' | 'prompt-user' | 'prompt-admin'
 
@@ -66,7 +66,16 @@ export interface ToolRegistration {
   description: string
   input_schema: JsonSchemaDocument
   output_schema: JsonSchemaDocument
-  capability_required: NeutronCapability
+  /**
+   * The capability this tool exercises — the validated-open-string form
+   * (`<verb>:<resource>`, `Capability`). The registry gates on STRING
+   * EQUALITY against the owner's resolved capability set, so it accepts the
+   * open shape: first-party sidecar + third-party Cores legitimately declare
+   * capabilities outside the platform-known set (`read:notes.db`,
+   * `connect:google-ads`). Use `isKnownCapability()` from
+   * `@neutronai/cores-sdk` where you need the platform-known subset.
+   */
+  capability_required: Capability
   approval_policy: ApprovalPolicy
   handler: ToolHandler
   /**

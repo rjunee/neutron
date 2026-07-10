@@ -34,7 +34,6 @@ import { pathToFileURL } from 'node:url'
 import type { ProjectDb } from '@neutronai/persistence/index.ts'
 import type { ToolRegistry } from '@neutronai/tools/registry.ts'
 import type { ApprovalPolicy } from '@neutronai/tools/registry.ts'
-import type { NeutronCapability } from '@neutronai/core-sdk/types.ts'
 import { SecretsStore } from '@neutronai/auth/secrets-store.ts'
 import {
   buildBundledRegistry,
@@ -923,16 +922,13 @@ async function registerCoreTools(input: RegisterCoreToolsInput): Promise<void> {
         description: def.description,
         input_schema: def.input_schema,
         output_schema: def.output_schema,
-        // The SDK's CapabilitySchema is permissive (`<verb>:<resource>`
-        // pattern) while `core-sdk/types.ts:NeutronCapability` is a
-        // closed union covering the canonical platform capabilities.
-        // Cores legitimately declare custom strings like
-        // `read:notes.db` and `read:calendar_core.events` that pass
-        // the SDK regex but aren't in the closed union — the ToolRegistry
-        // gates on string equality, not on the union, so the runtime
-        // accepts the broader shape. Cast through to satisfy the
-        // strict TS surface.
-        capability_required: def.capability_required as NeutronCapability,
+        // `def.capability_required` and `ToolRegistration.capability_required`
+        // are now BOTH the validated-open-string `Capability` (X3 — one
+        // manifest contract). Cores legitimately declare custom strings like
+        // `read:notes.db` / `read:calendar_core.events` that aren't in the
+        // platform-known set; the ToolRegistry gates on string equality, so
+        // no cast is needed and the openness is preserved end-to-end.
+        capability_required: def.capability_required,
         approval_policy: DEFAULT_APPROVAL_POLICY,
         handler: wrapHandler(handler),
       })
@@ -971,7 +967,7 @@ function registerNotImplementedStubs(tools: ToolRegistry, core: BundledCore): vo
         description: def.description,
         input_schema: def.input_schema,
         output_schema: def.output_schema,
-        capability_required: def.capability_required as NeutronCapability,
+        capability_required: def.capability_required,
         approval_policy: DEFAULT_APPROVAL_POLICY,
         handler: async () => {
           throw new Error(

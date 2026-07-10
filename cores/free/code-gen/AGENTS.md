@@ -40,8 +40,15 @@ uninjected installs failed loud + actionable.
   `app_tab` UI component metadata in `src/ui/app-tab-surface.ts`.
 - 3 new SDK capabilities (`host:gh`, `network:github`,
   `agent:dispatch_subagent`) declared in `package.json`'s
-  `"neutron"` block; the closed enum at `core-sdk/types.ts` +
-  `validator.ts` + `manifest.schema.json` extended in the same PR.
+  `"neutron"` block. Capabilities validate against the OPEN
+  `<verb>:<resource>` shape (X3 — one manifest contract); a
+  platform-known capability is additionally listed in the single
+  source `cores/sdk/manifest.ts:KNOWN_CAPABILITIES` (+ covered in
+  `cores/sdk/__tests__/manifest.test.ts` /
+  `cores/runtime/__tests__/manifest-conformance.test.ts`). The old
+  four-place edit across `core-sdk/{types,validator}.ts` +
+  `manifest.schema.json` is gone — those were folded into the single
+  Zod schema and deleted.
 - Production-composer reachability guard at
   `gateway/__tests__/code-gen-core-production-composer.test.ts`.
 
