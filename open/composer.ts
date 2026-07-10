@@ -74,12 +74,19 @@ import {
 } from '@neutronai/onboarding/interview/llm-timeouts.ts'
 import type { AgentSpec, Substrate } from '@neutronai/runtime/substrate.ts'
 import { SubagentRegistry } from '@neutronai/runtime/subagent/registry.ts'
+import { SubagentRegistryStore } from '@neutronai/runtime/subagent/store.ts'
+import {
+  sweepOrphanedDispatchesOnBoot,
+  type BootSweepReport,
+} from '@neutronai/runtime/subagent/boot-sweep.ts'
 import { newControlState } from '@neutronai/runtime/subagent/control.ts'
 import {
   DispatchService,
   buildCancellableDispatchTurn,
+  buildDispatchWatchdogNotifier,
   defaultPersonaLoader,
   type DispatchBoardBinder,
+  type DispatchReporter,
 } from '@neutronai/agent-dispatch/index.ts'
 import {
   buildAnthropicLlmCall,
@@ -525,9 +532,25 @@ export function buildOpenGraphComposer(
         await dispatchBoardHolder.deref((s) => s.clearRun(slug, id, run_id))
       },
     }
+    // Report-back sink — HOISTED (plan §P7) so the live dispatch terminal report
+    // AND the boot-reap of a prior process's orphaned dispatch surface the SAME
+    // way. First-cut: log the announcement. The live WS `agent_message` splice is
+    // the documented follow-up (Open is WS-native + single-owner, no Telegram).
+    const dispatchReport: DispatchReporter = async (r) => {
+      console.log(
+        `[agent-dispatch] ${r.kind} (${r.agent_kind}) ${r.run_id.slice(0, 8)} → ${r.status}\n${r.markdown}`,
+      )
+    }
+    // S4 (plan §P7 / D-6) — the registry's durable mirror (`code_subagent_registry`,
+    // migration 0099). Wiring it as the registry's write-through persistence makes
+    // a dispatched sub-agent SURVIVE a gateway restart, so the boot reap below can
+    // surface an in-flight dispatch a prior process left behind instead of
+    // silently orphaning it. Persists the REGISTRY only — never the Trident
+    // orchestrator's volatile `fired`/`redispatched` orphan-detection sets.
+    const subagentRegistryStore = new SubagentRegistryStore(db)
     const dispatchService = ((): DispatchService | null => {
       if (llmPool === null) return null
-      const registry = new SubagentRegistry()
+      const registry = new SubagentRegistry(subagentRegistryStore)
       const control = newControlState(registry)
       return new DispatchService({
         registry,
@@ -535,14 +558,7 @@ export function buildOpenGraphComposer(
         dispatch: buildCancellableDispatchTurn({
           build_substrate: makeEphemeralSubstrate('cc-dispatch'),
         }),
-        report: async (r) => {
-          // First-cut report-back: log the announcement. The live WS
-          // `agent_message` splice is the documented follow-up (Open is
-          // WS-native + single-owner, no Telegram channel).
-          console.log(
-            `[agent-dispatch] ${r.kind} (${r.agent_kind}) ${r.run_id.slice(0, 8)} → ${r.status}\n${r.markdown}`,
-          )
-        },
+        report: dispatchReport,
         instance_key: internal_handle,
         // Phase 2b — the board-binding chokepoint: every dispatch must carry a
         // valid, sufficiently-specified board_item_id (else rejected) and is
@@ -556,6 +572,40 @@ export function buildOpenGraphComposer(
         persona_loader: defaultPersonaLoader,
       })
     })()
+
+    // BOOT REAP (plan §P7 / D-6). Every persisted registry row still LIVE
+    // (`pending`|`running`) was left in-flight by a PRIOR process that has since
+    // died — an orphaned dispatch. Mark each `crashed` and fire the SAME report
+    // sink so a restart SURFACES it (a caller awaiting a crashed dispatch stops
+    // hanging) instead of vanishing it. The boot-reap report reuses the dispatch
+    // watchdog notifier's SubagentRecord→report mapping (incl. its forge/argus
+    // skip — those belong to the Trident loop's own supervision). Fire-and-forget:
+    // never block boot, and a sink failure is swallowed. Runs UNCONDITIONALLY (not
+    // gated on `llmPool`): if this boot has no dispatcher but a prior one did, its
+    // orphans still deserve to be surfaced + reaped.
+    const bootReapNotifier = buildDispatchWatchdogNotifier(dispatchReport)
+    const bootReapReport: BootSweepReport = (rec) => {
+      const detected_at = rec.ended_at ?? Date.now()
+      return bootReapNotifier({
+        run_id: rec.run_id,
+        agent_kind: rec.agent_kind,
+        instance_key: rec.instance_key,
+        reason: 'process_dead',
+        last_event_at: rec.last_event_at,
+        detected_at,
+        age_ms: detected_at - rec.started_at,
+        ...(rec.delivery_target !== undefined ? { delivery_target: rec.delivery_target } : {}),
+        ...(rec.pid !== undefined ? { pid: rec.pid } : {}),
+      })
+    }
+    void sweepOrphanedDispatchesOnBoot({
+      store: subagentRegistryStore,
+      report: bootReapReport,
+    }).catch((err: unknown) => {
+      console.warn(
+        `[agent-dispatch] boot reap failed: ${err instanceof Error ? err.message : String(err)}`,
+      )
+    })
 
     // ── Skill-forge → Open boot (Vajra parity gap #5) ──────────────────────
     // Auto-skillify: audit a COMPLETED Trident workflow and, gated by the

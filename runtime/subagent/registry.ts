@@ -67,12 +67,33 @@ export interface CreateRecordInput {
 }
 
 /**
+ * Optional write-through mirror for the registry (S4 — plan §P7). When a
+ * persistence sink is supplied, every record mutation is projected to a durable
+ * store so a gateway restart can reap orphaned dispatches instead of vanishing
+ * them (`store.ts` / `boot-sweep.ts`). Absent → the registry is pure in-memory,
+ * byte-identical to its S3 behaviour (every existing hermetic test path).
+ *
+ * Sync by design — the registry's `create`/`update`/`delete` are synchronous
+ * (the spawn/watchdog/control call graph is sync), so the sink must be too
+ * (wired in production to `SubagentRegistryStore` over `ProjectDb.runSync`).
+ */
+export interface SubagentPersistence {
+  /** Insert-or-replace the latest snapshot of a record. */
+  persist(rec: SubagentRecord): void
+  /** Remove a record (lifecycle prune). */
+  remove(run_id: string): void
+}
+
+/**
  * In-memory registry. Construct one per-process; the gateway owns the only
  * live instance. Tests can construct fresh instances without polluting global
- * state.
+ * state. An optional `persistence` sink write-throughs every mutation to a
+ * durable store (S4 — see `SubagentPersistence`); omit it for pure in-memory.
  */
 export class SubagentRegistry {
   private readonly byId = new Map<string, SubagentRecord>()
+
+  constructor(private readonly persistence?: SubagentPersistence) {}
 
   create(input: CreateRecordInput): SubagentRecord {
     if (this.byId.has(input.run_id)) {
@@ -94,6 +115,7 @@ export class SubagentRegistry {
     if (input.delegation_claims !== undefined) rec.delegation_claims = input.delegation_claims
     if (input.spawn_key !== undefined) rec.spawn_key = input.spawn_key
     this.byId.set(input.run_id, rec)
+    this.persistence?.persist(rec)
     return rec
   }
 
@@ -110,6 +132,7 @@ export class SubagentRegistry {
     const last_event_at = patch.last_event_at ?? Date.now()
     const next: SubagentRecord = { ...cur, ...patch, last_event_at }
     this.byId.set(run_id, next)
+    this.persistence?.persist(next)
     return next
   }
 
@@ -163,6 +186,7 @@ export class SubagentRegistry {
 
   delete(run_id: string): void {
     this.byId.delete(run_id)
+    this.persistence?.remove(run_id)
   }
 
   /** Snapshot — used for tests + observability. */
