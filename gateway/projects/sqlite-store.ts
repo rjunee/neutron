@@ -333,6 +333,34 @@ export class SqliteProjectSettingsStore implements ProjectSettingsStore {
   }
 
   /**
+   * Stamp `last_activity_at` on any NON-DELETED row — archived rows
+   * INCLUDED (contrast `touchActivity` above, which additionally skips
+   * `archived_at IS NOT NULL` rows). P4 (table-ownership, 2026-07): moved
+   * VERBATIM (SQL byte-identical) from the Open composer's agent-reply fan
+   * (`open/composer.ts`), where an agent reply on a project topic stamps
+   * activity before the `projects_changed` re-fan. The two predicates
+   * differ by the archived filter and converging them was not provably
+   * behaviour-preserving (an archived project's reply-stamp would be
+   * dropped), so the composer's variant keeps its exact SQL as a
+   * dedicated method — flagged as a candidate for deliberate convergence
+   * in migrations/table-ownership.json. Best-effort, never throws:
+   * activity stamping must never break a message turn.
+   */
+  async touchActivityIncludingArchived(
+    project_id: string,
+    iso: string = nowIso(),
+  ): Promise<void> {
+    try {
+      await this.db.run(
+        `UPDATE projects SET last_activity_at = ? WHERE id = ? AND deleted_at IS NULL`,
+        [iso, project_id],
+      )
+    } catch {
+      /* activity stamping must never break a message turn */
+    }
+  }
+
+  /**
    * Idempotent — insert seed rows for any project_ids in `seeds` that
    * are not already present. Used at boot by the production composer
    * to materialize the canonical demo projects (Neutron / Acme /
