@@ -188,6 +188,36 @@ describe('SupervisedLoop', () => {
     await loop.stop()
   })
 
+  test.each([['null', null], ['undefined', undefined], ['zero', 0]])(
+    'lifecycle is handle-agnostic: setTimer returning %s → start once, stop clears once',
+    async (_label, handleValue) => {
+      let setCalls = 0
+      const cleared: unknown[] = []
+      const loop = new SupervisedLoop({
+        name: 'handle',
+        intervalMs: 60_000,
+        setTimer: () => {
+          setCalls++
+          return handleValue
+        },
+        clearTimer: (h) => cleared.push(h),
+        tick: async () => {},
+      })
+      loop.start()
+      loop.start() // idempotent regardless of the handle value
+      expect(setCalls).toBe(1)
+      await loop.stop()
+      await loop.stop() // idempotent
+      expect(cleared).toHaveLength(1)
+      expect(cleared[0]).toBe(handleValue)
+      // A fresh start after stop re-arms exactly one timer.
+      loop.start()
+      expect(setCalls).toBe(2)
+      await loop.stop()
+      expect(cleared).toHaveLength(2)
+    },
+  )
+
   test('stop() is safe with no in-flight tick and before start()', async () => {
     const loop = manualLoop({ tick: async () => {} })
     await loop.stop() // never started

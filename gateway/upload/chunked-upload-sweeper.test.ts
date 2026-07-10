@@ -64,6 +64,35 @@ describe('ChunkedUploadSweeper — §F1 quiescing stop()', () => {
     expect(stopped).toBe(true)
   })
 
+  test('stop() awaits a sweep started directly via runOnce() (not just loop-driven)', async () => {
+    const g = gatedStore()
+    const sweeper = new ChunkedUploadSweeper({
+      store: g.store,
+      owner_home: '/tmp/nope',
+      project_slug: 'p',
+      intervalMs: 60_000,
+      setTimer: () => 1,
+      clearTimer: () => {},
+    })
+    // Drive a sweep directly through the PUBLIC api — this tracks on
+    // `this.inflight`, which the loop does not know about.
+    const sweep = sweeper.runOnce()
+    for (let i = 0; i < 50 && !g.entered(); i++) await sleep(2)
+    expect(g.entered()).toBe(true)
+
+    let stopped = false
+    const stopP = sweeper.stop().then(() => {
+      stopped = true
+    })
+    await sleep(10)
+    expect(stopped).toBe(false) // must wait for the manually-triggered sweep
+
+    g.release([])
+    await stopP
+    await sweep
+    expect(stopped).toBe(true)
+  })
+
   test('start()/stop() are idempotent and safe with no in-flight sweep', async () => {
     const g = gatedStore()
     const sweeper = new ChunkedUploadSweeper({

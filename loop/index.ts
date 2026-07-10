@@ -152,7 +152,14 @@ export class SupervisedLoop {
   private readonly setTimer: (fn: () => void, ms: number) => unknown
   private readonly clearTimer: (handle: unknown) => void
 
-  private timer: unknown | null = null
+  // Lifecycle state is a DEDICATED boolean, NOT the timer handle: an injected
+  // `setTimer` returns `unknown`, which permits `null`/`undefined`/`0` as a
+  // legitimate handle. Keying start/stop off the handle value would let a
+  // `null`-returning timer double-register on `start()` and skip `clearTimer`
+  // on `stop()`. `timer` only ever holds whatever `setTimer` returned, for the
+  // one `clearTimer` call.
+  private started = false
+  private timer: unknown = undefined
   private running = false
   private inflight: Promise<void> | null = null
   private lastError: unknown = null
@@ -184,7 +191,8 @@ export class SupervisedLoop {
    * after the interval is armed (fire-and-forget, still single-flighted).
    */
   start(): void {
-    if (this.timer !== null) return
+    if (this.started) return
+    this.started = true
     this.timer = this.setTimer(() => {
       void this.runOnce()
     }, this.intervalMs)
@@ -251,9 +259,12 @@ export class SupervisedLoop {
    * `await loop.stop()`. Idempotent + safe to call when never started.
    */
   async stop(): Promise<void> {
-    if (this.timer !== null) {
+    if (this.started) {
+      this.started = false
+      // Pass the stored handle (whatever `setTimer` returned) to `clearTimer`
+      // exactly once — correct even when that handle is `null`/`undefined`/`0`.
       this.clearTimer(this.timer)
-      this.timer = null
+      this.timer = undefined
     }
     const p = this.inflight
     if (p !== null) {

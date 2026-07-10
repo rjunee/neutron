@@ -89,9 +89,22 @@ export class ChunkedUploadSweeper {
   }
 
   /** Stop + quiesce: awaits the in-flight sweep so a SIGTERM teardown can run
-   *  after `await stop()` without a half-processed batch. */
+   *  after `await stop()` without a half-processed batch. Drains BOTH the
+   *  loop-driven tick (`loop.stop()`) AND any sweep started directly through the
+   *  public `runOnce()` — those coalesce on `this.inflight`, which the loop does
+   *  not track, so a manually-triggered sweep must be awaited here too. */
   async stop(): Promise<void> {
     await this.loop.stop()
+    const sweep = this.inflight
+    if (sweep !== null) {
+      // `runOnceInner` swallows its own row-level errors and never rejects; the
+      // catch is defensive so quiesce can't throw.
+      try {
+        await sweep
+      } catch {
+        /* unreachable — the sweep body contains its own errors */
+      }
+    }
   }
 
   /**
