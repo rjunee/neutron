@@ -16,6 +16,22 @@ export function arr<T>(x: T[] | undefined): T[] {
   return Array.isArray(x) ? x : [];
 }
 
+/**
+ * Coerce ANY value into a string safe to use as a React `<Text>` child. The
+ * client validates structure but not every nested scalar's TYPE; a malformed
+ * field like `session.model: {}` would otherwise be handed to React as an object
+ * child and throw "Objects are not valid as a React child". Primitives stringify;
+ * null/undefined and non-primitives (object/array/function/symbol) collapse to
+ * `fallback` so rendering can NEVER crash regardless of payload.
+ */
+export function str(x: unknown, fallback = '—'): string {
+  if (x === null || x === undefined) return fallback;
+  const t = typeof x;
+  if (t === 'string') return x as string;
+  if (t === 'number' || t === 'boolean' || t === 'bigint') return String(x);
+  return fallback;
+}
+
 export interface DiagnosticsState {
   data: DiagnosticsReport | null;
   loading: boolean;

@@ -214,10 +214,14 @@ const COLLECTION_SECTIONS: ReadonlyArray<{
  * or `null` when it is missing / partial / wrong-shaped. Checks the scalar
  * header (`generated_at`, `project_slug`) and every required section's boolean
  * `available` (reject on violation), and for each iterated collection: rejects a
- * present-but-non-array value, then DROPS malformed elements (null, primitives,
- * or missing the string key the pane renders) so the pane can never deref a bad
- * element (`e.ts` on `null`, `s.key` on a string, …). Returns a normalized copy
- * — the input is not mutated.
+ * present-but-non-array value, then DROPS structurally-malformed elements (null,
+ * primitives, or missing the string key the pane renders) so the pane can never
+ * deref a bad element (`e.ts` on `null`, `s.key` on a string, …). Returns a
+ * normalized copy — the input is not mutated.
+ *
+ * This guards element STRUCTURE; per-field scalar TYPE safety (e.g. a nested
+ * `model: {}`) is guaranteed at render by `str()` in `diagnostics-pane-helpers`,
+ * which coerces every dynamic `<Text>` child to a safe string.
  */
 export function validateDiagnosticsReport(raw: unknown): DiagnosticsReport | null {
   if (!isObject(raw)) return null;

@@ -14,6 +14,7 @@ import {
   arr,
   diagnosticsReducer,
   initialDiagnosticsState,
+  str,
   type DiagnosticsState,
 } from '../lib/diagnostics-pane-helpers';
 import type { DiagnosticsReport } from '../lib/admin-client';
@@ -75,6 +76,34 @@ describe('diagnosticsReducer', () => {
     const fresh = diagnosticsReducer(started, { type: 'fetch-success', report: report('new') });
     expect(fresh.data?.project_slug).toBe('new');
     expect(fresh.error).toBeNull();
+  });
+});
+
+describe('str (safe Text-child coercion — every rendered scalar type)', () => {
+  it('passes strings through', () => {
+    expect(str('hello')).toBe('hello');
+    expect(str('')).toBe('');
+  });
+  it('stringifies numbers, booleans, bigints', () => {
+    expect(str(42)).toBe('42');
+    expect(str(0)).toBe('0');
+    expect(str(true)).toBe('true');
+    expect(str(false)).toBe('false');
+    expect(str(10n)).toBe('10');
+  });
+  it('collapses null / undefined to the fallback', () => {
+    expect(str(null)).toBe('—');
+    expect(str(undefined)).toBe('—');
+    expect(str(null, '?')).toBe('?');
+  });
+  it('collapses NON-PRIMITIVES (object/array/function/symbol) to the fallback — never a React object child', () => {
+    // These are exactly the values React rejects as a Text child.
+    expect(str({})).toBe('—');
+    expect(str({ model: 'x' })).toBe('—');
+    expect(str([1, 2, 3])).toBe('—');
+    expect(str(() => 1)).toBe('—');
+    expect(str(Symbol('s'))).toBe('—');
+    expect(str({}, 'n/a')).toBe('n/a');
   });
 });
 

@@ -16,6 +16,7 @@ import {
   arr,
   diagnosticsReducer,
   initialDiagnosticsState,
+  str,
 } from '../../lib/diagnostics-pane-helpers';
 import { formatError } from './format';
 
@@ -46,7 +47,7 @@ function Section({
         <View style={[styles.dot, available ? styles.dotOk : styles.dotOff]} />
       </View>
       {available ? null : (
-        <Text style={styles.muted}>{note ?? 'not available on this deployment'}</Text>
+        <Text style={styles.muted}>{str(note, 'not available on this deployment')}</Text>
       )}
       {children}
     </View>
@@ -57,7 +58,7 @@ function Row({ label, value }: { label: string; value: string }) {
   return (
     <View style={styles.row}>
       <Text style={styles.rowLabel}>{label}</Text>
-      <Text style={styles.rowValue}>{value}</Text>
+      <Text style={styles.rowValue}>{str(value)}</Text>
     </View>
   );
 }
@@ -135,7 +136,7 @@ export function DiagnosticsPane({ client }: { client: AdminClient }) {
                 <Row label="Deferred writes" value={String(data.gbrain.deferred_count ?? 0)} />
               </>
             ) : data.gbrain.available ? (
-              <Text style={styles.muted}>{data.gbrain.note ?? 'no sync state recorded yet'}</Text>
+              <Text style={styles.muted}>{str(data.gbrain.note, 'no sync state recorded yet')}</Text>
             ) : null}
           </Section>
 
@@ -168,7 +169,7 @@ export function DiagnosticsPane({ client }: { client: AdminClient }) {
               ) : (
                 arr(data.repl_sessions.sessions).map((s) => (
                   <View key={s.key} style={styles.subCard}>
-                    <Text style={styles.subTitle}>{s.key}</Text>
+                    <Text style={styles.subTitle}>{str(s.key)}</Text>
                     <Row label="Model" value={s.model ?? '?'} />
                     <Row label="Respawns" value={String(s.respawn_count ?? 0)} />
                     {s.capped_at ? <Row label="Capped" value={fmtTime(s.capped_at)} /> : null}
@@ -193,7 +194,7 @@ export function DiagnosticsPane({ client }: { client: AdminClient }) {
               ) : (
                 arr(data.cron_jobs.jobs).map((j) => (
                   <View key={j.job_name} style={styles.subCard}>
-                    <Text style={styles.subTitle}>{j.job_name}</Text>
+                    <Text style={styles.subTitle}>{str(j.job_name)}</Text>
                     <Row label="Last run" value={fmtTime(j.last_run_at ?? null)} />
                     <Row label="Status" value={j.last_run_status ?? '—'} />
                     {j.last_run_error ? <Row label="Error" value={j.last_run_error} /> : null}
@@ -214,7 +215,7 @@ export function DiagnosticsPane({ client }: { client: AdminClient }) {
               ) : (
                 arr(data.import_jobs.jobs).map((j) => (
                   <View key={j.job_id} style={styles.subCard}>
-                    <Text style={styles.subTitle}>{j.status ?? '?'}</Text>
+                    <Text style={styles.subTitle}>{str(j.status, '?')}</Text>
                     <Row label="Source" value={j.source ?? '?'} />
                     <Row label="Job" value={j.job_id} />
                     {j.error_code ? (
@@ -237,7 +238,7 @@ export function DiagnosticsPane({ client }: { client: AdminClient }) {
               ) : (
                 arr(data.recent_events.events).slice(0, 20).map((e, i) => (
                   <Text key={i} style={styles.eventLine}>
-                    {fmtTime(e.ts ?? null)} · [{e.level ?? '?'}] {e.module ?? '?'}/{e.event ?? '?'}
+                    {fmtTime(e.ts ?? null)} · [{str(e.level, '?')}] {str(e.module, '?')}/{str(e.event, '?')}
                   </Text>
                 ))
               )
