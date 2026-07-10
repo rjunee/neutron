@@ -218,6 +218,50 @@ describe('SupervisedLoop', () => {
     },
   )
 
+  test('a tick that stops its own loop does not deadlock (self-stop)', async () => {
+    let loop!: SupervisedLoop
+    let tickFinished = false
+    loop = manualLoop({
+      tick: async () => {
+        // A tick asking its own loop to stop must not self-deadlock: `stop()`
+        // detects it is running inside this tick and skips the self-await.
+        await loop.stop()
+        tickFinished = true
+      },
+    })
+    // Bound the whole thing so a regression (deadlock) fails fast instead of hanging.
+    const timeout = new Promise<'timeout'>((r) => setTimeout(() => r('timeout'), 1000))
+    const raced = await Promise.race([loop.runOnce().then(() => 'ran' as const), timeout])
+    expect(raced).toBe('ran')
+    expect(tickFinished).toBe(true)
+    expect(loop.stats().ticks).toBe(1)
+    // An EXTERNAL stop() afterwards still resolves cleanly.
+    await loop.stop()
+  })
+
+  test('external stop() still quiesces an in-flight tick (self-stop guard does not weaken it)', async () => {
+    const gate = deferred()
+    let finished = false
+    const loop = manualLoop({
+      tick: async () => {
+        await gate.promise
+        finished = true
+      },
+    })
+    const t = loop.runOnce()
+    let stopped = false
+    const stopP = loop.stop().then(() => {
+      stopped = true
+    })
+    await Promise.resolve()
+    expect(stopped).toBe(false)
+    gate.resolve()
+    await stopP
+    await t
+    expect(stopped).toBe(true)
+    expect(finished).toBe(true)
+  })
+
   test('stop() is safe with no in-flight tick and before start()', async () => {
     const loop = manualLoop({ tick: async () => {} })
     await loop.stop() // never started

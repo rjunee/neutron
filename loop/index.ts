@@ -39,6 +39,8 @@
  * {@link guardedFire}, the same catch-all this loop runs its tick behind.
  */
 
+import { AsyncLocalStorage } from 'node:async_hooks'
+
 /** Payload handed to {@link SupervisedLoopOptions.onEscalate}. */
 export interface SupervisedLoopEscalation {
   /** The loop's {@link SupervisedLoopOptions.name}. */
@@ -162,6 +164,15 @@ export class SupervisedLoop {
   private timer: unknown = undefined
   private running = false
   private inflight: Promise<void> | null = null
+  /**
+   * Marks the async context of the currently-executing tick. `stop()` reads it
+   * to detect a SELF-STOP — a tick that calls `loop.stop()` on its own loop.
+   * Without this, `stop()` would `await this.inflight` (the very tick that is
+   * awaiting `stop()`), a genuine circular dependency → deadlock. An EXTERNAL
+   * caller runs outside this context (`getStore()` is undefined) and still
+   * quiesces; a self-caller sees the store set and skips the self-await.
+   */
+  private readonly tickContext = new AsyncLocalStorage<true>()
   private lastError: unknown = null
   private tickCount = 0
   private failureCount = 0
@@ -215,10 +226,17 @@ export class SupervisedLoop {
     // passed as a THUNK so a synchronous throw is caught too (otherwise it would
     // escape here and leave `running` stuck true). `guardedFire` never rejects,
     // so `inflight` never carries a rejection.
-    const p = guardedFire(this.name, () => this.tickBody(), (name, err) => {
-      this.lastError = err
-      this.onErrorFn(name, err)
-    })
+    const p = guardedFire(
+      this.name,
+      // Run the tick inside `tickContext` so a self-stop (a tick calling
+      // `loop.stop()`) is detectable and does not deadlock. The context
+      // propagates across the tick's own awaits.
+      () => this.tickContext.run(true, () => this.tickBody()),
+      (name, err) => {
+        this.lastError = err
+        this.onErrorFn(name, err)
+      },
+    )
     const settled = p.then(() => undefined)
     this.inflight = settled
     let ok = false
@@ -267,7 +285,12 @@ export class SupervisedLoop {
       this.timer = undefined
     }
     const p = this.inflight
-    if (p !== null) {
+    // Skip the quiesce-await when `stop()` is invoked FROM WITHIN the running
+    // tick (self-stop): awaiting the current tick from inside it would deadlock.
+    // `tickContext.getStore()` is set only on the tick's async context, so an
+    // external caller (undefined store) still quiesces normally.
+    const selfStop = this.tickContext.getStore() === true
+    if (p !== null && !selfStop) {
       // `guardedFire` never rejects; the catch is defensive.
       try {
         await p
