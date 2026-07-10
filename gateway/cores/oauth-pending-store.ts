@@ -12,6 +12,7 @@
  */
 
 import type { ProjectDb } from '@neutronai/persistence/index.ts'
+import { parseJsonColumn } from '@neutronai/persistence/index.ts'
 
 /** TTL for a pending row — 10 minutes. */
 export const PENDING_TTL_MS = 10 * 60 * 1_000
@@ -129,17 +130,12 @@ export class CoresOAuthPendingStore {
 }
 
 function rowToRecord(row: RawPendingRow): CoresOAuthPendingRow {
-  let labels: string[]
-  try {
-    const parsed: unknown = JSON.parse(row.labels_json)
-    if (!Array.isArray(parsed)) {
-      labels = []
-    } else {
-      labels = parsed.filter((v): v is string => typeof v === 'string')
-    }
-  } catch {
-    labels = []
-  }
+  // Corrupt-policy: fallback to []. Codec degrades corrupt text to [], which
+  // then fails the Array.isArray guard to the same empty label list.
+  const parsed: unknown = parseJsonColumn(row.labels_json, { onCorrupt: 'fallback', fallback: [] })
+  const labels: string[] = Array.isArray(parsed)
+    ? parsed.filter((v): v is string => typeof v === 'string')
+    : []
   return {
     state: row.state,
     project_slug: row.project_slug,

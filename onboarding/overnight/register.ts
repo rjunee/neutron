@@ -27,6 +27,7 @@ import {
 } from 'node:fs'
 import { dirname, join } from 'node:path'
 import type { ProjectDb } from '@neutronai/persistence/index.ts'
+import { parseJsonColumn } from '@neutronai/persistence/index.ts'
 import type {
   CronHandler,
   CronHandlerContext,
@@ -301,8 +302,14 @@ function resolveGeneralTopic(db: ProjectDb): string | null {
     )
     .get()
   if (row === undefined || row === null) return null
+  // Corrupt-policy: return null. The codec rethrows the SyntaxError so the
+  // existing catch (which also absorbs a `null` phase_state property-access)
+  // yields null exactly as before.
   try {
-    const ps = JSON.parse(row.phase_state_json) as Record<string, unknown>
+    const ps = parseJsonColumn(row.phase_state_json, { onCorrupt: 'throw' }) as Record<
+      string,
+      unknown
+    >
     return typeof ps['topic_id'] === 'string' ? ps['topic_id'] : null
   } catch {
     return null

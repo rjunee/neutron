@@ -19,6 +19,7 @@
 import { randomUUID } from 'node:crypto'
 
 import type { ProjectDb } from '@neutronai/persistence/index.ts'
+import { parseJsonColumn } from '@neutronai/persistence/index.ts'
 import {
   validateButtonPrompt,
   type ButtonChoice,
@@ -1090,7 +1091,9 @@ function rowToHistoryTurn(row: PromptRow): ChatHistoryTurn {
   if (typeof value === 'string' && value.length > 0) {
     let display = value
     try {
-      const options = JSON.parse(row.options_json) as ButtonOption[]
+      // Corrupt-policy: log + fall through to raw resolution_value. The codec
+      // rethrows the SyntaxError so the existing catch keeps the console.warn.
+      const options = parseJsonColumn(row.options_json, { onCorrupt: 'throw' }) as ButtonOption[]
       if (Array.isArray(options)) {
         const match = options.find((opt) => opt?.value === value)
         if (match !== undefined) {
@@ -1138,7 +1141,9 @@ function truncatePreview(body: string): string {
 function rowToPrompt(row: PromptRow): ButtonPrompt {
   let options: ButtonOption[]
   try {
-    options = JSON.parse(row.options_json) as ButtonOption[]
+    // Corrupt-policy: rethrow as a typed ButtonStoreError. The codec rethrows
+    // the SyntaxError so the existing catch performs the type conversion.
+    options = parseJsonColumn(row.options_json, { onCorrupt: 'throw' }) as ButtonOption[]
   } catch (err) {
     throw new ButtonStoreError(
       'db_write_failed',

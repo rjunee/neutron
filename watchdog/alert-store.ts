@@ -6,6 +6,7 @@
  */
 
 import type { ProjectDb } from '@neutronai/persistence/index.ts'
+import { parseJsonColumn } from '@neutronai/persistence/index.ts'
 import type { WatchdogAlert, WatchdogKind } from './types.ts'
 
 interface RawAlertRow {
@@ -76,6 +77,6 @@ function rowToAlert(r: RawAlertRow): WatchdogAlert {
     project_slug: r.project_slug,
     detected_at: r.detected_at,
     resolved_at: r.resolved_at,
-    payload: JSON.parse(r.payload_json) as Record<string, unknown>,
+    payload: parseJsonColumn(r.payload_json, { onCorrupt: 'throw' }) as Record<string, unknown>,
   }
 }

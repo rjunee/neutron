@@ -21,6 +21,7 @@
 import { randomUUID } from 'node:crypto'
 
 import type { ProjectDb } from '@neutronai/persistence/index.ts'
+import { parseJsonColumn } from '@neutronai/persistence/index.ts'
 import type {
   OnboardingState,
   OnboardingStateStore,
@@ -340,13 +341,11 @@ function rowToState(row: OnboardingStateRow): OnboardingState {
 }
 
 function parseJson(s: string): Record<string, unknown> | null {
-  try {
-    const v = JSON.parse(s) as unknown
-    if (v !== null && typeof v === 'object' && !Array.isArray(v)) {
-      return v as Record<string, unknown>
-    }
-    return null
-  } catch {
-    return null
+  // Corrupt-policy: silent reset to null (callers apply `?? {}`), matching the
+  // onboarding sub-state reset-to-`{}` behaviour called out in the refactor plan.
+  const v = parseJsonColumn(s, { onCorrupt: 'fallback', fallback: null })
+  if (v !== null && typeof v === 'object' && !Array.isArray(v)) {
+    return v as Record<string, unknown>
   }
+  return null
 }

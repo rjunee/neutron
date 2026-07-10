@@ -26,6 +26,8 @@
  * via separate reads against the events table.
  */
 
+import { parseJsonColumn } from '@neutronai/persistence/index.ts'
+
 /**
  * Locked vocabulary — see brief § 3.3. Forge: add new kinds here as
  * S2 / S3 / S4 work lands; the schema column is plain TEXT so the
@@ -447,13 +449,10 @@ function byCreatedAtAndEventId(a: DocCommentEvent, b: DocCommentEvent): number {
 
 function parseMetadata(raw: string | null): Record<string, unknown> | null {
   if (raw === null || raw.length === 0) return null
-  try {
-    const parsed = JSON.parse(raw)
-    if (parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)) {
-      return parsed as Record<string, unknown>
-    }
-  } catch {
-    /* fall through */
+  // Corrupt-policy: fallback to null (also the non-object result below).
+  const parsed = parseJsonColumn(raw, { onCorrupt: 'fallback', fallback: null })
+  if (parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)) {
+    return parsed as Record<string, unknown>
   }
   return null
 }

@@ -41,6 +41,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
 import type { ProjectDb } from '@neutronai/persistence/index.ts'
+import { parseJsonColumn } from '@neutronai/persistence/index.ts'
 import type { ImportResult } from '../history-import/types.ts'
 import type { CapturedProject } from './action-types.ts'
 import { OVERNIGHT_OPT_IN_KEY } from '../overnight/status-md-sync.ts'
@@ -570,26 +571,24 @@ function chunkMatchesTerms(row: RetainedChunkRow, terms: ReadonlyArray<string>):
 
 /** Defensive parse — accepts `[{name}]` rows or bare string arrays. */
 function parseCandidateNames(json: string): string[] {
-  try {
-    const parsed: unknown = JSON.parse(json)
-    if (!Array.isArray(parsed)) return []
-    const out: string[] = []
-    for (const item of parsed) {
-      if (typeof item === 'string' && item.trim().length > 0) {
-        out.push(item.trim())
-      } else if (
-        item !== null &&
-        typeof item === 'object' &&
-        typeof (item as { name?: unknown }).name === 'string'
-      ) {
-        const name = ((item as { name: string }).name ?? '').trim()
-        if (name.length > 0) out.push(name)
-      }
+  // Corrupt-policy: fallback to []. The codec degrades corrupt text to [],
+  // which then fails no checks below and yields the same empty result.
+  const parsed: unknown = parseJsonColumn(json, { onCorrupt: 'fallback', fallback: [] })
+  if (!Array.isArray(parsed)) return []
+  const out: string[] = []
+  for (const item of parsed) {
+    if (typeof item === 'string' && item.trim().length > 0) {
+      out.push(item.trim())
+    } else if (
+      item !== null &&
+      typeof item === 'object' &&
+      typeof (item as { name?: unknown }).name === 'string'
+    ) {
+      const name = ((item as { name: string }).name ?? '').trim()
+      if (name.length > 0) out.push(name)
     }
-    return out
-  } catch {
-    return []
   }
+  return out
 }
 
 // ---------------------------------------------------------------------------

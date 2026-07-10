@@ -37,6 +37,7 @@
  */
 
 import type { Database, Statement } from 'bun:sqlite'
+import { parseJsonColumn } from '@neutronai/persistence/index.ts'
 
 import type { CommentStore } from '../comments/comment-store.ts'
 
@@ -370,13 +371,10 @@ function normaliseHistory(raw: unknown): NormalisedComment[] {
 
 function parseMetadata(raw: string | null): Record<string, unknown> {
   if (raw === null || raw.length === 0) return {}
-  try {
-    const parsed: unknown = JSON.parse(raw)
-    if (parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)) {
-      return parsed as Record<string, unknown>
-    }
-  } catch {
-    /* fall through to {} */
+  // Corrupt-policy: fallback to {} (also the non-object result below).
+  const parsed: unknown = parseJsonColumn(raw, { onCorrupt: 'fallback', fallback: {} })
+  if (parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)) {
+    return parsed as Record<string, unknown>
   }
   return {}
 }

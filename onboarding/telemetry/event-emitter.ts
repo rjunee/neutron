@@ -25,6 +25,7 @@
 
 import { randomUUID } from 'node:crypto'
 import type { ProjectDb } from '@neutronai/persistence/index.ts'
+import { parseJsonColumn } from '@neutronai/persistence/index.ts'
 import { SqliteOnboardingStateStore } from '../interview/sqlite-state-store.ts'
 
 /**
@@ -564,7 +565,10 @@ export class OnboardingTelemetry {
         attempt_id: r.attempt_id,
         module: r.module,
         event: r.event_name,
-        payload: JSON.parse(r.payload_json) as Record<string, unknown>,
+        payload: parseJsonColumn(r.payload_json, { onCorrupt: 'throw' }) as Record<
+          string,
+          unknown
+        >,
       }
       if (r.duration_ms !== null) out.duration_ms = r.duration_ms
       return out
