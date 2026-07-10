@@ -59,8 +59,15 @@ import type { SyncHook } from '@neutronai/runtime/entity-writer.ts'
 export interface GBrainMemoryWiring {
   // NB: the raw `GBrainStdioMcpClient` transport is intentionally NOT a field
   // here — it stays a local inside `buildGBrainMemory`. Product code must reach
-  // memory only through the typed `MemoryStore` (RA5 / invariant I2); exposing
-  // the transport on this composer-returned shape would be a swap-seam bypass.
+  // memory only through the typed `MemoryStore` (RA5 / invariant I2). This is
+  // layer (ii) of the acquisition boundary: the ENFORCED guarantee is that no
+  // product-scope module can OBTAIN a raw transport via (i) importing the sealed
+  // type [depcruise import-ban], (ii) this composer wiring [MemoryStore only —
+  // guarded by the compile-time probe in build-gbrain-memory.test.ts], or (iii)
+  // a connect provider surface [type-checker acquisition scan]. Exposing the
+  // transport on this returned shape would break (ii). (Deliberate type-erasing
+  // laundering inside the trusted connect/ boundary is a documented out-of-scope
+  // residual — see memory-swap-seam.depcruise.test.ts.)
   /** Admin "Memory" tab read/write surface + `memory_search` backing store. */
   memoryStore: MemoryStore
   /** Entity-writer fan-out hook (page store + typed-edge graph). */

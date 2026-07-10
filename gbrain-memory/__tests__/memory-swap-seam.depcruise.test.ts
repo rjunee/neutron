@@ -28,6 +28,13 @@
  *       Alias resolution uses the TS type-CHECKER, so an aliased re-export
  *       (`export type T = McpClient; export declare const x: T`) is caught.
  *
+ * OUT OF SCOPE (accepted, documented boundary — see the RESIDUAL test below):
+ * deliberate type-ERASING param-echo laundering inside the trusted connect/
+ * backend boundary (a `(client: McpClient): unknown => client` echo whose result
+ * a caller re-widens). Not statically enforced by design; it additionally
+ * presupposes an already-obtained client, which the acquisition boundary denies
+ * to product scope. connect/ is a reviewed integration boundary.
+ *
  * The depcruise probes are written + removed per test (afterEach), so the tree
  * stays clean even on failure.
  */
@@ -384,6 +391,39 @@ describe('RA5 acquisition boundary — no transport PROVIDER outside gbrain-memo
         `import type { McpClient } from '@neutronai/gbrain-memory/mcp-client.ts'`,
         `export function consume(mcp: McpClient): void { void mcp }`,
         `export interface Deps { memory: McpClient }`,
+      ].join('\n'),
+    )
+    expect(scanSourceForTransportProviders(sf, checker)).toEqual([])
+  })
+
+  test('RESIDUAL, OUT OF SCOPE — a type-ERASED connect param-echo + a dynamic product op is NOT statically flagged (by design)', () => {
+    // The adversarial end-to-end regress:
+    //   connect:  export function echo(client: McpClient): unknown { return client }
+    //   product:  const c = echo(x) as { call: Function }; c.call([a, b].join('_'), {})
+    //
+    // This is NOT statically enforced, BY DESIGN — it is an accepted, documented
+    // boundary, not a gap in the enforced guarantee. It presupposes:
+    //   (a) an ALREADY-OBTAINED raw client `x`, which the ACQUISITION BOUNDARY
+    //       denies to product scope: no sealed-type import (depcruise import-ban),
+    //       no wiring leak (buildGBrainMemory returns MemoryStore only — compile-
+    //       time probe), and the composition root hands product code ONLY the
+    //       typed MemoryStore. There is no product-scope SOURCE for `x`; AND
+    //   (b) deliberate type-ERASING launder code written INSIDE the trusted,
+    //       reviewed connect/ integration boundary (the `: unknown` return throws
+    //       away the type so no provider surface names the transport).
+    // Defeating a trusted boundary on purpose while already holding a client is
+    // not something a static rule is meant to stop. The ENFORCED guarantee is
+    // ACQUISITION (the tests above); the product-side dynamic op is the
+    // by-design fully-dynamic case documented in raw-op-seam-ban.test.ts.
+    //
+    // We assert CURRENT behavior HONESTLY (the scan does NOT flag the erased
+    // echo — its return type is `unknown`, not a transport), rather than
+    // pretending it is caught.
+    const { checker, sf } = overlayProgram(
+      'connect/__ra5_residual_echo__.ts',
+      [
+        `import type { McpClient } from '@neutronai/gbrain-memory/mcp-client.ts'`,
+        `export function echo(client: McpClient): unknown { return client }`,
       ].join('\n'),
     )
     expect(scanSourceForTransportProviders(sf, checker)).toEqual([])

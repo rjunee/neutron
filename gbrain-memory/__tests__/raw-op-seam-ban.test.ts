@@ -1,20 +1,18 @@
 /**
  * RA5 (invariant I2) — AST-based ban on raw GBrain op-name CALLS (defense-in-depth).
  *
- * WHERE THE REAL GUARANTEE LIVES (read this first). The ENFORCED invariant is
- * that no product-scope module can OBTAIN a raw GBrain transport instance — so
- * it can't make ANY raw call on one, LITERAL or fully dynamic
- * (`client.call([...].join('_'))`). That ACQUISITION BOUNDARY rests on three
- * real, tested layers (all proven in memory-swap-seam.depcruise.test.ts):
- *   (1) TYPE-SEAL — `GBrainStdioMcpClient` / `McpClient` (the only surfaces that
- *       can name + call a raw op) are internal to `gbrain-memory/`.
- *   (2) IMPORT-BAN — the `memory-backend-swap-seam` depcruise rule forbids a
- *       product module importing them.
- *   (3) NO WIRING LEAK — the one composition module allowed to import the
- *       transport returns only the typed `MemoryStore`, never the transport
- *       (guarded by a compile-time conditional-type probe + an acquisition scan).
- * The fully-dynamic op-name case is therefore prevented by the ACQUISITION
- * boundary, NOT by this scanner.
+ * WHERE THE REAL GUARANTEE LIVES (read this first). The ENFORCED guarantee is
+ * that no product-scope module can OBTAIN a raw GBrain transport instance through
+ * (i) importing the sealed type [depcruise import-ban], (ii) the composer wiring
+ * [returns MemoryStore only; compile-time probe], or (iii) a connect provider
+ * surface [type-checker acquisition scan — alias / re-export / generic resolved].
+ * All three are proven in memory-swap-seam.depcruise.test.ts. Since product code
+ * has no SOURCE for a raw client, it can make no raw call on one — LITERAL or
+ * fully dynamic (`client.call([...].join('_'))`). The fully-dynamic case is
+ * therefore prevented by the ACQUISITION boundary, NOT by this scanner. OUT OF
+ * SCOPE (accepted, documented): deliberate type-erasing param-echo laundering
+ * inside the trusted connect/ backend boundary — see the RESIDUAL test in
+ * memory-swap-seam.depcruise.test.ts.
  *
  * WHAT THIS SCANNER ADDS. SECONDARY defense-in-depth: it catches a raw op NAME
  * that a module writes as a LITERAL or a trivially-constant expression — the
