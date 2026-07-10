@@ -1959,7 +1959,7 @@ the R-behavior block (RB*/RC2/RC3) is the perfect-recall uplift, sequenced last 
 - [x] L1 ✅ #253 · [x] L2 ✅ #255 · [x] L3 ✅ #262 · [x] L4 ✅ #258 · [x] L5 ✅ #280 · [x] L6 ✅ #270 · [x] L7 ✅ #260 — **L-PHASE COMPLETE**
 - [x] C1 ✅ #265 · [x] C2 ✅ #268 · [x] C3a ✅ #272 · [x] C3b ✅ #274 · [x] C3c ✅ #276 · [x] C3d ✅ #278 · [x] C4 ✅ #283 · [~] C5a ✅ #302 (route-manifest half — LANDING_PATHS→generated `landing/routes.ts`; **C5b auth-gate-seam unification DEFERRED, owner-gated** — see note) · [x] C6 ✅ #293 · [ ] C7 · [ ] C8
 - [x] D1 ✅ #282 · [x] D2 ✅ #294 · [ ] D3 · [x] D4 ✅ #285 · [x] D5 ✅ #290 · [x] D6 ✅ #289 · [ ] D7 · [x] D8 ✅ #298 · [x] D9a ✅ #286 · [ ] D9b (MOOT — K11*) · [x] D9c ✅ #300 (ProjectsProposedFlow — router/consumeChoice core already K11b1-deleted) · [x] D9d ✅ #305 (PHASE_DESCRIPTORS + exhaustiveness; STATIC_PHASE_SPECS left — undefined-semantics leaf) — **D9-PHASE COMPLETE**
-- [x] P1 ✅ #284 · [x] P2 ✅ #297 · [x] P3 ✅ #292 · [x] P4 ✅ #304 (table-ownership map + conformance test) · [x] P5 ✅ #299 · [ ] P6 · [ ] P7 · [ ] P8 · [ ] P9 · [x] P10 ✅ #303 · [ ] P11
+- [x] P1 ✅ #284 · [x] P2 ✅ #297 · [x] P3 ✅ #292 · [x] P4 ✅ #304 (table-ownership map + conformance test) · [x] P5 ✅ #299 · [ ] P6 · [ ] P7 · [x] P8 ✅ #307 (single entity-format codec; +pre-existing splitTopLevelCommas backslash fix at the seam) · [x] P9 ✅ #309 (gbrain_sync_state observability, fail-soft byte-identical) · [x] P10 ✅ #303 · [x] P11 ✅ #308 (typed JSON codecs on contract columns via P3 parseJsonColumn)
 - [ ] F1 · [ ] F2 · [ ] F3 · [ ] F4 · [ ] F5 · [ ] F6 · [x] F7 ✅ #296 · [ ] F8 · [x] F9 ✅ #194 (pilot)
 - [x] O1 ✅ #295 · [ ] O2 · [ ] O3 · [ ] O4 · [ ] O5 · [ ] O6 · [ ] O7 · [ ] O8
 - [ ] X1 · [ ] X2 · [ ] X3 · [ ] X4 · [ ] X5 · [ ] X6
