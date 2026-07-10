@@ -43,6 +43,7 @@ import { fileURLToPath } from 'node:url'
 // property.
 export { MOBILE_APP_URL } from '@neutronai/contracts/handoff-config.ts'
 
+import { emitSystemEvent } from '@neutronai/persistence/index.ts'
 import { renderMobileInstallHtml } from './mobile-install-config.ts'
 import { isSpaClientRoute } from './spa-routes.ts'
 // C5 — the landing server OWNS the route predicate/set the per-instance gateway
@@ -621,12 +622,36 @@ export function createLandingServer(options: LandingServerOptions): LandingServe
         minify: true,
         sourcemap: 'none',
       })
-      if (!result.success || result.outputs.length === 0) return null
+      if (!result.success || result.outputs.length === 0) {
+        // O4 — VISIBILITY ONLY: the web chat client silently 404s when this
+        // bundle build fails (return null → /chat-react.js 404). Journal it.
+        // Control flow unchanged (still returns null); emit can never throw.
+        void emitSystemEvent({
+          event: 'bundle_build_failed',
+          module: 'landing',
+          payload: {
+            bundle: 'chat-react.js',
+            entry: chat_react_entry_path,
+            logs: result.logs.map((l) => String(l)),
+          },
+        })
+        return null
+      }
       const out = result.outputs[0]
       if (out === undefined) return null
       chat_react_js_cache = await out.text()
       return chat_react_js_cache
-    } catch {
+    } catch (err) {
+      void emitSystemEvent({
+        event: 'bundle_build_failed',
+        module: 'landing',
+        level: 'error',
+        payload: {
+          bundle: 'chat-react.js',
+          entry: chat_react_entry_path,
+          error: err instanceof Error ? err.message : String(err),
+        },
+      })
       return null
     }
   }
@@ -681,12 +706,33 @@ export function createLandingServer(options: LandingServerOptions): LandingServe
         minify: false,
         sourcemap: 'none',
       })
-      if (!result.success || result.outputs.length === 0) return null
+      if (!result.success || result.outputs.length === 0) {
+        void emitSystemEvent({
+          event: 'bundle_build_failed',
+          module: 'landing',
+          payload: {
+            bundle: 'invite.js',
+            entry: invite_ts_path,
+            logs: result.logs.map((l) => String(l)),
+          },
+        })
+        return null
+      }
       const out = result.outputs[0]
       if (out === undefined) return null
       invite_js_cache = await out.text()
       return invite_js_cache
-    } catch {
+    } catch (err) {
+      void emitSystemEvent({
+        event: 'bundle_build_failed',
+        module: 'landing',
+        level: 'error',
+        payload: {
+          bundle: 'invite.js',
+          entry: invite_ts_path,
+          error: err instanceof Error ? err.message : String(err),
+        },
+      })
       return null
     }
   }

@@ -29,7 +29,11 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { applyMigrations } from '@neutronai/migrations/runner.ts'
-import { ProjectDb } from '@neutronai/persistence/index.ts'
+import {
+  ProjectDb,
+  registerSystemEventSink,
+  type SystemEventInput,
+} from '@neutronai/persistence/index.ts'
 import { ButtonStore } from '@neutronai/channels/button-store.ts'
 import type { ButtonPrompt } from '@neutronai/channels/button-primitive.ts'
 import {
@@ -389,5 +393,71 @@ describe('pollImportRunningTick — progress-aware timeout (integration)', () =>
     expect(out.state?.phase).toBe('import_analysis_presented')
     expect(out.state?.phase_state['import_failed']).toBe(true)
     expect(cancels).toEqual(['job-stuck']) // runner cancelled to stop the burn
+  })
+})
+
+describe('O4 — import_orphaned degrade journal', () => {
+  const T0 = 7_000_000_000_000
+
+  test('a runner that lost the job (status→null) emits ONE import_orphaned row + still fails the sub_step', async () => {
+    const rows: SystemEventInput[] = []
+    registerSystemEventSink({
+      record(input) {
+        rows.push(input)
+        return { id: String(rows.length) }
+      },
+    })
+    try {
+      const runner: ImportJobRunnerHook = {
+        start: async () => ({ job_id: 'ghost' }),
+        status: async () => null, // runner has no record of the job → orphaned
+        cancel: async () => {},
+        synthesizeOnDemand: async () => null,
+      }
+      const engine = buildEngine(runner)
+      await seedImportRunning('ghost', T0)
+      const out = await engine.pollImportRunningTick({
+        project_slug: OWNER,
+        user_id: USER,
+        observed_at: T0 + 1000,
+      })
+      // Degrade behaviour UNCHANGED: the orphaned job surfaces the hard-failure
+      // prompt (a `failed` sub_step) without throwing.
+      expect(out).toBeDefined()
+      expect(sentPrompts.length).toBeGreaterThan(0)
+      const orphaned = rows.filter((r) => r.event === 'import_orphaned')
+      expect(orphaned).toHaveLength(1)
+      expect(orphaned[0]).toMatchObject({ module: 'onboarding' })
+      expect(orphaned[0]?.payload).toMatchObject({ job_id: 'ghost', source: 'claude-zip' })
+    } finally {
+      registerSystemEventSink(null)
+    }
+  })
+
+  test('a throwing journal sink does NOT break the orphaned-job hard-failure path', async () => {
+    registerSystemEventSink({
+      record() {
+        throw new Error('journal write failed')
+      },
+    })
+    try {
+      const runner: ImportJobRunnerHook = {
+        start: async () => ({ job_id: 'ghost2' }),
+        status: async () => null,
+        cancel: async () => {},
+        synthesizeOnDemand: async () => null,
+      }
+      const engine = buildEngine(runner)
+      await seedImportRunning('ghost2', T0)
+      const out = await engine.pollImportRunningTick({
+        project_slug: OWNER,
+        user_id: USER,
+        observed_at: T0 + 1000,
+      })
+      expect(out).toBeDefined()
+      expect(sentPrompts.length).toBeGreaterThan(0)
+    } finally {
+      registerSystemEventSink(null)
+    }
   })
 })

@@ -3,7 +3,12 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { applyMigrations } from '@neutronai/migrations/runner.ts'
-import { ProjectDb } from '@neutronai/persistence/index.ts'
+import {
+  ProjectDb,
+  registerSystemEventSink,
+  type SystemEventInput,
+  type SystemEventSink,
+} from '@neutronai/persistence/index.ts'
 import { CronJobRegistry, validateJobName } from './jobs.ts'
 import { CronHandlerRegistry } from './handlers.ts'
 import { CronScheduler } from './scheduler.ts'
@@ -123,6 +128,119 @@ describe('CronScheduler.fireOnce', () => {
     const result = await scheduler.fireOnce('nope')
     expect(result.status).toBe('error')
     expect(result.detail).toMatch(/unknown job/)
+  })
+})
+
+describe('O4 — cron_job_error degrade journal (rising edge)', () => {
+  // Synchronous in-memory sink: emitSystemEventSafe calls record() synchronously
+  // inside the (voided) emit, so rows land before fireOnce's await chain resolves.
+  function fakeSink(): { rows: SystemEventInput[]; sink: SystemEventSink } {
+    const rows: SystemEventInput[] = []
+    return {
+      rows,
+      sink: {
+        record(input: SystemEventInput) {
+          rows.push(input)
+          return { id: String(rows.length) }
+        },
+      },
+    }
+  }
+
+  afterEach(() => registerSystemEventSink(null))
+
+  function flakyScheduler(): { scheduler: CronScheduler; setMode: (m: 'fail' | 'ok') => void } {
+    const jobs = new CronJobRegistry()
+    const handlers = new CronHandlerRegistry()
+    jobs.register({
+      name: 'flaky',
+      description: '',
+      schedule: { kind: 'interval_ms', interval_ms: 1000 },
+      handler: 'h',
+    })
+    let mode: 'fail' | 'ok' = 'fail'
+    handlers.register('h', async () => {
+      if (mode === 'fail') throw new Error('handler boom')
+      return { status: 'ok' as const }
+    })
+    return {
+      scheduler: new CronScheduler({ jobs, handlers, db, project_slug: 't1' }),
+      setMode: (m) => {
+        mode = m
+      },
+    }
+  }
+
+  test('fires exactly ONE row on the healthy→error edge, NOT on every failing poll', async () => {
+    const { rows, sink } = fakeSink()
+    registerSystemEventSink(sink)
+    const { scheduler } = flakyScheduler()
+    await scheduler.fireOnce('flaky') // healthy→error: emit
+    await scheduler.fireOnce('flaky') // error→error: NO emit (rising-edge dedup)
+    await scheduler.fireOnce('flaky') // error→error: NO emit
+    expect(rows).toHaveLength(1)
+    expect(rows[0]).toMatchObject({ event: 'cron_job_error', module: 'cron', project_slug: 't1' })
+    expect(rows[0]?.payload).toMatchObject({ job_name: 'flaky', error: 'handler boom' })
+  })
+
+  test('re-fires after recovery (error→ok→error is a fresh rising edge)', async () => {
+    const { rows, sink } = fakeSink()
+    registerSystemEventSink(sink)
+    const { scheduler, setMode } = flakyScheduler()
+    await scheduler.fireOnce('flaky') // →error: emit #1
+    setMode('ok')
+    await scheduler.fireOnce('flaky') // →ok: no emit, clears the edge
+    setMode('fail')
+    await scheduler.fireOnce('flaky') // →error again: emit #2
+    expect(rows).toHaveLength(2)
+  })
+
+  test('healthy job never emits; a write-throwing sink does NOT break the fire', async () => {
+    const jobs = new CronJobRegistry()
+    const handlers = new CronHandlerRegistry()
+    jobs.register({
+      name: 'good',
+      description: '',
+      schedule: { kind: 'interval_ms', interval_ms: 1000 },
+      handler: 'h',
+    })
+    handlers.register('h', async () => ({ status: 'ok' as const }))
+    // Healthy path: no sink interaction at all.
+    let recorded = 0
+    registerSystemEventSink({
+      record() {
+        recorded++
+        return { id: 'x' }
+      },
+    })
+    const okScheduler = new CronScheduler({ jobs, handlers, db, project_slug: 't1' })
+    const okResult = await okScheduler.fireOnce('good')
+    expect(okResult.status).toBe('ok')
+    expect(recorded).toBe(0)
+
+    // Degrade path with a THROWING sink: the fire still completes + records state.
+    const jobs2 = new CronJobRegistry()
+    const handlers2 = new CronHandlerRegistry()
+    jobs2.register({
+      name: 'bad',
+      description: '',
+      schedule: { kind: 'interval_ms', interval_ms: 1000 },
+      handler: 'h2',
+    })
+    handlers2.register('h2', async () => {
+      throw new Error('degrade boom')
+    })
+    registerSystemEventSink({
+      record() {
+        throw new Error('journal write failed')
+      },
+    })
+    const badScheduler = new CronScheduler({ jobs: jobs2, handlers: handlers2, db, project_slug: 't1' })
+    const badResult = await badScheduler.fireOnce('bad')
+    expect(badResult.status).toBe('error')
+    expect(badResult.detail).toBe('degrade boom')
+    const state = new CronStateStore(db).get('bad', 't1')
+    expect(state?.last_run_status).toBe('error')
   })
 })
 

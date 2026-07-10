@@ -3,7 +3,7 @@ import { dirname, join } from 'node:path'
 import type { WebSocketHandler } from 'bun'
 import { applyMigrationsToProjectDb } from '@neutronai/migrations/runner.ts'
 import { shutdownAllPersistentRepls } from '@neutronai/runtime/adapters/claude-code/persistent/persistent-repl-substrate.ts'
-import { ProjectDb } from '@neutronai/persistence/index.ts'
+import { ProjectDb, SystemEventsStore, registerSystemEventSink } from '@neutronai/persistence/index.ts'
 import { MAX_UPLOAD_BYTES_DEFAULT } from './upload/import-upload-handler.ts'
 // C2 OSS-split (2026-06-10) — the Managed production composer
 // (`buildDefaultRealModeComposer`, formerly ~4800 lines of this file)
@@ -220,6 +220,13 @@ export async function boot(options: BootOptions = {}): Promise<BootHandle> {
 
   const db = ProjectDb.open(dbPath)
   applyMigrationsToProjectDb(db)
+
+  // O4 — register the process-wide system_events degradation journal sink
+  // ONCE, right after migrations apply (so `system_events` exists). Every
+  // silent fail-soft / degrade site reaches this via the ambient registry
+  // (persistence/system-events.ts) and emits a VISIBILITY-ONLY row; when this
+  // registration hasn't run (unit tests, sidecar tools) each emit is a no-op.
+  registerSystemEventSink(new SystemEventsStore({ db }))
 
   const project_slug = resolveOwnerSlugFromConfig(config)
   const bootedAt = Date.now()

@@ -17,6 +17,7 @@ import {
   deriveIdempotencyKey,
   type ButtonChoice,
 } from '@neutronai/channels/button-primitive.ts'
+import { emitSystemEvent } from '@neutronai/persistence/index.ts'
 import {
   isLegalTransition,
   TERMINAL_PHASES,
@@ -844,6 +845,15 @@ export async function pollImportRunningAndAdvance(
     if (job === null) {
       // The runner has no record of this job — treat as a hard failure
       // so the user can retry or skip.
+      // O4 — VISIBILITY ONLY: journal the orphaned import (runner lost the
+      // job) before the unchanged hard-failure UX. Fire-and-forget emit that
+      // can never throw.
+      void emitSystemEvent({
+        event: 'import_orphaned',
+        module: 'onboarding',
+        level: 'error',
+        payload: { job_id, source, phase: state.phase },
+      })
       return await self.emitImportRunningPromptSpec(input, state, observed_at, {
         sub_step: 'failed',
         source,

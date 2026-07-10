@@ -20,6 +20,11 @@ import { join } from 'node:path'
 
 import { memoizeCredentialPoolByEnvMtime } from '../memoize-credential-pool.ts'
 import {
+  registerSystemEventSink,
+  type SystemEventInput,
+  type SystemEventSink,
+} from '@neutronai/persistence/index.ts'
+import {
   newCredentialPool,
   reportFailure,
   selectCredential,
@@ -411,4 +416,103 @@ test('all-cooldown probe does NOT mutate use_count on the steady-state hot path 
   // No selection happened via the resolver itself — use_count stays 0 on both.
   expect(p4!.credentials[0]!.use_count).toBe(0)
   expect(p4!.credentials[1]!.use_count).toBe(0)
+})
+
+// ── O4: credential_all_cooldown degrade journal (rising edge) ───────────────
+
+function fakeSink(): { rows: SystemEventInput[]; sink: SystemEventSink } {
+  const rows: SystemEventInput[] = []
+  return {
+    rows,
+    sink: {
+      record(input: SystemEventInput) {
+        rows.push(input)
+        return { id: String(rows.length) }
+      },
+    },
+  }
+}
+
+test('O4 — emits ONE credential_all_cooldown row per cooldown episode, not per wedged re-resolve', async () => {
+  const { rows, sink } = fakeSink()
+  registerSystemEventSink(sink)
+  try {
+    const envPath = join(owner_home, '.env')
+    writeFileSync(envPath, 'ANTHROPIC_API_KEY=sk-test\n')
+    const pinned = new Date(Date.now() - 60_000)
+    utimesSync(envPath, pinned, pinned)
+
+    let storeKeys: StoreKey[] = [{ id: 'anthropic:k1', kind: 'api_key', secret: 'sk-1' }]
+    const resolver = memoizeCredentialPoolByEnvMtime({
+      owner_home,
+      resolve: async () => newCredentialPool({ strategy: 'fill_first', credentials: storeKeys }),
+    })
+
+    // Dispatch 1 — healthy resolve + select, then wedge k1 on a 402. No emit yet
+    // (the wedge lands on the live pool; the memoizer hasn't returned wedged).
+    const pool1 = await resolver()
+    const c1 = selectCredential(pool1!)
+    reportFailure(pool1!, c1!.id, 402)
+    expect(rows).toHaveLength(0)
+
+    // Dispatch 2 — all-cooldown re-resolve returns the wedged pool → RISING EDGE emit #1.
+    await resolver()
+    // Dispatch 3 — still wedged → latched, NO second emit.
+    await resolver()
+    expect(rows).toHaveLength(1)
+    expect(rows[0]).toMatchObject({ event: 'credential_all_cooldown', module: 'credentials' })
+    expect(rows[0]?.payload).toMatchObject({ credential_count: 1 })
+
+    // Recovery — operator adds a usable key; next resolve is healthy → latch resets.
+    storeKeys = [
+      { id: 'anthropic:k1', kind: 'api_key', secret: 'sk-1' },
+      { id: 'anthropic:k2', kind: 'api_key', secret: 'sk-2' },
+    ]
+    const recovered = await resolver()
+    expect(selectCredential(recovered!)).not.toBeNull()
+    expect(rows).toHaveLength(1) // healthy path emits nothing
+
+    // Wedge the whole set again → fresh rising edge → emit #2.
+    const c2 = selectCredential(recovered!)
+    reportFailure(recovered!, c2!.id, 402)
+    // k1 was carried forward already cooling; ensure both are wedged.
+    for (const cr of recovered!.credentials) reportFailure(recovered!, cr.id, 402)
+    expect(selectCredential(recovered!)).toBeNull()
+    await resolver()
+    expect(rows).toHaveLength(2)
+  } finally {
+    registerSystemEventSink(null)
+  }
+})
+
+test('O4 — a throwing journal sink does NOT break the wedged-cache degrade decision', async () => {
+  registerSystemEventSink({
+    record() {
+      throw new Error('journal write failed')
+    },
+  })
+  try {
+    const envPath = join(owner_home, '.env')
+    writeFileSync(envPath, 'ANTHROPIC_API_KEY=sk-test\n')
+    const pinned = new Date(Date.now() - 60_000)
+    utimesSync(envPath, pinned, pinned)
+    const resolver = memoizeCredentialPoolByEnvMtime({
+      owner_home,
+      resolve: async () =>
+        newCredentialPool({
+          strategy: 'fill_first',
+          credentials: [{ id: 'anthropic:k1', kind: 'api_key', secret: 'sk-1' }],
+        }),
+    })
+    const pool1 = await resolver()
+    const c1 = selectCredential(pool1!)
+    reportFailure(pool1!, c1!.id, 402)
+    // Wedged re-resolve with a throwing sink: the degrade decision is unchanged —
+    // the SAME wedged pool is returned and selectCredential still yields null.
+    const pool2 = await resolver()
+    expect(pool2).toBe(pool1)
+    expect(selectCredential(pool2!)).toBeNull()
+  } finally {
+    registerSystemEventSink(null)
+  }
 })

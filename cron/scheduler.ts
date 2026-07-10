@@ -27,6 +27,7 @@
  */
 
 import { guardedFire } from '@neutronai/loop'
+import { emitSystemEvent } from '@neutronai/persistence/index.ts'
 import type { ProjectDb } from '@neutronai/persistence/index.ts'
 import {
   hostTimeZone,
@@ -393,6 +394,11 @@ export class CronScheduler {
       return { status: 'error', detail: `handler '${job.handler}' not registered` }
     }
     if (entry) entry.in_flight = true
+    // O4 rising-edge dedup: capture the PRIOR persisted status BEFORE this fire
+    // overwrites cron_state, so the degrade journal only fires on the
+    // healthy→error TRANSITION (not on every poll of a persistently-failing
+    // job). Read-only; does not affect the fire.
+    const prior_status = this.state.get(name, this.project_slug)?.last_run_status ?? null
     const fired_at = this.now()
     let status: CronHandlerStatus = 'ok'
     let detail: string | undefined
@@ -417,6 +423,18 @@ export class CronScheduler {
       status,
       error,
     })
+    // O4 — VISIBILITY ONLY: journal the degrade on the RISING EDGE only
+    // (prior status was not 'error', this fire IS). Control flow is unchanged;
+    // fire-and-forget emit that can never throw.
+    if (status === 'error' && prior_status !== 'error') {
+      void emitSystemEvent({
+        event: 'cron_job_error',
+        module: 'cron',
+        level: 'error',
+        project_slug: this.project_slug,
+        payload: { job_name: name, error: error ?? undefined, duration_ms },
+      })
+    }
     return detail !== undefined ? { status, detail } : { status }
   }
 

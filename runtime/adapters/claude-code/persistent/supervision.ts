@@ -3,6 +3,7 @@
 // the model-update watchdog, and test/operator introspection (D2 split).
 
 import { existsSync, statSync } from 'node:fs'
+import { emitSystemEvent } from '@neutronai/persistence/index.ts'
 import { getBestModel, getKnownFallbackModels, setBestModelOverride } from '../../../models.ts'
 import type { AgentSpec } from '../../../substrate.ts'
 import { type CwdDriftSupervisedEntry, type CwdDriftTickResult, type CwdProbe, runCwdDriftTick } from './cwd-drift-watchdog.ts'
@@ -228,7 +229,10 @@ export function respawnReplSession(
   try {
     // Cross-process guard + cap enforcement under the registry flock.
     const decision = withRegistry<
-      { kind: 'go'; record: ReplRegistryRecord } | { kind: 'no-record' } | { kind: 'in-flight' } | { kind: 'capped' }
+      | { kind: 'go'; record: ReplRegistryRecord }
+      | { kind: 'no-record' }
+      | { kind: 'in-flight' }
+      | { kind: 'capped'; just_tripped?: boolean }
     >(registryPath, (registry) => {
       const rec = registry[sessionKey]
       if (!rec) return { registry, result: { kind: 'no-record' } }
@@ -249,8 +253,12 @@ export function respawnReplSession(
       if (rec.capped_at !== undefined) return { registry, result: { kind: 'capped' } }
       if (recentRespawnCount(rec, now) >= RESPAWN_CAP_MAX) {
         // Trip the hard cap — auto-recovery OFF until an operator clears it.
+        // `just_tripped` marks the healthy→capped RISING EDGE (the `capped_at`
+        // guard above returns for an already-capped session) so the O4 degrade
+        // journal fires ONCE per cap episode, not on every subsequent respawn
+        // attempt.
         registry[sessionKey] = { ...rec, capped_at: now }
-        return { registry, result: { kind: 'capped' } }
+        return { registry, result: { kind: 'capped', just_tripped: true } }
       }
       // CLAIM the respawn atomically under the flock: stamp in-flight BEFORE
       // releasing the lock so a racing process/tick that acquires the lock next
@@ -263,7 +271,20 @@ export function respawnReplSession(
 
     if (decision.kind === 'no-record') return { ok: false, reason: 'session-not-found', sessionKey }
     if (decision.kind === 'in-flight') return { ok: false, reason: 'spawn-failed', sessionKey }
-    if (decision.kind === 'capped') return { ok: false, reason: 'spawn-failed', sessionKey }
+    if (decision.kind === 'capped') {
+      // O4 — VISIBILITY ONLY: journal the hard-cap trip on the rising edge
+      // (emitted outside the registry flock so the locked critical section
+      // stays pure). Control flow unchanged; emit can never throw.
+      if (decision.just_tripped === true) {
+        void emitSystemEvent({
+          event: 'repl_session_capped',
+          module: 'repl',
+          level: 'error',
+          payload: { session_key: sessionKey, respawn_cap_max: RESPAWN_CAP_MAX, trigger },
+        })
+      }
+      return { ok: false, reason: 'spawn-failed', sessionKey }
+    }
 
     const deps = makeReplRespawnDeps(options)
     if (!shouldPostRespawnNotice(trigger)) {
