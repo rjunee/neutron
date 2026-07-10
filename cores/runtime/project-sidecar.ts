@@ -188,11 +188,27 @@ export function assertWithinProjectsBoundary(
     opts.makeError ??
     ((pid, resolved_path, boundary) =>
       new CorePathTraversalError(pid, resolved_path, boundary))
+  // Anchor the boundary to the REAL owner_home. If `<owner_home>/Projects`
+  // is ITSELF a symlink escaping owner_home, `realpath(Projects)` would be
+  // an outside dir that then "contains" every target — so the boundary is
+  // only trustworthy when its real path lives directly under the real
+  // owner_home. If owner_home / Projects don't exist yet there is nothing
+  // to symlink through, so the lexical guard alone is authoritative.
+  let realOwnerHome: string
+  try {
+    realOwnerHome = realpathSync(opts.owner_home)
+  } catch {
+    return
+  }
   let realBoundary: string
   try {
     realBoundary = realpathSync(owner_projects_dir)
   } catch {
     return
+  }
+  if (realBoundary !== join(realOwnerHome, 'Projects')) {
+    // Projects is a symlink (or otherwise resolves) outside owner_home.
+    throw makeError(opts.project_id, realBoundary, owner_projects_dir)
   }
   let probe = resolvePath(opts.target)
   while (!existsSync(probe) && dirname(probe) !== probe) {

@@ -248,6 +248,30 @@ describe('ProjectSidecarResolver — mechanics + guard', () => {
     }
   })
 
+  test('rejects when the Projects boundary ITSELF is a symlink escaping owner_home, no outside write', async () => {
+    const outside = mkdtempSync(join(tmpdir(), 'boundary-outside-'))
+    try {
+      // `<owner_home>/Projects` is a symlink to an outside dir — realpath of
+      // the boundary would otherwise "contain" everything. The anchor check
+      // (real Projects must live directly under real owner_home) rejects it.
+      symlinkSync(outside, join(tmp, 'Projects'), 'dir')
+
+      expect(() =>
+        safeResolveProjectRoot({ owner_home: tmp, project_id: 'proj-a' }),
+      ).toThrow(CorePathTraversalError)
+
+      const { resolver, state } = makeResolver()
+      await expect(resolver.resolve('proj-a')).rejects.toThrow(
+        CorePathTraversalError,
+      )
+      expect(state.builds).toBe(0)
+      expect(existsSync(join(outside, 'proj-a'))).toBe(false)
+      resolver.closeAll()
+    } finally {
+      rmSync(outside, { recursive: true, force: true })
+    }
+  })
+
   test('rejects a symlink at the FINAL sidecar dir (below a real project root), no outside DB', async () => {
     const outside = mkdtempSync(join(tmpdir(), 'sidecar-deep-outside-'))
     try {
