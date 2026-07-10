@@ -75,12 +75,10 @@ export function buildInstanceDiagnosticsSources(
           ORDER BY started_at DESC`,
         [project_slug],
       ),
-    recentEvents: () => {
-      const all = telemetry.list(project_slug)
-      // `list()` is ts ASC + unbounded — take the newest `maxEvents`, newest first.
-      const tail = all.slice(Math.max(0, all.length - maxEvents))
-      return tail.reverse()
-    },
+    // Bounded at the DB (`ORDER BY ts DESC LIMIT`) — a long-lived instance reads
+    // + parses at most `maxEvents` rows per hit, not the whole event history.
+    // `listRecent` already returns newest-first.
+    recentEvents: () => telemetry.listRecent(project_slug, maxEvents),
     replRegistry: () => ({
       path: registryPath,
       // Propagate corruption/read errors as a throw → the section renders

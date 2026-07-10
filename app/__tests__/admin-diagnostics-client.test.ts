@@ -162,6 +162,40 @@ describe('AdminClient.getDiagnostics', () => {
     await expect(client.getDiagnostics()).rejects.toMatchObject({ code: 'malformed_response' });
   });
 
+  it('drops malformed ELEMENTS (null / primitive / missing-key) in every collection, keeps valid ones', async () => {
+    const report = {
+      ...sampleReport(),
+      repl_sessions: { available: true, sessions: [null, 'x', { no: 'key' }, { key: 'sess-ok', model: 'sonnet' }] },
+      cron_jobs: { available: true, jobs: [null, 42, { missing: 'name' }, { job_name: 'nudge', last_run_status: 'ok' }] },
+      import_jobs: { available: true, jobs: ['nope', { no_id: 1 }, { job_id: 'j-ok', status: 'failed' }] },
+      recent_events: { available: true, events: [null, 7, { ts: 1, level: 'error' }] },
+    } as unknown;
+    const stub = makeFetchStub(() => ({ status: 200, body: { ok: true, diagnostics: report } }));
+    globalThis.fetch = stub.fetch;
+    const client = new AdminClient({ base_url: 'https://gw', token: 'tok' });
+
+    const out = await client.getDiagnostics();
+    // Only the well-shaped element survives in each collection.
+    expect(out.repl_sessions.sessions).toEqual([{ key: 'sess-ok', model: 'sonnet' }]);
+    expect(out.cron_jobs.jobs).toEqual([{ job_name: 'nudge', last_run_status: 'ok' }]);
+    expect(out.import_jobs.jobs).toEqual([{ job_id: 'j-ok', status: 'failed' }]);
+    expect(out.recent_events.events).toEqual([{ ts: 1, level: 'error' }]);
+  });
+
+  it('an all-malformed collection normalizes to an empty array (never crashes the pane)', async () => {
+    const report = {
+      ...sampleReport(),
+      recent_events: { available: true, events: [null, 1, 'x', {}] }, // {} kept (events need no key)
+      repl_sessions: { available: true, sessions: [null, 1, 'x'] }, // all dropped
+    } as unknown;
+    const stub = makeFetchStub(() => ({ status: 200, body: { ok: true, diagnostics: report } }));
+    globalThis.fetch = stub.fetch;
+    const client = new AdminClient({ base_url: 'https://gw', token: 'tok' });
+    const out = await client.getDiagnostics();
+    expect(out.repl_sessions.sessions).toEqual([]);
+    expect(out.recent_events.events).toEqual([{}]);
+  });
+
   it('a malformed/empty error body still yields a typed error (no throw-through)', async () => {
     const stub = makeFetchStub(() => ({ status: 500, body: null, noJson: true }));
     globalThis.fetch = stub.fetch;

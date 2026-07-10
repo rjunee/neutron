@@ -184,42 +184,66 @@ export interface DiagnosticsReport {
   };
 }
 
-/** The sections the Diagnostics pane dereferences — each must be an object
- *  carrying a boolean `available`. The optional value is the collection field
- *  the pane iterates with `.map()`/`.slice()`; when present it MUST be an array. */
-const DIAGNOSTICS_SECTIONS: ReadonlyArray<readonly [section: string, collection: string | null]> = [
-  ['gbrain', null],
-  ['credentials', null],
-  ['repl_sessions', 'sessions'],
-  ['cron_jobs', 'jobs'],
-  ['import_jobs', 'jobs'],
-  ['recent_events', 'events'],
+/** Sections with NO iterated collection — validated for object + boolean `available`. */
+const SCALAR_SECTIONS = ['gbrain', 'credentials'] as const;
+
+function isObject(x: unknown): x is Record<string, unknown> {
+  return x !== null && typeof x === 'object';
+}
+
+/**
+ * Sections the pane iterates. `collection` is the array field; `keyField`, when
+ * set, is the element property the pane uses as a React key AND dereferences,
+ * so it must be a string — an element missing it (or that is null / a primitive)
+ * would crash rendering and is DROPPED. Events have no key field (rendered by
+ * index) so any non-null object element is kept.
+ */
+const COLLECTION_SECTIONS: ReadonlyArray<{
+  section: string;
+  collection: string;
+  keyField: string | null;
+}> = [
+  { section: 'repl_sessions', collection: 'sessions', keyField: 'key' },
+  { section: 'cron_jobs', collection: 'jobs', keyField: 'job_name' },
+  { section: 'import_jobs', collection: 'jobs', keyField: 'job_id' },
+  { section: 'recent_events', collection: 'events', keyField: null },
 ];
 
 /**
- * Runtime-validate a diagnostics payload into a `DiagnosticsReport`, or `null`
- * when it is missing / partial / wrong-shaped. Checks the scalar header
- * (`generated_at`, `project_slug`), every required section's boolean
- * `available`, AND that each section's iterated collection (when present) is an
- * array — exactly what the pane dereferences (`.available`, `.map()`, `.slice()`)
- * — so a partial or wrong-typed object can never slip through and crash the UI.
+ * Runtime-validate + NORMALIZE a diagnostics payload into a `DiagnosticsReport`,
+ * or `null` when it is missing / partial / wrong-shaped. Checks the scalar
+ * header (`generated_at`, `project_slug`) and every required section's boolean
+ * `available` (reject on violation), and for each iterated collection: rejects a
+ * present-but-non-array value, then DROPS malformed elements (null, primitives,
+ * or missing the string key the pane renders) so the pane can never deref a bad
+ * element (`e.ts` on `null`, `s.key` on a string, …). Returns a normalized copy
+ * — the input is not mutated.
  */
 export function validateDiagnosticsReport(raw: unknown): DiagnosticsReport | null {
-  if (raw === null || typeof raw !== 'object') return null;
-  const r = raw as Record<string, unknown>;
-  if (typeof r.generated_at !== 'number') return null;
-  if (typeof r.project_slug !== 'string') return null;
-  for (const [key, collection] of DIAGNOSTICS_SECTIONS) {
-    const section = r[key];
-    if (section === null || typeof section !== 'object') return null;
-    const s = section as Record<string, unknown>;
-    if (typeof s.available !== 'boolean') return null;
-    // A present collection field must be an array (the pane maps over it).
-    if (collection !== null && s[collection] !== undefined && !Array.isArray(s[collection])) {
-      return null;
-    }
+  if (!isObject(raw)) return null;
+  if (typeof raw.generated_at !== 'number') return null;
+  if (typeof raw.project_slug !== 'string') return null;
+
+  for (const key of SCALAR_SECTIONS) {
+    const section = raw[key];
+    if (!isObject(section) || typeof section.available !== 'boolean') return null;
   }
-  return raw as DiagnosticsReport;
+
+  const normalized: Record<string, unknown> = { ...raw };
+  for (const { section, collection, keyField } of COLLECTION_SECTIONS) {
+    const s = raw[section];
+    if (!isObject(s) || typeof s.available !== 'boolean') return null;
+    const copy: Record<string, unknown> = { ...s };
+    const coll = s[collection];
+    if (coll !== undefined) {
+      if (!Array.isArray(coll)) return null; // gross shape violation → reject whole
+      copy[collection] = coll.filter(
+        (el) => isObject(el) && (keyField === null || typeof el[keyField] === 'string'),
+      );
+    }
+    normalized[section] = copy;
+  }
+  return normalized as unknown as DiagnosticsReport;
 }
 
 export interface AdminClientOptions {
