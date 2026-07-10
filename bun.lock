@@ -34,6 +34,8 @@
       "name": "@neutronai/agent-dispatch",
       "dependencies": {
         "@neutronai/core-sdk": "workspace:*",
+        "@neutronai/migrations": "workspace:*",
+        "@neutronai/persistence": "workspace:*",
         "@neutronai/runtime": "workspace:*",
         "@neutronai/tools": "workspace:*",
         "@neutronai/trident": "workspace:*",
@@ -491,6 +493,7 @@
         "@neutronai/gbrain-memory": "workspace:*",
         "@neutronai/jwt-validator": "workspace:*",
         "@neutronai/mcp": "workspace:*",
+        "@neutronai/migrations": "workspace:*",
         "@neutronai/persistence": "workspace:*",
         "@neutronai/scribe": "workspace:*",
         "@neutronai/tools": "workspace:*",

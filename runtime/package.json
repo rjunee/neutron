@@ -11,6 +11,7 @@
     "@neutronai/gbrain-memory": "workspace:*",
     "@neutronai/jwt-validator": "workspace:*",
     "@neutronai/mcp": "workspace:*",
+    "@neutronai/migrations": "workspace:*",
     "@neutronai/persistence": "workspace:*",
     "@neutronai/scribe": "workspace:*",
     "@neutronai/tools": "workspace:*",
