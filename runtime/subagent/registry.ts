@@ -265,6 +265,17 @@ export class SubagentRegistry {
     return this.runSerial(run_id, async () => {
       const cur = this.byId.get(run_id)
       if (!cur) throw new Error(`subagent registry: unknown run_id ${JSON.stringify(run_id)}`)
+      // NEVER clobber a terminal record. `update`'s sole live caller is the
+      // dispatch running-flip (pending→running); if a concurrent watchdog `failRun`
+      // (or a caller-stop) already drove the still-cancellerless pending record
+      // terminal, resurrecting it to `running` would launch a substrate for a run
+      // the registry says is dead — the exact orphan P7 exists to prevent. Return
+      // the terminal record unchanged (no publish, no persist) so the caller sees
+      // the real status and skips the launch. Terminal transitions go through
+      // `updateTerminal`, never here.
+      if (cur.status === 'finished' || cur.status === 'crashed' || cur.status === 'cancelled') {
+        return cur
+      }
       // If the caller explicitly sets last_event_at in the patch, honor it
       // (callers patching watchdog-driven staleness need to be able to set
       // it to a past timestamp). Otherwise default to now().
@@ -335,6 +346,21 @@ export class SubagentRegistry {
   }
 
   /**
+   * SERIALIZATION BARRIER. Resolve after every same-run mutation ALREADY queued
+   * has settled, returning the record as it then stands (a pure read — never
+   * mutates). The dispatch launch-gate uses it to observe a run's TRUE status
+   * before starting a substrate: a watchdog `failRun` (or a caller-stop) can race
+   * the running-flip and queue a terminal transition BEHIND it, so the flip
+   * returns `running` while a `crashed` sits enqueued. Draining the queue first
+   * makes the terminal land, so the gate never launches an agent for an
+   * already-terminal run (the orphan P7 exists to prevent). Uncontended → runs
+   * synchronously (no added latency on the normal dispatch path).
+   */
+  settle(run_id: string): Promise<SubagentRecord | undefined> {
+    return this.runSerial(run_id, async () => this.byId.get(run_id))
+  }
+
+  /**
    * Drive a run TERMINAL with a durable write that CONVERGES. Retries the durable
    * `update` up to `attempts` times — a TRANSIENT store failure (a brief I/O blip,
    * a momentary lock the async busy-retry didn't outlast) may clear, so a retry
@@ -352,7 +378,7 @@ export class SubagentRegistry {
     run_id: string,
     patch: Partial<Omit<SubagentRecord, 'run_id'>>,
     attempts = 4,
-  ): Promise<{ record: SubagentRecord | undefined; durable: boolean }> {
+  ): Promise<{ record: SubagentRecord | undefined; durable: boolean; transitioned: boolean }> {
     // The ENTIRE transition — the "first terminal wins" check, the publish, AND the
     // durable convergence — runs inside ONE serialized step. Holding the per-run
     // lock across the persist (and its retry backoffs) is what makes it atomic
@@ -362,23 +388,27 @@ export class SubagentRegistry {
     // deleted. Cross-run mutations are unaffected (the lock is per run_id).
     return this.runSerial(run_id, async () => {
       const cur = this.byId.get(run_id)
-      if (cur === undefined) return { record: undefined, durable: false }
+      if (cur === undefined) return { record: undefined, durable: false, transitioned: false }
       // Already terminal → that outcome WINS (a cancellation must never overwrite a
       // concurrent completion, nor vice-versa). No clobber of the patch — but the
       // record may be terminal-IN-MEMORY yet NOT durable (a prior terminal write
       // exhausted its retries), so CONVERGE the EXISTING terminal record rather
       // than falsely claiming durability. Idempotent: if it is already durable the
-      // converge is a no-op.
+      // converge is a no-op. `transitioned: false` — THIS call did NOT drive the
+      // live→terminal move (a concurrent completion/cancel/fail already won); the
+      // caller (watchdog `failRun`) must NOT claim ownership and surface a
+      // contradictory crash for a run that actually finished.
       if (cur.status === 'finished' || cur.status === 'crashed' || cur.status === 'cancelled') {
-        return { record: cur, durable: await this.convergeDurable(run_id, cur, attempts) }
+        return { record: cur, durable: await this.convergeDurable(run_id, cur, attempts), transitioned: false }
       }
       // Publish the terminal patch synchronously. NOT via `update` — a terminal
       // live record must stay terminal even if the durable write later fails
-      // (round 14), so there is no rollback here.
+      // (round 14), so there is no rollback here. `transitioned: true` — THIS call
+      // performed the live→terminal transition and owns the outcome.
       const last_event_at = patch.last_event_at ?? Date.now()
       const next: SubagentRecord = { ...cur, ...patch, last_event_at }
       this.byId.set(run_id, next)
-      return { record: next, durable: await this.convergeDurable(run_id, next, attempts) }
+      return { record: next, durable: await this.convergeDurable(run_id, next, attempts), transitioned: true }
     })
   }
 

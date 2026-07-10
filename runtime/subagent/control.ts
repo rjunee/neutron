@@ -70,13 +70,17 @@ export async function cancelRun(
     status: 'cancelled',
     ended_at: Date.now(),
   })
-  if (!settled.durable) {
+  state.cancellers.delete(run_id)
+  // Only warn when THIS call actually performed the cancel: if a concurrent
+  // completion/crash won the first-terminal race (`transitioned === false`), that
+  // winner owns durability and its own convergence logging — a warn here would be
+  // a misleading duplicate.
+  if (settled.transitioned && !settled.durable) {
     console.warn(
       `[subagent-control] cancel persist for ${run_id} did not converge; ` +
         `canceller removed, durable row stale (best-effort)`,
     )
   }
-  state.cancellers.delete(run_id)
 }
 
 /**
@@ -145,13 +149,23 @@ export async function failRun(
     failure_reason: reason,
     last_event_at: now,
   })
+  state.cancellers.delete(run_id)
+  // `updateTerminal` serializes per run_id and is FIRST-TERMINAL-WINS: a real
+  // completion (or a caller-stop) whose transition was queued ahead of ours runs
+  // first, leaving the record `finished`/`cancelled`; our call then observes the
+  // terminal record and does NOT transition (`transitioned === false`). The
+  // post-await re-read above only catches a terminal that was already VISIBLE; a
+  // transition still QUEUED behind an in-flight same-run mutation is invisible to
+  // it, so `transitioned` is the authoritative "did I win the crash" signal.
+  // Return it so the watchdog never surfaces a contradictory crash for a run that
+  // actually finished.
+  if (!settled.transitioned) return false
   if (!settled.durable) {
     console.warn(
       `[subagent-control] failRun persist for ${run_id} did not converge; ` +
         `crash surfaced, durable row stale (best-effort)`,
     )
   }
-  state.cancellers.delete(run_id)
   return true
 }
 

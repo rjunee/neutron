@@ -12,6 +12,7 @@ import { describe, expect, test } from 'bun:test'
 import {
   MAX_CONCURRENT_SUBAGENTS,
   SubagentRegistry,
+  failRun,
   newControlState,
   runAgentWatchdog,
   type ControlState,
@@ -452,5 +453,65 @@ describe('completion is best-effort against persistence — a terminal-write fai
     h.resolveTurn({ result: '', status: 'completed' })
     await handle.completion
     expect(h.registry.byRunId(handle.run_id)?.status).toBe('finished')
+  })
+})
+
+describe('terminal-race gate — a run driven terminal during the running-flip is NOT launched', () => {
+  // Codex blocker: the canceller is not registered until `launch`, so a watchdog
+  // `failRun` (or a caller-stop) can drive a still-cancellerless run terminal
+  // DURING the running-flip. The old dispatch launched on the stale optimistic
+  // `running` record — starting a substrate for a run the registry says is dead,
+  // the exact orphan P7 exists to prevent. The gate now `settle`s the per-run
+  // queue and refuses to launch a terminal run.
+  test('a watchdog failRun that races the running-flip does NOT start a substrate', async () => {
+    // A store whose 'running' persist BLOCKS once, so the dispatch parks mid-flip
+    // with the record optimistically visible as running and NO canceller yet.
+    let releaseRunning!: () => void
+    const runningGate = new Promise<void>((r) => {
+      releaseRunning = r
+    })
+    let gateRunning = false
+    const persistence: SubagentPersistence = {
+      persist: async (rec) => {
+        if (rec.status === 'running' && gateRunning) {
+          gateRunning = false
+          await runningGate
+        }
+      },
+      remove: async () => {},
+    }
+    const registry = new SubagentRegistry(persistence)
+    const control = newControlState(registry)
+    const h = makeHarness({ registry, control })
+
+    gateRunning = true
+    const dispatching = h.service.dispatch({ board_item_id: 'it-race', kind: 'research', task: 'survey' })
+
+    // Let the flip publish 'running' and block on its gated persist.
+    await new Promise((r) => setTimeout(r, 10))
+    const runId = registry.live()[0]?.run_id
+    expect(runId).toBeDefined()
+    expect(registry.byRunId(runId!)?.status).toBe('running')
+    expect(control.cancellers.has(runId!)).toBe(false) // canceller not registered yet
+
+    // The watchdog fails the run mid-flip; with no canceller its crash queues
+    // behind the flip.
+    const failed = failRun(control, runId!, 'stuck', 2000)
+
+    // Release the flip → it commits, the gate drains the queued crash, and the
+    // launch-gate observes 'crashed' → NO substrate is launched.
+    releaseRunning()
+    const handle = await dispatching
+    expect(await failed).toBe(true) // the watchdog OWNED the crash transition
+
+    expect(h.calls).toHaveLength(0) // substrate NEVER launched (old code: 1)
+    expect(registry.byRunId(runId!)?.status).toBe('crashed')
+
+    // The dispatch still yields a settled handle whose completion is the terminal
+    // report (board unbound, announcement delivered) — the contract holds.
+    const outcome = await handle.completion
+    expect(outcome.status).toBe('crashed')
+    expect(h.reports).toHaveLength(1)
+    expect(h.reports[0]!.status).toBe('crashed')
   })
 })

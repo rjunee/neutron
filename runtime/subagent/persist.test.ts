@@ -335,6 +335,73 @@ describe('async-persist update boundary — a landing completion stays visible',
     expect(reg.byRunId('r')?.status).toBe('finished') // finish preserved, not crashed
     expect(reg.byRunId('r')?.failure_reason).toBeUndefined()
   })
+
+  test('failRun that LOSES a QUEUED terminal race returns false (no contradictory crash)', async () => {
+    // Codex blocker: `updateTerminal` is first-terminal-wins, but `failRun` used to
+    // return `true` UNCONDITIONALLY. When a real completion won a transition QUEUED
+    // ahead of the watchdog's crash, `failRun` still claimed ownership → the
+    // watchdog surfaced a contradictory `crashed` for a run that actually finished.
+    // failRun's post-await re-read only sees an ALREADY-VISIBLE terminal; a
+    // transition still QUEUED behind an in-flight same-run mutation is invisible to
+    // it. `failRun` must instead return `updateTerminal`'s `transitioned` flag.
+    let releaseBlock!: () => void
+    const block = new Promise<void>((r) => {
+      releaseBlock = r
+    })
+    let blockNextRunning = false
+    const sink: SubagentPersistence = {
+      persist: async (rec) => {
+        if (blockNextRunning && rec.status === 'running') {
+          blockNextRunning = false
+          await block
+        }
+      },
+      remove: async () => {},
+    }
+    const reg = new SubagentRegistry(sink)
+    const control = newControlState(reg)
+    await reg.create(dispatchInput({ run_id: 'r' }))
+    await reg.update('r', { status: 'running' }) // committed; memory reads running
+
+    // (1) An in-flight same-run mutation HOLDS the per-run lock: a progress bump
+    // whose 'running' persist blocks. Status stays running.
+    blockNextRunning = true
+    const inflight = reg.update('r', { status: 'running', last_event_at: 5 })
+    await Promise.resolve()
+
+    // (2) The real completion is queued BEHIND the blocked mutation — not yet
+    // published, so memory still reads running.
+    const finishing = reg.updateTerminal('r', { status: 'finished', ended_at: 9 })
+
+    // (3) The watchdog fails the run while memory reads running, with NO canceller
+    // registered → its crash queues behind the finish.
+    const failing = failRun(control, 'r', 'stuck', 999)
+
+    releaseBlock()
+    const [, finished, failed] = await Promise.all([inflight, finishing, failing])
+
+    expect(finished.transitioned).toBe(true) // the completion WON the transition
+    expect(finished.record?.status).toBe('finished')
+    expect(failed).toBe(false) // OLD: unconditionally true → false crash surfaced
+    expect(reg.byRunId('r')?.status).toBe('finished') // preserved, not clobbered
+    expect(reg.byRunId('r')?.failure_reason).toBeUndefined()
+  })
+
+  test('update() REFUSES to resurrect a terminal record to running (no orphan flip)', async () => {
+    // The dispatch running-flip's guard: if a watchdog `failRun` (or caller-stop)
+    // drove the still-cancellerless PENDING run terminal BEFORE the flip's serial
+    // step ran, the flip must NOT clobber the terminal record back to running —
+    // else the dispatch launch-gate (which reads the post-flip status) would start
+    // a substrate for a dead run. `update` returns the terminal record unchanged.
+    const reg = new SubagentRegistry()
+    await reg.create(dispatchInput({ run_id: 'r' }))
+    const settled = await reg.updateTerminal('r', { status: 'crashed', ended_at: 1 })
+    expect(settled.transitioned).toBe(true)
+
+    const flipped = await reg.update('r', { status: 'running' }) // the late running-flip
+    expect(flipped.status).toBe('crashed') // guarded — NOT resurrected to running
+    expect(reg.byRunId('r')?.status).toBe('crashed')
+  })
 })
 
 describe('per-run serialization: memory never diverges from the last committed persist', () => {

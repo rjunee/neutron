@@ -364,11 +364,47 @@ export class DispatchService {
       )
       // `update` rolled memory back to `pending` on the failed persist — reconcile
       // the LIVE registry to `running` so the caps count it and `statusOf` doesn't
-      // show a phantom `pending` while the subprocess runs.
-      running = { ...record, status: 'running' }
-      await this.deps.registry.reconcileInMemory(record.run_id, { status: 'running' })
+      // show a phantom `pending` while the subprocess runs. `reconcileInMemory`
+      // returns the AUTHORITATIVE record (it refuses to clobber a terminal one), so
+      // capture it — a concurrent watchdog-`failRun` / caller-stop may already have
+      // driven this cancellerless run terminal.
+      running =
+        (await this.deps.registry.reconcileInMemory(record.run_id, { status: 'running' })) ?? {
+          ...record,
+          status: 'running',
+        }
     }
-    const handle = this.launch(running, req.kind, agent_kind, req, delivery_target, board_item_id, board_scope)
+    // TERMINAL-RACE GATE. The canceller is not registered until `launch` below, so
+    // a watchdog `failRun` (or a caller-stop) can drive this still-cancellerless run
+    // terminal DURING the running-flip — either by acting on the `pending` record
+    // BEFORE the flip (the flip's terminal-guard then keeps it terminal) or by
+    // queuing a `crashed` transition BEHIND the in-flight flip. `settle` drains the
+    // per-run mutation queue so BOTH orderings have landed before we read the true
+    // status. Launching a substrate for an already-terminal run would orphan exactly
+    // the dispatch P7 exists to prevent, so don't launch: hand back a settled handle
+    // whose `completion` is the terminal report (board unbound, announcement
+    // delivered). A terminal transition that lands strictly AFTER the gate is still
+    // caught by the post-launch machinery — `launch` registers the canceller
+    // synchronously before its first await, so a later `failRun` fires the abort and
+    // the completion closure re-reads the terminal status.
+    const authoritative = (await this.deps.registry.settle(record.run_id)) ?? running
+    if (
+      authoritative.status === 'finished' ||
+      authoritative.status === 'crashed' ||
+      authoritative.status === 'cancelled'
+    ) {
+      const completion = this.report(
+        authoritative,
+        req.kind,
+        agent_kind,
+        '',
+        delivery_target,
+        board_item_id,
+        board_scope,
+      )
+      return { run_id: record.run_id, record: authoritative, completion }
+    }
+    const handle = this.launch(authoritative, req.kind, agent_kind, req, delivery_target, board_item_id, board_scope)
     this.inflight.set(record.run_id, handle)
     return handle
   }
