@@ -1,28 +1,25 @@
 /**
- * Entity-page codec golden round-trip (refactor G3).
+ * Entity-page codec golden round-trip (refactor G3, updated by P8).
  *
- * `runtime/entity-writer.ts` is the canonical entity-page codec
- * (`renderYamlFrontmatter` + `extractCompiledTruth` + the `KIND_TO_DIR`
- * subdirectory map). Two modules keep HAND-WRITTEN mirrors of pieces of
- * that codec, by design, rather than importing across their own module
- * boundary (each documents why in its own comments):
- *   - `scribe/write-to-gbrain.ts:331-338` (`KIND_TO_DIR`) + `:440-484`
- *     (`readExistingPage`/`parseFrontmatter`/`parseYamlScalar`, the INVERSE
- *     of `renderYamlFrontmatter`/`renderYamlValue`) + the sibling
- *     `extractCompiledTruthSlice` (a byte-for-byte copy of
- *     `extractCompiledTruth`, explicitly commented "Mirror of
- *     entity-writer.ts:extractCompiledTruth (not exported there)" — it now
- *     IS exported, test-only, so this test can pin it).
- *   - `gbrain-memory/GBrainSyncHook.ts:47-54` (`DIR_TO_KIND`), the inverse
- *     of `KIND_TO_DIR`, commented "duplicated by design because the sync
- *     hook treats the writer output path as ground truth".
+ * `runtime/entity-format.ts` is THE entity-page codec — render
+ * (`renderEntityPage`/`renderYamlFrontmatter`), parse (`parseFrontmatter`/
+ * `extractCompiledTruth`/`extractTimeline`), and the `KIND_TO_DIR` /
+ * `DIR_TO_KIND` maps. Before P8 this test pinned three HAND MIRRORS of those
+ * pieces (scribe/write-to-gbrain.ts's `KIND_TO_DIR` + `parseFrontmatter` +
+ * `extractCompiledTruthSlice`, gbrain-memory/GBrainSyncHook.ts's
+ * `DIR_TO_KIND`) against the canonical implementations; P8 deleted the
+ * mirrors against this test, so all consumers now import the one codec.
  *
- * Nothing enforces any of these three mirrors stay in lockstep with the
- * canonical codec. This test pins today's agreement via an actual
- * render → parse → re-render round trip so a future edit to ANY one of the
- * four files (entity-writer, write-to-gbrain, GBrainSyncHook, or this test)
- * fails loudly instead of silently drifting. Green today; P8 later deletes
- * the two hand mirrors against this test.
+ * What remains load-bearing:
+ *   - the kind↔dir maps are exact inverses (DIR_TO_KIND is derived, but a
+ *     future hand edit to either fails here loudly)
+ *   - `extractCompiledTruth`'s liberal-parsing behavior on golden pages
+ *     (hand-edited shapes must keep returning the whole body, canonical
+ *     shapes must slice exactly)
+ *   - `parseFrontmatter` is the exact inverse of `renderYamlFrontmatter` on
+ *     every value shape the emitter produces
+ *   - end to end: a page written by `writeEntity` reconstructs BYTE-IDENTICAL
+ *     from the codec's parse side (frontmatter + compiled-truth + timeline)
  */
 
 import { describe, expect, test } from 'bun:test'
@@ -32,63 +29,69 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import {
-  writeEntity,
-  type EntityWriteInput,
-  _renderEntityPage,
-  _extractCompiledTruth,
-  _extractTimeline,
-  _KIND_TO_DIR as ENTITY_WRITER_KIND_TO_DIR,
-} from '../entity-writer.ts'
+  DIR_TO_KIND,
+  KIND_TO_DIR,
+  extractCompiledTruth,
+  extractTimeline,
+  parseFrontmatter,
+  renderEntityPage,
+} from '../entity-format.ts'
+import { writeEntity, type EntityWriteInput } from '../entity-writer.ts'
 
-import {
-  _extractCompiledTruthSlice,
-  _parseFrontmatter,
-  _KIND_TO_DIR as SCRIBE_KIND_TO_DIR,
-} from '@neutronai/scribe/write-to-gbrain.ts'
-
-import { _DIR_TO_KIND as GBRAIN_DIR_TO_KIND } from '@neutronai/gbrain-memory/GBrainSyncHook.ts'
-
-describe('KIND_TO_DIR / DIR_TO_KIND — three-way mirror agreement', () => {
-  test('scribe/write-to-gbrain.ts KIND_TO_DIR byte-equals runtime/entity-writer.ts KIND_TO_DIR', () => {
-    expect(SCRIBE_KIND_TO_DIR).toEqual(ENTITY_WRITER_KIND_TO_DIR)
-  })
-
-  test('gbrain-memory/GBrainSyncHook.ts DIR_TO_KIND is the exact inverse of KIND_TO_DIR', () => {
-    const kinds = Object.keys(ENTITY_WRITER_KIND_TO_DIR) as Array<
-      keyof typeof ENTITY_WRITER_KIND_TO_DIR
-    >
+describe('KIND_TO_DIR / DIR_TO_KIND — exact inverses', () => {
+  test('DIR_TO_KIND is the exact inverse of KIND_TO_DIR', () => {
+    const kinds = Object.keys(KIND_TO_DIR) as Array<keyof typeof KIND_TO_DIR>
     expect(kinds.length).toBeGreaterThan(0)
     for (const kind of kinds) {
-      const dir = ENTITY_WRITER_KIND_TO_DIR[kind]
-      expect(GBRAIN_DIR_TO_KIND[dir]).toBe(kind)
+      const dir = KIND_TO_DIR[kind]
+      expect(DIR_TO_KIND[dir]).toBe(kind)
     }
     // And no extra directories on the inverse side.
-    expect(Object.keys(GBRAIN_DIR_TO_KIND).sort()).toEqual(
-      Object.values(ENTITY_WRITER_KIND_TO_DIR).sort(),
+    expect(Object.keys(DIR_TO_KIND).sort()).toEqual(
+      Object.values(KIND_TO_DIR).sort(),
     )
   })
 })
 
-describe('extractCompiledTruth / extractCompiledTruthSlice — byte-equal on golden pages', () => {
-  const PAGES: string[] = [
+describe('extractCompiledTruth — golden pages (liberal-parsing contract)', () => {
+  const CASES: Array<{ page: string; expected: string }> = [
     // Canonical shape: frontmatter + compiled-truth + timeline.
-    '---\nslug: acme\ntype: company\n---\n\n# Acme\n\nAcme is a company.\n---\n\n## Timeline\n\n- 2026-01-01T00:00:00Z | chat | mentioned\n',
+    {
+      page: '---\nslug: acme\ntype: company\n---\n\n# Acme\n\nAcme is a company.\n---\n\n## Timeline\n\n- 2026-01-01T00:00:00Z | chat | mentioned\n',
+      expected: '# Acme\n\nAcme is a company.',
+    },
     // No timeline section — compiled truth extends to end-of-body.
-    '---\nslug: a\ntype: person\n---\n\nJust prose, no timeline.\n',
-    // Hand-edited page: no frontmatter fence at all.
-    'plain body, no fences',
-    // Frontmatter open but never closes.
-    '---\nkey: v\n\nnever closes',
+    {
+      page: '---\nslug: a\ntype: person\n---\n\nJust prose, no timeline.\n',
+      expected: 'Just prose, no timeline.\n',
+    },
+    // Hand-edited page: no frontmatter fence at all — whole body returned.
+    {
+      page: 'plain body, no fences',
+      expected: 'plain body, no fences',
+    },
+    // Frontmatter open but never closes — whole body returned.
+    {
+      page: '---\nkey: v\n\nnever closes',
+      expected: '---\nkey: v\n\nnever closes',
+    },
     // Extra blank lines between the compiled-truth and the timeline separator
     // (extractCompiledTruth's regex is deliberately liberal on whitespace).
-    '---\nslug: b\ntype: concept\n---\n\nBody here.\n\n\n---\n\n\n## Timeline\n\n- x | y | z\n',
+    {
+      page: '---\nslug: b\ntype: concept\n---\n\nBody here.\n\n\n---\n\n\n## Timeline\n\n- x | y | z\n',
+      expected: 'Body here.\n\n',
+    },
     // Multi-line compiled truth with wikilinks and a Relationships section.
-    '---\nslug: c\ntype: person\ntier: 1\n---\n\n## State\n\n- Role: founder\n\n## Relationships\n\n- Works at [[acme]].\n- Advises [[beta]].\n---\n\n## Timeline\n\n- 2026-02-01T00:00:00Z | m | note one\n- 2026-01-01T00:00:00Z | m | note two\n',
+    {
+      page: '---\nslug: c\ntype: person\ntier: 1\n---\n\n## State\n\n- Role: founder\n\n## Relationships\n\n- Works at [[acme]].\n- Advises [[beta]].\n---\n\n## Timeline\n\n- 2026-02-01T00:00:00Z | m | note one\n- 2026-01-01T00:00:00Z | m | note two\n',
+      expected:
+        '## State\n\n- Role: founder\n\n## Relationships\n\n- Works at [[acme]].\n- Advises [[beta]].',
+    },
   ]
 
-  for (const [i, page] of PAGES.entries()) {
+  for (const [i, { page, expected }] of CASES.entries()) {
     test(`fixture #${i}`, () => {
-      expect(_extractCompiledTruthSlice(page)).toBe(_extractCompiledTruth(page))
+      expect(extractCompiledTruth(page)).toBe(expected)
     })
   }
 })
@@ -118,26 +121,32 @@ describe('renderYamlFrontmatter / parseFrontmatter — inverse round trip on gol
     { slug: 'a', type: 'person', tags: [] },
     { slug: 'a', type: 'person', tags: ['x', 'y', 'z'] },
     { slug: 'a', type: 'person', tags: ['needs quoting: yes', 'true', '007'] },
+    // Backslash boundaries: an array item whose value ends in a literal
+    // backslash renders as `\\"` — a naive `s[i-1] !== '\\'` split mis-reads
+    // the closing quote as escaped and breaks the round trip (Codex).
+    { slug: 'a', type: 'person', tags: ['colon: \\', 'next'] },
+    { slug: 'a', type: 'person', tags: ['ends\\', 'and "quoted"', 'x'] },
+    { slug: 'a', type: 'person', tags: ['back\\slash: mid'] },
     { slug: 'a', type: 'person', nums: [1, 2, 3] },
   ]
 
   for (const [i, fm] of FRONTMATTER_FIXTURES.entries()) {
     test(`fixture #${i}: ${JSON.stringify(fm)}`, () => {
-      // _renderEntityPage renders a full on-disk-shaped page (frontmatter
+      // renderEntityPage renders a full on-disk-shaped page (frontmatter
       // fence + compiled-truth + timeline separator), which is exactly the
       // shape parseFrontmatter expects to scan.
-      const page = _renderEntityPage({ frontmatter: fm, compiledTruth: 'body', timeline: [] })
+      const page = renderEntityPage({ frontmatter: fm, compiledTruth: 'body', timeline: [] })
       expect(page.startsWith('---\n')).toBe(true)
-      const parsed = _parseFrontmatter(page)
+      const parsed = parseFrontmatter(page)
       expect(parsed).toEqual(fm)
     })
   }
 })
 
-describe('golden end-to-end: write → read → scribe-mirror-parse → re-render is byte-identical', () => {
+describe('golden end-to-end: write → read → parse → re-render is byte-identical', () => {
   let ownerDir: string
 
-  test('a written entity page reconstructs byte-identically via the scribe mirrors', async () => {
+  test('a written entity page reconstructs byte-identically via the codec parse side', async () => {
     ownerDir = mkdtempSync(join(tmpdir(), 'neutron-g3-entity-golden-'))
     try {
       const input: EntityWriteInput = {
@@ -166,29 +175,26 @@ describe('golden end-to-end: write → read → scribe-mirror-parse → re-rende
       const out = await writeEntity(input)
       const onDisk = await fs.readFile(out.path, 'utf8')
 
-      // 1. The two extractCompiledTruth implementations agree on the REAL
-      //    written page.
-      const compiledFromWriter = _extractCompiledTruth(onDisk)
-      const compiledFromScribe = _extractCompiledTruthSlice(onDisk)
-      expect(compiledFromScribe).toBe(compiledFromWriter)
-
-      // 2. Scribe's parseFrontmatter (the hand-rolled inverse of
-      //    renderYamlFrontmatter) recovers exactly the frontmatter map that
-      //    was written.
-      const parsedFm = _parseFrontmatter(onDisk)
+      // 1. parseFrontmatter (the inverse of renderYamlFrontmatter) recovers
+      //    exactly the frontmatter map that was written.
+      const parsedFm = parseFrontmatter(onDisk)
       expect(parsedFm).toEqual(input.body.frontmatter)
 
-      // 3. Re-render from the recovered pieces (frontmatter via scribe's
-      //    parser, compiledTruth via either extractor, timeline via the
-      //    writer's own parser) and assert BYTE-IDENTICAL reconstruction —
-      //    the actual "golden round trip" the plan calls for.
-      const recoveredTimeline = _extractTimeline(onDisk)
-      const reRendered = _renderEntityPage({
+      // 2. Re-render from the recovered pieces (frontmatter, compiled truth,
+      //    timeline — all via the codec's parse side) and assert
+      //    BYTE-IDENTICAL reconstruction — the actual "golden round trip"
+      //    the plan calls for.
+      const compiled = extractCompiledTruth(onDisk)
+      const recoveredTimeline = extractTimeline(onDisk)
+      const reRendered = renderEntityPage({
         frontmatter: parsedFm,
-        compiledTruth: compiledFromScribe,
+        compiledTruth: compiled,
         timeline: recoveredTimeline,
       })
       expect(reRendered).toBe(onDisk)
+
+      // 3. The write landed in the KIND_TO_DIR-mapped subdirectory.
+      expect(out.path).toContain('/entities/people/')
     } finally {
       rmSync(ownerDir, { recursive: true, force: true })
     }

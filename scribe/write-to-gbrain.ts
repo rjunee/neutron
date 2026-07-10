@@ -42,6 +42,11 @@
 
 import { readFile } from 'node:fs/promises'
 import { resolve } from 'node:path'
+import {
+  KIND_TO_DIR,
+  extractCompiledTruth,
+  parseFrontmatter,
+} from '@neutronai/runtime/entity-format.ts'
 import type { EntityKind, SyncHook } from '@neutronai/runtime/entity-writer.ts'
 import { entitySlugify } from '@neutronai/runtime/entity-slug.ts'
 import type { ExtractedEntity, ExtractedRelation, ScribeExtraction } from './extract.ts'
@@ -327,16 +332,6 @@ function orderPagesObjectsFirst(bySlug: Map<string, PlannedPage>): PlannedPage[]
   return emitted
 }
 
-/** Entity-writer on-disk directory per kind (the 3 kinds scribe writes). */
-const KIND_TO_DIR: Readonly<Record<EntityKind, string>> = Object.freeze({
-  person: 'people',
-  company: 'companies',
-  project: 'projects',
-  meeting: 'meetings',
-  concept: 'concepts',
-  original: 'originals',
-})
-
 /** Deterministic timeline-entry body for a page — identical across the new-page
  *  and existing-page paths for the same input so the writer's (ts,source,body)
  *  dedup makes a repeated identical turn a no-op. */
@@ -437,9 +432,10 @@ interface ExistingPage {
 
 /**
  * Read the on-disk page for `(kind, slug)`, or null when it doesn't exist yet
- * (or can't be read). Replicates the entity-writer's `extractCompiledTruth` +
- * frontmatter parse so the merge preserves exactly what the writer would
- * re-emit.
+ * (or can't be read). Parses via the shared entity-format codec
+ * (`@neutronai/runtime/entity-format.ts` — refactor P8 deleted the hand
+ * mirrors that used to live here) so the merge preserves exactly what the
+ * writer would re-emit.
  */
 async function readExistingPage(
   ownerDataDir: string,
@@ -453,88 +449,7 @@ async function readExistingPage(
   } catch {
     return null // ENOENT (new page) or unreadable — treat as fresh
   }
-  return { compiledTruth: extractCompiledTruthSlice(body), frontmatter: parseFrontmatter(body) }
-}
-
-/**
- * Parse the YAML frontmatter block of an on-disk entity page into a key→value
- * map — the inverse of `entity-writer.ts:renderYamlFrontmatter`. Handles the
- * exact shapes that emitter produces (scalars, `~` null, `[a, b]` scalar arrays,
- * `"quoted"` strings). Returns `{}` when there's no frontmatter fence. Values
- * are typed so re-emitting them round-trips byte-for-byte (idempotency). Lines
- * with a non-identifier key are skipped (the writer would reject them anyway).
- */
-function parseFrontmatter(body: string): Record<string, unknown> {
-  if (!body.startsWith('---\n')) return {}
-  const fmEnd = body.indexOf('\n---\n', 4)
-  if (fmEnd === -1) return {}
-  const block = body.slice(4, fmEnd) // between the opening `---\n` and `\n---\n`
-  const out: Record<string, unknown> = {}
-  for (const line of block.split('\n')) {
-    if (line.length === 0) continue
-    const idx = line.indexOf(':')
-    if (idx === -1) continue
-    const key = line.slice(0, idx).trim()
-    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) continue
-    out[key] = parseYamlScalar(line.slice(idx + 1).trim())
-  }
-  return out
-}
-
-/** Inverse of `entity-writer.ts:renderYamlValue` for the scalar + scalar-array
- *  shapes that emitter produces. Anything unrecognised stays a raw string. */
-function parseYamlScalar(raw: string): unknown {
-  if (raw === '~' || raw === '') return null
-  if (raw === 'true') return true
-  if (raw === 'false') return false
-  if (raw.startsWith('[') && raw.endsWith(']')) {
-    const inner = raw.slice(1, -1).trim()
-    if (inner.length === 0) return []
-    return splitTopLevelCommas(inner).map((x) => parseYamlScalar(x.trim()))
-  }
-  if (raw.length >= 2 && raw.startsWith('"') && raw.endsWith('"')) {
-    return raw.slice(1, -1).replace(/\\"/g, '"').replace(/\\\\/g, '\\')
-  }
-  if (/^[+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?$/.test(raw)) {
-    const n = Number(raw)
-    if (Number.isFinite(n)) return n
-  }
-  return raw
-}
-
-/** Split on top-level commas, respecting `"…"` quoting (array items may be
- *  quoted strings that contain commas). */
-function splitTopLevelCommas(s: string): string[] {
-  const parts: string[] = []
-  let cur = ''
-  let inQuote = false
-  for (let i = 0; i < s.length; i += 1) {
-    const ch = s[i]
-    if (ch === '"' && s[i - 1] !== '\\') inQuote = !inQuote
-    if (ch === ',' && !inQuote) {
-      parts.push(cur)
-      cur = ''
-      continue
-    }
-    cur += ch
-  }
-  parts.push(cur)
-  return parts
-}
-
-/** Mirror of entity-writer.ts:extractCompiledTruth (not exported there). */
-function extractCompiledTruthSlice(body: string): string {
-  if (!body.startsWith('---\n')) return body
-  const fmEnd = body.indexOf('\n---\n', 4)
-  if (fmEnd === -1) return body
-  let afterFm = fmEnd + '\n---\n'.length
-  if (body[afterFm] === '\n') afterFm += 1
-  const timelineMatch = body.slice(afterFm).match(/\n---\n+##\s+Timeline\s*\n/i)
-  const end =
-    timelineMatch !== null && timelineMatch.index !== undefined
-      ? afterFm + timelineMatch.index
-      : body.length
-  return body.slice(afterFm, end)
+  return { compiledTruth: extractCompiledTruth(body), frontmatter: parseFrontmatter(body) }
 }
 
 /**
@@ -544,15 +459,3 @@ function extractCompiledTruthSlice(body: string): string {
  * one implementation. See {@link entitySlugify}.
  */
 export const slugify = entitySlugify
-
-export {
-  // G3 (mirror-parity guardrail): exported for unit tests only, so a golden-
-  // roundtrip test can pin these hand mirrors of
-  // `runtime/entity-writer.ts` (KIND_TO_DIR, extractCompiledTruth,
-  // renderYamlFrontmatter) against the canonical implementations. Not part
-  // of the public surface.
-  KIND_TO_DIR as _KIND_TO_DIR,
-  extractCompiledTruthSlice as _extractCompiledTruthSlice,
-  parseFrontmatter as _parseFrontmatter,
-  parseYamlScalar as _parseYamlScalar,
-}
