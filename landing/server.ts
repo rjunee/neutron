@@ -45,7 +45,6 @@ export { MOBILE_APP_URL } from '@neutronai/contracts/handoff-config.ts'
 
 import { renderMobileInstallHtml } from './mobile-install-config.ts'
 import { isSpaClientRoute } from './spa-routes.ts'
-import type { ChatOutbound } from './chat-protocol.ts'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 
@@ -61,82 +60,6 @@ const HERE = dirname(fileURLToPath(import.meta.url))
  * matches against the set of declared hashes regardless of source
  * position. Multiple blocks of the same type are supported.
  */
-/**
- * 2026-05-28 sidebar sprint — validate the optional `?topic_id=` query
- * parameter the WS client supplies. Returns `undefined` when the
- * parameter is absent or empty (caller treats as "General"), the
- * validated string when it matches the allowlist, OR the literal
- * `'invalid'` discriminator to signal "send a 400 and skip the upgrade".
- *
- * Allowlist:
- *   - exactly `web:<user_id>` (General)
- *   - `web:<user_id>:<descendant>` where `<descendant>` is `[A-Za-z0-9._-]+`
- *
- * The strict end-of-string-or-`:` boundary mirrors the SQL
- * `topic_id = ? OR topic_id LIKE ? || ':%'` filter in
- * `ButtonStore.listTopicsByUser` — an instance with users `u-1` and
- * `u-10` MUST NOT have `u-1`'s socket accept a topic_id naming
- * `u-10`'s sub-topic.
- */
-function validateActiveTopicId(
-  raw: string | null,
-  user_id: string,
-): string | undefined | 'invalid' {
-  if (raw === null || raw.length === 0) return undefined
-  const generalPrefix = `web:${user_id}`
-  if (raw === generalPrefix) return raw
-  if (!raw.startsWith(`${generalPrefix}:`)) return 'invalid'
-  const descendant = raw.slice(generalPrefix.length + 1)
-  if (descendant.length === 0) return 'invalid'
-  // Allow `[A-Za-z0-9._-]+` only — matches `sanitizeProjectId` in
-  // channels/adapters/app-ws/envelope.ts so a topic the sidebar can
-  // produce is round-trippable through the existing project surfaces.
-  if (!/^[A-Za-z0-9._-]+$/.test(descendant)) return 'invalid'
-  return raw
-}
-
-/**
- * 2026-06-05 (click-button, Argus #1 BLOCKER) — resolve the host the WS
- * upgrade request actually arrived on, honouring the `X-Forwarded-Host`
- * the production Caddy chain sets (the upstream Bun socket only knows its
- * loopback bind). Mirrors the identically-named helper in
- * `landing/auth-gate.ts` used by the HTTP 302 self-redirect guard, so the
- * WS-replay path and the 302 path compare against the SAME host value.
- *
- * TRUST ASSUMPTION (Argus r2 minor): `X-Forwarded-Host` is taken on faith.
- * That is safe ONLY because every instance Bun process binds loopback and is
- * never directly internet-reachable — the production Caddy chain is the sole
- * ingress and it OVERWRITES (not appends) `X-Forwarded-Host` with the real
- * SNI host, so a client-supplied header cannot reach here. We still take the
- * first comma-segment defensively. If an instance is ever exposed without the
- * Caddy front (e.g. a future direct-bind dev mode), this header becomes
- * spoofable and host-derivation must move to a server-configured origin.
- */
-function resolveRequestHost(req: Request): string {
-  const reqUrl = new URL(req.url)
-  const xfh = req.headers.get('x-forwarded-host')
-  return (xfh ?? reqUrl.host).split(',')[0]!.trim()
-}
-
-/**
- * 2026-05-30 Argus r3 P2 #1 follow-up — fire-and-forget emit of the
- * server-trusted `user_id`. Wrapped in a try/catch so a closed-socket
- * throw from the send lambda (see the T10 r3 fix above) NEVER tears
- * down the WS during bring-up; the client falls back to the JWT
- * decode path on the next switchTopic if the envelope is lost.
- */
-function emitSessionReady(
-  send: (event: ChatOutbound) => void,
-  user_id: string,
-  resumed = false,
-): void {
-  try {
-    send({ type: 'session_ready', user_id, ...(resumed ? { resumed: true } : {}) })
-  } catch (err) {
-    console.error('landing/server: emitSessionReady threw (best-effort):', err)
-  }
-}
-
 function buildOnboardingTelegramCsp(html: string): string {
   const scriptHashes = collectInlineHashes(html, 'script')
   const styleHashes = collectInlineHashes(html, 'style')
