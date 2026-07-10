@@ -172,6 +172,49 @@ describe('CronScheduler.stop — §F1 quiescing shutdown', () => {
     expect(stopped).toBe(true)
     expect(finished).toBe(true)
   })
+
+  test('stop() quiesces a fire started directly via the public fireOnce()', async () => {
+    const jobs = new CronJobRegistry()
+    const handlers = new CronHandlerRegistry()
+    jobs.register({
+      name: 'manual',
+      description: '',
+      schedule: { kind: 'interval_ms', interval_ms: 999_999 },
+      handler: 'h-manual',
+    })
+    let entered = false
+    let finished = false
+    let release!: () => void
+    const gate = new Promise<void>((r) => {
+      release = r
+    })
+    handlers.register('h-manual', async () => {
+      entered = true
+      await gate
+      finished = true
+      return { status: 'ok' }
+    })
+    const scheduler = new CronScheduler({ jobs, handlers, db, project_slug: 't1' })
+    // Manual operator trigger — drive fireOnce() DIRECTLY (no start()/timer).
+    const fireP = scheduler.fireOnce('manual')
+    for (let i = 0; i < 100 && !entered; i++) await sleep(2)
+    expect(entered).toBe(true)
+
+    let stopped = false
+    const stopP = scheduler.stop().then(() => {
+      stopped = true
+    })
+    await sleep(15)
+    // stop() must await the in-flight manual fire, not just timer-driven ones.
+    expect(stopped).toBe(false)
+    expect(finished).toBe(false)
+
+    release()
+    await stopP
+    await fireP
+    expect(stopped).toBe(true)
+    expect(finished).toBe(true)
+  })
 })
 
 describe('CronScheduler.start — runtime registrations (S15 Codex r1 P1)', () => {

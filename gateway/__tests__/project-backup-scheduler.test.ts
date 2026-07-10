@@ -282,4 +282,59 @@ describe('ProjectBackupScheduler', () => {
     await stopP
     expect(stopped).toBe(true)
   })
+
+  it('§F1 stop() quiesces a directly-invoked poll() and blocks a post-stop snapshot', async () => {
+    const now = 1_000_000
+    let entered = false
+    let release!: () => void
+    const gate = new Promise<void>((r) => {
+      release = r
+    })
+    const store = new StubStore(() => now)
+    // Gate the FIRST store read so a manually-driven poll() can be held in flight.
+    store.readLastAttemptedAt = async (project_id: string): Promise<number | null> => {
+      entered = true
+      await gate
+      return store.sidecar.get(project_id) ?? null
+    }
+    let jitterArmed = 0
+    const sched = new ProjectBackupScheduler({
+      store: store as unknown as import('../git/project-backup-store.ts').ProjectBackupStore,
+      tickIntervalMs: 1_000,
+      jitterMaxMs: 0,
+      enumerateProjects: async () => ['a'],
+      now: () => now,
+      random: () => 0,
+      pollIntervalMs: 999_999,
+      setInterval: () => 1 as unknown as NodeJS.Timeout,
+      clearInterval: () => {},
+      setTimeout: () => {
+        jitterArmed++
+        return 2 as unknown as NodeJS.Timeout
+      },
+      clearTimeout: () => {},
+    })
+    // Drive poll() DIRECTLY (manual) — no start(). It blocks on the gated read.
+    const pollP = sched.poll()
+    for (let i = 0; i < 50 && !entered; i++) {
+      await new Promise((r) => setTimeout(r, 2))
+    }
+    expect(entered).toBe(true)
+
+    let stopped = false
+    const stopP = sched.stop().then(() => {
+      stopped = true
+    })
+    await new Promise((r) => setTimeout(r, 15))
+    expect(stopped).toBe(false) // stop() awaits the in-flight direct poll
+
+    release()
+    await stopP
+    await pollP
+    expect(stopped).toBe(true)
+    // The poll saw `stopped` after its gated read and bailed BEFORE writing the
+    // sidecar / arming a jitter timer → no snapshot escapes the shutdown.
+    expect(jitterArmed).toBe(0)
+    expect(store.attempts.get('a') ?? 0).toBe(0)
+  })
 })

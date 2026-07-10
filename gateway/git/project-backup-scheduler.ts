@@ -108,6 +108,9 @@ export class ProjectBackupScheduler {
    *  drains these so a shutdown quiesces an in-flight `backupNow()`, not just
    *  the polling loop + not-yet-fired jitter timers. */
   private readonly activeFires = new Set<Promise<void>>()
+  /** §F1 — in-flight `poll()` runs (loop-driven AND direct/manual callers), so
+   *  `stop()` quiesces a poll that is mid-`readLastAttemptedAt`/`writeLastAttemptedAt`. */
+  private readonly activePolls = new Set<Promise<void>>()
   private stopped = false
 
   constructor(opts: ProjectBackupSchedulerOptions) {
@@ -162,14 +165,31 @@ export class ProjectBackupScheduler {
       this.clearTimeoutFn(handle)
     }
     this.pendingJitterTimers.clear()
+    // Drain any in-flight poll (loop-driven OR a direct/manual `poll()` call)
+    // BEFORE the fires, then the fires — so neither is mid-store-write when the
+    // caller closes the DB.
+    if (this.activePolls.size > 0) {
+      await Promise.all([...this.activePolls])
+    }
     if (this.activeFires.size > 0) {
       await Promise.all([...this.activeFires])
     }
   }
 
-  /** Single poll — fires backups for projects whose tick interval has
-   *  elapsed. Exposed for tests to drive manually. */
+  /** Single poll — fires backups for projects whose tick interval has elapsed.
+   *  Exposed for tests + manual driving. Every run (loop-driven or direct) is
+   *  registered so `stop()` can quiesce it (§F1). */
   async poll(): Promise<void> {
+    const p = this.pollInner()
+    this.activePolls.add(p)
+    try {
+      await p
+    } finally {
+      this.activePolls.delete(p)
+    }
+  }
+
+  private async pollInner(): Promise<void> {
     if (this.stopped) return
     let projects: string[] = []
     try {
@@ -185,6 +205,10 @@ export class ProjectBackupScheduler {
       // already scheduled them; we don't want to double-arm).
       if (this.pendingJitterTimers.has(project_id)) continue
       const last = await this.store.readLastAttemptedAt(project_id)
+      // §F1 — re-check AFTER the await: if `stop()` fired while we were reading,
+      // bail before writing the attempt sidecar / arming a new jitter timer
+      // (which would outlive the shutdown that already cleared the timer map).
+      if (this.stopped) return
       const elapsed = last === null ? Infinity : now - last
       // Fire when at least `tickIntervalMs` has elapsed since the
       // LAST attempt. `Infinity` for fresh projects always triggers.

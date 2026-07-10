@@ -285,12 +285,12 @@ export class CronScheduler {
    * old `void this.fireOnce(...)` would have leaked as an unhandledRejection.
    */
   private trackFire(name: string): void {
-    const p = guardedFire(name, () => this.fireOnce(name), (jobName, err) => {
+    // Timer path — `fireOnce()` self-registers in `inflightFires` for quiesce
+    // (so direct/manual callers are covered too); `guardedFire` here only
+    // contains a tail throw so this VOIDED timer promise can't leak an
+    // unhandledRejection.
+    void guardedFire(name, () => this.fireOnce(name), (jobName, err) => {
       console.error(`cron scheduler: fire '${jobName}' threw:`, err)
-    }).then(() => undefined)
-    this.inflightFires.add(p)
-    void p.finally(() => {
-      this.inflightFires.delete(p)
     })
   }
 
@@ -356,8 +356,29 @@ export class CronScheduler {
   /**
    * Fire one job by name (one-shot). Returns the resulting status. Used
    * by tests + by manual operator triggers.
+   *
+   * §F1 — EVERY fire (timer-driven via {@link trackFire} AND direct/manual
+   * operator calls) self-registers in `inflightFires` so `stop()` quiesces it
+   * before `db.close()`. The tracked copy swallows so a fire failure can't
+   * reject `stop()`'s `Promise.all`; the original `exec` still surfaces its
+   * result/throw to a direct caller.
    */
   async fireOnce(name: string): Promise<{ status: CronHandlerStatus; detail?: string }> {
+    const exec = this.fireOnceInner(name)
+    const tracked = exec.then(
+      () => undefined,
+      () => undefined,
+    )
+    this.inflightFires.add(tracked)
+    void tracked.finally(() => {
+      this.inflightFires.delete(tracked)
+    })
+    return await exec
+  }
+
+  private async fireOnceInner(
+    name: string,
+  ): Promise<{ status: CronHandlerStatus; detail?: string }> {
     const entry = this.running.get(name)
     if (entry?.in_flight && entry.job.skip_if_running !== false) {
       await this.recordSkipped(name, 'previous run still in-flight')
