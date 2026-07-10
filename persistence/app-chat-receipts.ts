@@ -112,7 +112,7 @@ export class AppChatReceiptStore implements AppChatReceiptLog {
       const deliveredAt = input.at
       const readAt = input.state === 'read' ? input.at : null
 
-      tx.raw().run(
+      tx.runSync(
         `INSERT INTO app_chat_receipts
            (topic_id, message_id, device_id, seq, delivered_at, read_at)
          VALUES (?, ?, ?, ?, ?, ?)

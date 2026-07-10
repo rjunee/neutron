@@ -171,7 +171,7 @@ export class AppChatEditStore implements AppChatEditLog {
       // UPSERT on (topic, message): one row holds the latest edit state. `seq`
       // backfills once known (an edit can't really precede its message, but stay
       // defensive — mirrors the reactions store).
-      tx.raw().run(
+      tx.runSync(
         `INSERT INTO app_chat_edits
            (topic_id, message_id, seq, rev, body, deleted, edited_at, editor_device_id)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?)

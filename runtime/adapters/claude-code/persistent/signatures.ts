@@ -231,7 +231,7 @@ export function runOutputScan(
   options: PersistentReplSubstrateOptions,
   now: number,
 ): void {
-  for (const fired of session.scanner.scan(session.ring.raw(), now)) {
+  for (const fired of session.scanner.scan(session.ring.text(), now)) {
     if (fired.id === WEDGED_PROMPT_DETECTOR_ID) {
       dispatchWedgeRecovery(session, child, options)
     } else if (fired.id === RESUME_PICKER_DETECTOR_ID) {
@@ -267,7 +267,7 @@ function dispatchWedgeRecovery(
     // In-process ring read always returns a string; the null-as-not-cleared
     // contract is honoured at the module boundary for hosts that can fail a
     // re-capture (the Vajra tmux `capture-pane` lesson).
-    readRing: () => session.ring.raw(),
+    readRing: () => session.ring.text(),
     delay: (ms) => new Promise((res) => setTimeout(res, ms)),
     // Surface the still-wedged question to the active turn's chat channel (the
     // dev-channel surface) so the user can see what the agent is blocked on.

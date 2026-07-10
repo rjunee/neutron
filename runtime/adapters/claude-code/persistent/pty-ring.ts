@@ -61,7 +61,7 @@ export class PtyRing {
   }
 
   /** The whole retained buffer, verbatim (line structure preserved). */
-  raw(): string {
+  text(): string {
     return this.buf
   }
 

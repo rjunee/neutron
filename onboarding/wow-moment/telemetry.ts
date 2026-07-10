@@ -176,10 +176,11 @@ export class WowTelemetry {
    * in production.
    */
   async recordEngaged(input: WowEngagedEvent): Promise<void> {
-    const updated = this.db
-      .raw()
-      .query<{ id: string }, [string, string, string]>(
-        `UPDATE wow_events
+    // P2 (raw() sweep): this WRITE used to ride `raw().query(...).get()` only
+    // to learn whether a row matched; `runSync` reports the same fact via
+    // `changes` (query text byte-identical, RETURNING clause kept).
+    const updated = this.db.runSync<[string, string, string]>(
+      `UPDATE wow_events
             SET engagement = ?
           WHERE id = (
             SELECT id FROM wow_events
@@ -187,9 +188,9 @@ export class WowTelemetry {
              ORDER BY fired_at DESC LIMIT 1
           )
           RETURNING id`,
-      )
-      .get(input.engagement, input.project_slug, input.action_id)
-    if (updated === null) {
+      [input.engagement, input.project_slug, input.action_id],
+    )
+    if (updated.changes === 0) {
       const id = this.uuid()
       await this.db.run(
         `INSERT INTO wow_events
@@ -220,15 +221,14 @@ export class WowTelemetry {
    */
   list(project_slug: string): WowEventRow[] {
     const rows = this.db
-      .raw()
-      .query<WowEventDbRow, [string]>(
+      .all<WowEventDbRow, [string]>(
         `SELECT id, project_slug, action_id, fired_at, success, success_reason,
                 engagement, redacted_payload_json
            FROM wow_events
           WHERE project_slug = ?
           ORDER BY fired_at ASC, rowid ASC`,
+        [project_slug],
       )
-      .all(project_slug)
     return rows.map((r) => ({
       id: r.id,
       project_slug: r.project_slug,

@@ -58,7 +58,6 @@ export {
   checkSqlNamespace,
   decideDataLayout,
   openSidecar,
-  rawSidecarDatabase,
   releaseCoreNamespace,
   runScopedSql,
   sidecarDbPath,

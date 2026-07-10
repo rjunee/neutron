@@ -208,11 +208,10 @@ export class ProfilePicPendingStore {
     const ts = this.now()
     return await this.db.transaction(async (tx) => {
       const before = tx
-        .raw()
-        .query<{ status: string; auto_retry_attempted: number }, [string]>(
+        .get<{ status: string; auto_retry_attempted: number }, [string]>(
           `SELECT status, auto_retry_attempted FROM profile_pic_pending WHERE request_id = ?`,
+          [request_id],
         )
-        .get(request_id)
       if (before === null) return false
       if (before.status !== 'pending' || before.auto_retry_attempted !== 0) return false
       await tx.run(
@@ -237,11 +236,10 @@ export class ProfilePicPendingStore {
     const ts = this.now()
     return await this.db.transaction(async (tx) => {
       const before = tx
-        .raw()
-        .query<{ status: string }, [string]>(
+        .get<{ status: string }, [string]>(
           `SELECT status FROM profile_pic_pending WHERE request_id = ?`,
+          [request_id],
         )
-        .get(request_id)
       if (before === null) return false
       if (before.status !== 'pending') return false
       await tx.run(
@@ -257,14 +255,13 @@ export class ProfilePicPendingStore {
   /** Read a single row by request_id. Returns null when absent. */
   async get(request_id: string): Promise<ProfilePicPendingRow | null> {
     const row = this.db
-      .raw()
-      .query<RawPendingRow, [string]>(
+      .get<RawPendingRow, [string]>(
         `SELECT request_id, project_slug, user_id, prompt, archetype_hint,
                 started_at, completed_at, result_path, status, auto_retry_attempted,
                 job_id
            FROM profile_pic_pending WHERE request_id = ?`,
+        [request_id],
       )
-      .get(request_id)
     if (row === null) return null
     return toRow(row)
   }
@@ -275,15 +272,13 @@ export class ProfilePicPendingStore {
    */
   async listPending(): Promise<ProfilePicPendingRow[]> {
     const rows = this.db
-      .raw()
-      .query<RawPendingRow, []>(
+      .all<RawPendingRow, []>(
         `SELECT request_id, project_slug, user_id, prompt, archetype_hint,
                 started_at, completed_at, result_path, status, auto_retry_attempted,
                 job_id
            FROM profile_pic_pending WHERE status = 'pending'
           ORDER BY started_at ASC`,
       )
-      .all()
     return rows.map(toRow)
   }
 
@@ -302,27 +297,25 @@ export class ProfilePicPendingStore {
     const row =
       user_id === null
         ? this.db
-            .raw()
-            .query<RawPendingRow, [string]>(
+            .get<RawPendingRow, [string]>(
               `SELECT request_id, project_slug, user_id, prompt, archetype_hint,
                       started_at, completed_at, result_path, status,
                       auto_retry_attempted, job_id
                  FROM profile_pic_pending
                 WHERE project_slug = ? AND user_id IS NULL
                 ORDER BY started_at DESC LIMIT 1`,
+              [project_slug],
             )
-            .get(project_slug)
         : this.db
-            .raw()
-            .query<RawPendingRow, [string, string]>(
+            .get<RawPendingRow, [string, string]>(
               `SELECT request_id, project_slug, user_id, prompt, archetype_hint,
                       started_at, completed_at, result_path, status,
                       auto_retry_attempted, job_id
                  FROM profile_pic_pending
                 WHERE project_slug = ? AND user_id = ?
                 ORDER BY started_at DESC LIMIT 1`,
+              [project_slug, user_id],
             )
-            .get(project_slug, user_id)
     if (row === null) return null
     return toRow(row)
   }

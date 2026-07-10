@@ -545,15 +545,14 @@ export class OnboardingTelemetry {
       duration_ms: number | null
     }
     const rows = this.db
-      .raw()
-      .query<Row, [string]>(
+      .all<Row, [string]>(
         `SELECT id, ts, level, project_slug, user_id, attempt_id, module, event_name,
                 payload_json, duration_ms
            FROM gateway_events
           WHERE project_slug = ?
           ORDER BY ts ASC, id ASC`,
+        [project_slug],
       )
-      .all(project_slug)
     return rows.map((r) => {
       const out: PersistedOnboardingEvent = {
         id: r.id,

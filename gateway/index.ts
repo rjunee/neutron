@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import type { WebSocketHandler } from 'bun'
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { applyMigrationsToProjectDb } from '@neutronai/migrations/runner.ts'
 import { shutdownAllPersistentRepls } from '@neutronai/runtime/adapters/claude-code/persistent/persistent-repl-substrate.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { MAX_UPLOAD_BYTES_DEFAULT } from './upload/import-upload-handler.ts'
@@ -199,7 +199,7 @@ export async function boot(options: BootOptions = {}): Promise<BootHandle> {
   mkdirSync(dirname(dbPath), { recursive: true })
 
   const db = ProjectDb.open(dbPath)
-  applyMigrations(db.raw())
+  applyMigrationsToProjectDb(db)
 
   const project_slug = resolveOwnerSlugFromConfig(config)
   const bootedAt = Date.now()

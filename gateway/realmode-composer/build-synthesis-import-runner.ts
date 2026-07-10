@@ -150,11 +150,12 @@ export function buildSynthesisImportJobRunner(
     // pass updates `pass1_chunks_done/total` + flips `chunks_total_known` so
     // `sendImportProgress` emits an advancing pct instead of stranding at
     // `pct=0.00 known=false` for the whole run (the dogfood symptom). Synchronous
-    // raw write (bun:sqlite is sync) so the sync `onProgress` callback can persist
-    // without an unawaited race; never throws out of synthesis (best-effort).
+    // write via `runSync` (bun:sqlite is sync) so the sync `onProgress` callback
+    // can persist without an unawaited race; never throws out of synthesis
+    // (best-effort).
     const onProgress = (done: number, total: number): void => {
       try {
-        db.raw().run(
+        db.runSync(
           `UPDATE import_jobs
              SET pass1_chunks_done = ?, pass1_chunks_total = ?, chunks_total_known = 1
            WHERE job_id = ?`,
@@ -269,14 +270,13 @@ export function buildSynthesisImportJobRunner(
 
     async status(job_id): Promise<ImportJob | null> {
       const row = db
-        .raw()
-        .query<ImportJobRow, [string]>(
+        .get<ImportJobRow, [string]>(
           `SELECT job_id, project_slug, source, status, dollars_spent, pass1_chunks_done,
                   pass1_chunks_total, chunks_total_known, started_at, completed_at,
                   error_code, error_message
              FROM import_jobs WHERE job_id = ?`,
+          [job_id],
         )
-        .get(job_id)
       if (row === null) return null
       const job: ImportJob = {
         job_id: row.job_id,
@@ -304,9 +304,7 @@ export function buildSynthesisImportJobRunner(
     async cancel(job_id): Promise<void> {
       cancelled.add(job_id)
       const row = db
-        .raw()
-        .query<{ status: string }, [string]>(`SELECT status FROM import_jobs WHERE job_id = ?`)
-        .get(job_id)
+        .get<{ status: string }, [string]>(`SELECT status FROM import_jobs WHERE job_id = ?`, [job_id])
       if (row === null) return
       if (row.status !== 'completed' && row.status !== 'failed' && row.status !== 'cancelled') {
         await db.run(

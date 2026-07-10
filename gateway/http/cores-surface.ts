@@ -399,11 +399,10 @@ async function loadInstallStates(
   if (projectDb === undefined) return out
   try {
     const rows = projectDb
-      .raw()
-      .query<{ core_slug: string; install_state: string }, [string]>(
+      .all<{ core_slug: string; install_state: string }, [string]>(
         `SELECT core_slug, install_state FROM core_installations WHERE project_slug = ?`,
+        [project_slug],
       )
-      .all(project_slug)
     for (const r of rows) {
       if (typeof r.install_state === 'string') out.set(r.core_slug, r.install_state)
     }

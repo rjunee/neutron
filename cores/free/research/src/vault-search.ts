@@ -77,7 +77,7 @@ export function searchPriorBriefs(
   const safeQuery = sanitizeFtsQuery(input.query)
   if (safeQuery.length === 0) return []
 
-  const db = deps.store.raw()
+  const db = deps.store.database()
 
   // FTS5 query — return rank() per row; pull snippets per column.
   // The FTS5 mirror is populated by `setCompleted` so we only query

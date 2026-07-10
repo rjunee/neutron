@@ -1931,15 +1931,13 @@ export function buildOpenGraphComposer(
     // recovery below.
     const probeInFlightImport = async (): Promise<boolean> => {
       try {
-        const raw = db.raw()
-        const job = raw
-          .query<{ one: number }, [string]>(
-            `SELECT 1 AS one FROM import_jobs
+        const job = db.get<{ one: number }, [string]>(
+          `SELECT 1 AS one FROM import_jobs
                WHERE project_slug = ?
                  AND status NOT IN ('completed', 'failed', 'cancelled')
                LIMIT 1`,
-          )
-          .get(project_slug)
+          [project_slug],
+        )
         if (job !== null && job !== undefined) return true
         // SEV1 (2026-07-01, "STOP M2" a) — close the UPLOAD-WINDOW hole. The
         // chunked resumable upload writes an `upload_sessions` row (status=
@@ -1953,15 +1951,14 @@ export function buildOpenGraphComposer(
         // extractor's onComplete AND `finalizeImportOnboardingIfReady`) AND the
         // extractor's project-discovery field suppression hold across the WHOLE
         // upload, not just after the ZIP lands.
-        const upload = raw
-          .query<{ one: number }, [string, number]>(
-            `SELECT 1 AS one FROM upload_sessions
+        const upload = db.get<{ one: number }, [string, number]>(
+          `SELECT 1 AS one FROM upload_sessions
                WHERE project_slug = ?
                  AND status = 'uploading'
                  AND expires_at > ?
                LIMIT 1`,
-          )
-          .get(project_slug, Date.now())
+          [project_slug, Date.now()],
+        )
         return upload !== null && upload !== undefined
       } catch {
         // Probe failure must never block a legitimate completion.

@@ -121,16 +121,15 @@ export function loadImportResult(
   job_id: string,
 ): { result: ImportResult; partial: boolean } | null {
   const row = db
-    .raw()
-    .query<ImportResultRow, [string]>(
+    .get<ImportResultRow, [string]>(
       `SELECT job_id, project_slug, source, projects_json, tasks_json, topics_json,
               reminders_json, entities_json, voice_signals_json, facts_json,
               finalized_at, partial,
               inferred_interests_json, confidence_by_inference_json,
               conversation_count, synthesizer_model
          FROM import_results WHERE job_id = ?`,
+      [job_id],
     )
-    .get(job_id)
   if (row === null) return null
   const result: ImportResult = {
     entities: JSON.parse(row.entities_json) as ImportResult['entities'],

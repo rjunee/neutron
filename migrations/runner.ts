@@ -61,6 +61,20 @@ export function applyProjectScopedMigrations(
   return applyMigrations(db, dir)
 }
 
+/**
+ * Apply the instance-DB migration tree against a wrapped connection (the
+ * gateway's boot-time `ProjectDb`). P2 (world-class-refactor plan) restricts
+ * `ProjectDb.raw()` to THIS module — the migration runner is the one
+ * legitimate consumer of the bare `bun:sqlite` Database (its per-migration
+ * BEGIN/COMMIT + PRAGMA-preamble mechanics need the unserialized handle).
+ * The parameter is a structural `{ raw(): Database }` rather than the
+ * `ProjectDb` class so `migrations/` doesn't grow an import edge onto
+ * `persistence/` (which already depends on this package for sidecars).
+ */
+export function applyMigrationsToProjectDb(db: { raw(): Database }): ApplyResult {
+  return applyMigrations(db.raw())
+}
+
 export function applyMigrations(db: Database, dir: string = HERE): ApplyResult {
   // foreign_keys is per-connection (PRAGMA, not persisted), so every caller-supplied Database
   // gets it asserted here before any work. The bootstrap SQL also sets it for direct sqlite CLI
