@@ -125,6 +125,16 @@ describe('NexusStore — schema init', () => {
     await expect(h.store.ensureInit('../escape')).rejects.toThrow(NexusStoreError)
   })
 
+  it('rejects "." and ".." project_ids (path-resolution escape)', async () => {
+    // Both pass sanitizeProjectId's charset but would resolve the
+    // sidecar OUTSIDE the per-project root (`Projects/..` ==
+    // owner_home, `Projects/.` == the shared Projects dir).
+    await expect(h.store.ensureInit('..')).rejects.toThrow(NexusStoreError)
+    await expect(h.store.ensureInit('.')).rejects.toThrow(NexusStoreError)
+    expect(existsSync(join(h.owner_home, '.nexus'))).toBe(false)
+    expect(existsSync(join(h.owner_home, 'Projects', '.nexus'))).toBe(false)
+  })
+
   it('two concurrent first-writes share one init (lazy-init dance)', async () => {
     const [a, b] = await Promise.all([
       h.store.appendEvent(PROJECT_ID, input({ body: 'first' })),
@@ -555,7 +565,12 @@ describe('NexusStore — taxonomy + caps enforcement', () => {
     ).rejects.toThrow(NexusStoreError)
   })
 
-  it('enforces the body cap', async () => {
+  it('body cap: exactly-cap accepted, cap+1 rejected (byte boundary)', async () => {
+    const atCap = await h.store.appendEvent(
+      PROJECT_ID,
+      input({ body: 'x'.repeat(MAX_NEXUS_BODY_BYTES) }),
+    )
+    expect(atCap.body.length).toBe(MAX_NEXUS_BODY_BYTES)
     await expect(
       h.store.appendEvent(
         PROJECT_ID,
@@ -564,12 +579,55 @@ describe('NexusStore — taxonomy + caps enforcement', () => {
     ).rejects.toThrow(NexusStoreError)
   })
 
-  it('enforces the refs_json cap', async () => {
-    const refs: NexusRef[] = Array.from({ length: 200 }, (_, i) => ({
-      kind: 'url',
-      ref: `https://example.com/${'x'.repeat(64)}/${i}`,
-    }))
-    expect(JSON.stringify(refs).length).toBeGreaterThan(MAX_NEXUS_REFS_JSON_BYTES)
+  it('body cap counts UTF-8 BYTES, not chars', async () => {
+    // '€' is 3 bytes UTF-8 — this string is under the cap in chars
+    // (~2.7k) but over it in bytes, so it must be rejected.
+    const multibyte = '€'.repeat(Math.floor(MAX_NEXUS_BODY_BYTES / 3) + 1)
+    expect(multibyte.length).toBeLessThan(MAX_NEXUS_BODY_BYTES)
+    expect(Buffer.byteLength(multibyte, 'utf8')).toBeGreaterThan(MAX_NEXUS_BODY_BYTES)
+    await expect(
+      h.store.appendEvent(PROJECT_ID, input({ body: multibyte })),
+    ).rejects.toThrow(NexusStoreError)
+  })
+
+  it('refs_json cap: exactly-cap accepted, over-cap rejected (byte boundary)', async () => {
+    // Pad an ASCII note so the SERIALIZED refs_json lands exactly on
+    // the cap (ASCII ⇒ bytes == JSON string length).
+    const base: NexusRef[] = [{ kind: 'url', ref: 'https://x.test', note: '' }]
+    const overhead = JSON.stringify(base).length
+    const refsAtCap: NexusRef[] = [
+      {
+        kind: 'url',
+        ref: 'https://x.test',
+        note: 'a'.repeat(MAX_NEXUS_REFS_JSON_BYTES - overhead),
+      },
+    ]
+    const serialized = JSON.stringify(refsAtCap)
+    expect(Buffer.byteLength(serialized, 'utf8')).toBe(MAX_NEXUS_REFS_JSON_BYTES)
+    const written = await h.store.appendEvent(PROJECT_ID, input({ refs: refsAtCap }))
+    expect(written.refs_json).toBe(serialized)
+
+    const refsOverCap: NexusRef[] = [
+      {
+        kind: 'url',
+        ref: 'https://x.test',
+        note: 'a'.repeat(MAX_NEXUS_REFS_JSON_BYTES - overhead + 1),
+      },
+    ]
+    await expect(
+      h.store.appendEvent(PROJECT_ID, input({ refs: refsOverCap })),
+    ).rejects.toThrow(NexusStoreError)
+  })
+
+  it('refs_json cap counts UTF-8 BYTES, not UTF-16 code units', async () => {
+    // The note is ~1.4k chars (well under the cap as code units) but
+    // >4 KB as UTF-8 — must be rejected.
+    const note = '€'.repeat(Math.floor(MAX_NEXUS_REFS_JSON_BYTES / 3) + 40)
+    const refs: NexusRef[] = [{ kind: 'url', ref: 'https://x.test', note }]
+    expect(JSON.stringify(refs).length).toBeLessThan(MAX_NEXUS_REFS_JSON_BYTES)
+    expect(Buffer.byteLength(JSON.stringify(refs), 'utf8')).toBeGreaterThan(
+      MAX_NEXUS_REFS_JSON_BYTES,
+    )
     await expect(
       h.store.appendEvent(PROJECT_ID, input({ refs })),
     ).rejects.toThrow(NexusStoreError)

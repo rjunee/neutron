@@ -409,6 +409,18 @@ export class NexusStore {
         'project_id must be 1-128 chars from [A-Za-z0-9_.-]',
       )
     }
+    // sanitizeProjectId's charset allows dots, and the two dot-only
+    // names special to path resolution would escape the per-project
+    // root: `Projects/..` is `<owner_home>` itself and `Projects/.` is
+    // the shared Projects dir — either would plant a `.nexus/` OUTSIDE
+    // the project whose rm-with-project lifecycle this store relies on
+    // (Codex r3 HIGH).
+    if (cleaned === '.' || cleaned === '..') {
+      throw new NexusStoreError(
+        'invalid_project_id',
+        'project_id must not be "." or ".."',
+      )
+    }
     const cached = this.handles.get(cleaned)
     if (cached !== undefined) return cached
     const inflight = this.initPromises.get(cleaned)
