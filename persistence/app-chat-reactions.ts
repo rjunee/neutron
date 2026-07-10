@@ -141,7 +141,7 @@ export class AppChatReactionStore implements AppChatReactionLog {
       // across removes. `rev` + `updated_at` always take the new values; `seq`
       // updates once known (a reaction can arrive before its message persisted
       // in a degenerate race — backfill seq when it shows up).
-      tx.raw().run(
+      tx.runSync(
         `INSERT INTO app_chat_reactions
            (topic_id, message_id, device_id, emoji, seq, active, rev, updated_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?)

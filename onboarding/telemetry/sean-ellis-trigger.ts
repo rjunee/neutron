@@ -155,15 +155,14 @@ export class SeanEllisStore {
 
   latestForOwner(project_slug: string): SeanEllisRow | null {
     const row = this.db
-      .raw()
-      .query<SeanEllisDbRow, [string]>(
+      .get<SeanEllisDbRow, [string]>(
         `SELECT ${SeanEllisStore.SELECT_COLUMNS}
            FROM sean_ellis_responses
           WHERE project_slug = ?
           ORDER BY prompt_emitted_at DESC
           LIMIT 1`,
+        [project_slug],
       )
-      .get(project_slug)
     return row ?? null
   }
 
@@ -173,15 +172,14 @@ export class SeanEllisStore {
    */
   latestForUser(project_slug: string, user_id: string): SeanEllisRow | null {
     const row = this.db
-      .raw()
-      .query<SeanEllisDbRow, [string, string]>(
+      .get<SeanEllisDbRow, [string, string]>(
         `SELECT ${SeanEllisStore.SELECT_COLUMNS}
            FROM sean_ellis_responses
           WHERE project_slug = ? AND user_id = ?
           ORDER BY prompt_emitted_at DESC
           LIMIT 1`,
+        [project_slug, user_id],
       )
-      .get(project_slug, user_id)
     return row ?? null
   }
 
@@ -193,27 +191,25 @@ export class SeanEllisStore {
    */
   byPromptId(project_slug: string, prompt_id: string): SeanEllisRow | null {
     const row = this.db
-      .raw()
-      .query<SeanEllisDbRow, [string, string]>(
+      .get<SeanEllisDbRow, [string, string]>(
         `SELECT ${SeanEllisStore.SELECT_COLUMNS}
            FROM sean_ellis_responses
           WHERE project_slug = ? AND prompt_id = ?
           LIMIT 1`,
+        [project_slug, prompt_id],
       )
-      .get(project_slug, prompt_id)
     return row ?? null
   }
 
   byId(input: { project_slug: string; id: string }): SeanEllisRow | null {
     const row = this.db
-      .raw()
-      .query<SeanEllisDbRow, [string, string]>(
+      .get<SeanEllisDbRow, [string, string]>(
         `SELECT ${SeanEllisStore.SELECT_COLUMNS}
            FROM sean_ellis_responses
           WHERE project_slug = ? AND id = ?
           LIMIT 1`,
+        [input.project_slug, input.id],
       )
-      .get(input.project_slug, input.id)
     return row ?? null
   }
 
@@ -227,8 +223,7 @@ export class SeanEllisStore {
    */
   latestPendingForUser(project_slug: string, user_id: string): SeanEllisRow | null {
     const row = this.db
-      .raw()
-      .query<SeanEllisDbRow, [string, string]>(
+      .get<SeanEllisDbRow, [string, string]>(
         `SELECT ${SeanEllisStore.SELECT_COLUMNS}
            FROM sean_ellis_responses
           WHERE project_slug = ? AND user_id = ?
@@ -236,8 +231,8 @@ export class SeanEllisStore {
             AND responded_at IS NULL
           ORDER BY prompt_emitted_at DESC
           LIMIT 1`,
+        [project_slug, user_id],
       )
-      .get(project_slug, user_id)
     return row ?? null
   }
 
@@ -328,14 +323,13 @@ export function buildSeanEllisHandler(deps: SeanEllisHandlerDeps): CronHandler {
     // completed 1w ago → handler used to see B, skip 'not_yet', and A
     // never gets surveyed).
     const completedRows = deps.db
-      .raw()
-      .query<CompletedRow, [string]>(
+      .all<CompletedRow, [string]>(
         `SELECT user_id, completed_at
            FROM onboarding_metrics
           WHERE project_slug = ? AND completed_at IS NOT NULL
           ORDER BY completed_at ASC`,
+        [ctx.project_slug],
       )
-      .all(ctx.project_slug)
 
     if (completedRows.length === 0) {
       return { status: 'skipped', detail: 'no_completed_onboarding' }

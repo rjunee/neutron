@@ -312,16 +312,16 @@ export async function claimInviteToken(input: {
     if (before.expires_at_ms <= now) {
       throw new InviteTokenError('expired', `invite jti=${input.jti} expired`)
     }
-    // Use the raw bun:sqlite Statement.run so we can inspect `changes`.
+    // Synchronous `runSync` so we can inspect `changes`.
     // The transaction's per-instance mutex serializes against any other
     // run/exec/transaction on this ProjectDb; the WHERE clause + the
     // changes check protect against a separate-process write that
     // committed between our SELECT and our UPDATE.
-    const stmt = tx.raw().prepare(
+    const result = tx.runSync(
       `UPDATE invites SET consumed_at_ms = ? WHERE token_id = ? AND consumed_at_ms IS NULL`,
+      [now, input.jti],
     )
-    const result = stmt.run(now, input.jti) as { changes?: number }
-    const changes = result.changes ?? 0
+    const changes = result.changes
     if (changes !== 1) {
       throw new InviteTokenError(
         'consumed',

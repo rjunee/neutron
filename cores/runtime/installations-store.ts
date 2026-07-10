@@ -165,29 +165,27 @@ export class CoreInstallationsStore {
 
   async get(project_slug: string, core_slug: string): Promise<CoreInstallationRecord | null> {
     const row = this.db
-      .raw()
-      .query<CoreInstallationRow, [string, string]>(
+      .get<CoreInstallationRow, [string, string]>(
         `SELECT project_slug, core_slug, package_name, package_version,
                 manifest_capabilities_json, data_layout, sidecar_db_path,
                 installed_at, configured_at, started_at, stopped_at, uninstalled_at
            FROM core_installations
           WHERE project_slug = ? AND core_slug = ?`,
+        [project_slug, core_slug],
       )
-      .get(project_slug, core_slug)
     return row === null ? null : rowToRecord(row)
   }
 
   async listForProject(project_slug: string): Promise<CoreInstallationRecord[]> {
     const rows = this.db
-      .raw()
-      .query<CoreInstallationRow, [string]>(
+      .all<CoreInstallationRow, [string]>(
         `SELECT project_slug, core_slug, package_name, package_version,
                 manifest_capabilities_json, data_layout, sidecar_db_path,
                 installed_at, configured_at, started_at, stopped_at, uninstalled_at
            FROM core_installations
           WHERE project_slug = ? ORDER BY installed_at`,
+        [project_slug],
       )
-      .all(project_slug)
     return rows.map(rowToRecord)
   }
 
@@ -277,27 +275,24 @@ export class CoreInstallationsStore {
 
   async getGlobal(core_slug: string): Promise<CoreGlobalInstallationRecord | null> {
     const row = this.db
-      .raw()
-      .query<CoreGlobalInstallationRow, [string]>(
+      .get<CoreGlobalInstallationRow, [string]>(
         `SELECT core_slug, package_name, package_version,
                 manifest_capabilities_json, install_state, installed_at, uninstalled_at
            FROM core_global_installations
           WHERE core_slug = ?`,
+        [core_slug],
       )
-      .get(core_slug)
     return row === null ? null : globalRowToRecord(row)
   }
 
   async listGlobal(): Promise<CoreGlobalInstallationRecord[]> {
     const rows = this.db
-      .raw()
-      .query<CoreGlobalInstallationRow, []>(
+      .all<CoreGlobalInstallationRow, []>(
         `SELECT core_slug, package_name, package_version,
                 manifest_capabilities_json, install_state, installed_at, uninstalled_at
            FROM core_global_installations
           ORDER BY installed_at`,
       )
-      .all()
     return rows.map(globalRowToRecord)
   }
 

@@ -29,9 +29,7 @@ export function buildLiveProjectEnumerator(
     const dirs = await enumerateProjectDirs(ownerHome)
     try {
       const deletedRows = db
-        .raw()
-        .query<{ id: string }, []>(`SELECT id FROM projects WHERE deleted_at IS NOT NULL`)
-        .all()
+        .all<{ id: string }, []>(`SELECT id FROM projects WHERE deleted_at IS NOT NULL`)
       if (deletedRows.length === 0) return dirs
       const deleted = new Set(deletedRows.map((r) => r.id))
       return dirs.filter((id) => !deleted.has(id))

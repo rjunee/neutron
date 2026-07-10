@@ -193,13 +193,12 @@ export class SecretsStore {
 
   async get(input: GetInput): Promise<string | null> {
     const row = this.db
-      .raw()
-      .query<SecretRow, [string, string, string]>(
+      .get<SecretRow, [string, string, string]>(
         `SELECT id, project_slug, kind, label, ciphertext, created_at, rotated_at, expires_at
            FROM secrets
           WHERE project_slug = ? AND kind = ? AND label = ?`,
+        [input.internal_handle, input.kind, input.label],
       )
-      .get(input.internal_handle, input.kind, input.label)
     if (row === null) return null
     // Codex review fix: honor expires_at — an expired row behaves like a
     // missing secret. Critical for OAuth access tokens (Max +
@@ -223,19 +222,17 @@ export class SecretsStore {
     const rows: SecretRow[] =
       input.kind === undefined
         ? this.db
-            .raw()
-            .query<SecretRow, [string]>(
+            .all<SecretRow, [string]>(
               `SELECT id, project_slug, kind, label, ciphertext, created_at, rotated_at, expires_at
                  FROM secrets WHERE project_slug = ? ORDER BY created_at DESC`,
+              [input.internal_handle],
             )
-            .all(input.internal_handle)
         : this.db
-            .raw()
-            .query<SecretRow, [string, string]>(
+            .all<SecretRow, [string, string]>(
               `SELECT id, project_slug, kind, label, ciphertext, created_at, rotated_at, expires_at
                  FROM secrets WHERE project_slug = ? AND kind = ? ORDER BY created_at DESC`,
+              [input.internal_handle, input.kind],
             )
-            .all(input.internal_handle, input.kind)
     return rows.map(rowToRecord)
   }
 

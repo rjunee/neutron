@@ -294,13 +294,12 @@ export function buildImportResumeReadinessProbe(
       let row: { status: string; source: string } | null = null
       try {
         row = input.db
-          .raw()
-          .query<{ status: string; source: string }, [string, string]>(
+          .get<{ status: string; source: string }, [string, string]>(
             `SELECT status, source FROM import_jobs
               WHERE job_id = ? AND project_slug = ?
               LIMIT 1`,
+            [probeInput.job_id, input.project_slug],
           )
-          .get(probeInput.job_id, input.project_slug)
       } catch {
         return false
       }

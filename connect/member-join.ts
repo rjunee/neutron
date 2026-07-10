@@ -161,10 +161,10 @@ function insertMemberInTx(
     approved_at: fields.approved_at,
     status: 'active',
   }
-  // Synchronous raw writes — we already hold the tx's write lock, so re-entrant
-  // tx.run would also work; raw keeps the helper purely synchronous inside the
-  // BEGIN/COMMIT window.
-  tx.raw().run(
+  // Synchronous writes — we already hold the tx's write lock, so re-entrant
+  // tx.run would also work; runSync keeps the helper purely synchronous inside
+  // the BEGIN/COMMIT window.
+  tx.runSync(
     `INSERT INTO connected_members
        (local_slug, display_name, role, home_authority, home_instance_slug,
         home_user_id, access, approved_at, status)
@@ -181,7 +181,7 @@ function insertMemberInTx(
       member.status,
     ],
   )
-  tx.raw().run(
+  tx.runSync(
     `INSERT INTO project_members
        (project_id, user_id, name, role, joined_at, origin_instance)
      VALUES (?, ?, ?, 'member', ?, ?)

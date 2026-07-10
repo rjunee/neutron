@@ -38,7 +38,7 @@ describe('PtyRing', () => {
     const r = new PtyRing()
     r.append('hello ')
     r.append('world')
-    expect(r.raw()).toBe('hello world')
+    expect(r.text()).toBe('hello world')
   })
 
   test('getRecentOutput with bottomN returns line-addressed slice', () => {
@@ -71,8 +71,8 @@ describe('PtyRing', () => {
   test('bounds the buffer to maxBytes (rolling)', () => {
     const r = new PtyRing(8)
     r.append('0123456789')
-    expect(r.raw()).toBe('23456789')
-    expect(r.raw().length).toBe(8)
+    expect(r.text()).toBe('23456789')
+    expect(r.text().length).toBe(8)
   })
 
   test('default buffer is widened beyond the legacy 16 KB', () => {
@@ -83,6 +83,6 @@ describe('PtyRing', () => {
     const r = new PtyRing(0)
     const big = 'x'.repeat(DEFAULT_RING_MAX_BYTES + 100)
     r.append(big)
-    expect(r.raw().length).toBe(DEFAULT_RING_MAX_BYTES)
+    expect(r.text().length).toBe(DEFAULT_RING_MAX_BYTES)
   })
 })

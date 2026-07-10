@@ -100,6 +100,12 @@ export class ProjectDb {
    * code paths; prefer the `prepare` / `exec` / `run` / `transaction` wrappers so
    * busy-retry covers your write AND the per-instance mutex serializes you
    * against any in-flight transaction.
+   *
+   * P2 (world-class-refactor plan): production callers are LINT-RESTRICTED to
+   * `migrations/runner.ts` (`no-restricted-syntax` in eslint.config.mjs,
+   * enforced by scripts/ci/lint.sh; tests exempt). Use `get`/`all` for reads
+   * and `runSync` for synchronous mutations that need
+   * `{changes, lastInsertRowid}`.
    */
   raw(): Database {
     return this.db

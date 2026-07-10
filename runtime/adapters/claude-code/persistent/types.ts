@@ -49,7 +49,7 @@ export function dispatchRateLimitBannerNotice(
   // detector saw (the ring is unchanged on this synchronous tick). The framework's
   // FiredDetection carries only id/keys, so the verbatim banner line is recovered
   // here rather than threaded through the latch state.
-  const ctx = buildDetectorContext(session.ring.raw(), RATE_LIMIT_BANNER_BOTTOM_N, now)
+  const ctx = buildDetectorContext(session.ring.text(), RATE_LIMIT_BANNER_BOTTOM_N, now)
   const matched = matchRateLimitBanner(severity, ctx.lines) ?? '(rate-limit banner)'
   const message =
     severity === 'usage-cap'

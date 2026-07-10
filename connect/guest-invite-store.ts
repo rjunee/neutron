@@ -141,7 +141,7 @@ export class ConnectGuestInviteStore {
    *   - expired         — past `expires_at_ms`
    *   - already_redeemed — already claimed (single-use); also the race-loser path
    *
-   * MUST be called from within `db.transaction(...)` so `tx.raw()` shares the
+   * MUST be called from within `db.transaction(...)` so `tx.runSync` shares the
    * held write lock (the ProjectDb mutex serializes the BEGIN→COMMIT window).
    */
   claimInTx(tx: ProjectDb, rawToken: string, nowMs: number): ClaimedGuestInvite {
@@ -155,14 +155,12 @@ export class ConnectGuestInviteStore {
     // guards re-assert under the lock so a concurrent claim (or a replay) that
     // raced past the SELECT above still resolves to exactly one winner; the
     // loser sees changes===0 and 409s.
-    const res = tx
-      .raw()
-      .run(
-        `UPDATE connect_guest_invites
+    const res = tx.runSync(
+      `UPDATE connect_guest_invites
             SET redeemed_at_ms = ?
           WHERE token_hash = ? AND redeemed_at_ms IS NULL AND expires_at_ms > ?`,
-        [nowMs, tokenHash, nowMs],
-      )
+      [nowMs, tokenHash, nowMs],
+    )
     if (res.changes !== 1) throw new GuestInviteError('already_redeemed')
 
     return {
@@ -176,7 +174,7 @@ export class ConnectGuestInviteStore {
   /** Stamp the assigned local_slug onto a just-claimed invite (audit). Must run
    *  inside the same tx as `claimInTx`. */
   recordRedeemedBySlugInTx(tx: ProjectDb, tokenHash: string, localSlug: string): void {
-    tx.raw().run(
+    tx.runSync(
       `UPDATE connect_guest_invites SET redeemed_by_slug = ? WHERE token_hash = ?`,
       [localSlug, tokenHash],
     )

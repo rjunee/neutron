@@ -133,7 +133,7 @@ export class AppChatStore implements AppChatMessageLog {
         .get(input.topic_id)
       const seq = (maxRow?.max_seq ?? 0) + 1
 
-      tx.raw().run(
+      tx.runSync(
         `INSERT INTO app_chat_messages
            (topic_id, seq, message_id, role, body, client_msg_id, project_id,
             attachments_json, created_at)

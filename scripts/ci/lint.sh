@@ -9,11 +9,16 @@
 # cross-package import also silently couples packages without ever touching
 # their `package.json` `dependencies`.
 #
-# CHECK 1 — ESLint `import/no-relative-packages` (eslint.config.mjs).
-#   Covers STATIC import/export declarations (with OR without a file
-#   extension — the config's `import/resolver: typescript` setting resolves
-#   extensionless `.ts` specifiers so the rule can see they cross a boundary),
-#   `require()`, and value-position dynamic `await import()`.
+# CHECK 1 — ESLint (eslint.config.mjs), two rules:
+#   * `import/no-relative-packages` — covers STATIC import/export declarations
+#     (with OR without a file extension — the config's `import/resolver:
+#     typescript` setting resolves extensionless `.ts` specifiers so the rule
+#     can see they cross a boundary), `require()`, and value-position dynamic
+#     `await import()`.
+#   * `no-restricted-syntax` — P2 `ProjectDb.raw()` restriction: production
+#     code must use the typed get/all/runSync/run/exec/transaction API; the
+#     migration runner (`migrations/runner.ts`) is the only allowed `raw()`
+#     caller (tests exempt — see the config block for the full rationale).
 #
 #   WHY NOT JUST `eslint .`'S EXIT CODE: this config registers ONE rule. Some
 #   source files (e.g. under `app/`, or files carrying directives for other
@@ -66,10 +71,10 @@ fi
 
 fail=0
 if [ "${count:-0}" -gt 0 ]; then
-  echo "LINT (relative cross-workspace imports): FAILED — ${count} found" >&2
+  echo "LINT (cross-workspace imports + ProjectDb.raw() restriction): FAILED — ${count} found" >&2
   fail=1
 else
-  echo "LINT (relative cross-workspace static/require/value-import): 0 found ✅"
+  echo "LINT (cross-workspace static/require/value-import + ProjectDb.raw() restriction): 0 found ✅"
 fi
 
 # ── CHECK 2: type-position import() queries ────────────────────────────

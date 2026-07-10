@@ -139,7 +139,7 @@ export class ResearchProjectStore {
     return this.project_id
   }
 
-  raw(): Database {
+  database(): Database {
     return this.db
   }
 

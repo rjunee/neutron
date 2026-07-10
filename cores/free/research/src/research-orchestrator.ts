@@ -267,14 +267,14 @@ export function buildProjectResearchOrchestrator(
           firstSourcesError = err.message
           // Roll the just-inserted claims back so the retry pass starts
           // clean. Tiny in count (1-10); no transaction needed.
-          handle.store.raw().run(`DELETE FROM research_claims WHERE task_id = ?`, [row.id])
+          handle.store.database().run(`DELETE FROM research_claims WHERE task_id = ?`, [row.id])
           continue
         }
         if (err instanceof SourcesCitedViolationError) {
           // Final-failure cleanup — drop the claim rows we just inserted
           // before flagging the task failed so the persisted row count
           // matches the user-visible "failed task has no claims" model.
-          handle.store.raw().run(`DELETE FROM research_claims WHERE task_id = ?`, [row.id])
+          handle.store.database().run(`DELETE FROM research_claims WHERE task_id = ?`, [row.id])
           handle.store.setFailed(row.id, `sources-cited violation: ${err.message}`)
           return { task_id: row.id, status: 'failed' }
         }
@@ -395,7 +395,7 @@ export function buildProjectResearchOrchestrator(
       } catch (err) {
         // Drop the just-inserted claims on failure to match the "failed
         // task has no claims" persisted-row invariant.
-        handle.store.raw().run(`DELETE FROM research_claims WHERE task_id = ?`, [row.id])
+        handle.store.database().run(`DELETE FROM research_claims WHERE task_id = ?`, [row.id])
         if (err instanceof SourcesCitedViolationError) {
           handle.store.setFailed(row.id, `sources-cited violation: ${err.message}`)
         } else {

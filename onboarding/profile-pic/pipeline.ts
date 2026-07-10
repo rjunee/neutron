@@ -238,23 +238,21 @@ export class ProfilePicPipeline {
   /** Polled by the UI. Returns null if no such job. */
   async status(job_id: string): Promise<ProfilePicJob | null> {
     const row = this.db
-      .raw()
-      .query<ProfilePicJobRow, [string]>(
+      .get<ProfilePicJobRow, [string]>(
         `SELECT id, project_slug, status, archetype_hint, started_at, completed_at,
                 fallback_used, failure_count
            FROM profile_pic_jobs WHERE id = ?`,
+        [job_id],
       )
-      .get(job_id)
     if (row === null) return null
     const candidateRows = this.db
-      .raw()
-      .query<ProfilePicCandidateRow, [string]>(
+      .all<ProfilePicCandidateRow, [string]>(
         `SELECT id, job_id, path, source, created_at, picked_at
            FROM profile_pic_candidates
           WHERE job_id = ?
           ORDER BY created_at ASC`,
+        [job_id],
       )
-      .all(job_id)
     return {
       id: row.id,
       project_slug: row.project_slug,
@@ -506,11 +504,10 @@ export class ProfilePicPipeline {
    */
   private async isUserTerminated(job_id: string): Promise<boolean> {
     const row = this.db
-      .raw()
-      .query<{ status: string }, [string]>(
+      .get<{ status: string }, [string]>(
         `SELECT status FROM profile_pic_jobs WHERE id = ?`,
+        [job_id],
       )
-      .get(job_id)
     if (row === null) return true
     return (
       row.status === 'fallback' ||

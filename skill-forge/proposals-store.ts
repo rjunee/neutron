@@ -89,11 +89,10 @@ export class SkillForgeProposalsStore {
 
   async get(id: string): Promise<ProposalRecord | null> {
     const row = this.db
-      .raw()
-      .query<ProposalRow, [string]>(
+      .get<ProposalRow, [string]>(
         `SELECT ${COLUMNS} FROM skill_forge_proposals WHERE id = ?`,
+        [id],
       )
-      .get(id)
     return row === null ? null : rowToRecord(row)
   }
 
@@ -104,25 +103,22 @@ export class SkillForgeProposalsStore {
    */
   async getActiveBySignature(signature: string): Promise<ProposalRecord | null> {
     const row = this.db
-      .raw()
-      .query<ProposalRow, [string]>(
+      .get<ProposalRow, [string]>(
         `SELECT ${COLUMNS} FROM skill_forge_proposals
           WHERE workflow_signature = ? AND status IN ('pending', 'approved')
           ORDER BY created_at DESC
           LIMIT 1`,
+        [signature],
       )
-      .get(signature)
     return row === null ? null : rowToRecord(row)
   }
 
   async listPending(): Promise<ProposalRecord[]> {
     const rows = this.db
-      .raw()
-      .query<ProposalRow, []>(
+      .all<ProposalRow, []>(
         `SELECT ${COLUMNS} FROM skill_forge_proposals
           WHERE status = 'pending' ORDER BY created_at ASC`,
       )
-      .all()
     return rows.map(rowToRecord)
   }
 

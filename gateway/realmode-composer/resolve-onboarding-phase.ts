@@ -88,11 +88,10 @@ export function loadCurrentOnboardingPhase(
 ): string | null {
   try {
     const row = db
-      .raw()
-      .query<{ phase: string }, [string, string]>(
+      .get<{ phase: string }, [string, string]>(
         `SELECT phase FROM onboarding_state WHERE project_slug = ? AND user_id = ? LIMIT 1`,
+        [project_slug, user_id],
       )
-      .get(project_slug, user_id)
     if (row === null || row === undefined) return null
     const phase = row.phase
     if (typeof phase !== 'string' || phase.length === 0) return null

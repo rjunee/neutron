@@ -142,19 +142,17 @@ export class ApiKeyStore {
     const rows: ApiKeyDbRow[] =
       input.provider === undefined
         ? this.db
-            .raw()
-            .query<ApiKeyDbRow, [string]>(
+            .all<ApiKeyDbRow, [string]>(
               `SELECT id, project_slug, provider, label, secret_id, added_at, last_used_at
                  FROM api_keys WHERE project_slug = ? ORDER BY added_at DESC`,
+              [input.internal_handle],
             )
-            .all(input.internal_handle)
         : this.db
-            .raw()
-            .query<ApiKeyDbRow, [string, string]>(
+            .all<ApiKeyDbRow, [string, string]>(
               `SELECT id, project_slug, provider, label, secret_id, added_at, last_used_at
                  FROM api_keys WHERE project_slug = ? AND provider = ? ORDER BY added_at DESC`,
+              [input.internal_handle, input.provider],
             )
-            .all(input.internal_handle, input.provider)
     return rows.map(toRow)
   }
 

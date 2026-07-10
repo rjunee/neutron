@@ -22,8 +22,6 @@
 import { existsSync, mkdirSync, rmSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 
-import { Database } from 'bun:sqlite'
-
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 
 import { CoreInstallError } from './errors.ts'
@@ -186,11 +184,10 @@ export async function releaseCoreNamespace(input: {
   // alphanum-only name allow-list to avoid SQL injection (slug is
   // already sanitized via packageNameToSlug, but defense in depth).
   const rows = input.projectDb
-    .raw()
-    .query<{ name: string }, [string]>(
+    .all<{ name: string }, [string]>(
       `SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE ? || '%'`,
+      [prefix],
     )
-    .all(prefix)
   for (const r of rows) {
     if (!/^[a-z][a-z0-9_]*$/.test(r.name)) {
       // Identifier failed the allow-list — refuse. Should never trigger
@@ -329,15 +326,6 @@ export function openSidecar(dataDir: string, slug: string): ProjectDb {
     mkdirSync(dirname(path), { recursive: true })
   }
   return ProjectDb.open(path)
-}
-
-/**
- * Helper for tests + lifecycle paths that want a raw `bun:sqlite`
- * `Database` (e.g. to apply a Core's own bundled migrations to the
- * sidecar). Forwards `ProjectDb.raw()` semantics.
- */
-export function rawSidecarDatabase(sidecar: ProjectDb): Database {
-  return sidecar.raw()
 }
 
 const SQL_KEYWORDS = new Set([

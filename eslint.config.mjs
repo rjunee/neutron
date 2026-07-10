@@ -112,4 +112,45 @@ export default [
       ],
     },
   },
+  // P2 (world-class-refactor plan) — `ProjectDb.raw()` restriction.
+  //
+  // `raw()` hands back the bare `bun:sqlite` Database, bypassing the ProjectDb
+  // per-instance async mutex + busy-retry that keep writes from landing inside
+  // another caller's open BEGIN/COMMIT window. After the P2 sweep every
+  // production call site uses the typed API instead (`get`/`all` for reads,
+  // `runSync` for synchronous mutations needing `{changes, lastInsertRowid}`,
+  // `run`/`exec`/`transaction` for serialized writes). The ONE legitimate
+  // `raw()` consumer left is the migration runner (`applyMigrationsToProjectDb`
+  // in `migrations/runner.ts` — its per-migration BEGIN/COMMIT + PRAGMA
+  // preamble mechanics need the unserialized handle), hence the ignore.
+  //
+  // Scope notes:
+  //  * Test files are exempt — fixtures/assertions legitimately reach for the
+  //    bare connection to seed and inspect state out-of-band.
+  //  * The selector is syntactic (any zero-arg `.raw()` call), so methods that
+  //    merely SHARE the name would false-positive; the two prior collisions
+  //    were renamed in the P2 sweep (`PtyRing.raw()` → `text()`,
+  //    `ResearchProjectStore.raw()` → `database()`). Name a new accessor
+  //    something else rather than widening the ignore list.
+  {
+    files: ['**/*.ts', '**/*.tsx'],
+    ignores: [
+      'migrations/runner.ts',
+      '**/*.test.ts',
+      '**/__tests__/**',
+      'tests/**',
+    ],
+    rules: {
+      'no-restricted-syntax': [
+        'error',
+        {
+          selector: "CallExpression[callee.property.name='raw'][arguments.length=0]",
+          message:
+            'ProjectDb.raw() is reserved for the migration runner (migrations/runner.ts). ' +
+            'Use ProjectDb.get/all for reads, runSync for sync mutations that need ' +
+            '{changes, lastInsertRowid}, and run/exec/transaction for serialized writes.',
+        },
+      ],
+    },
+  },
 ];

@@ -157,21 +157,19 @@ export class SecretAuditLog {
     const limit = input.limit ?? 100
     const rows: AuditRow[] = input.core_slug === undefined
       ? this.db
-          .raw()
-          .query<AuditRow, [string, number]>(
+          .all<AuditRow, [string, number]>(
             `SELECT id, ts, project_slug, core_slug, op, kind, label, outcome, error, author_id
                FROM secret_audit_log WHERE project_slug = ?
                ORDER BY ts DESC LIMIT ?`,
+            [input.project_slug, limit],
           )
-          .all(input.project_slug, limit)
       : this.db
-          .raw()
-          .query<AuditRow, [string, string, number]>(
+          .all<AuditRow, [string, string, number]>(
             `SELECT id, ts, project_slug, core_slug, op, kind, label, outcome, error, author_id
                FROM secret_audit_log WHERE project_slug = ? AND core_slug = ?
                ORDER BY ts DESC LIMIT ?`,
+            [input.project_slug, input.core_slug, limit],
           )
-          .all(input.project_slug, input.core_slug, limit)
     return rows.map(rowToEntry)
   }
 
@@ -183,21 +181,19 @@ export class SecretAuditLog {
     const limit = input.limit ?? 100
     const rows: AuditRow[] = input.core_slug === undefined
       ? this.db
-          .raw()
-          .query<AuditRow, [string, number]>(
+          .all<AuditRow, [string, number]>(
             `SELECT id, ts, project_slug, core_slug, op, kind, label, outcome, error, author_id
                FROM secret_audit_log WHERE project_slug = ? AND outcome = 'capability_denied'
                ORDER BY ts DESC LIMIT ?`,
+            [input.project_slug, limit],
           )
-          .all(input.project_slug, limit)
       : this.db
-          .raw()
-          .query<AuditRow, [string, string, number]>(
+          .all<AuditRow, [string, string, number]>(
             `SELECT id, ts, project_slug, core_slug, op, kind, label, outcome, error, author_id
                FROM secret_audit_log WHERE project_slug = ? AND core_slug = ? AND outcome = 'capability_denied'
                ORDER BY ts DESC LIMIT ?`,
+            [input.project_slug, input.core_slug, limit],
           )
-          .all(input.project_slug, input.core_slug, limit)
     return rows.map(rowToEntry)
   }
 }

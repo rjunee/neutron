@@ -123,14 +123,13 @@ export function buildImportResumeHandler(
     let row: ImportJobLookupRow | null = null
     try {
       row = input.db
-        .raw()
-        .query<ImportJobLookupRow, [string, string]>(
+        .get<ImportJobLookupRow, [string, string]>(
           `SELECT job_id, project_slug, source, status
              FROM import_jobs
             WHERE job_id = ? AND project_slug = ?
             LIMIT 1`,
+          [job_id, input.project_slug],
         )
-        .get(job_id, input.project_slug)
     } catch (err) {
       return jsonResponse(
         {
@@ -188,14 +187,13 @@ export function buildImportResumeHandler(
     let osRow: { user_id: string } | null = null
     try {
       osRow = input.db
-        .raw()
-        .query<{ user_id: string }, [string]>(
+        .get<{ user_id: string }, [string]>(
           `SELECT user_id FROM onboarding_state
             WHERE project_slug = ? AND user_id != ''
             ORDER BY last_advanced_at DESC
             LIMIT 1`,
+          [input.project_slug],
         )
-        .get(input.project_slug)
     } catch (err) {
       return jsonResponse(
         {
@@ -303,12 +301,11 @@ export function buildImportResumeHandler(
     let chunks_already_done = 0
     try {
       const cnt = input.db
-        .raw()
-        .query<{ n: number }, [string, string]>(
+        .get<{ n: number }, [string, string]>(
           `SELECT COUNT(*) AS n FROM import_pass1_chunks
             WHERE project_slug = ? AND source = ? AND analyzed = 1`,
+          [input.project_slug, row.source],
         )
-        .get(input.project_slug, row.source)
       if (cnt !== null && typeof cnt.n === 'number') {
         chunks_already_done = cnt.n
       }
