@@ -506,7 +506,7 @@
       },
       {
         "name": "email_draft_prepare",
-        "description": "Create a Gmail DRAFT (drafts.create) and atomically apply the owner 4-point label policy (INBOX + IMPORTANT + UNREAD) to the resulting thread via threads.modify. When `project_id` is supplied, ALSO applies the `Neutron/<project_id>` user-label. NOT sending — the draft lands in the user's Drafts label for review. Returns the new draft id + the persisted message metadata + the applied labels list. Sending is intentionally Tier 2 (Email-Private paid Core); this Tier 1 free Core only prepares drafts.",
+        "description": "Create a Gmail DRAFT (drafts.create) and atomically apply the owner 4-point label policy (INBOX + IMPORTANT + UNREAD) to the resulting thread via threads.modify. When `project_id` is supplied, ALSO applies the `Neutron/<project_id>` user-label. NOT sending — the draft lands in the user's Drafts label for review. Returns the new draft id + the persisted message metadata + the applied labels list. This tool only prepares a draft for review; to send directly, use the `email_send` tool (gmail.send).",
         "input_schema": {
           "type": "object",
           "properties": {
