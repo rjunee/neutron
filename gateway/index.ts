@@ -266,6 +266,25 @@ export async function boot(options: BootOptions = {}): Promise<BootHandle> {
   let composedChainFetch:
     | ((req: Request, server: import('bun').Server<unknown>) => Response | Promise<Response>)
     | undefined
+  // Sprint 19 + O4 — release ALL boot-owned resources on ANY init failure after
+  // the DB is open + the system_events sink is registered, so a systemd
+  // Restart=always loop doesn't race a still-open SQLite handle, dangling
+  // timers from a half-composed graph, or an ambient sink pointing at the
+  // failed boot's (now-closed) DB. Runs for a composer/compose throw AND for a
+  // later failure (listener bind, port assertion, sd_notify) before a
+  // BootHandle is returned. Idempotent-safe: only invoked on the failure paths.
+  const bootFailureCleanup = async (): Promise<void> => {
+    if (graph !== null) {
+      try {
+        await graph.shutdown()
+      } catch (shutdownErr) {
+        console.error('graph shutdown during init failure threw:', shutdownErr)
+      }
+    }
+    // Clear the ambient sink (ownership-guarded) BEFORE closing the DB it holds.
+    clearOwnedSystemEventSink()
+    db.close()
+  }
   if (options.composer !== undefined) {
     try {
       const composition = await options.composer({ db, project_slug })
@@ -297,31 +316,22 @@ export async function boot(options: BootOptions = {}): Promise<BootHandle> {
         composedWebsocket = composed.websocket
       }
     } catch (err) {
-      // Sprint 19 — release resources on init failure so a systemd
-      // restart doesn't race a still-open SQLite handle / dangling
-      // timers spawned by a partially-composed graph. Mirrors the
-      // shutdown() cleanup at lines ~321-354 below; that path runs on
-      // SIGTERM AFTER a successful boot, this one runs when the boot
-      // itself fails. Without this, a throw from `options.composer` or
-      // `composeProductionGraph` would leak `db` (open SQLite handle)
-      // + any timers a half-composed graph already started (e.g. the
-      // reminders tick loop, the watchdog supervisor).
-      if (graph !== null) {
-        try {
-          await graph.shutdown()
-        } catch (shutdownErr) {
-          console.error('graph shutdown during init failure threw:', shutdownErr)
-        }
-      }
-      // O4 — clear the ambient sink before closing the DB it references (this
-      // is the composer-init-failure path; the sink was registered right after
-      // migrations applied, above).
-      clearOwnedSystemEventSink()
-      db.close()
+      // Sprint 19 — release resources on init failure so a systemd restart
+      // doesn't race a still-open SQLite handle / dangling timers spawned by a
+      // partially-composed graph. This is the composer / composeProductionGraph
+      // throw path; the identical guard wraps the post-composition init below.
+      await bootFailureCleanup()
       throw err
     }
   }
 
+  // O4 / Sprint 19 — everything from here to the returned BootHandle is guarded:
+  // a throw (listener bind, port assertion, sd_notify) runs bootFailureCleanup
+  // so the DB handle, a composed graph's timers, and the ambient system_events
+  // sink are all released before the error propagates. `boundServerRef` lets the
+  // catch also stop a listener that DID bind before a later step threw.
+  let boundServerRef: BootServer | null = null
+  try {
   // Pick the http handler. Explicit BootOptions wins over composer output;
   // composer output wins over the default healthz stub. The chained-fetch
   // path (Sprint 18) is wired below inside the Bun.serve `fetch` arrow so
@@ -432,6 +442,9 @@ export async function boot(options: BootOptions = {}): Promise<BootHandle> {
       await server.stop(force)
     },
   }
+  // Track the bound listener so the init-failure guard can stop it if a later
+  // step (sd_notify, watchdog wiring) throws after the socket is already open.
+  boundServerRef = boundServer
 
   // Best-effort READY=1; sdNotify is a no-op when NOTIFY_SOCKET is unset (dev
   // mode / macOS), and throws on real systemd error paths so a bricked notify
@@ -540,6 +553,21 @@ export async function boot(options: BootOptions = {}): Promise<BootHandle> {
   process.once('SIGINT', handleSignal)
 
   return { db, graph, server: boundServer, shutdown }
+  } catch (err) {
+    // Any failure between the sink registration and the returned BootHandle
+    // (listener bind rejection, port assertion, sd_notify READY throw) lands
+    // here. Stop a listener that already bound, then release the graph, sink,
+    // and DB via the shared cleanup so nothing leaks into a systemd restart.
+    if (boundServerRef !== null) {
+      try {
+        await boundServerRef.stop({ force: true })
+      } catch (stopErr) {
+        console.error('http listener stop during init failure threw:', stopErr)
+      }
+    }
+    await bootFailureCleanup()
+    throw err
+  }
 }
 
 /**

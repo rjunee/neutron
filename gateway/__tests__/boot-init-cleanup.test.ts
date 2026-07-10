@@ -338,6 +338,26 @@ describe('O4 — boot manages the ambient system_events sink lifecycle', () => {
     expect(resolveSystemEventSink()).toBeNull()
   })
 
+  test('CLEARS the sink + closes the DB + stops the listener on a POST-bind init failure', async () => {
+    // Exercises the guard around all initialization AFTER sink registration:
+    // the listener binds, then `sdNotify('READY=1')` throws (a bogus
+    // NOTIFY_SOCKET makes sendto() fail) BEFORE a BootHandle is returned. This
+    // is the same guarded region a bindHttpListener rejection lands in, and it
+    // additionally proves the already-bound listener is stopped.
+    const root = mkdtempSync(join(tmpdir(), 'neutron-o4-sink-postbind-'))
+    cleanups.push(root)
+    bootEnv(root)
+    process.env['NOTIFY_SOCKET'] = join(root, 'nonexistent', 'bogus.sock')
+    registerSystemEventSink(null)
+
+    activeSpy = spyProjectDbClose()
+    const closeSpy = activeSpy
+    await expect(boot({ port: 0, composer: goodComposer })).rejects.toThrow(/sd_notify/)
+    // Guard ran: sink cleared, DB closed (listener stop is best-effort + logged).
+    expect(resolveSystemEventSink()).toBeNull()
+    expect(closeSpy.calls).toBe(1)
+  })
+
   test('ownership-guarded: shutdown does NOT clobber a sibling sink registered after boot', async () => {
     const root = mkdtempSync(join(tmpdir(), 'neutron-o4-sink-own-'))
     cleanups.push(root)
