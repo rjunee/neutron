@@ -20,9 +20,13 @@
  * The {@link AppChatReactionLog} interface is what the app-ws adapter depends
  * on, so the adapter stays DB-agnostic + unit-testable with an in-memory fake;
  * {@link AppChatReactionStore} is the SQLite implementation wired in the gateway
- * composition alongside {@link AppChatStore} + {@link AppChatReceiptStore}.
+ * composition alongside {@link AppChatStore} + {@link AppChatReceiptStore}. The
+ * seq/rev/replay mechanics live in the shared {@link AppChatEventLogCore};
+ * this wrapper owns the tombstoning `(topic, message, device, emoji)` upsert
+ * and the active-set fold.
  */
 
+import { AppChatEventLogCore } from './app-chat-event-core.ts'
 import type { ProjectDb } from './db.ts'
 
 /** Add or remove an emoji reaction. */
@@ -99,40 +103,40 @@ interface ReactionRow {
   rev: number
 }
 
+const REACTION_COLUMNS = `message_id, device_id, emoji, seq, active, rev`
+
 export interface AppChatReactionStoreOptions {
   db: ProjectDb
 }
 
 export class AppChatReactionStore implements AppChatReactionLog {
-  private readonly db: ProjectDb
+  private readonly core: AppChatEventLogCore<ReactionRow, AppChatReactionAggregate>
 
   constructor(opts: AppChatReactionStoreOptions) {
-    this.db = opts.db
+    this.core = new AppChatEventLogCore<ReactionRow, AppChatReactionAggregate>({
+      db: opts.db,
+      table: 'app_chat_reactions',
+      columns: REACTION_COLUMNS,
+      defaultReplayLimit: DEFAULT_REACTION_REPLAY_LIMIT,
+      replay: {
+        kind: 'message-group',
+        messageIdOf: (r) => r.message_id,
+        fold: aggregateFromRows,
+      },
+    })
   }
 
   async record(input: AppChatReactionRecordInput): Promise<AppChatReactionAggregate> {
-    return this.db.transaction<AppChatReactionAggregate>((tx) => {
+    return this.core.transaction<AppChatReactionAggregate>((tx) => {
       // Resolve the message's true seq from the durable log — never trust a
       // client-asserted seq. 0 when the message isn't present (defensive: such
       // a reaction simply won't make the resume replay window).
-      const seqRow = tx
-        .prepare<{ seq: number | null }, [string]>(
-          `SELECT seq FROM app_chat_messages WHERE message_id = ? LIMIT 1`,
-        )
-        .get(input.message_id)
-      const seq = seqRow?.seq ?? 0
+      const seq = this.core.resolveMessageSeq(input.message_id, tx)
 
       // Monotonic per-message revision: one higher than any rev this message has
       // seen (active or tombstoned), so every change strictly advances rev. This
       // is the last-writer-wins key the client orders updates by.
-      const revRow = tx
-        .prepare<{ next: number }, [string, string]>(
-          `SELECT COALESCE(MAX(rev), 0) + 1 AS next
-             FROM app_chat_reactions
-            WHERE topic_id = ? AND message_id = ?`,
-        )
-        .get(input.topic_id, input.message_id)
-      const rev = revRow?.next ?? 1
+      const rev = this.core.nextMessageRev(input.topic_id, input.message_id, tx)
 
       const active = input.action === 'add' ? 1 : 0
 
@@ -153,19 +157,15 @@ export class AppChatReactionStore implements AppChatReactionLog {
         [input.topic_id, input.message_id, input.device_id, input.emoji, seq, active, rev, input.at],
       )
 
-      return this.aggregateInTx(tx, input.topic_id, input.message_id)
+      return aggregateFromRows(
+        input.message_id,
+        this.core.rowsForMessage(input.topic_id, input.message_id, tx),
+      )
     })
   }
 
   async aggregate(topic_id: string, message_id: string): Promise<AppChatReactionAggregate> {
-    const rows = this.db
-      .prepare<ReactionRow, [string, string]>(
-        `SELECT message_id, device_id, emoji, seq, active, rev
-           FROM app_chat_reactions
-          WHERE topic_id = ? AND message_id = ?`,
-      )
-      .all(topic_id, message_id)
-    return aggregateFromRows(message_id, rows)
+    return aggregateFromRows(message_id, this.core.rowsForMessage(topic_id, message_id))
   }
 
   async aggregatesAfter(
@@ -173,34 +173,7 @@ export class AppChatReactionStore implements AppChatReactionLog {
     after_seq: number,
     limit: number = DEFAULT_REACTION_REPLAY_LIMIT,
   ): Promise<AppChatReactionAggregate[]> {
-    const safeAfter = Number.isFinite(after_seq) ? Math.max(0, Math.trunc(after_seq)) : 0
-    const safeLimit = Number.isFinite(limit)
-      ? Math.max(1, Math.trunc(limit))
-      : DEFAULT_REACTION_REPLAY_LIMIT
-    const rows = this.db
-      .prepare<ReactionRow, [string, number]>(
-        `SELECT message_id, device_id, emoji, seq, active, rev
-           FROM app_chat_reactions
-          WHERE topic_id = ? AND seq > ?
-          ORDER BY seq ASC`,
-      )
-      .all(topic_id, safeAfter)
-    return groupAggregates(rows, safeLimit)
-  }
-
-  private aggregateInTx(
-    tx: ProjectDb,
-    topic_id: string,
-    message_id: string,
-  ): AppChatReactionAggregate {
-    const rows = tx
-      .prepare<ReactionRow, [string, string]>(
-        `SELECT message_id, device_id, emoji, seq, active, rev
-           FROM app_chat_reactions
-          WHERE topic_id = ? AND message_id = ?`,
-      )
-      .all(topic_id, message_id)
-    return aggregateFromRows(message_id, rows)
+    return this.core.aggregatesAfter(topic_id, after_seq, limit)
   }
 }
 
@@ -220,25 +193,4 @@ function aggregateFromRows(message_id: string, rows: ReactionRow[]): AppChatReac
     a.emoji < b.emoji ? -1 : a.emoji > b.emoji ? 1 : a.device_id < b.device_id ? -1 : a.device_id > b.device_id ? 1 : 0,
   )
   return { message_id, seq, rev, reactions }
-}
-
-/** Group seq-ordered reaction rows (spanning many messages) into per-message
- *  aggregates, preserving seq order and capping at `limit` distinct messages. */
-function groupAggregates(rows: ReactionRow[], limit: number): AppChatReactionAggregate[] {
-  const byMessage = new Map<string, ReactionRow[]>()
-  for (const r of rows) {
-    let list = byMessage.get(r.message_id)
-    if (list === undefined) {
-      if (byMessage.size >= limit) continue
-      list = []
-      byMessage.set(r.message_id, list)
-    }
-    list.push(r)
-  }
-  const out: AppChatReactionAggregate[] = []
-  for (const [message_id, group] of byMessage) {
-    out.push(aggregateFromRows(message_id, group))
-  }
-  // Map preserves first-seen (seq-ascending) insertion order.
-  return out
 }

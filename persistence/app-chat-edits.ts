@@ -24,9 +24,12 @@
  * The {@link AppChatEditLog} interface is what the app-ws adapter depends on, so
  * the adapter stays DB-agnostic + unit-testable with an in-memory fake;
  * {@link AppChatEditStore} is the SQLite implementation wired in the gateway
- * composition alongside {@link AppChatStore} + {@link AppChatReactionStore}.
+ * composition alongside {@link AppChatStore} + {@link AppChatReactionStore}. The
+ * seq/rev/replay mechanics live in the shared {@link AppChatEventLogCore};
+ * this wrapper owns authorization and the one-row-per-message upsert.
  */
 
+import { AppChatEventLogCore } from './app-chat-event-core.ts'
 import type { ProjectDb } from './db.ts'
 
 /** Edit (rewrite body) or delete (tombstone) a message. */
@@ -121,27 +124,31 @@ interface EditRow {
   edited_at: number
 }
 
+const EDIT_COLUMNS = `message_id, seq, rev, body, deleted, edited_at`
+
 export interface AppChatEditStoreOptions {
   db: ProjectDb
 }
 
 export class AppChatEditStore implements AppChatEditLog {
-  private readonly db: ProjectDb
+  private readonly core: AppChatEventLogCore<EditRow, AppChatEditAggregate>
 
   constructor(opts: AppChatEditStoreOptions) {
-    this.db = opts.db
+    this.core = new AppChatEventLogCore<EditRow, AppChatEditAggregate>({
+      db: opts.db,
+      table: 'app_chat_edits',
+      columns: EDIT_COLUMNS,
+      defaultReplayLimit: DEFAULT_EDIT_REPLAY_LIMIT,
+      replay: { kind: 'row', toAggregate: (r) => rowToAggregate(r.message_id, r) },
+    })
   }
 
   async record(input: AppChatEditRecordInput): Promise<AppChatEditAggregate> {
-    return this.db.transaction<AppChatEditAggregate>((tx) => {
+    return this.core.transaction<AppChatEditAggregate>((tx) => {
       // Resolve the message's true seq + role from the durable log — never trust
       // a client-asserted seq, and the role is what authorizes the mutation.
-      const msgRow = tx
-        .prepare<{ seq: number | null; role: string | null }, [string]>(
-          `SELECT seq, role FROM app_chat_messages WHERE message_id = ? LIMIT 1`,
-        )
-        .get(input.message_id)
-      if (msgRow === undefined || msgRow === null || msgRow.role === null) {
+      const msgRow = this.core.lookupMessage(input.message_id, tx)
+      if (msgRow === null || msgRow.role === null) {
         // Unknown message → can't establish authorship → reject.
         throw new AppChatEditNotAuthorizedError('message not found')
       }
@@ -156,14 +163,7 @@ export class AppChatEditStore implements AppChatEditLog {
 
       // Monotonic per-message revision: one higher than this message's current
       // edit rev, so every edit/delete strictly advances rev (the LWW key).
-      const revRow = tx
-        .prepare<{ next: number }, [string, string]>(
-          `SELECT COALESCE(MAX(rev), 0) + 1 AS next
-             FROM app_chat_edits
-            WHERE topic_id = ? AND message_id = ?`,
-        )
-        .get(input.topic_id, input.message_id)
-      const rev = revRow?.next ?? 1
+      const rev = this.core.nextMessageRev(input.topic_id, input.message_id, tx)
 
       const deleted = input.action === 'delete' ? 1 : 0
       const body = input.action === 'delete' ? '' : input.body
@@ -185,20 +185,15 @@ export class AppChatEditStore implements AppChatEditLog {
         [input.topic_id, input.message_id, seq, rev, body, deleted, input.at, input.editor_device_id],
       )
 
-      return this.aggregateInTx(tx, input.topic_id, input.message_id)
+      return rowToAggregate(
+        input.message_id,
+        this.core.firstRowForMessage(input.topic_id, input.message_id, tx),
+      )
     })
   }
 
   async aggregate(topic_id: string, message_id: string): Promise<AppChatEditAggregate> {
-    const row = this.db
-      .prepare<EditRow, [string, string]>(
-        `SELECT message_id, seq, rev, body, deleted, edited_at
-           FROM app_chat_edits
-          WHERE topic_id = ? AND message_id = ?
-          LIMIT 1`,
-      )
-      .get(topic_id, message_id)
-    return rowToAggregate(message_id, row)
+    return rowToAggregate(message_id, this.core.firstRowForMessage(topic_id, message_id))
   }
 
   async aggregatesAfter(
@@ -206,36 +201,7 @@ export class AppChatEditStore implements AppChatEditLog {
     after_seq: number,
     limit: number = DEFAULT_EDIT_REPLAY_LIMIT,
   ): Promise<AppChatEditAggregate[]> {
-    const safeAfter = Number.isFinite(after_seq) ? Math.max(0, Math.trunc(after_seq)) : 0
-    const safeLimit = Number.isFinite(limit)
-      ? Math.max(1, Math.trunc(limit))
-      : DEFAULT_EDIT_REPLAY_LIMIT
-    const rows = this.db
-      .prepare<EditRow, [string, number, number]>(
-        `SELECT message_id, seq, rev, body, deleted, edited_at
-           FROM app_chat_edits
-          WHERE topic_id = ? AND seq > ?
-          ORDER BY seq ASC
-          LIMIT ?`,
-      )
-      .all(topic_id, safeAfter, safeLimit)
-    return rows.map((r) => rowToAggregate(r.message_id, r))
-  }
-
-  private aggregateInTx(
-    tx: ProjectDb,
-    topic_id: string,
-    message_id: string,
-  ): AppChatEditAggregate {
-    const row = tx
-      .prepare<EditRow, [string, string]>(
-        `SELECT message_id, seq, rev, body, deleted, edited_at
-           FROM app_chat_edits
-          WHERE topic_id = ? AND message_id = ?
-          LIMIT 1`,
-      )
-      .get(topic_id, message_id)
-    return rowToAggregate(message_id, row)
+    return this.core.aggregatesAfter(topic_id, after_seq, limit)
   }
 }
 

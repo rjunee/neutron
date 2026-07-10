@@ -14,9 +14,13 @@
  * The {@link AppChatReceiptLog} interface is what the app-ws adapter depends
  * on, so the adapter stays DB-agnostic and unit-testable with an in-memory
  * fake; {@link AppChatReceiptStore} is the SQLite implementation wired in the
- * gateway composition alongside {@link AppChatStore}.
+ * gateway composition alongside {@link AppChatStore}. The seq-resolution and
+ * replay mechanics live in the shared {@link AppChatEventLogCore}; this
+ * wrapper owns the monotonic `(topic, message, device)` upsert and the
+ * delivered/read fold.
  */
 
+import { AppChatEventLogCore } from './app-chat-event-core.ts'
 import type { ProjectDb } from './db.ts'
 
 /** A receipt state a device can report / the server can record. */
@@ -83,28 +87,35 @@ interface ReceiptRow {
   read_at: number | null
 }
 
+const RECEIPT_COLUMNS = `message_id, device_id, seq, delivered_at, read_at`
+
 export interface AppChatReceiptStoreOptions {
   db: ProjectDb
 }
 
 export class AppChatReceiptStore implements AppChatReceiptLog {
-  private readonly db: ProjectDb
+  private readonly core: AppChatEventLogCore<ReceiptRow, AppChatReceiptAggregate>
 
   constructor(opts: AppChatReceiptStoreOptions) {
-    this.db = opts.db
+    this.core = new AppChatEventLogCore<ReceiptRow, AppChatReceiptAggregate>({
+      db: opts.db,
+      table: 'app_chat_receipts',
+      columns: RECEIPT_COLUMNS,
+      defaultReplayLimit: DEFAULT_RECEIPT_REPLAY_LIMIT,
+      replay: {
+        kind: 'message-group',
+        messageIdOf: (r) => r.message_id,
+        fold: aggregateFromRows,
+      },
+    })
   }
 
   async record(input: AppChatReceiptRecordInput): Promise<AppChatReceiptAggregate> {
-    return this.db.transaction<AppChatReceiptAggregate>((tx) => {
+    return this.core.transaction<AppChatReceiptAggregate>((tx) => {
       // Resolve the message's true seq from the durable log — never trust a
       // client-asserted seq. 0 when the message isn't present (defensive: such
       // a receipt simply won't make the resume replay window).
-      const seqRow = tx
-        .prepare<{ seq: number | null }, [string]>(
-          `SELECT seq FROM app_chat_messages WHERE message_id = ? LIMIT 1`,
-        )
-        .get(input.message_id)
-      const seq = seqRow?.seq ?? 0
+      const seq = this.core.resolveMessageSeq(input.message_id, tx)
 
       // `read` implies `delivered`: stamp both on a read so a device that only
       // ever reports read still counts as delivered. COALESCE in the conflict
@@ -123,19 +134,15 @@ export class AppChatReceiptStore implements AppChatReceiptLog {
         [input.topic_id, input.message_id, input.device_id, seq, deliveredAt, readAt],
       )
 
-      return this.aggregateInTx(tx, input.topic_id, input.message_id)
+      return aggregateFromRows(
+        input.message_id,
+        this.core.rowsForMessage(input.topic_id, input.message_id, tx),
+      )
     })
   }
 
   async aggregate(topic_id: string, message_id: string): Promise<AppChatReceiptAggregate> {
-    const rows = this.db
-      .prepare<ReceiptRow, [string, string]>(
-        `SELECT message_id, device_id, seq, delivered_at, read_at
-           FROM app_chat_receipts
-          WHERE topic_id = ? AND message_id = ?`,
-      )
-      .all(topic_id, message_id)
-    return aggregateFromRows(message_id, rows)
+    return aggregateFromRows(message_id, this.core.rowsForMessage(topic_id, message_id))
   }
 
   async aggregatesAfter(
@@ -143,34 +150,7 @@ export class AppChatReceiptStore implements AppChatReceiptLog {
     after_seq: number,
     limit: number = DEFAULT_RECEIPT_REPLAY_LIMIT,
   ): Promise<AppChatReceiptAggregate[]> {
-    const safeAfter = Number.isFinite(after_seq) ? Math.max(0, Math.trunc(after_seq)) : 0
-    const safeLimit = Number.isFinite(limit)
-      ? Math.max(1, Math.trunc(limit))
-      : DEFAULT_RECEIPT_REPLAY_LIMIT
-    const rows = this.db
-      .prepare<ReceiptRow, [string, number]>(
-        `SELECT message_id, device_id, seq, delivered_at, read_at
-           FROM app_chat_receipts
-          WHERE topic_id = ? AND seq > ?
-          ORDER BY seq ASC`,
-      )
-      .all(topic_id, safeAfter)
-    return groupAggregates(rows, safeLimit)
-  }
-
-  private aggregateInTx(
-    tx: ProjectDb,
-    topic_id: string,
-    message_id: string,
-  ): AppChatReceiptAggregate {
-    const rows = tx
-      .prepare<ReceiptRow, [string, string]>(
-        `SELECT message_id, device_id, seq, delivered_at, read_at
-           FROM app_chat_receipts
-          WHERE topic_id = ? AND message_id = ?`,
-      )
-      .all(topic_id, message_id)
-    return aggregateFromRows(message_id, rows)
+    return this.core.aggregatesAfter(topic_id, after_seq, limit)
   }
 }
 
@@ -187,25 +167,4 @@ function aggregateFromRows(message_id: string, rows: ReceiptRow[]): AppChatRecei
   delivered_by.sort()
   read_by.sort()
   return { message_id, seq, delivered_by, read_by }
-}
-
-/** Group seq-ordered receipt rows (spanning many messages) into per-message
- *  aggregates, preserving seq order and capping at `limit` distinct messages. */
-function groupAggregates(rows: ReceiptRow[], limit: number): AppChatReceiptAggregate[] {
-  const byMessage = new Map<string, ReceiptRow[]>()
-  for (const r of rows) {
-    let list = byMessage.get(r.message_id)
-    if (list === undefined) {
-      if (byMessage.size >= limit) continue
-      list = []
-      byMessage.set(r.message_id, list)
-    }
-    list.push(r)
-  }
-  const out: AppChatReceiptAggregate[] = []
-  for (const [message_id, group] of byMessage) {
-    out.push(aggregateFromRows(message_id, group))
-  }
-  // Map preserves first-seen (seq-ascending) insertion order.
-  return out
 }
