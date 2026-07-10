@@ -107,10 +107,11 @@ export class GoogleGmailApiError extends Error {
  * would let the caller inject arbitrary RFC 5322 headers (extra Bcc,
  * From-spoof, attachments) into the raw MIME before drafts.create.
  *
- * The Tier 1 Core does not send mail, but the same `buildRawMessage`
- * primitive will be inherited by the Tier 2 paid Email-Private Core's
- * send path — sanitising at the MIME-build layer kills the injection
- * surface for both Cores in one place. Argus r1 BLOCKING.
+ * This Core both prepares drafts (drafts.create) AND sends mail
+ * (messages.send, the `email_send` tool), and the same `buildRawMessage`
+ * primitive feeds both paths — sanitising at the MIME-build layer kills
+ * the injection surface for every raw-message path in one place. Argus
+ * r1 BLOCKING.
  */
 export class EmailHeaderInjectionError extends Error {
   readonly code = 'email_header_injection' as const

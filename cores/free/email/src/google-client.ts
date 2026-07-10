@@ -62,10 +62,13 @@ import type { GmailMessageResource } from './mime.ts'
  * closure so the runtime composer can refresh tokens out-of-band
  * without the client caching stale credentials.
  *
- * The five endpoints this wrapper calls:
- *   GET /messages              — listMessages / search
- *   GET /messages/<id>?format=full — getMessage
- *   POST /drafts               — createDraft
+ * The Gmail v1 endpoints this wrapper calls:
+ *   GET  /messages              — listMessages / search
+ *   GET  /messages/<id>?format=full — getMessage
+ *   POST /drafts                — createDraft
+ *   POST /messages/send         — sendMessage (the `email_send` tool)
+ *   POST /threads/<id>/modify   — modifyThread (label changes)
+ *   GET  /labels                — label lookup/ensure
  *
  * v1 limitations (deliberate — flagged in README + AGENTS.md):
  * - No automatic refresh-token exchange here. The runtime composer

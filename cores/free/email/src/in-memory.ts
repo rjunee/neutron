@@ -357,10 +357,10 @@ export function buildInMemoryGmailClient(
  * `__tests__/tools.test.ts` suite needs deterministic message
  * fixtures for `listMessages` / `getMessage` / `search`, and the
  * Calendar Core uses `create()` (which exists in its CRUD shape) as
- * the seeding mechanism. Email-Managed only ships `createDraft`
- * (drafts only), so seeding inbox messages needs a separate hook —
- * exposed here so tools.test can build realistic fixtures without
- * fighting the no-send guarantee.
+ * the seeding mechanism. Email-Managed ships `createDraft` +
+ * `sendMessage` but no path that RECEIVES/injects inbox messages, so
+ * seeding inbox fixtures needs a separate hook — exposed here so
+ * tools.test can build realistic fixtures.
  *
  * IMPORTANT: this helper is purely a TEST SEAM. Production runtime
  * never calls it — only the GmailClient interface methods do. The

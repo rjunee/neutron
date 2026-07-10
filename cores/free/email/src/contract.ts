@@ -5,7 +5,7 @@
  * derivation helpers for the Email-Managed Core's Gmail client
  * surface. Split out of `backend.ts` (D5); `backend.ts` remains the
  * barrel — see its header for the design notes (newest-first
- * ordering, draft-only / no-send guarantee).
+ * ordering; draft + send surface, see manifest.ts).
  */
 
 /**
@@ -211,8 +211,8 @@ export interface GmailThreadModifyResult {
 
 /**
  * Backend contract every GmailClient implementation satisfies. The
- * shape mirrors the five MCP tool inputs the manifest declares (list
- * / read / search / draft) — `summarize` is implemented at the
+ * shape mirrors the MCP tool inputs the manifest declares (list /
+ * read / search / draft / send) — `summarize` is implemented at the
  * tool layer because it composes a `getMessage` round-trip with a
  * separate `EmailSummarizer` call (not part of Gmail's REST surface).
  */
