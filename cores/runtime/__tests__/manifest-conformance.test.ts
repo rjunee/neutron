@@ -26,7 +26,23 @@ import {
   CapabilitySchema,
   NeutronManifestSchema,
   isKnownCapability,
+  isValidSemverRange,
 } from '@neutronai/cores-sdk'
+
+/** Minimal green manifest, one field overridden per negative test. */
+function baseManifest(): Record<string, unknown> {
+  return {
+    capabilities: [],
+    tier_support: ['regular'],
+    tools: [],
+    ui_components: [],
+    billing_hooks: [],
+    linked_sources: [],
+    secrets: [],
+    compat: { coreApi: '^1.0.0' },
+    build: { neutronVersion: '0.1.0' },
+  }
+}
 
 const FREE_CORES_DIR = join(import.meta.dir, '..', '..', 'free')
 
@@ -101,6 +117,31 @@ describe('bundled Core manifest conformance (X3 — one schema)', () => {
       build: { neutronVersion: '0.1.0' },
     }
     expect(NeutronManifestSchema.safeParse(manifest).success).toBe(true)
+  })
+
+  describe('compat.coreApi semver validation preserved from the deleted hand validator', () => {
+    test('valid semver ranges parse green (positive boundaries)', () => {
+      for (const coreApi of ['^0.1.0', '^1.0.0', '1.2.3', '>=1.0.0 <2.0.0', '^1.0.0 || ^2.0.0', '*']) {
+        expect(isValidSemverRange(coreApi)).toBe(true)
+        const m = { ...baseManifest(), compat: { coreApi } }
+        expect(NeutronManifestSchema.safeParse(m).success).toBe(true)
+      }
+    })
+
+    test('malformed compat.coreApi is REJECTED (single schema is not looser than the deleted validator)', () => {
+      for (const coreApi of ['not-a-version', 'v1', '1.2.3.4.5', '>>1.0.0', '']) {
+        expect(isValidSemverRange(coreApi)).toBe(false)
+        const m = { ...baseManifest(), compat: { coreApi } }
+        expect(NeutronManifestSchema.safeParse(m).success).toBe(false)
+      }
+    })
+
+    test('all 9 bundled Cores declare a valid semver coreApi', () => {
+      for (const slug of slugs) {
+        const parsed = NeutronManifestSchema.parse(readNeutronBlock(slug))
+        expect(isValidSemverRange(parsed.compat.coreApi)).toBe(true)
+      }
+    })
   })
 
   test('platform-known set is consulted, not enforced — every bundled capability that IS known round-trips', () => {

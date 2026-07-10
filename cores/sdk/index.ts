@@ -23,6 +23,7 @@ export {
   CapabilitySchema,
   KNOWN_CAPABILITIES,
   isKnownCapability,
+  isValidSemverRange,
   JsonSchemaDocumentSchema,
   LinkedSourceDefSchema,
   LinkedSourceScopeSchema,

@@ -35,4 +35,8 @@ export type {
 
 // The platform-known capability set (formerly hand-maintained in
 // validator.ts as KNOWN_CAPABILITIES) now lives with the single schema.
-export { KNOWN_CAPABILITIES, isKnownCapability } from '@neutronai/cores-sdk/manifest'
+export {
+  KNOWN_CAPABILITIES,
+  isKnownCapability,
+  isValidSemverRange,
+} from '@neutronai/cores-sdk/manifest'

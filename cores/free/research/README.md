@@ -52,7 +52,7 @@ This contract enforces CLAUDE.md / SOUL.md operating principle #9 ("No fabricate
 
 ## SDK capability — `network:browse`
 
-New in this sprint. Declared in `core-sdk/types.ts:NeutronCapability`, `core-sdk/manifest.schema.json`, `core-sdk/validator.ts:KNOWN_CAPABILITIES`.
+Declared in the single manifest source `cores/sdk/manifest.ts:KNOWN_CAPABILITIES` (X3 — one manifest contract; the former `core-sdk` closed union + JSON-schema mirror were folded in and deleted).
 
 Semantics: declaring `network:browse` implies `network:external` and promises the Core enforces a per-Core domain allow-list. The runtime does NOT enforce the allow-list itself; the Core is the source of truth. See `src/web-fetch.ts` for the reference enforcer:
 

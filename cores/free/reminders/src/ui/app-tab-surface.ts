@@ -15,10 +15,10 @@
  *   (iii) use the existing `project_tab` enum value already in the SDK.
  *
  * S1 picks (i) — Notes Core S1 (PR #247, merged 2026-05-20) landed the
- * additive `app_tab` enum value on both manifest validators
- * (`cores/sdk/manifest.ts:UiComponentSurfaceSchema` +
- * `core-sdk/types.ts:UiComponentSurface` + `core-sdk/validator.ts` +
- * `core-sdk/manifest.schema.json`). Reminders Core consumes the
+ * additive `app_tab` enum value on the single manifest schema
+ * (`cores/sdk/manifest.ts:UiComponentSurfaceSchema` — X3 collapsed the
+ * former `core-sdk` validator + JSON-schema mirror into this one source).
+ * Reminders Core consumes the
  * already-landed enum — no additive SDK change in this sprint. The
  * `app_tab` semantic is the brief's locked target ("Core's in-app
  * full-screen surface, navigated to by P5.3 launcher tiles whose

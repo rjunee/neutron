@@ -14,21 +14,15 @@
  * - docs/engineering-plan.md § D.10.4 (capability-gated `secrets:` block,
  *   2026-05-06)
  *
- * Relationship to `core-sdk/`:
- * - `core-sdk/types.ts` is the prior P0 contract surface — strict literal
- *   capability union + a hand-written validator. It survives as the wire
- *   shape consumed by the (P3) install pipeline; this Zod schema is the
- *   author-facing surface a Core uses when it imports
- *   `@neutronai/cores-sdk` to build/validate its own manifest at boot.
- * - The two MUST stay shape-compatible. The lone difference is the
- *   capability list: `core-sdk` enumerates a fixed union, `cores-sdk`
- *   accepts the broader `<verb>:<resource>`-shaped string the Core author
- *   declares (a Core may declare a third-party connector capability that
- *   the closed enum doesn't yet name — `connect:google-ads`, etc.). The
- *   P3 install pipeline cross-checks against the closed enum and refuses
- *   unknown capabilities. SDK-side we accept the broader shape so a Core
- *   can build green against the SDK while marketplace registration
- *   surfaces the unknown-capability error.
+ * X3 — one manifest contract: this is the SINGLE manifest schema. The former
+ * `core-sdk/` hand validator + JSON-schema mirror (zero production callers)
+ * were deleted and `core-sdk/` reduced to a one-release path-shim that
+ * re-exports the types below. Capabilities: the schema validates the OPEN
+ * `<verb>:<resource>` string (a Core may declare a third-party / sidecar
+ * capability the platform doesn't enumerate — `connect:google-ads`,
+ * `read:notes.db`); the platform-KNOWN subset lives here too as
+ * `KNOWN_CAPABILITIES` + `isKnownCapability()`, consulted by X1's install
+ * gate but never used to reject an unknown-but-well-formed capability.
  */
 
 import { z } from 'zod'
@@ -45,13 +39,12 @@ import { z } from 'zod'
  *
  * Validated as a non-empty, lowercase string with at least one colon — this
  * schema checks SHAPE only (a Core may declare its own `<slug>.db` sidecar
- * cap, so the resource side stays open). The closed capability enum lives in
- * `core-sdk/types.ts:NeutronCapability`. Per § 2.3 (ZERO back-compat) the
- * retired pre-§2.3 shared-DB/data-dir aliases were removed from that enum +
- * types; Open ships no manifest declaring them. (Shape validation here does
- * NOT enumerate the retired forms — there is no runtime install-time
- * hard-reject of them; correctness rests on
- * the closed enum + the fact that no legacy manifest exists.)
+ * cap, so the resource side stays open). The platform-known subset is
+ * `KNOWN_CAPABILITIES` below. Per § 2.3 (ZERO back-compat) the retired
+ * pre-§2.3 shared-DB/data-dir aliases were removed; Open ships no manifest
+ * declaring them. (Shape validation here does NOT enumerate the retired
+ * forms — there is no runtime install-time hard-reject of them; correctness
+ * rests on the known set + the fact that no legacy manifest exists.)
  */
 
 export const CapabilitySchema = z
@@ -244,9 +237,7 @@ export type UiComponentDef = z.infer<typeof UiComponentDefSchema>
 /**
  * Billing-hook declaration. v1 ships an empty array — billing
  * actually wires up in P3+ when the Cores marketplace adds usage-
- * based billing. Shape mirrors `core-sdk/types.ts:BillingHookDef`
- * so a manifest that parses through this schema also passes
- * `validateNeutronManifest()` on the install pipeline.
+ * based billing.
  */
 export const BillingModelSchema = z.enum([
   'flat_monthly',
@@ -358,8 +349,49 @@ export type ManifestSecret = z.infer<typeof ManifestSecretSchema>
  * against the host's Core SDK version at install time; `neutronVersion`
  * names the Neutron host version this Core was built against.
  */
+const SEMVER_TERM_RE =
+  /^([\^~]|>=?|<=?|=)?\d+(\.\d+){0,2}(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$/
+
+/**
+ * Conservative semver-range syntax check. Folded in from the deleted
+ * `core-sdk/validator.ts:isValidSemverRange` (X3 — one manifest contract) so
+ * the single schema preserves the STRICTER of the two former behaviors: the
+ * hand validator rejected a malformed `compat.coreApi`, so the surviving
+ * schema must too (not silently loosen). Canonical npm-style grammar:
+ *   - bare wildcard (`*`)
+ *   - single term (`1.2.3`, `^1.2.3`, `>=1.2.3-rc.1`)
+ *   - space-joined intersections (`>=1 <2`, `>= 1.0.0 <2.0.0`)
+ *   - `||`-joined unions (`^1.0.0 || ^2.0.0`)
+ */
+export function isValidSemverRange(input: unknown): boolean {
+  if (typeof input !== 'string') return false
+  const trimmed = input.trim()
+  if (trimmed === '') return false
+  // npm tolerates whitespace between the comparator and the version
+  // (e.g. `>= 1.0.0`). Collapse it before splitting into terms. The
+  // lookahead requires a digit immediately after the whitespace so split
+  // comparators like `> =1.0.0` stay split and the per-term regex rejects.
+  const normalized = trimmed.replace(/([\^~]|>=?|<=?|=)\s+(?=\d)/g, '$1')
+  for (const orClause of normalized.split(/\s*\|\|\s*/)) {
+    const clause = orClause.trim()
+    if (clause === '') return false
+    if (clause === '*') continue
+    const terms = clause.split(/\s+/).filter((t) => t !== '')
+    if (terms.length === 0) return false
+    for (const term of terms) {
+      if (!SEMVER_TERM_RE.test(term)) return false
+    }
+  }
+  return true
+}
+
 export const NeutronCompatSchema = z.object({
-  coreApi: z.string().min(1, { message: 'compat.coreApi semver range required' }),
+  coreApi: z
+    .string()
+    .min(1, { message: 'compat.coreApi semver range required' })
+    .refine(isValidSemverRange, {
+      message: 'compat.coreApi must be a valid semver range',
+    }),
 })
 export type NeutronCompat = z.infer<typeof NeutronCompatSchema>
 
@@ -375,10 +407,8 @@ export type NeutronBuild = z.infer<typeof NeutronBuildSchema>
  * a Core's `package.json`. Array fields are required-but-may-be-empty
  * so that an absent declaration is intentional rather than accidental.
  *
- * `compat` + `build` are required to keep this schema shape-compatible
- * with the install-time validator in `core-sdk/validator.ts` — a
- * manifest that parses through `@neutronai/cores-sdk` MUST also pass
- * `validateNeutronManifest()` on the same input.
+ * `compat` + `build` are required. This is the single install-time +
+ * author-facing schema (X3 — the former `core-sdk/validator.ts` was deleted).
  *
  * The cross-field `route_mount` ⇒ `mount_path` invariant lives on the
  * schema itself via `superRefine`, so callers who use

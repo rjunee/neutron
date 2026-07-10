@@ -406,51 +406,39 @@ The P3 install pipeline will allocate the on-disk file + register the capability
 
 ---
 
-## Relationship to `core-sdk/`
+## Relationship to `core-sdk/` (merged — X3)
 
-`core-sdk/` (Sprint 2B P0) is the install-time / marketplace validator
-surface — `validateNeutronManifest()` + JSON Schema mirror. It's the
-wire shape the P3 install pipeline + the Cores marketplace read against.
+**X3 — one manifest contract.** There is now a SINGLE manifest schema: this
+package (`cores/sdk/manifest.ts`, Zod). The former `core-sdk/` hand validator
+(`validateNeutronManifest()`, 650 lines) + its JSON-Schema mirror
+(`manifest.schema.json`) had ZERO production callers and were deleted;
+`core-sdk/` is now a one-release **path-shim** that re-exports the pure types +
+the platform-known helpers (`KNOWN_CAPABILITIES`, `isKnownCapability`,
+`isValidSemverRange`) from this package. New code imports `@neutronai/cores-sdk`.
 
-`cores/sdk/` (Sprint 24, this package) is the **runtime / author-
-facing** surface a Core imports to validate, mount routes, read
-secrets, validate JWTs, run reconciliation.
+Validate a manifest with `parseManifest` / `safeParseManifest` /
+`NeutronManifestSchema`. The schema locks the required-fields list
+(`capabilities`, `tier_support`, `tools`, `ui_components`, `billing_hooks`,
+`linked_sources`, `secrets`, `compat`, `build`) and every field shape:
 
-**The two are shape-compatible as of Sprint 24** — a `package.json`
-`"neutron"` block that `parseManifest()` accepts MUST also pass
-`validateNeutronManifest()` on the same input, and vice versa. The
-required-fields list is locked across both: `capabilities`,
-`tier_support`, `tools`, `ui_components`, `billing_hooks`,
-`linked_sources`, `secrets`, `compat`, `build`. Field-shape parity
-extends to:
+- **`tier_support` enum** — `'regular' | 'private' | 'both'`.
+- **`linked_sources[]`** — `{kind, scope, target_kinds[]}` with free-form
+  `kind` string (per § A.3.5; `KNOWN_LINKED_SOURCE_KINDS` is informational /
+  marketplace-display only — values outside it still validate).
+- **`billing_hooks[]`** — `{model, price_cents, currency, on_install?, on_uninstall?}`.
+- **`secrets[]`** — per § D.10.4: `{name, kind, label, scope?, required, install_prompt}`.
+- **`UiComponentSurface`** — `route_mount` requires `mount_path` (schema `superRefine`).
+- **`compat.coreApi`** — semver-range syntax validated (`isValidSemverRange`,
+  folded into this module; preserves the check the deleted hand validator had).
 
-- **`tier_support` enum.** Both schemas accept `'regular' | 'private' | 'both'`.
-- **`linked_sources[]` shape.** Both require `{kind, scope, target_kinds[]}`
-  with free-form `kind` string (per § A.3.5; the closed enum
-  `KNOWN_LINKED_SOURCE_KINDS` survives as informational/marketplace-
-  display only — values outside it pass the validator with a warning).
-- **`billing_hooks[]` shape.** Both accept `{model, price_cents,
-  currency, on_install?, on_uninstall?}`.
-- **`secrets[]` block.** Both require the per § D.10.4 shape:
-  `{name, kind, label, scope?, required, install_prompt}` with `kind`
-  in `byo_api_key | oauth_token | oauth_client | webhook_secret`.
-- **`UiComponentSurface` enum.** Both accept `route_mount` and both
-  require `mount_path` when surface is `route_mount` (Sprint 24
-  refinement landed in `core-sdk/validator.ts` and the JSON Schema
-  mirror's `allOf if/then`).
-
-The one *intentional* divergence:
-
-- **Capability list.** `core-sdk` enforces a closed union of the
-  capability strings the P3 install pipeline knows about. `cores/sdk`
-  accepts a permissive `<verb>:<resource>` regex so a Core can declare
-  a new connector capability (`connect:google-ads`) and build green
-  before the closed-enum landing PR adds it. The P3 install pipeline
-  flags unknowns at marketplace registration; SDK-side stays open so
-  first-party Cores can experiment ahead of the closed-enum edit.
-
-`cores/sdk` is the spec-locked author-facing surface as of Sprint 24
-2026-05-08; `core-sdk` was migrated to match in the same sprint.
+**Capabilities — open shape + known-platform set.** `CapabilitySchema`
+validates the OPEN `<verb>:<resource>` string, so a Core can declare a
+capability the platform doesn't enumerate (`connect:google-ads`, `read:notes.db`)
+and it still validates + installs. The platform-KNOWN set (what X1's install
+gate can enforce natively) is `KNOWN_CAPABILITIES`, consulted via
+`isKnownCapability()` — consulted, never used to reject unknowns. This replaces
+the former closed-union-vs-open-regex split (and the casts that bridged them at
+`install-bundled.ts`).
 
 ---
 
