@@ -36,6 +36,7 @@ import {
   type AuthGateOptions,
 } from '@neutronai/landing/auth-gate.ts'
 import { isSpaClientRoute } from '@neutronai/landing/spa-routes.ts'
+import type { HttpGate } from './http-gate.ts'
 import {
   ROUTE_SLOTS,
   slotMatches,
@@ -56,6 +57,7 @@ export {
   LANDING_ROUTE_PATHS,
   ROUTE_SLOTS,
 } from './route-slots.ts'
+export type { HttpGate } from './http-gate.ts'
 export type {
   AppWsHandler,
   InternalCacheInvalidateConfig,
@@ -95,12 +97,80 @@ export type ComposeHttpHandlerInput = ComposeSurfaceInput & {
    *
    * Per docs/plans/2026-05-27-returning-user-resume-auth.md.
    */
-  authGate?: AuthGateOptions
+  /**
+   * C5b — the ONE auth-gate seam, both modes. When supplied, the composed
+   * handler runs the gate on every request that hits the user-facing path set
+   * (`isGatedUserFacingRoute`) BEFORE dispatching the route ladder. Managed
+   * owner-gated mode supplies `buildManagedAuthGate(<AuthGateOptions>)` (the
+   * OAuth decision gate + Set-Cookie stitch); Open anonymous mode supplies
+   * `buildOpenOwnerGate(...).gate` (the single-owner serving gate). Both flow
+   * through the single `gate.apply(...)` dispatch below.
+   *
+   * When omitted the gate is skipped entirely — the pre-2026-05-27
+   * unauthenticated behaviour for `/chat` / `/api/app/*` is preserved (used by
+   * tests + dev / smoke deploys without an identity service co-located).
+   */
+  gate?: HttpGate
   /**
    * Always-present fallback. Production wires
    * `defaultHealthzHandler({ project_slug, bootedAt })` from gateway/index.
    */
   defaultHandler: (req: Request) => Response | Promise<Response>
+}
+
+/**
+ * C5b — the MANAGED-mode adapter: wrap an `AuthGateOptions` decision object into
+ * the unified `HttpGate` seam. Behaviorally IDENTICAL to the pre-C5b inline
+ * auth-gate block that lived in `composeHttpHandler` — it evaluates the gate,
+ * short-circuits redirects, and stitches the gate's `Set-Cookie` onto the
+ * downstream response (APPEND, never replace, for BOTH the `authenticated` and
+ * cookie-valid `allow` decisions — sliding refresh). Pinned by
+ * `auth-gate-dispatch.test.ts` + `auth-gate-seam-both-modes.test.ts`.
+ */
+export function buildManagedAuthGate(options: AuthGateOptions): HttpGate {
+  return {
+    async apply(req, _server, next): Promise<Response> {
+      const decision = await evaluateAuthGate(req, options)
+      if (decision.kind === 'redirect-to-signin') {
+        return new Response(null, {
+          status: 302,
+          headers: { location: decision.location },
+        })
+      }
+      // Argus r1 BLOCKER #1 + #2 — a 302 to a per-instance route, carrying an
+      // optional Set-Cookie to stitch onto the 302 in one shot.
+      if (decision.kind === 'redirect') {
+        const headers = new Headers({ location: decision.location })
+        if (decision.set_cookie !== undefined) {
+          headers.append('set-cookie', decision.set_cookie)
+        }
+        return new Response(null, { status: 302, headers })
+      }
+      // `authenticated` (just consumed a `?start=`) and cookie-valid `allow`
+      // (sliding refresh) both carry a Set-Cookie we APPEND onto whatever the
+      // downstream chain returns — never replacing a cookie the surface set.
+      let gateSetCookie: string | null = null
+      if (decision.kind === 'authenticated') {
+        gateSetCookie = decision.set_cookie
+      }
+      if (decision.kind === 'allow' && decision.set_cookie !== undefined) {
+        gateSetCookie = decision.set_cookie
+      }
+      // 'pass-through-unauthed' (programmatic API request — bearer-auth chain
+      // decides) falls through unchanged.
+      const res = await next()
+      if (gateSetCookie !== null) {
+        const headers = new Headers(res.headers)
+        headers.append('set-cookie', gateSetCookie)
+        return new Response(res.body, {
+          status: res.status,
+          statusText: res.statusText,
+          headers,
+        })
+      }
+      return res
+    },
+  }
 }
 
 export interface ComposedHttpHandler {
@@ -174,7 +244,7 @@ const NOOP_WEBSOCKET: WebSocketHandler<LandingSocketState> = {
  * touch `Bun.serve` itself; caller wires it in `gateway/index.ts:boot`.
  */
 export function composeHttpHandler(input: ComposeHttpHandlerInput): ComposedHttpHandler {
-  const { landing, appWs, authGate, defaultHandler } = input
+  const { landing, appWs, gate, defaultHandler } = input
   return {
     fetch: async (req, server) => {
       const url = new URL(req.url)
@@ -182,76 +252,17 @@ export function composeHttpHandler(input: ComposeHttpHandlerInput): ComposedHttp
       const method = req.method
       const ctx: RouteDispatchContext = { req, server, url, pathname, method }
 
-      // 2026-05-27 returning-user resume sprint — evaluate the
-      // per-instance HTTP auth gate FIRST for browser-facing routes
-      // (/, /chat, /api/app/*). The gate either (a) 302s a tokenless
-      // browser request to identity signin with `return_url` preserved,
-      // OR (b) consumes a fresh `?start=<token>` + emits a Set-Cookie
-      // we tack onto whatever the downstream chain returns, OR (c)
-      // passes through unchanged when the request is already
-      // authenticated (existing session cookie OR programmatic API
-      // call with bearer-auth that the downstream chain owns).
-      //
-      // 2026-05-27 persistent-session-cookie sprint — sliding refresh:
-      // cookie-valid `allow` decisions ALSO carry a `set_cookie` so the
-      // 30-day session-cookie TTL rolls forward on every authenticated
-      // request. The stitch site below handles both `authenticated`
-      // (just-consumed-a-token) and `allow` (existing-cookie) uniformly.
-      let gateSetCookie: string | null = null
-      if (authGate !== undefined && isGatedUserFacingRoute(pathname, method)) {
-        const decision = await evaluateAuthGate(req, authGate)
-        if (decision.kind === 'redirect-to-signin') {
-          return new Response(null, {
-            status: 302,
-            headers: { location: decision.location },
-          })
-        }
-        // Argus r1 BLOCKER #1 + #2 (2026-05-27): the gate produced a 302
-        // to a per-instance route. Either:
-        //   - cookie-valid GET / → 302 /chat with refreshed cookie
-        //     (closes #2 cookie path; sliding-refresh applies)
-        //   - cookie-valid GET /chat tokenless → 302 /chat?start=<fresh>
-        //     with refreshed cookie (closes #1 hot-loop)
-        //   - just-signed-in GET /?start=<valid> → 302 /chat?start=<token>
-        //     with set-cookie (closes #2 first-signin path)
-        // The decision carries the optional Set-Cookie so we can stitch
-        // it onto the 302 in one shot.
-        if (decision.kind === 'redirect') {
-          const headers = new Headers({ location: decision.location })
-          if (decision.set_cookie !== undefined) {
-            headers.append('set-cookie', decision.set_cookie)
-          }
-          return new Response(null, { status: 302, headers })
-        }
-        if (decision.kind === 'authenticated') {
-          gateSetCookie = decision.set_cookie
-        }
-        // 'allow' carries an optional `set_cookie` when the request came
-        // in with a valid session cookie — sliding-refresh emits a fresh
-        // Set-Cookie on every authenticated hit so the 30-day TTL keeps
-        // rolling forward and active users never time out.
-        if (decision.kind === 'allow' && decision.set_cookie !== undefined) {
-          gateSetCookie = decision.set_cookie
-        }
-        // 'pass-through-unauthed' (programmatic API request — bearer-auth
-        // chain decides) falls through unchanged.
+      // C5b — the ONE auth-gate seam, both modes. For browser-facing routes
+      // (`/`, `/chat`, SPA deep links, `/api/app/*`) delegate to the supplied
+      // gate, handing it `next = dispatchRequest` so it can either terminate
+      // the request (redirect, or — Open mode — serve the injected shell) OR
+      // fall through to the ladder and stitch its Set-Cookie on. Non-gated
+      // routes (and the no-gate Open-without-seam / dev cases) dispatch the
+      // ladder directly, exactly as before.
+      if (gate !== undefined && isGatedUserFacingRoute(pathname, method)) {
+        return await gate.apply(req, server, dispatchRequest)
       }
-
-      const res = await dispatchRequest()
-      if (gateSetCookie !== null) {
-        // Tack the gate's Set-Cookie onto the downstream response. We
-        // build a fresh Headers from the existing response then append
-        // so any Set-Cookie the downstream emitted survives (Headers
-        // supports multiple `set-cookie` entries via .append).
-        const headers = new Headers(res.headers)
-        headers.append('set-cookie', gateSetCookie)
-        return new Response(res.body, {
-          status: res.status,
-          statusText: res.statusText,
-          headers,
-        })
-      }
-      return res
+      return await dispatchRequest()
 
       /**
        * C4 — the GENERATED precedence ladder. Walk `ROUTE_SLOTS` in array

@@ -24,6 +24,7 @@ import { CronScheduler } from '@neutronai/cron/scheduler.ts'
 import { CronStateStore } from '@neutronai/cron/state.ts'
 import { GatewayModuleGraph } from './module-graph.ts'
 import {
+  buildManagedAuthGate,
   composeHttpHandler,
   type ComposedHttpHandler,
   type ComposeHttpHandlerInput,
@@ -154,12 +155,17 @@ async function buildComposedHttpFromComposition(
   if (connectHandler !== undefined) {
     composeInput.connectHandler = connectHandler
   }
-  //   - the auth gate wraps the whole ladder rather than being a rung of it.
-  //     2026-05-27 returning-user resume sprint — every gated route in the
-  //     per-instance gateway runs through `landing/auth-gate.ts` before
-  //     dispatching to landing / app / cores surfaces.
+  //   - C5b — the ONE auth-gate seam, both modes. `composition.auth_gate`
+  //     carries EITHER a Managed `AuthGateOptions` decision object (the default
+  //     shape — wrapped here into the unified `HttpGate` via
+  //     `buildManagedAuthGate`) OR an Open pre-built `HttpGate`
+  //     (`{ kind: 'gate', gate }`, supplied by the Open composer for the
+  //     single-owner `openFetch` serving gate). Both land on the single
+  //     `composeInput.gate` seam the ladder dispatches through. The gate wraps
+  //     the whole ladder rather than being a rung of it.
   if (composition.auth_gate !== undefined) {
-    composeInput.authGate = composition.auth_gate
+    const ag = composition.auth_gate
+    composeInput.gate = 'kind' in ag ? ag.gate : buildManagedAuthGate(ag)
   }
   return composeHttpHandler(composeInput)
 }

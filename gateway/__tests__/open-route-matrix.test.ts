@@ -64,6 +64,7 @@ import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { STUB_PLATFORM } from '@neutronai/runtime/__tests__/stub-platform.ts'
 import { composeProductionGraph } from '../composition.ts'
 import {
+  buildManagedAuthGate,
   composeHttpHandler,
   type ComposeHttpHandlerInput,
 } from '../http/compose.ts'
@@ -402,7 +403,7 @@ describe('G1 — ladder order: authGate FIRST + Set-Cookie stitch', () => {
     const calls: string[] = []
     const fetch = compose({
       defaultHandler: () => new Response('Not Found', { status: 404 }),
-      authGate: AUTH_GATE,
+      gate: buildManagedAuthGate(AUTH_GATE),
       appProjects: surface('app-projects', (u) => u.pathname === '/api/app/projects', calls),
     })
     const cookie = signSessionCookie(OWNER, COOKIE_SECRET, Date.now())
@@ -423,7 +424,7 @@ describe('G1 — ladder order: authGate FIRST + Set-Cookie stitch', () => {
     const calls: string[] = []
     const fetch = compose({
       defaultHandler: () => new Response('Not Found', { status: 404 }),
-      authGate: AUTH_GATE,
+      gate: buildManagedAuthGate(AUTH_GATE),
       // The landing stub RECORDS into `calls` before answering — so the
       // `calls === []` assertion below has teeth: it stays empty ONLY because
       // the gate short-circuited before landing ran. A regression that let the

@@ -39,6 +39,8 @@
  * `projects_changed` app-ws emit + topic-rail surface (it stays composer-owned).
  */
 
+import type { HttpGate } from '@neutronai/gateway/http/http-gate.ts'
+import { isLandingRoute } from '@neutronai/landing/routes.ts'
 import { isSpaClientRoute } from '@neutronai/landing/spa-routes.ts'
 import { readSessionCookie, signSessionCookie } from '@neutronai/landing/session-cookie.ts'
 import type { ConsumedTokensStore } from '@neutronai/runtime/start-token-types.ts'
@@ -109,6 +111,19 @@ export interface WiredOwnerGate {
     req: Request,
     server: import('bun').Server<unknown>,
   ) => Response | Promise<Response>
+  /**
+   * C5b — the same single-owner gate re-expressed as the unified `HttpGate`
+   * seam, so Open flows through `composition.auth_gate` exactly like Managed
+   * (instead of wiring `openFetch` as `landing_server.fetch`). The Open composer
+   * supplies THIS as `auth_gate` and points `landing_server.fetch` at the RAW
+   * landing surface. `apply` routes ONLY `GET /chat` + SPA client-route deep
+   * links to `openFetch` (the paths the owner gate meaningfully gates); every
+   * other request — including the bare `GET /`, which `openFetch`'s shadowed
+   * `/` branch never handled in the compose chain, and `/api/app/*`, which the
+   * owner gate never touched — falls through to `next()` (the route ladder),
+   * preserving the exact pre-C5b behavior. `openFetch` itself is UNCHANGED.
+   */
+  gate: HttpGate
 }
 
 /**
@@ -420,5 +435,37 @@ export function buildOpenOwnerGate(
     return res
   }
 
-  return { openFetch }
+  // C5b — the unified `HttpGate` view of the owner gate. It routes to `openFetch`
+  // EXACTLY the request set that invoked `openFetch` in the pre-C5b wiring, where
+  // `openFetch` WAS `landing_server.fetch`: the landing rung
+  // (`isLandingRoute(pathname, method, hasInvite)`) OR the SPA client-route rung
+  // (`isSpaClientRoute`). Everything else falls through to `next()` (the ladder,
+  // now serving the RAW landing surface). This preserves behavior byte-for-byte:
+  //
+  //   - `GET /chat`, isLandingRoute paths, and SPA deep links → `openFetch`
+  //     (which gates `/chat` + SPA and is a pure `landing.fetch` passthrough for
+  //     the rest — the ladder's raw-landing rung produces the same bytes for
+  //     those passthrough paths, so it makes no difference which serves them).
+  //   - `GET /?invite=<x>` → isLandingRoute('/','GET', hasInvite=true) === true
+  //     → `openFetch`, whose `/` branch owner-cold-starts / bounces to `/chat`
+  //     EXACTLY as on main (the landing rung matched root-with-invite there too).
+  //   - bare `GET /` (no `invite`) → isLandingRoute('/','GET',false) === false
+  //     and not SPA → `next()`. `openFetch`'s `/` branch stays SHADOWED/dead,
+  //     identical to main (the landing rung never matched a bare root).
+  //   - `/api/app/*` → neither predicate → `next()` (the app surface), which
+  //     `openFetch` never handled on main.
+  const gate: HttpGate = {
+    apply(req, server, next): Promise<Response> {
+      const url = new URL(req.url)
+      const invokesOpenFetch =
+        isLandingRoute(url.pathname, req.method, url.searchParams.has('invite')) ||
+        isSpaClientRoute(url.pathname, req.method)
+      if (invokesOpenFetch) {
+        return Promise.resolve(openFetch(req, server))
+      }
+      return next()
+    },
+  }
+
+  return { openFetch, gate }
 }

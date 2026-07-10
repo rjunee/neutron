@@ -1,17 +1,42 @@
 export interface AuthCompositionInput {
   /**
-   * 2026-05-27 returning-user resume sprint — per-instance HTTP auth
-   * gate. When supplied, the composed handler 302s a tokenless browser
-   * GET of `/`, `/chat`, or `/api/app/*` to the identity service's
-   * signin with `return_url` preserved, AND consumes a fresh
-   * `?start=<token>` query param into a session cookie. Without this
-   * field the gate is unmounted and the pre-sprint unauthenticated
-   * behaviour for those paths is preserved (used by tests + dev /
-   * smoke deploys without an identity service co-located).
+   * C5b — the ONE auth-gate seam, both modes. `composition.auth_gate` carries
+   * EITHER a Managed owner-gated `AuthGateOptions` decision object (the default
+   * shape below — `gateway/composition.ts` wraps it into the unified `HttpGate`
+   * via `buildManagedAuthGate`) OR an Open pre-built `HttpGate` in the
+   * `{ kind: 'gate', gate }` variant (supplied by the Open composer for the
+   * single-owner `openFetch` serving gate). Both land on the single compose
+   * `gate` seam.
+   *
+   * MANAGED shape (2026-05-27 returning-user resume sprint): when supplied, the
+   * composed handler 302s a tokenless browser GET of `/`, `/chat`, or
+   * `/api/app/*` to the identity service's signin with `return_url` preserved,
+   * AND consumes a fresh `?start=<token>` query param into a session cookie.
+   * Without this field the gate is unmounted and the pre-sprint unauthenticated
+   * behaviour for those paths is preserved (used by tests + dev / smoke deploys
+   * without an identity service co-located).
    *
    * See `landing/auth-gate.ts:AuthGateOptions` for field semantics.
    */
-  auth_gate?: {
+  auth_gate?: AuthGateManagedComposition | AuthGateOpenComposition
+}
+
+/**
+ * C5b — the Open variant of the `composition.auth_gate` seam: a pre-built
+ * `HttpGate` (the single-owner `openFetch` serving gate). Discriminated by
+ * `kind: 'gate'` so `gateway/composition.ts` routes it straight onto the compose
+ * seam instead of wrapping it as Managed options.
+ */
+export interface AuthGateOpenComposition {
+  kind: 'gate'
+  gate: import('@neutronai/gateway/http/http-gate.ts').HttpGate
+}
+
+/**
+ * The Managed owner-gated shape (the default — no discriminant). Wrapped into
+ * the unified `HttpGate` by `buildManagedAuthGate` in `gateway/composition.ts`.
+ */
+export interface AuthGateManagedComposition {
     project_slug: string
     cookie_secret: string
     resolveKey: (kid: string) => Promise<import('jose').KeyLike | null>
@@ -62,5 +87,4 @@ export interface AuthCompositionInput {
         now_ms: number
       }): Promise<{ expires_at_ms: number } | null>
     }
-  }
 }
