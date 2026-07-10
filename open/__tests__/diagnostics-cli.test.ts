@@ -93,7 +93,7 @@ describe('collectCliDiagnostics', () => {
     applyMigrationsToProjectDb(db)
     db.runSync(
       `INSERT INTO cron_state (job_name, project_slug, last_run_at, last_run_status, last_run_error, last_run_duration_ms)
-       VALUES ('nudge', 'demo', 10, 'ok', NULL, 5)`,
+       VALUES ('nudge', 'demo', 1710000000, 'ok', NULL, 5)`,
       [],
     )
     db.runSync(
@@ -110,6 +110,10 @@ describe('collectCliDiagnostics', () => {
     expect(jobs.map((j) => j.job_name)).toEqual(['nudge'])
     // the other project's error text must NOT be present
     expect(JSON.stringify(jobs)).not.toContain('private error text')
+    // last_run_at (Unix seconds in cron_state) is normalized to epoch-MS end-to-end:
+    // 1_710_000_000s → March 2024, NOT Jan 1970.
+    expect(jobs[0]!.last_run_at).toBe(1_710_000_000 * 1000)
+    expect(new Date(jobs[0]!.last_run_at!).getUTCFullYear()).toBe(2024)
   })
 
   it('repl registry: absent file → available with zero sessions', () => {

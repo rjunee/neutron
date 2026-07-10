@@ -102,7 +102,8 @@ describe('composeDiagnostics', () => {
     const r = composeDiagnostics(
       baseSources({
         cronJobs: () => [
-          { job_name: 'nudge', project_slug: 'demo', last_run_at: 10, last_run_status: 'ok', last_run_error: null, last_run_duration_ms: 5 },
+          // last_run_at is Unix SECONDS in cron_state → composer must emit epoch-MS.
+          { job_name: 'nudge', project_slug: 'demo', last_run_at: 1_710_000_000, last_run_status: 'ok', last_run_error: null, last_run_duration_ms: 5 },
         ],
         importJobs: () => [
           { job_id: 'j1', source: 'chatgpt', status: 'failed', started_at: 1, completed_at: 2, error_code: 'rate_limit', error_message: 'slow down' },
@@ -110,6 +111,9 @@ describe('composeDiagnostics', () => {
       }),
     )
     expect(r.cron_jobs.jobs![0]).toMatchObject({ job_name: 'nudge', last_run_status: 'ok' })
+    // seconds → ms normalization (1_710_000_000s = March 2024, not 1970).
+    expect(r.cron_jobs.jobs![0]!.last_run_at).toBe(1_710_000_000 * 1000)
+    expect(new Date(r.cron_jobs.jobs![0]!.last_run_at!).getUTCFullYear()).toBe(2024)
     expect(r.import_jobs.jobs![0]).toMatchObject({ job_id: 'j1', status: 'failed', error_code: 'rate_limit' })
   })
 

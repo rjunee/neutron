@@ -81,6 +81,7 @@ export interface ReplDiag {
 export interface CronJobDiag {
   job_name: string
   project_slug?: string | undefined
+  /** Epoch MILLISECONDS (normalized from cron_state's Unix-seconds column). */
   last_run_at?: number | null
   last_run_status?: string | null
   last_run_error?: string | null
@@ -170,6 +171,7 @@ export interface ReplRecordish {
 export interface CronRowish {
   job_name: string
   project_slug?: string
+  /** Unix SECONDS as stored in cron_state (normalized to ms by the composer). */
   last_run_at?: number | null
   last_run_status?: string | null
   last_run_error?: string | null
@@ -312,7 +314,10 @@ export function composeDiagnostics(sources: DiagnosticsSources): DiagnosticsRepo
       jobs: raw.map((j) => ({
         job_name: j.job_name,
         project_slug: j.project_slug,
-        last_run_at: j.last_run_at ?? null,
+        // `cron_state.last_run_at` is Unix SECONDS (the scheduler stores
+        // fired_at/1000 and reads *1000); normalize to epoch-MS here so the
+        // whole report is one unit and consumers can `new Date(ms)` directly.
+        last_run_at: typeof j.last_run_at === 'number' ? j.last_run_at * 1000 : null,
         last_run_status: j.last_run_status ?? null,
         last_run_error: j.last_run_error ?? null,
         last_run_duration_ms: j.last_run_duration_ms ?? null,
