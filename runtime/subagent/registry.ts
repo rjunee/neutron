@@ -300,23 +300,25 @@ export class SubagentRegistry {
   }
 
   /**
-   * Force the in-memory record to a TERMINAL state WITHOUT a durable write —
-   * called ONLY by the live dispatch/cancel/fail paths after their best-effort
-   * terminal `update` persist FAILED. `update` rolls memory back to the last
-   * durable snapshot on a persist failure (correct for the general
-   * overlapping-update case), but a COMPLETED / CANCELLED / CRASHED run must not
-   * linger `running` in the LIVE registry: `waitForCompletion` (control.ts) would
-   * hang forever, the live/concurrency caps (`live`) would retain a finished run,
-   * and the watchdog would re-reap it and emit a SECOND, contradictory crash
-   * report. The in-memory registry is the process's operational source of truth,
-   * so it must reflect that the run ended — even though the durable store is now
-   * stale (the failure was logged; a restart reaps that still-live row as an
-   * orphan, which is the correct surfacing). Only advances a live record to
-   * terminal; a no-op if the run is unknown or already terminal. Serialized per
-   * run_id like every other mutation. Does NOT touch `lastPersisted` (that tracks
-   * DURABLE truth, which did not change).
+   * Force the in-memory record to `patch` WITHOUT a durable write — the LIVE-flow
+   * fix-up the dispatch/cancel/fail paths apply after a best-effort `update`
+   * persist FAILED. `update` rolls memory back to the last durable snapshot on a
+   * persist failure (correct for the general overlapping-update case), but the
+   * in-memory registry is the process's OPERATIONAL source of truth and must
+   * reflect reality even when the durable store is now stale:
+   *   - a running-flip whose persist failed must still read `running` (else the
+   *     concurrency caps under-count and `statusOf` shows a phantom `pending`
+   *     while the subprocess runs);
+   *   - a COMPLETED / CANCELLED / CRASHED run must not linger `running` (else
+   *     `waitForCompletion` hangs forever, the caps retain a finished run, and the
+   *     watchdog re-reaps it into a SECOND, contradictory crash report).
+   * The durable store stays stale (the failure was logged; a restart reaps the
+   * still-live row as an orphan — the correct surfacing). NEVER clobbers an
+   * already-terminal record (a concurrent completion/cancel/fail wins); a no-op if
+   * the run is unknown. Serialized per run_id like every other mutation. Does NOT
+   * touch `lastPersisted` (that tracks DURABLE truth, which did not change).
    */
-  reconcileTerminalInMemory(
+  reconcileInMemory(
     run_id: string,
     patch: Partial<Omit<SubagentRecord, 'run_id'>>,
   ): Promise<void> {

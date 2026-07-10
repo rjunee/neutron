@@ -420,4 +420,37 @@ describe('completion is best-effort against persistence — a terminal-write fai
     expect(h.registry.byRunId(handle.run_id)?.status).toBe('finished')
     expect(h.service.liveDispatches().map((r) => r.run_id)).not.toContain(handle.run_id)
   })
+
+  test('a running-flip persist failure still launches AND the LIVE record reads running', async () => {
+    // persist SUCCEEDS for 'pending' (create) but REJECTS for 'running' — the
+    // store outage that bites at the running-flip. The dispatch must still launch,
+    // and the live registry must read 'running' (reconciled), NOT a phantom
+    // 'pending' (which under-counts the caps + drifts statusOf).
+    const runningFailPersistence: SubagentPersistence = {
+      persist: async (rec) => {
+        if (rec.status === 'running') throw new Error('running persist down')
+      },
+      remove: async () => {},
+    }
+    const registry = new SubagentRegistry(runningFailPersistence)
+    const h = makeHarness({ registry })
+
+    const handle = await h.service.dispatch({
+      board_item_id: 'it-run',
+      kind: 'research',
+      task: 'survey',
+    })
+
+    // Launched despite the failed running persist (substrate turn fired).
+    expect(h.calls).toHaveLength(1)
+    // The LIVE registry reflects 'running' (reconciled), NOT a phantom 'pending'.
+    expect(h.registry.byRunId(handle.run_id)?.status).toBe('running')
+    expect(h.service.liveDispatches().map((r) => r.run_id)).toContain(handle.run_id)
+    expect(h.control.cancellers.has(handle.run_id)).toBe(true)
+
+    // Drain the in-flight turn so the test doesn't leak (terminal persist succeeds).
+    h.resolveTurn({ result: '', status: 'completed' })
+    await handle.completion
+    expect(h.registry.byRunId(handle.run_id)?.status).toBe('finished')
+  })
 })

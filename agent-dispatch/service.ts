@@ -362,7 +362,11 @@ export class DispatchService {
           `launching on the in-memory record (persistence best-effort): ` +
           `${err instanceof Error ? err.message : String(err)}`,
       )
+      // `update` rolled memory back to `pending` on the failed persist — reconcile
+      // the LIVE registry to `running` so the caps count it and `statusOf` doesn't
+      // show a phantom `pending` while the subprocess runs.
       running = { ...record, status: 'running' }
+      await this.deps.registry.reconcileInMemory(record.run_id, { status: 'running' })
     }
     const handle = this.launch(running, req.kind, agent_kind, req, delivery_target, board_item_id, board_scope)
     this.inflight.set(record.run_id, handle)
@@ -496,7 +500,7 @@ export class DispatchService {
         // pre-terminal state — force the LIVE registry record terminal so
         // waitForCompletion doesn't hang, the caps release the run, and the
         // watchdog doesn't re-reap it into a second crash report.
-        await this.deps.registry.reconcileTerminalInMemory(run_id, patch)
+        await this.deps.registry.reconcileInMemory(run_id, patch)
         recordToReport = { ...(cur ?? record), ...patch }
       }
       // ALWAYS remove the canceller and report — on BOTH the success and the

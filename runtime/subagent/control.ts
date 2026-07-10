@@ -60,7 +60,7 @@ export async function cancelRun(
     )
     // Force the live record terminal despite the failed persist (else it lingers
     // `running`: waitForCompletion hangs, caps retain it, the watchdog re-reaps).
-    await state.registry.reconcileTerminalInMemory(run_id, cancelledPatch)
+    await state.registry.reconcileInMemory(run_id, cancelledPatch)
   }
   state.cancellers.delete(run_id)
 }
@@ -137,7 +137,7 @@ export async function failRun(
     )
     // Force the live record terminal despite the failed persist so the watchdog
     // doesn't re-reap this run next tick into a second, contradictory report.
-    await state.registry.reconcileTerminalInMemory(run_id, crashedPatch)
+    await state.registry.reconcileInMemory(run_id, crashedPatch)
   }
   state.cancellers.delete(run_id)
   return true
