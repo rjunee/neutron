@@ -10,17 +10,19 @@
  * drift from what the seam actually calls:
  *
  *   - the guard's op-name BAN-LIST is derived from this constant, and
- *   - an anti-drift check in that same test asserts every op the production
- *     GBrain adapters actually pass to `mcp.call(…)` is a member here — so a
- *     newly-added backend op forces an update to this one list, which the ban
- *     then automatically covers.
+ *   - an anti-drift check in that same test walks the production GBrain adapters
+ *     with the SAME AST visitor and asserts every op they actually pass to a
+ *     `.call('<literal>', …)` (receiver-agnostic — any transport name) is a
+ *     member here, so a newly-added backend op forces an update to this one
+ *     list, which the ban then automatically covers.
  *
- * WHY A SOURCE-TEXT BAN (not just the depcruise import rule): `McpClient` is a
+ * WHY AN AST OP-NAME BAN (not just the depcruise import rule): `McpClient` is a
  * purely STRUCTURAL interface — a product module could declare its own
  * identically-shaped `{ call(name, args) }` type with ZERO gbrain import and
  * call `client.call('put_page', …)`, which the import-edge depcruise rule has
- * no edge to reject. The op-NAME scan closes that structural bypass; the
- * depcruise import ban stays as belt-and-suspenders.
+ * no edge to reject. The AST op-NAME scan (which sees through bracket access,
+ * optional chaining, and comment/whitespace trivia) closes that structural
+ * bypass; the depcruise import ban stays as belt-and-suspenders.
  *
  * Legitimate holders of the raw transport (which therefore legitimately name
  * these ops) are the `gbrain-memory/` adapters and the `connect/` federation
