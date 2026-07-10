@@ -299,6 +299,37 @@ export class SubagentRegistry {
     })
   }
 
+  /**
+   * Force the in-memory record to a TERMINAL state WITHOUT a durable write —
+   * called ONLY by the live dispatch/cancel/fail paths after their best-effort
+   * terminal `update` persist FAILED. `update` rolls memory back to the last
+   * durable snapshot on a persist failure (correct for the general
+   * overlapping-update case), but a COMPLETED / CANCELLED / CRASHED run must not
+   * linger `running` in the LIVE registry: `waitForCompletion` (control.ts) would
+   * hang forever, the live/concurrency caps (`live`) would retain a finished run,
+   * and the watchdog would re-reap it and emit a SECOND, contradictory crash
+   * report. The in-memory registry is the process's operational source of truth,
+   * so it must reflect that the run ended — even though the durable store is now
+   * stale (the failure was logged; a restart reaps that still-live row as an
+   * orphan, which is the correct surfacing). Only advances a live record to
+   * terminal; a no-op if the run is unknown or already terminal. Serialized per
+   * run_id like every other mutation. Does NOT touch `lastPersisted` (that tracks
+   * DURABLE truth, which did not change).
+   */
+  reconcileTerminalInMemory(
+    run_id: string,
+    patch: Partial<Omit<SubagentRecord, 'run_id'>>,
+  ): Promise<void> {
+    return this.runSerial(run_id, async () => {
+      const cur = this.byId.get(run_id)
+      if (cur === undefined) return
+      if (cur.status === 'finished' || cur.status === 'crashed' || cur.status === 'cancelled') {
+        return
+      }
+      this.byId.set(run_id, { ...cur, ...patch })
+    })
+  }
+
   byRunId(run_id: string): SubagentRecord | undefined {
     return this.byId.get(run_id)
   }

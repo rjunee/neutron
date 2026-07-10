@@ -449,6 +449,9 @@ describe('live-path persist failures are best-effort (never reject, canceller ne
     expect(won).toBe(true) // reap intent stands (crash is surfaced to the caller)
     expect(cancelled).toBe(true) // the live process was still terminated
     expect(control.cancellers.has('r')).toBe(false) // canceller removed — no leak
+    // Live record forced terminal despite the failed persist — no watchdog re-reap.
+    expect(reg.byRunId('r')?.status).toBe('crashed')
+    expect(reg.live().map((r) => r.run_id)).not.toContain('r')
   })
 
   test('cancelRun: a terminal persist failure does not reject; canceller removed', async () => {
@@ -461,6 +464,9 @@ describe('live-path persist failures are best-effort (never reject, canceller ne
     // The cancelled-status persist throws — cancelRun must not reject.
     await cancelRun(control, 'r')
     expect(control.cancellers.has('r')).toBe(false) // canceller removed — no leak
+    // Live record forced terminal despite the failed persist.
+    expect(reg.byRunId('r')?.status).toBe('cancelled')
+    expect(reg.live().map((r) => r.run_id)).not.toContain('r')
   })
 })
 

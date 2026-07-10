@@ -415,5 +415,9 @@ describe('completion is best-effort against persistence — a terminal-write fai
     // Canceller removed (no leak) + board cleanup ran.
     expect(h.control.cancellers.has(handle.run_id)).toBe(false)
     expect(cleared).toBe(true)
+    // CRITICAL state boundary: the LIVE registry record is terminal, NOT stuck
+    // 'running' — else waitForCompletion hangs, caps retain it, watchdog re-reaps.
+    expect(h.registry.byRunId(handle.run_id)?.status).toBe('finished')
+    expect(h.service.liveDispatches().map((r) => r.run_id)).not.toContain(handle.run_id)
   })
 })

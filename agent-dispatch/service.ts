@@ -492,6 +492,11 @@ export class DispatchService {
             `reporting intended terminal outcome (persistence best-effort): ` +
             `${err instanceof Error ? err.message : String(err)}`,
         )
+        // The durable write failed AND `update` rolled memory back to the
+        // pre-terminal state — force the LIVE registry record terminal so
+        // waitForCompletion doesn't hang, the caps release the run, and the
+        // watchdog doesn't re-reap it into a second crash report.
+        await this.deps.registry.reconcileTerminalInMemory(run_id, patch)
         recordToReport = { ...(cur ?? record), ...patch }
       }
       // ALWAYS remove the canceller and report — on BOTH the success and the
