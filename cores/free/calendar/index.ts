@@ -176,3 +176,27 @@ export {
 
 export { LAUNCHER_ICON, type LauncherIconMeta } from './src/ui/launcher-icon.ts'
 export { APP_TAB_META, type AppTabMeta } from './src/ui/app-tab-surface.ts'
+
+// ── X2: typed Core module contract ──────────────────────────────────────
+// The ONE declaration the install composer (`gateway/cores/install-bundled.ts`)
+// reads instead of duck-typing barrel exports + a hardcoded backend-key table.
+// `backendKey` is the `ToolDeps` key a bare backend primitive maps onto; when
+// the backend factory returns an already-shaped object it is passed through
+// verbatim. Conformance: cores/runtime/__tests__/define-core-conformance.test.ts.
+import { defineCore } from '@neutronai/cores-sdk'
+import { CORE_SLUG as CORE_SLUG_X2, TOOL_NAMES as TOOL_NAMES_X2 } from './src/manifest.ts'
+import { buildTools as buildTools_X2 } from './src/tools.ts'
+
+// NOTE: no `buildExtraTools` here — Calendar's `buildTools` ALREADY invokes
+// `buildExtraTools` internally and returns the full 9-tool surface
+// (`src/tools.ts`: `BuiltTools extends ExtraTools`, merges `...extras`). Wiring
+// the extra factory a second time here would just re-run it and collide on
+// every install. Tasks, by contrast, keeps its separate `buildExtraTools`
+// because its `buildTools` only adds `tasks_pick_next` when a `pickNext` dep is
+// wired — the extra factory is the coverage fallback when it isn't.
+export const core = defineCore({
+  slug: CORE_SLUG_X2,
+  backendKey: 'client',
+  toolNames: TOOL_NAMES_X2,
+  buildTools: buildTools_X2,
+})

@@ -1,0 +1,32 @@
+{
+  "name": "@neutronai/extrawins-core",
+  "version": "0.1.0",
+  "private": true,
+  "main": "./index.ts",
+  "neutron": {
+    "capabilities": ["read:project_data"],
+    "tier_support": ["regular"],
+    "tools": [
+      {
+        "name": "ew_a",
+        "description": "Wired on the base surface.",
+        "input_schema": { "type": "object" },
+        "output_schema": { "type": "object" },
+        "capability_required": "read:project_data"
+      },
+      {
+        "name": "ew_b",
+        "description": "Base declares it as a non-callable placeholder; the real handler ships in buildExtraTools.",
+        "input_schema": { "type": "object" },
+        "output_schema": { "type": "object" },
+        "capability_required": "read:project_data"
+      }
+    ],
+    "ui_components": [],
+    "billing_hooks": [],
+    "linked_sources": [],
+    "secrets": [],
+    "compat": { "coreApi": "^1.0.0" },
+    "build": { "neutronVersion": "0.1.0" }
+  }
+}

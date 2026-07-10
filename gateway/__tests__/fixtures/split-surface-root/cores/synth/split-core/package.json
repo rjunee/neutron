@@ -1,0 +1,32 @@
+{
+  "name": "@neutronai/split-core",
+  "version": "0.1.0",
+  "private": true,
+  "main": "./index.ts",
+  "neutron": {
+    "capabilities": ["read:project_data"],
+    "tier_support": ["regular"],
+    "tools": [
+      {
+        "name": "split_a",
+        "description": "Only in buildTools.",
+        "input_schema": { "type": "object" },
+        "output_schema": { "type": "object" },
+        "capability_required": "read:project_data"
+      },
+      {
+        "name": "split_b",
+        "description": "Returned by BOTH buildTools and buildExtraTools (expected split-surface overlap).",
+        "input_schema": { "type": "object" },
+        "output_schema": { "type": "object" },
+        "capability_required": "read:project_data"
+      }
+    ],
+    "ui_components": [],
+    "billing_hooks": [],
+    "linked_sources": [],
+    "secrets": [],
+    "compat": { "coreApi": "^1.0.0" },
+    "build": { "neutronVersion": "0.1.0" }
+  }
+}

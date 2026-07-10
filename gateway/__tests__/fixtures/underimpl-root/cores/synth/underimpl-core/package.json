@@ -1,0 +1,32 @@
+{
+  "name": "@neutronai/underimpl-core",
+  "version": "0.1.0",
+  "private": true,
+  "main": "./index.ts",
+  "neutron": {
+    "capabilities": ["read:project_data", "write:project_data"],
+    "tier_support": ["regular"],
+    "tools": [
+      {
+        "name": "underimpl_ok",
+        "description": "A tool the barrel DOES implement.",
+        "input_schema": { "type": "object" },
+        "output_schema": { "type": "object" },
+        "capability_required": "read:project_data"
+      },
+      {
+        "name": "underimpl_missing",
+        "description": "A manifest tool with NO handler — the under-implementation.",
+        "input_schema": { "type": "object" },
+        "output_schema": { "type": "object" },
+        "capability_required": "write:project_data"
+      }
+    ],
+    "ui_components": [],
+    "billing_hooks": [],
+    "linked_sources": [],
+    "secrets": [],
+    "compat": { "coreApi": "^1.0.0" },
+    "build": { "neutronVersion": "0.1.0" }
+  }
+}

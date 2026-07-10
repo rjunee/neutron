@@ -31,6 +31,20 @@ export type CoreInstallErrorCode =
   // WAVE 3 PR-2 — a global install was attempted for a Core whose manifest
   // `install_scopes` does not include 'global'.
   | 'scope_not_supported'
+  // Refactor X2 — the Core's built tool surface UNDER-IMPLEMENTS its
+  // manifest: a backend was wired and `buildTools`/`buildExtraTools` ran,
+  // but one or more manifest-declared tools got no callable handler.
+  // Formerly a silent throw-stub + log line (ISSUE #330); now a hard install
+  // failure so a Core that under-implements its manifest cannot install
+  // silently-broken (surfaces as `install_state: 'failed'` in /api/cores).
+  | 'manifest_incomplete'
+  // Refactor X2 — the Core's `defineCore()` contract MISDECLARES its identity:
+  // its declared `slug` disagrees with the package-resolved slug, or its
+  // declared `toolNames` drift from the manifest's `tools[]`. A dynamically
+  // discovered Core (custom `rootDirs`) is otherwise trusted for its
+  // backendKey + factories; this hard-fail keeps the typed contract
+  // authoritative rather than letting a misdeclared Core install.
+  | 'core_contract_mismatch'
 
 export class CoreInstallError extends Error {
   override readonly name = 'CoreInstallError'
