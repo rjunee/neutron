@@ -18,6 +18,7 @@
 
 import { AppChatEventLogCore } from './app-chat-event-core.ts'
 import type { ProjectDb } from './db.ts'
+import { parseJsonColumn } from './sidecar.ts'
 
 /** A persisted chat message as stored / replayed. */
 export interface AppChatRow {
@@ -182,13 +183,10 @@ export class AppChatStore implements AppChatMessageLog {
 function rowFrom(r: MessageRow): AppChatRow {
   let attachments: ReadonlyArray<string> | null = null
   if (r.attachments_json !== null) {
-    try {
-      const parsed = JSON.parse(r.attachments_json) as unknown
-      if (Array.isArray(parsed)) {
-        attachments = parsed.filter((x): x is string => typeof x === 'string')
-      }
-    } catch {
-      attachments = null
+    // Corrupt-policy: silent reset to null (leave attachments unset).
+    const parsed = parseJsonColumn(r.attachments_json, { onCorrupt: 'fallback', fallback: null })
+    if (Array.isArray(parsed)) {
+      attachments = parsed.filter((x): x is string => typeof x === 'string')
     }
   }
   return {

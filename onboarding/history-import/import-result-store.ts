@@ -16,6 +16,7 @@
  */
 
 import type { ProjectDb } from '@neutronai/persistence/index.ts'
+import { parseJsonColumn } from '@neutronai/persistence/index.ts'
 import type { ImportResult, ImportSource } from './types.ts'
 
 interface ImportResultRow {
@@ -131,31 +132,42 @@ export function loadImportResult(
       [job_id],
     )
   if (row === null) return null
+  // Corrupt-policy (core fields): throw propagates — a malformed core column
+  // is a hard data-integrity failure, not something to silently paper over.
   const result: ImportResult = {
-    entities: JSON.parse(row.entities_json) as ImportResult['entities'],
-    topics: JSON.parse(row.topics_json) as ImportResult['topics'],
-    proposed_projects: JSON.parse(row.projects_json) as ImportResult['proposed_projects'],
-    proposed_tasks: JSON.parse(row.tasks_json) as ImportResult['proposed_tasks'],
-    proposed_reminders: JSON.parse(row.reminders_json) as ImportResult['proposed_reminders'],
-    voice_signals: JSON.parse(row.voice_signals_json) as ImportResult['voice_signals'],
-    facts: JSON.parse(row.facts_json) as ImportResult['facts'],
+    entities: parseJsonColumn(row.entities_json, { onCorrupt: 'throw' }) as ImportResult['entities'],
+    topics: parseJsonColumn(row.topics_json, { onCorrupt: 'throw' }) as ImportResult['topics'],
+    proposed_projects: parseJsonColumn(row.projects_json, {
+      onCorrupt: 'throw',
+    }) as ImportResult['proposed_projects'],
+    proposed_tasks: parseJsonColumn(row.tasks_json, {
+      onCorrupt: 'throw',
+    }) as ImportResult['proposed_tasks'],
+    proposed_reminders: parseJsonColumn(row.reminders_json, {
+      onCorrupt: 'throw',
+    }) as ImportResult['proposed_reminders'],
+    voice_signals: parseJsonColumn(row.voice_signals_json, {
+      onCorrupt: 'throw',
+    }) as ImportResult['voice_signals'],
+    facts: parseJsonColumn(row.facts_json, { onCorrupt: 'throw' }) as ImportResult['facts'],
   }
-  try {
-    const interests = JSON.parse(row.inferred_interests_json) as unknown
-    if (Array.isArray(interests) && interests.length > 0) {
-      result.inferred_interests = interests as NonNullable<ImportResult['inferred_interests']>
-    }
-  } catch {
-    // legacy row with malformed column — skip
+  // Corrupt-policy (legacy inference fields): silent skip — a malformed
+  // column on a legacy row leaves the optional field unset (fallback → null
+  // fails the Array.isArray guard, exactly as the old catch did).
+  const interests = parseJsonColumn(row.inferred_interests_json, {
+    onCorrupt: 'fallback',
+    fallback: null,
+  })
+  if (Array.isArray(interests) && interests.length > 0) {
+    result.inferred_interests = interests as NonNullable<ImportResult['inferred_interests']>
   }
-  try {
-    const confidence = JSON.parse(row.confidence_by_inference_json) as unknown
-    if (Array.isArray(confidence) && confidence.length > 0) {
-      result.confidence_by_inference =
-        confidence as NonNullable<ImportResult['confidence_by_inference']>
-    }
-  } catch {
-    // skip
+  const confidence = parseJsonColumn(row.confidence_by_inference_json, {
+    onCorrupt: 'fallback',
+    fallback: null,
+  })
+  if (Array.isArray(confidence) && confidence.length > 0) {
+    result.confidence_by_inference =
+      confidence as NonNullable<ImportResult['confidence_by_inference']>
   }
   if (typeof row.conversation_count === 'number' && row.conversation_count > 0) {
     ;(result as ImportResult & { conversation_count?: number }).conversation_count =

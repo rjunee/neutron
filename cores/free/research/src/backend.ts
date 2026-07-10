@@ -43,6 +43,7 @@
 import { randomUUID } from 'node:crypto'
 
 import type { ProjectDb } from '@neutronai/persistence/index.ts'
+import { parseJsonColumn } from '@neutronai/persistence/index.ts'
 
 import { SONNET_MODEL, FAST_MODEL } from '@neutronai/runtime/models.ts'
 
@@ -554,13 +555,14 @@ interface ResearchTaskColumns {
 function rowFromColumns(c: ResearchTaskColumns): ResearchTaskRow {
   const depth = c.depth as ResearchDepth
   const status = c.status as ResearchStatus
-  const sourcesRaw: unknown = JSON.parse(c.sources_json)
+  // Corrupt-policy: throw propagates (mirrors research-store.ts).
+  const sourcesRaw: unknown = parseJsonColumn(c.sources_json, { onCorrupt: 'throw' })
   const sources = Array.isArray(sourcesRaw)
     ? (sourcesRaw.filter((v) => typeof v === 'string') as string[])
     : []
   let brief: ResearchBrief | null = null
   if (c.brief_json !== null) {
-    const parsed: unknown = JSON.parse(c.brief_json)
+    const parsed: unknown = parseJsonColumn(c.brief_json, { onCorrupt: 'throw' })
     const validated = validateResearchBrief(parsed)
     brief = validated.ok ? validated.brief : null
   }

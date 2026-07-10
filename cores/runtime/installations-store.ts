@@ -11,6 +11,7 @@
 
 import { randomUUID } from 'node:crypto'
 import type { ProjectDb } from '@neutronai/persistence/index.ts'
+import { parseJsonColumn } from '@neutronai/persistence/index.ts'
 
 export type CoreDataLayout = 'tables' | 'sidecar'
 
@@ -311,15 +312,15 @@ export class CoreInstallationsStore {
 }
 
 function globalRowToRecord(row: CoreGlobalInstallationRow): CoreGlobalInstallationRecord {
-  let capabilities: string[]
-  try {
-    const parsed: unknown = JSON.parse(row.manifest_capabilities_json)
-    capabilities = Array.isArray(parsed)
-      ? parsed.filter((v): v is string => typeof v === 'string')
-      : []
-  } catch {
-    capabilities = []
-  }
+  // Corrupt-policy: fallback to []. Codec degrades corrupt text to [], which
+  // then passes the Array.isArray guard to the same empty capability list.
+  const parsed: unknown = parseJsonColumn(row.manifest_capabilities_json, {
+    onCorrupt: 'fallback',
+    fallback: [],
+  })
+  const capabilities = Array.isArray(parsed)
+    ? parsed.filter((v): v is string => typeof v === 'string')
+    : []
   return {
     core_slug: row.core_slug,
     package_name: row.package_name,
@@ -332,17 +333,14 @@ function globalRowToRecord(row: CoreGlobalInstallationRow): CoreGlobalInstallati
 }
 
 function rowToRecord(row: CoreInstallationRow): CoreInstallationRecord {
-  let capabilities: string[]
-  try {
-    const parsed: unknown = JSON.parse(row.manifest_capabilities_json)
-    if (!Array.isArray(parsed)) {
-      capabilities = []
-    } else {
-      capabilities = parsed.filter((v): v is string => typeof v === 'string')
-    }
-  } catch {
-    capabilities = []
-  }
+  // Corrupt-policy: fallback to []. Same degrade-to-empty as globalRowToRecord.
+  const parsed: unknown = parseJsonColumn(row.manifest_capabilities_json, {
+    onCorrupt: 'fallback',
+    fallback: [],
+  })
+  const capabilities: string[] = Array.isArray(parsed)
+    ? parsed.filter((v): v is string => typeof v === 'string')
+    : []
   if (row.data_layout !== 'tables' && row.data_layout !== 'sidecar') {
     throw new Error(
       `core_installations row has invalid data_layout=${row.data_layout} (project=${row.project_slug} core=${row.core_slug})`,

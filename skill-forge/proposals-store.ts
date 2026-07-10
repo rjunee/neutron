@@ -11,6 +11,7 @@
 import { randomUUID } from 'node:crypto'
 
 import type { ProjectDb } from '@neutronai/persistence/index.ts'
+import { parseJsonColumn } from '@neutronai/persistence/index.ts'
 import type {
   CompletedWorkflow,
   ProposalRecord,
@@ -163,10 +164,10 @@ function rowToRecord(row: ProposalRow): ProposalRecord {
     project_slug: row.project_slug,
     topic_id: row.topic_id,
     proposed_name: row.proposed_name,
-    triggers: JSON.parse(row.triggers_json) as string[],
+    triggers: parseJsonColumn(row.triggers_json, { onCorrupt: 'throw' }) as string[],
     what_it_does: row.what_it_does,
-    artifacts: JSON.parse(row.artifacts_json) as string[],
-    workflow: JSON.parse(row.workflow_json) as CompletedWorkflow,
+    artifacts: parseJsonColumn(row.artifacts_json, { onCorrupt: 'throw' }) as string[],
+    workflow: parseJsonColumn(row.workflow_json, { onCorrupt: 'throw' }) as CompletedWorkflow,
     status: row.status as ProposalStatus,
     skill_path: row.skill_path,
     created_at: row.created_at,

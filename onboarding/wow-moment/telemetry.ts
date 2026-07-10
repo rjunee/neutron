@@ -20,6 +20,7 @@
 
 import { randomUUID } from 'node:crypto'
 import type { ProjectDb } from '@neutronai/persistence/index.ts'
+import { parseJsonColumn } from '@neutronai/persistence/index.ts'
 
 export type WowActionId =
   | '01-first-week-brief'
@@ -237,7 +238,10 @@ export class WowTelemetry {
       success: r.success === 1,
       success_reason: r.success_reason,
       engagement: r.engagement as WowEngagement | null,
-      redacted_payload: JSON.parse(r.redacted_payload_json) as Record<string, unknown>,
+      redacted_payload: parseJsonColumn(r.redacted_payload_json, { onCorrupt: 'throw' }) as Record<
+        string,
+        unknown
+      >,
     }))
   }
 }
