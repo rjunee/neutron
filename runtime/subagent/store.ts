@@ -73,12 +73,38 @@ const COLS =
 const LIVE_STATUS_SQL = "('pending', 'running')"
 
 /**
+ * This process's boot id — minted ONCE at module load (process start) and never
+ * regenerated. Stamped on every row this process creates (the `boot_id` column)
+ * so the boot reap can tell rows THIS boot owns (live, MUST NOT reap) from rows a
+ * PRIOR boot left behind (true orphans → reap). Same id shape as `run_id`
+ * (`crypto.randomUUID`, with a non-crypto fallback), prefixed `boot-` so it is
+ * self-describing in the table. A restart yields a fresh id — which is exactly
+ * how a prior generation's in-flight rows become reapable.
+ */
+export const CURRENT_BOOT_ID: string = mintBootId()
+
+function mintBootId(): string {
+  const c = (globalThis as { crypto?: { randomUUID?: () => string } }).crypto
+  if (c?.randomUUID) return `boot-${c.randomUUID()}`
+  return `boot-${Date.now()}-${Math.random().toString(16).slice(2, 10)}`
+}
+
+/**
  * Typed CRUD over `code_subagent_registry`. Constructed once per process and
  * handed to `SubagentRegistry` as its write-through mirror; the boot sweep reads
- * `loadLive()` directly and drives orphaned rows terminal via `markCrashed`.
+ * `loadReapable()` directly and drives orphaned rows terminal via `markCrashed`.
+ *
+ * The store carries this process's `bootId` (defaults to the module-level
+ * `CURRENT_BOOT_ID`; tests inject distinct ids to simulate separate process
+ * generations). `persist` stamps it on every row; `loadReapable` returns only
+ * rows owned by a DIFFERENT boot — so the reap can never crash a dispatch the
+ * current boot created and is legitimately still running.
  */
 export class SubagentRegistryStore implements SubagentPersistence {
-  constructor(private readonly db: ProjectDb) {}
+  constructor(
+    private readonly db: ProjectDb,
+    private readonly bootId: string = CURRENT_BOOT_ID,
+  ) {}
 
   /**
    * Insert-or-replace the row for `rec` (`SubagentPersistence.persist`). Called
@@ -88,8 +114,13 @@ export class SubagentRegistryStore implements SubagentPersistence {
    */
   async persist(rec: SubagentRecord): Promise<void> {
     await this.db.run(
-      `INSERT INTO code_subagent_registry (${COLS})
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      // `boot_id` is stamped on INSERT and DELIBERATELY absent from the
+      // ON CONFLICT SET: it records the OWNING process generation and must stay
+      // immutable across this process's own updates (the row is only ever updated
+      // by the boot that created it, so `excluded.boot_id` would equal it anyway
+      // — omitting it makes ownership provably write-once).
+      `INSERT INTO code_subagent_registry (${COLS}, boot_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(run_id) DO UPDATE SET
          instance_key      = excluded.instance_key,
          agent_kind        = excluded.agent_kind,
@@ -127,6 +158,7 @@ export class SubagentRegistryStore implements SubagentPersistence {
         rec.delegation_claims !== undefined ? JSON.stringify(rec.delegation_claims) : null,
         rec.spawn_key ?? null,
         rec.failure_reason ?? null,
+        this.bootId,
       ],
     )
   }
@@ -155,15 +187,22 @@ export class SubagentRegistryStore implements SubagentPersistence {
   }
 
   /**
-   * Every LIVE (`pending`|`running`) row. On boot these are the in-flight
-   * dispatches left by a prior process — the orphans the boot sweep reaps.
+   * The REAPABLE orphans: every LIVE (`pending`|`running`) row owned by a
+   * DIFFERENT process boot (`boot_id <> this.bootId`). These are the in-flight
+   * dispatches a PRIOR process left behind; rows the CURRENT boot created and is
+   * legitimately still running carry this process's `boot_id` and are excluded —
+   * so a repeat composer build / second boot-sweep in the same process can never
+   * crash a live current-boot dispatch. (The predicate is correct for sequential
+   * process generations, the real deployment model; concurrently-live processes
+   * sharing one DB are out of scope — see the migration header.)
    */
-  loadLive(): SubagentRecord[] {
+  loadReapable(): SubagentRecord[] {
     return this.db
-      .prepare<SubagentRegistryDbRow, []>(
-        `SELECT ${COLS} FROM code_subagent_registry WHERE status IN ${LIVE_STATUS_SQL}`,
+      .prepare<SubagentRegistryDbRow, [string]>(
+        `SELECT ${COLS} FROM code_subagent_registry
+          WHERE status IN ${LIVE_STATUS_SQL} AND boot_id <> ?`,
       )
-      .all()
+      .all(this.bootId)
       .map(rowToRecord)
   }
 
@@ -217,8 +256,8 @@ export class SubagentRegistryStore implements SubagentPersistence {
 /**
  * Parse a persisted JSON blob, ISOLATING a malformed value: a single corrupt
  * row (e.g. external tampering — the store's own writes always `JSON.stringify`,
- * so valid) must not throw out of `rowToRecord` and abort the WHOLE `loadLive()`
- * scan, which would block reaping every other orphan. On a parse failure the
+ * so valid) must not throw out of `rowToRecord` and abort the WHOLE
+ * `loadReapable()` scan, which would block reaping every other orphan. On a parse failure the
  * optional field is dropped (logged) and the row is still returned + reaped.
  */
 function parseBlob<T>(text: string, run_id: string, field: string): T | undefined {

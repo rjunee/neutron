@@ -72,8 +72,11 @@ afterEach(() => {
 
 describe('Open subagent boot-reap prod-boot wiring', () => {
   test('a LIVE registry row left by a prior process is reaped to crashed during boot', async () => {
-    // Seed a prior process's in-flight dispatch directly into the project DB.
-    const seed = new SubagentRegistryStore(db)
+    // Seed a PRIOR process's in-flight dispatch directly into the project DB. It
+    // MUST carry a boot id distinct from this process's CURRENT_BOOT_ID (which the
+    // composer's sweep runs under) — a same-boot row would be correctly protected
+    // and never reaped. That distinct boot id is exactly what marks it a prior orphan.
+    const seed = new SubagentRegistryStore(db, 'boot-prior-dead-process')
     await seed.persist({
       run_id: 'prior-orphan',
       instance_key: 'owner',

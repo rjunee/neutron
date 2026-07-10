@@ -1,11 +1,22 @@
 /**
  * @neutronai/runtime — subagent boot reap (plan §P7, decision D-6).
  *
- * On startup, every persisted registry row still in a LIVE (`pending`|`running`)
- * status was left in-flight by a PRIOR process that has since died — the gateway
- * restarted mid-dispatch. Without this sweep those rows were silently orphaned:
- * the in-memory registry started empty (no persistence at all), so the dispatch
- * just vanished with no record and no signal.
+ * On startup, a persisted registry row still in a LIVE (`pending`|`running`)
+ * status AND owned by a DIFFERENT process boot (`boot_id`) was left in-flight by
+ * a PRIOR process that has since died — the gateway restarted mid-dispatch.
+ * Without this sweep those rows were silently orphaned: the in-memory registry
+ * started empty (no persistence at all), so the dispatch just vanished with no
+ * record and no signal.
+ *
+ * BOOT-OWNER PREDICATE. The sweep reaps ONLY rows a PRIOR boot owns
+ * (`store.loadReapable()` filters `boot_id <> currentBootId`); it NEVER reaps a
+ * row the CURRENT boot created and is legitimately still running. This is what
+ * makes repeat composition safe — the sweep runs inside the composer, and a
+ * second composer build (or any repeat sweep) in the same process would
+ * otherwise crash the current boot's own live dispatches. Correct for SEQUENTIAL
+ * process generations (Managed: one process per tenant; Open: a single gateway).
+ * Two CONCURRENTLY-live gateway processes sharing one project DB is NOT the
+ * deployment model and is out of scope — see `store.ts` / the migration header.
  *
  * This sweep SURFACES each orphan instead of vanishing it, per the P7 spec
  * ("mark rows left by a prior process as `crashed`, and fire the report sink"):
@@ -75,7 +86,7 @@ export async function sweepOrphanedDispatchesOnBoot(
   const now = (deps.now ?? Date.now)()
   const surfaced: SubagentRecord[] = []
 
-  for (const rec of deps.store.loadLive()) {
+  for (const rec of deps.store.loadReapable()) {
     // ATOMIC CLAIM first — a mutex-serialized `db.transaction` that guard-reads
     // the status and transitions `live → crashed` in one atomic step. Its truthy
     // result means THIS sweep won the transition; a concurrent sweep (its claim

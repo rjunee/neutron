@@ -44,7 +44,9 @@ afterEach(() => {
 const productionBootReport = buildBootSweepReport
 
 test('a REJECTING DispatchReporter through the real adapter still durably claims the orphan crashed', async () => {
-  const store = new SubagentRegistryStore(db)
+  // Seed under a PRIOR boot id so the current-boot sweep (default CURRENT_BOOT_ID)
+  // sees the row as a reapable prior-process orphan.
+  const store = new SubagentRegistryStore(db, 'boot-prior-process')
   const reg = new SubagentRegistry(store)
   await reg.create({ run_id: 'orphan-atlas', instance_key: 'owner', agent_kind: 'atlas', spawn_depth: 0 })
   await reg.update('orphan-atlas', { status: 'running' })
@@ -70,7 +72,9 @@ test('a REJECTING DispatchReporter through the real adapter still durably claims
 })
 
 test('a working DispatchReporter receives a crashed report for the orphan', async () => {
-  const store = new SubagentRegistryStore(db)
+  // Seed under a PRIOR boot id so the current-boot sweep (default CURRENT_BOOT_ID)
+  // sees the row as a reapable prior-process orphan.
+  const store = new SubagentRegistryStore(db, 'boot-prior-process')
   const reg = new SubagentRegistry(store)
   await reg.create({ run_id: 'orphan-sentinel', instance_key: 'owner', agent_kind: 'sentinel', spawn_depth: 0 })
   await reg.update('orphan-sentinel', { status: 'running' })
@@ -91,7 +95,9 @@ test('a working DispatchReporter receives a crashed report for the orphan', asyn
 })
 
 test('a forge orphan is claimed crashed but the adapter skips the report (Trident owns it)', async () => {
-  const store = new SubagentRegistryStore(db)
+  // Seed under a PRIOR boot id so the current-boot sweep (default CURRENT_BOOT_ID)
+  // sees the row as a reapable prior-process orphan.
+  const store = new SubagentRegistryStore(db, 'boot-prior-process')
   const reg = new SubagentRegistry(store)
   await reg.create({ run_id: 'orphan-forge', instance_key: 'owner', agent_kind: 'forge', spawn_depth: 0 })
   await reg.update('orphan-forge', { status: 'running' })

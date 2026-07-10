@@ -574,10 +574,15 @@ export function buildOpenGraphComposer(
     })()
 
     // BOOT REAP (plan §P7 / D-6). Every persisted registry row still LIVE
-    // (`pending`|`running`) was left in-flight by a PRIOR process that has since
-    // died — an orphaned dispatch. Atomically claim each `crashed` (the durable,
-    // queryable surfacing that never vanishes) and fire the SAME report-back sink
-    // a clean completion uses, instead of letting it vanish from `live()`. The
+    // (`pending`|`running`) AND owned by a PRIOR process boot (`boot_id`) was left
+    // in-flight by a process that has since died — an orphaned dispatch. Atomically
+    // claim each `crashed` (the durable, queryable surfacing that never vanishes)
+    // and fire the SAME report-back sink a clean completion uses, instead of
+    // letting it vanish from `live()`. CRITICAL: the sweep shares the SAME
+    // `subagentRegistryStore` instance (hence the SAME `CURRENT_BOOT_ID`) that
+    // backs the registry above, so `loadReapable()` reaps ONLY prior-boot rows and
+    // never a dispatch THIS boot creates and is legitimately running — a repeat
+    // composer build in this process cannot crash its own live dispatches. The
     // report surface is TODAY the structured `[agent-dispatch]` log (identical to
     // the live dispatch terminal path — this reuses `dispatchReport` verbatim);
     // the live WS `agent_message` splice is the documented follow-up for BOTH

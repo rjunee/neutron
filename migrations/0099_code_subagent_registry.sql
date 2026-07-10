@@ -83,6 +83,23 @@
 --   (`process_dead`/`stuck`), set by the watchdog / boot sweep. Undefined for
 --   clean finishes.
 --
+-- * `boot_id` — the PER-PROCESS-BOOT OWNERSHIP TOKEN (NOT a SubagentRecord field
+--   — a store-internal column). Minted ONCE per process at startup (same id
+--   shape as `run_id`) and stamped on every row THIS process creates. It is the
+--   predicate that makes the boot reap CORRECT: the sweep reaps only rows whose
+--   `boot_id` differs from the current process's (rows a PRIOR boot left behind),
+--   and NEVER a row the current boot owns and is legitimately still running. It
+--   is set once at INSERT and immutable thereafter (never rewritten on the
+--   ON CONFLICT update, never by `markCrashed`). Without it, a second composer
+--   build / a repeat boot in the SAME process would sweep its OWN live dispatches
+--   to `crashed`. It is emphatically NOT a fired/redispatched dedup marker: it
+--   records WHICH process generation owns a row, not whether an orphan was
+--   already reported — a restart (new `boot_id`) still re-detects prior orphans.
+--   SCOPE: `boot_id` reaping is correct for SEQUENTIAL process generations (the
+--   real deployment model — Managed runs one process per tenant via systemd,
+--   Open runs a single gateway). Two CONCURRENTLY-live gateway processes sharing
+--   ONE project DB is out of scope (not a supported deployment).
+--
 -- Indexes match the two read paths:
 --   * the boot sweep's "load every live (in-flight) row" → a partial index on
 --     `status` restricted to the live set keeps that scan dense as terminal
@@ -118,11 +135,19 @@ CREATE TABLE IF NOT EXISTS code_subagent_registry (
     failure_reason      TEXT
                             CHECK (failure_reason IS NULL OR failure_reason IN (
                                 'process_dead', 'stuck'
-                            ))
+                            )),
+    -- Per-process-boot ownership token (see header). NOT NULL: every row is
+    -- stamped with the creating process's boot id so the reap can tell prior-boot
+    -- orphans from current-boot live rows.
+    boot_id             TEXT NOT NULL
 ) STRICT;
 
 -- The boot sweep scans only LIVE (in-flight) rows; a partial index keeps that
--- query flat-cost as finished/crashed/cancelled rows pile up.
+-- query flat-cost as finished/crashed/cancelled rows pile up. The reap's extra
+-- `boot_id <> ?` filter needs no index of its own — an inequality over the
+-- already-tiny live set (in-flight dispatches only) is negligible, and the full
+-- record columns force a table lookup regardless, so a boot_id index could not
+-- cover the read.
 CREATE INDEX IF NOT EXISTS idx_code_subagent_registry_live
     ON code_subagent_registry (status)
     WHERE status IN ('pending', 'running');

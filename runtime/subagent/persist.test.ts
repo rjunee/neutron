@@ -50,6 +50,18 @@ const dispatchInput = (over: Partial<CreateRecordInput> = {}): CreateRecordInput
   ...(over.spawn_key !== undefined ? { spawn_key: over.spawn_key } : {}),
 })
 
+// Boot-owner tokens: a reap surfaces a row ONLY when its owning boot differs
+// from the sweeping store's boot. `PRIOR_BOOT` stamps rows a dead prior process
+// left behind (the reap must find them); `CURR_BOOT` is the booting process that
+// runs the sweep (its own live rows must survive). Tests that only exercise
+// `get`/`loadAll`/`markCrashed` (all boot-agnostic) use the default boot id.
+const PRIOR_BOOT = 'boot-prior-process'
+const CURR_BOOT = 'boot-current-process'
+/** A store representing the PRIOR (dead) process — seeds reapable orphan rows. */
+const priorStore = (): SubagentRegistryStore => new SubagentRegistryStore(db, PRIOR_BOOT)
+/** A store representing the CURRENT boot — runs `loadReapable()` / the sweep. */
+const currStore = (): SubagentRegistryStore => new SubagentRegistryStore(db, CURR_BOOT)
+
 describe('migration 0099 idempotency', () => {
   test('the raw 0099 SQL re-applies cleanly (IF NOT EXISTS everywhere)', () => {
     const here = dirname(fileURLToPath(import.meta.url))
@@ -287,8 +299,8 @@ describe('async-persist update boundary — a landing completion stays visible',
 })
 
 describe('SubagentRegistryStore — malformed-row isolation', () => {
-  test('one row with corrupt JSON does not abort loadLive; valid orphans still reap', async () => {
-    const store = new SubagentRegistryStore(db)
+  test('one row with corrupt JSON does not abort loadReapable; valid orphans still reap', async () => {
+    const store = priorStore()
     const reg = new SubagentRegistry(store)
     await reg.create(
       dispatchInput({
@@ -304,8 +316,8 @@ describe('SubagentRegistryStore — malformed-row isolation', () => {
       'corrupt',
     ])
 
-    // loadLive must NOT throw — both rows come back (the corrupt field dropped).
-    const live = new SubagentRegistryStore(db).loadLive()
+    // loadReapable must NOT throw — both prior-boot rows come back (corrupt field dropped).
+    const live = currStore().loadReapable()
     expect(live.map((r) => r.run_id).sort()).toEqual(['corrupt', 'good'])
     const corrupt = live.find((r) => r.run_id === 'corrupt')
     expect(corrupt).not.toHaveProperty('delivery_target') // malformed → dropped
@@ -315,7 +327,7 @@ describe('SubagentRegistryStore — malformed-row isolation', () => {
     // The boot sweep still reaps BOTH orphans despite the corrupt row.
     const fired: string[] = []
     const swept = await sweepOrphanedDispatchesOnBoot({
-      store: new SubagentRegistryStore(db),
+      store: currStore(),
       report: (rec) => {
         fired.push(rec.run_id)
       },
@@ -340,9 +352,9 @@ describe('mutex-serialized writes survive a concurrent foreign transaction rollb
     let entered = false
     const txDone = db.transaction(async (tx) => {
       await tx.run(
-        `INSERT INTO code_subagent_registry (run_id, instance_key, agent_kind, started_at, last_event_at)
-         VALUES (?, ?, ?, ?, ?)`,
-        ['foreign-doomed', 'owner', 'core', 1, 1],
+        `INSERT INTO code_subagent_registry (run_id, instance_key, agent_kind, started_at, last_event_at, boot_id)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+        ['foreign-doomed', 'owner', 'core', 1, 1, PRIOR_BOOT],
       )
       entered = true
       await Bun.sleep(30) // hold the BEGIN open across the queued store write
@@ -413,20 +425,23 @@ describe('markCrashed claim is EXACTLY-ONCE across SEPARATE connections (multi-p
   // (already crashed → changes===0 → false). The prior bug returned `true`
   // unconditionally, so BOTH connections would have fired the report sink.
 
+  // Seeds a PRIOR-boot orphan so BOTH current-boot sweepers (distinct boot ids)
+  // see it as reapable.
   async function seedRunningOrphan(run_id: string): Promise<void> {
-    const reg = new SubagentRegistry(new SubagentRegistryStore(db))
+    const reg = new SubagentRegistry(priorStore())
     await reg.create(dispatchInput({ run_id }))
     await reg.update(run_id, { status: 'running' })
   }
 
   test('two connections CONCURRENTLY claiming one running orphan → exactly ONE wins', async () => {
     await seedRunningOrphan('orphan')
-    // Two distinct connections on the same file — as two OS processes would open.
+    // Two distinct connections on the same file — as two OS processes would open,
+    // each with its OWN boot id (both differ from the prior-boot orphan).
     const connA = ProjectDb.open(db.path)
     const connB = ProjectDb.open(db.path)
     try {
-      const storeA = new SubagentRegistryStore(connA)
-      const storeB = new SubagentRegistryStore(connB)
+      const storeA = new SubagentRegistryStore(connA, 'boot-proc-A')
+      const storeB = new SubagentRegistryStore(connB, 'boot-proc-B')
       // Both race to claim the SAME live row. The guarded UPDATE's affected-row
       // count is the authority: exactly one commits the transition (changes=1 →
       // true); the other's UPDATE re-evaluates against the committed state and
@@ -449,8 +464,8 @@ describe('markCrashed claim is EXACTLY-ONCE across SEPARATE connections (multi-p
 
   test('two boot sweeps over separate connections fire the report sink EXACTLY ONCE total', async () => {
     await seedRunningOrphan('orphan2')
-    // Two processes booting simultaneously: each opens its own connection, each
-    // loadLive()s the orphan as running, and both race to reap it.
+    // Two processes booting simultaneously: each opens its own connection with its
+    // OWN boot id, each loadReapable()s the prior-boot orphan, and both race to reap it.
     const connA = ProjectDb.open(db.path)
     const connB = ProjectDb.open(db.path)
     try {
@@ -460,12 +475,12 @@ describe('markCrashed claim is EXACTLY-ONCE across SEPARATE connections (multi-p
       }
       const [sweptA, sweptB] = await Promise.all([
         sweepOrphanedDispatchesOnBoot({
-          store: new SubagentRegistryStore(connA),
+          store: new SubagentRegistryStore(connA, 'boot-proc-A'),
           report,
           now: () => 1,
         }),
         sweepOrphanedDispatchesOnBoot({
-          store: new SubagentRegistryStore(connB),
+          store: new SubagentRegistryStore(connB, 'boot-proc-B'),
           report,
           now: () => 2,
         }),
@@ -474,7 +489,7 @@ describe('markCrashed claim is EXACTLY-ONCE across SEPARATE connections (multi-p
       // Both loaded the orphan as live, but only ONE claimed + reported it.
       expect(sweptA.length + sweptB.length).toBe(1)
       expect(fired).toEqual(['orphan2']) // EXACTLY ONCE total across both processes
-      expect(new SubagentRegistryStore(db).get('orphan2')?.status).toBe('crashed')
+      expect(currStore().get('orphan2')?.status).toBe('crashed')
     } finally {
       connA.close()
       connB.close()
@@ -485,19 +500,19 @@ describe('markCrashed claim is EXACTLY-ONCE across SEPARATE connections (multi-p
 describe('(a) a dispatched agent row persists across a simulated process restart', () => {
   test('a running dispatch survives; a fresh registry over the same db still sees it live', async () => {
     // Process 1: dispatch + drive to running.
-    const store1 = new SubagentRegistryStore(db)
+    const store1 = priorStore()
     const registry1 = new SubagentRegistry(store1)
     await registry1.create(dispatchInput({ run_id: 'run-live', agent_kind: 'sentinel' }))
     await registry1.update('run-live', { status: 'running', pid: 9001 })
 
     // Process 2 (RESTART): a brand-new in-memory registry + store over the SAME
-    // db. The in-memory map starts empty (crash lost it) — but the store retains
-    // the row, so the dispatch did NOT vanish.
-    const registry2 = new SubagentRegistry(new SubagentRegistryStore(db))
+    // db with a fresh boot id. The in-memory map starts empty (crash lost it) —
+    // but the store retains the row, so the dispatch did NOT vanish.
+    const registry2 = new SubagentRegistry(currStore())
     expect(registry2.snapshot()).toHaveLength(0) // in-memory state gone
 
-    const store2 = new SubagentRegistryStore(db)
-    const live = store2.loadLive()
+    const store2 = currStore()
+    const live = store2.loadReapable()
     expect(live).toHaveLength(1)
     expect(live[0]?.run_id).toBe('run-live')
     expect(live[0]?.status).toBe('running')
@@ -505,10 +520,76 @@ describe('(a) a dispatched agent row persists across a simulated process restart
   })
 })
 
+describe('boot-owner predicate: a current-boot live row is NEVER reaped', () => {
+  // Reads a row's persisted owning boot id (write-once stamp) directly.
+  const bootOf = (run_id: string): string | undefined =>
+    db
+      .prepare<{ boot_id: string }, [string]>(
+        `SELECT boot_id FROM code_subagent_registry WHERE run_id = ?`,
+      )
+      .get(run_id)?.boot_id ?? undefined
+
+  test('the current boot sweeps a PRIOR-boot orphan but leaves its OWN live dispatch running', async () => {
+    // The exact hazard the boot_id token closes: the sweep runs inside the
+    // composer, so a repeat composition (or any second sweep) in the SAME process
+    // must NOT crash a dispatch THIS boot created and is legitimately running.
+    const current = currStore()
+
+    // Current boot creates a live dispatch (stamped CURR_BOOT).
+    const mine = new SubagentRegistry(current)
+    await mine.create(dispatchInput({ run_id: 'mine-live', agent_kind: 'atlas' }))
+    await mine.update('mine-live', { status: 'running' })
+
+    // A prior (dead) process left its own live orphan (stamped PRIOR_BOOT).
+    const prior = new SubagentRegistry(priorStore())
+    await prior.create(dispatchInput({ run_id: 'their-orphan', agent_kind: 'core' }))
+    await prior.update('their-orphan', { status: 'running' })
+
+    // Rows carry the expected owning boot ids (proves the write-once stamp).
+    expect(bootOf('mine-live')).toBe(CURR_BOOT)
+    expect(bootOf('their-orphan')).toBe(PRIOR_BOOT)
+
+    // loadReapable under CURR_BOOT returns ONLY the prior-boot row.
+    expect(current.loadReapable().map((r) => r.run_id)).toEqual(['their-orphan'])
+
+    // The sweep (CURR_BOOT) reaps ONLY the prior-boot orphan.
+    const fired: string[] = []
+    const swept = await sweepOrphanedDispatchesOnBoot({
+      store: currStore(),
+      report: (rec) => {
+        fired.push(rec.run_id)
+      },
+      now: () => 100,
+    })
+    expect(swept.map((r) => r.run_id)).toEqual(['their-orphan'])
+    expect(fired).toEqual(['their-orphan'])
+    // CRITICAL: the current boot's own live dispatch was NOT crashed.
+    expect(current.get('mine-live')?.status).toBe('running')
+    expect(current.get('their-orphan')?.status).toBe('crashed')
+  })
+
+  test('a repeat sweep in the SAME boot reaps nothing (its own live rows survive)', async () => {
+    // Repeat composition in one process: create a live dispatch under CURR_BOOT,
+    // then run the sweep AGAIN under the SAME boot id — the old bug would crash it.
+    const current = currStore()
+    const reg = new SubagentRegistry(current)
+    await reg.create(dispatchInput({ run_id: 'live-1' }))
+    await reg.update('live-1', { status: 'running' })
+
+    const swept = await sweepOrphanedDispatchesOnBoot({
+      store: currStore(),
+      report: () => {},
+      now: () => 1,
+    })
+    expect(swept).toHaveLength(0) // no prior-boot rows → nothing reaped
+    expect(current.get('live-1')?.status).toBe('running') // survives
+  })
+})
+
 describe('(b) boot sweep marks prior-process in-flight rows crashed + fires report once each', () => {
   test('two live orphans surface exactly once; terminal rows are untouched', async () => {
     // Prior process left two in-flight dispatches + one cleanly-finished one.
-    const store1 = new SubagentRegistryStore(db)
+    const store1 = priorStore()
     const reg1 = new SubagentRegistry(store1)
     await reg1.create(dispatchInput({ run_id: 'orphan-1', agent_kind: 'atlas' }))
     await reg1.update('orphan-1', { status: 'running' })
@@ -517,8 +598,8 @@ describe('(b) boot sweep marks prior-process in-flight rows crashed + fires repo
     await reg1.create(dispatchInput({ run_id: 'done-1', agent_kind: 'sentinel' }))
     await reg1.update('done-1', { status: 'finished' })
 
-    // BOOT (process 2): sweep.
-    const bootStore = new SubagentRegistryStore(db)
+    // BOOT (process 2): sweep under a fresh boot id.
+    const bootStore = currStore()
     const fired: SubagentRecord[] = []
     const swept = await sweepOrphanedDispatchesOnBoot({
       store: bootStore,
@@ -546,7 +627,7 @@ describe('(b) boot sweep marks prior-process in-flight rows crashed + fires repo
     // SECOND BOOT: idempotent — the now-crashed rows must NOT re-fire.
     const fired2: SubagentRecord[] = []
     const swept2 = await sweepOrphanedDispatchesOnBoot({
-      store: new SubagentRegistryStore(db),
+      store: new SubagentRegistryStore(db, 'boot-third-process'),
       report: (rec) => {
         fired2.push(rec)
       },
@@ -560,13 +641,13 @@ describe('(b) boot sweep marks prior-process in-flight rows crashed + fires repo
     // The report is a NOTIFICATION on top of the durable claimed row. A sink
     // failure must not abort the sweep nor un-claim the row — the crash is
     // recorded in the store (the surfacing that never vanishes) and returned.
-    const store = new SubagentRegistryStore(db)
+    const store = priorStore()
     const reg = new SubagentRegistry(store)
     await reg.create(dispatchInput({ run_id: 'boom' }))
     await reg.update('boom', { status: 'running' })
 
     const swept = await sweepOrphanedDispatchesOnBoot({
-      store: new SubagentRegistryStore(db),
+      store: currStore(),
       report: () => {
         throw new Error('sink down')
       },
@@ -580,7 +661,7 @@ describe('(b) boot sweep marks prior-process in-flight rows crashed + fires repo
     // A second boot does not re-fire (the atomic claim already committed).
     const fired2: string[] = []
     await sweepOrphanedDispatchesOnBoot({
-      store: new SubagentRegistryStore(db),
+      store: new SubagentRegistryStore(db, 'boot-third-process'),
       report: (rec) => {
         fired2.push(rec.run_id)
       },
@@ -594,7 +675,7 @@ describe('(b) boot sweep marks prior-process in-flight rows crashed + fires repo
     // The claim is a mutex-serialized `db.transaction` (guard-read + guarded
     // UPDATE), so whichever sweep's claim transaction runs second reads the row
     // already `crashed` and returns false — only one sweep reports.
-    const store = new SubagentRegistryStore(db)
+    const store = priorStore()
     const reg = new SubagentRegistry(store)
     await reg.create(dispatchInput({ run_id: 'shared' }))
     await reg.update('shared', { status: 'running' })
@@ -606,9 +687,10 @@ describe('(b) boot sweep marks prior-process in-flight rows crashed + fires repo
       await Promise.resolve()
       fired.push(rec.run_id)
     }
+    // Two overlapping sweeps in the same current boot against a prior-boot orphan.
     const [a, b] = await Promise.all([
-      sweepOrphanedDispatchesOnBoot({ store: new SubagentRegistryStore(db), report, now: () => 7 }),
-      sweepOrphanedDispatchesOnBoot({ store: new SubagentRegistryStore(db), report, now: () => 7 }),
+      sweepOrphanedDispatchesOnBoot({ store: currStore(), report, now: () => 7 }),
+      sweepOrphanedDispatchesOnBoot({ store: currStore(), report, now: () => 7 }),
     ])
 
     // Reported once total; claimed by exactly one sweep.
@@ -634,13 +716,13 @@ describe('(c) the fired/redispatched orphan-detection sets stay volatile', () =>
   test('a persisted running row is ALWAYS re-surfaced on a fresh boot (no suppression flag survives)', async () => {
     // If the persistence layer had smuggled a "this-process fired it" flag, the
     // fresh boot would SKIP the orphan. It must not: the orphan re-detects.
-    const store1 = new SubagentRegistryStore(db)
+    const store1 = priorStore()
     const reg1 = new SubagentRegistry(store1)
     await reg1.create(dispatchInput({ run_id: 'reorphan' }))
     await reg1.update('reorphan', { status: 'running' })
 
     const surfaced = await sweepOrphanedDispatchesOnBoot({
-      store: new SubagentRegistryStore(db),
+      store: currStore(),
       report: () => {},
       now: () => 42,
     })
