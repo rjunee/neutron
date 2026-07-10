@@ -85,6 +85,21 @@ describe('C5 landing route manifest — transition parity', () => {
       expect(isLandingRoute('/oauth/max/install-token/state', 'GET', false)).toBe(true)
     })
 
+    test('install-token prefix boundary — preserves the pre-C5 startsWith semantics', () => {
+      // FAITHFUL RELOCATION: the pre-C5 `gateway/http/route-slots.ts:273` used
+      // the identical bare `pathname.startsWith('/oauth/max/install-token')` with
+      // NO trailing delimiter, so a sibling like `/oauth/max/install-tokenized`
+      // ALSO matched. This test pins that byte-identical behavior so the C5 move
+      // provably changed nothing (tightening the prefix would be a behavior
+      // change — out of scope for this relocation — and is harmless anyway: the
+      // landing `installTokenHandler` returns null on a non-handoff path, so the
+      // request falls through to a 404 either way).
+      expect(isLandingRoute('/oauth/max/install-tokenized', 'GET', false)).toBe(true)
+      // Anything NOT under the prefix stays out.
+      expect(isLandingRoute('/oauth/max/install', 'GET', false)).toBe(false)
+      expect(isLandingRoute('/oauth/max', 'GET', false)).toBe(false)
+    })
+
     test('root-with-?invite= short-circuit (GET only, requires the flag)', () => {
       expect(isLandingRoute('/', 'GET', true)).toBe(true)
       // Without the invite flag the bare root is NOT a landing route.
