@@ -43,6 +43,7 @@ export {
   CorePathTraversalError,
   ProjectSidecarResolver,
   safeResolveProjectRoot,
+  type PathTraversalErrorFactory,
   type ProjectSidecarInit,
   type ProjectSidecarResolverOptions,
   type SafeResolveProjectRootOptions,

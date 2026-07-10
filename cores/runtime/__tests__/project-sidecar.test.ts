@@ -7,7 +7,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
-import { existsSync, mkdtempSync, rmSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -59,6 +59,42 @@ describe('safeResolveProjectRoot — traversal guard', () => {
     expect(() =>
       safeResolveProjectRoot({ owner_home: tmp, project_id: 'proj\0evil' }),
     ).toThrow(CorePathTraversalError)
+  })
+
+  test('default error carries the stable name + code contract', () => {
+    let caught: unknown
+    try {
+      safeResolveProjectRoot({ owner_home: tmp, project_id: '..' })
+    } catch (e) {
+      caught = e
+    }
+    expect(caught).toBeInstanceOf(CorePathTraversalError)
+    const err = caught as CorePathTraversalError
+    expect(err.name).toBe('CorePathTraversalError')
+    expect(err.code).toBe('core_path_traversal')
+    expect(err.project_id).toBe('..')
+  })
+
+  test('a Core-supplied makeError subclass is thrown instead (contract-preserving)', () => {
+    class CustomTraversalError extends CorePathTraversalError {
+      constructor(pid: string, rp: string, opd: string) {
+        super(pid, rp, opd, 'CustomTraversalError', 'custom_code')
+      }
+    }
+    let caught: unknown
+    try {
+      safeResolveProjectRoot({
+        owner_home: tmp,
+        project_id: '..',
+        makeError: (pid, rp, opd) => new CustomTraversalError(pid, rp, opd),
+      })
+    } catch (e) {
+      caught = e
+    }
+    expect(caught).toBeInstanceOf(CustomTraversalError)
+    expect(caught).toBeInstanceOf(CorePathTraversalError) // still the base
+    expect((caught as CustomTraversalError).name).toBe('CustomTraversalError')
+    expect((caught as CustomTraversalError).code).toBe('custom_code')
   })
 
   test('rejects an absolute-path escape supplied via a resolveProjectRoot override', () => {
@@ -185,5 +221,31 @@ describe('ProjectSidecarResolver — mechanics + guard', () => {
     await resolver.resolve('proj-b')
     resolver.closeAll()
     expect(a.closed).toBe(true)
+  })
+
+  test('rejects a SYMLINK escape (lexically-valid project dir that links outside the boundary), no outside write', async () => {
+    const outside = mkdtempSync(join(tmpdir(), 'sidecar-outside-'))
+    try {
+      // `Projects/proj-a` is lexically inside the boundary but is a symlink
+      // pointing OUTSIDE it — the lexical check passes, the realpath check
+      // must reject.
+      mkdirSync(join(tmp, 'Projects'), { recursive: true })
+      symlinkSync(outside, join(tmp, 'Projects', 'proj-a'), 'dir')
+
+      expect(() =>
+        safeResolveProjectRoot({ owner_home: tmp, project_id: 'proj-a' }),
+      ).toThrow(CorePathTraversalError)
+
+      const { resolver, state } = makeResolver()
+      await expect(resolver.resolve('proj-a')).rejects.toThrow(
+        CorePathTraversalError,
+      )
+      // Nothing was built and nothing was written under the escape target.
+      expect(state.builds).toBe(0)
+      expect(existsSync(join(outside, 'fake'))).toBe(false)
+      resolver.closeAll()
+    } finally {
+      rmSync(outside, { recursive: true, force: true })
+    }
   })
 })

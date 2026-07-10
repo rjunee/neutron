@@ -20,6 +20,7 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import {
+  CorePathTraversalError,
   ProjectSidecarResolver,
   type ProjectSidecarResolverOptions,
 } from '@neutronai/cores-runtime'
@@ -47,12 +48,28 @@ export class ResearchSidecarMismatchError extends Error {
 
 /**
  * Thrown when a caller-supplied `project_id` escapes the
- * `<owner_home>/Projects/` boundary. Refactor X4: this is now an alias of
- * the shared `CorePathTraversalError` (the guard was hoisted into
- * `@neutronai/cores-runtime`) so `instanceof` keeps working for every
- * existing catcher + test.
+ * `<owner_home>/Projects/` boundary. Refactor X4: the guard was hoisted into
+ * the shared `@neutronai/cores-runtime` `safeResolveProjectRoot`, but this
+ * subclass PRESERVES the Research Core's historical public error contract —
+ * `name === 'ResearchPathTraversalError'` and `code === 'research_path_traversal'`
+ * — while being `instanceof CorePathTraversalError`. Threaded into the shared
+ * guard via `makeError` so the resolver still throws THIS class.
  */
-export { CorePathTraversalError as ResearchPathTraversalError } from '@neutronai/cores-runtime'
+export class ResearchPathTraversalError extends CorePathTraversalError {
+  constructor(
+    project_id: string,
+    resolved_path: string,
+    owner_projects_dir: string,
+  ) {
+    super(
+      project_id,
+      resolved_path,
+      owner_projects_dir,
+      'ResearchPathTraversalError',
+      'research_path_traversal',
+    )
+  }
+}
 
 export interface ResearchStoreResolverOptions {
   project_slug: string
@@ -86,6 +103,8 @@ export class ResearchStoreResolver {
       owner_home: opts.owner_home,
       sidecar_dir: RESEARCH_SIDECAR_DIR,
       db_filename: RESEARCH_SIDECAR_DB,
+      makeError: (project_id, resolved_path, boundary) =>
+        new ResearchPathTraversalError(project_id, resolved_path, boundary),
       buildHandle: (init) => this.buildHandle(init),
       closeHandle: (handle) => handle.db.close(),
     }

@@ -145,6 +145,22 @@ describe('ResearchStoreResolver', () => {
       r.closeAll()
     })
 
+    test('preserves the historical error contract (name + code) after the X4 shared-guard hoist', async () => {
+      const r = new ResearchStoreResolver({ project_slug: 'project-a', owner_home: tmp })
+      let caught: unknown
+      try {
+        await r.resolve('../../../etc/passwd')
+      } catch (e) {
+        caught = e
+      }
+      expect(caught).toBeInstanceOf(ResearchPathTraversalError)
+      const err = caught as ResearchPathTraversalError
+      // The public fields third-party code may branch on are UNCHANGED.
+      expect(err.name).toBe('ResearchPathTraversalError')
+      expect(err.code).toBe('research_path_traversal')
+      r.closeAll()
+    })
+
     test('pathFor + outputDirFor also enforce the guard (no leakage path)', () => {
       const r = new ResearchStoreResolver({ project_slug: 'project-a', owner_home: tmp })
       expect(() => r.pathFor('../../../etc/passwd')).toThrow(ResearchPathTraversalError)

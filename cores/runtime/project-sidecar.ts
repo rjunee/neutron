@@ -20,19 +20,25 @@
  * `project_id`s are newly rejected.
  */
 
-import { existsSync, mkdirSync } from 'node:fs'
-import { join, resolve as resolvePath, sep } from 'node:path'
+import { existsSync, mkdirSync, realpathSync } from 'node:fs'
+import { dirname, join, resolve as resolvePath, sep } from 'node:path'
 
 /**
  * Thrown when a caller-supplied `project_id` resolves to a filesystem path
  * outside the owner's `<owner_home>/Projects/` boundary (traversal via
- * `..`, an embedded NUL byte, an absolute path, or a value that resolves to
- * the `Projects/` dir itself). The guard throws BEFORE any FS operation
- * runs against the resolved path.
+ * `..`, an embedded NUL byte, an absolute path, a value that resolves to
+ * the `Projects/` dir itself, OR a path whose existing components symlink
+ * outside the boundary). The guard throws BEFORE any FS operation runs
+ * against the resolved path.
+ *
+ * `name` + `code` are constructor-overridable so a Core can preserve its
+ * own historical error contract (e.g. the Research Core's
+ * `ResearchPathTraversalError` / `research_path_traversal`) while still
+ * being `instanceof CorePathTraversalError`.
  */
 export class CorePathTraversalError extends Error {
-  override readonly name = 'CorePathTraversalError'
-  readonly code = 'core_path_traversal' as const
+  override readonly name: string
+  readonly code: string
   readonly project_id: string
   readonly resolved_path: string
   readonly owner_projects_dir: string
@@ -40,16 +46,28 @@ export class CorePathTraversalError extends Error {
     project_id: string,
     resolved_path: string,
     owner_projects_dir: string,
+    name = 'CorePathTraversalError',
+    code = 'core_path_traversal',
   ) {
     super(
       `project_id ${JSON.stringify(project_id)} resolves to ${resolved_path}, ` +
         `which escapes the project boundary ${owner_projects_dir}`,
     )
+    this.name = name
+    this.code = code
     this.project_id = project_id
     this.resolved_path = resolved_path
     this.owner_projects_dir = owner_projects_dir
   }
 }
+
+/** Factory a Core supplies to throw its own traversal-error subclass while
+ *  keeping `instanceof CorePathTraversalError`. */
+export type PathTraversalErrorFactory = (
+  project_id: string,
+  resolved_path: string,
+  owner_projects_dir: string,
+) => CorePathTraversalError
 
 export interface SafeResolveProjectRootOptions {
   /** The owner's home dir; `<owner_home>/Projects/` is the boundary. */
@@ -60,15 +78,19 @@ export interface SafeResolveProjectRootOptions {
    *  The RESULT is still boundary-checked, so an override cannot defeat the
    *  guard. Defaults to `join(owner_home, 'Projects', project_id)`. */
   resolveProjectRoot?: (project_id: string) => string
+  /** Throw a Core-specific traversal-error subclass instead of the default
+   *  {@link CorePathTraversalError} (preserves per-Core error contracts). */
+  makeError?: PathTraversalErrorFactory
 }
 
 /**
  * Resolve `project_id` to its absolute project root AFTER asserting the
  * result stays inside `<owner_home>/Projects/`. Throws
- * {@link CorePathTraversalError} for any `project_id` that is empty /
- * non-string, contains an embedded NUL byte, or whose resolved path is not
- * a STRICT subpath of `<owner_home>/Projects/` (traversal, absolute escape,
- * or the `Projects/` dir itself).
+ * {@link CorePathTraversalError} (or the Core's `makeError` subclass) for any
+ * `project_id` that is empty / non-string, contains an embedded NUL byte,
+ * whose resolved path is not a STRICT subpath of `<owner_home>/Projects/`
+ * (traversal, absolute escape, or the `Projects/` dir itself), OR whose
+ * existing filesystem components symlink OUTSIDE the boundary.
  *
  * Legitimate nested subpaths (`nested/group/proj-7`) are allowed — the
  * boundary check is a directory-prefix check, not a segment-count check.
@@ -83,30 +105,59 @@ export function safeResolveProjectRoot(
   // directory-boundary check; the bare-prefix equality case is rejected
   // separately below.
   const owner_projects_dir_prefix = owner_projects_dir + sep
+  const makeError: PathTraversalErrorFactory =
+    opts.makeError ??
+    ((pid, resolved_path, boundary) =>
+      new CorePathTraversalError(pid, resolved_path, boundary))
 
   if (typeof project_id !== 'string' || project_id.length === 0) {
-    throw new CorePathTraversalError(
-      String(project_id),
-      '',
-      owner_projects_dir,
-    )
+    throw makeError(String(project_id), '', owner_projects_dir)
   }
   if (project_id.includes('\0')) {
-    throw new CorePathTraversalError(project_id, '', owner_projects_dir)
+    throw makeError(project_id, '', owner_projects_dir)
   }
   const resolveRoot =
     opts.resolveProjectRoot ??
     ((pid: string) => join(owner_home, 'Projects', pid))
   const projectRoot = resolveRoot(project_id)
   const resolved = resolvePath(projectRoot)
+
+  // (1) Lexical containment — cheap first line: the canonicalised
+  //     dot-segment-free path must be a STRICT subpath of the boundary.
   const insideBoundary =
     resolved === owner_projects_dir ||
     resolved.startsWith(owner_projects_dir_prefix)
   if (!insideBoundary || resolved === owner_projects_dir) {
-    // Disallow the bare-prefix case too — `project_id` MUST resolve to a
-    // strict subpath of `<owner_home>/Projects/`, never the Projects/ dir
-    // itself.
-    throw new CorePathTraversalError(project_id, resolved, owner_projects_dir)
+    throw makeError(project_id, resolved, owner_projects_dir)
+  }
+
+  // (2) Filesystem containment — defeat SYMLINK escapes that the lexical
+  //     check can't see (e.g. `Projects/proj-a` is a symlink to /tmp/out).
+  //     realpath the nearest EXISTING ancestor of the resolved root and
+  //     assert it stays inside the real boundary. If the boundary dir does
+  //     not exist yet there is no symlink target to escape into, so the
+  //     lexical check alone is authoritative.
+  let realBoundary: string
+  try {
+    realBoundary = realpathSync(owner_projects_dir)
+  } catch {
+    return resolved
+  }
+  let probe = resolved
+  while (!existsSync(probe) && dirname(probe) !== probe) {
+    probe = dirname(probe)
+  }
+  let realProbe: string
+  try {
+    realProbe = realpathSync(probe)
+  } catch {
+    return resolved
+  }
+  if (
+    realProbe !== realBoundary &&
+    !realProbe.startsWith(realBoundary + sep)
+  ) {
+    throw makeError(project_id, realProbe, owner_projects_dir)
   }
   return resolved
 }
@@ -132,6 +183,8 @@ export interface ProjectSidecarResolverOptions<H> {
   /** Testing seam — overrides project-root resolution; the result is still
    *  boundary-checked by the guard. */
   resolveProjectRoot?: (project_id: string) => string
+  /** Throw a Core-specific traversal-error subclass on a guard violation. */
+  makeError?: PathTraversalErrorFactory
   /** Construct the Core-specific handle from the safe-resolved paths. Owns
    *  the DB open + migrations + meta bootstrap + store construction. If it
    *  throws it MUST close any DB it opened. */
@@ -153,6 +206,7 @@ export class ProjectSidecarResolver<H> {
   private readonly resolveProjectRoot:
     | ((project_id: string) => string)
     | undefined
+  private readonly makeError: PathTraversalErrorFactory | undefined
   private readonly buildHandle: (init: ProjectSidecarInit) => Promise<H>
   private readonly closeHandle: (handle: H) => void
   private readonly handles = new Map<string, H>()
@@ -163,6 +217,7 @@ export class ProjectSidecarResolver<H> {
     this.sidecar_dir = opts.sidecar_dir
     this.db_filename = opts.db_filename
     this.resolveProjectRoot = opts.resolveProjectRoot
+    this.makeError = opts.makeError
     this.buildHandle = opts.buildHandle
     this.closeHandle = opts.closeHandle
   }
@@ -175,6 +230,9 @@ export class ProjectSidecarResolver<H> {
     }
     if (this.resolveProjectRoot !== undefined) {
       opts.resolveProjectRoot = this.resolveProjectRoot
+    }
+    if (this.makeError !== undefined) {
+      opts.makeError = this.makeError
     }
     return safeResolveProjectRoot(opts)
   }
