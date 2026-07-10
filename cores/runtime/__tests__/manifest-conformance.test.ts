@@ -24,8 +24,10 @@ import { join } from 'node:path'
 import { describe, expect, test } from 'bun:test'
 import {
   CapabilitySchema,
+  ERROR_CODES,
   KNOWN_CAPABILITIES,
   NeutronManifestSchema,
+  WARNING_CODES,
   isKnownCapability,
   isValidSemverRange,
   validateNeutronManifest,
@@ -233,6 +235,49 @@ describe('bundled Core manifest conformance (X3 — one schema)', () => {
     test('non-object input → invalid (does not throw)', () => {
       expect(validateNeutronManifest(null).valid).toBe(false)
       expect(validateNeutronManifest('nope').valid).toBe(false)
+    })
+
+    test('Zod issues map to the legacy ERROR_CODES taxonomy', () => {
+      const codeFor = (m: Record<string, unknown>, pathSubstr: string): string | undefined => {
+        const r = validateNeutronManifest(m)
+        return r.errors.find((e) => e.path.includes(pathSubstr))?.code
+      }
+      // REQUIRED_MISSING — omit a required field.
+      const { tools: _omit, ...noTools } = baseManifest()
+      expect(codeFor(noTools, 'tools')).toBe(ERROR_CODES.REQUIRED_MISSING)
+      // TYPE_MISMATCH — wrong type for a required field.
+      expect(codeFor({ ...baseManifest(), tools: 'nope' }, 'tools')).toBe(ERROR_CODES.TYPE_MISMATCH)
+      // INVALID_SEMVER — malformed compat.coreApi.
+      expect(codeFor({ ...baseManifest(), compat: { coreApi: 'nope' } }, 'coreApi')).toBe(
+        ERROR_CODES.INVALID_SEMVER,
+      )
+      // INVALID_TIER_SUPPORT — bad enum member.
+      expect(codeFor({ ...baseManifest(), tier_support: ['regular', 'bogus'] }, 'tier_support')).toBe(
+        ERROR_CODES.INVALID_TIER_SUPPORT,
+      )
+      // UNKNOWN_CAPABILITY — malformed capability string.
+      expect(codeFor({ ...baseManifest(), capabilities: ['BadCap'] }, 'capabilities')).toBe(
+        ERROR_CODES.UNKNOWN_CAPABILITY,
+      )
+      // INVALID_LINKED_SOURCE — bad linked-source scope enum.
+      expect(
+        codeFor(
+          { ...baseManifest(), linked_sources: [{ kind: 'gmail', scope: 'bogus', target_kinds: ['user'] }] },
+          'linked_sources',
+        ),
+      ).toBe(ERROR_CODES.INVALID_LINKED_SOURCE)
+    })
+
+    test('advisory warnings are preserved (valid manifest, warnings never flip validity)', () => {
+      const m = {
+        ...baseManifest(),
+        linked_sources: [{ kind: 'novel_provider', scope: 'read', target_kinds: [] }],
+      }
+      const r = validateNeutronManifest(m)
+      expect(r.valid).toBe(true) // warnings do not fail validity
+      const codes = r.warnings.map((w) => w.code)
+      expect(codes).toContain(WARNING_CODES.UNKNOWN_LINKED_SOURCE_KIND)
+      expect(codes).toContain(WARNING_CODES.EMPTY_TARGET_KINDS)
     })
   })
 

@@ -500,29 +500,134 @@ export interface ValidationResult {
   warnings: ValidationWarning[]
 }
 
+/**
+ * Legacy error/warning codes, retained so `@neutronai/core-sdk` consumers that
+ * referenced `ERROR_CODES.REQUIRED_MISSING` etc. keep compiling. The codes are
+ * unchanged from the deleted `core-sdk/validator.ts`; the values behind them
+ * are now produced by mapping the single Zod schema's issues.
+ */
 export const ERROR_CODES = {
-  /** Generic schema-validation failure (Zod-sourced; see `.message`). */
-  VALIDATION_FAILED: 'E_VALIDATION_FAILED',
+  REQUIRED_MISSING: 'E_REQUIRED_MISSING',
+  TYPE_MISMATCH: 'E_TYPE_MISMATCH',
+  UNKNOWN_CAPABILITY: 'E_UNKNOWN_CAPABILITY',
+  INVALID_SEMVER: 'E_INVALID_SEMVER',
+  INVALID_TIER_SUPPORT: 'E_INVALID_TIER_SUPPORT',
+  INVALID_LINKED_SOURCE: 'E_INVALID_LINKED_SOURCE',
 } as const
-export const WARNING_CODES = {} as const
+
+export const WARNING_CODES = {
+  EMPTY_TARGET_KINDS: 'W_EMPTY_TARGET_KINDS',
+  UNKNOWN_LINKED_SOURCE_KIND: 'W_UNKNOWN_LINKED_SOURCE_KIND',
+} as const
+
+/**
+ * Known linked-source kinds — informational (marketplace display + the
+ * `W_UNKNOWN_LINKED_SOURCE_KIND` warning below). NOT enforced: `kind` is a
+ * free-form string per § A.3.5, so first-party Cores declare novel providers
+ * (`shopify`, `google-ads`) that still validate.
+ */
+export const KNOWN_LINKED_SOURCE_KINDS = [
+  'gmail',
+  'calendar',
+  'tasks',
+  'docs',
+  'memory',
+  'custom',
+] as const
+
+// The remaining KNOWN_* enumerations are DERIVED from the Zod enums above, so
+// there is exactly one source of truth for each closed set (a drift is
+// impossible — they ARE the schema's option lists).
+export const KNOWN_TIER_SUPPORTS = TierSupportSchema.options
+export const KNOWN_INSTALL_SCOPES = InstallScopeSchema.options
+export const KNOWN_LINKED_SOURCE_SCOPES = LinkedSourceScopeSchema.options
+export const KNOWN_LINKED_SOURCE_TARGET_KINDS = LinkedSourceTargetKindSchema.options
+export const KNOWN_BILLING_MODELS = BillingModelSchema.options
+export const KNOWN_UI_SURFACES = UiComponentSurfaceSchema.options
+export const KNOWN_MANIFEST_SECRET_KINDS = ManifestSecretKindSchema.options
+
+/** Map a Zod issue to the closest legacy `ERROR_CODES` value. */
+function legacyErrorCode(issue: z.ZodIssue): string {
+  const path = issue.path.map(String)
+  const inCapability =
+    path.includes('capabilities') || path.includes('capability_required')
+  const inTier = path.includes('tier_support')
+  const inLinked = path.includes('linked_sources')
+  const inCoreApi = path.includes('coreApi')
+
+  switch (issue.code) {
+    case 'invalid_type':
+      // Zod reports `received: 'undefined'` for a missing required field.
+      return (issue as z.ZodInvalidTypeIssue).received === 'undefined'
+        ? ERROR_CODES.REQUIRED_MISSING
+        : ERROR_CODES.TYPE_MISMATCH
+    case 'invalid_enum_value':
+      if (inTier) return ERROR_CODES.INVALID_TIER_SUPPORT
+      if (inLinked) return ERROR_CODES.INVALID_LINKED_SOURCE
+      return ERROR_CODES.TYPE_MISMATCH
+    case 'invalid_string':
+      return inCapability ? ERROR_CODES.UNKNOWN_CAPABILITY : ERROR_CODES.TYPE_MISMATCH
+    case 'custom':
+      if (inCoreApi) return ERROR_CODES.INVALID_SEMVER
+      return ERROR_CODES.TYPE_MISMATCH
+    case 'too_small':
+      if (inCoreApi) return ERROR_CODES.INVALID_SEMVER
+      if (inTier) return ERROR_CODES.INVALID_TIER_SUPPORT
+      return ERROR_CODES.TYPE_MISMATCH
+    default:
+      return ERROR_CODES.TYPE_MISMATCH
+  }
+}
+
+/** Advisory warnings the schema does not encode (warnings never fail validity). */
+function collectWarnings(input: unknown): ValidationWarning[] {
+  const warnings: ValidationWarning[] = []
+  if (typeof input !== 'object' || input === null) return warnings
+  const sources = (input as Record<string, unknown>)['linked_sources']
+  if (!Array.isArray(sources)) return warnings
+  const knownKinds = new Set<string>(KNOWN_LINKED_SOURCE_KINDS)
+  sources.forEach((raw, i) => {
+    if (typeof raw !== 'object' || raw === null) return
+    const src = raw as Record<string, unknown>
+    const kind = src['kind']
+    if (typeof kind === 'string' && kind.length > 0 && !knownKinds.has(kind)) {
+      warnings.push({
+        code: WARNING_CODES.UNKNOWN_LINKED_SOURCE_KIND,
+        path: `/linked_sources/${i}/kind`,
+        message: `kind ${JSON.stringify(kind)} is not in the known set (${KNOWN_LINKED_SOURCE_KINDS.join(', ')})`,
+      })
+    }
+    if (Array.isArray(src['target_kinds']) && src['target_kinds'].length === 0) {
+      warnings.push({
+        code: WARNING_CODES.EMPTY_TARGET_KINDS,
+        path: `/linked_sources/${i}/target_kinds`,
+        message:
+          'empty target_kinds means the Core opts out of cross-project linking for this source',
+      })
+    }
+  })
+  return warnings
+}
 
 /**
  * Structural manifest validator — GENERATED from the single Zod schema (X3).
- * The 650-line hand validator was deleted; this thin adapter delegates to
- * `safeParseManifest`, so there is exactly ONE validation implementation. It
- * returns the legacy discriminated `ValidationResult` (rather than throwing)
- * for the one-release `@neutronai/core-sdk` barrel. New code SHOULD use
- * `safeParseManifest` / `NeutronManifestSchema` and read Zod issues directly.
+ * The 650-line hand validator was deleted; validity is decided ONLY by
+ * `safeParseManifest` (one validation implementation), then Zod issues are
+ * mapped to the legacy `ERROR_CODES` and the two advisory warnings the schema
+ * doesn't encode are layered on. Returns the legacy discriminated
+ * `ValidationResult` (never throws) for the one-release `@neutronai/core-sdk`
+ * barrel. New code SHOULD use `safeParseManifest` / `NeutronManifestSchema`.
  */
 export function validateNeutronManifest(input: unknown): ValidationResult {
+  const warnings = collectWarnings(input)
   const result = safeParseManifest(input)
   if (result.success) {
-    return { valid: true, errors: [], warnings: [] }
+    return { valid: true, errors: [], warnings }
   }
   const errors: ValidationError[] = result.error.issues.map((issue) => ({
-    code: ERROR_CODES.VALIDATION_FAILED,
-    path: `/${issue.path.join('/')}`,
+    code: legacyErrorCode(issue),
+    path: `/${issue.path.map(String).join('/')}`,
     message: issue.message,
   }))
-  return { valid: false, errors, warnings: [] }
+  return { valid: false, errors, warnings }
 }
