@@ -131,4 +131,22 @@ describe('AppChatReactionStore — aggregatesAfter (resume replay)', () => {
     await reactions.record({ topic_id: 'app:kim', message_id: 'k1', device_id: 'devA', emoji: '👍', action: 'add', at: 1 })
     expect(await reactions.aggregatesAfter(TOPIC, 0)).toEqual([])
   })
+
+  it('the limit caps DISTINCT messages, not reaction rows', async () => {
+    await appendMessage('m1') // seq 1
+    await appendMessage('m2') // seq 2
+    await appendMessage('m3') // seq 3
+    // m1 carries TWO reaction rows — they must not eat the message budget.
+    await reactions.record({ topic_id: TOPIC, message_id: 'm1', device_id: 'devA', emoji: '👍', action: 'add', at: 1 })
+    await reactions.record({ topic_id: TOPIC, message_id: 'm1', device_id: 'devB', emoji: '🎉', action: 'add', at: 2 })
+    await reactions.record({ topic_id: TOPIC, message_id: 'm2', device_id: 'devA', emoji: '👍', action: 'add', at: 3 })
+    await reactions.record({ topic_id: TOPIC, message_id: 'm3', device_id: 'devA', emoji: '👍', action: 'add', at: 4 })
+
+    const capped = await reactions.aggregatesAfter(TOPIC, 0, 2)
+    expect(capped.map((a) => a.message_id)).toEqual(['m1', 'm2'])
+    expect(capped[0]?.reactions).toEqual([
+      { emoji: '🎉', device_id: 'devB' },
+      { emoji: '👍', device_id: 'devA' },
+    ])
+  })
 })

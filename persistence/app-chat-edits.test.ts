@@ -161,6 +161,18 @@ describe('AppChatEditStore — aggregatesAfter (resume replay)', () => {
     expect(await edits.aggregatesAfter(TOPIC, 0)).toEqual([])
   })
 
+  it('the limit caps replayed messages', async () => {
+    await appendMessage('m1') // seq 1
+    await appendMessage('m2') // seq 2
+    await appendMessage('m3') // seq 3
+    await edits.record({ topic_id: TOPIC, message_id: 'm1', editor_device_id: 'devA', action: 'edit', body: 'e1', at: 1 })
+    await edits.record({ topic_id: TOPIC, message_id: 'm2', editor_device_id: 'devA', action: 'edit', body: 'e2', at: 2 })
+    await edits.record({ topic_id: TOPIC, message_id: 'm3', editor_device_id: 'devA', action: 'edit', body: 'e3', at: 3 })
+
+    const capped = await edits.aggregatesAfter(TOPIC, 0, 2)
+    expect(capped.map((a) => a.message_id)).toEqual(['m1', 'm2'])
+  })
+
   it('aggregate() returns rev 0 / empty for an unedited message', async () => {
     await appendMessage('m1')
     const agg = await edits.aggregate(TOPIC, 'm1')
