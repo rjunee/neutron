@@ -75,8 +75,9 @@ import type { GmailMessageResource } from './mime.ts'
  * - No batch endpoint. v1 sends one HTTP request per call.
  * - No attachment handling. Attachments come back as MIME parts the
  *   wrapper currently ignores; surface lands in a follow-up sprint.
- * - No send. Intentional Tier 1 limitation — paid Email-Private
- *   Core ships send.
+ * - Send IS supported: `messages.send` (the `email_send` tool),
+ *   alongside drafts.create. See manifest.ts for the scope grant
+ *   (incl. gmail.send).
  */
 export type FetchLike = (
   input: URL | Request | string,

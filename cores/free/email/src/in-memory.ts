@@ -60,9 +60,9 @@ interface InMemoryGmailClientOptions {
  * Ordering: `listMessages` / `search` return NEWEST-FIRST by
  * internalDate (the natural inbox semantic — most recent at the top).
  *
- * SEND IS NOT SUPPORTED — the in-memory client has no `send` method
- * BY DESIGN, mirroring the production wrapper. Adding one would
- * compromise the Tier 1 "drafts only" guarantee.
+ * Mirrors the production wrapper's FULL surface, including `sendMessage`
+ * (messages.send — the `email_send` tool; see manifest.ts's gmail.send
+ * scope and `google-client.ts`).
  */
 export function buildInMemoryGmailClient(
   options: InMemoryGmailClientOptions = {},

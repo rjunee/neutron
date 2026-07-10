@@ -26,14 +26,13 @@
  * recent at the top"). Distinct from the Calendar Core's chronological-
  * ascending ordering (meetings face forward; inboxes face backward).
  *
- * SEND IS NOT SUPPORTED. The Core deliberately omits `messages.send` /
- * `drafts.send` from the client surface AND from the manifest's
- * declared capabilities AND from the OAuth scope grant (the
- * 3-scope split is gmail.readonly + gmail.modify + gmail.compose;
- * gmail.send is excluded). A Tier 2 paid Email-Private Core will
- * ship that surface; this one prepares drafts only. Drafts land in
- * the user's Gmail Drafts label and require an explicit human
- * action to send.
+ * SEND IS SUPPORTED (gap-audit-P0 send work). The Core's OAuth grant
+ * covers FOUR scopes — gmail.readonly + gmail.modify + gmail.compose +
+ * gmail.send — and it ships BOTH draft preparation (drafts.create, the
+ * `email_draft_prepare` tool) AND direct send (messages.send, the
+ * `email_send` tool). `manifest.ts` is the authoritative capability +
+ * scope list. Drafts still land in the user's Gmail Drafts label for
+ * the human-in-the-loop path; `email_send` performs the actual send.
  */
 
 // D5 refactor (2026-07-09): this module is now a BARREL. The
