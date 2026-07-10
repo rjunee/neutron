@@ -549,6 +549,45 @@ describe('terminal-write convergence: a restart never re-reports an already-term
     expect(fired).toEqual([]) // no contradictory crash re-report
     expect(realStore.get('r')?.status).toBe('finished') // still finished, NOT crashed
   })
+
+  test('a concurrent prune/delete during a blocked terminal persist does NOT resurrect the durable row', async () => {
+    // The whole terminal transition (publish + persist) is serialized per run_id,
+    // so a concurrent `delete` (the lifecycle prune) queues BEHIND it and cannot
+    // interleave between publish and persist — otherwise the delayed upsert would
+    // recreate the durable row after the delete removed it (memory gone, store
+    // resurrected).
+    const realStore = new SubagentRegistryStore(db)
+    let releaseFinish!: () => void
+    const finishGate = new Promise<void>((r) => {
+      releaseFinish = r
+    })
+    const gated: SubagentPersistence = {
+      persist: async (rec) => {
+        if (rec.status === 'finished') await finishGate // block the terminal write
+        await realStore.persist(rec)
+      },
+      remove: (id) => realStore.remove(id),
+    }
+    const reg = new SubagentRegistry(gated)
+    await reg.create(dispatchInput({ run_id: 'r' }))
+    await reg.update('r', { status: 'running' })
+
+    // Terminal 'finished' — its persist BLOCKS on the gate while holding the
+    // per-run lock.
+    const finishing = reg.updateTerminal('r', { status: 'finished', ended_at: 1 })
+    await Promise.resolve()
+    // A concurrent prune deletes the run; it must serialize behind the in-flight
+    // terminal transition.
+    const deleting = reg.delete('r')
+
+    releaseFinish()
+    await Promise.all([finishing, deleting])
+
+    // Memory and the durable store AGREE — the row is gone from BOTH (no stale
+    // upsert resurrecting the durable row after the delete).
+    expect(reg.byRunId('r')).toBeUndefined()
+    expect(realStore.get('r')).toBeNull()
+  })
 })
 
 describe('SubagentRegistryStore — malformed-row isolation', () => {
