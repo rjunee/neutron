@@ -22,7 +22,14 @@ import { fileURLToPath } from 'node:url'
 
 import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
-import type { CredentialPool } from '@neutronai/runtime/credential-pool.ts'
+import { newCredentialPool, type CredentialPool } from '@neutronai/runtime/credential-pool.ts'
+
+function newPool(provider: string): CredentialPool {
+  return newCredentialPool({
+    strategy: 'fill_first',
+    credentials: [{ id: `${provider}:k`, kind: 'api_key', secret: 'sk' }],
+  })
+}
 import type { PlatformAdapter } from '@neutronai/runtime/platform-adapter.ts'
 import type { OpenWiringContext } from '../wiring/context.ts'
 import { wireLandingStack, type WireLandingStackDeps } from '../wiring/landing.ts'
@@ -44,7 +51,10 @@ afterEach(() => {
   rmSync(tmpDir, { recursive: true, force: true })
 })
 
-function makeCtx(env: NodeJS.ProcessEnv = {} as NodeJS.ProcessEnv): OpenWiringContext {
+function makeCtx(
+  env: NodeJS.ProcessEnv = {} as NodeJS.ProcessEnv,
+  overrides: Partial<OpenWiringContext> = {},
+): OpenWiringContext {
   return {
     llmPool: null,
     internal_handle: 'owner',
@@ -53,6 +63,7 @@ function makeCtx(env: NodeJS.ProcessEnv = {} as NodeJS.ProcessEnv): OpenWiringCo
     env,
     db,
     prewarmSubstrate: async (): Promise<void> => {},
+    ...overrides,
   }
 }
 
@@ -110,5 +121,47 @@ describe('wireLandingStack — chatAuthGate closes over live env, evaluated per 
     // The per-request closure fired against the SAME live env reference.
     expect(seenEnv.length).toBeGreaterThan(0)
     expect(seenEnv[0]).toBe(env)
+  })
+
+  test('provider=openai: auth gate keys on the OpenAI key, NOT the Claude key (audit Medium)', async () => {
+    const claudeCalls: NodeJS.ProcessEnv[] = []
+    const openaiCalls: NodeJS.ProcessEnv[] = []
+    const claudePool = newPool('anthropic')
+    // Claude key PRESENT, OpenAI key MISSING — under provider=openai this must
+    // read UNAUTHENTICATED (every turn would fail for the missing OpenAI key), so
+    // the gate must consult the OpenAI resolver and IGNORE the Claude one.
+    const resolveOpenLlmPool = (e: NodeJS.ProcessEnv): CredentialPool | null => {
+      claudeCalls.push(e)
+      return claudePool
+    }
+    const resolveOpenOpenAiPool = (e: NodeJS.ProcessEnv): CredentialPool | null => {
+      openaiCalls.push(e)
+      return null
+    }
+    const env = { MARKER: 'openai-box' } as unknown as NodeJS.ProcessEnv
+    const { landing } = wireLandingStack(
+      makeCtx(env, { provider: 'openai' }),
+      makeDeps({ resolveOpenLlmPool, resolveOpenOpenAiPool }),
+    )
+    await landing.fetch(new Request('http://localhost/chat'), {} as never)
+    // Gate consulted the SELECTED provider's (OpenAI) resolver...
+    expect(openaiCalls.length).toBeGreaterThan(0)
+    // ...and did NOT let the present Claude key satisfy the gate.
+    expect(claudeCalls.length).toBe(0)
+  })
+
+  test('provider=openai WITH an OpenAI key ⇒ gate authenticated (Claude resolver not consulted)', async () => {
+    const claudeCalls: NodeJS.ProcessEnv[] = []
+    const resolveOpenLlmPool = (e: NodeJS.ProcessEnv): CredentialPool | null => {
+      claudeCalls.push(e)
+      return null
+    }
+    const resolveOpenOpenAiPool = (): CredentialPool | null => newPool('openai')
+    const { landing } = wireLandingStack(
+      makeCtx({} as NodeJS.ProcessEnv, { provider: 'openai' }),
+      makeDeps({ resolveOpenLlmPool, resolveOpenOpenAiPool }),
+    )
+    await landing.fetch(new Request('http://localhost/chat'), {} as never)
+    expect(claudeCalls.length).toBe(0) // Claude resolver irrelevant under provider=openai
   })
 })

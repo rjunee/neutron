@@ -28,6 +28,8 @@ import {
   resolveOpenModelProvider,
   resolveOpenOpenAiPool,
   buildOpenAiMcpResolver,
+  buildOpenAiToolManifest,
+  resolveOpenConversationalProvider,
 } from '../composer.ts'
 
 function cannedHandle(instanceId: string): SessionHandle {
@@ -238,6 +240,68 @@ describe('open composer — swappable provider boot helpers', () => {
   test('buildOpenAiMcpResolver throws loudly when the tool bridge is not yet wired', async () => {
     const resolver = buildOpenAiMcpResolver()
     await expect(resolver({ call_id: 'c', tool_name: 't', args: {} })).rejects.toThrow(/tool bridge not wired/i)
+  })
+})
+
+describe('resolveOpenConversationalProvider — every declared value dispatches coherently', () => {
+  const deps = (openaiKeyPresent: boolean) => ({
+    resolveOpenAiPool: () =>
+      openaiKeyPresent
+        ? newCredentialPool({ strategy: 'fill_first', credentials: [{ id: 'openai:k', kind: 'api_key' as const, secret: 'sk' }] })
+        : null,
+    buildMcpResolver: buildOpenAiMcpResolver,
+    buildToolManifest: buildOpenAiToolManifest,
+  })
+
+  test('unset / anthropic → {} (Claude Code, no provider override)', () => {
+    expect(resolveOpenConversationalProvider({} as NodeJS.ProcessEnv, deps(false))).toEqual({})
+    expect(
+      resolveOpenConversationalProvider(
+        { NEUTRON_MODEL_PROVIDER: 'anthropic' } as unknown as NodeJS.ProcessEnv,
+        deps(false),
+      ),
+    ).toEqual({})
+  })
+
+  test('openai + OPENAI_API_KEY → fully-wired GPT ctx', () => {
+    const ctx = resolveOpenConversationalProvider(
+      { NEUTRON_MODEL_PROVIDER: 'openai' } as unknown as NodeJS.ProcessEnv,
+      deps(true),
+    )
+    expect(ctx.provider).toBe('openai')
+    expect(ctx.openaiLlmPool).not.toBeNull()
+    expect(ctx.openaiLlmPool).toBeDefined()
+    expect(typeof ctx.mcpResolver).toBe('function')
+    expect(typeof ctx.toolManifest).toBe('function')
+  })
+
+  test('openai WITHOUT a key → honored (provider set) so turns fail LOUD, NOT a silent Claude fallback', () => {
+    const ctx = resolveOpenConversationalProvider(
+      { NEUTRON_MODEL_PROVIDER: 'openai' } as unknown as NodeJS.ProcessEnv,
+      deps(false),
+    )
+    expect(ctx.provider).toBe('openai')
+    expect(ctx.openaiLlmPool).toBeUndefined() // no key → substrate fails loud per turn
+  })
+
+  test('openai-codex-cli (declared but NOT production-wired) → THROWS a loud boot error (never silent Claude)', () => {
+    expect(() =>
+      resolveOpenConversationalProvider(
+        { NEUTRON_MODEL_PROVIDER: 'openai-codex-cli' } as unknown as NodeJS.ProcessEnv,
+        deps(true),
+      ),
+    ).toThrow(/not.*production-wired|refusing to boot/i)
+    // Mutation check: it must NOT silently return {} (Claude fallback).
+    let threw = false
+    try {
+      resolveOpenConversationalProvider(
+        { NEUTRON_MODEL_PROVIDER: 'openai-codex-cli' } as unknown as NodeJS.ProcessEnv,
+        deps(true),
+      )
+    } catch {
+      threw = true
+    }
+    expect(threw).toBe(true)
   })
 })
 

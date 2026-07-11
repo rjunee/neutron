@@ -125,13 +125,15 @@ export function wireLandingStack(
     // composer's substrate wiring uses (`resolveOpenLlmPool`).
     chatAuthGate: {
       isUnauthenticated: (): boolean => {
-        // Default (anthropic) gate — byte-identical to before.
-        if (deps.resolveOpenLlmPool(ctx.env) !== null) return false
-        // SWAPPABLE PROVIDER — an OpenAI-provider box is authenticated when it has
-        // an OpenAI key, even with no Claude credential (no "Authenticate Claude"
-        // wall). Only consulted for provider==='openai'.
-        if (ctx.provider === 'openai') return deps.resolveOpenOpenAiPool(ctx.env) === null
-        return true
+        // SWAPPABLE PROVIDER (audit Medium) — key on the SELECTED provider's
+        // credentials FIRST. When openai is selected, the OpenAI key is what gates
+        // auth: a present Claude key is IRRELEVANT (every turn would still fail for
+        // the missing OpenAI key), so it must NOT satisfy the gate.
+        if (ctx.provider === 'openai') {
+          return deps.resolveOpenOpenAiPool(ctx.env) === null
+        }
+        // Default (anthropic): Claude credential gates — byte-identical to before.
+        return deps.resolveOpenLlmPool(ctx.env) === null
       },
     },
     ...(deps.phaseSpecResolver !== null ? { phaseSpecResolver: deps.phaseSpecResolver } : {}),
