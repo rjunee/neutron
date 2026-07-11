@@ -114,6 +114,8 @@ type Op =
   | 'writeFile'
   | 'moveFile'
   | 'deleteFile'
+  | 'deleteFolder'
+  | 'deleteBinariesUnderPrefix'
   | 'revert'
   | 'deleteBinary'
   | 'uploadBinary'
@@ -125,6 +127,8 @@ const OPS: Op[] = [
   'writeFile',
   'moveFile',
   'deleteFile',
+  'deleteFolder',
+  'deleteBinariesUnderPrefix',
   'revert',
   'deleteBinary',
   'uploadBinary',
@@ -141,6 +145,8 @@ interface Trackers {
   setTree: unknown[];
   setConflict: unknown[];
   setError: unknown[];
+  setRevertConfirm: unknown[];
+  setPreviewVersion: unknown[];
 }
 let calls: Trackers;
 let q: Record<Op, { d: Deferred<unknown>; args: unknown[] }[]>;
@@ -188,6 +194,8 @@ beforeEach(async () => {
     setTree: [],
     setConflict: [],
     setError: [],
+    setRevertConfirm: [],
+    setPreviewVersion: [],
   };
   q = {} as Record<Op, { d: Deferred<unknown>; args: unknown[] }[]>;
   served = {} as Record<Op, number>;
@@ -200,6 +208,8 @@ beforeEach(async () => {
     writeFile: (...args: unknown[]) => op('writeFile', args),
     moveFile: (...args: unknown[]) => op('moveFile', args),
     deleteFile: (...args: unknown[]) => op('deleteFile', args),
+    deleteFolder: (...args: unknown[]) => op('deleteFolder', args),
+    deleteBinariesUnderPrefix: (...args: unknown[]) => op('deleteBinariesUnderPrefix', args),
     revert: (...args: unknown[]) => op('revert', args),
     deleteBinary: (...args: unknown[]) => op('deleteBinary', args),
     uploadBinary: (...args: unknown[]) => op('uploadBinary', args),
@@ -237,11 +247,11 @@ function render(project_id: string, client: unknown = fakeClient) {
     fetchTree: (...a: unknown[]) => op('fetchTree', a) as Promise<void>,
     setTree: (v: unknown) => calls.setTree.push(v),
     loadHistory: (...a: unknown[]) => op('loadHistory', a) as Promise<void>,
-    setPreviewVersion: () => {},
+    setPreviewVersion: (v: unknown) => calls.setPreviewVersion.push(v),
     setHistoryEntries: () => {},
     setHistoryCursor: () => {},
     setHistoryOpen: () => {},
-    setRevertConfirm: () => {},
+    setRevertConfirm: (v: unknown) => calls.setRevertConfirm.push(v),
     setRevertingSha: () => {},
   });
   commitEffects();
@@ -456,34 +466,86 @@ describe('handleRename', () => {
   });
 });
 
-// ── handleDelete (file) ───────────────────────────────────────────────
-describe('handleDelete (file)', () => {
-  it('COMMITS with the right args (deleteFile) with no switch', async () => {
-    const api = render('A');
-    const p = api.handleDelete(FILE_NODE);
-    expect(argsOf('deleteFile')).toEqual(['A', 'notes/a.md']);
-    await settle('deleteFile');
-    await settle('fetchTree');
-    await p;
-    expect(q.fetchTree.length).toBe(1);
-  });
+// ── handleDelete — all FOUR destructive dispatch paths ───────────────
+// file → deleteFile, unreferenced-binary → deleteBinary, binary-origin
+// folder → deleteBinariesUnderPrefix, ordinary folder → deleteFolder.
+// Each path: a COMMIT case (correct client method + args) AND a
+// project-switch boundary case (bails at the delete await → no
+// fetchTree, no stale clear). The gate guard is shared across the four
+// branches, so dropping it turns every BAILS case red (mutation-
+// verified); the per-path arg assertions catch wrong routing.
+describe('handleDelete — four destructive routes', () => {
+  const cases: {
+    label: string;
+    node: unknown;
+    method: Op;
+    args: unknown[];
+    clearsSelected: boolean; // selectedPath === node.path
+  }[] = [
+    { label: 'file', node: FILE_NODE, method: 'deleteFile', args: ['A', 'notes/a.md'], clearsSelected: true },
+    {
+      label: 'unreferenced binary',
+      node: { kind: 'binary', path: 'img/a.png', name: 'a.png', referenced_by_count: 0 },
+      method: 'deleteBinary',
+      args: ['A', 'img/a.png'],
+      clearsSelected: false,
+    },
+    {
+      label: 'binary-origin folder (recursive prefix delete)',
+      node: { kind: 'folder', origin: 'binary', path: 'img', name: 'img', children: [] },
+      method: 'deleteBinariesUnderPrefix',
+      args: ['A', 'img'],
+      clearsSelected: false,
+    },
+    {
+      label: 'ordinary folder',
+      node: { kind: 'folder', path: 'sub', name: 'sub', children: [] },
+      method: 'deleteFolder',
+      args: ['A', 'sub'],
+      clearsSelected: false,
+    },
+  ];
 
-  it('BAILS on switch while deleteFile is pending (no clear / no fetchTree)', async () => {
-    const api = render('A');
-    const p = api.handleDelete(FILE_NODE);
-    render('B');
-    await settle('deleteFile');
-    await p;
-    expect(q.fetchTree.length).toBe(0);
-    expect(calls.setSelectedPath.length).toBe(0);
-  });
+  for (const c of cases) {
+    it(`${c.label} — COMMITS via ${c.method} with the right args`, async () => {
+      const api = render('A');
+      const p = api.handleDelete(c.node);
+      // Correct routing: ONLY the expected method is called, with args.
+      expect(q[c.method].length).toBe(1);
+      expect(argsOf(c.method)).toEqual(c.args);
+      await settle(c.method);
+      await settle('fetchTree');
+      await p;
+      expect(q.fetchTree.length).toBe(1);
+      if (c.clearsSelected) expect(calls.setSelectedPath).toContain(null);
+    });
+
+    it(`${c.label} — BAILS on switch while ${c.method} is pending`, async () => {
+      const api = render('A');
+      const p = api.handleDelete(c.node);
+      render('B');
+      await settle(c.method);
+      await p;
+      expect(q.fetchTree.length).toBe(0);
+      expect(calls.setSelectedPath.length).toBe(0);
+    });
+
+    it(`${c.label} — BAILS on client/session switch while ${c.method} is pending`, async () => {
+      const api = render('A');
+      const p = api.handleDelete(c.node);
+      render('A', { session: 'refreshed' }); // same project, new DocsClient
+      await settle(c.method);
+      await p;
+      expect(q.fetchTree.length).toBe(0);
+    });
+  }
 });
 
 // ── handleRevertConfirm (3 await boundaries in the non-deleted arm) ────
 describe('handleRevertConfirm', () => {
   const entry = { sha: 'deadbee', message: 'x', author_date: '2026-01-01T00:00:00Z' } as never;
 
-  it('COMMITS with the right args (revert carries expected_modified_at)', async () => {
+  it('deleted:false — COMMITS with the right args, reloads file + history, closes the confirm', async () => {
     const api = render('A');
     const p = api.handleRevertConfirm(entry);
     expect(argsOf('revert')).toEqual([
@@ -496,9 +558,12 @@ describe('handleRevertConfirm', () => {
     await p;
     expect(q.fetchFile.length).toBe(1);
     expect(q.loadHistory.length).toBe(1);
+    // final guard passed → confirm dismissed + preview cleared
+    expect(calls.setRevertConfirm).toContain(null);
+    expect(calls.setPreviewVersion).toContain(null);
   });
 
-  it('BAILS on switch while revert is pending (no reload)', async () => {
+  it('deleted:false — BAILS on switch while revert is pending (no reload, confirm untouched)', async () => {
     const api = render('A');
     const p = api.handleRevertConfirm(entry);
     render('B');
@@ -506,9 +571,10 @@ describe('handleRevertConfirm', () => {
     await p;
     expect(q.fetchFile.length).toBe(0);
     expect(q.loadHistory.length).toBe(0);
+    expect(calls.setRevertConfirm.length).toBe(0);
   });
 
-  it('BAILS on switch while the post-revert fetchFile is pending (no loadHistory)', async () => {
+  it('deleted:false — BAILS on switch while the post-revert fetchFile is pending (no loadHistory)', async () => {
     const api = render('A');
     const p = api.handleRevertConfirm(entry);
     await settle('revert', { deleted: false });
@@ -516,6 +582,44 @@ describe('handleRevertConfirm', () => {
     await settle('fetchFile');
     await p;
     expect(q.loadHistory.length).toBe(0);
+    expect(calls.setRevertConfirm.length).toBe(0);
+  });
+
+  it('deleted:false — BAILS on switch while loadHistory is pending (final guard: confirm NOT dismissed)', async () => {
+    const api = render('A');
+    const p = api.handleRevertConfirm(entry);
+    await settle('revert', { deleted: false });
+    await settle('fetchFile');
+    render('B'); // switch AFTER fetchFile, WHILE loadHistory is pending
+    await settle('loadHistory');
+    await p;
+    // The :267 final guard must bail → confirm/preview NOT written.
+    expect(calls.setRevertConfirm.length).toBe(0);
+    expect(calls.setPreviewVersion.length).toBe(0);
+  });
+
+  it('deleted:true — COMMITS: clears the file surface, refreshes tree, dismisses the confirm', async () => {
+    const api = render('A');
+    const p = api.handleRevertConfirm(entry);
+    await settle('revert', { deleted: true });
+    await settle('fetchTree');
+    await p;
+    expect(q.fetchTree.length).toBe(1);
+    expect(q.fetchFile.length).toBe(0); // deleted arm never reloads a body
+    expect(calls.setFile).toContain(null);
+    expect(calls.setRevertConfirm).toContain(null);
+  });
+
+  it('deleted:true — BAILS on switch while the deleted-arm fetchTree is pending (final guard)', async () => {
+    const api = render('A');
+    const p = api.handleRevertConfirm(entry);
+    await settle('revert', { deleted: true });
+    render('B'); // switch WHILE the deleted-arm fetchTree is pending
+    await settle('fetchTree');
+    await p;
+    // The :267 final guard must bail → confirm/preview NOT written.
+    expect(calls.setRevertConfirm.length).toBe(0);
+    expect(calls.setPreviewVersion.length).toBe(0);
   });
 
   it('surfaces a 409 revert as conflict', async () => {
