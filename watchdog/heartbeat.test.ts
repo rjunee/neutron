@@ -78,7 +78,10 @@ describe('HeartbeatPulse', () => {
     now += 40_000 // stale
     let total = 0
     for (let i = 0; i < 10; i++) {
-      total += (await detector.detect()).length
+      const fired = await detector.detect()
+      total += fired.length
+      // Simulate the supervisor's COMMIT-ON-SUCCESS: a delivered alert latches.
+      for (const a of fired) detector.commit(a)
       now += 30_000 // detector loop keeps ticking; pulse stays dead
     }
     expect(total).toBe(1) // ONE incident, not ten
@@ -95,13 +98,17 @@ describe('HeartbeatPulse', () => {
       now: () => now,
     })
     now += 40_000
-    expect((await detector.detect()).length).toBe(1) // incident 1
+    const f1 = await detector.detect()
+    expect(f1.length).toBe(1) // incident 1
+    for (const a of f1) detector.commit(a) // delivered → latched
     // Recovery: the tick loop resumes pulsing → fresh.
     pulse.pulse()
     expect((await detector.detect()).length).toBe(0)
     // Tick loop dies again → a NEW incident fires.
     now += 40_000
-    expect((await detector.detect()).length).toBe(1) // incident 2
+    const f2 = await detector.detect()
+    expect(f2.length).toBe(1) // incident 2
+    for (const a of f2) detector.commit(a)
   })
 
   test('LIMITATION (documented): a synchronous wedge is NOT detected — the resumed pulse masks it', async () => {

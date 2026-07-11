@@ -121,7 +121,7 @@ describe('runAgentWatchdog — notify_only mode (F4)', () => {
     expect(registry.byRunId('stuck-2')?.status).toBe('running')
   })
 
-  test('a throwing notifier does NOT break the tick and does NOT transition the run', async () => {
+  test('round-3: a throwing notifier is RETRYABLE — not permanently suppressed, delivered once when it clears', async () => {
     const registry = new SubagentRegistry()
     const control = newControlState(registry)
     const now = 4_000_000
@@ -131,20 +131,43 @@ describe('runAgentWatchdog — notify_only mode (F4)', () => {
       cancellerCalls++
     })
 
-    const { surfaced } = await runAgentWatchdog({
+    const notified = new Set<string>()
+    let notifyCalls = 0
+    let deliveries = 0
+    const base = {
       control,
       registry,
       now: () => now,
-      notify_only: true,
-      notify: () => {
-        throw new Error('sink boom')
+      notify_only: true as const,
+      notified,
+      // Throws on the FIRST call (transient sink blip), succeeds afterward.
+      notify: (): void => {
+        notifyCalls++
+        if (notifyCalls === 1) throw new Error('sink boom')
+        deliveries++
       },
-    })
+    }
 
-    // The throw was swallowed — the run was still surfaced, nothing killed.
-    expect(surfaced.length).toBe(1)
+    // Tick 1 — notify throws → NOT latched (COMMIT-ON-SUCCESS), nothing surfaced,
+    // the tick did NOT break, nothing killed.
+    const t1 = await runAgentWatchdog(base)
+    expect(t1.surfaced.length).toBe(0)
+    expect(deliveries).toBe(0)
+    expect(notified.has('stuck-3')).toBe(false) // un-latched → retryable
     expect(cancellerCalls).toBe(0)
     expect(registry.byRunId('stuck-3')?.status).toBe('running')
+
+    // Tick 2 — sink recovers → delivered EXACTLY ONCE and now latched.
+    const t2 = await runAgentWatchdog(base)
+    expect(t2.surfaced.length).toBe(1)
+    expect(deliveries).toBe(1)
+    expect(notified.has('stuck-3')).toBe(true)
+
+    // Tick 3 — latched → no repeat (still nothing killed).
+    const t3 = await runAgentWatchdog(base)
+    expect(t3.surfaced.length).toBe(0)
+    expect(deliveries).toBe(1)
+    expect(cancellerCalls).toBe(0)
   })
 
   test('Blocker-2: stale → healthy → stale RE-NOTIFIES (a second incident is not lost)', async () => {

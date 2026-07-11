@@ -151,9 +151,12 @@ export interface AgentWatchdogDeps {
   notify_only?: boolean
   /**
    * De-dup ledger for {@link notify_only} mode. A run_id present here is skipped
-   * (already notified); a newly-surfaced run_id is inserted. The caller (the
-   * scheduled tick closure) owns this set so the pure watchdog stays stateless.
-   * Ignored when `notify_only` is false.
+   * (already notified); a surfaced run_id is inserted ONLY AFTER the notifier
+   * accepted the alert (COMMIT-ON-SUCCESS, round-3 — a transient sink failure
+   * leaves it un-latched so the next tick re-attempts). Cleared on recovery and
+   * pruned of run_ids that left `live()`. The caller (the scheduled tick closure)
+   * owns this set so the pure watchdog stays stateless. Ignored when
+   * `notify_only` is false.
    */
   notified?: Set<string>
 }
@@ -231,15 +234,28 @@ export async function runAgentWatchdog(deps: AgentWatchdogDeps): Promise<AgentWa
       // its own).
       if (deps.notified?.has(rec.run_id) === true) continue
       const event = buildEvent(rec, reason, now, progressAt, probedProgress)
-      surfaced.push(event)
-      deps.notified?.add(rec.run_id)
+      // COMMIT-ON-SUCCESS (round-3): mark this run notified ONLY AFTER the sink
+      // accepted the alert. Adding it before the await meant a TRANSIENT sink
+      // failure permanently suppressed every later tick (until the run went
+      // healthy-then-stale). Now a failed delivery leaves the run un-latched and
+      // the next tick re-attempts — delivered exactly once when the blip clears.
+      let notified = true
       if (deps.notify) {
         try {
           // eslint-disable-next-line no-await-in-loop
           await deps.notify(event)
-        } catch {
-          // Notifier is best-effort; a sink failure must not abort the tick.
+        } catch (err) {
+          notified = false
+          console.error(
+            `[subagent-lifecycle] alert delivery FAILING for ${rec.run_id} ` +
+              `(will retry next tick):`,
+            err,
+          )
         }
+      }
+      if (notified) {
+        surfaced.push(event)
+        deps.notified?.add(rec.run_id)
       }
       continue
     }

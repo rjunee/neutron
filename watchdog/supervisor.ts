@@ -68,13 +68,19 @@ export class WatchdogSupervisor {
   }
 
   /**
-   * One tick. Runs every detector, persists + notifies each fired alert.
-   * Returns the alerts that fired so tests can assert.
+   * One tick. Runs every detector, then for each candidate alert: persists it,
+   * notifies it, and — ONLY when BOTH succeed — commits the detector's
+   * incident-edge dedup (COMMIT-ON-SUCCESS, F4 round-3). A transient persist or
+   * notify failure does NOT commit, so the same incident is re-attempted next
+   * tick and delivered exactly once when the blip clears — never permanently
+   * suppressed by a DB/sink hiccup. `record()` is idempotent (`INSERT OR
+   * IGNORE`), so re-recording an already-persisted id on a notify-retry is a
+   * safe no-op. Returns the alerts DELIVERED this tick so tests can assert.
    */
   async runOnce(): Promise<WatchdogAlert[]> {
     if (this.running) return []
     this.running = true
-    const fired: WatchdogAlert[] = []
+    const delivered: WatchdogAlert[] = []
     try {
       for (const detector of this.detectors) {
         let alerts: WatchdogAlert[]
@@ -85,24 +91,45 @@ export class WatchdogSupervisor {
           continue
         }
         for (const alert of alerts) {
+          // (1) Durable persist. A REAL store failure (not a dup — record is
+          // idempotent) leaves the incident UN-committed so it retries next tick.
           try {
             await this.store.record(alert)
           } catch (err) {
-            // Likely a duplicate (PK collision) — log + continue
-            console.warn(`watchdog supervisor: persist ${alert.id} failed:`, err)
-            continue
+            console.error(
+              `watchdog supervisor: alert delivery FAILING — persist ${alert.id} threw ` +
+                `(will retry next tick):`,
+              err,
+            )
+            continue // do NOT commit
           }
-          fired.push(alert)
+          // (2) Notify. On failure, still do NOT commit — the idempotent record
+          // means next tick re-records (no-op) and re-attempts the notify.
+          let notified = true
           try {
             await this.notifier.notify(alert)
           } catch (err) {
-            console.error(`watchdog notifier failed for ${alert.id}:`, err)
+            notified = false
+            console.error(
+              `watchdog supervisor: alert delivery FAILING — notify ${alert.id} threw ` +
+                `(will retry next tick):`,
+              err,
+            )
+          }
+          // (3) COMMIT the dedup ONLY after persist AND notify both succeeded.
+          if (notified) {
+            delivered.push(alert)
+            try {
+              detector.commit?.(alert)
+            } catch (err) {
+              console.error(`watchdog supervisor: commit ${alert.id} threw:`, err)
+            }
           }
         }
       }
     } finally {
       this.running = false
     }
-    return fired
+    return delivered
   }
 }

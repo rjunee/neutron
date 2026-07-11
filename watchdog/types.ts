@@ -33,6 +33,20 @@ export interface WatchdogNotifier {
 /** A watchdog detector — pure function over current state → alerts to fire. */
 export interface WatchdogDetector {
   kind: WatchdogKind
-  /** Returns the alerts that should be fired now. Empty array = no fire. */
+  /**
+   * Returns the alerts that should be fired now. Empty array = no fire. For an
+   * incident-edge detector this returns CANDIDATES that have NOT yet latched
+   * their dedup state — {@link commit} is called by the supervisor only after the
+   * alert is durably persisted AND delivered (COMMIT-ON-SUCCESS), so a transient
+   * failure re-attempts rather than permanently suppressing.
+   */
   detect(): Promise<WatchdogAlert[]>
+  /**
+   * Optional COMMIT-ON-SUCCESS hook (F4). The supervisor calls this AFTER an
+   * alert from {@link detect} was durably persisted AND handed to the notifier
+   * successfully, so the detector can latch its "already alerted" dedup state.
+   * Detectors with no per-incident dedup (e.g. crashed_agent, which reaps) omit
+   * it. Never called on a persist/notify failure — the alert stays retryable.
+   */
+  commit?(alert: WatchdogAlert): void
 }

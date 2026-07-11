@@ -56,6 +56,13 @@ export class HeartbeatDetector implements WatchdogDetector {
   private readonly threshold_ms: number
   private readonly incidents = new IncidentEdgeTracker()
 
+  // COMMIT-ON-SUCCESS (F4 round-3): latch this incident's dedup ONLY after the
+  // supervisor durably persisted AND delivered the alert. A transient failure
+  // skips this, so the incident re-attempts next tick instead of being lost.
+  commit(alert: WatchdogAlert): void {
+    this.incidents.commitById(alert.id)
+  }
+
   constructor(opts: HeartbeatDetectorOptions) {
     this.tracker = opts.tracker
     this.project_slug = opts.project_slug
@@ -69,7 +76,7 @@ export class HeartbeatDetector implements WatchdogDetector {
     const firing = last !== null && now - last > this.threshold_ms
     // Incident-edge: fire ONCE while the heartbeat stays stale, and again only
     // after it recovers then goes stale anew (Blocker-1 fix).
-    const risen = this.incidents.rising(firing ? [this.project_slug] : [], (key) =>
+    const risen = this.incidents.candidates(firing ? [this.project_slug] : [], (key) =>
       newAlertId(this.kind, key, now),
     )
     return risen.map(({ id }) => ({
@@ -101,6 +108,13 @@ export class StuckAgentDetector implements WatchdogDetector {
   private readonly threshold_ms: number
   private readonly incidents = new IncidentEdgeTracker()
 
+  // COMMIT-ON-SUCCESS (F4 round-3): latch this incident's dedup ONLY after the
+  // supervisor durably persisted AND delivered the alert. A transient failure
+  // skips this, so the incident re-attempts next tick instead of being lost.
+  commit(alert: WatchdogAlert): void {
+    this.incidents.commitById(alert.id)
+  }
+
   constructor(opts: StuckAgentDetectorOptions) {
     this.registry = opts.process_registry
     this.project_slug = opts.project_slug
@@ -115,7 +129,7 @@ export class StuckAgentDetector implements WatchdogDetector {
     // Incident-edge PER process: one alert per stuck process while it stays
     // stuck; a process that recovers (activity resumes → drops out of listStuck)
     // and later wedges again re-fires (Blocker-1 fix).
-    const risen = this.incidents.rising(byName.keys(), (key) => newAlertId(this.kind, key, now))
+    const risen = this.incidents.candidates(byName.keys(), (key) => newAlertId(this.kind, key, now))
     return risen.map(({ key, id }) => {
       const r = byName.get(key)!
       return {
@@ -219,6 +233,13 @@ export class OverrunCronDetector implements WatchdogDetector {
   private readonly default_expected_ms: number
   private readonly incidents = new IncidentEdgeTracker()
 
+  // COMMIT-ON-SUCCESS (F4 round-3): latch this incident's dedup ONLY after the
+  // supervisor durably persisted AND delivered the alert. A transient failure
+  // skips this, so the incident re-attempts next tick instead of being lost.
+  commit(alert: WatchdogAlert): void {
+    this.incidents.commitById(alert.id)
+  }
+
   constructor(opts: OverrunCronDetectorOptions) {
     this.jobs = opts.jobs
     this.state = opts.state
@@ -249,7 +270,7 @@ export class OverrunCronDetector implements WatchdogDetector {
         last_run_at: state.last_run_at,
       })
     }
-    const risen = this.incidents.rising(payloads.keys(), (key) => newAlertId(this.kind, key, now))
+    const risen = this.incidents.candidates(payloads.keys(), (key) => newAlertId(this.kind, key, now))
     return risen.map(({ key, id }) => ({
       id,
       kind: this.kind,
@@ -288,6 +309,13 @@ export class DbLockContentionDetector implements WatchdogDetector {
   private samples: Array<{ t: number; count: number }> = []
   private readonly incidents = new IncidentEdgeTracker()
 
+  // COMMIT-ON-SUCCESS (F4 round-3): latch this incident's dedup ONLY after the
+  // supervisor durably persisted AND delivered the alert. A transient failure
+  // skips this, so the incident re-attempts next tick instead of being lost.
+  commit(alert: WatchdogAlert): void {
+    this.incidents.commitById(alert.id)
+  }
+
   constructor(opts: DbLockDetectorOptions) {
     this.counter = opts.counter
     this.project_slug = opts.project_slug
@@ -311,7 +339,7 @@ export class DbLockContentionDetector implements WatchdogDetector {
     // Incident-edge: sustained contention keeps `delta` over threshold across
     // ticks — fire once per contention incident, re-fire only after it subsides
     // below threshold and crosses again (Blocker-1 fix).
-    const risen = this.incidents.rising(firing ? [this.project_slug] : [], (key) =>
+    const risen = this.incidents.candidates(firing ? [this.project_slug] : [], (key) =>
       newAlertId(this.kind, key, now),
     )
     return risen.map(({ id }) => ({
@@ -347,6 +375,13 @@ export class SubstrateCooldownDetector implements WatchdogDetector {
   private readonly now: () => number
   private readonly incidents = new IncidentEdgeTracker()
 
+  // COMMIT-ON-SUCCESS (F4 round-3): latch this incident's dedup ONLY after the
+  // supervisor durably persisted AND delivered the alert. A transient failure
+  // skips this, so the incident re-attempts next tick instead of being lost.
+  commit(alert: WatchdogAlert): void {
+    this.incidents.commitById(alert.id)
+  }
+
   constructor(opts: SubstrateCooldownDetectorOptions) {
     this.pool = opts.pool
     this.project_slug = opts.project_slug
@@ -364,7 +399,7 @@ export class SubstrateCooldownDetector implements WatchdogDetector {
     // Incident-edge: a cooldown lasts minutes across many ticks — fire once when
     // the pool saturates, and again only after some credential recovers then the
     // pool saturates anew (Blocker-1 fix: was ~20 pings for a 10-min cooldown).
-    const risen = this.incidents.rising(allCold ? [this.substrate_kind] : [], (key) =>
+    const risen = this.incidents.candidates(allCold ? [this.substrate_kind] : [], (key) =>
       newAlertId(this.kind, key, now),
     )
     return risen.map(({ id }) => ({

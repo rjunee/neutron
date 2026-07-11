@@ -21,9 +21,18 @@ interface RawAlertRow {
 export class AlertStore {
   constructor(private readonly db: ProjectDb) {}
 
+  /**
+   * Persist a fired alert. IDEMPOTENT (F4 round-3): `INSERT OR IGNORE` — a
+   * re-record of an already-persisted incident id is a silent no-op success, NOT
+   * a throw. This is what makes the supervisor's COMMIT-ON-SUCCESS retry safe: if
+   * `record()` succeeded but the notifier failed, the next tick re-records the
+   * SAME id (no duplicate row, no throw) and re-attempts the notify. A REAL store
+   * failure (disk full, locked DB) still throws, so the supervisor can leave the
+   * incident un-committed and retry it — never latching dedup on a transient blip.
+   */
   async record(alert: WatchdogAlert): Promise<void> {
     await this.db.run(
-      `INSERT INTO watchdog_alerts
+      `INSERT OR IGNORE INTO watchdog_alerts
          (id, kind, project_slug, detected_at, resolved_at, payload_json)
        VALUES (?, ?, ?, ?, ?, ?)`,
       [
