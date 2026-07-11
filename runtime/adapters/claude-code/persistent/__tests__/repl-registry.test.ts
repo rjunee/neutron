@@ -6,9 +6,9 @@
  */
 
 import { describe, it, expect } from 'bun:test'
-import { mkdtempSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import {
   getRecord,
   loadRegistry,
@@ -64,6 +64,17 @@ describe('repl-registry — pure (de)serialization', () => {
       expect(parsed.registry.good).toBeDefined()
       expect(parsed.registry.bad).toBeUndefined()
     }
+  })
+
+  it('reports a dropped row via onDropRow instead of dropping it silently', () => {
+    const raw = JSON.stringify({
+      good: rec({ sessionKey: 'good' }),
+      bad: { sessionKey: 'bad' }, // missing required fields
+    })
+    const dropped: string[] = []
+    const parsed = parseRegistryContents(raw, (key) => dropped.push(key))
+    expect(parsed.kind).toBe('loaded')
+    expect(dropped).toEqual(['bad'])
   })
 
   it('backfills sessionKey from the map key when the field is absent', () => {
@@ -142,5 +153,94 @@ describe('repl-registry — lock-guarded mutations', () => {
     })
     expect(won).toBe(true)
     expect(getRecord(path, 'k')?.respawn_in_flight_at).toBe(123)
+  })
+})
+
+describe('repl-registry — corruption on the mutation path is loud and recoverable (data-loss regression)', () => {
+  /** List sidecar files `<path>.corrupt-<epoch-ms>` written next to `path`. */
+  function sidecarsFor(path: string): string[] {
+    const dir = dirname(path)
+    const base = path.split('/').pop() as string
+    return readdirSync(dir).filter((f) => f.startsWith(`${base}.corrupt-`))
+  }
+
+  it('patchRecord on a corrupt file does NOT silently vaporize other rows: it sidecars the raw bytes and signals loudly', () => {
+    const path = tmpRegistry()
+    // Seed N rows the normal way, then corrupt the file on disk (e.g. an
+    // operator hand-edit gone wrong, a bad deploy, a disk fault).
+    upsertRecord(path, rec({ sessionKey: 'alice', sessionId: 'uuid-alice', pid: 111 }))
+    upsertRecord(path, rec({ sessionKey: 'bob', sessionId: 'uuid-bob', pid: 222 }))
+    upsertRecord(path, rec({ sessionKey: 'carol', sessionId: 'uuid-carol', pid: 333 }))
+    const beforeCorruption = readFileSync(path, 'utf8')
+    expect(beforeCorruption).toContain('uuid-bob') // sanity: all 3 rows really are on disk
+    writeFileSync(path, `${beforeCorruption}TRAILING-GARBAGE`) // corrupt it
+
+    // Wrap (not replace) the default handler so we observe BOTH the loud
+    // signal AND the default's sidecar-preservation side effect — this is
+    // the real production shape: a watchdog tick patching ANY one record
+    // must not be the thing that destroys everyone else's row with zero log.
+    let signaled: { reason: string; hadRawContents: boolean } | undefined
+    const originalConsoleError = console.error
+    const logs: unknown[][] = []
+    console.error = (...args: unknown[]) => logs.push(args)
+    try {
+      patchRecord(path, 'alice', { pid: 999 }) // no options → default handler
+    } finally {
+      console.error = originalConsoleError
+    }
+    signaled = { reason: String(logs[0]?.[0] ?? ''), hadRawContents: sidecarsFor(path).length > 0 }
+
+    expect(logs.some((l) => String(l[0]).includes('CORRUPT registry'))).toBe(true)
+    expect(signaled.reason).toContain('json-parse-error')
+    expect(signaled.hadRawContents).toBe(true)
+
+    // The corrupt bytes (containing all 3 original rows) must be recoverable
+    // from a sidecar file written BEFORE the rebuild.
+    const sidecars = sidecarsFor(path)
+    expect(sidecars.length).toBeGreaterThan(0)
+    const sidecarContents = readFileSync(join(dirname(path), sidecars[0] as string), 'utf8')
+    expect(sidecarContents).toBe(beforeCorruption + 'TRAILING-GARBAGE')
+    expect(sidecarContents).toContain('uuid-alice')
+    expect(sidecarContents).toContain('uuid-bob')
+    expect(sidecarContents).toContain('uuid-carol')
+
+    // And the mutation still degrades loud-but-alive (no throw, no crash):
+    // the rebuild-from-`{}` means `patchRecord`'s no-op-if-gone guard kicks
+    // in for EVERY key (the corrupt registry has no rows to patch), so all
+    // three rows are gone from the LIVE file — recoverable only via the
+    // sidecar asserted above, never silently.
+    expect(getRecord(path, 'alice')).toBeUndefined()
+    expect(getRecord(path, 'bob')).toBeUndefined()
+    expect(getRecord(path, 'carol')).toBeUndefined()
+  })
+
+  it('the default onCorrupt handler (no override) also sidecars + logs — the real production path', () => {
+    const path = tmpRegistry()
+    upsertRecord(path, rec({ sessionKey: 'alice', sessionId: 'uuid-alice' }))
+    upsertRecord(path, rec({ sessionKey: 'bob', sessionId: 'uuid-bob' }))
+    writeFileSync(path, 'not even json')
+
+    const originalConsoleError = console.error
+    const logs: unknown[][] = []
+    console.error = (...args: unknown[]) => logs.push(args)
+    try {
+      patchRecord(path, 'alice', { pid: 42 }) // no options → default handler
+    } finally {
+      console.error = originalConsoleError
+    }
+
+    expect(logs.some((l) => String(l[0]).includes('CORRUPT registry'))).toBe(true)
+    const sidecars = sidecarsFor(path)
+    expect(sidecars.length).toBeGreaterThan(0)
+    expect(readFileSync(join(dirname(path), sidecars[0] as string), 'utf8')).toBe('not even json')
+  })
+
+  it('does not sidecar or falsely signal corruption on an ABSENT file (steady-state cold boot)', () => {
+    const path = tmpRegistry() // never written — file is absent
+    let signaled = false
+    patchRecord(path, 'ghost', { pid: 1 }, { onCorrupt: () => (signaled = true) })
+    expect(signaled).toBe(false)
+    expect(existsSync(path)).toBe(true) // patchRecord still no-ops + saves cleanly
+    expect(sidecarsFor(path)).toEqual([])
   })
 })
