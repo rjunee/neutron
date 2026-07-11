@@ -16,7 +16,7 @@ export { NeutronError, SubstrateCallError, SUBSTRATE_ERROR_CODES } from './error
 export type { SubstrateErrorCodeSpec } from './errors.ts'
 
 export { drainToText, drainToOutcome } from './substrate-text.ts'
-export type { DrainOptions, DrainOutcome, DrainStatus, DrainErrorMode } from './substrate-text.ts'
+export type { DrainOptions, DrainOutcome, DrainStatus } from './substrate-text.ts'
 
 export {
   selectCredential,

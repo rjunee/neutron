@@ -77,19 +77,18 @@ export function buildCancellableDispatchTurn(
       }, input.timeout_ms)
     }
 
-    // O8 — the drain loop is now the ONE `drainToOutcome` (capture mode: a
-    // substrate error/abort is RETURNED as a status, not thrown, so we map it onto
-    // this runner's terminal `DispatchTurnResult`). `signal` (a `/dispatch stop`
-    // or watchdog reap) drives the abort; `keepAliveExempt` preserves this
-    // runner's fix for "stop didn't stop" — a fired signal calls `handle.cancel()`
-    // to actually terminate the subprocess. The wall-clock timeout stays a LOCAL
-    // timer (it cancels the handle), and `timedOut` still wins over a generic
-    // failure exactly as before.
+    // O8 — the drain loop is now the shared `drainToOutcome` (the capture
+    // primitive: a substrate error/abort is RETURNED as a status, not thrown, so
+    // we map it onto this runner's terminal `DispatchTurnResult`). `signal` (a
+    // `/dispatch stop` or watchdog reap) drives the abort; `keepAliveExempt`
+    // preserves this runner's fix for "stop didn't stop" — a fired signal calls
+    // `handle.cancel()` to actually terminate the subprocess. The wall-clock
+    // timeout stays a LOCAL timer (it cancels the handle), and `timedOut` still
+    // wins over a generic failure exactly as before.
     let outcome
     try {
       outcome = await drainToOutcome(handle, {
         ...(input.signal !== undefined ? { signal: input.signal } : {}),
-        treatErrorAs: 'capture',
         keepAliveExempt: true,
       })
     } finally {
