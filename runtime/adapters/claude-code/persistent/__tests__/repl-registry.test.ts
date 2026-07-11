@@ -6,7 +6,7 @@
  */
 
 import { describe, it, expect } from 'bun:test'
-import { chmodSync, existsSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import {
@@ -19,6 +19,8 @@ import {
   serializeRegistry,
   upsertRecord,
   withRegistry,
+  SIDECAR_MAX_ATTEMPTS,
+  __resetSidecarCounterForTests,
   type ReplRegistry,
   type ReplRegistryRecord,
 } from '../repl-registry.ts'
@@ -36,11 +38,6 @@ function rec(over: Partial<ReplRegistryRecord> & { sessionKey: string }): ReplRe
 function tmpRegistry(): string {
   return join(mkdtempSync(join(tmpdir(), 'neutron-reg-')), 'repl-registry.json')
 }
-
-/** Permission-based fault injection is a no-op under root (bypasses all
- *  permission bits) — guard those tests so they don't false-pass/false-fail
- *  under a root-run CI container. */
-const isRoot = typeof process.getuid === 'function' && process.getuid() === 0
 
 describe('repl-registry — pure (de)serialization', () => {
   it('round-trips a registry through serialize → parse', () => {
@@ -490,55 +487,49 @@ describe('repl-registry — corruption on the mutation path is loud and recovera
     expect(body).toContain('bad3')
   })
 
-  it.skipIf(isRoot)(
-    'a read-error (e.g. permission denied) is loud-but-alive AND leaves the file untouched — the save is skipped, not just the sidecar (Codex r4)',
-    () => {
-      const path = tmpRegistry()
-      // A VALID, multi-row registry is on disk — the read error is about to
-      // be entirely transient (permissions flap), not actual corruption.
-      upsertRecord(path, rec({ sessionKey: 'alice', sessionId: 'uuid-alice', pid: 111 }))
-      upsertRecord(path, rec({ sessionKey: 'bob', sessionId: 'uuid-bob', pid: 222 }))
-      const beforeBytes = readFileSync(path, 'utf8')
-      chmodSync(path, 0o000)
+  it('a whole-file read error (EISDIR — root-proof, unlike chmod) is loud-but-alive AND leaves the path untouched — the save is skipped, not just the sidecar (Codex r4/r7)', () => {
+    // EISDIR (attempting to read a DIRECTORY as a file) is a kernel-level
+    // TYPE error, not a permission check — unlike chmod-based EACCES it is
+    // NOT bypassed by root, so this boundary now has real coverage under
+    // every CI user, not just non-root (Codex r7).
+    const dir = mkdtempSync(join(tmpdir(), 'neutron-reg-'))
+    const path = join(dir, 'a-directory-not-a-file') // registry "path" IS a directory
+    mkdirSync(path)
 
-      const originalConsoleError = console.error
-      const logs: unknown[][] = []
-      console.error = (...args: unknown[]) => logs.push(args)
-      try {
-        // The mutation still runs end-to-end (the caller always gets a
-        // result) — it just must not COMMIT anything built on the `{}` it
-        // was forced to fall back to, since we have no idea whether the
-        // real on-disk data was fine.
-        expect(() => patchRecord(path, 'alice', { pid: 999 })).not.toThrow()
-      } finally {
-        chmodSync(path, 0o600) // restore readability
-        console.error = originalConsoleError
-      }
+    const originalConsoleError = console.error
+    const logs: unknown[][] = []
+    console.error = (...args: unknown[]) => logs.push(args)
+    try {
+      // The mutation still runs end-to-end (the caller always gets a
+      // result) — it just must not COMMIT anything built on the `{}` it
+      // was forced to fall back to, since we have no idea whether the
+      // real on-disk state was fine.
+      expect(() => patchRecord(path, 'alice', { pid: 999 })).not.toThrow()
+    } finally {
+      console.error = originalConsoleError
+    }
 
-      expect(logs.some((l) => String(l[0]).includes('read-error'))).toBe(true)
-      // The message itself must be operationally ACCURATE for this branch —
-      // not the generic corrupt-file wording, which would falsely claim a
-      // rebuild is imminent (Codex r6). It must say the save was skipped and
-      // nothing was dropped.
-      expect(
-        logs.some(
-          (l) =>
-            String(l[0]).includes('READ ERROR') &&
-            String(l[0]).includes('SKIPPED') &&
-            String(l[0]).includes('Nothing was dropped'),
-        ),
-      ).toBe(true)
-      // Nothing was readable, so there is genuinely nothing to sidecar.
-      expect(sidecarsFor(path)).toEqual([])
-      // The critical assertion: the save was SKIPPED, not just un-sidecarred.
-      // The file on disk is byte-for-byte what it was before the attempted
-      // mutation — alice's `pid` patch did NOT silently commit over a
-      // rebuilt-from-`{}` registry, and bob's row was never at risk.
-      expect(readFileSync(path, 'utf8')).toBe(beforeBytes)
-      expect(getRecord(path, 'alice')?.pid).toBe(111) // unchanged, not 999
-      expect(getRecord(path, 'bob')?.pid).toBe(222)
-    },
-  )
+    expect(logs.some((l) => String(l[0]).includes('read-error'))).toBe(true)
+    // The message itself must be operationally ACCURATE for this branch —
+    // not the generic corrupt-file wording, which would falsely claim a
+    // rebuild is imminent (Codex r6). It must say the save was skipped and
+    // nothing was dropped.
+    expect(
+      logs.some(
+        (l) =>
+          String(l[0]).includes('READ ERROR') &&
+          String(l[0]).includes('SKIPPED') &&
+          String(l[0]).includes('Nothing was dropped'),
+      ),
+    ).toBe(true)
+    // Nothing was readable, so there is genuinely nothing to sidecar.
+    expect(sidecarsFor(path)).toEqual([])
+    // The critical assertion: the save was SKIPPED entirely. `path` is STILL
+    // a directory — `saveRegistry` never ran (it would have thrown trying to
+    // rename a tmp file onto an existing directory, proving conclusively
+    // that this call never reached the save step at all).
+    expect(statSync(path).isDirectory()).toBe(true)
+  })
 
   it('an ABSENT file (ENOENT) is classified as steady-state cold boot, never as a read error — no log, no skipped save, the mutation persists normally', () => {
     const path = tmpRegistry() // never written — genuinely absent (ENOENT)
@@ -558,34 +549,87 @@ describe('repl-registry — corruption on the mutation path is loud and recovera
     expect(getRecord(path, 'k')?.sessionId).toBe('uuid-k')
   })
 
-  it.skipIf(isRoot)(
-    'a sidecar-write failure is logged honestly — it never silently reports success',
-    () => {
-      const path = tmpRegistry()
-      const dir = dirname(path)
-      upsertRecord(path, rec({ sessionKey: 'k' }))
-      writeFileSync(path, 'garbage{')
+  // The next two tests exercise `writeSidecarBestEffort`'s EEXIST-retry
+  // machinery DETERMINISTICALLY — pre-occupying the exact candidate paths
+  // instead of chmod-based permission denial (Codex r7: chmod is a no-op
+  // under root, silently skipping this coverage in a root-run CI container;
+  // pre-occupying candidates works identically for every user). Both freeze
+  // `Date.now` and reset the counter so `${path}.corrupt-${now}-${pid}-N`
+  // is fully predictable; both are synchronous end-to-end (no `await`), so
+  // there is no window for a concurrently-running test file — sharing the
+  // same process-wide `sidecarCounter` — to interleave (bun's cross-file
+  // concurrency is single-event-loop, not multi-threaded: nothing else runs
+  // while a synchronous test body is executing).
+  it('EEXIST retry succeeds: a pre-existing file at the first candidate path survives untouched, and the sidecar lands at the NEXT candidate (Codex r7)', () => {
+    const path = tmpRegistry()
+    upsertRecord(path, rec({ sessionKey: 'k' }))
+    writeFileSync(path, 'garbage{')
 
-      const originalConsoleError = console.error
-      const logs: unknown[][] = []
-      console.error = (...args: unknown[]) => logs.push(args)
-      chmodSync(dir, 0o500) // read+execute only — no new file can be created here,
-      // so BOTH the sidecar write and the mutation's own save will fail. The
-      // save failing too (and this call throwing) is expected in a
-      // can't-write-anything scenario; what matters is the sidecar failure is
-      // still reported honestly rather than silently claiming success.
-      try {
-        expect(() => patchRecord(path, 'k', { pid: 1 })).toThrow()
-      } finally {
-        chmodSync(dir, 0o700) // restore so the tmpdir can be cleaned up
-        console.error = originalConsoleError
-      }
+    __resetSidecarCounterForTests()
+    const fixedNow = 1_700_000_000_000
+    const originalDateNow = Date.now
+    Date.now = () => fixedNow
 
-      expect(
-        logs.some(
-          (l) => String(l[0]).includes('CORRUPT registry') && String(l[0]).includes('Sidecar preservation FAILED'),
-        ),
-      ).toBe(true)
-    },
-  )
+    const decoyPath = `${path}.corrupt-${fixedNow}-${process.pid}-0`
+    const decoyContents = 'DECOY — must survive untouched (wx refuses to overwrite it)'
+    writeFileSync(decoyPath, decoyContents)
+
+    try {
+      patchRecord(path, 'k', { pid: 1 })
+    } finally {
+      Date.now = originalDateNow
+    }
+
+    // The decoy occupying candidate #0 is byte-for-byte untouched.
+    expect(readFileSync(decoyPath, 'utf8')).toBe(decoyContents)
+    // The retry landed at candidate #1 and holds the REAL corrupt bytes.
+    const realSidecarPath = `${path}.corrupt-${fixedNow}-${process.pid}-1`
+    expect(existsSync(realSidecarPath)).toBe(true)
+    expect(readFileSync(realSidecarPath, 'utf8')).toBe('garbage{')
+  })
+
+  it('retry exhaustion: every candidate path pre-occupied logs a loud failure, never overwrites any of them, and the mutation still completes without throwing (Codex r7)', () => {
+    const path = tmpRegistry()
+    upsertRecord(path, rec({ sessionKey: 'k' }))
+    writeFileSync(path, 'garbage{')
+
+    __resetSidecarCounterForTests()
+    const fixedNow = 1_700_000_000_001 // distinct ms from the test above
+    const originalDateNow = Date.now
+    Date.now = () => fixedNow
+
+    const decoys = new Map<string, string>()
+    for (let i = 0; i < SIDECAR_MAX_ATTEMPTS; i++) {
+      const p = `${path}.corrupt-${fixedNow}-${process.pid}-${i}`
+      const contents = `DECOY-${i}`
+      writeFileSync(p, contents)
+      decoys.set(p, contents)
+    }
+
+    const originalConsoleError = console.error
+    const logs: unknown[][] = []
+    console.error = (...args: unknown[]) => logs.push(args)
+    try {
+      // Total sidecar exhaustion must never abort the mutation itself — it's
+      // still loud-but-alive, just without a recovery copy this one time.
+      expect(() => patchRecord(path, 'k', { pid: 1 })).not.toThrow()
+    } finally {
+      Date.now = originalDateNow
+      console.error = originalConsoleError
+    }
+
+    // Every decoy survives byte-for-byte — none was overwritten mid-retry.
+    for (const [p, contents] of decoys) {
+      expect(readFileSync(p, 'utf8')).toBe(contents)
+    }
+    // The exhaustion itself is logged loudly...
+    expect(logs.some((l) => String(l[0]).includes('EEXIST retries'))).toBe(true)
+    // ...and the corruption message honestly reports the failure, never a
+    // false claim that the bytes were preserved.
+    expect(
+      logs.some(
+        (l) => String(l[0]).includes('CORRUPT registry') && String(l[0]).includes('Sidecar preservation FAILED'),
+      ),
+    ).toBe(true)
+  })
 })

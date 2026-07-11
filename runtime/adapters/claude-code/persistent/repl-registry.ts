@@ -245,11 +245,22 @@ export function getRecord(path: string, sessionKey: string): ReplRegistryRecord 
 // symlink at that path, defeating the whole point of the sidecar.
 let sidecarCounter = 0
 
+/** TEST-ONLY: reset the monotonic sidecar-naming counter to 0 so a test can
+ *  predict exact candidate sidecar paths (combined with overriding
+ *  `Date.now`) and deterministically exercise the `EEXIST`-retry / retry-
+ *  exhaustion boundaries without relying on real OS permission bits — which
+ *  a root-run CI container bypasses entirely, silently skipping coverage of
+ *  those paths (Codex r7). NEVER call this outside tests. */
+export function __resetSidecarCounterForTests(): void {
+  sidecarCounter = 0
+}
+
 /** Ceiling on `EEXIST` retries — defends against a hostile/corrupted
  *  directory that's pre-populated every candidate path; a real collision
  *  resolves on attempt 1 essentially always (pid+counter+ms is already
- *  unique in the overwhelmingly common case). */
-const SIDECAR_MAX_ATTEMPTS = 5
+ *  unique in the overwhelmingly common case). Exported read-only so tests
+ *  can exercise the exhaustion boundary without hardcoding the number twice. */
+export const SIDECAR_MAX_ATTEMPTS = 5
 
 /** Best-effort preserve a corrupt/pre-drop registry's raw bytes to a
  *  collision-resistant sidecar file next to `path`, so an operator can
