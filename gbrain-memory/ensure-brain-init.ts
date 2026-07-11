@@ -50,7 +50,7 @@ import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 
 import type { EmbedderConfig } from './embedder-config.ts'
-import { probeOllamaHealth, redactUrlUserinfo } from './embedder-config.ts'
+import { probeOllamaHealth, redactUrlUserinfo, type OllamaHealthCheck } from './embedder-config.ts'
 import { isGbrainBinaryMissingError } from './memory-store.ts'
 import { type CommandRunner, bunCommandRunner } from './command-runner.ts'
 import { resolveGbrainChildPath } from './resolve-gbrain-command.ts'
@@ -157,17 +157,25 @@ export interface EnsureBrainInitInput {
   logger?: { warn: (msg: string) => void; info: (msg: string) => void }
   /**
    * Ollama reachability probe seam (injected in tests). Default the real
-   * `probeOllamaHealth` (does actual network I/O). Advisory-only — see
-   * "Fail-soft Ollama reachability" above.
+   * `probeOllamaHealth` (does actual network I/O). Used only when
+   * `resolveOllamaHealth` is NOT supplied.
    */
   probeOllamaHealth?: typeof probeOllamaHealth
   /**
-   * Skip the advisory Ollama reachability probe (+ its log). The init guard now
-   * re-runs on every (re)connect, so the caller sets this after the FIRST run to
-   * keep the probe a once-per-client boot signal — otherwise an unreachable
-   * Ollama would add the probe's ~1.5s timeout to each reconnect. Init +
-   * backfill (the correctness work) still run every time; only the advisory
-   * probe is gated.
+   * The per-connect SHARED local-Ollama health resolver. When supplied (the LIVE
+   * path threads `makePerConnectResolver.getOllamaHealth`), the guard reads
+   * health from it INSTEAD of its own probe, so the backfill/invalidation gate
+   * here observes the EXACT same result as the serve-embedder gate — the two can
+   * never disagree within one connect (which would let Ollama coming up mid-window
+   * serve embeddings while the stale invalidation was skipped → mixed space).
+   */
+  resolveOllamaHealth?: () => Promise<OllamaHealthCheck>
+  /**
+   * Suppress the advisory Ollama-degradation LOG (a once-per-client boot signal).
+   * The init guard re-runs on every (re)connect, so the caller sets this after
+   * the FIRST run to avoid log spam. NOTE: this suppresses ONLY the log — the
+   * health probe itself STILL runs (it gates the `embed --stale` backfill; an
+   * unhealthy provider must never trigger a doomed 120s backfill spawn).
    */
   skipOllamaProbe?: boolean
 }
@@ -301,22 +309,27 @@ export async function ensureBrainInitialized(
   // the later healthy reconnect sees a matching marker and skips `embed --stale`.
   let embedderConfirmedUsable = input.embedder !== null && input.embedder.provider !== 'ollama'
 
-  // Ollama reachability probe (RA3). For a local Ollama embedder we ALWAYS probe
-  // (cheap — a ~1.5s-bounded HTTP GET), because the result GATES the
-  // `embed --stale` backfill below: an unreachable/model-missing provider must
-  // NOT trigger a doomed 120s backfill spawn that blocks connection
+  // Ollama reachability probe (RA3). For a local Ollama embedder we ALWAYS
+  // resolve health (cheap — a ~1.5s-bounded HTTP GET), because the result GATES
+  // the `embed --stale` backfill below: an unreachable/model-missing provider
+  // must NOT trigger a doomed 120s backfill spawn that blocks connection
   // establishment (the stdio client awaits this guard BEFORE composing the serve
-  // env). `skipOllamaProbe` suppresses only the repeated ADVISORY LOG (a
-  // once-per-client boot signal), NEVER the health check itself — so the backfill
-  // decision matches the serve-side reachability gate on EVERY connect, including
-  // reconnects. A cloud (OpenAI-key) embedder is never probed and stays
-  // `embedderConfirmedUsable` from its initializer (a key present → embeds).
+  // env). Prefer the SHARED per-connect `resolveOllamaHealth` (live path) so this
+  // backfill gate reads the EXACT same probe result as the serve-embedder gate —
+  // the two can never disagree within one connect. `skipOllamaProbe` suppresses
+  // only the repeated ADVISORY LOG, NEVER the health check itself. A cloud
+  // (OpenAI-key) embedder is never probed and stays `embedderConfirmedUsable`
+  // from its initializer (a key present → embeds).
   if (input.embedder !== null && input.embedder.provider === 'ollama') {
     const baseUrl = input.embedder.childEnv['OLLAMA_BASE_URL'] ?? 'http://localhost:11434/v1'
     // Redact any `user:pass@` userinfo before logging — an operator can put
     // credentials in OLLAMA_BASE_URL and they must never reach a log line.
     const safeUrl = redactUrlUserinfo(baseUrl)
-    const health = await probeHealth(baseUrl, { model: input.embedder.model })
+    const health = input.resolveOllamaHealth
+      ? await input.resolveOllamaHealth().catch(
+          (): OllamaHealthCheck => ({ reachable: false, modelPresent: false }),
+        )
+      : await probeHealth(baseUrl, { model: input.embedder.model })
     embedderConfirmedUsable = health.reachable && health.modelPresent
     if (!input.skipOllamaProbe) {
       if (!health.reachable) {

@@ -15,6 +15,8 @@ export {
   resolveEmbedderConfig,
   buildOpenAiEmbedderConfig,
   probeOllamaHealth,
+  resolveOllamaProbeTarget,
+  keylessDisableEmbeddingEnv,
   redactUrlUserinfo,
   isOpenAiEmbeddingWidthSupported,
   type EmbedderConfig,

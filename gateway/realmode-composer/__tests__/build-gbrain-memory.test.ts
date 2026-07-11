@@ -23,6 +23,7 @@ import { composeGbrainChildEnv } from '@neutronai/gbrain-memory/index.ts'
 import {
   buildOpenAiEmbedderConfig,
   resolveInitEmbeddingTarget,
+  type OllamaHealthCheck,
 } from '@neutronai/gbrain-memory/index.ts'
 
 // COMPILE-TIME negative probe (RA5 / invariant I2). The composer wiring is the
@@ -499,7 +500,7 @@ describe('resolveGbrainClientOptions', () => {
         owner_home: '/t',
         env: {}, // default → local Ollama
         resolveBrainWidth: () => null, // fresh
-        probeOllamaReachable: reachable,
+        resolveOllamaHealth: reachable,
       })
       await expect(opts.resolveDynamicEnv!()).resolves.toEqual({
         GBRAIN_EMBEDDING_MODEL: 'ollama:nomic-embed-text',
@@ -513,7 +514,7 @@ describe('resolveGbrainClientOptions', () => {
         owner_home: '/t',
         env: {},
         resolveBrainWidth: () => null,
-        probeOllamaReachable: unreachable,
+        resolveOllamaHealth: unreachable,
       })
       const dyn = await opts.resolveDynamicEnv!()
       // Keyless OpenAI-latent override (no dims → keeps the persisted column
@@ -529,7 +530,7 @@ describe('resolveGbrainClientOptions', () => {
         owner_home: '/t',
         env: {},
         resolveBrainWidth: () => null,
-        probeOllamaReachable: modelMissing,
+        resolveOllamaHealth: modelMissing,
       })
       const dyn = await opts.resolveDynamicEnv!()
       expect(dyn['GBRAIN_EMBEDDING_MODEL']).toBe('openai:text-embedding-3-large')
@@ -546,7 +547,7 @@ describe('resolveGbrainClientOptions', () => {
         owner_home: '/t',
         env: { NEUTRON_EMBEDDINGS: 'off' },
         resolveBrainWidth: () => 768, // persisted RA3-default (ollama@768) column
-        probeOllamaReachable: async () => {
+        resolveOllamaHealth: async () => {
           probed = true
           return { reachable: true, modelPresent: true }
         },
@@ -562,7 +563,7 @@ describe('resolveGbrainClientOptions', () => {
         env: {},
         openaiApiKey: 'sk-real',
         resolveBrainWidth: () => null,
-        probeOllamaReachable: async () => {
+        resolveOllamaHealth: async () => {
           probed = true
           return { reachable: false, modelPresent: false }
         },
@@ -571,6 +572,48 @@ describe('resolveGbrainClientOptions', () => {
       expect(probed).toBe(false) // OpenAI is assumed reachable; no Ollama probe
       expect(dyn['GBRAIN_EMBEDDING_MODEL']).toBe('openai:text-embedding-3-large')
       expect(dyn['OPENAI_API_KEY']).toBe('sk-real')
+    })
+
+    test('ONE probe per connect: an ALTERNATING probe cannot split the init-guard gate and the serve gate (no mixed space)', async () => {
+      // A probe that FLIPS unhealthy → healthy between successive calls. With TWO
+      // independent probes, the init guard (read #1: unhealthy → SKIP the stale
+      // invalidation/backfill) and the serve gate (read #2: healthy → serve
+      // Ollama) would DISAGREE → new Ollama vectors written without the drift
+      // invalidation → corrupted mixed vector space. The per-connect SHARED,
+      // memoized `getOllamaHealth` makes that impossible: both reads see read #1.
+      let calls = 0
+      const flipping = async (): Promise<OllamaHealthCheck> => {
+        calls += 1
+        return calls === 1
+          ? { reachable: false, modelPresent: false }
+          : { reachable: true, modelPresent: true }
+      }
+      const conn = makePerConnectResolver({
+        resolveBrainWidth: () => 768, // persisted ollama@768
+        env: {},
+        probeOllamaHealth: flipping,
+      })
+      conn.resetForConnect() // start of one connect
+
+      // Init-guard gate reads FIRST (unhealthy → would skip backfill).
+      const initHealth = await conn.getOllamaHealth()
+      // Serve gate reads SECOND — must be the SAME memoized result, not a fresh
+      // (healthy) probe.
+      const serveHealth = await conn.getOllamaHealth()
+      expect(calls).toBe(1) // ONE probe for the whole connect
+      expect(initHealth).toEqual({ reachable: false, modelPresent: false })
+      expect(serveHealth).toEqual(initHealth)
+
+      // The serve env built from the SHARED result is the keyless disable override
+      // (keyword+graph) — coherent with the skipped backfill, NOT the ollama env.
+      const opts = resolveGbrainClientOptions({
+        owner_home: '/t',
+        env: {},
+        resolveBrainWidth: () => 768,
+        resolveOllamaHealth: conn.getOllamaHealth,
+      })
+      expect(await opts.resolveDynamicEnv!()).toEqual(DISABLED_EMBED_ENV)
+      expect(calls).toBe(1) // still ONE probe — serve reused the shared result
     })
   })
 
@@ -621,7 +664,7 @@ describe('resolveGbrainClientOptions', () => {
         owner_home: '/t',
         env: {},
         resolveOpenAiKey: async () => undefined,
-        probeOllamaReachable: reachableProbe,
+        resolveOllamaHealth: reachableProbe,
       })
       await expect(opts.resolveDynamicEnv!()).resolves.toEqual({
         GBRAIN_EMBEDDING_MODEL: 'ollama:nomic-embed-text',
@@ -635,7 +678,7 @@ describe('resolveGbrainClientOptions', () => {
         owner_home: '/t',
         env: {},
         resolveOpenAiKey: async () => '   ',
-        probeOllamaReachable: reachableProbe,
+        resolveOllamaHealth: reachableProbe,
       })
       const env = await opts.resolveDynamicEnv!()
       expect(env['GBRAIN_EMBEDDING_MODEL']).toBe('ollama:nomic-embed-text')
@@ -651,7 +694,7 @@ describe('resolveGbrainClientOptions', () => {
         owner_home: '/t',
         env: {},
         resolveOpenAiKey: async () => stored,
-        probeOllamaReachable: reachableProbe,
+        resolveOllamaHealth: reachableProbe,
       })
       // First spawn: no key → the local Ollama fallback.
       await expect(opts.resolveDynamicEnv!()).resolves.toEqual({

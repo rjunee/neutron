@@ -177,7 +177,10 @@ describe('composeGbrainChildEnv', () => {
     })
   })
 
-  test('a throwing resolveDynamicEnv is fail-soft → keyword + graph, never blocks the spawn', async () => {
+  test('a throwing resolveDynamicEnv is fail-soft → applies the keyless-disable override so the spawn GENUINELY serves keyword+graph (never re-attempts the persisted Ollama)', async () => {
+    // A brain whose config.json persists `ollama:nomic-embed-text` needs a TRUTHY
+    // override to actually disable embedding; leaving the selectors absent would
+    // let gbrain fall back to that keyless provider and STILL attempt Ollama.
     const env = await composeGbrainChildEnv(
       {
         env: { GBRAIN_HOME: '/h/gbrain' },
@@ -185,9 +188,17 @@ describe('composeGbrainChildEnv', () => {
           throw new Error('store unreachable')
         },
       },
-      {},
+      // Base carries an ambient key that MUST be neutralized (no silent cloud embed).
+      { OPENAI_API_KEY: 'sk-ambient' },
     )
-    expect(env).toEqual({ GBRAIN_HOME: '/h/gbrain' })
+    expect(env).toEqual({
+      GBRAIN_HOME: '/h/gbrain',
+      GBRAIN_EMBEDDING_MODEL: 'openai:text-embedding-3-large', // truthy → overrides persisted ollama
+      OPENAI_API_KEY: '', // ambient key neutralized → no cloud embed
+    })
+    // Crucially NO ollama selectors → gbrain will not re-attempt Ollama.
+    expect(env['OLLAMA_BASE_URL']).toBeUndefined()
+    expect(env['GBRAIN_EMBEDDING_DIMENSIONS']).toBeUndefined()
   })
 
   test('an empty dynamic env (key absent) leaves the static keyword env intact', async () => {

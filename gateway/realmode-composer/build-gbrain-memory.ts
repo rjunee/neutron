@@ -57,6 +57,8 @@ import {
   resolveGbrainCommand,
   resolveGbrainChildPath,
   probeOllamaHealth,
+  resolveOllamaProbeTarget,
+  keylessDisableEmbeddingEnv,
   type OllamaHealthCheck,
 } from '@neutronai/gbrain-memory/index.ts'
 import type { SyncHook } from '@neutronai/runtime/entity-writer.ts'
@@ -155,16 +157,30 @@ export interface GBrainMemoryWiring {
 export function makePerConnectResolver(input: {
   resolveOpenAiKey?: () => Promise<string | undefined>
   resolveBrainWidth: () => BrainEmbeddingWidth
+  /** Env the local-Ollama probe TARGET is derived from (base url + model). */
+  env?: NodeJS.ProcessEnv
+  /** Health probe seam (injected in tests). Default the real `probeOllamaHealth`. */
+  probeOllamaHealth?: typeof probeOllamaHealth
 }): {
   getKey: () => Promise<string | undefined>
   getBrainWidth: () => BrainEmbeddingWidth
+  /**
+   * The ONE local-Ollama health probe for THIS connect — memoized so a single
+   * ~1.5s-bounded probe is SHARED by the init-guard backfill gate AND the serve
+   * embedder gate (they must agree, or Ollama coming up between two independent
+   * probes could serve embeddings while invalidation was skipped → mixed space).
+   */
+  getOllamaHealth: () => Promise<OllamaHealthCheck>
   resetForConnect: () => void
 } {
   const resolveOpenAiKey = input.resolveOpenAiKey
+  const env = input.env ?? process.env
+  const probeHealth = input.probeOllamaHealth ?? probeOllamaHealth
   let cachedKey: string | undefined
   let keyValid = false
   let cachedWidth: BrainEmbeddingWidth = null
   let widthValid = false
+  let healthPromise: Promise<OllamaHealthCheck> | null = null
   return {
     getKey: async () => {
       if (resolveOpenAiKey === undefined) return undefined
@@ -187,11 +203,24 @@ export function makePerConnectResolver(input: {
       widthValid = true
       return cachedWidth
     },
+    getOllamaHealth: () => {
+      // Memoize the PROMISE (not just the result) so concurrent callers within
+      // one connect share the single in-flight probe. Fail-safe: a probe throw →
+      // unreachable (degrade), never rejects the shared promise.
+      if (healthPromise === null) {
+        const t = resolveOllamaProbeTarget(env)
+        healthPromise = probeHealth(t.baseUrl, { model: t.model }).catch(
+          (): OllamaHealthCheck => ({ reachable: false, modelPresent: false }),
+        )
+      }
+      return healthPromise
+    },
     resetForConnect: () => {
       keyValid = false
       cachedKey = undefined
       widthValid = false
       cachedWidth = null
+      healthPromise = null
     },
   }
 }
@@ -282,37 +311,11 @@ function readNeutronEmbeddingsMode(
 }
 
 /**
- * Reachability probe seam for the local Ollama embedder (injected in tests).
- * Signature-compatible with `probeOllamaHealth`.
+ * The ONE per-connect local-Ollama health result, resolved once and SHARED by
+ * both the init-guard backfill gate and the serve-embedder gate (injected in
+ * tests). Memoized per connect by `makePerConnectResolver.getOllamaHealth`.
  */
-export type OllamaReachabilityProbe = (
-  baseUrl: string,
-  opts: { model: string },
-) => Promise<OllamaHealthCheck>
-
-/**
- * The env that AUTHORITATIVELY disables embedding on the `gbrain serve` child —
- * regardless of what provider is PERSISTED in the brain's `config.json`.
- *
- * Why not an empty env: gbrain's `loadConfig` spreads `config.json` FIRST and
- * only overrides `embedding_model` when `GBRAIN_EMBEDDING_MODEL` is TRUTHY
- * (`gbrain/src/core/config.ts`). A brain created under the RA3 default persists
- * `ollama:nomic-embed-text`, and Ollama needs no key — so an EMPTY env leaves
- * the persisted Ollama active and `put_page` keeps embedding (or FAILS writes
- * when Ollama is down). An empty env is therefore NOT a kill switch.
- *
- * To WIN over the persisted config we emit a TRUTHY override to the keyless
- * OpenAI-latent model and NEUTRALIZE any ambient `OPENAI_API_KEY` (a BYO GPT
- * chat key the owner never opted into for cloud embeddings). With no usable
- * credential, gbrain's `noEmbed = !isAvailable('embedding')` is true → it stores
- * pages UNEMBEDDED and writes succeed with NO provider call. We deliberately
- * DON'T emit `GBRAIN_EMBEDDING_DIMENSIONS`: this override never writes a vector,
- * so its width is moot, and gbrain keeps the persisted column width from
- * `config.json` (a fixed width here could mismatch a legacy column).
- */
-function keylessDisableEmbeddingEnv(): Record<string, string> {
-  return { GBRAIN_EMBEDDING_MODEL: OLLAMA_DOWN_LATENT_MODEL, OPENAI_API_KEY: '' }
-}
+export type SharedOllamaHealthResolver = () => Promise<OllamaHealthCheck>
 
 /**
  * The embedding env to forward to the `gbrain serve` child for a resolved
@@ -326,33 +329,34 @@ function keylessDisableEmbeddingEnv(): Record<string, string> {
  * of which an EMPTY env fails to (the persisted Ollama config would stay live):
  *
  *   • `null` embedder (explicit `NEUTRON_EMBEDDINGS=off`, OR a width-mismatch
- *     drop) → emit the keyless DISABLE override so the kill switch WINS over a
- *     persisted `ollama:*` config. Authoritative: never embeds, never bills,
- *     never fails writes — even starting from a persisted-Ollama brain.
+ *     drop) → emit the keyless DISABLE override (`keylessDisableEmbeddingEnv`)
+ *     so the kill switch WINS over a persisted `ollama:*` config. Authoritative:
+ *     never embeds, never bills, never fails writes — even from a persisted-Ollama
+ *     brain.
  *   • local Ollama that is NOT reachable / model-not-pulled at connect → same
  *     keyless disable override: gbrain stores pages UNEMBEDDED (NULL-stale) and
  *     writes succeed as keyword+graph. The column keeps its width, so the next
  *     reachable reconnect forwards the real `ollama:*` env and the init guard's
- *     `embed --stale` backfills those chunks IN PLACE (write-side mirror of
- *     gbrain's read-side per-query search fallback, proven in
- *     `gbrain-memory/__tests__/failsoft-search-cli.test.ts`).
+ *     `embed --stale` backfills those chunks IN PLACE.
  *
- * A CLOUD (OpenAI) embedder is never probed — it is assumed reachable; a
- * transient API blip is gbrain's own retry concern, and a bad key is a config
- * error to surface, not a reason to silently drop embeddings.
+ * Health is read through `resolveOllamaHealth` — the ONE per-connect probe result
+ * SHARED with the init-guard backfill gate (`makePerConnectResolver.getOllamaHealth`)
+ * so the two can NEVER disagree (a second, independent probe could see Ollama come
+ * up in the window between them → serve embeds while invalidation was skipped →
+ * mixed vector space). A CLOUD (OpenAI) embedder is never probed — it is assumed
+ * reachable.
  */
 async function resolveServeEmbeddingEnv(
   embedder: EmbedderConfig | null,
-  probe: OllamaReachabilityProbe,
+  resolveOllamaHealth: () => Promise<OllamaHealthCheck>,
 ): Promise<Record<string, string>> {
   // No embedder (off / width-drop): AUTHORITATIVELY disable — don't rely on an
   // empty env, which gbrain would fall through to the persisted config for.
   if (embedder === null) return keylessDisableEmbeddingEnv()
   if (embedder.provider === 'ollama') {
-    const baseUrl = embedder.childEnv['OLLAMA_BASE_URL'] ?? 'http://localhost:11434/v1'
     let health: OllamaHealthCheck
     try {
-      health = await probe(baseUrl, { model: embedder.model })
+      health = await resolveOllamaHealth()
     } catch {
       // A probe that itself errors is treated as unreachable (fail-soft).
       health = { reachable: false, modelPresent: false }
@@ -363,14 +367,6 @@ async function resolveServeEmbeddingEnv(
   }
   return embedder.childEnv
 }
-
-/**
- * The keyless latent model the WRITE gate parks an unreachable-Ollama brain on
- * (see `resolveServeEmbeddingEnv`). `text-embedding-3-large` is the shared-width
- * default and requires a key, so with the key neutralized gbrain treats
- * embedding as unavailable and stores pages unembedded rather than failing.
- */
-const OLLAMA_DOWN_LATENT_MODEL = 'openai:text-embedding-3-large'
 
 export function resolveGbrainClientOptions(input: {
   owner_home: string
@@ -414,12 +410,13 @@ export function resolveGbrainClientOptions(input: {
    */
   resolveBrainWidth?: () => BrainEmbeddingWidth
   /**
-   * Local-Ollama reachability probe (injected in tests). Default the real
-   * `probeOllamaHealth`. Used by `resolveDynamicEnv` to gate the WRITE-side
-   * embed env: an unreachable Ollama is dropped to keyword+graph so `gbrain
-   * put_page` doesn't fail hard — see `resolveServeEmbeddingEnv`.
+   * The per-connect SHARED local-Ollama health resolver. `resolveDynamicEnv`
+   * consults it to gate the WRITE-side embed env (unreachable Ollama → dropped to
+   * keyword+graph). The LIVE path threads `makePerConnectResolver.getOllamaHealth`
+   * so this is the SAME result the init-guard backfill gate sees (they can never
+   * disagree). Omitted → a fresh per-call `probeOllamaHealth` (eager/test path).
    */
-  probeOllamaReachable?: OllamaReachabilityProbe
+  resolveOllamaHealth?: SharedOllamaHealthResolver
 }): GBrainStdioMcpClientOptions {
   const env = input.env ?? process.env
   const gbrainHome = join(input.owner_home, 'gbrain')
@@ -482,7 +479,15 @@ export function resolveGbrainClientOptions(input: {
   if (perConnect) {
     const resolveOpenAiKey = input.resolveOpenAiKey
     const resolveBrainWidth = input.resolveBrainWidth
-    const probeOllama = input.probeOllamaReachable ?? probeOllamaHealth
+    // Prefer the SHARED per-connect health (live path) so the serve gate and the
+    // init-guard backfill gate observe the SAME probe. The eager/test fallback
+    // probes the env-derived Ollama target fresh per call.
+    const resolveOllamaHealth: SharedOllamaHealthResolver =
+      input.resolveOllamaHealth ??
+      (() => {
+        const t = resolveOllamaProbeTarget(env)
+        return probeOllamaHealth(t.baseUrl, { model: t.model })
+      })
     opts.resolveDynamicEnv = async () => {
       // No key resolver → fall back to the eager static key (usually undefined →
       // the RA3 default local Ollama embedder).
@@ -495,7 +500,7 @@ export function resolveGbrainClientOptions(input: {
       // Fail-soft WRITE gate: an unreachable local Ollama is dropped to
       // keyword+graph so `gbrain put_page` succeeds (unembedded, backfilled
       // later) instead of failing hard on every write.
-      return resolveServeEmbeddingEnv(lazyEmbedder, probeOllama)
+      return resolveServeEmbeddingEnv(lazyEmbedder, resolveOllamaHealth)
     }
   }
 
@@ -558,6 +563,7 @@ export function buildGBrainMemory(input: {
   const conn = makePerConnectResolver({
     ...(input.resolveOpenAiKey !== undefined ? { resolveOpenAiKey: input.resolveOpenAiKey } : {}),
     resolveBrainWidth: () => resolveExistingBrainWidth(gbrainHome),
+    env, // the local-Ollama probe target derives from this
   })
   const getKey = input.resolveOpenAiKey !== undefined ? conn.getKey : undefined
 
@@ -570,6 +576,8 @@ export function buildGBrainMemory(input: {
     owner_home: input.owner_home,
     env,
     resolveBrainWidth: conn.getBrainWidth,
+    // SHARE the one per-connect Ollama health with the init guard below.
+    resolveOllamaHealth: conn.getOllamaHealth,
     ...(input.openaiApiKey !== undefined ? { openaiApiKey: input.openaiApiKey } : {}),
     ...(getKey !== undefined ? { resolveOpenAiKey: getKey } : {}),
   })
@@ -670,6 +678,9 @@ export function buildGBrainMemory(input: {
       embedder,
       env,
       skipOllamaProbe,
+      // SHARE the one per-connect Ollama health with the serve gate: the backfill
+      // decision here and the serve-embedder decision can NEVER disagree.
+      resolveOllamaHealth: conn.getOllamaHealth,
       // Pass the resolved ABSOLUTE command so init spawns the same binary the
       // serve path does (init also carries the bun-resolvable child PATH).
       ...(command !== null ? { command } : {}),

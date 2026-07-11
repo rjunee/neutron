@@ -183,6 +183,44 @@ function buildOllamaConfig(env: NodeJS.ProcessEnv): EmbedderConfig {
 }
 
 /**
+ * The local-Ollama reachability probe TARGET (base URL + model) for an env —
+ * env-derived and INDEPENDENT of the resolved key/width, so ONE probe result can
+ * be shared by every consumer this connect (the init-guard backfill gate AND the
+ * serve-embedder gate). Matches `buildOllamaConfig`'s own base-url/model so the
+ * shared probe hits exactly the endpoint the serve child would embed against.
+ */
+export function resolveOllamaProbeTarget(env: NodeJS.ProcessEnv): {
+  baseUrl: string
+  model: string
+} {
+  return {
+    baseUrl: readNonEmpty(env, 'OLLAMA_BASE_URL') ?? OLLAMA_DEFAULT_BASE_URL,
+    model: OLLAMA_EMBED_MODEL,
+  }
+}
+
+/**
+ * The env that AUTHORITATIVELY disables embedding on the `gbrain serve` child —
+ * regardless of what provider is PERSISTED in the brain's `config.json`.
+ *
+ * gbrain's `loadConfig` spreads config.json FIRST and only overrides
+ * `embedding_model` when `GBRAIN_EMBEDDING_MODEL` is TRUTHY. A brain created
+ * under the RA3 default persists `ollama:nomic-embed-text`, and Ollama needs no
+ * key — so an ABSENT/empty embed env is NOT a kill switch (gbrain keeps embedding
+ * with the persisted Ollama, or fails writes when it's down). To WIN over the
+ * persisted config we emit a TRUTHY override to the keyless OpenAI-latent model
+ * and NEUTRALIZE any ambient `OPENAI_API_KEY`: with no usable credential gbrain's
+ * `noEmbed = !isAvailable('embedding')` is true → it stores pages UNEMBEDDED, no
+ * provider call. No `GBRAIN_EMBEDDING_DIMENSIONS` → gbrain keeps the persisted
+ * column width (this override never writes a vector, so its width is moot). Used
+ * by the composer's `off` / unreachable-Ollama / width-drop gate AND by the stdio
+ * client's dynamic-resolver failure catch (genuine keyword+graph degrade).
+ */
+export function keylessDisableEmbeddingEnv(): Record<string, string> {
+  return { GBRAIN_EMBEDDING_MODEL: `openai:${OPENAI_EMBED_MODEL}`, OPENAI_API_KEY: '' }
+}
+
+/**
  * Resolve the conditional embedder config from env. The DEFAULT (unset
  * `NEUTRON_EMBEDDINGS`) is the local Ollama fallback (hybrid recall out of
  * the box, no key, no billing risk) — `null` (no embedder at all) is now an

@@ -29,6 +29,7 @@ import {
   isGbrainBinaryMissingError,
 } from './memory-store.ts'
 import type { McpClient } from './mcp-client.ts'
+import { keylessDisableEmbeddingEnv } from './embedder-config.ts'
 import {
   GBrainVersionNotice,
   type GBrainUpgradeMode,
@@ -114,8 +115,17 @@ export async function composeGbrainChildEnv(
     try {
       Object.assign(env, await opts.resolveDynamicEnv())
     } catch (err) {
+      // A resolver failure must GENUINELY degrade to keyword+graph. Simply
+      // leaving the selectors ABSENT does NOT: for a brain whose config.json
+      // persists `ollama:nomic-embed-text`, gbrain would fall back to that
+      // keyless provider and STILL attempt Ollama on write (embed or hard-fail) —
+      // contradicting the "keyword-only" claim. Apply the SAME authoritative
+      // keyless-disable override as the `off`/unreachable/width-drop gate so the
+      // serve child truly never embeds this connect.
+      Object.assign(env, keylessDisableEmbeddingEnv())
       console.warn(
-        '[gbrain-stdio-client] dynamic env resolver threw (continuing keyword+graph): ' +
+        '[gbrain-stdio-client] dynamic env resolver threw — forcing keyword+graph ' +
+          '(embedding disabled for this connect): ' +
           (err instanceof Error ? err.message : String(err)),
       )
     }
