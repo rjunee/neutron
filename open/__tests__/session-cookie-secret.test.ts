@@ -5,7 +5,10 @@
  *   - existing files are tightened to 0600 (via the fd) or rotated (Blocker #2);
  *   - a first-boot mint race converges on one winner (Medium #3);
  *   - a SYMLINKED secret is never followed/trusted (High — token forgery);
- *   - a too-short (< 16) persisted value is rotated, not trusted (Medium).
+ *   - a too-short (< 16) persisted value is rotated, not trusted (Medium);
+ *   - concurrent rotation is FIRST-WRITER-WINS behind an exclusive lock: two
+ *     real resolvers converge on one on-disk secret; a competitor-held lock is
+ *     waited-on + adopted; a stale (crashed-holder) lock is reclaimed.
  */
 import { afterEach, beforeEach, describe, expect, it, spyOn } from 'bun:test'
 import * as fs from 'node:fs'
@@ -14,8 +17,10 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import {
+  __cookieSecretTiming,
   MIN_COOKIE_SECRET_LEN,
   resolvePersistedCookieSecret,
+  sessionCookieSecretLockPath,
   sessionCookieSecretPath,
 } from '../session-cookie-secret.ts'
 
@@ -167,36 +172,96 @@ describe('resolvePersistedCookieSecret', () => {
     expect(resolvePersistedCookieSecret(home)).toBe(atFloor)
   })
 
-  it('Medium — concurrent rotation CONVERGES on the on-disk winner (not our own mint)', () => {
+  it('Medium — TWO real competing resolvers CONVERGE first-writer-wins (one home)', () => {
     const path = sessionCookieSecretPath(home)
+    const lockPath = sessionCookieSecretLockPath(home)
     fs.mkdirSync(home, { recursive: true })
-    fs.writeFileSync(path, 'x\n', { mode: 0o600 }) // weak → rejected → triggers rotation
+    fs.writeFileSync(path, 'x\n', { mode: 0o600 }) // weak → rejected → BOTH must rotate
 
-    // Simulate a concurrent starter B that lands its own valid secret at the
-    // target just before OUR rename: the atomic rename+readback must return B's
-    // on-disk value (convergence), NOT our freshly-minted secret and NOT the old
-    // weak value. (Reverting to unlink-then-create — or returning the in-memory
-    // mint instead of the readback — makes this diverge → the assertions go red.)
-    const WINNER = 'converged-winner-secret-0123456789'
-    const spy = spyOn(fs, 'renameSync').mockImplementation((from: fs.PathLike, to: fs.PathLike) => {
-      fs.writeFileSync(to as string, WINNER + '\n', { mode: 0o600 })
-      try {
-        fs.unlinkSync(from as string)
-      } catch {
-        /* best-effort temp cleanup */
+    // Drive TWO genuinely competing resolver invocations against the SAME home
+    // (not a mocked rename to a predetermined value — that can't detect a
+    // post-read overwrite). Interleave at the moment resolver A tries to CREATE
+    // the rotate lock: right before A's exclusive-create, run resolver B to
+    // completion. B wins the lock, mints the winner, releases. Control returns to
+    // A, which then creates the lock, RE-READS the target under the lock, sees
+    // B's winner, and ADOPTS it — never minting a second, diverging secret.
+    const realOpen = fs.openSync
+    let interleaved = false
+    let bSecret = ''
+    const spy = spyOn(fs, 'openSync').mockImplementation((p: fs.PathLike, ...rest: unknown[]) => {
+      if (p === lockPath && !interleaved) {
+        interleaved = true // guard: B's own lock-create must NOT re-trigger this
+        bSecret = resolvePersistedCookieSecret(home) // B runs fully, wins, releases
       }
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      return (realOpen as any)(p, ...rest)
+    })
+    let aSecret: string
+    try {
+      aSecret = resolvePersistedCookieSecret(home)
+    } finally {
+      spy.mockRestore()
+    }
+
+    // Both resolvers actually ran the rotation path (removing the lock — reverting
+    // to last-writer rename — leaves the lock unopened → interleaved stays false).
+    expect(interleaved).toBe(true)
+    expect(bSecret).toMatch(/^[0-9a-f]{48}$/)
+    // First-writer-wins: BOTH returned values are EQUAL and equal the FINAL
+    // on-disk value. (Dropping the under-lock re-read makes A mint + overwrite →
+    // aSecret ≠ bSecret ≠ on-disk → these go red.)
+    expect(aSecret).toBe(bSecret)
+    expect(aSecret).not.toBe('x') // never the old weak value
+    expect(fs.readFileSync(path, 'utf8').trim()).toBe(bSecret)
+    // Regular 0600 non-symlink target.
+    expect(fs.lstatSync(path).isSymbolicLink()).toBe(false)
+    expect(fs.lstatSync(path).isFile()).toBe(true)
+    expect(fs.statSync(path).mode & 0o777).toBe(0o600)
+  })
+
+  it('Medium — a competitor-held lock makes us WAIT and ADOPT their secret', () => {
+    const path = sessionCookieSecretPath(home)
+    const lockPath = sessionCookieSecretLockPath(home)
+    fs.mkdirSync(home, { recursive: true })
+    fs.writeFileSync(path, 'x\n', { mode: 0o600 }) // weak → we must rotate…
+    fs.writeFileSync(lockPath, '', { mode: 0o600 }) // …but a fresh (non-stale) lock is held
+
+    const WINNER = 'competitor-installed-secret-0123456789'
+    // The competitor finishes while we wait: on our first wait-sleep their valid
+    // secret lands at the target, and our next re-read must ADOPT it — we must
+    // NOT mint our own (which would diverge from the lock holder's value).
+    let waits = 0
+    const sleepSpy = spyOn(__cookieSecretTiming, 'sleep').mockImplementation(() => {
+      waits += 1
+      fs.writeFileSync(path, WINNER + '\n', { mode: 0o600 })
     })
     let secret: string
     try {
       secret = resolvePersistedCookieSecret(home)
     } finally {
-      spy.mockRestore()
+      sleepSpy.mockRestore()
     }
-    expect(secret).toBe(WINNER) // converged on the on-disk winner…
-    expect(secret).not.toBe('x') // …never the old weak value
+    expect(secret).toBe(WINNER) // adopted the holder's secret…
+    expect(secret).not.toMatch(/^[0-9a-f]{48}$/) // …did NOT mint our own 48-hex
+    expect(waits).toBeGreaterThan(0) // we actually waited (didn't mint immediately)
+    expect(fs.existsSync(lockPath)).toBe(true) // did NOT steal the live lock
     expect(fs.readFileSync(path, 'utf8').trim()).toBe(WINNER)
-    // The path is a real regular 0600 file (a planted symlink would've been
-    // atomically replaced), never a symlink.
-    expect(fs.lstatSync(path).isFile()).toBe(true)
+  })
+
+  it('Medium — a STALE rotate lock (crashed holder) is reclaimed, then we rotate', () => {
+    const path = sessionCookieSecretPath(home)
+    const lockPath = sessionCookieSecretLockPath(home)
+    fs.mkdirSync(home, { recursive: true })
+    fs.writeFileSync(path, 'x\n', { mode: 0o600 }) // weak → must rotate
+    fs.writeFileSync(lockPath, '', { mode: 0o600 })
+    // Backdate the lock far beyond the stale threshold → crashed-holder orphan.
+    const old = new Date(Date.now() - 60_000)
+    fs.utimesSync(lockPath, old, old)
+
+    const secret = resolvePersistedCookieSecret(home)
+    expect(secret).toMatch(/^[0-9a-f]{48}$/) // reclaimed the orphan + minted a real secret
+    expect(secret).not.toBe('x')
+    expect(fs.readFileSync(path, 'utf8').trim()).toBe(secret)
+    expect(fs.existsSync(lockPath)).toBe(false) // reclaimed lock released, not left dangling
   })
 })

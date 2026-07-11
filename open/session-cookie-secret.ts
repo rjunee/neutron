@@ -14,11 +14,20 @@
  * confirmed REGULAR, 0600, NON-SYMLINK file opened NO-FOLLOW whose value meets
  * the high-entropy floor ({@link MIN_COOKIE_SECRET_LEN}). Anything else — a
  * symlink (token-forgery vector), a non-regular file, un-tightenable perms, or a
- * too-short/weak value — is ROTATED via an ATOMIC temp-file + `rename` (no
- * unlink-then-create window) and then RE-READ, so concurrent starters CONVERGE
- * on one on-disk secret. Otherwise it falls to a process-ephemeral secret. Never
- * a trusted-but-exposed on-disk value, never a guessable constant, never a hard
- * boot failure, never a hang (bounded retries).
+ * too-short/weak value — is ROTATED.
+ *
+ * Rotation is FIRST-WRITER-WINS, not last-writer-wins: `rename(tmp → path)` is
+ * atomic but last-writer-wins (starter A can rename→read→return secret A before
+ * starter B renames→returns secret B → they DIVERGE). True convergence needs a
+ * single rotator, so rotation is serialized behind an EXCLUSIVE sibling lockfile
+ * (`O_CREAT|O_EXCL|O_NOFOLLOW`). The one process that creates the lock rotates
+ * (re-reading the target FIRST so it adopts, not overwrites, a secret a prior
+ * rotator already installed); every competitor waits (bounded) and ADOPTS that
+ * one on-disk secret. A stale lock (crashed holder, detected by age) is
+ * reclaimed. Otherwise it falls to a process-ephemeral secret. Never a
+ * trusted-but-exposed on-disk value, never a guessable constant, never a hard
+ * boot failure, never a hang (bounded waits/retries), never divergence with
+ * false confidence.
  */
 
 import { randomBytes } from 'node:crypto'
@@ -99,18 +108,17 @@ function readPersistedSecret(path: string): ReadResult {
 let tmpSeq = 0
 
 /**
- * ATOMICALLY install a fresh 0600 secret and RETURN THE ON-DISK BYTES.
+ * Install a fresh 0600 secret and RETURN THE ON-DISK BYTES. Called ONLY by the
+ * process holding the rotate lock, so there is never a competing rename.
  *
  * Write the new secret to a unique per-process TEMP file in the same dir
  * (`O_CREAT|O_EXCL|O_WRONLY|O_NOFOLLOW`), then `renameSync(tmp → path)` — a
  * SINGLE syscall that atomically replaces whatever is there (a planted symlink,
- * a weak regular file, or nothing) with our regular 0600 file. There is NO
- * unlink-then-create window (the concurrent-rotation divergence bug). After the
- * rename we ALWAYS RE-READ the target through the no-follow loader and return
- * THOSE bytes — so if a concurrent starter's rename landed last, every process
- * converges on that one on-disk secret rather than each returning its own mint.
- * Returns `null` when this attempt couldn't install/confirm (caller retries or
- * falls to ephemeral). Best-effort temp cleanup on every failure path.
+ * a weak regular file, or nothing) with our regular 0600 file (no
+ * unlink-then-create window). After the rename we RE-READ the target through the
+ * no-follow loader and return THOSE confirmed bytes. Returns `null` when this
+ * attempt couldn't install/confirm (caller falls to ephemeral). Best-effort temp
+ * cleanup on every failure path.
  */
 function installFreshSecret(neutronHome: string, path: string): string | null {
   const secret = randomBytes(24).toString('hex') // 48 hex chars ≫ the length floor
@@ -156,21 +164,105 @@ function installFreshSecret(neutronHome: string, path: string): string | null {
   return back.kind === 'ok' ? back.value : null
 }
 
+/** Sibling exclusive lockfile that serializes rotation → one sole rotator. */
+export function sessionCookieSecretLockPath(neutronHome: string): string {
+  return sessionCookieSecretPath(neutronHome) + '.lock'
+}
+
+// Bounded lock cooperation: a competitor's rotation is a couple of syscalls, so
+// a short wait covers it; a lock older than the (much larger) stale threshold
+// means a crashed holder and is reclaimed. Every wait/retry is bounded — a
+// pathological FS or a truly stuck lock falls to an ephemeral secret, never a
+// hang.
+const LOCK_WAIT_TOTAL_MS = 1000
+const LOCK_WAIT_STEP_MS = 20
+const LOCK_STALE_MS = 5000
+const MAX_LOCK_ACQUIRE_ATTEMPTS = 3
+
+/**
+ * Synchronous sleep seam. Boot is single-threaded and synchronous here, so we
+ * block the thread for the wait step. Exposed as a mutable member ONLY so tests
+ * can drive the bounded lock-wait deterministically (`spyOn(this, 'sleep')`).
+ */
+export const __cookieSecretTiming = {
+  sleep(ms: number): void {
+    try {
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)
+    } catch {
+      /* SharedArrayBuffer unavailable — skip the sleep; the loop is still bounded */
+    }
+  },
+}
+
+/** True when the lock is old enough to be a crashed holder's orphan (or gone). */
+function rotateLockIsStale(lockPath: string): boolean {
+  try {
+    return Date.now() - fs.statSync(lockPath).mtimeMs > LOCK_STALE_MS
+  } catch {
+    // Vanished / dangling between our EEXIST and this stat → reclaimable.
+    return true
+  }
+}
+
+/**
+ * Try to become the SOLE rotator by exclusively creating the sibling lockfile
+ * (`O_CREAT|O_EXCL|O_NOFOLLOW`). Returns the held fd, or `null` if a LIVE
+ * competitor holds it. A stale lock (crashed holder) is reclaimed and re-tried,
+ * bounded so a rename/unlink adversary can't spin us.
+ */
+function tryAcquireRotateLock(lockPath: string): number | null {
+  for (let attempt = 0; attempt < MAX_LOCK_ACQUIRE_ATTEMPTS; attempt += 1) {
+    try {
+      return fs.openSync(lockPath, WX_NOFOLLOW, 0o600)
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'EEXIST') return null // unexpected → ephemeral
+      if (!rotateLockIsStale(lockPath)) return null // live competitor → wait + adopt
+      try {
+        fs.unlinkSync(lockPath) // reclaim the orphan, then retry the exclusive create
+      } catch {
+        /* someone else reclaimed it first — retry the create anyway */
+      }
+    }
+  }
+  return null
+}
+
+/** Close + unlink the held lock (best-effort — never throws out of `finally`). */
+function releaseRotateLock(fd: number, lockPath: string): void {
+  try {
+    fs.closeSync(fd)
+  } catch {
+    /* already closed — non-fatal */
+  }
+  try {
+    fs.unlinkSync(lockPath)
+  } catch {
+    /* lock already reclaimed — non-fatal */
+  }
+}
+
 /**
  * Read the persisted per-install cookie secret, minting + persisting a fresh
  * random one on first boot (or rotating an untrusted one). The returned value is
  * ALWAYS a high-entropy random string — never a predictable constant — AND, when
  * it comes from disk, one read from a confirmed regular, 0600, non-symlink file
- * meeting {@link MIN_COOKIE_SECRET_LEN}. An existing entry we cannot trust is
- * ROTATED atomically; concurrent starters CONVERGE on one on-disk secret; if
- * nothing can be secured we return a process-ephemeral secret and warn (sessions
- * reset on restart) — never a trusted-but-exposed on-disk value, never a hard
- * boot failure, never a hang (bounded retries).
+ * meeting {@link MIN_COOKIE_SECRET_LEN}.
+ *
+ * FIRST-WRITER-WINS convergence: an untrusted/absent entry is rotated behind an
+ * exclusive sibling lock. The one process that acquires the lock rotates —
+ * re-reading the target FIRST so it ADOPTS (not overwrites) a secret a prior
+ * rotator already installed — while every competitor waits (bounded) and adopts
+ * that same on-disk secret. So for a given NEUTRON_HOME the first process to
+ * install a valid secret wins and every concurrent starter returns THAT value;
+ * they never diverge. If nothing can be secured we return a process-ephemeral
+ * secret and warn (sessions reset on restart) — never a trusted-but-exposed
+ * on-disk value, never a hard boot failure, never a hang.
  */
 export function resolvePersistedCookieSecret(neutronHome: string): string {
   const path = sessionCookieSecretPath(neutronHome)
-  // Fast path: an existing VALID secret is returned UNCHANGED — no rotation, no
-  // write (the single-process loopback dogfood happy path: one no-follow read).
+  // Fast path: an existing VALID secret is returned UNCHANGED — no lock, no
+  // write, no rotation (the single-process loopback dogfood happy path: one
+  // no-follow read).
   const first = readPersistedSecret(path)
   if (first.kind === 'ok') return first.value
 
@@ -180,16 +272,35 @@ export function resolvePersistedCookieSecret(neutronHome: string): string {
     /* install may still fail below → ephemeral */
   }
 
-  // Bounded rotate→re-read cycles so a pathological FS can't spin.
-  const MAX_ATTEMPTS = 3
-  for (let i = 0; i < MAX_ATTEMPTS; i += 1) {
-    // A valid secret may have appeared meanwhile (a concurrent starter won) —
-    // converge on it instead of installing our own.
+  const lockPath = sessionCookieSecretLockPath(neutronHome)
+  const deadline = Date.now() + LOCK_WAIT_TOTAL_MS
+
+  while (Date.now() <= deadline) {
+    const lockFd = tryAcquireRotateLock(lockPath)
+    if (lockFd !== null) {
+      // We are the SOLE rotator.
+      try {
+        // A prior rotator may have already installed a valid secret in a window
+        // before we got the lock → ADOPT it, don't overwrite (first-writer-wins).
+        const underLock = readPersistedSecret(path)
+        if (underLock.kind === 'ok') return underLock.value
+        const installed = installFreshSecret(neutronHome, path)
+        if (installed !== null) return installed
+        break // couldn't install even under the lock → ephemeral
+      } finally {
+        releaseRotateLock(lockFd, lockPath)
+      }
+    }
+    // A competitor holds the lock → adopt their secret the moment it lands.
     const cur = readPersistedSecret(path)
     if (cur.kind === 'ok') return cur.value
-    const installed = installFreshSecret(neutronHome, path)
-    if (installed !== null) return installed
+    __cookieSecretTiming.sleep(LOCK_WAIT_STEP_MS)
   }
+
+  // Final adopt attempt — a late writer may have just landed the secret.
+  const late = readPersistedSecret(path)
+  if (late.kind === 'ok') return late.value
+
   console.warn(
     `[open] could not converge a persisted session-cookie secret at ${path}; using a ` +
       `process-ephemeral secret — owner sessions reset on restart.`,
