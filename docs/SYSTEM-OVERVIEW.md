@@ -2066,6 +2066,19 @@ optional operator `GBRAIN_SOURCE` / `GBRAIN_BRAIN_ID`.
   no-op). The pre-RA3 keyword+graph-only mode is still available as the explicit
   `NEUTRON_EMBEDDINGS=off` opt-out. **`unset` is NOT off** — it selects the local
   fallback.
+- **Fail-soft on the WRITE path too (RA3).** GBrain's `put_page` embeds inline and
+  FAILS HARD when the configured provider is unreachable — and an Ollama provider
+  needs no key, so a naive default would make EVERY memory write fail on a host
+  without Ollama. So the serve seam (`resolveServeEmbeddingEnv` in
+  `build-gbrain-memory.ts`) gates the local embedder on a reachability probe at each
+  connect: reachable → embed with Ollama; unreachable / model-not-pulled → park the
+  `gbrain serve` child on the KEYLESS OpenAI-latent default at the same 768 width
+  (env overrides config.json, and any ambient `OPENAI_API_KEY` is neutralized so no
+  silent cloud-billing). With no key `isAvailable('embedding')` is false, so gbrain
+  stores pages UNEMBEDDED (NULL-stale) and writes succeed. The next reconnect after
+  Ollama returns forwards the real `ollama:*` env → `ensure-brain-init`'s
+  unconditional `gbrain embed --stale` backfills those chunks IN PLACE. A cloud
+  (OpenAI-key) embedder is never probed — it is assumed reachable.
 - **Cloud (OpenAI) embeddings — the UPGRADE over the free local default
   (`gbrain-memory/embedder-config.ts`).** Two triggers select OpenAI
   `text-embedding-3-large` in place of the default local Ollama fallback

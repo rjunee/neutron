@@ -374,11 +374,13 @@ describe('resolveGbrainClientOptions', () => {
       return resolveInitEmbeddingTarget(embedder).dimensions
     }
 
-    test('fresh `off` brain (init with no key) → later key spawns at the SAME width', async () => {
-      // Init: off + no key → embedder null → latent column width.
+    test('authoritative `off`: a key stored AFTER a fresh `off`-init does NOT activate embeddings (kill switch holds through the dynamic path)', async () => {
+      // Init: off + no key → embedder null → latent 768 column, no embeddings.
       const w = initWidth({ NEUTRON_EMBEDDINGS: 'off' }, undefined)
       expect(w).toBe(768)
-      // Serve, after a key is stored: dynamic env must target the same width.
+      // Serve, after a key is stored: `NEUTRON_EMBEDDINGS=off` is the operator's
+      // AUTHORITATIVE kill switch, so a later onboarding key must NOT silently
+      // re-enable cloud embeddings — the dynamic env stays empty (keyword+graph).
       let stored: string | undefined
       const opts = resolveGbrainClientOptions({
         owner_home: '/t',
@@ -388,8 +390,7 @@ describe('resolveGbrainClientOptions', () => {
       })
       stored = 'sk-late'
       const dyn = await opts.resolveDynamicEnv!()
-      expect(dyn['GBRAIN_EMBEDDING_DIMENSIONS']).toBe(String(w))
-      expect(dyn['GBRAIN_EMBEDDING_DIMENSIONS']).toBe('768')
+      expect(dyn).toEqual({}) // no GBRAIN_EMBEDDING_* leaks, no OPENAI_API_KEY
     })
 
     test('fresh explicit `openai` brain (init with no key) → later onboarding key spawns at the SAME width', async () => {
@@ -406,6 +407,138 @@ describe('resolveGbrainClientOptions', () => {
       const dyn = await opts.resolveDynamicEnv!()
       expect(dyn['GBRAIN_EMBEDDING_DIMENSIONS']).toBe(String(w))
       expect(dyn['OPENAI_API_KEY']).toBe('sk-onboarding')
+    })
+  })
+
+  // --- resolveEffectiveEmbedder precedence (off authoritative) --------------
+  // An EXPLICIT operator choice (`NEUTRON_EMBEDDINGS`) wins over any stored
+  // onboarding key. `off` is the authoritative kill switch; an explicit provider
+  // pin wins over the key; only the DEFAULT (unset/auto) lets the stored key
+  // flip on cloud embeddings.
+  describe('resolveEffectiveEmbedder precedence', () => {
+    test('off + stored key → null (kill switch beats the key)', () => {
+      expect(
+        resolveEffectiveEmbedder({ env: { NEUTRON_EMBEDDINGS: 'off' }, openaiApiKey: 'sk-stored' }),
+      ).toBeNull()
+    })
+
+    test.each(['0', 'false', 'none'])('off-alias %s + stored key → null', (tok) => {
+      expect(
+        resolveEffectiveEmbedder({ env: { NEUTRON_EMBEDDINGS: tok }, openaiApiKey: 'sk-stored' }),
+      ).toBeNull()
+    })
+
+    test('explicit ollama pin + stored key → ollama (explicit provider beats the key)', () => {
+      const e = resolveEffectiveEmbedder({
+        env: { NEUTRON_EMBEDDINGS: 'ollama' },
+        openaiApiKey: 'sk-stored',
+      })
+      expect(e?.provider).toBe('ollama')
+      expect(e?.childEnv['GBRAIN_EMBEDDING_MODEL']).toBe('ollama:nomic-embed-text')
+    })
+
+    test('explicit openai pin + stored key → openai with the stored key', () => {
+      const e = resolveEffectiveEmbedder({
+        env: { NEUTRON_EMBEDDINGS: 'openai' },
+        openaiApiKey: 'sk-stored',
+      })
+      expect(e?.provider).toBe('openai')
+      expect(e?.childEnv['OPENAI_API_KEY']).toBe('sk-stored')
+    })
+
+    test('unset + stored key → openai (ND1 onboarding-key product path)', () => {
+      const e = resolveEffectiveEmbedder({ env: {}, openaiApiKey: 'sk-stored' })
+      expect(e?.provider).toBe('openai')
+      expect(e?.childEnv['OPENAI_API_KEY']).toBe('sk-stored')
+    })
+
+    test('unset + no key → default local Ollama fallback (still hybrid recall)', () => {
+      const e = resolveEffectiveEmbedder({ env: {} })
+      expect(e?.provider).toBe('ollama')
+      expect(e?.childEnv['GBRAIN_EMBEDDING_MODEL']).toBe('ollama:nomic-embed-text')
+    })
+
+    test('auto + stored key → openai (auto considers the stored key)', () => {
+      const e = resolveEffectiveEmbedder({
+        env: { NEUTRON_EMBEDDINGS: 'auto' },
+        openaiApiKey: 'sk-stored',
+      })
+      expect(e?.provider).toBe('openai')
+      expect(e?.childEnv['OPENAI_API_KEY']).toBe('sk-stored')
+    })
+  })
+
+  // --- WRITE-side fail-soft gate: unreachable Ollama degrades, never hard-fails
+  // gbrain's put_page embeds inline and FAILS HARD when the configured provider
+  // is unreachable. RA3's Ollama default would break every memory WRITE on a
+  // host without Ollama. `resolveDynamicEnv` gates the local embedder on a
+  // reachability probe: reachable → embed with Ollama; unreachable → park on the
+  // KEYLESS OpenAI-latent default (key neutralized) so writes store unembedded
+  // and succeed, backfilled by `embed --stale` when Ollama returns.
+  describe('resolveDynamicEnv — Ollama reachability write gate', () => {
+    const reachable = async () => ({ reachable: true, modelPresent: true })
+    const unreachable = async () => ({ reachable: false, modelPresent: false })
+    const modelMissing = async () => ({ reachable: true, modelPresent: false })
+
+    test('reachable Ollama → forwards the real ollama embed env (embeds on write)', async () => {
+      const opts = resolveGbrainClientOptions({
+        owner_home: '/t',
+        env: {}, // default → local Ollama
+        resolveBrainWidth: () => null, // fresh
+        probeOllamaReachable: reachable,
+      })
+      await expect(opts.resolveDynamicEnv!()).resolves.toEqual({
+        GBRAIN_EMBEDDING_MODEL: 'ollama:nomic-embed-text',
+        GBRAIN_EMBEDDING_DIMENSIONS: '768',
+        OLLAMA_BASE_URL: 'http://localhost:11434/v1',
+      })
+    })
+
+    test('unreachable Ollama → parks on keyless OpenAI-latent @768 (no ollama env, key neutralized) → put_page skips embed', async () => {
+      const opts = resolveGbrainClientOptions({
+        owner_home: '/t',
+        env: {},
+        resolveBrainWidth: () => null,
+        probeOllamaReachable: unreachable,
+      })
+      const dyn = await opts.resolveDynamicEnv!()
+      expect(dyn).toEqual({
+        GBRAIN_EMBEDDING_MODEL: 'openai:text-embedding-3-large',
+        GBRAIN_EMBEDDING_DIMENSIONS: '768',
+        OPENAI_API_KEY: '', // neutralize any ambient BYO GPT key → no silent cloud embed
+      })
+      // Crucially: NOT the ollama env (which would make gbrain embed + hard-fail).
+      expect(dyn['OLLAMA_BASE_URL']).toBeUndefined()
+    })
+
+    test('Ollama reachable but model NOT pulled → same keyless-latent degrade', async () => {
+      const opts = resolveGbrainClientOptions({
+        owner_home: '/t',
+        env: {},
+        resolveBrainWidth: () => null,
+        probeOllamaReachable: modelMissing,
+      })
+      const dyn = await opts.resolveDynamicEnv!()
+      expect(dyn['GBRAIN_EMBEDDING_MODEL']).toBe('openai:text-embedding-3-large')
+      expect(dyn['OPENAI_API_KEY']).toBe('')
+    })
+
+    test('CLOUD (OpenAI key) embedder is NEVER probed → forwards its env unchanged', async () => {
+      let probed = false
+      const opts = resolveGbrainClientOptions({
+        owner_home: '/t',
+        env: {},
+        openaiApiKey: 'sk-real',
+        resolveBrainWidth: () => null,
+        probeOllamaReachable: async () => {
+          probed = true
+          return { reachable: false, modelPresent: false }
+        },
+      })
+      const dyn = await opts.resolveDynamicEnv!()
+      expect(probed).toBe(false) // OpenAI is assumed reachable; no Ollama probe
+      expect(dyn['GBRAIN_EMBEDDING_MODEL']).toBe('openai:text-embedding-3-large')
+      expect(dyn['OPENAI_API_KEY']).toBe('sk-real')
     })
   })
 
@@ -445,11 +578,18 @@ describe('resolveGbrainClientOptions', () => {
       })
     })
 
+    // These exercise embedder SELECTION (local Ollama fallback chosen). The
+    // WRITE gate only forwards the ollama env when the embedder is reachable, so
+    // inject a reachable probe — reachability itself is covered by the
+    // "Ollama reachability write gate" describe above.
+    const reachableProbe = async () => ({ reachable: true, modelPresent: true })
+
     test('resolveDynamicEnv() yields the local Ollama fallback (not empty) when the key is absent', async () => {
       const opts = resolveGbrainClientOptions({
         owner_home: '/t',
         env: {},
         resolveOpenAiKey: async () => undefined,
+        probeOllamaReachable: reachableProbe,
       })
       await expect(opts.resolveDynamicEnv!()).resolves.toEqual({
         GBRAIN_EMBEDDING_MODEL: 'ollama:nomic-embed-text',
@@ -463,6 +603,7 @@ describe('resolveGbrainClientOptions', () => {
         owner_home: '/t',
         env: {},
         resolveOpenAiKey: async () => '   ',
+        probeOllamaReachable: reachableProbe,
       })
       const env = await opts.resolveDynamicEnv!()
       expect(env['GBRAIN_EMBEDDING_MODEL']).toBe('ollama:nomic-embed-text')
@@ -478,6 +619,7 @@ describe('resolveGbrainClientOptions', () => {
         owner_home: '/t',
         env: {},
         resolveOpenAiKey: async () => stored,
+        probeOllamaReachable: reachableProbe,
       })
       // First spawn: no key → the local Ollama fallback.
       await expect(opts.resolveDynamicEnv!()).resolves.toEqual({

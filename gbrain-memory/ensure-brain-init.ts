@@ -254,13 +254,21 @@ export function resolveExistingBrainWidth(gbrainHome: string): BrainEmbeddingWid
  * The (model, dimensions) the brain's vector column is sized for. Tracks an
  * explicitly-configured embedder; otherwise the OpenAI default so an
  * onboarding-captured key upgrades the brain in place.
+ *
+ * The `model` MUST be provider-qualified (`provider:model`, e.g.
+ * `ollama:nomic-embed-text`) — `gbrain init` REFUSES a bare model id
+ * ("missing a provider prefix"), so returning `embedder.model` (bare) would
+ * abort init for EVERY keyless default (Ollama) and eager-key (OpenAI)
+ * deployment. Use the same qualified id the runtime embed seam uses
+ * (`embedderModelId`), keeping init and `gbrain serve` on one model lineage.
+ * `DEFAULT_EMBEDDING_MODEL` is already qualified.
  */
 export function resolveInitEmbeddingTarget(embedder: EmbedderConfig | null): {
   model: string
   dimensions: number
 } {
   if (embedder !== null) {
-    return { model: embedder.model, dimensions: embedder.dimensions }
+    return { model: embedderModelId(embedder), dimensions: embedder.dimensions }
   }
   return { model: DEFAULT_EMBEDDING_MODEL, dimensions: DEFAULT_EMBEDDING_DIMENSIONS }
 }

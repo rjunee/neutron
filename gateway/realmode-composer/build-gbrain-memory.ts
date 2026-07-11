@@ -56,6 +56,8 @@ import {
   isOpenAiEmbeddingWidthSupported,
   resolveGbrainCommand,
   resolveGbrainChildPath,
+  probeOllamaHealth,
+  type OllamaHealthCheck,
 } from '@neutronai/gbrain-memory/index.ts'
 import type { SyncHook } from '@neutronai/runtime/entity-writer.ts'
 
@@ -217,29 +219,144 @@ export function reconcileEmbedderToBrain(
 }
 
 /**
- * Resolve the effective embedder, preferring an OpenAI key the owner captured
- * through the onboarding optional-key offer ("paste a key to unlock cloud
- * embeddings"). That purpose-stated capture is the sanctioned embeddings
- * trigger — so a stored key alone flips on CLOUD semantic memory, no
- * `NEUTRON_EMBEDDINGS` env required (ND1: "wire it so gbrain flips to
- * semantic-embeddings mode when present"). With no stored key we fall back to
- * the env `resolveEmbedderConfig` path — RA3: that DEFAULTS to the free local
- * Ollama fallback (still hybrid recall, no billing), so a bare env
- * `OPENAI_API_KEY` (the GPT BYO adapter's key) still never silently bills for
- * CLOUD embeddings (that requires the explicit `NEUTRON_EMBEDDINGS=openai|auto`
- * opt-in). NOTE: the returned dims are the provider default — the caller
- * reconciles to an existing brain's column via `reconcileEmbedderToBrain`.
+ * Resolve the effective embedder. Precedence (an EXPLICIT operator choice wins
+ * over any stored key; the stored key only decides the OTHERWISE-default path):
+ *
+ *   1. `NEUTRON_EMBEDDINGS=off` (/`0`/`false`/`none`) — AUTHORITATIVE kill
+ *      switch → keyword+graph only. An onboarding-captured key must NOT silently
+ *      re-enable cloud embeddings the operator explicitly turned off.
+ *   2. `=ollama` / `=openai` — explicit provider pin, wins over the stored key
+ *      (an operator who pinned ollama gets ollama even with a key on file;
+ *      explicit openai prefers the stored onboarding key, else the env key).
+ *   3. stored onboarding key (ND1 product path) — with `NEUTRON_EMBEDDINGS`
+ *      unset (or `auto`/`on`), a key the owner captured through the onboarding
+ *      optional-key offer ("paste a key to unlock cloud embeddings") flips on
+ *      CLOUD semantic memory with no env required.
+ *   4. env `resolveEmbedderConfig` — RA3 default: free local Ollama fallback
+ *      (still hybrid recall, no billing). A bare env `OPENAI_API_KEY` (the GPT
+ *      BYO adapter's key) never silently bills for CLOUD embeddings here.
+ *
+ * NOTE: returned dims are the provider default — the caller reconciles to an
+ * existing brain's column via `reconcileEmbedderToBrain`.
  */
 export function resolveEffectiveEmbedder(input: {
   env: NodeJS.ProcessEnv
   openaiApiKey?: string | undefined
 }): EmbedderConfig | null {
+  const normalized = readNeutronEmbeddingsMode(input.env)
   const stored = input.openaiApiKey?.trim()
-  if (stored !== undefined && stored.length > 0) {
-    return buildOpenAiEmbedderConfig(stored)
+
+  // 1. Kill switch is authoritative — off beats any stored key.
+  if (normalized === 'off') return null
+
+  // 2. Explicit provider pin beats the stored key.
+  if (normalized === 'ollama') return resolveEmbedderConfig(input.env)
+  if (normalized === 'openai') {
+    if (stored !== undefined && stored.length > 0) return buildOpenAiEmbedderConfig(stored)
+    return resolveEmbedderConfig(input.env)
   }
+
+  // 3. Onboarding-captured key (unset / auto) → cloud embeddings, no env needed.
+  if (stored !== undefined && stored.length > 0) return buildOpenAiEmbedderConfig(stored)
+
+  // 4. Env default → free local Ollama fallback (or auto→env-key OpenAI).
   return resolveEmbedderConfig(input.env)
 }
+
+/**
+ * Normalize `NEUTRON_EMBEDDINGS` to a coarse mode for the effective-embedder
+ * precedence. Mirrors `resolveEmbedderConfig`'s own token handling: unset /
+ * blank → `'default'` (NOT off — RA3 defaults to the local Ollama fallback);
+ * the opt-out tokens collapse to `'off'`.
+ */
+function readNeutronEmbeddingsMode(
+  env: NodeJS.ProcessEnv,
+): 'off' | 'openai' | 'ollama' | 'default' {
+  const raw = env.NEUTRON_EMBEDDINGS
+  const t = typeof raw === 'string' ? raw.trim().toLowerCase() : ''
+  if (t === '') return 'default'
+  if (t === 'off' || t === '0' || t === 'false' || t === 'none') return 'off'
+  if (t === 'ollama') return 'ollama'
+  if (t === 'openai') return 'openai'
+  return 'default' // auto / on / 1 / true / anything else → env resolver decides
+}
+
+/**
+ * Reachability probe seam for the local Ollama embedder (injected in tests).
+ * Signature-compatible with `probeOllamaHealth`.
+ */
+export type OllamaReachabilityProbe = (
+  baseUrl: string,
+  opts: { model: string },
+) => Promise<OllamaHealthCheck>
+
+/**
+ * The embedding env to forward to the `gbrain serve` child for a resolved
+ * embedder — with a WRITE-side fail-soft gate for the local Ollama fallback.
+ *
+ * gbrain's `put_page` embeds inline and FAILS HARD ("[embed(...)] Failed after
+ * N attempts") when the configured provider is unreachable — it only skips
+ * embedding when NO provider is configured (`operations.ts`:
+ * `noEmbed = !isAvailable('embedding')`). So forwarding an unreachable Ollama
+ * (the RA3 default on a host without Ollama installed) would make EVERY memory
+ * write fail — "silently useless", the exact failure mode RA3 forbids.
+ *
+ * Fix: when the effective embedder is local Ollama and it is NOT reachable (or
+ * the model isn't pulled) at connect, forward NO embedding env → gbrain writes
+ * succeed as keyword+graph (chunks land NULL-stale). The column stays sized for
+ * Ollama (init created it at 768), so the next reachable reconnect's
+ * `embed --stale` backfills those chunks IN PLACE. This is the write-side mirror
+ * of gbrain's read-side per-query search fallback (proven in
+ * `gbrain-memory/__tests__/failsoft-search-cli.test.ts`). A CLOUD (OpenAI)
+ * embedder is never probed — it is assumed reachable; a transient API blip is
+ * gbrain's own retry concern, and a bad key is a config error to surface, not a
+ * reason to silently drop embeddings.
+ */
+async function resolveServeEmbeddingEnv(
+  embedder: EmbedderConfig | null,
+  probe: OllamaReachabilityProbe,
+): Promise<Record<string, string>> {
+  if (embedder === null) return {}
+  if (embedder.provider === 'ollama') {
+    const baseUrl = embedder.childEnv['OLLAMA_BASE_URL'] ?? 'http://localhost:11434/v1'
+    let health: OllamaHealthCheck
+    try {
+      health = await probe(baseUrl, { model: embedder.model })
+    } catch {
+      // A probe that itself errors is treated as unreachable (fail-soft).
+      health = { reachable: false, modelPresent: false }
+    }
+    if (!health.reachable || !health.modelPresent) {
+      // Ollama configured but DOWN. Simply omitting the embed env is NOT enough:
+      // gbrain's `loadConfig` falls back to the PERSISTED `embedding_model`
+      // (`ollama:nomic-embed-text`, written by init), and an Ollama provider
+      // needs no key so `isAvailable('embedding')` stays true → put_page would
+      // still try to embed and FAIL HARD. So we OVERRIDE the persisted provider
+      // (env beats config in gbrain's loadConfig) with the KEYLESS OpenAI-latent
+      // default at the SAME column width: with no key, `isAvailable('embedding')`
+      // is false → gbrain stores the page UNEMBEDDED (NULL-stale) and succeeds.
+      // We also NEUTRALIZE any ambient `OPENAI_API_KEY` (a BYO GPT chat key the
+      // owner never opted into for cloud embeddings) so this degraded state can
+      // never silently start cloud-billing. When Ollama comes back, the next
+      // reconnect forwards the real `ollama:*` env → `embed --stale` backfills
+      // the NULL-stale chunks IN PLACE at the shared 768 width.
+      return {
+        GBRAIN_EMBEDDING_MODEL: OLLAMA_DOWN_LATENT_MODEL,
+        GBRAIN_EMBEDDING_DIMENSIONS: String(embedder.dimensions),
+        OPENAI_API_KEY: '',
+      }
+    }
+  }
+  return embedder.childEnv
+}
+
+/**
+ * The keyless latent model the WRITE gate parks an unreachable-Ollama brain on
+ * (see `resolveServeEmbeddingEnv`). `text-embedding-3-large` is the shared-width
+ * default and requires a key, so with the key neutralized gbrain treats
+ * embedding as unavailable and stores pages unembedded rather than failing.
+ */
+const OLLAMA_DOWN_LATENT_MODEL = 'openai:text-embedding-3-large'
 
 export function resolveGbrainClientOptions(input: {
   owner_home: string
@@ -282,6 +399,13 @@ export function resolveGbrainClientOptions(input: {
    * per-connect readers (`makePerConnectResolver`) so init + serve agree.
    */
   resolveBrainWidth?: () => BrainEmbeddingWidth
+  /**
+   * Local-Ollama reachability probe (injected in tests). Default the real
+   * `probeOllamaHealth`. Used by `resolveDynamicEnv` to gate the WRITE-side
+   * embed env: an unreachable Ollama is dropped to keyword+graph so `gbrain
+   * put_page` doesn't fail hard — see `resolveServeEmbeddingEnv`.
+   */
+  probeOllamaReachable?: OllamaReachabilityProbe
 }): GBrainStdioMcpClientOptions {
   const env = input.env ?? process.env
   const gbrainHome = join(input.owner_home, 'gbrain')
@@ -344,6 +468,7 @@ export function resolveGbrainClientOptions(input: {
   if (perConnect) {
     const resolveOpenAiKey = input.resolveOpenAiKey
     const resolveBrainWidth = input.resolveBrainWidth
+    const probeOllama = input.probeOllamaReachable ?? probeOllamaHealth
     opts.resolveDynamicEnv = async () => {
       // No key resolver → fall back to the eager static key (usually undefined →
       // the RA3 default local Ollama embedder).
@@ -353,7 +478,10 @@ export function resolveGbrainClientOptions(input: {
         resolveEffectiveEmbedder({ env, openaiApiKey: key }),
         width,
       )
-      return lazyEmbedder?.childEnv ?? {}
+      // Fail-soft WRITE gate: an unreachable local Ollama is dropped to
+      // keyword+graph so `gbrain put_page` succeeds (unembedded, backfilled
+      // later) instead of failing hard on every write.
+      return resolveServeEmbeddingEnv(lazyEmbedder, probeOllama)
     }
   }
 

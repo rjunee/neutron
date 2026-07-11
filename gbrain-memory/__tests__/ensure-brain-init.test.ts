@@ -144,7 +144,13 @@ describe('ensureBrainInitialized', () => {
     const embedder = buildOpenAiEmbedderConfig('sk-test-123')
     await ensureBrainInitialized({ gbrainHome: home, embedder, runner, logger: silentLogger })
     const initArgs = calls[0]!.args
-    expect(initArgs).toContain(embedder.model)
+    // `gbrain init` requires a PROVIDER-QUALIFIED model id (it refuses a bare id
+    // with "missing a provider prefix"), so init must pass `provider:model`, not
+    // the bare `embedder.model`.
+    const qualified = 'openai:text-embedding-3-large'
+    expect(embedder.childEnv['GBRAIN_EMBEDDING_MODEL']).toBe(qualified)
+    expect(initArgs).toContain(qualified) // init passes the QUALIFIED id
+    expect(initArgs).not.toContain(embedder.model) // never the bare id
     expect(initArgs).toContain(String(embedder.dimensions))
     // Provider auth is forwarded to the child so embed-on-write can reach it.
     expect(calls[0]!.env?.['OPENAI_API_KEY']).toBe('sk-test-123')
@@ -549,7 +555,8 @@ describe('ensureBrainInitialized — Ollama reachability probe (RA3)', () => {
     expect(res.status).toBe('initialized')
     expect(calls).toHaveLength(1)
     const initArgs = calls[0]!.args
-    expect(initArgs).toContain('nomic-embed-text')
+    // Provider-qualified model id (gbrain init refuses a bare `nomic-embed-text`).
+    expect(initArgs).toContain('ollama:nomic-embed-text')
     expect(initArgs).toContain('768')
     // The degradation is SURFACED, not silent.
     expect(warnings.some((w) => w.includes('not reachable'))).toBe(true)
