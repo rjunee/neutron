@@ -214,14 +214,14 @@ afterEach(() => {
 const OPEN_FILE = { path: 'notes/a.md', content: 'hello', modified_at: 111, size_bytes: 5 };
 const FILE_NODE = { kind: 'file' as const, path: OPEN_FILE.path, name: 'a.md' };
 
-function render(project_id: string) {
+function render(project_id: string, client: unknown = fakeClient) {
   idx = 0;
   frameEffects = [];
   // Deliberate test harness: `useDocMutations` is driven directly against
   // the stubbed react dispatcher, not from a real component render.
   // eslint-disable-next-line react-hooks/rules-of-hooks
   const api = useDocMutations({
-    client: fakeClient,
+    client,
     project_id,
     file: OPEN_FILE,
     selectedPath: OPEN_FILE.path,
@@ -293,6 +293,30 @@ describe('handleSave', () => {
     await p;
     expect(calls.setError.some((v) => typeof v === 'string')).toBe(true);
     expect(calls.setConflict).not.toContain(true);
+  });
+});
+
+// ── gate scope includes client/session, not just project (Codex D7-r4) ─
+describe('handleSave — scope covers client/session identity, same project', () => {
+  it('BAILS when the client/session is replaced mid-save', async () => {
+    const api = render('A', fakeClient);
+    const p = api.handleSave();
+    // Same project, but the auth session refreshed → a NEW DocsClient.
+    render('A', { session: 'refreshed' });
+    await settle('writeFile', { size_bytes: 12, modified_at: 222 });
+    await p;
+    expect(calls.setFile.length).toBe(0);
+    expect(calls.setMode).not.toContain('view');
+  });
+
+  it('BAILS when the client goes null (logout) mid-save', async () => {
+    const api = render('A', fakeClient);
+    const p = api.handleSave();
+    render('A', null); // logout: client → null, same project
+    await settle('writeFile', { size_bytes: 12, modified_at: 222 });
+    await p;
+    expect(calls.setFile.length).toBe(0);
+    expect(calls.setMode).not.toContain('view');
   });
 });
 

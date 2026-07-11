@@ -57,7 +57,7 @@ export function useDocHistory(params: {
   setError: React.Dispatch<React.SetStateAction<string | null>>;
 }): UseDocHistory {
   const { client, project_id, file, setError } = params;
-  const historyGate = useProjectScopedAsync(project_id);
+  const historyGate = useProjectScopedAsync(project_id, client);
 
   const [historyOpen, setHistoryOpen] = useState(false);
   const [historyLoading, setHistoryLoading] = useState(false);

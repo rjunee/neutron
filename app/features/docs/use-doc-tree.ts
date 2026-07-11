@@ -30,7 +30,7 @@ export function useDocTree(params: {
   setError: React.Dispatch<React.SetStateAction<string | null>>;
 }): UseDocTree {
   const { client, project_id, setError } = params;
-  const treeGate = useProjectScopedAsync(project_id);
+  const treeGate = useProjectScopedAsync(project_id, client);
 
   const [tree, setTree] = useState<DocTreeNode[]>([]);
   const [loadingTree, setLoadingTree] = useState(true);

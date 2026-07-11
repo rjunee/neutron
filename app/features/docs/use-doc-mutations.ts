@@ -117,7 +117,7 @@ export function useDocMutations(params: {
   } = params;
 
   // THE single mutation gate. Shared by every handler below.
-  const mutateGate = useProjectScopedAsync(project_id);
+  const mutateGate = useProjectScopedAsync(project_id, client);
 
   const [saving, setSaving] = useState(false);
   const [newFileOpen, setNewFileOpen] = useState(false);

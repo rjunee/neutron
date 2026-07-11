@@ -46,7 +46,7 @@ export function useDocFile(params: {
   project_id: string;
 }): UseDocFile {
   const { client, project_id } = params;
-  const fileGate = useProjectScopedAsync(project_id);
+  const fileGate = useProjectScopedAsync(project_id, client);
 
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
   const [file, setFile] = useState<DocFile | null>(null);

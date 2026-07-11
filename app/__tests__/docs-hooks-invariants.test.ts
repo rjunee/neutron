@@ -80,10 +80,21 @@ describe('useProjectScopedAsync — committed reset-on-switch (never during rend
     const effectIdx = src.indexOf('useEffect(');
     expect(effectIdx).toBeGreaterThanOrEqual(0);
     expect(resetIdx).toBeGreaterThan(effectIdx);
-    expect(src).toMatch(/seenProject\.current\s*!==\s*projectId/);
     // No bare render-phase mutation of the gate.
     const beforeEffect = src.slice(0, effectIdx);
     expect(beforeEffect).not.toContain('gate.reset()');
+  });
+
+  it('scopes the reset to the project AND the client/session (Codex D7-r4)', () => {
+    // The pre-D7 effect reset every gate on `client` OR `project_id`
+    // change (its dep was `fetchTree = f(client, project_id)`). A gate
+    // keyed on `projectId` alone would let a request from a stale
+    // session commit under a refreshed one.
+    expect(src).toMatch(/useProjectScopedAsync\(\s*projectId: string,\s*client: unknown,?\s*\)/);
+    expect(src).toMatch(/seenScope\.current\.projectId\s*!==\s*projectId/);
+    expect(src).toMatch(/seenScope\.current\.client\s*!==\s*client/);
+    // The reset effect depends on both scope inputs.
+    expect(src).toMatch(/\},\s*\[projectId, client, gate\]\);/);
   });
 });
 
@@ -99,7 +110,7 @@ describe('useDocMutations — ONE gate for ALL mutations (fixed 4× in review)',
     // The behavioural bail-on-switch coverage lives in
     // docs-mutations-race.test.ts (all seven mutations). Here we only
     // pin the STRUCTURAL single-gate guarantee.
-    expect(src).toContain('const mutateGate = useProjectScopedAsync(project_id);');
+    expect(src).toContain('const mutateGate = useProjectScopedAsync(project_id, client);');
     expect(src).not.toMatch(/new RequestGate\(/);
   });
 
