@@ -71,6 +71,36 @@ function timerHarness() {
   }
 }
 
+/** Like `timerHarness()`, but deliberately REUSES freed handle IDs (resets
+ *  the counter to 1 whenever nothing is pending) instead of always
+ *  allocating fresh ones. Some real `setTimeoutFn` adapters recycle freed
+ *  numeric IDs; the reconnect-timer stale-guard must hold even when two
+ *  different timers end up sharing the exact same underlying handle. */
+function reusingHandleTimerHarness() {
+  const timers: PendingTimer[] = []
+  let nextHandle = 1
+  return {
+    setTimeoutFn: (fn: () => void, ms: number): unknown => {
+      if (timers.length === 0) nextHandle = 1 // simulate ID recycling
+      const handle = nextHandle++
+      timers.push({ fn, ms, handle })
+      return handle
+    },
+    clearTimeoutFn: (handle: unknown): void => {
+      const idx = timers.findIndex((t) => t.handle === handle)
+      if (idx >= 0) timers.splice(idx, 1)
+    },
+    pendingCount(): number {
+      return timers.length
+    },
+    peekNextFn(): () => void {
+      const t = timers[0]
+      if (t === undefined) throw new Error('no pending timer')
+      return t.fn
+    },
+  }
+}
+
 function setup() {
   const sockets: FakeSocket[] = []
   const timers = timerHarness()
@@ -359,6 +389,57 @@ describe('ChatWsClient — connect() during backoff (zombie-socket regression)',
     // armed (if T1's stale fire had nulled `reconnectHandle`, `close()`'s
     // `cancelReconnect()` would have nothing to cancel, but T2 would still
     // be physically armed and fire later regardless).
+    client.close()
+    expect(timers.pendingCount()).toBe(0)
+  })
+
+  it('the T1/T2 stale-guard survives HANDLE REUSE — it must not depend on the raw timer handle being unique', () => {
+    // Per Codex review: a guard that compares `this.reconnectHandle` against
+    // a captured raw handle breaks if the injected `setTimeoutFn` adapter
+    // ever recycles freed numeric IDs (plausible for some timer pools) — T1
+    // and T2 could end up sharing the identical handle, defeating an
+    // identity check based on that handle alone. This uses an adapter that
+    // deliberately reuses handle `1` for both T1 and T2 to prove the fix
+    // (a monotonic generation counter, independent of the handle) holds
+    // regardless.
+    const sockets: FakeSocket[] = []
+    const timers = reusingHandleTimerHarness()
+    const client = new ChatWsClient({
+      url: 'wss://test/ws/app/chat',
+      createSocket: () => {
+        const s = new FakeSocket()
+        sockets.push(s)
+        return s
+      },
+      minBackoffMs: 500,
+      maxBackoffMs: 8000,
+      jitter: () => 0,
+      setTimeoutFn: timers.setTimeoutFn,
+      clearTimeoutFn: timers.clearTimeoutFn,
+    })
+
+    client.connect()
+    sockets[0]!.fireOpen()
+    sockets[0]!.fireClose() // unexpected drop → T1 armed (handle 1)
+    const staleT1Fn = timers.peekNextFn()
+
+    client.connect() // cancels T1 (frees handle 1), opens socket A
+    const socketA = sockets[1]!
+    expect(timers.pendingCount()).toBe(0)
+
+    socketA.fireClose() // unexpected drop → T2 armed, REUSING handle 1
+    expect(timers.pendingCount()).toBe(1)
+    expect(sockets.length).toBe(2)
+
+    // T1 fires anyway. A handle-identity guard would wrongly treat it as
+    // still current, since T1's captured handle (1) equals T2's CURRENT
+    // handle (also 1).
+    staleT1Fn()
+
+    // The generation guard catches it regardless: no new socket, T2 untouched.
+    expect(sockets.length).toBe(2)
+    expect(timers.pendingCount()).toBe(1)
+
     client.close()
     expect(timers.pendingCount()).toBe(0)
   })

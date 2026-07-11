@@ -103,6 +103,12 @@ export class ChatWsClient {
   private active = true
   private closedByUser = false
   private reconnectHandle: unknown = null
+  /** Monotonic counter, bumped on every `cancelReconnect()` call. The reconnect
+   *  timer's own callback captures its value and stale-guards on it — NOT on
+   *  `reconnectHandle` itself, which some `setTimeoutFn` adapters may reuse
+   *  after cancellation (e.g. a simple numeric-ID pool), unlike this
+   *  always-distinct counter. */
+  private reconnectGeneration = 0
   /** GAP-1 — heartbeat: the pending idle-ping timer (fires a ping after silence). */
   private heartbeatHandle: unknown = null
   /** GAP-1 — heartbeat: the pending missed-pong deadline (fires a force-close). */
@@ -434,13 +440,13 @@ export class ChatWsClient {
   }
 
   private scheduleReconnect(): void {
-    this.cancelReconnect()
+    this.cancelReconnect() // bumps `reconnectGeneration`, invalidating any prior pending callback
     this.setStatus('reconnecting')
     const delay = this.backoffDelay(this.attempt)
     this.attempt += 1
-    // Identity stale-guard (mirrors the socket-identity guards in
-    // `openSocket()`): capture THIS timer's own handle and only act if it's
-    // still the one `this.reconnectHandle` points to. Without this, a stale
+    // Generation stale-guard (mirrors the socket-identity guards elsewhere in
+    // this file, but deliberately does NOT compare the raw timer handle — see
+    // `reconnectGeneration`'s doc comment for why). Without this, a stale
     // callback that somehow still fires after being "cancelled" (e.g. a
     // native-bridge timer race on RN, or any future call path) would
     // unconditionally null `this.reconnectHandle` and call `openSocket()` —
@@ -448,14 +454,13 @@ export class ChatWsClient {
     // uncancellable) or reopening a socket after a fresher one is already
     // live, reintroducing the exact zombie-socket class of bug this file
     // exists to prevent.
-    let handle: unknown
-    handle = this.opts.setTimeoutFn(() => {
-      if (this.reconnectHandle !== handle) return
+    const generation = this.reconnectGeneration
+    this.reconnectHandle = this.opts.setTimeoutFn(() => {
+      if (generation !== this.reconnectGeneration) return
       this.reconnectHandle = null
       if (this.closedByUser || !this.active) return
       this.openSocket()
     }, delay)
-    this.reconnectHandle = handle
   }
 
   /** Exponential backoff with additive jitter, capped at maxBackoffMs. */
@@ -466,6 +471,12 @@ export class ChatWsClient {
   }
 
   private cancelReconnect(): void {
+    // Bump FIRST and unconditionally (not just when a timer is currently
+    // armed): this invalidates any earlier reconnect callback's captured
+    // generation even if this particular cancel has nothing to clear —
+    // e.g. `connect()` cancelling a timer that (in a pathological adapter)
+    // already fired but whose callback is still queued.
+    this.reconnectGeneration += 1
     if (this.reconnectHandle !== null) {
       this.opts.clearTimeoutFn(this.reconnectHandle)
       this.reconnectHandle = null
