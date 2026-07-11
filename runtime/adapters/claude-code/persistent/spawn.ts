@@ -17,8 +17,7 @@ import { type InFlightGate, makeInFlightGate } from './in-flight-gate.ts'
 import { childByKey, pool, replToolBridgeRef, respawnGates, sink } from './pool-state.ts'
 import {
   registerLiveProcessSafe,
-  touchLiveProcessSafe,
-  unregisterLiveProcessSafe,
+  type LiveProcessHandle,
 } from '@neutronai/tools/process-registry.ts'
 import { assertReplAlive } from './post-spawn-assertion.ts'
 import type { PtyChild } from './pty-host.ts'
@@ -327,6 +326,11 @@ async function spawnSession(
   // so route fired-detector keystrokes through this mirror (set right after
   // spawn, before any onData can fire on the event loop).
   let scanChild: PtyChild | undefined
+  // F4 — the ambient live-process handle for THIS child, assigned right after the
+  // register call below (before any onData can fire on the event loop). It is
+  // bound to the owning registry + this child's (name, pid), so a late touch from
+  // this child can never refresh a different registry or a respawned successor.
+  let liveHandle: LiveProcessHandle | undefined
 
   const child = ptyHost.spawn(argv, {
     cwd,
@@ -337,8 +341,9 @@ async function spawnSession(
       session.lastDataAt = now
       // F4 — feed the watchdog's live-process view: any child output is activity,
       // so keep the ProcessRegistry entry fresh (stuck-agent = no activity past
-      // the threshold). Guarded no-op when no ambient registry is registered.
-      touchLiveProcessSafe(sessionKey)
+      // the threshold). Guarded no-op when no ambient registry is registered; the
+      // handle identity-guards so it only ever touches THIS child's entry.
+      liveHandle?.touch()
       const target = scanChild
       if (target === undefined) return
       // Run the registered detectors against the ring and actuate the ones that
@@ -359,7 +364,7 @@ async function spawnSession(
   // children, so ONE writer here covers every spawn site). UPSERT-safe against a
   // respawn re-using `sessionKey`; unregistered in `child.exited` below. Guarded
   // no-op when no ambient ProcessRegistry is registered (unit tests / LLM-less).
-  registerLiveProcessSafe({
+  liveHandle = registerLiveProcessSafe({
     name: sessionKey,
     pid: child.pid,
     tool_name: 'cc-repl',
@@ -406,11 +411,12 @@ async function spawnSession(
     // Stop the size-watchdog cadence — the child it watched is gone (row #13).
     session.sizeWatchdog?.stop()
     // F4 — drop this child from the watchdog's live-process view now it has
-    // exited (a real subprocess exit, so the OS-liveness projection follows).
-    // IDENTITY-GUARDED like the `childByKey` cleanup below: only unregister when
-    // the entry still points at THIS child, so a concurrent respawn that
-    // re-registered `sessionKey` for a fresh child isn't clobbered.
-    if (childByKey.get(sessionKey) === child) unregisterLiveProcessSafe(sessionKey)
+    // exited (a real subprocess exit, so the OS-liveness projection follows). The
+    // handle is bound to the OWNING registry + this child's (name, pid), so it
+    // no-ops if a concurrent respawn already replaced `sessionKey` with a fresh
+    // child, or if a newer gateway boot pushed a different ambient registry — it
+    // can only ever drop THIS child's own entry (High 2 fix).
+    liveHandle?.unregister()
     sink.unregisterIf(sessionId, session)
     // Reclaim the temp config files now the child is gone (covers pool eviction,
     // crash, and shutdown — the ephemeral dispose path unlinks eagerly too).

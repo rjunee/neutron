@@ -15,8 +15,6 @@ import {
   pushAmbientProcessRegistry,
   resolveAmbientProcessRegistry,
   registerLiveProcessSafe,
-  touchLiveProcessSafe,
-  unregisterLiveProcessSafe,
 } from './process-registry.ts'
 
 let clears: Array<() => void> = []
@@ -53,24 +51,68 @@ describe('ambient ProcessRegistry (F4)', () => {
     expect(reg.list()[0]!.pid).toBe(222)
   })
 
-  test('touch bumps activity; unregister drops the entry', () => {
+  test('the handle bumps activity; unregister drops the entry', () => {
     let now = 1_000
     const reg = new ProcessRegistry({ now: () => now })
     clears.push(pushAmbientProcessRegistry(reg))
-    registerLiveProcessSafe({ name: 'sess-1', pid: 1, tool_name: 'cc-repl' })
+    const handle = registerLiveProcessSafe({ name: 'sess-1', pid: 1, tool_name: 'cc-repl' })
     now = 5_000
-    touchLiveProcessSafe('sess-1')
+    handle.touch()
     expect(reg.list()[0]!.last_activity_at).toBe(5_000)
-    unregisterLiveProcessSafe('sess-1')
+    handle.unregister()
     expect(reg.size()).toBe(0)
+  })
+
+  test('the handle is IDENTITY-GUARDED — a respawn under the same name is not touched or dropped by the old handle', () => {
+    let now = 1_000
+    const reg = new ProcessRegistry({ now: () => now })
+    clears.push(pushAmbientProcessRegistry(reg))
+    const oldHandle = registerLiveProcessSafe({ name: 'sess-1', pid: 1, tool_name: 'cc-repl' })
+    // A respawn replaces the entry under the same name with a NEW pid.
+    const newHandle = registerLiveProcessSafe({ name: 'sess-1', pid: 2, tool_name: 'cc-repl' })
+    now = 9_000
+    // The OLD child's late touch/unregister must NOT affect the live pid-2 entry.
+    oldHandle.touch()
+    expect(reg.list()[0]!.last_activity_at).toBe(1_000) // pid-2 entry untouched
+    oldHandle.unregister()
+    expect(reg.size()).toBe(1)
+    expect(reg.list()[0]!.pid).toBe(2)
+    // The NEW child's handle still operates on its own entry.
+    newHandle.touch()
+    expect(reg.list()[0]!.last_activity_at).toBe(9_000)
+  })
+
+  test('High 2: an old child exit does NOT empty a NEWER boot registry pushed after it registered', () => {
+    const a = new ProcessRegistry()
+    const clearA = pushAmbientProcessRegistry(a)
+    clears.push(clearA)
+    // A's child registers while A is top-of-stack — capture its ownership handle.
+    const aHandle = registerLiveProcessSafe({ name: 'same', pid: 1, tool_name: 'cc-repl' })
+
+    // A NEWER gateway boot pushes registry B and registers its own live child.
+    const b = new ProcessRegistry()
+    const clearB = pushAmbientProcessRegistry(b)
+    clears.push(clearB)
+    registerLiveProcessSafe({ name: 'same', pid: 2, tool_name: 'cc-repl' })
+    expect(resolveAmbientProcessRegistry()).toBe(b)
+
+    // A's exiting child fires its handle. A top-of-stack resolution would EMPTY B
+    // (blinding B's watchdog to its live child); the bound handle only drops A's.
+    aHandle.unregister()
+    expect(a.size()).toBe(0) // A's own child dropped
+    expect(b.size()).toBe(1) // B's live child RETAINED
+    expect(b.list()[0]!.pid).toBe(2)
   })
 
   test('guarded no-op when no ambient registry is registered (LLM-less / unit)', () => {
     expect(resolveAmbientProcessRegistry()).toBeNull()
-    // Must not throw.
-    expect(() => registerLiveProcessSafe({ name: 'x', pid: 1, tool_name: 't' })).not.toThrow()
-    expect(() => touchLiveProcessSafe('x')).not.toThrow()
-    expect(() => unregisterLiveProcessSafe('x')).not.toThrow()
+    // Must not throw, and the returned handle is a safe no-op.
+    let handle
+    expect(() => {
+      handle = registerLiveProcessSafe({ name: 'x', pid: 1, tool_name: 't' })
+    }).not.toThrow()
+    expect(() => handle!.touch()).not.toThrow()
+    expect(() => handle!.unregister()).not.toThrow()
   })
 
   test('stack semantics — newest wins, clears remove by identity in any order', () => {

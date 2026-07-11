@@ -150,6 +150,43 @@ describe('CrashedAgentDetector', () => {
     expect(reg.size()).toBe(1)
     expect(reg.list().find((r) => r.name === 'session')?.pid).toBe(2)
   })
+
+  test('round-6 High-1: a DEAD→DEAD respawn under the same name is REPORTED, not suppressed', async () => {
+    const reg = new ProcessRegistry()
+    reg.register({ name: 's', pid: 1, tool_name: 't' })
+    // Both pid 1 and pid 2 are dead.
+    const probe: PidLivenessProbe = { isAlive: () => false }
+    const detector = new CrashedAgentDetector({
+      project_slug: 't1',
+      process_registry: reg,
+      pid_probe: probe,
+    })
+
+    // Tick 1 — dead pid 1 is reported.
+    const t1 = await detector.detect()
+    expect(t1.length).toBe(1)
+    expect(t1[0]?.payload['pid']).toBe(1)
+
+    // A DEAD replacement under the same name (upsert: same name, new dead pid 2)
+    // lands BEFORE the pid-1 alert commits.
+    reg.unregister('s')
+    reg.register({ name: 's', pid: 2, tool_name: 't' })
+
+    // Commit the pid-1 alert — pid guard keeps pid 2 (it did not match).
+    detector.commit(t1[0]!)
+    expect(reg.list().find((r) => r.name === 's')?.pid).toBe(2)
+
+    // Tick 2 — pid 2's death MUST surface (a distinct name+pid incident), not be
+    // suppressed by pid 1's still-open name key. This is the High-1 regression.
+    const t2 = await detector.detect()
+    expect(t2.length).toBe(1)
+    expect(t2[0]?.payload['pid']).toBe(2)
+
+    // Commit pid 2 → reaped; tick 3 sees nothing.
+    detector.commit(t2[0]!)
+    expect(reg.size()).toBe(0)
+    expect((await detector.detect()).length).toBe(0)
+  })
 })
 
 describe('OverrunCronDetector', () => {

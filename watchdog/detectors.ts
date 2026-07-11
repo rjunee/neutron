@@ -33,6 +33,13 @@ export interface CommonDetectorOptions {
 const newAlertId = (kind: WatchdogKind, key: string, ts: number): string =>
   `${kind}:${key}:${ts}`
 
+// A process is identified by (name, pid) — NEVER name alone. Incident keys for the
+// process detectors embed BOTH so a REPLACED process (same name, new pid) is a
+// DISTINCT incident, not one suppressed by the prior pid's still-open name key
+// (High 1). `pid` is always numeric and appended last, so the mapping is injective
+// even when a name legitimately contains '#'.
+const procIncidentKey = (name: string, pid: number): string => `${name}#${pid}`
+
 // ─────────────────────────────────────────────────────────────────
 // 1. gateway_heartbeat
 // ─────────────────────────────────────────────────────────────────
@@ -125,13 +132,14 @@ export class StuckAgentDetector implements WatchdogDetector {
   async detect(): Promise<WatchdogAlert[]> {
     const now = this.now()
     const stuck = this.registry.listStuck(this.threshold_ms)
-    const byName = new Map(stuck.map((r) => [r.name, r]))
-    // Incident-edge PER process: one alert per stuck process while it stays
-    // stuck; a process that recovers (activity resumes → drops out of listStuck)
-    // and later wedges again re-fires (Blocker-1 fix).
-    const risen = this.incidents.candidates(byName.keys(), (key) => newAlertId(this.kind, key, now))
+    // Key PER (name, pid): one alert per stuck process while it stays stuck; a
+    // process that recovers (activity resumes → drops out of listStuck) and later
+    // wedges again re-fires (Blocker-1). A REPLACED process (same name, new pid) is
+    // a DISTINCT incident, not suppressed by the old pid's open key (High 1).
+    const byKey = new Map(stuck.map((r) => [procIncidentKey(r.name, r.pid), r]))
+    const risen = this.incidents.candidates(byKey.keys(), (key) => newAlertId(this.kind, key, now))
     return risen.map(({ key, id }) => {
-      const r = byName.get(key)!
+      const r = byKey.get(key)!
       return {
         id,
         kind: this.kind,
@@ -202,10 +210,14 @@ export class CrashedAgentDetector implements WatchdogDetector {
     // dead record deduped (one alert per crash) WITHOUT removing it — the removal
     // is deferred to commit().
     const dead = this.registry.list().filter((r) => !this.probe.isAlive(r.pid))
-    const byName = new Map(dead.map((r) => [r.name, r]))
-    const risen = this.incidents.candidates(byName.keys(), (key) => newAlertId(this.kind, key, now))
+    // Key PER (name, pid): a dead→dead REPLACEMENT (same name, new dead pid) must
+    // be a DISTINCT incident. Keying by name alone left the old pid's incident open
+    // (its removal is pid-guarded, so it never resolves the name key) and the
+    // tracker then suppressed the successor's death forever (High 1).
+    const byKey = new Map(dead.map((r) => [procIncidentKey(r.name, r.pid), r]))
+    const risen = this.incidents.candidates(byKey.keys(), (key) => newAlertId(this.kind, key, now))
     return risen.map(({ key, id }) => {
-      const r = byName.get(key)!
+      const r = byKey.get(key)!
       return {
         id,
         kind: this.kind,

@@ -32,7 +32,9 @@ export {
   pushAmbientProcessRegistry,
   resolveAmbientProcessRegistry,
   registerLiveProcessSafe,
-  touchLiveProcessSafe,
-  unregisterLiveProcessSafe,
 } from './process-registry.ts'
-export type { ProcessRecord, ProcessRegisterInput } from './process-registry.ts'
+export type {
+  ProcessRecord,
+  ProcessRegisterInput,
+  LiveProcessHandle,
+} from './process-registry.ts'

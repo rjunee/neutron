@@ -86,6 +86,19 @@ export class ProcessRegistry {
   }
 
   /**
+   * Bump activity ONLY when the entry STILL points at `pid` — identity-guarded so
+   * a late event from an OLD child cannot refresh the NEW child a respawn
+   * installed under the same `name`. Returns true only when the matching entry was
+   * touched.
+   */
+  touchIfPid(name: string, pid: number): boolean {
+    const r = this.records.get(name)
+    if (r === undefined || r.pid !== pid) return false
+    r.last_activity_at = this.now()
+    return true
+  }
+
+  /**
    * Send SIGTERM and forget. Returns true if the process was registered,
    * false otherwise. Idempotent (SIGTERM to a dead PID is a no-op kill(2)
    * EAGAIN/ESRCH which we swallow).
@@ -197,38 +210,66 @@ export function resolveAmbientProcessRegistry(): ProcessRegistry | null {
 }
 
 /**
- * Register a live child process into the ambient registry — GUARDED so it can
- * NEVER throw into a spawn path. UPSERT semantics: an existing entry under
- * `name` (e.g. a respawn re-using the same session key while the old child's
- * exit handler hasn't fired yet) is replaced rather than colliding, so the
- * live-process view tracks the newest child. A no-op when no ambient registry is
- * registered (unit tests, sidecar tools, an LLM-less box).
+ * A handle bound to the SPECIFIC registry + `(name, pid)` a child was registered
+ * into. Its `touch`/`unregister` operate on THAT registry and THAT entry — never
+ * the current top-of-stack — so an old child's late touch or exit cannot mutate a
+ * DIFFERENT registry that a newer gateway boot pushed after this child registered
+ * (the ambient-stack clobber, High 2). Both operations identity-guard on the
+ * captured pid, so even within the same registry a respawn that replaced `name`
+ * with a new pid is never touched or dropped by the old child's handle.
  */
-export function registerLiveProcessSafe(input: ProcessRegisterInput): void {
+export interface LiveProcessHandle {
+  /** Refresh last-activity — no-op unless the owned `(registry, name, pid)` is still current. */
+  touch(): void
+  /** Drop the owned entry (natural exit) — no-op unless `(registry, name, pid)` is still current. */
+  unregister(): void
+}
+
+/** Handle returned when there is no ambient registry to write into. */
+const NOOP_LIVE_PROCESS_HANDLE: LiveProcessHandle = {
+  touch(): void {},
+  unregister(): void {},
+}
+
+/**
+ * Register a live child process into the ambient registry — GUARDED so it can
+ * NEVER throw into a spawn path — and return a {@link LiveProcessHandle} bound to
+ * the registry this write landed in plus the child's `(name, pid)`. UPSERT
+ * semantics: an existing entry under `name` (e.g. a respawn re-using the same
+ * session key while the old child's exit handler hasn't fired yet) is replaced
+ * rather than colliding, so the live-process view tracks the newest child. Returns
+ * a no-op handle when no ambient registry is registered (unit tests, sidecar
+ * tools, an LLM-less box).
+ */
+export function registerLiveProcessSafe(input: ProcessRegisterInput): LiveProcessHandle {
   try {
     const reg = resolveAmbientProcessRegistry()
-    if (reg === null) return
+    if (reg === null) return NOOP_LIVE_PROCESS_HANDLE
     reg.unregister(input.name)
     reg.register(input)
+    // Capture the OWNING registry + identity now, so touch/unregister below bind
+    // to THIS registry — not whatever is top-of-stack when they later fire.
+    const owner = reg
+    const name = input.name
+    const pid = input.pid
+    return {
+      touch(): void {
+        try {
+          owner.touchIfPid(name, pid)
+        } catch {
+          // Observability write — must never perturb the spawn it observes.
+        }
+      },
+      unregister(): void {
+        try {
+          owner.unregisterIfPid(name, pid)
+        } catch {
+          // swallow
+        }
+      },
+    }
   } catch {
     // Observability write — must never perturb the spawn it observes.
-  }
-}
-
-/** Bump a live child's last-activity timestamp. Guarded + no-op when absent. */
-export function touchLiveProcessSafe(name: string): void {
-  try {
-    resolveAmbientProcessRegistry()?.touch(name)
-  } catch {
-    // swallow
-  }
-}
-
-/** Drop a live child (natural exit) WITHOUT signalling. Guarded + no-op when absent. */
-export function unregisterLiveProcessSafe(name: string): void {
-  try {
-    resolveAmbientProcessRegistry()?.unregister(name)
-  } catch {
-    // swallow
+    return NOOP_LIVE_PROCESS_HANDLE
   }
 }
