@@ -320,6 +320,44 @@ describe('handleSave — scope covers client/session identity, same project', ()
   });
 });
 
+// ── busy flags clear when their OWN op settles (no stuck spinner) ─────
+// Intentional pre-D7 contract, faithfully preserved (Codex D7-r5): the
+// mutation busy-flags (`saving`, `uploadingBinary`, `revertingSha`)
+// clear UNCONDITIONALLY in `finally` — unlike the read-loading flags
+// (fetchTree / loadHistory) which clear only-when-latest. Rationale
+// (documented in the original handleSave): the shared `mutateGate` is
+// bumped by ANY mutation, so a save/upload/revert whose token is
+// superseded (by a scope switch OR a concurrent same-project mutation)
+// must STILL clear its own button — a "clear only when latest" policy
+// would leave the button permanently disabled (stuck spinner). These
+// tests pin that no-stuck-spinner property.
+describe('mutation busy flags never get stuck', () => {
+  it('saving clears even after a mid-save project switch', async () => {
+    let api = render('A');
+    const p = api.handleSave();
+    api = render('A');
+    expect(api.saving).toBe(true);
+    render('B');
+    await settle('writeFile', { size_bytes: 1, modified_at: 2 });
+    await p;
+    api = render('B');
+    expect(api.saving).toBe(false);
+  });
+
+  it('uploadingBinary clears even after a mid-upload project switch', async () => {
+    const pngFile = { name: 'shot.png' } as unknown as File;
+    let api = render('A');
+    const p = api.handleUploadBinary(pngFile);
+    api = render('A');
+    expect(api.uploadingBinary).toBe(true);
+    render('B');
+    await settle('uploadBinary');
+    await p;
+    api = render('B');
+    expect(api.uploadingBinary).toBe(false);
+  });
+});
+
 // ── handleCreateFile (4 await boundaries) ─────────────────────────────
 describe('handleCreateFile', () => {
   it('COMMITS with the right args (tree probe → writeFile new.md) with no switch', async () => {
