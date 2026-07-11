@@ -14,19 +14,29 @@ export { GBrainMemoryStore } from './gbrain-memory-store.ts'
 export {
   resolveEmbedderConfig,
   buildOpenAiEmbedderConfig,
+  probeOllamaHealth,
+  resolveOllamaProbeTarget,
+  keylessDisableEmbeddingEnv,
+  redactUrlUserinfo,
+  isOpenAiEmbeddingWidthSupported,
   type EmbedderConfig,
+  type OllamaHealthCheck,
 } from './embedder-config.ts'
 export {
   ensureBrainInitialized,
   isBrainInitialized,
   brainConfigPath,
+  readPersistedEmbeddingDims,
+  resolveExistingBrainWidth,
   resolveInitEmbeddingTarget,
+  type BrainEmbeddingWidth,
   type EnsureBrainInitInput,
   type EnsureBrainInitResult,
   type EnsureBrainInitStatus,
 } from './ensure-brain-init.ts'
 export {
   GBrainStdioMcpClient,
+  composeGbrainChildEnv,
   type GBrainStdioMcpClientOptions,
 } from './gbrain-stdio-client.ts'
 export {

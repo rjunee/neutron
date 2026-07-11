@@ -2046,18 +2046,57 @@ optional operator `GBRAIN_SOURCE` / `GBRAIN_BRAIN_ID`.
   `buildGBrainMemory`). Idempotent (no-op once `<GBRAIN_HOME>/.gbrain/config.json`
   exists) and fail-soft (a missing binary / failed init returns a status, never
   throws → the existing latched degrade-path). The brain is created
-  **embeddings-ready** (an OpenAI `text-embedding-3-large` 3072-dim column) even
-  with no key — so the default still computes NO embeddings (verified: `serve`
-  answers `put_page` + keyword `search` with no key) yet a later key upgrades in
-  place with no schema rebuild (a `--no-embedding` 1280-dim column can't — OpenAI
-  rejects 1280-dim vectors).
-- **Default — keyword + graph, NO embeddings.** Memory search runs on GBrain's
-  BM25 keyword index + the typed-edge graph. No embeddings are computed without a
-  key; provisioning and search need no external embedder. This is the shipped
-  default.
-- **Embeddings flip on with an OpenAI key — `gbrain-memory/embedder-config.ts`.**
-  Two triggers resolve an embedder (`resolveEffectiveEmbedder` in
-  `build-gbrain-memory.ts`):
+  **embeddings-ready at the ONE universal 768-dim column (RA3)** — the width the
+  free local Ollama `nomic-embed-text` fallback emits natively AND that OpenAI's
+  `text-embedding-3-large` slots into via Matryoshka truncation
+  (`ensure-brain-init.ts#resolveInitEmbeddingTarget` pins EVERY fresh lineage —
+  incl. the latent column an `off` install is pre-sized at — to 768). So a fresh
+  brain does SEMANTIC recall out of the box via the local fallback with no key,
+  and a later OpenAI key upgrades in place at the SAME 768 width — no schema
+  rebuild. (A pre-RA3 brain persisted at 3072 keeps 3072; a key upgrades THAT in
+  place at its existing width — the reconciler validates 1..3072 before handing
+  the width to OpenAI.)
+- **Default — HYBRID recall via a FREE local embedder (RA3).** Memory search runs
+  vector (local Ollama `nomic-embed-text` @ 768d, over `OLLAMA_BASE_URL`, default
+  `http://localhost:11434/v1`) + GBrain's BM25 keyword index + the typed-edge
+  graph — out of the box, with no key and no env. If Ollama is unreachable / the
+  model isn't pulled, GBrain's `hybridSearch` degrades each failed per-query embed
+  to keyword-only, so recall fails SOFT to lexical (never crashes;
+  `ensure-brain-init` probes once at boot and LOGS the degradation — not a silent
+  no-op). The pre-RA3 keyword+graph-only mode is still available as the explicit
+  `NEUTRON_EMBEDDINGS=off` opt-out. **`unset` is NOT off** — it selects the local
+  fallback.
+- **`off` is an AUTHORITATIVE kill switch — even over a persisted Ollama config.**
+  Because RA3 makes Ollama the default, essentially EVERY brain persists
+  `embedding_model: "ollama:nomic-embed-text"` in its `config.json`, and gbrain's
+  `loadConfig` only lets `GBRAIN_EMBEDDING_MODEL` override that when it is TRUTHY —
+  so an EMPTY serve env is NOT a kill switch (gbrain falls back to the persisted
+  keyless Ollama and keeps embedding). `off` therefore emits a TRUTHY keyless
+  DISABLE override (`GBRAIN_EMBEDDING_MODEL=openai:text-embedding-3-large` with the
+  key neutralized): with no usable credential gbrain's `noEmbed` is true, so it
+  stores pages unembedded and never calls a provider, regardless of what's
+  persisted. On the INIT side, `off` sizes the column at the shared keyless latent
+  default (`openai:text-embedding-3-large @ 768`, no embeddings computed); removing
+  `off` later (back to unset) simply re-activates the local Ollama embedder over
+  that same 768 column and `embed --stale` backfills — no rebuild.
+- **Fail-soft on the WRITE path too (RA3).** GBrain's `put_page` embeds inline and
+  FAILS HARD when the configured provider is unreachable — and an Ollama provider
+  needs no key, so a naive default would make EVERY memory write fail on a host
+  without Ollama. So the serve seam (`resolveServeEmbeddingEnv` /
+  `keylessDisableEmbeddingEnv` in `build-gbrain-memory.ts`) gates the local embedder
+  on a reachability probe at each connect: reachable → embed with Ollama;
+  unreachable / model-not-pulled (or a width-mismatch drop, or `off`) → emit the
+  SAME keyless disable override as above (truthy `GBRAIN_EMBEDDING_MODEL`, key
+  neutralized, and NO dims so gbrain keeps the persisted column width). With no key
+  `isAvailable('embedding')` is false, so gbrain stores pages UNEMBEDDED (NULL-stale)
+  and writes succeed. The next reconnect after Ollama returns forwards the real
+  `ollama:*` env → `ensure-brain-init`'s unconditional `gbrain embed --stale`
+  backfills those chunks IN PLACE. A cloud (OpenAI-key) embedder is never probed —
+  it is assumed reachable.
+- **Cloud (OpenAI) embeddings — the UPGRADE over the free local default
+  (`gbrain-memory/embedder-config.ts`).** Two triggers select OpenAI
+  `text-embedding-3-large` in place of the default local Ollama fallback
+  (`resolveEffectiveEmbedder` in `build-gbrain-memory.ts`):
   1. **The onboarding-captured OpenAI key (the product path, ND1).** The
      onboarding optional-key offer (`onboarding/optional-keys.ts#OPENAI_OFFER`,
      "paste a key to unlock cloud embeddings") stores the key in the per-owner
@@ -2076,20 +2115,38 @@ optional operator `GBRAIN_SOURCE` / `GBRAIN_BRAIN_ID`.
      "the OpenAI embeddings key is supposed to be wired to GBrain but isn't."
      Instead the composer threads a resolver thunk
      (`resolveOnboardingOpenAiKey` → `buildGBrainMemory({ resolveOpenAiKey })`),
-     and `buildGBrainMemory` calls it at the first memory op: the lazily-resolved
-     embedder env (`GBRAIN_EMBEDDING_*` + `OPENAI_API_KEY`) is merged into the
-     `gbrain serve` child via `GBrainStdioMcpClientOptions.resolveDynamicEnv`, and
-     `ensureBrainInitialized` inits against that same embedder and backfills
-     pre-key pages once via `gbrain embed --stale`. So a stored key alone flips
-     GBrain to semantic embeddings on the next turn — no env flag, no restart —
-     exactly as the onboarding offer ("flips on your next turn") promises. The key
-     is memoized at first spawn so the init guard + serve child agree on the
-     embedder selected then; `null`/absent → keyword + graph, byte-for-byte
-     unchanged.
-  2. **The operator env opt-in (`NEUTRON_EMBEDDINGS`) — unchanged.**
-     `resolveEmbedderConfig(env)`: `openai` (3072d), `ollama` (768d,
-     `OLLAMA_BASE_URL`), `auto`, or `off`/unset. A bare `OPENAI_API_KEY` (consumed
-     by the GPT LLM adapter) does **not** enable embeddings on its own.
+     and `buildGBrainMemory` calls it when a `gbrain serve` connection is created:
+     the lazily-resolved embedder env (`GBRAIN_EMBEDDING_*` + `OPENAI_API_KEY`) is
+     merged into the `gbrain serve` child via
+     `GBrainStdioMcpClientOptions.resolveDynamicEnv`, and `ensureBrainInitialized`
+     inits against that same embedder and backfills pre-key pages via
+     `gbrain embed --stale`. **Activation cadence — per-spawn, NOT
+     mid-connection.** The `GBrainStdioMcpClient` connects LAZILY on the first
+     memory op and then holds ONE long-lived connection for the process: every
+     later op returns the existing client, and the dynamic embedder env is
+     resolved ONLY at connection CREATION (`gbrain-stdio-client.ts` — the init
+     guard re-arms on `close()` / after a failed connect, not on a live client).
+     So a key stored while a connection already exists is picked up the next time
+     that connection is **(re)created** — a reconnect (a transient drop, or the
+     process teardown/restart that `open/wiring/memory.ts` closes it on) — **NOT
+     necessarily on the immediate next turn** of an already-open connection. It
+     activates "next turn" only in the case where no connection exists yet when
+     the key lands (the lazy first spawn reads it). The key is memoized per connect
+     so the init guard + serve child agree on the embedder selected then;
+     `null`/absent → keyword + graph, byte-for-byte unchanged. (A
+     mid-live-connection hot-swap — activate WITHOUT a reconnect — is out of RA3
+     scope; a possible RA2 follow-up.)
+  2. **The operator env override (`NEUTRON_EMBEDDINGS`).**
+     `resolveEmbedderConfig(env)`: **`unset` (DEFAULT) → local Ollama
+     `nomic-embed-text` @ 768d** (embeddings ON); `off`/`0`/`false`/`none` →
+     keyword + graph only (the explicit opt-out); `openai` →
+     `text-embedding-3-large` at the shared **768d** width (needs a key,
+     `NEUTRON_EMBEDDINGS_OPENAI_API_KEY` ← `OPENAI_API_KEY`); `ollama` →
+     `nomic-embed-text` @ 768d (explicit, e.g. a custom `OLLAMA_BASE_URL`);
+     `auto`/`on`/`1`/`true` → OpenAI when a key is present, else the local Ollama
+     fallback. A bare `OPENAI_API_KEY` (consumed by the GPT LLM adapter) does
+     **not** enable embeddings on its own — only `auto`/`openai` (or the separate
+     onboarding-key path above) does.
 
   A non-null embedder is the child env (`GBRAIN_EMBEDDING_MODEL` =
   `provider:model`, `GBRAIN_EMBEDDING_DIMENSIONS`, provider auth/base-url) that

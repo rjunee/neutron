@@ -1,43 +1,82 @@
 /**
  * @neutronai/gbrain-memory — conditional embedding-store configuration.
  *
- * Embeddings are **OPT-IN**. The default Neutron instance runs its memory on
- * GBrain's keyword (BM25) + typed-edge graph stores and initializes **no**
- * embedding/vector store — that path is unchanged and must stay untouched.
+ * RA3 (2026-07): recall is HYBRID (vector + keyword + graph) BY DEFAULT. A
+ * fresh install with no OpenAI key still gets semantic recall via a LOCAL,
+ * free embedder — Ollama `nomic-embed-text` — auto-configured with zero env
+ * required. `NEUTRON_EMBEDDINGS` lets an operator override the provider or
+ * opt all the way out:
  *
- * An embedding store initializes ONLY when an embedder is explicitly opted into
- * via `NEUTRON_EMBEDDINGS`:
- *
- *   - unset / `off` / `0` / `false` / ``  → `null` (DEFAULT: no store,
- *     keyword + graph only — byte-for-byte today's behavior).
+ *   - unset (DEFAULT)                     → local Ollama fallback
+ *     (`nomic-embed-text`, 768 dims) over `OLLAMA_BASE_URL` (default
+ *     `http://localhost:11434/v1`). No key, no env, no I/O in THIS resolver
+ *     (it stays pure/sync) — GBrain's own `hybridSearch` already degrades a
+ *     failed per-query embed to keyword-only (`gbrain/src/core/search/
+ *     hybrid.ts`), so an unreachable/not-yet-pulled Ollama fails soft to
+ *     lexical recall with no crash. `ensure-brain-init.ts` additionally
+ *     probes Ollama once at boot (`probeOllamaHealth`, below) and logs a
+ *     clear degradation warning — or a healthy confirmation — so this is
+ *     never a silent mystery. Deliberately does NOT consult any OpenAI key
+ *     (bare or dedicated) — see "Why the default never bills" below.
+ *   - `off` / `0` / `false` / `none` / `` → `null` (no store, keyword + graph
+ *     only — the pre-RA3 default, still available as an explicit opt-out).
  *   - `openai`                            → cloud `text-embedding-3-large`
- *     (3072 dims). Requires an OpenAI key (`NEUTRON_EMBEDDINGS_OPENAI_API_KEY`,
- *     falling back to `OPENAI_API_KEY`). Missing key → `null` + a one-line warn.
+ *     at the shared 768-dim width (see below). Requires an OpenAI key
+ *     (`NEUTRON_EMBEDDINGS_OPENAI_API_KEY`, falling back to
+ *     `OPENAI_API_KEY`). Missing key → `null` + a one-line warn.
  *   - `ollama`                            → local/free `nomic-embed-text`
- *     (768 dims) over `OLLAMA_BASE_URL` (default `http://localhost:11434/v1`).
- *     No key required — runs unauthenticated on the local host.
- *   - `auto` / `on` / `1` / `true`        → prefer OpenAI when a key is present,
- *     else Ollama when `OLLAMA_BASE_URL` is set, else `null`.
+ *     (768 dims) — the same provider as the default, but as an explicit,
+ *     discoverable choice (e.g. a custom `OLLAMA_BASE_URL`).
+ *   - `auto` / `on` / `1` / `true`        → EXPLICIT opt-in escape hatch:
+ *     prefer OpenAI when a key is present (bare or dedicated), else the
+ *     local Ollama fallback. This is the ONLY path where a bare
+ *     `OPENAI_API_KEY` can activate cloud embeddings — an operator must
+ *     deliberately type `NEUTRON_EMBEDDINGS=auto` (or `openai`) for that;
+ *     the passive default never does.
  *
- * **Why an explicit switch and not "OpenAI key present → embed".** A plain
- * `OPENAI_API_KEY` is already consumed by the GPT BYO LLM adapter
- * (`runtime/adapters/gpt-5-5-api/auth.ts`). Triggering cloud embeddings off its
- * mere presence would silently bill every GPT-BYO user for embeddings and
- * change the default — violating the opt-in contract. The operator opts in once
- * via `NEUTRON_EMBEDDINGS`; provider auth is then resolved from the usual keys.
+ * **Why the default never bills.** A plain `OPENAI_API_KEY` is already
+ * consumed by the GPT BYO LLM adapter (`runtime/adapters/gpt-5-5-api/
+ * auth.ts`). Defaulting to cloud embeddings off its mere presence would
+ * silently bill every GPT-BYO user for embeddings — so the DEFAULT never
+ * looks at any OpenAI key at all; it only ever activates the free local
+ * Ollama fallback. Reaching cloud embeddings still requires the deliberate
+ * `NEUTRON_EMBEDDINGS=openai|auto` opt-in (unchanged), or the SEPARATE,
+ * consensual onboarding-key capture the composer wires ahead of this
+ * resolver (`buildOpenAiEmbedderConfig`, called directly with a stored key —
+ * see `gateway/realmode-composer/build-gbrain-memory.ts:resolveEffectiveEmbedder`).
+ *
+ * **One universal 768-dim column width (no-rebuild upgrade, no divergence).**
+ * EVERY fresh-brain lineage — the local Ollama fallback (native 768), the
+ * onboarding-captured OpenAI key (`buildOpenAiEmbedderConfig` default 768),
+ * the explicit `NEUTRON_EMBEDDINGS=openai` opt-in (below), AND the latent
+ * column a `off` brain is pre-sized at (`ensure-brain-init.ts:
+ * resolveInitEmbeddingTarget`) — resolves to the SAME 768 dims. This is
+ * deliberate: it makes the init-time width and every serve-time width
+ * STRUCTURALLY identical, so a key pasted after boot (or after an `off`
+ * install) can NEVER produce a `GBRAIN_EMBEDDING_DIMENSIONS` that mismatches
+ * the persisted column. 768 is the one width the free local embedder can
+ * emit; OpenAI's `text-embedding-3-large` supports Matryoshka truncation to
+ * any width ≤ 3072 (verified against `gbrain/src/core/ai/dims.ts:
+ * dimsProviderOptions`), so it slots into the same `vector(768)` column with
+ * no ALTER and no `gbrain embed --stale` dimension-mismatch. The ONLY non-768
+ * columns are LEGACY brains created under the pre-RA3 3072 default; those
+ * already exist on disk and are reconciled to their persisted width at boot
+ * (`build-gbrain-memory.ts:reconcileEmbedderToBrain`).
  *
  * **The GBrain seam.** GBrain reads its embedding model from
  * `GBRAIN_EMBEDDING_MODEL` (format `provider:model`, e.g.
- * `openai:text-embedding-3-large`) + `GBRAIN_EMBEDDING_DIMENSIONS`, falling back
- * to these env vars when no `~/.gbrain/config.json` is present
+ * `openai:text-embedding-3-large`) + `GBRAIN_EMBEDDING_DIMENSIONS`, falling
+ * back to these env vars when no `~/.gbrain/config.json` is present
  * (`gbrain/src/cli.ts`, `gbrain/src/core/ai/model-resolver.ts#parseModelId`).
- * When neither is set, `gbrain serve` initializes no embedding store and
- * hybridSearch degrades to lexical — exactly the path Neutron ships today.
  *
- * This module is **pure** (no I/O, no spawn): given an env, it returns the child
- * env GBrain needs, or `null`. The provisioning seam
- * (`resolveGbrainClientOptions`) merges a non-null result into the `gbrain serve`
- * child env; a `null` result leaves the child env untouched.
+ * This module is **pure** (no I/O, no spawn): given an env, `resolveEmbedder
+ * Config` returns the child env GBrain needs, or `null`. The provisioning
+ * seam (`resolveGbrainClientOptions`) merges a non-null result into the
+ * `gbrain serve` child env; a `null` result leaves the child env untouched.
+ * The one exception is `probeOllamaHealth` — a SEPARATE, explicitly-async,
+ * explicitly-named export that does real network I/O; it is advisory-only
+ * (never changes which embedder gets configured) and is called from
+ * `ensure-brain-init.ts`, not from `resolveEmbedderConfig`.
  */
 
 /** A configured embedder. `childEnv` is merged into the `gbrain serve` child. */
@@ -55,14 +94,35 @@ export interface EmbedderConfig {
   childEnv: Record<string, string>
 }
 
-/** Cloud default: OpenAI `text-embedding-3-large` at its max 3072 dims. */
+/** Cloud: OpenAI `text-embedding-3-large`. Max native width 3072 dims. */
 const OPENAI_EMBED_MODEL = 'text-embedding-3-large'
-const OPENAI_EMBED_DIMENSIONS = 3072
+/**
+ * `text-embedding-3-large` supports Matryoshka truncation to ANY integer width
+ * in `1..3072` (mirrors gbrain's `isValidOpenAITextEmbedding3Dim`,
+ * `gbrain/src/core/ai/dims.ts`). Used to VALIDATE an untrusted persisted column
+ * width before configuring OpenAI against it — a corrupt/out-of-range width
+ * (e.g. `9999`, or `<= 0`) must NOT be forwarded (gbrain would reject it at
+ * embed time); the reconciler degrades to keyword+graph instead.
+ */
+const OPENAI_TE3_LARGE_MAX_DIMS = 3072
+
+/** True when OpenAI `text-embedding-3-large` can serve embeddings at `dims`. */
+export function isOpenAiEmbeddingWidthSupported(dims: number): boolean {
+  return Number.isInteger(dims) && dims >= 1 && dims <= OPENAI_TE3_LARGE_MAX_DIMS
+}
 
 /** Local/free default: Ollama `nomic-embed-text` at its native 768 dims. */
 const OLLAMA_EMBED_MODEL = 'nomic-embed-text'
 const OLLAMA_EMBED_DIMENSIONS = 768
 const OLLAMA_DEFAULT_BASE_URL = 'http://localhost:11434/v1'
+
+/**
+ * Shared width for the default/auto/onboarding-key lineage (see file doc,
+ * "Shared 768-dim column width"). Matches Ollama's native output so an
+ * onboarding-captured OpenAI key upgrades an existing local-fallback column
+ * IN PLACE, no rebuild.
+ */
+const SHARED_DEFAULT_DIMENSIONS = OLLAMA_EMBED_DIMENSIONS
 
 function readNonEmpty(env: NodeJS.ProcessEnv, key: string): string | undefined {
   const v = env[key]
@@ -85,15 +145,24 @@ function resolveOpenAiKey(env: NodeJS.ProcessEnv): string | undefined {
  * sanctioned trigger, distinct from a bare env `OPENAI_API_KEY` (which the GPT
  * BYO adapter consumes and which must NOT silently switch on cloud embeddings;
  * see `resolveEmbedderConfig`'s `NEUTRON_EMBEDDINGS` gate).
+ *
+ * `dimensions` defaults to `SHARED_DEFAULT_DIMENSIONS` (768) — the one
+ * universal fresh-brain width (see "One universal 768-dim column width"). Pass
+ * `dimensions` explicitly ONLY to target a pre-existing LEGACY column of a
+ * different width (`reconcileEmbedderToBrain` does this for a 3072 brain), so
+ * the key upgrades that column in place at its native width.
  */
-export function buildOpenAiEmbedderConfig(apiKey: string): EmbedderConfig {
+export function buildOpenAiEmbedderConfig(
+  apiKey: string,
+  dimensions: number = SHARED_DEFAULT_DIMENSIONS,
+): EmbedderConfig {
   return {
     provider: 'openai',
     model: OPENAI_EMBED_MODEL,
-    dimensions: OPENAI_EMBED_DIMENSIONS,
+    dimensions,
     childEnv: {
       GBRAIN_EMBEDDING_MODEL: `openai:${OPENAI_EMBED_MODEL}`,
-      GBRAIN_EMBEDDING_DIMENSIONS: String(OPENAI_EMBED_DIMENSIONS),
+      GBRAIN_EMBEDDING_DIMENSIONS: String(dimensions),
       OPENAI_API_KEY: apiKey,
     },
   }
@@ -114,15 +183,63 @@ function buildOllamaConfig(env: NodeJS.ProcessEnv): EmbedderConfig {
 }
 
 /**
- * Resolve the conditional embedder config from env. Returns `null` (the
- * default) when embeddings are not opted in or cannot be satisfied — in which
- * case provisioning forwards nothing and GBrain runs keyword + graph only.
+ * The local-Ollama reachability probe TARGET (base URL + model) for an env —
+ * env-derived and INDEPENDENT of the resolved key/width, so ONE probe result can
+ * be shared by every consumer this connect (the init-guard backfill gate AND the
+ * serve-embedder gate). Matches `buildOllamaConfig`'s own base-url/model so the
+ * shared probe hits exactly the endpoint the serve child would embed against.
+ */
+export function resolveOllamaProbeTarget(env: NodeJS.ProcessEnv): {
+  baseUrl: string
+  model: string
+} {
+  return {
+    baseUrl: readNonEmpty(env, 'OLLAMA_BASE_URL') ?? OLLAMA_DEFAULT_BASE_URL,
+    model: OLLAMA_EMBED_MODEL,
+  }
+}
+
+/**
+ * The env that AUTHORITATIVELY disables embedding on the `gbrain serve` child —
+ * regardless of what provider is PERSISTED in the brain's `config.json`.
+ *
+ * gbrain's `loadConfig` spreads config.json FIRST and only overrides
+ * `embedding_model` when `GBRAIN_EMBEDDING_MODEL` is TRUTHY. A brain created
+ * under the RA3 default persists `ollama:nomic-embed-text`, and Ollama needs no
+ * key — so an ABSENT/empty embed env is NOT a kill switch (gbrain keeps embedding
+ * with the persisted Ollama, or fails writes when it's down). To WIN over the
+ * persisted config we emit a TRUTHY override to the keyless OpenAI-latent model
+ * and NEUTRALIZE any ambient `OPENAI_API_KEY`: with no usable credential gbrain's
+ * `noEmbed = !isAvailable('embedding')` is true → it stores pages UNEMBEDDED, no
+ * provider call. No `GBRAIN_EMBEDDING_DIMENSIONS` → gbrain keeps the persisted
+ * column width (this override never writes a vector, so its width is moot). Used
+ * by the composer's `off` / unreachable-Ollama / width-drop gate AND by the stdio
+ * client's dynamic-resolver failure catch (genuine keyword+graph degrade).
+ */
+export function keylessDisableEmbeddingEnv(): Record<string, string> {
+  return { GBRAIN_EMBEDDING_MODEL: `openai:${OPENAI_EMBED_MODEL}`, OPENAI_API_KEY: '' }
+}
+
+/**
+ * Resolve the conditional embedder config from env. The DEFAULT (unset
+ * `NEUTRON_EMBEDDINGS`) is the local Ollama fallback (hybrid recall out of
+ * the box, no key, no billing risk) — `null` (no embedder at all) is now an
+ * explicit opt-out (`off`/`0`/`false`/`none`), not the default.
  */
 export function resolveEmbedderConfig(env: NodeJS.ProcessEnv = process.env): EmbedderConfig | null {
   const raw = readNonEmpty(env, 'NEUTRON_EMBEDDINGS')?.toLowerCase()
 
-  // Default + explicit-off: no embedder. Today's behavior, untouched.
-  if (raw === undefined || raw === 'off' || raw === '0' || raw === 'false' || raw === 'none') {
+  // DEFAULT: unset (or blank/whitespace, which `readNonEmpty` also treats as
+  // "not configured"). Local Ollama fallback, unconditionally — this branch
+  // deliberately never calls `resolveOpenAiKey`; see "Why the default never
+  // bills" above.
+  if (raw === undefined) {
+    return buildOllamaConfig(env)
+  }
+
+  // Explicit off: no embedder. The pre-RA3 default, still available as an
+  // opt-out for operators who want keyword + graph only.
+  if (raw === 'off' || raw === '0' || raw === 'false' || raw === 'none') {
     return null
   }
 
@@ -136,6 +253,8 @@ export function resolveEmbedderConfig(env: NodeJS.ProcessEnv = process.env): Emb
       )
       return null
     }
+    // Shared universal width (768) — same as every other fresh-brain lineage,
+    // so a later onboarding key or an `off`→key transition never diverges.
     return buildOpenAiEmbedderConfig(apiKey)
   }
 
@@ -143,17 +262,13 @@ export function resolveEmbedderConfig(env: NodeJS.ProcessEnv = process.env): Emb
     return buildOllamaConfig(env)
   }
 
-  // auto / on / 1 / true → pick the best available provider.
+  // auto / on / 1 / true → EXPLICIT opt-in: prefer OpenAI when a key is
+  // present (bare or dedicated — deliberate, the operator typed this),
+  // else the local Ollama fallback (always available; never null).
   if (raw === 'auto' || raw === 'on' || raw === '1' || raw === 'true') {
     const apiKey = resolveOpenAiKey(env)
     if (apiKey !== undefined) return buildOpenAiEmbedderConfig(apiKey)
-    if (readNonEmpty(env, 'OLLAMA_BASE_URL') !== undefined) return buildOllamaConfig(env)
-    console.warn(
-      `[gbrain-memory] NEUTRON_EMBEDDINGS=${raw} but no embedder is available ` +
-        '(no OpenAI key, no OLLAMA_BASE_URL). ' +
-        'Embedding store DISABLED; memory runs on keyword + graph.',
-    )
-    return null
+    return buildOllamaConfig(env)
   }
 
   console.warn(
@@ -162,4 +277,136 @@ export function resolveEmbedderConfig(env: NodeJS.ProcessEnv = process.env): Emb
       'Embedding store DISABLED; memory runs on keyword + graph.',
   )
   return null
+}
+
+/** Result of a local-Ollama reachability probe. See `probeOllamaHealth`. */
+export interface OllamaHealthCheck {
+  /** The base URL answered at all (server up, port open). */
+  reachable: boolean
+  /** The configured embedding model is present in Ollama's local model list. */
+  modelPresent: boolean
+}
+
+/**
+ * Redact `user:pass@` userinfo from a URL for SAFE logging. An operator can put
+ * credentials in `OLLAMA_BASE_URL` — WITH a scheme (`http://user:secret@host/v1`)
+ * OR without one (`user:secret@host/v1`) — and those must NEVER reach a log line.
+ * Returns the value with any userinfo replaced by `***@`; unchanged only when the
+ * authority genuinely has no `user[:pass]@` segment.
+ *
+ * FAIL-CLOSED: a scheme-less `alice:secret@host` is NOT caught by `new URL()` —
+ * it parses as scheme `alice:` + an OPAQUE path, reporting empty username/
+ * password — so relying on the parser alone leaked it. So the parser only
+ * handles well-formed URLs with a real authority; EVERYTHING else falls through
+ * to a linear authority scan that redacts a leading `user[:pass]@` even without a
+ * scheme, over-redacting rather than risk a leak. Linear character ops only (no
+ * regex → no `js/polynomial-redos`, the prior CodeQL lesson in this file).
+ */
+export function redactUrlUserinfo(url: string): string {
+  // Well-formed URL with an authority (`scheme://user:pass@host`): the parser
+  // locates the userinfo precisely. Only RETURN here when it actually found
+  // credentials — an empty username/password may still hide a scheme-less
+  // `user:pass@host` the parser mis-read as scheme+opaque-path, so fall through.
+  try {
+    const u = new URL(url)
+    if (u.username !== '' || u.password !== '') {
+      u.username = ''
+      u.password = ''
+      return u.toString().replace('://', '://***@')
+    }
+  } catch {
+    /* not a parseable URL — fall through to the fail-closed authority scan */
+  }
+  // Fail-closed strip: find the AUTHORITY (after `://` if present, else the whole
+  // leading segment, up to the first `/`, `?` or `#`) and, if it contains an `@`
+  // with any userinfo before it, redact the whole `userinfo@` span. Catches the
+  // scheme-less `alice:secret@host` case the parser misses. Uses the LAST `@` in
+  // the authority so a malformed multi-`@` value can't smuggle a credential past.
+  const schemeSep = url.indexOf('://')
+  const authorityStart = schemeSep === -1 ? 0 : schemeSep + 3
+  let authorityEnd = url.length
+  for (let i = authorityStart; i < url.length; i++) {
+    const c = url[i]
+    if (c === '/' || c === '?' || c === '#') {
+      authorityEnd = i
+      break
+    }
+  }
+  let at = -1
+  for (let i = authorityStart; i < authorityEnd; i++) {
+    if (url[i] === '@') at = i
+  }
+  if (at > authorityStart) {
+    return `${url.slice(0, authorityStart)}***@${url.slice(at + 1)}`
+  }
+  return url
+}
+
+/**
+ * Derive Ollama's native `/api/tags` health/model-list endpoint from the base
+ * URL — PRESERVING any base path so a reverse-proxied deployment probes the
+ * right place. Strip a trailing `/v1` (the OpenAI-compat suffix) and any
+ * trailing slash, then append `/api/tags`:
+ *   - `http://localhost:11434/v1`        → `http://localhost:11434/api/tags`
+ *   - `http://localhost:11434`           → `http://localhost:11434/api/tags`
+ *   - `https://proxy.example/ollama/v1`  → `https://proxy.example/ollama/api/tags`
+ *   - `https://proxy.example/ollama`     → `https://proxy.example/ollama/api/tags`
+ * (Dropping the base path would probe `https://proxy.example/api/tags` and
+ * yield a FALSE "not reachable" — which now also wrongly suppresses the
+ * fresh-init backfill marker.)
+ */
+function ollamaTagsUrl(baseUrl: string): string {
+  // Strip trailing slashes then a terminal `/v1` segment. Uses linear string ops
+  // (NOT a `\/+$` regex, which is polynomial-ReDoS on `//////…x` inputs and runs
+  // on the operator-supplied OLLAMA_BASE_URL — CodeQL js/polynomial-redos).
+  const stripToBase = (path: string): string => {
+    let p = path
+    while (p.endsWith('/')) p = p.slice(0, -1)
+    if (p.endsWith('/v1')) p = p.slice(0, -'/v1'.length)
+    return p
+  }
+  try {
+    const u = new URL(baseUrl)
+    u.pathname = `${stripToBase(u.pathname)}/api/tags`
+    u.search = ''
+    u.hash = ''
+    return u.toString()
+  } catch {
+    return `${stripToBase(baseUrl)}/api/tags`
+  }
+}
+
+/**
+ * Best-effort reachability probe for the local Ollama embedder fallback.
+ *
+ * NOT used to gate which embedder gets configured — `resolveEmbedderConfig`
+ * stays pure/sync, and GBrain's own `hybridSearch` already degrades a failed
+ * per-query embed to keyword-only (`gbrain/src/core/search/hybrid.ts`:
+ * "Embedding failure is non-fatal, fall back to keyword-only"), so recall
+ * never crashes when Ollama is absent. This probe exists purely so that
+ * degraded state is OBSERVABLE: `ensure-brain-init.ts` calls it once at boot
+ * and logs a clear, actionable warning (or a healthy confirmation) instead of
+ * leaving "why does recall feel lexical-only" a silent mystery.
+ *
+ * Fails soft in every direction: a network error, timeout, or malformed
+ * response all resolve to `{ reachable: false, modelPresent: false }` rather
+ * than throwing.
+ */
+export async function probeOllamaHealth(
+  baseUrl: string,
+  opts: { model?: string; timeoutMs?: number; fetchImpl?: typeof fetch } = {},
+): Promise<OllamaHealthCheck> {
+  const model = opts.model ?? OLLAMA_EMBED_MODEL
+  const timeoutMs = opts.timeoutMs ?? 1500
+  const doFetch = opts.fetchImpl ?? fetch
+  try {
+    const res = await doFetch(ollamaTagsUrl(baseUrl), { signal: AbortSignal.timeout(timeoutMs) })
+    if (!res.ok) return { reachable: false, modelPresent: false }
+    const body = (await res.json()) as { models?: Array<{ name?: string }> }
+    const names = Array.isArray(body.models) ? body.models.map((m) => m?.name ?? '') : []
+    const modelPresent = names.some((n) => n === model || n.startsWith(`${model}:`))
+    return { reachable: true, modelPresent }
+  } catch {
+    return { reachable: false, modelPresent: false }
+  }
 }

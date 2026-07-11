@@ -29,6 +29,7 @@ import {
   isGbrainBinaryMissingError,
 } from './memory-store.ts'
 import type { McpClient } from './mcp-client.ts'
+import { keylessDisableEmbeddingEnv } from './embedder-config.ts'
 import {
   GBrainVersionNotice,
   type GBrainUpgradeMode,
@@ -78,8 +79,24 @@ export interface GBrainStdioMcpClientOptions {
 }
 
 /**
+ * The embedding-selector env keys that determine the `content_chunks` vector
+ * column's model + width. These are OWNED by the resolved embedder seam
+ * (`opts.env` static childEnv + `opts.resolveDynamicEnv()`): they must reach the
+ * `gbrain serve` child ONLY when our reconciliation intends them. We strip any
+ * value inherited from the ambient base env first, so the composer's fail-safe
+ * (an embedder dropped to keyword+graph → NO embedding env) can't be silently
+ * defeated by an ambient `GBRAIN_EMBEDDING_DIMENSIONS` that would mismatch an
+ * existing brain's column (the whole point of `reconcileEmbedderToBrain`). The
+ * MCP SDK's `getDefaultEnvironment()` already allowlists inherited vars (these
+ * aren't on it), so this is defense-in-depth that makes the guarantee
+ * self-contained rather than dependent on that allowlist.
+ */
+const EMBEDDER_OWNED_ENV_KEYS = ['GBRAIN_EMBEDDING_MODEL', 'GBRAIN_EMBEDDING_DIMENSIONS'] as const
+
+/**
  * Build the `gbrain serve` child env, merging (in precedence order) the MCP SDK
- * defaults, the static `opts.env` (baked at composition), the LAZILY-resolved
+ * defaults (with embedder-owned keys stripped — see `EMBEDDER_OWNED_ENV_KEYS`),
+ * the static `opts.env` (baked at composition), the LAZILY-resolved
  * `opts.resolveDynamicEnv()` (the embedder seam for a key captured after boot),
  * then the explicit `GBRAIN_BRAIN_ID` / `GBRAIN_SOURCE` scoping. Extracted (and
  * exported) so the boot-time-vs-connect-time merge is unit-testable without a
@@ -90,13 +107,25 @@ export async function composeGbrainChildEnv(
   base: Record<string, string>,
 ): Promise<Record<string, string>> {
   const env: Record<string, string> = { ...base }
+  // The embedder seam is the SOLE authority on the embedding column selectors;
+  // never inherit them ambiently (would defeat a reconciled keyword+graph drop).
+  for (const key of EMBEDDER_OWNED_ENV_KEYS) delete env[key]
   if (opts.env !== undefined) Object.assign(env, opts.env)
   if (opts.resolveDynamicEnv !== undefined) {
     try {
       Object.assign(env, await opts.resolveDynamicEnv())
     } catch (err) {
+      // A resolver failure must GENUINELY degrade to keyword+graph. Simply
+      // leaving the selectors ABSENT does NOT: for a brain whose config.json
+      // persists `ollama:nomic-embed-text`, gbrain would fall back to that
+      // keyless provider and STILL attempt Ollama on write (embed or hard-fail) —
+      // contradicting the "keyword-only" claim. Apply the SAME authoritative
+      // keyless-disable override as the `off`/unreachable/width-drop gate so the
+      // serve child truly never embeds this connect.
+      Object.assign(env, keylessDisableEmbeddingEnv())
       console.warn(
-        '[gbrain-stdio-client] dynamic env resolver threw (continuing keyword+graph): ' +
+        '[gbrain-stdio-client] dynamic env resolver threw — forcing keyword+graph ' +
+          '(embedding disabled for this connect): ' +
           (err instanceof Error ? err.message : String(err)),
       )
     }
@@ -121,9 +150,14 @@ export class GBrainStdioMcpClient implements McpClient {
    */
   private unavailableDetail: string | null = null
   /**
-   * Latched once the init guard (`opts.ensureInitialized`) has run, so the
-   * idempotent `gbrain init` is attempted at most once per client even if the
-   * child is closed + reconnected later.
+   * Latched once the init guard (`opts.ensureInitialized`) has run for the
+   * CURRENT connection, so the idempotent `gbrain init` is attempted at most
+   * once per `gbrain serve` session. RE-ARMED on `close()` so a teardown +
+   * reconnect runs the guard again — this is what lets an OpenAI key captured
+   * AFTER the first connection trigger its one-time `gbrain embed --stale`
+   * backfill of pre-key pages on the next spawn (the guard body is idempotent:
+   * `init` is skipped when the brain exists and the backfill is marker-gated,
+   * so re-running per session is cheap + safe).
    */
   private initGuardDone = false
   /** The latest GBrain upstream upgrade notice, fed from the child's stderr. */
@@ -203,6 +237,16 @@ export class GBrainStdioMcpClient implements McpClient {
       return await this.connecting
     } finally {
       this.connecting = null
+      // Re-arm the init guard if this attempt did NOT establish a live client
+      // (a transient connect failure, a thrown compose, etc.). `initGuardDone`
+      // is latched optimistically BEFORE the spawn, so without this a failed
+      // first connect would leave it stuck `true` with no live child — the next
+      // attempt would then skip the guard (and its per-connect key re-resolve),
+      // so a key stored between a failed spawn and the retry would never
+      // activate. On SUCCESS (`this.client` set) the guard stays latched, so a
+      // live session never re-runs it. (Binary-missing latches
+      // `unavailableDetail`, so future calls fast-fail regardless.)
+      if (this.client === null) this.initGuardDone = false
     }
   }
 
@@ -222,6 +266,14 @@ export class GBrainStdioMcpClient implements McpClient {
       await this.client.close()
       this.client = null
     }
+    // Re-arm the init guard so the NEXT connect re-runs it. A key captured
+    // after this session (onboarding/admin) then triggers its marker-gated
+    // `gbrain embed --stale` backfill on the reconnect — without this, the
+    // reconnect would activate the embedder env (via `resolveDynamicEnv`) but
+    // never backfill the pages written before the key existed. Not gated on a
+    // prior client: a connect that failed before completing (leaving the guard
+    // latched but no live child) must also re-arm so the next attempt retries.
+    this.initGuardDone = false
   }
 }
 

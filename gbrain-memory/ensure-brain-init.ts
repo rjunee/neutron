@@ -17,36 +17,124 @@
  * typed-edge graph search work with NO embedder; semantic embeddings turn on
  * only when an OpenAI key is present.
  *
- * **Embeddings-ready by construction (the key design decision).** We always
- * init the PGLite brain with the OpenAI embedding model + dims (3072) so the
- * `content_chunks` vector column is OpenAI-compatible *from creation* — EVEN
- * when no key is present. Verified end-to-end: with no key, `gbrain` computes no
- * embeddings and `gbrain serve` answers `put_page` + keyword `search` exactly as
- * the default keyword+graph mode requires. When the owner later adds an OpenAI
- * key (the onboarding optional-key offer → secrets store), embeddings flip on
- * with **NO schema rebuild** and a one-time `gbrain embed --stale` backfill of
- * any pages written before the key existed. A `--no-embedding` brain could NOT
- * upgrade in place: its default column is 1280-dim and OpenAI's
- * `text-embedding-3-large` rejects 1280-dim vectors (allowed: 256/512/768/1024/
- * 1536/3072). The init dims/model track an explicitly-configured embedder when
- * one is set via `NEUTRON_EMBEDDINGS` (e.g. ollama 768), so an operator who
- * opts into a different provider gets a matching column.
+ * **Embeddings-ready by construction (the key design decision).** We init the
+ * PGLite brain against whatever embedder is effectively configured — by
+ * DEFAULT (RA3, 2026-07) that is the local Ollama fallback (768 dims,
+ * `resolveEmbedderConfig`'s unset case), so `content_chunks` is
+ * semantic-ready *from creation* with no key and no operator config. EVERY
+ * fresh-brain lineage — local fallback, onboarding key, explicit
+ * `NEUTRON_EMBEDDINGS=openai`, AND the latent column of an `off` brain — uses
+ * the SAME universal 768-dim width, so init-time and every serve-time width
+ * are structurally identical and a key pasted later can never mismatch the
+ * column. When the owner adds an OpenAI key (the onboarding optional-key
+ * offer → secrets store), embeddings flip to cloud with **NO schema rebuild**:
+ * OpenAI's `text-embedding-3-large` truncates to 768 via Matryoshka, so a
+ * one-time `gbrain embed --stale` backfill writes into the SAME `vector(768)`
+ * column. A `--no-embedding` brain could NOT upgrade in place (its default
+ * column is 1280-dim). The init dims/model always track the EFFECTIVELY
+ * -configured embedder (`resolveInitEmbeddingTarget`); the ONLY non-768
+ * columns are LEGACY brains created under the pre-RA3 3072 default, reconciled
+ * to their persisted width at boot (`build-gbrain-memory.ts`).
+ *
+ * **Fail-soft Ollama reachability (RA3).** Because the default now
+ * optimistically configures the local Ollama fallback, `ensureBrainInitialized`
+ * also probes it once at boot (`probeOllamaHealth`) and logs a clear
+ * degradation warning when it's unreachable or `nomic-embed-text` isn't
+ * pulled — advisory only, it never changes the embedder or column sizing.
+ * GBrain's own `hybridSearch` already degrades a failed per-query embed to
+ * keyword-only, so an absent Ollama never crashes recall; this probe just
+ * makes the degraded state OBSERVABLE instead of a silent mystery.
  */
 
-import { existsSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 
 import type { EmbedderConfig } from './embedder-config.ts'
+import { probeOllamaHealth, redactUrlUserinfo, type OllamaHealthCheck } from './embedder-config.ts'
 import { isGbrainBinaryMissingError } from './memory-store.ts'
 import { type CommandRunner, bunCommandRunner } from './command-runner.ts'
 import { resolveGbrainChildPath } from './resolve-gbrain-command.ts'
 
-/** OpenAI default the latent column is sized for (upgrade-without-rebuild). */
+/**
+ * The latent column an embedder-less (`off`) brain is pre-sized at so a later
+ * key upgrades it in place WITHOUT a rebuild. RA3: this is the ONE universal
+ * fresh-brain width (768) — identical to the local Ollama fallback and the
+ * onboarding-key path — so an `off`→key transition can never mismatch the
+ * column. OpenAI `text-embedding-3-large` truncates to 768 via Matryoshka, so
+ * the model is still the OpenAI one (a `--no-embedding` 1280-dim brain could
+ * not upgrade at all).
+ */
 const DEFAULT_EMBEDDING_MODEL = 'openai:text-embedding-3-large'
-const DEFAULT_EMBEDDING_DIMENSIONS = 3072
+const DEFAULT_EMBEDDING_DIMENSIONS = 768
 
-/** Marker file (under the brain dir) recording a completed embeddings backfill. */
+/**
+ * Marker file (under the brain dir) recording the embedding MODEL the column was
+ * last (re)embedded under, e.g. `openai:text-embedding-3-large`. RA3: the SAME
+ * 768-dim column can be embedded by DIFFERENT providers (local Ollama
+ * `nomic-embed-text` vs cloud OpenAI) — numerically compatible, but semantically
+ * DISTINCT vector spaces.
+ *
+ * INFORMATIONAL ONLY (as of the outage-orphan fix): the marker enriches the
+ * model-change log line and tracks the current provider; it NO LONGER gates the
+ * backfill. `gbrain embed --stale` runs on EVERY connect (see the
+ * already-initialized branch), so convergence to one vector space — and repair
+ * of any NULL-embedding pages orphaned by a provider/Ollama outage — is driven
+ * by gbrain's OWN per-page `embedding_signature` tracking + the unconditional
+ * `--stale` cursor (`gbrain/src/commands/embed.ts:embedAllStale` →
+ * `invalidateStaleSignatureEmbeddings`), NOT by this marker. Gating the backfill
+ * on "marker == current model" was a bug: it wrongly implied "every page is
+ * embedded" and permanently stranded pages written during an outage that
+ * happened AFTER the marker was recorded.
+ */
 const BACKFILL_MARKER = '.neutron-embeddings-backfilled'
+
+/** `<GBRAIN_HOME>/.gbrain/.neutron-embeddings-backfilled` */
+function backfillMarkerPath(gbrainHome: string): string {
+  return join(gbrainHome, '.gbrain', BACKFILL_MARKER)
+}
+
+/**
+ * The embedding model recorded in the backfill marker, or `null` when absent /
+ * unreadable / a LEGACY marker (pre-RA3 markers stored a bare ISO timestamp, no
+ * model — treated as `null` so the first RA3 boot re-validates via one
+ * `embed --stale`).
+ */
+function readBackfillMarkerModel(gbrainHome: string): string | null {
+  try {
+    const raw = readFileSync(backfillMarkerPath(gbrainHome), 'utf-8').trim()
+    const parsed = JSON.parse(raw) as { model?: unknown }
+    return typeof parsed.model === 'string' && parsed.model.length > 0 ? parsed.model : null
+  } catch {
+    return null
+  }
+}
+
+/** The provider-qualified model id an embedder embeds under (`provider:model`). */
+function embedderModelId(embedder: EmbedderConfig): string {
+  return embedder.childEnv['GBRAIN_EMBEDDING_MODEL'] ?? `${embedder.provider}:${embedder.model}`
+}
+
+/** Record the model the column is now embedded under (best-effort). */
+async function writeBackfillMarker(gbrainHome: string, model: string): Promise<void> {
+  try {
+    await Bun.write(backfillMarkerPath(gbrainHome), JSON.stringify({ model, at: new Date().toISOString() }))
+  } catch {
+    /* marker is an optimization; a missing marker only re-scans (idempotent). */
+  }
+}
+
+/**
+ * Count of chunks embedded this run, parsed from `gbrain embed --stale` stdout.
+ * gbrain prints `Embedded N chunks across M pages` (or `Embedded 0 chunks (0
+ * stale found)` on a clean brain) to stdout via `slog` → `console.log`. Returns
+ * 0 when unparseable — a no-op scan, the steady-state case. Used only to label
+ * the outcome (backfill happened vs cheap no-op); it never gates the embed.
+ */
+function parseEmbeddedCount(stdout: string): number {
+  const m = stdout.match(/Embedded\s+(\d+)\s+chunk/i)
+  const n = m?.[1] !== undefined ? parseInt(m[1], 10) : 0
+  return Number.isFinite(n) ? n : 0
+}
 
 export interface EnsureBrainInitInput {
   /** The per-instance `GBRAIN_HOME` (the data boundary; `.gbrain/` lives under it). */
@@ -67,6 +155,29 @@ export interface EnsureBrainInitInput {
   runner?: CommandRunner
   /** Structured log sink (injected in tests). Default `console`. */
   logger?: { warn: (msg: string) => void; info: (msg: string) => void }
+  /**
+   * Ollama reachability probe seam (injected in tests). Default the real
+   * `probeOllamaHealth` (does actual network I/O). Used only when
+   * `resolveOllamaHealth` is NOT supplied.
+   */
+  probeOllamaHealth?: typeof probeOllamaHealth
+  /**
+   * The per-connect SHARED local-Ollama health resolver. When supplied (the LIVE
+   * path threads `makePerConnectResolver.getOllamaHealth`), the guard reads
+   * health from it INSTEAD of its own probe, so the backfill/invalidation gate
+   * here observes the EXACT same result as the serve-embedder gate — the two can
+   * never disagree within one connect (which would let Ollama coming up mid-window
+   * serve embeddings while the stale invalidation was skipped → mixed space).
+   */
+  resolveOllamaHealth?: () => Promise<OllamaHealthCheck>
+  /**
+   * Suppress the advisory Ollama-degradation LOG (a once-per-client boot signal).
+   * The init guard re-runs on every (re)connect, so the caller sets this after
+   * the FIRST run to avoid log spam. NOTE: this suppresses ONLY the log — the
+   * health probe itself STILL runs (it gates the `embed --stale` backfill; an
+   * unhealthy provider must never trigger a doomed 120s backfill spawn).
+   */
+  skipOllamaProbe?: boolean
 }
 
 export type EnsureBrainInitStatus =
@@ -93,16 +204,79 @@ export function isBrainInitialized(gbrainHome: string): boolean {
 }
 
 /**
+ * The embedding dimensionality an EXISTING brain's `content_chunks` vector
+ * column was created at, read from `<GBRAIN_HOME>/.gbrain/config.json`
+ * (`embedding_dimensions`) — or `null` for a brain that isn't initialized, has
+ * no persisted embedding config, or an unreadable/legacy config.
+ *
+ * This is the authoritative width for a brain that ALREADY exists: at gbrain
+ * runtime the `GBRAIN_EMBEDDING_DIMENSIONS` env OVERRIDES config.json
+ * (`gbrain/src/core/config.ts:loadConfig`), so sending a width that mismatches
+ * the persisted `vector(N)` column makes `gbrain serve` embed writes fail with
+ * a dimension mismatch. RA3 uses this to RECONCILE the effective embedder to a
+ * pre-existing column (`build-gbrain-memory.ts:reconcileEmbedderToBrain`) —
+ * e.g. a legacy 3072-dim brain created under the pre-RA3 default keeps its
+ * width (an OpenAI key upgrades in place at 3072; the 768-dim local Ollama
+ * fallback, which cannot match, is dropped to keyword+graph rather than
+ * corrupting writes).
+ */
+export function readPersistedEmbeddingDims(gbrainHome: string): number | null {
+  try {
+    const raw = readFileSync(brainConfigPath(gbrainHome), 'utf-8')
+    const parsed = JSON.parse(raw) as { embedding_dimensions?: unknown }
+    const dims = parsed.embedding_dimensions
+    return typeof dims === 'number' && Number.isInteger(dims) && dims > 0 ? dims : null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * The column-width state a reconciler must key off — distinguishing a FRESH
+ * brain (safe to init at the RA3 default width) from an already-initialized
+ * one whose width we can't read (must NOT be treated as fresh):
+ *
+ *   - `null`      — NO brain yet (no `config.json`). Fresh: use the RA3 default.
+ *   - `number`    — an existing brain with a KNOWN persisted column width.
+ *   - `'unknown'` — an existing/initialized brain (`config.json` present) whose
+ *                   width can't be determined (missing `embedding_dimensions`,
+ *                   a malformed/unreadable config, or a `--no-embedding` brain).
+ *                   FAIL SAFE: the reconciler injects NO embedding dimension so
+ *                   `gbrain serve` honors the brain's OWN persisted config
+ *                   rather than a guessed width that could mismatch the column.
+ */
+export type BrainEmbeddingWidth = number | 'unknown' | null
+
+/**
+ * Resolve the reconciliation width for the brain at `gbrainHome`. Combines the
+ * initialized-ness check (`isBrainInitialized`) with the persisted-dims read so
+ * an initialized-but-unreadable brain is `'unknown'` (fail safe), never `null`
+ * (which would misclassify it as fresh and inject the RA3 default width).
+ */
+export function resolveExistingBrainWidth(gbrainHome: string): BrainEmbeddingWidth {
+  if (!isBrainInitialized(gbrainHome)) return null
+  return readPersistedEmbeddingDims(gbrainHome) ?? 'unknown'
+}
+
+/**
  * The (model, dimensions) the brain's vector column is sized for. Tracks an
  * explicitly-configured embedder; otherwise the OpenAI default so an
  * onboarding-captured key upgrades the brain in place.
+ *
+ * The `model` MUST be provider-qualified (`provider:model`, e.g.
+ * `ollama:nomic-embed-text`) — `gbrain init` REFUSES a bare model id
+ * ("missing a provider prefix"), so returning `embedder.model` (bare) would
+ * abort init for EVERY keyless default (Ollama) and eager-key (OpenAI)
+ * deployment. Use the same qualified id the runtime embed seam uses
+ * (`embedderModelId`), keeping init and `gbrain serve` on one model lineage.
+ * `DEFAULT_EMBEDDING_MODEL` is already qualified.
  */
 export function resolveInitEmbeddingTarget(embedder: EmbedderConfig | null): {
   model: string
   dimensions: number
 } {
   if (embedder !== null) {
-    return { model: embedder.model, dimensions: embedder.dimensions }
+    return { model: embedderModelId(embedder), dimensions: embedder.dimensions }
   }
   return { model: DEFAULT_EMBEDDING_MODEL, dimensions: DEFAULT_EMBEDDING_DIMENSIONS }
 }
@@ -123,6 +297,66 @@ export async function ensureBrainInitialized(
     warn: (m: string) => console.warn(m),
     info: (m: string) => console.info(m),
   }
+  const probeHealth = input.probeOllamaHealth ?? probeOllamaHealth
+
+  // Whether the effective embedder is CONFIRMED able to embed right now. Used to
+  // gate the fresh-init marker write: the marker must mean "the column is (and
+  // will be, for the pages that exist) embedded under this model", NOT merely
+  // "init ran". OpenAI (a key is present → embeds on write) needs no local probe
+  // → treated as usable. A local Ollama embedder is usable ONLY when the probe
+  // confirms reachable + model-pulled; if it's down/missing at init, we must NOT
+  // write the marker, or pages written during the outage would be orphaned when
+  // the later healthy reconnect sees a matching marker and skips `embed --stale`.
+  let embedderConfirmedUsable = input.embedder !== null && input.embedder.provider !== 'ollama'
+
+  // Ollama reachability probe (RA3). For a local Ollama embedder we ALWAYS
+  // resolve health (cheap — a ~1.5s-bounded HTTP GET), because the result GATES
+  // the `embed --stale` backfill below: an unreachable/model-missing provider
+  // must NOT trigger a doomed 120s backfill spawn that blocks connection
+  // establishment (the stdio client awaits this guard BEFORE composing the serve
+  // env). Prefer the SHARED per-connect `resolveOllamaHealth` (live path) so this
+  // backfill gate reads the EXACT same probe result as the serve-embedder gate —
+  // the two can never disagree within one connect. `skipOllamaProbe` suppresses
+  // only the repeated ADVISORY LOG, NEVER the health check itself. A cloud
+  // (OpenAI-key) embedder is never probed and stays `embedderConfirmedUsable`
+  // from its initializer (a key present → embeds).
+  if (input.embedder !== null && input.embedder.provider === 'ollama') {
+    const baseUrl = input.embedder.childEnv['OLLAMA_BASE_URL'] ?? 'http://localhost:11434/v1'
+    // Redact any `user:pass@` userinfo before logging — an operator can put
+    // credentials in OLLAMA_BASE_URL and they must never reach a log line.
+    const safeUrl = redactUrlUserinfo(baseUrl)
+    const health = input.resolveOllamaHealth
+      ? await input.resolveOllamaHealth().catch(
+          (): OllamaHealthCheck => ({ reachable: false, modelPresent: false }),
+        )
+      : await probeHealth(baseUrl, { model: input.embedder.model })
+    embedderConfirmedUsable = health.reachable && health.modelPresent
+    if (!input.skipOllamaProbe) {
+      if (!health.reachable) {
+        logger.warn(
+          `[gbrain-memory] local Ollama embedder configured (${input.embedder.model} @ ${safeUrl}) ` +
+            'but it is not reachable — semantic recall degrades to keyword+graph (lexical) while it ' +
+            'is down. Once Ollama is available, NEW content embeds automatically; content written ' +
+            'DURING the outage backfills on the next reconnect/restart of the GBrain connection ' +
+            '(not mid-session — the running connection keeps its lexical fallback until it reconnects). ' +
+            `Install: brew install ollama && ollama pull ${input.embedder.model} ` +
+            '(or paste an OpenAI key in Settings to use cloud embeddings instead).',
+        )
+      } else if (!health.modelPresent) {
+        logger.warn(
+          `[gbrain-memory] Ollama is reachable at ${safeUrl} but '${input.embedder.model}' is not ` +
+            'pulled — semantic recall degrades to keyword+graph (lexical) until it is. ' +
+            `Install: ollama pull ${input.embedder.model}`,
+        )
+      } else {
+        logger.info(
+          `[gbrain-memory] local Ollama embedder healthy (${input.embedder.model} @ ${safeUrl}) — ` +
+            'semantic recall active.',
+        )
+      }
+    }
+  }
+
   const childEnv: Record<string, string> = { GBRAIN_HOME: input.gbrainHome }
   // Provider auth (e.g. OPENAI_API_KEY) the embed backfill needs lives in the
   // embedder's childEnv; merge it so `gbrain embed` can reach the provider.
@@ -189,38 +423,88 @@ export async function ensureBrainInitialized(
         `(keyword+graph; column ${target.model} ${target.dimensions}d, embeddings ` +
         `${input.embedder !== null ? 'ENABLED' : 'latent — add an OpenAI key to turn on'}).`,
     )
-    // Fresh brain has no pre-key pages, so no backfill is needed even with a key.
+    // Fresh brain has no pages, so no backfill is needed — record the model the
+    // column starts under so a later provider/model switch is detected. BUT only
+    // when the embedder is CONFIRMED usable: if a local Ollama embedder is down /
+    // model-missing at init, do NOT write the marker — leave it absent so the
+    // next healthy reconnect runs `embed --stale` and backfills any pages written
+    // while degraded (the marker means "backfill completed", not "init ran").
+    if (input.embedder !== null && embedderConfirmedUsable) {
+      await writeBackfillMarker(input.gbrainHome, embedderModelId(input.embedder))
+    }
     return { status: 'initialized', detail: `${target.model} ${target.dimensions}d` }
   }
 
-  // Already initialized. The only remaining work is a one-time embeddings
-  // backfill when a provider key is now present but pages predate it.
-  const hasProviderKey =
-    input.embedder !== null &&
-    typeof input.embedder.childEnv['OPENAI_API_KEY'] === 'string' &&
-    input.embedder.childEnv['OPENAI_API_KEY'].length > 0
-  if (hasProviderKey && !existsSync(join(input.gbrainHome, '.gbrain', BACKFILL_MARKER))) {
-    // `embed --stale` only embeds pages missing/with-outdated vectors, so this
-    // is cheap when there is nothing to backfill (fresh-with-key) and bounded
-    // otherwise. Best-effort: a failure must never block serving.
-    const res = await runner.run(command, ['embed', '--stale'], { timeoutMs: 120_000, env: childEnv })
-    if (res.code === 0) {
-      // Drop the marker so subsequent boots skip the backfill scan. We can't
-      // write files from the runner seam, so do it directly — best-effort.
-      try {
-        await Bun.write(join(input.gbrainHome, '.gbrain', BACKFILL_MARKER), new Date().toISOString())
-      } catch {
-        /* marker is an optimization; a missing marker only re-scans (idempotent). */
+  // Already initialized. Run `gbrain embed --stale` on EVERY connect ONCE the
+  // embedder is CONFIRMED usable (a reachable+pulled Ollama, or a cloud key) —
+  // NOT gated on the marker. It is idempotent and repairs BOTH orphan modes:
+  //   • OUTAGE ORPHANS — any chunk whose embedding IS NULL (pages written while
+  //     Ollama / the provider was unreachable, WHENEVER that outage happened,
+  //     including AFTER a healthy init already wrote the marker) is (re)embedded.
+  //     This is the crux of the fix: a marker matching the current model means
+  //     "the last backfill ran under this model", NOT "every page is embedded" —
+  //     the old `markerModel !== currentModel` gate skipped this backfill and
+  //     stranded those pages permanently.
+  //   • MODEL / PROVIDER SWITCH — gbrain first NULLs the prior-signature vectors
+  //     (`invalidateStaleSignatureEmbeddings`, keyed on gbrain's OWN per-page
+  //     signature — not this marker), then the same NULL-embedding cursor
+  //     re-embeds them into the new space, converging a mixed column (openai↔
+  //     ollama) back to one space.
+  // Cheap on a clean brain: gbrain's stale fast-path exits after a single
+  // `countStaleChunks` (~50 bytes wire) when nothing is NULL. Keyword+graph
+  // brains (no embedder) never embed, so skip entirely.
+  //
+  // CRUCIALLY gated on `embedderConfirmedUsable`: `embed --stale` spawns
+  // `gbrain embed` with a 120s timeout, and the stdio client AWAITS this guard
+  // BEFORE it composes the serve env — so firing it against an UNREACHABLE Ollama
+  // (the majority no-Ollama-host case) would block connection establishment for
+  // up to 120s while it retries a dead provider, directly breaking the fail-soft
+  // promise. When the local embedder isn't confirmed healthy we SKIP the backfill
+  // entirely: the brain serves keyword+graph immediately, the stale chunks stay
+  // NULL, and a LATER reconnect with a healthy provider backfills them (the
+  // whole backfill-when-healthy design). Best-effort even when it does run: any
+  // failure never blocks serving.
+  if (input.embedder !== null && embedderConfirmedUsable) {
+    const currentModel = embedderModelId(input.embedder)
+    const markerModel = readBackfillMarkerModel(input.gbrainHome)
+    let res: { code: number; stdout: string; stderr: string }
+    try {
+      res = await runner.run(command, ['embed', '--stale'], { timeoutMs: 120_000, env: childEnv })
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err)
+      if (isGbrainBinaryMissingError(err)) {
+        logger.warn(
+          `[gbrain-memory] '${command}' could not be spawned for embed backfill — memory DISABLED ` +
+            '(keyword+graph still works). Install: bun install -g github:garrytan/gbrain',
+        )
+        return { status: 'binary-missing', detail: detail.slice(0, 200) }
       }
-      logger.info(
-        `[gbrain-memory] embeddings backfill complete at GBRAIN_HOME=${input.gbrainHome} — ` +
-          'semantic recall active.',
+      logger.warn(
+        `[gbrain-memory] 'gbrain embed --stale' threw under ${currentModel} — keyword+graph ` +
+          `recall still works; embeddings backfill on the next reconnect. err: ${detail.slice(0, 160)}`,
       )
-      return { status: 'embeddings-backfilled', detail: 'embed --stale ok' }
+      return { status: 'already-initialized', detail: brainConfigPath(input.gbrainHome) }
+    }
+    if (res.code === 0) {
+      const embedded = parseEmbeddedCount(res.stdout)
+      // Record the model the column is now embedded under (informational — see
+      // the marker doc; it no longer gates anything).
+      await writeBackfillMarker(input.gbrainHome, currentModel)
+      if (embedded > 0) {
+        logger.info(
+          `[gbrain-memory] embeddings backfill embedded ${embedded} chunk(s) at ` +
+            `GBRAIN_HOME=${input.gbrainHome} under ${currentModel}` +
+            `${markerModel !== null && markerModel !== currentModel ? ` (was ${markerModel})` : ''} — semantic recall active.`,
+        )
+        return { status: 'embeddings-backfilled', detail: `embed --stale ok (${embedded} under ${currentModel})` }
+      }
+      // Clean idempotent no-op — nothing was stale. Steady state.
+      return { status: 'already-initialized', detail: brainConfigPath(input.gbrainHome) }
     }
     logger.warn(
-      `[gbrain-memory] 'gbrain embed --stale' failed (code ${res.code}) — keyword+graph recall ` +
-        `still works; semantic embeddings will populate on next write. stderr: ${res.stderr.trim().slice(0, 160)}`,
+      `[gbrain-memory] 'gbrain embed --stale' failed (code ${res.code}) under ${currentModel} — ` +
+        'keyword+graph recall still works; embeddings backfill on the next reconnect. ' +
+        `stderr: ${res.stderr.trim().slice(0, 160)}`,
     )
   }
   return { status: 'already-initialized', detail: brainConfigPath(input.gbrainHome) }
