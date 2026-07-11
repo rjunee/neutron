@@ -389,15 +389,19 @@ describe('neutron-backup.sh — AES key excluded from the backup bundle (S3a)', 
     }
   })
 
-  // Post-push remote verification + NON-DESTRUCTIVE ownership (Codex blockers
-  // #6/#7): a key on a PRE-EXISTING remote tag the tool does NOT own must be
-  // caught by the post-push verify — the backup FAILS CLOSED naming the ref and
+  // PRE-PUSH remote verification + NON-DESTRUCTIVE ownership (Codex blockers
+  // #6/#7/#10): a key on a PRE-EXISTING remote tag the tool does NOT own must be
+  // caught BEFORE any push — the backup FAILS CLOSED naming the ref and
   // requiring OPERATOR remediation, and it must NEVER delete/rewrite that
-  // unowned ref itself. Pre-seed the bare remote with a key-containing commit
-  // on `refs/tags/leaked`, run the backup from a clean local repo → non-zero
-  // exit, error names the ref + remediation, no success line, and the tag
-  // REMAINS on the remote UNTOUCHED.
-  test('a pre-seeded remote tag with the key: fails closed with remediation and leaves the tag UNTOUCHED', () => {
+  // unowned ref itself. Critically (blocker #10, the ORDERING bug), because the
+  // gate runs BEFORE the push, NO new ciphertext (`project.db`) may reach a
+  // remote that still discloses the key — the remote's refs are UNCHANGED and
+  // the tool's own backup branch is never created. Pre-seed the bare remote
+  // with a key-containing commit on `refs/tags/leaked`, run the backup from a
+  // clean local repo → non-zero exit, error names the ref + remediation + the
+  // "NO new ciphertext was pushed." guarantee, no success line, the tag REMAINS
+  // UNTOUCHED, AND no new backup branch / `project.db` object was pushed.
+  test('a pre-seeded remote tag with the key: fails closed BEFORE push, leaves the tag UNTOUCHED, and uploads NO fresh ciphertext', () => {
     const dataDir = mkdtempSync(join(tmpdir(), 'neutron-backup-remotetag-'))
     const remoteDir = mkdtempSync(join(tmpdir(), 'neutron-backup-remote3-'))
     const seedDir = mkdtempSync(join(tmpdir(), 'neutron-backup-seed-'))
@@ -418,19 +422,31 @@ describe('neutron-backup.sh — AES key excluded from the backup bundle (S3a)', 
       spawnSync('git', ['-C', seedDir, 'push', '-q', remoteGitDir, 'refs/tags/leaked'])
       expect(remoteObjectsMatching(remoteGitDir, '.neutron-aes-key').length).toBeGreaterThan(0)
       const tagShaBefore = git(remoteGitDir, ['rev-parse', 'refs/tags/leaked'])
+      // The FULL set of remote refs before the run — must be byte-identical after.
+      const refsBefore = git(remoteGitDir, ['for-each-ref', '--format=%(refname) %(objectname)'])
 
-      // A clean local backup repo (no key anywhere) pushing to that remote.
-      writeFileSync(join(dataDir, 'project.db'), 'db-v1\n')
+      // A clean local backup repo (no key anywhere) pushing to that remote. The
+      // fresh ciphertext is a DISTINCTIVE marker so we can prove it never lands.
+      writeFileSync(join(dataDir, 'project.db'), 'FRESH-CIPHERTEXT-MUST-NOT-LEAK\n')
       const res = runBackup(dataDir, { extraEnv: { NEUTRON_BACKUP_REMOTE: remoteGitDir } })
 
-      // MUST fail closed — the tool never destructively "cleans" a ref it does
-      // not own; the operator remediates.
+      // (a) MUST fail closed BEFORE the push — the tool never destructively
+      // "cleans" a ref it does not own; the operator remediates. The message is
+      // the PRE-push gate's, and it names the offending ref + the guarantee.
       expect(res.status).not.toBe(0)
-      expect(res.stderr).toContain('refusing to report the backup clean')
+      expect(res.stderr).toContain('refusing to push')
       expect(res.stderr).toContain('refs/tags/leaked')
+      expect(res.stderr).toContain('NO new ciphertext was pushed.')
       expect(res.stdout).not.toContain('carries .neutron-aes-key on NO ref')
-      // The unowned tag is LEFT UNTOUCHED (same SHA, still present).
+      // (b) The unowned tag is LEFT UNTOUCHED (same SHA, still present).
       expect(git(remoteGitDir, ['rev-parse', 'refs/tags/leaked'])).toBe(tagShaBefore)
+      // (c) CRUCIAL (blocker #10): the gate ran BEFORE the push, so NO fresh
+      // ciphertext reached the dirty remote. The remote's refs are byte-for-byte
+      // unchanged, no backup branch was created, and the distinctive project.db
+      // ciphertext object is absent from the remote entirely.
+      expect(git(remoteGitDir, ['for-each-ref', '--format=%(refname) %(objectname)'])).toBe(refsBefore)
+      expect(git(remoteGitDir, ['for-each-ref', '--format=%(refname)', 'refs/heads/'])).toBe('')
+      expect(remoteObjectsMatching(remoteGitDir, 'project.db')).toEqual([])
     } finally {
       rmSync(dataDir, { recursive: true, force: true })
       rmSync(remoteDir, { recursive: true, force: true })

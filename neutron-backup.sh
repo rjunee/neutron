@@ -267,6 +267,18 @@ purge_key_from_history() {
   info "purged .neutron-aes-key from all local backup history (local keyfile left intact)."
 }
 
+# Point `origin` at $REMOTE (create or re-point). Idempotent — called both
+# before the pre-push gate (which fetches from origin) and again AFTER
+# `purge_key_from_history`, because `git filter-repo` removes the origin remote
+# as a safety measure and the push that follows needs it back.
+ensure_origin_remote() {
+  if git remote get-url origin >/dev/null 2>&1; then
+    git remote set-url origin "$REMOTE"
+  else
+    git remote add origin "$REMOTE"
+  fi
+}
+
 # Delete the temp verification namespace so a fetched (possibly key-carrying)
 # remote ref never lingers to pollute the local `--all` history checks.
 _cleanup_remote_verify_refs() {
@@ -274,38 +286,65 @@ _cleanup_remote_verify_refs() {
     | while IFS= read -r _r; do [ -n "$_r" ] && git update-ref -d "$_r" 2>/dev/null || true; done
 }
 
-# S3(a) — the AUTHORITATIVE post-push gate. The local purge + force-push clean
-# the branch this tool OWNS, but they cannot reach a key sitting on a
-# PRE-EXISTING remote tag or a second branch the tool never created. So AFTER
-# pushing we fetch EVERY remote ref into a temp namespace and verify the key is
-# reachable from NONE of them. If any remote ref still carries it, we FAIL
-# CLOSED (die) naming the exact ref(s) + the commands to sanitize them, rather
-# than falsely report the backup clean. (neutron-backup is a single-branch
-# snapshot tool that never creates tags/other branches, so this only triggers
-# on an exotic remote seeded outside the tool — but the guarantee is honest.)
-verify_remote_clean_after_push() {
+# Fetch EVERY remote ref into a temp namespace and set `_BAD_REMOTE_REFS` to the
+# space-separated list of remote refs from which `.neutron-aes-key` is
+# reachable. `$1`, when non-empty, is a branch short-name to EXEMPT (our own
+# backup branch, whose OLD key-bearing state is replaced atomically by the
+# force-push in the same run — the post-push scan re-checks it with no
+# exemption). Always cleans up the temp namespace. Dies if the remote refs
+# cannot be fetched (cannot verify → fail closed).
+_scan_remote_refs_for_key() {
+  _exempt_branch=${1:-}
   if ! git fetch -q origin '+refs/*:refs/remote-verify/*' 2>/dev/null; then
     _cleanup_remote_verify_refs
-    die "refusing to report the backup clean: could not fetch $REMOTE refs to verify .neutron-aes-key is absent from every remote ref. Verify the remote manually before trusting this backup."
+    die "refusing to continue: could not fetch $REMOTE refs to verify .neutron-aes-key is absent from every remote ref. Verify the remote manually before trusting this backup."
   fi
-  _bad_refs=""
+  _BAD_REMOTE_REFS=""
+  _scanrefs=""
   for _vref in $(git for-each-ref --format='%(refname)' refs/remote-verify/ 2>/dev/null); do
+    _orig=${_vref#refs/remote-verify/}
+    if [ -n "$_exempt_branch" ] && [ "$_orig" = "heads/$_exempt_branch" ]; then
+      continue                                       # our own branch — exempt
+    fi
+    _scanrefs="$_scanrefs $_vref"
     if [ -n "$(git log "$_vref" --pretty=format:%H -- .neutron-aes-key 2>/dev/null)" ]; then
-      _bad_refs="$_bad_refs refs/${_vref#refs/remote-verify/}"
+      _BAD_REMOTE_REFS="$_BAD_REMOTE_REFS refs/$_orig"
     fi
   done
-  # Object-level belt-and-suspenders across all fetched refs (catches a blob
-  # reachable even where a path-filtered log might not surface it).
-  _allv=$(git for-each-ref --format='%(refname)' refs/remote-verify/ 2>/dev/null)
-  if [ -n "$_allv" ] && git rev-list --objects $_allv 2>/dev/null | grep -qF ' .neutron-aes-key'; then
-    case "$_bad_refs" in
+  # Object-level belt-and-suspenders across the NON-exempt fetched refs (catches
+  # a blob reachable even where a path-filtered log might not surface it).
+  if [ -n "$_scanrefs" ] && git rev-list --objects $_scanrefs 2>/dev/null | grep -qF ' .neutron-aes-key'; then
+    case "$_BAD_REMOTE_REFS" in
       *refs/*) : ;;                                  # already named a ref
-      *) _bad_refs="$_bad_refs (a reachable object on the remote)" ;;
+      *) _BAD_REMOTE_REFS="$_BAD_REMOTE_REFS (a reachable object on the remote)" ;;
     esac
   fi
   _cleanup_remote_verify_refs
-  if [ -n "$_bad_refs" ]; then
-    die "refusing to report the backup clean: .neutron-aes-key is STILL retrievable from $REMOTE on ref(s):$_bad_refs. This tool rewrote + force-pushed the branch it owns, but it does NOT own the ref(s) above. Sanitize them, e.g.:  git push $REMOTE --delete <branch>   (for a tag:  git push $REMOTE :refs/tags/<name>), or re-initialize the backup remote. The key remains DISCLOSED on the remote until you do."
+}
+
+# S3(a) — the PRE-PUSH gate. Before uploading fresh `project.db` ciphertext we
+# MUST confirm the remote does not still carry `.neutron-aes-key` on an UNOWNED
+# ref (a pre-existing tag or a second branch an older backup leaked). Otherwise
+# the new secrets would land on a remote from which the key is retrievable —
+# exposing them the instant they're pushed. Our OWN backup branch is exempt
+# (its old key-bearing state is atomically replaced by the force-push below;
+# the post-push gate re-verifies it). Fails closed (die) BEFORE any push if the
+# key is reachable from a ref we do not own.
+verify_remote_unowned_refs_clean_before_push() {
+  _scan_remote_refs_for_key "$1"
+  if [ -n "$_BAD_REMOTE_REFS" ]; then
+    die "refusing to push: .neutron-aes-key is retrievable from $REMOTE on ref(s):$_BAD_REMOTE_REFS. Uploading new backup data now would expose the fresh secrets on a remote that still discloses the key. This tool does NOT own the ref(s) above — sanitize them first, e.g.:  git push $REMOTE --delete <branch>   (for a tag:  git push $REMOTE :refs/tags/<name>), or re-initialize the backup remote. NO new ciphertext was pushed."
+  fi
+}
+
+# S3(a) — the AUTHORITATIVE post-push gate. After pushing we re-scan EVERY
+# remote ref (no exemption — including our own just-pushed branch, as a race /
+# own-branch confirmation) and FAIL CLOSED (die) if the key is reachable from
+# ANY of them, rather than falsely report the backup clean.
+verify_remote_clean_after_push() {
+  _scan_remote_refs_for_key ""
+  if [ -n "$_BAD_REMOTE_REFS" ]; then
+    die "refusing to report the backup clean: .neutron-aes-key is STILL retrievable from $REMOTE on ref(s):$_BAD_REMOTE_REFS. Sanitize them, e.g.:  git push $REMOTE --delete <branch>   (for a tag:  git push $REMOTE :refs/tags/<name>), or re-initialize the backup remote. The key remains DISCLOSED on the remote until you do."
   fi
   info "verified $REMOTE carries .neutron-aes-key on NO ref."
 }
@@ -367,20 +406,30 @@ do_run() {
     # exist on the remote yet (a fresh remote → a plain create push).
     _remote_sha_pre=$(git ls-remote "$REMOTE" "refs/heads/$_branch" 2>/dev/null | awk 'NR==1{print $1}')
 
-    # S3(a) — purge the key from ALL reachable LOCAL history BEFORE it can reach
-    # the remote (handles legacy repos that committed it under an older backup
-    # version), then the AUTHORITATIVE pre-push gate: never push a history that
-    # still contains the key. Both steps fail closed (die) on any doubt.
+    # Configure origin FIRST — the pre-push gate below fetches from it.
+    ensure_origin_remote
+
+    # S3(a) — PRE-PUSH gate (ordering matters): confirm the remote is NOT still
+    # disclosing the key on an UNOWNED ref BEFORE we upload any fresh ciphertext.
+    # This runs on EVERY push path (rewrite or not), because an old leak on an
+    # unowned ref is independent of whether THIS run rewrote history. Our own
+    # backup branch is exempt — the local purge + explicit-lease force-push
+    # atomically replace its old key-bearing state, which the post-push gate
+    # then confirms.
+    verify_remote_unowned_refs_clean_before_push "$_branch"
+
+    # Purge the key from ALL reachable LOCAL history (handles legacy repos that
+    # committed it under an older backup version), then the local pre-push gate:
+    # never push a LOCAL history that still contains the key. Fail closed on doubt.
     purge_key_from_history
+    # `git filter-repo` DROPS the `origin` remote as a safety measure, so
+    # re-assert it after any purge — the push below needs it. Harmless no-op on
+    # the filter-branch / no-rewrite paths (origin already points at $REMOTE).
+    ensure_origin_remote
     if key_reachable_in_history; then
       die "refusing to push: .neutron-aes-key is reachable in history at push time. Aborting so the key can never reach $REMOTE — purge it (git filter-repo --path .neutron-aes-key --invert-paths --force in $DATA_DIR) and re-run."
     fi
 
-    if git remote get-url origin >/dev/null 2>&1; then
-      git remote set-url origin "$REMOTE"
-    else
-      git remote add origin "$REMOTE"
-    fi
     # Push ONLY the single backup branch this tool owns — never a wildcard, never
     # --prune, never --tags. The tool must not modify, prune, or clobber any
     # remote ref other than its own branch. A normal push preserves the safe
