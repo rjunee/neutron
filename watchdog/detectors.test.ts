@@ -245,7 +245,9 @@ describe('OverrunCronDetector', () => {
 })
 
 describe('DbLockContentionDetector', () => {
-  test('fires when delta within window > threshold', async () => {
+  // AT-LEAST semantics (inclusive): fire when delta >= threshold. Boundary matrix
+  // for threshold 5 — below (4) is quiet, EQUAL (5) fires, above (6) fires.
+  function firesAtDelta(delta: number): Promise<boolean> {
     let now = 1_000
     let count = 0
     const counter: BusyRetryCounter = { exhaustionCount: () => count }
@@ -253,16 +255,27 @@ describe('DbLockContentionDetector', () => {
       project_slug: 't1',
       counter,
       window_ms: 60_000,
-      threshold_per_window: 3,
+      threshold_per_window: 5,
       now: () => now,
     })
-    // sample 1 (count=0)
-    expect((await detector.detect()).length).toBe(0)
-    // sample 2 a moment later (count=5 → delta from oldest = 5)
-    now += 1_000
-    count = 5
-    const alerts = await detector.detect()
-    expect(alerts.length).toBe(1)
+    // sample 1 (count=0), then sample 2 a moment later at `delta`.
+    return detector.detect().then(async () => {
+      now += 1_000
+      count = delta
+      return (await detector.detect()).length === 1
+    })
+  }
+
+  test('BELOW threshold (delta=4) — quiet', async () => {
+    expect(await firesAtDelta(4)).toBe(false)
+  })
+
+  test('EQUAL to threshold (delta=5) — fires (inclusive)', async () => {
+    expect(await firesAtDelta(5)).toBe(true)
+  })
+
+  test('ABOVE threshold (delta=6) — fires', async () => {
+    expect(await firesAtDelta(6)).toBe(true)
   })
 })
 

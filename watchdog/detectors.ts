@@ -347,7 +347,11 @@ export interface DbLockDetectorOptions extends CommonDetectorOptions {
   counter: BusyRetryCounter
   /** Window the counter delta is measured against. Default 60 s. */
   window_ms?: number
-  /** Fire when delta within window > this. Default 5. */
+  /**
+   * Fire when the busy-retry-exhaustion delta within the window is AT LEAST this
+   * (i.e. `delta >= threshold`, inclusive). Default 5 — an exhaustion count that
+   * reaches exactly 5 in the window fires.
+   */
   threshold_per_window?: number
 }
 
@@ -387,8 +391,9 @@ export class DbLockContentionDetector implements WatchdogDetector {
     const inWindow = this.samples.filter((s) => s.t >= windowStart)
     const oldest = inWindow[0]
     const delta = oldest ? cur - oldest.count : 0
+    // AT-LEAST semantics (inclusive): fire when delta reaches the threshold.
     const firing = oldest !== undefined && delta >= this.threshold
-    // Incident-edge: sustained contention keeps `delta` over threshold across
+    // Incident-edge: sustained contention keeps `delta` at/over threshold across
     // ticks — fire once per contention incident, re-fire only after it subsides
     // below threshold and crosses again (Blocker-1 fix).
     const risen = this.incidents.candidates(firing ? [this.project_slug] : [], (key) =>

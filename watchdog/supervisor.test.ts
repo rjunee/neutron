@@ -150,3 +150,101 @@ describe('WatchdogSupervisor — quiescing stop (round-7 meta-audit)', () => {
     expect(stopResolved).toBe(true)
   })
 })
+
+describe('WatchdogSupervisor — exactly-once across a failing commit (round-8)', () => {
+  test('a THROWING detector.commit() does NOT redeliver the notification', async () => {
+    const notified: WatchdogAlert[] = []
+    let commitCalls = 0
+    const alertId = 'db_lock_contention:owner:1'
+    // A persistent condition that yields the SAME candidate every tick (as a real
+    // detector does while its incident stays un-committed), whose commit() ALWAYS
+    // throws — so the incident never latches.
+    const throwingCommitDetector: WatchdogDetector = {
+      kind: 'db_lock_contention',
+      detect: async (): Promise<WatchdogAlert[]> => [
+        {
+          id: alertId,
+          kind: 'db_lock_contention',
+          project_slug: 'owner',
+          detected_at: 1,
+          resolved_at: null,
+          payload: {},
+        },
+      ],
+      commit: (): void => {
+        commitCalls++
+        throw new Error('commit boom')
+      },
+    }
+    const supervisor = new WatchdogSupervisor({
+      store: { record: async (): Promise<void> => {} } as unknown as AlertStore,
+      notifier: { notify: async (a): Promise<void> => { notified.push(a) } },
+      detectors: [throwingCommitDetector],
+    })
+
+    // Tick 1 — persist + notify succeed, commit throws → notified ONCE, not latched.
+    const t1 = await supervisor.runOnce()
+    expect(t1.length).toBe(1)
+    expect(notified.length).toBe(1)
+    expect(commitCalls).toBe(1)
+
+    // Tick 2 — the same candidate reappears (never latched). The deliveredIds guard
+    // RE-COMMITS only — it must NOT re-persist or re-notify. Exactly ONE notification.
+    const t2 = await supervisor.runOnce()
+    expect(t2.length).toBe(0)
+    expect(notified.length).toBe(1) // <-- exactly-once preserved across the commit failure
+    expect(commitCalls).toBe(2) // commit retried (surfaced, not silently dropped)
+
+    // Tick 3 — still failing → still exactly one notification.
+    await supervisor.runOnce()
+    expect(notified.length).toBe(1)
+    expect(commitCalls).toBe(3)
+  })
+
+  test('a commit that recovers latches cleanly with no re-notify (delivered exactly once)', async () => {
+    const notified: WatchdogAlert[] = []
+    let failCommit = true
+    let committed = false
+    const alertId = 'db_lock_contention:owner:2'
+    const detector: WatchdogDetector = {
+      kind: 'db_lock_contention',
+      // Keeps yielding the candidate until it is successfully committed, then goes
+      // quiet — exactly how IncidentEdgeTracker.candidates() behaves.
+      detect: async (): Promise<WatchdogAlert[]> =>
+        committed
+          ? []
+          : [
+              {
+                id: alertId,
+                kind: 'db_lock_contention',
+                project_slug: 'owner',
+                detected_at: 1,
+                resolved_at: null,
+                payload: {},
+              },
+            ],
+      commit: (): void => {
+        if (failCommit) throw new Error('transient commit failure')
+        committed = true
+      },
+    }
+    const supervisor = new WatchdogSupervisor({
+      store: { record: async (): Promise<void> => {} } as unknown as AlertStore,
+      notifier: { notify: async (a): Promise<void> => { notified.push(a) } },
+      detectors: [detector],
+    })
+
+    // Tick 1 — notify once, commit throws (un-latched).
+    await supervisor.runOnce()
+    expect(notified.length).toBe(1)
+
+    // Tick 2 — commit now succeeds via the re-commit branch → no re-notify.
+    failCommit = false
+    await supervisor.runOnce()
+    expect(notified.length).toBe(1)
+
+    // Tick 3 — incident is committed + quiet → nothing, still exactly one.
+    await supervisor.runOnce()
+    expect(notified.length).toBe(1)
+  })
+})

@@ -34,6 +34,16 @@ export class WatchdogSupervisor {
   private running = false
   /** The in-flight tick, so {@link stop} can QUIESCE (await it) before returning. */
   private inflight: Promise<void> | null = null
+  /**
+   * Alert ids whose NOTIFICATION was delivered but whose `detector.commit()` has
+   * not yet latched the incident (a commit that threw). Guards exactly-once: the
+   * same candidate re-appears next tick (still un-committed), and this set makes
+   * the supervisor RE-COMMIT it WITHOUT re-persisting or re-notifying — a commit
+   * failure can never redeliver an already-delivered notification. Entries are
+   * dropped the moment their commit finally succeeds (the incident's `open` set
+   * suppresses it thereafter), so in the normal path this stays empty.
+   */
+  private readonly deliveredIds = new Set<string>()
 
   constructor(options: SupervisorOptions) {
     this.store = options.store
@@ -109,6 +119,23 @@ export class WatchdogSupervisor {
           continue
         }
         for (const alert of alerts) {
+          // (0) Already NOTIFIED but not yet committed (a prior commit threw): the
+          // notification went out, so do NOT re-persist or re-notify — only RE-COMMIT
+          // to finally latch the incident. Guarantees exactly-once even when commit
+          // keeps failing (the failure is surfaced, never redelivered).
+          if (this.deliveredIds.has(alert.id)) {
+            try {
+              detector.commit?.(alert)
+              this.deliveredIds.delete(alert.id) // latched → `open` suppresses henceforth
+            } catch (err) {
+              console.error(
+                `watchdog supervisor: commit ${alert.id} threw AGAIN — notification already ` +
+                  `delivered; will NOT re-notify, retrying commit next tick:`,
+                err,
+              )
+            }
+            continue
+          }
           // (1) Durable persist. A REAL store failure (not a dup — record is
           // idempotent) leaves the incident UN-committed so it retries next tick.
           try {
@@ -137,10 +164,18 @@ export class WatchdogSupervisor {
           // (3) COMMIT the dedup ONLY after persist AND notify both succeeded.
           if (notified) {
             delivered.push(alert)
+            // Mark delivered BEFORE commit so a commit throw cannot redeliver the
+            // notification: next tick takes branch (0) and re-commits only.
+            this.deliveredIds.add(alert.id)
             try {
               detector.commit?.(alert)
+              this.deliveredIds.delete(alert.id) // committed cleanly → drop the guard entry
             } catch (err) {
-              console.error(`watchdog supervisor: commit ${alert.id} threw:`, err)
+              console.error(
+                `watchdog supervisor: commit ${alert.id} threw — notification already ` +
+                  `delivered; will NOT re-notify, retrying commit next tick:`,
+                err,
+              )
             }
           }
         }
