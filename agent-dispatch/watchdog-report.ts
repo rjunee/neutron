@@ -247,10 +247,15 @@ export interface ScheduleDispatchLifecycleWatchdogDeps {
  *     before `db.close()`.
  * A tick failure is routed to SupervisedLoop's `onError` (logged + counted) so the
  * loop keeps firing.
+ *
+ * Returns `stop()` (async, quiescing) plus `runOnce()` — an AWAITABLE single tick
+ * (SupervisedLoop's own single-flight-guarded runner). `runOnce()` lets tests drive
+ * ticks DETERMINISTICALLY (await settlement) instead of firing the interval seam
+ * and guessing at a `sleep`; production ignores it and relies on the timer.
  */
 export function scheduleDispatchLifecycleWatchdog(
   deps: ScheduleDispatchLifecycleWatchdogDeps,
-): { stop: () => Promise<void> } {
+): { stop: () => Promise<void>; runOnce: () => Promise<void> } {
   const notify = buildDispatchSuspectedStuckNotifier(deps.alert_sink)
   const notified = new Set<string>()
   const loop = new SupervisedLoop({
@@ -278,6 +283,9 @@ export function scheduleDispatchLifecycleWatchdog(
   loop.start()
   return {
     stop: (): Promise<void> => loop.stop(),
+    runOnce: async (): Promise<void> => {
+      await loop.runOnce()
+    },
   }
 }
 

@@ -378,6 +378,16 @@ export class DbLockContentionDetector implements WatchdogDetector {
     this.now = opts.now ?? Date.now
     this.window_ms = opts.window_ms ?? 60_000
     this.threshold = opts.threshold_per_window ?? 5
+    // STARTUP BASELINE (round-10 P1). Seed a baseline sample AT CONSTRUCTION —
+    // boot, when the watchdog module composes — so the FIRST tick's delta covers
+    // boot→first-tick. Without it, the first `detect()` (which the supervisor runs
+    // only after a 30 s interval) pushed its baseline from the CURRENT counter and
+    // compared against that same sample → delta 0, so every exhaustion between boot
+    // and the first tick was invisible for the whole first window. Constructing at
+    // boot (counter ~0), this baseline is ~0, so exhaustions accumulated before the
+    // first tick are counted; it does NOT over-count a late construction (baseline =
+    // its then-current count → delta ~0, no false fire on historical backlog).
+    this.samples.push({ t: this.now(), count: this.counter.exhaustionCount() })
   }
 
   async detect(): Promise<WatchdogAlert[]> {

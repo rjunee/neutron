@@ -7,7 +7,13 @@
  *   - Blocker-A: it does NOT push a terminal `crashed` report and the record
  *     stays `running`.
  *   - Blocker-C: the alert path journals a `watchdog_alert` system_event.
- * An injected interval driver runs the tick synchronously (no real timers).
+ *
+ * DETERMINISTIC TICKS (round-10 P2). These tests drive the loop through the
+ * scheduler's awaitable `runOnce()` — SupervisedLoop's own single-flight-guarded
+ * runner — and AWAIT settlement, rather than firing the interval seam and hoping a
+ * fixed `Bun.sleep` was long enough (a sleep-based race that flaked on loaded CI).
+ * The injected `set_interval` is a no-op that never arms a real timer, so a tick
+ * happens ONLY when the test calls `runOnce()`.
  */
 
 import { afterEach, describe, expect, test } from 'bun:test'
@@ -40,6 +46,15 @@ afterEach(() => {
   tmp = undefined
 })
 
+/** A no-op interval seam — no real timer ever fires; tests drive `runOnce()`. */
+const noTimer = (): ReturnType<typeof setInterval> => 0 as unknown as ReturnType<typeof setInterval>
+
+/** Deterministically drain the microtask queue (no wall-clock) so a "has this
+ *  promise NOT resolved yet?" assertion is stable without a `sleep`. */
+async function flushMicrotasks(): Promise<void> {
+  for (let i = 0; i < 8; i++) await Promise.resolve()
+}
+
 describe('scheduleDispatchLifecycleWatchdog (F4)', () => {
   test('Blocker-A: the scheduled tick emits a NON-TERMINAL alert, killing/transitioning NOTHING', async () => {
     const registry = new SubagentRegistry()
@@ -56,23 +71,17 @@ describe('scheduleDispatchLifecycleWatchdog (F4)', () => {
     })
 
     const alerts: DispatchSuspectedStuckAlert[] = []
-    let tickFn: (() => void) | null = null
     const scheduled = scheduleDispatchLifecycleWatchdog({
       registry,
       control,
       alert_sink: (a) => {
         alerts.push(a)
       },
-      set_interval: (fn) => {
-        tickFn = fn
-        return 0 as unknown as ReturnType<typeof setInterval>
-      },
+      set_interval: noTimer,
       clear_interval: () => {},
     })
-    expect(tickFn).not.toBeNull()
 
-    tickFn!()
-    await Bun.sleep(20)
+    await scheduled.runOnce()
 
     // The tick RAN and emitted a NON-TERMINAL suspected-stuck alert…
     expect(alerts.length).toBe(1)
@@ -92,8 +101,7 @@ describe('scheduleDispatchLifecycleWatchdog (F4)', () => {
     expect(registry.live().length).toBe(1)
 
     // A second tick does NOT re-alert the same still-live run (deduped).
-    tickFn!()
-    await Bun.sleep(20)
+    await scheduled.runOnce()
     expect(alerts.length).toBe(1)
 
     await scheduled.stop()
@@ -111,13 +119,13 @@ describe('scheduleDispatchLifecycleWatchdog (F4)', () => {
     await registry.create({ run_id: 'r2', instance_key: 'owner', agent_kind: 'sentinel', spawn_depth: 0 })
     await registry.update('r2', { status: 'running', last_event_at: Date.now() - 10 * 60_000 })
 
-    // The composer's alert sink emits `watchdog_alert` into O4 (same code path).
-    let tickFn: (() => void) | null = null
+    // The composer's alert sink journals `watchdog_alert` into O4. AWAIT the write
+    // so `runOnce()` settling guarantees the row is durable (no fire-and-forget race).
     const scheduled = scheduleDispatchLifecycleWatchdog({
       registry,
       control,
-      alert_sink: (alert) => {
-        void emitSystemEvent({
+      alert_sink: async (alert) => {
+        await emitSystemEvent({
           event: 'watchdog_alert',
           module: 'watchdog',
           level: 'warn',
@@ -125,15 +133,11 @@ describe('scheduleDispatchLifecycleWatchdog (F4)', () => {
           payload: { source: 'dispatch_lifecycle', run_id: alert.run_id, reason: alert.reason },
         })
       },
-      set_interval: (fn) => {
-        tickFn = fn
-        return 0 as unknown as ReturnType<typeof setInterval>
-      },
+      set_interval: noTimer,
       clear_interval: () => {},
     })
 
-    tickFn!()
-    await Bun.sleep(40) // let the tick + the fire-and-forget O4 write settle
+    await scheduled.runOnce()
 
     const rows = db.all<{ event_name: string; module: string; payload_json: string }, []>(
       `SELECT event_name, module, payload_json FROM system_events WHERE event_name = 'watchdog_alert'`,
@@ -163,7 +167,6 @@ describe('scheduleDispatchLifecycleWatchdog (F4)', () => {
     // The sink REJECTS the first delivery (transient O4/app-ws blip), then succeeds.
     let sinkCalls = 0
     let deliveries = 0
-    let tickFn: (() => void) | null = null
     const scheduled = scheduleDispatchLifecycleWatchdog({
       registry,
       control,
@@ -172,31 +175,26 @@ describe('scheduleDispatchLifecycleWatchdog (F4)', () => {
         if (sinkCalls === 1) throw new Error('sink boom')
         deliveries++
       },
-      set_interval: (fn) => {
-        tickFn = fn
-        return 0 as unknown as ReturnType<typeof setInterval>
-      },
+      set_interval: noTimer,
       clear_interval: () => {},
     })
 
     // Tick 1 — the wrapper PROPAGATES the rejection, so the run is NOT added to
-    // `notified`. Nothing delivered, nothing killed, the tick did not wedge.
-    tickFn!()
-    await Bun.sleep(20)
+    // `notified`. Nothing delivered, nothing killed, the tick did not wedge (the
+    // rejection is contained by SupervisedLoop's onError, so runOnce resolves).
+    await scheduled.runOnce()
     expect(sinkCalls).toBe(1)
     expect(deliveries).toBe(0)
     expect(cancellerCalls).toBe(0)
     expect(registry.byRunId('r3')?.status).toBe('running')
 
     // Tick 2 — still un-latched → rediscovered, sink recovers → delivered ONCE.
-    tickFn!()
-    await Bun.sleep(20)
+    await scheduled.runOnce()
     expect(sinkCalls).toBe(2)
     expect(deliveries).toBe(1)
 
     // Tick 3 — now latched → no repeat delivery (exactly-once holds).
-    tickFn!()
-    await Bun.sleep(20)
+    await scheduled.runOnce()
     expect(sinkCalls).toBe(2)
     expect(deliveries).toBe(1)
     expect(cancellerCalls).toBe(0)
@@ -210,43 +208,45 @@ describe('scheduleDispatchLifecycleWatchdog (F4)', () => {
     await registry.create({ run_id: 'r4', instance_key: 'owner', agent_kind: 'atlas', spawn_depth: 0 })
     await registry.update('r4', { status: 'running', last_event_at: Date.now() - 10 * 60_000 })
 
-    // A DEFERRED sink: it does not resolve until released, so tick 1 stays
-    // in-flight (awaiting delivery) across the moment tick 2 fires.
+    // A DEFERRED sink: it does not resolve until released, so tick 1 stays in-flight
+    // (awaiting delivery) across the moment tick 2 starts. `sinkEntered` fires the
+    // instant tick 1 reaches the sink, making the assertion deterministic (no sleep).
     let release: () => void = () => {}
     const gate = new Promise<void>((res) => {
       release = res
     })
+    let sinkEnteredResolve: () => void = () => {}
+    const sinkEntered = new Promise<void>((res) => {
+      sinkEnteredResolve = res
+    })
     let sinkCalls = 0
-    let tickFn: (() => void) | null = null
     const scheduled = scheduleDispatchLifecycleWatchdog({
       registry,
       control,
       alert_sink: async (_a) => {
         sinkCalls++
+        sinkEnteredResolve()
         await gate
       },
-      set_interval: (fn) => {
-        tickFn = fn
-        return 0 as unknown as ReturnType<typeof setInterval>
-      },
+      set_interval: noTimer,
       clear_interval: () => {},
     })
 
-    // Fire twice back-to-back. Tick 1 is awaiting the gated sink (dedup ledger not
-    // yet written), so a NON-single-flight loop would let tick 2 read the run as
-    // un-notified and fire the sink AGAIN. The in-flight guard skips tick 2.
-    tickFn!()
-    tickFn!()
-    await Bun.sleep(20)
+    // Start two ticks back-to-back WITHOUT awaiting the first. runOnce() sets the
+    // in-flight guard synchronously, so tick 2 is single-flight-SKIPPED — a
+    // non-single-flight loop would read the run as un-notified and fire again.
+    const t1 = scheduled.runOnce()
+    const t2 = scheduled.runOnce()
+    await t2 // the skipped tick resolves immediately (no body ran)
+    await sinkEntered // tick 1 has reached the sink — deterministic checkpoint
     expect(sinkCalls).toBe(1) // tick 2 skipped — no duplicate notify
 
     // Release → tick 1 completes and latches the run in `notified`.
     release()
-    await Bun.sleep(20)
+    await t1
 
     // A later, non-overlapping tick sees the run already notified → no repeat.
-    tickFn!()
-    await Bun.sleep(20)
+    await scheduled.runOnce()
     expect(sinkCalls).toBe(1)
 
     await scheduled.stop()
@@ -265,7 +265,6 @@ describe('scheduleDispatchLifecycleWatchdog (F4)', () => {
       release = res
     })
     let tickCompleted = false
-    let tickFn: (() => void) | null = null
     const scheduled = scheduleDispatchLifecycleWatchdog({
       registry,
       control,
@@ -273,16 +272,13 @@ describe('scheduleDispatchLifecycleWatchdog (F4)', () => {
         await gate
         tickCompleted = true
       },
-      set_interval: (fn) => {
-        tickFn = fn
-        return 0 as unknown as ReturnType<typeof setInterval>
-      },
+      set_interval: noTimer,
       clear_interval: () => {},
     })
 
-    // Start a tick; it blocks inside the gated sink (in-flight, not yet done).
-    tickFn!()
-    await Bun.sleep(10)
+    // Start a tick WITHOUT awaiting; it blocks inside the gated sink (in-flight).
+    const tick = scheduled.runOnce()
+    await flushMicrotasks()
     expect(tickCompleted).toBe(false)
 
     // stop() must NOT resolve while a tick is in-flight — it DRAINS it first. The
@@ -291,12 +287,13 @@ describe('scheduleDispatchLifecycleWatchdog (F4)', () => {
     const stopPromise = scheduled.stop().then(() => {
       stopResolved = true
     })
-    await Bun.sleep(10)
+    await flushMicrotasks()
     expect(stopResolved).toBe(false) // still draining the in-flight tick
     expect(tickCompleted).toBe(false)
 
     // Release the tick → it completes, and ONLY THEN does stop() resolve.
     release()
+    await tick
     await stopPromise
     expect(tickCompleted).toBe(true)
     expect(stopResolved).toBe(true)
@@ -369,32 +366,25 @@ describe('buildDispatchStuckAlertSink — persist-before-deliver (round-9)', () 
       },
     })
 
-    let tickFn: (() => void) | null = null
     const scheduled = scheduleDispatchLifecycleWatchdog({
       registry,
       control,
       alert_sink: sink,
-      set_interval: (fn) => {
-        tickFn = fn
-        return 0 as unknown as ReturnType<typeof setInterval>
-      },
+      set_interval: noTimer,
       clear_interval: () => {},
     })
 
     // Tick 1 — journal rejects → run NOT latched, NO visible push.
-    tickFn!()
-    await Bun.sleep(20)
+    await scheduled.runOnce()
     expect(journalCalls).toBe(1)
     expect(pushCalls).toBe(0)
 
     // Tick 2 — journal commits → the visible push fires once, run latched.
-    tickFn!()
-    await Bun.sleep(20)
+    await scheduled.runOnce()
     expect(pushCalls).toBe(1)
 
     // Tick 3 — latched → no repeat visible push (exactly-once holds).
-    tickFn!()
-    await Bun.sleep(20)
+    await scheduled.runOnce()
     expect(pushCalls).toBe(1)
 
     await scheduled.stop()

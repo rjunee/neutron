@@ -277,6 +277,48 @@ describe('DbLockContentionDetector', () => {
   test('ABOVE threshold (delta=6) — fires', async () => {
     expect(await firesAtDelta(6)).toBe(true)
   })
+
+  test('round-10 startup: threshold-many exhaustions BEFORE the first tick fire on the first tick', async () => {
+    let now = 0 // boot
+    let count = 0
+    const counter: BusyRetryCounter = { exhaustionCount: () => count }
+    // Constructed at boot with counter 0 — the module composes here, seeding the
+    // baseline. The supervisor would only call detect() 30 s later.
+    const detector = new DbLockContentionDetector({
+      project_slug: 't1',
+      counter,
+      window_ms: 60_000,
+      threshold_per_window: 5,
+      now: () => now,
+    })
+    // 5 exhaustions accumulate DURING the boot→first-tick blind window.
+    now = 30_000
+    count = 5
+    // The FIRST tick (30 s in) must SEE them — with the pre-fix self-baseline this
+    // returned 0 (the blind spot). The construction baseline makes delta = 5 - 0.
+    const alerts = await detector.detect()
+    expect(alerts.length).toBe(1)
+  })
+
+  test('round-10: a LATE construction does NOT false-fire on historical backlog', async () => {
+    let now = 3_600_000 // constructed an hour in
+    let count = 1_000 // large historical exhaustion total already accrued
+    const counter: BusyRetryCounter = { exhaustionCount: () => count }
+    const detector = new DbLockContentionDetector({
+      project_slug: 't1',
+      counter,
+      window_ms: 60_000,
+      threshold_per_window: 5,
+      now: () => now,
+    })
+    // First tick shortly after construction, NO new exhaustions → delta ~0, quiet.
+    now += 30_000
+    expect((await detector.detect()).length).toBe(0)
+    // Then 5 NEW exhaustions within the window → fires (measured from the baseline).
+    now += 1_000
+    count = 1_005
+    expect((await detector.detect()).length).toBe(1)
+  })
 })
 
 describe('SubstrateCooldownDetector', () => {
