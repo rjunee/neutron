@@ -29,8 +29,8 @@ import { buildCoreModules } from './build-core-modules.ts'
 import type { CompositionInput } from '../composition.ts'
 import type { ModuleContext } from '../module-graph.ts'
 
-let tmp: string
-let db: ProjectDb
+let tmp: string | undefined
+let db: ProjectDb | undefined
 
 beforeEach(() => {
   tmp = mkdtempSync(join(tmpdir(), 'neutron-watchdog-wiring-'))
@@ -39,15 +39,20 @@ beforeEach(() => {
 })
 
 afterEach(() => {
-  db.close()
-  rmSync(tmp, { recursive: true, force: true })
+  // Guard teardown on successful setup — if `mkdtempSync`/`open` threw (e.g. a
+  // sandbox that rejects mkdtemp), `db`/`tmp` are undefined and an unguarded
+  // `db.close()` would throw and MASK the real setup error.
+  db?.close()
+  db = undefined
+  if (tmp !== undefined) rmSync(tmp, { recursive: true, force: true })
+  tmp = undefined
 })
 
 const NOW = 10_000_000
 
 function baseInput(overrides: Partial<CompositionInput> = {}): CompositionInput {
   return {
-    db,
+    db: db!,
     project_slug: 'alice',
     topic_handler: async () => {},
     approval_notifier: { notify: async () => undefined },
@@ -148,6 +153,18 @@ describe('F4 — build-core-modules watchdog + process-registry wiring', () => {
       // The notifier (not the no-op stub) received them.
       expect(fired.length).toBe(out.length)
       expect(fired.length).toBeGreaterThanOrEqual(5)
+
+      // (3) INCIDENT-EDGE across ticks (Blocker-1 storm fix). The persistent
+      // conditions (stale heartbeat, cron overrun, all-cooldown pool) STILL HOLD,
+      // so a naive detector would re-notify on every subsequent tick. With
+      // incident-edge, two more consecutive ticks produce ZERO new alerts — one
+      // incident = one notification. (stuck/crashed were reaped on tick 1.)
+      const firedBefore = fired.length
+      const tick2 = await wd.supervisor.runOnce()
+      const tick3 = await wd.supervisor.runOnce()
+      expect(tick2.length).toBe(0)
+      expect(tick3.length).toBe(0)
+      expect(fired.length).toBe(firedBefore) // notifier saw nothing new
     } finally {
       mods.watchdogModule.shutdown?.(wd)
       mods.processRegistryModule.shutdown?.(processRegistry)

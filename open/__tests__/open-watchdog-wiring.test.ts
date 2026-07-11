@@ -42,8 +42,8 @@ const SAVED_ENV_KEYS = [
 ] as const
 
 let savedEnv: Record<string, string | undefined> = {}
-let tmpDir: string
-let db: ProjectDb
+let tmpDir: string | undefined
+let db: ProjectDb | undefined
 
 beforeEach(() => {
   savedEnv = {}
@@ -65,18 +65,23 @@ beforeEach(() => {
 
 afterEach(() => {
   registerSystemEventSink(null)
-  db.close()
+  // Guard teardown on successful setup — if setup threw (e.g. a sandbox that
+  // rejects mkdtemp), `db`/`tmpDir` are undefined and an unguarded `db.close()`
+  // would throw and MASK the real setup error.
+  db?.close()
+  db = undefined
   for (const k of SAVED_ENV_KEYS) {
     if (savedEnv[k] === undefined) delete process.env[k]
     else process.env[k] = savedEnv[k]
   }
-  rmSync(tmpDir, { recursive: true, force: true })
+  if (tmpDir !== undefined) rmSync(tmpDir, { recursive: true, force: true })
+  tmpDir = undefined
 })
 
 describe('Open supervision-watchdog prod-boot wiring (F4)', () => {
   test('composition wires a REAL heartbeat pulse + on_gateway_tick (not the never-stale stub)', async () => {
     const composer = buildOpenGraphComposer({ env: process.env })
-    const composition = await composer({ db, project_slug: 'owner' })
+    const composition = await composer({ db: db!, project_slug: 'owner' })
     try {
       const tracker = composition.heartbeat_tracker
       // Pre-pulsed at construction → a concrete number, not null.
@@ -118,10 +123,10 @@ describe('Open supervision-watchdog prod-boot wiring (F4)', () => {
   test('the real watchdog_notifier emits a watchdog_alert system_events row and never throws', async () => {
     // Register an ambient O4 sink (as the gateway boot does) so the notifier's
     // `emitSystemEvent` resolves it.
-    registerSystemEventSink(new SystemEventsStore({ db }))
+    registerSystemEventSink(new SystemEventsStore({ db: db! }))
 
     const composer = buildOpenGraphComposer({ env: process.env })
-    const composition = await composer({ db, project_slug: 'owner' })
+    const composition = await composer({ db: db!, project_slug: 'owner' })
     try {
       // It is NOT the no-op stub — invoking it lands a durable journal row.
       const alert: WatchdogAlert = {
@@ -137,7 +142,7 @@ describe('Open supervision-watchdog prod-boot wiring (F4)', () => {
       // Give the fire-and-forget emit a tick to land.
       await Bun.sleep(30)
 
-      const rows = db.all<{ event_name: string; module: string }, []>(
+      const rows = db!.all<{ event_name: string; module: string }, []>(
         `SELECT event_name, module FROM system_events WHERE event_name = 'watchdog_alert'`,
         [],
       )

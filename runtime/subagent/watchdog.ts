@@ -181,7 +181,22 @@ export async function runAgentWatchdog(deps: AgentWatchdogDeps): Promise<AgentWa
 
   // Snapshot the live set up-front: `failRun` mutates statuses out of `live()`,
   // so iterating a frozen list keeps the pass deterministic.
-  for (const rec of deps.registry.live()) {
+  const live = deps.registry.live()
+
+  // NOTIFY-ONLY dedup hygiene (F4 Blocker-2 fix). The `notified` ledger suppresses
+  // the every-tick repeat for a still-stuck run, but a run that RECOVERED (or went
+  // terminal / disappeared) must be dropped so a genuine SECOND incident on it
+  // re-notifies. Prune the ledger down to the currently-live run_ids up-front;
+  // recovery (live-but-healthy) is cleared per-record below. Without this a
+  // stale→healthy→stale sequence silently swallowed the second incident.
+  if (deps.notify_only === true && deps.notified !== undefined) {
+    const liveIds = new Set(live.map((r) => r.run_id))
+    for (const id of [...deps.notified]) {
+      if (!liveIds.has(id)) deps.notified.delete(id)
+    }
+  }
+
+  for (const rec of live) {
     // Authoritative progress timestamp: the JSONL turn-progress signal when a
     // probe is wired and reports one (source of truth — a heartbeat that bumps
     // `last_event_at` can't mask a wedged turn), else the in-memory
@@ -198,7 +213,14 @@ export async function runAgentWatchdog(deps: AgentWatchdogDeps): Promise<AgentWa
     } else if (now - progressAt > thresholdFor(rec.agent_kind, deps.stuck_threshold_ms)) {
       reason = 'stuck'
     }
-    if (reason === undefined) continue
+    if (reason === undefined) {
+      // RECOVERY (Blocker-2 fix): a live record that is healthy again clears its
+      // notified mark, so if it later goes stuck once more that is a NEW incident
+      // and re-notifies. Only meaningful in notify_only mode (the enforcing path
+      // transitions the record terminal, so it never returns to live()).
+      if (deps.notify_only === true) deps.notified?.delete(rec.run_id)
+      continue
+    }
 
     if (deps.notify_only === true) {
       // NOTIFY-ONLY (F4): DETECT + NOTIFY, never reap. Do NOT call `failRun` —

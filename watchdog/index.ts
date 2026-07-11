@@ -18,6 +18,8 @@ export { AlertStore } from './alert-store.ts'
 
 export { HeartbeatPulse } from './heartbeat.ts'
 
+export { IncidentEdgeTracker } from './incident.ts'
+
 export {
   HeartbeatDetector,
   StuckAgentDetector,

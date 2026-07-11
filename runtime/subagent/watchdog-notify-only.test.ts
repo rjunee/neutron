@@ -147,6 +147,68 @@ describe('runAgentWatchdog — notify_only mode (F4)', () => {
     expect(registry.byRunId('stuck-3')?.status).toBe('running')
   })
 
+  test('Blocker-2: stale → healthy → stale RE-NOTIFIES (a second incident is not lost)', async () => {
+    const registry = new SubagentRegistry()
+    const control = newControlState(registry)
+    const notified = new Set<string>()
+    let notifyCount = 0
+    const base = {
+      control,
+      registry,
+      notify_only: true as const,
+      notified,
+      notify: () => {
+        notifyCount++
+      },
+    }
+
+    // Tick 1 — the run is STALE → notify (incident 1).
+    await seedRunning(registry, 'r1', 0)
+    await runAgentWatchdog({ ...base, now: () => 10 * 60_000 })
+    expect(notifyCount).toBe(1)
+    expect(notified.has('r1')).toBe(true)
+
+    // Tick 2 — the run made progress (healthy again) → cleared from `notified`.
+    await registry.update('r1', { last_event_at: 20 * 60_000 })
+    await runAgentWatchdog({ ...base, now: () => 20 * 60_000 })
+    expect(notifyCount).toBe(1) // no new notify on a healthy tick
+    expect(notified.has('r1')).toBe(false) // recovery cleared the mark
+
+    // Tick 3 — it wedges AGAIN → a genuine second incident re-notifies.
+    await runAgentWatchdog({ ...base, now: () => 30 * 60_000 })
+    expect(notifyCount).toBe(2)
+    expect(registry.byRunId('r1')?.status).toBe('running') // still nothing killed
+  })
+
+  test('Blocker-2: a run that leaves live() is pruned from the notified ledger', async () => {
+    const registry = new SubagentRegistry()
+    const control = newControlState(registry)
+    const notified = new Set<string>()
+    await seedRunning(registry, 'r1', 0)
+    await runAgentWatchdog({
+      control,
+      registry,
+      now: () => 10 * 60_000,
+      notify_only: true,
+      notified,
+      notify: () => {},
+    })
+    expect(notified.has('r1')).toBe(true)
+
+    // The run reaches a terminal state (a normal completion) → leaves live().
+    await registry.updateTerminal('r1', { status: 'finished', ended_at: 11 * 60_000 })
+    await runAgentWatchdog({
+      control,
+      registry,
+      now: () => 12 * 60_000,
+      notify_only: true,
+      notified,
+      notify: () => {},
+    })
+    // Pruned — the ledger doesn't grow unbounded with dead run_ids.
+    expect(notified.has('r1')).toBe(false)
+  })
+
   test('enforcing mode (default) STILL reaps — notify_only is opt-in', async () => {
     const registry = new SubagentRegistry()
     const control = newControlState(registry)

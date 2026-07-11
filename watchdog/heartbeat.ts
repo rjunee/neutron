@@ -8,13 +8,29 @@
  * was structurally incapable of firing.
  *
  * A `HeartbeatPulse` is driven by an EXTERNAL periodic tick — in production the
- * gateway's systemd `WATCHDOG=1` `setInterval` (`gateway/index.ts`), the one
- * process-level liveness loop. Each tick calls {@link pulse}; the detector reads
- * {@link lastHeartbeatAt}. When the gateway tick stops firing (the event loop
- * wedges, the timer is cleared, or the tick callback throws and stops
- * re-pulsing) the last-pulse timestamp stops advancing, so `now - last` crosses
- * the detector threshold and the heartbeat alert fires. That is the whole point
- * of driving it off a real source: it CAN go stale.
+ * gateway's `WATCHDOG=1` `setInterval` (`gateway/index.ts`), the one process-level
+ * liveness loop. Each tick calls {@link pulse}; the `HeartbeatDetector` reads
+ * {@link lastHeartbeatAt} on the supervisor's own tick. When the pulse stops
+ * advancing, `now - last` crosses the detector threshold and the alert fires —
+ * replacing the `() => Date.now()` stub that reported "now" on every read and so
+ * could NEVER be stale.
+ *
+ * WHAT THIS ACTUALLY DETECTS — read carefully (F4 Blocker-3 correction). The
+ * pulse and the detector both run on `setInterval` timers in the SAME process and
+ * event loop. So this detects the GATEWAY TICK LOOP STOPPING WHILE THE DETECTOR
+ * LOOP KEEPS RUNNING: the `WATCHDOG` timer being cleared, the tick scheduler
+ * dying, or the pulse source being detached — a divergence between the two loops.
+ *
+ * It does NOT (and cannot) detect a SYNCHRONOUS EVENT-LOOP WEDGE. During a real
+ * synchronous stall neither timer fires (both are frozen); when the loop resumes,
+ * the already-overdue 5 s pulse timer runs BEFORE the 30 s detector reads it, so
+ * the heartbeat looks fresh and the wedge is never reported. The teeth for a true
+ * process-level stall are OUT of this loop entirely: systemd's `WatchdogSec` on
+ * the unit, which restarts the process when `WATCHDOG=1` datagrams stop arriving
+ * (a kernel-side timer independent of the wedged Bun loop). Measuring in-loop
+ * timer LATENESS to catch a resumed-after-stall pulse is possible but is beyond
+ * this notify-only PR (it would need an out-of-loop clock or a scheduled-vs-actual
+ * delta) — deferred.
  *
  * NOTIFY-ONLY: this is pure observability state — a counter that a tick advances
  * and a detector reads. It changes no control flow and kills nothing.

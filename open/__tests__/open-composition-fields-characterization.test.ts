@@ -111,7 +111,7 @@ const SAVED_ENV_KEYS = [
 ] as const
 
 let savedEnv: Record<string, string | undefined> = {}
-let tmpDir: string
+let tmpDir: string | undefined
 
 beforeEach(() => {
   savedEnv = {}
@@ -133,7 +133,10 @@ afterEach(() => {
     if (savedEnv[k] === undefined) delete process.env[k]
     else process.env[k] = savedEnv[k]
   }
-  rmSync(tmpDir, { recursive: true, force: true })
+  // Guard on successful setup — a failed mkdtemp (sandbox) leaves tmpDir
+  // undefined; an unguarded rmSync would throw in afterEach and mask it.
+  if (tmpDir !== undefined) rmSync(tmpDir, { recursive: true, force: true })
+  tmpDir = undefined
 })
 
 function cannedHandle(instanceId: string): SessionHandle {

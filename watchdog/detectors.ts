@@ -22,6 +22,7 @@ import type {
   PooledCredential,
 } from '@neutronai/runtime/credential-pool.ts'
 import type { ProcessRegistry } from '@neutronai/tools/process-registry.ts'
+import { IncidentEdgeTracker } from './incident.ts'
 import type { WatchdogAlert, WatchdogDetector, WatchdogKind } from './types.ts'
 
 export interface CommonDetectorOptions {
@@ -53,6 +54,7 @@ export class HeartbeatDetector implements WatchdogDetector {
   private readonly project_slug: string
   private readonly now: () => number
   private readonly threshold_ms: number
+  private readonly incidents = new IncidentEdgeTracker()
 
   constructor(opts: HeartbeatDetectorOptions) {
     this.tracker = opts.tracker
@@ -64,17 +66,20 @@ export class HeartbeatDetector implements WatchdogDetector {
   async detect(): Promise<WatchdogAlert[]> {
     const last = this.tracker.lastHeartbeatAt()
     const now = this.now()
-    if (last === null || now - last <= this.threshold_ms) return []
-    return [
-      {
-        id: newAlertId(this.kind, this.project_slug, now),
-        kind: this.kind,
-        project_slug: this.project_slug,
-        detected_at: now / 1000,
-        resolved_at: null,
-        payload: { last_heartbeat_at: last, age_ms: now - last },
-      },
-    ]
+    const firing = last !== null && now - last > this.threshold_ms
+    // Incident-edge: fire ONCE while the heartbeat stays stale, and again only
+    // after it recovers then goes stale anew (Blocker-1 fix).
+    const risen = this.incidents.rising(firing ? [this.project_slug] : [], (key) =>
+      newAlertId(this.kind, key, now),
+    )
+    return risen.map(({ id }) => ({
+      id,
+      kind: this.kind,
+      project_slug: this.project_slug,
+      detected_at: now / 1000,
+      resolved_at: null,
+      payload: { last_heartbeat_at: last, age_ms: last === null ? 0 : now - last },
+    }))
   }
 }
 
@@ -94,6 +99,7 @@ export class StuckAgentDetector implements WatchdogDetector {
   private readonly project_slug: string
   private readonly now: () => number
   private readonly threshold_ms: number
+  private readonly incidents = new IncidentEdgeTracker()
 
   constructor(opts: StuckAgentDetectorOptions) {
     this.registry = opts.process_registry
@@ -105,20 +111,28 @@ export class StuckAgentDetector implements WatchdogDetector {
   async detect(): Promise<WatchdogAlert[]> {
     const now = this.now()
     const stuck = this.registry.listStuck(this.threshold_ms)
-    return stuck.map((r) => ({
-      id: newAlertId(this.kind, r.name, now),
-      kind: this.kind,
-      project_slug: this.project_slug,
-      detected_at: now / 1000,
-      resolved_at: null,
-      payload: {
-        process_name: r.name,
-        pid: r.pid,
-        tool_name: r.tool_name,
-        last_activity_at: r.last_activity_at,
-        age_ms: now - r.last_activity_at,
-      },
-    }))
+    const byName = new Map(stuck.map((r) => [r.name, r]))
+    // Incident-edge PER process: one alert per stuck process while it stays
+    // stuck; a process that recovers (activity resumes → drops out of listStuck)
+    // and later wedges again re-fires (Blocker-1 fix).
+    const risen = this.incidents.rising(byName.keys(), (key) => newAlertId(this.kind, key, now))
+    return risen.map(({ key, id }) => {
+      const r = byName.get(key)!
+      return {
+        id,
+        kind: this.kind,
+        project_slug: this.project_slug,
+        detected_at: now / 1000,
+        resolved_at: null,
+        payload: {
+          process_name: r.name,
+          pid: r.pid,
+          tool_name: r.tool_name,
+          last_activity_at: r.last_activity_at,
+          age_ms: now - r.last_activity_at,
+        },
+      }
+    })
   }
 }
 
@@ -203,6 +217,7 @@ export class OverrunCronDetector implements WatchdogDetector {
   private readonly project_slug: string
   private readonly now: () => number
   private readonly default_expected_ms: number
+  private readonly incidents = new IncidentEdgeTracker()
 
   constructor(opts: OverrunCronDetectorOptions) {
     this.jobs = opts.jobs
@@ -214,27 +229,32 @@ export class OverrunCronDetector implements WatchdogDetector {
 
   async detect(): Promise<WatchdogAlert[]> {
     const now = this.now()
-    const fired: WatchdogAlert[] = []
+    const payloads = new Map<string, Record<string, unknown>>()
     for (const job of this.jobs.list()) {
       const state = this.state.get(job.name, this.project_slug)
       if (!state || state.last_run_duration_ms === null) continue
       const expected = job.expected_duration_ms ?? this.default_expected_ms
       if (state.last_run_duration_ms <= expected) continue
-      fired.push({
-        id: newAlertId(this.kind, job.name, now),
-        kind: this.kind,
-        project_slug: this.project_slug,
-        detected_at: now / 1000,
-        resolved_at: null,
-        payload: {
-          job_name: job.name,
-          duration_ms: state.last_run_duration_ms,
-          expected_ms: expected,
-          last_run_at: state.last_run_at,
-        },
+      payloads.set(job.name, {
+        job_name: job.name,
+        duration_ms: state.last_run_duration_ms,
+        expected_ms: expected,
+        last_run_at: state.last_run_at,
       })
     }
-    return fired
+    // Incident-edge: a job that overran once keeps the SAME `last_run_duration_ms`
+    // in cron_state until its NEXT run, so a naive detector re-fired every tick
+    // forever. Fire once per overrun; the key clears when a later run comes in
+    // under budget, so the next overrun is a fresh incident (Blocker-1 fix).
+    const risen = this.incidents.rising(payloads.keys(), (key) => newAlertId(this.kind, key, now))
+    return risen.map(({ key, id }) => ({
+      id,
+      kind: this.kind,
+      project_slug: this.project_slug,
+      detected_at: now / 1000,
+      resolved_at: null,
+      payload: payloads.get(key)!,
+    }))
   }
 }
 
@@ -263,6 +283,7 @@ export class DbLockContentionDetector implements WatchdogDetector {
   private readonly window_ms: number
   private readonly threshold: number
   private samples: Array<{ t: number; count: number }> = []
+  private readonly incidents = new IncidentEdgeTracker()
 
   constructor(opts: DbLockDetectorOptions) {
     this.counter = opts.counter
@@ -282,23 +303,26 @@ export class DbLockContentionDetector implements WatchdogDetector {
     const windowStart = now - this.window_ms
     const inWindow = this.samples.filter((s) => s.t >= windowStart)
     const oldest = inWindow[0]
-    if (!oldest) return []
-    const delta = cur - oldest.count
-    if (delta < this.threshold) return []
-    return [
-      {
-        id: newAlertId(this.kind, this.project_slug, now),
-        kind: this.kind,
-        project_slug: this.project_slug,
-        detected_at: now / 1000,
-        resolved_at: null,
-        payload: {
-          delta,
-          window_ms: this.window_ms,
-          threshold: this.threshold,
-        },
+    const delta = oldest ? cur - oldest.count : 0
+    const firing = oldest !== undefined && delta >= this.threshold
+    // Incident-edge: sustained contention keeps `delta` over threshold across
+    // ticks — fire once per contention incident, re-fire only after it subsides
+    // below threshold and crosses again (Blocker-1 fix).
+    const risen = this.incidents.rising(firing ? [this.project_slug] : [], (key) =>
+      newAlertId(this.kind, key, now),
+    )
+    return risen.map(({ id }) => ({
+      id,
+      kind: this.kind,
+      project_slug: this.project_slug,
+      detected_at: now / 1000,
+      resolved_at: null,
+      payload: {
+        delta,
+        window_ms: this.window_ms,
+        threshold: this.threshold,
       },
-    ]
+    }))
   }
 }
 
@@ -318,6 +342,7 @@ export class SubstrateCooldownDetector implements WatchdogDetector {
   private readonly project_slug: string
   private readonly substrate_kind: string
   private readonly now: () => number
+  private readonly incidents = new IncidentEdgeTracker()
 
   constructor(opts: SubstrateCooldownDetectorOptions) {
     this.pool = opts.pool
@@ -328,23 +353,27 @@ export class SubstrateCooldownDetector implements WatchdogDetector {
 
   async detect(): Promise<WatchdogAlert[]> {
     const now = this.now()
-    if (this.pool.credentials.length === 0) return []
-    const allCold = this.pool.credentials.every((c: PooledCredential) =>
-      c.cooldown_until !== undefined && c.cooldown_until > now,
+    const allCold =
+      this.pool.credentials.length > 0 &&
+      this.pool.credentials.every(
+        (c: PooledCredential) => c.cooldown_until !== undefined && c.cooldown_until > now,
+      )
+    // Incident-edge: a cooldown lasts minutes across many ticks — fire once when
+    // the pool saturates, and again only after some credential recovers then the
+    // pool saturates anew (Blocker-1 fix: was ~20 pings for a 10-min cooldown).
+    const risen = this.incidents.rising(allCold ? [this.substrate_kind] : [], (key) =>
+      newAlertId(this.kind, key, now),
     )
-    if (!allCold) return []
-    return [
-      {
-        id: newAlertId(this.kind, this.substrate_kind, now),
-        kind: this.kind,
-        project_slug: this.project_slug,
-        detected_at: now / 1000,
-        resolved_at: null,
-        payload: {
-          substrate_kind: this.substrate_kind,
-          credential_count: this.pool.credentials.length,
-        },
+    return risen.map(({ id }) => ({
+      id,
+      kind: this.kind,
+      project_slug: this.project_slug,
+      detected_at: now / 1000,
+      resolved_at: null,
+      payload: {
+        substrate_kind: this.substrate_kind,
+        credential_count: this.pool.credentials.length,
       },
-    ]
+    }))
   }
 }

@@ -2486,10 +2486,15 @@ export function buildOpenGraphComposer(
     // it DETECTS + NOTIFIES; it changes no control flow and kills nothing
     // (enforcement is a separate flagged PR).
 
-    // (1) Real heartbeat source. The gateway's `WATCHDOG=1` tick pulses this via
-    // the `on_gateway_tick` seam below; when the tick stops, the heartbeat goes
-    // STALE and the detector fires. Pre-pulse once so a freshly-booted gateway
-    // reads healthy before the first tick lands.
+    // (1) Real heartbeat source (replaces the never-stale `() => Date.now()`
+    // stub). The gateway's `WATCHDOG=1` tick pulses this via the `on_gateway_tick`
+    // seam below; when the TICK LOOP stops advancing the pulse (timer cleared /
+    // scheduler died) while the supervisor loop keeps running, the heartbeat goes
+    // STALE and the detector fires. NOTE: this does NOT catch a synchronous
+    // event-loop wedge (both loops freeze together; the resumed pulse masks it) —
+    // systemd's `WatchdogSec` is the out-of-process teeth for that. See
+    // `watchdog/heartbeat.ts`. Pre-pulse once so a freshly-booted gateway reads
+    // healthy before the first tick lands.
     const heartbeatPulse = new HeartbeatPulse()
     heartbeatPulse.pulse()
 

@@ -506,9 +506,11 @@ export async function boot(options: BootOptions = {}): Promise<BootHandle> {
       console.error('sd_notify WATCHDOG=1 failed:', err)
     }
     // F4 — pulse the composition's supervision-watchdog heartbeat off this same
-    // tick (the one process-level liveness loop). GUARDED: a hook throw must
-    // never crash the tick or the process — the heartbeat detector then simply
-    // observes the pulse stop, which is the correct signal.
+    // tick (the one process-level liveness loop). This lets the heartbeat detector
+    // notice if THIS tick loop stops while the supervisor loop keeps running (a
+    // dead scheduler / cleared timer) — NOT a synchronous event-loop wedge, which
+    // freezes both loops and is systemd `WatchdogSec`'s job (see
+    // watchdog/heartbeat.ts). GUARDED: a hook throw must never crash the tick.
     try {
       onGatewayTick?.()
     } catch (err) {
