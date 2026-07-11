@@ -65,27 +65,35 @@ import { constantTimeEqual } from '@neutronai/runtime/constant-time-equal.ts'
 export type { ChatCommandFilter, ChatCommandFilterResult }
 
 /**
- * S0 security quick-patch (a) — same-origin guard for the `/ws/app/chat`
- * upgrade. A browser ALWAYS sends an `Origin` header on the WebSocket
- * handshake, and a WS upgrade is NOT subject to CORS — so without this check
- * ANY web page the owner merely visits could open
+ * Origin guard for the `/ws/app/chat` upgrade (S0 (a) same-origin core, S2 (a)
+ * configured-origin allow-list). A browser ALWAYS sends an `Origin` header on
+ * the WebSocket handshake, and a WS upgrade is NOT subject to CORS — so without
+ * this check ANY web page the owner merely visits could open
  * `ws://127.0.0.1:7800/ws/app/chat?token=…` against the loopback gateway.
  *
  * Returns `true` when the request may proceed:
  *   - `Origin` ABSENT (native Expo / CLI clients send none) → allowed; those
  *     authenticate by bearer alone.
+ *   - `Origin` PRESENT and its host is in `allowedWebOriginHosts` (the
+ *     configured owner web origin(s) — `NEUTRON_WEB_APP_BASE` / landing origin,
+ *     for a reverse-proxied deploy served from a different origin than the
+ *     gateway's own Host) → allowed.
  *   - `Origin` PRESENT and its host equals the request's own `Host` header
  *     (the owner's served page) → allowed.
  *   - `Origin` PRESENT but cross-origin (or opaque `"null"`, or the `Host`
- *     header is missing) → REJECTED.
+ *     header is missing with no configured match) → REJECTED.
  *
- * The `Host` value is not a secret, so a plain equality is sufficient (and the
- * length pre-check inside `constantTimeEqual` would leak nothing meaningful
- * either way); we use a strict `===` for clarity.
+ * The policy keys on the `Origin` being present-and-cross-origin, NOT on its
+ * absence — a same-origin/native client still connects. Hosts are not secrets,
+ * so a plain equality / membership test is sufficient; we use strict `===` /
+ * `includes` for clarity.
  */
-export function appWsOriginAllowed(origin: string | null, host: string | null): boolean {
+export function appWsOriginAllowed(
+  origin: string | null,
+  host: string | null,
+  allowedWebOriginHosts: readonly string[] = [],
+): boolean {
   if (origin === null) return true
-  if (host === null) return false
   let originHost: string
   try {
     originHost = new URL(origin).host
@@ -93,7 +101,35 @@ export function appWsOriginAllowed(origin: string | null, host: string | null): 
     // Opaque / malformed origin (e.g. a sandboxed iframe's `Origin: null`).
     return false
   }
-  return originHost.length > 0 && originHost === host
+  if (originHost.length === 0) return false
+  // A configured owner web origin is allowed even when it differs from `Host`
+  // (reverse-proxied deploy). Fail-closed: an empty/unconfigured list widens
+  // nothing, leaving the strict same-origin check below.
+  if (allowedWebOriginHosts.includes(originHost)) return true
+  // Same-origin: the owner's served page (Origin host === the socket authority).
+  if (host !== null && originHost === host) return true
+  return false
+}
+
+/**
+ * S2 (a) — extract the comparable `host` (authority) from each configured owner
+ * web origin (raw `NEUTRON_WEB_APP_BASE` / landing-origin base URL strings) so
+ * {@link appWsOriginAllowed} can match a browser `Origin` against them. Empty /
+ * malformed entries are dropped — they simply don't widen the allow-set
+ * (fail-closed), never a throw at boot.
+ */
+export function normalizeWebOriginHosts(bases: readonly string[]): string[] {
+  const hosts: string[] = []
+  for (const base of bases) {
+    if (typeof base !== 'string' || base.trim().length === 0) continue
+    try {
+      const h = new URL(base.trim()).host
+      if (h.length > 0) hosts.push(h)
+    } catch {
+      /* malformed configured origin — ignore, don't widen the allow-set */
+    }
+  }
+  return hosts
 }
 
 export interface AppWsSocketData {
@@ -171,6 +207,17 @@ export interface CreateAppWsSurfaceOptions {
    */
   app_ws_token?: string
   /**
+   * S2 (a) — configured owner web origin(s) (e.g. `NEUTRON_WEB_APP_BASE` /
+   * landing origin) whose BROWSER upgrades are allowed IN ADDITION to a strict
+   * same-origin (`Origin` host === `Host`). A reverse-proxied deploy serves the
+   * web app from a different origin than the gateway's own Host, so a pure
+   * same-origin check would reject the legitimate owner page. Raw base URL
+   * strings; the surface extracts each `host` ONCE at construction via
+   * {@link normalizeWebOriginHosts}. Absent / empty ⇒ same-origin-only (the S0
+   * behavior — a loopback dogfood box with `NEUTRON_WEB_APP_BASE` unset).
+   */
+  allowed_web_origins?: readonly string[]
+  /**
    * Optional pre-dispatch chat-command filter. When supplied, the
    * surface checks every inbound (HTTP + WS) against the filter
    * BEFORE calling `adapter.dispatchInbound`. A matching command
@@ -216,6 +263,9 @@ export function createAppWsSurface(opts: CreateAppWsSurfaceOptions): AppWsSurfac
   const chat_command_filter = opts.chat_command_filter
   const project_slug = opts.project_slug
   const app_ws_token = opts.app_ws_token
+  // S2 (a) — resolve the configured owner web origin host(s) ONCE (empty on a
+  // loopback dogfood box), reused on every upgrade's origin check below.
+  const allowedWebOriginHosts = normalizeWebOriginHosts(opts.allowed_web_origins ?? [])
   const on_session_open = opts.on_session_open
   const on_button_choice = opts.on_button_choice
 
@@ -235,7 +285,7 @@ export function createAppWsSurface(opts: CreateAppWsSurfaceOptions): AppWsSurfac
         // client (no Origin) is unaffected. Rejected BEFORE any token work so a
         // malicious page never even reaches the resolver.
         const origin = req.headers.get('origin')
-        if (!appWsOriginAllowed(origin, req.headers.get('host'))) {
+        if (!appWsOriginAllowed(origin, req.headers.get('host'), allowedWebOriginHosts)) {
           return new Response(
             JSON.stringify({
               ok: false,

@@ -18,6 +18,7 @@ import { MAX_UPLOAD_BYTES_DEFAULT } from './upload/import-upload-handler.ts'
 // (signup/, provisioning/, identity/, proxy/).
 import { composeProductionGraph } from './composition.ts'
 import { resolveBootConfig, type BootConfig } from '@neutronai/config/index.ts'
+import { assertWideBindPolicy } from './boot-bind-policy.ts'
 
 
 // Shared boot-time helpers — extracted to `./boot-helpers.ts` (Argus
@@ -376,6 +377,13 @@ export async function boot(options: BootOptions = {}): Promise<BootHandle> {
     options.httpHandler ??
     composedHttpHandler ??
     defaultHealthzHandler({ project_slug, bootedAt })
+
+  // S2 (b) — fail-closed wide-bind policy. Refuse to open a non-loopback
+  // listener while a dev-auth bypass env is set (that combination exposes the
+  // agent surfaces to the network with auth OFF). Loopback binds are a no-op,
+  // so the 127.0.0.1 dev/dogfood path is untouched. Thrown BEFORE the socket
+  // opens so a misconfigured wide bind never serves a single request.
+  assertWideBindPolicy(config.host, process.env)
 
   // Open the listener. This is the carryover fix from S5 Argus r2: prior to
   // this commit boot() never opened any HTTP port, so the systemd unit's

@@ -1103,11 +1103,20 @@ export function buildOpenGraphComposer(
 
     // ── Single-owner session + first-prompt-on-connect ─────────────────────
     // The cookie secret is the single shared HMAC secret for both the session
-    // cookie AND the local start-token. open/server.ts guarantees it is set
-    // (it generates an ephemeral one when unset), but default defensively so
-    // the composer never throws on a missing secret.
-    const cookieSecret =
-      env['NEUTRON_ONBOARDING_CHAT_COOKIE_SECRET'] ?? `open-ephemeral-${internal_handle}`
+    // cookie AND the local start-token. open/server.ts guarantees it is set (it
+    // derives a persisted per-install RANDOM secret when the operator sets
+    // none). S2 (c) — FAIL LOUD on a missing secret; NEVER fall back to a
+    // guessable constant (the old `open-ephemeral-<slug>` string let anyone who
+    // knew the slug forge the owner cookie). Reaching here without the secret is
+    // a wiring bug we surface, not one we silently paper over with a weak key.
+    const cookieSecret = env['NEUTRON_ONBOARDING_CHAT_COOKIE_SECRET']
+    if (cookieSecret === undefined || cookieSecret.length === 0) {
+      throw new Error(
+        'NEUTRON_ONBOARDING_CHAT_COOKIE_SECRET is unset — refusing to sign owner ' +
+          'sessions with a predictable fallback. Set it in .env, or boot via ' +
+          'open/server.ts which derives a persisted per-install secret.',
+      )
+    }
     const startTokenAuth = buildLocalStartTokenAuth(cookieSecret)
 
     // S0 security quick-patch (b) — per-boot app-ws token. The React client's

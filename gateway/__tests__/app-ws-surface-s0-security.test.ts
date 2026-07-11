@@ -13,7 +13,11 @@ import { describe, expect, it } from 'bun:test'
 
 import { createAppWsAuthResolver } from '@neutronai/channels/index.ts'
 import { AppWsAdapter, InMemoryAppWsSessionRegistry } from '@neutronai/channels/index.ts'
-import { appWsOriginAllowed, createAppWsSurface } from '../http/app-ws-surface.ts'
+import {
+  appWsOriginAllowed,
+  createAppWsSurface,
+  normalizeWebOriginHosts,
+} from '../http/app-ws-surface.ts'
 
 const HOST = '127.0.0.1:7800'
 const SAME_ORIGIN = `http://${HOST}`
@@ -35,7 +39,10 @@ function makeFakeServer(upgradeResult = true): {
   return { server, lastData: () => captured }
 }
 
-function makeSurface(app_ws_token?: string): ReturnType<typeof createAppWsSurface> {
+function makeSurface(
+  app_ws_token?: string,
+  allowed_web_origins?: readonly string[],
+): ReturnType<typeof createAppWsSurface> {
   const registry = new InMemoryAppWsSessionRegistry()
   const adapter = new AppWsAdapter({ registry, receiver: { receive: async () => {} } })
   const auth = createAppWsAuthResolver({ project_slug: 'demo', bypass: true })
@@ -45,6 +52,7 @@ function makeSurface(app_ws_token?: string): ReturnType<typeof createAppWsSurfac
     auth,
     project_slug: 'demo',
     ...(app_ws_token !== undefined ? { app_ws_token } : {}),
+    ...(allowed_web_origins !== undefined ? { allowed_web_origins } : {}),
   })
 }
 
@@ -162,5 +170,61 @@ describe('S0 (b) — per-boot app-ws token gate (browser-origin upgrades)', () =
     )
     expect(res!.status).toBe(101)
     expect((lastData() as { user_id: string }).user_id).toBe('sam')
+  })
+})
+
+const WEB_ORIGIN = 'https://app.example.test'
+const WEB_HOST = 'app.example.test'
+
+describe('normalizeWebOriginHosts — configured-origin host extraction', () => {
+  it('extracts the host authority from each valid base URL', () => {
+    expect(normalizeWebOriginHosts([WEB_ORIGIN, 'http://web.local:8080/x'])).toEqual([
+      WEB_HOST,
+      'web.local:8080',
+    ])
+  })
+  it('drops empty / whitespace / malformed entries (fail-closed, never a throw)', () => {
+    expect(normalizeWebOriginHosts(['', '   ', 'not a url', 'ht!tp://['])).toEqual([])
+  })
+})
+
+describe('appWsOriginAllowed — S2 (a) configured owner web origin allow-list', () => {
+  it('allows a cross-Host browser Origin that matches a configured web origin', () => {
+    // Reverse-proxied deploy: Origin host !== Host, but it IS the configured
+    // owner web origin → allowed.
+    expect(appWsOriginAllowed(WEB_ORIGIN, HOST, [WEB_HOST])).toBe(true)
+  })
+  it('MUTATION: the SAME cross-origin is rejected without the allow-list', () => {
+    // Remove the allow-list (the S2 broadening) → the request goes red.
+    expect(appWsOriginAllowed(WEB_ORIGIN, HOST, [])).toBe(false)
+    expect(appWsOriginAllowed(WEB_ORIGIN, HOST)).toBe(false)
+  })
+  it('still rejects an unrelated cross-origin even with an allow-list present', () => {
+    expect(appWsOriginAllowed('https://evil.example', HOST, [WEB_HOST])).toBe(false)
+  })
+  it('still allows same-origin and missing-Origin regardless of the allow-list', () => {
+    expect(appWsOriginAllowed(SAME_ORIGIN, HOST, [WEB_HOST])).toBe(true)
+    expect(appWsOriginAllowed(null, HOST, [WEB_HOST])).toBe(true)
+  })
+})
+
+describe('S2 (a) — WS upgrade accepts a configured cross-origin owner page', () => {
+  it('ALLOWS the configured web origin (101) but REJECTS it without the config (403)', async () => {
+    // Configured: the reverse-proxied owner page connects.
+    const configured = makeSurface(undefined, [WEB_ORIGIN])
+    const okRes = await configured.handler(
+      upgradeReq({ origin: WEB_ORIGIN, token: 'sam' }),
+      makeFakeServer().server,
+    )
+    expect(okRes!.status).toBe(101)
+
+    // MUTATION: same request, surface built WITHOUT allowed_web_origins → 403.
+    const bare = makeSurface()
+    const rejRes = await bare.handler(
+      upgradeReq({ origin: WEB_ORIGIN, token: 'sam' }),
+      makeFakeServer().server,
+    )
+    expect(rejRes!.status).toBe(403)
+    expect(((await rejRes!.json()) as { code: string }).code).toBe('bad_origin')
   })
 })
