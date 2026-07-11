@@ -254,17 +254,19 @@ describe('ChatWsClient — connect() during backoff (zombie-socket regression)',
     expect(sockets.length).toBe(2)
   })
 
-  it('openSocket() closes any superseded socket instead of leaking it, even if a stale timer still fires', () => {
+  it('a stale backoff-timer callback fired mid-handshake (A not yet open) is a complete no-op', () => {
+    // Grab the still-armed backoff timer's callback BEFORE `connect()` gets a
+    // chance to cancel it — models the exact race the bug report describes:
+    // "the still-armed backoff timer fires... opening socket B" even though
+    // a cancel was attempted. With BOTH fixes in place (connect() cancels +
+    // the reconnect-timer identity guard), this must never even reach
+    // `openSocket()` — it's not just cleaned up after the fact, it never
+    // creates a second socket or touches A at all.
     const { client, sockets, timers, closeCount } = setup()
     client.connect()
     sockets[0]!.fireOpen()
     sockets[0]!.fireClose() // unexpected drop → reconnecting, backoff timer armed
     expect(timers.pendingCount()).toBe(1)
-
-    // Grab the still-armed backoff timer's callback BEFORE `connect()` gets a
-    // chance to cancel it — models the exact race the bug report describes:
-    // "the still-armed backoff timer fires... opening socket B" even though
-    // a cancel was attempted.
     const staleReconnectFn = timers.peekNextFn()
 
     // Manual retry / remount during backoff opens socket A (still mid-
@@ -272,38 +274,29 @@ describe('ChatWsClient — connect() during backoff (zombie-socket regression)',
     client.connect()
     const socketA = sockets[1]!
     expect(socketA.closed).toBe(false)
-    const closesBeforeSupersede = closeCount()
+    const closesBefore = closeCount()
 
-    // The (already in-flight) backoff timer now fires anyway and calls
-    // openSocket() again, exactly like the still-armed timer in the bug.
+    // The (already in-flight) backoff timer fires anyway.
     staleReconnectFn()
 
-    // Exactly one live socket may remain: the superseded one (A) must have
-    // been closed by openSocket()'s defense-in-depth guard, not orphaned as
-    // a zombie the server still thinks is a live session. Superseding a
-    // socket is a real (if mid-handshake) close — `onClose` must fire for it,
-    // same as a real unexpected close, so a surface can tear down any state.
-    expect(sockets.length).toBe(3)
-    const socketB = sockets[2]!
-    expect(socketA.closed).toBe(true)
-    expect(socketB.closed).toBe(false)
-    expect(closeCount()).toBe(closesBeforeSupersede + 1)
+    // Complete no-op: the identity guard in `scheduleReconnect()` (T1's own
+    // handle no longer matches `this.reconnectHandle`, which `connect()`
+    // already nulled) rejects it before `openSocket()` ever runs — no second
+    // socket, A untouched, no spurious `onClose`.
+    expect(sockets.length).toBe(2)
+    expect(socketA.closed).toBe(false)
+    expect(closeCount()).toBe(closesBefore)
 
-    // A's late onopen (its handshake completing after supersession) must be
-    // a stale no-op — it must NOT resurrect A as `this.socket` or fire onOpen
-    // again for a socket the app never reads from.
     socketA.fireOpen()
-    socketB.fireOpen()
     expect(client.getStatus()).toBe('open')
+    expect(sockets.length).toBe(2)
   })
 
-  it('supersedes a FULLY OPEN socket cleanly: closes it, fires onClose to tear down per-open state, then opens fresh', () => {
+  it('a stale backoff-timer callback fired after A is FULLY OPEN is a complete no-op', () => {
     // Codex's exact repro: capture the stale backoff callback, call connect()
     // (opens A), let A actually finish its handshake (onOpen fires — a
     // surface would arm its resume-fallback here), THEN the stale callback
-    // fires. The superseded-but-live A must be closed AND get its `onClose`
-    // (the surface's only signal to tear down what `onOpen` armed) — not just
-    // silently dropped.
+    // fires. A live, fully-open socket must be left completely alone.
     const { client, sockets, timers, opens, closeCount } = setup()
     client.connect()
     sockets[0]!.fireOpen()
@@ -316,21 +309,57 @@ describe('ChatWsClient — connect() during backoff (zombie-socket regression)',
     expect(client.getStatus()).toBe('open')
     expect(opens().length).toBe(2) // socket[0]'s open + A's open
 
-    const closesBeforeSupersede = closeCount()
-    staleReconnectFn() // the stale timer fires anyway, superseding live A
-    expect(socketA.closed).toBe(true)
-    expect(closeCount()).toBe(closesBeforeSupersede + 1) // onClose fired for A
+    const closesBefore = closeCount()
+    staleReconnectFn() // the stale timer fires anyway
 
-    const socketB = sockets[2]!
-    expect(socketB.closed).toBe(false)
-    socketB.fireOpen()
+    // A must be left running exactly as-is: not closed, no spurious onClose,
+    // no second socket ever created, status still open.
+    expect(socketA.closed).toBe(false)
+    expect(closeCount()).toBe(closesBefore)
+    expect(sockets.length).toBe(2)
     expect(client.getStatus()).toBe('open')
-    expect(opens().length).toBe(3) // B's open fires onOpen again, fresh
+    expect(opens().length).toBe(2)
+  })
 
-    // A's own (now-stale) close, if the real socket ever surfaces one, must
-    // be a no-op — it must not double-fire onClose or re-schedule.
-    const closesAfterBOpen = closeCount()
-    socketA.fireClose()
-    expect(closeCount()).toBe(closesAfterBOpen)
+  it('a stale reconnect-timer callback (T1) cannot clobber a NEWER reconnect timer (T2) it was superseded by', () => {
+    // Per Codex review: `scheduleReconnect()`'s timer callback used to
+    // unconditionally null `this.reconnectHandle` and call `openSocket()`.
+    // If a "cancelled" timer (T1) somehow still fires — e.g. a native-bridge
+    // timer race, or any future call path that reaches `scheduleReconnect()`
+    // twice without an intervening open — after a NEWER timer (T2) has since
+    // been armed, T1's callback would null out the field tracking T2 (making
+    // T2 uncancellable bookkeeping-wise) and open an extra socket. Sequence:
+    // T1 armed → connect() cancels T1 + opens A → A drops → T2 armed → T1
+    // fires anyway (race) → T2 must be completely unaffected.
+    const { client, sockets, timers } = setup()
+    client.connect()
+    sockets[0]!.fireOpen()
+    sockets[0]!.fireClose() // unexpected drop → T1 armed
+    const staleT1Fn = timers.peekNextFn()
+
+    client.connect() // cancels T1, opens socket A
+    const socketA = sockets[1]!
+    expect(timers.pendingCount()).toBe(0) // T1 cancelled
+
+    socketA.fireClose() // unexpected drop → T2 armed
+    expect(timers.pendingCount()).toBe(1)
+    expect(sockets.length).toBe(2) // no new socket yet — T2 hasn't fired
+
+    // T1 fires anyway (the race Codex's finding models).
+    staleT1Fn()
+
+    // Stale-guarded: T1 must be a complete no-op — no new socket, and (most
+    // importantly) T2's own bookkeeping in `reconnectHandle` must be
+    // untouched, so T2 remains both live and legitimately cancellable.
+    expect(sockets.length).toBe(2)
+    expect(timers.pendingCount()).toBe(1)
+
+    // T2 must still be the SAME still-cancellable timer — prove it by
+    // cancelling via an explicit close() and confirming nothing is left
+    // armed (if T1's stale fire had nulled `reconnectHandle`, `close()`'s
+    // `cancelReconnect()` would have nothing to cancel, but T2 would still
+    // be physically armed and fire later regardless).
+    client.close()
+    expect(timers.pendingCount()).toBe(0)
   })
 })

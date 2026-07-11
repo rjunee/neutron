@@ -425,11 +425,24 @@ export class ChatWsClient {
     this.setStatus('reconnecting')
     const delay = this.backoffDelay(this.attempt)
     this.attempt += 1
-    this.reconnectHandle = this.opts.setTimeoutFn(() => {
+    // Identity stale-guard (mirrors the socket-identity guards in
+    // `openSocket()`): capture THIS timer's own handle and only act if it's
+    // still the one `this.reconnectHandle` points to. Without this, a stale
+    // callback that somehow still fires after being "cancelled" (e.g. a
+    // native-bridge timer race on RN, or any future call path) would
+    // unconditionally null `this.reconnectHandle` and call `openSocket()` —
+    // clobbering a NEWER reconnect timer's bookkeeping (making it
+    // uncancellable) or reopening a socket after a fresher one is already
+    // live, reintroducing the exact zombie-socket class of bug this file
+    // exists to prevent.
+    let handle: unknown
+    handle = this.opts.setTimeoutFn(() => {
+      if (this.reconnectHandle !== handle) return
       this.reconnectHandle = null
       if (this.closedByUser || !this.active) return
       this.openSocket()
     }, delay)
+    this.reconnectHandle = handle
   }
 
   /** Exponential backoff with additive jitter, capped at maxBackoffMs. */
