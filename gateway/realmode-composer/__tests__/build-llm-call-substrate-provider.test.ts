@@ -1097,3 +1097,129 @@ test('CONTINUITY ON ERROR: turn 2 (resumes r1) errors terminally → turn 3 carr
   const t3input = bodies[2]!['input'] as Array<{ role: string; content: string }>
   expect(t3input.map((m) => m.content)).toContain('u2-after-failed-turn')
 })
+
+// --- STRUCTURAL LEDGER INVALIDATION (audit round 17): EVERY non-success exit
+// clears the ledger, so the next turn replays full history. Covers the early
+// returns (pool-null, all-cooling) + setup throw that the r15 per-branch delete
+// missed. ---
+
+function completionFetch(): { fetchImpl: typeof fetch; bodies: Array<Record<string, unknown>> } {
+  const bodies: Array<Record<string, unknown>> = []
+  let n = 0
+  const fetchImpl = (async (_url: string | URL, init?: RequestInit) => {
+    bodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>)
+    n++
+    const id = `r${n}`
+    const sse =
+      [
+        { event: 'response.created', data: { type: 'response.created', response: { id } } },
+        { event: 'response.completed', data: { type: 'response.completed', response: { id, usage: { input_tokens: 1, output_tokens: 1 } } } },
+      ]
+        .map((f) => `event: ${f.event}\ndata: ${JSON.stringify(f.data)}\n`)
+        .join('\n') + '\n'
+    const stream = new ReadableStream({ start(c) { c.enqueue(new TextEncoder().encode(sse)); c.close() } })
+    return new Response(stream, { status: 200 })
+  }) as unknown as typeof fetch
+  return { fetchImpl, bodies }
+}
+
+const TURN3_SPEC: AgentSpec = {
+  prompt: 'turn 3',
+  tools: [],
+  model_preference: ['claude-opus-4-8'],
+  messages: [
+    { role: 'user', content: 'u1' },
+    { role: 'assistant', content: 'a1' },
+    { role: 'user', content: 'u2-intervening' },
+  ],
+}
+
+/** Assert turn 3 did NOT resume + carries the full intervening history. */
+function assertTurn3ReplaysFullHistory(bodies: Array<Record<string, unknown>>): void {
+  const t3 = bodies[bodies.length - 1]!
+  expect(t3['previous_response_id']).toBeUndefined()
+  const input = t3['input'] as Array<{ role: string; content: string }>
+  expect(input.map((m) => m.content)).toContain('u2-intervening')
+}
+
+test('STRUCTURAL: success → turn 2 POOL-NULL early return → turn 3 replays full history (no stale resume)', async () => {
+  const rec = completionFetch()
+  const pool = openaiPool()
+  let failMode: 'none' | 'pool-null' = 'none'
+  const sub = buildLlmCallSubstrate({
+    pool: anthropicPool(),
+    substrate_instance_id: 'gpt-struct-poolnull',
+    provider: 'openai',
+    user_id: 'owner',
+    openai: {
+      resolvePool: async () => (failMode === 'pool-null' ? null : pool),
+      bindMcpResolver: () => async () => ({}),
+      model_preference: ['gpt-5.6'],
+      fetchImpl: rec.fetchImpl,
+    },
+  })!
+  await drain(sub.start(spec())) // turn 1 → stores r1
+  failMode = 'pool-null'
+  await drain(sub.start(spec())) // turn 2 → pool-null early return → finally clears ledger
+  failMode = 'none'
+  await drain(sub.start(TURN3_SPEC)) // turn 3 → recovery
+  expect(rec.bodies).toHaveLength(2) // turn 2 never dispatched
+  assertTurn3ReplaysFullHistory(rec.bodies)
+})
+
+test('STRUCTURAL: success → turn 2 ALL-CREDENTIALS-COOLING early return → turn 3 replays full history', async () => {
+  const rec = completionFetch()
+  const pool = openaiPool()
+  const sub = buildLlmCallSubstrate({
+    pool: anthropicPool(),
+    substrate_instance_id: 'gpt-struct-cooling',
+    provider: 'openai',
+    user_id: 'owner',
+    openai: {
+      pool,
+      bindMcpResolver: () => async () => ({}),
+      model_preference: ['gpt-5.6'],
+      fetchImpl: rec.fetchImpl,
+    },
+  })!
+  await drain(sub.start(spec())) // turn 1 → stores r1
+  // Turn 2 — cool the only credential → selectCredential returns null → early return.
+  pool.credentials[0]!.cooldown_until = Date.now() + 60_000
+  pool.credentials[0]!.cooldown_reason = 'rate_limit_429'
+  await drain(sub.start(spec()))
+  // Turn 3 — un-cool + recover.
+  delete pool.credentials[0]!.cooldown_until
+  delete pool.credentials[0]!.cooldown_reason
+  await drain(sub.start(TURN3_SPEC))
+  expect(rec.bodies).toHaveLength(2)
+  assertTurn3ReplaysFullHistory(rec.bodies)
+})
+
+test('STRUCTURAL: success → turn 2 SETUP THROW (resolvePool throws) → turn 3 replays full history', async () => {
+  const rec = completionFetch()
+  const pool = openaiPool()
+  let failMode: 'none' | 'throw' = 'none'
+  const sub = buildLlmCallSubstrate({
+    pool: anthropicPool(),
+    substrate_instance_id: 'gpt-struct-throw',
+    provider: 'openai',
+    user_id: 'owner',
+    openai: {
+      resolvePool: async () => {
+        if (failMode === 'throw') throw new Error('vault unavailable')
+        return pool
+      },
+      bindMcpResolver: () => async () => ({}),
+      model_preference: ['gpt-5.6'],
+      fetchImpl: rec.fetchImpl,
+    },
+  })!
+  await drain(sub.start(spec())) // turn 1 → stores r1
+  failMode = 'throw'
+  const t2 = await drain(sub.start(spec())) // turn 2 → setup throw → catch → finally clears
+  expect(t2.some((e) => e.kind === 'error')).toBe(true)
+  failMode = 'none'
+  await drain(sub.start(TURN3_SPEC))
+  expect(rec.bodies).toHaveLength(2)
+  assertTurn3ReplaysFullHistory(rec.bodies)
+})

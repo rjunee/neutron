@@ -858,6 +858,20 @@ export function startOpenAiFamilySession(args: {
   let innerHandle: SessionHandle | null = null
   let cancelled = false
   const events = (async function* (): AsyncGenerator<Event, void, void> {
+   // SINGLE-CHOKEPOINT LEDGER INVALIDATION (audit round 17) — compute the ledger
+   // key BEFORE any setup / pool resolution / credential check so EVERY exit path
+   // has it in scope, and invalidate it in the `finally` below on ANY non-success
+   // exit (pool-null, all-credentials-cooling, setup/iterator throw, stream error,
+   // expired-session, mid-switch, cancel). `committed` flips true ONLY after a
+   // clean completion has stored the fresh response id. This replaces the scattered
+   // per-error-path deletes, so no future exit path can silently regress continuity
+   // (a resumed-but-failed turn otherwise leaks a stale previous_response_id that
+   // drops the failed turn's history from the next turn).
+   const ledgerKey =
+     sessionLedger !== undefined && sessionKey !== undefined && sessionKey.length > 0
+       ? sessionKey
+       : undefined
+   let committed = false
    // SETUP GUARD (audit) — the OpenAI path promises to "degrade LOUDLY (terminal
    // error event)". Pool resolution (`await config.resolvePool()`), manifest
    // resolution (`config.toolManifest()`), and adapter construction/`start()` can
@@ -953,10 +967,7 @@ export function startOpenAiFamilySession(args: {
     // CONTINUITY (audit CRITICAL) — thread the last completion's session hint
     // back as `spec.session` so the STATELESS provider is not amnesiac. Only when
     // the caller wired a ledger (conversational) AND didn't already set a session.
-    const ledgerKey =
-      sessionLedger !== undefined && sessionKey !== undefined && sessionKey.length > 0
-        ? sessionKey
-        : undefined
+    // `ledgerKey` is computed once at the top (single-chokepoint invalidation).
     if (ledgerKey !== undefined && dispatchSpec.session === undefined) {
       const prior = sessionLedger!.get(ledgerKey)
       // CROSS-PROVIDER CONTINUITY (audit round 14) — only resume the stored
@@ -1024,25 +1035,22 @@ export function startOpenAiFamilySession(args: {
           reportSuccess(pool, cred.id)
           // Persist the session hint (tagged with THIS provider) for the next turn
           // on this conversation key — the provider tag lets the read above reject a
-          // continuation stored by a different provider.
+          // continuation stored by a different provider. `committed = true` marks
+          // this the ONE clean-success outcome, so the finally-guard does NOT
+          // invalidate (every other outcome does).
           if (ledgerKey !== undefined && ev.session !== undefined) {
             sessionLedger!.set(ledgerKey, {
               id: ev.session.id,
               last_active_at: ev.session.last_active_at,
               provider,
             })
+            committed = true
           }
         } else if (ev.kind === 'error') {
           reported = true
-          // CONTINUITY ON FAILURE (audit round 15) — a dispatched turn that ends in
-          // a terminal error may have consumed/invalidated its resumed session, so
-          // INVALIDATE this scope's stored continuation: the next turn must replay
-          // the COMPLETE `spec.messages` rather than resume a dead/uncertain session
-          // (which the adapter would otherwise use, suppressing spec.messages and
-          // dropping this failed turn's history). The adapter self-heals a merely
-          // EXPIRED previous_response_id in-turn (fresh replay → new id stored on
-          // completion); this clear covers every OTHER terminal error.
-          if (ledgerKey !== undefined) sessionLedger!.delete(ledgerKey)
+          // CONTINUITY ON FAILURE (audit round 15/17) — a stream error is a
+          // non-success exit; the `finally` guard invalidates the ledger (no
+          // per-branch delete needed). We still classify the cooldown here.
           // CREDENTIAL-FAULT-ONLY cooldown (audit round 12). ONLY 401/402/429 cool
           // the OpenAI key. A 5xx / 408 / network exception / no-status error is a
           // transient SERVER/NETWORK fault, NOT a credential fault — cooling the key
@@ -1081,6 +1089,14 @@ export function startOpenAiFamilySession(args: {
        }`,
        retryable: false,
      }
+   } finally {
+     // SINGLE-CHOKEPOINT INVALIDATION (audit round 17) — EVERY non-success exit
+     // (pool-null / all-cooling early returns, setup or iterator throw, stream
+     // error, abandonment/cancel) lands here with `committed === false`, so the
+     // stale continuation is cleared and the next turn replays full `spec.messages`
+     // instead of resuming a dead/uncertain session. A clean completion set
+     // `committed = true`, so it is the ONLY outcome that keeps the stored id.
+     if (!committed && ledgerKey !== undefined) sessionLedger!.delete(ledgerKey)
    }
   })()
   const handle: SessionHandle = {
