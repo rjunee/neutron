@@ -2561,8 +2561,14 @@ export function buildOpenGraphComposer(
         } catch {
           // app-ws delivery is best-effort — never throw into the tick
         }
-        // O4 — VISIBILITY row. `emitSystemEvent` never throws/rejects.
-        void emitSystemEvent({
+        // O4 — VISIBILITY row. AWAIT the durable write (round-15): `notify()` must
+        // not resolve before it completes, else the supervisor commits the incident
+        // and considers the tick drained while the `system_events` write is still in
+        // flight — and the quiescing `WatchdogSupervisor.stop()` (awaited before
+        // `db.close()`) could then close the DB mid-write, permanently losing the
+        // row. `emitSystemEvent` is fully guarded (never throws/rejects), so awaiting
+        // it cannot break the tick; a null ambient sink is an awaited no-op.
+        await emitSystemEvent({
           event: 'watchdog_alert',
           module: 'watchdog',
           level: 'warn',

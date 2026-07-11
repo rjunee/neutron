@@ -21,7 +21,11 @@ import { fileURLToPath } from 'node:url'
 
 import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
-import { SystemEventsStore, registerSystemEventSink } from '@neutronai/persistence/system-events.ts'
+import {
+  SystemEventsStore,
+  registerSystemEventSink,
+  type SystemEventInput,
+} from '@neutronai/persistence/system-events.ts'
 import type { WatchdogAlert } from '@neutronai/watchdog/types.ts'
 import { buildOpenGraphComposer } from '../composer.ts'
 
@@ -137,10 +141,9 @@ describe('Open supervision-watchdog prod-boot wiring (F4)', () => {
         resolved_at: null,
         payload: { age_ms: 99_000 },
       }
-      // Must never throw (guarded fire-and-forget).
+      // Must never throw, and `notify()` AWAITS the durable O4 write (round-15):
+      // the row is present the instant `notify()` resolves — NO `Bun.sleep` needed.
       await composition.watchdog_notifier.notify(alert)
-      // Give the fire-and-forget emit a tick to land.
-      await Bun.sleep(30)
 
       const rows = db!.all<{ event_name: string; module: string }, []>(
         `SELECT event_name, module FROM system_events WHERE event_name = 'watchdog_alert'`,
@@ -157,6 +160,79 @@ describe('Open supervision-watchdog prod-boot wiring (F4)', () => {
         }
       }
     } catch (err) {
+      for (const cleanup of composition.realmode_cleanups ?? []) {
+        try {
+          await cleanup()
+        } catch {
+          /* ignore */
+        }
+      }
+      throw err
+    }
+  }, 20_000)
+
+  test('round-15: notify() does NOT resolve until the deferred O4 write completes (no fire-and-forget race)', async () => {
+    // A durable sink whose record() is HELD pending until released — stands in for
+    // an O4 write still in flight when the tick would otherwise be considered drained.
+    let release: () => void = () => {}
+    const gate = new Promise<void>((res) => {
+      release = res
+    })
+    const realStore = new SystemEventsStore({ db: db! })
+    let recordStarted = false
+    let recorded = false
+    registerSystemEventSink({
+      record: async (input: SystemEventInput) => {
+        recordStarted = true
+        await gate
+        const out = await realStore.record(input) // land the durable row only after release
+        recorded = true
+        return out
+      },
+    } as unknown as SystemEventsStore)
+
+    const composer = buildOpenGraphComposer({ env: process.env })
+    const composition = await composer({ db: db!, project_slug: 'owner' })
+    try {
+      const alert: WatchdogAlert = {
+        id: 'deferred-alert-1',
+        kind: 'gateway_heartbeat',
+        project_slug: 'owner',
+        detected_at: Date.now() / 1000,
+        resolved_at: null,
+        payload: { age_ms: 99_000 },
+      }
+
+      // Start notify() WITHOUT awaiting; it must BLOCK on the durable write.
+      let notifyResolved = false
+      const notifyP = composition.watchdog_notifier.notify(alert).then(() => {
+        notifyResolved = true
+      })
+      for (let i = 0; i < 8; i++) await Promise.resolve() // let notify reach the gated write
+      expect(recordStarted).toBe(true) // it DID begin the durable write…
+      expect(notifyResolved).toBe(false) // …and notify() has NOT resolved while it's pending
+      expect(recorded).toBe(false)
+
+      // Release the write → ONLY THEN does notify() resolve, with the row durable.
+      release()
+      await notifyP
+      expect(notifyResolved).toBe(true)
+      expect(recorded).toBe(true)
+      const rows = db!.all<{ event_name: string }, []>(
+        `SELECT event_name FROM system_events WHERE event_name = 'watchdog_alert'`,
+        [],
+      )
+      expect(rows.length).toBe(1)
+
+      for (const cleanup of composition.realmode_cleanups ?? []) {
+        try {
+          await cleanup()
+        } catch {
+          /* best-effort */
+        }
+      }
+    } catch (err) {
+      release()
       for (const cleanup of composition.realmode_cleanups ?? []) {
         try {
           await cleanup()
