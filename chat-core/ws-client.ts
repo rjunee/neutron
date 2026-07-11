@@ -103,6 +103,12 @@ export class ChatWsClient {
   private active = true
   private closedByUser = false
   private reconnectHandle: unknown = null
+  /** Monotonic counter, bumped on every `cancelReconnect()` call. The reconnect
+   *  timer's own callback captures its value and stale-guards on it — NOT on
+   *  `reconnectHandle` itself, which some `setTimeoutFn` adapters may reuse
+   *  after cancellation (e.g. a simple numeric-ID pool), unlike this
+   *  always-distinct counter. */
+  private reconnectGeneration = 0
   /** GAP-1 — heartbeat: the pending idle-ping timer (fires a ping after silence). */
   private heartbeatHandle: unknown = null
   /** GAP-1 — heartbeat: the pending missed-pong deadline (fires a force-close). */
@@ -148,6 +154,18 @@ export class ChatWsClient {
     this.closedByUser = false
     this.active = true
     if (this.status === 'connecting' || this.status === 'open') return
+    // `status === 'reconnecting'` is ambiguous by design: `openSocket()` uses
+    // it for BOTH "waiting on the backoff timer, no socket yet" AND "a retry
+    // attempt (attempt > 0) is actively mid-handshake". A socket already in
+    // flight must make `connect()` a no-op too — same as the `'connecting'`
+    // check above — otherwise a caller (a manual "retry" button, a remount)
+    // would tear down a handshake that might well succeed, for no reason.
+    if (this.socket !== null) return
+    // Otherwise we're genuinely idle with a backoff timer still armed in
+    // `reconnectHandle`. Cancel it BEFORE opening a fresh socket (mirrors
+    // `notifyReachable`): otherwise the timer fires later and calls
+    // `openSocket()` again, orphaning the socket we're about to open.
+    this.cancelReconnect()
     this.openSocket()
   }
 
@@ -190,17 +208,24 @@ export class ChatWsClient {
    * "connectivity regained" event (browser `online`; NetInfo `isConnected` on
    * native, via the W6 bridge) so a reconnect fires the INSTANT the network is
    * back instead of waiting out the (up-to-`maxBackoffMs`) backoff. Resets the
-   * backoff to base and reconnects NOW when we're not already open/connecting;
-   * a no-op after an explicit `close()` or while backgrounded (`setActive`
-   * owns the foreground/background lifecycle). Safe to call spuriously — an
-   * already-open socket is left untouched (a genuinely half-open one is caught
-   * by the heartbeat).
+   * backoff to base and reconnects NOW when we're not already open/connecting
+   * and no retry is already mid-handshake; a no-op after an explicit `close()`
+   * or while backgrounded (`setActive` owns the foreground/background
+   * lifecycle). Safe to call spuriously — an already-open (or already-in-
+   * flight) socket is left untouched (a genuinely half-open one is caught by
+   * the heartbeat).
    */
   notifyReachable(): void {
     if (this.closedByUser || !this.active) return
     this.attempt = 0
     this.cancelReconnect()
     if (this.status === 'open' || this.status === 'connecting') return
+    // Same ambiguous-`'reconnecting'`-status boundary as `connect()`: a retry
+    // attempt can be actively mid-handshake (a socket already in flight) even
+    // though `status` isn't `'connecting'`. Leave it alone — connectivity
+    // coming back doesn't mean that handshake is stuck, and tearing it down
+    // here would just be needless churn (or worse, race its own onopen).
+    if (this.socket !== null) return
     this.openSocket()
   }
 
@@ -234,6 +259,27 @@ export class ChatWsClient {
 
   private openSocket(): void {
     this.clearHeartbeat()
+    // Defense-in-depth: never replace `this.socket` without properly tearing
+    // down whatever it currently points to. Under normal operation this is
+    // already null here (the callers that reach `openSocket()` all null it
+    // first), but if that ever stops holding — a missed cancel, a future call
+    // path — the superseded socket's own onopen/onclose are identity-stale-
+    // guarded and would never fire, leaking it as a zombie live connection.
+    // Tear it down exactly like a real unexpected close: close the socket and
+    // fire `onClose` (if it was open, this is the surface's only signal to
+    // tear down per-open state — e.g. the resume-fallback armed in `onOpen`;
+    // if it was still mid-handshake this mirrors `onclose` firing before
+    // `onopen` ever did, which is equally harmless to signal).
+    if (this.socket !== null) {
+      const stale = this.socket
+      this.socket = null
+      try {
+        stale.close()
+      } catch {
+        /* already closed */
+      }
+      if (this.onClose !== undefined) this.onClose()
+    }
     this.setStatus(this.attempt === 0 ? 'connecting' : 'reconnecting')
     let socket: SocketLike
     try {
@@ -394,11 +440,23 @@ export class ChatWsClient {
   }
 
   private scheduleReconnect(): void {
-    this.cancelReconnect()
+    this.cancelReconnect() // bumps `reconnectGeneration`, invalidating any prior pending callback
     this.setStatus('reconnecting')
     const delay = this.backoffDelay(this.attempt)
     this.attempt += 1
+    // Generation stale-guard (mirrors the socket-identity guards elsewhere in
+    // this file, but deliberately does NOT compare the raw timer handle — see
+    // `reconnectGeneration`'s doc comment for why). Without this, a stale
+    // callback that somehow still fires after being "cancelled" (e.g. a
+    // native-bridge timer race on RN, or any future call path) would
+    // unconditionally null `this.reconnectHandle` and call `openSocket()` —
+    // clobbering a NEWER reconnect timer's bookkeeping (making it
+    // uncancellable) or reopening a socket after a fresher one is already
+    // live, reintroducing the exact zombie-socket class of bug this file
+    // exists to prevent.
+    const generation = this.reconnectGeneration
     this.reconnectHandle = this.opts.setTimeoutFn(() => {
+      if (generation !== this.reconnectGeneration) return
       this.reconnectHandle = null
       if (this.closedByUser || !this.active) return
       this.openSocket()
@@ -413,6 +471,12 @@ export class ChatWsClient {
   }
 
   private cancelReconnect(): void {
+    // Bump FIRST and unconditionally (not just when a timer is currently
+    // armed): this invalidates any earlier reconnect callback's captured
+    // generation even if this particular cancel has nothing to clear —
+    // e.g. `connect()` cancelling a timer that (in a pathological adapter)
+    // already fired but whose callback is still queued.
+    this.reconnectGeneration += 1
     if (this.reconnectHandle !== null) {
       this.opts.clearTimeoutFn(this.reconnectHandle)
       this.reconnectHandle = null

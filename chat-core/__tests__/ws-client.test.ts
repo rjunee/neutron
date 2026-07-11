@@ -58,6 +58,46 @@ function timerHarness() {
     pendingCount(): number {
       return timers.length
     },
+    /** Peek at (without removing) the next pending timer's callback. Used to
+     *  model a timer that's already been dispatched to the callback queue at
+     *  the instant a caller tries to cancel it — `clearTimeout` can't un-fire
+     *  a callback already in flight, so grabbing the closure directly and
+     *  invoking it later reproduces that race deterministically. */
+    peekNextFn(): () => void {
+      const t = timers[0]
+      if (t === undefined) throw new Error('no pending timer')
+      return t.fn
+    },
+  }
+}
+
+/** Like `timerHarness()`, but deliberately REUSES freed handle IDs (resets
+ *  the counter to 1 whenever nothing is pending) instead of always
+ *  allocating fresh ones. Some real `setTimeoutFn` adapters recycle freed
+ *  numeric IDs; the reconnect-timer stale-guard must hold even when two
+ *  different timers end up sharing the exact same underlying handle. */
+function reusingHandleTimerHarness() {
+  const timers: PendingTimer[] = []
+  let nextHandle = 1
+  return {
+    setTimeoutFn: (fn: () => void, ms: number): unknown => {
+      if (timers.length === 0) nextHandle = 1 // simulate ID recycling
+      const handle = nextHandle++
+      timers.push({ fn, ms, handle })
+      return handle
+    },
+    clearTimeoutFn: (handle: unknown): void => {
+      const idx = timers.findIndex((t) => t.handle === handle)
+      if (idx >= 0) timers.splice(idx, 1)
+    },
+    pendingCount(): number {
+      return timers.length
+    },
+    peekNextFn(): () => void {
+      const t = timers[0]
+      if (t === undefined) throw new Error('no pending timer')
+      return t.fn
+    },
   }
 }
 
@@ -67,6 +107,7 @@ function setup() {
   const statuses: string[] = []
   const opens: number[] = []
   let openCount = 0
+  let closeCount = 0
   const client = new ChatWsClient({
     url: 'wss://test/ws/app/chat',
     createSocket: () => {
@@ -75,6 +116,7 @@ function setup() {
       return s
     },
     onOpen: () => { openCount++; opens.push(openCount) },
+    onClose: () => { closeCount++ },
     onStatus: (s) => statuses.push(s),
     minBackoffMs: 500,
     maxBackoffMs: 8000,
@@ -82,7 +124,7 @@ function setup() {
     setTimeoutFn: timers.setTimeoutFn,
     clearTimeoutFn: timers.clearTimeoutFn,
   })
-  return { client, sockets, timers, statuses, opens: () => opens }
+  return { client, sockets, timers, statuses, opens: () => opens, closeCount: () => closeCount }
 }
 
 describe('ChatWsClient — connect + open', () => {
@@ -209,5 +251,227 @@ describe('ChatWsClient — AppState awareness', () => {
     sockets[0]!.fireClose()
     expect(timers.pendingCount()).toBe(0)
     expect(sockets.length).toBe(1)
+  })
+})
+
+describe('ChatWsClient — connect() during backoff (zombie-socket regression)', () => {
+  // A UI wires a manual "retry connection" button (or a remount calls
+  // `session.start()` → `connect()`) while a reconnect backoff timer is still
+  // armed. Pre-fix, `connect()` opened a new socket WITHOUT cancelling that
+  // timer, so it fired later and opened a second socket, orphaning the
+  // first — the server ends up holding two live sockets for one client.
+
+  it('connect() cancels the still-armed backoff timer, so it can never fire and open a second socket', () => {
+    const { client, sockets, timers } = setup()
+    client.connect()
+    sockets[0]!.fireOpen()
+    sockets[0]!.fireClose() // unexpected drop → reconnecting, backoff timer armed
+    expect(client.getStatus()).toBe('reconnecting')
+    expect(timers.pendingCount()).toBe(1)
+
+    // Manual retry / remount during backoff.
+    client.connect()
+
+    // The pending backoff timer must be cancelled — otherwise it's still
+    // armed and will fire later, opening a zombie second socket.
+    expect(timers.pendingCount()).toBe(0)
+    expect(sockets.length).toBe(2)
+
+    sockets[1]!.fireOpen()
+    expect(client.getStatus()).toBe('open')
+    // No further sockets ever get created — there's no leftover timer to
+    // fire one.
+    expect(sockets.length).toBe(2)
+  })
+
+  it('a stale backoff-timer callback fired mid-handshake (A not yet open) is a complete no-op', () => {
+    // Grab the still-armed backoff timer's callback BEFORE `connect()` gets a
+    // chance to cancel it — models the exact race the bug report describes:
+    // "the still-armed backoff timer fires... opening socket B" even though
+    // a cancel was attempted. With BOTH fixes in place (connect() cancels +
+    // the reconnect-timer identity guard), this must never even reach
+    // `openSocket()` — it's not just cleaned up after the fact, it never
+    // creates a second socket or touches A at all.
+    const { client, sockets, timers, closeCount } = setup()
+    client.connect()
+    sockets[0]!.fireOpen()
+    sockets[0]!.fireClose() // unexpected drop → reconnecting, backoff timer armed
+    expect(timers.pendingCount()).toBe(1)
+    const staleReconnectFn = timers.peekNextFn()
+
+    // Manual retry / remount during backoff opens socket A (still mid-
+    // handshake — it hasn't fired onopen yet).
+    client.connect()
+    const socketA = sockets[1]!
+    expect(socketA.closed).toBe(false)
+    const closesBefore = closeCount()
+
+    // The (already in-flight) backoff timer fires anyway.
+    staleReconnectFn()
+
+    // Complete no-op: the identity guard in `scheduleReconnect()` (T1's own
+    // handle no longer matches `this.reconnectHandle`, which `connect()`
+    // already nulled) rejects it before `openSocket()` ever runs — no second
+    // socket, A untouched, no spurious `onClose`.
+    expect(sockets.length).toBe(2)
+    expect(socketA.closed).toBe(false)
+    expect(closeCount()).toBe(closesBefore)
+
+    socketA.fireOpen()
+    expect(client.getStatus()).toBe('open')
+    expect(sockets.length).toBe(2)
+  })
+
+  it('a stale backoff-timer callback fired after A is FULLY OPEN is a complete no-op', () => {
+    // Codex's exact repro: capture the stale backoff callback, call connect()
+    // (opens A), let A actually finish its handshake (onOpen fires — a
+    // surface would arm its resume-fallback here), THEN the stale callback
+    // fires. A live, fully-open socket must be left completely alone.
+    const { client, sockets, timers, opens, closeCount } = setup()
+    client.connect()
+    sockets[0]!.fireOpen()
+    sockets[0]!.fireClose() // unexpected drop → reconnecting, backoff timer armed
+    const staleReconnectFn = timers.peekNextFn()
+
+    client.connect() // manual retry during backoff → opens socket A
+    const socketA = sockets[1]!
+    socketA.fireOpen() // A's handshake completes — fully open, onOpen fired
+    expect(client.getStatus()).toBe('open')
+    expect(opens().length).toBe(2) // socket[0]'s open + A's open
+
+    const closesBefore = closeCount()
+    staleReconnectFn() // the stale timer fires anyway
+
+    // A must be left running exactly as-is: not closed, no spurious onClose,
+    // no second socket ever created, status still open.
+    expect(socketA.closed).toBe(false)
+    expect(closeCount()).toBe(closesBefore)
+    expect(sockets.length).toBe(2)
+    expect(client.getStatus()).toBe('open')
+    expect(opens().length).toBe(2)
+  })
+
+  it('a stale reconnect-timer callback (T1) cannot clobber a NEWER reconnect timer (T2) it was superseded by', () => {
+    // Per Codex review: `scheduleReconnect()`'s timer callback used to
+    // unconditionally null `this.reconnectHandle` and call `openSocket()`.
+    // If a "cancelled" timer (T1) somehow still fires — e.g. a native-bridge
+    // timer race, or any future call path that reaches `scheduleReconnect()`
+    // twice without an intervening open — after a NEWER timer (T2) has since
+    // been armed, T1's callback would null out the field tracking T2 (making
+    // T2 uncancellable bookkeeping-wise) and open an extra socket. Sequence:
+    // T1 armed → connect() cancels T1 + opens A → A drops → T2 armed → T1
+    // fires anyway (race) → T2 must be completely unaffected.
+    const { client, sockets, timers } = setup()
+    client.connect()
+    sockets[0]!.fireOpen()
+    sockets[0]!.fireClose() // unexpected drop → T1 armed
+    const staleT1Fn = timers.peekNextFn()
+
+    client.connect() // cancels T1, opens socket A
+    const socketA = sockets[1]!
+    expect(timers.pendingCount()).toBe(0) // T1 cancelled
+
+    socketA.fireClose() // unexpected drop → T2 armed
+    expect(timers.pendingCount()).toBe(1)
+    expect(sockets.length).toBe(2) // no new socket yet — T2 hasn't fired
+
+    // T1 fires anyway (the race Codex's finding models).
+    staleT1Fn()
+
+    // Stale-guarded: T1 must be a complete no-op — no new socket, and (most
+    // importantly) T2's own bookkeeping in `reconnectHandle` must be
+    // untouched, so T2 remains both live and legitimately cancellable.
+    expect(sockets.length).toBe(2)
+    expect(timers.pendingCount()).toBe(1)
+
+    // T2 must still be the SAME still-cancellable timer — prove it by
+    // cancelling via an explicit close() and confirming nothing is left
+    // armed (if T1's stale fire had nulled `reconnectHandle`, `close()`'s
+    // `cancelReconnect()` would have nothing to cancel, but T2 would still
+    // be physically armed and fire later regardless).
+    client.close()
+    expect(timers.pendingCount()).toBe(0)
+  })
+
+  it('the T1/T2 stale-guard survives HANDLE REUSE — it must not depend on the raw timer handle being unique', () => {
+    // Per Codex review: a guard that compares `this.reconnectHandle` against
+    // a captured raw handle breaks if the injected `setTimeoutFn` adapter
+    // ever recycles freed numeric IDs (plausible for some timer pools) — T1
+    // and T2 could end up sharing the identical handle, defeating an
+    // identity check based on that handle alone. This uses an adapter that
+    // deliberately reuses handle `1` for both T1 and T2 to prove the fix
+    // (a monotonic generation counter, independent of the handle) holds
+    // regardless.
+    const sockets: FakeSocket[] = []
+    const timers = reusingHandleTimerHarness()
+    const client = new ChatWsClient({
+      url: 'wss://test/ws/app/chat',
+      createSocket: () => {
+        const s = new FakeSocket()
+        sockets.push(s)
+        return s
+      },
+      minBackoffMs: 500,
+      maxBackoffMs: 8000,
+      jitter: () => 0,
+      setTimeoutFn: timers.setTimeoutFn,
+      clearTimeoutFn: timers.clearTimeoutFn,
+    })
+
+    client.connect()
+    sockets[0]!.fireOpen()
+    sockets[0]!.fireClose() // unexpected drop → T1 armed (handle 1)
+    const staleT1Fn = timers.peekNextFn()
+
+    client.connect() // cancels T1 (frees handle 1), opens socket A
+    const socketA = sockets[1]!
+    expect(timers.pendingCount()).toBe(0)
+
+    socketA.fireClose() // unexpected drop → T2 armed, REUSING handle 1
+    expect(timers.pendingCount()).toBe(1)
+    expect(sockets.length).toBe(2)
+
+    // T1 fires anyway. A handle-identity guard would wrongly treat it as
+    // still current, since T1's captured handle (1) equals T2's CURRENT
+    // handle (also 1).
+    staleT1Fn()
+
+    // The generation guard catches it regardless: no new socket, T2 untouched.
+    expect(sockets.length).toBe(2)
+    expect(timers.pendingCount()).toBe(1)
+
+    client.close()
+    expect(timers.pendingCount()).toBe(0)
+  })
+
+  it('connect() is a true no-op while a RETRY attempt is already mid-handshake (status reconnecting, no timer armed)', () => {
+    // Per Codex review: `status === 'reconnecting'` is ambiguous — it also
+    // covers a retry socket actively mid-handshake (attempt > 0), not just
+    // "waiting on the backoff timer". `connect()`'s doc says it's "idempotent
+    // while already connecting/open"; a retry-in-flight must count as busy
+    // too, or a manual retry/remount would needlessly tear down a handshake
+    // that might well succeed.
+    const { client, sockets, timers, closeCount } = setup()
+    client.connect()
+    sockets[0]!.fireOpen()
+    sockets[0]!.fireClose() // unexpected drop → T1 armed
+    timers.runNext() // T1 fires → socket[1] created, actively mid-handshake
+    expect(client.getStatus()).toBe('reconnecting') // retry, not yet open
+    expect(timers.pendingCount()).toBe(0) // no timer armed — a live socket is in flight
+
+    const inFlight = sockets[1]!
+    const closesBefore = closeCount()
+
+    client.connect() // manual retry / remount while the retry is in flight
+
+    // True no-op: the in-flight retry socket must be left completely alone —
+    // not closed, no spurious onClose, no redundant second socket.
+    expect(sockets.length).toBe(2)
+    expect(inFlight.closed).toBe(false)
+    expect(closeCount()).toBe(closesBefore)
+
+    inFlight.fireOpen()
+    expect(client.getStatus()).toBe('open')
+    expect(sockets.length).toBe(2)
   })
 })
