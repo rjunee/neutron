@@ -311,6 +311,71 @@ describe('repl-registry — corruption on the mutation path is loud and recovera
     expect(readFileSync(join(dirname(path), sidecars[0] as string), 'utf8')).toBe(raw)
   })
 
+  it('a THROWING caller-supplied onCorrupt cannot abort the mutation — the default still runs and the caller still gets its result (Codex r5)', () => {
+    const path = tmpRegistry()
+    upsertRecord(path, rec({ sessionKey: 'k' }))
+    writeFileSync(path, 'not even json')
+
+    const originalConsoleError = console.error
+    const logs: unknown[][] = []
+    console.error = (...args: unknown[]) => logs.push(args)
+    let threw = false
+    try {
+      // A hostile/buggy caller callback must be isolated — it must NEVER be
+      // able to prevent the mandatory sidecar+log, and must never propagate
+      // out and abort the mutation ("corruption never aborts the mutation"
+      // is the whole point of this module).
+      patchRecord(path, 'k', { pid: 1 }, {
+        onCorrupt: () => {
+          throw new Error('a badly-written alerting hook exploded')
+        },
+      })
+    } catch {
+      threw = true
+    } finally {
+      console.error = originalConsoleError
+    }
+
+    expect(threw).toBe(false)
+    // The mandatory default still fired: loud log + sidecar, unaffected by
+    // the custom callback's failure.
+    expect(logs.some((l) => String(l[0]).includes('CORRUPT registry'))).toBe(true)
+    expect(logs.some((l) => String(l[0]).includes('onCorrupt callback threw'))).toBe(true)
+    expect(sidecarsFor(path).length).toBe(1)
+  })
+
+  it('a THROWING caller-supplied onDropRow cannot abort the mutation — the default still runs and valid rows still save', () => {
+    const path = tmpRegistry()
+    const raw = JSON.stringify({
+      good: rec({ sessionKey: 'good' }),
+      stale: { sessionKey: 'stale' }, // missing required fields
+    })
+    writeFileSync(path, raw)
+
+    const originalConsoleError = console.error
+    const logs: unknown[][] = []
+    console.error = (...args: unknown[]) => logs.push(args)
+    let threw = false
+    try {
+      patchRecord(path, 'good', { pid: 5 }, {
+        onDropRow: () => {
+          throw new Error('a badly-written alerting hook exploded')
+        },
+      })
+    } catch {
+      threw = true
+    } finally {
+      console.error = originalConsoleError
+    }
+
+    expect(threw).toBe(false)
+    expect(logs.some((l) => String(l[0]).includes('dropping row sessionKey=stale'))).toBe(true)
+    expect(logs.some((l) => String(l[0]).includes('onDropRow callback threw'))).toBe(true)
+    expect(sidecarsFor(path).length).toBe(1)
+    // The mutation still completed normally: the valid row's patch landed.
+    expect(getRecord(path, 'good')?.pid).toBe(5)
+  })
+
   it('a single malformed row (schema skew, not whole-file corruption) is ALSO sidecar-preserved before it is dropped for good', () => {
     const path = tmpRegistry()
     // Two good rows + one row an older/newer build wrote with a missing field

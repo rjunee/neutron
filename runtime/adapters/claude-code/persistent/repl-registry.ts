@@ -379,13 +379,27 @@ export function withRegistry<T>(
 ): T {
   const mandatoryOnCorrupt = defaultCorruptHandler(path)
   const mandatoryOnDropRow = defaultDropRowHandler(path)
+  // The mandatory default ALWAYS runs, unguarded — if that itself throws,
+  // something is deeply wrong and we want it loud. The CALLER-supplied
+  // callback, in contrast, is untrusted: it must NEVER be able to abort the
+  // mutation by throwing (Codex r5) — that would violate "corruption never
+  // aborts the mutation" for the one case (options.onCorrupt/onDropRow) that
+  // isn't under this module's control. Isolate it in its own try/catch.
   const onCorrupt = (reason: string, rawContents?: string): void => {
     mandatoryOnCorrupt(reason, rawContents)
-    options.onCorrupt?.(reason, rawContents)
+    try {
+      options.onCorrupt?.(reason, rawContents)
+    } catch (e) {
+      console.error(`repl-registry: caller-supplied onCorrupt callback threw (ignored): ${e}`)
+    }
   }
   const onDropRow = (key: string, raw: unknown, rawContents: string): void => {
     mandatoryOnDropRow(key, raw, rawContents)
-    options.onDropRow?.(key, raw, rawContents)
+    try {
+      options.onDropRow?.(key, raw, rawContents)
+    } catch (e) {
+      console.error(`repl-registry: caller-supplied onDropRow callback threw (ignored): ${e}`)
+    }
   }
   return withFlockSync(registryLockPath(path), () => {
     const { registry: current, skipSave } = loadRegistryForMutation(path, onCorrupt, onDropRow)
