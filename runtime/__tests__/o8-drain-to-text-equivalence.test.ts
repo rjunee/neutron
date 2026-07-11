@@ -1,0 +1,463 @@
+/**
+ * O8 — the shared `drainToText` / `drainToOutcome` drain: three-adapter
+ * equivalence + policy-flag mutation suite.
+ *
+ * The plan asks that the shared drain iterate IDENTICALLY across substrate
+ * adapters with different iterator shapes. We pin three faithful shapes:
+ *
+ *   1. `cc`    — backed by the REAL persistent-REPL `EventChannel` (push/pull,
+ *                and — faithfully — NO finally→cancel hookup, which is exactly the
+ *                property that makes an early `cancel()` on an unsettled turn
+ *                poison the warm session).
+ *   2. `gen`   — a native `async function*` generator (the gpt-5-5-api adapter's
+ *                shape: it `yield`s each `Event`).
+ *   3. `array` — a hand-rolled async iterator over an array, exposing `return()`
+ *                (a third, minimal substrate shape).
+ *
+ * All three must drain to the SAME text, classify a 429 the SAME way, and treat
+ * exhaustion the SAME way. We then mutation-verify:
+ *   - `keepAliveExempt` (cancel-on-abort ↔ no-cancel) — the poison invariant;
+ *   - throw-vs-capture (the ENTRY POINT: `drainToText` throws, `drainToOutcome`
+ *     captures);
+ *   - Blocker #1: a `completion` is never misclassified as `exhausted`;
+ *   - Blocker #3: teardown `iterator.return()` IS invoked on a settled turn but
+ *     is FIRE-AND-FORGET (the drain resolves before it settles) and is NOT
+ *     invoked on an abort.
+ */
+
+import { describe, test, expect } from 'bun:test'
+
+import { drainToText, drainToOutcome } from '../substrate-text.ts'
+import { SubstrateCallError } from '../errors.ts'
+import type { SessionHandle } from '../session-handle.ts'
+import type { Event } from '../events.ts'
+import { EventChannel } from '../adapters/claude-code/persistent/event-channel.ts'
+
+type AdapterKind = 'cc' | 'gen' | 'array'
+const ADAPTERS: readonly AdapterKind[] = ['cc', 'gen', 'array']
+
+interface Spy {
+  cancels: number
+  returns: number
+}
+
+const completion = (): Event => ({
+  kind: 'completion',
+  usage: { input_tokens: 1, output_tokens: 1 },
+  substrate_instance_id: 'test-instance',
+})
+
+const SEQ_OK: Event[] = [
+  { kind: 'token', text: 'Hello ' },
+  { kind: 'thinking', text: '(pondering)' },
+  { kind: 'token', text: 'world' },
+  completion(),
+]
+const SEQ_429: Event[] = [
+  { kind: 'token', text: 'partial' },
+  { kind: 'error', message: 'HTTP 429: slow down', retryable: true, code: 'rate_limited', retry_after_ms: 4200 },
+]
+const SEQ_EXHAUST: Event[] = [{ kind: 'token', text: 'abc' }]
+const SEQ_COMPLETION_ONLY: Event[] = [{ kind: 'token', text: 'ok' }, completion()]
+
+/**
+ * Build a SessionHandle of the given adapter shape that yields `events` then
+ * ends. `spy.cancels` counts EXPLICIT `handle.cancel()` calls; `spy.returns`
+ * counts iterator `return()` calls (teardown). No shape wires `return()`→
+ * `cancel()`, so the two counters isolate what the drain does on its own.
+ */
+function makeHandle(kind: AdapterKind, events: Event[], spy: Spy): SessionHandle {
+  const cancel = async (): Promise<void> => {
+    spy.cancels += 1
+  }
+  if (kind === 'cc') {
+    const ch = new EventChannel()
+    for (const ev of events) ch.push(ev)
+    ch.close()
+    const base = ch[Symbol.asyncIterator]()
+    const events_: AsyncIterable<Event> = {
+      [Symbol.asyncIterator]: () => ({
+        next: () => base.next(),
+        return: async (): Promise<IteratorResult<Event>> => {
+          spy.returns += 1
+          await base.return?.()
+          return { value: undefined, done: true }
+        },
+      }),
+    }
+    return { events: events_, respondToTool: async () => undefined, cancel, tool_resolution: 'internal' }
+  }
+  if (kind === 'gen') {
+    async function* gen(): AsyncGenerator<Event> {
+      for (const ev of events) yield ev
+    }
+    const g = gen()
+    const events_: AsyncIterable<Event> = {
+      [Symbol.asyncIterator]: () => ({
+        next: () => g.next(),
+        return: async (v?: unknown): Promise<IteratorResult<Event>> => {
+          spy.returns += 1
+          return g.return(v as never)
+        },
+      }),
+    }
+    return { events: events_, respondToTool: async () => undefined, cancel, tool_resolution: 'internal' }
+  }
+  // array
+  let i = 0
+  const events_: AsyncIterable<Event> = {
+    [Symbol.asyncIterator]: () => ({
+      next: async (): Promise<IteratorResult<Event>> =>
+        i < events.length ? { value: events[i++]!, done: false } : { value: undefined, done: true },
+      return: async (): Promise<IteratorResult<Event>> => {
+        spy.returns += 1
+        return { value: undefined, done: true }
+      },
+    }),
+  }
+  return { events: events_, respondToTool: async () => undefined, cancel, tool_resolution: 'internal' }
+}
+
+const newSpy = (): Spy => ({ cancels: 0, returns: 0 })
+
+describe('O8 drainToText — three-adapter equivalence', () => {
+  test('same text out on a clean completion across all three adapters', async () => {
+    const outs: string[] = []
+    for (const kind of ADAPTERS) {
+      const spy = newSpy()
+      outs.push(await drainToText(makeHandle(kind, SEQ_OK, spy), { errorPrefix: 'x: ' }))
+      // No explicit cancel on the happy path — teardown is iterator.return() only
+      // (poison-safe: completion already settled the turn).
+      expect(spy.cancels).toBe(0)
+      expect(spy.returns).toBe(1)
+    }
+    expect(outs).toEqual(['Hello world', 'Hello world', 'Hello world'])
+  })
+
+  test('same 429 classification (SubstrateCallError code/retryable/retry_after_ms + prose) across all three', async () => {
+    for (const kind of ADAPTERS) {
+      const spy = newSpy()
+      const err = (await drainToText(makeHandle(kind, SEQ_429, spy), { errorPrefix: 'cc-llm-call: ' }).catch(
+        (e: unknown) => e,
+      )) as SubstrateCallError
+      expect(err).toBeInstanceOf(SubstrateCallError)
+      expect(err.code).toBe('rate_limited')
+      expect(err.retryable).toBe(true)
+      expect(err.retry_after_ms).toBe(4200)
+      expect(err.message).toBe('cc-llm-call: HTTP 429: slow down')
+    }
+  })
+
+  test('same exhaustion behaviour (no completion → status exhausted) across all three', async () => {
+    for (const kind of ADAPTERS) {
+      const spy = newSpy()
+      const outcome = await drainToOutcome(makeHandle(kind, SEQ_EXHAUST, spy))
+      expect(outcome.status).toBe('exhausted')
+      expect(outcome.text).toBe('abc')
+    }
+  })
+
+  test('onFirstToken fires exactly once on the first non-empty token, across all three', async () => {
+    for (const kind of ADAPTERS) {
+      const spy = newSpy()
+      let firstTokens = 0
+      await drainToText(makeHandle(kind, SEQ_OK, spy), { onFirstToken: () => (firstTokens += 1) })
+      expect(firstTokens).toBe(1)
+    }
+  })
+})
+
+describe('O8 — completion is never misclassified as exhausted (Blocker #1 regression)', () => {
+  test('a completion event yields status `completed` with the accumulated text, across all three', async () => {
+    for (const kind of ADAPTERS) {
+      const outcome = await drainToOutcome(makeHandle(kind, SEQ_COMPLETION_ONLY, newSpy()))
+      expect(outcome.status).toBe('completed')
+      expect(outcome.text).toBe('ok')
+    }
+  })
+
+  test('drainToText returns the completed text and never throws "exhausted" despite completion', async () => {
+    for (const kind of ADAPTERS) {
+      // The removed `stopOnCompletion:false` + `requireCompletion:true` combo used
+      // to make THIS throw "…without a completion event" after a real completion.
+      const text = await drainToText(makeHandle(kind, SEQ_COMPLETION_ONLY, newSpy()))
+      expect(text).toBe('ok')
+    }
+  })
+
+  test('a stream that ends WITHOUT completion returns the partial buffer (defensive; no throw)', async () => {
+    for (const kind of ADAPTERS) {
+      const text = await drainToText(makeHandle(kind, SEQ_EXHAUST, newSpy()))
+      expect(text).toBe('abc')
+    }
+  })
+})
+
+/** A handle that yields one token then HANGS (never settles) — for abort tests.
+ *  Its iterator is wrapped with a `return()` spy so a test can assert teardown
+ *  return() is NOT invoked on the (non-settled) abort path. */
+function hangingHandle(spy: Spy): SessionHandle {
+  const ch = new EventChannel()
+  ch.push({ kind: 'token', text: 'partial' })
+  // deliberately not closed → the iterator's next pull blocks forever.
+  const base = ch[Symbol.asyncIterator]()
+  const events_: AsyncIterable<Event> = {
+    [Symbol.asyncIterator]: () => ({
+      next: () => base.next(),
+      return: async (): Promise<IteratorResult<Event>> => {
+        spy.returns += 1
+        await base.return?.()
+        return { value: undefined, done: true }
+      },
+    }),
+  }
+  return {
+    events: events_,
+    respondToTool: async () => undefined,
+    cancel: async () => {
+      spy.cancels += 1
+      ch.close()
+    },
+    tool_resolution: 'internal',
+  }
+}
+
+describe('O8 — warm-CC poison invariant (drain to exhaustion, never early-cancel)', () => {
+  test('the DEFAULT path never calls cancel() before a terminal event', async () => {
+    for (const kind of ADAPTERS) {
+      const spy = newSpy()
+      await drainToText(makeHandle(kind, SEQ_OK, spy))
+      expect(spy.cancels).toBe(0) // completion settled the turn; no mid-turn cancel
+    }
+  })
+
+  test('keepAliveExempt=false aborts WITHOUT cancelling a live turn (no poison)', async () => {
+    const spy = newSpy()
+    const ac = new AbortController()
+    const p = drainToOutcome(hangingHandle(spy), { signal: ac.signal, keepAliveExempt: false })
+    await Promise.resolve()
+    ac.abort()
+    const outcome = await p
+    expect(outcome.status).toBe('aborted')
+    expect(outcome.text).toBe('partial')
+    // The load-bearing guarantee: a default drain leaves the warm turn running.
+    expect(spy.cancels).toBe(0)
+  })
+
+  test('MUTATION: keepAliveExempt=true DOES cancel the live turn on abort (watchdog divergence)', async () => {
+    const spy = newSpy()
+    const ac = new AbortController()
+    const p = drainToOutcome(hangingHandle(spy), { signal: ac.signal, keepAliveExempt: true })
+    await Promise.resolve()
+    ac.abort()
+    const outcome = await p
+    expect(outcome.status).toBe('aborted')
+    // Flip the flag → this count flips 1↔0, so the mutation is caught here + above.
+    expect(spy.cancels).toBe(1)
+  })
+})
+
+describe('O8 — throw vs capture is the ENTRY POINT, not a flag', () => {
+  test('drainToText THROWS a SubstrateCallError on a terminal error', async () => {
+    const thrown = await drainToText(makeHandle('gen', SEQ_429, newSpy()), { errorPrefix: 'x: ' }).then(
+      () => null,
+      (e: unknown) => e,
+    )
+    expect(thrown).toBeInstanceOf(SubstrateCallError)
+  })
+
+  test('drainToOutcome CAPTURES the same error on the outcome (never throws)', async () => {
+    const outcome = await drainToOutcome(makeHandle('array', SEQ_429, newSpy()), { errorPrefix: 'x: ' })
+    expect(outcome.status).toBe('error')
+    expect(outcome.error).toBeInstanceOf(SubstrateCallError)
+    expect(outcome.error?.code).toBe('rate_limited')
+    expect(outcome.text).toBe('partial')
+  })
+})
+
+describe('O8 — teardown is fire-and-forget on a settled turn (Blocker #3)', () => {
+  /** A handle whose `return()` is INVOKED synchronously (counter++) but whose
+   *  promise settles on a LATER macrotask (sets `returnSettled`). Lets the test
+   *  observe the ordering: the drain resolves BEFORE teardown settles. */
+  function deferredReturnHandle(state: { returns: number; returnSettled: boolean }): SessionHandle {
+    const events = SEQ_COMPLETION_ONLY
+    let i = 0
+    const events_: AsyncIterable<Event> = {
+      [Symbol.asyncIterator]: () => ({
+        next: async (): Promise<IteratorResult<Event>> =>
+          i < events.length ? { value: events[i++]!, done: false } : { value: undefined, done: true },
+        return: async (): Promise<IteratorResult<Event>> => {
+          state.returns += 1
+          await new Promise((r) => setTimeout(r, 20))
+          state.returnSettled = true
+          return { value: undefined, done: true }
+        },
+      }),
+    }
+    return { events: events_, respondToTool: async () => undefined, cancel: async () => undefined, tool_resolution: 'internal' }
+  }
+
+  test('the drain resolves BEFORE iterator.return() settles, yet return() WAS invoked', async () => {
+    const state = { returns: 0, returnSettled: false }
+    const text = await drainToText(deferredReturnHandle(state))
+    expect(text).toBe('ok')
+    // return() was called (teardown happened)…
+    expect(state.returns).toBe(1)
+    // …but the drain did NOT await it (fire-and-forget): the 20ms return() promise
+    // is still pending. MUTATION: `await iter.return()` → returnSettled would be
+    // true here (the drain would have blocked on teardown).
+    expect(state.returnSettled).toBe(false)
+  })
+
+  test('an abort (keepAliveExempt=false) does NOT invoke return() OR cancel() on the still-running turn', async () => {
+    const spy = newSpy()
+    const ac = new AbortController()
+    const p = drainToOutcome(hangingHandle(spy), { signal: ac.signal, keepAliveExempt: false })
+    await Promise.resolve()
+    ac.abort()
+    await p
+    // Non-settled exit → NO teardown at all (leave the warm turn to settle). The
+    // hangingHandle now has an explicit return() spy, so a wrongly-invoked return()
+    // is detected (not just cancel()). MUTATION: calling return() on abort reddens
+    // `expect(spy.returns).toBe(0)`.
+    expect(spy.cancels).toBe(0)
+    expect(spy.returns).toBe(0)
+  })
+
+  /** A handle whose iterator `return()` throws SYNCHRONOUSLY (not a rejected
+   *  promise) after the given events settle the turn — the exact shape that
+   *  `Promise.resolve(iter.return())` alone would NOT guard. */
+  function syncThrowReturnHandle(events: Event[], spy: Spy): SessionHandle {
+    let i = 0
+    const events_: AsyncIterable<Event> = {
+      [Symbol.asyncIterator]: () => ({
+        next: async (): Promise<IteratorResult<Event>> =>
+          i < events.length ? { value: events[i++]!, done: false } : { value: undefined, done: true },
+        return: (): Promise<IteratorResult<Event>> => {
+          spy.returns += 1
+          throw new Error('sync teardown boom')
+        },
+      }),
+    }
+    return { events: events_, respondToTool: async () => undefined, cancel: async () => undefined, tool_resolution: 'internal' }
+  }
+
+  test('a SYNCHRONOUS return() throw does NOT mask a completed outcome', async () => {
+    const spy = newSpy()
+    // drainToOutcome: the terminal completed outcome survives the teardown throw.
+    const outcome = await drainToOutcome(syncThrowReturnHandle(SEQ_COMPLETION_ONLY, spy))
+    expect(outcome.status).toBe('completed')
+    expect(outcome.text).toBe('ok')
+    expect(spy.returns).toBe(1) // teardown WAS attempted (and threw)…
+    // …and drainToText returns the text rather than throwing 'sync teardown boom'.
+    const text = await drainToText(syncThrowReturnHandle(SEQ_COMPLETION_ONLY, newSpy()))
+    expect(text).toBe('ok')
+  })
+
+  test('a SYNCHRONOUS return() throw does NOT mask a captured error outcome', async () => {
+    const spy = newSpy()
+    const outcome = await drainToOutcome(syncThrowReturnHandle(SEQ_429, spy), { errorPrefix: 'cc-llm-call: ' })
+    // The captured 429 must survive — NOT be replaced by the teardown throw.
+    expect(outcome.status).toBe('error')
+    expect(outcome.error).toBeInstanceOf(SubstrateCallError)
+    expect(outcome.error?.code).toBe('rate_limited')
+    expect(outcome.error?.message).toBe('cc-llm-call: HTTP 429: slow down')
+    expect(spy.returns).toBe(1)
+    // drainToText throws the SubstrateCallError (429), never the teardown error.
+    const thrown = (await drainToText(syncThrowReturnHandle(SEQ_429, newSpy()), { errorPrefix: 'cc-llm-call: ' }).catch(
+      (e: unknown) => e,
+    )) as SubstrateCallError
+    expect(thrown).toBeInstanceOf(SubstrateCallError)
+    expect(thrown.code).toBe('rate_limited')
+    expect(thrown.message).toBe('cc-llm-call: HTTP 429: slow down')
+  })
+})
+
+describe('O8 — async-iterator boundary edge cases', () => {
+  /** A handle whose `next()` returns an ALREADY-RESOLVED completion (via
+   *  `Promise.resolve`), so a synchronous `abort()` right after dispatch races a
+   *  ready completion — the `/dispatch stop` tie. */
+  function readyCompletionHandle(spy: Spy): SessionHandle {
+    const events: Event[] = [completion()]
+    let i = 0
+    const events_: AsyncIterable<Event> = {
+      [Symbol.asyncIterator]: () => ({
+        next: (): Promise<IteratorResult<Event>> =>
+          i < events.length
+            ? Promise.resolve({ value: events[i++]!, done: false })
+            : Promise.resolve({ value: undefined, done: true }),
+        return: async (): Promise<IteratorResult<Event>> => {
+          spy.returns += 1
+          return { value: undefined, done: true }
+        },
+      }),
+    }
+    return {
+      events: events_,
+      respondToTool: async () => undefined,
+      cancel: async () => {
+        spy.cancels += 1
+      },
+      tool_resolution: 'internal',
+    }
+  }
+
+  test('HIGH: abort wins a tie against an already-ready completion (never reported completed)', async () => {
+    const spy = newSpy()
+    const ac = new AbortController()
+    const p = drainToOutcome(readyCompletionHandle(spy), { signal: ac.signal, keepAliveExempt: true })
+    ac.abort() // synchronous — races the ready completion; abort must win
+    const outcome = await p
+    // MUTATION: revert the `if (aborted)` re-check before the completion return →
+    // this becomes 'completed' (a cancelled subprocess shown as finished).
+    expect(outcome.status).toBe('aborted')
+    expect(outcome.status).not.toBe('completed')
+  })
+
+  /** A handle whose iterator `next()` throws SYNCHRONOUSLY (not a rejected
+   *  promise) — the exact shape that a `next()` call outside the try would leak. */
+  function syncThrowNextHandle(): SessionHandle {
+    const events_: AsyncIterable<Event> = {
+      [Symbol.asyncIterator]: () => ({
+        next: (): Promise<IteratorResult<Event>> => {
+          throw new Error('sync pull boom')
+        },
+        return: async (): Promise<IteratorResult<Event>> => ({ value: undefined, done: true }),
+      }),
+    }
+    return { events: events_, respondToTool: async () => undefined, cancel: async () => undefined, tool_resolution: 'internal' }
+  }
+
+  test('MEDIUM: a SYNCHRONOUS next() throw is CAPTURED as status error (never rejects the drain)', async () => {
+    // drainToOutcome captures it — same as an async next() rejection.
+    const outcome = await drainToOutcome(syncThrowNextHandle(), { errorPrefix: 'cc-llm-call: ' })
+    expect(outcome.status).toBe('error')
+    expect(outcome.error).toBeInstanceOf(SubstrateCallError)
+    expect(outcome.error?.message).toBe('cc-llm-call: sync pull boom')
+    // drainToText throws the TYPED error, never the raw 'sync pull boom'.
+    // MUTATION: move `iter.next()` outside the try → the drain REJECTS with the raw
+    // Error and this whole test throws before its first assertion.
+    const thrown = (await drainToText(syncThrowNextHandle(), { errorPrefix: 'cc-llm-call: ' }).catch(
+      (e: unknown) => e,
+    )) as SubstrateCallError
+    expect(thrown).toBeInstanceOf(SubstrateCallError)
+    expect(thrown.message).toBe('cc-llm-call: sync pull boom')
+  })
+})
+
+describe('O8 — pre-dispatch abort', () => {
+  test('an already-aborted signal returns/throws without pulling an event', async () => {
+    const spy = newSpy()
+    const ac = new AbortController()
+    ac.abort()
+    const err = (await drainToText(makeHandle('gen', SEQ_OK, spy), {
+      signal: ac.signal,
+      abortBeforeDispatchMessage: 'x: aborted before dispatch',
+      keepAliveExempt: true,
+    }).catch((e: unknown) => e)) as SubstrateCallError
+    expect(err).toBeInstanceOf(SubstrateCallError)
+    expect(err.code).toBe('aborted')
+    expect(err.message).toBe('x: aborted before dispatch')
+    expect(spy.cancels).toBe(1) // keepAliveExempt cancels even the pre-dispatch abort
+  })
+})

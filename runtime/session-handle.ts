@@ -30,4 +30,18 @@ export interface SessionHandle {
   respondToTool(call_id: string, result: unknown): Promise<void>
   cancel(): Promise<void>
   readonly tool_resolution: 'internal' | 'external'
+  /**
+   * OPTIONAL child-process liveness probe (a SUPERSET of the locked contract).
+   *
+   * The persistent-REPL CC adapter's concrete handle additionally exposes this
+   * (`runtime/adapters/claude-code/persistent/pool.ts`) so a heartbeat drain can
+   * distinguish "silently reading but ALIVE" from a genuine hang: on an idle-
+   * window expiry, `onboarding/synthesis`'s `drainWithHeartbeat` consults it and
+   * treats a still-running child as liveness, not a wedge (the 2026-06-18 false-
+   * wedge fix). It is declared here so that structural probe (`typeof
+   * handle.isAlive === 'function'`) has a typed member to read instead of an
+   * `as`-cast; substrates that don't implement it leave it `undefined` and every
+   * consumer that doesn't know about it is unaffected.
+   */
+  isAlive?(): boolean
 }
