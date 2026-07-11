@@ -15,6 +15,9 @@ export type { Event, TokenUsage, SubstrateErrorClass } from './events.ts'
 export { NeutronError, SubstrateCallError, SUBSTRATE_ERROR_CODES } from './errors.ts'
 export type { SubstrateErrorCodeSpec } from './errors.ts'
 
+export { drainToText, drainToOutcome } from './substrate-text.ts'
+export type { DrainOptions, DrainOutcome, DrainStatus, DrainErrorMode } from './substrate-text.ts'
+
 export {
   selectCredential,
   reportFailure,

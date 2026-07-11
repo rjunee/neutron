@@ -350,15 +350,17 @@ test('G6 · isFreezeTimeout matches the REAL turn-timeout AND composer-abort pro
     'the `persistent-repl: turn timeout` producer literal',
     'the substrate module cluster',
   )
-  // Producer B: runtime/collect-tokens.ts abort-signal listener —
-  //   throw new SubstrateCallError('cc-llm-call: aborted', { code: 'aborted', ... })
+  // Producer B: runtime/collect-tokens.ts abort producer.
   // O3 migrated this producer from a bare `throw new Error(...)` to the typed
-  // `SubstrateCallError` (code: 'aborted') — the message LITERAL is unchanged, so
-  // the extraction still fails loudly the moment the `cc-llm-call: aborted`
-  // wording is reworded; only the constructor it is passed to changed.
+  // `SubstrateCallError` (code: 'aborted'). O8 then folded the drain LOOP into the
+  // one `drainToText` (runtime/substrate-text.ts), so `collectTokensToString` no
+  // longer inlines the `throw` — it passes the abort wording as the `abortMessage`
+  // policy flag that `drainToText` throws. The message LITERAL is unchanged, so
+  // the extraction still fails loudly the moment `cc-llm-call: aborted` is
+  // reworded; only the FORM it appears in moved (inline throw → option value).
   const composerAbort = extractFromSource(
     COLLECT_TOKENS_SRC_PATH,
-    /throw new SubstrateCallError\('(cc-llm-call: aborted)',/,
+    /abortMessage: '(cc-llm-call: aborted)',/,
     'the `cc-llm-call: aborted` composer-abort producer literal',
   )
   expect(isFreezeTimeout(turnTimeout)).toBe(true)

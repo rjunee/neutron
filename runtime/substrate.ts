@@ -1,9 +1,14 @@
 /**
  * @neutronai/runtime — Substrate interface + AgentSpec input shape.
  *
- * VERBATIM per `docs/engineering-plan.md` § B.P1 lines 394-417. Locked
- * 2026-04-25 from validator-checked review. Do not edit type shapes without
- * a corresponding § B.P1 amendment in the engineering plan.
+ * THESE TYPE SHAPES ARE THE LOCK. Originally transcribed 2026-04-25 from the
+ * validator-checked substrate-adapter review (the old "engineering-plan § B.P1"
+ * working doc, since retired) — this file, not that doc, is now the source of
+ * truth. Do not change a field on `AgentSpec` / `Substrate` without treating it
+ * as a contract amendment: every adapter under `runtime/adapters/*` and every
+ * Core builds against exactly this shape, so a silent widening ripples through
+ * all of them. The living rationale + invariants live in `docs/INVARIANTS.md`
+ * and `docs/AS_BUILT.md`.
  *
  * Substrate is the model-execution backend abstraction. Three concrete
  * implementations land in this codebase:

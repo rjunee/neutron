@@ -22,6 +22,7 @@
 
 import type { SessionHandle } from '@neutronai/runtime/session-handle.ts'
 import type { AgentSpec, Substrate } from '@neutronai/runtime/substrate.ts'
+import { drainToOutcome } from '@neutronai/runtime/substrate-text.ts'
 import type { DispatchTurn, DispatchTurnResult } from './service.ts'
 
 export interface CancellableDispatchTurnOptions {
@@ -67,9 +68,7 @@ export function buildCancellableDispatchTurn(
       return { result: '', status: 'failed' }
     }
 
-    let text = ''
     let timedOut = false
-    let aborted = false
     let timer: unknown = null
     if (input.timeout_ms > 0) {
       timer = setTimer(() => {
@@ -78,41 +77,31 @@ export function buildCancellableDispatchTurn(
       }, input.timeout_ms)
     }
 
-    const onAbort = (): void => {
-      aborted = true
-      // Actually terminate the subprocess — this is the fix for "stop didn't stop".
-      void handle.cancel().catch(() => {})
-    }
-    const signal = input.signal
-    if (signal !== undefined) {
-      if (signal.aborted) onAbort()
-      else signal.addEventListener('abort', onAbort, { once: true })
-    }
-
+    // O8 — the drain loop is now the ONE `drainToOutcome` (capture mode: a
+    // substrate error/abort is RETURNED as a status, not thrown, so we map it onto
+    // this runner's terminal `DispatchTurnResult`). `signal` (a `/dispatch stop`
+    // or watchdog reap) drives the abort; `keepAliveExempt` preserves this
+    // runner's fix for "stop didn't stop" — a fired signal calls `handle.cancel()`
+    // to actually terminate the subprocess. The wall-clock timeout stays a LOCAL
+    // timer (it cancels the handle), and `timedOut` still wins over a generic
+    // failure exactly as before.
+    let outcome
     try {
-      for await (const ev of handle.events) {
-        if (ev.kind === 'token') {
-          text += ev.text
-        } else if (ev.kind === 'completion') {
-          return { result: text, status: 'completed' }
-        } else if (ev.kind === 'error') {
-          void handle.cancel().catch(() => {})
-          return { result: text, status: 'failed' }
-        }
-        // thinking / status / tool_* carry no terminal text — ignored.
-      }
-    } catch {
-      // Iterator threw (cancellation or transport error). Abort wins over
-      // timeout wins over a generic failure.
-      return { result: text, status: aborted ? 'cancelled' : timedOut ? 'timed_out' : 'failed' }
+      outcome = await drainToOutcome(handle, {
+        ...(input.signal !== undefined ? { signal: input.signal } : {}),
+        treatErrorAs: 'capture',
+        keepAliveExempt: true,
+      })
     } finally {
       if (timer !== null) clearTimer(timer)
-      if (signal !== undefined) signal.removeEventListener('abort', onAbort)
     }
 
-    // Stream ended WITHOUT a terminal `completion` — paused ≠ finished (the
-    // persistent-REPL substrate always settles a real turn with completion/error
-    // before closing). Report the most specific non-success terminal.
-    return { result: text, status: aborted ? 'cancelled' : timedOut ? 'timed_out' : 'failed' }
+    if (outcome.status === 'completed') return { result: outcome.text, status: 'completed' }
+    // Precedence — abort (a real `/dispatch stop`) wins, then the wall-clock
+    // timeout, then any other non-success terminal (error event / paused stream
+    // that closed without a completion; paused ≠ finished → failed).
+    if (outcome.status === 'aborted') return { result: outcome.text, status: 'cancelled' }
+    if (timedOut) return { result: outcome.text, status: 'timed_out' }
+    return { result: outcome.text, status: 'failed' }
   }
 }

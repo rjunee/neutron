@@ -17,9 +17,8 @@
  */
 
 import type { Substrate } from '@neutronai/runtime/substrate.ts'
-import type { Event } from '@neutronai/runtime/events.ts'
-import type { SessionHandle } from '@neutronai/runtime/session-handle.ts'
 import { getBestModel } from '@neutronai/runtime/models.ts'
+import { drainToText } from '@neutronai/runtime/substrate-text.ts'
 
 export type ExtractedEntityKind = 'person' | 'company' | 'concept'
 
@@ -112,53 +111,18 @@ export async function runExtraction(
         : [getBestModel()],
     max_tokens: deps.max_tokens ?? 2048,
   })
-  const raw = await drainToString(handle, signal)
+  // O8 — the drain loop is now the ONE `drainToText`. `keepAliveExempt` preserves
+  // scribe's watchdog divergence: a fired `signal` cancels the handle (abandon-
+  // poisoning the warm session so the next dispatch respawns clean). Error/abort
+  // prose is byte-identical to the pre-O8 local `drainToString`.
+  const raw = await drainToText(handle, {
+    ...(signal !== undefined ? { signal } : {}),
+    errorPrefix: 'scribe extract: substrate error: ',
+    abortMessage: 'scribe extract: aborted (watchdog)',
+    abortBeforeDispatchMessage: 'scribe extract: aborted before dispatch (watchdog)',
+    keepAliveExempt: true,
+  })
   return parseExtraction(raw)
-}
-
-/**
- * Accumulate `token` events into a string, throwing on the first `error` event
- * or on watchdog abort. Mirrors the import pipeline's `drainSubstrateEvents`
- * shape (substrate-callers.ts) but adds AbortSignal cancellation for the
- * watchdog.
- */
-async function drainToString(handle: SessionHandle, signal?: AbortSignal): Promise<string> {
-  let aborted = false
-  let abortListener: (() => void) | undefined
-  if (signal !== undefined) {
-    if (signal.aborted) {
-      await handle.cancel()
-      throw new Error('scribe extract: aborted before dispatch (watchdog)')
-    }
-    abortListener = (): void => {
-      aborted = true
-      void handle.cancel().catch(() => undefined)
-    }
-    signal.addEventListener('abort', abortListener, { once: true })
-  }
-  try {
-    let buf = ''
-    for await (const ev of handle.events as AsyncIterable<Event>) {
-      if (aborted) throw new Error('scribe extract: aborted (watchdog)')
-      if (ev.kind === 'token') {
-        buf += ev.text
-        continue
-      }
-      if (ev.kind === 'completion') return buf
-      if (ev.kind === 'error') {
-        throw new Error(`scribe extract: substrate error: ${ev.message}`)
-      }
-      // thinking / tool_call / tool_result_ack / status — informational.
-    }
-    if (aborted) throw new Error('scribe extract: aborted (watchdog)')
-    // Iterator ended without an explicit completion event — return the
-    // accumulated buffer (defensive; adapters normally emit a terminal event).
-    return buf
-  } finally {
-    if (signal !== undefined && abortListener !== undefined) {
-      signal.removeEventListener('abort', abortListener)
-    }
-  }
 }
 
 /**
