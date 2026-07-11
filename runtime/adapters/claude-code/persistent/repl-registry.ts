@@ -19,10 +19,10 @@
  *     stale read and our write is never clobbered (TOCTOU-safe).
  *   - Atomic write (tmp → fsync → rename) so a crash mid-write never leaves a
  *     truncated registry.
- *   - A CORRUPT on-disk file (unparseable JSON, wrong shape, or unreadable)
- *     never brings supervision down — `loadRegistry` maps it to `{}` — but a
- *     mutation built on that `{}` would otherwise silently overwrite the file
- *     and vaporize every other sessionKey's row with zero signal. Same story,
+ *   - A CORRUPT on-disk file (unparseable JSON or wrong shape) never brings
+ *     supervision down — `loadRegistry` maps it to `{}` — but a mutation
+ *     built on that `{}` would otherwise silently overwrite the file and
+ *     vaporize every other sessionKey's row with zero signal. Same story,
  *     smaller blast radius, for a single MALFORMED row (schema skew from a
  *     rolling restart) that `isMinimalRecord` drops during parse. The
  *     mutation path (`withRegistry` and the `*Record` helpers) guards BOTH:
@@ -30,6 +30,12 @@
  *     collision-resistant `<path>.corrupt-<epoch-ms>-<pid>-<counter>` before
  *     the save makes the drop permanent, so rows are recoverable by hand. See
  *     `defaultCorruptHandler` / `defaultDropRowHandler`.
+ *   - A whole-file READ error (EACCES, EMFILE, a transient I/O hiccup — as
+ *     opposed to a parse/shape error) is handled MORE conservatively still:
+ *     there are no bytes to sidecar and no way to know the failure wasn't
+ *     momentary, so the mutation path skips the SAVE entirely rather than
+ *     committing a `{}`-based rebuild — the file is left untouched for the
+ *     next tick to retry. See `loadRegistryForMutation`.
  *
  * Keyed on the `sessionKey` STRING the substrate already uses
  * (`${substrate_instance_id} ${cwd}` today; `(instance, user, project)` after S3
@@ -167,6 +173,44 @@ export function loadRegistry(
   if (result.kind === 'loaded') return result.registry
   if (result.kind === 'corrupt') onCorrupt?.(result.reason, contents)
   return {}
+}
+
+/**
+ * Load for the MUTATION path specifically (`withRegistry`) — like
+ * `loadRegistry`, but additionally reports whether the save that's about to
+ * follow should be SKIPPED.
+ *
+ * A whole-file READ error (EACCES, EMFILE, a transient NFS hiccup, ...) is
+ * fundamentally different from a PARSE error: on a parse error we DID get
+ * the bytes (just couldn't make sense of them), so proceeding to rebuild +
+ * save is safe — the original is sidecar-preserved either way. On a read
+ * error we got NOTHING, so we have no idea whether the on-disk file was
+ * fine, transiently inaccessible, or genuinely bad — and no bytes to
+ * sidecar even if we wanted to. Proceeding to save a mutation built on `{}`
+ * would silently convert a possibly-momentary hiccup into PERMANENT,
+ * unrecoverable loss of every row (Codex r4). So on a read error the
+ * mutation still runs (callers always get a `T` back, same as any other
+ * no-record case) but `skipSave` tells `withRegistry` to leave the on-disk
+ * file untouched — whatever state it was in, the next tick gets to retry
+ * the read rather than this tick permanently erasing it.
+ */
+function loadRegistryForMutation(
+  path: string,
+  onCorrupt: (reason: string, rawContents?: string) => void,
+  onDropRow: (key: string, raw: unknown, rawContents: string) => void,
+): { registry: ReplRegistry; skipSave: boolean } {
+  if (!existsSync(path)) return { registry: {}, skipSave: false }
+  let contents: string
+  try {
+    contents = readFileSync(path, 'utf8')
+  } catch (e) {
+    onCorrupt(`read-error: ${(e as Error).message}`)
+    return { registry: {}, skipSave: true }
+  }
+  const result = parseRegistryContents(contents, onDropRow)
+  if (result.kind === 'loaded') return { registry: result.registry, skipSave: false }
+  if (result.kind === 'corrupt') onCorrupt(result.reason, contents)
+  return { registry: {}, skipSave: false }
 }
 
 /** Atomically write the registry to disk (tmp → fsync → rename). */
@@ -319,6 +363,14 @@ export interface WithRegistryOptions {
  * `options.onCorrupt` / `options.onDropRow`, if given, run in ADDITION —
  * never as a replacement (Codex r3: a caller-supplied callback must not be
  * able to silently disable the sidecar safety net).
+ *
+ * A whole-file READ error (as opposed to a parse/shape error) skips the SAVE
+ * entirely — `mutate` still runs and the caller still gets its `T`, but
+ * nothing is written to disk, leaving the file exactly as it was for the
+ * next tick to retry (Codex r4: we have no bytes to sidecar and no way to
+ * know the failure wasn't transient, so committing a `{}`-based mutation
+ * would risk turning a momentary hiccup into permanent, unrecoverable loss).
+ * See `loadRegistryForMutation`.
  */
 export function withRegistry<T>(
   path: string,
@@ -336,9 +388,9 @@ export function withRegistry<T>(
     options.onDropRow?.(key, raw, rawContents)
   }
   return withFlockSync(registryLockPath(path), () => {
-    const current = loadRegistry(path, onCorrupt, onDropRow)
+    const { registry: current, skipSave } = loadRegistryForMutation(path, onCorrupt, onDropRow)
     const { registry, result } = mutate(current)
-    saveRegistry(path, registry)
+    if (!skipSave) saveRegistry(path, registry)
     return result
   })
 }

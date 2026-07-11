@@ -426,28 +426,40 @@ describe('repl-registry — corruption on the mutation path is loud and recovera
   })
 
   it.skipIf(isRoot)(
-    'a read-error (e.g. permission denied) is loud-but-alive: no throw, no sidecar (nothing readable to preserve), and the mutation still completes',
+    'a read-error (e.g. permission denied) is loud-but-alive AND leaves the file untouched — the save is skipped, not just the sidecar (Codex r4)',
     () => {
       const path = tmpRegistry()
-      writeFileSync(path, 'irrelevant — about to be made unreadable')
+      // A VALID, multi-row registry is on disk — the read error is about to
+      // be entirely transient (permissions flap), not actual corruption.
+      upsertRecord(path, rec({ sessionKey: 'alice', sessionId: 'uuid-alice', pid: 111 }))
+      upsertRecord(path, rec({ sessionKey: 'bob', sessionId: 'uuid-bob', pid: 222 }))
+      const beforeBytes = readFileSync(path, 'utf8')
       chmodSync(path, 0o000)
 
       const originalConsoleError = console.error
       const logs: unknown[][] = []
       console.error = (...args: unknown[]) => logs.push(args)
       try {
-        expect(() => patchRecord(path, 'k', { pid: 1 })).not.toThrow()
+        // The mutation still runs end-to-end (the caller always gets a
+        // result) — it just must not COMMIT anything built on the `{}` it
+        // was forced to fall back to, since we have no idea whether the
+        // real on-disk data was fine.
+        expect(() => patchRecord(path, 'alice', { pid: 999 })).not.toThrow()
       } finally {
-        chmodSync(path, 0o600) // restore so cleanup can remove it
+        chmodSync(path, 0o600) // restore readability
         console.error = originalConsoleError
       }
 
       expect(logs.some((l) => String(l[0]).includes('read-error'))).toBe(true)
       // Nothing was readable, so there is genuinely nothing to sidecar.
       expect(sidecarsFor(path)).toEqual([])
-      // The mutation degrades to an empty registry and still saves cleanly —
-      // supervision keeps running rather than bricking on this project.
-      expect(existsSync(path)).toBe(true)
+      // The critical assertion: the save was SKIPPED, not just un-sidecarred.
+      // The file on disk is byte-for-byte what it was before the attempted
+      // mutation — alice's `pid` patch did NOT silently commit over a
+      // rebuilt-from-`{}` registry, and bob's row was never at risk.
+      expect(readFileSync(path, 'utf8')).toBe(beforeBytes)
+      expect(getRecord(path, 'alice')?.pid).toBe(111) // unchanged, not 999
+      expect(getRecord(path, 'bob')?.pid).toBe(222)
     },
   )
 
