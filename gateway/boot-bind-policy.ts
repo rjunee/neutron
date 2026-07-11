@@ -21,25 +21,44 @@
 export type BindEnvBag = Record<string, string | undefined>
 
 /**
+ * SECRET-valued bypass vars: their consumer activates on ANY non-empty string
+ * (e.g. `channels/adapters/app-ws/auth.ts` enables HS256 when
+ * `hs256_secret.length > 0`). So `"0"` / `"false"` are 1/5-char secrets that DO
+ * activate the prohibited mode — they count as SET, no off-value exemption.
+ */
+const SECRET_BYPASS_VARS = ['NEUTRON_APP_WS_DEV_SECRET', 'NEUTRON_E2E_DEV_SECRET'] as const
+
+/**
+ * FLAG bypass vars: their consumer activates ONLY on the exact flag `"1"`
+ * (`config/index.ts` derives `devAuth: NEUTRON_DEV_AUTH === '1'`, `cores/sdk`
+ * throws unless `=== '1'`; app-ws dev-bypass is documented `NEUTRON_APP_WS_BYPASS=1`).
+ * So `"0"` / `"false"` / anything-but-`"1"` is genuinely OFF for these.
+ */
+const FLAG_BYPASS_VARS = ['NEUTRON_DEV_AUTH', 'NEUTRON_APP_WS_BYPASS'] as const
+
+/**
  * The dev-only auth BYPASS env vars. Each turns OFF a real credential check
- * somewhere in the stack, so NONE may be set on a wide bind:
+ * somewhere in the stack, so NONE may be ACTIVE on a wide bind:
  *   - `NEUTRON_DEV_AUTH`          — dev platform-JWT / secrets accessors (cores/sdk).
  *   - `NEUTRON_APP_WS_BYPASS`     — app-ws resolver accepts ANY bearer.
  *   - `NEUTRON_APP_WS_DEV_SECRET` — app-ws HS256 *dev* shared secret.
  *   - `NEUTRON_E2E_DEV_SECRET`    — e2e-only dev route secret.
  */
-export const DEV_BYPASS_ENV_VARS = [
-  'NEUTRON_DEV_AUTH',
-  'NEUTRON_APP_WS_BYPASS',
-  'NEUTRON_APP_WS_DEV_SECRET',
-  'NEUTRON_E2E_DEV_SECRET',
-] as const
+export const DEV_BYPASS_ENV_VARS = [...FLAG_BYPASS_VARS, ...SECRET_BYPASS_VARS] as const
 
-/** A value counts as "set" when present and not an explicit off/empty token. */
-function envIsSet(raw: string | undefined): boolean {
+/**
+ * TRUE when `name`'s configured `raw` value would ACTIVATE its dev-bypass mode,
+ * using each var's OWN consumer semantics (secret ⇒ any non-empty; flag ⇒ the
+ * exact `"1"`). This closes the "`NEUTRON_APP_WS_DEV_SECRET=false` slips through"
+ * hole: `false` is a live HS256 secret, so it activates and MUST be caught.
+ */
+function bypassVarActive(name: (typeof DEV_BYPASS_ENV_VARS)[number], raw: string | undefined): boolean {
   if (raw === undefined) return false
   const v = raw.trim()
-  return v.length > 0 && v !== '0' && v.toLowerCase() !== 'false'
+  if (v.length === 0) return false
+  if ((SECRET_BYPASS_VARS as readonly string[]).includes(name)) return true
+  // Flag var — only the exact activation token counts (matches the consumer).
+  return v === '1'
 }
 
 /**
@@ -62,7 +81,7 @@ export function isLoopbackBindHost(host: string): boolean {
  */
 export function assertWideBindPolicy(host: string, env: BindEnvBag = process.env): void {
   if (isLoopbackBindHost(host)) return
-  const active = DEV_BYPASS_ENV_VARS.filter((name) => envIsSet(env[name]))
+  const active = DEV_BYPASS_ENV_VARS.filter((name) => bypassVarActive(name, env[name]))
   if (active.length > 0) {
     throw new Error(
       `refusing to boot: NEUTRON_HOST=${host} is a WIDE (non-loopback) bind, but ` +

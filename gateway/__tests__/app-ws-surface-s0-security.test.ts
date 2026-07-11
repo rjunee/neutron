@@ -16,7 +16,7 @@ import { AppWsAdapter, InMemoryAppWsSessionRegistry } from '@neutronai/channels/
 import {
   appWsOriginAllowed,
   createAppWsSurface,
-  normalizeWebOriginHosts,
+  normalizeWebOrigins,
 } from '../http/app-ws-surface.ts'
 
 const HOST = '127.0.0.1:7800'
@@ -64,20 +64,25 @@ function upgradeReq(opts: { origin?: string; token?: string }): Request {
   return new Request(`http://${HOST}/ws/app/chat${q}`, { method: 'GET', headers })
 }
 
-describe('appWsOriginAllowed — pure same-origin predicate', () => {
+describe('appWsOriginAllowed — pure same-origin predicate (canonical)', () => {
+  // Second arg is the server's OWN canonical origin (scheme+host+port).
   it('allows a MISSING Origin (native Expo/CLI clients send none)', () => {
-    expect(appWsOriginAllowed(null, HOST)).toBe(true)
+    expect(appWsOriginAllowed(null, SAME_ORIGIN)).toBe(true)
   })
-  it('allows a same-origin browser (Origin host === Host)', () => {
-    expect(appWsOriginAllowed(SAME_ORIGIN, HOST)).toBe(true)
-    expect(appWsOriginAllowed(`https://${HOST}`, HOST)).toBe(true)
+  it('allows a same-origin browser (Origin === selfOrigin)', () => {
+    expect(appWsOriginAllowed(SAME_ORIGIN, SAME_ORIGIN)).toBe(true)
+  })
+  it('REJECTS a scheme downgrade against the same host (https self vs http Origin)', () => {
+    // High #1 — host-only comparison used to allow this; canonical must not.
+    expect(appWsOriginAllowed(`http://${HOST}`, `https://${HOST}`)).toBe(false)
+    expect(appWsOriginAllowed(`https://${HOST}`, `http://${HOST}`)).toBe(false)
   })
   it('rejects a cross-origin page the owner merely visits', () => {
-    expect(appWsOriginAllowed('https://evil.example', HOST)).toBe(false)
-    expect(appWsOriginAllowed('http://127.0.0.1:9999', HOST)).toBe(false)
+    expect(appWsOriginAllowed('https://evil.example', SAME_ORIGIN)).toBe(false)
+    expect(appWsOriginAllowed('http://127.0.0.1:9999', SAME_ORIGIN)).toBe(false)
   })
-  it('rejects an opaque/sandboxed Origin ("null") and a missing Host', () => {
-    expect(appWsOriginAllowed('null', HOST)).toBe(false)
+  it('rejects an opaque/sandboxed Origin ("null") and a missing selfOrigin', () => {
+    expect(appWsOriginAllowed('null', SAME_ORIGIN)).toBe(false)
     expect(appWsOriginAllowed(SAME_ORIGIN, null)).toBe(false)
   })
 })
@@ -174,37 +179,48 @@ describe('S0 (b) — per-boot app-ws token gate (browser-origin upgrades)', () =
 })
 
 const WEB_ORIGIN = 'https://app.example.test'
-const WEB_HOST = 'app.example.test'
 
-describe('normalizeWebOriginHosts — configured-origin host extraction', () => {
-  it('extracts the host authority from each valid base URL', () => {
-    expect(normalizeWebOriginHosts([WEB_ORIGIN, 'http://web.local:8080/x'])).toEqual([
-      WEB_HOST,
-      'web.local:8080',
+describe('normalizeWebOrigins — configured-origin canonicalization', () => {
+  it('canonicalizes each valid base URL to scheme+host+port (path stripped)', () => {
+    expect(normalizeWebOrigins([WEB_ORIGIN, 'http://web.local:8080/x'])).toEqual([
+      'https://app.example.test',
+      'http://web.local:8080',
     ])
   })
-  it('drops empty / whitespace / malformed entries (fail-closed, never a throw)', () => {
-    expect(normalizeWebOriginHosts(['', '   ', 'not a url', 'ht!tp://['])).toEqual([])
+  it('drops empty / whitespace / malformed / opaque entries (fail-closed)', () => {
+    expect(normalizeWebOrigins(['', '   ', 'not a url', 'ht!tp://[', 'foo://bar'])).toEqual([])
   })
 })
 
 describe('appWsOriginAllowed — S2 (a) configured owner web origin allow-list', () => {
-  it('allows a cross-Host browser Origin that matches a configured web origin', () => {
-    // Reverse-proxied deploy: Origin host !== Host, but it IS the configured
+  it('allows a cross-origin browser Origin that matches a configured web origin', () => {
+    // Reverse-proxied deploy: Origin !== selfOrigin, but it IS the configured
     // owner web origin → allowed.
-    expect(appWsOriginAllowed(WEB_ORIGIN, HOST, [WEB_HOST])).toBe(true)
+    expect(appWsOriginAllowed(WEB_ORIGIN, SAME_ORIGIN, [WEB_ORIGIN])).toBe(true)
   })
   it('MUTATION: the SAME cross-origin is rejected without the allow-list', () => {
     // Remove the allow-list (the S2 broadening) → the request goes red.
-    expect(appWsOriginAllowed(WEB_ORIGIN, HOST, [])).toBe(false)
-    expect(appWsOriginAllowed(WEB_ORIGIN, HOST)).toBe(false)
+    expect(appWsOriginAllowed(WEB_ORIGIN, SAME_ORIGIN, [])).toBe(false)
+    expect(appWsOriginAllowed(WEB_ORIGIN, SAME_ORIGIN)).toBe(false)
+  })
+  it('High #1: a configured HTTPS origin does NOT authorize http / ftp / wrong-port', () => {
+    // Scheme downgrade (network-injectable http page) — rejected.
+    expect(appWsOriginAllowed('http://app.example.test', SAME_ORIGIN, [WEB_ORIGIN])).toBe(false)
+    // Non-http(s) scheme sharing the host — rejected.
+    expect(appWsOriginAllowed('ftp://app.example.test', SAME_ORIGIN, [WEB_ORIGIN])).toBe(false)
+    // Wrong port — rejected.
+    expect(appWsOriginAllowed('https://app.example.test:8443', SAME_ORIGIN, [WEB_ORIGIN])).toBe(
+      false,
+    )
+    // The exact configured canonical origin — still allowed.
+    expect(appWsOriginAllowed('https://app.example.test', SAME_ORIGIN, [WEB_ORIGIN])).toBe(true)
   })
   it('still rejects an unrelated cross-origin even with an allow-list present', () => {
-    expect(appWsOriginAllowed('https://evil.example', HOST, [WEB_HOST])).toBe(false)
+    expect(appWsOriginAllowed('https://evil.example', SAME_ORIGIN, [WEB_ORIGIN])).toBe(false)
   })
   it('still allows same-origin and missing-Origin regardless of the allow-list', () => {
-    expect(appWsOriginAllowed(SAME_ORIGIN, HOST, [WEB_HOST])).toBe(true)
-    expect(appWsOriginAllowed(null, HOST, [WEB_HOST])).toBe(true)
+    expect(appWsOriginAllowed(SAME_ORIGIN, SAME_ORIGIN, [WEB_ORIGIN])).toBe(true)
+    expect(appWsOriginAllowed(null, SAME_ORIGIN, [WEB_ORIGIN])).toBe(true)
   })
 })
 
@@ -226,5 +242,15 @@ describe('S2 (a) — WS upgrade accepts a configured cross-origin owner page', (
     )
     expect(rejRes!.status).toBe(403)
     expect(((await rejRes!.json()) as { code: string }).code).toBe('bad_origin')
+  })
+
+  it('REJECTS a scheme downgrade (http) of a configured HTTPS owner origin (403)', async () => {
+    const configured = makeSurface(undefined, [WEB_ORIGIN])
+    const res = await configured.handler(
+      upgradeReq({ origin: 'http://app.example.test', token: 'sam' }),
+      makeFakeServer().server,
+    )
+    expect(res!.status).toBe(403)
+    expect(((await res!.json()) as { code: string }).code).toBe('bad_origin')
   })
 })

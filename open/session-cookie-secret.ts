@@ -11,12 +11,47 @@
  */
 
 import { randomBytes } from 'node:crypto'
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+// Namespace import so the security-critical TOCTOU / perms branches are
+// interceptable in tests (`spyOn(fs, 'existsSync')`) — the destructured form
+// isn't reliably spyable under Bun.
+import * as fs from 'node:fs'
 import { join } from 'node:path'
 
 /** The on-disk secret file (0600) under NEUTRON_HOME. */
 export function sessionCookieSecretPath(neutronHome: string): string {
   return join(neutronHome, '.session-cookie-secret')
+}
+
+/**
+ * Enforce owner-only 0600 on the secret file. A restored backup / manually
+ * created file can land 0644 (world-readable) — a signing secret must never be.
+ * Best-effort + non-fatal (an exotic FS chmod failure must not abort boot).
+ */
+function enforceOwnerOnly(path: string): void {
+  try {
+    if ((fs.statSync(path).mode & 0o777) !== 0o600) fs.chmodSync(path, 0o600)
+  } catch {
+    /* non-fatal */
+  }
+}
+
+/** Read the persisted secret if present + non-empty, enforcing 0600 first. */
+function readPersistedSecret(path: string): string | null {
+  try {
+    if (fs.existsSync(path)) {
+      const existing = fs.readFileSync(path, 'utf8').trim()
+      if (existing.length > 0) {
+        // High #2 — a pre-existing (restored / hand-created) file may be 0644;
+        // tighten it to 0600 BEFORE we return it, so a world-readable secret is
+        // never silently trusted.
+        enforceOwnerOnly(path)
+        return existing
+      }
+    }
+  } catch {
+    /* unreadable — caller mints a fresh one */
+  }
+  return null
 }
 
 /**
@@ -29,32 +64,31 @@ export function sessionCookieSecretPath(neutronHome: string): string {
  */
 export function resolvePersistedCookieSecret(neutronHome: string): string {
   const path = sessionCookieSecretPath(neutronHome)
-  try {
-    if (existsSync(path)) {
-      const existing = readFileSync(path, 'utf8').trim()
-      if (existing.length > 0) return existing
-    }
-  } catch {
-    /* unreadable — fall through and mint a fresh one */
-  }
+  const existing = readPersistedSecret(path)
+  if (existing !== null) return existing
+
   const secret = randomBytes(24).toString('hex')
   try {
-    mkdirSync(neutronHome, { recursive: true })
-    // `mode` on writeFileSync only applies when CREATING the file; force 0600
-    // afterwards in case it pre-existed with wider perms (mirrors the
-    // install-token-env.ts secret-write idiom).
-    writeFileSync(path, secret + '\n', { mode: 0o600 })
-    try {
-      chmodSync(path, 0o600)
-    } catch {
-      /* non-fatal */
-    }
+    fs.mkdirSync(neutronHome, { recursive: true })
+    // Medium #3 — EXCLUSIVE create (`wx`): if two starters race the first-boot
+    // mint, only one wins; the loser gets EEXIST and reads back the winner's
+    // secret below, so every process converges on ONE signing key (otherwise
+    // each would truncate + return a DIFFERENT key and reject the other's
+    // sessions). `mode` on create applies 0600.
+    fs.writeFileSync(path, secret + '\n', { flag: 'wx', mode: 0o600 })
+    enforceOwnerOnly(path)
+    return secret
   } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'EEXIST') {
+      // Lost the mint race — return the winner's already-persisted secret.
+      const winner = readPersistedSecret(path)
+      if (winner !== null) return winner
+    }
     console.warn(
       `[open] could not persist the session-cookie secret to ${path} (${
         err instanceof Error ? err.message : String(err)
       }); using a process-ephemeral secret — owner sessions reset on restart.`,
     )
+    return secret
   }
-  return secret
 }

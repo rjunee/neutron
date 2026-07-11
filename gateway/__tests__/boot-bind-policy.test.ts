@@ -49,6 +49,16 @@ describe('assertWideBindPolicy', () => {
     }
   })
 
+  it('REFUSES a wide bind when a SECRET-valued bypass var is "0" / "false" (High #4)', () => {
+    // A *_SECRET var activates on ANY non-empty string (HS256 secret length>0),
+    // so "false" / "0" are LIVE secrets — must be caught, not exempted.
+    for (const name of ['NEUTRON_APP_WS_DEV_SECRET', 'NEUTRON_E2E_DEV_SECRET']) {
+      for (const val of ['false', '0']) {
+        expect(() => assertWideBindPolicy('0.0.0.0', { [name]: val })).toThrow(new RegExp(name))
+      }
+    }
+  })
+
   it('names all offending vars when several are set at once', () => {
     let thrown: Error | null = null
     try {
@@ -61,9 +71,13 @@ describe('assertWideBindPolicy', () => {
     expect(thrown!.message).toContain('NEUTRON_APP_WS_BYPASS')
   })
 
-  it('treats explicit off/empty values as UNSET (0 / false / empty)', () => {
-    for (const off of ['0', 'false', 'FALSE', '', '   ']) {
-      expect(() => assertWideBindPolicy('0.0.0.0', { NEUTRON_DEV_AUTH: off })).not.toThrow()
+  it('treats a FLAG bypass var off/empty as UNSET (consumer activates only on "1")', () => {
+    // NEUTRON_DEV_AUTH / NEUTRON_APP_WS_BYPASS activate strictly on "1", so any
+    // other value is genuinely off — no false-positive boot refusal.
+    for (const name of ['NEUTRON_DEV_AUTH', 'NEUTRON_APP_WS_BYPASS']) {
+      for (const off of ['0', 'false', 'FALSE', 'true', 'yes', '', '   ']) {
+        expect(() => assertWideBindPolicy('0.0.0.0', { [name]: off })).not.toThrow()
+      }
     }
   })
 })
