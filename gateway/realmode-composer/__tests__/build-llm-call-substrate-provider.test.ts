@@ -48,6 +48,30 @@ function httpErrorFetch(status: number, opts: { retryAfterSec?: number } = {}): 
   }) as unknown as typeof fetch
 }
 
+/**
+ * A fetch that returns HTTP 200 but STREAMS a `response.error` SSE event — the
+ * OTHER error surface. The `error.type` is the only durable rate-limit signal;
+ * the human message deliberately omits the literal "429".
+ */
+function streamedErrorFetch(type: string, message: string): typeof fetch {
+  const sse =
+    [
+      { event: 'response.created', data: { type: 'response.created', response: { id: 'r1' } } },
+      { event: 'response.error', data: { type: 'response.error', error: { type, message } } },
+    ]
+      .map((f) => `event: ${f.event}\ndata: ${JSON.stringify(f.data)}\n`)
+      .join('\n') + '\n'
+  return (async () => {
+    const stream = new ReadableStream({
+      start(c) {
+        c.enqueue(new TextEncoder().encode(sse))
+        c.close()
+      },
+    })
+    return new Response(stream, { status: 200 })
+  }) as unknown as typeof fetch
+}
+
 async function drain(h: SessionHandle): Promise<Event[]> {
   const out: Event[] = []
   for await (const e of h.events) out.push(e)
@@ -489,4 +513,90 @@ test('HONEST MANIFEST → no toolManifest ⇒ GPT advertises NO tools (never fal
   // With no manifest wired, the request carries no `tools` (the adapter only sets
   // tools when spec.tools is non-empty) — GPT is never told it can call Workflow.
   expect(rec.bodies[0]!['tools']).toBeUndefined()
+})
+
+// --- STREAMED error surface (HTTP 200 SSE response.error) — must cool too ---
+
+test('BOUNDARY streamed 429 (SSE rate_limit_exceeded, message lacks "429") → cools after exhaustion + retry_after honored', async () => {
+  const pool = openaiPool()
+  const before = Date.now()
+  const sub = buildLlmCallSubstrate({
+    pool: anthropicPool(),
+    substrate_instance_id: 'gpt-streamed',
+    provider: 'openai',
+    user_id: 'owner',
+    openai: {
+      pool,
+      mcpResolver: async () => ({}),
+      model_preference: ['gpt-5.6', 'gpt-5.5'],
+      // Small retry-after so the adapter's inter-rotation sleep stays short; the
+      // point is that the parsed retry_after (NOT the default 429 window) drives
+      // the cooldown, proving the streamed error's classification flows through.
+      fetchImpl: streamedErrorFetch('rate_limit_exceeded', 'Rate limit reached. Please try again in 0.5s'),
+    },
+  })!
+  await drain(sub.start(spec()))
+  const cred = pool.credentials[0]!
+  expect(cred.cooldown_reason).toBe('rate_limit_429')
+  expect(cred.cooldown_until).toBeDefined()
+  // retry_after=0.5s honored → cooldown ≈ before + (one 0.5s inter-rotation sleep)
+  // + 0.5s window ≈ 1s. Well under the multi-second DEFAULT 429 window, proving
+  // the parsed retry_after (not a default) drove it.
+  expect(cred.cooldown_until! - before).toBeGreaterThanOrEqual(400)
+  expect(cred.cooldown_until! - before).toBeLessThan(5000)
+})
+
+test('BOUNDARY streamed insufficient_quota → cools with billing_402', async () => {
+  const pool = openaiPool()
+  const sub = buildLlmCallSubstrate({
+    pool: anthropicPool(),
+    substrate_instance_id: 'gpt-quota',
+    provider: 'openai',
+    user_id: 'owner',
+    openai: {
+      pool,
+      mcpResolver: async () => ({}),
+      model_preference: ['gpt-5.6', 'gpt-5.5'],
+      fetchImpl: streamedErrorFetch('insufficient_quota', 'You exceeded your current quota'),
+    },
+  })!
+  await drain(sub.start(spec()))
+  expect(pool.credentials[0]!.cooldown_reason).toBe('billing_402')
+})
+
+test('BOUNDARY streamed auth error → cools with auth_401', async () => {
+  const pool = openaiPool()
+  const sub = buildLlmCallSubstrate({
+    pool: anthropicPool(),
+    substrate_instance_id: 'gpt-auth',
+    provider: 'openai',
+    user_id: 'owner',
+    openai: {
+      pool,
+      mcpResolver: async () => ({}),
+      model_preference: ['gpt-5.6'],
+      fetchImpl: streamedErrorFetch('invalid_api_key', 'Incorrect API key provided'),
+    },
+  })!
+  await drain(sub.start(spec()))
+  expect(pool.credentials[0]!.cooldown_reason).toBe('auth_401')
+})
+
+test('BOUNDARY streamed server_error → NOT cooled (upstream fault, not credential)', async () => {
+  const pool = openaiPool()
+  const sub = buildLlmCallSubstrate({
+    pool: anthropicPool(),
+    substrate_instance_id: 'gpt-5xx',
+    provider: 'openai',
+    user_id: 'owner',
+    openai: {
+      pool,
+      mcpResolver: async () => ({}),
+      model_preference: ['gpt-5.6', 'gpt-5.5'],
+      fetchImpl: streamedErrorFetch('server_error', 'The server had an error'),
+    },
+  })!
+  const events = await drain(sub.start(spec()))
+  expect(events.some((e) => e.kind === 'error')).toBe(true)
+  expect(pool.credentials[0]!.cooldown_until).toBeUndefined()
 })
