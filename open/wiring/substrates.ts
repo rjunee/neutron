@@ -21,7 +21,11 @@
  *     `...(substrateFactory !== undefined ? { substrateFactory } : {})` spread.
  */
 
-import { buildLlmCallSubstrate } from '@neutronai/gateway/realmode-composer/build-llm-call-substrate.ts'
+import {
+  buildLlmCallSubstrate,
+  type BuildLlmCallSubstrateInput,
+} from '@neutronai/gateway/realmode-composer/build-llm-call-substrate.ts'
+import { getOpenAiModelPreference } from '@neutronai/runtime/models-openai.ts'
 import { OWNER_USER_ID } from '../owner-identity.ts'
 import type { Substrate } from '@neutronai/runtime/substrate.ts'
 import type { OpenWiringContext } from './context.ts'
@@ -52,6 +56,88 @@ export function wireSubstrates(ctx: OpenWiringContext): WiredSubstrates {
   const { llmPool, substrateFactory, internal_handle, owner_home, project_slug, prewarmSubstrate } =
     ctx
 
+  // SWAPPABLE PROVIDER — the CONVERSATIONAL provider option bag. Applied ONLY to
+  // the `cc-llm-*` (phase-spec) + `cc-agent-*` (live chat) substrates below.
+  //
+  // TRIDENT STAYS CLAUDE-CODE (hard constraint): the trident-fire
+  // (`makeWarmFireSubstrate`) + ephemeral (`makeEphemeralSubstrate`) substrates
+  // NEVER receive this — trident's fire-and-settle inner loop is a native CC
+  // Dynamic Workflow with no OpenAI analogue, so an autonomous build always runs
+  // on Claude Code regardless of the conversational provider. Degrade LOUDLY: if
+  // openai is selected but its pool / mcpResolver is missing, we leave the
+  // conversational config unset (→ Claude Code) rather than boot a broken path;
+  // the composer logs the fallback.
+  // EXPLICIT operator selection vs FULLY-WIRED. `ctx.provider === 'openai'` is the
+  // operator's explicit choice (NEUTRON_MODEL_PROVIDER=openai); it is honored even
+  // when incomplete so the substrate FAILS LOUDLY rather than silently routing the
+  // operator's prompts to Anthropic — the provider they did NOT select (audit High).
+  const openaiRequested = ctx.provider === 'openai'
+  const openaiFullyWired =
+    openaiRequested &&
+    ctx.openaiLlmPool !== null &&
+    ctx.openaiLlmPool !== undefined &&
+    ctx.bindMcpResolver !== undefined
+  // CAPABILITY-PARITY (audit round 16) — the OpenAI config must grant EXACTLY the
+  // capabilities the substrate's CLAUDE-path equivalent grants, never more. The
+  // decisive one is the TOOL BRIDGE: on the Claude path ONLY `cc-agent-*` (live
+  // chat) sets `enableToolBridge: true`; `cc-llm-*` (onboarding phase-spec) does
+  // NOT. So the OpenAI `toolManifest` (which becomes the GPT tool surface) is
+  // included ONLY for the live-agent substrate — never the phase-spec one, whose
+  // input is user-controlled ONBOARDING text. Emitting the full MCP manifest there
+  // would let onboarding prompts reach work_board / dispatch / etc. = privilege
+  // escalation the Claude path never permits.
+  const conversationalProviderFor = (
+    withToolBridge: boolean,
+  ): Partial<BuildLlmCallSubstrateInput> =>
+    openaiRequested
+      ? {
+          // ALWAYS set provider='openai' for an explicit selection. When fully wired
+          // the `openai` config is included; when NOT, it is omitted so the substrate
+          // emits its LOUD terminal error (never a silent Anthropic fallback).
+          provider: 'openai',
+          ...(openaiFullyWired
+            ? {
+                openai: {
+                  pool: ctx.openaiLlmPool!,
+                  bindMcpResolver: ctx.bindMcpResolver!,
+                  // OPERATOR OVERRIDE (audit round 11) — resolve the model ids from the
+                  // COMPOSER'S selected env (`ctx.env`), NOT the ambient global
+                  // `process.env`, so `NEUTRON_OPENAI_MODEL` on the instance env is honored.
+                  model_preference: getOpenAiModelPreference(ctx.env),
+                  // HONEST TOOL MANIFEST (audit BLOCKER 1) — only real MCP tools reach
+                  // GPT, and ONLY on a tool-bridge substrate (audit round 16). Without
+                  // a manifest the GPT turn advertises NO tools (spec.tools → []).
+                  ...(withToolBridge && ctx.toolManifest !== undefined
+                    ? { toolManifest: ctx.toolManifest }
+                    : {}),
+                  // Test-only fetch seam (E2E mocked GPT), mirrors substrateFactory.
+                  ...(ctx.openaiFetchImpl !== undefined ? { fetchImpl: ctx.openaiFetchImpl } : {}),
+                },
+              }
+            : {}),
+        }
+      : {}
+  // Phase-spec (`cc-llm-*`): NO tool bridge (mirrors the Claude path — it never sets
+  // enableToolBridge). Live-agent (`cc-agent-*`): tool bridge ON (mirrors enableToolBridge).
+  const phaseSpecProvider = conversationalProviderFor(false)
+  const liveAgentProvider = conversationalProviderFor(true)
+
+  // Codex-fix — the CONVERSATIONAL substrates build when the SELECTED provider's
+  // pool is available, NOT solely on the Anthropic `llmPool`. An OpenAI-only box
+  // (valid OPENAI_API_KEY, no Claude credential) must still get its conversational
+  // pair; otherwise `llmPool === null` silently nulls them while the OpenAI pool is
+  // never consulted (repro: NEUTRON_MODEL_PROVIDER=openai + OPENAI_API_KEY, no Claude).
+  //
+  // The Anthropic `pool`/`resolvePool` arg is required by the composer contract but
+  // is NEVER consulted on an openai turn (`start()` delegates to the openai branch
+  // before touching it). When there's no Anthropic pool we thread a lazy resolver
+  // that returns null so construction still yields a non-null Substrate. When NOT
+  // openai-selected this is `{ pool: llmPool }` with a non-null pool — BYTE-IDENTICAL
+  // to before.
+  const conversationalAvailable = openaiRequested || llmPool !== null
+  const anthropicPoolArg: Pick<BuildLlmCallSubstrateInput, 'pool' | 'resolvePool'> =
+    llmPool !== null ? { pool: llmPool } : { resolvePool: async (): Promise<null> => null }
+
   // WARM conversational substrate for the onboarding phase-spec LLM
   // rephrasing — the snappy-conversational core of the onboarding rework
   // (2026-06-17 single-session architecture, Step 1).
@@ -75,15 +161,18 @@ export function wireSubstrates(ctx: OpenWiringContext): WiredSubstrates {
   // mirrors `liveAgentSubstrate` so the headless REPL doesn't block on
   // interactive prompts.
   const llmCallSubstrate =
-    llmPool !== null
+    conversationalAvailable
       ? buildLlmCallSubstrate({
-          pool: llmPool,
+          ...anthropicPoolArg,
           substrate_instance_id: `cc-llm-${internal_handle}`,
           cwd: owner_home,
           internal_handle,
           user_id: OWNER_USER_ID,
           project_slug,
           skip_permissions: true,
+          // Phase-spec: openai provider WITHOUT the tool manifest (no tool bridge),
+          // mirroring the Claude path (cc-llm-* never sets enableToolBridge).
+          ...phaseSpecProvider,
           ...(substrateFactory !== undefined ? { substrateFactory } : {}),
         })
       : null
@@ -103,8 +192,12 @@ export function wireSubstrates(ctx: OpenWiringContext): WiredSubstrates {
   // 12s conversational tier into the static fallback (the live-signup symptom).
   // Awaiting readiness OUTSIDE the conversational timeout means only the cold
   // first turn waits; warm turns stay snappy.
+  // Pre-warm ONLY the Claude Code warm-REPL path — pre-warming is a CC concept
+  // (cold spawn of the interactive REPL). The OpenAI adapter is stateless HTTP, so
+  // pre-warming it would fire a real API call at boot; skip it whenever openai is
+  // the requested provider (wired or not — an unwired openai turn just errors).
   const prewarmReady: Promise<void> | null =
-    llmCallSubstrate !== null ? prewarmSubstrate(llmCallSubstrate) : null
+    llmCallSubstrate !== null && !openaiRequested ? prewarmSubstrate(llmCallSubstrate) : null
   // Track whether the pre-warm has SETTLED so the resolver can elevate the
   // budget for EVERY conversational dispatch in the cold window — not just the
   // first (2026-06-18 cold-start fix, round 2: the live owner-signup raced the
@@ -121,9 +214,9 @@ export function wireSubstrates(ctx: OpenWiringContext): WiredSubstrates {
   // Dedicated WARM conversational substrate for post-onboarding live chat
   // turns (no `ephemeral`; keyed per-dispatch on metering_context).
   const liveAgentSubstrate =
-    llmPool !== null
+    conversationalAvailable
       ? buildLlmCallSubstrate({
-          pool: llmPool,
+          ...anthropicPoolArg,
           substrate_instance_id: `cc-agent-${internal_handle}`,
           cwd: owner_home,
           internal_handle,
@@ -137,6 +230,10 @@ export function wireSubstrates(ctx: OpenWiringContext): WiredSubstrates {
           // `tools-bridge.ts`). The untrusted import (`cc-import-*`) and
           // disposable Trident (`cc-trident-*`) substrates deliberately omit it.
           enableToolBridge: true,
+          // Live-agent: openai provider WITH the tool manifest (tool bridge ON),
+          // mirroring the Claude path's enableToolBridge — this is the ONE
+          // conversational substrate that gets tools on either provider.
+          ...liveAgentProvider,
           ...(substrateFactory !== undefined ? { substrateFactory } : {}),
         })
       : null

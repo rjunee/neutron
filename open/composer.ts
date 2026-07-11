@@ -38,6 +38,9 @@ import {
   resolveApiKeyEnvTier,
   resolveAmbientTier,
 } from '@neutronai/gateway/realmode-composer/resolve-llm-credentials.ts'
+import { normalizeProvider, type Provider } from '@neutronai/runtime/adapters/select-substrate.ts'
+import type { McpToolResolver } from '@neutronai/contracts/mcp-tool-resolver.ts'
+import { replToolBridgeRef } from '@neutronai/runtime/adapters/claude-code/persistent/pool-state.ts'
 import { detectAmbientClaudeAuthCached } from './ambient-claude-auth.ts'
 import { buildOpenInstallTokenHandler } from './install-token-handoff.ts'
 import { persistOauthTokenToEnv, requestSupervisorRestart } from './install-token-env.ts'
@@ -400,6 +403,143 @@ export function resolveOpenLlmPool(
   return resolveAmbientTier({ provider: 'anthropic', allowAmbient: true, probeAmbientAuth })
 }
 
+/**
+ * SWAPPABLE PROVIDER — resolve the single-owner OpenAI credential pool for a box
+ * that opted into `provider:'openai'`. BYO `OPENAI_API_KEY` ONLY (no
+ * subscription OAuth — per the gpt-5-5-api adapter's ToS). Single-entry
+ * `env_vars` ⇒ never classified as a cross-instance shared key. Returns null
+ * when no OpenAI key is present (the composer then degrades to Claude Code).
+ */
+export function resolveOpenOpenAiPool(env: NodeJS.ProcessEnv): CredentialPool | null {
+  return resolveApiKeyEnvTier({
+    provider: 'openai',
+    env,
+    env_vars: ['OPENAI_API_KEY'],
+    allowSharedEnvTier: true,
+  })
+}
+
+/**
+ * The conversational model provider this box booted with, from
+ * `NEUTRON_MODEL_PROVIDER` (Managed-open-contract: env read stays under `open/`).
+ * Absent / unknown ⇒ `'anthropic'` (Claude Code — the default).
+ */
+export function resolveOpenModelProvider(env: NodeJS.ProcessEnv): Provider {
+  return normalizeProvider(env['NEUTRON_MODEL_PROVIDER'])
+}
+
+/**
+ * Late-bound MCP tool resolver for the OpenAI-family conversational substrate.
+ * Dispatches against the SAME in-process McpServer the Claude tool bridge uses
+ * (`replToolBridgeRef`, wired by `composeProductionGraph` once the graph exists,
+ * AFTER substrates are built — hence late-bound). NB: full tool PARITY for the
+ * openai path also needs `AgentSpec.tools` populated from the bridge manifest;
+ * that + a live-key smoke are the documented follow-up. For pure-text turns this
+ * resolver is never invoked (GPT emits no tool calls without `spec.tools`).
+ */
+export function buildOpenAiMcpResolver(): (bind: { project_id?: string }) => McpToolResolver {
+  // PROJECT SCOPING (audit High) — a project-BOUND factory. The composer calls it
+  // per turn with the active `project_id`; the returned resolver closes over it and
+  // forwards it to `ReplToolBridge.dispatch`, so project-scoped tools (work_board_*,
+  // dispatch, …) bind to the correct project — exactly like the Claude path threads
+  // ReplSession.projectId → McpServer.dispatch({project_id}). Absent project → null
+  // (the General/default scope), matching the CC sink's fallback.
+  return (bind: { project_id?: string }): McpToolResolver =>
+    async (call: { call_id: string; tool_name: string; args: unknown }): Promise<unknown> => {
+      const bridge = replToolBridgeRef.current
+      if (bridge === undefined) {
+        throw new Error(
+          'openai provider: MCP tool bridge not wired yet (graph not composed) — tool call cannot be resolved',
+        )
+      }
+      return bridge.dispatch({
+        tool_name: call.tool_name,
+        args: call.args,
+        call_id: call.call_id,
+        project_id: bind.project_id ?? null,
+      })
+    }
+}
+
+/**
+ * HONEST TOOL MANIFEST (audit BLOCKER 1) for the OpenAI conversational path.
+ * Returns ONLY the tools the in-process McpServer actually has registered (the
+ * SAME `listToolSchemas` the Claude tool bridge advertises), so the GPT adapter
+ * advertises exclusively tools its `mcpResolver` can execute — never the
+ * Claude-native `Read`/`Bash`/`Skill`/`Workflow` built-ins. Empty until the graph
+ * composes the bridge (late-bound), so early GPT turns run tool-free rather than
+ * with a false manifest.
+ */
+export function buildOpenAiToolManifest(): () => ReadonlyArray<{
+  name: string
+  description: string
+  input_schema: unknown
+}> {
+  return () => replToolBridgeRef.current?.listToolSchemas() ?? []
+}
+
+/** Deps for {@link resolveOpenConversationalProvider} (injected for testing). */
+export interface OpenConversationalProviderDeps {
+  resolveOpenAiPool: (env: NodeJS.ProcessEnv) => CredentialPool | null
+  buildMcpResolver: () => (bind: { project_id?: string }) => McpToolResolver
+  buildToolManifest: () => () => ReadonlyArray<{ name: string; description: string; input_schema: unknown }>
+}
+
+/**
+ * COHERENT PROVIDER RESOLUTION (audit High) — decide the conversational-provider
+ * slice of the wiring context for EVERY declared provider value, so no value can
+ * silently degrade to Claude Code:
+ *
+ *   - `anthropic` (default / unset)  → `{}` (Claude Code, byte-identical).
+ *   - `openai` + OPENAI_API_KEY      → fully wired GPT ctx.
+ *   - `openai` WITHOUT a key         → `{ provider:'openai' }` — honored, so
+ *                                      conversational turns FAIL LOUDLY per turn
+ *                                      (never a silent Anthropic fallback).
+ *   - ANY OTHER declared value       → THROW a loud boot error. A declared-but-not-
+ *     (`openai-codex-cli` today)       production-wired provider must refuse to boot
+ *                                      rather than silently dispatch Claude Code.
+ *
+ * The exhaustive final `throw` is the invariant: adding a new `Provider` union
+ * member that production hasn't wired will loudly reject at boot, not silently
+ * route the operator's data to Claude.
+ */
+export function resolveOpenConversationalProvider(
+  env: NodeJS.ProcessEnv,
+  deps: OpenConversationalProviderDeps,
+): Pick<OpenWiringContext, 'provider' | 'openaiLlmPool' | 'bindMcpResolver' | 'toolManifest'> {
+  const provider = resolveOpenModelProvider(env)
+  if (provider === 'anthropic') return {}
+  if (provider === 'openai') {
+    const pool = deps.resolveOpenAiPool(env)
+    if (pool !== null) {
+      console.log(
+        '[composer] NEUTRON_MODEL_PROVIDER=openai — conversational turns route to the GPT ' +
+          'Responses API adapter (BYO OPENAI_API_KEY). Trident + autonomous builds stay Claude Code.',
+      )
+      return {
+        provider: 'openai',
+        openaiLlmPool: pool,
+        bindMcpResolver: deps.buildMcpResolver(),
+        toolManifest: deps.buildToolManifest(),
+      }
+    }
+    // Honor the explicit selection with NO key: fail loudly per turn (below),
+    // never silently fall back to Anthropic.
+    console.error(
+      '[composer] NEUTRON_MODEL_PROVIDER=openai but no OPENAI_API_KEY resolved — ' +
+        'conversational turns will FAIL LOUDLY (no silent Anthropic fallback). Set OPENAI_API_KEY.',
+    )
+    return { provider: 'openai' }
+  }
+  // Exhaustive: any OTHER declared value (openai-codex-cli today) is NOT wired
+  // for production — refuse to boot rather than silently dispatch Claude Code.
+  throw new Error(
+    `[composer] NEUTRON_MODEL_PROVIDER=${provider} is a declared but NOT production-wired provider — ` +
+      "refusing to boot rather than silently falling back to Claude Code. Use 'openai' (GPT Responses) " +
+      'or leave NEUTRON_MODEL_PROVIDER unset for Claude Code.',
+  )
+}
+
 // C3d — the two pure Open-mode app-ws routing helpers MOVED to
 // `open/wiring/app-ws.ts` (they are app-ws-only). Re-exported here so the
 // existing `open/__tests__/open-import-analysis-delivery.test.ts` import path
@@ -502,6 +642,21 @@ export function buildOpenGraphComposer(
     // factory. Built once from the narrow wiring context and consumed downstream
     // verbatim. `prewarmSettledRef` is a LIVE reference the pre-warm `.then`
     // flips (cold-window budget elevation reads `.settled`, not a snapshot).
+    // SWAPPABLE PROVIDER — resolve the conversational backend. Default anthropic
+    // (Claude Code) is the untouched path. A box opts into openai via
+    // NEUTRON_MODEL_PROVIDER=openai + an OPENAI_API_KEY; missing prerequisites
+    // degrade LOUDLY to Claude Code (never a broken openai boot). Trident + all
+    // ephemeral/fire substrates stay Claude Code regardless (wired in
+    // wireSubstrates — this provider config reaches ONLY the conversational pair).
+    // COHERENT PROVIDER RESOLUTION — handles EVERY declared provider value: openai
+    // fully wired, openai-without-key honored (fails loud per turn), and any other
+    // declared-but-unwired value (openai-codex-cli) throws a LOUD boot error. Never
+    // a silent Claude fallback for an explicitly-selected non-anthropic provider.
+    const conversationalProviderCtx = resolveOpenConversationalProvider(env, {
+      resolveOpenAiPool: resolveOpenOpenAiPool,
+      buildMcpResolver: buildOpenAiMcpResolver,
+      buildToolManifest: buildOpenAiToolManifest,
+    })
     const wiringCtx: OpenWiringContext = {
       llmPool,
       internal_handle,
@@ -510,6 +665,7 @@ export function buildOpenGraphComposer(
       env,
       db,
       prewarmSubstrate,
+      ...conversationalProviderCtx,
       ...(substrateFactory !== undefined ? { substrateFactory } : {}),
     }
     const {
@@ -1055,6 +1211,7 @@ export function buildOpenGraphComposer(
       platform,
       cookieToUserClaim,
       resolveOpenLlmPool,
+      resolveOpenOpenAiPool,
       phaseSpecResolver,
       personalityCharacterSuggester,
       personaSummarizer,

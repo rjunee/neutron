@@ -326,6 +326,62 @@ test('Sprint 22 — gemini provider receives undefined maxOAuth, returns null wh
   expect(pool).toBeNull()
 })
 
+// ---------- Swappable provider: OpenAI credential resolution -------------
+
+test("provider='openai' resolves an api_key pool from OPENAI_API_KEY (tier 4), no maxOAuth", async () => {
+  // The swappable-provider path relies on resolveLlmCredentials already
+  // supporting non-anthropic providers via the generic env_vars / BYO-store
+  // tiers. OpenAI has NO subscription-OAuth path (BYO OPENAI_API_KEY only), so
+  // maxOAuth is undefined and the env-OAuth (tier 2) + ambient (tier 5) tiers
+  // are correctly anthropic-only no-ops.
+  const pool = await resolveLlmCredentials({
+    internal_handle: 'casey-test',
+    apiKeys: api_keys,
+    provider: 'openai',
+    env_vars: ['OPENAI_API_KEY'],
+    env: { OPENAI_API_KEY: 'sk-openai-byo' },
+  })
+  expect(pool).not.toBeNull()
+  if (pool === null) return
+  const sel = selectCredential(pool)
+  expect(sel?.secret).toBe('sk-openai-byo')
+  // OpenAI keys are x-api-key style → api_key kind (never oauth/ambient).
+  expect(sel?.kind).toBe('api_key')
+  expect(sel?.id).toBe('openai:OPENAI_API_KEY')
+})
+
+test("provider='openai' with a stray CLAUDE_CODE_OAUTH_TOKEN in env is NOT hijacked (anthropic-only tier 2)", async () => {
+  // A box that has BOTH an anthropic OAuth token AND an OpenAI key in env must
+  // not resolve the anthropic OAuth token for an openai request — tier 2 is
+  // anthropic-only.
+  const pool = await resolveLlmCredentials({
+    internal_handle: 'casey-test',
+    apiKeys: api_keys,
+    provider: 'openai',
+    env_vars: ['OPENAI_API_KEY'],
+    env: {
+      CLAUDE_CODE_OAUTH_TOKEN: 'sk-ant-oauth-should-be-ignored',
+      OPENAI_API_KEY: 'sk-openai-byo',
+    },
+  })
+  expect(pool).not.toBeNull()
+  if (pool === null) return
+  const sel = selectCredential(pool)
+  expect(sel?.secret).toBe('sk-openai-byo')
+  expect(sel?.kind).toBe('api_key')
+})
+
+test("provider='openai' with no OpenAI key returns null (→ reconnect/skip)", async () => {
+  const pool = await resolveLlmCredentials({
+    internal_handle: 'casey-test',
+    apiKeys: api_keys,
+    provider: 'openai',
+    env_vars: ['OPENAI_API_KEY'],
+    env: {},
+  })
+  expect(pool).toBeNull()
+})
+
 // ---------- T15: process-env CLAUDE_CODE_OAUTH_TOKEN source -------------
 
 test('T15 — process-env CLAUDE_CODE_OAUTH_TOKEN only → returns oauth-kind pool + WARN log', async () => {

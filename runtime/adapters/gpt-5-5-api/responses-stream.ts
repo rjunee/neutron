@@ -74,6 +74,43 @@ export async function* startResponsesStream(
   if (!response.ok || !response.body) {
     const status = response.status
     const text = await response.text().catch(() => '')
+    // PREVIOUS-RESPONSE EXPIRED/INVALID (audit round 15) — the request tried to
+    // resume via `previous_response_id` but the upstream rejected THAT id (expired /
+    // not found), NOT the model. Signal it distinctly (marker `previous_response_
+    // not_found:`) so the adapter can REPLAY the same turn WITHOUT the dead id and
+    // WITH the full `spec.messages` (fresh history) instead of failing. Checked
+    // BEFORE model-not-found so an expiry 404 isn't misread as a bad model id.
+    const sentPreviousId = typeof opts.body['previous_response_id'] === 'string'
+    if (
+      sentPreviousId &&
+      (status === 404 || status === 400) &&
+      /previous[_\s-]?response|previous_response_id|response .*(not found|expired)/i.test(text)
+    ) {
+      yield {
+        kind: 'error',
+        message: `previous_response_not_found: ${truncate(text, 200)}`,
+        retryable: false,
+      }
+      return
+    }
+    // MODEL-NOT-FOUND (audit round 10) — a 404 (or an explicit model_not_found body)
+    // means the requested model id isn't in OpenAI's catalog. Non-retryable (a
+    // rotation won't help if the ids are wrong), but it must be a LOUD, ACTIONABLE
+    // terminal error that NAMES the rejected model and the override env — otherwise
+    // an operator just gets a silent dead turn. Keep the `HTTP <status>:` prefix so
+    // the composer's classifier still reads it (404 → no credential cooldown).
+    if (status === 404 || /model[_\s-]?not[_\s-]?found/i.test(text)) {
+      const model = typeof opts.body['model'] === 'string' ? opts.body['model'] : '(unknown)'
+      yield {
+        kind: 'error',
+        message:
+          `HTTP ${status}: OpenAI does not recognize model '${model}'. If the GA model id ` +
+          `differs, set NEUTRON_OPENAI_MODEL (or NEUTRON_OPENAI_MODEL_PREFERENCE) to the correct ` +
+          `id and retry — this is a configuration error, not a transient failure. Upstream: ${truncate(text, 200)}`,
+        retryable: false,
+      }
+      return
+    }
     const retryable = status === 429 || status === 408 || (status >= 500 && status < 600)
     const retry_after = parseRetryAfterMs(response.headers.get('retry-after'))
     const ev: Event =
@@ -259,16 +296,78 @@ function mapResponsesEvent(
     }
     case 'response.error':
     case 'error': {
-      const message = evt.error?.message ?? 'unknown openai error'
+      const rawMessage = evt.error?.message ?? 'unknown openai error'
+      const type = evt.error?.type
+      // UNIFIED CLASSIFICATION (audit BLOCKER): a STREAMED error (HTTP 200 SSE
+      // `response.error`) must yield the SAME durable classification the non-OK
+      // HTTP path produces, so the composer's credential-pool cooldown fires no
+      // matter which surface the error originated on. Map the durable `error.type`
+      // to an HTTP status and PREFIX the message with `HTTP <status>:` (the exact
+      // shape `parseHttpStatusFromMessage` reads), so the classification survives
+      // model rotation/exhaustion instead of collapsing into an unclassifiable
+      // human string.
+      const status = openAiErrorTypeToStatus(type)
       const retryable =
-        evt.error?.type === 'rate_limit_exceeded' ||
-        evt.error?.type === 'server_error' ||
-        evt.error?.type === 'timeout'
-      return [{ kind: 'error', message, retryable }]
+        type === 'rate_limit_exceeded' || type === 'server_error' || type === 'timeout'
+      const message = status !== undefined ? `HTTP ${status}: ${rawMessage}` : rawMessage
+      const retry_after = parseRetryAfterFromMessage(rawMessage)
+      const ev: Event =
+        retry_after !== undefined
+          ? { kind: 'error', message, retryable, retry_after_ms: retry_after }
+          : { kind: 'error', message, retryable }
+      return [ev]
     }
     default:
       return []
   }
+}
+
+/**
+ * Map a durable OpenAI `error.type` to the HTTP status the credential-pool
+ * cooldown classifier keys on — so a STREAMED `response.error` cools the
+ * credential identically to the non-OK HTTP response path:
+ *   - `rate_limit_exceeded`                         → 429 (rate_limit_429)
+ *   - `insufficient_quota`                          → 402 (billing_402)
+ *   - invalid-auth families                         → 401 (auth_401)
+ *   - server_error / timeout / anything else        → undefined (not a credential
+ *     fault → no cooldown; still surfaced as a retryable error where applicable)
+ */
+export function openAiErrorTypeToStatus(type: string | undefined): number | undefined {
+  if (type === undefined) return undefined
+  if (type === 'rate_limit_exceeded') return 429
+  if (type === 'insufficient_quota') return 402
+  // Auth families (explicit ids + any type mentioning auth / api key). NB
+  // `invalid_request_error` is deliberately NOT auth — it is a request-shape
+  // error and must not cool the credential.
+  if (
+    type === 'invalid_api_key' ||
+    type === 'authentication_error' ||
+    type === 'invalid_authentication'
+  ) {
+    return 401
+  }
+  if (/auth/i.test(type) || /api[_-]?key/i.test(type)) return 401
+  return undefined
+}
+
+/**
+ * Best-effort retry-after extraction from an OpenAI error MESSAGE (streamed
+ * errors carry no `retry-after` HEADER — the header path is the non-OK HTTP
+ * response). OpenAI 429 bodies commonly read "Please try again in 1.2s" /
+ * "try again in 500ms". Returns milliseconds, or undefined when absent.
+ */
+export function parseRetryAfterFromMessage(message: string): number | undefined {
+  const ms = message.match(/try again in\s+([\d.]+)\s*ms/i)
+  if (ms && ms[1]) {
+    const n = Number(ms[1])
+    if (Number.isFinite(n)) return Math.max(0, Math.round(n))
+  }
+  const s = message.match(/try again in\s+([\d.]+)\s*s/i)
+  if (s && s[1]) {
+    const n = Number(s[1])
+    if (Number.isFinite(n)) return Math.max(0, Math.round(n * 1000))
+  }
+  return undefined
 }
 
 function parseRetryAfterMs(value: string | null): number | undefined {

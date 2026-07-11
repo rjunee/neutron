@@ -56,6 +56,10 @@ import { ImportError } from '@neutronai/onboarding/history-import/types.ts'
 import type { Event } from '@neutronai/runtime/events.ts'
 import type { SessionHandle } from '@neutronai/runtime/session-handle.ts'
 import type { AgentSpec, Substrate } from '@neutronai/runtime/substrate.ts'
+import {
+  normalizeProvider,
+  type Provider,
+} from '@neutronai/runtime/adapters/select-substrate.ts'
 import type { OAuthCredentialSource } from './resolve-llm-credentials.ts'
 import {
   BINARY_NOT_FOUND_MESSAGE,
@@ -63,6 +67,8 @@ import {
   detectCliAuthFailure,
   mapStatusForPoolCooldown,
   parseHttpStatusFromMessage,
+  startOpenAiFamilySession,
+  type OpenAiFamilyProviderConfig,
 } from './build-llm-call-substrate.ts'
 
 export interface BuildImportSubstrateInput {
@@ -173,6 +179,17 @@ export interface BuildImportSubstrateInput {
    * Required when `oauthRefresh` is wired; ignored otherwise.
    */
   internal_handle?: string
+  /**
+   * SWAPPABLE MODEL PROVIDER — see `BuildLlmCallSubstrateInput.provider`. Absent
+   * ⇒ `'anthropic'` (Claude Code), BYTE-IDENTICAL to the pre-provider import
+   * substrate (the entire block below is unchanged). No import caller sets this
+   * today; the plumbing exists for symmetry with the LLM-call substrate.
+   */
+  provider?: Provider
+  /** PER-TURN provider resolver — see `BuildLlmCallSubstrateInput.providerResolver`. */
+  providerResolver?: () => Provider | string | undefined
+  /** OpenAI-family config — see `BuildLlmCallSubstrateInput.openai`. */
+  openai?: OpenAiFamilyProviderConfig
 }
 
 /**
@@ -215,6 +232,31 @@ export function buildImportSubstrate(
   }
   return {
     start(spec: AgentSpec): SessionHandle {
+      // SWAPPABLE PROVIDER — a NON-EMPTY per-turn resolver value wins; an
+      // EMPTY/whitespace result means "no dynamic override" → defer to the static
+      // `provider` (an empty string passed straight to normalizeProvider would
+      // resolve to Anthropic and silently route an explicit-openai turn to Claude —
+      // audit High). Default 'anthropic' (both absent) keeps the block below
+      // BYTE-IDENTICAL.
+      const resolvedProvider = input.providerResolver?.()
+      const effectiveProvider =
+        resolvedProvider !== undefined && resolvedProvider !== null && resolvedProvider.trim() !== ''
+          ? resolvedProvider
+          : input.provider
+      const provider = normalizeProvider(effectiveProvider)
+      if (provider !== 'anthropic') {
+        return startOpenAiFamilySession({
+          provider,
+          spec,
+          substrate_instance_id: input.substrate_instance_id,
+          config: input.openai,
+          // Import is a stateless one-shot (no continuity ledger); still bind the
+          // per-chunk project scope for tool dispatch.
+          ...(spec.metering_context?.project_id !== undefined
+            ? { projectId: spec.metering_context.project_id }
+            : {}),
+        })
+      }
       // S13 (2026-05-16) — single async-generator that:
       //   1. Resolves the live pool (lazy `resolvePool` re-runs per call;
       //      eager `pool` is the static boot-time value).

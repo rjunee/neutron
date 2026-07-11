@@ -42,6 +42,15 @@ import {
   type RecoveredReply,
 } from '@neutronai/runtime/adapters/claude-code/index.ts'
 import {
+  normalizeProvider,
+  selectSubstrateFactory,
+  type Provider,
+} from '@neutronai/runtime/adapters/select-substrate.ts'
+import type { GptResponsesApiSubstrateOptions } from '@neutronai/runtime/adapters/gpt-5-5-api/index.ts'
+import type { CodexCliSubstrateOptions } from '@neutronai/runtime/adapters/gpt-5-5-codex-cli/index.ts'
+import type { McpToolResolver } from '@neutronai/contracts/mcp-tool-resolver.ts'
+import type { ToolDef } from '@neutronai/core-sdk/types.ts'
+import {
   reportFailure,
   reportSuccess,
   selectCredential,
@@ -382,6 +391,107 @@ export interface BuildLlmCallSubstrateInput {
    * content can never reach a Core tool.
    */
   enableToolBridge?: boolean
+  /**
+   * SWAPPABLE MODEL PROVIDER — the conversational/utility backend for THIS
+   * substrate. Absent ⇒ `'anthropic'` (Claude Code) — the default and primary
+   * orchestration backend, BYTE-IDENTICAL to the pre-provider composer: the
+   * resolved factory is `createClaudeCodeSubstrateAuto` and the whole
+   * credential-scrub / warm-pool / cooldown path below is unchanged. A project
+   * that opts into `'openai'` / `'openai-codex-cli'` routes each turn through the
+   * matching adapter (see `openai` config + `providerResolver`).
+   *
+   * SCOPE — conversational / utility LLM turns ONLY. Trident's autonomous build
+   * loop (the native `Workflow` inner loop) has NO OpenAI analogue and MUST stay
+   * on Claude Code regardless of this setting; the trident-fire substrate is
+   * built WITHOUT a provider so it always resolves to `'anthropic'`.
+   */
+  provider?: Provider
+  /**
+   * PER-TURN provider resolver — mirrors `projectIdResolver`. Re-evaluated on
+   * EVERY `start(spec)` so the ACTIVE project's provider selection is honored
+   * per turn (the "per-project resolved per-turn" granularity). Its result wins
+   * over the static `provider`; an absent/undefined/empty result falls back to
+   * `provider`, then to `'anthropic'`. An UNKNOWN non-empty string THROWS via
+   * `normalizeProvider` (fail-loud, never a silent Claude fallback) — production
+   * only ever resolves a valid `Provider` here, so this never trips in practice.
+   */
+  providerResolver?: () => Provider | string | undefined
+  /**
+   * OpenAI-family (`'openai'` / `'openai-codex-cli'`) configuration. Consumed
+   * ONLY when the resolved provider is non-anthropic; ignored for the default
+   * Claude Code path. When the provider resolves non-anthropic and this is
+   * absent (or, for `'openai'`, its `mcpResolver` is missing) the substrate
+   * degrades LOUDLY with a terminal `error` event rather than silently.
+   */
+  openai?: OpenAiFamilyProviderConfig
+}
+
+/**
+ * Per-provider config for the OpenAI-family adapters. The credential pool is
+ * SEPARATE from the anthropic pool (`OPENAI_API_KEY`, resolved via
+ * `resolveLlmCredentials({provider:'openai'})`) — never the anthropic pool, so
+ * an anthropic BYO key can't leak onto an OpenAI call.
+ */
+export interface OpenAiFamilyProviderConfig {
+  /** Eager OpenAI credential pool (tests / pre-resolved callers). */
+  pool?: CredentialPool
+  /** Lazy OpenAI credential pool — re-run per `start()` (mirrors `resolvePool`). */
+  resolvePool?: () => Promise<CredentialPool | null>
+  /**
+   * PROJECT-BOUND MCP resolver FACTORY (audit High — project scoping). The GPT
+   * adapter's `McpToolResolver` receives only `{call_id,tool_name,args}`, but the
+   * `ReplToolBridge.dispatch` needs the originating `project_id` to bind
+   * project-scoped tools (work_board_*, dispatch, …) — exactly like the Claude
+   * path threads `ReplSession.projectId → McpServer.dispatch({project_id})`. The
+   * composer calls this factory PER TURN with the active project, so the returned
+   * resolver closes over the right `project_id`. Mirrors `mcpServer.resolveBound(ctx)`.
+   * REQUIRED for `'openai'`; the codex-cli adapter resolves MCP tools server-side.
+   */
+  bindMcpResolver?: (bind: { project_id?: string }) => McpToolResolver
+  /**
+   * HONEST TOOL MANIFEST (audit BLOCKER 1). The conversational `spec.tools`
+   * carries Claude-Code NATIVE tool names (`Read`, `Write`, `Bash`, `Skill`,
+   * `Workflow`, …) that only the Claude adapter can execute — they are NOT
+   * MCP-registered, so the GPT adapter would advertise them to OpenAI as callable
+   * functions it cannot honor (a call would hit `mcpResolver` for an unregistered
+   * tool and fail). To obey "surface degradation, never silently break", the GPT
+   * path REPLACES `spec.tools` with ONLY the tools this manifest reports — the
+   * REAL MCP-registered tools the `mcpResolver` can actually execute (production
+   * wires `() => mcpServer.listToolSchemas()`). Absent ⇒ the GPT turn advertises
+   * NO tools (pure conversation) rather than falsely-advertised Claude built-ins.
+   */
+  toolManifest?: () => ReadonlyArray<{ name: string; description: string; input_schema: unknown }>
+  /**
+   * Model-preference override for the OpenAI-family turn. The gpt adapter reads
+   * `spec.model_preference`; the caller's `spec` carries CLAUDE ids for the
+   * anthropic path, so a non-anthropic turn MUST remap them to OpenAI ids (see
+   * `runtime/models-openai.ts`). Absent ⇒ the spec's `model_preference` is used
+   * as-is (only correct if the caller already built an OpenAI-shaped spec).
+   */
+  model_preference?: ReadonlyArray<string>
+  /** Override the OpenAI Responses endpoint (tests). */
+  endpoint?: string
+  /** Cap tool-call rounds per turn (gpt-5-5-api adapter). */
+  max_tool_rounds?: number
+  /**
+   * Extra env overlay for the adapter. For codex-cli this is where the selected
+   * credential's `OPENAI_API_KEY` is threaded (the adapter defaults env to `{}`
+   * and never reads host `process.env` — ISSUES #67).
+   */
+  env?: Readonly<Record<string, string | undefined>>
+  /** codex-cli: override CODEX_HOME. */
+  codex_home?: string
+  /** codex-cli: override the `codex` binary path. */
+  codex_bin?: string
+  /**
+   * Test seam — override `fetch` for the gpt-5-5-api adapter (mirrors the
+   * adapter's own `fetchImpl`). Production leaves this unset. Lets the composer's
+   * OpenAI path be unit-tested end-to-end against a mocked Responses stream
+   * without a live `OPENAI_API_KEY`.
+   */
+  fetchImpl?: typeof fetch
+  /** Test seam — override `spawn` for the codex-cli adapter (mirrors `spawnImpl`). */
+  spawnImpl?: CodexCliSubstrateOptions['spawnImpl']
 }
 
 /**
@@ -413,8 +523,52 @@ export function buildLlmCallSubstrate(
   if (input.pool !== undefined && input.pool.credentials.length === 0) {
     return null
   }
+  // Cross-turn continuity ledger for the STATELESS OpenAI-family providers (audit
+  // CRITICAL). Lives on THIS substrate's closure so it persists across `start()`
+  // calls. The Claude path never touches it. Keyed per conversation so distinct
+  // (user, project) turns keep separate upstream sessions — mirroring the CC
+  // warm-pool key dimensions.
+  const openaiSessions: OpenAiSessionLedger = new Map()
   return {
     start(spec: AgentSpec): SessionHandle {
+      // SWAPPABLE PROVIDER — resolve the backend for THIS turn. A NON-EMPTY per-turn
+      // resolver value wins (active-project provider); an EMPTY/whitespace resolver
+      // result means "no dynamic override this turn" → defer to the statically
+      // configured `provider` (which may be 'openai'); only when BOTH are
+      // absent/empty do we get the 'anthropic' default. Passing an empty string
+      // straight to normalizeProvider would resolve to Anthropic and SILENTLY route
+      // an explicit-openai turn to Claude (audit High). When non-anthropic, delegate
+      // to the OpenAI-family path; the anthropic block below stays BYTE-IDENTICAL.
+      const resolvedProvider = input.providerResolver?.()
+      const effectiveProvider =
+        resolvedProvider !== undefined && resolvedProvider !== null && resolvedProvider.trim() !== ''
+          ? resolvedProvider
+          : input.provider
+      const provider = normalizeProvider(effectiveProvider)
+      if (provider !== 'anthropic') {
+        // Conversation key mirrors the CC warm-pool key dimensions (user +
+        // live active project) so continuity is scoped identically across
+        // providers.
+        // SCOPE-KEY SAFETY (audit High) — resolve the raw project id (undefined
+        // when absent; NEVER a `'default'` literal that would collide with a real
+        // project named 'default'), then build a COLLISION-SAFE continuity key via
+        // structural encoding. Also thread the raw projectId for tool scoping so an
+        // absent project binds to null (not the string 'default').
+        const scopeUserId = input.user_id ?? '_platform'
+        const rawProjectId = input.projectIdResolver?.() ?? spec.metering_context?.project_id
+        const scopeProjectId =
+          rawProjectId !== undefined && rawProjectId.length > 0 ? rawProjectId : undefined
+        const sessionKey = openAiSessionScopeKey(scopeUserId, scopeProjectId)
+        return startOpenAiFamilySession({
+          provider,
+          spec,
+          substrate_instance_id: input.substrate_instance_id,
+          config: input.openai,
+          sessionLedger: openaiSessions,
+          sessionKey,
+          ...(scopeProjectId !== undefined ? { projectId: scopeProjectId } : {}),
+        })
+      }
       let innerHandle: SessionHandle | null = null
       let cancelled = false
       const events = (async function* (): AsyncGenerator<Event, void, void> {
@@ -482,6 +636,20 @@ export function buildLlmCallSubstrate(
         const projectId =
           input.projectIdResolver?.() ?? spec.metering_context?.project_id
         if (projectId !== undefined && projectId.length > 0) opts.project_id = projectId
+        // CROSS-PROVIDER CONTINUITY (audit round 14) — this Claude turn is handling
+        // the scope, so INVALIDATE any stored OpenAI continuation for it: a later
+        // OpenAI turn on this scope must replay the FULL history (`spec.messages`)
+        // instead of resuming a `previous_response_id` that predates (and can't see)
+        // this intervening Claude turn — otherwise this turn silently vanishes from
+        // the OpenAI-side conversation. Pure ledger bookkeeping — the CC option bag,
+        // spec, and factory are UNTOUCHED (Claude path stays byte-identical). The
+        // scope key matches the openai path's exactly (same user + project transform).
+        openaiSessions.delete(
+          openAiSessionScopeKey(
+            input.user_id ?? '_platform',
+            projectId !== undefined && projectId.length > 0 ? projectId : undefined,
+          ),
+        )
         if (input.project_slug !== undefined) opts.instance_slug = input.project_slug
         if (input.delivery_topic_id !== undefined) opts.delivery_topic_id = input.delivery_topic_id
         if (input.onRecoveredReply !== undefined) opts.onRecoveredReply = input.onRecoveredReply
@@ -608,6 +776,347 @@ export function buildLlmCallSubstrate(
 }
 
 /**
+ * A tiny in-memory cross-turn continuity ledger for the STATELESS OpenAI-family
+ * adapters. Maps a per-conversation key → the last `session` hint carried on a
+ * `completion` event (OpenAI `previous_response_id` / codex `--resume` thread id).
+ *
+ * WHY THIS EXISTS (audit CRITICAL): Claude Code keeps conversational continuity
+ * IMPLICITLY in its warm REPL transcript (pool-key continuity) and IGNORES
+ * `spec.session` — so no caller in the codebase threads `spec.session` today. A
+ * stateless provider given no session is AMNESIAC every turn (silent — no error).
+ * This ledger persists the completion's `session` and threads it back as
+ * `spec.session` on the next dispatch for the SAME conversation key, so
+ * multi-turn GPT/codex turns retain context. The Claude path never consults this
+ * (it stays behavior-identical by construction — the CC adapter ignores session).
+ *
+ * SCOPE / KNOWN GAP: this ledger is per-gateway-process + in-memory, so it does
+ * NOT survive a restart, and it does NOT yet rebuild history via `spec.messages`
+ * when an upstream session EXPIRES (OpenAI response-id TTL / codex session prune).
+ * A durable ledger + `spec.messages` replay (rebuilt from the chat log) is the
+ * required follow-up before GPT is production-grade for long-lived conversations.
+ */
+export type OpenAiSessionLedger = Map<
+  string,
+  { id: string; last_active_at: number; provider: string }
+>
+
+/**
+ * COLLISION-SAFE continuity scope key (audit High) for {@link OpenAiSessionLedger}.
+ *
+ * A naive `${userId}:${projectId}` key leaks conversation history across scope
+ * boundaries: `(user='a:b', project='c')` and `(user='a', project='b:c')` both
+ * flatten to `"a:b:c"`, and an ABSENT project (`undefined`) collides with a real
+ * project literally named `"default"`. A collision means one conversation's
+ * `previous_response_id` is replayed into another → cross-user / cross-project
+ * context bleed. Structural JSON encoding makes every id boundary explicit — no
+ * delimiter inside any id can forge another scope's key — and encodes an absent
+ * project as `null`, which is a DISTINCT key from every real project name.
+ */
+export function openAiSessionScopeKey(
+  userId: string,
+  projectId: string | undefined | null,
+): string {
+  return JSON.stringify([userId, projectId ?? null])
+}
+
+/**
+ * Dispatch ONE turn through an OpenAI-family adapter (`'openai'` /
+ * `'openai-codex-cli'`), selected via the platform-band `selectSubstrateFactory`.
+ *
+ * Shared by BOTH `buildLlmCallSubstrate` and `buildImportSubstrate`. Mirrors the
+ * anthropic path's discipline — per-turn credential selection from a LIVE pool +
+ * completion/error feedback into the pool's cooldown clock — but against the
+ * SEPARATE OpenAI credential pool and the OpenAI adapters' own option bags. The
+ * gpt/codex adapters both expose `tool_resolution='internal'` and a throwing
+ * `respondToTool`, so the caller-facing handle shape matches the CC path exactly.
+ *
+ * CONTINUITY: when a `sessionLedger` + `sessionKey` are supplied (conversational
+ * callers), the last completion's `session` is threaded back as `spec.session` so
+ * the stateless provider is NOT amnesiac across turns. Stateless one-shot callers
+ * (history import — each chunk independent) omit the ledger.
+ *
+ * Degrades LOUDLY (terminal `error` event, `retryable:false`) when the OpenAI
+ * config is missing — a project that selected `'openai'` but wasn't wired an
+ * OpenAI pool / `mcpResolver` gets a clear failure, never a silent fallback.
+ */
+export function startOpenAiFamilySession(args: {
+  provider: 'openai' | 'openai-codex-cli'
+  spec: AgentSpec
+  substrate_instance_id: string
+  config: OpenAiFamilyProviderConfig | undefined
+  /** Cross-turn continuity ledger — omit for stateless one-shot callers. */
+  sessionLedger?: OpenAiSessionLedger
+  /** COLLISION-SAFE conversation key into `sessionLedger` — built via
+   *  {@link openAiSessionScopeKey} (structural JSON of `[userId, projectId|null]`),
+   *  so no id delimiter can forge another scope's key and absent ≠ 'default'. */
+  sessionKey?: string
+  /** Active project id for THIS turn — bound into the MCP resolver so
+   *  project-scoped tools dispatch with the correct scope (audit High). */
+  projectId?: string
+}): SessionHandle {
+  const { provider, spec, substrate_instance_id, config, sessionLedger, sessionKey, projectId } = args
+  let innerHandle: SessionHandle | null = null
+  let cancelled = false
+  const events = (async function* (): AsyncGenerator<Event, void, void> {
+   // SINGLE-CHOKEPOINT LEDGER INVALIDATION (audit round 17) — compute the ledger
+   // key BEFORE any setup / pool resolution / credential check so EVERY exit path
+   // has it in scope, and invalidate it in the `finally` below on ANY non-success
+   // exit (pool-null, all-credentials-cooling, setup/iterator throw, stream error,
+   // expired-session, mid-switch, cancel). `committed` flips true ONLY after a
+   // clean completion has stored the fresh response id. This replaces the scattered
+   // per-error-path deletes, so no future exit path can silently regress continuity
+   // (a resumed-but-failed turn otherwise leaks a stale previous_response_id that
+   // drops the failed turn's history from the next turn).
+   const ledgerKey =
+     sessionLedger !== undefined && sessionKey !== undefined && sessionKey.length > 0
+       ? sessionKey
+       : undefined
+   let committed = false
+   // SETUP GUARD (audit) — the OpenAI path promises to "degrade LOUDLY (terminal
+   // error event)". Pool resolution (`await config.resolvePool()`), manifest
+   // resolution (`config.toolManifest()`), and adapter construction/`start()` can
+   // all THROW; without this guard a throw would REJECT the caller's `for await`
+   // instead of yielding a terminal `error`. Wrap the whole setup+dispatch so any
+   // throw becomes an `error` event on the stream. (The shape-checks below yield
+   // their own terminal errors and `return`.)
+   try {
+    if (config === undefined) {
+      yield {
+        kind: 'error',
+        message:
+          `model provider '${provider}' was selected but no OpenAI-family config ` +
+          `was wired into the substrate (missing credential pool + mcpResolver). ` +
+          `Configure OPENAI_API_KEY and thread an mcpResolver, or leave the ` +
+          `provider unset to use Claude Code.`,
+        retryable: false,
+      }
+      return
+    }
+    if (provider === 'openai' && config.bindMcpResolver === undefined) {
+      yield {
+        kind: 'error',
+        message:
+          "model provider 'openai' requires a bindMcpResolver so tools work in " +
+          'internal mode (production passes a project-bound mcpServer.resolveBound(ctx)); none was wired.',
+        retryable: false,
+      }
+      return
+    }
+    // Resolve the LIVE OpenAI pool (lazy re-run per call, or eager boot pool).
+    let pool: CredentialPool
+    if (config.pool !== undefined) {
+      pool = config.pool
+    } else if (config.resolvePool !== undefined) {
+      const resolved = await config.resolvePool()
+      if (resolved === null || resolved.credentials.length === 0) {
+        yield {
+          kind: 'error',
+          message:
+            `no OpenAI credentials available at dispatch time (provider='${provider}'). ` +
+            'Configure OPENAI_API_KEY in the per-project `.env` or attach a BYO OpenAI key, then retry.',
+          retryable: false,
+        }
+        return
+      }
+      pool = resolved
+    } else {
+      yield {
+        kind: 'error',
+        message: `provider='${provider}': neither an eager pool nor a resolvePool was wired`,
+        retryable: false,
+      }
+      return
+    }
+    const cred = selectCredential(pool)
+    if (cred === null) {
+      yield {
+        kind: 'error',
+        message: `all OpenAI credentials are in cooldown (429/401). Retry once the rate-limit window passes.`,
+        retryable: true,
+      }
+      return
+    }
+    // HONEST TOOL MANIFEST (audit BLOCKER 1) — the incoming `spec.tools` carries
+    // Claude-NATIVE tool names (Read/Write/Bash/Skill/Workflow) that the OpenAI
+    // adapter cannot execute. Replace them with ONLY the real MCP-registered tools
+    // the resolver can honor (or NONE), so GPT never advertises a tool it can't run.
+    const openaiTools: ToolDef[] =
+      config.toolManifest !== undefined
+        ? config.toolManifest().map((t) => ({
+            name: t.name,
+            description: t.description,
+            input_schema: (typeof t.input_schema === 'object' && t.input_schema !== null
+              ? (t.input_schema as Record<string, unknown>)
+              : { type: 'object' }),
+            output_schema: { type: 'object' } as Record<string, unknown>,
+            capability_required: 'fs:project_data',
+          }))
+        : []
+
+    // Remap CLAUDE model ids → OpenAI ids when the caller supplied an override
+    // (a non-anthropic turn's spec still carries the anthropic model_preference),
+    // and swap in the honest OpenAI tool manifest.
+    let dispatchSpec: AgentSpec = {
+      ...spec,
+      tools: openaiTools,
+      ...(config.model_preference !== undefined && config.model_preference.length > 0
+        ? { model_preference: [...config.model_preference] }
+        : {}),
+    }
+
+    // CONTINUITY (audit CRITICAL) — thread the last completion's session hint
+    // back as `spec.session` so the STATELESS provider is not amnesiac. Only when
+    // the caller wired a ledger (conversational) AND didn't already set a session.
+    // `ledgerKey` is computed once at the top (single-chokepoint invalidation).
+    if (ledgerKey !== undefined && dispatchSpec.session === undefined) {
+      const prior = sessionLedger!.get(ledgerKey)
+      // CROSS-PROVIDER CONTINUITY (audit round 14) — only resume the stored
+      // continuation if the SAME provider stored it. A different provider's session
+      // id (e.g. a codex `--resume` thread id vs an OpenAI `previous_response_id`,
+      // or a stale entry from before a non-OpenAI turn) is not a valid continuation
+      // and would silently drop the intervening turns; a mismatch replays FULL
+      // history via `spec.messages` instead. (A non-OpenAI turn also CLEARS the
+      // entry — see the anthropic path — so this guards the openai↔codex case.)
+      if (prior !== undefined && prior.provider === provider) {
+        dispatchSpec = {
+          ...dispatchSpec,
+          session: { id: prior.id, last_active_at: prior.last_active_at },
+        }
+      }
+    }
+
+    const selected = selectSubstrateFactory(provider)
+    let substrate: Substrate
+    if (selected.provider === 'openai') {
+      const opts: GptResponsesApiSubstrateOptions = {
+        substrate_instance_id,
+        api_key: cred.secret,
+        // PROJECT SCOPING (audit High) — bind the resolver to THIS turn's active
+        // project so project-scoped tools (work_board_*, dispatch, …) dispatch with
+        // the correct `project_id`, mirroring the Claude path. Guarded above:
+        // bindMcpResolver is defined for 'openai'.
+        mcpResolver: (config.bindMcpResolver as (bind: { project_id?: string }) => McpToolResolver)(
+          projectId !== undefined ? { project_id: projectId } : {},
+        ),
+      }
+      if (config.env !== undefined) opts.env = config.env
+      if (config.endpoint !== undefined) opts.endpoint = config.endpoint
+      if (config.max_tool_rounds !== undefined) opts.max_tool_rounds = config.max_tool_rounds
+      if (config.fetchImpl !== undefined) opts.fetchImpl = config.fetchImpl
+      substrate = selected.create(opts)
+    } else if (selected.provider === 'openai-codex-cli') {
+      // codex-cli: thread the selected secret as OPENAI_API_KEY (the adapter
+      // defaults env to `{}` and never reads host process.env — ISSUES #67).
+      const codexEnv: Record<string, string | undefined> = {
+        ...(config.env ?? {}),
+        OPENAI_API_KEY: cred.secret,
+      }
+      const opts: CodexCliSubstrateOptions = { env: codexEnv }
+      if (config.codex_home !== undefined) opts.codex_home = config.codex_home
+      if (config.codex_bin !== undefined) opts.bin = config.codex_bin
+      if (config.spawnImpl !== undefined) opts.spawnImpl = config.spawnImpl
+      substrate = selected.create(opts)
+    } else {
+      // Unreachable: `provider` is narrowed to the two OpenAI-family variants by
+      // the function signature. Defensive throw keeps the switch exhaustive.
+      throw new Error(`startOpenAiFamilySession: unexpected provider '${provider}'`)
+    }
+
+    innerHandle = substrate.start(dispatchSpec)
+    if (cancelled) {
+      await innerHandle.cancel()
+      return
+    }
+    let reported = false
+    for await (const ev of innerHandle.events) {
+      if (!reported) {
+        if (ev.kind === 'completion') {
+          reported = true
+          reportSuccess(pool, cred.id)
+          // Persist the session hint (tagged with THIS provider) for the next turn
+          // on this conversation key — the provider tag lets the read above reject a
+          // continuation stored by a different provider. `committed = true` marks
+          // this the ONE clean-success outcome, so the finally-guard does NOT
+          // invalidate (every other outcome does).
+          if (ledgerKey !== undefined && ev.session !== undefined) {
+            sessionLedger!.set(ledgerKey, {
+              id: ev.session.id,
+              last_active_at: ev.session.last_active_at,
+              provider,
+            })
+            committed = true
+          }
+        } else if (ev.kind === 'error') {
+          reported = true
+          // CONTINUITY ON FAILURE (audit round 15/17) — a stream error is a
+          // non-success exit; the `finally` guard invalidates the ledger (no
+          // per-branch delete needed). We still classify the cooldown here.
+          // CREDENTIAL-FAULT-ONLY cooldown (audit round 12). ONLY 401/402/429 cool
+          // the OpenAI key. A 5xx / 408 / network exception / no-status error is a
+          // transient SERVER/NETWORK fault, NOT a credential fault — cooling the key
+          // for it would punish a valid credential for an upstream outage (and, with
+          // the r9 at-most-once change, a post-tool 503 surfaces retryable, which the
+          // old shared mapper turned into a 429 cooldown). The error still SURFACES
+          // (below) — only the cooldown is suppressed. NB: deliberately NOT the
+          // Claude-shared `mapStatusForPoolCooldown` (its retryable→429 default is
+          // byte-identical CC behavior).
+          const httpStatus = parseHttpStatusFromMessage(ev.message)
+          const cooldownStatus: number | null =
+            httpStatus !== null
+              ? classifyOpenAiCredentialCooldown(httpStatus)
+              : detectCliAuthFailure(ev.message)
+                ? 401
+                : null
+          if (cooldownStatus !== null) {
+            if (ev.retry_after_ms !== undefined) {
+              reportFailure(pool, cred.id, cooldownStatus, ev.retry_after_ms)
+            } else {
+              reportFailure(pool, cred.id, cooldownStatus)
+            }
+          }
+        }
+      }
+      yield ev
+    }
+   } catch (err) {
+     // SETUP GUARD — convert any throw (pool/manifest resolution, adapter
+     // construction/start, or a misbehaving adapter iterator) into a terminal
+     // error event so the caller's `for await` never rejects.
+     yield {
+       kind: 'error',
+       message: `openai provider (${provider}) failed during setup/dispatch: ${
+         err instanceof Error ? err.message : String(err)
+       }`,
+       retryable: false,
+     }
+   } finally {
+     // SINGLE-CHOKEPOINT INVALIDATION (audit round 17) — EVERY non-success exit
+     // (pool-null / all-cooling early returns, setup or iterator throw, stream
+     // error, abandonment/cancel) lands here with `committed === false`, so the
+     // stale continuation is cleared and the next turn replays full `spec.messages`
+     // instead of resuming a dead/uncertain session. A clean completion set
+     // `committed = true`, so it is the ONLY outcome that keeps the stored id.
+     if (!committed && ledgerKey !== undefined) sessionLedger!.delete(ledgerKey)
+   }
+  })()
+  const handle: SessionHandle = {
+    events,
+    async respondToTool(call_id: string, result: unknown): Promise<void> {
+      if (innerHandle !== null) return innerHandle.respondToTool(call_id, result)
+      throw new Error(
+        'openai-family substrate: respondToTool called before dispatch (caller bug; tool_resolution=internal)',
+      )
+    },
+    async cancel(): Promise<void> {
+      cancelled = true
+      if (innerHandle !== null) await innerHandle.cancel()
+    },
+    tool_resolution: 'internal',
+  }
+  return handle
+}
+
+/**
  * Parse the leading `HTTP <N>:` token from a CC adapter error message.
  * Lifted verbatim from build-import-substrate.ts for shared use.
  */
@@ -628,6 +1137,28 @@ export function parseHttpStatusFromMessage(message: string): number | null {
  * original's docstring for the full mapping table + the Codex r4/r5 P1
  * incident history that drove it.
  */
+/**
+ * OpenAI-SPECIFIC credential-cooldown classifier (audit round 12).
+ *
+ * ONLY a genuine CREDENTIAL fault cools an OpenAI key:
+ *   - 401 → auth cooldown
+ *   - 402 → quota/billing cooldown
+ *   - 429 → rate-limit cooldown
+ * Everything else — 5xx, 408, a network/fetch exception, or a no-status error —
+ * is a transient SERVER/NETWORK fault, NOT a credential fault; it returns `null`
+ * (no cooldown) so a valid credential is never punished for an upstream outage.
+ *
+ * Why NOT reuse the Claude-shared {@link mapStatusForPoolCooldown}: that mapper's
+ * `retryable → 429` default is load-bearing for the CC adapter's own error taxonomy
+ * (Codex r4/r5 incident history) and MUST stay byte-identical for the Claude path.
+ * The OpenAI path therefore keeps its own, stricter classifier — credential-fault
+ * statuses only, no retryable-default-to-429.
+ */
+export function classifyOpenAiCredentialCooldown(httpStatus: number | null): number | null {
+  if (httpStatus === 401 || httpStatus === 402 || httpStatus === 429) return httpStatus
+  return null
+}
+
 export function mapStatusForPoolCooldown(
   httpStatus: number | null,
   retryable: boolean,
