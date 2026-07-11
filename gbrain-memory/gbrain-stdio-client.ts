@@ -227,6 +227,16 @@ export class GBrainStdioMcpClient implements McpClient {
       return await this.connecting
     } finally {
       this.connecting = null
+      // Re-arm the init guard if this attempt did NOT establish a live client
+      // (a transient connect failure, a thrown compose, etc.). `initGuardDone`
+      // is latched optimistically BEFORE the spawn, so without this a failed
+      // first connect would leave it stuck `true` with no live child — the next
+      // attempt would then skip the guard (and its per-connect key re-resolve),
+      // so a key stored between a failed spawn and the retry would never
+      // activate. On SUCCESS (`this.client` set) the guard stays latched, so a
+      // live session never re-runs it. (Binary-missing latches
+      // `unavailableDetail`, so future calls fast-fail regardless.)
+      if (this.client === null) this.initGuardDone = false
     }
   }
 

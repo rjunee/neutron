@@ -44,42 +44,57 @@ describe('GBrainStdioMcpClient — binary-missing latch', () => {
   })
 })
 
-// RA3 — the init guard re-arms on close() so a key captured AFTER the first
-// connection triggers its (marker-gated, idempotent) `embed --stale` backfill
-// on the NEXT spawn (a reconnect after teardown, or a process restart). Without
-// the re-arm, that reconnect would activate the embedder env (resolveDynamicEnv)
-// but never re-run the backfill path. NB: the client holds ONE persistent
-// `gbrain serve` child, so this is the reconnect boundary — it does NOT hot-swap
-// the embedder mid-session over a still-live connection (documented cadence in
-// build-gbrain-memory.ts:resolveOpenAiKey).
-describe('GBrainStdioMcpClient — init guard re-arms on close (late-key backfill)', () => {
-  test('ensureInitialized runs once per connection session, again after close()+reconnect', async () => {
+// RA3 — the init guard is re-armed whenever a connect attempt does NOT yield a
+// live client (a transient connect failure, or an explicit close()), so the
+// NEXT attempt re-runs it. This is what lets a key captured AFTER a failed (or
+// closed) connection trigger its per-connect key re-resolve + the marker-gated,
+// idempotent `embed --stale` backfill on the next spawn. `initGuardDone` is
+// latched optimistically BEFORE the spawn, so without the re-arm a failed first
+// connect would leave it stuck `true` and every retry would skip the guard
+// (Codex blocker). NB: on a SUCCESSFUL connect the guard stays latched, so a
+// live persistent session never re-runs it — activation is a per-spawn boundary,
+// not a mid-session hot-swap (cadence in build-gbrain-memory.ts:resolveOpenAiKey).
+describe('GBrainStdioMcpClient — init guard re-arms when no live client (transient-failure key pickup)', () => {
+  test('a failed connect re-arms the guard so the next attempt re-runs it AND observes a key stored since', async () => {
     // `/usr/bin/true` exists (so this is NOT the binary-missing latch) but exits
     // immediately, so `client.connect` fails fast with a transport-closed error
-    // AFTER the init guard has already run. That lets us observe the guard
-    // WITHOUT a live MCP server.
-    const runs: number[] = []
+    // AFTER the init guard has run — letting us observe the guard, and the key it
+    // would see, WITHOUT a live MCP server.
+    const seen: Array<string | undefined> = []
+    let stored: string | undefined
     const client = new GBrainStdioMcpClient({
       command: '/usr/bin/true',
       ensureInitialized: async () => {
-        runs.push(1)
+        seen.push(stored)
       },
     })
 
-    // First connection session: guard runs once.
+    // Attempt 1: no key yet. Connect fails → the finally re-arms the guard.
     await client.call('get_links', { slug: 'x' }).catch(() => {})
-    expect(runs.length).toBe(1)
+    expect(seen).toEqual([undefined])
 
-    // A second call WITHOUT a reconnect must NOT re-run the guard (still the
-    // same latched session — this is the "at most once per session" invariant).
+    // Key stored BETWEEN attempts, with NO explicit close(). The next memory op
+    // must re-run the guard and observe the newly-stored key (pre-fix: the guard
+    // stayed latched after the failed connect → this second read never happened →
+    // the brain would stay on Ollama despite the key).
+    stored = 'sk-late'
     await client.call('get_links', { slug: 'x' }).catch(() => {})
-    expect(runs.length).toBe(1)
+    expect(seen).toEqual([undefined, 'sk-late'])
+  })
 
-    // Teardown re-arms the guard; the next connection (e.g. after a key was
-    // stored) re-runs it → the marker-gated backfill can fire.
+  test('close() also re-arms the guard (explicit-teardown reconnect boundary)', async () => {
+    let runs = 0
+    const client = new GBrainStdioMcpClient({
+      command: '/usr/bin/true',
+      ensureInitialized: async () => {
+        runs += 1
+      },
+    })
+    await client.call('get_links', { slug: 'x' }).catch(() => {})
+    expect(runs).toBe(1)
     await client.close()
     await client.call('get_links', { slug: 'x' }).catch(() => {})
-    expect(runs.length).toBe(2)
+    expect(runs).toBe(2)
   })
 })
 
