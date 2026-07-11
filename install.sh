@@ -466,17 +466,41 @@ migrate_flat_layout() {
   done
 }
 
+# S3(b): force a secrets file to 0600 and FAIL CLOSED if it can't be secured.
+# `.env` holds live secrets (cookie secret, OAuth token, API keys), so a chmod
+# that FAILS — or one that "succeeds" but doesn't stick (an exotic FS/mount) —
+# must ABORT the install, not be swallowed while we go on to persist more
+# secrets and report success. A perms guarantee that discards its own failure
+# is worthless. This is the single chokepoint every `.env` write funnels
+# through (mirrors the runtime writer `install-token-env.ts:persistOauthTokenToEnv`,
+# which force-chmods 0600 on every write because writeFileSync's mode only
+# applies on CREATE — here we additionally VERIFY the result).
+secure_secret_file() {
+  _sf=$1
+  if ! chmod 600 "$_sf" 2>/dev/null; then
+    die "refusing to continue: could not secure $_sf to 0600 — secrets would be left readable by other users. Fix its ownership/filesystem/mount and re-run."
+  fi
+  # Belt-and-suspenders: verify the mode actually stuck. GNU stat is `-c %a`,
+  # BSD/macOS stat is `-f %Lp`; both print octal perms with no leading zero
+  # (e.g. `600`). Only trust an all-octal-digits result — if stat is absent or
+  # its output is unrecognized we cannot verify and rely on the chmod success
+  # above (the normal-install happy path on a box without stat still works).
+  _mode=$(stat -c '%a' "$_sf" 2>/dev/null || stat -f '%Lp' "$_sf" 2>/dev/null || true)
+  case "$_mode" in
+    ''|*[!0-7]*) : ;;      # stat unavailable / unrecognized — cannot verify
+    600|0600) : ;;         # verified locked
+    *) die "refusing to continue: $_sf is mode $_mode after chmod 600 (permissions did not stick — exotic filesystem/mount?). Secrets would be left readable by other users." ;;
+  esac
+}
+
 # Pin KEY=value in a dotenv file: replace any existing assignment (commented or
 # not, export or not), else append. Used to lock NEUTRON_HOME to the resolved
 # data dir so the server (which auto-loads .env) opens the SAME dir the installer
 # migrated — the install↔server agreement the shared-resolver parity protects.
 #
-# S3(b): `.env` holds secrets (cookie secret, OAuth token, API keys), so force
-# it to 0600 after every write regardless of the umask it was created under —
-# mirrors the runtime writer's idiom (`install-token-env.ts:persistOauthTokenToEnv`,
-# which force-chmods 0600 on every write for the same reason). Best-effort: a
-# chmod failure (e.g. an exotic filesystem) must not abort the install — the
-# value is already persisted.
+# S3(b): `.env` holds secrets, so every write re-secures it to 0600 via
+# `secure_secret_file`, which FAILS CLOSED (aborts the install) if the file
+# cannot be made / verified 0600 — never leaves secrets group/world-readable.
 persist_env_var() {
   _ef=$1
   _k=$2
@@ -490,14 +514,15 @@ persist_env_var() {
   else
     printf '%s=%s\n' "$_k" "$_v" >> "$_ef"
   fi
-  chmod 600 "$_ef" 2>/dev/null || true
+  secure_secret_file "$_ef"
 }
 
 # Ensure `.env` exists in `_dir` — copy it from `.env.example` if missing,
-# NEVER clobber an existing one — then S3(b) force it to 0600 either way.
-# `.env` holds secrets (cookie secret, OAuth token, API keys), so it must
-# never be left group/world-readable under a loose umask; tightening even the
-# "already exists" reuse path mirrors `ensureKey`'s force-chmod-on-reuse in
+# NEVER clobber an existing one — then S3(b) force it to 0600 either way,
+# FAILING CLOSED if it can't be secured (see `secure_secret_file`). `.env`
+# holds secrets (cookie secret, OAuth token, API keys), so it must never be
+# left group/world-readable under a loose umask; tightening even the "already
+# exists" reuse path mirrors `ensureKey`'s force-chmod-on-reuse in
 # `auth/secrets-store.ts` (a keyfile copied in at 0644 gets tightened too).
 # Pulled out as its own function so the `NEUTRON_INSTALL_PRINT_ENV_PERMS` test
 # seam below can exercise it without running the rest of the installer.
@@ -514,7 +539,7 @@ ensure_env_file() {
     warn ".env.example missing — skipping .env creation"
     return 0
   fi
-  chmod 600 "$_ef" 2>/dev/null || true
+  secure_secret_file "$_ef"
 }
 
 # Generate a random hex secret — 48 hex chars (24 bytes), matching the server's
@@ -938,8 +963,10 @@ persist_oauth_token_to_env() {
   else
     printf 'CLAUDE_CODE_OAUTH_TOKEN=%s\n' "$_tok" >> "$_ef"
   fi
-  # S3(b) — this file holds a live OAuth token; force 0600 regardless of umask.
-  chmod 600 "$_ef" 2>/dev/null || true
+  # S3(b) — this file now holds a live OAuth token; force + verify 0600, and
+  # FAIL CLOSED (abort) if it can't be secured rather than leave the token
+  # readable by other local users.
+  secure_secret_file "$_ef"
 }
 
 # Detect Claude auth state and guide the user HONESTLY, mirroring the Managed
