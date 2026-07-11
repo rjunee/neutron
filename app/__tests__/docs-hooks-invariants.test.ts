@@ -66,18 +66,24 @@ describe('RequestGate — the useProjectScopedAsync race-guard contract', () => 
   });
 });
 
-describe('useProjectScopedAsync — render-phase reset-on-switch', () => {
+describe('useProjectScopedAsync — committed reset-on-switch (never during render)', () => {
   const src = readHook('use-project-scoped-async.ts');
 
   it('memoises a single RequestGate for the component lifetime', () => {
     expect(src).toMatch(/useMemo\(\(\)\s*=>\s*new RequestGate\(\),\s*\[\]\)/);
   });
 
-  it('resets the gate when the projectId changes (ref compare, no effect lag)', () => {
-    // The reset must be a render-phase compare so it precedes the
-    // effect-phase refetch the switch triggers.
+  it('resets the gate inside a useEffect (committed transition), not during render', () => {
+    // Codex D7-r2: the reset MUST live in an effect so an abandoned /
+    // suspended B render can never invalidate A's in-flight request.
+    const resetIdx = src.indexOf('gate.reset()');
+    const effectIdx = src.indexOf('useEffect(');
+    expect(effectIdx).toBeGreaterThanOrEqual(0);
+    expect(resetIdx).toBeGreaterThan(effectIdx);
     expect(src).toMatch(/seenProject\.current\s*!==\s*projectId/);
-    expect(src).toMatch(/gate\.reset\(\)/);
+    // No bare render-phase mutation of the gate.
+    const beforeEffect = src.slice(0, effectIdx);
+    expect(beforeEffect).not.toContain('gate.reset()');
   });
 });
 
@@ -89,27 +95,31 @@ describe('useDocMutations — ONE gate for ALL mutations (fixed 4× in review)',
     expect(gateAcquisitions.length).toBe(1);
   });
 
-  it('every write path checks isLatest on that single mutateGate', () => {
-    // The token guard `mutateGate.isLatest(token)` appears once per
-    // resolver arm across save / create / rename / delete / upload /
-    // binary-delete / revert — never a second gate name.
+  it('routes every write path through that single mutateGate — no stray second gate', () => {
+    // The behavioural bail-on-switch coverage lives in
+    // docs-mutations-race.test.ts (all seven mutations). Here we only
+    // pin the STRUCTURAL single-gate guarantee.
     expect(src).toContain('const mutateGate = useProjectScopedAsync(project_id);');
-    expect(src.match(/mutateGate\.acquire\(\)/g)?.length).toBeGreaterThanOrEqual(7);
-    expect(src).toMatch(/mutateGate\.isLatest\(token\)/);
-    // No stray second gate.
     expect(src).not.toMatch(/new RequestGate\(/);
   });
 
   it('project-switch reset clears ALL confirm modals but PRESERVES non-destructive transient flags', () => {
-    // Isolate the project-change effect body.
-    const effect = src.slice(src.indexOf('useEffect(() => {\n    setExistingFileConflict(null);'));
+    // Isolate JUST the bounded project-change effect body (start → its
+    // own `}, [project_id, client]);`) so moving a setter OUT of the
+    // effect can't satisfy these assertions (Codex D7-r2).
+    const start = src.indexOf('useEffect(() => {\n    setExistingFileConflict(null);');
+    expect(start).toBeGreaterThanOrEqual(0);
+    const end = src.indexOf('}, [project_id, client]);', start);
+    expect(end).toBeGreaterThan(start);
+    const effect = src.slice(start, end);
     expect(effect).toContain('setExistingFileConflict(null)');
     expect(effect).toContain('setActionSheet(null)');
     expect(effect).toContain('setRenameTarget(null)');
     expect(effect).toContain('setNewFileOpen(false)');
     // Every DESTRUCTIVE confirm-modal target must clear on switch so it
     // can't be confirmed against the wrong project (Codex D7-r1 BLOCKER
-    // — the pre-D7 effect missed binaryDeleteTarget).
+    // — the pre-D7 effect missed binaryDeleteTarget). Behaviourally
+    // re-verified in docs-mutations-race.test.ts.
     expect(effect).toContain('setBinaryDeleteTarget(null)');
     // Non-destructive transient flags intentionally persist (matching
     // the pre-D7 effect) — resetting them would be a behaviour change

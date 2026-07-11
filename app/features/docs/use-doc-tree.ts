@@ -7,7 +7,7 @@
  * to `[]` BEFORE `fetchTree()` runs, so a project A → B switch can
  * never leave A's tree rendered under B's `project_id` (tapping a row
  * would otherwise read/write B with A's relative paths). The gate is
- * invalidated render-phase by `useProjectScopedAsync`, so its reset
+ * invalidated on a committed switch by `useProjectScopedAsync`, so its reset
  * also precedes the refetch's `acquire()`.
  */
 

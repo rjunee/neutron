@@ -141,7 +141,7 @@ export function useDocHistory(params: {
   }, []);
 
   // Project change: reset the history-pane surface. (The gate is
-  // invalidated render-phase by `useProjectScopedAsync`.) Fires on the
+  // invalidated on a committed switch by `useProjectScopedAsync`.) Fires on the
   // same `project_id`/`client` trigger as the pre-D7 single effect.
   useEffect(() => {
     setHistoryOpen(false);

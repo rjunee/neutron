@@ -24,7 +24,8 @@
  *   • `useDeepLinkAnchor` — `?path`/`?line`/`?range`/`?folder` +
  *                           highlight overlay + scroll-to-anchor
  * all built on the `useProjectScopedAsync` race-guard primitive
- * (acquire-before-await, isLatest-before-setState, reset-on-switch).
+ * (acquire-before-await, isLatest-before-setState, committed reset-on-
+ * switch).
  * Leaf components + StyleSheet live in `app/features/docs/docs-ui.tsx`.
  *
  * Concurrency: every PUT carries `expected_modified_at`. A 409 from the

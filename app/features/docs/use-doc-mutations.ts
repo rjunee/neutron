@@ -11,7 +11,7 @@
  * mutations. Every handler `acquire()`s a token before its first
  * await and checks `isLatest(token)` before it re-installs any `file`
  * / `selectedPath` / `mode` state. A project A → B switch mid-mutation
- * calls `mutateGate` reset (render-phase, via `useProjectScopedAsync`)
+ * resets `mutateGate` on a committed switch (via `useProjectScopedAsync`)
  * and invalidates the token, so the resolver bails BEFORE writing A's
  * content / path under project B or re-seating A's closures into B's
  * screen. Round-6 fixed this for `handleSave` only; round-7 extended
@@ -305,7 +305,7 @@ export function useDocMutations(params: {
   const handleSave = useCallback(async () => {
     if (client === null || file === null) return;
     // Acquire a mutate token before the await. If the project_id
-    // flips mid-save, the render-phase reset in `useProjectScopedAsync`
+    // flips mid-save, the committed-switch reset in `useProjectScopedAsync`
     // invalidates this token — the resolver below bails BEFORE
     // re-installing A's `file` closure (path + content + mtime) into
     // B's now-reset screen. Without this, the next Save in B would
@@ -359,7 +359,7 @@ export function useDocMutations(params: {
       const folder = input.folder.replace(/^\/+|\/+$/g, '');
       const fullPath = folder.length > 0 ? `${folder}/${withExt}` : withExt;
       // Acquire a mutate token. If `project_id` flips mid-await, the
-      // render-phase gate reset invalidates this token and the resolver
+      // committed-switch gate reset invalidates this token and the resolver
       // bails BEFORE any state setter fires — without this guard, A's
       // newly-created path landed in B's editor and the next Save
       // silently wrote B with A's content (round-7 BLOCKING #1, same
@@ -491,7 +491,7 @@ export function useDocMutations(params: {
   );
 
   // Project change: reset the mutation-driven modal/affordance state.
-  // (The gate is invalidated render-phase by `useProjectScopedAsync`.)
+  // (The gate is invalidated on a committed switch by `useProjectScopedAsync`.)
   //
   // D7 correctness fix (Codex D7-r1 BLOCKER): the pre-D7 project-change
   // effect cleared `actionSheet` / `renameTarget` but MISSED

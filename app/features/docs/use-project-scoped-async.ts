@@ -16,15 +16,20 @@
  *      newer one's state (or re-install a stale `file` closure whose
  *      next Save would write the wrong project's path).
  *   3. reset-on-switch — when `projectId` changes, every in-flight
- *      token is invalidated at once. Implemented here as a render-
- *      phase compare (the standard React "adjust on prop change"
- *      pattern) so the invalidation is guaranteed to precede the
- *      effect-phase refetch the switch triggers — this is what keeps
- *      the "gates reset BEFORE fetchTree" ordering the docs tab's
- *      project-change path depends on. `RequestGate.reset()` only
- *      bumps a monotonic counter, so a discarded render (or a
- *      StrictMode double-invoke) at worst invalidates tokens twice,
- *      which is a no-op for correctness.
+ *      token is invalidated at once, in a COMMITTED-phase effect (never
+ *      during render). Render must stay pure: a render for project B
+ *      that resets the gate but is then abandoned / suspended by React
+ *      would leave the committed UI on A while A's still-in-flight
+ *      request now fails `isLatest` — its guarded `finally` could never
+ *      clear the loading flag, stranding the A screen (Codex D7-r2).
+ *      An effect only runs on a COMMITTED transition, so the
+ *      invalidation tracks what the user actually sees. Ordering is
+ *      still preserved: this hook is called at the TOP of each data
+ *      hook, so its reset effect registers — and therefore runs —
+ *      before that hook's own refetch effect, keeping "gate reset
+ *      BEFORE fetchTree". `RequestGate.reset()` only bumps a monotonic
+ *      counter, so a StrictMode double-invoke is a no-op for
+ *      correctness.
  *
  * Under the hood this is a `RequestGate` (see `lib/docs-client.ts`)
  * memoised for the component's lifetime; the hook just names the
@@ -32,7 +37,7 @@
  * doesn't reimplement it.
  */
 
-import { useMemo, useRef } from 'react';
+import { useEffect, useMemo, useRef } from 'react';
 
 import { RequestGate } from '../../lib/docs-client';
 
@@ -45,13 +50,16 @@ export interface ProjectScopedGate {
 
 export function useProjectScopedAsync(projectId: string): ProjectScopedGate {
   const gate = useMemo(() => new RequestGate(), []);
-  // reset-on-switch: invalidate every in-flight token the instant the
-  // project changes, in the render pass — before the effects that
-  // refetch this project's tree/file run. See property (3) above.
   const seenProject = useRef(projectId);
-  if (seenProject.current !== projectId) {
-    seenProject.current = projectId;
-    gate.reset();
-  }
+  // reset-on-switch: invalidate every in-flight token on a COMMITTED
+  // project transition (see property (3) above). The ref compare skips
+  // the mount run (nothing in flight yet) so only real A → B switches
+  // reset.
+  useEffect(() => {
+    if (seenProject.current !== projectId) {
+      seenProject.current = projectId;
+      gate.reset();
+    }
+  }, [projectId, gate]);
   return gate;
 }

@@ -106,7 +106,7 @@ export function useDocFile(params: {
   }, [client, activeFilePath, project_id]);
 
   // Project change: reset every per-file field BEFORE the tree refetch
-  // (the gate itself is invalidated render-phase by
+  // (the gate itself is invalidated on a committed switch by
   // `useProjectScopedAsync`). Without this, navigating A → B leaves A's
   // open file + selectedPath + draftContent + mode in state while
   // `project_id` is now B; pressing Save (or letting any mid-flight
