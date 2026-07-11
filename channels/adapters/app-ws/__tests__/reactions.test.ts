@@ -15,8 +15,10 @@ import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import {
   AppChatReactionStore,
   AppChatStore,
+  DEFAULT_REACTION_REPLAY_LIMIT,
   ProjectDb,
 } from '@neutronai/persistence/index.ts'
+import type { AppChatReactionAggregate, AppChatReactionLog } from '@neutronai/persistence/index.ts'
 import type { Topic } from '../../../types.ts'
 import { AppWsAdapter } from '../adapter.ts'
 import { decodeAppWsReaction, sanitizeReactionEmoji } from '../envelope.ts'
@@ -179,6 +181,109 @@ describe('AppWsAdapter — reaction resume replay', () => {
 
     const tail = await adapter.replayReactionsAfter(CHANNEL_TOPIC, 1)
     expect(tail.map((r) => r.seq)).toEqual([3])
+  })
+
+  it('drains the continuation cursor: a backlog LARGER than one replay page replays in FULL (no silent tail drop)', async () => {
+    // End-to-end guard for the production bug: a reconnecting device with a
+    // reaction backlog exceeding the store's default page size used to get only
+    // the first page (cursorless `aggregatesAfter`), silently dropping the rest.
+    // The adapter now drains `aggregatesAfterPage` across pages.
+    const { adapter } = setup(['devA'])
+    const messages = new AppChatStore({ db })
+    const N = DEFAULT_REACTION_REPLAY_LIMIT + 5 // straddles the page boundary
+    for (let i = 1; i <= N; i++) {
+      const id = `m${i}`
+      await messages.append({ topic_id: CHANNEL_TOPIC, message_id: id, role: 'user', body: 'x', created_at: i })
+      await adapter.recordReaction({ channel_topic_id: CHANNEL_TOPIC, message_id: id, device_id: 'devA', emoji: '👍', action: 'add' })
+    }
+
+    const replay = await adapter.replayReactionsAfter(CHANNEL_TOPIC, 0)
+    // Every one of the N messages replays exactly once — the tail past the first
+    // page is delivered, not dropped.
+    expect(replay).toHaveLength(N)
+    const uniqueIds = new Set(replay.map((r) => r.message_id))
+    expect(uniqueIds.size).toBe(N)
+    // Ascending, contiguous seqs 1..N — nothing skipped across the page seam.
+    expect(replay.map((r) => r.seq)).toEqual(Array.from({ length: N }, (_, i) => i + 1))
+  })
+
+  it('compat boundary: a legacy log WITHOUT aggregatesAfterPage still replays (single-shot fallback, no throw)', async () => {
+    // `aggregatesAfterPage` is OPTIONAL on the exported AppChatReactionLog
+    // contract. A pre-existing injected log implementing only the required
+    // methods must still replay: the adapter capability-detects the page method
+    // and falls back to the cursorless `aggregatesAfter`.
+    const legacyCalls: Array<{ topic: string; after: number }> = []
+    const legacyLog: AppChatReactionLog = {
+      record: async () => {
+        throw new Error('unused in this test')
+      },
+      aggregate: async () => {
+        throw new Error('unused in this test')
+      },
+      aggregatesAfter: async (topic_id, after_seq): Promise<AppChatReactionAggregate[]> => {
+        legacyCalls.push({ topic: topic_id, after: after_seq })
+        return [
+          { message_id: 'm1', seq: 1, rev: 1, reactions: [{ emoji: '👍', device_id: 'devA' }] },
+          { message_id: 'm2', seq: 2, rev: 1, reactions: [{ emoji: '🎉', device_id: 'devB' }] },
+        ].filter((a) => a.seq > after_seq)
+      },
+      // NO aggregatesAfterPage — the compat boundary under test.
+    }
+    const registry = new InMemoryAppWsSessionRegistry()
+    const adapter = new AppWsAdapter({
+      registry,
+      receiver: { receive: async () => {} },
+      now: () => 1000,
+      chat_log: new AppChatStore({ db }),
+      reaction_log: legacyLog,
+    })
+    // Sanity: a concrete store DOES expose the page method (its full-cursor
+    // drain is covered above).
+    expect(typeof new AppChatReactionStore({ db }).aggregatesAfterPage).toBe('function')
+
+    const replay = await adapter.replayReactionsAfter(CHANNEL_TOPIC, 0)
+    // Fallback made exactly one cursorless call (no page loop for a legacy log).
+    expect(legacyCalls).toEqual([{ topic: CHANNEL_TOPIC, after: 0 }])
+    expect(replay.map((r) => r.message_id)).toEqual(['m1', 'm2'])
+    expect(replay[1]).toMatchObject({
+      rev: 1,
+      reactions: [{ emoji: '🎉', device_id: 'devB' }],
+      type: 'reaction_update',
+    })
+  })
+
+  it('liveness: the drain terminates on a malformed log that returns a NON-advancing cursor (no infinite spin)', async () => {
+    // See the receipt suite's twin — the strict-advance guard stops a broken
+    // provider that returns a repeated cursor instead of spinning forever.
+    let calls = 0
+    const stuckLog: AppChatReactionLog = {
+      record: async () => {
+        throw new Error('unused')
+      },
+      aggregate: async () => {
+        throw new Error('unused')
+      },
+      aggregatesAfter: async () => [],
+      aggregatesAfterPage: async () => {
+        calls += 1
+        if (calls > 100) throw new Error('drain did not terminate — infinite spin')
+        return {
+          aggregates: [{ message_id: 'm1', seq: 1, rev: 1, reactions: [{ emoji: '👍', device_id: 'devA' }] }],
+          next_cursor: { seq: 0, message_id: '' },
+        }
+      },
+    }
+    const registry = new InMemoryAppWsSessionRegistry()
+    const adapter = new AppWsAdapter({
+      registry,
+      receiver: { receive: async () => {} },
+      now: () => 1000,
+      chat_log: new AppChatStore({ db }),
+      reaction_log: stuckLog,
+    })
+    const replay = await adapter.replayReactionsAfter(CHANNEL_TOPIC, 0)
+    expect(calls).toBe(1)
+    expect(replay.map((r) => r.message_id)).toEqual(['m1'])
   })
 })
 

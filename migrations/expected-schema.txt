@@ -61,13 +61,13 @@ CREATE UNIQUE INDEX idx_app_chat_messages_client_msg
 CREATE UNIQUE INDEX idx_app_chat_messages_message_id
     ON app_chat_messages (message_id)
 
-[index] idx_app_chat_reactions_topic_seq (tbl=app_chat_reactions)
-CREATE INDEX idx_app_chat_reactions_topic_seq
-    ON app_chat_reactions (topic_id, seq)
+[index] idx_app_chat_reactions_topic_seq_msg (tbl=app_chat_reactions)
+CREATE INDEX idx_app_chat_reactions_topic_seq_msg
+    ON app_chat_reactions (topic_id, seq, message_id)
 
-[index] idx_app_chat_receipts_topic_seq (tbl=app_chat_receipts)
-CREATE INDEX idx_app_chat_receipts_topic_seq
-    ON app_chat_receipts (topic_id, seq)
+[index] idx_app_chat_receipts_topic_seq_msg (tbl=app_chat_receipts)
+CREATE INDEX idx_app_chat_receipts_topic_seq_msg
+    ON app_chat_receipts (topic_id, seq, message_id)
 
 [index] idx_code_subagent_registry_live (tbl=code_subagent_registry)
 CREATE INDEX idx_code_subagent_registry_live

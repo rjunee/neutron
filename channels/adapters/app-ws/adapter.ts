@@ -46,7 +46,9 @@ import type {
   AppChatEditLog,
   AppChatMessageLog,
   AppChatReactionAction,
+  AppChatReactionAggregate,
   AppChatReactionLog,
+  AppChatReceiptAggregate,
   AppChatReceiptLog,
   AppChatReceiptState,
   AppChatRow,
@@ -114,6 +116,26 @@ export interface AppWsAdapterOptions {
    * inert (legacy behaviour).
    */
   edit_log?: AppChatEditLog
+}
+
+/**
+ * Liveness guard for the receipt/reaction replay drain loops: a conforming
+ * `aggregatesAfterPage` returns a `next_cursor` that STRICTLY advances by
+ * `(seq, message_id)` each page. A malformed provider returning a repeated /
+ * non-advancing non-null cursor would spin the drain forever and stall
+ * reconnect — the loops stop when this returns false. The very first page has
+ * no `message_id` tiebreak (`prevMsg` undefined), so a same-seq cursor is
+ * treated as non-advancing there (a conforming store's first boundary always
+ * has `seq > after_seq`).
+ */
+function replayCursorAdvanced(
+  prevSeq: number,
+  prevMsg: string | undefined,
+  next: { seq: number; message_id: string },
+): boolean {
+  if (next.seq > prevSeq) return true
+  if (next.seq < prevSeq) return false
+  return prevMsg !== undefined && next.message_id > prevMsg
 }
 
 export class AppWsAdapter implements ChannelAdapter {
@@ -480,15 +502,23 @@ export class AppWsAdapter implements ChannelAdapter {
    * after_seq) that has any receipt, ascending by seq. The surface sends these
    * to the single requesting socket so its ladder reflects current state.
    * `[]` when the receipt log isn't wired.
+   *
+   * DRAINS the store's continuation cursor: a long-offline device whose backlog
+   * exceeds one replay page would otherwise have every message past the first
+   * page silently dropped (the store caps a page at `limit` DISTINCT messages).
+   * We loop `aggregatesAfterPage` following `next_cursor` until it is null, so
+   * the FULL backlog replays — while each page's SQL scan stays bounded (the
+   * old single unbounded `WHERE seq > ?` query that materialized every row is
+   * gone), keeping per-query memory bounded even for a huge backlog.
    */
   async replayReceiptsAfter(
     channel_topic_id: string,
     after_seq: number,
   ): Promise<AppWsOutboundReceiptUpdate[]> {
-    if (this.receipt_log === undefined) return []
-    const aggregates = await this.receipt_log.aggregatesAfter(channel_topic_id, after_seq)
+    const log = this.receipt_log
+    if (log === undefined) return []
     const ts = this.now()
-    return aggregates.map((agg) => {
+    const toEnv = (agg: AppChatReceiptAggregate): AppWsOutboundReceiptUpdate => {
       const env: AppWsOutboundReceiptUpdate = {
         v: 1,
         type: 'receipt_update',
@@ -499,7 +529,33 @@ export class AppWsAdapter implements ChannelAdapter {
       }
       if (agg.seq > 0) env.seq = agg.seq
       return env
-    })
+    }
+    // Capability-detect the bounded-cursor page method — it is OPTIONAL on the
+    // exported log interface. A legacy injected log without it replays in one
+    // shot (old behavior); the concrete production store has it, so prod drains
+    // the FULL backlog page-by-page (no silent tail drop, each page bounded).
+    if (log.aggregatesAfterPage === undefined) {
+      const aggregates = await log.aggregatesAfter(channel_topic_id, after_seq)
+      return aggregates.map(toEnv)
+    }
+    const out: AppWsOutboundReceiptUpdate[] = []
+    let seq = after_seq
+    let message_id: string | undefined
+    for (;;) {
+      const page = await log.aggregatesAfterPage(channel_topic_id, seq, undefined, message_id)
+      for (const agg of page.aggregates) out.push(toEnv(agg))
+      const next = page.next_cursor
+      if (next === null) break
+      if (!replayCursorAdvanced(seq, message_id, next)) {
+        console.warn(
+          `[app-ws] topic=${channel_topic_id} receipt replay cursor did not advance (seq=${next.seq}) — stopping drain`,
+        )
+        break
+      }
+      seq = next.seq
+      message_id = next.message_id
+    }
+    return out
   }
 
   /**
@@ -560,15 +616,20 @@ export class AppWsAdapter implements ChannelAdapter {
    * reconnecting device after the message replay. Returns one `reaction_update`
    * per message (with seq > after_seq) that has any reaction, ascending by seq.
    * `[]` when the reaction log isn't wired.
+   *
+   * DRAINS the store's continuation cursor (see {@link replayReceiptsAfter}) so
+   * a long-offline device's full reaction backlog replays instead of the tail
+   * past the first page being silently dropped, while each page's SQL scan
+   * stays bounded.
    */
   async replayReactionsAfter(
     channel_topic_id: string,
     after_seq: number,
   ): Promise<AppWsOutboundReactionUpdate[]> {
-    if (this.reaction_log === undefined) return []
-    const aggregates = await this.reaction_log.aggregatesAfter(channel_topic_id, after_seq)
+    const log = this.reaction_log
+    if (log === undefined) return []
     const ts = this.now()
-    return aggregates.map((agg) => {
+    const toEnv = (agg: AppChatReactionAggregate): AppWsOutboundReactionUpdate => {
       const env: AppWsOutboundReactionUpdate = {
         v: 1,
         type: 'reaction_update',
@@ -579,7 +640,32 @@ export class AppWsAdapter implements ChannelAdapter {
       }
       if (agg.seq > 0) env.seq = agg.seq
       return env
-    })
+    }
+    // Capability-detect the OPTIONAL bounded-cursor page method (see
+    // {@link replayReceiptsAfter}): a legacy injected log without it replays in
+    // one shot; the concrete production store drains the FULL backlog.
+    if (log.aggregatesAfterPage === undefined) {
+      const aggregates = await log.aggregatesAfter(channel_topic_id, after_seq)
+      return aggregates.map(toEnv)
+    }
+    const out: AppWsOutboundReactionUpdate[] = []
+    let seq = after_seq
+    let message_id: string | undefined
+    for (;;) {
+      const page = await log.aggregatesAfterPage(channel_topic_id, seq, undefined, message_id)
+      for (const agg of page.aggregates) out.push(toEnv(agg))
+      const next = page.next_cursor
+      if (next === null) break
+      if (!replayCursorAdvanced(seq, message_id, next)) {
+        console.warn(
+          `[app-ws] topic=${channel_topic_id} reaction replay cursor did not advance (seq=${next.seq}) — stopping drain`,
+        )
+        break
+      }
+      seq = next.seq
+      message_id = next.message_id
+    }
+    return out
   }
 
   /**
