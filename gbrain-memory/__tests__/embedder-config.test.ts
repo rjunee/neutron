@@ -197,6 +197,20 @@ describe('buildOpenAiEmbedderConfig — shared 768-dim default (no-rebuild upgra
 })
 
 describe('probeOllamaHealth — best-effort reachability probe (fail-soft, no real network)', () => {
+  test('probes the native /api/tags endpoint derived from the /v1 base url', async () => {
+    let seenUrl: string | undefined
+    let sawSignal = false
+    const fetchImpl = (async (url: string | URL, init?: RequestInit) => {
+      seenUrl = String(url)
+      sawSignal = init?.signal instanceof AbortSignal
+      return new Response(JSON.stringify({ models: [] }), { status: 200 })
+    }) as unknown as typeof fetch
+    await probeOllamaHealth('http://localhost:11434/v1', { fetchImpl })
+    expect(seenUrl).toBe('http://localhost:11434/api/tags')
+    // The production boundary MUST supply a timeout AbortSignal.
+    expect(sawSignal).toBe(true)
+  })
+
   test('reachable + model pulled → { reachable: true, modelPresent: true }', async () => {
     const fetchImpl = (async () =>
       new Response(JSON.stringify({ models: [{ name: 'nomic-embed-text:latest' }] }), {
@@ -204,6 +218,20 @@ describe('probeOllamaHealth — best-effort reachability probe (fail-soft, no re
       })) as unknown as typeof fetch
     const health = await probeOllamaHealth('http://localhost:11434/v1', { fetchImpl })
     expect(health).toEqual({ reachable: true, modelPresent: true })
+  })
+
+  test('malformed successful JSON (not the promised shape) → modelPresent:false, never throws', async () => {
+    const fetchImpl = (async () =>
+      new Response('this is not json at all', { status: 200 })) as unknown as typeof fetch
+    const health = await probeOllamaHealth('http://localhost:11434/v1', { fetchImpl })
+    expect(health).toEqual({ reachable: false, modelPresent: false })
+  })
+
+  test('200 with no `models` array → reachable:true, modelPresent:false', async () => {
+    const fetchImpl = (async () =>
+      new Response(JSON.stringify({ unexpected: 'shape' }), { status: 200 })) as unknown as typeof fetch
+    const health = await probeOllamaHealth('http://localhost:11434/v1', { fetchImpl })
+    expect(health).toEqual({ reachable: true, modelPresent: false })
   })
 
   test('reachable but model NOT pulled → { reachable: true, modelPresent: false }', async () => {
@@ -229,13 +257,31 @@ describe('probeOllamaHealth — best-effort reachability probe (fail-soft, no re
     expect(health).toEqual({ reachable: false, modelPresent: false })
   })
 
-  test('a timeout / abort never throws out of the probe', async () => {
-    const fetchImpl = (async () => {
-      const err = new Error('The operation was aborted')
-      err.name = 'TimeoutError'
-      throw err
-    }) as unknown as typeof fetch
-    const health = await probeOllamaHealth('http://localhost:11434/v1', { fetchImpl, timeoutMs: 10 })
+  test('a hung server → the timeout signal aborts the fetch → fail-soft, never throws', async () => {
+    // The fake fetch never resolves on its own; it settles ONLY when the
+    // timeout AbortSignal fires — so this genuinely exercises the production
+    // timeout boundary (a probe that dropped the signal would hang forever
+    // and this test would time out, not pass).
+    const fetchImpl = ((_url: string | URL, init?: RequestInit) =>
+      new Promise((_resolve, reject) => {
+        const signal = init?.signal
+        if (signal instanceof AbortSignal) {
+          signal.addEventListener('abort', () =>
+            reject(Object.assign(new Error('aborted'), { name: 'AbortError' })),
+          )
+        }
+      })) as unknown as typeof fetch
+    const health = await probeOllamaHealth('http://localhost:11434/v1', { fetchImpl, timeoutMs: 20 })
     expect(health).toEqual({ reachable: false, modelPresent: false })
+  })
+
+  test('a base url without a /v1 suffix still targets /api/tags on the same host', async () => {
+    let seenUrl: string | undefined
+    const fetchImpl = (async (url: string | URL) => {
+      seenUrl = String(url)
+      return new Response(JSON.stringify({ models: [] }), { status: 200 })
+    }) as unknown as typeof fetch
+    await probeOllamaHealth('http://gpu-box:11434', { fetchImpl })
+    expect(seenUrl).toBe('http://gpu-box:11434/api/tags')
   })
 })

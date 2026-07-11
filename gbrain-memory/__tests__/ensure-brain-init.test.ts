@@ -25,7 +25,11 @@ import { mkdtempSync, mkdirSync, writeFileSync, existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { ensureBrainInitialized, brainConfigPath } from '../ensure-brain-init.ts'
+import {
+  ensureBrainInitialized,
+  brainConfigPath,
+  readPersistedEmbeddingDims,
+} from '../ensure-brain-init.ts'
 import { buildOpenAiEmbedderConfig, resolveEmbedderConfig } from '../embedder-config.ts'
 import type { OllamaHealthCheck } from '../embedder-config.ts'
 import type { CommandRunner, CommandResult } from '../gbrain-doctor.ts'
@@ -184,6 +188,38 @@ describe('ensureBrainInitialized', () => {
       logger: silentLogger,
     })
     expect(res.status).toBe('binary-missing')
+  })
+})
+
+// RA3 — persisted column-width reader (cross-version reconciliation input).
+describe('readPersistedEmbeddingDims', () => {
+  test('reads embedding_dimensions from an existing config.json', () => {
+    const home = tempHome()
+    mkdirSync(join(home, '.gbrain'), { recursive: true })
+    writeFileSync(
+      brainConfigPath(home),
+      JSON.stringify({ engine: 'pglite', embedding_dimensions: 3072 }),
+    )
+    expect(readPersistedEmbeddingDims(home)).toBe(3072)
+  })
+
+  test('no config.json (fresh brain) → null', () => {
+    const home = tempHome()
+    expect(readPersistedEmbeddingDims(home)).toBeNull()
+  })
+
+  test('config.json without embedding_dimensions → null', () => {
+    const home = tempHome()
+    mkdirSync(join(home, '.gbrain'), { recursive: true })
+    writeFileSync(brainConfigPath(home), JSON.stringify({ engine: 'pglite' }))
+    expect(readPersistedEmbeddingDims(home)).toBeNull()
+  })
+
+  test('malformed config.json → null (never throws)', () => {
+    const home = tempHome()
+    mkdirSync(join(home, '.gbrain'), { recursive: true })
+    writeFileSync(brainConfigPath(home), 'not json{')
+    expect(readPersistedEmbeddingDims(home)).toBeNull()
   })
 })
 

@@ -22,6 +22,7 @@ export {
   ensureBrainInitialized,
   isBrainInitialized,
   brainConfigPath,
+  readPersistedEmbeddingDims,
   resolveInitEmbeddingTarget,
   type EnsureBrainInitInput,
   type EnsureBrainInitResult,

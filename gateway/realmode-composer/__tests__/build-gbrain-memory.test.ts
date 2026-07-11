@@ -14,8 +14,11 @@ import { join } from 'node:path'
 import {
   buildGBrainMemory,
   resolveGbrainClientOptions,
+  resolveEffectiveEmbedder,
+  reconcileEmbedderToBrain,
   type GBrainMemoryWiring,
 } from '../build-gbrain-memory.ts'
+import { buildOpenAiEmbedderConfig } from '@neutronai/gbrain-memory/index.ts'
 
 // COMPILE-TIME negative probe (RA5 / invariant I2). The composer wiring is the
 // exempt-module bypass Codex flagged: if the raw transport were on this public
@@ -143,6 +146,104 @@ describe('resolveGbrainClientOptions', () => {
     })
   })
 
+  // --- Existing-brain width reconciliation (cross-version upgrade safety) ---
+  // At gbrain runtime the GBRAIN_EMBEDDING_DIMENSIONS env OVERRIDES config.json,
+  // so a fresh RA3 default (768) sent to a legacy 3072-dim brain's column would
+  // mismatch → embed writes fail. `existingBrainDims` reconciles the effective
+  // embedder to the persisted column so that never happens.
+  describe('existing-brain dimension reconciliation', () => {
+    test('legacy 3072 brain, default (no key) → local Ollama fallback DROPPED (keyword+graph)', () => {
+      // Ollama nomic-embed-text is fixed at 768 and cannot match a 3072 column.
+      const opts = resolveGbrainClientOptions({
+        owner_home: '/t',
+        env: {},
+        existingBrainDims: 3072,
+      })
+      expect(opts.env).toEqual({ GBRAIN_HOME: '/t/gbrain' })
+    })
+
+    test('legacy 3072 brain + eager OpenAI key → cloud embedder at the brain width (in-place upgrade)', () => {
+      const opts = resolveGbrainClientOptions({
+        owner_home: '/t',
+        env: {},
+        openaiApiKey: 'sk-real',
+        existingBrainDims: 3072,
+      })
+      expect(opts.env).toEqual({
+        GBRAIN_HOME: '/t/gbrain',
+        GBRAIN_EMBEDDING_MODEL: 'openai:text-embedding-3-large',
+        GBRAIN_EMBEDDING_DIMENSIONS: '3072',
+        OPENAI_API_KEY: 'sk-real',
+      })
+    })
+
+    test('existing 768 brain, default → local fallback matches, unchanged', () => {
+      const opts = resolveGbrainClientOptions({
+        owner_home: '/t',
+        env: {},
+        existingBrainDims: 768,
+      })
+      expect(opts.env).toMatchObject({
+        GBRAIN_EMBEDDING_MODEL: 'ollama:nomic-embed-text',
+        GBRAIN_EMBEDDING_DIMENSIONS: '768',
+      })
+    })
+
+    test('legacy 3072 brain + LAZY key → resolveDynamicEnv upgrades in place at 3072, drops to keyword+graph without a key', async () => {
+      let stored: string | undefined
+      const opts = resolveGbrainClientOptions({
+        owner_home: '/t',
+        env: {},
+        resolveOpenAiKey: async () => stored,
+        existingBrainDims: 3072,
+      })
+      // No key yet: the 768 local fallback can't match → keyword+graph (no
+      // embedding env leaks). Static env is GBRAIN_HOME only, so the empty
+      // dynamic merge leaves no stale 768 keys behind.
+      expect(opts.env).toEqual({ GBRAIN_HOME: '/t/gbrain' })
+      await expect(opts.resolveDynamicEnv!()).resolves.toEqual({})
+      // Key pasted → cloud embedder AT THE BRAIN WIDTH (3072), upgrade in place.
+      stored = 'sk-late'
+      await expect(opts.resolveDynamicEnv!()).resolves.toEqual({
+        GBRAIN_EMBEDDING_MODEL: 'openai:text-embedding-3-large',
+        GBRAIN_EMBEDDING_DIMENSIONS: '3072',
+        OPENAI_API_KEY: 'sk-late',
+      })
+    })
+  })
+
+  // --- reconcileEmbedderToBrain (pure unit) ---------------------------------
+  describe('reconcileEmbedderToBrain', () => {
+    test('null embedder (explicit off) → null regardless of brain width', () => {
+      expect(reconcileEmbedderToBrain(null, 3072)).toBeNull()
+      expect(reconcileEmbedderToBrain(null, null)).toBeNull()
+    })
+
+    test('fresh brain (dims null) → embedder returned unchanged', () => {
+      const e = resolveEffectiveEmbedder({ env: {} }) // default: ollama 768
+      expect(reconcileEmbedderToBrain(e, null)).toBe(e)
+    })
+
+    test('matching width → embedder returned unchanged', () => {
+      const e = resolveEffectiveEmbedder({ env: {} })
+      expect(reconcileEmbedderToBrain(e, 768)).toBe(e)
+    })
+
+    test('mismatch + openai → rebuilt at the brain width (Matryoshka truncation)', () => {
+      const e = buildOpenAiEmbedderConfig('sk-x') // defaults to 768
+      const r = reconcileEmbedderToBrain(e, 3072)!
+      expect(r.provider).toBe('openai')
+      expect(r.dimensions).toBe(3072)
+      expect(r.childEnv['GBRAIN_EMBEDDING_DIMENSIONS']).toBe('3072')
+      expect(r.childEnv['OPENAI_API_KEY']).toBe('sk-x')
+    })
+
+    test('mismatch + ollama (fixed width) → dropped to null (keyword+graph)', () => {
+      const e = resolveEffectiveEmbedder({ env: {} }) // ollama 768
+      expect(reconcileEmbedderToBrain(e, 3072)).toBeNull()
+    })
+  })
+
   // --- LAZY onboarding-key activation (key captured AFTER boot) -------------
   // The composer can't see the onboarding/admin OpenAI key at boot (it's
   // captured later, over the already-running server), so it threads a LAZY
@@ -253,6 +354,35 @@ describe('buildGBrainMemory', () => {
     expect(Object.keys(wiring).sort()).toEqual(['close', 'memoryStore', 'syncHook'])
     // close() never spawned a child (lazy connect), so it resolves cleanly.
     await expect(wiring.close()).resolves.toBeUndefined()
+  })
+
+  test('legacy 3072-dim brain on disk + default → emits a LOUD keyword+graph-degradation warning', () => {
+    const home = mkdtempSync(join(tmpdir(), 'bgm-legacy-'))
+    try {
+      // Simulate a brain created under the pre-RA3 default (openai:3072).
+      const gbrainHome = join(home, 'data', 'gbrain')
+      mkdirSync(join(gbrainHome, '.gbrain'), { recursive: true })
+      writeFileSync(
+        join(gbrainHome, '.gbrain', 'config.json'),
+        JSON.stringify({ engine: 'pglite', embedding_dimensions: 3072 }),
+      )
+      const warnings: string[] = []
+      const orig = console.warn
+      console.warn = (...args: unknown[]) => warnings.push(args.map(String).join(' '))
+      try {
+        buildGBrainMemory({ owner_home: join(home, 'data'), project_slug: 'acme', env: {} })
+      } finally {
+        console.warn = orig
+      }
+      // The degraded state is surfaced, not a silent no-op.
+      expect(
+        warnings.some(
+          (w) => w.includes('3072-dim') && w.includes('keyword+graph') && w.includes('OpenAI key'),
+        ),
+      ).toBe(true)
+    } finally {
+      rmSync(home, { recursive: true, force: true })
+    }
   })
 
   // --- gbrain reachability (dogfood 2026-06-28) ------------------------------

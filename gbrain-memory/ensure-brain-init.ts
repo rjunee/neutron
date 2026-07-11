@@ -45,7 +45,7 @@
  * makes the degraded state OBSERVABLE instead of a silent mystery.
  */
 
-import { existsSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 
 import type { EmbedderConfig } from './embedder-config.ts'
@@ -109,6 +109,34 @@ export function brainConfigPath(gbrainHome: string): string {
 /** True once `gbrain init` has run against this `GBRAIN_HOME`. */
 export function isBrainInitialized(gbrainHome: string): boolean {
   return existsSync(brainConfigPath(gbrainHome))
+}
+
+/**
+ * The embedding dimensionality an EXISTING brain's `content_chunks` vector
+ * column was created at, read from `<GBRAIN_HOME>/.gbrain/config.json`
+ * (`embedding_dimensions`) — or `null` for a brain that isn't initialized, has
+ * no persisted embedding config, or an unreadable/legacy config.
+ *
+ * This is the authoritative width for a brain that ALREADY exists: at gbrain
+ * runtime the `GBRAIN_EMBEDDING_DIMENSIONS` env OVERRIDES config.json
+ * (`gbrain/src/core/config.ts:loadConfig`), so sending a width that mismatches
+ * the persisted `vector(N)` column makes `gbrain serve` embed writes fail with
+ * a dimension mismatch. RA3 uses this to RECONCILE the effective embedder to a
+ * pre-existing column (`build-gbrain-memory.ts:reconcileEmbedderToBrain`) —
+ * e.g. a legacy 3072-dim brain created under the pre-RA3 default keeps its
+ * width (an OpenAI key upgrades in place at 3072; the 768-dim local Ollama
+ * fallback, which cannot match, is dropped to keyword+graph rather than
+ * corrupting writes).
+ */
+export function readPersistedEmbeddingDims(gbrainHome: string): number | null {
+  try {
+    const raw = readFileSync(brainConfigPath(gbrainHome), 'utf-8')
+    const parsed = JSON.parse(raw) as { embedding_dimensions?: unknown }
+    const dims = parsed.embedding_dimensions
+    return typeof dims === 'number' && Number.isInteger(dims) && dims > 0 ? dims : null
+  } catch {
+    return null
+  }
 }
 
 /**
