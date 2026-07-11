@@ -295,19 +295,29 @@ export function resolveGbrainClientOptions(input: {
       ? env['GBRAIN_SOURCE']!
       : 'default'
 
-  // The live boot path threads a lazy key resolver: in that mode the embedder
-  // seam (GBRAIN_EMBEDDING_* + provider auth) is resolved ENTIRELY per connect
-  // in `resolveDynamicEnv` — key AND width read fresh at spawn — so the static
-  // child env carries NO embedding keys (GBRAIN_HOME only). This is what makes
-  // per-connect resolution authoritative: there is no composition-time embedder
-  // snapshot that a stale width could bake in and that an empty dynamic result
-  // couldn't later clear.
-  const perConnect = input.resolveOpenAiKey !== undefined
+  // The live boot path threads a PER-CONNECT resolver for the key AND/OR the
+  // brain width. In that mode the embedder seam (GBRAIN_EMBEDDING_* + provider
+  // auth) is resolved ENTIRELY per connect in `resolveDynamicEnv` — key AND
+  // width read fresh at spawn — so the static child env carries NO embedding
+  // keys (GBRAIN_HOME only). This is what makes per-connect resolution
+  // authoritative: there is no composition-time embedder snapshot that a stale
+  // width could bake in and that an empty dynamic result couldn't later clear.
+  //
+  // CRUCIALLY, the per-connect path is enabled by EITHER a lazy key resolver OR
+  // a per-connect width reader — NOT the key alone. `buildGBrainMemory` ALWAYS
+  // threads `resolveBrainWidth` but only CONDITIONALLY a key resolver, so the
+  // common default (local Ollama, no OpenAI key) MUST still take this path: else
+  // `resolveDynamicEnv` wouldn't attach, the static env would bake a stale
+  // composition-time 768, and the init guard (which always reconciles against
+  // the live width) would drop to keyword+graph — init and serve disagreeing on
+  // the same spawn (the exact TOCTOU this fix prevents).
+  const perConnect = input.resolveOpenAiKey !== undefined || input.resolveBrainWidth !== undefined
 
-  // EAGER path only (tests / backward-compat, no lazy resolver): bake the
-  // reconciled embedder into the static child env at composition, using the
-  // composition-time `existingBrainDims`. RA3 default is the local Ollama
-  // fallback; `null` (off, or a width-mismatched drop) → keyword + graph.
+  // EAGER path only (tests / backward-compat, NEITHER a lazy key nor a
+  // per-connect width reader): bake the reconciled embedder into the static
+  // child env at composition, using the composition-time `existingBrainDims`.
+  // RA3 default is the local Ollama fallback; `null` (off, or a width-mismatched
+  // drop) → keyword + graph.
   if (!perConnect) {
     const embedder = reconcileEmbedderToBrain(
       resolveEffectiveEmbedder({ env, openaiApiKey: input.openaiApiKey }),
@@ -321,20 +331,23 @@ export function resolveGbrainClientOptions(input: {
     opts.brainId = env['GBRAIN_BRAIN_ID']
   }
 
-  // Lazy embedder seam: resolve the onboarding key AND the brain width at each
-  // `gbrain serve` SPAWN and produce the reconciled embedding env. Resolving
-  // here — not at composition — is what lets a key pasted (or a legacy brain
-  // created) after boot take effect at the next SPAWN. NOTE: the stdio client
-  // holds ONE persistent `gbrain serve` child for the process, so this runs at
-  // connect, not per memory op — activation is a per-spawn boundary (process
-  // restart, or a reconnect after `close()` re-arms the init guard), NOT
-  // mid-session. Absent key → the RA3 default (local Ollama fallback),
-  // reconciled to the freshly-read brain width.
-  if (input.resolveOpenAiKey !== undefined) {
+  // Per-connect embedder seam: resolve the onboarding key (if any) AND the brain
+  // width at each `gbrain serve` SPAWN and produce the reconciled embedding env.
+  // Resolving here — not at composition — is what lets a key pasted (or a legacy
+  // brain created) after boot take effect at the next SPAWN, and is what keeps
+  // this in lockstep with the init guard's own per-connect reconciliation. NOTE:
+  // the stdio client holds ONE persistent `gbrain serve` child for the process,
+  // so this runs at connect, not per memory op — activation is a per-spawn
+  // boundary (process restart, or a reconnect after `close()` re-arms the init
+  // guard), NOT mid-session. Absent key → the RA3 default (local Ollama
+  // fallback), reconciled to the freshly-read brain width.
+  if (perConnect) {
     const resolveOpenAiKey = input.resolveOpenAiKey
     const resolveBrainWidth = input.resolveBrainWidth
     opts.resolveDynamicEnv = async () => {
-      const key = await resolveOpenAiKey()
+      // No key resolver → fall back to the eager static key (usually undefined →
+      // the RA3 default local Ollama embedder).
+      const key = resolveOpenAiKey !== undefined ? await resolveOpenAiKey() : input.openaiApiKey
       const width: BrainEmbeddingWidth = resolveBrainWidth ? resolveBrainWidth() : (input.existingBrainDims ?? null)
       const lazyEmbedder = reconcileEmbedderToBrain(
         resolveEffectiveEmbedder({ env, openaiApiKey: key }),

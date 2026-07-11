@@ -228,6 +228,54 @@ describe('resolveGbrainClientOptions', () => {
       })
     })
 
+    test('TOCTOU NO-KEY (default local Ollama): `resolveBrainWidth` ALONE enables per-connect resolution → 3072 brain drops to keyword+graph, NEVER 768', async () => {
+      // The COMMON default deployment: local Ollama, NO OpenAI key. buildGBrainMemory
+      // always threads `resolveBrainWidth` but only conditionally a key resolver,
+      // so per-connect resolution MUST engage on the width reader alone — else the
+      // static env bakes a stale 768 and the init guard (always live-reconciled)
+      // disagrees. Repro Codex flagged: resolveBrainWidth present, resolveOpenAiKey absent.
+      const opts = resolveGbrainClientOptions({
+        owner_home: '/t',
+        env: {}, // default embedder = local Ollama, no key
+        resolveBrainWidth: () => 3072, // existing legacy brain
+      })
+      // Per-connect (width reader present) → static env is GBRAIN_HOME ONLY (no
+      // stale 768) AND a resolveDynamicEnv is attached even without a key resolver.
+      expect(opts.env).toEqual({ GBRAIN_HOME: '/t/gbrain' })
+      expect(typeof opts.resolveDynamicEnv).toBe('function')
+      // Serve side: local Ollama (768) can't match a 3072 column → dropped →
+      // keyword+graph. NEVER injects 768 to the 3072 column.
+      await expect(opts.resolveDynamicEnv!()).resolves.toEqual({})
+    })
+
+    test('TOCTOU NO-KEY: init AND serve reconcile to the SAME live width (3072 brain, default Ollama) — both drop to keyword+graph, no split', async () => {
+      // Observable both-selection proof for the no-key branch, mirroring
+      // buildGBrainMemory's wiring: ONE per-connect resolver over a live width,
+      // threaded to resolveGbrainClientOptions, NO key resolver.
+      const liveWidth: number | 'unknown' | null = 3072
+      const conn = makePerConnectResolver({ resolveBrainWidth: () => liveWidth })
+      const opts = resolveGbrainClientOptions({
+        owner_home: '/t',
+        env: {},
+        resolveBrainWidth: conn.getBrainWidth, // per-connect, NO resolveOpenAiKey
+      })
+      expect(opts.env).toEqual({ GBRAIN_HOME: '/t/gbrain' })
+
+      // Connect start (ensureInitialized does resetForConnect first).
+      conn.resetForConnect()
+      // INIT side: the embedder ensureBrainInitialized reconciles against.
+      const initEmbedder = reconcileEmbedderToBrain(
+        resolveEffectiveEmbedder({ env: {} }),
+        conn.getBrainWidth(),
+      )
+      // SERVE side: resolveDynamicEnv, sharing the SAME conn.getBrainWidth.
+      const serveEnv = await opts.resolveDynamicEnv!()
+
+      // AGREE — both drop the 768 local fallback (can't match 3072) → keyword+graph.
+      expect(initEmbedder).toBeNull() // init NEVER injects 768
+      expect(serveEnv).toEqual({}) // serve NEVER injects 768
+    })
+
     test('legacy 3072 brain + LAZY key → resolveDynamicEnv upgrades in place at 3072, drops to keyword+graph without a key', async () => {
       let stored: string | undefined
       const opts = resolveGbrainClientOptions({
