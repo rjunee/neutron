@@ -88,6 +88,32 @@ describe('renderButtonPromptForWeb', () => {
     expect(out.upload_affordance).toEqual({ source: 'chatgpt' })
   })
 
+  // P1a — the optional `topic_id` arg stamps the owning topic so the
+  // per-topic client drop-guard routes the prompt to ITS topic. Pin both
+  // sides of the boundary: omitted → absent; provided → stamped verbatim.
+  test('omits topic_id when the arg is not provided', () => {
+    const prompt: ButtonPrompt = {
+      prompt_id: '00000000-0000-4000-8000-000000000006',
+      body: 'Body',
+      options: [],
+      allow_freeform: true,
+    }
+    const out = renderButtonPromptForWeb(prompt)
+    if (out.type !== 'agent_message') throw new Error('expected agent_message')
+    expect(out.topic_id).toBeUndefined()
+  })
+  test('stamps topic_id verbatim when provided', () => {
+    const prompt: ButtonPrompt = {
+      prompt_id: '00000000-0000-4000-8000-000000000007',
+      body: 'Body',
+      options: [],
+      allow_freeform: true,
+    }
+    const out = renderButtonPromptForWeb(prompt, 'web:u-1')
+    if (out.type !== 'agent_message') throw new Error('expected agent_message')
+    expect(out.topic_id).toBe('web:u-1')
+  })
+
   // Unrecognised / malformed affordance sources are still dropped.
   test('drops an unrecognised upload_affordance source', () => {
     const prompt: ButtonPrompt = {
