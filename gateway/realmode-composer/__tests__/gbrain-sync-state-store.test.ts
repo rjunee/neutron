@@ -167,4 +167,50 @@ describe('createGbrainSyncStateStore', () => {
     const row2 = readRow('acme')!
     expect(row2.last_success_at).toBe('2026-07-10T01:00:00.000Z')
   })
+
+  test('MONOTONIC-KEEP: an OLDER non-null publish must not regress a NEWER durable timestamp', () => {
+    // Inverse boundary of the null case: last_success_at only ever moves
+    // forward. Even if some code path published an older non-null timestamp
+    // (a stale in-RAM value, clock skew, a re-derived guess), it must NOT
+    // overwrite a newer durable one — the sink keeps the LATER of the two.
+    const store = createGbrainSyncStateStore({ db, scope: 'acme' })
+    store.publish({
+      status: 'ok',
+      latchReason: null,
+      latchedAt: null,
+      lastSuccessAt: '2026-07-10T12:00:00.000Z', // newer, durable
+      deferredCount: 0,
+    })
+    store.publish({
+      status: 'ok',
+      latchReason: null,
+      latchedAt: null,
+      lastSuccessAt: '2026-07-10T06:00:00.000Z', // OLDER — must be ignored
+      deferredCount: 1,
+    })
+    const row = readRow('acme')!
+    // The newer timestamp survives the older publish.
+    expect(row.last_success_at).toBe('2026-07-10T12:00:00.000Z')
+    // Other fields still reflect the latest snapshot verbatim.
+    expect(row.deferred_count).toBe(1)
+  })
+
+  test('MONOTONIC-KEEP: a first-ever publish with null lastSuccessAt persists null (valid pre-success state)', () => {
+    // Before any success has ever happened (e.g. gbrain missing from the very
+    // first entity write on a fresh host), the row must record null — the
+    // honest "never succeeded" state — not spuriously invent a timestamp. Both
+    // sides of the merge are null → the result is null.
+    const store = createGbrainSyncStateStore({ db, scope: 'acme' })
+    store.publish({
+      status: 'unavailable',
+      latchReason: 'gbrain binary missing',
+      latchedAt: '2026-07-10T00:00:00.000Z',
+      lastSuccessAt: null,
+      deferredCount: 0,
+    })
+    const row = readRow('acme')!
+    expect(row.last_success_at).toBeNull()
+    expect(row.status).toBe('unavailable')
+    expect(row.latch_reason).toBe('gbrain binary missing')
+  })
 })

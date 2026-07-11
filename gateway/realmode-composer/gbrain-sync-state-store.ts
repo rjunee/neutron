@@ -100,18 +100,30 @@ export function createGbrainSyncStateStore(input: {
              status          = excluded.status,
              latch_reason    = excluded.latch_reason,
              latched_at      = excluded.latched_at,
-             -- Monotonic-keep: the sink's snapshot source (GBrainSyncHook's
-             -- in-RAM lastSuccessAt) starts NULL on every process restart, so
-             -- a publish before the first post-restart success (e.g. the
-             -- unavailable-latch trip, or the end-of-write publish after a
-             -- failed put_page) would otherwise carry snapshot.lastSuccessAt
-             -- = null and clobber the durable last-known-good timestamp. That
-             -- is exactly the failure scenario this row exists to diagnose
-             -- ("was my memory being written, and until when?"), so a null
-             -- incoming value must never erase a previously recorded one —
-             -- COALESCE keeps the durable value until a REAL new success
-             -- (a non-null excluded.last_success_at) supersedes it.
-             last_success_at = COALESCE(excluded.last_success_at, gbrain_sync_state.last_success_at),
+             -- Monotonic-keep: last_success_at only ever moves FORWARD, never
+             -- back. Two independent hazards make this non-trivial:
+             --   (1) NULL clobber — the sink's snapshot source (GBrainSyncHook's
+             --       in-RAM lastSuccessAt) starts NULL on every process restart,
+             --       so a publish before the first post-restart success (the
+             --       unavailable-latch trip, or the end-of-write publish after a
+             --       failed put_page) carries snapshot.lastSuccessAt = null. That
+             --       is exactly the failure scenario this row exists to diagnose
+             --       ("was my memory being written, and until when?"), so a null
+             --       incoming value must never erase a previously recorded one.
+             --   (2) Backward step — an older non-null value must never replace a
+             --       newer durable one (in practice successes are chronological,
+             --       but we don't rely on that: we keep the LATER of the two).
+             -- Implemented as an explicit NULL-guarded max: scalar max() in
+             -- SQLite returns NULL if ANY argument is NULL, so we can't hand it a
+             -- possibly-null pair. The values are ISO-8601 UTC strings, whose
+             -- lexicographic order IS chronological order, so max() picks the
+             -- later timestamp. Result: NULL only when BOTH are NULL (never
+             -- succeeded), else the later of whichever are present.
+             last_success_at = CASE
+               WHEN excluded.last_success_at IS NULL THEN gbrain_sync_state.last_success_at
+               WHEN gbrain_sync_state.last_success_at IS NULL THEN excluded.last_success_at
+               ELSE max(excluded.last_success_at, gbrain_sync_state.last_success_at)
+             END,
              deferred_count  = excluded.deferred_count,
              updated_at      = excluded.updated_at`,
           [
