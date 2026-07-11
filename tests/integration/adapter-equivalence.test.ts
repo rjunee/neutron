@@ -30,6 +30,8 @@ import {
   shutdownAllPersistentRepls,
 } from '@neutronai/runtime/adapters/claude-code/persistent/persistent-repl-substrate.ts'
 import { createGptResponsesApiSubstrate } from '@neutronai/runtime/adapters/gpt-5-5-api/index.ts'
+import { getOpenAiModelPreference, OPENAI_BEST_MODEL } from '@neutronai/runtime/models-openai.ts'
+import { selectSubstrateFactory } from '@neutronai/runtime/adapters/select-substrate.ts'
 
 afterEach(async () => {
   await shutdownAllPersistentRepls()
@@ -243,7 +245,35 @@ describe('adapter equivalence (mocked transport)', () => {
     expect(inputContents).toEqual(['first', 'reply', 'and again'])
   })
 
-  test.skipIf(!process.env['OPENAI_API_KEY'])('GPT-5.5 live: smoke test against real OpenAI Responses API', async () => {
+  test('selector-built GPT (gpt-5.6 registry preference) emits the same completion SHAPE as CC', async () => {
+    // Drive the GPT adapter through the SAME factory the composer selects for
+    // provider='openai', with the registry's gpt-5.6 model preference — proving
+    // the swappable path produces a contract-equivalent Event stream.
+    const selected = selectSubstrateFactory('openai')
+    expect(selected.provider).toBe('openai')
+    const gpt = selected.create({
+      env: { OPENAI_API_KEY: 'sk' },
+      substrate_instance_id: 'gpt-5-6',
+      mcpResolver: async () => ({}),
+      fetchImpl: mockFetch(gptBody()),
+    })
+    const pref = getOpenAiModelPreference()
+    expect(pref[0]).toBe(OPENAI_BEST_MODEL)
+    const events = await collect(gpt.start({ prompt: 'hi', tools: [], model_preference: pref }).events)
+    const tokens = events
+      .filter((e) => e.kind === 'token')
+      .map((e) => (e as { text: string }).text)
+      .join('')
+    expect(tokens).toBe('hello world')
+    const comp = events.find((e) => e.kind === 'completion')
+    expect(comp?.kind).toBe('completion')
+    if (comp?.kind === 'completion') {
+      expect(typeof comp.usage.input_tokens).toBe('number')
+      expect(typeof comp.substrate_instance_id).toBe('string')
+    }
+  })
+
+  test.skipIf(!process.env['OPENAI_API_KEY'])('GPT-5.6 live: smoke test against real OpenAI Responses API', async () => {
     const gpt = createGptResponsesApiSubstrate({
       env: process.env,
       substrate_instance_id: 'gpt-live',
@@ -252,7 +282,7 @@ describe('adapter equivalence (mocked transport)', () => {
     const handle = gpt.start({
       prompt: 'reply with the word ok',
       tools: [],
-      model_preference: ['gpt-5.5'],
+      model_preference: getOpenAiModelPreference(),
       max_tokens: 16,
     })
     const events = await collect(handle.events)

@@ -504,6 +504,12 @@ export function buildLlmCallSubstrate(
   if (input.pool !== undefined && input.pool.credentials.length === 0) {
     return null
   }
+  // Cross-turn continuity ledger for the STATELESS OpenAI-family providers (audit
+  // CRITICAL). Lives on THIS substrate's closure so it persists across `start()`
+  // calls. The Claude path never touches it. Keyed per conversation so distinct
+  // (user, project) turns keep separate upstream sessions — mirroring the CC
+  // warm-pool key dimensions.
+  const openaiSessions: OpenAiSessionLedger = new Map()
   return {
     start(spec: AgentSpec): SessionHandle {
       // SWAPPABLE PROVIDER — resolve the backend for THIS turn. Per-turn resolver
@@ -512,11 +518,19 @@ export function buildLlmCallSubstrate(
       // anthropic block below stays BYTE-IDENTICAL (same factory, same option bag).
       const provider = normalizeProvider(input.providerResolver?.() ?? input.provider)
       if (provider !== 'anthropic') {
+        // Conversation key mirrors the CC warm-pool key dimensions (user +
+        // live active project) so continuity is scoped identically across
+        // providers.
+        const projectId =
+          input.projectIdResolver?.() ?? spec.metering_context?.project_id ?? 'default'
+        const sessionKey = `${input.user_id ?? '_platform'}:${projectId}`
         return startOpenAiFamilySession({
           provider,
           spec,
           substrate_instance_id: input.substrate_instance_id,
           config: input.openai,
+          sessionLedger: openaiSessions,
+          sessionKey,
         })
       }
       let innerHandle: SessionHandle | null = null
@@ -712,6 +726,28 @@ export function buildLlmCallSubstrate(
 }
 
 /**
+ * A tiny in-memory cross-turn continuity ledger for the STATELESS OpenAI-family
+ * adapters. Maps a per-conversation key → the last `session` hint carried on a
+ * `completion` event (OpenAI `previous_response_id` / codex `--resume` thread id).
+ *
+ * WHY THIS EXISTS (audit CRITICAL): Claude Code keeps conversational continuity
+ * IMPLICITLY in its warm REPL transcript (pool-key continuity) and IGNORES
+ * `spec.session` — so no caller in the codebase threads `spec.session` today. A
+ * stateless provider given no session is AMNESIAC every turn (silent — no error).
+ * This ledger persists the completion's `session` and threads it back as
+ * `spec.session` on the next dispatch for the SAME conversation key, so
+ * multi-turn GPT/codex turns retain context. The Claude path never consults this
+ * (it stays behavior-identical by construction — the CC adapter ignores session).
+ *
+ * SCOPE / KNOWN GAP: this ledger is per-gateway-process + in-memory, so it does
+ * NOT survive a restart, and it does NOT yet rebuild history via `spec.messages`
+ * when an upstream session EXPIRES (OpenAI response-id TTL / codex session prune).
+ * A durable ledger + `spec.messages` replay (rebuilt from the chat log) is the
+ * required follow-up before GPT is production-grade for long-lived conversations.
+ */
+export type OpenAiSessionLedger = Map<string, { id: string; last_active_at: number }>
+
+/**
  * Dispatch ONE turn through an OpenAI-family adapter (`'openai'` /
  * `'openai-codex-cli'`), selected via the platform-band `selectSubstrateFactory`.
  *
@@ -722,6 +758,11 @@ export function buildLlmCallSubstrate(
  * gpt/codex adapters both expose `tool_resolution='internal'` and a throwing
  * `respondToTool`, so the caller-facing handle shape matches the CC path exactly.
  *
+ * CONTINUITY: when a `sessionLedger` + `sessionKey` are supplied (conversational
+ * callers), the last completion's `session` is threaded back as `spec.session` so
+ * the stateless provider is NOT amnesiac across turns. Stateless one-shot callers
+ * (history import — each chunk independent) omit the ledger.
+ *
  * Degrades LOUDLY (terminal `error` event, `retryable:false`) when the OpenAI
  * config is missing — a project that selected `'openai'` but wasn't wired an
  * OpenAI pool / `mcpResolver` gets a clear failure, never a silent fallback.
@@ -731,8 +772,12 @@ export function startOpenAiFamilySession(args: {
   spec: AgentSpec
   substrate_instance_id: string
   config: OpenAiFamilyProviderConfig | undefined
+  /** Cross-turn continuity ledger — omit for stateless one-shot callers. */
+  sessionLedger?: OpenAiSessionLedger
+  /** Conversation key into `sessionLedger` (e.g. `${user}:${project}`). */
+  sessionKey?: string
 }): SessionHandle {
-  const { provider, spec, substrate_instance_id, config } = args
+  const { provider, spec, substrate_instance_id, config, sessionLedger, sessionKey } = args
   let innerHandle: SessionHandle | null = null
   let cancelled = false
   const events = (async function* (): AsyncGenerator<Event, void, void> {
@@ -794,10 +839,27 @@ export function startOpenAiFamilySession(args: {
     }
     // Remap CLAUDE model ids → OpenAI ids when the caller supplied an override
     // (a non-anthropic turn's spec still carries the anthropic model_preference).
-    const dispatchSpec: AgentSpec =
+    let dispatchSpec: AgentSpec =
       config.model_preference !== undefined && config.model_preference.length > 0
         ? { ...spec, model_preference: [...config.model_preference] }
         : spec
+
+    // CONTINUITY (audit CRITICAL) — thread the last completion's session hint
+    // back as `spec.session` so the STATELESS provider is not amnesiac. Only when
+    // the caller wired a ledger (conversational) AND didn't already set a session.
+    const ledgerKey =
+      sessionLedger !== undefined && sessionKey !== undefined && sessionKey.length > 0
+        ? sessionKey
+        : undefined
+    if (ledgerKey !== undefined && dispatchSpec.session === undefined) {
+      const prior = sessionLedger!.get(ledgerKey)
+      if (prior !== undefined) {
+        dispatchSpec =
+          dispatchSpec === spec
+            ? { ...spec, session: prior }
+            : { ...dispatchSpec, session: prior }
+      }
+    }
 
     const selected = selectSubstrateFactory(provider)
     let substrate: Substrate
@@ -842,6 +904,13 @@ export function startOpenAiFamilySession(args: {
         if (ev.kind === 'completion') {
           reported = true
           reportSuccess(pool, cred.id)
+          // Persist the session hint for the NEXT turn on this conversation key.
+          if (ledgerKey !== undefined && ev.session !== undefined) {
+            sessionLedger!.set(ledgerKey, {
+              id: ev.session.id,
+              last_active_at: ev.session.last_active_at,
+            })
+          }
         } else if (ev.kind === 'error') {
           reported = true
           // Generic HTTP / auth / retryable cooldown classification (the CC-only

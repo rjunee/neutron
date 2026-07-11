@@ -8,18 +8,18 @@ import {
 
 describe('gpt-5-5-api multi-model rotation', () => {
   test('currentModel returns the first preference initially', () => {
-    const s = newRotationState(['gpt-5-5-pro', 'gpt-5-5'])
+    const s = newRotationState(['gpt-5.6', 'gpt-5.5'])
     const d = currentModel(s)
     expect(d.decision).toBe('use')
-    if (d.decision === 'use') expect(d.model).toBe('gpt-5-5-pro')
+    if (d.decision === 'use') expect(d.model).toBe('gpt-5.6')
   })
 
   test('rotate advances to the next model and reports decision=rotate', () => {
-    const s = newRotationState(['gpt-5-5-pro', 'gpt-5-5'])
+    const s = newRotationState(['gpt-5.6', 'gpt-5.5'])
     const d = rotate(s)
     expect(d.decision).toBe('rotate')
     if (d.decision === 'rotate') {
-      expect(d.model).toBe('gpt-5-5')
+      expect(d.model).toBe('gpt-5.5')
       expect(d.attempt_idx).toBe(1)
     }
   })

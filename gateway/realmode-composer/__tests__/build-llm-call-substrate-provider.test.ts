@@ -65,6 +65,37 @@ function ccCapture() {
   return { substrateFactory, seen }
 }
 
+/** Recording SSE fetch that returns a fixed response id + captures the request
+ *  body per call, so we can assert `previous_response_id` continuity threading. */
+function recordingGptFetch(responseId: string): {
+  fetchImpl: typeof fetch
+  bodies: Array<Record<string, unknown>>
+} {
+  const bodies: Array<Record<string, unknown>> = []
+  const body =
+    [
+      { event: 'response.created', data: { type: 'response.created', response: { id: responseId } } },
+      { event: 'response.output_text.delta', data: { type: 'response.output_text.delta', delta: 'ok' } },
+      {
+        event: 'response.completed',
+        data: { type: 'response.completed', response: { id: responseId, usage: { input_tokens: 1, output_tokens: 1 } } },
+      },
+    ]
+      .map((f) => `event: ${f.event}\ndata: ${JSON.stringify(f.data)}\n`)
+      .join('\n') + '\n'
+  const fetchImpl = (async (_url: string | URL, init?: RequestInit) => {
+    bodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>)
+    const stream = new ReadableStream({
+      start(c) {
+        c.enqueue(new TextEncoder().encode(body))
+        c.close()
+      },
+    })
+    return new Response(stream, { status: 200 })
+  }) as unknown as typeof fetch
+  return { fetchImpl, bodies }
+}
+
 /** SSE body for the Responses API (matches adapter-equivalence). */
 function gptFetch(): typeof fetch {
   const body =
@@ -194,6 +225,51 @@ test("provider='openai' with empty OpenAI pool ⇒ terminal error", async () => 
   const e = events[0]!
   expect(e.kind).toBe('error')
   if (e.kind === 'error') expect(e.message).toMatch(/no OpenAI credentials/i)
+})
+
+test('CONTINUITY: turn 2 threads turn 1 completion session as previous_response_id (not amnesiac)', async () => {
+  const rec = recordingGptFetch('resp_abc')
+  const sub = buildLlmCallSubstrate({
+    pool: anthropicPool(),
+    substrate_instance_id: 'gpt-conv',
+    provider: 'openai',
+    user_id: 'owner',
+    openai: {
+      pool: openaiPool(),
+      mcpResolver: async () => ({}),
+      model_preference: ['gpt-5.6'],
+      fetchImpl: rec.fetchImpl,
+    },
+  })!
+  // Turn 1 — no prior session → request carries NO previous_response_id.
+  await drain(sub.start(spec()))
+  // Turn 2 — same substrate/conversation → request carries turn 1's response id.
+  await drain(sub.start(spec()))
+  expect(rec.bodies).toHaveLength(2)
+  expect(rec.bodies[0]!['previous_response_id']).toBeUndefined()
+  expect(rec.bodies[1]!['previous_response_id']).toBe('resp_abc')
+})
+
+test('CONTINUITY: distinct projects keep SEPARATE upstream sessions (no cross-project bleed)', async () => {
+  const rec = recordingGptFetch('resp_projA')
+  let project = 'projA'
+  const sub = buildLlmCallSubstrate({
+    pool: anthropicPool(),
+    substrate_instance_id: 'gpt-conv',
+    provider: 'openai',
+    user_id: 'owner',
+    projectIdResolver: () => project,
+    openai: {
+      pool: openaiPool(),
+      mcpResolver: async () => ({}),
+      model_preference: ['gpt-5.6'],
+      fetchImpl: rec.fetchImpl,
+    },
+  })!
+  await drain(sub.start(spec())) // projA turn 1 → stores resp_projA under owner:projA
+  project = 'projB'
+  await drain(sub.start(spec())) // projB turn 1 → fresh, NO previous_response_id
+  expect(rec.bodies[1]!['previous_response_id']).toBeUndefined()
 })
 
 test('per-turn providerResolver flips backend between dispatches (per-project granularity)', async () => {

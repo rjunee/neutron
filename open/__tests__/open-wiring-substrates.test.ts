@@ -24,6 +24,11 @@ import type { Event } from '@neutronai/runtime/events.ts'
 import type { ClaudeCodeSubstrateOptions } from '@neutronai/runtime/adapters/claude-code/index.ts'
 import type { OpenWiringContext } from '../wiring/context.ts'
 import { wireSubstrates } from '../wiring/substrates.ts'
+import {
+  resolveOpenModelProvider,
+  resolveOpenOpenAiPool,
+  buildOpenAiMcpResolver,
+} from '../composer.ts'
 
 function cannedHandle(instanceId: string): SessionHandle {
   const events = (async function* (): AsyncGenerator<Event, void, void> {
@@ -137,6 +142,74 @@ describe('wireSubstrates — instance ids + tool-bridge invariants', () => {
       expect(o.enableToolBridge).not.toBe(true)
       expect(o.ephemeral).not.toBe(true)
     }
+  })
+})
+
+describe('wireSubstrates — swappable provider (trident stays Claude Code)', () => {
+  function openaiCtxOverrides(): Partial<OpenWiringContext> {
+    return {
+      provider: 'openai',
+      openaiLlmPool: newCredentialPool({
+        strategy: 'fill_first',
+        credentials: [{ id: 'openai:k', kind: 'api_key', secret: 'sk-openai' }],
+      }),
+      mcpResolver: async () => ({}),
+    }
+  }
+
+  test('provider=openai: trident-fire + ephemeral substrates STILL dispatch through the Claude Code factory', async () => {
+    // The CC-typed `substrateFactory` is used ONLY by the anthropic path. If the
+    // trident substrates recorded into `captured`, they are on Claude Code —
+    // exactly the hard constraint (trident's Workflow inner loop is CC-only).
+    const { ctx, captured } = makeCtx(openaiCtxOverrides())
+    const w = wireSubstrates(ctx)
+    await drain(w.makeWarmFireSubstrate('/repo/alpha'))
+    await drain(w.makeEphemeralSubstrate('cc-trident')('/repo/one'))
+    expect(captured.some((o) => o.substrate_instance_id.startsWith('cc-trident-fire-'))).toBe(true)
+    expect(captured.some((o) => o.substrate_instance_id === 'cc-trident-owner')).toBe(true)
+  })
+
+  test('provider=openai: conversational substrates are built (non-null) and do NOT use the CC fake factory', async () => {
+    const { ctx, captured } = makeCtx(openaiCtxOverrides())
+    const w = wireSubstrates(ctx)
+    // Constructed for the openai provider (routing to the gpt adapter happens at
+    // dispatch — not exercised here to avoid a live HTTP call).
+    expect(w.llmCallSubstrate).not.toBeNull()
+    expect(w.liveAgentSubstrate).not.toBeNull()
+    // The conversational substrates were NOT built on the CC fake path — only the
+    // trident/ephemeral ones would be, and none were dispatched here.
+    expect(captured.some((o) => o.substrate_instance_id === 'cc-agent-owner')).toBe(false)
+    expect(captured.some((o) => o.substrate_instance_id === 'cc-llm-owner')).toBe(false)
+  })
+
+  test('provider=openai but missing openai pool ⇒ conversational config NOT applied (falls back to CC)', async () => {
+    const { ctx, captured } = makeCtx({ provider: 'openai', openaiLlmPool: null, mcpResolver: async () => ({}) })
+    const w = wireSubstrates(ctx)
+    // With no openai pool the conversational config is omitted → anthropic path,
+    // so draining the live-agent substrate records the CC fake opts.
+    await drain(w.liveAgentSubstrate!)
+    expect(captured.some((o) => o.substrate_instance_id === 'cc-agent-owner')).toBe(true)
+  })
+})
+
+describe('open composer — swappable provider boot helpers', () => {
+  test('resolveOpenModelProvider reads NEUTRON_MODEL_PROVIDER, defaults anthropic', () => {
+    expect(resolveOpenModelProvider({} as NodeJS.ProcessEnv)).toBe('anthropic')
+    expect(resolveOpenModelProvider({ NEUTRON_MODEL_PROVIDER: 'openai' } as unknown as NodeJS.ProcessEnv)).toBe('openai')
+    expect(resolveOpenModelProvider({ NEUTRON_MODEL_PROVIDER: 'nonsense' } as unknown as NodeJS.ProcessEnv)).toBe('anthropic')
+  })
+
+  test('resolveOpenOpenAiPool resolves an api_key pool from OPENAI_API_KEY, null otherwise', () => {
+    expect(resolveOpenOpenAiPool({} as NodeJS.ProcessEnv)).toBeNull()
+    const pool = resolveOpenOpenAiPool({ OPENAI_API_KEY: 'sk-o' } as unknown as NodeJS.ProcessEnv)
+    expect(pool).not.toBeNull()
+    expect(pool!.credentials[0]!.kind).toBe('api_key')
+    expect(pool!.credentials[0]!.secret).toBe('sk-o')
+  })
+
+  test('buildOpenAiMcpResolver throws loudly when the tool bridge is not yet wired', async () => {
+    const resolver = buildOpenAiMcpResolver()
+    await expect(resolver({ call_id: 'c', tool_name: 't', args: {} })).rejects.toThrow(/tool bridge not wired/i)
   })
 })
 

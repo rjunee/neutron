@@ -21,7 +21,11 @@
  *     `...(substrateFactory !== undefined ? { substrateFactory } : {})` spread.
  */
 
-import { buildLlmCallSubstrate } from '@neutronai/gateway/realmode-composer/build-llm-call-substrate.ts'
+import {
+  buildLlmCallSubstrate,
+  type BuildLlmCallSubstrateInput,
+} from '@neutronai/gateway/realmode-composer/build-llm-call-substrate.ts'
+import { getOpenAiModelPreference } from '@neutronai/runtime/models-openai.ts'
 import { OWNER_USER_ID } from '../owner-identity.ts'
 import type { Substrate } from '@neutronai/runtime/substrate.ts'
 import type { OpenWiringContext } from './context.ts'
@@ -51,6 +55,32 @@ export interface WiredSubstrates {
 export function wireSubstrates(ctx: OpenWiringContext): WiredSubstrates {
   const { llmPool, substrateFactory, internal_handle, owner_home, project_slug, prewarmSubstrate } =
     ctx
+
+  // SWAPPABLE PROVIDER — the CONVERSATIONAL provider option bag. Applied ONLY to
+  // the `cc-llm-*` (phase-spec) + `cc-agent-*` (live chat) substrates below.
+  //
+  // TRIDENT STAYS CLAUDE-CODE (hard constraint): the trident-fire
+  // (`makeWarmFireSubstrate`) + ephemeral (`makeEphemeralSubstrate`) substrates
+  // NEVER receive this — trident's fire-and-settle inner loop is a native CC
+  // Dynamic Workflow with no OpenAI analogue, so an autonomous build always runs
+  // on Claude Code regardless of the conversational provider. Degrade LOUDLY: if
+  // openai is selected but its pool / mcpResolver is missing, we leave the
+  // conversational config unset (→ Claude Code) rather than boot a broken path;
+  // the composer logs the fallback.
+  const conversationalProvider: Partial<BuildLlmCallSubstrateInput> =
+    ctx.provider === 'openai' &&
+    ctx.openaiLlmPool !== null &&
+    ctx.openaiLlmPool !== undefined &&
+    ctx.mcpResolver !== undefined
+      ? {
+          provider: 'openai',
+          openai: {
+            pool: ctx.openaiLlmPool,
+            mcpResolver: ctx.mcpResolver,
+            model_preference: getOpenAiModelPreference(),
+          },
+        }
+      : {}
 
   // WARM conversational substrate for the onboarding phase-spec LLM
   // rephrasing — the snappy-conversational core of the onboarding rework
@@ -84,6 +114,7 @@ export function wireSubstrates(ctx: OpenWiringContext): WiredSubstrates {
           user_id: OWNER_USER_ID,
           project_slug,
           skip_permissions: true,
+          ...conversationalProvider,
           ...(substrateFactory !== undefined ? { substrateFactory } : {}),
         })
       : null
@@ -137,6 +168,7 @@ export function wireSubstrates(ctx: OpenWiringContext): WiredSubstrates {
           // `tools-bridge.ts`). The untrusted import (`cc-import-*`) and
           // disposable Trident (`cc-trident-*`) substrates deliberately omit it.
           enableToolBridge: true,
+          ...conversationalProvider,
           ...(substrateFactory !== undefined ? { substrateFactory } : {}),
         })
       : null
