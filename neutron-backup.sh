@@ -175,17 +175,32 @@ GI
 # safe to run every `do_run` pass. Does NOT rewrite git history — a key
 # committed before this fix landed is still recoverable from old commits on
 # whatever remote it was pushed to; rotate it if that remote was untrusted.
+#
+# S3(a) — FAIL CLOSED. The `git rm --cached` is not trusted blindly: an index
+# lock / perms error / any git failure could leave the key STILL tracked, and
+# committing/pushing then would re-leak it. So the AUTHORITATIVE gate is a
+# post-removal `git ls-files` VERIFY — if the key is still in the index we
+# `die` BEFORE `do_run` ever reaches `git add`/commit/push. The commit/push
+# only proceeds once the key is verified absent from the index.
 ensure_gitignore_excludes_key() {
   _gi="$DATA_DIR/.gitignore"
   if [ -f "$_gi" ] && ! grep -qxF '.neutron-aes-key' "$_gi" 2>/dev/null; then
     printf '\n# S3(a) — NEVER back up the AES key that decrypts project.db'"'"'s secrets table.\n.neutron-aes-key\n' >> "$_gi"
     info "hardened $_gi — added .neutron-aes-key exclusion (pre-existing install)"
   fi
-  if [ -f "$DATA_DIR/.neutron-aes-key" ] && git ls-files --error-unmatch .neutron-aes-key >/dev/null 2>&1; then
-    git rm -q --cached .neutron-aes-key >/dev/null 2>&1 || true
-    warn ".neutron-aes-key was tracked in the backup repo — untracked it going forward."
-    warn "  It is STILL present in older commits; rotate the key if the backup remote is not fully trusted."
+  # Only act if the key is actually TRACKED in this backup repo's index.
+  git ls-files --error-unmatch .neutron-aes-key >/dev/null 2>&1 || return 0
+  # Attempt to untrack it (index only — never deletes the local keyfile). Do
+  # NOT claim success from the exit code here; the verify below is authoritative.
+  if ! git rm -q --cached .neutron-aes-key >/dev/null 2>&1; then
+    warn "git rm --cached .neutron-aes-key failed — verifying the index before any commit/push"
   fi
+  # AUTHORITATIVE gate: refuse to proceed while the key is still in the index.
+  if git ls-files --error-unmatch .neutron-aes-key >/dev/null 2>&1; then
+    die "refusing to back up: .neutron-aes-key is STILL tracked in the backup repo after attempting to untrack it (git index locked / permissions?). Committing or pushing now would leak the AES key. Aborting before add/commit/push — resolve the git state (e.g. remove .git/index.lock) and re-run."
+  fi
+  info "untracked .neutron-aes-key from the backup repo — excluded from all future commits (local keyfile left intact)."
+  warn "  It may STILL exist in OLDER commits; rotate the key if the backup remote is not fully trusted."
 }
 
 do_run() {

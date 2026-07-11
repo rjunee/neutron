@@ -493,27 +493,45 @@ secure_secret_file() {
   esac
 }
 
+# mktemp a 0600 temp file NEXT TO the target (`_dir`), so a later `mv` is a
+# same-filesystem atomic RENAME that preserves the temp's 0600 mode — never a
+# cross-FS copy that would recreate the destination at the umask-derived mode.
+# mktemp itself always creates 0600, and we set `umask 077` around every secret
+# write besides, so the temp is born locked. Prints the temp path.
+mk_secret_tmp() {
+  _dir=$1
+  mktemp "$_dir/.neutron-env.XXXXXX" 2>/dev/null \
+    || { _t="$_dir/.neutron-env.tmp.$$"; : > "$_t" && chmod 600 "$_t" 2>/dev/null; printf '%s\n' "$_t"; }
+}
+
 # Pin KEY=value in a dotenv file: replace any existing assignment (commented or
 # not, export or not), else append. Used to lock NEUTRON_HOME to the resolved
 # data dir so the server (which auto-loads .env) opens the SAME dir the installer
 # migrated — the install↔server agreement the shared-resolver parity protects.
 #
-# S3(b): `.env` holds secrets, so every write re-secures it to 0600 via
-# `secure_secret_file`, which FAILS CLOSED (aborts the install) if the file
-# cannot be made / verified 0600 — never leaves secrets group/world-readable.
+# S3(b) — secrets are born 0600 and stay that way. `umask 077` around every
+# write means a FRESHLY created `.env` (or temp) is 0600 from the first byte —
+# there is never a window where the secret sits on disk group/world-readable,
+# and even if the later chmod fails the file was already locked. The replace
+# path writes a 0600 same-dir temp and ATOMICALLY renames it into place, so a
+# failure leaves the OLD secured file (or nothing) — never a new exposed one.
+# `secure_secret_file` then re-asserts + VERIFIES 0600 and FAILS CLOSED.
 persist_env_var() {
   _ef=$1
   _k=$2
   _v=$3
+  _om=$(umask)
+  umask 077
   [ -f "$_ef" ] || : > "$_ef"
   if grep -qE "^[[:space:]]*#?[[:space:]]*(export[[:space:]]+)?${_k}=" "$_ef" 2>/dev/null; then
-    _tmp=$(mktemp 2>/dev/null || printf '%s\n' "$_ef.tmp.$$")
+    _tmp=$(mk_secret_tmp "$(dirname "$_ef")")
     grep -vE "^[[:space:]]*#?[[:space:]]*(export[[:space:]]+)?${_k}=" "$_ef" > "$_tmp" 2>/dev/null || true
     printf '%s=%s\n' "$_k" "$_v" >> "$_tmp"
     mv "$_tmp" "$_ef"
   else
     printf '%s=%s\n' "$_k" "$_v" >> "$_ef"
   fi
+  umask "$_om"
   secure_secret_file "$_ef"
 }
 
@@ -521,11 +539,12 @@ persist_env_var() {
 # NEVER clobber an existing one — then S3(b) force it to 0600 either way,
 # FAILING CLOSED if it can't be secured (see `secure_secret_file`). `.env`
 # holds secrets (cookie secret, OAuth token, API keys), so it must never be
-# left group/world-readable under a loose umask; tightening even the "already
-# exists" reuse path mirrors `ensureKey`'s force-chmod-on-reuse in
-# `auth/secrets-store.ts` (a keyfile copied in at 0644 gets tightened too).
-# Pulled out as its own function so the `NEUTRON_INSTALL_PRINT_ENV_PERMS` test
-# seam below can exercise it without running the rest of the installer.
+# left group/world-readable under a loose umask; the `umask 077` around the
+# copy means a fresh `.env` is born 0600 (never a 0644 window), and tightening
+# even the "already exists" reuse path mirrors `ensureKey`'s force-chmod-on-
+# reuse in `auth/secrets-store.ts` (a keyfile copied in at 0644 gets tightened
+# too). Pulled out as its own function so the `NEUTRON_INSTALL_PRINT_ENV_PERMS`
+# test seam below can exercise it without running the rest of the installer.
 ensure_env_file() {
   _dir=$1
   _ef="$_dir/.env"
@@ -533,7 +552,10 @@ ensure_env_file() {
   if [ -f "$_ef" ]; then
     info ".env already exists — leaving it untouched"
   elif [ -f "$_example" ]; then
+    _om=$(umask)
+    umask 077
     cp "$_example" "$_ef"
+    umask "$_om"
     info "wrote .env from .env.example (every value has a default; edit what you need)"
   else
     warn ".env.example missing — skipping .env creation"
@@ -954,18 +976,24 @@ apply_auth_gate() {
 persist_oauth_token_to_env() {
   _ef=$1
   _tok=$2
+  # S3(b) — the live OAuth token is born 0600: `umask 077` around every write
+  # (fresh file / append) + a 0600 same-dir temp atomically renamed into place
+  # on the replace path, so the token never sits on disk group/world-readable,
+  # even for an instant, and a failure leaves the old secured file (or nothing).
+  _om=$(umask)
+  umask 077
   [ -f "$_ef" ] || : > "$_ef"
   if grep -qE '^[[:space:]]*(export[[:space:]]+)?CLAUDE_CODE_OAUTH_TOKEN=' "$_ef" 2>/dev/null; then
-    _tmp=$(mktemp 2>/dev/null || printf '%s\n' "$_ef.tmp.$$")
+    _tmp=$(mk_secret_tmp "$(dirname "$_ef")")
     grep -vE '^[[:space:]]*(export[[:space:]]+)?CLAUDE_CODE_OAUTH_TOKEN=' "$_ef" > "$_tmp" 2>/dev/null || true
     printf 'CLAUDE_CODE_OAUTH_TOKEN=%s\n' "$_tok" >> "$_tmp"
     mv "$_tmp" "$_ef"
   else
     printf 'CLAUDE_CODE_OAUTH_TOKEN=%s\n' "$_tok" >> "$_ef"
   fi
-  # S3(b) — this file now holds a live OAuth token; force + verify 0600, and
-  # FAIL CLOSED (abort) if it can't be secured rather than leave the token
-  # readable by other local users.
+  umask "$_om"
+  # Force + verify 0600 and FAIL CLOSED (abort) if it can't be secured rather
+  # than leave the token readable by other local users.
   secure_secret_file "$_ef"
 }
 

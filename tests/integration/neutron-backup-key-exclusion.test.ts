@@ -17,9 +17,9 @@
 
 import { describe, expect, test } from 'bun:test'
 import { spawnSync } from 'node:child_process'
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { delimiter, dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
@@ -30,15 +30,31 @@ function git(dataDir: string, args: string[]): string {
   return (res.stdout ?? '').trim()
 }
 
-function runBackup(dataDir: string, extraEnv: Record<string, string | undefined> = {}) {
+function runBackup(
+  dataDir: string,
+  opts: { extraEnv?: Record<string, string | undefined>; stubGitRmFail?: boolean } = {},
+) {
+  let path = process.env['PATH'] ?? '/usr/bin:/bin'
+  if (opts.stubGitRmFail === true) {
+    // Shadow `git` with a stub that FAILS on the `rm` subcommand (simulating a
+    // locked index / perms error) but proxies every other subcommand to the
+    // real git, so the rest of the backup (init/add/commit/ls-files) is real.
+    const realGit = (spawnSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).stdout ?? 'git').trim()
+    const stubDir = join(dataDir, '.stubbin')
+    mkdirSync(stubDir, { recursive: true })
+    writeFileSync(join(stubDir, 'git'), `#!/bin/sh\nif [ "$1" = "rm" ]; then exit 1; fi\nexec ${realGit} "$@"\n`, {
+      mode: 0o755,
+    })
+    path = `${stubDir}${delimiter}${path}`
+  }
   return spawnSync('sh', [BACKUP_SH, 'run'], {
     encoding: 'utf8',
     env: {
-      PATH: process.env['PATH'] ?? '/usr/bin:/bin',
+      PATH: path,
       HOME: dataDir,
       NEUTRON_HOME: dataDir,
       // No NEUTRON_BACKUP_REMOTE — local-only, so `run` never attempts network.
-      ...extraEnv,
+      ...opts.extraEnv,
     },
   })
 }
@@ -88,7 +104,10 @@ describe('neutron-backup.sh — AES key excluded from the backup bundle (S3a)', 
 
       const res = runBackup(dataDir)
       expect(res.status).toBe(0)
-      expect(res.stderr).toContain('untracked it going forward')
+      // Success is reported ONLY after the index is verified key-free (info →
+      // stdout); the "rotate the key" caveat is a warn → stderr.
+      expect(res.stdout).toContain('untracked .neutron-aes-key from the backup repo')
+      expect(res.stderr).toContain('rotate the key if the backup remote is not fully trusted')
 
       const after = git(dataDir, ['ls-files']).split('\n').filter((l) => l.length > 0)
       expect(after).not.toContain('.neutron-aes-key')
@@ -100,6 +119,46 @@ describe('neutron-backup.sh — AES key excluded from the backup bundle (S3a)', 
       // The key file itself is untouched on disk (un-tracking is a git-index
       // operation only — never delete the working-tree file).
       expect(readFileSync(join(dataDir, '.neutron-aes-key'))).toEqual(keyBytes)
+    } finally {
+      rmSync(dataDir, { recursive: true, force: true })
+    }
+  })
+
+  // Fail-CLOSED boundary (Codex blocker #2): if `git rm --cached` cannot untrack
+  // the key (index lock / perms / any git error), the backup must ABORT before
+  // add/commit/push — it must NEVER report success and re-commit/push a bundle
+  // that still contains the AES key. Force it by shadowing `git` so `git rm`
+  // fails while the key is tracked.
+  test('git rm --cached FAILURE aborts the backup before it can commit/push the key', () => {
+    const dataDir = mkdtempSync(join(tmpdir(), 'neutron-backup-rmfail-'))
+    try {
+      const keyBytes = Buffer.alloc(32, 3)
+      writeFileSync(join(dataDir, '.neutron-aes-key'), keyBytes, { mode: 0o600 })
+      writeFileSync(join(dataDir, 'project.db'), 'legacy-bundle\n')
+      writeFileSync(join(dataDir, '.gitignore'), 'logs/\n')
+
+      // Prior (pre-fix) run that committed the key into the index.
+      spawnSync('git', ['-C', dataDir, 'init', '-q'])
+      spawnSync('git', ['-C', dataDir, 'config', 'user.email', 'test@localhost'])
+      spawnSync('git', ['-C', dataDir, 'config', 'user.name', 'Test'])
+      spawnSync('git', ['-C', dataDir, 'add', '-A'])
+      spawnSync('git', ['-C', dataDir, 'commit', '-q', '-m', 'legacy: key + db'])
+      const commitsBefore = git(dataDir, ['rev-list', '--count', 'HEAD'])
+      expect(git(dataDir, ['ls-files']).split('\n')).toContain('.neutron-aes-key')
+
+      const res = runBackup(dataDir, { stubGitRmFail: true })
+
+      // Aborted loudly.
+      expect(res.status).not.toBe(0)
+      expect(res.stderr).toContain('refusing to back up')
+      expect(res.stderr).toContain('STILL tracked')
+
+      // Authoritative outcome: NO new backup commit was created (the abort
+      // happened before `git add`/commit), and the key is still tracked at the
+      // pre-existing commit — never re-committed/pushed by this run. The whole
+      // point: a tracked key is never bundled again behind a false success.
+      expect(git(dataDir, ['rev-list', '--count', 'HEAD'])).toBe(commitsBefore)
+      expect(git(dataDir, ['ls-files']).split('\n')).toContain('.neutron-aes-key')
     } finally {
       rmSync(dataDir, { recursive: true, force: true })
     }

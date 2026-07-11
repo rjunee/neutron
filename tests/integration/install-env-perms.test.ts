@@ -19,7 +19,7 @@
 
 import { describe, expect, test } from 'bun:test'
 import { spawnSync } from 'node:child_process'
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { delimiter, dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -34,6 +34,11 @@ function buildFakeCheckout(): string {
   writeFileSync(join(dir, 'open', 'server.ts'), '// stub for resolve_src_dir\n')
   writeFileSync(join(dir, '.env.example'), 'NEUTRON_PORT=7800\n')
   return dir
+}
+
+/** Single-quote a string for safe embedding in a `sh -c` command. */
+function quoteSh(s: string): string {
+  return `'${s.replace(/'/g, `'\\''`)}'`
 }
 
 /**
@@ -56,7 +61,13 @@ function runEnvPermsSeam(
     writeFileSync(stub, opts.chmodBody, { mode: 0o755 })
     path = `${stubDir}${delimiter}${path}`
   }
-  const res = spawnSync('sh', [INSTALL_SH, '--yes', '--dir', checkoutDir], {
+  // Force a LOOSE umask (022) in the spawned shell so that if install.sh did
+  // NOT birth `.env` at 0600, the file would land 0644 (world/group-readable).
+  // This makes the birth-secure (`umask 077`) behavior meaningfully testable:
+  // under the fix, .env is 0600 from creation even when the ambient umask is
+  // loose and even when a later chmod fails.
+  const inner = `umask 022; exec sh ${quoteSh(INSTALL_SH)} --yes --dir ${quoteSh(checkoutDir)}`
+  const res = spawnSync('sh', ['-c', inner], {
     cwd: checkoutDir,
     encoding: 'utf8',
     env: {
@@ -107,15 +118,26 @@ describe('install.sh — .env is 0600 after write (S3b secrets-at-rest hygiene)'
   // Fail-CLOSED boundary (Codex blocker): a chmod that CANNOT secure .env must
   // ABORT the install, never be swallowed while secrets are persisted and
   // success is reported. Force it by shadowing `chmod` with a stub that errors.
-  test('chmod FAILURE aborts the install (does not report an insecure-.env success)', () => {
+  test('chmod FAILURE aborts the install AND leaves no exposed secret on disk', () => {
     const dir = buildFakeCheckout()
     try {
-      const { status, stderr } = runEnvPermsSeam(dir, { chmodBody: '#!/bin/sh\nexit 1\n' })
+      const { status, stdout, stderr } = runEnvPermsSeam(dir, { chmodBody: '#!/bin/sh\nexit 1\n' })
       expect(status).toBe(1)
       expect(stderr).toContain('refusing to continue')
       expect(stderr).toContain('could not secure')
-      // The seam's success line (`env_path=`) prints on stdout only when it
-      // runs to completion — the abort must happen before it.
+      // The seam's success line (`env_path=`) only prints on full completion —
+      // the abort must happen before it.
+      expect(stdout).not.toContain('env_path=')
+
+      // POST-FAILURE FILESYSTEM STATE (Codex blocker #1): even though chmod
+      // failed, the abort must NOT leave a world/group-readable secret sitting
+      // on disk. `.env` is born 0600 via `umask 077` (the seam runs under a
+      // loose umask 022), so the post-abort state is either absent OR 0600 —
+      // never a 0644 file containing secrets.
+      const envPath = join(dir, '.env')
+      if (existsSync(envPath)) {
+        expect(statSync(envPath).mode & 0o777).toBe(0o600)
+      }
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }
