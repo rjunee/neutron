@@ -6,7 +6,7 @@
  */
 
 import { describe, it, expect } from 'bun:test'
-import { existsSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import {
@@ -36,6 +36,11 @@ function rec(over: Partial<ReplRegistryRecord> & { sessionKey: string }): ReplRe
 function tmpRegistry(): string {
   return join(mkdtempSync(join(tmpdir(), 'neutron-reg-')), 'repl-registry.json')
 }
+
+/** Permission-based fault injection is a no-op under root (bypasses all
+ *  permission bits) — guard those tests so they don't false-pass/false-fail
+ *  under a root-run CI container. */
+const isRoot = typeof process.getuid === 'function' && process.getuid() === 0
 
 describe('repl-registry — pure (de)serialization', () => {
   it('round-trips a registry through serialize → parse', () => {
@@ -303,4 +308,115 @@ describe('repl-registry — corruption on the mutation path is loud and recovera
       expect(sidecarBodies).toContain(original) // every payload is recoverable, not just the last
     }
   })
+
+  it('wrong-shape JSON (a top-level array, not an object) is treated as corrupt and sidecar-preserved, same as a syntax error', () => {
+    const path = tmpRegistry()
+    upsertRecord(path, rec({ sessionKey: 'k' }))
+    writeFileSync(path, '["not", "a", "registry", "object"]')
+
+    const originalConsoleError = console.error
+    const logs: unknown[][] = []
+    console.error = (...args: unknown[]) => logs.push(args)
+    try {
+      patchRecord(path, 'k', { pid: 1 })
+    } finally {
+      console.error = originalConsoleError
+    }
+
+    expect(logs.some((l) => String(l[0]).includes('not-an-object'))).toBe(true)
+    const sidecars = sidecarsFor(path)
+    expect(sidecars.length).toBe(1)
+    expect(readFileSync(join(dirname(path), sidecars[0] as string), 'utf8')).toBe(
+      '["not", "a", "registry", "object"]',
+    )
+  })
+
+  it('multiple malformed rows dropped in ONE load produce exactly ONE sidecar (not one per row)', () => {
+    const path = tmpRegistry()
+    const raw = JSON.stringify({
+      good: rec({ sessionKey: 'good' }),
+      bad1: { sessionKey: 'bad1' }, // missing required fields
+      bad2: { sessionKey: 'bad2' }, // missing required fields
+      bad3: { sessionKey: 'bad3', cwd: '/x' }, // still missing fields
+    })
+    writeFileSync(path, raw)
+
+    const originalConsoleError = console.error
+    const logs: unknown[][] = []
+    console.error = (...args: unknown[]) => logs.push(args)
+    try {
+      patchRecord(path, 'good', { pid: 1 })
+    } finally {
+      console.error = originalConsoleError
+    }
+
+    // All three drops are individually logged...
+    expect(logs.filter((l) => String(l[0]).includes('dropping row sessionKey=')).length).toBe(3)
+    // ...but only ONE sidecar file backs all of them (the whole pre-drop file
+    // is in that one copy — no need for N identical-content sidecars).
+    const sidecars = sidecarsFor(path)
+    expect(sidecars.length).toBe(1)
+    const body = readFileSync(join(dirname(path), sidecars[0] as string), 'utf8')
+    expect(body).toBe(raw)
+    expect(body).toContain('bad1')
+    expect(body).toContain('bad2')
+    expect(body).toContain('bad3')
+  })
+
+  it.skipIf(isRoot)(
+    'a read-error (e.g. permission denied) is loud-but-alive: no throw, no sidecar (nothing readable to preserve), and the mutation still completes',
+    () => {
+      const path = tmpRegistry()
+      writeFileSync(path, 'irrelevant — about to be made unreadable')
+      chmodSync(path, 0o000)
+
+      const originalConsoleError = console.error
+      const logs: unknown[][] = []
+      console.error = (...args: unknown[]) => logs.push(args)
+      try {
+        expect(() => patchRecord(path, 'k', { pid: 1 })).not.toThrow()
+      } finally {
+        chmodSync(path, 0o600) // restore so cleanup can remove it
+        console.error = originalConsoleError
+      }
+
+      expect(logs.some((l) => String(l[0]).includes('read-error'))).toBe(true)
+      // Nothing was readable, so there is genuinely nothing to sidecar.
+      expect(sidecarsFor(path)).toEqual([])
+      // The mutation degrades to an empty registry and still saves cleanly —
+      // supervision keeps running rather than bricking on this project.
+      expect(existsSync(path)).toBe(true)
+    },
+  )
+
+  it.skipIf(isRoot)(
+    'a sidecar-write failure is logged honestly — it never silently reports success',
+    () => {
+      const path = tmpRegistry()
+      const dir = dirname(path)
+      upsertRecord(path, rec({ sessionKey: 'k' }))
+      writeFileSync(path, 'garbage{')
+
+      const originalConsoleError = console.error
+      const logs: unknown[][] = []
+      console.error = (...args: unknown[]) => logs.push(args)
+      chmodSync(dir, 0o500) // read+execute only — no new file can be created here,
+      // so BOTH the sidecar write and the mutation's own save will fail. The
+      // save failing too (and this call throwing) is expected in a
+      // can't-write-anything scenario; what matters is the sidecar failure is
+      // still reported honestly rather than silently claiming success.
+      try {
+        expect(() => patchRecord(path, 'k', { pid: 1 })).toThrow()
+      } finally {
+        chmodSync(dir, 0o700) // restore so the tmpdir can be cleaned up
+        console.error = originalConsoleError
+      }
+
+      expect(
+        logs.some(
+          (l) => String(l[0]).includes('CORRUPT registry') && String(l[0]).includes('Sidecar preservation FAILED'),
+        ),
+      ).toBe(true)
+    },
+  )
 })

@@ -181,25 +181,48 @@ export function getRecord(path: string, sessionKey: string): ReplRegistryRecord 
 
 // Per-process monotonic counter so two sidecars written in the SAME
 // millisecond (a corrupt full-file save racing a dropped-row save, or two
-// watchdog ticks in tight succession) never collide on `Date.now()` alone —
-// mirrors `atomic-write.ts`'s `stagingPathFor` pid+counter pattern. Without
-// this a same-millisecond second write would silently `writeFileSync`-truncate
-// the first recovery copy, defeating the whole point of the sidecar.
+// watchdog ticks in tight succession) never PICK the same candidate path —
+// mirrors `atomic-write.ts`'s `stagingPathFor` pid+counter pattern. The `wx`
+// exclusive-create flag below is the actual guarantee (this counter is just
+// what keeps the retry loop from needing more than one attempt in practice);
+// without EITHER, a same-millisecond second write could silently
+// `writeFileSync`-truncate the first recovery copy or follow a pre-existing
+// symlink at that path, defeating the whole point of the sidecar.
 let sidecarCounter = 0
+
+/** Ceiling on `EEXIST` retries — defends against a hostile/corrupted
+ *  directory that's pre-populated every candidate path; a real collision
+ *  resolves on attempt 1 essentially always (pid+counter+ms is already
+ *  unique in the overwhelmingly common case). */
+const SIDECAR_MAX_ATTEMPTS = 5
 
 /** Best-effort preserve a corrupt/pre-drop registry's raw bytes to a
  *  collision-resistant sidecar file next to `path`, so an operator can
- *  hand-recover rows a save is about to drop. Never throws — a sidecar-write
- *  failure must not block the mutation already in flight inside the lock. */
+ *  hand-recover rows a save is about to drop. Uses exclusive create (`wx`) —
+ *  refuses to touch an existing path (including a symlink planted there)
+ *  rather than silently overwriting/following it — and retries with a fresh
+ *  suffix on `EEXIST` instead of ever falling back to a non-exclusive write.
+ *  Never throws — a sidecar-write failure must not block the mutation
+ *  already in flight inside the lock. */
 function writeSidecarBestEffort(path: string, contents: string): string | undefined {
-  const sidecarPath = `${path}.corrupt-${Date.now()}-${process.pid}-${sidecarCounter++}`
-  try {
-    writeFileSync(sidecarPath, contents, { mode: 0o600 })
-    return sidecarPath
-  } catch (e) {
-    console.error(`repl-registry: failed to write corruption sidecar ${sidecarPath}: ${e}`)
-    return undefined
+  let lastErr: unknown
+  for (let attempt = 0; attempt < SIDECAR_MAX_ATTEMPTS; attempt++) {
+    const sidecarPath = `${path}.corrupt-${Date.now()}-${process.pid}-${sidecarCounter++}`
+    try {
+      writeFileSync(sidecarPath, contents, { mode: 0o600, flag: 'wx' })
+      return sidecarPath
+    } catch (e) {
+      lastErr = e
+      if ((e as NodeJS.ErrnoException).code === 'EEXIST') continue // fresh suffix, retry
+      console.error(`repl-registry: failed to write corruption sidecar ${sidecarPath}: ${e}`)
+      return undefined
+    }
   }
+  console.error(
+    `repl-registry: failed to write corruption sidecar for ${path} after ${SIDECAR_MAX_ATTEMPTS} ` +
+      `EEXIST retries: ${lastErr}`,
+  )
+  return undefined
 }
 
 /**
