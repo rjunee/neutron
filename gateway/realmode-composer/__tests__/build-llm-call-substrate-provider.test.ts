@@ -811,3 +811,88 @@ test('AT-MOST-ONCE: tool executes, continuation 429s → resolver runs EXACTLY O
   // And we did NOT fan out to a 3rd upstream call (model-2 rotation attempt).
   expect(call).toBe(2)
 })
+
+// --- CREDENTIAL-FAULT-ONLY cooldown (audit round 12): transient server/network
+// faults must NOT cool a valid OpenAI credential; only 401/402/429 do. ---
+
+test('CREDENTIAL COOLDOWN: post-tool continuation 503 → credential NOT cooled (server fault, not credential), error surfaced retryable', async () => {
+  // Tool executes, continuation 503s. Per at-most-once the 503 surfaces (no
+  // rotation) — and a 503 is a SERVER fault, so the credential must stay usable.
+  let toolExecutions = 0
+  let call = 0
+  const fetchImpl = (async () => {
+    call++
+    if (call === 1) {
+      const body = [
+        { event: 'response.created', data: { type: 'response.created', response: { id: 'r1' } } },
+        { event: 'response.function_call.delta', data: { type: 'response.function_call.delta', call_id: 'c1', name: 'work_board_add', arguments: '{"t":"x"}' } },
+        { event: 'response.function_call.completed', data: { type: 'response.function_call.completed', call_id: 'c1', name: 'work_board_add' } },
+        { event: 'response.completed', data: { type: 'response.completed', response: { id: 'r1', usage: { input_tokens: 1, output_tokens: 1 } } } },
+      ]
+      const sse = body.map((f) => `event: ${f.event}\ndata: ${JSON.stringify(f.data)}\n`).join('\n') + '\n'
+      const stream = new ReadableStream({ start(c) { c.enqueue(new TextEncoder().encode(sse)); c.close() } })
+      return new Response(stream, { status: 200 })
+    }
+    return new Response('service unavailable', { status: 503 })
+  }) as unknown as typeof fetch
+
+  const pool = openaiPool()
+  const sub = buildLlmCallSubstrate({
+    pool: anthropicPool(),
+    substrate_instance_id: 'gpt-503',
+    provider: 'openai',
+    user_id: 'owner',
+    openai: {
+      pool,
+      bindMcpResolver: () => async () => { toolExecutions++; return { ok: true } },
+      model_preference: ['gpt-5.6', 'gpt-5.5'],
+      toolManifest: () => [{ name: 'work_board_add', description: 'add', input_schema: { type: 'object' } }],
+      fetchImpl,
+    },
+  })!
+  const events = await drain(sub.start(spec()))
+  expect(toolExecutions).toBe(1) // at-most-once holds
+  // The 503 is a SERVER fault — the credential is NOT cooled.
+  expect(pool.credentials[0]!.cooldown_until).toBeUndefined()
+  expect(pool.credentials[0]!.cooldown_reason).toBeUndefined()
+  // The error still surfaces.
+  expect(events.some((e) => e.kind === 'error')).toBe(true)
+})
+
+test('CREDENTIAL COOLDOWN: fetch rejects (network exception) → credential NOT cooled', async () => {
+  const pool = openaiPool()
+  const networkFetch = (async () => {
+    throw new Error('ECONNRESET: connection reset by peer')
+  }) as unknown as typeof fetch
+  const sub = buildLlmCallSubstrate({
+    pool: anthropicPool(),
+    substrate_instance_id: 'gpt-net',
+    provider: 'openai',
+    user_id: 'owner',
+    openai: {
+      pool,
+      bindMcpResolver: () => async () => ({}),
+      model_preference: ['gpt-5.6'],
+      fetchImpl: networkFetch,
+    },
+  })!
+  const events = await drain(sub.start(spec()))
+  // A network exception is NOT a credential fault → no cooldown.
+  expect(pool.credentials[0]!.cooldown_until).toBeUndefined()
+  expect(pool.credentials[0]!.cooldown_reason).toBeUndefined()
+  expect(events.some((e) => e.kind === 'error')).toBe(true)
+})
+
+test('CREDENTIAL COOLDOWN mutation-verify: 401/402/429 STILL cool (only credential faults do)', async () => {
+  // 429 cools (rate-limit) — proves the default-suppression did not disable real
+  // credential-fault cooldowns.
+  const pool429 = openaiPool()
+  await drain(
+    openaiSub(pool429, httpErrorFetch(429, { retryAfterSec: 0.2 })).start(spec()),
+  )
+  expect(pool429.credentials[0]!.cooldown_reason).toBe('rate_limit_429')
+
+  const pool401 = openaiPool()
+  await drain(openaiSub(pool401, httpErrorFetch(401)).start(spec()))
+  expect(pool401.credentials[0]!.cooldown_reason).toBe('auth_401')
+})

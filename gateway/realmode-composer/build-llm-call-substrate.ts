@@ -995,18 +995,22 @@ export function startOpenAiFamilySession(args: {
           }
         } else if (ev.kind === 'error') {
           reported = true
-          // Generic HTTP / auth / retryable cooldown classification (the CC-only
-          // ENOENT / channel-wedged / turn-timeout fast-paths don't apply to the
-          // OpenAI adapters). An OpenAI 429/401 cools the credential down.
+          // CREDENTIAL-FAULT-ONLY cooldown (audit round 12). ONLY 401/402/429 cool
+          // the OpenAI key. A 5xx / 408 / network exception / no-status error is a
+          // transient SERVER/NETWORK fault, NOT a credential fault — cooling the key
+          // for it would punish a valid credential for an upstream outage (and, with
+          // the r9 at-most-once change, a post-tool 503 surfaces retryable, which the
+          // old shared mapper turned into a 429 cooldown). The error still SURFACES
+          // (below) — only the cooldown is suppressed. NB: deliberately NOT the
+          // Claude-shared `mapStatusForPoolCooldown` (its retryable→429 default is
+          // byte-identical CC behavior).
           const httpStatus = parseHttpStatusFromMessage(ev.message)
-          let cooldownStatus: number | null
-          if (httpStatus !== null) {
-            cooldownStatus = mapStatusForPoolCooldown(httpStatus, ev.retryable)
-          } else if (detectCliAuthFailure(ev.message)) {
-            cooldownStatus = 401
-          } else {
-            cooldownStatus = mapStatusForPoolCooldown(null, ev.retryable)
-          }
+          const cooldownStatus: number | null =
+            httpStatus !== null
+              ? classifyOpenAiCredentialCooldown(httpStatus)
+              : detectCliAuthFailure(ev.message)
+                ? 401
+                : null
           if (cooldownStatus !== null) {
             if (ev.retry_after_ms !== undefined) {
               reportFailure(pool, cred.id, cooldownStatus, ev.retry_after_ms)
@@ -1069,6 +1073,28 @@ export function parseHttpStatusFromMessage(message: string): number | null {
  * original's docstring for the full mapping table + the Codex r4/r5 P1
  * incident history that drove it.
  */
+/**
+ * OpenAI-SPECIFIC credential-cooldown classifier (audit round 12).
+ *
+ * ONLY a genuine CREDENTIAL fault cools an OpenAI key:
+ *   - 401 → auth cooldown
+ *   - 402 → quota/billing cooldown
+ *   - 429 → rate-limit cooldown
+ * Everything else — 5xx, 408, a network/fetch exception, or a no-status error —
+ * is a transient SERVER/NETWORK fault, NOT a credential fault; it returns `null`
+ * (no cooldown) so a valid credential is never punished for an upstream outage.
+ *
+ * Why NOT reuse the Claude-shared {@link mapStatusForPoolCooldown}: that mapper's
+ * `retryable → 429` default is load-bearing for the CC adapter's own error taxonomy
+ * (Codex r4/r5 incident history) and MUST stay byte-identical for the Claude path.
+ * The OpenAI path therefore keeps its own, stricter classifier — credential-fault
+ * statuses only, no retryable-default-to-429.
+ */
+export function classifyOpenAiCredentialCooldown(httpStatus: number | null): number | null {
+  if (httpStatus === 401 || httpStatus === 402 || httpStatus === 429) return httpStatus
+  return null
+}
+
 export function mapStatusForPoolCooldown(
   httpStatus: number | null,
   retryable: boolean,
