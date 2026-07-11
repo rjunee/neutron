@@ -18,7 +18,10 @@ import {
   reconcileEmbedderToBrain,
   type GBrainMemoryWiring,
 } from '../build-gbrain-memory.ts'
-import { buildOpenAiEmbedderConfig } from '@neutronai/gbrain-memory/index.ts'
+import {
+  buildOpenAiEmbedderConfig,
+  resolveInitEmbeddingTarget,
+} from '@neutronai/gbrain-memory/index.ts'
 
 // COMPILE-TIME negative probe (RA5 / invariant I2). The composer wiring is the
 // exempt-module bypass Codex flagged: if the raw transport were on this public
@@ -105,7 +108,7 @@ describe('resolveGbrainClientOptions', () => {
       expect(opts.env).toEqual({ GBRAIN_HOME: '/srv/owners/acme/gbrain' })
     })
 
-    test('embedder configured (openai) → child env carries the GBrain embedding seam', () => {
+    test('embedder configured (openai) → child env carries the GBrain embedding seam (universal 768 width)', () => {
       const opts = resolveGbrainClientOptions({
         owner_home: '/srv/owners/acme',
         env: { NEUTRON_EMBEDDINGS: 'openai', OPENAI_API_KEY: 'sk-real' },
@@ -113,7 +116,7 @@ describe('resolveGbrainClientOptions', () => {
       expect(opts.env).toEqual({
         GBRAIN_HOME: '/srv/owners/acme/gbrain',
         GBRAIN_EMBEDDING_MODEL: 'openai:text-embedding-3-large',
-        GBRAIN_EMBEDDING_DIMENSIONS: '3072',
+        GBRAIN_EMBEDDING_DIMENSIONS: '768',
         OPENAI_API_KEY: 'sk-real',
       })
     })
@@ -241,6 +244,57 @@ describe('resolveGbrainClientOptions', () => {
     test('mismatch + ollama (fixed width) → dropped to null (keyword+graph)', () => {
       const e = resolveEffectiveEmbedder({ env: {} }) // ollama 768
       expect(reconcileEmbedderToBrain(e, 3072)).toBeNull()
+    })
+  })
+
+  // --- Fresh-brain width consistency (Codex blocker: init width MUST equal
+  // every later serve width so a key stored AFTER init never mismatches the
+  // column). For a FRESH brain existingBrainDims is null, so this pins that the
+  // universal 768 width holds across the divergence-prone lineages. ------------
+  describe('fresh-brain init width == later serve width (no divergence)', () => {
+    // Mirror how buildGBrainMemory picks the INIT embedder: reconcile the
+    // effective embedder (at init-time key state) against the brain width (null
+    // for fresh), then ask what column width `gbrain init` would create.
+    function initWidth(env: NodeJS.ProcessEnv, keyAtInit: string | undefined): number {
+      const embedder = reconcileEmbedderToBrain(
+        resolveEffectiveEmbedder({ env, openaiApiKey: keyAtInit }),
+        null,
+      )
+      return resolveInitEmbeddingTarget(embedder).dimensions
+    }
+
+    test('fresh `off` brain (init with no key) → later key spawns at the SAME width', async () => {
+      // Init: off + no key → embedder null → latent column width.
+      const w = initWidth({ NEUTRON_EMBEDDINGS: 'off' }, undefined)
+      expect(w).toBe(768)
+      // Serve, after a key is stored: dynamic env must target the same width.
+      let stored: string | undefined
+      const opts = resolveGbrainClientOptions({
+        owner_home: '/t',
+        env: { NEUTRON_EMBEDDINGS: 'off' },
+        resolveOpenAiKey: async () => stored,
+        existingBrainDims: null, // fresh
+      })
+      stored = 'sk-late'
+      const dyn = await opts.resolveDynamicEnv!()
+      expect(dyn['GBRAIN_EMBEDDING_DIMENSIONS']).toBe(String(w))
+      expect(dyn['GBRAIN_EMBEDDING_DIMENSIONS']).toBe('768')
+    })
+
+    test('fresh explicit `openai` brain (init with no key) → later onboarding key spawns at the SAME width', async () => {
+      const w = initWidth({ NEUTRON_EMBEDDINGS: 'openai', OPENAI_API_KEY: 'sk-env' }, undefined)
+      expect(w).toBe(768)
+      let stored: string | undefined
+      const opts = resolveGbrainClientOptions({
+        owner_home: '/t',
+        env: { NEUTRON_EMBEDDINGS: 'openai', OPENAI_API_KEY: 'sk-env' },
+        resolveOpenAiKey: async () => stored,
+        existingBrainDims: null, // fresh
+      })
+      stored = 'sk-onboarding'
+      const dyn = await opts.resolveDynamicEnv!()
+      expect(dyn['GBRAIN_EMBEDDING_DIMENSIONS']).toBe(String(w))
+      expect(dyn['OPENAI_API_KEY']).toBe('sk-onboarding')
     })
   })
 

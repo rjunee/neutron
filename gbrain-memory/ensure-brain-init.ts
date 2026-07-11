@@ -21,19 +21,20 @@
  * PGLite brain against whatever embedder is effectively configured — by
  * DEFAULT (RA3, 2026-07) that is the local Ollama fallback (768 dims,
  * `resolveEmbedderConfig`'s unset case), so `content_chunks` is
- * semantic-ready *from creation* with no key and no operator config. When
- * the owner later adds an OpenAI key (the onboarding optional-key offer →
- * secrets store), embeddings flip to cloud with **NO schema rebuild**: the
- * onboarding-key path (`buildOpenAiEmbedderConfig`, called bare) shares the
- * SAME 768-dim width as the local fallback (OpenAI's `text-embedding-3-large`
- * supports Matryoshka truncation to any width ≤ 3072), so a one-time
- * `gbrain embed --stale` backfill of any pages written before the key existed
- * writes into the SAME column. A `--no-embedding` brain could NOT upgrade in
- * place: its default column is 1280-dim and OpenAI's `text-embedding-3-large`
- * rejects a mismatched width. The init dims/model always track the
- * EFFECTIVELY-configured embedder (`resolveInitEmbeddingTarget`), so an
- * operator who explicitly opts into a different provider (or `off`) gets a
- * matching column.
+ * semantic-ready *from creation* with no key and no operator config. EVERY
+ * fresh-brain lineage — local fallback, onboarding key, explicit
+ * `NEUTRON_EMBEDDINGS=openai`, AND the latent column of an `off` brain — uses
+ * the SAME universal 768-dim width, so init-time and every serve-time width
+ * are structurally identical and a key pasted later can never mismatch the
+ * column. When the owner adds an OpenAI key (the onboarding optional-key
+ * offer → secrets store), embeddings flip to cloud with **NO schema rebuild**:
+ * OpenAI's `text-embedding-3-large` truncates to 768 via Matryoshka, so a
+ * one-time `gbrain embed --stale` backfill writes into the SAME `vector(768)`
+ * column. A `--no-embedding` brain could NOT upgrade in place (its default
+ * column is 1280-dim). The init dims/model always track the EFFECTIVELY
+ * -configured embedder (`resolveInitEmbeddingTarget`); the ONLY non-768
+ * columns are LEGACY brains created under the pre-RA3 3072 default, reconciled
+ * to their persisted width at boot (`build-gbrain-memory.ts`).
  *
  * **Fail-soft Ollama reachability (RA3).** Because the default now
  * optimistically configures the local Ollama fallback, `ensureBrainInitialized`
@@ -54,9 +55,17 @@ import { isGbrainBinaryMissingError } from './memory-store.ts'
 import { type CommandRunner, bunCommandRunner } from './command-runner.ts'
 import { resolveGbrainChildPath } from './resolve-gbrain-command.ts'
 
-/** OpenAI default the latent column is sized for (upgrade-without-rebuild). */
+/**
+ * The latent column an embedder-less (`off`) brain is pre-sized at so a later
+ * key upgrades it in place WITHOUT a rebuild. RA3: this is the ONE universal
+ * fresh-brain width (768) — identical to the local Ollama fallback and the
+ * onboarding-key path — so an `off`→key transition can never mismatch the
+ * column. OpenAI `text-embedding-3-large` truncates to 768 via Matryoshka, so
+ * the model is still the OpenAI one (a `--no-embedding` 1280-dim brain could
+ * not upgrade at all).
+ */
 const DEFAULT_EMBEDDING_MODEL = 'openai:text-embedding-3-large'
-const DEFAULT_EMBEDDING_DIMENSIONS = 3072
+const DEFAULT_EMBEDDING_DIMENSIONS = 768
 
 /** Marker file (under the brain dir) recording a completed embeddings backfill. */
 const BACKFILL_MARKER = '.neutron-embeddings-backfilled'

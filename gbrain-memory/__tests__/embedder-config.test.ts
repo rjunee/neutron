@@ -81,16 +81,18 @@ describe('resolveEmbedderConfig — explicit off (opt-out, keyword + graph only)
   })
 })
 
-describe('resolveEmbedderConfig — openai (explicit opt-in, full 3072-dim fidelity)', () => {
-  test('NEUTRON_EMBEDDINGS=openai + OPENAI_API_KEY → cloud config at full 3072 dims', () => {
+describe('resolveEmbedderConfig — openai (explicit opt-in, shared 768-dim width)', () => {
+  test('NEUTRON_EMBEDDINGS=openai + OPENAI_API_KEY → cloud config at the universal 768-dim width', () => {
+    // RA3: the openai opt-in uses the SAME 768 width as every other fresh-brain
+    // lineage, so an onboarding key or an `off`→key transition never diverges.
     const cfg = resolveEmbedderConfig({ NEUTRON_EMBEDDINGS: 'openai', OPENAI_API_KEY: 'sk-real' })
     expect(cfg).not.toBeNull()
     expect(cfg!.provider).toBe('openai')
     expect(cfg!.model).toBe('text-embedding-3-large')
-    expect(cfg!.dimensions).toBe(3072)
+    expect(cfg!.dimensions).toBe(768)
     expect(cfg!.childEnv).toEqual({
       GBRAIN_EMBEDDING_MODEL: 'openai:text-embedding-3-large',
-      GBRAIN_EMBEDDING_DIMENSIONS: '3072',
+      GBRAIN_EMBEDDING_DIMENSIONS: '768',
       OPENAI_API_KEY: 'sk-real',
     })
   })
@@ -189,7 +191,7 @@ describe('buildOpenAiEmbedderConfig — shared 768-dim default (no-rebuild upgra
     })
   })
 
-  test('explicit dimensions override the shared default (used by the `openai` opt-in at 3072)', () => {
+  test('explicit dimensions override the shared default (used by reconciliation for a legacy column)', () => {
     const cfg = buildOpenAiEmbedderConfig('sk-explicit', 3072)
     expect(cfg.dimensions).toBe(3072)
     expect(cfg.childEnv['GBRAIN_EMBEDDING_DIMENSIONS']).toBe('3072')

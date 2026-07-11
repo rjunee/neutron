@@ -7,9 +7,9 @@
  *
  *   - FRESH brain → runs `gbrain init --pglite` exactly once, embeddings-ready.
  *   - IDEMPOTENT → a second call (config.json now present) does NOT re-init.
- *   - NO embedder (explicit `off`) → still inits an OpenAI-ready column (3072)
- *     so a later key upgrades in place (a 1280-dim `--no-embedding` brain
- *     could not).
+ *   - NO embedder (explicit `off`) → still inits an OpenAI-ready column at the
+ *     universal 768-dim width so a later key upgrades in place at the SAME
+ *     width (a 1280-dim `--no-embedding` brain could not).
  *   - WITH embedder → inits against that provider's model + dims, and backfills
  *     pre-existing pages once (marker-gated) when a provider key is present.
  *   - binary-missing / init-failure → returns a status, never throws.
@@ -82,7 +82,7 @@ function fakeRunner(opts?: {
 }
 
 describe('ensureBrainInitialized', () => {
-  test('fresh brain → runs init once, embeddings-ready (3072) when no embedder', async () => {
+  test('fresh brain → runs init once, embeddings-ready at the universal 768 width when no embedder', async () => {
     const home = tempHome()
     const { runner, calls } = fakeRunner()
     const res = await ensureBrainInitialized({
@@ -98,11 +98,13 @@ describe('ensureBrainInitialized', () => {
     expect(initArgs).toContain('--pglite')
     expect(initArgs).toContain('--non-interactive')
     // Embeddings-ready column even with no key → a later OpenAI key upgrades in
-    // place (OpenAI rejects the 1280-dim `--no-embedding` default column).
+    // place at the SAME 768 width (the universal fresh-brain width). OpenAI's
+    // text-embedding-3-large truncates to 768 via Matryoshka.
     expect(initArgs).toContain('--embedding-model')
     expect(initArgs).toContain('openai:text-embedding-3-large')
     expect(initArgs).toContain('--embedding-dimensions')
-    expect(initArgs).toContain('3072')
+    expect(initArgs).toContain('768')
+    expect(initArgs).not.toContain('3072')
     expect(initArgs).not.toContain('--no-embedding')
     expect(existsSync(brainConfigPath(home))).toBe(true)
   })

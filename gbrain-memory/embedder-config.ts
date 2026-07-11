@@ -21,7 +21,7 @@
  *   - `off` / `0` / `false` / `none` / `` → `null` (no store, keyword + graph
  *     only — the pre-RA3 default, still available as an explicit opt-out).
  *   - `openai`                            → cloud `text-embedding-3-large`
- *     at its full 3072 dims. Requires an OpenAI key
+ *     at the shared 768-dim width (see below). Requires an OpenAI key
  *     (`NEUTRON_EMBEDDINGS_OPENAI_API_KEY`, falling back to
  *     `OPENAI_API_KEY`). Missing key → `null` + a one-line warn.
  *   - `ollama`                            → local/free `nomic-embed-text`
@@ -45,20 +45,23 @@
  * resolver (`buildOpenAiEmbedderConfig`, called directly with a stored key —
  * see `gateway/realmode-composer/build-gbrain-memory.ts:resolveEffectiveEmbedder`).
  *
- * **Shared 768-dim column width (no-rebuild upgrade).**
- * `buildOpenAiEmbedderConfig` defaults to 768 dims — NOT OpenAI's max 3072 —
- * for exactly one reason: a fresh install's local-fallback column is created
- * at Ollama's native 768 dims (`ensure-brain-init.ts:
- * resolveInitEmbeddingTarget`, unchanged — it already sizes the column to
- * whatever embedder is active), and OpenAI's `text-embedding-3-large`
- * supports arbitrary Matryoshka truncation down to any width ≤ 3072
- * (verified against `gbrain/src/core/ai/dims.ts:dimsProviderOptions`).
- * Reusing 768 for the onboarding-captured-key upgrade path means pasting a
- * key later writes into the SAME `vector(768)` column with no ALTER and no
- * `gbrain embed --stale` dimension-mismatch failure. The EXPLICIT
- * `NEUTRON_EMBEDDINGS=openai` opt-in (a deliberate, from-day-one cloud
- * choice) still gets the full 3072 dims — there is no pre-existing local
- * column to reconcile against on that path.
+ * **One universal 768-dim column width (no-rebuild upgrade, no divergence).**
+ * EVERY fresh-brain lineage — the local Ollama fallback (native 768), the
+ * onboarding-captured OpenAI key (`buildOpenAiEmbedderConfig` default 768),
+ * the explicit `NEUTRON_EMBEDDINGS=openai` opt-in (below), AND the latent
+ * column a `off` brain is pre-sized at (`ensure-brain-init.ts:
+ * resolveInitEmbeddingTarget`) — resolves to the SAME 768 dims. This is
+ * deliberate: it makes the init-time width and every serve-time width
+ * STRUCTURALLY identical, so a key pasted after boot (or after an `off`
+ * install) can NEVER produce a `GBRAIN_EMBEDDING_DIMENSIONS` that mismatches
+ * the persisted column. 768 is the one width the free local embedder can
+ * emit; OpenAI's `text-embedding-3-large` supports Matryoshka truncation to
+ * any width ≤ 3072 (verified against `gbrain/src/core/ai/dims.ts:
+ * dimsProviderOptions`), so it slots into the same `vector(768)` column with
+ * no ALTER and no `gbrain embed --stale` dimension-mismatch. The ONLY non-768
+ * columns are LEGACY brains created under the pre-RA3 3072 default; those
+ * already exist on disk and are reconciled to their persisted width at boot
+ * (`build-gbrain-memory.ts:reconcileEmbedderToBrain`).
  *
  * **The GBrain seam.** GBrain reads its embedding model from
  * `GBRAIN_EMBEDDING_MODEL` (format `provider:model`, e.g.
@@ -93,8 +96,6 @@ export interface EmbedderConfig {
 
 /** Cloud: OpenAI `text-embedding-3-large`. Max native width 3072 dims. */
 const OPENAI_EMBED_MODEL = 'text-embedding-3-large'
-/** Full fidelity — used ONLY for the explicit `NEUTRON_EMBEDDINGS=openai` opt-in. */
-const OPENAI_EMBED_DIMENSIONS = 3072
 
 /** Local/free default: Ollama `nomic-embed-text` at its native 768 dims. */
 const OLLAMA_EMBED_MODEL = 'nomic-embed-text'
@@ -131,12 +132,11 @@ function resolveOpenAiKey(env: NodeJS.ProcessEnv): string | undefined {
  * BYO adapter consumes and which must NOT silently switch on cloud embeddings;
  * see `resolveEmbedderConfig`'s `NEUTRON_EMBEDDINGS` gate).
  *
- * `dimensions` defaults to `SHARED_DEFAULT_DIMENSIONS` (768) — NOT OpenAI's
- * max 3072 — so this call (used bare by the onboarding-key upgrade path in
- * `build-gbrain-memory.ts`) matches the column a fresh install's local
- * Ollama fallback already created. Pass `dimensions` explicitly (as
- * `resolveEmbedderConfig`'s `openai` branch does, at 3072) for a
- * from-day-one cloud choice with no pre-existing column to reconcile.
+ * `dimensions` defaults to `SHARED_DEFAULT_DIMENSIONS` (768) — the one
+ * universal fresh-brain width (see "One universal 768-dim column width"). Pass
+ * `dimensions` explicitly ONLY to target a pre-existing LEGACY column of a
+ * different width (`reconcileEmbedderToBrain` does this for a 3072 brain), so
+ * the key upgrades that column in place at its native width.
  */
 export function buildOpenAiEmbedderConfig(
   apiKey: string,
@@ -201,7 +201,9 @@ export function resolveEmbedderConfig(env: NodeJS.ProcessEnv = process.env): Emb
       )
       return null
     }
-    return buildOpenAiEmbedderConfig(apiKey, OPENAI_EMBED_DIMENSIONS)
+    // Shared universal width (768) — same as every other fresh-brain lineage,
+    // so a later onboarding key or an `off`→key transition never diverges.
+    return buildOpenAiEmbedderConfig(apiKey)
   }
 
   if (raw === 'ollama') {
