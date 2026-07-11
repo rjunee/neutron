@@ -17,6 +17,7 @@ import {
   appWsOriginAllowed,
   createAppWsSurface,
   normalizeWebOrigins,
+  requestSelfOrigin,
 } from '../http/app-ws-surface.ts'
 
 const HOST = '127.0.0.1:7800'
@@ -252,5 +253,114 @@ describe('S2 (a) — WS upgrade accepts a configured cross-origin owner page', (
     )
     expect(res!.status).toBe(403)
     expect(((await res!.json()) as { code: string }).code).toBe('bad_origin')
+  })
+})
+
+describe('requestSelfOrigin — canonical self-origin (Blocker B)', () => {
+  /** Build a request with an explicit scheme/host and optional X-Forwarded-Proto. */
+  function reqWith(opts: { scheme: string; host: string; xfp?: string }): Request {
+    const headers = new Headers({ host: opts.host })
+    if (opts.xfp !== undefined) headers.set('x-forwarded-proto', opts.xfp)
+    return new Request(`${opts.scheme}://${opts.host}/ws/app/chat`, { method: 'GET', headers })
+  }
+
+  it('strips the default port (https :443, http :80) so it matches a browser Origin', () => {
+    expect(requestSelfOrigin(reqWith({ scheme: 'https', host: 'app.example.test:443' }))).toBe(
+      'https://app.example.test',
+    )
+    expect(requestSelfOrigin(reqWith({ scheme: 'http', host: 'app.example.test:80' }))).toBe(
+      'http://app.example.test',
+    )
+  })
+  it('lower-cases the host (casing is not significant)', () => {
+    expect(requestSelfOrigin(reqWith({ scheme: 'https', host: 'APP.Example.TEST' }))).toBe(
+      'https://app.example.test',
+    )
+  })
+  it('keeps a non-default port', () => {
+    expect(requestSelfOrigin(reqWith({ scheme: 'http', host: '127.0.0.1:7800' }))).toBe(
+      'http://127.0.0.1:7800',
+    )
+  })
+  it('uses the FIRST token of a comma-separated X-Forwarded-Proto', () => {
+    // Proxy chain reports `https, http`; the external scheme is https.
+    expect(
+      requestSelfOrigin(reqWith({ scheme: 'http', host: 'app.example.test', xfp: 'https, http' })),
+    ).toBe('https://app.example.test')
+  })
+  it('falls back to the socket scheme on a malformed / untrusted forwarded proto', () => {
+    expect(
+      requestSelfOrigin(reqWith({ scheme: 'http', host: 'app.example.test', xfp: 'ht!tp' })),
+    ).toBe('http://app.example.test')
+    expect(
+      requestSelfOrigin(reqWith({ scheme: 'https', host: 'app.example.test', xfp: 'gopher' })),
+    ).toBe('https://app.example.test')
+  })
+  it('returns null when the Host header is absent', () => {
+    expect(
+      requestSelfOrigin(new Request('http://x/ws/app/chat', { method: 'GET' })),
+    ).toBe(null)
+  })
+})
+
+describe('S2 (a)/Blocker B — WS upgrade accepts a canonical same-origin page', () => {
+  function upgradeReqFull(opts: {
+    scheme: string
+    host: string
+    origin: string
+    xfp?: string
+    token: string
+  }): Request {
+    const headers = new Headers({ host: opts.host, origin: opts.origin })
+    if (opts.xfp !== undefined) headers.set('x-forwarded-proto', opts.xfp)
+    return new Request(`${opts.scheme}://${opts.host}/ws/app/chat?token=${opts.token}`, {
+      method: 'GET',
+      headers,
+    })
+  }
+
+  it('ALLOWS an HTTPS same-origin upgrade on the default :443 port (101)', async () => {
+    const surface = makeSurface()
+    const res = await surface.handler(
+      upgradeReqFull({
+        scheme: 'https',
+        host: 'app.example.test:443',
+        origin: 'https://app.example.test',
+        xfp: 'https',
+        token: 'sam',
+      }),
+      makeFakeServer().server,
+    )
+    expect(res!.status).toBe(101)
+  })
+
+  it('ALLOWS a mixed-case Host same-origin upgrade (101)', async () => {
+    const surface = makeSurface()
+    const res = await surface.handler(
+      upgradeReqFull({
+        scheme: 'https',
+        host: 'APP.example.test',
+        origin: 'https://app.example.test',
+        xfp: 'https',
+        token: 'sam',
+      }),
+      makeFakeServer().server,
+    )
+    expect(res!.status).toBe(101)
+  })
+
+  it('a proxy-forwarded HTTPS (comma XFP) same-origin upgrade is accepted (101)', async () => {
+    const surface = makeSurface()
+    const res = await surface.handler(
+      upgradeReqFull({
+        scheme: 'http', // gateway sees http from the proxy…
+        host: 'app.example.test',
+        origin: 'https://app.example.test', // …but the browser is on https
+        xfp: 'https, http',
+        token: 'sam',
+      }),
+      makeFakeServer().server,
+    )
+    expect(res!.status).toBe(101)
   })
 })

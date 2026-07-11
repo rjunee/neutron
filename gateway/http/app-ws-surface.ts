@@ -139,21 +139,43 @@ export function normalizeWebOrigins(bases: readonly string[]): string[] {
 }
 
 /**
- * The server's OWN canonical origin for a request (`scheme://host[:port]`), used
- * for the same-origin check. The scheme is the real one the gateway is serving
- * on: `X-Forwarded-Proto` (set only by a real reverse proxy — a browser cannot
- * add headers to a WS handshake) when present, else the request URL's own
- * protocol. `null` when the `Host` header is absent (no reliable self-origin).
+ * The server's OWN CANONICAL origin for a request (via `URL.origin`, so a
+ * default port is stripped and the host is lower-cased — exactly like
+ * {@link normalizeWebOrigins}), used for the same-origin check. Without this a
+ * legit `Host: app.example.test:443` on HTTPS would build `https://…:443` and
+ * never equal the browser's port-stripped `Origin`.
+ *
+ * Scheme resolution: prefer `X-Forwarded-Proto` (only a real reverse proxy can
+ * set it — a browser cannot add headers to a WS handshake), take its FIRST
+ * comma-separated token, and TRUST it only when it is `http`/`https`; otherwise
+ * fall back to the actual request (socket) scheme, else `http`. `null` when the
+ * `Host` header is absent (no reliable self-origin).
  */
 export function requestSelfOrigin(req: Request): string | null {
   const host = req.headers.get('host')
   if (host === null || host.length === 0) return null
+  let socketScheme = 'http'
+  try {
+    socketScheme = new URL(req.url).protocol.replace(/:$/, '').toLowerCase()
+  } catch {
+    /* keep the http default */
+  }
   const fwd = req.headers.get('x-forwarded-proto')
-  const proto =
-    (fwd !== null && fwd.length > 0
-      ? (fwd.split(',')[0] ?? '').trim()
-      : new URL(req.url).protocol.replace(/:$/, '')) || 'http'
-  return `${proto}://${host}`
+  const fwdFirst = fwd !== null ? (fwd.split(',')[0] ?? '').trim().toLowerCase() : ''
+  const scheme =
+    fwdFirst === 'http' || fwdFirst === 'https'
+      ? fwdFirst
+      : socketScheme === 'http' || socketScheme === 'https'
+        ? socketScheme
+        : 'http'
+  try {
+    const o = new URL(`${scheme}://${host}`).origin
+    return o !== 'null' && o.length > 0 ? o : null
+  } catch {
+    // Malformed Host — no reliable self-origin (still safe: configured origins
+    // remain matchable, and a missing self-origin only tightens the check).
+    return null
+  }
 }
 
 export interface AppWsSocketData {

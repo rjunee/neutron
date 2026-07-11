@@ -85,10 +85,15 @@ export function isLoopbackBindHost(host: string): boolean {
 
 /**
  * S2 (b) — refuse to boot a WIDE (non-loopback) bind while any dev-auth bypass
- * env is set. Throws a loud, actionable error naming the offending vars. A
+ * env is ACTIVE. Throws a loud, actionable error naming the offending vars. A
  * loopback bind is a no-op (dev ergonomics preserved).
+ *
+ * `env` is REQUIRED (no `process.env` default) — the caller MUST pass the
+ * config's own env SNAPSHOT (`BootConfig.devBypassEnv`), so the guard judges a
+ * pre-resolved config by the env it was resolved from, not whatever the global
+ * `process.env` happens to hold at boot time (the single-snapshot contract).
  */
-export function assertWideBindPolicy(host: string, env: BindEnvBag = process.env): void {
+export function assertWideBindPolicy(host: string, env: BindEnvBag): void {
   if (isLoopbackBindHost(host)) return
   const active = DEV_BYPASS_ENV_VARS.filter((name) => bypassVarActive(name, env[name]))
   if (active.length > 0) {

@@ -382,8 +382,10 @@ export async function boot(options: BootOptions = {}): Promise<BootHandle> {
   // listener while a dev-auth bypass env is set (that combination exposes the
   // agent surfaces to the network with auth OFF). Loopback binds are a no-op,
   // so the 127.0.0.1 dev/dogfood path is untouched. Thrown BEFORE the socket
-  // opens so a misconfigured wide bind never serves a single request.
-  assertWideBindPolicy(config.host, process.env)
+  // opens so a misconfigured wide bind never serves a single request. Reads the
+  // config's OWN env SNAPSHOT (`devBypassEnv`), never live `process.env` — so a
+  // pre-resolved config is judged by the env it was resolved from.
+  assertWideBindPolicy(config.host, config.devBypassEnv)
 
   // Open the listener. This is the carryover fix from S5 Argus r2: prior to
   // this commit boot() never opened any HTTP port, so the systemd unit's
