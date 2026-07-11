@@ -235,17 +235,20 @@ export class OverrunCronDetector implements WatchdogDetector {
       if (!state || state.last_run_duration_ms === null) continue
       const expected = job.expected_duration_ms ?? this.default_expected_ms
       if (state.last_run_duration_ms <= expected) continue
-      payloads.set(job.name, {
+      // PER-RUN incident key (Blocker-B fix). Keying by job name ALONE would
+      // suppress a LATER run of the same job that ALSO overran (the incident
+      // never closes until a run comes in UNDER budget). `last_run_at` identifies
+      // the specific run, so: the same overrunning run re-observed → suppressed;
+      // a DIFFERENT run that overruns → a NEW key → a fresh alert. Satisfies both
+      // "no storm for one overrun" AND "one alert per overrunning run".
+      const key = `${job.name} ${state.last_run_at}`
+      payloads.set(key, {
         job_name: job.name,
         duration_ms: state.last_run_duration_ms,
         expected_ms: expected,
         last_run_at: state.last_run_at,
       })
     }
-    // Incident-edge: a job that overran once keeps the SAME `last_run_duration_ms`
-    // in cron_state until its NEXT run, so a naive detector re-fired every tick
-    // forever. Fire once per overrun; the key clears when a later run comes in
-    // under budget, so the next overrun is a fresh incident (Blocker-1 fix).
     const risen = this.incidents.rising(payloads.keys(), (key) => newAlertId(this.kind, key, now))
     return risen.map(({ key, id }) => ({
       id,

@@ -87,6 +87,7 @@ import {
   defaultPersonaLoader,
   type DispatchBoardBinder,
   type DispatchReporter,
+  type DispatchSuspectedStuckSink,
 } from '@neutronai/agent-dispatch/index.ts'
 import {
   buildAnthropicLlmCall,
@@ -2538,22 +2539,60 @@ export function buildOpenGraphComposer(
 
     // (5) Schedule the subagent lifecycle watchdog tick — the piece that was
     // NEVER scheduled. NOTIFY-ONLY: `notify_only: true` DETECTS a stuck/dead
-    // dispatch and surfaces it through `buildDispatchWatchdogNotifier`
-    // (→ the dispatch report-back surface) but does NOT `failRun` it — nothing is
-    // killed, no record is transitioned. The `notified` ledger suppresses the
-    // every-tick repeat for a still-live stuck run. Gated on `dispatchService`
-    // (no dispatcher → empty registry → nothing to supervise). Registered in
-    // `realmodeCleanups` so shutdown clears the interval.
+    // dispatch and emits a NON-TERMINAL suspected-stuck ALERT — it does NOT
+    // `failRun` it (nothing killed, no record transitioned) and does NOT push a
+    // terminal `crashed` completion report (Blocker-A). The alert is journaled to
+    // O4 `system_events` (`watchdog_alert`, Blocker-C — the same journal the six
+    // general detectors reach) AND fanned to app-ws as a non-terminal notice. The
+    // `notified` ledger suppresses the every-tick repeat for a still-live stuck
+    // run. Gated on `dispatchService` (no dispatcher → empty registry → nothing
+    // to supervise). Registered in `realmodeCleanups` so shutdown clears it.
     //
     // ENFORCEMENT DEFERRED: killing a wedged dispatch after a threshold is a
     // SEPARATE flagged PR. The 5-min `DEFAULT_STUCK_THRESHOLD_MS`
     // (`runtime/subagent/watchdog.ts`) is UNVERIFIED against real dispatch
     // durations for killing — it only gates a NOTIFICATION here.
     if (dispatchService !== null) {
+      const dispatchStuckAlertSink: DispatchSuspectedStuckSink = (alert) => {
+        // O4 (Blocker-C) — journal the suspected-stuck dispatched subagent, the
+        // SAME `watchdog_alert` stream the six general detectors emit. Never throws.
+        void emitSystemEvent({
+          event: 'watchdog_alert',
+          module: 'watchdog',
+          level: 'warn',
+          project_slug,
+          payload: {
+            source: 'dispatch_lifecycle',
+            run_id: alert.run_id,
+            agent_kind: alert.agent_kind,
+            reason: alert.reason,
+            age_ms: alert.age_ms,
+          },
+        })
+        // app-ws — best-effort NON-terminal notice to the owner's live topics.
+        try {
+          const env: AppWsOutboundAgentMessage = {
+            v: 1,
+            type: 'agent_message',
+            body: alert.markdown,
+            message_id: `watchdog:dispatch:${alert.run_id}`,
+            ts: Date.now(),
+          }
+          for (const topic of appWsRegistry.topics()) {
+            try {
+              appWsRegistry.send(topic, env)
+            } catch {
+              // one dead socket must not stop the rest
+            }
+          }
+        } catch {
+          // app-ws delivery is best-effort — never throw into the tick
+        }
+      }
       const lifecycleWatchdog = scheduleDispatchLifecycleWatchdog({
         registry: subagentRegistry,
         control: subagentControl,
-        report: dispatchReport,
+        alert_sink: dispatchStuckAlertSink,
       })
       realmodeCleanups.push(() => lifecycleWatchdog.stop())
     }

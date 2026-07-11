@@ -45,9 +45,15 @@ export {
 
 export {
   buildDispatchWatchdogNotifier,
+  buildDispatchSuspectedStuckNotifier,
   buildBootSweepReport,
   scheduleDispatchLifecycleWatchdog,
   LIFECYCLE_WATCHDOG_TICK_MS,
+} from './watchdog-report.ts'
+export type {
+  DispatchSuspectedStuckAlert,
+  DispatchSuspectedStuckSink,
+  ScheduleDispatchLifecycleWatchdogDeps,
 } from './watchdog-report.ts'
 
 export { registerDispatchToolSurface, DISPATCH_AGENT_TOOL } from './tool.ts'

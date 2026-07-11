@@ -112,6 +112,32 @@ describe('OverrunCronDetector', () => {
     expect(alerts.length).toBe(1)
     expect(alerts[0]?.payload['job_name']).toBe('slow-job')
   })
+
+  test('Blocker-B: one alert per OVERRUNNING RUN — a second overrun is not swallowed', async () => {
+    const jobs = new CronJobRegistry()
+    jobs.register({
+      name: 'slow-job',
+      description: '',
+      schedule: { kind: 'interval_ms', interval_ms: 60_000 },
+      handler: 'h',
+      expected_duration_ms: 5_000,
+    })
+    const state = new CronStateStore(db)
+    const detector = new OverrunCronDetector({ project_slug: 't1', jobs, state })
+
+    // Run A overruns → one alert.
+    await state.record({ job_name: 'slow-job', project_slug: 't1', fired_at: 1000, duration_ms: 30_000, status: 'ok' })
+    expect((await detector.detect()).length).toBe(1)
+    // Re-observing the SAME run A → suppressed (no storm).
+    expect((await detector.detect()).length).toBe(0)
+
+    // Run B (a DIFFERENT run of the same job) ALSO overruns → a NEW alert, not
+    // swallowed by the still-open job-name incident (the round-1 over-correction).
+    await state.record({ job_name: 'slow-job', project_slug: 't1', fired_at: 2000, duration_ms: 40_000, status: 'ok' })
+    expect((await detector.detect()).length).toBe(1)
+    // Re-observing run B → suppressed again.
+    expect((await detector.detect()).length).toBe(0)
+  })
 })
 
 describe('DbLockContentionDetector', () => {

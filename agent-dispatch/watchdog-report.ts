@@ -15,13 +15,17 @@
  * agent.
  */
 
-import type { AgentWatchdogEvent, AgentWatchdogNotifier } from '@neutronai/runtime/subagent/watchdog.ts'
-import type { SubagentRecord, SubagentRegistry } from '@neutronai/runtime/subagent/registry.ts'
+import type {
+  AgentWatchdogEvent,
+  AgentWatchdogNotifier,
+  WatchdogReason,
+} from '@neutronai/runtime/subagent/watchdog.ts'
+import type { AgentKind, SubagentRecord, SubagentRegistry } from '@neutronai/runtime/subagent/registry.ts'
 import type { ControlState } from '@neutronai/runtime/subagent/control.ts'
 import type { BootSweepReport } from '@neutronai/runtime/subagent/boot-sweep.ts'
 import { runLifecycleTick } from '@neutronai/runtime/subagent/lifecycle.ts'
 import { DISPATCH_KIND_BY_AGENT_KIND } from './prompts.ts'
-import type { DispatchReport, DispatchReporter } from './service.ts'
+import type { DeliveryTarget, DispatchReport, DispatchReporter } from './service.ts'
 
 /** Build a watchdog notifier that forwards dispatch failures to `report`. */
 export function buildDispatchWatchdogNotifier(report: DispatchReporter): AgentWatchdogNotifier {
@@ -66,14 +70,86 @@ export function buildDispatchWatchdogNotifier(report: DispatchReporter): AgentWa
   }
 }
 
+/**
+ * A NON-TERMINAL "this dispatch LOOKS stuck/dead" alert (F4 Blocker-A fix). The
+ * notify-only lifecycle watchdog emits THIS — never a terminal `crashed`
+ * DispatchReport. The dispatch record is still `running` and alive: it has NOT
+ * been reaped, stopped, or transitioned. Reusing the terminal `crashed`
+ * report/status (which real completions AND the boot-sweep of a genuinely-dead
+ * orphan use) would push contradictory lifecycle facts through the completion
+ * surface. This is an ALERT, not a lifecycle event.
+ */
+export interface DispatchSuspectedStuckAlert {
+  run_id: string
+  agent_kind: AgentKind
+  /** Why it looks stuck. `stuck` = no progress past threshold; `process_dead` = pid gone. */
+  reason: WatchdogReason
+  /** Staleness at detection (ms). */
+  age_ms: number
+  /** Human-readable NON-terminal notice (explicitly states nothing was stopped). */
+  markdown: string
+  delivery_target?: DeliveryTarget
+}
+
+/** Sink for the non-terminal suspected-stuck alert (O4 journal + app-ws in prod). */
+export type DispatchSuspectedStuckSink = (alert: DispatchSuspectedStuckAlert) => void | Promise<void>
+
+/**
+ * Build a notify-only watchdog notifier that emits a NON-TERMINAL
+ * {@link DispatchSuspectedStuckAlert} (F4 Blocker-A fix) instead of the terminal
+ * `crashed` DispatchReport. It states plainly that the dispatch has NOT been
+ * stopped and may still complete — it never claims a terminal crash for a run
+ * the notify-only watchdog leaves live. Skips forge/argus (Trident's own loop).
+ */
+export function buildDispatchSuspectedStuckNotifier(
+  sink: DispatchSuspectedStuckSink,
+): AgentWatchdogNotifier {
+  return async (event: AgentWatchdogEvent): Promise<void> => {
+    const kind = DISPATCH_KIND_BY_AGENT_KIND[event.agent_kind]
+    if (kind === undefined) return // forge/argus — Trident's, not ours
+
+    const reasonText =
+      event.reason === 'process_dead'
+        ? 'its process appears to be gone'
+        : 'it has made no progress past its inactivity threshold'
+    const markdown = [
+      `### Supervisor alert: dispatched ${event.agent_kind} looks stuck (${event.reason})`,
+      `- run_id: \`${event.run_id}\``,
+      `- age: ${event.age_ms}ms`,
+      '',
+      `A dispatched ${event.agent_kind} subagent ${reasonText}. This is a NOTIFICATION only —` +
+        ` the dispatch has NOT been stopped and remains live; it may still complete on its own.`,
+    ].join('\n')
+
+    const alert: DispatchSuspectedStuckAlert = {
+      run_id: event.run_id,
+      agent_kind: event.agent_kind,
+      reason: event.reason,
+      age_ms: event.age_ms,
+      markdown,
+    }
+    if (event.delivery_target !== undefined) alert.delivery_target = event.delivery_target
+
+    try {
+      await sink(alert)
+    } catch {
+      // Best-effort — an alert-sink failure must not abort the watchdog tick.
+    }
+  }
+}
+
 /** Default cadence for the scheduled lifecycle watchdog tick (60 s). */
 export const LIFECYCLE_WATCHDOG_TICK_MS = 60_000
 
 export interface ScheduleDispatchLifecycleWatchdogDeps {
   registry: SubagentRegistry
   control: ControlState
-  /** Report-back surface — a surfaced reap forwards here (same sink completions use). */
-  report: DispatchReporter
+  /**
+   * NON-TERMINAL alert sink (F4 Blocker-A fix). A suspected-stuck dispatch is
+   * surfaced HERE — NOT through the terminal `DispatchReporter` completions use.
+   * Production wires it to O4 `system_events` + app-ws (composer).
+   */
+  alert_sink: DispatchSuspectedStuckSink
   /** Tick cadence. Default {@link LIFECYCLE_WATCHDOG_TICK_MS}. */
   interval_ms?: number
   /** setInterval seam (tests inject a synchronous driver). Default `setInterval`. */
@@ -84,9 +160,10 @@ export interface ScheduleDispatchLifecycleWatchdogDeps {
 /**
  * Schedule the subagent lifecycle watchdog (F4) — the tick that was NEVER
  * scheduled. Runs `runLifecycleTick` on an interval in NOTIFY-ONLY mode: it
- * DETECTS a stuck/dead dispatch and surfaces it through
- * {@link buildDispatchWatchdogNotifier}, but reaps NOTHING — no canceller runs
- * (nothing killed) and no record is transitioned (no control-flow change).
+ * DETECTS a stuck/dead dispatch and emits a NON-TERMINAL
+ * {@link DispatchSuspectedStuckAlert} through `alert_sink`, but reaps NOTHING —
+ * no canceller runs (nothing killed), no record is transitioned (no control-flow
+ * change), and it does NOT push a terminal `crashed` report (Blocker-A fix).
  * Enforcement (killing a wedged dispatch after a VERIFIED threshold) is a
  * separate flagged PR; the 5-min default stuck threshold is unverified for
  * killing and here only gates a NOTIFICATION.
@@ -99,7 +176,7 @@ export interface ScheduleDispatchLifecycleWatchdogDeps {
 export function scheduleDispatchLifecycleWatchdog(
   deps: ScheduleDispatchLifecycleWatchdogDeps,
 ): { stop: () => void } {
-  const notify = buildDispatchWatchdogNotifier(deps.report)
+  const notify = buildDispatchSuspectedStuckNotifier(deps.alert_sink)
   const notified = new Set<string>()
   const setIv = deps.set_interval ?? ((fn: () => void, ms: number) => setInterval(fn, ms))
   const clearIv = deps.clear_interval ?? ((handle: unknown) => clearInterval(handle as ReturnType<typeof setInterval>))
