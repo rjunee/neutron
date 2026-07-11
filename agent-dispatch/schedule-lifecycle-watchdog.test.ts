@@ -29,6 +29,9 @@ import {
 } from '@neutronai/persistence/system-events.ts'
 import { newControlState, registerCanceller } from '@neutronai/runtime/subagent/control.ts'
 import { SubagentRegistry } from '@neutronai/runtime/subagent/registry.ts'
+import { ToolRegistry } from '@neutronai/tools/registry.ts'
+import { DispatchService } from './service.ts'
+import { registerDispatchToolSurface, DISPATCH_AGENT_TOOL } from './tool.ts'
 import {
   scheduleDispatchLifecycleWatchdog,
   buildDispatchStuckAlertSink,
@@ -393,13 +396,14 @@ describe('buildDispatchStuckAlertSink — persist-before-deliver (round-9)', () 
   })
 })
 
-describe('selectDispatchAlertTopics — cross-binding isolation (round-11)', () => {
-  // Two live app-ws topics (two conversations of the single owner).
+describe('selectDispatchAlertTopics — cross-binding isolation (round-11/13)', () => {
+  // The owner-root/General topic + two live per-project topics (two conversations).
+  const ownerRoot = 'app:owner'
   const topicA = 'app:owner:projA'
   const topicB = 'app:owner:projB'
   const registry: AppWsAlertRegistry = {
-    has: (t) => t === topicA || t === topicB,
-    topics: () => [topicA, topicB],
+    has: (t) => t === ownerRoot || t === topicA || t === topicB,
+    topics: () => [ownerRoot, topicA, topicB],
   }
   const base: DispatchSuspectedStuckAlert = {
     run_id: 'r1',
@@ -409,24 +413,119 @@ describe('selectDispatchAlertTopics — cross-binding isolation (round-11)', () 
     markdown: 'x',
   }
 
-  test('an app_socket-bound alert routes to ONLY its binding topic — the other conversation never sees it', () => {
+  test('an app_socket-bound alert routes to ONLY its binding topic — siblings never see it', () => {
     const bound = { ...base, delivery_target: { channel: 'app_socket', binding_id: topicA } }
-    const topics = selectDispatchAlertTopics(bound, registry)
+    const topics = selectDispatchAlertTopics(bound, registry, { owner_root_topic: ownerRoot })
     expect(topics).toEqual([topicA])
     expect(topics).not.toContain(topicB) // no cross-binding leak
+    expect(topics).not.toContain(ownerRoot)
   })
 
   test('a bound target whose topic has NO live device routes NOWHERE — never falls back to broadcast', () => {
     const bound = { ...base, delivery_target: { channel: 'app_socket', binding_id: 'app:owner:gone' } }
-    expect(selectDispatchAlertTopics(bound, registry)).toEqual([])
+    expect(selectDispatchAlertTopics(bound, registry, { owner_root_topic: ownerRoot })).toEqual([])
   })
 
   test('a recorded but UNSUPPORTED channel does not broadcast', () => {
     const bound = { ...base, delivery_target: { channel: 'telegram', binding_id: '123' } }
-    expect(selectDispatchAlertTopics(bound, registry)).toEqual([])
+    expect(selectDispatchAlertTopics(bound, registry, { owner_root_topic: ownerRoot })).toEqual([])
   })
 
-  test('NO delivery target → documented single-owner fallback: fan to every live topic', () => {
-    expect(selectDispatchAlertTopics(base, registry)).toEqual([topicA, topicB])
+  test('round-13: an ORIGIN-LESS alert falls back to the owner-ROOT topic ONLY — never sibling projects', () => {
+    const topics = selectDispatchAlertTopics(base, registry, { owner_root_topic: ownerRoot })
+    expect(topics).toEqual([ownerRoot])
+    expect(topics).not.toContain(topicA) // the r11 fan-to-all leak is closed
+    expect(topics).not.toContain(topicB)
+  })
+
+  test('round-13: an origin-less alert with NO owner-root configured DROPS the ephemeral push', () => {
+    expect(selectDispatchAlertTopics(base, registry)).toEqual([])
+  })
+})
+
+describe('round-13 E2E — real dispatch_agent path: origin-stamped alert isolates to its project', () => {
+  test('dispatch_agent from projA → stuck-alert reaches ONLY app:owner:projA, never projB', async () => {
+    // Real registry + control; the dispatch TURN hangs so the run stays live.
+    const registry = new SubagentRegistry()
+    const control = newControlState(registry)
+    const service = new DispatchService({
+      registry,
+      control,
+      dispatch: () => new Promise<never>(() => {}), // never settles → run stays running
+      report: () => {},
+      instance_key: 'inst-a',
+      repo_path: '/home/owner',
+      board: {
+        get: (_slug: string, id: string) => ({
+          id,
+          title: 'a fully specified plan item with plenty of detail here',
+          design_doc_ref: null,
+        }),
+        attachRun: async () => undefined,
+        clearRun: async () => undefined,
+      },
+      project_slug: 'owner',
+      default_model: 'm',
+      persona_loader: () => ({ content: 'ROLE', source: 'fallback' }),
+    })
+
+    // Register the REAL tool with the production-shaped resolver (project_id →
+    // app:owner:<project_id>). This is the actual tool→service wiring, not a
+    // manually-populated target.
+    const toolReg = new ToolRegistry()
+    registerDispatchToolSurface(toolReg, service, {
+      resolve_delivery_target: (ctx) => ({
+        channel: 'app_socket',
+        binding_id: ctx.project_id !== null ? `app:owner:${ctx.project_id}` : 'app:owner',
+      }),
+    })
+    const tool = toolReg.get(DISPATCH_AGENT_TOOL)!
+
+    // The live agent dispatches a research task FROM PROJECT A.
+    await tool.handler(
+      { kind: 'research', task: 'investigate the thing', board_item_id: 'it1' },
+      { project_slug: 'owner', project_id: 'projA', topic_id: null, call_id: 'c1', speaker_user_id: null },
+    )
+
+    // The run is live and carries projA's origin binding (stamped by the tool).
+    const live = registry.live()
+    expect(live.length).toBe(1)
+    const run_id = live[0]!.run_id
+    expect(live[0]!.delivery_target).toEqual({ channel: 'app_socket', binding_id: 'app:owner:projA' })
+
+    // Make it stale (past the 5-min suspected-stuck threshold).
+    await registry.update(run_id, { last_event_at: Date.now() - 10 * 60_000 })
+
+    // Two live conversations (+ owner root). Capture where the ephemeral push lands
+    // via the REAL router the composer's push uses.
+    const twoTopics: AppWsAlertRegistry = {
+      has: (t) => t === 'app:owner' || t === 'app:owner:projA' || t === 'app:owner:projB',
+      topics: () => ['app:owner', 'app:owner:projA', 'app:owner:projB'],
+    }
+    let pushedTopics: string[] = []
+    const sink = buildDispatchStuckAlertSink({
+      journal: async () => {}, // durable side — irrelevant to the routing assertion
+      push: (alert) => {
+        pushedTopics = selectDispatchAlertTopics(alert, twoTopics, { owner_root_topic: 'app:owner' })
+      },
+    })
+
+    // Drive the REAL lifecycle watchdog once: registry → runLifecycleTick →
+    // notifier → sink → router. Nothing manually populated.
+    const scheduled = scheduleDispatchLifecycleWatchdog({
+      registry,
+      control,
+      alert_sink: sink,
+      set_interval: noTimer,
+      clear_interval: () => {},
+    })
+    await scheduled.runOnce()
+    await scheduled.stop()
+
+    // ISOLATION: the alert reached ONLY projA's topic. The sibling project B — and
+    // even the owner-root/General surface — NEVER received it.
+    expect(pushedTopics).toEqual(['app:owner:projA'])
+    expect(pushedTopics).not.toContain('app:owner:projB')
+    expect(pushedTopics).not.toContain('app:owner')
   })
 })

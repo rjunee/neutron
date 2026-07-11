@@ -111,28 +111,42 @@ export interface AppWsAlertRegistry {
   topics(): string[]
 }
 
+/** Options for {@link selectDispatchAlertTopics}. */
+export interface DispatchAlertRouteOptions {
+  /**
+   * The single owner-root/General surface (`app:<owner>`) a genuinely
+   * origin-LESS (system/cron-initiated) dispatch alert falls back to. It is NOT a
+   * project topic, so this never fans a targeted-dispatch alert to sibling
+   * projects. Omit (or leave un-live) to DROP the ephemeral push entirely.
+   */
+  owner_root_topic?: string
+}
+
 /**
  * Choose the app-ws topic(s) a dispatch suspected-stuck alert may be pushed to,
  * HONORING the dispatch's recorded delivery target so a run bound to binding A is
- * never leaked into unrelated conversations B…N (round-11 privacy boundary).
+ * never leaked into unrelated conversations B…N (round-11/13 privacy boundary).
  *
- * TARGETED — when the alert carries an `app_socket` delivery target, `binding_id`
- * IS the app-ws `channel_topic_id`, so route to THAT topic ONLY. If that topic has
- * no live device, route to NOTHING (return `[]`) — deliberately NOT falling back to
- * a broadcast, because that broadcast is exactly the cross-binding leak we are
- * closing (the durable O4 journal still has the alert; the ephemeral push is
- * best-effort). A non-`app_socket` target is unsupported → also no ephemeral push.
+ * TARGETED — every real dispatch now stamps its ORIGINATING binding at creation
+ * (round-13, `registerDispatchToolSurface`'s `resolve_delivery_target`), so
+ * `binding_id` IS the app-ws `channel_topic_id` it came from → route to THAT topic
+ * ONLY. If that topic has no live device, route to NOTHING (return `[]`) —
+ * deliberately NOT falling back to a broadcast, because that broadcast is exactly
+ * the cross-binding leak we are closing (the durable O4 journal still holds the
+ * alert; the ephemeral push is best-effort). A non-`app_socket` target is
+ * unsupported → also no ephemeral push.
  *
- * FALLBACK — when NO delivery target was recorded (the current Open reality: neither
- * the `dispatch_agent` tool nor the `DispatchService` deps stamp one yet), fan to
- * every live topic. This is documented + intentional, NOT a leak: app-ws on Open is
- * SINGLE-OWNER, so "every live topic" is only the one owner's own surfaces, and with
- * no recorded binding there is no narrower scope to honor. It matches the existing
- * owner-fan pattern (`fanProjectsChanged`).
+ * FALLBACK — a MISSING target now means a genuinely origin-less, system/cron-
+ * initiated dispatch (a real chat-originated dispatch always carries its origin).
+ * It must NOT fan to every project topic (that was the r11 leak). Instead route to
+ * the owner-ROOT/General surface only (`owner_root_topic`, e.g. `app:<owner>`) — the
+ * owner still sees system alerts, and no sibling PROJECT topic receives them. With
+ * no owner-root topic configured (or it has no live device), DROP the ephemeral push.
  */
 export function selectDispatchAlertTopics(
   alert: Pick<DispatchSuspectedStuckAlert, 'delivery_target'>,
   registry: AppWsAlertRegistry,
+  options: DispatchAlertRouteOptions = {},
 ): string[] {
   const target = alert.delivery_target
   if (target !== undefined) {
@@ -142,7 +156,9 @@ export function selectDispatchAlertTopics(
     // A recorded-but-unsupported channel: do NOT broadcast (that would leak).
     return []
   }
-  return registry.topics()
+  // Origin-less (system-initiated): owner-root/General surface only, never siblings.
+  const root = options.owner_root_topic
+  return root !== undefined && root.length > 0 && registry.has(root) ? [root] : []
 }
 
 /** The two effects a dispatch-alert sink performs, split so the ORDERING between

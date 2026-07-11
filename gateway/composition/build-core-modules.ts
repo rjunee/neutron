@@ -179,7 +179,11 @@ export function buildCoreModules(input: CompositionInput): CoreModules {
       // named/ad-hoc background specialist that shares the SubagentRegistry +
       // watchdog with the Trident loop and reports its result back to chat.
       if (input.agent_dispatch !== undefined) {
-        registerDispatchToolSurface(reg, input.agent_dispatch.service)
+        registerDispatchToolSurface(reg, input.agent_dispatch.service, {
+          ...(input.agent_dispatch.resolve_delivery_target !== undefined
+            ? { resolve_delivery_target: input.agent_dispatch.resolve_delivery_target }
+            : {}),
+        })
       }
       // Skill-forge (parity gap #5) — register `skill_forge_list` +
       // `skill_forge_decide` when the composer wired the backend, so the live

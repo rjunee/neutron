@@ -202,6 +202,14 @@ export interface MiscCompositionInput {
    */
   agent_dispatch?: {
     service: import('@neutronai/agent-dispatch/service.ts').DispatchService
+    /**
+     * Surface-supplied resolver (F4 round-13) that stamps the ORIGINATING app-ws
+     * binding onto an agent-initiated dispatch, so its later stuck-alert routes to
+     * exactly the surface it came from (never fanned to sibling projects). The
+     * composer supplies it because the `channel_topic_id` derivation is Open-
+     * specific; omitting it leaves dispatches origin-less (system-scoped).
+     */
+    resolve_delivery_target?: import('@neutronai/agent-dispatch/tool.ts').DispatchToolSurfaceOptions['resolve_delivery_target']
   }
   /**
    * Skill-forge (auto-skillify, parity gap #5) — when supplied, the `tools`

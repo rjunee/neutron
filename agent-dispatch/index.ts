@@ -57,10 +57,15 @@ export type {
   DispatchSuspectedStuckSink,
   DispatchStuckAlertSinkEffects,
   AppWsAlertRegistry,
+  DispatchAlertRouteOptions,
   ScheduleDispatchLifecycleWatchdogDeps,
 } from './watchdog-report.ts'
 
-export { registerDispatchToolSurface, DISPATCH_AGENT_TOOL } from './tool.ts'
+export {
+  registerDispatchToolSurface,
+  DISPATCH_AGENT_TOOL,
+  type DispatchToolSurfaceOptions,
+} from './tool.ts'
 
 export {
   parseDispatchCommand,

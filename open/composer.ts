@@ -90,6 +90,7 @@ import {
   type DispatchBoardBinder,
   type DispatchReporter,
   type DispatchSuspectedStuckSink,
+  type DispatchToolSurfaceOptions,
 } from '@neutronai/agent-dispatch/index.ts'
 import {
   buildAnthropicLlmCall,
@@ -408,6 +409,24 @@ export {
   resolveImportRunningStatusDelivery,
   type ImportRunningStatusDelivery,
 } from './wiring/app-ws.ts'
+
+/**
+ * Round-13 — the app-ws delivery-target resolver injected into `dispatch_agent`.
+ * Stamps the ORIGINATING binding on an agent-initiated dispatch so its later
+ * stuck-alert / report routes back to exactly the surface it came from, never
+ * fanned to sibling projects. The active project maps to its per-project topic
+ * (`app:owner:<project_id>`); General (no active project) → the owner-root topic
+ * (`app:owner`). Module-level (no per-instance state): pure `(ctx) → DeliveryTarget`.
+ */
+const resolveDispatchDeliveryTarget: NonNullable<
+  DispatchToolSurfaceOptions['resolve_delivery_target']
+> = (ctx) => ({
+  channel: 'app_socket',
+  binding_id:
+    ctx.project_id !== null
+      ? appWsProjectTopicId(OWNER_USER_ID, ctx.project_id)
+      : appWsTopicId(OWNER_USER_ID),
+})
 
 /**
  * Build the single-owner Open graph composer. The returned closure is what
@@ -2605,13 +2624,15 @@ export function buildOpenGraphComposer(
             message_id: `watchdog:dispatch:${alert.run_id}`,
             ts: Date.now(),
           }
-          // Route by the dispatch's RECORDED delivery target (round-11 privacy
+          // Route by the dispatch's RECORDED delivery target (round-11/13 privacy
           // boundary): a run bound to a specific app_socket binding is pushed to
-          // THAT topic only, never broadcast into unrelated conversations. When no
-          // target was recorded, `selectDispatchAlertTopics` returns the owner's
-          // live topics (documented single-owner fallback — the owner's own
-          // surfaces only).
-          for (const topic of selectDispatchAlertTopics(alert, appWsRegistry)) {
+          // THAT topic only, never broadcast into unrelated conversations. A real
+          // dispatch always carries its origin now (round-13 stamping); an
+          // origin-LESS (system-initiated) alert falls back to the owner-ROOT topic
+          // only — never fanned to sibling PROJECT topics.
+          for (const topic of selectDispatchAlertTopics(alert, appWsRegistry, {
+            owner_root_topic: appWsTopicId(OWNER_USER_ID),
+          })) {
             try {
               appWsRegistry.send(topic, env)
             } catch {
@@ -2821,7 +2842,9 @@ export function buildOpenGraphComposer(
       // tool when the dispatch service was built (same credential gate as
       // trident). The live chat agent can then dispatch a research/review/
       // ad-hoc background agent that shares the SubagentRegistry + watchdog.
-      ...(dispatchService !== null ? { agent_dispatch: { service: dispatchService } } : {}),
+      ...(dispatchService !== null
+        ? { agent_dispatch: { service: dispatchService, resolve_delivery_target: resolveDispatchDeliveryTarget } }
+        : {}),
       // Skill-forge (parity gap #5) — register the `skill_forge_list` +
       // `skill_forge_decide` agent tools, backed by the SAME `SkillForgeBackend`
       // the `/skills` chat command uses (agent-native parity). Built

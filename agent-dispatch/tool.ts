@@ -20,12 +20,28 @@
  */
 
 import type { JsonSchemaDocument } from '@neutronai/core-sdk/types.ts'
-import type { ToolRegistry } from '@neutronai/tools/registry.ts'
+import type { ToolCallContext, ToolRegistry } from '@neutronai/tools/registry.ts'
 import { workBoardScopeKey } from '@neutronai/work-board/store.ts'
 import { DISPATCH_KINDS, type DispatchKind } from './prompts.ts'
-import type { DispatchRequest, DispatchService } from './service.ts'
+import type { DeliveryTarget, DispatchRequest, DispatchService } from './service.ts'
 
 export const DISPATCH_AGENT_TOOL = 'dispatch_agent'
+
+/**
+ * Options for {@link registerDispatchToolSurface}.
+ *
+ * `resolve_delivery_target` (F4 round-13) stamps the ORIGINATING binding onto the
+ * dispatch so its later report-back / stuck-alert routes to exactly the surface the
+ * dispatch was requested from — NOT broadcast to sibling projects. The surface
+ * (Open composer) supplies it because the app-ws `channel_topic_id` derivation
+ * (`appWsProjectTopicId`/`OWNER_USER_ID`) is Open-specific; this package stays free
+ * of that knowledge (and of a `wire-types` dependency). Given the warm-REPL tool
+ * context is topic-agnostic (`ctx.topic_id` is always null), it derives the binding
+ * from `ctx.project_id` — the same active-project id threaded for work-board scoping.
+ */
+export interface DispatchToolSurfaceOptions {
+  resolve_delivery_target?: (ctx: ToolCallContext) => DeliveryTarget | undefined
+}
 
 const inputSchema: JsonSchemaDocument = {
   type: 'object',
@@ -84,6 +100,7 @@ function isDispatchKind(v: unknown): v is DispatchKind {
 export function registerDispatchToolSurface(
   registry: ToolRegistry,
   service: DispatchService,
+  options: DispatchToolSurfaceOptions = {},
 ): string {
   registry.register({
     name: DISPATCH_AGENT_TOOL,
@@ -126,6 +143,13 @@ export function registerDispatchToolSurface(
         board_item_id,
         board_scope: workBoardScopeKey(ctx.project_slug, ctx.project_id),
       }
+      // Stamp the ORIGINATING binding (round-13) so this dispatch's later stuck-
+      // alert / report routes back to EXACTLY the surface it was requested from,
+      // never fanned to sibling projects. Derived from `ctx.project_id` (the
+      // topic-agnostic warm REPL leaves `ctx.topic_id` null), via the surface-
+      // supplied resolver. Absent resolver (non-app-ws surface / tests) → no target.
+      const delivery_target = options.resolve_delivery_target?.(ctx)
+      if (delivery_target !== undefined) req.delivery_target = delivery_target
       const handle = await service.dispatch(req)
       return {
         run_id: handle.run_id,
