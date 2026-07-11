@@ -2,13 +2,16 @@
  * S2 (c) — the per-install session-cookie secret is RANDOM + persisted, never
  * the old guessable `open-ephemeral-<slug>` constant, and is loaded fail-closed
  * against a hostile filesystem:
- *   - existing files are tightened to 0600 (via the fd) or rotated (Blocker #2);
+ *   - a value found with perms BROADER than 0600 is COMPROMISED → rotated, not
+ *     tightened-and-trusted (High — a later chmod can't un-expose it);
  *   - a first-boot mint race converges on one winner (Medium #3);
  *   - a SYMLINKED secret is never followed/trusted (High — token forgery);
  *   - a too-short (< 16) persisted value is rotated, not trusted (Medium);
  *   - concurrent rotation is FIRST-WRITER-WINS behind an exclusive lock: two
  *     real resolvers converge on one on-disk secret; a competitor-held lock is
- *     waited-on + adopted; a stale (crashed-holder) lock is reclaimed.
+ *     waited-on + adopted; a stale (crashed-holder) lock is reclaimed; the lock
+ *     carries an owner TOKEN so a reclaimed holder's release can't delete the
+ *     new owner's lock and let a third rotator run concurrently (High).
  */
 import { afterEach, beforeEach, describe, expect, it, spyOn } from 'bun:test'
 import * as fs from 'node:fs'
@@ -18,6 +21,7 @@ import { join } from 'node:path'
 
 import {
   __cookieSecretTiming,
+  __rotateLockInternals,
   MIN_COOKIE_SECRET_LEN,
   resolvePersistedCookieSecret,
   sessionCookieSecretLockPath,
@@ -61,52 +65,22 @@ describe('resolvePersistedCookieSecret', () => {
     expect(resolvePersistedCookieSecret(home)).not.toBe(resolvePersistedCookieSecret(freshHome()))
   })
 
-  it('High #2 — tightens a pre-existing 0644 secret to 0600 and keeps its value', () => {
+  it('High — a world-readable (0644) secret is COMPROMISED → ROTATED, not tightened-and-trusted', () => {
     const path = sessionCookieSecretPath(home)
     fs.mkdirSync(home, { recursive: true })
-    fs.writeFileSync(path, 'restored-world-readable-secret\n') // 29 chars ≥ 16
+    // A known value another local user may have ALREADY read (perms broader than
+    // 0600). Merely tightening it later cannot un-expose it → it must be rotated.
+    fs.writeFileSync(path, 'world-readable-known-secret-0123456789\n') // ≥ 16
     fs.chmodSync(path, 0o644)
     expect(fs.statSync(path).mode & 0o777).toBe(0o644)
 
     const secret = resolvePersistedCookieSecret(home)
-    expect(secret).toBe('restored-world-readable-secret')
+    // The exposed value is NEVER kept as the signing key…
+    expect(secret).not.toBe('world-readable-known-secret-0123456789')
+    expect(secret).toMatch(/^[0-9a-f]{48}$/) // …a fresh secret is minted instead
+    // …and the on-disk file is now a fresh 0600 value.
     expect(fs.statSync(path).mode & 0o777).toBe(0o600)
-  })
-
-  it('Blocker #2 — an existing secret we CANNOT tighten (fchmod throws) is NOT returned', () => {
-    const path = sessionCookieSecretPath(home)
-    fs.mkdirSync(home, { recursive: true })
-    fs.writeFileSync(path, 'exposed-secret-value-0123456789\n') // 31 chars ≥ 16
-    fs.chmodSync(path, 0o644)
-
-    const spy = spyOn(fs, 'fchmodSync').mockImplementation(() => {
-      throw Object.assign(new Error('EPERM: fchmod not permitted'), { code: 'EPERM' })
-    })
-    try {
-      const secret = resolvePersistedCookieSecret(home)
-      expect(secret).not.toBe('exposed-secret-value-0123456789')
-      expect(secret).toMatch(/^[0-9a-f]{48}$/)
-    } finally {
-      spy.mockRestore()
-    }
-  })
-
-  it('Blocker #2 — a fchmod that silently does NOT take (re-stat still wide) is NOT returned', () => {
-    const path = sessionCookieSecretPath(home)
-    fs.mkdirSync(home, { recursive: true })
-    fs.writeFileSync(path, 'still-wide-secret-value-0123456789\n') // ≥ 16
-    fs.chmodSync(path, 0o644)
-
-    const spy = spyOn(fs, 'fchmodSync').mockImplementation(() => {
-      /* pretend it worked, but change nothing */
-    })
-    try {
-      const secret = resolvePersistedCookieSecret(home)
-      expect(secret).not.toBe('still-wide-secret-value-0123456789')
-      expect(secret).toMatch(/^[0-9a-f]{48}$/)
-    } finally {
-      spy.mockRestore()
-    }
+    expect(fs.readFileSync(path, 'utf8').trim()).toBe(secret)
   })
 
   it('Medium #3 — EEXIST mint race returns the winner value, not a fresh mint', () => {
@@ -263,5 +237,38 @@ describe('resolvePersistedCookieSecret', () => {
     expect(secret).not.toBe('x')
     expect(fs.readFileSync(path, 'utf8').trim()).toBe(secret)
     expect(fs.existsSync(lockPath)).toBe(false) // reclaimed lock released, not left dangling
+  })
+
+  it('High — ownership token: a reclaimed holder\'s release does NOT delete the new owner\'s lock', () => {
+    const lockPath = sessionCookieSecretLockPath(home)
+    fs.mkdirSync(home, { recursive: true })
+
+    // A acquires the rotate lock, then STALLS — we backdate its lock past the
+    // stale threshold to simulate a paused/crashed-looking holder.
+    const heldA = __rotateLockInternals.acquire(lockPath)
+    expect(heldA).not.toBeNull()
+    const old = new Date(Date.now() - 60_000)
+    fs.utimesSync(lockPath, old, old)
+
+    // B observes A's lock as (confirmed) stale, RECLAIMS it, and now owns the
+    // lock under ITS OWN unique token — B is mid-rotation, still holding it.
+    const heldB = __rotateLockInternals.acquire(lockPath)
+    expect(heldB).not.toBeNull()
+    expect(heldB!.token).not.toBe(heldA!.token)
+
+    // A resumes and releases. It MUST NOT remove B's live lock — the pathname no
+    // longer carries A's token. (Dropping the release token check → A unlinks B's
+    // lock → this assertion + the C assertion below go red.)
+    __rotateLockInternals.release(heldA!, lockPath)
+    expect(fs.existsSync(lockPath)).toBe(true) // B's lock survived A's release
+
+    // C now tries to rotate: it sees B's live (fresh, non-stale) lock and must
+    // WAIT/adopt — it must NOT acquire and rotate concurrently with B.
+    const heldC = __rotateLockInternals.acquire(lockPath)
+    expect(heldC).toBeNull() // no concurrent rotation
+
+    // B finishes and releases its OWN lock (token matches) → lock removed.
+    __rotateLockInternals.release(heldB!, lockPath)
+    expect(fs.existsSync(lockPath)).toBe(false)
   })
 })

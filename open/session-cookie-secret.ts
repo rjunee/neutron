@@ -13,7 +13,9 @@
  * fail-closed and hostile-FS-resistant: it only ever RETURNS bytes read from a
  * confirmed REGULAR, 0600, NON-SYMLINK file opened NO-FOLLOW whose value meets
  * the high-entropy floor ({@link MIN_COOKIE_SECRET_LEN}). Anything else — a
- * symlink (token-forgery vector), a non-regular file, un-tightenable perms, or a
+ * symlink (token-forgery vector), a non-regular file, a value found with perms
+ * BROADER than 0600 (potentially already read by another local user → we ROTATE
+ * rather than tighten-and-trust, since a later chmod can't un-expose it), or a
  * too-short/weak value — is ROTATED.
  *
  * Rotation is FIRST-WRITER-WINS, not last-writer-wins: `rename(tmp → path)` is
@@ -23,11 +25,14 @@
  * (`O_CREAT|O_EXCL|O_NOFOLLOW`). The one process that creates the lock rotates
  * (re-reading the target FIRST so it adopts, not overwrites, a secret a prior
  * rotator already installed); every competitor waits (bounded) and ADOPTS that
- * one on-disk secret. A stale lock (crashed holder, detected by age) is
- * reclaimed. Otherwise it falls to a process-ephemeral secret. Never a
- * trusted-but-exposed on-disk value, never a guessable constant, never a hard
- * boot failure, never a hang (bounded waits/retries), never divergence with
- * false confidence.
+ * one on-disk secret. The lock carries a UNIQUE owner TOKEN (pid + monotonic
+ * seq): a process only ever unlinks a lock still carrying ITS token, and only
+ * reclaims one confirmed stale (same token across two reads + age) — so even a
+ * reclaimed-while-stalled holder's release can't delete the new owner's lock and
+ * let a third rotator run concurrently. Otherwise it falls to a process-
+ * ephemeral secret. Never a trusted-but-exposed on-disk value, never a guessable
+ * constant, never a hard boot failure, never a hang (bounded waits/retries),
+ * never divergence with false confidence.
  */
 
 import { randomBytes } from 'node:crypto'
@@ -79,16 +84,12 @@ function readPersistedSecret(path: string): ReadResult {
   try {
     const st = fs.fstatSync(fd)
     if (!st.isFile()) return { kind: 'reject' } // reject a fifo/device/dir behind the name
-    if ((st.mode & 0o777) !== 0o600) {
-      // Tighten on the DESCRIPTOR (not the path), then re-fstat to CONFIRM the
-      // chmod actually took — never assume it did.
-      try {
-        fs.fchmodSync(fd, 0o600)
-      } catch {
-        return { kind: 'reject' }
-      }
-      if ((fs.fstatSync(fd).mode & 0o777) !== 0o600) return { kind: 'reject' }
-    }
+    // Perms broader than 0600 mean another local user may have ALREADY read the
+    // secret — a later `chmod` cannot un-expose it, so tightening-and-trusting
+    // would keep a potentially-compromised value as the signing key. Treat any
+    // non-owner-only file as COMPROMISED and ROTATE (mint a fresh secret via the
+    // first-writer-wins install path).
+    if ((st.mode & 0o777) !== 0o600) return { kind: 'reject' }
     const value = fs.readFileSync(fd, 'utf8').trim()
     // Empty / short / weak persisted value is invalid → rotate to a fresh one.
     if (value.length < MIN_COOKIE_SECRET_LEN) return { kind: 'reject' }
@@ -194,51 +195,128 @@ export const __cookieSecretTiming = {
   },
 }
 
-/** True when the lock is old enough to be a crashed holder's orphan (or gone). */
-function rotateLockIsStale(lockPath: string): boolean {
+/** A held rotate lock: the open fd plus the UNIQUE owner token we stamped in it. */
+type HeldRotateLock = { fd: number; token: string }
+
+/** Per-process monotonic acquire counter → unique tokens (never Math.random). */
+let lockSeq = 0
+
+/** Read the lock's owner token + mtime via a NO-FOLLOW fd (null on any error). */
+function readRotateLockObservation(lockPath: string): { token: string; mtimeMs: number } | null {
+  let fd: number
   try {
-    return Date.now() - fs.statSync(lockPath).mtimeMs > LOCK_STALE_MS
+    fd = fs.openSync(lockPath, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW)
   } catch {
-    // Vanished / dangling between our EEXIST and this stat → reclaimable.
-    return true
+    return null
+  }
+  try {
+    const mtimeMs = fs.fstatSync(fd).mtimeMs
+    const token = fs.readFileSync(fd, 'utf8').trim()
+    return { token, mtimeMs }
+  } catch {
+    return null
+  } finally {
+    try {
+      fs.closeSync(fd)
+    } catch {
+      /* non-fatal */
+    }
   }
 }
 
 /**
- * Try to become the SOLE rotator by exclusively creating the sibling lockfile
- * (`O_CREAT|O_EXCL|O_NOFOLLOW`). Returns the held fd, or `null` if a LIVE
- * competitor holds it. A stale lock (crashed holder) is reclaimed and re-tried,
- * bounded so a rename/unlink adversary can't spin us.
+ * Classify an EEXIST lock without touching it: a LIVE competitor (→ wait +
+ * adopt), a RECLAIMABLE crashed-holder orphan, or GONE (vanished → retry the
+ * create). A stale lock is only RECLAIMABLE if a SECOND read still shows the
+ * SAME token and is still stale — so we never reclaim a lock that just changed
+ * hands (was reclaimed + refreshed by someone else) between our two reads.
  */
-function tryAcquireRotateLock(lockPath: string): number | null {
+function classifyRotateLock(lockPath: string): 'live' | 'reclaimable' | 'gone' {
+  const o1 = readRotateLockObservation(lockPath)
+  if (!o1) return 'gone'
+  if (Date.now() - o1.mtimeMs <= LOCK_STALE_MS) return 'live'
+  const o2 = readRotateLockObservation(lockPath)
+  if (!o2) return 'gone'
+  if (o2.token !== o1.token || Date.now() - o2.mtimeMs <= LOCK_STALE_MS) return 'live'
+  return 'reclaimable'
+}
+
+/**
+ * Try to become the SOLE rotator by exclusively creating the sibling lockfile
+ * (`O_CREAT|O_EXCL|O_NOFOLLOW`) and stamping a UNIQUE owner token into it.
+ * Returns the held lock, or `null` if a LIVE competitor holds it. A confirmed
+ * stale orphan is reclaimed and re-tried, bounded so a churning adversary can't
+ * spin us.
+ */
+function tryAcquireRotateLock(lockPath: string): HeldRotateLock | null {
   for (let attempt = 0; attempt < MAX_LOCK_ACQUIRE_ATTEMPTS; attempt += 1) {
+    let fd: number
     try {
-      return fs.openSync(lockPath, WX_NOFOLLOW, 0o600)
+      fd = fs.openSync(lockPath, WX_NOFOLLOW, 0o600)
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code !== 'EEXIST') return null // unexpected → ephemeral
-      if (!rotateLockIsStale(lockPath)) return null // live competitor → wait + adopt
-      try {
-        fs.unlinkSync(lockPath) // reclaim the orphan, then retry the exclusive create
-      } catch {
-        /* someone else reclaimed it first — retry the create anyway */
+      const cls = classifyRotateLock(lockPath)
+      if (cls === 'live') return null // live competitor → wait + adopt
+      if (cls === 'reclaimable') {
+        try {
+          fs.unlinkSync(lockPath) // reclaim the confirmed orphan…
+        } catch {
+          /* someone else reclaimed it first — non-fatal */
+        }
       }
+      continue // 'gone' or just-reclaimed → retry the exclusive create
     }
+    // We created it → stamp a UNIQUE owner token (pid + monotonic seq + time) so
+    // release/reclaim can PROVE ownership and never touch another owner's lock.
+    const token = `${process.pid}.${(lockSeq += 1)}.${Date.now()}`
+    try {
+      fs.writeSync(fd, token)
+    } catch {
+      try {
+        fs.closeSync(fd)
+      } catch {
+        /* non-fatal */
+      }
+      try {
+        fs.unlinkSync(lockPath)
+      } catch {
+        /* non-fatal */
+      }
+      return null
+    }
+    return { fd, token }
   }
   return null
 }
 
-/** Close + unlink the held lock (best-effort — never throws out of `finally`). */
-function releaseRotateLock(fd: number, lockPath: string): void {
+/**
+ * Release the lock, unlinking the pathname ONLY if it still carries OUR token.
+ * If we were reclaimed while stalled (another process now owns the pathname),
+ * the token won't match and we leave THEIR lock intact — otherwise our release
+ * would delete a live lock and let a third rotator run concurrently. Best-effort;
+ * on any ambiguity we prefer NOT unlinking (the lock is harmlessly reclaimed as
+ * stale later) over removing a lock that might be someone else's.
+ */
+function releaseRotateLock(held: HeldRotateLock, lockPath: string): void {
+  const cur = readRotateLockObservation(lockPath)
+  if (cur !== null && cur.token === held.token) {
+    try {
+      fs.unlinkSync(lockPath)
+    } catch {
+      /* already gone — non-fatal */
+    }
+  }
   try {
-    fs.closeSync(fd)
+    fs.closeSync(held.fd)
   } catch {
     /* already closed — non-fatal */
   }
-  try {
-    fs.unlinkSync(lockPath)
-  } catch {
-    /* lock already reclaimed — non-fatal */
-  }
+}
+
+/** Test-only seam: exercise the lock-ownership discipline directly. */
+export const __rotateLockInternals = {
+  acquire: tryAcquireRotateLock,
+  release: releaseRotateLock,
 }
 
 /**
@@ -276,8 +354,8 @@ export function resolvePersistedCookieSecret(neutronHome: string): string {
   const deadline = Date.now() + LOCK_WAIT_TOTAL_MS
 
   while (Date.now() <= deadline) {
-    const lockFd = tryAcquireRotateLock(lockPath)
-    if (lockFd !== null) {
+    const held = tryAcquireRotateLock(lockPath)
+    if (held !== null) {
       // We are the SOLE rotator.
       try {
         // A prior rotator may have already installed a valid secret in a window
@@ -288,7 +366,7 @@ export function resolvePersistedCookieSecret(neutronHome: string): string {
         if (installed !== null) return installed
         break // couldn't install even under the lock → ephemeral
       } finally {
-        releaseRotateLock(lockFd, lockPath)
+        releaseRotateLock(held, lockPath)
       }
     }
     // A competitor holds the lock → adopt their secret the moment it lands.
