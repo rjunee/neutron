@@ -44,6 +44,41 @@ describe('GBrainStdioMcpClient — binary-missing latch', () => {
   })
 })
 
+// RA3 — the init guard re-arms on close() so a key captured AFTER the first
+// connection triggers its (marker-gated, idempotent) `embed --stale` backfill
+// on the next spawn. Without the re-arm, a reconnect would activate the
+// embedder env (resolveDynamicEnv) but never re-run the backfill path.
+describe('GBrainStdioMcpClient — init guard re-arms on close (late-key backfill)', () => {
+  test('ensureInitialized runs once per connection session, again after close()+reconnect', async () => {
+    // `/usr/bin/true` exists (so this is NOT the binary-missing latch) but exits
+    // immediately, so `client.connect` fails fast with a transport-closed error
+    // AFTER the init guard has already run. That lets us observe the guard
+    // WITHOUT a live MCP server.
+    const runs: number[] = []
+    const client = new GBrainStdioMcpClient({
+      command: '/usr/bin/true',
+      ensureInitialized: async () => {
+        runs.push(1)
+      },
+    })
+
+    // First connection session: guard runs once.
+    await client.call('get_links', { slug: 'x' }).catch(() => {})
+    expect(runs.length).toBe(1)
+
+    // A second call WITHOUT a reconnect must NOT re-run the guard (still the
+    // same latched session — this is the "at most once per session" invariant).
+    await client.call('get_links', { slug: 'x' }).catch(() => {})
+    expect(runs.length).toBe(1)
+
+    // Teardown re-arms the guard; the next connection (e.g. after a key was
+    // stored) re-runs it → the marker-gated backfill can fire.
+    await client.close()
+    await client.call('get_links', { slug: 'x' }).catch(() => {})
+    expect(runs.length).toBe(2)
+  })
+})
+
 // composeGbrainChildEnv — the boot-time-vs-spawn-time env merge that lets an
 // embedder opted in AFTER process boot still activate (the onboarding/admin
 // OpenAI key is captured over the already-running server). The lazy

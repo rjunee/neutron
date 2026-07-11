@@ -121,9 +121,14 @@ export class GBrainStdioMcpClient implements McpClient {
    */
   private unavailableDetail: string | null = null
   /**
-   * Latched once the init guard (`opts.ensureInitialized`) has run, so the
-   * idempotent `gbrain init` is attempted at most once per client even if the
-   * child is closed + reconnected later.
+   * Latched once the init guard (`opts.ensureInitialized`) has run for the
+   * CURRENT connection, so the idempotent `gbrain init` is attempted at most
+   * once per `gbrain serve` session. RE-ARMED on `close()` so a teardown +
+   * reconnect runs the guard again — this is what lets an OpenAI key captured
+   * AFTER the first connection trigger its one-time `gbrain embed --stale`
+   * backfill of pre-key pages on the next spawn (the guard body is idempotent:
+   * `init` is skipped when the brain exists and the backfill is marker-gated,
+   * so re-running per session is cheap + safe).
    */
   private initGuardDone = false
   /** The latest GBrain upstream upgrade notice, fed from the child's stderr. */
@@ -222,6 +227,14 @@ export class GBrainStdioMcpClient implements McpClient {
       await this.client.close()
       this.client = null
     }
+    // Re-arm the init guard so the NEXT connect re-runs it. A key captured
+    // after this session (onboarding/admin) then triggers its marker-gated
+    // `gbrain embed --stale` backfill on the reconnect — without this, the
+    // reconnect would activate the embedder env (via `resolveDynamicEnv`) but
+    // never backfill the pages written before the key existed. Not gated on a
+    // prior client: a connect that failed before completing (leaving the guard
+    // latched but no live child) must also re-arm so the next attempt retries.
+    this.initGuardDone = false
   }
 }
 
