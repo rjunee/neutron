@@ -202,17 +202,24 @@ export class ChatWsClient {
    * "connectivity regained" event (browser `online`; NetInfo `isConnected` on
    * native, via the W6 bridge) so a reconnect fires the INSTANT the network is
    * back instead of waiting out the (up-to-`maxBackoffMs`) backoff. Resets the
-   * backoff to base and reconnects NOW when we're not already open/connecting;
-   * a no-op after an explicit `close()` or while backgrounded (`setActive`
-   * owns the foreground/background lifecycle). Safe to call spuriously — an
-   * already-open socket is left untouched (a genuinely half-open one is caught
-   * by the heartbeat).
+   * backoff to base and reconnects NOW when we're not already open/connecting
+   * and no retry is already mid-handshake; a no-op after an explicit `close()`
+   * or while backgrounded (`setActive` owns the foreground/background
+   * lifecycle). Safe to call spuriously — an already-open (or already-in-
+   * flight) socket is left untouched (a genuinely half-open one is caught by
+   * the heartbeat).
    */
   notifyReachable(): void {
     if (this.closedByUser || !this.active) return
     this.attempt = 0
     this.cancelReconnect()
     if (this.status === 'open' || this.status === 'connecting') return
+    // Same ambiguous-`'reconnecting'`-status boundary as `connect()`: a retry
+    // attempt can be actively mid-handshake (a socket already in flight) even
+    // though `status` isn't `'connecting'`. Leave it alone — connectivity
+    // coming back doesn't mean that handshake is stuck, and tearing it down
+    // here would just be needless churn (or worse, race its own onopen).
+    if (this.socket !== null) return
     this.openSocket()
   }
 

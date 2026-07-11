@@ -219,6 +219,56 @@ describe('W5 GAP-2 — notifyReachable reconnects now + resets backoff', () => {
     sockets.at(-1)!.fireOpen()
     expect(client.getStatus()).toBe('open')
   })
+
+  it('leaves an ALREADY-IN-FLIGHT retry handshake alone instead of tearing it down', () => {
+    // Per Codex review: `status === 'reconnecting'` is ambiguous — it also
+    // covers a retry socket actively mid-handshake (a backoff timer already
+    // fired, `openSocket()` ran, but `onopen` hasn't landed yet), not just
+    // "waiting on the timer". `notifyReachable()` only special-cased `'open'`
+    // and `'connecting'` as busy, so a reachability signal arriving mid-retry
+    // would tear down a handshake that might well succeed on its own and
+    // open a redundant replacement — needless churn on the exact "network
+    // just came back" signal this method exists to react to quickly.
+    const clock = new VirtualClock()
+    const sockets: FakeSocket[] = []
+    let closeCount = 0
+    const client = new ChatWsClient({
+      url: 'wss://test/ws/app/chat',
+      createSocket: () => {
+        const s = new FakeSocket()
+        sockets.push(s)
+        return s
+      },
+      onClose: () => { closeCount++ },
+      minBackoffMs: 500,
+      maxBackoffMs: 15_000,
+      jitter: () => 0,
+      heartbeatIntervalMs: 0, // isolate: no heartbeat noise
+      setTimeoutFn: clock.set,
+      clearTimeoutFn: clock.clear,
+    })
+    client.connect()
+    sockets[0]!.fireOpen()
+    sockets[0]!.fireClose() // unexpected drop → backoff timer armed
+    clock.advance(500) // timer fires → socket[1] created, actively mid-handshake
+    expect(client.getStatus()).toBe('reconnecting') // retry in flight, not yet open
+    expect(clock.pending()).toBe(0) // no timer armed — a live socket is in flight
+
+    const inFlight = sockets[1]!
+    const closesBefore = closeCount
+
+    client.notifyReachable() // reachability fires while the retry is mid-handshake
+
+    // Must be a true no-op on the in-flight socket: not closed, no spurious
+    // onClose, no redundant replacement socket opened.
+    expect(sockets.length).toBe(2)
+    expect(inFlight.closed).toBe(false)
+    expect(closeCount).toBe(closesBefore)
+
+    inFlight.fireOpen()
+    expect(client.getStatus()).toBe('open')
+    expect(sockets.length).toBe(2)
+  })
 })
 
 // ===========================================================================
