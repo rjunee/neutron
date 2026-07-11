@@ -7,6 +7,7 @@ import {
   applyMigrations,
   isQuietMigrate,
   loadMigrations,
+  splitPragmaPreamble,
   summarizeMigrateResult,
 } from './runner.ts'
 
@@ -326,6 +327,52 @@ test('applyMigrations rolls back the whole migration on mid-file failure', () =>
     .get()
   expect(migRow).toBeNull()
 
+  db.close()
+})
+
+// splitPragmaPreamble's guard against exec'ing a comment-only preamble used to
+// word-match `/PRAGMA\s+/i` against the RAW preamble text, INCLUDING its
+// leading comment block. A header comment that merely mentions "PRAGMA "
+// (common in this tree's doc comments) but contains no actual PRAGMA
+// statement would false-pass the guard, and the caller's `db.exec(preamble)`
+// on a comment-only string throws ("Query contained no valid SQL statement"),
+// failing that migration at every fresh-install boot. The fix strips comments
+// from the matched preamble before testing for a real PRAGMA statement.
+test('splitPragmaPreamble does not treat a comment merely mentioning PRAGMA as a real preamble', () => {
+  const sql = '-- No PRAGMA preamble needed.\nCREATE TABLE foo (id INTEGER PRIMARY KEY);\n'
+  const { preamble, body } = splitPragmaPreamble(sql)
+  expect(preamble).toBe('')
+  expect(body).toBe(sql)
+})
+
+test('splitPragmaPreamble still lifts a real PRAGMA preamble past its header comment', () => {
+  const sql = '-- PRAGMA setup\nPRAGMA foreign_keys = OFF;\nCREATE TABLE bar (id INTEGER);\n'
+  const { preamble, body } = splitPragmaPreamble(sql)
+  expect(preamble).toBe('-- PRAGMA setup\nPRAGMA foreign_keys = OFF;')
+  expect(body).toBe('\nCREATE TABLE bar (id INTEGER);\n')
+})
+
+// End-to-end: a migration file shaped exactly like the failure mode above
+// (comment-only preamble whose comment contains the word PRAGMA, no real
+// PRAGMA statement) must apply cleanly, not throw at db.exec(preamble).
+test('applyMigrations applies a migration whose header comment mentions PRAGMA but has none', () => {
+  const dir = join(tmp, 'migrations-pragma-mention')
+  mkdirSync(dir, { recursive: true })
+  writeFileSync(
+    join(dir, '0001_comment_mentions_pragma.sql'),
+    '-- No PRAGMA preamble needed.\nCREATE TABLE mentions_pragma (id INTEGER PRIMARY KEY);\n',
+  )
+
+  const db = new Database(join(tmp, 'project-pragma-mention.db'), { create: true })
+  const result = applyMigrations(db, dir)
+  expect(result.applied).toEqual([1])
+
+  const row = db
+    .query<{ name: string }, []>(
+      "SELECT name FROM sqlite_master WHERE type='table' AND name='mentions_pragma'",
+    )
+    .get()
+  expect(row?.name).toBe('mentions_pragma')
   db.close()
 })
 
