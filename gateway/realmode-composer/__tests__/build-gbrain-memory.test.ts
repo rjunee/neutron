@@ -245,6 +245,13 @@ describe('resolveGbrainClientOptions', () => {
       const e = resolveEffectiveEmbedder({ env: {} }) // ollama 768
       expect(reconcileEmbedderToBrain(e, 3072)).toBeNull()
     })
+
+    test('initialized-but-unknown width → dropped to null even for OpenAI (fail safe, no guessed dims)', () => {
+      // We must NOT inject a guessed 768 against a possibly-1536/3072 column;
+      // gbrain honors its own persisted config when we inject nothing.
+      expect(reconcileEmbedderToBrain(buildOpenAiEmbedderConfig('sk-x'), 'unknown')).toBeNull()
+      expect(reconcileEmbedderToBrain(resolveEffectiveEmbedder({ env: {} }), 'unknown')).toBeNull()
+    })
   })
 
   // --- Fresh-brain width consistency (Codex blocker: init width MUST equal
@@ -433,6 +440,29 @@ describe('buildGBrainMemory', () => {
         warnings.some(
           (w) => w.includes('3072-dim') && w.includes('keyword+graph') && w.includes('OpenAI key'),
         ),
+      ).toBe(true)
+    } finally {
+      rmSync(home, { recursive: true, force: true })
+    }
+  })
+
+  test('initialized brain with UNKNOWN width (config lacks embedding_dimensions) → no 768 injected + a LOUD warning', () => {
+    const home = mkdtempSync(join(tmpdir(), 'bgm-unknown-'))
+    try {
+      const gbrainHome = join(home, 'data', 'gbrain')
+      mkdirSync(join(gbrainHome, '.gbrain'), { recursive: true })
+      // Initialized (config.json present) but width unreadable.
+      writeFileSync(join(gbrainHome, '.gbrain', 'config.json'), JSON.stringify({ engine: 'pglite' }))
+      const warnings: string[] = []
+      const orig = console.warn
+      console.warn = (...args: unknown[]) => warnings.push(args.map(String).join(' '))
+      try {
+        buildGBrainMemory({ owner_home: join(home, 'data'), project_slug: 'acme', env: {} })
+      } finally {
+        console.warn = orig
+      }
+      expect(
+        warnings.some((w) => w.includes('unreadable') && w.includes('keyword+graph')),
       ).toBe(true)
     } finally {
       rmSync(home, { recursive: true, force: true })

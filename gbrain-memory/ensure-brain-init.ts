@@ -149,6 +149,33 @@ export function readPersistedEmbeddingDims(gbrainHome: string): number | null {
 }
 
 /**
+ * The column-width state a reconciler must key off — distinguishing a FRESH
+ * brain (safe to init at the RA3 default width) from an already-initialized
+ * one whose width we can't read (must NOT be treated as fresh):
+ *
+ *   - `null`      — NO brain yet (no `config.json`). Fresh: use the RA3 default.
+ *   - `number`    — an existing brain with a KNOWN persisted column width.
+ *   - `'unknown'` — an existing/initialized brain (`config.json` present) whose
+ *                   width can't be determined (missing `embedding_dimensions`,
+ *                   a malformed/unreadable config, or a `--no-embedding` brain).
+ *                   FAIL SAFE: the reconciler injects NO embedding dimension so
+ *                   `gbrain serve` honors the brain's OWN persisted config
+ *                   rather than a guessed width that could mismatch the column.
+ */
+export type BrainEmbeddingWidth = number | 'unknown' | null
+
+/**
+ * Resolve the reconciliation width for the brain at `gbrainHome`. Combines the
+ * initialized-ness check (`isBrainInitialized`) with the persisted-dims read so
+ * an initialized-but-unreadable brain is `'unknown'` (fail safe), never `null`
+ * (which would misclassify it as fresh and inject the RA3 default width).
+ */
+export function resolveExistingBrainWidth(gbrainHome: string): BrainEmbeddingWidth {
+  if (!isBrainInitialized(gbrainHome)) return null
+  return readPersistedEmbeddingDims(gbrainHome) ?? 'unknown'
+}
+
+/**
  * The (model, dimensions) the brain's vector column is sized for. Tracks an
  * explicitly-configured embedder; otherwise the OpenAI default so an
  * onboarding-captured key upgrades the brain in place.

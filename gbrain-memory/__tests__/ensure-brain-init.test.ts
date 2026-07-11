@@ -29,6 +29,7 @@ import {
   ensureBrainInitialized,
   brainConfigPath,
   readPersistedEmbeddingDims,
+  resolveExistingBrainWidth,
 } from '../ensure-brain-init.ts'
 import { buildOpenAiEmbedderConfig, resolveEmbedderConfig } from '../embedder-config.ts'
 import type { OllamaHealthCheck } from '../embedder-config.ts'
@@ -222,6 +223,44 @@ describe('readPersistedEmbeddingDims', () => {
     mkdirSync(join(home, '.gbrain'), { recursive: true })
     writeFileSync(brainConfigPath(home), 'not json{')
     expect(readPersistedEmbeddingDims(home)).toBeNull()
+  })
+})
+
+// RA3 — three-state width resolver: FRESH vs KNOWN vs initialized-but-UNKNOWN.
+// The distinction is the Codex-flagged guard: an initialized brain whose width
+// can't be read must NOT be misclassified as fresh (which would inject 768).
+describe('resolveExistingBrainWidth', () => {
+  test('no config.json (truly fresh) → null', () => {
+    const home = tempHome()
+    expect(resolveExistingBrainWidth(home)).toBeNull()
+  })
+
+  test('config with a valid embedding_dimensions → that number', () => {
+    const home = tempHome()
+    mkdirSync(join(home, '.gbrain'), { recursive: true })
+    writeFileSync(brainConfigPath(home), JSON.stringify({ embedding_dimensions: 3072 }))
+    expect(resolveExistingBrainWidth(home)).toBe(3072)
+  })
+
+  test('initialized brain WITHOUT embedding_dimensions → "unknown" (NOT null/fresh)', () => {
+    const home = tempHome()
+    mkdirSync(join(home, '.gbrain'), { recursive: true })
+    writeFileSync(brainConfigPath(home), JSON.stringify({ engine: 'pglite' }))
+    expect(resolveExistingBrainWidth(home)).toBe('unknown')
+  })
+
+  test('initialized brain with a MALFORMED config → "unknown" (NOT null/fresh)', () => {
+    const home = tempHome()
+    mkdirSync(join(home, '.gbrain'), { recursive: true })
+    writeFileSync(brainConfigPath(home), 'not json{')
+    expect(resolveExistingBrainWidth(home)).toBe('unknown')
+  })
+
+  test('a --no-embedding brain (embedding_disabled, no dims) → "unknown"', () => {
+    const home = tempHome()
+    mkdirSync(join(home, '.gbrain'), { recursive: true })
+    writeFileSync(brainConfigPath(home), JSON.stringify({ embedding_disabled: true }))
+    expect(resolveExistingBrainWidth(home)).toBe('unknown')
   })
 })
 

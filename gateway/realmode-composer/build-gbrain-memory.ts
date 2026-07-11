@@ -48,10 +48,11 @@ import {
   type GbrainSyncStateSink,
   type MemoryStore,
   type EmbedderConfig,
+  type BrainEmbeddingWidth,
   resolveEmbedderConfig,
   buildOpenAiEmbedderConfig,
   ensureBrainInitialized,
-  readPersistedEmbeddingDims,
+  resolveExistingBrainWidth,
   resolveGbrainCommand,
   resolveGbrainChildPath,
 } from '@neutronai/gbrain-memory/index.ts'
@@ -99,34 +100,43 @@ export interface GBrainMemoryWiring {
  */
 /**
  * Reconcile an effective embedder against an EXISTING brain's persisted
- * `content_chunks` column width (`existingBrainDims`, from
- * `readPersistedEmbeddingDims`). At gbrain runtime the
+ * `content_chunks` column width (`brainWidth`, from
+ * `resolveExistingBrainWidth`). At gbrain runtime the
  * `GBRAIN_EMBEDDING_DIMENSIONS` env OVERRIDES config.json, so a width that
  * mismatches the persisted `vector(N)` column would make embed writes fail —
  * this is the guard that prevents that on a cross-version upgrade (e.g. a
  * legacy 3072-dim brain created under the pre-RA3 default meeting RA3's
  * 768-dim local fallback):
  *
- *   - `null` embedder (explicit `off`) or a FRESH brain (`existingBrainDims`
- *     null) or an already-matching width → returned unchanged.
- *   - width mismatch + OpenAI embedder → rebuilt at the brain's width. OpenAI
- *     `text-embedding-3-large` truncates via Matryoshka to any width ≤ 3072,
- *     so a stored key upgrades the legacy column IN PLACE at its native
+ *   - `null` embedder (explicit `off`) → `null`.
+ *   - `brainWidth` `null` (FRESH brain — no config yet) or a matching known
+ *     width → embedder returned unchanged (fresh init at the RA3 default; or
+ *     already aligned).
+ *   - known-width mismatch + OpenAI embedder → rebuilt at the brain's width.
+ *     OpenAI `text-embedding-3-large` truncates via Matryoshka to any width
+ *     ≤ 3072, so a stored key upgrades the legacy column IN PLACE at its native
  *     fidelity (e.g. full 3072 for a legacy brain), no rebuild.
- *   - width mismatch + Ollama embedder → dropped to `null` (keyword+graph).
- *     `nomic-embed-text` is fixed at 768 dims and cannot match a wider legacy
- *     column; rather than corrupt writes we degrade to lexical recall (the
- *     caller logs this loudly). A later OpenAI key still upgrades in place.
+ *   - known-width mismatch + Ollama embedder → dropped to `null` (keyword
+ *     +graph). `nomic-embed-text` is fixed at 768 dims and cannot match a wider
+ *     legacy column; rather than corrupt writes we degrade to lexical recall
+ *     (the caller logs this loudly). A later OpenAI key still upgrades in place.
+ *   - `brainWidth` `'unknown'` (an INITIALIZED brain whose width we can't read
+ *     — missing `embedding_dimensions`, malformed config, or `--no-embedding`)
+ *     → dropped to `null`. FAIL SAFE: inject NO embedding dimension so
+ *     `gbrain serve` honors the brain's OWN persisted config rather than a
+ *     guessed width that could mismatch the column (the caller logs this).
  */
 export function reconcileEmbedderToBrain(
   embedder: EmbedderConfig | null,
-  existingBrainDims: number | null,
+  brainWidth: BrainEmbeddingWidth,
 ): EmbedderConfig | null {
   if (embedder === null) return null
-  if (existingBrainDims === null || existingBrainDims === embedder.dimensions) return embedder
+  // Initialized-but-unknown width → never guess; let gbrain's own config drive.
+  if (brainWidth === 'unknown') return null
+  if (brainWidth === null || brainWidth === embedder.dimensions) return embedder
   if (embedder.provider === 'openai') {
     const apiKey = embedder.childEnv['OPENAI_API_KEY'] ?? ''
-    return buildOpenAiEmbedderConfig(apiKey, existingBrainDims)
+    return buildOpenAiEmbedderConfig(apiKey, brainWidth)
   }
   // Ollama (or any fixed-width local provider) cannot match a different
   // persisted column → degrade to keyword+graph rather than mis-dimension writes.
@@ -181,20 +191,20 @@ export function resolveGbrainClientOptions(input: {
    */
   resolveOpenAiKey?: () => Promise<string | undefined>
   /**
-   * The persisted `content_chunks` column width of an EXISTING brain at this
-   * `GBRAIN_HOME` (from `readPersistedEmbeddingDims`), or `null`/omitted for a
-   * FRESH brain. When set, the effective embedder is RECONCILED to it
-   * (`reconcileEmbedderToBrain`) — BOTH the static child env and the lazy
-   * `resolveDynamicEnv` seam use the same width, so a cross-version upgrade
-   * never sends `gbrain serve` a dimension that mismatches the persisted
-   * column. Stays a plain param (no I/O here) to keep this function pure; the
-   * read happens in `buildGBrainMemory`.
+   * The persisted column-width state of the brain at this `GBRAIN_HOME` (from
+   * `resolveExistingBrainWidth`): `null`/omitted = FRESH; a number = a known
+   * legacy width; `'unknown'` = initialized-but-unreadable (fail safe). The
+   * effective embedder is RECONCILED to it (`reconcileEmbedderToBrain`) — BOTH
+   * the static child env and the lazy `resolveDynamicEnv` seam use the same
+   * width, so a cross-version upgrade never sends `gbrain serve` a dimension
+   * that mismatches the persisted column. Stays a plain param (no I/O here) to
+   * keep this function pure; the read happens in `buildGBrainMemory`.
    */
-  existingBrainDims?: number | null
+  existingBrainDims?: BrainEmbeddingWidth
 }): GBrainStdioMcpClientOptions {
   const env = input.env ?? process.env
   const gbrainHome = join(input.owner_home, 'gbrain')
-  const existingBrainDims = input.existingBrainDims ?? null
+  const existingBrainDims: BrainEmbeddingWidth = input.existingBrainDims ?? null
 
   // GBRAIN_HOME is the per-instance data boundary. Forward an
   // operator/systemd-provided GBRAIN_SOURCE / GBRAIN_BRAIN_ID when present.
@@ -299,13 +309,14 @@ export function buildGBrainMemory(input: {
           return key
         }
 
-  // Read an EXISTING brain's persisted column width ONCE at boot (a fresh
-  // install has no brain yet → null → no reconciliation, it will be init'd at
-  // the RA3 default width). This is the cross-version guard: a legacy brain
-  // created under the pre-RA3 default (openai:3072) must not receive the new
-  // 768-dim local-fallback env, which would mismatch its `vector(3072)` column.
+  // Read the EXISTING brain's column-width state ONCE at boot (a fresh install
+  // has no brain yet → null → no reconciliation, it will be init'd at the RA3
+  // default width). This is the cross-version guard: a legacy brain created
+  // under the pre-RA3 default (openai:3072), OR one whose width we can't read
+  // ('unknown'), must not receive the new 768-dim local-fallback env, which
+  // would mismatch its persisted `vector(N)` column.
   const gbrainHome = join(input.owner_home, 'gbrain')
-  const existingBrainDims = readPersistedEmbeddingDims(gbrainHome)
+  const existingBrainDims = resolveExistingBrainWidth(gbrainHome)
 
   const opts = resolveGbrainClientOptions({
     owner_home: input.owner_home,
@@ -315,24 +326,31 @@ export function buildGBrainMemory(input: {
     ...(getKey !== undefined ? { resolveOpenAiKey: getKey } : {}),
   })
 
-  // Loud-not-silent: when a legacy brain's width forces the free local Ollama
-  // fallback OFF (it can't match a wider persisted column), semantic recall
-  // stays lexical for THIS brain until a key upgrades it in place — surface
-  // that, don't let it be a silent no-op (RA3 / "dead in prod" lesson).
+  // Loud-not-silent: when an existing brain's width forces the free local
+  // Ollama fallback OFF (a wider known legacy column, or an unreadable width),
+  // semantic recall stays lexical for THIS brain until a key upgrades it in
+  // place — surface that, don't let it be a silent no-op (RA3 / "dead in prod"
+  // lesson). Only warn when the default WOULD otherwise configure the local
+  // embedder (i.e. not for the explicit `off` opt-out).
   const defaultEnvEmbedder = resolveEmbedderConfig(env)
   if (
     existingBrainDims !== null &&
     defaultEnvEmbedder?.provider === 'ollama' &&
     reconcileEmbedderToBrain(defaultEnvEmbedder, existingBrainDims) === null
   ) {
-    console.warn(
-      `[gbrain-memory] project=${input.project_slug}: existing brain column is ` +
-        `${existingBrainDims}-dim (created under an earlier default); the local Ollama ` +
-        'fallback (768-dim nomic-embed-text) cannot match it, so semantic recall stays ' +
-        'keyword+graph for this brain. Paste an OpenAI key in Settings to upgrade it in ' +
-        'place (embeds at the existing width, no rebuild), or re-init the brain to use the ' +
-        'local fallback.',
-    )
+    const detail =
+      existingBrainDims === 'unknown'
+        ? 'an unreadable column width (its config predates or omits ' +
+          'embedding_dimensions); the local Ollama fallback (768-dim ' +
+          'nomic-embed-text) is not injected, so gbrain honors the brain’s own ' +
+          'persisted config and semantic recall stays keyword+graph. Re-init the ' +
+          'brain to adopt the local fallback.'
+        : `a ${existingBrainDims}-dim column (created under an earlier default); the ` +
+          'local Ollama fallback (768-dim nomic-embed-text) cannot match it, so semantic ' +
+          'recall stays keyword+graph for this brain. Paste an OpenAI key in Settings to ' +
+          'upgrade it in place at its existing width (no rebuild), or re-init the brain to ' +
+          'use the local fallback.'
+    console.warn(`[gbrain-memory] project=${input.project_slug}: existing brain has ${detail}`)
   }
 
   // Reachability fix (dogfood 2026-06-28): the launchd/systemd SERVICE runs with
