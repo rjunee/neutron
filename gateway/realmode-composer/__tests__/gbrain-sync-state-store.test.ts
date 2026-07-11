@@ -129,4 +129,42 @@ describe('createGbrainSyncStateStore', () => {
     // Must NOT throw — the store is a best-effort diagnostic.
     expect(() => store.publish(OK)).not.toThrow()
   })
+
+  test('MONOTONIC-KEEP: a null lastSuccessAt in a later publish must not clobber a recorded one', () => {
+    // Regression for the P9 data-integrity bug: GBrainSyncHook's in-RAM
+    // lastSuccessAt starts null on every process restart, so a publish before
+    // the first post-restart success (the unavailable-latch trip, or the
+    // end-of-write publish after a failed put_page) would otherwise UPSERT
+    // last_success_at back to NULL — destroying the durable "worked until
+    // <ts>" record in exactly the failure scenario the row exists to
+    // diagnose.
+    const store = createGbrainSyncStateStore({ db, scope: 'acme' })
+    store.publish(OK) // last_success_at = '2026-07-09T00:00:00.000Z'
+    store.publish({
+      status: 'unavailable',
+      latchReason: 'gbrain binary missing',
+      latchedAt: '2026-07-10T00:00:00.000Z',
+      lastSuccessAt: null, // simulates a fresh-restart hook that never re-succeeded
+      deferredCount: 0,
+    })
+    const row = readRow('acme')!
+    // The durable last-known-good timestamp must survive the null publish.
+    expect(row.last_success_at).toBe('2026-07-09T00:00:00.000Z')
+    // Non-monotonic fields DO reflect the latest snapshot verbatim (per-incident
+    // fields are correctly overwritten, not preserved).
+    expect(row.status).toBe('unavailable')
+    expect(row.latch_reason).toBe('gbrain binary missing')
+    expect(row.latched_at).toBe('2026-07-10T00:00:00.000Z')
+
+    // A REAL new success (non-null lastSuccessAt) still supersedes the old one.
+    store.publish({
+      status: 'ok',
+      latchReason: null,
+      latchedAt: null,
+      lastSuccessAt: '2026-07-10T01:00:00.000Z',
+      deferredCount: 0,
+    })
+    const row2 = readRow('acme')!
+    expect(row2.last_success_at).toBe('2026-07-10T01:00:00.000Z')
+  })
 })

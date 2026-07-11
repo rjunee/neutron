@@ -100,7 +100,18 @@ export function createGbrainSyncStateStore(input: {
              status          = excluded.status,
              latch_reason    = excluded.latch_reason,
              latched_at      = excluded.latched_at,
-             last_success_at = excluded.last_success_at,
+             -- Monotonic-keep: the sink's snapshot source (GBrainSyncHook's
+             -- in-RAM lastSuccessAt) starts NULL on every process restart, so
+             -- a publish before the first post-restart success (e.g. the
+             -- unavailable-latch trip, or the end-of-write publish after a
+             -- failed put_page) would otherwise carry snapshot.lastSuccessAt
+             -- = null and clobber the durable last-known-good timestamp. That
+             -- is exactly the failure scenario this row exists to diagnose
+             -- ("was my memory being written, and until when?"), so a null
+             -- incoming value must never erase a previously recorded one —
+             -- COALESCE keeps the durable value until a REAL new success
+             -- (a non-null excluded.last_success_at) supersedes it.
+             last_success_at = COALESCE(excluded.last_success_at, gbrain_sync_state.last_success_at),
              deferred_count  = excluded.deferred_count,
              updated_at      = excluded.updated_at`,
           [
