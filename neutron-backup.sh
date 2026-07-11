@@ -200,7 +200,68 @@ ensure_gitignore_excludes_key() {
     die "refusing to back up: .neutron-aes-key is STILL tracked in the backup repo after attempting to untrack it (git index locked / permissions?). Committing or pushing now would leak the AES key. Aborting before add/commit/push — resolve the git state (e.g. remove .git/index.lock) and re-run."
   fi
   info "untracked .neutron-aes-key from the backup repo — excluded from all future commits (local keyfile left intact)."
-  warn "  It may STILL exist in OLDER commits; rotate the key if the backup remote is not fully trusted."
+  warn "  It may STILL exist in OLDER commits; the pre-push history gate purges those before any push."
+}
+
+# Set to 1 by `purge_key_from_history` when it rewrites history, so the push
+# uses `--force` (rewriting changes every commit's SHA).
+HISTORY_REWRITTEN=0
+
+# Is a git subcommand available? A subcommand `git-<name>` lives either on PATH
+# (filter-repo installs itself there) or inside `git --exec-path` (built-ins
+# like filter-branch). Checking both is more reliable than probing `git <name>`.
+_git_subcmd_available() {
+  command -v "git-$1" >/dev/null 2>&1 && return 0
+  [ -n "${1:-}" ] && [ -e "$(git --exec-path 2>/dev/null)/git-$1" ] && return 0
+  return 1
+}
+
+# TRUE when `.neutron-aes-key` is reachable ANYWHERE in history — either a
+# reachable commit touched the path, or a reachable object is that blob. Both
+# dimensions are checked so a rename/gc quirk can't hide it.
+key_reachable_in_history() {
+  [ -n "$(git log --all --pretty=format:%H -- .neutron-aes-key 2>/dev/null)" ] && return 0
+  git rev-list --all --objects 2>/dev/null | grep -qF ' .neutron-aes-key' && return 0
+  return 1
+}
+
+# S3(a) — the key must NEVER be reachable in anything we PUSH. The index gates
+# keep it out of the CURRENT commit, but a user who ran an OLDER backup version
+# (which committed the key) still has it in reachable HISTORY, and the first
+# push to a newly configured remote would disclose it. So BEFORE any push we
+# DETECT the key in history and, if present, PURGE it from ALL commits (this is
+# a dedicated backup repo — rewriting its history to remove a leaked secret is
+# correct and expected), then VERIFY it is gone. If we cannot purge or verify,
+# we FAIL CLOSED (die) rather than push a history that still contains the key.
+# Only the key PATH is rewritten; project.db + unrelated history are untouched.
+purge_key_from_history() {
+  git rev-parse HEAD >/dev/null 2>&1 || return 0   # no commits yet → nothing to purge
+  key_reachable_in_history || return 0             # not in history → nothing to do
+
+  warn ".neutron-aes-key is present in this backup repo's HISTORY — purging it from ALL commits before push."
+  if _git_subcmd_available filter-repo; then
+    git filter-repo --path .neutron-aes-key --invert-paths --force >/dev/null 2>&1 \
+      || die "refusing to push: 'git filter-repo' failed to purge .neutron-aes-key from history. Run it by hand in $DATA_DIR, then re-run:  git filter-repo --path .neutron-aes-key --invert-paths --force"
+  elif _git_subcmd_available filter-branch; then
+    FILTER_BRANCH_SQUELCH_WARNING=1 git filter-branch --force \
+      --index-filter 'git rm --cached --ignore-unmatch .neutron-aes-key' \
+      --prune-empty -- --all >/dev/null 2>&1 \
+      || die "refusing to push: 'git filter-branch' failed to purge .neutron-aes-key from history. Run it by hand in $DATA_DIR (see below), then re-run:  FILTER_BRANCH_SQUELCH_WARNING=1 git filter-branch --force --index-filter 'git rm --cached --ignore-unmatch .neutron-aes-key' --prune-empty -- --all"
+    # filter-branch keeps the pre-rewrite refs under refs/original/; drop them,
+    # expire the reflogs, and gc so the key blob becomes truly unreachable.
+    git for-each-ref --format='%(refname)' refs/original/ 2>/dev/null \
+      | while IFS= read -r _ref; do [ -n "$_ref" ] && git update-ref -d "$_ref" 2>/dev/null || true; done
+    git reflog expire --expire=now --all >/dev/null 2>&1 || true
+    git gc --prune=now >/dev/null 2>&1 || true
+  else
+    die "refusing to push: .neutron-aes-key is in this backup repo's history and neither 'git filter-repo' nor 'git filter-branch' is available to purge it. Install git-filter-repo, then in $DATA_DIR run:  git filter-repo --path .neutron-aes-key --invert-paths --force  — and re-run the backup. (The push is BLOCKED until the key is purged so it can never reach the remote.)"
+  fi
+  HISTORY_REWRITTEN=1
+  # AUTHORITATIVE post-purge verify — never assume the rewrite worked.
+  if key_reachable_in_history; then
+    die "refusing to push: .neutron-aes-key is STILL reachable in history after the purge attempt. Aborting before push to avoid disclosing the key — purge it manually in $DATA_DIR and re-run."
+  fi
+  info "purged .neutron-aes-key from all backup history (local keyfile left intact)."
 }
 
 do_run() {
@@ -249,16 +310,36 @@ do_run() {
   # Offsite push only when a remote is configured. Local history alone is
   # already fully recoverable, so a push failure must never lose the commit.
   if [ -n "$REMOTE" ]; then
+    # S3(a) — purge the key from ALL reachable history BEFORE it can reach the
+    # remote (handles legacy repos that committed it under an older backup
+    # version), then run the AUTHORITATIVE pre-push gate: never push a history
+    # that still contains the key. Both steps fail closed (die) on any doubt.
+    purge_key_from_history
+    if key_reachable_in_history; then
+      die "refusing to push: .neutron-aes-key is reachable in history at push time. Aborting so the key can never reach $REMOTE — purge it (git filter-repo --path .neutron-aes-key --invert-paths --force in $DATA_DIR) and re-run."
+    fi
+
     if git remote get-url origin >/dev/null 2>&1; then
       git remote set-url origin "$REMOTE"
     else
       git remote add origin "$REMOTE"
     fi
     _branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo main)
-    if git push -q origin "$_branch" 2>/dev/null; then
-      info "pushed to $REMOTE ($_branch)"
+    # A history rewrite changed every SHA, so the push must be a force-push to
+    # replace the remote's old (key-containing) history. This is a dedicated
+    # backup remote (origin == $REMOTE), so force is safe + intended.
+    if [ "$HISTORY_REWRITTEN" = 1 ]; then
+      if git push -q --force origin "$_branch" 2>/dev/null; then
+        info "force-pushed purged history to $REMOTE ($_branch)"
+      else
+        warn "git push --force to $REMOTE failed — local commit preserved, will retry next run"
+      fi
     else
-      warn "git push to $REMOTE failed — local commit preserved, will retry next run"
+      if git push -q origin "$_branch" 2>/dev/null; then
+        info "pushed to $REMOTE ($_branch)"
+      else
+        warn "git push to $REMOTE failed — local commit preserved, will retry next run"
+      fi
     fi
   fi
 }
