@@ -545,6 +545,42 @@ describe('buildGBrainMemory', () => {
     }
   })
 
+  test('legacy 3072-dim brain + EAGER OpenAI key → NO degradation warning (OpenAI@3072 is selected, recall NOT degraded)', () => {
+    // Codex P2: the warning decision must factor in the eager `openaiApiKey`,
+    // matching the actual embedder SELECTION (`ensureInitialized`: `getKey() ??
+    // input.openaiApiKey`). Reading `resolveEmbedderConfig(env)` alone ignored
+    // the key, so a real key + a wide legacy brain FALSELY warned "paste a key"
+    // even though OpenAI upgrades it in place at 3072 and recall is NOT degraded.
+    const home = mkdtempSync(join(tmpdir(), 'bgm-legacy-key-'))
+    try {
+      const gbrainHome = join(home, 'data', 'gbrain')
+      mkdirSync(join(gbrainHome, '.gbrain'), { recursive: true })
+      writeFileSync(
+        join(gbrainHome, '.gbrain', 'config.json'),
+        JSON.stringify({ engine: 'pglite', embedding_dimensions: 3072 }),
+      )
+      const warnings: string[] = []
+      const orig = console.warn
+      console.warn = (...args: unknown[]) => warnings.push(args.map(String).join(' '))
+      try {
+        buildGBrainMemory({
+          owner_home: join(home, 'data'),
+          project_slug: 'acme',
+          env: {},
+          openaiApiKey: 'sk-real-eager-key',
+        })
+      } finally {
+        console.warn = orig
+      }
+      // With the eager key present the effective embedder is OpenAI@3072 (in-place
+      // upgrade) — recall is NOT degraded, so the "keyword+graph, paste a key"
+      // degradation warning must NOT fire.
+      expect(warnings.some((w) => w.includes('keyword+graph'))).toBe(false)
+    } finally {
+      rmSync(home, { recursive: true, force: true })
+    }
+  })
+
   test('initialized brain with UNKNOWN width (config lacks embedding_dimensions) → no 768 injected + a LOUD warning', () => {
     const home = mkdtempSync(join(tmpdir(), 'bgm-unknown-'))
     try {

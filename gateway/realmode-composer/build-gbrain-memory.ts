@@ -441,11 +441,19 @@ export function buildGBrainMemory(input: {
   // read: a brain absent here (fresh install) simply doesn't warn; the
   // CORRECTNESS path is the per-connect reconciliation above.
   const bootBrainDims = resolveExistingBrainWidth(gbrainHome)
-  const defaultEnvEmbedder = resolveEmbedderConfig(env)
+  // Use the EFFECTIVE EAGER embedder — factoring in a build-time `openaiApiKey`
+  // exactly as the selection does at `ensureInitialized` (:507, `getKey() ??
+  // input.openaiApiKey`). Reading `resolveEmbedderConfig(env)` alone ignored the
+  // eager key, so a real key + a wide legacy brain (e.g. 3072) falsely warned
+  // "recall stays keyword+graph, paste a key" even though OpenAI@<width> IS
+  // selected and recall is NOT degraded. (A LAZY onboarding key isn't
+  // sync-resolvable at this boot-time advisory read; the per-connect
+  // reconciliation above is the correctness path.)
+  const bootEmbedder = resolveEffectiveEmbedder({ env, openaiApiKey: input.openaiApiKey })
   if (
     bootBrainDims !== null &&
-    defaultEnvEmbedder?.provider === 'ollama' &&
-    reconcileEmbedderToBrain(defaultEnvEmbedder, bootBrainDims) === null
+    bootEmbedder?.provider === 'ollama' &&
+    reconcileEmbedderToBrain(bootEmbedder, bootBrainDims) === null
   ) {
     // A key upgrades in place ONLY if the persisted width is one OpenAI can
     // serve (1..3072 Matryoshka); a corrupt/out-of-range width can't be served
