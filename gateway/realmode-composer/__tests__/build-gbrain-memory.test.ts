@@ -16,7 +16,7 @@ import {
   resolveGbrainClientOptions,
   resolveEffectiveEmbedder,
   reconcileEmbedderToBrain,
-  makePerConnectKeyResolver,
+  makePerConnectResolver,
   type GBrainMemoryWiring,
 } from '../build-gbrain-memory.ts'
 import { composeGbrainChildEnv } from '@neutronai/gbrain-memory/index.ts'
@@ -194,6 +194,40 @@ describe('resolveGbrainClientOptions', () => {
       })
     })
 
+    test('TOCTOU: brain ABSENT at compose, legacy 3072 appears BEFORE first connect → resolveDynamicEnv reads the NEW width per spawn (never 768 → 3072 column)', async () => {
+      // The live boot path threads `resolveBrainWidth` (per-connect), NOT a
+      // composition-time `existingBrainDims`. A legacy brain created after
+      // composition must be seen at connect time.
+      let liveWidth: import('@neutronai/gbrain-memory/index.ts').BrainEmbeddingWidth = null // absent at compose
+      const opts = resolveGbrainClientOptions({
+        owner_home: '/t',
+        env: {},
+        resolveOpenAiKey: async () => undefined, // default embedder, no key
+        resolveBrainWidth: () => liveWidth,
+      })
+      // Static env has NO embedding keys — everything resolves per connect.
+      expect(opts.env).toEqual({ GBRAIN_HOME: '/t/gbrain' })
+
+      // A legacy 3072-dim brain is created/restored AFTER composition.
+      liveWidth = 3072
+      // First spawn: default Ollama (768) can't match a 3072 column → DROPPED
+      // → keyword+graph (empty), NOT a stale 768 that would corrupt writes.
+      await expect(opts.resolveDynamicEnv!()).resolves.toEqual({})
+
+      // A key stored later → OpenAI adopts the freshly-read 3072 width (in place).
+      const keyed = resolveGbrainClientOptions({
+        owner_home: '/t',
+        env: {},
+        resolveOpenAiKey: async () => 'sk-real',
+        resolveBrainWidth: () => 3072,
+      })
+      await expect(keyed.resolveDynamicEnv!()).resolves.toEqual({
+        GBRAIN_EMBEDDING_MODEL: 'openai:text-embedding-3-large',
+        GBRAIN_EMBEDDING_DIMENSIONS: '3072',
+        OPENAI_API_KEY: 'sk-real',
+      })
+    })
+
     test('legacy 3072 brain + LAZY key → resolveDynamicEnv upgrades in place at 3072, drops to keyword+graph without a key', async () => {
       let stored: string | undefined
       const opts = resolveGbrainClientOptions({
@@ -330,26 +364,21 @@ describe('resolveGbrainClientOptions', () => {
   // --- LAZY onboarding-key activation (key captured AFTER boot) -------------
   // The composer can't see the onboarding/admin OpenAI key at boot (it's
   // captured later, over the already-running server), so it threads a LAZY
-  // resolver. RA3: the STATIC child env is now the local Ollama fallback (the
-  // default, always-on baseline — no longer "keyword-only"); a
-  // `resolveDynamicEnv` thunk OVERRIDES it with OpenAI, at the SAME shared
-  // 768-dim width, once/if a key resolves — so a spawn before vs. after the
-  // key lands never straddles two different column widths.
+  // resolver. RA3 + TOCTOU fix: in the lazy (live-boot) mode the embedder seam
+  // is resolved ENTIRELY per connect in `resolveDynamicEnv` — key AND width read
+  // fresh at spawn — so the STATIC child env carries NO embedding keys
+  // (GBRAIN_HOME only). This is what makes per-connect resolution authoritative:
+  // there is no composition-time embedder snapshot that a stale width could bake
+  // in and an empty dynamic result couldn't clear.
   describe('lazy onboarding-key resolver (resolveOpenAiKey)', () => {
-    test('static child env is the local Ollama fallback; a resolveDynamicEnv thunk is attached', () => {
+    test('static child env is GBRAIN_HOME only; the embedder is resolved per-connect via resolveDynamicEnv', () => {
       const opts = resolveGbrainClientOptions({
         owner_home: '/srv/owners/acme',
         env: {},
         resolveOpenAiKey: async () => 'sk-captured-later',
       })
-      // The key is NOT in the static env — it resolves at spawn, not compose.
-      // But the RA3 default (local Ollama) IS already in the static env.
-      expect(opts.env).toEqual({
-        GBRAIN_HOME: '/srv/owners/acme/gbrain',
-        GBRAIN_EMBEDDING_MODEL: 'ollama:nomic-embed-text',
-        GBRAIN_EMBEDDING_DIMENSIONS: '768',
-        OLLAMA_BASE_URL: 'http://localhost:11434/v1',
-      })
+      // NO embedding keys in the static env — key AND width resolve at spawn.
+      expect(opts.env).toEqual({ GBRAIN_HOME: '/srv/owners/acme/gbrain' })
       expect(typeof opts.resolveDynamicEnv).toBe('function')
     })
 
@@ -526,18 +555,18 @@ describe('buildGBrainMemory', () => {
 
   test('per-connect coherence at the embedder-SELECTION boundary: init + serve pick the SAME embedder (absent→Ollama, present→OpenAI)', async () => {
     // Observable version of the coherence guarantee (Codex): mirror exactly how
-    // buildGBrainMemory wires the key — ONE shared makePerConnectKeyResolver
+    // buildGBrainMemory wires the resolver — ONE shared makePerConnectResolver
     // feeding BOTH the init-guard embedder and the serve childEnv embedder,
     // reset at the start of each connect — and assert both SELECTIONS
     // (provider + dimensions + childEnv), not just a call count.
     let stored: string | undefined
-    const kr = makePerConnectKeyResolver(async () => stored)
+    const kr = makePerConnectResolver({ resolveOpenAiKey: async () => stored, resolveBrainWidth: () => null })
     // The exact derivation buildGBrainMemory runs at both the init guard and the
-    // serve `resolveDynamicEnv` (fresh brain → no width reconciliation).
+    // serve `resolveDynamicEnv`, reading the SAME per-connect key + width.
     const selectEmbedder = async () =>
       reconcileEmbedderToBrain(
         resolveEffectiveEmbedder({ env: {}, openaiApiKey: await kr.getKey() }),
-        null,
+        kr.getBrainWidth(),
       )
 
     // --- Connect 1: no key. AND the key lands MID-connect (the race). ---
@@ -560,6 +589,45 @@ describe('buildGBrainMemory', () => {
     expect(serveSel2).toEqual(initSel2)
     expect(initSel2?.dimensions).toBe(768)
     expect(initSel2?.childEnv['OPENAI_API_KEY']).toBe('sk-mid')
+  })
+
+  test('TOCTOU: a legacy 3072 brain appearing AFTER composition (before first connect) is reconciled — init + serve NEVER send 768 to the 3072 column', async () => {
+    // Mirror buildGBrainMemory's wiring with a live width source. Brain ABSENT
+    // at composition; a legacy 3072-dim brain is created before the first
+    // connect. With per-connect width the connect sees 3072 and reconciles.
+    let liveWidth: number | 'unknown' | null = null // brain absent at compose
+    let storedKey: string | undefined
+    const kr = makePerConnectResolver({
+      resolveOpenAiKey: async () => storedKey,
+      resolveBrainWidth: () => liveWidth,
+    })
+    const selectEmbedder = async () =>
+      reconcileEmbedderToBrain(
+        resolveEffectiveEmbedder({ env: {}, openaiApiKey: await kr.getKey() }),
+        kr.getBrainWidth(),
+      )
+
+    // A legacy 3072-dim brain is created/restored AFTER composition.
+    liveWidth = 3072
+
+    // --- Connect (default embedder, no key): the fixed-width local Ollama (768)
+    //     CANNOT match a 3072 column → reconciliation DROPS it → keyword+graph.
+    kr.resetForConnect()
+    const initSel = await selectEmbedder()
+    const serveSel = await selectEmbedder()
+    expect(initSel).toBeNull() // NOT ollama@768 sent to a 3072 column
+    expect(serveSel).toBeNull()
+
+    // --- A later connect WITH a key: OpenAI adopts the brain's 3072 width
+    //     (Matryoshka) → in-place upgrade, still never 768.
+    storedKey = 'sk-real'
+    kr.resetForConnect()
+    const initSel2 = await selectEmbedder()
+    const serveSel2 = await selectEmbedder()
+    expect(initSel2?.provider).toBe('openai')
+    expect(serveSel2).toEqual(initSel2)
+    expect(initSel2?.dimensions).toBe(3072) // adopts the existing column width
+    expect(initSel2?.childEnv['GBRAIN_EMBEDDING_DIMENSIONS']).toBe('3072')
   })
 
   // --- gbrain reachability (dogfood 2026-06-28) ------------------------------
@@ -626,13 +694,16 @@ describe('buildGBrainMemory', () => {
 // The observable core of the per-connect coherence contract (Codex boundary):
 // both consumers read the SAME key within a connect, and a key stored BETWEEN
 // connects is picked up on the next connect.
-describe('makePerConnectKeyResolver', () => {
+describe('makePerConnectResolver — key coherence', () => {
   test('within ONE connect, both reads see the SAME value even if the source flips between them', async () => {
     let calls = 0
     // Absent on the first read, present on the second — the classic race.
-    const r = makePerConnectKeyResolver(async () => {
-      calls += 1
-      return calls === 1 ? undefined : 'sk-late'
+    const r = makePerConnectResolver({
+      resolveOpenAiKey: async () => {
+        calls += 1
+        return calls === 1 ? undefined : 'sk-late'
+      },
+      resolveBrainWidth: () => null,
     })
     // Read #1 = the init guard; read #2 = the serve childEnv, same connect.
     const initKey = await r.getKey()
@@ -644,9 +715,12 @@ describe('makePerConnectKeyResolver', () => {
 
   test('a found key is shared within a connect (both reads = the key, one store read)', async () => {
     let calls = 0
-    const r = makePerConnectKeyResolver(async () => {
-      calls += 1
-      return 'sk-A'
+    const r = makePerConnectResolver({
+      resolveOpenAiKey: async () => {
+        calls += 1
+        return 'sk-A'
+      },
+      resolveBrainWidth: () => null,
     })
     expect(await r.getKey()).toBe('sk-A')
     expect(await r.getKey()).toBe('sk-A')
@@ -656,9 +730,12 @@ describe('makePerConnectKeyResolver', () => {
   test('resetForConnect re-resolves → a key stored BETWEEN connects is picked up on the next connect', async () => {
     let stored: string | undefined
     let calls = 0
-    const r = makePerConnectKeyResolver(async () => {
-      calls += 1
-      return stored
+    const r = makePerConnectResolver({
+      resolveOpenAiKey: async () => {
+        calls += 1
+        return stored
+      },
+      resolveBrainWidth: () => null,
     })
     // Connect 1: no key yet → both reads absent, one store read.
     expect(await r.getKey()).toBeUndefined()
@@ -673,19 +750,61 @@ describe('makePerConnectKeyResolver', () => {
   })
 
   test('a whitespace/blank key normalizes to undefined (no accidental activation)', async () => {
-    const r = makePerConnectKeyResolver(async () => '   ')
+    const r = makePerConnectResolver({ resolveOpenAiKey: async () => '   ', resolveBrainWidth: () => null })
     expect(await r.getKey()).toBeUndefined()
   })
 
-  test('a throwing resolver is swallowed → undefined (fail-soft), and still cached for the connect', async () => {
+  test('a throwing key resolver is swallowed → undefined (fail-soft), and still cached for the connect', async () => {
     let calls = 0
-    const r = makePerConnectKeyResolver(async () => {
-      calls += 1
-      throw new Error('store unreachable')
+    const r = makePerConnectResolver({
+      resolveOpenAiKey: async () => {
+        calls += 1
+        throw new Error('store unreachable')
+      },
+      resolveBrainWidth: () => null,
     })
     expect(await r.getKey()).toBeUndefined()
     expect(await r.getKey()).toBeUndefined()
     expect(calls).toBe(1)
+  })
+
+  test('no key resolver → getKey is always undefined (eager/off path)', async () => {
+    const r = makePerConnectResolver({ resolveBrainWidth: () => 768 })
+    expect(await r.getKey()).toBeUndefined()
+  })
+})
+
+describe('makePerConnectResolver — per-connect brain-width coherence (TOCTOU guard)', () => {
+  test('width is read FRESH per connect (not snapshotted); both reads within a connect share ONE read', () => {
+    let reads = 0
+    let live: number | 'unknown' | null = null
+    const r = makePerConnectResolver({
+      resolveBrainWidth: () => {
+        reads += 1
+        return live
+      },
+    })
+    // Connect 1: brain ABSENT at composition/first read → fresh.
+    expect(r.getBrainWidth()).toBeNull()
+    expect(r.getBrainWidth()).toBeNull() // init + serve share ONE read
+    expect(reads).toBe(1)
+
+    // A legacy 3072 brain is created/restored AFTER composition, BEFORE connect 2.
+    live = 3072
+    r.resetForConnect()
+    // Connect 2: the freshly-read width now reflects the brain that appeared.
+    expect(r.getBrainWidth()).toBe(3072)
+    expect(r.getBrainWidth()).toBe(3072)
+    expect(reads).toBe(2) // exactly one more read for connect 2
+  })
+
+  test('a throwing width reader → "unknown" (fail-safe: inject no guessed width)', () => {
+    const r = makePerConnectResolver({
+      resolveBrainWidth: () => {
+        throw new Error('fs blip')
+      },
+    })
+    expect(r.getBrainWidth()).toBe('unknown')
   })
 })
 

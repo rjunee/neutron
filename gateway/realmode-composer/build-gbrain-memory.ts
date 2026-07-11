@@ -128,34 +128,68 @@ export interface GBrainMemoryWiring {
  *     guessed width that could mismatch the column (the caller logs this).
  */
 /**
- * Per-connect coherent OpenAI-key resolver. Wraps the lazy onboarding-key
- * thunk so the init guard and the serve childEnv, which each read the key
- * within one connect, observe the SAME value — a key landing between the two
- * reads can otherwise split them (init runs keyword/no-backfill while the same
- * spawn serves cloud embeddings). `getKey` memoizes the resolved key (found OR
- * miss, and swallows resolver errors → `undefined`) for the current connect;
- * `resetForConnect` clears it so the NEXT connect re-resolves fresh (preserving
- * no-restart activation: a key stored later is picked up on the next spawn). The
- * client re-runs `ensureInitialized` — which calls `resetForConnect` first — at
- * the start of every (re)connect.
+ * Per-connect coherent resolver for the two inputs that select the effective
+ * embedder — the onboarding OpenAI key AND the persisted brain column WIDTH.
+ * Both are read by the init guard (`ensureInitialized`) and the serve childEnv
+ * (`resolveDynamicEnv`) WITHIN one connect, and they MUST observe the SAME
+ * values or the two split (init runs keyword/no-backfill while the same spawn
+ * serves cloud embeddings; or init inits a fresh 768 column while serve targets
+ * a legacy 3072 one). Both are freshly resolved — and memoized — per connect:
+ *
+ *   - `getKey` memoizes the resolved key (found OR miss, swallowing resolver
+ *     errors → `undefined`) so a key landing between the two reads can't split
+ *     them.
+ *   - `getBrainWidth` memoizes a FRESH `resolveExistingBrainWidth` read (NOT a
+ *     composition-time snapshot) — a legacy brain created/restored AFTER
+ *     composition but BEFORE the first connect is seen on that connect, so
+ *     reconciliation never sends a 768 dim to a pre-existing 3072 column.
+ *
+ * `resetForConnect` clears both so the NEXT connect re-resolves fresh
+ * (preserving no-restart activation: a key/brain appearing later is picked up on
+ * the next spawn). The client re-runs `ensureInitialized` — which calls
+ * `resetForConnect` FIRST, then reads — at the start of every (re)connect, and
+ * the serve `resolveDynamicEnv` runs after, reading the same memoized values.
  */
-export function makePerConnectKeyResolver(resolveOpenAiKey: () => Promise<string | undefined>): {
+export function makePerConnectResolver(input: {
+  resolveOpenAiKey?: () => Promise<string | undefined>
+  resolveBrainWidth: () => BrainEmbeddingWidth
+}): {
   getKey: () => Promise<string | undefined>
+  getBrainWidth: () => BrainEmbeddingWidth
   resetForConnect: () => void
 } {
+  const resolveOpenAiKey = input.resolveOpenAiKey
   let cachedKey: string | undefined
-  let cacheValid = false
+  let keyValid = false
+  let cachedWidth: BrainEmbeddingWidth = null
+  let widthValid = false
   return {
     getKey: async () => {
-      if (cacheValid) return cachedKey
+      if (resolveOpenAiKey === undefined) return undefined
+      if (keyValid) return cachedKey
       const key = await resolveOpenAiKey().catch(() => undefined)
       cachedKey = key !== undefined && key.trim().length > 0 ? key : undefined
-      cacheValid = true
+      keyValid = true
       return cachedKey
     },
+    getBrainWidth: () => {
+      if (widthValid) return cachedWidth
+      // Fail-safe: an unexpected throw → 'unknown' (inject no width) rather than
+      // a guessed one. `resolveExistingBrainWidth` already handles its own I/O
+      // errors, so this is defense-in-depth.
+      try {
+        cachedWidth = input.resolveBrainWidth()
+      } catch {
+        cachedWidth = 'unknown'
+      }
+      widthValid = true
+      return cachedWidth
+    },
     resetForConnect: () => {
-      cacheValid = false
+      keyValid = false
       cachedKey = undefined
+      widthValid = false
+      cachedWidth = null
     },
   }
 }
@@ -232,66 +266,79 @@ export function resolveGbrainClientOptions(input: {
   /**
    * The persisted column-width state of the brain at this `GBRAIN_HOME` (from
    * `resolveExistingBrainWidth`): `null`/omitted = FRESH; a number = a known
-   * legacy width; `'unknown'` = initialized-but-unreadable (fail safe). The
-   * effective embedder is RECONCILED to it (`reconcileEmbedderToBrain`) — BOTH
-   * the static child env and the lazy `resolveDynamicEnv` seam use the same
-   * width, so a cross-version upgrade never sends `gbrain serve` a dimension
-   * that mismatches the persisted column. Stays a plain param (no I/O here) to
-   * keep this function pure; the read happens in `buildGBrainMemory`.
+   * legacy width; `'unknown'` = initialized-but-unreadable (fail safe). Used by
+   * the EAGER (no-lazy-resolver) path only — baked into the static child env at
+   * composition. The LIVE boot path passes `resolveBrainWidth` instead so the
+   * width is read per connect, not snapshotted here.
    */
   existingBrainDims?: BrainEmbeddingWidth
+  /**
+   * PER-CONNECT brain-width reader (the live boot path). When present, the
+   * embedder seam is resolved ENTIRELY in `resolveDynamicEnv` at each spawn —
+   * key AND width read fresh — so a legacy brain created/restored AFTER
+   * composition but BEFORE the first connect is reconciled correctly (no stale
+   * composition-time snapshot; the TOCTOU that `existingBrainDims` alone had).
+   * Threaded together with `resolveOpenAiKey`; both should be the memoized
+   * per-connect readers (`makePerConnectResolver`) so init + serve agree.
+   */
+  resolveBrainWidth?: () => BrainEmbeddingWidth
 }): GBrainStdioMcpClientOptions {
   const env = input.env ?? process.env
   const gbrainHome = join(input.owner_home, 'gbrain')
-  const existingBrainDims: BrainEmbeddingWidth = input.existingBrainDims ?? null
 
   // GBRAIN_HOME is the per-instance data boundary. Forward an
   // operator/systemd-provided GBRAIN_SOURCE / GBRAIN_BRAIN_ID when present.
   const childEnv: Record<string, string> = { GBRAIN_HOME: gbrainHome }
-
-  // Embedding-store wiring (RA3: hybrid by default). Merge the embedder's child
-  // env when an embedder is effective — by default the free local Ollama
-  // fallback, or cloud OpenAI from an eager onboarding key / the env opt-in.
-  // `null` (the explicit `NEUTRON_EMBEDDINGS=off` opt-out, OR a width-mismatched
-  // local fallback dropped by `reconcileEmbedderToBrain`) leaves childEnv as
-  // GBRAIN_HOME only → keyword + graph. The LAZY onboarding key
-  // (`resolveOpenAiKey`) is merged later via `resolveDynamicEnv` at spawn time,
-  // so it is intentionally NOT read here.
-  const embedder = reconcileEmbedderToBrain(
-    resolveEffectiveEmbedder({ env, openaiApiKey: input.openaiApiKey }),
-    existingBrainDims,
-  )
-  if (embedder !== null) {
-    Object.assign(childEnv, embedder.childEnv)
-  }
 
   const source =
     typeof env['GBRAIN_SOURCE'] === 'string' && env['GBRAIN_SOURCE']!.length > 0
       ? env['GBRAIN_SOURCE']!
       : 'default'
 
+  // The live boot path threads a lazy key resolver: in that mode the embedder
+  // seam (GBRAIN_EMBEDDING_* + provider auth) is resolved ENTIRELY per connect
+  // in `resolveDynamicEnv` — key AND width read fresh at spawn — so the static
+  // child env carries NO embedding keys (GBRAIN_HOME only). This is what makes
+  // per-connect resolution authoritative: there is no composition-time embedder
+  // snapshot that a stale width could bake in and that an empty dynamic result
+  // couldn't later clear.
+  const perConnect = input.resolveOpenAiKey !== undefined
+
+  // EAGER path only (tests / backward-compat, no lazy resolver): bake the
+  // reconciled embedder into the static child env at composition, using the
+  // composition-time `existingBrainDims`. RA3 default is the local Ollama
+  // fallback; `null` (off, or a width-mismatched drop) → keyword + graph.
+  if (!perConnect) {
+    const embedder = reconcileEmbedderToBrain(
+      resolveEffectiveEmbedder({ env, openaiApiKey: input.openaiApiKey }),
+      input.existingBrainDims ?? null,
+    )
+    if (embedder !== null) Object.assign(childEnv, embedder.childEnv)
+  }
+
   const opts: GBrainStdioMcpClientOptions = { source, env: childEnv }
   if (typeof env['GBRAIN_BRAIN_ID'] === 'string' && env['GBRAIN_BRAIN_ID']!.length > 0) {
     opts.brainId = env['GBRAIN_BRAIN_ID']
   }
 
-  // Lazy embedder seam: resolve the onboarding key at each `gbrain serve` SPAWN
-  // and merge the reconciled embedding env (GBRAIN_EMBEDDING_* + provider auth)
-  // over the static child env. Resolving here — not at composition — is what
-  // lets a key pasted after boot flip on cloud embeddings at the next SPAWN.
-  // NOTE: the stdio client holds ONE persistent `gbrain serve` child for the
-  // process, so `resolveDynamicEnv` runs at connect, not per memory op — a key
-  // captured after that child is already connected activates on the next spawn
-  // (process restart, or a reconnect after `close()` re-arms the init guard),
-  // NOT mid-session over the live connection. Absent key → the RA3 default
-  // (local Ollama fallback), reconciled to the brain width.
+  // Lazy embedder seam: resolve the onboarding key AND the brain width at each
+  // `gbrain serve` SPAWN and produce the reconciled embedding env. Resolving
+  // here — not at composition — is what lets a key pasted (or a legacy brain
+  // created) after boot take effect at the next SPAWN. NOTE: the stdio client
+  // holds ONE persistent `gbrain serve` child for the process, so this runs at
+  // connect, not per memory op — activation is a per-spawn boundary (process
+  // restart, or a reconnect after `close()` re-arms the init guard), NOT
+  // mid-session. Absent key → the RA3 default (local Ollama fallback),
+  // reconciled to the freshly-read brain width.
   if (input.resolveOpenAiKey !== undefined) {
     const resolveOpenAiKey = input.resolveOpenAiKey
+    const resolveBrainWidth = input.resolveBrainWidth
     opts.resolveDynamicEnv = async () => {
       const key = await resolveOpenAiKey()
+      const width: BrainEmbeddingWidth = resolveBrainWidth ? resolveBrainWidth() : (input.existingBrainDims ?? null)
       const lazyEmbedder = reconcileEmbedderToBrain(
         resolveEffectiveEmbedder({ env, openaiApiKey: key }),
-        existingBrainDims,
+        width,
       )
       return lazyEmbedder?.childEnv ?? {}
     }
@@ -343,35 +390,31 @@ export function buildGBrainMemory(input: {
 }): GBrainMemoryWiring {
   const env = input.env ?? process.env
 
-  // PER-CONNECT key coherence. The init guard (`ensureInitialized`, below) and
-  // the serve childEnv (`resolveDynamicEnv`) each read the key, and the client
-  // runs the guard THEN composes the env within one connect. They MUST observe
-  // the SAME key so a `gbrain embed --stale` backfill (gated on the key at init)
-  // never disagrees with the embedder the serve child actually uses.
-  const keyResolver =
-    input.resolveOpenAiKey === undefined
-      ? undefined
-      : makePerConnectKeyResolver(input.resolveOpenAiKey)
-  const getKey = keyResolver?.getKey
+  const gbrainHome = join(input.owner_home, 'gbrain')
+
+  // PER-CONNECT resolution. The init guard (`ensureInitialized`, below) and the
+  // serve childEnv (`resolveDynamicEnv`) each read the onboarding key AND the
+  // brain WIDTH, and the client runs the guard THEN composes the env within one
+  // connect. They MUST observe the SAME key + width so (a) a `gbrain embed
+  // --stale` backfill never disagrees with the serve embedder, and (b) a legacy
+  // brain appearing AFTER composition is seen on the connect (not snapshotted at
+  // boot). `resolveExistingBrainWidth` is read FRESH each connect through this
+  // resolver, never captured once.
+  const conn = makePerConnectResolver({
+    ...(input.resolveOpenAiKey !== undefined ? { resolveOpenAiKey: input.resolveOpenAiKey } : {}),
+    resolveBrainWidth: () => resolveExistingBrainWidth(gbrainHome),
+  })
+  const getKey = input.resolveOpenAiKey !== undefined ? conn.getKey : undefined
 
   // The advisory Ollama reachability probe is a once-per-client boot signal;
   // the init guard re-runs each (re)connect, so this latches after the first
   // run to keep an unreachable Ollama from adding its timeout to every retry.
   let ollamaProbed = false
 
-  // Read the EXISTING brain's column-width state ONCE at boot (a fresh install
-  // has no brain yet → null → no reconciliation, it will be init'd at the RA3
-  // default width). This is the cross-version guard: a legacy brain created
-  // under the pre-RA3 default (openai:3072), OR one whose width we can't read
-  // ('unknown'), must not receive the new 768-dim local-fallback env, which
-  // would mismatch its persisted `vector(N)` column.
-  const gbrainHome = join(input.owner_home, 'gbrain')
-  const existingBrainDims = resolveExistingBrainWidth(gbrainHome)
-
   const opts = resolveGbrainClientOptions({
     owner_home: input.owner_home,
     env,
-    existingBrainDims,
+    resolveBrainWidth: conn.getBrainWidth,
     ...(input.openaiApiKey !== undefined ? { openaiApiKey: input.openaiApiKey } : {}),
     ...(getKey !== undefined ? { resolveOpenAiKey: getKey } : {}),
   })
@@ -381,26 +424,29 @@ export function buildGBrainMemory(input: {
   // semantic recall stays lexical for THIS brain until a key upgrades it in
   // place — surface that, don't let it be a silent no-op (RA3 / "dead in prod"
   // lesson). Only warn when the default WOULD otherwise configure the local
-  // embedder (i.e. not for the explicit `off` opt-out).
+  // embedder (i.e. not for the explicit `off` opt-out). Advisory boot-time
+  // read: a brain absent here (fresh install) simply doesn't warn; the
+  // CORRECTNESS path is the per-connect reconciliation above.
+  const bootBrainDims = resolveExistingBrainWidth(gbrainHome)
   const defaultEnvEmbedder = resolveEmbedderConfig(env)
   if (
-    existingBrainDims !== null &&
+    bootBrainDims !== null &&
     defaultEnvEmbedder?.provider === 'ollama' &&
-    reconcileEmbedderToBrain(defaultEnvEmbedder, existingBrainDims) === null
+    reconcileEmbedderToBrain(defaultEnvEmbedder, bootBrainDims) === null
   ) {
     // A key upgrades in place ONLY if the persisted width is one OpenAI can
     // serve (1..3072 Matryoshka); a corrupt/out-of-range width can't be served
     // by either provider, so re-init is the only path.
     const keyCanUpgrade =
-      typeof existingBrainDims === 'number' && isOpenAiEmbeddingWidthSupported(existingBrainDims)
+      typeof bootBrainDims === 'number' && isOpenAiEmbeddingWidthSupported(bootBrainDims)
     const detail =
-      existingBrainDims === 'unknown'
+      bootBrainDims === 'unknown'
         ? 'an unreadable column width (its config predates or omits ' +
           'embedding_dimensions); the local Ollama fallback (768-dim ' +
           'nomic-embed-text) is not injected, so gbrain honors the brain’s own ' +
           'persisted config and semantic recall stays keyword+graph. Re-init the ' +
           'brain to adopt the local fallback.'
-        : `a ${existingBrainDims}-dim column (created under an earlier default); the ` +
+        : `a ${bootBrainDims}-dim column (created under an earlier default); the ` +
           'local Ollama fallback (768-dim nomic-embed-text) cannot match it, so semantic ' +
           'recall stays keyword+graph for this brain. ' +
           (keyCanUpgrade
@@ -434,22 +480,21 @@ export function buildGBrainMemory(input: {
   // client's first connect. The embedder it inits against is the SAME effective
   // embedder the serve child uses, so the vector column matches the runtime.
   opts.ensureInitialized = async () => {
-    // Start of a (re)connect: drop any key cached on a PRIOR connect so this
-    // connect re-resolves fresh (picks up a key stored since) — then every read
-    // WITHIN this connect (here + the serve `resolveDynamicEnv`) shares that one
-    // resolution, so the backfill's key and the serve embedder can't disagree.
-    keyResolver?.resetForConnect()
-    // Resolve the embedder at INIT time, not composition time: when a lazy key
-    // resolver is threaded, read the key now (memoized — same value the serve
-    // childEnv sees) so the brain is init'd + `embed --stale`-backfilled against
-    // the key present at first spawn. Absent a lazy resolver, fall back to the
-    // eager static key / env opt-in (unchanged behavior). Reconcile to the
-    // existing brain width so a legacy column drives the backfill embedder
-    // (and a fresh brain — dims null — inits at the RA3 default width).
+    // Start of a (re)connect: drop any key/width cached on a PRIOR connect so
+    // this connect re-resolves BOTH fresh (picks up a key stored — or a legacy
+    // brain created — since) — then every read WITHIN this connect (here + the
+    // serve `resolveDynamicEnv`) shares that one resolution, so the backfill's
+    // key+width and the serve embedder can't disagree.
+    conn.resetForConnect()
+    // Resolve the embedder at INIT time, not composition time: read the key +
+    // brain width NOW (memoized — the same values the serve childEnv sees) so
+    // the brain is init'd + `embed --stale`-backfilled against the key present
+    // and reconciled to the width present at THIS spawn. Absent a lazy key
+    // resolver, fall back to the eager static key / env opt-in.
     const key = getKey !== undefined ? await getKey() : input.openaiApiKey
     const embedder = reconcileEmbedderToBrain(
       resolveEffectiveEmbedder({ env, openaiApiKey: key }),
-      existingBrainDims,
+      conn.getBrainWidth(),
     )
     // The guard re-runs on every (re)connect, but the advisory Ollama probe is
     // a once-per-client boot signal — skip it after the first run so an
