@@ -268,13 +268,29 @@ export function redactUrlUserinfo(url: string): string {
   }
 }
 
-/** Derive Ollama's native `/api/tags` health/model-list endpoint from the `/v1` base URL. */
+/**
+ * Derive Ollama's native `/api/tags` health/model-list endpoint from the base
+ * URL — PRESERVING any base path so a reverse-proxied deployment probes the
+ * right place. Strip a trailing `/v1` (the OpenAI-compat suffix) and any
+ * trailing slash, then append `/api/tags`:
+ *   - `http://localhost:11434/v1`        → `http://localhost:11434/api/tags`
+ *   - `http://localhost:11434`           → `http://localhost:11434/api/tags`
+ *   - `https://proxy.example/ollama/v1`  → `https://proxy.example/ollama/api/tags`
+ *   - `https://proxy.example/ollama`     → `https://proxy.example/ollama/api/tags`
+ * (Dropping the base path would probe `https://proxy.example/api/tags` and
+ * yield a FALSE "not reachable" — which now also wrongly suppresses the
+ * fresh-init backfill marker.)
+ */
 function ollamaTagsUrl(baseUrl: string): string {
+  const stripToBase = (path: string): string => path.replace(/\/+$/, '').replace(/\/v1$/, '')
   try {
     const u = new URL(baseUrl)
-    return `${u.protocol}//${u.host}/api/tags`
+    u.pathname = `${stripToBase(u.pathname)}/api/tags`
+    u.search = ''
+    u.hash = ''
+    return u.toString()
   } catch {
-    return `${baseUrl.replace(/\/?v1\/?$/, '')}/api/tags`
+    return `${stripToBase(baseUrl)}/api/tags`
   }
 }
 

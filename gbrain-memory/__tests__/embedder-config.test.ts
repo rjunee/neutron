@@ -292,6 +292,40 @@ describe('probeOllamaHealth — best-effort reachability probe (fail-soft, no re
     await probeOllamaHealth('http://gpu-box:11434', { fetchImpl })
     expect(seenUrl).toBe('http://gpu-box:11434/api/tags')
   })
+
+  // A reverse-proxied Ollama mounts the API under a base PATH — that prefix must
+  // survive into /api/tags, else the probe hits the wrong URL, falsely reports
+  // "not reachable", and now (marker gated on probe health) wrongly suppresses
+  // the fresh-init backfill marker for a perfectly valid deployment.
+  test('a proxied base with a /v1-suffixed path prefix preserves the prefix → .../ollama/api/tags', async () => {
+    let seenUrl: string | undefined
+    const fetchImpl = (async (url: string | URL) => {
+      seenUrl = String(url)
+      return new Response(JSON.stringify({ models: [] }), { status: 200 })
+    }) as unknown as typeof fetch
+    await probeOllamaHealth('https://proxy.example/ollama/v1', { fetchImpl })
+    expect(seenUrl).toBe('https://proxy.example/ollama/api/tags')
+  })
+
+  test('a proxied base with a bare (no /v1) path prefix also preserves it → .../ollama/api/tags', async () => {
+    let seenUrl: string | undefined
+    const fetchImpl = (async (url: string | URL) => {
+      seenUrl = String(url)
+      return new Response(JSON.stringify({ models: [] }), { status: 200 })
+    }) as unknown as typeof fetch
+    await probeOllamaHealth('https://proxy.example/ollama', { fetchImpl })
+    expect(seenUrl).toBe('https://proxy.example/ollama/api/tags')
+  })
+
+  test('a proxied base with a trailing slash after /v1 still resolves cleanly', async () => {
+    let seenUrl: string | undefined
+    const fetchImpl = (async (url: string | URL) => {
+      seenUrl = String(url)
+      return new Response(JSON.stringify({ models: [] }), { status: 200 })
+    }) as unknown as typeof fetch
+    await probeOllamaHealth('https://proxy.example/ollama/v1/', { fetchImpl })
+    expect(seenUrl).toBe('https://proxy.example/ollama/api/tags')
+  })
 })
 
 describe('redactUrlUserinfo — never log OLLAMA_BASE_URL credentials', () => {
