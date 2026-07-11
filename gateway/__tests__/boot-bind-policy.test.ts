@@ -15,13 +15,42 @@ import {
 } from '../boot-bind-policy.ts'
 
 describe('isLoopbackBindHost', () => {
-  it('treats loopback literals as loopback', () => {
-    for (const h of ['127.0.0.1', 'localhost', 'LOCALHOST', '::1', '[::1]', '127.0.0.5', ' 127.0.0.1 ']) {
+  it('treats genuine loopbacks as loopback', () => {
+    for (const h of [
+      '127.0.0.1',
+      '127.0.0.255',
+      '127.1.2.3',
+      '127.0.0.5',
+      ' 127.0.0.1 ',
+      'localhost',
+      'LOCALHOST',
+      '::1',
+      '[::1]',
+      '::ffff:127.0.0.1',
+    ]) {
       expect(isLoopbackBindHost(h)).toBe(true)
     }
   })
   it('treats every wide bind as NOT loopback', () => {
     for (const h of ['0.0.0.0', '::', '[::]', '192.168.1.20', '10.0.0.3', 'example.com', 'box.local']) {
+      expect(isLoopbackBindHost(h)).toBe(false)
+    }
+  })
+  it('STRICTLY validates the 127.0.0.0/8 octets — malformed 127.* is NOT loopback (High)', () => {
+    for (const h of [
+      '127.0.0.256', // octet overflow
+      '127.999.999.999', // wildly invalid (could resolve as a hostname → non-loopback)
+      '127.0.0', // too few parts
+      '127.0.0.1.5', // too many parts
+      '127.0.0.01', // leading-zero ambiguity
+      '127.0.0.1.evil.com', // hostname suffix
+      '127x0x0x1', // not dotted-quad
+      '127..0.1', // empty octet
+      '127.0.0.1.', // trailing dot
+      '0.0.0.0',
+      '10.0.0.1',
+      '::ffff:10.0.0.1', // mapped NON-loopback
+    ]) {
       expect(isLoopbackBindHost(h)).toBe(false)
     }
   })

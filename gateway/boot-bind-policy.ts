@@ -71,15 +71,38 @@ function bypassVarActive(name: (typeof DEV_BYPASS_ENV_VARS)[number], raw: string
 }
 
 /**
+ * STRICT `127.0.0.0/8` check — TRUE only for a valid dotted-quad IPv4 literal in
+ * the loopback block: exactly four octets, each a plain 0–255 decimal with no
+ * empty part, no leading zero (rejects the `127.0.0.01` ambiguity), no overflow,
+ * and first octet exactly 127. This must be airtight: it gates the dev-bypass,
+ * so a malformed `127.999.999.999` (which a listener might resolve as a HOSTNAME
+ * onto a NON-loopback address) must NOT count as loopback. Linear scan / bounded
+ * regex — no ReDoS.
+ */
+function isLoopbackIpv4(s: string): boolean {
+  const parts = s.split('.')
+  if (parts.length !== 4) return false
+  for (const p of parts) {
+    if (p.length === 0 || p.length > 3) return false
+    if (!/^[0-9]+$/.test(p)) return false
+    if (p.length > 1 && p[0] === '0') return false // leading-zero / '00' ambiguity
+    if (Number(p) > 255) return false
+  }
+  return Number(parts[0]) === 127
+}
+
+/**
  * TRUE when `host` binds ONLY the loopback interface (reachable solely from the
  * machine itself). `0.0.0.0` / `::` / a LAN address / a hostname are all WIDE.
- * Handles a bracketed IPv6 literal (`[::1]`) and the whole `127.0.0.0/8` block.
+ * Handles a bracketed IPv6 literal (`[::1]`), the whole (strictly-validated)
+ * `127.0.0.0/8` block, and the IPv4-mapped loopback `::ffff:127.x.x.x`.
  */
 export function isLoopbackBindHost(host: string): boolean {
   const h = host.trim().toLowerCase().replace(/^\[/, '').replace(/\]$/, '')
   if (h === 'localhost' || h === '::1') return true
-  // Any 127.0.0.0/8 literal is loopback (127.0.0.1 default + aliases).
-  if (/^127(?:\.\d{1,3}){3}$/.test(h)) return true
+  if (isLoopbackIpv4(h)) return true
+  // IPv4-mapped IPv6 loopback (e.g. ::ffff:127.0.0.1) — validate the embedded v4.
+  if (h.startsWith('::ffff:')) return isLoopbackIpv4(h.slice('::ffff:'.length))
   return false
 }
 
