@@ -1,11 +1,14 @@
 /**
- * K11b0 survivor tests for the RETAINED slug-history shim helpers in
- * gateway/http/chat-bridge.ts: `InMemorySlugHistoryCache` (TTL cache +
- * push-invalidate) and `buildSlugHistoryShimFromRegistry` (registry →
+ * Tests for the slug-history shim helpers in
+ * `gateway/http/slug-history-shim.ts`: `InMemorySlugHistoryCache` (TTL cache
+ * + push-invalidate) and `buildSlugHistoryShimFromRegistry` (registry →
  * async shim adapter). The JWT-claim / ownerRegistry routing this file
  * once also covered lived on the dead `buildWebChatBridge` surface
  * (excised in K11b0); the retained HTTP path's slug shim is covered by
  * landing/__tests__/auth-gate.test.ts.
+ *
+ * D3 (2026-07) — renamed from `chat-bridge-jwt-shim.test.ts` and repointed
+ * to the split-out `./slug-history-shim.ts` leaf.
  */
 
 import { describe, expect, test } from 'bun:test'
@@ -13,7 +16,7 @@ import {
   InMemorySlugHistoryCache,
   buildSlugHistoryShimFromRegistry,
   type SlugHistoryShimStore,
-} from '../chat-bridge.ts'
+} from '../slug-history-shim.ts'
 
 const NOW_MS = 1_700_000_000_000
 
