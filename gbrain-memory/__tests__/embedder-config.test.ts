@@ -346,7 +346,50 @@ describe('redactUrlUserinfo — never log OLLAMA_BASE_URL credentials', () => {
     expect(out).toContain('***@')
   })
 
-  test('a non-URL string is passed through by the regex fallback without throwing', () => {
+  // SECURITY BLOCKER (RA3): a SCHEME-LESS credential must fail CLOSED. `new URL`
+  // reads `alice:secret@host` as scheme `alice:` + opaque path with EMPTY
+  // username/password, so the parser-only path returned it unredacted and the
+  // secret leaked into the degradation warning. The fail-closed authority scan
+  // must catch it even without a `scheme://`.
+  test('scheme-less credential (host+port+path) is redacted — the leak this fixes', () => {
+    const out = redactUrlUserinfo('alice:secret@ollama.internal:11434/v1')
+    expect(out).not.toContain('secret')
+    expect(out).not.toContain('alice')
+    expect(out).toContain('***@')
+    expect(out).toContain('ollama.internal') // host still shown for diagnosis
+    expect(out).toContain('11434')
+  })
+
+  test('bare scheme-less user:pass@host is redacted', () => {
+    const out = redactUrlUserinfo('user:pass@host')
+    expect(out).not.toContain('pass')
+    expect(out).not.toContain('user')
+    expect(out).toBe('***@host')
+  })
+
+  test('scheme-less username-only user@host is redacted', () => {
+    const out = redactUrlUserinfo('user@host')
+    expect(out).not.toContain('user')
+    expect(out).toBe('***@host')
+  })
+
+  test('a well-formed scheme URL with userinfo is still redacted', () => {
+    const out = redactUrlUserinfo('http://user:pass@host')
+    expect(out).not.toContain('pass')
+    expect(out).not.toContain('user')
+    expect(out).toContain('***@')
+    expect(out).toContain('host')
+  })
+
+  test('a clean host:port URL is NOT falsely redacted (no `@` in the authority)', () => {
+    // A bare `host:port/path` has a `:` (port) but no credential — must pass through.
+    expect(redactUrlUserinfo('http://host:11434/v1')).toBe('http://host:11434/v1')
+    expect(redactUrlUserinfo('localhost:11434/v1')).toBe('localhost:11434/v1')
+    // An `@` that appears only in the PATH is not userinfo → not redacted.
+    expect(redactUrlUserinfo('http://host:11434/path@x')).toBe('http://host:11434/path@x')
+  })
+
+  test('a non-URL string with no `@` is passed through without throwing', () => {
     expect(redactUrlUserinfo('not a url')).toBe('not a url')
   })
 })

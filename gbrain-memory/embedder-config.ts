@@ -251,21 +251,57 @@ export interface OllamaHealthCheck {
 
 /**
  * Redact `user:pass@` userinfo from a URL for SAFE logging. An operator can put
- * credentials in `OLLAMA_BASE_URL` (`http://user:secret@host/v1`); those must
- * never reach a log line. Returns the URL with userinfo replaced by `***@`, or
- * the input unchanged when it has no userinfo / isn't a parseable URL.
+ * credentials in `OLLAMA_BASE_URL` — WITH a scheme (`http://user:secret@host/v1`)
+ * OR without one (`user:secret@host/v1`) — and those must NEVER reach a log line.
+ * Returns the value with any userinfo replaced by `***@`; unchanged only when the
+ * authority genuinely has no `user[:pass]@` segment.
+ *
+ * FAIL-CLOSED: a scheme-less `alice:secret@host` is NOT caught by `new URL()` —
+ * it parses as scheme `alice:` + an OPAQUE path, reporting empty username/
+ * password — so relying on the parser alone leaked it. So the parser only
+ * handles well-formed URLs with a real authority; EVERYTHING else falls through
+ * to a linear authority scan that redacts a leading `user[:pass]@` even without a
+ * scheme, over-redacting rather than risk a leak. Linear character ops only (no
+ * regex → no `js/polynomial-redos`, the prior CodeQL lesson in this file).
  */
 export function redactUrlUserinfo(url: string): string {
+  // Well-formed URL with an authority (`scheme://user:pass@host`): the parser
+  // locates the userinfo precisely. Only RETURN here when it actually found
+  // credentials — an empty username/password may still hide a scheme-less
+  // `user:pass@host` the parser mis-read as scheme+opaque-path, so fall through.
   try {
     const u = new URL(url)
-    if (u.username === '' && u.password === '') return url
-    u.username = ''
-    u.password = ''
-    return u.toString().replace('://', '://***@')
+    if (u.username !== '' || u.password !== '') {
+      u.username = ''
+      u.password = ''
+      return u.toString().replace('://', '://***@')
+    }
   } catch {
-    // Not a parseable URL — fall back to a regex strip of `scheme://user:pass@`.
-    return url.replace(/(^[a-z][a-z0-9+.-]*:\/\/)[^/@]*@/i, '$1***@')
+    /* not a parseable URL — fall through to the fail-closed authority scan */
   }
+  // Fail-closed strip: find the AUTHORITY (after `://` if present, else the whole
+  // leading segment, up to the first `/`, `?` or `#`) and, if it contains an `@`
+  // with any userinfo before it, redact the whole `userinfo@` span. Catches the
+  // scheme-less `alice:secret@host` case the parser misses. Uses the LAST `@` in
+  // the authority so a malformed multi-`@` value can't smuggle a credential past.
+  const schemeSep = url.indexOf('://')
+  const authorityStart = schemeSep === -1 ? 0 : schemeSep + 3
+  let authorityEnd = url.length
+  for (let i = authorityStart; i < url.length; i++) {
+    const c = url[i]
+    if (c === '/' || c === '?' || c === '#') {
+      authorityEnd = i
+      break
+    }
+  }
+  let at = -1
+  for (let i = authorityStart; i < authorityEnd; i++) {
+    if (url[i] === '@') at = i
+  }
+  if (at > authorityStart) {
+    return `${url.slice(0, authorityStart)}***@${url.slice(at + 1)}`
+  }
+  return url
 }
 
 /**
