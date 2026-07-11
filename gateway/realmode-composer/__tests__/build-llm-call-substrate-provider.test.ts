@@ -14,7 +14,10 @@
 
 import { expect, test } from 'bun:test'
 
-import { buildLlmCallSubstrate } from '../build-llm-call-substrate.ts'
+import {
+  buildLlmCallSubstrate,
+  openAiSessionScopeKey,
+} from '../build-llm-call-substrate.ts'
 import type { ClaudeCodeSubstrateOptions } from '@neutronai/runtime/adapters/claude-code/index.ts'
 import { newCredentialPool, type CredentialPool } from '@neutronai/runtime/credential-pool.ts'
 import type { AgentSpec, Substrate } from '@neutronai/runtime/substrate.ts'
@@ -680,4 +683,52 @@ test('SETUP GUARD: adapter start() throw (auth failure) → terminal error event
   const err = events.find((e) => e.kind === 'error')
   expect(err?.kind).toBe('error')
   if (err?.kind === 'error') expect(err.message).toMatch(/OPENAI_API_KEY|setup\/dispatch/i)
+})
+
+// --- SCOPE-KEY SAFETY (audit High): continuity ledger key must be collision-safe
+// and absence-distinct, so session history NEVER bleeds across user/project. ---
+
+test('SCOPE KEY: delimiter-containing ids get DISTINCT keys (no ${user}:${project} collision)', () => {
+  // (user='a:b', project='c') vs (user='a', project='b:c') both flatten to "a:b:c"
+  // under naive concatenation — structural encoding keeps them distinct.
+  expect(openAiSessionScopeKey('a:b', 'c')).not.toBe(openAiSessionScopeKey('a', 'b:c'))
+  // A few more delimiter shapes.
+  expect(openAiSessionScopeKey('x', 'y:z')).not.toBe(openAiSessionScopeKey('x:y', 'z'))
+  expect(openAiSessionScopeKey('"', ']')).not.toBe(openAiSessionScopeKey(']', '"'))
+  // Same scope → same key (stable).
+  expect(openAiSessionScopeKey('a', 'b')).toBe(openAiSessionScopeKey('a', 'b'))
+})
+
+test('SCOPE KEY: absent project is DISTINCT from a real project literally named "default"', () => {
+  expect(openAiSessionScopeKey('u', undefined)).not.toBe(openAiSessionScopeKey('u', 'default'))
+  expect(openAiSessionScopeKey('u', null)).not.toBe(openAiSessionScopeKey('u', 'default'))
+  // undefined and null (both "absent") map to the same key.
+  expect(openAiSessionScopeKey('u', undefined)).toBe(openAiSessionScopeKey('u', null))
+})
+
+test('SCOPE KEY e2e: absent-project turn does NOT leak previous_response_id into a "default"-named project', async () => {
+  // Within ONE substrate: turn 1 has NO active project; turn 2's active project is
+  // literally 'default'. They MUST be distinct continuity scopes → turn 2 must not
+  // replay turn 1's response id.
+  const rec = recordingGptFetch('resp_absent')
+  let project: string | undefined
+  const sub = buildLlmCallSubstrate({
+    pool: anthropicPool(),
+    substrate_instance_id: 'gpt-scope',
+    provider: 'openai',
+    user_id: 'owner',
+    projectIdResolver: () => project,
+    openai: {
+      pool: openaiPool(),
+      bindMcpResolver: () => async () => ({}),
+      model_preference: ['gpt-5.6'],
+      fetchImpl: rec.fetchImpl,
+    },
+  })!
+  project = undefined // absent
+  await drain(sub.start(spec())) // stores resp_absent under [owner, null]
+  project = 'default' // a real project literally named "default"
+  await drain(sub.start(spec())) // MUST NOT read the absent scope's id
+  expect(rec.bodies).toHaveLength(2)
+  expect(rec.bodies[1]!['previous_response_id']).toBeUndefined()
 })

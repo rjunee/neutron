@@ -540,9 +540,16 @@ export function buildLlmCallSubstrate(
         // Conversation key mirrors the CC warm-pool key dimensions (user +
         // live active project) so continuity is scoped identically across
         // providers.
-        const projectId =
-          input.projectIdResolver?.() ?? spec.metering_context?.project_id ?? 'default'
-        const sessionKey = `${input.user_id ?? '_platform'}:${projectId}`
+        // SCOPE-KEY SAFETY (audit High) — resolve the raw project id (undefined
+        // when absent; NEVER a `'default'` literal that would collide with a real
+        // project named 'default'), then build a COLLISION-SAFE continuity key via
+        // structural encoding. Also thread the raw projectId for tool scoping so an
+        // absent project binds to null (not the string 'default').
+        const scopeUserId = input.user_id ?? '_platform'
+        const rawProjectId = input.projectIdResolver?.() ?? spec.metering_context?.project_id
+        const scopeProjectId =
+          rawProjectId !== undefined && rawProjectId.length > 0 ? rawProjectId : undefined
+        const sessionKey = openAiSessionScopeKey(scopeUserId, scopeProjectId)
         return startOpenAiFamilySession({
           provider,
           spec,
@@ -550,7 +557,7 @@ export function buildLlmCallSubstrate(
           config: input.openai,
           sessionLedger: openaiSessions,
           sessionKey,
-          projectId,
+          ...(scopeProjectId !== undefined ? { projectId: scopeProjectId } : {}),
         })
       }
       let innerHandle: SessionHandle | null = null
@@ -768,6 +775,25 @@ export function buildLlmCallSubstrate(
 export type OpenAiSessionLedger = Map<string, { id: string; last_active_at: number }>
 
 /**
+ * COLLISION-SAFE continuity scope key (audit High) for {@link OpenAiSessionLedger}.
+ *
+ * A naive `${userId}:${projectId}` key leaks conversation history across scope
+ * boundaries: `(user='a:b', project='c')` and `(user='a', project='b:c')` both
+ * flatten to `"a:b:c"`, and an ABSENT project (`undefined`) collides with a real
+ * project literally named `"default"`. A collision means one conversation's
+ * `previous_response_id` is replayed into another → cross-user / cross-project
+ * context bleed. Structural JSON encoding makes every id boundary explicit — no
+ * delimiter inside any id can forge another scope's key — and encodes an absent
+ * project as `null`, which is a DISTINCT key from every real project name.
+ */
+export function openAiSessionScopeKey(
+  userId: string,
+  projectId: string | undefined | null,
+): string {
+  return JSON.stringify([userId, projectId ?? null])
+}
+
+/**
  * Dispatch ONE turn through an OpenAI-family adapter (`'openai'` /
  * `'openai-codex-cli'`), selected via the platform-band `selectSubstrateFactory`.
  *
@@ -794,7 +820,9 @@ export function startOpenAiFamilySession(args: {
   config: OpenAiFamilyProviderConfig | undefined
   /** Cross-turn continuity ledger — omit for stateless one-shot callers. */
   sessionLedger?: OpenAiSessionLedger
-  /** Conversation key into `sessionLedger` (e.g. `${user}:${project}`). */
+  /** COLLISION-SAFE conversation key into `sessionLedger` — built via
+   *  {@link openAiSessionScopeKey} (structural JSON of `[userId, projectId|null]`),
+   *  so no id delimiter can forge another scope's key and absent ≠ 'default'. */
   sessionKey?: string
   /** Active project id for THIS turn — bound into the MCP resolver so
    *  project-scoped tools dispatch with the correct scope (audit High). */
