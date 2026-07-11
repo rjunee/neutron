@@ -42,6 +42,14 @@ import {
   type RecoveredReply,
 } from '@neutronai/runtime/adapters/claude-code/index.ts'
 import {
+  normalizeProvider,
+  selectSubstrateFactory,
+  type Provider,
+} from '@neutronai/runtime/adapters/select-substrate.ts'
+import type { GptResponsesApiSubstrateOptions } from '@neutronai/runtime/adapters/gpt-5-5-api/index.ts'
+import type { CodexCliSubstrateOptions } from '@neutronai/runtime/adapters/gpt-5-5-codex-cli/index.ts'
+import type { McpToolResolver } from '@neutronai/contracts/mcp-tool-resolver.ts'
+import {
   reportFailure,
   reportSuccess,
   selectCredential,
@@ -382,6 +390,89 @@ export interface BuildLlmCallSubstrateInput {
    * content can never reach a Core tool.
    */
   enableToolBridge?: boolean
+  /**
+   * SWAPPABLE MODEL PROVIDER — the conversational/utility backend for THIS
+   * substrate. Absent ⇒ `'anthropic'` (Claude Code) — the default and primary
+   * orchestration backend, BYTE-IDENTICAL to the pre-provider composer: the
+   * resolved factory is `createClaudeCodeSubstrateAuto` and the whole
+   * credential-scrub / warm-pool / cooldown path below is unchanged. A project
+   * that opts into `'openai'` / `'openai-codex-cli'` routes each turn through the
+   * matching adapter (see `openai` config + `providerResolver`).
+   *
+   * SCOPE — conversational / utility LLM turns ONLY. Trident's autonomous build
+   * loop (the native `Workflow` inner loop) has NO OpenAI analogue and MUST stay
+   * on Claude Code regardless of this setting; the trident-fire substrate is
+   * built WITHOUT a provider so it always resolves to `'anthropic'`.
+   */
+  provider?: Provider
+  /**
+   * PER-TURN provider resolver — mirrors `projectIdResolver`. Re-evaluated on
+   * EVERY `start(spec)` so the ACTIVE project's provider selection is honored
+   * per turn (the "per-project resolved per-turn" granularity). Its result wins
+   * over the static `provider`; an absent/undefined result falls back to
+   * `provider`, then to `'anthropic'`. Any unknown string normalizes to
+   * `'anthropic'` (never strands a turn on a half-wired backend).
+   */
+  providerResolver?: () => Provider | string | undefined
+  /**
+   * OpenAI-family (`'openai'` / `'openai-codex-cli'`) configuration. Consumed
+   * ONLY when the resolved provider is non-anthropic; ignored for the default
+   * Claude Code path. When the provider resolves non-anthropic and this is
+   * absent (or, for `'openai'`, its `mcpResolver` is missing) the substrate
+   * degrades LOUDLY with a terminal `error` event rather than silently.
+   */
+  openai?: OpenAiFamilyProviderConfig
+}
+
+/**
+ * Per-provider config for the OpenAI-family adapters. The credential pool is
+ * SEPARATE from the anthropic pool (`OPENAI_API_KEY`, resolved via
+ * `resolveLlmCredentials({provider:'openai'})`) — never the anthropic pool, so
+ * an anthropic BYO key can't leak onto an OpenAI call.
+ */
+export interface OpenAiFamilyProviderConfig {
+  /** Eager OpenAI credential pool (tests / pre-resolved callers). */
+  pool?: CredentialPool
+  /** Lazy OpenAI credential pool — re-run per `start()` (mirrors `resolvePool`). */
+  resolvePool?: () => Promise<CredentialPool | null>
+  /**
+   * Per-instance MCP tool resolver threaded into the gpt-5-5-api adapter so
+   * tools work in `internal` mode. Production passes `mcpServer.resolveBound(ctx)`
+   * (`resolveBound` IS an `McpToolResolver`). REQUIRED for `'openai'`; the
+   * codex-cli adapter resolves MCP tools server-side and ignores it.
+   */
+  mcpResolver?: McpToolResolver
+  /**
+   * Model-preference override for the OpenAI-family turn. The gpt adapter reads
+   * `spec.model_preference`; the caller's `spec` carries CLAUDE ids for the
+   * anthropic path, so a non-anthropic turn MUST remap them to OpenAI ids (see
+   * `runtime/models-openai.ts`). Absent ⇒ the spec's `model_preference` is used
+   * as-is (only correct if the caller already built an OpenAI-shaped spec).
+   */
+  model_preference?: ReadonlyArray<string>
+  /** Override the OpenAI Responses endpoint (tests). */
+  endpoint?: string
+  /** Cap tool-call rounds per turn (gpt-5-5-api adapter). */
+  max_tool_rounds?: number
+  /**
+   * Extra env overlay for the adapter. For codex-cli this is where the selected
+   * credential's `OPENAI_API_KEY` is threaded (the adapter defaults env to `{}`
+   * and never reads host `process.env` — ISSUES #67).
+   */
+  env?: Readonly<Record<string, string | undefined>>
+  /** codex-cli: override CODEX_HOME. */
+  codex_home?: string
+  /** codex-cli: override the `codex` binary path. */
+  codex_bin?: string
+  /**
+   * Test seam — override `fetch` for the gpt-5-5-api adapter (mirrors the
+   * adapter's own `fetchImpl`). Production leaves this unset. Lets the composer's
+   * OpenAI path be unit-tested end-to-end against a mocked Responses stream
+   * without a live `OPENAI_API_KEY`.
+   */
+  fetchImpl?: typeof fetch
+  /** Test seam — override `spawn` for the codex-cli adapter (mirrors `spawnImpl`). */
+  spawnImpl?: CodexCliSubstrateOptions['spawnImpl']
 }
 
 /**
@@ -415,6 +506,19 @@ export function buildLlmCallSubstrate(
   }
   return {
     start(spec: AgentSpec): SessionHandle {
+      // SWAPPABLE PROVIDER — resolve the backend for THIS turn. Per-turn resolver
+      // wins (active-project provider), then the static `provider`, then default
+      // 'anthropic'. When non-anthropic, delegate to the OpenAI-family path; the
+      // anthropic block below stays BYTE-IDENTICAL (same factory, same option bag).
+      const provider = normalizeProvider(input.providerResolver?.() ?? input.provider)
+      if (provider !== 'anthropic') {
+        return startOpenAiFamilySession({
+          provider,
+          spec,
+          substrate_instance_id: input.substrate_instance_id,
+          config: input.openai,
+        })
+      }
       let innerHandle: SessionHandle | null = null
       let cancelled = false
       const events = (async function* (): AsyncGenerator<Event, void, void> {
@@ -605,6 +709,180 @@ export function buildLlmCallSubstrate(
       return handle
     },
   }
+}
+
+/**
+ * Dispatch ONE turn through an OpenAI-family adapter (`'openai'` /
+ * `'openai-codex-cli'`), selected via the platform-band `selectSubstrateFactory`.
+ *
+ * Shared by BOTH `buildLlmCallSubstrate` and `buildImportSubstrate`. Mirrors the
+ * anthropic path's discipline — per-turn credential selection from a LIVE pool +
+ * completion/error feedback into the pool's cooldown clock — but against the
+ * SEPARATE OpenAI credential pool and the OpenAI adapters' own option bags. The
+ * gpt/codex adapters both expose `tool_resolution='internal'` and a throwing
+ * `respondToTool`, so the caller-facing handle shape matches the CC path exactly.
+ *
+ * Degrades LOUDLY (terminal `error` event, `retryable:false`) when the OpenAI
+ * config is missing — a project that selected `'openai'` but wasn't wired an
+ * OpenAI pool / `mcpResolver` gets a clear failure, never a silent fallback.
+ */
+export function startOpenAiFamilySession(args: {
+  provider: 'openai' | 'openai-codex-cli'
+  spec: AgentSpec
+  substrate_instance_id: string
+  config: OpenAiFamilyProviderConfig | undefined
+}): SessionHandle {
+  const { provider, spec, substrate_instance_id, config } = args
+  let innerHandle: SessionHandle | null = null
+  let cancelled = false
+  const events = (async function* (): AsyncGenerator<Event, void, void> {
+    if (config === undefined) {
+      yield {
+        kind: 'error',
+        message:
+          `model provider '${provider}' was selected but no OpenAI-family config ` +
+          `was wired into the substrate (missing credential pool + mcpResolver). ` +
+          `Configure OPENAI_API_KEY and thread an mcpResolver, or leave the ` +
+          `provider unset to use Claude Code.`,
+        retryable: false,
+      }
+      return
+    }
+    if (provider === 'openai' && config.mcpResolver === undefined) {
+      yield {
+        kind: 'error',
+        message:
+          "model provider 'openai' requires an mcpResolver so tools work in " +
+          'internal mode (production passes mcpServer.resolveBound(ctx)); none was wired.',
+        retryable: false,
+      }
+      return
+    }
+    // Resolve the LIVE OpenAI pool (lazy re-run per call, or eager boot pool).
+    let pool: CredentialPool
+    if (config.pool !== undefined) {
+      pool = config.pool
+    } else if (config.resolvePool !== undefined) {
+      const resolved = await config.resolvePool()
+      if (resolved === null || resolved.credentials.length === 0) {
+        yield {
+          kind: 'error',
+          message:
+            `no OpenAI credentials available at dispatch time (provider='${provider}'). ` +
+            'Configure OPENAI_API_KEY in the per-project `.env` or attach a BYO OpenAI key, then retry.',
+          retryable: false,
+        }
+        return
+      }
+      pool = resolved
+    } else {
+      yield {
+        kind: 'error',
+        message: `provider='${provider}': neither an eager pool nor a resolvePool was wired`,
+        retryable: false,
+      }
+      return
+    }
+    const cred = selectCredential(pool)
+    if (cred === null) {
+      yield {
+        kind: 'error',
+        message: `all OpenAI credentials are in cooldown (429/401). Retry once the rate-limit window passes.`,
+        retryable: true,
+      }
+      return
+    }
+    // Remap CLAUDE model ids → OpenAI ids when the caller supplied an override
+    // (a non-anthropic turn's spec still carries the anthropic model_preference).
+    const dispatchSpec: AgentSpec =
+      config.model_preference !== undefined && config.model_preference.length > 0
+        ? { ...spec, model_preference: [...config.model_preference] }
+        : spec
+
+    const selected = selectSubstrateFactory(provider)
+    let substrate: Substrate
+    if (selected.provider === 'openai') {
+      const opts: GptResponsesApiSubstrateOptions = {
+        substrate_instance_id,
+        api_key: cred.secret,
+        // Guarded above: mcpResolver is defined for 'openai'.
+        mcpResolver: config.mcpResolver as McpToolResolver,
+      }
+      if (config.env !== undefined) opts.env = config.env
+      if (config.endpoint !== undefined) opts.endpoint = config.endpoint
+      if (config.max_tool_rounds !== undefined) opts.max_tool_rounds = config.max_tool_rounds
+      if (config.fetchImpl !== undefined) opts.fetchImpl = config.fetchImpl
+      substrate = selected.create(opts)
+    } else if (selected.provider === 'openai-codex-cli') {
+      // codex-cli: thread the selected secret as OPENAI_API_KEY (the adapter
+      // defaults env to `{}` and never reads host process.env — ISSUES #67).
+      const codexEnv: Record<string, string | undefined> = {
+        ...(config.env ?? {}),
+        OPENAI_API_KEY: cred.secret,
+      }
+      const opts: CodexCliSubstrateOptions = { env: codexEnv }
+      if (config.codex_home !== undefined) opts.codex_home = config.codex_home
+      if (config.codex_bin !== undefined) opts.bin = config.codex_bin
+      if (config.spawnImpl !== undefined) opts.spawnImpl = config.spawnImpl
+      substrate = selected.create(opts)
+    } else {
+      // Unreachable: `provider` is narrowed to the two OpenAI-family variants by
+      // the function signature. Defensive throw keeps the switch exhaustive.
+      throw new Error(`startOpenAiFamilySession: unexpected provider '${provider}'`)
+    }
+
+    innerHandle = substrate.start(dispatchSpec)
+    if (cancelled) {
+      await innerHandle.cancel()
+      return
+    }
+    let reported = false
+    for await (const ev of innerHandle.events) {
+      if (!reported) {
+        if (ev.kind === 'completion') {
+          reported = true
+          reportSuccess(pool, cred.id)
+        } else if (ev.kind === 'error') {
+          reported = true
+          // Generic HTTP / auth / retryable cooldown classification (the CC-only
+          // ENOENT / channel-wedged / turn-timeout fast-paths don't apply to the
+          // OpenAI adapters). An OpenAI 429/401 cools the credential down.
+          const httpStatus = parseHttpStatusFromMessage(ev.message)
+          let cooldownStatus: number | null
+          if (httpStatus !== null) {
+            cooldownStatus = mapStatusForPoolCooldown(httpStatus, ev.retryable)
+          } else if (detectCliAuthFailure(ev.message)) {
+            cooldownStatus = 401
+          } else {
+            cooldownStatus = mapStatusForPoolCooldown(null, ev.retryable)
+          }
+          if (cooldownStatus !== null) {
+            if (ev.retry_after_ms !== undefined) {
+              reportFailure(pool, cred.id, cooldownStatus, ev.retry_after_ms)
+            } else {
+              reportFailure(pool, cred.id, cooldownStatus)
+            }
+          }
+        }
+      }
+      yield ev
+    }
+  })()
+  const handle: SessionHandle = {
+    events,
+    async respondToTool(call_id: string, result: unknown): Promise<void> {
+      if (innerHandle !== null) return innerHandle.respondToTool(call_id, result)
+      throw new Error(
+        'openai-family substrate: respondToTool called before dispatch (caller bug; tool_resolution=internal)',
+      )
+    },
+    async cancel(): Promise<void> {
+      cancelled = true
+      if (innerHandle !== null) await innerHandle.cancel()
+    },
+    tool_resolution: 'internal',
+  }
+  return handle
 }
 
 /**
