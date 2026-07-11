@@ -166,36 +166,58 @@ export function selectDispatchAlertTopics(
 export interface DispatchStuckAlertSinkEffects {
   /**
    * The DURABLE surfacing (the O4 `watchdog_alert` journal in prod) — the DELIVERY
-   * GATE. Awaited FIRST; a rejection PROPAGATES so the watchdog leaves the run
-   * un-latched and retries cleanly. A no-op resolve (no durable target, e.g. an
-   * LLM-less box) is a success.
+   * GATE, awaited FIRST. It SIGNALS whether it actually PERSISTED:
+   *   • resolve `true`  → a durable record was written; the visible push may fire.
+   *   • resolve `false` → there was NO durable target (a null sink); the push MUST
+   *     be suppressed and the run left un-latched (see the factory) — a visible
+   *     alert with no durable record is exactly the hole this closes.
+   *   • REJECT → a real write failure; propagates so the run is un-latched + retried.
    */
-  journal: (alert: DispatchSuspectedStuckAlert) => Promise<void>
+  journal: (alert: DispatchSuspectedStuckAlert) => Promise<boolean>
   /**
    * The USER-VISIBLE ephemeral push (app-ws in prod). Fired ONLY after `journal`
-   * resolves, and best-effort (a throw is swallowed) — a dead socket must not
-   * un-latch an already-journaled alert.
+   * confirms a durable record, and best-effort (a throw is swallowed) — a dead
+   * socket must not un-latch an already-journaled alert.
    */
   push: (alert: DispatchSuspectedStuckAlert) => void
 }
 
 /**
- * Build the dispatch suspected-stuck sink with PERSIST-BEFORE-DELIVER ordering.
+ * Build the dispatch suspected-stuck sink with PERSIST-BEFORE-DELIVER ordering,
+ * gated on the journal ACTUALLY persisting.
  *
- * The durable `journal` commits BEFORE the user-visible `push`. This is the whole
- * point of the split: if the visible push ran first and the journal then rejected,
- * the watchdog would leave the run un-latched and RE-PUSH the same visible alert
- * every tick (a duplicate the user sees). Journaling first means a persist failure
- * is "not delivered" — no push has happened, so the retry is clean and the visible
- * alert lands EXACTLY ONCE (on the tick whose journal finally commits).
+ * The durable `journal` commits BEFORE the user-visible `push`. If the visible push
+ * ran first and the journal then rejected, the watchdog would leave the run
+ * un-latched and RE-PUSH the same visible alert every tick (a duplicate the user
+ * sees). Journaling first means a persist failure is "not delivered" — no push has
+ * happened, so the retry is clean and the visible alert lands EXACTLY ONCE (on the
+ * tick whose journal finally commits).
+ *
+ * NULL DURABLE TARGET (round-14): `journal` resolving `false` — no durable record
+ * was written — must NOT deliver-and-latch. That was the hole: a visible alert with
+ * no durable record, contradicting "every dispatch alert is journaled". We suppress
+ * the push and THROW so the run is left un-latched (retried when a durable sink
+ * exists) and the miss is loud/observable. In production the O4 sink is ALWAYS wired
+ * at gateway boot (`gateway/index.ts` `pushSystemEventSink`, before composition +
+ * the watchdog), so `false` is a misconfiguration / sidecar-only path, never a
+ * steady state — the throw is effectively a loud assertion that never fires in prod.
  */
 export function buildDispatchStuckAlertSink(
   fx: DispatchStuckAlertSinkEffects,
 ): DispatchSuspectedStuckSink {
   return async (alert: DispatchSuspectedStuckAlert): Promise<void> => {
-    await fx.journal(alert) // durable gate — rejection propagates (clean retry)
+    const persisted = await fx.journal(alert) // durable gate — rejection propagates
+    if (!persisted) {
+      // No durable record written → NEVER do the user-visible push. Throw so the
+      // run stays un-latched (retryable) and the miss is surfaced, not swallowed.
+      throw new Error(
+        `dispatch suspected-stuck alert for run ${alert.run_id} has NO durable ` +
+          `system-event sink — suppressing the ephemeral push and leaving the run ` +
+          `un-latched (retryable). The O4 sink must be wired at gateway boot.`,
+      )
+    }
     try {
-      fx.push(alert) // user-visible, ONLY after the durable commit; best-effort
+      fx.push(alert) // user-visible, ONLY after a confirmed durable record; best-effort
     } catch {
       // ephemeral push is best-effort — never un-latch an already-journaled alert
     }

@@ -2588,33 +2588,35 @@ export function buildOpenGraphComposer(
     // (`runtime/subagent/watchdog.ts`) is UNVERIFIED against real dispatch
     // durations for killing — it only gates a NOTIFICATION here.
     if (dispatchService !== null) {
-      // PERSIST-BEFORE-DELIVER (round-9 class fix), enforced by the shared
+      // PERSIST-BEFORE-DELIVER (round-9/14 class fix), enforced by the shared
       // `buildDispatchStuckAlertSink` factory: the durable `journal` (O4
       // `watchdog_alert` — the DELIVERY GATE, there is no `watchdog_alerts` ledger
       // for dispatch alerts unlike the six general detectors) is awaited FIRST and a
       // real failure PROPAGATES; the user-visible app-ws `push` fires ONLY after the
-      // journal commits. Old order pushed the websocket alert first, so a journal
-      // failure left the run un-latched and RE-PUSHED the same visible alert every
-      // tick. A null ambient sink (LLM-less/dev box) is a no-op success — no durable
-      // target, and no push has happened, so nothing to dedupe.
+      // journal confirms a durable record. `journal` returns whether it actually
+      // PERSISTED: a null ambient sink writes NOTHING → returns FALSE → the factory
+      // suppresses the push and leaves the run un-latched (round-14: a visible alert
+      // with no durable record was the hole). The O4 sink is always wired at gateway
+      // boot (`gateway/index.ts` `pushSystemEventSink`), so `false` never happens in
+      // production — it is a misconfiguration/sidecar signal.
       const dispatchStuckAlertSink: DispatchSuspectedStuckSink = buildDispatchStuckAlertSink({
-        journal: async (alert): Promise<void> => {
+        journal: async (alert): Promise<boolean> => {
           const eventSink = resolveSystemEventSink()
-          if (eventSink !== null) {
-            await eventSink.record({
-              event: 'watchdog_alert',
-              module: 'watchdog',
-              level: 'warn',
-              project_slug,
-              payload: {
-                source: 'dispatch_lifecycle',
-                run_id: alert.run_id,
-                agent_kind: alert.agent_kind,
-                reason: alert.reason,
-                age_ms: alert.age_ms,
-              },
-            })
-          }
+          if (eventSink === null) return false // no durable target → do NOT push/latch
+          await eventSink.record({
+            event: 'watchdog_alert',
+            module: 'watchdog',
+            level: 'warn',
+            project_slug,
+            payload: {
+              source: 'dispatch_lifecycle',
+              run_id: alert.run_id,
+              agent_kind: alert.agent_kind,
+              reason: alert.reason,
+              age_ms: alert.age_ms,
+            },
+          })
+          return true // durably recorded → the visible push may fire
         },
         push: (alert): void => {
           const env: AppWsOutboundAgentMessage = {

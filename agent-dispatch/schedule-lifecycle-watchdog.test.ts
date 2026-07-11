@@ -318,10 +318,11 @@ describe('buildDispatchStuckAlertSink — persist-before-deliver (round-9)', () 
     let journalCalls = 0
     let pushCalls = 0
     const sink = buildDispatchStuckAlertSink({
-      // The durable journal REJECTS on the first call, then succeeds.
-      journal: async (): Promise<void> => {
+      // The durable journal REJECTS on the first call, then persists (returns true).
+      journal: async (): Promise<boolean> => {
         journalCalls++
         if (journalCalls === 1) throw new Error('journal down')
+        return true
       },
       // The user-visible push always "succeeds" — the mutation check: with the OLD
       // send-then-record order this counter would reach 2 (fires on both ticks).
@@ -343,7 +344,7 @@ describe('buildDispatchStuckAlertSink — persist-before-deliver (round-9)', () 
 
   test('a push that throws is swallowed (journal already committed → alert stays latched)', async () => {
     const sink = buildDispatchStuckAlertSink({
-      journal: async (): Promise<void> => {},
+      journal: async (): Promise<boolean> => true,
       push: (): void => {
         throw new Error('dead socket')
       },
@@ -351,6 +352,28 @@ describe('buildDispatchStuckAlertSink — persist-before-deliver (round-9)', () 
     // A dead socket must NOT propagate — the durable journal already committed, so
     // re-throwing would wrongly un-latch and re-journal.
     await expect(Promise.resolve(sink(alert))).resolves.toBeUndefined()
+  })
+
+  test('round-14: a NULL durable sink (journal returns false) SUPPRESSES the push and does NOT deliver', async () => {
+    let journalCalls = 0
+    let pushCalls = 0
+    const sink = buildDispatchStuckAlertSink({
+      // No durable target → journal persists NOTHING and signals it (false).
+      journal: async (): Promise<boolean> => {
+        journalCalls++
+        return false
+      },
+      push: (): void => {
+        pushCalls++
+      },
+    })
+
+    // The sink must REJECT (not-delivered) so the run is left un-latched, and it must
+    // NOT perform the user-visible push — a visible alert with no durable record is
+    // exactly the hole this closes.
+    await expect(sink(alert)).rejects.toThrow(/no durable system-event sink/i)
+    expect(journalCalls).toBe(1)
+    expect(pushCalls).toBe(0)
   })
 
   test('integration: journal rejects tick 1 → the VISIBLE push is delivered EXACTLY ONCE across retry ticks', async () => {
@@ -362,9 +385,10 @@ describe('buildDispatchStuckAlertSink — persist-before-deliver (round-9)', () 
     let journalCalls = 0
     let pushCalls = 0
     const sink = buildDispatchStuckAlertSink({
-      journal: async (): Promise<void> => {
+      journal: async (): Promise<boolean> => {
         journalCalls++
         if (journalCalls === 1) throw new Error('journal down')
+        return true
       },
       push: (): void => {
         pushCalls++
@@ -389,6 +413,55 @@ describe('buildDispatchStuckAlertSink — persist-before-deliver (round-9)', () 
     expect(pushCalls).toBe(1)
 
     // Tick 3 — latched → no repeat visible push (exactly-once holds).
+    await scheduled.runOnce()
+    expect(pushCalls).toBe(1)
+
+    await scheduled.stop()
+  })
+
+  test('round-14 integration: a NULL durable sink never pushes and keeps RETRYING; delivers once a sink is wired', async () => {
+    const registry = new SubagentRegistry()
+    const control = newControlState(registry)
+    await registry.create({ run_id: 'r8', instance_key: 'owner', agent_kind: 'atlas', spawn_depth: 0 })
+    await registry.update('r8', { status: 'running', last_event_at: Date.now() - 10 * 60_000 })
+
+    // Mirror the composer's real journal: resolveSystemEventSink() === null → the
+    // journal writes nothing and returns false, until a sink is wired.
+    let sinkWired = false
+    let journalWrites = 0
+    let pushCalls = 0
+    const sink = buildDispatchStuckAlertSink({
+      journal: async (): Promise<boolean> => {
+        if (!sinkWired) return false // no durable target yet
+        journalWrites++
+        return true
+      },
+      push: (): void => {
+        pushCalls++
+      },
+    })
+    const scheduled = scheduleDispatchLifecycleWatchdog({
+      registry,
+      control,
+      alert_sink: sink,
+      set_interval: noTimer,
+      clear_interval: () => {},
+    })
+
+    // Ticks 1-2 with a NULL sink → NO push, nothing journaled, run NOT latched
+    // (the throw is caught + logged by the notifier wrapper — observable, retryable).
+    await scheduled.runOnce()
+    await scheduled.runOnce()
+    expect(pushCalls).toBe(0)
+    expect(journalWrites).toBe(0)
+
+    // The O4 sink gets wired → the next tick journals AND pushes exactly once.
+    sinkWired = true
+    await scheduled.runOnce()
+    expect(journalWrites).toBe(1)
+    expect(pushCalls).toBe(1)
+
+    // Latched → no repeat.
     await scheduled.runOnce()
     expect(pushCalls).toBe(1)
 
@@ -504,7 +577,7 @@ describe('round-13 E2E — real dispatch_agent path: origin-stamped alert isolat
     }
     let pushedTopics: string[] = []
     const sink = buildDispatchStuckAlertSink({
-      journal: async () => {}, // durable side — irrelevant to the routing assertion
+      journal: async () => true, // durable record written — routing is what we assert
       push: (alert) => {
         pushedTopics = selectDispatchAlertTopics(alert, twoTopics, { owner_root_topic: 'app:owner' })
       },
