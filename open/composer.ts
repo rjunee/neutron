@@ -116,6 +116,7 @@ import { wireLandingStack } from './wiring/landing.ts'
 import { wireUploads } from './wiring/uploads.ts'
 import { buildOpenOwnerGate } from './wiring/owner-gate.ts'
 import { wireAppWs, type OnboardingMsgEmit } from './wiring/app-ws.ts'
+import { MIN_COOKIE_SECRET_LEN } from './session-cookie-secret.ts'
 import { late } from './wiring/late.ts'
 import type { OpenWiringContext } from './wiring/context.ts'
 import { buildChainedChatCommandFilter } from '@neutronai/gateway/boot-helpers.ts'
@@ -1127,6 +1128,17 @@ export function buildOpenGraphComposer(
         'NEUTRON_ONBOARDING_CHAT_COOKIE_SECRET is unset — refusing to sign owner ' +
           'sessions with a predictable fallback. Set it in .env, or boot via ' +
           'open/server.ts which derives a persisted per-install secret.',
+      )
+    }
+    // S2 (c) — enforce the consumer's ≥16-char high-entropy floor
+    // (cookie-user-claim.ts) on an OPERATOR-provided secret; FAIL LOUD on a weak
+    // one rather than sign owner sessions with a guessable key. The server-
+    // derived secret is 48 hex chars, so the normal path never trips this.
+    if (cookieSecret.length < MIN_COOKIE_SECRET_LEN) {
+      throw new Error(
+        `NEUTRON_ONBOARDING_CHAT_COOKIE_SECRET is too short (${cookieSecret.length} < ` +
+          `${MIN_COOKIE_SECRET_LEN} chars) — refusing to sign owner sessions with a weak ` +
+          `secret. Use a high-entropy value (e.g. 32+ random hex chars).`,
       )
     }
     const startTokenAuth = buildLocalStartTokenAuth(cookieSecret)

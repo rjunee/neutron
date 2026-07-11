@@ -8,78 +8,118 @@
  * cookie). Instead we derive a per-INSTALL RANDOM secret and persist it under
  * NEUTRON_HOME so it is stable across restarts (owner sessions survive a
  * redeploy) yet unforgeable.
+ *
+ * This is the credential that authenticates the owner, so the loader is
+ * fail-closed and hostile-FS-resistant: it only ever RETURNS bytes read from a
+ * confirmed REGULAR, 0600, NON-SYMLINK file opened NO-FOLLOW whose value meets
+ * the high-entropy floor ({@link MIN_COOKIE_SECRET_LEN}). Anything else — a
+ * symlink (token-forgery vector), a non-regular file, un-tightenable perms, or a
+ * too-short/weak value — is ROTATED (mint a fresh 0600 file), else falls to a
+ * process-ephemeral secret. Never a trusted-but-exposed on-disk value, never a
+ * guessable constant, never a hard boot failure.
  */
 
 import { randomBytes } from 'node:crypto'
-// Namespace import so the security-critical TOCTOU / perms branches are
-// interceptable in tests (`spyOn(fs, 'existsSync')`) — the destructured form
-// isn't reliably spyable under Bun.
+// Namespace import so the security-critical no-follow / perms / rotate branches
+// are interceptable in tests (`spyOn(fs, 'openSync' | 'fchmodSync')`) — the
+// destructured form isn't reliably spyable under Bun.
 import * as fs from 'node:fs'
 import { join } from 'node:path'
+
+/**
+ * High-entropy floor for a PERSISTED / operator-provided secret. Matches the
+ * consumer's documented contract (`gateway/http/cookie-user-claim.ts`: the
+ * cookie secret is `>= 16 chars, caller-validated`). A shorter persisted value
+ * is invalid → rotate; a shorter operator-set value fails loud at the composer.
+ */
+export const MIN_COOKIE_SECRET_LEN = 16
 
 /** The on-disk secret file (0600) under NEUTRON_HOME. */
 export function sessionCookieSecretPath(neutronHome: string): string {
   return join(neutronHome, '.session-cookie-secret')
 }
 
-/**
- * CONFIRM the secret file is owner-only 0600 — tightening a wider (restored /
- * hand-created 0644) file and RE-STATTING to verify the chmod actually took.
- * Returns `true` only when the on-disk perms are confirmed 0600. A stat/chmod
- * failure, or a chmod that silently didn't stick, returns `false` — Blocker #2:
- * the caller must then NOT trust the on-disk value (rotate / go ephemeral).
- */
-function confirmOwnerOnly(path: string): boolean {
-  try {
-    if ((fs.statSync(path).mode & 0o777) === 0o600) return true
-    fs.chmodSync(path, 0o600)
-    // Re-stat: never ASSUME the chmod took (exotic FS / mount options).
-    return (fs.statSync(path).mode & 0o777) === 0o600
-  } catch {
-    return false
-  }
-}
+// EXCLUSIVE, NO-FOLLOW create for the mint path: O_CREAT|O_EXCL fails on ANY
+// existing entry (incl. a symlink); O_NOFOLLOW is belt-and-suspenders.
+const WX_NOFOLLOW =
+  fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_NOFOLLOW
+
+type ReadResult =
+  | { kind: 'ok'; value: string }
+  | { kind: 'reject' } // exists but untrusted (symlink / non-regular / perms / too short) → rotate
+  | { kind: 'absent' } // no file → mint (keeps the first-boot wx-race convergence intact)
 
 /**
- * The persisted secret if present + non-empty. `value` is the trimmed secret;
- * `secured` reports whether its perms are confirmed 0600. Returns `null` when
- * there is no usable file (absent / empty / unreadable) — the caller mints.
+ * Load the persisted secret through a NO-FOLLOW, race-resistant DESCRIPTOR:
+ * open `O_NOFOLLOW` (a symlink throws `ELOOP` → reject), `fstat` the fd (require
+ * a regular file), enforce + CONFIRM 0600 on the fd, then read the bytes FROM
+ * the fd (no second path-based open → no TOCTOU). Only a value meeting the
+ * length floor is trusted.
  */
-function readPersistedSecret(path: string): { value: string; secured: boolean } | null {
+function readPersistedSecret(path: string): ReadResult {
+  let fd: number
   try {
-    if (fs.existsSync(path)) {
-      const existing = fs.readFileSync(path, 'utf8').trim()
-      if (existing.length > 0) {
-        return { value: existing, secured: confirmOwnerOnly(path) }
+    fd = fs.openSync(path, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW)
+  } catch (err) {
+    // No file → mint. A symlink (ELOOP) or anything else we can't open cleanly →
+    // rotate (we will not follow / trust it).
+    return (err as NodeJS.ErrnoException).code === 'ENOENT' ? { kind: 'absent' } : { kind: 'reject' }
+  }
+  try {
+    const st = fs.fstatSync(fd)
+    if (!st.isFile()) return { kind: 'reject' } // reject a fifo/device/dir behind the name
+    if ((st.mode & 0o777) !== 0o600) {
+      // Tighten on the DESCRIPTOR (not the path), then re-fstat to CONFIRM the
+      // chmod actually took — never assume it did.
+      try {
+        fs.fchmodSync(fd, 0o600)
+      } catch {
+        return { kind: 'reject' }
       }
+      if ((fs.fstatSync(fd).mode & 0o777) !== 0o600) return { kind: 'reject' }
     }
+    const value = fs.readFileSync(fd, 'utf8').trim()
+    // Empty / short / weak persisted value is invalid → rotate to a fresh one.
+    if (value.length < MIN_COOKIE_SECRET_LEN) return { kind: 'reject' }
+    return { kind: 'ok', value }
   } catch {
-    /* unreadable — caller mints a fresh one */
+    return { kind: 'reject' }
+  } finally {
+    try {
+      fs.closeSync(fd)
+    } catch {
+      /* already closed / invalid fd — non-fatal */
+    }
   }
-  return null
 }
 
-/** Mint + persist a fresh 0600 secret via exclusive create, confirming perms. */
+/** Mint + persist a fresh 0600 secret via NO-FOLLOW exclusive create, confirming. */
 function mintPersistedSecret(neutronHome: string, path: string): string {
-  const secret = randomBytes(24).toString('hex')
+  const secret = randomBytes(24).toString('hex') // 48 hex chars ≫ the length floor
   try {
     fs.mkdirSync(neutronHome, { recursive: true })
-    // Medium #3 — EXCLUSIVE create (`wx`): if two starters race the first-boot
-    // mint, only one wins; the loser gets EEXIST and reads back the winner's
-    // secret below, so every process converges on ONE signing key (otherwise
-    // each would truncate + return a DIFFERENT key and reject the other's
-    // sessions). `mode` on create applies 0600.
-    fs.writeFileSync(path, secret + '\n', { flag: 'wx', mode: 0o600 })
-    // Blocker #2 — CONFIRM 0600 (re-stat); a persisted-but-unconfirmable secret
-    // is not trustworthy, so fall through to the ephemeral path instead.
-    if (confirmOwnerOnly(path)) return secret
-    throw new Error('could not confirm 0600 on the freshly-persisted secret')
+    // Medium #3 — EXCLUSIVE create: if two starters race the first-boot mint,
+    // only one wins; the loser gets EEXIST and reads back the winner's secret
+    // below, so every process converges on ONE signing key. NO-FOLLOW so a
+    // planted symlink can never be written through. Explicit fd so the numeric
+    // O_* flags apply (the `writeFileSync` flag option is typed string-only).
+    const fd = fs.openSync(path, WX_NOFOLLOW, 0o600)
+    try {
+      fs.writeSync(fd, secret + '\n')
+    } finally {
+      fs.closeSync(fd)
+    }
+    // Blocker #2 — CONFIRM the freshly-persisted file reads back as a regular,
+    // 0600, valid secret; otherwise don't trust the on-disk copy.
+    const check = readPersistedSecret(path)
+    if (check.kind === 'ok' && check.value === secret) return secret
+    throw new Error('could not confirm the freshly-persisted secret')
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === 'EEXIST') {
-      // Lost the mint race — return the winner's secret, but ONLY if its perms
-      // are confirmed 0600 (never trust an exposed on-disk value).
+      // Lost the mint race — return the winner's secret, but ONLY if it is a
+      // confirmed regular, 0600, valid on-disk value.
       const winner = readPersistedSecret(path)
-      if (winner !== null && winner.secured) return winner.value
+      if (winner.kind === 'ok') return winner.value
     }
     console.warn(
       `[open] could not securely persist the session-cookie secret to ${path} (${
@@ -92,28 +132,29 @@ function mintPersistedSecret(neutronHome: string, path: string): string {
 
 /**
  * Read the persisted per-install cookie secret, minting + persisting a fresh
- * random one on first boot. The returned value is ALWAYS a high-entropy random
- * string — never a predictable constant — AND, when it comes from disk, one
- * whose perms we've CONFIRMED are 0600 (Blocker #2 fail-closed contract). An
- * existing secret we cannot secure is ROTATED (mint a fresh 0600 file); if
- * nothing can be secured we return a process-ephemeral secret and warn, so a
- * locked-down FS degrades to "sessions reset on restart" — never a
- * trusted-but-world-readable on-disk value, never a hard boot failure.
+ * random one on first boot (or rotating an untrusted one). The returned value is
+ * ALWAYS a high-entropy random string — never a predictable constant — AND, when
+ * it comes from disk, one read from a confirmed regular, 0600, non-symlink file
+ * meeting {@link MIN_COOKIE_SECRET_LEN}. An existing entry we cannot trust is
+ * ROTATED; if nothing can be secured we return a process-ephemeral secret and
+ * warn (sessions reset on restart) — never a trusted-but-exposed on-disk value,
+ * never a hard boot failure.
  */
 export function resolvePersistedCookieSecret(neutronHome: string): string {
   const path = sessionCookieSecretPath(neutronHome)
-  const existing = readPersistedSecret(path)
-  if (existing !== null) {
-    if (existing.secured) return existing.value
-    // Blocker #2 — an existing secret whose perms we could NOT confirm/tighten
-    // to 0600 is exposed; do NOT trust it. Rotate: drop it and mint a fresh
-    // 0600 file (best-effort unlink — if it can't be removed, the mint's `wx`
-    // EEXIST readback re-checks perms and falls to ephemeral).
+  const read = readPersistedSecret(path)
+  if (read.kind === 'ok') return read.value
+  if (read.kind === 'reject') {
+    // Untrusted existing entry (symlink / non-regular / wrong perms / too short):
+    // remove it and mint a fresh secure file. `unlinkSync` removes the SYMLINK
+    // itself (not its target). Best-effort — the mint's `wx` EEXIST readback
+    // re-checks perms if it can't be removed.
     try {
       fs.unlinkSync(path)
     } catch {
       /* couldn't remove — mintPersistedSecret handles the EEXIST re-check */
     }
   }
+  // 'absent' → straight to mint (no unlink → the first-boot wx race converges).
   return mintPersistedSecret(neutronHome, path)
 }

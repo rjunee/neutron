@@ -73,4 +73,22 @@ describe('S2 (c) — cookie secret fails loud when unset', () => {
       db.close()
     }
   })
+
+  test('composer REJECTS a too-short (< 16) operator-provided secret — fails LOUD', async () => {
+    // Operator sets a weak secret directly — the composer must refuse it, not
+    // sign owner sessions with a guessable key.
+    process.env['NEUTRON_ONBOARDING_CHAT_COOKIE_SECRET'] = 'short-secret' // 12 chars
+    const db = ProjectDb.open(process.env['NEUTRON_DB_PATH']!)
+    applyMigrations(db.raw())
+    const composer = buildOpenGraphComposer({
+      env: process.env,
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      substrateFactory: (() => recordingSubstrate()) as any,
+    })
+    try {
+      await expect(composer({ db, project_slug: 'owner' })).rejects.toThrow(/too short/)
+    } finally {
+      db.close()
+    }
+  })
 })
