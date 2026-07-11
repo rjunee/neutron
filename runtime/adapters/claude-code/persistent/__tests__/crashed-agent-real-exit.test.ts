@@ -150,12 +150,16 @@ describe('crashed-agent watchdog — real spawn exit handler (F4)', () => {
       exitLast(1)
       await settle()
 
-      // The real exit handler LEFT the record, marked crashed (not unregistered).
-      expect(reg.size()).toBe(1)
-      expect(reg.list()[0]!.exit_status).toBe('crashed')
+      // The real exit handler ENQUEUED the crash into the pending-crash queue
+      // (round-12) — INDEPENDENT of the live slot, so it survives a respawn. The
+      // live slot is emptied; the crash lives in the queue.
+      expect(reg.size()).toBe(0)
+      const pending = reg.listPendingCrashes()
+      expect(pending.length).toBe(1)
+      expect(pending[0]!.exit_status).toBe('crashed')
 
-      // The detector reports it — pid probe forced alive so ONLY the crash mark
-      // can drive the alert (proving the mark, not pid-liveness, is what fires).
+      // The detector reports it — pid probe forced alive so ONLY the enqueued crash
+      // (not pid-liveness) can drive the alert.
       const detector = new CrashedAgentDetector({
         project_slug: 'owner',
         process_registry: reg,
@@ -165,9 +169,9 @@ describe('crashed-agent watchdog — real spawn exit handler (F4)', () => {
       expect(alerts.length).toBe(1)
       expect(alerts[0]?.kind).toBe('crashed_agent')
 
-      // Commit reaps the crashed record.
+      // Commit reaps the crash from the pending queue.
       detector.commit(alerts[0]!)
-      expect(reg.size()).toBe(0)
+      expect(reg.listPendingCrashes().length).toBe(0)
     } finally {
       clear()
     }

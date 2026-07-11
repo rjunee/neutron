@@ -57,8 +57,21 @@ export interface ProcessRegisterInput {
  */
 export const STUCK_PROCESS_INACTIVITY_MS = 15 * 60_000
 
+/** Composite identity key for a process — `(name, pid)`, never name alone. */
+const procRegistryKey = (name: string, pid: number): string => `${name}#${pid}`
+
 export class ProcessRegistry {
   private readonly records = new Map<string, ProcessRecord>()
+  /**
+   * Un-reported crashes, keyed by `(name, pid)` — INDEPENDENT of the single mutable
+   * live `records` slot (round-12). An abnormal exit ENQUEUES its crash here rather
+   * than marking the live record in place, so a fast respawn that reuses the same
+   * `name` (upsert → delete+register) can no longer erase a crash before the 30 s
+   * crashed-agent detector drains it. The detector reports each entry once and
+   * reaps it on commit ({@link reapCrash}); multiple rapid respawns each enqueue a
+   * distinct `(name, pid)` crash.
+   */
+  private readonly pendingCrashes = new Map<string, ProcessRecord>()
   private readonly now: () => number
 
   constructor(options: { now?: () => number } = {}) {
@@ -146,17 +159,37 @@ export class ProcessRegistry {
   }
 
   /**
-   * Mark the entry as abnormally exited (crashed) ONLY when it STILL points at
-   * `pid` — identity-guarded, same principle as {@link unregisterIfPid}. The
-   * record is LEFT in the registry (not dropped) so the crashed-agent watchdog can
-   * observe + report it exactly once, then reap it on commit. Returns true only
-   * when the exact entry was marked.
+   * ENQUEUE a crash (round-12). Records an abnormally-exited child in the durable
+   * {@link pendingCrashes} queue — keyed by `(name, pid)`, INDEPENDENT of the live
+   * `records` slot — so a respawn that overwrites the slot cannot erase it before
+   * the detector's next tick. Idempotent per `(name, pid)`. Also drops the matching
+   * live record if it is STILL this exact `(name, pid)` (identity-guarded), so the
+   * detector's defensive dead-pid pass can't ALSO report it (no double-report); a
+   * respawn that already replaced the slot is left untouched. `record` is the
+   * child's captured registration (see `registerLiveProcessSafe`), so this works
+   * even when the live slot was already overwritten by a fast respawn.
    */
-  markCrashedIfPid(name: string, pid: number): boolean {
-    const r = this.records.get(name)
-    if (r === undefined || r.pid !== pid) return false
-    r.exit_status = 'crashed'
-    return true
+  enqueueCrash(record: ProcessRecord): void {
+    this.pendingCrashes.set(procRegistryKey(record.name, record.pid), {
+      ...record,
+      exit_status: 'crashed',
+    })
+    const live = this.records.get(record.name)
+    if (live !== undefined && live.pid === record.pid) this.records.delete(record.name)
+  }
+
+  /** Snapshot of the un-reported crashes the crashed-agent detector drains. */
+  listPendingCrashes(): ProcessRecord[] {
+    return [...this.pendingCrashes.values()].sort((a, b) => a.name.localeCompare(b.name))
+  }
+
+  /**
+   * Reap a reported crash from the pending queue, identity-guarded on `(name, pid)`
+   * — called by the detector's commit-after-delivery. Returns true only when the
+   * exact entry was removed.
+   */
+  reapCrash(name: string, pid: number): boolean {
+    return this.pendingCrashes.delete(procRegistryKey(name, pid))
   }
 
   /** SIGTERM every registered process. Returns the count signalled. */
@@ -275,9 +308,12 @@ export function registerLiveProcessSafe(input: ProcessRegisterInput): LiveProces
     const reg = resolveAmbientProcessRegistry()
     if (reg === null) return NOOP_LIVE_PROCESS_HANDLE
     reg.unregister(input.name)
-    reg.register(input)
-    // Capture the OWNING registry + identity now, so touch/unregister below bind
-    // to THIS registry — not whatever is top-of-stack when they later fire.
+    // Capture the OWNING registry + the child's OWN registered record, so
+    // touch/unregister/markCrashed below bind to THIS registry and THIS child —
+    // not whatever is top-of-stack, nor whatever record a later respawn installed
+    // under the same name. `record` is retained by this closure, so markCrashed can
+    // enqueue the crash even after a fast respawn overwrote the live slot (round-12).
+    const record = reg.register(input)
     const owner = reg
     const name = input.name
     const pid = input.pid
@@ -298,7 +334,7 @@ export function registerLiveProcessSafe(input: ProcessRegisterInput): LiveProces
       },
       markCrashed(): void {
         try {
-          owner.markCrashedIfPid(name, pid)
+          owner.enqueueCrash(record)
         } catch {
           // swallow
         }

@@ -209,17 +209,20 @@ export class CrashedAgentDetector implements WatchdogDetector {
     // so the retry tick had nothing to rediscover. The incident tracker keeps the
     // dead record deduped (one alert per crash) WITHOUT removing it — the removal
     // is deferred to commit().
-    // A record is CRASHED when the spawn exit handler explicitly marked it so (an
-    // abnormal exit — non-zero code / an external signal), OR — defensively — it is
-    // still registered but its pid is no longer alive (a process that died without
-    // its exit handler marking it). The explicit mark is the primary signal: it is
-    // what makes the detector actually fire in production, because a child that
-    // exits between 30 s ticks is otherwise unregistered by its exit handler before
-    // this runs. A cleanly/intentionally exited child was unregistered, so it never
-    // appears here.
-    const dead = this.registry
-      .list()
-      .filter((r) => r.exit_status === 'crashed' || !this.probe.isAlive(r.pid))
+    // A crash comes from TWO sources:
+    //   (1) the PENDING-CRASH QUEUE — the spawn exit handler ENQUEUED an abnormal
+    //       exit here, INDEPENDENT of the mutable live slot, so a fast respawn that
+    //       overwrote the slot cannot erase it before this tick drains it (round-12).
+    //       This is the primary signal: a child that exits between 30 s ticks is
+    //       otherwise unregistered/replaced before the detector ever runs.
+    //   (2) DEFENSIVELY, any still-live record whose pid is no longer alive — a
+    //       process that died WITHOUT its exit handler enqueuing (a true orphan).
+    // A cleanly/intentionally exited child was unregistered (never enqueued), so it
+    // never appears here.
+    const dead = [
+      ...this.registry.listPendingCrashes(),
+      ...this.registry.list().filter((r) => !this.probe.isAlive(r.pid)),
+    ]
     // Key PER (name, pid): a dead→dead REPLACEMENT (same name, new dead pid) must
     // be a DISTINCT incident. Keying by name alone left the old pid's incident open
     // (its removal is pid-guarded, so it never resolves the name key) and the
@@ -248,18 +251,19 @@ export class CrashedAgentDetector implements WatchdogDetector {
   // discoverable so a failed tick retries. `commitById` latches the incident so a
   // re-registered same-name process later is a fresh incident.
   //
-  // IDENTITY-GUARDED reap (High A): remove the entry ONLY if it still points at the
-  // EXACT pid we detected dead. A respawn intentionally replaces an entry under the
-  // same `name` with a NEW pid (`registerLiveProcessSafe` upsert / spawn.ts); if
-  // that happened between detect() and this commit(), a name-only unregister would
-  // erase the freshly-respawned LIVE process. `unregisterIfPid` no-ops in that case
-  // and leaves the new child registered.
+  // IDENTITY-GUARDED reap (High A + round-12): reap the reported crash from BOTH
+  // sources by EXACT `(name, pid)`. `reapCrash` drops the pending-queue entry;
+  // `unregisterIfPid` drops a defensive live-dead record ONLY if the slot still
+  // points at that pid — a respawn that replaced it (`registerLiveProcessSafe`
+  // upsert / spawn.ts) is left untouched, so committing an old crash never erases
+  // the freshly-respawned LIVE process. Both are no-ops when their entry is absent.
   commit(alert: WatchdogAlert): void {
     this.incidents.commitById(alert.id)
     const payload = alert.payload as { process_name?: unknown; pid?: unknown }
     const name = payload.process_name
     const pid = payload.pid
     if (typeof name === 'string' && typeof pid === 'number') {
+      this.registry.reapCrash(name, pid)
       this.registry.unregisterIfPid(name, pid)
     }
   }

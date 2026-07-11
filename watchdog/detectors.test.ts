@@ -7,7 +7,11 @@ import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { CronJobRegistry } from '@neutronai/cron/jobs.ts'
 import { CronStateStore } from '@neutronai/cron/state.ts'
 import { newCredentialPool } from '@neutronai/runtime/credential-pool.ts'
-import { ProcessRegistry } from '@neutronai/tools/process-registry.ts'
+import {
+  ProcessRegistry,
+  pushAmbientProcessRegistry,
+  registerLiveProcessSafe,
+} from '@neutronai/tools/process-registry.ts'
 import {
   CrashedAgentDetector,
   DbLockContentionDetector,
@@ -186,6 +190,60 @@ describe('CrashedAgentDetector', () => {
     detector.commit(t2[0]!)
     expect(reg.size()).toBe(0)
     expect((await detector.detect()).length).toBe(0)
+  })
+
+  test('round-12: a fast RESPAWN before detect() does NOT erase the crash — pid 1 still reported once', async () => {
+    const reg = new ProcessRegistry()
+    const clear = pushAmbientProcessRegistry(reg)
+    try {
+      // Register pid 1 through the ambient handle (exactly as spawn.ts does), then
+      // the exit handler enqueues its crash.
+      const h1 = registerLiveProcessSafe({ name: 'session', pid: 1, tool_name: 'cc-repl' })
+      h1.markCrashed()
+
+      // A FAST respawn reuses the SAME session key with pid 2 BEFORE the 30 s tick —
+      // the upsert (delete+register) overwrites the live slot. Pre-round-12 this
+      // erased pid 1's crash; now the crash lives in the pending queue.
+      registerLiveProcessSafe({ name: 'session', pid: 2, tool_name: 'cc-repl' })
+
+      // pid 2 is alive; only the ENQUEUED pid-1 crash can fire (probe forced alive).
+      const detector = new CrashedAgentDetector({
+        project_slug: 'owner',
+        process_registry: reg,
+        pid_probe: { isAlive: () => true },
+      })
+      const alerts = await detector.detect()
+      expect(alerts.length).toBe(1)
+      expect(alerts[0]?.payload['pid']).toBe(1) // pid 1's crash survived the respawn
+
+      // Commit reaps the crash but leaves the live pid-2 child intact.
+      detector.commit(alerts[0]!)
+      expect(reg.list().find((r) => r.name === 'session')?.pid).toBe(2)
+      expect(reg.listPendingCrashes().length).toBe(0)
+      // Exactly once — no repeat.
+      expect((await detector.detect()).length).toBe(0)
+    } finally {
+      clear()
+    }
+  })
+
+  test('round-12 sweep: a CLEAN/intentional exit (unregister) does NOT enqueue a false crash', async () => {
+    const reg = new ProcessRegistry()
+    const clear = pushAmbientProcessRegistry(reg)
+    try {
+      const h = registerLiveProcessSafe({ name: 'session', pid: 1, tool_name: 'cc-repl' })
+      // Clean exit / intentional kill routes to unregister(), NEVER markCrashed().
+      h.unregister()
+      expect(reg.listPendingCrashes().length).toBe(0)
+      const detector = new CrashedAgentDetector({
+        project_slug: 'owner',
+        process_registry: reg,
+        pid_probe: { isAlive: () => true },
+      })
+      expect((await detector.detect()).length).toBe(0) // no false crash
+    } finally {
+      clear()
+    }
   })
 })
 
