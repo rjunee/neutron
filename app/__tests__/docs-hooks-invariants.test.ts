@@ -163,34 +163,3 @@ describe('useDocTree — tree cleared BEFORE refetch (round-7 BLOCKING #2 orderi
     expect(fetchIdx).toBeGreaterThan(setTreeIdx);
   });
 });
-
-// ── Panes: SOURCE-TEXT wiring guards (fallback only) ──────────────────
-// The presentational panes (DocViewerPane / DocHistoryPane) import
-// react-native, which bun cannot parse (Flow) and cannot safely mock in
-// the run-tests.sh partitioned runner without corrupting real-RN imports
-// in chunk-mate suites. Their RENDER behaviour is therefore covered by
-// the agent-browser smoke (the repo convention — see
-// comments-side-pane.test.tsx). These source-text guards are a weak
-// backstop that the extracted panes still READ the hook objects they're
-// handed, so a future edit that decouples a pane from its hook at least
-// trips here.
-describe('docs-panes — hook wiring (source-text backstop)', () => {
-  const src = readHook('docs-panes.tsx');
-
-  it('DocViewerPane consumes docFile/docHistory/docMutations/anchor and renders the viewer', () => {
-    const pane = src.slice(src.indexOf('export function DocViewerPane'), src.indexOf('export function DocHistoryPane'));
-    expect(pane).toContain('docFile');
-    expect(pane).toContain('docHistory');
-    expect(pane).toContain('docMutations');
-    expect(pane).toContain('anchor');
-    expect(pane).toContain('file === null');
-    expect(pane).toContain('testID="docs-viewer"');
-  });
-
-  it('DocHistoryPane maps docHistory.historyEntries into rows', () => {
-    const pane = src.slice(src.indexOf('export function DocHistoryPane'));
-    expect(pane).toContain('docHistory');
-    expect(pane).toMatch(/historyEntries\.map\(/);
-    expect(pane).toContain('docs-history-row-');
-  });
-});

@@ -67,10 +67,9 @@ mock.module('react', () => ({ ...reactStub, default: reactStub }));
 // mocks) react-native. That matters: real react-native won't parse in
 // bun (Flow), and MOCKING it corrupts real-RN named imports for
 // chunk-mates under run-tests.sh's per-process file grouping. The
-// react-native-dependent PANES (docs-ui) are therefore left to the
-// source-text guards in docs-hooks-invariants.test.ts + the agent-browser
-// smoke (the repo convention for render-level coverage; see
-// comments-side-pane.test.tsx).
+// react-native-dependent PANES (docs-ui) get their own RENDER coverage in
+// docs-panes-render.test.ts, which mocks react-native the way
+// diagnostics-pane-render.test.ts does.
 
 function commitEffects(): void {
   for (const e of frameEffects) {
@@ -91,7 +90,7 @@ function deferred<T>(): Deferred<T> {
   const promise = new Promise<T>((res, rej) => { resolve = res; reject = rej; });
   return { promise, resolve, reject };
 }
-type Op = 'readFile' | 'tree' | 'history';
+type Op = 'readFile' | 'tree' | 'history' | 'getVersion';
 let q: Record<Op, { d: Deferred<unknown>; args: unknown[] }[]>;
 function op(name: Op, args: unknown[]): Promise<unknown> {
   const d = deferred<unknown>();
@@ -117,12 +116,13 @@ function resetHarness(): void {
   slots = [];
   idx = 0;
   frameEffects = [];
-  q = { readFile: [], tree: [], history: [] };
+  q = { readFile: [], tree: [], history: [], getVersion: [] };
   calls = { setError: [], setSelectedPath: [], setFile: [], fetchFile: [] };
   client = {
     readFile: (...a: unknown[]) => op('readFile', a),
     tree: (...a: unknown[]) => op('tree', a),
     history: (...a: unknown[]) => op('history', a),
+    getVersion: (...a: unknown[]) => op('getVersion', a),
   };
 }
 
@@ -279,6 +279,64 @@ describe('useDocHistory — history race guard (:84)', () => {
     api = renderHist('P');
     expect(calls.setError.length).toBeGreaterThan(0);
     expect(api.historyLoading).toBe(false);
+  });
+
+  // ── handlePreviewVersion (getVersion → setPreviewVersion) ──
+  it('preview COMMITS with the right args (project_id, sha, file.path)', async () => {
+    let api = renderHist('P');
+    api.handlePreviewVersion(entry('v1'));
+    expect(argsAt('getVersion', 0)).toEqual(['P', 'v1', 'notes/a.md']);
+    await settleAt('getVersion', 0, { sha: 'v1', content: 'V1', message: 'v1' });
+    api = renderHist('P');
+    expect((api.previewVersion as { sha: string }).sha).toBe('v1');
+  });
+
+  it('preview: newer request wins; the older late version is dropped', async () => {
+    let api = renderHist('P');
+    api.handlePreviewVersion(entry('a')); // token1, getVersion[0]
+    api.handlePreviewVersion(entry('b')); // token2, getVersion[1]
+    await settleAt('getVersion', 1, { sha: 'b', content: 'B', message: 'b' });
+    await settleAt('getVersion', 0, { sha: 'a', content: 'A', message: 'a' }); // stale
+    api = renderHist('P');
+    // Remove the guard at use-doc-history.ts:129 → 'a' overwrites 'b' → red.
+    expect((api.previewVersion as { sha: string }).sha).toBe('b');
+  });
+
+  it('preview: project switch mid-fetch discards the stale version', async () => {
+    let api = renderHist('P');
+    api.handlePreviewVersion(entry('a')); // token1
+    renderHist('Q'); // committed switch → historyGate reset
+    await settleAt('getVersion', 0, { sha: 'a', content: 'A', message: 'a' });
+    api = renderHist('Q');
+    expect(api.previewVersion).toBeNull();
+  });
+
+  it('preview: client/session switch mid-fetch discards the stale version', async () => {
+    let api = renderHist('P');
+    api.handlePreviewVersion(entry('a'));
+    renderHist('P', { ...client }); // same project, new DocsClient
+    await settleAt('getVersion', 0, { sha: 'a', content: 'A', message: 'a' });
+    api = renderHist('P', client);
+    expect(api.previewVersion).toBeNull();
+  });
+
+  it('preview: a getVersion error surfaces via error, no version committed', async () => {
+    let api = renderHist('P');
+    api.handlePreviewVersion(entry('a'));
+    await failAt('getVersion', 0, new DocsClientError('io_error', 'boom', 500, null));
+    api = renderHist('P');
+    expect(calls.setError.length).toBeGreaterThan(0);
+    expect(api.previewVersion).toBeNull();
+  });
+
+  it('preview: a stale getVersion error after a switch is DROPPED (catch guard)', async () => {
+    const api = renderHist('P');
+    api.handlePreviewVersion(entry('a')); // token1
+    renderHist('Q'); // switch → historyGate reset invalidates token1
+    await failAt('getVersion', 0, new DocsClientError('io_error', 'boom', 500, null));
+    // Remove the catch guard at use-doc-history.ts:132 → the stale error
+    // lands under project Q → setError fires → red.
+    expect(calls.setError.length).toBe(0);
   });
 });
 
