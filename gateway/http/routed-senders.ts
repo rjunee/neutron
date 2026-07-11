@@ -179,6 +179,16 @@ export function buildRoutedSendButtonPrompt(
 ): SendButtonPromptFn {
   return async ({ project_slug, topic_id, prompt }) => {
     if (topic_id.startsWith('web:')) {
+      // NOTE (D3, 2026-07) — the web route intentionally renders WITHOUT the
+      // optional `topic_id` stamp, preserving the exact pre-split behavior
+      // (chat-bridge.ts:414 on origin/main called `renderButtonPromptForWeb(prompt)`
+      // single-arg). An independent Codex pass flagged that a web-routed
+      // envelope therefore carries `topic_id === undefined`, which would let
+      // the per-topic client drop-guard misroute if a web session ever
+      // multiplexed topics. Stamping it (`renderButtonPromptForWeb(prompt, topic_id)`)
+      // is a WIRE-FORMAT behavior change — deferred to a behavior unit with its
+      // own cross-channel parity verification, NOT folded into this pure
+      // structural split.
       const ok = opts.webRegistry.send(topic_id, renderButtonPromptForWeb(prompt))
       // T10 — observability for the welcome-emit chain. `delivered=false`
       // is the smoking-gun trace for the "engine emitted but registry had
