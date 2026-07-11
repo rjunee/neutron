@@ -593,9 +593,14 @@ export function buildOpenGraphComposer(
             'Responses API adapter (BYO OPENAI_API_KEY). Trident + autonomous builds stay Claude Code.',
         )
       } else {
-        console.warn(
+        // HONOR the explicit selection even without a key: set provider='openai'
+        // so conversational turns FAIL LOUDLY (a terminal error per turn) instead
+        // of SILENTLY routing the operator's data to Anthropic — the provider they
+        // did NOT select (audit High). Set OPENAI_API_KEY to enable openai.
+        conversationalProviderCtx = { provider: 'openai' }
+        console.error(
           '[composer] NEUTRON_MODEL_PROVIDER=openai but no OPENAI_API_KEY resolved — ' +
-            'degrading LOUDLY to Claude Code for conversational turns. Set OPENAI_API_KEY to enable openai.',
+            'conversational turns will FAIL LOUDLY (no silent Anthropic fallback). Set OPENAI_API_KEY.',
         )
       }
     }

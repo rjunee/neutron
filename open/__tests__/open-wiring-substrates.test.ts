@@ -200,13 +200,23 @@ describe('wireSubstrates — swappable provider (trident stays Claude Code)', ()
     )
   })
 
-  test('provider=openai but missing openai pool ⇒ conversational config NOT applied (falls back to CC)', async () => {
+  test('provider=openai but missing openai pool ⇒ FAILS LOUDLY (terminal error), NEVER silent Anthropic fallback', async () => {
+    // An EXPLICIT openai selection must be honored even when incomplete — routing
+    // the operator's prompts to Anthropic (the unselected provider) is the exact
+    // silent-fallback bug this guards against (audit High).
     const { ctx, captured } = makeCtx({ provider: 'openai', openaiLlmPool: null, mcpResolver: async () => ({}) })
     const w = wireSubstrates(ctx)
-    // With no openai pool the conversational config is omitted → anthropic path,
-    // so draining the live-agent substrate records the CC fake opts.
-    await drain(w.liveAgentSubstrate!)
-    expect(captured.some((o) => o.substrate_instance_id === 'cc-agent-owner')).toBe(true)
+    expect(w.liveAgentSubstrate).not.toBeNull()
+    // Draining yields a LOUD terminal error and NEVER dispatches through the CC
+    // fake factory (which only the anthropic path uses).
+    const handle = w.liveAgentSubstrate!.start(SESSIONLESS_SPEC)
+    const events: Event[] = []
+    for await (const e of handle.events) events.push(e)
+    const err = events.find((e) => e.kind === 'error')
+    expect(err?.kind).toBe('error')
+    if (err?.kind === 'error') expect(err.message).toMatch(/openai/i)
+    // The Claude Code fake factory was NOT invoked — no silent Anthropic dispatch.
+    expect(captured.some((o) => o.substrate_instance_id === 'cc-agent-owner')).toBe(false)
   })
 })
 

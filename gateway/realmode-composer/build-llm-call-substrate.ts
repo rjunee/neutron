@@ -795,6 +795,14 @@ export function startOpenAiFamilySession(args: {
   let innerHandle: SessionHandle | null = null
   let cancelled = false
   const events = (async function* (): AsyncGenerator<Event, void, void> {
+   // SETUP GUARD (audit) — the OpenAI path promises to "degrade LOUDLY (terminal
+   // error event)". Pool resolution (`await config.resolvePool()`), manifest
+   // resolution (`config.toolManifest()`), and adapter construction/`start()` can
+   // all THROW; without this guard a throw would REJECT the caller's `for await`
+   // instead of yielding a terminal `error`. Wrap the whole setup+dispatch so any
+   // throw becomes an `error` event on the stream. (The shape-checks below yield
+   // their own terminal errors and `return`.)
+   try {
     if (config === undefined) {
       yield {
         kind: 'error',
@@ -968,6 +976,18 @@ export function startOpenAiFamilySession(args: {
       }
       yield ev
     }
+   } catch (err) {
+     // SETUP GUARD — convert any throw (pool/manifest resolution, adapter
+     // construction/start, or a misbehaving adapter iterator) into a terminal
+     // error event so the caller's `for await` never rejects.
+     yield {
+       kind: 'error',
+       message: `openai provider (${provider}) failed during setup/dispatch: ${
+         err instanceof Error ? err.message : String(err)
+       }`,
+       retryable: false,
+     }
+   }
   })()
   const handle: SessionHandle = {
     events,

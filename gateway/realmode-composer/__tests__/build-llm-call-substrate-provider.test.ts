@@ -600,3 +600,74 @@ test('BOUNDARY streamed server_error → NOT cooled (upstream fault, not credent
   expect(events.some((e) => e.kind === 'error')).toBe(true)
   expect(pool.credentials[0]!.cooldown_until).toBeUndefined()
 })
+
+// --- SETUP GUARD (audit Medium): every throw site → terminal error event, not a
+// rejected iterator. Three sites: pool resolution, manifest resolution, adapter
+// construction/start. ---
+
+test('SETUP GUARD: resolvePool throw → terminal error event (iterator does NOT reject)', async () => {
+  const sub = buildLlmCallSubstrate({
+    pool: anthropicPool(),
+    substrate_instance_id: 'gpt-throw-pool',
+    provider: 'openai',
+    user_id: 'owner',
+    openai: {
+      resolvePool: async () => { throw new Error('vault unavailable') },
+      mcpResolver: async () => ({}),
+      model_preference: ['gpt-5.6'],
+    },
+  })!
+  // Must NOT reject — must yield a terminal error.
+  const events = await drain(sub.start(spec()))
+  const err = events.find((e) => e.kind === 'error')
+  expect(err?.kind).toBe('error')
+  if (err?.kind === 'error') {
+    expect(err.message).toMatch(/vault unavailable/)
+    expect(err.retryable).toBe(false)
+  }
+})
+
+test('SETUP GUARD: toolManifest throw → terminal error event', async () => {
+  const sub = buildLlmCallSubstrate({
+    pool: anthropicPool(),
+    substrate_instance_id: 'gpt-throw-manifest',
+    provider: 'openai',
+    user_id: 'owner',
+    openai: {
+      pool: openaiPool(),
+      mcpResolver: async () => ({}),
+      model_preference: ['gpt-5.6'],
+      toolManifest: () => { throw new Error('manifest boom') },
+      fetchImpl: gptFetch(),
+    },
+  })!
+  const events = await drain(sub.start(spec()))
+  const err = events.find((e) => e.kind === 'error')
+  expect(err?.kind).toBe('error')
+  if (err?.kind === 'error') expect(err.message).toMatch(/manifest boom/)
+})
+
+test('SETUP GUARD: adapter start() throw (auth failure) → terminal error event', async () => {
+  // An empty-secret credential + empty env makes resolveOpenAiAuth throw at
+  // substrate.start() — must surface as a terminal error, not a rejection.
+  const emptySecretPool = newCredentialPool({
+    strategy: 'fill_first',
+    credentials: [{ id: 'openai:empty', kind: 'api_key', secret: '' }],
+  })
+  const sub = buildLlmCallSubstrate({
+    pool: anthropicPool(),
+    substrate_instance_id: 'gpt-throw-start',
+    provider: 'openai',
+    user_id: 'owner',
+    openai: {
+      pool: emptySecretPool,
+      mcpResolver: async () => ({}),
+      model_preference: ['gpt-5.6'],
+      env: {}, // no OPENAI_API_KEY fallback → auth resolution throws
+    },
+  })!
+  const events = await drain(sub.start(spec()))
+  const err = events.find((e) => e.kind === 'error')
+  expect(err?.kind).toBe('error')
+  if (err?.kind === 'error') expect(err.message).toMatch(/OPENAI_API_KEY|setup\/dispatch/i)
+})

@@ -67,21 +67,33 @@ export function wireSubstrates(ctx: OpenWiringContext): WiredSubstrates {
   // openai is selected but its pool / mcpResolver is missing, we leave the
   // conversational config unset (→ Claude Code) rather than boot a broken path;
   // the composer logs the fallback.
-  const openaiSelected =
-    ctx.provider === 'openai' &&
+  // EXPLICIT operator selection vs FULLY-WIRED. `ctx.provider === 'openai'` is the
+  // operator's explicit choice (NEUTRON_MODEL_PROVIDER=openai); it is honored even
+  // when incomplete so the substrate FAILS LOUDLY rather than silently routing the
+  // operator's prompts to Anthropic — the provider they did NOT select (audit High).
+  const openaiRequested = ctx.provider === 'openai'
+  const openaiFullyWired =
+    openaiRequested &&
     ctx.openaiLlmPool !== null &&
     ctx.openaiLlmPool !== undefined &&
     ctx.mcpResolver !== undefined
-  const conversationalProvider: Partial<BuildLlmCallSubstrateInput> = openaiSelected
+  const conversationalProvider: Partial<BuildLlmCallSubstrateInput> = openaiRequested
     ? {
+        // ALWAYS set provider='openai' for an explicit selection. When fully wired
+        // the `openai` config is included; when NOT, it is omitted so the substrate
+        // emits its LOUD terminal error (never a silent Anthropic fallback).
         provider: 'openai',
-        openai: {
-          pool: ctx.openaiLlmPool!,
-          mcpResolver: ctx.mcpResolver!,
-          model_preference: getOpenAiModelPreference(),
-          // HONEST TOOL MANIFEST (audit BLOCKER 1) — only real MCP tools reach GPT.
-          ...(ctx.toolManifest !== undefined ? { toolManifest: ctx.toolManifest } : {}),
-        },
+        ...(openaiFullyWired
+          ? {
+              openai: {
+                pool: ctx.openaiLlmPool!,
+                mcpResolver: ctx.mcpResolver!,
+                model_preference: getOpenAiModelPreference(),
+                // HONEST TOOL MANIFEST (audit BLOCKER 1) — only real MCP tools reach GPT.
+                ...(ctx.toolManifest !== undefined ? { toolManifest: ctx.toolManifest } : {}),
+              },
+            }
+          : {}),
       }
     : {}
 
@@ -97,7 +109,7 @@ export function wireSubstrates(ctx: OpenWiringContext): WiredSubstrates {
   // that returns null so construction still yields a non-null Substrate. When NOT
   // openai-selected this is `{ pool: llmPool }` with a non-null pool — BYTE-IDENTICAL
   // to before.
-  const conversationalAvailable = openaiSelected || llmPool !== null
+  const conversationalAvailable = openaiRequested || llmPool !== null
   const anthropicPoolArg: Pick<BuildLlmCallSubstrateInput, 'pool' | 'resolvePool'> =
     llmPool !== null ? { pool: llmPool } : { resolvePool: async (): Promise<null> => null }
 
@@ -155,9 +167,10 @@ export function wireSubstrates(ctx: OpenWiringContext): WiredSubstrates {
   // first turn waits; warm turns stay snappy.
   // Pre-warm ONLY the Claude Code warm-REPL path — pre-warming is a CC concept
   // (cold spawn of the interactive REPL). The OpenAI adapter is stateless HTTP, so
-  // pre-warming it would fire a real API call at boot; skip it under openaiSelected.
+  // pre-warming it would fire a real API call at boot; skip it whenever openai is
+  // the requested provider (wired or not — an unwired openai turn just errors).
   const prewarmReady: Promise<void> | null =
-    llmCallSubstrate !== null && !openaiSelected ? prewarmSubstrate(llmCallSubstrate) : null
+    llmCallSubstrate !== null && !openaiRequested ? prewarmSubstrate(llmCallSubstrate) : null
   // Track whether the pre-warm has SETTLED so the resolver can elevate the
   // budget for EVERY conversational dispatch in the cold window — not just the
   // first (2026-06-18 cold-start fix, round 2: the live owner-signup raced the
