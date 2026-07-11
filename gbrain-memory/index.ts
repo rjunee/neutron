@@ -14,7 +14,9 @@ export { GBrainMemoryStore } from './gbrain-memory-store.ts'
 export {
   resolveEmbedderConfig,
   buildOpenAiEmbedderConfig,
+  probeOllamaHealth,
   type EmbedderConfig,
+  type OllamaHealthCheck,
 } from './embedder-config.ts'
 export {
   ensureBrainInitialized,

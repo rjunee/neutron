@@ -31,7 +31,12 @@ void _wiringExposesNoRawClient
 
 describe('resolveGbrainClientOptions', () => {
   test('GBRAIN_HOME is the per-project <owner_home>/gbrain boundary', () => {
-    const opts = resolveGbrainClientOptions({ owner_home: '/srv/owners/acme', env: {} })
+    // Uses the explicit `off` opt-out so this test stays decoupled from the
+    // RA3 default embedder choice — its whole point is the path boundary.
+    const opts = resolveGbrainClientOptions({
+      owner_home: '/srv/owners/acme',
+      env: { NEUTRON_EMBEDDINGS: 'off' },
+    })
     expect(opts.env).toEqual({ GBRAIN_HOME: '/srv/owners/acme/gbrain' })
   })
 
@@ -57,12 +62,42 @@ describe('resolveGbrainClientOptions', () => {
 
   // --- Conditional embedding-store init (opt-in) ---------------------------
   describe('conditional embedding store', () => {
-    test('NO embedder (default) → child env is exactly GBRAIN_HOME (keyword + graph)', () => {
-      // The whole point of opt-in: a bare OPENAI_API_KEY (the LLM adapter key)
-      // must NOT leak any GBRAIN_EMBEDDING_* env into the child.
+    test('DEFAULT (unset, no key) → child env carries the local Ollama fallback seam', () => {
+      // RA3: the default is now the local Ollama fallback (hybrid recall out
+      // of the box), not "no embedder at all".
+      const opts = resolveGbrainClientOptions({
+        owner_home: '/srv/owners/acme',
+        env: {},
+      })
+      expect(opts.env).toEqual({
+        GBRAIN_HOME: '/srv/owners/acme/gbrain',
+        GBRAIN_EMBEDDING_MODEL: 'ollama:nomic-embed-text',
+        GBRAIN_EMBEDDING_DIMENSIONS: '768',
+        OLLAMA_BASE_URL: 'http://localhost:11434/v1',
+      })
+    })
+
+    test('DEFAULT + a bare OPENAI_API_KEY (LLM adapter key) → still the local fallback, no cloud billing', () => {
+      // The billing-safety invariant survives RA3: a bare OPENAI_API_KEY (the
+      // LLM adapter's key) must NOT leak into the embedding seam or trigger
+      // cloud embeddings — the default stays the FREE local Ollama fallback.
       const opts = resolveGbrainClientOptions({
         owner_home: '/srv/owners/acme',
         env: { OPENAI_API_KEY: 'sk-llm-only' },
+      })
+      expect(opts.env).toEqual({
+        GBRAIN_HOME: '/srv/owners/acme/gbrain',
+        GBRAIN_EMBEDDING_MODEL: 'ollama:nomic-embed-text',
+        GBRAIN_EMBEDDING_DIMENSIONS: '768',
+        OLLAMA_BASE_URL: 'http://localhost:11434/v1',
+      })
+      expect(opts.env?.['OPENAI_API_KEY']).toBeUndefined()
+    })
+
+    test('explicit opt-out (NEUTRON_EMBEDDINGS=off) → child env is exactly GBRAIN_HOME (keyword + graph)', () => {
+      const opts = resolveGbrainClientOptions({
+        owner_home: '/srv/owners/acme',
+        env: { NEUTRON_EMBEDDINGS: 'off', OPENAI_API_KEY: 'sk-llm-only' },
       })
       expect(opts.env).toEqual({ GBRAIN_HOME: '/srv/owners/acme/gbrain' })
     })
@@ -111,67 +146,89 @@ describe('resolveGbrainClientOptions', () => {
   // --- LAZY onboarding-key activation (key captured AFTER boot) -------------
   // The composer can't see the onboarding/admin OpenAI key at boot (it's
   // captured later, over the already-running server), so it threads a LAZY
-  // resolver. The embedder seam must NOT be baked into the static child env (the
-  // key isn't known yet) — it is resolved at spawn time via `resolveDynamicEnv`.
+  // resolver. RA3: the STATIC child env is now the local Ollama fallback (the
+  // default, always-on baseline — no longer "keyword-only"); a
+  // `resolveDynamicEnv` thunk OVERRIDES it with OpenAI, at the SAME shared
+  // 768-dim width, once/if a key resolves — so a spawn before vs. after the
+  // key lands never straddles two different column widths.
   describe('lazy onboarding-key resolver (resolveOpenAiKey)', () => {
-    test('static child env stays keyword-only; a resolveDynamicEnv thunk is attached', () => {
+    test('static child env is the local Ollama fallback; a resolveDynamicEnv thunk is attached', () => {
       const opts = resolveGbrainClientOptions({
         owner_home: '/srv/owners/acme',
         env: {},
         resolveOpenAiKey: async () => 'sk-captured-later',
       })
       // The key is NOT in the static env — it resolves at spawn, not compose.
-      expect(opts.env).toEqual({ GBRAIN_HOME: '/srv/owners/acme/gbrain' })
+      // But the RA3 default (local Ollama) IS already in the static env.
+      expect(opts.env).toEqual({
+        GBRAIN_HOME: '/srv/owners/acme/gbrain',
+        GBRAIN_EMBEDDING_MODEL: 'ollama:nomic-embed-text',
+        GBRAIN_EMBEDDING_DIMENSIONS: '768',
+        OLLAMA_BASE_URL: 'http://localhost:11434/v1',
+      })
       expect(typeof opts.resolveDynamicEnv).toBe('function')
     })
 
-    test('resolveDynamicEnv() yields the OpenAI embedding seam when the key is present', async () => {
+    test('resolveDynamicEnv() yields the OpenAI embedding seam, at the SHARED 768-dim width, when the key is present', async () => {
       const opts = resolveGbrainClientOptions({
         owner_home: '/t',
         env: {},
         resolveOpenAiKey: async () => 'sk-captured-later',
       })
+      // 768, not 3072: matches the local-fallback column this brain's `gbrain
+      // init` already sized (upgrade in place, no rebuild).
       await expect(opts.resolveDynamicEnv!()).resolves.toEqual({
         GBRAIN_EMBEDDING_MODEL: 'openai:text-embedding-3-large',
-        GBRAIN_EMBEDDING_DIMENSIONS: '3072',
+        GBRAIN_EMBEDDING_DIMENSIONS: '768',
         OPENAI_API_KEY: 'sk-captured-later',
       })
     })
 
-    test('resolveDynamicEnv() yields NO embedding seam when the key is absent (keyword + graph)', async () => {
+    test('resolveDynamicEnv() yields the local Ollama fallback (not empty) when the key is absent', async () => {
       const opts = resolveGbrainClientOptions({
         owner_home: '/t',
         env: {},
         resolveOpenAiKey: async () => undefined,
       })
-      await expect(opts.resolveDynamicEnv!()).resolves.toEqual({})
+      await expect(opts.resolveDynamicEnv!()).resolves.toEqual({
+        GBRAIN_EMBEDDING_MODEL: 'ollama:nomic-embed-text',
+        GBRAIN_EMBEDDING_DIMENSIONS: '768',
+        OLLAMA_BASE_URL: 'http://localhost:11434/v1',
+      })
     })
 
-    test('a blank/whitespace key does NOT activate embeddings (no accidental billing)', async () => {
+    test('a blank/whitespace key does NOT activate cloud billing (falls to the free local fallback)', async () => {
       const opts = resolveGbrainClientOptions({
         owner_home: '/t',
         env: {},
         resolveOpenAiKey: async () => '   ',
       })
-      await expect(opts.resolveDynamicEnv!()).resolves.toEqual({})
+      const env = await opts.resolveDynamicEnv!()
+      expect(env['GBRAIN_EMBEDDING_MODEL']).toBe('ollama:nomic-embed-text')
+      expect(env['OPENAI_API_KEY']).toBeUndefined()
     })
 
-    test('resolveDynamicEnv re-resolves each spawn → a key stored AFTER a keyword spawn activates', async () => {
+    test('resolveDynamicEnv re-resolves each spawn → a key stored AFTER an Ollama spawn upgrades in place', async () => {
       // The miss is never cached at this seam: if the first memory op spawned
-      // keyword (no key yet), a later reconnect must pick up a key stored since.
+      // on the local fallback (no key yet), a later reconnect must pick up a
+      // key stored since.
       let stored: string | undefined
       const opts = resolveGbrainClientOptions({
         owner_home: '/t',
         env: {},
         resolveOpenAiKey: async () => stored,
       })
-      // First spawn: no key → keyword + graph.
-      await expect(opts.resolveDynamicEnv!()).resolves.toEqual({})
+      // First spawn: no key → the local Ollama fallback.
+      await expect(opts.resolveDynamicEnv!()).resolves.toEqual({
+        GBRAIN_EMBEDDING_MODEL: 'ollama:nomic-embed-text',
+        GBRAIN_EMBEDDING_DIMENSIONS: '768',
+        OLLAMA_BASE_URL: 'http://localhost:11434/v1',
+      })
       // Key pasted during onboarding/admin, THEN a reconnect spawns again.
       stored = 'sk-stored-later'
       await expect(opts.resolveDynamicEnv!()).resolves.toEqual({
         GBRAIN_EMBEDDING_MODEL: 'openai:text-embedding-3-large',
-        GBRAIN_EMBEDDING_DIMENSIONS: '3072',
+        GBRAIN_EMBEDDING_DIMENSIONS: '768',
         OPENAI_API_KEY: 'sk-stored-later',
       })
     })

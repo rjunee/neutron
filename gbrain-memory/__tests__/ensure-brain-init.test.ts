@@ -7,11 +7,17 @@
  *
  *   - FRESH brain → runs `gbrain init --pglite` exactly once, embeddings-ready.
  *   - IDEMPOTENT → a second call (config.json now present) does NOT re-init.
- *   - NO embedder → still inits an OpenAI-ready column (3072) so a later key
- *     upgrades in place (a 1280-dim `--no-embedding` brain could not).
+ *   - NO embedder (explicit `off`) → still inits an OpenAI-ready column (3072)
+ *     so a later key upgrades in place (a 1280-dim `--no-embedding` brain
+ *     could not).
  *   - WITH embedder → inits against that provider's model + dims, and backfills
  *     pre-existing pages once (marker-gated) when a provider key is present.
  *   - binary-missing / init-failure → returns a status, never throws.
+ *
+ * RA3 (2026-07) adds: a fail-soft, advisory-only Ollama reachability probe —
+ * NEVER gates the embedder/column choice (already fixed by the caller), only
+ * logs a degradation warning (unreachable / model not pulled) or a healthy
+ * confirmation. See `probeOllamaHealth` tests below.
  */
 
 import { describe, test, expect } from 'bun:test'
@@ -20,7 +26,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { ensureBrainInitialized, brainConfigPath } from '../ensure-brain-init.ts'
-import { buildOpenAiEmbedderConfig } from '../embedder-config.ts'
+import { buildOpenAiEmbedderConfig, resolveEmbedderConfig } from '../embedder-config.ts'
+import type { OllamaHealthCheck } from '../embedder-config.ts'
 import type { CommandRunner, CommandResult } from '../gbrain-doctor.ts'
 
 function tempHome(): string {
@@ -177,5 +184,128 @@ describe('ensureBrainInitialized', () => {
       logger: silentLogger,
     })
     expect(res.status).toBe('binary-missing')
+  })
+})
+
+// RA3 — Ollama reachability probe (advisory-only, fail-soft).
+describe('ensureBrainInitialized — Ollama reachability probe (RA3)', () => {
+  function capturingLogger(): {
+    logger: { warn: (m: string) => void; info: (m: string) => void }
+    warnings: string[]
+    infos: string[]
+  } {
+    const warnings: string[] = []
+    const infos: string[] = []
+    return {
+      logger: {
+        warn: (m: string) => warnings.push(m),
+        info: (m: string) => infos.push(m),
+      },
+      warnings,
+      infos,
+    }
+  }
+
+  test('fresh install, no key → the DEFAULT embedder is the local Ollama fallback', () => {
+    // Pins the RA3 default end-to-end: resolveEmbedderConfig({}) (a fresh
+    // install with no env at all) is exactly the embedder ensureBrainInitialized
+    // gets handed in production.
+    const embedder = resolveEmbedderConfig({})
+    expect(embedder?.provider).toBe('ollama')
+  })
+
+  test('Ollama unreachable → init still succeeds, but a degradation warning fires', async () => {
+    const home = tempHome()
+    const { runner, calls } = fakeRunner()
+    const embedder = resolveEmbedderConfig({})! // the RA3 default: local Ollama fallback
+    const { logger, warnings } = capturingLogger()
+    const probe = async (): Promise<OllamaHealthCheck> => ({ reachable: false, modelPresent: false })
+
+    const res = await ensureBrainInitialized({
+      gbrainHome: home,
+      embedder,
+      runner,
+      logger,
+      probeOllamaHealth: probe,
+    })
+
+    // Fail-soft: init still succeeds (column created at Ollama's dims) even
+    // though Ollama itself isn't reachable right now — GBrain's own
+    // hybridSearch degrades a failed per-query embed to keyword-only.
+    expect(res.status).toBe('initialized')
+    expect(calls).toHaveLength(1)
+    const initArgs = calls[0]!.args
+    expect(initArgs).toContain('nomic-embed-text')
+    expect(initArgs).toContain('768')
+    // The degradation is SURFACED, not silent.
+    expect(warnings.some((w) => w.includes('not reachable'))).toBe(true)
+    expect(warnings.some((w) => w.includes('keyword+graph'))).toBe(true)
+  })
+
+  test('Ollama reachable but nomic-embed-text not pulled → a different, specific warning', async () => {
+    const home = tempHome()
+    const { runner } = fakeRunner()
+    const embedder = resolveEmbedderConfig({ NEUTRON_EMBEDDINGS: 'ollama' })!
+    const { logger, warnings } = capturingLogger()
+    const probe = async (): Promise<OllamaHealthCheck> => ({ reachable: true, modelPresent: false })
+
+    await ensureBrainInitialized({ gbrainHome: home, embedder, runner, logger, probeOllamaHealth: probe })
+
+    expect(warnings.some((w) => w.includes('is not pulled'))).toBe(true)
+    expect(warnings.some((w) => w.includes('ollama pull nomic-embed-text'))).toBe(true)
+  })
+
+  test('Ollama healthy (reachable + model present) → an info confirmation, no warning', async () => {
+    const home = tempHome()
+    const { runner } = fakeRunner()
+    const embedder = resolveEmbedderConfig({})!
+    const { logger, warnings, infos } = capturingLogger()
+    const probe = async (): Promise<OllamaHealthCheck> => ({ reachable: true, modelPresent: true })
+
+    await ensureBrainInitialized({ gbrainHome: home, embedder, runner, logger, probeOllamaHealth: probe })
+
+    expect(warnings).toHaveLength(0)
+    expect(infos.some((m) => m.includes('healthy') && m.includes('semantic recall active'))).toBe(true)
+  })
+
+  test('no embedder (explicit off) → the probe is never consulted', async () => {
+    const home = tempHome()
+    const { runner } = fakeRunner()
+    let probeCalls = 0
+    const probe = async (): Promise<OllamaHealthCheck> => {
+      probeCalls += 1
+      return { reachable: true, modelPresent: true }
+    }
+
+    await ensureBrainInitialized({
+      gbrainHome: home,
+      embedder: null,
+      runner,
+      logger: silentLogger,
+      probeOllamaHealth: probe,
+    })
+
+    expect(probeCalls).toBe(0)
+  })
+
+  test('openai embedder → the Ollama probe is never consulted', async () => {
+    const home = tempHome()
+    const { runner } = fakeRunner()
+    const embedder = buildOpenAiEmbedderConfig('sk-test-123', 3072)
+    let probeCalls = 0
+    const probe = async (): Promise<OllamaHealthCheck> => {
+      probeCalls += 1
+      return { reachable: true, modelPresent: true }
+    }
+
+    await ensureBrainInitialized({
+      gbrainHome: home,
+      embedder,
+      runner,
+      logger: silentLogger,
+      probeOllamaHealth: probe,
+    })
+
+    expect(probeCalls).toBe(0)
   })
 })

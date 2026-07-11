@@ -17,26 +17,39 @@
  * typed-edge graph search work with NO embedder; semantic embeddings turn on
  * only when an OpenAI key is present.
  *
- * **Embeddings-ready by construction (the key design decision).** We always
- * init the PGLite brain with the OpenAI embedding model + dims (3072) so the
- * `content_chunks` vector column is OpenAI-compatible *from creation* — EVEN
- * when no key is present. Verified end-to-end: with no key, `gbrain` computes no
- * embeddings and `gbrain serve` answers `put_page` + keyword `search` exactly as
- * the default keyword+graph mode requires. When the owner later adds an OpenAI
- * key (the onboarding optional-key offer → secrets store), embeddings flip on
- * with **NO schema rebuild** and a one-time `gbrain embed --stale` backfill of
- * any pages written before the key existed. A `--no-embedding` brain could NOT
- * upgrade in place: its default column is 1280-dim and OpenAI's
- * `text-embedding-3-large` rejects 1280-dim vectors (allowed: 256/512/768/1024/
- * 1536/3072). The init dims/model track an explicitly-configured embedder when
- * one is set via `NEUTRON_EMBEDDINGS` (e.g. ollama 768), so an operator who
- * opts into a different provider gets a matching column.
+ * **Embeddings-ready by construction (the key design decision).** We init the
+ * PGLite brain against whatever embedder is effectively configured — by
+ * DEFAULT (RA3, 2026-07) that is the local Ollama fallback (768 dims,
+ * `resolveEmbedderConfig`'s unset case), so `content_chunks` is
+ * semantic-ready *from creation* with no key and no operator config. When
+ * the owner later adds an OpenAI key (the onboarding optional-key offer →
+ * secrets store), embeddings flip to cloud with **NO schema rebuild**: the
+ * onboarding-key path (`buildOpenAiEmbedderConfig`, called bare) shares the
+ * SAME 768-dim width as the local fallback (OpenAI's `text-embedding-3-large`
+ * supports Matryoshka truncation to any width ≤ 3072), so a one-time
+ * `gbrain embed --stale` backfill of any pages written before the key existed
+ * writes into the SAME column. A `--no-embedding` brain could NOT upgrade in
+ * place: its default column is 1280-dim and OpenAI's `text-embedding-3-large`
+ * rejects a mismatched width. The init dims/model always track the
+ * EFFECTIVELY-configured embedder (`resolveInitEmbeddingTarget`), so an
+ * operator who explicitly opts into a different provider (or `off`) gets a
+ * matching column.
+ *
+ * **Fail-soft Ollama reachability (RA3).** Because the default now
+ * optimistically configures the local Ollama fallback, `ensureBrainInitialized`
+ * also probes it once at boot (`probeOllamaHealth`) and logs a clear
+ * degradation warning when it's unreachable or `nomic-embed-text` isn't
+ * pulled — advisory only, it never changes the embedder or column sizing.
+ * GBrain's own `hybridSearch` already degrades a failed per-query embed to
+ * keyword-only, so an absent Ollama never crashes recall; this probe just
+ * makes the degraded state OBSERVABLE instead of a silent mystery.
  */
 
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 
 import type { EmbedderConfig } from './embedder-config.ts'
+import { probeOllamaHealth } from './embedder-config.ts'
 import { isGbrainBinaryMissingError } from './memory-store.ts'
 import { type CommandRunner, bunCommandRunner } from './command-runner.ts'
 import { resolveGbrainChildPath } from './resolve-gbrain-command.ts'
@@ -67,6 +80,12 @@ export interface EnsureBrainInitInput {
   runner?: CommandRunner
   /** Structured log sink (injected in tests). Default `console`. */
   logger?: { warn: (msg: string) => void; info: (msg: string) => void }
+  /**
+   * Ollama reachability probe seam (injected in tests). Default the real
+   * `probeOllamaHealth` (does actual network I/O). Advisory-only — see
+   * "Fail-soft Ollama reachability" above.
+   */
+  probeOllamaHealth?: typeof probeOllamaHealth
 }
 
 export type EnsureBrainInitStatus =
@@ -123,6 +142,39 @@ export async function ensureBrainInitialized(
     warn: (m: string) => console.warn(m),
     info: (m: string) => console.info(m),
   }
+  const probeHealth = input.probeOllamaHealth ?? probeOllamaHealth
+
+  // Advisory-only Ollama reachability probe (RA3). Never gates the embedder
+  // or column sizing (already fixed by `resolveEmbedderConfig` at
+  // composition time, before this function is ever called) — purely surfaces
+  // a degraded state with an actionable log line, since GBrain's own
+  // per-query embed-fail fallback to keyword-only is otherwise silent from
+  // outside the gbrain process.
+  if (input.embedder !== null && input.embedder.provider === 'ollama') {
+    const baseUrl = input.embedder.childEnv['OLLAMA_BASE_URL'] ?? 'http://localhost:11434/v1'
+    const health = await probeHealth(baseUrl, { model: input.embedder.model })
+    if (!health.reachable) {
+      logger.warn(
+        `[gbrain-memory] local Ollama embedder configured (${input.embedder.model} @ ${baseUrl}) ` +
+          'but it is not reachable — semantic recall degrades to keyword+graph (lexical) until ' +
+          'Ollama is running; recall auto-upgrades once it is, no restart needed. ' +
+          `Install: brew install ollama && ollama pull ${input.embedder.model} ` +
+          '(or paste an OpenAI key in Settings to use cloud embeddings instead).',
+      )
+    } else if (!health.modelPresent) {
+      logger.warn(
+        `[gbrain-memory] Ollama is reachable at ${baseUrl} but '${input.embedder.model}' is not ` +
+          'pulled — semantic recall degrades to keyword+graph (lexical) until it is. ' +
+          `Install: ollama pull ${input.embedder.model}`,
+      )
+    } else {
+      logger.info(
+        `[gbrain-memory] local Ollama embedder healthy (${input.embedder.model} @ ${baseUrl}) — ` +
+          'semantic recall active.',
+      )
+    }
+  }
+
   const childEnv: Record<string, string> = { GBRAIN_HOME: input.gbrainHome }
   // Provider auth (e.g. OPENAI_API_KEY) the embed backfill needs lives in the
   // embedder's childEnv; merge it so `gbrain embed` can reach the provider.
