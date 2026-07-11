@@ -500,6 +500,9 @@
         "@neutronai/wire-types": "workspace:*",
         "jose": "^5.9.0",
       },
+      "devDependencies": {
+        "yaml": "2.9.0",
+      },
     },
     "scribe": {
       "name": "@neutronai/scribe",

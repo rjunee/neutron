@@ -210,6 +210,46 @@ const YAML_KEYWORDS = new Set([
   'off',
 ])
 
+/**
+ * The RENDER-side quoting grammar: the full YAML 1.2 core-schema numeric SHAPE
+ * a standard parser will coerce to a number — anchored to the WHOLE string, so
+ * a number-lookalike PREFIX (`5foo`, `.5foo`, `1.2.3`) is NOT a match and stays
+ * an unquoted plain string. A string value is quoted iff it matches, so no YAML
+ * consumer can silently retype it. Covers, exactly as the repo's locked
+ * `yaml@2` coerces them (verified in the golden-mirror interop test):
+ *   - decimal int incl. leading zeros: `007`, `-0`
+ *   - hex / octal: `0x1f`, `0o17`
+ *   - float incl. leading/trailing dot + exponent: `.5`, `1.`, `.5e3`
+ *   - OVERFLOW forms that coerce to Infinity: `1e400`, giant integers
+ *   - `±.inf` / `.nan`
+ * This is DELIBERATELY decoupled from the read side's coercion: quoting is
+ * keyed to "what a YAML parser would coerce", NOT to whether OUR naive reader
+ * coerces it to a FINITE JS number. The prior finite-gated guard left `1e400`
+ * unquoted → every standard reader retyped it to Infinity (the blocker this
+ * fixes); the still-earlier leading-digit-only guard left `.5` unquoted → 0.5.
+ */
+const YAML_NUMBER_RE = new RegExp(
+  '^(?:' +
+    '[-+]?[0-9]+' + // decimal integer (leading zeros allowed: 007, 010)
+    '|0x[0-9a-fA-F]+' + // hex integer
+    '|0o[0-7]+' + // octal integer
+    '|[-+]?(?:\\.[0-9]+|[0-9]+(?:\\.[0-9]*)?)(?:[eE][-+]?[0-9]+)?' + // float (incl. overflow like 1e400)
+    '|[-+]?\\.(?:inf|Inf|INF)' + // ±infinity
+    '|\\.(?:nan|NaN|NAN)' + // not-a-number
+    ')$',
+)
+
+/**
+ * The READ-side coercion grammar, kept intentionally NARROWER than the render
+ * guard: only plain decimal/float literals are coerced, and only when FINITE.
+ * Our own writer always QUOTES anything the render grammar matches, so a page
+ * this codec produced never reaches the coercion branch with a numeric-looking
+ * unquoted value — this only governs hand-edited / foreign unquoted input, for
+ * which the original conservative behavior is preserved (e.g. an unquoted
+ * `0x1f` or `1e400` stays a string here rather than being reinterpreted).
+ */
+const YAML_COERCE_RE = /^[+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?$/
+
 function renderYamlString(s: string): string {
   if (s.length === 0) return '""'
   if (s.includes('\n') || s.includes('\r')) {
@@ -223,7 +263,12 @@ function renderYamlString(s: string): string {
     /^[-?]/.test(s) ||
     /^\s|\s$/.test(s) ||
     YAML_KEYWORDS.has(s.toLowerCase()) ||
-    /^[+-]?[0-9]/.test(s)
+    // Quote anything whose SHAPE is a YAML number so a standard YAML parser
+    // can't reclaim it — INCLUDING overflow forms (`1e400`→Infinity), hex/octal
+    // (`0x1f`, `0o17`), and `.inf`/`.nan`. A number-lookalike prefix (`5foo`,
+    // `.5foo`, `1.2.3`) fails the whole-string-anchored grammar and stays an
+    // unquoted plain string.
+    YAML_NUMBER_RE.test(s)
   if (!needsQuotes) return s
   return `"${s.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`
 }
@@ -267,7 +312,12 @@ export function parseYamlScalar(raw: string): unknown {
   if (raw.length >= 2 && raw.startsWith('"') && raw.endsWith('"')) {
     return raw.slice(1, -1).replace(/\\"/g, '"').replace(/\\\\/g, '\\')
   }
-  if (/^[+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?$/.test(raw)) {
+  // Coerce only a plain decimal/float literal that is also FINITE — an overflow
+  // form like `1e400`, or hex/octal, stays a string here (the renderer quotes
+  // anything the wider render grammar matches, so a written page never reaches
+  // this branch with such a value; this only governs hand-edited / foreign
+  // unquoted input, where the original conservative behavior is preserved).
+  if (YAML_COERCE_RE.test(raw)) {
     const n = Number(raw)
     if (Number.isFinite(n)) return n
   }

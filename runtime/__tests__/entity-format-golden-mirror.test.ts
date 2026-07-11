@@ -27,6 +27,10 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { promises as fs } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+// A REAL, standard YAML parser (the repo's locked yaml@2) — used to prove the
+// bytes this codec writes are safe for external YAML consumers, not just for
+// our own naive parseYamlScalar.
+import YAML from 'yaml'
 
 import {
   DIR_TO_KIND,
@@ -35,6 +39,7 @@ import {
   extractTimeline,
   parseFrontmatter,
   renderEntityPage,
+  renderYamlFrontmatter,
 } from '../entity-format.ts'
 import { writeEntity, type EntityWriteInput } from '../entity-writer.ts'
 
@@ -107,6 +112,13 @@ describe('renderYamlFrontmatter / parseFrontmatter — inverse round trip on gol
     // (frontmatter values are single-line so we don't fixture raw whitespace).
     { slug: 'a', type: 'person', note: 'ratio 3:1' },
     { slug: 'a', type: 'person', note: '007 agent' },
+    // Leading-dot decimal-lookalike strings: parseYamlScalar's number regex
+    // accepts `\.\d+` (not just a leading digit), so needsQuotes must guard
+    // this shape too or `.5` round-trips as the NUMBER 0.5, not the string
+    // `'.5'` (data-integrity regression).
+    { slug: 'a', type: 'person', note: '.5' },
+    { slug: 'a', type: 'person', note: '-.5' },
+    { slug: 'a', type: 'person', note: '+.25' },
     { slug: 'a', type: 'person', note: 'true' },
     { slug: 'a', type: 'person', note: 'yes' },
     { slug: 'a', type: 'person', note: '#hashtag' },
@@ -139,6 +151,126 @@ describe('renderYamlFrontmatter / parseFrontmatter — inverse round trip on gol
       expect(page.startsWith('---\n')).toBe(true)
       const parsed = parseFrontmatter(page)
       expect(parsed).toEqual(fm)
+    })
+  }
+})
+
+describe('needsQuotes — leading-dot decimal-lookalike strings stay strings', () => {
+  // Data-integrity regression: parseYamlScalar's number regex accepts a
+  // leading-dot decimal form (`\.\d+`), not just a leading digit. A frontmatter
+  // STRING value of `.5` used to render unquoted (`note: .5`), which parses
+  // back as the NUMBER 0.5 — a silent JS-type + text change on any
+  // read-merge-rewrite (e.g. scribe/write-to-gbrain's readExistingPage →
+  // writeEntity re-render).
+  test('a `.5`-shaped string round-trips as a string, not a number', () => {
+    const fm = { slug: 'a', type: 'person', note: '.5' }
+    const rendered = renderYamlFrontmatter(fm)
+    // Must be quoted on render so the read side can't reclaim it as a number.
+    expect(rendered).toContain('note: ".5"')
+    const page = renderEntityPage({ frontmatter: fm, compiledTruth: 'body', timeline: [] })
+    const parsed = parseFrontmatter(page)
+    expect(parsed['note']).toBe('.5')
+    expect(typeof parsed['note']).toBe('string')
+  })
+
+  test('signed and multi-digit leading-dot strings also stay strings', () => {
+    for (const note of ['-.5', '+.25', '.999']) {
+      const fm = { note }
+      const page = renderEntityPage({ frontmatter: fm, compiledTruth: 'body', timeline: [] })
+      const parsed = parseFrontmatter(page)
+      expect(parsed['note']).toBe(note)
+      expect(typeof parsed['note']).toBe('string')
+    }
+  })
+
+  // The fix must not over-quote strings the reader would NEVER coerce to a
+  // number: the render guard is anchored to the WHOLE string (shared grammar
+  // with parseYamlScalar), so a number-lookalike PREFIX is a plain string and
+  // stays unquoted. Covers dotfile-style values (.env, .gitignore) AND the
+  // `.5foo`/`5foo` prefix cases the old prefix-match over-quoted (Codex).
+  test('number-lookalike prefixes and dotfiles stay unquoted (no over-quoting)', () => {
+    for (const note of ['.env', '.gitignore', '.', '.5foo', '.5-config', '+.5foo', '5foo', '1.2.3']) {
+      const rendered = renderYamlFrontmatter({ note })
+      expect(rendered.trim()).toBe(`note: ${note}`)
+      const page = renderEntityPage({ frontmatter: { note }, compiledTruth: 'body', timeline: [] })
+      const parsed = parseFrontmatter(page)
+      expect(parsed['note']).toBe(note)
+      expect(typeof parsed['note']).toBe('string')
+    }
+  })
+
+  // Overflow numeric literals (`1e400` → Infinity, giant integers) match the
+  // number GRAMMAR even though our own read side won't coerce them (non-finite).
+  // A STANDARD YAML parser DOES coerce them, so the renderer MUST quote them —
+  // quoting is keyed to the grammar, decoupled from our finite-only read path.
+  // (Regression: a finiteness-gated render guard left these unquoted → retyped
+  // by any real YAML consumer.)
+  test('overflow numeric literals are quoted and round-trip as strings', () => {
+    for (const note of ['1e400', '-1e400', '99999999999999999999']) {
+      const rendered = renderYamlFrontmatter({ note })
+      expect(rendered.trim()).toBe(`note: ${JSON.stringify(note)}`)
+      const page = renderEntityPage({ frontmatter: { note }, compiledTruth: 'body', timeline: [] })
+      const parsed = parseFrontmatter(page)
+      expect(parsed['note']).toBe(note)
+      expect(typeof parsed['note']).toBe('string')
+    }
+  })
+})
+
+// INTEROP: the frontmatter this codec writes is also read by STANDARD YAML
+// parsers (the repo's locked `yaml@2`). Our own parseYamlScalar is naive
+// (finite-only coercion), so it alone cannot prove the on-disk bytes are safe
+// for external consumers. This pins the actual hazard: render a set of
+// numeric-lookalike STRINGS and assert a real YAML parser reads every one back
+// as the original STRING — never a number/Infinity. Without grammar-based
+// quoting, `1e400` would come back as Infinity here.
+describe('interop — a real YAML parser reads our frontmatter numeric-lookalike strings as strings', () => {
+  // Sanity anchor: prove the parser WOULD coerce these if we emitted them
+  // unquoted, so the round-trip assertion below is meaningful (not vacuous).
+  test('the real parser coerces bare numeric-lookalikes (why quoting is required)', () => {
+    expect(YAML.parse('n: 1e400').n).toBe(Infinity)
+    expect(YAML.parse('n: .5').n).toBe(0.5)
+    expect(YAML.parse('n: 007').n).toBe(7)
+  })
+
+  // Every form yaml@2's core schema coerces to a number (decimal incl. leading
+  // zeros, hex, octal, float, exponent, OVERFLOW→Infinity, ±.inf, .nan). Each
+  // must come back a STRING through a real YAML parse of our rendered bytes.
+  const NUMERIC_LOOKALIKE_STRINGS = [
+    '.5',
+    '-.5',
+    '+.25',
+    '007',
+    '00',
+    '-0',
+    '010',
+    '1e3',
+    '1e400',
+    '-1e400',
+    '123',
+    '99999999999999999999',
+    '0x1f',
+    '0o17',
+    '1.',
+    '.5e3',
+    '.inf',
+    '-.inf',
+    '.nan',
+  ]
+
+  for (const note of NUMERIC_LOOKALIKE_STRINGS) {
+    test(`\`${note}\` survives a real YAML parse as the string it is`, () => {
+      const page = renderEntityPage({
+        frontmatter: { slug: 'a', type: 'person', note },
+        compiledTruth: 'body',
+        timeline: [],
+      })
+      // Extract the frontmatter block (between the opening/closing fences) and
+      // hand the exact bytes to the real parser.
+      const fmBlock = page.slice(4, page.indexOf('\n---\n', 4))
+      const realParsed = YAML.parse(fmBlock) as Record<string, unknown>
+      expect(typeof realParsed['note']).toBe('string')
+      expect(realParsed['note']).toBe(note)
     })
   }
 })
