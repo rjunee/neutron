@@ -446,6 +446,12 @@ describe('ensureBrainInitialized — Ollama reachability probe (RA3)', () => {
     // The degradation is SURFACED, not silent.
     expect(warnings.some((w) => w.includes('not reachable'))).toBe(true)
     expect(warnings.some((w) => w.includes('keyword+graph'))).toBe(true)
+    // ...and it is HONEST about the per-spawn cadence: outage-written pages
+    // backfill on the next reconnect/restart, NOT mid-session. The warning must
+    // NOT overpromise a mid-session auto-upgrade ("no restart needed").
+    const joined = warnings.join('\n')
+    expect(joined).toContain('reconnect/restart')
+    expect(joined).not.toContain('no restart needed')
   })
 
   test('Ollama reachable but nomic-embed-text not pulled → a different, specific warning', async () => {

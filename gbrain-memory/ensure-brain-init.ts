@@ -294,8 +294,10 @@ export async function ensureBrainInitialized(
     if (!health.reachable) {
       logger.warn(
         `[gbrain-memory] local Ollama embedder configured (${input.embedder.model} @ ${safeUrl}) ` +
-          'but it is not reachable — semantic recall degrades to keyword+graph (lexical) until ' +
-          'Ollama is running; recall auto-upgrades once it is, no restart needed. ' +
+          'but it is not reachable — semantic recall degrades to keyword+graph (lexical) while it ' +
+          'is down. Once Ollama is available, NEW content embeds automatically; content written ' +
+          'DURING the outage backfills on the next reconnect/restart of the GBrain connection ' +
+          '(not mid-session — the running connection keeps its lexical fallback until it reconnects). ' +
           `Install: brew install ollama && ollama pull ${input.embedder.model} ` +
           '(or paste an OpenAI key in Settings to use cloud embeddings instead).',
       )

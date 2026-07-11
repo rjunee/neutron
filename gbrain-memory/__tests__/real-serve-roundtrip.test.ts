@@ -74,4 +74,35 @@ describeReal('ND1 — real gbrain serve write→read round-trip (keyword+graph d
       await client.close()
     }
   }, 60_000)
+
+  // RA3 per-spawn cadence, against a REAL live `gbrain serve` child: the init
+  // guard runs exactly once for the life of a connection (no mid-session
+  // re-backfill), and a close()+reconnect re-runs it (the recovery boundary).
+  test('LIVE gbrain serve: init guard runs once per connection, re-runs on reconnect', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'gbrain-real-cadence-'))
+    const gbrainHome = join(home, 'gbrain')
+    await ensureBrainInitialized({ gbrainHome, embedder: null })
+
+    let guardRuns = 0
+    const client = new GBrainStdioMcpClient({
+      source: 'default',
+      env: { GBRAIN_HOME: gbrainHome },
+      ensureInitialized: async () => {
+        guardRuns += 1
+      },
+    })
+    try {
+      await client.call('search', { query: 'a', limit: 1 })
+      expect(guardRuns).toBe(1)
+      // More ops on the SAME live connection → guard stays latched.
+      await client.call('search', { query: 'b', limit: 1 })
+      expect(guardRuns).toBe(1)
+      // Reconnect → guard re-runs (this is where an outage backfill would fire).
+      await client.close()
+      await client.call('search', { query: 'c', limit: 1 })
+      expect(guardRuns).toBe(2)
+    } finally {
+      await client.close()
+    }
+  }, 60_000)
 })

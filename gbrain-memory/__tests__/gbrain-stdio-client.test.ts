@@ -10,6 +10,7 @@
  */
 
 import { describe, expect, test } from 'bun:test'
+import { join } from 'node:path'
 import { GBrainStdioMcpClient, composeGbrainChildEnv } from '../gbrain-stdio-client.ts'
 import { GBrainUnavailableError } from '../memory-store.ts'
 
@@ -96,6 +97,46 @@ describe('GBrainStdioMcpClient — init guard re-arms when no live client (trans
     await client.call('get_links', { slug: 'x' }).catch(() => {})
     expect(runs).toBe(2)
   })
+
+  // RA3 per-spawn cadence CONTRACT — over a LIVE connection (a real MCP child
+  // that stays up, standing in for `gbrain serve`), the init guard (which is
+  // what runs `ensureBrainInitialized` → the marker-gated `embed --stale`
+  // backfill) fires EXACTLY ONCE and does NOT re-run for later ops on the same
+  // connection. This is the mechanism behind the honest warning at
+  // ensure-brain-init.ts:294: if Ollama recovers mid-session, the running
+  // connection keeps its lexical fallback — outage-written pages backfill only
+  // on the NEXT reconnect/restart, never mid-session. A close()+reconnect DOES
+  // re-run it (the recovery boundary). Unlike the `/usr/bin/true` tests above
+  // (connect FAILS → guard always re-arms), this proves the LIVE-latch: on a
+  // successful connect the guard stays latched for the session.
+  test('LIVE session: guard runs once mid-session (no backfill without reconnect); reconnect re-runs it', async () => {
+    const fixture = join(import.meta.dir, 'fixtures', 'minimal-mcp-serve.ts')
+    let runs = 0
+    const client = new GBrainStdioMcpClient({
+      command: process.execPath, // the bun runtime
+      args: [fixture],
+      ensureInitialized: async () => {
+        runs += 1
+      },
+    })
+    try {
+      // First op → live connect → guard runs once.
+      await client.call('search', { query: 'x' })
+      expect(runs).toBe(1)
+      // Second + third ops on the SAME live connection → guard does NOT re-run.
+      // (Ollama could recover here; the live session must NOT auto-backfill.)
+      await client.call('search', { query: 'y' })
+      await client.call('search', { query: 'z' })
+      expect(runs).toBe(1)
+      // Reconnect boundary: close() re-arms, next op re-runs the guard → this is
+      // the ONLY place the outage-written pages get their `embed --stale`.
+      await client.close()
+      await client.call('search', { query: 'after-reconnect' })
+      expect(runs).toBe(2)
+    } finally {
+      await client.close()
+    }
+  }, 30_000)
 })
 
 // composeGbrainChildEnv — the boot-time-vs-spawn-time env merge that lets an
