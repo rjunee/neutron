@@ -14,7 +14,7 @@
  * `isLatest(token)`-before-setState guards in each hook.
  */
 
-import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
+import { beforeEach, describe, expect, it, mock } from 'bun:test';
 import * as RealReact from 'react';
 
 import { DocsClientError } from '../lib/docs-client';
@@ -60,7 +60,7 @@ const reactStub = {
     frameEffects.push({ slot: slots[i]!, fn, deps });
   },
 };
-mock.module('react', () => reactStub);
+mock.module('react', () => ({ ...reactStub, default: reactStub }));
 // react-native can't be loaded in bun (Flow syntax). useDeepLinkAnchor
 // value-imports `ScrollView`; stub react-native as a SUPERSET of every
 // export any docs module needs so this never loads the real module (and
@@ -152,7 +152,11 @@ beforeEach(async () => {
     useDeepLinkAnchor: (await import('../features/docs/use-deep-link-anchor')).useDeepLinkAnchor,
   };
 });
-afterEach(() => { mock.restore(); });
+// NB: no mock.restore() — mirroring the CI-proven diagnostics-pane-render
+// test, the module mocks persist for THIS file. Restoring react-native
+// mid-run corrupts its module state for chunk-mates that import the real
+// module (run-tests.sh groups files per process). The react stub spreads
+// the real module and the RN stub is a superset, so persistence is safe.
 
 // Harness drives the hooks directly against the stubbed dispatcher.
 function drive<T>(fn: () => T): T { idx = 0; frameEffects = []; const r = fn(); commitEffects(); return r; }
