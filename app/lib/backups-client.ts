@@ -11,6 +11,12 @@
  * the P7.4 Phase 2 admin surface manages.
  */
 
+import {
+  GatewayClientError,
+  GatewayHttpClient,
+  type GatewayHttpClientOptions,
+} from '@neutronai/client-core';
+
 export interface SnapshotSummary {
   sha: string;
   parent_sha: string | null;
@@ -59,29 +65,18 @@ export interface RestoreResult {
   completed_at_ms: number;
 }
 
-export interface BackupsClientOptions {
-  base_url: string;
-  token: string;
-}
+export type BackupsClientOptions = GatewayHttpClientOptions;
 
-export class BackupsClientError extends Error {
-  readonly code: string;
-  readonly status: number;
+export class BackupsClientError extends GatewayClientError {
   constructor(code: string, message: string, status: number) {
-    super(`${code}: ${message}`);
+    super(code, message, status);
     this.name = 'BackupsClientError';
-    this.code = code;
-    this.status = status;
   }
 }
 
-export class BackupsClient {
-  private readonly base_url: string;
-  private readonly token: string;
-
-  constructor(opts: BackupsClientOptions) {
-    this.base_url = opts.base_url.replace(/\/+$/, '');
-    this.token = opts.token;
+export class BackupsClient extends GatewayHttpClient {
+  protected override makeError(code: string, message: string, status: number): GatewayClientError {
+    return new BackupsClientError(code, message, status);
   }
 
   async listSnapshots(
@@ -160,39 +155,6 @@ export class BackupsClient {
       { method: 'POST', body },
     );
     return res.restore;
-  }
-
-  private async req<T>(
-    path: string,
-    init: { method?: string; body?: unknown } = {},
-  ): Promise<T> {
-    const method = init.method ?? 'GET';
-    const headers: Record<string, string> = {
-      authorization: `Bearer ${this.token}`,
-    };
-    let body: string | undefined;
-    if (init.body !== undefined) {
-      headers['content-type'] = 'application/json';
-      body = JSON.stringify(init.body);
-    }
-    const res = await fetch(`${this.base_url}${path}`, {
-      method,
-      headers,
-      ...(body !== undefined ? { body } : {}),
-    });
-    let json: unknown = null;
-    try {
-      json = await res.json();
-    } catch {
-      // fall through to status-coded error below
-    }
-    if (!res.ok) {
-      const errBody = json as { code?: string; message?: string } | null;
-      const code = errBody?.code ?? 'request_failed';
-      const message = errBody?.message ?? `HTTP ${res.status}`;
-      throw new BackupsClientError(code, message, res.status);
-    }
-    return json as T;
   }
 }
 

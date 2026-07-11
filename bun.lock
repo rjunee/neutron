@@ -49,6 +49,7 @@
       "dependencies": {
         "@neutronai/channels": "workspace:*",
         "@neutronai/chat-core": "workspace:*",
+        "@neutronai/client-core": "workspace:*",
         "@neutronai/connect": "workspace:*",
         "@neutronai/landing": "workspace:*",
         "@neutronai/tabs": "workspace:*",
@@ -106,6 +107,9 @@
       "dependencies": {
         "@neutronai/wire-types": "workspace:*",
       },
+    },
+    "client-core": {
+      "name": "@neutronai/client-core",
     },
     "config": {
       "name": "@neutronai/config",
@@ -361,6 +365,7 @@
       "dependencies": {
         "@assistant-ui/react": "^0.14.23",
         "@neutronai/chat-core": "workspace:*",
+        "@neutronai/client-core": "workspace:*",
         "@neutronai/contracts": "workspace:*",
         "@neutronai/onboarding": "workspace:*",
         "@neutronai/runtime": "workspace:*",
@@ -1020,6 +1025,8 @@
     "@neutronai/channels": ["@neutronai/channels@workspace:channels"],
 
     "@neutronai/chat-core": ["@neutronai/chat-core@workspace:chat-core"],
+
+    "@neutronai/client-core": ["@neutronai/client-core@workspace:client-core"],
 
     "@neutronai/codegen-core": ["@neutronai/codegen-core@workspace:cores/free/code-gen"],
 

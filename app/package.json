@@ -14,6 +14,7 @@
   },
   "dependencies": {
     "@neutronai/chat-core": "workspace:*",
+    "@neutronai/client-core": "workspace:*",
     "@neutronai/channels": "workspace:*",
     "@neutronai/connect": "workspace:*",
     "@neutronai/landing": "workspace:*",
