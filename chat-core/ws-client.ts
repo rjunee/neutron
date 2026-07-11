@@ -148,6 +148,12 @@ export class ChatWsClient {
     this.closedByUser = false
     this.active = true
     if (this.status === 'connecting' || this.status === 'open') return
+    // A caller (a manual "retry" button, a remount calling `connect()` again)
+    // can reach here while `status === 'reconnecting'` — a backoff timer is
+    // still armed in `reconnectHandle`. Cancel it BEFORE opening a fresh
+    // socket (mirrors `notifyReachable`): otherwise the timer fires later and
+    // calls `openSocket()` again, orphaning the socket we're about to open.
+    this.cancelReconnect()
     this.openSocket()
   }
 
@@ -234,6 +240,27 @@ export class ChatWsClient {
 
   private openSocket(): void {
     this.clearHeartbeat()
+    // Defense-in-depth: never replace `this.socket` without properly tearing
+    // down whatever it currently points to. Under normal operation this is
+    // already null here (the callers that reach `openSocket()` all null it
+    // first), but if that ever stops holding — a missed cancel, a future call
+    // path — the superseded socket's own onopen/onclose are identity-stale-
+    // guarded and would never fire, leaking it as a zombie live connection.
+    // Tear it down exactly like a real unexpected close: close the socket and
+    // fire `onClose` (if it was open, this is the surface's only signal to
+    // tear down per-open state — e.g. the resume-fallback armed in `onOpen`;
+    // if it was still mid-handshake this mirrors `onclose` firing before
+    // `onopen` ever did, which is equally harmless to signal).
+    if (this.socket !== null) {
+      const stale = this.socket
+      this.socket = null
+      try {
+        stale.close()
+      } catch {
+        /* already closed */
+      }
+      if (this.onClose !== undefined) this.onClose()
+    }
     this.setStatus(this.attempt === 0 ? 'connecting' : 'reconnecting')
     let socket: SocketLike
     try {
