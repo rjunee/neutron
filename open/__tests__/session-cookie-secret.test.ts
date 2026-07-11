@@ -166,4 +166,37 @@ describe('resolvePersistedCookieSecret', () => {
     fs.writeFileSync(sessionCookieSecretPath(home), atFloor + '\n', { mode: 0o600 })
     expect(resolvePersistedCookieSecret(home)).toBe(atFloor)
   })
+
+  it('Medium — concurrent rotation CONVERGES on the on-disk winner (not our own mint)', () => {
+    const path = sessionCookieSecretPath(home)
+    fs.mkdirSync(home, { recursive: true })
+    fs.writeFileSync(path, 'x\n', { mode: 0o600 }) // weak → rejected → triggers rotation
+
+    // Simulate a concurrent starter B that lands its own valid secret at the
+    // target just before OUR rename: the atomic rename+readback must return B's
+    // on-disk value (convergence), NOT our freshly-minted secret and NOT the old
+    // weak value. (Reverting to unlink-then-create — or returning the in-memory
+    // mint instead of the readback — makes this diverge → the assertions go red.)
+    const WINNER = 'converged-winner-secret-0123456789'
+    const spy = spyOn(fs, 'renameSync').mockImplementation((from: fs.PathLike, to: fs.PathLike) => {
+      fs.writeFileSync(to as string, WINNER + '\n', { mode: 0o600 })
+      try {
+        fs.unlinkSync(from as string)
+      } catch {
+        /* best-effort temp cleanup */
+      }
+    })
+    let secret: string
+    try {
+      secret = resolvePersistedCookieSecret(home)
+    } finally {
+      spy.mockRestore()
+    }
+    expect(secret).toBe(WINNER) // converged on the on-disk winner…
+    expect(secret).not.toBe('x') // …never the old weak value
+    expect(fs.readFileSync(path, 'utf8').trim()).toBe(WINNER)
+    // The path is a real regular 0600 file (a planted symlink would've been
+    // atomically replaced), never a symlink.
+    expect(fs.lstatSync(path).isFile()).toBe(true)
+  })
 })

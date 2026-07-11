@@ -14,9 +14,11 @@
  * confirmed REGULAR, 0600, NON-SYMLINK file opened NO-FOLLOW whose value meets
  * the high-entropy floor ({@link MIN_COOKIE_SECRET_LEN}). Anything else — a
  * symlink (token-forgery vector), a non-regular file, un-tightenable perms, or a
- * too-short/weak value — is ROTATED (mint a fresh 0600 file), else falls to a
- * process-ephemeral secret. Never a trusted-but-exposed on-disk value, never a
- * guessable constant, never a hard boot failure.
+ * too-short/weak value — is ROTATED via an ATOMIC temp-file + `rename` (no
+ * unlink-then-create window) and then RE-READ, so concurrent starters CONVERGE
+ * on one on-disk secret. Otherwise it falls to a process-ephemeral secret. Never
+ * a trusted-but-exposed on-disk value, never a guessable constant, never a hard
+ * boot failure, never a hang (bounded retries).
  */
 
 import { randomBytes } from 'node:crypto'
@@ -93,41 +95,65 @@ function readPersistedSecret(path: string): ReadResult {
   }
 }
 
-/** Mint + persist a fresh 0600 secret via NO-FOLLOW exclusive create, confirming. */
-function mintPersistedSecret(neutronHome: string, path: string): string {
+/** Per-process temp-name sequence (pid + counter — deterministic, never Math.random). */
+let tmpSeq = 0
+
+/**
+ * ATOMICALLY install a fresh 0600 secret and RETURN THE ON-DISK BYTES.
+ *
+ * Write the new secret to a unique per-process TEMP file in the same dir
+ * (`O_CREAT|O_EXCL|O_WRONLY|O_NOFOLLOW`), then `renameSync(tmp → path)` — a
+ * SINGLE syscall that atomically replaces whatever is there (a planted symlink,
+ * a weak regular file, or nothing) with our regular 0600 file. There is NO
+ * unlink-then-create window (the concurrent-rotation divergence bug). After the
+ * rename we ALWAYS RE-READ the target through the no-follow loader and return
+ * THOSE bytes — so if a concurrent starter's rename landed last, every process
+ * converges on that one on-disk secret rather than each returning its own mint.
+ * Returns `null` when this attempt couldn't install/confirm (caller retries or
+ * falls to ephemeral). Best-effort temp cleanup on every failure path.
+ */
+function installFreshSecret(neutronHome: string, path: string): string | null {
   const secret = randomBytes(24).toString('hex') // 48 hex chars ≫ the length floor
+  const tmp = join(neutronHome, `.session-cookie-secret.tmp.${process.pid}.${(tmpSeq += 1)}`)
+  let fd: number
   try {
-    fs.mkdirSync(neutronHome, { recursive: true })
-    // Medium #3 — EXCLUSIVE create: if two starters race the first-boot mint,
-    // only one wins; the loser gets EEXIST and reads back the winner's secret
-    // below, so every process converges on ONE signing key. NO-FOLLOW so a
-    // planted symlink can never be written through. Explicit fd so the numeric
-    // O_* flags apply (the `writeFileSync` flag option is typed string-only).
-    const fd = fs.openSync(path, WX_NOFOLLOW, 0o600)
-    try {
-      fs.writeSync(fd, secret + '\n')
-    } finally {
-      fs.closeSync(fd)
-    }
-    // Blocker #2 — CONFIRM the freshly-persisted file reads back as a regular,
-    // 0600, valid secret; otherwise don't trust the on-disk copy.
-    const check = readPersistedSecret(path)
-    if (check.kind === 'ok' && check.value === secret) return secret
-    throw new Error('could not confirm the freshly-persisted secret')
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === 'EEXIST') {
-      // Lost the mint race — return the winner's secret, but ONLY if it is a
-      // confirmed regular, 0600, valid on-disk value.
-      const winner = readPersistedSecret(path)
-      if (winner.kind === 'ok') return winner.value
-    }
-    console.warn(
-      `[open] could not securely persist the session-cookie secret to ${path} (${
-        err instanceof Error ? err.message : String(err)
-      }); using a process-ephemeral secret — owner sessions reset on restart.`,
-    )
-    return secret
+    fd = fs.openSync(tmp, WX_NOFOLLOW, 0o600)
+  } catch {
+    return null
   }
+  try {
+    fs.writeSync(fd, secret + '\n')
+  } catch {
+    try {
+      fs.closeSync(fd)
+    } catch {
+      /* non-fatal */
+    }
+    try {
+      fs.unlinkSync(tmp)
+    } catch {
+      /* non-fatal */
+    }
+    return null
+  }
+  try {
+    fs.closeSync(fd)
+  } catch {
+    /* non-fatal */
+  }
+  try {
+    fs.renameSync(tmp, path) // atomic replace (symlink or regular), one syscall
+  } catch {
+    try {
+      fs.unlinkSync(tmp)
+    } catch {
+      /* non-fatal */
+    }
+    return null
+  }
+  // ALWAYS re-read: whoever renamed LAST is what every process converges on.
+  const back = readPersistedSecret(path)
+  return back.kind === 'ok' ? back.value : null
 }
 
 /**
@@ -136,25 +162,37 @@ function mintPersistedSecret(neutronHome: string, path: string): string {
  * ALWAYS a high-entropy random string — never a predictable constant — AND, when
  * it comes from disk, one read from a confirmed regular, 0600, non-symlink file
  * meeting {@link MIN_COOKIE_SECRET_LEN}. An existing entry we cannot trust is
- * ROTATED; if nothing can be secured we return a process-ephemeral secret and
- * warn (sessions reset on restart) — never a trusted-but-exposed on-disk value,
- * never a hard boot failure.
+ * ROTATED atomically; concurrent starters CONVERGE on one on-disk secret; if
+ * nothing can be secured we return a process-ephemeral secret and warn (sessions
+ * reset on restart) — never a trusted-but-exposed on-disk value, never a hard
+ * boot failure, never a hang (bounded retries).
  */
 export function resolvePersistedCookieSecret(neutronHome: string): string {
   const path = sessionCookieSecretPath(neutronHome)
-  const read = readPersistedSecret(path)
-  if (read.kind === 'ok') return read.value
-  if (read.kind === 'reject') {
-    // Untrusted existing entry (symlink / non-regular / wrong perms / too short):
-    // remove it and mint a fresh secure file. `unlinkSync` removes the SYMLINK
-    // itself (not its target). Best-effort — the mint's `wx` EEXIST readback
-    // re-checks perms if it can't be removed.
-    try {
-      fs.unlinkSync(path)
-    } catch {
-      /* couldn't remove — mintPersistedSecret handles the EEXIST re-check */
-    }
+  // Fast path: an existing VALID secret is returned UNCHANGED — no rotation, no
+  // write (the single-process loopback dogfood happy path: one no-follow read).
+  const first = readPersistedSecret(path)
+  if (first.kind === 'ok') return first.value
+
+  try {
+    fs.mkdirSync(neutronHome, { recursive: true })
+  } catch {
+    /* install may still fail below → ephemeral */
   }
-  // 'absent' → straight to mint (no unlink → the first-boot wx race converges).
-  return mintPersistedSecret(neutronHome, path)
+
+  // Bounded rotate→re-read cycles so a pathological FS can't spin.
+  const MAX_ATTEMPTS = 3
+  for (let i = 0; i < MAX_ATTEMPTS; i += 1) {
+    // A valid secret may have appeared meanwhile (a concurrent starter won) —
+    // converge on it instead of installing our own.
+    const cur = readPersistedSecret(path)
+    if (cur.kind === 'ok') return cur.value
+    const installed = installFreshSecret(neutronHome, path)
+    if (installed !== null) return installed
+  }
+  console.warn(
+    `[open] could not converge a persisted session-cookie secret at ${path}; using a ` +
+      `process-ephemeral secret — owner sessions reset on restart.`,
+  )
+  return randomBytes(24).toString('hex')
 }
