@@ -19,7 +19,7 @@
 
 import { describe, expect, test } from 'bun:test'
 import { spawnSync } from 'node:child_process'
-import { existsSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { delimiter, dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -80,6 +80,33 @@ function runEnvPermsSeam(
       HOME: checkoutDir,
       NEUTRON_INSTALL_PRINT_ENV_PERMS: '1',
     },
+  })
+  return { status: res.status, stdout: res.stdout ?? '', stderr: res.stderr ?? '' }
+}
+
+/**
+ * Run an arbitrary install.sh test seam (by env var) against an isolated
+ * checkout under a loose umask, with an optional PATH-shadowed `mktemp` stub.
+ * Used by the symlink-safety + mktemp-failure boundaries where we need to drive
+ * `persist_env_var` / `persist_oauth_token_to_env` / `ensure_env_file` directly.
+ */
+function runSeam(
+  checkoutDir: string,
+  seamEnv: Record<string, string>,
+  opts: { mktempBody?: string } = {},
+): { status: number | null; stdout: string; stderr: string } {
+  let path = process.env['PATH'] ?? '/usr/bin:/bin'
+  if (opts.mktempBody !== undefined) {
+    const stubDir = join(checkoutDir, 'stubbin')
+    mkdirSync(stubDir, { recursive: true })
+    writeFileSync(join(stubDir, 'mktemp'), opts.mktempBody, { mode: 0o755 })
+    path = `${stubDir}${delimiter}${path}`
+  }
+  const inner = `umask 022; exec sh ${quoteSh(INSTALL_SH)} --yes --dir ${quoteSh(checkoutDir)}`
+  const res = spawnSync('sh', ['-c', inner], {
+    cwd: checkoutDir,
+    encoding: 'utf8',
+    env: { PATH: path, HOME: checkoutDir, ...seamEnv },
   })
   return { status: res.status, stdout: res.stdout ?? '', stderr: res.stderr ?? '' }
 }
@@ -271,6 +298,82 @@ describe('install.sh — .env is 0600 after write (S3b secrets-at-rest hygiene)'
       expect(stderr).toContain('cannot verify')
       expect(stdout).not.toContain('env_path=')
       expect(statSync(envPath).mode & 0o777).toBe(0o644)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+})
+
+// SYSTEMIC symlink safety (Codex blocker) — a 0600 guarantee is meaningless if
+// the secret write FOLLOWS a planted symlink to an attacker-chosen target. Every
+// secret-file writer (`persist_env_var`, `ensure_env_file`,
+// `persist_oauth_token_to_env`) must reject a symlink `.env` destination up
+// front (`assert_env_not_symlink`, which fires even for a DANGLING link) AND
+// route mutations through an exclusive-temp + atomic `mv` (mv replaces rather
+// than following). These tests plant a symlink at `.env` and assert the write
+// ABORTS and the link target is NEVER written.
+describe('install.sh — secret writes are symlink-safe (S3b)', () => {
+  function buildFakeCheckout(): string {
+    const dir = mkdtempSync(join(tmpdir(), 'neutron-install-symlink-'))
+    mkdirSync(join(dir, 'open'), { recursive: true })
+    writeFileSync(join(dir, 'open', 'server.ts'), '// stub\n')
+    writeFileSync(join(dir, '.env.example'), 'NEUTRON_PORT=7800\n')
+    return dir
+  }
+
+  test('persist_env_var: .env is a symlink to an existing file → aborts, target NOT written', () => {
+    const dir = buildFakeCheckout()
+    try {
+      const target = join(dir, 'attacker-target')
+      writeFileSync(target, 'PREEXISTING-TARGET-CONTENT\n')
+      symlinkSync(target, join(dir, '.env'))
+
+      const { status, stdout, stderr } = runSeam(dir, {
+        NEUTRON_INSTALL_PERSIST_ENV_VAR: '1',
+        NEUTRON_TEST_PERSIST_KEY: 'SECRET_KEY',
+      })
+      expect(status).toBe(1)
+      expect(stderr).toContain('is a symlink')
+      expect(stdout).not.toContain('persisted=')
+      // The attacker's target was NOT written through the link — the secret never landed.
+      expect(readFileSync(target, 'utf8')).toBe('PREEXISTING-TARGET-CONTENT\n')
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('ensure_env_file: DANGLING .env symlink → aborts, dangling target NOT created', () => {
+    const dir = buildFakeCheckout()
+    try {
+      const danglingTarget = join(dir, 'nonexistent-target')
+      symlinkSync(danglingTarget, join(dir, '.env'))
+      expect(existsSync(danglingTarget)).toBe(false)
+
+      const { status, stdout, stderr } = runSeam(dir, { NEUTRON_INSTALL_PRINT_ENV_PERMS: '1' })
+      expect(status).toBe(1)
+      expect(stderr).toContain('is a symlink')
+      expect(stdout).not.toContain('env_path=')
+      // The dangling target was never materialized (no `cp`/create through the link).
+      expect(existsSync(danglingTarget)).toBe(false)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('persist_oauth_token_to_env: .env is a symlink → aborts, token NOT written to target', () => {
+    const dir = buildFakeCheckout()
+    try {
+      const target = join(dir, 'attacker-target')
+      writeFileSync(target, 'PREEXISTING-TARGET-CONTENT\n')
+      symlinkSync(target, join(dir, '.env'))
+
+      const { status, stdout, stderr } = runSeam(dir, { NEUTRON_INSTALL_PERSIST_OAUTH: '1' })
+      expect(status).toBe(1)
+      expect(stderr).toContain('is a symlink')
+      expect(stdout).not.toContain('token_persisted=')
+      // The token never reached the attacker's target.
+      expect(readFileSync(target, 'utf8')).toBe('PREEXISTING-TARGET-CONTENT\n')
+      expect(readFileSync(target, 'utf8')).not.toContain('sk-ant-oat01')
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }
