@@ -61,33 +61,16 @@ const reactStub = {
   },
 };
 mock.module('react', () => ({ ...reactStub, default: reactStub }));
-// react-native can't be loaded in bun (Flow syntax). useDeepLinkAnchor
-// value-imports `ScrollView`; stub react-native as a SUPERSET of every
-// export any docs module needs so this never loads the real module (and
-// is harmless if it wins globally over a sibling suite's narrower stub).
-const rnStub = (name: string) => { const C = () => null; Object.defineProperty(C, 'name', { value: name }); return C; };
-mock.module('react-native', () => ({
-  View: rnStub('View'),
-  Text: rnStub('Text'),
-  Pressable: rnStub('Pressable'),
-  ScrollView: rnStub('ScrollView'),
-  TextInput: rnStub('TextInput'),
-  ActivityIndicator: rnStub('ActivityIndicator'),
-  Image: rnStub('Image'),
-  Modal: rnStub('Modal'),
-  Linking: { openURL: () => Promise.resolve() },
-  Platform: { OS: 'web' },
-  StyleSheet: { create: (s: Record<string, unknown>) => s },
-  useWindowDimensions: () => ({ width: 1200, height: 800 }),
-}));
-// The heavy pane children pull Flow-typed deps bun can't parse — stub
-// them so `docs-panes` (imported below for the pane-wiring smoke tests)
-// loads cheaply. Kept in THIS file (not a separate one) so the docs
-// suite only ever registers ONE react-native mock: a 3rd RN-mocking test
-// file trips a bun double-mock→real-module resolution bug.
-mock.module('../lib/markdown-render', () => ({ RenderMarkdown: rnStub('RenderMarkdown') }));
-mock.module('../lib/comments-state', () => ({ CommentsProvider: rnStub('CommentsProvider') }));
-mock.module('../components/CommentsSidePane', () => ({ CommentsSidePane: rnStub('CommentsSidePane') }));
+// NB: react-native is NOT mocked and NOT imported by any hook under test.
+// All four read hooks are RN-runtime-free — useDeepLinkAnchor's
+// `ScrollView` is a type-only import — so this suite never loads (or
+// mocks) react-native. That matters: real react-native won't parse in
+// bun (Flow), and MOCKING it corrupts real-RN named imports for
+// chunk-mates under run-tests.sh's per-process file grouping. The
+// react-native-dependent PANES (docs-ui) are therefore left to the
+// source-text guards in docs-hooks-invariants.test.ts + the agent-browser
+// smoke (the repo convention for render-level coverage; see
+// comments-side-pane.test.tsx).
 
 function commitEffects(): void {
   for (const e of frameEffects) {
@@ -352,123 +335,5 @@ describe('useDeepLinkAnchor — auto-select (:116) + malformed no-op', () => {
   it('exposes ?folder as folderPath', () => {
     const api = renderAnchor({ folderParam: 'sub/dir' });
     expect(api.folderPath).toBe('sub/dir');
-  });
-});
-
-// ── DocViewerPane / DocHistoryPane wiring (item 5) ────────────────────
-// The panes are pure (no hooks); we call them directly under the same
-// react/react-native stubs and walk the returned element tree for
-// testIDs/text that ONLY appear when the pane consumes the hook object.
-const panes: any = await import('../features/docs/docs-panes');
-
-function scan(node: unknown, ids: string[], texts: string[]): void {
-  if (node === null || node === undefined || node === false || node === true) return;
-  if (Array.isArray(node)) { for (const n of node) scan(n, ids, texts); return; }
-  if (typeof node === 'string' || typeof node === 'number') { texts.push(String(node)); return; }
-  if (typeof node === 'object') {
-    const props = (node as { props?: Record<string, unknown> }).props;
-    if (props) {
-      if (typeof props.testID === 'string') ids.push(props.testID);
-      scan(props.children, ids, texts);
-    }
-  }
-}
-function tree(el: unknown): { ids: string[]; texts: string[] } {
-  const ids: string[] = [];
-  const texts: string[] = [];
-  scan(el, ids, texts);
-  return { ids, texts };
-}
-
-describe('DocHistoryPane wiring', () => {
-  const baseHistory = {
-    historyUnavailable: false,
-    historyLoading: false,
-    historyEntries: [] as unknown[],
-    historyCursor: null,
-    revertingSha: null,
-    handlePreviewVersion: () => {},
-    setRevertConfirm: () => {},
-    loadHistory: () => {},
-    setHistoryOpen: () => {},
-  };
-  const file = { path: 'notes/a.md', content: '', size_bytes: 0, modified_at: 1 };
-
-  it('renders a row per historyEntries entry (wired to the hook state)', () => {
-    const entry = { sha: 'abc1234', message: 'first commit', author_date: '2026-01-01T00:00:00Z' };
-    const { ids, texts } = tree(
-      panes.DocHistoryPane({ docHistory: { ...baseHistory, historyEntries: [entry] }, file, wideViewport: true }),
-    );
-    expect(ids).toContain('docs-history-pane');
-    // ONLY present if the pane maps historyEntries → stop mapping → red.
-    expect(ids).toContain('docs-history-row-abc1234');
-    expect(texts.join(' ')).toContain('first commit');
-  });
-
-  it('renders the versioning-unavailable notice when the hook flags it', () => {
-    const { texts } = tree(
-      panes.DocHistoryPane({ docHistory: { ...baseHistory, historyUnavailable: true }, file, wideViewport: true }),
-    );
-    expect(texts.join(' ')).toContain('Versioning isn’t available');
-  });
-});
-
-describe('DocViewerPane wiring', () => {
-  const common = {
-    docHistory: {
-      historyEntries: [] as unknown[],
-      historyCursor: null,
-      historyOpen: false,
-      handleToggleHistory: () => {},
-      previewVersion: null,
-      handleExitPreview: () => {},
-    },
-    docMutations: {
-      saving: false,
-      handleSave: () => {},
-      handleEditorDrop: () => {},
-      dragOver: false,
-      setDragOver: () => {},
-      setEditorSelection: () => {},
-    },
-    anchor: {
-      handleScrollToAnchor: () => {},
-      formatAnchorLineLabelForSidePane: () => null,
-      viewerScrollRef: { current: null },
-      highlightSpan: null,
-    },
-    tree: [],
-    client: null,
-    project_id: 'P',
-    wideViewport: true,
-    commentsPaneOpen: false,
-    setCommentsPaneOpen: () => {},
-    mobilePane: 'editor' as const,
-    setMobilePane: () => {},
-  };
-  const fileState = (over: Record<string, unknown>) => ({
-    file: null,
-    selectedPath: null,
-    mode: 'view' as const,
-    draftContent: '',
-    conflict: false,
-    setDraftContent: () => {},
-    setMode: () => {},
-    handleReload: () => {},
-    resolveBinary: undefined,
-    ...over,
-  });
-
-  it('renders the viewer surface (docs-viewer) + file path when docFile.file is set', () => {
-    const docFile = fileState({ file: { path: 'notes/a.md', content: '# hi', size_bytes: 4, modified_at: 1 }, selectedPath: 'notes/a.md', draftContent: '# hi' });
-    const { ids, texts } = tree(panes.DocViewerPane({ ...common, docFile }));
-    expect(ids).toContain('docs-viewer');
-    expect(texts.join(' ')).toContain('notes/a.md');
-  });
-
-  it('renders the empty prompt when docFile.file is null and nothing selected', () => {
-    const { ids, texts } = tree(panes.DocViewerPane({ ...common, docFile: fileState({}) }));
-    expect(ids).not.toContain('docs-viewer');
-    expect(texts.join(' ')).toContain('Pick a doc from the tree');
   });
 });

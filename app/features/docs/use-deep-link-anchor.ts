@@ -12,7 +12,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ScrollView } from 'react-native';
+import type { ScrollView } from 'react-native';
 
 import {
   computeAnchorLines,
