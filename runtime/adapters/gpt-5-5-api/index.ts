@@ -147,6 +147,12 @@ function startResponsesSession(
     // duplicate side effect. So after a tool runs, a retryable error is SURFACED to
     // the turn (normal turn-level retry/handling) instead of triggering a rotation.
     let toolExecutedThisTurn = false
+    // EXPIRED-SESSION REPLAY (audit round 15) — the resume `previous_response_id`
+    // this turn started with. If the upstream rejects it as expired/not-found, we
+    // clear it and REPLAY the same turn WITHOUT a resume id (buildBody then carries
+    // the full `spec.messages`), once, so an expired session never loses history.
+    let sessionIdForTurn = spec.session?.id
+    let expiryReplayed = false
     const exhaustionError = (reason: string): Event => {
       if (lastRetryable === undefined) {
         return { kind: 'error', message: reason, retryable: false }
@@ -169,7 +175,7 @@ function startResponsesSession(
           yield exhaustionError(decision.reason)
           return
         }
-        const initialUpstream = startUpstream(decision.model, spec.session?.id)
+        const initialUpstream = startUpstream(decision.model, sessionIdForTurn)
         const shimOpts: Parameters<typeof shimToInternal>[1] = {
           resolver: options.mcpResolver,
           continueStream: ({ previous_response_id, outputs }) =>
@@ -177,6 +183,7 @@ function startResponsesSession(
         }
         if (options.max_tool_rounds !== undefined) shimOpts.max_rounds = options.max_tool_rounds
         let needRotate = false
+        let needExpiryReplay = false
         let rotateDelay: number | undefined
         for await (const ev of shimToInternal(initialUpstream, shimOpts)) {
           if (ev.kind === 'tool_call') {
@@ -186,6 +193,27 @@ function startResponsesSession(
             toolExecutedThisTurn = true
             yield ev
             continue
+          }
+          if (
+            ev.kind === 'error' &&
+            isPreviousResponseExpired(ev.message) &&
+            sessionIdForTurn !== undefined &&
+            !expiryReplayed &&
+            !toolExecutedThisTurn
+          ) {
+            // EXPIRED RESUME — the upstream rejected our `previous_response_id`.
+            // Replay the SAME model WITHOUT it (fresh full-history replay via
+            // spec.messages), exactly once. Do NOT advance rotation and do NOT fail
+            // the turn — the fresh completion returns a NEW response id the caller
+            // stores, self-healing the continuity ledger.
+            expiryReplayed = true
+            sessionIdForTurn = undefined
+            needExpiryReplay = true
+            yield {
+              kind: 'status',
+              message: 'previous response expired — replaying full history without resume',
+            }
+            break
           }
           if (ev.kind === 'error' && ev.retryable) {
             if (toolExecutedThisTurn) {
@@ -207,6 +235,11 @@ function startResponsesSession(
           }
           yield ev
           if (ev.kind === 'completion') return
+        }
+        if (needExpiryReplay) {
+          // Re-run the SAME model this iteration (rotation NOT advanced), now with
+          // `sessionIdForTurn === undefined` → full-history replay.
+          continue
         }
         if (!needRotate) return
         const next = rotate(rotation, rotateDelay)
@@ -247,6 +280,15 @@ function startResponsesSession(
     tool_resolution: 'internal',
   }
   return handle
+}
+
+/**
+ * Detect the responses-stream signal that our `previous_response_id` was rejected
+ * as expired/not-found (the `previous_response_not_found:` marker), as opposed to
+ * a model-not-found / transient error. Drives the one-shot full-history replay.
+ */
+function isPreviousResponseExpired(message: string): boolean {
+  return /previous_response_not_found:/i.test(message)
 }
 
 function sleep(ms: number): Promise<void> {

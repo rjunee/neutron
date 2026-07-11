@@ -1034,6 +1034,15 @@ export function startOpenAiFamilySession(args: {
           }
         } else if (ev.kind === 'error') {
           reported = true
+          // CONTINUITY ON FAILURE (audit round 15) — a dispatched turn that ends in
+          // a terminal error may have consumed/invalidated its resumed session, so
+          // INVALIDATE this scope's stored continuation: the next turn must replay
+          // the COMPLETE `spec.messages` rather than resume a dead/uncertain session
+          // (which the adapter would otherwise use, suppressing spec.messages and
+          // dropping this failed turn's history). The adapter self-heals a merely
+          // EXPIRED previous_response_id in-turn (fresh replay → new id stored on
+          // completion); this clear covers every OTHER terminal error.
+          if (ledgerKey !== undefined) sessionLedger!.delete(ledgerKey)
           // CREDENTIAL-FAULT-ONLY cooldown (audit round 12). ONLY 401/402/429 cool
           // the OpenAI key. A 5xx / 408 / network exception / no-status error is a
           // transient SERVER/NETWORK fault, NOT a credential fault — cooling the key

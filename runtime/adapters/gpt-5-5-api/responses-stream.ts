@@ -74,6 +74,25 @@ export async function* startResponsesStream(
   if (!response.ok || !response.body) {
     const status = response.status
     const text = await response.text().catch(() => '')
+    // PREVIOUS-RESPONSE EXPIRED/INVALID (audit round 15) — the request tried to
+    // resume via `previous_response_id` but the upstream rejected THAT id (expired /
+    // not found), NOT the model. Signal it distinctly (marker `previous_response_
+    // not_found:`) so the adapter can REPLAY the same turn WITHOUT the dead id and
+    // WITH the full `spec.messages` (fresh history) instead of failing. Checked
+    // BEFORE model-not-found so an expiry 404 isn't misread as a bad model id.
+    const sentPreviousId = typeof opts.body['previous_response_id'] === 'string'
+    if (
+      sentPreviousId &&
+      (status === 404 || status === 400) &&
+      /previous[_\s-]?response|previous_response_id|response .*(not found|expired)/i.test(text)
+    ) {
+      yield {
+        kind: 'error',
+        message: `previous_response_not_found: ${truncate(text, 200)}`,
+        retryable: false,
+      }
+      return
+    }
     // MODEL-NOT-FOUND (audit round 10) — a 404 (or an explicit model_not_found body)
     // means the requested model id isn't in OpenAI's catalog. Non-retryable (a
     // rotation won't help if the ids are wrong), but it must be a LOUD, ACTIONABLE

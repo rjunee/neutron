@@ -179,3 +179,77 @@ describe('gpt-5-5-api model-not-found + operator override', () => {
     expect(sentModel).toBe('gpt-5.6-ga')
   })
 })
+
+describe('gpt-5-5-api expired-session replay', () => {
+  test('previous_response_id rejected as expired → adapter REPLAYS full history WITHOUT it and SUCCEEDS (no lost history)', async () => {
+    const bodies: Array<Record<string, unknown>> = []
+    let call = 0
+    const fetchImpl = (async (_url: string | URL, init?: RequestInit) => {
+      call++
+      bodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>)
+      if (call === 1) {
+        // The upstream rejects our previous_response_id as expired/not-found.
+        return new Response(
+          '{"error":{"message":"Previous response with id resp_old not found"}}',
+          { status: 404 },
+        )
+      }
+      // The replay (no previous_response_id) succeeds.
+      const sse =
+        [
+          { event: 'response.created', data: { type: 'response.created', response: { id: 'resp_new' } } },
+          { event: 'response.output_text.delta', data: { type: 'response.output_text.delta', delta: 'ok' } },
+          { event: 'response.completed', data: { type: 'response.completed', response: { id: 'resp_new', usage: { input_tokens: 1, output_tokens: 1 } } } },
+        ]
+          .map((f) => `event: ${f.event}\ndata: ${JSON.stringify(f.data)}\n`)
+          .join('\n') + '\n'
+      const stream = new ReadableStream({ start(c) { c.enqueue(new TextEncoder().encode(sse)); c.close() } })
+      return new Response(stream, { status: 200 })
+    }) as unknown as typeof fetch
+
+    const gpt = createGptResponsesApiSubstrate({
+      env: { OPENAI_API_KEY: 'sk' },
+      substrate_instance_id: 'gpt-expired',
+      mcpResolver: async () => ({}),
+      fetchImpl,
+    })
+    const events = await collect(
+      gpt.start({
+        prompt: 'and now',
+        tools: [],
+        model_preference: ['gpt-5.6'],
+        session: { id: 'resp_old', last_active_at: Date.now() },
+        messages: [
+          { role: 'user', content: 'earlier-u1' },
+          { role: 'assistant', content: 'earlier-a1' },
+        ],
+      }).events,
+    )
+    // Call 1 tried to resume the expired id; call 2 replayed WITHOUT it + WITH history.
+    expect(bodies).toHaveLength(2)
+    expect(bodies[0]!['previous_response_id']).toBe('resp_old')
+    expect(bodies[1]!['previous_response_id']).toBeUndefined()
+    const replayInput = bodies[1]!['input'] as Array<{ role: string; content: string }>
+    expect(replayInput.map((m) => m.content)).toContain('earlier-u1') // full history replayed
+    // The turn SUCCEEDS — no lost history, no failed turn.
+    const comp = events.find((e) => e.kind === 'completion')
+    expect(comp?.kind).toBe('completion')
+    if (comp?.kind === 'completion') expect(comp.session?.id).toBe('resp_new') // fresh id to store
+  })
+
+  test('a NON-resume turn does NOT trigger expiry replay on a plain 404 (model-not-found path preserved)', async () => {
+    const notFoundFetch = (async () =>
+      new Response('{"error":{"message":"The model does not exist"}}', { status: 404 })) as unknown as typeof fetch
+    const gpt = createGptResponsesApiSubstrate({
+      env: { OPENAI_API_KEY: 'sk' },
+      substrate_instance_id: 'gpt-404-model',
+      mcpResolver: async () => ({}),
+      fetchImpl: notFoundFetch,
+    })
+    const events = await collect(gpt.start({ prompt: 'hi', tools: [], model_preference: ['gpt-5.6'] }).events)
+    const err = events.find((e) => e.kind === 'error')
+    // No previous_response_id was sent → this is model-not-found, not expiry.
+    if (err?.kind === 'error') expect(err.message).toMatch(/does not recognize model/)
+    else throw new Error('expected a terminal error event')
+  })
+})

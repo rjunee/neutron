@@ -1043,3 +1043,57 @@ test('CROSS-PROVIDER: uninterrupted openai → openai on one scope STILL resumes
   expect(rec.bodies).toHaveLength(2)
   expect(rec.bodies[1]!['previous_response_id']).toBe('resp_a')
 })
+
+// --- CONTINUITY ON ERROR/EXPIRY (audit round 15): a failed turn invalidates the
+// stored continuation so the next turn replays the COMPLETE spec.messages. ---
+
+test('CONTINUITY ON ERROR: turn 2 (resumes r1) errors terminally → turn 3 carries NO previous_response_id + full history', async () => {
+  const bodies: Array<Record<string, unknown>> = []
+  let call = 0
+  const fetchImpl = (async (_url: string | URL, init?: RequestInit) => {
+    call++
+    bodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>)
+    if (call === 2) {
+      // Turn 2 resumes r1 but the server errors terminally (single model → exhausts).
+      return new Response('server error', { status: 500 })
+    }
+    const id = call === 1 ? 'r1' : 'r3'
+    const sse =
+      [
+        { event: 'response.created', data: { type: 'response.created', response: { id } } },
+        { event: 'response.completed', data: { type: 'response.completed', response: { id, usage: { input_tokens: 1, output_tokens: 1 } } } },
+      ]
+        .map((f) => `event: ${f.event}\ndata: ${JSON.stringify(f.data)}\n`)
+        .join('\n') + '\n'
+    const stream = new ReadableStream({ start(c) { c.enqueue(new TextEncoder().encode(sse)); c.close() } })
+    return new Response(stream, { status: 200 })
+  }) as unknown as typeof fetch
+
+  const sub = buildLlmCallSubstrate({
+    pool: anthropicPool(),
+    substrate_instance_id: 'gpt-err-continuity',
+    provider: 'openai',
+    user_id: 'owner',
+    openai: { pool: openaiPool(), bindMcpResolver: () => async () => ({}), model_preference: ['gpt-5.6'], fetchImpl },
+  })!
+  await drain(sub.start(spec())) // turn 1 → r1 stored
+  await drain(sub.start(spec())) // turn 2 → resumes r1, errors terminally → ledger cleared
+  const turn3: AgentSpec = {
+    prompt: 'turn 3',
+    tools: [],
+    model_preference: ['claude-opus-4-8'],
+    messages: [
+      { role: 'user', content: 'u1' },
+      { role: 'assistant', content: 'a1' },
+      { role: 'user', content: 'u2-after-failed-turn' },
+    ],
+  }
+  await drain(sub.start(turn3))
+  // bodies: [0]=turn1, [1]=turn2, [2]=turn3.
+  expect(bodies[1]!['previous_response_id']).toBe('r1') // turn 2 DID resume r1
+  // Turn 3 does NOT resume the dead session (cleared on turn 2's error)...
+  expect(bodies[2]!['previous_response_id']).toBeUndefined()
+  // ...and replays the FULL history including the failed turn's follow-up.
+  const t3input = bodies[2]!['input'] as Array<{ role: string; content: string }>
+  expect(t3input.map((m) => m.content)).toContain('u2-after-failed-turn')
+})
