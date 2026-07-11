@@ -371,22 +371,29 @@ do_run() {
       git remote add origin "$REMOTE"
     fi
     _branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo main)
-    # Push comprehensively for what this tool OWNS: force ALL local heads (a
-    # rewrite changed every SHA, so force is required; this is a dedicated
-    # backup remote, so force is safe + intended) and PRUNE remote branches the
-    # local no longer has, then sync any local tags. We drive it off the local
-    # ref globs rather than hard-coding the single branch, so an unexpected
-    # local ref still syncs instead of being silently missed.
-    if git push -q --force --prune origin 'refs/heads/*:refs/heads/*' 2>/dev/null; then
-      git push -q --force --tags origin 2>/dev/null || true
-      if [ "$HISTORY_REWRITTEN" = 1 ]; then
+    # Push ONLY the single backup branch this tool owns — never a wildcard, never
+    # --prune, never --tags. The tool must not modify, prune, or clobber any
+    # remote ref other than its own branch. A normal push preserves the safe
+    # non-fast-forward rejection (so an unexpectedly divergent remote branch is
+    # never silently discarded); a history rewrite legitimately needs force, and
+    # `--force-with-lease` still refuses to clobber an unforeseen remote advance.
+    if [ "$HISTORY_REWRITTEN" = 1 ]; then
+      _pushed=0
+      git push -q --force-with-lease origin "$_branch" 2>/dev/null && _pushed=1
+      if [ "$_pushed" = 1 ]; then
         info "force-pushed purged history to $REMOTE ($_branch)"
-      else
+      fi
+    else
+      _pushed=0
+      git push -q origin "$_branch" 2>/dev/null && _pushed=1
+      if [ "$_pushed" = 1 ]; then
         info "pushed to $REMOTE ($_branch)"
       fi
+    fi
+    if [ "$_pushed" = 1 ]; then
       # AUTHORITATIVE post-push gate: verify the REMOTE carries the key on NO
       # ref (branch OR tag), including refs this tool did not create. Fails
-      # closed with remediation if any remote ref still has it.
+      # closed with remediation (leaving any unowned ref UNTOUCHED) if it does.
       verify_remote_clean_after_push
     else
       warn "git push to $REMOTE failed — local commit preserved, will retry next run"

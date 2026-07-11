@@ -329,15 +329,15 @@ describe('neutron-backup.sh — AES key excluded from the backup bundle (S3a)', 
     }
   })
 
-  // Post-push remote verification (Codex blocker #6): the local purge + branch
-  // force-push clean what the tool OWNS, but a key sitting on a PRE-EXISTING
-  // remote tag (or a second branch the tool never created) would survive — and
-  // the code must not overclaim "clean". Pre-seed the bare remote with a
-  // key-containing commit on `refs/tags/leaked`, run the backup from a clean
-  // local repo → the outcome must be honest: EITHER the remote ends with the
-  // key on NO ref, OR the backup ABORTS with remediation naming that ref and
-  // does NOT report success.
-  test('a pre-seeded remote tag carrying the key is caught by the post-push verify (no false clean)', () => {
+  // Post-push remote verification + NON-DESTRUCTIVE ownership (Codex blockers
+  // #6/#7): a key on a PRE-EXISTING remote tag the tool does NOT own must be
+  // caught by the post-push verify — the backup FAILS CLOSED naming the ref and
+  // requiring OPERATOR remediation, and it must NEVER delete/rewrite that
+  // unowned ref itself. Pre-seed the bare remote with a key-containing commit
+  // on `refs/tags/leaked`, run the backup from a clean local repo → non-zero
+  // exit, error names the ref + remediation, no success line, and the tag
+  // REMAINS on the remote UNTOUCHED.
+  test('a pre-seeded remote tag with the key: fails closed with remediation and leaves the tag UNTOUCHED', () => {
     const dataDir = mkdtempSync(join(tmpdir(), 'neutron-backup-remotetag-'))
     const remoteDir = mkdtempSync(join(tmpdir(), 'neutron-backup-remote3-'))
     const seedDir = mkdtempSync(join(tmpdir(), 'neutron-backup-seed-'))
@@ -357,26 +357,101 @@ describe('neutron-backup.sh — AES key excluded from the backup bundle (S3a)', 
       spawnSync('git', ['-C', seedDir, 'tag', 'leaked'])
       spawnSync('git', ['-C', seedDir, 'push', '-q', remoteGitDir, 'refs/tags/leaked'])
       expect(remoteObjectsMatching(remoteGitDir, '.neutron-aes-key').length).toBeGreaterThan(0)
+      const tagShaBefore = git(remoteGitDir, ['rev-parse', 'refs/tags/leaked'])
 
       // A clean local backup repo (no key anywhere) pushing to that remote.
       writeFileSync(join(dataDir, 'project.db'), 'db-v1\n')
       const res = runBackup(dataDir, { extraEnv: { NEUTRON_BACKUP_REMOTE: remoteGitDir } })
 
-      const remoteHasKey = remoteObjectsMatching(remoteGitDir, '.neutron-aes-key').length > 0
-      if (res.status === 0) {
-        // If the tool reported success, the remote MUST be clean on every ref.
-        expect(remoteHasKey).toBe(false)
-      } else {
-        // Otherwise it must have FAILED CLOSED with remediation naming the ref,
-        // and never printed the "verified … NO ref" success line.
-        expect(res.stderr).toContain('refusing to report the backup clean')
-        expect(res.stderr).toContain('refs/tags/leaked')
-        expect(res.stdout).not.toContain('carries .neutron-aes-key on NO ref')
-      }
+      // MUST fail closed — the tool never destructively "cleans" a ref it does
+      // not own; the operator remediates.
+      expect(res.status).not.toBe(0)
+      expect(res.stderr).toContain('refusing to report the backup clean')
+      expect(res.stderr).toContain('refs/tags/leaked')
+      expect(res.stdout).not.toContain('carries .neutron-aes-key on NO ref')
+      // The unowned tag is LEFT UNTOUCHED (same SHA, still present).
+      expect(git(remoteGitDir, ['rev-parse', 'refs/tags/leaked'])).toBe(tagShaBefore)
     } finally {
       rmSync(dataDir, { recursive: true, force: true })
       rmSync(remoteDir, { recursive: true, force: true })
       rmSync(seedDir, { recursive: true, force: true })
+    }
+  })
+
+  // Non-destructive ownership #1 (Codex): the tool must NOT force-overwrite a
+  // DIVERGENT same-named remote branch (remote has commits the local doesn't)
+  // when there is no history rewrite. A normal push that rejects the
+  // non-fast-forward is the safe outcome — the remote's divergent commit must
+  // NOT be silently discarded.
+  test('a divergent same-named remote branch is NOT force-clobbered (non-ff reject preserves remote commits)', () => {
+    const dataDir = mkdtempSync(join(tmpdir(), 'neutron-backup-diverge-'))
+    const remoteDir = mkdtempSync(join(tmpdir(), 'neutron-backup-remote4-'))
+    const cloneDir = mkdtempSync(join(tmpdir(), 'neutron-backup-clone-'))
+    const remoteGitDir = join(remoteDir, 'remote.git')
+    try {
+      spawnSync(REAL_GIT, ['init', '--bare', '-q', remoteGitDir])
+      writeFileSync(join(dataDir, 'project.db'), 'db-local\n')
+
+      // First backup establishes the branch on the remote.
+      expect(runBackup(dataDir, { extraEnv: { NEUTRON_BACKUP_REMOTE: remoteGitDir } }).status).toBe(0)
+      const branch = git(dataDir, ['rev-parse', '--abbrev-ref', 'HEAD'])
+
+      // The remote diverges: an outside clone adds a commit on the SAME branch.
+      spawnSync(REAL_GIT, ['clone', '-q', remoteGitDir, cloneDir])
+      writeFileSync(join(cloneDir, 'project.db'), 'db-local\nremote-only\n')
+      spawnSync('git', ['-C', cloneDir, 'config', 'user.email', 'o@l'])
+      spawnSync('git', ['-C', cloneDir, 'config', 'user.name', 'O'])
+      spawnSync('git', ['-C', cloneDir, 'add', '-A'])
+      spawnSync('git', ['-C', cloneDir, 'commit', '-q', '-m', 'remote-only divergent commit'])
+      spawnSync('git', ['-C', cloneDir, 'push', '-q', 'origin', branch])
+      const divergentSha = git(remoteGitDir, ['rev-parse', `refs/heads/${branch}`])
+
+      // Local makes its OWN new commit (now diverged) and backs up — NO rewrite.
+      writeFileSync(join(dataDir, 'project.db'), 'db-local\nlocal-change\n')
+      runBackup(dataDir, { extraEnv: { NEUTRON_BACKUP_REMOTE: remoteGitDir } })
+
+      // The remote's divergent commit must be intact (not clobbered by a force).
+      expect(git(remoteGitDir, ['rev-parse', `refs/heads/${branch}`])).toBe(divergentSha)
+      expect(git(remoteGitDir, ['log', '--oneline', `refs/heads/${branch}`])).toContain('remote-only divergent commit')
+    } finally {
+      rmSync(dataDir, { recursive: true, force: true })
+      rmSync(remoteDir, { recursive: true, force: true })
+      rmSync(cloneDir, { recursive: true, force: true })
+    }
+  })
+
+  // Non-destructive ownership #2 (Codex): an UNRELATED remote-only branch must
+  // survive a backup — the tool owns exactly its one branch and must never
+  // prune other remote refs.
+  test('an unrelated remote-only branch survives a backup (never pruned)', () => {
+    const dataDir = mkdtempSync(join(tmpdir(), 'neutron-backup-unrelated-'))
+    const remoteDir = mkdtempSync(join(tmpdir(), 'neutron-backup-remote5-'))
+    const cloneDir = mkdtempSync(join(tmpdir(), 'neutron-backup-clone2-'))
+    const remoteGitDir = join(remoteDir, 'remote.git')
+    try {
+      spawnSync(REAL_GIT, ['init', '--bare', '-q', remoteGitDir])
+      writeFileSync(join(dataDir, 'project.db'), 'db\n')
+      expect(runBackup(dataDir, { extraEnv: { NEUTRON_BACKUP_REMOTE: remoteGitDir } }).status).toBe(0)
+
+      // Add an unrelated branch `other` to the remote via an outside clone.
+      spawnSync(REAL_GIT, ['clone', '-q', remoteGitDir, cloneDir])
+      spawnSync('git', ['-C', cloneDir, 'checkout', '-q', '-b', 'other'])
+      writeFileSync(join(cloneDir, 'o.txt'), 'other\n')
+      spawnSync('git', ['-C', cloneDir, 'config', 'user.email', 'o@l'])
+      spawnSync('git', ['-C', cloneDir, 'config', 'user.name', 'O'])
+      spawnSync('git', ['-C', cloneDir, 'add', '-A'])
+      spawnSync('git', ['-C', cloneDir, 'commit', '-q', '-m', 'other branch'])
+      spawnSync('git', ['-C', cloneDir, 'push', '-q', 'origin', 'other'])
+      expect(git(remoteGitDir, ['show-ref', '--verify', 'refs/heads/other']).length).toBeGreaterThan(0)
+
+      // A second backup must NOT prune the unrelated branch.
+      writeFileSync(join(dataDir, 'project.db'), 'db\nmore\n')
+      runBackup(dataDir, { extraEnv: { NEUTRON_BACKUP_REMOTE: remoteGitDir } })
+      expect(git(remoteGitDir, ['show-ref', '--verify', 'refs/heads/other']).length).toBeGreaterThan(0)
+    } finally {
+      rmSync(dataDir, { recursive: true, force: true })
+      rmSync(remoteDir, { recursive: true, force: true })
+      rmSync(cloneDir, { recursive: true, force: true })
     }
   })
 })
