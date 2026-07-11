@@ -282,7 +282,15 @@ export function redactUrlUserinfo(url: string): string {
  * fresh-init backfill marker.)
  */
 function ollamaTagsUrl(baseUrl: string): string {
-  const stripToBase = (path: string): string => path.replace(/\/+$/, '').replace(/\/v1$/, '')
+  // Strip trailing slashes then a terminal `/v1` segment. Uses linear string ops
+  // (NOT a `\/+$` regex, which is polynomial-ReDoS on `//////…x` inputs and runs
+  // on the operator-supplied OLLAMA_BASE_URL — CodeQL js/polynomial-redos).
+  const stripToBase = (path: string): string => {
+    let p = path
+    while (p.endsWith('/')) p = p.slice(0, -1)
+    if (p.endsWith('/v1')) p = p.slice(0, -'/v1'.length)
+    return p
+  }
   try {
     const u = new URL(baseUrl)
     u.pathname = `${stripToBase(u.pathname)}/api/tags`
