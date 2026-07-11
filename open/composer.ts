@@ -449,6 +449,23 @@ export function buildOpenAiMcpResolver(): McpToolResolver {
   }
 }
 
+/**
+ * HONEST TOOL MANIFEST (audit BLOCKER 1) for the OpenAI conversational path.
+ * Returns ONLY the tools the in-process McpServer actually has registered (the
+ * SAME `listToolSchemas` the Claude tool bridge advertises), so the GPT adapter
+ * advertises exclusively tools its `mcpResolver` can execute — never the
+ * Claude-native `Read`/`Bash`/`Skill`/`Workflow` built-ins. Empty until the graph
+ * composes the bridge (late-bound), so early GPT turns run tool-free rather than
+ * with a false manifest.
+ */
+export function buildOpenAiToolManifest(): () => ReadonlyArray<{
+  name: string
+  description: string
+  input_schema: unknown
+}> {
+  return () => replToolBridgeRef.current?.listToolSchemas() ?? []
+}
+
 // C3d — the two pure Open-mode app-ws routing helpers MOVED to
 // `open/wiring/app-ws.ts` (they are app-ws-only). Re-exported here so the
 // existing `open/__tests__/open-import-analysis-delivery.test.ts` import path
@@ -561,7 +578,7 @@ export function buildOpenGraphComposer(
     const openaiLlmPool = modelProvider === 'openai' ? resolveOpenOpenAiPool(env) : null
     let conversationalProviderCtx: Pick<
       OpenWiringContext,
-      'provider' | 'openaiLlmPool' | 'mcpResolver'
+      'provider' | 'openaiLlmPool' | 'mcpResolver' | 'toolManifest'
     > = {}
     if (modelProvider === 'openai') {
       if (openaiLlmPool !== null) {
@@ -569,6 +586,7 @@ export function buildOpenGraphComposer(
           provider: 'openai',
           openaiLlmPool,
           mcpResolver: buildOpenAiMcpResolver(),
+          toolManifest: buildOpenAiToolManifest(),
         }
         console.log(
           '[composer] NEUTRON_MODEL_PROVIDER=openai — conversational turns route to the GPT ' +

@@ -35,8 +35,17 @@ function openaiPool(): CredentialPool {
   })
 }
 
-function spec(model = 'claude-opus-4-8'): AgentSpec {
-  return { prompt: 'hello world', tools: [], model_preference: [model], max_tokens: 32 }
+function spec(model = 'claude-opus-4-8', tools: AgentSpec['tools'] = []): AgentSpec {
+  return { prompt: 'hello world', tools, model_preference: [model], max_tokens: 32 }
+}
+
+/** A fetch that returns a non-ok HTTP status (drives the adapter's error path). */
+function httpErrorFetch(status: number, opts: { retryAfterSec?: number } = {}): typeof fetch {
+  return (async () => {
+    const headers: Record<string, string> = {}
+    if (opts.retryAfterSec !== undefined) headers['retry-after'] = String(opts.retryAfterSec)
+    return new Response('upstream error body', { status, headers })
+  }) as unknown as typeof fetch
 }
 
 async function drain(h: SessionHandle): Promise<Event[]> {
@@ -290,4 +299,194 @@ test('per-turn providerResolver flips backend between dispatches (per-project gr
   const gptEvents = await drain(sub.start(spec()))
   expect(cc.seen).toHaveLength(1) // unchanged — CC factory not called
   expect(gptEvents.find((e) => e.kind === 'completion')?.kind).toBe('completion')
+})
+
+// ---------------------------------------------------------------------------
+// BOUNDARY TESTS (audit BLOCKER 3) — each failure class must cool the OpenAI
+// credential correctly; success must clear cooldown; a tool round-trip must
+// actually execute; the tool manifest must be honest.
+// ---------------------------------------------------------------------------
+
+function openaiSub(pool: CredentialPool, fetchImpl: typeof fetch, extra: Record<string, unknown> = {}) {
+  return buildLlmCallSubstrate({
+    pool: anthropicPool(),
+    substrate_instance_id: 'gpt-boundary',
+    provider: 'openai',
+    user_id: 'owner',
+    openai: { pool, mcpResolver: async () => ({}), model_preference: ['gpt-5.6'], fetchImpl, ...extra },
+  })!
+}
+
+test('BOUNDARY 429 → credential cooled with rate_limit_429 + retry_after honored', async () => {
+  const pool = openaiPool()
+  const before = Date.now()
+  const sub = openaiSub(pool, httpErrorFetch(429, { retryAfterSec: 2 }))
+  const events = await drain(sub.start(spec()))
+  expect(events.some((e) => e.kind === 'error')).toBe(true)
+  const cred = pool.credentials[0]!
+  expect(cred.cooldown_reason).toBe('rate_limit_429')
+  // retry_after=2s honored (cooldown_until ≈ now + 2000, NOT the default 429 window).
+  expect(cred.cooldown_until).toBeDefined()
+  expect(cred.cooldown_until! - before).toBeGreaterThanOrEqual(1500)
+  expect(cred.cooldown_until! - before).toBeLessThan(5000)
+})
+
+test('BOUNDARY 401 → credential cooled with auth_401', async () => {
+  const pool = openaiPool()
+  const sub = openaiSub(pool, httpErrorFetch(401))
+  await drain(sub.start(spec()))
+  expect(pool.credentials[0]!.cooldown_reason).toBe('auth_401')
+})
+
+test('BOUNDARY 5xx (server error) → credential NOT cooled (not a credential fault), error surfaces', async () => {
+  const pool = openaiPool()
+  const sub = openaiSub(pool, httpErrorFetch(503))
+  const events = await drain(sub.start(spec()))
+  expect(events.some((e) => e.kind === 'error')).toBe(true)
+  // A 5xx is an upstream server fault, not a credential problem → no cooldown.
+  expect(pool.credentials[0]!.cooldown_until).toBeUndefined()
+})
+
+test('BOUNDARY model exhaustion (429 on ALL models) → still cools the credential (Blocker 2)', async () => {
+  const pool = openaiPool()
+  const before = Date.now()
+  // TWO models both 429 → rotation exhausts; the terminal error must preserve the
+  // HTTP 429 classification + retry_after so the credential still cools.
+  const sub = buildLlmCallSubstrate({
+    pool: anthropicPool(),
+    substrate_instance_id: 'gpt-exhaust',
+    provider: 'openai',
+    user_id: 'owner',
+    openai: {
+      pool,
+      mcpResolver: async () => ({}),
+      model_preference: ['gpt-5.6', 'gpt-5.5'],
+      fetchImpl: httpErrorFetch(429, { retryAfterSec: 3 }),
+    },
+  })!
+  await drain(sub.start(spec()))
+  const cred = pool.credentials[0]!
+  expect(cred.cooldown_reason).toBe('rate_limit_429')
+  expect(cred.cooldown_until! - before).toBeGreaterThanOrEqual(2500)
+})
+
+test('BOUNDARY all-credentials-cooling → terminal retryable error, no dispatch', async () => {
+  const pool = openaiPool()
+  // Pre-cool the only credential into the future.
+  pool.credentials[0]!.cooldown_until = Date.now() + 60_000
+  pool.credentials[0]!.cooldown_reason = 'rate_limit_429'
+  let fetchCalled = false
+  const sub = openaiSub(pool, (async () => {
+    fetchCalled = true
+    return new Response('', { status: 200 })
+  }) as unknown as typeof fetch)
+  const events = await drain(sub.start(spec()))
+  const err = events.find((e) => e.kind === 'error')
+  expect(err?.kind).toBe('error')
+  if (err?.kind === 'error') expect(err.retryable).toBe(true)
+  expect(fetchCalled).toBe(false) // never reached the adapter
+})
+
+test('BOUNDARY success → reportSuccess clears a stale (past) cooldown on the selected credential', async () => {
+  const pool = openaiPool()
+  // A stale past cooldown: still selectable, but the fields linger until a
+  // success reports through. If reportSuccess were NOT called they would remain.
+  pool.credentials[0]!.cooldown_until = Date.now() - 1000
+  pool.credentials[0]!.cooldown_reason = 'rate_limit_429'
+  const sub = openaiSub(pool, gptFetch())
+  const events = await drain(sub.start(spec()))
+  expect(events.some((e) => e.kind === 'completion')).toBe(true)
+  expect(pool.credentials[0]!.cooldown_until).toBeUndefined()
+  expect(pool.credentials[0]!.cooldown_reason).toBeUndefined()
+})
+
+test('BOUNDARY tool round-trip → an advertised MCP tool actually EXECUTES via the resolver', async () => {
+  // 1st upstream call streams a function_call; the shim resolves it via the
+  // mcpResolver; 2nd call streams the completion. Proves an advertised tool runs.
+  const resolverCalls: Array<{ tool_name: string; args: unknown }> = []
+  let call = 0
+  const fetchImpl = (async (_url: string | URL, init?: RequestInit) => {
+    call++
+    const body =
+      call === 1
+        ? [
+            { event: 'response.created', data: { type: 'response.created', response: { id: 'r1' } } },
+            // The stream accumulates args via a delta, THEN completes the call.
+            {
+              event: 'response.function_call.delta',
+              data: { type: 'response.function_call.delta', call_id: 'c1', name: 'search_docs', arguments: '{"q":"x"}' },
+            },
+            {
+              event: 'response.function_call.completed',
+              data: { type: 'response.function_call.completed', call_id: 'c1', name: 'search_docs' },
+            },
+            { event: 'response.completed', data: { type: 'response.completed', response: { id: 'r1', usage: { input_tokens: 1, output_tokens: 1 } } } },
+          ]
+        : [
+            { event: 'response.created', data: { type: 'response.created', response: { id: 'r2' } } },
+            { event: 'response.output_text.delta', data: { type: 'response.output_text.delta', delta: 'done' } },
+            { event: 'response.completed', data: { type: 'response.completed', response: { id: 'r2', usage: { input_tokens: 1, output_tokens: 1 } } } },
+          ]
+    void init
+    const sse = body.map((f) => `event: ${f.event}\ndata: ${JSON.stringify(f.data)}\n`).join('\n') + '\n'
+    const stream = new ReadableStream({ start(c) { c.enqueue(new TextEncoder().encode(sse)); c.close() } })
+    return new Response(stream, { status: 200 })
+  }) as unknown as typeof fetch
+  const sub = buildLlmCallSubstrate({
+    pool: anthropicPool(),
+    substrate_instance_id: 'gpt-tool',
+    provider: 'openai',
+    user_id: 'owner',
+    openai: {
+      pool: openaiPool(),
+      mcpResolver: async (c) => { resolverCalls.push({ tool_name: c.tool_name, args: c.args }); return { hits: 1 } },
+      model_preference: ['gpt-5.6'],
+      toolManifest: () => [{ name: 'search_docs', description: 'search', input_schema: { type: 'object' } }],
+      fetchImpl,
+    },
+  })!
+  const events = await drain(sub.start(spec()))
+  expect(resolverCalls).toHaveLength(1)
+  expect(resolverCalls[0]!.tool_name).toBe('search_docs')
+  expect(events.some((e) => e.kind === 'completion')).toBe(true)
+})
+
+test('HONEST MANIFEST → GPT is advertised ONLY the MCP tools, never Claude-native names', async () => {
+  const rec = recordingGptFetch('r1')
+  const claudeNativeTools: AgentSpec['tools'] = [
+    { name: 'Bash', description: 'x', input_schema: { type: 'object' }, output_schema: { type: 'object' }, capability_required: 'fs:project_data' },
+    { name: 'Read', description: 'x', input_schema: { type: 'object' }, output_schema: { type: 'object' }, capability_required: 'fs:project_data' },
+  ]
+  const sub = buildLlmCallSubstrate({
+    pool: anthropicPool(),
+    substrate_instance_id: 'gpt-manifest',
+    provider: 'openai',
+    user_id: 'owner',
+    openai: {
+      pool: openaiPool(),
+      mcpResolver: async () => ({}),
+      model_preference: ['gpt-5.6'],
+      toolManifest: () => [{ name: 'search_docs', description: 'search', input_schema: { type: 'object' } }],
+      fetchImpl: rec.fetchImpl,
+    },
+  })!
+  // The incoming spec carries Claude-native tools — they must be SUPPRESSED.
+  await drain(sub.start(spec('claude-opus-4-8', claudeNativeTools)))
+  const sentTools = (rec.bodies[0]!['tools'] as Array<{ name: string }> | undefined) ?? []
+  const names = sentTools.map((t) => t.name)
+  expect(names).toEqual(['search_docs'])
+  expect(names).not.toContain('Bash')
+  expect(names).not.toContain('Read')
+})
+
+test('HONEST MANIFEST → no toolManifest ⇒ GPT advertises NO tools (never false Claude built-ins)', async () => {
+  const rec = recordingGptFetch('r1')
+  const claudeNativeTools: AgentSpec['tools'] = [
+    { name: 'Workflow', description: 'x', input_schema: { type: 'object' }, output_schema: { type: 'object' }, capability_required: 'fs:project_data' },
+  ]
+  const sub = openaiSub(openaiPool(), rec.fetchImpl)
+  await drain(sub.start(spec('claude-opus-4-8', claudeNativeTools)))
+  // With no manifest wired, the request carries no `tools` (the adapter only sets
+  // tools when spec.tools is non-empty) — GPT is never told it can call Workflow.
+  expect(rec.bodies[0]!['tools']).toBeUndefined()
 })

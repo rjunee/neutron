@@ -49,6 +49,7 @@ import {
 import type { GptResponsesApiSubstrateOptions } from '@neutronai/runtime/adapters/gpt-5-5-api/index.ts'
 import type { CodexCliSubstrateOptions } from '@neutronai/runtime/adapters/gpt-5-5-codex-cli/index.ts'
 import type { McpToolResolver } from '@neutronai/contracts/mcp-tool-resolver.ts'
+import type { ToolDef } from '@neutronai/core-sdk/types.ts'
 import {
   reportFailure,
   reportSuccess,
@@ -442,6 +443,19 @@ export interface OpenAiFamilyProviderConfig {
    * codex-cli adapter resolves MCP tools server-side and ignores it.
    */
   mcpResolver?: McpToolResolver
+  /**
+   * HONEST TOOL MANIFEST (audit BLOCKER 1). The conversational `spec.tools`
+   * carries Claude-Code NATIVE tool names (`Read`, `Write`, `Bash`, `Skill`,
+   * `Workflow`, …) that only the Claude adapter can execute — they are NOT
+   * MCP-registered, so the GPT adapter would advertise them to OpenAI as callable
+   * functions it cannot honor (a call would hit `mcpResolver` for an unregistered
+   * tool and fail). To obey "surface degradation, never silently break", the GPT
+   * path REPLACES `spec.tools` with ONLY the tools this manifest reports — the
+   * REAL MCP-registered tools the `mcpResolver` can actually execute (production
+   * wires `() => mcpServer.listToolSchemas()`). Absent ⇒ the GPT turn advertises
+   * NO tools (pure conversation) rather than falsely-advertised Claude built-ins.
+   */
+  toolManifest?: () => ReadonlyArray<{ name: string; description: string; input_schema: unknown }>
   /**
    * Model-preference override for the OpenAI-family turn. The gpt adapter reads
    * `spec.model_preference`; the caller's `spec` carries CLAUDE ids for the
@@ -837,12 +851,33 @@ export function startOpenAiFamilySession(args: {
       }
       return
     }
+    // HONEST TOOL MANIFEST (audit BLOCKER 1) — the incoming `spec.tools` carries
+    // Claude-NATIVE tool names (Read/Write/Bash/Skill/Workflow) that the OpenAI
+    // adapter cannot execute. Replace them with ONLY the real MCP-registered tools
+    // the resolver can honor (or NONE), so GPT never advertises a tool it can't run.
+    const openaiTools: ToolDef[] =
+      config.toolManifest !== undefined
+        ? config.toolManifest().map((t) => ({
+            name: t.name,
+            description: t.description,
+            input_schema: (typeof t.input_schema === 'object' && t.input_schema !== null
+              ? (t.input_schema as Record<string, unknown>)
+              : { type: 'object' }),
+            output_schema: { type: 'object' } as Record<string, unknown>,
+            capability_required: 'fs:project_data',
+          }))
+        : []
+
     // Remap CLAUDE model ids → OpenAI ids when the caller supplied an override
-    // (a non-anthropic turn's spec still carries the anthropic model_preference).
-    let dispatchSpec: AgentSpec =
-      config.model_preference !== undefined && config.model_preference.length > 0
-        ? { ...spec, model_preference: [...config.model_preference] }
-        : spec
+    // (a non-anthropic turn's spec still carries the anthropic model_preference),
+    // and swap in the honest OpenAI tool manifest.
+    let dispatchSpec: AgentSpec = {
+      ...spec,
+      tools: openaiTools,
+      ...(config.model_preference !== undefined && config.model_preference.length > 0
+        ? { model_preference: [...config.model_preference] }
+        : {}),
+    }
 
     // CONTINUITY (audit CRITICAL) — thread the last completion's session hint
     // back as `spec.session` so the STATELESS provider is not amnesiac. Only when
@@ -854,10 +889,7 @@ export function startOpenAiFamilySession(args: {
     if (ledgerKey !== undefined && dispatchSpec.session === undefined) {
       const prior = sessionLedger!.get(ledgerKey)
       if (prior !== undefined) {
-        dispatchSpec =
-          dispatchSpec === spec
-            ? { ...spec, session: prior }
-            : { ...dispatchSpec, session: prior }
+        dispatchSpec = { ...dispatchSpec, session: prior }
       }
     }
 

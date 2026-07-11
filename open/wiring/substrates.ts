@@ -79,6 +79,8 @@ export function wireSubstrates(ctx: OpenWiringContext): WiredSubstrates {
           pool: ctx.openaiLlmPool!,
           mcpResolver: ctx.mcpResolver!,
           model_preference: getOpenAiModelPreference(),
+          // HONEST TOOL MANIFEST (audit BLOCKER 1) — only real MCP tools reach GPT.
+          ...(ctx.toolManifest !== undefined ? { toolManifest: ctx.toolManifest } : {}),
         },
       }
     : {}

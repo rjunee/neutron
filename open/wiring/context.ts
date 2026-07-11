@@ -76,4 +76,10 @@ export interface OpenWiringContext {
    * tool bridge uses. Required alongside `provider === 'openai'`.
    */
   mcpResolver?: McpToolResolver
+  /**
+   * HONEST TOOL MANIFEST for the OpenAI path — returns only the real
+   * MCP-registered tools (never Claude-native built-ins), so the GPT adapter
+   * advertises exclusively what its resolver can execute (audit BLOCKER 1).
+   */
+  toolManifest?: () => ReadonlyArray<{ name: string; description: string; input_schema: unknown }>
 }
