@@ -148,11 +148,17 @@ export class ChatWsClient {
     this.closedByUser = false
     this.active = true
     if (this.status === 'connecting' || this.status === 'open') return
-    // A caller (a manual "retry" button, a remount calling `connect()` again)
-    // can reach here while `status === 'reconnecting'` — a backoff timer is
-    // still armed in `reconnectHandle`. Cancel it BEFORE opening a fresh
-    // socket (mirrors `notifyReachable`): otherwise the timer fires later and
-    // calls `openSocket()` again, orphaning the socket we're about to open.
+    // `status === 'reconnecting'` is ambiguous by design: `openSocket()` uses
+    // it for BOTH "waiting on the backoff timer, no socket yet" AND "a retry
+    // attempt (attempt > 0) is actively mid-handshake". A socket already in
+    // flight must make `connect()` a no-op too — same as the `'connecting'`
+    // check above — otherwise a caller (a manual "retry" button, a remount)
+    // would tear down a handshake that might well succeed, for no reason.
+    if (this.socket !== null) return
+    // Otherwise we're genuinely idle with a backoff timer still armed in
+    // `reconnectHandle`. Cancel it BEFORE opening a fresh socket (mirrors
+    // `notifyReachable`): otherwise the timer fires later and calls
+    // `openSocket()` again, orphaning the socket we're about to open.
     this.cancelReconnect()
     this.openSocket()
   }

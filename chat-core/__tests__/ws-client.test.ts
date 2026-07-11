@@ -362,4 +362,35 @@ describe('ChatWsClient — connect() during backoff (zombie-socket regression)',
     client.close()
     expect(timers.pendingCount()).toBe(0)
   })
+
+  it('connect() is a true no-op while a RETRY attempt is already mid-handshake (status reconnecting, no timer armed)', () => {
+    // Per Codex review: `status === 'reconnecting'` is ambiguous — it also
+    // covers a retry socket actively mid-handshake (attempt > 0), not just
+    // "waiting on the backoff timer". `connect()`'s doc says it's "idempotent
+    // while already connecting/open"; a retry-in-flight must count as busy
+    // too, or a manual retry/remount would needlessly tear down a handshake
+    // that might well succeed.
+    const { client, sockets, timers, closeCount } = setup()
+    client.connect()
+    sockets[0]!.fireOpen()
+    sockets[0]!.fireClose() // unexpected drop → T1 armed
+    timers.runNext() // T1 fires → socket[1] created, actively mid-handshake
+    expect(client.getStatus()).toBe('reconnecting') // retry, not yet open
+    expect(timers.pendingCount()).toBe(0) // no timer armed — a live socket is in flight
+
+    const inFlight = sockets[1]!
+    const closesBefore = closeCount()
+
+    client.connect() // manual retry / remount while the retry is in flight
+
+    // True no-op: the in-flight retry socket must be left completely alone —
+    // not closed, no spurious onClose, no redundant second socket.
+    expect(sockets.length).toBe(2)
+    expect(inFlight.closed).toBe(false)
+    expect(closeCount()).toBe(closesBefore)
+
+    inFlight.fireOpen()
+    expect(client.getStatus()).toBe('open')
+    expect(sockets.length).toBe(2)
+  })
 })
