@@ -23,8 +23,9 @@ export type BindEnvBag = Record<string, string | undefined>
 /**
  * SECRET-valued bypass vars: their consumer activates on ANY non-empty string
  * (e.g. `channels/adapters/app-ws/auth.ts` enables HS256 when
- * `hs256_secret.length > 0`). So `"0"` / `"false"` are 1/5-char secrets that DO
- * activate the prohibited mode — they count as SET, no off-value exemption.
+ * `hs256_secret.length > 0`, UNTRIMMED). So `"0"`, `"false"`, and even a
+ * whitespace-only `"   "` are live secrets that DO activate the prohibited mode
+ * — they all count as SET, no off-value / whitespace exemption.
  */
 const SECRET_BYPASS_VARS = ['NEUTRON_APP_WS_DEV_SECRET', 'NEUTRON_E2E_DEV_SECRET'] as const
 
@@ -48,17 +49,25 @@ export const DEV_BYPASS_ENV_VARS = [...FLAG_BYPASS_VARS, ...SECRET_BYPASS_VARS] 
 
 /**
  * TRUE when `name`'s configured `raw` value would ACTIVATE its dev-bypass mode,
- * using each var's OWN consumer semantics (secret ⇒ any non-empty; flag ⇒ the
- * exact `"1"`). This closes the "`NEUTRON_APP_WS_DEV_SECRET=false` slips through"
- * hole: `false` is a live HS256 secret, so it activates and MUST be caught.
+ * using each var's OWN consumer semantics — mirrored EXACTLY, including whether
+ * the consumer trims:
+ *   - SECRET vars: the consumer keys on the UNTRIMMED length
+ *     (`channels/adapters/app-ws/auth.ts`: `hs256_secret.length > 0`), so ANY
+ *     non-empty string — INCLUDING whitespace-only (`'   '`) and `'0'`/`'false'`
+ *     — is a live secret and counts as active. Do NOT trim.
+ *   - FLAG vars: the consumer keys on the exact, UNTRIMMED string `'1'`
+ *     (`config/index.ts` `NEUTRON_DEV_AUTH === '1'`, `cores/sdk` `!== '1'`), so
+ *     anything but `'1'` is genuinely off.
+ * This closes both the `NEUTRON_APP_WS_DEV_SECRET=false` and the `='   '` holes.
  */
 function bypassVarActive(name: (typeof DEV_BYPASS_ENV_VARS)[number], raw: string | undefined): boolean {
   if (raw === undefined) return false
-  const v = raw.trim()
-  if (v.length === 0) return false
-  if ((SECRET_BYPASS_VARS as readonly string[]).includes(name)) return true
-  // Flag var — only the exact activation token counts (matches the consumer).
-  return v === '1'
+  if ((SECRET_BYPASS_VARS as readonly string[]).includes(name)) {
+    // Untrimmed length — whitespace IS a live secret to the consumer.
+    return raw.length > 0
+  }
+  // Flag var — exact, untrimmed activation token (matches the consumer).
+  return raw === '1'
 }
 
 /**

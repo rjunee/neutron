@@ -23,29 +23,34 @@ export function sessionCookieSecretPath(neutronHome: string): string {
 }
 
 /**
- * Enforce owner-only 0600 on the secret file. A restored backup / manually
- * created file can land 0644 (world-readable) — a signing secret must never be.
- * Best-effort + non-fatal (an exotic FS chmod failure must not abort boot).
+ * CONFIRM the secret file is owner-only 0600 — tightening a wider (restored /
+ * hand-created 0644) file and RE-STATTING to verify the chmod actually took.
+ * Returns `true` only when the on-disk perms are confirmed 0600. A stat/chmod
+ * failure, or a chmod that silently didn't stick, returns `false` — Blocker #2:
+ * the caller must then NOT trust the on-disk value (rotate / go ephemeral).
  */
-function enforceOwnerOnly(path: string): void {
+function confirmOwnerOnly(path: string): boolean {
   try {
-    if ((fs.statSync(path).mode & 0o777) !== 0o600) fs.chmodSync(path, 0o600)
+    if ((fs.statSync(path).mode & 0o777) === 0o600) return true
+    fs.chmodSync(path, 0o600)
+    // Re-stat: never ASSUME the chmod took (exotic FS / mount options).
+    return (fs.statSync(path).mode & 0o777) === 0o600
   } catch {
-    /* non-fatal */
+    return false
   }
 }
 
-/** Read the persisted secret if present + non-empty, enforcing 0600 first. */
-function readPersistedSecret(path: string): string | null {
+/**
+ * The persisted secret if present + non-empty. `value` is the trimmed secret;
+ * `secured` reports whether its perms are confirmed 0600. Returns `null` when
+ * there is no usable file (absent / empty / unreadable) — the caller mints.
+ */
+function readPersistedSecret(path: string): { value: string; secured: boolean } | null {
   try {
     if (fs.existsSync(path)) {
       const existing = fs.readFileSync(path, 'utf8').trim()
       if (existing.length > 0) {
-        // High #2 — a pre-existing (restored / hand-created) file may be 0644;
-        // tighten it to 0600 BEFORE we return it, so a world-readable secret is
-        // never silently trusted.
-        enforceOwnerOnly(path)
-        return existing
+        return { value: existing, secured: confirmOwnerOnly(path) }
       }
     }
   } catch {
@@ -54,19 +59,8 @@ function readPersistedSecret(path: string): string | null {
   return null
 }
 
-/**
- * Read the persisted per-install cookie secret, minting + persisting a fresh
- * random one on first boot. The returned value is ALWAYS a high-entropy random
- * string — never a predictable constant. If NEUTRON_HOME is not writable we
- * still return a random (process-ephemeral) secret and warn, so a locked-down
- * FS degrades to "sessions reset on restart" rather than a guessable secret or
- * a hard boot failure.
- */
-export function resolvePersistedCookieSecret(neutronHome: string): string {
-  const path = sessionCookieSecretPath(neutronHome)
-  const existing = readPersistedSecret(path)
-  if (existing !== null) return existing
-
+/** Mint + persist a fresh 0600 secret via exclusive create, confirming perms. */
+function mintPersistedSecret(neutronHome: string, path: string): string {
   const secret = randomBytes(24).toString('hex')
   try {
     fs.mkdirSync(neutronHome, { recursive: true })
@@ -76,19 +70,50 @@ export function resolvePersistedCookieSecret(neutronHome: string): string {
     // each would truncate + return a DIFFERENT key and reject the other's
     // sessions). `mode` on create applies 0600.
     fs.writeFileSync(path, secret + '\n', { flag: 'wx', mode: 0o600 })
-    enforceOwnerOnly(path)
-    return secret
+    // Blocker #2 — CONFIRM 0600 (re-stat); a persisted-but-unconfirmable secret
+    // is not trustworthy, so fall through to the ephemeral path instead.
+    if (confirmOwnerOnly(path)) return secret
+    throw new Error('could not confirm 0600 on the freshly-persisted secret')
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === 'EEXIST') {
-      // Lost the mint race — return the winner's already-persisted secret.
+      // Lost the mint race — return the winner's secret, but ONLY if its perms
+      // are confirmed 0600 (never trust an exposed on-disk value).
       const winner = readPersistedSecret(path)
-      if (winner !== null) return winner
+      if (winner !== null && winner.secured) return winner.value
     }
     console.warn(
-      `[open] could not persist the session-cookie secret to ${path} (${
+      `[open] could not securely persist the session-cookie secret to ${path} (${
         err instanceof Error ? err.message : String(err)
       }); using a process-ephemeral secret — owner sessions reset on restart.`,
     )
     return secret
   }
+}
+
+/**
+ * Read the persisted per-install cookie secret, minting + persisting a fresh
+ * random one on first boot. The returned value is ALWAYS a high-entropy random
+ * string — never a predictable constant — AND, when it comes from disk, one
+ * whose perms we've CONFIRMED are 0600 (Blocker #2 fail-closed contract). An
+ * existing secret we cannot secure is ROTATED (mint a fresh 0600 file); if
+ * nothing can be secured we return a process-ephemeral secret and warn, so a
+ * locked-down FS degrades to "sessions reset on restart" — never a
+ * trusted-but-world-readable on-disk value, never a hard boot failure.
+ */
+export function resolvePersistedCookieSecret(neutronHome: string): string {
+  const path = sessionCookieSecretPath(neutronHome)
+  const existing = readPersistedSecret(path)
+  if (existing !== null) {
+    if (existing.secured) return existing.value
+    // Blocker #2 — an existing secret whose perms we could NOT confirm/tighten
+    // to 0600 is exposed; do NOT trust it. Rotate: drop it and mint a fresh
+    // 0600 file (best-effort unlink — if it can't be removed, the mint's `wx`
+    // EEXIST readback re-checks perms and falls to ephemeral).
+    try {
+      fs.unlinkSync(path)
+    } catch {
+      /* couldn't remove — mintPersistedSecret handles the EEXIST re-check */
+    }
+  }
+  return mintPersistedSecret(neutronHome, path)
 }

@@ -67,6 +67,50 @@ describe('resolvePersistedCookieSecret', () => {
     expect(fs.statSync(path).mode & 0o777).toBe(0o600)
   })
 
+  it('Blocker #2 — an existing secret we CANNOT tighten (chmod throws) is NOT returned', () => {
+    const path = sessionCookieSecretPath(home)
+    fs.mkdirSync(home, { recursive: true })
+    fs.writeFileSync(path, 'exposed-secret-value\n')
+    fs.chmodSync(path, 0o644)
+
+    // chmod fails on this FS → we cannot secure the 0644 file → must fail closed.
+    const spy = spyOn(fs, 'chmodSync').mockImplementation(() => {
+      throw Object.assign(new Error('EPERM: chmod not permitted'), { code: 'EPERM' })
+    })
+    try {
+      const secret = resolvePersistedCookieSecret(home)
+      // NOT the exposed on-disk value — rotated to a fresh random (or ephemeral).
+      expect(secret).not.toBe('exposed-secret-value')
+      expect(secret).toMatch(/^[0-9a-f]{48}$/)
+    } finally {
+      spy.mockRestore()
+    }
+    // Whatever is on disk now must not be the exposed value.
+    if (fs.existsSync(path)) {
+      expect(fs.readFileSync(path, 'utf8').trim()).not.toBe('exposed-secret-value')
+    }
+  })
+
+  it('Blocker #2 — a chmod that silently does NOT take (re-stat still wide) is NOT returned', () => {
+    const path = sessionCookieSecretPath(home)
+    fs.mkdirSync(home, { recursive: true })
+    fs.writeFileSync(path, 'still-wide-secret-value\n')
+    fs.chmodSync(path, 0o644)
+
+    // chmod "succeeds" but is a no-op (perms stay 0644) — the re-stat must catch
+    // it and refuse to trust the still-world-readable value.
+    const spy = spyOn(fs, 'chmodSync').mockImplementation(() => {
+      /* pretend it worked, but change nothing */
+    })
+    try {
+      const secret = resolvePersistedCookieSecret(home)
+      expect(secret).not.toBe('still-wide-secret-value')
+      expect(secret).toMatch(/^[0-9a-f]{48}$/)
+    } finally {
+      spy.mockRestore()
+    }
+  })
+
   it('Medium #3 — EEXIST mint race returns the winner value, not a fresh mint', () => {
     const path = sessionCookieSecretPath(home)
     fs.mkdirSync(home, { recursive: true })

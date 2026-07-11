@@ -49,13 +49,29 @@ describe('assertWideBindPolicy', () => {
     }
   })
 
-  it('REFUSES a wide bind when a SECRET-valued bypass var is "0" / "false" (High #4)', () => {
+  it('REFUSES a wide bind when a SECRET-valued bypass var is "0" / "false" (#4)', () => {
     // A *_SECRET var activates on ANY non-empty string (HS256 secret length>0),
     // so "false" / "0" are LIVE secrets — must be caught, not exempted.
     for (const name of ['NEUTRON_APP_WS_DEV_SECRET', 'NEUTRON_E2E_DEV_SECRET']) {
       for (const val of ['false', '0']) {
         expect(() => assertWideBindPolicy('0.0.0.0', { [name]: val })).toThrow(new RegExp(name))
       }
+    }
+  })
+
+  it('REFUSES a wide bind when a SECRET-valued bypass var is WHITESPACE-only (Blocker #1)', () => {
+    // The consumer keys on the UNTRIMMED length (`hs256_secret.length > 0`), so a
+    // 3-space secret is live HS256 — the guard must NOT trim it away.
+    for (const name of ['NEUTRON_APP_WS_DEV_SECRET', 'NEUTRON_E2E_DEV_SECRET']) {
+      for (const val of ['   ', '\t', ' \n ']) {
+        expect(() => assertWideBindPolicy('0.0.0.0', { [name]: val })).toThrow(new RegExp(name))
+      }
+    }
+  })
+
+  it('an EMPTY SECRET var is UNSET (consumer length === 0 → HS256 off)', () => {
+    for (const name of ['NEUTRON_APP_WS_DEV_SECRET', 'NEUTRON_E2E_DEV_SECRET']) {
+      expect(() => assertWideBindPolicy('0.0.0.0', { [name]: '' })).not.toThrow()
     }
   })
 
