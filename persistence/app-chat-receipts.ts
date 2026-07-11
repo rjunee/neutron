@@ -20,7 +20,7 @@
  * delivered/read fold.
  */
 
-import { AppChatEventLogCore } from './app-chat-event-core.ts'
+import { AppChatEventLogCore, type AggregatesPage } from './app-chat-event-core.ts'
 import type { ProjectDb } from './db.ts'
 
 /** A receipt state a device can report / the server can record. */
@@ -73,6 +73,26 @@ export interface AppChatReceiptLog {
     after_seq: number,
     limit?: number,
   ): Promise<AppChatReceiptAggregate[]>
+  /**
+   * Same replay as {@link aggregatesAfter}, but bounded to one PAGE and paired
+   * with a message-identity `next_cursor` — pass its `seq`/`message_id` as the
+   * next call's `(after_seq, after_message_id)` to fetch the remainder when a
+   * long-offline device's backlog exceeds `limit` distinct messages, instead of
+   * that tail's receipt state being silently dropped.
+   *
+   * OPTIONAL to keep this exported interface's contract backward-compatible: a
+   * pre-existing injected log that implements only `record`/`aggregate`/
+   * `aggregatesAfter` stays valid, and callers must capability-detect this
+   * method and fall back to {@link aggregatesAfter} when it is absent. The
+   * concrete {@link AppChatReceiptStore} always implements it, so production
+   * gets the bounded-cursor drain.
+   */
+  aggregatesAfterPage?(
+    topic_id: string,
+    after_seq: number,
+    limit?: number,
+    after_message_id?: string,
+  ): Promise<AggregatesPage<AppChatReceiptAggregate>>
 }
 
 /** Default replay page size — distinct messages whose receipts replay in one
@@ -151,6 +171,15 @@ export class AppChatReceiptStore implements AppChatReceiptLog {
     limit: number = DEFAULT_RECEIPT_REPLAY_LIMIT,
   ): Promise<AppChatReceiptAggregate[]> {
     return this.core.aggregatesAfter(topic_id, after_seq, limit)
+  }
+
+  async aggregatesAfterPage(
+    topic_id: string,
+    after_seq: number,
+    limit: number = DEFAULT_RECEIPT_REPLAY_LIMIT,
+    after_message_id?: string,
+  ): Promise<AggregatesPage<AppChatReceiptAggregate>> {
+    return this.core.aggregatesAfterPage(topic_id, after_seq, limit, after_message_id)
   }
 }
 
