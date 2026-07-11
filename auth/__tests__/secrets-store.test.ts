@@ -235,6 +235,55 @@ test('ensureKey creates a fresh 32-byte keyfile when none exists', () => {
   expect(ensureKey(dataDir).equals(fresh)).toBe(true)
 })
 
+// S3(a) — secrets-at-rest hygiene: neutron-backup.sh deliberately excludes
+// `.neutron-aes-key` from the backup bundle, so a data dir restored from a
+// backup arrives with the `secrets` table's rows but WITHOUT the keyfile.
+// `ensureKey` must fail loud in that case rather than silently mint a fresh
+// key that can never decrypt the restored rows.
+test('ensureKey mints a fresh key when hasExistingSecrets is false (normal fresh install)', () => {
+  const path = join(dataDir, '.neutron-aes-key')
+  const fresh = ensureKey(dataDir, () => false)
+  expect(fresh.length).toBe(32)
+  expect(existsSync(path)).toBe(true)
+})
+
+test('ensureKey throws key_missing_after_restore when the keyfile is absent but secrets already exist', () => {
+  const path = join(dataDir, '.neutron-aes-key')
+  expect(existsSync(path)).toBe(false)
+  let caught: unknown
+  try {
+    ensureKey(dataDir, () => true)
+  } catch (err) {
+    caught = err
+  }
+  expect(caught).toBeInstanceOf(SecretsStoreError)
+  expect((caught as SecretsStoreError).code).toBe('key_missing_after_restore')
+  // Never silently minted a key in this scenario — the operator must
+  // provision the ORIGINAL keyfile, not get a fresh unusable one.
+  expect(existsSync(path)).toBe(false)
+})
+
+test('SecretsStore constructor fails loud on a restored data dir: rows exist, keyfile does not', async () => {
+  // Step 1: a store writes a secret + its keyfile — the ORIGINAL machine.
+  const original = buildStore()
+  await original.put({ internal_handle: 'alice', kind: 'byo_api_key', label: 'k', plaintext: 'v' })
+
+  // Step 2: simulate a neutron-backup.sh restore — the DB (carrying that row)
+  // comes back, but `.neutron-aes-key` (excluded from the bundle) does not.
+  rmSync(join(dataDir, '.neutron-aes-key'))
+
+  // Step 3: constructing a fresh SecretsStore against the now-keyless data
+  // dir must fail loud instead of silently minting an unusable new key.
+  let caught: unknown
+  try {
+    buildStore()
+  } catch (err) {
+    caught = err
+  }
+  expect(caught).toBeInstanceOf(SecretsStoreError)
+  expect((caught as SecretsStoreError).code).toBe('key_missing_after_restore')
+})
+
 // CRITICAL forward-compat regression — see § 0a.1 risk row 1.
 test('SecretsStore decrypts an envelope written by the legacy EncryptedBotTokenStore', async () => {
   // Step 1: legacy store writes a token with its own keyfile setup.

@@ -470,6 +470,13 @@ migrate_flat_layout() {
 # not, export or not), else append. Used to lock NEUTRON_HOME to the resolved
 # data dir so the server (which auto-loads .env) opens the SAME dir the installer
 # migrated — the install↔server agreement the shared-resolver parity protects.
+#
+# S3(b): `.env` holds secrets (cookie secret, OAuth token, API keys), so force
+# it to 0600 after every write regardless of the umask it was created under —
+# mirrors the runtime writer's idiom (`install-token-env.ts:persistOauthTokenToEnv`,
+# which force-chmods 0600 on every write for the same reason). Best-effort: a
+# chmod failure (e.g. an exotic filesystem) must not abort the install — the
+# value is already persisted.
 persist_env_var() {
   _ef=$1
   _k=$2
@@ -483,6 +490,31 @@ persist_env_var() {
   else
     printf '%s=%s\n' "$_k" "$_v" >> "$_ef"
   fi
+  chmod 600 "$_ef" 2>/dev/null || true
+}
+
+# Ensure `.env` exists in `_dir` — copy it from `.env.example` if missing,
+# NEVER clobber an existing one — then S3(b) force it to 0600 either way.
+# `.env` holds secrets (cookie secret, OAuth token, API keys), so it must
+# never be left group/world-readable under a loose umask; tightening even the
+# "already exists" reuse path mirrors `ensureKey`'s force-chmod-on-reuse in
+# `auth/secrets-store.ts` (a keyfile copied in at 0644 gets tightened too).
+# Pulled out as its own function so the `NEUTRON_INSTALL_PRINT_ENV_PERMS` test
+# seam below can exercise it without running the rest of the installer.
+ensure_env_file() {
+  _dir=$1
+  _ef="$_dir/.env"
+  _example="$_dir/.env.example"
+  if [ -f "$_ef" ]; then
+    info ".env already exists — leaving it untouched"
+  elif [ -f "$_example" ]; then
+    cp "$_example" "$_ef"
+    info "wrote .env from .env.example (every value has a default; edit what you need)"
+  else
+    warn ".env.example missing — skipping .env creation"
+    return 0
+  fi
+  chmod 600 "$_ef" 2>/dev/null || true
 }
 
 # Generate a random hex secret — 48 hex chars (24 bytes), matching the server's
@@ -906,6 +938,8 @@ persist_oauth_token_to_env() {
   else
     printf 'CLAUDE_CODE_OAUTH_TOKEN=%s\n' "$_tok" >> "$_ef"
   fi
+  # S3(b) — this file holds a live OAuth token; force 0600 regardless of umask.
+  chmod 600 "$_ef" 2>/dev/null || true
 }
 
 # Detect Claude auth state and guide the user HONESTLY, mirroring the Managed
@@ -1119,6 +1153,18 @@ if [ "${NEUTRON_INSTALL_PRINT_CODEX:-}" = "1" ]; then
   exit 0
 fi
 
+# Test seam (harness only) — S3(b): create/repair `.env` in isolation and
+# exit, without bun install / migrations. Lets the unit tests assert `.env`
+# ends up 0600 both on a fresh `.env.example` copy AND when one already
+# existed (the harness stats the file itself; this seam just needs to run the
+# real write path deterministically).
+if [ "${NEUTRON_INSTALL_PRINT_ENV_PERMS:-}" = "1" ]; then
+  _seam_src=${SRC_DIR:-$(pwd)}
+  ensure_env_file "$_seam_src"
+  printf 'env_path=%s\n' "$_seam_src/.env"
+  exit 0
+fi
+
 if [ "$MODE" = "local" ]; then
   info "installing in place from existing checkout: $SRC_DIR"
 else
@@ -1179,14 +1225,7 @@ ensure_codex
 ui_phase "2/6" "Configuration"
 
 # ── .env (never clobber an existing one) ─────────────────────────────────────
-if [ -f .env ]; then
-  info ".env already exists — leaving it untouched"
-elif [ -f .env.example ]; then
-  cp .env.example .env
-  info "wrote .env from .env.example (every value has a default; edit what you need)"
-else
-  warn ".env.example missing — skipping .env creation"
-fi
+ensure_env_file "$SRC_DIR"
 
 # Pin a STABLE onboarding-chat cookie secret so the owner's logged-in session
 # survives server restarts (open/server.ts otherwise mints an ephemeral secret

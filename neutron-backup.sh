@@ -21,6 +21,23 @@
 #   uninstall-timer stop + remove the timer
 #   print           write the resolved timer file to stdout (test seam)
 #
+# SECRETS-AT-REST (S3a): the backup deliberately EXCLUDES `.neutron-aes-key`
+# (`.gitignore`'d — see `write_gitignore` / `ensure_gitignore_excludes_key`),
+# even though it lives inside NEUTRON_HOME next to `project.db`. `project.db`
+# holds AES-256-GCM CIPHERTEXT (`auth/secrets-store.ts`); shipping the key
+# alongside it to the backup remote would make that ciphertext trivially
+# decryptable by anyone with read access to the remote — encryption-at-rest
+# in name only. There is no `restore` subcommand here (restore is: clone/pull
+# the backup remote into a fresh NEUTRON_HOME, then start the server) — and
+# because the key is excluded, that restore does NOT recover the ability to
+# decrypt pre-existing secrets by itself. The key must be provisioned
+# separately (copy it from the original machine, or from wherever you store
+# it out-of-band) BEFORE starting a restored server. If it's missing,
+# `SecretsStore` (`auth/secrets-store.ts:ensureKey`) now fails loud at
+# construction — rather than silently minting a fresh key that can never
+# decrypt the restored rows — whenever the restored `secrets` table already
+# has data but no keyfile is present.
+#
 # Resolution (env overridable):
 #   NEUTRON_SERVICE_CODE_DIR  code dir (default: this script's dir) — for .env
 #   NEUTRON_HOME              data dir to back up (default: <code>/.env, else $HOME/neutron/data)
@@ -122,7 +139,19 @@ checkpoint_sqlite_dbs() {
 
 # Volatile files we never want in the backup history: logs, pidfiles, and the
 # SQLite WAL/SHM sidecars (transient; the committed project.db — made coherent by
-# checkpoint_sqlite_dbs above — is the recoverable snapshot). Written once on init.
+# checkpoint_sqlite_dbs above — is the recoverable snapshot).
+#
+# S3(a) — CRITICAL: `.neutron-aes-key` (the AES-256-GCM key that decrypts every
+# row in the `secrets` table, `auth/secrets-store.ts`) MUST NEVER be committed
+# here. `project.db` (the ciphertext) is exactly what this backup is FOR, but
+# bundling the key alongside it would hand anyone with read access to the
+# backup remote both the lock and the key — encryption-at-rest in name only.
+# The key stays local-only; see `do_run`'s restore note below for what that
+# means for restore. Written once on init, but the exclusion patterns are
+# also RE-ASSERTED on every `run` (see `ensure_gitignore_excludes_key` below)
+# so an existing install's `.gitignore` — written before this fix — still
+# gets the key pattern appended, and so a key file already staged/tracked
+# from a prior (pre-fix) run gets un-staged/un-tracked before the commit.
 write_gitignore() {
   _gi="$DATA_DIR/.gitignore"
   [ -f "$_gi" ] && return 0
@@ -133,7 +162,30 @@ logs/
 *.pid
 *-wal
 *-shm
+
+# S3(a) — NEVER back up the AES key that decrypts project.db's secrets table.
+# The backup must contain only ciphertext; the key stays local-only.
+.neutron-aes-key
 GI
+}
+
+# Self-heal an existing `.gitignore` (written by a pre-S3 install) that
+# predates the `.neutron-aes-key` exclusion, and un-track the key if a prior
+# (pre-fix) run already committed it into THIS local backup repo. Idempotent;
+# safe to run every `do_run` pass. Does NOT rewrite git history — a key
+# committed before this fix landed is still recoverable from old commits on
+# whatever remote it was pushed to; rotate it if that remote was untrusted.
+ensure_gitignore_excludes_key() {
+  _gi="$DATA_DIR/.gitignore"
+  if [ -f "$_gi" ] && ! grep -qxF '.neutron-aes-key' "$_gi" 2>/dev/null; then
+    printf '\n# S3(a) — NEVER back up the AES key that decrypts project.db'"'"'s secrets table.\n.neutron-aes-key\n' >> "$_gi"
+    info "hardened $_gi — added .neutron-aes-key exclusion (pre-existing install)"
+  fi
+  if [ -f "$DATA_DIR/.neutron-aes-key" ] && git ls-files --error-unmatch .neutron-aes-key >/dev/null 2>&1; then
+    git rm -q --cached .neutron-aes-key >/dev/null 2>&1 || true
+    warn ".neutron-aes-key was tracked in the backup repo — untracked it going forward."
+    warn "  It is STILL present in older commits; rotate the key if the backup remote is not fully trusted."
+  fi
 }
 
 do_run() {
@@ -149,6 +201,7 @@ do_run() {
     git config user.name   >/dev/null 2>&1 || git config user.name  "Neutron Backup"
   fi
   write_gitignore
+  ensure_gitignore_excludes_key
   # Coherent snapshot first (fold WAL into the main .db), THEN stage + commit.
   checkpoint_sqlite_dbs
 

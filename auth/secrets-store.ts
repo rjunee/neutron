@@ -31,6 +31,14 @@
  * the existing material instead of overwriting it. See
  * `tests/integration/p15-secrets-store-roundtrip.test.ts` for the locked
  * forward-compat assertion.
+ *
+ * **S3(a) secrets-at-rest hygiene:** `neutron-backup.sh` deliberately
+ * `.gitignore`s `.neutron-aes-key` — the backup remote must only ever hold
+ * `project.db` ciphertext, never the key that decrypts it. That means a data
+ * dir restored from a backup arrives WITHOUT the keyfile. `ensureKey` detects
+ * that case (existing rows in `secrets`, no keyfile) and throws
+ * `key_missing_after_restore` instead of silently minting a fresh key that
+ * could never decrypt the restored rows.
  */
 
 import {
@@ -111,6 +119,7 @@ export type SecretsStoreErrorCode =
   | 'decrypt_failed'
   | 'duplicate_label'
   | 'project_mismatch'
+  | 'key_missing_after_restore'
 
 export class SecretsStoreError extends Error {
   override readonly name = 'SecretsStoreError'
@@ -154,7 +163,12 @@ export class SecretsStore {
   private readonly now: () => number
 
   constructor(options: SecretsStoreOptions) {
-    this.key = ensureKey(options.data_dir)
+    // S3(a): a restored-without-keyfile data dir must fail loud, not silently
+    // mint a key that can never decrypt the rows the backup already carried
+    // over. See `ensureKey`'s doc comment.
+    this.key = ensureKey(options.data_dir, () =>
+      options.db.get<{ one: number }, []>('SELECT 1 AS one FROM secrets LIMIT 1', []) !== null,
+    )
     this.db = options.db
     this.now = options.now ?? ((): number => Date.now())
   }
@@ -436,13 +450,26 @@ function decrypt(key: Buffer, envelope: string): string {
  *     already created the keyfile in P1 — overwriting would brick every
  *     existing bot token. See `EncryptedBotTokenStore.ensureKey` in the
  *     legacy per-instance bot token store for the original writer.
+ *   - S3(a): if the keyfile is ABSENT but `hasExistingSecrets` reports the
+ *     `secrets` table already has rows, this is a data dir restored from a
+ *     backup (`neutron-backup.sh` deliberately excludes `.neutron-aes-key`
+ *     from the bundle, so a fresh clone of the backup remote never carries
+ *     it) that has not yet had its keyfile re-provisioned. Minting a fresh
+ *     key here would silently orphan every existing secret — the store would
+ *     boot fine and `get()` would just start throwing `decrypt_failed` (or
+ *     worse, GCM auth-tag mismatches) the first time something is read. Fail
+ *     LOUD instead, with a message that says exactly what to do.
  *   - Otherwise generate a fresh 32-byte key, write it with mode 0600,
  *     and return the bytes.
+ *
+ * `hasExistingSecrets` is injected (rather than querying a `ProjectDb`
+ * directly) so this stays a pure, easily-testable function; `SecretsStore`'s
+ * constructor wires it to a real row-count check.
  *
  * Exported so `__tests__/secrets-store.test.ts` can assert the legacy
  * keyfile is reused.
  */
-export function ensureKey(data_dir: string): Buffer {
+export function ensureKey(data_dir: string, hasExistingSecrets?: () => boolean): Buffer {
   const path = join(data_dir, KEYFILE_NAME)
   if (existsSync(path)) {
     const buf = readFileSync(path)
@@ -460,6 +487,18 @@ export function ensureKey(data_dir: string): Buffer {
     // `~/.codex/auth.json`.
     chmodSync(path, 0o600)
     return buf
+  }
+  if (hasExistingSecrets?.() === true) {
+    throw new SecretsStoreError(
+      'key_missing_after_restore',
+      `no AES keyfile at ${path}, but the 'secrets' table already has rows. This data dir ` +
+        `looks restored from a backup — neutron-backup.sh deliberately excludes ` +
+        `${KEYFILE_NAME} from the bundle (S3: secrets-at-rest hygiene), so a fresh clone of ` +
+        `the backup remote never carries it. Minting a new key here would silently make every ` +
+        `existing secret permanently undecryptable. Copy the ORIGINAL ${KEYFILE_NAME} into ` +
+        `${data_dir} before starting the server (it never left the source machine unless you ` +
+        `provisioned it separately), then restart.`,
+    )
   }
   mkdirSync(dirname(path), { recursive: true })
   const fresh = Buffer.from(crypto.getRandomValues(new Uint8Array(KEY_LENGTH_BYTES)))
