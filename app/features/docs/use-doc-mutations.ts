@@ -492,14 +492,24 @@ export function useDocMutations(params: {
 
   // Project change: reset the mutation-driven modal/affordance state.
   // (The gate is invalidated render-phase by `useProjectScopedAsync`.)
-  // NOTE — matching the pre-D7 project-change effect, this does NOT
-  // reset `binaryDeleteTarget` / `uploadingBinary` / `editorSelection`
-  // / `dragOver`; those intentionally persist across a switch.
+  //
+  // D7 correctness fix (Codex D7-r1 BLOCKER): the pre-D7 project-change
+  // effect cleared `actionSheet` / `renameTarget` but MISSED
+  // `binaryDeleteTarget` — a confirm-modal target in the same category.
+  // Leaving it live let project A's "Delete image.png?" dialog survive
+  // an A → B switch; confirming it then ran `deleteBinary(B, A-path)`
+  // (the gate can't guard this — the confirm acquires a fresh token
+  // AFTER the switch). Clearing it here closes that cross-project
+  // destructive path and makes the confirm-modal reset surface
+  // consistent. The non-destructive transient flags (`uploadingBinary`
+  // spinner, `editorSelection` caret, `dragOver`) still intentionally
+  // persist, matching the pre-D7 behaviour.
   useEffect(() => {
     setExistingFileConflict(null);
     setActionSheet(null);
     setRenameTarget(null);
     setNewFileOpen(false);
+    setBinaryDeleteTarget(null);
   }, [project_id, client]);
 
   return {

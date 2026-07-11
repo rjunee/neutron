@@ -100,17 +100,20 @@ describe('useDocMutations — ONE gate for ALL mutations (fixed 4× in review)',
     expect(src).not.toMatch(/new RequestGate\(/);
   });
 
-  it('project-switch reset clears the modal surface but PRESERVES the fields that must survive a switch', () => {
+  it('project-switch reset clears ALL confirm modals but PRESERVES non-destructive transient flags', () => {
     // Isolate the project-change effect body.
-    const effect = src.slice(src.indexOf('// Project change: reset the mutation-driven'));
+    const effect = src.slice(src.indexOf('useEffect(() => {\n    setExistingFileConflict(null);'));
     expect(effect).toContain('setExistingFileConflict(null)');
     expect(effect).toContain('setActionSheet(null)');
     expect(effect).toContain('setRenameTarget(null)');
     expect(effect).toContain('setNewFileOpen(false)');
-    // These intentionally persist across a project switch (matching the
-    // pre-D7 single project-change effect) — regressing that would be a
-    // behaviour change.
-    expect(effect).not.toContain('setBinaryDeleteTarget(');
+    // Every DESTRUCTIVE confirm-modal target must clear on switch so it
+    // can't be confirmed against the wrong project (Codex D7-r1 BLOCKER
+    // — the pre-D7 effect missed binaryDeleteTarget).
+    expect(effect).toContain('setBinaryDeleteTarget(null)');
+    // Non-destructive transient flags intentionally persist (matching
+    // the pre-D7 effect) — resetting them would be a behaviour change
+    // with no safety benefit.
     expect(effect).not.toContain('setUploadingBinary(');
     expect(effect).not.toContain('setEditorSelection(');
     expect(effect).not.toContain('setDragOver(');
