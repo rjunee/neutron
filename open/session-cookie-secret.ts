@@ -18,21 +18,31 @@
  * rather than tighten-and-trust, since a later chmod can't un-expose it), or a
  * too-short/weak value — is ROTATED.
  *
- * Rotation is FIRST-WRITER-WINS, not last-writer-wins: `rename(tmp → path)` is
- * atomic but last-writer-wins (starter A can rename→read→return secret A before
- * starter B renames→returns secret B → they DIVERGE). True convergence needs a
- * single rotator, so rotation is serialized behind an EXCLUSIVE sibling lockfile
- * (`O_CREAT|O_EXCL|O_NOFOLLOW`). The one process that creates the lock rotates
- * (re-reading the target FIRST so it adopts, not overwrites, a secret a prior
- * rotator already installed); every competitor waits (bounded) and ADOPTS that
- * one on-disk secret. The lock carries a UNIQUE owner TOKEN (pid + monotonic
- * seq): a process only ever unlinks a lock still carrying ITS token, and only
- * reclaims one confirmed stale (same token across two reads + age) — so even a
- * reclaimed-while-stalled holder's release can't delete the new owner's lock and
- * let a third rotator run concurrently. Otherwise it falls to a process-
- * ephemeral secret. Never a trusted-but-exposed on-disk value, never a guessable
- * constant, never a hard boot failure, never a hang (bounded waits/retries),
- * never divergence with false confidence.
+ * Rotation aims for FIRST-WRITER-WINS convergence rather than last-writer-wins:
+ * `rename(tmp → path)` is atomic but last-writer-wins (starter A can
+ * rename→read→return secret A before starter B renames→returns secret B → they
+ * DIVERGE). To converge, rotation is serialized behind a BEST-EFFORT advisory
+ * sibling lockfile (`O_CREAT|O_EXCL|O_NOFOLLOW`). The process that creates the
+ * lock rotates — re-reading the target FIRST so it adopts, not overwrites, a
+ * secret a prior rotator already installed — while every competitor waits
+ * (bounded) and ADOPTS that one on-disk secret. The lock carries a UNIQUE owner
+ * TOKEN (pid + monotonic seq + time): a process only unlinks a lock still
+ * carrying ITS token, only reclaims one confirmed stale (same token across two
+ * reads + age), and RE-VERIFIES its token immediately after creating the lock —
+ * yielding (adopt/retry) if a racer swapped the lock in between.
+ *
+ * HONEST LIMITATION: this is best-effort, NOT an absolute guarantee. A pathname
+ * lockfile is validated by NAME, so a sub-millisecond check-then-unlink /
+ * check-then-rotate window is inherent and cannot be fully closed without OS
+ * advisory locking (flock/fcntl on a held fd), which Node doesn't expose without
+ * a native addon — deliberately NOT taken here (platform-variance risk outweighs
+ * an unreachable race). The post-acquire re-verify shrinks the window; it does
+ * not eliminate it. In neutron's actual deployment — ONE server process per
+ * NEUTRON_HOME — concurrent rotation of the same home does not occur, so this
+ * residual window is unreachable in practice. On any failure the last resort is
+ * a process-ephemeral secret + loud warn: never a trusted-but-exposed on-disk
+ * value, never a guessable constant, never a hard boot failure, never a hang
+ * (bounded waits/retries), never SILENT divergence-with-false-confidence.
  */
 
 import { randomBytes } from 'node:crypto'
@@ -284,6 +294,22 @@ function tryAcquireRotateLock(lockPath: string): HeldRotateLock | null {
       }
       return null
     }
+    // Post-acquire RE-VERIFY: confirm the on-disk token is still OURS. Because a
+    // pathname lock is validated by NAME, a racer that reclaimed+recreated the
+    // lock in the sub-millisecond window since our exclusive create would now
+    // own the pathname under a DIFFERENT token. If so we are NOT the sole rotator
+    // → YIELD (close our stale fd, return null; the caller re-reads + adopts or
+    // retries) rather than rotate concurrently. This shrinks — it cannot fully
+    // close — the inherent check-then-act window of a pathname lockfile.
+    const verify = readRotateLockObservation(lockPath)
+    if (verify === null || verify.token !== token) {
+      try {
+        fs.closeSync(fd)
+      } catch {
+        /* non-fatal */
+      }
+      return null
+    }
     return { fd, token }
   }
   return null
@@ -326,15 +352,16 @@ export const __rotateLockInternals = {
  * it comes from disk, one read from a confirmed regular, 0600, non-symlink file
  * meeting {@link MIN_COOKIE_SECRET_LEN}.
  *
- * FIRST-WRITER-WINS convergence: an untrusted/absent entry is rotated behind an
- * exclusive sibling lock. The one process that acquires the lock rotates —
- * re-reading the target FIRST so it ADOPTS (not overwrites) a secret a prior
- * rotator already installed — while every competitor waits (bounded) and adopts
- * that same on-disk secret. So for a given NEUTRON_HOME the first process to
- * install a valid secret wins and every concurrent starter returns THAT value;
- * they never diverge. If nothing can be secured we return a process-ephemeral
- * secret and warn (sessions reset on restart) — never a trusted-but-exposed
- * on-disk value, never a hard boot failure, never a hang.
+ * Best-effort FIRST-WRITER-WINS convergence: an untrusted/absent entry is rotated
+ * behind the advisory sibling lock (see the file header for the ownership-token +
+ * post-acquire-re-verify discipline and its inherent, unreachable-in-deployment
+ * residual window). The process that acquires the lock rotates — re-reading the
+ * target FIRST so it ADOPTS (not overwrites) a secret a prior rotator already
+ * installed — while every competitor waits (bounded) and adopts that same on-disk
+ * secret, so concurrent starters converge on the first installed value rather than
+ * diverging. If nothing can be secured we return a process-ephemeral secret and
+ * warn (sessions reset on restart) — never a trusted-but-exposed on-disk value,
+ * never a hard boot failure, never a hang, never silent divergence.
  */
 export function resolvePersistedCookieSecret(neutronHome: string): string {
   const path = sessionCookieSecretPath(neutronHome)

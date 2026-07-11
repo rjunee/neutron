@@ -7,11 +7,13 @@
  *   - a first-boot mint race converges on one winner (Medium #3);
  *   - a SYMLINKED secret is never followed/trusted (High — token forgery);
  *   - a too-short (< 16) persisted value is rotated, not trusted (Medium);
- *   - concurrent rotation is FIRST-WRITER-WINS behind an exclusive lock: two
+ *   - concurrent rotation converges (best-effort) behind an advisory lock: two
  *     real resolvers converge on one on-disk secret; a competitor-held lock is
  *     waited-on + adopted; a stale (crashed-holder) lock is reclaimed; the lock
- *     carries an owner TOKEN so a reclaimed holder's release can't delete the
- *     new owner's lock and let a third rotator run concurrently (High).
+ *     carries an owner TOKEN so a reclaimed holder's release doesn't delete the
+ *     new owner's lock; and a post-acquire RE-VERIFY makes a rotator whose lock
+ *     was swapped in the inherent check-then-act window YIELD, not rotate
+ *     concurrently (High — the residual window is documented, not falsely closed).
  */
 import { afterEach, beforeEach, describe, expect, it, spyOn } from 'bun:test'
 import * as fs from 'node:fs'
@@ -270,5 +272,54 @@ describe('resolvePersistedCookieSecret', () => {
     // B finishes and releases its OWN lock (token matches) → lock removed.
     __rotateLockInternals.release(heldB!, lockPath)
     expect(fs.existsSync(lockPath)).toBe(false)
+  })
+
+  it('High — post-acquire re-verify: a lock SWAPPED between stamp and check makes the rotator YIELD', () => {
+    const lockPath = sessionCookieSecretLockPath(home)
+    fs.mkdirSync(home, { recursive: true })
+
+    // Deterministically drive the inherent pathname-lockfile window: right after
+    // A stamps its token (our first writeSync), a racer SWAPS the lock — unlinks
+    // A's file and recreates the pathname under a DIFFERENT owner token, exactly
+    // in the check-then-act gap. The post-acquire re-verify must catch the
+    // foreign token and YIELD (acquire → null) instead of returning a lock A no
+    // longer owns (which would let A rotate concurrently with the racer).
+    const realWrite = fs.writeSync
+    let swapped = false
+    const spy = spyOn(fs, 'writeSync').mockImplementation((fd: number, ...rest: unknown[]) => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const n = (realWrite as any)(fd, ...rest) // A stamps ITS token first…
+      if (!swapped) {
+        swapped = true // guard: the racer's own writeSync below must not re-enter
+        try {
+          fs.unlinkSync(lockPath)
+        } catch {
+          /* non-fatal */
+        }
+        const racer = fs.openSync(
+          lockPath,
+          fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL,
+          0o600,
+        )
+        fs.writeSync(racer, 'racer.777.222')
+        fs.closeSync(racer)
+      }
+      return n
+    })
+    let held: ReturnType<typeof __rotateLockInternals.acquire>
+    try {
+      held = __rotateLockInternals.acquire(lockPath)
+    } finally {
+      spy.mockRestore()
+    }
+
+    expect(swapped).toBe(true) // the swap happened in the window
+    // WITH the re-verify: A notices the on-disk token is no longer its own and
+    // YIELDS. (Dropping the re-verify → A returns a non-null held lock it doesn't
+    // own → TWO concurrent rotators → this assertion goes red.)
+    expect(held).toBeNull()
+    // A did NOT delete the racer's lock on its way out.
+    expect(fs.existsSync(lockPath)).toBe(true)
+    expect(fs.readFileSync(lockPath, 'utf8').trim()).toBe('racer.777.222')
   })
 })
