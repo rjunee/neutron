@@ -732,3 +732,60 @@ test('SCOPE KEY e2e: absent-project turn does NOT leak previous_response_id into
   expect(rec.bodies).toHaveLength(2)
   expect(rec.bodies[1]!['previous_response_id']).toBeUndefined()
 })
+
+// --- AT-MOST-ONCE (audit Blocker): a tool that already executed must NOT be
+// re-run when a retryable continuation error would otherwise rotate models. ---
+
+test('AT-MOST-ONCE: tool executes, continuation 429s → resolver runs EXACTLY ONCE (no rotation re-execution)', async () => {
+  // Two models are offered, so WITHOUT the fix the 429 would rotate to model 2 and
+  // the rotated model would request + re-execute the mutation. A side-effect COUNTER
+  // proves the tool runs exactly once across the whole turn.
+  let toolExecutions = 0
+  let call = 0
+  const fetchImpl = (async () => {
+    call++
+    let body: Array<{ event: string; data: unknown }>
+    let status = 200
+    if (call === 1) {
+      // Model 1 initial: request a mutating tool, then a mid-turn completion.
+      body = [
+        { event: 'response.created', data: { type: 'response.created', response: { id: 'r1' } } },
+        { event: 'response.function_call.delta', data: { type: 'response.function_call.delta', call_id: 'c1', name: 'work_board_add', arguments: '{"title":"x"}' } },
+        { event: 'response.function_call.completed', data: { type: 'response.function_call.completed', call_id: 'c1', name: 'work_board_add' } },
+        { event: 'response.completed', data: { type: 'response.completed', response: { id: 'r1', usage: { input_tokens: 1, output_tokens: 1 } } } },
+      ]
+    } else {
+      // The continuation (after the tool ran) 429s. Must NOT rotate + re-run.
+      status = 429
+      body = []
+    }
+    if (status !== 200) {
+      return new Response('rate limited', { status, headers: { 'retry-after': '0.2' } })
+    }
+    const sse = body.map((f) => `event: ${f.event}\ndata: ${JSON.stringify(f.data)}\n`).join('\n') + '\n'
+    const stream = new ReadableStream({ start(c) { c.enqueue(new TextEncoder().encode(sse)); c.close() } })
+    return new Response(stream, { status: 200 })
+  }) as unknown as typeof fetch
+
+  const sub = buildLlmCallSubstrate({
+    pool: anthropicPool(),
+    substrate_instance_id: 'gpt-once',
+    provider: 'openai',
+    user_id: 'owner',
+    openai: {
+      pool: openaiPool(),
+      // The mutating tool: count each execution.
+      bindMcpResolver: () => async () => { toolExecutions++; return { ok: true } },
+      model_preference: ['gpt-5.6', 'gpt-5.5'], // TWO models — rotation is available
+      toolManifest: () => [{ name: 'work_board_add', description: 'add', input_schema: { type: 'object' } }],
+      fetchImpl,
+    },
+  })!
+  const events = await drain(sub.start(spec()))
+  // The mutation ran EXACTLY once — no rotation-induced duplicate side effect.
+  expect(toolExecutions).toBe(1)
+  // The retryable error was surfaced (not swallowed into a rotation).
+  expect(events.some((e) => e.kind === 'error')).toBe(true)
+  // And we did NOT fan out to a 3rd upstream call (model-2 rotation attempt).
+  expect(call).toBe(2)
+})

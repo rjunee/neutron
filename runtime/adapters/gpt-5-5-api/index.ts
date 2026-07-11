@@ -138,6 +138,15 @@ function startResponsesSession(
     // error keeps its `HTTP 429:` prefix so `parseHttpStatusFromMessage` classifies
     // it and `reportFailure` sets cooldown_until / cooldown_reason with the delay.
     let lastRetryable: { message: string; retry_after_ms?: number } | undefined
+    // AT-MOST-ONCE (audit BLOCKER) — once ANY tool has executed this turn, model
+    // rotation is UNSAFE: the shim executes side-effecting tools BEFORE the
+    // continuation, and rotation restarts from the ORIGINAL `spec.session` + prompt
+    // on a DIFFERENT model (the continuation's `previous_response_id` is
+    // model-specific and can't be replayed cross-model). A rotated model could
+    // request + re-execute the SAME mutation (work_board_add, dispatch, …) → a
+    // duplicate side effect. So after a tool runs, a retryable error is SURFACED to
+    // the turn (normal turn-level retry/handling) instead of triggering a rotation.
+    let toolExecutedThisTurn = false
     const exhaustionError = (reason: string): Event => {
       if (lastRetryable === undefined) {
         return { kind: 'error', message: reason, retryable: false }
@@ -170,7 +179,23 @@ function startResponsesSession(
         let needRotate = false
         let rotateDelay: number | undefined
         for await (const ev of shimToInternal(initialUpstream, shimOpts)) {
+          if (ev.kind === 'tool_call') {
+            // A tool has (or is about to) execute this turn — see the shim: the
+            // `tool_call` is surfaced right before the resolver runs. Mark it so a
+            // later retryable error surfaces instead of rotating + re-executing.
+            toolExecutedThisTurn = true
+            yield ev
+            continue
+          }
           if (ev.kind === 'error' && ev.retryable) {
+            if (toolExecutedThisTurn) {
+              // AT-MOST-ONCE — a side-effecting tool already ran this turn.
+              // Rotating would restart from the original prompt on another model
+              // and could re-execute the mutation. Surface the retryable error for
+              // turn-level handling; do NOT rotate.
+              yield ev
+              return
+            }
             needRotate = true
             if (ev.retry_after_ms !== undefined) rotateDelay = ev.retry_after_ms
             // Remember the classification for the terminal exhaustion error.
