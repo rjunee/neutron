@@ -37,6 +37,18 @@ type _WiringExposesNoRawClient = 'client' extends keyof GBrainMemoryWiring
 const _wiringExposesNoRawClient: _WiringExposesNoRawClient = true
 void _wiringExposesNoRawClient
 
+// The AUTHORITATIVE "do not embed" env the serve seam emits whenever the
+// resolved state is keyword+graph (explicit `off`, a width-mismatch drop, or an
+// unreachable local Ollama). A TRUTHY `GBRAIN_EMBEDDING_MODEL` override is
+// REQUIRED — an empty env would let gbrain fall through to the PERSISTED
+// `config.json` (`ollama:*`, which needs no key) and keep embedding. The key is
+// neutralized so no ambient BYO GPT key can silently cloud-embed. No dims → gbrain
+// keeps the persisted column width. See `resolveServeEmbeddingEnv`.
+const DISABLED_EMBED_ENV = {
+  GBRAIN_EMBEDDING_MODEL: 'openai:text-embedding-3-large',
+  OPENAI_API_KEY: '',
+} as const
+
 describe('resolveGbrainClientOptions', () => {
   test('GBRAIN_HOME is the per-project <owner_home>/gbrain boundary', () => {
     // Uses the explicit `off` opt-out so this test stays decoupled from the
@@ -211,8 +223,9 @@ describe('resolveGbrainClientOptions', () => {
       // A legacy 3072-dim brain is created/restored AFTER composition.
       liveWidth = 3072
       // First spawn: default Ollama (768) can't match a 3072 column → DROPPED
-      // → keyword+graph (empty), NOT a stale 768 that would corrupt writes.
-      await expect(opts.resolveDynamicEnv!()).resolves.toEqual({})
+      // → keyword+graph via the authoritative disable override (NO dims, so no
+      // stale 768 that would corrupt the 3072 column; NOT the ollama env).
+      await expect(opts.resolveDynamicEnv!()).resolves.toEqual(DISABLED_EMBED_ENV)
 
       // A key stored later → OpenAI adopts the freshly-read 3072 width (in place).
       const keyed = resolveGbrainClientOptions({
@@ -244,8 +257,8 @@ describe('resolveGbrainClientOptions', () => {
       expect(opts.env).toEqual({ GBRAIN_HOME: '/t/gbrain' })
       expect(typeof opts.resolveDynamicEnv).toBe('function')
       // Serve side: local Ollama (768) can't match a 3072 column → dropped →
-      // keyword+graph. NEVER injects 768 to the 3072 column.
-      await expect(opts.resolveDynamicEnv!()).resolves.toEqual({})
+      // keyword+graph via the disable override. NEVER injects 768 (no dims).
+      await expect(opts.resolveDynamicEnv!()).resolves.toEqual(DISABLED_EMBED_ENV)
     })
 
     test('TOCTOU NO-KEY: init AND serve reconcile to the SAME live width (3072 brain, default Ollama) — both drop to keyword+graph, no split', async () => {
@@ -273,7 +286,7 @@ describe('resolveGbrainClientOptions', () => {
 
       // AGREE — both drop the 768 local fallback (can't match 3072) → keyword+graph.
       expect(initEmbedder).toBeNull() // init NEVER injects 768
-      expect(serveEnv).toEqual({}) // serve NEVER injects 768
+      expect(serveEnv).toEqual(DISABLED_EMBED_ENV) // serve disables (no dims → never 768)
     })
 
     test('legacy 3072 brain + LAZY key → resolveDynamicEnv upgrades in place at 3072, drops to keyword+graph without a key', async () => {
@@ -284,11 +297,10 @@ describe('resolveGbrainClientOptions', () => {
         resolveOpenAiKey: async () => stored,
         existingBrainDims: 3072,
       })
-      // No key yet: the 768 local fallback can't match → keyword+graph (no
-      // embedding env leaks). Static env is GBRAIN_HOME only, so the empty
-      // dynamic merge leaves no stale 768 keys behind.
+      // No key yet: the 768 local fallback can't match → keyword+graph via the
+      // disable override (no dims → no stale 768 keys leak to the 3072 column).
       expect(opts.env).toEqual({ GBRAIN_HOME: '/t/gbrain' })
-      await expect(opts.resolveDynamicEnv!()).resolves.toEqual({})
+      await expect(opts.resolveDynamicEnv!()).resolves.toEqual(DISABLED_EMBED_ENV)
       // Key pasted → cloud embedder AT THE BRAIN WIDTH (3072), upgrade in place.
       stored = 'sk-late'
       await expect(opts.resolveDynamicEnv!()).resolves.toEqual({
@@ -380,7 +392,8 @@ describe('resolveGbrainClientOptions', () => {
       expect(w).toBe(768)
       // Serve, after a key is stored: `NEUTRON_EMBEDDINGS=off` is the operator's
       // AUTHORITATIVE kill switch, so a later onboarding key must NOT silently
-      // re-enable cloud embeddings — the dynamic env stays empty (keyword+graph).
+      // re-enable cloud embeddings. The dynamic env is the keyless DISABLE
+      // override (NOT empty) so it WINS over any persisted embedding provider.
       let stored: string | undefined
       const opts = resolveGbrainClientOptions({
         owner_home: '/t',
@@ -390,7 +403,8 @@ describe('resolveGbrainClientOptions', () => {
       })
       stored = 'sk-late'
       const dyn = await opts.resolveDynamicEnv!()
-      expect(dyn).toEqual({}) // no GBRAIN_EMBEDDING_* leaks, no OPENAI_API_KEY
+      expect(dyn).toEqual(DISABLED_EMBED_ENV) // authoritative disable, not `{}`
+      expect(dyn['OLLAMA_BASE_URL']).toBeUndefined()
     })
 
     test('fresh explicit `openai` brain (init with no key) → later onboarding key spawns at the SAME width', async () => {
@@ -502,13 +516,12 @@ describe('resolveGbrainClientOptions', () => {
         probeOllamaReachable: unreachable,
       })
       const dyn = await opts.resolveDynamicEnv!()
-      expect(dyn).toEqual({
-        GBRAIN_EMBEDDING_MODEL: 'openai:text-embedding-3-large',
-        GBRAIN_EMBEDDING_DIMENSIONS: '768',
-        OPENAI_API_KEY: '', // neutralize any ambient BYO GPT key → no silent cloud embed
-      })
+      // Keyless OpenAI-latent override (no dims → keeps the persisted column
+      // width), key neutralized → put_page skips embed instead of hard-failing.
+      expect(dyn).toEqual(DISABLED_EMBED_ENV)
       // Crucially: NOT the ollama env (which would make gbrain embed + hard-fail).
       expect(dyn['OLLAMA_BASE_URL']).toBeUndefined()
+      expect(dyn['GBRAIN_EMBEDDING_DIMENSIONS']).toBeUndefined()
     })
 
     test('Ollama reachable but model NOT pulled → same keyless-latent degrade', async () => {
@@ -521,6 +534,25 @@ describe('resolveGbrainClientOptions', () => {
       const dyn = await opts.resolveDynamicEnv!()
       expect(dyn['GBRAIN_EMBEDDING_MODEL']).toBe('openai:text-embedding-3-large')
       expect(dyn['OPENAI_API_KEY']).toBe('')
+    })
+
+    test('off + a PERSISTED Ollama-width brain → keyless disable override wins over config.json (no probe)', async () => {
+      // The Codex-flagged boundary: a brain created under the RA3 default persists
+      // `ollama:nomic-embed-text` in config.json. `off` must OVERRIDE that (an empty
+      // env would let the persisted Ollama keep embedding). `off` short-circuits to
+      // null before any reachability probe.
+      let probed = false
+      const opts = resolveGbrainClientOptions({
+        owner_home: '/t',
+        env: { NEUTRON_EMBEDDINGS: 'off' },
+        resolveBrainWidth: () => 768, // persisted RA3-default (ollama@768) column
+        probeOllamaReachable: async () => {
+          probed = true
+          return { reachable: true, modelPresent: true }
+        },
+      })
+      expect(await opts.resolveDynamicEnv!()).toEqual(DISABLED_EMBED_ENV)
+      expect(probed).toBe(false)
     })
 
     test('CLOUD (OpenAI key) embedder is NEVER probed → forwards its env unchanged', async () => {

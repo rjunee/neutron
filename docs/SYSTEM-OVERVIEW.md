@@ -2066,19 +2066,33 @@ optional operator `GBRAIN_SOURCE` / `GBRAIN_BRAIN_ID`.
   no-op). The pre-RA3 keyword+graph-only mode is still available as the explicit
   `NEUTRON_EMBEDDINGS=off` opt-out. **`unset` is NOT off** — it selects the local
   fallback.
+- **`off` is an AUTHORITATIVE kill switch — even over a persisted Ollama config.**
+  Because RA3 makes Ollama the default, essentially EVERY brain persists
+  `embedding_model: "ollama:nomic-embed-text"` in its `config.json`, and gbrain's
+  `loadConfig` only lets `GBRAIN_EMBEDDING_MODEL` override that when it is TRUTHY —
+  so an EMPTY serve env is NOT a kill switch (gbrain falls back to the persisted
+  keyless Ollama and keeps embedding). `off` therefore emits a TRUTHY keyless
+  DISABLE override (`GBRAIN_EMBEDDING_MODEL=openai:text-embedding-3-large` with the
+  key neutralized): with no usable credential gbrain's `noEmbed` is true, so it
+  stores pages unembedded and never calls a provider, regardless of what's
+  persisted. On the INIT side, `off` sizes the column at the shared keyless latent
+  default (`openai:text-embedding-3-large @ 768`, no embeddings computed); removing
+  `off` later (back to unset) simply re-activates the local Ollama embedder over
+  that same 768 column and `embed --stale` backfills — no rebuild.
 - **Fail-soft on the WRITE path too (RA3).** GBrain's `put_page` embeds inline and
   FAILS HARD when the configured provider is unreachable — and an Ollama provider
   needs no key, so a naive default would make EVERY memory write fail on a host
-  without Ollama. So the serve seam (`resolveServeEmbeddingEnv` in
-  `build-gbrain-memory.ts`) gates the local embedder on a reachability probe at each
-  connect: reachable → embed with Ollama; unreachable / model-not-pulled → park the
-  `gbrain serve` child on the KEYLESS OpenAI-latent default at the same 768 width
-  (env overrides config.json, and any ambient `OPENAI_API_KEY` is neutralized so no
-  silent cloud-billing). With no key `isAvailable('embedding')` is false, so gbrain
-  stores pages UNEMBEDDED (NULL-stale) and writes succeed. The next reconnect after
-  Ollama returns forwards the real `ollama:*` env → `ensure-brain-init`'s
-  unconditional `gbrain embed --stale` backfills those chunks IN PLACE. A cloud
-  (OpenAI-key) embedder is never probed — it is assumed reachable.
+  without Ollama. So the serve seam (`resolveServeEmbeddingEnv` /
+  `keylessDisableEmbeddingEnv` in `build-gbrain-memory.ts`) gates the local embedder
+  on a reachability probe at each connect: reachable → embed with Ollama;
+  unreachable / model-not-pulled (or a width-mismatch drop, or `off`) → emit the
+  SAME keyless disable override as above (truthy `GBRAIN_EMBEDDING_MODEL`, key
+  neutralized, and NO dims so gbrain keeps the persisted column width). With no key
+  `isAvailable('embedding')` is false, so gbrain stores pages UNEMBEDDED (NULL-stale)
+  and writes succeed. The next reconnect after Ollama returns forwards the real
+  `ollama:*` env → `ensure-brain-init`'s unconditional `gbrain embed --stale`
+  backfills those chunks IN PLACE. A cloud (OpenAI-key) embedder is never probed —
+  it is assumed reachable.
 - **Cloud (OpenAI) embeddings — the UPGRADE over the free local default
   (`gbrain-memory/embedder-config.ts`).** Two triggers select OpenAI
   `text-embedding-3-large` in place of the default local Ollama fallback
