@@ -122,6 +122,34 @@ describe('CrashedAgentDetector', () => {
     // Tick 3 — nothing left to observe.
     expect((await detector.detect()).length).toBe(0)
   })
+
+  test('round-4 High-A: a RESPAWN under the same name (new pid) SURVIVES the stale commit', async () => {
+    const reg = new ProcessRegistry()
+    reg.register({ name: 'session', pid: 1, tool_name: 't' })
+    // pid 1 is dead; the respawn's pid 2 is alive.
+    const probe: PidLivenessProbe = { isAlive: (pid) => pid === 2 }
+    const detector = new CrashedAgentDetector({
+      project_slug: 't1',
+      process_registry: reg,
+      pid_probe: probe,
+    })
+
+    // detect() captures the dead pid 1 as a candidate (mutates nothing).
+    const alerts = await detector.detect()
+    expect(alerts.length).toBe(1)
+    expect(alerts[0]?.payload['pid']).toBe(1)
+
+    // A respawn REPLACES `session` with a NEW live pid 2 (upsert: same name, new
+    // pid) BEFORE the crash alert's persist/deliver settles and commit() lands.
+    reg.unregister('session')
+    reg.register({ name: 'session', pid: 2, tool_name: 't' })
+
+    // Commit the STALE pid-1 alert — the identity guard must leave the live pid-2
+    // entry intact (a name-only unregister would erase the freshly-respawned child).
+    detector.commit(alerts[0]!)
+    expect(reg.size()).toBe(1)
+    expect(reg.list().find((r) => r.name === 'session')?.pid).toBe(2)
+  })
 })
 
 describe('OverrunCronDetector', () => {

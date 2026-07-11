@@ -191,6 +191,14 @@ export interface ScheduleDispatchLifecycleWatchdogDeps {
  * stays live (it is never transitioned, so it keeps being detected). A tick
  * failure is swallowed so the interval keeps firing. Returns a `stop()` the
  * caller wires into shutdown cleanup.
+ *
+ * SINGLE-FLIGHT (High B): the tick is async and — because the dedup check reads
+ * `notified` BEFORE awaiting the sink and only writes it AFTER delivery — two
+ * overlapping ticks would both see a still-live run as un-notified and BOTH fire
+ * the sink → a duplicate alert, violating one-notification. An in-flight guard
+ * (skip-if-running) makes the tick non-overlapping, mirroring the six-detector
+ * `WatchdogSupervisor.runOnce`'s own `if (this.running) return` guard so both F4
+ * watchdog loops share one proven pattern.
  */
 export function scheduleDispatchLifecycleWatchdog(
   deps: ScheduleDispatchLifecycleWatchdogDeps,
@@ -199,7 +207,12 @@ export function scheduleDispatchLifecycleWatchdog(
   const notified = new Set<string>()
   const setIv = deps.set_interval ?? ((fn: () => void, ms: number) => setInterval(fn, ms))
   const clearIv = deps.clear_interval ?? ((handle: unknown) => clearInterval(handle as ReturnType<typeof setInterval>))
+  let running = false
   const handle = setIv(() => {
+    // Skip this fire if the previous tick is still awaiting its sink — otherwise
+    // both ticks read `notified` pre-delivery and double-notify the same run.
+    if (running) return
+    running = true
     void runLifecycleTick({
       registry: deps.registry,
       watchdog: {
@@ -208,11 +221,15 @@ export function scheduleDispatchLifecycleWatchdog(
         notify_only: true,
         notified,
       },
-    }).catch((err: unknown) => {
-      console.warn(
-        `[subagent-lifecycle] tick failed: ${err instanceof Error ? err.message : String(err)}`,
-      )
     })
+      .catch((err: unknown) => {
+        console.warn(
+          `[subagent-lifecycle] tick failed: ${err instanceof Error ? err.message : String(err)}`,
+        )
+      })
+      .finally(() => {
+        running = false
+      })
   }, deps.interval_ms ?? LIFECYCLE_WATCHDOG_TICK_MS)
   return {
     stop: () => clearIv(handle),

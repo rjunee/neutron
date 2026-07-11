@@ -110,6 +110,20 @@ export class ProcessRegistry {
     return this.records.delete(name)
   }
 
+  /**
+   * Drop a record ONLY when it STILL points at `pid` — identity-guarded so a
+   * concurrently-respawned entry that re-used the same `name` under a NEW pid is
+   * never clobbered. Mirrors the spawn.ts exit-path `childByKey` identity guard
+   * (`if (childByKey.get(key) === child) …`) but keys on pid, which is all the
+   * crashed-agent detector carries across its detect→persist→deliver→commit gap.
+   * Returns true only when the exact detected entry was removed.
+   */
+  unregisterIfPid(name: string, pid: number): boolean {
+    const r = this.records.get(name)
+    if (r === undefined || r.pid !== pid) return false
+    return this.records.delete(name)
+  }
+
   /** SIGTERM every registered process. Returns the count signalled. */
   killAll(): number {
     const names = [...this.records.keys()]

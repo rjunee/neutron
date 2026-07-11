@@ -202,4 +202,52 @@ describe('scheduleDispatchLifecycleWatchdog (F4)', () => {
 
     scheduled.stop()
   })
+
+  test('round-4 High-B single-flight: two OVERLAPPING ticks notify a still-live run exactly once', async () => {
+    const registry = new SubagentRegistry()
+    const control = newControlState(registry)
+    await registry.create({ run_id: 'r4', instance_key: 'owner', agent_kind: 'atlas', spawn_depth: 0 })
+    await registry.update('r4', { status: 'running', last_event_at: Date.now() - 10 * 60_000 })
+
+    // A DEFERRED sink: it does not resolve until released, so tick 1 stays
+    // in-flight (awaiting delivery) across the moment tick 2 fires.
+    let release: () => void = () => {}
+    const gate = new Promise<void>((res) => {
+      release = res
+    })
+    let sinkCalls = 0
+    let tickFn: (() => void) | null = null
+    const scheduled = scheduleDispatchLifecycleWatchdog({
+      registry,
+      control,
+      alert_sink: async (_a) => {
+        sinkCalls++
+        await gate
+      },
+      set_interval: (fn) => {
+        tickFn = fn
+        return 0 as unknown as ReturnType<typeof setInterval>
+      },
+      clear_interval: () => {},
+    })
+
+    // Fire twice back-to-back. Tick 1 is awaiting the gated sink (dedup ledger not
+    // yet written), so a NON-single-flight loop would let tick 2 read the run as
+    // un-notified and fire the sink AGAIN. The in-flight guard skips tick 2.
+    tickFn!()
+    tickFn!()
+    await Bun.sleep(20)
+    expect(sinkCalls).toBe(1) // tick 2 skipped — no duplicate notify
+
+    // Release → tick 1 completes and latches the run in `notified`.
+    release()
+    await Bun.sleep(20)
+
+    // A later, non-overlapping tick sees the run already notified → no repeat.
+    tickFn!()
+    await Bun.sleep(20)
+    expect(sinkCalls).toBe(1)
+
+    scheduled.stop()
+  })
 })

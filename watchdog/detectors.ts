@@ -225,10 +225,21 @@ export class CrashedAgentDetector implements WatchdogDetector {
   // after its crash alert was durably persisted + delivered. Until then it stays
   // discoverable so a failed tick retries. `commitById` latches the incident so a
   // re-registered same-name process later is a fresh incident.
+  //
+  // IDENTITY-GUARDED reap (High A): remove the entry ONLY if it still points at the
+  // EXACT pid we detected dead. A respawn intentionally replaces an entry under the
+  // same `name` with a NEW pid (`registerLiveProcessSafe` upsert / spawn.ts); if
+  // that happened between detect() and this commit(), a name-only unregister would
+  // erase the freshly-respawned LIVE process. `unregisterIfPid` no-ops in that case
+  // and leaves the new child registered.
   commit(alert: WatchdogAlert): void {
     this.incidents.commitById(alert.id)
-    const name = (alert.payload as { process_name?: unknown }).process_name
-    if (typeof name === 'string') this.registry.unregister(name)
+    const payload = alert.payload as { process_name?: unknown; pid?: unknown }
+    const name = payload.process_name
+    const pid = payload.pid
+    if (typeof name === 'string' && typeof pid === 'number') {
+      this.registry.unregisterIfPid(name, pid)
+    }
   }
 }
 
