@@ -301,46 +301,46 @@ export async function ensureBrainInitialized(
   // the later healthy reconnect sees a matching marker and skips `embed --stale`.
   let embedderConfirmedUsable = input.embedder !== null && input.embedder.provider !== 'ollama'
 
-  // Advisory-only Ollama reachability probe (RA3). Never gates the embedder
-  // or column sizing (already fixed by `resolveEmbedderConfig` at
-  // composition time, before this function is ever called) — purely surfaces
-  // a degraded state with an actionable log line, since GBrain's own
-  // per-query embed-fail fallback to keyword-only is otherwise silent from
-  // outside the gbrain process. `skipOllamaProbe` lets the caller run this at
-  // most ONCE per client (the guard now re-runs on every reconnect), so an
-  // unreachable Ollama doesn't add the probe's timeout to each retry.
-  if (
-    !input.skipOllamaProbe &&
-    input.embedder !== null &&
-    input.embedder.provider === 'ollama'
-  ) {
+  // Ollama reachability probe (RA3). For a local Ollama embedder we ALWAYS probe
+  // (cheap — a ~1.5s-bounded HTTP GET), because the result GATES the
+  // `embed --stale` backfill below: an unreachable/model-missing provider must
+  // NOT trigger a doomed 120s backfill spawn that blocks connection
+  // establishment (the stdio client awaits this guard BEFORE composing the serve
+  // env). `skipOllamaProbe` suppresses only the repeated ADVISORY LOG (a
+  // once-per-client boot signal), NEVER the health check itself — so the backfill
+  // decision matches the serve-side reachability gate on EVERY connect, including
+  // reconnects. A cloud (OpenAI-key) embedder is never probed and stays
+  // `embedderConfirmedUsable` from its initializer (a key present → embeds).
+  if (input.embedder !== null && input.embedder.provider === 'ollama') {
     const baseUrl = input.embedder.childEnv['OLLAMA_BASE_URL'] ?? 'http://localhost:11434/v1'
     // Redact any `user:pass@` userinfo before logging — an operator can put
     // credentials in OLLAMA_BASE_URL and they must never reach a log line.
     const safeUrl = redactUrlUserinfo(baseUrl)
     const health = await probeHealth(baseUrl, { model: input.embedder.model })
-    if (!health.reachable) {
-      logger.warn(
-        `[gbrain-memory] local Ollama embedder configured (${input.embedder.model} @ ${safeUrl}) ` +
-          'but it is not reachable — semantic recall degrades to keyword+graph (lexical) while it ' +
-          'is down. Once Ollama is available, NEW content embeds automatically; content written ' +
-          'DURING the outage backfills on the next reconnect/restart of the GBrain connection ' +
-          '(not mid-session — the running connection keeps its lexical fallback until it reconnects). ' +
-          `Install: brew install ollama && ollama pull ${input.embedder.model} ` +
-          '(or paste an OpenAI key in Settings to use cloud embeddings instead).',
-      )
-    } else if (!health.modelPresent) {
-      logger.warn(
-        `[gbrain-memory] Ollama is reachable at ${safeUrl} but '${input.embedder.model}' is not ` +
-          'pulled — semantic recall degrades to keyword+graph (lexical) until it is. ' +
-          `Install: ollama pull ${input.embedder.model}`,
-      )
-    } else {
-      logger.info(
-        `[gbrain-memory] local Ollama embedder healthy (${input.embedder.model} @ ${safeUrl}) — ` +
-          'semantic recall active.',
-      )
-      embedderConfirmedUsable = true
+    embedderConfirmedUsable = health.reachable && health.modelPresent
+    if (!input.skipOllamaProbe) {
+      if (!health.reachable) {
+        logger.warn(
+          `[gbrain-memory] local Ollama embedder configured (${input.embedder.model} @ ${safeUrl}) ` +
+            'but it is not reachable — semantic recall degrades to keyword+graph (lexical) while it ' +
+            'is down. Once Ollama is available, NEW content embeds automatically; content written ' +
+            'DURING the outage backfills on the next reconnect/restart of the GBrain connection ' +
+            '(not mid-session — the running connection keeps its lexical fallback until it reconnects). ' +
+            `Install: brew install ollama && ollama pull ${input.embedder.model} ` +
+            '(or paste an OpenAI key in Settings to use cloud embeddings instead).',
+        )
+      } else if (!health.modelPresent) {
+        logger.warn(
+          `[gbrain-memory] Ollama is reachable at ${safeUrl} but '${input.embedder.model}' is not ` +
+            'pulled — semantic recall degrades to keyword+graph (lexical) until it is. ' +
+            `Install: ollama pull ${input.embedder.model}`,
+        )
+      } else {
+        logger.info(
+          `[gbrain-memory] local Ollama embedder healthy (${input.embedder.model} @ ${safeUrl}) — ` +
+            'semantic recall active.',
+        )
+      }
     }
   }
 
@@ -422,9 +422,9 @@ export async function ensureBrainInitialized(
     return { status: 'initialized', detail: `${target.model} ${target.dimensions}d` }
   }
 
-  // Already initialized. Run `gbrain embed --stale` on EVERY connect (whenever an
-  // embedder is configured) — NOT gated on the marker. It is idempotent + cheap
-  // and is the single operation that repairs BOTH orphan modes:
+  // Already initialized. Run `gbrain embed --stale` on EVERY connect ONCE the
+  // embedder is CONFIRMED usable (a reachable+pulled Ollama, or a cloud key) —
+  // NOT gated on the marker. It is idempotent and repairs BOTH orphan modes:
   //   • OUTAGE ORPHANS — any chunk whose embedding IS NULL (pages written while
   //     Ollama / the provider was unreachable, WHENEVER that outage happened,
   //     including AFTER a healthy init already wrote the marker) is (re)embedded.
@@ -439,11 +439,19 @@ export async function ensureBrainInitialized(
   //     ollama) back to one space.
   // Cheap on a clean brain: gbrain's stale fast-path exits after a single
   // `countStaleChunks` (~50 bytes wire) when nothing is NULL. Keyword+graph
-  // brains (no embedder) never embed, so skip entirely. Best-effort throughout:
-  // a failure (Ollama still down, a missing binary, a provider error) never
-  // blocks serving — the pages stay NULL and the NEXT reconnect's unconditional
-  // `--stale` backfills them (the per-spawn recovery cadence).
-  if (input.embedder !== null) {
+  // brains (no embedder) never embed, so skip entirely.
+  //
+  // CRUCIALLY gated on `embedderConfirmedUsable`: `embed --stale` spawns
+  // `gbrain embed` with a 120s timeout, and the stdio client AWAITS this guard
+  // BEFORE it composes the serve env — so firing it against an UNREACHABLE Ollama
+  // (the majority no-Ollama-host case) would block connection establishment for
+  // up to 120s while it retries a dead provider, directly breaking the fail-soft
+  // promise. When the local embedder isn't confirmed healthy we SKIP the backfill
+  // entirely: the brain serves keyword+graph immediately, the stale chunks stay
+  // NULL, and a LATER reconnect with a healthy provider backfills them (the
+  // whole backfill-when-healthy design). Best-effort even when it does run: any
+  // failure never blocks serving.
+  if (input.embedder !== null && embedderConfirmedUsable) {
     const currentModel = embedderModelId(input.embedder)
     const markerModel = readBackfillMarkerModel(input.gbrainHome)
     let res: { code: number; stdout: string; stderr: string }

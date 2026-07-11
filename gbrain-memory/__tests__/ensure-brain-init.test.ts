@@ -41,6 +41,14 @@ function tempHome(): string {
 
 const silentLogger = { warn: () => {}, info: () => {} }
 
+// A local Ollama embedder is only CONFIRMED usable — and thus only backfills via
+// `embed --stale` — when the reachability probe passes. Tests that assert a
+// backfill DID run against an Ollama embedder must model an available provider.
+const healthyOllamaProbe = async (): Promise<OllamaHealthCheck> => ({
+  reachable: true,
+  modelPresent: true,
+})
+
 interface RecordedCall {
   cmd: string
   args: string[]
@@ -209,8 +217,9 @@ describe('ensureBrainInitialized', () => {
     expect(a.calls.map((c) => c.args[0])).toEqual(['embed'])
 
     // 2) Ollama: switch → gbrain invalidates the openai vectors → --stale re-embeds them.
+    //    (Ollama healthy → confirmed usable → backfill runs.)
     const b = fakeRunner({ embedStdout: 'Embedded 3 chunks across 2 pages' })
-    const r2 = await ensureBrainInitialized({ gbrainHome: home, embedder: ollama, runner: b.runner, logger: silentLogger })
+    const r2 = await ensureBrainInitialized({ gbrainHome: home, embedder: ollama, runner: b.runner, logger: silentLogger, probeOllamaHealth: healthyOllamaProbe })
     expect(r2.status).toBe('embeddings-backfilled')
     expect(b.calls.map((c) => c.args[0])).toEqual(['embed'])
 
@@ -351,9 +360,11 @@ describe('ensureBrainInitialized', () => {
 
     // 3) Reconnect, Ollama healthy again, SAME model → marker STILL matches. The
     //    stale scan finds the orphaned NULL-embedding chunks and backfills them.
+    //    `skipOllamaProbe` suppresses the repeated LOG but the health probe STILL
+    //    runs to gate the backfill — a HEALTHY provider here → backfill proceeds.
     const recover = fakeRunner({ embedStdout: 'Embedded 5 chunks across 3 pages' })
     const r = await ensureBrainInitialized({
-      gbrainHome: home, embedder, runner: recover.runner, logger: silentLogger, skipOllamaProbe: true,
+      gbrainHome: home, embedder, runner: recover.runner, logger: silentLogger, skipOllamaProbe: true, probeOllamaHealth: healthy,
     })
     expect(r.status).toBe('embeddings-backfilled') // NOT skipped despite matching marker
     expect(recover.calls.map((c) => c.args[0])).toEqual(['embed'])
@@ -400,13 +411,44 @@ describe('ensureBrainInitialized', () => {
     const a = fakeRunner({ embedStdout: 'Embedded 3 chunks across 2 pages' })
     await ensureBrainInitialized({ gbrainHome: home, embedder: openai, runner: a.runner, logger: silentLogger })
 
-    // Switch to ollama → gbrain invalidates the openai-signature vectors, `--stale`
-    // re-embeds them into the ollama space.
+    // Switch to ollama (healthy → confirmed usable) → gbrain invalidates the
+    // openai-signature vectors, `--stale` re-embeds them into the ollama space.
     const b = fakeRunner({ embedStdout: 'Embedded 3 chunks across 2 pages' })
-    const r = await ensureBrainInitialized({ gbrainHome: home, embedder: ollama, runner: b.runner, logger: silentLogger })
+    const r = await ensureBrainInitialized({ gbrainHome: home, embedder: ollama, runner: b.runner, logger: silentLogger, probeOllamaHealth: healthyOllamaProbe })
     expect(r.status).toBe('embeddings-backfilled')
     expect(b.calls.map((c) => c.args[0])).toEqual(['embed'])
     expect(b.calls[0]!.args).toContain('--stale')
+  })
+
+  test('existing brain + UNHEALTHY Ollama → NO embed --stale spawned (prompt keyword+graph); a later HEALTHY reconnect backfills', async () => {
+    // The fail-soft boundary: `embed --stale` spawns with a 120s timeout and the
+    // stdio client awaits this guard BEFORE composing the serve env. Firing it
+    // against an unreachable Ollama (the majority no-Ollama-host case) would block
+    // connection for up to 120s. So an UNHEALTHY provider must SKIP the backfill
+    // entirely; only a CONFIRMED-healthy one runs it.
+    const home = tempHome()
+    mkdirSync(join(home, '.gbrain'), { recursive: true })
+    writeFileSync(brainConfigPath(home), JSON.stringify({ engine: 'pglite' })) // already-init
+    const embedder = resolveEmbedderConfig({})! // RA3 default: local Ollama fallback
+    const unhealthy = async (): Promise<OllamaHealthCheck> => ({ reachable: false, modelPresent: false })
+
+    // 1) Ollama DOWN → connect returns PROMPTLY, the embed runner is NEVER called
+    //    (no doomed 120s spawn). Stale chunks stay NULL; serving is keyword+graph.
+    const down = fakeRunner({ embedStdout: 'Embedded 9 chunks across 4 pages' })
+    const r1 = await ensureBrainInitialized({
+      gbrainHome: home, embedder, runner: down.runner, logger: silentLogger, probeOllamaHealth: unhealthy,
+    })
+    expect(r1.status).toBe('already-initialized')
+    expect(down.calls).toHaveLength(0) // NO `embed --stale` against the dead provider
+
+    // 2) Later reconnect, Ollama HEALTHY → the SAME stale chunks now backfill.
+    const up = fakeRunner({ embedStdout: 'Embedded 9 chunks across 4 pages' })
+    const r2 = await ensureBrainInitialized({
+      gbrainHome: home, embedder, runner: up.runner, logger: silentLogger, probeOllamaHealth: healthyOllamaProbe,
+    })
+    expect(r2.status).toBe('embeddings-backfilled')
+    expect(up.calls.map((c) => c.args[0])).toEqual(['embed'])
+    expect(up.calls[0]!.args).toContain('--stale')
   })
 
   test('init failure → returns init-failed, never throws', async () => {
@@ -636,35 +678,42 @@ describe('ensureBrainInitialized — Ollama reachability probe (RA3)', () => {
     expect(probeCalls).toBe(0)
   })
 
-  test('skipOllamaProbe → the probe (and its log) is suppressed (once-per-client boot cadence)', async () => {
+  test('skipOllamaProbe → suppresses the repeated LOG, but the health probe STILL runs to gate the backfill (no doomed 120s spawn)', async () => {
     const home = tempHome()
-    const { runner } = fakeRunner()
+    mkdirSync(join(home, '.gbrain'), { recursive: true })
+    writeFileSync(brainConfigPath(home), JSON.stringify({ engine: 'pglite' })) // already-initialized
     const embedder = resolveEmbedderConfig({})! // ollama fallback
-    const { logger, warnings } = capturingLogger()
     let probeCalls = 0
-    const probe = async (): Promise<OllamaHealthCheck> => {
+    const unhealthyProbe = async (): Promise<OllamaHealthCheck> => {
       probeCalls += 1
       return { reachable: false, modelPresent: false }
     }
 
-    // First run: probe fires (boot signal).
-    await ensureBrainInitialized({ gbrainHome: home, embedder, runner, logger, probeOllamaHealth: probe })
+    // First run: probe fires (boot signal) + degradation log. Unhealthy provider →
+    // the `embed --stale` backfill is SKIPPED (never spawn a doomed 120s embed).
+    const first = fakeRunner()
+    const boot = capturingLogger()
+    await ensureBrainInitialized({ gbrainHome: home, embedder, runner: first.runner, logger: boot.logger, probeOllamaHealth: unhealthyProbe })
     expect(probeCalls).toBe(1)
-    expect(warnings.some((w) => w.includes('not reachable'))).toBe(true)
+    expect(boot.warnings.some((w) => w.includes('not reachable'))).toBe(true)
+    expect(first.calls.map((c) => c.args[0])).toEqual([]) // NO embed against a dead provider
 
-    // Subsequent reconnect run with skipOllamaProbe: no probe, no extra timeout,
-    // no repeated log — but the init/backfill work still runs.
-    const warnings2 = capturingLogger()
+    // Reconnect with skipOllamaProbe: the repeated LOG is suppressed, but the
+    // probe STILL runs (so the backfill decision matches the serve-embedder
+    // decision on EVERY connect) and the doomed backfill stays gated OFF.
+    const reconnect = fakeRunner()
+    const rl = capturingLogger()
     await ensureBrainInitialized({
       gbrainHome: home,
       embedder,
-      runner,
-      logger: warnings2.logger,
-      probeOllamaHealth: probe,
+      runner: reconnect.runner,
+      logger: rl.logger,
+      probeOllamaHealth: unhealthyProbe,
       skipOllamaProbe: true,
     })
-    expect(probeCalls).toBe(1) // NOT re-probed
-    expect(warnings2.warnings).toHaveLength(0)
+    expect(probeCalls).toBe(2) // probe STILL runs to gate the backfill
+    expect(rl.warnings).toHaveLength(0) // only the repeated LOG is suppressed
+    expect(reconnect.calls.map((c) => c.args[0])).toEqual([]) // still NO doomed embed --stale
   })
 
   test('OLLAMA_BASE_URL credentials are REDACTED from the degradation warning', async () => {
