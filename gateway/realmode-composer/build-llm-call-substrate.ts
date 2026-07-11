@@ -636,6 +636,20 @@ export function buildLlmCallSubstrate(
         const projectId =
           input.projectIdResolver?.() ?? spec.metering_context?.project_id
         if (projectId !== undefined && projectId.length > 0) opts.project_id = projectId
+        // CROSS-PROVIDER CONTINUITY (audit round 14) — this Claude turn is handling
+        // the scope, so INVALIDATE any stored OpenAI continuation for it: a later
+        // OpenAI turn on this scope must replay the FULL history (`spec.messages`)
+        // instead of resuming a `previous_response_id` that predates (and can't see)
+        // this intervening Claude turn — otherwise this turn silently vanishes from
+        // the OpenAI-side conversation. Pure ledger bookkeeping — the CC option bag,
+        // spec, and factory are UNTOUCHED (Claude path stays byte-identical). The
+        // scope key matches the openai path's exactly (same user + project transform).
+        openaiSessions.delete(
+          openAiSessionScopeKey(
+            input.user_id ?? '_platform',
+            projectId !== undefined && projectId.length > 0 ? projectId : undefined,
+          ),
+        )
         if (input.project_slug !== undefined) opts.instance_slug = input.project_slug
         if (input.delivery_topic_id !== undefined) opts.delivery_topic_id = input.delivery_topic_id
         if (input.onRecoveredReply !== undefined) opts.onRecoveredReply = input.onRecoveredReply
@@ -781,7 +795,10 @@ export function buildLlmCallSubstrate(
  * A durable ledger + `spec.messages` replay (rebuilt from the chat log) is the
  * required follow-up before GPT is production-grade for long-lived conversations.
  */
-export type OpenAiSessionLedger = Map<string, { id: string; last_active_at: number }>
+export type OpenAiSessionLedger = Map<
+  string,
+  { id: string; last_active_at: number; provider: string }
+>
 
 /**
  * COLLISION-SAFE continuity scope key (audit High) for {@link OpenAiSessionLedger}.
@@ -942,8 +959,18 @@ export function startOpenAiFamilySession(args: {
         : undefined
     if (ledgerKey !== undefined && dispatchSpec.session === undefined) {
       const prior = sessionLedger!.get(ledgerKey)
-      if (prior !== undefined) {
-        dispatchSpec = { ...dispatchSpec, session: prior }
+      // CROSS-PROVIDER CONTINUITY (audit round 14) — only resume the stored
+      // continuation if the SAME provider stored it. A different provider's session
+      // id (e.g. a codex `--resume` thread id vs an OpenAI `previous_response_id`,
+      // or a stale entry from before a non-OpenAI turn) is not a valid continuation
+      // and would silently drop the intervening turns; a mismatch replays FULL
+      // history via `spec.messages` instead. (A non-OpenAI turn also CLEARS the
+      // entry — see the anthropic path — so this guards the openai↔codex case.)
+      if (prior !== undefined && prior.provider === provider) {
+        dispatchSpec = {
+          ...dispatchSpec,
+          session: { id: prior.id, last_active_at: prior.last_active_at },
+        }
       }
     }
 
@@ -995,11 +1022,14 @@ export function startOpenAiFamilySession(args: {
         if (ev.kind === 'completion') {
           reported = true
           reportSuccess(pool, cred.id)
-          // Persist the session hint for the NEXT turn on this conversation key.
+          // Persist the session hint (tagged with THIS provider) for the next turn
+          // on this conversation key — the provider tag lets the read above reject a
+          // continuation stored by a different provider.
           if (ledgerKey !== undefined && ev.session !== undefined) {
             sessionLedger!.set(ledgerKey, {
               id: ev.session.id,
               last_active_at: ev.session.last_active_at,
+              provider,
             })
           }
         } else if (ev.kind === 'error') {

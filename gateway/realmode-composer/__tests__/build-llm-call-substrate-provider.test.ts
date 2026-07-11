@@ -972,3 +972,74 @@ test('RESOLVER mutation-verify: BOTH empty resolver AND absent static provider �
   await drain(sub.start(spec()))
   expect(cc.seen).toHaveLength(1) // truly-absent → Claude default
 })
+
+// --- CROSS-PROVIDER CONTINUITY (audit round 14): switching providers mid-scope
+// must NOT stale-resume — an intervening non-OpenAI turn invalidates the ledger. ---
+
+test('CROSS-PROVIDER: openai → anthropic → openai on ONE scope does NOT stale-resume; turn 3 replays FULL history', async () => {
+  const cc = ccCapture()
+  const rec = recordingGptFetch('resp1')
+  let provider: string = 'openai'
+  const sub = buildLlmCallSubstrate({
+    pool: anthropicPool(),
+    substrate_instance_id: 'switch-scope',
+    providerResolver: () => provider,
+    user_id: 'owner', // no projectIdResolver → all three turns share ONE scope key
+    substrateFactory: cc.substrateFactory,
+    openai: {
+      pool: openaiPool(),
+      bindMcpResolver: () => async () => ({}),
+      model_preference: ['gpt-5.6'],
+      fetchImpl: rec.fetchImpl,
+    },
+  })!
+  // Turn 1 — OpenAI: stores resp1 for this scope.
+  await drain(sub.start(spec()))
+  // Turn 2 — Anthropic: handles the SAME scope → clears the OpenAI ledger entry.
+  provider = 'anthropic'
+  await drain(sub.start(spec()))
+  expect(cc.seen).toHaveLength(1) // the intervening turn ran on Claude
+  // Turn 3 — OpenAI: carries the FULL history (incl. the intervening turn 2) and
+  // MUST NOT resume from turn 1's stale previous_response_id.
+  provider = 'openai'
+  const turn3: AgentSpec = {
+    prompt: 'turn 3',
+    tools: [],
+    model_preference: ['claude-opus-4-8'],
+    messages: [
+      { role: 'user', content: 'u1' },
+      { role: 'assistant', content: 'a1' },
+      { role: 'user', content: 'u2-INTERVENING-anthropic-turn' },
+    ],
+  }
+  await drain(sub.start(turn3))
+  // rec.bodies: [0] = turn 1, [1] = turn 3 (turn 2 was Anthropic → no GPT fetch).
+  expect(rec.bodies).toHaveLength(2)
+  // NO stale resume — the ledger was invalidated by the intervening Claude turn.
+  expect(rec.bodies[1]!['previous_response_id']).toBeUndefined()
+  // The full history is replayed via spec.messages — the intervening turn is PRESENT
+  // (with a stale resume, previous_response_id would be set and messages suppressed,
+  // making the intervening turn vanish — the mutation this guards against).
+  const input = rec.bodies[1]!['input'] as Array<{ role: string; content: string }>
+  expect(input.map((m) => m.content)).toContain('u2-INTERVENING-anthropic-turn')
+})
+
+test('CROSS-PROVIDER: uninterrupted openai → openai on one scope STILL resumes (continuity intact)', async () => {
+  const rec = recordingGptFetch('resp_a')
+  const sub = buildLlmCallSubstrate({
+    pool: anthropicPool(),
+    substrate_instance_id: 'same-provider',
+    provider: 'openai',
+    user_id: 'owner',
+    openai: {
+      pool: openaiPool(),
+      bindMcpResolver: () => async () => ({}),
+      model_preference: ['gpt-5.6'],
+      fetchImpl: rec.fetchImpl,
+    },
+  })!
+  await drain(sub.start(spec())) // stores resp_a
+  await drain(sub.start(spec())) // same provider, same scope → resumes resp_a
+  expect(rec.bodies).toHaveLength(2)
+  expect(rec.bodies[1]!['previous_response_id']).toBe('resp_a')
+})
