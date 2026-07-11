@@ -166,7 +166,68 @@ describe('F4 — build-core-modules watchdog + process-registry wiring', () => {
       expect(tick3.length).toBe(0)
       expect(fired.length).toBe(firedBefore) // notifier saw nothing new
     } finally {
-      mods.watchdogModule.shutdown?.(wd)
+      // AWAIT the async quiescing shutdown — discarding it would let teardown +
+      // afterEach db.close() race an in-flight tick, defeating the quiesce (round-11).
+      await mods.watchdogModule.shutdown?.(wd)
+      mods.processRegistryModule.shutdown?.(processRegistry)
+      await mods.cronModule.shutdown?.(cron)
+    }
+  })
+
+  test('the watchdog module shutdown QUIESCES — it does not resolve until an in-flight tick drains', async () => {
+    // A DEFERRED notifier holds the tick in-flight (the persist/notify that must
+    // not resume against a closing DB during teardown).
+    let release: () => void = () => {}
+    const gate = new Promise<void>((res) => {
+      release = res
+    })
+    let notifyCompleted = false
+    const input = baseInput({
+      // Stale heartbeat → the tick fires an alert and enters the gated notifier.
+      heartbeat_tracker: { lastHeartbeatAt: () => NOW - 60_000 },
+      watchdog_notifier: {
+        notify: async () => {
+          await gate
+          notifyCompleted = true
+        },
+      },
+    })
+    const mods = buildCoreModules(input)
+    const processRegistry = await Promise.resolve(mods.processRegistryModule.init({} as ModuleContext))
+    const cron = await Promise.resolve(mods.cronModule.init({} as ModuleContext))
+    const ctx: ModuleContext = {
+      graph: {
+        get: ((name: string) => (name === 'process-registry' ? processRegistry : cron)) as never,
+        names: () => ['process-registry', 'cron'],
+      },
+      config: {},
+    }
+    const wd = await Promise.resolve(mods.watchdogModule.init(ctx))
+
+    try {
+      // Start a tick WITHOUT awaiting; it fires the heartbeat alert and blocks in
+      // the gated notifier (in-flight).
+      const tick = wd.supervisor.runOnce()
+      for (let i = 0; i < 8; i++) await Promise.resolve() // let it reach the notifier
+      expect(notifyCompleted).toBe(false)
+
+      // The module's async shutdown must DRAIN the in-flight tick — not resolve first.
+      let shutdownResolved = false
+      const shutdownP = Promise.resolve(mods.watchdogModule.shutdown?.(wd)).then(() => {
+        shutdownResolved = true
+      })
+      for (let i = 0; i < 8; i++) await Promise.resolve()
+      expect(shutdownResolved).toBe(false) // still draining
+      expect(notifyCompleted).toBe(false)
+
+      // Release → the tick completes, and ONLY THEN does shutdown resolve. Teardown
+      // (and afterEach db.close()) is now safe.
+      release()
+      await tick
+      await shutdownP
+      expect(notifyCompleted).toBe(true)
+      expect(shutdownResolved).toBe(true)
+    } finally {
       mods.processRegistryModule.shutdown?.(processRegistry)
       await mods.cronModule.shutdown?.(cron)
     }

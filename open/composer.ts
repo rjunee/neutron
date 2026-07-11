@@ -84,6 +84,7 @@ import {
   buildBootSweepReport,
   buildCancellableDispatchTurn,
   buildDispatchStuckAlertSink,
+  selectDispatchAlertTopics,
   scheduleDispatchLifecycleWatchdog,
   defaultPersonaLoader,
   type DispatchBoardBinder,
@@ -2525,6 +2526,12 @@ export function buildOpenGraphComposer(
             message_id: `watchdog:${alert.id}`,
             ts: Date.now(),
           }
+          // Broadcast to all live topics is INTENDED here (round-11 sweep): a
+          // six-detector `WatchdogAlert` is a SYSTEM-WIDE condition (stale
+          // heartbeat, DB-lock contention, cooldown saturation) — it carries NO
+          // per-binding `delivery_target`, so there is no narrower target to honor.
+          // (Contrast the DISPATCH path, whose alert IS bound to one conversation
+          // and is scoped via `selectDispatchAlertTopics`.)
           for (const topic of appWsRegistry.topics()) {
             try {
               appWsRegistry.send(topic, env)
@@ -2598,7 +2605,13 @@ export function buildOpenGraphComposer(
             message_id: `watchdog:dispatch:${alert.run_id}`,
             ts: Date.now(),
           }
-          for (const topic of appWsRegistry.topics()) {
+          // Route by the dispatch's RECORDED delivery target (round-11 privacy
+          // boundary): a run bound to a specific app_socket binding is pushed to
+          // THAT topic only, never broadcast into unrelated conversations. When no
+          // target was recorded, `selectDispatchAlertTopics` returns the owner's
+          // live topics (documented single-owner fallback — the owner's own
+          // surfaces only).
+          for (const topic of selectDispatchAlertTopics(alert, appWsRegistry)) {
             try {
               appWsRegistry.send(topic, env)
             } catch {

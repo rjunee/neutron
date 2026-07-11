@@ -47,6 +47,7 @@ export {
   buildDispatchWatchdogNotifier,
   buildDispatchSuspectedStuckNotifier,
   buildDispatchStuckAlertSink,
+  selectDispatchAlertTopics,
   buildBootSweepReport,
   scheduleDispatchLifecycleWatchdog,
   LIFECYCLE_WATCHDOG_TICK_MS,
@@ -55,6 +56,7 @@ export type {
   DispatchSuspectedStuckAlert,
   DispatchSuspectedStuckSink,
   DispatchStuckAlertSinkEffects,
+  AppWsAlertRegistry,
   ScheduleDispatchLifecycleWatchdogDeps,
 } from './watchdog-report.ts'
 

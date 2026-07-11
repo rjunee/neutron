@@ -103,6 +103,48 @@ export interface DispatchSuspectedStuckAlert {
 /** Sink for the non-terminal suspected-stuck alert (O4 journal + app-ws in prod). */
 export type DispatchSuspectedStuckSink = (alert: DispatchSuspectedStuckAlert) => void | Promise<void>
 
+/** The minimal app-ws registry surface the alert router needs. */
+export interface AppWsAlertRegistry {
+  /** True when `channel_topic_id` has ≥1 live device. */
+  has(channel_topic_id: string): boolean
+  /** Every live topic id (`app:<user>` and `app:<user>:<project>`). */
+  topics(): string[]
+}
+
+/**
+ * Choose the app-ws topic(s) a dispatch suspected-stuck alert may be pushed to,
+ * HONORING the dispatch's recorded delivery target so a run bound to binding A is
+ * never leaked into unrelated conversations B…N (round-11 privacy boundary).
+ *
+ * TARGETED — when the alert carries an `app_socket` delivery target, `binding_id`
+ * IS the app-ws `channel_topic_id`, so route to THAT topic ONLY. If that topic has
+ * no live device, route to NOTHING (return `[]`) — deliberately NOT falling back to
+ * a broadcast, because that broadcast is exactly the cross-binding leak we are
+ * closing (the durable O4 journal still has the alert; the ephemeral push is
+ * best-effort). A non-`app_socket` target is unsupported → also no ephemeral push.
+ *
+ * FALLBACK — when NO delivery target was recorded (the current Open reality: neither
+ * the `dispatch_agent` tool nor the `DispatchService` deps stamp one yet), fan to
+ * every live topic. This is documented + intentional, NOT a leak: app-ws on Open is
+ * SINGLE-OWNER, so "every live topic" is only the one owner's own surfaces, and with
+ * no recorded binding there is no narrower scope to honor. It matches the existing
+ * owner-fan pattern (`fanProjectsChanged`).
+ */
+export function selectDispatchAlertTopics(
+  alert: Pick<DispatchSuspectedStuckAlert, 'delivery_target'>,
+  registry: AppWsAlertRegistry,
+): string[] {
+  const target = alert.delivery_target
+  if (target !== undefined) {
+    if (target.channel === 'app_socket' && target.binding_id.length > 0) {
+      return registry.has(target.binding_id) ? [target.binding_id] : []
+    }
+    // A recorded-but-unsupported channel: do NOT broadcast (that would leak).
+    return []
+  }
+  return registry.topics()
+}
+
 /** The two effects a dispatch-alert sink performs, split so the ORDERING between
  *  them is enforced (and tested) in one place. */
 export interface DispatchStuckAlertSinkEffects {

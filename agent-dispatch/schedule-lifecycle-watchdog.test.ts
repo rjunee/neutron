@@ -32,6 +32,8 @@ import { SubagentRegistry } from '@neutronai/runtime/subagent/registry.ts'
 import {
   scheduleDispatchLifecycleWatchdog,
   buildDispatchStuckAlertSink,
+  selectDispatchAlertTopics,
+  type AppWsAlertRegistry,
   type DispatchSuspectedStuckAlert,
 } from './watchdog-report.ts'
 
@@ -388,5 +390,43 @@ describe('buildDispatchStuckAlertSink — persist-before-deliver (round-9)', () 
     expect(pushCalls).toBe(1)
 
     await scheduled.stop()
+  })
+})
+
+describe('selectDispatchAlertTopics — cross-binding isolation (round-11)', () => {
+  // Two live app-ws topics (two conversations of the single owner).
+  const topicA = 'app:owner:projA'
+  const topicB = 'app:owner:projB'
+  const registry: AppWsAlertRegistry = {
+    has: (t) => t === topicA || t === topicB,
+    topics: () => [topicA, topicB],
+  }
+  const base: DispatchSuspectedStuckAlert = {
+    run_id: 'r1',
+    agent_kind: 'atlas',
+    reason: 'stuck',
+    age_ms: 1,
+    markdown: 'x',
+  }
+
+  test('an app_socket-bound alert routes to ONLY its binding topic — the other conversation never sees it', () => {
+    const bound = { ...base, delivery_target: { channel: 'app_socket', binding_id: topicA } }
+    const topics = selectDispatchAlertTopics(bound, registry)
+    expect(topics).toEqual([topicA])
+    expect(topics).not.toContain(topicB) // no cross-binding leak
+  })
+
+  test('a bound target whose topic has NO live device routes NOWHERE — never falls back to broadcast', () => {
+    const bound = { ...base, delivery_target: { channel: 'app_socket', binding_id: 'app:owner:gone' } }
+    expect(selectDispatchAlertTopics(bound, registry)).toEqual([])
+  })
+
+  test('a recorded but UNSUPPORTED channel does not broadcast', () => {
+    const bound = { ...base, delivery_target: { channel: 'telegram', binding_id: '123' } }
+    expect(selectDispatchAlertTopics(bound, registry)).toEqual([])
+  })
+
+  test('NO delivery target → documented single-owner fallback: fan to every live topic', () => {
+    expect(selectDispatchAlertTopics(base, registry)).toEqual([topicA, topicB])
   })
 })
