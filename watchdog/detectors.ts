@@ -209,7 +209,17 @@ export class CrashedAgentDetector implements WatchdogDetector {
     // so the retry tick had nothing to rediscover. The incident tracker keeps the
     // dead record deduped (one alert per crash) WITHOUT removing it — the removal
     // is deferred to commit().
-    const dead = this.registry.list().filter((r) => !this.probe.isAlive(r.pid))
+    // A record is CRASHED when the spawn exit handler explicitly marked it so (an
+    // abnormal exit — non-zero code / an external signal), OR — defensively — it is
+    // still registered but its pid is no longer alive (a process that died without
+    // its exit handler marking it). The explicit mark is the primary signal: it is
+    // what makes the detector actually fire in production, because a child that
+    // exits between 30 s ticks is otherwise unregistered by its exit handler before
+    // this runs. A cleanly/intentionally exited child was unregistered, so it never
+    // appears here.
+    const dead = this.registry
+      .list()
+      .filter((r) => r.exit_status === 'crashed' || !this.probe.isAlive(r.pid))
     // Key PER (name, pid): a dead→dead REPLACEMENT (same name, new dead pid) must
     // be a DISTINCT incident. Keying by name alone left the old pid's incident open
     // (its removal is pid-guarded, so it never resolves the name key) and the

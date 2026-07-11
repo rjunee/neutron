@@ -33,6 +33,14 @@ export interface ProcessRecord {
   tool_name: string
   /** Optional metadata for ad-hoc fields. */
   meta: Record<string, string>
+  /**
+   * Set to `'crashed'` by the spawn exit handler when a child exited ABNORMALLY
+   * (non-zero code / an external signal we did not send). The crashed-agent
+   * watchdog reports such a record once and reaps it on commit. A cleanly-exited
+   * or intentionally-terminated child is unregistered outright, so it never
+   * carries this. Absent while the process is live.
+   */
+  exit_status?: 'crashed'
 }
 
 export interface ProcessRegisterInput {
@@ -137,6 +145,20 @@ export class ProcessRegistry {
     return this.records.delete(name)
   }
 
+  /**
+   * Mark the entry as abnormally exited (crashed) ONLY when it STILL points at
+   * `pid` — identity-guarded, same principle as {@link unregisterIfPid}. The
+   * record is LEFT in the registry (not dropped) so the crashed-agent watchdog can
+   * observe + report it exactly once, then reap it on commit. Returns true only
+   * when the exact entry was marked.
+   */
+  markCrashedIfPid(name: string, pid: number): boolean {
+    const r = this.records.get(name)
+    if (r === undefined || r.pid !== pid) return false
+    r.exit_status = 'crashed'
+    return true
+  }
+
   /** SIGTERM every registered process. Returns the count signalled. */
   killAll(): number {
     const names = [...this.records.keys()]
@@ -221,14 +243,21 @@ export function resolveAmbientProcessRegistry(): ProcessRegistry | null {
 export interface LiveProcessHandle {
   /** Refresh last-activity — no-op unless the owned `(registry, name, pid)` is still current. */
   touch(): void
-  /** Drop the owned entry (natural exit) — no-op unless `(registry, name, pid)` is still current. */
+  /** Drop the owned entry (clean/expected exit) — no-op unless `(registry, name, pid)` is still current. */
   unregister(): void
+  /**
+   * Mark the owned entry crashed (abnormal exit) and LEAVE it registered so the
+   * crashed-agent watchdog can report it once — no-op unless `(registry, name,
+   * pid)` is still current (a respawn that replaced it is untouched).
+   */
+  markCrashed(): void
 }
 
 /** Handle returned when there is no ambient registry to write into. */
 const NOOP_LIVE_PROCESS_HANDLE: LiveProcessHandle = {
   touch(): void {},
   unregister(): void {},
+  markCrashed(): void {},
 }
 
 /**
@@ -263,6 +292,13 @@ export function registerLiveProcessSafe(input: ProcessRegisterInput): LiveProces
       unregister(): void {
         try {
           owner.unregisterIfPid(name, pid)
+        } catch {
+          // swallow
+        }
+      },
+      markCrashed(): void {
+        try {
+          owner.markCrashedIfPid(name, pid)
         } catch {
           // swallow
         }

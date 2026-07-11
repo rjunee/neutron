@@ -95,7 +95,7 @@ describe('scheduleDispatchLifecycleWatchdog (F4)', () => {
     await Bun.sleep(20)
     expect(alerts.length).toBe(1)
 
-    scheduled.stop()
+    await scheduled.stop()
   })
 
   test('Blocker-C: a stuck dispatched subagent produces a watchdog_alert system_event', async () => {
@@ -143,7 +143,7 @@ describe('scheduleDispatchLifecycleWatchdog (F4)', () => {
     expect(rows[0]!.payload_json).toContain('dispatch_lifecycle')
     expect(rows[0]!.payload_json).toContain('r2')
 
-    scheduled.stop()
+    await scheduled.stop()
   })
 
   test('round-4 wrapper propagation: alert_sink rejects on tick 1 → NOT latched → retried + delivered exactly once', async () => {
@@ -200,7 +200,7 @@ describe('scheduleDispatchLifecycleWatchdog (F4)', () => {
     expect(deliveries).toBe(1)
     expect(cancellerCalls).toBe(0)
 
-    scheduled.stop()
+    await scheduled.stop()
   })
 
   test('round-4 High-B single-flight: two OVERLAPPING ticks notify a still-live run exactly once', async () => {
@@ -248,6 +248,56 @@ describe('scheduleDispatchLifecycleWatchdog (F4)', () => {
     await Bun.sleep(20)
     expect(sinkCalls).toBe(1)
 
-    scheduled.stop()
+    await scheduled.stop()
+  })
+
+  test('round-7 High-2: stop() is QUIESCING — it does not resolve until the in-flight tick drains', async () => {
+    const registry = new SubagentRegistry()
+    const control = newControlState(registry)
+    await registry.create({ run_id: 'r5', instance_key: 'owner', agent_kind: 'atlas', spawn_depth: 0 })
+    await registry.update('r5', { status: 'running', last_event_at: Date.now() - 10 * 60_000 })
+
+    // A DEFERRED sink holds the tick in-flight until released — this stands in for
+    // registry pruning / persistence that must NOT resume against a closing DB.
+    let release: () => void = () => {}
+    const gate = new Promise<void>((res) => {
+      release = res
+    })
+    let tickCompleted = false
+    let tickFn: (() => void) | null = null
+    const scheduled = scheduleDispatchLifecycleWatchdog({
+      registry,
+      control,
+      alert_sink: async (_a) => {
+        await gate
+        tickCompleted = true
+      },
+      set_interval: (fn) => {
+        tickFn = fn
+        return 0 as unknown as ReturnType<typeof setInterval>
+      },
+      clear_interval: () => {},
+    })
+
+    // Start a tick; it blocks inside the gated sink (in-flight, not yet done).
+    tickFn!()
+    await Bun.sleep(10)
+    expect(tickCompleted).toBe(false)
+
+    // stop() must NOT resolve while a tick is in-flight — it DRAINS it first. The
+    // gateway awaits this before db.close(), so no post-close DB access occurs.
+    let stopResolved = false
+    const stopPromise = scheduled.stop().then(() => {
+      stopResolved = true
+    })
+    await Bun.sleep(10)
+    expect(stopResolved).toBe(false) // still draining the in-flight tick
+    expect(tickCompleted).toBe(false)
+
+    // Release the tick → it completes, and ONLY THEN does stop() resolve.
+    release()
+    await stopPromise
+    expect(tickCompleted).toBe(true)
+    expect(stopResolved).toBe(true)
   })
 })

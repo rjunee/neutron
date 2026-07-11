@@ -17,7 +17,7 @@ import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { AlertStore } from './alert-store.ts'
 import { HeartbeatDetector, type HeartbeatTracker } from './detectors.ts'
 import { WatchdogSupervisor } from './supervisor.ts'
-import type { WatchdogAlert } from './types.ts'
+import type { WatchdogAlert, WatchdogDetector } from './types.ts'
 
 let db: ProjectDb | undefined
 let tmp: string | undefined
@@ -102,5 +102,51 @@ describe('WatchdogSupervisor — COMMIT-ON-SUCCESS (round-3)', () => {
     // (idempotent record — no duplicate on the notify-retry).
     expect(notifyCalls).toBe(2)
     expect(store.listOpen('owner').length).toBe(1)
+  })
+})
+
+describe('WatchdogSupervisor — quiescing stop (round-7 meta-audit)', () => {
+  test('stop() does not resolve until an in-flight tick drains (no persist against a closing DB)', async () => {
+    // A detector whose detect() blocks until released — stands in for a tick whose
+    // persist/notify would otherwise resume after stop() against a closing DB.
+    let release: () => void = () => {}
+    const gate = new Promise<void>((res) => {
+      release = res
+    })
+    let detectCompleted = false
+    const gatedDetector: WatchdogDetector = {
+      kind: 'gateway_heartbeat',
+      detect: async (): Promise<WatchdogAlert[]> => {
+        await gate
+        detectCompleted = true
+        return []
+      },
+    }
+    const supervisor = new WatchdogSupervisor({
+      store: { record: async (): Promise<void> => {} } as unknown as AlertStore,
+      notifier: { notify: async (): Promise<void> => {} },
+      detectors: [gatedDetector],
+    })
+
+    // Drive a tick; it blocks inside detect() (in-flight).
+    const tick = supervisor.runOnce()
+    await Promise.resolve()
+    expect(detectCompleted).toBe(false)
+
+    // stop() must DRAIN the in-flight tick — it cannot resolve first.
+    let stopResolved = false
+    const stopP = supervisor.stop().then(() => {
+      stopResolved = true
+    })
+    await new Promise((r) => setTimeout(r, 10))
+    expect(stopResolved).toBe(false)
+    expect(detectCompleted).toBe(false)
+
+    // Release → the tick completes, and ONLY THEN does stop() resolve.
+    release()
+    await stopP
+    await tick
+    expect(detectCompleted).toBe(true)
+    expect(stopResolved).toBe(true)
   })
 })

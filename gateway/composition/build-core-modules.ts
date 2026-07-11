@@ -576,8 +576,10 @@ export function buildCoreModules(input: CompositionInput): CoreModules {
       supervisor.start()
       return { store, supervisor }
     },
-    shutdown: (instance) => {
-      instance.supervisor.stop()
+    shutdown: async (instance) => {
+      // AWAIT the quiescing stop so an in-flight tick's persist/notify drains
+      // before `graph.shutdown()` returns and the gateway closes the DB (round-7).
+      await instance.supervisor.stop()
     },
   }
 

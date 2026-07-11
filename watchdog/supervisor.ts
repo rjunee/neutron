@@ -32,6 +32,8 @@ export class WatchdogSupervisor {
   private readonly tick_interval_ms: number
   private timer: ReturnType<typeof setInterval> | null = null
   private running = false
+  /** The in-flight tick, so {@link stop} can QUIESCE (await it) before returning. */
+  private inflight: Promise<void> | null = null
 
   constructor(options: SupervisorOptions) {
     this.store = options.store
@@ -60,11 +62,22 @@ export class WatchdogSupervisor {
     }, this.tick_interval_ms)
   }
 
-  stop(): void {
+  /**
+   * Stop ticking and QUIESCE: clear the interval so no new tick fires, then AWAIT
+   * the in-flight tick (if any) before resolving. A bare `clearInterval` cannot
+   * drain a running tick — its persist (`AlertStore.record`) / notify would resume
+   * against a closing database during shutdown. The gateway's watchdog module runs
+   * this async shutdown, and `graph.shutdown()` is awaited BEFORE `db.close()`
+   * (round-7 meta-audit — same guarantee the dispatch lifecycle watchdog gets from
+   * SupervisedLoop.stop).
+   */
+  async stop(): Promise<void> {
     if (this.timer !== null) {
       clearInterval(this.timer)
       this.timer = null
     }
+    const p = this.inflight
+    if (p !== null) await p
   }
 
   /**
@@ -81,6 +94,11 @@ export class WatchdogSupervisor {
     if (this.running) return []
     this.running = true
     const delivered: WatchdogAlert[] = []
+    // Expose this tick as `inflight` so a concurrent stop() can await it (quiesce).
+    let resolveInflight: () => void = () => {}
+    this.inflight = new Promise<void>((res) => {
+      resolveInflight = res
+    })
     try {
       for (const detector of this.detectors) {
         let alerts: WatchdogAlert[]
@@ -129,6 +147,8 @@ export class WatchdogSupervisor {
       }
     } finally {
       this.running = false
+      this.inflight = null
+      resolveInflight()
     }
     return delivered
   }

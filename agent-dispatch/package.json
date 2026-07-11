@@ -5,6 +5,7 @@
   "private": true,
   "dependencies": {
     "@neutronai/core-sdk": "workspace:*",
+    "@neutronai/loop": "workspace:*",
     "@neutronai/migrations": "workspace:*",
     "@neutronai/persistence": "workspace:*",
     "@neutronai/runtime": "workspace:*",

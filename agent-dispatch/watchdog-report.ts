@@ -24,6 +24,7 @@ import type { AgentKind, SubagentRecord, SubagentRegistry } from '@neutronai/run
 import type { ControlState } from '@neutronai/runtime/subagent/control.ts'
 import type { BootSweepReport } from '@neutronai/runtime/subagent/boot-sweep.ts'
 import { runLifecycleTick } from '@neutronai/runtime/subagent/lifecycle.ts'
+import { SupervisedLoop } from '@neutronai/loop'
 import { DISPATCH_KIND_BY_AGENT_KIND } from './prompts.ts'
 import type { DeliveryTarget, DispatchReport, DispatchReporter } from './service.ts'
 
@@ -188,51 +189,54 @@ export interface ScheduleDispatchLifecycleWatchdogDeps {
  * killing and here only gates a NOTIFICATION.
  *
  * The per-run `notified` ledger suppresses the every-tick repeat for a run that
- * stays live (it is never transitioned, so it keeps being detected). A tick
- * failure is swallowed so the interval keeps firing. Returns a `stop()` the
- * caller wires into shutdown cleanup.
+ * stays live (it is never transitioned, so it keeps being detected). Returns an
+ * ASYNC, QUIESCING `stop()` the caller wires into shutdown cleanup.
  *
- * SINGLE-FLIGHT (High B): the tick is async and — because the dedup check reads
- * `notified` BEFORE awaiting the sink and only writes it AFTER delivery — two
- * overlapping ticks would both see a still-live run as un-notified and BOTH fire
- * the sink → a duplicate alert, violating one-notification. An in-flight guard
- * (skip-if-running) makes the tick non-overlapping, mirroring the six-detector
- * `WatchdogSupervisor.runOnce`'s own `if (this.running) return` guard so both F4
- * watchdog loops share one proven pattern.
+ * Driven by {@link SupervisedLoop} (@neutronai/loop), the same primitive F1
+ * adopted for the other tick loops, for TWO guarantees this watchdog needs:
+ *   • SINGLE-FLIGHT (round-5 High B): the tick is async and — because the dedup
+ *     check reads `notified` BEFORE awaiting the sink and writes it only AFTER
+ *     delivery — two overlapping ticks would both see a still-live run as
+ *     un-notified and BOTH fire the sink → a duplicate alert. SupervisedLoop skips
+ *     a fire while a prior tick is still in flight.
+ *   • QUIESCING STOP (round-7 High 2): `stop()` clears the interval AND awaits the
+ *     in-flight tick before resolving, so registry pruning / persistence can never
+ *     resume against a closing database. A bare `clearInterval` cannot drain an
+ *     already-running tick; the gateway registers this async stop and AWAITS it
+ *     before `db.close()`.
+ * A tick failure is routed to SupervisedLoop's `onError` (logged + counted) so the
+ * loop keeps firing.
  */
 export function scheduleDispatchLifecycleWatchdog(
   deps: ScheduleDispatchLifecycleWatchdogDeps,
-): { stop: () => void } {
+): { stop: () => Promise<void> } {
   const notify = buildDispatchSuspectedStuckNotifier(deps.alert_sink)
   const notified = new Set<string>()
-  const setIv = deps.set_interval ?? ((fn: () => void, ms: number) => setInterval(fn, ms))
-  const clearIv = deps.clear_interval ?? ((handle: unknown) => clearInterval(handle as ReturnType<typeof setInterval>))
-  let running = false
-  const handle = setIv(() => {
-    // Skip this fire if the previous tick is still awaiting its sink — otherwise
-    // both ticks read `notified` pre-delivery and double-notify the same run.
-    if (running) return
-    running = true
-    void runLifecycleTick({
-      registry: deps.registry,
-      watchdog: {
-        control: deps.control,
-        notify,
-        notify_only: true,
-        notified,
-      },
-    })
-      .catch((err: unknown) => {
-        console.warn(
-          `[subagent-lifecycle] tick failed: ${err instanceof Error ? err.message : String(err)}`,
-        )
+  const loop = new SupervisedLoop({
+    name: 'dispatch-lifecycle-watchdog',
+    intervalMs: deps.interval_ms ?? LIFECYCLE_WATCHDOG_TICK_MS,
+    tick: async (): Promise<void> => {
+      await runLifecycleTick({
+        registry: deps.registry,
+        watchdog: {
+          control: deps.control,
+          notify,
+          notify_only: true,
+          notified,
+        },
       })
-      .finally(() => {
-        running = false
-      })
-  }, deps.interval_ms ?? LIFECYCLE_WATCHDOG_TICK_MS)
+    },
+    onError: (name, err): void => {
+      console.warn(
+        `[subagent-lifecycle] tick '${name}' failed: ${err instanceof Error ? err.message : String(err)}`,
+      )
+    },
+    ...(deps.set_interval !== undefined ? { setTimer: deps.set_interval } : {}),
+    ...(deps.clear_interval !== undefined ? { clearTimer: deps.clear_interval } : {}),
+  })
+  loop.start()
   return {
-    stop: () => clearIv(handle),
+    stop: (): Promise<void> => loop.stop(),
   }
 }
 

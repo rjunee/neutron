@@ -402,7 +402,7 @@ async function spawnSession(
   // IDENTITY-GUARDED: a respawn re-attaches the SAME sessionId/sessionKey, so a
   // dying OLD child must not evict the NEW session a concurrent respawn already
   // installed (the resume race the P2-3 regression caught).
-  void child.exited.then(async () => {
+  void child.exited.then(async (exitCode) => {
     session.onDeath()
     // Detach the row-#11 dead-turn JSONL watcher — this child's transcript is now
     // terminal; a respawn starts a fresh watcher for the new child.
@@ -410,13 +410,23 @@ async function spawnSession(
     session.deadTurnWatcher = undefined
     // Stop the size-watchdog cadence — the child it watched is gone (row #13).
     session.sizeWatchdog?.stop()
-    // F4 — drop this child from the watchdog's live-process view now it has
-    // exited (a real subprocess exit, so the OS-liveness projection follows). The
-    // handle is bound to the OWNING registry + this child's (name, pid), so it
-    // no-ops if a concurrent respawn already replaced `sessionKey` with a fresh
-    // child, or if a newer gateway boot pushed a different ambient registry — it
-    // can only ever drop THIS child's own entry (High 2 fix).
-    liveHandle?.unregister()
+    // F4 — reconcile the watchdog's live-process view against this real exit,
+    // distinguishing a CLEAN/EXPECTED exit from a CRASH so CrashedAgentDetector can
+    // actually observe crashes in production (a child that exits between 30 s ticks
+    // must not be silently dropped before the detector runs). The handle is bound
+    // to the OWNING registry + this child's (name, pid), so BOTH branches no-op if
+    // a concurrent respawn already replaced `sessionKey`, or a newer gateway boot
+    // pushed a different ambient registry — it can only ever touch THIS child's own
+    // entry (High 2). CLEAN = code 0 or a termination WE initiated (SIGTERM/SIGKILL
+    // on evict/respawn/cancel/shutdown → `wasKilledByUs`): unregister outright.
+    // CRASH = a non-zero code or an EXTERNAL signal we did not send: mark the record
+    // crashed and LEAVE it so the detector reports it once and reaps it on commit.
+    const killedByUs = child.wasKilledByUs?.() ?? false
+    if (!killedByUs && exitCode !== 0) {
+      liveHandle?.markCrashed()
+    } else {
+      liveHandle?.unregister()
+    }
     sink.unregisterIf(sessionId, session)
     // Reclaim the temp config files now the child is gone (covers pool eviction,
     // crash, and shutdown — the ephemeral dispose path unlinks eagerly too).

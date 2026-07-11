@@ -2613,6 +2613,10 @@ export function buildOpenGraphComposer(
         control: subagentControl,
         alert_sink: dispatchStuckAlertSink,
       })
+      // stop() is ASYNC + QUIESCING — the gateway's shutdown drain AWAITS every
+      // realmode cleanup BEFORE `db.close()` (drainRealmodeCleanups → db.close),
+      // so an in-flight lifecycle tick fully drains before the DB closes and can
+      // never persist / prune against a closing database (round-7 High 2).
       realmodeCleanups.push(() => lifecycleWatchdog.stop())
     }
 

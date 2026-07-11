@@ -64,6 +64,9 @@ export class BunTerminalHost implements PtyHost {
     }
     const stripState: DcsStripState = newDcsStripState()
     let exited = false
+    // Set the instant WE signal the child (any intentional termination), so the
+    // spawn exit handler can distinguish a crash from an expected recycle (F4).
+    let killedByUs = false
     let exitResolve: (code: number | null) => void = () => {}
     const exitedPromise = new Promise<number | null>((res) => {
       exitResolve = res
@@ -124,6 +127,9 @@ export class BunTerminalHost implements PtyHost {
       },
       kill(signal) {
         if (exited) return
+        // Record intent BEFORE signalling — even if the child is already gone,
+        // this exit was one we initiated, not a crash.
+        killedByUs = true
         try {
           proc.kill(signal)
         } catch {
@@ -132,6 +138,7 @@ export class BunTerminalHost implements PtyHost {
       },
       exited: exitedPromise,
       hasExited: () => exited,
+      wasKilledByUs: () => killedByUs,
     }
     return child
   }
