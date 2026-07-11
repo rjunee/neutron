@@ -116,6 +116,7 @@ import { wireLandingStack } from './wiring/landing.ts'
 import { wireUploads } from './wiring/uploads.ts'
 import { buildOpenOwnerGate } from './wiring/owner-gate.ts'
 import { wireAppWs, type OnboardingMsgEmit } from './wiring/app-ws.ts'
+import { MIN_COOKIE_SECRET_LEN } from './session-cookie-secret.ts'
 import { late } from './wiring/late.ts'
 import type { OpenWiringContext } from './wiring/context.ts'
 import { buildChainedChatCommandFilter } from '@neutronai/gateway/boot-helpers.ts'
@@ -221,6 +222,7 @@ import { buildOpenAgentProfileBackend } from './agent-profile-backend.ts'
 // only user and is already authed at the HTTP start-token/cookie layer, so the
 // app-bearer (`dev:<owner>`) is accepted directly. No feature flag, single path.
 import { createAppWsAuthResolver } from '@neutronai/channels/adapters/app-ws/auth.ts'
+import { isLoopbackBindHost } from '@neutronai/gateway/boot-bind-policy.ts'
 import type { AppWsAuthResolver } from '@neutronai/channels/adapters/app-ws/auth.ts'
 import { DocStore } from '@neutronai/gateway/http/doc-store.ts'
 import { createAppDocsSurface } from '@neutronai/gateway/http/app-docs-surface.ts'
@@ -585,6 +587,17 @@ export function buildOpenGraphComposer(
     // Single-owner: the frozen instance handle IS the boot slug.
     const internal_handle = project_slug
     const instanceInfo = resolveOpenInstanceInfo({ project_slug, owner_home, env })
+
+    // S2 (b) — the BIND HOST decides whether the predictable dev-bypass bearer
+    // (`dev:owner`) is honored. A LOOPBACK bind (127.0.0.1 dogfood) keeps today's
+    // ergonomics byte-for-byte (dev:owner + bypass + Origin-less native clients).
+    // A WIDE (non-loopback) bind REFUSES the predictable bearer — the ONLY owner
+    // credential it then accepts is the random per-boot `appWsToken`, and
+    // Origin-less clients must present it too (no `dev:owner` from the network).
+    // Resolved from the SAME source as the gateway bind (config.host, env fallback
+    // for composer-direct tests — both default 127.0.0.1).
+    const bindHost = options.config?.host ?? env['NEUTRON_HOST'] ?? '127.0.0.1'
+    const bindIsLoopback = isLoopbackBindHost(bindHost)
 
     // P1-5 (lift audit § P1-5) — native Claude Code SKILL.md discovery. Materialize
     // the bundled skill packs (`impeccable` + design sub-skills, `agent-browser`,
@@ -1103,11 +1116,31 @@ export function buildOpenGraphComposer(
 
     // ── Single-owner session + first-prompt-on-connect ─────────────────────
     // The cookie secret is the single shared HMAC secret for both the session
-    // cookie AND the local start-token. open/server.ts guarantees it is set
-    // (it generates an ephemeral one when unset), but default defensively so
-    // the composer never throws on a missing secret.
-    const cookieSecret =
-      env['NEUTRON_ONBOARDING_CHAT_COOKIE_SECRET'] ?? `open-ephemeral-${internal_handle}`
+    // cookie AND the local start-token. open/server.ts guarantees it is set (it
+    // derives a persisted per-install RANDOM secret when the operator sets
+    // none). S2 (c) — FAIL LOUD on a missing secret; NEVER fall back to a
+    // guessable constant (the old `open-ephemeral-<slug>` string let anyone who
+    // knew the slug forge the owner cookie). Reaching here without the secret is
+    // a wiring bug we surface, not one we silently paper over with a weak key.
+    const cookieSecret = env['NEUTRON_ONBOARDING_CHAT_COOKIE_SECRET']
+    if (cookieSecret === undefined || cookieSecret.length === 0) {
+      throw new Error(
+        'NEUTRON_ONBOARDING_CHAT_COOKIE_SECRET is unset — refusing to sign owner ' +
+          'sessions with a predictable fallback. Set it in .env, or boot via ' +
+          'open/server.ts which derives a persisted per-install secret.',
+      )
+    }
+    // S2 (c) — enforce the consumer's ≥16-char high-entropy floor
+    // (cookie-user-claim.ts) on an OPERATOR-provided secret; FAIL LOUD on a weak
+    // one rather than sign owner sessions with a guessable key. The server-
+    // derived secret is 48 hex chars, so the normal path never trips this.
+    if (cookieSecret.length < MIN_COOKIE_SECRET_LEN) {
+      throw new Error(
+        `NEUTRON_ONBOARDING_CHAT_COOKIE_SECRET is too short (${cookieSecret.length} < ` +
+          `${MIN_COOKIE_SECRET_LEN} chars) — refusing to sign owner sessions with a weak ` +
+          `secret. Use a high-entropy value (e.g. 32+ random hex chars).`,
+      )
+    }
     const startTokenAuth = buildLocalStartTokenAuth(cookieSecret)
 
     // S0 security quick-patch (b) — per-boot app-ws token. The React client's
@@ -1690,12 +1723,18 @@ export function buildOpenGraphComposer(
     // legitimate identity — the owner — so wrap the resolver to REJECT any
     // resolved user_id that isn't `OWNER_USER_ID`. This keeps Path A's
     // localhost-trust ergonomics (the React client's default `dev:<owner>`
-    // bearer still works) while closing the arbitrary-bearer hole. (A box bound
-    // to a non-loopback `NEUTRON_HOST` is still trusting the owner-id constant
-    // by design — that is the operator's Path A choice — but no OTHER identity
-    // is ever accepted.)
+    // bearer still works) while closing the arbitrary-bearer hole.
+    //
+    // S2 (b) — the predictable-bearer BYPASS is now gated on a LOOPBACK bind.
+    // On loopback (the 127.0.0.1 dogfood) `dev:owner` works exactly as before.
+    // On a WIDE bind the base resolver is built WITHOUT bypass, so `dev:owner`
+    // (and any other predictable bearer) is REJECTED; the only owner credential
+    // accepted is the random per-boot `appWsToken` checked below — so merely
+    // visiting the box over the network can no longer drive the agent. (A real
+    // operator-configured, persistent owner credential is S1's per-install work;
+    // until then the wide-bind credential is this unguessable per-boot token.)
     const appOwnerAuth: AppWsAuthResolver = ((): AppWsAuthResolver => {
-      const base = createAppWsAuthResolver({ project_slug, bypass: true })
+      const base = createAppWsAuthResolver({ project_slug, bypass: bindIsLoopback })
       return {
         mode: base.mode,
         resolve: async (token) => {
@@ -1705,7 +1744,10 @@ export function buildOpenGraphComposer(
           // for browser origins, but the resolver must ALSO map it to the owner
           // identity so both the WS and the /api/app/* bearer path accept it.
           if (constantTimeEqual(token, appWsToken)) {
-            return { user_id: OWNER_USER_ID, project_slug, mode: base.mode as 'dev-bypass' }
+            // The per-boot token IS the owner credential (works on loopback AND
+            // wide binds). `mode` is log-only; report 'dev-bypass' (base.mode is
+            // 'unconfigured' on a wide bind, which would misreport this accept).
+            return { user_id: OWNER_USER_ID, project_slug, mode: 'dev-bypass' }
           }
           const resolved = await base.resolve(token)
           if ('code' in resolved) return resolved
@@ -2634,6 +2676,7 @@ export function buildOpenGraphComposer(
       chatCommandFilter,
       appOwnerAuth,
       appWsToken,
+      bindIsLoopback,
       landing,
       emitProjectsChangedIfChanged,
       buildProjectsChangedFrame,

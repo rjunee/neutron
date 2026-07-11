@@ -234,6 +234,12 @@ export const bootEnvSchema = z.object({
   NEUTRON_DEV_AUTH: optStr,
   NEUTRON_SKIP_GBRAIN: optStr,
   NEUTRON_DISABLE_AMBIENT_CLAUDE_AUTH: optStr,
+  // S2 wide-bind guard — dev-auth BYPASS vars, snapshotted RAW so the guard
+  // reads the SAME env the config was resolved from (never live process.env,
+  // which can drift between resolve and boot). NEUTRON_DEV_AUTH is above.
+  NEUTRON_APP_WS_BYPASS: optStr,
+  NEUTRON_APP_WS_DEV_SECRET: optStr,
+  NEUTRON_E2E_DEV_SECRET: optStr,
   // secrets (optional passthrough)
   OPENAI_API_KEY: optStr,
   OPENAI_API_TOKEN: optStr,
@@ -323,6 +329,15 @@ export interface BootConfig {
   readonly devAuth: boolean
   readonly skipGbrain: boolean
   readonly disableAmbientClaudeAuth: boolean
+
+  /**
+   * S2 wide-bind guard input — the RAW dev-auth BYPASS env values captured at
+   * resolution time, so `assertWideBindPolicy` reads the SAME snapshot the rest
+   * of BootConfig came from (NOT live `process.env`, which can drift between
+   * resolve and boot — the single-snapshot contract). Keyed by env-var name so
+   * it is a drop-in `BindEnvBag` for the guard.
+   */
+  readonly devBypassEnv: Readonly<Record<string, string | undefined>>
 
   // timezone ---------------------------------------------------------------
   readonly tz: string | undefined
@@ -417,6 +432,14 @@ export function resolveBootConfig(env: EnvBag = process.env): BootConfig {
       disableAmbientRaw.length > 0 &&
       disableAmbientRaw !== '0' &&
       disableAmbientRaw !== 'false', // ambient-claude-auth.ts:96
+
+    // S2 wide-bind guard snapshot — raw values, frozen with the rest of config.
+    devBypassEnv: Object.freeze({
+      NEUTRON_DEV_AUTH: e.NEUTRON_DEV_AUTH,
+      NEUTRON_APP_WS_BYPASS: e.NEUTRON_APP_WS_BYPASS,
+      NEUTRON_APP_WS_DEV_SECRET: e.NEUTRON_APP_WS_DEV_SECRET,
+      NEUTRON_E2E_DEV_SECRET: e.NEUTRON_E2E_DEV_SECRET,
+    }),
 
     tz: e.TZ,
 

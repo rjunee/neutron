@@ -65,35 +65,117 @@ import { constantTimeEqual } from '@neutronai/runtime/constant-time-equal.ts'
 export type { ChatCommandFilter, ChatCommandFilterResult }
 
 /**
- * S0 security quick-patch (a) — same-origin guard for the `/ws/app/chat`
- * upgrade. A browser ALWAYS sends an `Origin` header on the WebSocket
- * handshake, and a WS upgrade is NOT subject to CORS — so without this check
- * ANY web page the owner merely visits could open
+ * Origin guard for the `/ws/app/chat` upgrade (S0 (a) same-origin core, S2 (a)
+ * configured-origin allow-list). A browser ALWAYS sends an `Origin` header on
+ * the WebSocket handshake, and a WS upgrade is NOT subject to CORS — so without
+ * this check ANY web page the owner merely visits could open
  * `ws://127.0.0.1:7800/ws/app/chat?token=…` against the loopback gateway.
  *
- * Returns `true` when the request may proceed:
+ * Comparison is by CANONICAL origin (`URL.origin` = scheme + host + port), NOT
+ * host-only: configuring `https://app.example` must NOT authorize
+ * `http://app.example` (network-injectable) or `ftp://app.example` or a
+ * different port. Returns `true` when the request may proceed:
  *   - `Origin` ABSENT (native Expo / CLI clients send none) → allowed; those
  *     authenticate by bearer alone.
- *   - `Origin` PRESENT and its host equals the request's own `Host` header
- *     (the owner's served page) → allowed.
- *   - `Origin` PRESENT but cross-origin (or opaque `"null"`, or the `Host`
- *     header is missing) → REJECTED.
+ *   - `Origin` PRESENT and its canonical origin is in `allowedWebOrigins` (the
+ *     configured owner web origin(s) — `NEUTRON_WEB_APP_BASE` / landing origin,
+ *     for a reverse-proxied deploy served from a different origin than the
+ *     gateway's own) → allowed.
+ *   - `Origin` PRESENT and its canonical origin equals the server's OWN
+ *     canonical origin (`selfOrigin`, derived from the request scheme + `Host`)
+ *     → allowed.
+ *   - `Origin` PRESENT but cross-origin, a scheme/port downgrade, opaque
+ *     (`"null"`), or `selfOrigin` unknown with no configured match → REJECTED.
  *
- * The `Host` value is not a secret, so a plain equality is sufficient (and the
- * length pre-check inside `constantTimeEqual` would leak nothing meaningful
- * either way); we use a strict `===` for clarity.
+ * The policy keys on the `Origin` being present-and-cross-origin, NOT on its
+ * absence — a same-origin/native client still connects.
  */
-export function appWsOriginAllowed(origin: string | null, host: string | null): boolean {
+export function appWsOriginAllowed(
+  origin: string | null,
+  selfOrigin: string | null,
+  allowedWebOrigins: readonly string[] = [],
+): boolean {
   if (origin === null) return true
-  if (host === null) return false
-  let originHost: string
+  let browserOrigin: string
   try {
-    originHost = new URL(origin).host
+    browserOrigin = new URL(origin).origin
   } catch {
-    // Opaque / malformed origin (e.g. a sandboxed iframe's `Origin: null`).
+    // Malformed origin.
     return false
   }
-  return originHost.length > 0 && originHost === host
+  // `URL.origin` is the string `"null"` for an opaque origin (sandboxed iframe
+  // `Origin: null`) or any non-hierarchical scheme — reject those outright.
+  if (browserOrigin.length === 0 || browserOrigin === 'null') return false
+  // A configured owner web origin is allowed even when it differs from the
+  // server's own origin (reverse-proxied deploy). CANONICAL match, so a scheme
+  // downgrade / wrong port never inherits the configured origin's authority.
+  // Fail-closed: an empty/unconfigured list widens nothing.
+  if (allowedWebOrigins.includes(browserOrigin)) return true
+  // Same-origin: the owner's served page (Origin === the server's own origin on
+  // the actual bound scheme + host + port).
+  if (selfOrigin !== null && browserOrigin === selfOrigin) return true
+  return false
+}
+
+/**
+ * S2 (a) — normalize each configured owner web origin (raw `NEUTRON_WEB_APP_BASE`
+ * / landing-origin base URL strings) to its CANONICAL `URL.origin` (scheme +
+ * host + port) so {@link appWsOriginAllowed} matches a browser `Origin` exactly
+ * — never scheme- or port-blind. Empty / malformed / opaque entries are dropped
+ * (they don't widen the allow-set — fail-closed), never a throw at boot.
+ */
+export function normalizeWebOrigins(bases: readonly string[]): string[] {
+  const origins: string[] = []
+  for (const base of bases) {
+    if (typeof base !== 'string' || base.trim().length === 0) continue
+    try {
+      const o = new URL(base.trim()).origin
+      if (o.length > 0 && o !== 'null') origins.push(o)
+    } catch {
+      /* malformed configured origin — ignore, don't widen the allow-set */
+    }
+  }
+  return origins
+}
+
+/**
+ * The server's OWN CANONICAL origin for a request (via `URL.origin`, so a
+ * default port is stripped and the host is lower-cased — exactly like
+ * {@link normalizeWebOrigins}), used for the same-origin check. Without this a
+ * legit `Host: app.example.test:443` on HTTPS would build `https://…:443` and
+ * never equal the browser's port-stripped `Origin`.
+ *
+ * Scheme resolution: prefer `X-Forwarded-Proto` (only a real reverse proxy can
+ * set it — a browser cannot add headers to a WS handshake), take its FIRST
+ * comma-separated token, and TRUST it only when it is `http`/`https`; otherwise
+ * fall back to the actual request (socket) scheme, else `http`. `null` when the
+ * `Host` header is absent (no reliable self-origin).
+ */
+export function requestSelfOrigin(req: Request): string | null {
+  const host = req.headers.get('host')
+  if (host === null || host.length === 0) return null
+  let socketScheme = 'http'
+  try {
+    socketScheme = new URL(req.url).protocol.replace(/:$/, '').toLowerCase()
+  } catch {
+    /* keep the http default */
+  }
+  const fwd = req.headers.get('x-forwarded-proto')
+  const fwdFirst = fwd !== null ? (fwd.split(',')[0] ?? '').trim().toLowerCase() : ''
+  const scheme =
+    fwdFirst === 'http' || fwdFirst === 'https'
+      ? fwdFirst
+      : socketScheme === 'http' || socketScheme === 'https'
+        ? socketScheme
+        : 'http'
+  try {
+    const o = new URL(`${scheme}://${host}`).origin
+    return o !== 'null' && o.length > 0 ? o : null
+  } catch {
+    // Malformed Host — no reliable self-origin (still safe: configured origins
+    // remain matchable, and a missing self-origin only tightens the check).
+    return null
+  }
 }
 
 export interface AppWsSocketData {
@@ -171,6 +253,26 @@ export interface CreateAppWsSurfaceOptions {
    */
   app_ws_token?: string
   /**
+   * S2 (b) — require the per-boot `app_ws_token` even from an ORIGIN-LESS
+   * (native) client. On a LOOPBACK bind this stays `false` so native dev clients
+   * authenticate by bearer alone (today's ergonomics). On a WIDE bind it is set
+   * `true` so an Origin-less client on the network can NOT ride the predictable
+   * `dev:owner` bearer — it must present the real per-boot token like the web
+   * client does. No effect when `app_ws_token` is unset (no token gate at all).
+   */
+  require_token_without_origin?: boolean
+  /**
+   * S2 (a) — configured owner web origin(s) (e.g. `NEUTRON_WEB_APP_BASE` /
+   * landing origin) whose BROWSER upgrades are allowed IN ADDITION to a strict
+   * same-origin (`Origin` host === `Host`). A reverse-proxied deploy serves the
+   * web app from a different origin than the gateway's own Host, so a pure
+   * same-origin check would reject the legitimate owner page. Raw base URL
+   * strings; the surface extracts each `host` ONCE at construction via
+   * {@link normalizeWebOriginHosts}. Absent / empty ⇒ same-origin-only (the S0
+   * behavior — a loopback dogfood box with `NEUTRON_WEB_APP_BASE` unset).
+   */
+  allowed_web_origins?: readonly string[]
+  /**
    * Optional pre-dispatch chat-command filter. When supplied, the
    * surface checks every inbound (HTTP + WS) against the filter
    * BEFORE calling `adapter.dispatchInbound`. A matching command
@@ -216,6 +318,11 @@ export function createAppWsSurface(opts: CreateAppWsSurfaceOptions): AppWsSurfac
   const chat_command_filter = opts.chat_command_filter
   const project_slug = opts.project_slug
   const app_ws_token = opts.app_ws_token
+  // S2 (b) — on a WIDE bind, an Origin-less client must ALSO present the token.
+  const requireTokenWithoutOrigin = opts.require_token_without_origin ?? false
+  // S2 (a) — resolve the configured owner web origin(s) to canonical origins
+  // ONCE (empty on a loopback dogfood box), reused on every upgrade check below.
+  const allowedWebOrigins = normalizeWebOrigins(opts.allowed_web_origins ?? [])
   const on_session_open = opts.on_session_open
   const on_button_choice = opts.on_button_choice
 
@@ -235,7 +342,7 @@ export function createAppWsSurface(opts: CreateAppWsSurfaceOptions): AppWsSurfac
         // client (no Origin) is unaffected. Rejected BEFORE any token work so a
         // malicious page never even reaches the resolver.
         const origin = req.headers.get('origin')
-        if (!appWsOriginAllowed(origin, req.headers.get('host'))) {
+        if (!appWsOriginAllowed(origin, requestSelfOrigin(req), allowedWebOrigins)) {
           return new Response(
             JSON.stringify({
               ok: false,
@@ -246,15 +353,17 @@ export function createAppWsSurface(opts: CreateAppWsSurfaceOptions): AppWsSurfac
           )
         }
         const token = url.searchParams.get('token') ?? ''
-        // S0 (b) — per-boot token gate for BROWSER upgrades. When a per-boot
-        // token is configured, an upgrade carrying an `Origin` (a browser) MUST
-        // present exactly it — the guessable `dev:<owner>` constant is no longer
-        // accepted from the web. Native clients (no Origin) skip this and fall
-        // through to the resolver's bearer check. Constant-time compare so a
-        // token guess can't be narrowed by response timing.
+        // S0 (b) / S2 (b) — per-boot token gate. When a per-boot token is
+        // configured, an upgrade carrying an `Origin` (a browser) MUST present
+        // exactly it — the guessable `dev:<owner>` constant is no longer accepted
+        // from the web. On a LOOPBACK bind, Origin-less native clients skip this
+        // and fall through to the resolver's bearer check (dev ergonomics). On a
+        // WIDE bind (`requireTokenWithoutOrigin`), Origin-less clients on the
+        // network must ALSO present the token — they cannot ride `dev:owner`.
+        // Constant-time compare so a token guess can't be narrowed by timing.
         if (
           app_ws_token !== undefined &&
-          origin !== null &&
+          (origin !== null || requireTokenWithoutOrigin) &&
           !constantTimeEqual(token, app_ws_token)
         ) {
           return new Response(

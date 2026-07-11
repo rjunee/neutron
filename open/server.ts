@@ -24,13 +24,13 @@
  * `gateway/index.ts` directly via systemd and never reaches here.
  */
 
-import { randomBytes } from 'node:crypto'
-
 import { boot, loadGraphComposerFromEnv, resolveOwnerSlugFromConfig } from '@neutronai/gateway/index.ts'
 import type { BootHandle } from '@neutronai/gateway/index.ts'
 import { resolveBootConfig, envShimFromBootConfig } from '@neutronai/config/index.ts'
+import { resolveNeutronHome } from '@neutronai/migrations/db-path.ts'
 
 import { buildOpenGraphComposer } from './composer.ts'
+import { resolvePersistedCookieSecret } from './session-cookie-secret.ts'
 
 /**
  * Boot the single-owner Open server. Returns the live `BootHandle` so
@@ -54,16 +54,19 @@ export async function startOpenServer(): Promise<BootHandle> {
     return boot({ composer: injected, config: resolveBootConfig(env) })
   }
 
-  // Ephemeral cookie-secret default must land on env BEFORE we freeze config so
-  // the generated value flows into both the frozen config and the shim below.
+  // Cookie-secret default must land on env BEFORE we freeze config so the
+  // resolved value flows into both the frozen config and the shim below.
+  // S2 (c) — when the operator sets none, derive a per-INSTALL RANDOM secret
+  // PERSISTED under NEUTRON_HOME (stable across restarts, never a guessable
+  // constant). The old ephemeral-per-boot value reset every owner session on
+  // restart; a persisted random keeps sessions AND stays unforgeable. The
+  // composer FAILS LOUD if this is still unset (no predictable fallback).
   if (
     env['NEUTRON_ONBOARDING_CHAT_COOKIE_SECRET'] === undefined ||
     env['NEUTRON_ONBOARDING_CHAT_COOKIE_SECRET'] === ''
   ) {
-    env['NEUTRON_ONBOARDING_CHAT_COOKIE_SECRET'] = randomBytes(24).toString('hex')
-    console.warn(
-      '[open] NEUTRON_ONBOARDING_CHAT_COOKIE_SECRET unset — generated an ephemeral ' +
-        'secret; the owner session resets on restart. Set it in .env to persist sessions.',
+    env['NEUTRON_ONBOARDING_CHAT_COOKIE_SECRET'] = resolvePersistedCookieSecret(
+      resolveNeutronHome(env),
     )
   }
 
