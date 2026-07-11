@@ -466,23 +466,151 @@ migrate_flat_layout() {
   done
 }
 
+# S3(b): force a secrets file to 0600 and FAIL CLOSED if it can't be secured.
+# `.env` holds live secrets (cookie secret, OAuth token, API keys), so a chmod
+# that FAILS — or one that "succeeds" but doesn't stick (an exotic FS/mount) —
+# must ABORT the install, not be swallowed while we go on to persist more
+# secrets and report success. A perms guarantee that discards its own failure
+# is worthless. This is the single chokepoint every `.env` write funnels
+# through (mirrors the runtime writer `install-token-env.ts:persistOauthTokenToEnv`,
+# which force-chmods 0600 on every write because writeFileSync's mode only
+# applies on CREATE — here we additionally VERIFY the result).
+secure_secret_file() {
+  _sf=$1
+  if ! chmod 600 "$_sf" 2>/dev/null; then
+    die "refusing to continue: could not secure $_sf to 0600 — secrets would be left readable by other users. Fix its ownership/filesystem/mount and re-run."
+  fi
+  # MANDATORY positive verify — chmod's exit code alone is UNTRUSTWORTHY (a
+  # no-op / shimmed chmod exits 0 without changing anything), so the perms
+  # guarantee MUST come from a stat READBACK. GNU stat is `-c %a`, BSD/macOS is
+  # `-f %Lp`; both print an octal mode (e.g. `600`). We require a SUCCESSFUL
+  # stat returning a clean octal that equals 600 — and `die` otherwise:
+  #   - stat failed / not on PATH / returned empty → we CANNOT verify → refuse
+  #     (an unverifiable host is exactly when we must NOT trust chmod).
+  #   - non-octal / unrecognized output → refuse (can't confirm the mode).
+  #   - a clean octal that isn't 600 → the chmod did not stick → refuse.
+  # Linux + macOS both ship a working stat, so the happy path is unaffected;
+  # only a genuinely broken / hostile PATH trips this.
+  _mode=$(stat -c '%a' "$_sf" 2>/dev/null || stat -f '%Lp' "$_sf" 2>/dev/null || printf '')
+  case "$_mode" in
+    600|0600) : ;;         # POSITIVELY verified locked — the only pass outcome
+    '') die "refusing to continue: cannot verify $_sf is 0600 — 'stat' is unavailable or failed on this host, so the permission cannot be confirmed. Refusing to persist secrets on an unverifiable system." ;;
+    *[!0-7]*) die "refusing to continue: cannot verify $_sf is 0600 — 'stat' returned an unrecognized mode '$_mode'. Refusing to persist secrets without a confirmed permission." ;;
+    *) die "refusing to continue: $_sf is mode $_mode after chmod 600 (permissions did not stick — exotic filesystem/mount?). Secrets would be left readable by other users." ;;
+  esac
+}
+
+# mktemp a 0600 temp file NEXT TO the target (`_dir`), so a later `mv` is a
+# same-filesystem atomic RENAME that preserves the temp's 0600 mode — never a
+# cross-FS copy that would recreate the destination at the umask-derived mode.
+# mktemp itself always creates a fresh, exclusive, 0600 file (it O_EXCL-creates a
+# random name, so it NEVER follows or overwrites a pre-existing path), and we set
+# `umask 077` around every secret write besides. Prints the temp path.
+#
+# FAIL CLOSED if mktemp is unavailable: the old fallback (`: > .neutron-env.tmp.$$`)
+# used a PREDICTABLE name with no exclusive creation, so an attacker who
+# pre-planted that path as a symlink would have the installer follow it and
+# write the .env secrets to an attacker-chosen target. mktemp is universally
+# present on Linux/macOS, so its failure is exotic — refusing to write secrets
+# is the only safe response. (`set -C`/noclobber does NOT stop a symlink-follow,
+# so there is no safe predictable-name fallback.)
+#
+# On failure we print nothing and return non-zero — we do NOT `die` here because
+# this runs inside `$(...)`, where an `exit` only leaves the subshell and the
+# parent would sail on with an empty path. Every caller MUST be `$(mk_secret_tmp
+# …) || die …` so the ABORT happens in the parent shell.
+mk_secret_tmp() {
+  _dir=$1
+  mktemp "$_dir/.neutron-env.XXXXXX" 2>/dev/null || return 1
+}
+
+# S3(b) — a secrets file destination must NEVER be a SYMLINK. A 0600 guarantee
+# is worthless if the write FOLLOWS a planted symlink to an attacker-chosen
+# target (the secret lands there instead, and the attacker made the link so they
+# can read it). `[ -L "$1" ]` is true even for a DANGLING symlink (one whose
+# target does not exist yet) — which the plain `[ -f ]` existence checks treat
+# as "missing" and would blindly create/overwrite through. A legitimate .env /
+# secret file is always a regular file, so rejecting a symlink outright is both
+# correct and the simplest safe rule. Called at the TOP of every secret writer,
+# BEFORE any create/append/copy. Fails closed (die).
+assert_env_not_symlink() {
+  if [ -L "$1" ]; then
+    die "refusing to write secrets: $1 is a symlink — a planted symlink would redirect secrets to an attacker-chosen file; remove it and re-run."
+  fi
+}
+
 # Pin KEY=value in a dotenv file: replace any existing assignment (commented or
 # not, export or not), else append. Used to lock NEUTRON_HOME to the resolved
 # data dir so the server (which auto-loads .env) opens the SAME dir the installer
 # migrated — the install↔server agreement the shared-resolver parity protects.
+#
+# S3(b) — secrets are born 0600 and stay that way, and are NEVER written
+# through a symlink. `assert_env_not_symlink` rejects a planted (even dangling)
+# `.env` symlink up front. Then EVERY case — create, append, key-replace — takes
+# the SAME path: assemble the new content in a 0600 same-dir mktemp under
+# `umask 077` and ATOMICALLY `mv` it over the destination. `mv` REPLACES the
+# destination inode rather than following/appending through it, so there is no
+# create-via-`: >` or append-via-`>>` that could follow a symlink, and a failure
+# leaves the OLD secured file (or nothing) — never a new exposed one.
+# `secure_secret_file` then re-asserts + VERIFIES 0600 and FAILS CLOSED.
 persist_env_var() {
   _ef=$1
   _k=$2
   _v=$3
-  [ -f "$_ef" ] || : > "$_ef"
-  if grep -qE "^[[:space:]]*#?[[:space:]]*(export[[:space:]]+)?${_k}=" "$_ef" 2>/dev/null; then
-    _tmp=$(mktemp 2>/dev/null || printf '%s\n' "$_ef.tmp.$$")
+  assert_env_not_symlink "$_ef"
+  _om=$(umask)
+  umask 077
+  _tmp=$(mk_secret_tmp "$(dirname "$_ef")") \
+    || { umask "$_om"; die "could not create a secure temp file for .env — refusing to write secrets to a predictable, symlink-followable path"; }
+  # Carry over the existing regular-file content minus any prior assignment of
+  # this key (commented or not), then append the new value. A missing file → the
+  # temp starts empty. This unifies replace + append + create through mv.
+  if [ -f "$_ef" ]; then
     grep -vE "^[[:space:]]*#?[[:space:]]*(export[[:space:]]+)?${_k}=" "$_ef" > "$_tmp" 2>/dev/null || true
-    printf '%s=%s\n' "$_k" "$_v" >> "$_tmp"
-    mv "$_tmp" "$_ef"
-  else
-    printf '%s=%s\n' "$_k" "$_v" >> "$_ef"
   fi
+  printf '%s=%s\n' "$_k" "$_v" >> "$_tmp"
+  mv "$_tmp" "$_ef"
+  umask "$_om"
+  secure_secret_file "$_ef"
+}
+
+# Ensure `.env` exists in `_dir` — copy it from `.env.example` if missing,
+# NEVER clobber an existing one — then S3(b) force it to 0600 either way,
+# FAILING CLOSED if it can't be secured (see `secure_secret_file`). `.env`
+# holds secrets (cookie secret, OAuth token, API keys), so it must never be
+# left group/world-readable under a loose umask; the `umask 077` around the
+# copy means a fresh `.env` is born 0600 (never a 0644 window), and tightening
+# even the "already exists" reuse path mirrors `ensureKey`'s force-chmod-on-
+# reuse in `auth/secrets-store.ts` (a keyfile copied in at 0644 gets tightened
+# too). Pulled out as its own function so the `NEUTRON_INSTALL_PRINT_ENV_PERMS`
+# test seam below can exercise it without running the rest of the installer.
+ensure_env_file() {
+  _dir=$1
+  _ef="$_dir/.env"
+  _example="$_dir/.env.example"
+  # S3(b) — reject a planted (even DANGLING) `.env` symlink BEFORE the existence
+  # check: `[ -f ]` treats a dangling link as "missing" and would `cp` over it,
+  # overwriting the link's target (an attacker-chosen file) and then chmodding
+  # THAT. `assert_env_not_symlink` fails closed on any symlink here.
+  assert_env_not_symlink "$_ef"
+  if [ -f "$_ef" ]; then
+    info ".env already exists — leaving it untouched"
+  elif [ -f "$_example" ]; then
+    # Copy into a 0600 same-dir temp, then atomically `mv` over the destination
+    # (mv replaces rather than following a link) — symmetric with persist_env_var.
+    _om=$(umask)
+    umask 077
+    _tmp=$(mk_secret_tmp "$_dir") \
+      || { umask "$_om"; die "could not create a secure temp file for .env — refusing to write secrets to a predictable, symlink-followable path"; }
+    cp "$_example" "$_tmp"
+    mv "$_tmp" "$_ef"
+    umask "$_om"
+    info "wrote .env from .env.example (every value has a default; edit what you need)"
+  else
+    warn ".env.example missing — skipping .env creation"
+    return 0
+  fi
+  secure_secret_file "$_ef"
 }
 
 # Generate a random hex secret — 48 hex chars (24 bytes), matching the server's
@@ -897,15 +1025,27 @@ apply_auth_gate() {
 persist_oauth_token_to_env() {
   _ef=$1
   _tok=$2
-  [ -f "$_ef" ] || : > "$_ef"
-  if grep -qE '^[[:space:]]*(export[[:space:]]+)?CLAUDE_CODE_OAUTH_TOKEN=' "$_ef" 2>/dev/null; then
-    _tmp=$(mktemp 2>/dev/null || printf '%s\n' "$_ef.tmp.$$")
+  # S3(b) — the live OAuth token is born 0600 and is NEVER written through a
+  # symlink: reject a planted `.env` symlink up front, then assemble the new
+  # content (existing regular-file lines minus any prior token, plus the new
+  # one) in a 0600 same-dir mktemp under `umask 077` and ATOMICALLY `mv` it over
+  # the destination — mv REPLACES rather than following/appending through a link,
+  # so create + append + replace all share the same symlink-safe path, and a
+  # failure leaves the old secured file (or nothing).
+  assert_env_not_symlink "$_ef"
+  _om=$(umask)
+  umask 077
+  _tmp=$(mk_secret_tmp "$(dirname "$_ef")") \
+    || { umask "$_om"; die "could not create a secure temp file for .env — refusing to write secrets to a predictable, symlink-followable path"; }
+  if [ -f "$_ef" ]; then
     grep -vE '^[[:space:]]*(export[[:space:]]+)?CLAUDE_CODE_OAUTH_TOKEN=' "$_ef" > "$_tmp" 2>/dev/null || true
-    printf 'CLAUDE_CODE_OAUTH_TOKEN=%s\n' "$_tok" >> "$_tmp"
-    mv "$_tmp" "$_ef"
-  else
-    printf 'CLAUDE_CODE_OAUTH_TOKEN=%s\n' "$_tok" >> "$_ef"
   fi
+  printf 'CLAUDE_CODE_OAUTH_TOKEN=%s\n' "$_tok" >> "$_tmp"
+  mv "$_tmp" "$_ef"
+  umask "$_om"
+  # Force + verify 0600 and FAIL CLOSED (abort) if it can't be secured rather
+  # than leave the token readable by other local users.
+  secure_secret_file "$_ef"
 }
 
 # Detect Claude auth state and guide the user HONESTLY, mirroring the Managed
@@ -1119,6 +1259,44 @@ if [ "${NEUTRON_INSTALL_PRINT_CODEX:-}" = "1" ]; then
   exit 0
 fi
 
+# Test seam (harness only) — S3(b): create/repair `.env` in isolation and
+# exit, without bun install / migrations. Lets the unit tests assert `.env`
+# ends up 0600 both on a fresh `.env.example` copy AND when one already
+# existed (the harness stats the file itself; this seam just needs to run the
+# real write path deterministically).
+if [ "${NEUTRON_INSTALL_PRINT_ENV_PERMS:-}" = "1" ]; then
+  _seam_src=${SRC_DIR:-$(pwd)}
+  ensure_env_file "$_seam_src"
+  printf 'env_path=%s\n' "$_seam_src/.env"
+  exit 0
+fi
+
+# Test seam (harness only) — S3(b): exercise the secret REPLACE path
+# (`persist_env_var` → `mk_secret_tmp`) in isolation. The value is a secret, so
+# the temp file must be created SECURELY (exclusive, non-symlink-following). A
+# test shadows `mktemp` to fail here to prove the installer FAILS CLOSED — it
+# aborts before writing the secret and never follows a pre-planted symlink of a
+# predictable name. `NEUTRON_TEST_PERSIST_KEY` names the .env key to persist so
+# the harness can pre-seed it (forcing the replace branch, which is the one that
+# uses the temp file). The `persisted=` line prints only on full success.
+if [ "${NEUTRON_INSTALL_PERSIST_ENV_VAR:-}" = "1" ]; then
+  _seam_src=${SRC_DIR:-$(pwd)}
+  persist_env_var "$_seam_src/.env" "${NEUTRON_TEST_PERSIST_KEY:-NEUTRON_TEST_SECRET}" "replaced-secret-value"
+  printf 'persisted=%s/.env\n' "$_seam_src"
+  exit 0
+fi
+
+# Test seam (harness only) — S3(b): exercise `persist_oauth_token_to_env` (the
+# live-token writer) in isolation, so a test can prove it is symlink-safe too —
+# a planted `.env` symlink must ABORT the write, never redirect the token to an
+# attacker-chosen target. The `token_persisted=` line prints only on success.
+if [ "${NEUTRON_INSTALL_PERSIST_OAUTH:-}" = "1" ]; then
+  _seam_src=${SRC_DIR:-$(pwd)}
+  persist_oauth_token_to_env "$_seam_src/.env" "sk-ant-oat01-seam-token"
+  printf 'token_persisted=%s/.env\n' "$_seam_src"
+  exit 0
+fi
+
 if [ "$MODE" = "local" ]; then
   info "installing in place from existing checkout: $SRC_DIR"
 else
@@ -1179,14 +1357,7 @@ ensure_codex
 ui_phase "2/6" "Configuration"
 
 # ── .env (never clobber an existing one) ─────────────────────────────────────
-if [ -f .env ]; then
-  info ".env already exists — leaving it untouched"
-elif [ -f .env.example ]; then
-  cp .env.example .env
-  info "wrote .env from .env.example (every value has a default; edit what you need)"
-else
-  warn ".env.example missing — skipping .env creation"
-fi
+ensure_env_file "$SRC_DIR"
 
 # Pin a STABLE onboarding-chat cookie secret so the owner's logged-in session
 # survives server restarts (open/server.ts otherwise mints an ephemeral secret
