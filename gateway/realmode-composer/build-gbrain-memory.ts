@@ -53,6 +53,7 @@ import {
   buildOpenAiEmbedderConfig,
   ensureBrainInitialized,
   resolveExistingBrainWidth,
+  isOpenAiEmbeddingWidthSupported,
   resolveGbrainCommand,
   resolveGbrainChildPath,
 } from '@neutronai/gbrain-memory/index.ts'
@@ -168,6 +169,11 @@ export function reconcileEmbedderToBrain(
   if (brainWidth === 'unknown') return null
   if (brainWidth === null || brainWidth === embedder.dimensions) return embedder
   if (embedder.provider === 'openai') {
+    // Validate the (untrusted) persisted width against what OpenAI can actually
+    // serve BEFORE forwarding it — a corrupt/out-of-range width (e.g. 9999, or
+    // <= 0) would make gbrain reject embed/backfill at runtime. Degrade to
+    // keyword+graph (fail-safe) rather than configure a doomed width.
+    if (!isOpenAiEmbeddingWidthSupported(brainWidth)) return null
     const apiKey = embedder.childEnv['OPENAI_API_KEY'] ?? ''
     return buildOpenAiEmbedderConfig(apiKey, brainWidth)
   }
@@ -382,6 +388,11 @@ export function buildGBrainMemory(input: {
     defaultEnvEmbedder?.provider === 'ollama' &&
     reconcileEmbedderToBrain(defaultEnvEmbedder, existingBrainDims) === null
   ) {
+    // A key upgrades in place ONLY if the persisted width is one OpenAI can
+    // serve (1..3072 Matryoshka); a corrupt/out-of-range width can't be served
+    // by either provider, so re-init is the only path.
+    const keyCanUpgrade =
+      typeof existingBrainDims === 'number' && isOpenAiEmbeddingWidthSupported(existingBrainDims)
     const detail =
       existingBrainDims === 'unknown'
         ? 'an unreadable column width (its config predates or omits ' +
@@ -391,9 +402,12 @@ export function buildGBrainMemory(input: {
           'brain to adopt the local fallback.'
         : `a ${existingBrainDims}-dim column (created under an earlier default); the ` +
           'local Ollama fallback (768-dim nomic-embed-text) cannot match it, so semantic ' +
-          'recall stays keyword+graph for this brain. Paste an OpenAI key in Settings to ' +
-          'upgrade it in place at its existing width (no rebuild), or re-init the brain to ' +
-          'use the local fallback.'
+          'recall stays keyword+graph for this brain. ' +
+          (keyCanUpgrade
+            ? 'Paste an OpenAI key in Settings to upgrade it in place at its existing width ' +
+              '(no rebuild), or re-init the brain to use the local fallback.'
+            : 'That width is outside the supported range, so re-init the brain to adopt the ' +
+              'local fallback (or a supported width).')
     console.warn(`[gbrain-memory] project=${input.project_slug}: existing brain has ${detail}`)
   }
 

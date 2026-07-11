@@ -243,6 +243,26 @@ describe('resolveGbrainClientOptions', () => {
       expect(r.childEnv['OPENAI_API_KEY']).toBe('sk-x')
     })
 
+    test('mismatch + openai at a non-preset but IN-RANGE width (e.g. 1280) → rebuilt (Matryoshka is continuous)', () => {
+      // OpenAI text-embedding-3-large truncates to ANY integer 1..3072, so a
+      // legacy 1280-dim column upgrades in place — not dropped.
+      const r = reconcileEmbedderToBrain(buildOpenAiEmbedderConfig('sk-x'), 1280)!
+      expect(r.provider).toBe('openai')
+      expect(r.dimensions).toBe(1280)
+      expect(r.childEnv['GBRAIN_EMBEDDING_DIMENSIONS']).toBe('1280')
+    })
+
+    test('mismatch + openai at an OUT-OF-RANGE width (> 3072) → dropped to null (fail-safe, not a doomed config)', () => {
+      // gbrain would reject a 9999-dim request for text-embedding-3-large at
+      // embed time; degrade to keyword+graph rather than configure it.
+      expect(reconcileEmbedderToBrain(buildOpenAiEmbedderConfig('sk-x'), 9999)).toBeNull()
+    })
+
+    test('mismatch + openai at a corrupt width (<= 0) → dropped to null', () => {
+      expect(reconcileEmbedderToBrain(buildOpenAiEmbedderConfig('sk-x'), 0)).toBeNull()
+      expect(reconcileEmbedderToBrain(buildOpenAiEmbedderConfig('sk-x'), -512)).toBeNull()
+    })
+
     test('mismatch + ollama (fixed width) → dropped to null (keyword+graph)', () => {
       const e = resolveEffectiveEmbedder({ env: {} }) // ollama 768
       expect(reconcileEmbedderToBrain(e, 3072)).toBeNull()

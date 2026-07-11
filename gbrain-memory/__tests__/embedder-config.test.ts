@@ -28,6 +28,7 @@ import {
   buildOpenAiEmbedderConfig,
   probeOllamaHealth,
   redactUrlUserinfo,
+  isOpenAiEmbeddingWidthSupported,
 } from '../embedder-config.ts'
 
 // Silence + capture the opt-in/misconfig warnings.
@@ -313,5 +314,14 @@ describe('redactUrlUserinfo — never log OLLAMA_BASE_URL credentials', () => {
 
   test('a non-URL string is passed through by the regex fallback without throwing', () => {
     expect(redactUrlUserinfo('not a url')).toBe('not a url')
+  })
+})
+
+describe('isOpenAiEmbeddingWidthSupported — validate an untrusted persisted width', () => {
+  test.each([1, 256, 512, 768, 1024, 1280, 1536, 3072])('in-range width %p → supported', (d) => {
+    expect(isOpenAiEmbeddingWidthSupported(d)).toBe(true)
+  })
+  test.each([0, -1, 3073, 9999, 1.5, Number.NaN])('out-of-range/invalid width %p → NOT supported', (d) => {
+    expect(isOpenAiEmbeddingWidthSupported(d)).toBe(false)
   })
 })

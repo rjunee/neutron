@@ -16,6 +16,7 @@ export {
   buildOpenAiEmbedderConfig,
   probeOllamaHealth,
   redactUrlUserinfo,
+  isOpenAiEmbeddingWidthSupported,
   type EmbedderConfig,
   type OllamaHealthCheck,
 } from './embedder-config.ts'

@@ -96,6 +96,20 @@ export interface EmbedderConfig {
 
 /** Cloud: OpenAI `text-embedding-3-large`. Max native width 3072 dims. */
 const OPENAI_EMBED_MODEL = 'text-embedding-3-large'
+/**
+ * `text-embedding-3-large` supports Matryoshka truncation to ANY integer width
+ * in `1..3072` (mirrors gbrain's `isValidOpenAITextEmbedding3Dim`,
+ * `gbrain/src/core/ai/dims.ts`). Used to VALIDATE an untrusted persisted column
+ * width before configuring OpenAI against it — a corrupt/out-of-range width
+ * (e.g. `9999`, or `<= 0`) must NOT be forwarded (gbrain would reject it at
+ * embed time); the reconciler degrades to keyword+graph instead.
+ */
+const OPENAI_TE3_LARGE_MAX_DIMS = 3072
+
+/** True when OpenAI `text-embedding-3-large` can serve embeddings at `dims`. */
+export function isOpenAiEmbeddingWidthSupported(dims: number): boolean {
+  return Number.isInteger(dims) && dims >= 1 && dims <= OPENAI_TE3_LARGE_MAX_DIMS
+}
 
 /** Local/free default: Ollama `nomic-embed-text` at its native 768 dims. */
 const OLLAMA_EMBED_MODEL = 'nomic-embed-text'
