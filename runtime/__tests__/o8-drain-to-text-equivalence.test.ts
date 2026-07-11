@@ -193,13 +193,26 @@ describe('O8 — completion is never misclassified as exhausted (Blocker #1 regr
   })
 })
 
-/** A handle that yields one token then HANGS (never settles) — for abort tests. */
+/** A handle that yields one token then HANGS (never settles) — for abort tests.
+ *  Its iterator is wrapped with a `return()` spy so a test can assert teardown
+ *  return() is NOT invoked on the (non-settled) abort path. */
 function hangingHandle(spy: Spy): SessionHandle {
   const ch = new EventChannel()
   ch.push({ kind: 'token', text: 'partial' })
   // deliberately not closed → the iterator's next pull blocks forever.
+  const base = ch[Symbol.asyncIterator]()
+  const events_: AsyncIterable<Event> = {
+    [Symbol.asyncIterator]: () => ({
+      next: () => base.next(),
+      return: async (): Promise<IteratorResult<Event>> => {
+        spy.returns += 1
+        await base.return?.()
+        return { value: undefined, done: true }
+      },
+    }),
+  }
   return {
-    events: ch,
+    events: events_,
     respondToTool: async () => undefined,
     cancel: async () => {
       spy.cancels += 1
@@ -296,16 +309,67 @@ describe('O8 — teardown is fire-and-forget on a settled turn (Blocker #3)', ()
     expect(state.returnSettled).toBe(false)
   })
 
-  test('an abort (keepAliveExempt=false) does NOT invoke return() on the still-running turn', async () => {
+  test('an abort (keepAliveExempt=false) does NOT invoke return() OR cancel() on the still-running turn', async () => {
     const spy = newSpy()
     const ac = new AbortController()
     const p = drainToOutcome(hangingHandle(spy), { signal: ac.signal, keepAliveExempt: false })
     await Promise.resolve()
     ac.abort()
     await p
-    // Non-settled exit → no teardown return() (leaving the warm turn to settle);
-    // hangingHandle has no return() spy, but cancels staying 0 pins the invariant.
+    // Non-settled exit → NO teardown at all (leave the warm turn to settle). The
+    // hangingHandle now has an explicit return() spy, so a wrongly-invoked return()
+    // is detected (not just cancel()). MUTATION: calling return() on abort reddens
+    // `expect(spy.returns).toBe(0)`.
     expect(spy.cancels).toBe(0)
+    expect(spy.returns).toBe(0)
+  })
+
+  /** A handle whose iterator `return()` throws SYNCHRONOUSLY (not a rejected
+   *  promise) after the given events settle the turn — the exact shape that
+   *  `Promise.resolve(iter.return())` alone would NOT guard. */
+  function syncThrowReturnHandle(events: Event[], spy: Spy): SessionHandle {
+    let i = 0
+    const events_: AsyncIterable<Event> = {
+      [Symbol.asyncIterator]: () => ({
+        next: async (): Promise<IteratorResult<Event>> =>
+          i < events.length ? { value: events[i++]!, done: false } : { value: undefined, done: true },
+        return: (): Promise<IteratorResult<Event>> => {
+          spy.returns += 1
+          throw new Error('sync teardown boom')
+        },
+      }),
+    }
+    return { events: events_, respondToTool: async () => undefined, cancel: async () => undefined, tool_resolution: 'internal' }
+  }
+
+  test('a SYNCHRONOUS return() throw does NOT mask a completed outcome', async () => {
+    const spy = newSpy()
+    // drainToOutcome: the terminal completed outcome survives the teardown throw.
+    const outcome = await drainToOutcome(syncThrowReturnHandle(SEQ_COMPLETION_ONLY, spy))
+    expect(outcome.status).toBe('completed')
+    expect(outcome.text).toBe('ok')
+    expect(spy.returns).toBe(1) // teardown WAS attempted (and threw)…
+    // …and drainToText returns the text rather than throwing 'sync teardown boom'.
+    const text = await drainToText(syncThrowReturnHandle(SEQ_COMPLETION_ONLY, newSpy()))
+    expect(text).toBe('ok')
+  })
+
+  test('a SYNCHRONOUS return() throw does NOT mask a captured error outcome', async () => {
+    const spy = newSpy()
+    const outcome = await drainToOutcome(syncThrowReturnHandle(SEQ_429, spy), { errorPrefix: 'cc-llm-call: ' })
+    // The captured 429 must survive — NOT be replaced by the teardown throw.
+    expect(outcome.status).toBe('error')
+    expect(outcome.error).toBeInstanceOf(SubstrateCallError)
+    expect(outcome.error?.code).toBe('rate_limited')
+    expect(outcome.error?.message).toBe('cc-llm-call: HTTP 429: slow down')
+    expect(spy.returns).toBe(1)
+    // drainToText throws the SubstrateCallError (429), never the teardown error.
+    const thrown = (await drainToText(syncThrowReturnHandle(SEQ_429, newSpy()), { errorPrefix: 'cc-llm-call: ' }).catch(
+      (e: unknown) => e,
+    )) as SubstrateCallError
+    expect(thrown).toBeInstanceOf(SubstrateCallError)
+    expect(thrown.code).toBe('rate_limited')
+    expect(thrown.message).toBe('cc-llm-call: HTTP 429: slow down')
   })
 })
 

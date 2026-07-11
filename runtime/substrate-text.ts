@@ -135,6 +135,25 @@ const errorEventError = (
   })
 
 /**
+ * Fire-and-forget a teardown side effect (`iter.return()` / `handle.cancel()`) so
+ * a teardown failure can NEVER mask the terminal {@link DrainOutcome}. Wrapping
+ * `Promise.resolve(fn())` alone only guards a REJECTING promise — the invocation
+ * `fn()` itself must sit inside the `try` to also swallow a SYNCHRONOUS throw (a
+ * substrate whose `return()`/`cancel()` throws inline). Both must be swallowed:
+ * the completed / error-captured / aborted outcome is what the caller depends on.
+ */
+function swallowTeardown(fn: () => unknown): void {
+  try {
+    const r = fn()
+    if (r !== undefined && r !== null && typeof (r as { then?: unknown }).then === 'function') {
+      void (r as Promise<unknown>).catch(() => undefined)
+    }
+  } catch {
+    /* teardown threw synchronously — ignored; the terminal outcome must survive it */
+  }
+}
+
+/**
  * THE drain loop. Pulls the substrate `Event` stream, accumulating `token` text
  * until a terminal event, and returns a {@link DrainOutcome} — it NEVER throws
  * for a substrate error or abort (that policy lives in {@link drainToText}); it
@@ -160,7 +179,15 @@ export async function drainToOutcome(
 
   // Already aborted before we pulled a single event: never even start iterating.
   if (signal?.aborted === true) {
-    if (keepAliveExempt) await handle.cancel().catch(() => undefined)
+    // Await the cancel so it lands before we return, but guard BOTH a sync throw
+    // and an async rejection — a failed teardown must not mask the aborted outcome.
+    if (keepAliveExempt) {
+      try {
+        await handle.cancel()
+      } catch {
+        /* best-effort teardown — the aborted outcome must survive a cancel throw */
+      }
+    }
     return { text: '', status: 'aborted', error: abortError(abortBeforeDispatchMessage) }
   }
 
@@ -187,7 +214,9 @@ export async function drainToOutcome(
       : undefined
   const onSignalAbort = (): void => {
     aborted = true
-    if (keepAliveExempt) void handle.cancel().catch(() => undefined)
+    // swallowTeardown guards a SYNC throw here too (this runs inside the abort
+    // event dispatch, where an escaping throw would surface as unhandled).
+    if (keepAliveExempt) swallowTeardown(() => handle.cancel())
     resolveAbort?.(ABORTED)
   }
   if (signal !== undefined) signal.addEventListener('abort', onSignalAbort, { once: true })
@@ -268,9 +297,11 @@ export async function drainToOutcome(
     // terminal event, so this `return()`→`cancel()` is a poison-flag no-op and
     // completes immediately. NOT awaited — the poison flag + session release are
     // decided server-side at settle time, so awaiting buys no poison-safety and
-    // only risks a hang on a misbehaving adapter `return()`. A NON-settled exit
+    // only risks a hang on a misbehaving adapter `return()`. `swallowTeardown`
+    // guards BOTH a synchronous `return()` throw and an async rejection so a
+    // teardown failure never masks the terminal outcome. A NON-settled exit
     // (abort / external cancel) is left alone.
-    if (settled) void Promise.resolve(iter.return?.()).catch(() => undefined)
+    if (settled) swallowTeardown(() => iter.return?.())
   }
 }
 
