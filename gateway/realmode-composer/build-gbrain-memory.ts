@@ -236,11 +236,16 @@ export function resolveGbrainClientOptions(input: {
     opts.brainId = env['GBRAIN_BRAIN_ID']
   }
 
-  // Lazy embedder seam: resolve the onboarding key at each spawn and merge the
-  // reconciled embedding env (GBRAIN_EMBEDDING_* + provider auth) over the
-  // static child env. Resolving here — not at composition — is what lets a key
-  // pasted after boot flip on semantic memory at the next memory op. Absent key
-  // → the RA3 default (local Ollama fallback), reconciled to the brain width.
+  // Lazy embedder seam: resolve the onboarding key at each `gbrain serve` SPAWN
+  // and merge the reconciled embedding env (GBRAIN_EMBEDDING_* + provider auth)
+  // over the static child env. Resolving here — not at composition — is what
+  // lets a key pasted after boot flip on cloud embeddings at the next SPAWN.
+  // NOTE: the stdio client holds ONE persistent `gbrain serve` child for the
+  // process, so `resolveDynamicEnv` runs at connect, not per memory op — a key
+  // captured after that child is already connected activates on the next spawn
+  // (process restart, or a reconnect after `close()` re-arms the init guard),
+  // NOT mid-session over the live connection. Absent key → the RA3 default
+  // (local Ollama fallback), reconciled to the brain width.
   if (input.resolveOpenAiKey !== undefined) {
     const resolveOpenAiKey = input.resolveOpenAiKey
     opts.resolveDynamicEnv = async () => {
@@ -269,14 +274,22 @@ export function buildGBrainMemory(input: {
    */
   openaiApiKey?: string | undefined
   /**
-   * LAZY resolver for the onboarding-captured OpenAI key, read at the FIRST
-   * `gbrain serve` spawn (first memory op) rather than at composition. The live
-   * boot path threads this so a key captured during onboarding/admin — always
-   * AFTER the boot-time composition — still flips on semantic embeddings at the
-   * next memory op (the offer's "flips on your next turn" promise). Memoized
-   * below so the init guard and the serve childEnv share ONE store read and
-   * agree on the embedder selected at first spawn. Takes precedence over
-   * `openaiApiKey`.
+   * LAZY resolver for the onboarding-captured OpenAI key, read at each
+   * `gbrain serve` SPAWN rather than at composition. The live boot path threads
+   * this so a key captured during onboarding/admin — always AFTER the boot-time
+   * composition — flips on cloud embeddings at the next SPAWN.
+   *
+   * ACTIVATION CADENCE (accurate as-built): the stdio client holds ONE
+   * persistent `gbrain serve` child for the process, so this resolver runs at
+   * connect time, NOT per memory op. A key stored BEFORE the child first
+   * connects (the common onboarding case — the memory connection is lazy and
+   * usually opens after the key is captured) activates on that first spawn. A
+   * key stored AFTER the child is already connected activates on the next spawn
+   * — a process restart, or a reconnect after `close()` (which re-arms the init
+   * guard, so the one-time `gbrain embed --stale` backfill of pre-key pages runs
+   * then). It does NOT hot-swap the live connection mid-session. Memoized below
+   * so the init guard and the serve childEnv share ONE store read and agree on
+   * the embedder selected at each spawn. Takes precedence over `openaiApiKey`.
    */
   resolveOpenAiKey?: () => Promise<string | undefined>
   /**

@@ -46,8 +46,12 @@ describe('GBrainStdioMcpClient — binary-missing latch', () => {
 
 // RA3 — the init guard re-arms on close() so a key captured AFTER the first
 // connection triggers its (marker-gated, idempotent) `embed --stale` backfill
-// on the next spawn. Without the re-arm, a reconnect would activate the
-// embedder env (resolveDynamicEnv) but never re-run the backfill path.
+// on the NEXT spawn (a reconnect after teardown, or a process restart). Without
+// the re-arm, that reconnect would activate the embedder env (resolveDynamicEnv)
+// but never re-run the backfill path. NB: the client holds ONE persistent
+// `gbrain serve` child, so this is the reconnect boundary — it does NOT hot-swap
+// the embedder mid-session over a still-live connection (documented cadence in
+// build-gbrain-memory.ts:resolveOpenAiKey).
 describe('GBrainStdioMcpClient — init guard re-arms on close (late-key backfill)', () => {
   test('ensureInitialized runs once per connection session, again after close()+reconnect', async () => {
     // `/usr/bin/true` exists (so this is NOT the binary-missing latch) but exits
