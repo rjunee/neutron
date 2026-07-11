@@ -84,4 +84,11 @@ export interface OpenWiringContext {
    * advertises exclusively what its resolver can execute (audit BLOCKER 1).
    */
   toolManifest?: () => ReadonlyArray<{ name: string; description: string; input_schema: unknown }>
+  /**
+   * Test-only `fetch` override for the OpenAI adapter (E2E mocked GPT). Undefined
+   * in production. Mirrors `substrateFactory` — lets a wiring test drive a real GPT
+   * dispatch against a mocked Responses stream (e.g. to assert the request body's
+   * model id honors `ctx.env` overrides).
+   */
+  openaiFetchImpl?: typeof fetch
 }

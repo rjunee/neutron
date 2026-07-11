@@ -203,6 +203,34 @@ describe('wireSubstrates — swappable provider (trident stays Claude Code)', ()
     )
   })
 
+  test('OPERATOR OVERRIDE: NEUTRON_OPENAI_MODEL on ctx.env is the model SENT on the wire (not the ambient global)', async () => {
+    // Regression (audit round 11): the model preference must resolve from the
+    // composer's SELECTED env (ctx.env), not global process.env. Drive a real GPT
+    // dispatch through wireSubstrates + a recording fetch and assert body.model.
+    let sentModel: unknown
+    const recordingFetch = (async (_url: string | URL, init?: RequestInit) => {
+      sentModel = (JSON.parse(String(init?.body)) as { model?: unknown }).model
+      const sse =
+        [
+          { event: 'response.created', data: { type: 'response.created', response: { id: 'r1' } } },
+          { event: 'response.completed', data: { type: 'response.completed', response: { id: 'r1', usage: { input_tokens: 1, output_tokens: 1 } } } },
+        ]
+          .map((f) => `event: ${f.event}\ndata: ${JSON.stringify(f.data)}\n`)
+          .join('\n') + '\n'
+      const stream = new ReadableStream({ start(c) { c.enqueue(new TextEncoder().encode(sse)); c.close() } })
+      return new Response(stream, { status: 200 })
+    }) as unknown as typeof fetch
+    const { ctx } = makeCtx({
+      ...openaiCtxOverrides(),
+      // The composer's selected env carries the override; global process.env does NOT.
+      env: { NEUTRON_OPENAI_MODEL: 'custom-model' } as unknown as NodeJS.ProcessEnv,
+      openaiFetchImpl: recordingFetch,
+    })
+    const w = wireSubstrates(ctx)
+    await drain(w.liveAgentSubstrate!)
+    expect(sentModel).toBe('custom-model')
+  })
+
   test('provider=openai but missing openai pool ⇒ FAILS LOUDLY (terminal error), NEVER silent Anthropic fallback', async () => {
     // An EXPLICIT openai selection must be honored even when incomplete — routing
     // the operator's prompts to Anthropic (the unselected provider) is the exact

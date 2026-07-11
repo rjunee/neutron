@@ -88,9 +88,14 @@ export function wireSubstrates(ctx: OpenWiringContext): WiredSubstrates {
               openai: {
                 pool: ctx.openaiLlmPool!,
                 bindMcpResolver: ctx.bindMcpResolver!,
-                model_preference: getOpenAiModelPreference(),
+                // OPERATOR OVERRIDE (audit round 11) — resolve the model ids from the
+                // COMPOSER'S selected env (`ctx.env`), NOT the ambient global
+                // `process.env`, so `NEUTRON_OPENAI_MODEL` on the instance env is honored.
+                model_preference: getOpenAiModelPreference(ctx.env),
                 // HONEST TOOL MANIFEST (audit BLOCKER 1) — only real MCP tools reach GPT.
                 ...(ctx.toolManifest !== undefined ? { toolManifest: ctx.toolManifest } : {}),
+                // Test-only fetch seam (E2E mocked GPT), mirrors substrateFactory.
+                ...(ctx.openaiFetchImpl !== undefined ? { fetchImpl: ctx.openaiFetchImpl } : {}),
               },
             }
           : {}),

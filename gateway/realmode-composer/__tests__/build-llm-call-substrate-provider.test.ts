@@ -169,15 +169,37 @@ test('provider unset ⇒ BYTE-IDENTICAL anthropic path (CC factory + option bag)
   const events = await drain(sub.start(spec()))
   expect(events.at(-1)?.kind).toBe('completion')
   expect(cc.seen).toHaveLength(1)
-  // The CC option bag is exactly what the composer builds today: scrubbed auth
-  // env with the anthropic api key, credential_identity, user_id — no openai leakage.
   const opts = cc.seen[0]!.opts
-  expect(opts.substrate_instance_id).toBe('cc-agent-x')
-  expect(opts.credential_identity).toBe('anthropic:k')
-  expect(opts.user_id).toBe('owner')
-  expect(opts.env?.['ANTHROPIC_API_KEY']).toBe('sk-ant')
-  // The spec's claude model_preference is passed through UNCHANGED.
+  // BYTE-IDENTICAL (audit round 11) — the COMPLETE ClaudeCodeSubstrateOptions bag
+  // must be EXACTLY what the pre-provider composer built for this input: the
+  // scrubbed auth env (ISSUES #49) + credential_identity + user_id, and NOTHING
+  // else. No cwd/skip_permissions/ephemeral/project_id (none were supplied) and —
+  // critically — no OpenAI-specific key leaking in even though the openai config
+  // was present. `toEqual` on the whole object fails on ANY extra/changed key.
+  expect(opts).toEqual({
+    substrate_instance_id: 'cc-agent-x',
+    env: {
+      ANTHROPIC_API_KEY: 'sk-ant',
+      ANTHROPIC_AUTH_TOKEN: undefined,
+      CLAUDE_CODE_OAUTH_TOKEN: undefined,
+    },
+    credential_identity: 'anthropic:k',
+    user_id: 'owner',
+  })
+  // Belt-and-braces vs `toEqual`'s undefined-key leniency: the EXACT key set (so an
+  // extra `undefined`-valued key can't sneak through) + a leak guard on the names.
+  expect(Object.keys(opts).sort()).toEqual([
+    'credential_identity',
+    'env',
+    'substrate_instance_id',
+    'user_id',
+  ])
+  for (const k of Object.keys(opts)) {
+    expect(k).not.toMatch(/openai|mcp|manifest|model_preference|bind|fetch/i)
+  }
+  // The spec handed to the CC factory is UNCHANGED — claude model_preference, tools.
   expect(cc.seen[0]!.spec.model_preference).toEqual(['claude-opus-4-8'])
+  expect(cc.seen[0]!.spec.tools).toEqual([])
 })
 
 test("provider='anthropic' explicit ⇒ same CC path (no openai config needed)", async () => {
