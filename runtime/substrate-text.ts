@@ -225,16 +225,22 @@ export async function drainToOutcome(
     for (;;) {
       if (aborted) return { text, status: 'aborted', error: abortError(abortMessage) }
 
-      const nextP = iter.next()
+      let nextP: Promise<IteratorResult<Event>> | undefined
       let res: IteratorResult<Event> | typeof ABORTED
       try {
+        // `iter.next()` is INSIDE the try so a SYNCHRONOUS throw from a
+        // misbehaving `next()` is captured identically to an async rejection
+        // (→ `status:'error'`), never rejecting the drain out from under a
+        // capture-mode caller.
+        nextP = iter.next()
         res =
           abortPromise !== undefined
             ? await Promise.race([nextP, abortPromise])
             : await nextP
       } catch (err) {
-        // The iterator threw — an external `cancel()` (timeout timer) or a
-        // transport fault. A concurrent watchdog abort wins the classification.
+        // The pull threw — a SYNC `next()` throw, an async rejection, an external
+        // `cancel()` (timeout timer), or a transport fault. A concurrent watchdog
+        // abort wins the classification.
         if (aborted) return { text, status: 'aborted', error: abortError(abortMessage) }
         return {
           text,
@@ -250,20 +256,25 @@ export async function drainToOutcome(
       }
 
       if (res === ABORTED) {
-        // The watchdog won the race against a pending pull. Swallow that pull's
+        // The watchdog WON the race against a pending pull. Swallow that pull's
         // eventual settle so a late resolve/reject is never an unhandled rejection.
         // We deliberately do NOT call iter.return() here (see `settled`).
-        void nextP.catch(() => undefined)
+        void Promise.resolve(nextP).catch(() => undefined)
         return { text, status: 'aborted', error: abortError(abortMessage) }
       }
 
       if (res.done === true) {
+        // ABORT WINS A TIE: a natural end that raced the signal is still an abort.
         if (aborted) return { text, status: 'aborted', error: abortError(abortMessage) }
         return { text, status: 'exhausted' }
       }
 
       const ev = res.value
       if (ev.kind === 'token') {
+        // A token that won the race is ACCUMULATED even if the signal also fired
+        // this tick — losing partial text would be wrong, and the loop-top
+        // `if (aborted)` guard catches the abort on the very next iteration
+        // (status is never misreported for a non-terminal event).
         if (!firstTokenSeen && ev.text.length > 0) {
           firstTokenSeen = true
           try {
@@ -276,6 +287,11 @@ export async function drainToOutcome(
         continue
       }
       if (ev.kind === 'completion') {
+        // ABORT WINS A TIE (High): a `/dispatch stop` that races an already-ready
+        // `completion` must be reported `aborted`, NOT `completed` — otherwise a
+        // cancelled subprocess is shown as finished. Re-check the signal BEFORE
+        // returning the terminal outcome.
+        if (aborted) return { text, status: 'aborted', error: abortError(abortMessage) }
         // `completion` is the terminal, already-settled event → return the text.
         // (No "keep draining past completion" mode exists: it had no consumer and
         // its only theoretical use — the un-converged email Core — is blocked by
@@ -285,6 +301,8 @@ export async function drainToOutcome(
         return { text, status: 'completed' }
       }
       if (ev.kind === 'error') {
+        // Abort wins a tie against a raced terminal error too.
+        if (aborted) return { text, status: 'aborted', error: abortError(abortMessage) }
         settled = true
         return { text, status: 'error', error: errorEventError(ev, errorPrefix) }
       }

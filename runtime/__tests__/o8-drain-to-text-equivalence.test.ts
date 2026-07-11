@@ -373,6 +373,78 @@ describe('O8 — teardown is fire-and-forget on a settled turn (Blocker #3)', ()
   })
 })
 
+describe('O8 — async-iterator boundary edge cases', () => {
+  /** A handle whose `next()` returns an ALREADY-RESOLVED completion (via
+   *  `Promise.resolve`), so a synchronous `abort()` right after dispatch races a
+   *  ready completion — the `/dispatch stop` tie. */
+  function readyCompletionHandle(spy: Spy): SessionHandle {
+    const events: Event[] = [completion()]
+    let i = 0
+    const events_: AsyncIterable<Event> = {
+      [Symbol.asyncIterator]: () => ({
+        next: (): Promise<IteratorResult<Event>> =>
+          i < events.length
+            ? Promise.resolve({ value: events[i++]!, done: false })
+            : Promise.resolve({ value: undefined, done: true }),
+        return: async (): Promise<IteratorResult<Event>> => {
+          spy.returns += 1
+          return { value: undefined, done: true }
+        },
+      }),
+    }
+    return {
+      events: events_,
+      respondToTool: async () => undefined,
+      cancel: async () => {
+        spy.cancels += 1
+      },
+      tool_resolution: 'internal',
+    }
+  }
+
+  test('HIGH: abort wins a tie against an already-ready completion (never reported completed)', async () => {
+    const spy = newSpy()
+    const ac = new AbortController()
+    const p = drainToOutcome(readyCompletionHandle(spy), { signal: ac.signal, keepAliveExempt: true })
+    ac.abort() // synchronous — races the ready completion; abort must win
+    const outcome = await p
+    // MUTATION: revert the `if (aborted)` re-check before the completion return →
+    // this becomes 'completed' (a cancelled subprocess shown as finished).
+    expect(outcome.status).toBe('aborted')
+    expect(outcome.status).not.toBe('completed')
+  })
+
+  /** A handle whose iterator `next()` throws SYNCHRONOUSLY (not a rejected
+   *  promise) — the exact shape that a `next()` call outside the try would leak. */
+  function syncThrowNextHandle(): SessionHandle {
+    const events_: AsyncIterable<Event> = {
+      [Symbol.asyncIterator]: () => ({
+        next: (): Promise<IteratorResult<Event>> => {
+          throw new Error('sync pull boom')
+        },
+        return: async (): Promise<IteratorResult<Event>> => ({ value: undefined, done: true }),
+      }),
+    }
+    return { events: events_, respondToTool: async () => undefined, cancel: async () => undefined, tool_resolution: 'internal' }
+  }
+
+  test('MEDIUM: a SYNCHRONOUS next() throw is CAPTURED as status error (never rejects the drain)', async () => {
+    // drainToOutcome captures it — same as an async next() rejection.
+    const outcome = await drainToOutcome(syncThrowNextHandle(), { errorPrefix: 'cc-llm-call: ' })
+    expect(outcome.status).toBe('error')
+    expect(outcome.error).toBeInstanceOf(SubstrateCallError)
+    expect(outcome.error?.message).toBe('cc-llm-call: sync pull boom')
+    // drainToText throws the TYPED error, never the raw 'sync pull boom'.
+    // MUTATION: move `iter.next()` outside the try → the drain REJECTS with the raw
+    // Error and this whole test throws before its first assertion.
+    const thrown = (await drainToText(syncThrowNextHandle(), { errorPrefix: 'cc-llm-call: ' }).catch(
+      (e: unknown) => e,
+    )) as SubstrateCallError
+    expect(thrown).toBeInstanceOf(SubstrateCallError)
+    expect(thrown.message).toBe('cc-llm-call: sync pull boom')
+  })
+})
+
 describe('O8 — pre-dispatch abort', () => {
   test('an already-aborted signal returns/throws without pulling an event', async () => {
     const spy = newSpy()
