@@ -221,6 +221,23 @@ do_run() {
   checkpoint_sqlite_dbs
 
   git add -A
+
+  # S3(a) — THE AUTHORITATIVE key-exclusion gate. The pre-emptive .gitignore
+  # write + `ensure_gitignore_excludes_key` are defense-in-depth, but neither
+  # is decisive: Git applies the LAST matching ignore rule, so a NEGATED pair
+  # (`.neutron-aes-key` then `!.neutron-aes-key`) leaves the key UN-ignored and
+  # `git add -A` above will have STAGED it — and a stray `git add -f`, a config
+  # quirk, or any other path could stage it too. So right here, after staging
+  # and BEFORE any commit/push, we (1) actively un-stage the key (corrects a
+  # negated rule) and (2) VERIFY it is absent from the index — dying loudly if
+  # it is still there, no matter WHY. This is the single chokepoint that makes
+  # "the backup never contains the AES key" true independent of gitignore-rule
+  # complexity.
+  git rm --cached --ignore-unmatch -q -- .neutron-aes-key >/dev/null 2>&1 || true
+  if git ls-files --error-unmatch -- .neutron-aes-key >/dev/null 2>&1; then
+    die "refusing to back up: .neutron-aes-key is STAGED in the index at commit time (a negated .gitignore rule / forced add?). Committing or pushing now would leak the AES key. Aborting before commit/push — remove any '!.neutron-aes-key' negation from $DATA_DIR/.gitignore and re-run."
+  fi
+
   if git diff --cached --quiet 2>/dev/null; then
     info "no changes to back up"
   else

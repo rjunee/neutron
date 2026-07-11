@@ -163,4 +163,43 @@ describe('neutron-backup.sh — AES key excluded from the backup bundle (S3a)', 
       rmSync(dataDir, { recursive: true, force: true })
     }
   })
+
+  // Authoritative-gate regression (Codex blocker #3): a NEGATED .gitignore pair
+  // (`.neutron-aes-key` then `!.neutron-aes-key`) leaves the key UN-ignored —
+  // Git applies the LAST matching rule — so `git add -A` STAGES it even though
+  // the exact exclusion line is present and the key started untracked. The
+  // pre-add checks all pass; only the post-add gate (force un-stage + verify
+  // before commit) keeps the key out of the bundle. Assert the produced commit
+  // does NOT contain the key.
+  test('a NEGATED .gitignore rule cannot smuggle the key into the committed bundle', () => {
+    const dataDir = mkdtempSync(join(tmpdir(), 'neutron-backup-negated-'))
+    try {
+      const keyBytes = Buffer.alloc(32, 5)
+      writeFileSync(join(dataDir, '.neutron-aes-key'), keyBytes, { mode: 0o600 })
+      writeFileSync(join(dataDir, 'project.db'), 'db-content\n')
+      // The exact exclusion line IS present, but a later negation un-ignores it.
+      writeFileSync(join(dataDir, '.gitignore'), 'logs/\n.neutron-aes-key\n!.neutron-aes-key\n')
+
+      // Fresh repo, key initially UNTRACKED (so the tracked-key path is not what
+      // saves us here — the post-add gate is).
+      spawnSync('git', ['-C', dataDir, 'init', '-q'])
+      spawnSync('git', ['-C', dataDir, 'config', 'user.email', 'test@localhost'])
+      spawnSync('git', ['-C', dataDir, 'config', 'user.name', 'Test'])
+
+      const res = runBackup(dataDir)
+      expect(res.status).toBe(0)
+
+      // THE assertion: whatever got committed, the key is NOT in the index and
+      // NOT in the committed tree — never bundled, never pushable.
+      expect(git(dataDir, ['ls-files']).split('\n')).not.toContain('.neutron-aes-key')
+      const headTree = git(dataDir, ['ls-tree', '-r', '--name-only', 'HEAD']).split('\n')
+      expect(headTree).not.toContain('.neutron-aes-key')
+      expect(headTree).toContain('project.db')
+
+      // The local key file is untouched (the gate is index-only).
+      expect(readFileSync(join(dataDir, '.neutron-aes-key'))).toEqual(keyBytes)
+    } finally {
+      rmSync(dataDir, { recursive: true, force: true })
+    }
+  })
 })
