@@ -69,15 +69,22 @@ const DEFAULT_EMBEDDING_DIMENSIONS = 768
 
 /**
  * Marker file (under the brain dir) recording the embedding MODEL the column was
- * last fully (re)embedded under, e.g. `openai:text-embedding-3-large`. RA3: the
- * SAME 768-dim column can be embedded by DIFFERENT providers (local Ollama
+ * last (re)embedded under, e.g. `openai:text-embedding-3-large`. RA3: the SAME
+ * 768-dim column can be embedded by DIFFERENT providers (local Ollama
  * `nomic-embed-text` vs cloud OpenAI) — numerically compatible, but semantically
- * DISTINCT vector spaces. A provider-AGNOSTIC "done" marker would suppress the
- * re-backfill on a provider switch (openai → ollama → openai), leaving a mix of
- * both spaces in one index. Recording the model lets us re-run `gbrain embed
- * --stale` whenever it changes — gbrain then invalidates + re-embeds the
- * prior-signature chunks (`gbrain/src/commands/embed.ts:embedAllStale` →
- * `invalidateStaleSignatureEmbeddings`), converging the column to one space.
+ * DISTINCT vector spaces.
+ *
+ * INFORMATIONAL ONLY (as of the outage-orphan fix): the marker enriches the
+ * model-change log line and tracks the current provider; it NO LONGER gates the
+ * backfill. `gbrain embed --stale` runs on EVERY connect (see the
+ * already-initialized branch), so convergence to one vector space — and repair
+ * of any NULL-embedding pages orphaned by a provider/Ollama outage — is driven
+ * by gbrain's OWN per-page `embedding_signature` tracking + the unconditional
+ * `--stale` cursor (`gbrain/src/commands/embed.ts:embedAllStale` →
+ * `invalidateStaleSignatureEmbeddings`), NOT by this marker. Gating the backfill
+ * on "marker == current model" was a bug: it wrongly implied "every page is
+ * embedded" and permanently stranded pages written during an outage that
+ * happened AFTER the marker was recorded.
  */
 const BACKFILL_MARKER = '.neutron-embeddings-backfilled'
 
@@ -114,6 +121,19 @@ async function writeBackfillMarker(gbrainHome: string, model: string): Promise<v
   } catch {
     /* marker is an optimization; a missing marker only re-scans (idempotent). */
   }
+}
+
+/**
+ * Count of chunks embedded this run, parsed from `gbrain embed --stale` stdout.
+ * gbrain prints `Embedded N chunks across M pages` (or `Embedded 0 chunks (0
+ * stale found)` on a clean brain) to stdout via `slog` → `console.log`. Returns
+ * 0 when unparseable — a no-op scan, the steady-state case. Used only to label
+ * the outcome (backfill happened vs cheap no-op); it never gates the embed.
+ */
+function parseEmbeddedCount(stdout: string): number {
+  const m = stdout.match(/Embedded\s+(\d+)\s+chunk/i)
+  const n = m?.[1] !== undefined ? parseInt(m[1], 10) : 0
+  return Number.isFinite(n) ? n : 0
 }
 
 export interface EnsureBrainInitInput {
@@ -394,50 +414,69 @@ export async function ensureBrainInitialized(
     return { status: 'initialized', detail: `${target.model} ${target.dimensions}d` }
   }
 
-  // Already initialized. Re-embed when the effective embedder's MODEL differs
-  // from what the column was last embedded under (a provider/model switch, or a
-  // first run / legacy marker) — NOT gated on a specific provider. `gbrain embed
-  // --stale` invalidates + re-embeds the prior-signature chunks, converging a
-  // mixed column (e.g. an openai→ollama→openai transition) back to one space;
-  // it is a cheap no-op when nothing is stale. Keyword+graph brains (no
-  // embedder) never embed, so skip entirely.
+  // Already initialized. Run `gbrain embed --stale` on EVERY connect (whenever an
+  // embedder is configured) — NOT gated on the marker. It is idempotent + cheap
+  // and is the single operation that repairs BOTH orphan modes:
+  //   • OUTAGE ORPHANS — any chunk whose embedding IS NULL (pages written while
+  //     Ollama / the provider was unreachable, WHENEVER that outage happened,
+  //     including AFTER a healthy init already wrote the marker) is (re)embedded.
+  //     This is the crux of the fix: a marker matching the current model means
+  //     "the last backfill ran under this model", NOT "every page is embedded" —
+  //     the old `markerModel !== currentModel` gate skipped this backfill and
+  //     stranded those pages permanently.
+  //   • MODEL / PROVIDER SWITCH — gbrain first NULLs the prior-signature vectors
+  //     (`invalidateStaleSignatureEmbeddings`, keyed on gbrain's OWN per-page
+  //     signature — not this marker), then the same NULL-embedding cursor
+  //     re-embeds them into the new space, converging a mixed column (openai↔
+  //     ollama) back to one space.
+  // Cheap on a clean brain: gbrain's stale fast-path exits after a single
+  // `countStaleChunks` (~50 bytes wire) when nothing is NULL. Keyword+graph
+  // brains (no embedder) never embed, so skip entirely. Best-effort throughout:
+  // a failure (Ollama still down, a missing binary, a provider error) never
+  // blocks serving — the pages stay NULL and the NEXT reconnect's unconditional
+  // `--stale` backfills them (the per-spawn recovery cadence).
   if (input.embedder !== null) {
     const currentModel = embedderModelId(input.embedder)
     const markerModel = readBackfillMarkerModel(input.gbrainHome)
-    if (markerModel !== currentModel) {
-      // Best-effort: a failure (incl. a missing binary) must never block serving.
-      let res: { code: number; stdout: string; stderr: string }
-      try {
-        res = await runner.run(command, ['embed', '--stale'], { timeoutMs: 120_000, env: childEnv })
-      } catch (err) {
-        const detail = err instanceof Error ? err.message : String(err)
-        if (isGbrainBinaryMissingError(err)) {
-          logger.warn(
-            `[gbrain-memory] '${command}' could not be spawned for embed backfill — memory DISABLED ` +
-              '(keyword+graph still works). Install: bun install -g github:garrytan/gbrain',
-          )
-          return { status: 'binary-missing', detail: detail.slice(0, 200) }
-        }
+    let res: { code: number; stdout: string; stderr: string }
+    try {
+      res = await runner.run(command, ['embed', '--stale'], { timeoutMs: 120_000, env: childEnv })
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err)
+      if (isGbrainBinaryMissingError(err)) {
         logger.warn(
-          `[gbrain-memory] 'gbrain embed --stale' threw under ${currentModel} — keyword+graph ` +
-            `recall still works. err: ${detail.slice(0, 160)}`,
+          `[gbrain-memory] '${command}' could not be spawned for embed backfill — memory DISABLED ` +
+            '(keyword+graph still works). Install: bun install -g github:garrytan/gbrain',
         )
-        return { status: 'already-initialized', detail: brainConfigPath(input.gbrainHome) }
-      }
-      if (res.code === 0) {
-        await writeBackfillMarker(input.gbrainHome, currentModel)
-        logger.info(
-          `[gbrain-memory] embeddings (re)backfill complete at GBRAIN_HOME=${input.gbrainHome} ` +
-            `under ${currentModel}${markerModel !== null ? ` (was ${markerModel})` : ''} — semantic recall active.`,
-        )
-        return { status: 'embeddings-backfilled', detail: `embed --stale ok (${currentModel})` }
+        return { status: 'binary-missing', detail: detail.slice(0, 200) }
       }
       logger.warn(
-        `[gbrain-memory] 'gbrain embed --stale' failed (code ${res.code}) under ${currentModel} — ` +
-          'keyword+graph recall still works; embeddings will populate on next write or boot. ' +
-          `stderr: ${res.stderr.trim().slice(0, 160)}`,
+        `[gbrain-memory] 'gbrain embed --stale' threw under ${currentModel} — keyword+graph ` +
+          `recall still works; embeddings backfill on the next reconnect. err: ${detail.slice(0, 160)}`,
       )
+      return { status: 'already-initialized', detail: brainConfigPath(input.gbrainHome) }
     }
+    if (res.code === 0) {
+      const embedded = parseEmbeddedCount(res.stdout)
+      // Record the model the column is now embedded under (informational — see
+      // the marker doc; it no longer gates anything).
+      await writeBackfillMarker(input.gbrainHome, currentModel)
+      if (embedded > 0) {
+        logger.info(
+          `[gbrain-memory] embeddings backfill embedded ${embedded} chunk(s) at ` +
+            `GBRAIN_HOME=${input.gbrainHome} under ${currentModel}` +
+            `${markerModel !== null && markerModel !== currentModel ? ` (was ${markerModel})` : ''} — semantic recall active.`,
+        )
+        return { status: 'embeddings-backfilled', detail: `embed --stale ok (${embedded} under ${currentModel})` }
+      }
+      // Clean idempotent no-op — nothing was stale. Steady state.
+      return { status: 'already-initialized', detail: brainConfigPath(input.gbrainHome) }
+    }
+    logger.warn(
+      `[gbrain-memory] 'gbrain embed --stale' failed (code ${res.code}) under ${currentModel} — ` +
+        'keyword+graph recall still works; embeddings backfill on the next reconnect. ' +
+        `stderr: ${res.stderr.trim().slice(0, 160)}`,
+    )
   }
   return { status: 'already-initialized', detail: brainConfigPath(input.gbrainHome) }
 }

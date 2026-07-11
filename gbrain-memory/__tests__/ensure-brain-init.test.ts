@@ -56,6 +56,14 @@ function fakeRunner(opts?: {
   initCode?: number
   embedCode?: number
   throwOnInit?: Error
+  /**
+   * stdout the fake `gbrain embed --stale` emits. The real binary prints
+   * `Embedded N chunks across M pages` (or `Embedded 0 chunks (0 stale found)`);
+   * `ensureBrainInitialized` parses the N to label backfill-happened vs no-op.
+   * Default: a nonzero count (the common "backfill ran" case). Pass an
+   * `Embedded 0` line for the steady-state / no-op assertions.
+   */
+  embedStdout?: string
 }): { runner: CommandRunner; calls: RecordedCall[] } {
   const calls: RecordedCall[] = []
   const runner: CommandRunner = {
@@ -74,13 +82,18 @@ function fakeRunner(opts?: {
         return { code, stdout: '', stderr: code === 0 ? '' : 'init boom' }
       }
       if (args[0] === 'embed') {
-        return { code: opts?.embedCode ?? 0, stdout: '', stderr: '' }
+        const code = opts?.embedCode ?? 0
+        const stdout = opts?.embedStdout ?? 'Embedded 2 chunks across 1 pages'
+        return { code, stdout: code === 0 ? stdout : '', stderr: '' }
       }
       return { code: 0, stdout: '', stderr: '' }
     },
   }
   return { runner, calls }
 }
+
+/** A fake `gbrain embed` that reports a clean no-op stale scan (nothing stale). */
+const NOOP_EMBED_STDOUT = 'Embedded 0 chunks (0 stale found)'
 
 describe('ensureBrainInitialized', () => {
   test('fresh brain → runs init once, embeddings-ready at the universal 768 width when no embedder', async () => {
@@ -137,13 +150,14 @@ describe('ensureBrainInitialized', () => {
     expect(calls[0]!.env?.['OPENAI_API_KEY']).toBe('sk-test-123')
   })
 
-  test('already-init + provider key present → one-time embed backfill (marker-gated)', async () => {
+  test('already-init + provider key present → embed --stale runs (backfills, then a cheap no-op)', async () => {
     const home = tempHome()
     mkdirSync(join(home, '.gbrain'), { recursive: true })
     writeFileSync(brainConfigPath(home), JSON.stringify({ engine: 'pglite' }))
     const embedder = buildOpenAiEmbedderConfig('sk-test-123')
 
-    const first = fakeRunner()
+    // First connect: pages are stale → embed --stale backfills them.
+    const first = fakeRunner({ embedStdout: 'Embedded 4 chunks across 2 pages' })
     const r1 = await ensureBrainInitialized({
       gbrainHome: home,
       embedder,
@@ -154,8 +168,10 @@ describe('ensureBrainInitialized', () => {
     expect(first.calls.map((c) => c.args[0])).toEqual(['embed'])
     expect(first.calls[0]!.args).toContain('--stale')
 
-    // Second call SAME model: marker matches → no second backfill scan.
-    const second = fakeRunner()
+    // Second connect SAME model, nothing stale now: embed --stale STILL runs
+    // (unconditional — it is the safety net for outage orphans) but is a cheap
+    // no-op scan, so the status reports steady state.
+    const second = fakeRunner({ embedStdout: NOOP_EMBED_STDOUT })
     const r2 = await ensureBrainInitialized({
       gbrainHome: home,
       embedder,
@@ -163,61 +179,67 @@ describe('ensureBrainInitialized', () => {
       logger: silentLogger,
     })
     expect(r2.status).toBe('already-initialized')
-    expect(second.calls).toHaveLength(0)
+    expect(second.calls.map((c) => c.args[0])).toEqual(['embed']) // scan ran…
+    expect(second.calls[0]!.args).toContain('--stale') // …and it was a --stale scan
   })
 
-  test('provider SWITCH (openai → ollama → openai) re-runs the backfill each time (no mixed vector spaces)', async () => {
+  test('provider SWITCH (openai → ollama → openai) re-embeds each time; steady state is a cheap no-op scan', async () => {
     // RA3: the same 768-dim column can hold BOTH openai and ollama vectors —
-    // numerically compatible, semantically distinct. A provider-agnostic marker
-    // would suppress the re-embed on switch-back, leaving a permanent mix. The
-    // model-specific marker re-runs `embed --stale` on every model change so
-    // gbrain invalidates + re-embeds the prior-signature chunks.
+    // numerically compatible, semantically distinct. On a provider switch gbrain
+    // NULLs the prior-signature vectors (via its OWN per-page embedding_signature)
+    // and the unconditional `embed --stale` re-embeds them into the new space —
+    // convergence no longer depends on our marker. When nothing changed, the
+    // same `--stale` scan runs but finds nothing stale (a cheap no-op).
     const home = tempHome()
     mkdirSync(join(home, '.gbrain'), { recursive: true })
     writeFileSync(brainConfigPath(home), JSON.stringify({ engine: 'pglite' }))
     const openai = buildOpenAiEmbedderConfig('sk-test-123') // openai:text-embedding-3-large
     const ollama = resolveEmbedderConfig({ NEUTRON_EMBEDDINGS: 'ollama' })! // ollama:nomic-embed-text @ 768
 
-    // 1) OpenAI: backfill runs, marker → openai.
-    const a = fakeRunner()
+    // 1) OpenAI: backfill runs (stale chunks embedded), marker → openai.
+    const a = fakeRunner({ embedStdout: 'Embedded 3 chunks across 2 pages' })
     const r1 = await ensureBrainInitialized({ gbrainHome: home, embedder: openai, runner: a.runner, logger: silentLogger })
     expect(r1.status).toBe('embeddings-backfilled')
     expect(a.calls.map((c) => c.args[0])).toEqual(['embed'])
 
-    // 2) Ollama: model changed → re-embed (openai vectors → ollama space), marker → ollama.
-    const b = fakeRunner()
+    // 2) Ollama: switch → gbrain invalidates the openai vectors → --stale re-embeds them.
+    const b = fakeRunner({ embedStdout: 'Embedded 3 chunks across 2 pages' })
     const r2 = await ensureBrainInitialized({ gbrainHome: home, embedder: ollama, runner: b.runner, logger: silentLogger })
     expect(r2.status).toBe('embeddings-backfilled')
     expect(b.calls.map((c) => c.args[0])).toEqual(['embed'])
 
-    // 3) OpenAI again: model changed back → re-embed (ollama vectors → openai space).
-    //    A provider-agnostic marker would WRONGLY skip this.
-    const c = fakeRunner()
+    // 3) OpenAI again: switch back → re-embed (ollama vectors → openai space).
+    const c = fakeRunner({ embedStdout: 'Embedded 3 chunks across 2 pages' })
     const r3 = await ensureBrainInitialized({ gbrainHome: home, embedder: openai, runner: c.runner, logger: silentLogger })
     expect(r3.status).toBe('embeddings-backfilled')
     expect(c.calls.map((cc) => cc.args[0])).toEqual(['embed'])
 
-    // 4) OpenAI once more, unchanged → marker matches → NO redundant re-embed.
-    const d = fakeRunner()
+    // 4) OpenAI once more, unchanged, nothing stale → --stale STILL runs (it is
+    //    unconditional) but is a cheap no-op scan → steady-state status.
+    const d = fakeRunner({ embedStdout: NOOP_EMBED_STDOUT })
     const r4 = await ensureBrainInitialized({ gbrainHome: home, embedder: openai, runner: d.runner, logger: silentLogger })
     expect(r4.status).toBe('already-initialized')
-    expect(d.calls).toHaveLength(0)
+    expect(d.calls.map((dd) => dd.args[0])).toEqual(['embed']) // scan ran, but no-op
   })
 
-  test('a fresh init records the model marker so a later same-model boot skips the backfill', async () => {
+  test('a fresh init records the model marker; a later same-model boot runs a cheap no-op stale scan', async () => {
     const home = tempHome()
     const embedder = buildOpenAiEmbedderConfig('sk-test-123')
-    // Fresh init (no config yet) writes the marker; no pages → no embed call.
+    // Fresh init (no config yet) writes the marker; a fresh brain has no pages,
+    // so init runs but NO embed call at init time.
     const first = fakeRunner()
     const r1 = await ensureBrainInitialized({ gbrainHome: home, embedder, runner: first.runner, logger: silentLogger })
     expect(r1.status).toBe('initialized')
     expect(first.calls.map((c) => c.args[0])).toEqual(['init']) // NOT ['init','embed']
 
-    // Next boot, same model, brain now initialized → marker matches → no embed.
-    const second = fakeRunner()
+    // Next boot, same model, brain now initialized, nothing stale → `embed
+    // --stale` runs UNCONDITIONALLY (the outage-orphan safety net) but is a cheap
+    // no-op scan.
+    const second = fakeRunner({ embedStdout: NOOP_EMBED_STDOUT })
     const r2 = await ensureBrainInitialized({ gbrainHome: home, embedder, runner: second.runner, logger: silentLogger })
     expect(r2.status).toBe('already-initialized')
-    expect(second.calls).toHaveLength(0)
+    expect(second.calls.map((c) => c.args[0])).toEqual(['embed'])
+    expect(second.calls[0]!.args).toContain('--stale')
   })
 
   // The internal marker filename (stable path contract).
@@ -256,8 +278,8 @@ describe('ensureBrainInitialized', () => {
       logger: silentLogger,
       probeOllamaHealth: async (): Promise<OllamaHealthCheck> => ({ reachable: true, modelPresent: true }),
     })
-    // `embed --stale` IS invoked (marker was absent), so the outage-written pages
-    // get vectors — the "auto-upgrades once it is" promise holds.
+    // `embed --stale` IS invoked (it runs on every reconnect), so the
+    // outage-written pages get vectors — the recovery promise holds.
     expect(r2.status).toBe('embeddings-backfilled')
     expect(up.calls.map((c) => c.args[0])).toEqual(['embed'])
     expect(up.calls[0]!.args).toContain('--stale')
@@ -265,7 +287,12 @@ describe('ensureBrainInitialized', () => {
     expect(existsSync(markerFile(home))).toBe(true)
   })
 
-  test('HEALTHY Ollama fresh init → marker written → same-model reconnect SKIPS (no redundant scan)', async () => {
+  // (d) HEALTHY steady-state reconnect with nothing stale: `embed --stale` STILL
+  // runs (it is unconditional — the outage-orphan safety net) but is a cheap
+  // no-op scan. The OLD marker-gate skipped this scan entirely; that skip was
+  // the bug (it also skipped genuinely-orphaned pages), so the scan running here
+  // is the intended, correct behavior.
+  test('HEALTHY Ollama fresh init → marker written → same-model reconnect runs a no-op --stale scan', async () => {
     const home = tempHome()
     const embedder = resolveEmbedderConfig({})! // ollama
     const healthy = async (): Promise<OllamaHealthCheck> => ({ reachable: true, modelPresent: true })
@@ -282,8 +309,8 @@ describe('ensureBrainInitialized', () => {
     expect(first.calls.map((c) => c.args[0])).toEqual(['init']) // no embed at fresh init
     expect(existsSync(markerFile(home))).toBe(true) // healthy → marker recorded
 
-    // Steady state: same model, healthy → marker matches → NO embed --stale scan.
-    const second = fakeRunner()
+    // Steady state: same model, healthy, nothing stale → `--stale` runs but is a no-op.
+    const second = fakeRunner({ embedStdout: NOOP_EMBED_STDOUT })
     const r2 = await ensureBrainInitialized({
       gbrainHome: home,
       embedder,
@@ -292,7 +319,88 @@ describe('ensureBrainInitialized', () => {
       probeOllamaHealth: healthy,
     })
     expect(r2.status).toBe('already-initialized')
-    expect(second.calls).toHaveLength(0)
+    expect(second.calls.map((c) => c.args[0])).toEqual(['embed']) // scan ran…
+    expect(second.calls[0]!.args).toContain('--stale') // …but found nothing stale
+  })
+
+  // (a) THE ROOT-CAUSE FIX — healthy init writes the marker, THEN a mid-life
+  // outage orphans pages (embedding IS NULL) while the marker still matches the
+  // current model. On reconnect the marker MATCHES, yet `embed --stale` MUST
+  // still run and backfill those pages. Under the old `markerModel !==
+  // currentModel` gate this was SKIPPED → permanent orphans. Mutation guard:
+  // re-introducing the marker gate makes this fail (embed would not be called).
+  test('healthy init (marker written) → mid-life outage orphans pages → reconnect BACKFILLS despite matching marker', async () => {
+    const home = tempHome()
+    const embedder = resolveEmbedderConfig({})! // ollama:nomic-embed-text
+    const healthy = async (): Promise<OllamaHealthCheck> => ({ reachable: true, modelPresent: true })
+
+    // 1) Healthy fresh init → marker written (== current ollama model).
+    const init = fakeRunner()
+    await ensureBrainInitialized({
+      gbrainHome: home, embedder, runner: init.runner, logger: silentLogger, probeOllamaHealth: healthy,
+    })
+    expect(existsSync(markerFile(home))).toBe(true)
+
+    // 2) (Ollama briefly went DOWN; pages written meanwhile have NULL embeddings.)
+
+    // 3) Reconnect, Ollama healthy again, SAME model → marker STILL matches. The
+    //    stale scan finds the orphaned NULL-embedding chunks and backfills them.
+    const recover = fakeRunner({ embedStdout: 'Embedded 5 chunks across 3 pages' })
+    const r = await ensureBrainInitialized({
+      gbrainHome: home, embedder, runner: recover.runner, logger: silentLogger, skipOllamaProbe: true,
+    })
+    expect(r.status).toBe('embeddings-backfilled') // NOT skipped despite matching marker
+    expect(recover.calls.map((c) => c.args[0])).toEqual(['embed'])
+    expect(recover.calls[0]!.args).toContain('--stale')
+    // Marker still present (re-stamped under the same model).
+    expect(existsSync(markerFile(home))).toBe(true)
+  })
+
+  // (b) Same root-cause, OpenAI provider: a transient embed failure after a
+  // healthy init leaves some chunks NULL; the next reconnect (same OpenAI model,
+  // matching marker) re-runs `--stale` and backfills them.
+  test('OpenAI: healthy init → transient outage orphans pages → reconnect BACKFILLS despite matching marker', async () => {
+    const home = tempHome()
+    mkdirSync(join(home, '.gbrain'), { recursive: true })
+    writeFileSync(brainConfigPath(home), JSON.stringify({ engine: 'pglite' }))
+    const embedder = buildOpenAiEmbedderConfig('sk-test-123')
+
+    // 1) First connect: backfill runs, marker → openai.
+    const first = fakeRunner({ embedStdout: 'Embedded 2 chunks across 1 pages' })
+    await ensureBrainInitialized({ gbrainHome: home, embedder, runner: first.runner, logger: silentLogger })
+    expect(existsSync(markerFile(home))).toBe(true)
+
+    // 2) (A transient provider outage left some newly-written chunks NULL.)
+
+    // 3) Reconnect, SAME openai model → marker matches, yet `--stale` re-runs and
+    //    backfills the orphaned chunks.
+    const recover = fakeRunner({ embedStdout: 'Embedded 4 chunks across 2 pages' })
+    const r = await ensureBrainInitialized({ gbrainHome: home, embedder, runner: recover.runner, logger: silentLogger })
+    expect(r.status).toBe('embeddings-backfilled')
+    expect(recover.calls.map((c) => c.args[0])).toEqual(['embed'])
+    expect(recover.calls[0]!.args).toContain('--stale')
+  })
+
+  // (c) A genuine model/provider change still triggers a re-embed (openai →
+  // ollama): the unconditional `--stale` runs, and gbrain's own per-page
+  // signature invalidation converges the vector space.
+  test('genuine model change (openai → ollama) triggers a re-embed via unconditional --stale', async () => {
+    const home = tempHome()
+    mkdirSync(join(home, '.gbrain'), { recursive: true })
+    writeFileSync(brainConfigPath(home), JSON.stringify({ engine: 'pglite' }))
+    const openai = buildOpenAiEmbedderConfig('sk-test-123')
+    const ollama = resolveEmbedderConfig({ NEUTRON_EMBEDDINGS: 'ollama' })!
+
+    const a = fakeRunner({ embedStdout: 'Embedded 3 chunks across 2 pages' })
+    await ensureBrainInitialized({ gbrainHome: home, embedder: openai, runner: a.runner, logger: silentLogger })
+
+    // Switch to ollama → gbrain invalidates the openai-signature vectors, `--stale`
+    // re-embeds them into the ollama space.
+    const b = fakeRunner({ embedStdout: 'Embedded 3 chunks across 2 pages' })
+    const r = await ensureBrainInitialized({ gbrainHome: home, embedder: ollama, runner: b.runner, logger: silentLogger })
+    expect(r.status).toBe('embeddings-backfilled')
+    expect(b.calls.map((c) => c.args[0])).toEqual(['embed'])
+    expect(b.calls[0]!.args).toContain('--stale')
   })
 
   test('init failure → returns init-failed, never throws', async () => {
