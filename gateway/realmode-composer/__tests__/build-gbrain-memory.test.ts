@@ -524,6 +524,44 @@ describe('buildGBrainMemory', () => {
     }
   })
 
+  test('per-connect coherence at the embedder-SELECTION boundary: init + serve pick the SAME embedder (absent→Ollama, present→OpenAI)', async () => {
+    // Observable version of the coherence guarantee (Codex): mirror exactly how
+    // buildGBrainMemory wires the key — ONE shared makePerConnectKeyResolver
+    // feeding BOTH the init-guard embedder and the serve childEnv embedder,
+    // reset at the start of each connect — and assert both SELECTIONS
+    // (provider + dimensions + childEnv), not just a call count.
+    let stored: string | undefined
+    const kr = makePerConnectKeyResolver(async () => stored)
+    // The exact derivation buildGBrainMemory runs at both the init guard and the
+    // serve `resolveDynamicEnv` (fresh brain → no width reconciliation).
+    const selectEmbedder = async () =>
+      reconcileEmbedderToBrain(
+        resolveEffectiveEmbedder({ env: {}, openaiApiKey: await kr.getKey() }),
+        null,
+      )
+
+    // --- Connect 1: no key. AND the key lands MID-connect (the race). ---
+    kr.resetForConnect() // ensureInitialized does this first
+    const initSel1 = await selectEmbedder() // init guard reads the key
+    stored = 'sk-mid' // key stored BETWEEN the two reads (the exact race)
+    const serveSel1 = await selectEmbedder() // serve childEnv reads the key
+    // Both pinned to the connect's first resolution (absent) → identical Ollama.
+    expect(initSel1?.provider).toBe('ollama')
+    expect(serveSel1?.provider).toBe('ollama')
+    expect(serveSel1).toEqual(initSel1) // no init-Ollama / serve-OpenAI split
+    expect(initSel1?.childEnv['OPENAI_API_KEY']).toBeUndefined()
+
+    // --- Connect 2: the key stored last connect is now picked up, coherently. ---
+    kr.resetForConnect()
+    const initSel2 = await selectEmbedder()
+    const serveSel2 = await selectEmbedder()
+    expect(initSel2?.provider).toBe('openai')
+    expect(serveSel2?.provider).toBe('openai')
+    expect(serveSel2).toEqual(initSel2)
+    expect(initSel2?.dimensions).toBe(768)
+    expect(initSel2?.childEnv['OPENAI_API_KEY']).toBe('sk-mid')
+  })
+
   // --- gbrain reachability (dogfood 2026-06-28) ------------------------------
   // The boot-time disabled-warning must reflect the SAME absolute-path resolver
   // the serve spawn uses — not a bare `Bun.which` against the (narrow) service
