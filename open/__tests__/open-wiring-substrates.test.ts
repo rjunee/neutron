@@ -223,10 +223,13 @@ describe('wireSubstrates — swappable provider (trident stays Claude Code)', ()
 })
 
 describe('open composer — swappable provider boot helpers', () => {
-  test('resolveOpenModelProvider reads NEUTRON_MODEL_PROVIDER, defaults anthropic', () => {
+  test('resolveOpenModelProvider reads NEUTRON_MODEL_PROVIDER, defaults anthropic, THROWS on typo', () => {
     expect(resolveOpenModelProvider({} as NodeJS.ProcessEnv)).toBe('anthropic')
     expect(resolveOpenModelProvider({ NEUTRON_MODEL_PROVIDER: 'openai' } as unknown as NodeJS.ProcessEnv)).toBe('openai')
-    expect(resolveOpenModelProvider({ NEUTRON_MODEL_PROVIDER: 'nonsense' } as unknown as NodeJS.ProcessEnv)).toBe('anthropic')
+    // Root-cause fix: an unknown value is a LOUD boot error, NOT a silent Claude fallback.
+    expect(() =>
+      resolveOpenModelProvider({ NEUTRON_MODEL_PROVIDER: 'nonsense' } as unknown as NodeJS.ProcessEnv),
+    ).toThrow(/Unknown model provider 'nonsense'/)
   })
 
   test('resolveOpenOpenAiPool resolves an api_key pool from OPENAI_API_KEY, null otherwise', () => {
@@ -282,6 +285,26 @@ describe('resolveOpenConversationalProvider — every declared value dispatches 
     )
     expect(ctx.provider).toBe('openai')
     expect(ctx.openaiLlmPool).toBeUndefined() // no key → substrate fails loud per turn
+  })
+
+  test('typo like "openaii" (unknown value) → THROWS at the normalizer, NOT a silent {} Claude fallback', () => {
+    expect(() =>
+      resolveOpenConversationalProvider(
+        { NEUTRON_MODEL_PROVIDER: 'openaii' } as unknown as NodeJS.ProcessEnv,
+        deps(true),
+      ),
+    ).toThrow(/Unknown model provider 'openaii'/)
+    // Mutation check: must NOT silently return {} (Claude fallback) on a typo.
+    let threw = false
+    try {
+      resolveOpenConversationalProvider(
+        { NEUTRON_MODEL_PROVIDER: 'garbage-value' } as unknown as NodeJS.ProcessEnv,
+        deps(true),
+      )
+    } catch {
+      threw = true
+    }
+    expect(threw).toBe(true)
   })
 
   test('openai-codex-cli (declared but NOT production-wired) → THROWS a loud boot error (never silent Claude)', () => {

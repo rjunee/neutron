@@ -104,15 +104,36 @@ export function providerCapabilities(provider: Provider): ProviderCapabilities {
   }
 }
 
+/** The known provider values, for validation + actionable error messages. */
+export const KNOWN_PROVIDERS: readonly Provider[] = ['anthropic', 'openai', 'openai-codex-cli']
+
 /**
- * Normalize an arbitrary (possibly absent / unknown) provider string to a known
- * `Provider`. Absent OR unrecognized ⇒ `'anthropic'` — Claude Code is always the
- * safe default so a mis-set / stale config can never silently strand a project
- * on a half-wired alternate backend.
+ * Normalize a provider string to a known `Provider` — the single chokepoint that
+ * decides "which backend" from raw config (`NEUTRON_MODEL_PROVIDER`).
+ *
+ *   - ABSENT / empty / whitespace-only ⇒ `'anthropic'` (the default, Claude Code).
+ *     This is the ONLY coercion — the normal Claude case stays byte-identical.
+ *   - A KNOWN value ⇒ itself.
+ *   - An UNKNOWN non-empty value ⇒ a LOUD, actionable THROW.
+ *
+ * The throw is the ROOT-CAUSE fix for the silent-fallback class: a typo
+ * (`'openaii'`), an un-wired value, or a future provider not yet wired must FAIL
+ * LOUD rather than silently coerce to `'anthropic'` and route an operator's data
+ * to Claude when they selected something else. Callers that read this from config
+ * (composer boot) surface it as a boot error; the substrate seam only ever passes
+ * a compile-time `Provider` or `undefined`, so it never trips the throw in
+ * production.
  */
 export function normalizeProvider(provider: string | undefined | null): Provider {
-  if (provider === 'openai' || provider === 'openai-codex-cli') return provider
-  return 'anthropic'
+  if (provider === undefined || provider === null || provider.trim() === '') return 'anthropic'
+  const v = provider.trim()
+  if (v === 'anthropic' || v === 'openai' || v === 'openai-codex-cli') return v
+  throw new Error(
+    `Unknown model provider '${provider}'. Valid values: ${KNOWN_PROVIDERS.map((p) => `'${p}'`).join(
+      ', ',
+    )} (or leave NEUTRON_MODEL_PROVIDER unset for the default, Claude Code). ` +
+      'Refusing to coerce an unrecognized value to Claude — set a valid provider or unset it.',
+  )
 }
 
 /**

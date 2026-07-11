@@ -410,9 +410,10 @@ export interface BuildLlmCallSubstrateInput {
    * PER-TURN provider resolver — mirrors `projectIdResolver`. Re-evaluated on
    * EVERY `start(spec)` so the ACTIVE project's provider selection is honored
    * per turn (the "per-project resolved per-turn" granularity). Its result wins
-   * over the static `provider`; an absent/undefined result falls back to
-   * `provider`, then to `'anthropic'`. Any unknown string normalizes to
-   * `'anthropic'` (never strands a turn on a half-wired backend).
+   * over the static `provider`; an absent/undefined/empty result falls back to
+   * `provider`, then to `'anthropic'`. An UNKNOWN non-empty string THROWS via
+   * `normalizeProvider` (fail-loud, never a silent Claude fallback) — production
+   * only ever resolves a valid `Provider` here, so this never trips in practice.
    */
   providerResolver?: () => Provider | string | undefined
   /**

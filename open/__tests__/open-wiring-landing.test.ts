@@ -123,45 +123,43 @@ describe('wireLandingStack — chatAuthGate closes over live env, evaluated per 
     expect(seenEnv[0]).toBe(env)
   })
 
-  test('provider=openai: auth gate keys on the OpenAI key, NOT the Claude key (audit Medium)', async () => {
-    const claudeCalls: NodeJS.ProcessEnv[] = []
-    const openaiCalls: NodeJS.ProcessEnv[] = []
-    const claudePool = newPool('anthropic')
-    // Claude key PRESENT, OpenAI key MISSING — under provider=openai this must
-    // read UNAUTHENTICATED (every turn would fail for the missing OpenAI key), so
-    // the gate must consult the OpenAI resolver and IGNORE the Claude one.
-    const resolveOpenLlmPool = (e: NodeJS.ProcessEnv): CredentialPool | null => {
-      claudeCalls.push(e)
-      return claudePool
-    }
-    const resolveOpenOpenAiPool = (e: NodeJS.ProcessEnv): CredentialPool | null => {
-      openaiCalls.push(e)
-      return null
-    }
-    const env = { MARKER: 'openai-box' } as unknown as NodeJS.ProcessEnv
-    const { landing } = wireLandingStack(
-      makeCtx(env, { provider: 'openai' }),
-      makeDeps({ resolveOpenLlmPool, resolveOpenOpenAiPool }),
-    )
-    await landing.fetch(new Request('http://localhost/chat'), {} as never)
-    // Gate consulted the SELECTED provider's (OpenAI) resolver...
-    expect(openaiCalls.length).toBeGreaterThan(0)
-    // ...and did NOT let the present Claude key satisfy the gate.
-    expect(claudeCalls.length).toBe(0)
-  })
-
-  test('provider=openai WITH an OpenAI key ⇒ gate authenticated (Claude resolver not consulted)', async () => {
-    const claudeCalls: NodeJS.ProcessEnv[] = []
-    const resolveOpenLlmPool = (e: NodeJS.ProcessEnv): CredentialPool | null => {
-      claudeCalls.push(e)
-      return null
-    }
-    const resolveOpenOpenAiPool = (): CredentialPool | null => newPool('openai')
+  test('provider=openai + Claude key present but OpenAI key MISSING ⇒ GET /chat is GATED (503), audit Medium', async () => {
+    // Claude key present must NOT satisfy the gate under provider=openai — every
+    // turn would still fail for the missing OpenAI key. Assert the OBSERVABLE
+    // response: the auth-gate page (503), not the chat shell.
+    const resolveOpenLlmPool = (): CredentialPool | null => newPool('anthropic') // Claude PRESENT
+    const resolveOpenOpenAiPool = (): CredentialPool | null => null // OpenAI MISSING
     const { landing } = wireLandingStack(
       makeCtx({} as NodeJS.ProcessEnv, { provider: 'openai' }),
       makeDeps({ resolveOpenLlmPool, resolveOpenOpenAiPool }),
     )
-    await landing.fetch(new Request('http://localhost/chat'), {} as never)
-    expect(claudeCalls.length).toBe(0) // Claude resolver irrelevant under provider=openai
+    const res = await landing.fetch(new Request('http://localhost/chat'), {} as never)
+    expect(res.status).toBe(503) // unauthenticated → auth-gate page
+  })
+
+  test('provider=openai WITH an OpenAI key ⇒ GET /chat is AUTHENTICATED (not gated)', async () => {
+    const resolveOpenLlmPool = (): CredentialPool | null => null // no Claude — irrelevant
+    const resolveOpenOpenAiPool = (): CredentialPool | null => newPool('openai') // OpenAI PRESENT
+    const { landing } = wireLandingStack(
+      makeCtx({} as NodeJS.ProcessEnv, { provider: 'openai' }),
+      makeDeps({ resolveOpenLlmPool, resolveOpenOpenAiPool }),
+    )
+    const res = await landing.fetch(new Request('http://localhost/chat'), {} as never)
+    // Authenticated → the chat shell, NOT the 503 gate page.
+    expect(res.status).not.toBe(503)
+    expect(res.status).toBe(200)
+  })
+
+  test('default (anthropic): GET /chat gates on the CLAUDE key — 503 without, 200 with (byte-identical)', async () => {
+    const gated = await wireLandingStack(
+      makeCtx({} as NodeJS.ProcessEnv),
+      makeDeps({ resolveOpenLlmPool: (): CredentialPool | null => null }),
+    ).landing.fetch(new Request('http://localhost/chat'), {} as never)
+    expect(gated.status).toBe(503)
+    const authed = await wireLandingStack(
+      makeCtx({} as NodeJS.ProcessEnv),
+      makeDeps({ resolveOpenLlmPool: (): CredentialPool | null => newPool('anthropic') }),
+    ).landing.fetch(new Request('http://localhost/chat'), {} as never)
+    expect(authed.status).toBe(200)
   })
 })
