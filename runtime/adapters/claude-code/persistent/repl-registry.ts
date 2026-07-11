@@ -44,7 +44,7 @@
  * with zero rework (brief § 8).
  */
 
-import { existsSync, readFileSync, writeFileSync } from 'node:fs'
+import { readFileSync, writeFileSync } from 'node:fs'
 import { atomicWriteFileSync } from '../../../atomic-write.ts'
 import { registryLockPath, withFlockSync } from './registry-lock.ts'
 
@@ -155,17 +155,23 @@ function isMinimalRecord(raw: unknown): boolean {
  *  contents when they were readable (i.e. every case except a read error) so
  *  a caller can sidecar-copy them before they're lost. `onDropRow` reports
  *  individual rows dropped for failing the schema check even when the file
- *  as a whole parses fine. */
+ *  as a whole parses fine.
+ *
+ * Classifies "absent" by `ENOENT` on the read itself rather than a separate
+ * `existsSync` pre-check (Codex r6): a pre-check-then-read has a TOCTOU gap,
+ * AND `existsSync` collapses ANY stat error — not just "doesn't exist" — to
+ * `false` (e.g. a permission-denied parent directory), which would silently
+ * misclassify a genuine read failure as the steady-state absent case. */
 export function loadRegistry(
   path: string,
   onCorrupt?: (reason: string, rawContents?: string) => void,
   onDropRow?: (key: string, raw: unknown, rawContents: string) => void,
 ): ReplRegistry {
-  if (!existsSync(path)) return {}
   let contents: string
   try {
     contents = readFileSync(path, 'utf8')
   } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === 'ENOENT') return {} // absent — steady-state cold boot
     onCorrupt?.(`read-error: ${(e as Error).message}`)
     return {}
   }
@@ -193,17 +199,22 @@ export function loadRegistry(
  * no-record case) but `skipSave` tells `withRegistry` to leave the on-disk
  * file untouched — whatever state it was in, the next tick gets to retry
  * the read rather than this tick permanently erasing it.
+ *
+ * Classifies "absent" by `ENOENT` on the read itself, same as `loadRegistry`
+ * (Codex r6) — a separate `existsSync` pre-check has a TOCTOU gap and would
+ * fold a genuine (non-ENOENT) read failure into the "absent" `skipSave:
+ * false` branch, defeating the very protection this function exists to add.
  */
 function loadRegistryForMutation(
   path: string,
   onCorrupt: (reason: string, rawContents?: string) => void,
   onDropRow: (key: string, raw: unknown, rawContents: string) => void,
 ): { registry: ReplRegistry; skipSave: boolean } {
-  if (!existsSync(path)) return { registry: {}, skipSave: false }
   let contents: string
   try {
     contents = readFileSync(path, 'utf8')
   } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === 'ENOENT') return { registry: {}, skipSave: false }
     onCorrupt(`read-error: ${(e as Error).message}`)
     return { registry: {}, skipSave: true }
   }
@@ -277,17 +288,35 @@ function writeSidecarBestEffort(path: string, contents: string): string | undefi
  * which THROWS so an unreadable registry surfaces as `available: false`), the
  * mutation path must never crash the gateway on corruption — a watchdog tick
  * that can't tolerate a bad registry file would take down supervision for
- * every OTHER project too. So this degrades LOUD-but-alive instead:
- *   1. logs to stderr so the loss is never silent, and
- *   2. best-effort sidecars the raw corrupt bytes BEFORE the mutation rebuilds
- *      `path` from `{}`, so every other sessionKey's row (sessionId/pid/respawn
- *      bookkeeping) is recoverable by hand even though it's about to be
- *      dropped from the live file.
+ * every OTHER project too. So this degrades LOUD-but-alive instead.
+ *
+ * Branches on TWO distinct failure shapes that must NOT share a message
+ * (Codex r6 — the shared message previously falsely told operators a
+ * whole-file read error was "about to rebuild ... DROPS every other row",
+ * when a read error's `skipSave` actually means NOTHING is committed):
+ *   - a whole-file READ error (`reason` starts with `read-error:`): NOTHING
+ *     is sidecar-preserved (there are no bytes to preserve) because NOTHING
+ *     is being overwritten either — `loadRegistryForMutation` sets
+ *     `skipSave` for this case, so the on-disk file is left completely
+ *     untouched. The log says exactly that.
+ *   - a genuine PARSE/shape error (bytes WERE read, just didn't parse): the
+ *     mutation DOES proceed to rebuild `path` from `{}`, so this branch logs
+ *     the sidecar it best-effort writes BEFORE that rebuild, so every other
+ *     sessionKey's row is recoverable by hand even though it's about to be
+ *     dropped from the live file.
  * An ABSENT file never reaches this — `loadRegistry` returns `{}` for that
  * case without invoking `onCorrupt` at all (the steady-state cold-boot path).
  */
 function defaultCorruptHandler(path: string): (reason: string, rawContents?: string) => void {
   return (reason, rawContents) => {
+    if (reason.startsWith('read-error:')) {
+      console.error(
+        `repl-registry: READ ERROR on ${path} (${reason}) — the SAVE for this mutation is being ` +
+          `SKIPPED entirely (not just left un-sidecarred): the on-disk file is left byte-for-byte ` +
+          `untouched so the next tick can retry the read. Nothing was dropped.`,
+      )
+      return
+    }
     const sidecarPath = rawContents !== undefined ? writeSidecarBestEffort(path, rawContents) : undefined
     console.error(
       `repl-registry: CORRUPT registry at ${path} (${reason}) — a mutation is about to ` +
@@ -295,7 +324,7 @@ function defaultCorruptHandler(path: string): (reason: string, rawContents?: str
         `respawn bookkeeping). ` +
         (sidecarPath
           ? `Raw bytes preserved at ${sidecarPath} for manual recovery.`
-          : `Sidecar preservation FAILED or was impossible (${reason}) — raw bytes may be lost.`),
+          : `Sidecar preservation FAILED — raw bytes may be lost.`),
     )
   }
 }

@@ -516,6 +516,18 @@ describe('repl-registry — corruption on the mutation path is loud and recovera
       }
 
       expect(logs.some((l) => String(l[0]).includes('read-error'))).toBe(true)
+      // The message itself must be operationally ACCURATE for this branch —
+      // not the generic corrupt-file wording, which would falsely claim a
+      // rebuild is imminent (Codex r6). It must say the save was skipped and
+      // nothing was dropped.
+      expect(
+        logs.some(
+          (l) =>
+            String(l[0]).includes('READ ERROR') &&
+            String(l[0]).includes('SKIPPED') &&
+            String(l[0]).includes('Nothing was dropped'),
+        ),
+      ).toBe(true)
       // Nothing was readable, so there is genuinely nothing to sidecar.
       expect(sidecarsFor(path)).toEqual([])
       // The critical assertion: the save was SKIPPED, not just un-sidecarred.
@@ -527,6 +539,24 @@ describe('repl-registry — corruption on the mutation path is loud and recovera
       expect(getRecord(path, 'bob')?.pid).toBe(222)
     },
   )
+
+  it('an ABSENT file (ENOENT) is classified as steady-state cold boot, never as a read error — no log, no skipped save, the mutation persists normally', () => {
+    const path = tmpRegistry() // never written — genuinely absent (ENOENT)
+    const logged: unknown[][] = []
+    const originalConsoleError = console.error
+    console.error = (...args: unknown[]) => logged.push(args)
+    try {
+      upsertRecord(path, rec({ sessionKey: 'k', sessionId: 'uuid-k' }))
+    } finally {
+      console.error = originalConsoleError
+    }
+    // ENOENT must NOT be treated as a read error: no read-error log, and the
+    // upsert must actually PERSIST (unlike the genuine-read-error case above,
+    // where the save is skipped).
+    expect(logged.some((l) => String(l[0]).includes('read-error'))).toBe(false)
+    expect(logged.some((l) => String(l[0]).includes('READ ERROR'))).toBe(false)
+    expect(getRecord(path, 'k')?.sessionId).toBe('uuid-k')
+  })
 
   it.skipIf(isRoot)(
     'a sidecar-write failure is logged honestly — it never silently reports success',
