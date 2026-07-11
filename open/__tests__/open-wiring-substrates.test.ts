@@ -160,6 +160,45 @@ describe('wireSubstrates — swappable provider (trident stays Claude Code)', ()
     }
   }
 
+  /** A recording fetch capturing each OpenAI request body (SSE completion reply). */
+  function recordingOpenAiFetch(): { fetchImpl: typeof fetch; bodies: Array<Record<string, unknown>> } {
+    const bodies: Array<Record<string, unknown>> = []
+    const sse =
+      [
+        { event: 'response.created', data: { type: 'response.created', response: { id: 'r1' } } },
+        { event: 'response.completed', data: { type: 'response.completed', response: { id: 'r1', usage: { input_tokens: 1, output_tokens: 1 } } } },
+      ]
+        .map((f) => `event: ${f.event}\ndata: ${JSON.stringify(f.data)}\n`)
+        .join('\n') + '\n'
+    const fetchImpl = (async (_url: string | URL, init?: RequestInit) => {
+      bodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>)
+      const stream = new ReadableStream({ start(c) { c.enqueue(new TextEncoder().encode(sse)); c.close() } })
+      return new Response(stream, { status: 200 })
+    }) as unknown as typeof fetch
+    return { fetchImpl, bodies }
+  }
+
+  test('CAPABILITY PARITY (audit round 16): phase-spec (cc-llm) advertises NO tools; live-agent (cc-agent) advertises the manifest', async () => {
+    const rec = recordingOpenAiFetch()
+    const { ctx } = makeCtx({
+      ...openaiCtxOverrides(),
+      // A real MCP tool is in the manifest — it must reach ONLY the live-agent turn.
+      toolManifest: () => [{ name: 'work_board_add', description: 'add', input_schema: { type: 'object' } }],
+      openaiFetchImpl: rec.fetchImpl,
+    })
+    const w = wireSubstrates(ctx)
+    // Phase-spec (onboarding, user-controlled) — must advertise NO MCP tools.
+    await drain(w.llmCallSubstrate!)
+    // Live-agent (post-onboarding chat) — mirrors enableToolBridge → tools present.
+    await drain(w.liveAgentSubstrate!)
+    expect(rec.bodies).toHaveLength(2)
+    // bodies[0] = phase-spec: NO tools advertised (no privilege escalation).
+    expect(rec.bodies[0]!['tools']).toBeUndefined()
+    // bodies[1] = live-agent: the manifest tool IS advertised.
+    const liveTools = (rec.bodies[1]!['tools'] as Array<{ name: string }> | undefined) ?? []
+    expect(liveTools.map((t) => t.name)).toEqual(['work_board_add'])
+  })
+
   test('provider=openai: trident-fire + ephemeral substrates STILL dispatch through the Claude Code factory', async () => {
     // The CC-typed `substrateFactory` is used ONLY by the anthropic path. If the
     // trident substrates recorded into `captured`, they are on Claude Code —

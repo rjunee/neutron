@@ -77,30 +77,50 @@ export function wireSubstrates(ctx: OpenWiringContext): WiredSubstrates {
     ctx.openaiLlmPool !== null &&
     ctx.openaiLlmPool !== undefined &&
     ctx.bindMcpResolver !== undefined
-  const conversationalProvider: Partial<BuildLlmCallSubstrateInput> = openaiRequested
-    ? {
-        // ALWAYS set provider='openai' for an explicit selection. When fully wired
-        // the `openai` config is included; when NOT, it is omitted so the substrate
-        // emits its LOUD terminal error (never a silent Anthropic fallback).
-        provider: 'openai',
-        ...(openaiFullyWired
-          ? {
-              openai: {
-                pool: ctx.openaiLlmPool!,
-                bindMcpResolver: ctx.bindMcpResolver!,
-                // OPERATOR OVERRIDE (audit round 11) — resolve the model ids from the
-                // COMPOSER'S selected env (`ctx.env`), NOT the ambient global
-                // `process.env`, so `NEUTRON_OPENAI_MODEL` on the instance env is honored.
-                model_preference: getOpenAiModelPreference(ctx.env),
-                // HONEST TOOL MANIFEST (audit BLOCKER 1) — only real MCP tools reach GPT.
-                ...(ctx.toolManifest !== undefined ? { toolManifest: ctx.toolManifest } : {}),
-                // Test-only fetch seam (E2E mocked GPT), mirrors substrateFactory.
-                ...(ctx.openaiFetchImpl !== undefined ? { fetchImpl: ctx.openaiFetchImpl } : {}),
-              },
-            }
-          : {}),
-      }
-    : {}
+  // CAPABILITY-PARITY (audit round 16) — the OpenAI config must grant EXACTLY the
+  // capabilities the substrate's CLAUDE-path equivalent grants, never more. The
+  // decisive one is the TOOL BRIDGE: on the Claude path ONLY `cc-agent-*` (live
+  // chat) sets `enableToolBridge: true`; `cc-llm-*` (onboarding phase-spec) does
+  // NOT. So the OpenAI `toolManifest` (which becomes the GPT tool surface) is
+  // included ONLY for the live-agent substrate — never the phase-spec one, whose
+  // input is user-controlled ONBOARDING text. Emitting the full MCP manifest there
+  // would let onboarding prompts reach work_board / dispatch / etc. = privilege
+  // escalation the Claude path never permits.
+  const conversationalProviderFor = (
+    withToolBridge: boolean,
+  ): Partial<BuildLlmCallSubstrateInput> =>
+    openaiRequested
+      ? {
+          // ALWAYS set provider='openai' for an explicit selection. When fully wired
+          // the `openai` config is included; when NOT, it is omitted so the substrate
+          // emits its LOUD terminal error (never a silent Anthropic fallback).
+          provider: 'openai',
+          ...(openaiFullyWired
+            ? {
+                openai: {
+                  pool: ctx.openaiLlmPool!,
+                  bindMcpResolver: ctx.bindMcpResolver!,
+                  // OPERATOR OVERRIDE (audit round 11) — resolve the model ids from the
+                  // COMPOSER'S selected env (`ctx.env`), NOT the ambient global
+                  // `process.env`, so `NEUTRON_OPENAI_MODEL` on the instance env is honored.
+                  model_preference: getOpenAiModelPreference(ctx.env),
+                  // HONEST TOOL MANIFEST (audit BLOCKER 1) — only real MCP tools reach
+                  // GPT, and ONLY on a tool-bridge substrate (audit round 16). Without
+                  // a manifest the GPT turn advertises NO tools (spec.tools → []).
+                  ...(withToolBridge && ctx.toolManifest !== undefined
+                    ? { toolManifest: ctx.toolManifest }
+                    : {}),
+                  // Test-only fetch seam (E2E mocked GPT), mirrors substrateFactory.
+                  ...(ctx.openaiFetchImpl !== undefined ? { fetchImpl: ctx.openaiFetchImpl } : {}),
+                },
+              }
+            : {}),
+        }
+      : {}
+  // Phase-spec (`cc-llm-*`): NO tool bridge (mirrors the Claude path — it never sets
+  // enableToolBridge). Live-agent (`cc-agent-*`): tool bridge ON (mirrors enableToolBridge).
+  const phaseSpecProvider = conversationalProviderFor(false)
+  const liveAgentProvider = conversationalProviderFor(true)
 
   // Codex-fix — the CONVERSATIONAL substrates build when the SELECTED provider's
   // pool is available, NOT solely on the Anthropic `llmPool`. An OpenAI-only box
@@ -150,7 +170,9 @@ export function wireSubstrates(ctx: OpenWiringContext): WiredSubstrates {
           user_id: OWNER_USER_ID,
           project_slug,
           skip_permissions: true,
-          ...conversationalProvider,
+          // Phase-spec: openai provider WITHOUT the tool manifest (no tool bridge),
+          // mirroring the Claude path (cc-llm-* never sets enableToolBridge).
+          ...phaseSpecProvider,
           ...(substrateFactory !== undefined ? { substrateFactory } : {}),
         })
       : null
@@ -208,7 +230,10 @@ export function wireSubstrates(ctx: OpenWiringContext): WiredSubstrates {
           // `tools-bridge.ts`). The untrusted import (`cc-import-*`) and
           // disposable Trident (`cc-trident-*`) substrates deliberately omit it.
           enableToolBridge: true,
-          ...conversationalProvider,
+          // Live-agent: openai provider WITH the tool manifest (tool bridge ON),
+          // mirroring the Claude path's enableToolBridge — this is the ONE
+          // conversational substrate that gets tools on either provider.
+          ...liveAgentProvider,
           ...(substrateFactory !== undefined ? { substrateFactory } : {}),
         })
       : null
