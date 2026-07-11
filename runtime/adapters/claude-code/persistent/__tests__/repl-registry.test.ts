@@ -243,4 +243,64 @@ describe('repl-registry — corruption on the mutation path is loud and recovera
     expect(existsSync(path)).toBe(true) // patchRecord still no-ops + saves cleanly
     expect(sidecarsFor(path)).toEqual([])
   })
+
+  it('a single malformed row (schema skew, not whole-file corruption) is ALSO sidecar-preserved before it is dropped for good', () => {
+    const path = tmpRegistry()
+    // Two good rows + one row an older/newer build wrote with a missing field
+    // (the exact rolling-restart schema-skew scenario the bug report calls
+    // out) — the file as a whole still parses fine, so `onCorrupt` never
+    // fires; only `onDropRow` does. It must be just as recoverable.
+    const raw = JSON.stringify({
+      alice: rec({ sessionKey: 'alice', sessionId: 'uuid-alice' }),
+      bob: rec({ sessionKey: 'bob', sessionId: 'uuid-bob' }),
+      stale: { sessionKey: 'stale', sessionId: 'uuid-stale', cwd: '/home/x' }, // missing channelName/has_session
+    })
+    writeFileSync(path, raw)
+
+    const originalConsoleError = console.error
+    const logs: unknown[][] = []
+    console.error = (...args: unknown[]) => logs.push(args)
+    try {
+      patchRecord(path, 'alice', { pid: 7 }) // no options → default handlers
+    } finally {
+      console.error = originalConsoleError
+    }
+
+    // Loud, and mentions the dropped row's key.
+    expect(logs.some((l) => String(l[0]).includes('dropping row sessionKey=stale'))).toBe(true)
+    // Recoverable: a sidecar holding the pre-drop bytes (including `stale`)
+    // exists, even though the live save below drops it.
+    const sidecars = sidecarsFor(path)
+    expect(sidecars.length).toBeGreaterThan(0)
+    const sidecarContents = readFileSync(join(dirname(path), sidecars[0] as string), 'utf8')
+    expect(sidecarContents).toBe(raw)
+    expect(sidecarContents).toContain('uuid-stale')
+    // The valid rows survive the save normally; only the malformed one is gone
+    // from the LIVE file (by design — a half-shaped record isn't usable).
+    expect(getRecord(path, 'alice')?.pid).toBe(7)
+    expect(getRecord(path, 'bob')).toBeDefined()
+    expect(getRecord(path, 'stale')).toBeUndefined()
+  })
+
+  it('sidecar filenames never collide across rapid-fire corruptions in the same process (no silent overwrite of an earlier recovery copy)', () => {
+    const path = tmpRegistry()
+    upsertRecord(path, rec({ sessionKey: 'k' }))
+    const N = 8
+    const seenContents: string[] = []
+    for (let i = 0; i < N; i++) {
+      const marker = `MARKER-${i}`
+      writeFileSync(path, `{not json ${marker}`) // re-corrupt with a UNIQUE payload each time
+      seenContents.push(readFileSync(path, 'utf8'))
+      patchRecord(path, 'k', { pid: i }) // fires the default onCorrupt each time, back-to-back
+    }
+    // Every corruption event must have left its OWN sidecar — none silently
+    // clobbered by a same-millisecond successor.
+    const sidecars = sidecarsFor(path)
+    expect(new Set(sidecars).size).toBe(sidecars.length) // filenames are unique
+    expect(sidecars.length).toBe(N)
+    const sidecarBodies = sidecars.map((f) => readFileSync(join(dirname(path), f), 'utf8'))
+    for (const original of seenContents) {
+      expect(sidecarBodies).toContain(original) // every payload is recoverable, not just the last
+    }
+  })
 })

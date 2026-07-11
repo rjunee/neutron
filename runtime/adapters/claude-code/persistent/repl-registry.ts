@@ -22,11 +22,14 @@
  *   - A CORRUPT on-disk file (unparseable JSON, wrong shape, or unreadable)
  *     never brings supervision down — `loadRegistry` maps it to `{}` — but a
  *     mutation built on that `{}` would otherwise silently overwrite the file
- *     and vaporize every other sessionKey's row with zero signal. The
- *     mutation path (`withRegistry` and the `*Record` helpers) guards this:
- *     it logs loudly AND best-effort sidecars the raw corrupt bytes to
- *     `<path>.corrupt-<epoch-ms>` before the rebuild, so rows are recoverable
- *     by hand. See `defaultCorruptHandler` / `defaultDropRowHandler`.
+ *     and vaporize every other sessionKey's row with zero signal. Same story,
+ *     smaller blast radius, for a single MALFORMED row (schema skew from a
+ *     rolling restart) that `isMinimalRecord` drops during parse. The
+ *     mutation path (`withRegistry` and the `*Record` helpers) guards BOTH:
+ *     it logs loudly AND best-effort sidecars the pre-loss raw bytes to a
+ *     collision-resistant `<path>.corrupt-<epoch-ms>-<pid>-<counter>` before
+ *     the save makes the drop permanent, so rows are recoverable by hand. See
+ *     `defaultCorruptHandler` / `defaultDropRowHandler`.
  *
  * Keyed on the `sessionKey` STRING the substrate already uses
  * (`${substrate_instance_id} ${cwd}` today; `(instance, user, project)` after S3
@@ -91,10 +94,13 @@ export type RegistryLoadResult =
  *  `onDropRow`, if given, is invoked for every row that fails the schema
  *  check (e.g. one written by an older/newer build during a rolling
  *  restart) so the drop is at least observable instead of silent — the row
- *  itself is still dropped (a half-shaped record isn't safely usable). */
+ *  itself is still dropped (a half-shaped record isn't safely usable). Its
+ *  third argument is the FULL raw file text (not just the one row) so a
+ *  caller can sidecar-preserve the whole pre-drop file, not just the one
+ *  malformed row, before the drop becomes permanent on save. */
 export function parseRegistryContents(
   contents: string,
-  onDropRow?: (key: string, raw: unknown) => void,
+  onDropRow?: (key: string, raw: unknown, rawContents: string) => void,
 ): RegistryLoadResult {
   let parsed: unknown
   try {
@@ -108,7 +114,7 @@ export function parseRegistryContents(
   const registry: ReplRegistry = {}
   for (const [key, raw] of Object.entries(parsed as Record<string, unknown>)) {
     if (!isMinimalRecord(raw)) {
-      onDropRow?.(key, raw)
+      onDropRow?.(key, raw, contents)
       continue
     }
     const rec = raw as ReplRegistryRecord
@@ -147,7 +153,7 @@ function isMinimalRecord(raw: unknown): boolean {
 export function loadRegistry(
   path: string,
   onCorrupt?: (reason: string, rawContents?: string) => void,
-  onDropRow?: (key: string, raw: unknown) => void,
+  onDropRow?: (key: string, raw: unknown, rawContents: string) => void,
 ): ReplRegistry {
   if (!existsSync(path)) return {}
   let contents: string
@@ -173,12 +179,20 @@ export function getRecord(path: string, sessionKey: string): ReplRegistryRecord 
   return loadRegistry(path)[sessionKey]
 }
 
-/** Best-effort preserve a corrupt registry's raw bytes to a timestamped
- *  sidecar file next to `path`, so an operator can hand-recover rows the
- *  rebuild-from-`{}` is about to drop. Never throws — a sidecar-write
+// Per-process monotonic counter so two sidecars written in the SAME
+// millisecond (a corrupt full-file save racing a dropped-row save, or two
+// watchdog ticks in tight succession) never collide on `Date.now()` alone —
+// mirrors `atomic-write.ts`'s `stagingPathFor` pid+counter pattern. Without
+// this a same-millisecond second write would silently `writeFileSync`-truncate
+// the first recovery copy, defeating the whole point of the sidecar.
+let sidecarCounter = 0
+
+/** Best-effort preserve a corrupt/pre-drop registry's raw bytes to a
+ *  collision-resistant sidecar file next to `path`, so an operator can
+ *  hand-recover rows a save is about to drop. Never throws — a sidecar-write
  *  failure must not block the mutation already in flight inside the lock. */
 function writeSidecarBestEffort(path: string, contents: string): string | undefined {
-  const sidecarPath = `${path}.corrupt-${Date.now()}`
+  const sidecarPath = `${path}.corrupt-${Date.now()}-${process.pid}-${sidecarCounter++}`
   try {
     writeFileSync(sidecarPath, contents, { mode: 0o600 })
     return sidecarPath
@@ -219,17 +233,36 @@ function defaultCorruptHandler(path: string): (reason: string, rawContents?: str
   }
 }
 
-/** Default `onDropRow` handler — logs a row dropped for failing the schema
- *  check (e.g. missing `has_session`/`channelName`, written by an older/newer
- *  build during a rolling restart) so the loss is observable instead of
- *  silent. The row is still dropped; a half-shaped record isn't safely usable
- *  by supervision. */
-function defaultDropRowHandler(path: string): (key: string, raw: unknown) => void {
-  return (key) => {
+/**
+ * Default `onDropRow` handler — a row dropped for failing the schema check
+ * (e.g. missing `has_session`/`channelName`, written by an older/newer build
+ * during a rolling restart) is JUST as lossy as whole-file corruption: it's
+ * still gone from the registry the mutation is about to save. So this mirrors
+ * `defaultCorruptHandler`: logs loudly AND best-effort sidecars the
+ * PRE-DROP file bytes before the row disappears for good.
+ *
+ * A single `loadRegistry` pass can drop multiple rows (e.g. two stale rows
+ * from the same bad deploy); this handler sidecars only ONCE per pass — the
+ * closure-local `sidecarPath`/`attempted` below are scoped to one call of
+ * `defaultDropRowHandler(path)`, and `withRegistry` makes exactly one such
+ * call per mutation, so N drops in one load still produce ONE recovery file
+ * (all the dropped rows' original bytes are in that one copy of the whole
+ * file — no need for N).
+ */
+function defaultDropRowHandler(path: string): (key: string, raw: unknown, rawContents: string) => void {
+  let attempted = false
+  let sidecarPath: string | undefined
+  return (key, _raw, rawContents) => {
+    if (!attempted) {
+      attempted = true
+      sidecarPath = writeSidecarBestEffort(path, rawContents)
+    }
     console.error(
       `repl-registry: dropping row sessionKey=${key} in ${path} — missing required fields ` +
-        `(schema skew; likely written by an older/newer build). The row is lost from this ` +
-        `save unless recovered by hand from a prior copy.`,
+        `(schema skew; likely written by an older/newer build). ` +
+        (sidecarPath
+          ? `Pre-drop file bytes preserved at ${sidecarPath} for manual recovery.`
+          : `Sidecar preservation FAILED — the row is lost unless recovered by hand from elsewhere.`),
     )
   }
 }
@@ -243,7 +276,7 @@ export interface WithRegistryOptions {
   onCorrupt?: (reason: string, rawContents?: string) => void
   /** Called (instead of the loud default) per row dropped for failing the
    *  schema check. See `defaultDropRowHandler`. */
-  onDropRow?: (key: string, raw: unknown) => void
+  onDropRow?: (key: string, raw: unknown, rawContents: string) => void
 }
 
 /**
