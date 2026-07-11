@@ -26,7 +26,7 @@ import {
   type CredentialPool,
 } from '@neutronai/runtime/credential-pool.ts'
 import type { AgentSpec, Substrate } from '@neutronai/runtime/substrate.ts'
-import type { Event } from '@neutronai/runtime/events.ts'
+import type { Event, SubstrateErrorClass } from '@neutronai/runtime/events.ts'
 import { poolKeyFor } from '@neutronai/runtime/adapters/claude-code/persistent/persistent-repl-substrate.ts'
 
 let workdir: string
@@ -44,6 +44,8 @@ interface ErrorEmit {
   retryable: boolean
   /** error message (drives the composer's cooldown classification). */
   message?: string
+  /** O3 typed failure class (drives the composer's code-first classification). */
+  code?: SubstrateErrorClass
 }
 
 /**
@@ -81,6 +83,7 @@ function captureFactory(): {
           kind: 'error',
           message: behaviour.opts.message ?? 'rate_limit: limit reached',
           retryable: behaviour.opts.retryable,
+          ...(behaviour.opts.code !== undefined ? { code: behaviour.opts.code } : {}),
         }
       })()
       return {
@@ -617,6 +620,203 @@ test('2026-06-26 chat-blocker — a per-turn timeout is a TRANSIENT turn failure
   expect(err).toBeDefined()
   expect(err!.kind === 'error' && err!.retryable).toBe(true)
   expect(err!.kind === 'error' && /turn timeout/i.test(err!.message)).toBe(true)
+})
+
+// ---------------------------------------------------------------------------
+// 6b. O3 — code-first classification. A stamped `code` classifies the failure
+//     even when the message prose would NOT match the regex fallback, and the
+//     re-emitted event carries the typed code for downstream consumers.
+// ---------------------------------------------------------------------------
+
+test('O3 — a stamped code:turn_timeout classifies as turn-timeout even with prose the regex would NOT match (no cooldown, re-emitted)', async () => {
+  const pool = newCredentialPool({
+    strategy: 'fill_first',
+    credentials: [{ id: 'k1', kind: 'oauth', secret: 'oauth-1' }],
+  })
+  const cap = captureFactory()
+  // Deliberately NON-matching prose: `detectTurnTimeout` would return false, so
+  // WITHOUT the code this would fall through to the 429 cooldown map. The stamped
+  // code must classify it first.
+  cap.emitError({ retryable: true, message: 'inner adapter hiccup', code: 'turn_timeout' })
+  const sub = buildLlmCallSubstrate({
+    pool,
+    substrate_instance_id: 'inst-1',
+    cwd: workdir,
+    substrateFactory: cap.substrateFactory,
+  })
+  const handle = sub!.start(runSpec())
+  const events: Event[] = []
+  for await (const ev of handle.events) events.push(ev)
+  // Classified turn-timeout via code → no cooldown, healthy credential preserved.
+  expect(pool.credentials[0]!.cooldown_reason).toBeUndefined()
+  expect(pool.credentials[0]!.consecutive_failures).toBe(0)
+  const err = events.find((e) => e.kind === 'error')
+  expect(err!.kind === 'error' && err!.retryable).toBe(true)
+  // The turn-timeout event is re-emitted UNCHANGED, so its typed discriminant
+  // must survive to downstream consumers (not be silently stripped).
+  expect(err!.kind === 'error' && err!.code).toBe('turn_timeout')
+})
+
+test('O3 — a stamped code:channel_wedged skips the cooldown + re-emits the canonical message WITH code, even with non-matching prose', async () => {
+  const pool = newCredentialPool({
+    strategy: 'fill_first',
+    credentials: [{ id: 'k1', kind: 'oauth', secret: 'oauth-1' }],
+  })
+  const cap = captureFactory()
+  cap.emitError({ retryable: true, message: 'opaque inner failure', code: 'channel_wedged' })
+  const sub = buildLlmCallSubstrate({
+    pool,
+    substrate_instance_id: 'inst-1',
+    cwd: workdir,
+    substrateFactory: cap.substrateFactory,
+  })
+  const handle = sub!.start(runSpec())
+  const events: Event[] = []
+  for await (const ev of handle.events) events.push(ev)
+  expect(pool.credentials[0]!.cooldown_reason).toBeUndefined()
+  expect(pool.credentials[0]!.consecutive_failures).toBe(0)
+  const err = events.find((e) => e.kind === 'error')
+  expect(err!.kind === 'error' && err!.retryable).toBe(false)
+  expect(err!.kind === 'error' && err!.code).toBe('channel_wedged')
+  expect(err!.kind === 'error' && /session channel failed to bind/i.test(err!.message)).toBe(true)
+})
+
+test('O3 — a stamped code:binary_not_found stays FATAL (no cooldown) + re-emits with code, even with non-matching prose', async () => {
+  const pool = newCredentialPool({
+    strategy: 'fill_first',
+    credentials: [{ id: 'k1', kind: 'oauth', secret: 'oauth-1' }],
+  })
+  const cap = captureFactory()
+  cap.emitError({ retryable: true, message: 'opaque spawn failure', code: 'binary_not_found' })
+  const sub = buildLlmCallSubstrate({
+    pool,
+    substrate_instance_id: 'inst-1',
+    cwd: workdir,
+    substrateFactory: cap.substrateFactory,
+  })
+  const handle = sub!.start(runSpec())
+  const events: Event[] = []
+  for await (const ev of handle.events) events.push(ev)
+  // Care invariant: binary-not-found must NOT launder into a 429 cooldown.
+  expect(pool.credentials[0]!.cooldown_reason).toBeUndefined()
+  expect(pool.credentials[0]!.consecutive_failures).toBe(0)
+  const err = events.find((e) => e.kind === 'error')
+  expect(err!.kind === 'error' && err!.retryable).toBe(false)
+  expect(err!.kind === 'error' && err!.code).toBe('binary_not_found')
+})
+
+test('O3 — a STAMPED code is AUTHORITATIVE: code:turn_timeout with binary-not-found PROSE classifies as turn-timeout, NOT fatal binary (no laundering)', async () => {
+  const pool = newCredentialPool({
+    strategy: 'fill_first',
+    credentials: [{ id: 'k1', kind: 'oauth', secret: 'oauth-1' }],
+  })
+  const cap = captureFactory()
+  // Conflicting signals: the stamped code says turn_timeout, but the prose would
+  // match detectBinaryNotFound. The code must win — a turn-timeout is retryable
+  // on the same credential, whereas binary-not-found is FATAL. The regex must NOT
+  // run because the event is stamped.
+  cap.emitError({ retryable: true, message: 'Error: spawn claude ENOENT', code: 'turn_timeout' })
+  const sub = buildLlmCallSubstrate({
+    pool,
+    substrate_instance_id: 'inst-1',
+    cwd: workdir,
+    substrateFactory: cap.substrateFactory,
+  })
+  const handle = sub!.start(runSpec())
+  const events: Event[] = []
+  for await (const ev of handle.events) events.push(ev)
+  expect(pool.credentials[0]!.cooldown_reason).toBeUndefined()
+  expect(pool.credentials[0]!.consecutive_failures).toBe(0)
+  const err = events.find((e) => e.kind === 'error')
+  // Re-emitted UNCHANGED (turn-timeout path yields `ev`), retryable, code intact.
+  expect(err!.kind === 'error' && err!.retryable).toBe(true)
+  expect(err!.kind === 'error' && err!.code).toBe('turn_timeout')
+  // It is NOT rewritten to the fatal binary-not-found message.
+  expect(err!.kind === 'error' && /session channel failed to bind|not found on the server PATH/i.test(err!.message)).toBe(false)
+})
+
+test('O3 — code:channel_wedged with turn-timeout PROSE classifies as channel-wedged (fatal), NOT retryable turn-timeout', async () => {
+  const pool = newCredentialPool({
+    strategy: 'fill_first',
+    credentials: [{ id: 'k1', kind: 'oauth', secret: 'oauth-1' }],
+  })
+  const cap = captureFactory()
+  cap.emitError({ retryable: true, message: 'persistent-repl: turn timeout', code: 'channel_wedged' })
+  const sub = buildLlmCallSubstrate({
+    pool,
+    substrate_instance_id: 'inst-1',
+    cwd: workdir,
+    substrateFactory: cap.substrateFactory,
+  })
+  const handle = sub!.start(runSpec())
+  const events: Event[] = []
+  for await (const ev of handle.events) events.push(ev)
+  expect(pool.credentials[0]!.cooldown_reason).toBeUndefined()
+  const err = events.find((e) => e.kind === 'error')
+  // channel-wedged is FATAL (non-retryable) + canonical message + code.
+  expect(err!.kind === 'error' && err!.retryable).toBe(false)
+  expect(err!.kind === 'error' && err!.code).toBe('channel_wedged')
+  expect(err!.kind === 'error' && /session channel failed to bind/i.test(err!.message)).toBe(true)
+})
+
+test('O3 — code:aborted is authoritative in the COOLDOWN section too: a caller-cancel with `HTTP 401` PROSE does NOT cool the credential', async () => {
+  const pool = newCredentialPool({
+    strategy: 'fill_first',
+    credentials: [{ id: 'k1', kind: 'api_key', secret: 'sk-1' }],
+  })
+  const cap = captureFactory()
+  // Conflicting: stamped `aborted` (caller cancellation, no credential fault) but
+  // prose reads `HTTP 401`. The prose classifier must NOT run — no cooldown.
+  cap.emitError({ retryable: false, message: 'HTTP 401: cancelled', code: 'aborted' })
+  const sub = buildLlmCallSubstrate({
+    pool,
+    substrate_instance_id: 'inst-1',
+    cwd: workdir,
+    substrateFactory: cap.substrateFactory,
+  })
+  const handle = sub!.start(runSpec())
+  for await (const _ev of handle.events) {
+    // drain
+  }
+  expect(pool.credentials[0]!.cooldown_reason).toBeUndefined()
+  expect(pool.credentials[0]!.cooldown_until).toBeUndefined()
+  expect(pool.credentials[0]!.consecutive_failures).toBe(0)
+})
+
+test('O3 — code-authoritative cooldown MATRIX (every taxonomy member): only rate_limited/http_status cool the SELECTED credential', async () => {
+  const cases: Array<{ code: SubstrateErrorClass; retryable: boolean; message: string; cools: boolean }> = [
+    { code: 'binary_not_found', retryable: true, message: 'opaque', cools: false },
+    { code: 'channel_wedged', retryable: true, message: 'opaque', cools: false },
+    { code: 'turn_timeout', retryable: true, message: 'opaque', cools: false },
+    { code: 'aborted', retryable: false, message: 'HTTP 401: cancelled', cools: false },
+    { code: 'rate_limited', retryable: true, message: 'slow down', cools: true },
+    { code: 'http_status', retryable: false, message: 'HTTP 401: bad key', cools: true },
+    { code: 'no_credentials', retryable: false, message: 'opaque', cools: false },
+    // The Codex r4 fix: all_cooldown (retryable:true) describes POOL state, NOT a
+    // fault of the selected credential — it must NOT map to 429 + reportFailure.
+    { code: 'all_cooldown', retryable: true, message: 'opaque', cools: false },
+    { code: 'oauth_refresh', retryable: false, message: 'opaque', cools: false },
+  ]
+  for (const c of cases) {
+    const pool = newCredentialPool({
+      strategy: 'fill_first',
+      credentials: [{ id: 'k1', kind: 'api_key', secret: 'sk-1' }],
+    })
+    const cap = captureFactory()
+    cap.emitError({ retryable: c.retryable, message: c.message, code: c.code })
+    const sub = buildLlmCallSubstrate({
+      pool,
+      substrate_instance_id: 'inst-1',
+      cwd: workdir,
+      substrateFactory: cap.substrateFactory,
+    })
+    const handle = sub!.start(runSpec())
+    for await (const _ev of handle.events) {
+      // drain
+    }
+    const cooled = pool.credentials[0]!.cooldown_reason !== undefined
+    expect({ code: c.code, cooled }).toEqual({ code: c.code, cooled: c.cools })
+  }
 })
 
 // ---------------------------------------------------------------------------

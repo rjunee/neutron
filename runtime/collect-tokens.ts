@@ -12,6 +12,7 @@
  * here in `runtime/`.
  */
 
+import { SubstrateCallError } from './errors.ts'
 import type { SessionHandle } from './session-handle.ts'
 
 /**
@@ -40,8 +41,17 @@ export async function collectTokensToString(
   let firstTokenSeen = false
   if (signal !== undefined) {
     if (signal.aborted) {
-      await handle.cancel()
-      throw new Error('cc-llm-call: aborted before dispatch')
+      // Best-effort cancellation: the typed `aborted` error is the CONTRACT here,
+      // so a rejecting `cancel()` must NOT escape and mask it (mirrors the
+      // mid-stream abort listener's `.catch(() => undefined)`). Swallow any
+      // cancel rejection, THEN throw the promised typed error.
+      await handle.cancel().catch(() => undefined)
+      // O3 — a caller-signalled cancellation is the `aborted` class. Message
+      // text preserved verbatim so the freeze-timeout classifier still matches.
+      throw new SubstrateCallError('cc-llm-call: aborted before dispatch', {
+        code: 'aborted',
+        retryable: false,
+      })
     }
     abortListener = (): void => {
       aborted = true
@@ -53,7 +63,7 @@ export async function collectTokensToString(
     let buf = ''
     for await (const ev of handle.events) {
       if (aborted) {
-        throw new Error('cc-llm-call: aborted')
+        throw new SubstrateCallError('cc-llm-call: aborted', { code: 'aborted', retryable: false })
       }
       if (ev.kind === 'token') {
         // FIX #347 — signal the first real token exactly once so the caller can
@@ -73,7 +83,17 @@ export async function collectTokensToString(
         return buf
       }
       if (ev.kind === 'error') {
-        throw new Error(`cc-llm-call: ${ev.message}`)
+        // O3 — surface a TYPED error carrying the event's failure `code` +
+        // recovery hints so callers can classify on `.code` instead of regexing
+        // prose. The `message` text is preserved EXACTLY (`cc-llm-call: <prose>`)
+        // so the freeze-timeout / 429 / cooldown classifiers that still read
+        // prose stay green mid-migration (SubstrateCallError extends Error, so
+        // every `instanceof Error` / `.message` consumer is unaffected).
+        throw new SubstrateCallError(`cc-llm-call: ${ev.message}`, {
+          retryable: ev.retryable,
+          ...(ev.code !== undefined ? { code: ev.code } : {}),
+          ...(ev.retry_after_ms !== undefined ? { retry_after_ms: ev.retry_after_ms } : {}),
+        })
       }
       // thinking / tool_call / tool_result_ack / status — informational
     }
@@ -87,7 +107,7 @@ export async function collectTokensToString(
     // which breaks the router's timeout-then-escalate-to-Sonnet contract
     // (it might never escalate if we return a truncated Pass-1 response).
     if (aborted) {
-      throw new Error('cc-llm-call: aborted')
+      throw new SubstrateCallError('cc-llm-call: aborted', { code: 'aborted', retryable: false })
     }
     // Iterator ended without an explicit completion event AND no abort.
     // Treat the accumulated buffer as the final response (defensive —

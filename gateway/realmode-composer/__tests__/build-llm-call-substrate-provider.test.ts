@@ -17,12 +17,51 @@ import { expect, test } from 'bun:test'
 import {
   buildLlmCallSubstrate,
   openAiSessionScopeKey,
+  openAiCredentialCooldownForEvent,
 } from '../build-llm-call-substrate.ts'
 import type { ClaudeCodeSubstrateOptions } from '@neutronai/runtime/adapters/claude-code/index.ts'
 import { newCredentialPool, type CredentialPool } from '@neutronai/runtime/credential-pool.ts'
 import type { AgentSpec, Substrate } from '@neutronai/runtime/substrate.ts'
 import type { SessionHandle } from '@neutronai/runtime/session-handle.ts'
 import type { Event } from '@neutronai/runtime/events.ts'
+
+// ───────────────────────────────────────────────────────────────────────────
+// O3 — the OpenAI credential-cooldown decision is CODE-FIRST (a stamped class is
+// authoritative; prose runs only for a legacy/unstamped event).
+// ───────────────────────────────────────────────────────────────────────────
+
+test('O3 openAiCredentialCooldownForEvent — stamped rate_limited cools the key (429), by CODE', () => {
+  // Even with non-HTTP prose the stamped rate-limit class cools as 429.
+  expect(openAiCredentialCooldownForEvent({ code: 'rate_limited', message: 'slow down' })).toBe(429)
+})
+
+test('O3 openAiCredentialCooldownForEvent — stamped http_status uses the numeric status from the HTTP prefix', () => {
+  expect(openAiCredentialCooldownForEvent({ code: 'http_status', message: 'HTTP 401: bad key' })).toBe(401)
+  expect(openAiCredentialCooldownForEvent({ code: 'http_status', message: 'HTTP 402: quota' })).toBe(402)
+  // A non-credential HTTP status (5xx/408) is a server/network fault — no cooldown.
+  expect(openAiCredentialCooldownForEvent({ code: 'http_status', message: 'HTTP 500: boom' })).toBeNull()
+})
+
+test('O3 openAiCredentialCooldownForEvent — code is AUTHORITATIVE: aborted with conflicting `HTTP 401` prose does NOT cool', () => {
+  // The concrete boundary Codex flagged: a caller-cancel must never cool the key
+  // just because its prose reads `HTTP 401`.
+  expect(openAiCredentialCooldownForEvent({ code: 'aborted', message: 'HTTP 401: cancelled' })).toBeNull()
+})
+
+test('O3 openAiCredentialCooldownForEvent — non-credential stamped classes never cool by prose', () => {
+  expect(openAiCredentialCooldownForEvent({ code: 'channel_wedged', message: 'HTTP 401: x' })).toBeNull()
+  expect(openAiCredentialCooldownForEvent({ code: 'turn_timeout', message: 'invalid api key' })).toBeNull()
+})
+
+test('O3 openAiCredentialCooldownForEvent — legacy UNSTAMPED events fall back to prose (HTTP status + CLI-auth)', () => {
+  expect(openAiCredentialCooldownForEvent({ message: 'HTTP 429: limit' })).toBe(429)
+  expect(openAiCredentialCooldownForEvent({ message: 'HTTP 402: quota' })).toBe(402)
+  // CLI-auth-shaped stderr tail with no HTTP prefix → 401.
+  expect(openAiCredentialCooldownForEvent({ message: 'invalid api key' })).toBe(401)
+  // A 5xx / transient with no credential signal → no cooldown.
+  expect(openAiCredentialCooldownForEvent({ message: 'HTTP 500: upstream' })).toBeNull()
+  expect(openAiCredentialCooldownForEvent({ message: 'network unreachable' })).toBeNull()
+})
 
 function anthropicPool(): CredentialPool {
   return newCredentialPool({

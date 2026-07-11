@@ -126,6 +126,53 @@ describe('gpt-5-5-api responses-stream', () => {
     const completions = events.filter((e) => e.kind === 'completion')
     expect(errors.length).toBe(1)
     expect(completions.length).toBe(0)
+    // O3 — a STREAMED 429 must carry the same typed class the non-OK HTTP path
+    // stamps, so `collectTokensToString` surfaces `rate_limited`, not `unknown`.
+    expect(errors[0]!.kind === 'error' && errors[0]!.code).toBe('rate_limited')
+  })
+
+  test('O3 — a STREAMED non-429 error stamps code=http_status (parity with the non-OK HTTP path)', async () => {
+    const body = ssePayload([
+      { event: 'response.created', data: { type: 'response.created', response: { id: 'r1' } } },
+      { event: 'response.error', data: { type: 'response.error', error: { type: 'insufficient_quota', message: 'boom' } } },
+    ])
+    const events = await collect(
+      startResponsesStream({
+        endpoint: 'http://test/responses',
+        authHeaders: {},
+        body: {},
+        signal: new AbortController().signal,
+        substrate_instance_id: 'gpt-1',
+        fetchImpl: mockFetch(body),
+      }),
+    )
+    const err = events.find((e) => e.kind === 'error')
+    expect(err!.kind === 'error' && err!.code).toBe('http_status')
+    // The `HTTP <status>:` prefix still carries the numeric status for the cooldown map.
+    expect(err!.kind === 'error' && err!.message.startsWith('HTTP 402:')).toBe(true)
+  })
+
+  test('O3 — a STREAMED 429 with a retry hint stamps code=rate_limited AND carries retry_after_ms', async () => {
+    const body = ssePayload([
+      { event: 'response.created', data: { type: 'response.created', response: { id: 'r1' } } },
+      {
+        event: 'response.error',
+        data: { type: 'response.error', error: { type: 'rate_limit_exceeded', message: 'Please try again in 2s' } },
+      },
+    ])
+    const events = await collect(
+      startResponsesStream({
+        endpoint: 'http://test/responses',
+        authHeaders: {},
+        body: {},
+        signal: new AbortController().signal,
+        substrate_instance_id: 'gpt-1',
+        fetchImpl: mockFetch(body),
+      }),
+    )
+    const err = events.find((e) => e.kind === 'error')
+    expect(err!.kind === 'error' && err!.code).toBe('rate_limited')
+    expect(err!.kind === 'error' && err!.retry_after_ms).toBe(2000)
   })
 
   test('reasoning deltas → thinking', async () => {

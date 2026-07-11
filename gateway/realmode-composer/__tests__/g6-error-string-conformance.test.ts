@@ -351,10 +351,14 @@ test('G6 · isFreezeTimeout matches the REAL turn-timeout AND composer-abort pro
     'the substrate module cluster',
   )
   // Producer B: runtime/collect-tokens.ts abort-signal listener —
-  //   throw new Error('cc-llm-call: aborted')
+  //   throw new SubstrateCallError('cc-llm-call: aborted', { code: 'aborted', ... })
+  // O3 migrated this producer from a bare `throw new Error(...)` to the typed
+  // `SubstrateCallError` (code: 'aborted') — the message LITERAL is unchanged, so
+  // the extraction still fails loudly the moment the `cc-llm-call: aborted`
+  // wording is reworded; only the constructor it is passed to changed.
   const composerAbort = extractFromSource(
     COLLECT_TOKENS_SRC_PATH,
-    /throw new Error\('(cc-llm-call: aborted)'\)/,
+    /throw new SubstrateCallError\('(cc-llm-call: aborted)',/,
     'the `cc-llm-call: aborted` composer-abort producer literal',
   )
   expect(isFreezeTimeout(turnTimeout)).toBe(true)

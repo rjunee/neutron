@@ -257,6 +257,71 @@ describe('PersistentReplSubstrate — failure + status', () => {
     expect(threw).toBe(false)
   })
 
+  it('O3 — a spawn/channel-bind failure stamps channel_wedged + the taxonomy-consistent NON-retryable hint at the producer', async () => {
+    // A host that spawns a LIVE child but NEVER announces /channel-ready, so the
+    // REAL post-spawn assertion fails (`no-channel-ready`) and the producer catch
+    // stamps `channel_wedged`. The taxonomy marks channel-wedge FATAL, so the
+    // EMITTED event must carry retryable:false — a DIRECT consumer (not just the
+    // gateway composer, which rewrites it) reads the correct recovery hint.
+    const noChannelHost: PtyHost = {
+      spawn() {
+        let hasExited = false
+        let exitResolve: (c: number | null) => void = () => {}
+        const exited = new Promise<number | null>((r) => {
+          exitResolve = r
+        })
+        return {
+          pid: 424242,
+          write() {},
+          resize() {},
+          kill() {
+            if (!hasExited) {
+              hasExited = true
+              exitResolve(143)
+            }
+          },
+          exited,
+          hasExited: () => hasExited,
+        }
+      },
+    }
+    const sub = createPersistentReplSubstrate(
+      baseOptions(noChannelHost, {
+        assertConfig: { readyBudgetMs: 80, readyIntervalMs: 10, healthBudgetMs: 80, healthIntervalMs: 10 },
+      }),
+    )
+    const handle = sub.start(spec('hi'))
+    const events: Event[] = []
+    for await (const ev of handle.events) events.push(ev)
+    const err = events.find((e) => e.kind === 'error')
+    expect(err).toBeDefined()
+    expect(err!.kind === 'error' && err!.code).toBe('channel_wedged')
+    expect(err!.kind === 'error' && err!.retryable).toBe(false)
+  })
+
+  it('O3 — a missing-binary spawn (ENOENT) stamps binary_not_found + the NON-retryable hint at the producer', async () => {
+    // The host's spawn throws a Bun/posix missing-binary error; the producer catch
+    // classifies it `binary_not_found` (FATAL) and must emit retryable:false so a
+    // missing `claude` never launders into a retry loop / 429 cooldown.
+    const enoentHost: PtyHost = {
+      spawn() {
+        throw new Error('spawn claude ENOENT')
+      },
+    }
+    const sub = createPersistentReplSubstrate(
+      baseOptions(enoentHost, {
+        assertConfig: { readyBudgetMs: 80, readyIntervalMs: 10, healthBudgetMs: 80, healthIntervalMs: 10 },
+      }),
+    )
+    const handle = sub.start(spec('hi'))
+    const events: Event[] = []
+    for await (const ev of handle.events) events.push(ev)
+    const err = events.find((e) => e.kind === 'error')
+    expect(err).toBeDefined()
+    expect(err!.kind === 'error' && err!.code).toBe('binary_not_found')
+    expect(err!.kind === 'error' && err!.retryable).toBe(false)
+  })
+
   it('cancel() ends the iterator and leaves no completion', async () => {
     // A responder that never replies → the turn stays open until we cancel.
     const { host } = makeFakeReplHost(() => '__NO_REPLY__')

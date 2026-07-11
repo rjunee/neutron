@@ -26,7 +26,7 @@
  * caller-facing `tool_resolution: 'internal'` per § 4.3 of the P1 plan.
  */
 
-import type { Event, TokenUsage } from '../../events.ts'
+import type { Event, TokenUsage, SubstrateErrorClass } from '../../events.ts'
 
 export interface ResponsesStreamOptions {
   endpoint: string
@@ -64,7 +64,7 @@ export async function* startResponsesStream(
     })
   } catch (err) {
     if (opts.signal.aborted) {
-      yield { kind: 'error', message: 'cancelled', retryable: false }
+      yield { kind: 'error', message: 'cancelled', retryable: false, code: 'aborted' }
       return
     }
     yield { kind: 'error', message: `fetch failed: ${(err as Error).message}`, retryable: true }
@@ -108,11 +108,17 @@ export async function* startResponsesStream(
           `differs, set NEUTRON_OPENAI_MODEL (or NEUTRON_OPENAI_MODEL_PREFERENCE) to the correct ` +
           `id and retry — this is a configuration error, not a transient failure. Upstream: ${truncate(text, 200)}`,
         retryable: false,
+        code: 'http_status',
       }
       return
     }
     const retryable = status === 429 || status === 408 || (status >= 500 && status < 600)
     const retry_after = parseRetryAfterMs(response.headers.get('retry-after'))
+    // O3 — stamp the typed class: a 429 is the `rate_limited` class, every other
+    // non-ok status is the generic `http_status` class. The numeric status stays
+    // in the `HTTP <status>:` message prefix (the composer's cooldown map needs
+    // the exact number), so the code is an ADDITIVE discriminant, not a replacement.
+    const code: SubstrateErrorClass = status === 429 ? 'rate_limited' : 'http_status'
     const ev: Event =
       retry_after !== undefined
         ? {
@@ -120,8 +126,9 @@ export async function* startResponsesStream(
             message: `HTTP ${status}: ${truncate(text, 400)}`,
             retryable,
             retry_after_ms: retry_after,
+            code,
           }
-        : { kind: 'error', message: `HTTP ${status}: ${truncate(text, 400)}`, retryable }
+        : { kind: 'error', message: `HTTP ${status}: ${truncate(text, 400)}`, retryable, code }
     yield ev
     return
   }
@@ -311,10 +318,16 @@ function mapResponsesEvent(
         type === 'rate_limit_exceeded' || type === 'server_error' || type === 'timeout'
       const message = status !== undefined ? `HTTP ${status}: ${rawMessage}` : rawMessage
       const retry_after = parseRetryAfterFromMessage(rawMessage)
+      // O3 — stamp the SAME typed class the non-OK HTTP path stamps, so a STREAMED
+      // error carries identical durable classification (`rate_limited` for a 429,
+      // else `http_status`). Only when the durable type maps to no HTTP status do
+      // we leave `code` unset (an unclassifiable human string → `unknown`).
+      const code: SubstrateErrorClass | undefined =
+        status === undefined ? undefined : status === 429 ? 'rate_limited' : 'http_status'
       const ev: Event =
         retry_after !== undefined
-          ? { kind: 'error', message, retryable, retry_after_ms: retry_after }
-          : { kind: 'error', message, retryable }
+          ? { kind: 'error', message, retryable, retry_after_ms: retry_after, ...(code !== undefined ? { code } : {}) }
+          : { kind: 'error', message, retryable, ...(code !== undefined ? { code } : {}) }
       return [ev]
     }
     default:

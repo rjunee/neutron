@@ -36,10 +36,41 @@ export interface TokenUsage {
  *                  `substrate_instance_id`, optional `session` continuation
  *                  hint, optional `dollars` (Private substrate only).
  * - `error` — terminal-or-mid-stream error. `retryable` + `retry_after_ms`
- *             telegraph the adapter's recovery hint.
+ *             telegraph the adapter's recovery hint; the additive `code?`
+ *             (O3) telegraphs the typed failure CLASS so consumers classify on
+ *             a discriminant instead of regexing `message`.
  * - `status` — non-fatal informational signal (e.g. "rotated credential",
  *              "cache cold after rotation"). Pure UX/observability.
  */
+
+/**
+ * Typed substrate/runtime failure classes (O3). Stamped ADDITIVELY on the
+ * `error` event's `code?` field at the producer's throw/emit site, so downstream
+ * classifiers read a discriminant first and fall back to message-prose regex
+ * only for legacy events that predate the stamp (one release). The registered
+ * code table (retryable default + description per class) lives in `./errors.ts`.
+ *
+ * The nine classes unify the two pre-existing ad-hoc taxonomies:
+ *   - the credential-resolution reasons (`no_credentials` / `all_cooldown` /
+ *     `oauth_refresh` — formerly `ScrubbedAuthEnvError.reason`), and
+ *   - the message-regex substrate classifiers (`binary_not_found` /
+ *     `channel_wedged` / `turn_timeout` / `http_status` / `rate_limited` /
+ *     `aborted`).
+ *
+ * Additive to the locked Event union: `code` is OPTIONAL, so every existing
+ * `{ kind: 'error', … }` literal stays valid and the wire shape is unchanged.
+ */
+export type SubstrateErrorClass =
+  | 'binary_not_found'
+  | 'channel_wedged'
+  | 'turn_timeout'
+  | 'http_status'
+  | 'rate_limited'
+  | 'aborted'
+  | 'no_credentials'
+  | 'all_cooldown'
+  | 'oauth_refresh'
+
 export type Event =
   | { kind: 'token'; text: string }
   | { kind: 'tool_call'; tool_name: string; args: unknown; call_id: string }
@@ -52,5 +83,13 @@ export type Event =
       substrate_instance_id: string
       dollars?: number
     }
-  | { kind: 'error'; message: string; retryable: boolean; retry_after_ms?: number }
+  | {
+      kind: 'error'
+      message: string
+      retryable: boolean
+      retry_after_ms?: number
+      /** O3 typed failure class — stamped at the producer; consumers classify on
+       *  this before falling back to `message` regex. Optional + additive. */
+      code?: SubstrateErrorClass
+    }
   | { kind: 'status'; message: string }
