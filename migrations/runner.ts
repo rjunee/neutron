@@ -158,7 +158,16 @@ const PRAGMA_PREAMBLE_RE = /^(?:\s*(?:--[^\n]*\n|\/\*[\s\S]*?\*\/|PRAGMA\s+[^;]+
 export function splitPragmaPreamble(sql: string): { preamble: string; body: string } {
   const match = sql.match(PRAGMA_PREAMBLE_RE)
   const preamble = match ? match[0] : ''
-  if (!/PRAGMA\s+/i.test(preamble)) {
+  // The "contains an actual PRAGMA" check must run against the preamble with
+  // its comments stripped, not the raw preamble text — a header comment that
+  // merely MENTIONS "PRAGMA " (e.g. `-- No PRAGMA preamble needed.`) would
+  // otherwise word-match and pass a comment-only string through to
+  // `db.exec(preamble)`, which SQLite rejects ("Query contained no valid SQL
+  // statement"). Migration preambles are PRAGMA-only per the doc comment
+  // above, so they don't carry string literals that could themselves contain
+  // `--`/`/* */` — this strip is safe for the shapes this runner handles.
+  const stripped = preamble.replace(/--[^\n]*\n/g, '').replace(/\/\*[\s\S]*?\*\//g, '')
+  if (!/PRAGMA\s+/i.test(stripped)) {
     return { preamble: '', body: sql }
   }
   return { preamble, body: sql.slice(preamble.length) }
