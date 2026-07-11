@@ -253,6 +253,15 @@ export interface CreateAppWsSurfaceOptions {
    */
   app_ws_token?: string
   /**
+   * S2 (b) — require the per-boot `app_ws_token` even from an ORIGIN-LESS
+   * (native) client. On a LOOPBACK bind this stays `false` so native dev clients
+   * authenticate by bearer alone (today's ergonomics). On a WIDE bind it is set
+   * `true` so an Origin-less client on the network can NOT ride the predictable
+   * `dev:owner` bearer — it must present the real per-boot token like the web
+   * client does. No effect when `app_ws_token` is unset (no token gate at all).
+   */
+  require_token_without_origin?: boolean
+  /**
    * S2 (a) — configured owner web origin(s) (e.g. `NEUTRON_WEB_APP_BASE` /
    * landing origin) whose BROWSER upgrades are allowed IN ADDITION to a strict
    * same-origin (`Origin` host === `Host`). A reverse-proxied deploy serves the
@@ -309,6 +318,8 @@ export function createAppWsSurface(opts: CreateAppWsSurfaceOptions): AppWsSurfac
   const chat_command_filter = opts.chat_command_filter
   const project_slug = opts.project_slug
   const app_ws_token = opts.app_ws_token
+  // S2 (b) — on a WIDE bind, an Origin-less client must ALSO present the token.
+  const requireTokenWithoutOrigin = opts.require_token_without_origin ?? false
   // S2 (a) — resolve the configured owner web origin(s) to canonical origins
   // ONCE (empty on a loopback dogfood box), reused on every upgrade check below.
   const allowedWebOrigins = normalizeWebOrigins(opts.allowed_web_origins ?? [])
@@ -342,15 +353,17 @@ export function createAppWsSurface(opts: CreateAppWsSurfaceOptions): AppWsSurfac
           )
         }
         const token = url.searchParams.get('token') ?? ''
-        // S0 (b) — per-boot token gate for BROWSER upgrades. When a per-boot
-        // token is configured, an upgrade carrying an `Origin` (a browser) MUST
-        // present exactly it — the guessable `dev:<owner>` constant is no longer
-        // accepted from the web. Native clients (no Origin) skip this and fall
-        // through to the resolver's bearer check. Constant-time compare so a
-        // token guess can't be narrowed by response timing.
+        // S0 (b) / S2 (b) — per-boot token gate. When a per-boot token is
+        // configured, an upgrade carrying an `Origin` (a browser) MUST present
+        // exactly it — the guessable `dev:<owner>` constant is no longer accepted
+        // from the web. On a LOOPBACK bind, Origin-less native clients skip this
+        // and fall through to the resolver's bearer check (dev ergonomics). On a
+        // WIDE bind (`requireTokenWithoutOrigin`), Origin-less clients on the
+        // network must ALSO present the token — they cannot ride `dev:owner`.
+        // Constant-time compare so a token guess can't be narrowed by timing.
         if (
           app_ws_token !== undefined &&
-          origin !== null &&
+          (origin !== null || requireTokenWithoutOrigin) &&
           !constantTimeEqual(token, app_ws_token)
         ) {
           return new Response(

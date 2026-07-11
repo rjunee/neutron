@@ -15,6 +15,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { boot } from '../index.ts'
+import { assertWideBindPolicy } from '../boot-bind-policy.ts'
 import { resolveBootConfig } from '@neutronai/config/index.ts'
 
 const roots: string[] = []
@@ -60,20 +61,19 @@ describe('S2 (b) Blocker A — wide-bind guard reads the config snapshot', () =>
     await expect(boot({ config, port: 0 })).rejects.toThrow(/NEUTRON_DEV_AUTH/)
   })
 
-  test('snapshot CLEAN + ambient bypass SET after resolution → boots (ignores live env)', async () => {
+  test('snapshot CLEAN + ambient bypass SET after resolution → guard IGNORES live env', () => {
+    // The env-layer guard reads ONLY the config snapshot: a clean snapshot is
+    // NOT rejected just because the live process.env later gains a bypass var.
+    // (We assert the guard directly rather than through a full wide `boot()` — a
+    // clean *env-layer* pass does NOT mean a clean wide bind is safe to expose;
+    // the real credential gate — rejecting the predictable `dev:owner` on a wide
+    // bind — is the COMPOSER's job, proven by the composition e2e
+    // `wide-bind-dev-owner-rejected.open.test.ts`.)
     const root = mkdtempSync(join(tmpdir(), 'neutron-s2-snap-'))
     roots.push(root)
     snapshotEnv()
-    // Wide bind, but the snapshot has NO bypass → the guard must permit it…
-    const config = configFor(root, { NEUTRON_HOST: '0.0.0.0' })
-    // …even though a bypass var is set in the live env AFTER resolution.
+    const config = configFor(root, { NEUTRON_HOST: '0.0.0.0' }) // no bypass in snapshot
     process.env['NEUTRON_APP_WS_DEV_SECRET'] = 'ambient-should-be-ignored'
-    let handle: Awaited<ReturnType<typeof boot>> | null = null
-    try {
-      handle = await boot({ config, port: 0 })
-      expect(handle.server.port).toBeGreaterThan(0)
-    } finally {
-      if (handle !== null) await handle.shutdown({ force: true })
-    }
+    expect(() => assertWideBindPolicy(config.host, config.devBypassEnv)).not.toThrow()
   })
 })

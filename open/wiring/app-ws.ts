@@ -237,6 +237,14 @@ export interface WireAppWsDeps {
    * injects into the page bootstrap.
    */
   appWsToken: string
+  /**
+   * S2 (b) — TRUE when the gateway binds LOOPBACK (127.0.0.1 dogfood). Loopback
+   * keeps today's ergonomics (Origin-less native clients skip the per-boot token
+   * gate); a WIDE bind flips it so an Origin-less client on the network must
+   * present the token too (it cannot ride the predictable `dev:owner` bearer,
+   * which the composer's resolver also refuses on a wide bind).
+   */
+  bindIsLoopback: boolean
   /** The landing stack — supplies `buttonStore` + `stateStore`. */
   landing: LandingStackWithEngine
   /** Diff-gated rail refresh (no-ops when the snapshot is unchanged). */
@@ -292,6 +300,7 @@ export function wireAppWs(ctx: OpenWiringContext, deps: WireAppWsDeps): WiredApp
     chatCommandFilter,
     appOwnerAuth,
     appWsToken,
+    bindIsLoopback,
     landing,
     emitProjectsChangedIfChanged,
     buildProjectsChangedFrame,
@@ -806,6 +815,10 @@ export function wireAppWs(ctx: OpenWiringContext, deps: WireAppWsDeps): WiredApp
     project_slug,
     // S0 (b) — require the per-boot token on browser-origin WS upgrades.
     app_ws_token: appWsToken,
+    // S2 (b) — on a WIDE bind, Origin-less clients must present the token too
+    // (they cannot ride the predictable `dev:owner` bearer from the network).
+    // Loopback keeps native dev clients token-free.
+    require_token_without_origin: !bindIsLoopback,
     // S2 (a) — also allow the configured owner web origin (NEUTRON_WEB_APP_BASE)
     // so a reverse-proxied deploy (web app served from a different origin than
     // the gateway Host) still connects; a bare same-origin check would reject

@@ -43,6 +43,7 @@ function makeFakeServer(upgradeResult = true): {
 function makeSurface(
   app_ws_token?: string,
   allowed_web_origins?: readonly string[],
+  require_token_without_origin?: boolean,
 ): ReturnType<typeof createAppWsSurface> {
   const registry = new InMemoryAppWsSessionRegistry()
   const adapter = new AppWsAdapter({ registry, receiver: { receive: async () => {} } })
@@ -54,6 +55,7 @@ function makeSurface(
     project_slug: 'demo',
     ...(app_ws_token !== undefined ? { app_ws_token } : {}),
     ...(allowed_web_origins !== undefined ? { allowed_web_origins } : {}),
+    ...(require_token_without_origin !== undefined ? { require_token_without_origin } : {}),
   })
 }
 
@@ -362,5 +364,43 @@ describe('S2 (a)/Blocker B — WS upgrade accepts a canonical same-origin page',
       makeFakeServer().server,
     )
     expect(res!.status).toBe(101)
+  })
+})
+
+describe('S2 (b) — Origin-less token gate on a WIDE bind', () => {
+  it('LOOPBACK (require_token_without_origin=false): Origin-less dev:owner CONNECTS (101)', async () => {
+    // Unchanged native/dev ergonomics — no Origin, no token needed.
+    const surface = makeSurface(BOOT_TOKEN, undefined, false)
+    const { server, lastData } = makeFakeServer()
+    const res = await surface.handler(upgradeReq({ token: 'dev:owner' }), server)
+    expect(res!.status).toBe(101)
+    // The dev-bypass resolver strips the `dev:` prefix → user_id 'owner'.
+    expect((lastData() as { user_id: string }).user_id).toBe('owner')
+  })
+
+  it('WIDE (require_token_without_origin=true): Origin-less dev:owner is REJECTED (401)', async () => {
+    // The heart of S2(b): a network client with NO Origin can no longer ride the
+    // predictable dev:owner bearer — it must present the per-boot token.
+    const surface = makeSurface(BOOT_TOKEN, undefined, true)
+    const { server } = makeFakeServer()
+    const res = await surface.handler(upgradeReq({ token: 'dev:owner' }), server)
+    expect(res!.status).toBe(401)
+    expect(((await res!.json()) as { code: string }).code).toBe('bad_app_ws_token')
+  })
+
+  it('WIDE: an Origin-less client presenting the correct per-boot token CONNECTS (101)', async () => {
+    const surface = makeSurface(BOOT_TOKEN, undefined, true)
+    const { server, lastData } = makeFakeServer()
+    const res = await surface.handler(upgradeReq({ token: BOOT_TOKEN }), server)
+    expect(res!.status).toBe(101)
+    expect((lastData() as { user_id: string }).user_id).toBe(BOOT_TOKEN)
+  })
+
+  it('WIDE with an ABSENT token from an Origin-less client is REJECTED (401)', async () => {
+    const surface = makeSurface(BOOT_TOKEN, undefined, true)
+    const { server } = makeFakeServer()
+    const res = await surface.handler(upgradeReq({}), server)
+    expect(res!.status).toBe(401)
+    expect(((await res!.json()) as { code: string }).code).toBe('bad_app_ws_token')
   })
 })
