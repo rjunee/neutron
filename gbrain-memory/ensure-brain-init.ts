@@ -50,7 +50,7 @@ import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 
 import type { EmbedderConfig } from './embedder-config.ts'
-import { probeOllamaHealth } from './embedder-config.ts'
+import { probeOllamaHealth, redactUrlUserinfo } from './embedder-config.ts'
 import { isGbrainBinaryMissingError } from './memory-store.ts'
 import { type CommandRunner, bunCommandRunner } from './command-runner.ts'
 import { resolveGbrainChildPath } from './resolve-gbrain-command.ts'
@@ -95,6 +95,15 @@ export interface EnsureBrainInitInput {
    * "Fail-soft Ollama reachability" above.
    */
   probeOllamaHealth?: typeof probeOllamaHealth
+  /**
+   * Skip the advisory Ollama reachability probe (+ its log). The init guard now
+   * re-runs on every (re)connect, so the caller sets this after the FIRST run to
+   * keep the probe a once-per-client boot signal — otherwise an unreachable
+   * Ollama would add the probe's ~1.5s timeout to each reconnect. Init +
+   * backfill (the correctness work) still run every time; only the advisory
+   * probe is gated.
+   */
+  skipOllamaProbe?: boolean
 }
 
 export type EnsureBrainInitStatus =
@@ -213,13 +222,22 @@ export async function ensureBrainInitialized(
   // composition time, before this function is ever called) — purely surfaces
   // a degraded state with an actionable log line, since GBrain's own
   // per-query embed-fail fallback to keyword-only is otherwise silent from
-  // outside the gbrain process.
-  if (input.embedder !== null && input.embedder.provider === 'ollama') {
+  // outside the gbrain process. `skipOllamaProbe` lets the caller run this at
+  // most ONCE per client (the guard now re-runs on every reconnect), so an
+  // unreachable Ollama doesn't add the probe's timeout to each retry.
+  if (
+    !input.skipOllamaProbe &&
+    input.embedder !== null &&
+    input.embedder.provider === 'ollama'
+  ) {
     const baseUrl = input.embedder.childEnv['OLLAMA_BASE_URL'] ?? 'http://localhost:11434/v1'
+    // Redact any `user:pass@` userinfo before logging — an operator can put
+    // credentials in OLLAMA_BASE_URL and they must never reach a log line.
+    const safeUrl = redactUrlUserinfo(baseUrl)
     const health = await probeHealth(baseUrl, { model: input.embedder.model })
     if (!health.reachable) {
       logger.warn(
-        `[gbrain-memory] local Ollama embedder configured (${input.embedder.model} @ ${baseUrl}) ` +
+        `[gbrain-memory] local Ollama embedder configured (${input.embedder.model} @ ${safeUrl}) ` +
           'but it is not reachable — semantic recall degrades to keyword+graph (lexical) until ' +
           'Ollama is running; recall auto-upgrades once it is, no restart needed. ' +
           `Install: brew install ollama && ollama pull ${input.embedder.model} ` +
@@ -227,13 +245,13 @@ export async function ensureBrainInitialized(
       )
     } else if (!health.modelPresent) {
       logger.warn(
-        `[gbrain-memory] Ollama is reachable at ${baseUrl} but '${input.embedder.model}' is not ` +
+        `[gbrain-memory] Ollama is reachable at ${safeUrl} but '${input.embedder.model}' is not ` +
           'pulled — semantic recall degrades to keyword+graph (lexical) until it is. ' +
           `Install: ollama pull ${input.embedder.model}`,
       )
     } else {
       logger.info(
-        `[gbrain-memory] local Ollama embedder healthy (${input.embedder.model} @ ${baseUrl}) — ` +
+        `[gbrain-memory] local Ollama embedder healthy (${input.embedder.model} @ ${safeUrl}) — ` +
           'semantic recall active.',
       )
     }

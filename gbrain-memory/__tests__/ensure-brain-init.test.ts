@@ -385,4 +385,55 @@ describe('ensureBrainInitialized — Ollama reachability probe (RA3)', () => {
 
     expect(probeCalls).toBe(0)
   })
+
+  test('skipOllamaProbe → the probe (and its log) is suppressed (once-per-client boot cadence)', async () => {
+    const home = tempHome()
+    const { runner } = fakeRunner()
+    const embedder = resolveEmbedderConfig({})! // ollama fallback
+    const { logger, warnings } = capturingLogger()
+    let probeCalls = 0
+    const probe = async (): Promise<OllamaHealthCheck> => {
+      probeCalls += 1
+      return { reachable: false, modelPresent: false }
+    }
+
+    // First run: probe fires (boot signal).
+    await ensureBrainInitialized({ gbrainHome: home, embedder, runner, logger, probeOllamaHealth: probe })
+    expect(probeCalls).toBe(1)
+    expect(warnings.some((w) => w.includes('not reachable'))).toBe(true)
+
+    // Subsequent reconnect run with skipOllamaProbe: no probe, no extra timeout,
+    // no repeated log — but the init/backfill work still runs.
+    const warnings2 = capturingLogger()
+    await ensureBrainInitialized({
+      gbrainHome: home,
+      embedder,
+      runner,
+      logger: warnings2.logger,
+      probeOllamaHealth: probe,
+      skipOllamaProbe: true,
+    })
+    expect(probeCalls).toBe(1) // NOT re-probed
+    expect(warnings2.warnings).toHaveLength(0)
+  })
+
+  test('OLLAMA_BASE_URL credentials are REDACTED from the degradation warning', async () => {
+    const home = tempHome()
+    const { runner } = fakeRunner()
+    // Operator put credentials in the base url.
+    const embedder = resolveEmbedderConfig({
+      NEUTRON_EMBEDDINGS: 'ollama',
+      OLLAMA_BASE_URL: 'http://alice:secret@ollama.internal:11434/v1',
+    })!
+    const { logger, warnings } = capturingLogger()
+    const probe = async (): Promise<OllamaHealthCheck> => ({ reachable: false, modelPresent: false })
+
+    await ensureBrainInitialized({ gbrainHome: home, embedder, runner, logger, probeOllamaHealth: probe })
+
+    const joined = warnings.join('\n')
+    expect(joined).toContain('not reachable') // it did warn
+    expect(joined).not.toContain('secret') // but NEVER logs the credential
+    expect(joined).not.toContain('alice')
+    expect(joined).toContain('ollama.internal') // host is still shown for diagnosis
+  })
 })

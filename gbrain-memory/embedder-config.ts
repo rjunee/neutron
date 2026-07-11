@@ -235,6 +235,25 @@ export interface OllamaHealthCheck {
   modelPresent: boolean
 }
 
+/**
+ * Redact `user:pass@` userinfo from a URL for SAFE logging. An operator can put
+ * credentials in `OLLAMA_BASE_URL` (`http://user:secret@host/v1`); those must
+ * never reach a log line. Returns the URL with userinfo replaced by `***@`, or
+ * the input unchanged when it has no userinfo / isn't a parseable URL.
+ */
+export function redactUrlUserinfo(url: string): string {
+  try {
+    const u = new URL(url)
+    if (u.username === '' && u.password === '') return url
+    u.username = ''
+    u.password = ''
+    return u.toString().replace('://', '://***@')
+  } catch {
+    // Not a parseable URL — fall back to a regex strip of `scheme://user:pass@`.
+    return url.replace(/(^[a-z][a-z0-9+.-]*:\/\/)[^/@]*@/i, '$1***@')
+  }
+}
+
 /** Derive Ollama's native `/api/tags` health/model-list endpoint from the `/v1` base URL. */
 function ollamaTagsUrl(baseUrl: string): string {
   try {

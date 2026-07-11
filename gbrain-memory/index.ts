@@ -15,6 +15,7 @@ export {
   resolveEmbedderConfig,
   buildOpenAiEmbedderConfig,
   probeOllamaHealth,
+  redactUrlUserinfo,
   type EmbedderConfig,
   type OllamaHealthCheck,
 } from './embedder-config.ts'

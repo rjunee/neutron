@@ -348,6 +348,11 @@ export function buildGBrainMemory(input: {
       : makePerConnectKeyResolver(input.resolveOpenAiKey)
   const getKey = keyResolver?.getKey
 
+  // The advisory Ollama reachability probe is a once-per-client boot signal;
+  // the init guard re-runs each (re)connect, so this latches after the first
+  // run to keep an unreachable Ollama from adding its timeout to every retry.
+  let ollamaProbed = false
+
   // Read the EXISTING brain's column-width state ONCE at boot (a fresh install
   // has no brain yet → null → no reconciliation, it will be init'd at the RA3
   // default width). This is the cross-version guard: a legacy brain created
@@ -432,10 +437,17 @@ export function buildGBrainMemory(input: {
       resolveEffectiveEmbedder({ env, openaiApiKey: key }),
       existingBrainDims,
     )
+    // The guard re-runs on every (re)connect, but the advisory Ollama probe is
+    // a once-per-client boot signal — skip it after the first run so an
+    // unreachable Ollama doesn't add its timeout to each reconnect. (Init +
+    // backfill still run every time.)
+    const skipOllamaProbe = ollamaProbed
+    ollamaProbed = true
     await ensureBrainInitialized({
       gbrainHome,
       embedder,
       env,
+      skipOllamaProbe,
       // Pass the resolved ABSOLUTE command so init spawns the same binary the
       // serve path does (init also carries the bun-resolvable child PATH).
       ...(command !== null ? { command } : {}),

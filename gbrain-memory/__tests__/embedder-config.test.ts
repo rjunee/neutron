@@ -23,7 +23,12 @@
  */
 
 import { describe, test, expect, spyOn, afterEach } from 'bun:test'
-import { resolveEmbedderConfig, buildOpenAiEmbedderConfig, probeOllamaHealth } from '../embedder-config.ts'
+import {
+  resolveEmbedderConfig,
+  buildOpenAiEmbedderConfig,
+  probeOllamaHealth,
+  redactUrlUserinfo,
+} from '../embedder-config.ts'
 
 // Silence + capture the opt-in/misconfig warnings.
 function muteWarn() {
@@ -285,5 +290,28 @@ describe('probeOllamaHealth — best-effort reachability probe (fail-soft, no re
     }) as unknown as typeof fetch
     await probeOllamaHealth('http://gpu-box:11434', { fetchImpl })
     expect(seenUrl).toBe('http://gpu-box:11434/api/tags')
+  })
+})
+
+describe('redactUrlUserinfo — never log OLLAMA_BASE_URL credentials', () => {
+  test('strips user:pass@ userinfo from a credentialed URL', () => {
+    expect(redactUrlUserinfo('http://alice:secret@ollama.internal:11434/v1')).not.toContain('secret')
+    expect(redactUrlUserinfo('http://alice:secret@ollama.internal:11434/v1')).not.toContain('alice')
+    expect(redactUrlUserinfo('http://alice:secret@ollama.internal:11434/v1')).toContain('***@')
+    expect(redactUrlUserinfo('http://alice:secret@ollama.internal:11434/v1')).toContain('ollama.internal')
+  })
+
+  test('a URL without userinfo is returned unchanged', () => {
+    expect(redactUrlUserinfo('http://localhost:11434/v1')).toBe('http://localhost:11434/v1')
+  })
+
+  test('a username-only URL is still redacted', () => {
+    const out = redactUrlUserinfo('http://token@host:11434/v1')
+    expect(out).not.toContain('token')
+    expect(out).toContain('***@')
+  })
+
+  test('a non-URL string is passed through by the regex fallback without throwing', () => {
+    expect(redactUrlUserinfo('not a url')).toBe('not a url')
   })
 })
