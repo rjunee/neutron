@@ -63,8 +63,11 @@ import {
 import type { OAuthCredentialSource } from './resolve-llm-credentials.ts'
 import {
   BINARY_NOT_FOUND_MESSAGE,
+  CHANNEL_WEDGED_MESSAGE,
   detectBinaryNotFound,
+  detectChannelWedged,
   detectCliAuthFailure,
+  detectTurnTimeout,
   mapStatusForPoolCooldown,
   parseHttpStatusFromMessage,
   startOpenAiFamilySession,
@@ -286,6 +289,7 @@ export function buildImportSubstrate(
                 'Configure CLAUDE_CODE_OAUTH_TOKEN / ANTHROPIC_API_KEY in the per-project `.env`, ' +
                 'or attach Max OAuth via signup, then retry the import.',
               retryable: false,
+              code: 'no_credentials',
             }
             return
           }
@@ -310,6 +314,7 @@ export function buildImportSubstrate(
               'cc-import substrate: all Anthropic credentials are in cooldown (429/402/401). ' +
               'Retry once the rate-limit window passes.',
             retryable: true,
+            code: 'all_cooldown',
           }
           if (resumeAt !== null) {
             const waitMs = Math.max(0, resumeAt - Date.now())
@@ -346,6 +351,7 @@ export function buildImportSubstrate(
               kind: 'error',
               message: `cc-import oauth-refresh failed: ${err instanceof Error ? err.message : String(err)}`,
               retryable: false,
+              code: 'oauth_refresh',
             }
             return
           }
@@ -448,11 +454,35 @@ export function buildImportSubstrate(
               // re-emit a distinct, truthful error so `drainSubstrateEvents` wraps
               // the real message into the import job's failure reason and the
               // runner fails fast (non-retryable) instead of looping.
-              if (detectBinaryNotFound(ev.message)) {
-                yield { kind: 'error', message: BINARY_NOT_FOUND_MESSAGE, retryable: false }
+              // O3 — a STAMPED code is AUTHORITATIVE; the message regex runs ONLY
+              // for a legacy/unstamped event (`code === undefined`), so a stamped
+              // class is never overridden by conflicting prose.
+              const stampedCode = ev.code
+              if (
+                stampedCode === 'binary_not_found' ||
+                (stampedCode === undefined && detectBinaryNotFound(ev.message))
+              ) {
+                yield { kind: 'error', message: BINARY_NOT_FOUND_MESSAGE, retryable: false, code: 'binary_not_found' }
                 continue
               }
-              const httpStatus = parseHttpStatusFromMessage(ev.message)
+              // O3 — a persistent-REPL spawn/channel failure is a SUBSTRATE fault,
+              // NOT a credential condition, and a per-turn timeout is transient;
+              // neither must cool a healthy credential (mirrors the LLM-call
+              // composer). Code-first, regex fallback for one release.
+              if (
+                stampedCode === 'channel_wedged' ||
+                (stampedCode === undefined && detectChannelWedged(ev.message))
+              ) {
+                yield { kind: 'error', message: CHANNEL_WEDGED_MESSAGE, retryable: false, code: 'channel_wedged' }
+                continue
+              }
+              if (
+                stampedCode === 'turn_timeout' ||
+                (stampedCode === undefined && detectTurnTimeout(ev.message))
+              ) {
+                yield ev
+                continue
+              }
               // ISSUES #50 (2026-05-28) — CLI-subprocess auth failures
               // arrive as `claude exited 1: <stderr-tail>` shaped
               // messages, so `parseHttpStatusFromMessage` returns null and
@@ -464,13 +494,32 @@ export function buildImportSubstrate(
               // swap. Order of precedence is HTTP-prefix → CLI-auth detect
               // → fallback so the existing 429 / 402 / 500-class paths and
               // the request-level (non-cooldown) path stay verbatim.
+              // O3 — the cooldown classification is code-authoritative too: prose
+              // classifiers run ONLY for a legacy/unstamped event.
               let cooldownStatus: number | null
-              if (httpStatus !== null) {
-                cooldownStatus = mapStatusForPoolCooldown(httpStatus, ev.retryable)
-              } else if (detectCliAuthFailure(ev.message)) {
-                cooldownStatus = 401
+              if (stampedCode !== undefined) {
+                if (stampedCode === 'aborted') {
+                  cooldownStatus = null
+                } else if (stampedCode === 'rate_limited') {
+                  cooldownStatus = 429
+                } else if (stampedCode === 'http_status') {
+                  cooldownStatus = mapStatusForPoolCooldown(parseHttpStatusFromMessage(ev.message), ev.retryable)
+                } else {
+                  // Every OTHER stamped class is not a fault of the SELECTED
+                  // credential (aborted = caller cancel; all_cooldown/no_credentials
+                  // /oauth_refresh describe pool/auth state; substrate classes
+                  // short-circuit above) — never cool the healthy credential.
+                  cooldownStatus = null
+                }
               } else {
-                cooldownStatus = mapStatusForPoolCooldown(null, ev.retryable)
+                const httpStatus = parseHttpStatusFromMessage(ev.message)
+                if (httpStatus !== null) {
+                  cooldownStatus = mapStatusForPoolCooldown(httpStatus, ev.retryable)
+                } else if (detectCliAuthFailure(ev.message)) {
+                  cooldownStatus = 401
+                } else {
+                  cooldownStatus = mapStatusForPoolCooldown(null, ev.retryable)
+                }
               }
               if (cooldownStatus !== null) {
                 if (ev.retry_after_ms !== undefined) {

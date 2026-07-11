@@ -10,7 +10,10 @@ export const __MODULE__ = '@neutronai/runtime' as const
 
 export type { Substrate, AgentSpec, Message } from './substrate.ts'
 export type { SessionHandle } from './session-handle.ts'
-export type { Event, TokenUsage } from './events.ts'
+export type { Event, TokenUsage, SubstrateErrorClass } from './events.ts'
+
+export { NeutronError, SubstrateCallError, SUBSTRATE_ERROR_CODES } from './errors.ts'
+export type { SubstrateErrorCodeSpec } from './errors.ts'
 
 export {
   selectCredential,

@@ -56,7 +56,7 @@ import {
   selectCredential,
   type CredentialPool,
 } from '@neutronai/runtime/credential-pool.ts'
-import type { Event } from '@neutronai/runtime/events.ts'
+import type { Event, SubstrateErrorClass } from '@neutronai/runtime/events.ts'
 import type { SessionHandle } from '@neutronai/runtime/session-handle.ts'
 import type { AgentSpec, Substrate } from '@neutronai/runtime/substrate.ts'
 import type { OAuthCredentialSource } from './resolve-llm-credentials.ts'
@@ -592,11 +592,14 @@ export function buildLlmCallSubstrate(
         } catch (err) {
           if (err instanceof ScrubbedAuthEnvError) {
             // `all_cooldown` was retryable:true; `no_credentials` and
-            // `oauth_refresh` were retryable:false — preserved verbatim.
+            // `oauth_refresh` were retryable:false — preserved verbatim. O3 —
+            // stamp the typed class (the reason IS a `SubstrateErrorClass`) so
+            // downstream consumers read `code` instead of the prose.
             yield {
               kind: 'error',
               message: err.message,
               retryable: err.reason === 'all_cooldown',
+              code: err.reason,
             }
             return
           }
@@ -690,8 +693,17 @@ export function buildLlmCallSubstrate(
               // binary that will never appear (the 2026-06-17 import-blocker).
               // Classify it FIRST: skip the pool cooldown entirely and re-emit a
               // distinct, actionable error so the caller fails fast + loud.
-              if (detectBinaryNotFound(ev.message)) {
-                yield { kind: 'error', message: BINARY_NOT_FOUND_MESSAGE, retryable: false }
+              // O3 — a STAMPED code is AUTHORITATIVE: the message regexes run
+              // ONLY when the producer left `code` unset (a legacy/unstamped
+              // event), so a stamped class is never overridden by conflicting
+              // prose (`{code:'turn_timeout', message:'…ENOENT'}` must NOT read
+              // as fatal binary-not-found). One release of regex fallback.
+              const stampedCode = ev.code
+              if (
+                stampedCode === 'binary_not_found' ||
+                (stampedCode === undefined && detectBinaryNotFound(ev.message))
+              ) {
+                yield { kind: 'error', message: BINARY_NOT_FOUND_MESSAGE, retryable: false, code: 'binary_not_found' }
                 continue
               }
               // P0 ROOT-CAUSE FIX (b): a persistent-REPL spawn/channel failure
@@ -708,8 +720,11 @@ export function buildLlmCallSubstrate(
               // map (mirrors the binary-not-found fast-path): skip the pool
               // cooldown entirely and re-emit a distinct error that names the real
               // class so the credential is never wrongly parked.
-              if (detectChannelWedged(ev.message)) {
-                yield { kind: 'error', message: CHANNEL_WEDGED_MESSAGE, retryable: false }
+              if (
+                stampedCode === 'channel_wedged' ||
+                (stampedCode === undefined && detectChannelWedged(ev.message))
+              ) {
+                yield { kind: 'error', message: CHANNEL_WEDGED_MESSAGE, retryable: false, code: 'channel_wedged' }
                 continue
               }
               // P0a ROOT-CAUSE FIX (2026-06-26 chat-blocker): a per-turn TIMEOUT
@@ -731,18 +746,48 @@ export function buildLlmCallSubstrate(
               // pool cooldown entirely and re-emit the timeout UNCHANGED
               // (retryable:true) so the turn is retried on the SAME healthy
               // credential, never laundered into a quota lie.
-              if (detectTurnTimeout(ev.message)) {
+              if (
+                stampedCode === 'turn_timeout' ||
+                (stampedCode === undefined && detectTurnTimeout(ev.message))
+              ) {
                 yield ev
                 continue
               }
-              const httpStatus = parseHttpStatusFromMessage(ev.message)
+              // O3 — the cooldown classification is ALSO code-authoritative: the
+              // prose classifiers (`parseHttpStatusFromMessage` / `detectCliAuth
+              // Failure`) run ONLY for a legacy/unstamped event. A stamped class
+              // is mapped by CODE so, e.g., a caller-cancelled `aborted` turn is
+              // never mis-cooled as a 401 just because its prose says `HTTP 401`.
               let cooldownStatus: number | null
-              if (httpStatus !== null) {
-                cooldownStatus = mapStatusForPoolCooldown(httpStatus, ev.retryable)
-              } else if (detectCliAuthFailure(ev.message)) {
-                cooldownStatus = 401
+              if (stampedCode !== undefined) {
+                if (stampedCode === 'aborted') {
+                  // Caller cancellation — never a credential fault; no cooldown.
+                  cooldownStatus = null
+                } else if (stampedCode === 'rate_limited') {
+                  cooldownStatus = 429
+                } else if (stampedCode === 'http_status') {
+                  // The numeric status lives in the `HTTP <n>:` message prefix.
+                  cooldownStatus = mapStatusForPoolCooldown(parseHttpStatusFromMessage(ev.message), ev.retryable)
+                } else {
+                  // Every OTHER stamped class is NOT a fault of the SELECTED
+                  // credential: `aborted` is a caller cancel; `all_cooldown` /
+                  // `no_credentials` / `oauth_refresh` describe POOL/auth state
+                  // (and are emitted by the composer's own pre-dispatch path, not
+                  // the inner handle); the substrate classes short-circuit above.
+                  // None must `reportFailure` on the healthy selected credential —
+                  // in particular `all_cooldown` (retryable:true) must NOT map to
+                  // 429 and cool the very credential the caller just picked.
+                  cooldownStatus = null
+                }
               } else {
-                cooldownStatus = mapStatusForPoolCooldown(null, ev.retryable)
+                const httpStatus = parseHttpStatusFromMessage(ev.message)
+                if (httpStatus !== null) {
+                  cooldownStatus = mapStatusForPoolCooldown(httpStatus, ev.retryable)
+                } else if (detectCliAuthFailure(ev.message)) {
+                  cooldownStatus = 401
+                } else {
+                  cooldownStatus = mapStatusForPoolCooldown(null, ev.retryable)
+                }
               }
               if (cooldownStatus !== null) {
                 if (ev.retry_after_ms !== undefined) {
@@ -1060,13 +1105,13 @@ export function startOpenAiFamilySession(args: {
           // (below) — only the cooldown is suppressed. NB: deliberately NOT the
           // Claude-shared `mapStatusForPoolCooldown` (its retryable→429 default is
           // byte-identical CC behavior).
-          const httpStatus = parseHttpStatusFromMessage(ev.message)
-          const cooldownStatus: number | null =
-            httpStatus !== null
-              ? classifyOpenAiCredentialCooldown(httpStatus)
-              : detectCliAuthFailure(ev.message)
-                ? 401
-                : null
+          // O3 — code-first, consistent with the Claude path: a STAMPED class is
+          // authoritative (the gpt-5-5 adapter stamps `rate_limited`/`http_status`
+          // /`aborted`), so the prose classifiers run ONLY for a legacy/unstamped
+          // event. Extracted to `openAiCredentialCooldownForEvent` so the
+          // conflicting-code/prose boundary is unit-tested without driving the
+          // whole adapter.
+          const cooldownStatus = openAiCredentialCooldownForEvent(ev)
           if (cooldownStatus !== null) {
             if (ev.retry_after_ms !== undefined) {
               reportFailure(pool, cred.id, cooldownStatus, ev.retry_after_ms)
@@ -1157,6 +1202,37 @@ export function parseHttpStatusFromMessage(message: string): number | null {
 export function classifyOpenAiCredentialCooldown(httpStatus: number | null): number | null {
   if (httpStatus === 401 || httpStatus === 402 || httpStatus === 429) return httpStatus
   return null
+}
+
+/**
+ * O3 — code-first OpenAI credential-cooldown decision for a substrate error event.
+ *
+ * A STAMPED class is authoritative: only `rate_limited` (→429) and `http_status`
+ * (→the numeric status in the `HTTP <n>:` prefix) can cool the OpenAI key; every
+ * other stamped class — including a caller-cancelled `aborted` and the substrate
+ * classes (`channel_wedged`/`turn_timeout`/…) — never cools it, EVEN IF its prose
+ * reads `HTTP 401`. The prose classifiers (`parseHttpStatusFromMessage` /
+ * `detectCliAuthFailure`) run ONLY for a legacy/unstamped event, for one release.
+ *
+ * Returns the HTTP status to cool the credential as, or `null` for no cooldown.
+ */
+export function openAiCredentialCooldownForEvent(ev: {
+  code?: SubstrateErrorClass
+  message: string
+}): number | null {
+  if (ev.code !== undefined) {
+    if (ev.code === 'rate_limited') return classifyOpenAiCredentialCooldown(429)
+    if (ev.code === 'http_status') {
+      return classifyOpenAiCredentialCooldown(parseHttpStatusFromMessage(ev.message))
+    }
+    return null
+  }
+  const httpStatus = parseHttpStatusFromMessage(ev.message)
+  return httpStatus !== null
+    ? classifyOpenAiCredentialCooldown(httpStatus)
+    : detectCliAuthFailure(ev.message)
+      ? 401
+      : null
 }
 
 export function mapStatusForPoolCooldown(

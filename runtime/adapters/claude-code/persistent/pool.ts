@@ -5,6 +5,8 @@
 import { getBestModel } from '../../../models.ts'
 import type { SessionHandle } from '../../../session-handle.ts'
 import type { AgentSpec, Substrate } from '../../../substrate.ts'
+import { classifySpawnError } from './classify-spawn-error.ts'
+import { SUBSTRATE_ERROR_CODES } from '../../../errors.ts'
 import { EventChannel } from './event-channel.ts'
 import { type PendingRespawnEntry, enqueuePendingRespawn } from './pending-respawns-queue.ts'
 import { REPL_DEBUG, activeModelWatchdogs, activeWatchdogs, childByKey, cwdDriftAlertState, cwdDriftRespawnState, ephemeralSessions, pendingChildKills, pool, respawnGates, sink, supervisedBySessionKey, wedgeAlertState } from './pool-state.ts'
@@ -330,7 +332,15 @@ export function createPersistentReplSubstrate(options: PersistentReplSubstrateOp
             : await getOrSpawnSession(sessionKey, options, spec)
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err)
-          channel.push({ kind: 'error', message, retryable: true })
+          // O3 — stamp the typed class at the producer (binary-not-found /
+          // channel-wedged) so the composer classifies on `code` first, and emit
+          // the taxonomy-consistent recovery hint (both classes are FATAL /
+          // non-retryable) so a DIRECT runtime consumer — not just the gateway
+          // composer — reads the correct `retryable`. An unclassified spawn error
+          // (e.g. a transient crash) keeps the default retryable:true.
+          const code = classifySpawnError(message)
+          const retryable = code !== undefined ? SUBSTRATE_ERROR_CODES[code].retryable : true
+          channel.push({ kind: 'error', message, retryable, ...(code !== undefined ? { code } : {}) })
           channel.close()
           return
         }
@@ -399,7 +409,15 @@ export function createPersistentReplSubstrate(options: PersistentReplSubstrateOp
 
         if (session.channelPort === undefined) {
           turn.settled = true
-          channel.push({ kind: 'error', message: 'persistent-repl: channel not ready', retryable: true })
+          // O3 — a channel that never bound is the `channel_wedged` class, which
+          // is FATAL: emit the taxonomy-consistent non-retryable hint at the
+          // producer (the composer already treats this as fatal).
+          channel.push({
+            kind: 'error',
+            message: 'persistent-repl: channel not ready',
+            retryable: SUBSTRATE_ERROR_CODES.channel_wedged.retryable,
+            code: 'channel_wedged',
+          })
           channel.close()
           session.activeTurn = undefined
           if (release) release()
@@ -441,7 +459,11 @@ export function createPersistentReplSubstrate(options: PersistentReplSubstrateOp
           if (!turn.settled) {
             turn.settled = true
             const message = err instanceof Error ? err.message : String(err)
-            channel.push({ kind: 'error', message, retryable: true })
+            // O3 — a classified fatal spawn/channel failure emits the taxonomy's
+            // non-retryable hint; an ordinary mid-turn crash stays retryable:true.
+            const code = classifySpawnError(message)
+            const retryable = code !== undefined ? SUBSTRATE_ERROR_CODES[code].retryable : true
+            channel.push({ kind: 'error', message, retryable, ...(code !== undefined ? { code } : {}) })
             channel.close()
           }
           // Enqueue-on-crash for the CRASH-DURING-INJECTION case (Codex P2): if the
@@ -533,7 +555,9 @@ export function createPersistentReplSubstrate(options: PersistentReplSubstrateOp
           // Mark the warm session so the NEXT dispatch respawns a clean REPL rather
           // than landing on the busy/desynced one (the cascade fix).
           if (!ephemeral && session !== undefined) session.poisoned = true
-          channel.push({ kind: 'error', message: 'persistent-repl: turn timeout', retryable: true })
+          // O3 — stamp the typed class so the composer's ladder classifies on
+          // `code` before its `persistent-repl: turn timeout` regex fallback.
+          channel.push({ kind: 'error', message: 'persistent-repl: turn timeout', retryable: true, code: 'turn_timeout' })
           channel.close()
           turn.settle()
         }

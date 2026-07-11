@@ -29,7 +29,7 @@ import {
 } from '@neutronai/runtime/credential-pool.ts'
 import type { AgentSpec, Substrate } from '@neutronai/runtime/substrate.ts'
 import type { SessionHandle } from '@neutronai/runtime/session-handle.ts'
-import type { Event } from '@neutronai/runtime/events.ts'
+import type { Event, SubstrateErrorClass } from '@neutronai/runtime/events.ts'
 
 let workdir: string
 
@@ -46,6 +46,8 @@ interface ErrorEmit {
   retryable: boolean
   /** error message; defaults to a rate_limit-shaped body. */
   message?: string
+  /** O3 typed failure class (drives the composer's code-first classification). */
+  code?: SubstrateErrorClass
 }
 
 /**
@@ -83,6 +85,7 @@ function captureFactory(): {
           kind: 'error',
           message: behaviour.opts.message ?? 'rate_limit: You’ve hit your limit',
           retryable: behaviour.opts.retryable,
+          ...(behaviour.opts.code !== undefined ? { code: behaviour.opts.code } : {}),
         }
       })()
       return {
@@ -487,6 +490,147 @@ test('2026-06-17 import-blocker — spawn ENOENT (claude not on PATH) is FATAL, 
   expect(err!.kind === 'error' && /not found on the server PATH/i.test(err!.message)).toBe(true)
   expect(err!.kind === 'error' && /cooldown/i.test(err!.message)).toBe(false)
   expect(err!.kind === 'error' && err!.retry_after_ms === undefined).toBe(true)
+})
+
+test('O3 — a producer-stamped code:channel_wedged is a SUBSTRATE fault: NOT cooled, re-emitted as the canonical channel-wedge message', async () => {
+  const pool = newCredentialPool({
+    strategy: 'fill_first',
+    credentials: [{ id: 'k1', kind: 'api_key', secret: 'sk-test-1' }],
+  })
+  // The persistent adapter now stamps `channel_wedged` (retryable:true) when a
+  // session never binds its channel. Pre-O3 the import path had NO channel-wedge
+  // fast-path, so this laundered into a 429 cooldown and cascaded into "all
+  // credentials in cooldown". The import composer must now skip the cooldown.
+  const cap = captureFactory()
+  cap.emitError({ retryable: true, message: 'persistent-repl: channel not ready', code: 'channel_wedged' })
+  const sub = buildImportSubstrate({
+    pool,
+    substrate_instance_id: 'cc',
+    cwd: workdir,
+    substrateFactory: cap.substrateFactory,
+  })
+  const h = sub!.start(runSpec())
+  const events: Event[] = []
+  for await (const ev of h.events) events.push(ev)
+  expect(pool.credentials[0]!.cooldown_until).toBeUndefined()
+  expect(pool.credentials[0]!.cooldown_reason).toBeUndefined()
+  expect(pool.credentials[0]!.consecutive_failures).toBe(0)
+  const err = events.find((e) => e.kind === 'error')
+  expect(err!.kind === 'error' && err!.retryable).toBe(false)
+  expect(err!.kind === 'error' && err!.code).toBe('channel_wedged')
+  expect(err!.kind === 'error' && /session channel failed to bind/i.test(err!.message)).toBe(true)
+})
+
+async function drainImportEvents(
+  pool: CredentialPool,
+  emit: (cap: ReturnType<typeof captureFactory>) => void,
+): Promise<Event[]> {
+  const cap = captureFactory()
+  emit(cap)
+  const sub = buildImportSubstrate({
+    pool,
+    substrate_instance_id: 'cc',
+    cwd: workdir,
+    substrateFactory: cap.substrateFactory,
+  })
+  const h = sub!.start(runSpec())
+  const events: Event[] = []
+  for await (const ev of h.events) events.push(ev)
+  return events
+}
+
+function singleApiKeyPool(): CredentialPool {
+  return newCredentialPool({
+    strategy: 'fill_first',
+    credentials: [{ id: 'k1', kind: 'api_key', secret: 'sk-test-1' }],
+  })
+}
+
+test('O3 import — stamped code:binary_not_found is FATAL (no cooldown) even with non-matching prose', async () => {
+  const pool = singleApiKeyPool()
+  const events = await drainImportEvents(pool, (cap) =>
+    cap.emitError({ retryable: true, message: 'opaque spawn failure', code: 'binary_not_found' }),
+  )
+  expect(pool.credentials[0]!.cooldown_reason).toBeUndefined()
+  expect(pool.credentials[0]!.consecutive_failures).toBe(0)
+  const err = events.find((e) => e.kind === 'error')
+  expect(err!.kind === 'error' && err!.retryable).toBe(false)
+  expect(err!.kind === 'error' && err!.code).toBe('binary_not_found')
+})
+
+test('O3 import — stamped code:turn_timeout is re-emitted UNCHANGED, no cooldown (transient turn failure)', async () => {
+  const pool = singleApiKeyPool()
+  const events = await drainImportEvents(pool, (cap) =>
+    cap.emitError({ retryable: true, message: 'opaque inner hiccup', code: 'turn_timeout' }),
+  )
+  expect(pool.credentials[0]!.cooldown_reason).toBeUndefined()
+  expect(pool.credentials[0]!.consecutive_failures).toBe(0)
+  const err = events.find((e) => e.kind === 'error')
+  expect(err!.kind === 'error' && err!.retryable).toBe(true)
+  expect(err!.kind === 'error' && err!.code).toBe('turn_timeout')
+})
+
+test('O3 import — stamped code:rate_limited cools the credential (429), by CODE not prose', async () => {
+  const pool = singleApiKeyPool()
+  // Non-HTTP-shaped prose: without the code the fallback would still 429 here via
+  // retryable:true, so assert the cooldown reason is the 429 class.
+  await drainImportEvents(pool, (cap) =>
+    cap.emitError({ retryable: true, message: 'slow down please', code: 'rate_limited' }),
+  )
+  expect(pool.credentials[0]!.cooldown_reason).toBe('rate_limit_429')
+})
+
+test('O3 import — stamped code:http_status uses the numeric status from the HTTP-prefixed message (402 → insufficient-quota class)', async () => {
+  const pool = singleApiKeyPool()
+  await drainImportEvents(pool, (cap) =>
+    cap.emitError({ retryable: false, message: 'HTTP 402: insufficient quota', code: 'http_status' }),
+  )
+  // 402 maps to its own cooldown class (not 429).
+  expect(pool.credentials[0]!.cooldown_reason).toBe('billing_402')
+})
+
+test('O3 import — stamped code:aborted with conflicting `HTTP 401` prose does NOT cool the credential', async () => {
+  const pool = singleApiKeyPool()
+  await drainImportEvents(pool, (cap) =>
+    cap.emitError({ retryable: false, message: 'HTTP 401: cancelled', code: 'aborted' }),
+  )
+  expect(pool.credentials[0]!.cooldown_reason).toBeUndefined()
+  expect(pool.credentials[0]!.cooldown_until).toBeUndefined()
+  expect(pool.credentials[0]!.consecutive_failures).toBe(0)
+})
+
+test('O3 import — code-authoritative cooldown MATRIX (every taxonomy member): only rate_limited/http_status cool the SELECTED credential', async () => {
+  const cases: Array<{ code: SubstrateErrorClass; retryable: boolean; message: string; cools: boolean }> = [
+    { code: 'binary_not_found', retryable: true, message: 'opaque', cools: false },
+    { code: 'channel_wedged', retryable: true, message: 'opaque', cools: false },
+    { code: 'turn_timeout', retryable: true, message: 'opaque', cools: false },
+    { code: 'aborted', retryable: false, message: 'HTTP 401: cancelled', cools: false },
+    { code: 'rate_limited', retryable: true, message: 'slow down', cools: true },
+    { code: 'http_status', retryable: false, message: 'HTTP 401: bad key', cools: true },
+    { code: 'no_credentials', retryable: false, message: 'opaque', cools: false },
+    { code: 'all_cooldown', retryable: true, message: 'opaque', cools: false },
+    { code: 'oauth_refresh', retryable: false, message: 'opaque', cools: false },
+  ]
+  for (const c of cases) {
+    const pool = singleApiKeyPool()
+    await drainImportEvents(pool, (cap) =>
+      cap.emitError({ retryable: c.retryable, message: c.message, code: c.code }),
+    )
+    const cooled = pool.credentials[0]!.cooldown_reason !== undefined
+    expect({ code: c.code, cooled }).toEqual({ code: c.code, cooled: c.cools })
+  }
+})
+
+test('O3 import — code is authoritative: code:turn_timeout with binary-not-found PROSE re-emits as turn-timeout, NOT fatal binary', async () => {
+  const pool = singleApiKeyPool()
+  const events = await drainImportEvents(pool, (cap) =>
+    cap.emitError({ retryable: true, message: 'Executable not found in $PATH: "claude"', code: 'turn_timeout' }),
+  )
+  expect(pool.credentials[0]!.cooldown_reason).toBeUndefined()
+  const err = events.find((e) => e.kind === 'error')
+  expect(err!.kind === 'error' && err!.code).toBe('turn_timeout')
+  expect(err!.kind === 'error' && err!.retryable).toBe(true)
+  expect(err!.kind === 'error' && /not found on the server PATH/i.test(err!.message)).toBe(false)
 })
 
 test('Codex r5 P1 — Max OAuth refresh is called on every start() (token freshness across long-lived gateway)', async () => {
