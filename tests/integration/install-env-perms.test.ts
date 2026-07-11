@@ -19,7 +19,7 @@
 
 import { describe, expect, test } from 'bun:test'
 import { spawnSync } from 'node:child_process'
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { delimiter, dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -192,6 +192,62 @@ describe('install.sh — .env is 0600 after write (S3b secrets-at-rest hygiene)'
       expect(stdout).not.toContain('env_path=')
       // The install did NOT silently trust the lying chmod: the file is still 0644.
       expect(statSync(envPath).mode & 0o777).toBe(0o644)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  // Symlink-safety boundary (Codex blocker): the secret REPLACE path writes to
+  // a temp file next to `.env` before an atomic rename. That temp MUST be
+  // created securely (mktemp = exclusive O_EXCL create of a RANDOM name, which
+  // never follows or overwrites a pre-existing path). If mktemp is unavailable
+  // the installer must FAIL CLOSED — the old predictable-name fallback
+  // (`.neutron-env.tmp.$$` truncated with `:>`) would FOLLOW an attacker's
+  // pre-planted symlink and write the .env secret to an attacker-chosen target.
+  // Force it: shadow `mktemp` to fail, drive the replace path (pre-seed the key
+  // so persist_env_var takes the temp-file branch) → the install ABORTS, writes
+  // NO secret, creates no predictable temp file, and leaves any attacker target
+  // byte-for-byte untouched.
+  test('mktemp FAILURE on the secret replace path fails closed (no secret written, no symlink followed)', () => {
+    const dir = buildFakeCheckout()
+    try {
+      const envPath = join(dir, '.env')
+      // Pre-seed the key so persist_env_var takes the REPLACE branch (the one
+      // that uses a temp file), holding a real prior secret value.
+      writeFileSync(envPath, 'NEUTRON_TEST_SECRET=prior-secret-value\n', { mode: 0o600 })
+      // An attacker's target the old predictable-name symlink would have pointed
+      // at — must remain byte-for-byte unchanged.
+      const attackerTarget = join(dir, 'attacker-target')
+      writeFileSync(attackerTarget, 'ORIGINAL-ATTACKER-CONTENT\n')
+
+      const stubDir = join(dir, 'stubbin')
+      mkdirSync(stubDir, { recursive: true })
+      writeFileSync(join(stubDir, 'mktemp'), '#!/bin/sh\nexit 1\n', { mode: 0o755 })
+      const path = `${stubDir}${delimiter}${process.env['PATH'] ?? '/usr/bin:/bin'}`
+      const inner = `umask 022; exec sh ${quoteSh(INSTALL_SH)} --yes --dir ${quoteSh(dir)}`
+      const res = spawnSync('sh', ['-c', inner], {
+        cwd: dir,
+        encoding: 'utf8',
+        env: {
+          PATH: path,
+          HOME: dir,
+          NEUTRON_INSTALL_PERSIST_ENV_VAR: '1',
+          NEUTRON_TEST_PERSIST_KEY: 'NEUTRON_TEST_SECRET',
+        },
+      })
+
+      // (a) FAILS CLOSED with a clear, secret-refusing error.
+      expect(res.status).toBe(1)
+      expect(res.stderr).toContain('refusing to write secrets')
+      // (b) No success line — the abort happened before the persist completed.
+      expect(res.stdout ?? '').not.toContain('persisted=')
+      // (c) The secret was NOT written/replaced — .env is byte-for-byte the prior value.
+      expect(readFileSync(envPath, 'utf8')).toBe('NEUTRON_TEST_SECRET=prior-secret-value\n')
+      // (d) No predictable temp file was created (the old fallback name was
+      // `.neutron-env.tmp.<pid>`), and the attacker's target is untouched.
+      const strays = readdirSync(dir).filter((n) => n.startsWith('.neutron-env.tmp.'))
+      expect(strays).toEqual([])
+      expect(readFileSync(attackerTarget, 'utf8')).toBe('ORIGINAL-ATTACKER-CONTENT\n')
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }

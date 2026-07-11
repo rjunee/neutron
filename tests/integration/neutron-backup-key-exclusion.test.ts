@@ -288,16 +288,20 @@ describe('neutron-backup.sh — AES key excluded from the backup bundle (S3a)', 
     }
   })
 
-  // UPGRADE BOUNDARY (Codex blocker #8) — the scenario the history-purge exists
-  // for: a remote ALREADY POPULATED with the legacy key-bearing branch (not
-  // empty). The local purge rewrites history + the LOCAL origin tracking ref, so
-  // an IMPLICIT --force-with-lease would compare against the just-purged SHA and
-  // wrongly reject the push (leaving the key on the remote under a false
-  // success). The explicit lease against the pre-rewrite remote SHA must make
-  // the force-push LAND. Honest outcome required: EITHER exit 0 with the remote
-  // key-free on every ref, OR a fail-closed abort (nonzero, remediation) — never
-  // exit 0 while the key is still retrievable from the remote.
-  test('upgrade: a remote already populated with the legacy key-bearing branch ends key-free (or fails closed)', () => {
+  // UPGRADE BOUNDARY (Codex blockers #8/#9) — the scenario the history-purge
+  // exists for: a remote ALREADY POPULATED with the legacy key-bearing branch
+  // (not empty), with a configured origin + tracking ref (the supported real
+  // prior-install fixture). The local purge rewrites history + the LOCAL origin
+  // tracking ref, so an IMPLICIT --force-with-lease would compare against the
+  // just-purged SHA and wrongly REJECT the push (leaving the key on the remote
+  // under a false success). The EXPLICIT lease against the pre-rewrite remote
+  // SHA must make the force-push actually LAND. This test therefore REQUIRES
+  // SUCCESS on this supported fixture — exit 0 AND a key-free remote AND
+  // project.db present — so that a regression which always fails the recovery
+  // here (e.g. a broken lease) turns this RED rather than passing on a false
+  // "fail-closed". (The fail-closed behavior for UNOWNED dirty refs / missing
+  // purge tools has its own separate boundary tests that require nonzero exit.)
+  test('upgrade: a populated remote with the legacy key-bearing branch is RECOVERED to key-free (exit 0, push lands)', () => {
     const dataDir = mkdtempSync(join(tmpdir(), 'neutron-backup-upgrade-'))
     const remoteDir = mkdtempSync(join(tmpdir(), 'neutron-backup-remote6-'))
     const remoteGitDir = join(remoteDir, 'remote.git')
@@ -327,20 +331,16 @@ describe('neutron-backup.sh — AES key excluded from the backup bundle (S3a)', 
       // Now the NEW backup runs against that populated remote.
       const res = runBackup(dataDir, { extraEnv: { NEUTRON_BACKUP_REMOTE: remoteGitDir } })
 
-      const remoteHasKey = remoteObjectsMatching(remoteGitDir, '.neutron-aes-key').length > 0
-      if (res.status === 0) {
-        // Success claimed → the remote MUST be key-free on every ref, and the db
-        // must still be present.
-        expect(remoteHasKey).toBe(false)
-        expect(remoteCommitsTouching(remoteGitDir, '.neutron-aes-key')).toEqual([])
-        expect(remoteObjectsMatching(remoteGitDir, 'project.db').length).toBeGreaterThan(0)
-      } else {
-        // Otherwise it must have FAILED CLOSED with remediation (the rewrite
-        // push did not land) and never claimed the backup clean.
-        expect(res.stderr).toMatch(/refusing to report the backup clean|history-rewrite push/)
-        expect(res.stdout).not.toContain('carries .neutron-aes-key on NO ref')
-      }
-      // Either way, the local keyfile is intact.
+      // The recovery MUST succeed on this supported fixture — the explicit lease
+      // makes the purged history LAND, so exit 0 is REQUIRED (a broken lease that
+      // always rejects the push would flip this red, which is the point).
+      expect(res.status).toBe(0)
+      expect(res.stdout).toContain('carries .neutron-aes-key on NO ref')
+      // And the remote is genuinely key-free on every ref, with project.db still present.
+      expect(remoteObjectsMatching(remoteGitDir, '.neutron-aes-key')).toEqual([])
+      expect(remoteCommitsTouching(remoteGitDir, '.neutron-aes-key')).toEqual([])
+      expect(remoteObjectsMatching(remoteGitDir, 'project.db').length).toBeGreaterThan(0)
+      // The local keyfile is intact (only remote HISTORY was rewritten).
       expect(readFileSync(join(dataDir, '.neutron-aes-key'))).toEqual(keyBytes)
     } finally {
       rmSync(dataDir, { recursive: true, force: true })

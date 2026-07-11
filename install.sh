@@ -503,12 +503,25 @@ secure_secret_file() {
 # mktemp a 0600 temp file NEXT TO the target (`_dir`), so a later `mv` is a
 # same-filesystem atomic RENAME that preserves the temp's 0600 mode — never a
 # cross-FS copy that would recreate the destination at the umask-derived mode.
-# mktemp itself always creates 0600, and we set `umask 077` around every secret
-# write besides, so the temp is born locked. Prints the temp path.
+# mktemp itself always creates a fresh, exclusive, 0600 file (it O_EXCL-creates a
+# random name, so it NEVER follows or overwrites a pre-existing path), and we set
+# `umask 077` around every secret write besides. Prints the temp path.
+#
+# FAIL CLOSED if mktemp is unavailable: the old fallback (`: > .neutron-env.tmp.$$`)
+# used a PREDICTABLE name with no exclusive creation, so an attacker who
+# pre-planted that path as a symlink would have the installer follow it and
+# write the .env secrets to an attacker-chosen target. mktemp is universally
+# present on Linux/macOS, so its failure is exotic — refusing to write secrets
+# is the only safe response. (`set -C`/noclobber does NOT stop a symlink-follow,
+# so there is no safe predictable-name fallback.)
+#
+# On failure we print nothing and return non-zero — we do NOT `die` here because
+# this runs inside `$(...)`, where an `exit` only leaves the subshell and the
+# parent would sail on with an empty path. Every caller MUST be `$(mk_secret_tmp
+# …) || die …` so the ABORT happens in the parent shell.
 mk_secret_tmp() {
   _dir=$1
-  mktemp "$_dir/.neutron-env.XXXXXX" 2>/dev/null \
-    || { _t="$_dir/.neutron-env.tmp.$$"; : > "$_t" && chmod 600 "$_t" 2>/dev/null; printf '%s\n' "$_t"; }
+  mktemp "$_dir/.neutron-env.XXXXXX" 2>/dev/null || return 1
 }
 
 # Pin KEY=value in a dotenv file: replace any existing assignment (commented or
@@ -531,7 +544,8 @@ persist_env_var() {
   umask 077
   [ -f "$_ef" ] || : > "$_ef"
   if grep -qE "^[[:space:]]*#?[[:space:]]*(export[[:space:]]+)?${_k}=" "$_ef" 2>/dev/null; then
-    _tmp=$(mk_secret_tmp "$(dirname "$_ef")")
+    _tmp=$(mk_secret_tmp "$(dirname "$_ef")") \
+      || die "could not create a secure temp file for .env — refusing to write secrets to a predictable, symlink-followable path"
     grep -vE "^[[:space:]]*#?[[:space:]]*(export[[:space:]]+)?${_k}=" "$_ef" > "$_tmp" 2>/dev/null || true
     printf '%s=%s\n' "$_k" "$_v" >> "$_tmp"
     mv "$_tmp" "$_ef"
@@ -991,7 +1005,8 @@ persist_oauth_token_to_env() {
   umask 077
   [ -f "$_ef" ] || : > "$_ef"
   if grep -qE '^[[:space:]]*(export[[:space:]]+)?CLAUDE_CODE_OAUTH_TOKEN=' "$_ef" 2>/dev/null; then
-    _tmp=$(mk_secret_tmp "$(dirname "$_ef")")
+    _tmp=$(mk_secret_tmp "$(dirname "$_ef")") \
+      || die "could not create a secure temp file for .env — refusing to write secrets to a predictable, symlink-followable path"
     grep -vE '^[[:space:]]*(export[[:space:]]+)?CLAUDE_CODE_OAUTH_TOKEN=' "$_ef" > "$_tmp" 2>/dev/null || true
     printf 'CLAUDE_CODE_OAUTH_TOKEN=%s\n' "$_tok" >> "$_tmp"
     mv "$_tmp" "$_ef"
@@ -1224,6 +1239,21 @@ if [ "${NEUTRON_INSTALL_PRINT_ENV_PERMS:-}" = "1" ]; then
   _seam_src=${SRC_DIR:-$(pwd)}
   ensure_env_file "$_seam_src"
   printf 'env_path=%s\n' "$_seam_src/.env"
+  exit 0
+fi
+
+# Test seam (harness only) — S3(b): exercise the secret REPLACE path
+# (`persist_env_var` → `mk_secret_tmp`) in isolation. The value is a secret, so
+# the temp file must be created SECURELY (exclusive, non-symlink-following). A
+# test shadows `mktemp` to fail here to prove the installer FAILS CLOSED — it
+# aborts before writing the secret and never follows a pre-planted symlink of a
+# predictable name. `NEUTRON_TEST_PERSIST_KEY` names the .env key to persist so
+# the harness can pre-seed it (forcing the replace branch, which is the one that
+# uses the temp file). The `persisted=` line prints only on full success.
+if [ "${NEUTRON_INSTALL_PERSIST_ENV_VAR:-}" = "1" ]; then
+  _seam_src=${SRC_DIR:-$(pwd)}
+  persist_env_var "$_seam_src/.env" "${NEUTRON_TEST_PERSIST_KEY:-NEUTRON_TEST_SECRET}" "replaced-secret-value"
+  printf 'persisted=%s/.env\n' "$_seam_src"
   exit 0
 fi
 
