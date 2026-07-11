@@ -10,6 +10,7 @@
 import { describe, expect, test } from 'bun:test'
 
 import { createGptResponsesApiSubstrate } from './index.ts'
+import { getOpenAiModelPreference } from '../../models-openai.ts'
 import type { Event } from '../../events.ts'
 
 function http429Fetch(retryAfterSec: number): typeof fetch {
@@ -123,5 +124,58 @@ describe('gpt-5-5-api exhaustion classification', () => {
     } else {
       throw new Error('expected a terminal error event')
     }
+  })
+})
+
+describe('gpt-5-5-api model-not-found + operator override', () => {
+  test('404 on the primary model → LOUD actionable terminal error naming the model + override env (not a silent exit)', async () => {
+    const notFoundFetch = (async () =>
+      new Response('{"error":{"message":"The model does not exist"}}', {
+        status: 404,
+      })) as unknown as typeof fetch
+    const gpt = createGptResponsesApiSubstrate({
+      env: { OPENAI_API_KEY: 'sk' },
+      substrate_instance_id: 'gpt-404',
+      mcpResolver: async () => ({}),
+      fetchImpl: notFoundFetch,
+    })
+    const events = await collect(gpt.start({ prompt: 'hi', tools: [], model_preference: ['gpt-5.6'] }).events)
+    const err = events.find((e) => e.kind === 'error')
+    expect(err?.kind).toBe('error')
+    if (err?.kind === 'error') {
+      // Names the rejected model AND the override env — actionable, not silent.
+      expect(err.message).toMatch(/gpt-5\.6/)
+      expect(err.message).toMatch(/NEUTRON_OPENAI_MODEL/)
+      expect(err.retryable).toBe(false)
+    } else {
+      throw new Error('expected a terminal error event')
+    }
+  })
+
+  test('the env override id is what gets SENT as the request model', async () => {
+    let sentModel: unknown
+    const recordingFetch = (async (_url: string | URL, init?: RequestInit) => {
+      sentModel = (JSON.parse(String(init?.body)) as { model?: unknown }).model
+      const sse =
+        [
+          { event: 'response.created', data: { type: 'response.created', response: { id: 'r1' } } },
+          { event: 'response.completed', data: { type: 'response.completed', response: { id: 'r1', usage: { input_tokens: 1, output_tokens: 1 } } } },
+        ]
+          .map((f) => `event: ${f.event}\ndata: ${JSON.stringify(f.data)}\n`)
+          .join('\n') + '\n'
+      const stream = new ReadableStream({ start(c) { c.enqueue(new TextEncoder().encode(sse)); c.close() } })
+      return new Response(stream, { status: 200 })
+    }) as unknown as typeof fetch
+    // The composer resolves model_preference via getOpenAiModelPreference(env); an
+    // operator override flows straight to the wire.
+    const pref = getOpenAiModelPreference({ NEUTRON_OPENAI_MODEL: 'gpt-5.6-ga' } as unknown as NodeJS.ProcessEnv)
+    const gpt = createGptResponsesApiSubstrate({
+      env: { OPENAI_API_KEY: 'sk' },
+      substrate_instance_id: 'gpt-override',
+      mcpResolver: async () => ({}),
+      fetchImpl: recordingFetch,
+    })
+    await collect(gpt.start({ prompt: 'hi', tools: [], model_preference: pref }).events)
+    expect(sentModel).toBe('gpt-5.6-ga')
   })
 })

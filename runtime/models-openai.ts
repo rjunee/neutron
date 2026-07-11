@@ -39,11 +39,37 @@ export const OPENAI_FAST_MODEL: string =
   process.env['NEUTRON_OPENAI_FAST_MODEL'] ?? 'gpt-5.6-mini'
 
 /**
- * The default `model_preference` list for an OpenAI-family conversational turn:
- * best model first, then the rotation fallback. The gpt-5-5-api adapter tries
- * these in order, advancing on retryable errors. Returns a fresh array so a
- * caller can't mutate the shared default.
+ * The `model_preference` list for an OpenAI-family conversational turn: best model
+ * first, then the rotation fallback. The gpt-5-5-api adapter tries these in order,
+ * advancing on retryable errors. Returns a FRESH array (caller can't mutate the
+ * default).
+ *
+ * OPERATOR-CORRECTABLE (audit round 10) — the ids are resolved DYNAMICALLY from
+ * `env` so an operator can correct them WITHOUT a code change if OpenAI's GA id
+ * ever firms up slightly differently from `gpt-5.6`, in precedence order:
+ *
+ *   1. `NEUTRON_OPENAI_MODEL_PREFERENCE` — a comma-separated list that REPLACES the
+ *      whole preference (e.g. `gpt-5.6-ga,gpt-5.5`). Blank entries dropped.
+ *   2. else `[ NEUTRON_OPENAI_MODEL ?? NEUTRON_OPENAI_BEST_MODEL ?? 'gpt-5.6',
+ *             NEUTRON_OPENAI_FALLBACK_MODEL ?? 'gpt-5.5' ]`.
+ *
+ * Default (nothing set) ⇒ `['gpt-5.6','gpt-5.5']` — the user's explicitly-requested
+ * models, unchanged. NB: `NEUTRON_OPENAI_MODEL` is the ergonomic single-primary
+ * override; `NEUTRON_OPENAI_BEST_MODEL` remains as the module-const seed's override.
  */
-export function getOpenAiModelPreference(): string[] {
-  return [OPENAI_BEST_MODEL, OPENAI_FALLBACK_MODEL]
+export function getOpenAiModelPreference(
+  env: NodeJS.ProcessEnv = typeof process !== 'undefined' ? process.env : ({} as NodeJS.ProcessEnv),
+): string[] {
+  const listOverride = env['NEUTRON_OPENAI_MODEL_PREFERENCE']
+  if (typeof listOverride === 'string' && listOverride.trim() !== '') {
+    const ids = listOverride
+      .split(',')
+      .map((s) => s.trim())
+      .filter((s) => s.length > 0)
+    if (ids.length > 0) return ids
+  }
+  const primary =
+    env['NEUTRON_OPENAI_MODEL'] ?? env['NEUTRON_OPENAI_BEST_MODEL'] ?? 'gpt-5.6'
+  const fallback = env['NEUTRON_OPENAI_FALLBACK_MODEL'] ?? 'gpt-5.5'
+  return [primary, fallback]
 }

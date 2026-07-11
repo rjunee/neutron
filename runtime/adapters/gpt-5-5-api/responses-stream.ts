@@ -74,6 +74,24 @@ export async function* startResponsesStream(
   if (!response.ok || !response.body) {
     const status = response.status
     const text = await response.text().catch(() => '')
+    // MODEL-NOT-FOUND (audit round 10) — a 404 (or an explicit model_not_found body)
+    // means the requested model id isn't in OpenAI's catalog. Non-retryable (a
+    // rotation won't help if the ids are wrong), but it must be a LOUD, ACTIONABLE
+    // terminal error that NAMES the rejected model and the override env — otherwise
+    // an operator just gets a silent dead turn. Keep the `HTTP <status>:` prefix so
+    // the composer's classifier still reads it (404 → no credential cooldown).
+    if (status === 404 || /model[_\s-]?not[_\s-]?found/i.test(text)) {
+      const model = typeof opts.body['model'] === 'string' ? opts.body['model'] : '(unknown)'
+      yield {
+        kind: 'error',
+        message:
+          `HTTP ${status}: OpenAI does not recognize model '${model}'. If the GA model id ` +
+          `differs, set NEUTRON_OPENAI_MODEL (or NEUTRON_OPENAI_MODEL_PREFERENCE) to the correct ` +
+          `id and retry — this is a configuration error, not a transient failure. Upstream: ${truncate(text, 200)}`,
+        retryable: false,
+      }
+      return
+    }
     const retryable = status === 429 || status === 408 || (status >= 500 && status < 600)
     const retry_after = parseRetryAfterMs(response.headers.get('retry-after'))
     const ev: Event =
