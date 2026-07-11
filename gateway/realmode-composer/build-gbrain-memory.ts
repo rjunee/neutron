@@ -304,22 +304,34 @@ export function buildGBrainMemory(input: {
 }): GBrainMemoryWiring {
   const env = input.env ?? process.env
 
-  // Cache only a FOUND key, never a miss. Within a single spawn the init guard
-  // (below) and the serve childEnv (`resolveDynamicEnv`) must agree on the key —
-  // caching the first usable read guarantees that. But an ABSENT key must NOT be
-  // cached: if the first memory op fires before the key is stored, a later
-  // reconnect must be free to re-resolve and pick it up (else the cached miss
-  // would defeat the very no-restart activation this lazy path exists for).
+  // PER-CONNECT key coherence. The init guard (`ensureInitialized`, below) and
+  // the serve childEnv (`resolveDynamicEnv`) each read the key, and the client
+  // runs the guard THEN composes the env within one connect. They MUST observe
+  // the SAME key so a `gbrain embed --stale` backfill (gated on the key at init)
+  // never disagrees with the embedder the serve child actually uses. We memoize
+  // the resolved key (found OR miss) so both reads within a connect share ONE
+  // store read — then `resetKeyCache()` (called at the top of `ensureInitialized`,
+  // which the client re-runs at the start of every (re)connect) clears it so the
+  // NEXT connect re-resolves fresh. That preserves no-restart activation (a key
+  // stored after a keyword-only connect is picked up on the next spawn) while
+  // making the same-spawn agreement an actual guarantee, not a race that skips
+  // the backfill when a key lands between the two reads.
   const resolveOpenAiKey = input.resolveOpenAiKey
   let cachedKey: string | undefined
+  let keyCacheValid = false
+  const resetKeyCache = () => {
+    keyCacheValid = false
+    cachedKey = undefined
+  }
   const getKey: (() => Promise<string | undefined>) | undefined =
     resolveOpenAiKey === undefined
       ? undefined
       : async () => {
-          if (cachedKey !== undefined) return cachedKey
+          if (keyCacheValid) return cachedKey
           const key = await resolveOpenAiKey().catch(() => undefined)
-          if (key !== undefined && key.trim().length > 0) cachedKey = key
-          return key
+          cachedKey = key !== undefined && key.trim().length > 0 ? key : undefined
+          keyCacheValid = true
+          return cachedKey
         }
 
   // Read the EXISTING brain's column-width state ONCE at boot (a fresh install
@@ -389,6 +401,11 @@ export function buildGBrainMemory(input: {
   // client's first connect. The embedder it inits against is the SAME effective
   // embedder the serve child uses, so the vector column matches the runtime.
   opts.ensureInitialized = async () => {
+    // Start of a (re)connect: drop any key cached on a PRIOR connect so this
+    // connect re-resolves fresh (picks up a key stored since) — then every read
+    // WITHIN this connect (here + the serve `resolveDynamicEnv`) shares that one
+    // resolution, so the backfill's key and the serve embedder can't disagree.
+    resetKeyCache()
     // Resolve the embedder at INIT time, not composition time: when a lazy key
     // resolver is threaded, read the key now (memoized — same value the serve
     // childEnv sees) so the brain is init'd + `embed --stale`-backfilled against

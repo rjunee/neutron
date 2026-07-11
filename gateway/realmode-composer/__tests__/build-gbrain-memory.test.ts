@@ -469,6 +469,39 @@ describe('buildGBrainMemory', () => {
     }
   })
 
+  test('per-connect key coherence: init guard + serve env share ONE key read within a spawn', async () => {
+    // Codex boundary: a resolver that changes value between the two reads within
+    // one connect must NOT be observed differently by the init guard (which gates
+    // the `embed --stale` backfill) and the serve `resolveDynamicEnv`. gbrain is
+    // absent in the test env, so a memory op drives a real connect: the client
+    // runs `ensureInitialized` (getKey read #1) then `resolveDynamicEnv` (getKey
+    // read #2) before the spawn fails ENOENT. With the per-connect cache the
+    // underlying resolver is called EXACTLY ONCE, so both reads agree; the pre-fix
+    // code (cache found-only, no reset) called it twice and could disagree.
+    const home = mkdtempSync(join(tmpdir(), 'bgm-coherence-'))
+    try {
+      let calls = 0
+      const wiring = buildGBrainMemory({
+        owner_home: join(home, 'data'),
+        project_slug: 'acme',
+        env: {},
+        // Flips absent → present between successive calls; the shared read must
+        // pin ONE value for the whole connect.
+        resolveOpenAiKey: async () => {
+          calls += 1
+          return calls === 1 ? undefined : 'sk-late'
+        },
+      })
+      // Drive one connect (gbrain absent → the op throws, swallowed).
+      await wiring.memoryStore.query({ query: 'x', limit: 1 }).catch(() => undefined)
+      await wiring.close()
+      // Exactly one underlying resolution for the connect → init + serve agreed.
+      expect(calls).toBe(1)
+    } finally {
+      rmSync(home, { recursive: true, force: true })
+    }
+  })
+
   // --- gbrain reachability (dogfood 2026-06-28) ------------------------------
   // The boot-time disabled-warning must reflect the SAME absolute-path resolver
   // the serve spawn uses — not a bare `Bun.which` against the (narrow) service
