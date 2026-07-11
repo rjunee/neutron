@@ -753,3 +753,73 @@ test('S13 — exactly-one validation: supplying neither `pool` nor `resolvePool`
     } as Parameters<typeof buildImportSubstrate>[0]),
   ).toThrow(/exactly one of/i)
 })
+
+// --- RESOLVER PRECEDENCE (audit round 13): same fix on the import path — an
+// EMPTY/whitespace providerResolver result defers to the static `provider`. ---
+
+function importAnthropicPool(): CredentialPool {
+  return newCredentialPool({ strategy: 'fill_first', credentials: [{ id: 'anthropic:k', kind: 'api_key', secret: 'sk-ant' }] })
+}
+function importOpenaiPool(): CredentialPool {
+  return newCredentialPool({ strategy: 'fill_first', credentials: [{ id: 'openai:k', kind: 'api_key', secret: 'sk-openai' }] })
+}
+function importGptFetch(): typeof fetch {
+  const sse =
+    [
+      { event: 'response.created', data: { type: 'response.created', response: { id: 'r1' } } },
+      { event: 'response.completed', data: { type: 'response.completed', response: { id: 'r1', usage: { input_tokens: 1, output_tokens: 1 } } } },
+    ]
+      .map((f) => `event: ${f.event}\ndata: ${JSON.stringify(f.data)}\n`)
+      .join('\n') + '\n'
+  return (async () => {
+    const stream = new ReadableStream({ start(c) { c.enqueue(new TextEncoder().encode(sse)); c.close() } })
+    return new Response(stream, { status: 200 })
+  }) as unknown as typeof fetch
+}
+async function drainImport(h: SessionHandle): Promise<Event[]> {
+  const out: Event[] = []
+  for await (const e of h.events) out.push(e)
+  return out
+}
+
+test("import RESOLVER '' + static provider:'openai' → openai path (NOT a silent Claude fallback)", async () => {
+  const { substrateFactory, seen } = captureFactory()
+  const sub = buildImportSubstrate({
+    pool: importAnthropicPool(),
+    substrate_instance_id: 'cc-import-x',
+    provider: 'openai',
+    providerResolver: () => '',
+    substrateFactory,
+    openai: { pool: importOpenaiPool(), bindMcpResolver: () => async () => ({}), model_preference: ['gpt-5.6'], fetchImpl: importGptFetch() },
+  })!
+  const events = await drainImport(sub.start(runSpec()))
+  expect(seen).toHaveLength(0) // CC fake NOT called → openai path
+  expect(events.some((e) => e.kind === 'completion')).toBe(true)
+})
+
+test("import RESOLVER 'openai' (non-empty) + static provider:'anthropic' → resolver wins → openai path", async () => {
+  const { substrateFactory, seen } = captureFactory()
+  const sub = buildImportSubstrate({
+    pool: importAnthropicPool(),
+    substrate_instance_id: 'cc-import-y',
+    provider: 'anthropic',
+    providerResolver: () => 'openai',
+    substrateFactory,
+    openai: { pool: importOpenaiPool(), bindMcpResolver: () => async () => ({}), model_preference: ['gpt-5.6'], fetchImpl: importGptFetch() },
+  })!
+  const events = await drainImport(sub.start(runSpec()))
+  expect(seen).toHaveLength(0)
+  expect(events.some((e) => e.kind === 'completion')).toBe(true)
+})
+
+test("import RESOLVER '' + absent static provider → Claude default (byte-identical)", async () => {
+  const { substrateFactory, seen } = captureFactory()
+  const sub = buildImportSubstrate({
+    pool: importAnthropicPool(),
+    substrate_instance_id: 'cc-import-z',
+    providerResolver: () => '',
+    substrateFactory,
+  })!
+  await drainImport(sub.start(runSpec()))
+  expect(seen).toHaveLength(1) // truly-absent → Claude default
+})

@@ -531,11 +531,20 @@ export function buildLlmCallSubstrate(
   const openaiSessions: OpenAiSessionLedger = new Map()
   return {
     start(spec: AgentSpec): SessionHandle {
-      // SWAPPABLE PROVIDER — resolve the backend for THIS turn. Per-turn resolver
-      // wins (active-project provider), then the static `provider`, then default
-      // 'anthropic'. When non-anthropic, delegate to the OpenAI-family path; the
-      // anthropic block below stays BYTE-IDENTICAL (same factory, same option bag).
-      const provider = normalizeProvider(input.providerResolver?.() ?? input.provider)
+      // SWAPPABLE PROVIDER — resolve the backend for THIS turn. A NON-EMPTY per-turn
+      // resolver value wins (active-project provider); an EMPTY/whitespace resolver
+      // result means "no dynamic override this turn" → defer to the statically
+      // configured `provider` (which may be 'openai'); only when BOTH are
+      // absent/empty do we get the 'anthropic' default. Passing an empty string
+      // straight to normalizeProvider would resolve to Anthropic and SILENTLY route
+      // an explicit-openai turn to Claude (audit High). When non-anthropic, delegate
+      // to the OpenAI-family path; the anthropic block below stays BYTE-IDENTICAL.
+      const resolvedProvider = input.providerResolver?.()
+      const effectiveProvider =
+        resolvedProvider !== undefined && resolvedProvider !== null && resolvedProvider.trim() !== ''
+          ? resolvedProvider
+          : input.provider
+      const provider = normalizeProvider(effectiveProvider)
       if (provider !== 'anthropic') {
         // Conversation key mirrors the CC warm-pool key dimensions (user +
         // live active project) so continuity is scoped identically across

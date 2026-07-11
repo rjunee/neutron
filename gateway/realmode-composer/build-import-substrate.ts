@@ -232,10 +232,18 @@ export function buildImportSubstrate(
   }
   return {
     start(spec: AgentSpec): SessionHandle {
-      // SWAPPABLE PROVIDER — resolve the backend for THIS turn. Non-anthropic ⇒
-      // delegate to the shared OpenAI-family path (against the SEPARATE OpenAI
-      // pool). Default 'anthropic' keeps the block below BYTE-IDENTICAL.
-      const provider = normalizeProvider(input.providerResolver?.() ?? input.provider)
+      // SWAPPABLE PROVIDER — a NON-EMPTY per-turn resolver value wins; an
+      // EMPTY/whitespace result means "no dynamic override" → defer to the static
+      // `provider` (an empty string passed straight to normalizeProvider would
+      // resolve to Anthropic and silently route an explicit-openai turn to Claude —
+      // audit High). Default 'anthropic' (both absent) keeps the block below
+      // BYTE-IDENTICAL.
+      const resolvedProvider = input.providerResolver?.()
+      const effectiveProvider =
+        resolvedProvider !== undefined && resolvedProvider !== null && resolvedProvider.trim() !== ''
+          ? resolvedProvider
+          : input.provider
+      const provider = normalizeProvider(effectiveProvider)
       if (provider !== 'anthropic') {
         return startOpenAiFamilySession({
           provider,

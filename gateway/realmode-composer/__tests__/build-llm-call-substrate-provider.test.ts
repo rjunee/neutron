@@ -896,3 +896,79 @@ test('CREDENTIAL COOLDOWN mutation-verify: 401/402/429 STILL cool (only credenti
   await drain(openaiSub(pool401, httpErrorFetch(401)).start(spec()))
   expect(pool401.credentials[0]!.cooldown_reason).toBe('auth_401')
 })
+
+// --- RESOLVER PRECEDENCE (audit round 13): an EMPTY/whitespace providerResolver
+// result defers to the static `provider`, NOT the Anthropic default. ---
+
+test("RESOLVER '' + static provider:'openai' → openai path (NOT a silent Claude fallback)", async () => {
+  const cc = ccCapture()
+  const sub = buildLlmCallSubstrate({
+    pool: anthropicPool(),
+    substrate_instance_id: 'gpt-empty',
+    provider: 'openai',
+    providerResolver: () => '',
+    substrateFactory: cc.substrateFactory,
+    openai: { pool: openaiPool(), bindMcpResolver: () => async () => ({}), model_preference: ['gpt-5.6'], fetchImpl: gptFetch() },
+  })!
+  const events = await drain(sub.start(spec()))
+  // The empty resolver deferred to static 'openai' → CC fake NEVER called.
+  expect(cc.seen).toHaveLength(0)
+  expect(events.some((e) => e.kind === 'completion')).toBe(true)
+})
+
+test("RESOLVER whitespace '   ' + static provider:'openai' → openai path", async () => {
+  const cc = ccCapture()
+  const sub = buildLlmCallSubstrate({
+    pool: anthropicPool(),
+    substrate_instance_id: 'gpt-ws',
+    provider: 'openai',
+    providerResolver: () => '   ',
+    substrateFactory: cc.substrateFactory,
+    openai: { pool: openaiPool(), bindMcpResolver: () => async () => ({}), model_preference: ['gpt-5.6'], fetchImpl: gptFetch() },
+  })!
+  const events = await drain(sub.start(spec()))
+  expect(cc.seen).toHaveLength(0)
+  expect(events.some((e) => e.kind === 'completion')).toBe(true)
+})
+
+test("RESOLVER 'anthropic' (non-empty) + static provider:'openai' → the resolver WINS → Claude path", async () => {
+  const cc = ccCapture()
+  const sub = buildLlmCallSubstrate({
+    pool: anthropicPool(),
+    substrate_instance_id: 'cc-wins',
+    provider: 'openai',
+    providerResolver: () => 'anthropic',
+    substrateFactory: cc.substrateFactory,
+    openai: { pool: openaiPool(), bindMcpResolver: () => async () => ({}), model_preference: ['gpt-5.6'], fetchImpl: gptFetch() },
+  })!
+  await drain(sub.start(spec()))
+  // The non-empty resolver value wins → CC fake IS called.
+  expect(cc.seen).toHaveLength(1)
+})
+
+test("RESOLVER 'openai' (non-empty) + static provider:'anthropic' → the resolver WINS → openai path", async () => {
+  const cc = ccCapture()
+  const sub = buildLlmCallSubstrate({
+    pool: anthropicPool(),
+    substrate_instance_id: 'gpt-wins',
+    provider: 'anthropic',
+    providerResolver: () => 'openai',
+    substrateFactory: cc.substrateFactory,
+    openai: { pool: openaiPool(), bindMcpResolver: () => async () => ({}), model_preference: ['gpt-5.6'], fetchImpl: gptFetch() },
+  })!
+  const events = await drain(sub.start(spec()))
+  expect(cc.seen).toHaveLength(0)
+  expect(events.some((e) => e.kind === 'completion')).toBe(true)
+})
+
+test('RESOLVER mutation-verify: BOTH empty resolver AND absent static provider → Claude default (byte-identical)', async () => {
+  const cc = ccCapture()
+  const sub = buildLlmCallSubstrate({
+    pool: anthropicPool(),
+    substrate_instance_id: 'cc-default',
+    providerResolver: () => '',
+    substrateFactory: cc.substrateFactory,
+  })!
+  await drain(sub.start(spec()))
+  expect(cc.seen).toHaveLength(1) // truly-absent → Claude default
+})
