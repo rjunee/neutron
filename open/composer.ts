@@ -83,6 +83,7 @@ import {
   DispatchService,
   buildBootSweepReport,
   buildCancellableDispatchTurn,
+  buildDispatchStuckAlertSink,
   scheduleDispatchLifecycleWatchdog,
   defaultPersonaLoader,
   type DispatchBoardBinder,
@@ -2561,10 +2562,35 @@ export function buildOpenGraphComposer(
     // (`runtime/subagent/watchdog.ts`) is UNVERIFIED against real dispatch
     // durations for killing — it only gates a NOTIFICATION here.
     if (dispatchService !== null) {
-      const dispatchStuckAlertSink: DispatchSuspectedStuckSink = async (alert) => {
-        // app-ws — best-effort EPHEMERAL push (NOT the durable surfacing; swallow
-        // so a dead socket never masks the durable-journal result below).
-        try {
+      // PERSIST-BEFORE-DELIVER (round-9 class fix), enforced by the shared
+      // `buildDispatchStuckAlertSink` factory: the durable `journal` (O4
+      // `watchdog_alert` — the DELIVERY GATE, there is no `watchdog_alerts` ledger
+      // for dispatch alerts unlike the six general detectors) is awaited FIRST and a
+      // real failure PROPAGATES; the user-visible app-ws `push` fires ONLY after the
+      // journal commits. Old order pushed the websocket alert first, so a journal
+      // failure left the run un-latched and RE-PUSHED the same visible alert every
+      // tick. A null ambient sink (LLM-less/dev box) is a no-op success — no durable
+      // target, and no push has happened, so nothing to dedupe.
+      const dispatchStuckAlertSink: DispatchSuspectedStuckSink = buildDispatchStuckAlertSink({
+        journal: async (alert): Promise<void> => {
+          const eventSink = resolveSystemEventSink()
+          if (eventSink !== null) {
+            await eventSink.record({
+              event: 'watchdog_alert',
+              module: 'watchdog',
+              level: 'warn',
+              project_slug,
+              payload: {
+                source: 'dispatch_lifecycle',
+                run_id: alert.run_id,
+                agent_kind: alert.agent_kind,
+                reason: alert.reason,
+                age_ms: alert.age_ms,
+              },
+            })
+          }
+        },
+        push: (alert): void => {
           const env: AppWsOutboundAgentMessage = {
             v: 1,
             type: 'agent_message',
@@ -2579,35 +2605,8 @@ export function buildOpenGraphComposer(
               // one dead socket must not stop the rest
             }
           }
-        } catch {
-          // app-ws delivery is best-effort — never throw on the ephemeral push
-        }
-        // O4 (Blocker-C) — the DURABLE surfacing for a dispatch alert is this
-        // `watchdog_alert` journal row (there is no `watchdog_alerts` ledger for
-        // dispatch alerts — unlike the six general detectors). AWAIT the durable
-        // write and let a REAL failure PROPAGATE (round-4 sweep): the watchdog
-        // adds the run to `notified` only when this resolves, so a swallowed
-        // write-failure would latch a LOST alert. Propagating leaves the run
-        // un-latched → retried next tick → delivered exactly once when it clears.
-        // No ambient sink (no gateway journal, e.g. an LLM-less/dev box) is a
-        // no-op success — there is no durable target to retry against.
-        const eventSink = resolveSystemEventSink()
-        if (eventSink !== null) {
-          await eventSink.record({
-            event: 'watchdog_alert',
-            module: 'watchdog',
-            level: 'warn',
-            project_slug,
-            payload: {
-              source: 'dispatch_lifecycle',
-              run_id: alert.run_id,
-              agent_kind: alert.agent_kind,
-              reason: alert.reason,
-              age_ms: alert.age_ms,
-            },
-          })
-        }
-      }
+        },
+      })
       const lifecycleWatchdog = scheduleDispatchLifecycleWatchdog({
         registry: subagentRegistry,
         control: subagentControl,

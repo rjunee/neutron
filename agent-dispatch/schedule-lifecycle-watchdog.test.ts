@@ -25,6 +25,7 @@ import { newControlState, registerCanceller } from '@neutronai/runtime/subagent/
 import { SubagentRegistry } from '@neutronai/runtime/subagent/registry.ts'
 import {
   scheduleDispatchLifecycleWatchdog,
+  buildDispatchStuckAlertSink,
   type DispatchSuspectedStuckAlert,
 } from './watchdog-report.ts'
 
@@ -299,5 +300,103 @@ describe('scheduleDispatchLifecycleWatchdog (F4)', () => {
     await stopPromise
     expect(tickCompleted).toBe(true)
     expect(stopResolved).toBe(true)
+  })
+})
+
+describe('buildDispatchStuckAlertSink — persist-before-deliver (round-9)', () => {
+  const alert: DispatchSuspectedStuckAlert = {
+    run_id: 'r1',
+    agent_kind: 'atlas',
+    reason: 'stuck',
+    age_ms: 1,
+    markdown: 'x',
+  }
+
+  test('journal record() rejects → NO visible push; on retry the push lands EXACTLY ONCE', async () => {
+    let journalCalls = 0
+    let pushCalls = 0
+    const sink = buildDispatchStuckAlertSink({
+      // The durable journal REJECTS on the first call, then succeeds.
+      journal: async (): Promise<void> => {
+        journalCalls++
+        if (journalCalls === 1) throw new Error('journal down')
+      },
+      // The user-visible push always "succeeds" — the mutation check: with the OLD
+      // send-then-record order this counter would reach 2 (fires on both ticks).
+      push: (): void => {
+        pushCalls++
+      },
+    })
+
+    // Tick 1 — journal rejects → the sink rejects BEFORE any push (persist-first),
+    // so the watchdog leaves the run un-latched and the user sees NOTHING yet.
+    await expect(sink(alert)).rejects.toThrow('journal down')
+    expect(pushCalls).toBe(0)
+
+    // Tick 2 (retry) — journal commits → the push fires. EXACTLY ONCE across both.
+    await sink(alert)
+    expect(pushCalls).toBe(1)
+    expect(journalCalls).toBe(2)
+  })
+
+  test('a push that throws is swallowed (journal already committed → alert stays latched)', async () => {
+    const sink = buildDispatchStuckAlertSink({
+      journal: async (): Promise<void> => {},
+      push: (): void => {
+        throw new Error('dead socket')
+      },
+    })
+    // A dead socket must NOT propagate — the durable journal already committed, so
+    // re-throwing would wrongly un-latch and re-journal.
+    await expect(Promise.resolve(sink(alert))).resolves.toBeUndefined()
+  })
+
+  test('integration: journal rejects tick 1 → the VISIBLE push is delivered EXACTLY ONCE across retry ticks', async () => {
+    const registry = new SubagentRegistry()
+    const control = newControlState(registry)
+    await registry.create({ run_id: 'r7', instance_key: 'owner', agent_kind: 'atlas', spawn_depth: 0 })
+    await registry.update('r7', { status: 'running', last_event_at: Date.now() - 10 * 60_000 })
+
+    let journalCalls = 0
+    let pushCalls = 0
+    const sink = buildDispatchStuckAlertSink({
+      journal: async (): Promise<void> => {
+        journalCalls++
+        if (journalCalls === 1) throw new Error('journal down')
+      },
+      push: (): void => {
+        pushCalls++
+      },
+    })
+
+    let tickFn: (() => void) | null = null
+    const scheduled = scheduleDispatchLifecycleWatchdog({
+      registry,
+      control,
+      alert_sink: sink,
+      set_interval: (fn) => {
+        tickFn = fn
+        return 0 as unknown as ReturnType<typeof setInterval>
+      },
+      clear_interval: () => {},
+    })
+
+    // Tick 1 — journal rejects → run NOT latched, NO visible push.
+    tickFn!()
+    await Bun.sleep(20)
+    expect(journalCalls).toBe(1)
+    expect(pushCalls).toBe(0)
+
+    // Tick 2 — journal commits → the visible push fires once, run latched.
+    tickFn!()
+    await Bun.sleep(20)
+    expect(pushCalls).toBe(1)
+
+    // Tick 3 — latched → no repeat visible push (exactly-once holds).
+    tickFn!()
+    await Bun.sleep(20)
+    expect(pushCalls).toBe(1)
+
+    await scheduled.stop()
   })
 })

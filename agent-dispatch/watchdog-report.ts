@@ -103,6 +103,47 @@ export interface DispatchSuspectedStuckAlert {
 /** Sink for the non-terminal suspected-stuck alert (O4 journal + app-ws in prod). */
 export type DispatchSuspectedStuckSink = (alert: DispatchSuspectedStuckAlert) => void | Promise<void>
 
+/** The two effects a dispatch-alert sink performs, split so the ORDERING between
+ *  them is enforced (and tested) in one place. */
+export interface DispatchStuckAlertSinkEffects {
+  /**
+   * The DURABLE surfacing (the O4 `watchdog_alert` journal in prod) — the DELIVERY
+   * GATE. Awaited FIRST; a rejection PROPAGATES so the watchdog leaves the run
+   * un-latched and retries cleanly. A no-op resolve (no durable target, e.g. an
+   * LLM-less box) is a success.
+   */
+  journal: (alert: DispatchSuspectedStuckAlert) => Promise<void>
+  /**
+   * The USER-VISIBLE ephemeral push (app-ws in prod). Fired ONLY after `journal`
+   * resolves, and best-effort (a throw is swallowed) — a dead socket must not
+   * un-latch an already-journaled alert.
+   */
+  push: (alert: DispatchSuspectedStuckAlert) => void
+}
+
+/**
+ * Build the dispatch suspected-stuck sink with PERSIST-BEFORE-DELIVER ordering.
+ *
+ * The durable `journal` commits BEFORE the user-visible `push`. This is the whole
+ * point of the split: if the visible push ran first and the journal then rejected,
+ * the watchdog would leave the run un-latched and RE-PUSH the same visible alert
+ * every tick (a duplicate the user sees). Journaling first means a persist failure
+ * is "not delivered" — no push has happened, so the retry is clean and the visible
+ * alert lands EXACTLY ONCE (on the tick whose journal finally commits).
+ */
+export function buildDispatchStuckAlertSink(
+  fx: DispatchStuckAlertSinkEffects,
+): DispatchSuspectedStuckSink {
+  return async (alert: DispatchSuspectedStuckAlert): Promise<void> => {
+    await fx.journal(alert) // durable gate — rejection propagates (clean retry)
+    try {
+      fx.push(alert) // user-visible, ONLY after the durable commit; best-effort
+    } catch {
+      // ephemeral push is best-effort — never un-latch an already-journaled alert
+    }
+  }
+}
+
 /**
  * Build a notify-only watchdog notifier that emits a NON-TERMINAL
  * {@link DispatchSuspectedStuckAlert} (F4 Blocker-A fix) instead of the terminal
