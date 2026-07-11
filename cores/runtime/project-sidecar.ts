@@ -188,27 +188,23 @@ export function assertWithinProjectsBoundary(
     opts.makeError ??
     ((pid, resolved_path, boundary) =>
       new CorePathTraversalError(pid, resolved_path, boundary))
-  // Anchor the boundary to the REAL owner_home. If `<owner_home>/Projects`
-  // is ITSELF a symlink escaping owner_home, `realpath(Projects)` would be
-  // an outside dir that then "contains" every target — so the boundary is
-  // only trustworthy when its real path lives directly under the real
-  // owner_home. If owner_home / Projects don't exist yet there is nothing
-  // to symlink through, so the lexical guard alone is authoritative.
-  let realOwnerHome: string
-  try {
-    realOwnerHome = realpathSync(opts.owner_home)
-  } catch {
-    return
-  }
+  // Anchor the boundary to the REAL `<owner_home>/Projects` dir — WHEREVER it
+  // really lives. `<owner_home>/Projects` may itself be a symlink, and that is
+  // a legitimate OPERATOR relocation (e.g. `ln -s /Volumes/Data/Projects
+  // ~/Projects` to keep projects on an external volume), NOT an attack: the
+  // boundary dir is operator-controlled; only the components BELOW it come
+  // from the (untrusted) tool-supplied `project_id`. So we canonicalise the
+  // boundary ITSELF and require every target's realpath to stay under it.
+  // This still rejects a genuine escape — a `..` / absolute `project_id`
+  // (caught lexically upstream) or a symlink placed INSIDE Projects pointing
+  // out, because THAT target's realpath leaves the real boundary. If Projects
+  // doesn't exist yet there is no symlink to follow, so the lexical guard
+  // alone is authoritative.
   let realBoundary: string
   try {
     realBoundary = realpathSync(owner_projects_dir)
   } catch {
     return
-  }
-  if (realBoundary !== join(realOwnerHome, 'Projects')) {
-    // Projects is a symlink (or otherwise resolves) outside owner_home.
-    throw makeError(opts.project_id, realBoundary, owner_projects_dir)
   }
   let probe = resolvePath(opts.target)
   while (!existsSync(probe) && dirname(probe) !== probe) {

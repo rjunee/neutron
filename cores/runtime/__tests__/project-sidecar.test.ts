@@ -248,13 +248,58 @@ describe('ProjectSidecarResolver — mechanics + guard', () => {
     }
   })
 
-  test('rejects when the Projects boundary ITSELF is a symlink escaping owner_home, no outside write', async () => {
-    const outside = mkdtempSync(join(tmpdir(), 'boundary-outside-'))
+  test('ACCEPTS a relocated (symlinked) Projects boundary — legit self-host config, valid slug resolves', async () => {
+    // A self-hoster keeps projects on an external volume and points
+    // `<owner_home>/Projects` at it via a symlink. The boundary dir is
+    // OPERATOR-controlled, not attacker-controlled — this is a trusted
+    // relocation, NOT an escape. A valid slug must resolve (regression from
+    // X4 #320, which mis-rejected this with a misleading CorePathTraversalError).
+    const relocated = mkdtempSync(join(tmpdir(), 'relocated-projects-'))
     try {
-      // `<owner_home>/Projects` is a symlink to an outside dir — realpath of
-      // the boundary would otherwise "contain" everything. The anchor check
-      // (real Projects must live directly under real owner_home) rejects it.
-      symlinkSync(outside, join(tmp, 'Projects'), 'dir')
+      symlinkSync(relocated, join(tmp, 'Projects'), 'dir')
+
+      // Guard does not throw for a valid slug through the relocated boundary.
+      const resolved = safeResolveProjectRoot({ owner_home: tmp, project_id: 'proj-a' })
+      expect(resolved).toBe(join(tmp, 'Projects', 'proj-a'))
+
+      // And the resolver builds + writes the sidecar (through the symlink).
+      const { resolver, state } = makeResolver()
+      const handle = await resolver.resolve('proj-a')
+      expect(handle.project_id).toBe('proj-a')
+      expect(state.builds).toBe(1)
+      // The real sidecar dir landed under the RELOCATED target.
+      expect(existsSync(join(relocated, 'proj-a', 'fake'))).toBe(true)
+      resolver.closeAll()
+    } finally {
+      rmSync(relocated, { recursive: true, force: true })
+    }
+  })
+
+  test('accepts a nested valid subpath through a relocated (symlinked) Projects boundary', () => {
+    const relocated = mkdtempSync(join(tmpdir(), 'relocated-nested-'))
+    try {
+      symlinkSync(relocated, join(tmp, 'Projects'), 'dir')
+      const resolved = safeResolveProjectRoot({
+        owner_home: tmp,
+        project_id: 'nested/group/proj-7',
+      })
+      expect(resolved).toBe(join(tmp, 'Projects', 'nested', 'group', 'proj-7'))
+    } finally {
+      rmSync(relocated, { recursive: true, force: true })
+    }
+  })
+
+  test('STILL rejects a symlink escape placed INSIDE a relocated Projects boundary, no outside write', async () => {
+    // Even when Projects is a legitimately-relocated symlink, a symlink at
+    // `Projects/<slug>` (i.e. inside the real boundary) pointing FURTHER out
+    // must still be rejected — its realpath leaves the real boundary.
+    const relocated = mkdtempSync(join(tmpdir(), 'relocated-escape-'))
+    const outside = mkdtempSync(join(tmpdir(), 'relocated-escape-target-'))
+    try {
+      symlinkSync(relocated, join(tmp, 'Projects'), 'dir')
+      // `Projects/proj-a` (which lands in `relocated/proj-a`) is itself a
+      // symlink to an unrelated outside dir → genuine escape.
+      symlinkSync(outside, join(relocated, 'proj-a'), 'dir')
 
       expect(() =>
         safeResolveProjectRoot({ owner_home: tmp, project_id: 'proj-a' }),
@@ -265,9 +310,10 @@ describe('ProjectSidecarResolver — mechanics + guard', () => {
         CorePathTraversalError,
       )
       expect(state.builds).toBe(0)
-      expect(existsSync(join(outside, 'proj-a'))).toBe(false)
+      expect(existsSync(join(outside, 'fake'))).toBe(false)
       resolver.closeAll()
     } finally {
+      rmSync(relocated, { recursive: true, force: true })
       rmSync(outside, { recursive: true, force: true })
     }
   })
