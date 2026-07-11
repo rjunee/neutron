@@ -12,6 +12,12 @@
  * 'doc_modified_conflict'` so the UI can prompt the user to reload.
  */
 
+import {
+  GatewayClientError,
+  GatewayHttpClient,
+  type GatewayHttpClientOptions,
+} from '@neutronai/client-core';
+
 export type DocTreeKind = 'file' | 'folder' | 'binary';
 
 /**
@@ -103,10 +109,7 @@ export interface DiffResult {
   truncated: boolean;
 }
 
-export interface DocsClientOptions {
-  base_url: string;
-  token: string;
-}
+export type DocsClientOptions = GatewayHttpClientOptions;
 
 /** Extensions the gateway accepts on the binary surface. Kept in sync
  *  with `gateway/storage/binary-types.ts` BINARY_EXTENSIONS so the
@@ -330,13 +333,18 @@ interface CommentsResolveResponse {
   resolved_at: number;
 }
 
-export class DocsClient {
-  private readonly base_url: string;
-  private readonly token: string;
-
-  constructor(opts: DocsClientOptions) {
-    this.base_url = opts.base_url.replace(/\/+$/, '');
-    this.token = opts.token;
+export class DocsClient extends GatewayHttpClient {
+  protected override makeError(
+    code: string,
+    message: string,
+    status: number,
+    body: Record<string, unknown>,
+  ): GatewayClientError {
+    const current =
+      typeof body['current_modified_at'] === 'number'
+        ? (body['current_modified_at'] as number)
+        : null;
+    return new DocsClientError(code, message, status, current);
   }
 
   async tree(project_id: string): Promise<{ tree: DocTreeNode[]; file_count: number }> {
@@ -694,40 +702,6 @@ export class DocsClient {
     const res = await this.req<DiffResponse>(path);
     return res.diff;
   }
-
-  private async req<T>(
-    path: string,
-    init: { method?: string; body?: unknown } = {},
-  ): Promise<T> {
-    const method = init.method ?? 'GET';
-    const headers: Record<string, string> = {
-      authorization: `Bearer ${this.token}`,
-    };
-    let body: string | undefined;
-    if (init.body !== undefined) {
-      headers['content-type'] = 'application/json';
-      body = JSON.stringify(init.body);
-    }
-    const res = await fetch(`${this.base_url}${path}`, {
-      method,
-      headers,
-      ...(body !== undefined ? { body } : {}),
-    });
-    let json: unknown = null;
-    try {
-      json = await res.json();
-    } catch {
-      // fall through to status-coded error below
-    }
-    if (!res.ok) {
-      const err = (json ?? {}) as ErrorResponse;
-      const code = err.code ?? 'request_failed';
-      const message = err.message ?? `HTTP ${res.status}`;
-      const current = typeof err.current_modified_at === 'number' ? err.current_modified_at : null;
-      throw new DocsClientError(code, message, res.status, current);
-    }
-    return json as T;
-  }
 }
 
 /**
@@ -831,15 +805,11 @@ export class RequestGate {
   }
 }
 
-export class DocsClientError extends Error {
-  readonly code: string;
-  readonly status: number;
+export class DocsClientError extends GatewayClientError {
   readonly current_modified_at: number | null;
   constructor(code: string, message: string, status: number, current_modified_at: number | null) {
-    super(`${code}: ${message}`);
+    super(code, message, status);
     this.name = 'DocsClientError';
-    this.code = code;
-    this.status = status;
     this.current_modified_at = current_modified_at;
   }
 }

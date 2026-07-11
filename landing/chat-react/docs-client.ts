@@ -36,6 +36,12 @@
  * unit-tests without a DOM or a live server.
  */
 
+import {
+  GatewayClientError,
+  GatewayHttpClient,
+  type GatewayHttpClientOptions,
+} from '@neutronai/client-core'
+
 /* ─── wire types (mirror gateway/http/doc-store.ts + comment-store.ts) ─── */
 
 export type DocTreeKind = 'file' | 'folder' | 'binary'
@@ -144,27 +150,14 @@ export const MAX_ANCHOR_CTX_BYTES = 256
 
 /* ─── client ─── */
 
-type FetchImpl = (input: string, init?: RequestInit) => Promise<Response>
+export type DocsClientOptions = GatewayHttpClientOptions
 
-export interface DocsClientOptions {
-  /** Page origin (`https://host`); the surface lives at `/api/app/...`. */
-  base_url: string
-  /** App-ws bearer token (`config.token`). */
-  token: string
-  /** Injected in tests; defaults to the global `fetch`. */
-  fetchImpl?: FetchImpl
-}
-
-export class DocsClientError extends Error {
-  readonly code: string
-  readonly status: number
+export class DocsClientError extends GatewayClientError {
   /** Present on a `doc_changed_underfoot` / conflict 409. */
   readonly current_modified_at: number | null
   constructor(code: string, message: string, status: number, current_modified_at: number | null = null) {
-    super(`${code}: ${message}`)
+    super(code, message, status)
     this.name = 'DocsClientError'
-    this.code = code
-    this.status = status
     this.current_modified_at = current_modified_at
   }
 }
@@ -196,13 +189,6 @@ interface CommentsThreadResponse {
   ok: boolean
   thread: ThreadTree
 }
-interface ErrorBody {
-  ok?: boolean
-  code?: string
-  message?: string
-  current_modified_at?: number
-}
-
 /** Result of `listComments` — when the gateway has no comment substrate wired
  *  (`503 comments_unavailable`) this surfaces `unavailable: true` so the
  *  Documents tab degrades to list+view gracefully instead of erroring. */
@@ -224,15 +210,20 @@ export interface AnchorInput {
   based_on_modified_at: number
 }
 
-export class WebDocsClient {
-  private readonly base_url: string
-  private readonly token: string
-  private readonly fetchImpl: FetchImpl
+export class WebDocsClient extends GatewayHttpClient {
+  protected override readonly guardNetworkErrors = true
 
-  constructor(opts: DocsClientOptions) {
-    this.base_url = opts.base_url.replace(/\/+$/, '')
-    this.token = opts.token
-    this.fetchImpl = opts.fetchImpl ?? ((input, init) => fetch(input, init))
+  protected override makeError(
+    code: string,
+    message: string,
+    status: number,
+    body: Record<string, unknown>,
+  ): GatewayClientError {
+    const current =
+      typeof body['current_modified_at'] === 'number'
+        ? (body['current_modified_at'] as number)
+        : null
+    return new DocsClientError(code, message, status, current)
   }
 
   /** List every doc + folder under the project's docs root. */
@@ -370,40 +361,6 @@ export class WebDocsClient {
     return { escalate_event_id: res.escalate_event_id, escalated_at: res.escalated_at }
   }
 
-  private async req<T>(path: string, init: { method?: string; body?: unknown } = {}): Promise<T> {
-    const method = init.method ?? 'GET'
-    const headers: Record<string, string> = { authorization: `Bearer ${this.token}` }
-    let body: string | undefined
-    if (init.body !== undefined) {
-      headers['content-type'] = 'application/json'
-      body = JSON.stringify(init.body)
-    }
-    let res: Response
-    try {
-      res = await this.fetchImpl(`${this.base_url}${path}`, {
-        method,
-        headers,
-        ...(body !== undefined ? { body } : {}),
-      })
-    } catch (err) {
-      throw new DocsClientError('network', err instanceof Error ? err.message : 'network error', 0)
-    }
-    let json: unknown = null
-    try {
-      json = await res.json()
-    } catch {
-      // fall through to the status-coded error below
-    }
-    if (!res.ok) {
-      const errBody = (json ?? {}) as ErrorBody
-      const code = errBody.code ?? 'request_failed'
-      const message = errBody.message ?? `HTTP ${res.status}`
-      const current =
-        typeof errBody.current_modified_at === 'number' ? errBody.current_modified_at : null
-      throw new DocsClientError(code, message, res.status, current)
-    }
-    return json as T
-  }
 }
 
 /* ─── pure helpers ─── */

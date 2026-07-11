@@ -21,6 +21,12 @@
  * `fetchImpl` is injectable for unit tests; it defaults to the global `fetch`.
  */
 
+import {
+  GatewayClientError,
+  GatewayHttpClient,
+  type GatewayHttpClientOptions,
+} from '@neutronai/client-core';
+
 export type CredentialScope = 'project' | 'global';
 
 /**
@@ -56,14 +62,7 @@ export interface SetCredentialInput {
   label?: string;
 }
 
-type FetchImpl = (input: string, init?: RequestInit) => Promise<Response>;
-
-export interface ProjectCredentialsClientOptions {
-  base_url: string;
-  token: string;
-  /** Injected in tests; defaults to the global `fetch`. */
-  fetchImpl?: FetchImpl;
-}
+export type ProjectCredentialsClientOptions = GatewayHttpClientOptions;
 
 interface ListResponse {
   ok: boolean;
@@ -77,26 +76,16 @@ interface SetResponse {
   credential: ProjectCredentialRecord;
 }
 
-export class ProjectCredentialsClientError extends Error {
-  readonly code: string;
-  readonly status: number;
+export class ProjectCredentialsClientError extends GatewayClientError {
   constructor(code: string, message: string, status: number) {
-    super(`${code}: ${message}`);
+    super(code, message, status);
     this.name = 'ProjectCredentialsClientError';
-    this.code = code;
-    this.status = status;
   }
 }
 
-export class ProjectCredentialsClient {
-  private readonly base_url: string;
-  private readonly token: string;
-  private readonly fetchImpl: FetchImpl;
-
-  constructor(opts: ProjectCredentialsClientOptions) {
-    this.base_url = opts.base_url.replace(/\/+$/, '');
-    this.token = opts.token;
-    this.fetchImpl = opts.fetchImpl ?? ((input, init) => fetch(input, init));
+export class ProjectCredentialsClient extends GatewayHttpClient {
+  protected override makeError(code: string, message: string, status: number): GatewayClientError {
+    return new ProjectCredentialsClientError(code, message, status);
   }
 
   /** The project's own credentials plus the global defaults it inherits. */
@@ -119,32 +108,5 @@ export class ProjectCredentialsClient {
       `/api/app/projects/${encodeURIComponent(project_id)}/credentials/${encodeURIComponent(service)}` +
       `?scope=${encodeURIComponent(scope)}`;
     await this.req<{ ok: boolean }>(path, { method: 'DELETE' });
-  }
-
-  private async req<T>(path: string, init: { method?: string; body?: unknown } = {}): Promise<T> {
-    const method = init.method ?? 'GET';
-    const headers: Record<string, string> = { authorization: `Bearer ${this.token}` };
-    let body: string | undefined;
-    if (init.body !== undefined) {
-      headers['content-type'] = 'application/json';
-      body = JSON.stringify(init.body);
-    }
-    const res = await this.fetchImpl(`${this.base_url}${path}`, {
-      method,
-      headers,
-      ...(body !== undefined ? { body } : {}),
-    });
-    let json: unknown = null;
-    try {
-      json = await res.json();
-    } catch {
-      // fall through to the status-coded error below
-    }
-    if (!res.ok) {
-      const code = (json as { code?: string } | null)?.code ?? 'request_failed';
-      const message = (json as { message?: string } | null)?.message ?? `HTTP ${res.status}`;
-      throw new ProjectCredentialsClientError(code, message, res.status);
-    }
-    return json as T;
   }
 }

@@ -1,0 +1,10 @@
+{
+  "extends": "../tsconfig.base.json",
+  "compilerOptions": {
+    // The surface clients target both the browser (web chat-react bundle) and
+    // the RN/Bun test runner, so the base needs the DOM lib for `fetch` /
+    // `RequestInit` / `Response` — the same reason `chat-core` pulls in DOM.
+    "lib": ["ESNext", "DOM"]
+  },
+  "include": ["./**/*.ts"]
+}

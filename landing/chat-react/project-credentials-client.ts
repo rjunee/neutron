@@ -28,6 +28,12 @@
  * without a DOM or a live server.
  */
 
+import {
+  GatewayClientError,
+  GatewayHttpClient,
+  type GatewayHttpClientOptions,
+} from '@neutronai/client-core'
+
 /* ─── wire types (mirror project-credentials/ store rows) ─── */
 
 /** Where a credential lives: this project only, or an instance-wide default. */
@@ -72,11 +78,6 @@ interface SetResponse {
   credential: Rec
   project_id: string
 }
-interface ErrorBody {
-  ok?: boolean
-  code?: string
-  message?: string
-}
 
 /** The list split by scope, as the Settings tab renders it. */
 export interface CredentialList {
@@ -84,37 +85,20 @@ export interface CredentialList {
   global: Rec[]
 }
 
-export class CredentialsClientError extends Error {
-  readonly code: string
-  readonly status: number
+export class CredentialsClientError extends GatewayClientError {
   constructor(code: string, message: string, status: number) {
-    super(`${code}: ${message}`)
+    super(code, message, status)
     this.name = 'CredentialsClientError'
-    this.code = code
-    this.status = status
   }
 }
 
-type FetchImpl = (input: string, init?: RequestInit) => Promise<Response>
+export type CredentialsClientOptions = GatewayHttpClientOptions
 
-export interface CredentialsClientOptions {
-  /** Page origin (`https://host`); the surface lives at `/api/app/...`. */
-  base_url: string
-  /** App-ws bearer token (`config.token`). */
-  token: string
-  /** Injected in tests; defaults to the global `fetch`. */
-  fetchImpl?: FetchImpl
-}
+export class WebProjectCredentialsClient extends GatewayHttpClient {
+  protected override readonly guardNetworkErrors = true
 
-export class WebProjectCredentialsClient {
-  private readonly base_url: string
-  private readonly token: string
-  private readonly fetchImpl: FetchImpl
-
-  constructor(opts: CredentialsClientOptions) {
-    this.base_url = opts.base_url.replace(/\/+$/, '')
-    this.token = opts.token
-    this.fetchImpl = opts.fetchImpl ?? ((input, init) => fetch(input, init))
+  protected override makeError(code: string, message: string, status: number): GatewayClientError {
+    return new CredentialsClientError(code, message, status)
   }
 
   /** This project's credentials + the global defaults it inherits (metadata). */
@@ -137,42 +121,5 @@ export class WebProjectCredentialsClient {
       `/api/app/projects/${encodeURIComponent(project_id)}/credentials/${encodeURIComponent(service)}` +
       `?scope=${encodeURIComponent(scope)}`
     await this.req<{ ok: boolean; deleted: boolean; scope: CredentialScope }>(path, { method: 'DELETE' })
-  }
-
-  private async req<T>(path: string, init: { method?: string; body?: unknown } = {}): Promise<T> {
-    const method = init.method ?? 'GET'
-    const headers: Record<string, string> = { authorization: `Bearer ${this.token}` }
-    let body: string | undefined
-    if (init.body !== undefined) {
-      headers['content-type'] = 'application/json'
-      body = JSON.stringify(init.body)
-    }
-    let res: Response
-    try {
-      res = await this.fetchImpl(`${this.base_url}${path}`, {
-        method,
-        headers,
-        ...(body !== undefined ? { body } : {}),
-      })
-    } catch (err) {
-      throw new CredentialsClientError(
-        'network',
-        err instanceof Error ? err.message : 'network error',
-        0,
-      )
-    }
-    let json: unknown = null
-    try {
-      json = await res.json()
-    } catch {
-      // fall through to the status-coded error below
-    }
-    if (!res.ok) {
-      const errBody = (json ?? {}) as ErrorBody
-      const code = errBody.code ?? 'request_failed'
-      const message = errBody.message ?? `HTTP ${res.status}`
-      throw new CredentialsClientError(code, message, res.status)
-    }
-    return json as T
   }
 }

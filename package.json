@@ -37,6 +37,7 @@
     "jwt-validator",
     "channels",
     "chat-core",
+    "client-core",
     "connect",
     "watchdog",
     "auth",
