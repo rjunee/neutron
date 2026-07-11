@@ -90,8 +90,17 @@ export interface GBrainSyncHookOptions {
 /**
  * P9 — a snapshot of the sync hook's health, published to the optional
  * `GbrainSyncStateSink` for the `gbrain_sync_state` observability row. All
- * fields are read from the hook's own in-RAM state at the observation point;
- * the sink is a dumb writer that persists them verbatim.
+ * fields are read from the hook's own in-RAM state at the observation point.
+ *
+ * The sink persists most fields verbatim (status / latchReason / latchedAt /
+ * deferredCount are per-incident or always-current, so the latest snapshot wins)
+ * — but `lastSuccessAt` is the ONE exception: the sink MONOTONIC-MERGES it into
+ * the durable row (keeps the later of the incoming vs. stored value, and a null
+ * incoming value never erases a recorded one). This matters because the hook's
+ * in-RAM `lastSuccessAt` resets to null on every process restart, so a publish
+ * before the first post-restart success would otherwise clobber the durable
+ * "worked until <ts>" record the row exists to preserve. See
+ * `gateway/realmode-composer/gbrain-sync-state-store.ts` for the merge SQL.
  */
 export interface GbrainSyncStateSnapshot {
   /** 'ok' while sync is live; 'unavailable' once the binary-missing latch trips. */
@@ -100,7 +109,12 @@ export interface GbrainSyncStateSnapshot {
   latchReason: string | null
   /** ISO-8601 UTC when the unavailable latch tripped; null while 'ok'. */
   latchedAt: string | null
-  /** ISO-8601 UTC of the most recent successful page persist; null until first success. */
+  /**
+   * ISO-8601 UTC of the most recent successful page persist; null until the
+   * first success in THIS process (resets on restart). The sink monotonic-merges
+   * this into the durable row, so a null (fresh-restart) or older value never
+   * regresses the persisted last-known-good timestamp.
+   */
   lastSuccessAt: string | null
   /** Current depth of the RAM deferred-edge retry queue. */
   deferredCount: number
