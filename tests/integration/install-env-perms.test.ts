@@ -42,23 +42,28 @@ function quoteSh(s: string): string {
 }
 
 /**
- * Run the seam with an optional PATH-shadowed `chmod` stub so a test can force
- * the fail-closed boundary: `chmodBody` is written as an executable `chmod`
- * earlier on PATH than the real one, letting us simulate (a) a chmod that
- * ERRORS and (b) a chmod that "succeeds" but does not change the mode. Only
- * `chmod` is shadowed — `cp`, `stat`, `grep`, `bun` still resolve to the
- * system binaries.
+ * Run the seam with optional PATH-shadowed `chmod` / `stat` stubs so a test can
+ * force the fail-closed boundaries: each `*Body` is written as an executable
+ * earlier on PATH than the real one, letting us simulate a chmod that ERRORS, a
+ * chmod that "succeeds" but does not change the mode, and a `stat` that
+ * fails/lies (so the mandatory verify readback cannot confirm 0600). Only the
+ * shadowed commands are replaced — `cp`, `grep`, `bun`, and any un-stubbed tool
+ * still resolve to the system binaries.
  */
 function runEnvPermsSeam(
   checkoutDir: string,
-  opts: { chmodBody?: string } = {},
+  opts: { chmodBody?: string; statBody?: string } = {},
 ): { status: number | null; stdout: string; stderr: string } {
   let path = process.env['PATH'] ?? '/usr/bin:/bin'
-  if (opts.chmodBody !== undefined) {
+  if (opts.chmodBody !== undefined || opts.statBody !== undefined) {
     const stubDir = join(checkoutDir, 'stubbin')
     mkdirSync(stubDir, { recursive: true })
-    const stub = join(stubDir, 'chmod')
-    writeFileSync(stub, opts.chmodBody, { mode: 0o755 })
+    if (opts.chmodBody !== undefined) {
+      writeFileSync(join(stubDir, 'chmod'), opts.chmodBody, { mode: 0o755 })
+    }
+    if (opts.statBody !== undefined) {
+      writeFileSync(join(stubDir, 'stat'), opts.statBody, { mode: 0o755 })
+    }
     path = `${stubDir}${delimiter}${path}`
   }
   // Force a LOOSE umask (022) in the spawned shell so that if install.sh did
@@ -158,6 +163,57 @@ describe('install.sh — .env is 0600 after write (S3b secrets-at-rest hygiene)'
       expect(status).toBe(1)
       expect(stderr).toContain('permissions did not stick')
       // The file really did stay insecure — proving the verify caught a real hole.
+      expect(statSync(envPath).mode & 0o777).toBe(0o644)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  // Mandatory-verify boundary (Codex blocker): chmod's exit code alone is
+  // untrustworthy (a no-op / shimmed chmod exits 0), so the perms guarantee
+  // MUST come from a positive `stat` readback. If chmod lies AND stat cannot
+  // confirm the mode, the installer must FAIL CLOSED — never trust the lying
+  // chmod. A no-op chmod + a FAILING stat on a pre-existing 0644 .env: the
+  // install must abort and the secret must stay proven-insecure (not silently
+  // accepted as "secured").
+  test('no-op chmod + FAILING stat aborts (cannot verify → refuse, secret stays insecure)', () => {
+    const dir = buildFakeCheckout()
+    try {
+      const envPath = join(dir, '.env')
+      writeFileSync(envPath, 'CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-preexisting\n', { mode: 0o644 })
+      expect(statSync(envPath).mode & 0o777).toBe(0o644)
+
+      const { status, stdout, stderr } = runEnvPermsSeam(dir, {
+        chmodBody: '#!/bin/sh\nexit 0\n', // "succeeds" but changes nothing
+        statBody: '#!/bin/sh\nexit 1\n', // both stat forms fail → mode unverifiable
+      })
+      expect(status).toBe(1)
+      expect(stderr).toContain('cannot verify')
+      expect(stdout).not.toContain('env_path=')
+      // The install did NOT silently trust the lying chmod: the file is still 0644.
+      expect(statSync(envPath).mode & 0o777).toBe(0o644)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  // Same fail-closed rule for a stat that "succeeds" (exit 0) but returns
+  // MALFORMED / non-octal output — an unrecognized mode cannot confirm 0600, so
+  // the install must refuse rather than accept it.
+  test('no-op chmod + MALFORMED stat output aborts (unrecognized mode → refuse)', () => {
+    const dir = buildFakeCheckout()
+    try {
+      const envPath = join(dir, '.env')
+      writeFileSync(envPath, 'CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-preexisting\n', { mode: 0o644 })
+      expect(statSync(envPath).mode & 0o777).toBe(0o644)
+
+      const { status, stdout, stderr } = runEnvPermsSeam(dir, {
+        chmodBody: '#!/bin/sh\nexit 0\n',
+        statBody: '#!/bin/sh\necho not-an-octal-mode\nexit 0\n', // lies with junk output
+      })
+      expect(status).toBe(1)
+      expect(stderr).toContain('cannot verify')
+      expect(stdout).not.toContain('env_path=')
       expect(statSync(envPath).mode & 0o777).toBe(0o644)
     } finally {
       rmSync(dir, { recursive: true, force: true })

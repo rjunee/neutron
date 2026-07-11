@@ -480,15 +480,22 @@ secure_secret_file() {
   if ! chmod 600 "$_sf" 2>/dev/null; then
     die "refusing to continue: could not secure $_sf to 0600 — secrets would be left readable by other users. Fix its ownership/filesystem/mount and re-run."
   fi
-  # Belt-and-suspenders: verify the mode actually stuck. GNU stat is `-c %a`,
-  # BSD/macOS stat is `-f %Lp`; both print octal perms with no leading zero
-  # (e.g. `600`). Only trust an all-octal-digits result — if stat is absent or
-  # its output is unrecognized we cannot verify and rely on the chmod success
-  # above (the normal-install happy path on a box without stat still works).
-  _mode=$(stat -c '%a' "$_sf" 2>/dev/null || stat -f '%Lp' "$_sf" 2>/dev/null || true)
+  # MANDATORY positive verify — chmod's exit code alone is UNTRUSTWORTHY (a
+  # no-op / shimmed chmod exits 0 without changing anything), so the perms
+  # guarantee MUST come from a stat READBACK. GNU stat is `-c %a`, BSD/macOS is
+  # `-f %Lp`; both print an octal mode (e.g. `600`). We require a SUCCESSFUL
+  # stat returning a clean octal that equals 600 — and `die` otherwise:
+  #   - stat failed / not on PATH / returned empty → we CANNOT verify → refuse
+  #     (an unverifiable host is exactly when we must NOT trust chmod).
+  #   - non-octal / unrecognized output → refuse (can't confirm the mode).
+  #   - a clean octal that isn't 600 → the chmod did not stick → refuse.
+  # Linux + macOS both ship a working stat, so the happy path is unaffected;
+  # only a genuinely broken / hostile PATH trips this.
+  _mode=$(stat -c '%a' "$_sf" 2>/dev/null || stat -f '%Lp' "$_sf" 2>/dev/null || printf '')
   case "$_mode" in
-    ''|*[!0-7]*) : ;;      # stat unavailable / unrecognized — cannot verify
-    600|0600) : ;;         # verified locked
+    600|0600) : ;;         # POSITIVELY verified locked — the only pass outcome
+    '') die "refusing to continue: cannot verify $_sf is 0600 — 'stat' is unavailable or failed on this host, so the permission cannot be confirmed. Refusing to persist secrets on an unverifiable system." ;;
+    *[!0-7]*) die "refusing to continue: cannot verify $_sf is 0600 — 'stat' returned an unrecognized mode '$_mode'. Refusing to persist secrets without a confirmed permission." ;;
     *) die "refusing to continue: $_sf is mode $_mode after chmod 600 (permissions did not stick — exotic filesystem/mount?). Secrets would be left readable by other users." ;;
   esac
 }
