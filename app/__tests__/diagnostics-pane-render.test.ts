@@ -30,6 +30,16 @@ mock.module('react-native', () => ({
   ScrollView: rnStub('ScrollView'),
   ActivityIndicator: rnStub('ActivityIndicator'),
   StyleSheet: { create: (s: Record<string, unknown>) => s },
+  // Superset padding so this react-native stub stays compatible with the
+  // sibling docs-panes-render suite (the other react-native mocker under
+  // `bun test`): whichever stub wins the global registration must still
+  // provide every export the docs modules import. Unused by DiagnosticsPane.
+  TextInput: rnStub('TextInput'),
+  Image: rnStub('Image'),
+  Modal: rnStub('Modal'),
+  Linking: { openURL: () => Promise.resolve() },
+  Platform: { OS: 'web' },
+  useWindowDimensions: () => ({ width: 1200, height: 800 }),
 }));
 
 // ── react hook control: useReducer returns a test-set [state, dispatch]; the
