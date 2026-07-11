@@ -85,7 +85,42 @@ describe('CrashedAgentDetector', () => {
     const alerts = await detector.detect()
     expect(alerts.length).toBe(1)
     expect(alerts[0]?.payload['process_name']).toBe('dead')
+    // detect() is PURE (round-4 sweep): the dead entry is NOT reaped until the
+    // alert is committed-after-delivery. Both entries are still registered here.
+    expect(reg.size()).toBe(2)
+    // commit() (post-delivery) is what unregisters the dead pid.
+    detector.commit(alerts[0]!)
     expect(reg.size()).toBe(1)
+    expect(reg.list().some((r) => r.name === 'dead')).toBe(false)
+  })
+
+  test('round-4 commit-on-success: a flaky store DEFERS the reap — rediscovered next tick, unregistered only after delivery', async () => {
+    const reg = new ProcessRegistry()
+    reg.register({ name: 'dead', pid: 9_999_991, tool_name: 't' })
+    const probe: PidLivenessProbe = { isAlive: () => false }
+    const detector = new CrashedAgentDetector({
+      project_slug: 't1',
+      process_registry: reg,
+      pid_probe: probe,
+    })
+
+    // Tick 1 — a candidate is raised, but the supervisor's persist/deliver FAILS,
+    // so commit() is never called. The dead entry MUST still be registered so it
+    // is re-observed next tick (no state mutated before delivery).
+    const t1 = await detector.detect()
+    expect(t1.length).toBe(1)
+    // (supervisor's record()/notify() threw → NO commit)
+    expect(reg.size()).toBe(1)
+
+    // Tick 2 — the same dead entry is rediscovered (still un-latched), delivery
+    // now succeeds → commit() reaps it exactly once.
+    const t2 = await detector.detect()
+    expect(t2.length).toBe(1)
+    detector.commit(t2[0]!)
+    expect(reg.size()).toBe(0)
+
+    // Tick 3 — nothing left to observe.
+    expect((await detector.detect()).length).toBe(0)
   })
 })
 

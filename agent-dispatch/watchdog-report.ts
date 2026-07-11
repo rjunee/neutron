@@ -62,10 +62,18 @@ export function buildDispatchWatchdogNotifier(report: DispatchReporter): AgentWa
     }
     if (event.delivery_target !== undefined) out.delivery_target = event.delivery_target
 
+    // SWALLOW is CORRECT here (round-4 sweep, audited): this notifier's ONLY
+    // caller is the BOOT SWEEP (`buildBootSweepReport`), where the durable
+    // `crashed` row is ALREADY committed (`markCrashed`) BEFORE this report fires,
+    // and the sweep is a one-shot at boot with no dedup ledger / retry. So the
+    // report is a best-effort notification ON TOP of an already-durable commit —
+    // there is no un-latch-on-failure logic that a propagated error would feed
+    // (unlike `buildDispatchSuspectedStuckNotifier`, whose `notified`-ledger
+    // commit DOES depend on delivery, so it re-throws).
     try {
       await report(out)
     } catch {
-      // Best-effort — a report failure must not abort the watchdog tick.
+      // Best-effort — the crash is already durably recorded by the boot sweep.
     }
   }
 }
@@ -130,10 +138,21 @@ export function buildDispatchSuspectedStuckNotifier(
     }
     if (event.delivery_target !== undefined) alert.delivery_target = event.delivery_target
 
+    // PROPAGATE a sink failure (round-4 sweep, Blocker-1). This wrapper must NOT
+    // swallow the rejection: `runAgentWatchdog` adds the run to `notified` only
+    // when notify() RESOLVES, so swallowing here would make a FAILED delivery look
+    // successful → the run latches → permanent suppression. Log for
+    // self-observability, then re-throw so the watchdog leaves the run un-latched
+    // and retries next tick. (The watchdog's own try/catch keeps the tick alive.)
     try {
       await sink(alert)
-    } catch {
-      // Best-effort — an alert-sink failure must not abort the watchdog tick.
+    } catch (err) {
+      console.error(
+        `[dispatch-watchdog] alert delivery FAILING for ${event.run_id} ` +
+          `(will retry next tick):`,
+        err,
+      )
+      throw err
     }
   }
 }

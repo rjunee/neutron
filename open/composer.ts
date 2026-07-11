@@ -32,7 +32,7 @@
  */
 
 import type { CredentialPool } from '@neutronai/runtime/credential-pool.ts'
-import { emitSystemEvent } from '@neutronai/persistence/index.ts'
+import { emitSystemEvent, resolveSystemEventSink } from '@neutronai/persistence/index.ts'
 import {
   resolveEnvOAuthTier,
   resolveApiKeyEnvTier,
@@ -2500,11 +2500,19 @@ export function buildOpenGraphComposer(
     heartbeatPulse.pulse()
 
     // (4) Real watchdog notifier — routes each fired alert to app-ws delivery AND
-    // O4's `system_events` journal. FULLY GUARDED (fire-and-forget): a delivery
-    // or emit failure can NEVER throw into the supervisor tick (same contract
-    // O4/P7 established). app-ws is single-owner, so broadcast the notice to every
-    // live topic (the owner's connections); `emitSystemEvent` resolves the ambient
-    // O4 sink and never throws/rejects.
+    // O4's `system_events` journal. FULLY GUARDED (fire-and-forget): a delivery or
+    // emit failure can NEVER throw into the supervisor tick (same contract O4/P7
+    // established). app-ws is single-owner, so broadcast to every live topic.
+    //
+    // SWALLOW is CORRECT here (round-4 sweep, audited): this is the SIX-DETECTOR
+    // supervisor's notify, whose DURABLE surfacing is the `watchdog_alerts` ledger
+    // that `WatchdogSupervisor.runOnce` persists via `AlertStore.record` BEFORE
+    // this notify — and THAT persist (which throws on a real failure) is what gates
+    // the incident-edge commit. So this notify is a best-effort SECONDARY push
+    // (ephemeral app-ws + the O4 convenience journal) on top of an already-durable
+    // ledger row; a lost push is not a lost alert (it is queryable in
+    // `watchdog_alerts`). This differs from the DISPATCH path, which has NO durable
+    // ledger — there the O4 write IS the surfacing, so its sink propagates.
     const watchdogNotifier: WatchdogNotifier = {
       notify: async (alert: WatchdogAlert): Promise<void> => {
         try {
@@ -2553,23 +2561,9 @@ export function buildOpenGraphComposer(
     // (`runtime/subagent/watchdog.ts`) is UNVERIFIED against real dispatch
     // durations for killing — it only gates a NOTIFICATION here.
     if (dispatchService !== null) {
-      const dispatchStuckAlertSink: DispatchSuspectedStuckSink = (alert) => {
-        // O4 (Blocker-C) — journal the suspected-stuck dispatched subagent, the
-        // SAME `watchdog_alert` stream the six general detectors emit. Never throws.
-        void emitSystemEvent({
-          event: 'watchdog_alert',
-          module: 'watchdog',
-          level: 'warn',
-          project_slug,
-          payload: {
-            source: 'dispatch_lifecycle',
-            run_id: alert.run_id,
-            agent_kind: alert.agent_kind,
-            reason: alert.reason,
-            age_ms: alert.age_ms,
-          },
-        })
-        // app-ws — best-effort NON-terminal notice to the owner's live topics.
+      const dispatchStuckAlertSink: DispatchSuspectedStuckSink = async (alert) => {
+        // app-ws — best-effort EPHEMERAL push (NOT the durable surfacing; swallow
+        // so a dead socket never masks the durable-journal result below).
         try {
           const env: AppWsOutboundAgentMessage = {
             v: 1,
@@ -2586,7 +2580,32 @@ export function buildOpenGraphComposer(
             }
           }
         } catch {
-          // app-ws delivery is best-effort — never throw into the tick
+          // app-ws delivery is best-effort — never throw on the ephemeral push
+        }
+        // O4 (Blocker-C) — the DURABLE surfacing for a dispatch alert is this
+        // `watchdog_alert` journal row (there is no `watchdog_alerts` ledger for
+        // dispatch alerts — unlike the six general detectors). AWAIT the durable
+        // write and let a REAL failure PROPAGATE (round-4 sweep): the watchdog
+        // adds the run to `notified` only when this resolves, so a swallowed
+        // write-failure would latch a LOST alert. Propagating leaves the run
+        // un-latched → retried next tick → delivered exactly once when it clears.
+        // No ambient sink (no gateway journal, e.g. an LLM-less/dev box) is a
+        // no-op success — there is no durable target to retry against.
+        const eventSink = resolveSystemEventSink()
+        if (eventSink !== null) {
+          await eventSink.record({
+            event: 'watchdog_alert',
+            module: 'watchdog',
+            level: 'warn',
+            project_slug,
+            payload: {
+              source: 'dispatch_lifecycle',
+              run_id: alert.run_id,
+              agent_kind: alert.agent_kind,
+              reason: alert.reason,
+              age_ms: alert.age_ms,
+            },
+          })
         }
       }
       const lifecycleWatchdog = scheduleDispatchLifecycleWatchdog({

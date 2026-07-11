@@ -183,6 +183,7 @@ export class CrashedAgentDetector implements WatchdogDetector {
   private readonly project_slug: string
   private readonly now: () => number
   private readonly probe: PidLivenessProbe
+  private readonly incidents = new IncidentEdgeTracker()
 
   constructor(opts: CrashedAgentDetectorOptions) {
     this.registry = opts.process_registry
@@ -193,23 +194,41 @@ export class CrashedAgentDetector implements WatchdogDetector {
 
   async detect(): Promise<WatchdogAlert[]> {
     const now = this.now()
+    // PURE: report dead records as candidates. Do NOT unregister here — the reap
+    // is a STATE MUTATION that must happen AFTER the alert is durably persisted +
+    // delivered (round-4 sweep, Blocker-2). Unregistering before delivery meant a
+    // failed persist/notify lost the crash forever: the record was already gone,
+    // so the retry tick had nothing to rediscover. The incident tracker keeps the
+    // dead record deduped (one alert per crash) WITHOUT removing it — the removal
+    // is deferred to commit().
     const dead = this.registry.list().filter((r) => !this.probe.isAlive(r.pid))
-    // Reap the dead entries from the registry so they don't fire again.
-    for (const r of dead) {
-      this.registry.unregister(r.name)
-    }
-    return dead.map((r) => ({
-      id: newAlertId(this.kind, r.name, now),
-      kind: this.kind,
-      project_slug: this.project_slug,
-      detected_at: now / 1000,
-      resolved_at: null,
-      payload: {
-        process_name: r.name,
-        pid: r.pid,
-        tool_name: r.tool_name,
-      },
-    }))
+    const byName = new Map(dead.map((r) => [r.name, r]))
+    const risen = this.incidents.candidates(byName.keys(), (key) => newAlertId(this.kind, key, now))
+    return risen.map(({ key, id }) => {
+      const r = byName.get(key)!
+      return {
+        id,
+        kind: this.kind,
+        project_slug: this.project_slug,
+        detected_at: now / 1000,
+        resolved_at: null,
+        payload: {
+          process_name: r.name,
+          pid: r.pid,
+          tool_name: r.tool_name,
+        },
+      }
+    })
+  }
+
+  // COMMIT-ON-SUCCESS (round-4): the dead record is REAPED from the registry ONLY
+  // after its crash alert was durably persisted + delivered. Until then it stays
+  // discoverable so a failed tick retries. `commitById` latches the incident so a
+  // re-registered same-name process later is a fresh incident.
+  commit(alert: WatchdogAlert): void {
+    this.incidents.commitById(alert.id)
+    const name = (alert.payload as { process_name?: unknown }).process_name
+    if (typeof name === 'string') this.registry.unregister(name)
   }
 }
 

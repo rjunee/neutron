@@ -145,4 +145,61 @@ describe('scheduleDispatchLifecycleWatchdog (F4)', () => {
 
     scheduled.stop()
   })
+
+  test('round-4 wrapper propagation: alert_sink rejects on tick 1 → NOT latched → retried + delivered exactly once', async () => {
+    const registry = new SubagentRegistry()
+    const control = newControlState(registry)
+
+    // A live atlas dispatch stale past threshold — detected every tick until latched.
+    await registry.create({ run_id: 'r3', instance_key: 'owner', agent_kind: 'atlas', spawn_depth: 0 })
+    await registry.update('r3', { status: 'running', last_event_at: Date.now() - 10 * 60_000 })
+
+    let cancellerCalls = 0
+    registerCanceller(control, 'r3', async () => {
+      cancellerCalls++
+    })
+
+    // The sink REJECTS the first delivery (transient O4/app-ws blip), then succeeds.
+    let sinkCalls = 0
+    let deliveries = 0
+    let tickFn: (() => void) | null = null
+    const scheduled = scheduleDispatchLifecycleWatchdog({
+      registry,
+      control,
+      alert_sink: async (_a) => {
+        sinkCalls++
+        if (sinkCalls === 1) throw new Error('sink boom')
+        deliveries++
+      },
+      set_interval: (fn) => {
+        tickFn = fn
+        return 0 as unknown as ReturnType<typeof setInterval>
+      },
+      clear_interval: () => {},
+    })
+
+    // Tick 1 — the wrapper PROPAGATES the rejection, so the run is NOT added to
+    // `notified`. Nothing delivered, nothing killed, the tick did not wedge.
+    tickFn!()
+    await Bun.sleep(20)
+    expect(sinkCalls).toBe(1)
+    expect(deliveries).toBe(0)
+    expect(cancellerCalls).toBe(0)
+    expect(registry.byRunId('r3')?.status).toBe('running')
+
+    // Tick 2 — still un-latched → rediscovered, sink recovers → delivered ONCE.
+    tickFn!()
+    await Bun.sleep(20)
+    expect(sinkCalls).toBe(2)
+    expect(deliveries).toBe(1)
+
+    // Tick 3 — now latched → no repeat delivery (exactly-once holds).
+    tickFn!()
+    await Bun.sleep(20)
+    expect(sinkCalls).toBe(2)
+    expect(deliveries).toBe(1)
+    expect(cancellerCalls).toBe(0)
+
+    scheduled.stop()
+  })
 })
