@@ -99,13 +99,17 @@ import {
 } from '@neutronai/tasks/overnight-task-hook.ts'
 import type { Task } from '@neutronai/tasks/store.ts'
 import { ApprovalManager } from '@neutronai/tools/approval.ts'
-import { ProcessRegistry } from '@neutronai/tools/process-registry.ts'
+import { busyRetryExhaustionCount } from '@neutronai/persistence/index.ts'
+import { ProcessRegistry, pushAmbientProcessRegistry } from '@neutronai/tools/process-registry.ts'
 import { ToolRegistry } from '@neutronai/tools/registry.ts'
 import { AlertStore } from '@neutronai/watchdog/alert-store.ts'
 import {
   CrashedAgentDetector,
+  DbLockContentionDetector,
   HeartbeatDetector,
+  OverrunCronDetector,
   StuckAgentDetector,
+  SubstrateCooldownDetector,
 } from '@neutronai/watchdog/detectors.ts'
 import { WatchdogSupervisor } from '@neutronai/watchdog/supervisor.ts'
 import { type GatewayModule } from '../module-graph.ts'
@@ -175,7 +179,11 @@ export function buildCoreModules(input: CompositionInput): CoreModules {
       // named/ad-hoc background specialist that shares the SubagentRegistry +
       // watchdog with the Trident loop and reports its result back to chat.
       if (input.agent_dispatch !== undefined) {
-        registerDispatchToolSurface(reg, input.agent_dispatch.service)
+        registerDispatchToolSurface(reg, input.agent_dispatch.service, {
+          ...(input.agent_dispatch.resolve_delivery_target !== undefined
+            ? { resolve_delivery_target: input.agent_dispatch.resolve_delivery_target }
+            : {}),
+        })
       }
       // Skill-forge (parity gap #5) — register `skill_forge_list` +
       // `skill_forge_decide` when the composer wired the backend, so the live
@@ -222,9 +230,26 @@ export function buildCoreModules(input: CompositionInput): CoreModules {
     },
   }
 
+  // F4 — the ambient-publish deregister for the process registry (below). Held
+  // in the module-builder closure so `shutdown` can clear the ambient handle the
+  // spawn sites reach (`tools/process-registry.ts` ambient accessor).
+  let clearAmbientProcessRegistry: (() => void) | null = null
   const processRegistryModule: GatewayModule<ProcessRegistry> = {
     name: 'process-registry',
-    init: () => new ProcessRegistry(),
+    init: () => {
+      const registry = new ProcessRegistry()
+      // F4 — publish THIS instance as the ambient live-process registry so the
+      // deep PTY spawn chokepoint (`persistent/spawn.ts`, no DI seam to here)
+      // writes child PIDs into the SAME registry the watchdog detectors read.
+      // The stuck/crashed detectors consume `graph.get('process-registry')`
+      // (below), which is this exact instance — one truth, not two.
+      clearAmbientProcessRegistry = pushAmbientProcessRegistry(registry)
+      return registry
+    },
+    shutdown: () => {
+      clearAmbientProcessRegistry?.()
+      clearAmbientProcessRegistry = null
+    },
   }
 
   const approvalModule: GatewayModule<ApprovalManager> = {
@@ -515,18 +540,50 @@ export function buildCoreModules(input: CompositionInput): CoreModules {
       }
       if (input.pid_probe !== undefined) crashedOpts.pid_probe = input.pid_probe
       supervisor.registerDetector(new CrashedAgentDetector(crashedOpts))
-      // overrun_cron, db_lock_contention, substrate_cooldown_saturation
-      // detectors are registered by the modules that own those state
-      // sources (substrate dispatcher, persistence layer) — wired in
-      // sprints S5/S6 when those modules expose hooks. P1 S4 ships the
-      // first three; the remaining three classes ARE testable in isolation
-      // (see tests/integration/watchdog-six-modes.test.ts) but the live
-      // production wire-up is incremental.
+      // F4 (D-8 = wire) — register the remaining THREE detectors so all SIX run
+      // live. Their state sources are now available: the cron module (jobs +
+      // state) is a dep, the busy-retry exhaustion counter is a process-wide
+      // observability count (`persistence/retry.ts`), and the substrate
+      // credential pool arrives via `input.watchdog_credential_pool`.
+      //
+      // 4. overrun_cron — a cron job whose last run overran its expected budget.
+      supervisor.registerDetector(
+        new OverrunCronDetector({
+          project_slug: input.project_slug,
+          jobs: cron.jobs,
+          state: cron.state,
+        }),
+      )
+      // 5. db_lock_contention — a rising count of SQLite busy-retry EXHAUSTIONS
+      //    over a window (write-path starvation under lock contention).
+      supervisor.registerDetector(
+        new DbLockContentionDetector({
+          project_slug: input.project_slug,
+          counter: { exhaustionCount: () => busyRetryExhaustionCount() },
+        }),
+      )
+      // 6. substrate_cooldown_saturation — every credential in the pool cooling
+      //    down at once (no substrate can dispatch). Watches the composer's LLM
+      //    pool; an empty/absent pool never fires but is still registered (all
+      //    six always wired).
+      supervisor.registerDetector(
+        new SubstrateCooldownDetector({
+          project_slug: input.project_slug,
+          pool: input.watchdog_credential_pool ?? {
+            credentials: [],
+            strategy: 'fill_first',
+            cursor: -1,
+          },
+          substrate_kind: 'llm',
+        }),
+      )
       supervisor.start()
       return { store, supervisor }
     },
-    shutdown: (instance) => {
-      instance.supervisor.stop()
+    shutdown: async (instance) => {
+      // AWAIT the quiescing stop so an in-flight tick's persist/notify drains
+      // before `graph.shutdown()` returns and the gateway closes the DB (round-7).
+      await instance.supervisor.stop()
     },
   }
 

@@ -43,9 +43,29 @@ export {
   type CancellableDispatchTurnOptions,
 } from './substrate-turn.ts'
 
-export { buildDispatchWatchdogNotifier, buildBootSweepReport } from './watchdog-report.ts'
+export {
+  buildDispatchWatchdogNotifier,
+  buildDispatchSuspectedStuckNotifier,
+  buildDispatchStuckAlertSink,
+  selectDispatchAlertTopics,
+  buildBootSweepReport,
+  scheduleDispatchLifecycleWatchdog,
+  LIFECYCLE_WATCHDOG_TICK_MS,
+} from './watchdog-report.ts'
+export type {
+  DispatchSuspectedStuckAlert,
+  DispatchSuspectedStuckSink,
+  DispatchStuckAlertSinkEffects,
+  AppWsAlertRegistry,
+  DispatchAlertRouteOptions,
+  ScheduleDispatchLifecycleWatchdogDeps,
+} from './watchdog-report.ts'
 
-export { registerDispatchToolSurface, DISPATCH_AGENT_TOOL } from './tool.ts'
+export {
+  registerDispatchToolSurface,
+  DISPATCH_AGENT_TOOL,
+  type DispatchToolSurfaceOptions,
+} from './tool.ts'
 
 export {
   parseDispatchCommand,

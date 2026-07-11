@@ -33,6 +33,19 @@ export interface MiscCompositionInput {
    */
   realmode_cleanups?: Array<() => void | Promise<void>>
   /**
+   * F4 — the gateway's periodic-tick hook. The boot shell invokes this INSIDE
+   * its `WATCHDOG=1` `setInterval` (`gateway/index.ts`), the one process-level
+   * liveness loop, on every tick. The Open composer wires it to pulse the
+   * supervision watchdog's `HeartbeatPulse` (the real `heartbeat_tracker` source),
+   * so the heartbeat goes STALE when the tick loop stops advancing the pulse
+   * (timer cleared / scheduler died) — replacing the never-stale `() => Date.now()`
+   * stub. (It does NOT catch a synchronous event-loop wedge — see
+   * `watchdog/heartbeat.ts`; systemd `WatchdogSec` is the out-of-process teeth for
+   * that.) Failure-safe: the boot shell guards the call so a hook throw never
+   * aborts the tick. Safe to omit (dev/test paths that don't drive a heartbeat).
+   */
+  on_gateway_tick?: () => void
+  /**
    * Trident v2 (Work Board Phase 2a exec-model) — drive the foundational
    * Forge→Argus→merge loop live. When `fire_inner_workflow` is supplied, the
    * `trident` module wires the REAL orchestrator `step`
@@ -189,6 +202,14 @@ export interface MiscCompositionInput {
    */
   agent_dispatch?: {
     service: import('@neutronai/agent-dispatch/service.ts').DispatchService
+    /**
+     * Surface-supplied resolver (F4 round-13) that stamps the ORIGINATING app-ws
+     * binding onto an agent-initiated dispatch, so its later stuck-alert routes to
+     * exactly the surface it came from (never fanned to sibling projects). The
+     * composer supplies it because the `channel_topic_id` derivation is Open-
+     * specific; omitting it leaves dispatches origin-less (system-scoped).
+     */
+    resolve_delivery_target?: import('@neutronai/agent-dispatch/tool.ts').DispatchToolSurfaceOptions['resolve_delivery_target']
   }
   /**
    * Skill-forge (auto-skillify, parity gap #5) — when supplied, the `tools`

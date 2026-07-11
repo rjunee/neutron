@@ -32,6 +32,18 @@ export class WatchdogSupervisor {
   private readonly tick_interval_ms: number
   private timer: ReturnType<typeof setInterval> | null = null
   private running = false
+  /** The in-flight tick, so {@link stop} can QUIESCE (await it) before returning. */
+  private inflight: Promise<void> | null = null
+  /**
+   * Alert ids whose NOTIFICATION was delivered but whose `detector.commit()` has
+   * not yet latched the incident (a commit that threw). Guards exactly-once: the
+   * same candidate re-appears next tick (still un-committed), and this set makes
+   * the supervisor RE-COMMIT it WITHOUT re-persisting or re-notifying — a commit
+   * failure can never redeliver an already-delivered notification. Entries are
+   * dropped the moment their commit finally succeeds (the incident's `open` set
+   * suppresses it thereafter), so in the normal path this stays empty.
+   */
+  private readonly deliveredIds = new Set<string>()
 
   constructor(options: SupervisorOptions) {
     this.store = options.store
@@ -44,6 +56,15 @@ export class WatchdogSupervisor {
     this.detectors.push(detector)
   }
 
+  /**
+   * The kinds of every registered detector, in registration order. Lets a wiring
+   * test assert the composer registered ALL SIX detectors (F4) rather than the
+   * former three — a registration regression the per-detector tests can't catch.
+   */
+  detectorKinds(): WatchdogDetector['kind'][] {
+    return this.detectors.map((d) => d.kind)
+  }
+
   start(): void {
     if (this.timer !== null) return
     this.timer = setInterval(() => {
@@ -51,21 +72,43 @@ export class WatchdogSupervisor {
     }, this.tick_interval_ms)
   }
 
-  stop(): void {
+  /**
+   * Stop ticking and QUIESCE: clear the interval so no new tick fires, then AWAIT
+   * the in-flight tick (if any) before resolving. A bare `clearInterval` cannot
+   * drain a running tick — its persist (`AlertStore.record`) / notify would resume
+   * against a closing database during shutdown. The gateway's watchdog module runs
+   * this async shutdown, and `graph.shutdown()` is awaited BEFORE `db.close()`
+   * (round-7 meta-audit — same guarantee the dispatch lifecycle watchdog gets from
+   * SupervisedLoop.stop).
+   */
+  async stop(): Promise<void> {
     if (this.timer !== null) {
       clearInterval(this.timer)
       this.timer = null
     }
+    const p = this.inflight
+    if (p !== null) await p
   }
 
   /**
-   * One tick. Runs every detector, persists + notifies each fired alert.
-   * Returns the alerts that fired so tests can assert.
+   * One tick. Runs every detector, then for each candidate alert: persists it,
+   * notifies it, and — ONLY when BOTH succeed — commits the detector's
+   * incident-edge dedup (COMMIT-ON-SUCCESS, F4 round-3). A transient persist or
+   * notify failure does NOT commit, so the same incident is re-attempted next
+   * tick and delivered exactly once when the blip clears — never permanently
+   * suppressed by a DB/sink hiccup. `record()` is idempotent (`INSERT OR
+   * IGNORE`), so re-recording an already-persisted id on a notify-retry is a
+   * safe no-op. Returns the alerts DELIVERED this tick so tests can assert.
    */
   async runOnce(): Promise<WatchdogAlert[]> {
     if (this.running) return []
     this.running = true
-    const fired: WatchdogAlert[] = []
+    const delivered: WatchdogAlert[] = []
+    // Expose this tick as `inflight` so a concurrent stop() can await it (quiesce).
+    let resolveInflight: () => void = () => {}
+    this.inflight = new Promise<void>((res) => {
+      resolveInflight = res
+    })
     try {
       for (const detector of this.detectors) {
         let alerts: WatchdogAlert[]
@@ -76,24 +119,72 @@ export class WatchdogSupervisor {
           continue
         }
         for (const alert of alerts) {
+          // (0) Already NOTIFIED but not yet committed (a prior commit threw): the
+          // notification went out, so do NOT re-persist or re-notify — only RE-COMMIT
+          // to finally latch the incident. Guarantees exactly-once even when commit
+          // keeps failing (the failure is surfaced, never redelivered).
+          if (this.deliveredIds.has(alert.id)) {
+            try {
+              detector.commit?.(alert)
+              this.deliveredIds.delete(alert.id) // latched → `open` suppresses henceforth
+            } catch (err) {
+              console.error(
+                `watchdog supervisor: commit ${alert.id} threw AGAIN — notification already ` +
+                  `delivered; will NOT re-notify, retrying commit next tick:`,
+                err,
+              )
+            }
+            continue
+          }
+          // (1) Durable persist. A REAL store failure (not a dup — record is
+          // idempotent) leaves the incident UN-committed so it retries next tick.
           try {
             await this.store.record(alert)
           } catch (err) {
-            // Likely a duplicate (PK collision) — log + continue
-            console.warn(`watchdog supervisor: persist ${alert.id} failed:`, err)
-            continue
+            console.error(
+              `watchdog supervisor: alert delivery FAILING — persist ${alert.id} threw ` +
+                `(will retry next tick):`,
+              err,
+            )
+            continue // do NOT commit
           }
-          fired.push(alert)
+          // (2) Notify. On failure, still do NOT commit — the idempotent record
+          // means next tick re-records (no-op) and re-attempts the notify.
+          let notified = true
           try {
             await this.notifier.notify(alert)
           } catch (err) {
-            console.error(`watchdog notifier failed for ${alert.id}:`, err)
+            notified = false
+            console.error(
+              `watchdog supervisor: alert delivery FAILING — notify ${alert.id} threw ` +
+                `(will retry next tick):`,
+              err,
+            )
+          }
+          // (3) COMMIT the dedup ONLY after persist AND notify both succeeded.
+          if (notified) {
+            delivered.push(alert)
+            // Mark delivered BEFORE commit so a commit throw cannot redeliver the
+            // notification: next tick takes branch (0) and re-commits only.
+            this.deliveredIds.add(alert.id)
+            try {
+              detector.commit?.(alert)
+              this.deliveredIds.delete(alert.id) // committed cleanly → drop the guard entry
+            } catch (err) {
+              console.error(
+                `watchdog supervisor: commit ${alert.id} threw — notification already ` +
+                  `delivered; will NOT re-notify, retrying commit next tick:`,
+                err,
+              )
+            }
           }
         }
       }
     } finally {
       this.running = false
+      this.inflight = null
+      resolveInflight()
     }
-    return fired
+    return delivered
   }
 }

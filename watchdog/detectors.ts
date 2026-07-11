@@ -22,6 +22,7 @@ import type {
   PooledCredential,
 } from '@neutronai/runtime/credential-pool.ts'
 import type { ProcessRegistry } from '@neutronai/tools/process-registry.ts'
+import { IncidentEdgeTracker } from './incident.ts'
 import type { WatchdogAlert, WatchdogDetector, WatchdogKind } from './types.ts'
 
 export interface CommonDetectorOptions {
@@ -31,6 +32,13 @@ export interface CommonDetectorOptions {
 
 const newAlertId = (kind: WatchdogKind, key: string, ts: number): string =>
   `${kind}:${key}:${ts}`
+
+// A process is identified by (name, pid) — NEVER name alone. Incident keys for the
+// process detectors embed BOTH so a REPLACED process (same name, new pid) is a
+// DISTINCT incident, not one suppressed by the prior pid's still-open name key
+// (High 1). `pid` is always numeric and appended last, so the mapping is injective
+// even when a name legitimately contains '#'.
+const procIncidentKey = (name: string, pid: number): string => `${name}#${pid}`
 
 // ─────────────────────────────────────────────────────────────────
 // 1. gateway_heartbeat
@@ -53,6 +61,14 @@ export class HeartbeatDetector implements WatchdogDetector {
   private readonly project_slug: string
   private readonly now: () => number
   private readonly threshold_ms: number
+  private readonly incidents = new IncidentEdgeTracker()
+
+  // COMMIT-ON-SUCCESS (F4 round-3): latch this incident's dedup ONLY after the
+  // supervisor durably persisted AND delivered the alert. A transient failure
+  // skips this, so the incident re-attempts next tick instead of being lost.
+  commit(alert: WatchdogAlert): void {
+    this.incidents.commitById(alert.id)
+  }
 
   constructor(opts: HeartbeatDetectorOptions) {
     this.tracker = opts.tracker
@@ -64,17 +80,20 @@ export class HeartbeatDetector implements WatchdogDetector {
   async detect(): Promise<WatchdogAlert[]> {
     const last = this.tracker.lastHeartbeatAt()
     const now = this.now()
-    if (last === null || now - last <= this.threshold_ms) return []
-    return [
-      {
-        id: newAlertId(this.kind, this.project_slug, now),
-        kind: this.kind,
-        project_slug: this.project_slug,
-        detected_at: now / 1000,
-        resolved_at: null,
-        payload: { last_heartbeat_at: last, age_ms: now - last },
-      },
-    ]
+    const firing = last !== null && now - last > this.threshold_ms
+    // Incident-edge: fire ONCE while the heartbeat stays stale, and again only
+    // after it recovers then goes stale anew (Blocker-1 fix).
+    const risen = this.incidents.candidates(firing ? [this.project_slug] : [], (key) =>
+      newAlertId(this.kind, key, now),
+    )
+    return risen.map(({ id }) => ({
+      id,
+      kind: this.kind,
+      project_slug: this.project_slug,
+      detected_at: now / 1000,
+      resolved_at: null,
+      payload: { last_heartbeat_at: last, age_ms: last === null ? 0 : now - last },
+    }))
   }
 }
 
@@ -94,6 +113,14 @@ export class StuckAgentDetector implements WatchdogDetector {
   private readonly project_slug: string
   private readonly now: () => number
   private readonly threshold_ms: number
+  private readonly incidents = new IncidentEdgeTracker()
+
+  // COMMIT-ON-SUCCESS (F4 round-3): latch this incident's dedup ONLY after the
+  // supervisor durably persisted AND delivered the alert. A transient failure
+  // skips this, so the incident re-attempts next tick instead of being lost.
+  commit(alert: WatchdogAlert): void {
+    this.incidents.commitById(alert.id)
+  }
 
   constructor(opts: StuckAgentDetectorOptions) {
     this.registry = opts.process_registry
@@ -105,20 +132,29 @@ export class StuckAgentDetector implements WatchdogDetector {
   async detect(): Promise<WatchdogAlert[]> {
     const now = this.now()
     const stuck = this.registry.listStuck(this.threshold_ms)
-    return stuck.map((r) => ({
-      id: newAlertId(this.kind, r.name, now),
-      kind: this.kind,
-      project_slug: this.project_slug,
-      detected_at: now / 1000,
-      resolved_at: null,
-      payload: {
-        process_name: r.name,
-        pid: r.pid,
-        tool_name: r.tool_name,
-        last_activity_at: r.last_activity_at,
-        age_ms: now - r.last_activity_at,
-      },
-    }))
+    // Key PER (name, pid): one alert per stuck process while it stays stuck; a
+    // process that recovers (activity resumes → drops out of listStuck) and later
+    // wedges again re-fires (Blocker-1). A REPLACED process (same name, new pid) is
+    // a DISTINCT incident, not suppressed by the old pid's open key (High 1).
+    const byKey = new Map(stuck.map((r) => [procIncidentKey(r.name, r.pid), r]))
+    const risen = this.incidents.candidates(byKey.keys(), (key) => newAlertId(this.kind, key, now))
+    return risen.map(({ key, id }) => {
+      const r = byKey.get(key)!
+      return {
+        id,
+        kind: this.kind,
+        project_slug: this.project_slug,
+        detected_at: now / 1000,
+        resolved_at: null,
+        payload: {
+          process_name: r.name,
+          pid: r.pid,
+          tool_name: r.tool_name,
+          last_activity_at: r.last_activity_at,
+          age_ms: now - r.last_activity_at,
+        },
+      }
+    })
   }
 }
 
@@ -155,6 +191,7 @@ export class CrashedAgentDetector implements WatchdogDetector {
   private readonly project_slug: string
   private readonly now: () => number
   private readonly probe: PidLivenessProbe
+  private readonly incidents = new IncidentEdgeTracker()
 
   constructor(opts: CrashedAgentDetectorOptions) {
     this.registry = opts.process_registry
@@ -165,23 +202,70 @@ export class CrashedAgentDetector implements WatchdogDetector {
 
   async detect(): Promise<WatchdogAlert[]> {
     const now = this.now()
-    const dead = this.registry.list().filter((r) => !this.probe.isAlive(r.pid))
-    // Reap the dead entries from the registry so they don't fire again.
-    for (const r of dead) {
-      this.registry.unregister(r.name)
+    // PURE: report dead records as candidates. Do NOT unregister here — the reap
+    // is a STATE MUTATION that must happen AFTER the alert is durably persisted +
+    // delivered (round-4 sweep, Blocker-2). Unregistering before delivery meant a
+    // failed persist/notify lost the crash forever: the record was already gone,
+    // so the retry tick had nothing to rediscover. The incident tracker keeps the
+    // dead record deduped (one alert per crash) WITHOUT removing it — the removal
+    // is deferred to commit().
+    // A crash comes from TWO sources:
+    //   (1) the PENDING-CRASH QUEUE — the spawn exit handler ENQUEUED an abnormal
+    //       exit here, INDEPENDENT of the mutable live slot, so a fast respawn that
+    //       overwrote the slot cannot erase it before this tick drains it (round-12).
+    //       This is the primary signal: a child that exits between 30 s ticks is
+    //       otherwise unregistered/replaced before the detector ever runs.
+    //   (2) DEFENSIVELY, any still-live record whose pid is no longer alive — a
+    //       process that died WITHOUT its exit handler enqueuing (a true orphan).
+    // A cleanly/intentionally exited child was unregistered (never enqueued), so it
+    // never appears here.
+    const dead = [
+      ...this.registry.listPendingCrashes(),
+      ...this.registry.list().filter((r) => !this.probe.isAlive(r.pid)),
+    ]
+    // Key PER (name, pid): a dead→dead REPLACEMENT (same name, new dead pid) must
+    // be a DISTINCT incident. Keying by name alone left the old pid's incident open
+    // (its removal is pid-guarded, so it never resolves the name key) and the
+    // tracker then suppressed the successor's death forever (High 1).
+    const byKey = new Map(dead.map((r) => [procIncidentKey(r.name, r.pid), r]))
+    const risen = this.incidents.candidates(byKey.keys(), (key) => newAlertId(this.kind, key, now))
+    return risen.map(({ key, id }) => {
+      const r = byKey.get(key)!
+      return {
+        id,
+        kind: this.kind,
+        project_slug: this.project_slug,
+        detected_at: now / 1000,
+        resolved_at: null,
+        payload: {
+          process_name: r.name,
+          pid: r.pid,
+          tool_name: r.tool_name,
+        },
+      }
+    })
+  }
+
+  // COMMIT-ON-SUCCESS (round-4): the dead record is REAPED from the registry ONLY
+  // after its crash alert was durably persisted + delivered. Until then it stays
+  // discoverable so a failed tick retries. `commitById` latches the incident so a
+  // re-registered same-name process later is a fresh incident.
+  //
+  // IDENTITY-GUARDED reap (High A + round-12): reap the reported crash from BOTH
+  // sources by EXACT `(name, pid)`. `reapCrash` drops the pending-queue entry;
+  // `unregisterIfPid` drops a defensive live-dead record ONLY if the slot still
+  // points at that pid — a respawn that replaced it (`registerLiveProcessSafe`
+  // upsert / spawn.ts) is left untouched, so committing an old crash never erases
+  // the freshly-respawned LIVE process. Both are no-ops when their entry is absent.
+  commit(alert: WatchdogAlert): void {
+    this.incidents.commitById(alert.id)
+    const payload = alert.payload as { process_name?: unknown; pid?: unknown }
+    const name = payload.process_name
+    const pid = payload.pid
+    if (typeof name === 'string' && typeof pid === 'number') {
+      this.registry.reapCrash(name, pid)
+      this.registry.unregisterIfPid(name, pid)
     }
-    return dead.map((r) => ({
-      id: newAlertId(this.kind, r.name, now),
-      kind: this.kind,
-      project_slug: this.project_slug,
-      detected_at: now / 1000,
-      resolved_at: null,
-      payload: {
-        process_name: r.name,
-        pid: r.pid,
-        tool_name: r.tool_name,
-      },
-    }))
   }
 }
 
@@ -203,6 +287,14 @@ export class OverrunCronDetector implements WatchdogDetector {
   private readonly project_slug: string
   private readonly now: () => number
   private readonly default_expected_ms: number
+  private readonly incidents = new IncidentEdgeTracker()
+
+  // COMMIT-ON-SUCCESS (F4 round-3): latch this incident's dedup ONLY after the
+  // supervisor durably persisted AND delivered the alert. A transient failure
+  // skips this, so the incident re-attempts next tick instead of being lost.
+  commit(alert: WatchdogAlert): void {
+    this.incidents.commitById(alert.id)
+  }
 
   constructor(opts: OverrunCronDetectorOptions) {
     this.jobs = opts.jobs
@@ -214,27 +306,35 @@ export class OverrunCronDetector implements WatchdogDetector {
 
   async detect(): Promise<WatchdogAlert[]> {
     const now = this.now()
-    const fired: WatchdogAlert[] = []
+    const payloads = new Map<string, Record<string, unknown>>()
     for (const job of this.jobs.list()) {
       const state = this.state.get(job.name, this.project_slug)
       if (!state || state.last_run_duration_ms === null) continue
       const expected = job.expected_duration_ms ?? this.default_expected_ms
       if (state.last_run_duration_ms <= expected) continue
-      fired.push({
-        id: newAlertId(this.kind, job.name, now),
-        kind: this.kind,
-        project_slug: this.project_slug,
-        detected_at: now / 1000,
-        resolved_at: null,
-        payload: {
-          job_name: job.name,
-          duration_ms: state.last_run_duration_ms,
-          expected_ms: expected,
-          last_run_at: state.last_run_at,
-        },
+      // PER-RUN incident key (Blocker-B fix). Keying by job name ALONE would
+      // suppress a LATER run of the same job that ALSO overran (the incident
+      // never closes until a run comes in UNDER budget). `last_run_at` identifies
+      // the specific run, so: the same overrunning run re-observed → suppressed;
+      // a DIFFERENT run that overruns → a NEW key → a fresh alert. Satisfies both
+      // "no storm for one overrun" AND "one alert per overrunning run".
+      const key = `${job.name} ${state.last_run_at}`
+      payloads.set(key, {
+        job_name: job.name,
+        duration_ms: state.last_run_duration_ms,
+        expected_ms: expected,
+        last_run_at: state.last_run_at,
       })
     }
-    return fired
+    const risen = this.incidents.candidates(payloads.keys(), (key) => newAlertId(this.kind, key, now))
+    return risen.map(({ key, id }) => ({
+      id,
+      kind: this.kind,
+      project_slug: this.project_slug,
+      detected_at: now / 1000,
+      resolved_at: null,
+      payload: payloads.get(key)!,
+    }))
   }
 }
 
@@ -251,7 +351,11 @@ export interface DbLockDetectorOptions extends CommonDetectorOptions {
   counter: BusyRetryCounter
   /** Window the counter delta is measured against. Default 60 s. */
   window_ms?: number
-  /** Fire when delta within window > this. Default 5. */
+  /**
+   * Fire when the busy-retry-exhaustion delta within the window is AT LEAST this
+   * (i.e. `delta >= threshold`, inclusive). Default 5 — an exhaustion count that
+   * reaches exactly 5 in the window fires.
+   */
   threshold_per_window?: number
 }
 
@@ -263,6 +367,14 @@ export class DbLockContentionDetector implements WatchdogDetector {
   private readonly window_ms: number
   private readonly threshold: number
   private samples: Array<{ t: number; count: number }> = []
+  private readonly incidents = new IncidentEdgeTracker()
+
+  // COMMIT-ON-SUCCESS (F4 round-3): latch this incident's dedup ONLY after the
+  // supervisor durably persisted AND delivered the alert. A transient failure
+  // skips this, so the incident re-attempts next tick instead of being lost.
+  commit(alert: WatchdogAlert): void {
+    this.incidents.commitById(alert.id)
+  }
 
   constructor(opts: DbLockDetectorOptions) {
     this.counter = opts.counter
@@ -270,6 +382,16 @@ export class DbLockContentionDetector implements WatchdogDetector {
     this.now = opts.now ?? Date.now
     this.window_ms = opts.window_ms ?? 60_000
     this.threshold = opts.threshold_per_window ?? 5
+    // STARTUP BASELINE (round-10 P1). Seed a baseline sample AT CONSTRUCTION —
+    // boot, when the watchdog module composes — so the FIRST tick's delta covers
+    // boot→first-tick. Without it, the first `detect()` (which the supervisor runs
+    // only after a 30 s interval) pushed its baseline from the CURRENT counter and
+    // compared against that same sample → delta 0, so every exhaustion between boot
+    // and the first tick was invisible for the whole first window. Constructing at
+    // boot (counter ~0), this baseline is ~0, so exhaustions accumulated before the
+    // first tick are counted; it does NOT over-count a late construction (baseline =
+    // its then-current count → delta ~0, no false fire on historical backlog).
+    this.samples.push({ t: this.now(), count: this.counter.exhaustionCount() })
   }
 
   async detect(): Promise<WatchdogAlert[]> {
@@ -282,23 +404,27 @@ export class DbLockContentionDetector implements WatchdogDetector {
     const windowStart = now - this.window_ms
     const inWindow = this.samples.filter((s) => s.t >= windowStart)
     const oldest = inWindow[0]
-    if (!oldest) return []
-    const delta = cur - oldest.count
-    if (delta < this.threshold) return []
-    return [
-      {
-        id: newAlertId(this.kind, this.project_slug, now),
-        kind: this.kind,
-        project_slug: this.project_slug,
-        detected_at: now / 1000,
-        resolved_at: null,
-        payload: {
-          delta,
-          window_ms: this.window_ms,
-          threshold: this.threshold,
-        },
+    const delta = oldest ? cur - oldest.count : 0
+    // AT-LEAST semantics (inclusive): fire when delta reaches the threshold.
+    const firing = oldest !== undefined && delta >= this.threshold
+    // Incident-edge: sustained contention keeps `delta` at/over threshold across
+    // ticks — fire once per contention incident, re-fire only after it subsides
+    // below threshold and crosses again (Blocker-1 fix).
+    const risen = this.incidents.candidates(firing ? [this.project_slug] : [], (key) =>
+      newAlertId(this.kind, key, now),
+    )
+    return risen.map(({ id }) => ({
+      id,
+      kind: this.kind,
+      project_slug: this.project_slug,
+      detected_at: now / 1000,
+      resolved_at: null,
+      payload: {
+        delta,
+        window_ms: this.window_ms,
+        threshold: this.threshold,
       },
-    ]
+    }))
   }
 }
 
@@ -318,6 +444,14 @@ export class SubstrateCooldownDetector implements WatchdogDetector {
   private readonly project_slug: string
   private readonly substrate_kind: string
   private readonly now: () => number
+  private readonly incidents = new IncidentEdgeTracker()
+
+  // COMMIT-ON-SUCCESS (F4 round-3): latch this incident's dedup ONLY after the
+  // supervisor durably persisted AND delivered the alert. A transient failure
+  // skips this, so the incident re-attempts next tick instead of being lost.
+  commit(alert: WatchdogAlert): void {
+    this.incidents.commitById(alert.id)
+  }
 
   constructor(opts: SubstrateCooldownDetectorOptions) {
     this.pool = opts.pool
@@ -328,23 +462,27 @@ export class SubstrateCooldownDetector implements WatchdogDetector {
 
   async detect(): Promise<WatchdogAlert[]> {
     const now = this.now()
-    if (this.pool.credentials.length === 0) return []
-    const allCold = this.pool.credentials.every((c: PooledCredential) =>
-      c.cooldown_until !== undefined && c.cooldown_until > now,
+    const allCold =
+      this.pool.credentials.length > 0 &&
+      this.pool.credentials.every(
+        (c: PooledCredential) => c.cooldown_until !== undefined && c.cooldown_until > now,
+      )
+    // Incident-edge: a cooldown lasts minutes across many ticks — fire once when
+    // the pool saturates, and again only after some credential recovers then the
+    // pool saturates anew (Blocker-1 fix: was ~20 pings for a 10-min cooldown).
+    const risen = this.incidents.candidates(allCold ? [this.substrate_kind] : [], (key) =>
+      newAlertId(this.kind, key, now),
     )
-    if (!allCold) return []
-    return [
-      {
-        id: newAlertId(this.kind, this.substrate_kind, now),
-        kind: this.kind,
-        project_slug: this.project_slug,
-        detected_at: now / 1000,
-        resolved_at: null,
-        payload: {
-          substrate_kind: this.substrate_kind,
-          credential_count: this.pool.credentials.length,
-        },
+    return risen.map(({ id }) => ({
+      id,
+      kind: this.kind,
+      project_slug: this.project_slug,
+      detected_at: now / 1000,
+      resolved_at: null,
+      payload: {
+        substrate_kind: this.substrate_kind,
+        credential_count: this.pool.credentials.length,
       },
-    ]
+    }))
   }
 }

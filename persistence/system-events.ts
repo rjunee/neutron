@@ -59,6 +59,11 @@ export type SystemEventName =
   // `McpServer.dispatch` (the verdict the gate WOULD reach under enforcement,
   // decision D-9). It records; it never changes dispatch behavior.
   | 'capability_verdict'
+  // F4 — a supervision-watchdog alert fired (heartbeat stale / stuck / crashed
+  // agent / overrun cron / db-lock contention / substrate cooldown saturation,
+  // OR a stuck/dead dispatched subagent). NOTIFY-ONLY: the watchdog DETECTS +
+  // journals the condition; it changes no control flow and kills nothing.
+  | 'watchdog_alert'
 
 export const ALL_SYSTEM_EVENT_NAMES: ReadonlyArray<SystemEventName> = [
   'gbrain_unavailable',
@@ -70,6 +75,7 @@ export const ALL_SYSTEM_EVENT_NAMES: ReadonlyArray<SystemEventName> = [
   'bundle_build_failed',
   'prewarm_failed',
   'capability_verdict',
+  'watchdog_alert',
 ]
 
 /** What a degrade site passes to {@link emitSystemEventSafe}. */

@@ -49,6 +49,17 @@ export interface PtyChild {
   readonly exited: Promise<number | null>
   /** True once the child has exited. */
   readonly hasExited: () => boolean
+  /**
+   * True once WE signalled this child via {@link kill} (any intentional
+   * termination — pool eviction, respawn, cancel, graceful shutdown). Lets the
+   * exit handler tell a crash (non-zero exit / an EXTERNAL signal we did not send,
+   * e.g. an OOM SIGKILL) apart from an expected termination, so the F4 crashed-
+   * agent watchdog fires only on real crashes and never on routine recycles.
+   * OPTIONAL: a backward-compatible extension — the real backend
+   * (`bun-terminal-host.ts`) provides it; a lightweight test fake may omit it, in
+   * which case the exit handler falls back to exit-code classification.
+   */
+  readonly wasKilledByUs?: () => boolean
 }
 
 /** Options for spawning a PTY-hosted child. */

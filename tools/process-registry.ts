@@ -33,6 +33,14 @@ export interface ProcessRecord {
   tool_name: string
   /** Optional metadata for ad-hoc fields. */
   meta: Record<string, string>
+  /**
+   * Set to `'crashed'` by the spawn exit handler when a child exited ABNORMALLY
+   * (non-zero code / an external signal we did not send). The crashed-agent
+   * watchdog reports such a record once and reaps it on commit. A cleanly-exited
+   * or intentionally-terminated child is unregistered outright, so it never
+   * carries this. Absent while the process is live.
+   */
+  exit_status?: 'crashed'
 }
 
 export interface ProcessRegisterInput {
@@ -49,8 +57,21 @@ export interface ProcessRegisterInput {
  */
 export const STUCK_PROCESS_INACTIVITY_MS = 15 * 60_000
 
+/** Composite identity key for a process — `(name, pid)`, never name alone. */
+const procRegistryKey = (name: string, pid: number): string => `${name}#${pid}`
+
 export class ProcessRegistry {
   private readonly records = new Map<string, ProcessRecord>()
+  /**
+   * Un-reported crashes, keyed by `(name, pid)` — INDEPENDENT of the single mutable
+   * live `records` slot (round-12). An abnormal exit ENQUEUES its crash here rather
+   * than marking the live record in place, so a fast respawn that reuses the same
+   * `name` (upsert → delete+register) can no longer erase a crash before the 30 s
+   * crashed-agent detector drains it. The detector reports each entry once and
+   * reaps it on commit ({@link reapCrash}); multiple rapid respawns each enqueue a
+   * distinct `(name, pid)` crash.
+   */
+  private readonly pendingCrashes = new Map<string, ProcessRecord>()
   private readonly now: () => number
 
   constructor(options: { now?: () => number } = {}) {
@@ -86,6 +107,19 @@ export class ProcessRegistry {
   }
 
   /**
+   * Bump activity ONLY when the entry STILL points at `pid` — identity-guarded so
+   * a late event from an OLD child cannot refresh the NEW child a respawn
+   * installed under the same `name`. Returns true only when the matching entry was
+   * touched.
+   */
+  touchIfPid(name: string, pid: number): boolean {
+    const r = this.records.get(name)
+    if (r === undefined || r.pid !== pid) return false
+    r.last_activity_at = this.now()
+    return true
+  }
+
+  /**
    * Send SIGTERM and forget. Returns true if the process was registered,
    * false otherwise. Idempotent (SIGTERM to a dead PID is a no-op kill(2)
    * EAGAIN/ESRCH which we swallow).
@@ -110,6 +144,54 @@ export class ProcessRegistry {
     return this.records.delete(name)
   }
 
+  /**
+   * Drop a record ONLY when it STILL points at `pid` — identity-guarded so a
+   * concurrently-respawned entry that re-used the same `name` under a NEW pid is
+   * never clobbered. Mirrors the spawn.ts exit-path `childByKey` identity guard
+   * (`if (childByKey.get(key) === child) …`) but keys on pid, which is all the
+   * crashed-agent detector carries across its detect→persist→deliver→commit gap.
+   * Returns true only when the exact detected entry was removed.
+   */
+  unregisterIfPid(name: string, pid: number): boolean {
+    const r = this.records.get(name)
+    if (r === undefined || r.pid !== pid) return false
+    return this.records.delete(name)
+  }
+
+  /**
+   * ENQUEUE a crash (round-12). Records an abnormally-exited child in the durable
+   * {@link pendingCrashes} queue — keyed by `(name, pid)`, INDEPENDENT of the live
+   * `records` slot — so a respawn that overwrites the slot cannot erase it before
+   * the detector's next tick. Idempotent per `(name, pid)`. Also drops the matching
+   * live record if it is STILL this exact `(name, pid)` (identity-guarded), so the
+   * detector's defensive dead-pid pass can't ALSO report it (no double-report); a
+   * respawn that already replaced the slot is left untouched. `record` is the
+   * child's captured registration (see `registerLiveProcessSafe`), so this works
+   * even when the live slot was already overwritten by a fast respawn.
+   */
+  enqueueCrash(record: ProcessRecord): void {
+    this.pendingCrashes.set(procRegistryKey(record.name, record.pid), {
+      ...record,
+      exit_status: 'crashed',
+    })
+    const live = this.records.get(record.name)
+    if (live !== undefined && live.pid === record.pid) this.records.delete(record.name)
+  }
+
+  /** Snapshot of the un-reported crashes the crashed-agent detector drains. */
+  listPendingCrashes(): ProcessRecord[] {
+    return [...this.pendingCrashes.values()].sort((a, b) => a.name.localeCompare(b.name))
+  }
+
+  /**
+   * Reap a reported crash from the pending queue, identity-guarded on `(name, pid)`
+   * — called by the detector's commit-after-delivery. Returns true only when the
+   * exact entry was removed.
+   */
+  reapCrash(name: string, pid: number): boolean {
+    return this.pendingCrashes.delete(procRegistryKey(name, pid))
+  }
+
   /** SIGTERM every registered process. Returns the count signalled. */
   killAll(): number {
     const names = [...this.records.keys()]
@@ -130,5 +212,136 @@ export class ProcessRegistry {
 
   size(): number {
     return this.records.size
+  }
+}
+
+// ── Ambient live-process registry (F4) ──────────────────────────────────────
+//
+// The subprocess spawn sites that should feed child PIDs into the watchdog's
+// live-process view (`runtime/adapters/claude-code/persistent/spawn.ts` — the
+// single PTY chokepoint serving BOTH the pooled REPL and the ephemeral/dispatch
+// children) are deep in the runtime-adapter band and have NO dependency-injection
+// seam to the gateway module that owns the `ProcessRegistry`. So they reach it
+// through this process-wide ambient accessor — the SAME ambient-registry pattern
+// O4's `system_events` sink established (`persistence/system-events.ts`) for its
+// equally-scattered degrade sites.
+//
+// CONSISTENCY, NOT A SECOND TRUTH. The `ProcessRegistry` is a pure OS-process
+// LIVENESS PROJECTION the stuck/crashed detectors READ (+ the crashed detector
+// reaps dead entries as bookkeeping). It NEVER drives a dispatch's lifecycle —
+// that authority is P7's persisted `SubagentRegistry`. Entries are registered on
+// the real subprocess spawn and unregistered on its real exit, so this view
+// cannot diverge from the OS reality it observes.
+//
+// SINGLE-OWNER: neutron-open runs one gateway boot per OS process, so the stack
+// normally holds exactly one registry. It is a STACK (mirroring the O4 sink) only
+// so overlapping test boots tear down in any order without orphaning a live older
+// boot; production pushes once at boot and clears on shutdown.
+
+const ambientRegistryStack: ProcessRegistry[] = []
+
+/**
+ * Publish `registry` as the ambient live-process registry and return an
+ * idempotent deregister that removes THIS registry (by identity, from any stack
+ * position). The gateway's `process-registry` module pushes once at boot and
+ * clears on shutdown.
+ */
+export function pushAmbientProcessRegistry(registry: ProcessRegistry): () => void {
+  ambientRegistryStack.push(registry)
+  let removed = false
+  return (): void => {
+    if (removed) return
+    removed = true
+    const i = ambientRegistryStack.lastIndexOf(registry)
+    if (i !== -1) ambientRegistryStack.splice(i, 1)
+  }
+}
+
+/** The top (most-recently-pushed still-live) ambient registry, or null when none. */
+export function resolveAmbientProcessRegistry(): ProcessRegistry | null {
+  return ambientRegistryStack.length > 0
+    ? (ambientRegistryStack[ambientRegistryStack.length - 1] ?? null)
+    : null
+}
+
+/**
+ * A handle bound to the SPECIFIC registry + `(name, pid)` a child was registered
+ * into. Its `touch`/`unregister` operate on THAT registry and THAT entry — never
+ * the current top-of-stack — so an old child's late touch or exit cannot mutate a
+ * DIFFERENT registry that a newer gateway boot pushed after this child registered
+ * (the ambient-stack clobber, High 2). Both operations identity-guard on the
+ * captured pid, so even within the same registry a respawn that replaced `name`
+ * with a new pid is never touched or dropped by the old child's handle.
+ */
+export interface LiveProcessHandle {
+  /** Refresh last-activity — no-op unless the owned `(registry, name, pid)` is still current. */
+  touch(): void
+  /** Drop the owned entry (clean/expected exit) — no-op unless `(registry, name, pid)` is still current. */
+  unregister(): void
+  /**
+   * Mark the owned entry crashed (abnormal exit) and LEAVE it registered so the
+   * crashed-agent watchdog can report it once — no-op unless `(registry, name,
+   * pid)` is still current (a respawn that replaced it is untouched).
+   */
+  markCrashed(): void
+}
+
+/** Handle returned when there is no ambient registry to write into. */
+const NOOP_LIVE_PROCESS_HANDLE: LiveProcessHandle = {
+  touch(): void {},
+  unregister(): void {},
+  markCrashed(): void {},
+}
+
+/**
+ * Register a live child process into the ambient registry — GUARDED so it can
+ * NEVER throw into a spawn path — and return a {@link LiveProcessHandle} bound to
+ * the registry this write landed in plus the child's `(name, pid)`. UPSERT
+ * semantics: an existing entry under `name` (e.g. a respawn re-using the same
+ * session key while the old child's exit handler hasn't fired yet) is replaced
+ * rather than colliding, so the live-process view tracks the newest child. Returns
+ * a no-op handle when no ambient registry is registered (unit tests, sidecar
+ * tools, an LLM-less box).
+ */
+export function registerLiveProcessSafe(input: ProcessRegisterInput): LiveProcessHandle {
+  try {
+    const reg = resolveAmbientProcessRegistry()
+    if (reg === null) return NOOP_LIVE_PROCESS_HANDLE
+    reg.unregister(input.name)
+    // Capture the OWNING registry + the child's OWN registered record, so
+    // touch/unregister/markCrashed below bind to THIS registry and THIS child —
+    // not whatever is top-of-stack, nor whatever record a later respawn installed
+    // under the same name. `record` is retained by this closure, so markCrashed can
+    // enqueue the crash even after a fast respawn overwrote the live slot (round-12).
+    const record = reg.register(input)
+    const owner = reg
+    const name = input.name
+    const pid = input.pid
+    return {
+      touch(): void {
+        try {
+          owner.touchIfPid(name, pid)
+        } catch {
+          // Observability write — must never perturb the spawn it observes.
+        }
+      },
+      unregister(): void {
+        try {
+          owner.unregisterIfPid(name, pid)
+        } catch {
+          // swallow
+        }
+      },
+      markCrashed(): void {
+        try {
+          owner.enqueueCrash(record)
+        } catch {
+          // swallow
+        }
+      },
+    }
+  } catch {
+    // Observability write — must never perturb the spawn it observes.
+    return NOOP_LIVE_PROCESS_HANDLE
   }
 }

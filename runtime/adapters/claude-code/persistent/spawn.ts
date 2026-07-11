@@ -15,6 +15,10 @@ import { ChannelWedgedSpawnError, MAX_FLEET_RESPAWNS, buildChannelWedgeCapAlertT
 import { ensureClaudeTrust } from './ensure-claude-trust.ts'
 import { type InFlightGate, makeInFlightGate } from './in-flight-gate.ts'
 import { childByKey, pool, replToolBridgeRef, respawnGates, sink } from './pool-state.ts'
+import {
+  registerLiveProcessSafe,
+  type LiveProcessHandle,
+} from '@neutronai/tools/process-registry.ts'
 import { assertReplAlive } from './post-spawn-assertion.ts'
 import type { PtyChild } from './pty-host.ts'
 import { RATE_LIMIT_BANNER_SEVERITIES, createRateLimitBannerDetector } from './rate-limit-banner.ts'
@@ -322,6 +326,11 @@ async function spawnSession(
   // so route fired-detector keystrokes through this mirror (set right after
   // spawn, before any onData can fire on the event loop).
   let scanChild: PtyChild | undefined
+  // F4 — the ambient live-process handle for THIS child, assigned right after the
+  // register call below (before any onData can fire on the event loop). It is
+  // bound to the owning registry + this child's (name, pid), so a late touch from
+  // this child can never refresh a different registry or a respawned successor.
+  let liveHandle: LiveProcessHandle | undefined
 
   const child = ptyHost.spawn(argv, {
     cwd,
@@ -330,6 +339,11 @@ async function spawnSession(
       session.ring.append(Buffer.from(chunk).toString('utf8'))
       const now = Date.now()
       session.lastDataAt = now
+      // F4 — feed the watchdog's live-process view: any child output is activity,
+      // so keep the ProcessRegistry entry fresh (stuck-agent = no activity past
+      // the threshold). Guarded no-op when no ambient registry is registered; the
+      // handle identity-guards so it only ever touches THIS child's entry.
+      liveHandle?.touch()
       const target = scanChild
       if (target === undefined) return
       // Run the registered detectors against the ring and actuate the ones that
@@ -345,6 +359,17 @@ async function spawnSession(
   // Synchronous handle mirror so a respawn can detect alive-but-wedged without
   // awaiting the pool promise (Argus r3 BLOCKER 1). Newest spawn wins the key.
   childByKey.set(sessionKey, child)
+  // F4 — publish this child's PID into the watchdog's live-process view (the
+  // single PTY chokepoint serves BOTH the pooled REPL and the ephemeral/dispatch
+  // children, so ONE writer here covers every spawn site). UPSERT-safe against a
+  // respawn re-using `sessionKey`; unregistered in `child.exited` below. Guarded
+  // no-op when no ambient ProcessRegistry is registered (unit tests / LLM-less).
+  liveHandle = registerLiveProcessSafe({
+    name: sessionKey,
+    pid: child.pid,
+    tool_name: 'cc-repl',
+    meta: { session_id: sessionId, channel: channelName },
+  })
 
   // Master-table row #11: start the per-turn API-5xx dead-turn JSONL watcher for
   // THIS child's transcript. A mid-turn 5xx (`Overloaded`/`internal_server_error`
@@ -377,7 +402,7 @@ async function spawnSession(
   // IDENTITY-GUARDED: a respawn re-attaches the SAME sessionId/sessionKey, so a
   // dying OLD child must not evict the NEW session a concurrent respawn already
   // installed (the resume race the P2-3 regression caught).
-  void child.exited.then(async () => {
+  void child.exited.then(async (exitCode) => {
     session.onDeath()
     // Detach the row-#11 dead-turn JSONL watcher — this child's transcript is now
     // terminal; a respawn starts a fresh watcher for the new child.
@@ -385,6 +410,23 @@ async function spawnSession(
     session.deadTurnWatcher = undefined
     // Stop the size-watchdog cadence — the child it watched is gone (row #13).
     session.sizeWatchdog?.stop()
+    // F4 — reconcile the watchdog's live-process view against this real exit,
+    // distinguishing a CLEAN/EXPECTED exit from a CRASH so CrashedAgentDetector can
+    // actually observe crashes in production (a child that exits between 30 s ticks
+    // must not be silently dropped before the detector runs). The handle is bound
+    // to the OWNING registry + this child's (name, pid), so BOTH branches no-op if
+    // a concurrent respawn already replaced `sessionKey`, or a newer gateway boot
+    // pushed a different ambient registry — it can only ever touch THIS child's own
+    // entry (High 2). CLEAN = code 0 or a termination WE initiated (SIGTERM/SIGKILL
+    // on evict/respawn/cancel/shutdown → `wasKilledByUs`): unregister outright.
+    // CRASH = a non-zero code or an EXTERNAL signal we did not send: mark the record
+    // crashed and LEAVE it so the detector reports it once and reaps it on commit.
+    const killedByUs = child.wasKilledByUs?.() ?? false
+    if (!killedByUs && exitCode !== 0) {
+      liveHandle?.markCrashed()
+    } else {
+      liveHandle?.unregister()
+    }
     sink.unregisterIf(sessionId, session)
     // Reclaim the temp config files now the child is gone (covers pool eviction,
     // crash, and shutdown — the ephemeral dispose path unlinks eagerly too).

@@ -32,7 +32,7 @@
  */
 
 import type { CredentialPool } from '@neutronai/runtime/credential-pool.ts'
-import { emitSystemEvent } from '@neutronai/persistence/index.ts'
+import { emitSystemEvent, resolveSystemEventSink } from '@neutronai/persistence/index.ts'
 import {
   resolveEnvOAuthTier,
   resolveApiKeyEnvTier,
@@ -77,13 +77,20 @@ import { SubagentRegistry } from '@neutronai/runtime/subagent/registry.ts'
 import { SubagentRegistryStore } from '@neutronai/runtime/subagent/store.ts'
 import { sweepOrphanedDispatchesOnBoot } from '@neutronai/runtime/subagent/boot-sweep.ts'
 import { newControlState } from '@neutronai/runtime/subagent/control.ts'
+import { HeartbeatPulse } from '@neutronai/watchdog/heartbeat.ts'
+import type { WatchdogAlert, WatchdogNotifier } from '@neutronai/watchdog/types.ts'
 import {
   DispatchService,
   buildBootSweepReport,
   buildCancellableDispatchTurn,
+  buildDispatchStuckAlertSink,
+  selectDispatchAlertTopics,
+  scheduleDispatchLifecycleWatchdog,
   defaultPersonaLoader,
   type DispatchBoardBinder,
   type DispatchReporter,
+  type DispatchSuspectedStuckSink,
+  type DispatchToolSurfaceOptions,
 } from '@neutronai/agent-dispatch/index.ts'
 import {
   buildAnthropicLlmCall,
@@ -404,6 +411,24 @@ export {
 } from './wiring/app-ws.ts'
 
 /**
+ * Round-13 — the app-ws delivery-target resolver injected into `dispatch_agent`.
+ * Stamps the ORIGINATING binding on an agent-initiated dispatch so its later
+ * stuck-alert / report routes back to exactly the surface it came from, never
+ * fanned to sibling projects. The active project maps to its per-project topic
+ * (`app:owner:<project_id>`); General (no active project) → the owner-root topic
+ * (`app:owner`). Module-level (no per-instance state): pure `(ctx) → DeliveryTarget`.
+ */
+const resolveDispatchDeliveryTarget: NonNullable<
+  DispatchToolSurfaceOptions['resolve_delivery_target']
+> = (ctx) => ({
+  channel: 'app_socket',
+  binding_id:
+    ctx.project_id !== null
+      ? appWsProjectTopicId(OWNER_USER_ID, ctx.project_id)
+      : appWsTopicId(OWNER_USER_ID),
+})
+
+/**
  * Build the single-owner Open graph composer. The returned closure is what
  * `boot({ composer })` invokes after migrations — it receives the live
  * `ProjectDb` + the boot-frozen `project_slug` and returns the
@@ -548,13 +573,18 @@ export function buildOpenGraphComposer(
     // `store.ts`), so a registry write is never absorbed into — nor rolled back
     // by — another store's in-flight transaction on this same shared connection.
     const subagentRegistryStore = new SubagentRegistryStore(db)
+    // F4 — HOISTED out of the dispatchService IIFE (was scoped inside) so the
+    // scheduled lifecycle watchdog tick (below) supervises the SAME registry +
+    // control the dispatcher spawns into. Constructed unconditionally: the
+    // in-memory registry is harmless on an LLM-less box (it stays empty, and the
+    // tick is only scheduled when a dispatcher exists).
+    const subagentRegistry = new SubagentRegistry(subagentRegistryStore)
+    const subagentControl = newControlState(subagentRegistry)
     const dispatchService = ((): DispatchService | null => {
       if (llmPool === null) return null
-      const registry = new SubagentRegistry(subagentRegistryStore)
-      const control = newControlState(registry)
       return new DispatchService({
-        registry,
-        control,
+        registry: subagentRegistry,
+        control: subagentControl,
         dispatch: buildCancellableDispatchTurn({
           build_substrate: makeEphemeralSubstrate('cc-dispatch'),
         }),
@@ -2470,6 +2500,167 @@ export function buildOpenGraphComposer(
           })
         : undefined
 
+    // ── F4 — wire the supervision watchdog for real (D-8 = wire) ─────────────
+    // Both supervision systems were decorative: the `watchdog/` package ran with
+    // a no-op notifier + a never-stale heartbeat, and the subagent watchdog
+    // (`runLifecycleTick`) was NEVER scheduled. F4 wires them THROUGH O4
+    // (`system_events`) + P7 (the persisted `SubagentRegistry`). NOTIFY-ONLY:
+    // it DETECTS + NOTIFIES; it changes no control flow and kills nothing
+    // (enforcement is a separate flagged PR).
+
+    // (1) Real heartbeat source (replaces the never-stale `() => Date.now()`
+    // stub). The gateway's `WATCHDOG=1` tick pulses this via the `on_gateway_tick`
+    // seam below; when the TICK LOOP stops advancing the pulse (timer cleared /
+    // scheduler died) while the supervisor loop keeps running, the heartbeat goes
+    // STALE and the detector fires. NOTE: this does NOT catch a synchronous
+    // event-loop wedge (both loops freeze together; the resumed pulse masks it) —
+    // systemd's `WatchdogSec` is the out-of-process teeth for that. See
+    // `watchdog/heartbeat.ts`. Pre-pulse once so a freshly-booted gateway reads
+    // healthy before the first tick lands.
+    const heartbeatPulse = new HeartbeatPulse()
+    heartbeatPulse.pulse()
+
+    // (4) Real watchdog notifier — routes each fired alert to app-ws delivery AND
+    // O4's `system_events` journal. FULLY GUARDED (fire-and-forget): a delivery or
+    // emit failure can NEVER throw into the supervisor tick (same contract O4/P7
+    // established). app-ws is single-owner, so broadcast to every live topic.
+    //
+    // SWALLOW is CORRECT here (round-4 sweep, audited): this is the SIX-DETECTOR
+    // supervisor's notify, whose DURABLE surfacing is the `watchdog_alerts` ledger
+    // that `WatchdogSupervisor.runOnce` persists via `AlertStore.record` BEFORE
+    // this notify — and THAT persist (which throws on a real failure) is what gates
+    // the incident-edge commit. So this notify is a best-effort SECONDARY push
+    // (ephemeral app-ws + the O4 convenience journal) on top of an already-durable
+    // ledger row; a lost push is not a lost alert (it is queryable in
+    // `watchdog_alerts`). This differs from the DISPATCH path, which has NO durable
+    // ledger — there the O4 write IS the surfacing, so its sink propagates.
+    const watchdogNotifier: WatchdogNotifier = {
+      notify: async (alert: WatchdogAlert): Promise<void> => {
+        try {
+          const body = `⚠️ Supervisor alert: ${alert.kind} (${alert.project_slug})`
+          const env: AppWsOutboundAgentMessage = {
+            v: 1,
+            type: 'agent_message',
+            body,
+            message_id: `watchdog:${alert.id}`,
+            ts: Date.now(),
+          }
+          // Broadcast to all live topics is INTENDED here (round-11 sweep): a
+          // six-detector `WatchdogAlert` is a SYSTEM-WIDE condition (stale
+          // heartbeat, DB-lock contention, cooldown saturation) — it carries NO
+          // per-binding `delivery_target`, so there is no narrower target to honor.
+          // (Contrast the DISPATCH path, whose alert IS bound to one conversation
+          // and is scoped via `selectDispatchAlertTopics`.)
+          for (const topic of appWsRegistry.topics()) {
+            try {
+              appWsRegistry.send(topic, env)
+            } catch {
+              // one dead socket must not stop the rest / the emit below
+            }
+          }
+        } catch {
+          // app-ws delivery is best-effort — never throw into the tick
+        }
+        // O4 — VISIBILITY row. AWAIT the durable write (round-15): `notify()` must
+        // not resolve before it completes, else the supervisor commits the incident
+        // and considers the tick drained while the `system_events` write is still in
+        // flight — and the quiescing `WatchdogSupervisor.stop()` (awaited before
+        // `db.close()`) could then close the DB mid-write, permanently losing the
+        // row. `emitSystemEvent` is fully guarded (never throws/rejects), so awaiting
+        // it cannot break the tick; a null ambient sink is an awaited no-op.
+        await emitSystemEvent({
+          event: 'watchdog_alert',
+          module: 'watchdog',
+          level: 'warn',
+          project_slug: alert.project_slug,
+          payload: { id: alert.id, kind: alert.kind, ...alert.payload },
+        })
+      },
+    }
+
+    // (5) Schedule the subagent lifecycle watchdog tick — the piece that was
+    // NEVER scheduled. NOTIFY-ONLY: `notify_only: true` DETECTS a stuck/dead
+    // dispatch and emits a NON-TERMINAL suspected-stuck ALERT — it does NOT
+    // `failRun` it (nothing killed, no record transitioned) and does NOT push a
+    // terminal `crashed` completion report (Blocker-A). The alert is journaled to
+    // O4 `system_events` (`watchdog_alert`, Blocker-C — the same journal the six
+    // general detectors reach) AND fanned to app-ws as a non-terminal notice. The
+    // `notified` ledger suppresses the every-tick repeat for a still-live stuck
+    // run. Gated on `dispatchService` (no dispatcher → empty registry → nothing
+    // to supervise). Registered in `realmodeCleanups` so shutdown clears it.
+    //
+    // ENFORCEMENT DEFERRED: killing a wedged dispatch after a threshold is a
+    // SEPARATE flagged PR. The 5-min `DEFAULT_STUCK_THRESHOLD_MS`
+    // (`runtime/subagent/watchdog.ts`) is UNVERIFIED against real dispatch
+    // durations for killing — it only gates a NOTIFICATION here.
+    if (dispatchService !== null) {
+      // PERSIST-BEFORE-DELIVER (round-9/14 class fix), enforced by the shared
+      // `buildDispatchStuckAlertSink` factory: the durable `journal` (O4
+      // `watchdog_alert` — the DELIVERY GATE, there is no `watchdog_alerts` ledger
+      // for dispatch alerts unlike the six general detectors) is awaited FIRST and a
+      // real failure PROPAGATES; the user-visible app-ws `push` fires ONLY after the
+      // journal confirms a durable record. `journal` returns whether it actually
+      // PERSISTED: a null ambient sink writes NOTHING → returns FALSE → the factory
+      // suppresses the push and leaves the run un-latched (round-14: a visible alert
+      // with no durable record was the hole). The O4 sink is always wired at gateway
+      // boot (`gateway/index.ts` `pushSystemEventSink`), so `false` never happens in
+      // production — it is a misconfiguration/sidecar signal.
+      const dispatchStuckAlertSink: DispatchSuspectedStuckSink = buildDispatchStuckAlertSink({
+        journal: async (alert): Promise<boolean> => {
+          const eventSink = resolveSystemEventSink()
+          if (eventSink === null) return false // no durable target → do NOT push/latch
+          await eventSink.record({
+            event: 'watchdog_alert',
+            module: 'watchdog',
+            level: 'warn',
+            project_slug,
+            payload: {
+              source: 'dispatch_lifecycle',
+              run_id: alert.run_id,
+              agent_kind: alert.agent_kind,
+              reason: alert.reason,
+              age_ms: alert.age_ms,
+            },
+          })
+          return true // durably recorded → the visible push may fire
+        },
+        push: (alert): void => {
+          const env: AppWsOutboundAgentMessage = {
+            v: 1,
+            type: 'agent_message',
+            body: alert.markdown,
+            message_id: `watchdog:dispatch:${alert.run_id}`,
+            ts: Date.now(),
+          }
+          // Route by the dispatch's RECORDED delivery target (round-11/13 privacy
+          // boundary): a run bound to a specific app_socket binding is pushed to
+          // THAT topic only, never broadcast into unrelated conversations. A real
+          // dispatch always carries its origin now (round-13 stamping); an
+          // origin-LESS (system-initiated) alert falls back to the owner-ROOT topic
+          // only — never fanned to sibling PROJECT topics.
+          for (const topic of selectDispatchAlertTopics(alert, appWsRegistry, {
+            owner_root_topic: appWsTopicId(OWNER_USER_ID),
+          })) {
+            try {
+              appWsRegistry.send(topic, env)
+            } catch {
+              // one dead socket must not stop the rest
+            }
+          }
+        },
+      })
+      const lifecycleWatchdog = scheduleDispatchLifecycleWatchdog({
+        registry: subagentRegistry,
+        control: subagentControl,
+        alert_sink: dispatchStuckAlertSink,
+      })
+      // stop() is ASYNC + QUIESCING — the gateway's shutdown drain AWAITS every
+      // realmode cleanup BEFORE `db.close()` (drainRealmodeCleanups → db.close),
+      // so an in-flight lifecycle tick fully drains before the DB closes and can
+      // never persist / prune against a closing database (round-7 High 2).
+      realmodeCleanups.push(() => lifecycleWatchdog.stop())
+    }
+
     return {
       db,
       project_slug,
@@ -2480,11 +2671,21 @@ export function buildOpenGraphComposer(
       // composition).
       topic_handler: async () => undefined,
       approval_notifier: { notify: async () => undefined },
-      watchdog_notifier: { notify: async () => undefined },
+      // F4 — real supervision-watchdog notifier (app-ws + O4 system_events),
+      // replacing the no-op. Fully guarded; never throws into the tick.
+      watchdog_notifier: watchdogNotifier,
       reminder_dispatcher,
       // P1-4 — proactive brief + idle-nudge sweep go live (see `tasksConfig`).
       tasks: tasksConfig,
-      heartbeat_tracker: { lastHeartbeatAt: () => Date.now() },
+      // F4 — real heartbeat source (pulsed by the gateway tick via
+      // `on_gateway_tick`), replacing the never-stale `() => Date.now()` stub.
+      heartbeat_tracker: heartbeatPulse,
+      // F4 — the gateway's `WATCHDOG=1` tick pulses the heartbeat so it goes
+      // stale the instant the gateway stops ticking. Guarded by the boot shell.
+      on_gateway_tick: () => heartbeatPulse.pulse(),
+      // F4 — the substrate credential pool the `substrate_cooldown_saturation`
+      // detector watches (null LLM-less box → detector registered but silent).
+      ...(llmPool !== null ? { watchdog_credential_pool: llmPool } : {}),
       platform,
       cron_jobs: cronJobs,
       // Free Cores (parity gap #2) — `composition.cores` flips on the cores
@@ -2649,7 +2850,9 @@ export function buildOpenGraphComposer(
       // tool when the dispatch service was built (same credential gate as
       // trident). The live chat agent can then dispatch a research/review/
       // ad-hoc background agent that shares the SubagentRegistry + watchdog.
-      ...(dispatchService !== null ? { agent_dispatch: { service: dispatchService } } : {}),
+      ...(dispatchService !== null
+        ? { agent_dispatch: { service: dispatchService, resolve_delivery_target: resolveDispatchDeliveryTarget } }
+        : {}),
       // Skill-forge (parity gap #5) — register the `skill_forge_list` +
       // `skill_forge_decide` agent tools, backed by the SAME `SkillForgeBackend`
       // the `/skills` chat command uses (agent-native parity). Built
