@@ -229,16 +229,19 @@ key_reachable_in_history() {
 # keep it out of the CURRENT commit, but a user who ran an OLDER backup version
 # (which committed the key) still has it in reachable HISTORY, and the first
 # push to a newly configured remote would disclose it. So BEFORE any push we
-# DETECT the key in history and, if present, PURGE it from ALL commits (this is
-# a dedicated backup repo — rewriting its history to remove a leaked secret is
-# correct and expected), then VERIFY it is gone. If we cannot purge or verify,
-# we FAIL CLOSED (die) rather than push a history that still contains the key.
-# Only the key PATH is rewritten; project.db + unrelated history are untouched.
+# DETECT the key in this LOCAL repo's history and, if present, PURGE it from all
+# LOCAL commits (this is a dedicated backup repo — rewriting its history to
+# remove a leaked secret is correct and expected), then VERIFY the local history
+# is clean. If we cannot purge or verify, we FAIL CLOSED (die) rather than push
+# a history that still contains the key. Only the key PATH is rewritten;
+# project.db + unrelated history are untouched. (The REMOTE side — including any
+# pre-existing remote tag/branch this tool did not create — is verified
+# separately AFTER the push by `verify_remote_clean_after_push`.)
 purge_key_from_history() {
   git rev-parse HEAD >/dev/null 2>&1 || return 0   # no commits yet → nothing to purge
   key_reachable_in_history || return 0             # not in history → nothing to do
 
-  warn ".neutron-aes-key is present in this backup repo's HISTORY — purging it from ALL commits before push."
+  warn ".neutron-aes-key is present in this backup repo's LOCAL history — purging it from all local commits before push."
   if _git_subcmd_available filter-repo; then
     git filter-repo --path .neutron-aes-key --invert-paths --force >/dev/null 2>&1 \
       || die "refusing to push: 'git filter-repo' failed to purge .neutron-aes-key from history. Run it by hand in $DATA_DIR, then re-run:  git filter-repo --path .neutron-aes-key --invert-paths --force"
@@ -261,7 +264,50 @@ purge_key_from_history() {
   if key_reachable_in_history; then
     die "refusing to push: .neutron-aes-key is STILL reachable in history after the purge attempt. Aborting before push to avoid disclosing the key — purge it manually in $DATA_DIR and re-run."
   fi
-  info "purged .neutron-aes-key from all backup history (local keyfile left intact)."
+  info "purged .neutron-aes-key from all local backup history (local keyfile left intact)."
+}
+
+# Delete the temp verification namespace so a fetched (possibly key-carrying)
+# remote ref never lingers to pollute the local `--all` history checks.
+_cleanup_remote_verify_refs() {
+  git for-each-ref --format='%(refname)' refs/remote-verify/ 2>/dev/null \
+    | while IFS= read -r _r; do [ -n "$_r" ] && git update-ref -d "$_r" 2>/dev/null || true; done
+}
+
+# S3(a) — the AUTHORITATIVE post-push gate. The local purge + force-push clean
+# the branch this tool OWNS, but they cannot reach a key sitting on a
+# PRE-EXISTING remote tag or a second branch the tool never created. So AFTER
+# pushing we fetch EVERY remote ref into a temp namespace and verify the key is
+# reachable from NONE of them. If any remote ref still carries it, we FAIL
+# CLOSED (die) naming the exact ref(s) + the commands to sanitize them, rather
+# than falsely report the backup clean. (neutron-backup is a single-branch
+# snapshot tool that never creates tags/other branches, so this only triggers
+# on an exotic remote seeded outside the tool — but the guarantee is honest.)
+verify_remote_clean_after_push() {
+  if ! git fetch -q origin '+refs/*:refs/remote-verify/*' 2>/dev/null; then
+    _cleanup_remote_verify_refs
+    die "refusing to report the backup clean: could not fetch $REMOTE refs to verify .neutron-aes-key is absent from every remote ref. Verify the remote manually before trusting this backup."
+  fi
+  _bad_refs=""
+  for _vref in $(git for-each-ref --format='%(refname)' refs/remote-verify/ 2>/dev/null); do
+    if [ -n "$(git log "$_vref" --pretty=format:%H -- .neutron-aes-key 2>/dev/null)" ]; then
+      _bad_refs="$_bad_refs refs/${_vref#refs/remote-verify/}"
+    fi
+  done
+  # Object-level belt-and-suspenders across all fetched refs (catches a blob
+  # reachable even where a path-filtered log might not surface it).
+  _allv=$(git for-each-ref --format='%(refname)' refs/remote-verify/ 2>/dev/null)
+  if [ -n "$_allv" ] && git rev-list --objects $_allv 2>/dev/null | grep -qF ' .neutron-aes-key'; then
+    case "$_bad_refs" in
+      *refs/*) : ;;                                  # already named a ref
+      *) _bad_refs="$_bad_refs (a reachable object on the remote)" ;;
+    esac
+  fi
+  _cleanup_remote_verify_refs
+  if [ -n "$_bad_refs" ]; then
+    die "refusing to report the backup clean: .neutron-aes-key is STILL retrievable from $REMOTE on ref(s):$_bad_refs. This tool rewrote + force-pushed the branch it owns, but it does NOT own the ref(s) above. Sanitize them, e.g.:  git push $REMOTE --delete <branch>   (for a tag:  git push $REMOTE :refs/tags/<name>), or re-initialize the backup remote. The key remains DISCLOSED on the remote until you do."
+  fi
+  info "verified $REMOTE carries .neutron-aes-key on NO ref."
 }
 
 do_run() {
@@ -325,21 +371,25 @@ do_run() {
       git remote add origin "$REMOTE"
     fi
     _branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo main)
-    # A history rewrite changed every SHA, so the push must be a force-push to
-    # replace the remote's old (key-containing) history. This is a dedicated
-    # backup remote (origin == $REMOTE), so force is safe + intended.
-    if [ "$HISTORY_REWRITTEN" = 1 ]; then
-      if git push -q --force origin "$_branch" 2>/dev/null; then
+    # Push comprehensively for what this tool OWNS: force ALL local heads (a
+    # rewrite changed every SHA, so force is required; this is a dedicated
+    # backup remote, so force is safe + intended) and PRUNE remote branches the
+    # local no longer has, then sync any local tags. We drive it off the local
+    # ref globs rather than hard-coding the single branch, so an unexpected
+    # local ref still syncs instead of being silently missed.
+    if git push -q --force --prune origin 'refs/heads/*:refs/heads/*' 2>/dev/null; then
+      git push -q --force --tags origin 2>/dev/null || true
+      if [ "$HISTORY_REWRITTEN" = 1 ]; then
         info "force-pushed purged history to $REMOTE ($_branch)"
       else
-        warn "git push --force to $REMOTE failed — local commit preserved, will retry next run"
-      fi
-    else
-      if git push -q origin "$_branch" 2>/dev/null; then
         info "pushed to $REMOTE ($_branch)"
-      else
-        warn "git push to $REMOTE failed — local commit preserved, will retry next run"
       fi
+      # AUTHORITATIVE post-push gate: verify the REMOTE carries the key on NO
+      # ref (branch OR tag), including refs this tool did not create. Fails
+      # closed with remediation if any remote ref still has it.
+      verify_remote_clean_after_push
+    else
+      warn "git push to $REMOTE failed — local commit preserved, will retry next run"
     fi
   fi
 }

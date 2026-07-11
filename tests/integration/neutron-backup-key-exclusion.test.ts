@@ -328,4 +328,55 @@ describe('neutron-backup.sh — AES key excluded from the backup bundle (S3a)', 
       rmSync(remoteDir, { recursive: true, force: true })
     }
   })
+
+  // Post-push remote verification (Codex blocker #6): the local purge + branch
+  // force-push clean what the tool OWNS, but a key sitting on a PRE-EXISTING
+  // remote tag (or a second branch the tool never created) would survive — and
+  // the code must not overclaim "clean". Pre-seed the bare remote with a
+  // key-containing commit on `refs/tags/leaked`, run the backup from a clean
+  // local repo → the outcome must be honest: EITHER the remote ends with the
+  // key on NO ref, OR the backup ABORTS with remediation naming that ref and
+  // does NOT report success.
+  test('a pre-seeded remote tag carrying the key is caught by the post-push verify (no false clean)', () => {
+    const dataDir = mkdtempSync(join(tmpdir(), 'neutron-backup-remotetag-'))
+    const remoteDir = mkdtempSync(join(tmpdir(), 'neutron-backup-remote3-'))
+    const seedDir = mkdtempSync(join(tmpdir(), 'neutron-backup-seed-'))
+    const remoteGitDir = join(remoteDir, 'remote.git')
+    try {
+      spawnSync(REAL_GIT, ['init', '--bare', '-q', remoteGitDir])
+
+      // Seed a key-containing commit and push it to the remote as a TAG the
+      // backup tool does NOT own / never created.
+      writeFileSync(join(seedDir, '.neutron-aes-key'), Buffer.alloc(32, 1), { mode: 0o600 })
+      writeFileSync(join(seedDir, 'unrelated.txt'), 'seed\n')
+      spawnSync('git', ['-C', seedDir, 'init', '-q'])
+      spawnSync('git', ['-C', seedDir, 'config', 'user.email', 'seed@localhost'])
+      spawnSync('git', ['-C', seedDir, 'config', 'user.name', 'Seed'])
+      spawnSync('git', ['-C', seedDir, 'add', '-A'])
+      spawnSync('git', ['-C', seedDir, 'commit', '-q', '-m', 'seed with key'])
+      spawnSync('git', ['-C', seedDir, 'tag', 'leaked'])
+      spawnSync('git', ['-C', seedDir, 'push', '-q', remoteGitDir, 'refs/tags/leaked'])
+      expect(remoteObjectsMatching(remoteGitDir, '.neutron-aes-key').length).toBeGreaterThan(0)
+
+      // A clean local backup repo (no key anywhere) pushing to that remote.
+      writeFileSync(join(dataDir, 'project.db'), 'db-v1\n')
+      const res = runBackup(dataDir, { extraEnv: { NEUTRON_BACKUP_REMOTE: remoteGitDir } })
+
+      const remoteHasKey = remoteObjectsMatching(remoteGitDir, '.neutron-aes-key').length > 0
+      if (res.status === 0) {
+        // If the tool reported success, the remote MUST be clean on every ref.
+        expect(remoteHasKey).toBe(false)
+      } else {
+        // Otherwise it must have FAILED CLOSED with remediation naming the ref,
+        // and never printed the "verified … NO ref" success line.
+        expect(res.stderr).toContain('refusing to report the backup clean')
+        expect(res.stderr).toContain('refs/tags/leaked')
+        expect(res.stdout).not.toContain('carries .neutron-aes-key on NO ref')
+      }
+    } finally {
+      rmSync(dataDir, { recursive: true, force: true })
+      rmSync(remoteDir, { recursive: true, force: true })
+      rmSync(seedDir, { recursive: true, force: true })
+    }
+  })
 })
