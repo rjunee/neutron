@@ -76,7 +76,7 @@ export function wireSubstrates(ctx: OpenWiringContext): WiredSubstrates {
     openaiRequested &&
     ctx.openaiLlmPool !== null &&
     ctx.openaiLlmPool !== undefined &&
-    ctx.mcpResolver !== undefined
+    ctx.bindMcpResolver !== undefined
   const conversationalProvider: Partial<BuildLlmCallSubstrateInput> = openaiRequested
     ? {
         // ALWAYS set provider='openai' for an explicit selection. When fully wired
@@ -87,7 +87,7 @@ export function wireSubstrates(ctx: OpenWiringContext): WiredSubstrates {
           ? {
               openai: {
                 pool: ctx.openaiLlmPool!,
-                mcpResolver: ctx.mcpResolver!,
+                bindMcpResolver: ctx.bindMcpResolver!,
                 model_preference: getOpenAiModelPreference(),
                 // HONEST TOOL MANIFEST (audit BLOCKER 1) — only real MCP tools reach GPT.
                 ...(ctx.toolManifest !== undefined ? { toolManifest: ctx.toolManifest } : {}),

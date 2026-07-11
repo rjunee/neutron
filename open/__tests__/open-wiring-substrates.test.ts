@@ -22,6 +22,7 @@ import type { AgentSpec, Substrate } from '@neutronai/runtime/substrate.ts'
 import type { SessionHandle } from '@neutronai/runtime/session-handle.ts'
 import type { Event } from '@neutronai/runtime/events.ts'
 import type { ClaudeCodeSubstrateOptions } from '@neutronai/runtime/adapters/claude-code/index.ts'
+import { replToolBridgeRef } from '@neutronai/runtime/adapters/claude-code/persistent/pool-state.ts'
 import type { OpenWiringContext } from '../wiring/context.ts'
 import { wireSubstrates } from '../wiring/substrates.ts'
 import {
@@ -155,7 +156,7 @@ describe('wireSubstrates — swappable provider (trident stays Claude Code)', ()
         strategy: 'fill_first',
         credentials: [{ id: 'openai:k', kind: 'api_key', secret: 'sk-openai' }],
       }),
-      mcpResolver: async () => ({}),
+      bindMcpResolver: () => async () => ({}),
     }
   }
 
@@ -206,7 +207,7 @@ describe('wireSubstrates — swappable provider (trident stays Claude Code)', ()
     // An EXPLICIT openai selection must be honored even when incomplete — routing
     // the operator's prompts to Anthropic (the unselected provider) is the exact
     // silent-fallback bug this guards against (audit High).
-    const { ctx, captured } = makeCtx({ provider: 'openai', openaiLlmPool: null, mcpResolver: async () => ({}) })
+    const { ctx, captured } = makeCtx({ provider: 'openai', openaiLlmPool: null, bindMcpResolver: () => async () => ({}) })
     const w = wireSubstrates(ctx)
     expect(w.liveAgentSubstrate).not.toBeNull()
     // Draining yields a LOUD terminal error and NEVER dispatches through the CC
@@ -240,9 +241,58 @@ describe('open composer — swappable provider boot helpers', () => {
     expect(pool!.credentials[0]!.secret).toBe('sk-o')
   })
 
-  test('buildOpenAiMcpResolver throws loudly when the tool bridge is not yet wired', async () => {
-    const resolver = buildOpenAiMcpResolver()
+  test('buildOpenAiMcpResolver: the project-bound resolver throws loudly when the tool bridge is not yet wired', async () => {
+    const resolver = buildOpenAiMcpResolver()({ project_id: 'proj-x' })
     await expect(resolver({ call_id: 'c', tool_name: 't', args: {} })).rejects.toThrow(/tool bridge not wired/i)
+  })
+
+  test('PROJECT SCOPING (audit High): the bound resolver forwards project_id to ReplToolBridge.dispatch', async () => {
+    // The production defect: a project-scoped tool (work_board_*, dispatch, …)
+    // invoked from a GPT turn must reach ReplToolBridge.dispatch WITH the active
+    // project_id — exactly like the Claude path threads it. Assert the DISPATCHED
+    // context carries the bound project.
+    const dispatched: Array<{ tool_name: string; project_id: string | null | undefined }> = []
+    const prev = replToolBridgeRef.current
+    replToolBridgeRef.current = {
+      listToolSchemas: () => [{ name: 'work_board_add', description: 'x', input_schema: { type: 'object' } }],
+      dispatch: async (input: {
+        tool_name: string
+        args: unknown
+        call_id: string
+        project_id?: string | null
+      }) => {
+        dispatched.push({ tool_name: input.tool_name, project_id: input.project_id })
+        return { ok: true }
+      },
+    }
+    try {
+      const resolver = buildOpenAiMcpResolver()({ project_id: 'proj-77' })
+      await resolver({ call_id: 'c1', tool_name: 'work_board_add', args: { title: 't' } })
+      expect(dispatched).toHaveLength(1)
+      expect(dispatched[0]!.tool_name).toBe('work_board_add')
+      expect(dispatched[0]!.project_id).toBe('proj-77')
+    } finally {
+      replToolBridgeRef.current = prev
+    }
+  })
+
+  test('PROJECT SCOPING: an ABSENT project binds to null (General/default scope), matching the CC sink fallback', async () => {
+    const dispatched: Array<{ project_id: string | null | undefined }> = []
+    const prev = replToolBridgeRef.current
+    replToolBridgeRef.current = {
+      listToolSchemas: () => [],
+      dispatch: async (input: { project_id?: string | null }) => {
+        dispatched.push({ project_id: input.project_id })
+        return {}
+      },
+    }
+    try {
+      const resolver = buildOpenAiMcpResolver()({}) // no project_id
+      await resolver({ call_id: 'c', tool_name: 't', args: {} })
+      expect(dispatched[0]!.project_id).toBeNull()
+    } finally {
+      replToolBridgeRef.current = prev
+    }
   })
 })
 
@@ -274,7 +324,7 @@ describe('resolveOpenConversationalProvider — every declared value dispatches 
     expect(ctx.provider).toBe('openai')
     expect(ctx.openaiLlmPool).not.toBeNull()
     expect(ctx.openaiLlmPool).toBeDefined()
-    expect(typeof ctx.mcpResolver).toBe('function')
+    expect(typeof ctx.bindMcpResolver).toBe('function')
     expect(typeof ctx.toolManifest).toBe('function')
   })
 

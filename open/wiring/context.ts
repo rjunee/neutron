@@ -71,11 +71,13 @@ export interface OpenWiringContext {
    */
   openaiLlmPool?: CredentialPool | null
   /**
-   * MCP tool resolver for the OpenAI-family conversational substrate (so tools
-   * work in `internal` mode). Late-bound to the same in-process McpServer the CC
-   * tool bridge uses. Required alongside `provider === 'openai'`.
+   * PROJECT-BOUND MCP resolver factory for the OpenAI-family conversational
+   * substrate (so tools work in `internal` mode WITH the correct project scope).
+   * The composer calls it per turn with the active `project_id`; late-bound to the
+   * same in-process McpServer the CC tool bridge uses. Required alongside
+   * `provider === 'openai'`.
    */
-  mcpResolver?: McpToolResolver
+  bindMcpResolver?: (bind: { project_id?: string }) => McpToolResolver
   /**
    * HONEST TOOL MANIFEST for the OpenAI path — returns only the real
    * MCP-registered tools (never Claude-native built-ins), so the GPT adapter

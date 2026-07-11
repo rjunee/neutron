@@ -242,6 +242,11 @@ export function buildImportSubstrate(
           spec,
           substrate_instance_id: input.substrate_instance_id,
           config: input.openai,
+          // Import is a stateless one-shot (no continuity ledger); still bind the
+          // per-chunk project scope for tool dispatch.
+          ...(spec.metering_context?.project_id !== undefined
+            ? { projectId: spec.metering_context.project_id }
+            : {}),
         })
       }
       // S13 (2026-05-16) — single async-generator that:

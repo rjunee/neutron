@@ -437,16 +437,28 @@ export function resolveOpenModelProvider(env: NodeJS.ProcessEnv): Provider {
  * that + a live-key smoke are the documented follow-up. For pure-text turns this
  * resolver is never invoked (GPT emits no tool calls without `spec.tools`).
  */
-export function buildOpenAiMcpResolver(): McpToolResolver {
-  return async (call: { call_id: string; tool_name: string; args: unknown }): Promise<unknown> => {
-    const bridge = replToolBridgeRef.current
-    if (bridge === undefined) {
-      throw new Error(
-        'openai provider: MCP tool bridge not wired yet (graph not composed) — tool call cannot be resolved',
-      )
+export function buildOpenAiMcpResolver(): (bind: { project_id?: string }) => McpToolResolver {
+  // PROJECT SCOPING (audit High) — a project-BOUND factory. The composer calls it
+  // per turn with the active `project_id`; the returned resolver closes over it and
+  // forwards it to `ReplToolBridge.dispatch`, so project-scoped tools (work_board_*,
+  // dispatch, …) bind to the correct project — exactly like the Claude path threads
+  // ReplSession.projectId → McpServer.dispatch({project_id}). Absent project → null
+  // (the General/default scope), matching the CC sink's fallback.
+  return (bind: { project_id?: string }): McpToolResolver =>
+    async (call: { call_id: string; tool_name: string; args: unknown }): Promise<unknown> => {
+      const bridge = replToolBridgeRef.current
+      if (bridge === undefined) {
+        throw new Error(
+          'openai provider: MCP tool bridge not wired yet (graph not composed) — tool call cannot be resolved',
+        )
+      }
+      return bridge.dispatch({
+        tool_name: call.tool_name,
+        args: call.args,
+        call_id: call.call_id,
+        project_id: bind.project_id ?? null,
+      })
     }
-    return bridge.dispatch({ tool_name: call.tool_name, args: call.args, call_id: call.call_id })
-  }
 }
 
 /**
@@ -469,7 +481,7 @@ export function buildOpenAiToolManifest(): () => ReadonlyArray<{
 /** Deps for {@link resolveOpenConversationalProvider} (injected for testing). */
 export interface OpenConversationalProviderDeps {
   resolveOpenAiPool: (env: NodeJS.ProcessEnv) => CredentialPool | null
-  buildMcpResolver: () => McpToolResolver
+  buildMcpResolver: () => (bind: { project_id?: string }) => McpToolResolver
   buildToolManifest: () => () => ReadonlyArray<{ name: string; description: string; input_schema: unknown }>
 }
 
@@ -494,7 +506,7 @@ export interface OpenConversationalProviderDeps {
 export function resolveOpenConversationalProvider(
   env: NodeJS.ProcessEnv,
   deps: OpenConversationalProviderDeps,
-): Pick<OpenWiringContext, 'provider' | 'openaiLlmPool' | 'mcpResolver' | 'toolManifest'> {
+): Pick<OpenWiringContext, 'provider' | 'openaiLlmPool' | 'bindMcpResolver' | 'toolManifest'> {
   const provider = resolveOpenModelProvider(env)
   if (provider === 'anthropic') return {}
   if (provider === 'openai') {
@@ -507,7 +519,7 @@ export function resolveOpenConversationalProvider(
       return {
         provider: 'openai',
         openaiLlmPool: pool,
-        mcpResolver: deps.buildMcpResolver(),
+        bindMcpResolver: deps.buildMcpResolver(),
         toolManifest: deps.buildToolManifest(),
       }
     }

@@ -161,7 +161,7 @@ test('provider unset ⇒ BYTE-IDENTICAL anthropic path (CC factory + option bag)
     user_id: 'owner',
     substrateFactory: cc.substrateFactory,
     // openai config PRESENT but must be ignored when provider is unset:
-    openai: { pool: openaiPool(), mcpResolver: async () => ({}), fetchImpl: gptFetch() },
+    openai: { pool: openaiPool(), bindMcpResolver: () => async () => ({}), fetchImpl: gptFetch() },
   })!
   const events = await drain(sub.start(spec()))
   expect(events.at(-1)?.kind).toBe('completion')
@@ -200,7 +200,7 @@ test("provider='openai' ⇒ routes through the gpt adapter, remaps model_prefere
     provider: 'openai',
     openai: {
       pool,
-      mcpResolver: async () => ({}),
+      bindMcpResolver: () => async () => ({}),
       model_preference: ['gpt-5.6'],
       fetchImpl: gptFetch(),
     },
@@ -230,7 +230,7 @@ test("provider='openai' but no openai config ⇒ LOUD terminal error (no silent 
   }
 })
 
-test("provider='openai' but missing mcpResolver ⇒ LOUD terminal error", async () => {
+test("provider='openai' but missing bindMcpResolver ⇒ LOUD terminal error", async () => {
   const sub = buildLlmCallSubstrate({
     pool: anthropicPool(),
     substrate_instance_id: 'gpt-agent',
@@ -240,7 +240,7 @@ test("provider='openai' but missing mcpResolver ⇒ LOUD terminal error", async 
   const events = await drain(sub.start(spec()))
   const e = events[0]!
   expect(e.kind).toBe('error')
-  if (e.kind === 'error') expect(e.message).toMatch(/requires an mcpResolver/i)
+  if (e.kind === 'error') expect(e.message).toMatch(/requires a bindMcpResolver/i)
 })
 
 test("provider='openai' with empty OpenAI pool ⇒ terminal error", async () => {
@@ -250,7 +250,7 @@ test("provider='openai' with empty OpenAI pool ⇒ terminal error", async () => 
     provider: 'openai',
     openai: {
       resolvePool: async () => null,
-      mcpResolver: async () => ({}),
+      bindMcpResolver: () => async () => ({}),
       model_preference: ['gpt-5.6'],
     },
   })!
@@ -269,7 +269,7 @@ test('CONTINUITY: turn 2 threads turn 1 completion session as previous_response_
     user_id: 'owner',
     openai: {
       pool: openaiPool(),
-      mcpResolver: async () => ({}),
+      bindMcpResolver: () => async () => ({}),
       model_preference: ['gpt-5.6'],
       fetchImpl: rec.fetchImpl,
     },
@@ -294,7 +294,7 @@ test('CONTINUITY: distinct projects keep SEPARATE upstream sessions (no cross-pr
     projectIdResolver: () => project,
     openai: {
       pool: openaiPool(),
-      mcpResolver: async () => ({}),
+      bindMcpResolver: () => async () => ({}),
       model_preference: ['gpt-5.6'],
       fetchImpl: rec.fetchImpl,
     },
@@ -313,7 +313,7 @@ test('per-turn providerResolver flips backend between dispatches (per-project gr
     substrate_instance_id: 'switch',
     providerResolver: () => provider,
     substrateFactory: cc.substrateFactory,
-    openai: { pool: openaiPool(), mcpResolver: async () => ({}), model_preference: ['gpt-5.6'], fetchImpl: gptFetch() },
+    openai: { pool: openaiPool(), bindMcpResolver: () => async () => ({}), model_preference: ['gpt-5.6'], fetchImpl: gptFetch() },
   })!
   // Turn 1 — anthropic: hits the CC fake factory.
   await drain(sub.start(spec()))
@@ -337,7 +337,7 @@ function openaiSub(pool: CredentialPool, fetchImpl: typeof fetch, extra: Record<
     substrate_instance_id: 'gpt-boundary',
     provider: 'openai',
     user_id: 'owner',
-    openai: { pool, mcpResolver: async () => ({}), model_preference: ['gpt-5.6'], fetchImpl, ...extra },
+    openai: { pool, bindMcpResolver: () => async () => ({}), model_preference: ['gpt-5.6'], fetchImpl, ...extra },
   })!
 }
 
@@ -383,7 +383,7 @@ test('BOUNDARY model exhaustion (429 on ALL models) → still cools the credenti
     user_id: 'owner',
     openai: {
       pool,
-      mcpResolver: async () => ({}),
+      bindMcpResolver: () => async () => ({}),
       model_preference: ['gpt-5.6', 'gpt-5.5'],
       fetchImpl: httpErrorFetch(429, { retryAfterSec: 3 }),
     },
@@ -424,10 +424,11 @@ test('BOUNDARY success → reportSuccess clears a stale (past) cooldown on the s
   expect(pool.credentials[0]!.cooldown_reason).toBeUndefined()
 })
 
-test('BOUNDARY tool round-trip → an advertised MCP tool actually EXECUTES via the resolver', async () => {
+test('BOUNDARY tool round-trip → an advertised MCP tool EXECUTES via the resolver WITH the active project scope (audit High)', async () => {
   // 1st upstream call streams a function_call; the shim resolves it via the
-  // mcpResolver; 2nd call streams the completion. Proves an advertised tool runs.
-  const resolverCalls: Array<{ tool_name: string; args: unknown }> = []
+  // mcpResolver; 2nd call streams the completion. Proves an advertised tool runs
+  // AND that the DISPATCHED tool carries the turn's active project_id.
+  const resolverCalls: Array<{ tool_name: string; args: unknown; project_id: string | undefined }> = []
   let call = 0
   const fetchImpl = (async (_url: string | URL, init?: RequestInit) => {
     call++
@@ -461,9 +462,16 @@ test('BOUNDARY tool round-trip → an advertised MCP tool actually EXECUTES via 
     substrate_instance_id: 'gpt-tool',
     provider: 'openai',
     user_id: 'owner',
+    // The active project for THIS turn — must reach the dispatched tool.
+    projectIdResolver: () => 'proj-42',
     openai: {
       pool: openaiPool(),
-      mcpResolver: async (c) => { resolverCalls.push({ tool_name: c.tool_name, args: c.args }); return { hits: 1 } },
+      // The factory is called per turn with the active project; the returned
+      // resolver closes over it and records what reaches dispatch.
+      bindMcpResolver: (bind) => async (c) => {
+        resolverCalls.push({ tool_name: c.tool_name, args: c.args, project_id: bind.project_id })
+        return { hits: 1 }
+      },
       model_preference: ['gpt-5.6'],
       toolManifest: () => [{ name: 'search_docs', description: 'search', input_schema: { type: 'object' } }],
       fetchImpl,
@@ -472,6 +480,8 @@ test('BOUNDARY tool round-trip → an advertised MCP tool actually EXECUTES via 
   const events = await drain(sub.start(spec()))
   expect(resolverCalls).toHaveLength(1)
   expect(resolverCalls[0]!.tool_name).toBe('search_docs')
+  // PROJECT SCOPING — the dispatched tool bound to the turn's active project.
+  expect(resolverCalls[0]!.project_id).toBe('proj-42')
   expect(events.some((e) => e.kind === 'completion')).toBe(true)
 })
 
@@ -488,7 +498,7 @@ test('HONEST MANIFEST → GPT is advertised ONLY the MCP tools, never Claude-nat
     user_id: 'owner',
     openai: {
       pool: openaiPool(),
-      mcpResolver: async () => ({}),
+      bindMcpResolver: () => async () => ({}),
       model_preference: ['gpt-5.6'],
       toolManifest: () => [{ name: 'search_docs', description: 'search', input_schema: { type: 'object' } }],
       fetchImpl: rec.fetchImpl,
@@ -527,7 +537,7 @@ test('BOUNDARY streamed 429 (SSE rate_limit_exceeded, message lacks "429") → c
     user_id: 'owner',
     openai: {
       pool,
-      mcpResolver: async () => ({}),
+      bindMcpResolver: () => async () => ({}),
       model_preference: ['gpt-5.6', 'gpt-5.5'],
       // Small retry-after so the adapter's inter-rotation sleep stays short; the
       // point is that the parsed retry_after (NOT the default 429 window) drives
@@ -555,7 +565,7 @@ test('BOUNDARY streamed insufficient_quota → cools with billing_402', async ()
     user_id: 'owner',
     openai: {
       pool,
-      mcpResolver: async () => ({}),
+      bindMcpResolver: () => async () => ({}),
       model_preference: ['gpt-5.6', 'gpt-5.5'],
       fetchImpl: streamedErrorFetch('insufficient_quota', 'You exceeded your current quota'),
     },
@@ -573,7 +583,7 @@ test('BOUNDARY streamed auth error → cools with auth_401', async () => {
     user_id: 'owner',
     openai: {
       pool,
-      mcpResolver: async () => ({}),
+      bindMcpResolver: () => async () => ({}),
       model_preference: ['gpt-5.6'],
       fetchImpl: streamedErrorFetch('invalid_api_key', 'Incorrect API key provided'),
     },
@@ -591,7 +601,7 @@ test('BOUNDARY streamed server_error → NOT cooled (upstream fault, not credent
     user_id: 'owner',
     openai: {
       pool,
-      mcpResolver: async () => ({}),
+      bindMcpResolver: () => async () => ({}),
       model_preference: ['gpt-5.6', 'gpt-5.5'],
       fetchImpl: streamedErrorFetch('server_error', 'The server had an error'),
     },
@@ -613,7 +623,7 @@ test('SETUP GUARD: resolvePool throw → terminal error event (iterator does NOT
     user_id: 'owner',
     openai: {
       resolvePool: async () => { throw new Error('vault unavailable') },
-      mcpResolver: async () => ({}),
+      bindMcpResolver: () => async () => ({}),
       model_preference: ['gpt-5.6'],
     },
   })!
@@ -635,7 +645,7 @@ test('SETUP GUARD: toolManifest throw → terminal error event', async () => {
     user_id: 'owner',
     openai: {
       pool: openaiPool(),
-      mcpResolver: async () => ({}),
+      bindMcpResolver: () => async () => ({}),
       model_preference: ['gpt-5.6'],
       toolManifest: () => { throw new Error('manifest boom') },
       fetchImpl: gptFetch(),
@@ -661,7 +671,7 @@ test('SETUP GUARD: adapter start() throw (auth failure) → terminal error event
     user_id: 'owner',
     openai: {
       pool: emptySecretPool,
-      mcpResolver: async () => ({}),
+      bindMcpResolver: () => async () => ({}),
       model_preference: ['gpt-5.6'],
       env: {}, // no OPENAI_API_KEY fallback → auth resolution throws
     },

@@ -438,12 +438,16 @@ export interface OpenAiFamilyProviderConfig {
   /** Lazy OpenAI credential pool — re-run per `start()` (mirrors `resolvePool`). */
   resolvePool?: () => Promise<CredentialPool | null>
   /**
-   * Per-instance MCP tool resolver threaded into the gpt-5-5-api adapter so
-   * tools work in `internal` mode. Production passes `mcpServer.resolveBound(ctx)`
-   * (`resolveBound` IS an `McpToolResolver`). REQUIRED for `'openai'`; the
-   * codex-cli adapter resolves MCP tools server-side and ignores it.
+   * PROJECT-BOUND MCP resolver FACTORY (audit High — project scoping). The GPT
+   * adapter's `McpToolResolver` receives only `{call_id,tool_name,args}`, but the
+   * `ReplToolBridge.dispatch` needs the originating `project_id` to bind
+   * project-scoped tools (work_board_*, dispatch, …) — exactly like the Claude
+   * path threads `ReplSession.projectId → McpServer.dispatch({project_id})`. The
+   * composer calls this factory PER TURN with the active project, so the returned
+   * resolver closes over the right `project_id`. Mirrors `mcpServer.resolveBound(ctx)`.
+   * REQUIRED for `'openai'`; the codex-cli adapter resolves MCP tools server-side.
    */
-  mcpResolver?: McpToolResolver
+  bindMcpResolver?: (bind: { project_id?: string }) => McpToolResolver
   /**
    * HONEST TOOL MANIFEST (audit BLOCKER 1). The conversational `spec.tools`
    * carries Claude-Code NATIVE tool names (`Read`, `Write`, `Bash`, `Skill`,
@@ -546,6 +550,7 @@ export function buildLlmCallSubstrate(
           config: input.openai,
           sessionLedger: openaiSessions,
           sessionKey,
+          projectId,
         })
       }
       let innerHandle: SessionHandle | null = null
@@ -791,8 +796,11 @@ export function startOpenAiFamilySession(args: {
   sessionLedger?: OpenAiSessionLedger
   /** Conversation key into `sessionLedger` (e.g. `${user}:${project}`). */
   sessionKey?: string
+  /** Active project id for THIS turn — bound into the MCP resolver so
+   *  project-scoped tools dispatch with the correct scope (audit High). */
+  projectId?: string
 }): SessionHandle {
-  const { provider, spec, substrate_instance_id, config, sessionLedger, sessionKey } = args
+  const { provider, spec, substrate_instance_id, config, sessionLedger, sessionKey, projectId } = args
   let innerHandle: SessionHandle | null = null
   let cancelled = false
   const events = (async function* (): AsyncGenerator<Event, void, void> {
@@ -816,12 +824,12 @@ export function startOpenAiFamilySession(args: {
       }
       return
     }
-    if (provider === 'openai' && config.mcpResolver === undefined) {
+    if (provider === 'openai' && config.bindMcpResolver === undefined) {
       yield {
         kind: 'error',
         message:
-          "model provider 'openai' requires an mcpResolver so tools work in " +
-          'internal mode (production passes mcpServer.resolveBound(ctx)); none was wired.',
+          "model provider 'openai' requires a bindMcpResolver so tools work in " +
+          'internal mode (production passes a project-bound mcpServer.resolveBound(ctx)); none was wired.',
         retryable: false,
       }
       return
@@ -908,8 +916,13 @@ export function startOpenAiFamilySession(args: {
       const opts: GptResponsesApiSubstrateOptions = {
         substrate_instance_id,
         api_key: cred.secret,
-        // Guarded above: mcpResolver is defined for 'openai'.
-        mcpResolver: config.mcpResolver as McpToolResolver,
+        // PROJECT SCOPING (audit High) — bind the resolver to THIS turn's active
+        // project so project-scoped tools (work_board_*, dispatch, …) dispatch with
+        // the correct `project_id`, mirroring the Claude path. Guarded above:
+        // bindMcpResolver is defined for 'openai'.
+        mcpResolver: (config.bindMcpResolver as (bind: { project_id?: string }) => McpToolResolver)(
+          projectId !== undefined ? { project_id: projectId } : {},
+        ),
       }
       if (config.env !== undefined) opts.env = config.env
       if (config.endpoint !== undefined) opts.endpoint = config.endpoint
