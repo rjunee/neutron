@@ -249,6 +249,68 @@ describe('repl-registry — corruption on the mutation path is loud and recovera
     expect(sidecarsFor(path)).toEqual([])
   })
 
+  it('a caller-supplied onCorrupt is ADDITIVE — it cannot silently disable the mandatory default log + sidecar', () => {
+    const path = tmpRegistry()
+    upsertRecord(path, rec({ sessionKey: 'k' }))
+    writeFileSync(path, 'not even json')
+
+    const originalConsoleError = console.error
+    const logs: unknown[][] = []
+    console.error = (...args: unknown[]) => logs.push(args)
+    let customFired: { reason: string; hadRawContents: boolean } | undefined
+    try {
+      // A caller passing its OWN onCorrupt (e.g. project-specific alerting, or
+      // — as here — a test wanting to also observe the event) must NOT be a
+      // way to opt out of the built-in safety net. Note this handler does
+      // NOT itself sidecar or log — if the default were skipped, there would
+      // be zero recovery trail.
+      patchRecord(path, 'k', { pid: 1 }, {
+        onCorrupt: (reason, rawContents) => {
+          customFired = { reason, hadRawContents: rawContents !== undefined }
+        },
+      })
+    } finally {
+      console.error = originalConsoleError
+    }
+
+    // The custom callback DID fire...
+    expect(customFired?.reason).toContain('json-parse-error')
+    expect(customFired?.hadRawContents).toBe(true)
+    // ...but so did the mandatory default: loud log AND a sidecar file exist,
+    // exactly as if no custom onCorrupt had been supplied at all.
+    expect(logs.some((l) => String(l[0]).includes('CORRUPT registry'))).toBe(true)
+    const sidecars = sidecarsFor(path)
+    expect(sidecars.length).toBe(1)
+    expect(readFileSync(join(dirname(path), sidecars[0] as string), 'utf8')).toBe('not even json')
+  })
+
+  it('a caller-supplied onDropRow is ADDITIVE — it cannot silently disable the mandatory default log + sidecar', () => {
+    const path = tmpRegistry()
+    const raw = JSON.stringify({
+      good: rec({ sessionKey: 'good' }),
+      stale: { sessionKey: 'stale' }, // missing required fields
+    })
+    writeFileSync(path, raw)
+
+    const originalConsoleError = console.error
+    const logs: unknown[][] = []
+    console.error = (...args: unknown[]) => logs.push(args)
+    const customCalls: string[] = []
+    try {
+      patchRecord(path, 'good', { pid: 1 }, {
+        onDropRow: (key) => customCalls.push(key),
+      })
+    } finally {
+      console.error = originalConsoleError
+    }
+
+    expect(customCalls).toEqual(['stale'])
+    expect(logs.some((l) => String(l[0]).includes('dropping row sessionKey=stale'))).toBe(true)
+    const sidecars = sidecarsFor(path)
+    expect(sidecars.length).toBe(1)
+    expect(readFileSync(join(dirname(path), sidecars[0] as string), 'utf8')).toBe(raw)
+  })
+
   it('a single malformed row (schema skew, not whole-file corruption) is ALSO sidecar-preserved before it is dropped for good', () => {
     const path = tmpRegistry()
     // Two good rows + one row an older/newer build wrote with a missing field

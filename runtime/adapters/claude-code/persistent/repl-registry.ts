@@ -292,13 +292,17 @@ function defaultDropRowHandler(path: string): (key: string, raw: unknown, rawCon
 
 /** Options accepted by `withRegistry` and the mutation helpers built on it. */
 export interface WithRegistryOptions {
-  /** Called (instead of the loud default) when the on-disk registry is
-   *  corrupt/unreadable. See `defaultCorruptHandler` for what the default
-   *  does. Pass this to override in tests or to add project-specific alerting
-   *  — NOT to silence corruption, which must always be observable. */
+  /** Called IN ADDITION to (never instead of) the mandatory default —
+   *  `defaultCorruptHandler`'s loud log + best-effort sidecar ALWAYS run
+   *  first, unconditionally, on every corruption event. This is purely an
+   *  extra side-channel notification hook (tests observing that corruption
+   *  fired; a caller wanting its own additional alerting) — there is
+   *  deliberately no way to pass an option that SILENCES or REPLACES the
+   *  default, because corruption recovery must never be optional. */
   onCorrupt?: (reason: string, rawContents?: string) => void
-  /** Called (instead of the loud default) per row dropped for failing the
-   *  schema check. See `defaultDropRowHandler`. */
+  /** Called IN ADDITION to (never instead of) the mandatory default —
+   *  `defaultDropRowHandler`'s loud log + best-effort sidecar. Same
+   *  additive-only contract as `onCorrupt`. */
   onDropRow?: (key: string, raw: unknown, rawContents: string) => void
 }
 
@@ -310,16 +314,27 @@ export interface WithRegistryOptions {
  * (e.g. "did I win the in-flight claim?").
  *
  * Corruption never aborts the mutation (boot resilience — a corrupt registry
- * must not brick the gateway) but is always LOUD: see `defaultCorruptHandler`
- * / `defaultDropRowHandler`, both overridable via `options`.
+ * must not brick the gateway) but is always LOUD: `defaultCorruptHandler` /
+ * `defaultDropRowHandler` run UNCONDITIONALLY on every corruption/drop event;
+ * `options.onCorrupt` / `options.onDropRow`, if given, run in ADDITION —
+ * never as a replacement (Codex r3: a caller-supplied callback must not be
+ * able to silently disable the sidecar safety net).
  */
 export function withRegistry<T>(
   path: string,
   mutate: (registry: ReplRegistry) => { registry: ReplRegistry; result: T },
   options: WithRegistryOptions = {},
 ): T {
-  const onCorrupt = options.onCorrupt ?? defaultCorruptHandler(path)
-  const onDropRow = options.onDropRow ?? defaultDropRowHandler(path)
+  const mandatoryOnCorrupt = defaultCorruptHandler(path)
+  const mandatoryOnDropRow = defaultDropRowHandler(path)
+  const onCorrupt = (reason: string, rawContents?: string): void => {
+    mandatoryOnCorrupt(reason, rawContents)
+    options.onCorrupt?.(reason, rawContents)
+  }
+  const onDropRow = (key: string, raw: unknown, rawContents: string): void => {
+    mandatoryOnDropRow(key, raw, rawContents)
+    options.onDropRow?.(key, raw, rawContents)
+  }
   return withFlockSync(registryLockPath(path), () => {
     const current = loadRegistry(path, onCorrupt, onDropRow)
     const { registry, result } = mutate(current)
