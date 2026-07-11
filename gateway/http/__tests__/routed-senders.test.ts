@@ -5,7 +5,11 @@
  */
 
 import { describe, expect, test } from 'bun:test'
-import { buildRoutedSendButtonPrompt } from '../routed-senders.ts'
+import {
+  buildRoutedSendButtonPrompt,
+  buildRoutedSendImportProgress,
+  type SendImportProgressArgs,
+} from '../routed-senders.ts'
 import { InMemoryWebChatSenderRegistry } from '../chat-sender-registry.ts'
 import type { ButtonPrompt } from '@neutronai/channels/button-primitive.ts'
 import type { ChatOutbound } from '@neutronai/landing/chat-protocol.ts'
@@ -45,8 +49,33 @@ describe('buildRoutedSendButtonPrompt', () => {
     const send = buildRoutedSendButtonPrompt({ webRegistry: reg, telegramSender: tg })
     const result = await send({ project_slug: 'alice', topic_id: 'tg:123:5', prompt: samplePrompt })
     expect(calls).toHaveLength(1)
+    // The forwarded request must be threaded through verbatim — a routing
+    // bug that swapped project_slug / topic_id / prompt would pass a
+    // call-count-only assertion. Pin the exact payload incl. the threaded
+    // `tg:123:5` (chat_id:thread_id) topic boundary.
+    expect(calls[0]).toEqual({ project_slug: 'alice', topic_id: 'tg:123:5', prompt: samplePrompt })
     expect(result.was_new).toBe(true)
     expect(result.message_id).toBe('tg-msg-1')
+  })
+  test('routes app:<user> to the composer-supplied app-socket holder + returns its result', async () => {
+    const reg = new InMemoryWebChatSenderRegistry()
+    const calls: Array<{ project_slug: string; topic_id: string; prompt: ButtonPrompt }> = []
+    const appSocketRouter = {
+      send: async (input: { project_slug: string; topic_id: string; prompt: ButtonPrompt }) => {
+        calls.push(input)
+        return { message_id: 'app-msg-1', was_new: true }
+      },
+    }
+    const send = buildRoutedSendButtonPrompt({ webRegistry: reg, appSocketRouter })
+    const result = await send({ project_slug: 'alice', topic_id: 'app:u-1', prompt: samplePrompt })
+    expect(calls).toEqual([{ project_slug: 'alice', topic_id: 'app:u-1', prompt: samplePrompt }])
+    expect(result).toEqual({ message_id: 'app-msg-1', was_new: true })
+  })
+  test('app:<user> with no app-socket holder wired returns was_new=false (engine retries)', async () => {
+    const reg = new InMemoryWebChatSenderRegistry()
+    const send = buildRoutedSendButtonPrompt({ webRegistry: reg })
+    const result = await send({ project_slug: 'alice', topic_id: 'app:u-1', prompt: samplePrompt })
+    expect(result.was_new).toBe(false)
   })
   test('returns was_new=false for unknown topic prefix', async () => {
     const reg = new InMemoryWebChatSenderRegistry()
@@ -105,5 +134,89 @@ describe('buildRoutedSendButtonPrompt', () => {
     expect(all_logs).toContain('options=1')
     expect(all_logs).toMatch(/body_len=\d+/)
     expect(all_logs).toMatch(/body_sha8=[0-9a-f]{8}/)
+  })
+})
+
+describe('buildRoutedSendImportProgress', () => {
+  const sampleEvent: SendImportProgressArgs['event'] = {
+    type: 'import_progress',
+    job_id: 'job-1',
+    status: 'pass1-running',
+    pass: 1,
+    pct: 42.5,
+    chunks_total_known: true,
+  }
+  test('routes web:<user> to the web registry + returns delivered=true with the event forwarded verbatim', async () => {
+    const reg = new InMemoryWebChatSenderRegistry()
+    const received: ChatOutbound[] = []
+    reg.register('web:u-1', (e) => received.push(e))
+    const send = buildRoutedSendImportProgress({ webRegistry: reg })
+    const result = await send({ project_slug: 'alice', topic_id: 'web:u-1', event: sampleEvent })
+    expect(result).toEqual({ delivered: true })
+    // The UI-only import_progress envelope is passed through unmodified.
+    expect(received).toEqual([sampleEvent])
+  })
+  test('returns delivered=false when no web sender is registered', async () => {
+    const reg = new InMemoryWebChatSenderRegistry()
+    const send = buildRoutedSendImportProgress({ webRegistry: reg })
+    const result = await send({ project_slug: 'alice', topic_id: 'web:u-missing', event: sampleEvent })
+    expect(result).toEqual({ delivered: false })
+  })
+  test('routes app:<user> to the composer-supplied holder + returns its result', async () => {
+    const reg = new InMemoryWebChatSenderRegistry()
+    const calls: SendImportProgressArgs[] = []
+    const appSocketRouter = {
+      send: async (input: SendImportProgressArgs) => {
+        calls.push(input)
+        return { delivered: true }
+      },
+    }
+    const send = buildRoutedSendImportProgress({ webRegistry: reg, appSocketRouter })
+    const result = await send({ project_slug: 'alice', topic_id: 'app:u-1', event: sampleEvent })
+    expect(calls).toEqual([{ project_slug: 'alice', topic_id: 'app:u-1', event: sampleEvent }])
+    expect(result).toEqual({ delivered: true })
+  })
+  test('app:<user> with no holder wired drops silently (delivered=false)', async () => {
+    const reg = new InMemoryWebChatSenderRegistry()
+    const send = buildRoutedSendImportProgress({ webRegistry: reg })
+    const result = await send({ project_slug: 'alice', topic_id: 'app:u-1', event: sampleEvent })
+    expect(result).toEqual({ delivered: false })
+  })
+  test('tg:<chat> drops silently — no telegram progress channel (delivered=false, no warn)', async () => {
+    const reg = new InMemoryWebChatSenderRegistry()
+    const warns: string[] = []
+    const orig_warn = console.warn
+    console.warn = (...args: unknown[]) => {
+      warns.push(args.map((a) => (typeof a === 'string' ? a : JSON.stringify(a))).join(' '))
+    }
+    try {
+      const send = buildRoutedSendImportProgress({ webRegistry: reg })
+      const result = await send({ project_slug: 'alice', topic_id: 'tg:123:5', event: sampleEvent })
+      expect(result).toEqual({ delivered: false })
+    } finally {
+      console.warn = orig_warn
+    }
+    // Telegram is a KNOWN silent-drop channel for progress — it must NOT
+    // warn (only genuinely-unknown prefixes warn).
+    expect(warns.join('\n')).not.toContain('event=drop')
+  })
+  test('unknown topic prefix drops with a warn (delivered=false)', async () => {
+    const reg = new InMemoryWebChatSenderRegistry()
+    const warns: string[] = []
+    const orig_warn = console.warn
+    console.warn = (...args: unknown[]) => {
+      warns.push(args.map((a) => (typeof a === 'string' ? a : JSON.stringify(a))).join(' '))
+    }
+    try {
+      const send = buildRoutedSendImportProgress({ webRegistry: reg })
+      const result = await send({ project_slug: 'alice', topic_id: 'cli:123', event: sampleEvent })
+      expect(result).toEqual({ delivered: false })
+    } finally {
+      console.warn = orig_warn
+    }
+    const all_warns = warns.join('\n')
+    expect(all_warns).toContain('event=drop')
+    expect(all_warns).toContain('reason=unknown-channel')
+    expect(all_warns).toContain('job=job-1')
   })
 })
