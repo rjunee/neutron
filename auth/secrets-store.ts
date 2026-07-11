@@ -57,6 +57,53 @@ const IV_LENGTH_BYTES = 12 // GCM standard
 const AUTH_TAG_LENGTH_BYTES = 16
 const KEYFILE_NAME = '.neutron-aes-key'
 
+/**
+ * Every SQLite table whose `ciphertext` column is AES-256-GCM encrypted with
+ * the SHARED `.neutron-aes-key` keyfile. The S3(a) restore guard
+ * (`hasSharedKeyEncryptedRows` → `ensureKey`) treats a restore that carries
+ * ANY of these — rows present, keyfile absent — as a keyless restore and fails
+ * loud, because minting a fresh key would silently orphan those rows forever.
+ *
+ * ⚠️ WHEN YOU ADD A NEW TABLE/COLUMN ENCRYPTED WITH THIS SHARED KEY, ADD IT
+ * HERE. Otherwise a restore carrying only that new table would slip past the
+ * guard, mint a fresh key, and permanently orphan the ciphertext (silent data
+ * loss). Current members:
+ *   - `secrets`             — `auth/secrets-store.ts`, migration 0009. Backs
+ *     bot tokens / OAuth / BYO API keys / webhook secrets; `api_keys` is
+ *     metadata-only and points here via `secret_id`, so it's covered
+ *     transitively.
+ *   - `project_credentials` — `project-credentials/store.ts` (shares this
+ *     module's crypto via `SecretCrypto`), migration 0092. Per-project service
+ *     tokens (Meta/Google Ads, Apify, the Codex OAuth bundle, …).
+ */
+export const SHARED_KEY_ENCRYPTED_TABLES = ['secrets', 'project_credentials'] as const
+
+/**
+ * TRUE when ANY shared-key-encrypted table (`SHARED_KEY_ENCRYPTED_TABLES`) has
+ * ≥1 row. A table this DB's schema does NOT yet have (a database migrated to a
+ * version before that table's migration) is treated as 0 rows — checked via
+ * `sqlite_master` first so the count never errors on a missing table.
+ *
+ * This is the S3(a) restore-detection predicate: rows here + no keyfile ⇒ a
+ * data dir restored from a backup that (correctly) excluded `.neutron-aes-key`.
+ */
+export function hasSharedKeyEncryptedRows(db: Pick<ProjectDb, 'get'>): boolean {
+  for (const table of SHARED_KEY_ENCRYPTED_TABLES) {
+    // Guard: skip a table this DB's schema does not have yet (pre-migration),
+    // so `count(*)` below never hits a "no such table" error.
+    const present = db.get<{ n: number }, [string]>(
+      "SELECT count(*) AS n FROM sqlite_master WHERE type = 'table' AND name = ?",
+      [table],
+    )
+    if (present === null || present.n === 0) continue
+    // Table name is from the hardcoded const list above (never user input), so
+    // the identifier interpolation is injection-safe.
+    const rows = db.get<{ n: number }, []>(`SELECT count(*) AS n FROM "${table}"`, [])
+    if (rows !== null && rows.n > 0) return true
+  }
+  return false
+}
+
 export type SecretKind =
   | 'max_oauth_refresh'
   | 'max_oauth_access'
@@ -165,10 +212,10 @@ export class SecretsStore {
   constructor(options: SecretsStoreOptions) {
     // S3(a): a restored-without-keyfile data dir must fail loud, not silently
     // mint a key that can never decrypt the rows the backup already carried
-    // over. See `ensureKey`'s doc comment.
-    this.key = ensureKey(options.data_dir, () =>
-      options.db.get<{ one: number }, []>('SELECT 1 AS one FROM secrets LIMIT 1', []) !== null,
-    )
+    // over. The check spans EVERY shared-key-encrypted table (`secrets` AND
+    // `project_credentials`, …), not just `secrets` — a restore carrying only
+    // project credentials would otherwise be orphaned. See `ensureKey`'s doc.
+    this.key = ensureKey(options.data_dir, () => hasSharedKeyEncryptedRows(options.db))
     this.db = options.db
     this.now = options.now ?? ((): number => Date.now())
   }
@@ -450,26 +497,28 @@ function decrypt(key: Buffer, envelope: string): string {
  *     already created the keyfile in P1 — overwriting would brick every
  *     existing bot token. See `EncryptedBotTokenStore.ensureKey` in the
  *     legacy per-instance bot token store for the original writer.
- *   - S3(a): if the keyfile is ABSENT but `hasExistingSecrets` reports the
- *     `secrets` table already has rows, this is a data dir restored from a
- *     backup (`neutron-backup.sh` deliberately excludes `.neutron-aes-key`
- *     from the bundle, so a fresh clone of the backup remote never carries
- *     it) that has not yet had its keyfile re-provisioned. Minting a fresh
- *     key here would silently orphan every existing secret — the store would
- *     boot fine and `get()` would just start throwing `decrypt_failed` (or
- *     worse, GCM auth-tag mismatches) the first time something is read. Fail
- *     LOUD instead, with a message that says exactly what to do.
+ *   - S3(a): if the keyfile is ABSENT but `hasExistingEncryptedRows` reports
+ *     that ANY shared-key-encrypted table (`secrets` OR `project_credentials`,
+ *     …) already has rows, this is a data dir restored from a backup
+ *     (`neutron-backup.sh` deliberately excludes `.neutron-aes-key` from the
+ *     bundle, so a fresh clone of the backup remote never carries it) that has
+ *     not yet had its keyfile re-provisioned. Minting a fresh key here would
+ *     silently orphan every one of those encrypted rows — the store would boot
+ *     fine and reads would just start throwing `decrypt_failed` (or worse, GCM
+ *     auth-tag mismatches) the first time something is decrypted. Fail LOUD
+ *     instead, with a message that says exactly what to do.
  *   - Otherwise generate a fresh 32-byte key, write it with mode 0600,
  *     and return the bytes.
  *
- * `hasExistingSecrets` is injected (rather than querying a `ProjectDb`
+ * `hasExistingEncryptedRows` is injected (rather than querying a `ProjectDb`
  * directly) so this stays a pure, easily-testable function; `SecretsStore`'s
- * constructor wires it to a real row-count check.
+ * constructor wires it to `hasSharedKeyEncryptedRows` (which checks EVERY
+ * shared-key table, guarding each with a table-exists check).
  *
  * Exported so `__tests__/secrets-store.test.ts` can assert the legacy
  * keyfile is reused.
  */
-export function ensureKey(data_dir: string, hasExistingSecrets?: () => boolean): Buffer {
+export function ensureKey(data_dir: string, hasExistingEncryptedRows?: () => boolean): Buffer {
   const path = join(data_dir, KEYFILE_NAME)
   if (existsSync(path)) {
     const buf = readFileSync(path)
@@ -488,14 +537,15 @@ export function ensureKey(data_dir: string, hasExistingSecrets?: () => boolean):
     chmodSync(path, 0o600)
     return buf
   }
-  if (hasExistingSecrets?.() === true) {
+  if (hasExistingEncryptedRows?.() === true) {
     throw new SecretsStoreError(
       'key_missing_after_restore',
-      `no AES keyfile at ${path}, but the 'secrets' table already has rows. This data dir ` +
-        `looks restored from a backup — neutron-backup.sh deliberately excludes ` +
-        `${KEYFILE_NAME} from the bundle (S3: secrets-at-rest hygiene), so a fresh clone of ` +
-        `the backup remote never carries it. Minting a new key here would silently make every ` +
-        `existing secret permanently undecryptable. Copy the ORIGINAL ${KEYFILE_NAME} into ` +
+      `no AES keyfile at ${path}, but a shared-key-encrypted table (secrets / ` +
+        `project_credentials) already has rows. This data dir looks restored from a backup — ` +
+        `neutron-backup.sh deliberately excludes ${KEYFILE_NAME} from the bundle (S3: ` +
+        `secrets-at-rest hygiene), so a fresh clone of the backup remote never carries it. ` +
+        `Minting a new key here would silently make every existing secret AND project ` +
+        `credential permanently undecryptable. Copy the ORIGINAL ${KEYFILE_NAME} into ` +
         `${data_dir} before starting the server (it never left the source machine unless you ` +
         `provisioned it separately), then restart.`,
     )

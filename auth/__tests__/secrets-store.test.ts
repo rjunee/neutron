@@ -6,7 +6,13 @@ import { createCipheriv, createDecipheriv } from 'node:crypto'
 import { Database } from 'bun:sqlite'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { applyMigrations } from '@neutronai/migrations/runner.ts'
-import { SecretsStore, SecretsStoreError, ensureKey } from '../secrets-store.ts'
+import {
+  SecretsStore,
+  SecretsStoreError,
+  ensureKey,
+  hasSharedKeyEncryptedRows,
+  SHARED_KEY_ENCRYPTED_TABLES,
+} from '../secrets-store.ts'
 
 /**
  * ISSUES #219 — `EncryptedBotTokenStore` (the P1-S4 legacy bot-token
@@ -282,6 +288,70 @@ test('SecretsStore constructor fails loud on a restored data dir: rows exist, ke
   }
   expect(caught).toBeInstanceOf(SecretsStoreError)
   expect((caught as SecretsStoreError).code).toBe('key_missing_after_restore')
+})
+
+// S3(a) whole-class widening (Codex blocker): `project_credentials` is
+// encrypted with the SAME `.neutron-aes-key`, so a restore carrying ONLY
+// project-credential rows (no `secrets` rows) + no keyfile must ALSO fail loud
+// — otherwise a fresh key is minted and every restored credential is orphaned.
+async function insertProjectCredentialRow(): Promise<void> {
+  // Raw INSERT of a ciphertext row (crypto is irrelevant to the row-count guard).
+  await db.run(
+    `INSERT INTO project_credentials
+       (id, owner_slug, project_id, scope, service, ciphertext, label, created_at, updated_at, expires_at)
+     VALUES (?, ?, '', 'global', 'meta_ads', ?, NULL, ?, ?, NULL)`,
+    [
+      '01JCRED0000000000000000000',
+      'alice',
+      JSON.stringify({ v: 1, iv_b64: 'x', ct_b64: 'y', tag_b64: 'z' }),
+      '2026-07-11T00:00:00Z',
+      '2026-07-11T00:00:00Z',
+    ],
+  )
+}
+
+test('hasSharedKeyEncryptedRows covers secrets AND project_credentials', async () => {
+  // Empty DB → no encrypted rows anywhere.
+  expect(hasSharedKeyEncryptedRows(db)).toBe(false)
+  // A row in project_credentials alone (no secrets) → TRUE.
+  await insertProjectCredentialRow()
+  expect(hasSharedKeyEncryptedRows(db)).toBe(true)
+  // Sanity: the shared-key table list is exactly the two audited ciphertext
+  // tables — if a new one is added, its restore coverage must be added too.
+  expect([...SHARED_KEY_ENCRYPTED_TABLES].sort()).toEqual(['project_credentials', 'secrets'])
+})
+
+test('hasSharedKeyEncryptedRows treats a table absent from the schema as 0 rows (no error)', () => {
+  // A DB with the `secrets` table but WITHOUT `project_credentials` (pre-0092)
+  // must NOT throw on the count — the missing table is skipped, not queried.
+  const raw = new Database(':memory:', { create: true })
+  raw.run('CREATE TABLE secrets (id TEXT PRIMARY KEY, ciphertext TEXT NOT NULL)')
+  // Minimal `Pick<ProjectDb, 'get'>` probe mirroring ProjectDb.get semantics.
+  const probe: Pick<ProjectDb, 'get'> = {
+    get: <R,>(sql: string, params: unknown[] = []): R | null =>
+      (raw.query(sql).get(...(params as never[])) as R | null),
+  }
+  expect(hasSharedKeyEncryptedRows(probe)).toBe(false) // empty secrets, missing table skipped
+  raw.run(`INSERT INTO secrets (id, ciphertext) VALUES ('a', 'ct')`)
+  expect(hasSharedKeyEncryptedRows(probe)).toBe(true) // secrets row present; no crash on missing pc
+  raw.close()
+})
+
+test('SecretsStore constructor fails loud when ONLY project_credentials has rows (no secrets, no keyfile)', async () => {
+  // Restore scenario: the DB carried project_credentials rows back, but the
+  // key (excluded from the backup) and any `secrets` rows are absent.
+  await insertProjectCredentialRow()
+  expect(existsSync(join(dataDir, '.neutron-aes-key'))).toBe(false)
+  let caught: unknown
+  try {
+    buildStore()
+  } catch (err) {
+    caught = err
+  }
+  expect(caught).toBeInstanceOf(SecretsStoreError)
+  expect((caught as SecretsStoreError).code).toBe('key_missing_after_restore')
+  // Fail-closed: no fresh key was minted that could never decrypt the creds.
+  expect(existsSync(join(dataDir, '.neutron-aes-key'))).toBe(false)
 })
 
 // CRITICAL forward-compat regression — see § 0a.1 risk row 1.
