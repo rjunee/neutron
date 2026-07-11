@@ -288,6 +288,66 @@ describe('neutron-backup.sh — AES key excluded from the backup bundle (S3a)', 
     }
   })
 
+  // UPGRADE BOUNDARY (Codex blocker #8) — the scenario the history-purge exists
+  // for: a remote ALREADY POPULATED with the legacy key-bearing branch (not
+  // empty). The local purge rewrites history + the LOCAL origin tracking ref, so
+  // an IMPLICIT --force-with-lease would compare against the just-purged SHA and
+  // wrongly reject the push (leaving the key on the remote under a false
+  // success). The explicit lease against the pre-rewrite remote SHA must make
+  // the force-push LAND. Honest outcome required: EITHER exit 0 with the remote
+  // key-free on every ref, OR a fail-closed abort (nonzero, remediation) — never
+  // exit 0 while the key is still retrievable from the remote.
+  test('upgrade: a remote already populated with the legacy key-bearing branch ends key-free (or fails closed)', () => {
+    const dataDir = mkdtempSync(join(tmpdir(), 'neutron-backup-upgrade-'))
+    const remoteDir = mkdtempSync(join(tmpdir(), 'neutron-backup-remote6-'))
+    const remoteGitDir = join(remoteDir, 'remote.git')
+    try {
+      spawnSync(REAL_GIT, ['init', '--bare', '-q', remoteGitDir])
+
+      const keyBytes = Buffer.alloc(32, 7)
+      writeFileSync(join(dataDir, '.neutron-aes-key'), keyBytes, { mode: 0o600 })
+      writeFileSync(join(dataDir, 'project.db'), 'db-v1\n')
+      writeFileSync(join(dataDir, '.gitignore'), 'logs/\n')
+
+      // Legacy backup repo: commit key+db and PUSH it — the remote branch now
+      // carries the key (the pre-upgrade real-world state).
+      spawnSync('git', ['-C', dataDir, 'init', '-q'])
+      spawnSync('git', ['-C', dataDir, 'config', 'user.email', 'test@localhost'])
+      spawnSync('git', ['-C', dataDir, 'config', 'user.name', 'Test'])
+      spawnSync('git', ['-C', dataDir, 'add', '-A'])
+      spawnSync('git', ['-C', dataDir, 'commit', '-q', '-m', 'legacy: key + db'])
+      const branch = git(dataDir, ['rev-parse', '--abbrev-ref', 'HEAD'])
+      spawnSync('git', ['-C', dataDir, 'push', '-q', remoteGitDir, branch])
+      // Establish an origin + tracking ref, mirroring a real prior-configured install.
+      spawnSync('git', ['-C', dataDir, 'remote', 'add', 'origin', remoteGitDir])
+      spawnSync('git', ['-C', dataDir, 'fetch', '-q', 'origin'])
+      // The remote really is populated with the key up front.
+      expect(remoteObjectsMatching(remoteGitDir, '.neutron-aes-key').length).toBeGreaterThan(0)
+
+      // Now the NEW backup runs against that populated remote.
+      const res = runBackup(dataDir, { extraEnv: { NEUTRON_BACKUP_REMOTE: remoteGitDir } })
+
+      const remoteHasKey = remoteObjectsMatching(remoteGitDir, '.neutron-aes-key').length > 0
+      if (res.status === 0) {
+        // Success claimed → the remote MUST be key-free on every ref, and the db
+        // must still be present.
+        expect(remoteHasKey).toBe(false)
+        expect(remoteCommitsTouching(remoteGitDir, '.neutron-aes-key')).toEqual([])
+        expect(remoteObjectsMatching(remoteGitDir, 'project.db').length).toBeGreaterThan(0)
+      } else {
+        // Otherwise it must have FAILED CLOSED with remediation (the rewrite
+        // push did not land) and never claimed the backup clean.
+        expect(res.stderr).toMatch(/refusing to report the backup clean|history-rewrite push/)
+        expect(res.stdout).not.toContain('carries .neutron-aes-key on NO ref')
+      }
+      // Either way, the local keyfile is intact.
+      expect(readFileSync(join(dataDir, '.neutron-aes-key'))).toEqual(keyBytes)
+    } finally {
+      rmSync(dataDir, { recursive: true, force: true })
+      rmSync(remoteDir, { recursive: true, force: true })
+    }
+  })
+
   // Fail-CLOSED fallback (Codex blocker #5): if NEITHER git-filter-repo nor
   // git-filter-branch is available to purge a key that lives in history, the
   // backup must ABORT with remediation — never push a history still holding the

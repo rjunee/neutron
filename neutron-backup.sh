@@ -356,10 +356,21 @@ do_run() {
   # Offsite push only when a remote is configured. Local history alone is
   # already fully recoverable, so a push failure must never lose the commit.
   if [ -n "$REMOTE" ]; then
-    # S3(a) — purge the key from ALL reachable history BEFORE it can reach the
-    # remote (handles legacy repos that committed it under an older backup
-    # version), then run the AUTHORITATIVE pre-push gate: never push a history
-    # that still contains the key. Both steps fail closed (die) on any doubt.
+    _branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo main)
+    # Capture the REMOTE branch's REAL current SHA (wire truth via ls-remote)
+    # BEFORE any history rewrite. A `filter-branch -- --all` rewrites (and
+    # `filter-repo` drops) the LOCAL refs/remotes/origin/* tracking refs, so an
+    # IMPLICIT `--force-with-lease` would compare against our just-purged SHA
+    # instead of the OLD key-bearing SHA actually on the remote — and wrongly
+    # REJECT the push, leaving the key disclosed. We pin an EXPLICIT lease
+    # against this pre-rewrite value instead. Empty when the branch does not
+    # exist on the remote yet (a fresh remote → a plain create push).
+    _remote_sha_pre=$(git ls-remote "$REMOTE" "refs/heads/$_branch" 2>/dev/null | awk 'NR==1{print $1}')
+
+    # S3(a) — purge the key from ALL reachable LOCAL history BEFORE it can reach
+    # the remote (handles legacy repos that committed it under an older backup
+    # version), then the AUTHORITATIVE pre-push gate: never push a history that
+    # still contains the key. Both steps fail closed (die) on any doubt.
     purge_key_from_history
     if key_reachable_in_history; then
       die "refusing to push: .neutron-aes-key is reachable in history at push time. Aborting so the key can never reach $REMOTE — purge it (git filter-repo --path .neutron-aes-key --invert-paths --force in $DATA_DIR) and re-run."
@@ -370,21 +381,33 @@ do_run() {
     else
       git remote add origin "$REMOTE"
     fi
-    _branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo main)
     # Push ONLY the single backup branch this tool owns — never a wildcard, never
     # --prune, never --tags. The tool must not modify, prune, or clobber any
     # remote ref other than its own branch. A normal push preserves the safe
     # non-fast-forward rejection (so an unexpectedly divergent remote branch is
-    # never silently discarded); a history rewrite legitimately needs force, and
-    # `--force-with-lease` still refuses to clobber an unforeseen remote advance.
+    # never silently discarded); a history rewrite legitimately needs force, but
+    # only via an EXPLICIT lease against the pre-rewrite remote SHA so it refuses
+    # to clobber a genuine concurrent advance.
+    _pushed=0
     if [ "$HISTORY_REWRITTEN" = 1 ]; then
-      _pushed=0
-      git push -q --force-with-lease origin "$_branch" 2>/dev/null && _pushed=1
+      if [ -n "$_remote_sha_pre" ]; then
+        # Replace exactly the old key-bearing history we captured; lease rejects
+        # if the remote advanced to anything else since.
+        git push -q "--force-with-lease=$_branch:$_remote_sha_pre" origin "$_branch" 2>/dev/null && _pushed=1
+      else
+        # Branch absent on the remote → nothing to lease against; a plain create.
+        git push -q origin "$_branch" 2>/dev/null && _pushed=1
+      fi
       if [ "$_pushed" = 1 ]; then
         info "force-pushed purged history to $REMOTE ($_branch)"
+      else
+        # FATAL: the whole POINT of the rewrite was to remove the key from the
+        # remote. If the push did not land, the purged history is NOT on the
+        # remote and .neutron-aes-key may STILL be reachable there — reporting
+        # success would be a FALSE clean. Never downgrade this to a warning.
+        die "refusing to report the backup clean: the history-rewrite push to $REMOTE ($_branch) FAILED, so the purged history did NOT land and .neutron-aes-key may STILL be on the remote. This usually means the remote branch advanced unexpectedly (the --force-with-lease was rejected). Reconcile the remote and re-run — do NOT trust this backup until the push succeeds:  git push --force-with-lease origin $_branch"
       fi
     else
-      _pushed=0
       git push -q origin "$_branch" 2>/dev/null && _pushed=1
       if [ "$_pushed" = 1 ]; then
         info "pushed to $REMOTE ($_branch)"
