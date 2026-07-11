@@ -182,6 +182,24 @@ describe('wireSubstrates — swappable provider (trident stays Claude Code)', ()
     expect(captured.some((o) => o.substrate_instance_id === 'cc-llm-owner')).toBe(false)
   })
 
+  test('OpenAI-ONLY box (llmPool null, openai pool present): conversational substrates are BUILT (Codex blocker fix)', () => {
+    // Repro: NEUTRON_MODEL_PROVIDER=openai + OPENAI_API_KEY, NO Claude credential.
+    // Pre-fix these nulled out because construction gated on the Anthropic llmPool.
+    const { ctx } = makeCtx({ ...openaiCtxOverrides(), llmPool: null })
+    const w = wireSubstrates(ctx)
+    expect(w.llmCallSubstrate).not.toBeNull()
+    expect(w.liveAgentSubstrate).not.toBeNull()
+    // No Anthropic pool → no CC pre-warm fired (openai is stateless HTTP).
+    expect(w.prewarmReady).toBeNull()
+    expect(w.prewarmSettledRef.settled).toBe(true)
+    // Trident stays Claude-Code-ONLY: with no Anthropic pool an autonomous build
+    // cannot run, and the factory throws LOUDLY (never silently no-ops on GPT).
+    expect(() => w.makeWarmFireSubstrate('/repo')).toThrow(/empty Anthropic credential pool/)
+    expect(() => w.makeEphemeralSubstrate('cc-trident')('/repo')).toThrow(
+      /empty Anthropic credential pool/,
+    )
+  })
+
   test('provider=openai but missing openai pool ⇒ conversational config NOT applied (falls back to CC)', async () => {
     const { ctx, captured } = makeCtx({ provider: 'openai', openaiLlmPool: null, mcpResolver: async () => ({}) })
     const w = wireSubstrates(ctx)

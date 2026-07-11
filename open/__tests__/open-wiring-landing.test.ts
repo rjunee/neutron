@@ -68,6 +68,7 @@ function makeDeps(
     platform: {} as PlatformAdapter,
     cookieToUserClaim: async () => null,
     resolveOpenLlmPool: (): CredentialPool | null => null,
+    resolveOpenOpenAiPool: (): CredentialPool | null => null,
     phaseSpecResolver: null,
     personalityCharacterSuggester: undefined,
     personaSummarizer: undefined,

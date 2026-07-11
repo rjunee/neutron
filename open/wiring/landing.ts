@@ -70,6 +70,14 @@ export interface WireLandingStackDeps {
    * request against live `ctx.env`) without an upward import into the composer.
    */
   resolveOpenLlmPool: (env: NodeJS.ProcessEnv) => CredentialPool | null
+  /**
+   * SWAPPABLE PROVIDER — the OpenAI credential resolver, so the `/chat` auth gate
+   * accepts an OpenAI-only box (`NEUTRON_MODEL_PROVIDER=openai` + `OPENAI_API_KEY`,
+   * no Claude credential) instead of walling it behind "Authenticate Claude".
+   * Consulted ONLY when `ctx.provider === 'openai'`; the default anthropic gate is
+   * byte-identical.
+   */
+  resolveOpenOpenAiPool: (env: NodeJS.ProcessEnv) => CredentialPool | null
   /** Onboarding phase-spec resolver (LLM rephrasing); null when LLM-less. */
   phaseSpecResolver: NonNullable<BuildLandingStackInput['phaseSpecResolver']> | null
   /** Personality-character suggester; undefined when LLM-less. */
@@ -115,7 +123,17 @@ export function wireLandingStack(
     // that silently produces nothing. Evaluated per request (reads live env)
     // so a restart-with-token clears it. Same credential predicate the
     // composer's substrate wiring uses (`resolveOpenLlmPool`).
-    chatAuthGate: { isUnauthenticated: () => deps.resolveOpenLlmPool(ctx.env) === null },
+    chatAuthGate: {
+      isUnauthenticated: (): boolean => {
+        // Default (anthropic) gate — byte-identical to before.
+        if (deps.resolveOpenLlmPool(ctx.env) !== null) return false
+        // SWAPPABLE PROVIDER — an OpenAI-provider box is authenticated when it has
+        // an OpenAI key, even with no Claude credential (no "Authenticate Claude"
+        // wall). Only consulted for provider==='openai'.
+        if (ctx.provider === 'openai') return deps.resolveOpenOpenAiPool(ctx.env) === null
+        return true
+      },
+    },
     ...(deps.phaseSpecResolver !== null ? { phaseSpecResolver: deps.phaseSpecResolver } : {}),
     // ONE warm LLM path (see construction above) — wiring these is the
     // fix for the `pickerLlm not configured` deterministic-fallback bug

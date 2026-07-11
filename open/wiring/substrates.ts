@@ -67,20 +67,37 @@ export function wireSubstrates(ctx: OpenWiringContext): WiredSubstrates {
   // openai is selected but its pool / mcpResolver is missing, we leave the
   // conversational config unset (→ Claude Code) rather than boot a broken path;
   // the composer logs the fallback.
-  const conversationalProvider: Partial<BuildLlmCallSubstrateInput> =
+  const openaiSelected =
     ctx.provider === 'openai' &&
     ctx.openaiLlmPool !== null &&
     ctx.openaiLlmPool !== undefined &&
     ctx.mcpResolver !== undefined
-      ? {
-          provider: 'openai',
-          openai: {
-            pool: ctx.openaiLlmPool,
-            mcpResolver: ctx.mcpResolver,
-            model_preference: getOpenAiModelPreference(),
-          },
-        }
-      : {}
+  const conversationalProvider: Partial<BuildLlmCallSubstrateInput> = openaiSelected
+    ? {
+        provider: 'openai',
+        openai: {
+          pool: ctx.openaiLlmPool!,
+          mcpResolver: ctx.mcpResolver!,
+          model_preference: getOpenAiModelPreference(),
+        },
+      }
+    : {}
+
+  // Codex-fix — the CONVERSATIONAL substrates build when the SELECTED provider's
+  // pool is available, NOT solely on the Anthropic `llmPool`. An OpenAI-only box
+  // (valid OPENAI_API_KEY, no Claude credential) must still get its conversational
+  // pair; otherwise `llmPool === null` silently nulls them while the OpenAI pool is
+  // never consulted (repro: NEUTRON_MODEL_PROVIDER=openai + OPENAI_API_KEY, no Claude).
+  //
+  // The Anthropic `pool`/`resolvePool` arg is required by the composer contract but
+  // is NEVER consulted on an openai turn (`start()` delegates to the openai branch
+  // before touching it). When there's no Anthropic pool we thread a lazy resolver
+  // that returns null so construction still yields a non-null Substrate. When NOT
+  // openai-selected this is `{ pool: llmPool }` with a non-null pool — BYTE-IDENTICAL
+  // to before.
+  const conversationalAvailable = openaiSelected || llmPool !== null
+  const anthropicPoolArg: Pick<BuildLlmCallSubstrateInput, 'pool' | 'resolvePool'> =
+    llmPool !== null ? { pool: llmPool } : { resolvePool: async (): Promise<null> => null }
 
   // WARM conversational substrate for the onboarding phase-spec LLM
   // rephrasing — the snappy-conversational core of the onboarding rework
@@ -105,9 +122,9 @@ export function wireSubstrates(ctx: OpenWiringContext): WiredSubstrates {
   // mirrors `liveAgentSubstrate` so the headless REPL doesn't block on
   // interactive prompts.
   const llmCallSubstrate =
-    llmPool !== null
+    conversationalAvailable
       ? buildLlmCallSubstrate({
-          pool: llmPool,
+          ...anthropicPoolArg,
           substrate_instance_id: `cc-llm-${internal_handle}`,
           cwd: owner_home,
           internal_handle,
@@ -134,8 +151,11 @@ export function wireSubstrates(ctx: OpenWiringContext): WiredSubstrates {
   // 12s conversational tier into the static fallback (the live-signup symptom).
   // Awaiting readiness OUTSIDE the conversational timeout means only the cold
   // first turn waits; warm turns stay snappy.
+  // Pre-warm ONLY the Claude Code warm-REPL path — pre-warming is a CC concept
+  // (cold spawn of the interactive REPL). The OpenAI adapter is stateless HTTP, so
+  // pre-warming it would fire a real API call at boot; skip it under openaiSelected.
   const prewarmReady: Promise<void> | null =
-    llmCallSubstrate !== null ? prewarmSubstrate(llmCallSubstrate) : null
+    llmCallSubstrate !== null && !openaiSelected ? prewarmSubstrate(llmCallSubstrate) : null
   // Track whether the pre-warm has SETTLED so the resolver can elevate the
   // budget for EVERY conversational dispatch in the cold window — not just the
   // first (2026-06-18 cold-start fix, round 2: the live owner-signup raced the
@@ -152,9 +172,9 @@ export function wireSubstrates(ctx: OpenWiringContext): WiredSubstrates {
   // Dedicated WARM conversational substrate for post-onboarding live chat
   // turns (no `ephemeral`; keyed per-dispatch on metering_context).
   const liveAgentSubstrate =
-    llmPool !== null
+    conversationalAvailable
       ? buildLlmCallSubstrate({
-          pool: llmPool,
+          ...anthropicPoolArg,
           substrate_instance_id: `cc-agent-${internal_handle}`,
           cwd: owner_home,
           internal_handle,

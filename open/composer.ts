@@ -1135,6 +1135,7 @@ export function buildOpenGraphComposer(
       platform,
       cookieToUserClaim,
       resolveOpenLlmPool,
+      resolveOpenOpenAiPool,
       phaseSpecResolver,
       personalityCharacterSuggester,
       personaSummarizer,
