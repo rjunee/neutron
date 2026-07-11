@@ -263,6 +263,16 @@ export async function ensureBrainInitialized(
   }
   const probeHealth = input.probeOllamaHealth ?? probeOllamaHealth
 
+  // Whether the effective embedder is CONFIRMED able to embed right now. Used to
+  // gate the fresh-init marker write: the marker must mean "the column is (and
+  // will be, for the pages that exist) embedded under this model", NOT merely
+  // "init ran". OpenAI (a key is present → embeds on write) needs no local probe
+  // → treated as usable. A local Ollama embedder is usable ONLY when the probe
+  // confirms reachable + model-pulled; if it's down/missing at init, we must NOT
+  // write the marker, or pages written during the outage would be orphaned when
+  // the later healthy reconnect sees a matching marker and skips `embed --stale`.
+  let embedderConfirmedUsable = input.embedder !== null && input.embedder.provider !== 'ollama'
+
   // Advisory-only Ollama reachability probe (RA3). Never gates the embedder
   // or column sizing (already fixed by `resolveEmbedderConfig` at
   // composition time, before this function is ever called) — purely surfaces
@@ -300,6 +310,7 @@ export async function ensureBrainInitialized(
         `[gbrain-memory] local Ollama embedder healthy (${input.embedder.model} @ ${safeUrl}) — ` +
           'semantic recall active.',
       )
+      embedderConfirmedUsable = true
     }
   }
 
@@ -369,9 +380,15 @@ export async function ensureBrainInitialized(
         `(keyword+graph; column ${target.model} ${target.dimensions}d, embeddings ` +
         `${input.embedder !== null ? 'ENABLED' : 'latent — add an OpenAI key to turn on'}).`,
     )
-    // Fresh brain has no pages, so no backfill is needed — but record the model
-    // the column starts under so a LATER provider/model switch is detected.
-    if (input.embedder !== null) await writeBackfillMarker(input.gbrainHome, embedderModelId(input.embedder))
+    // Fresh brain has no pages, so no backfill is needed — record the model the
+    // column starts under so a later provider/model switch is detected. BUT only
+    // when the embedder is CONFIRMED usable: if a local Ollama embedder is down /
+    // model-missing at init, do NOT write the marker — leave it absent so the
+    // next healthy reconnect runs `embed --stale` and backfills any pages written
+    // while degraded (the marker means "backfill completed", not "init ran").
+    if (input.embedder !== null && embedderConfirmedUsable) {
+      await writeBackfillMarker(input.gbrainHome, embedderModelId(input.embedder))
+    }
     return { status: 'initialized', detail: `${target.model} ${target.dimensions}d` }
   }
 

@@ -220,6 +220,81 @@ describe('ensureBrainInitialized', () => {
     expect(second.calls).toHaveLength(0)
   })
 
+  // The internal marker filename (stable path contract).
+  const markerFile = (home: string) => join(home, '.gbrain', '.neutron-embeddings-backfilled')
+
+  test('init-time Ollama OUTAGE → no marker written → healthy reconnect BACKFILLS (auto-upgrade)', async () => {
+    // The marker must mean "backfill completed under this model", NOT "init ran".
+    // If a local Ollama embedder is down at init, pages written during the outage
+    // have no vectors; writing the marker anyway would make the recovery
+    // reconnect skip `embed --stale` and orphan them forever.
+    const home = tempHome()
+    const embedder = resolveEmbedderConfig({})! // RA3 default: local Ollama fallback
+
+    // 1) Fresh init while Ollama is DOWN.
+    const down = fakeRunner()
+    const r1 = await ensureBrainInitialized({
+      gbrainHome: home,
+      embedder,
+      runner: down.runner,
+      logger: silentLogger,
+      probeOllamaHealth: async (): Promise<OllamaHealthCheck> => ({ reachable: false, modelPresent: false }),
+    })
+    expect(r1.status).toBe('initialized')
+    expect(down.calls.map((c) => c.args[0])).toEqual(['init'])
+    // Crucially: NO marker written during the outage.
+    expect(existsSync(markerFile(home))).toBe(false)
+
+    // 2) (Pages get written during the outage — no vectors, Ollama down.)
+
+    // 3) Recovery: Ollama healthy now, SAME embedder, brain already initialized.
+    const up = fakeRunner()
+    const r2 = await ensureBrainInitialized({
+      gbrainHome: home,
+      embedder,
+      runner: up.runner,
+      logger: silentLogger,
+      probeOllamaHealth: async (): Promise<OllamaHealthCheck> => ({ reachable: true, modelPresent: true }),
+    })
+    // `embed --stale` IS invoked (marker was absent), so the outage-written pages
+    // get vectors — the "auto-upgrades once it is" promise holds.
+    expect(r2.status).toBe('embeddings-backfilled')
+    expect(up.calls.map((c) => c.args[0])).toEqual(['embed'])
+    expect(up.calls[0]!.args).toContain('--stale')
+    // NOW the marker is recorded (backfill genuinely completed).
+    expect(existsSync(markerFile(home))).toBe(true)
+  })
+
+  test('HEALTHY Ollama fresh init → marker written → same-model reconnect SKIPS (no redundant scan)', async () => {
+    const home = tempHome()
+    const embedder = resolveEmbedderConfig({})! // ollama
+    const healthy = async (): Promise<OllamaHealthCheck> => ({ reachable: true, modelPresent: true })
+
+    const first = fakeRunner()
+    const r1 = await ensureBrainInitialized({
+      gbrainHome: home,
+      embedder,
+      runner: first.runner,
+      logger: silentLogger,
+      probeOllamaHealth: healthy,
+    })
+    expect(r1.status).toBe('initialized')
+    expect(first.calls.map((c) => c.args[0])).toEqual(['init']) // no embed at fresh init
+    expect(existsSync(markerFile(home))).toBe(true) // healthy → marker recorded
+
+    // Steady state: same model, healthy → marker matches → NO embed --stale scan.
+    const second = fakeRunner()
+    const r2 = await ensureBrainInitialized({
+      gbrainHome: home,
+      embedder,
+      runner: second.runner,
+      logger: silentLogger,
+      probeOllamaHealth: healthy,
+    })
+    expect(r2.status).toBe('already-initialized')
+    expect(second.calls).toHaveLength(0)
+  })
+
   test('init failure → returns init-failed, never throws', async () => {
     const home = tempHome()
     const { runner } = fakeRunner({ initCode: 1 })
