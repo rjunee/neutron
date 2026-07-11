@@ -78,13 +78,33 @@ async function openFileEngine(databasePath: string): Promise<FileEngine> {
   return eng
 }
 
-/** Run the pinned workspace `gbrain` CLI via bun; capture exit + stdout/stderr. */
+// HERMETICITY: pin every embedding provider's base URL in the child to a
+// guaranteed-CLOSED local port so the post-invalidation embed step ALWAYS fails
+// with ECONNREFUSED — the test must NOT depend on the host NOT running Ollama (a
+// dogfood Mac / some CI hosts run it with nomic-embed-text, which would re-embed
+// the invalidated chunk and flip the NULL assertion despite CORRECT behavior).
+// `OLLAMA_BASE_URL` is the var gbrain's ollama recipe reads
+// (`build-gateway-config.ts` → `base_urls['ollama']` → the embed request's base
+// URL); neutralize OpenAI too so a stray real key/base in the inherited env can't
+// embed either. Port 1 is never bound → instant connection-refused. The
+// invalidation (which runs BEFORE the embed loop) is what's under test.
+const HERMETIC_EMBED_ENV: Record<string, string> = {
+  OLLAMA_BASE_URL: 'http://127.0.0.1:1',
+  OPENAI_BASE_URL: 'http://127.0.0.1:1',
+  OPENAI_API_KEY: '',
+}
+
+/**
+ * Run the pinned workspace `gbrain` CLI via bun; capture exit + stdout/stderr.
+ * Always applies `HERMETIC_EMBED_ENV` (over the inherited env AND the caller's
+ * `env`) so no embedding provider is ever reachable, on any host.
+ */
 function runGbrain(
   args: string[],
   env: Record<string, string | undefined>,
 ): { code: number; stdout: string; stderr: string } {
   const res = Bun.spawnSync([process.execPath, GBRAIN_CLI, ...args], {
-    env: { ...process.env, ...env },
+    env: { ...process.env, ...env, ...HERMETIC_EMBED_ENV },
     stdout: 'pipe',
     stderr: 'pipe',
   })
@@ -136,14 +156,21 @@ describe('RA3 — real `gbrain embed --stale` invalidates prior-provider vectors
     }
 
     // 3) Run the REAL `gbrain embed --stale` — the EXACT command
-    //    `ensureBrainInitialized` runs on every reconnect. Ollama is unreachable
-    //    (CI), so the embed step fails fast locally after invalidation (exit 0).
+    //    `ensureBrainInitialized` runs on every reconnect. The embedder base URL
+    //    is pinned to a closed port (HERMETIC_EMBED_ENV), so the embed step fails
+    //    fast after invalidation on ANY host (exit 0 — per-chunk errors are logged,
+    //    not fatal).
     const embed = runGbrain(['embed', '--stale'], env)
     expect(embed.code).toBe(0)
     // The CLI reports it swept exactly the ONE drifted chunk (not the current one).
     // If upstream gbrain stopped calling invalidateStaleSignatureEmbeddings, this
     // line disappears and the NULL assertion below flips — the regression fails here.
     expect(embed.stdout).toContain('invalidated 1 chunk')
+    // The re-embed attempt hit the PINNED closed endpoint (proves hermeticity —
+    // it did NOT silently reach a host Ollama and re-embed): the drifted chunk
+    // could not be re-populated, so it errors + stays NULL below. gbrain logs
+    // per-chunk embed failures to stderr.
+    expect(embed.stderr).toContain('Error embedding')
 
     // 4) Verify the DB state the CLI produced: the prior-provider vector is NULL
     //    (invalidated → now plain NULL-stale, ready to re-embed under Ollama), and
