@@ -126,6 +126,39 @@ export interface GBrainMemoryWiring {
  *     `gbrain serve` honors the brain's OWN persisted config rather than a
  *     guessed width that could mismatch the column (the caller logs this).
  */
+/**
+ * Per-connect coherent OpenAI-key resolver. Wraps the lazy onboarding-key
+ * thunk so the init guard and the serve childEnv, which each read the key
+ * within one connect, observe the SAME value — a key landing between the two
+ * reads can otherwise split them (init runs keyword/no-backfill while the same
+ * spawn serves cloud embeddings). `getKey` memoizes the resolved key (found OR
+ * miss, and swallows resolver errors → `undefined`) for the current connect;
+ * `resetForConnect` clears it so the NEXT connect re-resolves fresh (preserving
+ * no-restart activation: a key stored later is picked up on the next spawn). The
+ * client re-runs `ensureInitialized` — which calls `resetForConnect` first — at
+ * the start of every (re)connect.
+ */
+export function makePerConnectKeyResolver(resolveOpenAiKey: () => Promise<string | undefined>): {
+  getKey: () => Promise<string | undefined>
+  resetForConnect: () => void
+} {
+  let cachedKey: string | undefined
+  let cacheValid = false
+  return {
+    getKey: async () => {
+      if (cacheValid) return cachedKey
+      const key = await resolveOpenAiKey().catch(() => undefined)
+      cachedKey = key !== undefined && key.trim().length > 0 ? key : undefined
+      cacheValid = true
+      return cachedKey
+    },
+    resetForConnect: () => {
+      cacheValid = false
+      cachedKey = undefined
+    },
+  }
+}
+
 export function reconcileEmbedderToBrain(
   embedder: EmbedderConfig | null,
   brainWidth: BrainEmbeddingWidth,
@@ -308,31 +341,12 @@ export function buildGBrainMemory(input: {
   // the serve childEnv (`resolveDynamicEnv`) each read the key, and the client
   // runs the guard THEN composes the env within one connect. They MUST observe
   // the SAME key so a `gbrain embed --stale` backfill (gated on the key at init)
-  // never disagrees with the embedder the serve child actually uses. We memoize
-  // the resolved key (found OR miss) so both reads within a connect share ONE
-  // store read — then `resetKeyCache()` (called at the top of `ensureInitialized`,
-  // which the client re-runs at the start of every (re)connect) clears it so the
-  // NEXT connect re-resolves fresh. That preserves no-restart activation (a key
-  // stored after a keyword-only connect is picked up on the next spawn) while
-  // making the same-spawn agreement an actual guarantee, not a race that skips
-  // the backfill when a key lands between the two reads.
-  const resolveOpenAiKey = input.resolveOpenAiKey
-  let cachedKey: string | undefined
-  let keyCacheValid = false
-  const resetKeyCache = () => {
-    keyCacheValid = false
-    cachedKey = undefined
-  }
-  const getKey: (() => Promise<string | undefined>) | undefined =
-    resolveOpenAiKey === undefined
+  // never disagrees with the embedder the serve child actually uses.
+  const keyResolver =
+    input.resolveOpenAiKey === undefined
       ? undefined
-      : async () => {
-          if (keyCacheValid) return cachedKey
-          const key = await resolveOpenAiKey().catch(() => undefined)
-          cachedKey = key !== undefined && key.trim().length > 0 ? key : undefined
-          keyCacheValid = true
-          return cachedKey
-        }
+      : makePerConnectKeyResolver(input.resolveOpenAiKey)
+  const getKey = keyResolver?.getKey
 
   // Read the EXISTING brain's column-width state ONCE at boot (a fresh install
   // has no brain yet → null → no reconciliation, it will be init'd at the RA3
@@ -405,7 +419,7 @@ export function buildGBrainMemory(input: {
     // connect re-resolves fresh (picks up a key stored since) — then every read
     // WITHIN this connect (here + the serve `resolveDynamicEnv`) shares that one
     // resolution, so the backfill's key and the serve embedder can't disagree.
-    resetKeyCache()
+    keyResolver?.resetForConnect()
     // Resolve the embedder at INIT time, not composition time: when a lazy key
     // resolver is threaded, read the key now (memoized — same value the serve
     // childEnv sees) so the brain is init'd + `embed --stale`-backfilled against

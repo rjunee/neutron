@@ -32,6 +32,7 @@ export {
 } from './ensure-brain-init.ts'
 export {
   GBrainStdioMcpClient,
+  composeGbrainChildEnv,
   type GBrainStdioMcpClientOptions,
 } from './gbrain-stdio-client.ts'
 export {

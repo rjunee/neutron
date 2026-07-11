@@ -16,8 +16,10 @@ import {
   resolveGbrainClientOptions,
   resolveEffectiveEmbedder,
   reconcileEmbedderToBrain,
+  makePerConnectKeyResolver,
   type GBrainMemoryWiring,
 } from '../build-gbrain-memory.ts'
+import { composeGbrainChildEnv } from '@neutronai/gbrain-memory/index.ts'
 import {
   buildOpenAiEmbedderConfig,
   resolveInitEmbeddingTarget,
@@ -560,5 +562,124 @@ describe('buildGBrainMemory', () => {
         rmSync(home, { recursive: true, force: true })
       }
     })
+  })
+})
+
+// The observable core of the per-connect coherence contract (Codex boundary):
+// both consumers read the SAME key within a connect, and a key stored BETWEEN
+// connects is picked up on the next connect.
+describe('makePerConnectKeyResolver', () => {
+  test('within ONE connect, both reads see the SAME value even if the source flips between them', async () => {
+    let calls = 0
+    // Absent on the first read, present on the second — the classic race.
+    const r = makePerConnectKeyResolver(async () => {
+      calls += 1
+      return calls === 1 ? undefined : 'sk-late'
+    })
+    // Read #1 = the init guard; read #2 = the serve childEnv, same connect.
+    const initKey = await r.getKey()
+    const serveKey = await r.getKey()
+    expect(initKey).toBe(serveKey) // AGREE — no init-Ollama/serve-OpenAI split
+    expect(initKey).toBeUndefined() // both pinned to the first resolution
+    expect(calls).toBe(1) // one underlying store read shared by both consumers
+  })
+
+  test('a found key is shared within a connect (both reads = the key, one store read)', async () => {
+    let calls = 0
+    const r = makePerConnectKeyResolver(async () => {
+      calls += 1
+      return 'sk-A'
+    })
+    expect(await r.getKey()).toBe('sk-A')
+    expect(await r.getKey()).toBe('sk-A')
+    expect(calls).toBe(1)
+  })
+
+  test('resetForConnect re-resolves → a key stored BETWEEN connects is picked up on the next connect', async () => {
+    let stored: string | undefined
+    let calls = 0
+    const r = makePerConnectKeyResolver(async () => {
+      calls += 1
+      return stored
+    })
+    // Connect 1: no key yet → both reads absent, one store read.
+    expect(await r.getKey()).toBeUndefined()
+    expect(await r.getKey()).toBeUndefined()
+    expect(calls).toBe(1)
+    // Key stored during onboarding/admin, THEN the next connect begins.
+    stored = 'sk-late'
+    r.resetForConnect()
+    expect(await r.getKey()).toBe('sk-late') // fresh resolve picks it up
+    expect(await r.getKey()).toBe('sk-late') // and is shared within this connect
+    expect(calls).toBe(2) // exactly one more store read for the second connect
+  })
+
+  test('a whitespace/blank key normalizes to undefined (no accidental activation)', async () => {
+    const r = makePerConnectKeyResolver(async () => '   ')
+    expect(await r.getKey()).toBeUndefined()
+  })
+
+  test('a throwing resolver is swallowed → undefined (fail-soft), and still cached for the connect', async () => {
+    let calls = 0
+    const r = makePerConnectKeyResolver(async () => {
+      calls += 1
+      throw new Error('store unreachable')
+    })
+    expect(await r.getKey()).toBeUndefined()
+    expect(await r.getKey()).toBeUndefined()
+    expect(calls).toBe(1)
+  })
+})
+
+// Blocker (Codex): the reconciled fail-safe (no embedder → empty dynamic env)
+// must actually prevent an embedding dimension from reaching the serve child —
+// even if one is inherited ambiently. `composeGbrainChildEnv` strips the
+// embedder-owned selectors from the base so only our resolved seam sets them.
+describe('composeGbrainChildEnv — embedder-owned keys are never inherited ambiently', () => {
+  test('an ambient GBRAIN_EMBEDDING_DIMENSIONS in the base is stripped when the embedder is dropped', async () => {
+    const env = await composeGbrainChildEnv(
+      { env: { GBRAIN_HOME: '/x/gbrain' }, source: 'default', resolveDynamicEnv: async () => ({}) },
+      // Base (would-be inherited) carries a stale/incompatible width + model.
+      { PATH: '/usr/bin', GBRAIN_EMBEDDING_DIMENSIONS: '768', GBRAIN_EMBEDDING_MODEL: 'ollama:nomic-embed-text' },
+    )
+    // Fail-safe reconciliation → NO embedding selectors reach the child, so
+    // gbrain honors its own persisted config (no dimension mismatch).
+    expect(env['GBRAIN_EMBEDDING_DIMENSIONS']).toBeUndefined()
+    expect(env['GBRAIN_EMBEDDING_MODEL']).toBeUndefined()
+    expect(env).toMatchObject({ GBRAIN_HOME: '/x/gbrain', PATH: '/usr/bin', GBRAIN_SOURCE: 'default' })
+  })
+
+  test('the resolved embedder seam STILL sets the selectors (strip only removes ambient inheritance)', async () => {
+    const env = await composeGbrainChildEnv(
+      {
+        env: { GBRAIN_HOME: '/x/gbrain' },
+        source: 'default',
+        resolveDynamicEnv: async () => ({
+          GBRAIN_EMBEDDING_MODEL: 'openai:text-embedding-3-large',
+          GBRAIN_EMBEDDING_DIMENSIONS: '3072',
+          OPENAI_API_KEY: 'sk-real',
+        }),
+      },
+      { GBRAIN_EMBEDDING_DIMENSIONS: '768' }, // ambient stale value must lose
+    )
+    expect(env['GBRAIN_EMBEDDING_MODEL']).toBe('openai:text-embedding-3-large')
+    expect(env['GBRAIN_EMBEDDING_DIMENSIONS']).toBe('3072') // reconciled value wins, not the ambient 768
+    expect(env['OPENAI_API_KEY']).toBe('sk-real')
+  })
+
+  test('a static child env (opts.env) selector also overrides an ambient one', async () => {
+    const env = await composeGbrainChildEnv(
+      {
+        env: {
+          GBRAIN_HOME: '/x/gbrain',
+          GBRAIN_EMBEDDING_MODEL: 'ollama:nomic-embed-text',
+          GBRAIN_EMBEDDING_DIMENSIONS: '768',
+        },
+        source: 'default',
+      },
+      { GBRAIN_EMBEDDING_DIMENSIONS: '1536' }, // ambient must not survive
+    )
+    expect(env['GBRAIN_EMBEDDING_DIMENSIONS']).toBe('768')
+    expect(env['GBRAIN_EMBEDDING_MODEL']).toBe('ollama:nomic-embed-text')
   })
 })

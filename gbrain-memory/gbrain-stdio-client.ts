@@ -78,8 +78,24 @@ export interface GBrainStdioMcpClientOptions {
 }
 
 /**
+ * The embedding-selector env keys that determine the `content_chunks` vector
+ * column's model + width. These are OWNED by the resolved embedder seam
+ * (`opts.env` static childEnv + `opts.resolveDynamicEnv()`): they must reach the
+ * `gbrain serve` child ONLY when our reconciliation intends them. We strip any
+ * value inherited from the ambient base env first, so the composer's fail-safe
+ * (an embedder dropped to keyword+graph → NO embedding env) can't be silently
+ * defeated by an ambient `GBRAIN_EMBEDDING_DIMENSIONS` that would mismatch an
+ * existing brain's column (the whole point of `reconcileEmbedderToBrain`). The
+ * MCP SDK's `getDefaultEnvironment()` already allowlists inherited vars (these
+ * aren't on it), so this is defense-in-depth that makes the guarantee
+ * self-contained rather than dependent on that allowlist.
+ */
+const EMBEDDER_OWNED_ENV_KEYS = ['GBRAIN_EMBEDDING_MODEL', 'GBRAIN_EMBEDDING_DIMENSIONS'] as const
+
+/**
  * Build the `gbrain serve` child env, merging (in precedence order) the MCP SDK
- * defaults, the static `opts.env` (baked at composition), the LAZILY-resolved
+ * defaults (with embedder-owned keys stripped — see `EMBEDDER_OWNED_ENV_KEYS`),
+ * the static `opts.env` (baked at composition), the LAZILY-resolved
  * `opts.resolveDynamicEnv()` (the embedder seam for a key captured after boot),
  * then the explicit `GBRAIN_BRAIN_ID` / `GBRAIN_SOURCE` scoping. Extracted (and
  * exported) so the boot-time-vs-connect-time merge is unit-testable without a
@@ -90,6 +106,9 @@ export async function composeGbrainChildEnv(
   base: Record<string, string>,
 ): Promise<Record<string, string>> {
   const env: Record<string, string> = { ...base }
+  // The embedder seam is the SOLE authority on the embedding column selectors;
+  // never inherit them ambiently (would defeat a reconciled keyword+graph drop).
+  for (const key of EMBEDDER_OWNED_ENV_KEYS) delete env[key]
   if (opts.env !== undefined) Object.assign(env, opts.env)
   if (opts.resolveDynamicEnv !== undefined) {
     try {
