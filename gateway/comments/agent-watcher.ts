@@ -82,6 +82,7 @@ import type {
 } from './comment-store.ts'
 import type { WebChatSessionProjectRegistry } from '../http/chat-bridge.ts'
 import type { EscalateCommentBodyHistoryEntry } from '../realmode-composer/escalation-loader.ts'
+import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
 
 /**
  * Polling cadence — every 30s the watcher walks every active project
@@ -315,7 +316,7 @@ export class AgentWatcher {
     if (this.interval !== null) return
     this.stopped = false
     this.interval = this.setIntervalFn(() => {
-      void this.runTickGuarded()
+      fireAndForget('agent-watcher.runTickGuarded', this.runTickGuarded())
     }, this.poll_interval_ms)
   }
 

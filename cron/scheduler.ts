@@ -39,6 +39,7 @@ import {
 import type { CronHandlerRegistry, CronHandlerStatus } from './handlers.ts'
 import type { CronJobDef, CronJobRegistry } from './jobs.ts'
 import { CronStateStore } from './state.ts'
+import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
 
 /** setTimeout's max delay (2^31-1 ms ≈ 24.8 days); longer waits are chunked. */
 const MAX_TIMER_DELAY_MS = 2_147_483_647
@@ -300,9 +301,9 @@ export class CronScheduler {
     // (so direct/manual callers are covered too); `guardedFire` here only
     // contains a tail throw so this VOIDED timer promise can't leak an
     // unhandledRejection.
-    void guardedFire(name, () => this.fireOnce(name), (jobName, err) => {
+    fireAndForget('scheduler.guardedFire', guardedFire(name, () => this.fireOnce(name), (jobName, err) => {
       console.error(`cron scheduler: fire '${jobName}' threw:`, err)
-    })
+    }))
   }
 
   /**
@@ -381,9 +382,9 @@ export class CronScheduler {
       () => undefined,
     )
     this.inflightFires.add(tracked)
-    void tracked.finally(() => {
+    fireAndForget('scheduler.finally', tracked.finally(() => {
       this.inflightFires.delete(tracked)
-    })
+    }))
     return await exec
   }
 
@@ -440,13 +441,13 @@ export class CronScheduler {
         // `{status:'error', detail}` carries its reason in `detail` (error stays
         // null). Prefer whichever is present so the journal never drops it.
         const reason = error ?? detail
-        void emitSystemEvent({
+        fireAndForget('scheduler.emitSystemEvent', emitSystemEvent({
           event: 'cron_job_error',
           module: 'cron',
           level: 'error',
           project_slug: this.project_slug,
           payload: { job_name: name, error: reason ?? undefined, duration_ms },
-        })
+        }))
       }
     } else {
       // Recovery (or any non-error outcome) clears the edge so the NEXT

@@ -55,6 +55,7 @@ import type { TridentRun } from './store.ts'
 import { FABLE_MODEL, SONNET_MODEL, FAST_MODEL, getBestModel } from '@neutronai/runtime/models.ts'
 import { DEFAULT_SETTLE_TIMEOUT_MS } from './liveness.ts'
 import { fileURLToPath } from 'node:url'
+import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
 
 export interface InnerLoopInput {
   run: TridentRun
@@ -376,7 +377,7 @@ export function buildSubstrateWorkflowFire(
     if (input.settle_timeout_ms > 0) {
       timer = setTimer(() => {
         timedOut = true
-        void handle.cancel().catch(() => {})
+        fireAndForget('inner-loop.cancel', handle.cancel().catch(() => {}))
       }, input.settle_timeout_ms)
     }
 
@@ -388,7 +389,7 @@ export function buildSubstrateWorkflowFire(
           return { status: 'fired', error: null }
         }
         if (ev.kind === 'error') {
-          void handle.cancel().catch(() => {})
+          fireAndForget('inner-loop.cancel', handle.cancel().catch(() => {}))
           return { status: 'failed', error: 'fire turn raised an error before settling' }
         }
         // token / thinking / status / tool_* events carry nothing terminal for

@@ -15,6 +15,7 @@ import type { SizeSeverity } from './session-size-watchdog.ts'
 import { WEDGED_PROMPT_DETECTOR_ID, runWedgedRecovery } from './wedged-prompt-detector.ts'
 import { type PersistentReplSubstrateOptions, dispatchRateLimitBannerNotice } from './types.ts'
 import type { ReplSession } from './repl-session.ts'
+import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 /** Separator between the warm-pool key components (S3: `substrate_instance_id`,
@@ -262,7 +263,7 @@ function dispatchWedgeRecovery(
   session.wedgeRecovering = true
   const alert =
     options.postWedgeAlert ?? ((text: string) => process.stderr.write(`[wedge-recover] ${text}\n`))
-  void runWedgedRecovery({
+  fireAndForget('signatures.runWedgedRecovery', runWedgedRecovery({
     writeKey: (key) => sendKey(child, key),
     // In-process ring read always returns a string; the null-as-not-cleared
     // contract is honoured at the module boundary for hosts that can fail a
@@ -285,7 +286,7 @@ function dispatchWedgeRecovery(
     })
     .finally(() => {
       session.wedgeRecovering = false
-    })
+    }))
 }
 
 /** Launch the resume-session-failure picker escape-then-recover ladder (P2,
@@ -308,7 +309,7 @@ function dispatchResumePickerRecovery(
   // a raw `options.projectsDir` is undefined under claudeConfigDir and would fall
   // back to `~/.claude/projects`, missing the recoverable transcript.
   const projectsDir = resolveTranscriptProjectsDir(options)
-  void runResumePickerRecovery({
+  fireAndForget('signatures.runResumePickerRecovery', runResumePickerRecovery({
     writeKey: (key) => sendKey(child, key),
     // JSONL/disk is the source of truth (invariant §5). Exclude the session this
     // REPL was spawned under: if it's the stale id that dropped us into the
@@ -375,7 +376,7 @@ function dispatchResumePickerRecovery(
     })
     .finally(() => {
       session.resumePickerRecovering = false
-    })
+    }))
 }
 
 /** Surface a session-size warn/critical affordance (Vajra port row #13). The

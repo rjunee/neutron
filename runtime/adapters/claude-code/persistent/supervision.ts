@@ -24,6 +24,7 @@ import { type ReplSession, httpHealth, terminateChild, terminatePidGracefully } 
 import { clearRespawnInFlight, gateFor, getOrSpawnSession } from './spawn.ts'
 import { drainPendingRespawns } from './pending-respawn.ts'
 import { poolKeyFor } from './pool.ts'
+import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
 
 // ---------------------------------------------------------------------------
 // Sprint-2 supervision actuation: respawn-is-always-resume, double-spawn-safe.
@@ -173,12 +174,12 @@ export function makeReplRespawnDeps(options: PersistentReplSubstrateOptions): Re
         // When there is no pending kill (crash path) `getOrSpawnSession` is called
         // synchronously inside this IIFE (no `await` precedes it) — ptyHost.spawn
         // still records synchronously, preserving the fire-and-forget timing.
-        void (async () => {
+        fireAndForget('supervision.task', (async () => {
           if (pendingKill !== undefined) await pendingKill
           await getOrSpawnSession(record.sessionKey, options, resumeSpecFor(record), {
             sessionId: record.sessionId,
           })
-        })().catch(() => undefined)
+        })().catch(() => undefined))
         return { ok: true }
       } catch {
         return { ok: false, reason: 'spawn-failed' }
@@ -276,12 +277,12 @@ export function respawnReplSession(
       // (emitted outside the registry flock so the locked critical section
       // stays pure). Control flow unchanged; emit can never throw.
       if (decision.just_tripped === true) {
-        void emitSystemEvent({
+        fireAndForget('supervision.emitSystemEvent', emitSystemEvent({
           event: 'repl_session_capped',
           module: 'repl',
           level: 'error',
           payload: { session_key: sessionKey, respawn_cap_max: RESPAWN_CAP_MAX, trigger },
-        })
+        }))
       }
       return { ok: false, reason: 'spawn-failed', sessionKey }
     }
@@ -647,9 +648,9 @@ export function startReplWatchdog(
   // in-process replay never fired because the gateway itself went down. Fire-and-
   // forget with the default anti-thundering-herd stagger; errors are swallowed so
   // a poisoned entry can't block watchdog startup.
-  void drainPendingRespawns(options).catch((e) =>
+  fireAndForget('supervision.drainPendingRespawns', drainPendingRespawns(options).catch((e) =>
     console.error(`repl-watchdog: boot-drain error: ${e}`),
-  )
+  ))
 
   // Per-registry tick gate (Argus r3 MINOR 3): scoped to THIS watchdog so a slow
   // tick for one instance's registry never serializes another instance's tick in a
@@ -660,9 +661,9 @@ export function startReplWatchdog(
     // in-flight gate: skip if a prior tick is still running (the work can take
     // longer than the cadence; double-firing would race the respawn).
     if (!tickGate.claim()) return
-    void runReplWatchdogTick(options, wopts)
+    fireAndForget('supervision.runReplWatchdogTick', runReplWatchdogTick(options, wopts)
       .catch((e) => console.error(`repl-watchdog: tick error: ${e}`))
-      .finally(() => tickGate.release())
+      .finally(() => tickGate.release()))
   }
   const handle = setIntervalFn(tick, intervalMs)
 
@@ -673,9 +674,9 @@ export function startReplWatchdog(
   const cwdDriftGate = makeInFlightGate()
   const cwdDriftTick = (): void => {
     if (!cwdDriftGate.claim()) return
-    void runCwdDriftWatchdogTick(options, wopts)
+    fireAndForget('supervision.runCwdDriftWatchdogTick', runCwdDriftWatchdogTick(options, wopts)
       .catch((e) => console.error(`cwd-drift-watchdog: tick error: ${e}`))
-      .finally(() => cwdDriftGate.release())
+      .finally(() => cwdDriftGate.release()))
   }
   const cwdDriftHandle = setIntervalFn(cwdDriftTick, cwdDriftIntervalMs)
 

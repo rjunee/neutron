@@ -20,6 +20,7 @@
 import { emitSystemEvent } from '@neutronai/persistence/index.ts'
 import { isGbrainBinaryMissingError, type MemoryStore } from './memory-store.ts'
 import type { McpClient } from './mcp-client.ts'
+import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
 
 export class GBrainMemoryStore implements MemoryStore {
   private readonly mcp: McpClient
@@ -57,11 +58,11 @@ export class GBrainMemoryStore implements MemoryStore {
         // O4 — VISIBILITY ONLY: the fail-soft decision (degrade recall to "no
         // memory") is UNCHANGED. Emit a journal row so this otherwise-silent
         // degrade is diagnosable. Fire-and-forget; the emit can never throw.
-        void emitSystemEvent({
+        fireAndForget('gbrain-memory-store.emitSystemEvent', emitSystemEvent({
           event: 'gbrain_unavailable',
           module: 'gbrain-memory',
           payload: { op: 'query', detail: err instanceof Error ? err.message : String(err) },
-        })
+        }))
         return []
       }
       throw err

@@ -30,6 +30,7 @@ import type {
   ProjectBackupLogger,
   ProjectBackupStore,
 } from './project-backup-store.ts'
+import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
 
 /** Default tick interval — every 6 hours. Brief § 0.3 confirms fixed. */
 export const DEFAULT_TICK_INTERVAL_MS = 6 * 60 * 60 * 1000
@@ -254,7 +255,7 @@ export class ProjectBackupScheduler {
         // rejection.
         const p = this.fire(project_id).then(() => undefined)
         this.activeFires.add(p)
-        void p.finally(() => this.activeFires.delete(p))
+        fireAndForget('project-backup-scheduler.finally', p.finally(() => this.activeFires.delete(p)))
       }, jitter)
       this.pendingJitterTimers.set(project_id, handle)
     }

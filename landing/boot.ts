@@ -43,6 +43,7 @@ import { existsSync, readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createLandingServer } from './server.ts'
+import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 
@@ -280,13 +281,13 @@ if (import.meta.main) {
   const handle = await bootSignup()
   console.log(`[signup-landing] listening on 127.0.0.1:${handle.port}`)
   process.once('SIGTERM', () => {
-    void handle.stop().catch((err) => {
+    fireAndForget('boot.stop', handle.stop().catch((err) => {
       console.error('signup-landing stop failed:', err)
-    })
+    }))
   })
   process.once('SIGINT', () => {
-    void handle.stop().catch((err) => {
+    fireAndForget('boot.stop', handle.stop().catch((err) => {
       console.error('signup-landing stop failed:', err)
-    })
+    }))
   })
 }

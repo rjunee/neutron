@@ -40,6 +40,7 @@
 
 import { spawn } from 'node:child_process'
 import { existsSync, readFileSync, writeFileSync } from 'node:fs'
+import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
 
 // ── Cadence + threshold constants ──────────────────────────────────────────
 
@@ -591,7 +592,7 @@ export function startModelUpdateWatchdog(deps: ModelUpdateWatchdogDeps): ModelUp
           })
           // Fire-and-forget the idle-gated graceful respawn of existing warm
           // sessions. Errors are swallowed — the adopt + notice already shipped.
-          void Promise.resolve(deps.runUpgrade(decision.newModel)).catch(onError)
+          fireAndForget('model-update-watchdog.resolve', Promise.resolve(deps.runUpgrade(decision.newModel)).catch(onError))
           break
         }
       }
@@ -603,7 +604,7 @@ export function startModelUpdateWatchdog(deps: ModelUpdateWatchdogDeps): ModelUp
   }
 
   const handle = setIntervalFn(() => {
-    void tick().catch(onError)
+    fireAndForget('model-update-watchdog.tick', tick().catch(onError))
   }, intervalMs)
   // Don't let the cadence timer hold the event loop open on its own.
   ;(handle as { unref?: () => void })?.unref?.()

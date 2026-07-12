@@ -20,6 +20,7 @@
 
 import type { ProjectDb } from '@neutronai/persistence/index.ts'
 import type { ApprovalPolicy } from './registry.ts'
+import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
 
 export type ApprovalDecision = 'approved' | 'denied' | 'expired'
 
@@ -125,9 +126,9 @@ export class ApprovalManager {
     // and the expire sweep will eventually clear it. Surface the failure
     // through the result promise so callers can see it but keep the lock
     // discipline straightforward.
-    void this.notifier.notify(row).catch((err) => {
+    fireAndForget('approval.notify', this.notifier.notify(row).catch((err) => {
       console.error('approval notifier failed:', err)
-    })
+    }))
 
     return new Promise<ApprovalDecision>((resolve, reject) => {
       this.pending.set(id, { resolve, reject })

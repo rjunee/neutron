@@ -31,6 +31,7 @@ import {
 } from './detector.ts'
 import { buildReflectionContext } from './context.ts'
 import type { Correction, DiaryEntry } from './types.ts'
+import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
 
 const LOG_TAG = '[reflection]'
 
@@ -99,9 +100,9 @@ export function createReflection(deps: CreateReflectionDeps): Reflection {
       // majority of turns that carry no correction cue.
       if (!looksLikeCorrection(turn.user_text)) return
       const substrate = deps.substrate
-      void runDetection(substrate).catch((err) => {
+      fireAndForget('index.runDetection', runDetection(substrate).catch((err) => {
         console.warn(`${LOG_TAG} event=on_turn_complete_failed err=${errMsg(err)}`)
-      })
+      }))
 
       async function runDetection(sub: Substrate): Promise<void> {
         const ac = new AbortController()

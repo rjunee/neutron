@@ -36,6 +36,7 @@
 import { randomUUID } from 'node:crypto'
 import type { ProjectDb } from './db.ts'
 import { parseJsonColumn } from './sidecar.ts'
+import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
 
 export type SystemEventLevel = 'info' | 'warn' | 'error'
 
@@ -181,7 +182,7 @@ export class SystemEventsStore implements SystemEventSink {
     const cleanup = (): void => {
       this.inflight.delete(write)
     }
-    void write.then(cleanup, cleanup)
+    fireAndForget('system-events.then', write.then(cleanup, cleanup))
     await write
     return { id }
   }

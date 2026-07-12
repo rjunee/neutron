@@ -61,6 +61,7 @@ import {
   CallToolRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js'
 import { TurnIdEcho } from './turn-id-echo.ts'
+import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
 
 const SINK_PORT = parseInt(process.env['SINK_PORT'] || '0', 10)
 const SINK_TOKEN = process.env['SINK_TOKEN'] || ''
@@ -353,9 +354,9 @@ process.on('SIGINT', () => shutdownChannel('SIGINT'))
 // genuine no-bind wedge never reaches `initialized`, so `/channel-bound` never
 // fires and the assertion still fast-fails (real wedges stay covered).
 mcp.oninitialized = () => {
-  void postToSink('/channel-bound', { session_id: SESSION_ID, pid: process.pid }).catch((e) => {
+  fireAndForget('dev-channel.postToSink', postToSink('/channel-bound', { session_id: SESSION_ID, pid: process.pid }).catch((e) => {
     process.stderr.write(`neutron-channel: channel-bound announce failed: ${e}\n`)
-  })
+  }))
   process.stderr.write('neutron-channel: MCP handshake complete (initialized)\n')
 }
 

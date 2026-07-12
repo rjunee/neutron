@@ -71,6 +71,7 @@
  */
 
 import { randomUUID } from 'node:crypto'
+import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
 
 /**
  * Terminal + non-terminal states the Core surfaces through
@@ -653,7 +654,7 @@ export class CodegenOrchestrator {
       () =>
         new Promise<void>((resolve) => {
           this.schedule(() => {
-            void this.executeTask(task_id, snapshot).then(resolve, resolve)
+            fireAndForget('backend.executeTask', this.executeTask(task_id, snapshot).then(resolve, resolve))
           })
         }),
     )

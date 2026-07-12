@@ -73,6 +73,7 @@ import { collectTokensToString } from './build-llm-call-substrate.ts'
 import { buildOperatingDoctrineFragment } from './operating-doctrine.ts'
 import { buildLiveAgentScopeFragment } from './live-agent-scope-fragment.ts'
 import type { LiveAgentTurnRequest } from '../http/chat-bridge.ts'
+import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
 
 const LOG_TAG = '[live-agent-turn]'
 
@@ -601,9 +602,9 @@ export function buildLiveAgentTurn(
       () => undefined,
     )
     turnChains.set(topicKey, tail)
-    void tail.then(() => {
+    fireAndForget('build-live-agent-turn.then', tail.then(() => {
       if (turnChains.get(topicKey) === tail) turnChains.delete(topicKey)
-    })
+    }))
     return run
   }
 

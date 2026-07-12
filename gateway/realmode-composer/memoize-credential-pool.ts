@@ -109,6 +109,7 @@ import {
   soonestCooldownUntil,
   type CredentialPool,
 } from '@neutronai/runtime/credential-pool.ts'
+import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
 
 export interface MemoizeCredentialPoolInput {
   /** Instance home dir whose `.env` file is the invalidation trigger. */
@@ -238,14 +239,14 @@ export function memoizeCredentialPoolByEnvMtime(
           // unchanged (still returns the wedged pool); emit can never throw.
           if (!all_cooldown_latched) {
             all_cooldown_latched = true
-            void emitSystemEvent({
+            fireAndForget('memoize-credential-pool.emitSystemEvent', emitSystemEvent({
               event: 'credential_all_cooldown',
               module: 'credentials',
               payload: {
                 credential_count: resolved.credentials.length,
                 soonest_cooldown_until: soonestCooldownUntil(resolved),
               },
-            })
+            }))
           }
           return wedgedCached.pool
         }

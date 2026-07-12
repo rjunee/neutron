@@ -18,6 +18,7 @@ import {
 import { currentTopicContext, type TopicContext, withTopicContext } from './topic-context.ts'
 import type { McpToolResolver } from '@neutronai/contracts/mcp-tool-resolver.ts'
 import { emitSystemEvent } from '@neutronai/persistence/index.ts'
+import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
 
 /**
  * X1 — the capability verdict the dispatch-time gate WOULD reach under
@@ -180,7 +181,7 @@ export class McpServer {
   private emitCapabilityVerdict(reg: ToolRegistration, verdict: CapabilityVerdict): void {
     try {
       const provenance = reg.provenance ?? PLATFORM_TOOL_PROVENANCE
-      void emitSystemEvent({
+      fireAndForget('server.emitSystemEvent', emitSystemEvent({
         event: 'capability_verdict',
         module: 'capability-gate',
         // allow / gated-approval are expected steady-state; denied-capability and
@@ -196,7 +197,7 @@ export class McpServer {
           // Marks X1's mode; D-9 flips this to real enforcement.
           enforcement: 'log-only',
         },
-      })
+      }))
     } catch {
       // Observability must never perturb dispatch. Swallow.
     }

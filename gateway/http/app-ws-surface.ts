@@ -62,6 +62,7 @@ import type {
   ChatCommandFilterResult,
 } from '@neutronai/contracts/chat-command-filter.ts'
 import { constantTimeEqual } from '@neutronai/runtime/constant-time-equal.ts'
+import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
 export type { ChatCommandFilter, ChatCommandFilterResult }
 
 /**
@@ -980,7 +981,7 @@ async function handleSend(
       // is still bad UX.) Return the echo NOW; the turn runs in the background.
       // Errors surface to the client as the agent's own FAILURE_BODY
       // `agent_message` over the WS, so we only log here.
-      void ctx.adapter
+      fireAndForget('app-ws-surface.dispatchInbound', ctx.adapter
         .dispatchInbound({
           user_id: resolved.user_id,
           channel_topic_id,
@@ -994,7 +995,7 @@ async function handleSend(
               err instanceof Error ? err.message : String(err)
             }`,
           )
-        })
+        }))
     }
   }
   // Return the canonical user_message envelope in the response so the

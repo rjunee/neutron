@@ -27,6 +27,7 @@ import { mountCoresScribeFanOut } from '@neutronai/gateway/cores/mount-cores-scr
 import { createReflection, type Reflection } from '@neutronai/reflection/index.ts'
 import { OWNER_USER_ID } from '../owner-identity.ts'
 import type { OpenWiringContext } from './context.ts'
+import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
 
 export interface WiredMemory {
   /** Lazy fail-soft GBrain memory (scribe write target + `memory_search` store). */
@@ -126,7 +127,7 @@ export function wireMemory(ctx: OpenWiringContext): WiredMemory {
       resolveOnboardingOpenAiKey({ db, owner_home, internal_handle, project_slug }),
   })
   cleanups.push(() => {
-    void gbrainMemory.close().catch(() => undefined)
+    fireAndForget('memory.close', gbrainMemory.close().catch(() => undefined))
   })
   const gbrainSyncHook = gbrainMemory.syncHook
   const scribe: Scribe | null =
@@ -199,7 +200,7 @@ export function wireMemory(ctx: OpenWiringContext): WiredMemory {
       owner_home,
     })
     cleanups.push(() => {
-      void coresFanOut.stop().catch(() => undefined)
+      fireAndForget('memory.stop', coresFanOut.stop().catch(() => undefined))
     })
   }
 

@@ -58,6 +58,7 @@ import type {
 } from '@neutronai/onboarding/synthesis/index.ts'
 import { slugifyProjectId } from '@neutronai/onboarding/wow-moment/project-identity.ts'
 import type { SynthesisRunner } from './build-synthesis-session.ts'
+import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
 
 export interface BuildSynthesisImportJobRunnerInput {
   /** Per-instance DB — job state persists to `import_jobs` (DB-backed status). */
@@ -257,14 +258,14 @@ export function buildSynthesisImportJobRunner(
       // poll + the 5s import-running cron tick). Any escape is swallowed so a
       // background failure surfaces as a `failed` job, never an unhandled
       // rejection.
-      void runJob(job_id, inp.source, inp.payload).catch(async (err) => {
+      fireAndForget('build-synthesis-import-runner.runJob', runJob(job_id, inp.source, inp.payload).catch(async (err) => {
         logFailure(`run_job:${job_id}`, err)
         try {
           await finishFailed(job_id, 'substrate_error', err instanceof Error ? err.message : String(err))
         } catch (e) {
           logFailure(`run_job_fail_persist:${job_id}`, e)
         }
-      })
+      }))
       return { job_id }
     },
 

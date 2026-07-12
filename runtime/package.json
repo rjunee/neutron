@@ -10,6 +10,7 @@
     "@neutronai/core-sdk": "workspace:*",
     "@neutronai/gbrain-memory": "workspace:*",
     "@neutronai/jwt-validator": "workspace:*",
+    "@neutronai/logger": "workspace:*",
     "@neutronai/mcp": "workspace:*",
     "@neutronai/migrations": "workspace:*",
     "@neutronai/persistence": "workspace:*",

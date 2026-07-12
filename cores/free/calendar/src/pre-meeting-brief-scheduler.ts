@@ -35,6 +35,7 @@ import type {
   PreMeetingBriefQueueRow,
   PreMeetingBriefQueueStore,
 } from './pre-meeting-brief-queue-store.ts'
+import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
 
 /** Default lead time before a meeting that the brief fires (ms). 10 min. */
 export const PRE_MEETING_LEAD_MS = 10 * 60 * 1000
@@ -176,7 +177,7 @@ export function buildPreMeetingBriefScheduler(
       const cur = queue.get(k)
       const fireEvent = cur?.event ?? input.event
       const fireProject = cur?.project_id ?? input.project_id
-      void (async (): Promise<void> => {
+      fireAndForget('pre-meeting-brief-scheduler.task', (async (): Promise<void> => {
         try {
           await opts.fire({
             event: fireEvent,
@@ -196,7 +197,7 @@ export function buildPreMeetingBriefScheduler(
         } catch {
           // best-effort
         }
-      })()
+      })())
       if (cur !== undefined) cur.timer = null
       queue.delete(k)
     }, Math.max(0, input.fire_at_ms - input.now_ms))
@@ -434,7 +435,7 @@ export function buildPreMeetingBriefScheduler(
   function scheduleNextTick(): void {
     if (!running) return
     tickTimer = scheduleTimer(() => {
-      void tickInternal(now()).catch(() => {})
+      fireAndForget('pre-meeting-brief-scheduler.tickInternal', tickInternal(now()).catch(() => {}))
     }, tick_interval_ms)
   }
 

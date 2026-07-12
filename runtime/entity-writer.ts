@@ -64,6 +64,7 @@ import {
   type TimelineEntry,
 } from './entity-format.ts'
 import { SLUG_REGEX } from './entity-slug.ts'
+import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
 
 // The page codec (render + parse + KIND_TO_DIR + extractCompiledTruth) lives
 // in the `./entity-format.ts` leaf (refactor P8). Re-export the shared
@@ -228,10 +229,10 @@ function withWriteLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
     () => undefined,
   )
   writeLocks.set(key, settled)
-  void settled.then(() => {
+  fireAndForget('entity-writer.then', settled.then(() => {
     // Only clean up if no later writer has already chained past us.
     if (writeLocks.get(key) === settled) writeLocks.delete(key)
-  })
+  }))
   return next
 }
 
@@ -346,7 +347,7 @@ async function writeEntityLocked(
   } catch (err) {
     // Best-effort cleanup; ignore errors. The canonical path is still
     // whatever was there before, since rename(2) is atomic.
-    void fs.rm(tmpPath, { force: true }).catch(() => undefined)
+    fireAndForget('entity-writer.rm', fs.rm(tmpPath, { force: true }).catch(() => undefined))
     throw new EntityWriteError(
       'write_failed',
       `failed to write entity page ${targetPath}: ${errMsg(err)}`,

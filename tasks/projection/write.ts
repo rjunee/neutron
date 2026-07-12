@@ -28,6 +28,7 @@ import {
   renderStatusBlock,
 } from './format.ts'
 import { replaceMarkedBlock } from './parse.ts'
+import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
 
 export const DEFAULT_PROJECTION_DEBOUNCE_MS = 500
 
@@ -127,7 +128,7 @@ export function buildProjectionWriter(
     }
     const timer = setTimeout(() => {
       pending.delete(k)
-      void doWrite(project_slug, project_id)
+      fireAndForget('write.doWrite', doWrite(project_slug, project_id))
     }, debounceMs)
     pending.set(k, {
       project_slug,

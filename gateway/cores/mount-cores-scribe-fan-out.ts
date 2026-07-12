@@ -68,6 +68,7 @@ import {
   fileScribeEmailWatermark,
 } from './email-managed-wiring.ts'
 import type { ScribeFanOut } from './scribe-fan-out.ts'
+import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
 
 /**
  * The composer-owned scribe fan-out binding (see module docblock §1). Wraps the
@@ -100,7 +101,7 @@ export function buildScribeCoresFanOut(
         logFailure('cores fan-out extraction failed', err)
       })
     inflight.add(p)
-    void p.finally(() => inflight.delete(p))
+    fireAndForget('mount-cores-scribe-fan-out.finally', p.finally(() => inflight.delete(p)))
   }
   return {
     fanOut,

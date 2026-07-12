@@ -8,6 +8,7 @@
     "@neutronai/chat-core": "workspace:*",
     "@neutronai/client-core": "workspace:*",
     "@neutronai/contracts": "workspace:*",
+    "@neutronai/logger": "workspace:*",
     "@neutronai/onboarding": "workspace:*",
     "@neutronai/runtime": "workspace:*",
     "@neutronai/wire-types": "workspace:*",

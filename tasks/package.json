@@ -6,6 +6,7 @@
   "dependencies": {
     "@neutronai/contracts": "workspace:*",
     "@neutronai/cron": "workspace:*",
+    "@neutronai/logger": "workspace:*",
     "@neutronai/migrations": "workspace:*",
     "@neutronai/onboarding": "workspace:*",
     "@neutronai/persistence": "workspace:*",

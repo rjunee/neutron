@@ -24,6 +24,7 @@ import type { SessionHandle } from '@neutronai/runtime/session-handle.ts'
 import type { AgentSpec, Substrate } from '@neutronai/runtime/substrate.ts'
 import { drainToOutcome } from '@neutronai/runtime/substrate-text.ts'
 import type { DispatchTurn, DispatchTurnResult } from './service.ts'
+import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
 
 export interface CancellableDispatchTurnOptions {
   /**
@@ -73,7 +74,7 @@ export function buildCancellableDispatchTurn(
     if (input.timeout_ms > 0) {
       timer = setTimer(() => {
         timedOut = true
-        void handle.cancel().catch(() => {})
+        fireAndForget('substrate-turn.cancel', handle.cancel().catch(() => {}))
       }, input.timeout_ms)
     }
 
