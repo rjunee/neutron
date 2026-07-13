@@ -102,6 +102,8 @@ export class WatchdogSupervisor {
         return self.startedAtMs ?? 0
       },
       health: () => ({ lastTickAt: this.lastTickAtMs, lastError: this.lastError }),
+      // Live: true while the supervisor's interval is armed (stop() nulls it).
+      isActive: () => this.timer !== null,
     }
   }
 

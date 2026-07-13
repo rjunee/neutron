@@ -268,7 +268,20 @@ export async function composeProductionGraph(
   if (coresModule !== null) {
     graph.register(coresModule)
   }
-  await graph.compose()
+  // §F2 — WHOLE-COMPOSITION failure atomicity. `graph.compose()` STARTS the
+  // module loops (reminders / trident / watchdog during their inits), and cron
+  // + the post-compose wiring run after. Per-loop register-before-start makes
+  // each loop individually atomic, but ACROSS loops a LATER failure (e.g. a
+  // reused `loop_registry` that collides on `cron`, which starts after the three
+  // module loops) would leave the earlier loops running — and `boot()`'s
+  // init-failure cleanup can't stop them because `graph` isn't assigned until
+  // this function RETURNS. So OWN the lifecycle here: wrap compose() + cron
+  // start + all post-compose wiring in one try/catch and, on ANY throw,
+  // `graph.shutdown()` (stops every started module loop in reverse-init order)
+  // BEFORE rethrowing. No leaked timer regardless of which loop collides.
+  let composedHttp: ComposedHttpHandler | null
+  try {
+    await graph.compose()
 
   // S15 (2026-05-17) — kick the CronScheduler over the line. Every cron
   // module's docblock (resume-on-reconnect, Sean Ellis, import-running)
@@ -327,26 +340,19 @@ export async function composeProductionGraph(
   //
   // Codex r1 P2 (2026-05-22) — `buildComposedHttpFromComposition` runs
   // AFTER `graph.compose()` + the cron scheduler `start()` calls
-  // above, so a failure here would leak the started graph (cron
-  // ticker, reminders tick loop, watchdog supervisor) — `boot()`'s
-  // init-failure catch can only see `graph` once this function
-  // returns. Pre-refactor the connect API construction happened
-  // inside `boot()` AFTER its `graph` variable was assigned, so its
-  // catch could `await graph.shutdown()`. Now we own the lifecycle
-  // until `return`: if the HTTP composition throws (the only realistic
-  // path is `import('@neutronai/connect/api/server.ts')` failing
-  // under a Managed boot when the submodule is unreadable), tear down
-  // the graph BEFORE re-throwing so the caller's catch doesn't see a
-  // half-running gateway it can't reach.
-  let composedHttp: ComposedHttpHandler | null
-  try {
-    composedHttp = await buildComposedHttpFromComposition(input)
+  // above, so a failure here would leak the started graph — now covered by the
+  // single whole-composition try/catch (§F2) that wraps compose() through here.
+  composedHttp = await buildComposedHttpFromComposition(input)
   } catch (err) {
+    // §F2 — ANY failure after `graph.register(...)` (a module-init loop-register
+    // collision during compose(), the cron register/start, Cores/connect wiring,
+    // or the HTTP composition) tears down every started module loop before
+    // rethrowing, so no timer leaks regardless of which loop or step failed.
     try {
       await graph.shutdown()
     } catch (shutdownErr) {
       console.error(
-        '[composeProductionGraph] graph shutdown after HTTP composition failure threw:',
+        '[composeProductionGraph] graph shutdown after composition failure threw:',
         shutdownErr,
       )
     }

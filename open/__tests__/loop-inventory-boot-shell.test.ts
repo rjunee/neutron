@@ -23,7 +23,6 @@ import { fileURLToPath } from 'node:url'
 
 import { boot, type BootHandle } from '@neutronai/gateway/index.ts'
 import type { ComposedProductionGraph } from '@neutronai/gateway/composition.ts'
-import { DORMANT_LOOPS } from '@neutronai/gateway/composition.ts'
 import type { SessionHandle } from '@neutronai/runtime/session-handle.ts'
 import type { Event } from '@neutronai/runtime/events.ts'
 import type { Substrate } from '@neutronai/runtime/substrate.ts'
@@ -133,9 +132,22 @@ test('gateway-liveness is a live descriptor with the watchdog cadence', async ()
   expect('lastError' in health).toBe(true)
 }, 30_000)
 
-test('the ONE boot line names all seven running loops + the dormant set', async () => {
-  const h = await bootOpen()
-  const line = registry(h).bootLine('owner', DORMANT_LOOPS)
+test('the real boot EMITS exactly ONE complete boot-inventory line (captured from console.log)', async () => {
+  // Capture the PRODUCTION console.log emission during the real boot — NOT a
+  // re-call of bootLine() — so deleting/duplicating the real emission fails here.
+  const lines: string[] = []
+  const orig = console.log
+  console.log = (...args: unknown[]): void => {
+    lines.push(args.map((a) => String(a)).join(' '))
+  }
+  try {
+    await bootOpen()
+  } finally {
+    console.log = orig
+  }
+  const inventoryLines = lines.filter((l) => l.includes('[loop-registry]'))
+  expect(inventoryLines).toHaveLength(1) // exactly one, emitted by the boot shell
+  const line = inventoryLines[0]!
   expect(line).toContain('7 loop(s) running')
   for (const name of EXPECTED_RUNNING_LOOPS) expect(line).toContain(name)
   expect(line).toContain('2 dormant (deferred): [agent-watcher, project-backup-scheduler]')

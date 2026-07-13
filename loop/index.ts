@@ -369,6 +369,10 @@ export class SupervisedLoop {
         return self.startedAtMs ?? 0
       },
       health: () => ({ lastTickAt: this.lastTickAtMs, lastError: this.lastError }),
+      // Live: true between start() and stop(). `started` is the loop's own
+      // lifecycle flag (stop() clears it), so a failure-atomicity shutdown that
+      // stops this loop is observable here.
+      isActive: () => this.started,
     }
   }
 }

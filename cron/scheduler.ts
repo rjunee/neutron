@@ -177,6 +177,8 @@ export class CronScheduler {
         return self.startedAtMs ?? 0
       },
       health: () => ({ lastTickAt: this.lastFireAtMs, lastError: this.lastFireError }),
+      // Live: true while the scheduler is started (stop() clears `started`).
+      isActive: () => this.started,
       detail: () => {
         const names = this.runningJobNames()
         return names.length === 0

@@ -184,3 +184,46 @@ test('composing with a colliding pre-loaded registry throws + leaks no timer (de
     rmSync(tmp, { recursive: true, force: true })
   }
 })
+
+test('WHOLE-COMPOSITION atomicity: a LATER collision stops the EARLIER loops (High defect)', async () => {
+  // Preload the registry with `cron` — which the graph starts AFTER the three
+  // module loops (reminders/trident/watchdog). Those three start successfully
+  // during compose(), THEN cron's register throws. The whole-composition
+  // try/catch must `graph.shutdown()` all three before rethrowing — no leaked
+  // timer even though the failing loop is not the one that leaked.
+  const tmp = mkdtempSync(join(tmpdir(), 'neutron-loop-atomicity-'))
+  const db = ProjectDb.open(join(tmp, 'owner.db'))
+  try {
+    applyMigrations(db.raw())
+    const preloaded = new LoopRegistry()
+    preloaded.register({
+      name: 'cron',
+      cadenceMs: 0,
+      startedAt: 1,
+      health: () => ({ lastTickAt: null, lastError: null }),
+    })
+    let threw = false
+    try {
+      await composeProductionGraph({
+        db,
+        project_slug: OWNER,
+        ...noOpInputBase,
+        loop_registry: preloaded,
+      })
+    } catch (err) {
+      threw = true
+      expect((err as Error).message).toMatch(/already registered/)
+    }
+    expect(threw).toBe(true)
+    // The three module loops registered their descriptors during compose (before
+    // the cron collision). Each must have been STOPPED by the atomicity shutdown.
+    for (const name of ['reminders', 'trident', 'watchdog']) {
+      const desc = preloaded.get(name)
+      expect(desc, `earlier loop '${name}' should have registered during compose`).toBeDefined()
+      expect(desc?.isActive?.(), `earlier loop '${name}' must be stopped, not leaked`).toBe(false)
+    }
+  } finally {
+    db.close()
+    rmSync(tmp, { recursive: true, force: true })
+  }
+})

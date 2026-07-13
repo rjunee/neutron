@@ -17,6 +17,7 @@ import { MAX_UPLOAD_BYTES_DEFAULT } from './upload/import-upload-handler.ts'
 // file holds ZERO imports — static OR dynamic — into Managed dirs
 // (signup/, provisioning/, identity/, proxy/).
 import { composeProductionGraph, DORMANT_LOOPS, type ComposedProductionGraph } from './composition.ts'
+import { LoopRegistry } from '@neutronai/loop'
 import { resolveBootConfig, type BootConfig } from '@neutronai/config/index.ts'
 import { assertWideBindPolicy } from './boot-bind-policy.ts'
 
@@ -520,21 +521,28 @@ export async function boot(options: BootOptions = {}): Promise<BootHandle> {
   let livenessStartedAt: number | null = null
   let livenessLastTickAt: number | null = null
   let livenessLastError: unknown = null
-  // The composed graph carries the shared registry (composeProductionGraph
-  // returns a ComposedProductionGraph). REGISTER BEFORE START (failure-atomic):
-  // a dup throws before the interval is armed, so no timer leaks.
+  // true between start and the shutdown clearInterval — the liveness loop's
+  // `isActive()` (mirrors the other loops' start/stop lifecycle flag).
+  let livenessActive = false
+  // The registry is the composed graph's when present (composeProductionGraph
+  // returns a ComposedProductionGraph); the COMPOSER-LESS `/healthz` boot has no
+  // graph, but the liveness interval still runs — so create a standalone registry
+  // there so EVERY boot path inventories its running loops (no uninventoried
+  // loop). REGISTER BEFORE START (failure-atomic): a dup throws before the
+  // interval is armed, so no timer leaks.
   const composedGraph = graph as ComposedProductionGraph | null
-  if (composedGraph?.loopRegistry !== undefined) {
-    composedGraph.loopRegistry.register({
-      name: 'gateway-liveness',
-      cadenceMs: WATCHDOG_INTERVAL_MS,
-      get startedAt(): number {
-        return livenessStartedAt ?? 0
-      },
-      health: () => ({ lastTickAt: livenessLastTickAt, lastError: livenessLastError }),
-    })
-  }
+  const loopRegistry = composedGraph?.loopRegistry ?? new LoopRegistry()
+  loopRegistry.register({
+    name: 'gateway-liveness',
+    cadenceMs: WATCHDOG_INTERVAL_MS,
+    get startedAt(): number {
+      return livenessStartedAt ?? 0
+    },
+    health: () => ({ lastTickAt: livenessLastTickAt, lastError: livenessLastError }),
+    isActive: () => livenessActive,
+  })
   livenessStartedAt = Date.now()
+  livenessActive = true
   let watchdogTimer: ReturnType<typeof setInterval> | null = setInterval(() => {
     let tickError: unknown = null
     // Catch transient sd_notify failures (kernel-side `sendto()` errors,
@@ -569,9 +577,9 @@ export async function boot(options: BootOptions = {}): Promise<BootHandle> {
 
   // §F2 — the ONE complete boot inventory line, now that EVERY long-lived loop
   // (composer loops + graph loops + this gateway-liveness loop) has started.
-  if (composedGraph?.loopRegistry !== undefined) {
-    console.log(composedGraph.loopRegistry.bootLine(project_slug, DORMANT_LOOPS))
-  }
+  // Emitted on EVERY boot path — composed AND composer-less (which inventories
+  // just gateway-liveness) — so no running loop is ever uninventoried.
+  console.log(loopRegistry.bootLine(project_slug, DORMANT_LOOPS))
 
   let shuttingDown = false
   const shutdown = async (opts?: { force?: boolean }): Promise<void> => {
@@ -601,6 +609,7 @@ export async function boot(options: BootOptions = {}): Promise<BootHandle> {
     if (watchdogTimer !== null) {
       clearInterval(watchdogTimer)
       watchdogTimer = null
+      livenessActive = false // §F2 — the gateway-liveness loop is now stopped.
     }
     if (graph !== null) {
       try {

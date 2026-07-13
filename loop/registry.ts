@@ -62,6 +62,13 @@ export interface LoopDescriptor {
    * generalisation.
    */
   detail?(): string
+  /**
+   * Whether the loop's timer is currently armed (started AND not yet stopped) —
+   * a LIVE read. Lets a failure-atomicity boundary test assert that a loop
+   * started earlier in a composition was STOPPED when a later loop's
+   * registration/start threw. Optional; loops that can be stopped implement it.
+   */
+  isActive?(): boolean
 }
 
 /**
