@@ -366,11 +366,66 @@ function minMaxNormalise(values: number[]): number[] {
 }
 
 /**
- * The tables `search()` (and every read/write) requires. `open()` guarantees
- * these exist before returning, so a `search()` can never throw
- * "no such table". Kept in sync with `SCHEMA` / `DROP_SCHEMA`.
+ * The doc-search objects `SCHEMA` creates, whose structure the fingerprint
+ * covers. Includes the FTS5 shadow tables SQLite auto-creates for `doc_fts`
+ * (`doc_fts_data`, `_idx`, `_content`, `_docsize`, `_config`) — a malformed or
+ * mis-versioned FTS mirror changes their DDL, so folding them in makes the
+ * fingerprint sensitive to FTS corruption too. Any object whose name is NOT in
+ * this set (a stray unrelated table) is IGNORED — the fingerprint is scoped to
+ * doc-search's own schema so inert foreign tables never trigger a rebuild.
  */
-const REQUIRED_TABLES = ['doc_chunks', 'doc_fts'] as const
+function isDocSearchObject(name: string): boolean {
+  return name === 'doc_chunks' || name === 'doc_fts' || name.startsWith('doc_fts_')
+}
+
+/**
+ * A stable structural fingerprint of doc-search's own schema in `db`.
+ *
+ * Reads `sqlite_master.sql` for every doc-search object (tables, the FTS mirror
+ * + its shadow tables, indexes, triggers), NORMALIZES for stability — sort by
+ * (type, name) so rowid/creation order never matters, collapse each DDL's
+ * internal whitespace, drop `IF NOT EXISTS` which SQLite strips from stored SQL
+ * anyway — and joins into one deterministic string. Two DBs whose doc-search
+ * schema is structurally identical fingerprint EQUAL; ANY drift (wrong/missing
+ * column, missing/extra index or trigger, malformed FTS) differs. `sql` is NULL
+ * for auto-indexes; those are represented by name only.
+ */
+function schemaFingerprint(db: Database): string {
+  const rows = db
+    .query<{ type: string; name: string; sql: string | null }, []>(
+      `SELECT type, name, sql FROM sqlite_master ORDER BY type, name`,
+    )
+    .all()
+    .filter((r) => isDocSearchObject(r.name))
+  return rows
+    .map((r) => {
+      const sql = (r.sql ?? '')
+        .replace(/\s+/g, ' ')
+        .replace(/\bIF NOT EXISTS\b/gi, '')
+        .trim()
+      return `${r.type}\x1f${r.name}\x1f${sql}`
+    })
+    .join('\x1e')
+}
+
+/**
+ * The fingerprint of a CORRECT current-schema DB, derived from a fresh
+ * in-memory build of `SCHEMA` (never hardcoded, so it can't drift from the DDL).
+ * Computed once and cached for the process.
+ */
+let expectedFingerprint: string | null = null
+function currentSchemaFingerprint(): string {
+  if (expectedFingerprint === null) {
+    const ref = openSidecar(':memory:')
+    try {
+      ref.exec(SCHEMA)
+      expectedFingerprint = schemaFingerprint(ref)
+    } finally {
+      ref.close()
+    }
+  }
+  return expectedFingerprint
+}
 
 /**
  * Bring a freshly-opened DB to EXACTLY the running binary's schema.
@@ -379,40 +434,32 @@ const REQUIRED_TABLES = ['doc_chunks', 'doc_fts'] as const
  * `<owner_home>/cache/doc-search/`, derived entirely from the on-disk project
  * docs and repopulated by the next `refreshIndex` pass). Because it is
  * disposable, the cache MUST match the running binary's schema and is made
- * SELF-HEALING: it is DROP-and-recreated on ANY `user_version` mismatch, in
- * EITHER direction — there is no in-place `ALTER` and no attempt to trust a
- * foreign stamp.
+ * SELF-HEALING: it is DROP-and-recreated on ANY `user_version` mismatch (either
+ * direction) OR ANY structural drift — there is no in-place `ALTER` and no
+ * attempt to trust a foreign or corrupt schema.
  *
- *   - `version < SCHEMA_VERSION` (legacy pre-RA4 DB still carrying the removed
- *     `doc_chunks.embedding` column, reporting 0; or a brand-new empty DB, also
- *     0) → rebuild. For a fresh DB the drops are `IF EXISTS` no-ops.
- *   - `version > SCHEMA_VERSION` (a DB written by a NEWER binary, then opened by
- *     an older/rolled-back one) → ALSO rebuild. This DELIBERATELY SUPERSEDES an
- *     earlier "preserve the future stamp / open as-is" approach: opening a
+ *   - `version !== SCHEMA_VERSION` → rebuild. Covers a legacy pre-RA4 DB (still
+ *     carrying the removed `doc_chunks.embedding` column, reporting 0) and a
+ *     fresh empty DB (also 0, drops are `IF EXISTS` no-ops), AND a DB written by
+ *     a NEWER/rolled-back binary (a foreign stamp is NOT trusted — opening a
  *     divergent future DB as-is left an UNUSABLE cache whose `search()` threw
- *     "no such table: doc_fts" (e.g. a bare `PRAGMA user_version=2` DB with no
- *     tables). A newer stamp is NOT trusted — the disposable cache is rebuilt to
- *     the current schema and repopulated from source docs.
- *   - `version === SCHEMA_VERSION` → same-schema reopen: no rebuild.
- *
- * Belt-and-suspenders: after the version path, VALIDATE that every
- * `REQUIRED_TABLES` object exists; if any is missing (a corrupt / partially
- * written cache that still happens to be stamped at `SCHEMA_VERSION`), rebuild.
- * So `open()` NEVER returns a runtime whose `search()` would throw.
+ *     "no such table: doc_fts"; e.g. a bare `PRAGMA user_version=2` DB).
+ *   - Otherwise the stamp matches, but the STRUCTURE is still verified against a
+ *     SCHEMA FINGERPRINT (see `schemaFingerprint`). A same-version DB whose
+ *     doc-search schema drifted — a missing table, a `doc_chunks` with the wrong
+ *     columns, a missing/extra trigger or index, a malformed FTS mirror —
+ *     mismatches and is rebuilt. This one integrity gate SUBSUMES a mere
+ *     table-existence check, so `open()` NEVER returns a runtime that would fail
+ *     on a corrupt/malformed same-version schema (no "no such table" / "no such
+ *     column" at search/index time).
+ *   - A CORRECT current-schema DB fingerprint-matches and is NOT rebuilt on
+ *     reopen (idempotent — normalization strips all non-deterministic ordering).
  */
 function migrateSchema(db: Database): void {
   const row = db.query<{ user_version: number }, []>('PRAGMA user_version').get()
   const version = row?.user_version ?? 0
 
-  if (version !== SCHEMA_VERSION) {
-    rebuildSchema(db)
-    return
-  }
-
-  // Stamp matches — trust it, but cheaply confirm the required tables are all
-  // present (guards a corrupt / half-written cache stamped at the right
-  // version). Missing anything → rebuild.
-  if (!requiredTablesPresent(db)) {
+  if (version !== SCHEMA_VERSION || schemaFingerprint(db) !== currentSchemaFingerprint()) {
     rebuildSchema(db)
   }
 }
@@ -424,16 +471,4 @@ function rebuildSchema(db: Database): void {
   // `user_version` takes an integer literal (no bound params in a PRAGMA);
   // SCHEMA_VERSION is a hardcoded numeric constant, so this is injection-safe.
   db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`)
-}
-
-/** True iff every `REQUIRED_TABLES` object exists in `sqlite_master`. */
-function requiredTablesPresent(db: Database): boolean {
-  return REQUIRED_TABLES.every(
-    (name) =>
-      db
-        .query<{ n: number }, [string]>(
-          `SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'table' AND name = ?`,
-        )
-        .get(name)?.n === 1,
-  )
 }

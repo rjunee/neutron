@@ -361,9 +361,9 @@ describe('DocSearchIndex (keyword-only; no dead embedder seam) — RA4', () => {
     })
 
     test('a corrupt cache stamped at the current version but missing doc_fts self-heals', async () => {
-      // Belt-and-suspenders: a half-written cache stamped at SCHEMA_VERSION but
-      // missing a required table. The required-table validation must catch it
-      // and rebuild so search() never throws.
+      // A half-written cache stamped at SCHEMA_VERSION but missing a table. The
+      // schema fingerprint (missing object → mismatch) catches it and rebuilds
+      // so search() never throws.
       const partial = new Database(dbPath)
       partial.exec(`
         CREATE TABLE doc_chunks (id INTEGER PRIMARY KEY, body TEXT);
@@ -381,6 +381,55 @@ describe('DocSearchIndex (keyword-only; no dead embedder seam) — RA4', () => {
       await reopened.indexFile(fileInput('p', 'docs/a.md', '# A\n\nwidget body'))
       expect((await reopened.search({ query: 'widget' })).map((h) => h.path)).toEqual(['docs/a.md'])
       reopened.close()
+    })
+
+    test('a SAME-version DB with a MALFORMED doc_chunks (wrong columns) self-heals via fingerprint', async () => {
+      // The whack-a-mole gap that existence-checking missed: user_version=1 AND
+      // both tables present by NAME, but doc_chunks has the WRONG columns
+      // (missing `project` etc.). Existence-only checks accept it → indexFile()
+      // later throws "no such column: project". The schema FINGERPRINT catches
+      // the structural drift and rebuilds to the correct schema.
+      const malformed = new Database(dbPath)
+      malformed.exec(`
+        CREATE TABLE doc_chunks (id INTEGER PRIMARY KEY, body TEXT);
+        CREATE VIRTUAL TABLE doc_fts USING fts5(
+          title, heading, body, content='doc_chunks', content_rowid='id',
+          tokenize='unicode61 remove_diacritics 2'
+        );
+        PRAGMA user_version = 1;
+      `)
+      malformed.close()
+
+      const reopened = DocSearchIndex.open(dbPath)
+      // Rebuilt to the correct schema: doc_chunks now has the real columns.
+      const cols = reopened
+        .raw()
+        .query<{ name: string }, []>(`SELECT name FROM pragma_table_info('doc_chunks')`)
+        .all()
+        .map((c) => c.name)
+      expect(cols).toContain('project')
+      expect(cols).toContain('relpath')
+      expect(cols).toContain('heading')
+      // indexFile()/search() work — no "no such column".
+      await reopened.indexFile(fileInput('p', 'docs/a.md', '# A\n\nwidget body'))
+      expect((await reopened.search({ query: 'widget' })).map((h) => h.path)).toEqual(['docs/a.md'])
+      reopened.close()
+    })
+
+    test('a CORRECT current-schema DB does NOT rebuild on reopen (fingerprint stable)', async () => {
+      // Build a correct v1 DB via open(), index a row, then reopen. A stable
+      // fingerprint must NOT trigger a rebuild — the row must survive across
+      // reopens (a spurious rebuild would drop it).
+      const first = DocSearchIndex.open(dbPath)
+      await first.indexFile(fileInput('p', 'docs/keep.md', '# Keep\n\nstable anchovy content'))
+      first.close()
+
+      // Reopen repeatedly; each must be a no-op (row survives every time).
+      for (let i = 0; i < 3; i++) {
+        const again = DocSearchIndex.open(dbPath)
+        expect((await again.search({ query: 'anchovy' })).map((h) => h.path)).toEqual(['docs/keep.md'])
+        again.close()
+      }
     })
   })
 })
