@@ -273,6 +273,9 @@ if (import.meta.main) {
   // F3 — standalone entrypoint: install the process-level rejection/exception
   // net so an UNEXPECTED failure here (this process does NOT go through the
   // gateway `boot()` that installs it) is logged-then-crashed, not a bare exit.
+  // RESIDUAL: covers the body onward; this dual library+entry module's OWN
+  // static imports (stable internal modules) are the accepted in-module-install
+  // limit (no bootstrap split — it exports `bootSignup`/`createLandingServer`).
   installProcessSafetyNet()
 
   // Top-level await: Bun supports TLA in entry modules. An unhandled

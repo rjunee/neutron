@@ -236,6 +236,24 @@ function defaultOnUncaught(): void {
  *     policy; an uncaught exception likewise leaves the process undefined.
  *   Neither is ever swallowed, and the crash decision sits in a `finally` so a
  *   throwing log sink can never skip it.
+ *
+ * STATIC-IMPORT COVERAGE (F3) — a module's `import` statements RESOLVE +
+ * EVALUATE before any BODY statement runs, so calling this as the first body
+ * statement of an entrypoint covers everything from the body onward but NOT a
+ * failure in THAT entry module's OWN static-import evaluation (a missing
+ * dependency / throwing module-init in its top-level `import` graph). Where the
+ * import graph warrants it — the SPAWNED MCP processes, whose static graph
+ * includes an external SDK — the entry uses BOOTSTRAP-INDIRECTION: a thin loader
+ * (`runtime/adapters/claude-code/persistent/{tools-bridge,dev-channel}.ts`)
+ * whose only static import is this stable logger leaf arms the net, then
+ * DYNAMICALLY imports the real body (`*-impl.ts`), so the body's whole static
+ * graph evaluates AFTER the net is armed. For the DUAL library-export + entry
+ * modules (`gateway/index.ts`, `open/server.ts`, and the CLIs
+ * `landing/boot.ts`, `gbrain-doctor.ts`, `diagnostics-cli.ts`,
+ * `migrations/runner.ts`) a bootstrap split would churn their exporters, and
+ * their failure-prone loads (composer/config/db) already run in the BODY (after
+ * this install) — only their own top-level imports of STABLE INTERNAL modules
+ * are the residual, an accepted inherent limitation of in-module installation.
  */
 export function installProcessSafetyNet(options?: ProcessSafetyNetOptions): void {
   if (installedRejectionHandler !== undefined) return

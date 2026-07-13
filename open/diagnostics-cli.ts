@@ -172,6 +172,9 @@ export function runDiagnosticsCli(argv: string[], env: NodeJS.ProcessEnv = proce
 }
 
 if (import.meta.main) {
-  installProcessSafetyNet() // F3 — standalone CLI entrypoint
+  // F3 — standalone CLI entrypoint. RESIDUAL: covers the body onward; this dual
+  // library+entry module's OWN static imports (stable internal modules) are the
+  // accepted in-module-install limit. See installProcessSafetyNet doc.
+  installProcessSafetyNet()
   process.exit(runDiagnosticsCli(process.argv.slice(2)))
 }

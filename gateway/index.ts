@@ -771,7 +771,11 @@ if (import.meta.main) {
   // resolve + dynamic composer load below (the most failure-prone startup
   // phase: missing composer module, bad config), so an early failure is
   // logged-then-crashed with structure, not a bare Bun error. boot()'s own
-  // idempotent install then no-ops.
+  // idempotent install then no-ops. RESIDUAL (documented at
+  // installProcessSafetyNet): this covers the BODY onward; a failure in this
+  // dual library+entry module's OWN static imports (stable internal modules) is
+  // the accepted in-module-install limit — no bootstrap split (it exports
+  // `boot()` and friends, whose importers a split would churn).
   installProcessSafetyNet()
   // Top-level await: Bun supports TLA in entry modules. An unhandled rejection
   // exits non-zero, which systemd's Restart=always policy converts into a

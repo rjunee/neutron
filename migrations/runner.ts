@@ -196,7 +196,11 @@ export function summarizeMigrateResult(result: ApplyResult): string {
 }
 
 if (import.meta.main) {
-  installProcessSafetyNet() // F3 — standalone CLI entrypoint (`bun run migrate`)
+  // F3 — standalone CLI entrypoint (`bun run migrate`). RESIDUAL: covers the
+  // body onward (incl. the fallible `new Database(...)`); this dual library+entry
+  // module's OWN static imports (stable internal modules) are the accepted
+  // in-module-install limit. See installProcessSafetyNet doc.
+  installProcessSafetyNet()
   // An explicit db-path arg wins (install.sh passes one). With no arg, resolve
   // the SAME file the server opens — NEUTRON_DB_PATH (honored from .env, which
   // Bun auto-loads) else <NEUTRON_HOME>/project.db — so the documented bare

@@ -1,31 +1,39 @@
-// F3 (Medium #3) — every PRODUCTION standalone entrypoint must arm the
-// process-level rejection/exception safety net as its FIRST statement, so an
+// F3 (Medium #3 + the static-import boundary) — every PRODUCTION standalone
+// entrypoint must arm the process-level rejection/exception safety net so an
 // EARLY startup failure is logged-then-crashed (structured `[process] event=…`)
-// instead of a bare runtime error. These are BEHAVIORAL subprocess tests: spawn
-// the real entrypoint, trigger a failure, and assert (a) nonzero exit and (b)
-// the structured log — proving the net is armed BEFORE the failure point.
+// instead of a bare runtime error. BEHAVIORAL subprocess tests: spawn the real
+// entrypoint, trigger a failure, assert (a) nonzero exit + (b) the structured
+// log — proving the net is armed BEFORE the failure point.
 //
-// STANDALONE-ENTRYPOINT INVENTORY (systematic sweep: `import.meta.main`,
-// top-level `await`, and `bun <script.ts>` spawns):
-//   - gateway/index.ts        → installs it inside boot()
-//   - open/server.ts          → hoisted install (before startOpenServer) [tested]
-//   - landing/boot.ts         → install first in the import.meta.main block
-//   - runtime/.../dev-channel.ts   → spawned MCP process; install first [tested]
-//   - runtime/.../tools-bridge.ts  → spawned MCP process; install first [tested]
-//   - gbrain-memory/gbrain-doctor.ts    → CLI; install first in the main block
-//   - open/diagnostics-cli.ts           → CLI; install first in the main block
-//   - migrations/runner.ts              → CLI; install first [tested]
-//   NOT in-repo: the trident launcher (external `claude -p`) + the Managed
-//   launcher (separate repo). Skipped: CI tooling (depcruise-ratchet-compare).
+// STANDALONE-ENTRYPOINT INVENTORY (sweep: `import.meta.main`, top-level `await`,
+// `bun <script.ts>` spawns) + net coverage:
+//   - gateway/index.ts        → hoisted install first in the main block [tested]
+//   - open/server.ts          → hoisted install before startOpenServer  [tested]
+//   - migrations/runner.ts    → install first in the main block         [tested]
+//   - landing/boot.ts         → install first in the main block         [tested]
+//   - gbrain-doctor.ts / diagnostics-cli.ts → install first; SELF-HANDLING CLIs
+//       (own top-level catch/exit → no env-triggerable uncaught path), so the
+//       net is a backstop — verified by install-presence + clean-run + the
+//       shared mechanism/static-init tests.
+//   - runtime/.../tools-bridge.ts, dev-channel.ts → SPAWNED MCP processes, now
+//       BOOTSTRAP entries: install the net (only static import = the logger
+//       leaf) then DYNAMICALLY import `*-impl.ts`, so the impl's whole static
+//       graph (incl. the external MCP SDK) is covered. [import-inject + shape +
+//       static-init tests]
+//   DUAL library+entry (gateway/open/CLIs) keep the in-body install; the
+//   residual (their own static imports of stable internal modules) is documented
+//   at installProcessSafetyNet. NOT in-repo: trident launcher (external
+//   `claude -p`), Managed launcher (separate repo). Skipped: CI tooling.
 import { describe, expect, test } from 'bun:test'
 import { spawnSync } from 'node:child_process'
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { join } from 'node:path'
 
 const REPO = fileURLToPath(new URL('../../', import.meta.url))
 const abs = (rel: string): string => join(REPO, rel)
+const LOGGER = abs('logger/fire-and-forget.ts')
 const STRUCTURED = /\[process\] event=(uncaught_exception|unhandled_rejection)/
 
 /** Env with NODE_ENV removed (so the net's crash policy is NOT suppressed). */
@@ -36,24 +44,29 @@ function crashEnv(extra: Record<string, string> = {}): Record<string, string> {
   return { ...env, ...extra }
 }
 
+/** Spawn an entrypoint with an early failure; return {status, out}. */
+function spawnEntry(
+  rel: string,
+  opts: { env?: Record<string, string>; args?: string[] } = {},
+): { status: number | null; out: string } {
+  const res = spawnSync('bun', [abs(rel), ...(opts.args ?? [])], {
+    env: crashEnv(opts.env),
+    encoding: 'utf8',
+    timeout: 30000,
+  })
+  return { status: res.status, out: `${res.stdout}${res.stderr}` }
+}
+
 /**
- * Spawn a top-level-script entrypoint that does NOT self-crash via env, then —
- * once its module top-level has run (arming the net) — inject an unhandled
- * throw. stdin is kept OPEN so the MCP scripts don't graceful-shutdown on EOF
- * before the injected failure fires. Proves the entrypoint INSTALLS the net.
+ * Import a top-level-script (bootstrap) entry — arming its net — then inject an
+ * unhandled throw. stdin is kept OPEN so the MCP scripts don't graceful-shutdown
+ * on EOF first. Proves the entry INSTALLS the net.
  */
 async function importThenInject(entryAbs: string): Promise<{ code: number; out: string }> {
   const harness = `await import(${JSON.stringify(entryAbs)}); setTimeout(() => { throw new Error('probe-injected') }, 250)`
   const proc = Bun.spawn(['bun', '-e', harness], {
-    env: crashEnv({
-      SINK_PORT: '1',
-      SINK_TOKEN: 'x',
-      SESSION_ID: 's',
-      CHANNEL_NAME: 'c',
-      BRIDGE_SERVER_NAME: 'n',
-      TOOLS_MANIFEST_PATH: '/dev/null',
-    }),
-    stdin: 'pipe', // kept open — never written/closed
+    env: crashEnv({ SINK_PORT: '1', SINK_TOKEN: 'x', SESSION_ID: 's', CHANNEL_NAME: 'c', BRIDGE_SERVER_NAME: 'n', TOOLS_MANIFEST_PATH: '/dev/null' }),
+    stdin: 'pipe',
     stdout: 'pipe',
     stderr: 'pipe',
   })
@@ -65,31 +78,27 @@ async function importThenInject(entryAbs: string): Promise<{ code: number; out: 
 }
 
 describe('production entrypoints arm the safety net before early failures', () => {
-  test('open/server.ts — an early composer-load failure is logged-then-crashed (finding #1)', () => {
+  test('open/server.ts — early composer-load failure is logged-then-crashed (finding #1)', () => {
     const home = mkdtempSync(join(tmpdir(), 'f3-os-'))
     try {
-      const res = spawnSync('bun', [abs('open/server.ts')], {
-        env: crashEnv({ NEUTRON_HOME: join(home, 'h'), NEUTRON_GRAPH_COMPOSER_MODULE: '/nonexistent-xyz.ts' }),
-        encoding: 'utf8',
-        timeout: 30000,
+      const { status, out } = spawnEntry('open/server.ts', {
+        env: { NEUTRON_HOME: join(home, 'h'), NEUTRON_GRAPH_COMPOSER_MODULE: '/nonexistent-xyz.ts' },
       })
-      expect(res.status).not.toBe(0)
-      expect(`${res.stdout}${res.stderr}`).toMatch(STRUCTURED)
+      expect(status).not.toBe(0)
+      expect(out).toMatch(STRUCTURED)
     } finally {
       rmSync(home, { recursive: true, force: true })
     }
   })
 
-  test('gateway/index.ts — an early composer-load failure is logged-then-crashed', () => {
+  test('gateway/index.ts — early composer-load failure is logged-then-crashed', () => {
     const home = mkdtempSync(join(tmpdir(), 'f3-gw-'))
     try {
-      const res = spawnSync('bun', [abs('gateway/index.ts')], {
-        env: crashEnv({ NEUTRON_HOME: join(home, 'h'), NEUTRON_GRAPH_COMPOSER_MODULE: '/nonexistent-xyz.ts' }),
-        encoding: 'utf8',
-        timeout: 30000,
+      const { status, out } = spawnEntry('gateway/index.ts', {
+        env: { NEUTRON_HOME: join(home, 'h'), NEUTRON_GRAPH_COMPOSER_MODULE: '/nonexistent-xyz.ts' },
       })
-      expect(res.status).not.toBe(0)
-      expect(`${res.stdout}${res.stderr}`).toMatch(STRUCTURED)
+      expect(status).not.toBe(0)
+      expect(out).toMatch(STRUCTURED)
     } finally {
       rmSync(home, { recursive: true, force: true })
     }
@@ -98,11 +107,48 @@ describe('production entrypoints arm the safety net before early failures', () =
   test('migrations/runner.ts — an unopenable db path is logged-then-crashed', () => {
     const dir = mkdtempSync(join(tmpdir(), 'f3-mr-')) // a DIRECTORY is not an openable db file
     try {
-      const res = spawnSync('bun', [abs('migrations/runner.ts'), dir], {
-        env: crashEnv(),
-        encoding: 'utf8',
-        timeout: 30000,
-      })
+      const { status, out } = spawnEntry('migrations/runner.ts', { args: [dir] })
+      expect(status).not.toBe(0)
+      expect(out).toMatch(STRUCTURED)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('landing/boot.ts — an invalid signup port is logged-then-crashed', () => {
+    const { status, out } = spawnEntry('landing/boot.ts', { env: { NEUTRON_SIGNUP_PORT: 'notaport' } })
+    expect(status).not.toBe(0)
+    expect(out).toMatch(STRUCTURED)
+  })
+
+  test('tools-bridge.ts (bootstrap) — installs the net (post-import failure is caught)', async () => {
+    const { code, out } = await importThenInject(abs('runtime/adapters/claude-code/persistent/tools-bridge.ts'))
+    expect(code).not.toBe(0)
+    expect(out).toMatch(STRUCTURED)
+  })
+
+  test('dev-channel.ts (bootstrap) — installs the net (post-import failure is caught)', async () => {
+    const { code, out } = await importThenInject(abs('runtime/adapters/claude-code/persistent/dev-channel.ts'))
+    expect(code).not.toBe(0)
+    expect(out).toMatch(STRUCTURED)
+  })
+
+  // THE static-import boundary: a bootstrap arms the net BEFORE the impl's whole
+  // static graph evaluates, so a dependency that fails to RESOLVE during the
+  // impl's initialization is caught (structured log), not a bare crash.
+  test('bootstrap-indirection covers the impl static-import graph (finding: static init)', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'f3-boot-'))
+    try {
+      const bootstrap = join(dir, 'bootstrap.ts')
+      // Same shape as tools-bridge.ts / dev-channel.ts: net first, then a
+      // DYNAMIC import whose static graph fails to resolve.
+      writeFileSync(
+        bootstrap,
+        `import { installProcessSafetyNet } from ${JSON.stringify(LOGGER)}\n` +
+          `installProcessSafetyNet()\n` +
+          `await import(${JSON.stringify(join(dir, 'missing-impl.ts'))})\n`,
+      )
+      const res = spawnSync('bun', [bootstrap], { env: crashEnv(), encoding: 'utf8', timeout: 30000 })
       expect(res.status).not.toBe(0)
       expect(`${res.stdout}${res.stderr}`).toMatch(STRUCTURED)
     } finally {
@@ -110,21 +156,33 @@ describe('production entrypoints arm the safety net before early failures', () =
     }
   })
 
-  test('tools-bridge.ts — installs the net (post-import unhandled failure is caught)', async () => {
-    const { code, out } = await importThenInject(abs('runtime/adapters/claude-code/persistent/tools-bridge.ts'))
-    expect(code).not.toBe(0)
-    expect(out).toMatch(STRUCTURED)
+  // Self-handling CLIs: prove the net is INSTALLED + does not break a clean run.
+  // (They own their error handling → no env-triggerable uncaught path; the net
+  // is a backstop, exercised by the shared mechanism + static-init tests above.)
+  test('gbrain-doctor.ts + diagnostics-cli.ts install the net and run cleanly under it', () => {
+    for (const rel of ['gbrain-memory/gbrain-doctor.ts', 'open/diagnostics-cli.ts']) {
+      expect(readFileSync(abs(rel), 'utf8')).toContain('installProcessSafetyNet()')
+    }
+    // diagnostics-cli is fully synchronous + self-handling → exits 0 cleanly.
+    expect(spawnEntry('open/diagnostics-cli.ts').status).toBe(0)
   })
 
-  test('dev-channel.ts — installs the net (post-import unhandled failure is caught)', async () => {
-    const { code, out } = await importThenInject(abs('runtime/adapters/claude-code/persistent/dev-channel.ts'))
-    expect(code).not.toBe(0)
-    expect(out).toMatch(STRUCTURED)
+  test('the spawned MCP entries are BOOTSTRAPS (net + dynamic-import, heavy imports moved to *-impl)', () => {
+    for (const rel of [
+      'runtime/adapters/claude-code/persistent/tools-bridge.ts',
+      'runtime/adapters/claude-code/persistent/dev-channel.ts',
+    ]) {
+      const src = readFileSync(abs(rel), 'utf8')
+      expect(src).toContain('installProcessSafetyNet()')
+      expect(src).toMatch(/await import\(['"]\.\/[a-z-]+-impl\.ts['"]\)/)
+      // heavy external SDK STATIC import must NOT be in the bootstrap (it moved
+      // to the impl, so it evaluates AFTER the net is armed). Check import
+      // statements only — a doc-comment mention of the package is fine.
+      expect(src).not.toMatch(/^\s*import\s.*@modelcontextprotocol/m)
+    }
   })
 
-  test('gateway/index.ts installs it in boot(); open/server.ts hoists it before boot', () => {
-    // gateway boot() is the composition install; open/server hoists an explicit
-    // call BEFORE startOpenServer so it is armed even earlier (boot re-install no-ops).
+  test('gateway/index.ts + open/server.ts install the net (dual library+entry, documented residual)', () => {
     expect(readFileSync(abs('gateway/index.ts'), 'utf8')).toContain('installProcessSafetyNet(')
     expect(readFileSync(abs('open/server.ts'), 'utf8')).toContain('installProcessSafetyNet(')
   })

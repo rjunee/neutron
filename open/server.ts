@@ -106,7 +106,11 @@ if (import.meta.main) {
   // composer load / config read inside startOpenServer() (the most
   // failure-prone phase: missing composer module, bad config), so an early
   // startup failure is logged-then-crashed with structure, not a bare Bun
-  // error. `boot()`'s own idempotent install then no-ops.
+  // error. `boot()`'s own idempotent install then no-ops. RESIDUAL (documented
+  // at installProcessSafetyNet): covers the BODY onward; a failure in this dual
+  // library+entry module's OWN static imports (stable internal modules) is the
+  // accepted in-module-install limit — no bootstrap split (it exports
+  // `startOpenServer`, whose importers a split would churn).
   installProcessSafetyNet()
   // Top-level await — Bun supports TLA in entry modules. An unhandled
   // rejection exits non-zero; under a process supervisor that becomes a

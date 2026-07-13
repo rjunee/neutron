@@ -570,7 +570,11 @@ export function renderDoctorReport(report: DoctorReport): string {
 // Honors --no-gbrain via NEUTRON_SKIP_GBRAIN=1 (reports skipped, exits 0).
 
 if (import.meta.main) {
-  installProcessSafetyNet() // F3 — standalone CLI entrypoint (async GBrain round-trip)
+  // F3 — standalone CLI entrypoint (async GBrain round-trip). RESIDUAL: covers
+  // the body onward; this dual library+entry module's OWN static imports (stable
+  // internal modules) are the accepted in-module-install limit (no bootstrap
+  // split — it exports doctor helpers). See installProcessSafetyNet doc.
+  installProcessSafetyNet()
   const argv = Bun.argv.slice(2)
   const json = argv.includes('--json')
   const force = argv.includes('--force')
