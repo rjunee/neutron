@@ -80,6 +80,21 @@ describe('production entrypoints arm the safety net before early failures', () =
     }
   })
 
+  test('gateway/index.ts — an early composer-load failure is logged-then-crashed', () => {
+    const home = mkdtempSync(join(tmpdir(), 'f3-gw-'))
+    try {
+      const res = spawnSync('bun', [abs('gateway/index.ts')], {
+        env: crashEnv({ NEUTRON_HOME: join(home, 'h'), NEUTRON_GRAPH_COMPOSER_MODULE: '/nonexistent-xyz.ts' }),
+        encoding: 'utf8',
+        timeout: 30000,
+      })
+      expect(res.status).not.toBe(0)
+      expect(`${res.stdout}${res.stderr}`).toMatch(STRUCTURED)
+    } finally {
+      rmSync(home, { recursive: true, force: true })
+    }
+  })
+
   test('migrations/runner.ts — an unopenable db path is logged-then-crashed', () => {
     const dir = mkdtempSync(join(tmpdir(), 'f3-mr-')) // a DIRECTORY is not an openable db file
     try {

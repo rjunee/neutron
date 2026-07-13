@@ -767,6 +767,11 @@ export async function loadGraphComposerFromEnv(
 }
 
 if (import.meta.main) {
+  // F3 — arm the safety net as the VERY FIRST statement, BEFORE the config
+  // resolve + dynamic composer load below (the most failure-prone startup
+  // phase: missing composer module, bad config), so an early failure is
+  // logged-then-crashed with structure, not a bare Bun error. boot()'s own
+  // idempotent install then no-ops.
   // Top-level await: Bun supports TLA in entry modules. An unhandled rejection
   // exits non-zero, which systemd's Restart=always policy converts into a
   // respawn after RestartSec=5s.

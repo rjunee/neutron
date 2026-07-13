@@ -242,22 +242,25 @@ function classifyWrapperArg(arg) {
   return null
 }
 
-// ── One-hop local-variable resolution (LIMITED, best-effort) ──────────
-// A pre-swallow can be laundered through a local binding:
+// ── Local const-alias-chain resolution (best-effort) ──────────────────
+// A pre-swallow can be laundered through local bindings:
 //   const s = p.catch(() => {}); fireAndForget('n', s)
-// When a wrapper's promise arg is a plain IDENTIFIER, resolve it ONE HOP to a
-// local `const`/`let` initializer in the SAME scope (a simple, non-reassigned
-// binding) and re-run the shape checks on that initializer.
+//   const a = p.catch(() => {}); const b = a; fireAndForget('n', b)   // chain
+// When a wrapper's promise arg is a plain IDENTIFIER, resolve it through a CHAIN
+// of IMMUTABLE `const` aliases to its terminal initializer and re-run the shape
+// checks on that initializer. A const-alias chain is DECIDABLE, so it is fully
+// followed (visited-set + depth cap guard cycles).
 //
-// INHERENT BOUNDARY (documented + locked by tests) — a SYNTACTIC lint gate
-// cannot catch every dataflow-laundered pre-swallow. Multi-hop chains
-// (`const a = p.catch(); const b = a; fireAndForget(n, b)`), a REASSIGNED
-// binding, a promise returned from another function, stored in an object/array
-// then passed, or a `.catch` applied conditionally elsewhere are general
-// dataflow (undecidable) and OUT OF SCOPE — the gate does NOT flag them, by
-// design. This gate is a best-effort REGRESSION PREVENTER for the DIRECT +
-// LOCAL-ONE-HOP shapes, NOT a proof of no-pre-swallow. The ACTUAL guarantee is
-// the RUNTIME wrapper (`fireAndForget` always logs+counts a rejection it
+// INHERENT BOUNDARY (documented + locked by tests) — a SYNTACTIC gate cannot
+// chase general dataflow. These are OUT OF SCOPE (→ NOT flagged, by design):
+//   - a REASSIGNED `let` (or any non-const alias hop) — the value is uncertain;
+//   - a promise stored in / read from an OBJECT / ARRAY / computed member;
+//   - a promise returned from ANOTHER function or referenced cross-function /
+//     as a parameter;
+//   - a `.catch` applied CONDITIONALLY elsewhere.
+// This gate is a best-effort REGRESSION PREVENTER for the DIRECT + immutable-
+// const-alias-CHAIN shapes, NOT a proof of no-pre-swallow. The ACTUAL guarantee
+// is the RUNTIME wrapper (`fireAndForget` always logs+counts a rejection it
 // RECEIVES) + the process safety net; a promise that never reaches the wrapper
 // is a code-review concern the gate best-effort-flags, not a soundness hole in
 // the reliability mechanism.
@@ -319,38 +322,10 @@ function classifyResolvedInitializer(init) {
   return null
 }
 
-/** Is `name` REASSIGNED (`=`/compound/`++`/`--`) anywhere within `scope`? */
-function isReassignedInScope(name, scope) {
-  let found = false
-  const w = (n) => {
-    if (found) return
-    if (
-      ts.isBinaryExpression(n) &&
-      ts.isIdentifier(n.left) &&
-      n.left.text === name &&
-      n.operatorToken.kind >= ts.SyntaxKind.FirstAssignment &&
-      n.operatorToken.kind <= ts.SyntaxKind.LastAssignment
-    ) {
-      found = true
-      return
-    }
-    if (
-      (ts.isPostfixUnaryExpression(n) || ts.isPrefixUnaryExpression(n)) &&
-      ts.isIdentifier(n.operand) &&
-      n.operand.text === name
-    ) {
-      found = true
-      return
-    }
-    ts.forEachChild(n, w)
-  }
-  w(scope)
-  return found
-}
-
-/** Resolve a plain identifier ONE HOP to its nearest-enclosing-scope `const`/
- *  `let` initializer (non-reassigned for `let`), or null. Requires parent links. */
-function resolveOneHopInitializer(identNode) {
+/** Find `identNode`'s nearest-enclosing-scope `const` binding's initializer, or
+ *  null. ONLY `const` (immutable) is resolvable — a `let`/`var` binding is
+ *  treated as undecidable (it could be reassigned). Requires parent links. */
+function findConstInitializer(identNode) {
   const name = identNode.text
   let scope = identNode.parent
   while (scope) {
@@ -359,21 +334,39 @@ function resolveOneHopInitializer(identNode) {
     if (statements) {
       for (const st of statements) {
         if (!ts.isVariableStatement(st)) continue
-        const flags = st.declarationList.flags
-        const isConst = (flags & ts.NodeFlags.Const) !== 0
-        const isLet = (flags & ts.NodeFlags.Let) !== 0
-        if (!isConst && !isLet) continue
+        if ((st.declarationList.flags & ts.NodeFlags.Const) === 0) continue // const only
         for (const d of st.declarationList.declarations) {
-          if (ts.isIdentifier(d.name) && d.name.text === name && d.initializer) {
-            if (isLet && isReassignedInScope(name, scope)) return null // reassigned → undecidable
-            return d.initializer
-          }
+          if (ts.isIdentifier(d.name) && d.name.text === name && d.initializer) return d.initializer
         }
       }
     }
     scope = scope.parent
   }
   return null
+}
+
+/**
+ * Resolve a plain identifier through a chain of IMMUTABLE `const` aliases to its
+ * terminal non-identifier initializer (then shape-checkable), or null. A chain
+ * of const aliases (`const b = a; const a = p.catch(...)`) is DECIDABLE, so it
+ * is fully followed. Terminates as OUT-OF-SCOPE (→ null, not flagged) on any
+ * genuinely-undecidable step: a NON-const binding (`let`/`var`, reassignable), a
+ * parameter / cross-scope binding not found as a local `const`, a non-identifier
+ * initializer that isn't shape-checkable (object/array/computed member, an
+ * unrecognized call chain), or a cycle (visited-set + depth cap).
+ */
+function resolveConstAliasChain(identNode) {
+  const visited = new Set()
+  let current = identNode
+  for (let depth = 0; depth < 2; depth += 1) {
+    if (!ts.isIdentifier(current)) return current // reached a non-identifier initializer
+    if (visited.has(current.text)) return null // cycle
+    visited.add(current.text)
+    const init = findConstInitializer(current)
+    if (!init) return null // non-const binding / param / cross-scope / not found → undecidable
+    current = init // identifier → keep following; non-identifier → returned next iteration
+  }
+  return null // depth cap
 }
 
 const WRAPPER_FNS = new Set(['fireAndForget', 'neutralizeAbandonedSettle'])
@@ -442,9 +435,11 @@ export function findPreSwallowedWraps(source, fileName = 'fixture.ts') {
         const arg = fn === 'fireAndForget' ? node.arguments[1] : node.arguments[0]
         if (arg) {
           let reason = classifyWrapperArg(arg)
-          // One-hop: a pre-swallow laundered through a local `const`/`let`.
+          // A pre-swallow laundered through a chain of immutable `const` aliases
+          // (fully resolved; reassigned-let / cross-scope / object-stored are the
+          // documented undecidable boundary — see resolveConstAliasChain).
           if (!reason && ts.isIdentifier(arg)) {
-            const init = resolveOneHopInitializer(arg)
+            const init = resolveConstAliasChain(arg)
             if (init) reason = classifyResolvedInitializer(init)
           }
           if (reason) {

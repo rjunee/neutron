@@ -298,16 +298,42 @@ describe('findPreSwallowedWraps', () => {
     expect(findPreSwallowedWraps("const s = p.finally(() => c())\nfireAndForget('n', s)").length).toBe(0)
   })
 
-  // ── DOCUMENTED INHERENT BOUNDARY — locked as INTENTIONAL, not accidental ──
-  // A syntactic gate cannot chase general dataflow; these are NOT flagged BY
-  // DESIGN. The runtime wrapper + safety net are the actual guarantee.
-  test('does NOT flag a TWO-hop alias (documented limit)', () => {
+  // A const-alias CHAIN is decidable → fully resolved and FLAGGED.
+  test('flags a swallow laundered through a TWO-hop const-alias chain', () => {
     const src = "const a = p.catch(() => {})\nconst s = a\nfireAndForget('n', s)"
+    expect(findPreSwallowedWraps(src).length).toBe(1)
+  })
+
+  test('flags a const-alias chain declared out of order (const b = a; const a = …)', () => {
+    const src = "const b = a\nconst a = p.catch(() => {})\nfireAndForget('n', b)"
+    expect(findPreSwallowedWraps(src).length).toBe(1)
+  })
+
+  test('PASSES a multi-hop const chain of a RAW promise', () => {
+    const src = "const a = p\nconst b = a\nfireAndForget('n', b)"
     expect(findPreSwallowedWraps(src).length).toBe(0)
   })
 
+  // ── DOCUMENTED INHERENT BOUNDARY — locked as INTENTIONAL, not accidental ──
+  // A syntactic gate cannot chase general dataflow; these are NOT flagged BY
+  // DESIGN. The runtime wrapper + safety net are the actual guarantee.
   test('does NOT flag a REASSIGNED let alias (documented limit)', () => {
     const src = "let s = p.catch(() => {})\ns = q\nfireAndForget('n', s)"
+    expect(findPreSwallowedWraps(src).length).toBe(0)
+  })
+
+  test('does NOT follow a NON-const (let) alias hop (documented limit)', () => {
+    const src = "let a = p.catch(() => {})\nconst s = a\nfireAndForget('n', s)"
+    expect(findPreSwallowedWraps(src).length).toBe(0)
+  })
+
+  test('does NOT flag a promise stored in / read from an object member (documented limit)', () => {
+    const src = "const s = box.p\nfireAndForget('n', s)"
+    expect(findPreSwallowedWraps(src).length).toBe(0)
+  })
+
+  test('does NOT flag a cycle in const aliases (guarded, documented limit)', () => {
+    const src = "const a = b\nconst b = a\nfireAndForget('n', a)"
     expect(findPreSwallowedWraps(src).length).toBe(0)
   })
 
