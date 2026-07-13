@@ -75,12 +75,25 @@ function logRejectionSafely(name: string, err: unknown): void {
 }
 
 /**
- * Run a promise fire-and-forget with its rejection made VISIBLE. Attaches a
- * `.catch` that logs `name` + the error at `error` level and bumps the
- * process-wide rejection counter. The attached handler NEVER rethrows, so the
- * returned-and-ignored promise can never itself become an unhandled rejection
- * and the caller's control flow is unaffected — identical fire-and-forget
- * semantics to a bare `void p`, minus the silent swallow.
+ * Run a promise fire-and-forget with its rejection made VISIBLE + NON-FATAL.
+ * Attaches a `.catch` that logs `name` + the error at `error` level and bumps
+ * the process-wide rejection counter, then swallows. The handler NEVER rethrows,
+ * so the returned-and-ignored promise can never itself become an unhandled
+ * rejection and the caller's control flow is unaffected.
+ *
+ * POLICY — this is DELIBERATELY non-fatal, and is NOT semantically identical to
+ * a bare `void p`: in Bun a bare `void Promise.reject()` is an unhandled
+ * rejection that EXITS the process (fatal), whereas `fireAndForget` logs +
+ * counts + swallows (the process survives). That is the intended design — a
+ * promise a developer EXPLICITLY voided is genuine fire-and-forget work that
+ * should be made visible, not tear down a long-lived server. The complementary
+ * fatal backstop is the process-level safety net
+ * ({@link installProcessSafetyNet}, log-then-crash): it catches any rejection
+ * that ESCAPES a wrap — i.e. genuinely unexpected. So: KNOWN fire-and-forget
+ * work → visible + soft (here); UNKNOWN / escaped rejection → fatal (the net).
+ * If a specific site's failure breaks an invariant such that continuing is
+ * dangerous, it is NOT fire-and-forget — either don't wrap it, or pass `onError`
+ * to escalate (e.g. trigger a supervised restart / `process.exit`).
  *
  * @param name    a short, descriptive site name (e.g. `'scribe.persistDaily'`) —
  *                logged verbatim so a rejection is traceable to its origin.

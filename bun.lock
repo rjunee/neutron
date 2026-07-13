@@ -415,6 +415,9 @@
     },
     "migrations": {
       "name": "@neutronai/migrations",
+      "dependencies": {
+        "@neutronai/logger": "workspace:*",
+      },
     },
     "onboarding": {
       "name": "@neutronai/onboarding",

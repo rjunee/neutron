@@ -61,7 +61,7 @@ import {
   CallToolRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js'
 import { TurnIdEcho } from './turn-id-echo.ts'
-import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
+import { fireAndForget, installProcessSafetyNet } from '@neutronai/logger/fire-and-forget.ts'
 
 const SINK_PORT = parseInt(process.env['SINK_PORT'] || '0', 10)
 const SINK_TOKEN = process.env['SINK_TOKEN'] || ''
@@ -72,6 +72,11 @@ const CHANNEL_NAME = process.env['CHANNEL_NAME'] || ''
  *  reset-per-turn scalar + a stale-reply debt counter, NOT a positional id-queue.
  *  Logic + rationale (incl. the Codex-r1-P1 abandoned-turn fix) live in the
  *  unit-tested `TurnIdEcho`. */
+// F3 — standalone entrypoint (this file is the spawned channel MCP process, not
+// launched via gateway `boot()`): install the process-level rejection/exception
+// net so an unexpected failure is logged-then-crashed with structure.
+installProcessSafetyNet()
+
 const turnEcho = new TurnIdEcho()
 
 /** Primary echo path (S3 #107): pull the originating message's `turn_id` off the

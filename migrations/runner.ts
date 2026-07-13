@@ -4,6 +4,7 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { resolveOpenDbPath } from './db-path.ts'
+import { installProcessSafetyNet } from '@neutronai/logger/fire-and-forget.ts'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 
@@ -195,6 +196,7 @@ export function summarizeMigrateResult(result: ApplyResult): string {
 }
 
 if (import.meta.main) {
+  installProcessSafetyNet() // F3 — standalone CLI entrypoint (`bun run migrate`)
   // An explicit db-path arg wins (install.sh passes one). With no arg, resolve
   // the SAME file the server opens — NEUTRON_DB_PATH (honored from .env, which
   // Bun auto-loads) else <NEUTRON_HOME>/project.db — so the documented bare

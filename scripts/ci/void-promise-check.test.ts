@@ -236,4 +236,38 @@ describe('findPreSwallowedWraps', () => {
   test('PASSES a raw promise-returning call', () => {
     expect(findPreSwallowedWraps("fireAndForget('n', doWork())").length).toBe(0)
   })
+
+  // Medium #2 (Codex): alias + namespace imports must be resolved, not just a
+  // literal `fireAndForget` identifier.
+  test('flags a pre-swallow through an ALIASED import', () => {
+    const src =
+      "import { fireAndForget as faf } from '@neutronai/logger/fire-and-forget.ts'\nfaf('n', p.catch(() => {}))"
+    expect(findPreSwallowedWraps(src).length).toBe(1)
+  })
+
+  test('flags a pre-swallow through a NAMESPACE import', () => {
+    const src =
+      "import * as ff from '@neutronai/logger/fire-and-forget.ts'\nff.fireAndForget('n', p.catch(() => {}))"
+    expect(findPreSwallowedWraps(src).length).toBe(1)
+  })
+
+  test('flags an aliased neutralizeAbandonedSettle pre-swallow', () => {
+    const src =
+      "import { neutralizeAbandonedSettle as nas } from '@neutronai/logger/fire-and-forget.ts'\nnas(p.then(a, b))"
+    expect(findPreSwallowedWraps(src).length).toBe(1)
+  })
+
+  test('PASSES aliased + namespace calls with the raw + onError form', () => {
+    const aliased =
+      "import { fireAndForget as faf } from '@neutronai/logger/fire-and-forget.ts'\nfaf('n', p, (e) => log(e))"
+    const namespaced =
+      "import * as ff from '@neutronai/logger/fire-and-forget.ts'\nff.fireAndForget('n', p, (e) => log(e))"
+    expect(findPreSwallowedWraps(aliased).length).toBe(0)
+    expect(findPreSwallowedWraps(namespaced).length).toBe(0)
+  })
+
+  test('does NOT treat `ns.fireAndForget` as a wrapper when ns is NOT the faf module', () => {
+    const src = "import * as ff from './unrelated.ts'\nff.fireAndForget('n', p.catch(() => {}))"
+    expect(findPreSwallowedWraps(src).length).toBe(0)
+  })
 })

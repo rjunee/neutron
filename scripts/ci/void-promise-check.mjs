@@ -244,21 +244,74 @@ function classifyWrapperArg(arg) {
 
 const WRAPPER_FNS = new Set(['fireAndForget', 'neutralizeAbandonedSettle'])
 
+/** A module specifier that refers to the fire-and-forget wrapper module
+ *  (`@neutronai/logger/fire-and-forget.ts`, or a relative `.../fire-and-forget`). */
+function isFafModuleSpecifier(spec) {
+  return /(^|\/)fire-and-forget(\.ts)?$/.test(spec)
+}
+
+/**
+ * Resolve which LOCAL names / namespaces are bound to the wrapper functions in
+ * `sf`, so an ALIASED import (`import { fireAndForget as faf }`) or a NAMESPACE
+ * import (`import * as ff` → `ff.fireAndForget(...)`) is recognized — not just a
+ * literal `fireAndForget` identifier.
+ */
+function resolveWrapperBindings(sf) {
+  const localFns = new Map() // localName → 'fireAndForget' | 'neutralizeAbandonedSettle'
+  const namespaces = new Set() // local name of a `import * as ns` from the module
+  const walk = (node) => {
+    if (ts.isImportDeclaration(node) && ts.isStringLiteral(node.moduleSpecifier) && isFafModuleSpecifier(node.moduleSpecifier.text)) {
+      const nb = node.importClause?.namedBindings
+      if (nb && ts.isNamespaceImport(nb)) namespaces.add(nb.name.text)
+      else if (nb && ts.isNamedImports(nb)) {
+        for (const el of nb.elements) {
+          const imported = (el.propertyName ?? el.name).text // original export name
+          if (WRAPPER_FNS.has(imported)) localFns.set(el.name.text, imported)
+        }
+      }
+    }
+    ts.forEachChild(node, walk)
+  }
+  walk(sf)
+  return { localFns, namespaces }
+}
+
+/** The wrapper kind a call targets (resolving aliases + namespace access), or
+ *  null. Bare `fireAndForget(...)` still matches (canonical import / test
+ *  fixtures without imports). */
+function wrapperKindOfCall(callee, localFns, namespaces) {
+  if (ts.isIdentifier(callee)) {
+    return localFns.get(callee.text) ?? (WRAPPER_FNS.has(callee.text) ? callee.text : null)
+  }
+  if (
+    ts.isPropertyAccessExpression(callee) &&
+    ts.isIdentifier(callee.expression) &&
+    namespaces.has(callee.expression.text) &&
+    WRAPPER_FNS.has(callee.name.text)
+  ) {
+    return callee.name.text
+  }
+  return null
+}
+
 /** Detector (exported for tests): every wrapper call whose promise arg
  *  pre-swallows. `fireAndForget` promise = arg[1]; `neutralizeAbandonedSettle`
- *  = arg[0]. */
+ *  = arg[0]. Recognizes aliased + namespace-imported wrapper calls. */
 export function findPreSwallowedWraps(source, fileName = 'fixture.ts') {
   const sf = ts.createSourceFile(fileName, source, ts.ScriptTarget.Latest, true)
+  const { localFns, namespaces } = resolveWrapperBindings(sf)
   const out = []
   const visit = (node) => {
-    if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && WRAPPER_FNS.has(node.expression.text)) {
-      const fn = node.expression.text
-      const arg = fn === 'fireAndForget' ? node.arguments[1] : node.arguments[0]
-      if (arg) {
-        const reason = classifyWrapperArg(arg)
-        if (reason) {
-          const { line } = sf.getLineAndCharacterOfPosition(node.getStart(sf))
-          out.push({ line: line + 1, fn, reason })
+    if (ts.isCallExpression(node)) {
+      const fn = wrapperKindOfCall(node.expression, localFns, namespaces)
+      if (fn) {
+        const arg = fn === 'fireAndForget' ? node.arguments[1] : node.arguments[0]
+        if (arg) {
+          const reason = classifyWrapperArg(arg)
+          if (reason) {
+            const { line } = sf.getLineAndCharacterOfPosition(node.getStart(sf))
+            out.push({ line: line + 1, fn, reason })
+          }
         }
       }
     }

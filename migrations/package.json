@@ -3,5 +3,7 @@
   "type": "module",
   "main": "./index.ts",
   "private": true,
-  "dependencies": {}
+  "dependencies": {
+    "@neutronai/logger": "workspace:*"
+  }
 }

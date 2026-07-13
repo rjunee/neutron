@@ -43,7 +43,7 @@ import { existsSync, readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createLandingServer } from './server.ts'
-import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
+import { fireAndForget, installProcessSafetyNet } from '@neutronai/logger/fire-and-forget.ts'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 
@@ -270,6 +270,11 @@ function withQueryParam(rawUrl: string, key: string, value: string): string {
 }
 
 if (import.meta.main) {
+  // F3 — standalone entrypoint: install the process-level rejection/exception
+  // net so an UNEXPECTED failure here (this process does NOT go through the
+  // gateway `boot()` that installs it) is logged-then-crashed, not a bare exit.
+  installProcessSafetyNet()
+
   // Top-level await: Bun supports TLA in entry modules. An unhandled
   // rejection exits non-zero, which systemd's Restart=always policy
   // converts into a respawn after RestartSec=5s.

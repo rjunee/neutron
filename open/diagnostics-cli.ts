@@ -19,6 +19,7 @@ import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { composeDiagnostics, type DiagnosticsReport } from '@neutronai/gateway/diagnostics/diagnostics-report.ts'
 import { buildInstanceDiagnosticsSources } from '@neutronai/gateway/diagnostics/instance-sources.ts'
 import { resolveNeutronHome, resolveOpenDbPath, resolveOwnerSlug } from './owner-identity.ts'
+import { installProcessSafetyNet } from '@neutronai/logger/fire-and-forget.ts'
 
 /** Build the report from the on-disk DB. Returns the report or an error note. */
 export function collectCliDiagnostics(env: NodeJS.ProcessEnv = process.env):
@@ -171,5 +172,6 @@ export function runDiagnosticsCli(argv: string[], env: NodeJS.ProcessEnv = proce
 }
 
 if (import.meta.main) {
+  installProcessSafetyNet() // F3 — standalone CLI entrypoint
   process.exit(runDiagnosticsCli(process.argv.slice(2)))
 }
