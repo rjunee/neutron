@@ -378,13 +378,33 @@ function minMaxNormalise(values: number[]): number[] {
  * empty DB also reports 0, but the drops are `IF EXISTS` no-ops there, so the
  * fresh-DB path is unchanged. Once at/above the stamp, `SCHEMA` is idempotent
  * (`IF NOT EXISTS`) and nothing is dropped.
+ *
+ * The version is stamped ONLY when we actually rebuild. A DB already at or
+ * above `SCHEMA_VERSION` keeps its existing stamp untouched — so a DB written
+ * by a FUTURE binary (`user_version` > ours) is opened AS-IS and NOT
+ * downgraded to our version, preserving forward-version detection.
  */
 function migrateSchema(db: Database): void {
   const row = db.query<{ user_version: number }, []>('PRAGMA user_version').get()
   const version = row?.user_version ?? 0
-  if (version < SCHEMA_VERSION) db.exec(DROP_SCHEMA)
+  if (version < SCHEMA_VERSION) {
+    db.exec(DROP_SCHEMA)
+    db.exec(SCHEMA)
+    // Stamp ONLY after a rebuild — a DB already >= SCHEMA_VERSION keeps its
+    // own stamp (a future v2 stays v2, never downgraded to v1). `user_version`
+    // takes an integer literal (no bound params in a PRAGMA); SCHEMA_VERSION is
+    // a hardcoded numeric constant, so this is injection-safe.
+    db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`)
+    return
+  }
+  if (version > SCHEMA_VERSION) {
+    console.warn(
+      `[doc-search] index DB user_version=${version} is newer than this ` +
+        `binary's schema (${SCHEMA_VERSION}); opening as-is without rebuild.`,
+    )
+  }
+  // At/above the stamp: the schema is present and idempotent. Ensure the
+  // objects exist (a fresh DB at exactly SCHEMA_VERSION is impossible, but a
+  // forward-version DB already has them) without dropping or restamping.
   db.exec(SCHEMA)
-  // `user_version` takes an integer literal (no bound params in a PRAGMA);
-  // SCHEMA_VERSION is a hardcoded numeric constant, so this is injection-safe.
-  db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`)
 }

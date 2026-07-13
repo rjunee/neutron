@@ -270,5 +270,43 @@ describe('DocSearchIndex (keyword-only; no dead embedder seam) — RA4', () => {
       expect(hits.map((h) => h.path)).toEqual(['docs/keep.md'])
       second.close()
     })
+
+    test('a FUTURE-version DB is opened as-is: not rebuilt, not downgraded', async () => {
+      // Simulate a DB written by a newer binary: current RA4 schema (no
+      // embedding column) but stamped at a HIGHER user_version (2). The
+      // current binary must open it as-is — no rebuild, no downgrade of the
+      // stamp — so forward-version detection is preserved.
+      const future = new Database(dbPath)
+      future.exec(`
+        CREATE TABLE doc_chunks (
+          id INTEGER PRIMARY KEY, project TEXT NOT NULL, relpath TEXT NOT NULL,
+          abs_path TEXT NOT NULL, title TEXT NOT NULL, heading TEXT NOT NULL,
+          ordinal INTEGER NOT NULL, body TEXT NOT NULL, mtime_ms INTEGER NOT NULL,
+          indexed_at INTEGER NOT NULL
+        );
+        CREATE VIRTUAL TABLE doc_fts USING fts5(
+          title, heading, body, content='doc_chunks', content_rowid='id',
+          tokenize='unicode61 remove_diacritics 2'
+        );
+        CREATE TRIGGER doc_chunks_ai AFTER INSERT ON doc_chunks BEGIN
+          INSERT INTO doc_fts(rowid, title, heading, body)
+          VALUES (new.id, new.title, new.heading, new.body);
+        END;
+        INSERT INTO doc_chunks
+          (project, relpath, abs_path, title, heading, ordinal, body, mtime_ms, indexed_at)
+        VALUES ('p', 'docs/future.md', '/o/p/docs/future.md', 'Future', '', 0, 'futuristic sprocket body', 1000, 1);
+        PRAGMA user_version = 2;
+      `)
+      future.close()
+
+      const reopened = DocSearchIndex.open(dbPath)
+      // NOT downgraded — the stamp stays at the future version.
+      expect(reopened.raw().query<{ user_version: number }, []>('PRAGMA user_version').get()?.user_version).toBe(2)
+      // NOT rebuilt — the pre-existing row survives (a rebuild would have
+      // dropped it).
+      const hits = await reopened.search({ query: 'sprocket' })
+      expect(hits.map((h) => h.path)).toEqual(['docs/future.md'])
+      reopened.close()
+    })
   })
 })
