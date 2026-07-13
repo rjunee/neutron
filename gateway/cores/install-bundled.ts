@@ -63,6 +63,7 @@ import type {
   LauncherIconLongPressEntry,
   LauncherIconMeta,
 } from './composer-state.ts'
+import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
 
 /**
  * Per-Core backend factories. The composer calls one per slug after a
@@ -261,13 +262,13 @@ export async function installBundledCores(
       // the existing structured `log` sink. The fail-soft decision (isolate the
       // failure + continue to the next Core) is UNCHANGED; emit is
       // fire-and-forget and can never throw.
-      void emitSystemEvent({
+      fireAndForget('install-bundled.emitSystemEvent', emitSystemEvent({
         event: 'core_install_failed',
         module: 'cores',
         level: 'error',
         project_slug: input.project_slug,
         payload: { core_slug: failure.core_slug, code: failure.code, message: failure.message },
-      })
+      }))
       // Continue to next Core. Failure isolation is the brief's lock.
     }
   }

@@ -76,6 +76,7 @@ import {
   readStringArray,
   type EngineInternals,
 } from './engine-internals.ts'
+import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
 
 export async function resolvePhasePromptSpecUncached(
   self: EngineInternals,
@@ -116,7 +117,7 @@ export async function resolvePhasePromptSpecUncached(
           (readStringArray(ps, 'non_work_interests') ?? []).length > 0 ||
           (readStringArray(ps, 'user_supplied_corrections') ?? []).length > 0
         if (already === null && hasSignal) {
-          void self.getOrStartCharacterSuggestions(project_slug, user_id, ps)
+          fireAndForget('engine-spec-resolution.getOrStartCharacterSuggestions', self.getOrStartCharacterSuggestions(project_slug, user_id, ps))
         }
       } catch {
         // Non-fatal — the personality_offered render falls back to its own

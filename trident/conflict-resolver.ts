@@ -45,6 +45,7 @@ import type { SessionHandle } from '@neutronai/runtime/session-handle.ts'
 import { getBestModel } from '@neutronai/runtime/models.ts'
 import type { MergeConflictResolver } from './merge.ts'
 import { DEFAULT_TIMEOUT_MS } from './liveness.ts'
+import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
 
 export interface BuildForgeConflictResolverOptions {
   /**
@@ -169,7 +170,7 @@ export function buildForgeConflictResolver(
     if (timeoutMs > 0) {
       timer = setTimer(() => {
         timedOut = true
-        void handle.cancel().catch(() => {})
+        fireAndForget('conflict-resolver.cancel', handle.cancel())
       }, timeoutMs)
     }
 
@@ -180,7 +181,7 @@ export function buildForgeConflictResolver(
         } else if (ev.kind === 'completion') {
           break
         } else if (ev.kind === 'error') {
-          void handle.cancel().catch(() => {})
+          fireAndForget('conflict-resolver.cancel', handle.cancel())
           return question('the resolver turn errored')
         }
       }

@@ -2,9 +2,11 @@
 #
 # scripts/ci/lint.sh — L5 layering gate: relative cross-workspace imports.
 #
-# Two complementary checks, both failing the build on a relative import that
+# CHECK 1 + CHECK 2 fail the build on a relative import that
 # crosses a `@neutronai/*` workspace-package boundary (which should use the
-# `@neutronai/<pkg>/...` specifier instead). depcruise (G4) tracks resolved
+# `@neutronai/<pkg>/...` specifier instead); CHECK 3 (F3) bans bare
+# `void <promise>` fire-and-forget outside the fireAndForget wrapper.
+# depcruise (G4) tracks resolved
 # module edges, not specifier shape, so it can't see either class; a relative
 # cross-package import also silently couples packages without ever touching
 # their `package.json` `dependencies`.
@@ -79,6 +81,13 @@ fi
 
 # ── CHECK 2: type-position import() queries ────────────────────────────
 if ! bun "$HERE/type-query-check.mjs"; then
+  fail=1
+fi
+
+# ── CHECK 3: F3 bare `void <promise>` fire-and-forget ban ──────────────
+# Every fire-and-forget promise must go through fireAndForget() so its
+# rejection is logged, not silently swallowed. See void-promise-check.mjs.
+if ! bun "$HERE/void-promise-check.mjs"; then
   fail=1
 fi
 

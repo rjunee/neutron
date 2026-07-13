@@ -65,6 +65,7 @@ import {
   readString,
   readStringArray,
 } from './engine-internals.ts'
+import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
 
 export async function reconcileSwitchIntentFromFreeform(
   self: EngineInternals,
@@ -848,12 +849,12 @@ export async function pollImportRunningAndAdvance(
       // O4 — VISIBILITY ONLY: journal the orphaned import (runner lost the
       // job) before the unchanged hard-failure UX. Fire-and-forget emit that
       // can never throw.
-      void emitSystemEvent({
+      fireAndForget('engine-import-routing.emitSystemEvent', emitSystemEvent({
         event: 'import_orphaned',
         module: 'onboarding',
         level: 'error',
         payload: { job_id, source, phase: state.phase },
-      })
+      }))
       return await self.emitImportRunningPromptSpec(input, state, observed_at, {
         sub_step: 'failed',
         source,

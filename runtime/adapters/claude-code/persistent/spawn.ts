@@ -32,6 +32,7 @@ import { createWedgedPromptDetector } from './wedged-prompt-detector.ts'
 import { COMPACT_RESUME_FULL_RE, COMPACT_RESUME_SUMMARY_RE, DEFAULT_AGENT_BASE_PROMPT, DEFAULT_DEV_CHANNEL_PATH, DEFAULT_TOOLS_BRIDGE_PATH, DEV_CHANNEL_DISCLAIMER_RE, DISCLAIMER_BOTTOM_N, RATE_LIMIT_OPTIONS_BOTTOM_N, RATE_LIMIT_OPTIONS_DEBOUNCE_MS, RATE_LIMIT_OPTIONS_RE, RATE_LIMIT_STOP_RE, SESSION_COMPACT_IDLE_QUIESCE_MS, TOOLS_BRIDGE_SERVER_NAME, TOOL_USE_QUESTION_RE, TOOL_USE_SELECTOR_RE, resolveTranscriptProjectsDir, runOutputScan, sendKey, surfaceSizeAlert } from './signatures.ts'
 import type { PersistentReplSubstrateOptions, ResumeDirective } from './types.ts'
 import { ReplSession, authFingerprintFor, httpHealth, mergeEnv, terminateChild, unlinkSessionConfigs } from './repl-session.ts'
+import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
 
 async function spawnSession(
   sessionKey: string,
@@ -402,7 +403,7 @@ async function spawnSession(
   // IDENTITY-GUARDED: a respawn re-attaches the SAME sessionId/sessionKey, so a
   // dying OLD child must not evict the NEW session a concurrent respawn already
   // installed (the resume race the P2-3 regression caught).
-  void child.exited.then(async (exitCode) => {
+  fireAndForget('spawn.then', child.exited.then(async (exitCode) => {
     session.onDeath()
     // Detach the row-#11 dead-turn JSONL watcher — this child's transcript is now
     // terminal; a respawn starts a fresh watcher for the new child.
@@ -442,7 +443,7 @@ async function spawnSession(
         pool.delete(sessionKey)
       }
     }
-  })
+  }))
 
   // Post-spawn assertion: child alive → /channel-ready (transport attached) →
   // HTTP /health → /channel-bound (MCP handshake complete).
@@ -572,7 +573,7 @@ async function spawnSession(
   // record's `has_session` true once the transcript exists, so a future
   // respawn / next-turn-after-crash resolves to `--resume` instead of fresh.
   const jsonlProbe = options.jsonlExistsProbe ?? makeJsonlExistsProbe(options.projectsDir)
-  void captureSession(
+  fireAndForget('spawn.captureSession', captureSession(
     sessionId,
     cwd,
     { jsonlExists: jsonlProbe, sleep: (ms) => Bun.sleep(ms) },
@@ -583,11 +584,11 @@ async function spawnSession(
         try {
           patchRecord(options.replRegistryPath, sessionKey, { has_session: true })
         } catch {
-          /* best-effort */
+          /* best-effort: a registry patch failure degrades to a fresh spawn
+             next time, not a fatal — kept local, not surfaced. */
         }
       }
-    })
-    .catch(() => undefined)
+    }))
 
   return session
 }

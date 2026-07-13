@@ -287,6 +287,7 @@ import type {
 } from '@neutronai/gateway/http/chat-bridge.ts'
 import type { OutgoingMessage } from '@neutronai/channels/types.ts'
 import type { ChatOutbound } from '@neutronai/landing/chat-protocol.ts'
+import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
 
 export interface BuildOpenGraphComposerOptions {
   /** Override the process env (tests). Defaults to `process.env`. */
@@ -792,10 +793,10 @@ export function buildOpenGraphComposer(
     // treats the durable row (not the notification) as the record. Fire-and-forget:
     // never block boot. Runs UNCONDITIONALLY (not gated on `llmPool`): if this
     // boot has no dispatcher but a prior one did, its orphans still deserve reaping.
-    void sweepOrphanedDispatchesOnBoot({
+    fireAndForget('composer.sweepOrphanedDispatchesOnBoot', sweepOrphanedDispatchesOnBoot({
       store: subagentRegistryStore,
       report: buildBootSweepReport(dispatchReport),
-    }).catch((err: unknown) => {
+    }), (err: unknown) => {
       console.warn(
         `[agent-dispatch] boot reap failed: ${err instanceof Error ? err.message : String(err)}`,
       )
@@ -2162,10 +2163,10 @@ export function buildOpenGraphComposer(
       const row = await createProjectRow(scaffoldDeps, { name: input.name })
       if (row.outcome !== 'skipped') {
         // Fire-and-forget on-disk scaffold; never blocks the response / rollback.
-        void materializeProjectScaffold(scaffoldDeps, {
+        fireAndForget('composer.materializeProjectScaffold', materializeProjectScaffold(scaffoldDeps, {
           name: row.name,
           project_id: row.project_id,
-        }).catch((err: unknown) => {
+        }), (err: unknown) => {
           console.warn(
             `[create-project] event=materialize_failed project=${project_slug} id=${
               row.project_id
@@ -2405,11 +2406,11 @@ export function buildOpenGraphComposer(
           return
         }
         const t = setTimeout(() => {
-          void tick()
+          fireAndForget('composer.tick', tick())
         }, IMPORT_WATCH_INTERVAL_MS)
         realmodeCleanups.push(() => clearTimeout(t))
       }
-      void tick()
+      fireAndForget('composer.tick', tick())
     }
     importWatchHolder.watch = watchImportCompletion
     // The onboarding interview preamble (offer history import only when a
@@ -2622,7 +2623,7 @@ export function buildOpenGraphComposer(
         // persisting a chat_log row (no stray bubble on reload).
         if (out.system_notice === true) adapter_options['system_notice'] = true
         if (Object.keys(adapter_options).length > 0) msg.adapter_options = adapter_options
-        void appWs.deref((adapter) => adapter.send(msg))
+        fireAndForget('composer.deref', appWs.deref((adapter) => adapter.send(msg)))
         // Rail-redesign: an agent reply on a PROJECT topic is fresh activity —
         // stamp the project's `last_activity_at` and re-fan `projects_changed`
         // so every connected rail reorders (this project pops to the top) and
@@ -2638,7 +2639,7 @@ export function buildOpenGraphComposer(
           // this project wouldn't yet have popped to the top. Async IIFE keeps
           // the fan itself sync + non-throwing; a stamp failure still emits (the
           // frame just keeps the prior order).
-          void (async (): Promise<void> => {
+          fireAndForget('composer.task', (async (): Promise<void> => {
             // P4 (table-ownership): the exact UPDATE moved into the owning
             // store — `touchActivityIncludingArchived` (best-effort, never
             // throws), NOT `touchActivity` (whose predicate also skips
@@ -2646,7 +2647,7 @@ export function buildOpenGraphComposer(
             // behaviour-preserving).
             await projectSettingsStore.touchActivityIncludingArchived(project_id)
             emitProjectsChangedNow(OWNER_USER_ID)
-          })()
+          })())
         }
       }
     // ── app-ws receiver + delivery cluster (C3d: carved to open/wiring/app-ws.ts) ─
@@ -3162,11 +3163,11 @@ export function prewarmSubstrate(substrate: Substrate): Promise<void> {
       // (never rejects). O4 adds a VISIBILITY-ONLY journal row for the otherwise
       // fully-silent prewarm failure; the emit is fire-and-forget + can never
       // throw (emitSystemEvent swallows all sink errors).
-      void emitSystemEvent({
+      fireAndForget('composer.emitSystemEvent', emitSystemEvent({
         event: 'prewarm_failed',
         module: 'open',
         payload: { error: err instanceof Error ? err.message : String(err) },
-      })
+      }))
     }
   })()
 }

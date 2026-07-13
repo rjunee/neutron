@@ -127,17 +127,28 @@ export async function guardedFire(
     await work()
     return true
   } catch (err) {
+    // The error sink must never re-throw out of the catch-all — that would
+    // break the "never rejects" contract and could become an unhandled
+    // rejection on a fire-and-forget timer path. Every fallback path (incl. the
+    // `console.error` itself, which a caller could have monkey-patched to throw)
+    // is wrapped so `guardedFire` GENUINELY never rejects — the void-promise
+    // gate's `loop/` exemption relies on this being true.
     if (onError !== undefined) {
-      // The error sink must never re-throw out of the catch-all — that would
-      // break the "never rejects" contract and could become an unhandled
-      // rejection on a fire-and-forget timer path.
       try {
         onError(name, err)
       } catch (sinkErr) {
-        console.error(`[supervised-loop] onError sink for '${name}' threw:`, sinkErr)
+        try {
+          console.error(`[supervised-loop] onError sink for '${name}' threw:`, sinkErr)
+        } catch {
+          /* console.error itself threw — nothing safe left to do; never reject */
+        }
       }
     } else {
-      console.error(`[supervised-loop] tick '${name}' threw:`, err)
+      try {
+        console.error(`[supervised-loop] tick '${name}' threw:`, err)
+      } catch {
+        /* console.error itself threw — nothing safe left to do; never reject */
+      }
     }
     return false
   }

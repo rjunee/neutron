@@ -96,6 +96,7 @@ import type { UserTurnInput } from '@neutronai/scribe/index.ts'
 import { OWNER_USER_ID } from '../owner-identity.ts'
 import type { Late } from './late.ts'
 import type { OpenWiringContext } from './context.ts'
+import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
 
 /**
  * Open-mode app-ws routing decision for an engine-emitted onboarding
@@ -795,7 +796,7 @@ export function wireAppWs(ctx: OpenWiringContext, deps: WireAppWsDeps): WiredApp
   // fans it live, so the ▶ route's clarifying question lands in the chat topic
   // exactly like a normal agent reply.
   buildClarifyPoster.post = (chatId: string, text: string): void => {
-    void appWs.deref((adapter) =>
+    fireAndForget('app-ws.deref', appWs.deref((adapter) =>
       adapter.send({
         topic: {
           topic_id: '',
@@ -806,7 +807,7 @@ export function wireAppWs(ctx: OpenWiringContext, deps: WireAppWsDeps): WiredApp
         },
         text,
       }),
-    )
+    ))
   }
   const appWsSurface = createAppWsSurface({
     adapter: appWsAdapter,

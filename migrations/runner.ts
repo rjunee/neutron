@@ -4,6 +4,7 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { resolveOpenDbPath } from './db-path.ts'
+import { installProcessSafetyNet } from '@neutronai/logger/fire-and-forget.ts'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 
@@ -195,6 +196,15 @@ export function summarizeMigrateResult(result: ApplyResult): string {
 }
 
 if (import.meta.main) {
+  // F3 — standalone CLI entrypoint (`bun run migrate`). RESIDUAL (deliberate):
+  // covers the body onward (incl. the fallible `new Database(...)`), but NOT
+  // this module's OWN static imports. NO bootstrap split — it is a DUAL
+  // library+entry module whose exports are consumed by PRODUCTION (gateway
+  // boot's `applyMigrationsToProjectDb`, comment-store / nexus-store's
+  // `applyProjectScopedMigrations`); splitting would repoint those importers.
+  // Its static imports are stable internal modules (bun:sqlite, node:fs,
+  // ./db-path.ts, logger). See installProcessSafetyNet doc.
+  installProcessSafetyNet()
   // An explicit db-path arg wins (install.sh passes one). With no arg, resolve
   // the SAME file the server opens — NEUTRON_DB_PATH (honored from .env, which
   // Bun auto-loads) else <NEUTRON_HOME>/project.db — so the documented bare

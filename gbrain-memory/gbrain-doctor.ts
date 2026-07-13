@@ -43,6 +43,7 @@ import { dirname, join } from 'node:path'
 import { GBrainStdioMcpClient } from './gbrain-stdio-client.ts'
 import { GBrainMemoryStore } from './gbrain-memory-store.ts'
 import { isGbrainBinaryMissingError } from './memory-store.ts'
+import { installProcessSafetyNet } from '@neutronai/logger/fire-and-forget.ts'
 import { resolveGbrainCommand, resolveGbrainChildPath } from './resolve-gbrain-command.ts'
 
 /**
@@ -569,6 +570,14 @@ export function renderDoctorReport(report: DoctorReport): string {
 // Honors --no-gbrain via NEUTRON_SKIP_GBRAIN=1 (reports skipped, exits 0).
 
 if (import.meta.main) {
+  // F3 — standalone CLI entrypoint (async GBrain round-trip). RESIDUAL
+  // (deliberate): covers the body onward, but NOT this module's OWN static
+  // imports. NO bootstrap split — it is a DUAL library+entry module whose
+  // exports flow through the package index (`gbrain-memory/index.ts` re-exports
+  // `realProbes` / doctor types) to PRODUCTION consumers; splitting would
+  // repoint them. Its static imports are stable internal modules. See
+  // installProcessSafetyNet doc.
+  installProcessSafetyNet()
   const argv = Bun.argv.slice(2)
   const json = argv.includes('--json')
   const force = argv.includes('--force')

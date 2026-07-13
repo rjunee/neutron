@@ -8,6 +8,7 @@
   },
   "dependencies": {
     "@neutronai/gbrain-memory": "workspace:*",
+    "@neutronai/logger": "workspace:*",
     "@neutronai/runtime": "workspace:*"
   }
 }

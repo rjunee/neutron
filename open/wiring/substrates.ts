@@ -29,6 +29,7 @@ import { getOpenAiModelPreference } from '@neutronai/runtime/models-openai.ts'
 import { OWNER_USER_ID } from '../owner-identity.ts'
 import type { Substrate } from '@neutronai/runtime/substrate.ts'
 import type { OpenWiringContext } from './context.ts'
+import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
 
 export interface WiredSubstrates {
   /** Warm onboarding phase-spec substrate (`cc-llm-*`); null when LLM-less. */
@@ -206,9 +207,9 @@ export function wireSubstrates(ctx: OpenWiringContext): WiredSubstrates {
   // early turns get the cold-spawn-sized `first_call_timeout_ms` budget.
   const prewarmSettledRef = { settled: prewarmReady === null }
   if (prewarmReady !== null) {
-    void prewarmReady.then(() => {
+    fireAndForget('substrates.then', prewarmReady.then(() => {
       prewarmSettledRef.settled = true
-    })
+    }))
   }
 
   // Dedicated WARM conversational substrate for post-onboarding live chat

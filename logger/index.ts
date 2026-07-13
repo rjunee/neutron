@@ -60,6 +60,13 @@
  * `rateLimited` windows.
  *
  * O1 scope: package + tests only — NO call sites adopt this yet (that is O2).
+ *
+ * F3 addendum: the sibling module `./fire-and-forget.ts` exports
+ * `fireAndForget` + the process-level safety net (`installProcessSafetyNet`),
+ * which make voided fire-and-forget promises VISIBLE (log + counter). It is
+ * imported directly as `@neutronai/logger/fire-and-forget.ts` (NOT re-exported
+ * here — it depends on this module's `createLogger`, so a re-export would form
+ * an import cycle the G4 no-cycles gate rejects).
  */
 
 /** Standard levels, most→least severe. */

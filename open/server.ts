@@ -31,6 +31,7 @@ import { resolveNeutronHome } from '@neutronai/migrations/db-path.ts'
 
 import { buildOpenGraphComposer } from './composer.ts'
 import { resolvePersistedCookieSecret } from './session-cookie-secret.ts'
+import { installProcessSafetyNet } from '@neutronai/logger/fire-and-forget.ts'
 
 /**
  * Boot the single-owner Open server. Returns the live `BootHandle` so
@@ -101,6 +102,16 @@ export async function startOpenServer(): Promise<BootHandle> {
 }
 
 if (import.meta.main) {
+  // F3 — arm the safety net as the VERY FIRST statement, BEFORE the risky
+  // composer load / config read inside startOpenServer() (the most
+  // failure-prone phase: missing composer module, bad config), so an early
+  // startup failure is logged-then-crashed with structure, not a bare Bun
+  // error. `boot()`'s own idempotent install then no-ops. RESIDUAL (documented
+  // at installProcessSafetyNet): covers the BODY onward; a failure in this dual
+  // library+entry module's OWN static imports (stable internal modules) is the
+  // accepted in-module-install limit — no bootstrap split (it exports
+  // `startOpenServer`, whose importers a split would churn).
+  installProcessSafetyNet()
   // Top-level await — Bun supports TLA in entry modules. An unhandled
   // rejection exits non-zero; under a process supervisor that becomes a
   // respawn. The Bun.serve listener + watchdog keep the event loop alive.

@@ -43,6 +43,7 @@ import {
   readStringArray,
 } from './engine-internals.ts'
 import { autoConfirmProjectsProposedAndAdvance } from './engine-projects-proposed.ts'
+import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
 
 /**
  * P2 v2 § 3.10 / S7 — `agent_name_chosen` handler. Captures the
@@ -388,17 +389,20 @@ export function getOrStartCharacterSuggestions(
     // interview turn retries the LLM after a transient failure. A real
     // ('llm') result stays cached for the foreground render to reuse (and
     // the render deletes it once consumed + persisted).
-    void p
-      .then((r) => {
+    fireAndForget(
+      'engine-agent-name.then',
+      p.then((r) => {
         if (r.source === 'fallback' && self.pendingCharacterSuggestions.get(key) === p) {
           self.pendingCharacterSuggestions.delete(key)
         }
-      })
-      .catch(() => {
+      }),
+      () => {
+        // drop the cache entry on failure so a later turn retries
         if (self.pendingCharacterSuggestions.get(key) === p) {
           self.pendingCharacterSuggestions.delete(key)
         }
-      })
+      },
+    )
     return p
   }
 
@@ -456,17 +460,20 @@ export function getOrStartAgentNameSuggestions(
     self.capPendingSuggestions(
       self.pendingAgentNameSuggestions as Map<string, Promise<unknown>>,
     )
-    void p
-      .then((r) => {
+    fireAndForget(
+      'engine-agent-name.then',
+      p.then((r) => {
         if (r.source === 'fallback' && self.pendingAgentNameSuggestions.get(key) === p) {
           self.pendingAgentNameSuggestions.delete(key)
         }
-      })
-      .catch(() => {
+      }),
+      () => {
+        // drop the cache entry on failure so a later turn retries
         if (self.pendingAgentNameSuggestions.get(key) === p) {
           self.pendingAgentNameSuggestions.delete(key)
         }
-      })
+      },
+    )
     return p
   }
 

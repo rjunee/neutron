@@ -1056,12 +1056,44 @@ D-7 wires or relocates them).
 **Accept:** the set of running loops is asserted, not archaeology.
 
 ### F3 — fireAndForget + unhandledRejection logger · `sonnet` · S · lane none
-28 bare `void fn(...)` sites, no process-level rejection handler anywhere. Add
-`fireAndForget(name, p)` (log + counter) required by lint for voided promises; one
-unhandledRejection/uncaughtException logger installed in boot().
-**Care:** principled voids keep their semantics (prewarm never rejects; scribe hot-path
-isolation) — the wrapper only makes them visible.
-**Accept:** zero bare `void <promise>` outside the wrapper.
+28 bare `void fn(...)` sites (actual count ~74), no process-level rejection handler
+anywhere. Add `fireAndForget(name, p, onError?)` (log + counter, then SWALLOW — never
+rethrow) required by lint for voided promises; one unhandledRejection/uncaughtException
+logger installed first-statement at every entrypoint. Static-import coverage is scoped:
+BOOTSTRAP-INDIRECTION (thin loader arms the net, then dynamic-imports an `*-impl.ts` so
+its whole static graph evaluates after) for the spawned MCP processes (tools-bridge,
+dev-channel — their static graph pulls an external SDK) + the clean standalone CLI entries
+(diagnostics-cli, landing/boot — pure entries, test-only exports). The DUAL library+entry
+modules — gateway/index.ts, open/server.ts (primary servers) and the CLIs migrations/runner
++ gbrain-doctor (their exports are consumed by PRODUCTION) — install first-statement with a
+documented, deliberate residual: their failure-prone runtime loads (composer/config/db) run
+in the BODY (after the install, so COVERED); only their own top-level imports of stable
+internal modules are uncovered, and a bootstrap split there would repoint live importers /
+launch wiring for marginal value (a missing static dep already fails fast with a clear
+"Cannot find module" — bootstrap only makes that error's format structured).
+**Care / semantics (clarified during build):** `fireAndForget` makes a voided promise's
+rejection VISIBLE (logged + counted) and NON-FATAL — it swallows after logging. This is
+the deliberate, correct semantics for the principled voids this unit targets: prewarm
+(never rejects) and scribe hot-path isolation (a rejection must NOT propagate into the
+hot path). A *fatal* wrapper would crash the process on exactly those benign failures, so
+"preserve bare-`void` fatal semantics" would be WRONG here — bare `void <reject>` is fatal
+in Bun, which for scribe/prewarm was itself a latent crash-on-benign-failure bug this unit
+removes. The process-level net (unhandledRejection + uncaughtException → log-then-crash,
+unconditionally fatal) is the FATAL backstop for a genuinely-unexpected rejection that
+ESCAPES a wrap; a site that truly needs fail-fast escalates via `onError`. Companion:
+`neutralizeAbandonedSettle` (silent, no log/count) for deliberately-abandoned settles.
+**Accept:** zero bare `void <promise>` outside the wrapper in HOST code that can import
+`@neutronai/logger` (CI-enforced type-aware gate + a pre-swallow gate that bans handing
+the wrapper an already-swallowed promise). Scoped-out of the gate: browser/RN client code
+and bundled Cores / the `loop` leaf, which cannot import the host logger and govern their
+own fire-and-forget error-handling per their module contract (Core observability sinks =
+`console.*` / SDK events, not the host wrapper). NOTE — the calendar/email Core schedulers
+have real silent-swallow + re-arm-on-failure bugs (a failing tick can stop the loop;
+per-project failures are dropped); these are a dedicated **Core-maintenance follow-up**, NOT
+a shallow F3-side patch (F3 owns the HOST fire-and-forget surface). The two DUAL
+library+entry primary servers (gateway/open) install the net first-statement with a
+documented static-import residual (bootstrap-indirection covers the spawned MCP + clean CLI
+entries).
 
 ### F4 — `[BEHAVIOR]` Wire the watchdog for real (D-8 = wire) · `opus` · L · lane trident
 **Ryan's decision: finish the S5/S6 wiring, don't delete.** Both supervision systems

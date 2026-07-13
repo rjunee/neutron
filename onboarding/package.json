@@ -9,6 +9,7 @@
     "@neutronai/contracts": "workspace:*",
     "@neutronai/cron": "workspace:*",
     "@neutronai/gateway": "workspace:*",
+    "@neutronai/logger": "workspace:*",
     "@neutronai/migrations": "workspace:*",
     "@neutronai/persistence": "workspace:*",
     "@neutronai/reminders": "workspace:*",

@@ -4,6 +4,7 @@
   "main": "./index.ts",
   "private": true,
   "dependencies": {
+    "@neutronai/logger": "workspace:*",
     "@neutronai/loop": "workspace:*",
     "@neutronai/migrations": "workspace:*",
     "@neutronai/persistence": "workspace:*"

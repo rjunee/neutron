@@ -46,6 +46,7 @@ export { MOBILE_APP_URL } from '@neutronai/contracts/handoff-config.ts'
 import { emitSystemEvent } from '@neutronai/persistence/index.ts'
 import { renderMobileInstallHtml } from './mobile-install-config.ts'
 import { isSpaClientRoute } from './spa-routes.ts'
+import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
 // C5 — the landing server OWNS the route predicate/set the per-instance gateway
 // delegates to it. The canonical declaration lives in the tiny `./routes.ts`
 // leaf (kept separate so `gateway/http` can consume it without importing this
@@ -637,7 +638,7 @@ export function createLandingServer(options: LandingServerOptions): LandingServe
         // emit a row per request. Control flow unchanged; emit can never throw.
         if (!chat_react_build_failed_latched) {
           chat_react_build_failed_latched = true
-          void emitSystemEvent({
+          fireAndForget('server.emitSystemEvent', emitSystemEvent({
             event: 'bundle_build_failed',
             module: 'landing',
             payload: {
@@ -645,7 +646,7 @@ export function createLandingServer(options: LandingServerOptions): LandingServe
               entry: chat_react_entry_path,
               logs: result.logs.map((l) => String(l)),
             },
-          })
+          }))
         }
         return null
       }
@@ -657,7 +658,7 @@ export function createLandingServer(options: LandingServerOptions): LandingServe
     } catch (err) {
       if (!chat_react_build_failed_latched) {
         chat_react_build_failed_latched = true
-        void emitSystemEvent({
+        fireAndForget('server.emitSystemEvent', emitSystemEvent({
           event: 'bundle_build_failed',
           module: 'landing',
           level: 'error',
@@ -666,7 +667,7 @@ export function createLandingServer(options: LandingServerOptions): LandingServe
             entry: chat_react_entry_path,
             error: err instanceof Error ? err.message : String(err),
           },
-        })
+        }))
       }
       return null
     }
@@ -725,7 +726,7 @@ export function createLandingServer(options: LandingServerOptions): LandingServe
       if (!result.success || result.outputs.length === 0) {
         if (!invite_build_failed_latched) {
           invite_build_failed_latched = true
-          void emitSystemEvent({
+          fireAndForget('server.emitSystemEvent', emitSystemEvent({
             event: 'bundle_build_failed',
             module: 'landing',
             payload: {
@@ -733,7 +734,7 @@ export function createLandingServer(options: LandingServerOptions): LandingServe
               entry: invite_ts_path,
               logs: result.logs.map((l) => String(l)),
             },
-          })
+          }))
         }
         return null
       }
@@ -745,7 +746,7 @@ export function createLandingServer(options: LandingServerOptions): LandingServe
     } catch (err) {
       if (!invite_build_failed_latched) {
         invite_build_failed_latched = true
-        void emitSystemEvent({
+        fireAndForget('server.emitSystemEvent', emitSystemEvent({
           event: 'bundle_build_failed',
           module: 'landing',
           level: 'error',
@@ -754,7 +755,7 @@ export function createLandingServer(options: LandingServerOptions): LandingServe
             entry: invite_ts_path,
             error: err instanceof Error ? err.message : String(err),
           },
-        })
+        }))
       }
       return null
     }

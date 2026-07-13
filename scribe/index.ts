@@ -47,6 +47,7 @@ import {
   SCRIBE_WATCHDOG_MS,
   SCRIBE_MIN_CHARS,
 } from './scribe-budget.ts'
+import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
 export const __MODULE__ = '@neutronai/scribe' as const
 
 export * from './scribe-budget.ts'
@@ -237,7 +238,9 @@ export function createScribe(deps: CreateScribeDeps): Scribe {
       clearTimeout(watchdog)
       release(deps.budget, ok, now())
       // Persist the daily counter off the hot path; failures are non-fatal.
-      void persistDaily(deps.budget, now()).catch((e) => logFailure('persistDaily failed', e))
+      fireAndForget('index.persistDaily', persistDaily(deps.budget, now()), (e) => {
+        logFailure('persistDaily failed', e)
+      })
     }
   }
 
@@ -259,12 +262,14 @@ export function createScribe(deps: CreateScribeDeps): Scribe {
     // Fire-and-forget: the chat path must never block on (or be broken by)
     // extraction. `extractAndWrite` swallows its own errors; this catch is the
     // last-resort backstop.
-    void extractAndWrite({
+    fireAndForget('index.extractAndWrite', extractAndWrite({
       text: input.text,
       observed_at: input.observed_at,
       trigger: 'chat',
       ...(input.author !== undefined ? { author: input.author } : {}),
-    }).catch((e) => logFailure('handleUserTurn', e))
+    }), (e) => {
+      logFailure('handleUserTurn', e)
+    })
   }
 
   return {

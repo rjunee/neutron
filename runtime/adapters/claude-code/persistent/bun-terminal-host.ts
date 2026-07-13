@@ -18,6 +18,7 @@
 import { stripPtyNoise, newDcsStripState, type DcsStripState } from './pty-noise.ts'
 import { encodeKey, encodeKeys, type Key } from './keystrokes.ts'
 import type { PtyChild, PtyHost, PtySpawnOpts } from './pty-host.ts'
+import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
 
 /** Minimal shape of `Bun.Terminal` we consume (kept narrow so the file type-
  *  checks even where the ambient Bun types lag the runtime). */
@@ -91,7 +92,7 @@ export class BunTerminalHost implements PtyHost {
 
     // Surface the real subprocess exit (the Terminal `exit` cb reports PTY
     // lifecycle, not the child exit code — per Bun docs we use proc.exited).
-    void proc.exited.then((code) => {
+    fireAndForget('bun-terminal-host.then', proc.exited.then((code) => {
       exited = true
       try {
         terminal.close()
@@ -100,7 +101,7 @@ export class BunTerminalHost implements PtyHost {
       }
       if (opts.onExit !== undefined) opts.onExit(code)
       exitResolve(code)
-    })
+    }))
 
     const child: PtyChild = {
       pid: proc.pid,

@@ -14,6 +14,7 @@
     "@neutronai/doc-search": "workspace:*",
     "@neutronai/gateway": "workspace:*",
     "@neutronai/landing": "workspace:*",
+    "@neutronai/logger": "workspace:*",
     "@neutronai/migrations": "workspace:*",
     "@neutronai/onboarding": "workspace:*",
     "@neutronai/persistence": "workspace:*",

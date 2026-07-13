@@ -68,6 +68,7 @@ import {
   fileScribeEmailWatermark,
 } from './email-managed-wiring.ts'
 import type { ScribeFanOut } from './scribe-fan-out.ts'
+import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
 
 /**
  * The composer-owned scribe fan-out binding (see module docblock §1). Wraps the
@@ -94,13 +95,18 @@ export function buildScribeCoresFanOut(
 ): ScribeCoresFanOut {
   const inflight = new Set<Promise<unknown>>()
   const fanOut: ScribeFanOut = (trigger, text, source): void => {
-    const p = scribe
-      .extractFromCoresSource({ trigger, text, source })
-      .catch((err: unknown) => {
-        logFailure('cores fan-out extraction failed', err)
-      })
+    // Pass the RAW extraction promise through the wrapper so a rejection is
+    // counted + structured-logged by fireAndForget (F3); the contextual log
+    // rides the onError callback. (A prior `.catch(() => log)` here swallowed
+    // the rejection into a resolved `p` before the wrapper — invisible to the
+    // counter; see the F3 pre-swallow gate.)
+    const p = scribe.extractFromCoresSource({ trigger, text, source })
     inflight.add(p)
-    void p.finally(() => inflight.delete(p))
+    fireAndForget(
+      'mount-cores-scribe-fan-out',
+      p.finally(() => inflight.delete(p)),
+      (err) => logFailure('cores fan-out extraction failed', err),
+    )
   }
   return {
     fanOut,

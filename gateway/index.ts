@@ -60,6 +60,7 @@ export type {
 } from './boot-helpers.ts'
 import type { GatewayModuleGraph } from './module-graph.ts'
 import { sdNotify } from './sd-notify.ts'
+import { fireAndForget, installProcessSafetyNet } from '@neutronai/logger/fire-and-forget.ts'
 
 // 5-second tick interval pairs with the systemd unit's WatchdogSec=10 — 50%
 // safety margin per `man sd_notify(3)` recommendations. If the gateway misses
@@ -217,6 +218,13 @@ export async function drainRealmodeCleanups(
 }
 
 export async function boot(options: BootOptions = {}): Promise<BootHandle> {
+  // F3 — install the process-level unhandledRejection/uncaughtException logger
+  // ONCE (idempotent; a repeat boot in tests is a no-op). Makes a swallowed
+  // async failure loud instead of invisible; both handlers are log-then-crash
+  // (UNCONDITIONALLY fatal — no NODE_ENV escape; tests inject their own
+  // non-exiting onUncaught). See installProcessSafetyNet.
+  installProcessSafetyNet()
+
   // C1 — resolve+validate env ONCE. When the caller (an entrypoint) already
   // resolved it, thread theirs so we never re-read process.env divergently.
   const config = options.config ?? resolveBootConfig(process.env)
@@ -617,7 +625,7 @@ export async function boot(options: BootOptions = {}): Promise<BootHandle> {
   const handleSignal = (): void => {
     // Don't await; node signal handlers are sync. shutdown() stores its own
     // re-entrancy guard so a double signal is harmless.
-    void shutdown()
+    fireAndForget('index.shutdown', shutdown())
   }
   process.once('SIGTERM', handleSignal)
   process.once('SIGINT', handleSignal)
@@ -760,6 +768,16 @@ export async function loadGraphComposerFromEnv(
 }
 
 if (import.meta.main) {
+  // F3 — arm the safety net as the VERY FIRST statement, BEFORE the config
+  // resolve + dynamic composer load below (the most failure-prone startup
+  // phase: missing composer module, bad config), so an early failure is
+  // logged-then-crashed with structure, not a bare Bun error. boot()'s own
+  // idempotent install then no-ops. RESIDUAL (documented at
+  // installProcessSafetyNet): this covers the BODY onward; a failure in this
+  // dual library+entry module's OWN static imports (stable internal modules) is
+  // the accepted in-module-install limit — no bootstrap split (it exports
+  // `boot()` and friends, whose importers a split would churn).
+  installProcessSafetyNet()
   // Top-level await: Bun supports TLA in entry modules. An unhandled rejection
   // exits non-zero, which systemd's Restart=always policy converts into a
   // respawn after RestartSec=5s.

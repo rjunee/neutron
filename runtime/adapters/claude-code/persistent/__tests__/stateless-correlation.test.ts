@@ -41,8 +41,11 @@ describe('S3 #107 — the FIFO is gone (structural)', () => {
     expect(existsSync(join(PERSISTENT_DIR, 'turn-id-fifo.ts'))).toBe(false)
   })
 
-  it('dev-channel.ts no longer imports or references the FIFO', () => {
-    const src = readFileSync(join(PERSISTENT_DIR, 'dev-channel.ts'), 'utf8')
+  it('dev-channel no longer imports or references the FIFO', () => {
+    // F3 bootstrap-indirection split the real body into `dev-channel-impl.ts`
+    // (the entry `dev-channel.ts` is now a thin safety-net loader), so the
+    // channel logic + its stateless echo live in the impl.
+    const src = readFileSync(join(PERSISTENT_DIR, 'dev-channel-impl.ts'), 'utf8')
     expect(src).not.toContain('TurnIdFifo')
     expect(src).not.toContain('turn-id-fifo')
     // The stateless echo (scalar + stale-reply debt) replaced the positional queue.

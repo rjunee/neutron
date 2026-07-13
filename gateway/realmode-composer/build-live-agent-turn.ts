@@ -73,6 +73,7 @@ import { collectTokensToString } from './build-llm-call-substrate.ts'
 import { buildOperatingDoctrineFragment } from './operating-doctrine.ts'
 import { buildLiveAgentScopeFragment } from './live-agent-scope-fragment.ts'
 import type { LiveAgentTurnRequest } from '../http/chat-bridge.ts'
+import { fireAndForget, neutralizeAbandonedSettle } from '@neutronai/logger/fire-and-forget.ts'
 
 const LOG_TAG = '[live-agent-turn]'
 
@@ -601,9 +602,12 @@ export function buildLiveAgentTurn(
       () => undefined,
     )
     turnChains.set(topicKey, tail)
-    void tail.then(() => {
+    // `tail` is a deliberately never-rejecting sequencing baton; this only prunes
+    // the per-topic chain map — no rejection to surface (the real turn error is
+    // returned to the caller via `run`). Silent neutralize, not fireAndForget.
+    neutralizeAbandonedSettle(tail.then(() => {
       if (turnChains.get(topicKey) === tail) turnChains.delete(topicKey)
-    })
+    }))
     return run
   }
 

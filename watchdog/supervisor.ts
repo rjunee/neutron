@@ -16,6 +16,7 @@ import type {
   WatchdogDetector,
   WatchdogNotifier,
 } from './types.ts'
+import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
 
 export interface SupervisorOptions {
   store: AlertStore
@@ -68,7 +69,7 @@ export class WatchdogSupervisor {
   start(): void {
     if (this.timer !== null) return
     this.timer = setInterval(() => {
-      void this.runOnce()
+      fireAndForget('supervisor.runOnce', this.runOnce())
     }, this.tick_interval_ms)
   }
 

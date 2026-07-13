@@ -37,6 +37,7 @@ import { sanitizeUserFirstName } from './extracted-fields.ts'
 import { auditRequiredFields } from './required-fields-audit.ts'
 import { dedupeStringsCaseInsensitive, readNonWorkInterests } from './engine-internals.ts'
 import type { OnboardingState, OnboardingStateStore } from './state-store.ts'
+import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
 
 const LOG_TAG = '[onboarding-extractor]'
 
@@ -336,9 +337,9 @@ export function buildPostTurnExtractor(deps: PostTurnExtractorDeps): PostTurnExt
       ),
     )
     chains.set(key, run)
-    void run.then(() => {
+    fireAndForget('post-turn-extractor.then', run.then(() => {
       if (chains.get(key) === run) chains.delete(key)
-    })
+    }))
   }
 
   return { onTurnComplete, runOnce }

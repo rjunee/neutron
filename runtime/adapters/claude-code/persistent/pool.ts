@@ -17,6 +17,7 @@ import { CONTEXT_RESET_COMMAND, DEFAULT_IDLE_MAX_MS, DEFAULT_IDLE_QUIET_MS, DEFA
 import type { ActiveTurn, PersistentReplSubstrateOptions, RecoveredReply } from './types.ts'
 import { ReplSession, terminateChild, unlinkSessionConfigs } from './repl-session.ts'
 import { getOrSpawnSession, injectMessage, spawnWithChannelWedgeRespawn, waitForReplIdle } from './spawn.ts'
+import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
 
 // ---------------------------------------------------------------------------
 // Pending-respawns queue wiring (brief § 2 row #11 / § 6 acceptance #1).
@@ -610,7 +611,7 @@ export function createPersistentReplSubstrate(options: PersistentReplSubstrateOp
          }
        }
       })()
-      void driver
+      fireAndForget('pool.driver', driver)
 
       // The concrete handle is a SUPERSET of the locked `SessionHandle` contract:
       // it additionally exposes `isAlive()` — a child-process liveness probe the

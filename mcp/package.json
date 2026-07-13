@@ -8,6 +8,7 @@
     "@neutronai/contracts": "workspace:*",
     "@neutronai/core-sdk": "workspace:*",
     "@neutronai/gbrain-memory": "workspace:*",
+    "@neutronai/logger": "workspace:*",
     "@neutronai/tools": "workspace:*"
   }
 }

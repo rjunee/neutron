@@ -47,6 +47,7 @@ import {
   serializeDraft,
   stubDraft,
 } from './engine-internals.ts'
+import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
 
 /**
  * P2 v2 § 0 locked decision #9 + § 3.9 + § 4.1 — sole handler for the
@@ -320,11 +321,11 @@ export async function consumePersonalityOfferedChoice(
     // promise instead of cold-spawning a second subprocess. Fire-and-
     // forget; persists only real picks. Names can't pre-compute earlier
     // than this turn because they depend on the just-chosen personality.
-    void self.getOrStartAgentNameSuggestions(
+    fireAndForget('engine-persona.getOrStartAgentNameSuggestions', self.getOrStartAgentNameSuggestions(
       input.project_slug,
       input.user_id,
       (advanced.phase_state ?? {}) as Record<string, unknown>,
-    )
+    ))
     let final_state: OnboardingState | null = null
     const emit = await self.emitPhasePrompt({
       project_slug: input.project_slug,

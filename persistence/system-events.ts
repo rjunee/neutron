@@ -36,6 +36,7 @@
 import { randomUUID } from 'node:crypto'
 import type { ProjectDb } from './db.ts'
 import { parseJsonColumn } from './sidecar.ts'
+import { neutralizeAbandonedSettle } from '@neutronai/logger/fire-and-forget.ts'
 
 export type SystemEventLevel = 'info' | 'warn' | 'error'
 
@@ -172,16 +173,24 @@ export class SystemEventsStore implements SystemEventSink {
       ],
     )
     this.inflight.add(write)
-    // Remove from the in-flight set on settle. Use `then(cleanup, cleanup)` —
-    // NOT `void write.finally(...)`: `finally` returns a promise that RE-REJECTS
-    // when `write` rejects, and voiding it would surface an unhandled rejection.
-    // Both `then` handlers return normally, so this derived promise always
-    // resolves. The original `write` rejection is still delivered to the awaiter
-    // below (and thence to emitSystemEventSafe, which swallows it).
+    // Remove from the in-flight set on settle. This is `neutralizeAbandonedSettle`
+    // — NOT `fireAndForget` — because the write's OWN failure is already handled
+    // elsewhere (see below), so there is no failure to log/count here (a
+    // fireAndForget would be the "lie" it must never tell). The write's rejection
+    // is delivered to
+    // the `await write` below (→ emitSystemEventSafe, whose contract swallows
+    // journal-write failures so the degradation journal never breaks the
+    // caller). `neutralizeAbandonedSettle` documents "settle irrelevant, handled
+    // elsewhere" and guards against any unforeseen rejection.
     const cleanup = (): void => {
       this.inflight.delete(write)
     }
-    void write.then(cleanup, cleanup)
+    // `.finally(cleanup)` runs cleanup on settle and passes the rejection
+    // through; `neutralizeAbandonedSettle` silently absorbs THAT re-rejection
+    // (the real write failure is surfaced by `await write` below). Using
+    // `.finally` (not `.then(cleanup, cleanup)`) keeps the arg free of a
+    // rejection-swallowing handler, satisfying the pre-swallow gate.
+    neutralizeAbandonedSettle(write.finally(cleanup))
     await write
     return { id }
   }
