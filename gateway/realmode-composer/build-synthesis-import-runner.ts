@@ -258,15 +258,16 @@ export function buildSynthesisImportJobRunner(
       // poll + the 5s import-running cron tick). Any escape is swallowed so a
       // background failure surfaces as a `failed` job, never an unhandled
       // rejection.
-      fireAndForget('build-synthesis-import-runner.runJob', runJob(job_id, inp.source, inp.payload).catch(async (err) => {
+      fireAndForget('build-synthesis-import-runner.runJob', runJob(job_id, inp.source, inp.payload), (err) => {
         logFailure(`run_job:${job_id}`, err)
-        try {
-          await finishFailed(job_id, 'substrate_error', err instanceof Error ? err.message : String(err))
-        } catch (e) {
-          logFailure(`run_job_fail_persist:${job_id}`, e)
-        }
-        throw err // job already marked failed; re-raise so fireAndForget also counts it
-      }))
+        // Mark the job failed (async) via a NESTED fireAndForget so onError stays
+        // synchronous-safe AND the persist failure is itself counted/logged.
+        fireAndForget(
+          'build-synthesis-import-runner.finishFailed',
+          finishFailed(job_id, 'substrate_error', err instanceof Error ? err.message : String(err)),
+          (e) => logFailure(`run_job_fail_persist:${job_id}`, e),
+        )
+      })
       return { job_id }
     },
 

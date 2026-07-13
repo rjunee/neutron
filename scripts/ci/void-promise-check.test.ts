@@ -7,7 +7,11 @@
 // no-op voids that share the keyword must not be. Fixtures `declare` their own
 // types so the detector's in-memory program can resolve them.
 import { describe, expect, test } from 'bun:test'
-import { findBareVoidPromiseCalls, hasVoidExpression } from './void-promise-check.mjs'
+import {
+  findBareVoidPromiseCalls,
+  findPreSwallowedWraps,
+  hasVoidExpression,
+} from './void-promise-check.mjs'
 
 describe('findBareVoidPromiseCalls', () => {
   test('flags a bare void on a promise-returning call', () => {
@@ -154,5 +158,56 @@ describe('hasVoidExpression (cheap pre-pass forwarding)', () => {
 
   test('does NOT forward a file with no `void` keyword (avoids false match on "avoidance")', () => {
     expect(hasVoidExpression('x.ts', 'const avoidance = 1\nconst x = 2')).toBe(false)
+  })
+})
+
+// Structural pre-swallow gate (Codex final): a `.catch`/two-arg-`.then`/
+// internally-catching-IIFE BEFORE a fireAndForget/neutralize wrapper swallows
+// the rejection so the wrapper never counts it. Ban it syntactically.
+describe('findPreSwallowedWraps', () => {
+  test('flags a .catch on the fireAndForget promise arg', () => {
+    const hits = findPreSwallowedWraps("fireAndForget('n', p.catch(() => {}))")
+    expect(hits.length).toBe(1)
+    expect(hits[0]?.reason).toContain('.catch')
+  })
+
+  test('flags a .catch that is NOT the outermost call (…​.catch(…).finally(…))', () => {
+    const hits = findPreSwallowedWraps("fireAndForget('n', p.catch(() => {}).finally(() => {}))")
+    expect(hits.length).toBe(1)
+  })
+
+  test('flags a two-arg .then (onFulfilled, onRejected)', () => {
+    const hits = findPreSwallowedWraps("fireAndForget('n', p.then(a, b))")
+    expect(hits.length).toBe(1)
+  })
+
+  test('flags an internally-catching async IIFE', () => {
+    const hits = findPreSwallowedWraps("fireAndForget('n', (async () => { try { await x() } catch {} })())")
+    expect(hits.length).toBe(1)
+    expect(hits[0]?.reason).toContain('IIFE')
+  })
+
+  test('also checks neutralizeAbandonedSettle (arg 0)', () => {
+    expect(findPreSwallowedWraps('neutralizeAbandonedSettle(p.catch(() => {}))').length).toBe(1)
+  })
+
+  test('PASSES the raw promise + onError form', () => {
+    expect(findPreSwallowedWraps("fireAndForget('n', p, (err) => log(err))").length).toBe(0)
+  })
+
+  test('PASSES a .finally / one-arg .then (rejection passes through)', () => {
+    expect(findPreSwallowedWraps("fireAndForget('n', p.finally(() => c()))").length).toBe(0)
+    expect(findPreSwallowedWraps("fireAndForget('n', p.then((r) => use(r)))").length).toBe(0)
+  })
+
+  test('PASSES an IIFE that rethrows from its catch', () => {
+    expect(
+      findPreSwallowedWraps("fireAndForget('n', (async () => { try { await x() } catch (e) { throw e } })())")
+        .length,
+    ).toBe(0)
+  })
+
+  test('PASSES a raw promise-returning call', () => {
+    expect(findPreSwallowedWraps("fireAndForget('n', doWork())").length).toBe(0)
   })
 })

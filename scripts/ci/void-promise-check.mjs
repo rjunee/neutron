@@ -38,9 +38,20 @@
 // code (it cannot import the Node console/env logger, and `void handler()` in a
 // React effect is idiomatic there): `app/`, `landing/chat-react/`, `chat-core/`
 // (the browser web-session lib), `landing/connect-accept.ts` (browser accept
-// client), and all `.tsx`. Tests are excluded too. The wrapper's own
-// definition file (`logger/fire-and-forget.ts`) owns the only sanctioned
-// `void <promise>` (inside `fireAndForget` / `neutralizeAbandonedSettle`).
+// client), and all `.tsx`. The wrapper's own definition file
+// (`logger/fire-and-forget.ts`) owns the only sanctioned `void <promise>`
+// (inside `fireAndForget` / `neutralizeAbandonedSettle`).
+//
+// TESTS ARE EXCLUDED — BY DECISION (P2). The F3 invariant is a PRODUCTION
+// reliability rule (make prod fire-and-forget failures visible). Test code may
+// intentionally bare-`void` a promise to MODEL production behavior without
+// asserting on the wrapper: e.g. `persistence/system-events.test.ts` fires
+// `void emitSystemEventSafe(...)` (the SAFE variant, which swallows its own
+// errors and never rejects) to reproduce the degrade-site "fire without
+// awaiting" path and then exercise `drain()` durability. Wrapping those in
+// `fireAndForget` would be a no-op (nothing rejects) and would couple the test
+// to the wrapper it isn't testing, so tests stay excluded from BOTH the
+// void-promise gate and the pre-swallow gate.
 //
 // Comments/strings can't false-positive: this parses the real TS AST + resolves
 // types (not a grep), so a `void foo()` quoted in a doc-comment is never seen.
@@ -163,6 +174,96 @@ export function findBareVoidPromiseCalls(source, fileName = 'fixture.ts') {
   return sf ? collectVoidPromiseHits(sf, checker) : []
 }
 
+// ── Pre-swallow gate (SYNTACTIC — no type inference) ──────────────────
+// A `fireAndForget(name, p, onError?)` / `neutralizeAbandonedSettle(p)` call
+// must receive a promise whose rejection can REACH the wrapper. A `.catch(...)`
+// anywhere in the argument's chain, a two-argument `.then(onF, onRej)`, or an
+// immediately-invoked async function whose body catches WITHOUT rethrowing all
+// swallow the rejection BEFORE the wrapper — so its count/log never fires (the
+// recurring F3 "pre-swallow" bug). Now that `fireAndForget` takes an `onError`
+// callback, a pre-wrapper `.catch` is ALWAYS the wrong shape. This is a pure
+// AST-shape check (robust + complete; no types needed) that bans it forever.
+
+/** True iff `fn` (arrow/function) body has a `catch` clause that does NOT
+ *  rethrow (walking only its own body, not nested functions). */
+function iifeHasNonRethrowingCatch(fn) {
+  let swallows = false
+  const visit = (n) => {
+    if (swallows) return
+    if (ts.isCatchClause(n)) {
+      let rethrows = false
+      const look = (m) => {
+        if (ts.isThrowStatement(m)) rethrows = true
+        if (ts.isFunctionLike(m) && m !== n) return // don't descend nested fns
+        ts.forEachChild(m, look)
+      }
+      if (n.block) ts.forEachChild(n.block, look)
+      if (!rethrows) {
+        swallows = true
+        return
+      }
+    }
+    if (ts.isFunctionLike(n) && n !== fn) return // don't descend nested fns
+    ts.forEachChild(n, visit)
+  }
+  if (fn.body) visit(fn.body)
+  return swallows
+}
+
+/** Classify a wrapper's promise argument: returns a reason string if it
+ *  pre-swallows a rejection, else null. */
+function classifyWrapperArg(arg) {
+  let a = arg
+  while (a) {
+    while (ts.isParenthesizedExpression(a)) a = a.expression
+    if (!ts.isCallExpression(a)) return null // identifier / plain expr → OK
+    let callee = a.expression
+    while (ts.isParenthesizedExpression(callee)) callee = callee.expression
+    // IIFE: (async () => {...})() / (function(){...})()
+    if (ts.isArrowFunction(callee) || ts.isFunctionExpression(callee)) {
+      return iifeHasNonRethrowingCatch(callee) ? 'IIFE body catches without rethrowing' : null
+    }
+    // chained `.method(...)` — inspect + descend the receiver
+    if (ts.isPropertyAccessExpression(callee)) {
+      const m = callee.name.text
+      if (m === 'catch') return 'a `.catch(...)` swallows before the wrapper (use the onError arg)'
+      if (m === 'then' && a.arguments.length >= 2) {
+        return 'a two-arg `.then(onF, onRej)` swallows before the wrapper (use the onError arg)'
+      }
+      a = callee.expression // descend past `.then(1)` / `.finally(...)` (rejection passes through)
+      continue
+    }
+    return null // base call like foo(...) → OK
+  }
+  return null
+}
+
+const WRAPPER_FNS = new Set(['fireAndForget', 'neutralizeAbandonedSettle'])
+
+/** Detector (exported for tests): every wrapper call whose promise arg
+ *  pre-swallows. `fireAndForget` promise = arg[1]; `neutralizeAbandonedSettle`
+ *  = arg[0]. */
+export function findPreSwallowedWraps(source, fileName = 'fixture.ts') {
+  const sf = ts.createSourceFile(fileName, source, ts.ScriptTarget.Latest, true)
+  const out = []
+  const visit = (node) => {
+    if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && WRAPPER_FNS.has(node.expression.text)) {
+      const fn = node.expression.text
+      const arg = fn === 'fireAndForget' ? node.arguments[1] : node.arguments[0]
+      if (arg) {
+        const reason = classifyWrapperArg(arg)
+        if (reason) {
+          const { line } = sf.getLineAndCharacterOfPosition(node.getStart(sf))
+          out.push({ line: line + 1, fn, reason })
+        }
+      }
+    }
+    ts.forEachChild(node, visit)
+  }
+  visit(sf)
+  return out
+}
+
 const ROOT = join(import.meta.dir, '..', '..')
 
 const IGNORE_DIRS = new Set(['node_modules', '.git', 'dist', '.expo', '.claude', 'coverage'])
@@ -283,4 +384,28 @@ if (import.meta.main) {
     process.exit(1)
   }
   console.log('VOID-PROMISE GATE (bare void <promise> outside fireAndForget): 0 found ✅')
+
+  // ── Pre-swallow scan (syntactic; no types) over every in-scope file that
+  // mentions a wrapper. Bans a `.catch`/two-arg-`.then`/internally-catching-IIFE
+  // BEFORE the wrapper, so a rejection can never be swallowed before it counts.
+  const preSwallows = []
+  for (const abs of files) {
+    const rel = abs.slice(ROOT.length + 1).split(sep).join('/')
+    if (!inScope(rel)) continue
+    const src = readFileSync(abs, 'utf8')
+    if (!src.includes('fireAndForget') && !src.includes('neutralizeAbandonedSettle')) continue
+    for (const hit of findPreSwallowedWraps(src, abs)) {
+      preSwallows.push(`${rel}:${hit.line}  ${hit.fn}(...) — ${hit.reason}`)
+    }
+  }
+  if (preSwallows.length > 0) {
+    console.error(
+      '\nPre-swallowed promise handed to a fire-and-forget wrapper — pass the RAW promise' +
+        ' + an onError callback so the rejection is counted/logged:',
+    )
+    for (const p of preSwallows) console.error('  ' + p)
+    console.error(`\nPRE-SWALLOW GATE: FAILED — ${preSwallows.length} found`)
+    process.exit(1)
+  }
+  console.log('PRE-SWALLOW GATE (no .catch/internal-catch before a fireAndForget wrapper): 0 found ✅')
 }

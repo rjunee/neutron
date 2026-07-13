@@ -173,11 +173,11 @@ export class SystemEventsStore implements SystemEventSink {
       ],
     )
     this.inflight.add(write)
-    // Remove from the in-flight set on settle. Use `then(cleanup, cleanup)` so
-    // both handlers return normally and the derived promise always resolves —
-    // NOT `fireAndForget`, because this cleanup-only derived promise CANNOT
-    // reject, so it carries no failure to log/count (that would be the "lie"
-    // fireAndForget must never tell). The write's OWN rejection is delivered to
+    // Remove from the in-flight set on settle. This is `neutralizeAbandonedSettle`
+    // — NOT `fireAndForget` — because the write's OWN failure is already handled
+    // elsewhere (see below), so there is no failure to log/count here (a
+    // fireAndForget would be the "lie" it must never tell). The write's rejection
+    // is delivered to
     // the `await write` below (→ emitSystemEventSafe, whose contract swallows
     // journal-write failures so the degradation journal never breaks the
     // caller). `neutralizeAbandonedSettle` documents "settle irrelevant, handled
@@ -185,7 +185,12 @@ export class SystemEventsStore implements SystemEventSink {
     const cleanup = (): void => {
       this.inflight.delete(write)
     }
-    neutralizeAbandonedSettle(write.then(cleanup, cleanup))
+    // `.finally(cleanup)` runs cleanup on settle and passes the rejection
+    // through; `neutralizeAbandonedSettle` silently absorbs THAT re-rejection
+    // (the real write failure is surfaced by `await write` below). Using
+    // `.finally` (not `.then(cleanup, cleanup)`) keeps the arg free of a
+    // rejection-swallowing handler, satisfying the pre-swallow gate.
+    neutralizeAbandonedSettle(write.finally(cleanup))
     await write
     return { id }
   }

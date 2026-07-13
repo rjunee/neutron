@@ -281,12 +281,11 @@ function dispatchWedgeRecovery(
     alert,
     now: () => Date.now(),
   })
-    .catch((err: unknown) => {
-      process.stderr.write(`[wedge-recover] ladder threw: ${String(err)}\n`)
-    })
     .finally(() => {
       session.wedgeRecovering = false
-    }))
+    }), (err: unknown) => {
+      process.stderr.write(`[wedge-recover] ladder threw: ${String(err)}\n`)
+    })
 }
 
 /** Launch the resume-session-failure picker escape-then-recover ladder (P2,
@@ -371,12 +370,11 @@ function dispatchResumePickerRecovery(
     alert: (text) => process.stderr.write(`[resume-picker] ${text}\n`),
     delay: (ms) => new Promise((res) => setTimeout(res, ms)),
   })
-    .catch((err: unknown) => {
-      process.stderr.write(`[resume-picker] ladder threw: ${String(err)}\n`)
-    })
     .finally(() => {
       session.resumePickerRecovering = false
-    }))
+    }), (err: unknown) => {
+      process.stderr.write(`[resume-picker] ladder threw: ${String(err)}\n`)
+    })
 }
 
 /** Surface a session-size warn/critical affordance (Vajra port row #13). The

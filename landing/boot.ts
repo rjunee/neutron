@@ -281,15 +281,13 @@ if (import.meta.main) {
   const handle = await bootSignup()
   console.log(`[signup-landing] listening on 127.0.0.1:${handle.port}`)
   process.once('SIGTERM', () => {
-    fireAndForget('boot.stop', handle.stop().catch((err) => {
+    fireAndForget('boot.stop', handle.stop(), (err) => {
       console.error('signup-landing stop failed:', err)
-      throw err // re-raise so fireAndForget counts it (the .catch only adds context)
-    }))
+    })
   })
   process.once('SIGINT', () => {
-    fireAndForget('boot.stop', handle.stop().catch((err) => {
+    fireAndForget('boot.stop', handle.stop(), (err) => {
       console.error('signup-landing stop failed:', err)
-      throw err // re-raise so fireAndForget counts it (the .catch only adds context)
-    }))
+    })
   })
 }

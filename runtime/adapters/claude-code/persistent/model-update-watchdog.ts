@@ -592,10 +592,7 @@ export function startModelUpdateWatchdog(deps: ModelUpdateWatchdogDeps): ModelUp
           })
           // Fire-and-forget the idle-gated graceful respawn of existing warm
           // sessions. Errors are swallowed — the adopt + notice already shipped.
-          fireAndForget('model-update-watchdog.resolve', Promise.resolve(deps.runUpgrade(decision.newModel)).catch((e) => {
-            onError(e)
-            throw e // re-raise so fireAndForget counts it (onError only adds context)
-          }))
+          fireAndForget('model-update-watchdog.resolve', Promise.resolve(deps.runUpgrade(decision.newModel)), onError)
           break
         }
       }

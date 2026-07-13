@@ -648,10 +648,9 @@ export function startReplWatchdog(
   // in-process replay never fired because the gateway itself went down. Fire-and-
   // forget with the default anti-thundering-herd stagger; errors are swallowed so
   // a poisoned entry can't block watchdog startup.
-  fireAndForget('supervision.drainPendingRespawns', drainPendingRespawns(options).catch((e) => {
+  fireAndForget('supervision.drainPendingRespawns', drainPendingRespawns(options), (e) => {
     console.error(`repl-watchdog: boot-drain error: ${e}`)
-    throw e // re-raise so fireAndForget counts it (the .catch only adds context)
-  }))
+  })
 
   // Per-registry tick gate (Argus r3 MINOR 3): scoped to THIS watchdog so a slow
   // tick for one instance's registry never serializes another instance's tick in a
@@ -663,8 +662,7 @@ export function startReplWatchdog(
     // longer than the cadence; double-firing would race the respawn).
     if (!tickGate.claim()) return
     fireAndForget('supervision.runReplWatchdogTick', runReplWatchdogTick(options, wopts)
-      .catch((e) => console.error(`repl-watchdog: tick error: ${e}`))
-      .finally(() => tickGate.release()))
+      .finally(() => tickGate.release()), (e) => console.error(`repl-watchdog: tick error: ${e}`))
   }
   const handle = setIntervalFn(tick, intervalMs)
 
@@ -676,8 +674,7 @@ export function startReplWatchdog(
   const cwdDriftTick = (): void => {
     if (!cwdDriftGate.claim()) return
     fireAndForget('supervision.runCwdDriftWatchdogTick', runCwdDriftWatchdogTick(options, wopts)
-      .catch((e) => console.error(`cwd-drift-watchdog: tick error: ${e}`))
-      .finally(() => cwdDriftGate.release()))
+      .finally(() => cwdDriftGate.release()), (e) => console.error(`cwd-drift-watchdog: tick error: ${e}`))
   }
   const cwdDriftHandle = setIntervalFn(cwdDriftTick, cwdDriftIntervalMs)
 

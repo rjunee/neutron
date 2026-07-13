@@ -796,12 +796,11 @@ export function buildOpenGraphComposer(
     fireAndForget('composer.sweepOrphanedDispatchesOnBoot', sweepOrphanedDispatchesOnBoot({
       store: subagentRegistryStore,
       report: buildBootSweepReport(dispatchReport),
-    }).catch((err: unknown) => {
+    }), (err: unknown) => {
       console.warn(
         `[agent-dispatch] boot reap failed: ${err instanceof Error ? err.message : String(err)}`,
       )
-      throw err // re-raise so fireAndForget counts it (the .catch only adds context)
-    }))
+    })
 
     // ── Skill-forge → Open boot (Vajra parity gap #5) ──────────────────────
     // Auto-skillify: audit a COMPLETED Trident workflow and, gated by the
@@ -2167,14 +2166,13 @@ export function buildOpenGraphComposer(
         fireAndForget('composer.materializeProjectScaffold', materializeProjectScaffold(scaffoldDeps, {
           name: row.name,
           project_id: row.project_id,
-        }).catch((err: unknown) => {
+        }), (err: unknown) => {
           console.warn(
             `[create-project] event=materialize_failed project=${project_slug} id=${
               row.project_id
             } err=${err instanceof Error ? err.message : String(err)}`,
           )
-          throw err // re-raise so fireAndForget counts it (the .catch only adds context)
-        }))
+        })
         // Known mutation → always push the fresh rail snapshot.
         emitProjectsChangedNow(input.user_id ?? OWNER_USER_ID)
       }

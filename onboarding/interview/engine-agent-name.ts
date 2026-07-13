@@ -389,18 +389,20 @@ export function getOrStartCharacterSuggestions(
     // interview turn retries the LLM after a transient failure. A real
     // ('llm') result stays cached for the foreground render to reuse (and
     // the render deletes it once consumed + persisted).
-    fireAndForget('engine-agent-name.then', p
-      .then((r) => {
+    fireAndForget(
+      'engine-agent-name.then',
+      p.then((r) => {
         if (r.source === 'fallback' && self.pendingCharacterSuggestions.get(key) === p) {
           self.pendingCharacterSuggestions.delete(key)
         }
-      })
-      .catch((err) => {
+      }),
+      () => {
+        // drop the cache entry on failure so a later turn retries
         if (self.pendingCharacterSuggestions.get(key) === p) {
           self.pendingCharacterSuggestions.delete(key)
         }
-        throw err // drop the cache entry (retry next turn) AND surface to fireAndForget
-      }))
+      },
+    )
     return p
   }
 
@@ -458,18 +460,20 @@ export function getOrStartAgentNameSuggestions(
     self.capPendingSuggestions(
       self.pendingAgentNameSuggestions as Map<string, Promise<unknown>>,
     )
-    fireAndForget('engine-agent-name.then', p
-      .then((r) => {
+    fireAndForget(
+      'engine-agent-name.then',
+      p.then((r) => {
         if (r.source === 'fallback' && self.pendingAgentNameSuggestions.get(key) === p) {
           self.pendingAgentNameSuggestions.delete(key)
         }
-      })
-      .catch((err) => {
+      }),
+      () => {
+        // drop the cache entry on failure so a later turn retries
         if (self.pendingAgentNameSuggestions.get(key) === p) {
           self.pendingAgentNameSuggestions.delete(key)
         }
-        throw err // drop the cache entry (retry next turn) AND surface to fireAndForget
-      }))
+      },
+    )
     return p
   }
 

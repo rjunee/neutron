@@ -988,15 +988,13 @@ async function handleSend(
           body: text,
           ...(project_id !== null ? { project_id } : {}),
           ...(cleaned_attachments !== null ? { attachments: cleaned_attachments } : {}),
-        })
-        .catch((err: unknown) => {
+        }), (err: unknown) => {
           console.warn(
             `[app-ws] topic=${channel_topic_id} HTTP-fallback dispatch failed: ${
               err instanceof Error ? err.message : String(err)
             }`,
           )
-          throw err // re-raise so fireAndForget counts it (the .catch only adds context)
-        }))
+        })
     }
   }
   // Return the canonical user_message envelope in the response so the

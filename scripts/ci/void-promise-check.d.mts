@@ -6,3 +6,8 @@ export function findBareVoidPromiseCalls(
 ): { line: number; text: string }[]
 
 export function hasVoidExpression(abs: string, src: string): boolean
+
+export function findPreSwallowedWraps(
+  source: string,
+  fileName?: string,
+): { line: number; fn: string; reason: string }[]

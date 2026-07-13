@@ -100,10 +100,9 @@ export function createReflection(deps: CreateReflectionDeps): Reflection {
       // majority of turns that carry no correction cue.
       if (!looksLikeCorrection(turn.user_text)) return
       const substrate = deps.substrate
-      fireAndForget('index.runDetection', runDetection(substrate).catch((err) => {
+      fireAndForget('index.runDetection', runDetection(substrate), (err) => {
         console.warn(`${LOG_TAG} event=on_turn_complete_failed err=${errMsg(err)}`)
-        throw err // re-raise so fireAndForget counts it (the .catch only adds context)
-      }))
+      })
 
       async function runDetection(sub: Substrate): Promise<void> {
         const ac = new AbortController()

@@ -96,6 +96,51 @@ describe('fireAndForget', () => {
     expect(true).toBe(true)
   })
 
+  // Structural fix (Codex final): onError replaces the pre-wrapper .catch — the
+  // wrapper ALWAYS counts+logs, THEN calls onError with the rejection.
+  test('onError runs with the rejection AND the count + structured log still fire', async () => {
+    let seen: unknown
+    fireAndForget('unit.onerror', Promise.reject(new Error('boom')), (err) => {
+      seen = err
+    })
+    await flush()
+    expect((seen as Error).message).toBe('boom') // onError got the rejection
+    expect(fireAndForgetRejectionCount()).toBe(1) // counted
+    expect(errorLines.find((l) => l.includes('name=unit.onerror'))).toBeDefined() // logged
+  })
+
+  test('onError runs AFTER the count + structured log (order)', async () => {
+    let countAtOnError = -1
+    let loggedAtOnError = false
+    fireAndForget('unit.order', Promise.reject(new Error('boom')), () => {
+      countAtOnError = fireAndForgetRejectionCount()
+      loggedAtOnError = errorLines.some((l) => l.includes('name=unit.order'))
+    })
+    await flush()
+    expect(countAtOnError).toBe(1) // count already bumped before onError
+    expect(loggedAtOnError).toBe(true) // structured log already emitted before onError
+  })
+
+  test('a throwing onError does NOT break the safety path (no unhandled rejection)', async () => {
+    const seen: unknown[] = []
+    const onUnhandled = (reason: unknown) => seen.push(reason)
+    process.on('unhandledRejection', onUnhandled)
+    try {
+      const reason = new Error('boom')
+      expect(() =>
+        fireAndForget('unit.throwing-onerror', Promise.reject(reason), () => {
+          throw new Error('onError blew up')
+        }),
+      ).not.toThrow()
+      await flush()
+      await flush()
+      expect(seen).not.toContain(reason)
+      expect(fireAndForgetRejectionCount()).toBe(1) // still counted despite onError throwing
+    } finally {
+      process.off('unhandledRejection', onUnhandled)
+    }
+  })
+
   test('counts each rejection independently', async () => {
     fireAndForget('unit.a', Promise.reject(new Error('a')))
     fireAndForget('unit.b', Promise.reject('b-string'))

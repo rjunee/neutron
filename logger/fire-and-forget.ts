@@ -82,16 +82,28 @@ function logRejectionSafely(name: string, err: unknown): void {
  * and the caller's control flow is unaffected — identical fire-and-forget
  * semantics to a bare `void p`, minus the silent swallow.
  *
- * @param name  a short, descriptive site name (e.g. `'scribe.persistDaily'`) —
- *              logged verbatim so a rejection is traceable to its origin.
- * @param p     the promise (or any `PromiseLike`/thenable) to run and forget.
- *              `null` / `undefined` are accepted and no-op — mirroring the
- *              `void maybePromise` idiom this replaces. Accepting `PromiseLike`
- *              (not just `Promise`) reconciles the wrapper with the lint gate,
- *              which flags ANY promise-typed void including a `.catch`-less
- *              standards thenable.
+ * @param name    a short, descriptive site name (e.g. `'scribe.persistDaily'`) —
+ *                logged verbatim so a rejection is traceable to its origin.
+ * @param p       the promise (or any `PromiseLike`/thenable) to run and forget.
+ *                `null` / `undefined` are accepted and no-op — mirroring the
+ *                `void maybePromise` idiom this replaces. Accepting `PromiseLike`
+ *                (not just `Promise`) reconciles the wrapper with the lint gate,
+ *                which flags ANY promise-typed void including a `.catch`-less
+ *                standards thenable.
+ * @param onError OPTIONAL per-site handler for contextual logging / cleanup on
+ *                rejection. Runs AFTER the structured count+log, so a site never
+ *                needs a pre-wrapper `.catch` (which would swallow the rejection
+ *                before the wrapper could count it — the F3 "pre-swallow" bug the
+ *                gate now bans). GUARDED: a throwing `onError` is contained, so
+ *                it can never turn the safety path into an unhandled rejection.
+ *                It must be synchronous-safe — a returned promise is NOT awaited,
+ *                so do async cleanup via a nested `fireAndForget`.
  */
-export function fireAndForget(name: string, p: PromiseLike<unknown> | null | undefined): void {
+export function fireAndForget(
+  name: string,
+  p: PromiseLike<unknown> | null | undefined,
+  onError?: (err: unknown) => void,
+): void {
   if (p == null) return
   // The ONE sanctioned `void <promise>` in the repo: this file is the wrapper
   // the F3 lint rule allowlists. `Promise.resolve(p)` normalizes ANY thenable —
@@ -103,6 +115,13 @@ export function fireAndForget(name: string, p: PromiseLike<unknown> | null | und
   void Promise.resolve(p).catch((err: unknown) => {
     rejectionCount += 1
     logRejectionSafely(name, err)
+    if (onError !== undefined) {
+      try {
+        onError(err)
+      } catch {
+        /* GUARDED — a throwing onError must never break the safety path */
+      }
+    }
   })
 }
 

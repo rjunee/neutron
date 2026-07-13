@@ -354,10 +354,9 @@ process.on('SIGINT', () => shutdownChannel('SIGINT'))
 // genuine no-bind wedge never reaches `initialized`, so `/channel-bound` never
 // fires and the assertion still fast-fails (real wedges stay covered).
 mcp.oninitialized = () => {
-  fireAndForget('dev-channel.postToSink', postToSink('/channel-bound', { session_id: SESSION_ID, pid: process.pid }).catch((e) => {
+  fireAndForget('dev-channel.postToSink', postToSink('/channel-bound', { session_id: SESSION_ID, pid: process.pid }), (e) => {
     process.stderr.write(`neutron-channel: channel-bound announce failed: ${e}\n`)
-    throw e // re-raise so fireAndForget counts it (the .catch only adds context)
-  }))
+  })
   process.stderr.write('neutron-channel: MCP handshake complete (initialized)\n')
 }
 
