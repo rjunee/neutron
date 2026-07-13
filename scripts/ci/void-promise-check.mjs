@@ -220,7 +220,19 @@ function classifyWrapperArg(arg) {
   let a = arg
   while (a) {
     while (ts.isParenthesizedExpression(a)) a = a.expression
-    if (!ts.isCallExpression(a)) return null // identifier / plain expr → OK
+    // An identifier — either the arg itself, or a RECEIVER reached while
+    // descending a `.finally()` / `.then(1)` chain (e.g. `p.finally(cleanup)` →
+    // `p`). Resolve its immutable-const-alias chain and classify the resolved
+    // initializer, so a swallow laundered into a local var BEFORE the wrapper
+    // (incl. under a `.finally` cleanup chain) is still caught. Delegating to
+    // `classifyResolvedInitializer` keeps the resolved-context policy (rethrow
+    // aware; a resolved IIFE is the documented out-of-scope boundary).
+    // Undecidable (reassigned-let / cross-scope / object-member / cycle) → null.
+    if (ts.isIdentifier(a)) {
+      const init = resolveConstAliasChain(a)
+      return init ? classifyResolvedInitializer(init) : null
+    }
+    if (!ts.isCallExpression(a)) return null // plain expr → OK
     let callee = a.expression
     while (ts.isParenthesizedExpression(callee)) callee = callee.expression
     // IIFE: (async () => {...})() / (function(){...})()
@@ -230,7 +242,15 @@ function classifyWrapperArg(arg) {
     // chained `.method(...)` — inspect + descend the receiver
     if (ts.isPropertyAccessExpression(callee)) {
       const m = callee.name.text
-      if (m === 'catch') return 'a `.catch(...)` swallows before the wrapper (use the onError arg)'
+      if (m === 'catch') {
+        // A `.catch` that RETHROWS passes the rejection through to the wrapper
+        // (safe); a swallowing `.catch` hides it.
+        if (rejectionHandlerRethrows(a.arguments[0])) {
+          a = callee.expression
+          continue
+        }
+        return 'a `.catch(...)` swallows before the wrapper (use the onError arg)'
+      }
       if (m === 'then' && a.arguments.length >= 2) {
         return 'a two-arg `.then(onF, onRej)` swallows before the wrapper (use the onError arg)'
       }
@@ -358,7 +378,7 @@ function findConstInitializer(identNode) {
 function resolveConstAliasChain(identNode) {
   const visited = new Set()
   let current = identNode
-  for (let depth = 0; depth < 2; depth += 1) {
+  for (let depth = 0; depth < 32; depth += 1) {
     if (!ts.isIdentifier(current)) return current // reached a non-identifier initializer
     if (visited.has(current.text)) return null // cycle
     visited.add(current.text)
@@ -421,9 +441,13 @@ function wrapperKindOfCall(callee, localFns, namespaces) {
   return null
 }
 
-/** Detector (exported for tests): every wrapper call whose promise arg
- *  pre-swallows. `fireAndForget` promise = arg[1]; `neutralizeAbandonedSettle`
- *  = arg[0]. Recognizes aliased + namespace-imported wrapper calls. */
+/** Detector (exported for tests): every `fireAndForget` call whose promise arg
+ *  (arg[1]) pre-swallows. Recognizes aliased + namespace-imported calls.
+ *  NOTE: only `fireAndForget` is checked — a pre-swallow defeats only the
+ *  VISIBLE primitive (which promises to log+count a rejection it receives).
+ *  `neutralizeAbandonedSettle` is SILENT by design (its purpose IS to absorb a
+ *  deliberately-abandoned / already-settled promise), so a swallowing arg there
+ *  is its intended use, not a lie — it is not pre-swallow-checked. */
 export function findPreSwallowedWraps(source, fileName = 'fixture.ts') {
   const sf = ts.createSourceFile(fileName, source, ts.ScriptTarget.Latest, true)
   const { localFns, namespaces } = resolveWrapperBindings(sf)
@@ -431,8 +455,8 @@ export function findPreSwallowedWraps(source, fileName = 'fixture.ts') {
   const visit = (node) => {
     if (ts.isCallExpression(node)) {
       const fn = wrapperKindOfCall(node.expression, localFns, namespaces)
-      if (fn) {
-        const arg = fn === 'fireAndForget' ? node.arguments[1] : node.arguments[0]
+      if (fn === 'fireAndForget') {
+        const arg = node.arguments[1]
         if (arg) {
           let reason = classifyWrapperArg(arg)
           // A pre-swallow laundered through a chain of immutable `const` aliases

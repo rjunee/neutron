@@ -187,8 +187,8 @@ describe('findPreSwallowedWraps', () => {
     expect(hits[0]?.reason).toContain('IIFE')
   })
 
-  test('also checks neutralizeAbandonedSettle (arg 0)', () => {
-    expect(findPreSwallowedWraps('neutralizeAbandonedSettle(p.catch(() => {}))').length).toBe(1)
+  test('does NOT check neutralizeAbandonedSettle (silent by design — a swallowing arg is its intended use)', () => {
+    expect(findPreSwallowedWraps('neutralizeAbandonedSettle(p.catch(() => {}))').length).toBe(0)
   })
 
   test('PASSES the raw promise + onError form', () => {
@@ -251,10 +251,10 @@ describe('findPreSwallowedWraps', () => {
     expect(findPreSwallowedWraps(src).length).toBe(1)
   })
 
-  test('flags an aliased neutralizeAbandonedSettle pre-swallow', () => {
+  test('does NOT flag an aliased neutralizeAbandonedSettle (silent primitive, not checked)', () => {
     const src =
       "import { neutralizeAbandonedSettle as nas } from '@neutronai/logger/fire-and-forget.ts'\nnas(p.then(a, b))"
-    expect(findPreSwallowedWraps(src).length).toBe(1)
+    expect(findPreSwallowedWraps(src).length).toBe(0)
   })
 
   test('PASSES aliased + namespace calls with the raw + onError form', () => {
@@ -280,8 +280,8 @@ describe('findPreSwallowedWraps', () => {
     expect(findPreSwallowedWraps("const s = p.then(a, b)\nfireAndForget('n', s)").length).toBe(1)
   })
 
-  test('flags a laundered swallow for neutralizeAbandonedSettle too', () => {
-    expect(findPreSwallowedWraps("const s = p.catch(() => {})\nneutralizeAbandonedSettle(s)").length).toBe(1)
+  test('does NOT flag a laundered swallow for neutralizeAbandonedSettle (silent primitive)', () => {
+    expect(findPreSwallowedWraps("const s = p.catch(() => {})\nneutralizeAbandonedSettle(s)").length).toBe(0)
   })
 
   test('PASSES a raw promise laundered through a local const', () => {
@@ -339,6 +339,24 @@ describe('findPreSwallowedWraps', () => {
 
   test('does NOT descend into a laundered self-handling IIFE (documented limit)', () => {
     const src = "const s = (async () => { try { await x() } catch {} })()\nfireAndForget('n', s)"
+    expect(findPreSwallowedWraps(src).length).toBe(0)
+  })
+
+  // Codex round 13: a swallow laundered into a local `const`, then handed to the
+  // wrapper under a `.finally(cleanup)` chain — the receiver identifier must be
+  // resolved during descent (the real mount-cores-scribe-fan-out.ts pattern).
+  test('flags a swallowed const handed to the wrapper via a .finally() chain', () => {
+    const src = "const p = work().catch(() => {})\nfireAndForget('n', p.finally(cleanup))"
+    expect(findPreSwallowedWraps(src).length).toBe(1)
+  })
+
+  test('does NOT flag a RAW promise handed to the wrapper via a .finally() chain', () => {
+    const src = "const p = work()\nfireAndForget('n', p.finally(cleanup))"
+    expect(findPreSwallowedWraps(src).length).toBe(0)
+  })
+
+  test('does NOT flag a rethrowing const handed via a .finally() chain', () => {
+    const src = "const p = work().catch((e) => { throw e })\nfireAndForget('n', p.finally(cleanup))"
     expect(findPreSwallowedWraps(src).length).toBe(0)
   })
 })

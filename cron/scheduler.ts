@@ -39,7 +39,7 @@ import {
 import type { CronHandlerRegistry, CronHandlerStatus } from './handlers.ts'
 import type { CronJobDef, CronJobRegistry } from './jobs.ts'
 import { CronStateStore } from './state.ts'
-import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
+import { fireAndForget, neutralizeAbandonedSettle } from '@neutronai/logger/fire-and-forget.ts'
 
 /** setTimeout's max delay (2^31-1 ms ≈ 24.8 days); longer waits are chunked. */
 const MAX_TIMER_DELAY_MS = 2_147_483_647
@@ -382,7 +382,10 @@ export class CronScheduler {
       () => undefined,
     )
     this.inflightFires.add(tracked)
-    fireAndForget('scheduler.finally', tracked.finally(() => {
+    // `tracked` is a deliberately never-rejecting sequencing baton; this only
+    // prunes the inflight set — no rejection to surface (the real fire error is
+    // returned to / thrown at the caller via `await exec`). Silent neutralize.
+    neutralizeAbandonedSettle(tracked.finally(() => {
       this.inflightFires.delete(tracked)
     }))
     return await exec

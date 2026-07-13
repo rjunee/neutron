@@ -772,6 +772,7 @@ if (import.meta.main) {
   // phase: missing composer module, bad config), so an early failure is
   // logged-then-crashed with structure, not a bare Bun error. boot()'s own
   // idempotent install then no-ops.
+  installProcessSafetyNet()
   // Top-level await: Bun supports TLA in entry modules. An unhandled rejection
   // exits non-zero, which systemd's Restart=always policy converts into a
   // respawn after RestartSec=5s.
