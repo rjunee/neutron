@@ -38,6 +38,11 @@ export class WatchdogSupervisor {
   // supervisor keeps its own hand-rolled setInterval so it can't reuse them).
   private startedAtMs: number | null = null
   private lastTickAtMs: number | null = null
+  // §F2 — the most recent error observed in a tick (detector.detect / persist /
+  // notify / commit failure), CLEARED on a fully-clean tick (recovery). The
+  // supervisor's own alert store owns durable failure surfacing; this is the
+  // loop-inventory `LoopHealth.lastError` (null-when-healthy) contract.
+  private lastError: unknown = null
   /** The in-flight tick, so {@link stop} can QUIESCE (await it) before returning. */
   private inflight: Promise<void> | null = null
   /**
@@ -81,16 +86,18 @@ export class WatchdogSupervisor {
 
   /**
    * §F2 — live LoopRegistry descriptor (name `watchdog`, cadence
-   * `tick_interval_ms`). The supervisor swallows per-detector errors internally
-   * (its own alert store owns failure surfacing), so `lastError` stays null;
-   * `lastTickAt` reflects the most recent completed tick. Call after `start()`.
+   * `tick_interval_ms`). `lastTickAt` reflects the most recent COMPLETED tick;
+   * `lastError` carries the most recent tick's detector/persist/notify/commit
+   * error (null when the last tick was clean — recovery clears it). The
+   * supervisor's alert store still owns durable failure surfacing; this is the
+   * loop-inventory health view. Call after `start()`.
    */
   describe(): LoopDescriptor {
     return {
       name: 'watchdog',
       cadenceMs: this.tick_interval_ms,
       startedAt: this.startedAtMs ?? 0,
-      health: () => ({ lastTickAt: this.lastTickAtMs, lastError: null }),
+      health: () => ({ lastTickAt: this.lastTickAtMs, lastError: this.lastError }),
     }
   }
 
@@ -125,6 +132,9 @@ export class WatchdogSupervisor {
   async runOnce(): Promise<WatchdogAlert[]> {
     if (this.running) return []
     this.running = true
+    // §F2 — most recent error observed THIS tick; assigned to `this.lastError` in
+    // the finally so a clean tick clears it (null-when-healthy / recovery).
+    let tickError: unknown = null
     const delivered: WatchdogAlert[] = []
     // Expose this tick as `inflight` so a concurrent stop() can await it (quiesce).
     let resolveInflight: () => void = () => {}
@@ -137,6 +147,7 @@ export class WatchdogSupervisor {
         try {
           alerts = await detector.detect()
         } catch (err) {
+          tickError = err
           console.error(`watchdog detector ${detector.kind} failed:`, err)
           continue
         }
@@ -150,6 +161,7 @@ export class WatchdogSupervisor {
               detector.commit?.(alert)
               this.deliveredIds.delete(alert.id) // latched → `open` suppresses henceforth
             } catch (err) {
+              tickError = err
               console.error(
                 `watchdog supervisor: commit ${alert.id} threw AGAIN — notification already ` +
                   `delivered; will NOT re-notify, retrying commit next tick:`,
@@ -163,6 +175,7 @@ export class WatchdogSupervisor {
           try {
             await this.store.record(alert)
           } catch (err) {
+            tickError = err
             console.error(
               `watchdog supervisor: alert delivery FAILING — persist ${alert.id} threw ` +
                 `(will retry next tick):`,
@@ -177,6 +190,7 @@ export class WatchdogSupervisor {
             await this.notifier.notify(alert)
           } catch (err) {
             notified = false
+            tickError = err
             console.error(
               `watchdog supervisor: alert delivery FAILING — notify ${alert.id} threw ` +
                 `(will retry next tick):`,
@@ -193,6 +207,7 @@ export class WatchdogSupervisor {
               detector.commit?.(alert)
               this.deliveredIds.delete(alert.id) // committed cleanly → drop the guard entry
             } catch (err) {
+              tickError = err
               console.error(
                 `watchdog supervisor: commit ${alert.id} threw — notification already ` +
                   `delivered; will NOT re-notify, retrying commit next tick:`,
@@ -205,7 +220,10 @@ export class WatchdogSupervisor {
     } finally {
       this.running = false
       this.inflight = null
+      // §F2 — stamp AFTER the tick tail; `lastError` = this tick's last error, or
+      // null when the tick was fully clean (recovery clears a prior error).
       this.lastTickAtMs = Date.now()
+      this.lastError = tickError
       resolveInflight()
     }
     return delivered

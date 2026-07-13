@@ -279,12 +279,16 @@ export class SupervisedLoop {
       this.running = false
       this.inflight = null
     }
-    // §F2 — stamp the tick clock whether the tick ran or threw (a loop that is
-    // failing every tick is still ticking; the inventory should show it).
+    // §F2 — stamp the tick clock AFTER the tick settles (ran OR threw): a loop
+    // failing every tick is still ticking, and `lastTickAt` must reflect a
+    // COMPLETED tick.
     this.lastTickAtMs = Date.now()
     if (ok) {
       this.tickCount++
       this.consecutiveFailures = 0
+      // §F2 — a successful tick CLEARS the last error (recovery): `lastError`
+      // must be null-when-healthy, not sticky forever after one transient throw.
+      this.lastError = null
     } else {
       this.failureCount++
       this.consecutiveFailures++

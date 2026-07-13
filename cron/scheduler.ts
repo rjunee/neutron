@@ -454,17 +454,26 @@ export class CronScheduler {
       if (entry) entry.in_flight = false
     }
     const duration_ms = this.now() - fired_at
-    // §F2 — stamp the loop-inventory clock + last-error for this fire (any job).
+    // §F2 — stamp the loop-inventory health ONLY AFTER the fire TAIL
+    // (`state.record`) settles, so `lastTickAt` reflects a COMPLETED fire and a
+    // `record()` rejection is reported as an error, not healthy. A tail throw
+    // still propagates (as before) after we record it.
+    try {
+      await this.state.record({
+        job_name: name,
+        project_slug: this.project_slug,
+        fired_at: fired_at / 1000,
+        duration_ms,
+        status,
+        error,
+      })
+    } catch (recErr) {
+      this.lastFireAtMs = this.now()
+      this.lastFireError = recErr
+      throw recErr
+    }
     this.lastFireAtMs = this.now()
     this.lastFireError = status === 'error' ? (error ?? detail ?? 'error') : null
-    await this.state.record({
-      job_name: name,
-      project_slug: this.project_slug,
-      fired_at: fired_at / 1000,
-      duration_ms,
-      status,
-      error,
-    })
     // O4 — VISIBILITY ONLY: journal the degrade on the RISING EDGE only. The
     // check-and-mutate below is SYNCHRONOUS (no await between them), so two
     // concurrent fires of the same job can't both emit for one transition: the

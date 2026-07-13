@@ -24,7 +24,7 @@ import type { AgentKind, SubagentRecord, SubagentRegistry } from '@neutronai/run
 import type { ControlState } from '@neutronai/runtime/subagent/control.ts'
 import type { BootSweepReport } from '@neutronai/runtime/subagent/boot-sweep.ts'
 import { runLifecycleTick } from '@neutronai/runtime/subagent/lifecycle.ts'
-import { SupervisedLoop } from '@neutronai/loop'
+import { SupervisedLoop, type LoopDescriptor } from '@neutronai/loop'
 import { DISPATCH_KIND_BY_AGENT_KIND } from './prompts.ts'
 import type { DeliveryTarget, DispatchReport, DispatchReporter } from './service.ts'
 
@@ -335,7 +335,7 @@ export interface ScheduleDispatchLifecycleWatchdogDeps {
  */
 export function scheduleDispatchLifecycleWatchdog(
   deps: ScheduleDispatchLifecycleWatchdogDeps,
-): { stop: () => Promise<void>; runOnce: () => Promise<void> } {
+): { stop: () => Promise<void>; runOnce: () => Promise<void>; describe: () => LoopDescriptor } {
   const notify = buildDispatchSuspectedStuckNotifier(deps.alert_sink)
   const notified = new Set<string>()
   const loop = new SupervisedLoop({
@@ -366,6 +366,9 @@ export function scheduleDispatchLifecycleWatchdog(
     runOnce: async (): Promise<void> => {
       await loop.runOnce()
     },
+    // §F2 — live LoopRegistry descriptor (name `dispatch-lifecycle-watchdog`).
+    // The Open composer registers this into the shared boot inventory.
+    describe: (): LoopDescriptor => loop.describe(),
   }
 }
 

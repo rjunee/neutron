@@ -125,3 +125,28 @@ test('SupervisedLoop.describe() surfaces the last tick error', async () => {
   expect(health.lastError).toBe(boom)
   await loop.stop()
 })
+
+test('SupervisedLoop CLEARS lastError on a success after a failure (recovery — defect #3)', async () => {
+  const boom = new Error('transient')
+  let shouldThrow = true
+  const loop = new SupervisedLoop({
+    name: 'recovering',
+    intervalMs: 10_000,
+    tick: async () => {
+      if (shouldThrow) throw boom
+    },
+    onError: () => {},
+    setTimer: () => 0,
+    clearTimer: () => {},
+  })
+  loop.start()
+  await loop.runOnce()
+  expect(loop.describe().health().lastError).toBe(boom)
+  // A later SUCCESS must null the error — not stay errored forever.
+  shouldThrow = false
+  await loop.runOnce()
+  const health = loop.describe().health()
+  expect(health.lastError).toBeNull()
+  expect(health.lastTickAt).toBeGreaterThan(0)
+  await loop.stop()
+})

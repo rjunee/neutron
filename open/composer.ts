@@ -39,6 +39,7 @@ import {
   resolveAmbientTier,
 } from '@neutronai/gateway/realmode-composer/resolve-llm-credentials.ts'
 import { normalizeProvider, type Provider } from '@neutronai/runtime/adapters/select-substrate.ts'
+import { LoopRegistry } from '@neutronai/loop'
 import type { McpToolResolver } from '@neutronai/contracts/mcp-tool-resolver.ts'
 import { replToolBridgeRef } from '@neutronai/runtime/adapters/claude-code/persistent/pool-state.ts'
 import { detectAmbientClaudeAuthCached } from './ambient-claude-auth.ts'
@@ -887,6 +888,14 @@ export function buildOpenGraphComposer(
     // §F1 — a cleanup may be async (e.g. the upload sweeper's quiescing
     // `stop()`); the gateway shutdown runner awaits each before `db.close()`.
     const realmodeCleanups: Array<() => void | Promise<void>> = []
+    // §F2 — the SINGLE loop inventory for this Open boot. The Open composer
+    // starts long-lived loops OUTSIDE `composeProductionGraph` (the
+    // `ChunkedUploadSweeper` in `wireUploads`, the `dispatch-lifecycle-watchdog`
+    // when the dispatch service is wired); each registers here, and the registry
+    // is threaded onto `composition.loop_registry` so `composeProductionGraph`
+    // adds ITS loops (reminders/trident/cron/watchdog) to the SAME instance and
+    // the ONE boot line inventories the COMPLETE running set.
+    const loopRegistry = new LoopRegistry()
     // Substrate teardown hooks (C3a): registered here — the point at which the
     // substrate wiring's inline cleanups previously ran. None exist today (the
     // array is empty), but the contract stays wired for the C3b-d carves.
@@ -1292,6 +1301,7 @@ export function buildOpenGraphComposer(
       uploadUid,
       uploadGid,
       importWatchHolder,
+      loopRegistry,
     })
     // The sweeper `stop()` hook collected into `wireUploads`'s `cleanups` is
     // re-registered HERE, at the carve site, so it lands at the SAME point in the
@@ -2855,6 +2865,8 @@ export function buildOpenGraphComposer(
         control: subagentControl,
         alert_sink: dispatchStuckAlertSink,
       })
+      // §F2 — register the running lifecycle watchdog into the shared inventory.
+      loopRegistry.register(lifecycleWatchdog.describe())
       // stop() is ASYNC + QUIESCING — the gateway's shutdown drain AWAITS every
       // realmode cleanup BEFORE `db.close()` (drainRealmodeCleanups → db.close),
       // so an in-flight lifecycle tick fully drains before the DB closes and can
@@ -2889,6 +2901,9 @@ export function buildOpenGraphComposer(
       ...(llmPool !== null ? { watchdog_credential_pool: llmPool } : {}),
       platform,
       cron_jobs: cronJobs,
+      // §F2 — the shared loop inventory (sweeper + lifecycle watchdog already
+      // registered above); `composeProductionGraph` adds its own loops to it.
+      loop_registry: loopRegistry,
       // Free Cores (parity gap #2) — `composition.cores` flips on the cores
       // module in `composeProductionGraph` (`build-core-modules.ts:535`) so
       // `installBundledCores` discovers the bundled Cores (rootDirs from the

@@ -1,25 +1,32 @@
 /**
- * §F2 — production-composer reachability guard for the LOOP INVENTORY (the
- * ISSUE-#32 "assert the set, not archaeology" pattern applied to long-lived
- * loops).
+ * §F2 — loop-inventory guard for the GATEWAY-GRAPH contribution (the ISSUE-#32
+ * "assert the set, not archaeology" pattern applied to loops).
+ *
+ * SCOPE: this test boots `composeProductionGraph` DIRECTLY with a minimal input
+ * and NO `loop_registry` threaded, so `graph.loopRegistry` holds exactly the
+ * loops the production GRAPH starts itself — cron, reminders, trident, watchdog.
+ * It does NOT cover the loops the OPEN COMPOSER starts before the graph composes
+ * (the `ChunkedUploadSweeper` + `dispatch-lifecycle-watchdog`) — the COMPLETE
+ * Open running set is pinned end-to-end by
+ * `open/__tests__/loop-inventory-open-composer.test.ts`, which drives the real
+ * Open composer → `composeProductionGraph` boundary. Keeping this focused guard
+ * catches a gateway-module loop regression fast, in isolation, without the heavy
+ * Open boot.
  *
  * What this pins:
- *   1. `composeProductionGraph` STARTS exactly the expected set of long-lived
- *      tick loops — cron, reminders, trident, watchdog — and exposes them via
- *      `graph.loopRegistry`. A future loop that silently stops starting (a
- *      wiring regression) OR a silently-added new loop breaks the pinned set.
+ *   1. The gateway graph starts EXACTLY {cron, reminders, trident, watchdog}.
  *   2. The two D-7 DORMANT loops (`project-backup-scheduler`, comments
- *      `agent-watcher`) are NOT in the running set — they are explicitly
- *      enumerated in `DORMANT_LOOPS`, never silently dead. If someone wires one
- *      for real (a future feature PR) without moving it out of `DORMANT_LOOPS`,
- *      or lets a third loop go silently-dead, this test flags it.
- *   3. The ONE boot inventory line names every running loop (cron with its job
+ *      `agent-watcher`) are NOT running — explicitly enumerated in
+ *      `DORMANT_LOOPS`, never silently dead.
+ *   3. The Open-composer loops are NOT in the gateway-only registry — proving the
+ *      cross-boundary threading (not the gateway alone) is what surfaces them.
+ *   4. The ONE boot inventory line names every running loop (cron with its job
  *      detail) plus the dormant set.
  *
  * MUTATION-VERIFIED: deleting any `loopRegistry.register(...)` line in
  * `gateway/composition/build-core-modules.ts` (or the cron registration in
  * `composition.ts`) drops that loop from `graph.loopRegistry.names()` and this
- * test goes red — the closing condition for F2.
+ * test goes red.
  */
 
 import { afterEach, beforeEach, expect, test } from 'bun:test'
@@ -34,8 +41,10 @@ import { composeProductionGraph, DORMANT_LOOPS } from '../composition.ts'
 
 const OWNER = 'loop-inventory-composer-owner'
 
-/** The exact set of loops the Open production composition starts. */
-const EXPECTED_RUNNING_LOOPS = ['cron', 'reminders', 'trident', 'watchdog'] as const
+/** The loops the GATEWAY GRAPH starts itself (no Open-composer loops here). */
+const EXPECTED_GATEWAY_LOOPS = ['cron', 'reminders', 'trident', 'watchdog'] as const
+/** Loops the OPEN COMPOSER starts — absent from a gateway-only registry. */
+const OPEN_COMPOSER_LOOPS = ['chunked-upload-sweeper', 'dispatch-lifecycle-watchdog'] as const
 /** The exact set of D-7 dormant loops (built, never started). */
 const EXPECTED_DORMANT_LOOPS = ['agent-watcher', 'project-backup-scheduler'] as const
 
@@ -80,12 +89,18 @@ afterEach(async () => {
   await harness.close()
 })
 
-test('composeProductionGraph starts exactly the expected loop set', () => {
-  expect(harness.graph.loopRegistry.names()).toEqual([...EXPECTED_RUNNING_LOOPS])
+test('the gateway graph starts exactly its four loops (no Open-composer loops)', () => {
+  expect(harness.graph.loopRegistry.names()).toEqual([...EXPECTED_GATEWAY_LOOPS])
+  // The sweeper + lifecycle watchdog are Open-composer loops — they only appear
+  // when the composer threads them in via `loop_registry`, NOT from the graph
+  // alone. Proves the cross-boundary threading is load-bearing.
+  for (const name of OPEN_COMPOSER_LOOPS) {
+    expect(harness.graph.loopRegistry.has(name)).toBe(false)
+  }
 })
 
 test('every running loop exposes a live descriptor (cadence, startedAt, health)', () => {
-  for (const name of EXPECTED_RUNNING_LOOPS) {
+  for (const name of EXPECTED_GATEWAY_LOOPS) {
     const desc = harness.graph.loopRegistry.get(name)
     expect(desc, `loop '${name}' missing`).toBeDefined()
     if (desc === undefined) continue
@@ -124,7 +139,7 @@ test('the ONE boot line names running loops (with cron jobs) + the dormant set',
   const line = harness.graph.loopRegistry.bootLine(OWNER, DORMANT_LOOPS)
   expect(line).toContain(`project=${OWNER}`)
   expect(line).toContain('4 loop(s) running')
-  for (const name of EXPECTED_RUNNING_LOOPS) expect(line).toContain(name)
+  for (const name of EXPECTED_GATEWAY_LOOPS) expect(line).toContain(name)
   expect(line).toMatch(/cron \(\d+ jobs/)
   expect(line).toContain('2 dormant (deferred): [agent-watcher, project-backup-scheduler]')
 })

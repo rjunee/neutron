@@ -220,10 +220,15 @@ export async function composeProductionGraph(
 ): Promise<ComposedProductionGraph> {
   const graph = new GatewayModuleGraph({ project_slug: input.project_slug })
 
-  // §F2 — the boot loop inventory. `buildCoreModules` threads this into the
+  // §F2 — the boot loop inventory. REUSE the registry the caller threaded
+  // through `CompositionInput.loop_registry` (the Open composer registers the
+  // `ChunkedUploadSweeper` it starts BEFORE this graph composes) so the ONE boot
+  // line inventories the COMPLETE running set — loops started here AND by the
+  // composer. Absent (Managed / direct composer-test callers) → a fresh registry
+  // holding just this graph's loops. `buildCoreModules` threads it into the
   // reminders / trident / watchdog module inits (each registers its live
   // descriptor after `start()`); cron registers below after its own `start()`.
-  const loopRegistry = new LoopRegistry()
+  const loopRegistry = input.loop_registry ?? new LoopRegistry()
 
   // R5 (audit P2-5) — module-graph object construction extracted to
   // `composition/build-core-modules.ts`. The registration ORDER below
