@@ -274,6 +274,13 @@ export async function boot(options: BootOptions = {}): Promise<BootHandle> {
   // hooks the production caller wired (e.g. http_handler) without changing
   // the GatewayModuleGraph contract.
   let graph: GatewayModuleGraph | null = null
+  // §F2 — the gateway-liveness interval + its lifecycle flag are declared at BOOT
+  // scope (not the liveness block far below) so the SHARED `bootFailureCleanup`
+  // can clear the timer if a failure fires AFTER it started (e.g. a throwing
+  // descriptor callback in `bootLine()`). Without this the interval would survive
+  // a rejected boot and `onGatewayTick` could fire against torn-down resources.
+  let watchdogTimer: ReturnType<typeof setInterval> | null = null
+  let livenessActive = false
   // §F1 — a cleanup may be async (the upload sweeper's quiescing `stop()`); the
   // shutdown drain awaits each before `db.close()`.
   let realmode_cleanups: Array<() => void | Promise<void>> = []
@@ -302,6 +309,14 @@ export async function boot(options: BootOptions = {}): Promise<BootHandle> {
   // later failure (listener bind, port assertion, sd_notify) before a
   // BootHandle is returned. Idempotent-safe: only invoked on the failure paths.
   const bootFailureCleanup = async (): Promise<void> => {
+    // §F2 — clear the gateway-liveness interval FIRST so no further
+    // `onGatewayTick` / sd_notify tick fires against resources this cleanup is
+    // about to tear down. No-op when the failure fired before the timer started.
+    if (watchdogTimer !== null) {
+      clearInterval(watchdogTimer)
+      watchdogTimer = null
+      livenessActive = false
+    }
     if (graph !== null) {
       try {
         await graph.shutdown()
@@ -521,9 +536,9 @@ export async function boot(options: BootOptions = {}): Promise<BootHandle> {
   let livenessStartedAt: number | null = null
   let livenessLastTickAt: number | null = null
   let livenessLastError: unknown = null
-  // true between start and the shutdown clearInterval — the liveness loop's
-  // `isActive()` (mirrors the other loops' start/stop lifecycle flag).
-  let livenessActive = false
+  // `livenessActive` (true between start and the shutdown / failure clearInterval)
+  // + `watchdogTimer` are declared at BOOT scope above so the shared failure
+  // cleanup can stop them; the descriptor's `isActive()` mirrors that flag.
   // The registry is the composed graph's when present (composeProductionGraph
   // returns a ComposedProductionGraph); the COMPOSER-LESS `/healthz` boot has no
   // graph, but the liveness interval still runs — so create a standalone registry
@@ -543,7 +558,7 @@ export async function boot(options: BootOptions = {}): Promise<BootHandle> {
   })
   livenessStartedAt = Date.now()
   livenessActive = true
-  let watchdogTimer: ReturnType<typeof setInterval> | null = setInterval(() => {
+  watchdogTimer = setInterval(() => {
     let tickError: unknown = null
     // Catch transient sd_notify failures (kernel-side `sendto()` errors,
     // recv-side socket teardown during shutdown) so a single hiccup does NOT

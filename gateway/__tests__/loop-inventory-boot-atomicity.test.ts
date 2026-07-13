@@ -103,3 +103,53 @@ test("boot() stops a composer-started loop when composeProductionGraph fails", a
   // loop is stopped, not leaked.
   expect(composerLoop.describe().isActive?.()).toBe(false)
 })
+
+test('boot() clears the gateway-liveness interval when boot fails AFTER it starts', async () => {
+  // A registry whose `detail()` THROWS → `bootLine()` throws, failing boot at a
+  // point AFTER the gateway-liveness interval has already been armed. The shared
+  // failure cleanup must clear that interval (no leaked timer, no onGatewayTick
+  // against torn-down resources). We hold the registry reference to inspect it.
+  const sharedRegistry = new LoopRegistry()
+  sharedRegistry.register({
+    name: 'evil-throwing-detail',
+    cadenceMs: 1_000,
+    startedAt: 1,
+    health: () => ({ lastTickAt: null, lastError: null }),
+    detail: () => {
+      throw new Error('boom in detail() — fails bootLine() AFTER liveness starts')
+    },
+  })
+
+  const composer = async ({
+    db,
+    project_slug,
+  }: {
+    db: CompositionInput['db']
+    project_slug: string
+  }): Promise<CompositionInput> => ({
+    db,
+    project_slug,
+    topic_handler: async () => undefined,
+    approval_notifier: { notify: async () => undefined },
+    watchdog_notifier: { notify: async () => undefined },
+    reminder_dispatcher: { dispatch: async () => undefined },
+    heartbeat_tracker: { lastHeartbeatAt: () => Date.now() },
+    platform: STUB_PLATFORM,
+    // composeProductionGraph SUCCEEDS (no collision), so boot reaches the
+    // liveness-start + bootLine(); bootLine() then throws on the evil detail().
+    loop_registry: sharedRegistry,
+  })
+
+  let threw = false
+  try {
+    await boot({ composer, port: 0 })
+  } catch {
+    threw = true
+  }
+  expect(threw).toBe(true)
+  // gateway-liveness was register-before-started into the shared registry before
+  // bootLine() threw; the shared failure cleanup cleared its interval.
+  const liveness = sharedRegistry.get('gateway-liveness')
+  expect(liveness, 'gateway-liveness should have been registered before bootLine() threw').toBeDefined()
+  expect(liveness?.isActive?.()).toBe(false) // interval cleared — not leaked
+})
