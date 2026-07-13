@@ -594,6 +594,7 @@
       "dependencies": {
         "@neutronai/cron": "workspace:*",
         "@neutronai/logger": "workspace:*",
+        "@neutronai/loop": "workspace:*",
         "@neutronai/migrations": "workspace:*",
         "@neutronai/persistence": "workspace:*",
         "@neutronai/runtime": "workspace:*",

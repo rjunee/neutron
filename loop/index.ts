@@ -41,6 +41,18 @@
 
 import { AsyncLocalStorage } from 'node:async_hooks'
 
+// §F2 — the loop inventory (LoopRegistry + descriptor/health/dormant types) is a
+// sibling leaf re-exported here so every `@neutronai/loop` importer reaches it
+// without a second package path. `SupervisedLoop.describe()` (below) produces a
+// live `LoopDescriptor` the composition registers.
+export {
+  LoopRegistry,
+  type LoopDescriptor,
+  type LoopHealth,
+  type DormantLoop,
+} from './registry.ts'
+import type { LoopDescriptor } from './registry.ts'
+
 /** Payload handed to {@link SupervisedLoopOptions.onEscalate}. */
 export interface SupervisedLoopEscalation {
   /** The loop's {@link SupervisedLoopOptions.name}. */
@@ -189,6 +201,12 @@ export class SupervisedLoop {
   private failureCount = 0
   private consecutiveFailures = 0
   private skippedCount = 0
+  // §F2 — loop-inventory observability. `startedAtMs` is stamped on the first
+  // `start()`; `lastTickAtMs` is stamped after each tick settles (ran OR threw).
+  // Both feed `describe()`'s live `LoopDescriptor` so the LoopRegistry can
+  // surface (name, cadence, started_at, last_tick, last_error).
+  private startedAtMs: number | null = null
+  private lastTickAtMs: number | null = null
 
   constructor(opts: SupervisedLoopOptions) {
     this.name = opts.name
@@ -215,6 +233,10 @@ export class SupervisedLoop {
   start(): void {
     if (this.started) return
     this.started = true
+    // Stamp the start clock ONCE (a stop()→start() re-arm keeps the original
+    // boot time — the inventory tracks "since first started", matching the
+    // gateway's single-boot lifecycle).
+    if (this.startedAtMs === null) this.startedAtMs = Date.now()
     this.timer = this.setTimer(() => {
       void this.runOnce()
     }, this.intervalMs)
@@ -257,6 +279,9 @@ export class SupervisedLoop {
       this.running = false
       this.inflight = null
     }
+    // §F2 — stamp the tick clock whether the tick ran or threw (a loop that is
+    // failing every tick is still ticking; the inventory should show it).
+    this.lastTickAtMs = Date.now()
     if (ok) {
       this.tickCount++
       this.consecutiveFailures = 0
@@ -318,6 +343,21 @@ export class SupervisedLoop {
       consecutiveFailures: this.consecutiveFailures,
       skipped: this.skippedCount,
       running: this.running,
+    }
+  }
+
+  /**
+   * §F2 — a live {@link LoopDescriptor} for the LoopRegistry inventory. The
+   * returned `health()` reads the loop's CURRENT `lastTickAt`/`lastError` each
+   * call (not a frozen snapshot), so the registry reflects real-time state. Call
+   * after `start()` so `startedAt` is stamped.
+   */
+  describe(): LoopDescriptor {
+    return {
+      name: this.name,
+      cadenceMs: this.intervalMs,
+      startedAt: this.startedAtMs ?? 0,
+      health: () => ({ lastTickAt: this.lastTickAtMs, lastError: this.lastError }),
     }
   }
 }

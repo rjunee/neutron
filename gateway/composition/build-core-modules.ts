@@ -14,6 +14,7 @@ import { CronHandlerRegistry } from '@neutronai/cron/handlers.ts'
 import { CronJobRegistry } from '@neutronai/cron/jobs.ts'
 import { CronScheduler } from '@neutronai/cron/scheduler.ts'
 import { CronStateStore } from '@neutronai/cron/state.ts'
+import { LoopRegistry } from '@neutronai/loop'
 import { McpServer } from '@neutronai/mcp/server.ts'
 import {
   setReplToolBridge,
@@ -148,7 +149,18 @@ export interface CoreModules {
   coresModule: GatewayModule<CoresModuleState> | null
 }
 
-export function buildCoreModules(input: CompositionInput): CoreModules {
+/**
+ * §F2 — the long-lived tick loops (reminders, trident, watchdog) register their
+ * live {@link LoopDescriptor} into this registry the moment they start, so the
+ * composer emits ONE boot inventory line and a production-composer test can PIN
+ * the running-loop set. Optional so the two existing direct-drivers of
+ * `buildCoreModules` (the trident-shutdown + watchdog-wiring unit tests) keep
+ * their one-arg call; they get a throwaway registry that no one reads.
+ */
+export function buildCoreModules(
+  input: CompositionInput,
+  loopRegistry: LoopRegistry = new LoopRegistry(),
+): CoreModules {
   const toolsModule: GatewayModule<ToolRegistry> = {
     name: 'tools',
     init: () => {
@@ -318,6 +330,8 @@ export function buildCoreModules(input: CompositionInput): CoreModules {
       }
       const loop = new ReminderTickLoop(loopOpts)
       loop.start()
+      // §F2 — register the running loop into the boot inventory.
+      loopRegistry.register(loop.describe())
       return { store, loop }
     },
     shutdown: async (instance) => {
@@ -468,6 +482,8 @@ export function buildCoreModules(input: CompositionInput): CoreModules {
         loop = new TridentTickLoop({ store, deps: stubAdvanceDeps(), on_terminal, ...transitionOpt })
       }
       loop.start()
+      // §F2 — register the running loop into the boot inventory.
+      loopRegistry.register(loop.describe())
       return drain !== undefined ? { store, loop, drain } : { store, loop }
     },
     shutdown: async (instance) => {
@@ -578,6 +594,8 @@ export function buildCoreModules(input: CompositionInput): CoreModules {
         }),
       )
       supervisor.start()
+      // §F2 — register the running loop into the boot inventory.
+      loopRegistry.register(supervisor.describe())
       return { store, supervisor }
     },
     shutdown: async (instance) => {

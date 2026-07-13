@@ -26,7 +26,7 @@
  * `cron_state` via the supplied `CronStateStore`.
  */
 
-import { guardedFire } from '@neutronai/loop'
+import { guardedFire, type LoopDescriptor } from '@neutronai/loop'
 import { emitSystemEvent } from '@neutronai/persistence/index.ts'
 import type { ProjectDb } from '@neutronai/persistence/index.ts'
 import {
@@ -104,6 +104,13 @@ export class CronScheduler {
   // exactly once — acceptable (a restart is itself worth surfacing), never a
   // per-poll spam.
   private readonly erroredJobs = new Set<string>()
+  // §F2 — loop-inventory observability. Cron is registered as ONE loop named
+  // `cron` (its N per-job timers stay its own); `startedAtMs` is stamped on the
+  // first `start()`, `lastFireAtMs`/`lastFireError` track the most recent job
+  // fire so the LoopRegistry surfaces (started_at, last_tick, last_error).
+  private startedAtMs: number | null = null
+  private lastFireAtMs: number | null = null
+  private lastFireError: unknown = null
 
   /**
    * §F1 — in-flight FIRE promises. Cron keeps its own N per-job timers +
@@ -147,8 +154,31 @@ export class CronScheduler {
    */
   start(): void {
     this.started = true
+    if (this.startedAtMs === null) this.startedAtMs = Date.now()
     for (const job of this.jobs.list()) {
       this.bindJob(job)
+    }
+  }
+
+  /**
+   * §F2 — a live {@link LoopDescriptor} for the LoopRegistry inventory. Cron is
+   * ONE registry entry (`cron`) whose `detail()` lists the running job names, so
+   * the S15 job-name observability survives the boot-line generalisation.
+   * `cadenceMs` is 0 (variable — each job carries its own interval / calendar
+   * schedule). `lastTick`/`lastError` reflect the most recent job FIRE.
+   */
+  describe(): LoopDescriptor {
+    return {
+      name: 'cron',
+      cadenceMs: 0,
+      startedAt: this.startedAtMs ?? 0,
+      health: () => ({ lastTickAt: this.lastFireAtMs, lastError: this.lastFireError }),
+      detail: () => {
+        const names = this.runningJobNames()
+        return names.length === 0
+          ? '0 jobs'
+          : `${names.length} jobs: ${names.join(', ')}`
+      },
     }
   }
 
@@ -424,6 +454,9 @@ export class CronScheduler {
       if (entry) entry.in_flight = false
     }
     const duration_ms = this.now() - fired_at
+    // §F2 — stamp the loop-inventory clock + last-error for this fire (any job).
+    this.lastFireAtMs = this.now()
+    this.lastFireError = status === 'error' ? (error ?? detail ?? 'error') : null
     await this.state.record({
       job_name: name,
       project_slug: this.project_slug,

@@ -22,6 +22,7 @@ import { CronHandlerRegistry } from '@neutronai/cron/handlers.ts'
 import { CronJobRegistry } from '@neutronai/cron/jobs.ts'
 import { CronScheduler } from '@neutronai/cron/scheduler.ts'
 import { CronStateStore } from '@neutronai/cron/state.ts'
+import { LoopRegistry, type DormantLoop } from '@neutronai/loop'
 import { GatewayModuleGraph } from './module-graph.ts'
 import {
   buildManagedAuthGate,
@@ -43,6 +44,36 @@ import type { CompositionInput } from './composition/input/composition-input.ts'
 import type { CompositionHttpHandler } from './composition/types.ts'
 export type { CompositionInput } from './composition/input/composition-input.ts'
 export type { CompositionHttpHandler } from './composition/types.ts'
+
+/**
+ * §F2 / decision D-7 — loops that are fully BUILT but deliberately NOT started
+ * in any composition today. Enumerated here so the boot inventory line names
+ * them (explicit dormancy, never a silent dead loop) and the loop-inventory
+ * production-composer test PINS the set — a future silently-added dead loop, or
+ * a silent deletion of one of these, breaks that test.
+ *
+ * D-7 (2026-07-02 Decisions Log): "Document as dormant now; add BOTH to SPEC.md
+ * as post-window feature PRs." Wiring each requires real feature infrastructure
+ * (ProjectBackupScheduler ← a per-instance `ProjectBackupStore` + git backup
+ * plumbing from the P7.4 sprint; comments `AgentWatcher` ← the realmode LLM-call
+ * composer + comment store + shared anchor-walker project lock) that belongs in
+ * a feature PR, not this refactor unit — so F2 makes their dormancy EXPLICIT
+ * rather than wiring or deleting them.
+ */
+export const DORMANT_LOOPS: readonly DormantLoop[] = [
+  {
+    name: 'project-backup-scheduler',
+    reason:
+      'built (gateway/git/project-backup-scheduler.ts) but never constructed in any composition; needs a wired ProjectBackupStore + project enumerator (P7.4 backup sprint).',
+    deferredTo: 'D-7 → SPEC roadmap post-window feature PR',
+  },
+  {
+    name: 'agent-watcher',
+    reason:
+      'built (gateway/comments/agent-watcher.ts) but never constructed in any composition; needs the realmode LLM-call composer + comment store + shared anchor-walker project lock.',
+    deferredTo: 'D-7 → SPEC roadmap post-window feature PR',
+  },
+]
 
 /**
  * Return shape from `composeProductionGraph` after ISSUE #32. The
@@ -86,6 +117,14 @@ export type ComposedProductionGraph = GatewayModuleGraph & {
    * overlays). Same object reference for backward compat.
    */
   composition: CompositionInput
+  /**
+   * §F2 — the loop inventory. Every long-lived tick loop this composition
+   * STARTED (reminders, trident, cron, watchdog) has registered its live
+   * descriptor here by the time `composeProductionGraph` returns. A
+   * production-composer test pins `loopRegistry.names()` (the ISSUE-#32 pattern
+   * applied to loops); the dormant set is {@link DORMANT_LOOPS}.
+   */
+  loopRegistry: LoopRegistry
 }
 
 /**
@@ -181,6 +220,11 @@ export async function composeProductionGraph(
 ): Promise<ComposedProductionGraph> {
   const graph = new GatewayModuleGraph({ project_slug: input.project_slug })
 
+  // §F2 — the boot loop inventory. `buildCoreModules` threads this into the
+  // reminders / trident / watchdog module inits (each registers its live
+  // descriptor after `start()`); cron registers below after its own `start()`.
+  const loopRegistry = new LoopRegistry()
+
   // R5 (audit P2-5) — module-graph object construction extracted to
   // `composition/build-core-modules.ts`. The registration ORDER below
   // and the post-`graph.compose()` wiring stay here (both load-bearing).
@@ -199,7 +243,7 @@ export async function composeProductionGraph(
     platformModule,
     tasksModule,
     coresModule,
-  } = buildCoreModules(input)
+  } = buildCoreModules(input, loopRegistry)
 
   graph.register(toolsModule)
   graph.register(processRegistryModule)
@@ -248,10 +292,15 @@ export async function composeProductionGraph(
     scheduler: CronScheduler
   }>('cron')
   cron.scheduler.start()
-  const job_names = cron.scheduler.runningJobNames()
-  console.log(
-    `[cron-scheduler] project=${input.project_slug} started — ${job_names.length} job(s) ticking: [${job_names.join(', ')}]`,
-  )
+  // §F2 — cron is the last loop to start (its jobs are registered by the modules
+  // that own them during compose(), and `start()` binds their timers here). Add
+  // it to the inventory, THEN emit the ONE boot line that subsumes cron's former
+  // ad-hoc `[cron-scheduler] … N job(s) ticking` line: it names every running
+  // loop (cron appends its job names via `detail()`, preserving the S15
+  // job-name + `0 jobs` regression signal) plus the known-dormant set so a
+  // deferred loop is explicitly enumerated at boot, never silently dead.
+  loopRegistry.register(cron.scheduler.describe())
+  console.log(loopRegistry.bootLine(input.project_slug, DORMANT_LOOPS))
 
   // R5 (audit P2-5) — Cores HTTP surface auto-build extracted to
   // `composition/wire-cores-surfaces.ts`. Runs in the SAME position as the
@@ -304,5 +353,6 @@ export async function composeProductionGraph(
     composedGraph.websocket = composedHttp.websocket
   }
   composedGraph.composition = input
+  composedGraph.loopRegistry = loopRegistry
   return composedGraph
 }

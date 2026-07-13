@@ -23,7 +23,7 @@
  * immediately. For Managed (hosted VPS), this concern doesn't apply.
  */
 
-import { SupervisedLoop } from '@neutronai/loop'
+import { SupervisedLoop, type LoopDescriptor } from '@neutronai/loop'
 
 import type {
   BackupResult,
@@ -153,6 +153,15 @@ export class ProjectBackupScheduler {
   start(): void {
     this.stopped = false
     this.loop.start()
+  }
+
+  /** §F2 — live LoopRegistry descriptor (name `project-backup-scheduler`,
+   *  cadence = inner poll interval). D-7: this scheduler is DORMANT (never
+   *  started in any composition today); the method exists so the loop registers
+   *  itself the moment its wiring lands in a post-window feature PR. Call after
+   *  `start()`. */
+  describe(): LoopDescriptor {
+    return this.loop.describe()
   }
 
   /** Stop + quiesce: mark stopped so an in-flight `poll()` short-circuits,

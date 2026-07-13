@@ -15,7 +15,7 @@
  */
 
 import { hostTimeZone, nextCronFire, parseCron } from '@neutronai/cron'
-import { SupervisedLoop } from '@neutronai/loop'
+import { SupervisedLoop, type LoopDescriptor } from '@neutronai/loop'
 
 import { isRecurring, type Reminder, type ReminderRecurrence, type ReminderStore } from './store.ts'
 
@@ -105,6 +105,12 @@ export class ReminderTickLoop {
    */
   start(): void {
     this.loop.start()
+  }
+
+  /** §F2 — live LoopRegistry descriptor (name `reminders`, cadence
+   *  `tick_interval_ms`). Call after `start()`. */
+  describe(): LoopDescriptor {
+    return this.loop.describe()
   }
 
   /** Stop + quiesce: awaits the in-flight tick so a caller can `await stop()`

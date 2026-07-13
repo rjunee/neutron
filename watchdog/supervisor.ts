@@ -17,6 +17,7 @@ import type {
   WatchdogNotifier,
 } from './types.ts'
 import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
+import type { LoopDescriptor } from '@neutronai/loop'
 
 export interface SupervisorOptions {
   store: AlertStore
@@ -33,6 +34,10 @@ export class WatchdogSupervisor {
   private readonly tick_interval_ms: number
   private timer: ReturnType<typeof setInterval> | null = null
   private running = false
+  // §F2 — loop-inventory observability (mirrors SupervisedLoop's fields; the
+  // supervisor keeps its own hand-rolled setInterval so it can't reuse them).
+  private startedAtMs: number | null = null
+  private lastTickAtMs: number | null = null
   /** The in-flight tick, so {@link stop} can QUIESCE (await it) before returning. */
   private inflight: Promise<void> | null = null
   /**
@@ -68,9 +73,25 @@ export class WatchdogSupervisor {
 
   start(): void {
     if (this.timer !== null) return
+    if (this.startedAtMs === null) this.startedAtMs = Date.now()
     this.timer = setInterval(() => {
       fireAndForget('supervisor.runOnce', this.runOnce())
     }, this.tick_interval_ms)
+  }
+
+  /**
+   * §F2 — live LoopRegistry descriptor (name `watchdog`, cadence
+   * `tick_interval_ms`). The supervisor swallows per-detector errors internally
+   * (its own alert store owns failure surfacing), so `lastError` stays null;
+   * `lastTickAt` reflects the most recent completed tick. Call after `start()`.
+   */
+  describe(): LoopDescriptor {
+    return {
+      name: 'watchdog',
+      cadenceMs: this.tick_interval_ms,
+      startedAt: this.startedAtMs ?? 0,
+      health: () => ({ lastTickAt: this.lastTickAtMs, lastError: null }),
+    }
   }
 
   /**
@@ -184,6 +205,7 @@ export class WatchdogSupervisor {
     } finally {
       this.running = false
       this.inflight = null
+      this.lastTickAtMs = Date.now()
       resolveInflight()
     }
     return delivered
