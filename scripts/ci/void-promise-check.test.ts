@@ -207,6 +207,32 @@ describe('findPreSwallowedWraps', () => {
     ).toBe(0)
   })
 
+  test('PASSES an IIFE whose catch does a side-effect THEN top-level rethrows', () => {
+    expect(
+      findPreSwallowedWraps(
+        "fireAndForget('n', (async () => { try { await x() } catch (e) { log(e); throw e } })())",
+      ).length,
+    ).toBe(0)
+  })
+
+  // P1 #3 (Codex): a CONDITIONAL throw is NOT a safe rethrow — the other branch
+  // swallows. Only a TOP-LEVEL unconditional throw counts.
+  test('flags an IIFE whose catch throws only CONDITIONALLY (if (flag) throw e)', () => {
+    expect(
+      findPreSwallowedWraps(
+        "fireAndForget('n', (async () => { try { await x() } catch (e) { if (flag) throw e } })())",
+      ).length,
+    ).toBe(1)
+  })
+
+  test('flags an IIFE whose catch throws only inside a nested block/loop', () => {
+    expect(
+      findPreSwallowedWraps(
+        "fireAndForget('n', (async () => { try { await x() } catch (e) { for (const _ of []) throw e } })())",
+      ).length,
+    ).toBe(1)
+  })
+
   test('PASSES a raw promise-returning call', () => {
     expect(findPreSwallowedWraps("fireAndForget('n', doWork())").length).toBe(0)
   })

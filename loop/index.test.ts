@@ -306,4 +306,41 @@ describe('guardedFire', () => {
     )
     expect(ok).toBe(false)
   })
+
+  // The void-promise gate exempts `loop/` claiming guardedFire "never rejects".
+  // That is only TRUE if EVERY fallback — including a monkey-patched throwing
+  // `console.error` — is guarded. These lock that honesty.
+  test('contains a throwing console.error in the no-onError fallback — never rejects', async () => {
+    const realErr = console.error
+    console.error = () => {
+      throw new Error('console down')
+    }
+    try {
+      // No onError → the `else` fallback `console.error` runs; if it throws,
+      // guardedFire must STILL resolve (not reject).
+      const ok = await guardedFire('x', () => Promise.reject(new Error('work')))
+      expect(ok).toBe(false)
+    } finally {
+      console.error = realErr
+    }
+  })
+
+  test('contains a throwing console.error in the onError-sink fallback — never rejects', async () => {
+    const realErr = console.error
+    console.error = () => {
+      throw new Error('console down')
+    }
+    try {
+      const ok = await guardedFire(
+        'x',
+        () => Promise.reject(new Error('work')),
+        () => {
+          throw new Error('sink') // sink throws → fallback console.error throws too
+        },
+      )
+      expect(ok).toBe(false)
+    } finally {
+      console.error = realErr
+    }
+  })
 })

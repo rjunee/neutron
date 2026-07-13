@@ -102,7 +102,7 @@ function logRejectionSafely(name: string, err: unknown): void {
 export function fireAndForget(
   name: string,
   p: PromiseLike<unknown> | null | undefined,
-  onError?: (err: unknown) => void,
+  onError?: (err: unknown) => unknown,
 ): void {
   if (p == null) return
   // The ONE sanctioned `void <promise>` in the repo: this file is the wrapper
@@ -115,14 +115,26 @@ export function fireAndForget(
   void Promise.resolve(p).catch((err: unknown) => {
     rejectionCount += 1
     logRejectionSafely(name, err)
-    if (onError !== undefined) {
-      try {
-        onError(err)
-      } catch {
-        /* GUARDED — a throwing onError must never break the safety path */
-      }
-    }
+    if (onError !== undefined) runOnErrorSafely(onError, err)
   })
+}
+
+/**
+ * Invoke a best-effort `onError` callback so it can NEVER break the safety path:
+ * a SYNC throw is caught, and — because `onError` may be `async` (returning a
+ * promise even against a `void`-return-typed slot) — a returned thenable's
+ * REJECTION is swallowed too. `onError` is contextual side-effect only, NOT part
+ * of the reliability guarantee; its own failures are intentionally dropped.
+ */
+function runOnErrorSafely(onError: (err: unknown) => unknown, err: unknown): void {
+  try {
+    const r = onError(err)
+    if (r != null && typeof (r as { then?: unknown }).then === 'function') {
+      void Promise.resolve(r as PromiseLike<unknown>).catch(() => undefined)
+    }
+  } catch {
+    /* GUARDED — a sync-throwing onError must never break the safety path */
+  }
 }
 
 /** Process-wide count of fire-and-forget rejections observed so far. */

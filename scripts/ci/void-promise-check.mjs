@@ -184,21 +184,25 @@ export function findBareVoidPromiseCalls(source, fileName = 'fixture.ts') {
 // callback, a pre-wrapper `.catch` is ALWAYS the wrong shape. This is a pure
 // AST-shape check (robust + complete; no types needed) that bans it forever.
 
+/** A catch clause counts as a SAFE rethrow ONLY if it rethrows
+ *  UNCONDITIONALLY — a `throw` at the TOP LEVEL of the catch block's statement
+ *  list. A throw nested inside an `if`/`for`/`while`/`switch`/`try`/`&&`/`?:`
+ *  can be skipped, so on the other branch the catch SWALLOWS — that is NOT a
+ *  safe rethrow. Conservative by design: err toward treating a
+ *  conditional/nested throw as a swallow. */
+function catchRethrowsUnconditionally(catchClause) {
+  if (!catchClause.block) return false
+  return catchClause.block.statements.some((s) => ts.isThrowStatement(s))
+}
+
 /** True iff `fn` (arrow/function) body has a `catch` clause that does NOT
- *  rethrow (walking only its own body, not nested functions). */
+ *  unconditionally rethrow (walking only its own body, not nested functions). */
 function iifeHasNonRethrowingCatch(fn) {
   let swallows = false
   const visit = (n) => {
     if (swallows) return
     if (ts.isCatchClause(n)) {
-      let rethrows = false
-      const look = (m) => {
-        if (ts.isThrowStatement(m)) rethrows = true
-        if (ts.isFunctionLike(m) && m !== n) return // don't descend nested fns
-        ts.forEachChild(m, look)
-      }
-      if (n.block) ts.forEachChild(n.block, look)
-      if (!rethrows) {
+      if (!catchRethrowsUnconditionally(n)) {
         swallows = true
         return
       }

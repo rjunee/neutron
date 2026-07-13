@@ -141,6 +141,30 @@ describe('fireAndForget', () => {
     }
   })
 
+  // P1 #1 (Codex): an ASYNC onError returns a promise; if it REJECTS, the wrapper
+  // must swallow it too — a `try/catch` around a sync call can't. No unhandled
+  // rejection; count/log still fire.
+  test('an async-rejecting onError does NOT create an unhandled rejection (count/log still fire)', async () => {
+    const seen: unknown[] = []
+    const onUnhandled = (reason: unknown) => seen.push(reason)
+    process.on('unhandledRejection', onUnhandled)
+    try {
+      fireAndForget('unit.async-onerror', Promise.reject(new Error('boom')), async () => {
+        throw new Error('async-handler-rejected')
+      })
+      await flush()
+      await flush()
+      const leaked = seen.some(
+        (r) => r instanceof Error && r.message === 'async-handler-rejected',
+      )
+      expect(leaked).toBe(false) // the async onError's rejection was contained
+      expect(fireAndForgetRejectionCount()).toBe(1)
+      expect(errorLines.find((l) => l.includes('name=unit.async-onerror'))).toBeDefined()
+    } finally {
+      process.off('unhandledRejection', onUnhandled)
+    }
+  })
+
   test('counts each rejection independently', async () => {
     fireAndForget('unit.a', Promise.reject(new Error('a')))
     fireAndForget('unit.b', Promise.reject('b-string'))
