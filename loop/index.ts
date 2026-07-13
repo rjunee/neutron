@@ -41,6 +41,18 @@
 
 import { AsyncLocalStorage } from 'node:async_hooks'
 
+// §F2 — the loop inventory (LoopRegistry + descriptor/health/dormant types) is a
+// sibling leaf re-exported here so every `@neutronai/loop` importer reaches it
+// without a second package path. `SupervisedLoop.describe()` (below) produces a
+// live `LoopDescriptor` the composition registers.
+export {
+  LoopRegistry,
+  type LoopDescriptor,
+  type LoopHealth,
+  type DormantLoop,
+} from './registry.ts'
+import type { LoopDescriptor } from './registry.ts'
+
 /** Payload handed to {@link SupervisedLoopOptions.onEscalate}. */
 export interface SupervisedLoopEscalation {
   /** The loop's {@link SupervisedLoopOptions.name}. */
@@ -189,6 +201,12 @@ export class SupervisedLoop {
   private failureCount = 0
   private consecutiveFailures = 0
   private skippedCount = 0
+  // §F2 — loop-inventory observability. `startedAtMs` is stamped on the first
+  // `start()`; `lastTickAtMs` is stamped after each tick settles (ran OR threw).
+  // Both feed `describe()`'s live `LoopDescriptor` so the LoopRegistry can
+  // surface (name, cadence, started_at, last_tick, last_error).
+  private startedAtMs: number | null = null
+  private lastTickAtMs: number | null = null
 
   constructor(opts: SupervisedLoopOptions) {
     this.name = opts.name
@@ -215,6 +233,10 @@ export class SupervisedLoop {
   start(): void {
     if (this.started) return
     this.started = true
+    // Stamp the start clock ONCE (a stop()→start() re-arm keeps the original
+    // boot time — the inventory tracks "since first started", matching the
+    // gateway's single-boot lifecycle).
+    if (this.startedAtMs === null) this.startedAtMs = Date.now()
     this.timer = this.setTimer(() => {
       void this.runOnce()
     }, this.intervalMs)
@@ -257,9 +279,16 @@ export class SupervisedLoop {
       this.running = false
       this.inflight = null
     }
+    // §F2 — stamp the tick clock AFTER the tick settles (ran OR threw): a loop
+    // failing every tick is still ticking, and `lastTickAt` must reflect a
+    // COMPLETED tick.
+    this.lastTickAtMs = Date.now()
     if (ok) {
       this.tickCount++
       this.consecutiveFailures = 0
+      // §F2 — a successful tick CLEARS the last error (recovery): `lastError`
+      // must be null-when-healthy, not sticky forever after one transient throw.
+      this.lastError = null
     } else {
       this.failureCount++
       this.consecutiveFailures++
@@ -318,6 +347,32 @@ export class SupervisedLoop {
       consecutiveFailures: this.consecutiveFailures,
       skipped: this.skippedCount,
       running: this.running,
+    }
+  }
+
+  /**
+   * §F2 — a live {@link LoopDescriptor} for the LoopRegistry inventory. Both
+   * `startedAt` (getter) and `health()` read the loop's CURRENT state each call
+   * (not a frozen snapshot), so the descriptor may be produced BEFORE `start()`
+   * (register-before-start) and still reflects the real boot time + health once
+   * the loop runs.
+   */
+  describe(): LoopDescriptor {
+    const self = this
+    return {
+      name: this.name,
+      cadenceMs: this.intervalMs,
+      // LAZY getter so a descriptor produced BEFORE `start()` (register-before-
+      // start, for failure-atomic registration) reflects the real boot time once
+      // the loop actually starts — 0 until then.
+      get startedAt(): number {
+        return self.startedAtMs ?? 0
+      },
+      health: () => ({ lastTickAt: this.lastTickAtMs, lastError: this.lastError }),
+      // Live: true between start() and stop(). `started` is the loop's own
+      // lifecycle flag (stop() clears it), so a failure-atomicity shutdown that
+      // stops this loop is observable here.
+      isActive: () => this.started,
     }
   }
 }

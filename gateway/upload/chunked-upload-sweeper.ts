@@ -25,7 +25,7 @@
 
 import { join } from 'node:path'
 
-import { SupervisedLoop } from '@neutronai/loop'
+import { SupervisedLoop, type LoopDescriptor } from '@neutronai/loop'
 
 import type { UploadSessionStore } from './upload-session-store.ts'
 
@@ -86,6 +86,12 @@ export class ChunkedUploadSweeper {
 
   start(): void {
     this.loop.start()
+  }
+
+  /** §F2 — live LoopRegistry descriptor (name `chunked-upload-sweeper`). Wired
+   *  into the registry by the Open composer's upload wiring. Call after `start()`. */
+  describe(): LoopDescriptor {
+    return this.loop.describe()
   }
 
   /** Stop + quiesce: awaits the in-flight sweep so a SIGTERM teardown can run

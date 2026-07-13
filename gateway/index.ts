@@ -16,7 +16,8 @@ import { MAX_UPLOAD_BYTES_DEFAULT } from './upload/import-upload-handler.ts'
 // (see `loadGraphComposerFromEnv` at the bottom of this file). This
 // file holds ZERO imports — static OR dynamic — into Managed dirs
 // (signup/, provisioning/, identity/, proxy/).
-import { composeProductionGraph } from './composition.ts'
+import { composeProductionGraph, DORMANT_LOOPS, type ComposedProductionGraph } from './composition.ts'
+import { LoopRegistry } from '@neutronai/loop'
 import { resolveBootConfig, type BootConfig } from '@neutronai/config/index.ts'
 import { assertWideBindPolicy } from './boot-bind-policy.ts'
 
@@ -273,6 +274,13 @@ export async function boot(options: BootOptions = {}): Promise<BootHandle> {
   // hooks the production caller wired (e.g. http_handler) without changing
   // the GatewayModuleGraph contract.
   let graph: GatewayModuleGraph | null = null
+  // §F2 — the gateway-liveness interval + its lifecycle flag are declared at BOOT
+  // scope (not the liveness block far below) so the SHARED `bootFailureCleanup`
+  // can clear the timer if a failure fires AFTER it started (e.g. a throwing
+  // descriptor callback in `bootLine()`). Without this the interval would survive
+  // a rejected boot and `onGatewayTick` could fire against torn-down resources.
+  let watchdogTimer: ReturnType<typeof setInterval> | null = null
+  let livenessActive = false
   // §F1 — a cleanup may be async (the upload sweeper's quiescing `stop()`); the
   // shutdown drain awaits each before `db.close()`.
   let realmode_cleanups: Array<() => void | Promise<void>> = []
@@ -301,6 +309,14 @@ export async function boot(options: BootOptions = {}): Promise<BootHandle> {
   // later failure (listener bind, port assertion, sd_notify) before a
   // BootHandle is returned. Idempotent-safe: only invoked on the failure paths.
   const bootFailureCleanup = async (): Promise<void> => {
+    // §F2 — clear the gateway-liveness interval FIRST so no further
+    // `onGatewayTick` / sd_notify tick fires against resources this cleanup is
+    // about to tear down. No-op when the failure fired before the timer started.
+    if (watchdogTimer !== null) {
+      clearInterval(watchdogTimer)
+      watchdogTimer = null
+      livenessActive = false
+    }
     if (graph !== null) {
       try {
         await graph.shutdown()
@@ -511,7 +527,39 @@ export async function boot(options: BootOptions = {}): Promise<BootHandle> {
   // every subsystem is actually ready to take traffic.
   sdNotify('READY=1')
 
-  let watchdogTimer: ReturnType<typeof setInterval> | null = setInterval(() => {
+  // §F2 — the gateway process-liveness loop (sd_notify systemd watchdog +
+  // onGatewayTick heartbeat pulse) is a genuine long-lived loop. It is the LAST
+  // loop to start (after the composer + graph loops), so register it into the
+  // SAME shared inventory the composed graph carries, then emit the ONE complete
+  // boot line here. Live state is tracked in these closure vars (a raw
+  // setInterval, so no SupervisedLoop to lean on).
+  let livenessStartedAt: number | null = null
+  let livenessLastTickAt: number | null = null
+  let livenessLastError: unknown = null
+  // `livenessActive` (true between start and the shutdown / failure clearInterval)
+  // + `watchdogTimer` are declared at BOOT scope above so the shared failure
+  // cleanup can stop them; the descriptor's `isActive()` mirrors that flag.
+  // The registry is the composed graph's when present (composeProductionGraph
+  // returns a ComposedProductionGraph); the COMPOSER-LESS `/healthz` boot has no
+  // graph, but the liveness interval still runs — so create a standalone registry
+  // there so EVERY boot path inventories its running loops (no uninventoried
+  // loop). REGISTER BEFORE START (failure-atomic): a dup throws before the
+  // interval is armed, so no timer leaks.
+  const composedGraph = graph as ComposedProductionGraph | null
+  const loopRegistry = composedGraph?.loopRegistry ?? new LoopRegistry()
+  loopRegistry.register({
+    name: 'gateway-liveness',
+    cadenceMs: WATCHDOG_INTERVAL_MS,
+    get startedAt(): number {
+      return livenessStartedAt ?? 0
+    },
+    health: () => ({ lastTickAt: livenessLastTickAt, lastError: livenessLastError }),
+    isActive: () => livenessActive,
+  })
+  livenessStartedAt = Date.now()
+  livenessActive = true
+  watchdogTimer = setInterval(() => {
+    let tickError: unknown = null
     // Catch transient sd_notify failures (kernel-side `sendto()` errors,
     // recv-side socket teardown during shutdown) so a single hiccup does NOT
     // become an unhandled exception that crashes the process. systemd's
@@ -521,6 +569,7 @@ export async function boot(options: BootOptions = {}): Promise<BootHandle> {
     try {
       sdNotify('WATCHDOG=1')
     } catch (err) {
+      tickError = err
       console.error('sd_notify WATCHDOG=1 failed:', err)
     }
     // F4 — pulse the composition's supervision-watchdog heartbeat off this same
@@ -532,9 +581,20 @@ export async function boot(options: BootOptions = {}): Promise<BootHandle> {
     try {
       onGatewayTick?.()
     } catch (err) {
+      tickError = err
       console.error('on_gateway_tick hook failed:', err)
     }
+    // §F2 — stamp health after the tick tail: lastTickAt = completed tick,
+    // lastError = this tick's error or null (recovery clears a prior error).
+    livenessLastTickAt = Date.now()
+    livenessLastError = tickError
   }, WATCHDOG_INTERVAL_MS)
+
+  // §F2 — the ONE complete boot inventory line, now that EVERY long-lived loop
+  // (composer loops + graph loops + this gateway-liveness loop) has started.
+  // Emitted on EVERY boot path — composed AND composer-less (which inventories
+  // just gateway-liveness) — so no running loop is ever uninventoried.
+  console.log(loopRegistry.bootLine(project_slug, DORMANT_LOOPS))
 
   let shuttingDown = false
   const shutdown = async (opts?: { force?: boolean }): Promise<void> => {
@@ -564,6 +624,7 @@ export async function boot(options: BootOptions = {}): Promise<BootHandle> {
     if (watchdogTimer !== null) {
       clearInterval(watchdogTimer)
       watchdogTimer = null
+      livenessActive = false // §F2 — the gateway-liveness loop is now stopped.
     }
     if (graph !== null) {
       try {

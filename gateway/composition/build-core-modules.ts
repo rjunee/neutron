@@ -14,6 +14,7 @@ import { CronHandlerRegistry } from '@neutronai/cron/handlers.ts'
 import { CronJobRegistry } from '@neutronai/cron/jobs.ts'
 import { CronScheduler } from '@neutronai/cron/scheduler.ts'
 import { CronStateStore } from '@neutronai/cron/state.ts'
+import { LoopRegistry } from '@neutronai/loop'
 import { McpServer } from '@neutronai/mcp/server.ts'
 import {
   setReplToolBridge,
@@ -148,7 +149,18 @@ export interface CoreModules {
   coresModule: GatewayModule<CoresModuleState> | null
 }
 
-export function buildCoreModules(input: CompositionInput): CoreModules {
+/**
+ * §F2 — the long-lived tick loops (reminders, trident, watchdog) register their
+ * live {@link LoopDescriptor} into this registry the moment they start, so the
+ * composer emits ONE boot inventory line and a production-composer test can PIN
+ * the running-loop set. Optional so the two existing direct-drivers of
+ * `buildCoreModules` (the trident-shutdown + watchdog-wiring unit tests) keep
+ * their one-arg call; they get a throwaway registry that no one reads.
+ */
+export function buildCoreModules(
+  input: CompositionInput,
+  loopRegistry: LoopRegistry = new LoopRegistry(),
+): CoreModules {
   const toolsModule: GatewayModule<ToolRegistry> = {
     name: 'tools',
     init: () => {
@@ -317,6 +329,10 @@ export function buildCoreModules(input: CompositionInput): CoreModules {
         loopOpts.on_fired = input.push_dispatcher
       }
       const loop = new ReminderTickLoop(loopOpts)
+      // §F2 — REGISTER BEFORE START (failure-atomic): a duplicate-name throw
+      // happens before any timer is armed, so a reused/colliding registry can
+      // never leak a running loop with no reachable stop handle.
+      loopRegistry.register(loop.describe())
       loop.start()
       return { store, loop }
     },
@@ -467,6 +483,8 @@ export function buildCoreModules(input: CompositionInput): CoreModules {
       } else {
         loop = new TridentTickLoop({ store, deps: stubAdvanceDeps(), on_terminal, ...transitionOpt })
       }
+      // §F2 — REGISTER BEFORE START (failure-atomic; see reminders module).
+      loopRegistry.register(loop.describe())
       loop.start()
       return drain !== undefined ? { store, loop, drain } : { store, loop }
     },
@@ -577,6 +595,8 @@ export function buildCoreModules(input: CompositionInput): CoreModules {
           substrate_kind: 'llm',
         }),
       )
+      // §F2 — REGISTER BEFORE START (failure-atomic; see reminders module).
+      loopRegistry.register(supervisor.describe())
       supervisor.start()
       return { store, supervisor }
     },

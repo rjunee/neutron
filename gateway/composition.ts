@@ -22,6 +22,7 @@ import { CronHandlerRegistry } from '@neutronai/cron/handlers.ts'
 import { CronJobRegistry } from '@neutronai/cron/jobs.ts'
 import { CronScheduler } from '@neutronai/cron/scheduler.ts'
 import { CronStateStore } from '@neutronai/cron/state.ts'
+import { LoopRegistry, type DormantLoop } from '@neutronai/loop'
 import { GatewayModuleGraph } from './module-graph.ts'
 import {
   buildManagedAuthGate,
@@ -43,6 +44,36 @@ import type { CompositionInput } from './composition/input/composition-input.ts'
 import type { CompositionHttpHandler } from './composition/types.ts'
 export type { CompositionInput } from './composition/input/composition-input.ts'
 export type { CompositionHttpHandler } from './composition/types.ts'
+
+/**
+ * §F2 / decision D-7 — loops that are fully BUILT but deliberately NOT started
+ * in any composition today. Enumerated here so the boot inventory line names
+ * them (explicit dormancy, never a silent dead loop) and the loop-inventory
+ * production-composer test PINS the set — a future silently-added dead loop, or
+ * a silent deletion of one of these, breaks that test.
+ *
+ * D-7 (2026-07-02 Decisions Log): "Document as dormant now; add BOTH to SPEC.md
+ * as post-window feature PRs." Wiring each requires real feature infrastructure
+ * (ProjectBackupScheduler ← a per-instance `ProjectBackupStore` + git backup
+ * plumbing from the P7.4 sprint; comments `AgentWatcher` ← the realmode LLM-call
+ * composer + comment store + shared anchor-walker project lock) that belongs in
+ * a feature PR, not this refactor unit — so F2 makes their dormancy EXPLICIT
+ * rather than wiring or deleting them.
+ */
+export const DORMANT_LOOPS: readonly DormantLoop[] = [
+  {
+    name: 'project-backup-scheduler',
+    reason:
+      'built (gateway/git/project-backup-scheduler.ts) but never constructed in any composition; needs a wired ProjectBackupStore + project enumerator (P7.4 backup sprint).',
+    deferredTo: 'D-7 → SPEC roadmap post-window feature PR',
+  },
+  {
+    name: 'agent-watcher',
+    reason:
+      'built (gateway/comments/agent-watcher.ts) but never constructed in any composition; needs the realmode LLM-call composer + comment store + shared anchor-walker project lock.',
+    deferredTo: 'D-7 → SPEC roadmap post-window feature PR',
+  },
+]
 
 /**
  * Return shape from `composeProductionGraph` after ISSUE #32. The
@@ -86,6 +117,14 @@ export type ComposedProductionGraph = GatewayModuleGraph & {
    * overlays). Same object reference for backward compat.
    */
   composition: CompositionInput
+  /**
+   * §F2 — the loop inventory. Every long-lived tick loop this composition
+   * STARTED (reminders, trident, cron, watchdog) has registered its live
+   * descriptor here by the time `composeProductionGraph` returns. A
+   * production-composer test pins `loopRegistry.names()` (the ISSUE-#32 pattern
+   * applied to loops); the dormant set is {@link DORMANT_LOOPS}.
+   */
+  loopRegistry: LoopRegistry
 }
 
 /**
@@ -181,6 +220,16 @@ export async function composeProductionGraph(
 ): Promise<ComposedProductionGraph> {
   const graph = new GatewayModuleGraph({ project_slug: input.project_slug })
 
+  // §F2 — the boot loop inventory. REUSE the registry the caller threaded
+  // through `CompositionInput.loop_registry` (the Open composer registers the
+  // `ChunkedUploadSweeper` it starts BEFORE this graph composes) so the ONE boot
+  // line inventories the COMPLETE running set — loops started here AND by the
+  // composer. Absent (Managed / direct composer-test callers) → a fresh registry
+  // holding just this graph's loops. `buildCoreModules` threads it into the
+  // reminders / trident / watchdog module inits (each registers its live
+  // descriptor after `start()`); cron registers below after its own `start()`.
+  const loopRegistry = input.loop_registry ?? new LoopRegistry()
+
   // R5 (audit P2-5) — module-graph object construction extracted to
   // `composition/build-core-modules.ts`. The registration ORDER below
   // and the post-`graph.compose()` wiring stay here (both load-bearing).
@@ -199,7 +248,7 @@ export async function composeProductionGraph(
     platformModule,
     tasksModule,
     coresModule,
-  } = buildCoreModules(input)
+  } = buildCoreModules(input, loopRegistry)
 
   graph.register(toolsModule)
   graph.register(processRegistryModule)
@@ -219,7 +268,20 @@ export async function composeProductionGraph(
   if (coresModule !== null) {
     graph.register(coresModule)
   }
-  await graph.compose()
+  // §F2 — WHOLE-COMPOSITION failure atomicity. `graph.compose()` STARTS the
+  // module loops (reminders / trident / watchdog during their inits), and cron
+  // + the post-compose wiring run after. Per-loop register-before-start makes
+  // each loop individually atomic, but ACROSS loops a LATER failure (e.g. a
+  // reused `loop_registry` that collides on `cron`, which starts after the three
+  // module loops) would leave the earlier loops running — and `boot()`'s
+  // init-failure cleanup can't stop them because `graph` isn't assigned until
+  // this function RETURNS. So OWN the lifecycle here: wrap compose() + cron
+  // start + all post-compose wiring in one try/catch and, on ANY throw,
+  // `graph.shutdown()` (stops every started module loop in reverse-init order)
+  // BEFORE rethrowing. No leaked timer regardless of which loop collides.
+  let composedHttp: ComposedHttpHandler | null
+  try {
+    await graph.compose()
 
   // S15 (2026-05-17) — kick the CronScheduler over the line. Every cron
   // module's docblock (resume-on-reconnect, Sean Ellis, import-running)
@@ -247,11 +309,17 @@ export async function composeProductionGraph(
     state: CronStateStore
     scheduler: CronScheduler
   }>('cron')
+  // §F2 — cron is the last loop the GRAPH starts (its jobs are registered by the
+  // modules that own them during compose(), and `start()` binds their timers).
+  // REGISTER BEFORE START (failure-atomic; see build-core-modules) so a reused
+  // registry collision throws before the scheduler arms its timers. The ONE boot
+  // line is emitted by the boot shell (`gateway/index.ts`) AFTER the
+  // gateway-liveness loop — the LAST loop of all — has also started, so the
+  // single inventory line names the truly-complete set (composer loops + graph
+  // loops + gateway liveness). A direct composeProductionGraph caller that never
+  // reaches the boot shell (tests) reads the set off `graph.loopRegistry`.
+  loopRegistry.register(cron.scheduler.describe())
   cron.scheduler.start()
-  const job_names = cron.scheduler.runningJobNames()
-  console.log(
-    `[cron-scheduler] project=${input.project_slug} started — ${job_names.length} job(s) ticking: [${job_names.join(', ')}]`,
-  )
 
   // R5 (audit P2-5) — Cores HTTP surface auto-build extracted to
   // `composition/wire-cores-surfaces.ts`. Runs in the SAME position as the
@@ -272,26 +340,19 @@ export async function composeProductionGraph(
   //
   // Codex r1 P2 (2026-05-22) — `buildComposedHttpFromComposition` runs
   // AFTER `graph.compose()` + the cron scheduler `start()` calls
-  // above, so a failure here would leak the started graph (cron
-  // ticker, reminders tick loop, watchdog supervisor) — `boot()`'s
-  // init-failure catch can only see `graph` once this function
-  // returns. Pre-refactor the connect API construction happened
-  // inside `boot()` AFTER its `graph` variable was assigned, so its
-  // catch could `await graph.shutdown()`. Now we own the lifecycle
-  // until `return`: if the HTTP composition throws (the only realistic
-  // path is `import('@neutronai/connect/api/server.ts')` failing
-  // under a Managed boot when the submodule is unreadable), tear down
-  // the graph BEFORE re-throwing so the caller's catch doesn't see a
-  // half-running gateway it can't reach.
-  let composedHttp: ComposedHttpHandler | null
-  try {
-    composedHttp = await buildComposedHttpFromComposition(input)
+  // above, so a failure here would leak the started graph — now covered by the
+  // single whole-composition try/catch (§F2) that wraps compose() through here.
+  composedHttp = await buildComposedHttpFromComposition(input)
   } catch (err) {
+    // §F2 — ANY failure after `graph.register(...)` (a module-init loop-register
+    // collision during compose(), the cron register/start, Cores/connect wiring,
+    // or the HTTP composition) tears down every started module loop before
+    // rethrowing, so no timer leaks regardless of which loop or step failed.
     try {
       await graph.shutdown()
     } catch (shutdownErr) {
       console.error(
-        '[composeProductionGraph] graph shutdown after HTTP composition failure threw:',
+        '[composeProductionGraph] graph shutdown after composition failure threw:',
         shutdownErr,
       )
     }
@@ -304,5 +365,6 @@ export async function composeProductionGraph(
     composedGraph.websocket = composedHttp.websocket
   }
   composedGraph.composition = input
+  composedGraph.loopRegistry = loopRegistry
   return composedGraph
 }

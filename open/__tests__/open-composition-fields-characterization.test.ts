@@ -75,6 +75,9 @@ const EXPECTED_COMPOSITION_KEYS = [
   'import_resume_handler',
   'import_upload_handler',
   'landing_server',
+  // §F2 — the shared loop inventory the Open composer threads through so the
+  // gateway boot line inventories the sweeper + lifecycle watchdog it starts.
+  'loop_registry',
   // RA5 — the memory-recall composition field is the backend-neutral
   // `memory_search` (renamed from `gbrain_search`; same MemoryStore wiring).
   'memory_search',

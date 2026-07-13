@@ -26,7 +26,7 @@
  * `cron_state` via the supplied `CronStateStore`.
  */
 
-import { guardedFire } from '@neutronai/loop'
+import { guardedFire, type LoopDescriptor } from '@neutronai/loop'
 import { emitSystemEvent } from '@neutronai/persistence/index.ts'
 import type { ProjectDb } from '@neutronai/persistence/index.ts'
 import {
@@ -104,6 +104,13 @@ export class CronScheduler {
   // exactly once — acceptable (a restart is itself worth surfacing), never a
   // per-poll spam.
   private readonly erroredJobs = new Set<string>()
+  // §F2 — loop-inventory observability. Cron is registered as ONE loop named
+  // `cron` (its N per-job timers stay its own); `startedAtMs` is stamped on the
+  // first `start()`, `lastFireAtMs`/`lastFireError` track the most recent job
+  // fire so the LoopRegistry surfaces (started_at, last_tick, last_error).
+  private startedAtMs: number | null = null
+  private lastFireAtMs: number | null = null
+  private lastFireError: unknown = null
 
   /**
    * §F1 — in-flight FIRE promises. Cron keeps its own N per-job timers +
@@ -147,8 +154,37 @@ export class CronScheduler {
    */
   start(): void {
     this.started = true
+    if (this.startedAtMs === null) this.startedAtMs = Date.now()
     for (const job of this.jobs.list()) {
       this.bindJob(job)
+    }
+  }
+
+  /**
+   * §F2 — a live {@link LoopDescriptor} for the LoopRegistry inventory. Cron is
+   * ONE registry entry (`cron`) whose `detail()` lists the running job names, so
+   * the S15 job-name observability survives the boot-line generalisation.
+   * `cadenceMs` is 0 (variable — each job carries its own interval / calendar
+   * schedule). `lastTick`/`lastError` reflect the most recent job FIRE.
+   */
+  describe(): LoopDescriptor {
+    const self = this
+    return {
+      name: 'cron',
+      cadenceMs: 0,
+      // LAZY (register-before-start): 0 until `start()`, real time after.
+      get startedAt(): number {
+        return self.startedAtMs ?? 0
+      },
+      health: () => ({ lastTickAt: this.lastFireAtMs, lastError: this.lastFireError }),
+      // Live: true while the scheduler is started (stop() clears `started`).
+      isActive: () => this.started,
+      detail: () => {
+        const names = this.runningJobNames()
+        return names.length === 0
+          ? '0 jobs'
+          : `${names.length} jobs: ${names.join(', ')}`
+      },
     }
   }
 
@@ -391,20 +427,44 @@ export class CronScheduler {
     return await exec
   }
 
+  /**
+   * §F2 — stamp the loop-inventory health for a COMPLETED fire on ANY path
+   * (overlap-skip, unknown-job, missing-handler, normal). `lastTickAt` marks the
+   * completion; `lastError` is set on an error path / tail failure and null on a
+   * clean fire (recovery). Called on every `fireOnceInner` completion so a
+   * `recordSkipped()` rejection or a validation error can't leave health stale.
+   */
+  private stampHealth(lastError: unknown): void {
+    this.lastFireAtMs = this.now()
+    this.lastFireError = lastError
+  }
+
   private async fireOnceInner(
     name: string,
   ): Promise<{ status: CronHandlerStatus; detail?: string }> {
     const entry = this.running.get(name)
     if (entry?.in_flight && entry.job.skip_if_running !== false) {
-      await this.recordSkipped(name, 'previous run still in-flight')
+      // Overlap-skip completion path. A `recordSkipped()` rejection must surface
+      // in health (it was previously swallowed by the early return). A skip is
+      // not a JOB run, so on success PRESERVE any prior error (a skip is not a
+      // recovery) — only advance `lastTickAt`.
+      try {
+        await this.recordSkipped(name, 'previous run still in-flight')
+      } catch (err) {
+        this.stampHealth(err)
+        throw err
+      }
+      this.lastFireAtMs = this.now()
       return { status: 'skipped', detail: 'overlap' }
     }
     const job = this.jobs.get(name)
     if (!job) {
+      this.stampHealth(`unknown job '${name}'`)
       return { status: 'error', detail: `unknown job '${name}'` }
     }
     const handler = this.handlers.get(job.handler)
     if (!handler) {
+      this.stampHealth(`handler '${job.handler}' not registered`)
       return { status: 'error', detail: `handler '${job.handler}' not registered` }
     }
     if (entry) entry.in_flight = true
@@ -424,14 +484,24 @@ export class CronScheduler {
       if (entry) entry.in_flight = false
     }
     const duration_ms = this.now() - fired_at
-    await this.state.record({
-      job_name: name,
-      project_slug: this.project_slug,
-      fired_at: fired_at / 1000,
-      duration_ms,
-      status,
-      error,
-    })
+    // §F2 — stamp the loop-inventory health ONLY AFTER the fire TAIL
+    // (`state.record`) settles, so `lastTickAt` reflects a COMPLETED fire and a
+    // `record()` rejection is reported as an error, not healthy. A tail throw
+    // still propagates (as before) after we record it.
+    try {
+      await this.state.record({
+        job_name: name,
+        project_slug: this.project_slug,
+        fired_at: fired_at / 1000,
+        duration_ms,
+        status,
+        error,
+      })
+    } catch (recErr) {
+      this.stampHealth(recErr)
+      throw recErr
+    }
+    this.stampHealth(status === 'error' ? (error ?? detail ?? 'error') : null)
     // O4 — VISIBILITY ONLY: journal the degrade on the RISING EDGE only. The
     // check-and-mutate below is SYNCHRONOUS (no await between them), so two
     // concurrent fires of the same job can't both emit for one transition: the

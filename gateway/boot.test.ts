@@ -52,6 +52,38 @@ describe('gateway boot/shutdown', () => {
   })
 })
 
+describe('§F2 — composer-less /healthz boot inventories its liveness loop', () => {
+  test('a composer-less boot emits ONE boot line naming gateway-liveness', async () => {
+    const ownerDir = mkdtempSync(join(tmpdir(), 'neutron-composerless-inv-'))
+    const savedHome = process.env['NEUTRON_HOME']
+    process.env['NEUTRON_HOME'] = ownerDir
+    delete process.env['NOTIFY_SOCKET']
+    const lines: string[] = []
+    const orig = console.log
+    console.log = (...args: unknown[]): void => {
+      lines.push(args.map((a) => String(a)).join(' '))
+    }
+    let handle: Awaited<ReturnType<typeof boot>> | null = null
+    try {
+      // No composer → the /healthz shell. The liveness interval still runs, so
+      // it MUST be inventoried (every boot path inventories its running loops).
+      handle = await boot({ port: 0 })
+      console.log = orig
+      const inventoryLines = lines.filter((l) => l.includes('[loop-registry]'))
+      expect(inventoryLines).toHaveLength(1)
+      const line = inventoryLines[0]!
+      expect(line).toContain('gateway-liveness')
+      expect(line).toContain('1 loop(s) running')
+    } finally {
+      console.log = orig
+      if (handle !== null) await handle.shutdown({ force: true })
+      if (savedHome === undefined) delete process.env['NEUTRON_HOME']
+      else process.env['NEUTRON_HOME'] = savedHome
+      rmSync(ownerDir, { recursive: true, force: true })
+    }
+  })
+})
+
 describe('drainRealmodeCleanups — §F1 shutdown ordering', () => {
   test('awaits an async cleanup before resolving, so db.close() waits for it', async () => {
     let released = false

@@ -20,7 +20,7 @@
  * Default interval is 90 s — matches the skill's ScheduleWakeup cadence.
  */
 
-import { SupervisedLoop } from '@neutronai/loop'
+import { SupervisedLoop, type LoopDescriptor } from '@neutronai/loop'
 
 import { advanceTridentRun, isTerminalPhase, type AdvanceDeps, type AdvanceOutcome } from './state-machine.ts'
 import type { TridentRun, TridentRunStore } from './store.ts'
@@ -203,6 +203,12 @@ export class TridentTickLoop {
   /** Start the loop. Idempotent — a second `start` is a no-op. */
   start(): void {
     this.loop.start()
+  }
+
+  /** §F2 — live LoopRegistry descriptor (name `trident`, cadence
+   *  `tick_interval_ms`). Call after `start()`. */
+  describe(): LoopDescriptor {
+    return this.loop.describe()
   }
 
   /** Stop + quiesce: awaits the in-flight tick so the composer can

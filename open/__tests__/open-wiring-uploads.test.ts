@@ -28,6 +28,7 @@ import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { appWsTopicId } from '@neutronai/channels/adapters/app-ws/envelope.ts'
 import type { LandingStackWithEngine } from '@neutronai/gateway/realmode-composer/build-landing-stack.ts'
 import type { OpenWiringContext } from '../wiring/context.ts'
+import { LoopRegistry } from '@neutronai/loop'
 import { wireUploads } from '../wiring/uploads.ts'
 
 // First two bytes are the ZIP local-file-header magic (`PK`); the single-shot
@@ -90,6 +91,7 @@ describe('wireUploads — handler wiring + sweeper cleanup + resume null-guard',
       uploadUid: process.getuid?.() ?? 0,
       uploadGid: process.getgid?.() ?? 0,
       importWatchHolder,
+      loopRegistry: new LoopRegistry(),
     })
     expect(typeof w.import_upload_handler).toBe('function')
     expect(typeof w.chunked_upload_handler).toBe('function')
@@ -108,6 +110,7 @@ describe('wireUploads — handler wiring + sweeper cleanup + resume null-guard',
       uploadUid: process.getuid?.() ?? 0,
       uploadGid: process.getgid?.() ?? 0,
       importWatchHolder,
+      loopRegistry: new LoopRegistry(),
     })
     expect(w.import_resume_handler).toBeUndefined()
     // The upload surface is still fully wired regardless of the resume guard.
@@ -126,6 +129,7 @@ describe('wireUploads — handler wiring + sweeper cleanup + resume null-guard',
       uploadUid: process.getuid?.() ?? 0,
       uploadGid: process.getgid?.() ?? 0,
       importWatchHolder,
+      loopRegistry: new LoopRegistry(),
     })
     expect(w.import_resume_handler).toBeUndefined()
     // The upload surface is still fully wired regardless of the resume guard.
@@ -145,6 +149,7 @@ describe('wireUploads — late-bound importWatchHolder reader/setter share one r
       uploadUid: process.getuid?.() ?? 0,
       uploadGid: process.getgid?.() ?? 0,
       importWatchHolder,
+      loopRegistry: new LoopRegistry(),
     })
 
     // SET the watch LATE — exactly as the composer does far downstream, on the

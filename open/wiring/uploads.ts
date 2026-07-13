@@ -30,6 +30,7 @@
  */
 
 import type { ProjectDb } from '@neutronai/persistence/index.ts'
+import type { LoopRegistry } from '@neutronai/loop'
 import type { CompositionInput } from '@neutronai/gateway/composition.ts'
 import type { LandingStackWithEngine } from '@neutronai/gateway/realmode-composer/build-landing-stack.ts'
 import type { OpenWiringContext } from './context.ts'
@@ -53,6 +54,13 @@ export interface WireUploadsDeps {
    * SETTER share one reference. Its `.watch` is filled long after composition.
    */
   importWatchHolder: { watch?: (user_id: string) => void }
+  /**
+   * §F2 — the shared loop inventory. This wiring starts the `ChunkedUploadSweeper`
+   * (a long-lived loop) OUTSIDE `composeProductionGraph`, so it registers the
+   * sweeper's live descriptor here; the composer threads the SAME registry into
+   * `CompositionInput.loop_registry` so the gateway boot line inventories it too.
+   */
+  loopRegistry: LoopRegistry
 }
 
 export interface WiredUploads {
@@ -78,7 +86,7 @@ export async function wireUploads(
   deps: WireUploadsDeps,
 ): Promise<WiredUploads> {
   const { db, owner_home, project_slug } = ctx
-  const { landing, uploadUid, uploadGid, importWatchHolder } = deps
+  const { landing, uploadUid, uploadGid, importWatchHolder, loopRegistry } = deps
   const cleanups: Array<() => void | Promise<void>> = []
 
   // Path 1 — the upload handler still drives the engine's import pipeline
@@ -150,6 +158,10 @@ export async function wireUploads(
     owner_home,
     project_slug,
   })
+  // §F2 — REGISTER BEFORE START (failure-atomic): a duplicate-name throw fires
+  // before the sweep timer is armed, so a reused registry can't leak a running
+  // sweeper with no reachable stop handle.
+  loopRegistry.register(uploadSweeper.describe())
   uploadSweeper.start()
   cleanups.push(async () => {
     // §F1 — quiescing stop: the gateway shutdown runner awaits this before

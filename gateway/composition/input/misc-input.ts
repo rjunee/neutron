@@ -1,4 +1,5 @@
 import type { CronJobRegistry } from '@neutronai/cron/jobs.ts'
+import type { LoopRegistry } from '@neutronai/loop'
 import type { ProjectDb } from '@neutronai/persistence/index.ts'
 
 export interface MiscCompositionInput {
@@ -149,6 +150,18 @@ export interface MiscCompositionInput {
    * own registry as before (the pre-r3 behaviour).
    */
   cron_jobs?: CronJobRegistry
+  /**
+   * §F2 — the SINGLE loop inventory shared across the whole composition
+   * boundary. A composer that starts long-lived loops OUTSIDE
+   * `composeProductionGraph` (the Open composer starts the
+   * `ChunkedUploadSweeper` before this graph composes) creates the registry,
+   * registers those loops into it, and threads it here; `composeProductionGraph`
+   * then registers ITS loops (reminders, trident, cron, watchdog) into the SAME
+   * instance so the ONE boot inventory line + the composer test see the COMPLETE
+   * running set. Omitted (Managed / direct composer-test callers) →
+   * `composeProductionGraph` creates a fresh registry holding just its own loops.
+   */
+  loop_registry?: LoopRegistry
   /**
    * Doc-search (QMD-equivalent) — when supplied, the `tools` module
    * registers the `doc_search` + `doc_read` agent tools backed by this
