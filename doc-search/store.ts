@@ -398,13 +398,19 @@ function migrateSchema(db: Database): void {
     return
   }
   if (version > SCHEMA_VERSION) {
+    // A DB written by a FUTURE binary owns its own schema — which may have
+    // renamed/removed columns or objects our older DDL knows nothing about.
+    // Open it TRULY as-is: run NO DDL (our `SCHEMA` could add obsolete
+    // triggers/indexes or fail against the changed shape) and NO restamp.
+    // The future binary is responsible for its own schema.
     console.warn(
       `[doc-search] index DB user_version=${version} is newer than this ` +
-        `binary's schema (${SCHEMA_VERSION}); opening as-is without rebuild.`,
+        `binary's schema (${SCHEMA_VERSION}); opening as-is (no DDL, no rebuild).`,
     )
+    return
   }
-  // At/above the stamp: the schema is present and idempotent. Ensure the
-  // objects exist (a fresh DB at exactly SCHEMA_VERSION is impossible, but a
-  // forward-version DB already has them) without dropping or restamping.
+  // Exactly at the stamp (same-schema reopen): the schema is already present.
+  // Ensure the objects exist idempotently (`IF NOT EXISTS`) without dropping or
+  // restamping — a no-op in practice, kept as a belt-and-braces self-heal.
   db.exec(SCHEMA)
 }

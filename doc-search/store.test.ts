@@ -271,19 +271,24 @@ describe('DocSearchIndex (keyword-only; no dead embedder seam) — RA4', () => {
       second.close()
     })
 
-    test('a FUTURE-version DB is opened as-is: not rebuilt, not downgraded', async () => {
-      // Simulate a DB written by a newer binary: current RA4 schema (no
-      // embedding column) but stamped at a HIGHER user_version (2). The
-      // current binary must open it as-is — no rebuild, no downgrade of the
-      // stamp — so forward-version detection is preserved.
+    test('a genuinely-FUTURE-schema DB is opened as-is: no DDL, no rebuild, no downgrade', async () => {
+      // Simulate a DB written by a NEWER binary whose schema DIVERGES from the
+      // current one: doc_chunks has an EXTRA column the current binary knows
+      // nothing about, PLUS an extra index + extra table, stamped user_version=2.
+      // The current binary must open it TRULY as-is: run NO DDL of its own (so
+      // it can't add obsolete objects or fail against the changed shape) and NOT
+      // downgrade the stamp.
       const future = new Database(dbPath)
       future.exec(`
         CREATE TABLE doc_chunks (
           id INTEGER PRIMARY KEY, project TEXT NOT NULL, relpath TEXT NOT NULL,
           abs_path TEXT NOT NULL, title TEXT NOT NULL, heading TEXT NOT NULL,
           ordinal INTEGER NOT NULL, body TEXT NOT NULL, mtime_ms INTEGER NOT NULL,
-          indexed_at INTEGER NOT NULL
+          indexed_at INTEGER NOT NULL,
+          lang TEXT NOT NULL DEFAULT 'en'
         );
+        CREATE INDEX idx_doc_chunks_lang ON doc_chunks(lang);
+        CREATE TABLE doc_meta (key TEXT PRIMARY KEY, value TEXT);
         CREATE VIRTUAL TABLE doc_fts USING fts5(
           title, heading, body, content='doc_chunks', content_rowid='id',
           tokenize='unicode61 remove_diacritics 2'
@@ -293,17 +298,50 @@ describe('DocSearchIndex (keyword-only; no dead embedder seam) — RA4', () => {
           VALUES (new.id, new.title, new.heading, new.body);
         END;
         INSERT INTO doc_chunks
-          (project, relpath, abs_path, title, heading, ordinal, body, mtime_ms, indexed_at)
-        VALUES ('p', 'docs/future.md', '/o/p/docs/future.md', 'Future', '', 0, 'futuristic sprocket body', 1000, 1);
+          (project, relpath, abs_path, title, heading, ordinal, body, mtime_ms, indexed_at, lang)
+        VALUES ('p', 'docs/future.md', '/o/p/docs/future.md', 'Future', '', 0, 'futuristic sprocket body', 1000, 1, 'fr');
         PRAGMA user_version = 2;
       `)
+      // Snapshot the exact schema (all objects + their SQL) BEFORE reopen.
+      const schemaBefore = future
+        .query<{ type: string; name: string; sql: string | null }, []>(
+          `SELECT type, name, sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name`,
+        )
+        .all()
       future.close()
 
       const reopened = DocSearchIndex.open(dbPath)
+
       // NOT downgraded — the stamp stays at the future version.
       expect(reopened.raw().query<{ user_version: number }, []>('PRAGMA user_version').get()?.user_version).toBe(2)
-      // NOT rebuilt — the pre-existing row survives (a rebuild would have
-      // dropped it).
+
+      // NO DDL ran: the schema is byte-identical to before (same objects, same
+      // SQL). A rebuild would have dropped doc_chunks/doc_fts/triggers; an
+      // idempotent `SCHEMA` exec would have ADDED our indexes
+      // (idx_doc_chunks_file / idx_doc_chunks_project) that the future DB lacks.
+      const schemaAfter = reopened
+        .raw()
+        .query<{ type: string; name: string; sql: string | null }, []>(
+          `SELECT type, name, sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name`,
+        )
+        .all()
+      expect(schemaAfter).toEqual(schemaBefore)
+
+      // The future-only objects/columns STILL EXIST (current binary didn't touch them).
+      const cols = reopened
+        .raw()
+        .query<{ name: string }, []>(`SELECT name FROM pragma_table_info('doc_chunks')`)
+        .all()
+        .map((c) => c.name)
+      expect(cols).toContain('lang')
+      const objNames = schemaAfter.map((o) => o.name)
+      expect(objNames).toContain('idx_doc_chunks_lang')
+      expect(objNames).toContain('doc_meta')
+      // The current binary did NOT add its own indexes on top of the future schema.
+      expect(objNames).not.toContain('idx_doc_chunks_file')
+      expect(objNames).not.toContain('idx_doc_chunks_project')
+
+      // NOT rebuilt — the pre-existing row survives (a rebuild would drop it).
       const hits = await reopened.search({ query: 'sprocket' })
       expect(hits.map((h) => h.path)).toEqual(['docs/future.md'])
       reopened.close()
