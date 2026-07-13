@@ -74,7 +74,7 @@
 import type { Event } from './events.ts'
 import type { SessionHandle } from './session-handle.ts'
 import { SubstrateCallError } from './errors.ts'
-import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
+import { neutralizeAbandonedSettle } from '@neutronai/logger/fire-and-forget.ts'
 
 /** Why the drain stopped. */
 export type DrainStatus =
@@ -147,7 +147,7 @@ function swallowTeardown(fn: () => unknown): void {
   try {
     const r = fn()
     if (r !== undefined && r !== null && typeof (r as { then?: unknown }).then === 'function') {
-      fireAndForget('substrate-text.catch', (r as Promise<unknown>).catch(() => undefined))
+      neutralizeAbandonedSettle(r as Promise<unknown>)
     }
   } catch {
     /* teardown threw synchronously — ignored; the terminal outcome must survive it */
@@ -260,7 +260,7 @@ export async function drainToOutcome(
         // The watchdog WON the race against a pending pull. Swallow that pull's
         // eventual settle so a late resolve/reject is never an unhandled rejection.
         // We deliberately do NOT call iter.return() here (see `settled`).
-        fireAndForget('substrate-text.resolve', Promise.resolve(nextP).catch(() => undefined))
+        neutralizeAbandonedSettle(Promise.resolve(nextP))
         return { text, status: 'aborted', error: abortError(abortMessage) }
       }
 

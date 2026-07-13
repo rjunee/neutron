@@ -43,7 +43,7 @@ import type {
   SynthesisResult,
   UserModel,
 } from './types.ts'
-import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
+import { neutralizeAbandonedSettle } from '@neutronai/logger/fire-and-forget.ts'
 
 /**
  * The CONTEXT-RESET command the old per-chunk path wrote to the REPL between
@@ -703,14 +703,14 @@ export async function drainWithHeartbeat(
         // is supplied) do we declare the turn wedged. The absolute ceiling still
         // bounds a live-but-livelocked child that never streams.
         if (opts.isAlive?.() === true) continue
-        fireAndForget('synthesis-session.resolve', Promise.resolve(nextP).catch(() => undefined))
+        neutralizeAbandonedSettle(Promise.resolve(nextP))
         return { text: '', reason: 'idle' }
       }
       if (res === '__ceiling__') {
         // Abandon the in-flight pull; swallow its eventual settle so a late
         // resolve/reject (after the caller cancels) is never an unhandled
         // rejection. The caller's `handle.cancel()` propagates real cancellation.
-        fireAndForget('synthesis-session.resolve', Promise.resolve(nextP).catch(() => undefined))
+        neutralizeAbandonedSettle(Promise.resolve(nextP))
         return { text: '', reason: 'ceiling' }
       }
       if (res.done === true) return { text, reason: 'done' }

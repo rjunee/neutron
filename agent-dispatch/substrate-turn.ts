@@ -74,7 +74,7 @@ export function buildCancellableDispatchTurn(
     if (input.timeout_ms > 0) {
       timer = setTimer(() => {
         timedOut = true
-        fireAndForget('substrate-turn.cancel', handle.cancel().catch(() => {}))
+        fireAndForget('substrate-turn.cancel', handle.cancel())
       }, input.timeout_ms)
     }
 

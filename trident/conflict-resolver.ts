@@ -170,7 +170,7 @@ export function buildForgeConflictResolver(
     if (timeoutMs > 0) {
       timer = setTimer(() => {
         timedOut = true
-        fireAndForget('conflict-resolver.cancel', handle.cancel().catch(() => {}))
+        fireAndForget('conflict-resolver.cancel', handle.cancel())
       }, timeoutMs)
     }
 
@@ -181,7 +181,7 @@ export function buildForgeConflictResolver(
         } else if (ev.kind === 'completion') {
           break
         } else if (ev.kind === 'error') {
-          fireAndForget('conflict-resolver.cancel', handle.cancel().catch(() => {}))
+          fireAndForget('conflict-resolver.cancel', handle.cancel())
           return question('the resolver turn errored')
         }
       }

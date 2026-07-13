@@ -6,6 +6,7 @@ import {
   fireAndForgetRejectionCount,
   installProcessSafetyNet,
   isProcessSafetyNetInstalled,
+  neutralizeAbandonedSettle,
   resetFireAndForgetCountForTests,
   resetProcessSafetyNetForTests,
 } from '../fire-and-forget.ts'
@@ -77,6 +78,23 @@ describe('fireAndForget', () => {
     expect(fireAndForgetRejectionCount()).toBe(2)
   })
 
+  // Blocker #2 (Codex): a rejection swallowed BEFORE the wrapper is invisible —
+  // migrated sites must hand the wrapper the ORIGINAL rejecting promise.
+  test('a pre-swallowed promise is INVISIBLE; the raw rejecting promise is counted', async () => {
+    // Anti-pattern the site audit removed: `.catch(() => {})` ahead of the
+    // wrapper → the wrapper sees a RESOLVED promise → no log, no count.
+    fireAndForget('unit.preswallowed', Promise.reject(new Error('boom')).catch(() => {}))
+    await flush()
+    expect(fireAndForgetRejectionCount()).toBe(0)
+    expect(errorLines.find((l) => l.includes('rejected'))).toBeUndefined()
+
+    // Migrated form: the raw rejecting promise reaches the wrapper → counted+logged.
+    fireAndForget('unit.raw', Promise.reject(new Error('boom')))
+    await flush()
+    expect(fireAndForgetRejectionCount()).toBe(1)
+    expect(errorLines.find((l) => l.includes('name=unit.raw'))).toBeDefined()
+  })
+
   // Blocker boundary: the wrapper's OWN log path must not turn an observability
   // failure into the unhandled rejection it promises to prevent.
   test('a throwing log sink is contained — no unhandled rejection, fallback attempted', async () => {
@@ -121,6 +139,37 @@ describe('fireAndForget', () => {
     } finally {
       process.off('unhandledRejection', onUnhandled)
     }
+  })
+})
+
+describe('neutralizeAbandonedSettle', () => {
+  test('swallows an abandoned rejection with NO log and NO count', async () => {
+    neutralizeAbandonedSettle(Promise.reject(new Error('abandoned')))
+    await flush()
+    expect(fireAndForgetRejectionCount()).toBe(0)
+    expect(errorLines.find((l) => l.includes('rejected'))).toBeUndefined()
+  })
+
+  test('prevents an unhandled rejection for the abandoned promise', async () => {
+    const seen: unknown[] = []
+    const onUnhandled = (r: unknown) => seen.push(r)
+    process.on('unhandledRejection', onUnhandled)
+    try {
+      const reason = new Error('late-settle')
+      neutralizeAbandonedSettle(Promise.reject(reason))
+      await flush()
+      await flush()
+      expect(seen).not.toContain(reason)
+    } finally {
+      process.off('unhandledRejection', onUnhandled)
+    }
+  })
+
+  test('no-ops on null / undefined', () => {
+    expect(() => {
+      neutralizeAbandonedSettle(null)
+      neutralizeAbandonedSettle(undefined)
+    }).not.toThrow()
   })
 })
 

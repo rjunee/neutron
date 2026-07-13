@@ -127,7 +127,7 @@ export function wireMemory(ctx: OpenWiringContext): WiredMemory {
       resolveOnboardingOpenAiKey({ db, owner_home, internal_handle, project_slug }),
   })
   cleanups.push(() => {
-    fireAndForget('memory.close', gbrainMemory.close().catch(() => undefined))
+    fireAndForget('memory.close', gbrainMemory.close())
   })
   const gbrainSyncHook = gbrainMemory.syncHook
   const scribe: Scribe | null =
@@ -200,7 +200,7 @@ export function wireMemory(ctx: OpenWiringContext): WiredMemory {
       owner_home,
     })
     cleanups.push(() => {
-      fireAndForget('memory.stop', coresFanOut.stop().catch(() => undefined))
+      fireAndForget('memory.stop', coresFanOut.stop())
     })
   }
 

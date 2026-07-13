@@ -7,29 +7,30 @@
 // instead of dropping it. This gate BANS the bare form so new swallowed
 // failures can't creep back in: every such site must go through the wrapper.
 //
-// WHAT IT FLAGS — an expression-statement `void <CallExpression>`, e.g.
-//   `void emitSystemEvent({…})`, `void handle.stop().catch(…)`,
-//   `void p.then(…)`. The `void` applied to a CALL is the fire-and-forget
-//   promise idiom in this codebase.
+// WHAT IT FLAGS — a `void <expr>` EXPRESSION-STATEMENT whose operand is a
+// Promise/thenable, decided by the TYPE CHECKER (not the AST shape). This
+// closes the Codex-flagged bypass where a promise VARIABLE slipped through:
+//   `const p: Promise<void> = …; void p`     ← now flagged (operand is a Promise)
+//   `void emitSystemEvent({…})`               ← flagged (call returns a Promise)
+//   `void handle.stop().catch(…)`             ← flagged (chain is still a Promise)
 //
-// WHAT IT DOES NOT FLAG (deliberately, to avoid a mountain of false positives):
+// WHAT IT DOES NOT FLAG — a `void <expr>` whose operand is NOT promise-typed:
 //   * `void 0` / `void <literal>` — the classic no-op.
-//   * `void <identifier>` / `void this.x` — the "silence an unused
-//     binding/import" idiom (`void _exhaustive`, `void driver`, `void input`).
-//     These are never promises. A fully-general "is it a promise" check needs
-//     type info; per the plan we ban the CALL form + allowlist the wrapper,
-//     which catches every real site (a fire-and-forget promise is always the
-//     result of a call) without touching the unused-binding voids.
+//   * `void _exhaustive` / `void driver` / `void this._deps` — the "silence an
+//     unused binding/import" idiom. These are non-promise values; the checker
+//     confirms it, so they are left alone WITHOUT a hand-maintained allowlist.
+//   * `void someSyncFn()` — a call returning a non-promise.
 //
 // SCOPE — server-side Node `.ts` only. Excludes browser/React-Native client
 // code (it cannot import the Node console/env logger, and `void handler()` in a
 // React effect is idiomatic there): `app/`, `landing/chat-react/`, `chat-core/`
 // (the browser web-session lib), `landing/connect-accept.ts` (browser accept
 // client), and all `.tsx`. Tests are excluded too. The wrapper's own
-// definition file is the single allowlisted `void <promise>`.
+// definition file (`logger/fire-and-forget.ts`) owns the only sanctioned
+// `void <promise>` (inside `fireAndForget` / `neutralizeAbandonedSettle`).
 //
-// Comments/strings can't false-positive: this parses the real TS AST (not a
-// grep), so a `void foo()` quoted in a doc-comment is never seen.
+// Comments/strings can't false-positive: this parses the real TS AST + resolves
+// types (not a grep), so a `void foo()` quoted in a doc-comment is never seen.
 //
 // EXIT: 0 = no bare void-promise statements, 1 = at least one (printed).
 
@@ -37,29 +38,114 @@ import { readdirSync, readFileSync, statSync } from 'node:fs'
 import { join, sep } from 'node:path'
 import ts from 'typescript'
 
-/**
- * Core detector (exported for unit tests). Returns one entry per bare
- * `void <CallExpression>` expression-statement in `source`.
- * @param {string} source     TS source text.
- * @param {string} [fileName] used only for the parse (diagnostics).
- * @returns {{line:number, text:string}[]} 1-based line + first line of text.
- */
-export function findBareVoidPromiseCalls(source, fileName = 'anonymous.ts') {
-  const sf = ts.createSourceFile(fileName, source, ts.ScriptTarget.Latest, true)
+// ── Promise classification (type-driven) ──────────────────────────────
+// True iff `type` (or any member of a union/intersection) is a Promise or a
+// thenable — i.e. carries a callable `then`. Robust across TS builds: tries the
+// dedicated `getPromisedTypeOfPromise` API, a `Promise`-named symbol, and a
+// structural callable-`then` probe, each guarded so a checker quirk can never
+// throw the gate.
+function isPromiseLikeType(checker, type) {
+  const seen = new Set()
+  const probe = (t) => {
+    if (t == null || seen.has(t)) return false
+    seen.add(t)
+    // eslint-disable-next-line no-bitwise
+    if ((t.flags & ts.TypeFlags.UnionOrIntersection) !== 0 && Array.isArray(t.types)) {
+      return t.types.some(probe)
+    }
+    try {
+      if (typeof checker.getPromisedTypeOfPromise === 'function') {
+        if (checker.getPromisedTypeOfPromise(t) !== undefined) return true
+      }
+    } catch {
+      /* fall through to the structural probes */
+    }
+    const sym = (typeof t.getSymbol === 'function' ? t.getSymbol() : undefined) ?? t.symbol
+    if (sym && typeof sym.getName === 'function' && sym.getName() === 'Promise') return true
+    try {
+      const apparent = checker.getApparentType ? checker.getApparentType(t) : t
+      const then =
+        (typeof apparent.getProperty === 'function' && apparent.getProperty('then')) ||
+        checker.getPropertyOfType?.(apparent, 'then')
+      if (then) {
+        const decl = then.valueDeclaration ?? then.declarations?.[0]
+        if (decl) {
+          const tt = checker.getTypeOfSymbolAtLocation(then, decl)
+          if (tt && typeof tt.getCallSignatures === 'function' && tt.getCallSignatures().length > 0) {
+            return true
+          }
+        }
+      }
+    } catch {
+      /* not classifiable structurally — treat as non-promise */
+    }
+    return false
+  }
+  return probe(type)
+}
+
+/** Walk a bound source file, collecting every `void <promise>` statement. */
+function collectVoidPromiseHits(sf, checker) {
   const out = []
   const visit = (node) => {
-    if (
-      ts.isExpressionStatement(node) &&
-      ts.isVoidExpression(node.expression) &&
-      ts.isCallExpression(node.expression.expression)
-    ) {
-      const { line } = sf.getLineAndCharacterOfPosition(node.getStart(sf))
-      out.push({ line: line + 1, text: node.getText(sf).split('\n')[0].trim() })
+    if (ts.isExpressionStatement(node) && ts.isVoidExpression(node.expression)) {
+      const operand = node.expression.expression
+      // Fast skip for `void <literal>` (never a promise) before touching types.
+      const isLiteral =
+        ts.isNumericLiteral(operand) ||
+        ts.isStringLiteralLike(operand) ||
+        operand.kind === ts.SyntaxKind.TrueKeyword ||
+        operand.kind === ts.SyntaxKind.FalseKeyword ||
+        operand.kind === ts.SyntaxKind.NullKeyword
+      if (!isLiteral) {
+        const type = checker.getTypeAtLocation(operand)
+        if (isPromiseLikeType(checker, type)) {
+          const { line } = sf.getLineAndCharacterOfPosition(node.getStart(sf))
+          out.push({ line: line + 1, text: node.getText(sf).split('\n')[0].trim() })
+        }
+      }
     }
     ts.forEachChild(node, visit)
   }
   visit(sf)
   return out
+}
+
+// In-memory compiler options for the exported (unit-test) entry point. Fixtures
+// are self-contained (they `declare` their own types), so a default-lib program
+// with no project resolution is enough to type `void p`.
+const IN_MEMORY_OPTIONS = {
+  target: ts.ScriptTarget.ES2022,
+  module: ts.ModuleKind.ESNext,
+  moduleResolution: ts.ModuleResolutionKind.Bundler,
+  strict: false,
+  noEmit: true,
+  skipLibCheck: true,
+}
+
+/**
+ * Detector entry point for unit tests: type-check `source` in isolation and
+ * return every `void <promise>` statement. Fixtures must `declare` any symbol
+ * whose promise-ness matters (cross-file imports don't resolve in isolation).
+ * @param {string} source     TS source text.
+ * @param {string} [fileName] virtual file name for the parse.
+ * @returns {{line:number, text:string}[]} 1-based line + first line of text.
+ */
+export function findBareVoidPromiseCalls(source, fileName = 'fixture.ts') {
+  const host = ts.createCompilerHost(IN_MEMORY_OPTIONS, true)
+  const virtual = ts.createSourceFile(fileName, source, ts.ScriptTarget.ES2022, true)
+  const origGetSourceFile = host.getSourceFile.bind(host)
+  host.getSourceFile = (name, langVersion, onError, shouldCreate) =>
+    name === fileName ? virtual : origGetSourceFile(name, langVersion, onError, shouldCreate)
+  const origFileExists = host.fileExists.bind(host)
+  host.fileExists = (name) => name === fileName || origFileExists(name)
+  const origReadFile = host.readFile.bind(host)
+  host.readFile = (name) => (name === fileName ? source : origReadFile(name))
+
+  const program = ts.createProgram([fileName], IN_MEMORY_OPTIONS, host)
+  const checker = program.getTypeChecker()
+  const sf = program.getSourceFile(fileName)
+  return sf ? collectVoidPromiseHits(sf, checker) : []
 }
 
 const ROOT = join(import.meta.dir, '..', '..')
@@ -99,19 +185,60 @@ function walk(dir, out) {
   }
 }
 
+/** Does this in-scope file contain ANY `void <expr>` statement? (cheap parse) */
+function hasVoidStatement(abs, src) {
+  if (!src.includes('void ')) return false
+  const sf = ts.createSourceFile(abs, src, ts.ScriptTarget.ES2022, true)
+  let found = false
+  const visit = (node) => {
+    if (found) return
+    if (ts.isExpressionStatement(node) && ts.isVoidExpression(node.expression)) {
+      found = true
+      return
+    }
+    ts.forEachChild(node, visit)
+  }
+  visit(sf)
+  return found
+}
+
+/** Compiler options from tsconfig.base.json (so `@neutronai/*` + `.ts` resolve). */
+function loadProjectOptions() {
+  const configPath = join(ROOT, 'tsconfig.base.json')
+  const read = ts.readConfigFile(configPath, ts.sys.readFile)
+  const parsed = ts.parseJsonConfigFileContent(read.config ?? {}, ts.sys, ROOT)
+  return { ...parsed.options, noEmit: true, skipLibCheck: true }
+}
+
 // CLI: scan the repo. Guarded so the test can `import` the detector without
 // running (or exiting) the whole gate.
 if (import.meta.main) {
   const files = []
   walk(ROOT, files)
 
-  const offenders = []
+  // Two-phase for speed: (1) a cheap AST parse finds the handful of files that
+  // still carry a `void <expr>` statement; (2) only those become a typed
+  // program's roots (TS pulls in their imports for type resolution), so we pay
+  // the type-checker cost on ~a dozen files, not the whole repo.
+  const candidates = []
   for (const abs of files) {
     const rel = abs.slice(ROOT.length + 1).split(sep).join('/')
     if (!inScope(rel)) continue
     const src = readFileSync(abs, 'utf8')
-    for (const hit of findBareVoidPromiseCalls(src, abs)) {
-      offenders.push(`${rel}:${hit.line}  ${hit.text}`)
+    if (hasVoidStatement(abs, src)) candidates.push(abs)
+  }
+
+  const offenders = []
+  if (candidates.length > 0) {
+    const program = ts.createProgram(candidates, loadProjectOptions())
+    const checker = program.getTypeChecker()
+    for (const abs of candidates) {
+      const sf = program.getSourceFile(abs)
+      if (!sf) continue
+      const rel = abs.slice(ROOT.length + 1).split(sep).join('/')
+      for (const hit of collectVoidPromiseHits(sf, checker)) {
+        offenders.push(`${rel}:${hit.line}  ${hit.text}`)
+      }
     }
   }
 

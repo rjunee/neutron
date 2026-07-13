@@ -377,7 +377,7 @@ export function buildSubstrateWorkflowFire(
     if (input.settle_timeout_ms > 0) {
       timer = setTimer(() => {
         timedOut = true
-        fireAndForget('inner-loop.cancel', handle.cancel().catch(() => {}))
+        fireAndForget('inner-loop.cancel', handle.cancel())
       }, input.settle_timeout_ms)
     }
 
@@ -389,7 +389,7 @@ export function buildSubstrateWorkflowFire(
           return { status: 'fired', error: null }
         }
         if (ev.kind === 'error') {
-          fireAndForget('inner-loop.cancel', handle.cancel().catch(() => {}))
+          fireAndForget('inner-loop.cancel', handle.cancel())
           return { status: 'failed', error: 'fire turn raised an error before settling' }
         }
         // token / thinking / status / tool_* events carry nothing terminal for

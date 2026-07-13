@@ -347,7 +347,7 @@ async function writeEntityLocked(
   } catch (err) {
     // Best-effort cleanup; ignore errors. The canonical path is still
     // whatever was there before, since rename(2) is atomic.
-    fireAndForget('entity-writer.rm', fs.rm(tmpPath, { force: true }).catch(() => undefined))
+    fireAndForget('entity-writer.rm', fs.rm(tmpPath, { force: true }))
     throw new EntityWriteError(
       'write_failed',
       `failed to write entity page ${targetPath}: ${errMsg(err)}`,

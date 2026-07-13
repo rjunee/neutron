@@ -435,7 +435,7 @@ export function buildPreMeetingBriefScheduler(
   function scheduleNextTick(): void {
     if (!running) return
     tickTimer = scheduleTimer(() => {
-      fireAndForget('pre-meeting-brief-scheduler.tickInternal', tickInternal(now()).catch(() => {}))
+      fireAndForget('pre-meeting-brief-scheduler.tickInternal', tickInternal(now()))
     }, tick_interval_ms)
   }
 

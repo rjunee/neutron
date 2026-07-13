@@ -1,38 +1,54 @@
 // F3 — unit tests for the bare `void <promise>` gate detector.
 //
 // The gate (scripts/ci/void-promise-check.mjs) bans fire-and-forget promise
-// voids outside the fireAndForget wrapper. These tests pin the detector's
-// PRECISION: it must flag `void <call>` (the promise idiom) and must NOT flag
-// the unused-binding / no-op voids that share the keyword.
+// voids outside the wrapper. Detection is TYPE-DRIVEN: it flags `void <expr>`
+// iff `<expr>` is promise-typed. These tests pin that precision — a promise
+// VARIABLE must be flagged (the Codex-found bypass), while the unused-binding /
+// no-op voids that share the keyword must not be. Fixtures `declare` their own
+// types so the detector's in-memory program can resolve them.
 import { describe, expect, test } from 'bun:test'
 import { findBareVoidPromiseCalls } from './void-promise-check.mjs'
 
 describe('findBareVoidPromiseCalls', () => {
-  test('flags a bare void on a call', () => {
-    const hits = findBareVoidPromiseCalls('void emitSystemEvent({ event: "x" })')
+  test('flags a bare void on a promise-returning call', () => {
+    const hits = findBareVoidPromiseCalls('async function f(): Promise<void> {}\nvoid f()')
     expect(hits.length).toBe(1)
-    expect(hits[0]?.text).toContain('void emitSystemEvent')
+    expect(hits[0]?.text).toContain('void f()')
   })
 
-  test('flags a void on a chained call (…().catch(…))', () => {
-    const hits = findBareVoidPromiseCalls('void handle.stop().catch(() => {})')
+  // Blocker #1 (Codex): a promise VARIABLE must NOT slip past the gate.
+  test('flags a bare void on a promise-typed VARIABLE', () => {
+    const hits = findBareVoidPromiseCalls('declare const p: Promise<void>\nvoid p')
+    expect(hits.length).toBe(1)
+  })
+
+  test('flags a void on a chained call (…().catch(…)) — still a promise', () => {
+    const hits = findBareVoidPromiseCalls(
+      'declare const handle: { stop(): Promise<void> }\nvoid handle.stop().catch(() => {})',
+    )
     expect(hits.length).toBe(1)
   })
 
   test('flags a void on a multi-line promise chain', () => {
-    const src = ['void p', '  .then((r) => r)', '  .catch(() => undefined)'].join('\n')
+    const src = ['declare const p: Promise<number>', 'void p', '  .then((r) => r)'].join('\n')
     const hits = findBareVoidPromiseCalls(src)
     expect(hits.length).toBe(1)
-    expect(hits[0]?.line).toBe(1)
+    expect(hits[0]?.line).toBe(2)
   })
 
   test('flags an immediately-invoked async IIFE void', () => {
-    const hits = findBareVoidPromiseCalls('void (async () => { await x() })()')
+    const hits = findBareVoidPromiseCalls('void (async () => {})()')
     expect(hits.length).toBe(1)
   })
 
   test('does NOT flag the wrapped form', () => {
-    const hits = findBareVoidPromiseCalls("fireAndForget('site', emitSystemEvent({}))")
+    const hits = findBareVoidPromiseCalls(
+      [
+        'declare const p: Promise<void>',
+        'declare function fireAndForget(n: string, x: unknown): void',
+        "fireAndForget('site', p)",
+      ].join('\n'),
+    )
     expect(hits.length).toBe(0)
   })
 
@@ -41,22 +57,35 @@ describe('findBareVoidPromiseCalls', () => {
     expect(findBareVoidPromiseCalls('void "noop"').length).toBe(0)
   })
 
-  test('does NOT flag the unused-binding void idiom (identifier / member)', () => {
-    // `void _exhaustive`, `void driver`, `void this._deps` — not calls.
-    expect(findBareVoidPromiseCalls('void _exhaustive').length).toBe(0)
-    expect(findBareVoidPromiseCalls('void driver').length).toBe(0)
-    expect(findBareVoidPromiseCalls('void this._deps').length).toBe(0)
+  test('does NOT flag the unused-binding void idiom (non-promise identifier / member)', () => {
+    // `void _exhaustive`, `void driver`, `void this._deps` — not promises.
+    expect(findBareVoidPromiseCalls('declare const _exhaustive: never\nvoid _exhaustive').length).toBe(0)
+    expect(findBareVoidPromiseCalls('declare const driver: { id: number }\nvoid driver').length).toBe(0)
+    expect(findBareVoidPromiseCalls('class C { _deps = 1; m() { void this._deps } }').length).toBe(0)
   })
 
-  test('does NOT flag a void CALL inside a fireAndForget argument (only statements)', () => {
-    // A `void x()` appearing as an argument (not an expression-statement) is
-    // out of scope — the gate targets the fire-and-forget STATEMENT form.
-    const hits = findBareVoidPromiseCalls('const y = (void a(), b())')
+  test('does NOT flag a void on a non-promise (sync) call', () => {
+    expect(findBareVoidPromiseCalls('declare function g(): void\nvoid g()').length).toBe(0)
+    expect(findBareVoidPromiseCalls('declare function n(): number\nvoid n()').length).toBe(0)
+  })
+
+  test('does NOT flag a void CALL nested inside an expression (only statements)', () => {
+    const hits = findBareVoidPromiseCalls(
+      'declare function a(): Promise<void>\ndeclare function b(): number\nconst y = (void a(), b())',
+    )
     expect(hits.length).toBe(0)
   })
 
-  test('flags each of several statements independently', () => {
-    const src = ['void a()', 'void b().catch(() => {})', 'void 0', 'void c'].join('\n')
+  test('flags each promise-void statement independently, skipping the non-promises', () => {
+    const src = [
+      'declare function a(): Promise<void>',
+      'declare function b(): Promise<void>',
+      'declare const sync: number',
+      'void a()',
+      'void b().catch(() => {})',
+      'void 0',
+      'void sync',
+    ].join('\n')
     expect(findBareVoidPromiseCalls(src).length).toBe(2)
   })
 })

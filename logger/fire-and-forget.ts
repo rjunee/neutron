@@ -111,6 +111,29 @@ export function resetFireAndForgetCountForTests(): void {
   rejectionCount = 0
 }
 
+/**
+ * Neutralize the late settle of a DELIBERATELY-ABANDONED promise so it can
+ * never become an unhandled rejection — WITHOUT logging or counting.
+ *
+ * This is NOT fire-and-forget: use it ONLY where the caller has already moved
+ * on (a watchdog won a race, a ceiling aborted the pull, teardown after the
+ * terminal outcome was captured) so the promise's eventual resolve/reject is
+ * by definition irrelevant. Routing these through `fireAndForget` would spam
+ * the error log with EXPECTED abort settles on a hot path; a genuine bug in an
+ * abandoned computation is moot because nothing consumes its result. The ONLY
+ * job here is to attach a handler so V8 doesn't report an unhandled rejection.
+ *
+ * Distinct from `fireAndForget`, which is for a fire-and-forget op whose
+ * failure IS worth surfacing (logged + counted).
+ */
+export function neutralizeAbandonedSettle(p: Promise<unknown> | null | undefined): void {
+  if (p == null) return
+  // Sanctioned `void <promise>` (this is the allowlisted wrapper file): the
+  // `.catch` swallows the abandoned settle and never throws, so voiding the
+  // returned always-resolved promise is safe.
+  void p.catch(() => undefined)
+}
+
 // ---------------------------------------------------------------------------
 // Process-level safety net — one unhandledRejection + uncaughtException logger.
 // ---------------------------------------------------------------------------
