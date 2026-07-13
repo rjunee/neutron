@@ -125,11 +125,8 @@ export function buildTriageScheduler(opts: TriageSchedulerOpts): TriageScheduler
       void (async (): Promise<void> => {
         try {
           await self.tick(nowFn())
-        } catch (err) {
-          // best-effort — a single tick failure must not stop the loop — but
-          // surface it (Cores can't import the host logger; console is the
-          // Core-legal observability sink) so a stuck scheduler is diagnosable.
-          console.error('[email-triage-scheduler] tick failed', err)
+        } catch {
+          // best-effort — a single tick failure must not stop the loop.
         }
         if (started) armSelfTick()
       })()

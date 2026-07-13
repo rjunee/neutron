@@ -496,11 +496,14 @@ const IGNORE_DIRS = new Set(['node_modules', '.git', 'dist', '.expo', '.claude',
 //     `cores-use-sdk-only` dependency-cruiser rule), so the host `fireAndForget`
 //     wrapper is unavailable to them and this gate cannot require it there. A
 //     Core's own fire-and-forget error-handling is governed by the Core contract
-//     (its Core-legal observability sink is `console.*` / SDK events, NOT the
-//     host logger) — out of F3's HOST scope. This gate therefore does not police
-//     Core voids; a Core that swallows a scheduler failure silently is a
-//     Core-maintenance concern (the calendar/email scheduler ticks were surfaced
-//     via `console.error` while F3 was here).
+//     (its Core-legal observability sinks are `console.*` / SDK events, NOT the
+//     host logger) — squarely OUT of F3's HOST scope. This gate therefore does
+//     not police Core voids. NOTE: the calendar/email schedulers DO have real
+//     silent-swallow + re-arm-on-failure bugs (a failing tick can stop the loop;
+//     per-project failures are dropped) — those are a dedicated Core-maintenance
+//     concern, NOT a shallow F3-side patch. Tracked as a follow-up (see
+//     memory `refactor-tail-remaining-units` / an ISSUES entry), to be fixed in
+//     the Core error-handling layer with proper re-arm + guarded sinks.
 // The wrapper's own file owns the sanctioned `void <promise>`.
 const EXCLUDE_PREFIXES = ['app/', 'landing/chat-react/', 'chat-core/', 'loop/', 'cores/']
 const EXCLUDE_FILES = new Set(['landing/connect-accept.ts', 'logger/fire-and-forget.ts'])

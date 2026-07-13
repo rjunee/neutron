@@ -1086,10 +1086,12 @@ ESCAPES a wrap; a site that truly needs fail-fast escalates via `onError`. Compa
 `@neutronai/logger` (CI-enforced type-aware gate + a pre-swallow gate that bans handing
 the wrapper an already-swallowed promise). Scoped-out of the gate: browser/RN client code
 and bundled Cores / the `loop` leaf, which cannot import the host logger and govern their
-own fire-and-forget error-handling per their module contract (Core observability sink =
-`console.*` / SDK events, not the host wrapper); Core silent-swallow sites are a
-Core-maintenance concern (the calendar/email scheduler ticks were surfaced here). The two
-DUAL library+entry primary servers (gateway/open) install the net first-statement with a
+own fire-and-forget error-handling per their module contract (Core observability sinks =
+`console.*` / SDK events, not the host wrapper). NOTE — the calendar/email Core schedulers
+have real silent-swallow + re-arm-on-failure bugs (a failing tick can stop the loop;
+per-project failures are dropped); these are a dedicated **Core-maintenance follow-up**, NOT
+a shallow F3-side patch (F3 owns the HOST fire-and-forget surface). The two DUAL
+library+entry primary servers (gateway/open) install the net first-statement with a
 documented static-import residual (bootstrap-indirection covers the spawned MCP + clean CLI
 entries).
 
