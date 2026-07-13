@@ -4,9 +4,8 @@
  * A keyword/BM25 search index + query over the owner's project folders
  * (`<owner_home>/Projects/<id>/`), exposed to the live agent as the
  * `doc_search` / `doc_read` tools so it can "research before asking"
- * the way Vajra agents hit QMD. OSS-friendly: pure `bun:sqlite` FTS5,
- * no SaaS dependency. Semantic re-ranking is optional behind the
- * `embedder` seam and is OFF by default.
+ * the way Vajra agents hit QMD. OSS-friendly: pure `bun:sqlite` FTS5
+ * keyword/BM25 search, no SaaS dependency and no embedding provider.
  *
  * See docs/SYSTEM-OVERVIEW.md § Doc search for the subsystem overview.
  */
@@ -26,12 +25,10 @@ export {
 } from './walk.ts'
 export type { WalkedFile, WalkOptions } from './walk.ts'
 
-export { DocSearchIndex, cosineSimilarity } from './store.ts'
+export { DocSearchIndex } from './store.ts'
 export type {
   ChunkInput,
   DocSearchHit,
-  DocSearchIndexOptions,
-  Embedder,
   IndexFileInput,
   IndexStats,
   SearchInput,

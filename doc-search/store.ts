@@ -21,30 +21,23 @@
  *   - Results are collapsed to the best-scoring chunk PER FILE so a
  *     "doc search" returns ranked DOCUMENTS (with the matching section's
  *     heading + snippet), not a flood of chunks from one big file.
- *   - Semantic search is OPTIONAL and behind the `embedder` seam — when
- *     no embedder is supplied (the OSS baseline) the index is pure
- *     lexical BM25 and pulls in NO external provider. When an embedder
- *     is supplied, chunk embeddings are stored and the top lexical
- *     candidates are re-ranked by cosine similarity, blended with the
- *     lexical score.
+ *
+ * Doc search is pure-lexical BM25 with NO external provider. (An optional
+ * in-process `embedder` seam once lived here for a hybrid semantic re-rank,
+ * but nothing ever wired one — the composer always opened the index lexical-
+ * only, so the branch was dead. It could not share RA3's embedder either:
+ * RA3 configures an OUT-OF-PROCESS `gbrain serve` child via env vars
+ * (`gbrain-memory/embedder-config.ts` → `EmbedderConfig.childEnv`), whereas
+ * this seam needed an in-process `embed(texts) → number[][]` function that
+ * doesn't exist anywhere in the tree. Rather than fork a parallel embedding
+ * path, the dead seam was removed (RA4) — one keyword path, no dead code.)
  */
 
 import type { Database } from 'bun:sqlite'
 
-import { openSidecar, parseJsonColumn } from '@neutronai/persistence/index.ts'
+import { openSidecar } from '@neutronai/persistence/index.ts'
 
 import { sanitizeFtsQuery } from './query.ts'
-
-/**
- * Pluggable embedding provider for the optional semantic mode. The
- * baseline never requires one; callers that DO want hybrid search wire
- * a local (OSS) embedder. `embed` is batched for index-time efficiency.
- */
-export interface Embedder {
-  /** Embedding dimensionality (all vectors must share it). */
-  readonly dim: number
-  embed(texts: string[]): Promise<number[][]>
-}
 
 /** A chunk ready for indexing (one file's worth is upserted atomically). */
 export interface ChunkInput {
@@ -101,7 +94,6 @@ interface ChunkRow {
   ordinal: number
   bm25: number
   snippet: string
-  embedding: string | null
 }
 
 const SCHEMA = `
@@ -115,8 +107,7 @@ CREATE TABLE IF NOT EXISTS doc_chunks (
   ordinal    INTEGER NOT NULL,
   body       TEXT NOT NULL,
   mtime_ms   INTEGER NOT NULL,
-  indexed_at INTEGER NOT NULL,
-  embedding  TEXT
+  indexed_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_doc_chunks_file ON doc_chunks(project, relpath);
 CREATE INDEX IF NOT EXISTS idx_doc_chunks_project ON doc_chunks(project);
@@ -147,9 +138,6 @@ END;
 /** BM25 column weights — title matches dominate, then headings, then body. */
 const BM25_WEIGHTS = { title: 10.0, heading: 4.0, body: 1.0 } as const
 
-/** Blend weight for the lexical score when hybrid (semantic) mode is on. */
-const HYBRID_LEX_WEIGHT = 0.6
-
 /**
  * Hard cap on BM25-ordered candidate chunks pulled before the per-file
  * collapse. High enough that the document `limit` is never starved by one
@@ -158,33 +146,21 @@ const HYBRID_LEX_WEIGHT = 0.6
  */
 const CANDIDATE_CAP = 5000
 
-export interface DocSearchIndexOptions {
-  /** Optional semantic embedder. Omit for the pure-lexical baseline. */
-  embedder?: Embedder
-}
-
 export class DocSearchIndex {
   private readonly db: Database
-  private readonly embedder: Embedder | null
 
-  private constructor(db: Database, embedder: Embedder | null) {
+  private constructor(db: Database) {
     this.db = db
-    this.embedder = embedder
   }
 
   /** Open (or create) an index at `path`. Use ':memory:' for tests. */
-  static open(path: string, options: DocSearchIndexOptions = {}): DocSearchIndex {
+  static open(path: string): DocSearchIndex {
     // P3 shared open — previously WAL + synchronous + foreign_keys only; now
     // additionally gains busy_timeout/temp_store/cache_size (strictly more
     // tolerant under contention, no semantic change).
     const db = openSidecar(path)
     db.exec(SCHEMA)
-    return new DocSearchIndex(db, options.embedder ?? null)
-  }
-
-  /** True iff a semantic embedder is wired (hybrid mode active). */
-  get semantic(): boolean {
-    return this.embedder !== null
+    return new DocSearchIndex(db)
   }
 
   /** Raw handle — for tests / advanced callers. */
@@ -223,22 +199,23 @@ export class DocSearchIndex {
 
   /**
    * Replace all chunks for one file atomically (delete-then-insert).
-   * When an embedder is wired, chunk embeddings are computed and stored.
+   *
+   * `async` is retained (callers `await` it) even though the body is now
+   * fully synchronous — the doc-corpus refresh pipeline awaits every
+   * `indexFile`, and keeping the signature avoids a churny ripple through
+   * `indexer.ts` / `runtime.ts` for no behavioural gain.
    */
   async indexFile(input: IndexFileInput): Promise<void> {
-    const embeddings = await this.maybeEmbed(input.chunks.map((c) => c.body))
     const now = Date.now()
     const del = this.db.query(`DELETE FROM doc_chunks WHERE project = ? AND relpath = ?`)
     const ins = this.db.query(
       `INSERT INTO doc_chunks
-         (project, relpath, abs_path, title, heading, ordinal, body, mtime_ms, indexed_at, embedding)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         (project, relpath, abs_path, title, heading, ordinal, body, mtime_ms, indexed_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     const tx = this.db.transaction(() => {
       del.run(input.project, input.relpath)
-      for (let i = 0; i < input.chunks.length; i++) {
-        const c = input.chunks[i]!
-        const emb = embeddings === null ? null : JSON.stringify(embeddings[i] ?? [])
+      for (const c of input.chunks) {
         ins.run(
           input.project,
           input.relpath,
@@ -249,7 +226,6 @@ export class DocSearchIndex {
           c.body,
           input.mtimeMs,
           now,
-          emb,
         )
       }
     })
@@ -279,9 +255,7 @@ export class DocSearchIndex {
   }
 
   /**
-   * BM25 search returned as ranked DOCUMENTS (best chunk per file). In
-   * semantic mode the top lexical files are re-ranked by query↔best-chunk
-   * cosine similarity blended with BM25.
+   * BM25 search returned as ranked DOCUMENTS (best chunk per file).
    *
    * Candidate chunks are pulled BM25-ordered up to a high safety cap,
    * then collapsed to the best chunk per file, and ONLY THEN is the
@@ -309,8 +283,7 @@ export class DocSearchIndex {
       `SELECT c.project AS project, c.relpath AS relpath, c.title AS title,
               c.heading AS heading, c.ordinal AS ordinal,
               bm25(doc_fts, ${BM25_WEIGHTS.title}, ${BM25_WEIGHTS.heading}, ${BM25_WEIGHTS.body}) AS bm25,
-              snippet(doc_fts, 2, '[', ']', ' … ', 12) AS snippet,
-              c.embedding AS embedding
+              snippet(doc_fts, 2, '[', ']', ' … ', 12) AS snippet
          FROM doc_fts
          JOIN doc_chunks c ON c.id = doc_fts.rowid
         WHERE doc_fts MATCH ?${projectClause}
@@ -336,15 +309,7 @@ export class DocSearchIndex {
     const files = [...bestByFile.values()]
 
     // Lexical relevance: min-max normalise -bm25 (higher = better).
-    const lexNorm = minMaxNormalise(files.map((f) => -f.bm25))
-    const scores =
-      this.embedder !== null
-        ? await this.blendSemantic(
-            input.query,
-            files.map((f) => f.embedding),
-            lexNorm,
-          )
-        : lexNorm
+    const scores = minMaxNormalise(files.map((f) => -f.bm25))
 
     return files
       .map((f, i) => ({
@@ -358,47 +323,6 @@ export class DocSearchIndex {
       }))
       .sort((a, b) => b.score - a.score || a.path.localeCompare(b.path))
       .slice(0, limit)
-  }
-
-  // ── internals ──────────────────────────────────────────────────────────
-
-  private async maybeEmbed(texts: string[]): Promise<number[][] | null> {
-    if (this.embedder === null || texts.length === 0) return null
-    const vecs = await this.embedder.embed(texts)
-    return vecs
-  }
-
-  /**
-   * Blend the lexical scores with query↔chunk cosine similarity for the
-   * supplied per-file best-chunk embeddings. Candidates with no stored
-   * embedding fall back to the lowest present cosine so they aren't
-   * spuriously boosted. Returns the lexical scores unchanged when the
-   * query can't be embedded or nothing has an embedding.
-   */
-  private async blendSemantic(
-    query: string,
-    embeddings: Array<string | null>,
-    lexNorm: number[],
-  ): Promise<number[]> {
-    const embedder = this.embedder!
-    const [queryVec] = await embedder.embed([query])
-    if (queryVec === undefined) return lexNorm
-
-    const cosines = embeddings.map((raw) => {
-      if (raw === null) return null
-      // Corrupt-JSON policy (explicit, historical): fallback → null — a
-      // chunk with an unparseable stored embedding simply drops out of the
-      // semantic blend. (`cosineSimilarity` itself never throws.)
-      const vec = parseJsonColumn(raw, { onCorrupt: 'fallback', fallback: null })
-      if (vec === null) return null
-      return cosineSimilarity(queryVec, vec as number[])
-    })
-    const present = cosines.filter((c): c is number => c !== null)
-    if (present.length === 0) return lexNorm
-    const floor = Math.min(...present)
-    const cosNorm = minMaxNormalise(cosines.map((c) => c ?? floor))
-
-    return lexNorm.map((lex, i) => HYBRID_LEX_WEIGHT * lex + (1 - HYBRID_LEX_WEIGHT) * cosNorm[i]!)
   }
 }
 
@@ -414,22 +338,4 @@ function minMaxNormalise(values: number[]): number[] {
   const span = max - min
   if (span <= 0) return values.map(() => 1)
   return values.map((v) => (v - min) / span)
-}
-
-/** Cosine similarity; returns 0 for zero-norm or mismatched vectors. */
-export function cosineSimilarity(a: number[], b: number[]): number {
-  const n = Math.min(a.length, b.length)
-  if (n === 0) return 0
-  let dot = 0
-  let na = 0
-  let nb = 0
-  for (let i = 0; i < n; i++) {
-    const x = a[i]!
-    const y = b[i]!
-    dot += x * y
-    na += x * x
-    nb += y * y
-  }
-  if (na === 0 || nb === 0) return 0
-  return dot / (Math.sqrt(na) * Math.sqrt(nb))
 }

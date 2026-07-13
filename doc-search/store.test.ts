@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 
 import { chunkMarkdown } from './chunk.ts'
-import { cosineSimilarity, DocSearchIndex, type Embedder, type IndexFileInput } from './store.ts'
+import { DocSearchIndex, type IndexFileInput } from './store.ts'
 
 function fileInput(project: string, relpath: string, content: string, mtimeMs = 1000): IndexFileInput {
   const { title, chunks } = chunkMarkdown(content, { filename: relpath })
@@ -140,57 +140,44 @@ describe('DocSearchIndex (incremental reindex)', () => {
   })
 })
 
-describe('DocSearchIndex (optional semantic mode)', () => {
-  // Deterministic, dependency-free embedder: a hashing bag-of-words
-  // vector. Real enough to make cosine similarity meaningful in a test
-  // without pulling an external embedding provider.
-  function makeEmbedder(dim = 64): Embedder {
-    return {
-      dim,
-      embed: async (texts) =>
-        texts.map((t) => {
-          const v = new Array<number>(dim).fill(0)
-          for (const tok of t.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean)) {
-            let h = 2166136261
-            for (let i = 0; i < tok.length; i++) h = ((h ^ tok.charCodeAt(i)) * 16777619) >>> 0
-            const idx = h % dim
-            v[idx] = (v[idx] ?? 0) + 1
-          }
-          return v
-        }),
-    }
-  }
+describe('DocSearchIndex (keyword-only; no dead embedder seam) — RA4', () => {
+  // RA4 removed the never-wired optional `embedder` seam (a dead in-process
+  // hybrid re-rank the composer never enabled and that could not share RA3's
+  // out-of-process gbrain embedder). These tests are the DELETE mutation
+  // guard: they RED if the dead embedder storage / API is re-introduced.
 
-  test('semantic flag is off by default and on with an embedder', () => {
-    const lex = DocSearchIndex.open(':memory:')
-    expect(lex.semantic).toBe(false)
-    lex.close()
-    const hybrid = DocSearchIndex.open(':memory:', { embedder: makeEmbedder() })
-    expect(hybrid.semantic).toBe(true)
-    hybrid.close()
+  test('the schema stores NO embedding column (pure lexical)', () => {
+    const idx = DocSearchIndex.open(':memory:')
+    const cols = idx
+      .raw()
+      .query<{ name: string }, []>(`SELECT name FROM pragma_table_info('doc_chunks')`)
+      .all()
+      .map((c) => c.name)
+    expect(cols).not.toContain('embedding')
+    // The lexical columns that ARE load-bearing are still present.
+    expect(cols).toContain('body')
+    expect(cols).toContain('title')
+    idx.close()
   })
 
-  test('hybrid search still returns relevant docs ranked', async () => {
-    const hybrid = DocSearchIndex.open(':memory:', { embedder: makeEmbedder() })
-    await hybrid.indexFile(fileInput('p', 'docs/revenue.md', '# Revenue\n\nquarterly revenue growth and churn metrics'))
-    await hybrid.indexFile(fileInput('p', 'docs/office.md', '# Office\n\nthe new office lease and desk layout'))
-    const hits = await hybrid.search({ query: 'revenue growth churn' })
+  test('there is no semantic/embedder surface on the index or its factory', () => {
+    const idx = DocSearchIndex.open(':memory:')
+    // No leftover `semantic` getter and no embedder field.
+    expect('semantic' in (idx as unknown as Record<string, unknown>)).toBe(false)
+    expect((idx as unknown as Record<string, unknown>)['embedder']).toBeUndefined()
+    // `open` takes a single path arg — the options/embedder param is gone.
+    expect(DocSearchIndex.open.length).toBe(1)
+    idx.close()
+  })
+
+  test('search returns keyword-ranked docs with in-range scores', async () => {
+    await index.indexFile(fileInput('p', 'docs/revenue.md', '# Revenue\n\nquarterly revenue growth and churn metrics'))
+    await index.indexFile(fileInput('p', 'docs/office.md', '# Office\n\nthe new office lease and desk layout'))
+    const hits = await index.search({ query: 'revenue growth churn' })
     expect(hits[0]!.path).toBe('docs/revenue.md')
     for (const h of hits) {
       expect(h.score).toBeGreaterThanOrEqual(0)
       expect(h.score).toBeLessThanOrEqual(1)
     }
-    hybrid.close()
-  })
-})
-
-describe('cosineSimilarity', () => {
-  test('identical vectors → 1, orthogonal → 0', () => {
-    expect(cosineSimilarity([1, 2, 3], [1, 2, 3])).toBeCloseTo(1, 6)
-    expect(cosineSimilarity([1, 0], [0, 1])).toBeCloseTo(0, 6)
-  })
-  test('zero / empty vectors → 0', () => {
-    expect(cosineSimilarity([0, 0], [1, 1])).toBe(0)
-    expect(cosineSimilarity([], [1])).toBe(0)
   })
 })
