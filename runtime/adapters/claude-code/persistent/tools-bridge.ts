@@ -47,6 +47,13 @@ import {
   ListToolsRequestSchema,
   CallToolRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js'
+import { installProcessSafetyNet } from '@neutronai/logger/fire-and-forget.ts'
+
+// F3 — standalone entrypoint (spawned tools-bridge MCP process, sibling to
+// dev-channel.ts): arm the process-level rejection/exception net as the VERY
+// FIRST statement, before any env read / init / top-level `await mcp.connect`,
+// so a startup failure is logged-then-crashed with structure.
+installProcessSafetyNet()
 
 const SINK_PORT = parseInt(process.env['SINK_PORT'] || '0', 10)
 const SINK_TOKEN = process.env['SINK_TOKEN'] || ''
