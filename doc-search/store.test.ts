@@ -271,13 +271,12 @@ describe('DocSearchIndex (keyword-only; no dead embedder seam) — RA4', () => {
       second.close()
     })
 
-    test('a genuinely-FUTURE-schema DB is opened as-is: no DDL, no rebuild, no downgrade', async () => {
+    test('a genuinely-FUTURE-schema DB is REBUILT to the current schema (self-heal)', async () => {
       // Simulate a DB written by a NEWER binary whose schema DIVERGES from the
-      // current one: doc_chunks has an EXTRA column the current binary knows
-      // nothing about, PLUS an extra index + extra table, stamped user_version=2.
-      // The current binary must open it TRULY as-is: run NO DDL of its own (so
-      // it can't add obsolete objects or fail against the changed shape) and NOT
-      // downgrade the stamp.
+      // current one: doc_chunks has an EXTRA column, PLUS an extra index + extra
+      // table, stamped user_version=2. The doc-search index is a REBUILDABLE
+      // CACHE that MUST match the running binary — so a foreign stamp is NOT
+      // trusted: the current binary rebuilds to its own schema.
       const future = new Database(dbPath)
       future.exec(`
         CREATE TABLE doc_chunks (
@@ -302,48 +301,85 @@ describe('DocSearchIndex (keyword-only; no dead embedder seam) — RA4', () => {
         VALUES ('p', 'docs/future.md', '/o/p/docs/future.md', 'Future', '', 0, 'futuristic sprocket body', 1000, 1, 'fr');
         PRAGMA user_version = 2;
       `)
-      // Snapshot the exact schema (all objects + their SQL) BEFORE reopen.
-      const schemaBefore = future
-        .query<{ type: string; name: string; sql: string | null }, []>(
-          `SELECT type, name, sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name`,
-        )
-        .all()
       future.close()
 
       const reopened = DocSearchIndex.open(dbPath)
 
-      // NOT downgraded — the stamp stays at the future version.
-      expect(reopened.raw().query<{ user_version: number }, []>('PRAGMA user_version').get()?.user_version).toBe(2)
+      // Rebuilt: stamp is DOWN to the current schema version (foreign stamp not trusted).
+      expect(reopened.raw().query<{ user_version: number }, []>('PRAGMA user_version').get()?.user_version).toBe(1)
 
-      // NO DDL ran: the schema is byte-identical to before (same objects, same
-      // SQL). A rebuild would have dropped doc_chunks/doc_fts/triggers; an
-      // idempotent `SCHEMA` exec would have ADDED our indexes
-      // (idx_doc_chunks_file / idx_doc_chunks_project) that the future DB lacks.
-      const schemaAfter = reopened
+      // Rebuilt to the CURRENT schema: required tables present, our own indexes
+      // recreated, and the future-only divergent objects GONE.
+      const objNames = reopened
         .raw()
-        .query<{ type: string; name: string; sql: string | null }, []>(
-          `SELECT type, name, sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name`,
+        .query<{ name: string }, []>(
+          `SELECT name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'`,
         )
         .all()
-      expect(schemaAfter).toEqual(schemaBefore)
-
-      // The future-only objects/columns STILL EXIST (current binary didn't touch them).
+        .map((o) => o.name)
+      expect(objNames).toContain('doc_chunks')
+      expect(objNames).toContain('doc_fts')
+      expect(objNames).toContain('idx_doc_chunks_file')
+      expect(objNames).toContain('idx_doc_chunks_project')
+      // doc_chunks was dropped + recreated at OUR schema, so its future-only
+      // index went with it. (A stray unrelated future table like `doc_meta`
+      // that DROP_SCHEMA doesn't know about may harmlessly remain — the rebuild
+      // only guarantees OUR objects match, it doesn't blow away foreign tables.)
+      expect(objNames).not.toContain('idx_doc_chunks_lang')
       const cols = reopened
         .raw()
         .query<{ name: string }, []>(`SELECT name FROM pragma_table_info('doc_chunks')`)
         .all()
         .map((c) => c.name)
-      expect(cols).toContain('lang')
-      const objNames = schemaAfter.map((o) => o.name)
-      expect(objNames).toContain('idx_doc_chunks_lang')
-      expect(objNames).toContain('doc_meta')
-      // The current binary did NOT add its own indexes on top of the future schema.
-      expect(objNames).not.toContain('idx_doc_chunks_file')
-      expect(objNames).not.toContain('idx_doc_chunks_project')
+      expect(cols).not.toContain('lang')
+      expect(cols).not.toContain('embedding')
 
-      // NOT rebuilt — the pre-existing row survives (a rebuild would drop it).
-      const hits = await reopened.search({ query: 'sprocket' })
-      expect(hits.map((h) => h.path)).toEqual(['docs/future.md'])
+      // The stale future row was dropped with the table; search WORKS (no
+      // "no such table") and the cache repopulates from source.
+      await reopened.indexFile(fileInput('p', 'docs/new.md', '# New\n\nfresh cog content'))
+      const hits = await reopened.search({ query: 'cog' })
+      expect(hits.map((h) => h.path)).toEqual(['docs/new.md'])
+      reopened.close()
+    })
+
+    test('a bare user_version=2 DB (no tables) opens AND searches cleanly (self-heal)', async () => {
+      // The exact repro: a DB with ONLY a future stamp and NO tables. Opening
+      // as-is would register a runtime whose search() throws
+      // "no such table: doc_fts". Rebuild-on-mismatch must recreate the schema
+      // so open() + search() both succeed.
+      const bare = new Database(dbPath)
+      bare.exec(`PRAGMA user_version = 2;`)
+      bare.close()
+
+      const reopened = DocSearchIndex.open(dbPath)
+      expect(reopened.raw().query<{ user_version: number }, []>('PRAGMA user_version').get()?.user_version).toBe(1)
+      // search() must NOT throw "no such table: doc_fts".
+      expect(await reopened.search({ query: 'anything' })).toEqual([])
+      await reopened.indexFile(fileInput('p', 'docs/a.md', '# A\n\nwidget body'))
+      expect((await reopened.search({ query: 'widget' })).map((h) => h.path)).toEqual(['docs/a.md'])
+      reopened.close()
+    })
+
+    test('a corrupt cache stamped at the current version but missing doc_fts self-heals', async () => {
+      // Belt-and-suspenders: a half-written cache stamped at SCHEMA_VERSION but
+      // missing a required table. The required-table validation must catch it
+      // and rebuild so search() never throws.
+      const partial = new Database(dbPath)
+      partial.exec(`
+        CREATE TABLE doc_chunks (id INTEGER PRIMARY KEY, body TEXT);
+        PRAGMA user_version = 1;
+      `)
+      partial.close()
+
+      const reopened = DocSearchIndex.open(dbPath)
+      const objNames = reopened
+        .raw()
+        .query<{ name: string }, []>(`SELECT name FROM sqlite_master WHERE type = 'table'`)
+        .all()
+        .map((o) => o.name)
+      expect(objNames).toContain('doc_fts')
+      await reopened.indexFile(fileInput('p', 'docs/a.md', '# A\n\nwidget body'))
+      expect((await reopened.search({ query: 'widget' })).map((h) => h.path)).toEqual(['docs/a.md'])
       reopened.close()
     })
   })

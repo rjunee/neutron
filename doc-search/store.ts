@@ -366,51 +366,74 @@ function minMaxNormalise(values: number[]): number[] {
 }
 
 /**
- * Bring a freshly-opened DB up to the current schema, then stamp its version.
+ * The tables `search()` (and every read/write) requires. `open()` guarantees
+ * these exist before returning, so a `search()` can never throw
+ * "no such table". Kept in sync with `SCHEMA` / `DROP_SCHEMA`.
+ */
+const REQUIRED_TABLES = ['doc_chunks', 'doc_fts'] as const
+
+/**
+ * Bring a freshly-opened DB to EXACTLY the running binary's schema.
  *
  * The doc-search index is a REBUILDABLE CACHE (lives under
  * `<owner_home>/cache/doc-search/`, derived entirely from the on-disk project
- * docs and repopulated by the next `refreshIndex` pass), so a stale schema is
- * resolved by DROP-and-recreate rather than an in-place `ALTER`. A DB stamped
- * below `SCHEMA_VERSION` — including a legacy pre-RA4 DB that still carries the
- * removed `doc_chunks.embedding` column and reports `user_version` 0 — has its
- * doc-search objects dropped so `SCHEMA` recreates them clean. A brand-new
- * empty DB also reports 0, but the drops are `IF EXISTS` no-ops there, so the
- * fresh-DB path is unchanged. Once at/above the stamp, `SCHEMA` is idempotent
- * (`IF NOT EXISTS`) and nothing is dropped.
+ * docs and repopulated by the next `refreshIndex` pass). Because it is
+ * disposable, the cache MUST match the running binary's schema and is made
+ * SELF-HEALING: it is DROP-and-recreated on ANY `user_version` mismatch, in
+ * EITHER direction — there is no in-place `ALTER` and no attempt to trust a
+ * foreign stamp.
  *
- * The version is stamped ONLY when we actually rebuild. A DB already at or
- * above `SCHEMA_VERSION` keeps its existing stamp untouched — so a DB written
- * by a FUTURE binary (`user_version` > ours) is opened AS-IS and NOT
- * downgraded to our version, preserving forward-version detection.
+ *   - `version < SCHEMA_VERSION` (legacy pre-RA4 DB still carrying the removed
+ *     `doc_chunks.embedding` column, reporting 0; or a brand-new empty DB, also
+ *     0) → rebuild. For a fresh DB the drops are `IF EXISTS` no-ops.
+ *   - `version > SCHEMA_VERSION` (a DB written by a NEWER binary, then opened by
+ *     an older/rolled-back one) → ALSO rebuild. This DELIBERATELY SUPERSEDES an
+ *     earlier "preserve the future stamp / open as-is" approach: opening a
+ *     divergent future DB as-is left an UNUSABLE cache whose `search()` threw
+ *     "no such table: doc_fts" (e.g. a bare `PRAGMA user_version=2` DB with no
+ *     tables). A newer stamp is NOT trusted — the disposable cache is rebuilt to
+ *     the current schema and repopulated from source docs.
+ *   - `version === SCHEMA_VERSION` → same-schema reopen: no rebuild.
+ *
+ * Belt-and-suspenders: after the version path, VALIDATE that every
+ * `REQUIRED_TABLES` object exists; if any is missing (a corrupt / partially
+ * written cache that still happens to be stamped at `SCHEMA_VERSION`), rebuild.
+ * So `open()` NEVER returns a runtime whose `search()` would throw.
  */
 function migrateSchema(db: Database): void {
   const row = db.query<{ user_version: number }, []>('PRAGMA user_version').get()
   const version = row?.user_version ?? 0
-  if (version < SCHEMA_VERSION) {
-    db.exec(DROP_SCHEMA)
-    db.exec(SCHEMA)
-    // Stamp ONLY after a rebuild — a DB already >= SCHEMA_VERSION keeps its
-    // own stamp (a future v2 stays v2, never downgraded to v1). `user_version`
-    // takes an integer literal (no bound params in a PRAGMA); SCHEMA_VERSION is
-    // a hardcoded numeric constant, so this is injection-safe.
-    db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`)
+
+  if (version !== SCHEMA_VERSION) {
+    rebuildSchema(db)
     return
   }
-  if (version > SCHEMA_VERSION) {
-    // A DB written by a FUTURE binary owns its own schema — which may have
-    // renamed/removed columns or objects our older DDL knows nothing about.
-    // Open it TRULY as-is: run NO DDL (our `SCHEMA` could add obsolete
-    // triggers/indexes or fail against the changed shape) and NO restamp.
-    // The future binary is responsible for its own schema.
-    console.warn(
-      `[doc-search] index DB user_version=${version} is newer than this ` +
-        `binary's schema (${SCHEMA_VERSION}); opening as-is (no DDL, no rebuild).`,
-    )
-    return
+
+  // Stamp matches — trust it, but cheaply confirm the required tables are all
+  // present (guards a corrupt / half-written cache stamped at the right
+  // version). Missing anything → rebuild.
+  if (!requiredTablesPresent(db)) {
+    rebuildSchema(db)
   }
-  // Exactly at the stamp (same-schema reopen): the schema is already present.
-  // Ensure the objects exist idempotently (`IF NOT EXISTS`) without dropping or
-  // restamping — a no-op in practice, kept as a belt-and-braces self-heal.
+}
+
+/** DROP every doc-search object, recreate at the current `SCHEMA`, and stamp. */
+function rebuildSchema(db: Database): void {
+  db.exec(DROP_SCHEMA)
   db.exec(SCHEMA)
+  // `user_version` takes an integer literal (no bound params in a PRAGMA);
+  // SCHEMA_VERSION is a hardcoded numeric constant, so this is injection-safe.
+  db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`)
+}
+
+/** True iff every `REQUIRED_TABLES` object exists in `sqlite_master`. */
+function requiredTablesPresent(db: Database): boolean {
+  return REQUIRED_TABLES.every(
+    (name) =>
+      db
+        .query<{ n: number }, [string]>(
+          `SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'table' AND name = ?`,
+        )
+        .get(name)?.n === 1,
+  )
 }
