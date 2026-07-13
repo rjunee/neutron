@@ -198,8 +198,9 @@ export interface ProcessSafetyNetOptions {
   /**
    * Called after logging an `uncaughtException` OR an `unhandledRejection` to
    * end the process. Injectable for tests. Defaults to `() => process.exit(1)`
-   * — EXCEPT under `NODE_ENV === 'test'`, where the default is a no-op so a boot
-   * inside the test runner cannot kill the whole suite. Receives the raw
+   * — EXCEPT under `NODE_ENV === 'test'`, where it does not hard-exit (that would
+   * kill the whole suite mid-run) but sets `process.exitCode = 1` so a stray
+   * rejection/exception still surfaces as a nonzero suite exit. Receives the raw
    * exception / rejection reason (which may not be an `Error`).
    */
   onUncaught?: (err: unknown) => void
@@ -211,10 +212,19 @@ function defaultOnUncaught(): void {
   // be worse than restarting, and swallowing it silently is exactly the bug
   // this unit removes. Exiting non-zero matches Node's own default crash
   // behavior — we only add a loud, structured log first, so a systemd
-  // Restart=always brings the process back clean. Suppressed under
-  // NODE_ENV=test (bun test sets this) so a boot in-process during the suite
-  // logs but does not tear the runner down.
-  if (process.env['NODE_ENV'] !== 'test') process.exit(1)
+  // Restart=always brings the process back clean.
+  //
+  // Under NODE_ENV=test (bun test sets this) we do NOT hard-`exit` — that would
+  // tear the whole suite down mid-run — but we still SIGNAL failure by setting
+  // `process.exitCode = 1`, so a stray unhandled rejection / exception that
+  // reaches this default handler surfaces as a NONZERO suite exit rather than a
+  // silent pass. (Tests that intentionally exercise the handler inject their own
+  // `onUncaught`, so they never reach this path.)
+  if (process.env['NODE_ENV'] === 'test') {
+    process.exitCode = 1
+    return
+  }
+  process.exit(1)
 }
 
 /**
