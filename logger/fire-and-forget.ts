@@ -51,6 +51,30 @@ function getFafLogger(): Logger {
 }
 
 /**
+ * Log a fire-and-forget rejection WITHOUT ever throwing. The primary sink is the
+ * structured logger; if IT throws (a broken/exhausted/DI-swapped sink), fall
+ * back to a raw `console.error`, and if even that throws, swallow. The safety
+ * guarantee of `fireAndForget` — "the attached `.catch` never rejects" — must
+ * hold regardless of the log sink's behavior, or the wrapper would itself become
+ * the unhandled rejection it exists to prevent.
+ */
+function logRejectionSafely(name: string, err: unknown): void {
+  try {
+    getFafLogger().error('rejected', { name, error: describeRejection(err) })
+  } catch (logErr) {
+    try {
+      console.error('[fire-and-forget] log sink threw', {
+        name,
+        error: describeRejection(err),
+        logError: describeRejection(logErr),
+      })
+    } catch {
+      /* even console.error threw — nothing safe left to do; swallow */
+    }
+  }
+}
+
+/**
  * Run a promise fire-and-forget with its rejection made VISIBLE. Attaches a
  * `.catch` that logs `name` + the error at `error` level and bumps the
  * process-wide rejection counter. The attached handler NEVER rethrows, so the
@@ -67,11 +91,13 @@ function getFafLogger(): Logger {
 export function fireAndForget(name: string, p: Promise<unknown> | null | undefined): void {
   if (p == null) return
   // The ONE sanctioned `void <promise>` in the repo: this file is the wrapper
-  // the F3 lint rule allowlists. `.catch(...)` returns a promise that always
-  // resolves (the handler never throws), so voiding it is safe.
+  // the F3 lint rule allowlists. The `.catch(...)` handler is GUARDED
+  // (`logRejectionSafely` never throws — even a broken log sink is contained),
+  // so the returned promise ALWAYS resolves and voiding it can never itself
+  // become an unhandled rejection. That is the whole point of the wrapper.
   void p.catch((err: unknown) => {
     rejectionCount += 1
-    getFafLogger().error('rejected', { name, error: describeRejection(err) })
+    logRejectionSafely(name, err)
   })
 }
 
@@ -137,12 +163,34 @@ export function installProcessSafetyNet(options?: ProcessSafetyNetOptions): void
   const log = createLogger('process')
   const onUncaught = options?.onUncaught ?? defaultOnUncaught
 
+  // Both handlers guard their logging: a throwing log sink must never turn the
+  // safety net into a new fault. For `uncaughtException` the crash decision is
+  // in a `finally`, so a logging failure can NEVER skip the log-then-crash
+  // policy (`onUncaught` — default `process.exit(1)`).
+  const logSafely = (event: string, err: unknown): void => {
+    try {
+      log.error(event, { error: describeRejection(err) })
+    } catch (logErr) {
+      try {
+        console.error(`[process] ${event} (log sink threw)`, {
+          error: describeRejection(err),
+          logError: describeRejection(logErr),
+        })
+      } catch {
+        /* swallow — nothing safe left to do */
+      }
+    }
+  }
+
   const onRejection: RejectionHandler = (reason) => {
-    log.error('unhandled_rejection', { error: describeRejection(reason) })
+    logSafely('unhandled_rejection', reason)
   }
   const onException: ExceptionHandler = (err) => {
-    log.error('uncaught_exception', { error: describeRejection(err) })
-    onUncaught(err)
+    try {
+      logSafely('uncaught_exception', err)
+    } finally {
+      onUncaught(err)
+    }
   }
 
   process.on('unhandledRejection', onRejection)

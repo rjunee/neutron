@@ -76,6 +76,52 @@ describe('fireAndForget', () => {
     await flush()
     expect(fireAndForgetRejectionCount()).toBe(2)
   })
+
+  // Blocker boundary: the wrapper's OWN log path must not turn an observability
+  // failure into the unhandled rejection it promises to prevent.
+  test('a throwing log sink is contained — no unhandled rejection, fallback attempted', async () => {
+    const seen: unknown[] = []
+    const onUnhandled = (reason: unknown) => seen.push(reason)
+    process.on('unhandledRejection', onUnhandled)
+    // Primary sink (logger → console.error) throws on its first call; the
+    // fallback console.error is captured on the second.
+    let calls = 0
+    const fallbackCaptured: string[] = []
+    console.error = (...args: unknown[]) => {
+      calls += 1
+      if (calls === 1) throw new Error('sink failed')
+      fallbackCaptured.push(args.map((a) => String(a)).join(' '))
+    }
+    try {
+      const reason = new Error('original')
+      fireAndForget('unit.throwing-sink', Promise.reject(reason))
+      await flush()
+      await flush()
+      expect(seen).not.toContain(reason) // wrapper's .catch never rejected
+      expect(fireAndForgetRejectionCount()).toBe(1) // counter independent of sink
+      expect(fallbackCaptured.find((l) => l.includes('log sink threw'))).toBeDefined()
+    } finally {
+      process.off('unhandledRejection', onUnhandled)
+    }
+  })
+
+  test('even a fully broken sink (primary AND fallback throw) never rejects', async () => {
+    const seen: unknown[] = []
+    const onUnhandled = (reason: unknown) => seen.push(reason)
+    process.on('unhandledRejection', onUnhandled)
+    console.error = () => {
+      throw new Error('everything is broken')
+    }
+    try {
+      const reason = new Error('original')
+      fireAndForget('unit.broken-sink', Promise.reject(reason))
+      await flush()
+      await flush()
+      expect(seen).not.toContain(reason)
+    } finally {
+      process.off('unhandledRejection', onUnhandled)
+    }
+  })
 })
 
 describe('describeRejection', () => {
@@ -138,5 +184,28 @@ describe('installProcessSafetyNet', () => {
     const line = errorLines.find((l) => l.includes('unhandled_rejection'))
     expect(line).toBeDefined()
     expect(line).toContain('stray')
+  })
+
+  // Blocker boundary: a throwing log sink must NOT skip the log-then-crash
+  // policy — `onUncaught` is guaranteed via `finally`.
+  test('uncaughtException calls onUncaught even when logging throws', () => {
+    let crashed: Error | undefined
+    console.error = () => {
+      throw new Error('log sink down')
+    }
+    installProcessSafetyNet({ onUncaught: (err) => (crashed = err) })
+    const handler = process.listeners('uncaughtException').at(-1) as (e: Error) => void
+    const boom = new Error('fatal-with-broken-log')
+    expect(() => handler(boom)).not.toThrow() // handler never propagates the log failure
+    expect(crashed).toBe(boom) // crash policy still ran
+  })
+
+  test('unhandledRejection handler survives a throwing log sink', () => {
+    console.error = () => {
+      throw new Error('log sink down')
+    }
+    installProcessSafetyNet({ onUncaught: () => {} })
+    const handler = process.listeners('unhandledRejection').at(-1) as (r: unknown) => void
+    expect(() => handler(new Error('stray'))).not.toThrow()
   })
 })
