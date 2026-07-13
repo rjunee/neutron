@@ -146,12 +146,13 @@ let installedExceptionHandler: ExceptionHandler | undefined
 
 export interface ProcessSafetyNetOptions {
   /**
-   * Called after logging an `uncaughtException` to end the process. Injectable
-   * for tests. Defaults to `() => process.exit(1)` — EXCEPT under
-   * `NODE_ENV === 'test'`, where the default is a no-op so a boot inside the
-   * test runner cannot kill the whole suite.
+   * Called after logging an `uncaughtException` OR an `unhandledRejection` to
+   * end the process. Injectable for tests. Defaults to `() => process.exit(1)`
+   * — EXCEPT under `NODE_ENV === 'test'`, where the default is a no-op so a boot
+   * inside the test runner cannot kill the whole suite. Receives the raw
+   * exception / rejection reason (which may not be an `Error`).
    */
-  onUncaught?: (err: Error) => void
+  onUncaught?: (err: unknown) => void
 }
 
 function defaultOnUncaught(): void {
@@ -171,14 +172,20 @@ function defaultOnUncaught(): void {
  * ONCE. Idempotent: a second call (e.g. a second `boot()` in tests) is a no-op,
  * so the process never accumulates duplicate listeners.
  *
- * POLICY:
- *   - `unhandledRejection` → LOG at `error` level, do NOT exit. A single stray
- *     rejected promise should not tear down a long-lived server; visibility is
- *     the win. (This is the last-resort net for any rejection that escaped a
- *     `fireAndForget` wrap.)
- *   - `uncaughtException` → LOG at `error` level, then CRASH via `onUncaught`
- *     (default `process.exit(1)`, suppressed under NODE_ENV=test). Never
- *     swallowed.
+ * POLICY — both handlers LOG-THEN-CRASH, preserving the runtime's fatal
+ * default while adding a loud, structured log first:
+ *   - `unhandledRejection` → LOG at `error`, then CRASH via `onUncaught`
+ *     (default `process.exit(1)`, suppressed under NODE_ENV=test). This is
+ *     deliberately fail-fast: EVERY known-benign fire-and-forget is already
+ *     wrapped (`fireAndForget` / `neutralizeAbandonedSettle` swallow before the
+ *     global handler can ever see them), so a rejection that reaches THIS
+ *     handler is genuinely unexpected and leaves the process in an unknown
+ *     state — exiting non-zero matches the runtime's own default (an unhandled
+ *     rejection exits 1) and a systemd Restart=always brings it back clean.
+ *   - `uncaughtException` → LOG at `error`, then CRASH via `onUncaught`. Same
+ *     policy; an uncaught exception likewise leaves the process undefined.
+ *   Neither is ever swallowed, and the crash decision sits in a `finally` so a
+ *   throwing log sink can never skip it.
  */
 export function installProcessSafetyNet(options?: ProcessSafetyNetOptions): void {
   if (installedRejectionHandler !== undefined) return
@@ -187,9 +194,9 @@ export function installProcessSafetyNet(options?: ProcessSafetyNetOptions): void
   const onUncaught = options?.onUncaught ?? defaultOnUncaught
 
   // Both handlers guard their logging: a throwing log sink must never turn the
-  // safety net into a new fault. For `uncaughtException` the crash decision is
-  // in a `finally`, so a logging failure can NEVER skip the log-then-crash
-  // policy (`onUncaught` — default `process.exit(1)`).
+  // safety net into a new fault. The crash decision sits in a `finally`, so a
+  // logging failure can NEVER skip the log-then-crash policy (`onUncaught` —
+  // default `process.exit(1)`).
   const logSafely = (event: string, err: unknown): void => {
     try {
       log.error(event, { error: describeRejection(err) })
@@ -206,7 +213,11 @@ export function installProcessSafetyNet(options?: ProcessSafetyNetOptions): void
   }
 
   const onRejection: RejectionHandler = (reason) => {
-    logSafely('unhandled_rejection', reason)
+    try {
+      logSafely('unhandled_rejection', reason)
+    } finally {
+      onUncaught(reason)
+    }
   }
   const onException: ExceptionHandler = (err) => {
     try {

@@ -124,12 +124,14 @@ export function buildTriageScheduler(opts: TriageSchedulerOpts): TriageScheduler
   function armSelfTick(): void {
     selfTickTimer = scheduleTimer(() => {
       fireAndForget('triage-scheduler.task', (async (): Promise<void> => {
+        // Re-arm regardless of outcome (a single tick failure must not stop the
+        // loop) via `finally`, but let the failure PROPAGATE to the
+        // fireAndForget wrapper so it is logged, not silently swallowed.
         try {
           await self.tick(nowFn())
-        } catch {
-          // best-effort — a single tick failure must not stop the loop.
+        } finally {
+          if (started) armSelfTick()
         }
-        if (started) armSelfTick()
       })())
     }, tickIntervalMs)
   }

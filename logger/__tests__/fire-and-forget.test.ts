@@ -1,5 +1,7 @@
 // F3 — fireAndForget wrapper + process-level safety net.
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
+import { spawnSync } from 'node:child_process'
+import { fileURLToPath } from 'node:url'
 import {
   describeRejection,
   fireAndForget,
@@ -216,7 +218,7 @@ describe('installProcessSafetyNet', () => {
   })
 
   test('uncaughtException handler LOGS then calls onUncaught (log-then-crash)', () => {
-    let crashed: Error | undefined
+    let crashed: unknown
     installProcessSafetyNet({ onUncaught: (err) => (crashed = err) })
     // The last-installed uncaughtException listener is ours.
     const handler = process.listeners('uncaughtException').at(-1) as (e: Error) => void
@@ -226,19 +228,22 @@ describe('installProcessSafetyNet', () => {
     expect(errorLines.find((l) => l.includes('uncaught_exception'))).toBeDefined()
   })
 
-  test('unhandledRejection handler LOGS and does not exit', () => {
-    installProcessSafetyNet({ onUncaught: () => {} })
+  test('unhandledRejection handler LOGS then calls onUncaught (log-then-crash)', () => {
+    let crashed: unknown
+    installProcessSafetyNet({ onUncaught: (err) => (crashed = err) })
     const handler = process.listeners('unhandledRejection').at(-1) as (r: unknown) => void
-    handler(new Error('stray'))
+    const reason = new Error('stray')
+    handler(reason)
     const line = errorLines.find((l) => l.includes('unhandled_rejection'))
     expect(line).toBeDefined()
     expect(line).toContain('stray')
+    expect(crashed).toBe(reason) // fatal default preserved (log-then-crash)
   })
 
   // Blocker boundary: a throwing log sink must NOT skip the log-then-crash
   // policy — `onUncaught` is guaranteed via `finally`.
   test('uncaughtException calls onUncaught even when logging throws', () => {
-    let crashed: Error | undefined
+    let crashed: unknown
     console.error = () => {
       throw new Error('log sink down')
     }
@@ -249,12 +254,34 @@ describe('installProcessSafetyNet', () => {
     expect(crashed).toBe(boom) // crash policy still ran
   })
 
-  test('unhandledRejection handler survives a throwing log sink', () => {
+  test('unhandledRejection calls onUncaught even when logging throws', () => {
+    let crashed: unknown
     console.error = () => {
       throw new Error('log sink down')
     }
-    installProcessSafetyNet({ onUncaught: () => {} })
+    installProcessSafetyNet({ onUncaught: (err) => (crashed = err) })
     const handler = process.listeners('unhandledRejection').at(-1) as (r: unknown) => void
-    expect(() => handler(new Error('stray'))).not.toThrow()
+    const reason = new Error('stray-with-broken-log')
+    expect(() => handler(reason)).not.toThrow() // handler never propagates the log failure
+    expect(crashed).toBe(reason) // crash policy still ran
+  })
+
+  // Real-process proof (not just a listener call): with the net installed and
+  // NODE_ENV unset, an ACTUAL unhandled rejection must EXIT NONZERO (the fatal
+  // default is preserved) after emitting the structured log.
+  test('a real unhandled rejection exits nonzero with the net installed', () => {
+    const fafPath = fileURLToPath(new URL('../fire-and-forget.ts', import.meta.url))
+    const script = [
+      `const m = await import(${JSON.stringify(fafPath)})`,
+      'm.installProcessSafetyNet()',
+      "Promise.reject(new Error('child-unhandled-boom'))",
+      'await new Promise((r) => setTimeout(r, 2000))',
+    ].join('\n')
+    const env = { ...process.env }
+    delete env['NODE_ENV'] // must NOT be 'test' or the crash is suppressed
+    const res = spawnSync('bun', ['-e', script], { env, encoding: 'utf8', timeout: 15000 })
+    expect(res.status).not.toBe(0)
+    expect(`${res.stdout}${res.stderr}`).toContain('unhandled_rejection')
+    expect(`${res.stdout}${res.stderr}`).toContain('child-unhandled-boom')
   })
 })

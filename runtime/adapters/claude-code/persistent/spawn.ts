@@ -584,11 +584,11 @@ async function spawnSession(
         try {
           patchRecord(options.replRegistryPath, sessionKey, { has_session: true })
         } catch {
-          /* best-effort */
+          /* best-effort: a registry patch failure degrades to a fresh spawn
+             next time, not a fatal — kept local, not surfaced. */
         }
       }
-    })
-    .catch(() => undefined))
+    }))
 
   return session
 }

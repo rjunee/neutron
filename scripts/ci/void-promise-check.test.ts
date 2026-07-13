@@ -41,6 +41,27 @@ describe('findBareVoidPromiseCalls', () => {
     expect(hits.length).toBe(1)
   })
 
+  // Medium #3 (Codex): a promise-void in EXPRESSION position (callback body /
+  // arrow concise body) must be flagged too — not just statements.
+  test('flags a promise void in expression position (arrow concise body)', () => {
+    const hits = findBareVoidPromiseCalls('declare const p: Promise<void>\nconst f = () => void p')
+    expect(hits.length).toBe(1)
+  })
+
+  test('flags a promise void nested in a callback argument', () => {
+    const hits = findBareVoidPromiseCalls(
+      'declare const p: Promise<void>\ndeclare function setTimeout(cb: () => void, ms: number): void\nsetTimeout(() => void p, 0)',
+    )
+    expect(hits.length).toBe(1)
+  })
+
+  test('does NOT flag a NON-promise void in expression position', () => {
+    expect(findBareVoidPromiseCalls('const f = () => void 0').length).toBe(0)
+    expect(
+      findBareVoidPromiseCalls('declare const n: number\nconst f = () => void n').length,
+    ).toBe(0)
+  })
+
   test('does NOT flag the wrapped form', () => {
     const hits = findBareVoidPromiseCalls(
       [
@@ -69,11 +90,12 @@ describe('findBareVoidPromiseCalls', () => {
     expect(findBareVoidPromiseCalls('declare function n(): number\nvoid n()').length).toBe(0)
   })
 
-  test('does NOT flag a void CALL nested inside an expression (only statements)', () => {
+  test('flags a promise void inside a comma expression, but not the non-promise arm', () => {
+    // `void a()` (promise) is caught even nested; `void b()` (number) is not.
     const hits = findBareVoidPromiseCalls(
-      'declare function a(): Promise<void>\ndeclare function b(): number\nconst y = (void a(), b())',
+      'declare function a(): Promise<void>\ndeclare function b(): number\nconst y = (void a(), void b(), 1)',
     )
-    expect(hits.length).toBe(0)
+    expect(hits.length).toBe(1)
   })
 
   test('flags each promise-void statement independently, skipping the non-promises', () => {

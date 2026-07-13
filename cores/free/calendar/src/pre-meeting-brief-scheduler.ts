@@ -178,15 +178,18 @@ export function buildPreMeetingBriefScheduler(
       const fireEvent = cur?.event ?? input.event
       const fireProject = cur?.project_id ?? input.project_id
       fireAndForget('pre-meeting-brief-scheduler.task', (async (): Promise<void> => {
+        // Run BOTH steps (a `fire` failure must still mark fired so we don't
+        // re-fire on every restart), but SURFACE any failure to the
+        // fireAndForget wrapper instead of swallowing it silently.
+        const failures: unknown[] = []
         try {
           await opts.fire({
             event: fireEvent,
             project_id: fireProject,
             fired_at: now(),
           })
-        } catch {
-          // best-effort — still mark fired so we don't re-fire on
-          // every restart.
+        } catch (e) {
+          failures.push(e)
         }
         try {
           await opts.queueStore.markFired(
@@ -194,8 +197,12 @@ export function buildPreMeetingBriefScheduler(
             input.event_id,
             now(),
           )
-        } catch {
-          // best-effort
+        } catch (e) {
+          failures.push(e)
+        }
+        if (failures.length === 1) throw failures[0]
+        if (failures.length > 1) {
+          throw new AggregateError(failures, 'pre-meeting brief fire had failures')
         }
       })())
       if (cur !== undefined) cur.timer = null

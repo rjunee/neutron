@@ -179,7 +179,7 @@ export function makeReplRespawnDeps(options: PersistentReplSubstrateOptions): Re
           await getOrSpawnSession(record.sessionKey, options, resumeSpecFor(record), {
             sessionId: record.sessionId,
           })
-        })().catch(() => undefined))
+        })())
         return { ok: true }
       } catch {
         return { ok: false, reason: 'spawn-failed' }

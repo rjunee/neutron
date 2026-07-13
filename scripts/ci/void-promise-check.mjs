@@ -7,12 +7,14 @@
 // instead of dropping it. This gate BANS the bare form so new swallowed
 // failures can't creep back in: every such site must go through the wrapper.
 //
-// WHAT IT FLAGS — a `void <expr>` EXPRESSION-STATEMENT whose operand is a
-// Promise/thenable, decided by the TYPE CHECKER (not the AST shape). This
-// closes the Codex-flagged bypass where a promise VARIABLE slipped through:
-//   `const p: Promise<void> = …; void p`     ← now flagged (operand is a Promise)
+// WHAT IT FLAGS — a `void <expr>` whose operand is a Promise/thenable, decided
+// by the TYPE CHECKER (not the AST shape), in STATEMENT **or** EXPRESSION
+// position (a callback body, ternary arm, etc.). This closes two Codex-flagged
+// bypasses — a promise VARIABLE and a nested/expression-position void:
+//   `const p: Promise<void> = …; void p`     ← flagged (operand is a Promise)
 //   `void emitSystemEvent({…})`               ← flagged (call returns a Promise)
 //   `void handle.stop().catch(…)`             ← flagged (chain is still a Promise)
+//   `setTimeout(() => void p, 0)`             ← flagged (expression-position void)
 //
 // WHAT IT DOES NOT FLAG — a `void <expr>` whose operand is NOT promise-typed:
 //   * `void 0` / `void <literal>` — the classic no-op.
@@ -84,12 +86,14 @@ function isPromiseLikeType(checker, type) {
   return probe(type)
 }
 
-/** Walk a bound source file, collecting every `void <promise>` statement. */
+/** Walk a bound source file, collecting every `void <promise>` — in STATEMENT
+ *  OR EXPRESSION position (`() => void p`, `setTimeout(() => void p)`, a ternary
+ *  arm, etc.), so a promise-void can't hide inside a callback body. */
 function collectVoidPromiseHits(sf, checker) {
   const out = []
   const visit = (node) => {
-    if (ts.isExpressionStatement(node) && ts.isVoidExpression(node.expression)) {
-      const operand = node.expression.expression
+    if (ts.isVoidExpression(node)) {
+      const operand = node.expression
       // Fast skip for `void <literal>` (never a promise) before touching types.
       const isLiteral =
         ts.isNumericLiteral(operand) ||
@@ -185,14 +189,15 @@ function walk(dir, out) {
   }
 }
 
-/** Does this in-scope file contain ANY `void <expr>` statement? (cheap parse) */
-function hasVoidStatement(abs, src) {
+/** Does this in-scope file contain ANY `void <expr>` (statement OR expression
+ *  position)? Cheap AST parse, no types. */
+function hasVoidExpression(abs, src) {
   if (!src.includes('void ')) return false
   const sf = ts.createSourceFile(abs, src, ts.ScriptTarget.ES2022, true)
   let found = false
   const visit = (node) => {
     if (found) return
-    if (ts.isExpressionStatement(node) && ts.isVoidExpression(node.expression)) {
+    if (ts.isVoidExpression(node)) {
       found = true
       return
     }
@@ -225,7 +230,7 @@ if (import.meta.main) {
     const rel = abs.slice(ROOT.length + 1).split(sep).join('/')
     if (!inScope(rel)) continue
     const src = readFileSync(abs, 'utf8')
-    if (hasVoidStatement(abs, src)) candidates.push(abs)
+    if (hasVoidExpression(abs, src)) candidates.push(abs)
   }
 
   const offenders = []
