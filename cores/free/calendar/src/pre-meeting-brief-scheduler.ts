@@ -35,7 +35,6 @@ import type {
   PreMeetingBriefQueueRow,
   PreMeetingBriefQueueStore,
 } from './pre-meeting-brief-queue-store.ts'
-import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
 
 /** Default lead time before a meeting that the brief fires (ms). 10 min. */
 export const PRE_MEETING_LEAD_MS = 10 * 60 * 1000
@@ -177,19 +176,16 @@ export function buildPreMeetingBriefScheduler(
       const cur = queue.get(k)
       const fireEvent = cur?.event ?? input.event
       const fireProject = cur?.project_id ?? input.project_id
-      fireAndForget('pre-meeting-brief-scheduler.task', (async (): Promise<void> => {
-        // Run BOTH steps (a `fire` failure must still mark fired so we don't
-        // re-fire on every restart), but SURFACE any failure to the
-        // fireAndForget wrapper instead of swallowing it silently.
-        const failures: unknown[] = []
+      void (async (): Promise<void> => {
         try {
           await opts.fire({
             event: fireEvent,
             project_id: fireProject,
             fired_at: now(),
           })
-        } catch (e) {
-          failures.push(e)
+        } catch {
+          // best-effort — still mark fired so we don't re-fire on
+          // every restart.
         }
         try {
           await opts.queueStore.markFired(
@@ -197,14 +193,10 @@ export function buildPreMeetingBriefScheduler(
             input.event_id,
             now(),
           )
-        } catch (e) {
-          failures.push(e)
+        } catch {
+          // best-effort
         }
-        if (failures.length === 1) throw failures[0]
-        if (failures.length > 1) {
-          throw new AggregateError(failures, 'pre-meeting brief fire had failures')
-        }
-      })())
+      })()
       if (cur !== undefined) cur.timer = null
       queue.delete(k)
     }, Math.max(0, input.fire_at_ms - input.now_ms))
@@ -442,7 +434,7 @@ export function buildPreMeetingBriefScheduler(
   function scheduleNextTick(): void {
     if (!running) return
     tickTimer = scheduleTimer(() => {
-      fireAndForget('pre-meeting-brief-scheduler.tickInternal', tickInternal(now()))
+      void tickInternal(now()).catch(() => {})
     }, tick_interval_ms)
   }
 

@@ -156,9 +156,20 @@ const ROOT = join(import.meta.dir, '..', '..')
 
 const IGNORE_DIRS = new Set(['node_modules', '.git', 'dist', '.expo', '.claude', 'coverage'])
 
-// Repo-relative POSIX path prefixes / files that are OUT of scope (client code
-// + the wrapper's own definition, which owns the one sanctioned void-promise).
-const EXCLUDE_PREFIXES = ['app/', 'landing/chat-react/', 'chat-core/']
+// Repo-relative POSIX path prefixes / files that are OUT of scope. The mandate
+// ("every fire-and-forget uses `fireAndForget`") applies to HOST SERVER code
+// that CAN import `@neutronai/logger`. Excluded:
+//   - browser / React-Native client code that can't load the Node console/env
+//     logger: `app/`, `landing/chat-react/`, `chat-core/`, `connect-accept`.
+//   - `loop/` — a contracts-band LEAF whose invariant (loop/AGENTS.md) forbids
+//     ANY `@neutronai/*` dep; its `void this.runOnce()` goes through
+//     `guardedFire` (never rejects), so it governs its own (non-)error path.
+//   - `cores/` — bundled Cores + the Core SDK/runtime are ISOLATED modules that
+//     must NOT import the host logger (enforced by the `cores-use-sdk-only`
+//     dependency-cruiser rule); they own their error-handling (event emission
+//     via cores/sdk), the Core contract's job, not F3's.
+// The wrapper's own file owns the sanctioned `void <promise>`.
+const EXCLUDE_PREFIXES = ['app/', 'landing/chat-react/', 'chat-core/', 'loop/', 'cores/']
 const EXCLUDE_FILES = new Set(['landing/connect-accept.ts', 'logger/fire-and-forget.ts'])
 
 function isTestPath(rel) {
@@ -190,9 +201,14 @@ function walk(dir, out) {
 }
 
 /** Does this in-scope file contain ANY `void <expr>` (statement OR expression
- *  position)? Cheap AST parse, no types. */
-function hasVoidExpression(abs, src) {
-  if (!src.includes('void ')) return false
+ *  position)? Cheap AST parse, no types. The fast-reject matches the `void`
+ *  KEYWORD as a word (`\bvoid\b`) — NOT the literal `"void "` — so a `void`
+ *  separated from its operand by a newline (`void\np`) or an inline block
+ *  comment still forwards the file to the type-aware AST pass, which handles
+ *  whitespace/comments correctly. (A conservative over-forward is fine; the
+ *  AST pass decides.) */
+export function hasVoidExpression(abs, src) {
+  if (!/\bvoid\b/.test(src)) return false
   const sf = ts.createSourceFile(abs, src, ts.ScriptTarget.ES2022, true)
   let found = false
   const visit = (node) => {

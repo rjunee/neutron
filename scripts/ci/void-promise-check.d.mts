@@ -4,3 +4,5 @@ export function findBareVoidPromiseCalls(
   source: string,
   fileName?: string,
 ): { line: number; text: string }[]
+
+export function hasVoidExpression(abs: string, src: string): boolean

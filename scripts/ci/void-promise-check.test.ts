@@ -7,7 +7,7 @@
 // no-op voids that share the keyword must not be. Fixtures `declare` their own
 // types so the detector's in-memory program can resolve them.
 import { describe, expect, test } from 'bun:test'
-import { findBareVoidPromiseCalls } from './void-promise-check.mjs'
+import { findBareVoidPromiseCalls, hasVoidExpression } from './void-promise-check.mjs'
 
 describe('findBareVoidPromiseCalls', () => {
   test('flags a bare void on a promise-returning call', () => {
@@ -98,6 +98,18 @@ describe('findBareVoidPromiseCalls', () => {
     expect(hits.length).toBe(1)
   })
 
+  // P2 #3 (Codex): a `void` separated from its operand by a newline / comment
+  // must still be seen (the AST walk handles it; these lock it in).
+  test('flags a promise void split across a newline (void\\np)', () => {
+    const hits = findBareVoidPromiseCalls('declare const p: Promise<void>\nvoid\np')
+    expect(hits.length).toBe(1)
+  })
+
+  test('flags a promise void separated by an inline comment', () => {
+    const hits = findBareVoidPromiseCalls('declare const p: Promise<void>\nvoid /* c */ p')
+    expect(hits.length).toBe(1)
+  })
+
   test('flags each promise-void statement independently, skipping the non-promises', () => {
     const src = [
       'declare function a(): Promise<void>',
@@ -109,5 +121,26 @@ describe('findBareVoidPromiseCalls', () => {
       'void sync',
     ].join('\n')
     expect(findBareVoidPromiseCalls(src).length).toBe(2)
+  })
+})
+
+// P2 #3 (Codex): the CLI's cheap pre-pass must FORWARD any file that mentions
+// the `void` keyword — including `void\np` / `void/*c*/p` — to the type-aware
+// AST pass. The bug was a `"void "` (trailing-space) substring reject.
+describe('hasVoidExpression (cheap pre-pass forwarding)', () => {
+  test('forwards a void split across a newline', () => {
+    expect(hasVoidExpression('x.ts', 'const p = Promise.resolve()\nvoid\np')).toBe(true)
+  })
+
+  test('forwards a void separated by an inline comment', () => {
+    expect(hasVoidExpression('x.ts', 'const p = Promise.resolve()\nvoid /* c */ p')).toBe(true)
+  })
+
+  test('forwards `void 0` (the AST pass then classifies it out)', () => {
+    expect(hasVoidExpression('x.ts', 'void 0')).toBe(true)
+  })
+
+  test('does NOT forward a file with no `void` keyword (avoids false match on "avoidance")', () => {
+    expect(hasVoidExpression('x.ts', 'const avoidance = 1\nconst x = 2')).toBe(false)
   })
 })

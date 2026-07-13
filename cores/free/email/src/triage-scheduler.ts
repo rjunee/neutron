@@ -22,7 +22,6 @@
 import type { EmailProjectCache } from './cache.ts'
 import type { GmailClient, GmailMessageMeta } from './backend.ts'
 import { composeTriage, type Triage } from './triage.ts'
-import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
 
 export interface TriageFireInput {
   triage: Triage
@@ -123,16 +122,14 @@ export function buildTriageScheduler(opts: TriageSchedulerOpts): TriageScheduler
 
   function armSelfTick(): void {
     selfTickTimer = scheduleTimer(() => {
-      fireAndForget('triage-scheduler.task', (async (): Promise<void> => {
-        // Re-arm regardless of outcome (a single tick failure must not stop the
-        // loop) via `finally`, but let the failure PROPAGATE to the
-        // fireAndForget wrapper so it is logged, not silently swallowed.
+      void (async (): Promise<void> => {
         try {
           await self.tick(nowFn())
-        } finally {
-          if (started) armSelfTick()
+        } catch {
+          // best-effort — a single tick failure must not stop the loop.
         }
-      })())
+        if (started) armSelfTick()
+      })()
     }, tickIntervalMs)
   }
 

@@ -168,7 +168,6 @@
         "@neutronai/cores-runtime": "workspace:*",
         "@neutronai/cores-sdk": "workspace:*",
         "@neutronai/gateway": "workspace:*",
-        "@neutronai/logger": "workspace:*",
         "@neutronai/migrations": "workspace:*",
         "@neutronai/persistence": "workspace:*",
         "@neutronai/tools": "workspace:*",
@@ -181,7 +180,6 @@
         "@neutronai/auth": "workspace:*",
         "@neutronai/cores-runtime": "workspace:*",
         "@neutronai/cores-sdk": "workspace:*",
-        "@neutronai/logger": "workspace:*",
         "@neutronai/migrations": "workspace:*",
         "@neutronai/persistence": "workspace:*",
         "@neutronai/prompts": "workspace:*",
@@ -194,7 +192,6 @@
         "@neutronai/auth": "workspace:*",
         "@neutronai/cores-runtime": "workspace:*",
         "@neutronai/cores-sdk": "workspace:*",
-        "@neutronai/logger": "workspace:*",
         "@neutronai/migrations": "workspace:*",
         "@neutronai/persistence": "workspace:*",
         "@neutronai/runtime": "workspace:*",
@@ -396,9 +393,6 @@
     },
     "loop": {
       "name": "@neutronai/loop",
-      "dependencies": {
-        "@neutronai/logger": "workspace:*",
-      },
     },
     "mcp": {
       "name": "@neutronai/mcp",

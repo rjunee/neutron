@@ -157,10 +157,14 @@ module.exports = {
       comment: "Cores platform boundary (audit §8): a bundled Core's only " +
         'legitimate cross-module deps are cores/sdk + cores/runtime + npm deps. ' +
         'Reaching into gateway/open/onboarding/connect/runtime/migrations/auth/' +
-        'landing is the "third-party fiction" violation the audit documents.',
+        'landing is the "third-party fiction" violation the audit documents. ' +
+        '`logger` is included (F3): a bundled Core must NOT import the host ' +
+        '`@neutronai/logger` — an isolated Core owns its error-handling via ' +
+        'cores/sdk event emission, not the host logger. (Its forbidden-target ' +
+        'regex previously omitted `logger`, so F3 drift slipped past CI.)',
       severity: 'error',
       from: { path: '^cores/free', pathNot: TEST },
-      to: { path: '^(gateway|open|onboarding|connect|runtime|migrations|auth|landing)/' },
+      to: { path: '^(gateway|open|onboarding|connect|runtime|migrations|auth|landing|logger)/' },
     },
     {
       name: 'connect-is-dynamic-only',

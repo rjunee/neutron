@@ -40,7 +40,6 @@
  */
 
 import { AsyncLocalStorage } from 'node:async_hooks'
-import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
 
 /** Payload handed to {@link SupervisedLoopOptions.onEscalate}. */
 export interface SupervisedLoopEscalation {
@@ -206,9 +205,9 @@ export class SupervisedLoop {
     if (this.started) return
     this.started = true
     this.timer = this.setTimer(() => {
-      fireAndForget('index.runOnce', this.runOnce())
+      void this.runOnce()
     }, this.intervalMs)
-    if (this.immediate) fireAndForget('index.runOnce', this.runOnce())
+    if (this.immediate) void this.runOnce()
   }
 
   /**

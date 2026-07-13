@@ -15,7 +15,6 @@
     "@neutronai/cores-runtime": "workspace:*",
     "@neutronai/cores-sdk": "workspace:*",
     "@neutronai/gateway": "workspace:*",
-    "@neutronai/logger": "workspace:*",
     "@neutronai/migrations": "workspace:*",
     "@neutronai/persistence": "workspace:*",
     "@neutronai/tools": "workspace:*"
