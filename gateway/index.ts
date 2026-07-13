@@ -220,8 +220,9 @@ export async function drainRealmodeCleanups(
 export async function boot(options: BootOptions = {}): Promise<BootHandle> {
   // F3 — install the process-level unhandledRejection/uncaughtException logger
   // ONCE (idempotent; a repeat boot in tests is a no-op). Makes a swallowed
-  // async failure loud instead of invisible; uncaughtException is log-then-crash
-  // (suppressed under NODE_ENV=test). See installProcessSafetyNet.
+  // async failure loud instead of invisible; both handlers are log-then-crash
+  // (UNCONDITIONALLY fatal — no NODE_ENV escape; tests inject their own
+  // non-exiting onUncaught). See installProcessSafetyNet.
   installProcessSafetyNet()
 
   // C1 — resolve+validate env ONCE. When the caller (an entrypoint) already

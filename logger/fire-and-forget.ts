@@ -1,12 +1,16 @@
 /**
  * @neutronai/logger — `fireAndForget` + the process-level safety net (refactor F3).
  *
- * The repo had ~30 bare `void somePromise(…)` fire-and-forget sites and NO
- * process-level rejection/exception handler anywhere. A voided promise that
- * rejects is SILENTLY swallowed — the failure never surfaces. These two
- * helpers make those failures VISIBLE without changing the fire-and-forget
- * SEMANTICS (the rejection is still not propagated to the caller — it is only
- * LOGGED, and a counter is bumped).
+ * The repo had ~74 bare `void somePromise(…)` fire-and-forget sites and NO
+ * process-level rejection/exception handler anywhere. `fireAndForget` makes a
+ * voided promise's rejection VISIBLE (logged + counted) and NON-FATAL — it
+ * swallows after logging (the rejection is not propagated to the caller). This
+ * is DELIBERATELY different from a bare `void <reject>`, which in Bun triggers
+ * `unhandledRejection` and exits the process: fire-and-forget work (prewarm,
+ * scribe hot-path isolation) must NOT crash the server. The process-level net
+ * (unhandledRejection + uncaughtException → log-then-crash, unconditionally
+ * fatal) is the backstop for a genuinely-unexpected rejection that ESCAPES a
+ * wrap; a site needing fail-fast escalates via the `onError` arg.
  *
  * `fireAndForget(name, p)` — attach a `.catch` that LOGS `name` + the error and
  * increments a process-wide counter, then swallows. It NEVER rethrows, so it is
