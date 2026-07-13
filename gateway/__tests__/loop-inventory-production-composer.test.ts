@@ -37,6 +37,7 @@ import { join } from 'node:path'
 import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { STUB_PLATFORM } from '@neutronai/runtime/__tests__/stub-platform.ts'
+import { LoopRegistry } from '@neutronai/loop'
 import { composeProductionGraph, DORMANT_LOOPS } from '../composition.ts'
 
 const OWNER = 'loop-inventory-composer-owner'
@@ -142,4 +143,44 @@ test('the ONE boot line names running loops (with cron jobs) + the dormant set',
   for (const name of EXPECTED_GATEWAY_LOOPS) expect(line).toContain(name)
   expect(line).toMatch(/cron \(\d+ jobs/)
   expect(line).toContain('2 dormant (deferred): [agent-watcher, project-backup-scheduler]')
+})
+
+test('composing with a colliding pre-loaded registry throws + leaks no timer (defect #2)', async () => {
+  // A caller-supplied registry that ALREADY holds 'reminders' — the reminders
+  // module registers BEFORE it starts, so the collision throws before any timer
+  // is armed (register-before-start = failure-atomic). reminders is the FIRST
+  // loop module, so the composition has ZERO started loops when it throws.
+  const tmp = mkdtempSync(join(tmpdir(), 'neutron-loop-collision-'))
+  const db = ProjectDb.open(join(tmp, 'owner.db'))
+  try {
+    applyMigrations(db.raw())
+    const preloaded = new LoopRegistry()
+    preloaded.register({
+      name: 'reminders',
+      cadenceMs: 30_000,
+      startedAt: 1,
+      health: () => ({ lastTickAt: null, lastError: null }),
+    })
+    let composed: Awaited<ReturnType<typeof composeProductionGraph>> | null = null
+    let threw = false
+    try {
+      composed = await composeProductionGraph({
+        db,
+        project_slug: OWNER,
+        ...noOpInputBase,
+        loop_registry: preloaded,
+      })
+    } catch (err) {
+      threw = true
+      expect((err as Error).message).toMatch(/already registered/)
+    }
+    expect(threw).toBe(true)
+    // No graph returned → nothing to shut down; register-before-start guarantees
+    // the reminders loop never armed a timer (no leak). Defensive shutdown if a
+    // future regression returns a partial graph.
+    if (composed !== null) await composed.shutdown()
+  } finally {
+    db.close()
+    rmSync(tmp, { recursive: true, force: true })
+  }
 })

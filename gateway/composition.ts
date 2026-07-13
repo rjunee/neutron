@@ -296,16 +296,17 @@ export async function composeProductionGraph(
     state: CronStateStore
     scheduler: CronScheduler
   }>('cron')
-  cron.scheduler.start()
-  // §F2 — cron is the last loop to start (its jobs are registered by the modules
-  // that own them during compose(), and `start()` binds their timers here). Add
-  // it to the inventory, THEN emit the ONE boot line that subsumes cron's former
-  // ad-hoc `[cron-scheduler] … N job(s) ticking` line: it names every running
-  // loop (cron appends its job names via `detail()`, preserving the S15
-  // job-name + `0 jobs` regression signal) plus the known-dormant set so a
-  // deferred loop is explicitly enumerated at boot, never silently dead.
+  // §F2 — cron is the last loop the GRAPH starts (its jobs are registered by the
+  // modules that own them during compose(), and `start()` binds their timers).
+  // REGISTER BEFORE START (failure-atomic; see build-core-modules) so a reused
+  // registry collision throws before the scheduler arms its timers. The ONE boot
+  // line is emitted by the boot shell (`gateway/index.ts`) AFTER the
+  // gateway-liveness loop — the LAST loop of all — has also started, so the
+  // single inventory line names the truly-complete set (composer loops + graph
+  // loops + gateway liveness). A direct composeProductionGraph caller that never
+  // reaches the boot shell (tests) reads the set off `graph.loopRegistry`.
   loopRegistry.register(cron.scheduler.describe())
-  console.log(loopRegistry.bootLine(input.project_slug, DORMANT_LOOPS))
+  cron.scheduler.start()
 
   // R5 (audit P2-5) — Cores HTTP surface auto-build extracted to
   // `composition/wire-cores-surfaces.ts`. Runs in the SAME position as the

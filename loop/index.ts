@@ -351,16 +351,23 @@ export class SupervisedLoop {
   }
 
   /**
-   * §F2 — a live {@link LoopDescriptor} for the LoopRegistry inventory. The
-   * returned `health()` reads the loop's CURRENT `lastTickAt`/`lastError` each
-   * call (not a frozen snapshot), so the registry reflects real-time state. Call
-   * after `start()` so `startedAt` is stamped.
+   * §F2 — a live {@link LoopDescriptor} for the LoopRegistry inventory. Both
+   * `startedAt` (getter) and `health()` read the loop's CURRENT state each call
+   * (not a frozen snapshot), so the descriptor may be produced BEFORE `start()`
+   * (register-before-start) and still reflects the real boot time + health once
+   * the loop runs.
    */
   describe(): LoopDescriptor {
+    const self = this
     return {
       name: this.name,
       cadenceMs: this.intervalMs,
-      startedAt: this.startedAtMs ?? 0,
+      // LAZY getter so a descriptor produced BEFORE `start()` (register-before-
+      // start, for failure-atomic registration) reflects the real boot time once
+      // the loop actually starts — 0 until then.
+      get startedAt(): number {
+        return self.startedAtMs ?? 0
+      },
       health: () => ({ lastTickAt: this.lastTickAtMs, lastError: this.lastError }),
     }
   }

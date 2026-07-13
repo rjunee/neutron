@@ -93,10 +93,14 @@ export class WatchdogSupervisor {
    * loop-inventory health view. Call after `start()`.
    */
   describe(): LoopDescriptor {
+    const self = this
     return {
       name: 'watchdog',
       cadenceMs: this.tick_interval_ms,
-      startedAt: this.startedAtMs ?? 0,
+      // LAZY (register-before-start): 0 until `start()`, real time after.
+      get startedAt(): number {
+        return self.startedAtMs ?? 0
+      },
       health: () => ({ lastTickAt: this.lastTickAtMs, lastError: this.lastError }),
     }
   }

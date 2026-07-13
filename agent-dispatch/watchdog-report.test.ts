@@ -16,6 +16,8 @@ import {
   type SubagentRecord,
 } from '@neutronai/runtime/subagent/index.ts'
 import { buildBootSweepReport, buildDispatchWatchdogNotifier, type DispatchReport } from './index.ts'
+import { scheduleDispatchLifecycleWatchdog } from './watchdog-report.ts'
+import { LoopRegistry } from '@neutronai/loop'
 
 function event(over: Partial<AgentWatchdogEvent>): AgentWatchdogEvent {
   return {
@@ -127,5 +129,42 @@ describe('buildBootSweepReport — age matches a live watchdog reap for the same
     expect(bootAge).toBe(liveAge) // parity: boot reap age == live reap age
     expect(bootAge).toBe(PROGRESS_AGE)
     expect(bootAge).not.toBe(STARTED_AGE) // NOT the old started_at-based over-report
+  })
+})
+
+describe('§F2 — lifecycle watchdog registration is failure-atomic (defect #2)', () => {
+  test('a colliding registry registration STOPS the self-started loop (no timer leak)', async () => {
+    const registry = new SubagentRegistry()
+    const ctrl = newControlState(registry)
+    let cleared = false
+    // The lifecycle watchdog self-STARTS in its factory (arms the fake interval),
+    // so register-before-start is impossible — the composer wraps register in a
+    // try/catch that STOPS the loop on failure. Reproduce that exact wrap here.
+    const wd = scheduleDispatchLifecycleWatchdog({
+      registry,
+      control: ctrl,
+      alert_sink: () => {},
+      set_interval: () => 1,
+      clear_interval: () => {
+        cleared = true
+      },
+    })
+    const loopRegistry = new LoopRegistry()
+    loopRegistry.register({
+      name: 'dispatch-lifecycle-watchdog',
+      cadenceMs: 60_000,
+      startedAt: 1,
+      health: () => ({ lastTickAt: null, lastError: null }),
+    })
+    let threw = false
+    try {
+      loopRegistry.register(wd.describe())
+    } catch {
+      await wd.stop() // the composer's catch — stop the just-started loop
+      threw = true
+    }
+    expect(threw).toBe(true)
+    // stop() cleared the interval → the just-started loop was stopped, no leak.
+    expect(cleared).toBe(true)
   })
 })

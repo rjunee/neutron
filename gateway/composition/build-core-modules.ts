@@ -329,9 +329,11 @@ export function buildCoreModules(
         loopOpts.on_fired = input.push_dispatcher
       }
       const loop = new ReminderTickLoop(loopOpts)
-      loop.start()
-      // §F2 — register the running loop into the boot inventory.
+      // §F2 — REGISTER BEFORE START (failure-atomic): a duplicate-name throw
+      // happens before any timer is armed, so a reused/colliding registry can
+      // never leak a running loop with no reachable stop handle.
       loopRegistry.register(loop.describe())
+      loop.start()
       return { store, loop }
     },
     shutdown: async (instance) => {
@@ -481,9 +483,9 @@ export function buildCoreModules(
       } else {
         loop = new TridentTickLoop({ store, deps: stubAdvanceDeps(), on_terminal, ...transitionOpt })
       }
-      loop.start()
-      // §F2 — register the running loop into the boot inventory.
+      // §F2 — REGISTER BEFORE START (failure-atomic; see reminders module).
       loopRegistry.register(loop.describe())
+      loop.start()
       return drain !== undefined ? { store, loop, drain } : { store, loop }
     },
     shutdown: async (instance) => {
@@ -593,9 +595,9 @@ export function buildCoreModules(
           substrate_kind: 'llm',
         }),
       )
-      supervisor.start()
-      // §F2 — register the running loop into the boot inventory.
+      // §F2 — REGISTER BEFORE START (failure-atomic; see reminders module).
       loopRegistry.register(supervisor.describe())
+      supervisor.start()
       return { store, supervisor }
     },
     shutdown: async (instance) => {

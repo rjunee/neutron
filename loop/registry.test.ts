@@ -47,6 +47,31 @@ test('register throws on a duplicate name (silently-added-twin guard)', () => {
   expect(reg.size()).toBe(1)
 })
 
+test('register-before-start on a dup throws BEFORE start — no timer leak (defect #2)', () => {
+  const reg = new LoopRegistry()
+  reg.register(staticDescriptor('reminders', 30_000))
+  let timerArmed = false
+  const loop = new SupervisedLoop({
+    name: 'reminders',
+    intervalMs: 10_000,
+    tick: async () => {},
+    setTimer: () => {
+      timerArmed = true
+      return 0
+    },
+    clearTimer: () => {},
+  })
+  // The register-before-start pattern: register (throws on dup) BEFORE start.
+  expect(() => {
+    reg.register(loop.describe())
+    loop.start()
+  }).toThrow(/already registered/)
+  // start() was never reached → no timer armed, loop never ran.
+  expect(timerArmed).toBe(false)
+  expect(loop.stats().running).toBe(false)
+  expect(loop.describe().startedAt).toBe(0)
+})
+
 test('bootLine names every running loop + cron detail + dormant set', () => {
   const reg = new LoopRegistry()
   reg.register(staticDescriptor('reminders', 30_000))

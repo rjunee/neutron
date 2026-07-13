@@ -168,10 +168,14 @@ export class CronScheduler {
    * schedule). `lastTick`/`lastError` reflect the most recent job FIRE.
    */
   describe(): LoopDescriptor {
+    const self = this
     return {
       name: 'cron',
       cadenceMs: 0,
-      startedAt: this.startedAtMs ?? 0,
+      // LAZY (register-before-start): 0 until `start()`, real time after.
+      get startedAt(): number {
+        return self.startedAtMs ?? 0
+      },
       health: () => ({ lastTickAt: this.lastFireAtMs, lastError: this.lastFireError }),
       detail: () => {
         const names = this.runningJobNames()
@@ -421,20 +425,44 @@ export class CronScheduler {
     return await exec
   }
 
+  /**
+   * §F2 — stamp the loop-inventory health for a COMPLETED fire on ANY path
+   * (overlap-skip, unknown-job, missing-handler, normal). `lastTickAt` marks the
+   * completion; `lastError` is set on an error path / tail failure and null on a
+   * clean fire (recovery). Called on every `fireOnceInner` completion so a
+   * `recordSkipped()` rejection or a validation error can't leave health stale.
+   */
+  private stampHealth(lastError: unknown): void {
+    this.lastFireAtMs = this.now()
+    this.lastFireError = lastError
+  }
+
   private async fireOnceInner(
     name: string,
   ): Promise<{ status: CronHandlerStatus; detail?: string }> {
     const entry = this.running.get(name)
     if (entry?.in_flight && entry.job.skip_if_running !== false) {
-      await this.recordSkipped(name, 'previous run still in-flight')
+      // Overlap-skip completion path. A `recordSkipped()` rejection must surface
+      // in health (it was previously swallowed by the early return). A skip is
+      // not a JOB run, so on success PRESERVE any prior error (a skip is not a
+      // recovery) — only advance `lastTickAt`.
+      try {
+        await this.recordSkipped(name, 'previous run still in-flight')
+      } catch (err) {
+        this.stampHealth(err)
+        throw err
+      }
+      this.lastFireAtMs = this.now()
       return { status: 'skipped', detail: 'overlap' }
     }
     const job = this.jobs.get(name)
     if (!job) {
+      this.stampHealth(`unknown job '${name}'`)
       return { status: 'error', detail: `unknown job '${name}'` }
     }
     const handler = this.handlers.get(job.handler)
     if (!handler) {
+      this.stampHealth(`handler '${job.handler}' not registered`)
       return { status: 'error', detail: `handler '${job.handler}' not registered` }
     }
     if (entry) entry.in_flight = true
@@ -468,12 +496,10 @@ export class CronScheduler {
         error,
       })
     } catch (recErr) {
-      this.lastFireAtMs = this.now()
-      this.lastFireError = recErr
+      this.stampHealth(recErr)
       throw recErr
     }
-    this.lastFireAtMs = this.now()
-    this.lastFireError = status === 'error' ? (error ?? detail ?? 'error') : null
+    this.stampHealth(status === 'error' ? (error ?? detail ?? 'error') : null)
     // O4 — VISIBILITY ONLY: journal the degrade on the RISING EDGE only. The
     // check-and-mutate below is SYNCHRONOUS (no await between them), so two
     // concurrent fires of the same job can't both emit for one transition: the

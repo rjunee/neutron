@@ -158,9 +158,11 @@ export async function wireUploads(
     owner_home,
     project_slug,
   })
-  uploadSweeper.start()
-  // §F2 — register the running sweeper into the shared boot inventory.
+  // §F2 — REGISTER BEFORE START (failure-atomic): a duplicate-name throw fires
+  // before the sweep timer is armed, so a reused registry can't leak a running
+  // sweeper with no reachable stop handle.
   loopRegistry.register(uploadSweeper.describe())
+  uploadSweeper.start()
   cleanups.push(async () => {
     // §F1 — quiescing stop: the gateway shutdown runner awaits this before
     // `db.close()`, so an in-flight sweep fully drains first. `stop()` never

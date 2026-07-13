@@ -16,7 +16,7 @@ import { MAX_UPLOAD_BYTES_DEFAULT } from './upload/import-upload-handler.ts'
 // (see `loadGraphComposerFromEnv` at the bottom of this file). This
 // file holds ZERO imports — static OR dynamic — into Managed dirs
 // (signup/, provisioning/, identity/, proxy/).
-import { composeProductionGraph } from './composition.ts'
+import { composeProductionGraph, DORMANT_LOOPS, type ComposedProductionGraph } from './composition.ts'
 import { resolveBootConfig, type BootConfig } from '@neutronai/config/index.ts'
 import { assertWideBindPolicy } from './boot-bind-policy.ts'
 
@@ -511,7 +511,32 @@ export async function boot(options: BootOptions = {}): Promise<BootHandle> {
   // every subsystem is actually ready to take traffic.
   sdNotify('READY=1')
 
+  // §F2 — the gateway process-liveness loop (sd_notify systemd watchdog +
+  // onGatewayTick heartbeat pulse) is a genuine long-lived loop. It is the LAST
+  // loop to start (after the composer + graph loops), so register it into the
+  // SAME shared inventory the composed graph carries, then emit the ONE complete
+  // boot line here. Live state is tracked in these closure vars (a raw
+  // setInterval, so no SupervisedLoop to lean on).
+  let livenessStartedAt: number | null = null
+  let livenessLastTickAt: number | null = null
+  let livenessLastError: unknown = null
+  // The composed graph carries the shared registry (composeProductionGraph
+  // returns a ComposedProductionGraph). REGISTER BEFORE START (failure-atomic):
+  // a dup throws before the interval is armed, so no timer leaks.
+  const composedGraph = graph as ComposedProductionGraph | null
+  if (composedGraph?.loopRegistry !== undefined) {
+    composedGraph.loopRegistry.register({
+      name: 'gateway-liveness',
+      cadenceMs: WATCHDOG_INTERVAL_MS,
+      get startedAt(): number {
+        return livenessStartedAt ?? 0
+      },
+      health: () => ({ lastTickAt: livenessLastTickAt, lastError: livenessLastError }),
+    })
+  }
+  livenessStartedAt = Date.now()
   let watchdogTimer: ReturnType<typeof setInterval> | null = setInterval(() => {
+    let tickError: unknown = null
     // Catch transient sd_notify failures (kernel-side `sendto()` errors,
     // recv-side socket teardown during shutdown) so a single hiccup does NOT
     // become an unhandled exception that crashes the process. systemd's
@@ -521,6 +546,7 @@ export async function boot(options: BootOptions = {}): Promise<BootHandle> {
     try {
       sdNotify('WATCHDOG=1')
     } catch (err) {
+      tickError = err
       console.error('sd_notify WATCHDOG=1 failed:', err)
     }
     // F4 — pulse the composition's supervision-watchdog heartbeat off this same
@@ -532,9 +558,20 @@ export async function boot(options: BootOptions = {}): Promise<BootHandle> {
     try {
       onGatewayTick?.()
     } catch (err) {
+      tickError = err
       console.error('on_gateway_tick hook failed:', err)
     }
+    // §F2 — stamp health after the tick tail: lastTickAt = completed tick,
+    // lastError = this tick's error or null (recovery clears a prior error).
+    livenessLastTickAt = Date.now()
+    livenessLastError = tickError
   }, WATCHDOG_INTERVAL_MS)
+
+  // §F2 — the ONE complete boot inventory line, now that EVERY long-lived loop
+  // (composer loops + graph loops + this gateway-liveness loop) has started.
+  if (composedGraph?.loopRegistry !== undefined) {
+    console.log(composedGraph.loopRegistry.bootLine(project_slug, DORMANT_LOOPS))
+  }
 
   let shuttingDown = false
   const shutdown = async (opts?: { force?: boolean }): Promise<void> => {

@@ -2865,8 +2865,15 @@ export function buildOpenGraphComposer(
         control: subagentControl,
         alert_sink: dispatchStuckAlertSink,
       })
-      // §F2 — register the running lifecycle watchdog into the shared inventory.
-      loopRegistry.register(lifecycleWatchdog.describe())
+      // §F2 — this factory self-starts, so register-before-start isn't possible.
+      // Wrap so a duplicate-name registration failure STOPS the just-started
+      // loop instead of leaking a running timer with no reachable stop handle.
+      try {
+        loopRegistry.register(lifecycleWatchdog.describe())
+      } catch (err) {
+        await lifecycleWatchdog.stop()
+        throw err
+      }
       // stop() is ASYNC + QUIESCING — the gateway's shutdown drain AWAITS every
       // realmode cleanup BEFORE `db.close()` (drainRealmodeCleanups → db.close),
       // so an in-flight lifecycle tick fully drains before the DB closes and can

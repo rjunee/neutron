@@ -72,6 +72,81 @@ describe('CronScheduler — loop-inventory health (defect #4)', () => {
     expect(sched.describe().health().lastError).toBeNull()
   })
 
+  test('unknown-job + missing-handler paths stamp health as an error, then a healthy fire clears it', async () => {
+    // unknown job — fireOnceInner returns before the normal path, but still stamps.
+    const jobs = new CronJobRegistry()
+    const handlers = new CronHandlerRegistry()
+    const sched = new CronScheduler({ jobs, handlers, db, project_slug: 't1' })
+    await sched.fireOnce('nope')
+    let health = sched.describe().health()
+    expect(health.lastError).not.toBeNull()
+    expect(health.lastTickAt).toBeGreaterThan(0)
+
+    // missing handler — job exists, handler not registered.
+    jobs.register({
+      name: 'orphan',
+      description: '',
+      schedule: { kind: 'interval_ms', interval_ms: 1000 },
+      handler: 'missing',
+    })
+    await sched.fireOnce('orphan')
+    expect(sched.describe().health().lastError).not.toBeNull()
+
+    // A healthy fire of a wired job clears the error (recovery on every path).
+    jobs.register({
+      name: 'good',
+      description: '',
+      schedule: { kind: 'interval_ms', interval_ms: 1000 },
+      handler: 'h',
+    })
+    handlers.register('h', async () => ({ status: 'ok' as const }))
+    await sched.fireOnce('good')
+    health = sched.describe().health()
+    expect(health.lastError).toBeNull()
+  })
+
+  test('overlap-skip with a rejecting recordSkipped surfaces in health (defect #3)', async () => {
+    const jobs = new CronJobRegistry()
+    jobs.register({
+      name: 'job',
+      description: '',
+      // 1h interval so start()'s bound timer never fires during the test.
+      schedule: { kind: 'interval_ms', interval_ms: 3_600_000 },
+      handler: 'h',
+    })
+    const handlers = new CronHandlerRegistry()
+    let release: () => void = () => {}
+    const gate = new Promise<void>((r) => {
+      release = r
+    })
+    handlers.register('h', async () => {
+      await gate
+      return { status: 'ok' as const }
+    })
+    const sched = new CronScheduler({ jobs, handlers, db, project_slug: 't1' })
+    sched.start() // binds the job into `running` so the overlap path is reachable
+
+    // First fire sets in_flight=true synchronously (up to the handler await) and
+    // blocks on the gate.
+    const p1 = sched.fireOnce('job')
+    // Close the db so the overlap fire's `recordSkipped()` → `state.record()` rejects.
+    db.close()
+    let overlapThrew = false
+    try {
+      await sched.fireOnce('job') // overlap → recordSkipped throws → stampHealth + rethrow
+    } catch {
+      overlapThrew = true
+    }
+    expect(overlapThrew).toBe(true)
+    expect(sched.describe().health().lastError).not.toBeNull()
+    expect(sched.describe().health().lastTickAt).toBeGreaterThan(0)
+
+    // Unblock p1 (its own record also rejects on the closed db) + quiesce.
+    release()
+    await p1.catch(() => undefined)
+    await sched.stop().catch(() => undefined)
+  })
+
   test('a record() TAIL failure is reported as an error, not healthy', async () => {
     // A dedicated db we close BEFORE firing so `state.record()` rejects in the
     // fire tail. The handler still runs healthy; the tail failure must set

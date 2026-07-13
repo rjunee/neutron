@@ -36,9 +36,10 @@ export interface LoopHealth {
 }
 
 /**
- * A long-lived loop's inventory entry. `startedAt` + `cadenceMs` are captured at
- * registration; `health()` returns a LIVE snapshot each call so an observability
- * surface (or a future admin panel) reflects the loop's current state.
+ * A long-lived loop's inventory entry. `cadenceMs` is fixed; `startedAt` and
+ * `health()` are LIVE reads each access (backed by the loop), so a descriptor
+ * produced BEFORE the loop starts (register-before-start, for failure-atomic
+ * registration) still reflects the real boot time + health once it runs.
  */
 export interface LoopDescriptor {
   /** Stable identifier, unique within a registry (dup → throw at register). */
@@ -48,7 +49,10 @@ export interface LoopDescriptor {
    * whose N jobs each carry their own interval / calendar cadence).
    */
   readonly cadenceMs: number
-  /** Epoch-ms the loop was started (0 if it exposes no start clock). */
+  /**
+   * Epoch-ms the loop started — a LIVE read (0 before `start()`, the real time
+   * after). Backed by a getter so register-before-start descriptors update.
+   */
   readonly startedAt: number
   /** Live health snapshot (last tick / last error). */
   health(): LoopHealth
