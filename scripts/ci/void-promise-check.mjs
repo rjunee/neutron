@@ -242,6 +242,140 @@ function classifyWrapperArg(arg) {
   return null
 }
 
+// ── One-hop local-variable resolution (LIMITED, best-effort) ──────────
+// A pre-swallow can be laundered through a local binding:
+//   const s = p.catch(() => {}); fireAndForget('n', s)
+// When a wrapper's promise arg is a plain IDENTIFIER, resolve it ONE HOP to a
+// local `const`/`let` initializer in the SAME scope (a simple, non-reassigned
+// binding) and re-run the shape checks on that initializer.
+//
+// INHERENT BOUNDARY (documented + locked by tests) — a SYNTACTIC lint gate
+// cannot catch every dataflow-laundered pre-swallow. Multi-hop chains
+// (`const a = p.catch(); const b = a; fireAndForget(n, b)`), a REASSIGNED
+// binding, a promise returned from another function, stored in an object/array
+// then passed, or a `.catch` applied conditionally elsewhere are general
+// dataflow (undecidable) and OUT OF SCOPE — the gate does NOT flag them, by
+// design. This gate is a best-effort REGRESSION PREVENTER for the DIRECT +
+// LOCAL-ONE-HOP shapes, NOT a proof of no-pre-swallow. The ACTUAL guarantee is
+// the RUNTIME wrapper (`fireAndForget` always logs+counts a rejection it
+// RECEIVES) + the process safety net; a promise that never reaches the wrapper
+// is a code-review concern the gate best-effort-flags, not a soundness hole in
+// the reliability mechanism.
+//
+// The one-hop LOCAL check is swallow-aware (flags a `.catch` that does NOT
+// unconditionally rethrow, or a two-arg `.then`); a laundered rethrow
+// (`const s = p.catch(e => { throw e })`) passes because its rejection still
+// reaches the wrapper. A laundered IIFE is NOT descended into (see
+// classifyResolvedInitializer) — the direct IIFE check still covers a
+// directly-passed swallowing IIFE.
+
+/** True iff a rejection handler UNCONDITIONALLY rethrows (a `throw` at the top
+ *  level of its block body). A concise-body arrow returns a value → swallows. */
+function rejectionHandlerRethrows(handler) {
+  if (!handler || !ts.isFunctionLike(handler)) return false
+  return handler.body && ts.isBlock(handler.body)
+    ? handler.body.statements.some((s) => ts.isThrowStatement(s))
+    : false
+}
+
+/** Swallow-aware classify for a ONE-HOP-resolved local initializer.
+ *
+ *  Scoped to the `.catch` / two-arg `.then` laundered-swallow shapes (the common
+ *  aliasing bug). It deliberately does NOT descend into a laundered IIFE body:
+ *  the "any non-rethrowing catch = swallow" heuristic OVER-approximates through
+ *  a local binding — a self-handling async IIFE assigned to a `const` (the
+ *  turn-driver pattern in pool.ts: comprehensive internal try/catch that
+ *  CLASSIFIES + surfaces failures to the channel, and can still reject on an
+ *  uncaught path) is a legitimate backstop, not a silent swallow. A DIRECTLY
+ *  passed swallowing IIFE is still flagged by `classifyWrapperArg`; a laundered
+ *  one is part of the documented dataflow boundary (code review, not the gate). */
+function classifyResolvedInitializer(init) {
+  let a = init
+  while (a) {
+    while (ts.isParenthesizedExpression(a)) a = a.expression
+    if (!ts.isCallExpression(a)) return null
+    let callee = a.expression
+    while (ts.isParenthesizedExpression(callee)) callee = callee.expression
+    if (ts.isArrowFunction(callee) || ts.isFunctionExpression(callee)) {
+      return null // laundered IIFE — out of scope (see doc above)
+    }
+    if (ts.isPropertyAccessExpression(callee)) {
+      const m = callee.name.text
+      if (m === 'catch') {
+        if (rejectionHandlerRethrows(a.arguments[0])) {
+          a = callee.expression // rethrows → rejection reaches the wrapper; keep checking the receiver
+          continue
+        }
+        return 'a `.catch(...)` swallows before the wrapper via a local alias (use the onError arg)'
+      }
+      if (m === 'then' && a.arguments.length >= 2) {
+        return 'a two-arg `.then(onF, onRej)` swallows before the wrapper via a local alias'
+      }
+      a = callee.expression
+      continue
+    }
+    return null
+  }
+  return null
+}
+
+/** Is `name` REASSIGNED (`=`/compound/`++`/`--`) anywhere within `scope`? */
+function isReassignedInScope(name, scope) {
+  let found = false
+  const w = (n) => {
+    if (found) return
+    if (
+      ts.isBinaryExpression(n) &&
+      ts.isIdentifier(n.left) &&
+      n.left.text === name &&
+      n.operatorToken.kind >= ts.SyntaxKind.FirstAssignment &&
+      n.operatorToken.kind <= ts.SyntaxKind.LastAssignment
+    ) {
+      found = true
+      return
+    }
+    if (
+      (ts.isPostfixUnaryExpression(n) || ts.isPrefixUnaryExpression(n)) &&
+      ts.isIdentifier(n.operand) &&
+      n.operand.text === name
+    ) {
+      found = true
+      return
+    }
+    ts.forEachChild(n, w)
+  }
+  w(scope)
+  return found
+}
+
+/** Resolve a plain identifier ONE HOP to its nearest-enclosing-scope `const`/
+ *  `let` initializer (non-reassigned for `let`), or null. Requires parent links. */
+function resolveOneHopInitializer(identNode) {
+  const name = identNode.text
+  let scope = identNode.parent
+  while (scope) {
+    const statements =
+      ts.isSourceFile(scope) || ts.isBlock(scope) || ts.isModuleBlock(scope) ? scope.statements : undefined
+    if (statements) {
+      for (const st of statements) {
+        if (!ts.isVariableStatement(st)) continue
+        const flags = st.declarationList.flags
+        const isConst = (flags & ts.NodeFlags.Const) !== 0
+        const isLet = (flags & ts.NodeFlags.Let) !== 0
+        if (!isConst && !isLet) continue
+        for (const d of st.declarationList.declarations) {
+          if (ts.isIdentifier(d.name) && d.name.text === name && d.initializer) {
+            if (isLet && isReassignedInScope(name, scope)) return null // reassigned → undecidable
+            return d.initializer
+          }
+        }
+      }
+    }
+    scope = scope.parent
+  }
+  return null
+}
+
 const WRAPPER_FNS = new Set(['fireAndForget', 'neutralizeAbandonedSettle'])
 
 /** A module specifier that refers to the fire-and-forget wrapper module
@@ -307,7 +441,12 @@ export function findPreSwallowedWraps(source, fileName = 'fixture.ts') {
       if (fn) {
         const arg = fn === 'fireAndForget' ? node.arguments[1] : node.arguments[0]
         if (arg) {
-          const reason = classifyWrapperArg(arg)
+          let reason = classifyWrapperArg(arg)
+          // One-hop: a pre-swallow laundered through a local `const`/`let`.
+          if (!reason && ts.isIdentifier(arg)) {
+            const init = resolveOneHopInitializer(arg)
+            if (init) reason = classifyResolvedInitializer(init)
+          }
           if (reason) {
             const { line } = sf.getLineAndCharacterOfPosition(node.getStart(sf))
             out.push({ line: line + 1, fn, reason })

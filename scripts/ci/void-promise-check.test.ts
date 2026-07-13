@@ -270,4 +270,49 @@ describe('findPreSwallowedWraps', () => {
     const src = "import * as ff from './unrelated.ts'\nff.fireAndForget('n', p.catch(() => {}))"
     expect(findPreSwallowedWraps(src).length).toBe(0)
   })
+
+  // Final edge (Codex): a pre-swallow laundered through a LOCAL one-hop binding.
+  test('flags a swallow laundered through a local const', () => {
+    expect(findPreSwallowedWraps("const s = p.catch(() => {})\nfireAndForget('n', s)").length).toBe(1)
+  })
+
+  test('flags a laundered two-arg .then through a local const', () => {
+    expect(findPreSwallowedWraps("const s = p.then(a, b)\nfireAndForget('n', s)").length).toBe(1)
+  })
+
+  test('flags a laundered swallow for neutralizeAbandonedSettle too', () => {
+    expect(findPreSwallowedWraps("const s = p.catch(() => {})\nneutralizeAbandonedSettle(s)").length).toBe(1)
+  })
+
+  test('PASSES a raw promise laundered through a local const', () => {
+    expect(findPreSwallowedWraps("const s = p\nfireAndForget('n', s)").length).toBe(0)
+  })
+
+  test('PASSES a laundered .catch that unconditionally RETHROWS', () => {
+    expect(
+      findPreSwallowedWraps("const s = p.catch((e) => { throw e })\nfireAndForget('n', s)").length,
+    ).toBe(0)
+  })
+
+  test('PASSES a laundered .finally (rejection passes through)', () => {
+    expect(findPreSwallowedWraps("const s = p.finally(() => c())\nfireAndForget('n', s)").length).toBe(0)
+  })
+
+  // ── DOCUMENTED INHERENT BOUNDARY — locked as INTENTIONAL, not accidental ──
+  // A syntactic gate cannot chase general dataflow; these are NOT flagged BY
+  // DESIGN. The runtime wrapper + safety net are the actual guarantee.
+  test('does NOT flag a TWO-hop alias (documented limit)', () => {
+    const src = "const a = p.catch(() => {})\nconst s = a\nfireAndForget('n', s)"
+    expect(findPreSwallowedWraps(src).length).toBe(0)
+  })
+
+  test('does NOT flag a REASSIGNED let alias (documented limit)', () => {
+    const src = "let s = p.catch(() => {})\ns = q\nfireAndForget('n', s)"
+    expect(findPreSwallowedWraps(src).length).toBe(0)
+  })
+
+  test('does NOT descend into a laundered self-handling IIFE (documented limit)', () => {
+    const src = "const s = (async () => { try { await x() } catch {} })()\nfireAndForget('n', s)"
+    expect(findPreSwallowedWraps(src).length).toBe(0)
+  })
 })
