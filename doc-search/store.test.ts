@@ -1,4 +1,8 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
+import { Database } from 'bun:sqlite'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 
 import { chunkMarkdown } from './chunk.ts'
 import { DocSearchIndex, type IndexFileInput } from './store.ts'
@@ -179,5 +183,92 @@ describe('DocSearchIndex (keyword-only; no dead embedder seam) — RA4', () => {
       expect(h.score).toBeGreaterThanOrEqual(0)
       expect(h.score).toBeLessThanOrEqual(1)
     }
+  })
+
+  // ── Upgrade boundary: a PERSISTENT DB created by the pre-RA4 version still
+  // carries `doc_chunks.embedding` on disk (CREATE TABLE IF NOT EXISTS never
+  // alters it away). `open()` must detect the stale schema (unstamped →
+  // user_version 0) and rebuild the rebuildable cache so the column is gone.
+  // This is the mutation guard for the detect-and-rebuild path: drop the
+  // migration and this test RESURFACES the embedding column → red.
+  describe('reopening a legacy on-disk DB rebuilds away the embedding column', () => {
+    let dir: string
+    let dbPath: string
+
+    beforeEach(() => {
+      dir = mkdtempSync(join(tmpdir(), 'doc-search-legacy-'))
+      dbPath = join(dir, 'index.db')
+    })
+    afterEach(() => {
+      rmSync(dir, { recursive: true, force: true })
+    })
+
+    function seedLegacyDb(path: string): void {
+      // Recreate the PRE-RA4 schema verbatim: doc_chunks WITH an `embedding`
+      // column, its FTS mirror + triggers, and NO user_version stamp (0).
+      const legacy = new Database(path)
+      legacy.exec(`
+        CREATE TABLE doc_chunks (
+          id INTEGER PRIMARY KEY, project TEXT NOT NULL, relpath TEXT NOT NULL,
+          abs_path TEXT NOT NULL, title TEXT NOT NULL, heading TEXT NOT NULL,
+          ordinal INTEGER NOT NULL, body TEXT NOT NULL, mtime_ms INTEGER NOT NULL,
+          indexed_at INTEGER NOT NULL, embedding TEXT
+        );
+        CREATE VIRTUAL TABLE doc_fts USING fts5(
+          title, heading, body, content='doc_chunks', content_rowid='id',
+          tokenize='unicode61 remove_diacritics 2'
+        );
+        CREATE TRIGGER doc_chunks_ai AFTER INSERT ON doc_chunks BEGIN
+          INSERT INTO doc_fts(rowid, title, heading, body)
+          VALUES (new.id, new.title, new.heading, new.body);
+        END;
+        INSERT INTO doc_chunks
+          (project, relpath, abs_path, title, heading, ordinal, body, mtime_ms, indexed_at, embedding)
+        VALUES ('p', 'docs/old.md', '/o/p/docs/old.md', 'Old', '', 0, 'legacy widget body', 1000, 1, '[0.1,0.2]');
+      `)
+      // Sanity: the legacy DB really has the column and no stamp.
+      const cols = legacy
+        .query<{ name: string }, []>(`SELECT name FROM pragma_table_info('doc_chunks')`)
+        .all()
+        .map((c) => c.name)
+      expect(cols).toContain('embedding')
+      expect(legacy.query<{ user_version: number }, []>('PRAGMA user_version').get()?.user_version).toBe(0)
+      legacy.close()
+    }
+
+    test('drops the stale schema on open and search still works (keyword)', async () => {
+      seedLegacyDb(dbPath)
+
+      const reopened = DocSearchIndex.open(dbPath)
+      // The rebuilt table no longer has the embedding column…
+      const cols = reopened
+        .raw()
+        .query<{ name: string }, []>(`SELECT name FROM pragma_table_info('doc_chunks')`)
+        .all()
+        .map((c) => c.name)
+      expect(cols).not.toContain('embedding')
+      // …and the version is stamped so a future reopen is a no-op.
+      expect(reopened.raw().query<{ user_version: number }, []>('PRAGMA user_version').get()?.user_version).toBe(1)
+
+      // The stale legacy row was dropped with the table; the cache rebuilds
+      // from source on the next index pass. Keyword search still works.
+      await reopened.indexFile(fileInput('p', 'docs/new.md', '# New\n\nfresh widget content'))
+      const hits = await reopened.search({ query: 'widget' })
+      expect(hits.map((h) => h.path)).toEqual(['docs/new.md'])
+      reopened.close()
+    })
+
+    test('a second reopen is idempotent (no rebuild once stamped)', async () => {
+      seedLegacyDb(dbPath)
+      const first = DocSearchIndex.open(dbPath)
+      await first.indexFile(fileInput('p', 'docs/keep.md', '# Keep\n\npreserved gadget content'))
+      first.close()
+
+      // Already at SCHEMA_VERSION → open must NOT drop; the row survives.
+      const second = DocSearchIndex.open(dbPath)
+      const hits = await second.search({ query: 'gadget' })
+      expect(hits.map((h) => h.path)).toEqual(['docs/keep.md'])
+      second.close()
+    })
   })
 })

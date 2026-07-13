@@ -135,6 +135,31 @@ CREATE TRIGGER IF NOT EXISTS doc_chunks_au AFTER UPDATE ON doc_chunks BEGIN
 END;
 `
 
+/**
+ * Schema version stamped into the DB's `PRAGMA user_version`. Bumped for the
+ * RA4 embedder-seam removal (the `doc_chunks.embedding` column is gone). Any
+ * DB whose stamp is BELOW this — including a legacy DB from before stamping
+ * existed, which reports `0` — is a stale schema and gets rebuilt on open (see
+ * `migrateSchema`). Bump this whenever the on-disk schema changes.
+ */
+const SCHEMA_VERSION = 1
+
+/**
+ * Drop every doc-search object so `SCHEMA` can recreate it cleanly. Used by the
+ * upgrade path when a persistent DB predates the current schema — e.g. an
+ * install created before RA4 still carries the removed `doc_chunks.embedding`
+ * column, which `CREATE TABLE IF NOT EXISTS` would NOT alter away. Triggers and
+ * the FTS mirror are dropped before the base table; the base table's indexes go
+ * with it. (Indexes on `doc_chunks` are dropped implicitly with the table.)
+ */
+const DROP_SCHEMA = `
+DROP TRIGGER IF EXISTS doc_chunks_ai;
+DROP TRIGGER IF EXISTS doc_chunks_ad;
+DROP TRIGGER IF EXISTS doc_chunks_au;
+DROP TABLE IF EXISTS doc_fts;
+DROP TABLE IF EXISTS doc_chunks;
+`
+
 /** BM25 column weights — title matches dominate, then headings, then body. */
 const BM25_WEIGHTS = { title: 10.0, heading: 4.0, body: 1.0 } as const
 
@@ -159,7 +184,7 @@ export class DocSearchIndex {
     // additionally gains busy_timeout/temp_store/cache_size (strictly more
     // tolerant under contention, no semantic change).
     const db = openSidecar(path)
-    db.exec(SCHEMA)
+    migrateSchema(db)
     return new DocSearchIndex(db)
   }
 
@@ -338,4 +363,28 @@ function minMaxNormalise(values: number[]): number[] {
   const span = max - min
   if (span <= 0) return values.map(() => 1)
   return values.map((v) => (v - min) / span)
+}
+
+/**
+ * Bring a freshly-opened DB up to the current schema, then stamp its version.
+ *
+ * The doc-search index is a REBUILDABLE CACHE (lives under
+ * `<owner_home>/cache/doc-search/`, derived entirely from the on-disk project
+ * docs and repopulated by the next `refreshIndex` pass), so a stale schema is
+ * resolved by DROP-and-recreate rather than an in-place `ALTER`. A DB stamped
+ * below `SCHEMA_VERSION` — including a legacy pre-RA4 DB that still carries the
+ * removed `doc_chunks.embedding` column and reports `user_version` 0 — has its
+ * doc-search objects dropped so `SCHEMA` recreates them clean. A brand-new
+ * empty DB also reports 0, but the drops are `IF EXISTS` no-ops there, so the
+ * fresh-DB path is unchanged. Once at/above the stamp, `SCHEMA` is idempotent
+ * (`IF NOT EXISTS`) and nothing is dropped.
+ */
+function migrateSchema(db: Database): void {
+  const row = db.query<{ user_version: number }, []>('PRAGMA user_version').get()
+  const version = row?.user_version ?? 0
+  if (version < SCHEMA_VERSION) db.exec(DROP_SCHEMA)
+  db.exec(SCHEMA)
+  // `user_version` takes an integer literal (no bound params in a PRAGMA);
+  // SCHEMA_VERSION is a hardcoded numeric constant, so this is injection-safe.
+  db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`)
 }
