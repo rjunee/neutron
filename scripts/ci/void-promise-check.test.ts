@@ -22,6 +22,18 @@ describe('findBareVoidPromiseCalls', () => {
     expect(hits.length).toBe(1)
   })
 
+  test('flags a bare void on a PromiseLike-typed variable', () => {
+    const hits = findBareVoidPromiseCalls('declare const p: PromiseLike<void>\nvoid p')
+    expect(hits.length).toBe(1)
+  })
+
+  // P2 #3 (Codex): the `any`-erasure boundary is INTENTIONAL. A `void <any>` is
+  // out of scope (the checker can't prove it's a promise; flagging all
+  // `void <any>` would false-positive). Lock the boundary so it stays deliberate.
+  test('does NOT flag `void <any>` (type erasure is out of scope by design)', () => {
+    expect(findBareVoidPromiseCalls('declare const p: any\nvoid p').length).toBe(0)
+  })
+
   test('flags a void on a chained call (…().catch(…)) — still a promise', () => {
     const hits = findBareVoidPromiseCalls(
       'declare const handle: { stop(): Promise<void> }\nvoid handle.stop().catch(() => {})',

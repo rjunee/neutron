@@ -102,6 +102,7 @@ export function createReflection(deps: CreateReflectionDeps): Reflection {
       const substrate = deps.substrate
       fireAndForget('index.runDetection', runDetection(substrate).catch((err) => {
         console.warn(`${LOG_TAG} event=on_turn_complete_failed err=${errMsg(err)}`)
+        throw err // re-raise so fireAndForget counts it (the .catch only adds context)
       }))
 
       async function runDetection(sub: Substrate): Promise<void> {

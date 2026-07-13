@@ -395,10 +395,11 @@ export function getOrStartCharacterSuggestions(
           self.pendingCharacterSuggestions.delete(key)
         }
       })
-      .catch(() => {
+      .catch((err) => {
         if (self.pendingCharacterSuggestions.get(key) === p) {
           self.pendingCharacterSuggestions.delete(key)
         }
+        throw err // drop the cache entry (retry next turn) AND surface to fireAndForget
       }))
     return p
   }
@@ -463,10 +464,11 @@ export function getOrStartAgentNameSuggestions(
           self.pendingAgentNameSuggestions.delete(key)
         }
       })
-      .catch(() => {
+      .catch((err) => {
         if (self.pendingAgentNameSuggestions.get(key) === p) {
           self.pendingAgentNameSuggestions.delete(key)
         }
+        throw err // drop the cache entry (retry next turn) AND surface to fireAndForget
       }))
     return p
   }

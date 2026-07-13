@@ -356,6 +356,7 @@ process.on('SIGINT', () => shutdownChannel('SIGINT'))
 mcp.oninitialized = () => {
   fireAndForget('dev-channel.postToSink', postToSink('/channel-bound', { session_id: SESSION_ID, pid: process.pid }).catch((e) => {
     process.stderr.write(`neutron-channel: channel-bound announce failed: ${e}\n`)
+    throw e // re-raise so fireAndForget counts it (the .catch only adds context)
   }))
   process.stderr.write('neutron-channel: MCP handshake complete (initialized)\n')
 }

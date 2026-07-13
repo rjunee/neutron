@@ -648,9 +648,10 @@ export function startReplWatchdog(
   // in-process replay never fired because the gateway itself went down. Fire-and-
   // forget with the default anti-thundering-herd stagger; errors are swallowed so
   // a poisoned entry can't block watchdog startup.
-  fireAndForget('supervision.drainPendingRespawns', drainPendingRespawns(options).catch((e) =>
-    console.error(`repl-watchdog: boot-drain error: ${e}`),
-  ))
+  fireAndForget('supervision.drainPendingRespawns', drainPendingRespawns(options).catch((e) => {
+    console.error(`repl-watchdog: boot-drain error: ${e}`)
+    throw e // re-raise so fireAndForget counts it (the .catch only adds context)
+  }))
 
   // Per-registry tick gate (Argus r3 MINOR 3): scoped to THIS watchdog so a slow
   // tick for one instance's registry never serializes another instance's tick in a

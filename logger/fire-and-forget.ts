@@ -84,18 +84,23 @@ function logRejectionSafely(name: string, err: unknown): void {
  *
  * @param name  a short, descriptive site name (e.g. `'scribe.persistDaily'`) —
  *              logged verbatim so a rejection is traceable to its origin.
- * @param p     the promise to run and forget. `null` / `undefined` are accepted
- *              and no-op — mirroring the `void maybePromise` idiom this replaces
- *              (a maybe-absent promise has nothing to forget).
+ * @param p     the promise (or any `PromiseLike`/thenable) to run and forget.
+ *              `null` / `undefined` are accepted and no-op — mirroring the
+ *              `void maybePromise` idiom this replaces. Accepting `PromiseLike`
+ *              (not just `Promise`) reconciles the wrapper with the lint gate,
+ *              which flags ANY promise-typed void including a `.catch`-less
+ *              standards thenable.
  */
-export function fireAndForget(name: string, p: Promise<unknown> | null | undefined): void {
+export function fireAndForget(name: string, p: PromiseLike<unknown> | null | undefined): void {
   if (p == null) return
   // The ONE sanctioned `void <promise>` in the repo: this file is the wrapper
-  // the F3 lint rule allowlists. The `.catch(...)` handler is GUARDED
-  // (`logRejectionSafely` never throws — even a broken log sink is contained),
-  // so the returned promise ALWAYS resolves and voiding it can never itself
-  // become an unhandled rejection. That is the whole point of the wrapper.
-  void p.catch((err: unknown) => {
+  // the F3 lint rule allowlists. `Promise.resolve(p)` normalizes ANY thenable —
+  // including a `PromiseLike` with no `.catch` — to a real Promise, so `.catch`
+  // is always callable (a bare `p.catch` would throw on such a thenable). The
+  // handler is GUARDED (`logRejectionSafely` never throws — even a broken log
+  // sink is contained), so the returned promise ALWAYS resolves and voiding it
+  // can never itself become an unhandled rejection. That is the whole point.
+  void Promise.resolve(p).catch((err: unknown) => {
     rejectionCount += 1
     logRejectionSafely(name, err)
   })
@@ -126,12 +131,13 @@ export function resetFireAndForgetCountForTests(): void {
  * Distinct from `fireAndForget`, which is for a fire-and-forget op whose
  * failure IS worth surfacing (logged + counted).
  */
-export function neutralizeAbandonedSettle(p: Promise<unknown> | null | undefined): void {
+export function neutralizeAbandonedSettle(p: PromiseLike<unknown> | null | undefined): void {
   if (p == null) return
-  // Sanctioned `void <promise>` (this is the allowlisted wrapper file): the
-  // `.catch` swallows the abandoned settle and never throws, so voiding the
-  // returned always-resolved promise is safe.
-  void p.catch(() => undefined)
+  // Sanctioned `void <promise>` (this is the allowlisted wrapper file).
+  // `Promise.resolve(p)` normalizes ANY thenable (incl. a `.catch`-less
+  // `PromiseLike`) to a real Promise; the `.catch` swallows the abandoned settle
+  // and never throws, so voiding the returned always-resolved promise is safe.
+  void Promise.resolve(p).catch(() => undefined)
 }
 
 // ---------------------------------------------------------------------------

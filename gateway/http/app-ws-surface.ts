@@ -995,6 +995,7 @@ async function handleSend(
               err instanceof Error ? err.message : String(err)
             }`,
           )
+          throw err // re-raise so fireAndForget counts it (the .catch only adds context)
         }))
     }
   }

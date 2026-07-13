@@ -36,7 +36,7 @@
 import { randomUUID } from 'node:crypto'
 import type { ProjectDb } from './db.ts'
 import { parseJsonColumn } from './sidecar.ts'
-import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
+import { neutralizeAbandonedSettle } from '@neutronai/logger/fire-and-forget.ts'
 
 export type SystemEventLevel = 'info' | 'warn' | 'error'
 
@@ -173,16 +173,19 @@ export class SystemEventsStore implements SystemEventSink {
       ],
     )
     this.inflight.add(write)
-    // Remove from the in-flight set on settle. Use `then(cleanup, cleanup)` —
-    // NOT `void write.finally(...)`: `finally` returns a promise that RE-REJECTS
-    // when `write` rejects, and voiding it would surface an unhandled rejection.
-    // Both `then` handlers return normally, so this derived promise always
-    // resolves. The original `write` rejection is still delivered to the awaiter
-    // below (and thence to emitSystemEventSafe, which swallows it).
+    // Remove from the in-flight set on settle. Use `then(cleanup, cleanup)` so
+    // both handlers return normally and the derived promise always resolves —
+    // NOT `fireAndForget`, because this cleanup-only derived promise CANNOT
+    // reject, so it carries no failure to log/count (that would be the "lie"
+    // fireAndForget must never tell). The write's OWN rejection is delivered to
+    // the `await write` below (→ emitSystemEventSafe, whose contract swallows
+    // journal-write failures so the degradation journal never breaks the
+    // caller). `neutralizeAbandonedSettle` documents "settle irrelevant, handled
+    // elsewhere" and guards against any unforeseen rejection.
     const cleanup = (): void => {
       this.inflight.delete(write)
     }
-    fireAndForget('system-events.then', write.then(cleanup, cleanup))
+    neutralizeAbandonedSettle(write.then(cleanup, cleanup))
     await write
     return { id }
   }

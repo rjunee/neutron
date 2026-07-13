@@ -238,7 +238,10 @@ export function createScribe(deps: CreateScribeDeps): Scribe {
       clearTimeout(watchdog)
       release(deps.budget, ok, now())
       // Persist the daily counter off the hot path; failures are non-fatal.
-      fireAndForget('index.persistDaily', persistDaily(deps.budget, now()).catch((e) => logFailure('persistDaily failed', e)))
+      fireAndForget('index.persistDaily', persistDaily(deps.budget, now()).catch((e) => {
+        logFailure('persistDaily failed', e)
+        throw e // re-raise so fireAndForget counts it (logFailure only adds context)
+      }))
     }
   }
 
@@ -265,7 +268,10 @@ export function createScribe(deps: CreateScribeDeps): Scribe {
       observed_at: input.observed_at,
       trigger: 'chat',
       ...(input.author !== undefined ? { author: input.author } : {}),
-    }).catch((e) => logFailure('handleUserTurn', e)))
+    }).catch((e) => {
+      logFailure('handleUserTurn', e)
+      throw e // re-raise so fireAndForget counts it (extractAndWrite's backstop)
+    }))
   }
 
   return {

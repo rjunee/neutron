@@ -800,6 +800,7 @@ export function buildOpenGraphComposer(
       console.warn(
         `[agent-dispatch] boot reap failed: ${err instanceof Error ? err.message : String(err)}`,
       )
+      throw err // re-raise so fireAndForget counts it (the .catch only adds context)
     }))
 
     // ── Skill-forge → Open boot (Vajra parity gap #5) ──────────────────────
@@ -2172,6 +2173,7 @@ export function buildOpenGraphComposer(
               row.project_id
             } err=${err instanceof Error ? err.message : String(err)}`,
           )
+          throw err // re-raise so fireAndForget counts it (the .catch only adds context)
         }))
         // Known mutation → always push the fresh rail snapshot.
         emitProjectsChangedNow(input.user_id ?? OWNER_USER_ID)

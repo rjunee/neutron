@@ -23,6 +23,17 @@
 //     confirms it, so they are left alone WITHOUT a hand-maintained allowlist.
 //   * `void someSyncFn()` — a call returning a non-promise.
 //
+// INHERENT LIMIT (by design, NOT a hole) — `void p` where `p: any` is NOT
+// flagged: `any` erases the type, so the checker cannot prove `p` is a promise,
+// and flagging every `void <any>` would false-positive on legitimate
+// `void someAny` no-ops. `any`/`unknown`-erased operands are therefore OUT OF
+// SCOPE — the gate catches STATICALLY-promise-typed voids (`Promise<T>`,
+// `PromiseLike<T>`, promise-returning calls/chains). This boundary is
+// intentional and locked by tests (`void <any>` → not flagged; `void <Promise>`
+// / `void <PromiseLike>` → flagged). A rare `void <unknown>` could in principle
+// be flagged without false positives, but is left in scope with `any` for a
+// single, simple rule.
+//
 // SCOPE — server-side Node `.ts` only. Excludes browser/React-Native client
 // code (it cannot import the Node console/env logger, and `void handler()` in a
 // React effect is idiomatic there): `app/`, `landing/chat-react/`, `chat-core/`

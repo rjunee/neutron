@@ -283,11 +283,13 @@ if (import.meta.main) {
   process.once('SIGTERM', () => {
     fireAndForget('boot.stop', handle.stop().catch((err) => {
       console.error('signup-landing stop failed:', err)
+      throw err // re-raise so fireAndForget counts it (the .catch only adds context)
     }))
   })
   process.once('SIGINT', () => {
     fireAndForget('boot.stop', handle.stop().catch((err) => {
       console.error('signup-landing stop failed:', err)
+      throw err // re-raise so fireAndForget counts it (the .catch only adds context)
     }))
   })
 }

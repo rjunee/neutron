@@ -265,6 +265,7 @@ export function buildSynthesisImportJobRunner(
         } catch (e) {
           logFailure(`run_job_fail_persist:${job_id}`, e)
         }
+        throw err // job already marked failed; re-raise so fireAndForget also counts it
       }))
       return { job_id }
     },

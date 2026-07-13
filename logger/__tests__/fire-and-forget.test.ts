@@ -73,6 +73,29 @@ describe('fireAndForget', () => {
     expect(fireAndForgetRejectionCount()).toBe(0)
   })
 
+  // P1 #2 (Codex): the wrapper must accept ANY thenable — incl. a standards
+  // `PromiseLike` with NO `.catch` — since the lint flags any callable-`then`.
+  test('accepts a bare thenable (no .catch): rejects → logs+counts, no sync throw', async () => {
+    const bareThenable: PromiseLike<never> = {
+      then(_onFulfilled, onRejected) {
+        onRejected?.(new Error('thenable-boom'))
+        return undefined as never
+      },
+    }
+    // A bare `bareThenable.catch(...)` would throw TypeError; the wrapper must not.
+    expect(() => fireAndForget('unit.thenable', bareThenable)).not.toThrow()
+    await flush()
+    expect(fireAndForgetRejectionCount()).toBe(1)
+    expect(errorLines.find((l) => l.includes('name=unit.thenable'))).toBeDefined()
+  })
+
+  test('a PromiseLike<void> typechecks as an argument', () => {
+    // Compile-time assertion: this must not be a tsc error.
+    const pl: PromiseLike<void> = Promise.resolve()
+    fireAndForget('unit.promiselike', pl)
+    expect(true).toBe(true)
+  })
+
   test('counts each rejection independently', async () => {
     fireAndForget('unit.a', Promise.reject(new Error('a')))
     fireAndForget('unit.b', Promise.reject('b-string'))
@@ -95,6 +118,24 @@ describe('fireAndForget', () => {
     await flush()
     expect(fireAndForgetRejectionCount()).toBe(1)
     expect(errorLines.find((l) => l.includes('name=unit.raw'))).toBeDefined()
+  })
+
+  // P1 #1 (Codex): the rethrow-after-handler form used at reflection.runDetection,
+  // scribe, composer, etc. — the .catch adds context THEN re-raises, so the
+  // wrapper still counts+logs it (the failure is NOT pre-swallowed).
+  test('a .catch that logs-then-rethrows still reaches the wrapper (counted)', async () => {
+    let sideEffectRan = false
+    fireAndForget(
+      'unit.rethrow',
+      Promise.reject(new Error('underlying')).catch((e) => {
+        sideEffectRan = true // e.g. console.warn / cache-delete / job-mark
+        throw e
+      }),
+    )
+    await flush()
+    expect(sideEffectRan).toBe(true)
+    expect(fireAndForgetRejectionCount()).toBe(1)
+    expect(errorLines.find((l) => l.includes('name=unit.rethrow'))).toBeDefined()
   })
 
   // Blocker boundary: the wrapper's OWN log path must not turn an observability

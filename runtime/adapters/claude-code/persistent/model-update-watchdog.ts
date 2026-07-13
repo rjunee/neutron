@@ -592,7 +592,10 @@ export function startModelUpdateWatchdog(deps: ModelUpdateWatchdogDeps): ModelUp
           })
           // Fire-and-forget the idle-gated graceful respawn of existing warm
           // sessions. Errors are swallowed — the adopt + notice already shipped.
-          fireAndForget('model-update-watchdog.resolve', Promise.resolve(deps.runUpgrade(decision.newModel)).catch(onError))
+          fireAndForget('model-update-watchdog.resolve', Promise.resolve(deps.runUpgrade(decision.newModel)).catch((e) => {
+            onError(e)
+            throw e // re-raise so fireAndForget counts it (onError only adds context)
+          }))
           break
         }
       }
@@ -604,7 +607,10 @@ export function startModelUpdateWatchdog(deps: ModelUpdateWatchdogDeps): ModelUp
   }
 
   const handle = setIntervalFn(() => {
-    fireAndForget('model-update-watchdog.tick', tick().catch(onError))
+    // `tick()` self-handles (its own try/catch calls onError + resets inFlight),
+    // so the old `.catch(onError)` was redundant. fireAndForget is the structural
+    // backstop: it fires only if tick() itself rejects (e.g. onError throws).
+    fireAndForget('model-update-watchdog.tick', tick())
   }, intervalMs)
   // Don't let the cadence timer hold the event loop open on its own.
   ;(handle as { unref?: () => void })?.unref?.()

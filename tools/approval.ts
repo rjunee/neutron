@@ -128,6 +128,7 @@ export class ApprovalManager {
     // discipline straightforward.
     fireAndForget('approval.notify', this.notifier.notify(row).catch((err) => {
       console.error('approval notifier failed:', err)
+      throw err // re-raise so fireAndForget counts it (the .catch only adds context)
     }))
 
     return new Promise<ApprovalDecision>((resolve, reject) => {
