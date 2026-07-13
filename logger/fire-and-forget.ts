@@ -197,33 +197,28 @@ let installedExceptionHandler: ExceptionHandler | undefined
 export interface ProcessSafetyNetOptions {
   /**
    * Called after logging an `uncaughtException` OR an `unhandledRejection` to
-   * end the process. Injectable for tests. Defaults to `() => process.exit(1)`
-   * — EXCEPT under `NODE_ENV === 'test'`, where it does not hard-exit (that would
-   * kill the whole suite mid-run) but sets `process.exitCode = 1` so a stray
-   * rejection/exception still surfaces as a nonzero suite exit. Receives the raw
-   * exception / rejection reason (which may not be an `Error`).
+   * end the process. The default is UNCONDITIONALLY `() => process.exit(1)` (no
+   * `NODE_ENV` escape hatch — a production process must crash on an uncaught
+   * exception even if `NODE_ENV=test` is stray/misconfigured). Tests that must
+   * not tear the bun runner down inject their own non-exiting `onUncaught`.
+   * Receives the raw exception / rejection reason (which may not be an `Error`).
    */
   onUncaught?: (err: unknown) => void
 }
 
 function defaultOnUncaught(): void {
-  // Log-then-CRASH. An uncaught exception leaves the process in an undefined
-  // state (partially-mutated globals, half-open resources); continuing would
-  // be worse than restarting, and swallowing it silently is exactly the bug
-  // this unit removes. Exiting non-zero matches Node's own default crash
-  // behavior — we only add a loud, structured log first, so a systemd
-  // Restart=always brings the process back clean.
+  // Log-then-CRASH, UNCONDITIONALLY. An uncaught exception leaves the process in
+  // an undefined state (partially-mutated globals, half-open resources);
+  // continuing would be worse than restarting, and swallowing it silently is
+  // exactly the bug this unit removes. Exiting non-zero matches Node's own
+  // default crash behavior — we only add a loud, structured log first, so a
+  // systemd Restart=always brings the process back clean.
   //
-  // Under NODE_ENV=test (bun test sets this) we do NOT hard-`exit` — that would
-  // tear the whole suite down mid-run — but we still SIGNAL failure by setting
-  // `process.exitCode = 1`, so a stray unhandled rejection / exception that
-  // reaches this default handler surfaces as a NONZERO suite exit rather than a
-  // silent pass. (Tests that intentionally exercise the handler inject their own
-  // `onUncaught`, so they never reach this path.)
-  if (process.env['NODE_ENV'] === 'test') {
-    process.exitCode = 1
-    return
-  }
+  // There is deliberately NO `NODE_ENV`-based escape hatch: a production process
+  // must crash on an uncaught exception regardless of a stray/misconfigured
+  // `NODE_ENV=test`. Tests that need the net to NOT tear the bun runner down
+  // inject their own non-exiting `onUncaught` (the F3 suite does exactly this);
+  // the production default stays fatal.
   process.exit(1)
 }
 
@@ -235,7 +230,7 @@ function defaultOnUncaught(): void {
  * POLICY — both handlers LOG-THEN-CRASH, preserving the runtime's fatal
  * default while adding a loud, structured log first:
  *   - `unhandledRejection` → LOG at `error`, then CRASH via `onUncaught`
- *     (default `process.exit(1)`, suppressed under NODE_ENV=test). This is
+ *     (default `process.exit(1)`, unconditionally — no NODE_ENV escape). This is
  *     deliberately fail-fast: EVERY known-benign fire-and-forget is already
  *     wrapped (`fireAndForget` / `neutralizeAbandonedSettle` swallow before the
  *     global handler can ever see them), so a rejection that reaches THIS

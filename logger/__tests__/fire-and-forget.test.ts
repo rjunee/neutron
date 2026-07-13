@@ -364,22 +364,25 @@ describe('installProcessSafetyNet', () => {
     expect(crashed).toBe(boom) // crash policy still ran
   })
 
-  // Codex round 15: under NODE_ENV=test the DEFAULT onUncaught must not
-  // hard-exit (would kill the suite) but must still SIGNAL failure via
-  // process.exitCode=1 so a stray rejection surfaces as a nonzero suite exit.
-  test('default onUncaught under NODE_ENV=test sets process.exitCode=1 (signals, does not hard-exit)', () => {
-    const prevCode = process.exitCode
+  // Codex round 16: the DEFAULT onUncaught is UNCONDITIONALLY fatal —
+  // `process.exit(1)` with NO NODE_ENV escape hatch. (Stub process.exit so this
+  // assertion doesn't actually tear the runner down.)
+  test('default onUncaught is unconditionally fatal — process.exit(1), no NODE_ENV escape', () => {
+    const realExit = process.exit
+    let exitedWith: number | undefined
+    // test stub: throw to unwind instead of really exiting
+    process.exit = ((code?: number) => {
+      exitedWith = code
+      throw new Error('__stubbed_exit__')
+    }) as never
     try {
-      expect(process.env['NODE_ENV']).toBe('test') // precondition (bun sets it)
-      process.exitCode = 0
-      installProcessSafetyNet() // no injected onUncaught → the DEFAULT path
+      expect(process.env['NODE_ENV']).toBe('test') // NODE_ENV=test, yet still fatal
+      installProcessSafetyNet() // no injected onUncaught → the DEFAULT (fatal) path
       const handler = process.listeners('uncaughtException').at(-1) as (e: Error) => void
-      // Must return (not hard-exit — that would tear the runner down) …
-      expect(() => handler(new Error('signals-via-exitcode'))).not.toThrow()
-      // … and STILL signal failure.
-      expect(process.exitCode).toBe(1)
+      expect(() => handler(new Error('fatal'))).toThrow('__stubbed_exit__') // hit process.exit
+      expect(exitedWith).toBe(1)
     } finally {
-      process.exitCode = prevCode ?? 0 // restore so this test file exits clean
+      process.exit = realExit
     }
   })
 

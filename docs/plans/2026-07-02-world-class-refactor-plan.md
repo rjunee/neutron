@@ -1056,12 +1056,24 @@ D-7 wires or relocates them).
 **Accept:** the set of running loops is asserted, not archaeology.
 
 ### F3 — fireAndForget + unhandledRejection logger · `sonnet` · S · lane none
-28 bare `void fn(...)` sites, no process-level rejection handler anywhere. Add
-`fireAndForget(name, p)` (log + counter) required by lint for voided promises; one
-unhandledRejection/uncaughtException logger installed in boot().
-**Care:** principled voids keep their semantics (prewarm never rejects; scribe hot-path
-isolation) — the wrapper only makes them visible.
-**Accept:** zero bare `void <promise>` outside the wrapper.
+28 bare `void fn(...)` sites (actual count ~74), no process-level rejection handler
+anywhere. Add `fireAndForget(name, p, onError?)` (log + counter, then SWALLOW — never
+rethrow) required by lint for voided promises; one unhandledRejection/uncaughtException
+logger installed first-statement at every entrypoint (bootstrap-indirection so it arms
+before the entry's own static imports).
+**Care / semantics (clarified during build):** `fireAndForget` makes a voided promise's
+rejection VISIBLE (logged + counted) and NON-FATAL — it swallows after logging. This is
+the deliberate, correct semantics for the principled voids this unit targets: prewarm
+(never rejects) and scribe hot-path isolation (a rejection must NOT propagate into the
+hot path). A *fatal* wrapper would crash the process on exactly those benign failures, so
+"preserve bare-`void` fatal semantics" would be WRONG here — bare `void <reject>` is fatal
+in Bun, which for scribe/prewarm was itself a latent crash-on-benign-failure bug this unit
+removes. The process-level net (unhandledRejection + uncaughtException → log-then-crash,
+unconditionally fatal) is the FATAL backstop for a genuinely-unexpected rejection that
+ESCAPES a wrap; a site that truly needs fail-fast escalates via `onError`. Companion:
+`neutralizeAbandonedSettle` (silent, no log/count) for deliberately-abandoned settles.
+**Accept:** zero bare `void <promise>` outside the wrapper (CI-enforced type-aware gate +
+a pre-swallow gate that bans handing the wrapper an already-swallowed promise).
 
 ### F4 — `[BEHAVIOR]` Wire the watchdog for real (D-8 = wire) · `opus` · L · lane trident
 **Ryan's decision: finish the S5/S6 wiring, don't delete.** Both supervision systems
