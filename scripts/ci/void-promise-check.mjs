@@ -492,9 +492,15 @@ const IGNORE_DIRS = new Set(['node_modules', '.git', 'dist', '.expo', '.claude',
 //     ANY `@neutronai/*` dep; its `void this.runOnce()` goes through
 //     `guardedFire` (never rejects), so it governs its own (non-)error path.
 //   - `cores/` — bundled Cores + the Core SDK/runtime are ISOLATED modules that
-//     must NOT import the host logger (enforced by the `cores-use-sdk-only`
-//     dependency-cruiser rule); they own their error-handling (event emission
-//     via cores/sdk), the Core contract's job, not F3's.
+//     must NOT import the host `@neutronai/logger` (enforced by the
+//     `cores-use-sdk-only` dependency-cruiser rule), so the host `fireAndForget`
+//     wrapper is unavailable to them and this gate cannot require it there. A
+//     Core's own fire-and-forget error-handling is governed by the Core contract
+//     (its Core-legal observability sink is `console.*` / SDK events, NOT the
+//     host logger) — out of F3's HOST scope. This gate therefore does not police
+//     Core voids; a Core that swallows a scheduler failure silently is a
+//     Core-maintenance concern (the calendar/email scheduler ticks were surfaced
+//     via `console.error` while F3 was here).
 // The wrapper's own file owns the sanctioned `void <promise>`.
 const EXCLUDE_PREFIXES = ['app/', 'landing/chat-react/', 'chat-core/', 'loop/', 'cores/']
 const EXCLUDE_FILES = new Set(['landing/connect-accept.ts', 'logger/fire-and-forget.ts'])

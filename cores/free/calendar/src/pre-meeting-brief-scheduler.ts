@@ -183,9 +183,10 @@ export function buildPreMeetingBriefScheduler(
             project_id: fireProject,
             fired_at: now(),
           })
-        } catch {
-          // best-effort — still mark fired so we don't re-fire on
-          // every restart.
+        } catch (err) {
+          // best-effort — still mark fired so we don't re-fire on every
+          // restart — but surface the failure (not a silent swallow).
+          console.error('[calendar-scheduler] pre-meeting-brief fire failed', err)
         }
         try {
           await opts.queueStore.markFired(
@@ -193,8 +194,9 @@ export function buildPreMeetingBriefScheduler(
             input.event_id,
             now(),
           )
-        } catch {
-          // best-effort
+        } catch (err) {
+          // best-effort, but surfaced.
+          console.error('[calendar-scheduler] markFired failed', err)
         }
       })()
       if (cur !== undefined) cur.timer = null
@@ -434,7 +436,12 @@ export function buildPreMeetingBriefScheduler(
   function scheduleNextTick(): void {
     if (!running) return
     tickTimer = scheduleTimer(() => {
-      void tickInternal(now()).catch(() => {})
+      // Best-effort tick (a failure must not stop the loop) but NOT silent —
+      // surface it (Cores can't import the host logger; console is the Core-legal
+      // observability sink) so a persistently-failing scheduler is diagnosable.
+      void tickInternal(now()).catch((err) => {
+        console.error('[calendar-scheduler] tick failed', err)
+      })
     }, tick_interval_ms)
   }
 

@@ -173,6 +173,56 @@ describe('TriageScheduler', () => {
     }
   })
 
+  // F3 (Codex r18): a self-tick failure must be OBSERVABLE (surfaced via
+  // console.error — Cores can't import the host logger), not silently swallowed.
+  test('a self-tick failure is surfaced via console.error, not silently swallowed', async () => {
+    const { home, close } = tmp()
+    const realErr = console.error
+    const errs: string[] = []
+    console.error = (...a: unknown[]): void => {
+      errs.push(a.map((x) => String(x)).join(' '))
+    }
+    let armed: (() => void) | null = null
+    try {
+      const resolver = new EmailProjectCacheResolver({ owner_home: home })
+      const client = buildSeededInMemoryGmailClient()
+      const s = buildTriageScheduler({
+        cacheFor: () => {
+          throw new Error('boom-cache') // make every tick throw
+        },
+        client,
+        targetProjectId: async () => 'demo',
+        fire: async () => ({ chat_message_id: 'cm' }),
+        llm: async () => '[]',
+        model: 'haiku',
+        userTz: 'America/Los_Angeles',
+        daily_hour: 8,
+        daily_minute: 0,
+        scheduleTimer: (fn) => {
+          armed = fn
+          return { cancel: (): void => { armed = null } }
+        },
+        now: () => new Date('2026-05-20T15:00:00Z'), // 08:00 PT — tick does real work
+      })
+      try {
+        await s.start() // start()'s immediate tick may surface the throw too
+      } catch {
+        /* the immediate tick can reject on the injected throw — not the path under test */
+      }
+      expect(armed).not.toBeNull()
+      armed!() // fire the recurring self-tick → tick throws → caught → console.error
+      await new Promise((r) => setTimeout(r, 0)) // let the async self-tick settle
+      expect(
+        errs.find((l) => l.includes('email-triage-scheduler') && l.includes('tick failed')),
+      ).toBeDefined()
+      await s.stop()
+      resolver.closeAll()
+    } finally {
+      console.error = realErr
+      close()
+    }
+  })
+
   test('writes triage_cache audit row on every fire', async () => {
     const { home, close } = tmp()
     try {

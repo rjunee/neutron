@@ -1082,8 +1082,16 @@ removes. The process-level net (unhandledRejection + uncaughtException → log-t
 unconditionally fatal) is the FATAL backstop for a genuinely-unexpected rejection that
 ESCAPES a wrap; a site that truly needs fail-fast escalates via `onError`. Companion:
 `neutralizeAbandonedSettle` (silent, no log/count) for deliberately-abandoned settles.
-**Accept:** zero bare `void <promise>` outside the wrapper (CI-enforced type-aware gate +
-a pre-swallow gate that bans handing the wrapper an already-swallowed promise).
+**Accept:** zero bare `void <promise>` outside the wrapper in HOST code that can import
+`@neutronai/logger` (CI-enforced type-aware gate + a pre-swallow gate that bans handing
+the wrapper an already-swallowed promise). Scoped-out of the gate: browser/RN client code
+and bundled Cores / the `loop` leaf, which cannot import the host logger and govern their
+own fire-and-forget error-handling per their module contract (Core observability sink =
+`console.*` / SDK events, not the host wrapper); Core silent-swallow sites are a
+Core-maintenance concern (the calendar/email scheduler ticks were surfaced here). The two
+DUAL library+entry primary servers (gateway/open) install the net first-statement with a
+documented static-import residual (bootstrap-indirection covers the spawned MCP + clean CLI
+entries).
 
 ### F4 — `[BEHAVIOR]` Wire the watchdog for real (D-8 = wire) · `opus` · L · lane trident
 **Ryan's decision: finish the S5/S6 wiring, don't delete.** Both supervision systems
