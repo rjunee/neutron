@@ -7,23 +7,26 @@
 //
 // STANDALONE-ENTRYPOINT INVENTORY (sweep: `import.meta.main`, top-level `await`,
 // `bun <script.ts>` spawns) + net coverage:
-//   - gateway/index.ts        → hoisted install first in the main block [tested]
-//   - open/server.ts          → hoisted install before startOpenServer  [tested]
-//   - migrations/runner.ts    → install first in the main block         [tested]
-//   - landing/boot.ts         → install first in the main block         [tested]
-//   - gbrain-doctor.ts / diagnostics-cli.ts → install first; SELF-HANDLING CLIs
-//       (own top-level catch/exit → no env-triggerable uncaught path), so the
-//       net is a backstop — verified by install-presence + clean-run + the
-//       shared mechanism/static-init tests.
-//   - runtime/.../tools-bridge.ts, dev-channel.ts → SPAWNED MCP processes, now
-//       BOOTSTRAP entries: install the net (only static import = the logger
-//       leaf) then DYNAMICALLY import `*-impl.ts`, so the impl's whole static
-//       graph (incl. the external MCP SDK) is covered. [import-inject + shape +
-//       static-init tests]
-//   DUAL library+entry (gateway/open/CLIs) keep the in-body install; the
-//   residual (their own static imports of stable internal modules) is documented
-//   at installProcessSafetyNet. NOT in-repo: trident launcher (external
-//   `claude -p`), Managed launcher (separate repo). Skipped: CI tooling.
+//   BOOTSTRAP entries (only static import = the logger leaf; arm the net, then
+//   DYNAMICALLY import `*-impl.ts` so the impl's WHOLE static graph evaluates
+//   after the net is armed):
+//     - runtime/.../tools-bridge.ts, dev-channel.ts — spawned MCP processes
+//       (static graph pulls the external MCP SDK). [import-inject + shape]
+//     - open/diagnostics-cli.ts, landing/boot.ts — clean pure entries (exports
+//       are TEST-only). [landing real-entry failure + shape]
+//   IN-BODY install (first statement), with a documented, deliberate RESIDUAL
+//   (their own static imports of STABLE INTERNAL modules are uncovered; a
+//   bootstrap split would repoint live importers / launch wiring):
+//     - gateway/index.ts, open/server.ts — dual library+entry primary servers;
+//       their failure-prone loads (composer/config) run in the BODY → covered.
+//       [bad-composer real-entry]
+//     - migrations/runner.ts — dual (gateway boot + stores consume its exports).
+//       [bad-db real-entry]
+//     - gbrain-doctor.ts — dual (gbrain-memory/index re-exports); self-handling.
+//   The bootstrap PATTERN's static-init guarantee (net armed → failing dynamic
+//   import → caught) is proven directly by the pattern test below.
+//   NOT in-repo: trident launcher (external `claude -p`), Managed launcher
+//   (separate repo). Skipped: CI tooling (depcruise-ratchet-compare).
 import { describe, expect, test } from 'bun:test'
 import { spawnSync } from 'node:child_process'
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'

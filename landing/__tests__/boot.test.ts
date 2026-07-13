@@ -16,7 +16,7 @@
  */
 
 import { describe, expect, test } from 'bun:test'
-import { bootSignup, resolveSignupPort, resolveIdentityOauthUrl } from '../boot.ts'
+import { bootSignup, resolveSignupPort, resolveIdentityOauthUrl } from '../boot-impl.ts'
 
 describe('resolveSignupPort', () => {
   test('explicit override wins', () => {

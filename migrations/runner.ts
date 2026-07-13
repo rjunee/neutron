@@ -196,10 +196,14 @@ export function summarizeMigrateResult(result: ApplyResult): string {
 }
 
 if (import.meta.main) {
-  // F3 — standalone CLI entrypoint (`bun run migrate`). RESIDUAL: covers the
-  // body onward (incl. the fallible `new Database(...)`); this dual library+entry
-  // module's OWN static imports (stable internal modules) are the accepted
-  // in-module-install limit. See installProcessSafetyNet doc.
+  // F3 — standalone CLI entrypoint (`bun run migrate`). RESIDUAL (deliberate):
+  // covers the body onward (incl. the fallible `new Database(...)`), but NOT
+  // this module's OWN static imports. NO bootstrap split — it is a DUAL
+  // library+entry module whose exports are consumed by PRODUCTION (gateway
+  // boot's `applyMigrationsToProjectDb`, comment-store / nexus-store's
+  // `applyProjectScopedMigrations`); splitting would repoint those importers.
+  // Its static imports are stable internal modules (bun:sqlite, node:fs,
+  // ./db-path.ts, logger). See installProcessSafetyNet doc.
   installProcessSafetyNet()
   // An explicit db-path arg wins (install.sh passes one). With no arg, resolve
   // the SAME file the server opens — NEUTRON_DB_PATH (honored from .env, which

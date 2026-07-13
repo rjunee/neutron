@@ -28,7 +28,7 @@ import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { bootSignup } from '../boot.ts'
+import { bootSignup } from '../boot-impl.ts'
 import { createLandingServer } from '../server.ts'
 import {
   MOBILE_INSTALL_LINKS,

@@ -1059,8 +1059,18 @@ D-7 wires or relocates them).
 28 bare `void fn(...)` sites (actual count ~74), no process-level rejection handler
 anywhere. Add `fireAndForget(name, p, onError?)` (log + counter, then SWALLOW — never
 rethrow) required by lint for voided promises; one unhandledRejection/uncaughtException
-logger installed first-statement at every entrypoint (bootstrap-indirection so it arms
-before the entry's own static imports).
+logger installed first-statement at every entrypoint. Static-import coverage is scoped:
+BOOTSTRAP-INDIRECTION (thin loader arms the net, then dynamic-imports an `*-impl.ts` so
+its whole static graph evaluates after) for the spawned MCP processes (tools-bridge,
+dev-channel — their static graph pulls an external SDK) + the clean standalone CLI entries
+(diagnostics-cli, landing/boot — pure entries, test-only exports). The DUAL library+entry
+modules — gateway/index.ts, open/server.ts (primary servers) and the CLIs migrations/runner
++ gbrain-doctor (their exports are consumed by PRODUCTION) — install first-statement with a
+documented, deliberate residual: their failure-prone runtime loads (composer/config/db) run
+in the BODY (after the install, so COVERED); only their own top-level imports of stable
+internal modules are uncovered, and a bootstrap split there would repoint live importers /
+launch wiring for marginal value (a missing static dep already fails fast with a clear
+"Cannot find module" — bootstrap only makes that error's format structured).
 **Care / semantics (clarified during build):** `fireAndForget` makes a voided promise's
 rejection VISIBLE (logged + counted) and NON-FATAL — it swallows after logging. This is
 the deliberate, correct semantics for the principled voids this unit targets: prewarm

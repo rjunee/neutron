@@ -16,7 +16,7 @@ import { join } from 'node:path'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { applyMigrationsToProjectDb } from '@neutronai/migrations/runner.ts'
 import { composeDiagnostics } from '@neutronai/gateway/diagnostics/diagnostics-report.ts'
-import { collectCliDiagnostics, formatDiagnosticsText } from '../diagnostics-cli.ts'
+import { collectCliDiagnostics, formatDiagnosticsText } from '../diagnostics-cli-impl.ts'
 
 let tmp: string
 
