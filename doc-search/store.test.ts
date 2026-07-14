@@ -419,7 +419,8 @@ describe('DocSearchIndex (keyword-only; no dead embedder seam) — RA4', () => {
     test('a CORRECT current-schema DB does NOT rebuild on reopen (fingerprint stable)', async () => {
       // Build a correct v1 DB via open(), index a row, then reopen. A stable
       // fingerprint must NOT trigger a rebuild — the row must survive across
-      // reopens (a spurious rebuild would drop it).
+      // reopens (a spurious rebuild would drop it, and any FTS shadow-table
+      // quirk would surface as a rebuild-every-open here).
       const first = DocSearchIndex.open(dbPath)
       await first.indexFile(fileInput('p', 'docs/keep.md', '# Keep\n\nstable anchovy content'))
       first.close()
@@ -430,6 +431,60 @@ describe('DocSearchIndex (keyword-only; no dead embedder seam) — RA4', () => {
         expect((await again.search({ query: 'anchovy' })).map((h) => h.path)).toEqual(['docs/keep.md'])
         again.close()
       }
+    })
+
+    test('a v1 DB missing an FTS-sync TRIGGER self-heals — search works after reopen', async () => {
+      // The scope bug this closes: a dropped `doc_chunks_ai` trigger left the
+      // fingerprint MATCHING (triggers were filtered out), so no rebuild — then
+      // indexFile() inserts stopped populating FTS and search() silently
+      // returned nothing. The fingerprint must now cover triggers → mismatch →
+      // rebuild → FTS repopulates.
+      const first = DocSearchIndex.open(dbPath)
+      first.close()
+      // Corrupt: drop the AFTER INSERT FTS-sync trigger on an otherwise-valid v1 DB.
+      const tamper = new Database(dbPath)
+      tamper.exec(`DROP TRIGGER doc_chunks_ai`)
+      expect(
+        tamper.query<{ n: number }, []>(
+          `SELECT COUNT(*) AS n FROM sqlite_master WHERE type='trigger' AND name='doc_chunks_ai'`,
+        ).get()?.n,
+      ).toBe(0)
+      tamper.close()
+
+      const reopened = DocSearchIndex.open(dbPath)
+      // Rebuilt: the trigger is back…
+      expect(
+        reopened
+          .raw()
+          .query<{ n: number }, []>(
+            `SELECT COUNT(*) AS n FROM sqlite_master WHERE type='trigger' AND name='doc_chunks_ai'`,
+          )
+          .get()?.n,
+      ).toBe(1)
+      // …and search WORKS after indexing (FTS is repopulated by the restored trigger).
+      await reopened.indexFile(fileInput('p', 'docs/a.md', '# A\n\nwidget body'))
+      expect((await reopened.search({ query: 'widget' })).map((h) => h.path)).toEqual(['docs/a.md'])
+      reopened.close()
+    })
+
+    test('a v1 DB missing an INDEX self-heals — index present again after reopen', async () => {
+      const first = DocSearchIndex.open(dbPath)
+      first.close()
+      const tamper = new Database(dbPath)
+      tamper.exec(`DROP INDEX idx_doc_chunks_project`)
+      tamper.close()
+
+      const reopened = DocSearchIndex.open(dbPath)
+      const idxNames = reopened
+        .raw()
+        .query<{ name: string }, []>(`SELECT name FROM sqlite_master WHERE type='index'`)
+        .all()
+        .map((r) => r.name)
+      expect(idxNames).toContain('idx_doc_chunks_project')
+      expect(idxNames).toContain('idx_doc_chunks_file')
+      await reopened.indexFile(fileInput('p', 'docs/a.md', '# A\n\nwidget body'))
+      expect((await reopened.search({ query: 'widget' })).map((h) => h.path)).toEqual(['docs/a.md'])
+      reopened.close()
     })
   })
 })

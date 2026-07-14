@@ -366,37 +366,45 @@ function minMaxNormalise(values: number[]): number[] {
 }
 
 /**
- * The doc-search objects `SCHEMA` creates, whose structure the fingerprint
- * covers. Includes the FTS5 shadow tables SQLite auto-creates for `doc_fts`
- * (`doc_fts_data`, `_idx`, `_content`, `_docsize`, `_config`) — a malformed or
- * mis-versioned FTS mirror changes their DDL, so folding them in makes the
- * fingerprint sensitive to FTS corruption too. Any object whose name is NOT in
- * this set (a stray unrelated table) is IGNORED — the fingerprint is scoped to
- * doc-search's own schema so inert foreign tables never trigger a rebuild.
+ * The set of object NAMES that a fresh build of `SCHEMA` creates — the exact
+ * scope the fingerprint covers. Derived DYNAMICALLY from the reference build
+ * (below), NOT a hardcoded name/prefix filter: it therefore includes EVERY
+ * object the schema defines — `doc_chunks`, the `doc_fts` virtual table + its
+ * FTS5 shadow tables (`doc_fts_data`/`_idx`/`_docsize`/`_config`), ALL indexes
+ * (`idx_doc_chunks_*`), and ALL triggers (`doc_chunks_ai/ad/au`) — and can
+ * never omit an object the schema creates (add a new index/trigger later → the
+ * reference build includes it → it's automatically in scope, no code change).
+ * SQLite-internal `sqlite_*` autoindex noise is excluded on both sides.
  */
-function isDocSearchObject(name: string): boolean {
-  return name === 'doc_chunks' || name === 'doc_fts' || name.startsWith('doc_fts_')
+function referenceObjectNames(): Set<string> {
+  return currentSchema().names
 }
 
 /**
- * A stable structural fingerprint of doc-search's own schema in `db`.
+ * A stable structural fingerprint of the doc-search objects named in `scope`,
+ * as they exist in `db`.
  *
- * Reads `sqlite_master.sql` for every doc-search object (tables, the FTS mirror
- * + its shadow tables, indexes, triggers), NORMALIZES for stability — sort by
- * (type, name) so rowid/creation order never matters, collapse each DDL's
- * internal whitespace, drop `IF NOT EXISTS` which SQLite strips from stored SQL
- * anyway — and joins into one deterministic string. Two DBs whose doc-search
- * schema is structurally identical fingerprint EQUAL; ANY drift (wrong/missing
- * column, missing/extra index or trigger, malformed FTS) differs. `sql` is NULL
- * for auto-indexes; those are represented by name only.
+ * Reads `sqlite_master.(type,name,sql)` for every object whose NAME is in
+ * `scope` (the reference build's object set), NORMALIZES for stability — sort
+ * by (type, name) so rowid/creation order never matters, collapse each DDL's
+ * internal whitespace, drop `IF NOT EXISTS` (SQLite strips it from stored SQL
+ * anyway) — and joins into one deterministic string. Two DBs whose in-scope
+ * schema is structurally identical fingerprint EQUAL; ANY drift — wrong/missing
+ * column, MISSING or extra index/trigger, malformed FTS mirror — differs.
+ * `sql` is NULL for auto-created objects; those are represented by name only.
+ *
+ * A MISSING in-scope object (e.g. a dropped trigger) simply doesn't appear in
+ * the actual DB's rows, so the actual fingerprint omits it while the expected
+ * one includes it → mismatch → rebuild. That is exactly the missing-trigger /
+ * missing-index self-heal.
  */
-function schemaFingerprint(db: Database): string {
+function schemaFingerprint(db: Database, scope: Set<string>): string {
   const rows = db
     .query<{ type: string; name: string; sql: string | null }, []>(
       `SELECT type, name, sql FROM sqlite_master ORDER BY type, name`,
     )
     .all()
-    .filter((r) => isDocSearchObject(r.name))
+    .filter((r) => scope.has(r.name))
   return rows
     .map((r) => {
       const sql = (r.sql ?? '')
@@ -409,22 +417,36 @@ function schemaFingerprint(db: Database): string {
 }
 
 /**
- * The fingerprint of a CORRECT current-schema DB, derived from a fresh
- * in-memory build of `SCHEMA` (never hardcoded, so it can't drift from the DDL).
- * Computed once and cached for the process.
+ * The reference schema of a CORRECT current-schema DB — both its object-NAME
+ * scope and its expected fingerprint — derived from a fresh in-memory build of
+ * `SCHEMA` (never hardcoded, so it can't drift from the DDL). Computed once and
+ * cached for the process.
  */
-let expectedFingerprint: string | null = null
-function currentSchemaFingerprint(): string {
-  if (expectedFingerprint === null) {
+let referenceSchema: { names: Set<string>; fingerprint: string } | null = null
+function currentSchema(): { names: Set<string>; fingerprint: string } {
+  if (referenceSchema === null) {
     const ref = openSidecar(':memory:')
     try {
       ref.exec(SCHEMA)
-      expectedFingerprint = schemaFingerprint(ref)
+      const names = new Set(
+        ref
+          .query<{ name: string }, []>(
+            `SELECT name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'`,
+          )
+          .all()
+          .map((r) => r.name),
+      )
+      referenceSchema = { names, fingerprint: schemaFingerprint(ref, names) }
     } finally {
       ref.close()
     }
   }
-  return expectedFingerprint
+  return referenceSchema
+}
+
+/** The fingerprint a correct current-schema DB must match. */
+function currentSchemaFingerprint(): string {
+  return currentSchema().fingerprint
 }
 
 /**
@@ -459,7 +481,10 @@ function migrateSchema(db: Database): void {
   const row = db.query<{ user_version: number }, []>('PRAGMA user_version').get()
   const version = row?.user_version ?? 0
 
-  if (version !== SCHEMA_VERSION || schemaFingerprint(db) !== currentSchemaFingerprint()) {
+  if (
+    version !== SCHEMA_VERSION ||
+    schemaFingerprint(db, referenceObjectNames()) !== currentSchemaFingerprint()
+  ) {
     rebuildSchema(db)
   }
 }
