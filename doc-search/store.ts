@@ -478,12 +478,23 @@ function migrateSchema(db: Database): void {
  * time we reach them the virtual table is gone, so `DROP TABLE IF EXISTS` is a
  * no-op — and we never try to drop a shadow table out from under a live vtable
  * (which SQLite forbids).
+ *
+ * INVARIANT: the drop-set MUST equal the fingerprint-set. The fingerprint
+ * covers EVERY owned object type (`ownedObjects` — table, index, trigger, AND
+ * view), so the drop must cover every type too. A missed type (e.g. a VIEW that
+ * DROP left behind) would survive the rebuild → the post-rebuild fingerprint
+ * would still mismatch → EVERY reopen rebuilds, dropping+recreating `doc_chunks`
+ * and losing all indexed rows (a perpetual-rebuild / data-loss bug). Enumerating
+ * dynamically by type — rather than a hardcoded object list — keeps drop-set ==
+ * fingerprint-set by construction.
  */
 function rebuildSchema(db: Database): void {
   const owned = ownedObjects(db)
   const isVirtual = (o: SchemaObject): boolean => /^\s*CREATE\s+VIRTUAL\s+TABLE/i.test(o.sql ?? '')
   const quote = (name: string): string => `"${name.replace(/"/g, '""')}"`
 
+  // Views + triggers first (they reference tables); then indexes; then tables.
+  for (const o of owned) if (o.type === 'view') db.exec(`DROP VIEW IF EXISTS ${quote(o.name)}`)
   for (const o of owned) if (o.type === 'trigger') db.exec(`DROP TRIGGER IF EXISTS ${quote(o.name)}`)
   // Skip auto-indexes (sql IS NULL) — they vanish with their table and can't be
   // dropped explicitly.

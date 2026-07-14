@@ -526,5 +526,43 @@ describe('DocSearchIndex (keyword-only; no dead embedder seam) — RA4', () => {
       expect((await again.search({ query: 'widget' })).map((h) => h.path)).toEqual(['docs/a.md'])
       again.close()
     })
+
+    test('an EXTRA rogue VIEW self-heals ONCE — no perpetual rebuild, row survives', async () => {
+      // The data-loss bug this closes: the fingerprint covers ALL owned objects
+      // (views included), but if the rebuild fails to DROP views, a rogue view
+      // SURVIVES every rebuild → the fingerprint NEVER matches → EVERY reopen
+      // drops+recreates doc_chunks and loses all indexed rows. The drop-set must
+      // equal the fingerprint-set, so views are dropped too → rebuild is
+      // idempotent by construction.
+      const first = DocSearchIndex.open(dbPath)
+      first.close()
+      const tamper = new Database(dbPath)
+      tamper.exec(`CREATE VIEW rogue_view AS SELECT * FROM doc_chunks`)
+      tamper.close()
+
+      // First reopen: rebuilt, the rogue view is GONE.
+      const reopened = DocSearchIndex.open(dbPath)
+      const objNamesAfter1 = reopened
+        .raw()
+        .query<{ name: string }, []>(`SELECT name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'`)
+        .all()
+        .map((o) => o.name)
+      expect(objNamesAfter1).not.toContain('rogue_view')
+      // Insert a row AFTER the heal, so we can prove the SECOND reopen preserves it.
+      await reopened.indexFile(fileInput('p', 'docs/keep.md', '# Keep\n\ndurable pomelo content'))
+      reopened.close()
+
+      // Second reopen: the view was removed, so the fingerprint now MATCHES →
+      // NO rebuild → the row inserted above SURVIVES (a perpetual rebuild would
+      // have dropped doc_chunks and lost it).
+      const second = DocSearchIndex.open(dbPath)
+      expect((await second.search({ query: 'pomelo' })).map((h) => h.path)).toEqual(['docs/keep.md'])
+      second.close()
+
+      // Third reopen for good measure — still stable, still no rebuild.
+      const third = DocSearchIndex.open(dbPath)
+      expect((await third.search({ query: 'pomelo' })).map((h) => h.path)).toEqual(['docs/keep.md'])
+      third.close()
+    })
   })
 })
