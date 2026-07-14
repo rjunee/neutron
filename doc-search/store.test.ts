@@ -308,8 +308,11 @@ describe('DocSearchIndex (keyword-only; no dead embedder seam) — RA4', () => {
       // Rebuilt: stamp is DOWN to the current schema version (foreign stamp not trusted).
       expect(reopened.raw().query<{ user_version: number }, []>('PRAGMA user_version').get()?.user_version).toBe(1)
 
-      // Rebuilt to the CURRENT schema: required tables present, our own indexes
-      // recreated, and the future-only divergent objects GONE.
+      // Rebuilt to EXACTLY the CURRENT schema: our objects present, and ALL the
+      // future-only divergent objects GONE — including the stray unrelated table
+      // `doc_meta`. Full-owned-set rebuild removes foreign/stale objects (a
+      // dedicated cache must contain exactly the current schema), superseding the
+      // earlier "leave inert future tables in place" behaviour.
       const objNames = reopened
         .raw()
         .query<{ name: string }, []>(
@@ -321,11 +324,8 @@ describe('DocSearchIndex (keyword-only; no dead embedder seam) — RA4', () => {
       expect(objNames).toContain('doc_fts')
       expect(objNames).toContain('idx_doc_chunks_file')
       expect(objNames).toContain('idx_doc_chunks_project')
-      // doc_chunks was dropped + recreated at OUR schema, so its future-only
-      // index went with it. (A stray unrelated future table like `doc_meta`
-      // that DROP_SCHEMA doesn't know about may harmlessly remain — the rebuild
-      // only guarantees OUR objects match, it doesn't blow away foreign tables.)
       expect(objNames).not.toContain('idx_doc_chunks_lang')
+      expect(objNames).not.toContain('doc_meta')
       const cols = reopened
         .raw()
         .query<{ name: string }, []>(`SELECT name FROM pragma_table_info('doc_chunks')`)
@@ -485,6 +485,46 @@ describe('DocSearchIndex (keyword-only; no dead embedder seam) — RA4', () => {
       await reopened.indexFile(fileInput('p', 'docs/a.md', '# A\n\nwidget body'))
       expect((await reopened.search({ query: 'widget' })).map((h) => h.path)).toEqual(['docs/a.md'])
       reopened.close()
+    })
+
+    test('a v1 DB with an EXTRA rogue TRIGGER self-heals — rogue gone, search works', async () => {
+      // The full-owned-set gap this closes: a name-scoped fingerprint DISCARDED
+      // an unexpected object (a NEW name not in the reference set) before
+      // comparing, so an EXTRA rogue trigger left the fingerprint MATCHING → no
+      // rebuild. A rogue `AFTER INSERT` trigger that deletes the just-inserted
+      // row makes every indexFile() a no-op and search() silently return
+      // nothing. The full-owned-set fingerprint sees the extra object → rebuild.
+      const first = DocSearchIndex.open(dbPath)
+      first.close()
+      const tamper = new Database(dbPath)
+      // A rogue trigger (extra object) + a rogue standalone table (extra object).
+      tamper.exec(`
+        CREATE TRIGGER rogue_sabotage AFTER INSERT ON doc_chunks BEGIN
+          DELETE FROM doc_chunks WHERE id = new.id;
+        END;
+        CREATE TABLE rogue_table (x TEXT);
+      `)
+      tamper.close()
+
+      const reopened = DocSearchIndex.open(dbPath)
+      // Rebuilt: BOTH rogue objects are gone (dedicated cache = exactly the schema).
+      const objNames = reopened
+        .raw()
+        .query<{ name: string }, []>(`SELECT name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'`)
+        .all()
+        .map((o) => o.name)
+      expect(objNames).not.toContain('rogue_sabotage')
+      expect(objNames).not.toContain('rogue_table')
+      // …and search WORKS — the rogue trigger no longer deletes freshly indexed rows.
+      await reopened.indexFile(fileInput('p', 'docs/a.md', '# A\n\nwidget body'))
+      expect((await reopened.search({ query: 'widget' })).map((h) => h.path)).toEqual(['docs/a.md'])
+      reopened.close()
+
+      // Idempotent: the rogue objects were REMOVED by the rebuild, so a second
+      // reopen fingerprint-matches and does NOT rebuild (the row survives).
+      const again = DocSearchIndex.open(dbPath)
+      expect((await again.search({ query: 'widget' })).map((h) => h.path)).toEqual(['docs/a.md'])
+      again.close()
     })
   })
 })

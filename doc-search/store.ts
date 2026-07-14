@@ -144,22 +144,6 @@ END;
  */
 const SCHEMA_VERSION = 1
 
-/**
- * Drop every doc-search object so `SCHEMA` can recreate it cleanly. Used by the
- * upgrade path when a persistent DB predates the current schema — e.g. an
- * install created before RA4 still carries the removed `doc_chunks.embedding`
- * column, which `CREATE TABLE IF NOT EXISTS` would NOT alter away. Triggers and
- * the FTS mirror are dropped before the base table; the base table's indexes go
- * with it. (Indexes on `doc_chunks` are dropped implicitly with the table.)
- */
-const DROP_SCHEMA = `
-DROP TRIGGER IF EXISTS doc_chunks_ai;
-DROP TRIGGER IF EXISTS doc_chunks_ad;
-DROP TRIGGER IF EXISTS doc_chunks_au;
-DROP TABLE IF EXISTS doc_fts;
-DROP TABLE IF EXISTS doc_chunks;
-`
-
 /** BM25 column weights — title matches dominate, then headings, then body. */
 const BM25_WEIGHTS = { title: 10.0, heading: 4.0, body: 1.0 } as const
 
@@ -365,47 +349,46 @@ function minMaxNormalise(values: number[]): number[] {
   return values.map((v) => (v - min) / span)
 }
 
-/**
- * The set of object NAMES that a fresh build of `SCHEMA` creates — the exact
- * scope the fingerprint covers. Derived DYNAMICALLY from the reference build
- * (below), NOT a hardcoded name/prefix filter: it therefore includes EVERY
- * object the schema defines — `doc_chunks`, the `doc_fts` virtual table + its
- * FTS5 shadow tables (`doc_fts_data`/`_idx`/`_docsize`/`_config`), ALL indexes
- * (`idx_doc_chunks_*`), and ALL triggers (`doc_chunks_ai/ad/au`) — and can
- * never omit an object the schema creates (add a new index/trigger later → the
- * reference build includes it → it's automatically in scope, no code change).
- * SQLite-internal `sqlite_*` autoindex noise is excluded on both sides.
- */
-function referenceObjectNames(): Set<string> {
-  return currentSchema().names
+/** A DB object as recorded in `sqlite_master`. */
+interface SchemaObject {
+  type: string
+  name: string
+  sql: string | null
 }
 
 /**
- * A stable structural fingerprint of the doc-search objects named in `scope`,
- * as they exist in `db`.
- *
- * Reads `sqlite_master.(type,name,sql)` for every object whose NAME is in
- * `scope` (the reference build's object set), NORMALIZES for stability — sort
- * by (type, name) so rowid/creation order never matters, collapse each DDL's
- * internal whitespace, drop `IF NOT EXISTS` (SQLite strips it from stored SQL
- * anyway) — and joins into one deterministic string. Two DBs whose in-scope
- * schema is structurally identical fingerprint EQUAL; ANY drift — wrong/missing
- * column, MISSING or extra index/trigger, malformed FTS mirror — differs.
- * `sql` is NULL for auto-created objects; those are represented by name only.
- *
- * A MISSING in-scope object (e.g. a dropped trigger) simply doesn't appear in
- * the actual DB's rows, so the actual fingerprint omits it while the expected
- * one includes it → mismatch → rebuild. That is exactly the missing-trigger /
- * missing-index self-heal.
+ * The FULL set of OWNED objects in `db` — every object whose name is NOT a
+ * SQLite internal (`sqlite_*`: autoindexes, `sqlite_sequence`, etc.). The
+ * doc-search index is a DEDICATED cache file that NOTHING else writes to, so it
+ * OWNS its entire object set: it must contain EXACTLY the current schema's
+ * objects — no more, no less. Fingerprinting/dropping the full owned set (not a
+ * name-scoped subset) is what makes an EXTRA/unexpected object (a rogue trigger,
+ * a stale/foreign table) detectable and removable.
  */
-function schemaFingerprint(db: Database, scope: Set<string>): string {
-  const rows = db
-    .query<{ type: string; name: string; sql: string | null }, []>(
-      `SELECT type, name, sql FROM sqlite_master ORDER BY type, name`,
+function ownedObjects(db: Database): SchemaObject[] {
+  return db
+    .query<SchemaObject, []>(
+      `SELECT type, name, sql FROM sqlite_master
+        WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name`,
     )
     .all()
-    .filter((r) => scope.has(r.name))
-  return rows
+}
+
+/**
+ * A stable structural fingerprint of `db`'s FULL owned object set.
+ *
+ * NORMALIZES for stability — sort by (type, name) so rowid/creation order never
+ * matters, collapse each DDL's internal whitespace, drop `IF NOT EXISTS` (SQLite
+ * strips it from stored SQL anyway) — and joins into one deterministic string.
+ * Two DBs with a structurally identical owned set fingerprint EQUAL; ANY
+ * deviation differs: a MISSING expected object (dropped trigger/index), a
+ * CHANGED object (wrong columns, malformed FTS), OR an EXTRA unexpected object
+ * (rogue trigger, stale/foreign table). By construction nothing can be added,
+ * removed, or altered in the cache undetected. `sql` is NULL for auto-created
+ * objects; those are represented by name only.
+ */
+function schemaFingerprint(db: Database): string {
+  return ownedObjects(db)
     .map((r) => {
       const sql = (r.sql ?? '')
         .replace(/\s+/g, ' ')
@@ -417,81 +400,101 @@ function schemaFingerprint(db: Database, scope: Set<string>): string {
 }
 
 /**
- * The reference schema of a CORRECT current-schema DB — both its object-NAME
- * scope and its expected fingerprint — derived from a fresh in-memory build of
- * `SCHEMA` (never hardcoded, so it can't drift from the DDL). Computed once and
- * cached for the process.
+ * The expected fingerprint of a CORRECT current-schema DB, derived from a fresh
+ * in-memory build of `SCHEMA` (never hardcoded, so it can't drift from the DDL).
+ * The reference build's owned set is EXACTLY the objects the schema defines
+ * (base table, the `doc_fts` virtual table + its FTS5 shadow tables, all
+ * indexes, all triggers), so a real DB matches iff its owned set is identical.
+ * Computed once and cached for the process.
  */
-let referenceSchema: { names: Set<string>; fingerprint: string } | null = null
-function currentSchema(): { names: Set<string>; fingerprint: string } {
-  if (referenceSchema === null) {
+let expectedFingerprint: string | null = null
+function currentSchemaFingerprint(): string {
+  if (expectedFingerprint === null) {
     const ref = openSidecar(':memory:')
     try {
       ref.exec(SCHEMA)
-      const names = new Set(
-        ref
-          .query<{ name: string }, []>(
-            `SELECT name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'`,
-          )
-          .all()
-          .map((r) => r.name),
-      )
-      referenceSchema = { names, fingerprint: schemaFingerprint(ref, names) }
+      expectedFingerprint = schemaFingerprint(ref)
     } finally {
       ref.close()
     }
   }
-  return referenceSchema
-}
-
-/** The fingerprint a correct current-schema DB must match. */
-function currentSchemaFingerprint(): string {
-  return currentSchema().fingerprint
+  return expectedFingerprint
 }
 
 /**
  * Bring a freshly-opened DB to EXACTLY the running binary's schema.
  *
- * The doc-search index is a REBUILDABLE CACHE (lives under
+ * The doc-search index is a DEDICATED, REBUILDABLE CACHE (lives under
  * `<owner_home>/cache/doc-search/`, derived entirely from the on-disk project
- * docs and repopulated by the next `refreshIndex` pass). Because it is
- * disposable, the cache MUST match the running binary's schema and is made
- * SELF-HEALING: it is DROP-and-recreated on ANY `user_version` mismatch (either
- * direction) OR ANY structural drift — there is no in-place `ALTER` and no
- * attempt to trust a foreign or corrupt schema.
+ * docs and repopulated by the next `refreshIndex` pass; nothing else writes to
+ * the file). Because it is disposable AND owns its whole object set, the cache
+ * must contain EXACTLY the current schema — no more, no less — and is made
+ * SELF-HEALING: DROP-and-recreated on ANY `user_version` mismatch (either
+ * direction) OR ANY deviation of its owned object set from the reference
+ * fingerprint. There is no in-place `ALTER` and no attempt to trust a foreign
+ * or corrupt schema.
  *
  *   - `version !== SCHEMA_VERSION` → rebuild. Covers a legacy pre-RA4 DB (still
- *     carrying the removed `doc_chunks.embedding` column, reporting 0) and a
- *     fresh empty DB (also 0, drops are `IF EXISTS` no-ops), AND a DB written by
- *     a NEWER/rolled-back binary (a foreign stamp is NOT trusted — opening a
+ *     carrying the removed `doc_chunks.embedding` column, reporting 0), a fresh
+ *     empty DB (also 0; the rebuild's drops are no-ops), AND a DB written by a
+ *     NEWER/rolled-back binary (a foreign stamp is NOT trusted — opening a
  *     divergent future DB as-is left an UNUSABLE cache whose `search()` threw
  *     "no such table: doc_fts"; e.g. a bare `PRAGMA user_version=2` DB).
- *   - Otherwise the stamp matches, but the STRUCTURE is still verified against a
- *     SCHEMA FINGERPRINT (see `schemaFingerprint`). A same-version DB whose
- *     doc-search schema drifted — a missing table, a `doc_chunks` with the wrong
- *     columns, a missing/extra trigger or index, a malformed FTS mirror —
- *     mismatches and is rebuilt. This one integrity gate SUBSUMES a mere
- *     table-existence check, so `open()` NEVER returns a runtime that would fail
- *     on a corrupt/malformed same-version schema (no "no such table" / "no such
- *     column" at search/index time).
+ *   - Otherwise the stamp matches, but the STRUCTURE is still verified against
+ *     the FULL-owned-set fingerprint (see `schemaFingerprint`). A same-version
+ *     DB whose owned set deviates in ANY way — a missing table, a `doc_chunks`
+ *     with the wrong columns, a missing OR extra trigger/index, a rogue trigger,
+ *     a stale/foreign table, a malformed FTS mirror — mismatches and is rebuilt.
+ *     So `open()` NEVER returns a runtime that would fail or silently misbehave
+ *     on a corrupt same-version schema (no "no such table" / "no such column";
+ *     no rogue object silently sabotaging inserts).
  *   - A CORRECT current-schema DB fingerprint-matches and is NOT rebuilt on
- *     reopen (idempotent — normalization strips all non-deterministic ordering).
+ *     reopen (idempotent — the FTS5 shadow tables are deterministic across
+ *     builds, so a correct reopen never spuriously rebuilds).
+ *
+ * (Supersedes an earlier "leave inert unrelated future tables in place"
+ * behaviour: for a DEDICATED cache a lingering foreign object is WRONG — it can
+ * corrupt results — so rebuild-to-exact-schema removes it. Safe: it's a cache.)
  */
 function migrateSchema(db: Database): void {
   const row = db.query<{ user_version: number }, []>('PRAGMA user_version').get()
   const version = row?.user_version ?? 0
 
-  if (
-    version !== SCHEMA_VERSION ||
-    schemaFingerprint(db, referenceObjectNames()) !== currentSchemaFingerprint()
-  ) {
+  if (version !== SCHEMA_VERSION || schemaFingerprint(db) !== currentSchemaFingerprint()) {
     rebuildSchema(db)
   }
 }
 
-/** DROP every doc-search object, recreate at the current `SCHEMA`, and stamp. */
+/**
+ * DROP every OWNED object (the full set — including any rogue/stale object, not
+ * just the ones the current `SCHEMA` names), recreate at the current `SCHEMA`,
+ * and stamp. Dropping the full owned set is what makes the rebuild IDEMPOTENT
+ * after an extra-object deviation: a rogue table/trigger is removed here, so the
+ * very next reopen fingerprint-matches (no rebuild loop).
+ *
+ * Drop order is safety-critical for FTS5: triggers first, then indexes, then the
+ * `doc_fts` VIRTUAL table (which auto-drops its shadow tables), then remaining
+ * base tables. The captured list still contains the shadow tables, but by the
+ * time we reach them the virtual table is gone, so `DROP TABLE IF EXISTS` is a
+ * no-op — and we never try to drop a shadow table out from under a live vtable
+ * (which SQLite forbids).
+ */
 function rebuildSchema(db: Database): void {
-  db.exec(DROP_SCHEMA)
+  const owned = ownedObjects(db)
+  const isVirtual = (o: SchemaObject): boolean => /^\s*CREATE\s+VIRTUAL\s+TABLE/i.test(o.sql ?? '')
+  const quote = (name: string): string => `"${name.replace(/"/g, '""')}"`
+
+  for (const o of owned) if (o.type === 'trigger') db.exec(`DROP TRIGGER IF EXISTS ${quote(o.name)}`)
+  // Skip auto-indexes (sql IS NULL) — they vanish with their table and can't be
+  // dropped explicitly.
+  for (const o of owned)
+    if (o.type === 'index' && o.sql !== null) db.exec(`DROP INDEX IF EXISTS ${quote(o.name)}`)
+  // Virtual tables first so their FTS5 shadow tables are gone before we reach them.
+  for (const o of owned)
+    if (o.type === 'table' && isVirtual(o)) db.exec(`DROP TABLE IF EXISTS ${quote(o.name)}`)
+  for (const o of owned)
+    if (o.type === 'table' && !isVirtual(o)) db.exec(`DROP TABLE IF EXISTS ${quote(o.name)}`)
+
   db.exec(SCHEMA)
   // `user_version` takes an integer literal (no bound params in a PRAGMA);
   // SCHEMA_VERSION is a hardcoded numeric constant, so this is injection-safe.
