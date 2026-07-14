@@ -21,30 +21,23 @@
  *   - Results are collapsed to the best-scoring chunk PER FILE so a
  *     "doc search" returns ranked DOCUMENTS (with the matching section's
  *     heading + snippet), not a flood of chunks from one big file.
- *   - Semantic search is OPTIONAL and behind the `embedder` seam — when
- *     no embedder is supplied (the OSS baseline) the index is pure
- *     lexical BM25 and pulls in NO external provider. When an embedder
- *     is supplied, chunk embeddings are stored and the top lexical
- *     candidates are re-ranked by cosine similarity, blended with the
- *     lexical score.
+ *
+ * Doc search is pure-lexical BM25 with NO external provider. (An optional
+ * in-process `embedder` seam once lived here for a hybrid semantic re-rank,
+ * but nothing ever wired one — the composer always opened the index lexical-
+ * only, so the branch was dead. It could not share RA3's embedder either:
+ * RA3 configures an OUT-OF-PROCESS `gbrain serve` child via env vars
+ * (`gbrain-memory/embedder-config.ts` → `EmbedderConfig.childEnv`), whereas
+ * this seam needed an in-process `embed(texts) → number[][]` function that
+ * doesn't exist anywhere in the tree. Rather than fork a parallel embedding
+ * path, the dead seam was removed (RA4) — one keyword path, no dead code.)
  */
 
 import type { Database } from 'bun:sqlite'
 
-import { openSidecar, parseJsonColumn } from '@neutronai/persistence/index.ts'
+import { openSidecar } from '@neutronai/persistence/index.ts'
 
 import { sanitizeFtsQuery } from './query.ts'
-
-/**
- * Pluggable embedding provider for the optional semantic mode. The
- * baseline never requires one; callers that DO want hybrid search wire
- * a local (OSS) embedder. `embed` is batched for index-time efficiency.
- */
-export interface Embedder {
-  /** Embedding dimensionality (all vectors must share it). */
-  readonly dim: number
-  embed(texts: string[]): Promise<number[][]>
-}
 
 /** A chunk ready for indexing (one file's worth is upserted atomically). */
 export interface ChunkInput {
@@ -101,7 +94,6 @@ interface ChunkRow {
   ordinal: number
   bm25: number
   snippet: string
-  embedding: string | null
 }
 
 const SCHEMA = `
@@ -115,8 +107,7 @@ CREATE TABLE IF NOT EXISTS doc_chunks (
   ordinal    INTEGER NOT NULL,
   body       TEXT NOT NULL,
   mtime_ms   INTEGER NOT NULL,
-  indexed_at INTEGER NOT NULL,
-  embedding  TEXT
+  indexed_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_doc_chunks_file ON doc_chunks(project, relpath);
 CREATE INDEX IF NOT EXISTS idx_doc_chunks_project ON doc_chunks(project);
@@ -144,11 +135,17 @@ CREATE TRIGGER IF NOT EXISTS doc_chunks_au AFTER UPDATE ON doc_chunks BEGIN
 END;
 `
 
+/**
+ * Schema version stamped into the DB's `PRAGMA user_version`. Bumped for the
+ * RA4 embedder-seam removal (the `doc_chunks.embedding` column is gone). Any
+ * DB whose stamp is BELOW this — including a legacy DB from before stamping
+ * existed, which reports `0` — is a stale schema and gets rebuilt on open (see
+ * `migrateSchema`). Bump this whenever the on-disk schema changes.
+ */
+const SCHEMA_VERSION = 1
+
 /** BM25 column weights — title matches dominate, then headings, then body. */
 const BM25_WEIGHTS = { title: 10.0, heading: 4.0, body: 1.0 } as const
-
-/** Blend weight for the lexical score when hybrid (semantic) mode is on. */
-const HYBRID_LEX_WEIGHT = 0.6
 
 /**
  * Hard cap on BM25-ordered candidate chunks pulled before the per-file
@@ -158,33 +155,34 @@ const HYBRID_LEX_WEIGHT = 0.6
  */
 const CANDIDATE_CAP = 5000
 
-export interface DocSearchIndexOptions {
-  /** Optional semantic embedder. Omit for the pure-lexical baseline. */
-  embedder?: Embedder
-}
-
 export class DocSearchIndex {
   private readonly db: Database
-  private readonly embedder: Embedder | null
 
-  private constructor(db: Database, embedder: Embedder | null) {
+  private constructor(db: Database) {
     this.db = db
-    this.embedder = embedder
   }
 
   /** Open (or create) an index at `path`. Use ':memory:' for tests. */
-  static open(path: string, options: DocSearchIndexOptions = {}): DocSearchIndex {
+  static open(path: string): DocSearchIndex {
     // P3 shared open — previously WAL + synchronous + foreign_keys only; now
     // additionally gains busy_timeout/temp_store/cache_size (strictly more
     // tolerant under contention, no semantic change).
     const db = openSidecar(path)
-    db.exec(SCHEMA)
-    return new DocSearchIndex(db, options.embedder ?? null)
-  }
-
-  /** True iff a semantic embedder is wired (hybrid mode active). */
-  get semantic(): boolean {
-    return this.embedder !== null
+    try {
+      migrateSchema(db)
+    } catch (err) {
+      // A failed migrate (rolled-back rebuild, SQLITE_BUSY from a concurrent
+      // rebuilder, etc.) must not leak the handle or its lock — close it and
+      // rethrow so the caller (composer try/catch) degrades doc-search for this
+      // process; it self-heals on the next clean open.
+      try {
+        db.close()
+      } catch {
+        // best-effort
+      }
+      throw err
+    }
+    return new DocSearchIndex(db)
   }
 
   /** Raw handle — for tests / advanced callers. */
@@ -223,22 +221,23 @@ export class DocSearchIndex {
 
   /**
    * Replace all chunks for one file atomically (delete-then-insert).
-   * When an embedder is wired, chunk embeddings are computed and stored.
+   *
+   * `async` is retained (callers `await` it) even though the body is now
+   * fully synchronous — the doc-corpus refresh pipeline awaits every
+   * `indexFile`, and keeping the signature avoids a churny ripple through
+   * `indexer.ts` / `runtime.ts` for no behavioural gain.
    */
   async indexFile(input: IndexFileInput): Promise<void> {
-    const embeddings = await this.maybeEmbed(input.chunks.map((c) => c.body))
     const now = Date.now()
     const del = this.db.query(`DELETE FROM doc_chunks WHERE project = ? AND relpath = ?`)
     const ins = this.db.query(
       `INSERT INTO doc_chunks
-         (project, relpath, abs_path, title, heading, ordinal, body, mtime_ms, indexed_at, embedding)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         (project, relpath, abs_path, title, heading, ordinal, body, mtime_ms, indexed_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     const tx = this.db.transaction(() => {
       del.run(input.project, input.relpath)
-      for (let i = 0; i < input.chunks.length; i++) {
-        const c = input.chunks[i]!
-        const emb = embeddings === null ? null : JSON.stringify(embeddings[i] ?? [])
+      for (const c of input.chunks) {
         ins.run(
           input.project,
           input.relpath,
@@ -249,7 +248,6 @@ export class DocSearchIndex {
           c.body,
           input.mtimeMs,
           now,
-          emb,
         )
       }
     })
@@ -279,9 +277,7 @@ export class DocSearchIndex {
   }
 
   /**
-   * BM25 search returned as ranked DOCUMENTS (best chunk per file). In
-   * semantic mode the top lexical files are re-ranked by query↔best-chunk
-   * cosine similarity blended with BM25.
+   * BM25 search returned as ranked DOCUMENTS (best chunk per file).
    *
    * Candidate chunks are pulled BM25-ordered up to a high safety cap,
    * then collapsed to the best chunk per file, and ONLY THEN is the
@@ -309,8 +305,7 @@ export class DocSearchIndex {
       `SELECT c.project AS project, c.relpath AS relpath, c.title AS title,
               c.heading AS heading, c.ordinal AS ordinal,
               bm25(doc_fts, ${BM25_WEIGHTS.title}, ${BM25_WEIGHTS.heading}, ${BM25_WEIGHTS.body}) AS bm25,
-              snippet(doc_fts, 2, '[', ']', ' … ', 12) AS snippet,
-              c.embedding AS embedding
+              snippet(doc_fts, 2, '[', ']', ' … ', 12) AS snippet
          FROM doc_fts
          JOIN doc_chunks c ON c.id = doc_fts.rowid
         WHERE doc_fts MATCH ?${projectClause}
@@ -336,15 +331,7 @@ export class DocSearchIndex {
     const files = [...bestByFile.values()]
 
     // Lexical relevance: min-max normalise -bm25 (higher = better).
-    const lexNorm = minMaxNormalise(files.map((f) => -f.bm25))
-    const scores =
-      this.embedder !== null
-        ? await this.blendSemantic(
-            input.query,
-            files.map((f) => f.embedding),
-            lexNorm,
-          )
-        : lexNorm
+    const scores = minMaxNormalise(files.map((f) => -f.bm25))
 
     return files
       .map((f, i) => ({
@@ -358,47 +345,6 @@ export class DocSearchIndex {
       }))
       .sort((a, b) => b.score - a.score || a.path.localeCompare(b.path))
       .slice(0, limit)
-  }
-
-  // ── internals ──────────────────────────────────────────────────────────
-
-  private async maybeEmbed(texts: string[]): Promise<number[][] | null> {
-    if (this.embedder === null || texts.length === 0) return null
-    const vecs = await this.embedder.embed(texts)
-    return vecs
-  }
-
-  /**
-   * Blend the lexical scores with query↔chunk cosine similarity for the
-   * supplied per-file best-chunk embeddings. Candidates with no stored
-   * embedding fall back to the lowest present cosine so they aren't
-   * spuriously boosted. Returns the lexical scores unchanged when the
-   * query can't be embedded or nothing has an embedding.
-   */
-  private async blendSemantic(
-    query: string,
-    embeddings: Array<string | null>,
-    lexNorm: number[],
-  ): Promise<number[]> {
-    const embedder = this.embedder!
-    const [queryVec] = await embedder.embed([query])
-    if (queryVec === undefined) return lexNorm
-
-    const cosines = embeddings.map((raw) => {
-      if (raw === null) return null
-      // Corrupt-JSON policy (explicit, historical): fallback → null — a
-      // chunk with an unparseable stored embedding simply drops out of the
-      // semantic blend. (`cosineSimilarity` itself never throws.)
-      const vec = parseJsonColumn(raw, { onCorrupt: 'fallback', fallback: null })
-      if (vec === null) return null
-      return cosineSimilarity(queryVec, vec as number[])
-    })
-    const present = cosines.filter((c): c is number => c !== null)
-    if (present.length === 0) return lexNorm
-    const floor = Math.min(...present)
-    const cosNorm = minMaxNormalise(cosines.map((c) => c ?? floor))
-
-    return lexNorm.map((lex, i) => HYBRID_LEX_WEIGHT * lex + (1 - HYBRID_LEX_WEIGHT) * cosNorm[i]!)
   }
 }
 
@@ -416,20 +362,200 @@ function minMaxNormalise(values: number[]): number[] {
   return values.map((v) => (v - min) / span)
 }
 
-/** Cosine similarity; returns 0 for zero-norm or mismatched vectors. */
-export function cosineSimilarity(a: number[], b: number[]): number {
-  const n = Math.min(a.length, b.length)
-  if (n === 0) return 0
-  let dot = 0
-  let na = 0
-  let nb = 0
-  for (let i = 0; i < n; i++) {
-    const x = a[i]!
-    const y = b[i]!
-    dot += x * y
-    na += x * x
-    nb += y * y
+/** A DB object as recorded in `sqlite_master`. */
+interface SchemaObject {
+  type: string
+  name: string
+  sql: string | null
+}
+
+/**
+ * The FULL set of OWNED objects in `db` — every object whose name is NOT a
+ * SQLite internal (`sqlite_*`: autoindexes, `sqlite_sequence`, etc.). The
+ * doc-search index is a DEDICATED cache file that NOTHING else writes to, so it
+ * OWNS its entire object set: it must contain EXACTLY the current schema's
+ * objects — no more, no less. Fingerprinting/dropping the full owned set (not a
+ * name-scoped subset) is what makes an EXTRA/unexpected object (a rogue trigger,
+ * a stale/foreign table) detectable and removable.
+ */
+function ownedObjects(db: Database): SchemaObject[] {
+  return db
+    .query<SchemaObject, []>(
+      `SELECT type, name, sql FROM sqlite_master
+        WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name`,
+    )
+    .all()
+}
+
+/**
+ * A stable structural fingerprint of `db`'s FULL owned object set.
+ *
+ * NORMALIZES for stability — sort by (type, name) so rowid/creation order never
+ * matters, collapse each DDL's internal whitespace, drop `IF NOT EXISTS` (SQLite
+ * strips it from stored SQL anyway) — and joins into one deterministic string.
+ * Two DBs with a structurally identical owned set fingerprint EQUAL; ANY
+ * deviation differs: a MISSING expected object (dropped trigger/index), a
+ * CHANGED object (wrong columns, malformed FTS), OR an EXTRA unexpected object
+ * (rogue trigger, stale/foreign table). By construction nothing can be added,
+ * removed, or altered in the cache undetected. `sql` is NULL for auto-created
+ * objects; those are represented by name only.
+ */
+function schemaFingerprint(db: Database): string {
+  return ownedObjects(db)
+    .map((r) => {
+      const sql = (r.sql ?? '')
+        .replace(/\s+/g, ' ')
+        .replace(/\bIF NOT EXISTS\b/gi, '')
+        .trim()
+      return `${r.type}\x1f${r.name}\x1f${sql}`
+    })
+    .join('\x1e')
+}
+
+/**
+ * The expected fingerprint of a CORRECT current-schema DB, derived from a fresh
+ * in-memory build of `SCHEMA` (never hardcoded, so it can't drift from the DDL).
+ * The reference build's owned set is EXACTLY the objects the schema defines
+ * (base table, the `doc_fts` virtual table + its FTS5 shadow tables, all
+ * indexes, all triggers), so a real DB matches iff its owned set is identical.
+ * Computed once and cached for the process.
+ */
+let expectedFingerprint: string | null = null
+function currentSchemaFingerprint(): string {
+  if (expectedFingerprint === null) {
+    const ref = openSidecar(':memory:')
+    try {
+      ref.exec(SCHEMA)
+      expectedFingerprint = schemaFingerprint(ref)
+    } finally {
+      ref.close()
+    }
   }
-  if (na === 0 || nb === 0) return 0
-  return dot / (Math.sqrt(na) * Math.sqrt(nb))
+  return expectedFingerprint
+}
+
+/**
+ * Bring a freshly-opened DB to EXACTLY the running binary's schema.
+ *
+ * The doc-search index is a DEDICATED, REBUILDABLE CACHE (lives under
+ * `<owner_home>/cache/doc-search/`, derived entirely from the on-disk project
+ * docs and repopulated by the next `refreshIndex` pass; nothing else writes to
+ * the file). Because it is disposable AND owns its whole object set, the cache
+ * must contain EXACTLY the current schema — no more, no less — and is made
+ * SELF-HEALING: DROP-and-recreated on ANY `user_version` mismatch (either
+ * direction) OR ANY deviation of its owned object set from the reference
+ * fingerprint. There is no in-place `ALTER` and no attempt to trust a foreign
+ * or corrupt schema.
+ *
+ *   - `version !== SCHEMA_VERSION` → rebuild. Covers a legacy pre-RA4 DB (still
+ *     carrying the removed `doc_chunks.embedding` column, reporting 0), a fresh
+ *     empty DB (also 0; the rebuild's drops are no-ops), AND a DB written by a
+ *     NEWER/rolled-back binary (a foreign stamp is NOT trusted — opening a
+ *     divergent future DB as-is left an UNUSABLE cache whose `search()` threw
+ *     "no such table: doc_fts"; e.g. a bare `PRAGMA user_version=2` DB).
+ *   - Otherwise the stamp matches, but the STRUCTURE is still verified against
+ *     the FULL-owned-set fingerprint (see `schemaFingerprint`). A same-version
+ *     DB whose owned set deviates in ANY way — a missing table, a `doc_chunks`
+ *     with the wrong columns, a missing OR extra trigger/index, a rogue trigger,
+ *     a stale/foreign table, a malformed FTS mirror — mismatches and is rebuilt.
+ *     So `open()` NEVER returns a runtime that would fail or silently misbehave
+ *     on a corrupt same-version schema (no "no such table" / "no such column";
+ *     no rogue object silently sabotaging inserts).
+ *   - A CORRECT current-schema DB fingerprint-matches and is NOT rebuilt on
+ *     reopen (idempotent — the FTS5 shadow tables are deterministic across
+ *     builds, so a correct reopen never spuriously rebuilds).
+ *
+ * (Supersedes an earlier "leave inert unrelated future tables in place"
+ * behaviour: for a DEDICATED cache a lingering foreign object is WRONG — it can
+ * corrupt results — so rebuild-to-exact-schema removes it. Safe: it's a cache.)
+ */
+function migrateSchema(db: Database): void {
+  // LOCK-then-CHECK. Take the write lock BEFORE inspecting version + fingerprint,
+  // and re-check UNDER the lock, so the whole decide-then-rebuild is one atomic
+  // critical section. Deciding outside the lock is a check-then-act race: two
+  // processes opening a stale (e.g. legacy v0) cache could BOTH decide "rebuild";
+  // the first rebuilds + starts indexing, then the second acquires the lock with
+  // its STALE decision and rebuilds AGAIN, erasing the first's rows. Serializing
+  // under `BEGIN IMMEDIATE` means the second waits, re-checks, finds the DB
+  // already current, and no-ops — the first's data is safe.
+  //
+  // `IMMEDIATE` acquires the write lock up front; a concurrent rebuilder either
+  // blocks then re-checks, or gets SQLITE_BUSY — which propagates out of `open()`
+  // (the handle is closed there) so the composer's try/catch degrades doc-search
+  // for that process and retries on the next open. Never a crash.
+  db.exec('BEGIN IMMEDIATE')
+  try {
+    if (schemaIsCurrent(db)) {
+      // Already current — possibly rebuilt by whoever held the lock before us.
+      // Release the (write-free) lock and return without touching anything.
+      db.exec('COMMIT')
+      return
+    }
+    // Still stale under the lock → rebuild. Enumerate the drop-set HERE, under
+    // the lock, so it reflects the real current contents (not a pre-lock snapshot).
+    dropAllOwnedObjects(db)
+    db.exec(SCHEMA)
+    // `user_version` takes an integer literal (no bound params in a PRAGMA);
+    // SCHEMA_VERSION is a hardcoded numeric constant, so this is injection-safe.
+    db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`)
+    db.exec('COMMIT')
+  } catch (err) {
+    // Roll back so the DB is never left half-dropped; rethrow for the caller to
+    // degrade on (graceful — doc-search disabled for this process, self-heals
+    // on the next clean open).
+    db.exec('ROLLBACK')
+    throw err
+  }
+}
+
+/**
+ * True iff `db` is EXACTLY the current schema: stamped at `SCHEMA_VERSION` AND
+ * its full owned-object set fingerprint-matches the reference build. Read-only;
+ * called under the write lock so the decision can't be stale.
+ */
+function schemaIsCurrent(db: Database): boolean {
+  const version = db.query<{ user_version: number }, []>('PRAGMA user_version').get()?.user_version ?? 0
+  return version === SCHEMA_VERSION && schemaFingerprint(db) === currentSchemaFingerprint()
+}
+
+/**
+ * DROP every OWNED object (the full set — including any rogue/stale object, not
+ * just the ones the current `SCHEMA` names). Dropping the full owned set is what
+ * makes the rebuild IDEMPOTENT after an extra-object deviation: a rogue
+ * table/trigger/view/index is removed here, so the very next reopen
+ * fingerprint-matches (no rebuild loop). MUST be called inside the transaction
+ * (`migrateSchema` holds `BEGIN IMMEDIATE`) so the teardown + recreate + stamp
+ * commit atomically — a crash/error mid-rebuild rolls back to the PRIOR state,
+ * never half-dropped.
+ *
+ * Drop order is safety-critical for FTS5: views + triggers first (they reference
+ * tables), then indexes, then the `doc_fts` VIRTUAL table (which auto-drops its
+ * shadow tables), then remaining base tables. The captured list still contains
+ * the shadow tables, but by the time we reach them the virtual table is gone, so
+ * `DROP TABLE IF EXISTS` is a no-op — and we never try to drop a shadow table out
+ * from under a live vtable (which SQLite forbids).
+ *
+ * INVARIANT: the drop-set MUST equal the fingerprint-set. The fingerprint covers
+ * EVERY owned object type (`ownedObjects` — table, index, trigger, AND view), so
+ * the drop covers every type too. A missed type (e.g. a VIEW left behind) would
+ * survive the rebuild → the post-rebuild fingerprint would still mismatch →
+ * EVERY reopen rebuilds, losing all indexed rows. Enumerating dynamically by
+ * type keeps drop-set == fingerprint-set by construction.
+ */
+function dropAllOwnedObjects(db: Database): void {
+  const owned = ownedObjects(db)
+  const isVirtual = (o: SchemaObject): boolean => /^\s*CREATE\s+VIRTUAL\s+TABLE/i.test(o.sql ?? '')
+  const quote = (name: string): string => `"${name.replace(/"/g, '""')}"`
+
+  for (const o of owned) if (o.type === 'view') db.exec(`DROP VIEW IF EXISTS ${quote(o.name)}`)
+  for (const o of owned) if (o.type === 'trigger') db.exec(`DROP TRIGGER IF EXISTS ${quote(o.name)}`)
+  // Skip auto-indexes (sql IS NULL) — they vanish with their table and can't be
+  // dropped explicitly.
+  for (const o of owned)
+    if (o.type === 'index' && o.sql !== null) db.exec(`DROP INDEX IF EXISTS ${quote(o.name)}`)
+  // Virtual tables first so their FTS5 shadow tables are gone before we reach them.
+  for (const o of owned)
+    if (o.type === 'table' && isVirtual(o)) db.exec(`DROP TABLE IF EXISTS ${quote(o.name)}`)
+  for (const o of owned)
+    if (o.type === 'table' && !isVirtual(o)) db.exec(`DROP TABLE IF EXISTS ${quote(o.name)}`)
 }

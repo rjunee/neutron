@@ -1985,8 +1985,11 @@ mid-conversation. It is the Neutron equivalent of Vajra's QMD.
   sync by triggers. Ranking is **BM25** with column weights (title ≫ heading
   ≫ body), normalised to a [0,1] relevance and collapsed to the best chunk
   per file, so a query returns ranked DOCUMENTS with the matching section's
-  heading + a snippet. Pure-lexical baseline — no external dependency.
-  Semantic re-rank is OPTIONAL behind the `embedder` seam (off by default).
+  heading + a snippet. Pure-lexical keyword/BM25 — no external dependency and
+  no embedding provider. (An optional in-process `embedder` seam once existed
+  here for a hybrid semantic re-rank but was never wired — the composer always
+  opened the index lexical-only — and could not share RA3's OUT-OF-process
+  gbrain embedder; RA4 removed the dead seam.)
 - **Corpus (`doc-search/walk.ts`, `indexer.ts`, `projects.ts`).** Indexes
   `.md`/`.markdown` under every `<owner_home>/Projects/<id>/` (README /
   STATUS / CLAUDE / docs / research / notes / archive), skipping hidden dirs
