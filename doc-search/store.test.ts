@@ -632,5 +632,44 @@ describe('DocSearchIndex (keyword-only; no dead embedder seam) — RA4', () => {
       expect((await healed.search({ query: 'widget' })).map((h) => h.path)).toEqual(['docs/a.md'])
       healed.close()
     })
+
+    test('a second opener of a just-rebuilt DB does NOT rebuild (lock-then-check) — data survives', async () => {
+      // The check-then-act race this closes: two processes open a legacy v0 DB;
+      // both would DECIDE "rebuild" if the decision were made outside the lock.
+      // With lock-then-check, opener A rebuilds under the write lock and indexes
+      // a row; opener B then takes the lock, RE-CHECKS, finds the DB already
+      // current, and does NOT rebuild → A's row survives. Ordering is
+      // deterministic here (A fully completes before B), which is exactly the
+      // interleaving that erased data before: B must re-decide under the lock.
+
+      // Seed a LEGACY v0 DB (forces a rebuild decision) with an old-schema row.
+      const legacy = new Database(dbPath)
+      legacy.exec(`
+        CREATE TABLE doc_chunks (
+          id INTEGER PRIMARY KEY, project TEXT NOT NULL, relpath TEXT NOT NULL,
+          abs_path TEXT NOT NULL, title TEXT NOT NULL, heading TEXT NOT NULL,
+          ordinal INTEGER NOT NULL, body TEXT NOT NULL, mtime_ms INTEGER NOT NULL,
+          indexed_at INTEGER NOT NULL, embedding TEXT
+        );
+        PRAGMA user_version = 0;
+      `)
+      legacy.close()
+
+      // Opener A: rebuilds the stale cache (v0 → current) and indexes a row.
+      const a = DocSearchIndex.open(dbPath)
+      expect(a.raw().query<{ user_version: number }, []>('PRAGMA user_version').get()?.user_version).toBe(1)
+      await a.indexFile(fileInput('p', 'docs/shared.md', '# Shared\n\ncollaborative tapir content'))
+      expect((await a.search({ query: 'tapir' })).map((h) => h.path)).toEqual(['docs/shared.md'])
+
+      // Opener B: same path. Under lock-then-check it re-reads version(=1) +
+      // fingerprint(match) → already current → NO rebuild. A's row must survive.
+      const b = DocSearchIndex.open(dbPath)
+      expect((await b.search({ query: 'tapir' })).map((h) => h.path)).toEqual(['docs/shared.md'])
+      b.close()
+
+      // A's own view of the DB is likewise intact.
+      expect((await a.search({ query: 'tapir' })).map((h) => h.path)).toEqual(['docs/shared.md'])
+      a.close()
+    })
   })
 })

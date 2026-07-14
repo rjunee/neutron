@@ -470,69 +470,30 @@ function currentSchemaFingerprint(): string {
  * corrupt results — so rebuild-to-exact-schema removes it. Safe: it's a cache.)
  */
 function migrateSchema(db: Database): void {
-  const row = db.query<{ user_version: number }, []>('PRAGMA user_version').get()
-  const version = row?.user_version ?? 0
-
-  if (version !== SCHEMA_VERSION || schemaFingerprint(db) !== currentSchemaFingerprint()) {
-    rebuildSchema(db)
-  }
-}
-
-/**
- * DROP every OWNED object (the full set — including any rogue/stale object, not
- * just the ones the current `SCHEMA` names), recreate at the current `SCHEMA`,
- * and stamp. Dropping the full owned set is what makes the rebuild IDEMPOTENT
- * after an extra-object deviation: a rogue table/trigger is removed here, so the
- * very next reopen fingerprint-matches (no rebuild loop).
- *
- * Drop order is safety-critical for FTS5: triggers first, then indexes, then the
- * `doc_fts` VIRTUAL table (which auto-drops its shadow tables), then remaining
- * base tables. The captured list still contains the shadow tables, but by the
- * time we reach them the virtual table is gone, so `DROP TABLE IF EXISTS` is a
- * no-op — and we never try to drop a shadow table out from under a live vtable
- * (which SQLite forbids).
- *
- * INVARIANT: the drop-set MUST equal the fingerprint-set. The fingerprint
- * covers EVERY owned object type (`ownedObjects` — table, index, trigger, AND
- * view), so the drop must cover every type too. A missed type (e.g. a VIEW that
- * DROP left behind) would survive the rebuild → the post-rebuild fingerprint
- * would still mismatch → EVERY reopen rebuilds, dropping+recreating `doc_chunks`
- * and losing all indexed rows (a perpetual-rebuild / data-loss bug). Enumerating
- * dynamically by type — rather than a hardcoded object list — keeps drop-set ==
- * fingerprint-set by construction.
- *
- * ATOMIC: the entire teardown + recreate + stamp runs in ONE `BEGIN IMMEDIATE`
- * transaction. `IMMEDIATE` takes the write lock up front, so a concurrent
- * rebuilder BLOCKS (or gets SQLITE_BUSY) rather than interleaving between
- * statements. On ANY error the transaction is ROLLED BACK and the error
- * rethrown, so a failed/crashed rebuild leaves the DB in its PRIOR state — never
- * half-dropped — and the caller (`open()` → the composer's try/catch at
- * open/composer.ts) degrades doc-search for that process, self-healing on the
- * next clean open. `PRAGMA user_version`, the FTS5 `DROP TABLE`, and
- * `CREATE VIRTUAL TABLE` all run correctly inside a SQLite transaction and
- * commit atomically with the rest.
- */
-function rebuildSchema(db: Database): void {
-  const owned = ownedObjects(db)
-  const isVirtual = (o: SchemaObject): boolean => /^\s*CREATE\s+VIRTUAL\s+TABLE/i.test(o.sql ?? '')
-  const quote = (name: string): string => `"${name.replace(/"/g, '""')}"`
-
+  // LOCK-then-CHECK. Take the write lock BEFORE inspecting version + fingerprint,
+  // and re-check UNDER the lock, so the whole decide-then-rebuild is one atomic
+  // critical section. Deciding outside the lock is a check-then-act race: two
+  // processes opening a stale (e.g. legacy v0) cache could BOTH decide "rebuild";
+  // the first rebuilds + starts indexing, then the second acquires the lock with
+  // its STALE decision and rebuilds AGAIN, erasing the first's rows. Serializing
+  // under `BEGIN IMMEDIATE` means the second waits, re-checks, finds the DB
+  // already current, and no-ops — the first's data is safe.
+  //
+  // `IMMEDIATE` acquires the write lock up front; a concurrent rebuilder either
+  // blocks then re-checks, or gets SQLITE_BUSY — which propagates out of `open()`
+  // (the handle is closed there) so the composer's try/catch degrades doc-search
+  // for that process and retries on the next open. Never a crash.
   db.exec('BEGIN IMMEDIATE')
   try {
-    // Views + triggers first (they reference tables); then indexes; then tables.
-    for (const o of owned) if (o.type === 'view') db.exec(`DROP VIEW IF EXISTS ${quote(o.name)}`)
-    for (const o of owned)
-      if (o.type === 'trigger') db.exec(`DROP TRIGGER IF EXISTS ${quote(o.name)}`)
-    // Skip auto-indexes (sql IS NULL) — they vanish with their table and can't be
-    // dropped explicitly.
-    for (const o of owned)
-      if (o.type === 'index' && o.sql !== null) db.exec(`DROP INDEX IF EXISTS ${quote(o.name)}`)
-    // Virtual tables first so their FTS5 shadow tables are gone before we reach them.
-    for (const o of owned)
-      if (o.type === 'table' && isVirtual(o)) db.exec(`DROP TABLE IF EXISTS ${quote(o.name)}`)
-    for (const o of owned)
-      if (o.type === 'table' && !isVirtual(o)) db.exec(`DROP TABLE IF EXISTS ${quote(o.name)}`)
-
+    if (schemaIsCurrent(db)) {
+      // Already current — possibly rebuilt by whoever held the lock before us.
+      // Release the (write-free) lock and return without touching anything.
+      db.exec('COMMIT')
+      return
+    }
+    // Still stale under the lock → rebuild. Enumerate the drop-set HERE, under
+    // the lock, so it reflects the real current contents (not a pre-lock snapshot).
+    dropAllOwnedObjects(db)
     db.exec(SCHEMA)
     // `user_version` takes an integer literal (no bound params in a PRAGMA);
     // SCHEMA_VERSION is a hardcoded numeric constant, so this is injection-safe.
@@ -545,4 +506,56 @@ function rebuildSchema(db: Database): void {
     db.exec('ROLLBACK')
     throw err
   }
+}
+
+/**
+ * True iff `db` is EXACTLY the current schema: stamped at `SCHEMA_VERSION` AND
+ * its full owned-object set fingerprint-matches the reference build. Read-only;
+ * called under the write lock so the decision can't be stale.
+ */
+function schemaIsCurrent(db: Database): boolean {
+  const version = db.query<{ user_version: number }, []>('PRAGMA user_version').get()?.user_version ?? 0
+  return version === SCHEMA_VERSION && schemaFingerprint(db) === currentSchemaFingerprint()
+}
+
+/**
+ * DROP every OWNED object (the full set — including any rogue/stale object, not
+ * just the ones the current `SCHEMA` names). Dropping the full owned set is what
+ * makes the rebuild IDEMPOTENT after an extra-object deviation: a rogue
+ * table/trigger/view/index is removed here, so the very next reopen
+ * fingerprint-matches (no rebuild loop). MUST be called inside the transaction
+ * (`migrateSchema` holds `BEGIN IMMEDIATE`) so the teardown + recreate + stamp
+ * commit atomically — a crash/error mid-rebuild rolls back to the PRIOR state,
+ * never half-dropped.
+ *
+ * Drop order is safety-critical for FTS5: views + triggers first (they reference
+ * tables), then indexes, then the `doc_fts` VIRTUAL table (which auto-drops its
+ * shadow tables), then remaining base tables. The captured list still contains
+ * the shadow tables, but by the time we reach them the virtual table is gone, so
+ * `DROP TABLE IF EXISTS` is a no-op — and we never try to drop a shadow table out
+ * from under a live vtable (which SQLite forbids).
+ *
+ * INVARIANT: the drop-set MUST equal the fingerprint-set. The fingerprint covers
+ * EVERY owned object type (`ownedObjects` — table, index, trigger, AND view), so
+ * the drop covers every type too. A missed type (e.g. a VIEW left behind) would
+ * survive the rebuild → the post-rebuild fingerprint would still mismatch →
+ * EVERY reopen rebuilds, losing all indexed rows. Enumerating dynamically by
+ * type keeps drop-set == fingerprint-set by construction.
+ */
+function dropAllOwnedObjects(db: Database): void {
+  const owned = ownedObjects(db)
+  const isVirtual = (o: SchemaObject): boolean => /^\s*CREATE\s+VIRTUAL\s+TABLE/i.test(o.sql ?? '')
+  const quote = (name: string): string => `"${name.replace(/"/g, '""')}"`
+
+  for (const o of owned) if (o.type === 'view') db.exec(`DROP VIEW IF EXISTS ${quote(o.name)}`)
+  for (const o of owned) if (o.type === 'trigger') db.exec(`DROP TRIGGER IF EXISTS ${quote(o.name)}`)
+  // Skip auto-indexes (sql IS NULL) — they vanish with their table and can't be
+  // dropped explicitly.
+  for (const o of owned)
+    if (o.type === 'index' && o.sql !== null) db.exec(`DROP INDEX IF EXISTS ${quote(o.name)}`)
+  // Virtual tables first so their FTS5 shadow tables are gone before we reach them.
+  for (const o of owned)
+    if (o.type === 'table' && isVirtual(o)) db.exec(`DROP TABLE IF EXISTS ${quote(o.name)}`)
+  for (const o of owned)
+    if (o.type === 'table' && !isVirtual(o)) db.exec(`DROP TABLE IF EXISTS ${quote(o.name)}`)
 }
