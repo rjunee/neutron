@@ -564,5 +564,73 @@ describe('DocSearchIndex (keyword-only; no dead embedder seam) — RA4', () => {
       expect((await third.search({ query: 'pomelo' })).map((h) => h.path)).toEqual(['docs/keep.md'])
       third.close()
     })
+
+    test('a mid-rebuild failure ROLLS BACK — DB left intact, not half-dropped', async () => {
+      // The rebuild's teardown + recreate + stamp must be ATOMIC: if a step
+      // fails partway (crash, DDL error, lock), the transaction rolls back so the
+      // DB is left in its PRIOR state — never half-dropped (which would lose all
+      // indexed rows). We inject a failure at the recreate step (CREATE VIRTUAL
+      // TABLE) AFTER the destructive drops have run inside the transaction.
+
+      // Warm the reference-fingerprint cache BEFORE patching exec, so building
+      // the reference schema (which also runs CREATE VIRTUAL TABLE) isn't caught
+      // by the injected failure. A fresh open stamps v1 (no fingerprint eval);
+      // the reopen evaluates the fingerprint → builds + caches the reference.
+      const warmPath = join(dir, 'warm.db')
+      DocSearchIndex.open(warmPath).close()
+      DocSearchIndex.open(warmPath).close()
+
+      // Seed a valid v1 DB with a row + a rogue view (forces a rebuild on reopen).
+      const seed = DocSearchIndex.open(dbPath)
+      await seed.indexFile(fileInput('p', 'docs/precious.md', '# Precious\n\nirreplaceable manatee content'))
+      seed.close()
+      const tamper = new Database(dbPath)
+      tamper.exec(`CREATE VIEW rogue_view AS SELECT * FROM doc_chunks`)
+      tamper.close()
+
+      // Inject a failure during the recreate (CREATE VIRTUAL TABLE), after the
+      // drops have executed inside the BEGIN IMMEDIATE transaction.
+      const origExec = Database.prototype.exec
+      Database.prototype.exec = function (this: Database, sql: string, ...rest: unknown[]): unknown {
+        if (typeof sql === 'string' && /CREATE\s+VIRTUAL\s+TABLE/i.test(sql)) {
+          throw new Error('injected mid-rebuild failure')
+        }
+        // eslint-disable-next-line prefer-rest-params
+        return (origExec as (...a: unknown[]) => unknown).apply(this, [sql, ...rest])
+      } as typeof origExec
+
+      let openError: unknown = null
+      try {
+        DocSearchIndex.open(dbPath)
+      } catch (e) {
+        openError = e
+      } finally {
+        Database.prototype.exec = origExec
+      }
+      // open() surfaced the failure as a caught error (composer degrades on it).
+      expect(openError).not.toBeNull()
+
+      // ROLLED BACK: the DB is in its PRIOR state — the row and the rogue view
+      // are BOTH still present (the DROPs were undone, NOT a half-dropped schema).
+      const check = new Database(dbPath)
+      const n = check.query<{ n: number }, []>(`SELECT COUNT(*) AS n FROM doc_chunks`).get()?.n
+      expect(n).toBeGreaterThan(0)
+      const views = check
+        .query<{ name: string }, []>(`SELECT name FROM sqlite_master WHERE type='view'`)
+        .all()
+        .map((r) => r.name)
+      expect(views).toContain('rogue_view')
+      check.close()
+
+      // A CLEAN reopen (no injected failure) now self-heals normally: rebuild
+      // succeeds atomically, the rogue view is gone, and search works.
+      const healed = DocSearchIndex.open(dbPath)
+      expect(
+        healed.raw().query<{ name: string }, []>(`SELECT name FROM sqlite_master WHERE type='view'`).all(),
+      ).toEqual([])
+      await healed.indexFile(fileInput('p', 'docs/a.md', '# A\n\nwidget body'))
+      expect((await healed.search({ query: 'widget' })).map((h) => h.path)).toEqual(['docs/a.md'])
+      healed.close()
+    })
   })
 })

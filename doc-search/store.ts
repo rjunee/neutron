@@ -168,7 +168,20 @@ export class DocSearchIndex {
     // additionally gains busy_timeout/temp_store/cache_size (strictly more
     // tolerant under contention, no semantic change).
     const db = openSidecar(path)
-    migrateSchema(db)
+    try {
+      migrateSchema(db)
+    } catch (err) {
+      // A failed migrate (rolled-back rebuild, SQLITE_BUSY from a concurrent
+      // rebuilder, etc.) must not leak the handle or its lock — close it and
+      // rethrow so the caller (composer try/catch) degrades doc-search for this
+      // process; it self-heals on the next clean open.
+      try {
+        db.close()
+      } catch {
+        // best-effort
+      }
+      throw err
+    }
     return new DocSearchIndex(db)
   }
 
@@ -487,27 +500,49 @@ function migrateSchema(db: Database): void {
  * and losing all indexed rows (a perpetual-rebuild / data-loss bug). Enumerating
  * dynamically by type — rather than a hardcoded object list — keeps drop-set ==
  * fingerprint-set by construction.
+ *
+ * ATOMIC: the entire teardown + recreate + stamp runs in ONE `BEGIN IMMEDIATE`
+ * transaction. `IMMEDIATE` takes the write lock up front, so a concurrent
+ * rebuilder BLOCKS (or gets SQLITE_BUSY) rather than interleaving between
+ * statements. On ANY error the transaction is ROLLED BACK and the error
+ * rethrown, so a failed/crashed rebuild leaves the DB in its PRIOR state — never
+ * half-dropped — and the caller (`open()` → the composer's try/catch at
+ * open/composer.ts) degrades doc-search for that process, self-healing on the
+ * next clean open. `PRAGMA user_version`, the FTS5 `DROP TABLE`, and
+ * `CREATE VIRTUAL TABLE` all run correctly inside a SQLite transaction and
+ * commit atomically with the rest.
  */
 function rebuildSchema(db: Database): void {
   const owned = ownedObjects(db)
   const isVirtual = (o: SchemaObject): boolean => /^\s*CREATE\s+VIRTUAL\s+TABLE/i.test(o.sql ?? '')
   const quote = (name: string): string => `"${name.replace(/"/g, '""')}"`
 
-  // Views + triggers first (they reference tables); then indexes; then tables.
-  for (const o of owned) if (o.type === 'view') db.exec(`DROP VIEW IF EXISTS ${quote(o.name)}`)
-  for (const o of owned) if (o.type === 'trigger') db.exec(`DROP TRIGGER IF EXISTS ${quote(o.name)}`)
-  // Skip auto-indexes (sql IS NULL) — they vanish with their table and can't be
-  // dropped explicitly.
-  for (const o of owned)
-    if (o.type === 'index' && o.sql !== null) db.exec(`DROP INDEX IF EXISTS ${quote(o.name)}`)
-  // Virtual tables first so their FTS5 shadow tables are gone before we reach them.
-  for (const o of owned)
-    if (o.type === 'table' && isVirtual(o)) db.exec(`DROP TABLE IF EXISTS ${quote(o.name)}`)
-  for (const o of owned)
-    if (o.type === 'table' && !isVirtual(o)) db.exec(`DROP TABLE IF EXISTS ${quote(o.name)}`)
+  db.exec('BEGIN IMMEDIATE')
+  try {
+    // Views + triggers first (they reference tables); then indexes; then tables.
+    for (const o of owned) if (o.type === 'view') db.exec(`DROP VIEW IF EXISTS ${quote(o.name)}`)
+    for (const o of owned)
+      if (o.type === 'trigger') db.exec(`DROP TRIGGER IF EXISTS ${quote(o.name)}`)
+    // Skip auto-indexes (sql IS NULL) — they vanish with their table and can't be
+    // dropped explicitly.
+    for (const o of owned)
+      if (o.type === 'index' && o.sql !== null) db.exec(`DROP INDEX IF EXISTS ${quote(o.name)}`)
+    // Virtual tables first so their FTS5 shadow tables are gone before we reach them.
+    for (const o of owned)
+      if (o.type === 'table' && isVirtual(o)) db.exec(`DROP TABLE IF EXISTS ${quote(o.name)}`)
+    for (const o of owned)
+      if (o.type === 'table' && !isVirtual(o)) db.exec(`DROP TABLE IF EXISTS ${quote(o.name)}`)
 
-  db.exec(SCHEMA)
-  // `user_version` takes an integer literal (no bound params in a PRAGMA);
-  // SCHEMA_VERSION is a hardcoded numeric constant, so this is injection-safe.
-  db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`)
+    db.exec(SCHEMA)
+    // `user_version` takes an integer literal (no bound params in a PRAGMA);
+    // SCHEMA_VERSION is a hardcoded numeric constant, so this is injection-safe.
+    db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`)
+    db.exec('COMMIT')
+  } catch (err) {
+    // Roll back so the DB is never left half-dropped; rethrow for the caller to
+    // degrade on (graceful — doc-search disabled for this process, self-heals
+    // on the next clean open).
+    db.exec('ROLLBACK')
+    throw err
+  }
 }
