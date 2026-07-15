@@ -162,7 +162,10 @@ function localHelperDeclarations(source: string, fileName: string): string[] {
       (ts.isFunctionDeclaration(node) ||
         ts.isVariableDeclaration(node) ||
         ts.isBindingElement(node) ||
-        ts.isFunctionExpression(node)) &&
+        ts.isFunctionExpression(node) ||
+        ts.isMethodDeclaration(node) ||
+        ts.isGetAccessorDeclaration(node) ||
+        ts.isSetAccessorDeclaration(node)) &&
       node.name &&
       ts.isIdentifier(node.name) &&
       KIT_HELPER_NAMES.has(node.name.text)
@@ -376,6 +379,9 @@ describe('project_slug timing-safe comparison (ISSUE #34)', () => {
     expect(has('const { jsonError } = require("./shadow")')).toBe(true) // destructure
     expect(has('const jsonOk = function () { return new Response() }')).toBe(true) // anonymous function expr assigned to helper name
     expect(has('const wrapper = function jsonError() { return new Response() }')).toBe(true) // NAMED function expression
+    expect(has('const helpers = { jsonError() { return new Response() } }')).toBe(true) // object method
+    expect(has('class Helpers { resolveBearer() {} }')).toBe(true) // class method
+    expect(has('class Helpers { get jsonOk() { return new Response() } }')).toBe(true) // accessor
     expect(has('async function resolveBearer() {}')).toBe(true) // function declaration
     expect(has("import { jsonError } from './surface-kit.ts'\njsonError(1,'x','y')")).toBe(false) // imported use, no local decl
   })
