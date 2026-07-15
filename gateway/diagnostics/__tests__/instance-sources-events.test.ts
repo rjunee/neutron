@@ -17,7 +17,12 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { applyMigrations } from '@neutronai/migrations/runner.ts'
-import { ProjectDb, SystemEventsStore } from '@neutronai/persistence/index.ts'
+import {
+  ProjectDb,
+  SystemEventsStore,
+  emitSystemEvent,
+  registerSystemEventSink,
+} from '@neutronai/persistence/index.ts'
 import { composeDiagnostics } from '../diagnostics-report.ts'
 import { buildInstanceDiagnosticsSources } from '../instance-sources.ts'
 
@@ -32,6 +37,7 @@ beforeEach(() => {
 })
 
 afterEach(() => {
+  registerSystemEventSink(null)
   db.close()
   rmSync(tmp, { recursive: true, force: true })
 })
@@ -109,7 +115,7 @@ describe('buildInstanceDiagnosticsSources — recent_events reads system_events'
       module: 'onboarding',
       level: 'error',
       ts: 110,
-      payload: { job_id: 'tenant-secret-job' }, // NULL scope
+      payload: { job_id: 'other-project-secret' }, // NULL scope
     })
     // A FOREIGN-slug row that is the NEWEST — under an UNSCOPED `LIMIT` it would
     // both leak into this instance's report AND (with a tight limit) starve the
@@ -129,10 +135,42 @@ describe('buildInstanceDiagnosticsSources — recent_events reads system_events'
     ).recent_events
     expect(ev.available).toBe(true)
     const events = ev.events!
-    // No cross-project disclosure — neither the foreign slug nor the NULL tenant row appears.
+    // No cross-project disclosure — neither the foreign slug nor the NULL-scoped row appears.
     expect(events.some((e) => e.project_slug === 'other-slug')).toBe(false)
     expect(events.some((e) => e.event === 'import_orphaned')).toBe(false)
     // Only the in-scope row survives.
     expect(events.map((e) => e.event)).toEqual(['core_install_failed'])
+  })
+
+  it('a row from the REAL emitter path is excluded — import_orphaned emits NULL scope', async () => {
+    // Reproduce the PRODUCTION shape: `import_orphaned` is emitted via the ambient
+    // `emitSystemEvent` helper WITHOUT a project_slug (onboarding/interview/
+    // engine-import-routing.ts), so it lands NULL-scoped — the exact leak vector.
+    const store = new SystemEventsStore({ db })
+    registerSystemEventSink(store)
+    // A project-scoped degrade DOES surface, as a control.
+    await store.record({
+      event: 'core_install_failed',
+      module: 'cores',
+      level: 'error',
+      project_slug: SLUG,
+      ts: 300,
+      payload: { core_slug: 'email' },
+    })
+    // Emit through the SAME helper production uses — omitting project_slug.
+    await emitSystemEvent({
+      event: 'import_orphaned',
+      module: 'onboarding',
+      level: 'error',
+      ts: 310,
+      payload: { job_id: 'j-42', source: 'gmail', phase: 'import_running' },
+    })
+    await store.drain()
+
+    const ev = report().recent_events
+    expect(ev.available).toBe(true)
+    // The real NULL-scoped emitter row is NOT disclosed; only the scoped row shows.
+    expect(ev.events!.some((e) => e.event === 'import_orphaned')).toBe(false)
+    expect(ev.events!.map((e) => e.event)).toEqual(['core_install_failed'])
   })
 })

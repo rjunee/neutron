@@ -26,12 +26,21 @@
  * (see `gateway/diagnostics/`). No writes, no degrade-decision changes.
  *
  * `recent_events` reads O4's operational `system_events` journal (unit O4 is
- * now merged — #319). That journal already carries every band's deliberate
- * silent-degrade decisions, so `core_install_failed` (emitted by X2's
- * `install-bundled.ts`), `credential_all_cooldown`, `repl_session_capped`,
- * `cron_job_error`, `import_orphaned`, … all surface here for free — the
- * question "why is memory / chat / import / a Core broken?" is answerable from
- * the journal tail without journalctl.
+ * now merged — #319), STRICTLY scoped to this instance's slug (see
+ * `listRecentForScope`). Project-scoped degrade decisions surface here — e.g.
+ * `core_install_failed` (X2's `install-bundled.ts`) and `cron_job_error` (the
+ * cron scheduler), both emitted WITH a `project_slug` — so "why is a Core / a
+ * scheduled job broken?" is answerable from the journal tail without journalctl.
+ *
+ * NOT-YET-SURFACED (accepted deferral): several degrade emitters persist their
+ * rows with NULL scope — `credential_all_cooldown`, `repl_session_capped`,
+ * `import_orphaned` — and NULL is excluded from this instance-scoped read because
+ * it is ambiguous (process-wide vs an emitter that omitted its scope) and those
+ * payloads carry instance-specific identifiers, so surfacing them would disclose
+ * one project's data into another's report. Those faults remain visible through
+ * their OWN dedicated diagnostics sections (credentials / repl-registry /
+ * import-jobs). Re-including them in `recent_events` needs the emitter-scoping
+ * audit (O4 territory) — tracked follow-up.
  *
  * HONEST PARTIAL — remaining accepted deferrals (tracked follow-ups):
  *   - a DEDICATED `core_install` section (beyond the `core_install_failed`

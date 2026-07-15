@@ -261,11 +261,12 @@ export class SystemEventsStore implements SystemEventSink {
    * process-wide" AND "an emitter that omitted its scope" — and several O4 degrade
    * emitters currently persist NULL while carrying instance-specific identifiers
    * (import `job_id`, REPL `session_key`, GBrain backend errors). Including NULL here
-   * would DISCLOSE those tenant identifiers across every project on a multi-tenant
-   * instance (Codex). Since this is an instance-scoped disclosure endpoint, the safe
-   * default is strict scope; genuinely process-wide faults (GBrain/credentials/cron)
-   * remain visible through their own dedicated diagnostics sections. Re-including
-   * process-wide rows safely needs the emitter-scoping audit (O4 territory).
+   * would DISCLOSE those identifiers into every project's report on an instance that
+   * serves more than one project (Codex). Since this is an instance-scoped disclosure
+   * endpoint, the safe default is strict scope; genuinely process-wide faults
+   * (GBrain/credentials/cron) remain visible through their own dedicated diagnostics
+   * sections. Re-including process-wide rows safely needs the emitter-scoping audit
+   * (O4 territory).
    */
   listRecentForScope(project_slug: string, limit: number): PersistedSystemEvent[] {
     if (!Number.isFinite(limit) || limit <= 0) return []
