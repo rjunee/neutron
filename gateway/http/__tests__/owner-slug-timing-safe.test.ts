@@ -80,14 +80,22 @@ function ownerSlugMismatchBindingOffense(source: string, fileName: string): stri
           const imported = el.propertyName?.text ?? el.name.text
           const local = el.name.text
           if (imported === NAME) {
-            // Importing THE canonical comparator (possibly aliased to `local`). An
-            // UNUSED canonical import is not an offense (tsc flags unused imports),
-            // so it does not mark the file "referenced" — only a real invocation or
-            // a shadow does.
-            if (CANON.test(mod)) canonicalImport = true
-            else {
+            if (!CANON.test(mod)) {
+              // Non-canonical source — a shadow comparator.
               shadow = `named import of ${NAME} from non-canonical '${mod}'`
               referenced = true
+            } else if (local !== NAME) {
+              // ALIASING DISALLOWED. Aliasing the canonical import to another local
+              // name (`ownerSlugMismatch as f`) would let a nested `f` parameter
+              // shadow it beyond what literal-name analysis can resolve. Requiring the
+              // direct name keeps the analysis SOUND: every `ownerSlugMismatch(...)`
+              // call then binds to this import unless a same-name local shadow (which
+              // we catch) rebinds it (Codex). An UNUSED canonical import is fine (tsc
+              // flags unused imports), so it does not mark the file "referenced".
+              shadow = `canonical import aliased to '${local}' — aliases are disallowed`
+              referenced = true
+            } else {
+              canonicalImport = true
             }
           } else if (local === NAME) {
             // Binding the NAME to some OTHER export (`import { x as ownerSlugMismatch }`)
@@ -312,13 +320,16 @@ describe('project_slug timing-safe comparison (ISSUE #34)', () => {
     // (local decl / param / namespace / non-canonical or name-binding import) and every
     // qualified/element-access call.
     //
-    // SCOPE (deliberate): this guards the `ownerSlugMismatch` IDENTIFIER. It does NOT
-    // attempt to prove that an arbitrary higher-order function value (e.g. a comparator
-    // passed as a callback param) is canonical — that is whole-program taint analysis,
-    // infeasible in a lint and not a real regression path. The ACTUAL timing-attack
-    // vector — a plain `===`/`!==` on a `*_slug` value — is banned separately by the
-    // `scanPlainSlugEquality` offenders test above; a shadow comparator would still have
-    // to perform that plain comparison somewhere to be exploitable.
+    // SOUNDNESS: aliases are DISALLOWED (below) and same-name local shadows (decls,
+    // params, namespace/name-binding imports) are rejected, so every accepted
+    // `ownerSlugMismatch` binding is the DIRECT canonical import and every
+    // `ownerSlugMismatch(...)` call resolves to it. Generic higher-order function
+    // values passed as callbacks are a different concern (whole-program taint analysis,
+    // out of scope) — they are simply not the `ownerSlugMismatch` identifier. The
+    // separate `scanPlainSlugEquality` test bans the COMMON timing vector (a plain
+    // `===`/`!==` on a `*_slug`); note it does not catch every hand-rolled variable-time
+    // comparison (an early-exit char loop or `localeCompare`), which is why routing all
+    // slug comparisons through the ONE canonical constant-time primitive is the design.
     const offenders: Array<{ file: string; why: string }> = []
     for (const name of allSurfaceFiles()) {
       const why = ownerSlugMismatchBindingOffense(readFileSync(join(HTTP_DIR, name), 'utf8'), name)
@@ -341,15 +352,17 @@ describe('project_slug timing-safe comparison (ISSUE #34)', () => {
     ).toBe(true) // element-access (bracket-string) call
     expect(flag("import { ownerSlugMismatch as f } from './shadow.ts'\nf('a','b')")).toBe(true) // aliased non-canonical import
     expect(flag("import { cmp as ownerSlugMismatch } from './shadow.ts'\nownerSlugMismatch('a','b')")).toBe(true) // alias BINDS the name to a shadow
-    // A CANONICAL aliased import is fine (still the canonical reference):
-    expect(flag("import { ownerSlugMismatch as f } from './surface-kit.ts'\nf('a','b')")).toBe(false)
-    // SCOPE: generic higher-order indirection that never invokes the ownerSlugMismatch
-    // IDENTIFIER is out of scope (not flagged) — proving a callback value is a comparator
-    // is taint analysis; the plain-=== ban is the real vector. An UNUSED canonical import
-    // + a generic `route(f){f(a,b)}` is not an offense.
+    // ALIASES DISALLOWED — even a canonical aliased import is an offense, because an
+    // aliased local name (`f`) can be shadowed by a nested `f` parameter beyond what
+    // literal-name analysis resolves (Codex round-11). Require the direct name.
+    expect(flag("import { ownerSlugMismatch as f } from './surface-kit.ts'\nf('a','b')")).toBe(true)
     expect(
-      flag("import { ownerSlugMismatch } from './surface-kit.ts'\nfunction route(f: (a: string, b: string) => boolean) { return f('a','b') }"),
-    ).toBe(false)
+      flag("import { ownerSlugMismatch as f } from './surface-kit.ts'\nfunction route(f: (a: string, b: string) => boolean) { return f('a','b') }"),
+    ).toBe(true)
+    // With aliases banned + same-name local shadows caught, the DIRECT canonical import
+    // is the only accepted form; generic higher-order indirection that never binds/
+    // invokes the ownerSlugMismatch IDENTIFIER is simply not our identifier.
+    expect(flag("import { ownerSlugMismatch } from './surface-kit.ts'\nownerSlugMismatch('a','b')")).toBe(false)
     expect(
       flag("import { ownerSlugMismatch } from './surface-kit.ts'\nconst ownerSlugMismatch = (a: string, b: string) => a === b\nownerSlugMismatch('a','b')"),
     ).toBe(true) // local var shadow
