@@ -16,7 +16,7 @@ import { MAX_UPLOAD_BYTES_DEFAULT } from './upload/import-upload-handler.ts'
 // (see `loadGraphComposerFromEnv` at the bottom of this file). This
 // file holds ZERO imports — static OR dynamic — into Managed dirs
 // (signup/, provisioning/, identity/, proxy/).
-import { composeProductionGraph, DORMANT_LOOPS, type ComposedProductionGraph } from './composition.ts'
+import { composeProductionGraph, DORMANT_LOOPS, type ComposedProductionGraph, type MemoryHealthProvider } from './composition.ts'
 import { LoopRegistry } from '@neutronai/loop'
 import { resolveBootConfig, type BootConfig } from '@neutronai/config/index.ts'
 import { assertWideBindPolicy } from './boot-bind-policy.ts'
@@ -368,7 +368,18 @@ export async function boot(options: BootOptions = {}): Promise<BootHandle> {
       // knows the per-instance `bootedAt` + slug needed for the healthz
       // stub; the composer accepts it via the new `default_handler`
       // field.
-      composition.default_handler = defaultHealthzHandler({ project_slug, bootedAt })
+      // RA2 — fold the composer's coarse memory-backend health into the terminal
+      // `/healthz` so a missing gbrain backend reads `status:'degraded'`. Only the
+      // boot shell knows `bootedAt`+slug; only the composer knows memory health —
+      // this seam joins them. Omitted by composers that don't wire memory → the
+      // body stays byte-identical (`status:'ok'`).
+      composition.default_handler = defaultHealthzHandler({
+        project_slug,
+        bootedAt,
+        ...(composition.memory_health !== undefined
+          ? { memoryHealth: composition.memory_health }
+          : {}),
+      })
       const composed = await composeProductionGraph(composition)
       graph = composed
       if (composition.http_handler !== undefined) {
@@ -718,22 +729,52 @@ export async function boot(options: BootOptions = {}): Promise<BootHandle> {
 }
 
 /**
- * Default `/healthz` handler used when no composer + no explicit
- * `BootOptions.httpHandler` are wired. Returns
- * `{status:'ok', project_slug, uptime_ms}` for liveness; everything else is
- * 404. Production wires a real handler via the composer.
+ * Default `/healthz` handler (also the terminal fallback of the composed
+ * precedence chain, so this IS the production `/healthz`). Returns
+ * `{status:'ok', project_slug, uptime_ms}` for liveness; everything else is 404.
+ *
+ * RA2 (gbrain live-or-loud) — when `memoryHealth` is supplied (the Open composer
+ * wires `buildGBrainMemory`'s boot-time binary-presence probe through
+ * `composition.memory_health`), a memory backend that is DOWN flips the body to
+ * `status:'degraded'` + `memory:'unavailable'` (+ a coarse `memory_detail`), so a
+ * box without the `gbrain` brain fails `/healthz` LOUDLY instead of silently
+ * degrading recall to file-grep. Omitted → the body is byte-identical to the
+ * pre-RA2 stub (`status:'ok'`, no `memory` field).
+ *
+ * DELIBERATELY HTTP 200 even when degraded: `/healthz` is load-balancer/systemd
+ * LIVENESS. Memory degrade is FAIL-SOFT (chat + every other surface still work —
+ * RA5), so a non-2xx here would pull the box from rotation / trigger a restart
+ * loop for a condition the process is designed to survive. The loud signal is
+ * the JSON `status` field a monitor scrapes (plus the existing boot ERROR log),
+ * NOT the HTTP code — the standard liveness-vs-readiness split. The rich,
+ * owner-gated view lives at `GET /api/app/admin/diagnostics`; the coarse fields
+ * here carry no paths/pids because `/healthz` is unauthenticated.
  */
 export function defaultHealthzHandler(opts: {
   project_slug: string
   bootedAt: number
+  memoryHealth?: MemoryHealthProvider
 }): HttpHandler {
   return (req: Request): Response => {
     const url = new URL(req.url)
     if (url.pathname === '/healthz') {
+      // Fail-soft: a throwing provider must never crash the liveness probe —
+      // treat it as "not reported" (status stays ok) rather than 500.
+      let memory: { available: boolean; detail?: string } | undefined
+      try {
+        memory = opts.memoryHealth?.()
+      } catch {
+        memory = undefined
+      }
+      const degraded = memory !== undefined && !memory.available
       const body = {
-        status: 'ok' as const,
+        status: degraded ? ('degraded' as const) : ('ok' as const),
         project_slug: opts.project_slug,
         uptime_ms: Date.now() - opts.bootedAt,
+        ...(memory !== undefined
+          ? { memory: memory.available ? ('ok' as const) : ('unavailable' as const) }
+          : {}),
+        ...(degraded && memory?.detail !== undefined ? { memory_detail: memory.detail } : {}),
       }
       return new Response(JSON.stringify(body), {
         status: 200,

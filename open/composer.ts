@@ -3129,6 +3129,21 @@ export function buildOpenGraphComposer(
     return {
       db,
       project_slug,
+      // RA2 (gbrain live-or-loud) — surface the memory backend's boot-time
+      // health so `boot()` can fold it into the terminal `/healthz`: a box whose
+      // `gbrain` binary is missing now reports `status:'degraded'` +
+      // `memory:'unavailable'` LOUDLY instead of silently grepping. Sourced from
+      // `buildGBrainMemory`'s binary-presence probe (the same `command === null`
+      // the boot warning fires on). A thunk so the shape can later reflect live
+      // latch state without a contract change. RA5 fail-soft is untouched — this
+      // is pure VISIBILITY: memory ops still degrade to the latched no-op, they
+      // never crash a chat turn.
+      memory_health: () => ({
+        available: gbrainMemory.bootHealth.binaryPresent,
+        ...(gbrainMemory.bootHealth.detail !== undefined
+          ? { detail: gbrainMemory.bootHealth.detail }
+          : {}),
+      }),
       chat_topics_surface,
       chat_history_surface,
       // Single-owner has no Telegram channel — the topic handler + notifiers

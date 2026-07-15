@@ -153,6 +153,64 @@ describe('defaultHealthzHandler', () => {
     const res = await handler(new Request('http://localhost/somewhere'))
     expect(res.status).toBe(404)
   })
+
+  // RA2 (gbrain live-or-loud) — memory-backend health folded into `/healthz`.
+  test('RA2: a DOWN memory backend flips /healthz to status:degraded + memory:unavailable (still 200)', async () => {
+    const handler = defaultHealthzHandler({
+      project_slug: 'unit-test',
+      bootedAt: Date.now() - 10,
+      memoryHealth: () => ({ available: false, detail: 'gbrain binary not found on PATH' }),
+    })
+    const res = await handler(new Request('http://localhost/healthz'))
+    // DELIBERATELY 200 — liveness must not restart-loop on a fail-soft degrade.
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as {
+      status: string
+      memory?: string
+      memory_detail?: string
+    }
+    expect(body.status).toBe('degraded')
+    expect(body.memory).toBe('unavailable')
+    expect(body.memory_detail).toBe('gbrain binary not found on PATH')
+  })
+
+  test('RA2: a healthy memory backend reports status:ok + memory:ok (no memory_detail)', async () => {
+    const handler = defaultHealthzHandler({
+      project_slug: 'unit-test',
+      bootedAt: Date.now(),
+      memoryHealth: () => ({ available: true }),
+    })
+    const res = await handler(new Request('http://localhost/healthz'))
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as { status: string; memory?: string; memory_detail?: string }
+    expect(body.status).toBe('ok')
+    expect(body.memory).toBe('ok')
+    expect(body.memory_detail).toBeUndefined()
+  })
+
+  test('RA2: no memoryHealth provider → body byte-identical to the pre-RA2 stub (no memory field)', async () => {
+    const handler = defaultHealthzHandler({ project_slug: 'unit-test', bootedAt: Date.now() })
+    const res = await handler(new Request('http://localhost/healthz'))
+    const body = (await res.json()) as Record<string, unknown>
+    expect(body.status).toBe('ok')
+    expect('memory' in body).toBe(false)
+    expect(Object.keys(body).sort()).toEqual(['project_slug', 'status', 'uptime_ms'])
+  })
+
+  test('RA2: a THROWING memoryHealth provider degrades to ok (never crashes the liveness probe)', async () => {
+    const handler = defaultHealthzHandler({
+      project_slug: 'unit-test',
+      bootedAt: Date.now(),
+      memoryHealth: () => {
+        throw new Error('boom')
+      },
+    })
+    const res = await handler(new Request('http://localhost/healthz'))
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as { status: string; memory?: string }
+    expect(body.status).toBe('ok')
+    expect(body.memory).toBeUndefined()
+  })
 })
 
 describe('boot opens Bun.serve on resolved port', () => {

@@ -19,7 +19,7 @@ import {
   makePerConnectResolver,
   type GBrainMemoryWiring,
 } from '../build-gbrain-memory.ts'
-import { composeGbrainChildEnv } from '@neutronai/gbrain-memory/index.ts'
+import { composeGbrainChildEnv, resolveGbrainCommand } from '@neutronai/gbrain-memory/index.ts'
 import {
   buildOpenAiEmbedderConfig,
   resolveInitEmbeddingTarget,
@@ -728,9 +728,57 @@ describe('buildGBrainMemory', () => {
     // The public shape carries ONLY memoryStore/syncHook/close.
     expect('client' in wiring).toBe(false)
     expect((wiring as unknown as Record<string, unknown>)['client']).toBeUndefined()
-    expect(Object.keys(wiring).sort()).toEqual(['close', 'memoryStore', 'syncHook'])
+    // RA2 adds `bootHealth` (a plain value object, NOT a transport) alongside the
+    // typed seams — still no `client`.
+    expect(Object.keys(wiring).sort()).toEqual(['bootHealth', 'close', 'memoryStore', 'syncHook'])
     // close() never spawned a child (lazy connect), so it resolves cleanly.
     await expect(wiring.close()).resolves.toBeUndefined()
+  })
+
+  // RA2 (gbrain live-or-loud) — the boot-time binary-presence verdict that
+  // `/healthz` folds into its degraded assertion.
+  test('RA2: bootHealth.binaryPresent is TRUE + no detail when a real gbrain is on PATH', () => {
+    // Put an executable `gbrain` in a temp dir and point PATH at ONLY that dir —
+    // `resolveGbrainCommand` honors the given env PATH first (Bun.which), so this
+    // is deterministic regardless of what's installed on the host.
+    const dir = mkdtempSync(join(tmpdir(), 'bgm-bin-'))
+    try {
+      const bin = join(dir, 'gbrain')
+      writeFileSync(bin, '#!/usr/bin/env bun\n')
+      chmodSync(bin, 0o755)
+      const env = { PATH: dir }
+      // Sanity: the resolver itself finds it (bootHealth must mirror this).
+      expect(resolveGbrainCommand(env)).not.toBeNull()
+      const wiring = buildGBrainMemory({ owner_home: join(dir, 'data'), project_slug: 'acme', env })
+      expect(wiring.bootHealth.binaryPresent).toBe(true)
+      expect(wiring.bootHealth.detail).toBeUndefined()
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('RA2: bootHealth MIRRORS resolveGbrainCommand — a missing binary yields a coarse, non-sensitive detail', () => {
+    const home = mkdtempSync(join(tmpdir(), 'bgm-missing-'))
+    try {
+      // An env that resolves no gbrain via PATH/BUN_INSTALL/HOME. (The absolute
+      // /usr/local + /opt/homebrew probes are host-dependent, so we derive the
+      // EXPECTATION from the resolver itself rather than hardcoding false — this
+      // proves bootHealth is SOURCED from resolveGbrainCommand on any host.)
+      const env = { PATH: join(home, 'empty-bin'), HOME: home, BUN_INSTALL: join(home, 'no-bun') }
+      const expectedPresent = resolveGbrainCommand(env) !== null
+      const wiring = buildGBrainMemory({ owner_home: join(home, 'data'), project_slug: 'acme', env })
+      expect(wiring.bootHealth.binaryPresent).toBe(expectedPresent)
+      if (!expectedPresent) {
+        expect(typeof wiring.bootHealth.detail).toBe('string')
+        // Coarse + non-sensitive: no owner path leaks into the /healthz-bound detail.
+        expect(wiring.bootHealth.detail).not.toContain(home)
+        expect(wiring.bootHealth.detail).toContain('gbrain')
+      } else {
+        expect(wiring.bootHealth.detail).toBeUndefined()
+      }
+    } finally {
+      rmSync(home, { recursive: true, force: true })
+    }
   })
 
   test('legacy 3072-dim brain on disk + default → emits a LOUD keyword+graph-degradation warning', () => {
