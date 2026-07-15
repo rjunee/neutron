@@ -48,9 +48,9 @@
  * reconnect (the common case) are unaffected.
  */
 
+import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
 import type { ChatOutbound } from '@neutronai/landing/chat-protocol.ts'
 import type { RecoveredReply } from '@neutronai/runtime/adapters/claude-code/index.ts'
-import type { WebChatSenderRegistry } from './chat-sender-registry.ts'
 
 /** An undelivered (or delivered) recovered-reply row, keyed `(topic_id, turn_id)`. */
 export interface RecoveredReplyRow {
@@ -183,47 +183,73 @@ export function renderRecoveredReply(text: string, topic_id: string): ChatOutbou
   return { type: 'agent_message', body: text, topic_id }
 }
 
+/** Awaitable app-ws delivery for a recovered reply: sends the rendered reply and
+ *  returns the adapter's RESULT id — `app-ws:*` (delivered live), `app-ws:dropped:*`
+ *  (persisted to chat_log, offline), `app-ws:lost:*` (captured nowhere), or
+ *  `undefined` (no adapter bound). The sink/drain classify it via
+ *  {@link assertRecoveredReplyPersisted}. */
+export type RecoveredReplyDelivery = (topic_id: string, event: ChatOutbound) => Promise<string | undefined>
+
 /**
  * Build the `onRecoveredReply` sink the gateway injects into the per-instance LLM
- * substrate (#106). Deliver-or-persist, deduped on `turn_id`.
+ * substrate (#106). Deduped on `turn_id`.
  *
- * `registry` is supplied lazily (`() => WebChatSenderRegistry | undefined`)
- * because the gateway's shared sender registry is constructed AFTER the per-instance
- * LLM substrate's build input — a holder resolved at call time avoids a forward
- * reference without reordering instance setup.
+ * CLAIM-FIRST (Codex): the reply is persisted AND marked delivered SYNCHRONOUSLY
+ * up-front, so (a) a concurrent replay or a simultaneous reconnect drain can never
+ * re-emit it, and (b) it is never silently lost. Then live delivery is attempted
+ * ASYNCHRONOUSLY and its REAL adapter result is classified — the previous code
+ * trusted a synchronous boolean, but production's fire-and-forget bridge returns
+ * `true` unconditionally, hiding an `app-ws:lost:*` (append failed AND socket
+ * offline). On a lost/failed delivery we RELEASE the claim back to pending so the
+ * reconnect drain retries; a delivered/persisted result stays claimed (the durable
+ * chat_log row + seq de-dupe make resume show it exactly once).
+ *
+ * `deliver` is supplied lazily because the app-ws adapter is constructed AFTER this
+ * sink's build input — a holder resolved at call time avoids a forward reference.
+ * When it resolves `undefined` (no adapter yet), the row simply stays pending for
+ * the reconnect drain.
  */
 export function makeRecoveredReplySink(deps: {
-  registry: () => WebChatSenderRegistry | undefined
+  deliver: () => RecoveredReplyDelivery | undefined
   store: RecoveredReplyStore
   now?: () => number
 }): (reply: RecoveredReply) => void {
   const clock = deps.now ?? ((): number => Date.now())
   return (reply: RecoveredReply): void => {
-    const t = clock()
     // Dedupe: a live-delivered + persisted race (or a duplicate replay) shows once.
     if (deps.store.seen(reply.topic_id, reply.turn_id)) return
-    const registry = deps.registry()
-    if (registry !== undefined && registry.has(reply.topic_id)) {
-      try {
-        const delivered = registry.send(reply.topic_id, renderRecoveredReply(reply.text, reply.topic_id))
-        if (delivered) {
-          deps.store.markDelivered(reply.topic_id, reply.turn_id, t)
-          return
-        }
-      } catch {
-        // The registry propagates a closed-socket send throw, and the socket can
-        // close between `has()` and `send()`. Fall through to PERSIST so the reply
-        // is recovered on the next reconnect rather than lost (Codex r1 P2).
-      }
-    }
+    // CLAIM synchronously (persist + mark) BEFORE any await, so a concurrent drain
+    // can't take the same row and the reply is never lost.
     const persist: Parameters<RecoveredReplyStore['persistUndelivered']>[0] = {
       topic_id: reply.topic_id,
       turn_id: reply.turn_id,
       text: reply.text,
-      now: t,
+      now: clock(),
     }
     if (reply.instance_slug !== undefined) persist.project_slug = reply.instance_slug
     deps.store.persistUndelivered(persist)
+    deps.store.markDelivered(reply.topic_id, reply.turn_id, clock())
+
+    const send = deps.deliver()
+    if (send === undefined) {
+      // No adapter bound → release the claim so the reconnect drain delivers it.
+      deps.store.releaseClaim(reply.topic_id, reply.turn_id)
+      return
+    }
+    fireAndForget(
+      'recovered-reply.live',
+      // RAW promise: it REJECTS when the reply was captured nowhere —
+      // `assertRecoveredReplyPersisted` throws on an `app-ws:lost:*` / `undefined`
+      // result, and the send itself may reject. A delivered / dropped-persisted
+      // result resolves → the row stays claimed.
+      (async (): Promise<void> => {
+        const id = await send(reply.topic_id, renderRecoveredReply(reply.text, reply.topic_id))
+        assertRecoveredReplyPersisted(id)
+      })(),
+      // onError: captured nowhere → RELEASE the claim so the reconnect drain
+      // retries rather than dropping the reply.
+      () => deps.store.releaseClaim(reply.topic_id, reply.turn_id),
+    )
   }
 }
 

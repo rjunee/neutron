@@ -39,6 +39,7 @@ import {
   makeRecoveredReplySink,
   drainRecoveredReplies,
   assertRecoveredReplyPersisted,
+  type RecoveredReplyDelivery,
 } from '../recovered-reply-store.ts'
 
 afterEach(async () => {
@@ -47,94 +48,114 @@ afterEach(async () => {
 
 // ─── Part 1: the gateway sink semantics (deliver-or-persist, deduped) ─────────
 
-describe('makeRecoveredReplySink — online / offline / dedupe', () => {
-  it('delivers immediately when the user is online; no persisted row', () => {
-    const registry = new InMemoryWebChatSenderRegistry()
+const flush = (): Promise<void> => new Promise((r) => setTimeout(r, 0))
+
+/** Deliver stub returning a fixed adapter result id (or throwing). */
+const deliverReturning = (id: string | undefined) => (): RecoveredReplyDelivery => async () => id
+
+describe('makeRecoveredReplySink — claim-first, real async delivery result', () => {
+  it('a live-delivered reply stays claimed (delivered) — nothing left to drain', async () => {
     const store = new InMemoryRecoveredReplyStore()
-    const sent: ChatOutbound[] = []
     const topic = webTopicId('u-1')
-    registry.register(topic, (e) => void sent.push(e))
     let clock = 1000
-    const sink = makeRecoveredReplySink({ registry: () => registry, store, now: () => clock })
+    const sent: ChatOutbound[] = []
+    const sink = makeRecoveredReplySink({
+      deliver: () => async (_t, e) => {
+        sent.push(e)
+        return 'app-ws:msg-1'
+      },
+      store,
+      now: () => ++clock,
+    })
 
     sink({ topic_id: topic, turn_id: 'abc:1', text: 'recovered answer' })
+    await flush()
 
     expect(sent).toHaveLength(1)
     expect(sent[0]).toEqual({ type: 'agent_message', body: 'recovered answer', topic_id: topic })
-    // Online delivery → nothing left to drain on reconnect.
-    expect(store.takeUndelivered(topic, ++clock)).toHaveLength(0)
+    // Delivered → claimed, nothing left to drain on reconnect.
+    expect(store.peekUndelivered(topic)).toHaveLength(0)
   })
 
-  it('persists an undelivered row when the user is offline; reconnect drains it once', async () => {
-    const registry = new InMemoryWebChatSenderRegistry()
+  it('a persisted-but-offline (dropped) reply counts delivered — resume shows it (nothing to drain)', async () => {
     const store = new InMemoryRecoveredReplyStore()
     const topic = webTopicId('u-2')
-    let clock = 2000
-    const sink = makeRecoveredReplySink({ registry: () => registry, store, now: () => clock })
+    const sink = makeRecoveredReplySink({ deliver: deliverReturning('app-ws:dropped:msg-1'), store, now: () => 1 })
 
-    // Offline at replay time (no sender registered).
     sink({ topic_id: topic, turn_id: 'def:1', text: 'answer for offline user' })
-    expect(store.seen(topic, 'def:1')).toBe(true)
+    await flush()
 
-    // Reconnect: the existing reconnect path drains it once.
-    const sent: ChatOutbound[] = []
-    const emitted = await drainRecoveredReplies({ topic_id: topic, store, send: (e) => void sent.push(e), now: () => ++clock })
-    expect(emitted).toBe(1)
-    expect(sent[0]).toEqual({ type: 'agent_message', body: 'answer for offline user', topic_id: topic })
-
-    // A second drain (e.g. another reconnect) re-emits NOTHING — already delivered.
-    const sent2: ChatOutbound[] = []
-    await drainRecoveredReplies({ topic_id: topic, store, send: (e) => void sent2.push(e), now: () => ++clock })
-    expect(sent2).toHaveLength(0)
+    // dropped == persisted to chat_log → delivered, not re-pending.
+    expect(store.peekUndelivered(topic)).toHaveLength(0)
   })
 
-  it('dedupes a live-delivered + persisted race on turn_id (shown once)', async () => {
-    const registry = new InMemoryWebChatSenderRegistry()
+  it('a LOST reply (captured nowhere) is RELEASED back to pending for the reconnect drain', async () => {
     const store = new InMemoryRecoveredReplyStore()
     const topic = webTopicId('u-3')
-    const sent: ChatOutbound[] = []
-    registry.register(topic, (e) => void sent.push(e))
-    let clock = 3000
-    const sink = makeRecoveredReplySink({ registry: () => registry, store, now: () => ++clock })
+    const sink = makeRecoveredReplySink({ deliver: deliverReturning('app-ws:lost:msg-1'), store, now: () => 1 })
 
-    // Same turn delivered twice (a replay race): second call is a no-op.
-    sink({ topic_id: topic, turn_id: 'race:1', text: 'once' })
-    sink({ topic_id: topic, turn_id: 'race:1', text: 'once' })
-    expect(sent).toHaveLength(1)
+    sink({ topic_id: topic, turn_id: 'lost:1', text: 'must survive a double failure' })
+    await flush()
 
-    // And a subsequent reconnect drain finds nothing to flush for that turn.
-    const drained: ChatOutbound[] = []
-    await drainRecoveredReplies({ topic_id: topic, store, send: (e) => void drained.push(e), now: () => ++clock })
-    expect(drained).toHaveLength(0)
+    // Neither persisted nor delivered → pending, retried on the next reconnect.
+    expect(store.peekUndelivered(topic)).toHaveLength(1)
   })
 
-  it('persists when a live send THROWS (closed socket between has() and send) — Codex r1 P2', async () => {
-    const registry = new InMemoryWebChatSenderRegistry()
+  it('no adapter bound (undefined) → released to pending', async () => {
+    const store = new InMemoryRecoveredReplyStore()
+    const topic = webTopicId('u-3b')
+    const sink = makeRecoveredReplySink({ deliver: () => undefined, store, now: () => 1 })
+
+    sink({ topic_id: topic, turn_id: 'unbound:1', text: 'no adapter yet' })
+    await flush()
+
+    expect(store.peekUndelivered(topic)).toHaveLength(1)
+  })
+
+  it('a delivery that THROWS → released to pending (not lost)', async () => {
     const store = new InMemoryRecoveredReplyStore()
     const topic = webTopicId('u-4')
-    // A registered-but-closed sender: has() is true, but send throws.
-    registry.register(topic, () => {
-      throw new Error('socket closed')
+    const sink = makeRecoveredReplySink({
+      deliver: () => async () => {
+        throw new Error('socket closed mid-send')
+      },
+      store,
+      now: () => 1,
     })
-    let clock = 4000
-    const sink = makeRecoveredReplySink({ registry: () => registry, store, now: () => ++clock })
 
     sink({ topic_id: topic, turn_id: 'thr:1', text: 'recovered despite throw' })
-    // NOT lost — persisted for the next reconnect.
-    expect(store.seen(topic, 'thr:1')).toBe(true)
-    const sent: ChatOutbound[] = []
-    const emitted = await drainRecoveredReplies({ topic_id: topic, store, send: (e) => void sent.push(e), now: () => ++clock })
-    expect(emitted).toBe(1)
-    expect((sent[0] as { body: string }).body).toContain('recovered despite throw')
+    await flush()
+
+    expect(store.peekUndelivered(topic)).toHaveLength(1)
+  })
+
+  it('dedupes a duplicate replay on turn_id (the second sink call is a no-op)', async () => {
+    const store = new InMemoryRecoveredReplyStore()
+    const topic = webTopicId('u-5b')
+    let sends = 0
+    const sink = makeRecoveredReplySink({
+      deliver: () => async () => {
+        sends += 1
+        return 'app-ws:msg-x'
+      },
+      store,
+      now: () => 1,
+    })
+
+    sink({ topic_id: topic, turn_id: 'race:1', text: 'once' })
+    await flush()
+    sink({ topic_id: topic, turn_id: 'race:1', text: 'once' }) // seen → no-op
+    await flush()
+
+    expect(sends).toBe(1)
+    expect(store.peekUndelivered(topic)).toHaveLength(0)
   })
 
   it('drain leaves a row PENDING when send throws, retried on the next reconnect — Codex r1 P2', async () => {
-    const registry = new InMemoryWebChatSenderRegistry()
     const store = new InMemoryRecoveredReplyStore()
     const topic = webTopicId('u-5')
     let clock = 5000
-    const sink = makeRecoveredReplySink({ registry: () => registry, store, now: () => ++clock })
-    sink({ topic_id: topic, turn_id: 'retry:1', text: 'must survive a failed drain' }) // offline → persisted
+    store.persistUndelivered({ topic_id: topic, turn_id: 'retry:1', text: 'must survive a failed drain', now: ++clock })
 
     // First reconnect: the send throws → the row must NOT be consumed.
     const failingEmitted = await drainRecoveredReplies({
@@ -158,23 +179,12 @@ describe('makeRecoveredReplySink — online / offline / dedupe', () => {
   })
 
   it('drain leaves a row PENDING when an ASYNC send REJECTS, retried on the next reconnect (the async loss path)', async () => {
-    // THE BUG this guards: the Open drain fans through the app-ws adapter, whose
-    // send is fire-and-forget (returns void, hides the promise). If the drain does
-    // not AWAIT the real delivery, a rejected/dropped send is marked delivered and
-    // the reply is lost forever. With the async-aware drain, a rejection leaves the
-    // row pending for the next reconnect (Codex).
     const store = new InMemoryRecoveredReplyStore()
     const topic = webTopicId('u-6')
     let clock = 6000
-    const sink = makeRecoveredReplySink({
-      registry: () => new InMemoryWebChatSenderRegistry(),
-      store,
-      now: () => ++clock,
-    })
-    sink({ topic_id: topic, turn_id: 'areject:1', text: 'must survive an async rejection' }) // offline → persisted
+    store.persistUndelivered({ topic_id: topic, turn_id: 'areject:1', text: 'must survive an async rejection', now: ++clock })
 
-    // First reconnect: an ASYNC send that REJECTS (adapter.send rejects, or a drop
-    // → thrown). The row must NOT be consumed.
+    // First reconnect: an ASYNC send that REJECTS. The row must NOT be consumed.
     const failing = await drainRecoveredReplies({
       topic_id: topic,
       store,
@@ -203,19 +213,12 @@ describe('makeRecoveredReplySink — online / offline / dedupe', () => {
   })
 
   it('two SIMULTANEOUS reconnect drains emit a row exactly ONCE (atomic claim)', async () => {
-    // Every socket open starts its OWN fire-and-forget drain. With async sends, a
-    // peek-then-mark drain would let both drains snapshot the same pending row and
-    // both emit it. The claim-first design (takeUndelivered marks synchronously,
-    // before any await) makes the second concurrent drain see nothing.
+    // The claim-first design (takeUndelivered marks synchronously, before any await)
+    // makes the second concurrent drain see nothing.
     const store = new InMemoryRecoveredReplyStore()
     const topic = webTopicId('u-7')
     let clock = 7000
-    const sink = makeRecoveredReplySink({
-      registry: () => new InMemoryWebChatSenderRegistry(),
-      store,
-      now: () => ++clock,
-    })
-    sink({ topic_id: topic, turn_id: 'conc:1', text: 'shown exactly once' }) // offline → persisted
+    store.persistUndelivered({ topic_id: topic, turn_id: 'conc:1', text: 'shown exactly once', now: ++clock })
 
     const sentA: ChatOutbound[] = []
     const sentB: ChatOutbound[] = []
@@ -282,12 +285,7 @@ describe('makeRecoveredReplySink — online / offline / dedupe', () => {
     const store = new InMemoryRecoveredReplyStore()
     const topic = webTopicId('u-8')
     let clock = 8000
-    const sink = makeRecoveredReplySink({
-      registry: () => new InMemoryWebChatSenderRegistry(),
-      store,
-      now: () => ++clock,
-    })
-    sink({ topic_id: topic, turn_id: 'lost:1', text: 'must not be lost on double failure' })
+    store.persistUndelivered({ topic_id: topic, turn_id: 'lost:1', text: 'must not be lost on double failure', now: ++clock })
 
     // First reconnect: the adapter reported `lost` → the drain's send throws.
     const failing = await drainRecoveredReplies({
@@ -434,11 +432,13 @@ describe('runtime replay invokes the injected onRecoveredReply sink (#106 end-to
     const cwd = mkdtempSync(join(tmpdir(), 'neutron-redeliv-cwd-'))
     const topic = webTopicId('owner-1')
 
-    // Wire the REAL gateway sink as the injected redelivery sink.
+    // Wire the REAL gateway sink as the injected redelivery sink. The user is
+    // OFFLINE at replay time → no live adapter delivery (deliver resolves undefined),
+    // so the sink persists the row for the reconnect drain (asserted below).
     const registry = new InMemoryWebChatSenderRegistry()
     const store = new InMemoryRecoveredReplyStore()
     let clock = 5000
-    const sink = makeRecoveredReplySink({ registry: () => registry, store, now: () => ++clock })
+    const sink = makeRecoveredReplySink({ deliver: () => undefined, store, now: () => ++clock })
     const recovered: RecoveredReply[] = []
 
     const opts: PersistentReplSubstrateOptions = {

@@ -297,6 +297,7 @@ import {
   makeRecoveredReplySink,
   drainRecoveredReplies,
   assertRecoveredReplyPersisted,
+  type RecoveredReplyDelivery,
 } from '@neutronai/gateway/http/recovered-reply-store.ts'
 import type { OutgoingMessage } from '@neutronai/channels/types.ts'
 import type { ChatOutbound } from '@neutronai/landing/chat-protocol.ts'
@@ -697,6 +698,10 @@ export function buildOpenGraphComposer(
     // binds + hydrates (the legacy `web:` registry reaches NO client; see the
     // reminder/brief delivery note below). Skipped LLM-less (no conversational REPL).
     const noticeRegistryHolder: { registry?: WebChatSenderRegistry } = {}
+    // O6 — the recovered-reply sink/drain need the REAL (async) app-ws delivery
+    // result, not the fire-and-forget bridge's unconditional `true`. Bound after
+    // the adapter exists (below); resolved lazily at call time.
+    const recoveredReplyDeliverHolder: { send?: RecoveredReplyDelivery } = {}
     const ownerNoticeTopic = appWsTopicId(OWNER_USER_ID)
     const recoveredReplyStore = new InMemoryRecoveredReplyStore()
     const liveAgentNoticeSinks =
@@ -710,7 +715,7 @@ export function buildOpenGraphComposer(
     const liveAgentRecoveredReplySink =
       llmPool !== null
         ? makeRecoveredReplySink({
-            registry: () => noticeRegistryHolder.registry,
+            deliver: () => recoveredReplyDeliverHolder.send,
             store: recoveredReplyStore,
           })
         : undefined
@@ -2757,6 +2762,28 @@ export function buildOpenGraphComposer(
     // BOUND inside (after `new AppWsAdapter`); `onboardingMsg` is bound at the SAME
     // sequence point as before. `buildAppWsSendReply` (composer-owned, above) is
     // threaded in so the receiver / seed / opening paths share one reply path.
+    // O6 — bind the ONE awaitable recovered-reply delivery both the live sink and
+    // the reconnect drain share. It sends the rendered reply through the app-ws
+    // adapter and returns its REAL result id (delivered / dropped-persisted / lost /
+    // unbound) so the caller classifies it — NOT the fire-and-forget bridge that
+    // always returns `true`. `appWs.deref` is lazy, so binding before the adapter is
+    // constructed is fine (it resolves at runtime, when a recovered reply fires).
+    recoveredReplyDeliverHolder.send = async (
+      topic_id: string,
+      event: ChatOutbound,
+    ): Promise<string | undefined> => {
+      const msg: OutgoingMessage = {
+        topic: {
+          topic_id: '',
+          channel_kind: 'app_socket',
+          channel_topic_id: topic_id,
+          project_id: null,
+          privacy_mode: 'regular',
+        },
+        text: event.type === 'agent_message' ? event.body : '',
+      }
+      return appWs.deref((adapter) => adapter.send(msg))
+    }
     const {
       appWsSurface,
       tridentDeliverySink,
@@ -2793,36 +2820,19 @@ export function buildOpenGraphComposer(
         ? {
             recoveredReplyDrain: (channel_topic_id: string): void => {
               // Fire-and-forget the drain (on_session_open must not block on it),
-              // but the drain AWAITS real per-row delivery so a failed/dropped send
-              // stays pending for the next reconnect. NOTE: we do NOT reuse
-              // `buildAppWsSendReply` here — its sender returns `void` and hides the
-              // `adapter.send()` promise behind `fireAndForget`, so the drain could
-              // never observe a rejection and would mark a lost reply delivered
-              // (Codex). Instead await the adapter directly and THROW on a
-              // drop/unbound so `drainRecoveredReplies` leaves the row pending.
+              // but the drain AWAITS real per-row delivery through the SAME awaitable
+              // adapter send the live sink uses, then classifies the result: a real
+              // id or `app-ws:dropped:*` is durable (persisted → resume shows it once,
+              // so NOT retried — a retry would double-append); `app-ws:lost:*` or an
+              // unbound adapter persisted nothing → throw so the row stays pending.
               fireAndForget(
                 'composer.recovered-reply-drain',
                 drainRecoveredReplies({
                   topic_id: channel_topic_id,
                   store: recoveredReplyStore,
                   send: async (event: ChatOutbound): Promise<void> => {
-                    const msg: OutgoingMessage = {
-                      topic: {
-                        topic_id: '',
-                        channel_kind: 'app_socket',
-                        channel_topic_id,
-                        project_id: null,
-                        privacy_mode: 'regular',
-                      },
-                      text: event.type === 'agent_message' ? event.body : '',
-                    }
-                    const id = await appWs.deref((adapter) => adapter.send(msg))
-                    // `adapter.send` PERSISTS to chat_log before the live send, so any
-                    // returned id (real OR `app-ws:dropped:*`) means the reply is
-                    // durable — resume shows it exactly once, so it's delivered and
-                    // must NOT be retried (a retry would double-append). Only an
-                    // unbound adapter (`undefined`) persisted nothing → throw to
-                    // leave the row pending (Codex).
+                    const deliver = recoveredReplyDeliverHolder.send
+                    const id = deliver === undefined ? undefined : await deliver(channel_topic_id, event)
                     assertRecoveredReplyPersisted(id)
                   },
                   log_tag: '[open][recovered-reply]',
