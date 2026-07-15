@@ -292,6 +292,10 @@ export async function boot(options: BootOptions = {}): Promise<BootHandle> {
   // shutdown drain awaits each before `db.close()`.
   let realmode_cleanups: Array<() => void | Promise<void>> = []
   let composedHttpHandler: HttpHandler | undefined
+  // RA2 — the composer's memory-backend health, hoisted so BOTH the terminal
+  // `/healthz` (composition.default_handler, chained path) AND the dev
+  // healthz-only fallback below fold it in consistently. Undefined → byte-identical.
+  let composedMemoryHealth: MemoryHealthProvider | undefined
   // Sprint 18: WebSocket handler exposed by the landing server (chat
   // upgrade path). Bun.serve receives it alongside the fetch handler so a
   // single port handles both HTTP and WS. Default no-op stays cold when
@@ -373,11 +377,12 @@ export async function boot(options: BootOptions = {}): Promise<BootHandle> {
       // boot shell knows `bootedAt`+slug; only the composer knows memory health —
       // this seam joins them. Omitted by composers that don't wire memory → the
       // body stays byte-identical (`status:'ok'`).
+      composedMemoryHealth = composition.memory_health
       composition.default_handler = defaultHealthzHandler({
         project_slug,
         bootedAt,
-        ...(composition.memory_health !== undefined
-          ? { memoryHealth: composition.memory_health }
+        ...(composedMemoryHealth !== undefined
+          ? { memoryHealth: composedMemoryHealth }
           : {}),
       })
       const composed = await composeProductionGraph(composition)
@@ -418,7 +423,13 @@ export async function boot(options: BootOptions = {}): Promise<BootHandle> {
   const handler: HttpHandler =
     options.httpHandler ??
     composedHttpHandler ??
-    defaultHealthzHandler({ project_slug, bootedAt })
+    defaultHealthzHandler({
+      project_slug,
+      bootedAt,
+      // RA2 — the dev healthz-only fallback (no chained surface) reports memory
+      // health too, so `/healthz` is consistent across both boot paths.
+      ...(composedMemoryHealth !== undefined ? { memoryHealth: composedMemoryHealth } : {}),
+    })
 
   // S2 (b) — fail-closed wide-bind policy. Refuse to open a non-loopback
   // listener while a dev-auth bypass env is set (that combination exposes the
@@ -758,13 +769,18 @@ export function defaultHealthzHandler(opts: {
   return (req: Request): Response => {
     const url = new URL(req.url)
     if (url.pathname === '/healthz') {
-      // Fail-soft: a throwing provider must never crash the liveness probe —
-      // treat it as "not reported" (status stays ok) rather than 500.
+      // Fail-soft: a throwing provider must never crash the liveness probe. But a
+      // provider that is WIRED and THROWS is itself a degrade signal — reporting
+      // `ok` there is a false-green precisely when health evaluation breaks (Codex).
+      // Optional-chaining means an UNWIRED provider (`undefined?.()`) never throws,
+      // so any throw reaching here came from a configured provider → report degraded.
       let memory: { available: boolean; detail?: string } | undefined
       try {
         memory = opts.memoryHealth?.()
       } catch {
-        memory = undefined
+        // Coarse detail only — `/healthz` is unauthenticated, so the raw error
+        // (which may carry paths/pids) must not leak into the body.
+        memory = { available: false, detail: 'memory health probe error' }
       }
       const degraded = memory !== undefined && !memory.available
       const body = {

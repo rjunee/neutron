@@ -197,19 +197,26 @@ describe('defaultHealthzHandler', () => {
     expect(Object.keys(body).sort()).toEqual(['project_slug', 'status', 'uptime_ms'])
   })
 
-  test('RA2: a THROWING memoryHealth provider degrades to ok (never crashes the liveness probe)', async () => {
+  test('RA2: a THROWING memoryHealth provider is reported DEGRADED (loud), never crashes the probe, still 200', async () => {
     const handler = defaultHealthzHandler({
       project_slug: 'unit-test',
       bootedAt: Date.now(),
       memoryHealth: () => {
-        throw new Error('boom')
+        throw new Error('boom /home/owner/.gbrain pid=1234')
       },
     })
     const res = await handler(new Request('http://localhost/healthz'))
+    // Liveness never crashes → still 200; but a WIRED provider that throws is a
+    // degrade signal, not a silent 'ok' (false-green when health eval breaks).
     expect(res.status).toBe(200)
-    const body = (await res.json()) as { status: string; memory?: string }
-    expect(body.status).toBe('ok')
-    expect(body.memory).toBeUndefined()
+    const body = (await res.json()) as { status: string; memory?: string; memory_detail?: string }
+    expect(body.status).toBe('degraded')
+    expect(body.memory).toBe('unavailable')
+    // Coarse detail only — the raw error (paths/pids) must not leak to the
+    // unauthenticated endpoint.
+    expect(body.memory_detail).toBe('memory health probe error')
+    expect(JSON.stringify(body)).not.toContain('/home/owner')
+    expect(JSON.stringify(body)).not.toContain('pid=1234')
   })
 })
 

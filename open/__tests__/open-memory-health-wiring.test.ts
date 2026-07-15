@@ -25,6 +25,7 @@ import { join } from 'node:path'
 import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { buildOpenGraphComposer } from '../composer.ts'
+import { boot } from '@neutronai/gateway/index.ts'
 
 const SAVED_ENV_KEYS = [
   'NEUTRON_HOME',
@@ -93,5 +94,37 @@ test('RA2: the Open composition sets memory_health with a consistent, non-sensit
         /* best-effort */
       }
     }
+  }
+})
+
+test('RA2: boot() folds the REAL Open composition memory_health into the SERVED /healthz (chained path, degraded)', async () => {
+  // End-to-end over the PRODUCTION chained path: boot the REAL Open composer (which
+  // stands up chained HTTP surfaces → composeProductionGraph's chain, NOT the dev
+  // healthz-only fallback), overriding only memory_health to a deterministic DOWN
+  // backend. Proves boot() folds it into the terminal /healthz. Deleting the chained
+  // fold in gateway/index.ts turns this red.
+  {
+    // Migrate the DB the composer/boot will open, then hand boot() the path.
+    const seed = ProjectDb.open(process.env['NEUTRON_DB_PATH']!)
+    applyMigrations(seed.raw())
+    seed.close()
+  }
+  const realComposer = buildOpenGraphComposer({ env: process.env })
+  const handle = await boot({
+    port: 0,
+    composer: async (args) => {
+      const c = await realComposer(args)
+      return { ...c, memory_health: () => ({ available: false, detail: 'gbrain binary not found on PATH' }) }
+    },
+  })
+  try {
+    const res = await fetch(`http://127.0.0.1:${handle.server.port}/healthz`)
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as { status: string; memory?: string; memory_detail?: string }
+    expect(body.status).toBe('degraded')
+    expect(body.memory).toBe('unavailable')
+    expect(body.memory_detail).toContain('gbrain')
+  } finally {
+    await handle.shutdown()
   }
 })
