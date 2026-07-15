@@ -38,7 +38,7 @@
 
 import { sanitizeProjectId } from '@neutronai/channels/adapters/app-ws/envelope.ts'
 import type { AppWsAuthResolver } from '@neutronai/channels/adapters/app-ws/auth.ts'
-import { ownerSlugMismatch } from './auth-helpers.ts'
+import { jsonError, jsonOk, ownerSlugMismatch, readJsonBody, resolveBearer } from './surface-kit.ts'
 import {
   ALL_TASK_ORDERS,
   ALL_TASK_STATUSES,
@@ -402,38 +402,6 @@ function assertTaskInProject(
   return { task: existing }
 }
 
-interface ResolvedAuth {
-  user_id: string
-  project_slug: string
-}
-
-interface AuthFailure {
-  code: string
-  message: string
-}
-
-async function resolveBearer(
-  req: Request,
-  auth: AppWsAuthResolver,
-): Promise<ResolvedAuth | AuthFailure> {
-  const header = req.headers.get('authorization') ?? ''
-  if (!header.toLowerCase().startsWith('bearer ')) {
-    return { code: 'missing_bearer', message: 'expected Authorization: Bearer <token>' }
-  }
-  const token = header.slice('bearer '.length).trim()
-  const resolved = await auth.resolve(token)
-  if ('code' in resolved) return { code: resolved.code, message: resolved.message }
-  return { user_id: resolved.user_id, project_slug: resolved.project_slug }
-}
-
-async function readJsonBody(req: Request): Promise<unknown> {
-  try {
-    return await req.json()
-  } catch {
-    return null
-  }
-}
-
 function parseStatusFilter(raw: string | null): TaskStatusFilter | undefined {
   if (raw === null || raw === '') return 'open'
   if (raw === 'all') return 'all'
@@ -511,18 +479,4 @@ function sanitizeTaskId(raw: string): string | null {
   if (raw.length === 0 || raw.length > MAX_TASK_ID_LEN) return null
   if (!/^[A-Za-z0-9_.-]+$/.test(raw)) return null
   return raw
-}
-
-function jsonOk(body: Record<string, unknown>, status = 200): Response {
-  return new Response(JSON.stringify({ ok: true, ...body }), {
-    status,
-    headers: { 'content-type': 'application/json' },
-  })
-}
-
-function jsonError(status: number, code: string, message: string): Response {
-  return new Response(JSON.stringify({ ok: false, code, message }), {
-    status,
-    headers: { 'content-type': 'application/json' },
-  })
 }

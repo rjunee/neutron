@@ -28,7 +28,7 @@
 import type { ReminderStore } from '@neutronai/reminders/index.ts'
 import type { AppWsAuthResolver } from '@neutronai/channels/adapters/app-ws/auth.ts'
 import { sanitizeProjectId } from '@neutronai/channels/adapters/app-ws/envelope.ts'
-import { ownerSlugMismatch } from './auth-helpers.ts'
+import { jsonResponse, ownerSlugMismatch, readJsonBody, resolveBearer } from './surface-kit.ts'
 
 const PATH_PREFIX = '/api/app/projects/'
 /**
@@ -564,38 +564,6 @@ function toListItem(r: {
   }
 }
 
-interface ResolvedAuth {
-  user_id: string
-  project_slug: string
-}
-
-interface AuthFailure {
-  code: string
-  message: string
-}
-
-async function resolveBearer(
-  req: Request,
-  auth: AppWsAuthResolver,
-): Promise<ResolvedAuth | AuthFailure> {
-  const header = req.headers.get('authorization') ?? ''
-  if (!header.toLowerCase().startsWith('bearer ')) {
-    return { code: 'missing_bearer', message: 'expected Authorization: Bearer <token>' }
-  }
-  const token = header.slice('bearer '.length).trim()
-  const resolved = await auth.resolve(token)
-  if ('code' in resolved) return { code: resolved.code, message: resolved.message }
-  return { user_id: resolved.user_id, project_slug: resolved.project_slug }
-}
-
-async function readJsonBody(req: Request): Promise<unknown> {
-  try {
-    return await req.json()
-  } catch {
-    return null
-  }
-}
-
 function readMessage(body: unknown): string | null {
   if (typeof body !== 'object' || body === null) return null
   const v = (body as Record<string, unknown>)['message']
@@ -658,11 +626,4 @@ function validateReminderId(raw: string): string | null {
   // through downstream join keys.
   if (!/^[A-Za-z0-9_.-]+$/.test(raw)) return null
   return raw
-}
-
-function jsonResponse(status: number, body: Record<string, unknown>): Response {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: { 'content-type': 'application/json' },
-  })
 }
