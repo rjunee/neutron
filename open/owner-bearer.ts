@@ -60,6 +60,20 @@ function mintOwnerBearer(): string {
   return `${MINTED_BEARER_PREFIX}${randomBytes(24).toString('base64url')}`
 }
 
+/**
+ * Select the app-ws owner-bearer token the composer presents from a threaded
+ * `NEUTRON_OWNER_BEARER` env value. TRIMS and requires a non-empty value, so a
+ * WHITESPACE-only or empty env is treated as UNSET and falls to a freshly minted
+ * (unguessable) token rather than becoming a guessable few-spaces bearer. This
+ * is the composer-side last line of defense: `server.ts` already resolves +
+ * normalizes the per-install bearer before threading it, but a composer-direct
+ * embed / test could pass a raw env value straight through.
+ */
+export function selectAppWsToken(injected: string | undefined): string {
+  const trimmed = injected?.trim()
+  return trimmed !== undefined && trimmed.length > 0 ? trimmed : mintOwnerBearer()
+}
+
 /** The on-disk owner-bearer file (0600) under NEUTRON_HOME. */
 export function ownerBearerPath(neutronHome: string): string {
   return join(neutronHome, '.owner-bearer')

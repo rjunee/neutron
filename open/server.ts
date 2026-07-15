@@ -84,13 +84,20 @@ export async function startOpenServer(): Promise<BootHandle> {
   // A LOOPBACK bind is a no-op: the 127.0.0.1 dogfood keeps its dev bypass.
   // The resolved bearer is threaded to the composer via NEUTRON_OWNER_BEARER so
   // the app-ws resolver + every /api/app/* surface accept THIS install's
-  // credential (and it is injected into the served page bootstrap). Only fills
-  // an empty slot — an operator-set value is never overwritten.
+  // credential (and it is injected into the served page bootstrap).
+  //
+  // `resolveOwnerBearer` has ALREADY applied the operator-vs-persisted
+  // precedence AND validated/normalized the value (trimmed; a too-short explicit
+  // value fails loud; a whitespace-only override is treated as unset → minted).
+  // `ownerBearer.value` is therefore the SOLE authoritative credential, and the
+  // guard judged `ownerBearer.source` for exactly it. Write it UNCONDITIONALLY
+  // so the composer reads the same value the guard approved — never a raw,
+  // unvalidated `env` string. (A conditional "fill empty slot only" left a
+  // whitespace-only `NEUTRON_OWNER_BEARER='   '` in place while the guard passed
+  // on the minted value, so three spaces authenticated as owner — Codex r1.)
   const ownerBearer = resolveOwnerBearer(config.neutronHome, env)
   assertOwnerCredentialPolicy(config.host, ownerBearer.source)
-  if (env[OWNER_BEARER_ENV_VAR] === undefined || env[OWNER_BEARER_ENV_VAR] === '') {
-    env[OWNER_BEARER_ENV_VAR] = ownerBearer.value
-  }
+  env[OWNER_BEARER_ENV_VAR] = ownerBearer.value
 
   // SHIM (marked to die): fill OWNER_HOME / NEUTRON_DB_PATH from the frozen
   // config so below-seam readers see them, keeping the gateway data dir + the

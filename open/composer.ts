@@ -105,7 +105,7 @@ import { buildGatewayAnthropicMessagesClient } from '@neutronai/gateway/wiring/b
 import { buildProjectOpeningMessageComposer } from '@neutronai/gateway/wiring/build-project-opening-message.ts'
 import { mkdirSync } from 'node:fs'
 import { join as joinPath } from 'node:path'
-import { randomBytes, randomUUID } from 'node:crypto'
+import { randomUUID } from 'node:crypto'
 import { constantTimeEqual } from '@neutronai/runtime/constant-time-equal.ts'
 import { DocSearchIndex } from '@neutronai/doc-search/store.ts'
 import { DocSearchRuntime } from '@neutronai/doc-search/runtime.ts'
@@ -119,6 +119,7 @@ import { wireUploads } from './wiring/uploads.ts'
 import { buildOpenOwnerGate } from './wiring/owner-gate.ts'
 import { wireAppWs, type OnboardingMsgEmit } from './wiring/app-ws.ts'
 import { MIN_COOKIE_SECRET_LEN } from './session-cookie-secret.ts'
+import { selectAppWsToken } from './owner-bearer.ts'
 import { late } from './wiring/late.ts'
 import type { OpenWiringContext } from './wiring/context.ts'
 import { buildChainedChatCommandFilter } from '@neutronai/gateway/boot-helpers.ts'
@@ -1233,11 +1234,13 @@ export function buildOpenGraphComposer(
     // whose bearer is only ephemeral). When the env is UNSET (composer built
     // directly in a test / non-server embed) we fall back to a fresh per-boot
     // random token — unguessable, just not persistent — so those paths still work.
-    const injectedOwnerBearer = env['NEUTRON_OWNER_BEARER']
-    const appWsToken =
-      injectedOwnerBearer !== undefined && injectedOwnerBearer.length > 0
-        ? injectedOwnerBearer
-        : `nbt_${randomBytes(24).toString('base64url')}`
+    //
+    // Defense-in-depth: `selectAppWsToken` TRIMS and requires a non-empty value,
+    // so a WHITESPACE-only env (e.g. a stray `NEUTRON_OWNER_BEARER='   '` reaching
+    // a composer-direct embed) is treated as UNSET and falls to a minted token —
+    // never a guessable few-spaces bearer. server.ts already normalizes this
+    // before it gets here; this is the last line of defense for the direct path.
+    const appWsToken = selectAppWsToken(env['NEUTRON_OWNER_BEARER'])
 
     // FIX 2 (P2 follow-up to #84) — ONE shared single-use store for start-token
     // JTIs. With the legacy `/ws/chat` onboarding socket deleted, the start

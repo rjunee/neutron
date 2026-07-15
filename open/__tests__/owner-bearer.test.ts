@@ -23,6 +23,7 @@ import {
   OWNER_BEARER_MIN_LEN,
   ownerBearerPath,
   resolveOwnerBearer,
+  selectAppWsToken,
 } from '../owner-bearer.ts'
 
 let home: string
@@ -149,5 +150,31 @@ describe('resolveOwnerBearer — persisted per-install', () => {
     }
     expect(res.source).toBe('ephemeral')
     expect(res.value).toMatch(/^nbt_/) // still unguessable — never a constant
+  })
+})
+
+describe('selectAppWsToken — composer-side boundary (Codex r1 Critical)', () => {
+  it('uses a real threaded bearer VERBATIM (trimmed)', () => {
+    expect(selectAppWsToken('nbt_a-real-per-install-owner-bearer-0123456789')).toBe(
+      'nbt_a-real-per-install-owner-bearer-0123456789',
+    )
+    expect(selectAppWsToken('  padded-operator-bearer-0123456789  ')).toBe(
+      'padded-operator-bearer-0123456789',
+    )
+  })
+
+  it('NEVER returns a whitespace-only / empty / unset value — mints instead', () => {
+    // The exact server-to-composer hole: a stray `NEUTRON_OWNER_BEARER='   '`
+    // must NOT become a guessable few-spaces owner credential.
+    for (const raw of ['   ', '\t', ' \n ', '', undefined]) {
+      const token = selectAppWsToken(raw)
+      expect(token).toMatch(/^nbt_[A-Za-z0-9_-]{20,}$/)
+      expect(token.trim()).toBe(token) // never whitespace-laden
+      expect(token.length).toBeGreaterThanOrEqual(OWNER_BEARER_MIN_LEN)
+    }
+  })
+
+  it('mints a DISTINCT token each call for the unset case (unguessable)', () => {
+    expect(selectAppWsToken(undefined)).not.toBe(selectAppWsToken(undefined))
   })
 })
