@@ -46,19 +46,18 @@ import ts from 'typescript'
 import { ownerSlugMismatch } from '../auth-helpers.ts'
 
 /**
- * AST BIND-ANALYSIS for `ownerSlugMismatch` usage in one surface source. Returns a
- * reason string if the surface would invoke a NON-canonical `ownerSlugMismatch`
- * (the timing-safe project_slug comparator), else `null`.
+ * AST BIND-ANALYSIS for a kit-helper `NAME` in one surface source. Returns a reason
+ * string if the surface would invoke a NON-canonical `NAME` (a shadow of the ONE
+ * surface-kit implementation), else `null`. `CANON` matches the module specifier(s)
+ * the helper may legitimately come from.
  *
  * A surface is clean iff, when it references the name at all, it has a canonical
- * NAMED import (`./auth-helpers.ts` or `./surface-kit.ts`) AND nothing shadows it:
- * no local function/var/param/binding-element named `ownerSlugMismatch`, no
- * `import * as ownerSlugMismatch`, no non-canonical named import, and no qualified
- * `x.ownerSlugMismatch(...)` call (which would bypass the direct canonical binding).
+ * DIRECT named import (matching `CANON`, no alias) AND nothing shadows it: no local
+ * function/var/param/binding-element named `NAME`, no `import * as NAME`, no
+ * non-canonical named import, no name-binding alias, and no qualified/element-access
+ * `x.NAME(...)` call (which would bypass the direct canonical binding).
  */
-function ownerSlugMismatchBindingOffense(source: string, fileName: string): string | null {
-  const NAME = 'ownerSlugMismatch'
-  const CANON = /^\.\/(?:auth-helpers|surface-kit)\.ts$/
+function helperBindingOffense(source: string, fileName: string, NAME: string, CANON: RegExp): string | null {
   const sf = ts.createSourceFile(fileName, source, ts.ScriptTarget.Latest, true)
   let referenced = false
   let canonicalImport = false
@@ -158,6 +157,22 @@ const KIT_HELPER_NAMES = new Set([
   'jsonError',
   'ownerSlugMismatch',
 ])
+
+/** Each consolidated kit helper + the module specifier(s) it may legitimately be
+ *  imported from. The five serializers/parsers live ONLY in surface-kit; the
+ *  timing-safe comparators are defined in auth-helpers and re-exported by
+ *  surface-kit (so either is canonical). */
+const AUTH_OR_KIT = /^\.\/(?:auth-helpers|surface-kit)\.ts$/
+const KIT_ONLY = /^\.\/surface-kit\.ts$/
+const KIT_HELPER_SOURCES: Array<{ name: string; canon: RegExp }> = [
+  { name: 'resolveBearer', canon: KIT_ONLY },
+  { name: 'readJsonBody', canon: KIT_ONLY },
+  { name: 'jsonResponse', canon: KIT_ONLY },
+  { name: 'jsonOk', canon: KIT_ONLY },
+  { name: 'jsonError', canon: KIT_ONLY },
+  { name: 'ownerSlugMismatch', canon: AUTH_OR_KIT },
+  { name: 'ownerIdentityMismatch', canon: AUTH_OR_KIT },
+]
 
 /** AST scan for LOCAL declarations of any kit helper name in one surface source —
  *  function declarations, variable declarations (typed / function-expr / arrow),
@@ -311,35 +326,44 @@ describe('project_slug timing-safe comparison (ISSUE #34)', () => {
     expect(offenders).toHaveLength(0)
   })
 
-  it('AST: every surface invoking ownerSlugMismatch calls the CANONICAL import (no shadow/param/qualified bypass)', () => {
+  it('AST: every surface invoking ANY kit helper calls the CANONICAL import (no shadow/param/qualified bypass)', () => {
     // Source regexes cannot prove the INVOKED function is canonical — a surface can
     // shadow the import via a parameter, a `./shadow.ts` import, an
-    // `import * as x` + `x.ownerSlugMismatch(...)`, or a local var. So bind-analyze
-    // the AST (Codex): for each surface that INVOKES the `ownerSlugMismatch` identifier
-    // (or shadows it), require a canonical named import AND reject every shadow form
-    // (local decl / param / namespace / non-canonical or name-binding import) and every
-    // qualified/element-access call.
+    // `import * as x` + `x.helper(...)`, or a local var. So bind-analyze the AST
+    // (Codex): for EACH consolidated kit helper, for each surface that INVOKES the
+    // identifier (or shadows it), require a canonical DIRECT named import AND reject
+    // every shadow form (local decl / param / namespace / non-canonical or
+    // name-binding import) and every qualified/element-access call.
     //
-    // SOUNDNESS: aliases are DISALLOWED (below) and same-name local shadows (decls,
-    // params, namespace/name-binding imports) are rejected, so every accepted
-    // `ownerSlugMismatch` binding is the DIRECT canonical import and every
-    // `ownerSlugMismatch(...)` call resolves to it. Generic higher-order function
-    // values passed as callbacks are a different concern (whole-program taint analysis,
-    // out of scope) — they are simply not the `ownerSlugMismatch` identifier. The
-    // separate `scanPlainSlugEquality` test bans the COMMON timing vector (a plain
-    // `===`/`!==` on a `*_slug`); note it does not catch every hand-rolled variable-time
-    // comparison (an early-exit char loop or `localeCompare`), which is why routing all
-    // slug comparisons through the ONE canonical constant-time primitive is the design.
-    const offenders: Array<{ file: string; why: string }> = []
-    for (const name of allSurfaceFiles()) {
-      const why = ownerSlugMismatchBindingOffense(readFileSync(join(HTTP_DIR, name), 'utf8'), name)
-      if (why !== null) offenders.push({ file: name, why })
+    // SOUNDNESS: aliases are DISALLOWED and same-name local shadows are rejected, so
+    // every accepted helper binding is the DIRECT canonical import and every `helper(…)`
+    // call resolves to it. Generic higher-order function values passed as callbacks are
+    // a different concern (whole-program taint analysis, out of scope) — they are simply
+    // not the helper identifier. For the security-sensitive `ownerSlugMismatch`, the
+    // separate `scanPlainSlugEquality` test additionally bans the COMMON timing vector
+    // (a plain `===`/`!==` on a `*_slug`); it does not catch every hand-rolled
+    // variable-time comparison (an early-exit char loop / `localeCompare`), which is why
+    // routing all slug comparisons through the ONE constant-time primitive is the design.
+    const offenders: Array<{ file: string; helper: string; why: string }> = []
+    for (const file of allSurfaceFiles()) {
+      const body = readFileSync(join(HTTP_DIR, file), 'utf8')
+      for (const { name, canon } of KIT_HELPER_SOURCES) {
+        const why = helperBindingOffense(body, file, name, canon)
+        if (why !== null) offenders.push({ file, helper: name, why })
+      }
     }
     expect(offenders).toEqual([])
   })
 
   it('AST guard self-test: it FLAGS every shadow-bypass form and PASSES canonical usage', () => {
-    const flag = (src: string): boolean => ownerSlugMismatchBindingOffense(src, 'x.ts') !== null
+    const SK = /^\.\/(?:auth-helpers|surface-kit)\.ts$/
+    const flag = (src: string): boolean => helperBindingOffense(src, 'x.ts', 'ownerSlugMismatch', SK) !== null
+    // Generalized: a NON-security helper (jsonError, canonical = surface-kit only) is
+    // also guarded — a `./shadow.ts` import is flagged (Codex round-12).
+    const SKit = /^\.\/surface-kit\.ts$/
+    expect(helperBindingOffense("import { jsonError } from './shadow.ts'\njsonError(500,'x','y')", 'x.ts', 'jsonError', SKit) !== null).toBe(true)
+    expect(helperBindingOffense("import { jsonError } from './surface-kit.ts'\njsonError(500,'x','y')", 'x.ts', 'jsonError', SKit) !== null).toBe(false)
+    expect(helperBindingOffense("import { resolveBearer as rb } from './shadow.ts'\nrb(req, auth)", 'x.ts', 'resolveBearer', SKit) !== null).toBe(true) // aliased non-canonical
     // Every bypass an independent reviewer surfaced across the O7 rounds:
     expect(flag("import { ownerSlugMismatch } from './surface-kit.ts'\nfunction r(ownerSlugMismatch){return ownerSlugMismatch('a','b')}")).toBe(true) // param shadow
     expect(flag("import { ownerSlugMismatch } from './shadow.ts'\nownerSlugMismatch('a','b')")).toBe(true) // non-canonical import
