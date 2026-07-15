@@ -2472,13 +2472,16 @@ export function buildOpenGraphComposer(
         typeof st.phase_state['import_result'] === 'object'
           ? (st.phase_state['import_result'] as ImportResult)
           : null
-      await onboardingFinalizer.finalize({
+      // Propagate the finalizer's REAL result: it can DEFER/ABORT without completing
+      // (churn budget, a non-finalizable phase, a deleted row). Returning an unconditional
+      // `true` would suppress the runner's wrap-up while the row is still non-terminal
+      // (Codex F8 r14). `true` iff onboarding actually completed.
+      return await onboardingFinalizer.finalize({
         user_id,
         topic_id: appWsTopicId(user_id),
         state: st,
         import_result: importResult,
       })
-      return true
     }
     // The fire-and-forget post-turn scribe — replaces the per-turn llm-router.
     const onboardingExtractor =

@@ -324,10 +324,13 @@ test('finalize NEVER falsely completes under continuous mid-run churn — the CA
     },
   }
   const finalizer = buildOnboardingFinalize({ ...h.deps, personaComposer: persona })
-  await finalizer.finalize({ user_id: USER_ID, topic_id: TOPIC_ID, state: seeded })
+  const result = await finalizer.finalize({ user_id: USER_ID, topic_id: TOPIC_ID, state: seeded })
 
-  // Deferred: NEVER falsely completed over unprocessed state (the CAS forbids it), and
-  // the completed signal never fired. The row stays non-terminal for the next trigger.
+  // Deferred: finalize RESOLVES `false` (not a false-positive success), so the caller
+  // (finalizeImportOnboardingIfReady) won't suppress the runner's wrap-up (Codex F8 r14).
+  expect(result).toBe(false)
+  // NEVER falsely completed over unprocessed state (the CAS forbids it), and the completed
+  // signal never fired. The row stays non-terminal for the next trigger.
   expect((await h.stateStore.get(PROJECT_SLUG, USER_ID))?.phase).not.toBe('completed')
   expect(h.onboardingCompleted.filter((u) => u === USER_ID)).toHaveLength(0)
 })
@@ -609,7 +612,8 @@ test('finalize completes onboarding: persona, projects row, rail refresh', async
   expect(seeded.phase).toBe('persona_reviewed')
 
   const finalizer = buildOnboardingFinalize(h.deps)
-  await finalizer.finalize({ user_id: USER_ID, topic_id: TOPIC_ID, state: seeded })
+  const result = await finalizer.finalize({ user_id: USER_ID, topic_id: TOPIC_ID, state: seeded })
+  expect(result).toBe(true) // completed → finalize resolves true (Codex F8 r14)
 
   // (1) Phase flipped to completed, with completed_at + wow_fired stamped.
   const after = await h.stateStore.get(PROJECT_SLUG, USER_ID)

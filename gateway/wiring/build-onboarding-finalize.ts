@@ -209,13 +209,19 @@ export interface OnboardingFinalizer {
    * if it fails, finalize REJECTS so the caller (a throw-tolerant fire-and-forget
    * scribe / boot recovery) logs it and the next trigger retries — and a coalesced
    * contender observes the SAME rejection instead of a false success.
+   *
+   * RESOLVES `true` iff the row is now `completed` (by this call OR already-completed);
+   * `false` when finalization DEFERRED or ABORTED without completing (churn budget
+   * exhausted, a non-finalizable phase, a deleted row, …). Callers that gate on "did
+   * onboarding actually complete" (e.g. suppressing the runner's wrap-up) MUST honor this
+   * result and not assume success (Codex F8 r14).
    */
   finalize(input: {
     user_id: string
     topic_id: string
     state: OnboardingState
     import_result?: ImportResult | null
-  }): Promise<void>
+  }): Promise<boolean>
 }
 
 export function buildOnboardingFinalize(deps: OnboardingFinalizeDeps): OnboardingFinalizer {
@@ -241,15 +247,15 @@ export function buildOnboardingFinalize(deps: OnboardingFinalizeDeps): Onboardin
   // falsely report success when the owner's terminal write fails (Codex F8 r2). The
   // Map read/insert is atomic in the single-threaded, single-owner Open process
   // (cross-process is precluded by one-process-per-NEUTRON_HOME).
-  const inFlight = new Map<string, Promise<void>>()
+  const inFlight = new Map<string, Promise<boolean>>()
   return {
-    finalize(input): Promise<void> {
+    finalize(input): Promise<boolean> {
       const existing = inFlight.get(input.user_id)
       if (existing !== undefined) {
         log('info', 'finalize: joining the in-flight finalize for this user', { user_id: input.user_id })
         return existing
       }
-      const running = (async (): Promise<void> => {
+      const running = (async (): Promise<boolean> => {
       // (1) Idempotency gate + FRESH SNAPSHOT. Read the LIVE durable row rather
       // than trusting the passed-in `input.state`, which can be stale by the time
       // this run wins the coalescing race — a newer caller that joined us may have
@@ -268,7 +274,7 @@ export function buildOnboardingFinalize(deps: OnboardingFinalizeDeps): Onboardin
           // is distinct from a read THROW (handled below), where we couldn't read at all
           // and the caller snapshot is the best available basis.
           log('info', 'finalize: durable row absent; nothing to finalize', { user_id: input.user_id })
-          return
+          return false
         }
         effectiveState = live
       } catch (err) {
@@ -287,7 +293,9 @@ export function buildOnboardingFinalize(deps: OnboardingFinalizeDeps): Onboardin
           user_id: input.user_id,
           phase: effectiveState.phase,
         })
-        return
+        // Already-completed counts as "finalized" for callers; any other non-finalizable
+        // phase (early / import / failed) did NOT complete.
+        return effectiveState.phase === 'completed'
       }
 
       const deriveImportResult = (s: OnboardingState): ImportResult | null =>
@@ -372,11 +380,11 @@ export function buildOnboardingFinalize(deps: OnboardingFinalizeDeps): Onboardin
           log('warn', 'finalize: post-CAS re-read failed; deferring to next trigger', {
             err: errStr(err),
           })
-          return
+          return false
         }
         if (after === null) {
           log('info', 'finalize: row vanished mid-run; nothing to complete', { user_id: input.user_id })
-          return
+          return false
         }
         if (!isFinalizablePhase(after.phase)) {
           // Completed concurrently, failed, OR transitioned to a live-import phase mid-run
@@ -385,7 +393,8 @@ export function buildOnboardingFinalize(deps: OnboardingFinalizeDeps): Onboardin
             user_id: input.user_id,
             phase: after.phase,
           })
-          return
+          // Completed-concurrently is "finalized" for callers; import/failed are not.
+          return after.phase === 'completed'
         }
         // Still a finalizable phase but phase or phase_state changed → redo from fresh.
         workState = after
@@ -402,7 +411,7 @@ export function buildOnboardingFinalize(deps: OnboardingFinalizeDeps): Onboardin
         log('warn', 'finalize: phase_state never quiesced for atomic completion; deferring', {
           user_id: input.user_id,
         })
-        return
+        return false
       }
 
       // (4b) RECONCILE REMOVALS. The CAS committed against the FINAL workState, whose
@@ -478,6 +487,7 @@ export function buildOnboardingFinalize(deps: OnboardingFinalizeDeps): Onboardin
           log('warn', 'finalize: closing message emit failed', { err: errStr(err) })
         }
       }
+      return true // the atomic CAS completed the row
       })()
       // Release the claim once the run SETTLES (success or failure) so a later
       // legitimate finalize (a genuinely new onboarding for the same user_id) isn't
