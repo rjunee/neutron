@@ -293,35 +293,62 @@ export function buildOnboardingFinalize(deps: OnboardingFinalizeDeps): Onboardin
       // and materializeProjects write persona FILES / `projects` rows respectively and do
       // NOT touch `phase_state`, so a quiescent row converges in ONE pass; bounded against
       // a pathological continuous-mutation livelock.
+      // (2)+(3)+(4) CONSISTENCY LOOP with an ATOMIC compare-and-set completion. Each
+      // pass composes persona + materializes projects from `workState`, then attempts
+      // `completeIfPhaseStateMatches` — a single guarded UPDATE that flips the row to
+      // `completed` ONLY IF its phase_state is still byte-identical to what we just
+      // processed. That CAS is what makes the read→compose→materialize→complete sequence
+      // safe: it is IMPOSSIBLE to stamp `completed` over a durable mutation that landed
+      // mid-run (Codex F8 r5–r9) — the write simply doesn't match and returns false, and
+      // we re-read + redo from the fresh state. A quiescent row completes on the first
+      // pass; bounded against a pathological continuous-mutation livelock.
       let workState = effectiveState
       let import_result = deriveImportResult(workState) ?? input.import_result ?? null
       // materialized: the projects that actually landed (created/existing, not the
       // soft-deleted skips) — the per-project opening step below seeds each one's chat.
       let materialized: MaterializedProject[] = []
-      const MAX_FINALIZE_REPASSES = 4
-      let settled = false
-      for (let pass = 0; pass < MAX_FINALIZE_REPASSES; pass++) {
-        // (2) Persona — compose + commit from workState, then invalidate the loader.
-        // Failure-isolated inside commitPersona (logs + presses on).
+      const MAX_FINALIZE_PASSES = 5
+      let completed = false
+      for (let pass = 0; pass < MAX_FINALIZE_PASSES && !completed; pass++) {
+        // (2) Persona — compose + commit from workState (failure-isolated in commitPersona).
         await commitPersona(deps, workState, log)
         // (3) Projects — DB rows + topic bindings + on-disk materialization from workState.
         import_result = deriveImportResult(workState) ?? input.import_result ?? null
         materialized = await materializeProjects(deps, workState, import_result, now, log)
 
+        // (4) ATOMIC terminal write — complete IFF nothing changed since we read workState.
+        let casOk: boolean
+        try {
+          casOk = await deps.stateStore.completeIfPhaseStateMatches({
+            project_slug: deps.project_slug,
+            user_id: input.user_id,
+            expected_phase_state: workState.phase_state,
+            completed_at: now(),
+          })
+        } catch (err) {
+          // The terminal write itself failed (locked DB / disk full). SURFACE it (reject)
+          // so the caller (fireAndForget boot recovery / watcher + extractor try/catch)
+          // logs it and the next trigger retries, and a coalesced contender sees the same
+          // rejection instead of a false success (Codex F8 r2).
+          throw err instanceof Error ? err : new Error(String(err))
+        }
+        if (casOk) {
+          completed = true
+          break
+        }
+
+        // CAS lost: the row is either already terminal, gone, or its phase_state moved
+        // under us. Re-read to decide.
         let after: OnboardingState | null
         try {
           after = await deps.stateStore.get(deps.project_slug, input.user_id)
         } catch (err) {
-          // Can't confirm the state we just processed is still current → do NOT complete
-          // (a completed row would suppress any un-processed mutation). Defer below.
-          log('warn', 'finalize: post-work re-read failed; deferring completion to next trigger', {
+          log('warn', 'finalize: post-CAS re-read failed; deferring to next trigger', {
             err: errStr(err),
           })
-          break
+          return
         }
         if (after === null) {
-          // Row vanished (deleted / reset) mid-run — nothing to finalize; do NOT
-          // recreate it as a completed row.
           log('info', 'finalize: row vanished mid-run; nothing to complete', { user_id: input.user_id })
           return
         }
@@ -329,50 +356,23 @@ export function buildOnboardingFinalize(deps: OnboardingFinalizeDeps): Onboardin
           log('info', 'finalize: completed concurrently; no-op', { user_id: input.user_id })
           return
         }
-        if (phaseStateKey(after) === phaseStateKey(workState)) {
-          settled = true // stable — the work we just did matches the freshest durable state
-          break
-        }
-        // Something persona/projects depend on changed mid-run — redo both from fresh.
+        // Non-terminal but phase_state changed → redo persona + materialize from fresh.
         workState = after
       }
 
-      if (!settled) {
-        // Exhausted the repass budget while phase_state was STILL churning (or a re-read
-        // failed). We must NOT strand the row: a deferred completion relies on a future
-        // trigger, but the boot + a coalesced extractor trigger may BOTH have been
-        // consumed by this run, and an offline owner has no further trigger (Codex F8 r8).
-        // So GUARANTEE convergence: do ONE final authoritative pass on the latest KNOWN
-        // state (workState already holds the most recent re-read) so that newest snapshot
-        // IS composed + materialized (satisfying "never complete unprocessed newest
-        // state", Codex F8 r7), then fall through and complete. The only residual is a
-        // mutation landing DURING this final materialize — the same inherent sub-op window
-        // any single finalize has. Continuous churn is pathological anyway (it requires an
-        // ACTIVE owner generating turns, i.e. more triggers), so this bound is safe.
-        log('warn', 'finalize: phase_state churn exceeded repass budget; final authoritative pass', {
+      if (!completed) {
+        // The row never held still long enough for the atomic CAS to land within the pass
+        // budget. We NEVER stamp `completed` over un-processed state (the CAS forbids it),
+        // so the correct action is to DEFER — leave the row non-terminal for the next
+        // finalize trigger. This only happens under CONTINUOUS mutation, which requires an
+        // ACTIVE owner generating turns (⟹ more finalize triggers), so it cannot strand a
+        // real owner; and the interview is over by the finalize trigger, so real onboarding
+        // state has stopped changing (Codex F8 r7/r8/r9).
+        log('warn', 'finalize: phase_state never quiesced for atomic completion; deferring', {
           user_id: input.user_id,
         })
-        await commitPersona(deps, workState, log)
-        import_result = deriveImportResult(workState) ?? input.import_result ?? null
-        materialized = await materializeProjects(deps, workState, import_result, now, log)
+        return
       }
-
-      // (4) Terminal state — flip to `completed`. Load-bearing: if THIS write fails
-      // the owner is NOT completed, so SURFACE the failure (reject) rather than
-      // pressing on to emit a "you're all set" closing for a row that isn't actually
-      // completed. The rejection reaches the caller (fireAndForget in boot recovery /
-      // the watcher + extractor try/catch) which logs it, and the NEXT finalize
-      // trigger (boot, reconnect, or the next turn) retries — finalize is idempotent.
-      // Coalesced contenders share THIS rejection, so none falsely reports success
-      // (Codex F8 r2). Persona/projects may have partially landed; the retry re-runs
-      // them idempotently.
-      await deps.stateStore.upsert({
-        project_slug: deps.project_slug,
-        user_id: input.user_id,
-        phase: 'completed',
-        completed_at: now(),
-        wow_fired: true,
-      })
 
       // (5) Live rail refresh.
       try {
@@ -551,30 +551,6 @@ async function emitProjectOpenings(
  * a PersonaError (cringe-cap, commit failure) is logged and swallowed — the
  * persona can regenerate later, and finalize must still complete onboarding.
  */
-/**
- * Canonical, order-independent serialization of an onboarding row's `phase_state`,
- * used to detect ANY durable mutation during finalize (persona + project inputs all
- * live in phase_state). Object keys are sorted recursively so key-order can't
- * false-trigger a repass; array order is preserved (a reordered primary_projects list
- * IS a real change worth reflecting). Compared by string equality across re-reads.
- */
-function phaseStateKey(state: OnboardingState): string {
-  const canon = (v: unknown): string => {
-    if (v === null || typeof v !== 'object') return JSON.stringify(v) ?? 'null'
-    if (Array.isArray(v)) return '[' + v.map(canon).join(',') + ']'
-    const obj = v as Record<string, unknown>
-    return (
-      '{' +
-      Object.keys(obj)
-        .sort()
-        .map((k) => JSON.stringify(k) + ':' + canon(obj[k]))
-        .join(',') +
-      '}'
-    )
-  }
-  return canon(state.phase_state)
-}
-
 async function commitPersona(
   deps: OnboardingFinalizeDeps,
   state: OnboardingState,

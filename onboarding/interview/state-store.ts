@@ -163,6 +163,27 @@ export interface OnboardingStateStore {
    * shot (replacing the pre-isolation `delete(project_slug)` semantics).
    */
   deleteByOwner(project_slug: string): Promise<void>
+
+  /**
+   * F8 — ATOMIC compare-and-set completion. Flip this (instance, user) row to
+   * `completed` (+ `completed_at`, `wow_fired: true`) ONLY IF it is still non-terminal
+   * AND its `phase_state` is IDENTICAL to `expected_phase_state` — i.e. nothing has
+   * mutated the row since the caller read + processed it. Returns true iff it completed.
+   *
+   * A false return means the row changed underneath the caller (or was already terminal
+   * / gone): the caller must re-read and reconcile before retrying. This is the
+   * finalizer's ONLY safe terminal write — the read → compose persona → materialize
+   * projects → complete sequence is otherwise NOT atomic, so a plain `upsert(completed)`
+   * could stamp `completed` over a durable mutation that landed mid-run and permanently
+   * suppress it. The CAS makes that impossible: `completed` is stamped only against the
+   * exact state that was composed + materialized.
+   */
+  completeIfPhaseStateMatches(input: {
+    project_slug: string
+    user_id: string
+    expected_phase_state: Record<string, unknown>
+    completed_at: number
+  }): Promise<boolean>
 }
 
 export interface InMemoryOnboardingStateStoreOptions {
@@ -287,6 +308,31 @@ export class InMemoryOnboardingStateStore implements OnboardingStateStore {
         this.rows.delete(k)
       }
     }
+  }
+
+  async completeIfPhaseStateMatches(input: {
+    project_slug: string
+    user_id: string
+    expected_phase_state: Record<string, unknown>
+    completed_at: number
+  }): Promise<boolean> {
+    const key = compositeKey(input.project_slug, input.user_id)
+    const existing = this.rows.get(key)
+    if (existing === undefined) return false
+    if (existing.phase === 'completed' || existing.phase === 'failed') return false
+    // Structural equality via canonical stringify (both objects share insertion order
+    // when the caller's expected snapshot is an unmutated read of this row).
+    if (JSON.stringify(existing.phase_state) !== JSON.stringify(input.expected_phase_state)) {
+      return false
+    }
+    this.rows.set(key, {
+      ...existing,
+      phase: 'completed',
+      completed_at: input.completed_at,
+      wow_fired: true,
+      last_advanced_at: this.now(),
+    })
+    return true
   }
 }
 
