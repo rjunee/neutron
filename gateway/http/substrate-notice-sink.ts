@@ -15,11 +15,12 @@
  *   1. `system_events` — the product-wide degradation journal (O4), via the
  *      ambient sink (`emitSystemEvent`) or an injected {@link SystemEventSink}.
  *   2. an OWNER-TOPIC SYSTEM BUBBLE — a transient `system_notice` pill on the
- *      owner's chat topic, delivered through the SAME {@link WebChatSenderRegistry}
- *      the live-agent reply / recovered-reply / reminder paths use, so the owner
- *      SEES the state in chat instead of it vanishing. `system_notice: true` marks
- *      it a live-only pill (the app-ws adapter skips the durable chat_log row), so
- *      a reload never re-hydrates a stale "rate-limited" bubble.
+ *      owner's chat topic, delivered through the SAME {@link Deliver} seam (F5)
+ *      the fired-reminder / proactive-brief paths use, so the owner SEES the
+ *      state in chat instead of it vanishing. The bubble is a `durability: 'none'`
+ *      delivery — a live-only pill (the app-ws adapter skips the durable
+ *      chat_log row), so a reload never re-hydrates a stale "rate-limited"
+ *      bubble.
  *
  * LATCHING: all three notices are edge-latched UPSTREAM by the substrate (a
  * per-turn dead-turn latch; a per-band size latch; a per-`threadId::severity`
@@ -29,13 +30,12 @@
  * would wrongly suppress a legitimate later rising edge (a size warn→critical
  * escalation, or a recovered-then-recurring rate limit).
  *
- * REGISTRY IS LAZY (`registry: () => …`) because the gateway's app-ws push
- * registry is constructed AFTER the per-instance conversational substrate this
- * sink is wired into — a holder resolved at call time avoids a forward reference
- * without reordering instance setup (mirrors {@link makeRecoveredReplySink}).
+ * DELIVER IS LAZY (`deliver: () => …`) because the {@link Deliver} seam is
+ * constructed AFTER the per-instance conversational substrate this sink is wired
+ * into — a holder resolved at call time avoids a forward reference without
+ * reordering instance setup (mirrors {@link makeRecoveredReplySink}).
  */
 
-import type { ChatOutbound } from '@neutronai/landing/chat-protocol.ts'
 import type {
   DeadTurnNotice,
   RateLimitBannerNotice,
@@ -47,7 +47,7 @@ import {
   type SystemEventSink,
 } from '@neutronai/persistence/index.ts'
 import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
-import type { WebChatSenderRegistry } from './chat-sender-registry.ts'
+import type { Deliver } from './deliver.ts'
 
 /** The three notice callbacks, shaped exactly as the substrate option bag expects
  *  (see `BuildLlmCallSubstrateInput`). */
@@ -58,8 +58,8 @@ export interface SubstrateNoticeSinks {
 }
 
 export interface MakeSubstrateNoticeSinksDeps {
-  /** Lazy owner-chat delivery registry (resolved at call time — see module header). */
-  registry: () => WebChatSenderRegistry | undefined
+  /** Lazy owner-chat delivery seam (resolved at call time — see module header). */
+  deliver: () => Deliver | undefined
   /** The owner's chat topic the system bubble is delivered on (the app-ws
    *  `app:<owner>` topic in Open — the ONE topic the live client binds). */
   owner_topic_id: string
@@ -116,22 +116,25 @@ export function makeSubstrateNoticeSinks(
   }
 
   const bubble = (body: string): void => {
-    const registry = deps.registry()
-    if (registry === undefined) return
-    const envelope: ChatOutbound = {
-      type: 'agent_message',
-      body,
-      topic_id: deps.owner_topic_id,
-      // Transient live-only pill — the app-ws adapter skips the durable chat_log
-      // row (matches the cold-start "Waking up…" ack), so a reload can't re-
-      // hydrate a stale state notice as a stray chat bubble.
-      system_notice: true,
-    }
+    const deliver = deps.deliver()
+    if (deliver === undefined) return
+    // A `durability: 'none'` delivery — a transient live-only `system_notice`
+    // pill (the app-ws adapter skips the durable chat_log row, matching the
+    // cold-start "Waking up…" ack), so a reload can't re-hydrate a stale state
+    // notice as a stray chat bubble. `deliver` builds the system_notice envelope
+    // and PUSHES SYNCHRONOUSLY for the 'none' path (no await before the push), so
+    // the bubble reaches the socket within this tick; it swallows a closed-socket
+    // throw internally (best-effort — the journal row is the durable record).
+    // fireAndForget backstops the result promise so a notice never crashes the
+    // scan tick that fired it; the surrounding try/catch is belt-and-suspenders
+    // against a deliver impl that throws synchronously.
     try {
-      registry.send(deps.owner_topic_id, envelope)
+      fireAndForget(
+        'substrate-notice.bubble',
+        deliver(deps.owner_topic_id, { body, durability: 'none' }),
+      )
     } catch {
-      // The socket can close between build + send; a notice bubble is best-effort
-      // (the journal row is the durable record). Swallow — never crash the tick.
+      /* a notice bubble is best-effort (the journal row is the durable record) */
     }
   }
 

@@ -292,7 +292,7 @@ import type {
   AppSocketButtonPromptRouter,
   AppSocketImportProgressRouter,
 } from '@neutronai/gateway/http/chat-bridge.ts'
-import type { WebChatSenderRegistry } from '@neutronai/gateway/http/chat-sender-registry.ts'
+import { createDeliver, type Deliver } from '@neutronai/gateway/http/deliver.ts'
 import { makeSubstrateNoticeSinks } from '@neutronai/gateway/http/substrate-notice-sink.ts'
 import {
   InMemoryRecoveredReplyStore,
@@ -707,14 +707,15 @@ export function buildOpenGraphComposer(
     // rising edge of otherwise-invisible states — a mid-turn API 5xx dead turn, a
     // size-band crossing, a rate-limit/usage-cap banner, and a crash-recovered
     // reply — that were UNWIRED in Open (stderr-only). Build the sinks HERE, before
-    // wireSubstrates consumes them, over a LAZY registry holder: the app-ws push
-    // registry (`appWsAgentPushRegistry`) is constructed far below, so the holder is
-    // populated once it exists (the same forward-reference pattern the recovered-
-    // reply sink's `registry: () => …` seam was designed for). Delivery rides the
-    // owner's bare `app:<owner>` topic — the ONE topic the live React/Expo client
-    // binds + hydrates (the legacy `web:` registry reaches NO client; see the
-    // reminder/brief delivery note below). Skipped LLM-less (no conversational REPL).
-    const noticeRegistryHolder: { registry?: WebChatSenderRegistry } = {}
+    // wireSubstrates consumes them, over a LAZY deliver holder: the ONE F5
+    // `deliver` seam (`gateway/http/deliver.ts`) is constructed far below, so the
+    // holder is populated once it exists (the same forward-reference pattern the
+    // recovered-reply sink's `deliver: () => …` seam was designed for). Delivery
+    // rides the owner's bare `app:<owner>` topic — the ONE topic the live
+    // React/Expo client binds + hydrates (the legacy `web:` registry reaches NO
+    // client; see the reminder/brief delivery note below). Skipped LLM-less (no
+    // conversational REPL).
+    const noticeDeliverHolder: { deliver?: Deliver } = {}
     // O6 — the recovered-reply sink/drain need the REAL (async) app-ws delivery
     // result, not the fire-and-forget bridge's unconditional `true`. Bound after
     // the adapter exists (below); resolved lazily at call time.
@@ -724,7 +725,7 @@ export function buildOpenGraphComposer(
     const liveAgentNoticeSinks =
       llmPool !== null
         ? makeSubstrateNoticeSinks({
-            registry: () => noticeRegistryHolder.registry,
+            deliver: () => noticeDeliverHolder.deliver,
             owner_topic_id: ownerNoticeTopic,
             project_slug,
           })
@@ -1693,33 +1694,38 @@ export function buildOpenGraphComposer(
     // reply's landed under `app:<owner>`.) This is the "app: vs web: live-push
     // parity" follow-up the earlier wiring flagged as deferred.
     //
-    // THE FIX: deliver reminders + briefs the SAME way the agent delivers its
-    // own replies. `appWsAgentPushRegistry` is a thin `WebChatSenderRegistry`-
-    // shaped bridge that forwards each agent_message to `buildAppWsSendReply`
-    // (the exact steady-state reply path → `appWsHolder.adapter.send` →
-    // `appWsRegistry`). It forward-references `buildAppWsSendReply` / `appWsRegistry`
-    // (defined below); both are touched only at FIRE time (tick loop / brief
-    // cron), long after boot wires the adapter — never during composition. The
-    // durable `button_prompts` row now lands under the SAME `app:<user>` topic
-    // agent replies use, carrying its `prompt_id` into the live frame so a later
-    // hydration de-dupes cleanly. NO feature flag.
-    const appWsAgentPushRegistry = {
-      register: (): void => {},
-      unregister: (): void => {},
-      has: (topic_id: string): boolean => appWsRegistry.has(topic_id),
-      send: (topic_id: string, event: ChatOutbound): boolean => {
-        buildAppWsSendReply(topic_id)(event)
-        return true
+    // THE FIX (F5, the ONE delivery seam): reminders + briefs + notice bubbles
+    // all post through `deliver(topic, envelope)` (`gateway/http/deliver.ts`),
+    // which owns durable-row-first + best-effort push routed by topic grammar so
+    // a producer can no longer name — or mis-pick — a registry. Its `app` push is
+    // the exact steady-state reply path (`buildAppWsSendReply` → the router-
+    // registered `AppWsAdapter.send` → `appWsRegistry`): an out-of-turn post lands
+    // under the SAME `app:<user>` topic agent replies use, carrying its durable
+    // `prompt_id` into the live frame so a later hydration de-dupes cleanly. Its
+    // `web` push is `landing.registry` (single sender, effectively dead in Open —
+    // present for the Managed/web deploy). Both closures forward-reference
+    // `buildAppWsSendReply` / `landing.registry`, touched only at FIRE time (tick
+    // loop / brief cron / notice edge), long after boot wires the adapter — never
+    // during composition. NO feature flag.
+    const deliver: Deliver = createDeliver({
+      buttonStore: landing.buttonStore,
+      push: {
+        app: (topic_id: string, event: ChatOutbound): boolean => {
+          buildAppWsSendReply(topic_id)(event)
+          return true
+        },
+        web: (topic_id: string, event: ChatOutbound): boolean =>
+          landing.registry.send(topic_id, event),
       },
-    }
-    // O6 — populate the lazy registry holder the notice + recovered-reply sinks
+    })
+    // O6 — populate the lazy deliver holder the notice + recovered-reply sinks
     // (built above, threaded into `wireSubstrates`) resolve at fire time. This is
-    // the SAME `appWsAgentPushRegistry` fired reminders/briefs deliver through, so
-    // a dead-turn / size / rate-limit system bubble — and a crash-recovered reply —
-    // lands on the owner's live `app:<owner>` socket + durable-skips as a transient
-    // pill, exactly like the cold-start ack. Runs long after boot wired the
-    // substrate; the holder deref only happens when a notice actually fires.
-    noticeRegistryHolder.registry = appWsAgentPushRegistry
+    // the SAME `deliver` seam fired reminders/briefs post through, so a dead-turn /
+    // size / rate-limit system bubble lands on the owner's live `app:<owner>`
+    // socket + durable-skips as a transient pill (durability 'none'), exactly like
+    // the cold-start ack. Runs long after boot wired the substrate; the holder
+    // deref only happens when a notice actually fires.
+    noticeDeliverHolder.deliver = deliver
     // Resolve every fired reminder/brief to the app-ws topic the client binds:
     // the owner's BARE `app:<user>`.
     //
@@ -1751,10 +1757,7 @@ export function buildOpenGraphComposer(
     const resolveAppWsReminderTopic = (_explicit_topic: string | null): string =>
       reminderGeneralTopic
     const reminder_dispatcher = buildReminderDispatcher({
-      outbound: buildButtonStoreReminderOutbound({
-        buttonStore: landing.buttonStore,
-        registry: appWsAgentPushRegistry,
-      }),
+      outbound: buildButtonStoreReminderOutbound({ deliver }),
       ...(liveAgentSubstrate !== null
         ? { llm: buildSubstrateReminderLlm(liveAgentSubstrate) }
         : {}),
@@ -1776,17 +1779,14 @@ export function buildOpenGraphComposer(
         : null
     // The brief posts to the General topic on the SAME app-ws delivery path
     // fired reminders now use (`reminderGeneralTopic = appWsTopicId(OWNER_USER_ID)`
-    // + `appWsAgentPushRegistry`, just above): persist a durable history row
+    // + the F5 `deliver` seam, just above): persist a durable history row
     // under `app:<user>` + live-push through the app-ws session registry so a
     // connected client paints the brief immediately (the previous `web:` +
     // `landing.registry` path reached no app-ws client — same live-delivery bug
     // as reminders, now fixed for both). The durable row is the guarantee (read
     // on the next hydration); the live push reaches the owner's open socket.
     const proactiveGeneralTopic = appWsTopicId(OWNER_USER_ID)
-    const proactiveSink = buildButtonStoreProactiveSink({
-      buttonStore: landing.buttonStore,
-      registry: appWsAgentPushRegistry,
-    })
+    const proactiveSink = buildButtonStoreProactiveSink({ deliver })
     // Detect the host's LOCAL timezone (Ryan: "Detect local computer time not
     // hardcode pt"). Without this the morning brief fell back to the proactive
     // module's hardcoded `America/Los_Angeles`, so a non-Pacific owner got the
