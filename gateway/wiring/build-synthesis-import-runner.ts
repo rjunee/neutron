@@ -135,8 +135,16 @@ export function buildSynthesisImportJobRunner(
   const results = new Map<string, ImportResult>()
   const cancelled = new Set<string>()
 
+  // TERMINAL-WINNER guard (Codex): no runner write may resurrect a row a concurrent
+  // `cancel()` (or a prior terminal write) already settled. Every status write below
+  // is guarded to non-terminal rows, so a cancel that lands mid-run is authoritative
+  // — the in-flight synthesis then no-ops its progress/failed/completed writes.
+  const NON_TERMINAL_GUARD = `status NOT IN ('completed', 'failed', 'cancelled')`
   const setStatus = async (job_id: string, status: ImportJobStatus): Promise<void> => {
-    await db.run(`UPDATE import_jobs SET status = ? WHERE job_id = ?`, [status, job_id])
+    await db.run(
+      `UPDATE import_jobs SET status = ? WHERE job_id = ? AND ${NON_TERMINAL_GUARD}`,
+      [status, job_id],
+    )
   }
 
   const finishFailed = async (
@@ -147,7 +155,8 @@ export function buildSynthesisImportJobRunner(
     await db.run(
       `UPDATE import_jobs
          SET status = 'failed', error_code = ?, error_message = ?, completed_at = ?
-       WHERE job_id = ?`,
+       WHERE job_id = ?
+         AND ${NON_TERMINAL_GUARD}`,
       [code, message, now(), job_id],
     )
   }

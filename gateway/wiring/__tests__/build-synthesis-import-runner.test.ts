@@ -653,6 +653,51 @@ describe('buildSynthesisImportJobRunner — synthesis → engine bridge', () => 
     expect(resultRow).toBeNull()
   })
 
+  test('P6 cancel race: a cancel is NOT overwritten by a subsequent synthesis FAILURE (finishFailed guard)', async () => {
+    const db = freshDb()
+    let rejectSynthesis: (err: Error) => void = () => {}
+    const gate = new Promise<SynthesisResult>((_, reject) => {
+      rejectSynthesis = reject
+    })
+    const fakeSynthesis: SynthesisRunner = {
+      rawStore: new MemoryRawTranscriptStore(),
+      async synthesizeImport(): Promise<SynthesisResult> {
+        // Block until the test rejects — the window a cancel lands in.
+        return gate
+      },
+      async synthesizeInterviewOnly(): Promise<SynthesisResult | null> {
+        return null
+      },
+      writeSeed(seed: ProjectSeed): WriteProjectSeedOutcome {
+        return { project_slug: seed.slug, reason: 'created', docs_written: [], transcripts_written: 0 }
+      },
+    }
+    const runner = buildSynthesisImportJobRunner({ db, synthesis: fakeSynthesis, parse: () => fakeRecords() })
+    const { job_id } = await runner.start({
+      project_slug: 'owner',
+      user_id: 'u-owner',
+      source: 'claude-zip',
+      payload: Buffer.from('zip'),
+    })
+
+    // Wait until runJob is parked in synthesizeImport (status flipped to pass1-running).
+    const statusOf = (): string | undefined =>
+      db.raw().query<{ status: string }, [string]>(`SELECT status FROM import_jobs WHERE job_id = ?`).get(job_id)?.status
+    for (let i = 0; i < 200 && statusOf() !== 'pass1-running'; i += 1) await new Promise((r) => setTimeout(r, 5))
+    expect(statusOf()).toBe('pass1-running')
+
+    // Cancel wins the race → status='cancelled'.
+    await runner.cancel(job_id)
+    expect(statusOf()).toBe('cancelled')
+
+    // Now synthesis REJECTS → the catch calls finishFailed. The guard must leave the
+    // terminal 'cancelled' intact (pre-guard this overwrote it with 'failed').
+    rejectSynthesis(new Error('synthesis boom'))
+    await new Promise((r) => setTimeout(r, 60))
+
+    expect(statusOf()).toBe('cancelled')
+  })
+
   test('synthesisResultToImportResult maps projects, tasks, people, and voice', () => {
     const mapped = synthesisResultToImportResult(SYNTH_RESULT)
     expect(mapped.proposed_projects).toEqual([
