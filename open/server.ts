@@ -26,11 +26,13 @@
 
 import { boot, loadGraphComposerFromEnv, resolveOwnerSlugFromConfig } from '@neutronai/gateway/index.ts'
 import type { BootHandle } from '@neutronai/gateway/index.ts'
+import { assertOwnerCredentialPolicy } from '@neutronai/gateway/boot-bind-policy.ts'
 import { resolveBootConfig, envShimFromBootConfig } from '@neutronai/config/index.ts'
 import { resolveNeutronHome } from '@neutronai/migrations/db-path.ts'
 
 import { buildOpenGraphComposer } from './composer.ts'
 import { resolvePersistedCookieSecret } from './session-cookie-secret.ts'
+import { resolveOwnerBearer } from './owner-bearer.ts'
 import { installProcessSafetyNet } from '@neutronai/logger/fire-and-forget.ts'
 
 /**
@@ -50,6 +52,18 @@ import { installProcessSafetyNet } from '@neutronai/logger/fire-and-forget.ts'
 export async function startOpenServer(): Promise<BootHandle> {
   const env = process.env
   // Managed deploy-config injection wins — defer to the injected composer.
+  //
+  // The S1 owner-bearer resolution + `assertOwnerCredentialPolicy` guard below
+  // is deliberately NOT run on this branch: the per-install owner bearer is an
+  // OPEN single-owner construct, and an injected composer brings its OWN auth
+  // model — resolving/persisting an Open owner bearer under NEUTRON_HOME and
+  // requiring it here would be semantically wrong for that deployment. The
+  // injected path is NOT unguarded, though: `boot()` still runs the shared S2
+  // `assertWideBindPolicy` (refuses a wide bind carrying any dev-auth bypass env)
+  // for BOTH entrypoints, and an injected composer enforces its own credential
+  // check in its own layer. So a wide injected bind is governed by (S2 boot guard
+  // + that layer's auth); the Open owner-bearer fail-closed is scoped to the Open
+  // composer path.
   const injected = await loadGraphComposerFromEnv(env)
   if (injected !== undefined) {
     return boot({ composer: injected, config: resolveBootConfig(env) })
@@ -73,6 +87,29 @@ export async function startOpenServer(): Promise<BootHandle> {
 
   const config = resolveBootConfig(env)
 
+  // S1 — per-install OWNER BEARER + fail-closed wide-bind guard. Resolve the
+  // stable per-install owner bearer (an operator-set NEUTRON_OWNER_BEARER wins,
+  // else a random bearer persisted 0600 under NEUTRON_HOME), then REFUSE to boot
+  // a WIDE (non-loopback) bind whose bearer could only be secured as a
+  // process-ephemeral fallback — a public bind must carry a stable owner
+  // credential (S2 already rejects the guessable `dev:owner` on a wide bind).
+  // A LOOPBACK bind is a no-op: the 127.0.0.1 dogfood keeps its dev bypass.
+  //
+  // `resolveOwnerBearer` has ALREADY applied the operator-vs-persisted precedence
+  // AND validated/normalized the value (trimmed; a too-short explicit value fails
+  // loud; a whitespace-only override is treated as unset → minted). Its
+  // `ownerBearer.value` is the SOLE authoritative credential, and the guard
+  // judged `ownerBearer.source` for exactly it. It is threaded to the composer as
+  // an EXPLICIT option (`ownerBearer` below) — NEVER by writing back to the
+  // shared `process.env`. Mutating `process.env['NEUTRON_OWNER_BEARER']` would
+  // let a MINTED value leak into a second in-process `startOpenServer()` under a
+  // different NEUTRON_HOME, where `resolveOwnerBearer` would misread it as an
+  // operator-set `source: 'env'` bearer and skip the new home's per-install file
+  // (two installs sharing one bearer; an ephemeral value misclassified as
+  // persistent for a later wide bind) — Codex r3.
+  const ownerBearer = resolveOwnerBearer(config.neutronHome, env)
+  assertOwnerCredentialPolicy(config.host, ownerBearer.source)
+
   // SHIM (marked to die): fill OWNER_HOME / NEUTRON_DB_PATH from the frozen
   // config so below-seam readers see them, keeping the gateway data dir + the
   // composer's owner_home in lockstep under NEUTRON_HOME. Only fills empty
@@ -82,7 +119,7 @@ export async function startOpenServer(): Promise<BootHandle> {
     if (env[key] === undefined || env[key] === '') env[key] = value
   }
 
-  const composer = buildOpenGraphComposer({ env, config })
+  const composer = buildOpenGraphComposer({ env, config, ownerBearer: ownerBearer.value })
   const handle = await boot({ composer, config })
 
   const slug = resolveOwnerSlugFromConfig(config)

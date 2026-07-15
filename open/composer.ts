@@ -105,7 +105,7 @@ import { buildGatewayAnthropicMessagesClient } from '@neutronai/gateway/wiring/b
 import { buildProjectOpeningMessageComposer } from '@neutronai/gateway/wiring/build-project-opening-message.ts'
 import { mkdirSync } from 'node:fs'
 import { join as joinPath } from 'node:path'
-import { randomBytes, randomUUID } from 'node:crypto'
+import { randomUUID } from 'node:crypto'
 import { constantTimeEqual } from '@neutronai/runtime/constant-time-equal.ts'
 import { DocSearchIndex } from '@neutronai/doc-search/store.ts'
 import { DocSearchRuntime } from '@neutronai/doc-search/runtime.ts'
@@ -119,6 +119,7 @@ import { wireUploads } from './wiring/uploads.ts'
 import { buildOpenOwnerGate } from './wiring/owner-gate.ts'
 import { wireAppWs, type OnboardingMsgEmit } from './wiring/app-ws.ts'
 import { MIN_COOKIE_SECRET_LEN } from './session-cookie-secret.ts'
+import { selectAppWsToken, isValidThreadedBearer } from './owner-bearer.ts'
 import { late } from './wiring/late.ts'
 import type { OpenWiringContext } from './wiring/context.ts'
 import { buildChainedChatCommandFilter } from '@neutronai/gateway/boot-helpers.ts'
@@ -224,7 +225,7 @@ import { buildOpenAgentProfileBackend } from './agent-profile-backend.ts'
 // only user and is already authed at the HTTP start-token/cookie layer, so the
 // app-bearer (`dev:<owner>`) is accepted directly. No feature flag, single path.
 import { createAppWsAuthResolver } from '@neutronai/channels/adapters/app-ws/auth.ts'
-import { isLoopbackBindHost } from '@neutronai/gateway/boot-bind-policy.ts'
+import { isLoopbackBindHost, assertOwnerCredentialPolicy } from '@neutronai/gateway/boot-bind-policy.ts'
 import type { AppWsAuthResolver } from '@neutronai/channels/adapters/app-ws/auth.ts'
 import { DocStore } from '@neutronai/gateway/http/doc-store.ts'
 import { createAppDocsSurface } from '@neutronai/gateway/http/app-docs-surface.ts'
@@ -310,6 +311,18 @@ const log = createLogger('open-composer')
 export interface BuildOpenGraphComposerOptions {
   /** Override the process env (tests). Defaults to `process.env`. */
   env?: NodeJS.ProcessEnv
+  /**
+   * S1 — the pre-resolved, VALIDATED per-install owner bearer from the Open
+   * entrypoint (`open/server.ts`: operator `NEUTRON_OWNER_BEARER` or a persisted
+   * random bearer; already length-checked + guarded fail-closed). Threaded as an
+   * EXPLICIT value rather than via `process.env` so the entrypoint never mutates
+   * the shared environment — a minted value can't later be misread as an
+   * operator-set `NEUTRON_OWNER_BEARER` by a second in-process start under a
+   * different NEUTRON_HOME (Codex r3). When omitted, the composer reads
+   * `env['NEUTRON_OWNER_BEARER']` (composer-direct / embed) and applies the same
+   * length floor + fail-closed wide-bind check itself.
+   */
+  ownerBearer?: string
   /**
    * C1 — the frozen, validated {@link BootConfig} the entrypoint resolved. The
    * Open entrypoint threads it here so the composer shares boot()'s single env
@@ -1218,18 +1231,42 @@ export function buildOpenGraphComposer(
     }
     const startTokenAuth = buildLocalStartTokenAuth(cookieSecret)
 
-    // S0 security quick-patch (b) — per-boot app-ws token. The React client's
-    // historical default bearer was the guessable public constant `dev:<owner>`
-    // (chat-react/config.ts), so any web page the owner visited could open
-    // `ws://127.0.0.1:7800/ws/app/chat?token=dev:owner`. Mint a fresh random
-    // token EACH BOOT, inject it into the served page bootstrap
-    // (`window.__neutron_app_ws_token`, owner-gate), and require it on the WS
-    // upgrade for any browser-origin connection (app-ws-surface). A token from a
-    // previous boot no longer matches, so it can never re-authenticate. Native
-    // clients (Expo/CLI — no Origin header) are exempt and keep the localhost-
-    // trust bearer path. This is the S0 quick-patch; S1 replaces it with a
-    // per-INSTALL credential required on every /api/app/* surface.
-    const appWsToken = `nbt_${randomBytes(24).toString('base64url')}`
+    // S1 — the OWNER BEARER credential. This is the single token the served page
+    // bootstrap injects (`window.__neutron_app_ws_token`, owner-gate), the WS
+    // upgrade requires for browser-origin (and, on a wide bind, Origin-less)
+    // connections, and the app-ws resolver + every /api/app/* surface accept as
+    // the owner. It replaced S0's guessable `dev:owner` default; any web page the
+    // owner visited could otherwise open `ws://…/ws/app/chat?token=dev:owner`.
+    //
+    // The Open entrypoint (`open/server.ts`) resolves a PER-INSTALL bearer
+    // (operator `NEUTRON_OWNER_BEARER`, else a random bearer persisted 0600 under
+    // NEUTRON_HOME) and threads it here via `NEUTRON_OWNER_BEARER` — stable
+    // across restarts so a native Expo/CLI client keeps working after a redeploy,
+    // and fail-closed on a wide bind (server.ts refuses to boot a public bind
+    // whose bearer is only ephemeral). When the env is UNSET (composer built
+    // directly in a test / non-server embed) we fall back to a fresh per-boot
+    // random token — unguessable, just not persistent — so those paths still work.
+    //
+    // The bearer is threaded as an EXPLICIT option by server.ts (never via a
+    // process.env write), falling back to `env['NEUTRON_OWNER_BEARER']` only for
+    // a composer-direct embed / test. `isValidThreadedBearer` + `selectAppWsToken`
+    // apply the SAME length floor `resolveOwnerBearer` enforces, so a
+    // whitespace-only / too-short value (e.g. `NEUTRON_OWNER_BEARER=a`) is neither
+    // treated as persistent nor used as the token — never a guessable credential.
+    const threadedOwnerBearer = options.ownerBearer ?? env['NEUTRON_OWNER_BEARER']
+    const hasPersistentOwnerBearer = isValidThreadedBearer(threadedOwnerBearer)
+    // S1 (fail-closed, COMPOSITION boundary) — the "mandatory owner credential on
+    // a public bind" contract is enforced HERE too, not only in server.ts, so it
+    // holds for EVERY Open-composer entry point (server.ts, an embed, a future
+    // caller). A WIDE (non-loopback) bind with no VALID PERSISTENT owner bearer
+    // would otherwise fall to an ephemeral per-boot token — refuse instead
+    // (`'ephemeral'`). On a loopback bind this is a no-op (a minted dev token is
+    // fine). server.ts threads a persistent bearer (or refuses first) before
+    // building the composer on a wide bind, so reaching here without one means a
+    // misconfigured / direct-embed wide bind — fail closed. Reuses the SAME
+    // isLoopbackBindHost classification as S2 via assertOwnerCredentialPolicy.
+    if (!hasPersistentOwnerBearer) assertOwnerCredentialPolicy(bindHost, 'ephemeral')
+    const appWsToken = selectAppWsToken(threadedOwnerBearer)
 
     // FIX 2 (P2 follow-up to #84) — ONE shared single-use store for start-token
     // JTIs. With the legacy `/ws/chat` onboarding socket deleted, the start
@@ -1813,22 +1850,24 @@ export function buildOpenGraphComposer(
     // On loopback (the 127.0.0.1 dogfood) `dev:owner` works exactly as before.
     // On a WIDE bind the base resolver is built WITHOUT bypass, so `dev:owner`
     // (and any other predictable bearer) is REJECTED; the only owner credential
-    // accepted is the random per-boot `appWsToken` checked below — so merely
-    // visiting the box over the network can no longer drive the agent. (A real
-    // operator-configured, persistent owner credential is S1's per-install work;
-    // until then the wide-bind credential is this unguessable per-boot token.)
+    // accepted is the `appWsToken` checked below — so merely visiting the box
+    // over the network can no longer drive the agent.
+    // S1 — on a wide bind that `appWsToken` is now the PER-INSTALL owner bearer
+    // (persisted / operator-configured, threaded via NEUTRON_OWNER_BEARER), and
+    // server.ts refuses to boot a wide bind that could only secure an ephemeral
+    // one — so the wide-bind credential is stable across restarts, not per-boot.
     const appOwnerAuth: AppWsAuthResolver = ((): AppWsAuthResolver => {
       const base = createAppWsAuthResolver({ project_slug, bypass: bindIsLoopback })
       return {
         mode: base.mode,
         resolve: async (token) => {
-          // S0 (b) — the per-boot app-ws token resolves directly to the owner.
+          // S1 — the owner-bearer app-ws token resolves directly to the owner.
           // This is the credential the web client now presents (injected into
           // the page bootstrap); the WS upgrade already constant-time-checked it
           // for browser origins, but the resolver must ALSO map it to the owner
           // identity so both the WS and the /api/app/* bearer path accept it.
           if (constantTimeEqual(token, appWsToken)) {
-            // The per-boot token IS the owner credential (works on loopback AND
+            // The owner bearer IS the owner credential (works on loopback AND
             // wide binds). `mode` is log-only; report 'dev-bypass' (base.mode is
             // 'unconfigured' on a wide bind, which would misreport this accept).
             return { user_id: OWNER_USER_ID, project_slug, mode: 'dev-bypass' }

@@ -128,3 +128,46 @@ export function assertWideBindPolicy(host: string, env: BindEnvBag): void {
     )
   }
 }
+
+/**
+ * Whether a resolved owner credential is PERSISTENT (a real, stable, per-install
+ * credential) or merely a process-EPHEMERAL fallback that could not be secured
+ * on disk. A wide bind requires the former.
+ *
+ *   - `'env'`       — an operator-configured bearer (`NEUTRON_OWNER_BEARER`).
+ *   - `'persisted'` — a per-install bearer read/minted to a 0600 file.
+ *   - `'ephemeral'` — the FS-failure fallback (process-only; lost on restart).
+ */
+export type OwnerCredentialSource = 'env' | 'persisted' | 'ephemeral'
+
+/**
+ * S1 (b) — refuse to boot a WIDE (non-loopback) bind that lacks a CONFIGURED,
+ * PERSISTENT owner credential. This is the S1 sibling of {@link
+ * assertWideBindPolicy}: S2 closed the guessable-bearer half (a wide bind
+ * rejects `dev:owner`); S1 makes a properly-configured owner bearer MANDATORY on
+ * a public bind. Reuses the SAME {@link isLoopbackBindHost} classification.
+ *
+ * Decision (mirrors S2 exactly):
+ *   - LOOPBACK bind (the 127.0.0.1 dogfood default) → NO-OP. The documented dev
+ *     bypass (`dev:owner`) stays; an ephemeral bearer is fine locally.
+ *   - WIDE bind + a PERSISTENT bearer (`'env'` / `'persisted'`) → NO-OP. All
+ *     clients authenticate with the injected/configured per-install credential.
+ *   - WIDE bind + only an `'ephemeral'` bearer → THROW LOUD. The owner bearer
+ *     could not be persisted (hostile / read-only NEUTRON_HOME), so a rebooting
+ *     native client would silently lose access AND there is no stable owner
+ *     credential to hand out — fail closed rather than serve the agent to the
+ *     network on a fragile per-process token.
+ */
+export function assertOwnerCredentialPolicy(host: string, source: OwnerCredentialSource): void {
+  if (isLoopbackBindHost(host)) return
+  if (source === 'ephemeral') {
+    throw new Error(
+      `refusing to boot: NEUTRON_HOST=${host} is a WIDE (non-loopback) bind, but no ` +
+        `PERSISTENT owner credential could be secured (the per-install owner bearer fell ` +
+        `back to a process-ephemeral value — NEUTRON_HOME is likely read-only or hostile). ` +
+        `A wide bind exposes the agent surfaces to the network and needs a stable owner ` +
+        `credential: fix NEUTRON_HOME so the bearer can persist, set NEUTRON_OWNER_BEARER ` +
+        `to a high-entropy value, or bind loopback (NEUTRON_HOST=127.0.0.1) for local dev.`,
+    )
+  }
+}
