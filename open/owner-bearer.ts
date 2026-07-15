@@ -45,6 +45,34 @@ export const OWNER_BEARER_MIN_LEN = 16
 /** Recognizable, operator-visible prefix for a minted bearer. */
 const MINTED_BEARER_PREFIX = 'nbt_'
 
+/**
+ * Minimum Shannon entropy (bits/char) an owner bearer must carry to be accepted.
+ * The length floor alone accepts trivially guessable values (`'a'×16`, `'ab'×8`),
+ * which on a WIDE bind would expose the owner surfaces behind a readily guessed
+ * bearer (Codex). A minted bearer (random base64url) sits ~4.5+ bits/char and any
+ * real high-entropy operator value clears 3.0 comfortably; repeated/low-diversity
+ * strings fall well below it (`'a'×16` → 0.0, `'ab'×8` → 1.0).
+ */
+export const OWNER_BEARER_MIN_ENTROPY_BITS_PER_CHAR = 3.0
+
+/** Shannon entropy of a string's character distribution, in bits per character. */
+function shannonBitsPerChar(s: string): number {
+  if (s.length === 0) return 0
+  const freq = new Map<string, number>()
+  for (const ch of s) freq.set(ch, (freq.get(ch) ?? 0) + 1)
+  let h = 0
+  for (const count of freq.values()) {
+    const p = count / s.length
+    h -= p * Math.log2(p)
+  }
+  return h
+}
+
+/** TRUE when a bearer carries enough entropy to be non-guessable (see the floor). */
+export function hasSufficientBearerEntropy(s: string): boolean {
+  return shannonBitsPerChar(s) >= OWNER_BEARER_MIN_ENTROPY_BITS_PER_CHAR
+}
+
 const log = createLogger('open-owner-bearer')
 
 /** Where the owner bearer came from — `'env'` + `'persisted'` are PERSISTENT. */
@@ -70,7 +98,11 @@ function mintOwnerBearer(): string {
  */
 export function isValidThreadedBearer(injected: string | undefined): boolean {
   const trimmed = injected?.trim()
-  return trimmed !== undefined && trimmed.length >= OWNER_BEARER_MIN_LEN
+  return (
+    trimmed !== undefined &&
+    trimmed.length >= OWNER_BEARER_MIN_LEN &&
+    hasSufficientBearerEntropy(trimmed)
+  )
 }
 
 /**
@@ -115,6 +147,14 @@ export function resolveOwnerBearer(
           `${OWNER_BEARER_ENV_VAR} is too short (${trimmed.length} < ${OWNER_BEARER_MIN_LEN} chars) — ` +
             `refusing to authenticate the owner with a weak bearer. Use a high-entropy value ` +
             `(e.g. 32+ random chars) or unset it to auto-mint a per-install bearer.`,
+        )
+      }
+      if (!hasSufficientBearerEntropy(trimmed)) {
+        throw new Error(
+          `${OWNER_BEARER_ENV_VAR} is too low-entropy (repeated or predictable characters) — ` +
+            `refusing to authenticate the owner with a GUESSABLE bearer on a network-reachable ` +
+            `surface. Use a high-entropy value (e.g. 32+ random chars) or unset it to auto-mint ` +
+            `a per-install bearer.`,
         )
       }
       return { value: trimmed, source: 'env' }

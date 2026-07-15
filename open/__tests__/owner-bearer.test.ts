@@ -54,8 +54,9 @@ describe('resolveOwnerBearer — env override', () => {
   })
 
   it('TRIMS surrounding whitespace on the env override (both sides use the trimmed value)', () => {
-    const res = resolveOwnerBearer(home, { [OWNER_BEARER_ENV_VAR]: `  ${'z'.repeat(20)}  \n` })
-    expect(res.value).toBe('z'.repeat(20))
+    const strong = 'kZ2mR4nT6vB0cD5eG9h' // 19 chars, high entropy
+    const res = resolveOwnerBearer(home, { [OWNER_BEARER_ENV_VAR]: `  ${strong}  \n` })
+    expect(res.value).toBe(strong)
     expect(res.source).toBe('env')
   })
 
@@ -63,12 +64,33 @@ describe('resolveOwnerBearer — env override', () => {
     expect(() =>
       resolveOwnerBearer(home, { [OWNER_BEARER_ENV_VAR]: 'a'.repeat(OWNER_BEARER_MIN_LEN - 1) }),
     ).toThrow(new RegExp(OWNER_BEARER_ENV_VAR))
-    // A value AT the floor is accepted.
-    const atFloor = 'b'.repeat(OWNER_BEARER_MIN_LEN)
+    // A HIGH-ENTROPY value AT the floor is accepted.
+    const atFloor = 'a3F9kZ2mQ7pX1sW8' // 16 chars, high entropy
     expect(resolveOwnerBearer(home, { [OWNER_BEARER_ENV_VAR]: atFloor })).toEqual({
       value: atFloor,
       source: 'env',
     })
+  })
+
+  it('a SHORT write does NOT persist a TRUNCATED bearer — the mint falls back to ephemeral (Codex Medium)', () => {
+    // The persist calls writeSync in a FULL-write loop. Simulate a kernel that
+    // flushes a few bytes then can write no more: the loop must ABORT (not rename a
+    // truncated secret into place, which the length-only verify could still accept).
+    let calls = 0
+    const spy = spyOn(fs, 'writeSync').mockImplementation(((): number => {
+      calls += 1
+      return calls === 1 ? 4 : 0 // 4 bytes "written", then 0 → loop aborts
+    }) as typeof fs.writeSync)
+    try {
+      // No env → resolveOwnerBearer MINTS a bearer and tries to persist it.
+      const res = resolveOwnerBearer(home, {})
+      // Persist aborted on the short write → NOT accepted as a persisted credential
+      // (so on a wide bind the ephemeral source fails closed rather than serving a
+      // truncated, weaker bearer).
+      expect(res.source).not.toBe('persisted')
+    } finally {
+      spy.mockRestore()
+    }
   })
 
   it('treats an EMPTY / whitespace-only env override as UNSET → mints+persists', () => {
@@ -179,25 +201,50 @@ describe('selectAppWsToken — composer-side boundary (Codex r1 Critical)', () =
     expect(selectAppWsToken(undefined)).not.toBe(selectAppWsToken(undefined))
   })
 
-  it('enforces the LENGTH FLOOR on a threaded value (0 / 1 / 15 reject; 16 accept) — Codex r3', () => {
+  it('enforces the LENGTH + ENTROPY floor on a threaded value (short OR low-entropy reject; strong accept)', () => {
     // A composer-direct wide bind must NOT accept a weaker credential than the
-    // server entrypoint. isValidThreadedBearer mirrors resolveOwnerBearer's floor.
+    // server entrypoint. isValidThreadedBearer mirrors resolveOwnerBearer's floors.
+    const strong = 'a3F9kZ2mQ7pX1sW8' // 16 chars, all distinct → high entropy
     expect(isValidThreadedBearer(undefined)).toBe(false)
     expect(isValidThreadedBearer('')).toBe(false)
     expect(isValidThreadedBearer('a')).toBe(false) // 1 char
     expect(isValidThreadedBearer('a'.repeat(OWNER_BEARER_MIN_LEN - 1))).toBe(false) // 15
-    expect(isValidThreadedBearer('a'.repeat(OWNER_BEARER_MIN_LEN))).toBe(true) // 16
-    expect(isValidThreadedBearer(`  ${'a'.repeat(OWNER_BEARER_MIN_LEN)}  `)).toBe(true) // trims
+    // Length floor MET but LOW ENTROPY → rejected (Codex High: 'a'×16 is guessable).
+    expect(isValidThreadedBearer('a'.repeat(OWNER_BEARER_MIN_LEN))).toBe(false)
+    expect(isValidThreadedBearer('ab'.repeat(OWNER_BEARER_MIN_LEN / 2))).toBe(false) // 2-char cycle
+    // Length + entropy both met → accepted.
+    expect(isValidThreadedBearer(strong)).toBe(true)
+    expect(isValidThreadedBearer(`  ${strong}  `)).toBe(true) // trims
 
-    // selectAppWsToken never RETURNS a below-floor value — it mints instead.
-    for (const weak of ['', 'a', 'a'.repeat(OWNER_BEARER_MIN_LEN - 1)]) {
+    // selectAppWsToken never RETURNS a below-floor OR low-entropy value — it mints.
+    for (const weak of [
+      '',
+      'a',
+      'a'.repeat(OWNER_BEARER_MIN_LEN - 1),
+      'a'.repeat(OWNER_BEARER_MIN_LEN), // length OK, entropy too low
+    ]) {
       const token = selectAppWsToken(weak)
       expect(token).toMatch(/^nbt_/)
       expect(token).not.toBe(weak)
     }
-    // …and uses a value AT the floor verbatim.
-    const atFloor = 'z'.repeat(OWNER_BEARER_MIN_LEN)
-    expect(selectAppWsToken(atFloor)).toBe(atFloor)
+    // …and uses a HIGH-ENTROPY value AT the floor verbatim.
+    expect(selectAppWsToken(strong)).toBe(strong)
+  })
+
+  it('rejects a floor-length but LOW-ENTROPY explicit bearer (Codex High — guessable wide-bind bearer)', () => {
+    // The exact repro: NEUTRON_OWNER_BEARER='aaaaaaaaaaaaaaaa' clears the 16-char
+    // floor but is trivially guessable — resolveOwnerBearer must REFUSE it.
+    for (const weak of ['a'.repeat(16), 'ab'.repeat(8), 'abcabcabcabcabca']) {
+      expect(() => resolveOwnerBearer('/tmp/does-not-matter', { [OWNER_BEARER_ENV_VAR]: weak })).toThrow(
+        /low-entropy|too short/i,
+      )
+    }
+    // A high-entropy explicit bearer is accepted as source:'env'.
+    const strong = 'kQ7pX1sW8a3F9kZ2mR4nT6vB0cD5eG9h'
+    expect(resolveOwnerBearer('/tmp/does-not-matter', { [OWNER_BEARER_ENV_VAR]: strong })).toEqual({
+      value: strong,
+      source: 'env',
+    })
   })
 })
 

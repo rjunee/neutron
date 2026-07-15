@@ -141,7 +141,17 @@ function installFreshSecret(spec: PersistedSecretSpec): string | null {
     return null
   }
   try {
-    fs.writeSync(fd, secret + '\n')
+    // FULL write: `writeSync` may write fewer bytes than requested (short write),
+    // and a partial write would rename a TRUNCATED secret into place that the
+    // length-only verify could still accept (Codex). Loop over a Buffer until
+    // every byte is on disk; a zero/negative return is a hard failure.
+    const buf = Buffer.from(secret + '\n', 'utf8')
+    let written = 0
+    while (written < buf.length) {
+      const n = fs.writeSync(fd, buf, written, buf.length - written)
+      if (n <= 0) throw new Error(`short write: ${written}/${buf.length} bytes`)
+      written += n
+    }
   } catch {
     try {
       fs.closeSync(fd)

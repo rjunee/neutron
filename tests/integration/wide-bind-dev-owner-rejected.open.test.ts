@@ -163,6 +163,16 @@ describe('S2 (b) e2e — wide bind rejects the predictable dev:owner; loopback a
     await expect(buildGraph('0.0.0.0')).rejects.toThrow(/refusing to boot/)
   })
 
+  test('S1 fail-closed: WIDE bind with a PREDICTABLE floor-length owner bearer REFUSES to compose (Codex High)', async () => {
+    // A bearer that clears the 16-char floor but is trivially guessable
+    // ('aaaaaaaaaaaaaaaa') must NOT authenticate the owner on a network-reachable
+    // bind — it is rejected as low-entropy → no persistent credential → fail closed.
+    // Mutation-verify: drop the entropy gate in resolveOwnerBearer/isValidThreadedBearer
+    // → this stops throwing and exposes the owner behind a guessed bearer.
+    process.env['NEUTRON_OWNER_BEARER'] = 'a'.repeat(16)
+    await expect(buildGraph('0.0.0.0')).rejects.toThrow(/refusing to boot|low-entropy/i)
+  })
+
   test('S1: WIDE bind WITH a persistent owner bearer composes (all clients work)', async () => {
     // The counterpart: the SAME wide bind with a persistent bearer threaded in
     // builds fine — so a properly-configured public bind is fully functional.
