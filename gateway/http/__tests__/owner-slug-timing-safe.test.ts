@@ -147,21 +147,10 @@ function helperBindingOffense(source: string, fileName: string, NAME: string, CA
   return null
 }
 
-/** The consolidated surface-kit helper names — a surface must import them, never
- *  DECLARE its own copy. */
-const KIT_HELPER_NAMES = new Set([
-  'resolveBearer',
-  'readJsonBody',
-  'jsonResponse',
-  'jsonOk',
-  'jsonError',
-  'ownerSlugMismatch',
-])
-
 /** Each consolidated kit helper + the module specifier(s) it may legitimately be
- *  imported from. The five serializers/parsers live ONLY in surface-kit; the
- *  timing-safe comparators are defined in auth-helpers and re-exported by
- *  surface-kit (so either is canonical). */
+ *  imported from — the SINGLE SOURCE OF TRUTH for both guards. The five
+ *  serializers/parsers live ONLY in surface-kit; the timing-safe comparators are
+ *  defined in auth-helpers and re-exported by surface-kit (so either is canonical). */
 const AUTH_OR_KIT = /^\.\/(?:auth-helpers|surface-kit)\.ts$/
 const KIT_ONLY = /^\.\/surface-kit\.ts$/
 const KIT_HELPER_SOURCES: Array<{ name: string; canon: RegExp }> = [
@@ -173,6 +162,10 @@ const KIT_HELPER_SOURCES: Array<{ name: string; canon: RegExp }> = [
   { name: 'ownerSlugMismatch', canon: AUTH_OR_KIT },
   { name: 'ownerIdentityMismatch', canon: AUTH_OR_KIT },
 ]
+
+/** The consolidated helper names — DERIVED from KIT_HELPER_SOURCES so the two guards
+ *  (import bind-analysis + local-declaration completeness) can never drift apart. */
+const KIT_HELPER_NAMES = new Set(KIT_HELPER_SOURCES.map((h) => h.name))
 
 /** AST scan for LOCAL declarations of any kit helper name in one surface source —
  *  function declarations, variable declarations (typed / function-expr / arrow),
@@ -419,6 +412,7 @@ describe('project_slug timing-safe comparison (ISSUE #34)', () => {
     expect(has('const helpers = { jsonError() { return new Response() } }')).toBe(true) // object method
     expect(has('class Helpers { resolveBearer() {} }')).toBe(true) // class method
     expect(has('class Helpers { get jsonOk() { return new Response() } }')).toBe(true) // accessor
+    expect(has('class Helpers { ownerIdentityMismatch() {} }')).toBe(true) // ownerIdentityMismatch is a consolidated helper too
     expect(has('async function resolveBearer() {}')).toBe(true) // function declaration
     expect(has("import { jsonError } from './surface-kit.ts'\njsonError(1,'x','y')")).toBe(false) // imported use, no local decl
   })
