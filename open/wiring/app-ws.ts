@@ -82,12 +82,12 @@ import {
   buildDeterministicProjectOpening,
   finalizeOpeningBody,
   type ProjectOpeningDocs,
-} from '@neutronai/gateway/realmode-composer/build-onboarding-handoff.ts'
+} from '@neutronai/gateway/wiring/build-onboarding-handoff.ts'
 import type { IncomingEvent, OutgoingMessage } from '@neutronai/channels/types.ts'
 import type { ChatOutbound } from '@neutronai/landing/chat-protocol.ts'
-import type { LandingStackWithEngine } from '@neutronai/gateway/realmode-composer/build-landing-stack.ts'
+import type { LandingStackWithEngine } from '@neutronai/gateway/wiring/build-landing-stack.ts'
 import type { LiveAgentTurnRequest } from '@neutronai/gateway/http/chat-bridge.ts'
-import type { LiveAgentTurnResult } from '@neutronai/gateway/realmode-composer/build-live-agent-turn.ts'
+import type { LiveAgentTurnResult } from '@neutronai/gateway/wiring/build-live-agent-turn.ts'
 import type {
   AppSocketButtonPromptRouter,
   AppSocketImportProgressRouter,

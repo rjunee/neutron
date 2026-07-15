@@ -59,7 +59,7 @@ export function buildResearchLlmCallForOwner(opts: {
       )
     }
     const { collectTokensToString } = await import(
-      './realmode-composer/build-llm-call-substrate.ts'
+      './wiring/build-llm-call-substrate.ts'
     )
     const prompt = input.system.length > 0
       ? `${input.system}\n\n${input.user}`

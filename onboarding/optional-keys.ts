@@ -18,7 +18,7 @@
  *
  * Activation map (see docs/SYSTEM-OVERVIEW.md):
  *   - `openai_api_key` → stored via ApiKeyStore(provider='openai'). Becomes
- *     resolvable by `gateway/realmode-composer/resolve-llm-credentials.ts`
+ *     resolvable by `gateway/wiring/resolve-llm-credentials.ts`
  *     (→ `auth/byo-api-key-fallback.ts:buildBYOApiKeyPool`), which ACTIVATES
  *     the OpenAI / GPT-5 API adapter used for cross-model trident reviews.
  *     The SAME key also backs cloud embeddings

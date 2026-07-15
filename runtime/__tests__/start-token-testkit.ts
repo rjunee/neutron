@@ -3,7 +3,7 @@
  *
  * A faithful, dependency-light mirror of the Managed
  * `signup/start-token.ts` mint/verify/claim primitives, used ONLY by
- * Open-classified tests (gateway/http, gateway/realmode-composer,
+ * Open-classified tests (gateway/http, gateway/wiring,
  * landing/) that drive the chat-bridge + landing auth-gate through their
  * `verifyStartToken` / `claimStartTokenJti` DI seams.
  *

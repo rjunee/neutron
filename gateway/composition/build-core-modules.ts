@@ -26,7 +26,7 @@ import { registerMemorySearchToolSurface } from '@neutronai/gbrain-memory/agent-
 import { registerWorkBoardToolSurface } from '@neutronai/work-board/agent-tool.ts'
 import { registerTridentBuildToolSurface } from '@neutronai/trident/work-board-build-tool.ts'
 import { registerCodexCredentialToolSurface } from '@neutronai/trident/codex-credential-tool.ts'
-import { registerCreateProjectToolSurface } from '../realmode-composer/create-project-tool.ts'
+import { registerCreateProjectToolSurface } from '../wiring/create-project-tool.ts'
 import { registerMessageSearchToolSurface } from '@neutronai/message-search/tool.ts'
 import { registerDispatchToolSurface } from '@neutronai/agent-dispatch/tool.ts'
 import { registerSkillForgeToolSurface } from '@neutronai/skill-forge/tool.ts'
@@ -495,7 +495,7 @@ export function buildCoreModules(
     name: 'cron',
     init: () => {
       // T2 r3 (2026-05-13) — Argus BLOCKING #1: reuse the caller-supplied
-      // CronJobRegistry when present so the realmode-composer's
+      // CronJobRegistry when present so the wiring's
       // wow-dispatcher and THIS scheduler read from one shared instance.
       // See CompositionInput.cron_jobs docblock for the full incident.
       const jobs = input.cron_jobs ?? new CronJobRegistry()

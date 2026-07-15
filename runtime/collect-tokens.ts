@@ -2,7 +2,7 @@
  * @neutronai/runtime — SessionHandle token-drain helper (L3 leaf).
  *
  * L3 (2026-07) — `collectTokensToString` moved VERBATIM out of
- * `gateway/realmode-composer/build-llm-call-substrate.ts` into this runtime
+ * `gateway/wiring/build-llm-call-substrate.ts` into this runtime
  * (platform-band) leaf so services-band consumers (`reminders/dispatcher.ts`)
  * can drain a substrate stream WITHOUT importing UP into the gateway
  * composition band (the `services-below-product` / `nobody-imports-composition`

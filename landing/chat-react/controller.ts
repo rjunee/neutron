@@ -186,7 +186,7 @@ export interface SystemNoticeVM {
 /**
  * M1 — recognise the gateway's cold-start acknowledgement so it renders as a
  * quiet system pill instead of a chat bubble. Mirrors
- * `gateway/realmode-composer/build-live-agent-turn.ts` `COLD_START_ACK_BODY`
+ * `gateway/wiring/build-live-agent-turn.ts` `COLD_START_ACK_BODY`
  * ("⏳ Waking up, one moment…"); matched by its stable leading marker so a minor
  * copy tweak (trailing punctuation) still routes to the pill. Kept lenient on
  * purpose — a false positive only restyles a rare, transient ack.
@@ -692,7 +692,7 @@ export class NeutronChatController {
       // `system_notice: true` tag (forward-compatible with a first-class server
       // flag), OR the cold-start acknowledgement — a non-persisted live
       // `agent_message` the gateway emits while a cold first turn spins up
-      // (`gateway/realmode-composer/build-live-agent-turn.ts` COLD_START_ACK_BODY
+      // (`gateway/wiring/build-live-agent-turn.ts` COLD_START_ACK_BODY
       // = "⏳ Waking up, one moment…"). It self-clears when the real reply streams
       // (or after a grace window); the awaiting bracket stays so the typing dots
       // keep spinning while the workspace wakes.

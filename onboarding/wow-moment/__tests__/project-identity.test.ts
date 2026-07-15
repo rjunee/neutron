@@ -19,7 +19,7 @@ import {
   synthesizeProjectContext,
   weaveRelatedSignal,
 } from '../project-identity.ts'
-import { defaultProjectIdSlugifier } from '@neutronai/gateway/realmode-composer/build-onboarding-handoff.ts'
+import { defaultProjectIdSlugifier } from '@neutronai/gateway/wiring/build-onboarding-handoff.ts'
 import type { ImportResult } from '../../history-import/types.ts'
 
 function emptyImport(): ImportResult {

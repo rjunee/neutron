@@ -37,7 +37,7 @@
  * `McpClient` are the `gbrain-memory/` adapters (`GBrainMemoryStore`,
  * `GBrainSyncHook`) and the `connect/` federation mirror (which the swap-seam
  * rule exempts), never a product surface. Critically, the composer that builds
- * the production transport (`gateway/realmode-composer/build-gbrain-memory.ts`,
+ * the production transport (`gateway/wiring/build-gbrain-memory.ts`,
  * an exempt module) keeps the `GBrainStdioMcpClient` as a LOCAL and returns ONLY
  * the typed `MemoryStore` (+ syncHook + close) on `GBrainMemoryWiring` — it does
  * NOT surface the transport, so product code cannot reach a raw op even through

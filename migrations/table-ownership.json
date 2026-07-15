@@ -18,13 +18,13 @@
       "writers": [
         "cores/free/agent-settings/src/backend.ts",
         "gateway/projects/sqlite-store.ts",
-        "gateway/realmode-composer/project-create.ts"
+        "gateway/wiring/project-create.ts"
       ],
       "notes": [
         "gateway/projects/sqlite-store.ts is the owning settings/lifecycle store",
         "(seed, PATCH, archive/restore, activity stamps — incl.",
         "touchActivityIncludingArchived, moved verbatim from open/composer.ts).",
-        "gateway/realmode-composer/project-create.ts is the sanctioned",
+        "gateway/wiring/project-create.ts is the sanctioned",
         "project-CREATION writer (refactor-plan §P4: creation converges on",
         "sqlite-store.ts + project-create.ts; the second creation writer at",
         "onboarding/wow-moment/actions/03-project-shells.ts was deleted by",
@@ -55,9 +55,9 @@
       ]
     },
     "gbrain_sync_state": {
-      "owner": "gateway/realmode-composer/gbrain-sync-state-store.ts",
+      "owner": "gateway/wiring/gbrain-sync-state-store.ts",
       "writers": [
-        "gateway/realmode-composer/gbrain-sync-state-store.ts"
+        "gateway/wiring/gbrain-sync-state-store.ts"
       ],
       "notes": [
         "P9 (world-class refactor) — GBrain sync observability. Single-writer:",

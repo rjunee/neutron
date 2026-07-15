@@ -191,8 +191,8 @@ function readTracked(p: string): string | null {
 function isExemptFromBan(p: string): boolean {
   if (p.startsWith('gbrain-memory/')) return true
   if (p.startsWith('connect/')) return true
-  if (p === 'gateway/realmode-composer/build-gbrain-memory.ts') return true
-  if (p === 'gateway/realmode-composer/gbrain-sync-state-store.ts') return true
+  if (p === 'gateway/wiring/build-gbrain-memory.ts') return true
+  if (p === 'gateway/wiring/gbrain-sync-state-store.ts') return true
   if (/(^|\/)__tests__\//.test(p)) return true
   if (/\.test\.[a-z]+$/.test(p)) return true
   if (/(^|\/)tests\//.test(p)) return true

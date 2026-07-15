@@ -33,7 +33,7 @@ import { createLogger } from '@neutronai/logger'
 import type { ProjectDb } from '@neutronai/persistence/index.ts'
 import type { LoopRegistry } from '@neutronai/loop'
 import type { CompositionInput } from '@neutronai/gateway/composition.ts'
-import type { LandingStackWithEngine } from '@neutronai/gateway/realmode-composer/build-landing-stack.ts'
+import type { LandingStackWithEngine } from '@neutronai/gateway/wiring/build-landing-stack.ts'
 import type { OpenWiringContext } from './context.ts'
 
 /**

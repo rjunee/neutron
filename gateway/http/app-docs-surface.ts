@@ -1403,7 +1403,7 @@ async function handleGetThread(
  * P7.2 S3 — escalate an inline-comment thread to the project's chat
  * surface. Writes an `escalate_to_chat` event tied to the thread root;
  * the chat composer's `loadPendingEscalations` (see
- * `gateway/realmode-composer/escalation-loader.ts`) reads pending
+ * `gateway/wiring/escalation-loader.ts`) reads pending
  * escalate events on every chat turn and splices the rendered thread
  * history into the system prompt above the persona block.
  *

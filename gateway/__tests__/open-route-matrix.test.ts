@@ -41,7 +41,7 @@
  *     `:1047-1072` chunked-before-legacy) still land on the correct blocks at
  *     HEAD — no numeric drift to correct.
  *
- * OSS-SPLIT NOTE: the Managed production composer (`realmode-composer.ts`) is
+ * OSS-SPLIT NOTE: the Managed production composer (`wiring.ts`) is
  * deploy-config-injected from the private repo (see `gateway/index.ts`
  * `loadGraphComposerFromEnv`) and an Open self-host box boots a `/healthz`-only
  * shell. So the concrete "which surfaces does tier X wire" list lives outside

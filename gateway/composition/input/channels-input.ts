@@ -15,7 +15,7 @@ export interface ChannelsCompositionInput {
    * Why this exists: the production composer needs to pre-build the router
    * so the Telegram webhook handler can hold a reference to the SAME
    * router the graph exposes. The webhook handler is constructed in
-   * `gateway/realmode-composer/build-telegram-webhook.ts` BEFORE the graph
+   * `gateway/wiring/build-telegram-webhook.ts` BEFORE the graph
    * composes — without this seam the handler would have to wait on a
    * post-compose hook (`on_graph_composed`) or a `DeferredEventReceiver`
    * shim, both of which the v2 plan deliberately drops.

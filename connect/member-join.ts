@@ -110,7 +110,7 @@ export type RegisterMembershipFn = (args: {
  * deferred live-fan-out trident's scope (connect-spec §7 C-E): (i) the HTTP
  * host-snapshot transport (`SharedProjectGraphSource` is `InProcessGraphSource`
  * only today), and (ii) per-project GBrain source scoping — GBrain is per-
- * instance `source=default` today (`gateway/realmode-composer/build-gbrain-memory.ts`:
+ * instance `source=default` today (`gateway/wiring/build-gbrain-memory.ts`:
  * "project partitioning lands in M2.6"), so a host export would ship the host's
  * WHOLE cross-project memory, a privacy regression. The real collaborator-side
  * trigger point is `gateway/projects/shared-projects-resolver.ts` (shared-project

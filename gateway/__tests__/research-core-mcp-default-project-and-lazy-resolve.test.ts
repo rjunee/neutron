@@ -186,7 +186,7 @@ test('BLOCKER: explicit non-default project_id is honoured — wrapper is additi
 // Sprint cc-substrate-migration-3-sites (2026-05-31) — replaces the pre-
 // substrate `get_anthropic_pool` lazy-resolve guard. Per-call freshness
 // is now the substrate's own responsibility (tested in
-// gateway/realmode-composer/__tests__/build-llm-call-substrate.test.ts);
+// gateway/wiring/__tests__/build-llm-call-substrate.test.ts);
 // at THIS layer we only need to verify the closure threads the
 // `{system,user,max_tokens,model}` call shape into `spec.prompt` correctly
 // and surfaces the substrate's response.

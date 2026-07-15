@@ -24,7 +24,7 @@ export interface MiscCompositionInput {
     onFired(reminder: import('@neutronai/reminders/store.ts').Reminder): Promise<void>
   }
   /**
-   * P1.5 / Sprint 21 — realmode-composer cleanup callbacks. The realmode
+   * P1.5 / Sprint 21 — wiring cleanup callbacks. The realmode
    * composer opens auxiliary DB handles (e.g. RW registry/identity for
    * the slug-picker hook) that are NOT owned by the module graph but
    * must be closed on gateway shutdown. The boot loop runs these
@@ -137,7 +137,7 @@ export interface MiscCompositionInput {
   }
   /**
    * T2 r3 (2026-05-13) — Argus BLOCKING #1: pre-constructed
-   * `CronJobRegistry` shared with the realmode-composer's
+   * `CronJobRegistry` shared with the wiring's
    * `buildLandingStack` → `buildWowDispatcherHook` path. When supplied,
    * the `cron` module reuses THIS instance instead of constructing a
    * fresh one, so the wow-moment action 07 (overnight-pass) registers
@@ -317,6 +317,6 @@ export interface MiscCompositionInput {
    * the server-injected `ToolCallContext`, never an agent arg.
    */
   create_project?: {
-    service: import('../../../gateway/realmode-composer/create-project-tool.ts').CreateProjectToolService
+    service: import('../../../gateway/wiring/create-project-tool.ts').CreateProjectToolService
   }
 }

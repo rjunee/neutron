@@ -84,7 +84,7 @@ export interface GBrainSyncHookOptions {
    * This is a PURE side-observation: every `publish` call is wrapped so a
    * throwing sink can NEVER perturb, reorder, or abort the fail-soft sync
    * path. Absent (the default) → byte-for-byte today's behavior. The concrete
-   * writer (`gateway/realmode-composer/gbrain-sync-state-store.ts`) is the
+   * writer (`gateway/wiring/gbrain-sync-state-store.ts`) is the
    * table's sole owner (P4 table-ownership map).
    */
   syncStateSink?: GbrainSyncStateSink
@@ -103,7 +103,7 @@ export interface GBrainSyncHookOptions {
  * in-RAM `lastSuccessAt` resets to null on every process restart, so a publish
  * before the first post-restart success would otherwise clobber the durable
  * "worked until <ts>" record the row exists to preserve. See
- * `gateway/realmode-composer/gbrain-sync-state-store.ts` for the merge SQL.
+ * `gateway/wiring/gbrain-sync-state-store.ts` for the merge SQL.
  */
 export interface GbrainSyncStateSnapshot {
   /** 'ok' while sync is live; 'unavailable' once the binary-missing latch trips. */

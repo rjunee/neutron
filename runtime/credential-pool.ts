@@ -116,7 +116,7 @@ export function newCredentialPool(input: NewPoolInput): CredentialPool {
  * which would inflate `use_count` and advance the round-robin cursor on
  * every probe (corrupting `least_used` / `round_robin` fairness). The
  * credential-pool memoizer's all-cooldown invalidation check is the first
- * such caller (`gateway/realmode-composer/memoize-credential-pool.ts`).
+ * such caller (`gateway/wiring/memoize-credential-pool.ts`).
  */
 export function hasUsableCredential(pool: CredentialPool): boolean {
   const now = Date.now()

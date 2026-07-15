@@ -6,7 +6,7 @@
  *
  *   Prod composes the owner persona at Path-1 finalize, NOT the
  *   (dead-in-prod, K11b1-deleted) engine phase-walk:
- *     gateway/realmode-composer/build-onboarding-finalize.ts:453
+ *     gateway/wiring/build-onboarding-finalize.ts:453
  *       → buildComposeInput(project_slug, state)        [engine-internals.ts:1806, LIVE post-K11b1]
  *       → PersonaComposer.compose(...)                  [onboarding/persona-gen/compose.ts]
  *

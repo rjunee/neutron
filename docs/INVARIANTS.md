@@ -325,8 +325,8 @@ with cross-references noted inline.
     `chat-bridge.ts:~1919-2717`.
     Protects: **D3**.
 73. `tag_gated` no-mention posts persist the transcript and send a no-render `agent_ack`.
-    `gateway/realmode-composer/build-live-agent-turn.ts:1135`,
-    `gateway/realmode-composer/build-landing-stack.ts:1473`.
+    `gateway/wiring/build-live-agent-turn.ts:1135`,
+    `gateway/wiring/build-landing-stack.ts:1473`.
     Protects: **D3**.
 74. Backup/restore facade: `last_attempted` written BEFORE the snapshot fires (scheduler contract);
     SNAPSHOT caps constants; sha/path validation errors are typed classes the HTTP surface maps to
@@ -357,7 +357,25 @@ with cross-references noted inline.
     `gateway/index.ts:474-486` (healthz, one of the 8 pinned surfaces);
     contract at `neutron-managed/src/ops/open-contract.ts` (out-of-repo).
     Protects: **M1** (Contract-gate hardening + route-manifest adoption), **C7**
-    (`realmode-composer/` → `gateway/wiring/` rename must ship a paired `open-contract.ts` update).
+    (`realmode-composer/` → `gateway/wiring/` rename — see resolution below).
+    **C7 RESOLUTION (verified 2026-07-15):** the rename needed NO paired `open-contract.ts`
+    update. The contract is RELOCATION-TOLERANT (`open-contract.ts:34-40`): most surfaces are
+    checked by scanning a PACKAGE DIR (`open/`, `gateway/`, …) for the surface's literals, not by
+    pinning a subpath — the assertion is "this surface still exists in that package", not "it lives
+    in this file". Renaming a subdir *within* `gateway/` keeps every surface inside the scanned
+    `gateway/` package, so the gate is unaffected. Verified against the live contract: its only
+    file-PINNED surface is `entrypoint:open/server.ts` (systemd spawns it), and none of the 8
+    surfaces references a `realmode-composer` path. (A within-`gateway/` rename is exactly the
+    move this tolerance was designed for.)
+    **Import-side (INVARIANTS #96) also verified against live neutron-managed:** Managed's OWN
+    production code imports ZERO `@neutronai/gateway/realmode-composer/*` paths — every importer of
+    that dir lives inside `vendor/neutron/` (the vendored copy of Open itself). Managed consumes
+    Open as a git SUBMODULE, so the dir rename and all its in-Open importers move ATOMICALLY in the
+    same submodule bump — a Managed deploy never sees a half-renamed tree. The private composer that
+    `NEUTRON_GRAPH_COMPOSER_MODULE` loads is not a checked-in Managed module importing these paths.
+    Hence NO forwarding shims and NO paired Managed import change are required. (Only stale
+    neutron-managed `SPEC.md`/`AS-BUILT.md` docs + one non-load-bearing synthetic `open-contract.test.ts`
+    fixture still name the old path — cosmetic, refreshed on re-vendor.)
 79. `boot-helpers.ts` must never import `gateway/index.ts` (TLA entry↔composer cycle);
     new "shared boot config" modules must sit below both. `boot-helpers.ts:6-20`.
     Protects: **L3**, **C2** (boot-helpers split).
@@ -368,7 +386,7 @@ with cross-references noted inline.
 81. Moving value constants changes module-init graphs (e.g. `collectTokensToString`,
     `TELEGRAM_BIND_TOKEN_TTL_MS`) — several modules read env at module-load time; relocation
     reorders those reads. Prefer re-export shims for one release.
-    `gateway/realmode-composer/build-llm-call-substrate.ts:793` (`collectTokensToString`).
+    `gateway/wiring/build-llm-call-substrate.ts:793` (`collectTokensToString`).
     Protects: **L5** (Relative-import autofix sweeps).
 82. `slugifyProjectId` (`onboarding/wow-moment/project-identity.ts:41-44`) must stay byte-identical
     to gateway's `defaultProjectIdSlugifier` — already guarded by a drift test; keep the test until
@@ -479,7 +497,7 @@ with cross-references noted inline.
 108. Credential-pool threading into spawns explicitly UNSETS `ANTHROPIC_API_KEY`/
      `ANTHROPIC_AUTH_TOKEN`/`CLAUDE_CODE_OAUTH_TOKEN` before setting ONLY the selected credential;
      `cred_id` (never the secret) is what surfaces on completions. Already done right — preserve
-     verbatim. `gateway/realmode-composer/build-llm-call-substrate.ts:184-207`.
+     verbatim. `gateway/wiring/build-llm-call-substrate.ts:184-207`.
      Protects: **C6**, **S1**.
 109. Session cookie: HMAC-SHA256, 30-day sliding, `HttpOnly; SameSite=Lax; Path=/`, `Secure` only
      on https, constant-time HMAC compare. `landing/session-cookie.ts`, `open/composer.ts:3630`.

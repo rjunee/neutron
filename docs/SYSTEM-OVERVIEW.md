@@ -625,7 +625,7 @@ rather than waiting on the global diff-gate. Subscriber:
 >    runs now carry the originating chat topic (`resolve_delivery` maps the tool
 >    call's `project_id` → app-ws topic; the ▶ route + `/code` thread it too).
 > 4. **Every build creates a trackable card.** The build-routing doctrine
->    (`gateway/realmode-composer/operating-doctrine.ts`) now REQUIRES a Work Board
+>    (`gateway/wiring/operating-doctrine.ts`) now REQUIRES a Work Board
 >    card for EVERY build — inline OR trident, any project — so no build is invisible.
 > 5. **Underspecified builds ask in chat.** The ▶ route on an `underspecified`
 >    rejection posts a short clarifying question to chat (`open/composer.ts`
@@ -1471,7 +1471,7 @@ metadata only.
 backs the resolver AND the agent awareness: a per-turn `<available_services>`
 DATA block (`project-credentials/fragment.ts`), keyed on the real per-turn
 `project_id` (`LiveAgentTurnRequest.project_id`, parsed from the topic), spliced
-by `gateway/realmode-composer/build-live-agent-turn.ts` exactly like the Work
+by `gateway/wiring/build-live-agent-turn.ts` exactly like the Work
 Board block — so the agent knows which external services it can use in THIS
 project and gracefully refuses the rest, and switching projects flips
 availability within one turn. Wiring the existing Cores to CALL the resolver is
@@ -1727,7 +1727,7 @@ already renders are now LIT by real writers:
   carry it; reconcile keys off `linked_run_id`.
 - **Agent auto-invoke (Part B, M-K) — no `/code` needed.** The live chat agent
   SELF-ROUTES a build request via a complexity heuristic in the operating-doctrine
-  fragment (`gateway/realmode-composer/operating-doctrine.ts:BUILD_ROUTING_DOCTRINE`,
+  fragment (`gateway/wiring/operating-doctrine.ts:BUILD_ROUTING_DOCTRINE`,
   spliced every turn) + the `work_board_dispatch_build` tool description: SIMPLE
   work (single file, quick script, small self-contained edit) is built INLINE with
   the agent's own Read/Write/Edit tools; COMPLEX work (multi-file, a real project or
@@ -1749,7 +1749,7 @@ rail (rail order: **General → projects → Create Project**), plus a backend
 create capability and an agent tool, so the owner (or the agent) can spin up a
 fresh project + its tabs (Chat / Work Board / Documents) on demand.
 
-**One code path (`gateway/realmode-composer/project-create.ts`).** The shared
+**One code path (`gateway/wiring/project-create.ts`).** The shared
 primitives `ensureProjectRow` (the real `projects` row + cli wow-shell `topics`
 binding, idempotent, duplicate-safe, soft-delete-respecting) and
 `buildScaffoldMaterializer`/`materializeProjectScaffold` (the on-disk
@@ -2012,7 +2012,7 @@ mid-conversation. It is the Neutron equivalent of Vajra's QMD.
 
 The per-instance long-term memory: entity pages + a typed-edge graph, backed by
 GBrain (`gbrain serve` over stdio MCP). Provisioned at boot by
-`gateway/realmode-composer/build-gbrain-memory.ts#buildGBrainMemory`, which
+`gateway/wiring/build-gbrain-memory.ts#buildGBrainMemory`, which
 returns the live trio the composer threads in — the `client`, the admin
 "Memory" tab `memoryStore`, and the entity-writer `syncHook` (pages + graph
 fan-out). `resolveGbrainClientOptions` is the pure config seam: it scopes the
@@ -2217,7 +2217,7 @@ optional operator `GBRAIN_SOURCE` / `GBRAIN_BRAIN_ID`.
      gbrain. Pure addition to the existing curated list, dedup-safe.
   Covered by `gbrain-memory/__tests__/resolve-gbrain-command.test.ts`,
   `tests/integration/service-gbrain-path.test.ts`, and the disabled-warning
-  cases in `gateway/realmode-composer/__tests__/build-gbrain-memory.test.ts`.
+  cases in `gateway/wiring/__tests__/build-gbrain-memory.test.ts`.
 
 - **Auto-upgrade + doctor (`gbrain-memory/gbrain-doctor.ts`).** `ensure_gbrain`
   pins a point-in-time snapshot of an UNPINNED default branch with no upgrade
@@ -2272,7 +2272,7 @@ ADDITIVELY activates a capability.
   satisfies it structurally; this mirrors the engine's `MaxOauthSecretsStore`
   pattern).
 - **`openai_api_key`** → stored via `ApiKeyStore(provider='openai')`. It
-  becomes resolvable by `gateway/realmode-composer/resolve-llm-credentials.ts`
+  becomes resolvable by `gateway/wiring/resolve-llm-credentials.ts`
   (→ `auth/byo-api-key-fallback.ts:buildBYOApiKeyPool`), which **activates**
   the OpenAI / GPT-5 API adapter used for cross-model trident reviews. The
   SAME key backs cloud embeddings (`gbrain-memory/embedder-config.ts`), which
@@ -3058,7 +3058,7 @@ to the only surface that feeds the live agent's identity in Open: the persona
 files under `<owner_home>/persona/`. Name + personality land in a canonical
 scalar store (`persona/agent-profile.json`, the `get()` source) **and** a
 clearly-delimited managed block at the top of `persona/SOUL.md` — the exact file
-`PersonaPromptLoader` (`gateway/realmode-composer/persona-loader.ts`) reads every
+`PersonaPromptLoader` (`gateway/wiring/persona-loader.ts`) reads every
 agent turn and splices into the system prompt. The atomic write bumps SOUL.md's
 mtime (so the loader's mtime-keyed cache re-reads on the next turn) and the
 composer wires `onPersonaReload → personaLoader.invalidate('SOUL.md')` for
@@ -3763,7 +3763,7 @@ Trident run → real result → morning brief) is proven by the overnight test
 suite, which drives the run to terminal through the same store the engine
 polls.
 
-## Post-onboarding chat surface (`/ws/app/chat` → `appWsChatTurn` / `gateway/realmode-composer/build-live-agent-turn.ts`)
+## Post-onboarding chat surface (`/ws/app/chat` → `appWsChatTurn` / `gateway/wiring/build-live-agent-turn.ts`)
 
 Once onboarding reaches `phase==completed`, the chat surface is a normal
 live-agent chat on EVERY topic — the General topic and each per-project topic
@@ -3814,7 +3814,7 @@ the user text). Layer order, top to bottom:
 1. `base_persona` — the owner's generated SOUL/USER/priority-map (`personaLoader`),
    or a generic fallback when none exist. This is "who you are."
 2. `<operating_doctrine>` — gap-audit item 10: the owner-AGNOSTIC "how you act on
-   every turn" doctrine (`gateway/realmode-composer/operating-doctrine.ts`):
+   every turn" doctrine (`gateway/wiring/operating-doctrine.ts`):
    truth-first, essence-over-excess, calibrated confidence, explicit
    anti-sycophancy / pushback discipline, and a grounding ("dharma") reframe used
    only when it genuinely fits. Composed consistently on EVERY topic, independent
@@ -3855,7 +3855,7 @@ the user text). Layer order, top to bottom:
   whatever topic was focused (cross-project bleed). The app-ws (Expo mobile)
   surface carries `project_id`/`message_id` on its own envelope shape instead.
 - *Wow brief persistence (2026-06-20).* The wow channel adapter's `sendText`
-  (`buildWowChannelAdapter`, `gateway/realmode-composer/build-wow-dispatcher.ts`)
+  (`buildWowChannelAdapter`, `gateway/wiring/build-landing-stack.ts`)
   persists every delivered agent statement — notably action 01's first-week
   brief — to `button_prompts` as an inert, already-resolved agent-bubble turn so
   it survives a reload. Best-effort on the success path only (try/catch); it

@@ -2,7 +2,7 @@
  * @neutronai/reflection — the lightweight reflection + learning layer.
  *
  * Public surface: `createReflection(deps)` returns the runtime the live-agent
- * turn wires in (`gateway/realmode-composer/build-live-agent-turn.ts`):
+ * turn wires in (`gateway/wiring/build-live-agent-turn.ts`):
  *
  *   - `loadContext()` — the `<learned_corrections>` + `<recent_diary>` block to
  *     splice into a topic's FIRST-turn system context (the read path).

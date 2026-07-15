@@ -26,7 +26,7 @@
 --                         surfaced so a growing backlog is observable.
 --
 -- Single-writer by construction: the sole writer is the injected
--- `gateway/realmode-composer/gbrain-sync-state-store.ts` sink (P4
+-- `gateway/wiring/gbrain-sync-state-store.ts` sink (P4
 -- table-ownership map updated accordingly). This unit adds visibility, not
 -- behavior; the deferred-edge boot-drainable JOURNAL floated in the plan is
 -- deliberately DEFERRED (it changes drop-on-restart behavior and risks the

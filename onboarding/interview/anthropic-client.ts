@@ -3,7 +3,7 @@
  *
  * Extracted from `llm-router.ts` (K11a2 — refactor unit; router itself dies
  * post-extraction in K11b1). This is the minimal DI shape production code
- * dispatches through (`gateway/realmode-composer/build-anthropic-messages-client.ts`
+ * dispatches through (`gateway/wiring/build-anthropic-messages-client.ts`
  * wraps a CC-subprocess `Substrate` into this shape) and tests stub directly
  * (`fixture-anthropic-client.ts`).
  *

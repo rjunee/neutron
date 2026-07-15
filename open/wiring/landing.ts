@@ -35,7 +35,7 @@ import {
   buildLandingStack,
   type BuildLandingStackInput,
   type LandingStackWithEngine,
-} from '@neutronai/gateway/realmode-composer/build-landing-stack.ts'
+} from '@neutronai/gateway/wiring/build-landing-stack.ts'
 import type { CredentialPool } from '@neutronai/runtime/credential-pool.ts'
 import type { Substrate } from '@neutronai/runtime/substrate.ts'
 import type { PlatformAdapter } from '@neutronai/runtime/platform-adapter.ts'

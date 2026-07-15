@@ -43,7 +43,7 @@
  * `NEUTRON_EMBEDDINGS=openai|auto` opt-in (unchanged), or the SEPARATE,
  * consensual onboarding-key capture the composer wires ahead of this
  * resolver (`buildOpenAiEmbedderConfig`, called directly with a stored key —
- * see `gateway/realmode-composer/build-gbrain-memory.ts:resolveEffectiveEmbedder`).
+ * see `gateway/wiring/build-gbrain-memory.ts:resolveEffectiveEmbedder`).
  *
  * **One universal 768-dim column width (no-rebuild upgrade, no divergence).**
  * EVERY fresh-brain lineage — the local Ollama fallback (native 768), the

@@ -11,7 +11,7 @@ import {
 import { MAX_UPLOAD_BYTES_DEFAULT } from './upload/import-upload-handler.ts'
 // C2 OSS-split (2026-06-10) — the Managed production composer
 // (`buildDefaultRealModeComposer`, formerly ~4800 lines of this file)
-// now lives in the Managed provisioning module (`realmode-composer.ts`) and reaches
+// now lives in the Managed provisioning module (`wiring.ts`) and reaches
 // this boot shell ONLY via the `NEUTRON_GRAPH_COMPOSER_MODULE` env seam
 // (see `loadGraphComposerFromEnv` at the bottom of this file). This
 // file holds ZERO imports — static OR dynamic — into Managed dirs
@@ -751,7 +751,7 @@ export function defaultHealthzHandler(opts: {
  * seam. The Managed production composer (`buildDefaultRealModeComposer`)
  * lived in this file until C2; it carried 24 open-not-to-managed import
  * edges (signup/, provisioning/, identity/, proxy/), so it moved
- * to the Managed provisioning module (`realmode-composer.ts`, Managed-side,
+ * to the Managed provisioning module (`wiring.ts`, Managed-side,
  * those imports are legal). This Open boot shell now takes the composer
  * as DEPLOY-CONFIG INJECTION: the per-instance systemd unit sets
  *

@@ -47,7 +47,7 @@ import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { InMemoryConsumedTokens } from '@neutronai/runtime/consumed-tokens-in-memory.ts'
 import { signSessionCookie } from '@neutronai/landing/session-cookie.ts'
-import type { LandingStackWithEngine } from '@neutronai/gateway/realmode-composer/build-landing-stack.ts'
+import type { LandingStackWithEngine } from '@neutronai/gateway/wiring/build-landing-stack.ts'
 import {
   issueStartToken,
   verifyStartTokenCryptographic,

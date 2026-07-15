@@ -81,7 +81,7 @@ import type {
   DocCommentEvent,
 } from './comment-store.ts'
 import type { WebChatSessionProjectRegistry } from '../http/chat-bridge.ts'
-import type { EscalateCommentBodyHistoryEntry } from '../realmode-composer/escalation-loader.ts'
+import type { EscalateCommentBodyHistoryEntry } from '../wiring/escalation-loader.ts'
 import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
 import { createLogger } from '@neutronai/logger'
 

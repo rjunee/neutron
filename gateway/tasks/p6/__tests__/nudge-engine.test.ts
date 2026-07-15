@@ -15,7 +15,7 @@ import { join } from 'node:path'
 import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { TaskStore } from '@neutronai/tasks/store.ts'
-import { PersonaPromptLoader } from '../../../realmode-composer/persona-loader.ts'
+import { PersonaPromptLoader } from '../../../wiring/persona-loader.ts'
 import type { LlmCallFn } from '@neutronai/onboarding/interview/phase-spec-resolver.ts'
 import {
   clampRationale,

@@ -67,7 +67,7 @@ import { createAppDocsSurface } from '../http/app-docs-surface.ts'
 import { InMemoryWebChatSessionProjectRegistry } from '../http/chat-bridge.ts'
 import { DocStore } from '../http/doc-store.ts'
 import { composeHttpHandler } from '../http/compose.ts'
-import { buildPhaseSpecResolver } from '../realmode-composer/build-phase-spec-resolver.ts'
+import { buildPhaseSpecResolver } from '../wiring/build-phase-spec-resolver.ts'
 
 const PROJECT_SLUG = 'demo'
 const USER_ID = 'sam'

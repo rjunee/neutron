@@ -4,7 +4,7 @@
  * This is the IGNITION the Open public mirror was missing. The Open tree
  * already ships every engine part — the onboarding interview machine
  * (`onboarding/`), the landing chat UI + WebSocket (`landing/`), the
- * realmode wiring helpers (`gateway/realmode-composer/*`), and the
+ * realmode wiring helpers (`gateway/wiring/*`), and the
  * `boot()` shell (`gateway/index.ts`). But the only thing that wired them
  * into a live HTTP server was the Managed provisioning composer, which is
  * Managed-only and never carves to Open. So a fresh clone of Open booted
@@ -37,7 +37,7 @@ import {
   resolveEnvOAuthTier,
   resolveApiKeyEnvTier,
   resolveAmbientTier,
-} from '@neutronai/gateway/realmode-composer/resolve-llm-credentials.ts'
+} from '@neutronai/gateway/wiring/resolve-llm-credentials.ts'
 import { normalizeProvider, type Provider } from '@neutronai/runtime/adapters/select-substrate.ts'
 import { LoopRegistry } from '@neutronai/loop'
 import type { McpToolResolver } from '@neutronai/contracts/mcp-tool-resolver.ts'
@@ -48,14 +48,14 @@ import { persistOauthTokenToEnv, requestSupervisorRestart } from './install-toke
 import { buildLocalPlatformAdapter } from '@neutronai/runtime/platform-adapter-local.ts'
 import type { PlatformAdapter } from '@neutronai/runtime/platform-adapter.ts'
 import { CronJobRegistry } from '@neutronai/cron/jobs.ts'
-import { resolveLandingStaticDir } from '@neutronai/gateway/realmode-composer/build-landing-stack.ts'
-import { buildLiveAgentTurn } from '@neutronai/gateway/realmode-composer/build-live-agent-turn.ts'
-import type { LiveAgentOnboardingSeam } from '@neutronai/gateway/realmode-composer/build-live-agent-turn.ts'
-import { buildProjectDocComposer } from '@neutronai/gateway/realmode-composer/build-project-doc-composer.ts'
-import { buildProjectKickoffComposer } from '@neutronai/gateway/realmode-composer/build-project-kickoff-composer.ts'
-import { buildProjectKickoff } from '@neutronai/gateway/realmode-composer/build-project-kickoff.ts'
-import { buildProjectPageIndexer } from '@neutronai/gateway/realmode-composer/build-project-page-indexer.ts'
-import { buildOnboardingFinalize } from '@neutronai/gateway/realmode-composer/build-onboarding-finalize.ts'
+import { resolveLandingStaticDir } from '@neutronai/gateway/wiring/build-landing-stack.ts'
+import { buildLiveAgentTurn } from '@neutronai/gateway/wiring/build-live-agent-turn.ts'
+import type { LiveAgentOnboardingSeam } from '@neutronai/gateway/wiring/build-live-agent-turn.ts'
+import { buildProjectDocComposer } from '@neutronai/gateway/wiring/build-project-doc-composer.ts'
+import { buildProjectKickoffComposer } from '@neutronai/gateway/wiring/build-project-kickoff-composer.ts'
+import { buildProjectKickoff } from '@neutronai/gateway/wiring/build-project-kickoff.ts'
+import { buildProjectPageIndexer } from '@neutronai/gateway/wiring/build-project-page-indexer.ts'
+import { buildOnboardingFinalize } from '@neutronai/gateway/wiring/build-onboarding-finalize.ts'
 import { buildPostTurnExtractor } from '@neutronai/onboarding/interview/post-turn-extractor.ts'
 import { auditRequiredFields } from '@neutronai/onboarding/interview/required-fields-audit.ts'
 import { captureButtonBackedRequiredField } from '@neutronai/onboarding/interview/button-backed-answer.ts'
@@ -69,7 +69,7 @@ import type { ImportResult } from '@neutronai/onboarding/history-import/types.ts
 import {
   buildLlmCallSubstrate,
   collectTokensToString,
-} from '@neutronai/gateway/realmode-composer/build-llm-call-substrate.ts'
+} from '@neutronai/gateway/wiring/build-llm-call-substrate.ts'
 import { buildSubstrateWorkflowFire } from '@neutronai/trident/inner-loop.ts'
 import { getBestModel } from '@neutronai/runtime/models.ts'
 import {
@@ -99,9 +99,9 @@ import {
 import {
   buildAnthropicLlmCall,
   buildPhaseSpecResolver,
-} from '@neutronai/gateway/realmode-composer/build-phase-spec-resolver.ts'
-import { buildGatewayAnthropicMessagesClient } from '@neutronai/gateway/realmode-composer/build-anthropic-messages-client.ts'
-import { buildProjectOpeningMessageComposer } from '@neutronai/gateway/realmode-composer/build-project-opening-message.ts'
+} from '@neutronai/gateway/wiring/build-phase-spec-resolver.ts'
+import { buildGatewayAnthropicMessagesClient } from '@neutronai/gateway/wiring/build-anthropic-messages-client.ts'
+import { buildProjectOpeningMessageComposer } from '@neutronai/gateway/wiring/build-project-opening-message.ts'
 import { mkdirSync } from 'node:fs'
 import { join as joinPath } from 'node:path'
 import { randomBytes, randomUUID } from 'node:crypto'
@@ -137,7 +137,7 @@ import { runProgressForItem } from '@neutronai/trident/run-progress.ts'
 import { SecretsStore } from '@neutronai/auth/secrets-store.ts'
 import { buildPersonalityCharacterSuggester } from '@neutronai/onboarding/interview/personality-character-suggester.ts'
 import { buildPersonaSummarizer } from '@neutronai/onboarding/persona-gen/summarize.ts'
-import { PersonaPromptLoader } from '@neutronai/gateway/realmode-composer/persona-loader.ts'
+import { PersonaPromptLoader } from '@neutronai/gateway/wiring/persona-loader.ts'
 import type { GraphComposer } from '@neutronai/gateway/boot-helpers.ts'
 import type { CompositionInput } from '@neutronai/gateway/composition.ts'
 import { buildLlmBriefComposer } from '@neutronai/gateway/proactive/morning-brief.ts'
@@ -235,8 +235,8 @@ import {
   createProjectRow,
   materializeProjectScaffold,
   type ProjectScaffoldDeps,
-} from '@neutronai/gateway/realmode-composer/project-create.ts'
-import type { CreateProjectToolService } from '@neutronai/gateway/realmode-composer/create-project-tool.ts'
+} from '@neutronai/gateway/wiring/project-create.ts'
+import type { CreateProjectToolService } from '@neutronai/gateway/wiring/create-project-tool.ts'
 import { createAppTasksSurface } from '@neutronai/gateway/http/app-tasks-surface.ts'
 import { createAppUploadSurface } from '@neutronai/gateway/http/app-upload-surface.ts'
 import { createAppDiagnosticsSurface } from '@neutronai/gateway/http/app-diagnostics-surface.ts'
@@ -350,7 +350,7 @@ export interface BuildOpenGraphComposerOptions {
  * Resolve the single-owner LLM credential pool from the environment, honoring
  * BOTH subscription OAuth and API-billing auth. C6 (2026-07-09): this now walks
  * the SHARED credential precedence table
- * (`gateway/realmode-composer/resolve-llm-credentials.ts` —
+ * (`gateway/wiring/resolve-llm-credentials.ts` —
  * `resolveEnvOAuthTier` → `resolveApiKeyEnvTier` → `resolveAmbientTier`) rather
  * than re-implementing the env-OAuth / API-key pool construction by hand. The
  * Managed resolver (`resolveLlmCredentials`) consumes the SAME tier helpers, so

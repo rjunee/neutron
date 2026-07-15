@@ -49,7 +49,7 @@ import { MaxOAuthClient, oauthEnvForPool } from '@neutronai/auth/max-oauth.ts'
 import {
   resolveLlmCredentials,
   wrapMaxOAuthSource,
-} from '@neutronai/gateway/realmode-composer/resolve-llm-credentials.ts'
+} from '@neutronai/gateway/wiring/resolve-llm-credentials.ts'
 import { selectCredential } from '@neutronai/runtime/credential-pool.ts'
 
 const NOW_FIXED = 1_700_000_000_000

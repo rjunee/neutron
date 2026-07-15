@@ -2,9 +2,9 @@
  * P7.2 S3 — chat surface escalate-to-chat tests.
  *
  * Covers the escalation-loader path that the production resolver
- * (`gateway/realmode-composer/build-phase-spec-resolver.ts`) consumes
+ * (`gateway/wiring/build-phase-spec-resolver.ts`) consumes
  * on every chat turn. The loader lives at
- * `gateway/realmode-composer/escalation-loader.ts` and exports two
+ * `gateway/wiring/escalation-loader.ts` and exports two
  * functions:
  *
  *   - `loadPendingEscalations(comment_store, project_id)` —
@@ -47,7 +47,7 @@ import {
   loadPendingEscalations,
   markEscalationsConsumed,
   ESCALATION_RENDER_LIMIT,
-} from '../realmode-composer/escalation-loader.ts'
+} from '../wiring/escalation-loader.ts'
 
 const PROJECT_ID = 'demo-project'
 

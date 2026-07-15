@@ -384,7 +384,7 @@ export function buildProfilePicEngineHook(
   input: BuildProfilePicEngineHookInput,
 ): ProfilePicEngineHook {
   // C2 open-not-to-managed boundary — no Managed default here anymore.
-  // The Managed production composer (realmode-composer.ts, loaded via
+  // The Managed production composer (wiring.ts, loaded via
   // the NEUTRON_GRAPH_COMPOSER_MODULE env seam — it no longer lives in
   // gateway/index.ts) injects the real per-instance bot pusher; when
   // unwired (Open self-host, tests) the bot avatar push is skipped

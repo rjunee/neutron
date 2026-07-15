@@ -24,7 +24,7 @@
 import {
   buildLlmCallSubstrate,
   type BuildLlmCallSubstrateInput,
-} from '@neutronai/gateway/realmode-composer/build-llm-call-substrate.ts'
+} from '@neutronai/gateway/wiring/build-llm-call-substrate.ts'
 import { getOpenAiModelPreference } from '@neutronai/runtime/models-openai.ts'
 import { OWNER_USER_ID } from '../owner-identity.ts'
 import type { Substrate } from '@neutronai/runtime/substrate.ts'

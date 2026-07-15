@@ -103,7 +103,7 @@ export interface ComposeProjectDocInput {
 
 /**
  * LLM doc composer. Production wires the CC-substrate-backed messages
- * client (gateway/realmode-composer/build-project-doc-composer.ts);
+ * client (gateway/wiring/build-project-doc-composer.ts);
  * tests inject a deterministic stub. Throw → caller falls back to the
  * deterministic template (failure-isolated per spec § 4.2c).
  */
