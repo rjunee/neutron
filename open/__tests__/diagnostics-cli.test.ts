@@ -113,8 +113,14 @@ describe('collectCliDiagnostics', () => {
       project_slug: 'demo',
       payload: { core_slug: 'email', code: 'manifest_invalid' },
     })
-    // the printer labels the section as the operational system_events journal
-    expect(formatDiagnosticsText(result.report)).toContain('recent events (system_events')
+    // the printer labels the section as the operational system_events journal AND
+    // renders the structured payload (which core failed + why) — the whole point
+    // of the journal: answerable without journalctl.
+    const text = formatDiagnosticsText(result.report)
+    expect(text).toContain('recent events (system_events')
+    expect(text).toContain('cores/core_install_failed')
+    expect(text).toContain('core_slug=email')
+    expect(text).toContain('code=manifest_invalid')
   })
 
   it('scopes cron jobs to THIS instance slug (no cross-project leak)', () => {

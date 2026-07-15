@@ -55,6 +55,21 @@ function fmtTime(ms: number | null | undefined): string {
   return new Date(ms).toISOString()
 }
 
+/**
+ * Compact one-line render of a system_events payload — the structured "why" behind
+ * a degrade row (`core_slug=email code=manifest_invalid message=boom`), so `doctor`
+ * answers which Core failed and why without journalctl. `k=v` pairs; each value
+ * stringified + length-capped, the whole string bounded. Empty/non-object → ''.
+ */
+function fmtPayload(payload: unknown): string {
+  if (payload === null || typeof payload !== 'object') return ''
+  const entries = Object.entries(payload as Record<string, unknown>)
+  if (entries.length === 0) return ''
+  const cap = (s: string, n: number): string => (s.length > n ? `${s.slice(0, n - 1)}…` : s)
+  const parts = entries.map(([k, v]) => `${k}=${cap(typeof v === 'string' ? v : JSON.stringify(v), 80)}`)
+  return cap(parts.join(' '), 200)
+}
+
 /** Pure text formatter — testable without a DB. */
 export function formatDiagnosticsText(report: DiagnosticsReport): string {
   const lines: string[] = []
@@ -144,7 +159,11 @@ export function formatDiagnosticsText(report: DiagnosticsReport): string {
   } else {
     lines.push(`recent events (system_events, newest first, ${ev.events!.length}):`)
     for (const e of ev.events!.slice(0, 15)) {
-      lines.push(`  - ${fmtTime(e.ts)} [${e.level ?? '?'}] ${e.module ?? '?'}/${e.event ?? '?'}`)
+      const scope = e.project_slug ? ` (${e.project_slug})` : ''
+      const why = fmtPayload(e.payload)
+      lines.push(
+        `  - ${fmtTime(e.ts)} [${e.level ?? '?'}] ${e.module ?? '?'}/${e.event ?? '?'}${scope}${why ? ` — ${why}` : ''}`,
+      )
     }
   }
 
