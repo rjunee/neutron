@@ -357,7 +357,16 @@ with cross-references noted inline.
     `gateway/index.ts:474-486` (healthz, one of the 8 pinned surfaces);
     contract at `neutron-managed/src/ops/open-contract.ts` (out-of-repo).
     Protects: **M1** (Contract-gate hardening + route-manifest adoption), **C7**
-    (`realmode-composer/` → `gateway/wiring/` rename must ship a paired `open-contract.ts` update).
+    (`realmode-composer/` → `gateway/wiring/` rename — see resolution below).
+    **C7 RESOLUTION (verified 2026-07-15):** the rename needed NO paired `open-contract.ts`
+    update. The contract is RELOCATION-TOLERANT (`open-contract.ts:34-40`): most surfaces are
+    checked by scanning a PACKAGE DIR (`open/`, `gateway/`, …) for the surface's literals, not by
+    pinning a subpath — the assertion is "this surface still exists in that package", not "it lives
+    in this file". Renaming a subdir *within* `gateway/` keeps every surface inside the scanned
+    `gateway/` package, so the gate is unaffected. Verified against the live contract: its only
+    file-PINNED surface is `entrypoint:open/server.ts` (systemd spawns it), and none of the 8
+    surfaces references a `realmode-composer` path. (A within-`gateway/` rename is exactly the
+    move this tolerance was designed for.)
 79. `boot-helpers.ts` must never import `gateway/index.ts` (TLA entry↔composer cycle);
     new "shared boot config" modules must sit below both. `boot-helpers.ts:6-20`.
     Protects: **L3**, **C2** (boot-helpers split).
