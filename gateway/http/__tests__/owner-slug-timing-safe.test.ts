@@ -75,10 +75,20 @@ function ownerSlugMismatchBindingOffense(source: string, fileName: string): stri
         referenced = true
       } else if (ts.isNamedImports(bindings)) {
         for (const el of bindings.elements) {
-          if (el.name.text === NAME) {
+          // Alias-aware: `imported` is the ORIGINAL exported name (survives `as`),
+          // `local` is the binding introduced into this file.
+          const imported = el.propertyName?.text ?? el.name.text
+          const local = el.name.text
+          if (imported === NAME) {
+            // Importing THE canonical comparator (possibly aliased to `local`).
             referenced = true
             if (CANON.test(mod)) canonicalImport = true
-            else shadow = `named import from non-canonical '${mod}'`
+            else shadow = `named import of ${NAME} from non-canonical '${mod}'`
+          } else if (local === NAME) {
+            // Binding the NAME to some OTHER export (`import { x as ownerSlugMismatch }`)
+            // — a shadow of the comparator identifier.
+            shadow = `alias import binding ${NAME} to '${imported}' from '${mod}'`
+            referenced = true
           }
         }
       }
@@ -123,6 +133,38 @@ function ownerSlugMismatchBindingOffense(source: string, fileName: string): stri
   if (shadow !== null) return shadow
   if (!canonicalImport) return 'no canonical import of ownerSlugMismatch'
   return null
+}
+
+/** The consolidated surface-kit helper names — a surface must import them, never
+ *  DECLARE its own copy. */
+const KIT_HELPER_NAMES = new Set([
+  'resolveBearer',
+  'readJsonBody',
+  'jsonResponse',
+  'jsonOk',
+  'jsonError',
+  'ownerSlugMismatch',
+])
+
+/** AST scan for LOCAL declarations of any kit helper name in one surface source —
+ *  function declarations, variable declarations (typed / function-expr / arrow),
+ *  and destructuring binding elements. Returns the offending names. */
+function localHelperDeclarations(source: string, fileName: string): string[] {
+  const sf = ts.createSourceFile(fileName, source, ts.ScriptTarget.Latest, true)
+  const found = new Set<string>()
+  const visit = (node: ts.Node): void => {
+    if (
+      (ts.isFunctionDeclaration(node) || ts.isVariableDeclaration(node) || ts.isBindingElement(node)) &&
+      node.name &&
+      ts.isIdentifier(node.name) &&
+      KIT_HELPER_NAMES.has(node.name.text)
+    ) {
+      found.add(node.name.text)
+    }
+    ts.forEachChild(node, visit)
+  }
+  visit(sf)
+  return [...found].sort()
 }
 
 const HTTP_DIR = join(import.meta.dir, '..')
@@ -276,6 +318,10 @@ describe('project_slug timing-safe comparison (ISSUE #34)', () => {
     expect(
       flag("import { jsonError } from './surface-kit.ts'\nimport * as x from './shadow.ts'\nx['ownerSlugMismatch']('a','b')"),
     ).toBe(true) // element-access (bracket-string) call
+    expect(flag("import { ownerSlugMismatch as f } from './shadow.ts'\nf('a','b')")).toBe(true) // aliased non-canonical import
+    expect(flag("import { cmp as ownerSlugMismatch } from './shadow.ts'\nownerSlugMismatch('a','b')")).toBe(true) // alias BINDS the name to a shadow
+    // A CANONICAL aliased import is fine (still the canonical reference):
+    expect(flag("import { ownerSlugMismatch as f } from './surface-kit.ts'\nf('a','b')")).toBe(false)
     expect(
       flag("import { ownerSlugMismatch } from './surface-kit.ts'\nconst ownerSlugMismatch = (a: string, b: string) => a === b\nownerSlugMismatch('a','b')"),
     ).toBe(true) // local var shadow
@@ -285,22 +331,27 @@ describe('project_slug timing-safe comparison (ISSUE #34)', () => {
     expect(flag("import { jsonError } from './surface-kit.ts'\njsonError(1,'x','y')")).toBe(false)
   })
 
-  it('NO gateway/http surface defines a LOCAL copy of a surface-kit helper (consolidation complete)', () => {
+  it('AST: NO gateway/http surface DECLARES a local copy of a surface-kit helper (consolidation complete)', () => {
     // The O7 completeness invariant + drift guard: surface-kit.ts is the ONE place
-    // these helpers are defined. A surface must never carry its own copy — that is
-    // exactly the drift-prone duplication O7 eliminates, and a local
-    // `ownerSlugMismatch` copy is the shadow-implementation security hole. A local
-    // `function`/`const`/`let`/`var` declaration is unambiguous in source text; this
-    // catches every current + future duplicate. (Genuine USE is enforced by tsc:
-    // calling an unimported helper is a compile error, so a surface that uses one
-    // MUST import it from the kit — there is nowhere else to get it.)
-    const LOCAL_DEF =
-      /\b(?:async\s+)?function\s+(?:resolveBearer|readJsonBody|jsonResponse|jsonOk|jsonError|ownerSlugMismatch)\b|\b(?:const|let|var)\s+(?:resolveBearer|readJsonBody|jsonResponse|jsonOk|jsonError|ownerSlugMismatch)\s*=/
-    const offenders: string[] = []
+    // these helpers are defined. AST declaration analysis (not a regex) catches every
+    // declared form — function declarations, `const`/`let`/`var` (incl. TYPE-ANNOTATED
+    // `const jsonError: typeof … = …` and function-expression/arrow assignments), and
+    // destructuring binding elements (`const { jsonError } = …`).
+    const offenders: Array<{ file: string; helpers: string[] }> = []
     for (const name of allSurfaceFiles()) {
-      if (LOCAL_DEF.test(readFileSync(join(HTTP_DIR, name), 'utf8'))) offenders.push(name)
+      const helpers = localHelperDeclarations(readFileSync(join(HTTP_DIR, name), 'utf8'), name)
+      if (helpers.length > 0) offenders.push({ file: name, helpers })
     }
     expect(offenders).toEqual([])
+  })
+
+  it('AST completeness self-test: FLAGS typed-const / destructure / function-expr local copies', () => {
+    const has = (src: string): boolean => localHelperDeclarations(src, 'x.ts').length > 0
+    expect(has('const jsonError: typeof x = (a: number) => new Response()')).toBe(true) // type-annotated
+    expect(has('const { jsonError } = require("./shadow")')).toBe(true) // destructure
+    expect(has('const jsonOk = function () { return new Response() }')).toBe(true) // function expression
+    expect(has('async function resolveBearer() {}')).toBe(true) // function declaration
+    expect(has("import { jsonError } from './surface-kit.ts'\njsonError(1,'x','y')")).toBe(false) // imported use, no local decl
   })
 
   it('surface-kit re-exports the SAME timing-safe reference as auth-helpers (runtime identity, not a shadow)', async () => {
