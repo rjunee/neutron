@@ -85,9 +85,14 @@ export interface RecoveredReplyStore {
    *  whose send throws stays pending for the next reconnect (Codex r1 P2). */
   peekUndelivered(topic_id: string): RecoveredReplyRow[]
   /** Take every still-undelivered row for a topic (oldest first), marking each
-   *  delivered. Retained for callers that deliver atomically; the reconnect drain
-   *  uses `peekUndelivered` + per-row `markDelivered` instead. */
+   *  delivered. This is an ATOMIC claim: a concurrent `takeUndelivered` for the
+   *  same topic gets `[]`, so two simultaneous reconnect drains cannot both emit
+   *  the same row (the reconnect drain claims up-front, then releases on failure). */
   takeUndelivered(topic_id: string, now: number): RecoveredReplyRow[]
+  /** Release a claimed row back to pending (`delivered_at → null`) — the inverse of
+   *  the `takeUndelivered` claim, used when an async send fails so the row is
+   *  retried on the next reconnect rather than lost. No-op if the row is gone. */
+  releaseClaim(topic_id: string, turn_id: string): void
 }
 
 /** In-process `RecoveredReplyStore`. Rows live in a `topic_id → (turn_id → row)`
@@ -161,6 +166,11 @@ export class InMemoryRecoveredReplyStore implements RecoveredReplyStore {
     for (const r of pending) r.delivered_at = now
     return pending
   }
+
+  releaseClaim(topic_id: string, turn_id: string): void {
+    const row = this.byTopic.get(topic_id)?.get(turn_id)
+    if (row !== undefined) row.delivered_at = null
+  }
 }
 
 /** Render a recovered reply as the plain assistant-message wire envelope (no
@@ -219,10 +229,16 @@ export function makeRecoveredReplySink(deps: {
 
 /**
  * Drain a reconnecting topic's undelivered recovered replies — re-emit each once
- * (deduped on `turn_id` by the store marking them delivered). Called from the
- * EXISTING `startSession` reconnect path, alongside `reEmitActiveSeedPromptIfAny`.
- * Returns the count re-emitted. Best-effort: a `send` throw on one row does not
- * block the rest.
+ * (deduped on `turn_id`). Called from the reconnect path, alongside
+ * `reEmitActiveSeedPromptIfAny`. Returns the count re-emitted.
+ *
+ * CONCURRENCY (Codex): every socket open starts its OWN fire-and-forget drain, and
+ * `send` MAY be async (the app-ws adapter). So the drain CLAIMS the rows atomically
+ * up-front via `takeUndelivered` (a synchronous mark-delivered with NO await inside
+ * it) — a second simultaneous drain then gets `[]` and cannot re-emit the same row.
+ * Only on a FAILED send do we `releaseClaim` the row back to pending, so a
+ * rejected/dropped delivery is retried on the next reconnect rather than lost or
+ * double-shown.
  */
 export async function drainRecoveredReplies(deps: {
   topic_id: string
@@ -231,25 +247,26 @@ export async function drainRecoveredReplies(deps: {
    * Deliver one recovered reply. MAY be async: a sender that fans through a
    * fire-and-forget path (e.g. the app-ws adapter) MUST return a promise that
    * resolves ONLY when delivery is confirmed and REJECTS on a failed/dropped send
-   * — otherwise a rejected delivery would be marked delivered and the reply lost
-   * (Codex). The drain `await`s it before marking.
+   * — otherwise a rejected delivery would be silently dropped and the reply lost
+   * (Codex). The drain `await`s it and releases the claim on rejection.
    */
   send: (event: ChatOutbound) => void | Promise<void>
   now?: () => number
   log_tag?: string
 }): Promise<number> {
   const clock = deps.now ?? ((): number => Date.now())
-  // Peek (do NOT pre-mark) → AWAIT send → mark delivered ONLY on success, so a row
-  // whose send throws OR rejects stays pending and a later reconnect retries it
-  // (Codex r1 P2 + the async-delivery loss path).
-  const rows = deps.store.peekUndelivered(deps.topic_id)
+  // ATOMIC claim (sync, no await): mark every pending row delivered up-front so a
+  // concurrent drain sees none. We RELEASE a row back to pending only if its send
+  // fails — claim-first + release-on-failure is what makes "shown once" hold across
+  // simultaneous reconnects AND still survive a failed delivery.
+  const rows = deps.store.takeUndelivered(deps.topic_id, clock())
   let emitted = 0
   for (const row of rows) {
     try {
       await deps.send(renderRecoveredReply(row.text, deps.topic_id))
-      deps.store.markDelivered(deps.topic_id, row.turn_id, clock())
       emitted += 1
     } catch (err) {
+      deps.store.releaseClaim(deps.topic_id, row.turn_id)
       if (deps.log_tag !== undefined) {
         console.warn(
           `${deps.log_tag} drainRecoveredReplies event=fail topic=${deps.topic_id} turn=${row.turn_id} err=${

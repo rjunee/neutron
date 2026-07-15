@@ -200,6 +200,52 @@ describe('makeRecoveredReplySink — online / offline / dedupe', () => {
     expect(store.peekUndelivered(topic)).toHaveLength(0)
     expect((sent[0] as { body: string }).body).toContain('must survive an async rejection')
   })
+
+  it('two SIMULTANEOUS reconnect drains emit a row exactly ONCE (atomic claim)', async () => {
+    // Every socket open starts its OWN fire-and-forget drain. With async sends, a
+    // peek-then-mark drain would let both drains snapshot the same pending row and
+    // both emit it. The claim-first design (takeUndelivered marks synchronously,
+    // before any await) makes the second concurrent drain see nothing.
+    const store = new InMemoryRecoveredReplyStore()
+    const topic = webTopicId('u-7')
+    let clock = 7000
+    const sink = makeRecoveredReplySink({
+      registry: () => new InMemoryWebChatSenderRegistry(),
+      store,
+      now: () => ++clock,
+    })
+    sink({ topic_id: topic, turn_id: 'conc:1', text: 'shown exactly once' }) // offline → persisted
+
+    const sentA: ChatOutbound[] = []
+    const sentB: ChatOutbound[] = []
+    // Start BOTH drains before awaiting either — the synchronous claim in the first
+    // invocation must prevent the second from re-emitting. Async sends keep them
+    // genuinely overlapping.
+    const drainA = drainRecoveredReplies({
+      topic_id: topic,
+      store,
+      send: async (e): Promise<void> => {
+        await Promise.resolve()
+        sentA.push(e)
+      },
+      now: () => ++clock,
+    })
+    const drainB = drainRecoveredReplies({
+      topic_id: topic,
+      store,
+      send: async (e): Promise<void> => {
+        await Promise.resolve()
+        sentB.push(e)
+      },
+      now: () => ++clock,
+    })
+    const [a, b] = await Promise.all([drainA, drainB])
+
+    // Exactly one drain claimed + emitted the row; the other saw nothing.
+    expect(a + b).toBe(1)
+    expect(sentA.length + sentB.length).toBe(1)
+    expect(store.peekUndelivered(topic)).toHaveLength(0) // delivered, not re-pending
+  })
 })
 
 // ─── Part 2: the full runtime replay → injected sink path ─────────────────────
