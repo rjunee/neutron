@@ -61,6 +61,14 @@ export interface TridentBoardBinder {
     id: string,
   ): (DispatchReadinessTarget & { id: string; linked_run_id?: string | null }) | null
   attachRun(project_slug: string, id: string, run_id: string): Promise<unknown>
+  /**
+   * Reconcile a terminal run's bound card (mark it done/failed, preserve its
+   * retry binding). Optional so the readiness/bind test seams need not implement
+   * it; the production `WorkBoardStore` satisfies it structurally. `/code stop`
+   * uses it to reconcile the board on cancel (§F6a, Codex r6) — the SAME reconcile
+   * the tick loop + board DELETE run through `buildBoardReconcileObserver`.
+   */
+  detachRun?(project_slug: string, run_id: string, outcome: 'done' | 'failed'): Promise<unknown>
 }
 
 export interface BoardBoundBuildInput {

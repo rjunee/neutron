@@ -235,6 +235,94 @@ describe('work-board HTTP surface — trident run integration (items 1 + 3)', ()
     expect(store.get(SCOPE, item.id)).toBeNull()
   })
 
+  test('§F6a: DELETE routes the cancel through terminate() → the observer chain FIRES (the fix)', async () => {
+    // The X-cancel fix: when a `terminate` chokepoint is wired, the delete path
+    // cancels through it (not a bare `update`), so the terminal-observer chain
+    // fires for an X-cancel exactly as it does for a loop-reaped run.
+    const item = await store.create(SCOPE, { title: 'Running build' })
+    await store.bindRun(SCOPE, item.id, 'run-1')
+    const runs: Record<string, TridentRun> = { 'run-1': fakeRun({ id: 'run-1', phase: 'forge-init' }) }
+    const observed: Array<{ id: string; phase: TridentPhase }> = []
+    const terminated: Array<{ id: string; phase: TridentPhase }> = []
+    const access: TridentRunAccess = {
+      get: (id) => runs[id] ?? null,
+      // The bare update MUST NOT be the path taken when terminate is wired.
+      update: async () => {
+        throw new Error('delete must route through terminate(), not update()')
+      },
+      terminate: async (id, phase) => {
+        terminated.push({ id, phase })
+        const existing = runs[id]
+        if (existing !== undefined) runs[id] = { ...existing, phase }
+        // The chokepoint runs the observer chain — recorded here as the spy.
+        observed.push({ id, phase })
+        return { won: true }
+      },
+    }
+    const s = createWorkBoardSurface({ store, auth, trident_runs: access })
+
+    const res = await s.handler(req('DELETE', `/api/app/projects/proj1/work-board/${item.id}`))
+    expect(res?.status).toBe(200)
+    const body = (await res!.json()) as { cancelled_run?: string }
+    expect(body.cancelled_run).toBe('run-1')
+    expect(terminated).toEqual([{ id: 'run-1', phase: 'stopped' }])
+    // The observer-fired assertion. MUTATION-VERIFY: the pre-F6a bypass wrote
+    // `phase` via a bare `update` and never fired observers — that path is the
+    // `fakeRunAccess` (update-only) tests above, where `observed` would stay empty.
+    // Routing through terminate() is what makes this red if bypassed.
+    expect(observed).toEqual([{ id: 'run-1', phase: 'stopped' }])
+    expect(store.get(SCOPE, item.id)).toBeNull()
+  })
+
+  test('§F6a mutation-verify: an update-only access (bypassing terminate) fires NO observer', async () => {
+    // Same scenario, but the access has NO `terminate` — the surface falls back
+    // to the bare `update` (board-less/observer-less boots + pre-F6a behaviour).
+    // The observer spy stays empty: this is the exact regression terminate() fixes.
+    const item = await store.create(SCOPE, { title: 'Running build' })
+    await store.bindRun(SCOPE, item.id, 'run-1')
+    const observed: Array<{ id: string; phase: TridentPhase }> = []
+    const { access, updates } = fakeRunAccess({ 'run-1': fakeRun({ id: 'run-1', phase: 'forge-init' }) })
+    // (no `terminate` on `access` → the surface uses `update`; no observer runs)
+    const s = createWorkBoardSurface({ store, auth, trident_runs: access })
+
+    const res = await s.handler(req('DELETE', `/api/app/projects/proj1/work-board/${item.id}`))
+    expect(res?.status).toBe(200)
+    expect(updates).toEqual([{ id: 'run-1', phase: 'stopped' }])
+    expect(observed).toEqual([]) // <- reds if the bypass ever fired observers
+  })
+
+  test('§F6a race: DELETE does NOT report cancelled_run when terminate() LOSES the race', async () => {
+    // The pre-check sees a NON-terminal run (so the surface calls terminate), but
+    // in the await gap the tick loop finishes the run first → the atomic transition
+    // loses (`won:false`). The delete must NOT falsely claim it cancelled (Codex r3).
+    const item = await store.create(SCOPE, { title: 'Racing build' })
+    await store.bindRun(SCOPE, item.id, 'run-1')
+    const terminated: Array<{ id: string; phase: TridentPhase }> = []
+    const access: TridentRunAccess = {
+      // Pre-check reads a live run → the surface proceeds to terminate().
+      get: () => fakeRun({ id: 'run-1', phase: 'forge-init' }),
+      update: async () => {
+        throw new Error('must route through terminate()')
+      },
+      // The transition LOST — the run was already terminalized out-of-band.
+      terminate: async (id, phase) => {
+        terminated.push({ id, phase })
+        return { won: false }
+      },
+    }
+    const s = createWorkBoardSurface({ store, auth, trident_runs: access })
+
+    const res = await s.handler(req('DELETE', `/api/app/projects/proj1/work-board/${item.id}`))
+    expect(res?.status).toBe(200)
+    const body = (await res!.json()) as { cancelled_run?: string }
+    // terminate() WAS attempted (the pre-check passed)…
+    expect(terminated).toEqual([{ id: 'run-1', phase: 'stopped' }])
+    // …but it lost, so no phantom cancellation is reported.
+    expect(body.cancelled_run).toBeUndefined()
+    // The item is still deleted (best-effort cancel never blocks the delete).
+    expect(store.get(SCOPE, item.id)).toBeNull()
+  })
+
   test('DELETE does NOT cancel an already-terminal linked run', async () => {
     const item = await store.create(SCOPE, { title: 'Done build' })
     await store.bindRun(SCOPE, item.id, 'run-1')

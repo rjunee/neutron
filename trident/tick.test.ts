@@ -13,6 +13,7 @@ import {
   type SubagentOutcome,
 } from './state-machine.ts'
 import { TridentTickLoop } from './tick.ts'
+import { buildTridentTerminator } from './terminate.ts'
 import { buildTridentDelivery, type OutboundSink } from './delivery.ts'
 import type { OutgoingMessage } from '@neutronai/channels/types.ts'
 
@@ -341,6 +342,88 @@ describe('TridentTickLoop — on_transition (M1 UX REDESIGN live-progress fan)',
     expect(seen[3]!.phase).toBe('done')
 
     expect(loop.stats().transitions).toBe(4)
+  })
+
+  test('§F6a race: a run terminalized out-of-band during `step` is NOT clobbered and delivers ONCE', async () => {
+    // Codex's exact lost-update schedule: the tick loads a non-terminal run and
+    // awaits `step`; DURING that await a board DELETE wins `terminate('stopped')`
+    // and fires its observers; then `step` returns a terminal `done`. Without the
+    // conditional commit the tick would `save('done')` over `stopped` AND fire its
+    // own terminal delivery again — a lost update + a double-notify.
+    const store = new TridentRunStore(db)
+    const r = await store.create({ slug: 's', project_slug: 't1', repo_path: '/r', task: 't' })
+
+    // ONE shared delivery recorder: the out-of-band terminate fires it once; a
+    // second entry would be the tick re-delivering (the bug this guards).
+    const deliveries: Array<{ id: string; phase: string }> = []
+    const observer = {
+      async onTerminal(run: TridentRun): Promise<void> {
+        deliveries.push({ id: run.id, phase: run.phase })
+      },
+    }
+    const terminator = buildTridentTerminator({ store, observer })
+
+    const step = async (run: TridentRun): Promise<AdvanceOutcome> => {
+      // The board DELETE lands mid-step: wins the terminal transition + observes.
+      await terminator.terminate(run.id, 'stopped', { reason: 'user cancel' })
+      // The in-flight step then reports its own (now-stale) terminal outcome.
+      return { run: { ...run, phase: 'done' as const }, changed: true, waiting: false, note: 'done' }
+    }
+
+    const loop = new TridentTickLoop({ store, step, on_terminal: observer })
+    const res = await loop.runOnce()
+
+    // The tick's conditional `saveIfActive` LOST — the cancellation is authoritative.
+    expect(store.get(r.id)?.phase).toBe('stopped')
+    expect(store.get(r.id)?.failure_reason).toBe('user cancel')
+    // The rejected write counts as no advance.
+    expect(res.advanced).toBe(0)
+    // Exactly ONE terminal delivery — the terminate's `stopped`. The tick did NOT
+    // re-fire `done` (the double-notify this fix prevents).
+    expect(deliveries).toEqual([{ id: r.id, phase: 'stopped' }])
+  })
+
+  test('§F6a r9: a concurrent cancel after a non-terminal save is NOT masked by a stale fan', async () => {
+    // The tick commits a non-terminal advance; before the transition fan, a board
+    // DELETE atomically terminalizes the SAME row. The fan must reflect the
+    // COMMITTED (terminal) state — the tick reloads — not the stale non-terminal
+    // snapshot, which would RESTORE the just-cancelled run in the rail's live_runs.
+    const store = new TridentRunStore(db)
+    const r = await store.create({ slug: 's', project_slug: 't1', repo_path: '/r', task: 't' })
+
+    const fanned: string[] = []
+    const on_transition = {
+      async onTransition(run: TridentRun): Promise<void> {
+        fanned.push(run.phase)
+      },
+    }
+
+    // A store whose saveIfActive commits the non-terminal advance AND then models
+    // the concurrent board DELETE terminalizing the row right after our save wins.
+    const racing = {
+      listNonTerminal: (n: number) => store.listNonTerminal(n),
+      get: (id: string) => store.get(id),
+      save: (run: TridentRun) => store.save(run),
+      saveIfActive: async (run: TridentRun) => {
+        const won = await store.saveIfActive(run) // writes 'argus' (non-terminal)
+        await store.terminalTransition(r.id, { phase: 'stopped' }) // DELETE lands right after
+        return won
+      },
+    } as unknown as TridentRunStore
+
+    const step = async (run: TridentRun): Promise<AdvanceOutcome> => ({
+      run: { ...run, phase: 'argus' as const },
+      changed: true,
+      waiting: false,
+      note: 'advance',
+    })
+
+    const loop = new TridentTickLoop({ store: racing, step, on_transition })
+    await loop.runOnce()
+
+    // The fan saw the CURRENT terminal state, NOT the stale 'argus' (no restore).
+    expect(fanned).toEqual(['stopped'])
+    expect(store.get(r.id)?.phase).toBe('stopped')
   })
 
   test('fans exactly once when a live run ages past the display-stall threshold', async () => {

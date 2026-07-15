@@ -40,6 +40,18 @@ export type {
 export { TridentTickLoop } from './tick.ts'
 export type { TridentTickOptions, TridentStepFn } from './tick.ts'
 
+// §F6a — the terminal-write chokepoint used by the out-of-band terminal writers
+// (`/code stop`, board X-cancel/delete) + the shared observer-chain assembly.
+export { buildTridentTerminator } from './terminate.ts'
+export type {
+  TridentTerminator,
+  TridentTerminateStore,
+  TridentTerminateOptions,
+  TerminateResult,
+  TerminateSkipReason,
+} from './terminate.ts'
+export { withTerminalObserver, composeTerminalHook } from './terminal-observer.ts'
+
 export {
   detectMergeMode,
   defaultGitModeProbe,

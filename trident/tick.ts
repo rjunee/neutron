@@ -250,7 +250,18 @@ export class TridentTickLoop {
         try {
           const outcome = await this.step(run)
           if (outcome.changed) {
-            await this.store.save(outcome.run)
+            // CONDITIONAL commit (§F6a race guard): while `step` was in flight an
+            // out-of-band `terminate()` (board X-cancel/delete) may have won the
+            // terminal transition and fired its observers. Terminal is a SINK
+            // state — if this run is no longer active we must NOT overwrite that
+            // result nor fire our own terminal delivery (a double-notify). Drop
+            // the live-progress signature and move on; the winner already handled
+            // save + observers.
+            const committed = await this.store.saveIfActive(outcome.run)
+            if (!committed) {
+              this.lastSig.delete(run.id)
+              continue
+            }
             advanced++
           }
           // M1 UX REDESIGN — live-progress fan. `outcome.run` always carries the
@@ -262,7 +273,15 @@ export class TridentTickLoop {
           // terminal transition (which the rail needs to drop live_runs). Runs in
           // its own try/catch so a fan outage never aborts the tick.
           if (this.on_transition !== null) {
-            const nextRun = outcome.run
+            // Fan the COMMITTED row, not the in-flight `outcome.run`. Between our
+            // `saveIfActive` and this fan, an out-of-band `terminate()` (board
+            // DELETE) can atomically flip the row terminal + fan it; fanning our
+            // stale non-terminal snapshot would then RESTORE the just-cancelled run
+            // in `live_runs` (Codex r9). Reloading makes the fan reflect the current
+            // persisted state — terminal if a cancel won — so it converges with the
+            // terminator's fan instead of fighting it. Falls back to `outcome.run`
+            // only if the row vanished (a hard delete), where there's nothing to fan.
+            const nextRun = this.store.get(run.id) ?? outcome.run
             const sig = progressSignature(nextRun, this.now())
             if (this.lastSig.get(nextRun.id) !== sig) {
               this.lastSig.set(nextRun.id, sig)

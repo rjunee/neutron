@@ -47,3 +47,36 @@ export function withTerminalObserver(
     },
   }
 }
+
+/**
+ * Compose the terminal-observer chain from `delivery` + zero-or-more independent
+ * observers (board reconcile, skill-forge, …). This is the ONE assembly both the
+ * tick loop (`build-core-modules`) and the out-of-band `terminate()` chokepoint
+ * (`terminate.ts`, wired in the composer) build their `on_terminal` hook from, so
+ * a cancelled build runs the EXACT same chain a loop-reaped one does (§F6a).
+ *
+ * Each observer is isolated in its own try/catch (a hiccup in one must not skip
+ * the next), and delivery is isolated from ALL of them via `withTerminalObserver`
+ * (a delivery outage must not skip the observers — the run is already terminal so
+ * the hook never re-fires). With no observers this is just `delivery`.
+ */
+export function composeTerminalHook(
+  delivery: TridentTerminalHook,
+  observers: Array<(run: TridentRun) => Promise<void>>,
+): TridentTerminalHook {
+  if (observers.length === 0) return delivery
+  const combined = async (run: TridentRun): Promise<void> => {
+    for (const obs of observers) {
+      try {
+        await obs(run)
+      } catch (err) {
+        console.warn(
+          `[trident] terminal observer failed for run ${run.id}: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        )
+      }
+    }
+  }
+  return withTerminalObserver(delivery, combined)
+}
