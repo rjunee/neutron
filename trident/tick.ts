@@ -250,7 +250,18 @@ export class TridentTickLoop {
         try {
           const outcome = await this.step(run)
           if (outcome.changed) {
-            await this.store.save(outcome.run)
+            // CONDITIONAL commit (§F6a race guard): while `step` was in flight an
+            // out-of-band `terminate()` (board X-cancel/delete) may have won the
+            // terminal transition and fired its observers. Terminal is a SINK
+            // state — if this run is no longer active we must NOT overwrite that
+            // result nor fire our own terminal delivery (a double-notify). Drop
+            // the live-progress signature and move on; the winner already handled
+            // save + observers.
+            const committed = await this.store.saveIfActive(outcome.run)
+            if (!committed) {
+              this.lastSig.delete(run.id)
+              continue
+            }
             advanced++
           }
           // M1 UX REDESIGN — live-progress fan. `outcome.run` always carries the

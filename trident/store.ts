@@ -459,6 +459,52 @@ export class TridentRunStore {
     )
   }
 
+  /**
+   * CONDITIONAL full-snapshot save — the tick loop's race-safe terminal commit
+   * (§F6a). Identical to {@link save} but the write only lands when the row is
+   * currently NON-terminal; returns whether THIS caller won.
+   *
+   * Why the tick needs it: the in-band tick reads a non-terminal run, `await`s a
+   * long `step`, and during that gap an out-of-band `terminate()` (board
+   * X-cancel/delete) can win the terminal transition + fire its observers. An
+   * unconditional `save` here would then overwrite that terminal phase with the
+   * step's outcome AND fire the tick's own terminal observers again — a lost
+   * update + a double notification. The `AND phase NOT IN (terminal)` predicate
+   * makes terminal a SINK state: whoever transitions the row first wins, and no
+   * later writer (tick or terminate) moves it back out. A loser (`false`) tells
+   * the tick to skip its observer fire entirely.
+   */
+  async saveIfActive(run: TridentRun): Promise<boolean> {
+    return this.db.transaction((tx) => {
+      const res = tx.runSync(
+        `UPDATE code_trident_runs
+            SET phase = ?, round = ?, ralph_round = ?, branch = ?, pr = ?,
+                merge_mode = ?, subagent_run_id = ?, subagent_status = ?,
+                worktree = ?, failure_reason = ?, workflow_run_id = ?,
+                inner_checkpoint = ?, inner_verdict = ?, last_advanced_at = ?
+          WHERE id = ? AND phase NOT IN ${TERMINAL_PHASE_SQL}`,
+        [
+          run.phase,
+          run.round,
+          run.ralph_round,
+          run.branch,
+          run.pr,
+          run.merge_mode,
+          run.subagent_run_id,
+          run.subagent_status,
+          run.worktree,
+          run.failure_reason,
+          run.workflow_run_id,
+          run.inner_checkpoint,
+          run.inner_verdict,
+          this.now(),
+          run.id,
+        ],
+      )
+      return res.changes > 0
+    })
+  }
+
   /** Delete a run by id (the `/trident stop` hard-delete path). */
   async delete(id: string): Promise<void> {
     await this.db.run(`DELETE FROM code_trident_runs WHERE id = ?`, [id])
