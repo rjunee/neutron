@@ -299,6 +299,7 @@ export function buildOnboardingFinalize(deps: OnboardingFinalizeDeps): Onboardin
       // soft-deleted skips) — the per-project opening step below seeds each one's chat.
       let materialized: MaterializedProject[] = []
       const MAX_FINALIZE_REPASSES = 4
+      let settled = false
       for (let pass = 0; pass < MAX_FINALIZE_REPASSES; pass++) {
         // (2) Persona — compose + commit from workState, then invalidate the loader.
         // Failure-isolated inside commitPersona (logs + presses on).
@@ -311,24 +312,43 @@ export function buildOnboardingFinalize(deps: OnboardingFinalizeDeps): Onboardin
         try {
           after = await deps.stateStore.get(deps.project_slug, input.user_id)
         } catch (err) {
-          log('warn', 'finalize: post-work re-read failed; completing with current work', {
+          // Can't confirm the state we just processed is still current → do NOT complete
+          // (a completed row would suppress any un-processed mutation). Defer below.
+          log('warn', 'finalize: post-work re-read failed; deferring completion to next trigger', {
             err: errStr(err),
           })
           break
         }
-        if (after === null) break
+        if (after === null) {
+          // Row vanished (deleted / reset) mid-run — nothing to finalize; do NOT
+          // recreate it as a completed row.
+          log('info', 'finalize: row vanished mid-run; nothing to complete', { user_id: input.user_id })
+          return
+        }
         if (after.phase === 'completed') {
           log('info', 'finalize: completed concurrently; no-op', { user_id: input.user_id })
           return
         }
-        if (phaseStateKey(after) === phaseStateKey(workState)) break // stable — safe to complete
-        // Something the persona/projects depend on changed mid-run — redo both from fresh.
-        workState = after
-        if (pass === MAX_FINALIZE_REPASSES - 1) {
-          log('warn', 'finalize: phase_state still churning after max repasses; completing', {
-            user_id: input.user_id,
-          })
+        if (phaseStateKey(after) === phaseStateKey(workState)) {
+          settled = true // stable — the work we just did matches the freshest durable state
+          break
         }
+        // Something persona/projects depend on changed mid-run — redo both from fresh.
+        workState = after
+      }
+
+      if (!settled) {
+        // Exhausted the repass budget while phase_state was STILL churning (or a re-read
+        // failed): the newest durable state was NOT fully composed/materialized, so
+        // marking `completed` now would suppress that un-processed work permanently
+        // (Codex F8 r7). Leave the row non-terminal and DEFER — the next finalize trigger
+        // (boot, reconnect, or the next turn) retries once the churn settles. Continuous
+        // churn during finalize is pathological: the interview is over by the finalize
+        // trigger, so real onboarding state has stopped changing.
+        log('warn', 'finalize: phase_state did not settle within repass budget; deferring completion', {
+          user_id: input.user_id,
+        })
+        return
       }
 
       // (4) Terminal state — flip to `completed`. Load-bearing: if THIS write fails

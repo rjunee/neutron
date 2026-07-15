@@ -360,6 +360,57 @@ test('finalize re-materializes a project that lands DURING materialization — p
   expect((await real.get(PROJECT_SLUG, USER_ID))?.phase).toBe('completed')
 })
 
+test('finalize does NOT falsely complete under continuous mid-run churn — defers to next trigger (F8 r7)', async () => {
+  const h = makeHarness()
+  await h.stateStore.upsert({
+    project_slug: PROJECT_SLUG,
+    user_id: USER_ID,
+    phase: 'persona_reviewed',
+    phase_state_patch: {
+      user_first_name: 'Sam',
+      agent_name: 'Atlas',
+      primary_projects: ['P0'],
+    },
+  })
+  const seeded = await h.stateStore.get(PROJECT_SLUG, USER_ID) // captured via the REAL store (no churn)
+
+  // A store whose every read observes one MORE project than the last — perpetual churn
+  // that never settles within the repass budget. The loop must NOT mark completed with
+  // the newest (un-materialized) state; it must defer so a later trigger finalizes once
+  // the churn stops.
+  const real = h.stateStore
+  let reads = 0
+  const churningStore: OnboardingStateStore = {
+    async get(slug, uid) {
+      const state = await real.get(slug, uid)
+      if (state !== null && state.phase !== 'completed') {
+        reads += 1
+        const projects = Array.from({ length: reads + 1 }, (_, i) => `P${i}`)
+        await real.upsert({
+          project_slug: PROJECT_SLUG,
+          user_id: USER_ID,
+          phase: 'persona_reviewed',
+          phase_state_patch: { primary_projects: projects },
+        })
+        return real.get(slug, uid)
+      }
+      return state
+    },
+    async upsert(inp) { return real.upsert(inp) },
+    async rekey(a, b, c) { return real.rekey(a, b, c) },
+    async delete(slug, uid) { return real.delete(slug, uid) },
+    async deleteByOwner(slug) { return real.deleteByOwner(slug) },
+  }
+  const finalizer = buildOnboardingFinalize({ ...h.deps, stateStore: churningStore })
+  await finalizer.finalize({ user_id: USER_ID, topic_id: TOPIC_ID, state: seeded! })
+
+  // Deferred: the row is NOT completed (a false completion would strand un-materialized
+  // projects). It stays non-terminal for the next trigger to finalize once churn stops.
+  expect((await real.get(PROJECT_SLUG, USER_ID))?.phase).not.toBe('completed')
+  // And the completed signal never fired.
+  expect(h.onboardingCompleted.filter((u) => u === USER_ID)).toHaveLength(0)
+})
+
 test('finalize operates on the LIVE durable state, not a stale caller snapshot (F8 r3)', async () => {
   const h = makeHarness()
   // Snapshot A — the state a caller captured with ONE project.
