@@ -48,6 +48,10 @@ import type {
   SourceParser,
 } from '@neutronai/onboarding/history-import/types.ts'
 import { buildDefaultSourceParser } from '@neutronai/onboarding/history-import/default-source-parser.ts'
+import {
+  loadImportResult,
+  persistImportResult,
+} from '@neutronai/onboarding/history-import/import-result-store.ts'
 import type {
   ImportJobRunnerHook,
 } from '@neutronai/onboarding/interview/engine-internals.ts'
@@ -121,14 +125,26 @@ export function buildSynthesisImportJobRunner(
   const uuid = input.uuid ?? defaultUuid
   const logFailure = input.logFailure ?? defaultLogFailure
   const parse: SourceParser = input.parse ?? buildDefaultSourceParser()
-  // In-process result + cancellation (the synthesis run is single-process; the
-  // result is consumed by the engine in the same process the moment the job
-  // completes, so it does not need an `import_results` row for resume).
+  // In-process result cache + cancellation. The `results` Map is the PRIMARY
+  // read on the no-restart happy path (byte-identical to the pre-P6 behavior).
+  // P6 (durability P0): the completed `ImportResult` is ALSO persisted to the
+  // `import_results` table in the SAME write that flips `status='completed'`
+  // (see `runJob`), so a process restart — which discards this Map along with
+  // the fire-and-forget `runJob` promise — no longer silently loses a PAID
+  // synthesis: `status()` / `synthesizeOnDemand` read-on-miss from the row.
   const results = new Map<string, ImportResult>()
   const cancelled = new Set<string>()
 
+  // TERMINAL-WINNER guard (Codex): no runner write may resurrect a row a concurrent
+  // `cancel()` (or a prior terminal write) already settled. Every status write below
+  // is guarded to non-terminal rows, so a cancel that lands mid-run is authoritative
+  // — the in-flight synthesis then no-ops its progress/failed/completed writes.
+  const NON_TERMINAL_GUARD = `status NOT IN ('completed', 'failed', 'cancelled')`
   const setStatus = async (job_id: string, status: ImportJobStatus): Promise<void> => {
-    await db.run(`UPDATE import_jobs SET status = ? WHERE job_id = ?`, [status, job_id])
+    await db.run(
+      `UPDATE import_jobs SET status = ? WHERE job_id = ? AND ${NON_TERMINAL_GUARD}`,
+      [status, job_id],
+    )
   }
 
   const finishFailed = async (
@@ -139,13 +155,15 @@ export function buildSynthesisImportJobRunner(
     await db.run(
       `UPDATE import_jobs
          SET status = 'failed', error_code = ?, error_message = ?, completed_at = ?
-       WHERE job_id = ?`,
+       WHERE job_id = ?
+         AND ${NON_TERMINAL_GUARD}`,
       [code, message, now(), job_id],
     )
   }
 
   const runJob = async (
     job_id: string,
+    project_slug: string,
     source: ImportSource,
     payload: ChunkerInput,
   ): Promise<void> => {
@@ -234,15 +252,66 @@ export function buildSynthesisImportJobRunner(
       }
     }
 
-    results.set(job_id, synthesisResultToImportResult(result))
+    const importResult = synthesisResultToImportResult(result)
     const batches = result.batches_read
-    await db.run(
-      `UPDATE import_jobs
-         SET status = 'completed', pass1_chunks_done = ?, pass1_chunks_total = ?,
-             chunks_total_known = 1, completed_at = ?
-       WHERE job_id = ?`,
-      [batches, batches, now(), job_id],
-    )
+    // P6 (durability P0) — persist the `ImportResult` to `import_results` in the
+    // SAME transaction that flips `status='completed'`, so the two commit
+    // atomically: a restart never sees a `completed` job whose durable result is
+    // missing (nor a persisted result on a not-yet-completed job). `tx.run` is
+    // re-entry-detected inside the BEGIN/COMMIT so both writes share the one
+    // mutex-held transaction. `partial=false` (the synthesis session is a single
+    // accumulating run; a completed job is always a full result).
+    //
+    // CANCEL RACE (Codex): the pre-check at the top of this function (`cancelled.
+    // has(job_id)`) closes only cancels that land BEFORE synthesis returns. A
+    // `cancel()` arriving during the (synchronous) seed writes or right before this
+    // block has already flipped the row to `status='cancelled'`. So GUARD the flip
+    // on a non-terminal status and check the affected-row count: if the completion
+    // lost the race (0 rows), throw to roll the just-persisted result back with it —
+    // a cancelled/failed job must never resurrect to `completed`, nor keep a
+    // persisted result. The terminal status the winner wrote stays authoritative.
+    let completionWon = true
+    try {
+      await db.transaction(async (tx) => {
+        await persistImportResult(tx, {
+          job_id,
+          project_slug,
+          source,
+          result: importResult,
+          partial: false,
+          now: now(),
+        })
+        // `runSync` (not `run`) so we get the affected-row count; it writes on the
+        // transaction's connection inside the open BEGIN, so it commits/rolls back
+        // atomically with the `persistImportResult` above.
+        const res = tx.runSync(
+          `UPDATE import_jobs
+             SET status = 'completed', pass1_chunks_done = ?, pass1_chunks_total = ?,
+                 chunks_total_known = 1, completed_at = ?
+           WHERE job_id = ?
+             AND status NOT IN ('completed', 'failed', 'cancelled')`,
+          [batches, batches, now(), job_id],
+        )
+        if (res.changes === 0) {
+          // A concurrent cancel/fail already made the row terminal. Roll the
+          // persisted result back with this failed flip (same tx).
+          completionWon = false
+          throw new Error(`import completion lost the race for ${job_id} (already terminal)`)
+        }
+      })
+    } catch (err) {
+      if (!completionWon) {
+        // Benign: the row is already terminal (cancelled/failed) and the persisted
+        // result was rolled back. Do NOT warm the cache or fire completion.
+        return
+      }
+      throw err
+    }
+    // Populate the in-process cache only AFTER the durable commit — never cache a
+    // result the transaction rolled back. This runs synchronously in `runJob`'s
+    // continuation (no `await` between commit and here), so no `status()` poll
+    // can observe the committed `completed` row before the Map is warm.
+    results.set(job_id, importResult)
     input.onSynthesisComplete?.({ job_id, source, result, seeds_written })
   }
 
@@ -261,7 +330,7 @@ export function buildSynthesisImportJobRunner(
       // poll + the 5s import-running cron tick). Any escape is swallowed so a
       // background failure surfaces as a `failed` job, never an unhandled
       // rejection.
-      fireAndForget('build-synthesis-import-runner.runJob', runJob(job_id, inp.source, inp.payload), (err) => {
+      fireAndForget('build-synthesis-import-runner.runJob', runJob(job_id, inp.project_slug, inp.source, inp.payload), (err) => {
         logFailure(`run_job:${job_id}`, err)
         // Mark the job failed (async) via a NESTED fireAndForget so onError stays
         // synchronous-safe AND the persist failure is itself counted/logged.
@@ -301,7 +370,10 @@ export function buildSynthesisImportJobRunner(
       }
       if (row.error_message !== null) job.error_message = row.error_message
       if (row.status === 'completed') {
-        const result = results.get(job_id)
+        // Happy path: the in-process Map holds the result. P6 read-on-miss: after
+        // a restart the Map is empty, so fall back to the durable `import_results`
+        // row persisted atomically with the `completed` flip.
+        const result = results.get(job_id) ?? loadImportResult(db, job_id)?.result
         if (result !== undefined) job.result = result
       }
       return job
@@ -309,23 +381,28 @@ export function buildSynthesisImportJobRunner(
 
     async cancel(job_id): Promise<void> {
       cancelled.add(job_id)
-      const row = db
-        .get<{ status: string }, [string]>(`SELECT status FROM import_jobs WHERE job_id = ?`, [job_id])
-      if (row === null) return
-      if (row.status !== 'completed' && row.status !== 'failed' && row.status !== 'cancelled') {
-        await db.run(
-          `UPDATE import_jobs SET status = 'cancelled', completed_at = ? WHERE job_id = ?`,
-          [now(), job_id],
-        )
-      }
+      // SINGLE guarded write — no read/check/write TOCTOU (Codex): a separate
+      // status read then unconditional UPDATE could let a completion commit
+      // `completed` in the gap and then get overwritten to `cancelled`, orphaning
+      // its persisted result. The guard makes cancellation atomic against a
+      // concurrent completion/failure: if the row is already terminal, 0 rows change
+      // and the terminal winner stands. `cancelled.add` still short-circuits an
+      // in-flight runJob at its pre-checks. A missing job → 0 rows (harmless no-op).
+      await db.run(
+        `UPDATE import_jobs SET status = 'cancelled', completed_at = ?
+           WHERE job_id = ? AND ${NON_TERMINAL_GUARD}`,
+        [now(), job_id],
+      )
     },
 
     async synthesizeOnDemand(job_id): Promise<ImportResult | null> {
       // The synthesis session is a single accumulating run, not a chunk-
       // resumable pipeline: there is no partial Pass-1 cache to aggregate.
       // Surface the completed result if we have one, else null (the engine
-      // routes gracefully to gap-fill).
-      return results.get(job_id) ?? null
+      // routes gracefully to gap-fill). P6 read-on-miss: fall back to the
+      // durable `import_results` row so a post-restart on-demand request still
+      // recovers a result that completed before the crash.
+      return results.get(job_id) ?? loadImportResult(db, job_id)?.result ?? null
     },
   }
 }

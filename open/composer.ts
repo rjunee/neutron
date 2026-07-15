@@ -66,6 +66,7 @@ import {
   buildOnboardingStepGuardFragment,
 } from '@neutronai/onboarding/interview/onboarding-preamble.ts'
 import type { ImportResult } from '@neutronai/onboarding/history-import/types.ts'
+import { sweepOrphanedImportJobsOnBoot } from '@neutronai/onboarding/history-import/import-job-boot-sweep.ts'
 import {
   buildLlmCallSubstrate,
   collectTokensToString,
@@ -2482,7 +2483,26 @@ export function buildOpenGraphComposer(
       if (importWatchActive.has(user_id)) return
       importWatchActive.add(user_id)
       const startedAt = Date.now()
+      // P6 — hold ONE mutable timer handle per armed watcher and register ONE
+      // cleanup. The pre-P6 code pushed a fresh `() => clearTimeout(t)` closure
+      // onto `realmodeCleanups` on EVERY reschedule, so a long watcher
+      // (IMPORT_WATCH_MAX_MS / IMPORT_WATCH_INTERVAL_MS ≈ 600 ticks) leaked ~600
+      // dead closures — each capturing an already-fired timer — that shutdown
+      // then walked. One handle + one cleanup keeps it O(1) per arm.
+      let watchTimer: ReturnType<typeof setTimeout> | null = null
+      // P6 (Codex) — a `stopped` latch closes the shutdown-vs-in-flight-tick race:
+      // clearing `watchTimer` alone is not enough because a `tick()` already
+      // awaiting the state read/upsert when cleanup runs would, on resume, schedule
+      // a FRESH timer after every cleanup has fired — leaving a poll alive against
+      // closed resources. The latch is set in cleanup and re-checked after the tick's
+      // awaits, before any reschedule.
+      let stopped = false
+      realmodeCleanups.push(() => {
+        stopped = true
+        if (watchTimer !== null) clearTimeout(watchTimer)
+      })
       const tick = async (): Promise<void> => {
+        if (stopped) return
         let reschedule = false
         try {
           const st = await onboardingStateStore.get(project_slug, user_id)
@@ -2513,18 +2533,60 @@ export function buildOpenGraphComposer(
           // Transient read/write failure — retry next tick (still bounded).
           reschedule = Date.now() - startedAt <= IMPORT_WATCH_MAX_MS
         }
-        if (!reschedule) {
+        // Re-check the latch AFTER the awaits above: if cleanup ran during this
+        // tick, do not reschedule — otherwise a post-shutdown timer stays alive.
+        if (!reschedule || stopped) {
           importWatchActive.delete(user_id)
+          watchTimer = null
           return
         }
-        const t = setTimeout(() => {
+        watchTimer = setTimeout(() => {
           fireAndForget('composer.tick', tick())
         }, IMPORT_WATCH_INTERVAL_MS)
-        realmodeCleanups.push(() => clearTimeout(t))
       }
       fireAndForget('composer.tick', tick())
     }
     importWatchHolder.watch = watchImportCompletion
+    // P6 (durability P0) — boot sweep for orphaned non-terminal `import_jobs`
+    // rows. Runs ONCE at composition, BEFORE any new import can start, so every
+    // non-terminal row it finds is provably orphaned by the restart (its
+    // fire-and-forget synthesis run died with the previous process). Flips them
+    // to `failed` idempotently (guarded against the engine's hard timeout) so the
+    // import-running cron surfaces a fast retry/skip affordance instead of the
+    // owner waiting ~30 min for the progress-aware timeout. Best-effort — never
+    // block composition on a sweep failure.
+    try {
+      sweepOrphanedImportJobsOnBoot({ db })
+    } catch {
+      /* best-effort boot sweep; the engine's hard timeout remains the backstop */
+    }
+    // P6 (durability P0) — re-arm the Path-1 completion watcher from DURABLE
+    // state at composition. The watcher is otherwise armed ONLY on upload
+    // (`open/wiring/uploads.ts`) and socket reconnect (`open/wiring/app-ws.ts`).
+    // After a restart mid-import, if the owner does NOT reconnect (offline), the
+    // import-running cron re-arms on boot and drives the persisted row to
+    // `import_analysis_presented`, but with no watcher that phase is never
+    // consumed (its accept button is deliberately suppressed) and onboarding
+    // wedges permanently. Scan the durable `onboarding_state` for THIS instance's
+    // import-active rows and arm one watcher per user (idempotent via
+    // `importWatchActive`); mirrors the reconnect re-arm guard
+    // (`import_running` | `import_analysis_presented`). Pairs with the boot sweep
+    // above: a swept-`failed` job's `import_running` row is arm-covered here, so
+    // once the cron advances it to `import_analysis_presented` the watcher
+    // consumes it. Best-effort — a boot re-arm failure must never block
+    // composition (the reconnect re-arm remains a backstop).
+    try {
+      const importActiveRows = db
+        .prepare<{ user_id: string }, [string]>(
+          `SELECT user_id FROM onboarding_state
+            WHERE project_slug = ?
+              AND phase IN ('import_running', 'import_analysis_presented')`,
+        )
+        .all(project_slug)
+      for (const row of importActiveRows) watchImportCompletion(row.user_id)
+    } catch {
+      /* best-effort boot re-arm; reconnect re-arms when the owner returns */
+    }
     // The onboarding interview preamble (offer history import only when a
     // synthesis substrate exists to actually run it).
     const onboardingPreambleText = buildOnboardingPreamble({

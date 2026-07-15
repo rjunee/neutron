@@ -433,6 +433,312 @@ describe('buildSynthesisImportJobRunner — synthesis → engine bridge', () => 
     expect(job.status).toBe('completed')
   })
 
+  test('P6 durability: completed result is persisted to import_results in the SAME write as status=completed', async () => {
+    const db = freshDb()
+    const fakeSynthesis: SynthesisRunner = {
+      rawStore: new MemoryRawTranscriptStore(),
+      async synthesizeImport(): Promise<SynthesisResult> {
+        return SYNTH_RESULT
+      },
+      async synthesizeInterviewOnly(): Promise<SynthesisResult | null> {
+        return null
+      },
+      writeSeed(seed: ProjectSeed): WriteProjectSeedOutcome {
+        return { project_slug: seed.slug, reason: 'created', docs_written: ['STATUS.md'], transcripts_written: 1 }
+      },
+    }
+    const runner = buildSynthesisImportJobRunner({ db, synthesis: fakeSynthesis, parse: () => fakeRecords() })
+    const { job_id } = await runner.start({
+      project_slug: 'owner',
+      user_id: 'u-owner',
+      source: 'claude-zip',
+      payload: Buffer.from('zip'),
+    })
+    const job = await pollToTerminal(runner, job_id)
+    expect(job.status).toBe('completed')
+
+    // The durable `import_results` row landed atomically with the completed flip:
+    // whenever status='completed', a result row exists (assert row CONTENT, not a
+    // call count). Pre-P6 this row was never written (result held only in RAM).
+    const row = db
+      .raw()
+      .query<
+        { status: string; projects_json: string; facts_json: string; voice_signals_json: string },
+        [string]
+      >(
+        `SELECT j.status AS status, r.projects_json AS projects_json,
+                r.facts_json AS facts_json, r.voice_signals_json AS voice_signals_json
+           FROM import_jobs j JOIN import_results r ON r.job_id = j.job_id
+          WHERE j.job_id = ?`,
+      )
+      .get(job_id)
+    expect(row).not.toBeNull()
+    expect(row?.status).toBe('completed')
+    const projects = JSON.parse(row?.projects_json ?? '[]') as Array<{ name: string }>
+    expect(projects.map((p) => p.name)).toEqual(['Topline Hospitality'])
+    const facts = JSON.parse(row?.facts_json ?? '{}') as { key_people?: string[] }
+    expect(facts.key_people).toContain('Priya Shah')
+    const voice = JSON.parse(row?.voice_signals_json ?? '{}') as { tone?: string }
+    expect(voice.tone).toBe('terse')
+  })
+
+  test('P6 durability: a restart (fresh runner, cold in-process cache) recovers the completed result from the durable row', async () => {
+    const db = freshDb()
+    const fakeSynthesis: SynthesisRunner = {
+      rawStore: new MemoryRawTranscriptStore(),
+      async synthesizeImport(): Promise<SynthesisResult> {
+        return SYNTH_RESULT
+      },
+      async synthesizeInterviewOnly(): Promise<SynthesisResult | null> {
+        return null
+      },
+      writeSeed(seed: ProjectSeed): WriteProjectSeedOutcome {
+        return { project_slug: seed.slug, reason: 'created', docs_written: ['STATUS.md'], transcripts_written: 1 }
+      },
+    }
+    // Process 1: run the import to completion.
+    const runner1 = buildSynthesisImportJobRunner({ db, synthesis: fakeSynthesis, parse: () => fakeRecords() })
+    const { job_id } = await runner1.start({
+      project_slug: 'owner',
+      user_id: 'u-owner',
+      source: 'claude-zip',
+      payload: Buffer.from('zip'),
+    })
+    expect((await pollToTerminal(runner1, job_id)).status).toBe('completed')
+
+    // Process 2 (the "restart"): a BRAND-NEW runner over the SAME db has an EMPTY
+    // in-process `results` Map + no live `runJob` promise — exactly the state a
+    // process restart leaves. Pre-P6 `status()` read only the RAM Map, so
+    // `job.result` came back undefined and the paid synthesis was silently lost.
+    const runner2 = buildSynthesisImportJobRunner({ db, synthesis: fakeSynthesis, parse: () => fakeRecords() })
+
+    const resumed = await runner2.status(job_id)
+    expect(resumed?.status).toBe('completed')
+    // Assert the RESUMED result content — the read-on-miss reconstructed the full
+    // ImportResult from `import_results`, not just that a call happened.
+    expect(resumed?.result?.proposed_projects.map((p) => p.name)).toEqual(['Topline Hospitality'])
+    expect(resumed?.result?.facts.key_people).toContain('Priya Shah')
+    expect(resumed?.result?.voice_signals.tone).toBe('terse')
+
+    // synthesizeOnDemand also recovers from the durable row post-restart.
+    const onDemand = await runner2.synthesizeOnDemand(job_id)
+    expect(onDemand?.proposed_projects.map((p) => p.name)).toEqual(['Topline Hospitality'])
+  })
+
+  test('P6 durability: a failure on the completion write ROLLS BACK the persisted result (one transaction, not two independent writes)', async () => {
+    const real = freshDb()
+    const fakeSynthesis: SynthesisRunner = {
+      rawStore: new MemoryRawTranscriptStore(),
+      async synthesizeImport(): Promise<SynthesisResult> {
+        return SYNTH_RESULT
+      },
+      async synthesizeInterviewOnly(): Promise<SynthesisResult | null> {
+        return null
+      },
+      writeSeed(seed: ProjectSeed): WriteProjectSeedOutcome {
+        return { project_slug: seed.slug, reason: 'created', docs_written: ['STATUS.md'], transcripts_written: 1 }
+      },
+    }
+    // Inject a failure on the `status='completed'` UPDATE — the SECOND write in the
+    // completion transaction, AFTER `persistImportResult` has already inserted the
+    // `import_results` row into the SAME tx. If the two writes were independent, the
+    // persisted row would survive; because they share ONE transaction, the failed
+    // completion flip must roll the persisted result back too. (A revert of the
+    // shared-transaction wrapping makes this test go red: the import_results row
+    // would survive the failed flip.)
+    let intercepted = false
+    const db = new Proxy(real, {
+      get(target, prop, receiver) {
+        if (prop === 'transaction') {
+          return (userCb: (tx: unknown) => Promise<unknown>) =>
+            (target as ProjectDb).transaction(async (tx) => {
+              const wrappedTx = new Proxy(tx as unknown as Record<string, unknown>, {
+                get(t, p) {
+                  // The completion flip is a `runSync`; persistImportResult's INSERT
+                  // is an async `run` (must pass through). Throw only on the flip.
+                  if (p === 'runSync') {
+                    return (sql: string, params?: unknown[]) => {
+                      if (typeof sql === 'string' && sql.includes("status = 'completed'")) {
+                        intercepted = true
+                        throw new Error('injected: completion write failed')
+                      }
+                      return (t['runSync'] as (s: string, pp?: unknown[]) => unknown)(sql, params)
+                    }
+                  }
+                  const v = t[p as string]
+                  return typeof v === 'function' ? (v as (...a: unknown[]) => unknown).bind(t) : v
+                },
+              })
+              return userCb(wrappedTx)
+            })
+        }
+        const v = Reflect.get(target, prop, receiver)
+        return typeof v === 'function' ? (v as (...a: unknown[]) => unknown).bind(target) : v
+      },
+    }) as unknown as ProjectDb
+
+    const runner = buildSynthesisImportJobRunner({ db, synthesis: fakeSynthesis, parse: () => fakeRecords() })
+    const { job_id } = await runner.start({
+      project_slug: 'owner',
+      user_id: 'u-owner',
+      source: 'claude-zip',
+      payload: Buffer.from('zip'),
+    })
+
+    // Wait for the fire-and-forget runJob to reach + fail the completion transaction,
+    // then let the ROLLBACK + rejection unwind.
+    for (let i = 0; i < 400 && !intercepted; i += 1) await new Promise((r) => setTimeout(r, 5))
+    expect(intercepted).toBe(true)
+    await new Promise((r) => setTimeout(r, 30))
+
+    // The persisted `import_results` row was rolled back WITH the failed flip.
+    const resultRow = real
+      .raw()
+      .query<{ job_id: string }, [string]>(`SELECT job_id FROM import_results WHERE job_id = ?`)
+      .get(job_id)
+    expect(resultRow).toBeNull()
+    // And the job never reached 'completed' (the flip was rolled back).
+    const jobRow = real
+      .raw()
+      .query<{ status: string }, [string]>(`SELECT status FROM import_jobs WHERE job_id = ?`)
+      .get(job_id)
+    expect(jobRow?.status).not.toBe('completed')
+  })
+
+  test('P6 cancel race: a cancel landing during seed writes is NOT resurrected to completed (nor left with a persisted result)', async () => {
+    const db = freshDb()
+    // `writeSeed` runs in the synchronous seed loop AFTER the top-of-runJob cancel
+    // pre-check but BEFORE the completion transaction — the exact window a late
+    // cancel lands in. Simulate the cancel winning by flipping the in-flight row to
+    // 'cancelled' here (this is the row state `runner.cancel()` produces).
+    const fakeSynthesis: SynthesisRunner = {
+      rawStore: new MemoryRawTranscriptStore(),
+      async synthesizeImport(): Promise<SynthesisResult> {
+        return SYNTH_RESULT
+      },
+      async synthesizeInterviewOnly(): Promise<SynthesisResult | null> {
+        return null
+      },
+      writeSeed(seed: ProjectSeed): WriteProjectSeedOutcome {
+        db.raw().run(
+          `UPDATE import_jobs SET status = 'cancelled', completed_at = 1 WHERE status = 'pass1-running'`,
+        )
+        return { project_slug: seed.slug, reason: 'created', docs_written: ['STATUS.md'], transcripts_written: 1 }
+      },
+    }
+    const runner = buildSynthesisImportJobRunner({ db, synthesis: fakeSynthesis, parse: () => fakeRecords() })
+    const { job_id } = await runner.start({
+      project_slug: 'owner',
+      user_id: 'u-owner',
+      source: 'claude-zip',
+      payload: Buffer.from('zip'),
+    })
+
+    // Wait until the row is terminal (the simulated cancel), then let the completion
+    // transaction run + lose the guarded race + roll back.
+    await pollToTerminal(runner, job_id)
+    await new Promise((r) => setTimeout(r, 60))
+
+    // The completion did NOT clobber the cancel.
+    const status = db
+      .raw()
+      .query<{ status: string }, [string]>(`SELECT status FROM import_jobs WHERE job_id = ?`)
+      .get(job_id)?.status
+    expect(status).toBe('cancelled')
+    // And no result was persisted (the persist rolled back with the lost flip).
+    const resultRow = db
+      .raw()
+      .query<{ job_id: string }, [string]>(`SELECT job_id FROM import_results WHERE job_id = ?`)
+      .get(job_id)
+    expect(resultRow).toBeNull()
+  })
+
+  test('P6 cancel race: a cancel is NOT overwritten by a subsequent synthesis FAILURE (finishFailed guard)', async () => {
+    const db = freshDb()
+    let rejectSynthesis: (err: Error) => void = () => {}
+    const gate = new Promise<SynthesisResult>((_, reject) => {
+      rejectSynthesis = reject
+    })
+    const fakeSynthesis: SynthesisRunner = {
+      rawStore: new MemoryRawTranscriptStore(),
+      async synthesizeImport(): Promise<SynthesisResult> {
+        // Block until the test rejects — the window a cancel lands in.
+        return gate
+      },
+      async synthesizeInterviewOnly(): Promise<SynthesisResult | null> {
+        return null
+      },
+      writeSeed(seed: ProjectSeed): WriteProjectSeedOutcome {
+        return { project_slug: seed.slug, reason: 'created', docs_written: [], transcripts_written: 0 }
+      },
+    }
+    const runner = buildSynthesisImportJobRunner({ db, synthesis: fakeSynthesis, parse: () => fakeRecords() })
+    const { job_id } = await runner.start({
+      project_slug: 'owner',
+      user_id: 'u-owner',
+      source: 'claude-zip',
+      payload: Buffer.from('zip'),
+    })
+
+    // Wait until runJob is parked in synthesizeImport (status flipped to pass1-running).
+    const statusOf = (): string | undefined =>
+      db.raw().query<{ status: string }, [string]>(`SELECT status FROM import_jobs WHERE job_id = ?`).get(job_id)?.status
+    for (let i = 0; i < 200 && statusOf() !== 'pass1-running'; i += 1) await new Promise((r) => setTimeout(r, 5))
+    expect(statusOf()).toBe('pass1-running')
+
+    // Cancel wins the race → status='cancelled'.
+    await runner.cancel(job_id)
+    expect(statusOf()).toBe('cancelled')
+
+    // Now synthesis REJECTS → the catch calls finishFailed. The guard must leave the
+    // terminal 'cancelled' intact (pre-guard this overwrote it with 'failed').
+    rejectSynthesis(new Error('synthesis boom'))
+    await new Promise((r) => setTimeout(r, 60))
+
+    expect(statusOf()).toBe('cancelled')
+  })
+
+  test('P6 cancel race (inverse): a cancel arriving AFTER completion does NOT overwrite completed (terminal-winner)', async () => {
+    const db = freshDb()
+    const fakeSynthesis: SynthesisRunner = {
+      rawStore: new MemoryRawTranscriptStore(),
+      async synthesizeImport(): Promise<SynthesisResult> {
+        return SYNTH_RESULT
+      },
+      async synthesizeInterviewOnly(): Promise<SynthesisResult | null> {
+        return null
+      },
+      writeSeed(seed: ProjectSeed): WriteProjectSeedOutcome {
+        return { project_slug: seed.slug, reason: 'created', docs_written: ['STATUS.md'], transcripts_written: 1 }
+      },
+    }
+    const runner = buildSynthesisImportJobRunner({ db, synthesis: fakeSynthesis, parse: () => fakeRecords() })
+    const { job_id } = await runner.start({
+      project_slug: 'owner',
+      user_id: 'u-owner',
+      source: 'claude-zip',
+      payload: Buffer.from('zip'),
+    })
+    // Let it fully complete (status='completed' + durable result persisted).
+    expect((await pollToTerminal(runner, job_id)).status).toBe('completed')
+
+    // A late cancel — the owner hit cancel just as the import committed. The guarded
+    // single-write cancel must NOT resurrect the completed job to 'cancelled' (pre-fix
+    // the read/check/write let it), and must leave the persisted result intact.
+    await runner.cancel(job_id)
+
+    const status = db
+      .raw()
+      .query<{ status: string }, [string]>(`SELECT status FROM import_jobs WHERE job_id = ?`)
+      .get(job_id)?.status
+    expect(status).toBe('completed')
+    const resultRow = db
+      .raw()
+      .query<{ job_id: string }, [string]>(`SELECT job_id FROM import_results WHERE job_id = ?`)
+      .get(job_id)
+    expect(resultRow).not.toBeNull()
+  })
+
   test('synthesisResultToImportResult maps projects, tasks, people, and voice', () => {
     const mapped = synthesisResultToImportResult(SYNTH_RESULT)
     expect(mapped.proposed_projects).toEqual([
