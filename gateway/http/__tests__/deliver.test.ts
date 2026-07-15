@@ -216,29 +216,42 @@ describe('createDeliver — durable-first + routed best-effort push', () => {
     expect(appRegistry.deviceCount('app:owner')).toBe(1)
   })
 
-  it('production app path: delivered_live tracks REAL device presence via has() (offline→false, connected→true)', async () => {
-    // The composer's app push reads delivered_live from `appWsRegistry.has(topic)` —
-    // NOT a hardcoded true — because buildAppWsSendReply's adapter.send is
-    // fire-and-forget (persist + fan) and its own live result is detached. This
-    // mirrors that wiring: the "persist+fan" is elided; delivered_live must still
-    // reflect whether an app device is actually connected (Codex — an offline topic
-    // was previously reported delivered_live:true).
+  it('production app path (ASYNC): delivered_live is the REAL awaited fan-out result — offline→false, connected→true', async () => {
+    // The composer's app push AWAITS the app-ws adapter and classifies its real
+    // result marker — NOT a hardcoded true, NOT a stale pre-send registry snapshot.
+    // This mirrors that: an async push returning the TRUE registry.send() result
+    // (which evicts a throwing socket and reports actual delivery). An OFFLINE topic
+    // was previously reported delivered_live:true (Codex P1).
     const bs = fakeButtonStore()
     const appRegistry = new InMemoryAppWsSessionRegistry()
     const deliver = createDeliver({
       buttonStore: bs.store,
-      push: { app: (t) => appRegistry.has(t) },
+      push: { app: async (t, e) => appRegistry.send(t, e as unknown as AppWsOutbound) },
       log: () => {},
     })
-    // OFFLINE — no device connected for app:owner.
+    // OFFLINE — no device connected → delivered_live false; durable row still written.
     const offline = await deliver('app:owner', { body: 'hi', durability: 'reply' })
     expect(offline.delivered_live).toBe(false)
-    // The durable row is still written regardless (durable-first guarantee).
     expect(offline.persisted).toBe(true)
-    // CONNECTED — a device registers → delivered_live flips true.
-    appRegistry.register('app:owner', () => {})
+    // CONNECTED — a device receives it → delivered_live true.
+    const seen: AppWsOutbound[] = []
+    appRegistry.register('app:owner', (e) => seen.push(e))
     const online = await deliver('app:owner', { body: 'hi', durability: 'reply' })
     expect(online.delivered_live).toBe(true)
+    expect(seen).toHaveLength(1)
+    // A registered-but-DEAD socket (throws) is evicted and reports NOT delivered.
+    const bs2 = fakeButtonStore()
+    const reg2 = new InMemoryAppWsSessionRegistry()
+    reg2.register('app:owner', () => {
+      throw new Error('closed ws')
+    })
+    const deliver2 = createDeliver({
+      buttonStore: bs2.store,
+      push: { app: async (t, e) => reg2.send(t, e as unknown as AppWsOutbound) },
+      log: () => {},
+    })
+    const dead = await deliver2('app:owner', { body: 'hi', durability: 'reply' })
+    expect(dead.delivered_live).toBe(false) // evicted throwing sender → not delivered
   })
 
   it('PRESERVES web-registry propagate: a throwing single sender is swallowed by deliver (best-effort)', async () => {

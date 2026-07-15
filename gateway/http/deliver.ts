@@ -62,8 +62,8 @@ const REPLY_ROW_TTL_MS = 10 * 365 * 24 * 60 * 60 * 1_000
  *     topic's active prompt the next user message attaches to (the morning
  *     brief / nudge shape).
  *   - `none`   — no durable row; a TRANSIENT live-only `system_notice` pill
- *     (the substrate notice-family bubbles). The push runs SYNCHRONOUSLY so a
- *     sync caller (the substrate scan tick) observes delivery without awaiting.
+ *     (the substrate notice-family bubbles). `delivered_live` reflects the real
+ *     awaited fan-out result.
  */
 export type DeliveryDurability = 'reply' | 'inert' | 'none'
 
@@ -96,8 +96,12 @@ export type Deliver = (topic_id: string, envelope: DeliveryEnvelope) => Promise<
  * a throw.
  */
 export interface DeliverPushTargets {
-  app?: (topic_id: string, event: ChatOutbound) => boolean
-  web?: (topic_id: string, event: ChatOutbound) => boolean
+  // MAY be async: the app target awaits the app-ws adapter and classifies its real
+  // result marker (`app-ws:<id>` delivered vs `app-ws:dropped:`/`app-ws:lost:` not)
+  // so `delivered_live` reflects the TRUE fan-out, not a stale registered-sender
+  // snapshot (O6: never trust a pre-send sync boolean for a fire-and-forget transport).
+  app?: (topic_id: string, event: ChatOutbound) => boolean | Promise<boolean>
+  web?: (topic_id: string, event: ChatOutbound) => boolean | Promise<boolean>
 }
 
 export interface CreateDeliverInput {
@@ -119,7 +123,7 @@ export function createDeliver(input: CreateDeliverInput): Deliver {
    * Route the live push by topic grammar and swallow the sender's throw
    * (durable-first best-effort). Returns true iff a live sender received it.
    */
-  const routedPush = (topic_id: string, event: ChatOutbound): boolean => {
+  const routedPush = async (topic_id: string, event: ChatOutbound): Promise<boolean> => {
     const parsed = parseAnyTopicId(topic_id)
     const sender =
       parsed?.kind === 'app' ? push.app : parsed?.kind === 'web' ? push.web : undefined
@@ -127,7 +131,7 @@ export function createDeliver(input: CreateDeliverInput): Deliver {
     // push). The durable row — when there is one — is the guarantee.
     if (sender === undefined) return false
     try {
-      return sender(topic_id, event)
+      return await sender(topic_id, event)
     } catch (err) {
       // The app-ws registry evicts a throwing sender internally and never
       // throws OUT; the web registry can propagate a closed-socket throw. Either
@@ -142,10 +146,10 @@ export function createDeliver(input: CreateDeliverInput): Deliver {
     const { body, durability } = envelope
 
     // durability 'none' — a TRANSIENT live-only system_notice pill: no durable
-    // row, push synchronously (there is no await before it) so a sync caller
-    // observes delivery immediately, and never let a push failure surface.
+    // row; AWAIT the routed push so delivered_live is the real fan-out result, and
+    // never let a push failure surface (routedPush swallows throws).
     if (durability === 'none') {
-      const delivered = routedPush(topic_id, {
+      const delivered = await routedPush(topic_id, {
         type: 'agent_message',
         body,
         topic_id,
@@ -184,7 +188,7 @@ export function createDeliver(input: CreateDeliverInput): Deliver {
       return { prompt_id: null, persisted: false, delivered_live: false }
     }
 
-    const delivered = routedPush(topic_id, {
+    const delivered = await routedPush(topic_id, {
       type: 'agent_message',
       body,
       topic_id,

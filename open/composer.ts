@@ -1710,18 +1710,13 @@ export function buildOpenGraphComposer(
     const deliver: Deliver = createDeliver({
       buttonStore: landing.buttonStore,
       push: {
-        app: (topic_id: string, event: ChatOutbound): boolean => {
-          // delivered_live must reflect the REAL registry state, not a hardcoded
-          // `true`: `buildAppWsSendReply` fires `appWs.deref(adapter.send)` as
-          // fire-and-forget (persist + fan), so its own live result is detached and
-          // lost (the O6 fire-and-forget-lie). Read the registry's sync live-sender
-          // presence directly — an OFFLINE topic (no connected device) now correctly
-          // reports delivered_live:false so `deliver` can observe/record it (Codex).
-          // The durable row remains the guarantee; the persist+fan still happens.
-          const live = appWsRegistry.has(topic_id)
-          buildAppWsSendReply(topic_id)(event)
-          return live
-        },
+        // `buildAppWsSendReply` now AWAITS the app-ws adapter and classifies its real
+        // result marker, so `delivered_live` reflects the TRUE fan-out (an offline
+        // topic → false; a registered-but-dead socket that the send evicts → false) —
+        // NOT a hardcoded true or a stale pre-send registry snapshot (Codex/O6). The
+        // persist + fan still happen inside the awaited send.
+        app: (topic_id: string, event: ChatOutbound): Promise<boolean> =>
+          buildAppWsSendReply(topic_id)(event),
         web: (topic_id: string, event: ChatOutbound): boolean =>
           landing.registry.send(topic_id, event),
       },
@@ -2812,8 +2807,8 @@ export function buildOpenGraphComposer(
     // uses (one renderer, one path).
     const buildAppWsSendReply =
       (channel_topic_id: string, project_id?: string) =>
-      (out: ChatOutbound): void => {
-        if (out.type !== 'agent_message') return
+      async (out: ChatOutbound): Promise<boolean> => {
+        if (out.type !== 'agent_message') return false
         const msg: OutgoingMessage = {
           topic: {
             topic_id: '',
@@ -2844,7 +2839,18 @@ export function buildOpenGraphComposer(
         // persisting a chat_log row (no stray bubble on reload).
         if (out.system_notice === true) adapter_options['system_notice'] = true
         if (Object.keys(adapter_options).length > 0) msg.adapter_options = adapter_options
-        fireAndForget('composer.deref', appWs.deref((adapter) => adapter.send(msg)))
+        // AWAIT the real adapter result marker (O6) so delivered_live is accurate:
+        // `app-ws:<id>` = a live device received it; `app-ws:dropped:<id>` (no live
+        // socket) / `app-ws:lost:<id>` (append failed, uncaptured) = NOT delivered
+        // live. `deref` before the adapter binds returns undefined → not delivered.
+        // The chat_log persist happens inside adapter.send, so the durable resume row
+        // is written before this resolves. The delivered_live boolean is returned at
+        // the END (after the best-effort last_activity stamp below).
+        const marker = await appWs.deref((adapter) => adapter.send(msg))
+        const deliveredLive =
+          typeof marker === 'string' &&
+          !marker.startsWith('app-ws:dropped:') &&
+          !marker.startsWith('app-ws:lost:')
         // Rail-redesign: an agent reply on a PROJECT topic is fresh activity —
         // stamp the project's `last_activity_at` and re-fan `projects_changed`
         // so every connected rail reorders (this project pops to the top) and
@@ -2870,6 +2876,7 @@ export function buildOpenGraphComposer(
             emitProjectsChangedNow(OWNER_USER_ID)
           })())
         }
+        return deliveredLive
       }
     // ── app-ws receiver + delivery cluster (C3d: carved to open/wiring/app-ws.ts) ─
     // The Path-1 closing/opening delivery (`onboardingMsg` bind), the ephemeral
