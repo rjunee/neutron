@@ -142,20 +142,26 @@ test('CONCURRENT finalize whose TERMINAL write FAILS — both callers observe th
   })
 
   // Wrap the real store so the load-bearing `completed` upsert throws (locked DB /
-  // disk full); every other read/write delegates normally.
+  // disk full) WHILE `failTerminal` is set; every other read/write delegates normally.
+  // Toggleable so the healed retry can run through the SAME finalizer instance (proving
+  // the single-flight claim was actually RELEASED, not merely a fresh empty map).
   const real = h.stateStore
   let completedAttempts = 0
-  const failingStore: OnboardingStateStore = {
+  let failTerminal = true
+  const togglingStore: OnboardingStateStore = {
     async get(slug, uid) { return real.get(slug, uid) },
     async upsert(inp) {
-      if (inp.phase === 'completed') { completedAttempts += 1; throw new Error('terminal upsert boom') }
+      if (inp.phase === 'completed') {
+        completedAttempts += 1
+        if (failTerminal) throw new Error('terminal upsert boom')
+      }
       return real.upsert(inp)
     },
     async rekey(a, b, c) { return real.rekey(a, b, c) },
     async delete(slug, uid) { return real.delete(slug, uid) },
     async deleteByOwner(slug) { return real.deleteByOwner(slug) },
   }
-  const finalizer = buildOnboardingFinalize({ ...h.deps, stateStore: failingStore })
+  const finalizer = buildOnboardingFinalize({ ...h.deps, stateStore: togglingStore })
 
   // Two concurrent finalizes. Coalescing runs ONE body; its terminal write throws, so
   // the SHARED promise rejects — BOTH callers must see it (allSettled → both
@@ -174,12 +180,56 @@ test('CONCURRENT finalize whose TERMINAL write FAILS — both callers observe th
   expect((await real.get(PROJECT_SLUG, USER_ID))?.phase).not.toBe('completed')
   expect(h.onboardingCompleted.filter((u) => u === USER_ID)).toHaveLength(0)
 
-  // The claim was RELEASED on rejection: a later finalize against a HEALED store
-  // completes cleanly (idempotent retry), proving a transient terminal failure isn't
-  // a permanent wedge.
-  const healed = buildOnboardingFinalize(h.deps)
-  await healed.finalize({ user_id: USER_ID, topic_id: TOPIC_ID, state: seeded })
+  // Heal the store and retry through the SAME finalizer instance. This proves the
+  // single-flight claim was RELEASED on the prior rejection — if the rejected promise
+  // were permanently retained in the in-flight map, this same-instance retry would
+  // join the dead promise and never complete the row.
+  failTerminal = false
+  await finalizer.finalize({ user_id: USER_ID, topic_id: TOPIC_ID, state: seeded })
   expect((await real.get(PROJECT_SLUG, USER_ID))?.phase).toBe('completed')
+})
+
+test('finalize picks up a project persisted DURING the run — interleaved mutation, live re-read before materialize (F8 r4)', async () => {
+  const h = makeHarness()
+  const seeded = await h.stateStore.upsert({
+    project_slug: PROJECT_SLUG,
+    user_id: USER_ID,
+    phase: 'persona_reviewed',
+    phase_state_patch: {
+      user_first_name: 'Sam',
+      agent_name: 'Atlas',
+      primary_projects: ['Alpha'],
+    },
+  })
+
+  // A persona composer whose commit() runs an INTERLEAVED durable write mid-finalize:
+  // it adds project 'Beta' while the run awaits persona (exactly the "extractor
+  // persists state B during finalization" schedule Codex flagged). Because finalize
+  // re-reads live state AFTER persona (right before materialize), Beta is materialized
+  // too — not suppressed by the row flipping to completed on a stale snapshot.
+  let committed = 0
+  const interleavingPersona: PersonaComposerLike = {
+    async compose() { return { draft_id: 'x', status: 'composed' } },
+    async commit() {
+      committed += 1
+      await h.stateStore.upsert({
+        project_slug: PROJECT_SLUG,
+        user_id: USER_ID,
+        phase: 'persona_reviewed',
+        phase_state_patch: { primary_projects: ['Alpha', 'Beta'] },
+      })
+      return { committed_at: 0, git_sha: null, paths: [] }
+    },
+  }
+  const finalizer = buildOnboardingFinalize({ ...h.deps, personaComposer: interleavingPersona })
+  await finalizer.finalize({ user_id: USER_ID, topic_id: TOPIC_ID, state: seeded })
+
+  expect(committed).toBe(1)
+  const names = (
+    h.db.raw().query('SELECT name FROM projects ORDER BY name').all() as { name: string }[]
+  ).map((r) => r.name)
+  expect(names).toContain('Alpha')
+  expect(names).toContain('Beta') // the interleaved write is materialized, not suppressed
 })
 
 test('finalize operates on the LIVE durable state, not a stale caller snapshot (F8 r3)', async () => {

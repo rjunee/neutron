@@ -312,16 +312,22 @@ describe('Open import-watch re-arm on reconnect (restart resilience)', () => {
   test('F8 — boot re-arm + reconnect double-arm consumes the stranded row exactly once (idempotent single-consumption)', async () => {
     // Double-arm safety. Boot WITH the stranded `import_analysis_presented` row
     // (composition-boot arms one watcher) AND open a socket (on_session_open tries to
-    // arm a SECOND). Single-consumption is guaranteed by the PHASE-GATED consume: the
-    // consume only transitions FROM `import_analysis_presented`, so once ANY watcher
-    // moves the row to `work_interview_gap_fill` a second watcher reads the advanced
-    // phase and no-ops — regardless of how many watchers armed. (The `importWatchActive`
-    // guard is a complementary EFFICIENCY optimization: it avoids arming a redundant
-    // second timer at all; it is deliberately NOT the correctness mechanism, so this
-    // outcome-level test does not — and cannot — isolate it. The failure it would guard
-    // against, a duplicate CONSUME, is precluded by the phase gate above.) Prove the
-    // invariant: the row is consumed once to `work_interview_gap_fill` with a single
-    // `import_consumed_at` stamp that is NOT rewritten across subsequent watch ticks.
+    // arm a SECOND). Single consumption is guaranteed by the `importWatchActive`
+    // Set (open/composer.ts): watchImportCompletion checks-and-adds the user_id
+    // SYNCHRONOUSLY before scheduling any tick, so the second arm returns immediately
+    // and there is only ever ONE watcher (one tick loop) per user. That is the
+    // load-bearing correctness mechanism — the per-tick phase check (read then upsert)
+    // is NOT atomic, so it alone would NOT protect two genuinely concurrent watchers;
+    // the single-watcher Set is what precludes a duplicate consume.
+    //
+    // NOTE on rigor: this is an OUTCOME smoke test (double-arming doesn't crash and
+    // lands a single consume). It does not FORCE the two arms to overlap — the boot
+    // watcher's first tick fires immediately and may consume before the socket opens,
+    // so the reconnect arm can be a no-op. A deterministic forced-overlap test (gate
+    // the boot watcher's first read open until the reconnect arm has run, then assert
+    // exactly one consume) needs a composer store-injection seam to gate the async
+    // read window — the same seam the P6 watcher-latch follow-up tracks. Filed as a
+    // follow-up rather than built here.
     harness = await startHarness() // seeds import_analysis_presented before compose → boot arms
     const wsUrl = harness.base.replace(/^http/, 'ws')
     const ws = new WebSocket(`${wsUrl}/ws/app/chat?token=dev:owner&platform=web`)

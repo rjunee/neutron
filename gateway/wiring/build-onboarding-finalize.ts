@@ -273,27 +273,51 @@ export function buildOnboardingFinalize(deps: OnboardingFinalizeDeps): Onboardin
         log('warn', 'finalize: state read failed; using caller snapshot', { err: errStr(err) })
       }
 
-      // Prefer the live row's import_result (freshest); fall back to the caller's
-      // (e.g. when the live read failed and we're on the passed-in snapshot).
-      const liveImportResult =
-        effectiveState.phase_state['import_result'] !== null &&
-        typeof effectiveState.phase_state['import_result'] === 'object'
-          ? (effectiveState.phase_state['import_result'] as ImportResult)
-          : null
-      const import_result = liveImportResult ?? input.import_result ?? null
-
-      // (2) Persona — compose + commit from the live phase_state, then invalidate
-      // the steady-state loader. Failure-isolated: on any error we log and press
-      // on (the phase still flips to completed; persona regenerates later).
+      // (2) Persona — compose + commit from the live phase_state read above, then
+      // invalidate the steady-state loader. Failure-isolated: on any error we log and
+      // press on (the phase still flips to completed; persona regenerates later).
       await commitPersona(deps, effectiveState, log)
 
-      // (3) Projects — DB rows + topic bindings + on-disk materialization from the
-      // live phase_state. Returns the projects that actually landed (created/
-      // existing, not the soft-deleted skips) so the per-project opening step below
-      // can seed each one's chat.
+      // (3) Projects — RE-READ the live durable row as LATE as possible (right before
+      // materialization). Persona compose above is the dominant await; a field/project
+      // the owner added DURING it (e.g. the post-turn extractor persisting one more
+      // primary project, then its finalize coalescing into THIS run) is still picked up
+      // here and materialized. This narrows the mutate-during-finalize window (Codex F8
+      // r3/r4) to just the materialize→terminal-write span. Closing that residual span
+      // fully needs a CAS terminal write (durable-row revision support the store lacks
+      // today) — tracked as [[f8-finalize-cas-followup]]; real-world impact is a single
+      // project named in the last sub-second of onboarding, which the owner can re-create.
+      let materializeState = effectiveState
+      try {
+        const fresh = await deps.stateStore.get(deps.project_slug, input.user_id)
+        if (fresh !== null) {
+          // A concurrent (non-coalesced) finalize may have completed us in the gap.
+          if (fresh.phase === 'completed') {
+            log('info', 'finalize: completed during compose; no-op', { user_id: input.user_id })
+            return
+          }
+          materializeState = fresh
+        }
+      } catch (err) {
+        log('warn', 'finalize: pre-materialize re-read failed; using earlier snapshot', {
+          err: errStr(err),
+        })
+      }
+
+      // Prefer the freshest row's import_result; fall back to the caller's (e.g. when a
+      // read failed and we're on the passed-in snapshot).
+      const materializeImportResult =
+        materializeState.phase_state['import_result'] !== null &&
+        typeof materializeState.phase_state['import_result'] === 'object'
+          ? (materializeState.phase_state['import_result'] as ImportResult)
+          : null
+      const import_result = materializeImportResult ?? input.import_result ?? null
+
+      // Returns the projects that actually landed (created/existing, not the
+      // soft-deleted skips) so the per-project opening step below can seed each chat.
       const materialized = await materializeProjects(
         deps,
-        effectiveState,
+        materializeState,
         import_result,
         now,
         log,
