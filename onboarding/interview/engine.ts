@@ -316,8 +316,9 @@ import {
 // `invalidateResolvedSpec`, whose callers stay in engine.ts) and delegates
 // the uncached resolution to the extracted free function verbatim.
 import { resolvePhasePromptSpecUncached } from './engine-spec-resolution.ts'
+import { createLogger } from '@neutronai/logger'
 
-
+const log = createLogger('onboarding-engine')
 
 /**
  * 2026-06-05 (amend-redisplay typing-indicator fix) — generic
@@ -1203,9 +1204,11 @@ export class InterviewEngine implements EngineInternals {
         // engine has not advanced state and the user can retry. Log
         // and continue so the engine still returns a meaningful
         // AdvanceResult.
-        console.warn(
-          `[engine.sendAgentText] project=${input.project_slug} phase=${phase} send failed: ${err instanceof Error ? err.message : String(err)}`,
-        )
+        log.warn('send_agent_text_failed', {
+          project: input.project_slug,
+          phase,
+          error: err instanceof Error ? err.message : String(err),
+        })
       }
     }
   }
@@ -1716,9 +1719,13 @@ export class InterviewEngine implements EngineInternals {
           button_prompt_id: emit.prompt_id,
         })
       } else {
-        console.warn(
-          `[engine.emitPhasePrompt] event=send-undelivered project=${input.project_slug} topic=${input.topic_id} prompt=${emit.prompt_id} phase=${input.phase} — leaving delivered_at=null so reconnect re-emit catches it`,
-        )
+        log.warn('emit_phase_prompt_send_undelivered', {
+          project: input.project_slug,
+          topic: input.topic_id,
+          prompt: emit.prompt_id,
+          phase: input.phase,
+          note: 'leaving delivered_at=null so reconnect re-emit catches it',
+        })
       }
     }
     return { prompt_id: emit.prompt_id }

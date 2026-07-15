@@ -63,6 +63,9 @@ import type {
 } from '@neutronai/contracts/chat-command-filter.ts'
 import { constantTimeEqual } from '@neutronai/runtime/constant-time-equal.ts'
 import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
+import { createLogger } from '@neutronai/logger'
+
+const moduleLog = createLogger('app-ws')
 export type { ChatCommandFilter, ChatCommandFilterResult }
 
 /**
@@ -511,9 +514,13 @@ export function createAppWsSurface(opts: CreateAppWsSurfaceOptions): AppWsSurfac
           }
         }
         send(ready)
-        console.info(
-          `[app-ws] instance=${data.project_slug} user=${data.user_id} topic=${data.channel_topic_id} project=${data.project_id ?? '-'} platform=${data.platform ?? '-'} event=open`,
-        )
+        moduleLog.info('session_open', {
+          instance: data.project_slug,
+          user: data.user_id,
+          topic: data.channel_topic_id,
+          project: data.project_id ?? '-',
+          platform: data.platform ?? '-',
+        })
         // Onboarding consolidation (2026-06-26) — after session_ready, give the
         // composer a chance to fire the FIRST onboarding prompt over this socket
         // when the owner hasn't finished onboarding. Wrapped so a hook failure
@@ -527,11 +534,11 @@ export function createAppWsSurface(opts: CreateAppWsSurfaceOptions): AppWsSurfac
               ...(data.project_id !== undefined ? { project_id: data.project_id } : {}),
             })
           } catch (err) {
-            console.warn(
-              `[app-ws] on_session_open failed user=${data.user_id} topic=${data.channel_topic_id}: ${
-                err instanceof Error ? err.message : String(err)
-              }`,
-            )
+            moduleLog.warn('on_session_open_failed', {
+              user: data.user_id,
+              topic: data.channel_topic_id,
+              error: err instanceof Error ? err.message : String(err),
+            })
           }
         }
       },
@@ -814,9 +821,13 @@ export function createAppWsSurface(opts: CreateAppWsSurfaceOptions): AppWsSurfac
         if (send !== undefined) {
           registry.unregister(data.channel_topic_id, send)
         }
-        console.info(
-          `[app-ws] instance=${data.project_slug} user=${data.user_id} topic=${data.channel_topic_id} project=${data.project_id ?? '-'} platform=${data.platform ?? '-'} event=close`,
-        )
+        moduleLog.info('session_close', {
+          instance: data.project_slug,
+          user: data.user_id,
+          topic: data.channel_topic_id,
+          project: data.project_id ?? '-',
+          platform: data.platform ?? '-',
+        })
       },
     },
   }
@@ -989,11 +1000,10 @@ async function handleSend(
           ...(project_id !== null ? { project_id } : {}),
           ...(cleaned_attachments !== null ? { attachments: cleaned_attachments } : {}),
         }), (err: unknown) => {
-          console.warn(
-            `[app-ws] topic=${channel_topic_id} HTTP-fallback dispatch failed: ${
-              err instanceof Error ? err.message : String(err)
-            }`,
-          )
+          moduleLog.warn('http_fallback_dispatch_failed', {
+            topic: channel_topic_id,
+            error: err instanceof Error ? err.message : String(err),
+          })
         })
     }
   }

@@ -17,8 +17,11 @@ import { existsSync, readFileSync } from 'node:fs'
 import { join, resolve, sep } from 'node:path'
 
 import { sanitizeProjectId } from '@neutronai/channels/adapters/app-ws/envelope.ts'
+import { createLogger } from '@neutronai/logger'
 import type { ReminderContextSource } from './dispatcher.ts'
 import type { Reminder } from './store.ts'
+
+const contextLog = createLogger('reminder-context')
 
 /** Cap STATUS.md context so a sprawling file can't blow the composition prompt. */
 const STATUS_MD_CHAR_CAP = 4_000
@@ -51,23 +54,24 @@ export function buildStatusMdContextSource(
 ): ReminderContextSource {
   const cap = input.char_cap ?? STATUS_MD_CHAR_CAP
   const projectsRoot = resolve(input.owner_home, 'Projects')
+  const log = input.log ?? ((msg: string): void => contextLog.debug(msg))
   return {
     gather(_reminder: Reminder, project_id: string): string {
       const safe = sanitizeProjectId(project_id)
       if (safe === null) {
-        input.log?.(`[reminder-context] unsafe project id ${JSON.stringify(project_id)} — skipping STATUS.md`)
+        log(`[reminder-context] unsafe project id ${JSON.stringify(project_id)} — skipping STATUS.md`)
         return ''
       }
       // `sanitizeProjectId` allows dots, so a `.`/`..` segment slips the charset
       // gate. Reject dot-only ids outright, then verify the resolved path is
       // still strictly inside `Projects/` before any read (defense in depth).
       if (safe === '.' || safe === '..') {
-        input.log?.(`[reminder-context] project id ${JSON.stringify(project_id)} is a dot segment — skipping STATUS.md`)
+        log(`[reminder-context] project id ${JSON.stringify(project_id)} is a dot segment — skipping STATUS.md`)
         return ''
       }
       const path = join(projectsRoot, safe, 'STATUS.md')
       if (!path.startsWith(projectsRoot + sep)) {
-        input.log?.(`[reminder-context] project id ${JSON.stringify(project_id)} escapes Projects/ — skipping STATUS.md`)
+        log(`[reminder-context] project id ${JSON.stringify(project_id)} escapes Projects/ — skipping STATUS.md`)
         return ''
       }
       try {
@@ -76,7 +80,7 @@ export function buildStatusMdContextSource(
         const clipped = body.length > cap ? `${body.slice(0, cap)}\n…(truncated)` : body
         return `Project ${safe} STATUS.md:\n${clipped}`
       } catch (err) {
-        input.log?.(`[reminder-context] STATUS.md read failed for ${safe}: ${String(err)}`)
+        log(`[reminder-context] STATUS.md read failed for ${safe}: ${String(err)}`)
         return ''
       }
     },

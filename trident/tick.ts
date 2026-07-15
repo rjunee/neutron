@@ -25,6 +25,9 @@ import { SupervisedLoop, type LoopDescriptor } from '@neutronai/loop'
 import { advanceTridentRun, isTerminalPhase, type AdvanceDeps, type AdvanceOutcome } from './state-machine.ts'
 import type { TridentRun, TridentRunStore } from './store.ts'
 import { STALLED_WARN_MS } from './run-progress.ts'
+import { createLogger } from '@neutronai/logger'
+
+const log = createLogger('trident-tick')
 
 /**
  * The per-run advance function the loop applies each tick. PR-2 derives
@@ -289,10 +292,11 @@ export class TridentTickLoop {
                 await this.on_transition.onTransition(nextRun)
                 this.transitionCount++
               } catch (err) {
-                console.error(
-                  `trident transition fan failed for run ${run.id} (${run.slug}):`,
-                  err,
-                )
+                log.error('transition_fan_failed', {
+                  run: run.id,
+                  slug: run.slug,
+                  error: err instanceof Error ? (err.stack ?? err.message) : String(err),
+                })
               }
               // A terminal run won't be returned by `listNonTerminal` again —
               // drop its signature so the map can't grow unbounded across runs.
@@ -313,17 +317,22 @@ export class TridentTickLoop {
                 await this.on_terminal.onTerminal(outcome.run)
                 this.deliveredCount++
               } catch (err) {
-                console.error(
-                  `trident terminal delivery failed for run ${run.id} (${run.slug}):`,
-                  err,
-                )
+                log.error('terminal_delivery_failed', {
+                  run: run.id,
+                  slug: run.slug,
+                  error: err instanceof Error ? (err.stack ?? err.message) : String(err),
+                })
               }
             }
           }
         } catch (err) {
           // A single run's failure to advance must not abort the tick —
           // mirror the reminder loop's per-row try/catch.
-          console.error(`trident advance failed for run ${run.id} (${run.slug}):`, err)
+          log.error('advance_failed', {
+            run: run.id,
+            slug: run.slug,
+            error: err instanceof Error ? (err.stack ?? err.message) : String(err),
+          })
         }
       }
       this.advancedCount += advanced

@@ -51,6 +51,9 @@
 import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
 import type { ChatOutbound } from '@neutronai/landing/chat-protocol.ts'
 import type { RecoveredReply } from '@neutronai/runtime/adapters/claude-code/index.ts'
+import { createLogger } from '@neutronai/logger'
+
+const moduleLog = createLogger('recovered-reply-store')
 
 /** An undelivered (or delivered) recovered-reply row, keyed `(topic_id, turn_id)`. */
 export interface RecoveredReplyRow {
@@ -317,11 +320,12 @@ export async function drainRecoveredReplies(deps: {
     } catch (err) {
       deps.store.releaseClaim(deps.topic_id, row.turn_id)
       if (deps.log_tag !== undefined) {
-        console.warn(
-          `${deps.log_tag} drainRecoveredReplies event=fail topic=${deps.topic_id} turn=${row.turn_id} err=${
-            err instanceof Error ? err.message : String(err)
-          }`,
-        )
+        moduleLog.warn('drain_recovered_replies_fail', {
+          log_tag: deps.log_tag,
+          topic: deps.topic_id,
+          turn: row.turn_id,
+          error: err instanceof Error ? err.message : String(err),
+        })
       }
     }
   }

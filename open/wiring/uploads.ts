@@ -29,6 +29,7 @@
  *     including the not-mounted `console.warn`.
  */
 
+import { createLogger } from '@neutronai/logger'
 import type { ProjectDb } from '@neutronai/persistence/index.ts'
 import type { LoopRegistry } from '@neutronai/loop'
 import type { CompositionInput } from '@neutronai/gateway/composition.ts'
@@ -41,6 +42,8 @@ import type { OpenWiringContext } from './context.ts'
  * the import runner / payload-resolver / state-store), the single-owner POSIX
  * uid/gid, and the composer-owned late-bound import-watch holder.
  */
+const log = createLogger('open-uploads')
+
 export interface WireUploadsDeps {
   /** The landing stack — supplies the engine + import runner / resolver / store. */
   landing: LandingStackWithEngine
@@ -115,9 +118,11 @@ export async function wireUploads(
     project_slug,
     engine: engineForUpload,
     onTopicIdMissing: () => {
-      console.warn(
-        `[upload] open ${TOPIC_ID_HEADER} missing — falling back to topic_id=${TOPIC_ID_FALLBACK}. The engine's post-upload button emit is dropped unless a sender is registered for ${TOPIC_ID_FALLBACK}.`,
-      )
+      log.warn('topic_id_missing', {
+        header: TOPIC_ID_HEADER,
+        fallback: TOPIC_ID_FALLBACK,
+        note: `post-upload button emit is dropped unless a sender is registered for ${TOPIC_ID_FALLBACK}`,
+      })
     },
   })
 
@@ -148,9 +153,7 @@ export async function wireUploads(
     engine: engineForUpload,
     store: uploadSessionStore,
     onTopicIdMissing: () => {
-      console.warn(
-        `[chunked-upload] open ${TOPIC_ID_HEADER} missing — falling back to topic_id=${TOPIC_ID_FALLBACK}.`,
-      )
+      log.warn('chunked_topic_id_missing', { header: TOPIC_ID_HEADER, fallback: TOPIC_ID_FALLBACK })
     },
   })
   const uploadSweeper = new ChunkedUploadSweeper({
@@ -196,9 +199,11 @@ export async function wireUploads(
       stateStore: resumeStateStore,
     })
   } else {
-    console.warn(
-      `[composer] open import-resume handler NOT mounted — runner=${resumeRunner !== null} resolver=${resumePayloadResolver !== null}. resume_import button in chat will 404 if tapped.`,
-    )
+    log.warn('import_resume_not_mounted', {
+      runner: resumeRunner !== null,
+      resolver: resumePayloadResolver !== null,
+      note: 'resume_import button in chat will 404 if tapped',
+    })
   }
 
   return {

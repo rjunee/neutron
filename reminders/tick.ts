@@ -15,9 +15,12 @@
  */
 
 import { hostTimeZone, nextCronFire, parseCron } from '@neutronai/cron'
+import { createLogger } from '@neutronai/logger'
 import { SupervisedLoop, type LoopDescriptor } from '@neutronai/loop'
 
 import { isRecurring, type Reminder, type ReminderRecurrence, type ReminderStore } from './store.ts'
+
+const log = createLogger('reminder-tick')
 
 export interface ReminderDispatcher {
   /**
@@ -188,10 +191,10 @@ export class ReminderTickLoop {
           }
         } else {
           if (isRecurring(reminder)) {
-            console.error(
-              `reminder ${reminder.id} has an uncomputable cadence ` +
-                `(recurrence_spec=${JSON.stringify(reminder.recurrence_spec)}) — firing once then retiring`,
-            )
+            log.error('uncomputable_cadence_fire_once_then_retire', {
+              reminder: reminder.id,
+              recurrence_spec: JSON.stringify(reminder.recurrence_spec),
+            })
           }
           await this.store.markFired(reminder.id)
           claimRevert = () => this.store.reopen(reminder.id)
@@ -208,7 +211,10 @@ export class ReminderTickLoop {
             try {
               await this.on_fired.onFired(reminder)
             } catch (err) {
-              console.error(`reminder onFired hook failed for ${reminder.id}:`, err)
+              log.error('on_fired_hook_failed', {
+                reminder: reminder.id,
+                error: err instanceof Error ? (err.stack ?? err.message) : String(err),
+              })
             }
           }
         } catch (err) {
@@ -218,9 +224,15 @@ export class ReminderTickLoop {
           try {
             await claimRevert()
           } catch (rerr) {
-            console.error(`reminder ${reminder.id} claim-revert failed:`, rerr)
+            log.error('claim_revert_failed', {
+              reminder: reminder.id,
+              error: rerr instanceof Error ? (rerr.stack ?? rerr.message) : String(rerr),
+            })
           }
-          console.error(`reminder dispatch failed for ${reminder.id}:`, err)
+          log.error('dispatch_failed', {
+            reminder: reminder.id,
+            error: err instanceof Error ? (err.stack ?? err.message) : String(err),
+          })
         }
       }
       this.firedCount += fired

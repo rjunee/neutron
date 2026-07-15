@@ -26,6 +26,7 @@
  * `cron_state` via the supplied `CronStateStore`.
  */
 
+import { createLogger } from '@neutronai/logger'
 import { guardedFire, type LoopDescriptor } from '@neutronai/loop'
 import { emitSystemEvent } from '@neutronai/persistence/index.ts'
 import type { ProjectDb } from '@neutronai/persistence/index.ts'
@@ -40,6 +41,13 @@ import type { CronHandlerRegistry, CronHandlerStatus } from './handlers.ts'
 import type { CronJobDef, CronJobRegistry } from './jobs.ts'
 import { CronStateStore } from './state.ts'
 import { fireAndForget, neutralizeAbandonedSettle } from '@neutronai/logger/fire-and-forget.ts'
+
+const log = createLogger('cron-scheduler')
+
+/** Per-tick cron failures can recur EVERY fire; rate-limit the log so a
+ *  persistently-throwing job doesn't spam (visibility only — control flow is
+ *  unchanged, the fire still runs each tick). */
+const FIRE_ERROR_COOLDOWN_MS = 60_000
 
 /** setTimeout's max delay (2^31-1 ms ≈ 24.8 days); longer waits are chunked. */
 const MAX_TIMER_DELAY_MS = 2_147_483_647
@@ -205,7 +213,7 @@ export class CronScheduler {
     if (this.running.has(job.name)) return
     const handler = this.handlers.get(job.handler)
     if (!handler) {
-      console.warn(`cron scheduler: skipping job '${job.name}' — handler '${job.handler}' not registered`)
+      log.warn('skip_job_handler_unregistered', { job: job.name, handler: job.handler })
       return
     }
 
@@ -229,9 +237,7 @@ export class CronScheduler {
     try {
       spec = parseOnCalendar(job.schedule.expression)
     } catch (err) {
-      console.warn(
-        `cron scheduler: skipping job '${job.name}' — ${(err as Error).message}`,
-      )
+      log.warn('skip_job_bad_schedule', { job: job.name, error: (err as Error).message })
       return
     }
     const entry: RunningJob = {
@@ -338,7 +344,10 @@ export class CronScheduler {
     // contains a tail throw so this VOIDED timer promise can't leak an
     // unhandledRejection.
     fireAndForget('scheduler.guardedFire', guardedFire(name, () => this.fireOnce(name), (jobName, err) => {
-      console.error(`cron scheduler: fire '${jobName}' threw:`, err)
+      log.rateLimited(`fire_threw:${jobName}`, FIRE_ERROR_COOLDOWN_MS).error('fire_threw', {
+        job: jobName,
+        error: err instanceof Error ? (err.stack ?? err.message) : String(err),
+      })
     }))
   }
 

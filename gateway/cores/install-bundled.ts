@@ -64,6 +64,9 @@ import type {
   LauncherIconMeta,
 } from './composer-state.ts'
 import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
+import { createLogger } from '@neutronai/logger'
+
+const moduleLog = createLogger('cores')
 
 /**
  * Per-Core backend factories. The composer calls one per slug after a
@@ -656,33 +659,37 @@ export async function updateInstallState(
 function defaultLog(event: BundledRegistryEvent | InstallTelemetryEvent): void {
   if (event.event_name === 'cores.install_failed') {
     const e = event as InstallTelemetryEvent
-    console.warn(
-      `[cores] install_failed core=${e.core_slug} code=${e.code ?? 'unknown'} message=${e.message ?? ''}`,
-    )
+    moduleLog.warn('install_failed', {
+      core: e.core_slug,
+      code: e.code ?? 'unknown',
+      message: e.message ?? '',
+    })
     return
   }
   if (event.event_name === 'cores.tool_registration_failed') {
     const e = event as InstallTelemetryEvent
-    console.warn(
-      `[cores] tool_registration_failed core=${e.core_slug} code=${e.code ?? 'unknown'} message=${e.message ?? ''}`,
-    )
+    moduleLog.warn('tool_registration_failed', {
+      core: e.core_slug,
+      code: e.code ?? 'unknown',
+      message: e.message ?? '',
+    })
     return
   }
   if (event.event_name === 'cores.install_ok') {
     const e = event as InstallTelemetryEvent
-    console.log(`[cores] install_ok core=${e.core_slug}`)
+    moduleLog.info('install_ok', { core: e.core_slug })
     return
   }
   if (event.event_name === 'cores.root_skipped') {
-    console.warn(
-      `[cores] registry root_skipped rootDir=${event.rootDir} reason=${event.reason}`,
-    )
+    moduleLog.warn('root_skipped', { rootDir: event.rootDir, reason: event.reason })
     return
   }
   if (event.event_name === 'cores.duplicate_slug_resolved') {
-    console.log(
-      `[cores] registry duplicate_slug_resolved slug=${event.slug} winning_root=${event.winning_root} losing_root=${event.losing_root}`,
-    )
+    moduleLog.info('duplicate_slug_resolved', {
+      slug: event.slug,
+      winning_root: event.winning_root,
+      losing_root: event.losing_root,
+    })
     return
   }
 }

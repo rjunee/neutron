@@ -27,6 +27,9 @@
  */
 
 import type { AppWsOutbound } from './envelope.ts'
+import { createLogger } from '@neutronai/logger'
+
+const log = createLogger('app-ws-registry')
 
 /**
  * Client platform reported at WS upgrade time. Used by
@@ -136,11 +139,10 @@ export class InMemoryAppWsSessionRegistry implements AppWsSessionRegistry {
         // here. Per Codex P2 review on PR #142. With multi-device we
         // must NOT abort the fan-out: a dead laptop socket can't stop
         // the phone from receiving the emit.
-        console.warn(
-          `[app-ws-registry] topic=${channel_topic_id} a sender threw — treating as dropped: ${
-            err instanceof Error ? err.message : String(err)
-          }`,
-        )
+        log.warn('sender_threw_treating_as_dropped', {
+          topic: channel_topic_id,
+          error: err instanceof Error ? err.message : String(err),
+        })
         set.delete(entry)
       }
     }

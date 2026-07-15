@@ -35,6 +35,7 @@
  * import from `engine.ts`. This is a PURE MOVE.
  */
 
+import { createLogger } from '@neutronai/logger'
 import type { ButtonChoice } from '@neutronai/channels/button-primitive.ts'
 import { isLegalTransition, TERMINAL_PHASES } from './phase.ts'
 import {
@@ -54,6 +55,8 @@ import {
   type AdvanceResult,
   type EngineInternals,
 } from './engine-internals.ts'
+
+const log = createLogger('onboarding-engine')
 
 /**
  * GAP1 (onboarding-wow-handoff-fix, 2026-06-09) — count of projects the
@@ -83,10 +86,13 @@ function logProjectFunnel(args: {
   presented: number
   confirmed: number
 }): void {
-  console.info(
-    `[onboarding] project_funnel project=${args.project_slug} stage=${args.stage} ` +
-      `proposed=${args.proposed} presented=${args.presented} confirmed=${args.confirmed}`,
-  )
+  log.info('project_funnel', {
+    project: args.project_slug,
+    stage: args.stage,
+    proposed: args.proposed,
+    presented: args.presented,
+    confirmed: args.confirmed,
+  })
 }
 
 /**

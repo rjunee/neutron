@@ -66,6 +66,14 @@ import {
   type AppWsOutboundReceiptUpdate,
   type AppWsOutboundUserMessageEcho,
 } from './envelope.ts'
+import { createLogger } from '@neutronai/logger'
+
+const wsLog = createLogger('app-ws')
+
+/** Per-message persist failures can recur on every message; rate-limit the log
+ *  so a persistently-failing topic can't spam (visibility only — the echo/emit
+ *  still proceeds without a seq exactly as before). */
+const PERSIST_WARN_COOLDOWN_MS = 30_000
 
 const MANIFEST: ChannelAdapterManifest = {
   kind: 'app_socket',
@@ -217,11 +225,12 @@ export class AppWsAdapter implements ChannelAdapter {
         // to the legacy in-memory fan-out (no seq) and log. A client that
         // later resumes simply won't see this message in the replay; it's
         // still rendered live.
-        console.warn(
-          `[app-ws] topic=${message.topic.channel_topic_id} agent-message persist failed — emitting without seq: ${
-            err instanceof Error ? err.message : String(err)
-          }`,
-        )
+        wsLog
+          .rateLimited(`agent_message_persist_failed:${message.topic.channel_topic_id}`, PERSIST_WARN_COOLDOWN_MS)
+          .warn('agent_message_persist_failed_emit_without_seq', {
+            topic: message.topic.channel_topic_id,
+            error: err instanceof Error ? err.message : String(err),
+          })
       }
     }
     // Track B Phase 4 — record `delivered` for every device connected right
@@ -388,11 +397,12 @@ export class AppWsAdapter implements ChannelAdapter {
       canonical_id = result.row.message_id
       was_new = result.was_new
     } catch (err) {
-      console.warn(
-        `[app-ws] topic=${input.channel_topic_id} user-message persist failed — echoing without seq: ${
-          err instanceof Error ? err.message : String(err)
-        }`,
-      )
+      wsLog
+        .rateLimited(`user_message_persist_failed:${input.channel_topic_id}`, PERSIST_WARN_COOLDOWN_MS)
+        .warn('user_message_persist_failed_echo_without_seq', {
+          topic: input.channel_topic_id,
+          error: err instanceof Error ? err.message : String(err),
+        })
     }
     const env: AppWsOutboundUserMessageEcho = {
       v: 1,
@@ -446,11 +456,12 @@ export class AppWsAdapter implements ChannelAdapter {
         for (const d of agg.delivered_by) delivered.add(d)
         if (agg.read_by.length > 0) env.read_by = [...agg.read_by]
       } catch (err) {
-        console.warn(
-          `[app-ws] topic=${channel_topic_id} delivered-receipt persist failed: ${
-            err instanceof Error ? err.message : String(err)
-          }`,
-        )
+        wsLog
+          .rateLimited(`delivered_receipt_persist_failed:${channel_topic_id}`, PERSIST_WARN_COOLDOWN_MS)
+          .warn('delivered_receipt_persist_failed', {
+            topic: channel_topic_id,
+            error: err instanceof Error ? err.message : String(err),
+          })
       }
     }
     if (delivered.size > 0) env.delivered_by = [...delivered].sort()
@@ -485,11 +496,12 @@ export class AppWsAdapter implements ChannelAdapter {
         at: this.now(),
       })
     } catch (err) {
-      console.warn(
-        `[app-ws] topic=${input.channel_topic_id} receipt persist failed: ${
-          err instanceof Error ? err.message : String(err)
-        }`,
-      )
+      wsLog
+        .rateLimited(`receipt_persist_failed:${input.channel_topic_id}`, PERSIST_WARN_COOLDOWN_MS)
+        .warn('receipt_persist_failed', {
+          topic: input.channel_topic_id,
+          error: err instanceof Error ? err.message : String(err),
+        })
       return null
     }
     const env: AppWsOutboundReceiptUpdate = {
@@ -557,9 +569,10 @@ export class AppWsAdapter implements ChannelAdapter {
       const next = page.next_cursor
       if (next === null) break
       if (!replayCursorAdvanced(seq, message_id, next)) {
-        console.warn(
-          `[app-ws] topic=${channel_topic_id} receipt replay cursor did not advance (seq=${next.seq}) — stopping drain`,
-        )
+        wsLog.warn('receipt_replay_cursor_stalled', {
+          topic: channel_topic_id,
+          seq: next.seq,
+        })
         break
       }
       seq = next.seq
@@ -600,11 +613,12 @@ export class AppWsAdapter implements ChannelAdapter {
         at: this.now(),
       })
     } catch (err) {
-      console.warn(
-        `[app-ws] topic=${input.channel_topic_id} reaction persist failed: ${
-          err instanceof Error ? err.message : String(err)
-        }`,
-      )
+      wsLog
+        .rateLimited(`reaction_persist_failed:${input.channel_topic_id}`, PERSIST_WARN_COOLDOWN_MS)
+        .warn('reaction_persist_failed', {
+          topic: input.channel_topic_id,
+          error: err instanceof Error ? err.message : String(err),
+        })
       return null
     }
     const env: AppWsOutboundReactionUpdate = {
@@ -667,9 +681,10 @@ export class AppWsAdapter implements ChannelAdapter {
       const next = page.next_cursor
       if (next === null) break
       if (!replayCursorAdvanced(seq, message_id, next)) {
-        console.warn(
-          `[app-ws] topic=${channel_topic_id} reaction replay cursor did not advance (seq=${next.seq}) — stopping drain`,
-        )
+        wsLog.warn('reaction_replay_cursor_stalled', {
+          topic: channel_topic_id,
+          seq: next.seq,
+        })
         break
       }
       seq = next.seq
@@ -715,11 +730,12 @@ export class AppWsAdapter implements ChannelAdapter {
       // Authorization failures are the editor's problem, not the socket's — let
       // the surface map them to a `not_authorized` error frame.
       if (err instanceof AppChatEditNotAuthorizedError) throw err
-      console.warn(
-        `[app-ws] topic=${input.channel_topic_id} edit persist failed: ${
-          err instanceof Error ? err.message : String(err)
-        }`,
-      )
+      wsLog
+        .rateLimited(`edit_persist_failed:${input.channel_topic_id}`, PERSIST_WARN_COOLDOWN_MS)
+        .warn('edit_persist_failed', {
+          topic: input.channel_topic_id,
+          error: err instanceof Error ? err.message : String(err),
+        })
       return null
     }
     const env: AppWsOutboundEditUpdate = {

@@ -62,6 +62,13 @@ export type {
 import type { GatewayModuleGraph } from './module-graph.ts'
 import { sdNotify } from './sd-notify.ts'
 import { fireAndForget, installProcessSafetyNet } from '@neutronai/logger/fire-and-forget.ts'
+import { createLogger } from '@neutronai/logger'
+
+const log = createLogger('gateway')
+
+/** Render a thrown value for a log field. */
+const errText = (err: unknown): string =>
+  err instanceof Error ? (err.stack ?? err.message) : String(err)
 
 // 5-second tick interval pairs with the systemd unit's WatchdogSec=10 — 50%
 // safety margin per `man sd_notify(3)` recommendations. If the gateway misses
@@ -213,7 +220,7 @@ export async function drainRealmodeCleanups(
     try {
       await cleanup()
     } catch (err) {
-      console.error('realmode cleanup threw during shutdown:', err)
+      log.error('realmode_cleanup_threw', { error: errText(err) })
     }
   }
 }
@@ -321,7 +328,7 @@ export async function boot(options: BootOptions = {}): Promise<BootHandle> {
       try {
         await graph.shutdown()
       } catch (shutdownErr) {
-        console.error('graph shutdown during init failure threw:', shutdownErr)
+        log.error('graph_shutdown_threw', { error: errText(shutdownErr) })
       }
     }
     // §F1 — drain any realmode cleanups the composition wired (auxiliary DB
@@ -478,7 +485,7 @@ export async function boot(options: BootOptions = {}): Promise<BootHandle> {
           // 500 on any unhandled handler error so the listener stays up.
           // journald collects the trace; the supervisor watchdog uses the
           // instance-process liveness signal, not these handler errors.
-          console.error('http handler threw:', err)
+          log.error('http_handler_threw', { error: errText(err) })
           return new Response('Internal Server Error', { status: 500 })
         }
       },
@@ -570,7 +577,7 @@ export async function boot(options: BootOptions = {}): Promise<BootHandle> {
       sdNotify('WATCHDOG=1')
     } catch (err) {
       tickError = err
-      console.error('sd_notify WATCHDOG=1 failed:', err)
+      log.error('sd_notify_watchdog_failed', { error: errText(err) })
     }
     // F4 — pulse the composition's supervision-watchdog heartbeat off this same
     // tick (the one process-level liveness loop). This lets the heartbeat detector
@@ -582,7 +589,7 @@ export async function boot(options: BootOptions = {}): Promise<BootHandle> {
       onGatewayTick?.()
     } catch (err) {
       tickError = err
-      console.error('on_gateway_tick hook failed:', err)
+      log.error('gateway_tick_hook_failed', { error: errText(err) })
     }
     // §F2 — stamp health after the tick tail: lastTickAt = completed tick,
     // lastError = this tick's error or null (recovery clears a prior error).
@@ -594,7 +601,7 @@ export async function boot(options: BootOptions = {}): Promise<BootHandle> {
   // (composer loops + graph loops + this gateway-liveness loop) has started.
   // Emitted on EVERY boot path — composed AND composer-less (which inventories
   // just gateway-liveness) — so no running loop is ever uninventoried.
-  console.log(loopRegistry.bootLine(project_slug, DORMANT_LOOPS))
+  log.info(loopRegistry.bootLine(project_slug, DORMANT_LOOPS))
 
   let shuttingDown = false
   const shutdown = async (opts?: { force?: boolean }): Promise<void> => {
@@ -609,7 +616,7 @@ export async function boot(options: BootOptions = {}): Promise<BootHandle> {
     try {
       await boundServer.stop(opts)
     } catch (err) {
-      console.error('http listener stop failed:', err)
+      log.error('http_listener_stop_failed', { error: errText(err) })
     }
     // Same try/catch shape as the watchdog tick above: a transient sd_notify
     // failure (NOTIFY_SOCKET torn down mid-stop, kernel sendto hiccup) must
@@ -619,7 +626,7 @@ export async function boot(options: BootOptions = {}): Promise<BootHandle> {
     try {
       sdNotify('STOPPING=1')
     } catch (err) {
-      console.error('sd_notify STOPPING=1 failed:', err)
+      log.error('sd_notify_stopping_failed', { error: errText(err) })
     }
     if (watchdogTimer !== null) {
       clearInterval(watchdogTimer)
@@ -630,7 +637,7 @@ export async function boot(options: BootOptions = {}): Promise<BootHandle> {
       try {
         await graph.shutdown()
       } catch (err) {
-        console.error('module-graph shutdown failed:', err)
+        log.error('module_graph_shutdown_failed', { error: errText(err) })
       }
     }
     // ISSUES #217 — terminate the persistent-REPL warm pool (the `claude`
@@ -657,7 +664,7 @@ export async function boot(options: BootOptions = {}): Promise<BootHandle> {
     try {
       await shutdownAllPersistentRepls()
     } catch (err) {
-      console.error('persistent-REPL substrate shutdown failed:', err)
+      log.error('persistent_repl_shutdown_failed', { error: errText(err) })
     }
     // P1.5 / Sprint 21 (Codex r2 P2) — run realmode cleanups (e.g. the
     // slug-picker resolver's RW registry + identity DB handles) AFTER
@@ -702,7 +709,7 @@ export async function boot(options: BootOptions = {}): Promise<BootHandle> {
       try {
         await rawServerRef.stop(true)
       } catch (stopErr) {
-        console.error('http listener stop during init failure threw:', stopErr)
+        log.error('http_listener_stop_threw', { error: errText(stopErr) })
       }
     }
     await bootFailureCleanup()
@@ -786,13 +793,14 @@ export async function loadGraphComposerFromEnv(
   const jwksUrl = env['NEUTRON_AUTH_JWKS_URL']
   if (typeof modulePath !== 'string' || modulePath.length === 0) {
     if (typeof jwksUrl === 'string' && jwksUrl.length > 0) {
-      console.error(
-        '[boot] FATAL: NEUTRON_AUTH_JWKS_URL is set (realmode requested) but ' +
+      log.error('boot_fatal_missing_composer_module', {
+        detail:
+          '[boot] FATAL: NEUTRON_AUTH_JWKS_URL is set (realmode requested) but ' +
           'NEUTRON_GRAPH_COMPOSER_MODULE is not — the graph composer is ' +
           'deploy-config injection since C2. Managed units set it to ' +
           'owner-provisioning/realmode-composer.ts; run ' +
           'scripts/install/migrate-owners-graph-composer.sh for pre-C2 units.',
-      )
+      })
       process.exit(1)
     }
     return undefined
@@ -807,9 +815,7 @@ export async function loadGraphComposerFromEnv(
     buildGraphComposer?: () => unknown
   }
   if (typeof mod.buildGraphComposer !== 'function') {
-    console.error(
-      `[boot] FATAL: NEUTRON_GRAPH_COMPOSER_MODULE=${modulePath} does not export buildGraphComposer()`,
-    )
+    log.error('boot_fatal_composer_no_export', { module: modulePath })
     process.exit(1)
   }
   // Argus PR #440 r2 (minor 8): validate the factory's RETURN value too.
@@ -819,10 +825,10 @@ export async function loadGraphComposerFromEnv(
   // far less actionable stack than this fail-fast.
   const composer = mod.buildGraphComposer()
   if (typeof composer !== 'function') {
-    console.error(
-      `[boot] FATAL: NEUTRON_GRAPH_COMPOSER_MODULE=${modulePath} buildGraphComposer() ` +
-        `returned ${composer === null ? 'null' : typeof composer} — expected a GraphComposer function`,
-    )
+    log.error('boot_fatal_composer_bad_return', {
+      module: modulePath,
+      returned: composer === null ? 'null' : typeof composer,
+    })
     process.exit(1)
   }
   return composer as GraphComposer
@@ -863,12 +869,13 @@ if (import.meta.main) {
   // full onboarding+chat product). If the resolved DB already exists on disk
   // (an installed Open box), say so loudly rather than booting a bare shell.
   if (composer === undefined && config.role === 'open' && existsSync(config.dbPath)) {
-    console.warn(
-      `[boot] gateway entrypoint: role=open, no NEUTRON_GRAPH_COMPOSER_MODULE, but an ` +
-        `existing DB was found at ${config.dbPath}. This entrypoint serves ONLY /healthz. ` +
-        `For the full Open onboarding+chat product run \`bun start\` (open/server.ts). ` +
-        `Booting the /healthz shell against ${config.dbPath}.`,
-    )
+    log.warn('healthz_shell_existing_db', {
+      db_path: config.dbPath,
+      detail:
+        'gateway entrypoint: role=open, no NEUTRON_GRAPH_COMPOSER_MODULE, but an existing DB was ' +
+        'found. This entrypoint serves ONLY /healthz. For the full Open onboarding+chat product ' +
+        'run `bun start` (open/server.ts).',
+    })
   }
   await boot(composer !== undefined ? { composer, config } : { config })
   // The Bun.serve listener + watchdog setInterval both keep the event loop

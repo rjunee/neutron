@@ -57,16 +57,31 @@ import {
   type BinaryStoreLogger,
   type BinaryStoreOptions,
 } from './binary-types.ts'
+import { createLogger } from '@neutronai/logger'
+
+const moduleLog = createLogger('docs.binary')
+
+/** Coerce arbitrary log meta to the logger's primitive `LogValue` shape —
+ *  non-primitives are JSON-stringified so the emitted `k=v` line stays single. */
+const coerceLogFields = (
+  fields?: Record<string, unknown>,
+): Record<string, string | number | boolean | null | undefined> | undefined => {
+  if (fields === undefined) return undefined
+  const out: Record<string, string | number | boolean | null | undefined> = {}
+  for (const [k, v] of Object.entries(fields)) {
+    out[k] =
+      v === null || v === undefined || ['string', 'number', 'boolean'].includes(typeof v)
+        ? (v as string | number | boolean | null | undefined)
+        : (() => { try { return JSON.stringify(v) } catch { return String(v) } })()
+  }
+  return out
+}
 
 const BLOBS_DIR = '.docs-blobs'
 const INDEX_FILE = 'index.sqlite'
 
 const DEFAULT_LOGGER: BinaryStoreLogger = (event, fields) => {
-  try {
-    console.warn(`[docs.binary] ${event} ${JSON.stringify(fields)}`)
-  } catch {
-    console.warn(`[docs.binary] ${event}`)
-  }
+  moduleLog.warn(event, coerceLogFields(fields))
 }
 
 const SCHEMA = `

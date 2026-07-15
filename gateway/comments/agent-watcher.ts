@@ -83,6 +83,9 @@ import type {
 import type { WebChatSessionProjectRegistry } from '../http/chat-bridge.ts'
 import type { EscalateCommentBodyHistoryEntry } from '../realmode-composer/escalation-loader.ts'
 import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
+import { createLogger } from '@neutronai/logger'
+
+const moduleLog = createLogger('agent-watcher')
 
 /**
  * Polling cadence — every 30s the watcher walks every active project
@@ -1042,13 +1045,17 @@ function structuredLog(
   event: string,
   fields: Record<string, unknown>,
 ): void {
-  // Neutron's gateway uses console.warn / console.info with structured
-  // JSON appended — see `gateway/index.ts:3923` (anchor-walker wiring)
-  // for the same shape. No `gateway/logging.ts` module exists; the
-  // structured format is convention-by-grep.
-  const line = `[${event}] ${JSON.stringify(fields)}`
-  if (level === 'warn') console.warn(line)
-  else console.info(line)
+  // Route through the canonical `@neutronai/logger` (O2). Field values are
+  // coerced to the logger's primitive `LogValue` shape — non-primitives are
+  // JSON-stringified so the emitted line stays a single splittable `k=v` set.
+  const coerced: Record<string, string | number | boolean | null | undefined> = {}
+  for (const [k, v] of Object.entries(fields)) {
+    coerced[k] =
+      v === null || v === undefined || ['string', 'number', 'boolean'].includes(typeof v)
+        ? (v as string | number | boolean | null | undefined)
+        : JSON.stringify(v)
+  }
+  moduleLog[level](event, coerced)
 }
 
 function stringifyError(err: unknown): string {

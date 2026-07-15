@@ -14,6 +14,7 @@
  * and never widens the work-board package's dependency surface.
  */
 
+import { createLogger } from '@neutronai/logger'
 import {
   buildSpecDocMarkdown,
   designDocRefForPath,
@@ -64,6 +65,8 @@ export interface SpecDocLog {
   warn(message: string): void
 }
 
+const specDocLog = createLogger('work-board-spec-doc')
+
 export class WorkBoardSpecDocService {
   private readonly docs: SpecDocStore
   private readonly board: SpecDocBoardStore
@@ -88,7 +91,7 @@ export class WorkBoardSpecDocService {
   }) {
     this.docs = deps.docs
     this.board = deps.board
-    this.log = deps.log ?? { warn: (m) => console.warn(m) }
+    this.log = deps.log ?? { warn: (m) => specDocLog.warn(m) }
     this.ensureDocsDir = deps.ensureDocsDir ?? null
   }
 

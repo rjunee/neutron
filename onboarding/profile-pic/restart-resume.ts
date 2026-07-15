@@ -43,8 +43,11 @@
  * non-pending rows).
  */
 
+import { createLogger } from '@neutronai/logger'
 import type { ProfilePicPendingRow, ProfilePicPendingStore } from './pending-call-store.ts'
 import type { ProfilePicPipeline, StartProfilePicInput } from './pipeline.ts'
+
+const log = createLogger('profile-pic-resume')
 
 /**
  * Threshold (ms) below which a pending row is kept untouched. Older
@@ -103,7 +106,7 @@ export interface ResumeOnBootResult {
  * startup (e.g. "[profile-pic] resume: 0 kept, 1 expired, 0 failed,
  * 1 auto-retry fired") rather than a noisy per-row log.
  *
- * Per-row errors during auto-retry are caught + logged (console.warn);
+ * Per-row errors during auto-retry are caught + logged (profile-pic-resume logger);
  * a flaky retry does NOT abort the whole scan.
  */
 export async function resumeProfilePicOnBoot(
@@ -167,11 +170,10 @@ async function fireAutoRetry(
     const r = await pipeline.start(startInput)
     return r.job_id
   } catch (err) {
-    console.warn(
-      `[profile-pic.resume] auto-retry failed for request_id=${row.request_id}: ${
-        err instanceof Error ? err.message : String(err)
-      }`,
-    )
+    log.warn('auto_retry_failed', {
+      request_id: row.request_id,
+      error: err instanceof Error ? err.message : String(err),
+    })
     return null
   }
 }

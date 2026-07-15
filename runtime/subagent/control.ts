@@ -12,6 +12,9 @@
  */
 
 import type { SubagentRecord, SubagentRegistry } from './registry.ts'
+import { createLogger } from '@neutronai/logger'
+
+const log = createLogger('subagent-control')
 
 export interface Canceller {
   (reason: 'caller_cancelled' | 'lifecycle_cleanup'): Promise<void>
@@ -76,10 +79,7 @@ export async function cancelRun(
   // winner owns durability and its own convergence logging — a warn here would be
   // a misleading duplicate.
   if (settled.transitioned && !settled.durable) {
-    console.warn(
-      `[subagent-control] cancel persist for ${run_id} did not converge; ` +
-        `canceller removed, durable row stale (best-effort)`,
-    )
+    log.warn('cancel_persist_did_not_converge', { run_id })
   }
 }
 
@@ -161,10 +161,7 @@ export async function failRun(
   // actually finished.
   if (!settled.transitioned) return false
   if (!settled.durable) {
-    console.warn(
-      `[subagent-control] failRun persist for ${run_id} did not converge; ` +
-        `crash surfaced, durable row stale (best-effort)`,
-    )
+    log.warn('failrun_persist_did_not_converge', { run_id })
   }
   return true
 }

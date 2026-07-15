@@ -97,6 +97,7 @@ import { OWNER_USER_ID } from '../owner-identity.ts'
 import type { Late } from './late.ts'
 import type { OpenWiringContext } from './context.ts'
 import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
+import { createLogger } from '@neutronai/logger'
 
 /**
  * Open-mode app-ws routing decision for an engine-emitted onboarding
@@ -117,6 +118,8 @@ import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
  * Pure + exported for unit coverage; the router (in {@link wireAppWs}) calls this
  * then fans the result over the app-ws registry.
  */
+const log = createLogger('open-app-ws')
+
 export function resolveOpenImportPromptEmission(
   prompt: ButtonPrompt,
   phase: string | null,
@@ -368,11 +371,11 @@ export function wireAppWs(ctx: OpenWiringContext, deps: WireAppWsDeps): WiredApp
       prompt_id = emitted.prompt_id
       wasNew = emitted.was_new
     } catch (err) {
-      console.warn(
-        `[open] event=onboarding_msg_persist_failed project=${project_slug} topic=${turnTopic} err=${
-          err instanceof Error ? err.message : String(err)
-        }`,
-      )
+      log.warn('onboarding_msg_persist_failed', {
+        project: project_slug,
+        topic: turnTopic,
+        error: err instanceof Error ? err.message : String(err),
+      })
     }
     // A duplicate finalize already delivered this message — don't re-post it live.
     if (!wasNew) return
@@ -462,11 +465,11 @@ export function wireAppWs(ctx: OpenWiringContext, deps: WireAppWsDeps): WiredApp
         }),
       )
     } catch (err) {
-      console.warn(
-        `[open] event=project_opening_recovery_failed project=${project_slug} topic=${channel_topic_id} err=${
-          err instanceof Error ? err.message : String(err)
-        }`,
-      )
+      log.warn('project_opening_recovery_failed', {
+        project: project_slug,
+        topic: channel_topic_id,
+        error: err instanceof Error ? err.message : String(err),
+      })
     }
   }
   // Chat transport — server-authoritative typing indicator. Fan an ephemeral
@@ -777,11 +780,11 @@ export function wireAppWs(ctx: OpenWiringContext, deps: WireAppWsDeps): WiredApp
             author: { id: 'owner', display: 'owner' },
           })
         } catch (err) {
-          console.warn(
-            `[open] event=scribe_hook_threw project=${project_slug} topic=${turnTopicId} err=${
-              err instanceof Error ? err.message : String(err)
-            }`,
-          )
+          log.warn('scribe_hook_threw', {
+            project: project_slug,
+            topic: turnTopicId,
+            error: err instanceof Error ? err.message : String(err),
+          })
         }
       }
       // FIX 1 (#85) — re-wired into Path 1: after every turn, fan a
@@ -1055,11 +1058,11 @@ export function wireAppWs(ctx: OpenWiringContext, deps: WireAppWsDeps): WiredApp
             author: { id: 'owner', display: 'owner' },
           })
         } catch (err) {
-          console.warn(
-            `[open] event=scribe_hook_threw project=${project_slug} topic=${turnTopicId} err=${
-              err instanceof Error ? err.message : String(err)
-            }`,
-          )
+          log.warn('scribe_hook_threw', {
+            project: project_slug,
+            topic: turnTopicId,
+            error: err instanceof Error ? err.message : String(err),
+          })
         }
       }
       // FIX 1 (#85) — refresh the rail if this turn changed the project set.

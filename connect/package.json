@@ -13,6 +13,7 @@
     "@neutronai/contracts": "workspace:*",
     "@neutronai/gbrain-memory": "workspace:*",
     "@neutronai/jwt-validator": "workspace:*",
+    "@neutronai/logger": "workspace:*",
     "@neutronai/migrations": "workspace:*",
     "@neutronai/persistence": "workspace:*",
     "@neutronai/runtime": "workspace:*",

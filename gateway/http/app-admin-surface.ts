@@ -65,6 +65,9 @@ import {
   resolveBearer,
 } from './surface-kit.ts'
 import { PlatformOperationUnsupportedError, type PlatformAdapter } from '@neutronai/runtime/platform-adapter.ts'
+import { createLogger } from '@neutronai/logger'
+
+const moduleLog = createLogger('app-admin')
 
 /** Maximum number of GBrain entries returned by the browse endpoint. */
 export const MAX_MEMORY_RECENT = 20
@@ -369,10 +372,10 @@ function handleGatewayRestart(input: GatewayRestartInput): Response {
       // The restart action should not throw in production; log and
       // surface to stderr so an operator can spot a misconfigured
       // supervisor.
-      console.error(
-        `[app-admin] project=${input.project_slug} gateway restart action failed`,
-        err,
-      )
+      moduleLog.error('gateway_restart_action_failed', {
+        project: input.project_slug,
+        error: err instanceof Error ? (err.stack ?? err.message) : String(err),
+      })
     }
   })
   return jsonOk({
@@ -417,13 +420,13 @@ async function handleMemory(memoryStore: MemoryStore | undefined): Promise<Respo
       score: r.score,
     }))
   } catch (err) {
-    console.warn(`[app-admin] memoryStore.query failed`, err)
+    moduleLog.warn('memory_query_failed', { error: err instanceof Error ? err.message : String(err) })
   }
   let stats: { count: number; size_bytes: number } | null = null
   try {
     stats = await memoryStore.stats()
   } catch (err) {
-    console.warn(`[app-admin] memoryStore.stats failed`, err)
+    moduleLog.warn('memory_stats_failed', { error: err instanceof Error ? err.message : String(err) })
   }
   const body: MemoryBody = {
     configured: true,
@@ -493,7 +496,7 @@ async function handleListProjectBackupProjects(opts: {
   try {
     projects = await opts.enumerateProjects()
   } catch (err) {
-    console.warn(`[app-admin] project-backup enumerate failed`, err)
+    moduleLog.warn('project_backup_enumerate_failed', { error: err instanceof Error ? err.message : String(err) })
   }
   const body: ProjectBackupListBody = {
     configured: true,
@@ -716,9 +719,10 @@ async function handleMintReauthToken(input: MintReauthInput): Promise<Response> 
   // without `force=1` an already-healthy stored token would silently
   // 302 the user back to `return_url` and never render the paste form.
   pasteUrl.searchParams.set('force', '1')
-  console.info(
-    `[admin] max_oauth_reauth_minted project=${input.project_slug} user=${input.user_id}`,
-  )
+  moduleLog.info('max_oauth_reauth_minted', {
+    project: input.project_slug,
+    user: input.user_id,
+  })
   return jsonOk({ paste_url: pasteUrl.toString() })
 }
 

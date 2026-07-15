@@ -38,6 +38,10 @@ import type { ReminderOutbound, ReminderOutboundInput } from '@neutronai/reminde
  *  hydration. Ten years ≈ never (mirrors build-live-agent-turn's TTL). */
 const REPLY_ROW_TTL_MS = 10 * 365 * 24 * 60 * 60 * 1_000
 
+import { createLogger } from '@neutronai/logger'
+
+const moduleLog = createLogger('reminder-outbound')
+
 const LOG_TAG = '[reminder-outbound]'
 
 export interface BuildButtonStoreReminderOutboundInput {
@@ -54,7 +58,7 @@ export interface BuildButtonStoreReminderOutboundInput {
 export function buildButtonStoreReminderOutbound(
   input: BuildButtonStoreReminderOutboundInput,
 ): ReminderOutbound {
-  const log = input.log ?? ((msg: string): void => console.warn(msg))
+  const log = input.log ?? ((msg: string): void => moduleLog.warn(msg))
   return {
     async post(msg: ReminderOutboundInput): Promise<boolean> {
       let prompt_id: string | null = null

@@ -42,6 +42,7 @@
  */
 
 import { randomUUID } from 'node:crypto'
+import { createLogger } from '@neutronai/logger'
 import type { ProjectDb } from '@neutronai/persistence/index.ts'
 import type { ConnectAuthContext } from './api/jwt-bearer-middleware.ts'
 import type { MemberResolution } from './api/server.ts'
@@ -53,6 +54,8 @@ import {
   type MemberRole,
 } from './connected-members-store.ts'
 import { ConnectGuestInviteStore } from './guest-invite-store.ts'
+
+const log = createLogger('connect')
 
 /**
  * Home authority recorded for collaborators who joined via the
@@ -306,7 +309,7 @@ export async function acceptTrustedMember(
         },
       })
     } catch (err) {
-      console.warn('[connect] memory-mirror import-on-join failed (best-effort; join continues)', {
+      log.warn('memory_mirror_import_on_join_failed', {
         project_id: input.project_id,
         local_slug: result.member.local_slug,
         error: err instanceof Error ? err.message : String(err),
@@ -420,7 +423,7 @@ export async function acceptGuestMember(
         },
       })
     } catch (err) {
-      console.warn('[connect] memory-mirror import-on-join failed (best-effort; join continues)', {
+      log.warn('memory_mirror_import_on_join_failed', {
         project_id,
         local_slug: member.local_slug,
         error: err instanceof Error ? err.message : String(err),

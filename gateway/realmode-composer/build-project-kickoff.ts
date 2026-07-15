@@ -62,6 +62,9 @@ import {
   type ProjectOpeningDocs,
 } from './build-onboarding-handoff.ts'
 import type { ProjectKickoffComposer } from './build-project-kickoff-composer.ts'
+import { createLogger } from '@neutronai/logger'
+
+const moduleLog = createLogger('project-kickoff')
 
 /** Upcoming-deadline window (ms). A proposed task due within this window of now
  *  is a concrete "upcoming deadline" worth offering a reminder for. */
@@ -144,12 +147,10 @@ export function buildProjectKickoff(deps: ProjectKickoffDeps): ProjectKickoff {
   const log =
     deps.log ??
     ((msg: string, meta?: Record<string, unknown>): void => {
-      // eslint-disable-next-line no-console
-      console.warn(
-        `[project-kickoff] project=${deps.project_slug} ${msg}${
-          meta !== undefined ? ` ${safeMeta(meta)}` : ''
-        }`,
-      )
+      moduleLog.warn(msg, {
+        project: deps.project_slug,
+        meta: meta !== undefined ? safeMeta(meta) : undefined,
+      })
     })
 
   return {

@@ -6,6 +6,7 @@
  * webhook server in `webhook-server.ts`.
  */
 
+import { createLogger } from '@neutronai/logger'
 import type { IncomingEventReceiver } from '../../types.ts'
 import type { TelegramClient } from './client.ts'
 import {
@@ -15,6 +16,8 @@ import {
   type TelegramUpdate,
   type WebhookHandlerOptions,
 } from './webhook-server.ts'
+
+const log = createLogger('telegram-long-poll')
 
 export interface LongPollOptions {
   /** Bot user id — same role as in WebhookHandlerOptions. */
@@ -61,7 +64,7 @@ export async function runLongPoll(
       >('getUpdates', { offset, timeout, allowed_updates })
     } catch (err) {
       if (signal.aborted) return
-      console.warn('telegram long-poll getUpdates failed:', err)
+      log.warn('get_updates_failed', { error: err instanceof Error ? err.message : String(err) })
       // Brief backoff so a sustained outage doesn't tightloop.
       await sleep(2000, signal)
       continue
@@ -87,7 +90,7 @@ export async function runLongPoll(
       try {
         await opts.receiver.receive(event)
       } catch (err) {
-        console.error('telegram long-poll receiver threw:', err)
+        log.error('receiver_threw', { error: err instanceof Error ? (err.stack ?? err.message) : String(err) })
       }
     }
   }

@@ -56,6 +56,25 @@ import {
   DEFAULT_SKIP_OR_KILL_THRESHOLD,
   runStalenessPass,
 } from './staleness-engine.ts'
+import { createLogger } from '@neutronai/logger'
+
+const moduleLog = createLogger('nudge-engine')
+
+/** Coerce arbitrary log meta to the logger's primitive `LogValue` shape —
+ *  non-primitives are JSON-stringified so the emitted `k=v` line stays single. */
+const coerceLogFields = (
+  fields?: Record<string, unknown>,
+): Record<string, string | number | boolean | null | undefined> | undefined => {
+  if (fields === undefined) return undefined
+  const out: Record<string, string | number | boolean | null | undefined> = {}
+  for (const [k, v] of Object.entries(fields)) {
+    out[k] =
+      v === null || v === undefined || ['string', 'number', 'boolean'].includes(typeof v)
+        ? (v as string | number | boolean | null | undefined)
+        : (() => { try { return JSON.stringify(v) } catch { return String(v) } })()
+  }
+  return out
+}
 
 /**
  * Default 24h cadence — the LLM "pick of the day" by definition lasts
@@ -236,8 +255,7 @@ export async function runNudgePass(
   const log =
     input.log ??
     ((level, msg, meta): void => {
-      if (level === 'info') console.info(`[nudge-engine] ${msg}`, meta ?? {})
-      else console.warn(`[nudge-engine] ${msg}`, meta ?? {})
+      moduleLog[level](msg, coerceLogFields(meta))
     })
   const now = input.now ?? ((): number => Date.now())
   const tz = input.timezone ?? DEFAULT_OWNER_TIMEZONE

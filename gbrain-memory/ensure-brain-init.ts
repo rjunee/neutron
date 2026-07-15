@@ -54,6 +54,9 @@ import { probeOllamaHealth, redactUrlUserinfo, type OllamaHealthCheck } from './
 import { isGbrainBinaryMissingError } from './memory-store.ts'
 import { type CommandRunner, bunCommandRunner } from './command-runner.ts'
 import { resolveGbrainChildPath } from './resolve-gbrain-command.ts'
+import { createLogger } from '@neutronai/logger'
+
+const log = createLogger('gbrain-init')
 
 /**
  * The latent column an embedder-less (`off`) brain is pre-sized at so a later
@@ -294,8 +297,8 @@ export async function ensureBrainInitialized(
   const command = input.command ?? 'gbrain'
   const runner = input.runner ?? bunCommandRunner()
   const logger = input.logger ?? {
-    warn: (m: string) => console.warn(m),
-    info: (m: string) => console.info(m),
+    warn: (m: string) => log.warn(m),
+    info: (m: string) => log.info(m),
   }
   const probeHealth = input.probeOllamaHealth ?? probeOllamaHealth
 

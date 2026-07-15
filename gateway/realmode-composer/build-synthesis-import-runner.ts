@@ -59,6 +59,9 @@ import type {
 import { slugifyProjectId } from '@neutronai/onboarding/wow-moment/project-identity.ts'
 import type { SynthesisRunner } from './build-synthesis-session.ts'
 import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
+import { createLogger } from '@neutronai/logger'
+
+const moduleLog = createLogger('synthesis-import-runner')
 
 export interface BuildSynthesisImportJobRunnerInput {
   /** Per-instance DB — job state persists to `import_jobs` (DB-backed status). */
@@ -386,8 +389,5 @@ function defaultUuid(): string {
 }
 
 function defaultLogFailure(stage: string, err: unknown): void {
-  // eslint-disable-next-line no-console
-  console.warn(
-    `[synthesis-import-runner] ${stage}: ${err instanceof Error ? err.message : String(err)}`,
-  )
+  moduleLog.warn('stage_failed', { stage, error: err instanceof Error ? err.message : String(err) })
 }

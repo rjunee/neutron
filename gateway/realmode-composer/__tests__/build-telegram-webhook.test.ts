@@ -64,9 +64,14 @@ async function captureLogs<T>(
   const warn: string[] = []
   const origInfo = console.info
   const origWarn = console.warn
-  console.info = (...args: unknown[]) => {
+  const origLog = console.log
+  const pushInfo = (...args: unknown[]) => {
     info.push(args.map((a) => String(a)).join(' '))
   }
+  // The composer logs through `@neutronai/logger`, whose default sink routes
+  // info→console.log (and warn→console.warn). Capture console.log as info.
+  console.info = pushInfo
+  console.log = pushInfo
   console.warn = (...args: unknown[]) => {
     warn.push(args.map((a) => String(a)).join(' '))
   }
@@ -76,6 +81,7 @@ async function captureLogs<T>(
   } finally {
     console.info = origInfo
     console.warn = origWarn
+    console.log = origLog
   }
 }
 

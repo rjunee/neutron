@@ -21,6 +21,9 @@
 
 import type { TridentRun } from './store.ts'
 import type { TridentTerminalHook } from './tick.ts'
+import { createLogger } from '@neutronai/logger'
+
+const log = createLogger('trident')
 
 export function withTerminalObserver(
   delivery: TridentTerminalHook,
@@ -37,11 +40,10 @@ export function withTerminalObserver(
       try {
         await observer(run)
       } catch (err) {
-        console.warn(
-          `[trident] terminal observer failed for run ${run.id}: ${
-            err instanceof Error ? err.message : String(err)
-          }`,
-        )
+        log.warn('terminal_observer_failed', {
+          run: run.id,
+          error: err instanceof Error ? err.message : String(err),
+        })
       }
       if (deliveryError !== null) throw deliveryError
     },
@@ -70,11 +72,10 @@ export function composeTerminalHook(
       try {
         await obs(run)
       } catch (err) {
-        console.warn(
-          `[trident] terminal observer failed for run ${run.id}: ${
-            err instanceof Error ? err.message : String(err)
-          }`,
-        )
+        log.warn('terminal_observer_failed', {
+          run: run.id,
+          error: err instanceof Error ? err.message : String(err),
+        })
       }
     }
   }

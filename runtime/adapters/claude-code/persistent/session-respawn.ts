@@ -30,6 +30,9 @@
 
 import { resolveRespawnStrategy, type RespawnResolutionInput } from './respawn-strategy.ts'
 import type { ReplRegistryRecord } from './repl-registry.ts'
+import { createLogger } from '@neutronai/logger'
+
+const moduleLog = createLogger('repl-respawn')
 
 /** Result of planning a respawn — pure, computed before any side-effects. */
 export interface RespawnPlan {
@@ -162,7 +165,7 @@ export function executeRespawn(
   }
 
   const now = (deps.now ?? Date.now)()
-  const log = deps.log ?? ((msg: string) => console.log(msg))
+  const log = deps.log ?? ((msg: string) => moduleLog.info(msg))
 
   log(
     `repl-respawn: ${plan.sessionKey} trigger=${trigger} ` +

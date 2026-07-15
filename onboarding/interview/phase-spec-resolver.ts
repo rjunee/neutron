@@ -33,6 +33,7 @@
  * `PHASE_PROMPTS` table so a partial rollout is safe.
  */
 
+import { createLogger, type LogValue } from '@neutronai/logger'
 import type { OnboardingPhase } from './phase.ts'
 import { ALL_PHASES } from './phase.ts'
 import type { PhasePromptSpec } from './phase-prompts.ts'
@@ -221,6 +222,21 @@ export interface PhaseKnowledgePack {
  * (Argus r2 IMPORTANT #1): why_we_ask ≤ 400, faqs value ≤ 600,
  * expected_tangents 3-8, advance_examples 0-6, user_text examples ≤ 120.
  */
+const resolverLog = createLogger('phase-spec-resolver')
+
+/** Coerce arbitrary meta to logger-safe primitive fields. */
+function coerceFields(meta?: Record<string, unknown>): Record<string, LogValue> | undefined {
+  if (meta === undefined) return undefined
+  return Object.fromEntries(
+    Object.entries(meta).map(([k, v]) => [
+      k,
+      v === null || typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean'
+        ? (v as LogValue)
+        : JSON.stringify(v),
+    ]),
+  )
+}
+
 const KNOWLEDGE_PACK_LIMITS = {
   whyWeAskMax: 400,
   faqValueMax: 600,
@@ -1352,7 +1368,7 @@ export interface LlmPhaseSpecResolverDeps {
   enabled_phases: ReadonlySet<OnboardingPhase>
 
   /**
-   * Optional structured logger. Defaults to `console.warn` on warn/error
+   * Optional structured logger. Defaults to the `phase-spec-resolver` logger on warn/error
    * and a no-op on info.
    */
   log?: (
@@ -1449,8 +1465,7 @@ export function buildLlmPhaseSpecResolver(
     deps.log ??
     ((level: 'info' | 'warn' | 'error', msg: string, meta?: Record<string, unknown>) => {
       if (level === 'info') return
-      const tail = meta !== undefined ? ` ${JSON.stringify(meta)}` : ''
-      console.warn(`[phase-spec-resolver] ${msg}${tail}`)
+      resolverLog[level](msg, coerceFields(meta))
     })
   const timeout_ms = deps.timeout_ms ?? CONVERSATIONAL_TIMEOUT_MS_DEFAULT
   // ONE-TIME elevated budget for the cold first dispatch (2026-06-18 cold-start
@@ -1588,11 +1603,9 @@ function safeCall(
   try {
     fn(bundle)
   } catch (err) {
-    console.warn(
-      `[phase-spec-resolver] onLlmStart callback threw: ${
-        err instanceof Error ? err.message : String(err)
-      }`,
-    )
+    resolverLog.warn('on_llm_start_callback_threw', {
+      error: err instanceof Error ? err.message : String(err),
+    })
   }
 }
 
@@ -1607,11 +1620,9 @@ function safeEnd(
   try {
     fn(bundle, outcome)
   } catch (err) {
-    console.warn(
-      `[phase-spec-resolver] onLlmEnd callback threw: ${
-        err instanceof Error ? err.message : String(err)
-      }`,
-    )
+    resolverLog.warn('on_llm_end_callback_threw', {
+      error: err instanceof Error ? err.message : String(err),
+    })
   }
 }
 

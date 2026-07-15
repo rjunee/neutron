@@ -70,6 +70,9 @@ import {
   type UploadSource,
 } from './import-upload-handler.ts'
 import type { UploadSessionStore } from './upload-session-store.ts'
+import { createLogger } from '@neutronai/logger'
+
+const moduleLog = createLogger('chunked-upload')
 
 /**
  * Default chunk size returned to clients from `POST /start`. 4 MiB
@@ -191,9 +194,7 @@ export async function handleChunkedUpload(
   // fall through (return null) to the next handler in the compose chain.
   const csrf = evaluateCsrfOrigin(req)
   if (!csrf.allowed) {
-    console.warn(
-      `[chunked-upload] cross-site request rejected: ${csrf.reason} (${csrf.detail})`,
-    )
+    moduleLog.warn('csrf_rejected', { reason: csrf.reason, detail: csrf.detail })
     return csrfForbiddenResponse(csrf)
   }
 
@@ -298,26 +299,20 @@ async function handleStart(
   try {
     await fsImpl.mkdir(importDir, { recursive: true, mode: 0o700 })
   } catch (err) {
-    console.error(
-      `[chunked-upload] project=${ctx.project_slug} mkdir failed: ${errMsg(err)}`,
-    )
+    moduleLog.error('mkdir_failed', { project: ctx.project_slug, error: errMsg(err) })
     return jsonError(500, 'could not create imports directory')
   }
   let handle: FileHandle
   try {
     handle = await fsImpl.open(tempPath, 'w', 0o600)
   } catch (err) {
-    console.error(
-      `[chunked-upload] project=${ctx.project_slug} open(${tempPath}) failed: ${errMsg(err)}`,
-    )
+    moduleLog.error('open_failed', { project: ctx.project_slug, path: tempPath, error: errMsg(err) })
     return jsonError(500, 'could not create temp file')
   }
   try {
     await handle.truncate(total_bytes)
   } catch (err) {
-    console.error(
-      `[chunked-upload] project=${ctx.project_slug} truncate(${total_bytes}) failed: ${errMsg(err)}`,
-    )
+    moduleLog.error('truncate_failed', { project: ctx.project_slug, total_bytes, error: errMsg(err) })
     try {
       await handle.close()
     } catch {
@@ -333,17 +328,13 @@ async function handleStart(
   try {
     await handle.close()
   } catch (err) {
-    console.warn(
-      `[chunked-upload] project=${ctx.project_slug} close after truncate failed (non-fatal): ${errMsg(err)}`,
-    )
+    moduleLog.warn('close_after_truncate_failed', { project: ctx.project_slug, error: errMsg(err) })
   }
   // Best-effort chown — non-fatal on dev (single-user, CAP_CHOWN absent).
   try {
     await fsImpl.chown(tempPath, ctx.uid, ctx.gid)
   } catch (err) {
-    console.warn(
-      `[chunked-upload] project=${ctx.project_slug} chown(${tempPath}) failed (non-fatal): ${errMsg(err)}`,
-    )
+    moduleLog.warn('chown_failed', { project: ctx.project_slug, path: tempPath, error: errMsg(err) })
   }
 
   const ttl = deps.sessionTtlMs ?? DEFAULT_SESSION_TTL_MS
@@ -359,9 +350,7 @@ async function handleStart(
       expires_at: now + ttl,
     })
   } catch (err) {
-    console.error(
-      `[chunked-upload] project=${ctx.project_slug} store.create failed: ${errMsg(err)}`,
-    )
+    moduleLog.error('store_create_failed', { project: ctx.project_slug, error: errMsg(err) })
     try {
       await fsImpl.unlink(tempPath)
     } catch {
@@ -371,9 +360,7 @@ async function handleStart(
   }
 
   const chunk_size_bytes = deps.chunkSizeBytes ?? DEFAULT_CHUNK_SIZE_BYTES
-  console.info(
-    `[chunked-upload] project=${ctx.project_slug} source=${source} start upload_id=${uuid} total_bytes=${total_bytes} chunk_size=${chunk_size_bytes}`,
-  )
+  moduleLog.info('start', { project: ctx.project_slug, source, upload_id: uuid, total_bytes, chunk_size: chunk_size_bytes })
   return Response.json({
     upload_id: uuid,
     chunk_size_bytes,
@@ -485,18 +472,14 @@ async function handlePatch(
   try {
     handle = await fsImpl.open(tempPath, 'r+')
   } catch (err) {
-    console.error(
-      `[chunked-upload] project=${ctx.project_slug} open(${tempPath}) for chunk failed: ${errMsg(err)}`,
-    )
+    moduleLog.error('open_for_chunk_failed', { project: ctx.project_slug, path: tempPath, error: errMsg(err) })
     return jsonError(500, 'could not open temp file')
   }
   try {
     const bytes = new Uint8Array(buf)
     await handle.write(bytes, 0, bytes.byteLength, start)
   } catch (err) {
-    console.error(
-      `[chunked-upload] project=${ctx.project_slug} write(${tempPath}, start=${start}) failed: ${errMsg(err)}`,
-    )
+    moduleLog.error('chunk_write_failed', { project: ctx.project_slug, path: tempPath, start, error: errMsg(err) })
     try {
       await handle.close()
     } catch {
@@ -507,9 +490,7 @@ async function handlePatch(
   try {
     await handle.close()
   } catch (err) {
-    console.warn(
-      `[chunked-upload] project=${ctx.project_slug} close after chunk write failed (non-fatal): ${errMsg(err)}`,
-    )
+    moduleLog.warn('close_after_chunk_write_failed', { project: ctx.project_slug, error: errMsg(err) })
   }
 
   const candidate_offset = end + 1
@@ -576,9 +557,7 @@ async function finaliseUpload(
       }
     }
   } catch (err) {
-    console.error(
-      `[chunked-upload] project=${ctx.project_slug} magic-bytes read failed: ${errMsg(err)}`,
-    )
+    moduleLog.error('magic_bytes_read_failed', { project: ctx.project_slug, error: errMsg(err) })
     await cleanupFailedFinal(deps, fsImpl, tempPath, upload_id)
     return jsonError(500, 'could not read assembled file')
   }
@@ -601,9 +580,7 @@ async function finaliseUpload(
   try {
     await fsImpl.rename(tempPath, destPath)
   } catch (err) {
-    console.error(
-      `[chunked-upload] project=${ctx.project_slug} rename(${tempPath} -> ${destPath}) failed: ${errMsg(err)}`,
-    )
+    moduleLog.error('rename_failed', { project: ctx.project_slug, from: tempPath, to: destPath, error: errMsg(err) })
     await cleanupFailedFinal(deps, fsImpl, tempPath, upload_id)
     return jsonError(500, 'could not move assembled file into place')
   }
@@ -611,13 +588,9 @@ async function finaliseUpload(
   try {
     await fsImpl.chown(destPath, ctx.uid, ctx.gid)
   } catch (err) {
-    console.warn(
-      `[chunked-upload] project=${ctx.project_slug} chown(${destPath}) failed (non-fatal): ${errMsg(err)}`,
-    )
+    moduleLog.warn('final_chown_failed', { project: ctx.project_slug, path: destPath, error: errMsg(err) })
   }
-  console.info(
-    `[chunked-upload] project=${ctx.project_slug} source=${source} complete upload_id=${upload_id} filename=${filename} destination=${destPath}`,
-  )
+  moduleLog.info('complete', { project: ctx.project_slug, source, upload_id, filename, destination: destPath })
 
   // 4. Bridge into the InterviewEngine — same shape as the legacy
   //    single-shot handler's notify call so the `import_upload_pending`
@@ -641,9 +614,7 @@ async function finaliseUpload(
     // is salvageable manually, but the user-visible flow needs the
     // engine advance to fire. Same severity as the legacy handler's
     // engine-notify-failed branch.
-    console.error(
-      `[chunked-upload] project=${ctx.project_slug} engine notify failed: ${errMsg(err)}`,
-    )
+    moduleLog.error('engine_notify_failed', { project: ctx.project_slug, error: errMsg(err) })
     // Keep the bytes on disk + delete the session row. The user retrying
     // the upload would land a fresh ZIP at the same path, which the
     // engine runner handles.
@@ -659,9 +630,7 @@ async function finaliseUpload(
   try {
     await deps.store.deleteSession(upload_id)
   } catch (err) {
-    console.warn(
-      `[chunked-upload] project=${ctx.project_slug} store.deleteSession failed (non-fatal): ${errMsg(err)}`,
-    )
+    moduleLog.warn('delete_session_failed', { project: ctx.project_slug, error: errMsg(err) })
   }
 
   return Response.json({
@@ -721,12 +690,10 @@ async function sniffAssembledSource(
       }
     }
   } catch (err) {
-    console.warn(
-      `[chunked-upload] source sniff read failed (non-fatal, keeping url source ${urlSource}): ${errMsg(err)}`,
-    )
+    moduleLog.warn('source_sniff_read_failed', { url_source: urlSource, error: errMsg(err) })
     return urlSource
   }
-  return resolveEffectiveSource(urlSource, buf, (msg) => console.info(msg))
+  return resolveEffectiveSource(urlSource, buf, (msg) => moduleLog.info(msg))
 }
 
 function tempFilePath(owner_home: string, upload_id: string): string {

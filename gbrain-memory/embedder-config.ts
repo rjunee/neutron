@@ -79,6 +79,10 @@
  * `ensure-brain-init.ts`, not from `resolveEmbedderConfig`.
  */
 
+import { createLogger } from '@neutronai/logger'
+
+const log = createLogger('gbrain-memory')
+
 /** A configured embedder. `childEnv` is merged into the `gbrain serve` child. */
 export interface EmbedderConfig {
   /** Which provider the embedder routes to. */
@@ -246,8 +250,8 @@ export function resolveEmbedderConfig(env: NodeJS.ProcessEnv = process.env): Emb
   if (raw === 'openai') {
     const apiKey = resolveOpenAiKey(env)
     if (apiKey === undefined) {
-      console.warn(
-        "[gbrain-memory] NEUTRON_EMBEDDINGS=openai but no OpenAI key found " +
+      log.warn(
+        'NEUTRON_EMBEDDINGS=openai but no OpenAI key found ' +
           '(set NEUTRON_EMBEDDINGS_OPENAI_API_KEY or OPENAI_API_KEY). ' +
           'Embedding store DISABLED; memory runs on keyword + graph.',
       )
@@ -271,11 +275,8 @@ export function resolveEmbedderConfig(env: NodeJS.ProcessEnv = process.env): Emb
     return buildOllamaConfig(env)
   }
 
-  console.warn(
-    `[gbrain-memory] NEUTRON_EMBEDDINGS="${raw}" is not recognized ` +
-      '(expected: openai | ollama | auto | off). ' +
-      'Embedding store DISABLED; memory runs on keyword + graph.',
-  )
+  log.warn('NEUTRON_EMBEDDINGS not recognized (expected: openai | ollama | auto | off); ' +
+    'embedding store DISABLED, memory runs on keyword + graph', { value: raw })
   return null
 }
 

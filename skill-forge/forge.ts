@@ -19,6 +19,7 @@
  * silently" guarantee.
  */
 
+import { createLogger } from '@neutronai/logger'
 import { auditWorkflow } from './detector.ts'
 import { distillSkill } from './distiller.ts'
 import { composeProposalMessage } from './proposal-message.ts'
@@ -30,6 +31,8 @@ import type {
   ProposalEdits,
   ProposalRecord,
 } from './types.ts'
+
+const forgeLog = createLogger('skill-forge')
 
 /**
  * Delivers a proposal message to the user. Implementations bridge to whatever
@@ -93,11 +96,10 @@ export class SkillForge {
     } catch (err) {
       // The proposal is already persisted (pending); a delivery failure must
       // not lose it. Log and move on — it surfaces in `listPending()`.
-      console.warn(
-        `[skill-forge] proposal ${proposal.id} persisted but notify failed: ${
-          err instanceof Error ? err.message : String(err)
-        }`,
-      )
+      forgeLog.warn('proposal_persisted_but_notify_failed', {
+        proposal: proposal.id,
+        error: err instanceof Error ? err.message : String(err),
+      })
     }
     return proposal
   }

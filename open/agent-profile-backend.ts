@@ -48,6 +48,22 @@ import { lstat, mkdir, open, readFile, rename, unlink } from 'node:fs/promises'
 import { join } from 'node:path'
 
 import type { AgentProfileBackend } from '@neutronai/agent-settings'
+import { createLogger, type LogValue } from '@neutronai/logger'
+
+const moduleLog = createLogger('open-agent-profile')
+
+/** Coerce arbitrary meta into logfmt-safe primitive fields (objects → JSON). */
+const coerceFields = (
+  m?: Record<string, unknown>,
+): Record<string, LogValue> | undefined =>
+  m === undefined
+    ? undefined
+    : Object.fromEntries(
+        Object.entries(m).map(([k, v]) => [
+          k,
+          v === null || ['string', 'number', 'boolean'].includes(typeof v) ? (v as LogValue) : JSON.stringify(v),
+        ]),
+      )
 
 /** The SOUL.md filename the PersonaPromptLoader reads first (identity file). */
 const SOUL_FILENAME = 'SOUL.md'
@@ -82,7 +98,7 @@ export interface OpenAgentProfileBackendOptions {
    * a throw here is logged and swallowed (the persist already committed).
    */
   onProfileChange?: () => void
-  /** Optional structured logger; defaults to `console.warn`. */
+  /** Optional structured logger; defaults to the `@neutronai/logger` warn sink. */
   log?: (msg: string, meta?: Record<string, unknown>) => void
 }
 
@@ -148,7 +164,7 @@ export function buildOpenAgentProfileBackend(
   const storePath = join(personaDir, PROFILE_STORE_FILENAME)
   const soulPath = join(personaDir, SOUL_FILENAME)
   const log =
-    opts.log ?? ((msg, meta): void => console.warn(`[open-agent-profile] ${msg}`, meta ?? {}))
+    opts.log ?? ((msg, meta): void => moduleLog.warn(msg, coerceFields(meta)))
 
   const readStore = async (): Promise<OpenAgentProfile> => {
     let raw: string

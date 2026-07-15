@@ -17,8 +17,11 @@
  * running `fn` unguarded, which is safe for single-process test runners.
  */
 
+import { createLogger } from '@neutronai/logger'
 import { closeSync, mkdirSync, openSync } from 'node:fs'
 import { dirname, join } from 'node:path'
+
+const log = createLogger('registry-lock')
 
 const LOCK_EX = 2
 const LOCK_UN = 8
@@ -79,7 +82,7 @@ export function withFlockSync<T>(lockPath: string, fn: () => T): T {
   try {
     const rc = lib.symbols.flock(fd, LOCK_EX)
     if (rc !== 0) {
-      console.error(`registry-lock: flock(LOCK_EX) returned ${rc}`)
+      log.error('flock_lock_ex_nonzero', { rc })
       // Fall through — better to run unguarded than to skip the operation.
     }
     return fn()

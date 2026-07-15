@@ -37,6 +37,7 @@
  * better, more varied set of picks.
  */
 
+import { createLogger, type LogValue } from '@neutronai/logger'
 import { getBestModel } from '@neutronai/runtime/models.ts'
 import { SUGGESTER_TIMEOUT_MS_DEFAULT } from './llm-timeouts.ts'
 import {
@@ -536,14 +537,28 @@ function positiveInt(n: number, fallback: number): number {
   return Math.floor(n)
 }
 
+const log = createLogger('character-suggester')
+
+/** Coerce arbitrary meta to logger-safe primitive fields. */
+function coerceFields(meta?: Record<string, unknown>): Record<string, LogValue> | undefined {
+  if (meta === undefined) return undefined
+  return Object.fromEntries(
+    Object.entries(meta).map(([k, v]) => [
+      k,
+      v === null || typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean'
+        ? (v as LogValue)
+        : JSON.stringify(v),
+    ]),
+  )
+}
+
 function defaultLog(
   level: 'info' | 'warn' | 'error',
   msg: string,
   meta?: Record<string, unknown>,
 ): void {
   if (level === 'info') return
-  const tail = meta !== undefined ? ` ${JSON.stringify(meta)}` : ''
-  console.warn(`[character-suggester] ${msg}${tail}`)
+  log[level](msg, coerceFields(meta))
 }
 
 // ---------------------------------------------------------------------------

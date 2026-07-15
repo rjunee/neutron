@@ -16,7 +16,10 @@
  * alone rather than failing — mirrors the persona-loader's never-hard-fail rule.
  */
 
+import { createLogger } from '@neutronai/logger'
 import type { ProjectDb } from '@neutronai/persistence/index.ts'
+
+const log = createLogger('open-project-persona')
 
 interface PersonaRow {
   persona: string | null
@@ -43,10 +46,11 @@ export function buildProjectPersonaResolver(
       const trimmed = persona.trim()
       return trimmed.length > 0 ? trimmed : null
     } catch (err) {
-      console.warn(
-        `[open] project-persona read threw for project=${project_id} — falling back to owner-wide persona:`,
-        err,
-      )
+      log.warn('persona_read_threw', {
+        project: project_id,
+        note: 'falling back to owner-wide persona',
+        error: err instanceof Error ? (err.stack ?? err.message) : String(err),
+      })
       return null
     }
   }

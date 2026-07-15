@@ -33,11 +33,15 @@ let workdir: string
 let db: ProjectDb
 let dataDir: string
 let api_keys: ApiKeyStore
-// console.info / console.warn capture
+// console capture. The composer now logs through `@neutronai/logger`, whose
+// default sink routes info→console.log and warn→console.warn (error→console.error).
+// So INFO lines land on console.log; capture both console.log and console.info
+// into `infoCalls` so the assertions on info-level lines keep working.
 let infoCalls: string[]
 let warnCalls: string[]
 let originalInfo: typeof console.info
 let originalWarn: typeof console.warn
+let originalLog: typeof console.log
 
 beforeEach(() => {
   workdir = mkdtempSync(join(tmpdir(), 'neutron-resolve-llm-'))
@@ -55,9 +59,12 @@ beforeEach(() => {
   warnCalls = []
   originalInfo = console.info
   originalWarn = console.warn
-  console.info = (...args: unknown[]): void => {
+  originalLog = console.log
+  const pushInfo = (...args: unknown[]): void => {
     infoCalls.push(args.map((a) => String(a)).join(' '))
   }
+  console.info = pushInfo
+  console.log = pushInfo // logger routes info→console.log
   console.warn = (...args: unknown[]): void => {
     warnCalls.push(args.map((a) => String(a)).join(' '))
   }
@@ -66,6 +73,7 @@ beforeEach(() => {
 afterEach(() => {
   console.info = originalInfo
   console.warn = originalWarn
+  console.log = originalLog
   rmSync(workdir, { recursive: true, force: true })
 })
 

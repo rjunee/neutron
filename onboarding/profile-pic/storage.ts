@@ -38,6 +38,7 @@
  */
 
 import { existsSync, readFileSync } from 'node:fs'
+import { createLogger } from '@neutronai/logger'
 import { join } from 'node:path'
 import type {
   ProfilePicEngineHook,
@@ -47,6 +48,8 @@ import type {
 import type { ProfilePicPipeline } from './pipeline.ts'
 import type { ProfilePicPendingStore } from './pending-call-store.ts'
 import { DEFAULT_PENDING_FRESH_WINDOW_MS } from './restart-resume.ts'
+
+const log = createLogger('profile-pic-storage')
 
 /** Structural mirror of the Managed bot-avatar pusher's input
  *  (Managed per-instance bot manager: SetBotAvatarInput).
@@ -219,7 +222,7 @@ export async function persistChosenAvatar(
       png_bytes = readFileSync(canonical_path)
     } catch (err) {
       bot_avatar_error = `read canonical bytes failed: ${err instanceof Error ? err.message : String(err)}`
-      console.warn(`[storage.persistChosenAvatar] ${bot_avatar_error}`)
+      log.warn('persist_chosen_avatar_failed', { error: bot_avatar_error })
       const result: PersistChosenAvatarResult = {
         canonical_path,
         registry_updated,
@@ -238,7 +241,7 @@ export async function persistChosenAvatar(
       bot_avatar_pushed = true
     } catch (err) {
       bot_avatar_error = err instanceof Error ? err.message : String(err)
-      console.warn(`[storage.persistChosenAvatar] bot avatar push failed: ${bot_avatar_error}`)
+      log.warn('bot_avatar_push_failed', { error: bot_avatar_error })
     }
   }
 
@@ -699,9 +702,10 @@ export function buildAvatarRouteHandler(
     } catch (err) {
       // Disk-level failure (perm flip, fs unmount). Log + 500 rather
       // than serving a stale cached buffer.
-      console.error(
-        `[avatar-route] read failed for ${path}: ${err instanceof Error ? err.message : String(err)}`,
-      )
+      log.error('avatar_route_read_failed', {
+        path,
+        error: err instanceof Error ? err.message : String(err),
+      })
       return new Response('avatar read failed', {
         status: 500,
         headers: { 'content-type': 'text/plain' },
@@ -760,9 +764,10 @@ export function buildCandidateRouteHandler(
     try {
       bytes = readFileSync(path)
     } catch (err) {
-      console.error(
-        `[candidate-route] read failed for ${path}: ${err instanceof Error ? err.message : String(err)}`,
-      )
+      log.error('candidate_route_read_failed', {
+        path,
+        error: err instanceof Error ? err.message : String(err),
+      })
       return new Response('candidate read failed', {
         status: 500,
         headers: { 'content-type': 'text/plain' },

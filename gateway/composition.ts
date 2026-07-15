@@ -42,6 +42,9 @@ import { wireConnectOverlay } from './composition/wire-connect-overlay.ts'
 // unchanged.
 import type { CompositionInput } from './composition/input/composition-input.ts'
 import type { CompositionHttpHandler } from './composition/types.ts'
+import { createLogger } from '@neutronai/logger'
+
+const moduleLog = createLogger('composition')
 export type { CompositionInput } from './composition/input/composition-input.ts'
 export type { CompositionHttpHandler } from './composition/types.ts'
 
@@ -351,10 +354,9 @@ export async function composeProductionGraph(
     try {
       await graph.shutdown()
     } catch (shutdownErr) {
-      console.error(
-        '[composeProductionGraph] graph shutdown after composition failure threw:',
-        shutdownErr,
-      )
+      moduleLog.error('graph_shutdown_after_composition_failure_threw', {
+        error: shutdownErr instanceof Error ? (shutdownErr.stack ?? shutdownErr.message) : String(shutdownErr),
+      })
     }
     throw err
   }

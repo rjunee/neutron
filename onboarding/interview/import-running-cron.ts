@@ -49,10 +49,13 @@
  *   EXPLICITLY OUT OF SCOPE: any other engine handler changes.
  */
 
+import { createLogger } from '@neutronai/logger'
 import type { CronHandler, CronHandlerRegistry } from '@neutronai/cron/handlers.ts'
 import type { CronJobDef, CronJobRegistry } from '@neutronai/cron/jobs.ts'
 import type { ProjectDb } from '@neutronai/persistence/index.ts'
 import type { InterviewEngine } from './engine.ts'
+
+const log = createLogger('import-running-cron')
 
 /**
  * Default sweep cadence — 5 s (lowered from 15 s on 2026-05-21 by the
@@ -150,9 +153,7 @@ export function buildImportRunningHandler(
     // appeared; once it stops appearing in steady-state (or the count
     // stays > 0 for > 15 min on a single instance), operators have a
     // direct signal pointing at the cron tier rather than the engine.
-    console.log(
-      `[import-running-cron] tick project=${ctx.project_slug} in_flight_imports=${rows.length}`,
-    )
+    log.info('tick', { project: ctx.project_slug, in_flight_imports: rows.length })
 
     if (rows.length === 0) {
       return { status: 'skipped', detail: 'no_in_flight_imports' }
@@ -195,9 +196,7 @@ export function buildImportRunningHandler(
         }
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err)
-        console.warn(
-          `[import-running-cron] project=${row.project_slug} tick-failed: ${message}`,
-        )
+        log.warn('tick_failed', { project: row.project_slug, error: message })
         send_failed += 1
       }
     }
@@ -289,8 +288,10 @@ export function registerImportRunningCron(input: {
       ? job.schedule.interval_ms
       : DEFAULT_IMPORT_RUNNING_TICK_INTERVAL_MS) / 1_000,
   )
-  console.log(
-    `[import-running-cron] registered handler project=${input.project_slug} job=${job.name} recurrence_seconds=${recurrence_seconds}`,
-  )
+  log.info('registered_handler', {
+    project: input.project_slug,
+    job: job.name,
+    recurrence_seconds,
+  })
   return { job_name: job.name }
 }

@@ -44,9 +44,12 @@
  * with zero rework (brief § 8).
  */
 
+import { createLogger } from '@neutronai/logger'
 import { readFileSync, writeFileSync } from 'node:fs'
 import { atomicWriteFileSync } from '../../../atomic-write.ts'
 import { registryLockPath, withFlockSync } from './registry-lock.ts'
+
+const log = createLogger('repl-registry')
 
 /** One persisted REPL supervision row. */
 export interface ReplRegistryRecord {
@@ -280,14 +283,16 @@ function writeSidecarBestEffort(path: string, contents: string): string | undefi
     } catch (e) {
       lastErr = e
       if ((e as NodeJS.ErrnoException).code === 'EEXIST') continue // fresh suffix, retry
-      console.error(`repl-registry: failed to write corruption sidecar ${sidecarPath}: ${e}`)
+      log.error('sidecar_write_failed', { sidecar: sidecarPath, error: String(e) })
       return undefined
     }
   }
-  console.error(
-    `repl-registry: failed to write corruption sidecar for ${path} after ${SIDECAR_MAX_ATTEMPTS} ` +
-      `EEXIST retries: ${lastErr}`,
-  )
+  // Event text preserves the 'EEXIST retries' substring a regression test pins.
+  log.error('EEXIST retries exhausted — sidecar write gave up', {
+    path,
+    attempts: SIDECAR_MAX_ATTEMPTS,
+    error: String(lastErr),
+  })
   return undefined
 }
 
@@ -321,22 +326,25 @@ function writeSidecarBestEffort(path: string, contents: string): string | undefi
 function defaultCorruptHandler(path: string): (reason: string, rawContents?: string) => void {
   return (reason, rawContents) => {
     if (reason.startsWith('read-error:')) {
-      console.error(
-        `repl-registry: READ ERROR on ${path} (${reason}) — the SAVE for this mutation is being ` +
-          `SKIPPED entirely (not just left un-sidecarred): the on-disk file is left byte-for-byte ` +
-          `untouched so the next tick can retry the read. Nothing was dropped.`,
-      )
+      // Event text preserves the substrings a regression test pins
+      // ('READ ERROR', 'SKIPPED', 'Nothing was dropped').
+      log.error('READ ERROR — the SAVE is being SKIPPED entirely; on-disk file left untouched. Nothing was dropped.', {
+        path,
+        reason,
+      })
       return
     }
     const sidecarPath = rawContents !== undefined ? writeSidecarBestEffort(path, rawContents) : undefined
-    console.error(
-      `repl-registry: CORRUPT registry at ${path} (${reason}) — a mutation is about to ` +
-        `rebuild it from empty, which DROPS every other sessionKey's row (sessionId/pid/` +
-        `respawn bookkeeping). ` +
-        (sidecarPath
-          ? `Raw bytes preserved at ${sidecarPath} for manual recovery.`
-          : `Sidecar preservation FAILED — raw bytes may be lost.`),
-    )
+    log.error('CORRUPT registry rebuild', {
+      path,
+      reason,
+      sidecar: sidecarPath ?? null,
+      sidecar_failed: sidecarPath === undefined,
+      // Preserve the substring a regression test pins on the sidecar-failure path.
+      recovery: sidecarPath
+        ? `Raw bytes preserved at ${sidecarPath} for manual recovery.`
+        : 'Sidecar preservation FAILED — raw bytes may be lost.',
+    })
   }
 }
 
@@ -364,13 +372,11 @@ function defaultDropRowHandler(path: string): (key: string, raw: unknown, rawCon
       attempted = true
       sidecarPath = writeSidecarBestEffort(path, rawContents)
     }
-    console.error(
-      `repl-registry: dropping row sessionKey=${key} in ${path} — missing required fields ` +
-        `(schema skew; likely written by an older/newer build). ` +
-        (sidecarPath
-          ? `Pre-drop file bytes preserved at ${sidecarPath} for manual recovery.`
-          : `Sidecar preservation FAILED — the row is lost unless recovered by hand from elsewhere.`),
-    )
+    log.error(`dropping row sessionKey=${key} (schema skew)`, {
+      path,
+      sidecar: sidecarPath ?? null,
+      sidecar_failed: sidecarPath === undefined,
+    })
   }
 }
 
@@ -430,7 +436,7 @@ export function withRegistry<T>(
     try {
       options.onCorrupt?.(reason, rawContents)
     } catch (e) {
-      console.error(`repl-registry: caller-supplied onCorrupt callback threw (ignored): ${e}`)
+      log.error('caller-supplied onCorrupt callback threw (ignored)', { error: String(e) })
     }
   }
   const onDropRow = (key: string, raw: unknown, rawContents: string): void => {
@@ -438,7 +444,7 @@ export function withRegistry<T>(
     try {
       options.onDropRow?.(key, raw, rawContents)
     } catch (e) {
-      console.error(`repl-registry: caller-supplied onDropRow callback threw (ignored): ${e}`)
+      log.error('caller-supplied onDropRow callback threw (ignored)', { error: String(e) })
     }
   }
   return withFlockSync(registryLockPath(path), () => {

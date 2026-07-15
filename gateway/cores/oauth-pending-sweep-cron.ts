@@ -26,6 +26,9 @@ import type { CronHandler, CronHandlerRegistry } from '@neutronai/cron/handlers.
 import type { CronJobDef, CronJobRegistry } from '@neutronai/cron/jobs.ts'
 import { CoresOAuthPendingStore } from './oauth-pending-store.ts'
 import type { ProjectDb } from '@neutronai/persistence/index.ts'
+import { createLogger } from '@neutronai/logger'
+
+const moduleLog = createLogger('cores-oauth-pending-sweep')
 
 export const DEFAULT_CORES_OAUTH_SWEEP_INTERVAL_MS = 5 * 60 * 1_000
 
@@ -60,15 +63,11 @@ export function buildCoresOAuthPendingSweepHandler(
       deleted = await store.sweepExpired(now())
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)
-      console.warn(
-        `[cores-oauth-pending-sweep] project=${ctx.project_slug} sweep failed: ${message}`,
-      )
+      moduleLog.warn('sweep_failed', { project: ctx.project_slug, error: message })
       return { status: 'error', detail: message }
     }
     if (deleted > 0) {
-      console.log(
-        `[cores-oauth-pending-sweep] project=${ctx.project_slug} swept=${deleted}`,
-      )
+      moduleLog.info('swept', { project: ctx.project_slug, swept: deleted })
       return { status: 'ok', detail: `swept=${deleted}` }
     }
     return { status: 'skipped', detail: 'no_expired_rows' }
@@ -132,8 +131,10 @@ export function registerCoresOAuthPendingSweepCron(input: {
       ? job.schedule.interval_ms
       : DEFAULT_CORES_OAUTH_SWEEP_INTERVAL_MS) / 1_000,
   )
-  console.log(
-    `[cores-oauth-pending-sweep] registered handler project=${input.project_slug} job=${job.name} recurrence_seconds=${recurrence_seconds}`,
-  )
+  moduleLog.info('registered_handler', {
+    project: input.project_slug,
+    job: job.name,
+    recurrence_seconds,
+  })
   return { job_name: job.name }
 }

@@ -77,6 +77,9 @@ import {
   type EngineInternals,
 } from './engine-internals.ts'
 import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
+import { createLogger } from '@neutronai/logger'
+
+const log = createLogger('onboarding-engine')
 
 export async function resolvePhasePromptSpecUncached(
   self: EngineInternals,
@@ -273,11 +276,11 @@ export async function resolvePhasePromptSpecUncached(
           // (the safe default). Log to stderr for ops debugging but
           // do NOT bubble; the analysis-presented body still ships.
           // eslint-disable-next-line no-console
-          console.warn(
-            `[engine] importResumeReadiness.isResumable threw for ` +
-              `project=${project_slug} job=${probe_job_id}: ` +
-              `${err instanceof Error ? err.message : String(err)}`,
-          )
+          log.warn('import_resume_readiness_threw', {
+            project: project_slug,
+            job: probe_job_id,
+            error: err instanceof Error ? err.message : String(err),
+          })
         }
       }
       return buildImportAnalysisPresentedPromptSpec({
@@ -365,9 +368,10 @@ export async function resolvePhasePromptSpecUncached(
               advanced_at: state?.last_advanced_at ?? self.now(),
             })
           } catch (err) {
-            console.warn(
-              `[engine] persist personality_character_suggestions failed for project=${project_slug}: ${err instanceof Error ? err.message : err}`,
-            )
+            log.warn('persist_character_suggestions_failed', {
+              project: project_slug,
+              error: err instanceof Error ? err.message : String(err),
+            })
           }
           if (result.source === 'llm') {
             self.clearPendingSuggestions(
@@ -472,9 +476,10 @@ export async function resolvePhasePromptSpecUncached(
               advanced_at: state?.last_advanced_at ?? self.now(),
             })
           } catch (err) {
-            console.warn(
-              `[engine] persist agent_name_suggestions failed for project=${project_slug}: ${err instanceof Error ? err.message : err}`,
-            )
+            log.warn('persist_agent_name_suggestions_failed', {
+              project: project_slug,
+              error: err instanceof Error ? err.message : String(err),
+            })
           }
           if (result.source === 'llm') {
             self.clearPendingSuggestions(
@@ -556,9 +561,10 @@ export async function resolvePhasePromptSpecUncached(
           try {
             summary = await self.deps.personaSummarizer.summarize(summarizer_input)
           } catch (err) {
-            console.warn(
-              `[engine] personaSummarizer.summarize failed for project=${project_slug}: ${err instanceof Error ? err.message : err}`,
-            )
+            log.warn('persona_summarizer_failed', {
+              project: project_slug,
+              error: err instanceof Error ? err.message : String(err),
+            })
             summary = staticPersonaSummary(summarizer_input)
           }
         } else {
@@ -576,9 +582,10 @@ export async function resolvePhasePromptSpecUncached(
             advanced_at: state?.last_advanced_at ?? Date.now(),
           })
         } catch (err) {
-          console.warn(
-            `[engine] persist persona_reviewed_summary failed for project=${project_slug}: ${err instanceof Error ? err.message : err}`,
-          )
+          log.warn('persist_persona_reviewed_summary_failed', {
+            project: project_slug,
+            error: err instanceof Error ? err.message : String(err),
+          })
         }
       }
 
@@ -749,10 +756,11 @@ export async function resolveLlmSpec(
     try {
       return await self.deps.phaseSpecResolver.resolve(bundle)
     } catch (err) {
-      console.warn(
-        `[engine] phaseSpecResolver.resolve threw for phase=${input.phase} project=${input.project_slug}:`,
-        err instanceof Error ? err.message : err,
-      )
+      log.warn('phase_spec_resolver_threw', {
+        phase: input.phase,
+        project: input.project_slug,
+        error: err instanceof Error ? err.message : String(err),
+      })
       return null
     }
   }

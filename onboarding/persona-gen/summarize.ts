@@ -16,6 +16,7 @@
  * is never stranded on a "Couldn't generate" error.
  */
 
+import { createLogger, type LogValue } from '@neutronai/logger'
 import { FAST_MODEL } from '@neutronai/runtime/models.ts'
 
 // ---------------------------------------------------------------------------
@@ -396,12 +397,26 @@ function positiveInt(n: number, fallback: number): number {
   return Math.floor(n)
 }
 
+const log = createLogger('persona-summarizer')
+
+/** Coerce arbitrary meta to logger-safe primitive fields. */
+function coerceFields(meta?: Record<string, unknown>): Record<string, LogValue> | undefined {
+  if (meta === undefined) return undefined
+  return Object.fromEntries(
+    Object.entries(meta).map(([k, v]) => [
+      k,
+      v === null || typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean'
+        ? (v as LogValue)
+        : JSON.stringify(v),
+    ]),
+  )
+}
+
 function defaultLog(
   level: 'info' | 'warn' | 'error',
   msg: string,
   meta?: Record<string, unknown>,
 ): void {
   if (level === 'info') return
-  const tail = meta !== undefined ? ` ${JSON.stringify(meta)}` : ''
-  console.warn(`[persona-summarizer] ${msg}${tail}`)
+  log[level](msg, coerceFields(meta))
 }

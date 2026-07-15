@@ -13,6 +13,9 @@
 
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname } from 'node:path'
+import { createLogger } from '@neutronai/logger'
+
+const log = createLogger('onboarding-transcript')
 
 export type TranscriptRole = 'agent' | 'user' | 'system'
 
@@ -82,9 +85,7 @@ export class TranscriptWriter {
         if (!isLast) {
           // A non-trailing malformed line is a real corruption — surface
           // it loudly. Final line might be a partial write, swallow it.
-          console.warn(
-            `transcript: dropped malformed line ${i + 1} in ${JSON.stringify(this.path)}`,
-          )
+          log.warn('dropped_malformed_line', { line: i + 1, path: this.path })
         }
       }
     }

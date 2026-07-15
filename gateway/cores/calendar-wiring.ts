@@ -60,6 +60,9 @@ import type {
   ChatCommandFilterResult,
 } from '../http/app-ws-surface.ts'
 import type { PushDispatcher } from '../push/dispatcher.ts'
+import { createLogger } from '@neutronai/logger'
+
+const moduleLog = createLogger('calendar-core')
 
 export interface CalendarChatCommandDispatcherDeps {
   client: CalendarClient
@@ -293,10 +296,12 @@ export function buildCalendarPreMeetingBriefSchedulerDeps(
           }
         }
       } catch (err) {
-        console.warn(
-          `[calendar-core] pre-meeting-brief fire failed instance=${input.project_slug} project=${project_id} event=${event.id}:`,
-          err instanceof Error ? err.message : String(err),
-        )
+        moduleLog.warn('pre_meeting_brief_fire_failed', {
+          instance: input.project_slug,
+          project: project_id,
+          event: event.id,
+          error: err instanceof Error ? err.message : String(err),
+        })
       }
       // Scribe phase-2 ride-along: hand the SAME already-fetched event row to
       // scribe's extract→GBrain path. Runs after the brief regardless of brief

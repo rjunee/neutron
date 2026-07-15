@@ -53,6 +53,9 @@ import type { ButtonStore } from '@neutronai/channels/button-store.ts'
 import { ownerIdentityMismatch, type OwnerHandleResolver } from './auth-helpers.ts'
 import { jsonResponse } from './surface-kit.ts'
 import { webTopicId } from './chat-bridge.ts'
+import { createLogger } from '@neutronai/logger'
+
+const moduleLog = createLogger('chat-topics')
 
 /** Verified claim shape — matches `chat-history-surface.ts:UserClaim`. */
 export interface UserClaim {
@@ -144,10 +147,11 @@ export function createChatTopicsSurface(opts: ChatTopicsSurfaceOptions): ChatTop
         } catch (err) {
           // Don't 500 the sidebar over a name-resolver hiccup — the
           // humanised-slug fallback still produces readable labels.
-          console.warn(
-            `[chat-topics-surface] project=${opts.project_slug} user_id=${claim.user_id} resolveProjectNames threw — falling back to humanised ids:`,
-            err,
-          )
+          moduleLog.warn('resolve_project_names_threw', {
+            project: opts.project_slug,
+            user_id: claim.user_id,
+            error: err instanceof Error ? err.message : String(err),
+          })
         }
       }
       let rows: Awaited<ReturnType<typeof opts.store.listTopicsByUser>>
@@ -157,10 +161,11 @@ export function createChatTopicsSurface(opts: ChatTopicsSurfaceOptions): ChatTop
           now: observed,
         })
       } catch (err) {
-        console.warn(
-          `[chat-topics-surface] project=${opts.project_slug} user_id=${claim.user_id} listTopicsByUser threw:`,
-          err,
-        )
+        moduleLog.warn('list_topics_threw', {
+          project: opts.project_slug,
+          user_id: claim.user_id,
+          error: err instanceof Error ? err.message : String(err),
+        })
         return jsonErrorUtf8(500, 'internal', 'failed to list chat topics')
       }
       const decorated: ChatTopic[] = rows.map((row) => ({

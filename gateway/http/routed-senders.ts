@@ -37,6 +37,9 @@ import { createHash } from 'node:crypto'
 import type { SendButtonPromptFn } from '@neutronai/onboarding/interview/engine.ts'
 import type { WebChatSenderRegistry } from './chat-sender-registry.ts'
 import { renderButtonPromptForWeb } from './render-outbound.ts'
+import { createLogger } from '@neutronai/logger'
+
+const moduleLog = createLogger('chat-bridge')
 
 /**
  * Onboarding consolidation (2026-06-26) — a late-bound app-socket sender holder.
@@ -153,9 +156,17 @@ export function buildRoutedSendImportProgress(
       // Light-touch observability — no body content, just shape +
       // delivery boolean. Surfaces in journalctl as
       // `[chat-bridge] sendImportProgress event=route ...`.
-      console.info(
-        `[chat-bridge] sendImportProgress event=route channel=web project=${project_slug} topic=${topic_id} job=${event.job_id} status=${event.status} pass=${event.pass} pct=${event.pct.toFixed(2)} known=${event.chunks_total_known} delivered=${ok}`,
-      )
+      moduleLog.info('route', {
+        channel: 'web',
+        project: project_slug,
+        topic: topic_id,
+        job: event.job_id,
+        status: event.status,
+        pass: event.pass,
+        pct: event.pct.toFixed(2),
+        known: event.chunks_total_known,
+        delivered: ok,
+      })
       return { delivered: ok }
     }
     // Onboarding consolidation (2026-06-26) — app-socket route.
@@ -166,9 +177,12 @@ export function buildRoutedSendImportProgress(
     // agent_message still lands on these channels via the regular
     // `sendButtonPrompt` path.
     if (!topic_id.startsWith('tg:') && !topic_id.startsWith('app:')) {
-      console.warn(
-        `[chat-bridge] sendImportProgress event=drop reason=unknown-channel project=${project_slug} topic=${topic_id} job=${event.job_id}`,
-      )
+      moduleLog.warn('drop', {
+        reason: 'unknown-channel',
+        project: project_slug,
+        topic: topic_id,
+        job: event.job_id,
+      })
     }
     return { delivered: false }
   }
@@ -205,9 +219,16 @@ export function buildRoutedSendButtonPrompt(
       // is included as a cheap secondary signal (length variance also
       // distinguishes static vs LLM-rephrased without leaking bytes).
       const body_sha8 = createHash('sha256').update(prompt.body).digest('hex').slice(0, 8)
-      console.info(
-        `[chat-bridge] sendButtonPrompt event=route channel=web project=${project_slug} topic=${topic_id} prompt=${prompt.prompt_id} options=${prompt.options.length} delivered=${ok} body_len=${prompt.body.length} body_sha8=${body_sha8}`,
-      )
+      moduleLog.info('route', {
+        channel: 'web',
+        project: project_slug,
+        topic: topic_id,
+        prompt: prompt.prompt_id,
+        options: prompt.options.length,
+        delivered: ok,
+        body_len: prompt.body.length,
+        body_sha8,
+      })
       return { message_id: prompt.prompt_id, was_new: ok }
     }
     if (topic_id.startsWith('tg:') && opts.telegramSender !== undefined) {
@@ -227,9 +248,12 @@ export function buildRoutedSendButtonPrompt(
     // emit. The engine treats was_new=false as "delivered, no need
     // to re-send" which is misleading when there's nothing on the
     // far side — this log line gives the operator a foothold.
-    console.warn(
-      `[chat-bridge] sendButtonPrompt event=drop reason=unknown-channel-or-no-sender project=${project_slug} topic=${topic_id} prompt=${prompt.prompt_id}`,
-    )
+    moduleLog.warn('drop', {
+      reason: 'unknown-channel-or-no-sender',
+      project: project_slug,
+      topic: topic_id,
+      prompt: prompt.prompt_id,
+    })
     return { message_id: prompt.prompt_id, was_new: false }
   }
 }

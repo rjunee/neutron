@@ -20,6 +20,7 @@
  */
 
 import type { ProjectDb } from '@neutronai/persistence/index.ts'
+import { createLogger } from '@neutronai/logger'
 import { ReminderStore, type Reminder } from '@neutronai/reminders/store.ts'
 import type {
   Task,
@@ -218,9 +219,11 @@ export function attachReminderLinkSubscriber(input: {
       await handleEvent(event, ctx)
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
-      console.warn(
-        `[task-reminder-link] handler threw on ${event.kind} task=${event.task.id}: ${msg}`,
-      )
+      createLogger('task-reminder-link').warn('handler_threw', {
+        event: event.kind,
+        task: event.task.id,
+        error: msg,
+      })
     }
   })
 }

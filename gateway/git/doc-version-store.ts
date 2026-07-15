@@ -67,6 +67,25 @@ import { promisify } from 'node:util'
 
 import { createKeyedMutex } from '../http/keyed-mutex.ts'
 import type { KeyedMutex } from '../http/keyed-mutex.ts'
+import { createLogger } from '@neutronai/logger'
+
+const moduleLog = createLogger('docs.versioning')
+
+/** Coerce arbitrary log meta to the logger's primitive `LogValue` shape —
+ *  non-primitives are JSON-stringified so the emitted `k=v` line stays single. */
+const coerceLogFields = (
+  fields?: Record<string, unknown>,
+): Record<string, string | number | boolean | null | undefined> | undefined => {
+  if (fields === undefined) return undefined
+  const out: Record<string, string | number | boolean | null | undefined> = {}
+  for (const [k, v] of Object.entries(fields)) {
+    out[k] =
+      v === null || v === undefined || ['string', 'number', 'boolean'].includes(typeof v)
+        ? (v as string | number | boolean | null | undefined)
+        : (() => { try { return JSON.stringify(v) } catch { return String(v) } })()
+  }
+  return out
+}
 
 const execFileAsync = promisify(execFile)
 
@@ -170,11 +189,7 @@ export type DocVersionLogger = (
 ) => void
 
 const DEFAULT_LOGGER: DocVersionLogger = (event, fields) => {
-  try {
-    console.warn(`[docs.versioning] ${event} ${JSON.stringify(fields)}`)
-  } catch {
-    console.warn(`[docs.versioning] ${event}`)
-  }
+  moduleLog.warn(event, coerceLogFields(fields))
 }
 
 export interface DocVersionStoreOptions {

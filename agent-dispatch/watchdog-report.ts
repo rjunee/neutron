@@ -27,6 +27,9 @@ import { runLifecycleTick } from '@neutronai/runtime/subagent/lifecycle.ts'
 import { SupervisedLoop, type LoopDescriptor } from '@neutronai/loop'
 import { DISPATCH_KIND_BY_AGENT_KIND } from './prompts.ts'
 import type { DeliveryTarget, DispatchReport, DispatchReporter } from './service.ts'
+import { createLogger } from '@neutronai/logger'
+
+const log = createLogger('dispatch-watchdog')
 
 /** Build a watchdog notifier that forwards dispatch failures to `report`. */
 export function buildDispatchWatchdogNotifier(report: DispatchReporter): AgentWatchdogNotifier {
@@ -269,11 +272,10 @@ export function buildDispatchSuspectedStuckNotifier(
     try {
       await sink(alert)
     } catch (err) {
-      console.error(
-        `[dispatch-watchdog] alert delivery FAILING for ${event.run_id} ` +
-          `(will retry next tick):`,
-        err,
-      )
+      log.error('alert_delivery_failing', {
+        run_id: event.run_id,
+        error: err instanceof Error ? (err.stack ?? err.message) : String(err),
+      })
       throw err
     }
   }
@@ -353,9 +355,10 @@ export function scheduleDispatchLifecycleWatchdog(
       })
     },
     onError: (name, err): void => {
-      console.warn(
-        `[subagent-lifecycle] tick '${name}' failed: ${err instanceof Error ? err.message : String(err)}`,
-      )
+      log.warn('tick_failed', {
+        tick: name,
+        error: err instanceof Error ? err.message : String(err),
+      })
     },
     ...(deps.set_interval !== undefined ? { setTimer: deps.set_interval } : {}),
     ...(deps.clear_interval !== undefined ? { clearTimer: deps.clear_interval } : {}),

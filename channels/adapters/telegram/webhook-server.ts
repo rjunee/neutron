@@ -15,9 +15,12 @@
  */
 
 import { timingSafeEqual } from 'node:crypto'
+import { createLogger } from '@neutronai/logger'
 import type { IncomingEvent, IncomingEventReceiver } from '../../types.ts'
 import type { SelfEchoFilter } from './sync-message-filter.ts'
 import { hashText } from './sync-message-filter.ts'
+
+const log = createLogger('telegram-webhook')
 
 interface TelegramFrom {
   id: number
@@ -202,7 +205,7 @@ export async function dispatchStartCommandIfBind(
       observed_at: Date.now(),
     })
   } catch (err) {
-    console.error('telegram /start: bind-command handler threw:', err)
+    log.error('start_bind_command_handler_threw', { error: err instanceof Error ? (err.stack ?? err.message) : String(err) })
   }
   return true
 }
@@ -240,7 +243,7 @@ export async function dispatchStartCommandIfOnboarding(
       observed_at: Date.now(),
     })
   } catch (err) {
-    console.error('telegram /start: start-command handler threw:', err)
+    log.error('start_command_handler_threw', { error: err instanceof Error ? (err.stack ?? err.message) : String(err) })
   }
   return true
 }
@@ -273,7 +276,7 @@ export function buildWebhookHandler(opts: WebhookHandlerOptions): (req: Request)
     try {
       body = (await req.json()) as TelegramUpdate
     } catch (err) {
-      console.warn('telegram webhook: malformed json:', err)
+      log.warn('malformed_json', { error: err instanceof Error ? err.message : String(err) })
       return new Response('ok', { status: 200 })
     }
 
@@ -300,7 +303,7 @@ export function buildWebhookHandler(opts: WebhookHandlerOptions): (req: Request)
             observed_at: Date.now(),
           })
         } catch (err) {
-          console.error('telegram webhook: callback handler threw:', err)
+          log.error('callback_handler_threw', { error: err instanceof Error ? (err.stack ?? err.message) : String(err) })
         }
       }
       return new Response('ok', { status: 200 })
@@ -334,7 +337,7 @@ export function buildWebhookHandler(opts: WebhookHandlerOptions): (req: Request)
     try {
       await opts.receiver.receive(event)
     } catch (err) {
-      console.error('telegram webhook: receiver threw:', err)
+      log.error('receiver_threw', { error: err instanceof Error ? (err.stack ?? err.message) : String(err) })
       // Still 200 — letting Telegram retry would amplify the failure.
     }
     return new Response('ok', { status: 200 })

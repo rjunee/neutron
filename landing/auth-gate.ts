@@ -68,6 +68,9 @@ import {
   signSessionCookie,
 } from './session-cookie.ts'
 import { isSpaClientRoute } from './spa-routes.ts'
+import { createLogger } from '@neutronai/logger'
+
+const log = createLogger('auth-gate')
 
 /** Resolve a JWKS key by `kid`. Structurally identical to the resolver
  *  the platform chat-proxy uses; defined locally since C2 relocated that
@@ -340,10 +343,10 @@ export async function evaluateAuthGate(
           return { kind: 'redirect', location }
         }
       } catch (err) {
-        console.warn(
-          `[auth-gate] project_slug=${opts.project_slug} resolvePendingRedirect threw — falling through:`,
-          err,
-        )
+        log.warn('resolve_pending_redirect_threw_fall_through', {
+          project_slug: opts.project_slug,
+          error: err instanceof Error ? err.message : String(err),
+        })
       }
     }
     // Argus r1 BLOCKER #2 (2026-05-27): GET / has no downstream handler in
@@ -401,10 +404,10 @@ export async function evaluateAuthGate(
           }
         }
       } catch (err) {
-        console.warn(
-          `[auth-gate] project_slug=${opts.project_slug} mintStartToken threw — falling through to allow (chat.html will boot without a token):`,
-          err,
-        )
+        log.warn('mint_start_token_threw_fall_through_tokenless', {
+          project_slug: opts.project_slug,
+          error: err instanceof Error ? err.message : String(err),
+        })
       }
       // Mint hook returned null OR threw — fall through to `allow`. The
       // user lands on chat.html without a fresh ?start=, the WS upgrade
@@ -445,10 +448,10 @@ export async function evaluateAuthGate(
           }
         }
       } catch (err) {
-        console.warn(
-          `[auth-gate] project_slug=${opts.project_slug} mintStartToken threw for SPA deep link — falling through to allow (shell boots token-less):`,
-          err,
-        )
+        log.warn('mint_start_token_threw_spa_deep_link_fall_through', {
+          project_slug: opts.project_slug,
+          error: err instanceof Error ? err.message : String(err),
+        })
       }
     }
     // 2026-05-27 persistent-session-cookie sprint: refresh the cookie on

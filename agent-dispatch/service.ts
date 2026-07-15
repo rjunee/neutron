@@ -64,6 +64,9 @@ import {
   assessDispatchReadiness,
   type DispatchReadinessTarget,
 } from '@neutronai/work-board/dispatch-readiness.ts'
+import { createLogger } from '@neutronai/logger'
+
+const log = createLogger('agent-dispatch')
 
 /** Where a dispatch result should be delivered back. */
 export interface DeliveryTarget {
@@ -357,11 +360,10 @@ export class DispatchService {
     try {
       running = await this.deps.registry.update(record.run_id, { status: 'running' })
     } catch (err) {
-      console.warn(
-        `[agent-dispatch] running-flip persist failed for ${record.run_id}; ` +
-          `launching on the in-memory record (persistence best-effort): ` +
-          `${err instanceof Error ? err.message : String(err)}`,
-      )
+      log.warn('running_flip_persist_failed', {
+        run_id: record.run_id,
+        error: err instanceof Error ? err.message : String(err),
+      })
       // `update` rolled memory back to `pending` on the failed persist — reconcile
       // the LIVE registry to `running` so the caps count it and `statusOf` doesn't
       // show a phantom `pending` while the subprocess runs. `reconcileInMemory`
@@ -530,11 +532,7 @@ export class DispatchService {
       const settled = await this.deps.registry.updateTerminal(run_id, patch)
       const recordToReport: SubagentRecord = settled.record ?? { ...(cur ?? record), ...patch }
       if (!settled.durable) {
-        console.warn(
-          `[agent-dispatch] terminal persist for ${run_id} (${status}) did not converge after ` +
-            `retries; reported from intent, durable row stale (best-effort) — the boot reap may ` +
-            `re-surface it on restart`,
-        )
+        log.warn('terminal_persist_did_not_converge', { run_id, status })
       }
       // ALWAYS remove the canceller and report — on BOTH the converged and the
       // stale-durable path — so a store outage never leaks a canceller nor drops

@@ -302,6 +302,9 @@ import {
 import type { OutgoingMessage } from '@neutronai/channels/types.ts'
 import type { ChatOutbound } from '@neutronai/landing/chat-protocol.ts'
 import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
+import { createLogger } from '@neutronai/logger'
+
+const log = createLogger('open-composer')
 
 export interface BuildOpenGraphComposerOptions {
   /** Override the process env (tests). Defaults to `process.env`. */
@@ -529,10 +532,9 @@ export function resolveOpenConversationalProvider(
   if (provider === 'openai') {
     const pool = deps.resolveOpenAiPool(env)
     if (pool !== null) {
-      console.log(
-        '[composer] NEUTRON_MODEL_PROVIDER=openai — conversational turns route to the GPT ' +
-          'Responses API adapter (BYO OPENAI_API_KEY). Trident + autonomous builds stay Claude Code.',
-      )
+      log.info('provider_openai_selected', {
+        note: 'conversational turns route to the GPT Responses API adapter (BYO OPENAI_API_KEY); Trident + autonomous builds stay Claude Code',
+      })
       return {
         provider: 'openai',
         openaiLlmPool: pool,
@@ -542,10 +544,9 @@ export function resolveOpenConversationalProvider(
     }
     // Honor the explicit selection with NO key: fail loudly per turn (below),
     // never silently fall back to Anthropic.
-    console.error(
-      '[composer] NEUTRON_MODEL_PROVIDER=openai but no OPENAI_API_KEY resolved — ' +
-        'conversational turns will FAIL LOUDLY (no silent Anthropic fallback). Set OPENAI_API_KEY.',
-    )
+    log.error('provider_openai_no_key', {
+      note: 'NEUTRON_MODEL_PROVIDER=openai but no OPENAI_API_KEY resolved — conversational turns will FAIL LOUDLY (no silent Anthropic fallback). Set OPENAI_API_KEY.',
+    })
     return { provider: 'openai' }
   }
   // Exhaustive: any OTHER declared value (openai-codex-cli today) is NOT wired
@@ -626,15 +627,17 @@ export function buildOpenGraphComposer(
     const agentSkillsDir = resolveAgentSkillsDir(owner_home)
     try {
       const provisioned = provisionAgentSkills({ skillsDir: agentSkillsDir })
-      console.log(
-        `[skills] provisioned ${provisioned.bundled.length} bundled skill pack(s) into ${agentSkillsDir} ` +
-          `(${provisioned.present.length} total discoverable)`,
-      )
+      log.info('skills_provisioned', {
+        bundled: provisioned.bundled.length,
+        dir: agentSkillsDir,
+        discoverable: provisioned.present.length,
+      })
     } catch (err) {
       // Never block boot on skill provisioning — the agent just lacks the packs.
-      console.warn(
-        `[skills] provisioning failed for ${agentSkillsDir}: ${err instanceof Error ? err.message : String(err)}`,
-      )
+      log.warn('skills_provisioning_failed', {
+        dir: agentSkillsDir,
+        error: err instanceof Error ? err.message : String(err),
+      })
     }
 
     // Shared per-owner persona loader — splices <owner_home>/persona/*.md
@@ -783,10 +786,15 @@ export function buildOpenGraphComposer(
     // AND the boot-reap of a prior process's orphaned dispatch surface the SAME
     // way. First-cut: log the announcement. The live WS `agent_message` splice is
     // the documented follow-up (Open is WS-native + single-owner, no Telegram).
+    // Uses the `agent-dispatch` subsystem tag so the announcement line stays
+    // `[agent-dispatch] …` — the shape the boot-reap wiring test pins. `header`
+    // carries the truncated id + kind/agent/status; `markdown` carries the full
+    // run_id + failure_reason.
+    const dispatchLog = createLogger('agent-dispatch')
     const dispatchReport: DispatchReporter = async (r) => {
-      console.log(
-        `[agent-dispatch] ${r.kind} (${r.agent_kind}) ${r.run_id.slice(0, 8)} → ${r.status}\n${r.markdown}`,
-      )
+      dispatchLog.info(`${r.kind} (${r.agent_kind}) ${r.run_id.slice(0, 8)} → ${r.status}`, {
+        markdown: r.markdown,
+      })
     }
     // S4 (plan §P7 / D-6) — the registry's durable mirror (`code_subagent_registry`,
     // migration 0100). Wiring it as the registry's write-through persistence makes
@@ -852,9 +860,7 @@ export function buildOpenGraphComposer(
       store: subagentRegistryStore,
       report: buildBootSweepReport(dispatchReport),
     }), (err: unknown) => {
-      console.warn(
-        `[agent-dispatch] boot reap failed: ${err instanceof Error ? err.message : String(err)}`,
-      )
+      log.warn('boot_reap_failed', { error: err instanceof Error ? err.message : String(err) })
     })
 
     // ── Skill-forge → Open boot (Vajra parity gap #5) ──────────────────────
@@ -882,9 +888,11 @@ export function buildOpenGraphComposer(
       store: skillForgeStore,
       notifier: {
         async notify(proposal, message): Promise<void> {
-          console.log(
-            `[skill-forge] proposal ${proposal.id} (${proposal.proposed_name}):\n${message}`,
-          )
+          log.info('skill_forge_proposal', {
+            id: proposal.id,
+            proposed_name: proposal.proposed_name,
+            message,
+          })
         },
       },
       // P1-5 — write approved skills as native `SKILL.md` packs into the SAME
@@ -988,7 +996,10 @@ export function buildOpenGraphComposer(
         }
       })
     } catch (err) {
-      console.warn('[open] doc-search index unavailable; doc_search tools disabled:', err)
+      log.warn('doc_search_index_unavailable', {
+        note: 'doc_search tools disabled',
+        error: err instanceof Error ? (err.stack ?? err.message) : String(err),
+      })
       docSearchRuntime = null
     }
 
@@ -1059,7 +1070,7 @@ export function buildOpenGraphComposer(
     try {
       codexCredentialService.ensureMaterialized(project_slug)
     } catch (err) {
-      console.warn(`[codex] ensureMaterialized failed: ${err instanceof Error ? err.message : String(err)}`)
+      log.warn('codex_ensure_materialized_failed', { error: err instanceof Error ? err.message : String(err) })
     }
     const coresSubstrate =
       llmPool !== null ? makeEphemeralSubstrate('cc-cores')(owner_home) : null
@@ -1087,11 +1098,10 @@ export function buildOpenGraphComposer(
     realmodeCleanups.push(() => {
       coresWiring.cleanup()
     })
-    console.info(
-      `[open] cores composed: oauth_configured=${coresWiring.oauthConfigured} (Calendar/Email/Google ${
-        coresWiring.oauthConfigured ? 'live-cred-capable' : 'in-memory until Google OAuth connected'
-      })`,
-    )
+    log.info('cores_composed', {
+      oauth_configured: coresWiring.oauthConfigured,
+      note: coresWiring.oauthConfigured ? 'live-cred-capable' : 'in-memory until Google OAuth connected',
+    })
 
     const phaseSpecResolver = await buildPhaseSpecResolver({
       substrate: llmCallSubstrate,
@@ -2069,11 +2079,10 @@ export function buildOpenGraphComposer(
         }
         appWsRegistry.send(appWsTopicId(OWNER_USER_ID), frame)
       } catch (err) {
-        console.warn(
-          `[work-board] event=push_failed project=${changedKey} err=${
-            err instanceof Error ? err.message : String(err)
-          }`,
-        )
+        log.warn('work_board_push_failed', {
+          project: changedKey,
+          error: err instanceof Error ? err.message : String(err),
+        })
       }
     }
     const workBoardStore = new WorkBoardStore(db, {
@@ -2270,11 +2279,11 @@ export function buildOpenGraphComposer(
           name: row.name,
           project_id: row.project_id,
         }), (err: unknown) => {
-          console.warn(
-            `[create-project] event=materialize_failed project=${project_slug} id=${
-              row.project_id
-            } err=${err instanceof Error ? err.message : String(err)}`,
-          )
+          log.warn('create_project_materialize_failed', {
+            project: project_slug,
+            id: row.project_id,
+            error: err instanceof Error ? err.message : String(err),
+          })
         })
         // Known mutation → always push the fresh rail snapshot.
         emitProjectsChangedNow(input.user_id ?? OWNER_USER_ID)
@@ -2633,11 +2642,11 @@ export function buildOpenGraphComposer(
                 }
                 return { finalized: false }
               } catch (err) {
-                console.warn(
-                  `[open] event=capture_required_answer_failed project=${project_slug} user=${user_id} err=${
-                    err instanceof Error ? err.message : String(err)
-                  }`,
-                )
+                log.warn('capture_required_answer_failed', {
+                  project: project_slug,
+                  user: user_id,
+                  error: err instanceof Error ? err.message : String(err),
+                })
                 return { finalized: false }
               }
             },

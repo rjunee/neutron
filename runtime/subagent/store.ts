@@ -37,6 +37,9 @@ import type {
   SubagentRecord,
   SubagentStatus,
 } from './registry.ts'
+import { createLogger } from '@neutronai/logger'
+
+const log = createLogger('subagent-store')
 
 /** The persisted row (all columns; JSON blobs as TEXT, timestamps as INTEGER). */
 interface SubagentRegistryDbRow {
@@ -264,9 +267,7 @@ function parseBlob<T>(text: string, run_id: string, field: string): T | undefine
   try {
     return JSON.parse(text) as T
   } catch {
-    console.warn(
-      `[subagent-store] dropping malformed ${field} JSON for run ${run_id} (row still reaped)`,
-    )
+    log.warn('dropping_malformed_json', { field, run_id })
     return undefined
   }
 }

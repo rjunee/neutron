@@ -65,6 +65,9 @@ import {
 } from './entity-format.ts'
 import { SLUG_REGEX } from './entity-slug.ts'
 import { fireAndForget, neutralizeAbandonedSettle } from '@neutronai/logger/fire-and-forget.ts'
+import { createLogger } from '@neutronai/logger'
+
+const log = createLogger('entity-writer')
 
 // The page codec (render + parse + KIND_TO_DIR + extractCompiledTruth) lives
 // in the `./entity-format.ts` leaf (refactor P8). Re-export the shared
@@ -401,8 +404,7 @@ function diffTriples(previous: Triple[], next: Triple[]): Triple[] {
 
 function defaultLogSyncFailure(err: unknown, path: string): void {
   const msg = err instanceof Error ? err.message : String(err)
-  // Single-line, structured; the gateway log scraper can grep this prefix.
-  console.error(`[entity-writer] syncHook failed path=${path} err=${msg}`)
+  log.error('sync_hook_failed', { path, error: msg })
 }
 
 function validateInput(input: EntityWriteInput): void {

@@ -32,6 +32,7 @@
 
 import { randomUUID } from 'node:crypto'
 import type { ProjectDb } from '@neutronai/persistence/index.ts'
+import { createLogger } from '@neutronai/logger'
 import { computeFocusScore } from './focus-score.ts'
 
 /**
@@ -315,9 +316,11 @@ export class TaskStore {
         }
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err)
-        console.warn(
-          `[task-store] listener threw on ${event.kind} ${event.task.id}: ${msg}`,
-        )
+        createLogger('task-store').warn('listener_threw', {
+          event: event.kind,
+          task: event.task.id,
+          error: msg,
+        })
       }
     }
   }
