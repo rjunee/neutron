@@ -61,12 +61,19 @@ function fmtTime(ms: number | null | undefined): string {
  * answers which Core failed and why without journalctl. `k=v` pairs; each value
  * stringified + length-capped, the whole string bounded. Empty/non-object → ''.
  */
-function fmtPayload(payload: unknown): string {
+export function fmtPayload(payload: unknown): string {
   if (payload === null || typeof payload !== 'object') return ''
   const entries = Object.entries(payload as Record<string, unknown>)
   if (entries.length === 0) return ''
+  // Strip terminal control chars (newlines, ESC/ANSI, C0/C1 + DEL) BEFORE truncating
+  // so a journal payload — which carries attacker-influenceable error text — can't
+  // forge a diagnostics line or emit control sequences (e.g. clear-screen) to the
+  // terminal (Codex). Keeps the "one-line" contract intact.
+  const sanitize = (s: string): string => s.replace(/[\u0000-\u001f\u007f-\u009f]/g, ' ')
   const cap = (s: string, n: number): string => (s.length > n ? `${s.slice(0, n - 1)}…` : s)
-  const parts = entries.map(([k, v]) => `${k}=${cap(typeof v === 'string' ? v : JSON.stringify(v), 80)}`)
+  const parts = entries.map(
+    ([k, v]) => `${sanitize(k)}=${cap(sanitize(typeof v === 'string' ? v : JSON.stringify(v)), 80)}`,
+  )
   return cap(parts.join(' '), 200)
 }
 

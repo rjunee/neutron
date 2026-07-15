@@ -16,7 +16,7 @@ import { join } from 'node:path'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { applyMigrationsToProjectDb } from '@neutronai/migrations/runner.ts'
 import { composeDiagnostics } from '@neutronai/gateway/diagnostics/diagnostics-report.ts'
-import { collectCliDiagnostics, formatDiagnosticsText } from '../diagnostics-cli-impl.ts'
+import { collectCliDiagnostics, formatDiagnosticsText, fmtPayload } from '../diagnostics-cli-impl.ts'
 
 let tmp: string
 
@@ -121,6 +121,35 @@ describe('collectCliDiagnostics', () => {
     expect(text).toContain('cores/core_install_failed')
     expect(text).toContain('core_slug=email')
     expect(text).toContain('code=manifest_invalid')
+  })
+
+  describe('fmtPayload — terminal-injection safety + caps', () => {
+    it('strips newlines and ANSI/control sequences (no forged lines, one line out)', () => {
+      // A journal payload carries attacker-influenceable error text.
+      const out = fmtPayload({ message: 'failed\ncredentials: usable=true\u001b[2Jx\r\t' })
+      expect(out).not.toContain('\n')
+      expect(out).not.toContain('\r')
+      expect(out).not.toContain('\u001b') // ESC — no clear-screen etc.
+      expect(out).not.toContain('\t')
+      // The visible text survives (controls → spaces), so it's still informative.
+      expect(out).toContain('message=failed')
+    })
+
+    it('caps a long value at 80 and the whole line at 200 chars (…-elided)', () => {
+      const longVal = 'x'.repeat(500)
+      const perValue = fmtPayload({ k: longVal })
+      expect(perValue.length).toBeLessThanOrEqual(2 + 80) // "k=" + 80
+      expect(perValue.endsWith('…')).toBe(true)
+      const wide = fmtPayload(Object.fromEntries(Array.from({ length: 40 }, (_, i) => [`k${i}`, 'v'.repeat(30)])))
+      expect(wide.length).toBeLessThanOrEqual(200)
+      expect(wide.endsWith('…')).toBe(true)
+    })
+
+    it('non-object / empty payloads render as empty', () => {
+      expect(fmtPayload(null)).toBe('')
+      expect(fmtPayload('a string')).toBe('')
+      expect(fmtPayload({})).toBe('')
+    })
   })
 
   it('scopes cron jobs to THIS instance slug (no cross-project leak)', () => {
