@@ -40,7 +40,7 @@ import {
   SETTINGS_BACKEND_UNAVAILABLE_ERROR,
   type AgentSettingsTelegram,
 } from '@neutronai/agent-settings'
-import { PersonaPromptLoader } from '@neutronai/gateway/realmode-composer/persona-loader.ts'
+import { PersonaPromptLoader } from '@neutronai/gateway/wiring/persona-loader.ts'
 import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 

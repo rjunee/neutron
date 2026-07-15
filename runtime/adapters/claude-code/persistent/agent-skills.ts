@@ -7,7 +7,7 @@
  * Neutron previously had NO native skill-discovery path for the spawned agent:
  * `impeccable` (the CLAUDE.md-mandated design path) and `agent-browser` were
  * wholly unreachable, and the only "skills" surface was the system-prompt
- * convention-injection loader (`gateway/realmode-composer/skills-loader.ts`) plus
+ * convention-injection loader (`gateway/wiring/skills-loader.ts`) plus
  * skill-forge's *proposal* lifecycle — neither is the native loader.
  *
  * This module LIFTS the mechanism: it materializes a set of `SKILL.md` packs

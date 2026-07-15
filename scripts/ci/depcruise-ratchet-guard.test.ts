@@ -41,7 +41,7 @@ const V_A: DepcruiseViolation = {
 const V_B: DepcruiseViolation = {
   type: 'dependency',
   from: 'reminders/dispatcher.ts',
-  to: 'gateway/realmode-composer/build-llm-call-substrate.ts',
+  to: 'gateway/wiring/build-llm-call-substrate.ts',
   rule: { severity: 'error', name: 'services-below-product' },
 }
 // Same edge as V_A but a DIFFERENT rule — must be a distinct key (both really

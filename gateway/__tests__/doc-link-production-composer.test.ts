@@ -132,7 +132,7 @@ async function startHarness(): Promise<Harness> {
 
   // Construct the channel adapters the same way `gateway/index.ts`
   // does at boot (see index.ts around L2780-L2808 for AppWs and the
-  // realmode-composer's telegram-adapter wiring).
+  // wiring's telegram-adapter wiring).
   const appWsRegistry = new InMemoryAppWsSessionRegistry()
   const appWsAdapter = new AppWsAdapter({
     registry: appWsRegistry,

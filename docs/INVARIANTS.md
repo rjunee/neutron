@@ -325,8 +325,8 @@ with cross-references noted inline.
     `chat-bridge.ts:~1919-2717`.
     Protects: **D3**.
 73. `tag_gated` no-mention posts persist the transcript and send a no-render `agent_ack`.
-    `gateway/realmode-composer/build-live-agent-turn.ts:1135`,
-    `gateway/realmode-composer/build-landing-stack.ts:1473`.
+    `gateway/wiring/build-live-agent-turn.ts:1135`,
+    `gateway/wiring/build-landing-stack.ts:1473`.
     Protects: **D3**.
 74. Backup/restore facade: `last_attempted` written BEFORE the snapshot fires (scheduler contract);
     SNAPSHOT caps constants; sha/path validation errors are typed classes the HTTP surface maps to
@@ -368,7 +368,7 @@ with cross-references noted inline.
 81. Moving value constants changes module-init graphs (e.g. `collectTokensToString`,
     `TELEGRAM_BIND_TOKEN_TTL_MS`) — several modules read env at module-load time; relocation
     reorders those reads. Prefer re-export shims for one release.
-    `gateway/realmode-composer/build-llm-call-substrate.ts:793` (`collectTokensToString`).
+    `gateway/wiring/build-llm-call-substrate.ts:793` (`collectTokensToString`).
     Protects: **L5** (Relative-import autofix sweeps).
 82. `slugifyProjectId` (`onboarding/wow-moment/project-identity.ts:41-44`) must stay byte-identical
     to gateway's `defaultProjectIdSlugifier` — already guarded by a drift test; keep the test until
@@ -479,7 +479,7 @@ with cross-references noted inline.
 108. Credential-pool threading into spawns explicitly UNSETS `ANTHROPIC_API_KEY`/
      `ANTHROPIC_AUTH_TOKEN`/`CLAUDE_CODE_OAUTH_TOKEN` before setting ONLY the selected credential;
      `cred_id` (never the secret) is what surfaces on completions. Already done right — preserve
-     verbatim. `gateway/realmode-composer/build-llm-call-substrate.ts:184-207`.
+     verbatim. `gateway/wiring/build-llm-call-substrate.ts:184-207`.
      Protects: **C6**, **S1**.
 109. Session cookie: HMAC-SHA256, 30-day sliding, `HttpOnly; SameSite=Lax; Path=/`, `Secure` only
      on https, constant-time HMAC compare. `landing/session-cookie.ts`, `open/composer.ts:3630`.

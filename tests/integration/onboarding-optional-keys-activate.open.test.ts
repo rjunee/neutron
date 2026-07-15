@@ -25,7 +25,7 @@ import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { SecretsStore } from '@neutronai/auth/secrets-store.ts'
 import { ApiKeyStore } from '@neutronai/auth/api-key-store.ts'
-import { resolveLlmCredentials } from '@neutronai/gateway/realmode-composer/resolve-llm-credentials.ts'
+import { resolveLlmCredentials } from '@neutronai/gateway/wiring/resolve-llm-credentials.ts'
 import { selectCredential } from '@neutronai/runtime/credential-pool.ts'
 import { storeOptionalKey } from '@neutronai/onboarding/optional-keys.ts'
 

@@ -388,7 +388,7 @@ export interface SlugPickerEngineHook {
 
 /**
  * 2026-05-13 — T3 max-oauth handoff hook. Production wires this in
- * `gateway/realmode-composer/build-landing-stack.ts` to a closure over
+ * `gateway/wiring/build-landing-stack.ts` to a closure over
  * `auth/max-oauth.ts:MaxOAuthClient`. Tests inject an in-process stub.
  *
  * The hook is fire-and-forget on the engine's side: the engine calls
@@ -457,7 +457,7 @@ export interface MaxOauthSecretsStore {
  *
  * The hook is responsible for everything image-related; the engine
  * just dispatches choices + walks the phase machine. Production wires
- * the hook in `gateway/realmode-composer/build-landing-stack.ts`; tests
+ * the hook in `gateway/wiring/build-landing-stack.ts`; tests
  * inject an in-process stub.
  */
 export interface ProfilePicEngineHook {
@@ -762,7 +762,7 @@ export interface SlugPickerEngineHookInput {
  * hook is best-effort: the engine catches and logs throws so a seed
  * hiccup never blocks the user's onboarding completion.
  *
- * Production implementation lives in `gateway/realmode-composer/build-onboarding-handoff.ts`
+ * Production implementation lives in `gateway/wiring/build-onboarding-handoff.ts`
  * and walks `phase_state.primary_projects_confirmed` (falling back to
  * `phase_state.captured_projects`) to emit one button_prompts row per
  * project under `web:<user_id>:<project_id>` via the shared ButtonStore.
@@ -808,7 +808,7 @@ export interface InterviewEngineDeps {
    * live channel every tick. When absent, the engine silently no-ops the
    * progress emit (preserves pre-v0.1.75 behaviour — used by unit tests
    * that don't need to assert progress wire shape). Production composer
-   * wires this in `gateway/realmode-composer/build-landing-stack.ts`.
+   * wires this in `gateway/wiring/build-landing-stack.ts`.
    */
   sendImportProgress?: SendImportProgressFn
   /**
@@ -817,7 +817,7 @@ export interface InterviewEngineDeps {
    * absent, the engine emits the prompt + treats every choice (other
    * than `skip-slug`) as a re-prompt with a "slug picker not
    * configured" reason. Production wires this in
-   * `gateway/realmode-composer/build-landing-stack.ts`; tests pass an
+   * `gateway/wiring/build-landing-stack.ts`; tests pass an
    * in-process stub.
    */
   slugPicker?: SlugPickerEngineHook
@@ -837,7 +837,7 @@ export interface InterviewEngineDeps {
   slugAvailability?: SlugAvailabilityProbe
   /**
    * Sprint 28 — profile-pic hook. Production wires this in
-   * `gateway/realmode-composer/build-landing-stack.ts`; tests inject an
+   * `gateway/wiring/build-landing-stack.ts`; tests inject an
    * in-process stub. When absent, the engine collapses the
    * profile_pic_generating phase to skip-only (per the static
    * PHASE_PROMPTS spec) and the user advances without a portrait. The
@@ -851,7 +851,7 @@ export interface InterviewEngineDeps {
    * `agent_name` registry row. The column was
    * shipped in Sprint 20 but population was deferred to "post-agent-
    * naming P2 work" — this is now. Production wires this in
-   * `gateway/realmode-composer/build-landing-stack.ts` to the
+   * `gateway/wiring/build-landing-stack.ts` to the
    * registry's `setAgentName(internal_handle, agent_name)`; tests
    * inject a recorder.
    *
@@ -867,7 +867,7 @@ export interface InterviewEngineDeps {
    * INTO `persona_synthesizing` so the captured interview signals are
    * turned into SOUL.md / USER.md / priority-map.md drafts and the
    * cringe-check loop runs. Production wires this in
-   * `gateway/realmode-composer/build-landing-stack.ts` against a
+   * `gateway/wiring/build-landing-stack.ts` against a
    * `PersonaComposer` instance; tests inject an in-process stub.
    *
    * When absent, the engine leaves `persona_synthesizing` as a no-op
@@ -896,7 +896,7 @@ export interface InterviewEngineDeps {
    * static `PHASE_PROMPTS` lookup so a model outage stays user-invisible.
    *
    * Production wires `buildLlmPhaseSpecResolver` via
-   * `gateway/realmode-composer/build-phase-spec-resolver.ts`; tests
+   * `gateway/wiring/build-phase-spec-resolver.ts`; tests
    * inject a deterministic stub (or omit entirely → static fallback,
    * which preserves every existing test assertion).
    */
@@ -919,7 +919,7 @@ export interface InterviewEngineDeps {
    * + on `start()` re-entry. The hook is the only surface the engine
    * touches; production composer wires a real `ImportJobRunner` with
    * parsers + LLM calls behind it (see
-   * `gateway/realmode-composer/build-import-job-runner.ts`). Tests
+   * `gateway/wiring/build-import-job-runner.ts`). Tests
    * inject a recorder.
    *
    * When absent, `chatgpt_zip` / `claude_zip` choices collapse to the
@@ -1084,7 +1084,7 @@ export interface InterviewEngineDeps {
  * `recordAgentName`'s contract: idempotent, nullable, best-effort
  * (failures logged, not thrown). Optional so existing test fixtures
  * built before S3 keep compiling — production wiring in
- * `gateway/realmode-composer/resolve-persona-sync.ts` populates both
+ * `gateway/wiring/resolve-persona-sync.ts` populates both
  * methods.
  */
 export interface PersonaSyncHook {

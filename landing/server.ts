@@ -261,7 +261,7 @@ export interface LandingServerOptions {
 /**
  * Returned by `createLandingServer`: the `{ fetch, websocket }` pair the
  * caller plugs into Bun.serve (or composes into a per-instance gateway). A
- * named export so the realmode-composer factory can declare its return
+ * named export so the wiring factory can declare its return
  * type without `ReturnType<typeof createLandingServer>` magic (TS
  * reviewer Sprint 19 P3 recommendation).
  */

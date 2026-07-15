@@ -588,7 +588,7 @@ export class CommentStore {
    * `bun:sqlite` Database. The lazy-init contract is preserved: the
    * sidecar dir + DB are opened + migrated before `fn` runs.
    *
-   * Intended for `gateway/realmode-composer/escalation-loader.ts`, which
+   * Intended for `gateway/wiring/escalation-loader.ts`, which
    * needs a single `BEGIN IMMEDIATE` transaction to SELECT pending
    * escalations + atomically INSERT consumption-markers in one round-
    * trip. Adding a dedicated `loadPendingEscalations` method on the

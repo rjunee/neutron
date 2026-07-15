@@ -30,7 +30,7 @@
  * future overlay changes can't silently re-leak. The four cases mirror
  * the GAP items in ISSUES #67's closing condition (and the
  * structurally-identical four cases in PR #332's
- * `gateway/realmode-composer/__tests__/env-overlay-unset-unused.test.ts`).
+ * `gateway/wiring/__tests__/env-overlay-unset-unused.test.ts`).
  */
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'

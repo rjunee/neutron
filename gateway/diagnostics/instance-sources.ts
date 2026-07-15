@@ -24,7 +24,7 @@ import {
   soonestCooldownUntil,
   type CredentialPool,
 } from '@neutronai/runtime/credential-pool.ts'
-import { readGbrainSyncState } from '../realmode-composer/gbrain-sync-state-store.ts'
+import { readGbrainSyncState } from '../wiring/gbrain-sync-state-store.ts'
 import type { DiagnosticsSources, ImportRowish } from './diagnostics-report.ts'
 
 /** REPL supervision registry file, relative to the owner home. Mirrors

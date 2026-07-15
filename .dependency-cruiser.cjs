@@ -194,7 +194,7 @@ module.exports = {
         'transport mcp-client.ts, the stdio client, brain init/doctor, the index ' +
         'barrel) is backend INTERNALS. Exempt `from`s: connect/ (the shared-project ' +
         'memory mirror federates at the backend level, per the RA5 spec) and the ' +
-        'ONE designated composition swap point, gateway/realmode-composer/' +
+        'ONE designated composition swap point, gateway/wiring/' +
         'build-gbrain-memory.ts (+ its gbrain-sync-state sink, which persists ' +
         'backend-specific sync telemetry for that same wiring) — so swapping the ' +
         'backend touches only buildGBrainMemory + gbrain-memory/. WHY THIS BANS ' +
@@ -215,8 +215,8 @@ module.exports = {
         pathNot: [
           '^gbrain-memory',
           '^connect',
-          '^gateway/realmode-composer/build-gbrain-memory\\.ts$',
-          '^gateway/realmode-composer/gbrain-sync-state-store\\.ts$',
+          '^gateway/wiring/build-gbrain-memory\\.ts$',
+          '^gateway/wiring/gbrain-sync-state-store\\.ts$',
           TEST,
         ],
       },

@@ -59,7 +59,7 @@ import { ProjectDb } from '@neutronai/persistence/index.ts'
 import type { Substrate, AgentSpec } from '@neutronai/runtime/substrate.ts'
 import type { SecretsStore } from '@neutronai/auth/secrets-store.ts'
 import { getBestModel } from '@neutronai/runtime/models.ts'
-import { collectTokensToString } from '../realmode-composer/build-llm-call-substrate.ts'
+import { collectTokensToString } from '../wiring/build-llm-call-substrate.ts'
 
 import type { CalendarClient } from '@neutronai/calendar-core'
 import {

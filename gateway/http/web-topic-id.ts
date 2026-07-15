@@ -4,7 +4,7 @@
  * in the `chat-bridge.ts` monolith.
  *
  * Extracted in R5 (audit P1-2) to break the
- * `gateway/http/chat-bridge.ts` ↔ `gateway/realmode-composer/build-onboarding-handoff.ts`
+ * `gateway/http/chat-bridge.ts` ↔ `gateway/wiring/build-onboarding-handoff.ts`
  * import cycle: the handoff builder only needed `webTopicId`, and chat-bridge
  * imported a constant back from the handoff builder. With `webTopicId` living
  * here, the handoff builder imports the leaf instead of chat-bridge, and

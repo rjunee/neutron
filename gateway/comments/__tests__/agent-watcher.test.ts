@@ -43,7 +43,7 @@ import { dirname, join } from 'node:path'
 
 import { CommentStore, type AppendEventInput } from '../comment-store.ts'
 import { AgentWatcher } from '../agent-watcher.ts'
-import type { AgentWatcherLlmCall } from '../../realmode-composer/build-agent-watcher-llm-call.ts'
+import type { AgentWatcherLlmCall } from '../../wiring/build-agent-watcher-llm-call.ts'
 
 const PROJECT_ID = 'demo-project'
 

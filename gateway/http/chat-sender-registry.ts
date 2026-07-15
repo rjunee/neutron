@@ -84,11 +84,11 @@ export class InMemoryWebChatSenderRegistry implements WebChatSenderRegistry {
 
 /**
  * ISSUES #204 — one live-agent chat turn, as the bridge sees it. The
- * runner (`gateway/realmode-composer/build-live-agent-turn.ts`) loads the
+ * runner (`gateway/wiring/build-live-agent-turn.ts`) loads the
  * owner persona, dispatches the warm per-(instance, topic) CC session over
  * the substrate, streams the reply onto `send`, and persists it as a
  * `button_prompts` row. The bridge type is structural so the http layer
- * never takes a static realmode-composer import edge.
+ * never takes a static wiring import edge.
  */
 export interface LiveAgentTurnRequest {
   project_slug: string

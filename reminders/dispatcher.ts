@@ -17,7 +17,7 @@
  *      shape's literal fallback so a reminder ALWAYS delivers something real;
  *   4. posts the composed body to the topic via the injected `ReminderOutbound`.
  *
- * Mirrors `gateway/realmode-composer/build-live-agent-turn.ts`: CC-spawn
+ * Mirrors `gateway/wiring/build-live-agent-turn.ts`: CC-spawn
  * substrate only (NEVER a direct api.anthropic.com call), per-dispatch
  * `metering_context.project_id` keying, a wall-clock timeout around the turn.
  */

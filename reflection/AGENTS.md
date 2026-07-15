@@ -25,7 +25,7 @@ capture durable *entity* knowledge; this layer is the *self-improvement* loop:
 
 `open/composer.ts` builds a dedicated ephemeral `cc-reflection-*` substrate for
 the judge and threads the `Reflection` instance into `buildLiveAgentTurn`
-(`gateway/realmode-composer/build-live-agent-turn.ts`):
+(`gateway/wiring/build-live-agent-turn.ts`):
 
 - the FIRST turn on each (instance, topic) splices `loadContext()` into its
   system context — so the warm session adopts past corrections + recent diary
@@ -43,4 +43,4 @@ the chat path.
 `bun test reflection` — diary round-trip, corrections round-trip + append-only,
 the pre-gate, the judge over a fake substrate, and the full
 detect→log→retrieve→apply flow. The live-turn wiring is covered by
-`gateway/realmode-composer/__tests__/build-live-agent-turn-reflection.test.ts`.
+`gateway/wiring/__tests__/build-live-agent-turn-reflection.test.ts`.

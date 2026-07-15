@@ -14,7 +14,7 @@
  * This module is the Open-appropriate writer. There is exactly one durable
  * surface that actually feeds the LIVE agent's identity in Open: the persona
  * files under `<owner_home>/persona/`, read every agent turn by
- * `PersonaPromptLoader` (`gateway/realmode-composer/persona-loader.ts`) and
+ * `PersonaPromptLoader` (`gateway/wiring/persona-loader.ts`) and
  * spliced into the system prompt. `NEUTRON_AGENT_NAME` is read once at boot
  * (`owner-identity.ts:resolveOpenInstanceInfo`) but is NOT used to compose the
  * prompt, so persisting a name there would not change what the agent calls

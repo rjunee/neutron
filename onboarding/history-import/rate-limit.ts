@@ -10,7 +10,7 @@
  *   - the onboarding public barrel (`onboarding/index.ts`) re-exports the
  *     backoff constants + `is429RetryableError`;
  *   - the Phase-0 credential-classifier conformance guardrail
- *     (`gateway/realmode-composer/__tests__/g6-error-string-conformance.test.ts`)
+ *     (`gateway/wiring/__tests__/g6-error-string-conformance.test.ts`)
  *     pins `is429ErrorMessage`.
  * Golden-tested in `__tests__/rate-limit.test.ts`.
  */

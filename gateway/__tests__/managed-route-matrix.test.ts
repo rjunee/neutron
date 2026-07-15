@@ -2,7 +2,7 @@
  * G1 — Route-matrix characterization: the MANAGED-CONTRACT variant
  * (Phase-0 guardrail; additive). Sibling of `open-route-matrix.test.ts`.
  *
- * The Managed production composer (`realmode-composer.ts`) is deploy-config-
+ * The Managed production composer (`wiring.ts`) is deploy-config-
  * injected from the private repo (`gateway/index.ts:loadGraphComposerFromEnv`),
  * so it cannot be booted here. What CAN — and MUST — be pinned in this repo is
  * the SEAM the Managed composer relies on: the `CompositionInput` fields for

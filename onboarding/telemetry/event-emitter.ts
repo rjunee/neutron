@@ -429,7 +429,7 @@ export interface OnboardingTelemetryDeps {
    * onto the row. When the resolver is absent OR returns null, the
    * column falls back to `LEGACY_ATTEMPT_ID`.
    *
-   * Production wires this via `gateway/realmode-composer/build-landing-stack.ts`
+   * Production wires this via `gateway/wiring/build-landing-stack.ts`
    * to read `onboarding_state.attempt_id`. Tests may inject any pure
    * function (the m2-telemetry-roundtrip test asserts the resolver
    * stamps each event's attempt_id verbatim).

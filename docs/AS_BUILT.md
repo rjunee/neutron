@@ -14,7 +14,7 @@ Running log of what shipped, newest first. One entry per merged change.
 
 **Decision: DELETE** `runtime/adapters/claude-code/router-thinking-budget.ts` (+ its
 unit test) and correct the misleading comments in
-`gateway/realmode-composer/build-llm-call-substrate.ts` that claimed the router-hang
+`gateway/wiring/build-llm-call-substrate.ts` that claimed the router-hang
 protection was live.
 
 **Incident recap.** The 2026-06-05 router-hang root cause
@@ -1230,7 +1230,7 @@ REQUIRED". No feature flags.
   self-heals the on-disk file from the stored credential.
 - **M-K — the agent auto-invokes trident for complex builds.** A build-routing
   complexity heuristic in the operating-doctrine fragment
-  (`gateway/realmode-composer/operating-doctrine.ts:BUILD_ROUTING_DOCTRINE`,
+  (`gateway/wiring/operating-doctrine.ts:BUILD_ROUTING_DOCTRINE`,
   spliced every turn) + the `work_board_dispatch_build` tool description tell the
   live agent to self-route: SIMPLE → inline (Write/Edit); COMPLEX/multi-file/
   needs-review → `work_board_add` + `work_board_dispatch_build`, telling the owner
@@ -1272,7 +1272,7 @@ blob. Single path, no feature flags (Ryan approved).
   `finalizeImportOnboardingIfReady` also blocks `import_upload_pending`.
 - **Honest no-context opening (fix 2).** The materializer computes `has_context`
   (matched slices OR `hasRealProjectContext`); `emitProjectOpenings`
-  (`gateway/realmode-composer/build-onboarding-finalize.ts`) routes a no-context
+  (`gateway/wiring/build-onboarding-finalize.ts`) routes a no-context
   WORK project to `buildNoContextProjectOpening` ("I don't have any context on X
   yet - tell me a bit about it, and what do you want to work on first?") instead
   of the fabricated status. Projects WITH context (and thin hobbies, via the
@@ -1317,7 +1317,7 @@ timeout at 180s? Be smarter — look for activity, if it's not frozen keep waiti
   `lastDataAt`, so an alive-but-frozen child is still detected as frozen.
 - **`AgentSpec.turn_timeout_ms` repurposed** from "wall-clock budget" to "inactivity
   window"; new additive `AgentSpec.turn_absolute_ceiling_ms` (`runtime/substrate.ts`).
-  The composer (`gateway/realmode-composer/build-live-agent-turn.ts`) sends a snappy
+  The composer (`gateway/wiring/build-live-agent-turn.ts`) sends a snappy
   90s idle window for warm turns and a larger 180s window for cold/onboarding turns;
   its own AbortController is now a pure 45min absolute-ceiling backstop that covers
   the cold-SPAWN phase (which runs before the substrate watchdog starts) — the cold
@@ -1342,7 +1342,7 @@ recovers + re-runs the last message; seed freeze stays silent.
 inactivity/ceiling spec fields.
 
 **Files.** `runtime/adapters/claude-code/persistent/persistent-repl-substrate.ts`,
-`runtime/substrate.ts`, `gateway/realmode-composer/build-live-agent-turn.ts`,
+`runtime/substrate.ts`, `gateway/wiring/build-live-agent-turn.ts`,
 `docs/SYSTEM-OVERVIEW.md`, + the three test files above.
 
 ## 2026-07-01 — Notes / second-brain core: REMOVED entirely
@@ -1587,7 +1587,7 @@ user-supplied emoji (short, non-ASCII). `GENERAL_EMOJI` (💬) for the General s
   with no reload — this also fixes the pre-existing "rename doesn't refresh the
   rail" staleness (Codex r1 P2).
 - Materialize + create-project INSERTs (`onboarding/wow-moment/actions/
-  03-project-shells.ts`, `gateway/realmode-composer/project-create.ts`) stamp a
+  03-project-shells.ts`, `gateway/wiring/project-create.ts`) stamp a
   default emoji + `last_activity_at`.
 
 **Web client.** `config.ts` `ProjectTab` gains optional `emoji`/`unread`/
@@ -1746,7 +1746,7 @@ boolean, no dual path.
   `AppWsOutboundOnboardingCompleted` (`type: 'onboarding_completed'`, payload-free
   signal) added to the `AppWsOutbound` union. The redirect *target* is NOT on the
   frame — it lives in the client bootstrap config (a Managed-overlay concern).
-- `gateway/realmode-composer/build-onboarding-finalize.ts` — new optional dep
+- `gateway/wiring/build-onboarding-finalize.ts` — new optional dep
   `emitOnboardingCompleted?(user_id)`, called at the terminal `completed`
   transition (step 5b, right after `emitProjectsChanged`, before the closing
   message so a slow opening compose can't delay the redirect). The finalizer's
@@ -1782,7 +1782,7 @@ boolean, no dual path.
   when unset (Open self-host); at-most-once on a re-sent frame.
 - `landing/chat-react/__tests__/config.test.ts` — `postOnboardingClaimUrl`
   undefined by default, read when injected, empty treated as absent.
-- `gateway/realmode-composer/__tests__/build-onboarding-finalize.test.ts` —
+- `gateway/wiring/__tests__/build-onboarding-finalize.test.ts` —
   `emitOnboardingCompleted` fires once at the terminal transition and is NOT
   re-emitted on an idempotent re-finalize.
 - `open/__tests__/open-claim-redirect-bootstrap.test.ts` — the served `/chat`
@@ -1900,17 +1900,17 @@ duplicate phrases. Nice-to-have: preamble asks the agent to avoid em dashes.
 **Tests.** New `onboarding/interview/__tests__/button-backed-answer.test.ts` (15:
 tap/typed name + personality settle without the extractor; escape hatch / bare
 confirm / no-options-block / early yes/no / both-settled all decline); new
-`gateway/realmode-composer/__tests__/build-live-agent-turn-capture.test.ts` (5:
+`gateway/wiring/__tests__/build-live-agent-turn-capture.test.ts` (5:
 capture runs BEFORE the guard grounding; `finalized:true` suppresses dispatch +
 `agent_message`; `finalized:false` runs normally; seed turn never captures;
 settling answer still persisted as the user bubble); `onboarding-preamble.test.ts`
 updated (agent told not to self-close + em-dash guidance). Full
-`onboarding/interview` + `gateway/realmode-composer` + chat-bridge live-agent
+`onboarding/interview` + `gateway/wiring` + chat-bridge live-agent
 suites green (1373 pass / 0 fail). tsc clean; leak-gate SILENT.
 
 **Touched:** `onboarding/interview/button-backed-answer.ts` (new pure decider),
 `onboarding/interview/onboarding-preamble.ts` (export archetype names + no-self-
-close/em-dash guidance), `gateway/realmode-composer/build-live-agent-turn.ts`
+close/em-dash guidance), `gateway/wiring/build-live-agent-turn.ts`
 (`captureRequiredAnswer` seam + turn-start call + wrap-up suppression),
 `open/composer.ts` (seam impl: deterministic persist + finalize-on-complete).
 
@@ -1973,7 +1973,7 @@ has a message); existing cold-turn budget test updated 360s → 600s. tsc clean
 steady-state branch + `onboardingContext` step-guard wiring),
 `onboarding/interview/onboarding-preamble.ts` (step-guard fragment),
 `landing/chat-react/ChatApp.tsx` (loader gate),
-`gateway/realmode-composer/build-live-agent-turn.ts` (600s budget).
+`gateway/wiring/build-live-agent-turn.ts` (600s budget).
 
 ## 2026-06-30 — REPL/live-agent model is ALWAYS the latest (never a hardcoded stale id)
 
@@ -2318,7 +2318,7 @@ materialized at onboarding finalize; reaching one otherwise needed the ≥3-proj
 gap-fill quota). Added a Create Project affordance across all surfaces, all
 reusing ONE project-creation code path.
 
-- **Shared primitives (`gateway/realmode-composer/project-create.ts`).** Extracted
+- **Shared primitives (`gateway/wiring/project-create.ts`).** Extracted
   `ensureProjectRow` + `resolveBindTarget` (the `projects` row + cli wow-shell
   `topics` binding — idempotent, duplicate-safe, soft-delete-respecting) out of
   `build-onboarding-finalize.ts` into a shared module, plus `createProjectRow`
@@ -2345,7 +2345,7 @@ reusing ONE project-creation code path.
 - No migration (the `projects` table already exists, `0038`); Work Board tab is
   automatic per-project. tsc clean (root + chat-react + app); leak-gate SILENT.
   Tests: surface POST (`gateway/__tests__/app-projects-surface.test.ts`), shared
-  primitives + tool (`gateway/realmode-composer/__tests__/project-create.test.ts`),
+  primitives + tool (`gateway/wiring/__tests__/project-create.test.ts`),
   web rail click (`landing/chat-react/__tests__/component.test.tsx`), mobile client
   (`app/__tests__/projects-client.test.ts`).
 
@@ -2548,7 +2548,7 @@ for hobby and work); `is_interest` only steers the kickoff. Added `is_interest?`
 to `CapturedProject` (`onboarding/wow-moment/action-types.ts`).
 
 **PART B — one-time agentic kickoff.** `emitProjectOpenings` now first asks a
-`ProjectKickoff` (`gateway/realmode-composer/build-project-kickoff.ts`) for a
+`ProjectKickoff` (`gateway/wiring/build-project-kickoff.ts`) for a
 richer opening, behind a HARD data-sufficiency gate ("better nothing than a bad
 job"). Best-fit action per project:
 - `draft-doc` (rich work): compose a real starting plan via the new
@@ -2585,7 +2585,7 @@ Anthropic client (kickoff composer) + `buildProjectPageIndexer` (GBrain syncHook
 and passes it into `buildOnboardingFinalize` (optional dep; omitted on the LLM-less
 path).
 
-**Tests.** `gateway/realmode-composer/__tests__/build-project-kickoff.test.ts`
+**Tests.** `gateway/wiring/__tests__/build-project-kickoff.test.ts`
 (gate picks meaty-vs-prompt; draft-doc writes + presents a valid `docs:/` marker +
 indexes; create-if-missing never clobbers; deadline offer names only related
 upcoming deadlines and is offer-only; overdue/far-future excluded; thin hobby →
@@ -2797,7 +2797,7 @@ races, now closed on three sides:
    can never hydrate as a timestamped/avatar agent bubble (the sync engine
    persists a durable `agent_message` even though `onFrame` also shows it as a
    pill — that double-render was the bug).
-3. `gateway/realmode-composer/build-llm-call-substrate.ts` + `build-live-agent-turn.ts`
+3. `gateway/wiring/build-llm-call-substrate.ts` + `build-live-agent-turn.ts`
    — `collectTokensToString` takes an optional `onFirstToken` callback; the live
    turn passes `clearAckTimer` so the delayed cold-start ack is cancelled the
    moment the first reply token streams (not only at turn-settle).

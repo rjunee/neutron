@@ -30,8 +30,8 @@
  * the bucket-only Focus view remains usable.
  */
 
-import { composeSystemPrompt } from '../../realmode-composer/index.ts'
-import type { PersonaPromptLoader } from '../../realmode-composer/persona-loader.ts'
+import { composeSystemPrompt } from '../../wiring/index.ts'
+import type { PersonaPromptLoader } from '../../wiring/persona-loader.ts'
 import type { LlmCallFn } from '@neutronai/onboarding/interview/phase-spec-resolver.ts'
 import type {
   CronHandler,

@@ -25,7 +25,7 @@
  *   - `identity/oauth/install-token-handoff.ts` + tests + `max-handoff.ts` +
  *     `main.ts` — same probe-shape for OAuth callbacks.
  *   - `tests/integration/sprint23-paste-token-handoff.test.ts` + the
- *     `sprint19-realmode-composer-end-to-end.test.ts` notes — historical
+ *     `sprint19-wiring-end-to-end.test.ts` notes — historical
  *     test fixtures that mock the probe path.
  *   - `runtime/adapters/claude-code/cli-transport.ts` — file-header
  *     comment documenting that direct fetches were REMOVED in favour of

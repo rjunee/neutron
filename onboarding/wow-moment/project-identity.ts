@@ -6,7 +6,7 @@
  * converge on ONE project identity:
  *
  *   - `slugifyProjectId(name)` — the canonical name → project_id
- *     slugifier. `gateway/realmode-composer/build-onboarding-handoff.ts`
+ *     slugifier. `gateway/wiring/build-onboarding-handoff.ts`
  *     re-exports this as `defaultProjectIdSlugifier`; both the sidebar's
  *     `projects` rows (written by `03-project-shells`) AND the
  *     per-project proactive-seed prompts (`web:<user_id>:<slug>`, written
@@ -38,7 +38,7 @@ import type { CapturedProject } from './action-types.ts'
  * (all-emoji / all-punctuation names).
  *
  * MUST stay identical to `defaultProjectIdSlugifier` in
- * `gateway/realmode-composer/build-onboarding-handoff.ts` (which now
+ * `gateway/wiring/build-onboarding-handoff.ts` (which now
  * re-exports this function). A drift-guard test asserts equality.
  */
 export function slugifyProjectId(name: string): string {

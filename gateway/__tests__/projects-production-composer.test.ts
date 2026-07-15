@@ -40,7 +40,7 @@ import {
   buildDefaultSettings,
   type ProjectSettings,
 } from '../http/app-projects-surface.ts'
-import { createProjectRow } from '../realmode-composer/project-create.ts'
+import { createProjectRow } from '../wiring/project-create.ts'
 import { SqliteProjectSettingsStore } from '../projects/sqlite-store.ts'
 import { STUB_PLATFORM } from '@neutronai/runtime/__tests__/stub-platform.ts'
 

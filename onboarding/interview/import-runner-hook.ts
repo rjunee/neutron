@@ -34,7 +34,7 @@ import type {
  * When the hook is absent (`deps.importJobRunner === undefined`), the engine
  * collapses `chatgpt_zip` / `claude_zip` choices into the skip path — the
  * production composer ALWAYS wires the hook (see
- * `gateway/realmode-composer/build-landing-stack.ts`) so users always reach
+ * `gateway/wiring/build-landing-stack.ts`) so users always reach
  * the runner. The unwired path exists for legacy callers + test harnesses
  * that don't exercise the import flow.
  */

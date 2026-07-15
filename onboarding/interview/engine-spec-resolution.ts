@@ -297,7 +297,7 @@ export async function resolvePhasePromptSpecUncached(
     // branch was removed here. The phase is no longer walked (engine phase-
     // walk deleted in #243, handler methods in #248/K11e), so it can never be
     // the resolver's `phase`. Legacy stranded rows are handled purely by the
-    // creds gate in gateway/realmode-composer/resolve-onboarding-phase.ts.
+    // creds gate in gateway/wiring/resolve-onboarding-phase.ts.
     // P2 v2 § 0 #9 + § 3.9 — personality_offered dynamic rejection
     // path. Short-circuits the resolver ONLY when the dedicated handler
     // wrote a `personality_offered_rejection` (too short / unparseable

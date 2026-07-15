@@ -18,7 +18,7 @@ export function wireConnectOverlay(
   graph: GatewayModuleGraph,
 ): void {
   // P1.5 wiring — `on_inbound_message` was shipped as `undefined` in P1 S6
-  // (see realmode-composer.ts:buildDefaultRealModeComposer). Now that the
+  // (see wiring.ts:buildDefaultRealModeComposer). Now that the
   // channels module's router is composed, wire the handler so an inbound
   // POST /connect/v1/messages routes through the receiver's local
   // ChannelRouter ingress queue. The handler also writes an

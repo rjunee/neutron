@@ -325,8 +325,8 @@ describe('RA5 acquisition boundary — no transport PROVIDER outside gbrain-memo
         (p) =>
           !isTestFile(p) &&
           (p.startsWith('connect/') ||
-            p === 'gateway/realmode-composer/build-gbrain-memory.ts' ||
-            p === 'gateway/realmode-composer/gbrain-sync-state-store.ts'),
+            p === 'gateway/wiring/build-gbrain-memory.ts' ||
+            p === 'gateway/wiring/gbrain-sync-state-store.ts'),
       )
       const rootNames = [...scanned, ...SEALED_TRANSPORT_ORIGINS].map((p) => join(ROOT, p))
       const program = ts.createProgram({ rootNames, options: loadCompilerOptions() })

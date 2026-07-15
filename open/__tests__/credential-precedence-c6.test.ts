@@ -1,7 +1,7 @@
 /**
  * C6 — Credential-resolver unification. Table-driven precedence tests proving
  * the ONE shared precedence table
- * (`gateway/realmode-composer/resolve-llm-credentials.ts`) resolves IDENTICAL
+ * (`gateway/wiring/resolve-llm-credentials.ts`) resolves IDENTICAL
  * credentials for identical inputs from BOTH call sites:
  *
  *   - Open  — `resolveOpenLlmPool` (sync, single-owner, `allowAmbient: true`)
@@ -28,7 +28,7 @@ import {
   resolveEnvOAuthTier,
   resolveApiKeyEnvTier,
   resolveAmbientTier,
-} from '@neutronai/gateway/realmode-composer/resolve-llm-credentials.ts'
+} from '@neutronai/gateway/wiring/resolve-llm-credentials.ts'
 
 // An empty ApiKeyStore — the Managed resolver's BYO-store tier (3) is a no-op,
 // so the ONLY sources are the SHARED env tiers, making the two modes directly

@@ -1804,7 +1804,7 @@ export const PERSONA_FALLBACK_BLEND: BlendedArchetype = {
  * input type were deleted here. The phase is no longer walked (engine phase-walk
  * removed in #243, handler methods in #248/K11e), so nothing resolves this
  * builder. Legacy stranded rows are handled purely by the creds gate in
- * gateway/realmode-composer/resolve-onboarding-phase.ts.
+ * gateway/wiring/resolve-onboarding-phase.ts.
  */
 
 /**

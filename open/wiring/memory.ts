@@ -17,10 +17,10 @@
  * `realmodeCleanups` at the carve site so SIGTERM ordering is byte-identical.
  */
 
-import { buildLlmCallSubstrate } from '@neutronai/gateway/realmode-composer/build-llm-call-substrate.ts'
-import { buildGBrainMemory } from '@neutronai/gateway/realmode-composer/build-gbrain-memory.ts'
-import { createGbrainSyncStateStore } from '@neutronai/gateway/realmode-composer/gbrain-sync-state-store.ts'
-import { resolveOnboardingOpenAiKey } from '@neutronai/gateway/realmode-composer/resolve-onboarding-openai-key.ts'
+import { buildLlmCallSubstrate } from '@neutronai/gateway/wiring/build-llm-call-substrate.ts'
+import { buildGBrainMemory } from '@neutronai/gateway/wiring/build-gbrain-memory.ts'
+import { createGbrainSyncStateStore } from '@neutronai/gateway/wiring/gbrain-sync-state-store.ts'
+import { resolveOnboardingOpenAiKey } from '@neutronai/gateway/wiring/resolve-onboarding-openai-key.ts'
 import { createScribe, type Scribe, type UserTurnInput } from '@neutronai/scribe/index.ts'
 import { createState, defaultStatePath } from '@neutronai/scribe/scribe-budget.ts'
 import { mountCoresScribeFanOut } from '@neutronai/gateway/cores/mount-cores-scribe-fan-out.ts'
