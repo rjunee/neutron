@@ -71,9 +71,18 @@ export function fmtPayload(payload: unknown): string {
   // terminal (Codex). Keeps the "one-line" contract intact.
   const sanitize = (s: string): string => s.replace(/[\u0000-\u001f\u007f-\u009f]/g, ' ')
   const cap = (s: string, n: number): string => (s.length > n ? `${s.slice(0, n - 1)}…` : s)
-  const parts = entries.map(
-    ([k, v]) => `${sanitize(k)}=${cap(sanitize(typeof v === 'string' ? v : JSON.stringify(v)), 80)}`,
-  )
+  // Fail-soft stringify: `JSON.stringify(undefined)` returns `undefined` (not a
+  // string), and BigInt / circular values THROW — a diagnostics render must never
+  // crash on a payload value (Codex). Fall back to `String(v)` in both cases.
+  const stringify = (v: unknown): string => {
+    if (typeof v === 'string') return v
+    try {
+      return JSON.stringify(v) ?? String(v)
+    } catch {
+      return String(v)
+    }
+  }
+  const parts = entries.map(([k, v]) => `${sanitize(k)}=${cap(sanitize(stringify(v)), 80)}`)
   return cap(parts.join(' '), 200)
 }
 

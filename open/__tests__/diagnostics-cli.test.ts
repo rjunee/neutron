@@ -150,6 +150,19 @@ describe('collectCliDiagnostics', () => {
       expect(fmtPayload('a string')).toBe('')
       expect(fmtPayload({})).toBe('')
     })
+
+    it('is fail-soft on undefined / BigInt / circular values (never throws)', () => {
+      // Journal payloads are JSON-parsed so these shouldn't occur, but fmtPayload
+      // takes `unknown` + is a diagnostics render — it must never crash.
+      expect(() => fmtPayload({ x: undefined })).not.toThrow()
+      expect(fmtPayload({ x: undefined })).toContain('x=undefined')
+      expect(() => fmtPayload({ x: 1n })).not.toThrow()
+      expect(fmtPayload({ x: 1n })).toContain('x=1')
+      const circular: Record<string, unknown> = {}
+      circular['self'] = circular
+      expect(() => fmtPayload(circular)).not.toThrow()
+      expect(fmtPayload(circular)).toContain('self=')
+    })
   })
 
   it('scopes cron jobs to THIS instance slug (no cross-project leak)', () => {
