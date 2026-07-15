@@ -598,7 +598,12 @@ export function wireAppWs(ctx: OpenWiringContext, deps: WireAppWsDeps): WiredApp
           text: toEmit.body,
         }
         const id = await appWs.get()!.send(msg)
-        return { message_id: prompt.prompt_id, was_new: !id.startsWith('app-ws:dropped:') }
+        return {
+          message_id: prompt.prompt_id,
+          // Neither a `dropped` (persisted-but-offline) nor a `lost` (captured
+          // nowhere) marker is a live delivery.
+          was_new: !id.startsWith('app-ws:dropped:') && !id.startsWith('app-ws:lost:'),
+        }
       }
       // Ordering + de-dupe fix (import_running status bubble, M1 2026-06-30):
       // the "Reading through your export now…" progress bubble is buttonless
@@ -628,7 +633,12 @@ export function wireAppWs(ctx: OpenWiringContext, deps: WireAppWsDeps): WiredApp
           text: toEmit.body,
         }
         const id = await appWs.get()!.send(msg)
-        return { message_id: prompt.prompt_id, was_new: !id.startsWith('app-ws:dropped:') }
+        return {
+          message_id: prompt.prompt_id,
+          // Neither a `dropped` (persisted-but-offline) nor a `lost` (captured
+          // nowhere) marker is a live delivery.
+          was_new: !id.startsWith('app-ws:dropped:') && !id.startsWith('app-ws:lost:'),
+        }
       }
       const ok = emitOnboardingPrompt(topic_id, toEmit)
       return { message_id: prompt.prompt_id, was_new: ok }

@@ -266,6 +266,56 @@ describe('makeRecoveredReplySink — online / offline / dedupe', () => {
     it('undefined (adapter unbound → nothing persisted) throws → the drain leaves the row pending', () => {
       expect(() => assertRecoveredReplyPersisted(undefined)).toThrow()
     })
+
+    it('an app-ws:lost marker (append FAILED + offline → captured nowhere) throws → row stays pending', () => {
+      // Codex combined-failure boundary: chat_log.append rejected AND no socket
+      // received it, so the reply is neither persisted nor delivered — it MUST be
+      // retried, not marked delivered.
+      expect(() => assertRecoveredReplyPersisted('app-ws:lost:msg-1')).toThrow()
+    })
+  })
+
+  it('drain retries when the adapter reports LOST (combined persist+delivery failure) — Codex', async () => {
+    // End-to-end at the drain: a send whose adapter result is `lost` (append failed
+    // AND socket offline) must leave the row pending, then deliver on a later
+    // reconnect once persistence works.
+    const store = new InMemoryRecoveredReplyStore()
+    const topic = webTopicId('u-8')
+    let clock = 8000
+    const sink = makeRecoveredReplySink({
+      registry: () => new InMemoryWebChatSenderRegistry(),
+      store,
+      now: () => ++clock,
+    })
+    sink({ topic_id: topic, turn_id: 'lost:1', text: 'must not be lost on double failure' })
+
+    // First reconnect: the adapter reported `lost` → the drain's send throws.
+    const failing = await drainRecoveredReplies({
+      topic_id: topic,
+      store,
+      send: (): void => {
+        assertRecoveredReplyPersisted('app-ws:lost:msg-x')
+      },
+      now: () => ++clock,
+      log_tag: '[test]',
+    })
+    expect(failing).toBe(0)
+    expect(store.peekUndelivered(topic)).toHaveLength(1) // still pending — NOT lost
+
+    // Second reconnect: persistence works (a real id) → delivered exactly once.
+    const sent: ChatOutbound[] = []
+    const ok = await drainRecoveredReplies({
+      topic_id: topic,
+      store,
+      send: (e): void => {
+        assertRecoveredReplyPersisted('app-ws:msg-y')
+        sent.push(e)
+      },
+      now: () => ++clock,
+    })
+    expect(ok).toBe(1)
+    expect(store.peekUndelivered(topic)).toHaveLength(0)
+    expect((sent[0] as { body: string }).body).toContain('must not be lost on double failure')
   })
 })
 

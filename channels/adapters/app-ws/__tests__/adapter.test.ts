@@ -70,6 +70,58 @@ describe('AppWsAdapter.send — outgoing → envelope', () => {
     expect(id.startsWith('app-ws:dropped:')).toBe(true)
   })
 
+  // Durability distinction (Codex): a wired chat_log whose append FAILS AND an
+  // offline socket means the message was captured NOWHERE — a distinct `lost`
+  // marker so a durability-sensitive caller (recovered-reply drain) can retry.
+  it('returns a LOST-marker when a wired chat_log append fails AND no socket receives it', async () => {
+    const registry = new InMemoryAppWsSessionRegistry()
+    const chat_log = {
+      append: async () => {
+        throw new Error('disk full')
+      },
+      replayAfter: async () => [],
+      maxSeq: async () => 0,
+    }
+    const adapter = new AppWsAdapter({
+      registry,
+      receiver: { receive: async () => {} },
+      now: () => FROZEN_NOW,
+      generate_message_id: () => 'msg-lost',
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      chat_log: chat_log as any,
+    })
+    // No socket registered → offline. Append throws → no seq → captured nowhere.
+    const id = await adapter.send({ topic, text: 'must not be silently dropped' })
+    expect(id).toBe('app-ws:lost:msg-lost')
+  })
+
+  it('a persisted-but-offline message keeps the plain dropped-marker (resume replays it)', async () => {
+    const registry = new InMemoryAppWsSessionRegistry()
+    let seq = 0
+    const chat_log = {
+      append: async (input: { body: string }) => ({
+        row: {
+          topic_id: 'app:sam', seq: ++seq, message_id: 'x', role: 'agent' as const,
+          body: input.body, client_msg_id: null, project_id: null, attachments: null,
+          created_at: FROZEN_NOW,
+        },
+        was_new: true,
+      }),
+      replayAfter: async () => [],
+      maxSeq: async () => 0,
+    }
+    const adapter = new AppWsAdapter({
+      registry,
+      receiver: { receive: async () => {} },
+      now: () => FROZEN_NOW,
+      generate_message_id: () => 'msg-persisted',
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      chat_log: chat_log as any,
+    })
+    const id = await adapter.send({ topic, text: 'persisted then offline' })
+    expect(id).toBe('app-ws:dropped:msg-persisted') // persisted (seq assigned), just not live
+  })
+
   // FIX #333 — a transient system-notice (the cold-start "Waking up…" ack) is
   // fanned out LIVE but must NEVER be persisted, so a reload can't re-hydrate it
   // as a stray bubble. A normal message on the same adapter IS persisted.
