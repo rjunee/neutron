@@ -160,20 +160,28 @@ describe('project_slug timing-safe comparison (ISSUE #34)', () => {
     expect(offenders).toHaveLength(0)
   })
 
-  it('every gateway/http surface that compares project_slug imports ownerSlugMismatch', () => {
-    // A surface that calls `ownerSlugMismatch(` must IMPORT it — either directly
-    // from `./auth-helpers.ts`, or via `./surface-kit.ts` which RE-EXPORTS the
-    // exact same timing-safe primitive from auth-helpers (O7 consolidation).
-    // Catches a "shadow re-implementation" copy-paste regression.
-    const missing: string[] = []
+  it('every gateway/http surface that compares project_slug imports the NAMED ownerSlugMismatch', () => {
+    // A surface that calls `ownerSlugMismatch(` must import the NAMED binding from a
+    // canonical source — `./auth-helpers.ts` directly, or `./surface-kit.ts` which
+    // RE-EXPORTS the exact same timing-safe primitive (O7). Matching the named
+    // binding (not just "some import from that path") + banning a local definition
+    // closes the shadow-implementation hole: a surface can't keep its kit import
+    // for other helpers while defining its OWN insecure `ownerSlugMismatch`.
+    const offenders: string[] = []
     for (const name of inScopeSurfaces()) {
       const body = readFileSync(join(HTTP_DIR, name), 'utf8')
       if (!body.includes('ownerSlugMismatch(')) continue
-      const importLine =
-        /from ['"]\.\/auth-helpers\.ts['"]/.test(body) || /from ['"]\.\/surface-kit\.ts['"]/.test(body)
-      if (!importLine) missing.push(name)
+      // The NAMED binding must appear inside an import block from one of the two
+      // canonical sources (import blocks can't cross a `}`, so this pins the source).
+      const namedImport =
+        /import\s*(?:type\s*)?\{[^}]*\bownerSlugMismatch\b[^}]*\}\s*from\s*['"]\.\/(?:auth-helpers|surface-kit)\.ts['"]/s.test(
+          body,
+        )
+      // A local (re)definition — the exact shadow-implementation regression.
+      const localDef = /\b(?:function|const|let|var)\s+ownerSlugMismatch\b/.test(body)
+      if (!namedImport || localDef) offenders.push(name)
     }
-    expect(missing).toEqual([])
+    expect(offenders).toEqual([])
   })
 
   it('surface-kit RE-EXPORTS the timing-safe ownerSlugMismatch straight from auth-helpers (no shadow impl)', () => {
