@@ -367,6 +367,15 @@ with cross-references noted inline.
     file-PINNED surface is `entrypoint:open/server.ts` (systemd spawns it), and none of the 8
     surfaces references a `realmode-composer` path. (A within-`gateway/` rename is exactly the
     move this tolerance was designed for.)
+    **Import-side (INVARIANTS #96) also verified against live neutron-managed:** Managed's OWN
+    production code imports ZERO `@neutronai/gateway/realmode-composer/*` paths — every importer of
+    that dir lives inside `vendor/neutron/` (the vendored copy of Open itself). Managed consumes
+    Open as a git SUBMODULE, so the dir rename and all its in-Open importers move ATOMICALLY in the
+    same submodule bump — a Managed deploy never sees a half-renamed tree. The private composer that
+    `NEUTRON_GRAPH_COMPOSER_MODULE` loads is not a checked-in Managed module importing these paths.
+    Hence NO forwarding shims and NO paired Managed import change are required. (Only stale
+    neutron-managed `SPEC.md`/`AS-BUILT.md` docs + one non-load-bearing synthetic `open-contract.test.ts`
+    fixture still name the old path — cosmetic, refreshed on re-vendor.)
 79. `boot-helpers.ts` must never import `gateway/index.ts` (TLA entry↔composer cycle);
     new "shared boot config" modules must sit below both. `boot-helpers.ts:6-20`.
     Protects: **L3**, **C2** (boot-helpers split).
