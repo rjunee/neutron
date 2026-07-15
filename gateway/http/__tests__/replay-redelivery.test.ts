@@ -52,7 +52,7 @@ describe('makeRecoveredReplySink — online / offline / dedupe', () => {
     const store = new InMemoryRecoveredReplyStore()
     const sent: ChatOutbound[] = []
     const topic = webTopicId('u-1')
-    registry.register(topic, (e) => sent.push(e))
+    registry.register(topic, (e) => void sent.push(e))
     let clock = 1000
     const sink = makeRecoveredReplySink({ registry: () => registry, store, now: () => clock })
 
@@ -64,7 +64,7 @@ describe('makeRecoveredReplySink — online / offline / dedupe', () => {
     expect(store.takeUndelivered(topic, ++clock)).toHaveLength(0)
   })
 
-  it('persists an undelivered row when the user is offline; reconnect drains it once', () => {
+  it('persists an undelivered row when the user is offline; reconnect drains it once', async () => {
     const registry = new InMemoryWebChatSenderRegistry()
     const store = new InMemoryRecoveredReplyStore()
     const topic = webTopicId('u-2')
@@ -77,22 +77,22 @@ describe('makeRecoveredReplySink — online / offline / dedupe', () => {
 
     // Reconnect: the existing reconnect path drains it once.
     const sent: ChatOutbound[] = []
-    const emitted = drainRecoveredReplies({ topic_id: topic, store, send: (e) => sent.push(e), now: () => ++clock })
+    const emitted = await drainRecoveredReplies({ topic_id: topic, store, send: (e) => void sent.push(e), now: () => ++clock })
     expect(emitted).toBe(1)
     expect(sent[0]).toEqual({ type: 'agent_message', body: 'answer for offline user', topic_id: topic })
 
     // A second drain (e.g. another reconnect) re-emits NOTHING — already delivered.
     const sent2: ChatOutbound[] = []
-    drainRecoveredReplies({ topic_id: topic, store, send: (e) => sent2.push(e), now: () => ++clock })
+    await drainRecoveredReplies({ topic_id: topic, store, send: (e) => void sent2.push(e), now: () => ++clock })
     expect(sent2).toHaveLength(0)
   })
 
-  it('dedupes a live-delivered + persisted race on turn_id (shown once)', () => {
+  it('dedupes a live-delivered + persisted race on turn_id (shown once)', async () => {
     const registry = new InMemoryWebChatSenderRegistry()
     const store = new InMemoryRecoveredReplyStore()
     const topic = webTopicId('u-3')
     const sent: ChatOutbound[] = []
-    registry.register(topic, (e) => sent.push(e))
+    registry.register(topic, (e) => void sent.push(e))
     let clock = 3000
     const sink = makeRecoveredReplySink({ registry: () => registry, store, now: () => ++clock })
 
@@ -103,11 +103,11 @@ describe('makeRecoveredReplySink — online / offline / dedupe', () => {
 
     // And a subsequent reconnect drain finds nothing to flush for that turn.
     const drained: ChatOutbound[] = []
-    drainRecoveredReplies({ topic_id: topic, store, send: (e) => drained.push(e), now: () => ++clock })
+    await drainRecoveredReplies({ topic_id: topic, store, send: (e) => void drained.push(e), now: () => ++clock })
     expect(drained).toHaveLength(0)
   })
 
-  it('persists when a live send THROWS (closed socket between has() and send) — Codex r1 P2', () => {
+  it('persists when a live send THROWS (closed socket between has() and send) — Codex r1 P2', async () => {
     const registry = new InMemoryWebChatSenderRegistry()
     const store = new InMemoryRecoveredReplyStore()
     const topic = webTopicId('u-4')
@@ -122,12 +122,12 @@ describe('makeRecoveredReplySink — online / offline / dedupe', () => {
     // NOT lost — persisted for the next reconnect.
     expect(store.seen(topic, 'thr:1')).toBe(true)
     const sent: ChatOutbound[] = []
-    const emitted = drainRecoveredReplies({ topic_id: topic, store, send: (e) => sent.push(e), now: () => ++clock })
+    const emitted = await drainRecoveredReplies({ topic_id: topic, store, send: (e) => void sent.push(e), now: () => ++clock })
     expect(emitted).toBe(1)
     expect((sent[0] as { body: string }).body).toContain('recovered despite throw')
   })
 
-  it('drain leaves a row PENDING when send throws, retried on the next reconnect — Codex r1 P2', () => {
+  it('drain leaves a row PENDING when send throws, retried on the next reconnect — Codex r1 P2', async () => {
     const registry = new InMemoryWebChatSenderRegistry()
     const store = new InMemoryRecoveredReplyStore()
     const topic = webTopicId('u-5')
@@ -136,7 +136,7 @@ describe('makeRecoveredReplySink — online / offline / dedupe', () => {
     sink({ topic_id: topic, turn_id: 'retry:1', text: 'must survive a failed drain' }) // offline → persisted
 
     // First reconnect: the send throws → the row must NOT be consumed.
-    const failingEmitted = drainRecoveredReplies({
+    const failingEmitted = await drainRecoveredReplies({
       topic_id: topic,
       store,
       send: () => {
@@ -150,10 +150,55 @@ describe('makeRecoveredReplySink — online / offline / dedupe', () => {
 
     // Second reconnect with a working socket: delivered exactly once.
     const sent: ChatOutbound[] = []
-    const emitted = drainRecoveredReplies({ topic_id: topic, store, send: (e) => sent.push(e), now: () => ++clock })
+    const emitted = await drainRecoveredReplies({ topic_id: topic, store, send: (e) => void sent.push(e), now: () => ++clock })
     expect(emitted).toBe(1)
     expect((sent[0] as { body: string }).body).toContain('must survive a failed drain')
     expect(store.peekUndelivered(topic)).toHaveLength(0)
+  })
+
+  it('drain leaves a row PENDING when an ASYNC send REJECTS, retried on the next reconnect (the async loss path)', async () => {
+    // THE BUG this guards: the Open drain fans through the app-ws adapter, whose
+    // send is fire-and-forget (returns void, hides the promise). If the drain does
+    // not AWAIT the real delivery, a rejected/dropped send is marked delivered and
+    // the reply is lost forever. With the async-aware drain, a rejection leaves the
+    // row pending for the next reconnect (Codex).
+    const store = new InMemoryRecoveredReplyStore()
+    const topic = webTopicId('u-6')
+    let clock = 6000
+    const sink = makeRecoveredReplySink({
+      registry: () => new InMemoryWebChatSenderRegistry(),
+      store,
+      now: () => ++clock,
+    })
+    sink({ topic_id: topic, turn_id: 'areject:1', text: 'must survive an async rejection' }) // offline → persisted
+
+    // First reconnect: an ASYNC send that REJECTS (adapter.send rejects, or a drop
+    // → thrown). The row must NOT be consumed.
+    const failing = await drainRecoveredReplies({
+      topic_id: topic,
+      store,
+      send: async (): Promise<void> => {
+        throw new Error('adapter.send rejected / dropped')
+      },
+      now: () => ++clock,
+      log_tag: '[test]',
+    })
+    expect(failing).toBe(0)
+    expect(store.peekUndelivered(topic)).toHaveLength(1) // still pending — NOT lost
+
+    // Second reconnect with a working async send: delivered exactly once.
+    const sent: ChatOutbound[] = []
+    const ok = await drainRecoveredReplies({
+      topic_id: topic,
+      store,
+      send: async (e): Promise<void> => {
+        sent.push(e)
+      },
+      now: () => ++clock,
+    })
+    expect(ok).toBe(1)
+    expect(store.peekUndelivered(topic)).toHaveLength(0)
+    expect((sent[0] as { body: string }).body).toContain('must survive an async rejection')
   })
 })
 
@@ -335,13 +380,13 @@ describe('runtime replay invokes the injected onRecoveredReply sink (#106 end-to
 
     // Offline → persisted as undelivered. Now the user reconnects → drained once.
     const sent: ChatOutbound[] = []
-    const emitted = drainRecoveredReplies({ topic_id: topic, store, send: (e) => sent.push(e), now: () => ++clock })
+    const emitted = await drainRecoveredReplies({ topic_id: topic, store, send: (e) => void sent.push(e), now: () => ++clock })
     expect(emitted).toBe(1)
     expect((sent[0] as { type: string; body: string }).body).toContain('RECOVERED:')
 
     // Idempotency: a second reconnect drains nothing.
     const sent2: ChatOutbound[] = []
-    drainRecoveredReplies({ topic_id: topic, store, send: (e) => sent2.push(e), now: () => ++clock })
+    await drainRecoveredReplies({ topic_id: topic, store, send: (e) => void sent2.push(e), now: () => ++clock })
     expect(sent2).toHaveLength(0)
   })
 })

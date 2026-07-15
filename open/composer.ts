@@ -2791,12 +2791,41 @@ export function buildOpenGraphComposer(
       ...(liveAgentRecoveredReplySink !== undefined
         ? {
             recoveredReplyDrain: (channel_topic_id: string): void => {
-              drainRecoveredReplies({
-                topic_id: channel_topic_id,
-                store: recoveredReplyStore,
-                send: buildAppWsSendReply(channel_topic_id),
-                log_tag: '[open][recovered-reply]',
-              })
+              // Fire-and-forget the drain (on_session_open must not block on it),
+              // but the drain AWAITS real per-row delivery so a failed/dropped send
+              // stays pending for the next reconnect. NOTE: we do NOT reuse
+              // `buildAppWsSendReply` here — its sender returns `void` and hides the
+              // `adapter.send()` promise behind `fireAndForget`, so the drain could
+              // never observe a rejection and would mark a lost reply delivered
+              // (Codex). Instead await the adapter directly and THROW on a
+              // drop/unbound so `drainRecoveredReplies` leaves the row pending.
+              fireAndForget(
+                'composer.recovered-reply-drain',
+                drainRecoveredReplies({
+                  topic_id: channel_topic_id,
+                  store: recoveredReplyStore,
+                  send: async (event: ChatOutbound): Promise<void> => {
+                    const msg: OutgoingMessage = {
+                      topic: {
+                        topic_id: '',
+                        channel_kind: 'app_socket',
+                        channel_topic_id,
+                        project_id: null,
+                        privacy_mode: 'regular',
+                      },
+                      text: event.type === 'agent_message' ? event.body : '',
+                    }
+                    const id = await appWs.deref((adapter) => adapter.send(msg))
+                    // `undefined` = adapter not bound; `app-ws:dropped:*` = the
+                    // socket was offline at send time — neither is a confirmed
+                    // delivery, so reject to keep the row pending.
+                    if (id === undefined || id.startsWith('app-ws:dropped')) {
+                      throw new Error(`recovered-reply not confirmed (${id ?? 'no-adapter'})`)
+                    }
+                  },
+                  log_tag: '[open][recovered-reply]',
+                }),
+              )
             },
           }
         : {}),

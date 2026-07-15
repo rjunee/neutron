@@ -224,21 +224,29 @@ export function makeRecoveredReplySink(deps: {
  * Returns the count re-emitted. Best-effort: a `send` throw on one row does not
  * block the rest.
  */
-export function drainRecoveredReplies(deps: {
+export async function drainRecoveredReplies(deps: {
   topic_id: string
   store: RecoveredReplyStore
-  send: (event: ChatOutbound) => void
+  /**
+   * Deliver one recovered reply. MAY be async: a sender that fans through a
+   * fire-and-forget path (e.g. the app-ws adapter) MUST return a promise that
+   * resolves ONLY when delivery is confirmed and REJECTS on a failed/dropped send
+   * — otherwise a rejected delivery would be marked delivered and the reply lost
+   * (Codex). The drain `await`s it before marking.
+   */
+  send: (event: ChatOutbound) => void | Promise<void>
   now?: () => number
   log_tag?: string
-}): number {
+}): Promise<number> {
   const clock = deps.now ?? ((): number => Date.now())
-  // Peek (do NOT pre-mark) → send → mark delivered ONLY on success, so a row whose
-  // send throws stays pending and a later reconnect retries it (Codex r1 P2).
+  // Peek (do NOT pre-mark) → AWAIT send → mark delivered ONLY on success, so a row
+  // whose send throws OR rejects stays pending and a later reconnect retries it
+  // (Codex r1 P2 + the async-delivery loss path).
   const rows = deps.store.peekUndelivered(deps.topic_id)
   let emitted = 0
   for (const row of rows) {
     try {
-      deps.send(renderRecoveredReply(row.text, deps.topic_id))
+      await deps.send(renderRecoveredReply(row.text, deps.topic_id))
       deps.store.markDelivered(deps.topic_id, row.turn_id, clock())
       emitted += 1
     } catch (err) {
