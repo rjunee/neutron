@@ -1396,7 +1396,22 @@ pipeline (react-markdown + rehype-sanitize, 118 lines) is canonical. The hand-ro
 renderer's fate follows the W4 spike: if the native chat surface is retired, it dies with
 it; if ChatSyncSurface is carved out, replace it with a shared remark-AST parse (mdast is
 platform-free) + a ~300-400 line RN renderer over that parse — NOT a second grammar.
-**Accept:** one markdown grammar in the tree; RN renderer frozen pending W4.
+**Accept — split (the original one-liner was internally contradictory; formally revised, this unit is `[~]` PARTIAL):**
+- **Achievable in W2 (DONE):** the web `react-markdown` + `rehype-sanitize` pipeline
+  (`landing/chat-react/Markdown.tsx`) is the sole CANONICAL grammar and there is no duplicate
+  WEB renderer (the legacy `landing/markdown.ts` was deleted in the wave-1 dead-code kill); the
+  native hand-parser is FROZEN — its platform-free PARSE layer + URL sanitization predicate are
+  extracted to `app/lib/markdown-grammar.ts` (seeding the W4 mdast path), the `Block`/`Inline`
+  kind surface is `tsc`-locked by exhaustiveness guards, and the real `parseBlocks` /
+  `tokeniseInline` / `isAllowedUrl` are characterized by tests. New markdown features go to the
+  web pipeline, never the frozen grammar.
+- **W4-GATED (NOT achieved by W2 alone):** literally ONE grammar in the tree. The frozen native
+  parser is not removed here — it dies (native chat surface retired) or is replaced by a shared
+  mdast parse in W4. Until then, two grammars coexist, one frozen. This is why the checklist
+  keeps W2 at `[~]`, not `[x]`.
+- **Caveat on the freeze's teeth:** the `tsc` guards catch a NEW discriminant `kind`; they do
+  NOT mechanically catch a new syntax branch that emits an EXISTING kind — the FREEZE banners +
+  review are the backstop there (inherent to freezing rather than deleting a hand parser).
 
 ### W5 — `[BEHAVIOR]` chat-core connection resilience (Telegram-bar hardening) · `opus` · M · lane transport (EARLY — independent of the shell)
 The offline/online investigation confirmed the sync CORE is already Telegram-grade and
@@ -1995,7 +2010,7 @@ the R-behavior block (RB*/RC2/RC3) is the perfect-recall uplift, sequenced last 
 - [ ] F1 · [ ] F2 · [ ] F3 · [ ] F4 · [ ] F5 · [ ] F6 · [x] F7 ✅ #296 · [ ] F8 · [x] F9 ✅ #194 (pilot)
 - [x] O1 ✅ #295 · [ ] O2 · [ ] O3 · [ ] O4 · [ ] O5 · [ ] O6 · [ ] O7 · [ ] O8
 - [ ] X1 · [ ] X2 · [ ] X3 · [ ] X4 · [ ] X5 · [ ] X6
-- [x] W0 ✅ (docs/specs/ux-architecture-option-d-2026-07-03.md) · [ ] W1 · [ ] W2 · [ ] W3a · [ ] W3 · [ ] W4 · [x] W5 ✅ #263 · [ ] W6 · [ ] W7 · [x] W8 ✅ #197
+- [x] W0 ✅ (docs/specs/ux-architecture-option-d-2026-07-03.md) · [ ] W1 · [~] W2 FREEZE landed (web already converged on ONE shared react-markdown pipeline; legacy `landing/markdown.ts` long deleted; RN hand-parser extracted to a platform-free parse layer + kind-surface `tsc`-frozen + characterized) — "one grammar in the tree" acceptance is W4-gated: the RN grammar is frozen, not removed, and dies/replaced when the native chat surface is retired · [ ] W3a · [ ] W3 · [ ] W4 · [x] W5 ✅ #263 · [ ] W6 · [ ] W7 · [x] W8 ✅ #197
 - [x] M0 ✅ neutron-managed#123 (Managed CI) · [ ] M1 · [ ] M2 · [ ] M3 (riders — MG-1 ✅ managed#124 relocation-tolerant contract gate landed) · [ ] M4 · [ ] M5 · [ ] M6
 - [ ] N1 · [ ] N2 · [ ] N3 · [ ] N4 · [ ] N5 · [ ] N6 · [ ] N7 · [ ] N8
 - [x] S0 ✅ #287 (WS same-origin + per-boot token; NOTE: /api/app/* `dev:owner` bypass closure is deferred to S1 per scope) · [ ] S1 · [ ] S2 · [ ] S3
