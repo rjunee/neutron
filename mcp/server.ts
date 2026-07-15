@@ -49,6 +49,16 @@ export interface McpServerOptions {
    * module-graph; this default keeps the tests + standalone use simple.
    */
   capability_gate?: (capability: string) => boolean
+  /**
+   * X6 — bind the dispatching turn's ACTIVE project as ambient context for the
+   * duration of the tool handler, so a Core tool's credential accessor (which
+   * reads the ambient active-project frame at call time) resolves per-project on
+   * the agent's native tool path. The gateway wires this to
+   * `runWithActiveProject`; the default is a pass-through so mcp stays free of a
+   * gateway dependency and standalone/unit use is unaffected (→ '' / global
+   * scope, the pre-X6 behavior). Injected — mirrors `capability_gate`.
+   */
+  bindActiveProject?: <T>(project_id: string | null | undefined, fn: () => T) => T
 }
 
 /**
@@ -60,11 +70,13 @@ export class McpServer {
   private readonly project_slug: string
   private readonly registry: ToolRegistry
   private readonly capability_gate: (capability: string) => boolean
+  private readonly bindActiveProject: <T>(project_id: string | null | undefined, fn: () => T) => T
 
   constructor(options: McpServerOptions) {
     this.project_slug = options.project_slug
     this.registry = options.registry
     this.capability_gate = options.capability_gate ?? (() => true)
+    this.bindActiveProject = options.bindActiveProject ?? ((_project_id, fn) => fn())
   }
 
   /**
@@ -130,13 +142,20 @@ export class McpServer {
       )
     }
     const ctx = currentTopicContextOrSystem(input.call_id, this.project_slug, input.project_id)
-    return reg.handler(input.args, {
-      project_slug: ctx.project_slug,
-      project_id: ctx.project_id,
-      topic_id: ctx.topic_id,
-      call_id: ctx.call_id,
-      speaker_user_id: ctx.speaker_user_id,
-    })
+    // X6 — bind the resolved ACTIVE project (from the bound TopicContext or the
+    // caller-threaded fallback) as ambient context for the handler's lifetime, so
+    // a Core tool's credential accessor scopes per-project on the native tool
+    // path. A null project_id binds '' → global scope (the pre-X6 behavior). The
+    // frame propagates through the handler's `await` chain (bound synchronously).
+    return this.bindActiveProject(ctx.project_id, () =>
+      reg.handler(input.args, {
+        project_slug: ctx.project_slug,
+        project_id: ctx.project_id,
+        topic_id: ctx.topic_id,
+        call_id: ctx.call_id,
+        speaker_user_id: ctx.speaker_user_id,
+      }),
+    )
   }
 
   /**

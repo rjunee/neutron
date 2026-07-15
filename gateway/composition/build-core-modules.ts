@@ -31,6 +31,7 @@ import { registerMessageSearchToolSurface } from '@neutronai/message-search/tool
 import { registerDispatchToolSurface } from '@neutronai/agent-dispatch/tool.ts'
 import { registerSkillForgeToolSurface } from '@neutronai/skill-forge/tool.ts'
 import { installBundledCores } from '../cores/install-bundled.ts'
+import { runWithActiveProject } from '../cores/active-project-context.ts'
 import type { CoresModuleState } from '../cores/composer-state.ts'
 import {
   OnboardingTelemetry,
@@ -291,7 +292,15 @@ export function buildCoreModules(
     deps: ['tools'],
     init: (ctx) => {
       const tools = ctx.graph.get<ToolRegistry>('tools')
-      return new McpServer({ project_slug: input.project_slug, registry: tools })
+      // X6 — bind the dispatching turn's active project into the ambient
+      // active-project frame around every tool handler, so a Core tool's
+      // credential accessor (which reads that frame at call time) scopes
+      // per-project on the agent's native tool path.
+      return new McpServer({
+        project_slug: input.project_slug,
+        registry: tools,
+        bindActiveProject: runWithActiveProject,
+      })
     },
   }
 
