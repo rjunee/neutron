@@ -20,8 +20,14 @@ export type CompositionHttpHandler = (req: Request) => Response | Promise<Respon
 /**
  * RA2 (gbrain live-or-loud) — a coarse, NON-sensitive summary of the memory
  * backend's health, surfaced through the UNAUTHENTICATED `/healthz` liveness
- * probe so a missing/broken gbrain backend is a LOUD, monitorable "degraded"
- * signal instead of a silent no-op (recall quietly falling back to file-grep).
+ * probe so an ABSENT gbrain backend is a LOUD, monitorable "degraded" signal
+ * instead of a silent no-op (recall quietly falling back to file-grep).
+ *
+ * SCOPE (deliberate): `available` reflects binary PRESENCE (the primary ND1/RA5
+ * failure — gbrain not installed), NOT live serve-ability. A present-but-broken
+ * binary (installs OK, fails at init/serve) reads `available:true`; that rarer
+ * case degrades safely at query time (RA5 fail-soft) and a deeper cached
+ * serve-probe is a tracked follow-up.
  *
  * Coarse BY DESIGN: `/healthz` is unauthenticated (load-balancer liveness), so
  * this must NEVER carry an internal identifier a report leak would expose
@@ -31,7 +37,9 @@ export type CompositionHttpHandler = (req: Request) => Response | Promise<Respon
  * alerts on.
  */
 export interface MemoryHealthSummary {
-  /** false → the memory backend (gbrain) is unavailable; recall degraded to file-grep. */
+  /** false → the memory backend BINARY is absent/unresolvable; recall degraded to
+   *  file-grep. (Binary PRESENCE only — a present-but-broken binary reads true; see
+   *  the scope note above.) */
   available: boolean
   /** A coarse, non-sensitive one-liner (no paths/pids) safe for the unauthenticated `/healthz`. */
   detail?: string
