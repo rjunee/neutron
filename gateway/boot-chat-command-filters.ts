@@ -15,6 +15,9 @@
 import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { createLogger } from '@neutronai/logger'
+
+const moduleLog = createLogger('chat-command-filter')
 
 /**
  * S1 — chain multiple `ChatCommandFilter` instances into one. Each
@@ -40,11 +43,9 @@ export function buildChainedChatCommandFilter(
           // /remind path (and vice versa). The surface itself catches
           // throws from the chain root too; this catch belt-and-
           // suspenders the per-filter boundary.
-          console.warn(
-            `[chat-command-filter] chained filter threw — falling through: ${
-              err instanceof Error ? err.message : String(err)
-            }`,
-          )
+          moduleLog.warn('chained_filter_threw', {
+            error: err instanceof Error ? err.message : String(err),
+          })
         }
       }
       return null

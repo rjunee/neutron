@@ -43,6 +43,10 @@
  * `open/composer.ts`.
  */
 
+import { createLogger } from '@neutronai/logger'
+
+const log = createLogger('open-late')
+
 /** Injectable observability sink fired on a deref-before-bind. */
 export type LateUnboundSink = (name: string) => void
 
@@ -87,9 +91,11 @@ export function resetLateUnboundDerefCounts(): void {
 function defaultUnboundSink(name: string): void {
   const next = (unboundDerefCounts.get(name) ?? 0) + 1
   unboundDerefCounts.set(name, next)
-  console.error(
-    `[open] event=late_deref_before_bind seam=${name} count=${next} — a late<T> holder was dereferenced before it was bound; the call was skipped (prod no-op). This is a boot-ordering bug.`,
-  )
+  log.error('late_deref_before_bind', {
+    seam: name,
+    count: next,
+    note: 'a late<T> holder was dereferenced before it was bound; the call was skipped (prod no-op). This is a boot-ordering bug.',
+  })
 }
 
 /**

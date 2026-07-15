@@ -24,6 +24,7 @@
  * the freshness signal — the load-bearing ordering invariant the test pins.
  */
 
+import { createLogger } from '@neutronai/logger'
 import { closeSync, openSync, utimesSync } from 'node:fs'
 
 export interface HeartbeatWatchdogDeps {
@@ -56,6 +57,8 @@ export interface HeartbeatWatchdog {
   /** Stop the tick. Idempotent. */
   stop(): void
 }
+
+const log = createLogger('heartbeat-watchdog')
 
 const DEFAULT_INTERVAL_MS = 100
 const DEFAULT_BLOCK_WARN_MS = 500
@@ -110,14 +113,14 @@ export function startHeartbeatWatchdog(deps: HeartbeatWatchdogDeps): HeartbeatWa
   const onBlock =
     deps.onBlock ??
     ((elapsedMs: number) => {
-      console.error(`heartbeat: event-loop block detected (${elapsedMs.toFixed(0)}ms since last tick)`)
+      log.error('event_loop_block_detected', { elapsed_ms: Math.round(elapsedMs) })
     })
   const onWriteError =
     deps.onWriteError ??
     ((err: unknown) => {
-      console.error(
-        `heartbeat write failed: ${err instanceof Error ? err.message : String(err)}`,
-      )
+      log.error('heartbeat_write_failed', {
+        error: err instanceof Error ? err.message : String(err),
+      })
     })
 
   // Prime the file so the supervisor sees a fresh mtime before the first tick.

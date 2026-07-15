@@ -41,6 +41,9 @@ import {
   renderMessagesArray,
 } from './build-llm-call-substrate.ts'
 import { composeSystemPrompt } from './index.ts'
+import { createLogger } from '@neutronai/logger'
+
+const moduleLog = createLogger('agent-watcher')
 import type { PersonaPromptLoader } from './persona-loader.ts'
 import { getBestModel } from '@neutronai/runtime/models.ts'
 import type { AgentSpec, Substrate } from '@neutronai/runtime/substrate.ts'
@@ -99,9 +102,7 @@ export function buildAgentWatcherLlmCall(
 ): AgentWatcherLlmCall | null {
   const log_slug = input.url_slug ?? 'unknown'
   if (input.substrate === null) {
-    console.info(
-      `[agent-watcher] project=${log_slug} no substrate (no Anthropic credentials); watcher LLM path disabled`,
-    )
+    moduleLog.info('watcher_disabled_no_substrate', { project: log_slug })
     return null
   }
   const substrate = input.substrate
@@ -116,11 +117,10 @@ export function buildAgentWatcherLlmCall(
       try {
         persona = await personaLoader.load()
       } catch (err) {
-        console.warn(
-          `[agent-watcher] project=${log_slug} persona load failed; proceeding without persona splice: ${
-            err instanceof Error ? err.message : String(err)
-          }`,
-        )
+        moduleLog.warn('persona_load_failed', {
+          project: log_slug,
+          error: err instanceof Error ? err.message : String(err),
+        })
         persona = ''
       }
     }

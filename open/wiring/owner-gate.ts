@@ -39,6 +39,7 @@
  * `projects_changed` app-ws emit + topic-rail surface (it stays composer-owned).
  */
 
+import { createLogger } from '@neutronai/logger'
 import type { HttpGate } from '@neutronai/gateway/http/http-gate.ts'
 import { isLandingRoute } from '@neutronai/landing/routes.ts'
 import { isSpaClientRoute } from '@neutronai/landing/spa-routes.ts'
@@ -55,6 +56,8 @@ import type { OpenWiringContext } from './context.ts'
  * composer's `readProjectRows()` return type exactly (id + label + the
  * rail-redesign fields) so the composer → dep assignment is byte-identical.
  */
+const log = createLogger('open-owner-gate')
+
 export interface ProjectRailRow {
   id: string
   label: string
@@ -190,10 +193,10 @@ export function buildOpenOwnerGate(
       // a fresh onboarding bounce. `engine.start` is idempotent — it
       // re-emits the CURRENT phase prompt — so cold-starting a user who
       // actually had state simply re-surfaces where they left off.
-      console.warn(
-        '[open] hasResumableState read threw — treating as no resumable state (cold-start):',
-        err,
-      )
+      log.warn('resumable_state_read_threw', {
+        note: 'treating as no resumable state (cold-start)',
+        error: err instanceof Error ? (err.stack ?? err.message) : String(err),
+      })
       return false
     }
   }

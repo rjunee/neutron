@@ -38,6 +38,9 @@ import {
   ownerIdentityMismatch,
   type OwnerHandleLookup,
 } from './auth-helpers.ts'
+import { createLogger } from '@neutronai/logger'
+
+const moduleLog = createLogger('cookie-user-claim')
 
 export interface CookieUserClaim {
   project_slug: string
@@ -96,10 +99,7 @@ export function buildCookieUserClaim(
         set_cookie: formatSetCookie(refreshed),
       }
     } catch (err) {
-      console.warn(
-        `[cookie-user-claim] project=${log_owner} refresh-cookie sign failed (falling through to no-refresh accept):`,
-        err,
-      )
+      moduleLog.warn('refresh_cookie_sign_failed', { project: log_owner, error: err instanceof Error ? err.message : String(err) })
       return {
         project_slug: row.url_slug,
         user_id: owner,

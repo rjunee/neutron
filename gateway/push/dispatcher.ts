@@ -36,6 +36,24 @@ import {
   type ExpoPushClient,
   type ExpoPushMessage,
 } from './expo-push-client.ts'
+import { createLogger } from '@neutronai/logger'
+
+const moduleLog = createLogger('push')
+
+/** Coerce arbitrary log meta to the logger's primitive `LogValue` shape. */
+const coerceLogFields = (
+  fields?: Record<string, unknown>,
+): Record<string, string | number | boolean | null | undefined> | undefined => {
+  if (fields === undefined) return undefined
+  const out: Record<string, string | number | boolean | null | undefined> = {}
+  for (const [k, v] of Object.entries(fields)) {
+    out[k] =
+      v === null || v === undefined || ['string', 'number', 'boolean'].includes(typeof v)
+        ? (v as string | number | boolean | null | undefined)
+        : (() => { try { return JSON.stringify(v) } catch { return String(v) } })()
+  }
+  return out
+}
 
 export interface PushDispatcherOptions {
   store: DevicePushTokenStore
@@ -116,11 +134,7 @@ export function createPushDispatcher(opts: PushDispatcherOptions): PushDispatche
   const reminderTitle = opts.reminder_title ?? DEFAULT_REMINDER_TITLE
   const logger: PushDispatcherLogger = opts.logger ?? {
     warn(message, meta) {
-      if (meta !== undefined) {
-        console.warn(`[push] ${message}`, meta)
-      } else {
-        console.warn(`[push] ${message}`)
-      }
+      moduleLog.warn(message, coerceLogFields(meta))
     },
   }
 

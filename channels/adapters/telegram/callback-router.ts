@@ -27,6 +27,9 @@ import {
   type RouteChoiceResult,
 } from '../../button-routing.ts'
 import type { TelegramClient } from './client.ts'
+import { createLogger } from '@neutronai/logger'
+
+const moduleLog = createLogger('telegram-callback')
 
 export interface TelegramCallbackQueryPayload {
   /** Telegram callback_query.id — required for answerCallbackQuery. */
@@ -44,7 +47,7 @@ export interface TelegramCallbackRouterDeps {
   buttonRouter: ButtonRouter
   /** Telegram client used for `answerCallbackQuery`. */
   telegram: Pick<TelegramClient, 'answerCallbackQuery'>
-  /** Optional logger; defaults to console.warn for malformed callbacks. */
+  /** Optional logger; defaults to the @neutronai/logger warn sink for malformed callbacks. */
   logger?: { warn: (msg: string, meta?: unknown) => void }
 }
 
@@ -65,7 +68,10 @@ export interface TelegramCallbackHandlerResult {
 export function buildTelegramCallbackHandler(
   deps: TelegramCallbackRouterDeps,
 ): (cb: TelegramCallbackQueryPayload) => Promise<TelegramCallbackHandlerResult> {
-  const log = deps.logger ?? { warn: (msg: string, meta?: unknown) => console.warn(msg, meta) }
+  const log = deps.logger ?? {
+    warn: (msg: string, meta?: unknown) =>
+      moduleLog.warn(msg, meta !== undefined ? { meta: JSON.stringify(meta) } : undefined),
+  }
   return async (cb) => {
     const parsed = parseTelegramCallbackData(cb.data)
     if (parsed === null) {
@@ -120,6 +126,8 @@ async function safeAnswer(
   } catch (err) {
     // best-effort — if Telegram ack fails the user's spinner will time out
     // on its own. The agent-side advance has already landed.
-    console.warn('telegram answerCallbackQuery failed', err)
+    moduleLog.warn('answer_callback_query_failed', {
+      error: err instanceof Error ? err.message : String(err),
+    })
   }
 }

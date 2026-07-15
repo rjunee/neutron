@@ -12,8 +12,11 @@
  * the first refresh happens lazily on the first `ensureFresh()` call.
  */
 
+import { createLogger } from '@neutronai/logger'
 import { readProjectDoc } from './walk.ts'
 import { refreshIndex, type RefreshDeps, type RefreshStats } from './indexer.ts'
+
+const runtimeLog = createLogger('doc-search')
 import type { DocSearchHit, DocSearchIndex, SearchInput } from './store.ts'
 
 export interface DocSearchRuntimeOptions {
@@ -52,7 +55,7 @@ export class DocSearchRuntime {
     if (options.enumerateProjects !== undefined) deps.enumerateProjects = options.enumerateProjects
     if (options.walk !== undefined) deps.walk = options.walk
     if (options.maxChunkChars !== undefined) deps.maxChunkChars = options.maxChunkChars
-    if (options.log !== undefined) deps.log = options.log
+    deps.log = options.log ?? ((msg: string): void => runtimeLog.debug(msg))
     this.refreshDeps = deps
   }
 

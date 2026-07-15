@@ -26,6 +26,7 @@
 import { join } from 'node:path'
 import type { Substrate } from '@neutronai/runtime/substrate.ts'
 import type { ConversationRecord } from '@neutronai/onboarding/history-import/types.ts'
+import { createLogger } from '@neutronai/logger'
 import {
   DiskRawTranscriptStore,
   runDeterministicPrepass,
@@ -40,6 +41,8 @@ import {
   type SynthesisResult,
   type WriteProjectSeedOutcome,
 } from '@neutronai/onboarding/synthesis/index.ts'
+
+const moduleLog = createLogger('synthesis-session')
 
 export interface BuildSynthesisSessionInput {
   /**
@@ -105,10 +108,10 @@ export function buildSynthesisSession(input: BuildSynthesisSessionInput): Synthe
   const logFailure =
     input.logFailure ??
     ((stage: string, err: unknown): void => {
-      // eslint-disable-next-line no-console
-      console.warn(
-        `[synthesis-session] ${stage}: ${err instanceof Error ? err.message : String(err)}`,
-      )
+      moduleLog.warn('stage_failed', {
+        stage,
+        error: err instanceof Error ? err.message : String(err),
+      })
     })
 
   const synthDeps = (): {

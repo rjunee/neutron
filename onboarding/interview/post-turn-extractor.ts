@@ -30,6 +30,7 @@
  * an orchestrator and never asks the owner to name it.
  */
 
+import { createLogger, type LogValue } from '@neutronai/logger'
 import { getBestModel } from '@neutronai/runtime/models.ts'
 import type { AnthropicMessagesClient } from './agent-name-suggester.ts'
 import type { ExtractedFields } from './extracted-fields.ts'
@@ -39,7 +40,7 @@ import { dedupeStringsCaseInsensitive, readNonWorkInterests } from './engine-int
 import type { OnboardingState, OnboardingStateStore } from './state-store.ts'
 import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
 
-const LOG_TAG = '[onboarding-extractor]'
+const extractorLog = createLogger('onboarding-extractor')
 
 /** Default extraction budget. Background / non-blocking, so generous. */
 const DEFAULT_TIMEOUT_MS = 45_000
@@ -646,8 +647,19 @@ function sanitize(raw: string): string {
   return stripped.length > 1200 ? `${stripped.slice(0, 1197)}...` : stripped
 }
 
+function coerceFields(meta?: Record<string, unknown>): Record<string, LogValue> | undefined {
+  if (meta === undefined) return undefined
+  return Object.fromEntries(
+    Object.entries(meta).map(([k, v]) => [
+      k,
+      v === null || typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean'
+        ? (v as LogValue)
+        : JSON.stringify(v),
+    ]),
+  )
+}
+
 function defaultLog(level: 'info' | 'warn' | 'error', msg: string, meta?: Record<string, unknown>): void {
   if (level === 'info') return
-  const tail = meta !== undefined ? ` ${JSON.stringify(meta)}` : ''
-  console.warn(`${LOG_TAG} ${msg}${tail}`)
+  extractorLog[level](msg, coerceFields(meta))
 }

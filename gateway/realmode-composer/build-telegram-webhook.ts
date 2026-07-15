@@ -39,6 +39,9 @@ import type {
   TelegramStartCommandHandler,
   TelegramBindCommandHandler,
 } from '@neutronai/channels/adapters/telegram/webhook-server.ts'
+import { createLogger } from '@neutronai/logger'
+
+const moduleLog = createLogger('telegram-webhook-composer')
 
 export interface BuildTelegramWebhookSurfaceInput {
   /**
@@ -108,26 +111,20 @@ export async function buildTelegramWebhookSurface(
     }),
   ])
   if (botToken === null) {
-    console.info(
-      `[composer] project=${log_slug} bot_token (label=telegram) not seeded — skipping /webhook/telegram`,
-    )
+    moduleLog.info('skip_webhook_no_bot_token', { project: log_slug })
     return null
   }
   if (webhookSecret === null) {
-    console.info(
-      `[composer] project=${log_slug} webhook_secret (label=telegram) not seeded — skipping /webhook/telegram`,
-    )
+    moduleLog.info('skip_webhook_no_webhook_secret', { project: log_slug })
     return null
   }
   if (botUserIdRaw === null) {
-    console.info(
-      `[composer] project=${log_slug} bot_user_id (kind=channel_metadata, label=telegram-bot-user-id) not seeded — skipping /webhook/telegram`,
-    )
+    moduleLog.info('skip_webhook_no_bot_user_id', { project: log_slug })
     return null
   }
   const botUserId = Number.parseInt(botUserIdRaw, 10)
   if (!Number.isFinite(botUserId) || botUserId <= 0) {
-    console.warn(
+    moduleLog.warn(
       `[composer] project=${log_slug} bot_user_id is not a positive integer (got ${JSON.stringify(botUserIdRaw)}) — skipping /webhook/telegram`,
     )
     return null

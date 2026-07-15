@@ -35,7 +35,10 @@
 import type { ButtonStore } from '@neutronai/channels/button-store.ts'
 import type { ChatOutbound } from '@neutronai/landing/chat-protocol.ts'
 import type { WebChatSenderRegistry } from '../http/chat-sender-registry.ts'
+import { createLogger } from '@neutronai/logger'
 import type { OutboundSink, OutgoingMessage } from './sink.ts'
+
+const moduleLog = createLogger('proactive-sink')
 
 const LOG_TAG = '[proactive-sink]'
 
@@ -56,7 +59,7 @@ export interface BuildButtonStoreProactiveSinkInput {
 export function buildButtonStoreProactiveSink(
   input: BuildButtonStoreProactiveSinkInput,
 ): OutboundSink {
-  const log = input.log ?? ((msg: string): void => console.warn(msg))
+  const log = input.log ?? ((msg: string): void => moduleLog.warn(msg))
   return {
     async send(message: OutgoingMessage): Promise<string> {
       const topic_id = message.topic.channel_topic_id

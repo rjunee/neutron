@@ -62,6 +62,9 @@ import {
   type OllamaHealthCheck,
 } from '@neutronai/gbrain-memory/index.ts'
 import type { SyncHook } from '@neutronai/runtime/entity-writer.ts'
+import { createLogger } from '@neutronai/logger'
+
+const moduleLog = createLogger('gbrain-memory')
 
 export interface GBrainMemoryWiring {
   // NB: the raw `GBrainStdioMcpClient` transport is intentionally NOT a field
@@ -625,7 +628,7 @@ export function buildGBrainMemory(input: {
               '(no rebuild), or re-init the brain to use the local fallback.'
             : 'That width is outside the supported range, so re-init the brain to adopt the ' +
               'local fallback (or a supported width).')
-    console.warn(`[gbrain-memory] project=${input.project_slug}: existing brain has ${detail}`)
+    moduleLog.warn('existing_brain_mismatch', { project: input.project_slug, detail })
   }
 
   // Reachability fix (dogfood 2026-06-28): the launchd/systemd SERVICE runs with
@@ -695,13 +698,14 @@ export function buildGBrainMemory(input: {
   // the lazy/fail-soft behaviour below is unchanged (now with a
   // latched one-time runtime failure instead of a per-op storm).
   if (command === null) {
-    console.warn(
-      `[gbrain-memory] project=${input.project_slug} WARNING: 'gbrain' executable not found ` +
-        'on PATH or in any known install dir ($BUN_INSTALL/bin, ~/.bun/bin, /usr/local/bin, ' +
-        '/opt/homebrew/bin, ~/.local/bin) — entity-page memory sync will be DISABLED (pages remain ' +
-        'on disk; sync degrades to a one-time logged failure on first use). Install with: ' +
-        'bun install -g github:garrytan/gbrain',
-    )
+    moduleLog.warn('gbrain_executable_not_found', {
+      project: input.project_slug,
+      detail:
+        "'gbrain' executable not found on PATH or in any known install dir ($BUN_INSTALL/bin, " +
+        '~/.bun/bin, /usr/local/bin, /opt/homebrew/bin, ~/.local/bin) — entity-page memory sync ' +
+        'will be DISABLED (pages remain on disk; sync degrades to a one-time logged failure on ' +
+        'first use). Install with: bun install -g github:garrytan/gbrain',
+    })
   }
 
   const client = new GBrainStdioMcpClient(opts)

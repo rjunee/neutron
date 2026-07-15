@@ -91,4 +91,13 @@ if ! bun "$HERE/void-promise-check.mjs"; then
   fail=1
 fi
 
+# ── CHECK 4: O2 bare `console.*` ban ───────────────────────────────────
+# Host/product code must log through `createLogger(...)` from @neutronai/logger,
+# not a bare `console.*` (which re-forks the one-logger convention). The logger
+# package, genuine CLI entrypoints, browser/leaf/core code, and tests are
+# allow-listed. See console-ban-check.mjs.
+if ! bun "$HERE/console-ban-check.mjs"; then
+  fail=1
+fi
+
 exit "$fail"

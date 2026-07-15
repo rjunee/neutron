@@ -37,6 +37,9 @@
 import { isTerminalPhase } from './state-machine.ts'
 import type { TridentPhase, TridentRun } from './store.ts'
 import type { TridentTerminalHook, TridentTransitionHook } from './tick.ts'
+import { createLogger } from '@neutronai/logger'
+
+const log = createLogger('trident')
 
 /**
  * The minimal store surface the chokepoint writes through: a partial update by id
@@ -150,11 +153,10 @@ export function buildTridentTerminator(deps: {
         try {
           await transition.onTransition(run)
         } catch (err) {
-          console.warn(
-            `[trident] terminate transition fan failed for run ${run.id}: ${
-              err instanceof Error ? err.message : String(err)
-            }`,
-          )
+          log.warn('terminate_transition_fan_failed', {
+            run: run.id,
+            error: err instanceof Error ? err.message : String(err),
+          })
         }
       }
 
@@ -169,11 +171,10 @@ export function buildTridentTerminator(deps: {
         // Best-effort: the row is already committed terminal, so an observer
         // outage must not block the caller's cancel/stop. Log + record — never
         // propagate (mirrors the tick loop's on_terminal try/catch).
-        console.warn(
-          `[trident] terminate observer failed for run ${run.id}: ${
-            err instanceof Error ? err.message : String(err)
-          }`,
-        )
+        log.warn('terminate_observer_failed', {
+          run: run.id,
+          error: err instanceof Error ? err.message : String(err),
+        })
         return { run, won: true, observed: false, skipped_reason: 'observer_error' }
       }
     },

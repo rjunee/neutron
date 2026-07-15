@@ -1,3 +1,6 @@
+import { createLogger } from '@neutronai/logger'
+const moduleLog = createLogger('module-graph')
+
 /**
  * @neutronai/gateway — composable module-graph loader.
  *
@@ -121,7 +124,10 @@ export class GatewayModuleGraph implements ModuleGraph {
       try {
         await m.shutdown(m.instance)
       } catch (err) {
-        console.error(`module-graph: ${name}.shutdown failed:`, err)
+        moduleLog.error('shutdown_failed', {
+          module: name,
+          error: err instanceof Error ? (err.stack ?? err.message) : String(err),
+        })
       }
     }
   }

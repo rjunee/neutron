@@ -23,6 +23,9 @@
 
 import type { SubagentRegistry } from './registry.ts'
 import { runAgentWatchdog, type AgentWatchdogDeps } from './watchdog.ts'
+import { createLogger } from '@neutronai/logger'
+
+const log = createLogger('subagent-lifecycle')
 
 /**
  * @deprecated The stale-`running` threshold now lives on the agent-aware
@@ -73,11 +76,10 @@ export async function runLifecycleTick(deps: LifecycleDeps): Promise<number> {
       await deps.registry.delete(rec.run_id)
       affected++
     } catch (err) {
-      console.warn(
-        `[subagent-lifecycle] prune delete failed for ${rec.run_id}; ` +
-          `retrying next tick (persistence best-effort): ` +
-          `${err instanceof Error ? err.message : String(err)}`,
-      )
+      log.warn('prune_delete_failed', {
+        run_id: rec.run_id,
+        error: err instanceof Error ? err.message : String(err),
+      })
     }
   }
 

@@ -56,6 +56,9 @@ import type { ButtonStore, ChatHistoryTurn } from '@neutronai/channels/button-st
 import { ownerIdentityMismatch, type OwnerHandleResolver } from './auth-helpers.ts'
 import { jsonResponse } from './surface-kit.ts'
 import { webTopicId } from './chat-bridge.ts'
+import { createLogger } from '@neutronai/logger'
+
+const moduleLog = createLogger('chat-history')
 
 /**
  * Verified claim shape — matches `cookieToUserClaim`'s return type
@@ -196,10 +199,7 @@ export function createChatHistorySurface(
         // so the chat-side hydrator's `res.ok` branch can short-circuit
         // cleanly. The console.warn surfaces the underlying issue in
         // server logs.
-        console.warn(
-          `[chat-history-surface] project=${opts.project_slug} user_id=${claim.user_id} listHistoryByTopic threw:`,
-          err,
-        )
+        moduleLog.warn('list_history_threw', { project: opts.project_slug, user_id: claim.user_id, error: err instanceof Error ? err.message : String(err) })
         return jsonErrorUtf8(500, 'internal', 'failed to read chat history')
       }
 

@@ -48,6 +48,9 @@ import {
   SCRIBE_MIN_CHARS,
 } from './scribe-budget.ts'
 import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
+import { createLogger } from '@neutronai/logger'
+
+const log = createLogger('scribe')
 export const __MODULE__ = '@neutronai/scribe' as const
 
 export * from './scribe-budget.ts'
@@ -166,8 +169,7 @@ export function createScribe(deps: CreateScribeDeps): Scribe {
   const logFailure =
     deps.logFailure ??
     ((msg: string, err: unknown): void => {
-      // eslint-disable-next-line no-console
-      console.warn(`[scribe] ${msg}: ${err instanceof Error ? err.message : String(err)}`)
+      log.warn(msg, { error: err instanceof Error ? err.message : String(err) })
     })
 
   /** Cheap pre-filters lifted from Nova's `maybeSpawnScribe` (commands, system

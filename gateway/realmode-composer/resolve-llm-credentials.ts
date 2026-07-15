@@ -56,6 +56,9 @@ import {
   newCredentialPool,
   type CredentialPool,
 } from '@neutronai/runtime/credential-pool.ts'
+import { createLogger } from '@neutronai/logger'
+
+const moduleLog = createLogger('composer-credentials')
 
 /**
  * Sprint 22 — pluggable OAuth source. Production wires `MaxOAuthClient`
@@ -190,7 +193,7 @@ export function resolveEnvOAuthTier(input: {
   const token = input.env['CLAUDE_CODE_OAUTH_TOKEN']
   if (typeof token !== 'string' || token.length === 0) return null
   if (input.log_slug !== undefined) {
-    console.warn(
+    moduleLog.warn(
       `[composer] project=${input.log_slug} ${input.provider} credentials loaded from process-env CLAUDE_CODE_OAUTH_TOKEN — synthetic-auth / dev / CI fallback. Production should attach Max via signup.`,
     )
   }
@@ -232,19 +235,19 @@ export function resolveApiKeyEnvTier(input: {
       if (isShared) {
         if (!input.allowSharedEnvTier) {
           if (input.log_slug !== undefined) {
-            console.warn(
+            moduleLog.warn(
               `[composer] project=${input.log_slug} ${input.provider} SHARED env key ${name} is set but deployment mode is '${input.deploymentModeLabel ?? 'non-open'}' — refusing the box-global fallback; this project must attach its own credential (Max OAuth / BYO key). Returning null → reconnect gate.`,
             )
           }
           continue
         }
         if (input.log_slug !== undefined) {
-          console.warn(
+          moduleLog.warn(
             `[composer] project=${input.log_slug} ${input.provider} credentials loaded from SHARED env key ${name} — review M2 credential-sharing plan`,
           )
         }
       } else if (input.log_slug !== undefined) {
-        console.info(
+        moduleLog.info(
           `[composer] project=${input.log_slug} ${input.provider} credentials loaded from per-project env ${name}`,
         )
       }
@@ -324,14 +327,14 @@ export async function resolveLlmCredentials(
       // refresh endpoint is down. Operators see the failure in
       // journald via the WARN below.
       maxOAuthThrew = true
-      console.warn(
+      moduleLog.warn(
         `[composer] project=${log_slug} ${input.provider} max-oauth loadAccessToken threw: ${
           err instanceof Error ? err.message : String(err)
         } — falling through to BYO/env`,
       )
     }
     if (tokens !== null && tokens.access_token.length > 0) {
-      console.info(
+      moduleLog.info(
         `[composer] project=${log_slug} ${input.provider} credential resolved from max_oauth ` +
           `(will be threaded to claude subprocess as CLAUDE_CODE_OAUTH_TOKEN)`,
       )
@@ -375,7 +378,7 @@ export async function resolveLlmCredentials(
     api_keys: input.apiKeys,
   })
   if (stored !== null) {
-    console.info(
+    moduleLog.info(
       `[composer] project=${log_slug} ${input.provider} credentials loaded from store`,
     )
     return stored

@@ -44,6 +44,9 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createLandingServer } from './server.ts'
 import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
+import { createLogger } from '@neutronai/logger'
+
+const log = createLogger('signup-landing')
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 
@@ -228,7 +231,7 @@ export async function bootSignup(options: BootSignupOptions = {}): Promise<BootS
         }
         return await landing.fetch(req, srv)
       } catch (err) {
-        console.error('signup landing handler threw:', err)
+        log.error('handler_threw', { error: err instanceof Error ? (err.stack ?? err.message) : String(err) })
         return new Response('Internal Server Error', { status: 500 })
       }
     },
@@ -275,15 +278,15 @@ export async function startSignupServerMain(): Promise<void> {
   // assets and calls this.) An unhandled rejection exits non-zero → systemd
   // Restart=always respawn.
   const handle = await bootSignup()
-  console.log(`[signup-landing] listening on 127.0.0.1:${handle.port}`)
+  log.info('listening', { host: '127.0.0.1', port: handle.port })
   process.once('SIGTERM', () => {
     fireAndForget('boot.stop', handle.stop(), (err) => {
-      console.error('signup-landing stop failed:', err)
+      log.error('stop_failed', { error: err instanceof Error ? (err.stack ?? err.message) : String(err) })
     })
   })
   process.once('SIGINT', () => {
     fireAndForget('boot.stop', handle.stop(), (err) => {
-      console.error('signup-landing stop failed:', err)
+      log.error('stop_failed', { error: err instanceof Error ? (err.stack ?? err.message) : String(err) })
     })
   })
 }

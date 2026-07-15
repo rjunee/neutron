@@ -40,6 +40,7 @@ import type {
   CronJobRegistry,
 } from '@neutronai/cron/jobs.ts'
 import type { ProjectDb } from '@neutronai/persistence/index.ts'
+import { createLogger } from '@neutronai/logger'
 import type { LlmCallFn } from '@neutronai/contracts/llm-call.ts'
 import { computeFocusScore } from './focus-score.ts'
 
@@ -216,10 +217,10 @@ export async function prioritizeTasksForProject(
     return { scanned: rows.length, ranked, prioritized_by: 'llm', model_id: model }
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
-    console.warn(
-      `[task-prioritize] project=${input.project_slug} LLM ranking failed, ` +
-        `falling back to deterministic focus-score order: ${msg}`,
-    )
+    createLogger('task-prioritize').warn('llm_ranking_failed_fallback_deterministic', {
+      project: input.project_slug,
+      error: msg,
+    })
     const ranked = await writeRanking({
       db: input.db,
       project_slug: input.project_slug,

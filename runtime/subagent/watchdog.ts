@@ -55,6 +55,9 @@
 
 import { failRun, type ControlState } from './control.ts'
 import type { AgentKind, SubagentRecord, SubagentRegistry } from './registry.ts'
+import { createLogger } from '@neutronai/logger'
+
+const log = createLogger('subagent-watchdog')
 
 /** Default inactivity window before a `running` agent is judged stuck. */
 export const DEFAULT_STUCK_THRESHOLD_MS = 5 * 60_000
@@ -246,11 +249,10 @@ export async function runAgentWatchdog(deps: AgentWatchdogDeps): Promise<AgentWa
           await deps.notify(event)
         } catch (err) {
           notified = false
-          console.error(
-            `[subagent-lifecycle] alert delivery FAILING for ${rec.run_id} ` +
-              `(will retry next tick):`,
-            err,
-          )
+          log.error('alert_delivery_failing', {
+            run_id: rec.run_id,
+            error: err instanceof Error ? (err.stack ?? err.message) : String(err),
+          })
         }
       }
       if (notified) {

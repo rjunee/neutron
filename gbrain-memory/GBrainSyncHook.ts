@@ -41,6 +41,9 @@ import { DIR_TO_KIND } from '@neutronai/runtime/entity-format.ts'
 import type { SyncHook } from '@neutronai/runtime/entity-writer.ts'
 import { GBrainUnavailableError, type MemoryStore } from './memory-store.ts'
 import type { McpClient } from './mcp-client.ts'
+import { createLogger } from '@neutronai/logger'
+
+const log = createLogger('gbrain-sync-hook')
 
 export interface GBrainSyncHookOptions {
   /**
@@ -584,13 +587,11 @@ function isMissingPageError(err: unknown): boolean {
 
 function defaultLogFailure(event: SyncHookFailureEvent): void {
   const msg = event.err instanceof Error ? event.err.message : String(event.err)
-  const tripleSuffix =
+  const triple =
     event.triple !== undefined
-      ? ` triple=${event.triple.subject}|${event.triple.predicate}|${event.triple.object}`
-      : ''
-  console.error(
-    `[gbrain-sync-hook] stage=${event.stage} path=${event.path}${tripleSuffix} err=${msg}`,
-  )
+      ? `${event.triple.subject}|${event.triple.predicate}|${event.triple.object}`
+      : undefined
+  log.error('sync_failed', { stage: event.stage, path: event.path, triple, error: msg })
 }
 
 export {

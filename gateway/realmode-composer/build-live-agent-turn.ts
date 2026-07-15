@@ -74,8 +74,9 @@ import { buildOperatingDoctrineFragment } from './operating-doctrine.ts'
 import { buildLiveAgentScopeFragment } from './live-agent-scope-fragment.ts'
 import type { LiveAgentTurnRequest } from '../http/chat-bridge.ts'
 import { fireAndForget, neutralizeAbandonedSettle } from '@neutronai/logger/fire-and-forget.ts'
+import { createLogger } from '@neutronai/logger'
 
-const LOG_TAG = '[live-agent-turn]'
+const moduleLog = createLogger('live-agent-turn')
 
 /**
  * ACTIVITY-BASED turn timeout (2026-07-01). The per-turn budget is NOT a fixed
@@ -626,9 +627,11 @@ export function buildLiveAgentTurn(
     // gentle re-prompt if nothing was recorded (e.g. a restart cleared the map).
     if (turn.user_text === RETRY_TURN_VALUE) {
       const recovered = lastUserText.get(topicKey) ?? RETRY_FALLBACK_TEXT
-      console.info(
-        `${LOG_TAG} event=retry_tap project=${turn.project_slug} topic=${turn.topic_id} recovered=${recovered !== RETRY_FALLBACK_TEXT}`,
-      )
+      moduleLog.info('retry_tap', {
+        project: turn.project_slug,
+        topic: turn.topic_id,
+        recovered: recovered !== RETRY_FALLBACK_TEXT,
+      })
       turn = { ...turn, user_text: recovered }
     }
     // Record the last real user message so a later Retry tap can recover it. Skip
@@ -732,11 +735,11 @@ export function buildLiveAgentTurn(
           return { outcome: 'replied', reply_prompt_id: null }
         }
       } catch (err) {
-        console.warn(
-          `${LOG_TAG} event=capture_required_answer_failed project=${turn.project_slug} topic=${turn.topic_id} err=${
-            err instanceof Error ? err.message : String(err)
-          }`,
-        )
+        moduleLog.warn('capture_required_answer_failed', {
+          project: turn.project_slug,
+          topic: turn.topic_id,
+          error: err instanceof Error ? err.message : String(err),
+        })
       }
     }
 
@@ -754,11 +757,10 @@ export function buildLiveAgentTurn(
       try {
         workBoardFragment = input.workBoardSnapshot(turn.project_slug, turn.project_id)
       } catch (err) {
-        console.warn(
-          `${LOG_TAG} event=work_board_snapshot_failed project=${turn.project_slug} err=${
-            err instanceof Error ? err.message : String(err)
-          }`,
-        )
+        moduleLog.warn('work_board_snapshot_failed', {
+          project: turn.project_slug,
+          error: err instanceof Error ? err.message : String(err),
+        })
       }
     }
     // Available-services awareness — resolve the project-scoped credential
@@ -772,11 +774,10 @@ export function buildLiveAgentTurn(
           turn.project_id,
         )
       } catch (err) {
-        console.warn(
-          `${LOG_TAG} event=available_services_snapshot_failed project=${turn.project_slug} err=${
-            err instanceof Error ? err.message : String(err)
-          }`,
-        )
+        moduleLog.warn('available_services_snapshot_failed', {
+          project: turn.project_slug,
+          error: err instanceof Error ? err.message : String(err),
+        })
       }
     }
     // Onboarding per-turn grounding (e.g. the import analysis the agent already
@@ -789,11 +790,10 @@ export function buildLiveAgentTurn(
       try {
         onboardingContextFragment = await input.onboarding.onboardingContext(turn.user_id)
       } catch (err) {
-        console.warn(
-          `${LOG_TAG} event=onboarding_context_failed user=${turn.user_id} err=${
-            err instanceof Error ? err.message : String(err)
-          }`,
-        )
+        moduleLog.warn('onboarding_context_failed', {
+          user: turn.user_id,
+          error: err instanceof Error ? err.message : String(err),
+        })
       }
     }
     let prompt: string
@@ -936,13 +936,21 @@ export function buildLiveAgentTurn(
       } catch (err) {
         lastErrMessage = err instanceof Error ? err.message : String(err)
         const frozen = isFreezeTimeout(lastErrMessage)
-        console.warn(
-          `${LOG_TAG} event=turn_failed project=${turn.project_slug} topic=${turn.topic_id} scope=${scope} attempt=${attempt} frozen=${frozen} elapsed_ms=${now() - started} err=${lastErrMessage}`,
-        )
+        moduleLog.warn('turn_failed', {
+          project: turn.project_slug,
+          topic: turn.topic_id,
+          scope,
+          attempt,
+          frozen,
+          elapsed_ms: now() - started,
+          error: lastErrMessage,
+        })
         if (frozen && attempt + 1 < maxAttempts) {
-          console.info(
-            `${LOG_TAG} event=turn_auto_retry project=${turn.project_slug} topic=${turn.topic_id} scope=${scope}`,
-          )
+          moduleLog.info('turn_auto_retry', {
+            project: turn.project_slug,
+            topic: turn.topic_id,
+            scope,
+          })
           continue
         }
         break
@@ -969,9 +977,11 @@ export function buildLiveAgentTurn(
       return { outcome: 'failed', reply_prompt_id: null }
     }
     if (text.trim().length === 0) {
-      console.warn(
-        `${LOG_TAG} event=empty_reply project=${turn.project_slug} topic=${turn.topic_id} scope=${scope}`,
-      )
+      moduleLog.warn('empty_reply', {
+        project: turn.project_slug,
+        topic: turn.topic_id,
+        scope,
+      })
       // Same seed-failure discipline as above — never persist an error bubble for a
       // synthetic seed turn; let reload regenerate it. An empty reply is a
       // substrate fault, not a timeout, so it keeps the generic failure bubble.
@@ -1010,11 +1020,11 @@ export function buildLiveAgentTurn(
     } catch (err) {
       // Persistence failure must not eat the live reply — log + ship anyway
       // (the turn survives in the CC transcript; only hydration loses it).
-      console.warn(
-        `${LOG_TAG} event=persist_failed project=${turn.project_slug} topic=${turn.topic_id} err=${
-          err instanceof Error ? err.message : String(err)
-        }`,
-      )
+      moduleLog.warn('persist_failed', {
+        project: turn.project_slug,
+        topic: turn.topic_id,
+        error: err instanceof Error ? err.message : String(err),
+      })
     }
     const envelope: ChatOutbound = {
       type: 'agent_message',
@@ -1046,9 +1056,13 @@ export function buildLiveAgentTurn(
     } catch {
       /* audit-trail only */
     }
-    console.info(
-      `${LOG_TAG} event=replied project=${turn.project_slug} topic=${turn.topic_id} scope=${scope} chars=${text.length} elapsed_ms=${now() - dispatchStartedAt}`,
-    )
+    moduleLog.info('replied', {
+      project: turn.project_slug,
+      topic: turn.topic_id,
+      scope,
+      chars: text.length,
+      elapsed_ms: now() - dispatchStartedAt,
+    })
     // WAVE 2 P1 — fire-and-forget correction detection over THIS exchange. The
     // hook deterministically pre-gates (most turns carry no correction cue and
     // cost nothing), then LLM-judges the rest and logs any learning so a future
@@ -1067,11 +1081,11 @@ export function buildLiveAgentTurn(
           observed_at,
         })
       } catch (err) {
-        console.warn(
-          `${LOG_TAG} event=reflection_on_turn_failed project=${turn.project_slug} topic=${turn.topic_id} err=${
-            err instanceof Error ? err.message : String(err)
-          }`,
-        )
+        moduleLog.warn('reflection_on_turn_failed', {
+          project: turn.project_slug,
+          topic: turn.topic_id,
+          error: err instanceof Error ? err.message : String(err),
+        })
       }
     }
     // Path 1 — fire-and-forget onboarding scribe. The exchange judged is the
@@ -1088,11 +1102,11 @@ export function buildLiveAgentTurn(
           observed_at,
         })
       } catch (err) {
-        console.warn(
-          `${LOG_TAG} event=onboarding_scribe_failed project=${turn.project_slug} topic=${turn.topic_id} err=${
-            err instanceof Error ? err.message : String(err)
-          }`,
-        )
+        moduleLog.warn('onboarding_scribe_failed', {
+          project: turn.project_slug,
+          topic: turn.topic_id,
+          error: err instanceof Error ? err.message : String(err),
+        })
       }
     }
     return { outcome: 'replied', reply_prompt_id }
@@ -1165,11 +1179,11 @@ async function resolvePreviousRowWithUserText(
     })
     return priorBody
   } catch (err) {
-    console.warn(
-      `${LOG_TAG} event=user_turn_persist_skipped project=${turn.project_slug} topic=${turn.topic_id} err=${
-        err instanceof Error ? err.message : String(err)
-      }`,
-    )
+    moduleLog.warn('user_turn_persist_skipped', {
+      project: turn.project_slug,
+      topic: turn.topic_id,
+      error: err instanceof Error ? err.message : String(err),
+    })
     return null
   }
 }
@@ -1192,11 +1206,10 @@ async function composeFirstTurnPrompt(
   try {
     persona = await input.personaLoader.load()
   } catch (err) {
-    console.warn(
-      `${LOG_TAG} event=persona_load_failed project=${turn.project_slug} err=${
-        err instanceof Error ? err.message : String(err)
-      }`,
-    )
+    moduleLog.warn('persona_load_failed', {
+      project: turn.project_slug,
+      error: err instanceof Error ? err.message : String(err),
+    })
   }
   const scopeFragment =
     turn.project_id !== undefined
@@ -1277,11 +1290,10 @@ async function composeFirstTurnPrompt(
   } catch (err) {
     // Assembler reads owner workspace files — a pathological owner_home
     // must not kill the turn. Degrade to persona + (project persona) + scope.
-    console.warn(
-      `${LOG_TAG} event=system_prompt_assembly_failed project=${turn.project_slug} err=${
-        err instanceof Error ? err.message : String(err)
-      }`,
-    )
+    moduleLog.warn('system_prompt_assembly_failed', {
+      project: turn.project_slug,
+      error: err instanceof Error ? err.message : String(err),
+    })
     system = [
       persona.trim().length > 0 ? persona : FALLBACK_PERSONA,
       doctrineFragment,
@@ -1299,11 +1311,10 @@ async function composeFirstTurnPrompt(
     try {
       reflectionBlock = input.reflection.loadContext()
     } catch (err) {
-      console.warn(
-        `${LOG_TAG} event=reflection_context_failed project=${turn.project_slug} err=${
-          err instanceof Error ? err.message : String(err)
-        }`,
-      )
+      moduleLog.warn('reflection_context_failed', {
+        project: turn.project_slug,
+        error: err instanceof Error ? err.message : String(err),
+      })
     }
   }
   const parts = [system]
@@ -1341,11 +1352,11 @@ async function composeProjectPersonaFragment(
   try {
     label = await input.projectPersonaResolver(turn.project_id)
   } catch (err) {
-    console.warn(
-      `${LOG_TAG} event=project_persona_resolve_failed project=${turn.project_slug} topic=${turn.topic_id} err=${
-        err instanceof Error ? err.message : String(err)
-      }`,
-    )
+    moduleLog.warn('project_persona_resolve_failed', {
+      project: turn.project_slug,
+      topic: turn.topic_id,
+      error: err instanceof Error ? err.message : String(err),
+    })
     return null
   }
   if (label === null) return null
@@ -1421,9 +1432,7 @@ function sendSafe(send: (event: ChatOutbound) => void, event: ChatOutbound): voi
   try {
     send(event)
   } catch (err) {
-    console.warn(
-      `${LOG_TAG} event=send_failed err=${err instanceof Error ? err.message : String(err)}`,
-    )
+    moduleLog.warn('send_failed', { error: err instanceof Error ? err.message : String(err) })
   }
 }
 
@@ -1467,11 +1476,11 @@ async function sendTimeoutRetry(
     const emitted = await buttonStore.emit(prompt, { topic_id: turn.topic_id })
     reply_prompt_id = emitted.prompt_id
   } catch (err) {
-    console.warn(
-      `${LOG_TAG} event=timeout_retry_persist_failed project=${turn.project_slug} topic=${turn.topic_id} err=${
-        err instanceof Error ? err.message : String(err)
-      }`,
-    )
+    moduleLog.warn('timeout_retry_persist_failed', {
+      project: turn.project_slug,
+      topic: turn.topic_id,
+      error: err instanceof Error ? err.message : String(err),
+    })
   }
   const envelope: ChatOutbound = {
     type: 'agent_message',

@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'bun:test'
 
-import { NEUTRON_SCHEME, VAULT_REDIRECTOR_BASE, WEB_APP_BASE } from '@neutronai/runtime'
+import { NEUTRON_SCHEME, VAULT_REDIRECTOR_BASE } from '@neutronai/runtime'
+// Resolve the web base LIVE (as the adapter does via `resolveDocRefs`/`buildDocLink`,
+// which recompute `webAppBase()` per call) rather than the load-time `WEB_APP_BASE`
+// snapshot: a sibling file in the same bun chunk may mutate `NEUTRON_WEB_APP_BASE`.
+import { webAppBase } from '@neutronai/runtime/doc-links.ts'
 import type { IncomingEvent, OutgoingMessage, Topic } from '../../../types.ts'
 import { AppWsAdapter, optionsToInlineChoices } from '../adapter.ts'
 import { InMemoryAppWsSessionRegistry } from '../session-registry.ts'
@@ -513,7 +517,7 @@ describe('AppWsAdapter.send — outgoing → envelope', () => {
       const env = captured[0]
       if (env === undefined || env.type !== 'agent_message') throw new Error('expected agent_message')
       expect(env.body).toBe(
-        `See [plan](${WEB_APP_BASE}/projects/acme/docs?path=p.md).`,
+        `See [plan](${webAppBase()}/projects/acme/docs?path=p.md).`,
       )
     })
 
@@ -536,7 +540,7 @@ describe('AppWsAdapter.send — outgoing → envelope', () => {
       expect(env.doc_refs).toEqual([
         {
           label: 'p',
-          url: `${WEB_APP_BASE}/projects/acme/docs?path=p.md`,
+          url: `${webAppBase()}/projects/acme/docs?path=p.md`,
           project_id: 'acme',
           path: 'p.md',
         },

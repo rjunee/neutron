@@ -26,6 +26,9 @@
 import { join } from 'node:path'
 
 import { SupervisedLoop, type LoopDescriptor } from '@neutronai/loop'
+import { createLogger } from '@neutronai/logger'
+
+const moduleLog = createLogger('chunked-upload-sweeper')
 
 import type { UploadSessionStore } from './upload-session-store.ts'
 
@@ -137,9 +140,7 @@ export class ChunkedUploadSweeper {
     try {
       rows = await this.deps.store.listExpiredUploading(now, batchLimit)
     } catch (err) {
-      console.warn(
-        `[chunked-upload-sweeper] project=${this.deps.project_slug} listExpiredUploading failed (will retry next tick): ${errMsg(err)}`,
-      )
+      moduleLog.warn('list_expired_failed', { project: this.deps.project_slug, error: errMsg(err) })
       return
     }
     if (rows.length === 0) return
@@ -156,22 +157,16 @@ export class ChunkedUploadSweeper {
         // next tick re-try forever.
         const msg = errMsg(err)
         if (!/ENOENT|no such file/i.test(msg)) {
-          console.warn(
-            `[chunked-upload-sweeper] project=${this.deps.project_slug} unlink(${partial}) failed (non-fatal): ${msg}`,
-          )
+          moduleLog.warn('unlink_failed', { project: this.deps.project_slug, path: partial, error: msg })
         }
       }
       try {
         await this.deps.store.markExpired(row.upload_id)
       } catch (err) {
-        console.warn(
-          `[chunked-upload-sweeper] project=${this.deps.project_slug} markExpired(${row.upload_id}) failed (will retry next tick): ${errMsg(err)}`,
-        )
+        moduleLog.warn('mark_expired_failed', { project: this.deps.project_slug, upload_id: row.upload_id, error: errMsg(err) })
       }
     }
-    console.info(
-      `[chunked-upload-sweeper] project=${this.deps.project_slug} swept count=${rows.length}`,
-    )
+    moduleLog.info('swept', { project: this.deps.project_slug, count: rows.length })
   }
 }
 

@@ -49,6 +49,9 @@ import {
 } from '@neutronai/runtime/entity-format.ts'
 import type { EntityKind, SyncHook } from '@neutronai/runtime/entity-writer.ts'
 import { entitySlugify } from '@neutronai/runtime/entity-slug.ts'
+import { createLogger } from '@neutronai/logger'
+
+const writeGbrainLog = createLogger('scribe')
 import type { ExtractedEntity, ExtractedRelation, ScribeExtraction } from './extract.ts'
 
 /**
@@ -287,12 +290,11 @@ export async function writeExtractionToGBrain(
       const sink =
         deps.logFailure ??
         ((e: unknown, ctx: { kind: EntityKind; slug: string }): void => {
-          // eslint-disable-next-line no-console
-          console.warn(
-            `[scribe] writeEntity failed kind=${ctx.kind} slug=${ctx.slug}: ${
-              e instanceof Error ? e.message : String(e)
-            }`,
-          )
+          writeGbrainLog.warn('write_entity_failed', {
+            kind: ctx.kind,
+            slug: ctx.slug,
+            error: e instanceof Error ? e.message : String(e),
+          })
         })
       sink(err, { kind: page.kind, slug: page.slug })
     }

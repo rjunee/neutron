@@ -66,6 +66,9 @@ import {
   readStringArray,
 } from './engine-internals.ts'
 import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
+import { createLogger } from '@neutronai/logger'
+
+const log = createLogger('onboarding-engine')
 
 export async function reconcileSwitchIntentFromFreeform(
   self: EngineInternals,
@@ -1125,16 +1128,18 @@ export async function pollImportRunningAndAdvance(
           })
         }
       }
-      // eslint-disable-next-line no-console
-      console.warn(
-        `[engine] hard-timeout fired job=${job_id} reason=${timeoutDecision.reason} ` +
-          `elapsed=${elapsed_min}m no_progress=${no_progress_min}m window=${window_min}m ` +
-          `in_consolidate=${timeoutDecision.in_consolidate} ` +
-          `chunks_done=${job.pass1_chunks_done}/${job.pass1_chunks_total} ` +
-          `pass1_pct=${(pass1_pct * 100).toFixed(0)}% ` +
-          `dollars_spent=$${job.dollars_spent.toFixed(2)}; ` +
-          `partial=${partialResult !== null ? 'yes' : 'no'}; cancelling runner.`,
-      )
+      log.warn('import_hard_timeout_fired', {
+        job: job_id,
+        reason: timeoutDecision.reason,
+        elapsed_min,
+        no_progress_min,
+        window_min,
+        in_consolidate: timeoutDecision.in_consolidate,
+        chunks_done: `${job.pass1_chunks_done}/${job.pass1_chunks_total}`,
+        pass1_pct: `${(pass1_pct * 100).toFixed(0)}%`,
+        dollars_spent: `$${job.dollars_spent.toFixed(2)}`,
+        partial: partialResult !== null ? 'yes' : 'no',
+      })
       if (partialResult !== null) {
         return await self.advanceFromImportRunningOnComplete(
           input,
@@ -1289,11 +1294,12 @@ export async function pollImportRunningAndAdvance(
           })
         } catch (err) {
           // Best-effort — the next 5 s tick will retry. Don't bubble.
-          console.warn(
-            `[engine.import-progress] event=send-failed project=${input.project_slug} topic=${input.topic_id} job=${job_id}: ${
-              err instanceof Error ? err.message : String(err)
-            }`,
-          )
+          log.warn('import_progress_send_failed', {
+            project: input.project_slug,
+            topic: input.topic_id,
+            job: job_id,
+            error: err instanceof Error ? err.message : String(err),
+          })
         }
       }
       return {
@@ -1486,14 +1492,13 @@ export async function degradeRateLimitExhausted(
       }
     }
     const has_signal = partialResult !== null && importResultHasSignal(partialResult)
-    // eslint-disable-next-line no-console
-    console.warn(
-      `[engine] rate-limit-exhausted give-up job=${job_id} ` +
-        `resume_cycles=${resume_count} ` +
-        `chunks_done=${job.pass1_chunks_done}/${job.pass1_chunks_total} ` +
-        `dollars_spent=$${job.dollars_spent.toFixed(2)}; ` +
-        `salvaged=${has_signal ? 'partial' : 'none'}.`,
-    )
+    log.warn('import_rate_limit_exhausted_give_up', {
+      job: job_id,
+      resume_cycles: resume_count,
+      chunks_done: `${job.pass1_chunks_done}/${job.pass1_chunks_total}`,
+      dollars_spent: `$${job.dollars_spent.toFixed(2)}`,
+      salvaged: has_signal ? 'partial' : 'none',
+    })
     if (has_signal) {
       return await self.advanceFromImportRunningOnComplete(
         input,

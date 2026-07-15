@@ -14,6 +14,7 @@
  */
 
 import { readFileSync } from 'node:fs'
+import { createLogger } from '@neutronai/logger'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -36,6 +37,8 @@ import type { BlendedArchetype } from '../archetypes/compose.ts'
  * levels to repo root → `prompts/onboarding/_download-instructions-*.md`.
  * Tests that exercise this module run against the same on-disk files.
  */
+const log = createLogger('onboarding-phase-prompts')
+
 const HERE_DIR = dirname(fileURLToPath(import.meta.url))
 const DOWNLOAD_INSTRUCTIONS_DIR = resolve(
   HERE_DIR,
@@ -605,13 +608,14 @@ export function buildImportAnalysisPresentedPromptSpec(
   // narrowing what the user can confirm (the exact failure class behind
   // Sam's 3-of-7 shells on 2026-06-09).
   if (result.proposed_projects.length > MAX_ANALYSIS_PROJECTS) {
-    console.warn(
-      `[onboarding] import_analysis_presented: ${result.proposed_projects.length} proposed projects exceeds MAX_ANALYSIS_PROJECTS=${MAX_ANALYSIS_PROJECTS}; ` +
-        `presenting the first ${MAX_ANALYSIS_PROJECTS} (overflow: ${result.proposed_projects
-          .slice(MAX_ANALYSIS_PROJECTS)
-          .map((p) => p.name)
-          .join(', ')})`,
-    )
+    log.warn('import_analysis_presented_overflow', {
+      proposed: result.proposed_projects.length,
+      max: MAX_ANALYSIS_PROJECTS,
+      overflow: result.proposed_projects
+        .slice(MAX_ANALYSIS_PROJECTS)
+        .map((p) => p.name)
+        .join(', '),
+    })
   }
   const projects = capProposedProjects(result.proposed_projects)
   const interests = result.inferred_interests ?? []

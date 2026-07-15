@@ -19,6 +19,10 @@
  *   - `expected_duration_ms` feeds the overrun-cron watchdog (cron mode).
  */
 
+import { createLogger } from '@neutronai/logger'
+
+const log = createLogger('cron-jobs')
+
 export type CronSchedule =
   | { kind: 'oncalendar'; expression: string }
   | { kind: 'interval_ms'; interval_ms: number }
@@ -73,9 +77,7 @@ export class CronJobRegistry {
         listener(def)
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err)
-        console.warn(
-          `[cron-jobs] register-listener threw for job '${def.name}': ${msg}`,
-        )
+        log.warn('register_listener_threw', { job: def.name, error: msg })
       }
     }
   }

@@ -61,6 +61,9 @@ import type {
   DocVersionStore,
 } from '../git/doc-version-store.ts'
 import type { BinaryStore } from '../storage/binary-store.ts'
+import { createLogger } from '@neutronai/logger'
+
+const moduleLog = createLogger('doc-store')
 
 /**
  * Maximum byte size of a markdown file the surface will accept on
@@ -1528,19 +1531,13 @@ function logTreeCap(
   binaryCount: number,
   binaryBudget: number,
 ): void {
-  try {
-    console.warn(
-      `[docs.tree] tree budget exhausted ${JSON.stringify({
-        project_id,
-        markdown_nodes: markdownCount,
-        binary_nodes: binaryCount,
-        binary_budget: binaryBudget,
-        cap: MAX_TREE_NODES,
-      })}`,
-    )
-  } catch {
-    /* ignore */
-  }
+  moduleLog.warn('tree_budget_exhausted', {
+    project_id,
+    markdown_nodes: markdownCount,
+    binary_nodes: binaryCount,
+    binary_budget: binaryBudget,
+    cap: MAX_TREE_NODES,
+  })
 }
 
 function sortTree(nodes: DocTreeNode[]): void {

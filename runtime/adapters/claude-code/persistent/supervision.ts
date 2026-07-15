@@ -25,6 +25,9 @@ import { clearRespawnInFlight, gateFor, getOrSpawnSession } from './spawn.ts'
 import { drainPendingRespawns } from './pending-respawn.ts'
 import { poolKeyFor } from './pool.ts'
 import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
+import { createLogger } from '@neutronai/logger'
+
+const log = createLogger('repl-watchdog')
 
 // ---------------------------------------------------------------------------
 // Sprint-2 supervision actuation: respawn-is-always-resume, double-spawn-safe.
@@ -635,11 +638,11 @@ export function startReplWatchdog(
       if (verdict.warn) {
         const text = buildCrashLoopWarningText(verdict.detection)
         if (wopts.postAlert !== undefined) wopts.postAlert(text)
-        else console.error(text)
+        else log.error('crash_loop_warning', { text })
       }
     } catch (e) {
       // Best-effort: the guard must never block watchdog startup.
-      console.error(`repl-watchdog: restart-rate guard error: ${e}`)
+      log.error('restart_rate_guard_error', { error: String(e) })
     }
   }
 
@@ -649,7 +652,7 @@ export function startReplWatchdog(
   // forget with the default anti-thundering-herd stagger; errors are swallowed so
   // a poisoned entry can't block watchdog startup.
   fireAndForget('supervision.drainPendingRespawns', drainPendingRespawns(options), (e) => {
-    console.error(`repl-watchdog: boot-drain error: ${e}`)
+    log.error('boot_drain_error', { error: String(e) })
   })
 
   // Per-registry tick gate (Argus r3 MINOR 3): scoped to THIS watchdog so a slow
@@ -662,7 +665,7 @@ export function startReplWatchdog(
     // longer than the cadence; double-firing would race the respawn).
     if (!tickGate.claim()) return
     fireAndForget('supervision.runReplWatchdogTick', runReplWatchdogTick(options, wopts)
-      .finally(() => tickGate.release()), (e) => console.error(`repl-watchdog: tick error: ${e}`))
+      .finally(() => tickGate.release()), (e) => log.error('tick_error', { error: String(e) }))
   }
   const handle = setIntervalFn(tick, intervalMs)
 
@@ -674,7 +677,7 @@ export function startReplWatchdog(
   const cwdDriftTick = (): void => {
     if (!cwdDriftGate.claim()) return
     fireAndForget('supervision.runCwdDriftWatchdogTick', runCwdDriftWatchdogTick(options, wopts)
-      .finally(() => cwdDriftGate.release()), (e) => console.error(`cwd-drift-watchdog: tick error: ${e}`))
+      .finally(() => cwdDriftGate.release()), (e) => log.error('cwd_drift_tick_error', { error: String(e) }))
   }
   const cwdDriftHandle = setIntervalFn(cwdDriftTick, cwdDriftIntervalMs)
 
@@ -817,7 +820,7 @@ export function startModelUpdateWatchdogForInstance(
           )
           return outcome.ok
         },
-        log: (msg) => console.log(msg),
+        log: (msg) => log.info(msg),
         ...(options.modelUpgradeIdleQuiesceMs !== undefined ? { idleQuiesceMs: options.modelUpgradeIdleQuiesceMs } : {}),
         ...(options.modelUpgradeJsonlFreshMs !== undefined ? { jsonlFreshMs: options.modelUpgradeJsonlFreshMs } : {}),
         ...(options.modelUpgradePollMs !== undefined ? { pollMs: options.modelUpgradePollMs } : {}),

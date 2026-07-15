@@ -26,6 +26,9 @@ export type {
   TasksCoreOwnerRegistry,
   CoresBackendFactoriesOptions,
 } from './boot-cores-factories-types.ts'
+import { createLogger } from '@neutronai/logger'
+
+const moduleLog = createLogger('cores-factories')
 
 export async function buildCoresBackendFactories(
   opts: CoresBackendFactoriesOptions,
@@ -282,13 +285,14 @@ export async function buildCoresBackendFactories(
       // Tier-1 safe-install shape (install_ok must stay TRUE); we keep the
       // fall-through observable so it never silently masquerades as a real
       // runner.
-      console.warn(
-        '[codegen_core] note: no real `codegenOrchestrator` is wired — the ' +
+      moduleLog.warn('codegen_orchestrator_not_wired', {
+        detail:
+          'note: no real `codegenOrchestrator` is wired — the ' +
           'legacy codegen_* MCP tools dispatch into the SKELETON runner ' +
           '(CodegenNotConfiguredError). This is EXPECTED post Trident-port ' +
           'close-out: `/code <task>` runs on foundational Trident (the ' +
           'CC-subprocess substrate), not the retired Code-Gen Core wrapper.',
-      )
+      })
       const mod = await import('@neutronai/codegen-core')
       const runner = mod.buildSkeletonCodegenRunner()
       return { orchestrator: new mod.CodegenOrchestrator({ runner }) }

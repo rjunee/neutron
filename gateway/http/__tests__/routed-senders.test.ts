@@ -100,14 +100,19 @@ describe('buildRoutedSendButtonPrompt', () => {
     }
     const captured: string[] = []
     const orig_info = console.info
-    console.info = (...args: unknown[]) => {
+    const orig_log = console.log
+    const cap = (...args: unknown[]): void => {
       captured.push(args.map((a) => (typeof a === 'string' ? a : JSON.stringify(a))).join(' '))
     }
+    // The logger's default sink routes info→console.log; capture both.
+    console.info = cap
+    console.log = cap
     try {
       const send = buildRoutedSendButtonPrompt({ webRegistry: reg })
       await send({ project_slug: 'alice', topic_id: 'web:u-leak', prompt: leakyPrompt })
     } finally {
       console.info = orig_info
+      console.log = orig_log
     }
     expect(captured.length).toBeGreaterThan(0)
     const all_logs = captured.join('\n')

@@ -69,6 +69,9 @@ import {
 } from './email-managed-wiring.ts'
 import type { ScribeFanOut } from './scribe-fan-out.ts'
 import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
+import { createLogger } from '@neutronai/logger'
+
+const moduleLog = createLogger('cores-scribe-fanout')
 
 /**
  * The composer-owned scribe fan-out binding (see module docblock §1). Wraps the
@@ -286,6 +289,5 @@ export function mountCoresScribeFanOut(
 }
 
 function defaultLogFailure(msg: string, err: unknown): void {
-  // eslint-disable-next-line no-console
-  console.warn(`[cores-scribe-fanout] ${msg}: ${err instanceof Error ? err.message : String(err)}`)
+  moduleLog.warn(msg, { error: err instanceof Error ? err.message : String(err) })
 }

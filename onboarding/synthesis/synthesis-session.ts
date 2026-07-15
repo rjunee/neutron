@@ -24,6 +24,7 @@
  * the one warm REPL and accumulate context.
  */
 
+import { createLogger } from '@neutronai/logger'
 import type { Substrate } from '@neutronai/runtime/substrate.ts'
 import type { Event } from '@neutronai/runtime/events.ts'
 import { getBestModel } from '@neutronai/runtime/models.ts'
@@ -116,7 +117,7 @@ export interface SynthesisSessionDeps {
   max_tokens?: number
   /** Capture hook — every dispatched prompt (the `/clear`-absence assertion seam). */
   onDispatch?: (prompt: string) => void
-  /** Failure sink. Default console.warn; never throws out of the run. */
+  /** Failure sink. Defaults to the `synthesis-session` logger; never throws out of the run. */
   logFailure?: (stage: string, err: unknown) => void
   /**
    * Progress sink (2026-06-18). Called with `(done, total)` read-pass counts so
@@ -975,7 +976,8 @@ function firstClause(s: string, maxChars: number): string {
   return trimmed.length <= maxChars ? trimmed : `${trimmed.slice(0, maxChars - 3).trimEnd()}...`
 }
 
+const log = createLogger('synthesis-session')
+
 function defaultLogFailure(stage: string, err: unknown): void {
-  // eslint-disable-next-line no-console
-  console.warn(`[synthesis-session] ${stage}: ${err instanceof Error ? err.message : String(err)}`)
+  log.warn('failure', { stage, error: err instanceof Error ? err.message : String(err) })
 }

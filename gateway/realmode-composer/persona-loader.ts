@@ -61,6 +61,9 @@
 import { constants as fsConstants } from 'node:fs'
 import { lstat, open } from 'node:fs/promises'
 import { join } from 'node:path'
+import { createLogger } from '@neutronai/logger'
+
+const moduleLog = createLogger('system-prompt')
 
 /**
  * The three persona files written by `onboarding/persona-gen/compose.ts:commit`
@@ -114,8 +117,17 @@ export class PersonaPromptLoader {
     this.log =
       opts.log ??
       ((level, msg, meta): void => {
-        if (level === 'info') console.info(`[system-prompt] ${msg}`, meta ?? {})
-        else console.warn(`[system-prompt] ${msg}`, meta ?? {})
+        moduleLog[level](
+          msg,
+          meta === undefined
+            ? undefined
+            : Object.fromEntries(
+                Object.entries(meta).map(([k, v]) => [
+                  k,
+                  v === null || ['string', 'number', 'boolean'].includes(typeof v) ? (v as string | number | boolean | null) : JSON.stringify(v),
+                ]),
+              ),
+        )
       })
   }
 

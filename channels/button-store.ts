@@ -18,6 +18,7 @@
 
 import { randomUUID } from 'node:crypto'
 
+import { createLogger } from '@neutronai/logger'
 import type { ProjectDb } from '@neutronai/persistence/index.ts'
 import { parseJsonColumn } from '@neutronai/persistence/index.ts'
 import {
@@ -28,6 +29,8 @@ import {
   type ChannelKindForButton,
   DEFAULT_EXPIRES_IN_MS,
 } from './button-primitive.ts'
+
+const log = createLogger('button-store')
 
 export type ButtonStoreErrorCode =
   | 'prompt_not_found'
@@ -1086,13 +1089,13 @@ function rowToHistoryTurn(row: PromptRow): ChatHistoryTurn {
   // routing `value`. JSON.parse failure falls back to the raw
   // value so we still render *something*; a malformed
   // options_json is a data-corruption bug worth shipping to disk
-  // with a console warning, but it should not blank the chat.
+  // with a logged warning, but it should not blank the chat.
   const value = row.resolution_value
   if (typeof value === 'string' && value.length > 0) {
     let display = value
     try {
       // Corrupt-policy: log + fall through to raw resolution_value. The codec
-      // rethrows the SyntaxError so the existing catch keeps the console.warn.
+      // rethrows the SyntaxError so the existing catch keeps the logged warning.
       const options = parseJsonColumn(row.options_json, { onCorrupt: 'throw' }) as ButtonOption[]
       if (Array.isArray(options)) {
         const match = options.find((opt) => opt?.value === value)
@@ -1105,10 +1108,10 @@ function rowToHistoryTurn(row: PromptRow): ChatHistoryTurn {
         }
       }
     } catch (err) {
-      console.warn(
-        `[button-store] corrupt options_json on prompt_id=${row.prompt_id}; falling back to raw resolution_value:`,
-        err,
-      )
+      log.warn('corrupt options_json — falling back to raw resolution_value', {
+        prompt_id: row.prompt_id,
+        error: err instanceof Error ? err.message : String(err),
+      })
     }
     return { ...base, resolved: true, resolution_text: display }
   }

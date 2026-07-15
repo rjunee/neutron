@@ -21,6 +21,10 @@
  * is the within-process bookkeeping.
  */
 
+import { createLogger } from '@neutronai/logger'
+
+const log = createLogger('process-registry')
+
 export interface ProcessRecord {
   /** Caller-chosen handle. Unique per registry. */
   name: string
@@ -132,7 +136,11 @@ export class ProcessRegistry {
     } catch (err) {
       const code = (err as NodeJS.ErrnoException).code
       if (code !== 'ESRCH' && code !== 'EPERM') {
-        console.error(`process-registry kill(${name}, pid=${r.pid}) failed:`, err)
+        log.error('kill_failed', {
+          name,
+          pid: r.pid,
+          error: err instanceof Error ? (err.stack ?? err.message) : String(err),
+        })
       }
     }
     this.records.delete(name)

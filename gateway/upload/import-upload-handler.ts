@@ -49,6 +49,9 @@ import { parseAnyTopicId } from '@neutronai/channels/topic-id.ts'
 import type { InterviewEngine } from '@neutronai/onboarding/interview/engine.ts'
 import { listEntries } from '@neutronai/onboarding/history-import/zip-reader.ts'
 import { csrfForbiddenResponse, evaluateCsrfOrigin } from './csrf-origin-guard.ts'
+import { createLogger } from '@neutronai/logger'
+
+const moduleLog = createLogger('upload')
 
 /**
  * Upload size cap shared by BOTH the legacy single-shot upload handler
@@ -144,7 +147,7 @@ export function sniffZipSource(buffer: Buffer): UploadSource | null {
 export function resolveEffectiveSource(
   urlSource: UploadSource,
   buffer: Buffer,
-  log: (msg: string) => void = (msg): void => console.info(msg),
+  log: (msg: string) => void = (msg): void => moduleLog.info(msg),
 ): UploadSource {
   const sniffed = sniffZipSource(buffer)
   if (sniffed !== null && sniffed !== urlSource) {
@@ -307,9 +310,7 @@ export async function handleImportUpload(
   //    ride the user's ambient session.
   const csrf = evaluateCsrfOrigin(req)
   if (!csrf.allowed) {
-    console.warn(
-      `[upload] cross-site request rejected: ${csrf.reason} (${csrf.detail})`,
-    )
+    moduleLog.warn('csrf_rejected', { reason: csrf.reason, detail: csrf.detail })
     return csrfForbiddenResponse(csrf)
   }
 
@@ -375,17 +376,13 @@ export async function handleImportUpload(
   try {
     await fsImpl.mkdir(importDir, { recursive: true, mode: 0o700 })
   } catch (err) {
-    console.error(
-      `[upload] project=${ctx.project_slug} source=${source} mkdir failed: ${err instanceof Error ? err.message : String(err)}`,
-    )
+    moduleLog.error('mkdir_failed', { project: ctx.project_slug, source, error: err instanceof Error ? err.message : String(err) })
     return jsonError(500, 'could not create imports directory')
   }
   try {
     await fsImpl.writeFile(destPath, bytes, { mode: 0o600 })
   } catch (err) {
-    console.error(
-      `[upload] project=${ctx.project_slug} source=${source} write failed: ${err instanceof Error ? err.message : String(err)}`,
-    )
+    moduleLog.error('write_failed', { project: ctx.project_slug, source, error: err instanceof Error ? err.message : String(err) })
     return jsonError(500, 'could not write upload to disk')
   }
   try {
@@ -395,13 +392,9 @@ export async function handleImportUpload(
     // not have CAP_CHOWN (dev / single-user runs). Log + continue — the
     // file is still mode 0600 so the only access path is the gateway
     // process's own uid which is what we want anyway.
-    console.warn(
-      `[upload] project=${ctx.project_slug} source=${source} chown to uid=${ctx.uid} gid=${ctx.gid} failed (non-fatal): ${err instanceof Error ? err.message : String(err)}`,
-    )
+    moduleLog.warn('chown_failed', { project: ctx.project_slug, source, uid: ctx.uid, gid: ctx.gid, error: err instanceof Error ? err.message : String(err) })
   }
-  console.info(
-    `[upload] project=${ctx.project_slug} source=${source} bytes=${bytes.length} destination=${destPath}`,
-  )
+  moduleLog.info('written', { project: ctx.project_slug, source, bytes: bytes.length, destination: destPath })
 
   // 8. Notify the engine. The result feeds back into the WebSocket
   //    bridge via the engine's own state-store + button emit path.
@@ -426,9 +419,7 @@ export async function handleImportUpload(
       job_id: typeof job_id === 'string' ? job_id : null,
     })
   } catch (err) {
-    console.error(
-      `[upload] project=${ctx.project_slug} source=${source} engine notify failed: ${err instanceof Error ? err.message : String(err)}`,
-    )
+    moduleLog.error('engine_notify_failed', { project: ctx.project_slug, source, error: err instanceof Error ? err.message : String(err) })
     return jsonError(500, `engine notify failed: ${err instanceof Error ? err.message : 'unknown'}`)
   }
 }

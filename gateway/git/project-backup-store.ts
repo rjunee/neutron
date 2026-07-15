@@ -154,6 +154,25 @@ export type {
   SnapshotFileContent,
   SnapshotFileDiff,
 } from './snapshot-reader.ts'
+import { createLogger } from '@neutronai/logger'
+
+const moduleLog = createLogger('project-backup')
+
+/** Coerce arbitrary log meta to the logger's primitive `LogValue` shape —
+ *  non-primitives are JSON-stringified so the emitted `k=v` line stays single. */
+const coerceLogFields = (
+  fields?: Record<string, unknown>,
+): Record<string, string | number | boolean | null | undefined> | undefined => {
+  if (fields === undefined) return undefined
+  const out: Record<string, string | number | boolean | null | undefined> = {}
+  for (const [k, v] of Object.entries(fields)) {
+    out[k] =
+      v === null || v === undefined || ['string', 'number', 'boolean'].includes(typeof v)
+        ? (v as string | number | boolean | null | undefined)
+        : (() => { try { return JSON.stringify(v) } catch { return String(v) } })()
+  }
+  return out
+}
 export type { RestoreResult } from './restore.ts'
 
 const execFileAsync = promisify(execFile)
@@ -236,11 +255,7 @@ export type ProjectBackupLogger = (
 ) => void
 
 const DEFAULT_LOGGER: ProjectBackupLogger = (event, fields) => {
-  try {
-    console.warn(`[project-backup] ${event} ${JSON.stringify(fields)}`)
-  } catch {
-    console.warn(`[project-backup] ${event}`)
-  }
+  moduleLog.warn(event, coerceLogFields(fields))
 }
 
 export interface ProjectBackupStoreOptions {

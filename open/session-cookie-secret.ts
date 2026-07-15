@@ -52,12 +52,16 @@ import { randomBytes } from 'node:crypto'
 import * as fs from 'node:fs'
 import { join } from 'node:path'
 
+import { createLogger } from '@neutronai/logger'
+
 /**
  * High-entropy floor for a PERSISTED / operator-provided secret. Matches the
  * consumer's documented contract (`gateway/http/cookie-user-claim.ts`: the
  * cookie secret is `>= 16 chars, caller-validated`). A shorter persisted value
  * is invalid → rotate; a shorter operator-set value fails loud at the composer.
  */
+const log = createLogger('open-session-cookie')
+
 export const MIN_COOKIE_SECRET_LEN = 16
 
 /** The on-disk secret file (0600) under NEUTRON_HOME. */
@@ -406,9 +410,9 @@ export function resolvePersistedCookieSecret(neutronHome: string): string {
   const late = readPersistedSecret(path)
   if (late.kind === 'ok') return late.value
 
-  console.warn(
-    `[open] could not converge a persisted session-cookie secret at ${path}; using a ` +
-      `process-ephemeral secret — owner sessions reset on restart.`,
-  )
+  log.warn('cookie_secret_unconverged', {
+    path,
+    note: 'using a process-ephemeral secret — owner sessions reset on restart',
+  })
   return randomBytes(24).toString('hex')
 }

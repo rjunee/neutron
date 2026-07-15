@@ -31,6 +31,25 @@ import type {
   ProjectBackupStore,
 } from './project-backup-store.ts'
 import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
+import { createLogger } from '@neutronai/logger'
+
+const moduleLog = createLogger('project-backup-scheduler')
+
+/** Coerce arbitrary log meta to the logger's primitive `LogValue` shape —
+ *  non-primitives are JSON-stringified so the emitted `k=v` line stays single. */
+const coerceLogFields = (
+  fields?: Record<string, unknown>,
+): Record<string, string | number | boolean | null | undefined> | undefined => {
+  if (fields === undefined) return undefined
+  const out: Record<string, string | number | boolean | null | undefined> = {}
+  for (const [k, v] of Object.entries(fields)) {
+    out[k] =
+      v === null || v === undefined || ['string', 'number', 'boolean'].includes(typeof v)
+        ? (v as string | number | boolean | null | undefined)
+        : (() => { try { return JSON.stringify(v) } catch { return String(v) } })()
+  }
+  return out
+}
 
 /** Default tick interval — every 6 hours. Brief § 0.3 confirms fixed. */
 export const DEFAULT_TICK_INTERVAL_MS = 6 * 60 * 60 * 1000
@@ -123,11 +142,7 @@ export class ProjectBackupScheduler {
     this.logger =
       opts.logger ??
       ((event, fields): void => {
-        try {
-          console.warn(`[project-backup-scheduler] ${event} ${JSON.stringify(fields)}`)
-        } catch {
-          console.warn(`[project-backup-scheduler] ${event}`)
-        }
+        moduleLog.warn(event, coerceLogFields(fields))
       })
     this.pollIntervalMs = opts.pollIntervalMs ?? POLL_INTERVAL_MS
     this.setIntervalFn = opts.setInterval ?? ((h, ms): NodeJS.Timeout => setInterval(h, ms) as unknown as NodeJS.Timeout)

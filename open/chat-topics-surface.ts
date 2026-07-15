@@ -38,9 +38,12 @@
 
 import type { ButtonStore } from '@neutronai/channels/button-store.ts'
 import { webTopicId } from '@neutronai/gateway/http/web-topic-id.ts'
+import { createLogger } from '@neutronai/logger'
 import type { ProjectDb } from '@neutronai/persistence/index.ts'
 
 /** Verified claim shape — matches `chat-topics-surface.ts:UserClaim`. */
+const log = createLogger('open-chat-topics')
+
 export interface OpenUserClaim {
   project_slug: string
   user_id: string
@@ -175,10 +178,11 @@ export function createOpenChatTopicsSurface(
             })
           }
         } catch (err) {
-          console.warn(
-            `[open-chat-topics] project=${opts.project_slug} listTopicsByUser threw — sidebar renders without activity metadata:`,
-            err,
-          )
+          log.warn('list_topics_threw', {
+            project: opts.project_slug,
+            note: 'sidebar renders without activity metadata',
+            error: err instanceof Error ? (err.stack ?? err.message) : String(err),
+          })
         }
       }
 
@@ -194,10 +198,10 @@ export function createOpenChatTopicsSurface(
           )
           .all()
       } catch (err) {
-        console.warn(
-          `[open-chat-topics] project=${opts.project_slug} projects query threw:`,
-          err,
-        )
+        log.warn('projects_query_threw', {
+          project: opts.project_slug,
+          error: err instanceof Error ? (err.stack ?? err.message) : String(err),
+        })
         return jsonError(500, 'internal', 'failed to list projects')
       }
 

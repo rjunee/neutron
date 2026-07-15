@@ -37,6 +37,7 @@
  */
 
 import { execFile } from 'node:child_process'
+import { createLogger } from '@neutronai/logger'
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
@@ -55,6 +56,8 @@ import {
 } from './project-identity.ts'
 
 const execFileAsync = promisify(execFile)
+
+const log = createLogger('project-materializer')
 
 /** Relative path (inside the project repo) of the raw-slices doc. */
 export const TRANSCRIPT_SLICES_RELPATH = join(
@@ -132,7 +135,7 @@ export interface ProjectMaterializerDeps {
   indexer?: ProjectPageIndexFn | null
   /** Test seam — git subprocess runner. Default shells out to `git`. */
   runGit?: (args: string[], cwd: string) => Promise<void>
-  /** Failure sink. Default console.warn. */
+  /** Failure sink. Defaults to the `project-materializer` logger. */
   logFailure?: (stage: string, project_slug: string, err: unknown) => void
 }
 
@@ -186,12 +189,12 @@ export function buildProjectMaterializer(deps: ProjectMaterializerDeps): Project
   const logFailure =
     deps.logFailure ??
     ((stage: string, project_slug: string, err: unknown): void => {
-      // eslint-disable-next-line no-console
-      console.warn(
-        `[project-materializer] project=${deps.project_slug} project=${project_slug} stage=${stage}: ${
-          err instanceof Error ? err.message : String(err)
-        }`,
-      )
+      log.warn('failure', {
+        owner_project: deps.project_slug,
+        project: project_slug,
+        stage,
+        error: err instanceof Error ? err.message : String(err),
+      })
     })
   const runGit = deps.runGit ?? defaultRunGit
 

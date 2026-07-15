@@ -60,6 +60,9 @@ import {
   loadPendingEscalations,
   markEscalationsConsumed,
 } from './escalation-loader.ts'
+import { createLogger } from '@neutronai/logger'
+
+const moduleLog = createLogger('phase-spec-resolver')
 
 /**
  * Back-compat type alias. Older importers may still reference this
@@ -232,9 +235,7 @@ export async function buildPhaseSpecResolver(
   const log_slug = input.log_slug ?? input.internal_handle ?? 'unknown'
 
   if (input.substrate === null) {
-    console.info(
-      `[phase-spec-resolver] project=${log_slug} no Anthropic substrate supplied; LLM path disabled (engine will use static fallback)`,
-    )
+    moduleLog.info('llm_disabled_no_substrate', { project: log_slug })
     return null
   }
 
@@ -322,10 +323,11 @@ export async function buildPhaseSpecResolver(
                   commentStore as CommentStore,
                   currentEscalationProjectId as string,
                 ).catch((err) => {
-                  console.warn(
-                    `[phase-spec-resolver] instance=${log_slug} project=${currentEscalationProjectId} escalation_load_failed:`,
-                    err,
-                  )
+                  moduleLog.warn('escalation_load_failed', {
+                    instance: log_slug,
+                    project: currentEscalationProjectId,
+                    error: err instanceof Error ? err.message : String(err),
+                  })
                   return { rendered: '', consumed_event_ids: [] as string[] }
                 }),
           ])
@@ -370,10 +372,11 @@ export async function buildPhaseSpecResolver(
               currentEscalationProjectId,
               escalation.consumed_event_ids,
             ).catch((err) => {
-              console.warn(
-                `[phase-spec-resolver] instance=${log_slug} project=${currentEscalationProjectId} mark_consumed_failed:`,
-                err,
-              )
+              moduleLog.warn('mark_consumed_failed', {
+                instance: log_slug,
+                project: currentEscalationProjectId,
+                error: err instanceof Error ? err.message : String(err),
+              })
             })
           }
           return result
@@ -477,11 +480,11 @@ async function loadConventionsForResolver(input: {
     const loaded = await loadSkills({ skillsDir })
     return loaded.body
   } catch (err) {
-    console.warn(
-      `[phase-spec-resolver] project=${input.log_slug} skills-loader failed at ${skillsDir}: ${
-        err instanceof Error ? err.message : String(err)
-      } — proceeding without conventions`,
-    )
+    moduleLog.warn('skills_loader_failed', {
+      project: input.log_slug,
+      skills_dir: skillsDir,
+      error: err instanceof Error ? err.message : String(err),
+    })
     return ''
   }
 }

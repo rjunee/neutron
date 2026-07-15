@@ -35,6 +35,9 @@ import {
   type GBrainUpgradeMode,
   type GBrainUpgradeNotice,
 } from './version-notice.ts'
+import { createLogger } from '@neutronai/logger'
+
+const log = createLogger('gbrain-stdio-client')
 
 export interface GBrainStdioMcpClientOptions {
   /** Binary to spawn. Default `gbrain` (resolved from PATH / global install). */
@@ -123,11 +126,9 @@ export async function composeGbrainChildEnv(
       // keyless-disable override as the `off`/unreachable/width-drop gate so the
       // serve child truly never embeds this connect.
       Object.assign(env, keylessDisableEmbeddingEnv())
-      console.warn(
-        '[gbrain-stdio-client] dynamic env resolver threw — forcing keyword+graph ' +
-          '(embedding disabled for this connect): ' +
-          (err instanceof Error ? err.message : String(err)),
-      )
+      log.warn('dynamic_env_resolver_threw_forcing_keyword_graph', {
+        error: err instanceof Error ? err.message : String(err),
+      })
     }
   }
   if (opts.brainId !== undefined) env['GBRAIN_BRAIN_ID'] = opts.brainId
@@ -184,10 +185,9 @@ export class GBrainStdioMcpClient implements McpClient {
         try {
           await this.opts.ensureInitialized()
         } catch (err) {
-          console.warn(
-            '[gbrain-stdio-client] init guard threw (continuing fail-soft): ' +
-              (err instanceof Error ? err.message : String(err)),
-          )
+          log.warn('init_guard_threw_continuing_fail_soft', {
+            error: err instanceof Error ? err.message : String(err),
+          })
         }
       }
       const env = await composeGbrainChildEnv(this.opts, getDefaultEnvironment())
@@ -214,12 +214,12 @@ export class GBrainStdioMcpClient implements McpClient {
         if (isGbrainBinaryMissingError(err)) {
           const detail = err instanceof Error ? err.message : String(err)
           this.unavailableDetail = detail
-          console.error(
-            `[gbrain-stdio-client] '${this.opts.command ?? 'gbrain'}' could not be spawned (${detail}) — ` +
-              'GBrain memory sync DISABLED for this process. Entity pages remain on disk; ' +
-              'install gbrain (bun install -g github:garrytan/gbrain) and restart the owner to re-enable. ' +
-              'Further calls fail fast without re-spawning.',
-          )
+          const command = this.opts.command ?? 'gbrain'
+          log.once(`binary-missing:${command}`).error('binary_missing_sync_disabled', {
+            command,
+            detail,
+            remedy: 'install gbrain (bun install -g github:garrytan/gbrain) and restart the owner to re-enable',
+          })
           throw new GBrainUnavailableError(detail)
         }
         throw err

@@ -115,6 +115,12 @@ import {
 import { WatchdogSupervisor } from '@neutronai/watchdog/supervisor.ts'
 import { type GatewayModule } from '../module-graph.ts'
 import type { CompositionInput } from './input/composition-input.ts'
+import { createLogger } from '@neutronai/logger'
+
+const moduleLog = createLogger('core-modules')
+// Distinct subsystem tag for the tasks-composer wiring warnings (a boot-time
+// guardrail test pins the `[tasks-composer]` prefix in the log line).
+const tasksComposerLog = createLogger('tasks-composer')
 
 /**
  * Module objects produced by `buildCoreModules`. The caller registers
@@ -757,9 +763,12 @@ export function buildCoreModules(
           installArgs.hardFailFailureRatio = coresCfg.hardFailFailureRatio
         }
         const result = await installBundledCores(installArgs)
-        console.log(
-          `[cores] project=${input.project_slug} discovered=${result.discovered} installed=${result.installed.size} failed=${result.failures.length}`,
-        )
+        moduleLog.info('cores_install_summary', {
+          project: input.project_slug,
+          discovered: result.discovered,
+          installed: result.installed.size,
+          failed: result.failures.length,
+        })
         return {
           registry: result.registry,
           installed: result.installed,
@@ -805,19 +814,17 @@ export function buildCoreModules(
         tasksCfg.enable_reminder_link === true ||
         tasksCfg.projection !== undefined
       if (featuresEnabled && tasksCfg.store === undefined) {
-        console.warn(
-          `[tasks-composer] project=${input.project_slug} WARNING: ` +
-            `subscriber feature(s) enabled (focus_score_cron=` +
-            `${tasksCfg.enable_focus_score_cron === true} ` +
-            `reminder_link=${tasksCfg.enable_reminder_link === true} ` +
-            `projection=${tasksCfg.projection !== undefined}) but ` +
-            `tasksCfg.store is undefined. The fallback store will not ` +
-            `be shared with HTTP surfaces / Tasks-Core, so writes ` +
-            `through those surfaces will NOT fire subscribers. ` +
-            `Thread a canonical TaskStore via composition.tasks.store ` +
-            `+ buildCoresBackendFactories({ canonicalTaskStore }) — ` +
-            `see Argus r2 BLOCKING #2 (PR #221, 2026-05-20).`,
-        )
+        tasksComposerLog.warn('tasks_store_undefined_with_subscribers', {
+          project: input.project_slug,
+          focus_score_cron: tasksCfg.enable_focus_score_cron === true,
+          reminder_link: tasksCfg.enable_reminder_link === true,
+          projection: tasksCfg.projection !== undefined,
+          detail:
+            'subscriber feature(s) enabled but tasksCfg.store is undefined. The fallback store will ' +
+            'not be shared with HTTP surfaces / Tasks-Core, so writes through those surfaces will NOT ' +
+            'fire subscribers. Thread a canonical TaskStore via composition.tasks.store + ' +
+            'buildCoresBackendFactories({ canonicalTaskStore }) — see Argus r2 BLOCKING #2 (PR #221, 2026-05-20).',
+        })
       }
       const store = tasksCfg.store ?? new TaskStore(input.db)
       const remindersDeps = ctx.graph.get<{ store: ReminderStore }>('reminders')

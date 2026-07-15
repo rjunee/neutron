@@ -32,8 +32,9 @@ import {
 import { buildReflectionContext } from './context.ts'
 import type { Correction, DiaryEntry } from './types.ts'
 import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
+import { createLogger } from '@neutronai/logger'
 
-const LOG_TAG = '[reflection]'
+const log = createLogger('reflection')
 
 /** Default watchdog for one correction-judge dispatch. */
 const DEFAULT_WATCHDOG_MS = 60_000
@@ -87,7 +88,7 @@ export function createReflection(deps: CreateReflectionDeps): Reflection {
       try {
         return buildReflectionContext({ ownerDataDir })
       } catch (err) {
-        console.warn(`${LOG_TAG} event=load_context_failed err=${errMsg(err)}`)
+        log.warn('load_context_failed', { err: errMsg(err) })
         return null
       }
     },
@@ -101,7 +102,7 @@ export function createReflection(deps: CreateReflectionDeps): Reflection {
       if (!looksLikeCorrection(turn.user_text)) return
       const substrate = deps.substrate
       fireAndForget('index.runDetection', runDetection(substrate), (err) => {
-        console.warn(`${LOG_TAG} event=on_turn_complete_failed err=${errMsg(err)}`)
+        log.warn('on_turn_complete_failed', { err: errMsg(err) })
       })
 
       async function runDetection(sub: Substrate): Promise<void> {
@@ -142,11 +143,9 @@ export function createReflection(deps: CreateReflectionDeps): Reflection {
             observed_at,
           })
         } catch (err) {
-          console.warn(`${LOG_TAG} event=diary_breadcrumb_failed err=${errMsg(err)}`)
+          log.warn('diary_breadcrumb_failed', { err: errMsg(err) })
         }
-        console.info(
-          `${LOG_TAG} event=correction_logged id=${correction.id} scope=${scope}`,
-        )
+        log.info('correction_logged', { id: correction.id, scope })
       }
     },
 

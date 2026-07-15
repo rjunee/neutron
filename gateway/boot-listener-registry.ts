@@ -15,6 +15,9 @@
 
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
+import { createLogger } from '@neutronai/logger'
+
+const moduleLog = createLogger('gateway-boot')
 
 /**
  * Default upstream port used by the per-instance systemd unit when no
@@ -55,9 +58,10 @@ export function resolveRegistryDbPath(env: NodeJS.ProcessEnv = process.env): str
   if (legacy !== undefined && legacy !== '') {
     if (!warnedLegacyRegistryDbPathRw) {
       warnedLegacyRegistryDbPathRw = true
-      console.warn(
-        '[gateway] NEUTRON_REGISTRY_DB_PATH unset; using legacy NEUTRON_REGISTRY_DB_PATH_RW. Re-render this instance unit via `owner-create.sh` to drop the legacy var.',
-      )
+      moduleLog.warn('legacy_registry_db_path', {
+        detail:
+          'NEUTRON_REGISTRY_DB_PATH unset; using legacy NEUTRON_REGISTRY_DB_PATH_RW. Re-render this instance unit via `owner-create.sh` to drop the legacy var.',
+      })
     }
     return legacy
   }
@@ -141,7 +145,7 @@ export function resolveOwnerRegistryRow(input: {
   const byHandle = input.registry.getByInternalHandle(input.requested_slug)
   if (byHandle !== undefined) {
     const canonical = byHandle.url_slug
-    const warn = input.warn ?? ((m: string) => console.warn(m))
+    const warn = input.warn ?? ((m: string) => moduleLog.warn(m))
     warn(
       `[gateway] project_slug arg was internal_handle, resolved to url_slug=${canonical}; the systemd unit's NEUTRON_INSTANCE_SLUG env / .url_slug file should be regenerated to match — see scripts/install/regenerate-owner-slug-dropin.sh`,
     )
@@ -261,7 +265,7 @@ export async function bindHttpListener(opts: {
   const intervalMs = opts.retryIntervalMs ?? DEFAULT_PORT_BIND_RETRY_INTERVAL_MS
   const sleep = opts.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)))
   const now = opts.now ?? ((): number => Date.now())
-  const warn = opts.warn ?? ((m: string): void => console.warn(m))
+  const warn = opts.warn ?? ((m: string): void => moduleLog.warn(m))
 
   const startedAt = now()
   let attempts = 0

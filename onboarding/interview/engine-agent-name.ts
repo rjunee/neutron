@@ -19,6 +19,7 @@
  * This is a PURE MOVE — no logic, control-flow, or comment changes.
  */
 
+import { createLogger } from '@neutronai/logger'
 import { type ButtonChoice } from '@neutronai/channels/button-primitive.ts'
 import { isLegalTransition, TERMINAL_PHASES } from './phase.ts'
 import { validateAgentName } from './phase-prompts.ts'
@@ -44,6 +45,8 @@ import {
 } from './engine-internals.ts'
 import { autoConfirmProjectsProposedAndAdvance } from './engine-projects-proposed.ts'
 import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
+
+const log = createLogger('onboarding-engine')
 
 /**
  * P2 v2 § 3.10 / S7 — `agent_name_chosen` handler. Captures the
@@ -189,10 +192,10 @@ export async function consumeAgentNameChosenChoice(
             agent_name,
           })
         } catch (err) {
-          console.warn(
-            `[engine] personaSync.recordAgentName failed for project=${input.project_slug}:`,
-            err instanceof Error ? err.message : err,
-          )
+          log.warn('persona_sync_record_agent_name_failed', {
+            project: input.project_slug,
+            error: err instanceof Error ? err.message : String(err),
+          })
         }
       }
       if (!isLegalTransition('agent_name_chosen', 'projects_proposed', 'open')) {
@@ -260,10 +263,10 @@ export async function consumeAgentNameChosenChoice(
           agent_name,
         })
       } catch (err) {
-        console.warn(
-          `[engine] personaSync.recordAgentName failed for project=${input.project_slug}:`,
-          err instanceof Error ? err.message : err,
-        )
+        log.warn('persona_sync_record_agent_name_failed', {
+          project: input.project_slug,
+          error: err instanceof Error ? err.message : String(err),
+        })
       }
     }
 
@@ -370,9 +373,10 @@ export function getOrStartCharacterSuggestions(
       try {
         return await suggester.generate(input)
       } catch (err) {
-        console.warn(
-          `[engine] personalityCharacterSuggester.generate failed for project=${project_slug}: ${err instanceof Error ? err.message : err}`,
-        )
+        log.warn('character_suggester_generate_failed', {
+          project: project_slug,
+          error: err instanceof Error ? err.message : String(err),
+        })
         return {
           suggestions: cloneCharacterSuggestions(
             buildDiverseCharacterFallback(project_slug),
@@ -445,9 +449,10 @@ export function getOrStartAgentNameSuggestions(
       try {
         return await suggester.generate(input)
       } catch (err) {
-        console.warn(
-          `[engine] agentNameSuggester.generate failed for project=${project_slug}: ${err instanceof Error ? err.message : err}`,
-        )
+        log.warn('agent_name_suggester_generate_failed', {
+          project: project_slug,
+          error: err instanceof Error ? err.message : String(err),
+        })
         return {
           suggestions: cloneAgentNameSuggestions(
             buildDiverseAgentNameFallback(project_slug),

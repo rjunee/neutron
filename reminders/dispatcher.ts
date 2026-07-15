@@ -30,6 +30,9 @@ import { classifyReminderMessage, literalFallback, type ReminderShape } from './
 import { buildReminderPrompt } from './prompt.ts'
 import type { Reminder } from './store.ts'
 import type { ReminderDispatcher } from './tick.ts'
+import { createLogger } from '@neutronai/logger'
+
+const dispatcherLog = createLogger('reminder-dispatcher')
 
 /** Where a composed reminder body is posted. */
 export interface ReminderOutboundInput {
@@ -181,7 +184,7 @@ export function buildReminderDispatcher(input: BuildReminderDispatcherInput): Re
   const max_tokens = input.max_tokens ?? DEFAULT_MAX_TOKENS
   const general_topic_id = input.general_topic_id ?? 'general'
   const now = input.now ?? ((): number => Date.now())
-  const log = input.log ?? ((): void => undefined)
+  const log = input.log ?? ((msg: string): void => dispatcherLog.debug(msg))
   const toolNames = input.tool_names ?? DEFAULT_TOOL_NAMES
 
   // The REPL `--tools` allow-list only consumes `t.name`; the rest is contract

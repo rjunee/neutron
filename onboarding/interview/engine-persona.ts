@@ -11,6 +11,7 @@
  * This is a PURE MOVE — no logic, control-flow, or comment changes.
  */
 
+import { createLogger } from '@neutronai/logger'
 import type { ButtonChoice } from '@neutronai/channels/button-primitive.ts'
 import { isLegalTransition, type OnboardingPhase } from './phase.ts'
 import {
@@ -48,6 +49,8 @@ import {
   stubDraft,
 } from './engine-internals.ts'
 import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
+
+const log = createLogger('onboarding-engine')
 
 /**
  * P2 v2 § 0 locked decision #9 + § 3.9 + § 4.1 — sole handler for the
@@ -281,10 +284,10 @@ export async function consumePersonalityOfferedChoice(
           agent_personality,
         })
       } catch (err) {
-        console.warn(
-          `[engine] personaSync.recordAgentPersonality failed for project=${input.project_slug}:`,
-          err instanceof Error ? err.message : err,
-        )
+        log.warn('persona_sync_record_agent_personality_failed', {
+          project: input.project_slug,
+          error: err instanceof Error ? err.message : String(err),
+        })
       }
     }
 

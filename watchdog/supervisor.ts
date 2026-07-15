@@ -17,7 +17,10 @@ import type {
   WatchdogNotifier,
 } from './types.ts'
 import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
+import { createLogger } from '@neutronai/logger'
 import type { LoopDescriptor } from '@neutronai/loop'
+
+const log = createLogger('watchdog-supervisor')
 
 export interface SupervisorOptions {
   store: AlertStore
@@ -154,7 +157,10 @@ export class WatchdogSupervisor {
           alerts = await detector.detect()
         } catch (err) {
           tickError = err
-          console.error(`watchdog detector ${detector.kind} failed:`, err)
+          log.error('detector_failed', {
+            kind: detector.kind,
+            error: err instanceof Error ? (err.stack ?? err.message) : String(err),
+          })
           continue
         }
         for (const alert of alerts) {
@@ -168,11 +174,10 @@ export class WatchdogSupervisor {
               this.deliveredIds.delete(alert.id) // latched → `open` suppresses henceforth
             } catch (err) {
               tickError = err
-              console.error(
-                `watchdog supervisor: commit ${alert.id} threw AGAIN — notification already ` +
-                  `delivered; will NOT re-notify, retrying commit next tick:`,
-                err,
-              )
+              log.error('commit_threw_again', {
+                alert: alert.id,
+                error: err instanceof Error ? (err.stack ?? err.message) : String(err),
+              })
             }
             continue
           }
@@ -182,11 +187,10 @@ export class WatchdogSupervisor {
             await this.store.record(alert)
           } catch (err) {
             tickError = err
-            console.error(
-              `watchdog supervisor: alert delivery FAILING — persist ${alert.id} threw ` +
-                `(will retry next tick):`,
-              err,
-            )
+            log.error('persist_failing', {
+              alert: alert.id,
+              error: err instanceof Error ? (err.stack ?? err.message) : String(err),
+            })
             continue // do NOT commit
           }
           // (2) Notify. On failure, still do NOT commit — the idempotent record
@@ -197,11 +201,10 @@ export class WatchdogSupervisor {
           } catch (err) {
             notified = false
             tickError = err
-            console.error(
-              `watchdog supervisor: alert delivery FAILING — notify ${alert.id} threw ` +
-                `(will retry next tick):`,
-              err,
-            )
+            log.error('notify_failing', {
+              alert: alert.id,
+              error: err instanceof Error ? (err.stack ?? err.message) : String(err),
+            })
           }
           // (3) COMMIT the dedup ONLY after persist AND notify both succeeded.
           if (notified) {
@@ -214,11 +217,10 @@ export class WatchdogSupervisor {
               this.deliveredIds.delete(alert.id) // committed cleanly → drop the guard entry
             } catch (err) {
               tickError = err
-              console.error(
-                `watchdog supervisor: commit ${alert.id} threw — notification already ` +
-                  `delivered; will NOT re-notify, retrying commit next tick:`,
-                err,
-              )
+              log.error('commit_threw', {
+                alert: alert.id,
+                error: err instanceof Error ? (err.stack ?? err.message) : String(err),
+              })
             }
           }
         }

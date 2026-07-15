@@ -23,6 +23,7 @@
  */
 
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
+import { createLogger } from '@neutronai/logger'
 import { join } from 'node:path'
 import type { RawTranscriptStore } from './raw-store.ts'
 import { rawFilenameFor } from './raw-store.ts'
@@ -200,11 +201,12 @@ function firstSentence(s: string, maxChars: number): string {
   return sentence.length <= maxChars ? sentence : `${sentence.slice(0, maxChars - 3).trimEnd()}...`
 }
 
+const log = createLogger('seed-writer')
+
 function defaultLogFailure(project_slug: string, stage: string, err: unknown): void {
-  // eslint-disable-next-line no-console
-  console.warn(
-    `[seed-writer] project=${project_slug} stage=${stage}: ${
-      err instanceof Error ? err.message : String(err)
-    }`,
-  )
+  log.warn('failure', {
+    project: project_slug,
+    stage,
+    error: err instanceof Error ? err.message : String(err),
+  })
 }

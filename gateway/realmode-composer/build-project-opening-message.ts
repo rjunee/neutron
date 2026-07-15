@@ -47,6 +47,9 @@
  */
 
 import { getBestModel } from '@neutronai/runtime/models.ts'
+import { createLogger } from '@neutronai/logger'
+
+const moduleLog = createLogger('project-opening-composer')
 import type { AnthropicMessagesClient } from '@neutronai/onboarding/interview/anthropic-client.ts'
 import {
   OPENING_MESSAGE_MAX_CHARS,
@@ -138,18 +141,24 @@ export function buildProjectOpeningMessageComposer(
       text = response.content.map((b) => b.text).join('').trim()
     } catch (err) {
       const reason = err instanceof Error ? err.message : String(err ?? 'unknown')
-      console.warn(
-        `[project-opening-composer] LLM call failed for instance=${input.project_slug} user=${input.user_id} project="${input.name}" model=${model} reason=${reason} -- falling back to deterministic prose`,
-      )
+      moduleLog.warn('llm_call_failed_fallback_deterministic', {
+        instance: input.project_slug,
+        user: input.user_id,
+        project: input.name,
+        model,
+        reason,
+      })
       return buildDeterministicProjectOpening(input.name, input.imported_project, input.project_docs)
     } finally {
       clearTimeout(timeoutHandle)
     }
     const body = extractOpeningBody(text)
     if (body === null) {
-      console.warn(
-        `[project-opening-composer] LLM returned unusable body for instance=${input.project_slug} user=${input.user_id} project="${input.name}" -- falling back to deterministic prose`,
-      )
+      moduleLog.warn('llm_unusable_body_fallback_deterministic', {
+        instance: input.project_slug,
+        user: input.user_id,
+        project: input.name,
+      })
       return buildDeterministicProjectOpening(input.name, input.imported_project, input.project_docs)
     }
     return { body }

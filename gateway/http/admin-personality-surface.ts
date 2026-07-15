@@ -96,6 +96,9 @@ import { dirname, join } from 'node:path'
 import type { AppWsAuthResolver } from '@neutronai/channels/adapters/app-ws/auth.ts'
 import { jsonError, jsonOk, jsonResponse, ownerSlugMismatch, readJsonBody, resolveBearer } from './surface-kit.ts'
 import { createKeyedMutex, type KeyedMutex } from './keyed-mutex.ts'
+import { createLogger } from '@neutronai/logger'
+
+const moduleLog = createLogger('admin-personality')
 
 /** The three persona files committed by `onboarding/persona-gen/compose.ts:commit`. */
 export const ALLOWED_PERSONA_FILENAMES = [
@@ -459,7 +462,7 @@ async function handlePatchFile(input: PatchFileInput): Promise<Response> {
       try {
         input.onReload?.(filename)
       } catch (err) {
-        console.warn(`[admin-personality] onReload(${filename}) hook threw`, err)
+        moduleLog.warn('onreload_hook_threw', { filename, error: err instanceof Error ? err.message : String(err) })
       }
       return jsonOk({ mtime: new_mtime })
     } finally {
@@ -516,12 +519,12 @@ async function runRestartCriticalSection(input: RestartInput): Promise<Response>
       try {
         input.onReload?.(filename)
       } catch (err) {
-        console.warn(`[admin-personality] onReload(${filename}) hook threw during restart`, err)
+        moduleLog.warn('onreload_hook_threw_during_restart', { filename, error: err instanceof Error ? err.message : String(err) })
       }
     } catch (err: unknown) {
       const code = (err as NodeJS.ErrnoException | undefined)?.code ?? 'unknown'
       if (code === 'ENOENT') continue // best-effort: missing file is fine
-      console.warn(`[admin-personality] unlink(${filename}) failed`, err)
+      moduleLog.warn('unlink_failed', { filename, error: err instanceof Error ? err.message : String(err) })
       files_failed.push({
         filename,
         code,
@@ -535,7 +538,7 @@ async function runRestartCriticalSection(input: RestartInput): Promise<Response>
       await input.onRestartFromScratch()
       onboarding_reset = true
     } catch (err) {
-      console.warn(`[admin-personality] onRestartFromScratch hook threw`, err)
+      moduleLog.warn('onrestartfromscratch_hook_threw', { error: err instanceof Error ? err.message : String(err) })
     }
   }
   // If any file failed to delete, return 207 (partial success) so the

@@ -27,6 +27,9 @@ import { ApiKeyStore } from '@neutronai/auth/api-key-store.ts'
 import { SecretsStore } from '@neutronai/auth/secrets-store.ts'
 import { ONBOARDING_OPENAI_LABEL } from '@neutronai/onboarding/optional-keys.ts'
 import type { ProjectDb } from '@neutronai/persistence/index.ts'
+import { createLogger } from '@neutronai/logger'
+
+const moduleLog = createLogger('gbrain-memory')
 
 export async function resolveOnboardingOpenAiKey(input: {
   db: ProjectDb
@@ -48,10 +51,10 @@ export async function resolveOnboardingOpenAiKey(input: {
       })) ?? undefined
     )
   } catch (err) {
-    console.warn(
-      `[gbrain-memory] project=${input.project_slug ?? input.internal_handle} could not resolve ` +
-        `onboarding OpenAI key (continuing keyword+graph): ${err instanceof Error ? err.message : String(err)}`,
-    )
+    moduleLog.warn('onboarding_openai_key_unresolved', {
+      project: input.project_slug ?? input.internal_handle,
+      error: err instanceof Error ? err.message : String(err),
+    })
     return undefined
   }
 }
