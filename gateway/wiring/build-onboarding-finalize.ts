@@ -260,21 +260,28 @@ export function buildOnboardingFinalize(deps: OnboardingFinalizeDeps): Onboardin
       let effectiveState = input.state
       try {
         const live = await deps.stateStore.get(deps.project_slug, input.user_id)
-        if (live !== null) {
-          if (!isFinalizablePhase(live.phase)) {
-            // Already terminal, or transitioned to a live-import phase since the caller's
-            // check — never finalize on top of either. Abort; a later trigger recovers.
-            log('info', 'finalize: phase not finalizable; no-op', {
-              user_id: input.user_id,
-              phase: live.phase,
-            })
-            return
-          }
-          effectiveState = live
+        if (live === null) {
+          // A SUCCESSFUL read that finds NO row: the durable row was deleted / reset. Do
+          // NOT finalize a ghost from a stale caller snapshot (that would commit persona +
+          // create projects for a row that no longer exists) — abort (Codex F8 r11). This
+          // is distinct from a read THROW (handled below), where we couldn't read at all
+          // and the caller snapshot is the best available basis.
+          log('info', 'finalize: durable row absent; nothing to finalize', { user_id: input.user_id })
+          return
         }
+        if (!isFinalizablePhase(live.phase)) {
+          // Already terminal, or transitioned to a live-import phase since the caller's
+          // check — never finalize on top of either. Abort; a later trigger recovers.
+          log('info', 'finalize: phase not finalizable; no-op', {
+            user_id: input.user_id,
+            phase: live.phase,
+          })
+          return
+        }
+        effectiveState = live
       } catch (err) {
-        // A state read failure must not strand the user — fall through with the
-        // passed-in snapshot; the terminal upsert below re-asserts the phase.
+        // A state read THROW (not a null result) must not strand the user — fall through
+        // with the passed-in snapshot; the terminal CAS still guards the real phase/state.
         log('warn', 'finalize: state read failed; using caller snapshot', { err: errStr(err) })
       }
 
@@ -312,6 +319,11 @@ export function buildOnboardingFinalize(deps: OnboardingFinalizeDeps): Onboardin
       // materialized: the projects that actually landed (created/existing, not the
       // soft-deleted skips) — the per-project opening step below seeds each one's chat.
       let materialized: MaterializedProject[] = []
+      // Every project id THIS run materialized across ALL passes — so that if a project an
+      // earlier (stale) pass created is DROPPED by a later pass (removed from
+      // primary_projects / added to dropped_projects), we can reconcile it away after
+      // completion instead of leaving a stray live row (Codex F8 r8/r11).
+      const materializedIdsAllPasses = new Set<string>()
       const MAX_FINALIZE_PASSES = 5
       let completed = false
       for (let pass = 0; pass < MAX_FINALIZE_PASSES && !completed; pass++) {
@@ -320,6 +332,7 @@ export function buildOnboardingFinalize(deps: OnboardingFinalizeDeps): Onboardin
         // (3) Projects — DB rows + topic bindings + on-disk materialization from workState.
         import_result = deriveImportResult(workState) ?? input.import_result ?? null
         materialized = await materializeProjects(deps, workState, import_result, now, log)
+        for (const m of materialized) materializedIdsAllPasses.add(m.project_id)
 
         // (4) ATOMIC terminal write — complete IFF nothing changed since we read workState.
         let casOk: boolean
@@ -383,6 +396,30 @@ export function buildOnboardingFinalize(deps: OnboardingFinalizeDeps): Onboardin
           user_id: input.user_id,
         })
         return
+      }
+
+      // (4b) RECONCILE REMOVALS. The CAS committed against the FINAL workState, whose
+      // `materialized` set is authoritative. If an earlier (stale) pass created a project
+      // that the final state DROPPED (removed from primary_projects / listed in
+      // dropped_projects), its live row would linger. Soft-delete every id THIS run
+      // materialized across all passes that is NOT in the final set (Codex F8 r11). Runs
+      // only after a successful atomic completion, so it can never race the CAS. Best-
+      // effort + idempotent (guarded on `deleted_at IS NULL`); a failure never un-completes.
+      const finalIds = new Set(materialized.map((m) => m.project_id))
+      for (const id of materializedIdsAllPasses) {
+        if (finalIds.has(id)) continue
+        try {
+          await deps.db.run(
+            `UPDATE projects SET deleted_at = ?, updated_at = ? WHERE id = ? AND deleted_at IS NULL`,
+            [now(), now(), id],
+          )
+          log('info', 'finalize: reconciled a dropped project (soft-deleted a stale row)', {
+            user_id: input.user_id,
+            project_id: id,
+          })
+        } catch (err) {
+          log('warn', 'finalize: dropped-project reconcile failed', { project_id: id, err: errStr(err) })
+        }
       }
 
       // (5) Live rail refresh.

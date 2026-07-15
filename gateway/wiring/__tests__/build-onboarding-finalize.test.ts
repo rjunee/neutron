@@ -332,6 +332,82 @@ test('finalize NEVER falsely completes under continuous mid-run churn — the CA
   expect(h.onboardingCompleted.filter((u) => u === USER_ID)).toHaveLength(0)
 })
 
+test('finalize ABORTS on a deleted durable row (successful null read) — no persona/project side effects (F8 r11)', async () => {
+  const h = makeHarness()
+  const seeded = await h.stateStore.upsert({
+    project_slug: PROJECT_SLUG,
+    user_id: USER_ID,
+    phase: 'persona_reviewed',
+    phase_state_patch: { user_first_name: 'Sam', agent_name: 'Atlas', primary_projects: ['Alpha'] },
+  })
+  // The authoritative durable row is deleted AFTER the caller captured its snapshot.
+  await h.stateStore.delete(PROJECT_SLUG, USER_ID)
+
+  let composed = 0
+  const persona: PersonaComposerLike = {
+    async compose() { composed += 1; return { draft_id: 'x', status: 'composed' } },
+    async commit() { return { committed_at: 0, git_sha: null, paths: [] } },
+  }
+  const finalizer = buildOnboardingFinalize({ ...h.deps, personaComposer: persona })
+  await finalizer.finalize({ user_id: USER_ID, topic_id: TOPIC_ID, state: seeded })
+
+  // A successful null read aborts BEFORE any side effect: no persona composed, no project
+  // rows created, no completion signal, and no ghost row recreated.
+  expect(composed).toBe(0)
+  expect((h.db.raw().query('SELECT COUNT(*) AS n FROM projects').get() as { n: number }).n).toBe(0)
+  expect(h.onboardingCompleted).toEqual([])
+  expect(await h.stateStore.get(PROJECT_SLUG, USER_ID)).toBeNull()
+})
+
+test('finalize RECONCILES a project dropped mid-run — soft-deletes the stale row an earlier pass created (F8 r11)', async () => {
+  const h = makeHarness()
+  const seeded = await h.stateStore.upsert({
+    project_slug: PROJECT_SLUG,
+    user_id: USER_ID,
+    phase: 'persona_reviewed',
+    phase_state_patch: { user_first_name: 'Sam', agent_name: 'Atlas', primary_projects: ['Alpha'] },
+  })
+
+  // commit() (before the terminal CAS) DROPS Alpha and switches to Beta — but only AFTER
+  // pass 0 has already materialized Alpha from the stale [Alpha] snapshot. The terminal CAS
+  // then fails (state changed), pass 1 runs on [Beta] and completes, and the post-completion
+  // reconcile must soft-delete Alpha's now-orphaned live row.
+  let mutated = false
+  const persona: PersonaComposerLike = {
+    async compose() { return { draft_id: 'x', status: 'composed' } },
+    async commit() {
+      if (!mutated) {
+        mutated = true
+        await h.stateStore.upsert({
+          project_slug: PROJECT_SLUG,
+          user_id: USER_ID,
+          phase: 'persona_reviewed',
+          phase_state_patch: { primary_projects: ['Beta'], dropped_projects: ['Alpha'] },
+        })
+      }
+      return { committed_at: 0, git_sha: null, paths: [] }
+    },
+  }
+  const finalizer = buildOnboardingFinalize({ ...h.deps, personaComposer: persona })
+  await finalizer.finalize({ user_id: USER_ID, topic_id: TOPIC_ID, state: seeded })
+
+  expect((await h.stateStore.get(PROJECT_SLUG, USER_ID))?.phase).toBe('completed')
+  // Beta is live; Alpha (materialized by the stale pass 0) is reconciled away.
+  const live = (
+    h.db.raw().query('SELECT name FROM projects WHERE deleted_at IS NULL ORDER BY name').all() as {
+      name: string
+    }[]
+  ).map((r) => r.name)
+  expect(live).toContain('Beta')
+  expect(live).not.toContain('Alpha')
+  // Alpha's row still exists but is soft-deleted.
+  const alpha = h.db
+    .raw()
+    .query('SELECT deleted_at FROM projects WHERE id = ?')
+    .get(slugifyProjectId('Alpha')) as { deleted_at: number | null } | null
+  expect(alpha?.deleted_at).not.toBeNull()
+})
+
 test('finalize ABORTS (never completes) if the phase transitions to a live import mid-run (F8 r10)', async () => {
   const h = makeHarness()
   const seeded = await h.stateStore.upsert({
