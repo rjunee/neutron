@@ -102,15 +102,11 @@ async function waitFor(pred: () => boolean, timeoutMs = 20_000): Promise<void> {
   }
 }
 
-async function startHarness(): Promise<Harness> {
-  const db = ProjectDb.open(process.env['NEUTRON_DB_PATH']!)
-  applyMigrations(db.raw())
-
-  // Simulate the persisted state left by an import that finished right before a
-  // restart: phase already at `import_analysis_presented`, with the engine's
-  // ImportResult + merged fields stamped onto phase_state. (In production the
-  // import-running cron re-arms on boot and would advance a still-`import_running`
-  // row into exactly this phase.)
+// Seed the persisted state an import leaves right before a restart: phase already at
+// `import_analysis_presented`, with the engine's ImportResult + merged fields stamped
+// onto phase_state. (In production the import-running cron re-arms on boot and would
+// advance a still-`import_running` row into exactly this phase.)
+async function seedStrandedImportRow(db: ProjectDb): Promise<void> {
   const seedStore = new SqliteOnboardingStateStore({ db })
   await seedStore.upsert({
     project_slug: 'owner',
@@ -126,6 +122,17 @@ async function startHarness(): Promise<Harness> {
       },
     },
   })
+}
+
+// `seedBeforeCompose` = true → the row exists when the composition-boot re-arm scans
+// (so the boot scan consumes it — the offline-restart path). false → the row is absent
+// at boot; the test seeds it AFTER composition so ONLY `on_session_open` (reconnect)
+// can consume it — the reconnect-path boundary.
+async function startHarness({ seedBeforeCompose = true }: { seedBeforeCompose?: boolean } = {}): Promise<Harness> {
+  const db = ProjectDb.open(process.env['NEUTRON_DB_PATH']!)
+  applyMigrations(db.raw())
+
+  if (seedBeforeCompose) await seedStrandedImportRow(db)
 
   const composer = buildOpenGraphComposer({
     env: process.env,
@@ -156,15 +163,18 @@ function currentPhase(db: ProjectDb): string | null {
 }
 
 describe('Open import-watch re-arm on reconnect (restart resilience)', () => {
-  test('a reconnect after restart consumes a stranded import_analysis_presented row', async () => {
-    harness = await startHarness()
-    // P6 (c): the completion watcher is re-armed FROM DURABLE STATE at
-    // composition (the restart-boot), so the seeded stranded
-    // import_analysis_presented row is consumed WITHOUT needing the owner to
-    // reconnect. The consume is async right after composition; assert it via the
-    // convergence wait below rather than a synchronous "still stranded" snapshot.
-    // The reconnect below is now a redundant, idempotent re-arm (importWatchActive
-    // guards the double-arm) and must not disturb the already-consumed row.
+  test('a reconnect consumes a stranded import_analysis_presented row that appears AFTER boot (proves on_session_open, not the boot scan)', async () => {
+    // Boot with NO stranded row, so the composition-boot re-arm scan finds nothing
+    // and cannot consume anything. THEN seed the stranded row (a row that becomes
+    // import-active after the process is already up) and open the socket: the ONLY
+    // thing that can consume it now is the `on_session_open` reconnect re-arm.
+    // Deleting that reconnect re-arm makes THIS test time out (the boot-only path
+    // never sees the post-boot row).
+    harness = await startHarness({ seedBeforeCompose: false })
+    await seedStrandedImportRow(harness.db)
+    // Sanity: nothing has consumed it yet (no watcher is armed for this row).
+    expect(currentPhase(harness.db)).toBe('import_analysis_presented')
+
     const wsUrl = harness.base.replace(/^http/, 'ws')
     const ws = new WebSocket(`${wsUrl}/ws/app/chat?token=dev:owner&platform=web`)
     await new Promise<void>((resolve, reject) => {
@@ -172,7 +182,7 @@ describe('Open import-watch re-arm on reconnect (restart resilience)', () => {
       ws.onerror = (ev) => reject(new Error(`ws error: ${JSON.stringify(ev)}`))
     })
 
-    // The re-armed watcher (3s tick) consumes the phase, moving it back to the
+    // The reconnect-armed watcher (3s tick) consumes the phase, moving it back to the
     // conversational marker so onboarding can finish. Pre-fix this never happens.
     await waitFor(() => currentPhase(harness!.db) === 'work_interview_gap_fill', 20_000)
     expect(currentPhase(harness.db)).toBe('work_interview_gap_fill')
