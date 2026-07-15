@@ -4,6 +4,15 @@
  * One sanitized markdown surface used by BOTH the chat (agent message bodies)
  * and the Documents viewer, so the rendering + the dark theme stay identical.
  *
+ * ── CANONICAL renderer (refactor unit W2 / D-13) ─────────────────────────────
+ * This react-markdown + `remark-gfm` + `rehype-sanitize` pipeline is THE
+ * canonical markdown grammar for the tree (D-13 resolved: react-markdown). The
+ * legacy hand-rolled web renderer (`landing/markdown.ts`) was deleted in the
+ * wave-1 dead-code kill; the native Expo hand parser
+ * (`app/lib/markdown-render.tsx`) is FROZEN pending the W4 shell spike. New
+ * markdown features on web belong HERE, not in a second grammar. See
+ * docs/plans/2026-07-02-world-class-refactor-plan.md §W2.
+ *
  * ── Sanitized ───────────────────────────────────────────────────────────────
  * `rehype-sanitize` runs on the parsed HAST with the default GitHub schema, so
  * raw HTML, `javascript:`/`data:` URLs, event handlers, and `<script>`/`<style>`
