@@ -80,10 +80,15 @@ function ownerSlugMismatchBindingOffense(source: string, fileName: string): stri
           const imported = el.propertyName?.text ?? el.name.text
           const local = el.name.text
           if (imported === NAME) {
-            // Importing THE canonical comparator (possibly aliased to `local`).
-            referenced = true
+            // Importing THE canonical comparator (possibly aliased to `local`). An
+            // UNUSED canonical import is not an offense (tsc flags unused imports),
+            // so it does not mark the file "referenced" — only a real invocation or
+            // a shadow does.
             if (CANON.test(mod)) canonicalImport = true
-            else shadow = `named import of ${NAME} from non-canonical '${mod}'`
+            else {
+              shadow = `named import of ${NAME} from non-canonical '${mod}'`
+              referenced = true
+            }
           } else if (local === NAME) {
             // Binding the NAME to some OTHER export (`import { x as ownerSlugMismatch }`)
             // — a shadow of the comparator identifier.
@@ -299,8 +304,18 @@ describe('project_slug timing-safe comparison (ISSUE #34)', () => {
     // Source regexes cannot prove the INVOKED function is canonical — a surface can
     // shadow the import via a parameter, a `./shadow.ts` import, an
     // `import * as x` + `x.ownerSlugMismatch(...)`, or a local var. So bind-analyze
-    // the AST (Codex): for each surface that references the name, require a canonical
-    // named import AND reject every shadow form + every qualified call.
+    // the AST (Codex): for each surface that INVOKES the `ownerSlugMismatch` identifier
+    // (or shadows it), require a canonical named import AND reject every shadow form
+    // (local decl / param / namespace / non-canonical or name-binding import) and every
+    // qualified/element-access call.
+    //
+    // SCOPE (deliberate): this guards the `ownerSlugMismatch` IDENTIFIER. It does NOT
+    // attempt to prove that an arbitrary higher-order function value (e.g. a comparator
+    // passed as a callback param) is canonical — that is whole-program taint analysis,
+    // infeasible in a lint and not a real regression path. The ACTUAL timing-attack
+    // vector — a plain `===`/`!==` on a `*_slug` value — is banned separately by the
+    // `scanPlainSlugEquality` offenders test above; a shadow comparator would still have
+    // to perform that plain comparison somewhere to be exploitable.
     const offenders: Array<{ file: string; why: string }> = []
     for (const name of allSurfaceFiles()) {
       const why = ownerSlugMismatchBindingOffense(readFileSync(join(HTTP_DIR, name), 'utf8'), name)
@@ -325,6 +340,13 @@ describe('project_slug timing-safe comparison (ISSUE #34)', () => {
     expect(flag("import { cmp as ownerSlugMismatch } from './shadow.ts'\nownerSlugMismatch('a','b')")).toBe(true) // alias BINDS the name to a shadow
     // A CANONICAL aliased import is fine (still the canonical reference):
     expect(flag("import { ownerSlugMismatch as f } from './surface-kit.ts'\nf('a','b')")).toBe(false)
+    // SCOPE: generic higher-order indirection that never invokes the ownerSlugMismatch
+    // IDENTIFIER is out of scope (not flagged) — proving a callback value is a comparator
+    // is taint analysis; the plain-=== ban is the real vector. An UNUSED canonical import
+    // + a generic `route(f){f(a,b)}` is not an offense.
+    expect(
+      flag("import { ownerSlugMismatch } from './surface-kit.ts'\nfunction route(f: (a: string, b: string) => boolean) { return f('a','b') }"),
+    ).toBe(false)
     expect(
       flag("import { ownerSlugMismatch } from './surface-kit.ts'\nconst ownerSlugMismatch = (a: string, b: string) => a === b\nownerSlugMismatch('a','b')"),
     ).toBe(true) // local var shadow
