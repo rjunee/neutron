@@ -360,7 +360,7 @@ test('finalize re-materializes a project that lands DURING materialization — p
   expect((await real.get(PROJECT_SLUG, USER_ID))?.phase).toBe('completed')
 })
 
-test('finalize does NOT falsely complete under continuous mid-run churn — defers to next trigger (F8 r7)', async () => {
+test('finalize CONVERGES (completes) under continuous mid-run churn — final authoritative pass, no strand (F8 r7/r8)', async () => {
   const h = makeHarness()
   await h.stateStore.upsert({
     project_slug: PROJECT_SLUG,
@@ -375,9 +375,10 @@ test('finalize does NOT falsely complete under continuous mid-run churn — defe
   const seeded = await h.stateStore.get(PROJECT_SLUG, USER_ID) // captured via the REAL store (no churn)
 
   // A store whose every read observes one MORE project than the last — perpetual churn
-  // that never settles within the repass budget. The loop must NOT mark completed with
-  // the newest (un-materialized) state; it must defer so a later trigger finalizes once
-  // the churn stops.
+  // that never settles within the repass budget. The loop must GUARANTEE convergence:
+  // after the budget, one final authoritative pass on the latest KNOWN state, then
+  // complete — never strand (an offline owner has no further trigger). The final pass
+  // must have composed/materialized the newest state it saw.
   const real = h.stateStore
   let reads = 0
   const churningStore: OnboardingStateStore = {
@@ -404,11 +405,15 @@ test('finalize does NOT falsely complete under continuous mid-run churn — defe
   const finalizer = buildOnboardingFinalize({ ...h.deps, stateStore: churningStore })
   await finalizer.finalize({ user_id: USER_ID, topic_id: TOPIC_ID, state: seeded! })
 
-  // Deferred: the row is NOT completed (a false completion would strand un-materialized
-  // projects). It stays non-terminal for the next trigger to finalize once churn stops.
-  expect((await real.get(PROJECT_SLUG, USER_ID))?.phase).not.toBe('completed')
-  // And the completed signal never fired.
-  expect(h.onboardingCompleted.filter((u) => u === USER_ID)).toHaveLength(0)
+  // Converged: the row IS completed (no strand) and the completed signal fired.
+  expect((await real.get(PROJECT_SLUG, USER_ID))?.phase).toBe('completed')
+  expect(h.onboardingCompleted.filter((u) => u === USER_ID)).toHaveLength(1)
+  // The final authoritative pass materialized a batch of the churned projects (P0..Pn),
+  // i.e. more than just the initial single project — the newest known state was processed.
+  const count = (
+    h.db.raw().query('SELECT COUNT(*) AS n FROM projects').get() as { n: number }
+  ).n
+  expect(count).toBeGreaterThan(1)
 })
 
 test('finalize operates on the LIVE durable state, not a stale caller snapshot (F8 r3)', async () => {

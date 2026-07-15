@@ -339,16 +339,22 @@ export function buildOnboardingFinalize(deps: OnboardingFinalizeDeps): Onboardin
 
       if (!settled) {
         // Exhausted the repass budget while phase_state was STILL churning (or a re-read
-        // failed): the newest durable state was NOT fully composed/materialized, so
-        // marking `completed` now would suppress that un-processed work permanently
-        // (Codex F8 r7). Leave the row non-terminal and DEFER — the next finalize trigger
-        // (boot, reconnect, or the next turn) retries once the churn settles. Continuous
-        // churn during finalize is pathological: the interview is over by the finalize
-        // trigger, so real onboarding state has stopped changing.
-        log('warn', 'finalize: phase_state did not settle within repass budget; deferring completion', {
+        // failed). We must NOT strand the row: a deferred completion relies on a future
+        // trigger, but the boot + a coalesced extractor trigger may BOTH have been
+        // consumed by this run, and an offline owner has no further trigger (Codex F8 r8).
+        // So GUARANTEE convergence: do ONE final authoritative pass on the latest KNOWN
+        // state (workState already holds the most recent re-read) so that newest snapshot
+        // IS composed + materialized (satisfying "never complete unprocessed newest
+        // state", Codex F8 r7), then fall through and complete. The only residual is a
+        // mutation landing DURING this final materialize — the same inherent sub-op window
+        // any single finalize has. Continuous churn is pathological anyway (it requires an
+        // ACTIVE owner generating turns, i.e. more triggers), so this bound is safe.
+        log('warn', 'finalize: phase_state churn exceeded repass budget; final authoritative pass', {
           user_id: input.user_id,
         })
-        return
+        await commitPersona(deps, workState, log)
+        import_result = deriveImportResult(workState) ?? input.import_result ?? null
+        materialized = await materializeProjects(deps, workState, import_result, now, log)
       }
 
       // (4) Terminal state — flip to `completed`. Load-bearing: if THIS write fails
