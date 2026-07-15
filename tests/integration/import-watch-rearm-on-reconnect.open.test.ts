@@ -128,11 +128,42 @@ async function seedStrandedImportRow(db: ProjectDb): Promise<void> {
 // (so the boot scan consumes it — the offline-restart path). false → the row is absent
 // at boot; the test seeds it AFTER composition so ONLY `on_session_open` (reconnect)
 // can consume it — the reconnect-path boundary.
-async function startHarness({ seedBeforeCompose = true }: { seedBeforeCompose?: boolean } = {}): Promise<Harness> {
+// F8 — the M1 E2E Round 4 strand as it looks on disk right before a restart:
+// the import already landed and was CONSUMED back into the conversational
+// marker (`work_interview_gap_fill`, `import_consumed_at` stamped), the owner
+// had already answered EVERY required field (all four present, ≥3 primary
+// projects), but there was no further user turn to finalize on — so the row is
+// stuck one step short of `completed`. Pre-F8, only an owner RECONNECT recovers
+// this (on_session_open's finalize recovery); if the owner never reconnects it
+// wedges. `rearmFromDurableState` finalizes it boot-derived, no socket.
+async function seedStrandedCompletableRow(db: ProjectDb): Promise<void> {
+  const seedStore = new SqliteOnboardingStateStore({ db })
+  await seedStore.upsert({
+    project_slug: 'owner',
+    user_id: 'owner',
+    phase: 'work_interview_gap_fill',
+    phase_state_patch: {
+      user_first_name: 'Riya',
+      signup_via: 'web',
+      primary_projects: ['Acme Launch', 'Infra', 'Garden'],
+      non_work_interests: ['climbing'],
+      agent_personality: 'warm and direct',
+      import_result: {
+        proposed_projects: [{ name: 'Acme Launch' }, { name: 'Infra' }],
+      },
+      import_consumed_at: Date.now(),
+    },
+  })
+}
+
+async function startHarness({
+  seedBeforeCompose = true,
+  seedFn = seedStrandedImportRow,
+}: { seedBeforeCompose?: boolean; seedFn?: (db: ProjectDb) => Promise<void> } = {}): Promise<Harness> {
   const db = ProjectDb.open(process.env['NEUTRON_DB_PATH']!)
   applyMigrations(db.raw())
 
-  if (seedBeforeCompose) await seedStrandedImportRow(db)
+  if (seedBeforeCompose) await seedFn(db)
 
   const composer = buildOpenGraphComposer({
     env: process.env,
@@ -219,5 +250,57 @@ describe('Open import-watch re-arm on reconnect (restart resilience)', () => {
     const phaseState = JSON.parse(row.phase_state_json) as Record<string, unknown>
     expect(phaseState['import_result']).toBeDefined()
     expect(phaseState['import_consumed_at']).toBeDefined()
+  }, 45_000)
+
+  test('F8 — boot-derived finalize recovery finalizes a complete-but-stranded row WITHOUT any reconnect', async () => {
+    // F8 DISTINCT-FROM-P6: P6 boot-re-arms only the import WATCHER (import-active
+    // phases). The post-import FINALIZE recovery — an owner who answered every
+    // required field while the import synthesized, had it consumed back into
+    // `work_interview_gap_fill`, then went idle before any finalize turn — was
+    // still ONLY recoverable via `on_session_open` (an owner reconnect). This
+    // seeds exactly that strand (all four required fields present, import already
+    // consumed) and boots with NO socket: `rearmFromDurableState`'s finalize
+    // recovery drives it to `completed`. Deleting the finalize branch leaves the
+    // phase stuck at `work_interview_gap_fill` (the boot watcher re-arm never
+    // touches a non-import phase), timing this out.
+    harness = await startHarness({ seedFn: seedStrandedCompletableRow })
+    // No WebSocket — the offline-owner-after-restart case.
+    await waitFor(() => currentPhase(harness!.db) === 'completed', 20_000)
+    expect(currentPhase(harness.db)).toBe('completed')
+  }, 45_000)
+
+  test('F8 — boot re-arm + reconnect double-arm consumes the stranded row exactly once (idempotent single-consumption)', async () => {
+    // F8 Care note: the `importWatchActive` guard makes double-arming safe. Boot
+    // WITH the stranded `import_analysis_presented` row (composition-boot arms one
+    // watcher) AND open a socket (on_session_open tries to arm a SECOND) — the
+    // guard dedups to a single watcher. Prove single-consumption: the row is
+    // consumed once to `work_interview_gap_fill` with a single `import_consumed_at`
+    // stamp that does NOT get rewritten by a racing second consume across
+    // subsequent watch ticks.
+    harness = await startHarness() // seeds import_analysis_presented before compose → boot arms
+    const wsUrl = harness.base.replace(/^http/, 'ws')
+    const ws = new WebSocket(`${wsUrl}/ws/app/chat?token=dev:owner&platform=web`)
+    await new Promise<void>((resolve, reject) => {
+      ws.onopen = () => resolve() // on_session_open arms again (deduped)
+      ws.onerror = (ev) => reject(new Error(`ws error: ${JSON.stringify(ev)}`))
+    })
+
+    await waitFor(() => currentPhase(harness!.db) === 'work_interview_gap_fill', 20_000)
+    const readConsumedAt = (): unknown => {
+      const row = harness!.db.raw()
+        .query("SELECT phase_state_json FROM onboarding_state WHERE project_slug = 'owner' AND user_id = 'owner'")
+        .get() as { phase_state_json: string }
+      return (JSON.parse(row.phase_state_json) as Record<string, unknown>)['import_consumed_at']
+    }
+    const firstStamp = readConsumedAt()
+    expect(firstStamp).toBeDefined()
+    // Let several watch ticks (3s interval) elapse: a second (un-deduped) watcher
+    // would re-observe and re-stamp. The guard keeps it single, so the stamp is stable.
+    await sleep(7_000)
+    expect(currentPhase(harness.db)).toBe('work_interview_gap_fill')
+    expect(readConsumedAt()).toBe(firstStamp)
+
+    ws.close()
+    await sleep(50)
   }, 45_000)
 })
