@@ -163,6 +163,35 @@ export interface OnboardingStateStore {
    * shot (replacing the pre-isolation `delete(project_slug)` semantics).
    */
   deleteByOwner(project_slug: string): Promise<void>
+
+  /**
+   * F8 — ATOMIC compare-and-set completion. Flip this (instance, user) row to
+   * `completed` (+ `completed_at`, `wow_fired: true`) ONLY IF its CURRENT `phase` is
+   * exactly `expected_phase` AND its `phase_state` is IDENTICAL to `expected_phase_state`
+   * — i.e. nothing has mutated EITHER the phase or the scratch state since the caller
+   * read + processed it. Returns true iff it completed.
+   *
+   * The phase guard is load-bearing, not just the phase_state: a concurrent transition to
+   * another non-terminal phase (e.g. `import_running`) can leave `phase_state` untouched,
+   * and completing over it would violate "never finalize on top of a live import". The
+   * caller passes the phase it validated + processed, so a mid-run transition to ANY other
+   * phase fails the CAS.
+   *
+   * A false return means the row changed underneath the caller (phase or state), was
+   * already terminal, or is gone: the caller must re-read and reconcile before retrying.
+   * This is the finalizer's ONLY safe terminal write — the read → compose persona →
+   * materialize projects → complete sequence is otherwise NOT atomic, so a plain
+   * `upsert(completed)` could stamp `completed` over a durable mutation that landed mid-run
+   * and permanently suppress it. The CAS makes that impossible: `completed` is stamped only
+   * against the exact (phase, phase_state) that was composed + materialized.
+   */
+  completeIfPhaseStateMatches(input: {
+    project_slug: string
+    user_id: string
+    expected_phase: string
+    expected_phase_state: Record<string, unknown>
+    completed_at: number
+  }): Promise<boolean>
 }
 
 export interface InMemoryOnboardingStateStoreOptions {
@@ -287,6 +316,37 @@ export class InMemoryOnboardingStateStore implements OnboardingStateStore {
         this.rows.delete(k)
       }
     }
+  }
+
+  async completeIfPhaseStateMatches(input: {
+    project_slug: string
+    user_id: string
+    expected_phase: string
+    expected_phase_state: Record<string, unknown>
+    completed_at: number
+  }): Promise<boolean> {
+    const key = compositeKey(input.project_slug, input.user_id)
+    const existing = this.rows.get(key)
+    if (existing === undefined) return false
+    // Never re-complete a terminal row (defense-in-depth; expected_phase would normally
+    // exclude these already).
+    if (existing.phase === 'completed' || existing.phase === 'failed') return false
+    // Phase guard: complete ONLY from the exact phase the caller processed (a concurrent
+    // transition — e.g. to `import_running` — must fail even when phase_state is untouched).
+    if (existing.phase !== input.expected_phase) return false
+    // Structural equality via canonical stringify (both objects share insertion order
+    // when the caller's expected snapshot is an unmutated read of this row).
+    if (JSON.stringify(existing.phase_state) !== JSON.stringify(input.expected_phase_state)) {
+      return false
+    }
+    this.rows.set(key, {
+      ...existing,
+      phase: 'completed',
+      completed_at: input.completed_at,
+      wow_fired: true,
+      last_advanced_at: this.now(),
+    })
+    return true
   }
 }
 

@@ -320,6 +320,36 @@ export class SqliteOnboardingStateStore implements OnboardingStateStore {
       [project_slug],
     )
   }
+
+  async completeIfPhaseStateMatches(input: {
+    project_slug: string
+    user_id: string
+    expected_phase: string
+    expected_phase_state: Record<string, unknown>
+    completed_at: number
+  }): Promise<boolean> {
+    // ATOMIC CAS in a SINGLE guarded UPDATE: flip to `completed` iff the row's CURRENT
+    // `phase` equals the phase the caller processed AND its stored `phase_state_json` is
+    // byte-identical to the caller's processed snapshot. The phase guard blocks a
+    // concurrent transition to another non-terminal phase (e.g. `import_running`) that
+    // leaves phase_state untouched — completing over that would finalize a live import.
+    // `expected_phase_state` is a value the caller read via get() (so it was `JSON.parse`d
+    // from this exact column); `JSON.stringify` of it round-trips to the stored compact
+    // JSON when nothing has changed, and diverges the moment any upsert rewrites the row.
+    // `.changes === 1` ⇒ we won the race and completed; `0` ⇒ the row moved (phase or
+    // state) or is gone, and the caller must re-read + reconcile.
+    const expected_json = JSON.stringify(input.expected_phase_state)
+    const res = this.db.runSync(
+      `UPDATE onboarding_state
+          SET phase = 'completed', completed_at = ?, wow_fired = 1, last_advanced_at = ?
+        WHERE project_slug = ? AND user_id = ?
+          AND phase = ?
+          AND phase NOT IN ('completed', 'failed')
+          AND phase_state_json = ?`,
+      [input.completed_at, this.now(), input.project_slug, input.user_id, input.expected_phase, expected_json],
+    )
+    return res.changes === 1
+  }
 }
 
 function rowToState(row: OnboardingStateRow): OnboardingState {

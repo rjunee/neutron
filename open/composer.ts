@@ -2472,13 +2472,16 @@ export function buildOpenGraphComposer(
         typeof st.phase_state['import_result'] === 'object'
           ? (st.phase_state['import_result'] as ImportResult)
           : null
-      await onboardingFinalizer.finalize({
+      // Propagate the finalizer's REAL result: it can DEFER/ABORT without completing
+      // (churn budget, a non-finalizable phase, a deleted row). Returning an unconditional
+      // `true` would suppress the runner's wrap-up while the row is still non-terminal
+      // (Codex F8 r14). `true` iff onboarding actually completed.
+      return await onboardingFinalizer.finalize({
         user_id,
         topic_id: appWsTopicId(user_id),
         state: st,
         import_result: importResult,
       })
-      return true
     }
     // The fire-and-forget post-turn scribe — replaces the per-turn llm-router.
     const onboardingExtractor =
@@ -2602,33 +2605,85 @@ export function buildOpenGraphComposer(
     } catch {
       /* best-effort boot sweep; the engine's hard timeout remains the backstop */
     }
-    // P6 (durability P0) — re-arm the Path-1 completion watcher from DURABLE
-    // state at composition. The watcher is otherwise armed ONLY on upload
-    // (`open/wiring/uploads.ts`) and socket reconnect (`open/wiring/app-ws.ts`).
-    // After a restart mid-import, if the owner does NOT reconnect (offline), the
-    // import-running cron re-arms on boot and drives the persisted row to
-    // `import_analysis_presented`, but with no watcher that phase is never
-    // consumed (its accept button is deliberately suppressed) and onboarding
-    // wedges permanently. Scan the durable `onboarding_state` for THIS instance's
-    // import-active rows and arm one watcher per user (idempotent via
-    // `importWatchActive`); mirrors the reconnect re-arm guard
-    // (`import_running` | `import_analysis_presented`). Pairs with the boot sweep
-    // above: a swept-`failed` job's `import_running` row is arm-covered here, so
-    // once the cron advances it to `import_analysis_presented` the watcher
-    // consumes it. Best-effort — a boot re-arm failure must never block
-    // composition (the reconnect re-arm remains a backstop).
-    try {
-      const importActiveRows = db
-        .prepare<{ user_id: string }, [string]>(
-          `SELECT user_id FROM onboarding_state
-            WHERE project_slug = ?
-              AND phase IN ('import_running', 'import_analysis_presented')`,
+    // F8 — one idempotent, boot-derived re-arm sweep from durable state.
+    // `on_session_open` (`open/wiring/app-ws.ts`) had become the de-facto
+    // recovery dumping ground: it both re-arms the import-completion watcher AND
+    // runs the post-import finalize recovery, and BOTH fire only when an owner
+    // RECONNECTS. An owner who never reconnects after a restart (offline, closed
+    // the tab) stays wedged. `rearmFromDurableState` runs ONCE at composition and
+    // reconstructs the same recovery from durable `onboarding_state` alone, so
+    // recovery is boot-derived rather than owner-activity-derived. The
+    // `on_session_open` arming stays the FAST path (a reconnecting owner recovers
+    // instantly without waiting on this pass); this is the backstop. It
+    // generalizes P6's inline import-only boot re-arm into the single named seam
+    // future boot recovery paths hook into, and folds in the finalize recovery
+    // that P6 left owner-reconnect-only.
+    //
+    // Two durable recovery paths, both idempotent:
+    //   • import-active rows (`import_running` | `import_analysis_presented`) →
+    //     re-arm the completion watcher (self-guards via `importWatchActive`, so
+    //     double-arming from both this sweep and a later reconnect is safe). The
+    //     watcher drives the consume + a follow-on `finalizeImportOnboardingIfReady`
+    //     once it reaches `import_analysis_presented`. Mirrors the reconnect guard.
+    //     Pairs with the boot sweep above: a swept-`failed` job's `import_running`
+    //     row is arm-covered here, so once the cron advances it to
+    //     `import_analysis_presented` the watcher consumes it.
+    //   • every other non-terminal row → boot-derived finalize recovery (the M1
+    //     E2E Round 4 strand): the owner answered every required field while the
+    //     import synthesized, the import landed and was consumed back into the
+    //     conversational marker, but there was no further user turn to finalize on
+    //     and the owner went idle. `finalizeImportOnboardingIfReady` re-checks
+    //     every guard and no-ops any row that is already terminal, still
+    //     mid-interview (a required field missing), or has an import in flight, so
+    //     this can only advance a genuinely complete-but-stranded row. Its
+    //     finalizer contract is fully best-effort/failure-isolated (persona +
+    //     materialization swallow-and-log, phase still flips to `completed`), so
+    //     it is safe to run at boot with no live socket — the live-rail emit is a
+    //     harmless no-op with no subscriber and the next reconnect takes the
+    //     steady-state path.
+    //
+    // Watcher arming is synchronous (armed by the time composition returns, as
+    // under P6); the async finalize recovery is fire-and-forget so composition
+    // never blocks on persona compose / materialization. Best-effort throughout:
+    // a per-row failure never aborts the sweep and a sweep failure never blocks
+    // composition (the `on_session_open` re-arm remains a backstop).
+    const rearmFromDurableState = (): void => {
+      let rows: { user_id: string; phase: string }[]
+      try {
+        rows = db
+          .prepare<{ user_id: string; phase: string }, [string]>(
+            `SELECT user_id, phase FROM onboarding_state
+              WHERE project_slug = ?
+                AND phase NOT IN ('completed', 'failed')`,
+          )
+          .all(project_slug)
+      } catch {
+        return /* best-effort boot re-arm; reconnect re-arms when the owner returns */
+      }
+      const finalizeCandidates: string[] = []
+      for (const { user_id, phase } of rows) {
+        if (phase === 'import_running' || phase === 'import_analysis_presented') {
+          watchImportCompletion(user_id)
+        } else {
+          finalizeCandidates.push(user_id)
+        }
+      }
+      // Fire one INDEPENDENT finalize per candidate (not a single loop that
+      // swallows internally): each rejection stays visible to `fireAndForget`
+      // (logged + counted), and one bad row's rejection cannot abort another's
+      // recovery. `finalizeImportOnboardingIfReady` itself is best-effort and
+      // idempotent; the only throw surface is the durable-state read.
+      for (const user_id of finalizeCandidates) {
+        fireAndForget(
+          'composer.rearm-finalize',
+          (async (): Promise<void> => {
+            const st = await onboardingStateStore.get(project_slug, user_id)
+            if (st !== null) await finalizeImportOnboardingIfReady(user_id, st)
+          })(),
         )
-        .all(project_slug)
-      for (const row of importActiveRows) watchImportCompletion(row.user_id)
-    } catch {
-      /* best-effort boot re-arm; reconnect re-arms when the owner returns */
+      }
     }
+    rearmFromDurableState()
     // The onboarding interview preamble (offer history import only when a
     // synthesis substrate exists to actually run it).
     const onboardingPreambleText = buildOnboardingPreamble({

@@ -409,6 +409,7 @@ describe('ND2 — solicited Path-1 upload at a conversational phase starts a job
       rekey: (a, b, c) => stateStore.rekey(a, b, c),
       delete: (p, u) => stateStore.delete(p, u),
       deleteByOwner: (p) => stateStore.deleteByOwner(p),
+      completeIfPhaseStateMatches: (i) => stateStore.completeIfPhaseStateMatches(i),
     }
     const engine = new InterviewEngine({
       buttonStore,

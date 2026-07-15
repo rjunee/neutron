@@ -27,9 +27,13 @@
  *   - `watchImportCompletion`, right after consuming the import, finalizes when
  *     every required field is already present and no import is in flight;
  *   - `on_session_open` finalizes a row already consumed into the conversational
- *     marker (the restart / already-stranded recovery path).
+ *     marker (the restart / already-stranded recovery path);
+ *   - F8: `rearmFromDurableState` (open/composer.ts) also runs that finalize
+ *     recovery FROM DURABLE STATE at composition, so a stranded row is recovered
+ *     boot-derived — without waiting for an owner reconnect. on_session_open stays
+ *     the fast path + an idempotent backstop.
  *
- * Both are gated by `auditRequiredFields(...).next_to_collect === null` so a
+ * All are gated by `auditRequiredFields(...).next_to_collect === null` so a
  * still-incomplete interview simply continues as before (no premature finalize).
  */
 
@@ -209,20 +213,44 @@ describe('Open onboarding finalizes after a late import (owner already idle)', (
     await sleep(50)
   }, 45_000)
 
-  test('on_session_open finalizes a row already consumed into work_interview_gap_fill (restart/idle recovery)', async () => {
+  test('boot-derived finalize recovers a row already consumed into work_interview_gap_fill WITHOUT a reconnect (F8)', async () => {
     // The watcher already consumed the import (phase work_interview_gap_fill,
     // import_consumed_at stamped) but never finalized — the pre-fix stranded
     // state, or a restart between consume and finalize.
+    //
+    // F8: `rearmFromDurableState` now runs the finalize recovery FROM DURABLE
+    // STATE at composition, so this stranded row is finalized boot-derived —
+    // without waiting for an owner reconnect (pre-F8 only on_session_open
+    // finalized it, so an owner who never reconnected stayed stranded). The
+    // boot finalize is async right after composition, so the recovery is
+    // asserted via the convergence wait below rather than a synchronous "still
+    // stranded" snapshot (which no longer holds once the boot sweep fires).
     harness = await startHarness('work_interview_gap_fill', { import_consumed_at: 1 })
-    expect(currentPhase(harness.db)).toBe('work_interview_gap_fill')
-    expect(projectCount(harness.db)).toBe(0)
-
-    // A plain reconnect must recover it (pre-fix: on_session_open only re-armed
-    // the watcher for import-active phases, so this row stayed forever).
-    const ws = await openWs(harness)
+    // NO WebSocket — the offline-owner-after-restart case. Boot finalize alone
+    // must drive it to `completed` and materialize the imported projects.
     await waitFor(() => currentPhase(harness!.db) === 'completed', 25_000)
     expect(currentPhase(harness.db)).toBe('completed')
     expect(projectCount(harness.db)).toBeGreaterThanOrEqual(1)
+  }, 45_000)
+
+  test('on_session_open remains an idempotent finalize backstop for a row consumed into work_interview_gap_fill', async () => {
+    // The on_session_open finalize recovery stays the FAST path (F8 keeps event
+    // arming). Here a reconnect lands on a row that boot-finalize has already
+    // driven to `completed` (or is finalizing): the reconnect recovery is a
+    // redundant, idempotent no-op — `finalizeImportOnboardingIfReady` returns
+    // false on a `completed` row — never a double-materialize.
+    harness = await startHarness('work_interview_gap_fill', { import_consumed_at: 1 })
+    await waitFor(() => currentPhase(harness!.db) === 'completed', 25_000)
+    const countAfterBoot = projectCount(harness.db)
+    expect(countAfterBoot).toBeGreaterThanOrEqual(1)
+
+    const ws = await openWs(harness)
+    // A brief settle for on_session_open's recovery path to run its (no-op) pass.
+    await sleep(500)
+    expect(currentPhase(harness.db)).toBe('completed')
+    // The reconnect finalize is a no-op on the already-`completed` row — no
+    // double-materialize (the project count is unchanged from the boot finalize).
+    expect(projectCount(harness.db)).toBe(countAfterBoot)
 
     ws.close()
     await sleep(50)

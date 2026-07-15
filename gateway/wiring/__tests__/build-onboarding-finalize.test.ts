@@ -19,6 +19,7 @@ import { join } from 'node:path'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { SqliteOnboardingStateStore } from '@neutronai/onboarding/interview/sqlite-state-store.ts'
+import type { OnboardingStateStore } from '@neutronai/onboarding/interview/state-store.ts'
 import { slugifyProjectId } from '@neutronai/onboarding/wow-moment/project-identity.ts'
 import { MAX_ANALYSIS_PROJECTS } from '@neutronai/onboarding/interview/phase-prompts.ts'
 import {
@@ -89,6 +90,544 @@ function makeHarness(): Harness {
   return { db, stateStore, ownerHome, persona, invalidated, projectsChanged, onboardingCompleted, deps }
 }
 
+test('CONCURRENT finalize (boot + reconnect) does the work EXACTLY ONCE — atomic in-flight claim (F8 P1)', async () => {
+  const h = makeHarness()
+  const seeded = await h.stateStore.upsert({
+    project_slug: PROJECT_SLUG,
+    user_id: USER_ID,
+    phase: 'persona_reviewed',
+    phase_state_patch: {
+      user_first_name: 'Sam',
+      agent_name: 'Atlas',
+      primary_projects: ['Topline Revenue'],
+    },
+  })
+  const finalizer = buildOnboardingFinalize(h.deps)
+
+  // The exact F8 race: rearmFromDurableState (boot) + on_session_open (reconnect) both
+  // invoke the SAME finalizer for the SAME user before either terminal write. Without
+  // an atomic claim BOTH pass the completed-gate → double persona composition + double
+  // materialization + double completion side effects. Promise.all starts call #1's sync
+  // prefix (claim added before its first await), so call #2's sync claim-check sees the
+  // in-flight user and no-ops.
+  await Promise.all([
+    finalizer.finalize({ user_id: USER_ID, topic_id: TOPIC_ID, state: seeded }),
+    finalizer.finalize({ user_id: USER_ID, topic_id: TOPIC_ID, state: seeded }),
+  ])
+
+  // Persona composed/committed ONCE (not twice); rail refreshed once; row completed.
+  expect(h.persona.committed).toBe(1)
+  expect(h.persona.composed).toBe(1)
+  expect(h.projectsChanged.filter((u) => u === USER_ID)).toHaveLength(1)
+  expect(h.onboardingCompleted.filter((u) => u === USER_ID)).toHaveLength(1)
+  expect((await h.stateStore.get(PROJECT_SLUG, USER_ID))?.phase).toBe('completed')
+
+  // And a LATER finalize of the now-completed row is a clean no-op (claim released +
+  // completed-gate) — the claim never permanently blocks a genuine future finalize.
+  await finalizer.finalize({ user_id: USER_ID, topic_id: TOPIC_ID, state: seeded })
+  expect(h.persona.committed).toBe(1)
+})
+
+test('CONCURRENT finalize whose TERMINAL write FAILS — both callers observe the failure, none falsely succeeds (F8 r2)', async () => {
+  const h = makeHarness()
+  const seeded = await h.stateStore.upsert({
+    project_slug: PROJECT_SLUG,
+    user_id: USER_ID,
+    phase: 'persona_reviewed',
+    phase_state_patch: {
+      user_first_name: 'Sam',
+      agent_name: 'Atlas',
+      primary_projects: ['Topline Revenue'],
+    },
+  })
+
+  // Wrap the real store so the load-bearing terminal CAS throws (locked DB / disk full)
+  // WHILE `failTerminal` is set; every other read/write delegates normally. Toggleable so
+  // the healed retry can run through the SAME finalizer instance (proving the single-flight
+  // claim was actually RELEASED, not merely a fresh empty map).
+  const real = h.stateStore
+  let completedAttempts = 0
+  let failTerminal = true
+  const togglingStore: OnboardingStateStore = {
+    async get(slug, uid) { return real.get(slug, uid) },
+    async upsert(inp) { return real.upsert(inp) },
+    async rekey(a, b, c) { return real.rekey(a, b, c) },
+    async delete(slug, uid) { return real.delete(slug, uid) },
+    async deleteByOwner(slug) { return real.deleteByOwner(slug) },
+    async completeIfPhaseStateMatches(inp) {
+      completedAttempts += 1
+      if (failTerminal) throw new Error('terminal CAS boom')
+      return real.completeIfPhaseStateMatches(inp)
+    },
+  }
+  const finalizer = buildOnboardingFinalize({ ...h.deps, stateStore: togglingStore })
+
+  // Two concurrent finalizes. Coalescing runs ONE body; its terminal write throws, so
+  // the SHARED promise rejects — BOTH callers must see it (allSettled → both
+  // 'rejected'), never a false 'fulfilled' where a contender returns success while the
+  // row is not completed. Pre-fix (silent Set no-op + swallowed terminal error) the
+  // contender returned 'fulfilled' and no caller completed the row.
+  const settled = await Promise.allSettled([
+    finalizer.finalize({ user_id: USER_ID, topic_id: TOPIC_ID, state: seeded }),
+    finalizer.finalize({ user_id: USER_ID, topic_id: TOPIC_ID, state: seeded }),
+  ])
+  expect(settled.map((s) => s.status)).toEqual(['rejected', 'rejected'])
+  expect(completedAttempts).toBe(1) // coalesced: the body ran once (not once-per-caller)
+
+  // The row is NOT completed — it stays pre-terminal for a later retry, and the
+  // one-shot completed signal never fired (we never reached it).
+  expect((await real.get(PROJECT_SLUG, USER_ID))?.phase).not.toBe('completed')
+  expect(h.onboardingCompleted.filter((u) => u === USER_ID)).toHaveLength(0)
+
+  // Heal the store and retry through the SAME finalizer instance. This proves the
+  // single-flight claim was RELEASED on the prior rejection — if the rejected promise
+  // were permanently retained in the in-flight map, this same-instance retry would
+  // join the dead promise and never complete the row.
+  failTerminal = false
+  await finalizer.finalize({ user_id: USER_ID, topic_id: TOPIC_ID, state: seeded })
+  expect((await real.get(PROJECT_SLUG, USER_ID))?.phase).toBe('completed')
+})
+
+test('finalize materializes the FRESHEST state when phase_state changes during stabilize (F8 r4/r6)', async () => {
+  const h = makeHarness()
+  const seeded = await h.stateStore.upsert({
+    project_slug: PROJECT_SLUG,
+    user_id: USER_ID,
+    phase: 'persona_reviewed',
+    phase_state_patch: {
+      user_first_name: 'Sam',
+      agent_name: 'Atlas',
+      agent_personality: 'warm',
+      primary_projects: ['Alpha'],
+    },
+  })
+
+  // A get() wrapper that injects a durable change ONCE (a new persona field + an added
+  // project) — the extractor persisting one more field while finalize is reading. Because
+  // side effects happen ONLY after the state stabilizes, finalize composes persona +
+  // materializes from the FRESHEST (post-change) state: Beta + the updated personality.
+  const real = h.stateStore
+  let injected = false
+  const mutatingStore: OnboardingStateStore = {
+    async get(slug, uid) {
+      const state = await real.get(slug, uid)
+      const projects = (state?.phase_state['primary_projects'] as string[] | undefined) ?? []
+      if (!injected && state !== null && !projects.includes('Beta')) {
+        injected = true
+        await real.upsert({
+          project_slug: PROJECT_SLUG,
+          user_id: USER_ID,
+          phase: 'persona_reviewed',
+          phase_state_patch: { agent_personality: 'warm and direct', primary_projects: ['Alpha', 'Beta'] },
+        })
+        return real.get(slug, uid)
+      }
+      return state
+    },
+    async upsert(inp) { return real.upsert(inp) },
+    async rekey(a, b, c) { return real.rekey(a, b, c) },
+    async delete(slug, uid) { return real.delete(slug, uid) },
+    async deleteByOwner(slug) { return real.deleteByOwner(slug) },
+    async completeIfPhaseStateMatches(inp) { return real.completeIfPhaseStateMatches(inp) },
+  }
+  const finalizer = buildOnboardingFinalize({ ...h.deps, stateStore: mutatingStore })
+  await finalizer.finalize({ user_id: USER_ID, topic_id: TOPIC_ID, state: seeded })
+
+  expect(injected).toBe(true)
+  const finalState = await real.get(PROJECT_SLUG, USER_ID)
+  expect(finalState?.phase).toBe('completed')
+  expect(finalState?.phase_state['agent_personality']).toBe('warm and direct')
+  const names = (
+    h.db.raw().query('SELECT name FROM projects ORDER BY name').all() as { name: string }[]
+  ).map((r) => r.name)
+  expect(names).toContain('Alpha')
+  expect(names).toContain('Beta')
+})
+
+test('finalize picks up a NON-primary-projects field changed during stabilize (whole-phase_state stability) (F8 r6)', async () => {
+  const h = makeHarness()
+  const seeded = await h.stateStore.upsert({
+    project_slug: PROJECT_SLUG,
+    user_id: USER_ID,
+    phase: 'persona_reviewed',
+    phase_state_patch: {
+      user_first_name: 'Sam',
+      agent_name: 'Atlas',
+      primary_projects: ['Alpha'],
+    },
+  })
+
+  // A get() wrapper injects a change to a field OTHER than primary_projects
+  // (`non_work_interests`) once. Stability is keyed on the WHOLE phase_state, so this is
+  // detected (a coarse primary_projects-only key would have missed it): finalize
+  // re-reads, stabilizes on the updated state, and completes carrying the new field.
+  const real = h.stateStore
+  let injected = false
+  const mutatingStore: OnboardingStateStore = {
+    async get(slug, uid) {
+      const state = await real.get(slug, uid)
+      if (!injected && state !== null && !state.phase_state['non_work_interests']) {
+        injected = true
+        await real.upsert({
+          project_slug: PROJECT_SLUG,
+          user_id: USER_ID,
+          phase: 'persona_reviewed',
+          phase_state_patch: { non_work_interests: ['climbing'] },
+        })
+        return real.get(slug, uid)
+      }
+      return state
+    },
+    async upsert(inp) { return real.upsert(inp) },
+    async rekey(a, b, c) { return real.rekey(a, b, c) },
+    async delete(slug, uid) { return real.delete(slug, uid) },
+    async deleteByOwner(slug) { return real.deleteByOwner(slug) },
+    async completeIfPhaseStateMatches(inp) { return real.completeIfPhaseStateMatches(inp) },
+  }
+  const finalizer = buildOnboardingFinalize({ ...h.deps, stateStore: mutatingStore })
+  await finalizer.finalize({ user_id: USER_ID, topic_id: TOPIC_ID, state: seeded })
+
+  expect(injected).toBe(true)
+  const finalState = await real.get(PROJECT_SLUG, USER_ID)
+  expect(finalState?.phase).toBe('completed')
+  expect(finalState?.phase_state['non_work_interests']).toEqual(['climbing'])
+})
+
+test('finalize DEFERS with ZERO side effects under continuous churn — never stabilizes, creates no projects (F8 r7/r8/r15)', async () => {
+  const h = makeHarness()
+  const seeded = await h.stateStore.upsert({
+    project_slug: PROJECT_SLUG,
+    user_id: USER_ID,
+    phase: 'persona_reviewed',
+    phase_state_patch: {
+      user_first_name: 'Sam',
+      agent_name: 'Atlas',
+      primary_projects: ['P0'],
+    },
+  })
+
+  // A get() wrapper mutates the row on EVERY read (each read observes a different
+  // phase_state), so two consecutive reads NEVER agree → finalize never stabilizes → it
+  // DEFERS. Because side effects happen ONLY after stabilization, nothing is composed or
+  // materialized: NO project rows are created (this is what makes deferral safe — there are
+  // no stale creations to reconcile, the failure mode of the old per-pass approach).
+  const real = h.stateStore
+  let reads = 0
+  const churningStore: OnboardingStateStore = {
+    async get(slug, uid) {
+      const state = await real.get(slug, uid)
+      if (state !== null && state.phase !== 'completed') {
+        reads += 1
+        await real.upsert({
+          project_slug: PROJECT_SLUG,
+          user_id: USER_ID,
+          phase: 'persona_reviewed',
+          phase_state_patch: { primary_projects: Array.from({ length: reads + 1 }, (_, i) => `P${i}`) },
+        })
+        return real.get(slug, uid)
+      }
+      return state
+    },
+    async upsert(inp) { return real.upsert(inp) },
+    async rekey(a, b, c) { return real.rekey(a, b, c) },
+    async delete(slug, uid) { return real.delete(slug, uid) },
+    async deleteByOwner(slug) { return real.deleteByOwner(slug) },
+    async completeIfPhaseStateMatches(inp) { return real.completeIfPhaseStateMatches(inp) },
+  }
+  const finalizer = buildOnboardingFinalize({ ...h.deps, stateStore: churningStore })
+  const result = await finalizer.finalize({ user_id: USER_ID, topic_id: TOPIC_ID, state: seeded })
+
+  // Deferred: finalize RESOLVES `false` (not a false-positive success), so the caller
+  // (finalizeImportOnboardingIfReady) won't suppress the runner's wrap-up (Codex F8 r14).
+  expect(result).toBe(false)
+  // NO project rows were created — deferral took ZERO side effects (Codex F8 r15).
+  expect((h.db.raw().query('SELECT COUNT(*) AS n FROM projects').get() as { n: number }).n).toBe(0)
+  // NEVER falsely completed over unprocessed state (the CAS forbids it), and the completed
+  // signal never fired. The row stays non-terminal for the next trigger.
+  expect((await h.stateStore.get(PROJECT_SLUG, USER_ID))?.phase).not.toBe('completed')
+  expect(h.onboardingCompleted.filter((u) => u === USER_ID)).toHaveLength(0)
+})
+
+test('finalize ABORTS on a deleted durable row (successful null read) — no persona/project side effects (F8 r11)', async () => {
+  const h = makeHarness()
+  const seeded = await h.stateStore.upsert({
+    project_slug: PROJECT_SLUG,
+    user_id: USER_ID,
+    phase: 'persona_reviewed',
+    phase_state_patch: { user_first_name: 'Sam', agent_name: 'Atlas', primary_projects: ['Alpha'] },
+  })
+  // The authoritative durable row is deleted AFTER the caller captured its snapshot.
+  await h.stateStore.delete(PROJECT_SLUG, USER_ID)
+
+  let composed = 0
+  const persona: PersonaComposerLike = {
+    async compose() { composed += 1; return { draft_id: 'x', status: 'composed' } },
+    async commit() { return { committed_at: 0, git_sha: null, paths: [] } },
+  }
+  const finalizer = buildOnboardingFinalize({ ...h.deps, personaComposer: persona })
+  await finalizer.finalize({ user_id: USER_ID, topic_id: TOPIC_ID, state: seeded })
+
+  // A successful null read aborts BEFORE any side effect: no persona composed, no project
+  // rows created, no completion signal, and no ghost row recreated.
+  expect(composed).toBe(0)
+  expect((h.db.raw().query('SELECT COUNT(*) AS n FROM projects').get() as { n: number }).n).toBe(0)
+  expect(h.onboardingCompleted).toEqual([])
+  expect(await h.stateStore.get(PROJECT_SLUG, USER_ID)).toBeNull()
+})
+
+test('finalize does NOT materialize a project the stable state has DROPPED (no stale row to reconcile) (F8 r11)', async () => {
+  const h = makeHarness()
+  // The stable state lists Beta and explicitly DROPPED Alpha. Because side effects run only
+  // on the stable state, materialize resolves projects with drops EXCLUDED — Alpha is never
+  // created, so there is no orphaned row (the failure mode reconciliation used to chase).
+  const seeded = await h.stateStore.upsert({
+    project_slug: PROJECT_SLUG,
+    user_id: USER_ID,
+    phase: 'persona_reviewed',
+    phase_state_patch: {
+      user_first_name: 'Sam',
+      agent_name: 'Atlas',
+      primary_projects: ['Beta'],
+      dropped_projects: ['Alpha'],
+    },
+  })
+  const finalizer = buildOnboardingFinalize(h.deps)
+  await finalizer.finalize({ user_id: USER_ID, topic_id: TOPIC_ID, state: seeded })
+
+  expect((await h.stateStore.get(PROJECT_SLUG, USER_ID))?.phase).toBe('completed')
+  const names = (
+    h.db.raw().query('SELECT name FROM projects ORDER BY name').all() as { name: string }[]
+  ).map((r) => r.name)
+  expect(names).toContain('Beta')
+  expect(names).not.toContain('Alpha') // dropped → never materialized (no row at all)
+  expect(h.db.raw().query('SELECT COUNT(*) AS n FROM projects').get()).toEqual({ n: 1 })
+})
+
+test('finalize NEVER deletes a PRE-EXISTING project the owner already had (no reconciliation) (F8 r12)', async () => {
+  const h = makeHarness()
+  // Alpha exists BEFORE onboarding — a project the owner already had — and the stable state
+  // still lists it. finalize binds it (does not recreate) and NEVER soft-deletes it (there
+  // is no reconciliation path that could).
+  const iso = new Date(0).toISOString()
+  await h.db.run(
+    `INSERT INTO projects
+       (id, name, description, persona, privacy_mode, billing_mode, created_at, updated_at)
+     VALUES (?, ?, ?, NULL, 'private', 'personal', ?, ?)`,
+    [slugifyProjectId('Alpha'), 'Alpha', 'pre-existing', iso, iso],
+  )
+  const seeded = await h.stateStore.upsert({
+    project_slug: PROJECT_SLUG,
+    user_id: USER_ID,
+    phase: 'persona_reviewed',
+    phase_state_patch: { user_first_name: 'Sam', agent_name: 'Atlas', primary_projects: ['Alpha'] },
+  })
+  const finalizer = buildOnboardingFinalize(h.deps)
+  await finalizer.finalize({ user_id: USER_ID, topic_id: TOPIC_ID, state: seeded })
+
+  expect((await h.stateStore.get(PROJECT_SLUG, USER_ID))?.phase).toBe('completed')
+  const alpha = h.db
+    .raw()
+    .query('SELECT deleted_at FROM projects WHERE id = ?')
+    .get(slugifyProjectId('Alpha')) as { deleted_at: number | null } | null
+  expect(alpha?.deleted_at, 'pre-existing Alpha must stay live').toBeNull()
+})
+
+test('finalize does NOT complete a row in an early (non-finalizable) phase (allowlist) (F8 r12)', async () => {
+  const h = makeHarness()
+  // An early phase that has no legal edge to `completed`. Even with fields present, the
+  // finalizer's phase allowlist must refuse it (a denylist would have wrongly accepted it).
+  const seeded = await h.stateStore.upsert({
+    project_slug: PROJECT_SLUG,
+    user_id: USER_ID,
+    phase: 'ai_substrate_offered',
+    phase_state_patch: { user_first_name: 'Sam', agent_name: 'Atlas', primary_projects: ['Alpha'] },
+  })
+  let composed = 0
+  const persona: PersonaComposerLike = {
+    async compose() { composed += 1; return { draft_id: 'x', status: 'composed' } },
+    async commit() { return { committed_at: 0, git_sha: null, paths: [] } },
+  }
+  const finalizer = buildOnboardingFinalize({ ...h.deps, personaComposer: persona })
+  await finalizer.finalize({ user_id: USER_ID, topic_id: TOPIC_ID, state: seeded })
+
+  // Refused: phase unchanged, no persona composed, no project rows.
+  expect((await h.stateStore.get(PROJECT_SLUG, USER_ID))?.phase).toBe('ai_substrate_offered')
+  expect(composed).toBe(0)
+  expect((h.db.raw().query('SELECT COUNT(*) AS n FROM projects').get() as { n: number }).n).toBe(0)
+  expect(h.onboardingCompleted).toEqual([])
+})
+
+test('finalize refuses a non-finalizable phase even when the live read THROWS — snapshot fallback stays allowlist-guarded (F8 r13)', async () => {
+  const h = makeHarness()
+  const seeded = await h.stateStore.upsert({
+    project_slug: PROJECT_SLUG,
+    user_id: USER_ID,
+    phase: 'ai_substrate_offered',
+    phase_state_patch: { user_first_name: 'Sam', agent_name: 'Atlas', primary_projects: ['Alpha'] },
+  })
+  const real = h.stateStore
+  let composed = 0
+  const persona: PersonaComposerLike = {
+    async compose() { composed += 1; return { draft_id: 'x', status: 'composed' } },
+    async commit() { return { committed_at: 0, git_sha: null, paths: [] } },
+  }
+  // get() THROWS → finalize falls back to the caller snapshot (early phase). The allowlist
+  // check on effectiveState must STILL refuse it (the CAS alone would complete it, since it
+  // only pins phase==expected and the real row IS in that phase).
+  const throwingGetStore: OnboardingStateStore = {
+    async get() { throw new Error('read boom') },
+    async upsert(inp) { return real.upsert(inp) },
+    async rekey(a, b, c) { return real.rekey(a, b, c) },
+    async delete(slug, uid) { return real.delete(slug, uid) },
+    async deleteByOwner(slug) { return real.deleteByOwner(slug) },
+    async completeIfPhaseStateMatches(inp) { return real.completeIfPhaseStateMatches(inp) },
+  }
+  const finalizer = buildOnboardingFinalize({
+    ...h.deps,
+    stateStore: throwingGetStore,
+    personaComposer: persona,
+  })
+  await finalizer.finalize({ user_id: USER_ID, topic_id: TOPIC_ID, state: seeded })
+
+  // Refused via the allowlist on the throw path: phase unchanged, no persona, no projects.
+  expect((await real.get(PROJECT_SLUG, USER_ID))?.phase).toBe('ai_substrate_offered')
+  expect(composed).toBe(0)
+  expect((h.db.raw().query('SELECT COUNT(*) AS n FROM projects').get() as { n: number }).n).toBe(0)
+  expect(h.onboardingCompleted).toEqual([])
+})
+
+test('finalize DEFERS on a mutation in the materialize→CAS window WITHOUT unsafely deleting the created row (F8 r16/r17)', async () => {
+  const h = makeHarness()
+  const seeded = await h.stateStore.upsert({
+    project_slug: PROJECT_SLUG,
+    user_id: USER_ID,
+    phase: 'persona_reviewed',
+    phase_state_patch: { user_first_name: 'Sam', agent_name: 'Atlas', primary_projects: ['Alpha'] },
+  })
+
+  // A CAS wrapper injects a mutation in the exact materialize→CAS window: on the CAS call it
+  // first drops Alpha for Beta, THEN delegates (so the real CAS loses). finalize materialized
+  // Alpha on the stable [Alpha] state. It DEFERS — and DELIBERATELY does NOT soft-delete
+  // Alpha: post-hoc cleanup is unsafe (soft-deletes are un-resurrectable in ensureProjectRow,
+  // and project ids are shared across users; Codex F8 r17). The benign stray row is accepted.
+  const real = h.stateStore
+  let casCalls = 0
+  const casWrapper: OnboardingStateStore = {
+    async get(slug, uid) { return real.get(slug, uid) },
+    async upsert(inp) { return real.upsert(inp) },
+    async rekey(a, b, c) { return real.rekey(a, b, c) },
+    async delete(slug, uid) { return real.delete(slug, uid) },
+    async deleteByOwner(slug) { return real.deleteByOwner(slug) },
+    async completeIfPhaseStateMatches(inp) {
+      casCalls += 1
+      if (casCalls === 1) {
+        await real.upsert({
+          project_slug: PROJECT_SLUG,
+          user_id: USER_ID,
+          phase: 'persona_reviewed',
+          phase_state_patch: { primary_projects: ['Beta'], dropped_projects: ['Alpha'] },
+        })
+      }
+      return real.completeIfPhaseStateMatches(inp) // now fails — state changed under it
+    },
+  }
+  const finalizer = buildOnboardingFinalize({ ...h.deps, stateStore: casWrapper })
+  const result = await finalizer.finalize({ user_id: USER_ID, topic_id: TOPIC_ID, state: seeded })
+
+  // Deferred, not completed.
+  expect(result).toBe(false)
+  expect((await real.get(PROJECT_SLUG, USER_ID))?.phase).not.toBe('completed')
+  // Alpha's row is NOT soft-deleted — so a retry (or another user sharing the id) can still
+  // use it. This is the SAFE choice: no un-resurrectable / cross-user delete (Codex F8 r17).
+  const alpha = h.db
+    .raw()
+    .query('SELECT deleted_at FROM projects WHERE id = ?')
+    .get(slugifyProjectId('Alpha')) as { deleted_at: number | null } | null
+  expect(alpha?.deleted_at, 'created row left intact — no unsafe cleanup').toBeNull()
+})
+
+test('finalize ABORTS (never completes) if the phase transitions to a live import mid-run (F8 r10)', async () => {
+  const h = makeHarness()
+  const seeded = await h.stateStore.upsert({
+    project_slug: PROJECT_SLUG,
+    user_id: USER_ID,
+    phase: 'persona_reviewed',
+    phase_state_patch: {
+      user_first_name: 'Sam',
+      agent_name: 'Atlas',
+      primary_projects: ['Alpha'],
+    },
+  })
+
+  // A get() wrapper transitions the row to a live import phase during stabilize — a
+  // concurrent import kicking off after the finalize trigger. The stabilize loop's
+  // isFinalizablePhase check sees the import phase and ABORTS before ANY side effects
+  // (no persona, no projects), rather than stamping `completed` over the live import.
+  const real = h.stateStore
+  let mutated = false
+  const mutatingStore: OnboardingStateStore = {
+    async get(slug, uid) {
+      const state = await real.get(slug, uid)
+      if (!mutated && state !== null && state.phase === 'persona_reviewed') {
+        mutated = true
+        await real.upsert({ project_slug: PROJECT_SLUG, user_id: USER_ID, phase: 'import_running' })
+        return real.get(slug, uid)
+      }
+      return state
+    },
+    async upsert(inp) { return real.upsert(inp) },
+    async rekey(a, b, c) { return real.rekey(a, b, c) },
+    async delete(slug, uid) { return real.delete(slug, uid) },
+    async deleteByOwner(slug) { return real.deleteByOwner(slug) },
+    async completeIfPhaseStateMatches(inp) { return real.completeIfPhaseStateMatches(inp) },
+  }
+  const finalizer = buildOnboardingFinalize({ ...h.deps, stateStore: mutatingStore })
+  await finalizer.finalize({ user_id: USER_ID, topic_id: TOPIC_ID, state: seeded })
+
+  // Never finalized on top of the live import; aborted before side effects.
+  const finalState = await real.get(PROJECT_SLUG, USER_ID)
+  expect(finalState?.phase).toBe('import_running')
+  expect(finalState?.phase).not.toBe('completed')
+  expect(h.onboardingCompleted.filter((u) => u === USER_ID)).toHaveLength(0)
+  expect((h.db.raw().query('SELECT COUNT(*) AS n FROM projects').get() as { n: number }).n).toBe(0)
+})
+
+test('finalize operates on the LIVE durable state, not a stale caller snapshot (F8 r3)', async () => {
+  const h = makeHarness()
+  // Snapshot A — the state a caller captured with ONE project.
+  const snapA = await h.stateStore.upsert({
+    project_slug: PROJECT_SLUG,
+    user_id: USER_ID,
+    phase: 'persona_reviewed',
+    phase_state_patch: {
+      user_first_name: 'Sam',
+      agent_name: 'Atlas',
+      primary_projects: ['Alpha'],
+    },
+  })
+  // Durable state ADVANCES to B (an added project) before finalize runs — exactly
+  // the coalescing boundary: a newer caller persisted more, then the older caller's
+  // run wins the race carrying the stale snapshot A.
+  await h.stateStore.upsert({
+    project_slug: PROJECT_SLUG,
+    user_id: USER_ID,
+    phase: 'persona_reviewed',
+    phase_state_patch: { primary_projects: ['Alpha', 'Beta'] },
+  })
+
+  // Finalize with the STALE snapshot A. finalize re-reads live durable state after
+  // claiming, so it materializes BOTH Alpha AND Beta (the live set). Pre-fix (frozen
+  // input.state) it materialized only Alpha and `completed` suppressed Beta forever.
+  const finalizer = buildOnboardingFinalize(h.deps)
+  await finalizer.finalize({ user_id: USER_ID, topic_id: TOPIC_ID, state: snapA })
+
+  const names = (
+    h.db.raw().query('SELECT name FROM projects ORDER BY name').all() as { name: string }[]
+  ).map((r) => r.name)
+  expect(names).toContain('Alpha')
+  expect(names).toContain('Beta')
+})
+
 test('finalize completes onboarding: persona, projects row, rail refresh', async () => {
   const h = makeHarness()
 
@@ -106,7 +645,8 @@ test('finalize completes onboarding: persona, projects row, rail refresh', async
   expect(seeded.phase).toBe('persona_reviewed')
 
   const finalizer = buildOnboardingFinalize(h.deps)
-  await finalizer.finalize({ user_id: USER_ID, topic_id: TOPIC_ID, state: seeded })
+  const result = await finalizer.finalize({ user_id: USER_ID, topic_id: TOPIC_ID, state: seeded })
+  expect(result).toBe(true) // completed → finalize resolves true (Codex F8 r14)
 
   // (1) Phase flipped to completed, with completed_at + wow_fired stamped.
   const after = await h.stateStore.get(PROJECT_SLUG, USER_ID)
@@ -194,17 +734,22 @@ test('finalize does NOT emit the onboarding-complete signal when the terminal up
     phase_state_patch: { primary_projects: ['Topline Revenue'] },
   })
 
-  // Wrap the real store so ONLY the terminal `completed` write throws (locked DB
-  // / disk full); every other read/write still delegates to the real store.
+  // Wrap the real store so ONLY the terminal CAS completion throws (locked DB / disk
+  // full); every other read/write still delegates to the real store.
   const realStore = h.deps.stateStore
   const throwingStore = Object.create(realStore) as typeof realStore
-  throwingStore.upsert = ((input: Parameters<typeof realStore.upsert>[0]) => {
-    if (input.phase === 'completed') throw new Error('locked db')
-    return realStore.upsert(input)
-  }) as typeof realStore.upsert
+  throwingStore.completeIfPhaseStateMatches = ((
+    _input: Parameters<typeof realStore.completeIfPhaseStateMatches>[0],
+  ) => {
+    throw new Error('locked db')
+  }) as typeof realStore.completeIfPhaseStateMatches
 
   const finalizer = buildOnboardingFinalize({ ...h.deps, stateStore: throwingStore })
-  await finalizer.finalize({ user_id: USER_ID, topic_id: TOPIC_ID, state: seeded })
+  // The terminal write fails → finalize SURFACES it (rejects) so the caller retries
+  // on the next trigger and a coalesced contender can't falsely report success (F8 r2).
+  await expect(
+    finalizer.finalize({ user_id: USER_ID, topic_id: TOPIC_ID, state: seeded }),
+  ).rejects.toThrow('locked db')
 
   // The row never reached `completed`, so the claim-redirect signal must NOT
   // fire — otherwise a Managed client would be pulled to the claim flow despite
