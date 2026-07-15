@@ -525,6 +525,84 @@ describe('buildSynthesisImportJobRunner — synthesis → engine bridge', () => 
     expect(onDemand?.proposed_projects.map((p) => p.name)).toEqual(['Topline Hospitality'])
   })
 
+  test('P6 durability: a failure on the completion write ROLLS BACK the persisted result (one transaction, not two independent writes)', async () => {
+    const real = freshDb()
+    const fakeSynthesis: SynthesisRunner = {
+      rawStore: new MemoryRawTranscriptStore(),
+      async synthesizeImport(): Promise<SynthesisResult> {
+        return SYNTH_RESULT
+      },
+      async synthesizeInterviewOnly(): Promise<SynthesisResult | null> {
+        return null
+      },
+      writeSeed(seed: ProjectSeed): WriteProjectSeedOutcome {
+        return { project_slug: seed.slug, reason: 'created', docs_written: ['STATUS.md'], transcripts_written: 1 }
+      },
+    }
+    // Inject a failure on the `status='completed'` UPDATE — the SECOND write in the
+    // completion transaction, AFTER `persistImportResult` has already inserted the
+    // `import_results` row into the SAME tx. If the two writes were independent, the
+    // persisted row would survive; because they share ONE transaction, the failed
+    // completion flip must roll the persisted result back too. (A revert of the
+    // shared-transaction wrapping makes this test go red: the import_results row
+    // would survive the failed flip.)
+    let intercepted = false
+    const db = new Proxy(real, {
+      get(target, prop, receiver) {
+        if (prop === 'transaction') {
+          return (userCb: (tx: unknown) => Promise<unknown>) =>
+            (target as ProjectDb).transaction(async (tx) => {
+              const wrappedTx = new Proxy(tx as unknown as Record<string, unknown>, {
+                get(t, p) {
+                  if (p === 'run') {
+                    return async (sql: string, params?: unknown[]) => {
+                      if (typeof sql === 'string' && sql.includes("status = 'completed'")) {
+                        intercepted = true
+                        throw new Error('injected: completion write failed')
+                      }
+                      return (t['run'] as (s: string, pp?: unknown[]) => unknown)(sql, params)
+                    }
+                  }
+                  const v = t[p as string]
+                  return typeof v === 'function' ? (v as (...a: unknown[]) => unknown).bind(t) : v
+                },
+              })
+              return userCb(wrappedTx)
+            })
+        }
+        const v = Reflect.get(target, prop, receiver)
+        return typeof v === 'function' ? (v as (...a: unknown[]) => unknown).bind(target) : v
+      },
+    }) as unknown as ProjectDb
+
+    const runner = buildSynthesisImportJobRunner({ db, synthesis: fakeSynthesis, parse: () => fakeRecords() })
+    const { job_id } = await runner.start({
+      project_slug: 'owner',
+      user_id: 'u-owner',
+      source: 'claude-zip',
+      payload: Buffer.from('zip'),
+    })
+
+    // Wait for the fire-and-forget runJob to reach + fail the completion transaction,
+    // then let the ROLLBACK + rejection unwind.
+    for (let i = 0; i < 400 && !intercepted; i += 1) await new Promise((r) => setTimeout(r, 5))
+    expect(intercepted).toBe(true)
+    await new Promise((r) => setTimeout(r, 30))
+
+    // The persisted `import_results` row was rolled back WITH the failed flip.
+    const resultRow = real
+      .raw()
+      .query<{ job_id: string }, [string]>(`SELECT job_id FROM import_results WHERE job_id = ?`)
+      .get(job_id)
+    expect(resultRow).toBeNull()
+    // And the job never reached 'completed' (the flip was rolled back).
+    const jobRow = real
+      .raw()
+      .query<{ status: string }, [string]>(`SELECT status FROM import_jobs WHERE job_id = ?`)
+      .get(job_id)
+    expect(jobRow?.status).not.toBe('completed')
+  })
+
   test('synthesisResultToImportResult maps projects, tasks, people, and voice', () => {
     const mapped = synthesisResultToImportResult(SYNTH_RESULT)
     expect(mapped.proposed_projects).toEqual([

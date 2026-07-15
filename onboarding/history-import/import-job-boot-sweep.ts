@@ -84,6 +84,12 @@ export interface SweepOrphanedImportJobsInput {
   db: ProjectDb
   /** Test seam: clock. Defaults to `Date.now`. */
   now?: () => number
+  /** Test seam: invoked with the scanned orphan job_ids AFTER the `SELECT` and
+   *  BEFORE the guarded `UPDATE` loop — the exact window in which the engine's
+   *  hard timeout could concurrently make a row terminal. Lets a test drive that
+   *  race and prove the `WHERE status IN (<non-terminal>)` guard never clobbers a
+   *  now-terminal row. Undefined in production (no-op). */
+  onScanned?: (jobIds: string[]) => void
 }
 
 export interface ImportJobBootSweepResult {
@@ -117,6 +123,9 @@ export function sweepOrphanedImportJobsOnBoot(
       `SELECT job_id FROM import_jobs WHERE status IN (${statusList})`,
     )
     .all()
+  // Test seam: the window between the scan and the guarded writes, where a
+  // concurrent path (engine hard timeout) could make a row terminal.
+  input.onScanned?.(rows.map((r) => r.job_id))
   let failed = 0
   for (const row of rows) {
     // Guard the flip to non-terminal rows only: idempotent, and it never

@@ -188,4 +188,26 @@ describe('Open import-watch re-arm on reconnect (restart resilience)', () => {
     ws.close()
     await sleep(50)
   }, 45_000)
+
+  test('composition-boot re-arm consumes a stranded row WITHOUT any reconnect (proves the boot scan, not on_session_open)', async () => {
+    // P6 (c) BOUNDARY: the reconnect test above opens a WebSocket, and
+    // `on_session_open` ALSO re-arms the watcher — so it would still pass if the
+    // composition-time boot scan (open/composer.ts, the onboarding_state
+    // import-active re-arm) were deleted. This test opens NO socket: the ONLY thing
+    // that can consume the seeded stranded `import_analysis_presented` row is the
+    // composition-boot re-arm. Deleting that boot scan makes THIS test time out
+    // (verified: reverting the composer.ts re-arm block leaves the phase stranded).
+    harness = await startHarness()
+    // No WebSocket. The offline-owner-after-restart case.
+    await waitFor(() => currentPhase(harness!.db) === 'work_interview_gap_fill', 20_000)
+    expect(currentPhase(harness.db)).toBe('work_interview_gap_fill')
+
+    // The import context is preserved through the boot-driven consume.
+    const row = harness.db.raw()
+      .query("SELECT phase_state_json FROM onboarding_state WHERE project_slug = 'owner' AND user_id = 'owner'")
+      .get() as { phase_state_json: string }
+    const phaseState = JSON.parse(row.phase_state_json) as Record<string, unknown>
+    expect(phaseState['import_result']).toBeDefined()
+    expect(phaseState['import_consumed_at']).toBeDefined()
+  }, 45_000)
 })

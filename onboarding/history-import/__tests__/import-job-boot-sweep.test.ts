@@ -131,6 +131,65 @@ test('idempotent: a second sweep changes nothing (no double-fire)', () => {
   expect(readJob('orphan-2').completed_at).toBe(100)
 })
 
+test('scan/write race: a row made terminal AFTER the scan is NOT clobbered by the guarded write', () => {
+  // Two orphans are scanned. Between the SELECT and the guarded UPDATE loop, the
+  // engine's hard timeout concurrently `cancel`s one of them (the exact race the
+  // `WHERE status IN (<non-terminal>)` guard exists for). The guard must leave the
+  // now-`cancelled` row untouched and still fail the genuinely-orphaned one.
+  insertJob({ job_id: 'race-cancelled', status: 'pass1-running' })
+  insertJob({ job_id: 'race-orphan', status: 'pass2-running' })
+
+  const result = sweepOrphanedImportJobsOnBoot({
+    db,
+    now: () => 500,
+    onScanned: (jobIds) => {
+      // Sanity: both were scanned as orphans.
+      expect(jobIds.sort()).toEqual(['race-cancelled', 'race-orphan'])
+      // Concurrent terminal transition lands in the scan→write window.
+      db.raw().run(
+        `UPDATE import_jobs SET status = 'cancelled', completed_at = 250 WHERE job_id = 'race-cancelled'`,
+      )
+    },
+  })
+
+  // Scanned counts both; failed counts only the row still non-terminal at write time.
+  expect(result.scanned).toBe(2)
+  expect(result.failed).toBe(1)
+  // The concurrently-cancelled row is preserved verbatim — NOT clobbered to failed.
+  const cancelled = readJob('race-cancelled')
+  expect(cancelled.status).toBe('cancelled')
+  expect(cancelled.completed_at).toBe(250)
+  expect(cancelled.error_code).toBeNull()
+  // The genuine orphan is failed.
+  expect(readJob('race-orphan').status).toBe('failed')
+})
+
+test('the non-terminal set + terminal set exactly partition the schema CHECK statuses (independent of the impl constant)', () => {
+  // Derive the accepted `status` values from the DB schema itself — NOT from the
+  // implementation's own NON_TERMINAL_IMPORT_JOB_STATUSES — so a future schema
+  // status left out of that constant (→ silently never swept) is caught here.
+  const ddl = db
+    .raw()
+    .query<{ sql: string }, []>(
+      `SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'import_jobs'`,
+    )
+    .get()!.sql
+  // Pull the status CHECK IN (...) list out of the CREATE TABLE text.
+  const m = ddl.match(/status[^,]*?CHECK\s*\(\s*status\s+IN\s*\(([^)]*)\)/is)
+  const inList = m?.[1]
+  if (inList === undefined) throw new Error(`could not find a status CHECK constraint in:\n${ddl}`)
+  const schemaStatuses = new Set(
+    inList.split(',').map((s) => s.trim().replace(/^'|'$/g, '')),
+  )
+  // Terminal statuses are the fixed complement handled by the engine, spelled out
+  // here independently (the whole point is to not trust the impl's own list).
+  const TERMINAL = ['completed', 'failed', 'cancelled']
+  const classified = new Set<string>([...NON_TERMINAL_IMPORT_JOB_STATUSES, ...TERMINAL])
+  // Every schema status must be classified (else it would never be swept), and we
+  // must not classify a status the schema doesn't allow.
+  expect([...schemaStatuses].sort()).toEqual([...classified].sort())
+})
+
 test('empty DB: sweep is a no-op', () => {
   const result = sweepOrphanedImportJobsOnBoot({ db })
   expect(result).toEqual({ scanned: 0, failed: 0 })
