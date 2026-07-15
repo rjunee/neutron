@@ -30,7 +30,7 @@ import {
   SnapshotNotFoundError,
   SnapshotPathNotFoundError,
 } from '../git/project-backup-store.ts'
-import { ownerSlugMismatch } from './auth-helpers.ts'
+import { jsonError, jsonOk, ownerSlugMismatch, readJsonBody, resolveBearer } from './surface-kit.ts'
 
 const SNAPSHOT_SHA_RE = /^[0-9a-f]{40}$/
 
@@ -266,43 +266,6 @@ async function handleRestore(
   return jsonOk({ restore: result })
 }
 
-interface ResolvedAuth {
-  user_id: string
-  project_slug: string
-}
-
-interface AuthFailure {
-  code: string
-  message: string
-}
-
-async function resolveBearer(
-  req: Request,
-  auth: AppWsAuthResolver,
-): Promise<ResolvedAuth | AuthFailure> {
-  const header = req.headers.get('authorization') ?? ''
-  if (!header.toLowerCase().startsWith('bearer ')) {
-    return {
-      code: 'missing_bearer',
-      message: 'expected Authorization: Bearer <token>',
-    }
-  }
-  const token = header.slice('bearer '.length).trim()
-  const resolved = await auth.resolve(token)
-  if ('code' in resolved) {
-    return { code: resolved.code, message: resolved.message }
-  }
-  return { user_id: resolved.user_id, project_slug: resolved.project_slug }
-}
-
-async function readJsonBody(req: Request): Promise<unknown> {
-  try {
-    return await req.json()
-  } catch {
-    return null
-  }
-}
-
 function readStringField(raw: unknown): string | null {
   if (typeof raw !== 'string' || raw.length === 0) return null
   return raw
@@ -325,18 +288,4 @@ function jsonForError(err: unknown): Response {
     return jsonError(503, err.code, err.message)
   }
   throw err
-}
-
-function jsonOk(body: Record<string, unknown>, status = 200): Response {
-  return new Response(JSON.stringify({ ok: true, ...body }), {
-    status,
-    headers: { 'content-type': 'application/json' },
-  })
-}
-
-function jsonError(status: number, code: string, message: string): Response {
-  return new Response(JSON.stringify({ ok: false, code, message }), {
-    status,
-    headers: { 'content-type': 'application/json' },
-  })
 }

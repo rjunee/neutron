@@ -83,7 +83,7 @@ import {
   BinaryTypeError,
   MAX_BINARY_BYTES,
 } from '../storage/binary-types.ts'
-import { ownerSlugMismatch } from './auth-helpers.ts'
+import { jsonError, jsonOk, ownerSlugMismatch, readJsonBody, resolveBearer } from './surface-kit.ts'
 
 export interface AppDocsSurfaceOptions {
   store: DocStore
@@ -1625,30 +1625,6 @@ async function handleDiff(
   return jsonOk({ diff: result as DiffResult })
 }
 
-interface ResolvedAuth {
-  user_id: string
-  project_slug: string
-}
-
-interface AuthFailure {
-  code: string
-  message: string
-}
-
-async function resolveBearer(
-  req: Request,
-  auth: AppWsAuthResolver,
-): Promise<ResolvedAuth | AuthFailure> {
-  const header = req.headers.get('authorization') ?? ''
-  if (!header.toLowerCase().startsWith('bearer ')) {
-    return { code: 'missing_bearer', message: 'expected Authorization: Bearer <token>' }
-  }
-  const token = header.slice('bearer '.length).trim()
-  const resolved = await auth.resolve(token)
-  if ('code' in resolved) return { code: resolved.code, message: resolved.message }
-  return { user_id: resolved.user_id, project_slug: resolved.project_slug }
-}
-
 /**
  * Argus r1 MINOR — lightweight OCC stat for the comments
  * `doc_changed_underfoot` 409. Routes through `DocStore.statDoc` so
@@ -1675,14 +1651,6 @@ async function statDocModifiedAt(
   } catch (err) {
     if (err instanceof DocNotFoundError) return null
     throw err
-  }
-}
-
-async function readJsonBody(req: Request): Promise<unknown> {
-  try {
-    return await req.json()
-  } catch {
-    return null
   }
 }
 
@@ -1843,16 +1811,3 @@ function jsonForError(err: unknown): Response {
   throw err
 }
 
-function jsonOk(body: Record<string, unknown>, status = 200): Response {
-  return new Response(JSON.stringify({ ok: true, ...body }), {
-    status,
-    headers: { 'content-type': 'application/json' },
-  })
-}
-
-function jsonError(status: number, code: string, message: string): Response {
-  return new Response(JSON.stringify({ ok: false, code, message }), {
-    status,
-    headers: { 'content-type': 'application/json' },
-  })
-}

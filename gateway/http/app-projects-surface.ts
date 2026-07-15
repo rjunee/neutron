@@ -40,6 +40,7 @@
 
 import { sanitizeProjectId } from '@neutronai/channels/adapters/app-ws/envelope.ts'
 import type { AppWsAuthResolver } from '@neutronai/channels/adapters/app-ws/auth.ts'
+import { jsonError, jsonOk, readJsonBody, resolveBearer, type ResolvedAuth } from './surface-kit.ts'
 import {
   type AgentEngagementMode,
   ALL_AGENT_ENGAGEMENT_MODES,
@@ -1126,56 +1127,3 @@ async function handleConnectRevokeRoute(
   return jsonOk({ revoked: result.revoked, project_id, local_slug })
 }
 
-interface ResolvedAuth {
-  user_id: string
-  project_slug: string
-}
-
-interface AuthFailure {
-  code: string
-  message: string
-}
-
-async function resolveBearer(
-  req: Request,
-  auth: AppWsAuthResolver,
-): Promise<ResolvedAuth | AuthFailure> {
-  const header = req.headers.get('authorization') ?? ''
-  if (!header.toLowerCase().startsWith('bearer ')) {
-    return { code: 'missing_bearer', message: 'expected Authorization: Bearer <token>' }
-  }
-  const token = header.slice('bearer '.length).trim()
-  const resolved = await auth.resolve(token)
-  if ('code' in resolved) return { code: resolved.code, message: resolved.message }
-  return { user_id: resolved.user_id, project_slug: resolved.project_slug }
-}
-
-async function readJsonBody(req: Request): Promise<unknown> {
-  try {
-    return await req.json()
-  } catch {
-    return null
-  }
-}
-
-function jsonOk(body: Record<string, unknown>, status = 200): Response {
-  return new Response(JSON.stringify({ ok: true, ...body }), {
-    status,
-    headers: { 'content-type': 'application/json' },
-  })
-}
-
-function jsonError(
-  status: number,
-  code: string,
-  message: string,
-  extra: Record<string, unknown> = {},
-): Response {
-  return new Response(
-    JSON.stringify({ ok: false, code, message, ...extra }),
-    {
-      status,
-      headers: { 'content-type': 'application/json' },
-    },
-  )
-}

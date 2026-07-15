@@ -161,16 +161,32 @@ describe('project_slug timing-safe comparison (ISSUE #34)', () => {
   })
 
   it('every gateway/http surface that compares project_slug imports ownerSlugMismatch', () => {
-    // A surface that calls `ownerSlugMismatch(` must have an import for it.
+    // A surface that calls `ownerSlugMismatch(` must IMPORT it — either directly
+    // from `./auth-helpers.ts`, or via `./surface-kit.ts` which RE-EXPORTS the
+    // exact same timing-safe primitive from auth-helpers (O7 consolidation).
     // Catches a "shadow re-implementation" copy-paste regression.
     const missing: string[] = []
     for (const name of inScopeSurfaces()) {
       const body = readFileSync(join(HTTP_DIR, name), 'utf8')
       if (!body.includes('ownerSlugMismatch(')) continue
-      const importLine = /from ['"]\.\/auth-helpers\.ts['"]/.test(body)
+      const importLine =
+        /from ['"]\.\/auth-helpers\.ts['"]/.test(body) || /from ['"]\.\/surface-kit\.ts['"]/.test(body)
       if (!importLine) missing.push(name)
     }
     expect(missing).toEqual([])
+  })
+
+  it('surface-kit RE-EXPORTS the timing-safe ownerSlugMismatch straight from auth-helpers (no shadow impl)', () => {
+    // The O7 consolidation seam: surfaces routing `ownerSlugMismatch` through
+    // surface-kit must get the CANONICAL timing-safe primitive, not a local
+    // re-implementation. Pin that surface-kit re-exports it directly from
+    // auth-helpers — so a future shadow copy in surface-kit fails this guard.
+    const kit = readFileSync(join(HTTP_DIR, 'surface-kit.ts'), 'utf8')
+    // A single `export { … ownerSlugMismatch … } from './auth-helpers.ts'` block.
+    const reexport = /export\s*\{[^}]*\bownerSlugMismatch\b[^}]*\}\s*from\s*['"]\.\/auth-helpers\.ts['"]/s.test(kit)
+    expect(reexport).toBe(true)
+    // And surface-kit must NOT define its own `function ownerSlugMismatch`.
+    expect(/function\s+ownerSlugMismatch\b/.test(kit)).toBe(false)
   })
 
   it('the token/cookie/bearer auth surfaces use constantTimeEqual, not plain slug equality', () => {

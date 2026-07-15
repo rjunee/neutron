@@ -54,6 +54,7 @@
 
 import type { ButtonStore, ChatHistoryTurn } from '@neutronai/channels/button-store.ts'
 import { ownerIdentityMismatch, type OwnerHandleResolver } from './auth-helpers.ts'
+import { jsonResponse } from './surface-kit.ts'
 import { webTopicId } from './chat-bridge.ts'
 
 /**
@@ -248,16 +249,15 @@ function parseBefore(raw: string | null, nowMs: number): number {
   return Math.floor(n)
 }
 
+// O7 — this surface (pre-existing, harmless discrepancy) sets
+// `application/json; charset=utf-8` where every other gateway/http surface
+// sets plain `application/json`; kept byte-identical rather than silently
+// normalized, so these stay tiny local wrappers around the shared
+// `jsonResponse` primitive instead of importing `jsonOk`/`jsonError` directly.
 function jsonOk(body: Record<string, unknown>, status = 200): Response {
-  return new Response(JSON.stringify({ ok: true, ...body }), {
-    status,
-    headers: { 'content-type': 'application/json; charset=utf-8' },
-  })
+  return jsonResponse(status, { ok: true, ...body }, 'application/json; charset=utf-8')
 }
 
 function jsonError(status: number, code: string, message: string): Response {
-  return new Response(JSON.stringify({ ok: false, code, message }), {
-    status,
-    headers: { 'content-type': 'application/json; charset=utf-8' },
-  })
+  return jsonResponse(status, { ok: false, code, message }, 'application/json; charset=utf-8')
 }

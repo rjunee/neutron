@@ -41,6 +41,7 @@
  */
 
 import type { AppWsAuthResolver } from '@neutronai/channels/adapters/app-ws/auth.ts'
+import { jsonResponse, resolveBearer } from './surface-kit.ts'
 import type {
   CoreInstallationRecord,
 } from '@neutronai/cores-runtime/installations-store.ts'
@@ -490,33 +491,3 @@ function humaniseSlug(slug: string): string {
     .replace(/(^|\s)\S/g, (m) => m.toUpperCase())
 }
 
-interface ResolvedAuth {
-  user_id: string
-  project_slug: string
-}
-
-interface AuthFailure {
-  code: string
-  message: string
-}
-
-async function resolveBearer(
-  req: Request,
-  auth: AppWsAuthResolver,
-): Promise<ResolvedAuth | AuthFailure> {
-  const header = req.headers.get('authorization') ?? ''
-  if (!header.toLowerCase().startsWith('bearer ')) {
-    return { code: 'missing_bearer', message: 'expected Authorization: Bearer <token>' }
-  }
-  const token = header.slice('bearer '.length).trim()
-  const resolved = await auth.resolve(token)
-  if ('code' in resolved) return { code: resolved.code, message: resolved.message }
-  return { user_id: resolved.user_id, project_slug: resolved.project_slug }
-}
-
-function jsonResponse(status: number, body: unknown): Response {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: { 'content-type': 'application/json' },
-  })
-}
