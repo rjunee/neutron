@@ -25,6 +25,7 @@ import { join } from 'node:path'
 import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { buildOpenGraphComposer } from '../composer.ts'
+import { buildGBrainMemory } from '@neutronai/gateway/wiring/build-gbrain-memory.ts'
 import { boot } from '@neutronai/gateway/index.ts'
 
 const SAVED_ENV_KEYS = [
@@ -76,6 +77,17 @@ test('RA2: the Open composition sets memory_health with a consistent, non-sensit
     expect(typeof composition.memory_health).toBe('function')
     const summary = composition.memory_health!()
     expect(typeof summary.available).toBe('boolean')
+    // SOURCE check: the thunk must reflect buildGBrainMemory's bootHealth, not a
+    // constant. Probe the SAME env independently and assert equality — a stubbed
+    // `() => ({ available: true })` wiring would mismatch on any host whose real
+    // value differs (e.g. CI without gbrain → false), catching dead wiring.
+    const independent = buildGBrainMemory({ owner_home: tmpDir, project_slug: 'owner', env: process.env })
+    expect(summary.available).toBe(independent.bootHealth.binaryPresent)
+    try {
+      await independent.close()
+    } catch {
+      /* best-effort */
+    }
     if (summary.available) {
       // Healthy backend → no degraded detail.
       expect(summary.detail).toBeUndefined()
@@ -87,9 +99,11 @@ test('RA2: the Open composition sets memory_health with a consistent, non-sensit
       expect(summary.detail).toContain('gbrain')
     }
   } finally {
+    // Await async cleanups — realmode_cleanups may return Promise<void> (GBrain /
+    // client shutdown); not awaiting races the afterEach db.close()/rmSync.
     for (const cleanup of composition.realmode_cleanups ?? []) {
       try {
-        cleanup()
+        await cleanup()
       } catch {
         /* best-effort */
       }
