@@ -24,7 +24,7 @@ export interface ChannelsCompositionInput {
    * `channels` module then constructs its own router as before. The
    * behaviour for those callers is unchanged.
    *
-   * See `docs/plans/2026-05-05-002-feat-sprint-19-wiring-wiring-plan.md`
+   * See `docs/plans/2026-05-05-002-feat-sprint-19-realmode-composer-wiring-plan.md`
    * § Architectural revision: drop `DeferredEventReceiver` + `on_graph_composed`.
    */
   channel_router?: ChannelRouter

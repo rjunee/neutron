@@ -8,7 +8,7 @@
  * constructing its own from `(db, project_slug, topic_handler)` when
  * unset (preserves the legacy P1 path).
  *
- * See `docs/plans/2026-05-05-002-feat-sprint-19-wiring-wiring-plan.md`
+ * See `docs/plans/2026-05-05-002-feat-sprint-19-realmode-composer-wiring-plan.md`
  * § Architectural revision: drop `DeferredEventReceiver` + `on_graph_composed`.
  */
 

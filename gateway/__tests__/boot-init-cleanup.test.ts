@@ -1,7 +1,7 @@
 /**
  * Sprint 19 Phase 1 — boot init-failure cleanup tests.
  *
- * Per `docs/plans/2026-05-05-002-feat-sprint-19-wiring-wiring-plan.md`
+ * Per `docs/plans/2026-05-05-002-feat-sprint-19-realmode-composer-wiring-plan.md`
  * § Boot init cleanup (P2 race fix). When the composer or
  * `composeProductionGraph` throws, `boot()` MUST release the open SQLite
  * handle (`db.close()`) and shutdown any partially-composed graph

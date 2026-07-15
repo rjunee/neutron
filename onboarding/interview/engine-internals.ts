@@ -919,7 +919,7 @@ export interface InterviewEngineDeps {
    * + on `start()` re-entry. The hook is the only surface the engine
    * touches; production composer wires a real `ImportJobRunner` with
    * parsers + LLM calls behind it (see
-   * `gateway/wiring/build-import-job-runner.ts`). Tests
+   * `gateway/wiring/build-synthesis-import-runner.ts`). Tests
    * inject a recorder.
    *
    * When absent, `chatgpt_zip` / `claude_zip` choices collapse to the
@@ -1084,7 +1084,7 @@ export interface InterviewEngineDeps {
  * `recordAgentName`'s contract: idempotent, nullable, best-effort
  * (failures logged, not thrown). Optional so existing test fixtures
  * built before S3 keep compiling — production wiring in
- * `gateway/wiring/resolve-persona-sync.ts` populates both
+ * `gateway/wiring/build-landing-stack.ts` populates both
  * methods.
  */
 export interface PersonaSyncHook {

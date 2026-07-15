@@ -1,7 +1,7 @@
 /**
  * @neutronai/gateway/wiring — landing-stack factory (Sprint 19 P3).
  *
- * Per docs/plans/2026-05-05-002-feat-sprint-19-wiring-wiring-plan.md
+ * Per docs/plans/2026-05-05-002-feat-sprint-19-realmode-composer-wiring-plan.md
  * § Phase 3. The boot path composes a per-instance gateway from a handful of
  * narrow primitives (button-store, onboarding state, transcript writer,
  * web sender registry, JWT verifier, etc.). Inlining this wiring at the

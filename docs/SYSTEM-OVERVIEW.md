@@ -3855,7 +3855,7 @@ the user text). Layer order, top to bottom:
   whatever topic was focused (cross-project bleed). The app-ws (Expo mobile)
   surface carries `project_id`/`message_id` on its own envelope shape instead.
 - *Wow brief persistence (2026-06-20).* The wow channel adapter's `sendText`
-  (`buildWowChannelAdapter`, `gateway/wiring/build-wow-dispatcher.ts`)
+  (`buildWowChannelAdapter`, `gateway/wiring/build-landing-stack.ts`)
   persists every delivered agent statement — notably action 01's first-week
   brief — to `button_prompts` as an inert, already-resolved agent-bubble turn so
   it survives a reload. Best-effort on the success path only (try/catch); it
