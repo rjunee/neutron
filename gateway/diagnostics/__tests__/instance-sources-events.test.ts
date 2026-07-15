@@ -43,15 +43,23 @@ function report(): ReturnType<typeof composeDiagnostics> {
 }
 
 describe('buildInstanceDiagnosticsSources — recent_events reads system_events', () => {
-  it('surfaces a core_install_failed degrade row (newest first, with payload/scope)', async () => {
+  it('surfaces a scoped core_install_failed degrade row (newest first, with payload/scope)', async () => {
     const store = new SystemEventsStore({ db })
-    // Two degrade rows on the journal; `listRecent` returns newest (ts DESC).
+    // A NULL-scoped row (excluded — NULL is ambiguous) + two SCOPED degrade rows.
     await store.record({
       event: 'gbrain_unavailable',
       module: 'gbrain',
       level: 'warn',
       ts: 100,
-      payload: { reason: 'not_init' },
+      payload: { reason: 'not_init' }, // NULL scope → excluded from an instance-scoped read
+    })
+    await store.record({
+      event: 'cron_job_error',
+      module: 'cron',
+      level: 'error',
+      project_slug: SLUG,
+      ts: 150,
+      payload: { job: 'digest' },
     })
     await store.record({
       event: 'core_install_failed',
@@ -64,7 +72,8 @@ describe('buildInstanceDiagnosticsSources — recent_events reads system_events'
 
     const ev = report().recent_events
     expect(ev.available).toBe(true)
-    expect(ev.events!.map((e) => e.event)).toEqual(['core_install_failed', 'gbrain_unavailable'])
+    // NULL-scoped gbrain row is NOT disclosed; the two SLUG rows are, newest first.
+    expect(ev.events!.map((e) => e.event)).toEqual(['core_install_failed', 'cron_job_error'])
     expect(ev.events![0]).toMatchObject({
       ts: 200,
       level: 'error',
@@ -81,9 +90,9 @@ describe('buildInstanceDiagnosticsSources — recent_events reads system_events'
     expect(ev.events).toEqual([])
   })
 
-  it('SCOPES to this slug + process-wide (NULL) rows — a foreign slug is neither disclosed nor allowed to starve in-scope rows', async () => {
+  it('STRICTLY scopes to this slug — neither a foreign slug NOR an ambiguous NULL row is disclosed', async () => {
     const store = new SystemEventsStore({ db })
-    // In-scope (demo) + process-wide (NULL) rows.
+    // In-scope (demo) row.
     await store.record({
       event: 'core_install_failed',
       module: 'cores',
@@ -92,10 +101,19 @@ describe('buildInstanceDiagnosticsSources — recent_events reads system_events'
       ts: 100,
       payload: { core_slug: 'email' },
     })
-    await store.record({ event: 'gbrain_unavailable', module: 'gbrain', level: 'warn', ts: 110 }) // NULL scope
+    // A NULL-scoped row that carries an instance-specific identifier — this is the
+    // exact leak vector: an emitter that omitted its scope. It must NOT be disclosed
+    // into an instance-scoped report.
+    await store.record({
+      event: 'import_orphaned',
+      module: 'onboarding',
+      level: 'error',
+      ts: 110,
+      payload: { job_id: 'tenant-secret-job' }, // NULL scope
+    })
     // A FOREIGN-slug row that is the NEWEST — under an UNSCOPED `LIMIT` it would
     // both leak into this instance's report AND (with a tight limit) starve the
-    // in-scope rows out of the window.
+    // in-scope row out of the window.
     await store.record({
       event: 'credential_all_cooldown',
       module: 'credentials',
@@ -105,15 +123,16 @@ describe('buildInstanceDiagnosticsSources — recent_events reads system_events'
       payload: { secret: 'must-not-leak' },
     })
 
-    // Tight limit (2) so the newest foreign row WOULD displace an in-scope row if unscoped.
+    // Tight limit (2) so the newest foreign/NULL rows WOULD displace the in-scope row if unscoped.
     const ev = composeDiagnostics(
       buildInstanceDiagnosticsSources({ db, project_slug: SLUG, owner_home: tmp, maxRecentEvents: 2 }),
     ).recent_events
     expect(ev.available).toBe(true)
     const events = ev.events!
-    // No cross-project disclosure — the foreign slug never appears.
+    // No cross-project disclosure — neither the foreign slug nor the NULL tenant row appears.
     expect(events.some((e) => e.project_slug === 'other-slug')).toBe(false)
-    // Both in-scope + process-wide rows survive (foreign didn't starve them).
-    expect(events.map((e) => e.event).sort()).toEqual(['core_install_failed', 'gbrain_unavailable'])
+    expect(events.some((e) => e.event === 'import_orphaned')).toBe(false)
+    // Only the in-scope row survives.
+    expect(events.map((e) => e.event)).toEqual(['core_install_failed'])
   })
 })

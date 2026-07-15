@@ -77,12 +77,16 @@ export function buildInstanceDiagnosticsSources(
     // Source = `system_events` — O4's product-wide degradation journal (the
     // deliberate silent fail-soft / degrade decisions: core-install failures,
     // credential cooldown-saturation, REPL restart-cap, cron errors, orphaned
-    // imports, …). SCOPED to this instance's slug OR process-wide (`project_slug
-    // IS NULL`) rows — the sibling cron/import sources filter the same way and the
-    // endpoint is instance-scoped, so an unscoped read would DISCLOSE another
-    // slug's events/payloads and let foreign rows starve in-scope ones out of the
-    // window (Codex). The scope predicate is applied at the DB before the LIMIT;
-    // still newest-first and bounded to `maxEvents` rows per hit.
+    // imports, …). STRICTLY scoped to this instance's slug: the sibling cron/import
+    // sources filter the same way and the endpoint is instance-scoped, so an
+    // unscoped read would DISCLOSE another slug's events/payloads and let foreign
+    // rows starve in-scope ones out of the window (Codex). NULL-scoped rows are
+    // excluded too — `NULL` conflates "process-wide" with "emitter omitted its
+    // scope", and several O4 emitters persist NULL while carrying instance-specific
+    // identifiers, so surfacing them here would leak across projects. Genuinely
+    // process-wide faults stay visible via their own sections (gbrain/credentials/
+    // cron). The scope predicate is applied at the DB before the LIMIT; still
+    // newest-first and bounded to `maxEvents` rows per hit.
     recentEvents: () => systemEvents.listRecentForScope(project_slug, maxEvents),
     replRegistry: () => ({
       path: registryPath,

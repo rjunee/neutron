@@ -95,11 +95,11 @@ describe('SystemEventsStore.listRecentForScope — scope + limit boundaries (O5)
     )
   }
 
-  it('scopes to project_slug OR NULL; a foreign slug is never returned', () => {
+  it('scopes STRICTLY to project_slug — foreign AND NULL rows are excluded', () => {
     insert('a', 10, 'demo')
-    insert('b', 20, null) // process-wide → included
+    insert('b', 20, null) // NULL is ambiguous (process-wide vs unscoped-tenant) → excluded
     insert('c', 30, 'other') // foreign → excluded (even though newest)
-    expect(store.listRecentForScope('demo', 50).map((r) => r.id).sort()).toEqual(['a', 'b'])
+    expect(store.listRecentForScope('demo', 50).map((r) => r.id).sort()).toEqual(['a'])
   })
 
   it('non-positive / non-finite limits return []', () => {
