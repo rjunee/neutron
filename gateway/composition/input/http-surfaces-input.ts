@@ -1,5 +1,5 @@
 import type { Server, WebSocketHandler } from 'bun'
-import type { CompositionHttpHandler } from '../types.ts'
+import type { CompositionHttpHandler, MemoryHealthProvider } from '../types.ts'
 
 export interface HttpSurfacesCompositionInput {
   /**
@@ -30,6 +30,24 @@ export interface HttpSurfacesCompositionInput {
    * context flows through this seam instead of being inlined.
    */
   default_handler?: CompositionHttpHandler
+  /**
+   * RA2 (gbrain live-or-loud) — coarse memory-backend health provider the boot
+   * shell folds into the terminal `/healthz` liveness body. When the composer
+   * sets it (Open wires `buildGBrainMemory`'s boot-time binary-presence probe),
+   * `defaultHealthzHandler` reports `status:'degraded'` + `memory:'unavailable'`
+   * when the backend BINARY IS ABSENT/UNRESOLVABLE — a LOUD, monitorable signal
+   * instead of a silent recall degrade. This catches the PRIMARY failure (the
+   * `gbrain` binary not installed — the ND1/RA5 root cause). SCOPE (deliberate):
+   * `available` reflects binary PRESENCE, NOT live serve-ability — a present-but-
+   * broken binary (installs OK, fails at init/serve) reads `available:true` here;
+   * that rarer case is caught by RA5's query-time fail-soft (recall degrades to a
+   * logged no-op, never a crash). A deeper cached serve-probe is a tracked
+   * follow-up. Optional — omitted → `/healthz` stays byte-identical (`status:'ok'`,
+   * no `memory` field), so the no-composer dev shell and any composer that doesn't
+   * wire memory are unaffected. The RICH, owner-gated view remains
+   * `GET /api/app/admin/diagnostics`.
+   */
+  memory_health?: MemoryHealthProvider
   /**
    * Sprint 18 — landing server (chat HTTP + WebSocket upgrade) wired by
    * `gateway/index.ts:boot` into the per-instance `Bun.serve` listener.

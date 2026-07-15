@@ -19,7 +19,7 @@ import {
   makePerConnectResolver,
   type GBrainMemoryWiring,
 } from '../build-gbrain-memory.ts'
-import { composeGbrainChildEnv } from '@neutronai/gbrain-memory/index.ts'
+import { composeGbrainChildEnv, resolveGbrainCommand } from '@neutronai/gbrain-memory/index.ts'
 import {
   buildOpenAiEmbedderConfig,
   resolveInitEmbeddingTarget,
@@ -728,9 +728,77 @@ describe('buildGBrainMemory', () => {
     // The public shape carries ONLY memoryStore/syncHook/close.
     expect('client' in wiring).toBe(false)
     expect((wiring as unknown as Record<string, unknown>)['client']).toBeUndefined()
-    expect(Object.keys(wiring).sort()).toEqual(['close', 'memoryStore', 'syncHook'])
+    // RA2 adds `bootHealth` (a plain value object, NOT a transport) alongside the
+    // typed seams — still no `client`.
+    expect(Object.keys(wiring).sort()).toEqual(['bootHealth', 'close', 'memoryStore', 'syncHook'])
     // close() never spawned a child (lazy connect), so it resolves cleanly.
     await expect(wiring.close()).resolves.toBeUndefined()
+  })
+
+  // RA2 (gbrain live-or-loud) — the boot-time binary-presence verdict that
+  // `/healthz` folds into its degraded assertion.
+  test('RA2: bootHealth.binaryPresent is TRUE + no detail when a real gbrain is on PATH', () => {
+    // Put an executable `gbrain` in a temp dir and point PATH at ONLY that dir —
+    // `resolveGbrainCommand` honors the given env PATH first (Bun.which), so this
+    // is deterministic regardless of what's installed on the host.
+    const dir = mkdtempSync(join(tmpdir(), 'bgm-bin-'))
+    try {
+      const bin = join(dir, 'gbrain')
+      writeFileSync(bin, '#!/usr/bin/env bun\n')
+      chmodSync(bin, 0o755)
+      const env = { PATH: dir }
+      // Sanity: the resolver itself finds it (bootHealth must mirror this).
+      expect(resolveGbrainCommand(env)).not.toBeNull()
+      const wiring = buildGBrainMemory({ owner_home: join(dir, 'data'), project_slug: 'acme', env })
+      expect(wiring.bootHealth.binaryPresent).toBe(true)
+      expect(wiring.bootHealth.detail).toBeUndefined()
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('RA2: bootHealth reports binaryPresent:false + a coarse, non-sensitive detail when the binary is missing (deterministic)', () => {
+    const home = mkdtempSync(join(tmpdir(), 'bgm-missing-'))
+    try {
+      // DETERMINISTIC missing-binary branch on ANY host: inject a resolver that
+      // returns null. (resolveGbrainCommand also probes host-absolute /usr/local +
+      // /opt/homebrew paths a test env can't clear, so a dev host with gbrain
+      // installed would otherwise SKIP this branch entirely.)
+      const env = { PATH: join(home, 'empty-bin'), HOME: home }
+      const wiring = buildGBrainMemory({
+        owner_home: join(home, 'data'),
+        project_slug: 'acme',
+        env,
+        resolveCommand: () => null,
+      })
+      expect(wiring.bootHealth.binaryPresent).toBe(false)
+      expect(typeof wiring.bootHealth.detail).toBe('string')
+      // Coarse + non-sensitive: no owner path leaks into the /healthz-bound detail.
+      expect(wiring.bootHealth.detail).not.toContain(home)
+      expect(wiring.bootHealth.detail).toContain('gbrain')
+    } finally {
+      rmSync(home, { recursive: true, force: true })
+    }
+  })
+
+  test('RA2: bootHealth reports binaryPresent:true + no detail when the resolver finds a binary (deterministic)', () => {
+    const home = mkdtempSync(join(tmpdir(), 'bgm-present-'))
+    try {
+      // Symmetric: inject a resolver that returns an executable path → present.
+      const bin = join(home, 'gbrain')
+      writeFileSync(bin, '#!/bin/sh\n')
+      chmodSync(bin, 0o755)
+      const wiring = buildGBrainMemory({
+        owner_home: join(home, 'data'),
+        project_slug: 'acme',
+        env: { HOME: home },
+        resolveCommand: () => bin,
+      })
+      expect(wiring.bootHealth.binaryPresent).toBe(true)
+      expect(wiring.bootHealth.detail).toBeUndefined()
+    } finally {
+      rmSync(home, { recursive: true, force: true })
+    }
   })
 
   test('legacy 3072-dim brain on disk + default → emits a LOUD keyword+graph-degradation warning', () => {

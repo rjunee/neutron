@@ -153,6 +153,75 @@ describe('defaultHealthzHandler', () => {
     const res = await handler(new Request('http://localhost/somewhere'))
     expect(res.status).toBe(404)
   })
+
+  // RA2 (gbrain live-or-loud) — memory-backend health folded into `/healthz`.
+  test('RA2: a DOWN memory backend flips /healthz to degraded + a FIXED public detail, NEVER echoing the provider string (no leak)', async () => {
+    // ADVERSARIAL: the provider returns a sensitive detail (path + pid). The
+    // unauthenticated /healthz boundary must emit a FIXED public message and never
+    // echo the provider's string (defense-in-depth — the provider is not trusted).
+    const handler = defaultHealthzHandler({
+      project_slug: 'unit-test',
+      bootedAt: Date.now() - 10,
+      memoryHealth: () => ({ available: false, detail: '/home/owner/.gbrain/state pid=1234 (secret)' }),
+    })
+    const res = await handler(new Request('http://localhost/healthz'))
+    // DELIBERATELY 200 — liveness must not restart-loop on a fail-soft degrade.
+    expect(res.status).toBe(200)
+    const raw = await res.text()
+    const body = JSON.parse(raw) as { status: string; memory?: string; memory_detail?: string }
+    expect(body.status).toBe('degraded')
+    expect(body.memory).toBe('unavailable')
+    expect(body.memory_detail).toBe('memory backend unavailable')
+    // The sensitive provider string appears NOWHERE in the response.
+    expect(raw).not.toContain('/home/owner')
+    expect(raw).not.toContain('pid=1234')
+    expect(raw).not.toContain('secret')
+  })
+
+  test('RA2: a healthy memory backend reports status:ok + memory:ok (no memory_detail)', async () => {
+    const handler = defaultHealthzHandler({
+      project_slug: 'unit-test',
+      bootedAt: Date.now(),
+      memoryHealth: () => ({ available: true }),
+    })
+    const res = await handler(new Request('http://localhost/healthz'))
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as { status: string; memory?: string; memory_detail?: string }
+    expect(body.status).toBe('ok')
+    expect(body.memory).toBe('ok')
+    expect(body.memory_detail).toBeUndefined()
+  })
+
+  test('RA2: no memoryHealth provider → body byte-identical to the pre-RA2 stub (no memory field)', async () => {
+    const handler = defaultHealthzHandler({ project_slug: 'unit-test', bootedAt: Date.now() })
+    const res = await handler(new Request('http://localhost/healthz'))
+    const body = (await res.json()) as Record<string, unknown>
+    expect(body.status).toBe('ok')
+    expect('memory' in body).toBe(false)
+    expect(Object.keys(body).sort()).toEqual(['project_slug', 'status', 'uptime_ms'])
+  })
+
+  test('RA2: a THROWING memoryHealth provider is reported DEGRADED (loud), never crashes the probe, still 200', async () => {
+    const handler = defaultHealthzHandler({
+      project_slug: 'unit-test',
+      bootedAt: Date.now(),
+      memoryHealth: () => {
+        throw new Error('boom /home/owner/.gbrain pid=1234')
+      },
+    })
+    const res = await handler(new Request('http://localhost/healthz'))
+    // Liveness never crashes → still 200; but a WIRED provider that throws is a
+    // degrade signal, not a silent 'ok' (false-green when health eval breaks).
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as { status: string; memory?: string; memory_detail?: string }
+    expect(body.status).toBe('degraded')
+    expect(body.memory).toBe('unavailable')
+    // Coarse detail only — the raw error (paths/pids) must not leak to the
+    // unauthenticated endpoint.
+    expect(body.memory_detail).toBe('memory backend unavailable')
+    expect(JSON.stringify(body)).not.toContain('/home/owner')
+    expect(JSON.stringify(body)).not.toContain('pid=1234')
+  })
 })
 
 describe('boot opens Bun.serve on resolved port', () => {

@@ -207,6 +207,76 @@ describe('boot init-failure cleanup', () => {
     }
   })
 
+  test('RA2: boot() folds composition.memory_health into the SERVED /healthz (degraded end-to-end)', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'neutron-boot-mem-health-'))
+    cleanups.push(root)
+    process.env['NEUTRON_DB_PATH'] = join(root, 'owner.db')
+    process.env['NEUTRON_INSTANCE_SLUG'] = 'alice'
+    delete process.env['NOTIFY_SOCKET']
+
+    // A composition whose memory backend is DOWN. This is the end-to-end propagation
+    // Codex flagged: the composer sets `memory_health`, and boot() must fold it into
+    // the terminal `/healthz` handler. Deleting that fold in gateway/index.ts leaves
+    // the served /healthz reading 'ok' → this test goes red.
+    const handle = await boot({
+      port: 0,
+      composer: ({ db, project_slug }) => ({
+        db,
+        project_slug,
+        topic_handler: async () => {},
+        approval_notifier: { notify: async () => undefined },
+        watchdog_notifier: { notify: async () => undefined },
+        reminder_dispatcher: { dispatch: async () => undefined },
+        heartbeat_tracker: { lastHeartbeatAt: () => Date.now() },
+        platform: STUB_PLATFORM,
+        memory_health: () => ({ available: false, detail: 'gbrain binary not found on PATH' }),
+      }),
+    })
+    try {
+      const res = await fetch(`http://127.0.0.1:${handle.server.port}/healthz`)
+      // Liveness stays 200; the body is LOUDLY degraded.
+      expect(res.status).toBe(200)
+      const body = (await res.json()) as { status: string; memory?: string; memory_detail?: string }
+      expect(body.status).toBe('degraded')
+      expect(body.memory).toBe('unavailable')
+      expect(body.memory_detail).toBe('memory backend unavailable')
+    } finally {
+      await handle.shutdown()
+    }
+  })
+
+  test('RA2: boot() with a healthy composition memory_health serves status:ok + memory:ok', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'neutron-boot-mem-ok-'))
+    cleanups.push(root)
+    process.env['NEUTRON_DB_PATH'] = join(root, 'owner.db')
+    process.env['NEUTRON_INSTANCE_SLUG'] = 'alice'
+    delete process.env['NOTIFY_SOCKET']
+
+    const handle = await boot({
+      port: 0,
+      composer: ({ db, project_slug }) => ({
+        db,
+        project_slug,
+        topic_handler: async () => {},
+        approval_notifier: { notify: async () => undefined },
+        watchdog_notifier: { notify: async () => undefined },
+        reminder_dispatcher: { dispatch: async () => undefined },
+        heartbeat_tracker: { lastHeartbeatAt: () => Date.now() },
+        platform: STUB_PLATFORM,
+        memory_health: () => ({ available: true }),
+      }),
+    })
+    try {
+      const res = await fetch(`http://127.0.0.1:${handle.server.port}/healthz`)
+      expect(res.status).toBe(200)
+      const body = (await res.json()) as { status: string; memory?: string }
+      expect(body.status).toBe('ok')
+      expect(body.memory).toBe('ok')
+    } finally {
+      await handle.shutdown()
+    }
+  })
+
   test('§F1 shutdown awaits an async realmode_cleanup before db.close(), and tolerates a rejecting one', async () => {
     const root = mkdtempSync(join(tmpdir(), 'neutron-boot-f1-cleanup-'))
     cleanups.push(root)

@@ -84,6 +84,19 @@ export interface GBrainMemoryWiring {
   syncHook: SyncHook
   /** Tear down the `gbrain serve` child on SIGTERM. */
   close: () => Promise<void>
+  /**
+   * RA2 (gbrain live-or-loud) — boot-time backend health for the `/healthz`
+   * degraded assertion. Known at composition (before any lazy connect) from the
+   * SAME `resolveGbrainCommand` probe the loud boot warning uses: `binaryPresent`
+   * is false exactly when `gbrain` is absent from PATH + every known install dir
+   * → memory recall degrades to file-grep. This surfaces that latch as a
+   * MONITORABLE signal (folded into `/healthz`), NOT just a log line. Stable for
+   * the process lifetime — a missing binary can't appear without a restart. The
+   * lazy runtime latch (init-failed on first connect) stays visible via the
+   * owner-gated `gbrain_sync_state` diagnostics section; this coarse field is
+   * only the boot-detectable binary-missing case (RA2's Accept criterion).
+   */
+  bootHealth: { binaryPresent: boolean; detail?: string }
 }
 
 /**
@@ -515,6 +528,14 @@ export function buildGBrainMemory(input: {
   project_slug: string
   env?: NodeJS.ProcessEnv
   /**
+   * Test seam: the gbrain-command resolver. Defaults to `resolveGbrainCommand`.
+   * Injectable so a test can deterministically drive the missing-binary branch —
+   * `resolveGbrainCommand` also probes host-absolute paths (`/usr/local/bin`,
+   * `/opt/homebrew/bin`) that a test env can't clear, so on a dev host WITH gbrain
+   * installed the `binaryPresent:false` branch is otherwise never exercised.
+   */
+  resolveCommand?: (env: NodeJS.ProcessEnv) => string | null
+  /**
    * The owner's onboarding-captured OpenAI key (resolved from the ApiKeyStore
    * by the composer). Present → GBrain initializes + serves with CLOUD OpenAI
    * embeddings; absent → RA3's default, the free local Ollama fallback (still
@@ -641,7 +662,7 @@ export function buildGBrainMemory(input: {
   // restart with NO plist regeneration. `null` (gbrain genuinely absent) leaves
   // the bare-`gbrain` default in place so the existing fail-soft disabled path
   // (one-time warning + logged no-op) is preserved unchanged.
-  const command = resolveGbrainCommand(env)
+  const command = (input.resolveCommand ?? resolveGbrainCommand)(env)
   if (command !== null) {
     opts.command = command
     opts.env = { ...(opts.env ?? {}), PATH: resolveGbrainChildPath({ command, env }) }
@@ -722,5 +743,15 @@ export function buildGBrainMemory(input: {
     memoryStore,
     syncHook,
     close: () => client.close(),
+    // RA2 — the boot-time binary-presence verdict (same `command === null` the
+    // `gbrain_executable_not_found` warning above fires on). `detail` is a
+    // COARSE, non-sensitive one-liner (no paths/pids) — it rides the
+    // unauthenticated `/healthz` body, so it must never disclose internal state.
+    bootHealth: {
+      binaryPresent: command !== null,
+      ...(command === null
+        ? { detail: 'gbrain binary not found on PATH — memory recall degraded to file-grep' }
+        : {}),
+    },
   }
 }

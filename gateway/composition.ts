@@ -47,6 +47,7 @@ import { createLogger } from '@neutronai/logger'
 const moduleLog = createLogger('composition')
 export type { CompositionInput } from './composition/input/composition-input.ts'
 export type { CompositionHttpHandler } from './composition/types.ts'
+export type { MemoryHealthSummary, MemoryHealthProvider } from './composition/types.ts'
 
 /**
  * §F2 / decision D-7 — loops that are fully BUILT but deliberately NOT started

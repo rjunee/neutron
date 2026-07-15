@@ -16,3 +16,41 @@
  * `gateway/index.ts` already imports from the composition layer).
  */
 export type CompositionHttpHandler = (req: Request) => Response | Promise<Response>
+
+/**
+ * RA2 (gbrain live-or-loud) — a coarse, NON-sensitive summary of the memory
+ * backend's health, surfaced through the UNAUTHENTICATED `/healthz` liveness
+ * probe so an ABSENT gbrain backend is a LOUD, monitorable "degraded" signal
+ * instead of a silent no-op (recall quietly falling back to file-grep).
+ *
+ * SCOPE (deliberate): `available` reflects binary PRESENCE (the primary ND1/RA5
+ * failure — gbrain not installed), NOT live serve-ability. A present-but-broken
+ * binary (installs OK, fails at init/serve) reads `available:true`; that rarer
+ * case degrades safely at query time (RA5 fail-soft) and a deeper cached
+ * serve-probe is a tracked follow-up.
+ *
+ * Coarse BY DESIGN: `/healthz` is unauthenticated (load-balancer liveness), so
+ * this must NEVER carry an internal identifier a report leak would expose
+ * (latch reasons with paths, credential cooldowns, REPL pids). The RICH,
+ * owner-gated view stays at `GET /api/app/admin/diagnostics` (the `gbrain`
+ * section) — this is only the boolean + one non-sensitive sentence a monitor
+ * alerts on.
+ */
+export interface MemoryHealthSummary {
+  /** false → the memory backend BINARY is absent/unresolvable; recall degraded to
+   *  file-grep. (Binary PRESENCE only — a present-but-broken binary reads true; see
+   *  the scope note above.) */
+  available: boolean
+  /** A coarse, non-sensitive one-liner (no paths/pids) safe for the unauthenticated `/healthz`. */
+  detail?: string
+}
+
+/**
+ * A thunk the boot shell evaluates at each `/healthz` request to fold the
+ * memory backend's health into the liveness body. Evaluated per-request (not
+ * snapshotted) so a future enrichment can reflect live latch state without a
+ * contract change; the current source is the boot-time binary-presence probe,
+ * which is stable for the process lifetime (a missing binary can't appear
+ * without a restart).
+ */
+export type MemoryHealthProvider = () => MemoryHealthSummary

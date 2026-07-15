@@ -16,7 +16,7 @@ import { MAX_UPLOAD_BYTES_DEFAULT } from './upload/import-upload-handler.ts'
 // (see `loadGraphComposerFromEnv` at the bottom of this file). This
 // file holds ZERO imports — static OR dynamic — into Managed dirs
 // (signup/, provisioning/, identity/, proxy/).
-import { composeProductionGraph, DORMANT_LOOPS, type ComposedProductionGraph } from './composition.ts'
+import { composeProductionGraph, DORMANT_LOOPS, type ComposedProductionGraph, type MemoryHealthProvider } from './composition.ts'
 import { LoopRegistry } from '@neutronai/loop'
 import { resolveBootConfig, type BootConfig } from '@neutronai/config/index.ts'
 import { assertWideBindPolicy } from './boot-bind-policy.ts'
@@ -292,6 +292,10 @@ export async function boot(options: BootOptions = {}): Promise<BootHandle> {
   // shutdown drain awaits each before `db.close()`.
   let realmode_cleanups: Array<() => void | Promise<void>> = []
   let composedHttpHandler: HttpHandler | undefined
+  // RA2 — the composer's memory-backend health, hoisted so BOTH the terminal
+  // `/healthz` (composition.default_handler, chained path) AND the dev
+  // healthz-only fallback below fold it in consistently. Undefined → byte-identical.
+  let composedMemoryHealth: MemoryHealthProvider | undefined
   // Sprint 18: WebSocket handler exposed by the landing server (chat
   // upgrade path). Bun.serve receives it alongside the fetch handler so a
   // single port handles both HTTP and WS. Default no-op stays cold when
@@ -368,7 +372,19 @@ export async function boot(options: BootOptions = {}): Promise<BootHandle> {
       // knows the per-instance `bootedAt` + slug needed for the healthz
       // stub; the composer accepts it via the new `default_handler`
       // field.
-      composition.default_handler = defaultHealthzHandler({ project_slug, bootedAt })
+      // RA2 — fold the composer's coarse memory-backend health into the terminal
+      // `/healthz` so a missing gbrain backend reads `status:'degraded'`. Only the
+      // boot shell knows `bootedAt`+slug; only the composer knows memory health —
+      // this seam joins them. Omitted by composers that don't wire memory → the
+      // body stays byte-identical (`status:'ok'`).
+      composedMemoryHealth = composition.memory_health
+      composition.default_handler = defaultHealthzHandler({
+        project_slug,
+        bootedAt,
+        ...(composedMemoryHealth !== undefined
+          ? { memoryHealth: composedMemoryHealth }
+          : {}),
+      })
       const composed = await composeProductionGraph(composition)
       graph = composed
       if (composition.http_handler !== undefined) {
@@ -407,7 +423,13 @@ export async function boot(options: BootOptions = {}): Promise<BootHandle> {
   const handler: HttpHandler =
     options.httpHandler ??
     composedHttpHandler ??
-    defaultHealthzHandler({ project_slug, bootedAt })
+    defaultHealthzHandler({
+      project_slug,
+      bootedAt,
+      // RA2 — the dev healthz-only fallback (no chained surface) reports memory
+      // health too, so `/healthz` is consistent across both boot paths.
+      ...(composedMemoryHealth !== undefined ? { memoryHealth: composedMemoryHealth } : {}),
+    })
 
   // S2 (b) — fail-closed wide-bind policy. Refuse to open a non-loopback
   // listener while a dev-auth bypass env is set (that combination exposes the
@@ -718,22 +740,62 @@ export async function boot(options: BootOptions = {}): Promise<BootHandle> {
 }
 
 /**
- * Default `/healthz` handler used when no composer + no explicit
- * `BootOptions.httpHandler` are wired. Returns
- * `{status:'ok', project_slug, uptime_ms}` for liveness; everything else is
- * 404. Production wires a real handler via the composer.
+ * Default `/healthz` handler (also the terminal fallback of the composed
+ * precedence chain, so this IS the production `/healthz`). Returns
+ * `{status:'ok', project_slug, uptime_ms}` for liveness; everything else is 404.
+ *
+ * RA2 (gbrain live-or-loud) — when `memoryHealth` is supplied (the Open composer
+ * wires `buildGBrainMemory`'s boot-time binary-presence probe through
+ * `composition.memory_health`), a memory backend that is DOWN flips the body to
+ * `status:'degraded'` + `memory:'unavailable'` (+ a coarse `memory_detail`), so a
+ * box without the `gbrain` brain fails `/healthz` LOUDLY instead of silently
+ * degrading recall to file-grep. Omitted → the body is byte-identical to the
+ * pre-RA2 stub (`status:'ok'`, no `memory` field).
+ *
+ * DELIBERATELY HTTP 200 even when degraded: `/healthz` is load-balancer/systemd
+ * LIVENESS. Memory degrade is FAIL-SOFT (chat + every other surface still work —
+ * RA5), so a non-2xx here would pull the box from rotation / trigger a restart
+ * loop for a condition the process is designed to survive. The loud signal is
+ * the JSON `status` field a monitor scrapes (plus the existing boot ERROR log),
+ * NOT the HTTP code — the standard liveness-vs-readiness split. The rich,
+ * owner-gated view lives at `GET /api/app/admin/diagnostics`; the coarse fields
+ * here carry no paths/pids because `/healthz` is unauthenticated.
  */
 export function defaultHealthzHandler(opts: {
   project_slug: string
   bootedAt: number
+  memoryHealth?: MemoryHealthProvider
 }): HttpHandler {
   return (req: Request): Response => {
     const url = new URL(req.url)
     if (url.pathname === '/healthz') {
+      // Fail-soft: a throwing provider must never crash the liveness probe. But a
+      // provider that is WIRED and THROWS is itself a degrade signal — reporting
+      // `ok` there is a false-green precisely when health evaluation breaks (Codex).
+      // Optional-chaining means an UNWIRED provider (`undefined?.()`) never throws,
+      // so any throw reaching here came from a configured provider → report degraded.
+      let memory: { available: boolean; detail?: string } | undefined
+      try {
+        memory = opts.memoryHealth?.()
+      } catch {
+        // Coarse detail only — `/healthz` is unauthenticated, so the raw error
+        // (which may carry paths/pids) must not leak into the body.
+        memory = { available: false, detail: 'memory health probe error' }
+      }
+      const degraded = memory !== undefined && !memory.available
       const body = {
-        status: 'ok' as const,
+        status: degraded ? ('degraded' as const) : ('ok' as const),
         project_slug: opts.project_slug,
         uptime_ms: Date.now() - opts.bootedAt,
+        ...(memory !== undefined
+          ? { memory: memory.available ? ('ok' as const) : ('unavailable' as const) }
+          : {}),
+        // Enforce a FIXED public detail at the HTTP boundary — never echo the
+        // provider's `detail` string. `/healthz` is unauthenticated, and the
+        // provider's value is not a trusted boundary: a buggy/future provider that
+        // returned a path/pid would leak it here (Codex). The concrete "why"
+        // (missing binary, etc.) stays in the authenticated boot ERROR log.
+        ...(degraded ? { memory_detail: 'memory backend unavailable' } : {}),
       }
       return new Response(JSON.stringify(body), {
         status: 200,
