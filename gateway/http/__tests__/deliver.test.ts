@@ -157,6 +157,23 @@ describe('createDeliver — durable-first + routed best-effort push', () => {
     expect(p.web).toHaveLength(1)
   })
 
+  it('SAFELY drops every unrecognised topic grammar — unknown prefix, empty, no-prefix (no push, still persists)', async () => {
+    const bs = fakeButtonStore()
+    const p = recordingPush(bs.trace)
+    const deliver = createDeliver({ buttonStore: bs.store, push: p.push, log: () => {} })
+
+    for (const bad of ['xyz:owner', 'unknownprefix:1', '', 'owner', ':owner', 'app', 'web']) {
+      const r = await deliver(bad, { body: 'z', durability: 'reply' })
+      // No live sender for an unrecognised grammar → delivered_live false, never a throw.
+      expect(r.delivered_live).toBe(false)
+      // The durable row is still written (the guarantee holds regardless of grammar).
+      expect(r.persisted).toBe(true)
+    }
+    // NOT ONE push fired across all the malformed/unknown topics.
+    expect(p.app).toHaveLength(0)
+    expect(p.web).toHaveLength(0)
+  })
+
   it("'reply' persist failure SWALLOWS → not-delivered, no push", async () => {
     const bs = fakeButtonStore({ throwOn: 'emit' })
     const p = recordingPush(bs.trace)

@@ -1716,7 +1716,7 @@ export function buildOpenGraphComposer(
         // NOT a hardcoded true or a stale pre-send registry snapshot (Codex/O6). The
         // persist + fan still happen inside the awaited send.
         app: (topic_id: string, event: ChatOutbound): Promise<boolean> =>
-          buildAppWsSendReply(topic_id)(event),
+          buildAppWsSendReplyResult(topic_id)(event),
         web: (topic_id: string, event: ChatOutbound): boolean =>
           landing.registry.send(topic_id, event),
       },
@@ -2805,7 +2805,12 @@ export function buildOpenGraphComposer(
     // any button options/prompt_id/kind/allow_freeform/upload_affordance so
     // steady-state live-agent prompts render with the SAME button UI onboarding
     // uses (one renderer, one path).
-    const buildAppWsSendReply =
+    // The result-returning CORE: builds the app-ws message, AWAITS the adapter, and
+    // returns whether it delivered live (for the `deliver` seam's delivered_live).
+    // The public `buildAppWsSendReply` below wraps this in fire-and-forget to keep the
+    // `(out) => void` wiring contract (app-ws.ts) — a rejection must not escape into
+    // sendSafe's SYNC-only guard.
+    const buildAppWsSendReplyResult =
       (channel_topic_id: string, project_id?: string) =>
       async (out: ChatOutbound): Promise<boolean> => {
         if (out.type !== 'agent_message') return false
@@ -2877,6 +2882,15 @@ export function buildOpenGraphComposer(
           })())
         }
         return deliveredLive
+      }
+    // The public `(out) => void` callback the app-ws wiring (receiver / seed /
+    // button-choice / opening / sendSafe paths) consumes — UNCHANGED contract. It
+    // fire-and-forgets the awaitable core so a rejection is caught by the guarded
+    // fireAndForget sink, never surfacing past sendSafe's synchronous-only try/catch.
+    const buildAppWsSendReply =
+      (channel_topic_id: string, project_id?: string) =>
+      (out: ChatOutbound): void => {
+        fireAndForget('composer.deref', buildAppWsSendReplyResult(channel_topic_id, project_id)(out))
       }
     // ── app-ws receiver + delivery cluster (C3d: carved to open/wiring/app-ws.ts) ─
     // The Path-1 closing/opening delivery (`onboardingMsg` bind), the ephemeral
