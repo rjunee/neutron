@@ -4,105 +4,49 @@
  * The proactive modules (morning brief + idle-nudge sweep) post through a
  * minimal `OutboundSink` (`sink.ts`). In production on a TELEGRAM instance the
  * core `ChannelRouter` satisfies that seam directly. But Open is single-owner
- * WEB: its topics are `app_socket` (`web:<owner>[:<project>]`) and a proactive
- * post fires from a TIMER — there may be no live socket, and the live-only
- * `AppWsAdapter` would silently drop the brief/nudge.
+ * WEB: its topics are `app_socket` and a proactive post fires from a TIMER —
+ * there may be no live socket, and the live-only `AppWsAdapter` would silently
+ * drop the brief/nudge. So Open wires THIS durable sink instead.
  *
- * So Open wires THIS sink instead (the SAME durable path fired reminders use,
- * `reminders/outbound.ts`):
- *   • DURABLE — persist an INERT (already-resolved) agent history turn via
- *     `ButtonStore.persistInertAgentTurn` so the brief/nudge survives in chat
- *     history and re-appears on the next hydration / reconnect, even with no
- *     socket open at post time. It is NOT an unresolved zero-option prompt (the
- *     `emit` path): a passive scheduled statement must not become the topic's
- *     active prompt that the next user message attaches to — exactly what
- *     `persistInertAgentTurn` exists to avoid (same primitive the wow-moment
- *     passive posts use).
- *   • LIVE — best-effort push the `agent_message` envelope through the supplied
- *     `WebChatSenderRegistry` so an open client paints it immediately. A
- *     missing / stale sender is swallowed — the durable row is the guarantee.
+ * F5 (2026-07) — the durable-row-first + best-effort-push mechanics (and the
+ * registry pick) now live in the ONE {@link Deliver} seam
+ * (`gateway/http/deliver.ts`), shared with fired reminders + the substrate
+ * notice bubbles, so no producer names a registry. This sink is a thin adapter
+ * from the `OutboundSink` shape onto `deliver`: it persists an INERT
+ * (already-resolved) agent history turn — pure history, never the topic's active
+ * prompt the next user message attaches to — then best-effort live-pushes.
  *
- * This mirrors the fired-reminder outbound exactly (same registry, same web
- * topic), so the proactive brief has delivery PARITY with reminders. The live
- * push reaches the web (`web:`) chat registry; the durable row is what the Expo
- * app-ws (`app:`) client picks up on its next history hydration. Full live
- * parity across both client namespaces is a platform-wide concern shared with
- * reminders, not specific to this sink.
- *
- * Persist-before-send: a live-push failure never costs the durable record.
+ * Persist-before-send: a live-push failure never costs the durable record; a
+ * durable-persist failure surfaces (the proactive modules treat a throw as a
+ * delivery failure → retried, no day/dedupe ledger write).
  */
 
-import type { ButtonStore } from '@neutronai/channels/button-store.ts'
-import type { ChatOutbound } from '@neutronai/landing/chat-protocol.ts'
-import type { WebChatSenderRegistry } from '../http/chat-sender-registry.ts'
-import { createLogger } from '@neutronai/logger'
+import type { Deliver } from '../http/deliver.ts'
 import type { OutboundSink, OutgoingMessage } from './sink.ts'
 
-const moduleLog = createLogger('proactive-sink')
-
-const LOG_TAG = '[proactive-sink]'
-
 export interface BuildButtonStoreProactiveSinkInput {
-  buttonStore: ButtonStore
-  /** Optional live-push registry. Absent → durable-persist only. */
-  registry?: WebChatSenderRegistry
-  log?: (msg: string) => void
+  /** The ONE out-of-turn delivery seam (durable-row-first + best-effort push). */
+  deliver: Deliver
 }
 
 /**
- * Build an `OutboundSink` that persists each proactive post as a chat history
- * row and best-effort live-pushes it. The send target is the message's
- * `topic.channel_topic_id` (the `web:<owner>[:<project>]` key the client
- * subscribes to). Returns the durable `prompt_id` (the `OutboundSink`
- * contract's string id).
+ * Build an `OutboundSink` that persists each proactive post as an inert chat
+ * history row and best-effort live-pushes it, via the shared {@link Deliver}
+ * seam. The send target is the message's `topic.channel_topic_id`. Returns the
+ * durable `prompt_id` (the `OutboundSink` contract's string id).
  */
 export function buildButtonStoreProactiveSink(
   input: BuildButtonStoreProactiveSinkInput,
 ): OutboundSink {
-  const log = input.log ?? ((msg: string): void => moduleLog.warn(msg))
   return {
     async send(message: OutgoingMessage): Promise<string> {
-      const topic_id = message.topic.channel_topic_id
-      const body = message.text
-      let prompt_id: string
-      try {
-        // INERT, already-resolved agent turn — pure history, never an active
-        // unresolved prompt the next user message would attach to.
-        const persisted = await input.buttonStore.persistInertAgentTurn({ topic_id, body })
-        prompt_id = persisted.prompt_id
-      } catch (err) {
-        // Durable persist failed — surface it. The proactive modules treat a
-        // throw as a delivery failure (no day/dedupe ledger write → retried).
-        log(
-          `${LOG_TAG} persist failed topic=${topic_id}: ${
-            err instanceof Error ? err.message : String(err)
-          }`,
-        )
-        throw err instanceof Error ? err : new Error(String(err))
-      }
-
-      // Best-effort live push — a closed/stale socket throws; swallow it. The
-      // durable row already guarantees delivery on the next hydration.
-      if (input.registry !== undefined) {
-        const envelope: ChatOutbound = {
-          type: 'agent_message',
-          body,
-          topic_id,
-          options: [],
-          allow_freeform: true,
-          prompt_id,
-        }
-        try {
-          input.registry.send(topic_id, envelope)
-        } catch (err) {
-          log(
-            `${LOG_TAG} live push failed (durable row persisted) topic=${topic_id}: ${
-              err instanceof Error ? err.message : String(err)
-            }`,
-          )
-        }
-      }
-      return prompt_id
+      const result = await input.deliver(message.topic.channel_topic_id, {
+        body: message.text,
+        durability: 'inert',
+      })
+      // `deliver` throws when the durable persist fails (inert contract), so a
+      // resolved result always carries the durable id.
+      return result.prompt_id ?? ''
     },
   }
 }
