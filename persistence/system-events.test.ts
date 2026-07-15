@@ -86,6 +86,44 @@ describe('SystemEventsStore — persist + defaults', () => {
   })
 })
 
+describe('SystemEventsStore.listRecentForScope — scope + limit boundaries (O5)', () => {
+  const insert = (id: string, ts: number, project_slug: string | null): void => {
+    db.runSync(
+      `INSERT INTO system_events (id, ts, level, module, event_name, payload_json, project_slug, duration_ms)
+       VALUES (?, ?, 'warn', 'm', 'cron_job_error', '{}', ?, NULL)`,
+      [id, ts, project_slug],
+    )
+  }
+
+  it('scopes to project_slug OR NULL; a foreign slug is never returned', () => {
+    insert('a', 10, 'demo')
+    insert('b', 20, null) // process-wide → included
+    insert('c', 30, 'other') // foreign → excluded (even though newest)
+    expect(store.listRecentForScope('demo', 50).map((r) => r.id).sort()).toEqual(['a', 'b'])
+  })
+
+  it('non-positive / non-finite limits return []', () => {
+    insert('a', 10, 'demo')
+    expect(store.listRecentForScope('demo', 0)).toEqual([])
+    expect(store.listRecentForScope('demo', -5)).toEqual([])
+    expect(store.listRecentForScope('demo', Number.NaN)).toEqual([])
+    expect(store.listRecentForScope('demo', Number.POSITIVE_INFINITY)).toEqual([])
+  })
+
+  it('floors a fractional limit', () => {
+    insert('a', 10, 'demo')
+    insert('b', 20, 'demo')
+    insert('c', 30, 'demo')
+    expect(store.listRecentForScope('demo', 2.9)).toHaveLength(2) // floor(2.9) = 2
+  })
+
+  it('breaks equal-ts ties deterministically by id DESC', () => {
+    insert('id-1', 100, 'demo')
+    insert('id-2', 100, 'demo') // same ts
+    expect(store.listRecentForScope('demo', 10).map((r) => r.id)).toEqual(['id-2', 'id-1'])
+  })
+})
+
 describe('emitSystemEventSafe — NEVER throws / rejects', () => {
   it('no-op (resolves) when sink is null/undefined', async () => {
     await expect(emitSystemEventSafe(null, { event: 'gbrain_unavailable' })).resolves.toBeUndefined()
