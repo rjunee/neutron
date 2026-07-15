@@ -116,7 +116,7 @@ export function createChatTopicsSurface(opts: ChatTopicsSurfaceOptions): ChatTop
       const url = new URL(req.url)
       if (url.pathname !== TOPICS_PATH) return null
       if (req.method !== 'GET') {
-        return jsonError(
+        return jsonErrorUtf8(
           405,
           'method_not_allowed',
           `method '${req.method}' not allowed on ${TOPICS_PATH}`,
@@ -124,7 +124,7 @@ export function createChatTopicsSurface(opts: ChatTopicsSurfaceOptions): ChatTop
       }
       const claim = await opts.resolveUserClaim(req)
       if (claim === null) {
-        return jsonError(401, 'unauthorized', 'session cookie missing or invalid')
+        return jsonErrorUtf8(401, 'unauthorized', 'session cookie missing or invalid')
       }
       // Defense-in-depth: the resolver should already enforce this, but a
       // future composition wiring bug must not leak topics across instances.
@@ -133,7 +133,7 @@ export function createChatTopicsSurface(opts: ChatTopicsSurfaceOptions): ChatTop
       // internal handle; a raw compare broke on every slug rename
       // (2026-06-10 P0: sidebar rendered General-only post-rename).
       if (ownerIdentityMismatch(claim.project_slug, opts.project_slug, opts.resolveOwnerHandle)) {
-        return jsonError(401, 'project_mismatch', 'session cookie project does not match this gateway')
+        return jsonErrorUtf8(401, 'project_mismatch', 'session cookie project does not match this gateway')
       }
       const generalTopic = webTopicId(claim.user_id)
       const observed = now()
@@ -161,7 +161,7 @@ export function createChatTopicsSurface(opts: ChatTopicsSurfaceOptions): ChatTop
           `[chat-topics-surface] project=${opts.project_slug} user_id=${claim.user_id} listTopicsByUser threw:`,
           err,
         )
-        return jsonError(500, 'internal', 'failed to list chat topics')
+        return jsonErrorUtf8(500, 'internal', 'failed to list chat topics')
       }
       const decorated: ChatTopic[] = rows.map((row) => ({
         topic_id: row.topic_id,
@@ -196,7 +196,7 @@ export function createChatTopicsSurface(opts: ChatTopicsSurfaceOptions): ChatTop
         const tb = b.last_created_at ?? 0
         return tb - ta
       })
-      return jsonOk({ topics: decorated })
+      return jsonOkUtf8({ topics: decorated })
     },
   }
 }
@@ -219,11 +219,14 @@ function humaniseProjectId(project_id: string): string {
 // `application/json; charset=utf-8` where every other gateway/http surface
 // sets plain `application/json`; kept byte-identical rather than silently
 // normalized, so these stay tiny local wrappers around the shared
-// `jsonResponse` primitive instead of importing `jsonOk`/`jsonError` directly.
-function jsonOk(body: Record<string, unknown>, status = 200): Response {
+// `jsonResponse` primitive rather than the plain-`application/json`
+// `jsonOk`/`jsonError` the kit exports. The `Utf8` suffix keeps them out of
+// the O7 no-local-copy source guard (owner-slug-timing-safe.test.ts), which
+// forbids a bare `jsonOk`/`jsonError` definition in any surface.
+function jsonOkUtf8(body: Record<string, unknown>, status = 200): Response {
   return jsonResponse(status, { ok: true, ...body }, 'application/json; charset=utf-8')
 }
 
-function jsonError(status: number, code: string, message: string): Response {
+function jsonErrorUtf8(status: number, code: string, message: string): Response {
   return jsonResponse(status, { ok: false, code, message }, 'application/json; charset=utf-8')
 }

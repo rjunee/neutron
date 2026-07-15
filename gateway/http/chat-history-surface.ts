@@ -123,12 +123,12 @@ export function createChatHistorySurface(
       const url = new URL(req.url)
       if (url.pathname !== HISTORY_PATH) return null
       if (req.method !== 'GET') {
-        return jsonError(405, 'method_not_allowed', `method '${req.method}' not allowed on ${HISTORY_PATH}`)
+        return jsonErrorUtf8(405, 'method_not_allowed', `method '${req.method}' not allowed on ${HISTORY_PATH}`)
       }
 
       const claim = await opts.resolveUserClaim(req)
       if (claim === null) {
-        return jsonError(401, 'unauthorized', 'session cookie missing or invalid')
+        return jsonErrorUtf8(401, 'unauthorized', 'session cookie missing or invalid')
       }
       // Defense-in-depth: the resolver should never return a
       // mismatched project_slug (the underlying cookieToUserClaim asserts
@@ -140,7 +140,7 @@ export function createChatHistorySurface(
       // internal handle; a raw compare broke on every slug rename
       // (2026-06-10 P0).
       if (ownerIdentityMismatch(claim.project_slug, opts.project_slug, opts.resolveOwnerHandle)) {
-        return jsonError(401, 'project_mismatch', 'session cookie project does not match this gateway')
+        return jsonErrorUtf8(401, 'project_mismatch', 'session cookie project does not match this gateway')
       }
 
       const limit = parseLimit(url.searchParams.get('limit'))
@@ -171,7 +171,7 @@ export function createChatHistorySurface(
       ) {
         topic_id = topic_param
       } else {
-        return jsonError(
+        return jsonErrorUtf8(
           400,
           'invalid_topic_id',
           `topic_id must be '${generalTopic}' or a 'web:<user_id>:<project_id>' descendant`,
@@ -200,7 +200,7 @@ export function createChatHistorySurface(
           `[chat-history-surface] project=${opts.project_slug} user_id=${claim.user_id} listHistoryByTopic threw:`,
           err,
         )
-        return jsonError(500, 'internal', 'failed to read chat history')
+        return jsonErrorUtf8(500, 'internal', 'failed to read chat history')
       }
 
       // `turns.length > 0` plus a non-undefined narrowing — `at(-1)`
@@ -210,7 +210,7 @@ export function createChatHistorySurface(
       const oldest_returned_at = last !== undefined ? last.created_at : null
       const oldest_returned_prompt_id = last !== undefined ? last.prompt_id : null
 
-      return jsonOk({
+      return jsonOkUtf8({
         turns,
         has_more,
         oldest_returned_at,
@@ -253,11 +253,14 @@ function parseBefore(raw: string | null, nowMs: number): number {
 // `application/json; charset=utf-8` where every other gateway/http surface
 // sets plain `application/json`; kept byte-identical rather than silently
 // normalized, so these stay tiny local wrappers around the shared
-// `jsonResponse` primitive instead of importing `jsonOk`/`jsonError` directly.
-function jsonOk(body: Record<string, unknown>, status = 200): Response {
+// `jsonResponse` primitive rather than the plain-`application/json`
+// `jsonOk`/`jsonError` the kit exports. The `Utf8` suffix keeps them out of
+// the O7 no-local-copy source guard (owner-slug-timing-safe.test.ts), which
+// forbids a bare `jsonOk`/`jsonError` definition in any surface.
+function jsonOkUtf8(body: Record<string, unknown>, status = 200): Response {
   return jsonResponse(status, { ok: true, ...body }, 'application/json; charset=utf-8')
 }
 
-function jsonError(status: number, code: string, message: string): Response {
+function jsonErrorUtf8(status: number, code: string, message: string): Response {
   return jsonResponse(status, { ok: false, code, message }, 'application/json; charset=utf-8')
 }

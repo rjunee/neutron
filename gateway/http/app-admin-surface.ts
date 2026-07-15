@@ -56,7 +56,14 @@ import type { CoreInstallationsStore } from '@neutronai/cores-runtime/installati
 import type { MemoryStore } from '@neutronai/gbrain-memory/memory-store.ts'
 import type { ProjectBackupStore } from '../git/project-backup-store.ts'
 import { defaultEnumerateProjects } from '../projects/enumerate.ts'
-import { ownerSlugMismatch } from './auth-helpers.ts'
+import {
+  jsonError,
+  jsonOk,
+  jsonResponse,
+  ownerSlugMismatch,
+  readJsonBody,
+  resolveBearer,
+} from './surface-kit.ts'
 import { PlatformOperationUnsupportedError, type PlatformAdapter } from '@neutronai/runtime/platform-adapter.ts'
 
 /** Maximum number of GBrain entries returned by the browse endpoint. */
@@ -717,55 +724,8 @@ async function handleMintReauthToken(input: MintReauthInput): Promise<Response> 
 
 // ─── (end of switch-Max-account handler) ────────────────────────────
 
-interface ResolvedAuth {
-  user_id: string
-  project_slug: string
-}
-
-interface AuthFailure {
-  code: string
-  message: string
-}
-
-async function resolveBearer(
-  req: Request,
-  auth: AppWsAuthResolver,
-): Promise<ResolvedAuth | AuthFailure> {
-  const header = req.headers.get('authorization') ?? ''
-  if (!header.toLowerCase().startsWith('bearer ')) {
-    return { code: 'missing_bearer', message: 'expected Authorization: Bearer <token>' }
-  }
-  const token = header.slice('bearer '.length).trim()
-  const resolved = await auth.resolve(token)
-  if ('code' in resolved) return { code: resolved.code, message: resolved.message }
-  return { user_id: resolved.user_id, project_slug: resolved.project_slug }
-}
-
-async function readJsonBody(req: Request): Promise<unknown> {
-  try {
-    return await req.json()
-  } catch {
-    return null
-  }
-}
-
 function defaultRestartGateway(): void {
   // SIGTERM lets a systemd unit with `Restart=always` bring the gateway
   // back. Tests inject a spy so this branch never fires in CI.
   process.kill(process.pid, 'SIGTERM')
-}
-
-function jsonOk(body: object, status = 200): Response {
-  return jsonResponse(status, { ok: true, ...(body as Record<string, unknown>) })
-}
-
-function jsonError(status: number, code: string, message: string): Response {
-  return jsonResponse(status, { ok: false, code, message })
-}
-
-function jsonResponse(status: number, body: Record<string, unknown>): Response {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: { 'content-type': 'application/json' },
-  })
 }

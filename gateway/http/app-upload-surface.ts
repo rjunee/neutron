@@ -54,7 +54,7 @@ import { join } from 'node:path'
 
 import type { AppWsAuthResolver } from '@neutronai/channels/adapters/app-ws/auth.ts'
 import { canonicalizeMime, magicByteSniff } from '../storage/binary-types.ts'
-import { ownerSlugMismatch } from './auth-helpers.ts'
+import { jsonError, jsonOk, ownerSlugMismatch, resolveBearer } from './surface-kit.ts'
 
 /** P5.1 — 10 MiB cap on chat attachments per Argus r1 BLOCKING #1 brief. */
 export const MAX_CHAT_UPLOAD_BYTES = 10 * 1024 * 1024
@@ -339,30 +339,6 @@ async function handleGet(req: Request, ctx: GetContext): Promise<Response> {
   })
 }
 
-interface ResolvedAuth {
-  user_id: string
-  project_slug: string
-}
-
-interface AuthFailure {
-  code: string
-  message: string
-}
-
-async function resolveBearer(
-  req: Request,
-  auth: AppWsAuthResolver,
-): Promise<ResolvedAuth | AuthFailure> {
-  const header = req.headers.get('authorization') ?? ''
-  if (!header.toLowerCase().startsWith('bearer ')) {
-    return { code: 'missing_bearer', message: 'expected Authorization: Bearer <token>' }
-  }
-  const token = header.slice('bearer '.length).trim()
-  const resolved = await auth.resolve(token)
-  if ('code' in resolved) return { code: resolved.code, message: resolved.message }
-  return { user_id: resolved.user_id, project_slug: resolved.project_slug }
-}
-
 function mimeFromExt(ext: string): string | null {
   switch (ext) {
     case 'png':
@@ -380,18 +356,4 @@ function mimeFromExt(ext: string): string | null {
 
 function sha256Hex(bytes: Uint8Array): string {
   return createHash('sha256').update(bytes).digest('hex')
-}
-
-function jsonOk(body: Record<string, unknown>, status = 200): Response {
-  return new Response(JSON.stringify({ ok: true, ...body }), {
-    status,
-    headers: { 'content-type': 'application/json' },
-  })
-}
-
-function jsonError(status: number, code: string, message: string): Response {
-  return new Response(JSON.stringify({ ok: false, code, message }), {
-    status,
-    headers: { 'content-type': 'application/json' },
-  })
 }

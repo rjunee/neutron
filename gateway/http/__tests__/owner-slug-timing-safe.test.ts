@@ -70,6 +70,15 @@ function inScopeSurfaces(): string[] {
     .sort()
 }
 
+/** EVERY `gateway/http/*-surface.ts` (the O7 consolidation scope). Excludes
+ *  `surface-kit.ts` itself (name ends `-kit.ts`, not `-surface.ts`) — the ONE
+ *  place these helpers are allowed to be defined. */
+function allSurfaceFiles(): string[] {
+  return readdirSync(HTTP_DIR)
+    .filter((name) => /-surface\.ts$/.test(name) && !name.endsWith('.test.ts'))
+    .sort()
+}
+
 /**
  * The per-instance TOKEN / COOKIE / BEARER auth surfaces (outside
  * `gateway/http/`) that validate a caller-supplied slug against the gateway
@@ -160,41 +169,33 @@ describe('project_slug timing-safe comparison (ISSUE #34)', () => {
     expect(offenders).toHaveLength(0)
   })
 
-  it('every gateway/http surface that compares project_slug imports the NAMED ownerSlugMismatch', () => {
-    // A surface that calls `ownerSlugMismatch(` must import the NAMED binding from a
-    // canonical source — `./auth-helpers.ts` directly, or `./surface-kit.ts` which
-    // RE-EXPORTS the exact same timing-safe primitive (O7). Matching the named
-    // binding (not just "some import from that path") + banning a local definition
-    // closes the shadow-implementation hole: a surface can't keep its kit import
-    // for other helpers while defining its OWN insecure `ownerSlugMismatch`.
+  it('NO gateway/http surface defines a LOCAL copy of a surface-kit helper (consolidation complete)', () => {
+    // The O7 completeness invariant + drift guard: surface-kit.ts is the ONE place
+    // these helpers are defined. A surface must never carry its own copy — that is
+    // exactly the drift-prone duplication O7 eliminates, and a local
+    // `ownerSlugMismatch` copy is the shadow-implementation security hole. A local
+    // `function`/`const`/`let`/`var` declaration is unambiguous in source text; this
+    // catches every current + future duplicate. (Genuine USE is enforced by tsc:
+    // calling an unimported helper is a compile error, so a surface that uses one
+    // MUST import it from the kit — there is nowhere else to get it.)
+    const LOCAL_DEF =
+      /\b(?:async\s+)?function\s+(?:resolveBearer|readJsonBody|jsonResponse|jsonOk|jsonError|ownerSlugMismatch)\b|\b(?:const|let|var)\s+(?:resolveBearer|readJsonBody|jsonResponse|jsonOk|jsonError|ownerSlugMismatch)\s*=/
     const offenders: string[] = []
-    for (const name of inScopeSurfaces()) {
-      const body = readFileSync(join(HTTP_DIR, name), 'utf8')
-      if (!body.includes('ownerSlugMismatch(')) continue
-      // The NAMED binding must appear inside an import block from one of the two
-      // canonical sources (import blocks can't cross a `}`, so this pins the source).
-      const namedImport =
-        /import\s*(?:type\s*)?\{[^}]*\bownerSlugMismatch\b[^}]*\}\s*from\s*['"]\.\/(?:auth-helpers|surface-kit)\.ts['"]/s.test(
-          body,
-        )
-      // A local (re)definition — the exact shadow-implementation regression.
-      const localDef = /\b(?:function|const|let|var)\s+ownerSlugMismatch\b/.test(body)
-      if (!namedImport || localDef) offenders.push(name)
+    for (const name of allSurfaceFiles()) {
+      if (LOCAL_DEF.test(readFileSync(join(HTTP_DIR, name), 'utf8'))) offenders.push(name)
     }
     expect(offenders).toEqual([])
   })
 
-  it('surface-kit RE-EXPORTS the timing-safe ownerSlugMismatch straight from auth-helpers (no shadow impl)', () => {
-    // The O7 consolidation seam: surfaces routing `ownerSlugMismatch` through
-    // surface-kit must get the CANONICAL timing-safe primitive, not a local
-    // re-implementation. Pin that surface-kit re-exports it directly from
-    // auth-helpers — so a future shadow copy in surface-kit fails this guard.
-    const kit = readFileSync(join(HTTP_DIR, 'surface-kit.ts'), 'utf8')
-    // A single `export { … ownerSlugMismatch … } from './auth-helpers.ts'` block.
-    const reexport = /export\s*\{[^}]*\bownerSlugMismatch\b[^}]*\}\s*from\s*['"]\.\/auth-helpers\.ts['"]/s.test(kit)
-    expect(reexport).toBe(true)
-    // And surface-kit must NOT define its own `function ownerSlugMismatch`.
-    expect(/function\s+ownerSlugMismatch\b/.test(kit)).toBe(false)
+  it('surface-kit re-exports the SAME timing-safe reference as auth-helpers (runtime identity, not a shadow)', async () => {
+    // RUNTIME identity beats a source-regex: a shadow re-implementation in
+    // surface-kit would be a DIFFERENT function object. `Object.is` proves the
+    // re-export forwards the canonical timing-safe primitive verbatim — so every
+    // surface importing it from the kit gets the exact auth-helpers implementation.
+    const kit = await import('../surface-kit.ts')
+    const helpers = await import('../auth-helpers.ts')
+    expect(kit.ownerSlugMismatch).toBe(helpers.ownerSlugMismatch)
+    expect(kit.ownerIdentityMismatch).toBe(helpers.ownerIdentityMismatch)
   })
 
   it('the token/cookie/bearer auth surfaces use constantTimeEqual, not plain slug equality', () => {
