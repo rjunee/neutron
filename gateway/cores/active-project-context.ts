@@ -7,10 +7,11 @@
  * closure that carries no per-call arguments — so the active project id can't be
  * threaded through the closure signature without touching every `@neutronai/*`
  * Core package. Instead we bind the active project id as ambient async context
- * at the in-process dispatch boundary that already parses it (the chat-command
- * filter — `gateway/http/chat-bridge.ts`), and the `CoreCredentialResolver`
- * reads it back when the accessor fires. Because the chat-command path is a
- * single in-process `await` chain, the `AsyncLocalStorage` frame propagates
+ * (`AsyncLocalStorage`) around the tool handler at the in-process dispatch
+ * boundary (X6: `McpServer.dispatch`, wired with `bindActiveProject:
+ * runWithActiveProject` — the ONLY production binder), and the
+ * `CoreCredentialResolver` reads it back when the accessor fires. Because the
+ * handler runs as a single in-process `await` chain, the frame propagates
  * straight through to the accessor call.
  *
  * The agent's native MCP-tool path crosses a process + loopback-HTTP boundary an
