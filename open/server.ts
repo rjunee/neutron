@@ -52,6 +52,18 @@ import { installProcessSafetyNet } from '@neutronai/logger/fire-and-forget.ts'
 export async function startOpenServer(): Promise<BootHandle> {
   const env = process.env
   // Managed deploy-config injection wins — defer to the injected composer.
+  //
+  // The S1 owner-bearer resolution + `assertOwnerCredentialPolicy` guard below
+  // is deliberately NOT run on this branch: the per-install owner bearer is an
+  // OPEN single-owner construct, and an injected composer brings its OWN auth
+  // model — resolving/persisting an Open owner bearer under NEUTRON_HOME and
+  // requiring it here would be semantically wrong for that deployment. The
+  // injected path is NOT unguarded, though: `boot()` still runs the shared S2
+  // `assertWideBindPolicy` (refuses a wide bind carrying any dev-auth bypass env)
+  // for BOTH entrypoints, and an injected composer enforces its own credential
+  // check in its own layer. So a wide injected bind is governed by (S2 boot guard
+  // + that layer's auth); the Open owner-bearer fail-closed is scoped to the Open
+  // composer path.
   const injected = await loadGraphComposerFromEnv(env)
   if (injected !== undefined) {
     return boot({ composer: injected, config: resolveBootConfig(env) })

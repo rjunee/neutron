@@ -225,7 +225,7 @@ import { buildOpenAgentProfileBackend } from './agent-profile-backend.ts'
 // only user and is already authed at the HTTP start-token/cookie layer, so the
 // app-bearer (`dev:<owner>`) is accepted directly. No feature flag, single path.
 import { createAppWsAuthResolver } from '@neutronai/channels/adapters/app-ws/auth.ts'
-import { isLoopbackBindHost } from '@neutronai/gateway/boot-bind-policy.ts'
+import { isLoopbackBindHost, assertOwnerCredentialPolicy } from '@neutronai/gateway/boot-bind-policy.ts'
 import type { AppWsAuthResolver } from '@neutronai/channels/adapters/app-ws/auth.ts'
 import { DocStore } from '@neutronai/gateway/http/doc-store.ts'
 import { createAppDocsSurface } from '@neutronai/gateway/http/app-docs-surface.ts'
@@ -1240,7 +1240,21 @@ export function buildOpenGraphComposer(
     // a composer-direct embed) is treated as UNSET and falls to a minted token —
     // never a guessable few-spaces bearer. server.ts already normalizes this
     // before it gets here; this is the last line of defense for the direct path.
-    const appWsToken = selectAppWsToken(env['NEUTRON_OWNER_BEARER'])
+    const threadedOwnerBearer = env['NEUTRON_OWNER_BEARER']?.trim()
+    const hasPersistentOwnerBearer =
+      threadedOwnerBearer !== undefined && threadedOwnerBearer.length > 0
+    // S1 (fail-closed, COMPOSITION boundary) — the "mandatory owner credential on
+    // a public bind" contract is enforced HERE too, not only in server.ts, so it
+    // holds for EVERY Open-composer entry point (server.ts, an embed, a future
+    // caller). A WIDE (non-loopback) bind with no PERSISTENT owner bearer threaded
+    // in would otherwise fall to an ephemeral per-boot token — refuse instead
+    // (`'ephemeral'`). On a loopback bind this is a no-op (a minted dev token is
+    // fine). server.ts threads a persistent bearer (or refuses first) before
+    // building the composer on a wide bind, so reaching here without one means a
+    // misconfigured / direct-embed wide bind — fail closed. Reuses the SAME
+    // isLoopbackBindHost classification as S2 via assertOwnerCredentialPolicy.
+    if (!hasPersistentOwnerBearer) assertOwnerCredentialPolicy(bindHost, 'ephemeral')
+    const appWsToken = selectAppWsToken(threadedOwnerBearer)
 
     // FIX 2 (P2 follow-up to #84) — ONE shared single-use store for start-token
     // JTIs. With the legacy `/ws/chat` onboarding socket deleted, the start

@@ -82,7 +82,14 @@ async function buildGraph(host: string): Promise<Built> {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     substrateFactory: (() => recordingSubstrate()) as any,
   })
-  const composition = await composer({ db, project_slug: 'owner' })
+  let composition: Awaited<ReturnType<typeof composer>>
+  try {
+    composition = await composer({ db, project_slug: 'owner' })
+  } catch (err) {
+    // Fail-closed composition (S1 wide-bind guard) — don't leak the open db.
+    db.close()
+    throw err
+  }
   const graph = await composeProductionGraph(composition)
   if (graph.fetch === undefined) throw new Error('graph has no fetch handler')
   return {
@@ -109,11 +116,17 @@ beforeEach(() => {
       'NEUTRON_ONBOARDING_CHAT_COOKIE_SECRET',
       'ANTHROPIC_API_KEY',
       'NEUTRON_HOST',
+      'NEUTRON_OWNER_BEARER',
     ],
     env: {
       NEUTRON_LANDING_STATIC_DIR: LANDING_DIR,
       NEUTRON_ONBOARDING_CHAT_COOKIE_SECRET: 'open-test-secret-0123456789',
       ANTHROPIC_API_KEY: 'sk-ant-synthetic-wide-bind-test',
+      // S1 — server.ts threads a PERSISTENT owner bearer before building the
+      // composer on a wide bind. Mirror that here so the wide-bind composition
+      // builds (the S1 composition guard refuses a wide bind with NO persistent
+      // bearer — covered by its own test below).
+      NEUTRON_OWNER_BEARER: 'nbt_wide-bind-test-persistent-owner-bearer-0123456789',
     },
   })
 })
@@ -135,6 +148,32 @@ describe('S2 (b) e2e — wide bind rejects the predictable dev:owner; loopback a
       // bypass on a wide bind, so a dev:owner Bearer is rejected too.
       const http = await built.fetch(httpSend('dev:owner'), fakeServer)
       expect(http.status).toBe(401)
+    } finally {
+      await built.close()
+    }
+  })
+
+  test('S1 fail-closed: WIDE bind with NO persistent owner bearer REFUSES to compose', async () => {
+    // The composition-boundary half of the S1 guard: a wide bind that reaches the
+    // Open composer WITHOUT a threaded persistent owner bearer (server.ts would
+    // have refused first, or an embed passed none) must fail closed rather than
+    // fall to an ephemeral per-boot token. Mutation-verify: drop the composer's
+    // `assertOwnerCredentialPolicy(bindHost, 'ephemeral')` → this stops throwing.
+    delete process.env['NEUTRON_OWNER_BEARER']
+    await expect(buildGraph('0.0.0.0')).rejects.toThrow(/refusing to boot/)
+  })
+
+  test('S1: WIDE bind WITH a persistent owner bearer composes (all clients work)', async () => {
+    // The counterpart: the SAME wide bind with a persistent bearer threaded in
+    // builds fine — so a properly-configured public bind is fully functional.
+    const built = await buildGraph('0.0.0.0') // beforeEach set NEUTRON_OWNER_BEARER
+    try {
+      // The threaded persistent bearer authenticates as owner over the HTTP path…
+      const ok = await built.fetch(
+        httpSend('nbt_wide-bind-test-persistent-owner-bearer-0123456789'),
+        fakeServer,
+      )
+      expect(ok.status).not.toBe(401)
     } finally {
       await built.close()
     }
