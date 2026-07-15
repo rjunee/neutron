@@ -30,6 +30,17 @@ afterAll(async () => {
 const PROJECT = 'acme'
 const tick = () => new Promise((r) => setTimeout(r, 0))
 
+/**
+ * Deterministic barrier: tick until `pred()` holds (bounded). Under the CI
+ * bounded-memory partitioned runner a fixed `await tick()` count was not always
+ * enough for React state to flush / an async POST→re-fetch chain to settle — poll
+ * instead so an assertion awaits the effect rather than racing a fixed tick count.
+ */
+const waitFor = async (pred: () => boolean, maxTicks = 300): Promise<void> => {
+  for (let i = 0; i < maxTicks && !pred(); i += 1) await tick()
+  if (!pred()) throw new Error('waitFor: condition not met within bound')
+}
+
 const config = {
   wsUrl: 'wss://t/ws/app/chat',
   topicId: 'app:sam',
@@ -460,21 +471,25 @@ describe('WorkBoardTab (happy-dom)', () => {
     const { container, root, act } = await mount(handler)
 
     const input = container.querySelector('.cwb-add-input') as HTMLInputElement
-    const { act: ract } = await import('react')
-    await ract(async () => {
+    const addEnabled = (): boolean => {
+      const b = container.querySelector('.cwb-btn-primary') as HTMLButtonElement | null
+      return b !== null && !b.disabled
+    }
+    await act(async () => {
       const setter = Object.getOwnPropertyDescriptor(
         window.HTMLInputElement.prototype,
         'value',
       )!.set!
       setter.call(input, 'Brand new')
       input.dispatchEvent(new Event('input', { bubbles: true }))
-      await tick()
-    })
-    const addBtn = container.querySelector('.cwb-btn-primary') as HTMLButtonElement
-    await act(async () => {
-      addBtn.click()
-      await tick()
-      await tick()
+      // Wait for React to flush `newTitle` so the add button is ENABLED
+      // (`disabled={adding || newTitle.trim()===''}`) BEFORE clicking — under the
+      // memory-partitioned CI runner the state update didn't always land within a
+      // fixed tick, so the click hit a still-disabled button and no POST fired.
+      await waitFor(addEnabled)
+      ;(container.querySelector('.cwb-btn-primary') as HTMLButtonElement).click()
+      // Then wait for the POST + its triggered re-fetch to actually land.
+      await waitFor(() => posted !== null && listCount >= 2)
     })
     expect(posted).not.toBeNull()
     expect(posted!.title).toBe('Brand new')
