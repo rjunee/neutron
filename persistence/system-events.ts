@@ -250,6 +250,37 @@ export class SystemEventsStore implements SystemEventSink {
           )
     return rows.map((r) => rowToPersisted(r))
   }
+
+  /**
+   * Read-only: the most-recent `limit` events STRICTLY scoped to `project_slug`,
+   * newest first. The scope predicate is applied BEFORE the `LIMIT` so foreign-slug
+   * rows can neither be DISCLOSED into an instance-scoped report nor STARVE in-scope
+   * rows out of the window (O5 diagnostics, Codex). `limit <= 0` → `[]`.
+   *
+   * NULL-scoped rows are EXCLUDED. `NULL` is ambiguous: it means both "genuinely
+   * process-wide" AND "an emitter that omitted its scope" — and several O4 degrade
+   * emitters currently persist NULL while carrying instance-specific identifiers
+   * (import `job_id`, REPL `session_key`, GBrain backend errors). Including NULL here
+   * would DISCLOSE those identifiers into every project's report on an instance that
+   * serves more than one project (Codex). Since this is an instance-scoped disclosure
+   * endpoint, the safe default is strict scope; genuinely process-wide faults
+   * (GBrain/credentials/cron) remain visible through their own dedicated diagnostics
+   * sections. Re-including process-wide rows safely needs the emitter-scoping audit
+   * (O4 territory).
+   */
+  listRecentForScope(project_slug: string, limit: number): PersistedSystemEvent[] {
+    if (!Number.isFinite(limit) || limit <= 0) return []
+    const n = Math.floor(limit)
+    const rows = this.db.all<SystemEventRow, [string, number]>(
+      `SELECT id, ts, level, module, event_name, payload_json, project_slug, duration_ms
+         FROM system_events
+        WHERE project_slug = ?
+        ORDER BY ts DESC, id DESC
+        LIMIT ?`,
+      [project_slug, n],
+    )
+    return rows.map((r) => rowToPersisted(r))
+  }
 }
 
 interface SystemEventRow {

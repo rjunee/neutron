@@ -117,13 +117,40 @@ describe('composeDiagnostics', () => {
     expect(r.import_jobs.jobs![0]).toMatchObject({ job_id: 'j1', status: 'failed', error_code: 'rate_limit' })
   })
 
-  it('maps recent events', () => {
+  it('maps recent system_events rows (scope + payload passthrough)', () => {
     const r = composeDiagnostics(
       baseSources({
-        recentEvents: () => [{ ts: 5, level: 'error', module: 'gbrain', event: 'gbrain_unavailable', duration_ms: null }],
+        recentEvents: () => [
+          {
+            ts: 5,
+            level: 'error',
+            module: 'cores',
+            event: 'core_install_failed',
+            project_slug: 'demo',
+            payload: { core_slug: 'email', code: 'manifest_invalid', message: 'bad' },
+            duration_ms: null,
+          },
+        ],
       }),
     )
-    expect(r.recent_events.events![0]).toMatchObject({ ts: 5, level: 'error', event: 'gbrain_unavailable' })
+    expect(r.recent_events.available).toBe(true)
+    expect(r.recent_events.events![0]).toMatchObject({
+      ts: 5,
+      level: 'error',
+      module: 'cores',
+      event: 'core_install_failed',
+      project_slug: 'demo',
+      payload: { core_slug: 'email', code: 'manifest_invalid', message: 'bad' },
+    })
+  })
+
+  it('defaults scope/payload when the row omits them', () => {
+    const r = composeDiagnostics(
+      baseSources({
+        recentEvents: () => [{ ts: 9, level: 'warn', module: 'gbrain', event: 'gbrain_unavailable' }],
+      }),
+    )
+    expect(r.recent_events.events![0]).toMatchObject({ project_slug: null, payload: {} })
   })
 
   it('fail-soft: a throwing source degrades ONLY its section', () => {

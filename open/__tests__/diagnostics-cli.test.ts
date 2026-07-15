@@ -16,7 +16,7 @@ import { join } from 'node:path'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { applyMigrationsToProjectDb } from '@neutronai/migrations/runner.ts'
 import { composeDiagnostics } from '@neutronai/gateway/diagnostics/diagnostics-report.ts'
-import { collectCliDiagnostics, formatDiagnosticsText } from '../diagnostics-cli-impl.ts'
+import { collectCliDiagnostics, formatDiagnosticsText, fmtPayload } from '../diagnostics-cli-impl.ts'
 
 let tmp: string
 
@@ -85,6 +85,99 @@ describe('collectCliDiagnostics', () => {
     expect(result.report.gbrain.status).toBe('unavailable')
     expect(result.report.gbrain.deferred_count).toBe(3)
     expect(result.report.import_jobs.jobs?.[0]).toMatchObject({ job_id: 'j1', status: 'failed', error_code: 'rate_limit' })
+  })
+
+  it('surfaces a system_events degrade row (O4 journal) off-process', () => {
+    const dbPath = join(tmp, 'project.db')
+    const db = ProjectDb.open(dbPath)
+    applyMigrationsToProjectDb(db)
+    // A `core_install_failed` degrade — the exact "why is a Core broken?" signal
+    // the journal makes visible without journalctl.
+    db.runSync(
+      `INSERT INTO system_events (id, ts, level, module, event_name, payload_json, project_slug, duration_ms)
+       VALUES ('e1', 500, 'error', 'cores', 'core_install_failed', ?, 'demo', NULL)`,
+      [JSON.stringify({ core_slug: 'email', code: 'manifest_invalid' })],
+    )
+    db.close()
+
+    const result = collectCliDiagnostics(envFor(dbPath))
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    const ev = result.report.recent_events
+    expect(ev.available).toBe(true)
+    expect(ev.events?.[0]).toMatchObject({
+      ts: 500,
+      level: 'error',
+      module: 'cores',
+      event: 'core_install_failed',
+      project_slug: 'demo',
+      payload: { core_slug: 'email', code: 'manifest_invalid' },
+    })
+    // the printer labels the section as the operational system_events journal AND
+    // renders the structured payload (which core failed + why) — the whole point
+    // of the journal: answerable without journalctl.
+    const text = formatDiagnosticsText(result.report)
+    expect(text).toContain('recent events (system_events')
+    expect(text).toContain('cores/core_install_failed')
+    expect(text).toContain('core_slug=email')
+    expect(text).toContain('code=manifest_invalid')
+  })
+
+  describe('fmtPayload — terminal-injection safety + caps', () => {
+    it('strips newlines and ANSI/control sequences (no forged lines, one line out)', () => {
+      // A journal payload carries attacker-influenceable error text.
+      const out = fmtPayload({ message: 'failed\ncredentials: usable=true\u001b[2Jx\r\t' })
+      expect(out).not.toContain('\n')
+      expect(out).not.toContain('\r')
+      expect(out).not.toContain('\u001b') // ESC — no clear-screen etc.
+      expect(out).not.toContain('\t')
+      // The visible text survives (controls → spaces), so it's still informative.
+      expect(out).toContain('message=failed')
+    })
+
+    it('caps a long value at 80 and the whole line at 200 chars (…-elided)', () => {
+      const longVal = 'x'.repeat(500)
+      const perValue = fmtPayload({ k: longVal })
+      expect(perValue.length).toBeLessThanOrEqual(2 + 80) // "k=" + 80
+      expect(perValue.endsWith('…')).toBe(true)
+      const wide = fmtPayload(Object.fromEntries(Array.from({ length: 40 }, (_, i) => [`k${i}`, 'v'.repeat(30)])))
+      expect(wide.length).toBeLessThanOrEqual(200)
+      expect(wide.endsWith('…')).toBe(true)
+    })
+
+    it('non-object / empty payloads render as empty', () => {
+      expect(fmtPayload(null)).toBe('')
+      expect(fmtPayload('a string')).toBe('')
+      expect(fmtPayload({})).toBe('')
+    })
+
+    it('is fail-soft on undefined / BigInt / circular values (never throws)', () => {
+      // Journal payloads are JSON-parsed so these shouldn't occur, but fmtPayload
+      // takes `unknown` + is a diagnostics render — it must never crash.
+      expect(() => fmtPayload({ x: undefined })).not.toThrow()
+      expect(fmtPayload({ x: undefined })).toContain('x=undefined')
+      expect(() => fmtPayload({ x: 1n })).not.toThrow()
+      expect(fmtPayload({ x: 1n })).toContain('x=1')
+      const circular: Record<string, unknown> = {}
+      circular['self'] = circular
+      expect(() => fmtPayload(circular)).not.toThrow()
+      expect(fmtPayload(circular)).toContain('self=')
+      // A null-prototype object still renders (no inherited toString needed).
+      expect(fmtPayload(Object.assign(Object.create(null), { code: 'x' }))).toContain('code=x')
+    })
+
+    it('degrades to a marker (never throws) when even Object.entries throws — a hostile proxy', () => {
+      const hostile = new Proxy(
+        {},
+        {
+          ownKeys() {
+            throw new Error('nope')
+          },
+        },
+      )
+      expect(() => fmtPayload(hostile)).not.toThrow()
+      expect(fmtPayload(hostile)).toBe('[unrenderable payload]')
+    })
   })
 
   it('scopes cron jobs to THIS instance slug (no cross-project leak)', () => {

@@ -6,10 +6,13 @@
  * memory / chat / import broken?" from the CLI, WITHOUT journalctl. It opens
  * the per-instance `project.db` READ-ONLY (WAL lets it read alongside the live
  * server) and composes the on-disk diagnostic sections via the SAME pure
- * `composeDiagnostics` the admin endpoint uses. In-process-only sections
- * (credential-pool health, in-memory cores install failures) are not visible
- * off-process, so they render `{ available: false }` here — the running
- * instance's `GET /api/app/admin/diagnostics` (admin tab) has the full picture.
+ * `composeDiagnostics` the admin endpoint uses. In-process-only sections (the
+ * live credential-pool probe) are not visible off-process, so they render
+ * `{ available: false }` here — the running instance's
+ * `GET /api/app/admin/diagnostics` (admin tab) has the full picture. Everything
+ * on disk IS visible, including core-install failures: those land in the
+ * `system_events` journal (`core_install_failed`) and surface in the recent-
+ * events section here just as they do on the endpoint.
  *
  * READ-ONLY: opens the DB with `readonly: true` + `create: false` and only
  * reads. It never migrates, never writes.
@@ -50,6 +53,44 @@ export function collectCliDiagnostics(env: NodeJS.ProcessEnv = process.env):
 function fmtTime(ms: number | null | undefined): string {
   if (ms === null || ms === undefined) return '—'
   return new Date(ms).toISOString()
+}
+
+/**
+ * Compact one-line render of a system_events payload — the structured "why" behind
+ * a degrade row (`core_slug=email code=manifest_invalid message=boom`), so `doctor`
+ * answers which Core failed and why without journalctl. `k=v` pairs; each value
+ * stringified + length-capped, the whole string bounded. Empty/non-object → ''.
+ */
+export function fmtPayload(payload: unknown): string {
+  if (payload === null || typeof payload !== 'object') return ''
+  // Strip terminal control chars (newlines, ESC/ANSI, C0/C1 + DEL) BEFORE truncating
+  // so a journal payload — which carries attacker-influenceable error text — can't
+  // forge a diagnostics line or emit control sequences (e.g. clear-screen) to the
+  // terminal (Codex). Keeps the "one-line" contract intact.
+  const sanitize = (s: string): string => s.replace(/[\u0000-\u001f\u007f-\u009f]/g, ' ')
+  const cap = (s: string, n: number): string => (s.length > n ? `${s.slice(0, n - 1)}…` : s)
+  // Fail-soft stringify: `JSON.stringify(undefined)` returns `undefined` (not a
+  // string), and BigInt / circular values THROW — a diagnostics render must never
+  // crash on a payload value (Codex). Fall back to `String(v)` in both cases.
+  const stringify = (v: unknown): string => {
+    if (typeof v === 'string') return v
+    try {
+      return JSON.stringify(v) ?? String(v)
+    } catch {
+      return String(v)
+    }
+  }
+  // OUTER guard: a diagnostics render must NEVER throw on any payload shape — even
+  // `Object.entries` / property access can throw for an exotic value (a throwing
+  // Proxy). Any structural failure degrades to a marker, not a crash (Codex).
+  try {
+    const entries = Object.entries(payload as Record<string, unknown>)
+    if (entries.length === 0) return ''
+    const parts = entries.map(([k, v]) => `${sanitize(k)}=${cap(sanitize(stringify(v)), 80)}`)
+    return cap(parts.join(' '), 200)
+  } catch {
+    return '[unrenderable payload]'
+  }
 }
 
 /** Pure text formatter — testable without a DB. */
@@ -131,17 +172,21 @@ export function formatDiagnosticsText(report: DiagnosticsReport): string {
     }
   }
 
-  // recent events — source is gateway_events (onboarding/gateway telemetry),
-  // NOT the operational system_events journal (that table lands with unit O4).
+  // recent events — source is the operational system_events journal (O4): the
+  // deliberate silent fail-soft / degrade decisions across every band.
   const ev = report.recent_events
   if (!ev.available) {
-    lines.push(`recent events (gateway_events): ${ev.note ?? 'no events'}`)
+    lines.push(`recent events (system_events): ${ev.note ?? 'no events'}`)
   } else if ((ev.events?.length ?? 0) === 0) {
-    lines.push(`recent events (gateway_events): none`)
+    lines.push(`recent events (system_events): none`)
   } else {
-    lines.push(`recent events (gateway_events, newest first, ${ev.events!.length}):`)
+    lines.push(`recent events (system_events, newest first, ${ev.events!.length}):`)
     for (const e of ev.events!.slice(0, 15)) {
-      lines.push(`  - ${fmtTime(e.ts)} [${e.level ?? '?'}] ${e.module ?? '?'}/${e.event ?? '?'}`)
+      const scope = e.project_slug ? ` (${e.project_slug})` : ''
+      const why = fmtPayload(e.payload)
+      lines.push(
+        `  - ${fmtTime(e.ts)} [${e.level ?? '?'}] ${e.module ?? '?'}/${e.event ?? '?'}${scope}${why ? ` — ${why}` : ''}`,
+      )
     }
   }
 

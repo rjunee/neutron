@@ -115,19 +115,26 @@ export interface ImportDiag {
   note?: string
 }
 
-/** One `gateway_events` row (onboarding/gateway telemetry). NOT the operational
- *  `system_events` journal — that table is created by unit O4 (unmerged); this
- *  section reads `gateway_events` and is labelled as such by every consumer. */
+/** One `system_events` row (O4's product-wide degradation journal). This is the
+ *  operational journal — the deliberate silent fail-soft / degrade decisions
+ *  (`core_install_failed`, `credential_all_cooldown`, `repl_session_capped`,
+ *  `cron_job_error`, `import_orphaned`, …) — NOT the onboarding-only
+ *  `gateway_events` telemetry stream. */
 export interface SystemEventDiag {
   ts?: number | undefined
   level?: string | undefined
   module?: string | undefined
   event?: string | undefined
+  /** Instance scope of the degrade (`null` = process-wide / not instance-scoped). */
+  project_slug?: string | null
+  /** Structured "why" context (e.g. `core_install_failed` carries
+   *  `{ core_slug, code, message }`). Empty `{}` when the emitter passed none. */
+  payload?: Record<string, unknown>
   duration_ms?: number | null
 }
 
-/** Recent `gateway_events` (source = onboarding/gateway telemetry). Pending O4,
- *  this is NOT operational `system_events`; consumers label it `gateway_events`. */
+/** Recent `system_events` (O4's operational degradation journal), newest first.
+ *  This is the real journal — every consumer labels it `system_events`. */
 export interface EventsDiag {
   available: boolean
   events?: SystemEventDiag[]
@@ -199,12 +206,14 @@ export interface ImportRowish {
   error_message?: string | null
 }
 
-/** gateway_events row (subset) — `PersistedOnboardingEvent` shape. */
+/** system_events row (subset) — `PersistedSystemEvent` shape (O4). */
 export interface EventRowish {
   ts?: number
   level?: string
   module?: string
   event?: string
+  project_slug?: string | null
+  payload?: Record<string, unknown>
   duration_ms?: number | null
 }
 
@@ -232,7 +241,7 @@ export interface DiagnosticsSources {
   cronJobs?: () => ReadonlyArray<CronRowish>
   /** import_jobs rows for this instance. */
   importJobs?: () => ReadonlyArray<ImportRowish>
-  /** Most-recent system/gateway events, newest first, already sliced. */
+  /** Most-recent `system_events` (O4 journal), newest first, already sliced. */
   recentEvents?: () => ReadonlyArray<EventRowish>
 }
 
@@ -362,6 +371,8 @@ export function composeDiagnostics(sources: DiagnosticsSources): DiagnosticsRepo
         level: e.level,
         module: e.module,
         event: e.event,
+        project_slug: e.project_slug ?? null,
+        payload: e.payload ?? {},
         duration_ms: e.duration_ms ?? null,
       })),
     }),
