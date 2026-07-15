@@ -97,9 +97,20 @@ function ownerSlugMismatchBindingOffense(source: string, fileName: string): stri
       referenced = true
     }
     if (ts.isCallExpression(node)) {
-      if (ts.isIdentifier(node.expression) && node.expression.text === NAME) referenced = true
-      if (ts.isPropertyAccessExpression(node.expression) && node.expression.name.text === NAME) {
-        qualifiedCall = `qualified call ${node.expression.getText(sf)}`
+      const callee = node.expression
+      if (ts.isIdentifier(callee) && callee.text === NAME) referenced = true
+      // Dot form: `x.ownerSlugMismatch(...)`.
+      if (ts.isPropertyAccessExpression(callee) && callee.name.text === NAME) {
+        qualifiedCall = `qualified call ${callee.getText(sf)}`
+        referenced = true
+      }
+      // Bracket form: `x['ownerSlugMismatch'](...)` (string-literal element access).
+      if (
+        ts.isElementAccessExpression(callee) &&
+        ts.isStringLiteralLike(callee.argumentExpression) &&
+        callee.argumentExpression.text === NAME
+      ) {
+        qualifiedCall = `element-access call ${callee.getText(sf)}`
         referenced = true
       }
     }
@@ -262,6 +273,9 @@ describe('project_slug timing-safe comparison (ISSUE #34)', () => {
       flag("import { ownerSlugMismatch } from './surface-kit.ts'\nimport * as s from './shadow.ts'\ns.ownerSlugMismatch('a','b')"),
     ).toBe(true) // qualified call + unused canonical import
     expect(flag("import * as ownerSlugMismatch from './shadow.ts'\nownerSlugMismatch.cmp('a','b')")).toBe(true) // namespace shadow
+    expect(
+      flag("import { jsonError } from './surface-kit.ts'\nimport * as x from './shadow.ts'\nx['ownerSlugMismatch']('a','b')"),
+    ).toBe(true) // element-access (bracket-string) call
     expect(
       flag("import { ownerSlugMismatch } from './surface-kit.ts'\nconst ownerSlugMismatch = (a: string, b: string) => a === b\nownerSlugMismatch('a','b')"),
     ).toBe(true) // local var shadow
