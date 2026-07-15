@@ -554,13 +554,15 @@ describe('buildSynthesisImportJobRunner — synthesis → engine bridge', () => 
             (target as ProjectDb).transaction(async (tx) => {
               const wrappedTx = new Proxy(tx as unknown as Record<string, unknown>, {
                 get(t, p) {
-                  if (p === 'run') {
-                    return async (sql: string, params?: unknown[]) => {
+                  // The completion flip is a `runSync`; persistImportResult's INSERT
+                  // is an async `run` (must pass through). Throw only on the flip.
+                  if (p === 'runSync') {
+                    return (sql: string, params?: unknown[]) => {
                       if (typeof sql === 'string' && sql.includes("status = 'completed'")) {
                         intercepted = true
                         throw new Error('injected: completion write failed')
                       }
-                      return (t['run'] as (s: string, pp?: unknown[]) => unknown)(sql, params)
+                      return (t['runSync'] as (s: string, pp?: unknown[]) => unknown)(sql, params)
                     }
                   }
                   const v = t[p as string]
@@ -601,6 +603,54 @@ describe('buildSynthesisImportJobRunner — synthesis → engine bridge', () => 
       .query<{ status: string }, [string]>(`SELECT status FROM import_jobs WHERE job_id = ?`)
       .get(job_id)
     expect(jobRow?.status).not.toBe('completed')
+  })
+
+  test('P6 cancel race: a cancel landing during seed writes is NOT resurrected to completed (nor left with a persisted result)', async () => {
+    const db = freshDb()
+    // `writeSeed` runs in the synchronous seed loop AFTER the top-of-runJob cancel
+    // pre-check but BEFORE the completion transaction — the exact window a late
+    // cancel lands in. Simulate the cancel winning by flipping the in-flight row to
+    // 'cancelled' here (this is the row state `runner.cancel()` produces).
+    const fakeSynthesis: SynthesisRunner = {
+      rawStore: new MemoryRawTranscriptStore(),
+      async synthesizeImport(): Promise<SynthesisResult> {
+        return SYNTH_RESULT
+      },
+      async synthesizeInterviewOnly(): Promise<SynthesisResult | null> {
+        return null
+      },
+      writeSeed(seed: ProjectSeed): WriteProjectSeedOutcome {
+        db.raw().run(
+          `UPDATE import_jobs SET status = 'cancelled', completed_at = 1 WHERE status = 'pass1-running'`,
+        )
+        return { project_slug: seed.slug, reason: 'created', docs_written: ['STATUS.md'], transcripts_written: 1 }
+      },
+    }
+    const runner = buildSynthesisImportJobRunner({ db, synthesis: fakeSynthesis, parse: () => fakeRecords() })
+    const { job_id } = await runner.start({
+      project_slug: 'owner',
+      user_id: 'u-owner',
+      source: 'claude-zip',
+      payload: Buffer.from('zip'),
+    })
+
+    // Wait until the row is terminal (the simulated cancel), then let the completion
+    // transaction run + lose the guarded race + roll back.
+    await pollToTerminal(runner, job_id)
+    await new Promise((r) => setTimeout(r, 60))
+
+    // The completion did NOT clobber the cancel.
+    const status = db
+      .raw()
+      .query<{ status: string }, [string]>(`SELECT status FROM import_jobs WHERE job_id = ?`)
+      .get(job_id)?.status
+    expect(status).toBe('cancelled')
+    // And no result was persisted (the persist rolled back with the lost flip).
+    const resultRow = db
+      .raw()
+      .query<{ job_id: string }, [string]>(`SELECT job_id FROM import_results WHERE job_id = ?`)
+      .get(job_id)
+    expect(resultRow).toBeNull()
   })
 
   test('synthesisResultToImportResult maps projects, tasks, people, and voice', () => {

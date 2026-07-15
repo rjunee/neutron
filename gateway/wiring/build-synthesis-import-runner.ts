@@ -252,23 +252,52 @@ export function buildSynthesisImportJobRunner(
     // re-entry-detected inside the BEGIN/COMMIT so both writes share the one
     // mutex-held transaction. `partial=false` (the synthesis session is a single
     // accumulating run; a completed job is always a full result).
-    await db.transaction(async (tx) => {
-      await persistImportResult(tx, {
-        job_id,
-        project_slug,
-        source,
-        result: importResult,
-        partial: false,
-        now: now(),
+    //
+    // CANCEL RACE (Codex): the pre-check at the top of this function (`cancelled.
+    // has(job_id)`) closes only cancels that land BEFORE synthesis returns. A
+    // `cancel()` arriving during the (synchronous) seed writes or right before this
+    // block has already flipped the row to `status='cancelled'`. So GUARD the flip
+    // on a non-terminal status and check the affected-row count: if the completion
+    // lost the race (0 rows), throw to roll the just-persisted result back with it —
+    // a cancelled/failed job must never resurrect to `completed`, nor keep a
+    // persisted result. The terminal status the winner wrote stays authoritative.
+    let completionWon = true
+    try {
+      await db.transaction(async (tx) => {
+        await persistImportResult(tx, {
+          job_id,
+          project_slug,
+          source,
+          result: importResult,
+          partial: false,
+          now: now(),
+        })
+        // `runSync` (not `run`) so we get the affected-row count; it writes on the
+        // transaction's connection inside the open BEGIN, so it commits/rolls back
+        // atomically with the `persistImportResult` above.
+        const res = tx.runSync(
+          `UPDATE import_jobs
+             SET status = 'completed', pass1_chunks_done = ?, pass1_chunks_total = ?,
+                 chunks_total_known = 1, completed_at = ?
+           WHERE job_id = ?
+             AND status NOT IN ('completed', 'failed', 'cancelled')`,
+          [batches, batches, now(), job_id],
+        )
+        if (res.changes === 0) {
+          // A concurrent cancel/fail already made the row terminal. Roll the
+          // persisted result back with this failed flip (same tx).
+          completionWon = false
+          throw new Error(`import completion lost the race for ${job_id} (already terminal)`)
+        }
       })
-      await tx.run(
-        `UPDATE import_jobs
-           SET status = 'completed', pass1_chunks_done = ?, pass1_chunks_total = ?,
-               chunks_total_known = 1, completed_at = ?
-         WHERE job_id = ?`,
-        [batches, batches, now(), job_id],
-      )
-    })
+    } catch (err) {
+      if (!completionWon) {
+        // Benign: the row is already terminal (cancelled/failed) and the persisted
+        // result was rolled back. Do NOT warm the cache or fire completion.
+        return
+      }
+      throw err
+    }
     // Populate the in-process cache only AFTER the durable commit — never cache a
     // result the transaction rolled back. This runs synchronously in `runJob`'s
     // continuation (no `await` between commit and here), so no `status()` poll

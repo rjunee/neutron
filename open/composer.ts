@@ -2490,10 +2490,19 @@ export function buildOpenGraphComposer(
       // dead closures — each capturing an already-fired timer — that shutdown
       // then walked. One handle + one cleanup keeps it O(1) per arm.
       let watchTimer: ReturnType<typeof setTimeout> | null = null
+      // P6 (Codex) — a `stopped` latch closes the shutdown-vs-in-flight-tick race:
+      // clearing `watchTimer` alone is not enough because a `tick()` already
+      // awaiting the state read/upsert when cleanup runs would, on resume, schedule
+      // a FRESH timer after every cleanup has fired — leaving a poll alive against
+      // closed resources. The latch is set in cleanup and re-checked after the tick's
+      // awaits, before any reschedule.
+      let stopped = false
       realmodeCleanups.push(() => {
+        stopped = true
         if (watchTimer !== null) clearTimeout(watchTimer)
       })
       const tick = async (): Promise<void> => {
+        if (stopped) return
         let reschedule = false
         try {
           const st = await onboardingStateStore.get(project_slug, user_id)
@@ -2524,7 +2533,9 @@ export function buildOpenGraphComposer(
           // Transient read/write failure — retry next tick (still bounded).
           reschedule = Date.now() - startedAt <= IMPORT_WATCH_MAX_MS
         }
-        if (!reschedule) {
+        // Re-check the latch AFTER the awaits above: if cleanup ran during this
+        // tick, do not reschedule — otherwise a post-shutdown timer stays alive.
+        if (!reschedule || stopped) {
           importWatchActive.delete(user_id)
           watchTimer = null
           return
