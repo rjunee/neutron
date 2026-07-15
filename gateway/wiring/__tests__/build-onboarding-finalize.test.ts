@@ -188,7 +188,7 @@ test('CONCURRENT finalize whose TERMINAL write FAILS — both callers observe th
   expect((await real.get(PROJECT_SLUG, USER_ID))?.phase).toBe('completed')
 })
 
-test('finalize RE-COMPOSES persona AND re-materializes when phase_state changes mid-run (F8 r4/r6)', async () => {
+test('finalize materializes the FRESHEST state when phase_state changes during stabilize (F8 r4/r6)', async () => {
   const h = makeHarness()
   const seeded = await h.stateStore.upsert({
     project_slug: PROJECT_SLUG,
@@ -202,38 +202,41 @@ test('finalize RE-COMPOSES persona AND re-materializes when phase_state changes 
     },
   })
 
-  // A persona composer whose commit() runs an INTERLEAVED durable write mid-finalize
-  // (once): it changes a PERSONA field (agent_personality) AND adds a project (Beta),
-  // exactly the "extractor persists state B during finalization" schedule. The
-  // consistency loop must react to BOTH — re-compose persona from the updated field
-  // (Codex F8 r6 blocker 2) and re-materialize the fuller project set — before marking
-  // completed. Guarded so the mutation fires once (else the loop re-mutates forever).
-  let composes = 0
-  let mutated = false
-  const interleavingPersona: PersonaComposerLike = {
-    async compose() { composes += 1; return { draft_id: 'x', status: 'composed' } },
-    async commit() {
-      if (!mutated) {
-        mutated = true
-        await h.stateStore.upsert({
+  // A get() wrapper that injects a durable change ONCE (a new persona field + an added
+  // project) — the extractor persisting one more field while finalize is reading. Because
+  // side effects happen ONLY after the state stabilizes, finalize composes persona +
+  // materializes from the FRESHEST (post-change) state: Beta + the updated personality.
+  const real = h.stateStore
+  let injected = false
+  const mutatingStore: OnboardingStateStore = {
+    async get(slug, uid) {
+      const state = await real.get(slug, uid)
+      const projects = (state?.phase_state['primary_projects'] as string[] | undefined) ?? []
+      if (!injected && state !== null && !projects.includes('Beta')) {
+        injected = true
+        await real.upsert({
           project_slug: PROJECT_SLUG,
           user_id: USER_ID,
           phase: 'persona_reviewed',
           phase_state_patch: { agent_personality: 'warm and direct', primary_projects: ['Alpha', 'Beta'] },
         })
+        return real.get(slug, uid)
       }
-      return { committed_at: 0, git_sha: null, paths: [] }
+      return state
     },
+    async upsert(inp) { return real.upsert(inp) },
+    async rekey(a, b, c) { return real.rekey(a, b, c) },
+    async delete(slug, uid) { return real.delete(slug, uid) },
+    async deleteByOwner(slug) { return real.deleteByOwner(slug) },
+    async completeIfPhaseStateMatches(inp) { return real.completeIfPhaseStateMatches(inp) },
   }
-  const finalizer = buildOnboardingFinalize({ ...h.deps, personaComposer: interleavingPersona })
+  const finalizer = buildOnboardingFinalize({ ...h.deps, stateStore: mutatingStore })
   await finalizer.finalize({ user_id: USER_ID, topic_id: TOPIC_ID, state: seeded })
 
-  // Persona re-composed from the updated field (≥2 composes = a repass fired).
-  expect(composes).toBeGreaterThanOrEqual(2)
-  const finalState = await h.stateStore.get(PROJECT_SLUG, USER_ID)
+  expect(injected).toBe(true)
+  const finalState = await real.get(PROJECT_SLUG, USER_ID)
   expect(finalState?.phase).toBe('completed')
   expect(finalState?.phase_state['agent_personality']).toBe('warm and direct')
-  // The interleaved project is materialized too, not suppressed by completed.
   const names = (
     h.db.raw().query('SELECT name FROM projects ORDER BY name').all() as { name: string }[]
   ).map((r) => r.name)
@@ -241,7 +244,7 @@ test('finalize RE-COMPOSES persona AND re-materializes when phase_state changes 
   expect(names).toContain('Beta')
 })
 
-test('finalize reconciles a NON-primary-projects materialization input changed mid-run — terminal CAS retry (F8 r6/r9)', async () => {
+test('finalize picks up a NON-primary-projects field changed during stabilize (whole-phase_state stability) (F8 r6)', async () => {
   const h = makeHarness()
   const seeded = await h.stateStore.upsert({
     project_slug: PROJECT_SLUG,
@@ -254,39 +257,43 @@ test('finalize reconciles a NON-primary-projects materialization input changed m
     },
   })
 
-  // A persona composer whose commit() (during compose, BEFORE the terminal CAS) changes a
-  // materialization input OTHER than primary_projects — `non_work_interests` — once. The
-  // byte-exact terminal CAS then observes phase_state != what we processed and FAILS
-  // (changes=0), forcing a re-read + repass. The change is NOT lost (a coarse
-  // primary_projects-only comparison would have missed it; the CAS catches ANY field
-  // change), and the row completes only once a pass runs against unchanged state.
-  let composes = 0
-  let mutated = false
-  const persona: PersonaComposerLike = {
-    async compose() { composes += 1; return { draft_id: 'x', status: 'composed' } },
-    async commit() {
-      if (!mutated) {
-        mutated = true
-        await h.stateStore.upsert({
+  // A get() wrapper injects a change to a field OTHER than primary_projects
+  // (`non_work_interests`) once. Stability is keyed on the WHOLE phase_state, so this is
+  // detected (a coarse primary_projects-only key would have missed it): finalize
+  // re-reads, stabilizes on the updated state, and completes carrying the new field.
+  const real = h.stateStore
+  let injected = false
+  const mutatingStore: OnboardingStateStore = {
+    async get(slug, uid) {
+      const state = await real.get(slug, uid)
+      if (!injected && state !== null && !state.phase_state['non_work_interests']) {
+        injected = true
+        await real.upsert({
           project_slug: PROJECT_SLUG,
           user_id: USER_ID,
           phase: 'persona_reviewed',
           phase_state_patch: { non_work_interests: ['climbing'] },
         })
+        return real.get(slug, uid)
       }
-      return { committed_at: 0, git_sha: null, paths: [] }
+      return state
     },
+    async upsert(inp) { return real.upsert(inp) },
+    async rekey(a, b, c) { return real.rekey(a, b, c) },
+    async delete(slug, uid) { return real.delete(slug, uid) },
+    async deleteByOwner(slug) { return real.deleteByOwner(slug) },
+    async completeIfPhaseStateMatches(inp) { return real.completeIfPhaseStateMatches(inp) },
   }
-  const finalizer = buildOnboardingFinalize({ ...h.deps, personaComposer: persona })
+  const finalizer = buildOnboardingFinalize({ ...h.deps, stateStore: mutatingStore })
   await finalizer.finalize({ user_id: USER_ID, topic_id: TOPIC_ID, state: seeded })
 
-  expect(composes).toBeGreaterThanOrEqual(2) // the mid-run change forced a CAS retry + repass
-  const finalState = await h.stateStore.get(PROJECT_SLUG, USER_ID)
+  expect(injected).toBe(true)
+  const finalState = await real.get(PROJECT_SLUG, USER_ID)
   expect(finalState?.phase).toBe('completed')
   expect(finalState?.phase_state['non_work_interests']).toEqual(['climbing'])
 })
 
-test('finalize NEVER falsely completes under continuous mid-run churn — the CAS keeps failing, so it defers (F8 r7/r8/r9)', async () => {
+test('finalize DEFERS with ZERO side effects under continuous churn — never stabilizes, creates no projects (F8 r7/r8/r15)', async () => {
   const h = makeHarness()
   const seeded = await h.stateStore.upsert({
     project_slug: PROJECT_SLUG,
@@ -299,36 +306,42 @@ test('finalize NEVER falsely completes under continuous mid-run churn — the CA
     },
   })
 
-  // A persona composer whose commit() appends a NEW unique project on EVERY pass — so the
-  // durable phase_state is different on every pass, and the byte-exact terminal CAS can
-  // NEVER match the state that pass processed. This is the fundamental impossibility the
-  // r7↔r8↔r9 findings circled: you cannot BOTH always-complete AND never-complete-over-
-  // unprocessed-state under perpetual mutation. The CAS resolves it correctly: it refuses
-  // to stamp `completed` over changed state, so after the pass budget the finalizer
-  // DEFERS (leaves the row non-terminal) rather than falsely completing. This can only
-  // happen under an ACTIVE owner (who is generating the mutations), so a real owner always
-  // has a further trigger — no permanent strand.
-  let pass = 0
-  const persona: PersonaComposerLike = {
-    async compose() { return { draft_id: 'x', status: 'composed' } },
-    async commit() {
-      pass += 1
-      const projects = Array.from({ length: pass + 1 }, (_, i) => `P${i}`)
-      await h.stateStore.upsert({
-        project_slug: PROJECT_SLUG,
-        user_id: USER_ID,
-        phase: 'persona_reviewed',
-        phase_state_patch: { primary_projects: projects },
-      })
-      return { committed_at: 0, git_sha: null, paths: [] }
+  // A get() wrapper mutates the row on EVERY read (each read observes a different
+  // phase_state), so two consecutive reads NEVER agree → finalize never stabilizes → it
+  // DEFERS. Because side effects happen ONLY after stabilization, nothing is composed or
+  // materialized: NO project rows are created (this is what makes deferral safe — there are
+  // no stale creations to reconcile, the failure mode of the old per-pass approach).
+  const real = h.stateStore
+  let reads = 0
+  const churningStore: OnboardingStateStore = {
+    async get(slug, uid) {
+      const state = await real.get(slug, uid)
+      if (state !== null && state.phase !== 'completed') {
+        reads += 1
+        await real.upsert({
+          project_slug: PROJECT_SLUG,
+          user_id: USER_ID,
+          phase: 'persona_reviewed',
+          phase_state_patch: { primary_projects: Array.from({ length: reads + 1 }, (_, i) => `P${i}`) },
+        })
+        return real.get(slug, uid)
+      }
+      return state
     },
+    async upsert(inp) { return real.upsert(inp) },
+    async rekey(a, b, c) { return real.rekey(a, b, c) },
+    async delete(slug, uid) { return real.delete(slug, uid) },
+    async deleteByOwner(slug) { return real.deleteByOwner(slug) },
+    async completeIfPhaseStateMatches(inp) { return real.completeIfPhaseStateMatches(inp) },
   }
-  const finalizer = buildOnboardingFinalize({ ...h.deps, personaComposer: persona })
+  const finalizer = buildOnboardingFinalize({ ...h.deps, stateStore: churningStore })
   const result = await finalizer.finalize({ user_id: USER_ID, topic_id: TOPIC_ID, state: seeded })
 
   // Deferred: finalize RESOLVES `false` (not a false-positive success), so the caller
   // (finalizeImportOnboardingIfReady) won't suppress the runner's wrap-up (Codex F8 r14).
   expect(result).toBe(false)
+  // NO project rows were created — deferral took ZERO side effects (Codex F8 r15).
+  expect((h.db.raw().query('SELECT COUNT(*) AS n FROM projects').get() as { n: number }).n).toBe(0)
   // NEVER falsely completed over unprocessed state (the CAS forbids it), and the completed
   // signal never fired. The row stays non-terminal for the next trigger.
   expect((await h.stateStore.get(PROJECT_SLUG, USER_ID))?.phase).not.toBe('completed')
@@ -362,58 +375,39 @@ test('finalize ABORTS on a deleted durable row (successful null read) — no per
   expect(await h.stateStore.get(PROJECT_SLUG, USER_ID)).toBeNull()
 })
 
-test('finalize RECONCILES a project dropped mid-run — soft-deletes the stale row an earlier pass created (F8 r11)', async () => {
+test('finalize does NOT materialize a project the stable state has DROPPED (no stale row to reconcile) (F8 r11)', async () => {
   const h = makeHarness()
+  // The stable state lists Beta and explicitly DROPPED Alpha. Because side effects run only
+  // on the stable state, materialize resolves projects with drops EXCLUDED — Alpha is never
+  // created, so there is no orphaned row (the failure mode reconciliation used to chase).
   const seeded = await h.stateStore.upsert({
     project_slug: PROJECT_SLUG,
     user_id: USER_ID,
     phase: 'persona_reviewed',
-    phase_state_patch: { user_first_name: 'Sam', agent_name: 'Atlas', primary_projects: ['Alpha'] },
-  })
-
-  // commit() (before the terminal CAS) DROPS Alpha and switches to Beta — but only AFTER
-  // pass 0 has already materialized Alpha from the stale [Alpha] snapshot. The terminal CAS
-  // then fails (state changed), pass 1 runs on [Beta] and completes, and the post-completion
-  // reconcile must soft-delete Alpha's now-orphaned live row.
-  let mutated = false
-  const persona: PersonaComposerLike = {
-    async compose() { return { draft_id: 'x', status: 'composed' } },
-    async commit() {
-      if (!mutated) {
-        mutated = true
-        await h.stateStore.upsert({
-          project_slug: PROJECT_SLUG,
-          user_id: USER_ID,
-          phase: 'persona_reviewed',
-          phase_state_patch: { primary_projects: ['Beta'], dropped_projects: ['Alpha'] },
-        })
-      }
-      return { committed_at: 0, git_sha: null, paths: [] }
+    phase_state_patch: {
+      user_first_name: 'Sam',
+      agent_name: 'Atlas',
+      primary_projects: ['Beta'],
+      dropped_projects: ['Alpha'],
     },
-  }
-  const finalizer = buildOnboardingFinalize({ ...h.deps, personaComposer: persona })
+  })
+  const finalizer = buildOnboardingFinalize(h.deps)
   await finalizer.finalize({ user_id: USER_ID, topic_id: TOPIC_ID, state: seeded })
 
   expect((await h.stateStore.get(PROJECT_SLUG, USER_ID))?.phase).toBe('completed')
-  // Beta is live; Alpha (materialized by the stale pass 0) is reconciled away.
-  const live = (
-    h.db.raw().query('SELECT name FROM projects WHERE deleted_at IS NULL ORDER BY name').all() as {
-      name: string
-    }[]
+  const names = (
+    h.db.raw().query('SELECT name FROM projects ORDER BY name').all() as { name: string }[]
   ).map((r) => r.name)
-  expect(live).toContain('Beta')
-  expect(live).not.toContain('Alpha')
-  // Alpha's row still exists but is soft-deleted.
-  const alpha = h.db
-    .raw()
-    .query('SELECT deleted_at FROM projects WHERE id = ?')
-    .get(slugifyProjectId('Alpha')) as { deleted_at: number | null } | null
-  expect(alpha?.deleted_at).not.toBeNull()
+  expect(names).toContain('Beta')
+  expect(names).not.toContain('Alpha') // dropped → never materialized (no row at all)
+  expect(h.db.raw().query('SELECT COUNT(*) AS n FROM projects').get()).toEqual({ n: 1 })
 })
 
-test('dropped-project reconciliation NEVER soft-deletes a PRE-EXISTING project (F8 r12)', async () => {
+test('finalize NEVER deletes a PRE-EXISTING project the owner already had (no reconciliation) (F8 r12)', async () => {
   const h = makeHarness()
-  // Alpha exists BEFORE onboarding — a project the owner already had.
+  // Alpha exists BEFORE onboarding — a project the owner already had — and the stable state
+  // still lists it. finalize binds it (does not recreate) and NEVER soft-deletes it (there
+  // is no reconciliation path that could).
   const iso = new Date(0).toISOString()
   await h.db.run(
     `INSERT INTO projects
@@ -427,29 +421,10 @@ test('dropped-project reconciliation NEVER soft-deletes a PRE-EXISTING project (
     phase: 'persona_reviewed',
     phase_state_patch: { user_first_name: 'Sam', agent_name: 'Atlas', primary_projects: ['Alpha'] },
   })
-
-  // Pass 0 BINDS the pre-existing Alpha (row_created=false), then commit() drops it for Beta.
-  let mutated = false
-  const persona: PersonaComposerLike = {
-    async compose() { return { draft_id: 'x', status: 'composed' } },
-    async commit() {
-      if (!mutated) {
-        mutated = true
-        await h.stateStore.upsert({
-          project_slug: PROJECT_SLUG,
-          user_id: USER_ID,
-          phase: 'persona_reviewed',
-          phase_state_patch: { primary_projects: ['Beta'], dropped_projects: ['Alpha'] },
-        })
-      }
-      return { committed_at: 0, git_sha: null, paths: [] }
-    },
-  }
-  const finalizer = buildOnboardingFinalize({ ...h.deps, personaComposer: persona })
+  const finalizer = buildOnboardingFinalize(h.deps)
   await finalizer.finalize({ user_id: USER_ID, topic_id: TOPIC_ID, state: seeded })
 
   expect((await h.stateStore.get(PROJECT_SLUG, USER_ID))?.phase).toBe('completed')
-  // Alpha existed before this run (row_created=false), so reconciliation must NOT touch it.
   const alpha = h.db
     .raw()
     .query('SELECT deleted_at FROM projects WHERE id = ?')
@@ -534,29 +509,37 @@ test('finalize ABORTS (never completes) if the phase transitions to a live impor
     },
   })
 
-  // commit() (during compose, before the terminal CAS) transitions the row to a live
-  // import phase — a concurrent import kicking off after the finalize trigger. The terminal
-  // CAS pins the ORIGINAL phase, so it fails; the re-read sees a non-finalizable phase and
-  // the finalizer ABORTS rather than stamping `completed` over the live import.
+  // A get() wrapper transitions the row to a live import phase during stabilize — a
+  // concurrent import kicking off after the finalize trigger. The stabilize loop's
+  // isFinalizablePhase check sees the import phase and ABORTS before ANY side effects
+  // (no persona, no projects), rather than stamping `completed` over the live import.
+  const real = h.stateStore
   let mutated = false
-  const persona: PersonaComposerLike = {
-    async compose() { return { draft_id: 'x', status: 'composed' } },
-    async commit() {
-      if (!mutated) {
+  const mutatingStore: OnboardingStateStore = {
+    async get(slug, uid) {
+      const state = await real.get(slug, uid)
+      if (!mutated && state !== null && state.phase === 'persona_reviewed') {
         mutated = true
-        await h.stateStore.upsert({ project_slug: PROJECT_SLUG, user_id: USER_ID, phase: 'import_running' })
+        await real.upsert({ project_slug: PROJECT_SLUG, user_id: USER_ID, phase: 'import_running' })
+        return real.get(slug, uid)
       }
-      return { committed_at: 0, git_sha: null, paths: [] }
+      return state
     },
+    async upsert(inp) { return real.upsert(inp) },
+    async rekey(a, b, c) { return real.rekey(a, b, c) },
+    async delete(slug, uid) { return real.delete(slug, uid) },
+    async deleteByOwner(slug) { return real.deleteByOwner(slug) },
+    async completeIfPhaseStateMatches(inp) { return real.completeIfPhaseStateMatches(inp) },
   }
-  const finalizer = buildOnboardingFinalize({ ...h.deps, personaComposer: persona })
+  const finalizer = buildOnboardingFinalize({ ...h.deps, stateStore: mutatingStore })
   await finalizer.finalize({ user_id: USER_ID, topic_id: TOPIC_ID, state: seeded })
 
-  // Never finalized on top of the live import.
-  const finalState = await h.stateStore.get(PROJECT_SLUG, USER_ID)
+  // Never finalized on top of the live import; aborted before side effects.
+  const finalState = await real.get(PROJECT_SLUG, USER_ID)
   expect(finalState?.phase).toBe('import_running')
   expect(finalState?.phase).not.toBe('completed')
   expect(h.onboardingCompleted.filter((u) => u === USER_ID)).toHaveLength(0)
+  expect((h.db.raw().query('SELECT COUNT(*) AS n FROM projects').get() as { n: number }).n).toBe(0)
 })
 
 test('finalize operates on the LIVE durable state, not a stale caller snapshot (F8 r3)', async () => {

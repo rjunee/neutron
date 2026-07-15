@@ -67,7 +67,6 @@ import { capProposedProjects } from '@neutronai/onboarding/interview/phase-promp
 import {
   buildScaffoldMaterializer,
   ensureProjectRow,
-  softDeleteProjectRow,
 } from './project-create.ts'
 import {
   buildProjectDocReader,
@@ -303,138 +302,85 @@ export function buildOnboardingFinalize(deps: OnboardingFinalizeDeps): Onboardin
           ? (s.phase_state['import_result'] as ImportResult)
           : null
 
-      // (2)+(3) CONSISTENCY LOOP. Persona composition AND project materialization both
-      // consume mutable `phase_state` fields (agent_name/personality, primary_projects,
-      // non_work_interests + inferred interests, import_result, dropped_projects, …).
-      // A durable mutation to ANY of them DURING this run — the extractor settling one
-      // more field, then its finalize coalescing into us — must be reflected, or we'd
-      // commit persona/projects from a stale snapshot and then `completed` would suppress
-      // the correction forever. So we redo BOTH steps from a state, RE-READ, and repeat
-      // until a re-read shows the WHOLE phase_state unchanged since the state we just used
-      // (Codex F8 r5/r6). We fall through to the terminal write ONLY on a stable re-read —
-      // and because NO await separates that stability check from the `completed` upsert
-      // below, no mutation can interleave in the gap (single-threaded → atomic), so a
-      // completed row can never suppress un-committed persona/project work. commitPersona
-      // and materializeProjects write persona FILES / `projects` rows respectively and do
-      // NOT touch `phase_state`, so a quiescent row converges in ONE pass; bounded against
-      // a pathological continuous-mutation livelock.
-      // (2)+(3)+(4) CONSISTENCY LOOP with an ATOMIC compare-and-set completion. Each
-      // pass composes persona + materializes projects from `workState`, then attempts
-      // `completeIfPhaseStateMatches` — a single guarded UPDATE that flips the row to
-      // `completed` ONLY IF its phase_state is still byte-identical to what we just
-      // processed. That CAS is what makes the read→compose→materialize→complete sequence
-      // safe: it is IMPOSSIBLE to stamp `completed` over a durable mutation that landed
-      // mid-run (Codex F8 r5–r9) — the write simply doesn't match and returns false, and
-      // we re-read + redo from the fresh state. A quiescent row completes on the first
-      // pass; bounded against a pathological continuous-mutation livelock.
-      let workState = effectiveState
-      let import_result = deriveImportResult(workState) ?? input.import_result ?? null
-      // materialized: the projects that actually landed (created/existing, not the
-      // soft-deleted skips) — the per-project opening step below seeds each one's chat.
-      let materialized: MaterializedProject[] = []
-      // Every project id THIS run CREATED across ALL passes (NOT pre-existing rows it
-      // merely bound to) — so that if a project an earlier (stale) pass created is DROPPED
-      // by a later pass (removed from primary_projects / added to dropped_projects), we can
-      // reconcile it away after completion instead of leaving a stray live row. Tracking
-      // only `row_created` rows means the reconcile can NEVER soft-delete a project the
-      // owner already had (Codex F8 r11/r12).
-      const createdIdsAllPasses = new Set<string>()
-      const MAX_FINALIZE_PASSES = 5
-      let completed = false
-      for (let pass = 0; pass < MAX_FINALIZE_PASSES && !completed; pass++) {
-        // (2) Persona — compose + commit from workState (failure-isolated in commitPersona).
-        await commitPersona(deps, workState, log)
-        // (3) Projects — DB rows + topic bindings + on-disk materialization from workState.
-        import_result = deriveImportResult(workState) ?? input.import_result ?? null
-        materialized = await materializeProjects(deps, workState, import_result, now, log)
-        for (const m of materialized) if (m.row_created) createdIdsAllPasses.add(m.project_id)
-
-        // (4) ATOMIC terminal write — complete IFF nothing changed since we read workState.
-        let casOk: boolean
+      // (2) STABILIZE — read the row until two consecutive reads agree on the WHOLE
+      // phase_state, taking NO side effects. Persona compose + project materialization
+      // happen ONLY after the state has quiesced (Phase 3 below), so a churning row creates
+      // NOTHING before it settles — a deferral therefore leaves NO stale project rows to
+      // reconcile, which is what made post-hoc reconciliation unsafe (soft-deletes conflict
+      // with create-idempotency; Codex F8 r11–r15). Under continuous mutation this never
+      // stabilizes → we defer having done nothing. Persona/materialize don't touch
+      // phase_state, so a quiescent row stabilizes on the FIRST re-read.
+      const MAX_STABILIZE_PASSES = 5
+      let stableState: OnboardingState | null = null
+      let candidate = effectiveState
+      for (let pass = 0; pass < MAX_STABILIZE_PASSES; pass++) {
+        let reread: OnboardingState | null
         try {
-          casOk = await deps.stateStore.completeIfPhaseStateMatches({
-            project_slug: deps.project_slug,
-            user_id: input.user_id,
-            expected_phase: workState.phase,
-            expected_phase_state: workState.phase_state,
-            completed_at: now(),
-          })
+          reread = await deps.stateStore.get(deps.project_slug, input.user_id)
         } catch (err) {
-          // The terminal write itself failed (locked DB / disk full). SURFACE it (reject)
-          // so the caller (fireAndForget boot recovery / watcher + extractor try/catch)
-          // logs it and the next trigger retries, and a coalesced contender sees the same
-          // rejection instead of a false success (Codex F8 r2).
-          throw err instanceof Error ? err : new Error(String(err))
-        }
-        if (casOk) {
-          completed = true
-          break
-        }
-
-        // CAS lost: the row's phase or phase_state moved under us (or it's terminal /
-        // gone). Re-read to decide.
-        let after: OnboardingState | null
-        try {
-          after = await deps.stateStore.get(deps.project_slug, input.user_id)
-        } catch (err) {
-          log('warn', 'finalize: post-CAS re-read failed; deferring to next trigger', {
+          log('warn', 'finalize: stabilize re-read failed; deferring to next trigger', {
             err: errStr(err),
           })
           return false
         }
-        if (after === null) {
+        if (reread === null) {
           log('info', 'finalize: row vanished mid-run; nothing to complete', { user_id: input.user_id })
           return false
         }
-        if (!isFinalizablePhase(after.phase)) {
-          // Completed concurrently, failed, OR transitioned to a live-import phase mid-run
-          // — never finalize on top of any of those. Abort; a later trigger recovers.
-          log('info', 'finalize: phase moved to a non-finalizable state mid-run; aborting', {
+        if (!isFinalizablePhase(reread.phase)) {
+          // Completed concurrently / failed / live-import — never finalize on top of those.
+          log('info', 'finalize: phase not finalizable during stabilize; aborting', {
             user_id: input.user_id,
-            phase: after.phase,
+            phase: reread.phase,
           })
-          // Completed-concurrently is "finalized" for callers; import/failed are not.
-          return after.phase === 'completed'
+          return reread.phase === 'completed'
         }
-        // Still a finalizable phase but phase or phase_state changed → redo from fresh.
-        workState = after
+        if (phaseStateKey(reread) === phaseStateKey(candidate)) {
+          stableState = reread
+          break
+        }
+        candidate = reread // changed under us — read again
       }
-
-      if (!completed) {
-        // The row never held still long enough for the atomic CAS to land within the pass
-        // budget. We NEVER stamp `completed` over un-processed state (the CAS forbids it),
-        // so the correct action is to DEFER — leave the row non-terminal for the next
-        // finalize trigger. This only happens under CONTINUOUS mutation, which requires an
-        // ACTIVE owner generating turns (⟹ more finalize triggers), so it cannot strand a
-        // real owner; and the interview is over by the finalize trigger, so real onboarding
-        // state has stopped changing (Codex F8 r7/r8/r9).
-        log('warn', 'finalize: phase_state never quiesced for atomic completion; deferring', {
+      if (stableState === null) {
+        // Never quiesced within the budget — DEFER having created NOTHING. Only happens
+        // under continuous mutation (an active owner ⟹ more finalize triggers), so no real
+        // owner is stranded and no stale project rows are left behind (Codex F8 r7/r8/r15).
+        log('warn', 'finalize: phase_state never quiesced; deferring (no side effects taken)', {
           user_id: input.user_id,
         })
         return false
       }
 
-      // (4b) RECONCILE REMOVALS. The CAS committed against the FINAL workState, whose
-      // `materialized` set is authoritative. If an earlier (stale) pass CREATED a project
-      // that the final state DROPPED (removed from primary_projects / listed in
-      // dropped_projects), its live row would linger. Soft-delete every id THIS run
-      // CREATED across all passes that is NOT in the final set (Codex F8 r11/r12). Only
-      // this-run-created rows are candidates, so a project the owner already had is never
-      // touched. Runs only after a successful atomic completion, so it can never race the
-      // CAS. Best-effort + idempotent (guarded on `deleted_at IS NULL`); a failure never
-      // un-completes.
-      const finalIds = new Set(materialized.map((m) => m.project_id))
-      for (const id of createdIdsAllPasses) {
-        if (finalIds.has(id)) continue
-        try {
-          await softDeleteProjectRow(deps.db, id, now())
-          log('info', 'finalize: reconciled a dropped project (soft-deleted a stale row)', {
-            user_id: input.user_id,
-            project_id: id,
-          })
-        } catch (err) {
-          log('warn', 'finalize: dropped-project reconcile failed', { project_id: id, err: errStr(err) })
-        }
+      // (3) Persona + projects from the STABLE state — the ONLY place side effects happen.
+      await commitPersona(deps, stableState, log)
+      const import_result = deriveImportResult(stableState) ?? input.import_result ?? null
+      // materialized: the projects that landed (created/existing, not soft-deleted skips) —
+      // the per-project opening step below seeds each one's chat.
+      const materialized = await materializeProjects(deps, stableState, import_result, now, log)
+
+      // (4) ATOMIC terminal write — complete IFF the row STILL equals the stable state we
+      // just materialized (phase + phase_state). The only window is materialize→CAS; a loss
+      // means a mutation (or a concurrent completion) slipped into it — defer + retry
+      // (finalize is idempotent). We NEVER stamp `completed` over changed state (Codex F8
+      // r5–r10). A terminal-write THROW is surfaced (reject) so the caller retries and a
+      // coalesced contender sees the same rejection, not a false success (Codex F8 r2).
+      let casOk: boolean
+      try {
+        casOk = await deps.stateStore.completeIfPhaseStateMatches({
+          project_slug: deps.project_slug,
+          user_id: input.user_id,
+          expected_phase: stableState.phase,
+          expected_phase_state: stableState.phase_state,
+          completed_at: now(),
+        })
+      } catch (err) {
+        throw err instanceof Error ? err : new Error(String(err))
+      }
+      if (!casOk) {
+        log('info', 'finalize: state moved in the materialize→complete window; deferring', {
+          user_id: input.user_id,
+        })
+        return false
       }
 
       // (5) Live rail refresh.
@@ -616,6 +562,29 @@ async function emitProjectOpenings(
  * persona can regenerate later, and finalize must still complete onboarding.
  */
 /**
+ * Canonical, order-independent serialization of an onboarding row's `phase_state`, used to
+ * detect whether the row held STILL across two consecutive reads before finalize takes any
+ * side effects. Object keys are sorted recursively so key-order can't false-trigger; array
+ * order is preserved (a reordered primary_projects list IS a real change). String equality.
+ */
+function phaseStateKey(state: OnboardingState): string {
+  const canon = (v: unknown): string => {
+    if (v === null || typeof v !== 'object') return JSON.stringify(v) ?? 'null'
+    if (Array.isArray(v)) return '[' + v.map(canon).join(',') + ']'
+    const obj = v as Record<string, unknown>
+    return (
+      '{' +
+      Object.keys(obj)
+        .sort()
+        .map((k) => JSON.stringify(k) + ':' + canon(obj[k]))
+        .join(',') +
+      '}'
+    )
+  }
+  return canon(state.phase_state)
+}
+
+/**
  * The ONLY phases the Path-1 finalizer may legitimately complete FROM — the two
  * conversational markers at which every required field has been gathered and the wow /
  * import-consumed flows converge:
@@ -690,13 +659,6 @@ interface MaterializedProject {
   name: string
   /** True iff materialized from a hobby/interest answer (steers the kickoff). */
   is_interest: boolean
-  /**
-   * True iff THIS call created the `projects` row (ensureProjectRow outcome
-   * `'created'`), false for a pre-existing row it merely bound to. The finalizer's
-   * dropped-project reconciliation soft-deletes ONLY rows THIS run created — never a
-   * project the owner already had (Codex F8 r12).
-   */
-  row_created: boolean
   /**
    * The materializer's per-project outcome — `slice_chunk_count` /
    * `summary_written` / `llm_docs` are the strongest "enough signal" proxies
@@ -774,7 +736,6 @@ async function materializeProjects(
         project_id: bind_id,
         name: project.name.trim(),
         is_interest: project.is_interest === true,
-        row_created: outcome === 'created',
         outcome: materializeOutcome,
       })
     } catch (err) {
