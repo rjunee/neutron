@@ -116,6 +116,17 @@ export interface TridentRun {
   started_at: string
   /** ISO-8601 UTC; re-stamped on every state-machine transition. */
   last_advanced_at: string
+  /**
+   * RC2 (migration 0102) — the durable OUTER-HARVEST marker (ms-epoch). Written
+   * EXCLUSIVELY by `orchestrator.applyResult` (the outer loop decoded a typed
+   * `inner_result` and made a decision), and NEVER by the inner workflow nor by
+   * the out-of-band `terminalTransition`. So `harvested_at !== null` is the
+   * force-terminate-proof "the outer loop harvested" signal the RC2 nexus
+   * producer keys on (`isTridentHarvestTerminal`) — a cancelled/force-terminated
+   * run (which may still carry an inner-written `inner_verdict`) has it null.
+   * Null until (and unless) the outer loop harvests.
+   */
+  harvested_at: number | null
 }
 
 export interface CreateTridentRunInput {
@@ -164,6 +175,9 @@ export interface TridentRunUpdate {
   inner_verdict?: 'APPROVE' | 'REQUEST_CHANGES' | null
   /** Phase 2a (0091) — the inner workflow's typed terminal result (compact JSON). */
   inner_result?: string | null
+  /** RC2 (0102) — the outer-harvest marker (ms-epoch); set ONLY by
+   *  `applyResult`. See `TridentRun.harvested_at`. */
+  harvested_at?: number | null
 }
 
 interface TridentRunDbRow {
@@ -194,6 +208,7 @@ interface TridentRunDbRow {
   inner_result: string | null
   started_at: string
   last_advanced_at: string
+  harvested_at: number | null
 }
 
 const COLS =
@@ -201,7 +216,7 @@ const COLS =
   'max_ralph_rounds, branch, pr, merge_mode, subagent_run_id, subagent_status, ' +
   'repo_path, worktree, task, chat_id, thread_id, channel_kind, failure_reason, ' +
   'workflow_run_id, inner_checkpoint, inner_verdict, inner_result, ' +
-  'started_at, last_advanced_at'
+  'started_at, last_advanced_at, harvested_at'
 
 /** Phases the tick driver never loads — see `state-machine.ts`. */
 const TERMINAL_PHASE_SQL = "('done', 'failed', 'stopped')"
@@ -244,10 +259,11 @@ export class TridentRunStore {
       inner_result: null,
       started_at: ts,
       last_advanced_at: ts,
+      harvested_at: null,
     }
     await this.db.run(
       `INSERT INTO code_trident_runs (${COLS})
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         run.id,
         run.slug,
@@ -276,6 +292,7 @@ export class TridentRunStore {
         run.inner_result,
         run.started_at,
         run.last_advanced_at,
+        run.harvested_at,
       ],
     )
     return run
@@ -365,6 +382,7 @@ export class TridentRunStore {
     if (patch.inner_checkpoint !== undefined) push('inner_checkpoint', patch.inner_checkpoint)
     if (patch.inner_verdict !== undefined) push('inner_verdict', patch.inner_verdict)
     if (patch.inner_result !== undefined) push('inner_result', patch.inner_result)
+    if (patch.harvested_at !== undefined) push('harvested_at', patch.harvested_at)
     // Always advance the cursor timestamp.
     push('last_advanced_at', this.now())
     params.push(id)
@@ -437,7 +455,8 @@ export class TridentRunStore {
           SET phase = ?, round = ?, ralph_round = ?, branch = ?, pr = ?,
               merge_mode = ?, subagent_run_id = ?, subagent_status = ?,
               worktree = ?, failure_reason = ?, workflow_run_id = ?,
-              inner_checkpoint = ?, inner_verdict = ?, last_advanced_at = ?
+              inner_checkpoint = ?, inner_verdict = ?, harvested_at = ?,
+              last_advanced_at = ?
         WHERE id = ?`,
       [
         run.phase,
@@ -453,6 +472,7 @@ export class TridentRunStore {
         run.workflow_run_id,
         run.inner_checkpoint,
         run.inner_verdict,
+        run.harvested_at,
         this.now(),
         run.id,
       ],
@@ -481,7 +501,8 @@ export class TridentRunStore {
             SET phase = ?, round = ?, ralph_round = ?, branch = ?, pr = ?,
                 merge_mode = ?, subagent_run_id = ?, subagent_status = ?,
                 worktree = ?, failure_reason = ?, workflow_run_id = ?,
-                inner_checkpoint = ?, inner_verdict = ?, last_advanced_at = ?
+                inner_checkpoint = ?, inner_verdict = ?, harvested_at = ?,
+                last_advanced_at = ?
           WHERE id = ? AND phase NOT IN ${TERMINAL_PHASE_SQL}`,
         [
           run.phase,
@@ -497,6 +518,7 @@ export class TridentRunStore {
           run.workflow_run_id,
           run.inner_checkpoint,
           run.inner_verdict,
+          run.harvested_at,
           this.now(),
           run.id,
         ],
@@ -540,5 +562,6 @@ function rowToRun(row: TridentRunDbRow): TridentRun {
     inner_result: row.inner_result,
     started_at: row.started_at,
     last_advanced_at: row.last_advanced_at,
+    harvested_at: row.harvested_at,
   }
 }

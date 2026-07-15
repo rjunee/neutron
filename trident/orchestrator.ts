@@ -150,6 +150,23 @@ export interface BuildTridentOrchestratorOptions {
 }
 
 /**
+ * RC2 — did the OUTER loop genuinely HARVEST a result into this committed
+ * terminal transition? Keyed on the DURABLE `harvested_at` marker (migration
+ * 0102), which `applyResult` — and ONLY `applyResult` — stamps. This is
+ * deliberately NOT inferred from `inner_verdict`/`inner_result`: the DETACHED
+ * inner workflow writes both to the row BEFORE the outer harvest, and the
+ * out-of-band terminator (`terminate(id, 'failed'|'stopped')`, a board X-cancel
+ * / `/code stop`) can flip a LIVE run terminal via `terminalTransition` WITHOUT
+ * clearing them and WITHOUT setting `harvested_at`. So a force-terminated /
+ * cancelled row — even one carrying a stale parseable `inner_result` + verdict —
+ * returns false here, and the RC2 nexus producer fabricates no `handoff` /
+ * `decision`; only a real outer-loop harvest emits.
+ */
+export function isTridentHarvestTerminal(run: TridentRun): boolean {
+  return run.harvested_at !== null
+}
+
+/**
  * Sum changed lines from `git diff --numstat <base>..HEAD`. RETAINED as an
  * exported helper (its Vajra-parity tests + revertibility) though the inner
  * workflow now does its own oversized-diff guard internally. Conservative on
@@ -201,6 +218,12 @@ export function buildTridentOrchestrator(
   opts: BuildTridentOrchestratorOptions,
 ): { step: TridentStep; drain: () => Promise<void> } {
   const now = opts.now ?? (() => new Date().toISOString())
+  /** ms-epoch derived from the (injectable) ISO clock — the `harvested_at`
+   *  stamp. Falls back to wall-clock ms if the ISO clock is unparseable. */
+  const nowMs = (): number => {
+    const t = Date.parse(now())
+    return Number.isFinite(t) ? t : Date.now()
+  }
   const fireWorkflow = opts.fire_workflow
   const db_path = opts.db_path
   const merge_deps =
@@ -345,6 +368,16 @@ export function buildTridentOrchestrator(
   async function applyResult(run: TridentRun, result: InnerResult): Promise<AdvanceOutcome> {
     fired.delete(run.id)
     redispatched.delete(run.id)
+
+    // RC2 — STAMP the durable outer-harvest marker up front, so EVERY outcome
+    // this function returns (done / provenance-reject / exhausted / merge-fail)
+    // carries it (they all spread `run`). `applyResult` is reached ONLY on a
+    // genuine harvest (a decoded `inner_result`), and NOTHING else writes
+    // `harvested_at` — not the inner workflow, not the out-of-band
+    // `terminalTransition` — so `harvested_at !== null` on the committed row is
+    // the force-terminate-proof "the outer loop harvested" signal the RC2 nexus
+    // producer keys on (`isTridentHarvestTerminal`).
+    run = { ...run, harvested_at: nowMs() }
 
     const pr = result.pr_number ?? run.pr
     const branch = result.branch ?? run.branch

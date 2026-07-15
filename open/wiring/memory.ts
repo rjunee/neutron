@@ -25,6 +25,13 @@ import { createScribe, type Scribe, type UserTurnInput } from '@neutronai/scribe
 import { createState, defaultStatePath } from '@neutronai/scribe/scribe-budget.ts'
 import { mountCoresScribeFanOut } from '@neutronai/gateway/cores/mount-cores-scribe-fan-out.ts'
 import { createReflection, type Reflection } from '@neutronai/reflection/index.ts'
+import { NexusStore } from '@neutronai/gateway/nexus/nexus-store.ts'
+import {
+  emitNexusEvent,
+  isPerfectRecallEnabled,
+  reflectionLearningEvent,
+} from '@neutronai/gateway/nexus/nexus-emit.ts'
+import { workBoardScopeKey } from '@neutronai/work-board/store.ts'
 import { OWNER_USER_ID } from '../owner-identity.ts'
 import type { OpenWiringContext } from './context.ts'
 import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
@@ -40,6 +47,13 @@ export interface WiredMemory {
   reflection: Reflection
   /** Fire-and-forget per-turn hook threaded into the chat-bridge; undefined LLM-less. */
   scribeOnUserTurn: ((input: UserTurnInput) => void) | undefined
+  /**
+   * RC2 — the shared agent-nexus store when the perfect-recall flag is on, else
+   * null. Reflection's `learning` emitter is already wired onto it here; the
+   * composer reuses THIS instance to build the trident harvest emitter so both
+   * producers write through one store. Torn down via `cleanups`.
+   */
+  nexus: NexusStore | null
   /** Teardown hooks (GBrain close, Cores fan-out stop) in registration order. */
   cleanups: Array<() => void>
 }
@@ -167,9 +181,37 @@ export function wireMemory(ctx: OpenWiringContext): WiredMemory {
           ...(substrateFactory !== undefined ? { substrateFactory } : {}),
         })
       : null
+  // RC2 ([BEHAVIOR]) — the agent-nexus emitter, behind the shared perfect-recall
+  // flag (plan §14.6). When ON, a per-project append-only nexus sidecar receives
+  // the owner's corrections as `learning` events (below) + the trident harvest's
+  // handoff/decision events (wired on the trident input in the composer, over the
+  // SAME store). When OFF, `nexus` is null → `createReflection` gets no emitter →
+  // the `.nexus/` sidecar is never touched (unchanged behaviour). RC1's store is
+  // cross-connection safe by design, so the composer reusing this one instance
+  // for trident is a non-issue.
+  const nexus = isPerfectRecallEnabled(env) ? new NexusStore({ owner_home }) : null
+  if (nexus !== null) cleanups.push(() => nexus.closeAll())
   const reflection: Reflection = createReflection({
     ownerDataDir: owner_home,
     ...(reflectionSubstrate !== null ? { substrate: reflectionSubstrate } : {}),
+    ...(nexus !== null
+      ? {
+          // Fire-and-forget: file the correction under the CANONICAL project
+          // nexus scope. `scope` is `turn.project_id ?? 'general'`; run it
+          // through `workBoardScopeKey` (owner boundary = `project_slug`) so it
+          // matches the key trident stamps on a run's `project_slug`
+          // (`workBoardScopeKey(project_slug, project_id)`) — General collapses
+          // to the owner slug on BOTH sides, so a General correction and a
+          // General trident decision land in the SAME `.nexus` a reader (RC3)
+          // scopes to. A named project maps to its own id on both sides.
+          emitLearning: ({ scope, correction }): void =>
+            emitNexusEvent(
+              nexus,
+              workBoardScopeKey(project_slug, scope),
+              reflectionLearningEvent(correction),
+            ),
+        }
+      : {}),
   })
 
   // Production-shape hook threaded into `buildLandingStack` → the chat-bridge.
@@ -210,6 +252,7 @@ export function wireMemory(ctx: OpenWiringContext): WiredMemory {
     scribe,
     reflection,
     scribeOnUserTurn,
+    nexus,
     cleanups,
   }
 }

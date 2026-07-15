@@ -8,6 +8,8 @@ import type { Event } from '@neutronai/runtime/events.ts'
 import type { SessionHandle } from '@neutronai/runtime/session-handle.ts'
 
 import { createReflection } from '../index.ts'
+import { NexusStore } from '@neutronai/gateway/nexus/nexus-store.ts'
+import { emitNexusEvent, reflectionLearningEvent } from '@neutronai/gateway/nexus/nexus-emit.ts'
 
 let tmp: string
 
@@ -144,5 +146,91 @@ describe('createReflection — correction detected → logged → retrievable �
     expect(r.readCorrections()).toHaveLength(0) // no judge → nothing logged
     r.appendDiary({ text: 'still journaling without an LLM' })
     expect(r.readDiary()).toHaveLength(1) // diary + read-back unaffected
+  })
+})
+
+describe('createReflection — RC2 nexus learning emitter', () => {
+  test('a detected correction ALSO lands as a scoped learning event on the nexus', async () => {
+    const nexusHome = mkdtempSync(join(tmpdir(), 'neutron-refl-nexus-'))
+    const nexus = new NexusStore({ owner_home: nexusHome })
+    try {
+      const { substrate } = judgeSubstrate(
+        '{"is_correction":true,"wrong":"used spaces","right":"use tabs","why":"repo is tab-indented"}',
+      )
+      const r = createReflection({
+        ownerDataDir: tmp,
+        substrate,
+        now: () => Date.parse('2026-06-21T08:00:00.000Z'),
+        // The SAME glue the composer wires (scope → project nexus).
+        emitLearning: ({ scope, correction }): void =>
+          emitNexusEvent(nexus, scope, reflectionLearningEvent(correction)),
+      })
+
+      r.onTurnComplete({
+        user_text: 'no, use tabs not spaces',
+        agent_text: 'I indented with spaces.',
+        scope: 'project-globex',
+      })
+      await flush()
+
+      // The correction is still durable in the corrections-log (unchanged).
+      expect(r.readCorrections()).toHaveLength(1)
+
+      // AND it surfaced on the project nexus as a `learning` (fire-and-forget →
+      // poll for it).
+      let rows: Awaited<ReturnType<NexusStore['readRecent']>> = []
+      for (let i = 0; i < 200; i++) {
+        rows = await nexus.readRecent('project-globex', { limit: 100 })
+        if (rows.length >= 1) break
+        await new Promise((res) => setTimeout(res, 5))
+      }
+      expect(rows).toHaveLength(1)
+      expect(rows[0]?.kind).toBe('learning')
+      expect(rows[0]?.actor_kind).toBe('reflection')
+      expect(rows[0]?.body).toContain('use tabs')
+
+      // Scoped: another project sees nothing.
+      expect(await nexus.readRecent('other-proj', { limit: 100 })).toEqual([])
+    } finally {
+      nexus.closeAll()
+      rmSync(nexusHome, { recursive: true, force: true })
+    }
+  })
+
+  test('a non-correction turn emits no learning event', async () => {
+    const nexusHome = mkdtempSync(join(tmpdir(), 'neutron-refl-nexus-'))
+    const nexus = new NexusStore({ owner_home: nexusHome })
+    try {
+      const { substrate } = judgeSubstrate('{"is_correction":false,"wrong":"","right":"","why":""}')
+      const r = createReflection({
+        ownerDataDir: tmp,
+        substrate,
+        emitLearning: ({ scope, correction }): void =>
+          emitNexusEvent(nexus, scope, reflectionLearningEvent(correction)),
+      })
+      r.onTurnComplete({ user_text: 'actually, what is the weather?', agent_text: 'sunny', scope: 'p1' })
+      await flush()
+      expect(await nexus.readRecent('p1', { limit: 100 })).toEqual([])
+    } finally {
+      nexus.closeAll()
+      rmSync(nexusHome, { recursive: true, force: true })
+    }
+  })
+
+  test('a throwing emitLearning never breaks the durable correction write', async () => {
+    const { substrate } = judgeSubstrate(
+      '{"is_correction":true,"wrong":"a","right":"b","why":"c"}',
+    )
+    const r = createReflection({
+      ownerDataDir: tmp,
+      substrate,
+      emitLearning: () => {
+        throw new Error('nexus exploded')
+      },
+    })
+    r.onTurnComplete({ user_text: 'no, that is wrong', agent_text: 'x', scope: 'p1' })
+    await flush()
+    // The correction is still logged — the emitter throw was isolated.
+    expect(r.readCorrections()).toHaveLength(1)
   })
 })
