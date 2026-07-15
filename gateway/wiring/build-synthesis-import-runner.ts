@@ -48,6 +48,10 @@ import type {
   SourceParser,
 } from '@neutronai/onboarding/history-import/types.ts'
 import { buildDefaultSourceParser } from '@neutronai/onboarding/history-import/default-source-parser.ts'
+import {
+  loadImportResult,
+  persistImportResult,
+} from '@neutronai/onboarding/history-import/import-result-store.ts'
 import type {
   ImportJobRunnerHook,
 } from '@neutronai/onboarding/interview/engine-internals.ts'
@@ -121,9 +125,13 @@ export function buildSynthesisImportJobRunner(
   const uuid = input.uuid ?? defaultUuid
   const logFailure = input.logFailure ?? defaultLogFailure
   const parse: SourceParser = input.parse ?? buildDefaultSourceParser()
-  // In-process result + cancellation (the synthesis run is single-process; the
-  // result is consumed by the engine in the same process the moment the job
-  // completes, so it does not need an `import_results` row for resume).
+  // In-process result cache + cancellation. The `results` Map is the PRIMARY
+  // read on the no-restart happy path (byte-identical to the pre-P6 behavior).
+  // P6 (durability P0): the completed `ImportResult` is ALSO persisted to the
+  // `import_results` table in the SAME write that flips `status='completed'`
+  // (see `runJob`), so a process restart — which discards this Map along with
+  // the fire-and-forget `runJob` promise — no longer silently loses a PAID
+  // synthesis: `status()` / `synthesizeOnDemand` read-on-miss from the row.
   const results = new Map<string, ImportResult>()
   const cancelled = new Set<string>()
 
@@ -146,6 +154,7 @@ export function buildSynthesisImportJobRunner(
 
   const runJob = async (
     job_id: string,
+    project_slug: string,
     source: ImportSource,
     payload: ChunkerInput,
   ): Promise<void> => {
@@ -234,15 +243,37 @@ export function buildSynthesisImportJobRunner(
       }
     }
 
-    results.set(job_id, synthesisResultToImportResult(result))
+    const importResult = synthesisResultToImportResult(result)
     const batches = result.batches_read
-    await db.run(
-      `UPDATE import_jobs
-         SET status = 'completed', pass1_chunks_done = ?, pass1_chunks_total = ?,
-             chunks_total_known = 1, completed_at = ?
-       WHERE job_id = ?`,
-      [batches, batches, now(), job_id],
-    )
+    // P6 (durability P0) — persist the `ImportResult` to `import_results` in the
+    // SAME transaction that flips `status='completed'`, so the two commit
+    // atomically: a restart never sees a `completed` job whose durable result is
+    // missing (nor a persisted result on a not-yet-completed job). `tx.run` is
+    // re-entry-detected inside the BEGIN/COMMIT so both writes share the one
+    // mutex-held transaction. `partial=false` (the synthesis session is a single
+    // accumulating run; a completed job is always a full result).
+    await db.transaction(async (tx) => {
+      await persistImportResult(tx, {
+        job_id,
+        project_slug,
+        source,
+        result: importResult,
+        partial: false,
+        now: now(),
+      })
+      await tx.run(
+        `UPDATE import_jobs
+           SET status = 'completed', pass1_chunks_done = ?, pass1_chunks_total = ?,
+               chunks_total_known = 1, completed_at = ?
+         WHERE job_id = ?`,
+        [batches, batches, now(), job_id],
+      )
+    })
+    // Populate the in-process cache only AFTER the durable commit — never cache a
+    // result the transaction rolled back. This runs synchronously in `runJob`'s
+    // continuation (no `await` between commit and here), so no `status()` poll
+    // can observe the committed `completed` row before the Map is warm.
+    results.set(job_id, importResult)
     input.onSynthesisComplete?.({ job_id, source, result, seeds_written })
   }
 
@@ -261,7 +292,7 @@ export function buildSynthesisImportJobRunner(
       // poll + the 5s import-running cron tick). Any escape is swallowed so a
       // background failure surfaces as a `failed` job, never an unhandled
       // rejection.
-      fireAndForget('build-synthesis-import-runner.runJob', runJob(job_id, inp.source, inp.payload), (err) => {
+      fireAndForget('build-synthesis-import-runner.runJob', runJob(job_id, inp.project_slug, inp.source, inp.payload), (err) => {
         logFailure(`run_job:${job_id}`, err)
         // Mark the job failed (async) via a NESTED fireAndForget so onError stays
         // synchronous-safe AND the persist failure is itself counted/logged.
@@ -301,7 +332,10 @@ export function buildSynthesisImportJobRunner(
       }
       if (row.error_message !== null) job.error_message = row.error_message
       if (row.status === 'completed') {
-        const result = results.get(job_id)
+        // Happy path: the in-process Map holds the result. P6 read-on-miss: after
+        // a restart the Map is empty, so fall back to the durable `import_results`
+        // row persisted atomically with the `completed` flip.
+        const result = results.get(job_id) ?? loadImportResult(db, job_id)?.result
         if (result !== undefined) job.result = result
       }
       return job
@@ -324,8 +358,10 @@ export function buildSynthesisImportJobRunner(
       // The synthesis session is a single accumulating run, not a chunk-
       // resumable pipeline: there is no partial Pass-1 cache to aggregate.
       // Surface the completed result if we have one, else null (the engine
-      // routes gracefully to gap-fill).
-      return results.get(job_id) ?? null
+      // routes gracefully to gap-fill). P6 read-on-miss: fall back to the
+      // durable `import_results` row so a post-restart on-demand request still
+      // recovers a result that completed before the crash.
+      return results.get(job_id) ?? loadImportResult(db, job_id)?.result ?? null
     },
   }
 }

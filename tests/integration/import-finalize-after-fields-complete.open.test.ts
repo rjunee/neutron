@@ -191,11 +191,13 @@ describe('Open onboarding finalizes after a late import (owner already idle)', (
     // The engine left the row at import_analysis_presented (import landed) with
     // every required field already present and NO import job in flight.
     harness = await startHarness('import_analysis_presented')
-    expect(currentPhase(harness.db)).toBe('import_analysis_presented')
-    expect(projectCount(harness.db)).toBe(0)
-
-    // Owner reconnects → on_session_open re-arms the watcher, which consumes the
-    // import AND (post-fix) finalizes since no further user turn will arrive.
+    // P6 (c): the completion watcher is re-armed FROM DURABLE STATE at
+    // composition, so this stranded import_analysis_presented row is consumed +
+    // finalized WITHOUT waiting for a reconnect (pre-P6 it stayed stranded until
+    // on_session_open re-armed the watcher). The consume/finalize is async right
+    // after composition, so the pre-condition is asserted via the convergence
+    // wait below rather than a synchronous "still stranded" snapshot. The
+    // reconnect is now a redundant, idempotent re-arm.
     const ws = await openWs(harness)
     await waitFor(() => currentPhase(harness!.db) === 'completed', 25_000)
     expect(currentPhase(harness.db)).toBe('completed')

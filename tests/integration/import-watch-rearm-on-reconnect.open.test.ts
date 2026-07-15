@@ -158,11 +158,13 @@ function currentPhase(db: ProjectDb): string | null {
 describe('Open import-watch re-arm on reconnect (restart resilience)', () => {
   test('a reconnect after restart consumes a stranded import_analysis_presented row', async () => {
     harness = await startHarness()
-    // Pre-condition: the seeded row is stranded at import_analysis_presented.
-    expect(currentPhase(harness.db)).toBe('import_analysis_presented')
-
-    // Owner reconnects (post-restart) — this drives on_session_open, which must
-    // re-arm the import-completion watcher.
+    // P6 (c): the completion watcher is re-armed FROM DURABLE STATE at
+    // composition (the restart-boot), so the seeded stranded
+    // import_analysis_presented row is consumed WITHOUT needing the owner to
+    // reconnect. The consume is async right after composition; assert it via the
+    // convergence wait below rather than a synchronous "still stranded" snapshot.
+    // The reconnect below is now a redundant, idempotent re-arm (importWatchActive
+    // guards the double-arm) and must not disturb the already-consumed row.
     const wsUrl = harness.base.replace(/^http/, 'ws')
     const ws = new WebSocket(`${wsUrl}/ws/app/chat?token=dev:owner&platform=web`)
     await new Promise<void>((resolve, reject) => {

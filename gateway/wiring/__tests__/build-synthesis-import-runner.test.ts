@@ -433,6 +433,98 @@ describe('buildSynthesisImportJobRunner — synthesis → engine bridge', () => 
     expect(job.status).toBe('completed')
   })
 
+  test('P6 durability: completed result is persisted to import_results in the SAME write as status=completed', async () => {
+    const db = freshDb()
+    const fakeSynthesis: SynthesisRunner = {
+      rawStore: new MemoryRawTranscriptStore(),
+      async synthesizeImport(): Promise<SynthesisResult> {
+        return SYNTH_RESULT
+      },
+      async synthesizeInterviewOnly(): Promise<SynthesisResult | null> {
+        return null
+      },
+      writeSeed(seed: ProjectSeed): WriteProjectSeedOutcome {
+        return { project_slug: seed.slug, reason: 'created', docs_written: ['STATUS.md'], transcripts_written: 1 }
+      },
+    }
+    const runner = buildSynthesisImportJobRunner({ db, synthesis: fakeSynthesis, parse: () => fakeRecords() })
+    const { job_id } = await runner.start({
+      project_slug: 'owner',
+      user_id: 'u-owner',
+      source: 'claude-zip',
+      payload: Buffer.from('zip'),
+    })
+    const job = await pollToTerminal(runner, job_id)
+    expect(job.status).toBe('completed')
+
+    // The durable `import_results` row landed atomically with the completed flip:
+    // whenever status='completed', a result row exists (assert row CONTENT, not a
+    // call count). Pre-P6 this row was never written (result held only in RAM).
+    const row = db
+      .raw()
+      .query<
+        { status: string; projects_json: string; facts_json: string; voice_signals_json: string },
+        [string]
+      >(
+        `SELECT j.status AS status, r.projects_json AS projects_json,
+                r.facts_json AS facts_json, r.voice_signals_json AS voice_signals_json
+           FROM import_jobs j JOIN import_results r ON r.job_id = j.job_id
+          WHERE j.job_id = ?`,
+      )
+      .get(job_id)
+    expect(row).not.toBeNull()
+    expect(row?.status).toBe('completed')
+    const projects = JSON.parse(row?.projects_json ?? '[]') as Array<{ name: string }>
+    expect(projects.map((p) => p.name)).toEqual(['Topline Hospitality'])
+    const facts = JSON.parse(row?.facts_json ?? '{}') as { key_people?: string[] }
+    expect(facts.key_people).toContain('Priya Shah')
+    const voice = JSON.parse(row?.voice_signals_json ?? '{}') as { tone?: string }
+    expect(voice.tone).toBe('terse')
+  })
+
+  test('P6 durability: a restart (fresh runner, cold in-process cache) recovers the completed result from the durable row', async () => {
+    const db = freshDb()
+    const fakeSynthesis: SynthesisRunner = {
+      rawStore: new MemoryRawTranscriptStore(),
+      async synthesizeImport(): Promise<SynthesisResult> {
+        return SYNTH_RESULT
+      },
+      async synthesizeInterviewOnly(): Promise<SynthesisResult | null> {
+        return null
+      },
+      writeSeed(seed: ProjectSeed): WriteProjectSeedOutcome {
+        return { project_slug: seed.slug, reason: 'created', docs_written: ['STATUS.md'], transcripts_written: 1 }
+      },
+    }
+    // Process 1: run the import to completion.
+    const runner1 = buildSynthesisImportJobRunner({ db, synthesis: fakeSynthesis, parse: () => fakeRecords() })
+    const { job_id } = await runner1.start({
+      project_slug: 'owner',
+      user_id: 'u-owner',
+      source: 'claude-zip',
+      payload: Buffer.from('zip'),
+    })
+    expect((await pollToTerminal(runner1, job_id)).status).toBe('completed')
+
+    // Process 2 (the "restart"): a BRAND-NEW runner over the SAME db has an EMPTY
+    // in-process `results` Map + no live `runJob` promise — exactly the state a
+    // process restart leaves. Pre-P6 `status()` read only the RAM Map, so
+    // `job.result` came back undefined and the paid synthesis was silently lost.
+    const runner2 = buildSynthesisImportJobRunner({ db, synthesis: fakeSynthesis, parse: () => fakeRecords() })
+
+    const resumed = await runner2.status(job_id)
+    expect(resumed?.status).toBe('completed')
+    // Assert the RESUMED result content — the read-on-miss reconstructed the full
+    // ImportResult from `import_results`, not just that a call happened.
+    expect(resumed?.result?.proposed_projects.map((p) => p.name)).toEqual(['Topline Hospitality'])
+    expect(resumed?.result?.facts.key_people).toContain('Priya Shah')
+    expect(resumed?.result?.voice_signals.tone).toBe('terse')
+
+    // synthesizeOnDemand also recovers from the durable row post-restart.
+    const onDemand = await runner2.synthesizeOnDemand(job_id)
+    expect(onDemand?.proposed_projects.map((p) => p.name)).toEqual(['Topline Hospitality'])
+  })
+
   test('synthesisResultToImportResult maps projects, tasks, people, and voice', () => {
     const mapped = synthesisResultToImportResult(SYNTH_RESULT)
     expect(mapped.proposed_projects).toEqual([
