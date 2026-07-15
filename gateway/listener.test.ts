@@ -155,23 +155,27 @@ describe('defaultHealthzHandler', () => {
   })
 
   // RA2 (gbrain live-or-loud) — memory-backend health folded into `/healthz`.
-  test('RA2: a DOWN memory backend flips /healthz to status:degraded + memory:unavailable (still 200)', async () => {
+  test('RA2: a DOWN memory backend flips /healthz to degraded + a FIXED public detail, NEVER echoing the provider string (no leak)', async () => {
+    // ADVERSARIAL: the provider returns a sensitive detail (path + pid). The
+    // unauthenticated /healthz boundary must emit a FIXED public message and never
+    // echo the provider's string (defense-in-depth — the provider is not trusted).
     const handler = defaultHealthzHandler({
       project_slug: 'unit-test',
       bootedAt: Date.now() - 10,
-      memoryHealth: () => ({ available: false, detail: 'gbrain binary not found on PATH' }),
+      memoryHealth: () => ({ available: false, detail: '/home/owner/.gbrain/state pid=1234 (secret)' }),
     })
     const res = await handler(new Request('http://localhost/healthz'))
     // DELIBERATELY 200 — liveness must not restart-loop on a fail-soft degrade.
     expect(res.status).toBe(200)
-    const body = (await res.json()) as {
-      status: string
-      memory?: string
-      memory_detail?: string
-    }
+    const raw = await res.text()
+    const body = JSON.parse(raw) as { status: string; memory?: string; memory_detail?: string }
     expect(body.status).toBe('degraded')
     expect(body.memory).toBe('unavailable')
-    expect(body.memory_detail).toBe('gbrain binary not found on PATH')
+    expect(body.memory_detail).toBe('memory backend unavailable')
+    // The sensitive provider string appears NOWHERE in the response.
+    expect(raw).not.toContain('/home/owner')
+    expect(raw).not.toContain('pid=1234')
+    expect(raw).not.toContain('secret')
   })
 
   test('RA2: a healthy memory backend reports status:ok + memory:ok (no memory_detail)', async () => {
@@ -214,7 +218,7 @@ describe('defaultHealthzHandler', () => {
     expect(body.memory).toBe('unavailable')
     // Coarse detail only — the raw error (paths/pids) must not leak to the
     // unauthenticated endpoint.
-    expect(body.memory_detail).toBe('memory health probe error')
+    expect(body.memory_detail).toBe('memory backend unavailable')
     expect(JSON.stringify(body)).not.toContain('/home/owner')
     expect(JSON.stringify(body)).not.toContain('pid=1234')
   })

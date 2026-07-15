@@ -123,7 +123,7 @@ test('RA2: boot() folds the REAL Open composition memory_health into the SERVED 
     const body = (await res.json()) as { status: string; memory?: string; memory_detail?: string }
     expect(body.status).toBe('degraded')
     expect(body.memory).toBe('unavailable')
-    expect(body.memory_detail).toContain('gbrain')
+    expect(body.memory_detail).toBe('memory backend unavailable')
   } finally {
     await handle.shutdown()
   }

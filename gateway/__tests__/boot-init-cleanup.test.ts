@@ -239,7 +239,7 @@ describe('boot init-failure cleanup', () => {
       const body = (await res.json()) as { status: string; memory?: string; memory_detail?: string }
       expect(body.status).toBe('degraded')
       expect(body.memory).toBe('unavailable')
-      expect(body.memory_detail).toContain('gbrain')
+      expect(body.memory_detail).toBe('memory backend unavailable')
     } finally {
       await handle.shutdown()
     }

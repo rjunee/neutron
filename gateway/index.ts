@@ -790,7 +790,12 @@ export function defaultHealthzHandler(opts: {
         ...(memory !== undefined
           ? { memory: memory.available ? ('ok' as const) : ('unavailable' as const) }
           : {}),
-        ...(degraded && memory?.detail !== undefined ? { memory_detail: memory.detail } : {}),
+        // Enforce a FIXED public detail at the HTTP boundary — never echo the
+        // provider's `detail` string. `/healthz` is unauthenticated, and the
+        // provider's value is not a trusted boundary: a buggy/future provider that
+        // returned a path/pid would leak it here (Codex). The concrete "why"
+        // (missing binary, etc.) stays in the authenticated boot ERROR log.
+        ...(degraded ? { memory_detail: 'memory backend unavailable' } : {}),
       }
       return new Response(JSON.stringify(body), {
         status: 200,

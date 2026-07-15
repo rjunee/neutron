@@ -528,6 +528,14 @@ export function buildGBrainMemory(input: {
   project_slug: string
   env?: NodeJS.ProcessEnv
   /**
+   * Test seam: the gbrain-command resolver. Defaults to `resolveGbrainCommand`.
+   * Injectable so a test can deterministically drive the missing-binary branch —
+   * `resolveGbrainCommand` also probes host-absolute paths (`/usr/local/bin`,
+   * `/opt/homebrew/bin`) that a test env can't clear, so on a dev host WITH gbrain
+   * installed the `binaryPresent:false` branch is otherwise never exercised.
+   */
+  resolveCommand?: (env: NodeJS.ProcessEnv) => string | null
+  /**
    * The owner's onboarding-captured OpenAI key (resolved from the ApiKeyStore
    * by the composer). Present → GBrain initializes + serves with CLOUD OpenAI
    * embeddings; absent → RA3's default, the free local Ollama fallback (still
@@ -654,7 +662,7 @@ export function buildGBrainMemory(input: {
   // restart with NO plist regeneration. `null` (gbrain genuinely absent) leaves
   // the bare-`gbrain` default in place so the existing fail-soft disabled path
   // (one-time warning + logged no-op) is preserved unchanged.
-  const command = resolveGbrainCommand(env)
+  const command = (input.resolveCommand ?? resolveGbrainCommand)(env)
   if (command !== null) {
     opts.command = command
     opts.env = { ...(opts.env ?? {}), PATH: resolveGbrainChildPath({ command, env }) }

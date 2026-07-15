@@ -757,25 +757,45 @@ describe('buildGBrainMemory', () => {
     }
   })
 
-  test('RA2: bootHealth MIRRORS resolveGbrainCommand — a missing binary yields a coarse, non-sensitive detail', () => {
+  test('RA2: bootHealth reports binaryPresent:false + a coarse, non-sensitive detail when the binary is missing (deterministic)', () => {
     const home = mkdtempSync(join(tmpdir(), 'bgm-missing-'))
     try {
-      // An env that resolves no gbrain via PATH/BUN_INSTALL/HOME. (The absolute
-      // /usr/local + /opt/homebrew probes are host-dependent, so we derive the
-      // EXPECTATION from the resolver itself rather than hardcoding false — this
-      // proves bootHealth is SOURCED from resolveGbrainCommand on any host.)
-      const env = { PATH: join(home, 'empty-bin'), HOME: home, BUN_INSTALL: join(home, 'no-bun') }
-      const expectedPresent = resolveGbrainCommand(env) !== null
-      const wiring = buildGBrainMemory({ owner_home: join(home, 'data'), project_slug: 'acme', env })
-      expect(wiring.bootHealth.binaryPresent).toBe(expectedPresent)
-      if (!expectedPresent) {
-        expect(typeof wiring.bootHealth.detail).toBe('string')
-        // Coarse + non-sensitive: no owner path leaks into the /healthz-bound detail.
-        expect(wiring.bootHealth.detail).not.toContain(home)
-        expect(wiring.bootHealth.detail).toContain('gbrain')
-      } else {
-        expect(wiring.bootHealth.detail).toBeUndefined()
-      }
+      // DETERMINISTIC missing-binary branch on ANY host: inject a resolver that
+      // returns null. (resolveGbrainCommand also probes host-absolute /usr/local +
+      // /opt/homebrew paths a test env can't clear, so a dev host with gbrain
+      // installed would otherwise SKIP this branch entirely.)
+      const env = { PATH: join(home, 'empty-bin'), HOME: home }
+      const wiring = buildGBrainMemory({
+        owner_home: join(home, 'data'),
+        project_slug: 'acme',
+        env,
+        resolveCommand: () => null,
+      })
+      expect(wiring.bootHealth.binaryPresent).toBe(false)
+      expect(typeof wiring.bootHealth.detail).toBe('string')
+      // Coarse + non-sensitive: no owner path leaks into the /healthz-bound detail.
+      expect(wiring.bootHealth.detail).not.toContain(home)
+      expect(wiring.bootHealth.detail).toContain('gbrain')
+    } finally {
+      rmSync(home, { recursive: true, force: true })
+    }
+  })
+
+  test('RA2: bootHealth reports binaryPresent:true + no detail when the resolver finds a binary (deterministic)', () => {
+    const home = mkdtempSync(join(tmpdir(), 'bgm-present-'))
+    try {
+      // Symmetric: inject a resolver that returns an executable path → present.
+      const bin = join(home, 'gbrain')
+      writeFileSync(bin, '#!/bin/sh\n')
+      chmodSync(bin, 0o755)
+      const wiring = buildGBrainMemory({
+        owner_home: join(home, 'data'),
+        project_slug: 'acme',
+        env: { HOME: home },
+        resolveCommand: () => bin,
+      })
+      expect(wiring.bootHealth.binaryPresent).toBe(true)
+      expect(wiring.bootHealth.detail).toBeUndefined()
     } finally {
       rmSync(home, { recursive: true, force: true })
     }
