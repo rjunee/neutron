@@ -41,8 +41,78 @@
 import { describe, expect, it } from 'bun:test'
 import { readdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
+import ts from 'typescript'
 
 import { ownerSlugMismatch } from '../auth-helpers.ts'
+
+/**
+ * AST BIND-ANALYSIS for `ownerSlugMismatch` usage in one surface source. Returns a
+ * reason string if the surface would invoke a NON-canonical `ownerSlugMismatch`
+ * (the timing-safe project_slug comparator), else `null`.
+ *
+ * A surface is clean iff, when it references the name at all, it has a canonical
+ * NAMED import (`./auth-helpers.ts` or `./surface-kit.ts`) AND nothing shadows it:
+ * no local function/var/param/binding-element named `ownerSlugMismatch`, no
+ * `import * as ownerSlugMismatch`, no non-canonical named import, and no qualified
+ * `x.ownerSlugMismatch(...)` call (which would bypass the direct canonical binding).
+ */
+function ownerSlugMismatchBindingOffense(source: string, fileName: string): string | null {
+  const NAME = 'ownerSlugMismatch'
+  const CANON = /^\.\/(?:auth-helpers|surface-kit)\.ts$/
+  const sf = ts.createSourceFile(fileName, source, ts.ScriptTarget.Latest, true)
+  let referenced = false
+  let canonicalImport = false
+  let shadow: string | null = null
+  let qualifiedCall: string | null = null
+
+  const visit = (node: ts.Node): void => {
+    if (ts.isImportDeclaration(node) && node.importClause?.namedBindings) {
+      const spec = node.moduleSpecifier
+      const mod = ts.isStringLiteral(spec) ? spec.text : ''
+      const bindings = node.importClause.namedBindings
+      if (ts.isNamespaceImport(bindings) && bindings.name.text === NAME) {
+        shadow = `import * as ${NAME}`
+        referenced = true
+      } else if (ts.isNamedImports(bindings)) {
+        for (const el of bindings.elements) {
+          if (el.name.text === NAME) {
+            referenced = true
+            if (CANON.test(mod)) canonicalImport = true
+            else shadow = `named import from non-canonical '${mod}'`
+          }
+        }
+      }
+    }
+    // A local binding of the name (function / var / param / destructure element).
+    if (
+      (ts.isFunctionDeclaration(node) ||
+        ts.isVariableDeclaration(node) ||
+        ts.isParameter(node) ||
+        ts.isBindingElement(node)) &&
+      node.name &&
+      ts.isIdentifier(node.name) &&
+      node.name.text === NAME
+    ) {
+      shadow = `local ${ts.SyntaxKind[node.kind]} binding`
+      referenced = true
+    }
+    if (ts.isCallExpression(node)) {
+      if (ts.isIdentifier(node.expression) && node.expression.text === NAME) referenced = true
+      if (ts.isPropertyAccessExpression(node.expression) && node.expression.name.text === NAME) {
+        qualifiedCall = `qualified call ${node.expression.getText(sf)}`
+        referenced = true
+      }
+    }
+    ts.forEachChild(node, visit)
+  }
+  visit(sf)
+
+  if (!referenced) return null
+  if (qualifiedCall !== null) return qualifiedCall
+  if (shadow !== null) return shadow
+  if (!canonicalImport) return 'no canonical import of ownerSlugMismatch'
+  return null
+}
 
 const HTTP_DIR = join(import.meta.dir, '..')
 const REPO_ROOT = join(import.meta.dir, '..', '..', '..')
@@ -169,24 +239,36 @@ describe('project_slug timing-safe comparison (ISSUE #34)', () => {
     expect(offenders).toHaveLength(0)
   })
 
-  it('every surface calling ownerSlugMismatch imports the NAMED binding from a CANONICAL source', () => {
-    // tsc proves the symbol is imported, but NOT from where — a surface could
-    // `import { ownerSlugMismatch } from './shadow.ts'` (an insecure copy) and still
-    // compile. Pin the SOURCE: the named binding must come from `./auth-helpers.ts`
-    // (the timing-safe primitive) or `./surface-kit.ts` (which re-exports it — proven
-    // identical by the runtime-identity test below). Import blocks can't cross a `}`,
-    // so the regex pins the binding to the source.
-    const offenders: string[] = []
+  it('AST: every surface invoking ownerSlugMismatch calls the CANONICAL import (no shadow/param/qualified bypass)', () => {
+    // Source regexes cannot prove the INVOKED function is canonical — a surface can
+    // shadow the import via a parameter, a `./shadow.ts` import, an
+    // `import * as x` + `x.ownerSlugMismatch(...)`, or a local var. So bind-analyze
+    // the AST (Codex): for each surface that references the name, require a canonical
+    // named import AND reject every shadow form + every qualified call.
+    const offenders: Array<{ file: string; why: string }> = []
     for (const name of allSurfaceFiles()) {
-      const body = readFileSync(join(HTTP_DIR, name), 'utf8')
-      if (!body.includes('ownerSlugMismatch(')) continue
-      const canonicalImport =
-        /import\s*(?:type\s*)?\{[^}]*\bownerSlugMismatch\b[^}]*\}\s*from\s*['"]\.\/(?:auth-helpers|surface-kit)\.ts['"]/s.test(
-          body,
-        )
-      if (!canonicalImport) offenders.push(name)
+      const why = ownerSlugMismatchBindingOffense(readFileSync(join(HTTP_DIR, name), 'utf8'), name)
+      if (why !== null) offenders.push({ file: name, why })
     }
     expect(offenders).toEqual([])
+  })
+
+  it('AST guard self-test: it FLAGS every shadow-bypass form and PASSES canonical usage', () => {
+    const flag = (src: string): boolean => ownerSlugMismatchBindingOffense(src, 'x.ts') !== null
+    // Every bypass an independent reviewer surfaced across the O7 rounds:
+    expect(flag("import { ownerSlugMismatch } from './surface-kit.ts'\nfunction r(ownerSlugMismatch){return ownerSlugMismatch('a','b')}")).toBe(true) // param shadow
+    expect(flag("import { ownerSlugMismatch } from './shadow.ts'\nownerSlugMismatch('a','b')")).toBe(true) // non-canonical import
+    expect(
+      flag("import { ownerSlugMismatch } from './surface-kit.ts'\nimport * as s from './shadow.ts'\ns.ownerSlugMismatch('a','b')"),
+    ).toBe(true) // qualified call + unused canonical import
+    expect(flag("import * as ownerSlugMismatch from './shadow.ts'\nownerSlugMismatch.cmp('a','b')")).toBe(true) // namespace shadow
+    expect(
+      flag("import { ownerSlugMismatch } from './surface-kit.ts'\nconst ownerSlugMismatch = (a: string, b: string) => a === b\nownerSlugMismatch('a','b')"),
+    ).toBe(true) // local var shadow
+    // Canonical direct usage + no usage both pass:
+    expect(flag("import { jsonError, ownerSlugMismatch } from './surface-kit.ts'\nownerSlugMismatch('a','b')")).toBe(false)
+    expect(flag("import { ownerSlugMismatch } from './auth-helpers.ts'\nownerSlugMismatch('a','b')")).toBe(false)
+    expect(flag("import { jsonError } from './surface-kit.ts'\njsonError(1,'x','y')")).toBe(false)
   })
 
   it('NO gateway/http surface defines a LOCAL copy of a surface-kit helper (consolidation complete)', () => {
