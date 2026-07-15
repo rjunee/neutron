@@ -7,11 +7,13 @@ import { ProjectDb } from '@neutronai/persistence/index.ts'
 import type { HostCommandResult } from './git-mode.ts'
 import type { FireOutcome, InnerLoopInput } from './inner-loop.ts'
 import { buildSimFirer, type SimPlan } from './inner-loop-sim.ts'
-import { buildTridentOrchestrator } from './orchestrator.ts'
+import { buildTridentOrchestrator, isTridentHarvestTerminal } from './orchestrator.ts'
 import { runWorktreePath } from './merge.ts'
 import { isTerminalPhase } from './state-machine.ts'
 import { TridentRunStore, type MergeMode, type TridentRun } from './store.ts'
-import { TridentTickLoop } from './tick.ts'
+import { TridentTickLoop, type TridentTerminalHook } from './tick.ts'
+import { NexusStore } from '@neutronai/gateway/nexus/nexus-store.ts'
+import { emitTridentTerminalEvents } from '@neutronai/gateway/nexus/nexus-emit.ts'
 
 /**
  * Trident v2 (Work Board Phase 2a exec-model) — the orchestrator step now FIRES
@@ -60,6 +62,7 @@ function buildHarness(opts: {
   codex_home?: string | null
   resolve_codex_home?: (run: TridentRun) => string | null
   resolve_conflict?: import('./merge.ts').MergeConflictResolver
+  on_terminal?: TridentTerminalHook
 }): Harness {
   const hostCalls: string[][] = []
   const now = opts.now ?? (() => new Date(0).toISOString())
@@ -88,7 +91,11 @@ function buildHarness(opts: {
   if (opts.resolve_codex_home !== undefined) o.resolve_codex_home = opts.resolve_codex_home
   if (opts.resolve_conflict !== undefined) o.resolve_conflict = opts.resolve_conflict
   const orch = buildTridentOrchestrator(o)
-  const loop = new TridentTickLoop({ store, step: orch.step })
+  const loop = new TridentTickLoop({
+    store,
+    step: orch.step,
+    ...(opts.on_terminal !== undefined ? { on_terminal: opts.on_terminal } : {}),
+  })
   return { loop, complete: sim.drain, hostCalls, inputs: sim.inputs }
 }
 
@@ -548,5 +555,159 @@ describe('orchestrator — terminal-but-garbled harvest guard (Bug 2)', () => {
 
     await h.loop.runOnce()
     expect(store.get(run.id)?.phase).not.toBe('failed')
+  })
+})
+
+describe('orchestrator — RC2 nexus producer over the REAL post-commit on_terminal seam', () => {
+  // Drives a committed terminal transition through the tick loop's `on_terminal`
+  // hook (the SAME seam build-core-modules wires the composer's `on_run_terminal`
+  // into), with the RC2 producer wired exactly as the composer wires it. Proves
+  // the post-commit path actually persists project-scoped events — and would fail
+  // if the producer were unwired from `on_terminal`.
+  let nexusHome: string
+  let nexus: NexusStore
+  beforeEach(() => {
+    nexusHome = mkdtempSync(join(tmpdir(), 'neutron-orch-nexus-'))
+    nexus = new NexusStore({ owner_home: nexusHome })
+  })
+  afterEach(() => {
+    nexus.closeAll()
+    rmSync(nexusHome, { recursive: true, force: true })
+  })
+
+  const nexusOnTerminal = (store: NexusStore): TridentTerminalHook => ({
+    onTerminal: async (run): Promise<void> => {
+      await emitTridentTerminalEvents(store, run, {
+        harvested: isTridentHarvestTerminal(run),
+      })
+    },
+  })
+
+  async function waitForEvents(project_id: string, atLeast: number) {
+    for (let i = 0; i < 200; i++) {
+      const rows = await nexus.readRecent(project_id, { limit: 100 })
+      if (rows.length >= atLeast) return rows
+      await new Promise((r) => setTimeout(r, 5))
+    }
+    throw new Error(`timed out waiting for ${atLeast} nexus event(s)`)
+  }
+
+  test('a committed APPROVE harvest fires the post-commit hook → handoff + argus decision persist, scoped to the project', async () => {
+    const h = buildHarness({
+      plan: () => ({ result: { verdict: 'APPROVE', prNumber: 42, branch: 'feat-x' } }),
+      on_terminal: nexusOnTerminal(nexus),
+    })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode })
+    const final = await runToTerminal(h, run.id)
+    expect(final.phase).toBe('done')
+
+    const rows = await waitForEvents('t1', 2)
+    const byKind = new Map(rows.map((e) => [e.kind, e]))
+    expect(byKind.get('handoff')?.actor_kind).toBe('orchestrator')
+    expect(byKind.get('decision')?.actor_kind).toBe('argus')
+    expect(byKind.get('decision')?.body).toContain('APPROVE')
+    expect(byKind.get('decision')?.refs_json).toContain('#42')
+    // Scoped: another project sees nothing.
+    expect(await nexus.readRecent('other', { limit: 100 })).toEqual([])
+  })
+
+  test('flag-off analog: no producer wired → the run still terminates, nothing persisted', async () => {
+    const h = buildHarness({
+      plan: () => ({ result: { verdict: 'APPROVE', prNumber: 42, branch: 'feat-x' } }),
+      // No on_terminal — mirrors the composer passing no nexus observer (flag off).
+    })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode })
+    expect((await runToTerminal(h, run.id)).phase).toBe('done')
+    expect(await nexus.readRecent('t1', { limit: 100 })).toEqual([])
+  })
+
+  test('a hang-reaped run (no harvest) fires the hook but persists NOTHING (no false handoff/decision)', async () => {
+    // A run that never harvests (stalls) → reaped to failed with inner_verdict
+    // null. The post-commit hook fires, but the producer emits nothing.
+    let t = 0
+    const h = buildHarness({
+      plan: () => ({ result: null }),
+      now: () => new Date(t).toISOString(),
+      no_advance_hang_ms: 1_000,
+      on_terminal: nexusOnTerminal(nexus),
+    })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode })
+    await h.loop.runOnce() // launch (fires the workflow, no result)
+    await h.complete()
+    t = 10_000 // advance past the hang threshold
+    await h.loop.runOnce() // reaped → failed → on_terminal fires
+    const final = store.get(run.id)
+    expect(final?.phase).toBe('failed')
+    expect(final?.inner_verdict).toBeNull()
+    await new Promise((r) => setTimeout(r, 20))
+    expect(await nexus.readRecent('t1', { limit: 100 })).toEqual([])
+  })
+})
+
+describe('isTridentHarvestTerminal — the durable outer-harvest marker (harvested_at)', () => {
+  const valid = JSON.stringify({
+    ok: true,
+    verdict: 'APPROVE',
+    pr_number: 1,
+    branch: 'feat-x',
+    round: 1,
+    checkpoint: 'argus-approved',
+  })
+
+  test('harvested_at set → true (a genuine outer-loop harvest)', async () => {
+    const base = await createRun()
+    expect(isTridentHarvestTerminal({ ...base, phase: 'done', harvested_at: 123 })).toBe(true)
+    expect(isTridentHarvestTerminal({ ...base, phase: 'failed', harvested_at: 456 })).toBe(true)
+  })
+
+  test('harvested_at NULL → false — even with a parseable inner_result + an inner-written verdict', async () => {
+    // The force-terminate / cancel / stopped case: the DETACHED inner workflow
+    // wrote a result + verdict, the outer loop never harvested (harvested_at
+    // stays null), and `terminalTransition` flipped the phase.
+    const base = await createRun()
+    expect(
+      isTridentHarvestTerminal({
+        ...base,
+        phase: 'failed',
+        inner_result: valid,
+        inner_verdict: 'APPROVE',
+        inner_checkpoint: 'argus-approved',
+        harvested_at: null,
+      }),
+    ).toBe(false)
+    expect(
+      isTridentHarvestTerminal({ ...base, phase: 'stopped', inner_result: valid, harvested_at: null }),
+    ).toBe(false)
+  })
+})
+
+describe('applyResult stamps harvested_at (the outer loop is the ONLY writer)', () => {
+  test('a genuine APPROVE harvest commits harvested_at; a force-terminate leaves it null', async () => {
+    // APPROVE→done through the real orchestrator: harvested_at is stamped.
+    const h = buildHarness({ plan: () => ({ result: { verdict: 'APPROVE', prNumber: 9, branch: 'feat-x' } }) })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode })
+    const done = await runToTerminal(h, run.id)
+    expect(done.phase).toBe('done')
+    expect(done.harvested_at).not.toBeNull()
+    expect(isTridentHarvestTerminal(done)).toBe(true)
+
+    // A LIVE run force-terminated out-of-band (a board X-cancel / stop) — inner
+    // wrote a stale result + verdict, but the outer loop never harvested.
+    const live = await createRun({ slug: 'other-thing', merge_mode: 'pr' as MergeMode })
+    await store.update(live.id, {
+      subagent_run_id: 'wf-live',
+      subagent_status: 'running',
+      inner_result: JSON.stringify({ ok: true, verdict: 'APPROVE', round: 1, checkpoint: 'argus-approved' }),
+      inner_verdict: 'APPROVE',
+      inner_checkpoint: 'argus-approved',
+    })
+    const { run: terminated, won } = await store.terminalTransition(live.id, {
+      phase: 'failed',
+      failure_reason: 'cancelled by owner',
+    })
+    expect(won).toBe(true)
+    expect(terminated?.phase).toBe('failed')
+    expect(terminated?.harvested_at).toBeNull() // terminalTransition never sets it
+    expect(isTridentHarvestTerminal(terminated!)).toBe(false)
   })
 })

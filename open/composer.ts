@@ -282,6 +282,7 @@ import { WorkBoardSpecDocService } from '@neutronai/work-board/spec-doc-service.
 import { dispatchBoardBoundBuild } from '@neutronai/trident/board-dispatch.ts'
 import { buildForgeConflictResolver } from '@neutronai/trident/conflict-resolver.ts'
 import { buildTridentDelivery } from '@neutronai/trident/delivery.ts'
+import { buildTridentTerminalObserver } from './wiring/trident-nexus-observer.ts'
 import { composeTerminalHook } from '@neutronai/trident/terminal-observer.ts'
 import { buildBoardReconcileObserver } from '@neutronai/trident/board-reconcile.ts'
 import { buildTridentTerminator, type TridentTerminator } from '@neutronai/trident/terminate.ts'
@@ -1031,9 +1032,27 @@ export function buildOpenGraphComposer(
       scribe,
       reflection,
       scribeOnUserTurn,
+      nexus: nexusStore,
       cleanups: memoryCleanups,
     } = wireMemory(wiringCtx)
     for (const cleanup of memoryCleanups) realmodeCleanups.push(cleanup)
+
+    // RC2 ([BEHAVIOR]) — the tick loop's `on_run_terminal` = the skill-forge audit
+    // + (flag-gated) the RC2 nexus producer, each ISOLATED (see
+    // `buildTridentTerminalObserver`). The nexus producer fires from the tick's
+    // POST-COMMIT `on_terminal` seam (AFTER `saveIfActive` commits) rather than
+    // inside the harvest, so a discarded (concurrent-terminate) or retried
+    // transition can neither orphan nor duplicate events; it reconstructs
+    // the inner→outer `handoff` + the SERVER-GATED Argus `decision` from the
+    // committed row, gated on a GENUINE outer harvest (`isTridentHarvestTerminal`),
+    // so a stopped/garbled/reaped row or a pre-verdict Forge failure never
+    // fabricates an authenticated verdict. Reuses the SAME perfect-recall-flagged
+    // `NexusStore` `wireMemory` built (reflection's `learning` emitter rides it);
+    // null store (flag off) → the producer is simply absent (unchanged behaviour).
+    const tridentOnRunTerminal = buildTridentTerminalObserver({
+      nexus: nexusStore,
+      observers: [skillForgeOnRunTerminal],
+    })
 
     // ── Free Cores → Open boot (Vajra parity gap #2) ───────────────────────
     // Compose the bundled free Cores (Calendar / Email / Google-Workspace /
@@ -3039,12 +3058,19 @@ export function buildOpenGraphComposer(
     for (const cleanup of appWsCleanups) realmodeCleanups.push(cleanup)
 
     // §F6a — bind the board X-cancel/delete terminal-write chokepoint now that the
-    // durable delivery sink exists. Its observer chain is BUILT FROM THE SAME
-    // `composeTerminalHook` assembly the tick loop's `on_terminal` uses in
-    // `build-core-modules` (delivery → durable app-ws sink; board reconcile →
-    // canonical work-board store; skill-forge audit), so a cancelled build runs
-    // the exact chain a loop-reaped one does. `boardRunStore` is a thin
-    // `TridentRunStore` over the SAME `db` the loop reads.
+    // durable delivery sink exists. Its observer chain runs the same USER-FACING
+    // observers the tick loop's `on_terminal` does — delivery → durable app-ws
+    // sink; board reconcile → canonical work-board store; skill-forge audit — so a
+    // cancelled build reconciles + notifies exactly as a loop-reaped one does.
+    // NOTE (RC2): this is a SEPARATE assembly from the tick loop's
+    // `tridentOnRunTerminal`; it DELIBERATELY does NOT include the RC2 nexus
+    // producer. A force-terminate / cancel is not an OUTER-LOOP HARVEST — no
+    // handoff happened and Argus rendered no verdict — so it must emit no nexus
+    // event. This is enforced structurally (the producer isn't wired here) AND
+    // robustly at the producer (`isTridentHarvestTerminal` keys on the durable
+    // `harvested_at` marker, which `terminalTransition` never sets), so even if a
+    // future change routed a terminate through the producer it would emit nothing.
+    // `boardRunStore` is a thin `TridentRunStore` over the SAME `db` the loop reads.
     boardTerminatorHolder.bind(
       buildTridentTerminator({
         store: boardRunStore,
@@ -3392,7 +3418,7 @@ export function buildOpenGraphComposer(
         ? {
             trident: {
               fire_inner_workflow: tridentFireInnerWorkflow,
-              on_run_terminal: skillForgeOnRunTerminal,
+              on_run_terminal: tridentOnRunTerminal,
               // M1 UX REDESIGN — the LIVE-PROGRESS fan. Fired by the tick loop for
               // every run whose observable progress advanced (a checkpoint crossing
               // building→reviewing→fixing→merging, a launch, or a terminal

@@ -103,6 +103,7 @@ function localRun(repo: string, id: string, branch: string): TridentRun {
     inner_result: null,
     started_at: '2026-01-01T00:00:00.000Z',
     last_advanced_at: '2026-01-01T00:00:00.000Z',
+    harvested_at: null,
   }
 }
 

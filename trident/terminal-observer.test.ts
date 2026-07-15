@@ -42,6 +42,7 @@ function run(): TridentRun {
     inner_result: null,
     started_at: '2026-06-26T00:00:00.000Z',
     last_advanced_at: '2026-06-26T00:01:00.000Z',
+    harvested_at: null,
   }
 }
 

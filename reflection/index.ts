@@ -55,6 +55,17 @@ export interface CreateReflectionDeps {
   watchdog_ms?: number
   /** Override the wall clock (tests). */
   now?: () => number
+  /**
+   * RC2 ([BEHAVIOR]) — OPTIONAL agent-nexus emitter. When a correction is
+   * detected + logged, `onTurnComplete` ALSO emits it as a `learning` event so
+   * an owner correction reaches the build agents that re-ground on the project's
+   * nexus (RC3). Fire-and-forget: it must not throw (the caller additionally
+   * guards it), and it never blocks the correction write. `scope` is the turn's
+   * project scope (`turn.scope`, `general` for the General topic) — the nexus
+   * project the learning is filed under. Absent (default, and whenever the
+   * shared perfect-recall flag is off) → no emission, unchanged behaviour.
+   */
+  emitLearning?: (input: { scope: string; correction: Correction }) => void
 }
 
 export interface ReflectionTurn {
@@ -144,6 +155,17 @@ export function createReflection(deps: CreateReflectionDeps): Reflection {
           })
         } catch (err) {
           log.warn('diary_breadcrumb_failed', { err: errMsg(err) })
+        }
+        // RC2 — ALSO surface the learning on the project's agent-nexus so build
+        // agents (forge/argus/orchestrator) re-grounding on it see the owner's
+        // recent corrections. Fire-and-forget + isolated: a nexus outage must
+        // never fail the correction write (already durable above).
+        if (deps.emitLearning !== undefined) {
+          try {
+            deps.emitLearning({ scope, correction })
+          } catch (err) {
+            log.warn('nexus_learning_emit_failed', { err: errMsg(err) })
+          }
         }
         log.info('correction_logged', { id: correction.id, scope })
       }

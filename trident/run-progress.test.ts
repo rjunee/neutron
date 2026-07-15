@@ -39,6 +39,7 @@ function run(over: Partial<TridentRun> = {}): TridentRun {
     inner_result: null,
     started_at: '2026-07-02T00:00:00Z',
     last_advanced_at: '2026-07-02T00:00:00Z',
+    harvested_at: null,
     ...over,
   }
 }
