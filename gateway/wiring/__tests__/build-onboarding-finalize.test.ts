@@ -479,6 +479,45 @@ test('finalize does NOT complete a row in an early (non-finalizable) phase (allo
   expect(h.onboardingCompleted).toEqual([])
 })
 
+test('finalize refuses a non-finalizable phase even when the live read THROWS — snapshot fallback stays allowlist-guarded (F8 r13)', async () => {
+  const h = makeHarness()
+  const seeded = await h.stateStore.upsert({
+    project_slug: PROJECT_SLUG,
+    user_id: USER_ID,
+    phase: 'ai_substrate_offered',
+    phase_state_patch: { user_first_name: 'Sam', agent_name: 'Atlas', primary_projects: ['Alpha'] },
+  })
+  const real = h.stateStore
+  let composed = 0
+  const persona: PersonaComposerLike = {
+    async compose() { composed += 1; return { draft_id: 'x', status: 'composed' } },
+    async commit() { return { committed_at: 0, git_sha: null, paths: [] } },
+  }
+  // get() THROWS → finalize falls back to the caller snapshot (early phase). The allowlist
+  // check on effectiveState must STILL refuse it (the CAS alone would complete it, since it
+  // only pins phase==expected and the real row IS in that phase).
+  const throwingGetStore: OnboardingStateStore = {
+    async get() { throw new Error('read boom') },
+    async upsert(inp) { return real.upsert(inp) },
+    async rekey(a, b, c) { return real.rekey(a, b, c) },
+    async delete(slug, uid) { return real.delete(slug, uid) },
+    async deleteByOwner(slug) { return real.deleteByOwner(slug) },
+    async completeIfPhaseStateMatches(inp) { return real.completeIfPhaseStateMatches(inp) },
+  }
+  const finalizer = buildOnboardingFinalize({
+    ...h.deps,
+    stateStore: throwingGetStore,
+    personaComposer: persona,
+  })
+  await finalizer.finalize({ user_id: USER_ID, topic_id: TOPIC_ID, state: seeded })
+
+  // Refused via the allowlist on the throw path: phase unchanged, no persona, no projects.
+  expect((await real.get(PROJECT_SLUG, USER_ID))?.phase).toBe('ai_substrate_offered')
+  expect(composed).toBe(0)
+  expect((h.db.raw().query('SELECT COUNT(*) AS n FROM projects').get() as { n: number }).n).toBe(0)
+  expect(h.onboardingCompleted).toEqual([])
+})
+
 test('finalize ABORTS (never completes) if the phase transitions to a live import mid-run (F8 r10)', async () => {
   const h = makeHarness()
   const seeded = await h.stateStore.upsert({

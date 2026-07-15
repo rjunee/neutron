@@ -67,6 +67,7 @@ import { capProposedProjects } from '@neutronai/onboarding/interview/phase-promp
 import {
   buildScaffoldMaterializer,
   ensureProjectRow,
+  softDeleteProjectRow,
 } from './project-create.ts'
 import {
   buildProjectDocReader,
@@ -269,20 +270,24 @@ export function buildOnboardingFinalize(deps: OnboardingFinalizeDeps): Onboardin
           log('info', 'finalize: durable row absent; nothing to finalize', { user_id: input.user_id })
           return
         }
-        if (!isFinalizablePhase(live.phase)) {
-          // Already terminal, or transitioned to a live-import phase since the caller's
-          // check — never finalize on top of either. Abort; a later trigger recovers.
-          log('info', 'finalize: phase not finalizable; no-op', {
-            user_id: input.user_id,
-            phase: live.phase,
-          })
-          return
-        }
         effectiveState = live
       } catch (err) {
         // A state read THROW (not a null result) must not strand the user — fall through
         // with the passed-in snapshot; the terminal CAS still guards the real phase/state.
         log('warn', 'finalize: state read failed; using caller snapshot', { err: errStr(err) })
+      }
+
+      // Enforce the finalizable-phase ALLOWLIST on effectiveState — whether it came from the
+      // live read OR the caller-snapshot fallback (a read THROW must NOT bypass the
+      // allowlist; the CAS only pins phase==expected, so an early/terminal/import phase in
+      // the snapshot would otherwise complete). Never finalize from a non-allowlisted phase
+      // (Codex F8 r12/r13).
+      if (!isFinalizablePhase(effectiveState.phase)) {
+        log('info', 'finalize: phase not finalizable; no-op', {
+          user_id: input.user_id,
+          phase: effectiveState.phase,
+        })
+        return
       }
 
       const deriveImportResult = (s: OnboardingState): ImportResult | null =>
@@ -413,10 +418,7 @@ export function buildOnboardingFinalize(deps: OnboardingFinalizeDeps): Onboardin
       for (const id of createdIdsAllPasses) {
         if (finalIds.has(id)) continue
         try {
-          await deps.db.run(
-            `UPDATE projects SET deleted_at = ?, updated_at = ? WHERE id = ? AND deleted_at IS NULL`,
-            [now(), now(), id],
-          )
+          await softDeleteProjectRow(deps.db, id, now())
           log('info', 'finalize: reconciled a dropped project (soft-deleted a stale row)', {
             user_id: input.user_id,
             project_id: id,
