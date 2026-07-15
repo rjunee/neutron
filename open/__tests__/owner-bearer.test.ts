@@ -122,19 +122,52 @@ describe('resolveOwnerBearer — env override', () => {
     }
   })
 
-  it('a SHORT write on the LOCK TOKEN yields ephemeral WITHOUT leaving a bogus lockfile (Codex Medium)', () => {
-    // Short-circuit ONLY the lock-token write (`pid.seq.time`). Pre-fix this left a
-    // truncated token → verify-mismatch → a stale lockfile that blocks rotation and
-    // forces ephemeral. With the full-write loop, the short write ABORTS and unlinks.
+  it('a SHORT write on the LOCK TOKEN aborts the acquisition → ephemeral fallback (Codex Medium)', () => {
+    // Short-circuit ONLY the lock-token write: the full-write loop aborts on the
+    // stall → this attempt can't secure the rotate lock → ephemeral fallback (never a
+    // truncated/half-secured credential). Ownership-safety on the failure path is
+    // covered by the swap test below.
     const m = spyShortWriteMatching((c) => /^\d+\.\d+\.\d+/.test(c))
     try {
       const res = resolveOwnerBearer(home, {})
       expect(m.hits()).toBeGreaterThan(0) // the LOCK-token loop was actually reached
-      expect(res.source).toBe('ephemeral') // couldn't secure the lock → ephemeral
-      // The failed lock write unlinked its own lockfile — no bogus lock left behind.
-      expect(fs.existsSync(ownerBearerLockPath(home))).toBe(false)
+      expect(res.source).toBe('ephemeral')
     } finally {
       m.spy.mockRestore()
+    }
+  })
+
+  it('a failed lock-token write does NOT delete ANOTHER owner\'s lock swapped in mid-write (Codex r5 High)', () => {
+    fs.mkdirSync(home, { recursive: true })
+    const lockPath = ownerBearerLockPath(home)
+    const realWrite = fs.writeSync.bind(fs)
+    let swapped = false
+    const spy = spyOn(fs, 'writeSync').mockImplementation(((
+      fd: number,
+      data: unknown,
+      ...rest: unknown[]
+    ): number => {
+      if (!swapped && /^\d+\.\d+\.\d+/.test(fullWriteContent(data))) {
+        // A racer reclaims the pathname under a DIFFERENT owner token while our
+        // write is failing. Our error path must NOT delete THEIR live lock.
+        swapped = true
+        try {
+          fs.unlinkSync(lockPath)
+        } catch {
+          /* our just-created lock */
+        }
+        fs.writeFileSync(lockPath, 'OTHER-OWNER-TOKEN-999999', { mode: 0o600 })
+        throw new Error('lock write failed after a racer swapped the lock')
+      }
+      return (realWrite as (fd: number, data: unknown, ...r: unknown[]) => number)(fd, data, ...rest)
+    }) as typeof fs.writeSync)
+    try {
+      resolveOwnerBearer(home, {}) // our acquisition fails on the token write
+      // The racer's lock SURVIVES — we did not unlink a lock that wasn't ours.
+      expect(fs.existsSync(lockPath)).toBe(true)
+      expect(fs.readFileSync(lockPath, 'utf8')).toContain('OTHER-OWNER-TOKEN')
+    } finally {
+      spy.mockRestore()
     }
   })
 

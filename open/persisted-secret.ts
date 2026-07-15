@@ -319,10 +319,19 @@ function tryAcquireRotateLock(lockPath: string): HeldRotateLock | null {
       } catch {
         /* non-fatal */
       }
-      try {
-        fs.unlinkSync(lockPath)
-      } catch {
-        /* non-fatal */
+      // Unlink ONLY if the pathname still carries OUR token — mirrors
+      // releaseRotateLock's ownership discipline. A racer that reclaimed+recreated
+      // lockPath during our failed write now owns it under a DIFFERENT token;
+      // unconditionally unlinking would delete THEIR live lock and let a third
+      // rotator run concurrently (Codex). On a partial write our own token is
+      // truncated (also won't match) → we leave the stale lock to be reclaimed later.
+      const owned = readRotateLockObservation(lockPath)
+      if (owned !== null && owned.token === token) {
+        try {
+          fs.unlinkSync(lockPath)
+        } catch {
+          /* non-fatal */
+        }
       }
       return null
     }
