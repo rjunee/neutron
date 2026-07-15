@@ -12,6 +12,9 @@ import { describe, expect, test } from 'bun:test'
 
 import type { ChatOutbound } from '@neutronai/landing/chat-protocol.ts'
 import type { SystemEventInput, SystemEventSink } from '@neutronai/persistence/index.ts'
+import type { Topic } from '@neutronai/channels/types.ts'
+import { AppWsAdapter } from '@neutronai/channels/adapters/app-ws/adapter.ts'
+import { InMemoryAppWsSessionRegistry } from '@neutronai/channels/adapters/app-ws/session-registry.ts'
 import type { WebChatSenderRegistry } from '../chat-sender-registry.ts'
 import { makeSubstrateNoticeSinks } from '../substrate-notice-sink.ts'
 
@@ -121,6 +124,78 @@ describe('makeSubstrateNoticeSinks — journal + owner bubble per state', () => 
     expect(sent.length).toBe(2)
     expect(sent[0]!.event.body).toContain('gotten large')
     expect(sent[1]!.event.body).toContain('very large')
+  })
+
+  test('DURABLE-SAFE: a notice bubble routed through the REAL AppWsAdapter is fanned live but NEVER persisted', async () => {
+    // In production the sink delivers via the raw WebChatSenderRegistry (a socket
+    // fan, not the durable adapter), so a notice is inherently non-durable. This
+    // pins the STRONGER guarantee at the real adapter boundary: even if a notice
+    // envelope reached `AppWsAdapter.send`, its `system_notice:true` marks it
+    // live-only, so the adapter fans it WITHOUT a chat_log row (no seq, no receipt)
+    // — a reload can never re-hydrate a stale state pill as a stray chat bubble.
+    const innerRegistry = new InMemoryAppWsSessionRegistry()
+    const appended: string[] = []
+    const chat_log = {
+      append: async (input: { body: string }) => {
+        appended.push(input.body)
+        return {
+          row: {
+            topic_id: OWNER_TOPIC, seq: 1, message_id: 'x', role: 'agent' as const,
+            body: input.body, client_msg_id: null, project_id: null, attachments: null,
+            created_at: 0,
+          },
+          was_new: true,
+        }
+      },
+      replayAfter: async () => [],
+      maxSeq: async () => 0,
+    }
+    const adapter = new AppWsAdapter({
+      registry: innerRegistry,
+      receiver: { receive: async () => {} },
+      now: () => 0,
+      generate_message_id: () => 'msg-x',
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      chat_log: chat_log as any,
+    })
+    const captured: Array<{ body?: string; system_notice?: boolean; seq?: number }> = []
+    innerRegistry.register(OWNER_TOPIC, (e) => captured.push(e as { body?: string; system_notice?: boolean; seq?: number }))
+
+    const topic: Topic = {
+      topic_id: '', channel_kind: 'app_socket', channel_topic_id: OWNER_TOPIC,
+      project_id: null, privacy_mode: 'regular',
+    }
+    // A registry whose sender routes the sink's ChatOutbound through the durable
+    // adapter (the worst case) — translating the `system_notice` flag.
+    let pending: Promise<unknown> = Promise.resolve()
+    const bridge: WebChatSenderRegistry = {
+      register: () => {},
+      unregister: () => {},
+      has: () => true,
+      send: (_topic_id, event) => {
+        pending = adapter.send({
+          topic,
+          text: event.type === 'agent_message' ? event.body : '',
+          ...(event.type === 'agent_message' && event.system_notice === true
+            ? { adapter_options: { system_notice: true } }
+            : {}),
+        })
+        return true
+      },
+    }
+    const { sink } = fakeSink()
+    const sinks = makeSubstrateNoticeSinks({ registry: () => bridge, owner_topic_id: OWNER_TOPIC, sink })
+
+    sinks.onDeadTurnNotice({ reason: 'api_5xx_dead_turn', matched: 'x', record: 'y' })
+    await pending
+
+    // No durable chat_log row for the notice…
+    expect(appended).toEqual([])
+    // …but it DID reach the live socket, flagged transient, with no ordering seq.
+    expect(captured.length).toBe(1)
+    expect(captured[0]!.system_notice).toBe(true)
+    expect(captured[0]!.seq).toBeUndefined()
+    expect(captured[0]!.body).toContain('send your message again')
   })
 
   test('an offline owner (no registry) journals but sends no bubble; a throwing send is swallowed', () => {
