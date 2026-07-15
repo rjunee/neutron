@@ -332,6 +332,44 @@ test('finalize NEVER falsely completes under continuous mid-run churn — the CA
   expect(h.onboardingCompleted.filter((u) => u === USER_ID)).toHaveLength(0)
 })
 
+test('finalize ABORTS (never completes) if the phase transitions to a live import mid-run (F8 r10)', async () => {
+  const h = makeHarness()
+  const seeded = await h.stateStore.upsert({
+    project_slug: PROJECT_SLUG,
+    user_id: USER_ID,
+    phase: 'persona_reviewed',
+    phase_state_patch: {
+      user_first_name: 'Sam',
+      agent_name: 'Atlas',
+      primary_projects: ['Alpha'],
+    },
+  })
+
+  // commit() (during compose, before the terminal CAS) transitions the row to a live
+  // import phase — a concurrent import kicking off after the finalize trigger. The terminal
+  // CAS pins the ORIGINAL phase, so it fails; the re-read sees a non-finalizable phase and
+  // the finalizer ABORTS rather than stamping `completed` over the live import.
+  let mutated = false
+  const persona: PersonaComposerLike = {
+    async compose() { return { draft_id: 'x', status: 'composed' } },
+    async commit() {
+      if (!mutated) {
+        mutated = true
+        await h.stateStore.upsert({ project_slug: PROJECT_SLUG, user_id: USER_ID, phase: 'import_running' })
+      }
+      return { committed_at: 0, git_sha: null, paths: [] }
+    },
+  }
+  const finalizer = buildOnboardingFinalize({ ...h.deps, personaComposer: persona })
+  await finalizer.finalize({ user_id: USER_ID, topic_id: TOPIC_ID, state: seeded })
+
+  // Never finalized on top of the live import.
+  const finalState = await h.stateStore.get(PROJECT_SLUG, USER_ID)
+  expect(finalState?.phase).toBe('import_running')
+  expect(finalState?.phase).not.toBe('completed')
+  expect(h.onboardingCompleted.filter((u) => u === USER_ID)).toHaveLength(0)
+})
+
 test('finalize operates on the LIVE durable state, not a stale caller snapshot (F8 r3)', async () => {
   const h = makeHarness()
   // Snapshot A — the state a caller captured with ONE project.

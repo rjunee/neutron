@@ -261,8 +261,13 @@ export function buildOnboardingFinalize(deps: OnboardingFinalizeDeps): Onboardin
       try {
         const live = await deps.stateStore.get(deps.project_slug, input.user_id)
         if (live !== null) {
-          if (live.phase === 'completed') {
-            log('info', 'finalize: already completed; no-op', { user_id: input.user_id })
+          if (!isFinalizablePhase(live.phase)) {
+            // Already terminal, or transitioned to a live-import phase since the caller's
+            // check — never finalize on top of either. Abort; a later trigger recovers.
+            log('info', 'finalize: phase not finalizable; no-op', {
+              user_id: input.user_id,
+              phase: live.phase,
+            })
             return
           }
           effectiveState = live
@@ -322,6 +327,7 @@ export function buildOnboardingFinalize(deps: OnboardingFinalizeDeps): Onboardin
           casOk = await deps.stateStore.completeIfPhaseStateMatches({
             project_slug: deps.project_slug,
             user_id: input.user_id,
+            expected_phase: workState.phase,
             expected_phase_state: workState.phase_state,
             completed_at: now(),
           })
@@ -337,8 +343,8 @@ export function buildOnboardingFinalize(deps: OnboardingFinalizeDeps): Onboardin
           break
         }
 
-        // CAS lost: the row is either already terminal, gone, or its phase_state moved
-        // under us. Re-read to decide.
+        // CAS lost: the row's phase or phase_state moved under us (or it's terminal /
+        // gone). Re-read to decide.
         let after: OnboardingState | null
         try {
           after = await deps.stateStore.get(deps.project_slug, input.user_id)
@@ -352,11 +358,16 @@ export function buildOnboardingFinalize(deps: OnboardingFinalizeDeps): Onboardin
           log('info', 'finalize: row vanished mid-run; nothing to complete', { user_id: input.user_id })
           return
         }
-        if (after.phase === 'completed') {
-          log('info', 'finalize: completed concurrently; no-op', { user_id: input.user_id })
+        if (!isFinalizablePhase(after.phase)) {
+          // Completed concurrently, failed, OR transitioned to a live-import phase mid-run
+          // — never finalize on top of any of those. Abort; a later trigger recovers.
+          log('info', 'finalize: phase moved to a non-finalizable state mid-run; aborting', {
+            user_id: input.user_id,
+            phase: after.phase,
+          })
           return
         }
-        // Non-terminal but phase_state changed → redo persona + materialize from fresh.
+        // Still a finalizable phase but phase or phase_state changed → redo from fresh.
         workState = after
       }
 
@@ -551,6 +562,24 @@ async function emitProjectOpenings(
  * a PersonaError (cringe-cap, commit failure) is logged and swallowed — the
  * persona can regenerate later, and finalize must still complete onboarding.
  */
+/**
+ * Phases the finalizer may legitimately complete FROM — a conversational marker where the
+ * interview's required fields have been gathered. It must NEVER stamp `completed` over a
+ * terminal row or a LIVE import phase (that would finalize on top of an in-flight import,
+ * violating the composer's import guard). The caller validates the initial phase; finalize
+ * re-checks after every mid-run re-read, and the terminal CAS pins the exact phase too.
+ */
+const NON_FINALIZABLE_PHASES = new Set<string>([
+  'completed',
+  'failed',
+  'import_upload_pending',
+  'import_running',
+  'import_analysis_presented',
+])
+function isFinalizablePhase(phase: string): boolean {
+  return !NON_FINALIZABLE_PHASES.has(phase)
+}
+
 async function commitPersona(
   deps: OnboardingFinalizeDeps,
   state: OnboardingState,
