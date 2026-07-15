@@ -1711,8 +1711,16 @@ export function buildOpenGraphComposer(
       buttonStore: landing.buttonStore,
       push: {
         app: (topic_id: string, event: ChatOutbound): boolean => {
+          // delivered_live must reflect the REAL registry state, not a hardcoded
+          // `true`: `buildAppWsSendReply` fires `appWs.deref(adapter.send)` as
+          // fire-and-forget (persist + fan), so its own live result is detached and
+          // lost (the O6 fire-and-forget-lie). Read the registry's sync live-sender
+          // presence directly — an OFFLINE topic (no connected device) now correctly
+          // reports delivered_live:false so `deliver` can observe/record it (Codex).
+          // The durable row remains the guarantee; the persist+fan still happens.
+          const live = appWsRegistry.has(topic_id)
           buildAppWsSendReply(topic_id)(event)
-          return true
+          return live
         },
         web: (topic_id: string, event: ChatOutbound): boolean =>
           landing.registry.send(topic_id, event),

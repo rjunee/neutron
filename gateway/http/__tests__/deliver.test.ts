@@ -216,6 +216,31 @@ describe('createDeliver — durable-first + routed best-effort push', () => {
     expect(appRegistry.deviceCount('app:owner')).toBe(1)
   })
 
+  it('production app path: delivered_live tracks REAL device presence via has() (offline→false, connected→true)', async () => {
+    // The composer's app push reads delivered_live from `appWsRegistry.has(topic)` —
+    // NOT a hardcoded true — because buildAppWsSendReply's adapter.send is
+    // fire-and-forget (persist + fan) and its own live result is detached. This
+    // mirrors that wiring: the "persist+fan" is elided; delivered_live must still
+    // reflect whether an app device is actually connected (Codex — an offline topic
+    // was previously reported delivered_live:true).
+    const bs = fakeButtonStore()
+    const appRegistry = new InMemoryAppWsSessionRegistry()
+    const deliver = createDeliver({
+      buttonStore: bs.store,
+      push: { app: (t) => appRegistry.has(t) },
+      log: () => {},
+    })
+    // OFFLINE — no device connected for app:owner.
+    const offline = await deliver('app:owner', { body: 'hi', durability: 'reply' })
+    expect(offline.delivered_live).toBe(false)
+    // The durable row is still written regardless (durable-first guarantee).
+    expect(offline.persisted).toBe(true)
+    // CONNECTED — a device registers → delivered_live flips true.
+    appRegistry.register('app:owner', () => {})
+    const online = await deliver('app:owner', { body: 'hi', durability: 'reply' })
+    expect(online.delivered_live).toBe(true)
+  })
+
   it('PRESERVES web-registry propagate: a throwing single sender is swallowed by deliver (best-effort)', async () => {
     const bs = fakeButtonStore()
     const webRegistry = new InMemoryWebChatSenderRegistry()
