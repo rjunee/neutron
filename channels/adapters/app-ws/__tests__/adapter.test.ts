@@ -95,6 +95,35 @@ describe('AppWsAdapter.send — outgoing → envelope', () => {
     expect(id).toBe('app-ws:lost:msg-lost')
   })
 
+  it('append-failure with an ONLINE socket is NOT lost — it delivers live (normal id)', async () => {
+    // The `lost` marker requires BOTH append failure AND an offline socket. When the
+    // socket is live, an append failure still reaches the user live, so it is a
+    // normal delivery — never `lost` (which would wrongly retry an already-shown
+    // reply). Pins the two-condition branch.
+    const registry = new InMemoryAppWsSessionRegistry()
+    const captured: AppWsOutbound[] = []
+    registry.register('app:sam', (e) => captured.push(e))
+    const chat_log = {
+      append: async () => {
+        throw new Error('disk full')
+      },
+      replayAfter: async () => [],
+      maxSeq: async () => 0,
+    }
+    const adapter = new AppWsAdapter({
+      registry,
+      receiver: { receive: async () => {} },
+      now: () => FROZEN_NOW,
+      generate_message_id: () => 'msg-online',
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      chat_log: chat_log as any,
+    })
+    const id = await adapter.send({ topic, text: 'append failed but live' })
+    expect(id).toBe('app-ws:msg-online') // normal delivery, NOT app-ws:lost:*
+    expect(captured.length).toBe(1) // reached the live socket
+    expect((captured[0] as { seq?: number }).seq).toBeUndefined() // no seq (append failed)
+  })
+
   it('a persisted-but-offline message keeps the plain dropped-marker (resume replays it)', async () => {
     const registry = new InMemoryAppWsSessionRegistry()
     let seq = 0
