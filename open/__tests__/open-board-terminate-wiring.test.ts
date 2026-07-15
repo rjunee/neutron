@@ -216,7 +216,14 @@ describe('Open board terminate() wiring (§F6a composition boundary)', () => {
     // delivery frames → this assertion reds if `boardTerminatorHolder.bind` is
     // ever dropped.
     await waitFor(() => stoppedDeliveries(sock.frames).length >= 1)
-    await sleep(150) // allow a (buggy) second delivery to arrive before counting
+
+    // DETERMINISTIC exactly-once (Codex r9 — no timing sleep): round-trip a user
+    // message. Its agent reply arrives strictly AFTER every synchronous
+    // delete-triggered frame has flushed, so a duplicate delivery (if any) is
+    // already present by the time the reply lands. Then the count must still be 1.
+    const agentMsgBefore = sock.frames.filter((f) => f['type'] === 'agent_message').length
+    sock.ws.send(JSON.stringify({ v: 1, type: 'user_message', body: 'ping', client_msg_id: 'barrier-1' }))
+    await waitFor(() => sock.frames.filter((f) => f['type'] === 'agent_message').length > agentMsgBefore)
     expect(stoppedDeliveries(sock.frames).length).toBe(1)
 
     // Codex r7 — the out-of-band cancel ALSO fans the live transition, so the

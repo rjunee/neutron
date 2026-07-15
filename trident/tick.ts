@@ -273,7 +273,15 @@ export class TridentTickLoop {
           // terminal transition (which the rail needs to drop live_runs). Runs in
           // its own try/catch so a fan outage never aborts the tick.
           if (this.on_transition !== null) {
-            const nextRun = outcome.run
+            // Fan the COMMITTED row, not the in-flight `outcome.run`. Between our
+            // `saveIfActive` and this fan, an out-of-band `terminate()` (board
+            // DELETE) can atomically flip the row terminal + fan it; fanning our
+            // stale non-terminal snapshot would then RESTORE the just-cancelled run
+            // in `live_runs` (Codex r9). Reloading makes the fan reflect the current
+            // persisted state — terminal if a cancel won — so it converges with the
+            // terminator's fan instead of fighting it. Falls back to `outcome.run`
+            // only if the row vanished (a hard delete), where there's nothing to fan.
+            const nextRun = this.store.get(run.id) ?? outcome.run
             const sig = progressSignature(nextRun, this.now())
             if (this.lastSig.get(nextRun.id) !== sig) {
               this.lastSig.set(nextRun.id, sig)

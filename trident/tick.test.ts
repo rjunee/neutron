@@ -383,6 +383,49 @@ describe('TridentTickLoop — on_transition (M1 UX REDESIGN live-progress fan)',
     expect(deliveries).toEqual([{ id: r.id, phase: 'stopped' }])
   })
 
+  test('§F6a r9: a concurrent cancel after a non-terminal save is NOT masked by a stale fan', async () => {
+    // The tick commits a non-terminal advance; before the transition fan, a board
+    // DELETE atomically terminalizes the SAME row. The fan must reflect the
+    // COMMITTED (terminal) state — the tick reloads — not the stale non-terminal
+    // snapshot, which would RESTORE the just-cancelled run in the rail's live_runs.
+    const store = new TridentRunStore(db)
+    const r = await store.create({ slug: 's', project_slug: 't1', repo_path: '/r', task: 't' })
+
+    const fanned: string[] = []
+    const on_transition = {
+      async onTransition(run: TridentRun): Promise<void> {
+        fanned.push(run.phase)
+      },
+    }
+
+    // A store whose saveIfActive commits the non-terminal advance AND then models
+    // the concurrent board DELETE terminalizing the row right after our save wins.
+    const racing = {
+      listNonTerminal: (n: number) => store.listNonTerminal(n),
+      get: (id: string) => store.get(id),
+      save: (run: TridentRun) => store.save(run),
+      saveIfActive: async (run: TridentRun) => {
+        const won = await store.saveIfActive(run) // writes 'argus' (non-terminal)
+        await store.terminalTransition(r.id, { phase: 'stopped' }) // DELETE lands right after
+        return won
+      },
+    } as unknown as TridentRunStore
+
+    const step = async (run: TridentRun): Promise<AdvanceOutcome> => ({
+      run: { ...run, phase: 'argus' as const },
+      changed: true,
+      waiting: false,
+      note: 'advance',
+    })
+
+    const loop = new TridentTickLoop({ store: racing, step, on_transition })
+    await loop.runOnce()
+
+    // The fan saw the CURRENT terminal state, NOT the stale 'argus' (no restore).
+    expect(fanned).toEqual(['stopped'])
+    expect(store.get(r.id)?.phase).toBe('stopped')
+  })
+
   test('fans exactly once when a live run ages past the display-stall threshold', async () => {
     const store = new TridentRunStore(db)
     const r = await store.create({ slug: 's', project_slug: 't1', repo_path: '/r', task: 't' })
