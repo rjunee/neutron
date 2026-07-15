@@ -273,69 +273,45 @@ export function buildOnboardingFinalize(deps: OnboardingFinalizeDeps): Onboardin
         log('warn', 'finalize: state read failed; using caller snapshot', { err: errStr(err) })
       }
 
-      // (2) Persona — compose + commit from the live phase_state read above, then
-      // invalidate the steady-state loader. Failure-isolated: on any error we log and
-      // press on (the phase still flips to completed; persona regenerates later).
-      await commitPersona(deps, effectiveState, log)
-
-      // (3) Projects — RE-READ the live durable row as LATE as possible (right before
-      // materialization). Persona compose above is the dominant await; a field/project
-      // the owner added DURING it (e.g. the post-turn extractor persisting one more
-      // primary project, then its finalize coalescing into THIS run) is still picked up
-      // here and materialized.
-      //
-      // OPTIMISTIC READ-COMPARE-MATERIALIZE LOOP (Codex F8 r5). Even after re-reading,
-      // a project could land DURING materializeProjects' awaits and then be permanently
-      // suppressed once we mark `completed`. Close that window WITHOUT store CAS support:
-      // materialize, then RE-READ; if the project set grew, re-materialize the fuller
-      // (idempotent) set and re-check. Fall through to the terminal write ONLY on a
-      // re-read that shows NO change — and because NO await separates that stable check
-      // from the `completed` upsert below, no mutation can interleave in the gap
-      // (single-threaded), so a completed row can never suppress an un-materialized
-      // project. Bounded to avoid a pathological livelock of continuous mutation.
-      let materializeState = effectiveState
-      try {
-        const fresh = await deps.stateStore.get(deps.project_slug, input.user_id)
-        if (fresh !== null) {
-          // A concurrent (non-coalesced) finalize may have completed us in the gap.
-          if (fresh.phase === 'completed') {
-            log('info', 'finalize: completed during compose; no-op', { user_id: input.user_id })
-            return
-          }
-          materializeState = fresh
-        }
-      } catch (err) {
-        log('warn', 'finalize: pre-materialize re-read failed; using earlier snapshot', {
-          err: errStr(err),
-        })
-      }
-
-      // Prefer the freshest row's import_result; fall back to the caller's (e.g. when a
-      // read failed and we're on the passed-in snapshot).
       const deriveImportResult = (s: OnboardingState): ImportResult | null =>
         s.phase_state['import_result'] !== null && typeof s.phase_state['import_result'] === 'object'
           ? (s.phase_state['import_result'] as ImportResult)
           : null
-      // Stable comparison key for the materialization-driving project set (the field the
-      // post-turn extractor mutates). Set-equality via sort so order can't false-trigger.
-      const projectSetKey = (s: OnboardingState): string => {
-        const raw = s.phase_state['primary_projects']
-        const arr = Array.isArray(raw) ? (raw as unknown[]).map(String) : []
-        return [...arr].sort().join(',')
-      }
 
-      let import_result = deriveImportResult(materializeState) ?? input.import_result ?? null
-      // Returns the projects that actually landed (created/existing, not the soft-deleted
-      // skips) so the per-project opening step below can seed each chat.
-      let materialized = await materializeProjects(deps, materializeState, import_result, now, log)
+      // (2)+(3) CONSISTENCY LOOP. Persona composition AND project materialization both
+      // consume mutable `phase_state` fields (agent_name/personality, primary_projects,
+      // non_work_interests + inferred interests, import_result, dropped_projects, …).
+      // A durable mutation to ANY of them DURING this run — the extractor settling one
+      // more field, then its finalize coalescing into us — must be reflected, or we'd
+      // commit persona/projects from a stale snapshot and then `completed` would suppress
+      // the correction forever. So we redo BOTH steps from a state, RE-READ, and repeat
+      // until a re-read shows the WHOLE phase_state unchanged since the state we just used
+      // (Codex F8 r5/r6). We fall through to the terminal write ONLY on a stable re-read —
+      // and because NO await separates that stability check from the `completed` upsert
+      // below, no mutation can interleave in the gap (single-threaded → atomic), so a
+      // completed row can never suppress un-committed persona/project work. commitPersona
+      // and materializeProjects write persona FILES / `projects` rows respectively and do
+      // NOT touch `phase_state`, so a quiescent row converges in ONE pass; bounded against
+      // a pathological continuous-mutation livelock.
+      let workState = effectiveState
+      let import_result = deriveImportResult(workState) ?? input.import_result ?? null
+      // materialized: the projects that actually landed (created/existing, not the
+      // soft-deleted skips) — the per-project opening step below seeds each one's chat.
+      let materialized: MaterializedProject[] = []
+      const MAX_FINALIZE_REPASSES = 4
+      for (let pass = 0; pass < MAX_FINALIZE_REPASSES; pass++) {
+        // (2) Persona — compose + commit from workState, then invalidate the loader.
+        // Failure-isolated inside commitPersona (logs + presses on).
+        await commitPersona(deps, workState, log)
+        // (3) Projects — DB rows + topic bindings + on-disk materialization from workState.
+        import_result = deriveImportResult(workState) ?? input.import_result ?? null
+        materialized = await materializeProjects(deps, workState, import_result, now, log)
 
-      const MAX_MATERIALIZE_REPASSES = 4
-      for (let pass = 0; pass < MAX_MATERIALIZE_REPASSES; pass++) {
         let after: OnboardingState | null
         try {
           after = await deps.stateStore.get(deps.project_slug, input.user_id)
         } catch (err) {
-          log('warn', 'finalize: post-materialize re-read failed; completing with current set', {
+          log('warn', 'finalize: post-work re-read failed; completing with current work', {
             err: errStr(err),
           })
           break
@@ -345,13 +321,11 @@ export function buildOnboardingFinalize(deps: OnboardingFinalizeDeps): Onboardin
           log('info', 'finalize: completed concurrently; no-op', { user_id: input.user_id })
           return
         }
-        if (projectSetKey(after) === projectSetKey(materializeState)) break // stable — safe to complete
-        // A project landed during materialize — re-materialize the fuller set (idempotent).
-        materializeState = after
-        import_result = deriveImportResult(after) ?? import_result
-        materialized = await materializeProjects(deps, after, import_result, now, log)
-        if (pass === MAX_MATERIALIZE_REPASSES - 1) {
-          log('warn', 'finalize: project set still churning after max repasses; completing', {
+        if (phaseStateKey(after) === phaseStateKey(workState)) break // stable — safe to complete
+        // Something the persona/projects depend on changed mid-run — redo both from fresh.
+        workState = after
+        if (pass === MAX_FINALIZE_REPASSES - 1) {
+          log('warn', 'finalize: phase_state still churning after max repasses; completing', {
             user_id: input.user_id,
           })
         }
@@ -551,6 +525,30 @@ async function emitProjectOpenings(
  * a PersonaError (cringe-cap, commit failure) is logged and swallowed — the
  * persona can regenerate later, and finalize must still complete onboarding.
  */
+/**
+ * Canonical, order-independent serialization of an onboarding row's `phase_state`,
+ * used to detect ANY durable mutation during finalize (persona + project inputs all
+ * live in phase_state). Object keys are sorted recursively so key-order can't
+ * false-trigger a repass; array order is preserved (a reordered primary_projects list
+ * IS a real change worth reflecting). Compared by string equality across re-reads.
+ */
+function phaseStateKey(state: OnboardingState): string {
+  const canon = (v: unknown): string => {
+    if (v === null || typeof v !== 'object') return JSON.stringify(v) ?? 'null'
+    if (Array.isArray(v)) return '[' + v.map(canon).join(',') + ']'
+    const obj = v as Record<string, unknown>
+    return (
+      '{' +
+      Object.keys(obj)
+        .sort()
+        .map((k) => JSON.stringify(k) + ':' + canon(obj[k]))
+        .join(',') +
+      '}'
+    )
+  }
+  return canon(state.phase_state)
+}
+
 async function commitPersona(
   deps: OnboardingFinalizeDeps,
   state: OnboardingState,

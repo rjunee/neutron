@@ -189,7 +189,60 @@ test('CONCURRENT finalize whose TERMINAL write FAILS — both callers observe th
   expect((await real.get(PROJECT_SLUG, USER_ID))?.phase).toBe('completed')
 })
 
-test('finalize picks up a project persisted DURING the run — interleaved mutation, live re-read before materialize (F8 r4)', async () => {
+test('finalize RE-COMPOSES persona AND re-materializes when phase_state changes mid-run (F8 r4/r6)', async () => {
+  const h = makeHarness()
+  const seeded = await h.stateStore.upsert({
+    project_slug: PROJECT_SLUG,
+    user_id: USER_ID,
+    phase: 'persona_reviewed',
+    phase_state_patch: {
+      user_first_name: 'Sam',
+      agent_name: 'Atlas',
+      agent_personality: 'warm',
+      primary_projects: ['Alpha'],
+    },
+  })
+
+  // A persona composer whose commit() runs an INTERLEAVED durable write mid-finalize
+  // (once): it changes a PERSONA field (agent_personality) AND adds a project (Beta),
+  // exactly the "extractor persists state B during finalization" schedule. The
+  // consistency loop must react to BOTH — re-compose persona from the updated field
+  // (Codex F8 r6 blocker 2) and re-materialize the fuller project set — before marking
+  // completed. Guarded so the mutation fires once (else the loop re-mutates forever).
+  let composes = 0
+  let mutated = false
+  const interleavingPersona: PersonaComposerLike = {
+    async compose() { composes += 1; return { draft_id: 'x', status: 'composed' } },
+    async commit() {
+      if (!mutated) {
+        mutated = true
+        await h.stateStore.upsert({
+          project_slug: PROJECT_SLUG,
+          user_id: USER_ID,
+          phase: 'persona_reviewed',
+          phase_state_patch: { agent_personality: 'warm and direct', primary_projects: ['Alpha', 'Beta'] },
+        })
+      }
+      return { committed_at: 0, git_sha: null, paths: [] }
+    },
+  }
+  const finalizer = buildOnboardingFinalize({ ...h.deps, personaComposer: interleavingPersona })
+  await finalizer.finalize({ user_id: USER_ID, topic_id: TOPIC_ID, state: seeded })
+
+  // Persona re-composed from the updated field (≥2 composes = a repass fired).
+  expect(composes).toBeGreaterThanOrEqual(2)
+  const finalState = await h.stateStore.get(PROJECT_SLUG, USER_ID)
+  expect(finalState?.phase).toBe('completed')
+  expect(finalState?.phase_state['agent_personality']).toBe('warm and direct')
+  // The interleaved project is materialized too, not suppressed by completed.
+  const names = (
+    h.db.raw().query('SELECT name FROM projects ORDER BY name').all() as { name: string }[]
+  ).map((r) => r.name)
+  expect(names).toContain('Alpha')
+  expect(names).toContain('Beta')
+})
+
+test('finalize repasses on a NON-primary-projects materialization input changing mid-run (F8 r6 blocker 1)', async () => {
   const h = makeHarness()
   const seeded = await h.stateStore.upsert({
     project_slug: PROJECT_SLUG,
@@ -202,34 +255,50 @@ test('finalize picks up a project persisted DURING the run — interleaved mutat
     },
   })
 
-  // A persona composer whose commit() runs an INTERLEAVED durable write mid-finalize:
-  // it adds project 'Beta' while the run awaits persona (exactly the "extractor
-  // persists state B during finalization" schedule Codex flagged). Because finalize
-  // re-reads live state AFTER persona (right before materialize), Beta is materialized
-  // too — not suppressed by the row flipping to completed on a stale snapshot.
-  let committed = 0
-  const interleavingPersona: PersonaComposerLike = {
-    async compose() { return { draft_id: 'x', status: 'composed' } },
-    async commit() {
-      committed += 1
-      await h.stateStore.upsert({
-        project_slug: PROJECT_SLUG,
-        user_id: USER_ID,
-        phase: 'persona_reviewed',
-        phase_state_patch: { primary_projects: ['Alpha', 'Beta'] },
-      })
-      return { committed_at: 0, git_sha: null, paths: [] }
-    },
+  const real = h.stateStore
+  let injected = false
+  const alphaMaterialized = (): boolean =>
+    (h.db.raw().query('SELECT 1 FROM projects WHERE id = ?').get(slugifyProjectId('Alpha')) as
+      | unknown
+      | null) != null
+  let composes = 0
+  const persona: PersonaComposerLike = {
+    async compose() { composes += 1; return { draft_id: 'x', status: 'composed' } },
+    async commit() { return { committed_at: 0, git_sha: null, paths: [] } },
   }
-  const finalizer = buildOnboardingFinalize({ ...h.deps, personaComposer: interleavingPersona })
+
+  // Inject a change to a materialization input OTHER than primary_projects
+  // (non_work_interests) on the first post-work read. The OLD projectSetKey compared
+  // only primary_projects → the loop would exit and this change would be lost. The
+  // whole-phase_state key catches it and forces a repass.
+  const mutatingStore: OnboardingStateStore = {
+    async get(slug, uid) {
+      const state = await real.get(slug, uid)
+      if (!injected && state !== null && alphaMaterialized() && !state.phase_state['non_work_interests']) {
+        injected = true
+        await real.upsert({
+          project_slug: PROJECT_SLUG,
+          user_id: USER_ID,
+          phase: 'persona_reviewed',
+          phase_state_patch: { non_work_interests: ['climbing'] },
+        })
+        return real.get(slug, uid)
+      }
+      return state
+    },
+    async upsert(inp) { return real.upsert(inp) },
+    async rekey(a, b, c) { return real.rekey(a, b, c) },
+    async delete(slug, uid) { return real.delete(slug, uid) },
+    async deleteByOwner(slug) { return real.deleteByOwner(slug) },
+  }
+  const finalizer = buildOnboardingFinalize({ ...h.deps, stateStore: mutatingStore, personaComposer: persona })
   await finalizer.finalize({ user_id: USER_ID, topic_id: TOPIC_ID, state: seeded })
 
-  expect(committed).toBe(1)
-  const names = (
-    h.db.raw().query('SELECT name FROM projects ORDER BY name').all() as { name: string }[]
-  ).map((r) => r.name)
-  expect(names).toContain('Alpha')
-  expect(names).toContain('Beta') // the interleaved write is materialized, not suppressed
+  expect(injected).toBe(true)
+  expect(composes).toBeGreaterThanOrEqual(2) // the non_work_interests change forced a repass
+  const finalState = await real.get(PROJECT_SLUG, USER_ID)
+  expect(finalState?.phase).toBe('completed')
+  expect(finalState?.phase_state['non_work_interests']).toEqual(['climbing'])
 })
 
 test('finalize re-materializes a project that lands DURING materialization — post-materialize re-read loop (F8 r5)', async () => {
