@@ -36,7 +36,7 @@
 
 import { isTerminalPhase } from './state-machine.ts'
 import type { TridentPhase, TridentRun } from './store.ts'
-import type { TridentTerminalHook } from './tick.ts'
+import type { TridentTerminalHook, TridentTransitionHook } from './tick.ts'
 
 /**
  * The minimal store surface the chokepoint writes through: a partial update by id
@@ -112,8 +112,18 @@ export function buildTridentTerminator(deps: {
   /** The terminal-observer chain (the SAME hook the tick loop fires). Absent →
    *  a write-only terminator (e.g. the `/code stop` path). */
   observer?: TridentTerminalHook | null
+  /**
+   * The live TRANSITION fan (the SAME hook the tick loop fires per tick — the
+   * project-rail `projects_changed` push that drops a terminal run from
+   * `live_runs`). Fired on every WON transition, BEFORE the observer chain, so an
+   * out-of-band cancel refreshes connected rails exactly as a loop-reaped run does
+   * (Codex r7). Independent of delivery: a write-only terminator (no observer)
+   * still fans the rail. Absent → no rail fan (board-less / test boots).
+   */
+  onTransition?: TridentTransitionHook | null
 }): TridentTerminator {
   const observer = deps.observer ?? null
+  const transition = deps.onTransition ?? null
   return {
     async terminate(id, phase, opts): Promise<TerminateResult> {
       // Defensive: the terminal chokepoint only ever writes a TERMINAL phase.
@@ -130,8 +140,23 @@ export function buildTridentTerminator(deps: {
       const { run, won } = await deps.store.terminalTransition(id, patch)
       if (run === null) return { run: null, won: false, observed: false, skipped_reason: 'run_not_found' }
       // Already terminal (the tick loop or another cancel won): the WINNER ran the
-      // observers, so running them again here would double-deliver. Skip, explicitly.
+      // observers AND fanned the rail, so repeating either here would double-fire.
       if (!won) return { run, won: false, observed: false, skipped_reason: 'already_terminal' }
+
+      // WON. Fan the live transition FIRST (rail drops this run from live_runs),
+      // matching the tick loop's on_transition→on_terminal order. Best-effort +
+      // independent of delivery — a bare terminal write still refreshes the rail.
+      if (transition !== null) {
+        try {
+          await transition.onTransition(run)
+        } catch (err) {
+          console.warn(
+            `[trident] terminate transition fan failed for run ${run.id}: ${
+              err instanceof Error ? err.message : String(err)
+            }`,
+          )
+        }
+      }
 
       const runObservers = opts?.runObservers ?? true
       if (!runObservers) return { run, won: true, observed: false, skipped_reason: 'caller_notifies' }

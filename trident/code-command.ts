@@ -163,6 +163,14 @@ export interface TridentCodeContext {
   /** Round caps (else the store defaults: 8 / 20). */
   max_rounds?: number
   max_ralph_rounds?: number
+  /**
+   * The live TRANSITION fan (the SAME `on_run_transition` hook the tick loop
+   * fires — the project-rail `projects_changed` / `work_board_changed` push).
+   * When supplied, `/code stop` fans it on a WON cancel so a connected rail drops
+   * the stopped run from `live_runs` immediately, matching the board DELETE path
+   * (Codex r7). Absent → no rail fan (the rail refreshes on the next event).
+   */
+  onRunTransition?: (run: TridentRun) => Promise<void>
 }
 
 /** Dispatch the parsed command. */
@@ -279,7 +287,13 @@ async function executeStop(
       : null
   const observer =
     reconcile !== null ? composeTerminalHook({ onTerminal: async (): Promise<void> => {} }, [reconcile]) : null
-  const result = await buildTridentTerminator({ store: ctx.store, observer }).terminate(target.id, 'stopped', {})
+  const result = await buildTridentTerminator({
+    store: ctx.store,
+    observer,
+    // The rail fan (drops the stopped run from live_runs), matching the board
+    // DELETE path — fired on a WON transition, independent of the skipped delivery.
+    ...(ctx.onRunTransition !== undefined ? { onTransition: { onTransition: ctx.onRunTransition } } : {}),
+  }).terminate(target.id, 'stopped', {})
   // The `resolveStopTarget` read can go stale in the await gap: the tick loop may
   // finish the run first, so the atomic transition LOSES (`won:false`). Report
   // accurately rather than claim a stop that never happened (Codex r4, mirrors the

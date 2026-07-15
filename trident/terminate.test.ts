@@ -165,6 +165,53 @@ describe('buildTridentTerminator', () => {
     expect(fired).toEqual([])
   })
 
+  test('fires the transition fan (rail refresh) BEFORE the observer chain on a won transition', async () => {
+    const { store } = fakeStore()
+    const order: string[] = []
+    const term = buildTridentTerminator({
+      store,
+      observer: { onTerminal: async () => { order.push('terminal') } },
+      onTransition: { onTransition: async () => { order.push('transition') } },
+    })
+
+    const res = await term.terminate('run-1', 'stopped')
+
+    expect(res.won).toBe(true)
+    // Matches the tick loop's on_transition → on_terminal order.
+    expect(order).toEqual(['transition', 'terminal'])
+  })
+
+  test('fires the transition fan even for a write-only (observer-less) terminator', async () => {
+    const { store } = fakeStore()
+    const fanned: string[] = []
+    const term = buildTridentTerminator({
+      store,
+      onTransition: { onTransition: async (r) => { fanned.push(r.id) } },
+    })
+
+    const res = await term.terminate('run-1', 'stopped')
+
+    // No observer wired, but the rail fan still fires (independent of delivery).
+    expect(res.skipped_reason).toBe('no_observer')
+    expect(fanned).toEqual(['run-1'])
+  })
+
+  test('does NOT fire the transition fan when the transition is LOST (already terminal)', async () => {
+    const { store } = fakeStore(fakeRun({ phase: 'done' }))
+    const fanned: string[] = []
+    const term = buildTridentTerminator({
+      store,
+      onTransition: { onTransition: async (r) => { fanned.push(r.id) } },
+    })
+
+    const res = await term.terminate('run-1', 'stopped')
+
+    expect(res.won).toBe(false)
+    expect(res.skipped_reason).toBe('already_terminal')
+    // The winner already fanned; a loser must NOT re-fan (no phantom rail churn).
+    expect(fanned).toEqual([])
+  })
+
   test('a concurrently-terminalized run is NOT overwritten and NOT re-observed (race lost)', async () => {
     // The tick loop already persisted a real `done` result and delivered success.
     // A board delete then races to cancel the SAME run: the atomic transition must

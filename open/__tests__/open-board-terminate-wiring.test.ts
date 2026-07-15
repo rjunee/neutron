@@ -187,6 +187,8 @@ describe('Open board terminate() wiring (§F6a composition boundary)', () => {
     // The owner's live socket (registers `app:owner`) — the delivery target.
     const sock = await openSocket(harness.base)
     await waitFor(() => sock.frames.some((f) => f['type'] === 'session_ready'))
+    await sleep(100) // let the connect-seed projects_changed settle into the baseline
+    const projectsChangedBefore = sock.frames.filter((f) => f['type'] === 'projects_changed').length
 
     // DELETE the card through the REAL HTTP surface → routes the cancel through
     // the bound terminate() chokepoint → the real observer chain (delivery + board
@@ -210,6 +212,14 @@ describe('Open board terminate() wiring (§F6a composition boundary)', () => {
     await waitFor(() => stoppedDeliveries(sock.frames).length >= 1)
     await sleep(150) // allow a (buggy) second delivery to arrive before counting
     expect(stoppedDeliveries(sock.frames).length).toBe(1)
+
+    // Codex r7 — the out-of-band cancel ALSO fans the live transition, so the
+    // rail drops the run from live_runs immediately. Assert a NEW `projects_changed`
+    // frame arrived AFTER the delete (the terminator's onTransition fan), beyond the
+    // connect-seed baseline.
+    await waitFor(
+      () => sock.frames.filter((f) => f['type'] === 'projects_changed').length > projectsChangedBefore,
+    )
 
     sock.close()
     await sleep(50)

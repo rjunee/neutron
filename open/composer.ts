@@ -2750,6 +2750,16 @@ export function buildOpenGraphComposer(
             (o): o is (run: TridentRun) => Promise<void> => o !== null,
           ),
         ),
+        // Codex r7 — an out-of-band cancel must fan the SAME live transition the
+        // tick loop fires (`on_run_transition` below), so a connected rail drops
+        // the cancelled run from `live_runs` immediately instead of retaining it
+        // until the next unrelated event. Same two best-effort, diff-gated fans.
+        onTransition: {
+          onTransition: async (run): Promise<void> => {
+            fanWorkBoardChanged(run.project_slug)
+            emitProjectsChangedIfChanged(OWNER_USER_ID)
+          },
+        },
       }),
     )
 
