@@ -17,10 +17,14 @@
 
 import type { CredentialPool } from '@neutronai/runtime/credential-pool.ts'
 import type { Substrate } from '@neutronai/runtime/substrate.ts'
-import type { ClaudeCodeSubstrateOptions } from '@neutronai/runtime/adapters/claude-code/index.ts'
+import type {
+  ClaudeCodeSubstrateOptions,
+  RecoveredReply,
+} from '@neutronai/runtime/adapters/claude-code/index.ts'
 import type { Provider } from '@neutronai/runtime/adapters/select-substrate.ts'
 import type { McpToolResolver } from '@neutronai/contracts/mcp-tool-resolver.ts'
 import type { ProjectDb } from '@neutronai/persistence/index.ts'
+import type { SubstrateNoticeSinks } from '@neutronai/gateway/http/substrate-notice-sink.ts'
 
 export interface OpenWiringContext {
   /**
@@ -91,4 +95,29 @@ export interface OpenWiringContext {
    * model id honors `ctx.env` overrides).
    */
   openaiFetchImpl?: typeof fetch
+  /**
+   * O6 — the notice-family sinks (`onDeadTurnNotice` / `onSizeAlert` /
+   * `onRateLimitBanner`) the composer builds over the app-ws push registry +
+   * `system_events` journal. Wired ONLY onto the owner's WARM conversational
+   * substrate (`cc-agent-*`) so a usage-capped / dead-turn / size-alert / rate-
+   * limit state surfaces as an owner chat bubble instead of stderr. Absent (LLM-
+   * less / tests that don't exercise notices) ⇒ the substrate keeps its stderr-
+   * only default.
+   */
+  liveAgentNoticeSinks?: SubstrateNoticeSinks
+  /**
+   * O6 / #106 — the recovered-reply sink (deliver-or-persist into the
+   * `RecoveredReplyStore`) the composer builds over the same push registry. Wired
+   * ONLY onto `cc-agent-*`; the substrate calls it when its replay-after-resume
+   * path recovers a reply a crash dropped. Absent ⇒ the recovered reply degrades
+   * to the substrate's stderr fallback.
+   */
+  liveAgentRecoveredReplySink?: (reply: RecoveredReply) => void
+  /**
+   * O6 / #106 — the owner reconnect channel (`app:<owner>`) recorded on a dropped-
+   * turn entry so the substrate's replay path can route a recovered reply to the
+   * `liveAgentRecoveredReplySink`. Threaded alongside the sink (both wired only on
+   * `cc-agent-*`).
+   */
+  liveAgentDeliveryTopicId?: string
 }

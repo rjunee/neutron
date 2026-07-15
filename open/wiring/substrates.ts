@@ -231,6 +231,26 @@ export function wireSubstrates(ctx: OpenWiringContext): WiredSubstrates {
           // `tools-bridge.ts`). The untrusted import (`cc-import-*`) and
           // disposable Trident (`cc-trident-*`) substrates deliberately omit it.
           enableToolBridge: true,
+          // O6 — the notice-family sinks + recovered-reply sink are wired ONLY
+          // here (the owner's conversational REPL). So a rising-edge dead-turn /
+          // size-alert / rate-limit-banner state surfaces as an owner chat bubble
+          // + a `system_events` row, and a crash-dropped reply is recovered —
+          // instead of all four vanishing to the substrate's stderr fallback. The
+          // phase-spec / ephemeral / trident-fire substrates deliberately omit
+          // them (no owner chat surface to deliver to).
+          ...(ctx.liveAgentNoticeSinks !== undefined
+            ? {
+                onDeadTurnNotice: ctx.liveAgentNoticeSinks.onDeadTurnNotice,
+                onSizeAlert: ctx.liveAgentNoticeSinks.onSizeAlert,
+                onRateLimitBanner: ctx.liveAgentNoticeSinks.onRateLimitBanner,
+              }
+            : {}),
+          ...(ctx.liveAgentRecoveredReplySink !== undefined
+            ? { onRecoveredReply: ctx.liveAgentRecoveredReplySink }
+            : {}),
+          ...(ctx.liveAgentDeliveryTopicId !== undefined
+            ? { delivery_topic_id: ctx.liveAgentDeliveryTopicId }
+            : {}),
           // Live-agent: openai provider WITH the tool manifest (tool bridge ON),
           // mirroring the Claude path's enableToolBridge — this is the ONE
           // conversational substrate that gets tools on either provider.

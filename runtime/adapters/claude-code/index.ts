@@ -40,6 +40,11 @@ import type { SizeSeverity } from './persistent/session-size-watchdog.ts'
 
 export type { RecoveredReply } from './persistent/persistent-repl-substrate.ts'
 export type { RateLimitBannerNotice } from './persistent/persistent-repl-substrate.ts'
+// O6 — re-export the remaining notice-family types so a gateway consumer wiring
+// the `onDeadTurnNotice` / `onSizeAlert` sinks imports them from THIS adapter
+// boundary (never a deep `persistent/*` path).
+export type { DeadTurnNotice } from './persistent/api5xx-dead-turn-watcher.ts'
+export type { SizeSeverity } from './persistent/session-size-watchdog.ts'
 
 export interface ClaudeCodeSubstrateOptions {
   /**

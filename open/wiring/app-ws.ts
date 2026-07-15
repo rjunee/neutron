@@ -268,6 +268,15 @@ export interface WireAppWsDeps {
   activeChatProjects: Set<string>
   /** Rail-key for a chat topic (General → owner slug; else the project id). */
   railChatKey: (project_id?: string) => string
+  /**
+   * O6 / #106 — drain any undelivered recovered replies for the just-connected
+   * topic, re-emitting each once (deduped in the `RecoveredReplyStore`). Wired by
+   * the composer over the SAME `RecoveredReplyStore` the live-agent substrate's
+   * `onRecoveredReply` sink persists into, so a reply a crash dropped while the
+   * owner was offline is re-pushed the moment they reconnect (the offline
+   * counterpart to the sink's live-delivery branch). Omitted on an LLM-less box.
+   */
+  recoveredReplyDrain?: (channel_topic_id: string) => void
 }
 
 export interface WiredAppWs {
@@ -310,6 +319,7 @@ export function wireAppWs(ctx: OpenWiringContext, deps: WireAppWsDeps): WiredApp
     readProjectRows,
     activeChatProjects,
     railChatKey,
+    recoveredReplyDrain,
   } = deps
   const cleanups: Array<() => void> = []
   const onboardingStateStore = landing.stateStore
@@ -851,6 +861,11 @@ export function wireAppWs(ctx: OpenWiringContext, deps: WireAppWsDeps): WiredApp
       // full-list apply, so a redundant delivery to a co-topic session is a
       // harmless no-op — it never disturbs the diff baseline.
       appWsRegistry.send(channel_topic_id, buildProjectsChangedFrame())
+      // O6 / #106 — drain any recovered replies buffered for this topic while the
+      // owner was offline (the offline counterpart to the substrate's live-delivery
+      // sink). Idempotent + a no-op when the store is empty, so it is safe on EVERY
+      // reconnect (General or project topic) regardless of onboarding state.
+      recoveredReplyDrain?.(channel_topic_id)
       if (await isOnboardingActive(user_id)) {
         // RECOVERY (M1 E2E Round 4, 2026-06-29) — finalize a post-import
         // onboarding that was consumed back into the conversational marker but
