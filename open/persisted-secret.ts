@@ -261,14 +261,16 @@ function readRotateLockObservation(lockPath: string): { token: string; mtimeMs: 
  * SAME token and is still stale — so we never reclaim a lock that just changed
  * hands (was reclaimed + refreshed by someone else) between our two reads.
  */
-function classifyRotateLock(lockPath: string): 'live' | 'reclaimable' | 'gone' {
+function classifyRotateLock(
+  lockPath: string,
+): { kind: 'live' | 'gone' } | { kind: 'reclaimable'; token: string } {
   const o1 = readRotateLockObservation(lockPath)
-  if (!o1) return 'gone'
-  if (Date.now() - o1.mtimeMs <= LOCK_STALE_MS) return 'live'
+  if (!o1) return { kind: 'gone' }
+  if (Date.now() - o1.mtimeMs <= LOCK_STALE_MS) return { kind: 'live' }
   const o2 = readRotateLockObservation(lockPath)
-  if (!o2) return 'gone'
-  if (o2.token !== o1.token || Date.now() - o2.mtimeMs <= LOCK_STALE_MS) return 'live'
-  return 'reclaimable'
+  if (!o2) return { kind: 'gone' }
+  if (o2.token !== o1.token || Date.now() - o2.mtimeMs <= LOCK_STALE_MS) return { kind: 'live' }
+  return { kind: 'reclaimable', token: o2.token }
 }
 
 /**
@@ -286,15 +288,27 @@ function tryAcquireRotateLock(lockPath: string): HeldRotateLock | null {
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code !== 'EEXIST') return null // unexpected → ephemeral
       const cls = classifyRotateLock(lockPath)
-      if (cls === 'live') return null // live competitor → wait + adopt
-      if (cls === 'reclaimable') {
-        try {
-          fs.unlinkSync(lockPath) // reclaim the confirmed orphan…
-        } catch {
-          /* someone else reclaimed it first — non-fatal */
+      if (cls.kind === 'live') return null // live competitor → wait + adopt
+      if (cls.kind === 'reclaimable') {
+        // RE-VERIFY right before the unlink: only remove the pathname if it STILL
+        // carries the EXACT stale token we confirmed AND is still stale. This closes
+        // the interleaving where a racer replaced the orphan with a FRESH LIVE lock in
+        // the (classify → unlink) window — we would otherwise delete their live lock
+        // and both of us would rotate (Codex). Mirrors releaseRotateLock's
+        // token-verified unlink. The residual SUB-SYSCALL window (re-read → unlink) is
+        // the inherent pathname-lock limit — portable Node/Bun has no funlinkat to make
+        // it atomic — documented, not falsely closed, and UNREACHABLE in neutron's
+        // one-process-per-NEUTRON_HOME deployment (there is only ever one rotator).
+        const before = readRotateLockObservation(lockPath)
+        if (before !== null && before.token === cls.token && Date.now() - before.mtimeMs > LOCK_STALE_MS) {
+          try {
+            fs.unlinkSync(lockPath) // reclaim the confirmed, still-same orphan…
+          } catch {
+            /* someone else reclaimed it first — non-fatal */
+          }
         }
       }
-      continue // 'gone' or just-reclaimed → retry the exclusive create
+      continue // 'gone' / not-still-ours / just-reclaimed → retry the exclusive create
     }
     // We created it → stamp a UNIQUE owner token (pid + monotonic seq + time) so
     // release/reclaim can PROVE ownership and never touch another owner's lock.
