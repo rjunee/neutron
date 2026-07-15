@@ -169,6 +169,26 @@ describe('project_slug timing-safe comparison (ISSUE #34)', () => {
     expect(offenders).toHaveLength(0)
   })
 
+  it('every surface calling ownerSlugMismatch imports the NAMED binding from a CANONICAL source', () => {
+    // tsc proves the symbol is imported, but NOT from where — a surface could
+    // `import { ownerSlugMismatch } from './shadow.ts'` (an insecure copy) and still
+    // compile. Pin the SOURCE: the named binding must come from `./auth-helpers.ts`
+    // (the timing-safe primitive) or `./surface-kit.ts` (which re-exports it — proven
+    // identical by the runtime-identity test below). Import blocks can't cross a `}`,
+    // so the regex pins the binding to the source.
+    const offenders: string[] = []
+    for (const name of allSurfaceFiles()) {
+      const body = readFileSync(join(HTTP_DIR, name), 'utf8')
+      if (!body.includes('ownerSlugMismatch(')) continue
+      const canonicalImport =
+        /import\s*(?:type\s*)?\{[^}]*\bownerSlugMismatch\b[^}]*\}\s*from\s*['"]\.\/(?:auth-helpers|surface-kit)\.ts['"]/s.test(
+          body,
+        )
+      if (!canonicalImport) offenders.push(name)
+    }
+    expect(offenders).toEqual([])
+  })
+
   it('NO gateway/http surface defines a LOCAL copy of a surface-kit helper (consolidation complete)', () => {
     // The O7 completeness invariant + drift guard: surface-kit.ts is the ONE place
     // these helpers are defined. A surface must never carry its own copy — that is
