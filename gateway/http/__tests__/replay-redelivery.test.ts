@@ -38,6 +38,7 @@ import {
   InMemoryRecoveredReplyStore,
   makeRecoveredReplySink,
   drainRecoveredReplies,
+  assertRecoveredReplyPersisted,
 } from '../recovered-reply-store.ts'
 
 afterEach(async () => {
@@ -245,6 +246,26 @@ describe('makeRecoveredReplySink — online / offline / dedupe', () => {
     expect(a + b).toBe(1)
     expect(sentA.length + sentB.length).toBe(1)
     expect(store.peekUndelivered(topic)).toHaveLength(0) // delivered, not re-pending
+  })
+
+  // The app-ws adapter PERSISTS to chat_log BEFORE the live socket send, so a
+  // `dropped` result is durably captured and must NOT be retried (a retry would
+  // double-append the same reply). Only an unbound adapter persisted nothing.
+  describe('assertRecoveredReplyPersisted — persisted-counts-as-delivered (Codex)', () => {
+    it('a real message id counts as delivered (no throw → drain marks delivered)', () => {
+      expect(() => assertRecoveredReplyPersisted('app-ws:app:owner:42')).not.toThrow()
+    })
+
+    it('an app-ws:dropped marker ALSO counts as delivered — persisted, resume shows it once (no double-append)', () => {
+      // THE BUG this guards: socket closed AFTER chat_log.append but before the
+      // live send → the adapter returns `dropped`. Retrying would append the reply
+      // a SECOND time. Persisted == delivered, so the drain must NOT retry.
+      expect(() => assertRecoveredReplyPersisted('app-ws:dropped:app:owner')).not.toThrow()
+    })
+
+    it('undefined (adapter unbound → nothing persisted) throws → the drain leaves the row pending', () => {
+      expect(() => assertRecoveredReplyPersisted(undefined)).toThrow()
+    })
   })
 })
 

@@ -296,6 +296,7 @@ import {
   InMemoryRecoveredReplyStore,
   makeRecoveredReplySink,
   drainRecoveredReplies,
+  assertRecoveredReplyPersisted,
 } from '@neutronai/gateway/http/recovered-reply-store.ts'
 import type { OutgoingMessage } from '@neutronai/channels/types.ts'
 import type { ChatOutbound } from '@neutronai/landing/chat-protocol.ts'
@@ -2816,12 +2817,13 @@ export function buildOpenGraphComposer(
                       text: event.type === 'agent_message' ? event.body : '',
                     }
                     const id = await appWs.deref((adapter) => adapter.send(msg))
-                    // `undefined` = adapter not bound; `app-ws:dropped:*` = the
-                    // socket was offline at send time — neither is a confirmed
-                    // delivery, so reject to keep the row pending.
-                    if (id === undefined || id.startsWith('app-ws:dropped')) {
-                      throw new Error(`recovered-reply not confirmed (${id ?? 'no-adapter'})`)
-                    }
+                    // `adapter.send` PERSISTS to chat_log before the live send, so any
+                    // returned id (real OR `app-ws:dropped:*`) means the reply is
+                    // durable — resume shows it exactly once, so it's delivered and
+                    // must NOT be retried (a retry would double-append). Only an
+                    // unbound adapter (`undefined`) persisted nothing → throw to
+                    // leave the row pending (Codex).
+                    assertRecoveredReplyPersisted(id)
                   },
                   log_tag: '[open][recovered-reply]',
                 }),

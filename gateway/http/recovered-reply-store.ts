@@ -228,6 +228,27 @@ export function makeRecoveredReplySink(deps: {
 }
 
 /**
+ * Classify an app-ws adapter send RESULT for the recovered-reply drain (Codex).
+ *
+ * THE HAZARD: `AppWsAdapter.send` appends the reply to the durable `chat_log`
+ * BEFORE attempting live socket delivery. So a returned id — a real message id OR
+ * an `app-ws:dropped:*` marker (socket offline at send time) — BOTH mean the reply
+ * is now durably persisted; the client's history resume replays it exactly once.
+ * Treating a `dropped` result as "retry" would re-run `adapter.send` on the next
+ * reconnect and APPEND THE SAME REPLY AGAIN (a second durable row + a stale replay)
+ * — a double-show. So any returned id counts as DELIVERED and must NOT be retried.
+ *
+ * Only `undefined` (the adapter was not bound → nothing ran, nothing persisted) is
+ * a real failure → throw so `drainRecoveredReplies` releases the claim and the row
+ * is retried on the next reconnect.
+ */
+export function assertRecoveredReplyPersisted(id: string | undefined): void {
+  if (id === undefined) {
+    throw new Error('recovered-reply: no app-ws adapter bound — nothing persisted, retry next reconnect')
+  }
+}
+
+/**
  * Drain a reconnecting topic's undelivered recovered replies — re-emit each once
  * (deduped on `turn_id`). Called from the reconnect path, alongside
  * `reEmitActiveSeedPromptIfAny`. Returns the count re-emitted.
