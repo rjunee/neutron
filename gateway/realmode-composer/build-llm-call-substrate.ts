@@ -40,6 +40,9 @@ import {
   createClaudeCodeSubstrateAuto,
   type ClaudeCodeSubstrateOptions,
   type RecoveredReply,
+  type DeadTurnNotice,
+  type RateLimitBannerNotice,
+  type SizeSeverity,
 } from '@neutronai/runtime/adapters/claude-code/index.ts'
 import {
   normalizeProvider,
@@ -303,6 +306,22 @@ export interface BuildLlmCallSubstrateInput {
    *  replay path recovers a reply a crash dropped (deliver-or-persist by the
    *  gateway). */
   onRecoveredReply?: (reply: RecoveredReply) => void | Promise<void>
+  /**
+   * O6 — NOTICE-FAMILY DI seams the persistent substrate fires on the rising edge
+   * of a detected condition (the substrate never imports `gateway/*`). Forwarded
+   * onto `ClaudeCodeSubstrateOptions` so a gateway caller can wire user-facing
+   * chat delivery instead of the substrate's stderr-only fallback. All three are
+   * NOTIFY-ONLY (no keystroke, no auto-retry) and edge-latched UPSTREAM by the
+   * substrate (per-turn / per `threadId::severity`), so wiring the callback
+   * inherits the fire-once-per-rising-edge guarantee — the sink does not re-latch.
+   *   - `onDeadTurnNotice`   (row #11) — a mid-turn API 5xx killed a turn.
+   *   - `onSizeAlert`        (row #13) — a warm transcript crossed a warn/critical band.
+   *   - `onRateLimitBanner`  (row #10) — a rate-limit / usage-cap banner appeared.
+   * Wired ONLY on the owner's conversational substrate (`cc-agent-*`); the
+   * stateless-utility / import / trident substrates leave them unset (stderr). */
+  onDeadTurnNotice?: (notice: DeadTurnNotice) => void | Promise<void>
+  onSizeAlert?: (info: { sessionKey: string; severity: SizeSeverity; sizeBytes: number }) => void
+  onRateLimitBanner?: (notice: RateLimitBannerNotice) => void | Promise<void>
   /**
    * Optional `internal_handle` keyed against `oauthRefresh.loadAccessToken`.
    * Required when `oauthRefresh` is wired; ignored otherwise.
@@ -656,6 +675,13 @@ export function buildLlmCallSubstrate(
         if (input.project_slug !== undefined) opts.instance_slug = input.project_slug
         if (input.delivery_topic_id !== undefined) opts.delivery_topic_id = input.delivery_topic_id
         if (input.onRecoveredReply !== undefined) opts.onRecoveredReply = input.onRecoveredReply
+        // O6 — forward the notice-family sinks so the substrate delivers a
+        // rising-edge dead-turn / size-alert / rate-limit-banner notice to the
+        // gateway's chat surface instead of only stderr. Unset on every non-
+        // conversational substrate (they keep the stderr-only default).
+        if (input.onDeadTurnNotice !== undefined) opts.onDeadTurnNotice = input.onDeadTurnNotice
+        if (input.onSizeAlert !== undefined) opts.onSizeAlert = input.onSizeAlert
+        if (input.onRateLimitBanner !== undefined) opts.onRateLimitBanner = input.onRateLimitBanner
         // Argus r4 BLOCKER — stateless one-shot disposable-REPL mode: a session-
         // less dispatch on this substrate gets a fresh REPL terminated after the
         // turn, so distinct one-shot purposes never share a `--resume` transcript.

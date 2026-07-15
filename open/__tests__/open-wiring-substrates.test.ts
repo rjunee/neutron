@@ -113,6 +113,43 @@ describe('wireSubstrates — instance ids + tool-bridge invariants', () => {
     expect(opts!.skip_permissions).toBe(true)
   })
 
+  test('O6: notice + recovered-reply sinks wire ONLY onto cc-agent-* (not cc-llm-*/trident)', async () => {
+    const onDeadTurnNotice = (): void => {}
+    const onSizeAlert = (): void => {}
+    const onRateLimitBanner = (): void => {}
+    const onRecoveredReply = (): void => {}
+    const { ctx, captured } = makeCtx({
+      liveAgentNoticeSinks: { onDeadTurnNotice, onSizeAlert, onRateLimitBanner },
+      liveAgentRecoveredReplySink: onRecoveredReply,
+      liveAgentDeliveryTopicId: 'app:owner',
+    })
+    const w = wireSubstrates(ctx)
+    // Drain both conversational substrates + one ephemeral so all opts are captured.
+    await drain(w.liveAgentSubstrate!)
+    await drain(w.llmCallSubstrate!)
+    await drain(w.makeEphemeralSubstrate('cc-trident')('/repo/x'))
+
+    const agent = captured.find((o) => o.substrate_instance_id === 'cc-agent-owner')!
+    // The owner's conversational REPL carries all four sinks + the delivery topic.
+    expect(agent.onDeadTurnNotice).toBe(onDeadTurnNotice)
+    expect(agent.onSizeAlert).toBe(onSizeAlert)
+    expect(agent.onRateLimitBanner).toBe(onRateLimitBanner)
+    expect(agent.onRecoveredReply).toBe(onRecoveredReply)
+    expect(agent.delivery_topic_id).toBe('app:owner')
+
+    // The phase-spec (cc-llm-*) + ephemeral trident substrates must NOT — a notice
+    // there has no owner chat surface to deliver to (stderr-only default).
+    const llm = captured.find((o) => o.substrate_instance_id === 'cc-llm-owner')!
+    const trident = captured.find((o) => o.substrate_instance_id === 'cc-trident-owner')!
+    for (const o of [llm, trident]) {
+      expect(o.onDeadTurnNotice).toBeUndefined()
+      expect(o.onSizeAlert).toBeUndefined()
+      expect(o.onRateLimitBanner).toBeUndefined()
+      expect(o.onRecoveredReply).toBeUndefined()
+      expect(o.delivery_topic_id).toBeUndefined()
+    }
+  })
+
   test('makeEphemeralSubstrate builds a per-cwd ephemeral cc-<prefix>-* substrate (no bridge)', async () => {
     const { ctx, captured } = makeCtx()
     const w = wireSubstrates(ctx)

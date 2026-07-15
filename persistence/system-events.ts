@@ -65,6 +65,17 @@ export type SystemEventName =
   // OR a stuck/dead dispatched subagent). NOTIFY-ONLY: the watchdog DETECTS +
   // journals the condition; it changes no control flow and kills nothing.
   | 'watchdog_alert'
+  // O6 — a runtime persistent-REPL NOTICE crossed its rising edge and was
+  // previously stderr-only (the substrate's `onDeadTurnNotice` / `onSizeAlert` /
+  // `onRateLimitBanner` DI seams were unwired in Open). NOTIFY-ONLY: the runtime
+  // DETECTS + journals; the gateway ALSO surfaces an owner chat bubble so the
+  // state is visible instead of vanishing.
+  //   - `dead_turn_notice`   (row #11) — a mid-turn API 5xx killed a turn.
+  //   - `session_size_alert` (row #13) — a warm transcript crossed a size band.
+  //   - `rate_limit_banner`  (row #10) — a rate-limit / usage-cap banner appeared.
+  | 'dead_turn_notice'
+  | 'session_size_alert'
+  | 'rate_limit_banner'
 
 export const ALL_SYSTEM_EVENT_NAMES: ReadonlyArray<SystemEventName> = [
   'gbrain_unavailable',
@@ -77,6 +88,9 @@ export const ALL_SYSTEM_EVENT_NAMES: ReadonlyArray<SystemEventName> = [
   'prewarm_failed',
   'capability_verdict',
   'watchdog_alert',
+  'dead_turn_notice',
+  'session_size_alert',
+  'rate_limit_banner',
 ]
 
 /** What a degrade site passes to {@link emitSystemEventSafe}. */

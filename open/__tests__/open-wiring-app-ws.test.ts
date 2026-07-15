@@ -127,6 +127,22 @@ function buildDeps() {
   return { deps, appWs, onboardingMsg, appWsButtonPromptRouter, appWsImportProgressRouter, buildClarifyPoster }
 }
 
+/**
+ * O6 — a synthetic `ServerWebSocket` just complete enough to drive the surface's
+ * `open()` path (which fires `on_session_open`, where the recovered-reply drain is
+ * wired). `send` returns a non-zero write count so the surface treats the socket
+ * as live.
+ */
+function fakeOpenWs(channel_topic_id: string): Parameters<
+  NonNullable<ReturnType<typeof wireAppWs>['appWsSurface']['websocket']['open']>
+>[0] {
+  return {
+    data: { surface: 'app_ws', user_id: 'owner', project_slug: 'owner', channel_topic_id },
+    send: () => 1,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  } as any
+}
+
 describe('wireAppWs (C3d carve #6)', () => {
   test('constructs the adapter, binds the appWs seam, and returns the surface', () => {
     const { deps, appWs } = buildDeps()
@@ -175,5 +191,41 @@ describe('wireAppWs (C3d carve #6)', () => {
     const id = await wired.tridentDeliverySink.send(appMsg)
     expect(typeof id).toBe('string')
     expect(id.startsWith('app-ws:')).toBe(true)
+  })
+})
+
+describe('wireAppWs — recovered-reply drain on reconnect (O6)', () => {
+  test('on_session_open drains any recovered replies for the CONNECTED topic', async () => {
+    const { deps } = buildDeps()
+    const drained: string[] = []
+    const wired = wireAppWs(buildCtx(), { ...deps, recoveredReplyDrain: (t: string) => drained.push(t) })
+
+    // Driving the surface's open() runs on_session_open — where app-ws.ts wires the
+    // drain (the offline-buffered replies re-emit on the next connect).
+    await wired.appWsSurface.websocket.open!(fakeOpenWs('app:owner'))
+
+    expect(drained).toEqual(['app:owner'])
+  })
+
+  test('drains on reconnect EVEN with onboarding active (the drain precedes the onboarding branch)', async () => {
+    const { deps } = buildDeps()
+    const drained: string[] = []
+    const wired = wireAppWs(buildCtx(), {
+      ...deps,
+      isOnboardingActive: async () => true,
+      recoveredReplyDrain: (t: string) => drained.push(t),
+    })
+
+    await wired.appWsSurface.websocket.open!(fakeOpenWs('app:owner'))
+
+    expect(drained).toEqual(['app:owner'])
+  })
+
+  test('no drain wired (LLM-less boot) → open() is a clean no-op', async () => {
+    const { deps } = buildDeps() // no recoveredReplyDrain
+    const wired = wireAppWs(buildCtx(), deps)
+
+    // The `recoveredReplyDrain?.(…)` optional call must not throw when omitted.
+    await expect(wired.appWsSurface.websocket.open!(fakeOpenWs('app:owner'))).resolves.toBeUndefined()
   })
 })

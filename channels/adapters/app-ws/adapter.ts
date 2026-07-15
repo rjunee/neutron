@@ -234,6 +234,16 @@ export class AppWsAdapter implements ChannelAdapter {
       // remains accountable via the topic_handler's own bookkeeping (or
       // a future reconnect-replay queue). For P5.1 we surface the drop
       // through the returned message id so test harnesses can assert.
+      //
+      // Durability distinction (Codex): when a durable log WAS wired but its
+      // append FAILED above (`seq` never got stamped) AND no socket received the
+      // message, it is captured NOWHERE. Surface that as a distinct `lost` marker
+      // so a durability-sensitive caller (the recovered-reply drain) RETRIES rather
+      // than treating it as delivered. A persisted-but-socket-dropped message keeps
+      // the plain `dropped` marker — a later `resume` replays it exactly once.
+      if (this.chat_log !== undefined && envelope.seq === undefined) {
+        return `app-ws:lost:${envelope.message_id}`
+      }
       return `app-ws:dropped:${envelope.message_id}`
     }
     return `app-ws:${envelope.message_id}`

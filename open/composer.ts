@@ -290,6 +290,15 @@ import type {
   AppSocketButtonPromptRouter,
   AppSocketImportProgressRouter,
 } from '@neutronai/gateway/http/chat-bridge.ts'
+import type { WebChatSenderRegistry } from '@neutronai/gateway/http/chat-sender-registry.ts'
+import { makeSubstrateNoticeSinks } from '@neutronai/gateway/http/substrate-notice-sink.ts'
+import {
+  InMemoryRecoveredReplyStore,
+  makeRecoveredReplySink,
+  drainRecoveredReplies,
+  assertRecoveredReplyPersisted,
+  type RecoveredReplyDelivery,
+} from '@neutronai/gateway/http/recovered-reply-store.ts'
 import type { OutgoingMessage } from '@neutronai/channels/types.ts'
 import type { ChatOutbound } from '@neutronai/landing/chat-protocol.ts'
 import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
@@ -676,6 +685,40 @@ export function buildOpenGraphComposer(
       buildMcpResolver: buildOpenAiMcpResolver,
       buildToolManifest: buildOpenAiToolManifest,
     })
+    // O6 — NOTICE-FAMILY + RECOVERED-REPLY sinks for the owner's WARM conversational
+    // substrate (`cc-agent-*`). The persistent REPL fires four DI seams on the
+    // rising edge of otherwise-invisible states — a mid-turn API 5xx dead turn, a
+    // size-band crossing, a rate-limit/usage-cap banner, and a crash-recovered
+    // reply — that were UNWIRED in Open (stderr-only). Build the sinks HERE, before
+    // wireSubstrates consumes them, over a LAZY registry holder: the app-ws push
+    // registry (`appWsAgentPushRegistry`) is constructed far below, so the holder is
+    // populated once it exists (the same forward-reference pattern the recovered-
+    // reply sink's `registry: () => …` seam was designed for). Delivery rides the
+    // owner's bare `app:<owner>` topic — the ONE topic the live React/Expo client
+    // binds + hydrates (the legacy `web:` registry reaches NO client; see the
+    // reminder/brief delivery note below). Skipped LLM-less (no conversational REPL).
+    const noticeRegistryHolder: { registry?: WebChatSenderRegistry } = {}
+    // O6 — the recovered-reply sink/drain need the REAL (async) app-ws delivery
+    // result, not the fire-and-forget bridge's unconditional `true`. Bound after
+    // the adapter exists (below); resolved lazily at call time.
+    const recoveredReplyDeliverHolder: { send?: RecoveredReplyDelivery } = {}
+    const ownerNoticeTopic = appWsTopicId(OWNER_USER_ID)
+    const recoveredReplyStore = new InMemoryRecoveredReplyStore()
+    const liveAgentNoticeSinks =
+      llmPool !== null
+        ? makeSubstrateNoticeSinks({
+            registry: () => noticeRegistryHolder.registry,
+            owner_topic_id: ownerNoticeTopic,
+            project_slug,
+          })
+        : undefined
+    const liveAgentRecoveredReplySink =
+      llmPool !== null
+        ? makeRecoveredReplySink({
+            deliver: () => recoveredReplyDeliverHolder.send,
+            store: recoveredReplyStore,
+          })
+        : undefined
     const wiringCtx: OpenWiringContext = {
       llmPool,
       internal_handle,
@@ -685,6 +728,13 @@ export function buildOpenGraphComposer(
       db,
       prewarmSubstrate,
       ...conversationalProviderCtx,
+      ...(liveAgentNoticeSinks !== undefined ? { liveAgentNoticeSinks } : {}),
+      ...(liveAgentRecoveredReplySink !== undefined
+        ? {
+            liveAgentRecoveredReplySink,
+            liveAgentDeliveryTopicId: ownerNoticeTopic,
+          }
+        : {}),
       ...(substrateFactory !== undefined ? { substrateFactory } : {}),
     }
     const {
@@ -1614,6 +1664,14 @@ export function buildOpenGraphComposer(
         return true
       },
     }
+    // O6 — populate the lazy registry holder the notice + recovered-reply sinks
+    // (built above, threaded into `wireSubstrates`) resolve at fire time. This is
+    // the SAME `appWsAgentPushRegistry` fired reminders/briefs deliver through, so
+    // a dead-turn / size / rate-limit system bubble — and a crash-recovered reply —
+    // lands on the owner's live `app:<owner>` socket + durable-skips as a transient
+    // pill, exactly like the cold-start ack. Runs long after boot wired the
+    // substrate; the holder deref only happens when a notice actually fires.
+    noticeRegistryHolder.registry = appWsAgentPushRegistry
     // Resolve every fired reminder/brief to the app-ws topic the client binds:
     // the owner's BARE `app:<user>`.
     //
@@ -2704,6 +2762,28 @@ export function buildOpenGraphComposer(
     // BOUND inside (after `new AppWsAdapter`); `onboardingMsg` is bound at the SAME
     // sequence point as before. `buildAppWsSendReply` (composer-owned, above) is
     // threaded in so the receiver / seed / opening paths share one reply path.
+    // O6 — bind the ONE awaitable recovered-reply delivery both the live sink and
+    // the reconnect drain share. It sends the rendered reply through the app-ws
+    // adapter and returns its REAL result id (delivered / dropped-persisted / lost /
+    // unbound) so the caller classifies it — NOT the fire-and-forget bridge that
+    // always returns `true`. `appWs.deref` is lazy, so binding before the adapter is
+    // constructed is fine (it resolves at runtime, when a recovered reply fires).
+    recoveredReplyDeliverHolder.send = async (
+      topic_id: string,
+      event: ChatOutbound,
+    ): Promise<string | undefined> => {
+      const msg: OutgoingMessage = {
+        topic: {
+          topic_id: '',
+          channel_kind: 'app_socket',
+          channel_topic_id: topic_id,
+          project_id: null,
+          privacy_mode: 'regular',
+        },
+        text: event.type === 'agent_message' ? event.body : '',
+      }
+      return appWs.deref((adapter) => adapter.send(msg))
+    }
     const {
       appWsSurface,
       tridentDeliverySink,
@@ -2731,6 +2811,36 @@ export function buildOpenGraphComposer(
       readProjectRows,
       activeChatProjects,
       railChatKey,
+      // O6 / #106 — drain any recovered replies buffered for a topic while the
+      // owner was offline, on reconnect (deduped in the shared store). Bound to the
+      // SAME `recoveredReplyStore` the live-agent substrate's `onRecoveredReply`
+      // sink persists into + the composer-owned `buildAppWsSendReply`. Omitted
+      // LLM-less (no conversational substrate → the store is never written).
+      ...(liveAgentRecoveredReplySink !== undefined
+        ? {
+            recoveredReplyDrain: (channel_topic_id: string): void => {
+              // Fire-and-forget the drain (on_session_open must not block on it),
+              // but the drain AWAITS real per-row delivery through the SAME awaitable
+              // adapter send the live sink uses, then classifies the result: a real
+              // id or `app-ws:dropped:*` is durable (persisted → resume shows it once,
+              // so NOT retried — a retry would double-append); `app-ws:lost:*` or an
+              // unbound adapter persisted nothing → throw so the row stays pending.
+              fireAndForget(
+                'composer.recovered-reply-drain',
+                drainRecoveredReplies({
+                  topic_id: channel_topic_id,
+                  store: recoveredReplyStore,
+                  send: async (event: ChatOutbound): Promise<void> => {
+                    const deliver = recoveredReplyDeliverHolder.send
+                    const id = deliver === undefined ? undefined : await deliver(channel_topic_id, event)
+                    assertRecoveredReplyPersisted(id)
+                  },
+                  log_tag: '[open][recovered-reply]',
+                }),
+              )
+            },
+          }
+        : {}),
     })
     for (const cleanup of appWsCleanups) realmodeCleanups.push(cleanup)
 
