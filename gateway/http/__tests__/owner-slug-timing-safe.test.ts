@@ -154,7 +154,10 @@ function localHelperDeclarations(source: string, fileName: string): string[] {
   const found = new Set<string>()
   const visit = (node: ts.Node): void => {
     if (
-      (ts.isFunctionDeclaration(node) || ts.isVariableDeclaration(node) || ts.isBindingElement(node)) &&
+      (ts.isFunctionDeclaration(node) ||
+        ts.isVariableDeclaration(node) ||
+        ts.isBindingElement(node) ||
+        ts.isFunctionExpression(node)) &&
       node.name &&
       ts.isIdentifier(node.name) &&
       KIT_HELPER_NAMES.has(node.name.text)
@@ -349,7 +352,8 @@ describe('project_slug timing-safe comparison (ISSUE #34)', () => {
     const has = (src: string): boolean => localHelperDeclarations(src, 'x.ts').length > 0
     expect(has('const jsonError: typeof x = (a: number) => new Response()')).toBe(true) // type-annotated
     expect(has('const { jsonError } = require("./shadow")')).toBe(true) // destructure
-    expect(has('const jsonOk = function () { return new Response() }')).toBe(true) // function expression
+    expect(has('const jsonOk = function () { return new Response() }')).toBe(true) // anonymous function expr assigned to helper name
+    expect(has('const wrapper = function jsonError() { return new Response() }')).toBe(true) // NAMED function expression
     expect(has('async function resolveBearer() {}')).toBe(true) // function declaration
     expect(has("import { jsonError } from './surface-kit.ts'\njsonError(1,'x','y')")).toBe(false) // imported use, no local decl
   })
