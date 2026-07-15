@@ -269,9 +269,20 @@ async function executeStop(
   // `runObservers:false`: this command replies to the user synchronously (below),
   // so firing the delivery observer would DOUBLE-notify. The chokepoint records
   // the deliberate skip (`caller_notifies`) rather than silently bypassing it.
-  await buildTridentTerminator({ store: ctx.store }).terminate(target.id, 'stopped', {
+  const result = await buildTridentTerminator({ store: ctx.store }).terminate(target.id, 'stopped', {
     runObservers: false,
   })
+  // The `resolveStopTarget` read can go stale in the await gap: the tick loop may
+  // finish the run first, so the atomic transition LOSES (`won:false`). Report
+  // accurately rather than claim a stop that never happened (Codex r4, mirrors the
+  // board DELETE `won` contract).
+  if (!result.won) {
+    const priorPhase = result.run?.phase ?? 'terminal'
+    return {
+      text: `🛠 Trident run \`${target.id.slice(0, 8)}\` already finished (${priorPhase}) before it could be stopped — nothing to cancel.`,
+      data: { run_id: target.id, prior_phase: priorPhase, already_terminal: true },
+    }
+  }
   return {
     text: `🛠 Stopped Trident run \`${target.id.slice(0, 8)}\` (was ${target.phase}). The PR/branch (if any) stays for manual review.`,
     data: { run_id: target.id, prior_phase: target.phase },

@@ -26,7 +26,7 @@ import type { HostCommandResult } from './git-mode.ts'
 import { buildSimFirer } from './inner-loop-sim.ts'
 import { buildTridentOrchestrator } from './orchestrator.ts'
 import { isTerminalPhase } from './state-machine.ts'
-import { TridentRunStore } from './store.ts'
+import { TridentRunStore, type TridentRun } from './store.ts'
 import { TridentTickLoop } from './tick.ts'
 
 let tmp: string
@@ -211,6 +211,37 @@ describe('/code <task> creates a code_trident_runs row', () => {
     const stop = await parseAndExecuteCodeCommand('/code stop', ctx())
     expect(stop!.text).toContain('No in-flight')
     expect(stop!.error).toBeUndefined()
+  })
+
+  test('§F6a race: /code stop reports accurately when the run finished first (lost race)', async () => {
+    // The run is active when `resolveStopTarget` reads it, but the tick loop wins
+    // the terminal transition (commits `done`) before `terminate()` executes. The
+    // atomic transition then LOSES — the command must NOT claim it stopped the run.
+    const created = (await parseAndExecuteCodeCommand('/code --item item-1 build', ctx()))!.data as {
+      run_id: string
+    }
+    const active = store.get(created.run_id)!
+    // The tick loop committed a real terminal result during the await gap.
+    await store.save({ ...active, phase: 'done' })
+
+    // A store whose STALE `listNonTerminal` still surfaces the run (so the stop
+    // targets it), but whose atomic `terminalTransition` hits the now-terminal DB
+    // row → loses. `get`/`terminalTransition` delegate to the real (terminal) store.
+    const staleActive = { ...active, phase: 'forge-init' as const }
+    const racingStore = {
+      listNonTerminal: () => [staleActive],
+      get: (id: string) => store.get(id),
+      terminalTransition: (id: string, patch: { phase: TridentRun['phase']; failure_reason?: string | null }) =>
+        store.terminalTransition(id, patch),
+    } as unknown as typeof store
+
+    const stop = await parseAndExecuteCodeCommand('/code stop', ctx({ store: racingStore }))
+
+    // Accurate report — NOT a false "Stopped".
+    expect(stop!.text).toContain('already finished')
+    expect((stop!.data as { already_terminal?: boolean }).already_terminal).toBe(true)
+    // The real result stands — the DB row was NOT clobbered from `done` to `stopped`.
+    expect(store.get(created.run_id)!.phase).toBe('done')
   })
 })
 
