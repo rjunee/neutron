@@ -61,17 +61,29 @@ function mintOwnerBearer(): string {
 }
 
 /**
+ * TRUE when a threaded bearer value is a VALID persistent owner credential: a
+ * non-whitespace value meeting {@link OWNER_BEARER_MIN_LEN}. A whitespace-only,
+ * empty, or too-short value (e.g. `NEUTRON_OWNER_BEARER=a`) is NOT persistent —
+ * so on a wide bind it fails closed, and it is never used as the token. Mirrors
+ * the floor `resolveOwnerBearer` enforces, so the composer-direct path can't
+ * accept a weaker credential than the server entrypoint (Codex r3).
+ */
+export function isValidThreadedBearer(injected: string | undefined): boolean {
+  const trimmed = injected?.trim()
+  return trimmed !== undefined && trimmed.length >= OWNER_BEARER_MIN_LEN
+}
+
+/**
  * Select the app-ws owner-bearer token the composer presents from a threaded
- * `NEUTRON_OWNER_BEARER` env value. TRIMS and requires a non-empty value, so a
- * WHITESPACE-only or empty env is treated as UNSET and falls to a freshly minted
- * (unguessable) token rather than becoming a guessable few-spaces bearer. This
- * is the composer-side last line of defense: `server.ts` already resolves +
- * normalizes the per-install bearer before threading it, but a composer-direct
- * embed / test could pass a raw env value straight through.
+ * bearer value. Uses the value VERBATIM (trimmed) when it is a valid persistent
+ * bearer ({@link isValidThreadedBearer}); otherwise falls to a freshly minted
+ * (unguessable) token — so a whitespace-only / too-short value never becomes the
+ * authenticating credential. `server.ts` already resolves + validates the
+ * per-install bearer before threading it, but a composer-direct embed / test
+ * could pass a raw value straight through — this is the last line of defense.
  */
 export function selectAppWsToken(injected: string | undefined): string {
-  const trimmed = injected?.trim()
-  return trimmed !== undefined && trimmed.length > 0 ? trimmed : mintOwnerBearer()
+  return isValidThreadedBearer(injected) ? injected!.trim() : mintOwnerBearer()
 }
 
 /** The on-disk owner-bearer file (0600) under NEUTRON_HOME. */

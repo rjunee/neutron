@@ -119,7 +119,7 @@ import { wireUploads } from './wiring/uploads.ts'
 import { buildOpenOwnerGate } from './wiring/owner-gate.ts'
 import { wireAppWs, type OnboardingMsgEmit } from './wiring/app-ws.ts'
 import { MIN_COOKIE_SECRET_LEN } from './session-cookie-secret.ts'
-import { selectAppWsToken } from './owner-bearer.ts'
+import { selectAppWsToken, isValidThreadedBearer } from './owner-bearer.ts'
 import { late } from './wiring/late.ts'
 import type { OpenWiringContext } from './wiring/context.ts'
 import { buildChainedChatCommandFilter } from '@neutronai/gateway/boot-helpers.ts'
@@ -311,6 +311,18 @@ const log = createLogger('open-composer')
 export interface BuildOpenGraphComposerOptions {
   /** Override the process env (tests). Defaults to `process.env`. */
   env?: NodeJS.ProcessEnv
+  /**
+   * S1 — the pre-resolved, VALIDATED per-install owner bearer from the Open
+   * entrypoint (`open/server.ts`: operator `NEUTRON_OWNER_BEARER` or a persisted
+   * random bearer; already length-checked + guarded fail-closed). Threaded as an
+   * EXPLICIT value rather than via `process.env` so the entrypoint never mutates
+   * the shared environment — a minted value can't later be misread as an
+   * operator-set `NEUTRON_OWNER_BEARER` by a second in-process start under a
+   * different NEUTRON_HOME (Codex r3). When omitted, the composer reads
+   * `env['NEUTRON_OWNER_BEARER']` (composer-direct / embed) and applies the same
+   * length floor + fail-closed wide-bind check itself.
+   */
+  ownerBearer?: string
   /**
    * C1 — the frozen, validated {@link BootConfig} the entrypoint resolved. The
    * Open entrypoint threads it here so the composer shares boot()'s single env
@@ -1235,19 +1247,19 @@ export function buildOpenGraphComposer(
     // directly in a test / non-server embed) we fall back to a fresh per-boot
     // random token — unguessable, just not persistent — so those paths still work.
     //
-    // Defense-in-depth: `selectAppWsToken` TRIMS and requires a non-empty value,
-    // so a WHITESPACE-only env (e.g. a stray `NEUTRON_OWNER_BEARER='   '` reaching
-    // a composer-direct embed) is treated as UNSET and falls to a minted token —
-    // never a guessable few-spaces bearer. server.ts already normalizes this
-    // before it gets here; this is the last line of defense for the direct path.
-    const threadedOwnerBearer = env['NEUTRON_OWNER_BEARER']?.trim()
-    const hasPersistentOwnerBearer =
-      threadedOwnerBearer !== undefined && threadedOwnerBearer.length > 0
+    // The bearer is threaded as an EXPLICIT option by server.ts (never via a
+    // process.env write), falling back to `env['NEUTRON_OWNER_BEARER']` only for
+    // a composer-direct embed / test. `isValidThreadedBearer` + `selectAppWsToken`
+    // apply the SAME length floor `resolveOwnerBearer` enforces, so a
+    // whitespace-only / too-short value (e.g. `NEUTRON_OWNER_BEARER=a`) is neither
+    // treated as persistent nor used as the token — never a guessable credential.
+    const threadedOwnerBearer = options.ownerBearer ?? env['NEUTRON_OWNER_BEARER']
+    const hasPersistentOwnerBearer = isValidThreadedBearer(threadedOwnerBearer)
     // S1 (fail-closed, COMPOSITION boundary) — the "mandatory owner credential on
     // a public bind" contract is enforced HERE too, not only in server.ts, so it
     // holds for EVERY Open-composer entry point (server.ts, an embed, a future
-    // caller). A WIDE (non-loopback) bind with no PERSISTENT owner bearer threaded
-    // in would otherwise fall to an ephemeral per-boot token — refuse instead
+    // caller). A WIDE (non-loopback) bind with no VALID PERSISTENT owner bearer
+    // would otherwise fall to an ephemeral per-boot token — refuse instead
     // (`'ephemeral'`). On a loopback bind this is a no-op (a minted dev token is
     // fine). server.ts threads a persistent bearer (or refuses first) before
     // building the composer on a wide bind, so reaching here without one means a

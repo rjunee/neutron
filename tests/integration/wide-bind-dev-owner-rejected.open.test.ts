@@ -168,12 +168,14 @@ describe('S2 (b) e2e — wide bind rejects the predictable dev:owner; loopback a
     // builds fine — so a properly-configured public bind is fully functional.
     const built = await buildGraph('0.0.0.0') // beforeEach set NEUTRON_OWNER_BEARER
     try {
-      // The threaded persistent bearer authenticates as owner over the HTTP path…
+      // The threaded persistent bearer authenticates as owner over the HTTP path:
+      // exact 200 + `{ ok: true }` (not merely "not 401", which 403/404/500 pass).
       const ok = await built.fetch(
         httpSend('nbt_wide-bind-test-persistent-owner-bearer-0123456789'),
         fakeServer,
       )
-      expect(ok.status).not.toBe(401)
+      expect(ok.status).toBe(200)
+      expect((await ok.json()) as { ok: boolean }).toMatchObject({ ok: true })
     } finally {
       await built.close()
     }

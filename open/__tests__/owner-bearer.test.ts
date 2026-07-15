@@ -21,6 +21,7 @@ import { join } from 'node:path'
 import {
   OWNER_BEARER_ENV_VAR,
   OWNER_BEARER_MIN_LEN,
+  isValidThreadedBearer,
   ownerBearerPath,
   resolveOwnerBearer,
   selectAppWsToken,
@@ -176,5 +177,47 @@ describe('selectAppWsToken — composer-side boundary (Codex r1 Critical)', () =
 
   it('mints a DISTINCT token each call for the unset case (unguessable)', () => {
     expect(selectAppWsToken(undefined)).not.toBe(selectAppWsToken(undefined))
+  })
+
+  it('enforces the LENGTH FLOOR on a threaded value (0 / 1 / 15 reject; 16 accept) — Codex r3', () => {
+    // A composer-direct wide bind must NOT accept a weaker credential than the
+    // server entrypoint. isValidThreadedBearer mirrors resolveOwnerBearer's floor.
+    expect(isValidThreadedBearer(undefined)).toBe(false)
+    expect(isValidThreadedBearer('')).toBe(false)
+    expect(isValidThreadedBearer('a')).toBe(false) // 1 char
+    expect(isValidThreadedBearer('a'.repeat(OWNER_BEARER_MIN_LEN - 1))).toBe(false) // 15
+    expect(isValidThreadedBearer('a'.repeat(OWNER_BEARER_MIN_LEN))).toBe(true) // 16
+    expect(isValidThreadedBearer(`  ${'a'.repeat(OWNER_BEARER_MIN_LEN)}  `)).toBe(true) // trims
+
+    // selectAppWsToken never RETURNS a below-floor value — it mints instead.
+    for (const weak of ['', 'a', 'a'.repeat(OWNER_BEARER_MIN_LEN - 1)]) {
+      const token = selectAppWsToken(weak)
+      expect(token).toMatch(/^nbt_/)
+      expect(token).not.toBe(weak)
+    }
+    // …and uses a value AT the floor verbatim.
+    const atFloor = 'z'.repeat(OWNER_BEARER_MIN_LEN)
+    expect(selectAppWsToken(atFloor)).toBe(atFloor)
+  })
+})
+
+describe('resolveOwnerBearer — no cross-install leak via shared env (Codex r3 High)', () => {
+  it('does NOT mutate the passed env, so two homes get DISTINCT persisted bearers', () => {
+    // Models two in-process starts under DIFFERENT NEUTRON_HOME sharing one env
+    // bag. If resolveOwnerBearer wrote its minted value back into env, the second
+    // home would misread it as an operator `source: 'env'` bearer and skip its own
+    // per-install file — two installs sharing one bearer. It must not.
+    const sharedEnv: Record<string, string | undefined> = {}
+    const homeA = home
+    const homeB = freshHome()
+
+    const a = resolveOwnerBearer(homeA, sharedEnv)
+    expect(a.source).toBe('persisted')
+    // The env bag is untouched — no write-back promotes the minted value.
+    expect(sharedEnv[OWNER_BEARER_ENV_VAR]).toBeUndefined()
+
+    const b = resolveOwnerBearer(homeB, sharedEnv)
+    expect(b.source).toBe('persisted') // resolved from B's OWN file, not env
+    expect(b.value).not.toBe(a.value) // distinct per install — no leak
   })
 })

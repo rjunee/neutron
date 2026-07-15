@@ -32,7 +32,7 @@ import { resolveNeutronHome } from '@neutronai/migrations/db-path.ts'
 
 import { buildOpenGraphComposer } from './composer.ts'
 import { resolvePersistedCookieSecret } from './session-cookie-secret.ts'
-import { resolveOwnerBearer, OWNER_BEARER_ENV_VAR } from './owner-bearer.ts'
+import { resolveOwnerBearer } from './owner-bearer.ts'
 import { installProcessSafetyNet } from '@neutronai/logger/fire-and-forget.ts'
 
 /**
@@ -94,22 +94,21 @@ export async function startOpenServer(): Promise<BootHandle> {
   // process-ephemeral fallback — a public bind must carry a stable owner
   // credential (S2 already rejects the guessable `dev:owner` on a wide bind).
   // A LOOPBACK bind is a no-op: the 127.0.0.1 dogfood keeps its dev bypass.
-  // The resolved bearer is threaded to the composer via NEUTRON_OWNER_BEARER so
-  // the app-ws resolver + every /api/app/* surface accept THIS install's
-  // credential (and it is injected into the served page bootstrap).
   //
-  // `resolveOwnerBearer` has ALREADY applied the operator-vs-persisted
-  // precedence AND validated/normalized the value (trimmed; a too-short explicit
-  // value fails loud; a whitespace-only override is treated as unset → minted).
-  // `ownerBearer.value` is therefore the SOLE authoritative credential, and the
-  // guard judged `ownerBearer.source` for exactly it. Write it UNCONDITIONALLY
-  // so the composer reads the same value the guard approved — never a raw,
-  // unvalidated `env` string. (A conditional "fill empty slot only" left a
-  // whitespace-only `NEUTRON_OWNER_BEARER='   '` in place while the guard passed
-  // on the minted value, so three spaces authenticated as owner — Codex r1.)
+  // `resolveOwnerBearer` has ALREADY applied the operator-vs-persisted precedence
+  // AND validated/normalized the value (trimmed; a too-short explicit value fails
+  // loud; a whitespace-only override is treated as unset → minted). Its
+  // `ownerBearer.value` is the SOLE authoritative credential, and the guard
+  // judged `ownerBearer.source` for exactly it. It is threaded to the composer as
+  // an EXPLICIT option (`ownerBearer` below) — NEVER by writing back to the
+  // shared `process.env`. Mutating `process.env['NEUTRON_OWNER_BEARER']` would
+  // let a MINTED value leak into a second in-process `startOpenServer()` under a
+  // different NEUTRON_HOME, where `resolveOwnerBearer` would misread it as an
+  // operator-set `source: 'env'` bearer and skip the new home's per-install file
+  // (two installs sharing one bearer; an ephemeral value misclassified as
+  // persistent for a later wide bind) — Codex r3.
   const ownerBearer = resolveOwnerBearer(config.neutronHome, env)
   assertOwnerCredentialPolicy(config.host, ownerBearer.source)
-  env[OWNER_BEARER_ENV_VAR] = ownerBearer.value
 
   // SHIM (marked to die): fill OWNER_HOME / NEUTRON_DB_PATH from the frozen
   // config so below-seam readers see them, keeping the gateway data dir + the
@@ -120,7 +119,7 @@ export async function startOpenServer(): Promise<BootHandle> {
     if (env[key] === undefined || env[key] === '') env[key] = value
   }
 
-  const composer = buildOpenGraphComposer({ env, config })
+  const composer = buildOpenGraphComposer({ env, config, ownerBearer: ownerBearer.value })
   const handle = await boot({ composer, config })
 
   const slug = resolveOwnerSlugFromConfig(config)
