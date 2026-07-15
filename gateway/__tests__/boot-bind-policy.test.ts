@@ -10,8 +10,10 @@ import { describe, expect, it } from 'bun:test'
 
 import {
   DEV_BYPASS_ENV_VARS,
+  assertOwnerCredentialPolicy,
   assertWideBindPolicy,
   isLoopbackBindHost,
+  type OwnerCredentialSource,
 } from '../boot-bind-policy.ts'
 
 describe('isLoopbackBindHost', () => {
@@ -124,5 +126,51 @@ describe('assertWideBindPolicy', () => {
         expect(() => assertWideBindPolicy('0.0.0.0', { [name]: off })).not.toThrow()
       }
     }
+  })
+})
+
+describe('assertOwnerCredentialPolicy (S1)', () => {
+  const WIDE = ['0.0.0.0', '::', '192.168.1.20', '10.0.0.3', 'box.local'] as const
+  const LOOPBACK = ['127.0.0.1', 'localhost', '::1', '[::1]', '::ffff:127.0.0.1'] as const
+
+  it('is a no-op on a LOOPBACK bind for EVERY source (dev bypass preserved, incl. ephemeral)', () => {
+    for (const host of LOOPBACK) {
+      for (const source of ['env', 'persisted', 'ephemeral'] as OwnerCredentialSource[]) {
+        expect(() => assertOwnerCredentialPolicy(host, source)).not.toThrow()
+      }
+    }
+  })
+
+  it('ALLOWS a WIDE bind with a PERSISTENT owner credential (env / persisted)', () => {
+    for (const host of WIDE) {
+      expect(() => assertOwnerCredentialPolicy(host, 'env')).not.toThrow()
+      expect(() => assertOwnerCredentialPolicy(host, 'persisted')).not.toThrow()
+    }
+  })
+
+  it('REFUSES a WIDE bind whose owner credential is only EPHEMERAL (fail-closed)', () => {
+    for (const host of WIDE) {
+      expect(() => assertOwnerCredentialPolicy(host, 'ephemeral')).toThrow(/refusing to boot/)
+    }
+  })
+
+  it('the refusal names the host and points at the three remedies', () => {
+    let thrown: Error | null = null
+    try {
+      assertOwnerCredentialPolicy('0.0.0.0', 'ephemeral')
+    } catch (err) {
+      thrown = err as Error
+    }
+    expect(thrown).not.toBeNull()
+    expect(thrown!.message).toContain('0.0.0.0')
+    expect(thrown!.message).toContain('NEUTRON_OWNER_BEARER')
+    expect(thrown!.message).toContain('NEUTRON_HOST=127.0.0.1')
+  })
+
+  it('mutation guard: the loopback exemption AND the wide refusal each have a red case', () => {
+    // Loopback ephemeral must NOT throw (exemption); wide ephemeral MUST throw
+    // (refusal). Swapping either branch flips exactly one of these.
+    expect(() => assertOwnerCredentialPolicy('127.0.0.1', 'ephemeral')).not.toThrow()
+    expect(() => assertOwnerCredentialPolicy('0.0.0.0', 'ephemeral')).toThrow()
   })
 })

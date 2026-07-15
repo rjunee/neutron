@@ -26,11 +26,13 @@
 
 import { boot, loadGraphComposerFromEnv, resolveOwnerSlugFromConfig } from '@neutronai/gateway/index.ts'
 import type { BootHandle } from '@neutronai/gateway/index.ts'
+import { assertOwnerCredentialPolicy } from '@neutronai/gateway/boot-bind-policy.ts'
 import { resolveBootConfig, envShimFromBootConfig } from '@neutronai/config/index.ts'
 import { resolveNeutronHome } from '@neutronai/migrations/db-path.ts'
 
 import { buildOpenGraphComposer } from './composer.ts'
 import { resolvePersistedCookieSecret } from './session-cookie-secret.ts'
+import { resolveOwnerBearer, OWNER_BEARER_ENV_VAR } from './owner-bearer.ts'
 import { installProcessSafetyNet } from '@neutronai/logger/fire-and-forget.ts'
 
 /**
@@ -72,6 +74,23 @@ export async function startOpenServer(): Promise<BootHandle> {
   }
 
   const config = resolveBootConfig(env)
+
+  // S1 — per-install OWNER BEARER + fail-closed wide-bind guard. Resolve the
+  // stable per-install owner bearer (an operator-set NEUTRON_OWNER_BEARER wins,
+  // else a random bearer persisted 0600 under NEUTRON_HOME), then REFUSE to boot
+  // a WIDE (non-loopback) bind whose bearer could only be secured as a
+  // process-ephemeral fallback — a public bind must carry a stable owner
+  // credential (S2 already rejects the guessable `dev:owner` on a wide bind).
+  // A LOOPBACK bind is a no-op: the 127.0.0.1 dogfood keeps its dev bypass.
+  // The resolved bearer is threaded to the composer via NEUTRON_OWNER_BEARER so
+  // the app-ws resolver + every /api/app/* surface accept THIS install's
+  // credential (and it is injected into the served page bootstrap). Only fills
+  // an empty slot — an operator-set value is never overwritten.
+  const ownerBearer = resolveOwnerBearer(config.neutronHome, env)
+  assertOwnerCredentialPolicy(config.host, ownerBearer.source)
+  if (env[OWNER_BEARER_ENV_VAR] === undefined || env[OWNER_BEARER_ENV_VAR] === '') {
+    env[OWNER_BEARER_ENV_VAR] = ownerBearer.value
+  }
 
   // SHIM (marked to die): fill OWNER_HOME / NEUTRON_DB_PATH from the frozen
   // config so below-seam readers see them, keeping the gateway data dir + the
