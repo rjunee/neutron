@@ -41,16 +41,24 @@ import type { TridentTerminalHook } from './tick.ts'
  * `TridentRunStore` satisfies it structurally.
  */
 export interface TridentTerminateStore {
-  update(
+  /**
+   * ATOMIC conditional terminal write: flip the run to `patch.phase` ONLY when it
+   * is currently non-terminal, reporting `won` iff THIS call landed the
+   * transition. A loser (`won:false`) means the run was already terminal — its
+   * winning writer already ran the observer chain, so this caller must NOT.
+   * `TridentRunStore.terminalTransition` satisfies it structurally.
+   */
+  terminalTransition(
     id: string,
     patch: { phase: TridentPhase; failure_reason?: string | null },
-  ): Promise<TridentRun | null>
+  ): Promise<{ run: TridentRun | null; won: boolean }>
 }
 
 /** Why the observer chain did NOT run (or the write itself did not land). */
 export type TerminateSkipReason =
   | 'not_terminal_phase'
   | 'run_not_found'
+  | 'already_terminal'
   | 'caller_notifies'
   | 'no_observer'
   | 'observer_error'
@@ -103,8 +111,16 @@ export function buildTridentTerminator(deps: {
       }
       const patch: { phase: TridentPhase; failure_reason?: string | null } = { phase }
       if (opts?.reason !== undefined) patch.failure_reason = opts.reason
-      const run = await deps.store.update(id, patch)
+      // ATOMIC: win the transition only if the run is still non-terminal. This
+      // closes the read-then-terminate race (the DELETE path reads a non-terminal
+      // row, then in the await gap the tick loop can persist `done` + deliver) —
+      // an unconditional write here would clobber that result AND re-fire the
+      // observer chain (double-notify). A loser leaves the terminal row intact.
+      const { run, won } = await deps.store.terminalTransition(id, patch)
       if (run === null) return { run: null, observed: false, skipped_reason: 'run_not_found' }
+      // Already terminal (the tick loop or another cancel won): the WINNER ran the
+      // observers, so running them again here would double-deliver. Skip, explicitly.
+      if (!won) return { run, observed: false, skipped_reason: 'already_terminal' }
 
       const runObservers = opts?.runObservers ?? true
       if (!runObservers) return { run, observed: false, skipped_reason: 'caller_notifies' }

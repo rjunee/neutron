@@ -231,4 +231,51 @@ describe('TridentRunStore', () => {
       db.run(`UPDATE code_trident_runs SET phase = ? WHERE id = ?`, ['bogus', run.id]),
     ).rejects.toThrow()
   })
+
+  describe('terminalTransition — atomic conditional terminal write (§F6a race guard)', () => {
+    test('wins on a non-terminal run: flips the phase + reason and reports won', async () => {
+      const store = new TridentRunStore(db)
+      const run = await store.create({ slug: 's', project_slug: 't1', repo_path: '/r', task: 't' })
+      const res = await store.terminalTransition(run.id, { phase: 'stopped', failure_reason: 'user cancel' })
+      expect(res.won).toBe(true)
+      expect(res.run?.phase).toBe('stopped')
+      expect(res.run?.failure_reason).toBe('user cancel')
+      expect(store.get(run.id)?.phase).toBe('stopped')
+    })
+
+    test('LOSES against an already-terminal run: no clobber, no phantom win', async () => {
+      const store = new TridentRunStore(db)
+      const run = await store.create({ slug: 's', project_slug: 't1', repo_path: '/r', task: 't' })
+      // Simulate the tick loop persisting a real `done` result + delivery.
+      await store.save({ ...run, phase: 'done' })
+      // A racing board delete tries to cancel the SAME run.
+      const res = await store.terminalTransition(run.id, { phase: 'stopped', failure_reason: 'user cancel' })
+      // The SQL `AND phase NOT IN (terminal)` predicate matched no row.
+      expect(res.won).toBe(false)
+      // The real result stands — NOT overwritten to `stopped`, reason untouched.
+      expect(res.run?.phase).toBe('done')
+      expect(res.run?.failure_reason).toBeNull()
+      expect(store.get(run.id)?.phase).toBe('done')
+    })
+
+    test('two concurrent transitions on one run: exactly one wins', async () => {
+      const store = new TridentRunStore(db)
+      const run = await store.create({ slug: 's', project_slug: 't1', repo_path: '/r', task: 't' })
+      const [a, b] = await Promise.all([
+        store.terminalTransition(run.id, { phase: 'stopped' }),
+        store.terminalTransition(run.id, { phase: 'failed' }),
+      ])
+      expect([a.won, b.won].filter(Boolean).length).toBe(1)
+      // The row is terminal at whichever phase the winner wrote (never a mix).
+      const finalPhase = store.get(run.id)?.phase
+      expect(finalPhase === 'stopped' || finalPhase === 'failed').toBe(true)
+    })
+
+    test('missing run → run null, not won', async () => {
+      const store = new TridentRunStore(db)
+      const res = await store.terminalTransition('does-not-exist', { phase: 'stopped' })
+      expect(res.run).toBeNull()
+      expect(res.won).toBe(false)
+    })
+  })
 })

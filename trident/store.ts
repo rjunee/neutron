@@ -376,6 +376,48 @@ export class TridentRunStore {
   }
 
   /**
+   * ATOMIC terminal transition — the race-safe write the terminal chokepoint
+   * (`buildTridentTerminator`, §F6a) needs. Flip a run to `phase` (+ optional
+   * `failure_reason`) ONLY when it is currently non-terminal, and report whether
+   * THIS caller won the transition.
+   *
+   * Why conditional: an out-of-band caller (board X-cancel / delete) reads a
+   * non-terminal row, then — after an `await` gap — asks to terminate it. In that
+   * gap the tick loop can persist a real terminal result (`done` + delivery). An
+   * unconditional `update` would clobber that `done` with `stopped` AND re-fire
+   * the observer chain, corrupting the final result and double-notifying. The
+   * `AND phase NOT IN (terminal)` predicate makes the winner unambiguous: exactly
+   * one transition lands (`changes === 1`); a loser (`changes === 0`) leaves the
+   * already-terminal row untouched and learns it must NOT run observers.
+   *
+   * Wrapped in a `transaction` so the conditional UPDATE + its `changes` read are
+   * one mutex-held, busy-retry-covered unit on this connection.
+   */
+  async terminalTransition(
+    id: string,
+    patch: { phase: TridentPhase; failure_reason?: string | null },
+  ): Promise<{ run: TridentRun | null; won: boolean }> {
+    const won = await this.db.transaction((tx) => {
+      const sets: string[] = ['phase = ?']
+      const params: (string | number | null)[] = [patch.phase]
+      if (patch.failure_reason !== undefined) {
+        sets.push('failure_reason = ?')
+        params.push(patch.failure_reason)
+      }
+      sets.push('last_advanced_at = ?')
+      params.push(this.now())
+      params.push(id)
+      const res = tx.runSync(
+        `UPDATE code_trident_runs SET ${sets.join(', ')}
+          WHERE id = ? AND phase NOT IN ${TERMINAL_PHASE_SQL}`,
+        params,
+      )
+      return res.changes > 0
+    })
+    return { run: this.get(id), won }
+  }
+
+  /**
    * Persist a full run snapshot (the shape `advanceTridentRun` returns).
    * Re-stamps `last_advanced_at`. Mutable columns only — `id`, `slug`,
    * `project_slug`, `repo_path`, `task`, `started_at`, the caps, and

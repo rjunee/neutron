@@ -53,18 +53,33 @@ function fakeRun(over: Partial<TridentRun> = {}): TridentRun {
   }
 }
 
-/** A store spy: records each write, returns the row with the patch applied. */
+const TERMINAL = new Set<TridentPhase>(['done', 'failed', 'stopped'])
+
+/**
+ * A store spy modelling the ATOMIC conditional transition: it holds the current
+ * row and wins (`won:true`, applying the patch) ONLY when that row is non-terminal
+ * — exactly the `WHERE phase NOT IN (terminal)` guard the real store runs. A write
+ * against an already-terminal seed loses (`won:false`) and leaves the row intact,
+ * so the chokepoint's no-clobber / no-re-observe contract is verifiable here.
+ */
 function fakeStore(seed: TridentRun | null = fakeRun()): {
   store: TridentTerminateStore
   writes: Array<{ id: string; phase: TridentPhase; failure_reason?: string | null }>
 } {
   const writes: Array<{ id: string; phase: TridentPhase; failure_reason?: string | null }> = []
+  let current = seed
   return {
     store: {
-      update: async (id, patch) => {
+      terminalTransition: async (id, patch) => {
         writes.push({ id, ...patch })
-        if (seed === null) return null
-        return { ...seed, phase: patch.phase, ...(patch.failure_reason !== undefined ? { failure_reason: patch.failure_reason } : {}) }
+        if (current === null) return { run: null, won: false }
+        if (TERMINAL.has(current.phase)) return { run: current, won: false }
+        current = {
+          ...current,
+          phase: patch.phase,
+          ...(patch.failure_reason !== undefined ? { failure_reason: patch.failure_reason } : {}),
+        }
+        return { run: current, won: true }
       },
     },
     writes,
@@ -147,6 +162,23 @@ describe('buildTridentTerminator', () => {
     expect(res.observed).toBe(false)
     expect(res.skipped_reason).toBe('run_not_found')
     expect(fired).toEqual([])
+  })
+
+  test('a concurrently-terminalized run is NOT overwritten and NOT re-observed (race lost)', async () => {
+    // The tick loop already persisted a real `done` result and delivered success.
+    // A board delete then races to cancel the SAME run: the atomic transition must
+    // LOSE — no clobber of `done`→`stopped`, and crucially no second observer fire
+    // (which would double-notify with a bogus "stopped" outcome).
+    const { store } = fakeStore(fakeRun({ phase: 'done' }))
+    const { hook, fired } = spyObserver()
+    const term = buildTridentTerminator({ store, observer: hook })
+
+    const res = await term.terminate('run-1', 'stopped')
+
+    expect(res.observed).toBe(false)
+    expect(res.skipped_reason).toBe('already_terminal')
+    expect(res.run?.phase).toBe('done') // <- reds if the loser clobbers the result
+    expect(fired).toEqual([]) // <- reds on the double-notify this fix prevents
   })
 
   test('refuses a non-terminal phase (defensive) — no write, no observer', async () => {
