@@ -38,8 +38,8 @@ import {
   resolveGlobalTabs,
   resolveProjectTabs,
   type CoreTabContribution,
-  type TabDescriptor,
 } from '@neutronai/tabs/registry.ts'
+import { jsonResponse, resolveBearer } from './surface-kit.ts'
 
 export interface AppTabsSurfaceOptions {
   auth: AppWsAuthResolver
@@ -178,38 +178,4 @@ function coreTabsFromSlugs(
     out.push({ core_slug: slug, label, target })
   }
   return out
-}
-
-interface ResolvedAuth {
-  user_id: string
-  project_slug: string
-}
-
-interface AuthFailure {
-  code: string
-  message: string
-}
-
-async function resolveBearer(
-  req: Request,
-  auth: AppWsAuthResolver,
-): Promise<ResolvedAuth | AuthFailure> {
-  const header = req.headers.get('authorization') ?? ''
-  if (!header.toLowerCase().startsWith('bearer ')) {
-    return { code: 'missing_bearer', message: 'expected Authorization: Bearer <token>' }
-  }
-  const token = header.slice('bearer '.length).trim()
-  const result = await auth.resolve(token)
-  if ('code' in result) return { code: result.code, message: result.message }
-  return { user_id: result.user_id, project_slug: result.project_slug }
-}
-
-function jsonResponse(
-  status: number,
-  body: { ok: boolean; tabs?: TabDescriptor[]; [k: string]: unknown },
-): Response {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: { 'content-type': 'application/json' },
-  })
 }

@@ -28,6 +28,7 @@ import {
   type DevicePushTokenStore,
   isDevicePushPlatform,
 } from '../push/store.ts'
+import { jsonResponse, readJsonBody, resolveBearer, type ResolvedAuth } from './surface-kit.ts'
 
 const REGISTER_PATH = '/api/app/devices/register'
 const UNREGISTER_PATH = '/api/app/devices/unregister'
@@ -81,16 +82,6 @@ export function createAppDevicesSurface(
       return await handleUnregister(req, store, resolved)
     },
   }
-}
-
-interface ResolvedAuth {
-  user_id: string
-  project_slug: string
-}
-
-interface AuthFailure {
-  code: string
-  message: string
 }
 
 async function handleRegister(
@@ -173,28 +164,6 @@ async function handleUnregister(
   return jsonResponse(200, { ok: true })
 }
 
-async function resolveBearer(
-  req: Request,
-  auth: AppWsAuthResolver,
-): Promise<ResolvedAuth | AuthFailure> {
-  const header = req.headers.get('authorization') ?? ''
-  if (!header.toLowerCase().startsWith('bearer ')) {
-    return { code: 'missing_bearer', message: 'expected Authorization: Bearer <token>' }
-  }
-  const token = header.slice('bearer '.length).trim()
-  const resolved = await auth.resolve(token)
-  if ('code' in resolved) return { code: resolved.code, message: resolved.message }
-  return { user_id: resolved.user_id, project_slug: resolved.project_slug }
-}
-
-async function readJsonBody(req: Request): Promise<unknown> {
-  try {
-    return await req.json()
-  } catch {
-    return null
-  }
-}
-
 function readDeviceToken(body: unknown): string | null {
   if (typeof body !== 'object' || body === null) return null
   const v = (body as Record<string, unknown>)['device_token']
@@ -209,11 +178,4 @@ function readPlatform(body: unknown): DevicePushPlatform | null {
   const v = (body as Record<string, unknown>)['platform']
   if (!isDevicePushPlatform(v)) return null
   return v
-}
-
-function jsonResponse(status: number, body: Record<string, unknown>): Response {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: { 'content-type': 'application/json' },
-  })
 }
