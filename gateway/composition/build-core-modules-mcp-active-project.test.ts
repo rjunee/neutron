@@ -179,3 +179,63 @@ test('X6 production wiring: the frame bound at the boundary does not leak across
   expect(await dispatchToken(server, PROJECT)).toBe('project-drive')
   expect(await dispatchToken(server, null)).toBe('global-drive')
 })
+
+test('X6 production wiring: two CONCURRENT overlapping dispatches for different projects do NOT cross-leak credentials', async () => {
+  const store = makeCredentialStore()
+  await store.set(OWNER, { service: 'google_workspace', plaintext: 'global-drive', scope: 'global' })
+  await store.set(OWNER, {
+    service: 'google_workspace',
+    plaintext: 'project-drive',
+    scope: 'project',
+    project_id: PROJECT,
+  })
+  const resolver = new CoreCredentialResolver({ owner_slug: OWNER, store, oauthTokens: null })
+
+  // A two-party barrier: BOTH handlers must reach it (across an `await`) BEFORE
+  // EITHER reads its credential. This forces the two dispatches to be
+  // simultaneously in-flight with OVERLAPPING bound frames at the moment the
+  // credential accessor fires — the exact interleaving a process-global binder
+  // would corrupt (the 2nd dispatch's bind overwrites the 1st's shared slot, so
+  // both reads would resolve the LAST-bound project). The real
+  // `runWithActiveProject` (AsyncLocalStorage) restores each async context's own
+  // frame across the await, so each dispatch reads only its own project.
+  let arrived = 0
+  let releaseAll!: () => void
+  const allArrived = new Promise<void>((r) => {
+    releaseAll = r
+  })
+  const barrier = async (): Promise<void> => {
+    arrived += 1
+    if (arrived === 2) releaseAll()
+    await allArrived
+  }
+
+  const reg = new ToolRegistry()
+  reg.register({
+    name: 'read_cred',
+    description: 'resolves a credential after a concurrency barrier',
+    input_schema: schema,
+    output_schema: schema,
+    capability_required: 'read:project_data',
+    approval_policy: 'auto',
+    handler: async () => {
+      // The boundary bound this handler's frame synchronously before it ran.
+      // Park here until BOTH dispatches are in-flight, THEN read the credential —
+      // so the read happens while both frames overlap.
+      await barrier()
+      return { token: await resolver.accessorFor('google_workspace')() }
+    },
+  })
+
+  const db = makeProjectDb()
+  const server = productionMcpServer(db, reg)
+
+  // Launch BOTH without awaiting → they interleave across the barrier `await`.
+  const [projectToken, globalToken] = await Promise.all([
+    dispatchToken(server, PROJECT),
+    dispatchToken(server, null),
+  ])
+  // Each dispatch resolved ONLY its own project's credential despite overlapping.
+  expect(projectToken).toBe('project-drive')
+  expect(globalToken).toBe('global-drive')
+})
