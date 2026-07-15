@@ -8,12 +8,13 @@
  *
  * Secret labels (locked Sprint 19):
  *   kind='bot_token',         label='telegram'  → API token. Presence
- *                                                  gates the surface; the
- *                                                  token itself isn't used
- *                                                  by the webhook handler
- *                                                  (only by the outbound
- *                                                  sender, which lives
- *                                                  elsewhere).
+ *                                                  gates the surface. X5: the
+ *                                                  token now builds the
+ *                                                  `TelegramClient` behind the
+ *                                                  instantiated `TelegramAdapter`
+ *                                                  (its outbound `send`); the
+ *                                                  inbound webhook handler still
+ *                                                  does not read it.
  *   kind='webhook_secret',    label='telegram'  → secret_token used in the
  *                                                  X-Telegram-Bot-Api-
  *                                                  Secret-Token header.
@@ -33,7 +34,8 @@
  */
 
 import type { SecretsStore } from '@neutronai/auth/secrets-store.ts'
-import { buildWebhookHandler } from '@neutronai/channels/adapters/telegram/webhook-server.ts'
+import { TelegramAdapter } from '@neutronai/channels/adapters/telegram/index.ts'
+import { TelegramClient } from '@neutronai/channels/adapters/telegram/client.ts'
 import type { IncomingEventReceiver } from '@neutronai/channels/types.ts'
 import type {
   TelegramStartCommandHandler,
@@ -84,6 +86,17 @@ export interface BuildTelegramWebhookSurfaceInput {
 
 export interface TelegramWebhookSurface {
   handler: (req: Request) => Promise<Response>
+  /**
+   * X5 — the instantiated `TelegramAdapter` behind the handler. The inbound
+   * `handler` is `adapter.webhookHandler()`, so the class IS the real Telegram
+   * path (it was never instantiated before — `buildWebhookHandler` was mounted
+   * directly). The adapter also carries the OUTBOUND `send`, so a Telegram
+   * instance's composer registers THIS instance on its `ChannelRouter`
+   * (`router.registerAdapter(surface.adapter)`) to activate outbound delivery
+   * through the one router seam. Returned additively; existing callers that read
+   * only `.handler` are unaffected.
+   */
+  adapter: TelegramAdapter
 }
 
 export async function buildTelegramWebhookSurface(
@@ -129,13 +142,24 @@ export async function buildTelegramWebhookSurface(
     )
     return null
   }
+  // X5 — instantiate the real `TelegramAdapter` (previously the class was never
+  // constructed; `buildWebhookHandler` was mounted directly). The inbound handler
+  // is derived from the SAME adapter via `.webhookHandler()`, which forwards the
+  // identical options to `buildWebhookHandler` — so inbound behaviour is
+  // byte-identical. The client is side-effect-free at construction (no network
+  // until a `send`); it is what makes the adapter's OUTBOUND `send` real, which a
+  // Telegram instance activates by registering `surface.adapter` on its router.
+  const client = new TelegramClient(botToken)
+  const adapter = new TelegramAdapter({
+    client,
+    bot_user_id: botUserId,
+    webhook_secret_token: webhookSecret,
+    receiver: input.receiver,
+    ...(input.on_start_command !== undefined ? { on_start_command: input.on_start_command } : {}),
+    ...(input.on_bind_command !== undefined ? { on_bind_command: input.on_bind_command } : {}),
+  })
   return {
-    handler: buildWebhookHandler({
-      bot_user_id: botUserId,
-      secret_token: webhookSecret,
-      receiver: input.receiver,
-      ...(input.on_start_command !== undefined ? { on_start_command: input.on_start_command } : {}),
-      ...(input.on_bind_command !== undefined ? { on_bind_command: input.on_bind_command } : {}),
-    }),
+    handler: adapter.webhookHandler(),
+    adapter,
   }
 }

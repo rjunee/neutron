@@ -1,14 +1,32 @@
 /**
  * @neutronai/channels — channel-agnostic type abstraction.
  *
- * The single-registration ABC
- * shape is the architectural improvement over OpenClaw and Hermes — adding a
- * platform requires implementing `ChannelAdapter` (one file) plus a single
- * `registerChannelAdapter(adapter)` call at boot. The 9 surfaces (factory,
- * auth-map, system-prompt-hint, toolset, send-message-tool, …) all derive
- * by reflection from the manifest the adapter exports.
+ * ONE delivery seam, ONE registration. A platform is added by (1) implementing
+ * `ChannelAdapter` (one file — `send` + the inbound decode that feeds
+ * `IncomingEventReceiver`) and (2) a single `router.registerAdapter(adapter)`
+ * call in the composition that owns that channel. The `ChannelRouter` then
+ * dispatches every `OutgoingMessage` to the adapter that owns
+ * `topic.channel_kind`, and `router.assertAdaptersFor([...])` fails the boot
+ * loud if a kind a run can carry has no adapter — so a forgotten registration
+ * is a boot error, not a silent send-time drop.
+ *
+ * Live registrations today: the Open composition registers `AppWsAdapter`
+ * (`app_socket`); a Telegram instance registers `TelegramAdapter` (`telegram`).
+ * `webhook` is the generic inbound-webhook extension point. There is NO
+ * reflection / manifest-derived surface machinery — the manifest is pure
+ * introspection metadata (display name + capability flags), read by
+ * observability, not a code-generation seam.
  */
 
+/**
+ * `'cli'` is a SENTINEL binding-marker kind, NOT a deliverable channel: it tags
+ * the durable `topics` binding row a project materialization writes
+ * (`gateway/wiring/project-create.ts` — `wow-shell-<id>`) so the
+ * `(channel_kind, channel_topic_id)` unique key keeps re-creates idempotent. No
+ * run's terminal delivery ever targets a `cli` topic, so it intentionally has
+ * no adapter and is never passed to `assertAdaptersFor`. (N6 folds this
+ * persisted vocabulary into one unified enum next.)
+ */
 export type ChannelKind = 'telegram' | 'app_socket' | 'webhook' | 'cli'
 
 /**
@@ -151,8 +169,10 @@ export interface ChannelAdapterManifest {
 
 /**
  * Concrete channel adapter — one per `ChannelKind` per gateway process.
- * Implementations: TelegramAdapter (P1 S4), AppSocketAdapter (P5 stub),
- * WebhookAdapter (P1 S4 — generic incoming-webhook), CliAdapter (dev).
+ * Live implementations: `AppWsAdapter` (`app_socket`, registered by the Open
+ * composition) and `TelegramAdapter` (`telegram`, registered by a Telegram
+ * instance). `webhook` is the reserved generic inbound-webhook extension slot;
+ * `cli` is a sentinel binding-marker kind with no adapter (see `ChannelKind`).
  */
 export interface ChannelAdapter {
   manifest: ChannelAdapterManifest

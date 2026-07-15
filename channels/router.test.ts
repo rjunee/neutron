@@ -159,4 +159,29 @@ describe('ChannelRouter', () => {
     router.registerAdapter(new RecordingAdapter())
     expect(() => router.registerAdapter(new RecordingAdapter())).toThrow(/already registered/)
   })
+
+  // X5 — boot-time conformance guard: every kind a run can carry must have an
+  // adapter, so a forgotten registration fails LOUD at boot, not at send.
+  test('assertAdaptersFor passes when every requested kind has an adapter', () => {
+    const router = new ChannelRouter(db, 'project-A', async () => {})
+    router.registerAdapter(new RecordingAdapter()) // telegram
+    expect(() => router.assertAdaptersFor(['telegram'])).not.toThrow()
+    // Empty request is trivially satisfied.
+    expect(() => router.assertAdaptersFor([])).not.toThrow()
+  })
+
+  test('assertAdaptersFor throws naming the missing kind(s) and what is registered', () => {
+    const router = new ChannelRouter(db, 'project-A', async () => {})
+    router.registerAdapter(new RecordingAdapter()) // telegram
+    expect(() => router.assertAdaptersFor(['telegram', 'app_socket'])).toThrow(
+      /missing an adapter for kind\(s\): app_socket/,
+    )
+    // The message surfaces what IS registered so the boot failure is actionable.
+    expect(() => router.assertAdaptersFor(['app_socket'])).toThrow(/registered: telegram/)
+  })
+
+  test('assertAdaptersFor on an empty router reports registered: none', () => {
+    const router = new ChannelRouter(db, 'project-A', async () => {})
+    expect(() => router.assertAdaptersFor(['app_socket'])).toThrow(/registered: none/)
+  })
 })

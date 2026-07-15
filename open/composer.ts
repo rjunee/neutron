@@ -2857,7 +2857,7 @@ export function buildOpenGraphComposer(
     }
     const {
       appWsSurface,
-      tridentDeliverySink,
+      channelRouter,
       cleanups: appWsCleanups,
     } = wireAppWs(wiringCtx, {
       appWs,
@@ -2926,7 +2926,7 @@ export function buildOpenGraphComposer(
       buildTridentTerminator({
         store: boardRunStore,
         observer: composeTerminalHook(
-          buildTridentDelivery({ sink: tridentDeliverySink }),
+          buildTridentDelivery({ sink: channelRouter }),
           [buildBoardReconcileObserver(workBoardStore), skillForgeOnRunTerminal].filter(
             (o): o is (run: TridentRun) => Promise<void> => o !== null,
           ),
@@ -3150,6 +3150,13 @@ export function buildOpenGraphComposer(
       // are no-ops (the Managed composer uses the same shape for its base
       // composition).
       topic_handler: async () => undefined,
+      // X5 — the pre-built `ChannelRouter` with the durable app-ws adapter
+      // registered (`wireAppWs`). `build-core-modules` REUSES this instance for
+      // its `channels` graph module, so trident terminal delivery (its
+      // `on_terminal` hook) posts through `router.send` → the app-ws adapter.
+      // This is what activates the real delivery seam on Open (the bare router
+      // the module would otherwise construct has no adapter and throws on send).
+      channel_router: channelRouter,
       approval_notifier: { notify: async () => undefined },
       // F4 — real supervision-watchdog notifier (app-ws + O4 system_events),
       // replacing the no-op. Fully guarded; never throws into the tick.
@@ -3289,9 +3296,12 @@ export function buildOpenGraphComposer(
               resolve_codex_home: (run) =>
                 codexCredentialService.resolveActiveCodexHome(run.project_slug),
               codex_home: codexHome,
-              // #339 — post terminal completion messages through the durable
-              // app-ws adapter (the bare router has no app_socket adapter on Open).
-              delivery_sink: tridentDeliverySink,
+              // X5 — no `delivery_sink` override: the trident module falls back to
+              // the graph's `channels` router, which IS `channelRouter` (passed as
+              // `composition.channel_router` above) with the durable app-ws adapter
+              // registered. Terminal completions post through `router.send` → the
+              // app-ws adapter (durable persist + live fan-out), retiring the
+              // bespoke #339 sink now that the one real seam is live.
               // #342 — auto-resolve a parallel-build rebase conflict via a bounded
               // Forge instead of hard-failing the run.
               ...(tridentConflictResolver !== undefined

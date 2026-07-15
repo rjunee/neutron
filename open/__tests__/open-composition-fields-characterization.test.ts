@@ -62,6 +62,10 @@ const EXPECTED_COMPOSITION_KEYS = [
   // `composition.auth_gate` seam (both modes flow through ONE seam) instead of
   // wiring `openFetch` as `landing_server.fetch`.
   'auth_gate',
+  // X5 — the pre-built ChannelRouter (durable app-ws adapter registered) passed
+  // as `composition.channel_router`; build-core-modules reuses it as the ONE
+  // delivery seam trident terminal delivery posts through.
+  'channel_router',
   'chat_history_surface',
   'chat_topics_surface',
   'chunked_upload_handler',

@@ -26,6 +26,7 @@ import type {
   IncomingEvent,
   IncomingEventReceiver,
 } from '@neutronai/channels/types.ts'
+import { ChannelRouter } from '@neutronai/channels/router.ts'
 import { buildTelegramWebhookSurface } from '../build-telegram-webhook.ts'
 
 let workdir: string
@@ -162,6 +163,74 @@ describe('buildTelegramWebhookSurface', () => {
     const badRes = await surface.handler(badReq)
     expect(badRes.status).toBe(403)
     expect(recv.events.length).toBe(1)
+  })
+
+  test('X5: exposes the instantiated TelegramAdapter (real outbound path, registerable on a router)', async () => {
+    await seedBotToken()
+    await seedWebhookSecret()
+    await seedBotUserId('123456789')
+
+    const surface = await buildTelegramWebhookSurface({
+      internal_handle: OWNER,
+      secrets,
+      receiver: recordingReceiver(),
+    })
+    expect(surface).not.toBeNull()
+    if (surface === null) return
+
+    // The class is now INSTANTIATED (previously buildWebhookHandler was mounted
+    // directly and the class never constructed). It carries the outbound `send`
+    // + the `telegram` manifest, so a Telegram instance registers it on its
+    // ChannelRouter for delivery — the one seam.
+    expect(surface.adapter.manifest.kind).toBe('telegram')
+    expect(typeof surface.adapter.send).toBe('function')
+    expect(typeof surface.handler).toBe('function')
+    // Registering it on a real ChannelRouter works (the "add a channel = one
+    // registration" recipe) and makes router.send('telegram') dispatch here.
+    const router = new ChannelRouter(db, OWNER, async () => undefined)
+    expect(() => router.registerAdapter(surface.adapter)).not.toThrow()
+    expect(router.getAdapter('telegram')).toBe(surface.adapter)
+  })
+
+  test('X5: on_bind_command is threaded through the adapter webhook handler', async () => {
+    await seedBotToken()
+    await seedWebhookSecret('secret-tok')
+    await seedBotUserId('123456789')
+
+    const binds: Array<{ payload: string; from_user_id: string; chat_id: string }> = []
+    const surface = await buildTelegramWebhookSurface({
+      internal_handle: OWNER,
+      secrets,
+      receiver: recordingReceiver(),
+      on_bind_command: async (cmd) => {
+        binds.push({ payload: cmd.payload, from_user_id: cmd.from_user_id, chat_id: cmd.chat_id })
+      },
+    })
+    expect(surface).not.toBeNull()
+    if (surface === null) return
+
+    const req = new Request('http://x/webhook/telegram', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-telegram-bot-api-secret-token': 'secret-tok',
+      },
+      body: JSON.stringify({
+        update_id: 7,
+        message: {
+          message_id: 200,
+          from: { id: 42, first_name: 'Tester', username: 'tester' },
+          chat: { id: 99, type: 'private' },
+          date: 1700000000,
+          text: '/start bind_abc123',
+        },
+      }),
+    })
+    const res = await surface.handler(req)
+    expect(res.status).toBe(200)
+    // The bind deeplink dispatched to on_bind_command (the pre-X5 direct
+    // buildWebhookHandler mount accepted this; the class path must not drop it).
+    expect(binds).toEqual([{ payload: 'abc123', from_user_id: '42', chat_id: '99' }])
   })
 
   test('missing bot_token → null + info log', async () => {

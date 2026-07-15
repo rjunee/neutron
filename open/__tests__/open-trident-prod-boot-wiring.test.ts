@@ -137,6 +137,45 @@ describe('Open foundational-Trident prod-boot wiring', () => {
     expect(composition.trident).toBeDefined()
     expect(typeof composition.trident!.fire_inner_workflow).toBe('function')
 
+    // X5 — the real composer wires `composition.channel_router` (the ONE
+    // delivery seam) with the durable app-ws adapter registered for the
+    // `app_socket` kind every Open run carries. Trident terminal delivery falls
+    // back to THIS router (no `delivery_sink` override), so a completion posts
+    // through `router.send` → the app-ws adapter. Assert the seam is live at boot
+    // (anti "built-but-not-wired") and that its boot-conformance guard is
+    // satisfied.
+    expect(composition.channel_router).toBeDefined()
+    expect(composition.channel_router!.getAdapter('app_socket')).toBeDefined()
+    expect(() => composition.channel_router!.assertAdaptersFor(['app_socket'])).not.toThrow()
+    // The delivery seam actually flows: a terminal run stamped `app_socket` with
+    // a chat_id delivers through router.send → the app-ws adapter (no live socket
+    // → `app-ws:dropped:` id, but it DISPATCHED — the pre-X5 bare router threw).
+    const { buildTridentDelivery } = await import('@neutronai/trident/delivery.ts')
+    const delivery = buildTridentDelivery({ sink: composition.channel_router! })
+    let delivered = false
+    const origSend = composition.channel_router!.getAdapter('app_socket')!.send.bind(
+      composition.channel_router!.getAdapter('app_socket')!,
+    )
+    composition.channel_router!.getAdapter('app_socket')!.send = async (m) => {
+      delivered = true
+      return origSend(m)
+    }
+    await delivery.onTerminal({
+      // Minimal terminal run shape the delivery path reads (phase/task/chat_id/
+      // channel_kind); other fields are unread by `buildTridentDelivery`.
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      phase: 'done',
+      task: 'X5 seam smoke',
+      chat_id: 'app:owner',
+      thread_id: null,
+      channel_kind: 'app_socket',
+      merge_mode: 'local',
+      pr: null,
+      failure_reason: null,
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } as any)
+    expect(delivered).toBe(true)
+
     // Phase 2b — the agent-native board-bound build dispatch is wired on the
     // SAME credential gate, backed by a TridentRunStore + the shared board.
     // Reachability (anti "built-but-not-wired"): boot → create a ready Plan item

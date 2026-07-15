@@ -385,11 +385,13 @@ export function buildCoreModules(
       // hook. Failure-safe: the tick loop wraps `onTerminal` in its own
       // try/catch so a posting outage never un-terminates a finished build.
       const router = ctx.graph.get<ChannelRouter>('channels')
-      // #339 — prefer the composer-supplied delivery sink (Open's durable app-ws
-      // adapter) over the bare router: the router has NO app_socket adapter
-      // registered on Open, so a terminal completion message posted through it
-      // silently threw (walstore completed but the chat never announced). Falls
-      // back to the router for Telegram instances that register adapters on it.
+      // Terminal completions post through the graph's `ChannelRouter` — the ONE
+      // delivery seam. X5 registered a real adapter on it in every composition
+      // (Open: `AppWsAdapter` for `app_socket`, via `composition.channel_router`;
+      // Telegram instances: `TelegramAdapter`), so `router.send` dispatches to the
+      // owning adapter (durable persist + live fan-out) instead of throwing. The
+      // `delivery_sink` override remains an OPTIONAL escape hatch (custom sink /
+      // tests); default + Open is the router.
       const delivery = buildTridentDelivery({ sink: tridentWiring?.delivery_sink ?? router })
       // Skill-forge trigger (parity gap #5) — when the composer wired an
       // `on_run_terminal` observer, run it on every terminal run, ISOLATED
