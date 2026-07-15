@@ -46,14 +46,23 @@ export const OWNER_BEARER_MIN_LEN = 16
 const MINTED_BEARER_PREFIX = 'nbt_'
 
 /**
- * Minimum Shannon entropy (bits/char) an owner bearer must carry to be accepted.
- * The length floor alone accepts trivially guessable values (`'a'×16`, `'ab'×8`),
- * which on a WIDE bind would expose the owner surfaces behind a readily guessed
- * bearer (Codex). A minted bearer (random base64url) sits ~4.5+ bits/char and any
- * real high-entropy operator value clears 3.0 comfortably; repeated/low-diversity
- * strings fall well below it (`'a'×16` → 0.0, `'ab'×8` → 1.0).
+ * BEST-EFFORT mechanical-degeneracy filter for an OPERATOR-SUPPLIED owner bearer.
+ *
+ * The GUARANTEED-strong path is the auto-MINTED bearer (`nbt_` + 24 random bytes,
+ * cryptographic) — operators should leave `NEUTRON_OWNER_BEARER` unset and let it
+ * mint. When an operator DOES set it, we cannot prove its true entropy (guessability
+ * detection is an unwinnable heuristic arms race — every filter has bypasses, e.g.
+ * dictionary words with case variation). So this is a floor that rejects the OBVIOUS
+ * mechanical degeneracies — repeated (`'a'×16` → 0.0 bits/char), short cycles
+ * (`'ab'×8`), too-few distinct characters, and monotonic sequences (`'abcdefgh…'`,
+ * `'0123456789…'`) — NOT a proof of strength. The error message + docs direct the
+ * operator to a RANDOMLY-GENERATED value; the minted default is the real guarantee.
  */
 export const OWNER_BEARER_MIN_ENTROPY_BITS_PER_CHAR = 3.0
+/** Absolute floor on DISTINCT characters (a diverse random value has many more). */
+export const OWNER_BEARER_MIN_DISTINCT_CHARS = 8
+/** Reject when this fraction of adjacent-char steps are ±1 (a monotonic sequence). */
+const OWNER_BEARER_MAX_SEQUENTIAL_FRACTION = 0.5
 
 /** Shannon entropy of a string's character distribution, in bits per character. */
 function shannonBitsPerChar(s: string): number {
@@ -68,8 +77,22 @@ function shannonBitsPerChar(s: string): number {
   return h
 }
 
-/** TRUE when a bearer carries enough entropy to be non-guessable (see the floor). */
+/** Fraction of adjacent-character transitions that step by exactly ±1 code point —
+ *  high for a monotonic run ('abcdef…' → 1.0, '0123456789abcdef' → ~0.93). */
+function sequentialFraction(s: string): number {
+  if (s.length < 2) return 0
+  let seq = 0
+  for (let i = 1; i < s.length; i += 1) {
+    const d = s.charCodeAt(i) - s.charCodeAt(i - 1)
+    if (d === 1 || d === -1) seq += 1
+  }
+  return seq / (s.length - 1)
+}
+
+/** TRUE when a bearer clears the best-effort mechanical-degeneracy floor (see above). */
 export function hasSufficientBearerEntropy(s: string): boolean {
+  if (new Set(s).size < OWNER_BEARER_MIN_DISTINCT_CHARS) return false
+  if (sequentialFraction(s) >= OWNER_BEARER_MAX_SEQUENTIAL_FRACTION) return false
   return shannonBitsPerChar(s) >= OWNER_BEARER_MIN_ENTROPY_BITS_PER_CHAR
 }
 

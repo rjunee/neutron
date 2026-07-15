@@ -256,10 +256,18 @@ describe('selectAppWsToken — composer-side boundary (Codex r1 Critical)', () =
     expect(selectAppWsToken(strong)).toBe(strong)
   })
 
-  it('rejects a floor-length but LOW-ENTROPY explicit bearer (Codex High — guessable wide-bind bearer)', () => {
-    // The exact repro: NEUTRON_OWNER_BEARER='aaaaaaaaaaaaaaaa' clears the 16-char
-    // floor but is trivially guessable — resolveOwnerBearer must REFUSE it.
-    for (const weak of ['a'.repeat(16), 'ab'.repeat(8), 'abcabcabcabcabca']) {
+  it('rejects mechanically-degenerate explicit bearers — repeated, cyclic, AND SEQUENTIAL (Codex High)', () => {
+    // The mechanical-degeneracy filter refuses the OBVIOUS guessable shapes: repeated
+    // ('a'×16), short cycles ('ab'×8), and MONOTONIC SEQUENCES ('abcdefghijklmnop',
+    // '0123456789abcdef') — the exact wide-bind repros. resolveOwnerBearer throws.
+    for (const weak of [
+      'a'.repeat(16),
+      'ab'.repeat(8),
+      'abcabcabcabcabca',
+      'abcdefghijklmnop', // ascending run
+      '0123456789abcdef', // ascending run (digits → hex)
+      'ponmlkjihgfedcba', // descending run
+    ]) {
       expect(() => resolveOwnerBearer('/tmp/does-not-matter', { [OWNER_BEARER_ENV_VAR]: weak })).toThrow(
         /low-entropy|too short/i,
       )
@@ -270,6 +278,22 @@ describe('selectAppWsToken — composer-side boundary (Codex r1 Critical)', () =
       value: strong,
       source: 'env',
     })
+  })
+
+  it('KNOWN LIMIT — a dictionary-diverse operator value passes the mechanical filter (the minted default is the guarantee)', () => {
+    // Guessability detection is an unwinnable heuristic arms race: a dictionary value
+    // with case variation ('passwordPASSWORD') has real character diversity, no
+    // repeat/cycle, and no monotonic run, so the mechanical filter CANNOT reject it.
+    // This is DOCUMENTED, not a defect: the CRYPTOGRAPHIC guarantee is the auto-MINTED
+    // bearer (operators should leave NEUTRON_OWNER_BEARER unset). An operator who both
+    // sets a weak-but-diverse bearer AND binds wide has overridden that guarantee
+    // against the documented guidance. This test PINS that boundary so a future change
+    // to the filter's scope is a conscious decision, not an accident.
+    expect(hasSufficientBearerEntropy('passwordPASSWORD')).toBe(true)
+    // …whereas the auto-minted bearer is always strong.
+    const minted = resolveOwnerBearer(home, {}).value
+    expect(minted).toMatch(/^nbt_/)
+    expect(hasSufficientBearerEntropy(minted)).toBe(true)
   })
 })
 
