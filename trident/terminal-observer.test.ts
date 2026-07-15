@@ -9,7 +9,7 @@
 
 import { describe, expect, test } from 'bun:test'
 
-import { withTerminalObserver } from './terminal-observer.ts'
+import { composeTerminalHook, withTerminalObserver } from './terminal-observer.ts'
 import type { TridentRun } from './store.ts'
 import type { TridentTerminalHook } from './tick.ts'
 
@@ -90,5 +90,93 @@ describe('withTerminalObserver', () => {
     )
     await composed.onTerminal(run())
     expect(delivered).toBe(true)
+  })
+})
+
+describe('composeTerminalHook — the shared delivery+observers assembly (§F6a)', () => {
+  test('ordering: delivery runs FIRST, then each observer in registration order', async () => {
+    const order: string[] = []
+    const composed = composeTerminalHook(
+      hook(async () => {
+        order.push('delivery')
+      }),
+      [
+        async () => {
+          order.push('obs-a')
+        },
+        async () => {
+          order.push('obs-b')
+        },
+      ],
+    )
+    await composed.onTerminal(run())
+    expect(order).toEqual(['delivery', 'obs-a', 'obs-b'])
+  })
+
+  test('a delivery failure still runs EVERY observer (and the delivery error re-throws)', async () => {
+    const ran: string[] = []
+    const composed = composeTerminalHook(
+      hook(async () => {
+        throw new Error('channel send failed')
+      }),
+      [
+        async () => {
+          ran.push('obs-a')
+        },
+        async () => {
+          ran.push('obs-b')
+        },
+      ],
+    )
+    // Delivery threw → the loop's on_terminal try/catch still sees the failure…
+    await expect(composed.onTerminal(run())).rejects.toThrow('channel send failed')
+    // …but both observers ran regardless (the run is terminal; the hook never re-fires).
+    expect(ran).toEqual(['obs-a', 'obs-b'])
+  })
+
+  test('one observer failure does NOT suppress the later observers (each isolated)', async () => {
+    const ran: string[] = []
+    const composed = composeTerminalHook(
+      hook(async () => {
+        ran.push('delivery')
+      }),
+      [
+        async () => {
+          ran.push('obs-a')
+        },
+        async () => {
+          throw new Error('obs-b blew up')
+        },
+        async () => {
+          ran.push('obs-c')
+        },
+      ],
+    )
+    // obs-b throwing is swallowed → no throw, and obs-c still runs after it.
+    await composed.onTerminal(run())
+    expect(ran).toEqual(['delivery', 'obs-a', 'obs-c'])
+  })
+
+  test('zero observers preserves the delivery behaviour EXACTLY (returns delivery as-is)', async () => {
+    // Success: delivery runs.
+    let delivered = false
+    const ok = composeTerminalHook(
+      hook(async () => {
+        delivered = true
+      }),
+      [],
+    )
+    await ok.onTerminal(run())
+    expect(delivered).toBe(true)
+
+    // Failure: with no observers, a delivery throw propagates unchanged (no
+    // withTerminalObserver wrapper is added — it IS the delivery hook).
+    const bad = composeTerminalHook(
+      hook(async () => {
+        throw new Error('bare delivery failure')
+      }),
+      [],
+    )
+    await expect(bad.onTerminal(run())).rejects.toThrow('bare delivery failure')
   })
 })

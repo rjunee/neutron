@@ -256,7 +256,7 @@ describe('work-board HTTP surface — trident run integration (items 1 + 3)', ()
         if (existing !== undefined) runs[id] = { ...existing, phase }
         // The chokepoint runs the observer chain — recorded here as the spy.
         observed.push({ id, phase })
-        return null
+        return { won: true }
       },
     }
     const s = createWorkBoardSurface({ store, auth, trident_runs: access })
@@ -289,6 +289,38 @@ describe('work-board HTTP surface — trident run integration (items 1 + 3)', ()
     expect(res?.status).toBe(200)
     expect(updates).toEqual([{ id: 'run-1', phase: 'stopped' }])
     expect(observed).toEqual([]) // <- reds if the bypass ever fired observers
+  })
+
+  test('§F6a race: DELETE does NOT report cancelled_run when terminate() LOSES the race', async () => {
+    // The pre-check sees a NON-terminal run (so the surface calls terminate), but
+    // in the await gap the tick loop finishes the run first → the atomic transition
+    // loses (`won:false`). The delete must NOT falsely claim it cancelled (Codex r3).
+    const item = await store.create(SCOPE, { title: 'Racing build' })
+    await store.bindRun(SCOPE, item.id, 'run-1')
+    const terminated: Array<{ id: string; phase: TridentPhase }> = []
+    const access: TridentRunAccess = {
+      // Pre-check reads a live run → the surface proceeds to terminate().
+      get: () => fakeRun({ id: 'run-1', phase: 'forge-init' }),
+      update: async () => {
+        throw new Error('must route through terminate()')
+      },
+      // The transition LOST — the run was already terminalized out-of-band.
+      terminate: async (id, phase) => {
+        terminated.push({ id, phase })
+        return { won: false }
+      },
+    }
+    const s = createWorkBoardSurface({ store, auth, trident_runs: access })
+
+    const res = await s.handler(req('DELETE', `/api/app/projects/proj1/work-board/${item.id}`))
+    expect(res?.status).toBe(200)
+    const body = (await res!.json()) as { cancelled_run?: string }
+    // terminate() WAS attempted (the pre-check passed)…
+    expect(terminated).toEqual([{ id: 'run-1', phase: 'stopped' }])
+    // …but it lost, so no phantom cancellation is reported.
+    expect(body.cancelled_run).toBeUndefined()
+    // The item is still deleted (best-effort cancel never blocks the delete).
+    expect(store.get(SCOPE, item.id)).toBeNull()
   })
 
   test('DELETE does NOT cancel an already-terminal linked run', async () => {

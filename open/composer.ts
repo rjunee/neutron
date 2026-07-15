@@ -1960,9 +1960,20 @@ export function buildOpenGraphComposer(
       get: (id: string): TridentRun | null => boardRunStore.get(id),
       update: (id: string, patch: { phase: TridentRun['phase'] }): Promise<unknown> =>
         boardRunStore.update(id, patch),
-      terminate: (id: string, phase: TridentRun['phase'], reason?: string): Promise<unknown> =>
-        boardTerminatorHolder.deref((t) => t.terminate(id, phase, { ...(reason !== undefined ? { reason } : {}) })) ??
-        boardRunStore.update(id, { phase }),
+      terminate: async (id: string, phase: TridentRun['phase'], reason?: string): Promise<{ won: boolean }> => {
+        const pending = boardTerminatorHolder.deref((t) =>
+          t.terminate(id, phase, { ...(reason !== undefined ? { reason } : {}) }),
+        )
+        // No terminator bound (board-less / observer-less boot): the bare
+        // unconditional update always writes — pre-F6a behaviour → report won.
+        if (pending === undefined) {
+          await boardRunStore.update(id, { phase })
+          return { won: true }
+        }
+        // Bound: report whether the ATOMIC transition actually landed, so the
+        // delete surface only claims a cancellation it truly performed (Codex r3).
+        return { won: (await pending).won }
+      },
     }
     // `changedKey` is the storage key of the board that mutated. List + push THAT
     // project's snapshot (not one shared board) and tag the frame with the

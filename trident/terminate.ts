@@ -66,6 +66,14 @@ export type TerminateSkipReason =
 export interface TerminateResult {
   /** The reloaded terminal row, or `null` when the write did not land. */
   run: TridentRun | null
+  /**
+   * True IFF THIS call landed the terminal transition (the atomic
+   * `terminalTransition` won). False when the phase was non-terminal (defensive
+   * reject), the run was gone, or it was ALREADY terminal (a concurrent tick /
+   * cancel won the race). Callers that report a user-visible "cancelled" outcome
+   * MUST gate on this — a lost race cancelled nothing.
+   */
+  won: boolean
   /** True IFF the observer chain ran to completion for this run. */
   observed: boolean
   /** Present when `observed` is false — the specific reason. */
@@ -107,7 +115,7 @@ export function buildTridentTerminator(deps: {
     async terminate(id, phase, opts): Promise<TerminateResult> {
       // Defensive: the terminal chokepoint only ever writes a TERMINAL phase.
       if (!isTerminalPhase(phase)) {
-        return { run: null, observed: false, skipped_reason: 'not_terminal_phase' }
+        return { run: null, won: false, observed: false, skipped_reason: 'not_terminal_phase' }
       }
       const patch: { phase: TridentPhase; failure_reason?: string | null } = { phase }
       if (opts?.reason !== undefined) patch.failure_reason = opts.reason
@@ -117,18 +125,18 @@ export function buildTridentTerminator(deps: {
       // an unconditional write here would clobber that result AND re-fire the
       // observer chain (double-notify). A loser leaves the terminal row intact.
       const { run, won } = await deps.store.terminalTransition(id, patch)
-      if (run === null) return { run: null, observed: false, skipped_reason: 'run_not_found' }
+      if (run === null) return { run: null, won: false, observed: false, skipped_reason: 'run_not_found' }
       // Already terminal (the tick loop or another cancel won): the WINNER ran the
       // observers, so running them again here would double-deliver. Skip, explicitly.
-      if (!won) return { run, observed: false, skipped_reason: 'already_terminal' }
+      if (!won) return { run, won: false, observed: false, skipped_reason: 'already_terminal' }
 
       const runObservers = opts?.runObservers ?? true
-      if (!runObservers) return { run, observed: false, skipped_reason: 'caller_notifies' }
-      if (observer === null) return { run, observed: false, skipped_reason: 'no_observer' }
+      if (!runObservers) return { run, won: true, observed: false, skipped_reason: 'caller_notifies' }
+      if (observer === null) return { run, won: true, observed: false, skipped_reason: 'no_observer' }
 
       try {
         await observer.onTerminal(run)
-        return { run, observed: true }
+        return { run, won: true, observed: true }
       } catch (err) {
         // Best-effort: the row is already committed terminal, so an observer
         // outage must not block the caller's cancel/stop. Log + record — never
@@ -138,7 +146,7 @@ export function buildTridentTerminator(deps: {
             err instanceof Error ? err.message : String(err)
           }`,
         )
-        return { run, observed: false, skipped_reason: 'observer_error' }
+        return { run, won: true, observed: false, skipped_reason: 'observer_error' }
       }
     },
   }

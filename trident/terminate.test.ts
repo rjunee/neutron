@@ -108,6 +108,7 @@ describe('buildTridentTerminator', () => {
     const res = await term.terminate('run-1', 'stopped')
 
     expect(writes).toEqual([{ id: 'run-1', phase: 'stopped' }])
+    expect(res.won).toBe(true)
     expect(res.observed).toBe(true)
     expect(res.skipped_reason).toBeUndefined()
     expect(fired.map((r) => r.phase)).toEqual(['stopped'])
@@ -175,6 +176,7 @@ describe('buildTridentTerminator', () => {
 
     const res = await term.terminate('run-1', 'stopped')
 
+    expect(res.won).toBe(false) // <- the atomic transition lost
     expect(res.observed).toBe(false)
     expect(res.skipped_reason).toBe('already_terminal')
     expect(res.run?.phase).toBe('done') // <- reds if the loser clobbers the result

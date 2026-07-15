@@ -57,8 +57,12 @@ export interface TridentRunAccess {
    * fires for a loop-reaped run. When absent (board-less / observer-less boots,
    * unit tests), the delete path falls back to a bare `update`, which flips the
    * phase but runs no observers (the pre-F6a behaviour).
+   *
+   * Returns `{ won }` — whether the ATOMIC terminal transition actually landed.
+   * A lost race (`won:false`, the run went terminal out-of-band first) cancelled
+   * nothing, so the delete surface must NOT report a `cancelled_run` (Codex r3).
    */
-  terminate?(id: string, phase: TridentPhase, reason?: string): Promise<unknown>
+  terminate?(id: string, phase: TridentPhase, reason?: string): Promise<{ won: boolean }>
 }
 
 /**
@@ -424,11 +428,15 @@ async function handleDelete(
         // path used to bypass the observers). Fall back to a bare `update` for
         // board-less / observer-less boots (behaviour-identical to pre-F6a there).
         if (trident_runs.terminate !== undefined) {
-          await trident_runs.terminate(runId, 'stopped')
+          // Only claim a cancellation the ATOMIC transition actually won — the
+          // pre-check above can go stale in the await gap (the tick loop finishes
+          // the run first), and a lost race cancelled nothing (Codex r3).
+          const { won } = await trident_runs.terminate(runId, 'stopped')
+          if (won) cancelled_run = runId
         } else {
           await trident_runs.update(runId, { phase: 'stopped' })
+          cancelled_run = runId
         }
-        cancelled_run = runId
       }
     } catch {
       // Cancel is best-effort — proceed with the delete regardless.
