@@ -89,12 +89,18 @@ export interface TelegramWebhookSurface {
   /**
    * X5 — the instantiated `TelegramAdapter` behind the handler. The inbound
    * `handler` is `adapter.webhookHandler()`, so the class IS the real Telegram
-   * path (it was never instantiated before — `buildWebhookHandler` was mounted
-   * directly). The adapter also carries the OUTBOUND `send`, so a Telegram
-   * instance's composer registers THIS instance on its `ChannelRouter`
-   * (`router.registerAdapter(surface.adapter)`) to activate outbound delivery
-   * through the one router seam. Returned additively; existing callers that read
-   * only `.handler` are unaffected.
+   * INBOUND path now (it was never instantiated before — `buildWebhookHandler`
+   * was mounted directly). The adapter also carries the OUTBOUND `send`.
+   *
+   * SCOPE NOTE: this Open repo never wires Telegram (no Telegram secrets /
+   * instance — `buildTelegramWebhookSurface` is called only by the Managed
+   * composer), so there is intentionally NO `registerAdapter(surface.adapter)`
+   * call here. Exposing the adapter is what MAKES the one-line outbound
+   * activation possible in the Telegram-instance (Managed) composer
+   * (`router.registerAdapter(surface.adapter)`) — the documented "add a channel
+   * = one registration" recipe. Kept ADDITIVE and unregistered here to avoid a
+   * double-registration conflict with any existing Managed outbound sender.
+   * Existing callers that read only `.handler` are unaffected.
    */
   adapter: TelegramAdapter
 }
