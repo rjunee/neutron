@@ -63,8 +63,6 @@ function fmtTime(ms: number | null | undefined): string {
  */
 export function fmtPayload(payload: unknown): string {
   if (payload === null || typeof payload !== 'object') return ''
-  const entries = Object.entries(payload as Record<string, unknown>)
-  if (entries.length === 0) return ''
   // Strip terminal control chars (newlines, ESC/ANSI, C0/C1 + DEL) BEFORE truncating
   // so a journal payload — which carries attacker-influenceable error text — can't
   // forge a diagnostics line or emit control sequences (e.g. clear-screen) to the
@@ -82,8 +80,17 @@ export function fmtPayload(payload: unknown): string {
       return String(v)
     }
   }
-  const parts = entries.map(([k, v]) => `${sanitize(k)}=${cap(sanitize(stringify(v)), 80)}`)
-  return cap(parts.join(' '), 200)
+  // OUTER guard: a diagnostics render must NEVER throw on any payload shape — even
+  // `Object.entries` / property access can throw for an exotic value (a throwing
+  // Proxy). Any structural failure degrades to a marker, not a crash (Codex).
+  try {
+    const entries = Object.entries(payload as Record<string, unknown>)
+    if (entries.length === 0) return ''
+    const parts = entries.map(([k, v]) => `${sanitize(k)}=${cap(sanitize(stringify(v)), 80)}`)
+    return cap(parts.join(' '), 200)
+  } catch {
+    return '[unrenderable payload]'
+  }
 }
 
 /** Pure text formatter — testable without a DB. */

@@ -162,6 +162,21 @@ describe('collectCliDiagnostics', () => {
       circular['self'] = circular
       expect(() => fmtPayload(circular)).not.toThrow()
       expect(fmtPayload(circular)).toContain('self=')
+      // A null-prototype object still renders (no inherited toString needed).
+      expect(fmtPayload(Object.assign(Object.create(null), { code: 'x' }))).toContain('code=x')
+    })
+
+    it('degrades to a marker (never throws) when even Object.entries throws — a hostile proxy', () => {
+      const hostile = new Proxy(
+        {},
+        {
+          ownKeys() {
+            throw new Error('nope')
+          },
+        },
+      )
+      expect(() => fmtPayload(hostile)).not.toThrow()
+      expect(fmtPayload(hostile)).toBe('[unrenderable payload]')
     })
   })
 
