@@ -698,6 +698,47 @@ describe('buildSynthesisImportJobRunner — synthesis → engine bridge', () => 
     expect(statusOf()).toBe('cancelled')
   })
 
+  test('P6 cancel race (inverse): a cancel arriving AFTER completion does NOT overwrite completed (terminal-winner)', async () => {
+    const db = freshDb()
+    const fakeSynthesis: SynthesisRunner = {
+      rawStore: new MemoryRawTranscriptStore(),
+      async synthesizeImport(): Promise<SynthesisResult> {
+        return SYNTH_RESULT
+      },
+      async synthesizeInterviewOnly(): Promise<SynthesisResult | null> {
+        return null
+      },
+      writeSeed(seed: ProjectSeed): WriteProjectSeedOutcome {
+        return { project_slug: seed.slug, reason: 'created', docs_written: ['STATUS.md'], transcripts_written: 1 }
+      },
+    }
+    const runner = buildSynthesisImportJobRunner({ db, synthesis: fakeSynthesis, parse: () => fakeRecords() })
+    const { job_id } = await runner.start({
+      project_slug: 'owner',
+      user_id: 'u-owner',
+      source: 'claude-zip',
+      payload: Buffer.from('zip'),
+    })
+    // Let it fully complete (status='completed' + durable result persisted).
+    expect((await pollToTerminal(runner, job_id)).status).toBe('completed')
+
+    // A late cancel — the owner hit cancel just as the import committed. The guarded
+    // single-write cancel must NOT resurrect the completed job to 'cancelled' (pre-fix
+    // the read/check/write let it), and must leave the persisted result intact.
+    await runner.cancel(job_id)
+
+    const status = db
+      .raw()
+      .query<{ status: string }, [string]>(`SELECT status FROM import_jobs WHERE job_id = ?`)
+      .get(job_id)?.status
+    expect(status).toBe('completed')
+    const resultRow = db
+      .raw()
+      .query<{ job_id: string }, [string]>(`SELECT job_id FROM import_results WHERE job_id = ?`)
+      .get(job_id)
+    expect(resultRow).not.toBeNull()
+  })
+
   test('synthesisResultToImportResult maps projects, tasks, people, and voice', () => {
     const mapped = synthesisResultToImportResult(SYNTH_RESULT)
     expect(mapped.proposed_projects).toEqual([

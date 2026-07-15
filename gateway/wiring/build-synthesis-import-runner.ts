@@ -381,15 +381,18 @@ export function buildSynthesisImportJobRunner(
 
     async cancel(job_id): Promise<void> {
       cancelled.add(job_id)
-      const row = db
-        .get<{ status: string }, [string]>(`SELECT status FROM import_jobs WHERE job_id = ?`, [job_id])
-      if (row === null) return
-      if (row.status !== 'completed' && row.status !== 'failed' && row.status !== 'cancelled') {
-        await db.run(
-          `UPDATE import_jobs SET status = 'cancelled', completed_at = ? WHERE job_id = ?`,
-          [now(), job_id],
-        )
-      }
+      // SINGLE guarded write — no read/check/write TOCTOU (Codex): a separate
+      // status read then unconditional UPDATE could let a completion commit
+      // `completed` in the gap and then get overwritten to `cancelled`, orphaning
+      // its persisted result. The guard makes cancellation atomic against a
+      // concurrent completion/failure: if the row is already terminal, 0 rows change
+      // and the terminal winner stands. `cancelled.add` still short-circuits an
+      // in-flight runJob at its pre-checks. A missing job → 0 rows (harmless no-op).
+      await db.run(
+        `UPDATE import_jobs SET status = 'cancelled', completed_at = ?
+           WHERE job_id = ? AND ${NON_TERMINAL_GUARD}`,
+        [now(), job_id],
+      )
     },
 
     async synthesizeOnDemand(job_id): Promise<ImportResult | null> {
