@@ -300,7 +300,19 @@ function tryAcquireRotateLock(lockPath: string): HeldRotateLock | null {
     // release/reclaim can PROVE ownership and never touch another owner's lock.
     const token = `${process.pid}.${(lockSeq += 1)}.${Date.now()}`
     try {
-      fs.writeSync(fd, token)
+      // FULL write (same reason as the secret write): a legal SHORT write would
+      // leave a TRUNCATED token on disk, the post-acquire re-verify below would then
+      // mismatch our full token → we'd yield + leave a bogus lockfile behind that
+      // blocks rotation until the stale deadline, spuriously forcing an EPHEMERAL
+      // bearer and refusing a wide bind on a writable FS (Codex). Loop until every
+      // token byte is written; a zero/negative return aborts (→ unlink + retry).
+      const tbuf = Buffer.from(token, 'utf8')
+      let twritten = 0
+      while (twritten < tbuf.length) {
+        const n = fs.writeSync(fd, tbuf, twritten, tbuf.length - twritten)
+        if (n <= 0) throw new Error(`short lock-token write: ${twritten}/${tbuf.length}`)
+        twritten += n
+      }
     } catch {
       try {
         fs.closeSync(fd)

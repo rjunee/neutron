@@ -23,6 +23,7 @@ import {
   OWNER_BEARER_MIN_LEN,
   hasSufficientBearerEntropy,
   isValidThreadedBearer,
+  ownerBearerLockPath,
   ownerBearerPath,
   resolveOwnerBearer,
   selectAppWsToken,
@@ -73,36 +74,67 @@ describe('resolveOwnerBearer — env override', () => {
     })
   })
 
-  it('a SHORT write on the SECRET file does NOT persist a TRUNCATED bearer — falls back to ephemeral (Codex Medium)', () => {
-    // The persist writes the secret via a FULL-write loop. Simulate a kernel that
-    // flushes a few bytes of the SECRET then can write no more → the loop must ABORT
-    // (not rename a truncated secret into place). Delegate the STRING lock-token
-    // write to the real fs so lock acquisition succeeds and the secret loop is
-    // actually reached; only the BUFFER secret write is short-circuited.
+  /** Full decoded content of a writeSync buffer/string arg (offset/len ignored so a
+   *  matcher stays stable across a partial-write loop's re-calls on the same buffer). */
+  function fullWriteContent(data: unknown): string {
+    if (typeof data === 'string') return data
+    if (data instanceof Uint8Array) {
+      return Buffer.from(data.buffer, data.byteOffset, data.byteLength).toString('utf8')
+    }
+    return ''
+  }
+
+  /** Spy writeSync so ONLY writes whose full content matches `target` are short-written
+   *  (flush 4 bytes then stall); every other write (incl. the OTHER of lock/secret)
+   *  delegates to the real fs. Returns a hit counter to assert the target was reached. */
+  function spyShortWriteMatching(target: (content: string) => boolean): {
+    hits: () => number
+    spy: ReturnType<typeof spyOn>
+  } {
     const realWrite = fs.writeSync.bind(fs)
-    let secretCalls = 0
+    let hits = 0
     const spy = spyOn(fs, 'writeSync').mockImplementation(((
       fd: number,
       data: unknown,
       ...rest: unknown[]
     ): number => {
-      if (typeof data === 'string') {
-        return (realWrite as (fd: number, data: unknown, ...r: unknown[]) => number)(fd, data, ...rest)
+      if (target(fullWriteContent(data))) {
+        hits += 1
+        return hits === 1 ? 4 : 0
       }
-      // Buffer path = the secret-write loop: flush 4 bytes then stall.
-      secretCalls += 1
-      return secretCalls === 1 ? 4 : 0
+      return (realWrite as (fd: number, data: unknown, ...r: unknown[]) => number)(fd, data, ...rest)
     }) as typeof fs.writeSync)
+    return { hits: () => hits, spy }
+  }
+
+  it('a SHORT write on the SECRET file does NOT persist a TRUNCATED bearer — falls back to ephemeral (Codex Medium)', () => {
+    // Short-circuit ONLY the minted-secret write ('nbt_…'); the lock-token write
+    // delegates to real fs so lock acquisition succeeds and the secret loop is reached.
+    const m = spyShortWriteMatching((c) => c.startsWith('nbt_'))
     try {
-      // No env → resolveOwnerBearer MINTS a bearer and tries to persist it.
       const res = resolveOwnerBearer(home, {})
-      expect(secretCalls).toBeGreaterThan(0) // the SECRET loop was actually reached
-      // Persist aborted on the short write → NOT accepted as a persisted credential,
-      // and NO truncated file was installed (the tmp was unlinked, target absent).
+      expect(m.hits()).toBeGreaterThan(0) // the SECRET loop was actually reached
+      // Aborted → NOT persisted, and no truncated target file was installed.
       expect(res.source).not.toBe('persisted')
       expect(fs.existsSync(ownerBearerPath(home))).toBe(false)
     } finally {
-      spy.mockRestore()
+      m.spy.mockRestore()
+    }
+  })
+
+  it('a SHORT write on the LOCK TOKEN yields ephemeral WITHOUT leaving a bogus lockfile (Codex Medium)', () => {
+    // Short-circuit ONLY the lock-token write (`pid.seq.time`). Pre-fix this left a
+    // truncated token → verify-mismatch → a stale lockfile that blocks rotation and
+    // forces ephemeral. With the full-write loop, the short write ABORTS and unlinks.
+    const m = spyShortWriteMatching((c) => /^\d+\.\d+\.\d+/.test(c))
+    try {
+      const res = resolveOwnerBearer(home, {})
+      expect(m.hits()).toBeGreaterThan(0) // the LOCK-token loop was actually reached
+      expect(res.source).toBe('ephemeral') // couldn't secure the lock → ephemeral
+      // The failed lock write unlinked its own lockfile — no bogus lock left behind.
+      expect(fs.existsSync(ownerBearerLockPath(home))).toBe(false)
+    } finally {
+      m.spy.mockRestore()
     }
   })
 
