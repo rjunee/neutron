@@ -8,8 +8,10 @@
  *   - the delivery translators are wired: `onboardingMsg` bound, the engine
  *     button-prompt + import-progress routers' `.send` set, the clarifying
  *     poster's `.post` set;
- *   - `tridentDeliverySink.send` no-ops (returns '') for a non-app_socket
- *     message and forwards to the bound adapter for an app_socket one;
+ *   - X5: `channelRouter` has the durable app-ws adapter registered for
+ *     `app_socket`; `router.send` forwards an app_socket message to the adapter
+ *     (the activated trident-delivery seam) and THROWS loud for an unregistered
+ *     kind (no silent drop);
  *   - `cleanups` is collected as an array.
  */
 
@@ -172,25 +174,60 @@ describe('wireAppWs (C3d carve #6)', () => {
     expect(typeof buildClarifyPoster.post).toBe('function')
   })
 
-  test('tridentDeliverySink: no-op on non-app_socket, forwards to bound adapter on app_socket', async () => {
+  test('X5: channelRouter has the app-ws adapter registered for app_socket', () => {
+    const { deps, appWs } = buildDeps()
+    const wired = wireAppWs(buildCtx(), deps)
+
+    // The returned router IS the one delivery seam: the durable app-ws adapter
+    // (the SAME instance bound to the late<T>) is registered for `app_socket`.
+    expect(wired.channelRouter.getAdapter('app_socket')).toBe(appWs.get()!)
+    // Boot-conformance guard passes for the kind Open runs carry (it ran inside
+    // wireAppWs — this just re-asserts it doesn't throw).
+    expect(() => wired.channelRouter.assertAdaptersFor(['app_socket'])).not.toThrow()
+  })
+
+  test('X5: channelRouter.send routes app_socket to the adapter (trident delivery seam)', async () => {
     const { deps } = buildDeps()
     const wired = wireAppWs(buildCtx(), deps)
 
-    const webMsg = {
-      topic: { topic_id: '', channel_kind: 'web' as const, channel_topic_id: 't', project_id: null, privacy_mode: 'regular' as const },
-      text: 'hi',
-    } as unknown as OutgoingMessage
-    expect(await wired.tridentDeliverySink.send(webMsg)).toBe('')
-
-    const appMsg = {
-      topic: { topic_id: '', channel_kind: 'app_socket' as const, channel_topic_id: 'app:owner', project_id: null, privacy_mode: 'regular' as const },
+    const appMsg: OutgoingMessage = {
+      topic: {
+        topic_id: '',
+        channel_kind: 'app_socket',
+        channel_topic_id: 'app:owner',
+        project_id: null,
+        privacy_mode: 'regular',
+      },
       text: 'done',
-    } as unknown as OutgoingMessage
-    // Bound adapter (no live socket) → app-ws:dropped id string; the point is it
-    // routes through the adapter rather than no-op'ing.
-    const id = await wired.tridentDeliverySink.send(appMsg)
+    }
+    // Bound adapter (no live socket) → `app-ws:dropped:<id>`; the point is
+    // `router.send` dispatches to the app-ws adapter — the activated seam trident
+    // terminal delivery + the board terminator now post through.
+    const id = await wired.channelRouter.send(appMsg)
     expect(typeof id).toBe('string')
     expect(id.startsWith('app-ws:')).toBe(true)
+  })
+
+  test('X5: channelRouter.send THROWS loud for an unregistered kind (no silent drop)', async () => {
+    const { deps } = buildDeps()
+    const wired = wireAppWs(buildCtx(), deps)
+
+    const tgMsg: OutgoingMessage = {
+      topic: {
+        topic_id: '',
+        channel_kind: 'telegram',
+        channel_topic_id: '123',
+        project_id: null,
+        privacy_mode: 'regular',
+      },
+      text: 'unreachable on Open',
+    }
+    // Open registers no Telegram adapter; a stray non-app_socket send fails loud
+    // rather than silently vanishing. In production both trident terminal entry
+    // points (tick-loop `on_terminal` + the out-of-band terminator) wrap this in
+    // try/catch, and every Open run is stamped `app_socket`, so this path is
+    // unreachable — but the seam is fail-loud by design.
+    await expect(wired.channelRouter.send(tgMsg)).rejects.toThrow(/no channel adapter registered/)
   })
 })
 

@@ -124,8 +124,14 @@ describe('Sprint D — Open single-owner boot shell', () => {
     const h = await bootOpen()
     const res = await fetch(`http://127.0.0.1:${h.server.port}/healthz`)
     expect(res.status).toBe(200)
-    const body = (await res.json()) as { status: string; project_slug: string }
-    expect(body.status).toBe('ok')
+    const body = (await res.json()) as { status: string; project_slug: string; memory?: string }
+    // Liveness: a fresh boot SERVES /healthz (200). RA2 folds memory-backend health
+    // in, so `status` is 'ok' when the gbrain binary is present and 'degraded'
+    // (memory:'unavailable') when it is absent — the case on a runner without gbrain
+    // installed (e.g. CI). Both are a live, serving boot; assert the liveness contract,
+    // not memory presence. (Pins the RA2 #350 interaction so it can't silently regress.)
+    expect(['ok', 'degraded']).toContain(body.status)
+    if (body.status === 'degraded') expect(body.memory).toBe('unavailable')
     expect(body.project_slug).toBe('owner')
   }, 30_000)
 

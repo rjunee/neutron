@@ -56,6 +56,7 @@ import { randomUUID } from 'node:crypto'
 import { join as joinPath } from 'node:path'
 
 import { AppWsAdapter } from '@neutronai/channels/adapters/app-ws/adapter.ts'
+import { ChannelRouter } from '@neutronai/channels/router.ts'
 import {
   createAppWsSurface,
   type AppWsSurface,
@@ -98,6 +99,17 @@ import type { Late } from './late.ts'
 import type { OpenWiringContext } from './context.ts'
 import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
 import { createLogger } from '@neutronai/logger'
+import type { ChannelKind } from '@neutronai/channels/types.ts'
+
+/**
+ * X5 — the single `ChannelKind` every Open outbound run carries. Open is
+ * single-owner WEB: `work_board_dispatch_build` stamps `app_socket` and the
+ * `/code` chat-command filter defaults it, so a terminal delivery always routes
+ * to the app-ws adapter. The boot-time `assertAdaptersFor([...])` guard uses
+ * this so a dropped adapter registration fails the boot instead of a build's
+ * completion silently vanishing.
+ */
+const OPEN_RUN_CHANNEL_KIND: ChannelKind = 'app_socket'
 
 /**
  * Open-mode app-ws routing decision for an engine-emitted onboarding
@@ -285,8 +297,18 @@ export interface WireAppWsDeps {
 export interface WiredAppWs {
   /** The app-ws chat surface; consumed as `app_ws_surface`. */
   appWsSurface: AppWsSurface
-  /** #339 durable delivery sink for trident terminal results (`trident.delivery_sink`). */
-  tridentDeliverySink: { send(message: OutgoingMessage): Promise<string> }
+  /**
+   * X5 — the Open composition's `ChannelRouter` with the durable `AppWsAdapter`
+   * registered for `app_socket` (the kind every Open run carries). This is the
+   * ONE delivery seam: the composer passes it as `composition.channel_router`
+   * (so the graph's `channels` module IS this instance) and uses it as the
+   * trident terminal-delivery + board-terminator sink, so a completion posts
+   * through `router.send` → the app-ws adapter (durable chat-log persist + live
+   * fan-out — the proven steady-state reply path). Replaces the bespoke #339
+   * `tridentDeliverySink`, which existed only because the bare router had no
+   * adapter registered.
+   */
+  channelRouter: ChannelRouter
   /** Teardown hooks in registration order (re-registered at the carve site). */
   cleanups: Array<() => void>
 }
@@ -814,6 +836,22 @@ export function wireAppWs(ctx: OpenWiringContext, deps: WireAppWsDeps): WiredApp
     edit_log: new AppChatEditStore({ db }),
   })
   appWs.bind(appWsAdapter)
+  // X5 — the ONE delivery seam. Register the durable app-ws adapter on a real
+  // `ChannelRouter` so `router.send` is LIVE for Open (previously the bare router
+  // had zero adapters and every `send` threw "no channel adapter registered" —
+  // masked only because no Open path set `run.chat_id` on a non-app_socket kind).
+  // The composer passes this instance as `composition.channel_router` (the graph
+  // reuses it) and routes trident terminal delivery + the board terminator through
+  // it. `topic_handler` is a no-op: Open's app-ws INBOUND path runs through
+  // `appWsReceiver` directly (above), never `router.receive`, so the router is a
+  // pure OUTBOUND sink here.
+  const channelRouter = new ChannelRouter(db, project_slug, async () => undefined)
+  channelRouter.registerAdapter(appWsAdapter)
+  // Boot-time conformance guard: every Open trident run is stamped `app_socket`
+  // (`work_board_dispatch_build` + the `/code` chat-command filter), so assert an
+  // adapter exists for it — a dropped registration fails LOUD here instead of
+  // silently dropping a build's completion announce.
+  channelRouter.assertAdaptersFor([OPEN_RUN_CHANNEL_KIND])
   // #337 — bind the clarifying-question poster now the app-ws adapter exists.
   // `AppWsAdapter.send` persists the message (durable, survives reconnect) AND
   // fans it live, so the ▶ route's clarifying question lands in the chat topic
@@ -1070,20 +1108,11 @@ export function wireAppWs(ctx: OpenWiringContext, deps: WireAppWsDeps): WiredApp
     },
   })
 
-  // #339 — durable app-ws delivery sink for trident terminal results.
-  // `AppWsAdapter.send` persists to the chat log (survives reconnect) AND fans
-  // live to any open socket (the proven steady-state reply path). The bare
-  // ChannelRouter that `build-core-modules` would otherwise use has NO
-  // app_socket adapter registered on Open, so a completion posted through it was
-  // silently dropped — that is why a finished build (e.g. walstore) flipped the
-  // Work list to done but never announced in chat. app_socket only (Open has no
-  // other outbound channel); anything else no-ops.
-  const tridentDeliverySink = {
-    async send(message: OutgoingMessage): Promise<string> {
-      if (message.topic.channel_kind !== 'app_socket') return ''
-      return (await appWs.deref((adapter) => adapter.send(message))) ?? ''
-    },
-  }
-
-  return { appWsSurface, tridentDeliverySink, cleanups }
+  // X5 — trident terminal delivery + the board terminator now post through
+  // `channelRouter.send` (built above with the app-ws adapter registered).
+  // `router.send` for an `app_socket` topic dispatches to the SAME
+  // `AppWsAdapter.send` the bespoke #339 sink deref'd — durable chat-log persist
+  // (survives reconnect) + live fan-out — so a build's completion still announces
+  // in chat exactly as before, now through the one real seam.
+  return { appWsSurface, channelRouter, cleanups }
 }

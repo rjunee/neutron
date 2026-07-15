@@ -76,6 +76,27 @@ export class ChannelRouter implements IncomingEventReceiver {
   }
 
   /**
+   * Boot-time conformance guard (X5). Assert an adapter is registered for
+   * every channel kind an outbound run in THIS composition can carry, so a
+   * missing registration fails LOUD at boot — not silently (or as a per-send
+   * throw) when a terminal delivery finally fires. This is the seam that makes
+   * "adding a channel = one adapter file + one `registerAdapter` call" safe:
+   * forget the registration and the composition refuses to boot with a message
+   * naming the gap. `'cli'` is a sentinel binding-marker kind (see
+   * `types.ts`) that no run delivers to, so it is never passed here.
+   */
+  assertAdaptersFor(kinds: readonly ChannelKind[]): void {
+    const missing = kinds.filter((kind) => !this.adapters.has(kind))
+    if (missing.length > 0) {
+      const registered = [...this.adapters.keys()].join(', ') || 'none'
+      throw new Error(
+        `ChannelRouter is missing an adapter for kind(s): ${missing.join(', ')} ` +
+          `(registered: ${registered})`,
+      )
+    }
+  }
+
+  /**
    * Resolve (channel_kind, channel_topic_id) → Topic, creating a row if
    * none exists. The router writes the topic row inside a transaction to
    * keep concurrent first-sight events for the same channel topic atomic.

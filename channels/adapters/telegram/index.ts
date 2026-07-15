@@ -40,6 +40,7 @@ import {
 import { truncateForTelegram } from './utf16-truncation.ts'
 import {
   buildWebhookHandler,
+  type TelegramBindCommandHandler,
   type TelegramCallbackQueryHandler,
   type TelegramStartCommandHandler,
   type WebhookHandlerOptions,
@@ -75,6 +76,15 @@ export interface TelegramAdapterOptions {
    * validated, event gets logged with full context.
    */
   on_start_command?: TelegramStartCommandHandler
+  /**
+   * ISSUES #65 — optional `/start bind_<token>` bot-command handler (the
+   * final-handoff "Connect a Telegram bot" deeplink). Threaded straight into
+   * the webhook handler so the class is the FULL inbound path (parity with the
+   * pre-X5 direct `buildWebhookHandler` mount, which already accepted it).
+   * Absent → bind deeplinks fall through to `on_start_command` (which won't
+   * match `bind_`) and then to `decodeUpdate`.
+   */
+  on_bind_command?: TelegramBindCommandHandler
 }
 
 const MANIFEST: ChannelAdapterManifest = {
@@ -93,6 +103,7 @@ export class TelegramAdapter implements ChannelAdapter {
   private readonly self_echo_filter?: SelfEchoFilter
   private readonly on_callback_query?: TelegramCallbackQueryHandler
   private readonly on_start_command?: TelegramStartCommandHandler
+  private readonly on_bind_command?: TelegramBindCommandHandler
 
   constructor(opts: TelegramAdapterOptions) {
     this.client = opts.client
@@ -107,6 +118,9 @@ export class TelegramAdapter implements ChannelAdapter {
     }
     if (opts.on_start_command !== undefined) {
       this.on_start_command = opts.on_start_command
+    }
+    if (opts.on_bind_command !== undefined) {
+      this.on_bind_command = opts.on_bind_command
     }
   }
 
@@ -129,6 +143,9 @@ export class TelegramAdapter implements ChannelAdapter {
     }
     if (this.on_start_command !== undefined) {
       opts.on_start_command = this.on_start_command
+    }
+    if (this.on_bind_command !== undefined) {
+      opts.on_bind_command = this.on_bind_command
     }
     return buildWebhookHandler(opts)
   }
