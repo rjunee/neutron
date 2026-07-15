@@ -24,6 +24,7 @@
 
 import type { Topic } from '@neutronai/channels/types.ts'
 import type { MergeMode, TridentRun, TridentRunStore } from './store.ts'
+import { buildTridentTerminator } from './terminate.ts'
 import { dispatchBoardBoundBuild, type TridentBoardBinder } from './board-dispatch.ts'
 
 export type CodeCommand =
@@ -264,7 +265,13 @@ async function executeStop(
         }
       : { text: `🛠 No in-flight \`/code\` build to stop in project \`${ctx.project_slug}\`.` }
   }
-  await ctx.store.update(target.id, { phase: 'stopped' })
+  // §F6a — route the terminal write through the ONE `terminate()` chokepoint.
+  // `runObservers:false`: this command replies to the user synchronously (below),
+  // so firing the delivery observer would DOUBLE-notify. The chokepoint records
+  // the deliberate skip (`caller_notifies`) rather than silently bypassing it.
+  await buildTridentTerminator({ store: ctx.store }).terminate(target.id, 'stopped', {
+    runObservers: false,
+  })
   return {
     text: `🛠 Stopped Trident run \`${target.id.slice(0, 8)}\` (was ${target.phase}). The PR/branch (if any) stays for manual review.`,
     data: { run_id: target.id, prior_phase: target.phase },

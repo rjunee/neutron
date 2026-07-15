@@ -50,6 +50,15 @@ import type { TridentPhase, TridentRun } from '@neutronai/trident/store.ts'
 export interface TridentRunAccess {
   get(id: string): TridentRun | null
   update(id: string, patch: { phase: TridentPhase }): Promise<unknown>
+  /**
+   * §F6a — the terminal-write CHOKEPOINT. Deleting a board card bound to a LIVE
+   * build cancels the run: this writes the terminal phase AND runs the terminal-
+   * observer chain (delivery + board reconcile) — the SAME chain the tick loop
+   * fires for a loop-reaped run. When absent (board-less / observer-less boots,
+   * unit tests), the delete path falls back to a bare `update`, which flips the
+   * phase but runs no observers (the pre-F6a behaviour).
+   */
+  terminate?(id: string, phase: TridentPhase, reason?: string): Promise<unknown>
 }
 
 /**
@@ -409,7 +418,16 @@ async function handleDelete(
     try {
       const run = trident_runs.get(runId)
       if (run !== null && !isTerminalPhase(run.phase)) {
-        await trident_runs.update(runId, { phase: 'stopped' })
+        // §F6a — route the cancel through the ONE `terminate()` chokepoint when
+        // wired, so the terminal-observer chain (delivery + board reconcile) fires
+        // for an X-cancel exactly as it does for a loop-reaped run (the fix — this
+        // path used to bypass the observers). Fall back to a bare `update` for
+        // board-less / observer-less boots (behaviour-identical to pre-F6a there).
+        if (trident_runs.terminate !== undefined) {
+          await trident_runs.terminate(runId, 'stopped')
+        } else {
+          await trident_runs.update(runId, { phase: 'stopped' })
+        }
         cancelled_run = runId
       }
     } catch {

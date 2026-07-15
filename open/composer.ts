@@ -279,6 +279,10 @@ import {
 import { WorkBoardSpecDocService } from '@neutronai/work-board/spec-doc-service.ts'
 import { dispatchBoardBoundBuild } from '@neutronai/trident/board-dispatch.ts'
 import { buildForgeConflictResolver } from '@neutronai/trident/conflict-resolver.ts'
+import { buildTridentDelivery } from '@neutronai/trident/delivery.ts'
+import { composeTerminalHook } from '@neutronai/trident/terminal-observer.ts'
+import { buildBoardReconcileObserver } from '@neutronai/trident/board-reconcile.ts'
+import { buildTridentTerminator, type TridentTerminator } from '@neutronai/trident/terminate.ts'
 import type { WorkBoardStartResult } from '@neutronai/gateway/http/work-board-surface.ts'
 import { formatWorkBoardFragment } from '@neutronai/work-board/fragment.ts'
 import { InMemoryConsumedTokens } from '@neutronai/runtime/consumed-tokens-in-memory.ts'
@@ -1941,6 +1945,25 @@ export function buildOpenGraphComposer(
     // phase/round/elapsed/stalled from its `linked_run_id`'s `code_trident_runs`
     // row. Stateless wrapper — a second instance elsewhere is harmless.
     const boardRunStore = new TridentRunStore(db)
+    // §F6a — the board X-cancel/delete terminal-write CHOKEPOINT. Deleting a card
+    // bound to a LIVE build cancels its run through `terminate()`, which fires the
+    // SAME terminal-observer chain (delivery + board reconcile) the tick loop fires
+    // for a loop-reaped run — the fix for the old bypass that flipped `phase` but
+    // ran no observers. Late-bound: the durable delivery sink (`tridentDeliverySink`)
+    // is built later in `wireAppWs`, so the terminator is bound below once it exists
+    // (mirrors the `dispatchBoardHolder` two-phase seam). Every runtime DELETE lands
+    // long after composition, so the holder is always bound by request time.
+    const boardTerminatorHolder = late<TridentTerminator>('board_terminator')
+    // The run-access facade the work-board surface reads: live-progress reads +
+    // the item-3 delete-cancel, now routed through the chokepoint when bound.
+    const boardRunAccess = {
+      get: (id: string): TridentRun | null => boardRunStore.get(id),
+      update: (id: string, patch: { phase: TridentRun['phase'] }): Promise<unknown> =>
+        boardRunStore.update(id, patch),
+      terminate: (id: string, phase: TridentRun['phase'], reason?: string): Promise<unknown> =>
+        boardTerminatorHolder.deref((t) => t.terminate(id, phase, { ...(reason !== undefined ? { reason } : {}) })) ??
+        boardRunStore.update(id, { phase }),
+    }
     // `changedKey` is the storage key of the board that mutated. List + push THAT
     // project's snapshot (not one shared board) and tag the frame with the
     // per-project `project_id` so the clients' per-project filter applies it to the
@@ -2070,8 +2093,9 @@ export function buildOpenGraphComposer(
     const workBoardSurface = createWorkBoardSurface({
       store: workBoardStore,
       auth: appOwnerAuth,
-      // Item 1 (live progress on GET) + item 3 (delete cancels the linked run).
-      trident_runs: boardRunStore,
+      // Item 1 (live progress on GET) + item 3 (delete cancels the linked run,
+      // now via the §F6a `terminate()` chokepoint so the observers fire).
+      trident_runs: boardRunAccess,
       // M1 — persist a non-trivial create `spec` to a plans/ doc + link the card.
       create_card: (slug, input) => workBoardSpecDoc.createCardWithOptionalSpec(slug, input),
       // M1 — ▶ start/retry a build from the card's saved spec (undefined = 501).
@@ -2698,6 +2722,25 @@ export function buildOpenGraphComposer(
       railChatKey,
     })
     for (const cleanup of appWsCleanups) realmodeCleanups.push(cleanup)
+
+    // §F6a — bind the board X-cancel/delete terminal-write chokepoint now that the
+    // durable delivery sink exists. Its observer chain is BUILT FROM THE SAME
+    // `composeTerminalHook` assembly the tick loop's `on_terminal` uses in
+    // `build-core-modules` (delivery → durable app-ws sink; board reconcile →
+    // canonical work-board store; skill-forge audit), so a cancelled build runs
+    // the exact chain a loop-reaped one does. `boardRunStore` is a thin
+    // `TridentRunStore` over the SAME `db` the loop reads.
+    boardTerminatorHolder.bind(
+      buildTridentTerminator({
+        store: boardRunStore,
+        observer: composeTerminalHook(
+          buildTridentDelivery({ sink: tridentDeliverySink }),
+          [buildBoardReconcileObserver(workBoardStore), skillForgeOnRunTerminal].filter(
+            (o): o is (run: TridentRun) => Promise<void> => o !== null,
+          ),
+        ),
+      }),
+    )
 
     // #342 — bounded Forge merge-conflict resolver: a fresh ephemeral REPL rooted
     // in the conflicted worktree, reusing the SAME per-cwd factory the dispatch

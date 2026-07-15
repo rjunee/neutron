@@ -57,7 +57,7 @@ import { stubAdvanceDeps } from '@neutronai/trident/state-machine.ts'
 import { buildTridentOrchestrator } from '@neutronai/trident/orchestrator.ts'
 import { buildWorkflowFirer } from '@neutronai/trident/inner-loop.ts'
 import { buildTridentDelivery } from '@neutronai/trident/delivery.ts'
-import { withTerminalObserver } from '@neutronai/trident/terminal-observer.ts'
+import { composeTerminalHook } from '@neutronai/trident/terminal-observer.ts'
 import { buildBoardReconcileObserver } from '@neutronai/trident/board-reconcile.ts'
 import { spawnCapture } from '@neutronai/trident/git-mode.ts'
 import { TaskStore } from '@neutronai/tasks/store.ts'
@@ -403,26 +403,9 @@ export function buildCoreModules(
       const observers = [boardReconcile, runTerminalObserver].filter(
         (o): o is (run: TridentRun) => Promise<void> => o !== undefined,
       )
-      const combinedObserver =
-        observers.length === 0
-          ? undefined
-          : async (run: TridentRun): Promise<void> => {
-              for (const obs of observers) {
-                try {
-                  await obs(run)
-                } catch (err) {
-                  console.warn(
-                    `[trident] terminal observer failed for run ${run.id}: ${
-                      err instanceof Error ? err.message : String(err)
-                    }`,
-                  )
-                }
-              }
-            }
-      const on_terminal: TridentTerminalHook =
-        combinedObserver === undefined
-          ? delivery
-          : withTerminalObserver(delivery, combinedObserver)
+      // §F6a — the SAME assembly the out-of-band `terminate()` chokepoint uses,
+      // so a cancelled build runs the exact chain a loop-reaped one does.
+      const on_terminal: TridentTerminalHook = composeTerminalHook(delivery, observers)
       // M1 UX REDESIGN — the LIVE-PROGRESS fan. When the composer wired an
       // `on_run_transition` observer, adapt it to the loop's `TridentTransitionHook`
       // so a checkpoint advance (building→reviewing→fixing→merging), a launch, or a
