@@ -219,23 +219,25 @@ export function buildOnboardingFinalize(deps: OnboardingFinalizeDeps): Onboardin
       )
     })
 
-  // ATOMIC per-user in-flight claim. Boot recovery (rearmFromDurableState), the
-  // on_session_open reconnect replay, and the post-turn extractor can ALL call
-  // finalize concurrently, and the (read completed-gate → persona → materialize →
-  // write completed) sequence is NOT atomic — without a claim two callers both pass
-  // the gate and DOUBLE-compose persona + DOUBLE-materialize projects (Codex F8 P1).
-  // A `Set<user_id>` checked+added SYNCHRONOUSLY before any await is atomic in the
-  // single-threaded, single-owner Open process: exactly one finalize runs per user;
-  // the rest no-op. (Cross-process is precluded by one-process-per-NEUTRON_HOME.)
-  const inFlight = new Set<string>()
+  // COALESCE concurrent finalizes for the same user onto ONE in-flight run. Boot
+  // recovery (rearmFromDurableState), the on_session_open reconnect replay, and the
+  // post-turn extractor can ALL fire finalize at once, and the (read completed-gate →
+  // persona → materialize → write completed) sequence is NOT atomic — without
+  // coalescing two callers both pass the gate and DOUBLE-compose persona +
+  // DOUBLE-materialize projects (Codex F8 P1). A contender SHARES the active run's
+  // promise — success OR failure — rather than silently no-oping, so it can never
+  // falsely report success when the owner's terminal write fails (Codex F8 r2). The
+  // Map read/insert is atomic in the single-threaded, single-owner Open process
+  // (cross-process is precluded by one-process-per-NEUTRON_HOME).
+  const inFlight = new Map<string, Promise<void>>()
   return {
-    async finalize(input): Promise<void> {
-      if (inFlight.has(input.user_id)) {
-        log('info', 'finalize: already in-flight for this user; no-op', { user_id: input.user_id })
-        return
+    finalize(input): Promise<void> {
+      const existing = inFlight.get(input.user_id)
+      if (existing !== undefined) {
+        log('info', 'finalize: joining the in-flight finalize for this user', { user_id: input.user_id })
+        return existing
       }
-      inFlight.add(input.user_id)
-      try {
+      const running = (async (): Promise<void> => {
       // (1) Idempotency gate — a row already at `completed` is a no-op. We
       // read the LIVE row (not the passed-in snapshot) so a concurrent
       // finalize that already committed short-circuits us cleanly.
@@ -270,22 +272,22 @@ export function buildOnboardingFinalize(deps: OnboardingFinalizeDeps): Onboardin
         log,
       )
 
-      // (4) Terminal state — flip to `completed`. This is the load-bearing
-      // write: even if persona/projects partially failed, the user must not
-      // be stranded mid-onboarding.
-      let completedPersisted = false
-      try {
-        await deps.stateStore.upsert({
-          project_slug: deps.project_slug,
-          user_id: input.user_id,
-          phase: 'completed',
-          completed_at: now(),
-          wow_fired: true,
-        })
-        completedPersisted = true
-      } catch (err) {
-        log('error', 'finalize: terminal upsert failed', { err: errStr(err) })
-      }
+      // (4) Terminal state — flip to `completed`. Load-bearing: if THIS write fails
+      // the owner is NOT completed, so SURFACE the failure (reject) rather than
+      // pressing on to emit a "you're all set" closing for a row that isn't actually
+      // completed. The rejection reaches the caller (fireAndForget in boot recovery /
+      // the watcher + extractor try/catch) which logs it, and the NEXT finalize
+      // trigger (boot, reconnect, or the next turn) retries — finalize is idempotent.
+      // Coalesced contenders share THIS rejection, so none falsely reports success
+      // (Codex F8 r2). Persona/projects may have partially landed; the retry re-runs
+      // them idempotently.
+      await deps.stateStore.upsert({
+        project_slug: deps.project_slug,
+        user_id: input.user_id,
+        phase: 'completed',
+        completed_at: now(),
+        wow_fired: true,
+      })
 
       // (5) Live rail refresh.
       try {
@@ -299,17 +301,14 @@ export function buildOnboardingFinalize(deps: OnboardingFinalizeDeps): Onboardin
       // claim page on receipt; on Open self-host the client no-ops (no claim URL
       // in its bootstrap). Emitted BEFORE the closing/opening messages so a slow
       // opening compose can't delay the redirect, and independent of the
-      // `emitChatMessage` seam. GATED on the terminal upsert having SUCCEEDED —
-      // if the `completed` write failed (locked DB / disk full) the owner is not
-      // actually completed, so redirecting them to claim would pull them away
-      // from an unfinished onboarding (and the reconnect-recovery replay, which
-      // checks `phase === 'completed'`, would correctly NOT fire either). Best-effort.
-      if (completedPersisted) {
-        try {
-          deps.emitOnboardingCompleted?.(input.user_id)
-        } catch (err) {
-          log('warn', 'finalize: emitOnboardingCompleted failed', { err: errStr(err) })
-        }
+      // `emitChatMessage` seam. Reached ONLY after the terminal `completed` write
+      // succeeded (a failed write rejects above), so the owner really is completed
+      // and the reconnect-recovery replay — which checks `phase === 'completed'` —
+      // fires consistently. Best-effort.
+      try {
+        deps.emitOnboardingCompleted?.(input.user_id)
+      } catch (err) {
+        log('warn', 'finalize: emitOnboardingCompleted failed', { err: errStr(err) })
       }
 
       // (6) Per-project opening messages (item 7) — seed each newly-materialized
@@ -340,12 +339,15 @@ export function buildOnboardingFinalize(deps: OnboardingFinalizeDeps): Onboardin
           log('warn', 'finalize: closing message emit failed', { err: errStr(err) })
         }
       }
-      } finally {
-        // Release the claim so a LATER legitimate finalize (e.g. a genuinely new
-        // onboarding for the same user_id) isn't permanently blocked. The
-        // completed-gate above still no-ops a re-finalize of an already-completed row.
+      })()
+      // Release the claim once the run SETTLES (success or failure) so a later
+      // legitimate finalize (a genuinely new onboarding for the same user_id) isn't
+      // permanently blocked; the completed-gate no-ops a re-finalize of a done row.
+      const tracked = running.finally(() => {
         inFlight.delete(input.user_id)
-      }
+      })
+      inFlight.set(input.user_id, tracked)
+      return tracked
     },
   }
 }

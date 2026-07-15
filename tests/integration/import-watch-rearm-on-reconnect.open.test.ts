@@ -310,13 +310,18 @@ describe('Open import-watch re-arm on reconnect (restart resilience)', () => {
   }, 45_000)
 
   test('F8 — boot re-arm + reconnect double-arm consumes the stranded row exactly once (idempotent single-consumption)', async () => {
-    // F8 Care note: the `importWatchActive` guard makes double-arming safe. Boot
-    // WITH the stranded `import_analysis_presented` row (composition-boot arms one
-    // watcher) AND open a socket (on_session_open tries to arm a SECOND) — the
-    // guard dedups to a single watcher. Prove single-consumption: the row is
-    // consumed once to `work_interview_gap_fill` with a single `import_consumed_at`
-    // stamp that does NOT get rewritten by a racing second consume across
-    // subsequent watch ticks.
+    // Double-arm safety. Boot WITH the stranded `import_analysis_presented` row
+    // (composition-boot arms one watcher) AND open a socket (on_session_open tries to
+    // arm a SECOND). Single-consumption is guaranteed by the PHASE-GATED consume: the
+    // consume only transitions FROM `import_analysis_presented`, so once ANY watcher
+    // moves the row to `work_interview_gap_fill` a second watcher reads the advanced
+    // phase and no-ops — regardless of how many watchers armed. (The `importWatchActive`
+    // guard is a complementary EFFICIENCY optimization: it avoids arming a redundant
+    // second timer at all; it is deliberately NOT the correctness mechanism, so this
+    // outcome-level test does not — and cannot — isolate it. The failure it would guard
+    // against, a duplicate CONSUME, is precluded by the phase gate above.) Prove the
+    // invariant: the row is consumed once to `work_interview_gap_fill` with a single
+    // `import_consumed_at` stamp that is NOT rewritten across subsequent watch ticks.
     harness = await startHarness() // seeds import_analysis_presented before compose → boot arms
     const wsUrl = harness.base.replace(/^http/, 'ws')
     const ws = new WebSocket(`${wsUrl}/ws/app/chat?token=dev:owner&platform=web`)

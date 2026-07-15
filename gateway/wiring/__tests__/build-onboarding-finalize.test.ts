@@ -19,6 +19,7 @@ import { join } from 'node:path'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { SqliteOnboardingStateStore } from '@neutronai/onboarding/interview/sqlite-state-store.ts'
+import type { OnboardingStateStore } from '@neutronai/onboarding/interview/state-store.ts'
 import { slugifyProjectId } from '@neutronai/onboarding/wow-moment/project-identity.ts'
 import { MAX_ANALYSIS_PROJECTS } from '@neutronai/onboarding/interview/phase-prompts.ts'
 import {
@@ -125,6 +126,60 @@ test('CONCURRENT finalize (boot + reconnect) does the work EXACTLY ONCE — atom
   // completed-gate) — the claim never permanently blocks a genuine future finalize.
   await finalizer.finalize({ user_id: USER_ID, topic_id: TOPIC_ID, state: seeded })
   expect(h.persona.committed).toBe(1)
+})
+
+test('CONCURRENT finalize whose TERMINAL write FAILS — both callers observe the failure, none falsely succeeds (F8 r2)', async () => {
+  const h = makeHarness()
+  const seeded = await h.stateStore.upsert({
+    project_slug: PROJECT_SLUG,
+    user_id: USER_ID,
+    phase: 'persona_reviewed',
+    phase_state_patch: {
+      user_first_name: 'Sam',
+      agent_name: 'Atlas',
+      primary_projects: ['Topline Revenue'],
+    },
+  })
+
+  // Wrap the real store so the load-bearing `completed` upsert throws (locked DB /
+  // disk full); every other read/write delegates normally.
+  const real = h.stateStore
+  let completedAttempts = 0
+  const failingStore: OnboardingStateStore = {
+    async get(slug, uid) { return real.get(slug, uid) },
+    async upsert(inp) {
+      if (inp.phase === 'completed') { completedAttempts += 1; throw new Error('terminal upsert boom') }
+      return real.upsert(inp)
+    },
+    async rekey(a, b, c) { return real.rekey(a, b, c) },
+    async delete(slug, uid) { return real.delete(slug, uid) },
+    async deleteByOwner(slug) { return real.deleteByOwner(slug) },
+  }
+  const finalizer = buildOnboardingFinalize({ ...h.deps, stateStore: failingStore })
+
+  // Two concurrent finalizes. Coalescing runs ONE body; its terminal write throws, so
+  // the SHARED promise rejects — BOTH callers must see it (allSettled → both
+  // 'rejected'), never a false 'fulfilled' where a contender returns success while the
+  // row is not completed. Pre-fix (silent Set no-op + swallowed terminal error) the
+  // contender returned 'fulfilled' and no caller completed the row.
+  const settled = await Promise.allSettled([
+    finalizer.finalize({ user_id: USER_ID, topic_id: TOPIC_ID, state: seeded }),
+    finalizer.finalize({ user_id: USER_ID, topic_id: TOPIC_ID, state: seeded }),
+  ])
+  expect(settled.map((s) => s.status)).toEqual(['rejected', 'rejected'])
+  expect(completedAttempts).toBe(1) // coalesced: the body ran once (not once-per-caller)
+
+  // The row is NOT completed — it stays pre-terminal for a later retry, and the
+  // one-shot completed signal never fired (we never reached it).
+  expect((await real.get(PROJECT_SLUG, USER_ID))?.phase).not.toBe('completed')
+  expect(h.onboardingCompleted.filter((u) => u === USER_ID)).toHaveLength(0)
+
+  // The claim was RELEASED on rejection: a later finalize against a HEALED store
+  // completes cleanly (idempotent retry), proving a transient terminal failure isn't
+  // a permanent wedge.
+  const healed = buildOnboardingFinalize(h.deps)
+  await healed.finalize({ user_id: USER_ID, topic_id: TOPIC_ID, state: seeded })
+  expect((await real.get(PROJECT_SLUG, USER_ID))?.phase).toBe('completed')
 })
 
 test('finalize completes onboarding: persona, projects row, rail refresh', async () => {
@@ -242,7 +297,11 @@ test('finalize does NOT emit the onboarding-complete signal when the terminal up
   }) as typeof realStore.upsert
 
   const finalizer = buildOnboardingFinalize({ ...h.deps, stateStore: throwingStore })
-  await finalizer.finalize({ user_id: USER_ID, topic_id: TOPIC_ID, state: seeded })
+  // The terminal write fails → finalize SURFACES it (rejects) so the caller retries
+  // on the next trigger and a coalesced contender can't falsely report success (F8 r2).
+  await expect(
+    finalizer.finalize({ user_id: USER_ID, topic_id: TOPIC_ID, state: seeded }),
+  ).rejects.toThrow('locked db')
 
   // The row never reached `completed`, so the claim-redirect signal must NOT
   // fire — otherwise a Managed client would be pulled to the claim flow despite
