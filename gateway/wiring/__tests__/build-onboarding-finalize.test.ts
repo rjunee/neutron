@@ -89,6 +89,44 @@ function makeHarness(): Harness {
   return { db, stateStore, ownerHome, persona, invalidated, projectsChanged, onboardingCompleted, deps }
 }
 
+test('CONCURRENT finalize (boot + reconnect) does the work EXACTLY ONCE — atomic in-flight claim (F8 P1)', async () => {
+  const h = makeHarness()
+  const seeded = await h.stateStore.upsert({
+    project_slug: PROJECT_SLUG,
+    user_id: USER_ID,
+    phase: 'persona_reviewed',
+    phase_state_patch: {
+      user_first_name: 'Sam',
+      agent_name: 'Atlas',
+      primary_projects: ['Topline Revenue'],
+    },
+  })
+  const finalizer = buildOnboardingFinalize(h.deps)
+
+  // The exact F8 race: rearmFromDurableState (boot) + on_session_open (reconnect) both
+  // invoke the SAME finalizer for the SAME user before either terminal write. Without
+  // an atomic claim BOTH pass the completed-gate → double persona composition + double
+  // materialization + double completion side effects. Promise.all starts call #1's sync
+  // prefix (claim added before its first await), so call #2's sync claim-check sees the
+  // in-flight user and no-ops.
+  await Promise.all([
+    finalizer.finalize({ user_id: USER_ID, topic_id: TOPIC_ID, state: seeded }),
+    finalizer.finalize({ user_id: USER_ID, topic_id: TOPIC_ID, state: seeded }),
+  ])
+
+  // Persona composed/committed ONCE (not twice); rail refreshed once; row completed.
+  expect(h.persona.committed).toBe(1)
+  expect(h.persona.composed).toBe(1)
+  expect(h.projectsChanged.filter((u) => u === USER_ID)).toHaveLength(1)
+  expect(h.onboardingCompleted.filter((u) => u === USER_ID)).toHaveLength(1)
+  expect((await h.stateStore.get(PROJECT_SLUG, USER_ID))?.phase).toBe('completed')
+
+  // And a LATER finalize of the now-completed row is a clean no-op (claim released +
+  // completed-gate) — the claim never permanently blocks a genuine future finalize.
+  await finalizer.finalize({ user_id: USER_ID, topic_id: TOPIC_ID, state: seeded })
+  expect(h.persona.committed).toBe(1)
+})
+
 test('finalize completes onboarding: persona, projects row, rail refresh', async () => {
   const h = makeHarness()
 

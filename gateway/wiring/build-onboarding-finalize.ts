@@ -219,8 +219,23 @@ export function buildOnboardingFinalize(deps: OnboardingFinalizeDeps): Onboardin
       )
     })
 
+  // ATOMIC per-user in-flight claim. Boot recovery (rearmFromDurableState), the
+  // on_session_open reconnect replay, and the post-turn extractor can ALL call
+  // finalize concurrently, and the (read completed-gate → persona → materialize →
+  // write completed) sequence is NOT atomic — without a claim two callers both pass
+  // the gate and DOUBLE-compose persona + DOUBLE-materialize projects (Codex F8 P1).
+  // A `Set<user_id>` checked+added SYNCHRONOUSLY before any await is atomic in the
+  // single-threaded, single-owner Open process: exactly one finalize runs per user;
+  // the rest no-op. (Cross-process is precluded by one-process-per-NEUTRON_HOME.)
+  const inFlight = new Set<string>()
   return {
     async finalize(input): Promise<void> {
+      if (inFlight.has(input.user_id)) {
+        log('info', 'finalize: already in-flight for this user; no-op', { user_id: input.user_id })
+        return
+      }
+      inFlight.add(input.user_id)
+      try {
       // (1) Idempotency gate — a row already at `completed` is a no-op. We
       // read the LIVE row (not the passed-in snapshot) so a concurrent
       // finalize that already committed short-circuits us cleanly.
@@ -324,6 +339,12 @@ export function buildOnboardingFinalize(deps: OnboardingFinalizeDeps): Onboardin
         } catch (err) {
           log('warn', 'finalize: closing message emit failed', { err: errStr(err) })
         }
+      }
+      } finally {
+        // Release the claim so a LATER legitimate finalize (e.g. a genuinely new
+        // onboarding for the same user_id) isn't permanently blocked. The
+        // completed-gate above still no-ops a re-finalize of an already-completed row.
+        inFlight.delete(input.user_id)
       }
     },
   }
