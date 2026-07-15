@@ -755,7 +755,7 @@ export function defaultHealthzHandler(opts: {
  * those imports are legal). This Open boot shell now takes the composer
  * as DEPLOY-CONFIG INJECTION: the per-instance systemd unit sets
  *
- *   Environment=NEUTRON_GRAPH_COMPOSER_MODULE=provisioning/wiring.ts
+ *   Environment=NEUTRON_GRAPH_COMPOSER_MODULE=provisioning/realmode-composer.ts
  *
  * and the entrypoint dynamic-imports that path (resolved against the
  * repo root for relative values) and calls its exported
@@ -798,7 +798,7 @@ export async function loadGraphComposerFromEnv(
           '[boot] FATAL: NEUTRON_AUTH_JWKS_URL is set (realmode requested) but ' +
           'NEUTRON_GRAPH_COMPOSER_MODULE is not — the graph composer is ' +
           'deploy-config injection since C2. Managed units set it to ' +
-          'owner-provisioning/wiring.ts; run ' +
+          'owner-provisioning/realmode-composer.ts; run ' +
           'scripts/install/migrate-owners-graph-composer.sh for pre-C2 units.',
       })
       process.exit(1)
