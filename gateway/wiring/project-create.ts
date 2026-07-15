@@ -217,24 +217,6 @@ export async function createProjectRow(
 }
 
 /**
- * Soft-delete a `projects` row (set `deleted_at`). Used by the Path-1 finalizer to clean up
- * a project it CREATED on a stable state that a mutation then dropped in the tiny
- * materialize→CAS window (the CAS lost, so the row is orphaned). Idempotent — guarded on
- * `deleted_at IS NULL`. Lives here because `project-create.ts` is the sanctioned onboarding
- * `projects` writer (migrations/table-ownership.json); the finalizer must NOT write directly.
- */
-export async function softDeleteProjectRow(
-  db: ProjectDb,
-  project_id: string,
-  now: number,
-): Promise<void> {
-  await db.run(
-    `UPDATE projects SET deleted_at = ?, updated_at = ? WHERE id = ? AND deleted_at IS NULL`,
-    [now, now, project_id],
-  )
-}
-
-/**
  * Materialize the on-disk doc set + git repo + MEMORY/gbrain page for a project
  * whose row already exists. Best-effort + non-throwing (the materializer's own
  * contract); a failure lands in its outcome only and never rolls back the row.

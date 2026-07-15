@@ -496,7 +496,7 @@ test('finalize refuses a non-finalizable phase even when the live read THROWS �
   expect(h.onboardingCompleted).toEqual([])
 })
 
-test('finalize cleans up a project dropped in the materialize→CAS window (no stale live row) (F8 r16)', async () => {
+test('finalize DEFERS on a mutation in the materialize→CAS window WITHOUT unsafely deleting the created row (F8 r16/r17)', async () => {
   const h = makeHarness()
   const seeded = await h.stateStore.upsert({
     project_slug: PROJECT_SLUG,
@@ -505,10 +505,11 @@ test('finalize cleans up a project dropped in the materialize→CAS window (no s
     phase_state_patch: { user_first_name: 'Sam', agent_name: 'Atlas', primary_projects: ['Alpha'] },
   })
 
-  // A CAS wrapper injects the mutation in the exact materialize→CAS window: on the CAS call
-  // it first drops Alpha for Beta, THEN delegates (so the real CAS loses). finalize
-  // materialized Alpha on the stable [Alpha] state; the CAS-loss cleanup must soft-delete
-  // that now-orphaned Alpha row (created this run, dropped by the fresh state).
+  // A CAS wrapper injects a mutation in the exact materialize→CAS window: on the CAS call it
+  // first drops Alpha for Beta, THEN delegates (so the real CAS loses). finalize materialized
+  // Alpha on the stable [Alpha] state. It DEFERS — and DELIBERATELY does NOT soft-delete
+  // Alpha: post-hoc cleanup is unsafe (soft-deletes are un-resurrectable in ensureProjectRow,
+  // and project ids are shared across users; Codex F8 r17). The benign stray row is accepted.
   const real = h.stateStore
   let casCalls = 0
   const casWrapper: OnboardingStateStore = {
@@ -533,20 +534,16 @@ test('finalize cleans up a project dropped in the materialize→CAS window (no s
   const finalizer = buildOnboardingFinalize({ ...h.deps, stateStore: casWrapper })
   const result = await finalizer.finalize({ user_id: USER_ID, topic_id: TOPIC_ID, state: seeded })
 
-  expect(result).toBe(false) // CAS lost → deferred
-  // Alpha was created on the stable state, then dropped in the window → soft-deleted.
+  // Deferred, not completed.
+  expect(result).toBe(false)
+  expect((await real.get(PROJECT_SLUG, USER_ID))?.phase).not.toBe('completed')
+  // Alpha's row is NOT soft-deleted — so a retry (or another user sharing the id) can still
+  // use it. This is the SAFE choice: no un-resurrectable / cross-user delete (Codex F8 r17).
   const alpha = h.db
     .raw()
     .query('SELECT deleted_at FROM projects WHERE id = ?')
     .get(slugifyProjectId('Alpha')) as { deleted_at: number | null } | null
-  expect(alpha, 'Alpha row exists').not.toBeNull()
-  expect(alpha?.deleted_at, 'Alpha soft-deleted').not.toBeNull()
-  // No LIVE stale project row remains.
-  expect(
-    (h.db.raw().query('SELECT COUNT(*) AS n FROM projects WHERE deleted_at IS NULL').get() as {
-      n: number
-    }).n,
-  ).toBe(0)
+  expect(alpha?.deleted_at, 'created row left intact — no unsafe cleanup').toBeNull()
 })
 
 test('finalize ABORTS (never completes) if the phase transitions to a live import mid-run (F8 r10)', async () => {
