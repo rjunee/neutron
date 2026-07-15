@@ -182,6 +182,42 @@ test('CONCURRENT finalize whose TERMINAL write FAILS — both callers observe th
   expect((await real.get(PROJECT_SLUG, USER_ID))?.phase).toBe('completed')
 })
 
+test('finalize operates on the LIVE durable state, not a stale caller snapshot (F8 r3)', async () => {
+  const h = makeHarness()
+  // Snapshot A — the state a caller captured with ONE project.
+  const snapA = await h.stateStore.upsert({
+    project_slug: PROJECT_SLUG,
+    user_id: USER_ID,
+    phase: 'persona_reviewed',
+    phase_state_patch: {
+      user_first_name: 'Sam',
+      agent_name: 'Atlas',
+      primary_projects: ['Alpha'],
+    },
+  })
+  // Durable state ADVANCES to B (an added project) before finalize runs — exactly
+  // the coalescing boundary: a newer caller persisted more, then the older caller's
+  // run wins the race carrying the stale snapshot A.
+  await h.stateStore.upsert({
+    project_slug: PROJECT_SLUG,
+    user_id: USER_ID,
+    phase: 'persona_reviewed',
+    phase_state_patch: { primary_projects: ['Alpha', 'Beta'] },
+  })
+
+  // Finalize with the STALE snapshot A. finalize re-reads live durable state after
+  // claiming, so it materializes BOTH Alpha AND Beta (the live set). Pre-fix (frozen
+  // input.state) it materialized only Alpha and `completed` suppressed Beta forever.
+  const finalizer = buildOnboardingFinalize(h.deps)
+  await finalizer.finalize({ user_id: USER_ID, topic_id: TOPIC_ID, state: snapA })
+
+  const names = (
+    h.db.raw().query('SELECT name FROM projects ORDER BY name').all() as { name: string }[]
+  ).map((r) => r.name)
+  expect(names).toContain('Alpha')
+  expect(names).toContain('Beta')
+})
+
 test('finalize completes onboarding: persona, projects row, rail refresh', async () => {
   const h = makeHarness()
 

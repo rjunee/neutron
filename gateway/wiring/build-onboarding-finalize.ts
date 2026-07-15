@@ -26,13 +26,16 @@
  *      `wow_fired:true`).
  *   5. Live rail — `emitProjectsChanged(user_id)` so the project rail refreshes.
  *
- * Discipline (mirrors the wow-moment spec § 4.2): EVERY step is best-effort
- * and failure-isolated. `finalize` never throws to its caller (the caller is a
- * fire-and-forget scribe); a persona, materialize, or DB failure is swallowed +
- * logged and never aborts the remaining steps. The phase is still flipped to
- * `completed` even if persona/project work partially failed — persona can
- * regenerate later and the daily overnight re-fire backfills missing on-disk
- * project repos (the materializer's STATUS.md marker keeps re-runs idempotent).
+ * Discipline (mirrors the wow-moment spec § 4.2): the persona + project steps are
+ * best-effort and failure-isolated — a persona or materialize failure is swallowed
+ * + logged and never aborts the remaining steps, and the phase still flips to
+ * `completed` even if that work partially failed (persona regenerates later and the
+ * daily overnight re-fire backfills missing on-disk project repos; the
+ * materializer's STATUS.md marker keeps re-runs idempotent). The ONE exception is
+ * the load-bearing terminal `completed` write: if IT fails, `finalize` REJECTS
+ * (rather than reporting a false completion) so the throw-tolerant caller (a
+ * fire-and-forget scribe / boot recovery) logs it and the next trigger retries, and
+ * a coalesced contender sees the same rejection instead of a false success.
  */
 
 import { dirname, join } from 'node:path'
@@ -183,20 +186,28 @@ export interface OnboardingFinalizeDeps {
 
 export interface OnboardingFinalizer {
   /**
-   * Idempotent. When called:
-   *  1. If state.phase is already 'completed', return immediately (idempotent).
-   *  2. Compose + commit the owner persona files from phase_state, then
+   * Idempotent + single-flight per user. When called:
+   *  1. Concurrent finalizes for the SAME user COALESCE onto one run — a later
+   *     caller SHARES the in-flight run's outcome (success or failure) rather than
+   *     double-running or silently no-oping.
+   *  2. Read the LIVE durable row. If it is already 'completed', return
+   *     immediately. Otherwise this live row — NOT the passed-in `state` snapshot,
+   *     which may be stale by the time this run wins the coalescing race — is what
+   *     persona + materialization operate on, so whichever caller wins finalizes
+   *     the FRESHEST committed state.
+   *  3. Compose + commit the owner persona files from the live phase_state, then
    *     personaLoader.invalidate() so the next chat turn loads the real persona.
-   *  3. Materialize each project the user named (phase_state.primary_projects)
-   *     — OR import_result.proposed_projects when an import_result is supplied —
+   *  4. Materialize each project named in the live phase_state.primary_projects
+   *     — OR import_result.proposed_projects when an import_result is present —
    *     into: a real `projects` DB row + its General/topic binding, on-disk
-   *     Projects/<slug>/ docs, and a MEMORY/gbrain project page. Reuse the
-   *     existing project materializer; do NOT re-present any button prompt.
-   *  4. stateStore.upsert phase:'completed', completed_at, wow_fired:true.
-   *  5. emitProjectsChanged(user_id) so the rail refreshes live.
-   * Never throws to the caller (the caller is a fire-and-forget scribe). Swallow
-   * + log per-step failures; persona/materialize/db failures must not abort the
-   * others (best-effort, each isolated).
+   *     Projects/<slug>/ docs, and a MEMORY/gbrain project page.
+   *  5. stateStore.upsert phase:'completed', completed_at, wow_fired:true.
+   *  6. emitProjectsChanged(user_id) so the rail refreshes live.
+   * Per-step persona/materialize failures are SWALLOWED + logged (best-effort,
+   * each isolated). The LOAD-BEARING terminal `completed` write is the exception:
+   * if it fails, finalize REJECTS so the caller (a throw-tolerant fire-and-forget
+   * scribe / boot recovery) logs it and the next trigger retries — and a coalesced
+   * contender observes the SAME rejection instead of a false success.
    */
   finalize(input: {
     user_id: string
@@ -238,35 +249,51 @@ export function buildOnboardingFinalize(deps: OnboardingFinalizeDeps): Onboardin
         return existing
       }
       const running = (async (): Promise<void> => {
-      // (1) Idempotency gate — a row already at `completed` is a no-op. We
-      // read the LIVE row (not the passed-in snapshot) so a concurrent
-      // finalize that already committed short-circuits us cleanly.
+      // (1) Idempotency gate + FRESH SNAPSHOT. Read the LIVE durable row rather
+      // than trusting the passed-in `input.state`, which can be stale by the time
+      // this run wins the coalescing race — a newer caller that joined us may have
+      // persisted additional fields/projects durably first. A row already at
+      // `completed` is a no-op; otherwise the live row is what persona +
+      // materialization operate on, so whichever caller wins finalizes the FRESHEST
+      // committed state (Codex F8 r3). Fall back to the caller snapshot only if the
+      // read fails.
+      let effectiveState = input.state
       try {
         const live = await deps.stateStore.get(deps.project_slug, input.user_id)
-        if (live !== null && live.phase === 'completed') {
-          log('info', 'finalize: already completed; no-op', { user_id: input.user_id })
-          return
+        if (live !== null) {
+          if (live.phase === 'completed') {
+            log('info', 'finalize: already completed; no-op', { user_id: input.user_id })
+            return
+          }
+          effectiveState = live
         }
       } catch (err) {
-        // A state read failure must not strand the user — fall through and
-        // attempt the work; the terminal upsert below re-asserts the phase.
-        log('warn', 'finalize: state read failed; continuing', { err: errStr(err) })
+        // A state read failure must not strand the user — fall through with the
+        // passed-in snapshot; the terminal upsert below re-asserts the phase.
+        log('warn', 'finalize: state read failed; using caller snapshot', { err: errStr(err) })
       }
 
-      const import_result = input.import_result ?? null
+      // Prefer the live row's import_result (freshest); fall back to the caller's
+      // (e.g. when the live read failed and we're on the passed-in snapshot).
+      const liveImportResult =
+        effectiveState.phase_state['import_result'] !== null &&
+        typeof effectiveState.phase_state['import_result'] === 'object'
+          ? (effectiveState.phase_state['import_result'] as ImportResult)
+          : null
+      const import_result = liveImportResult ?? input.import_result ?? null
 
-      // (2) Persona — compose + commit from phase_state, then invalidate the
-      // steady-state loader. Failure-isolated: on any error we log and press
+      // (2) Persona — compose + commit from the live phase_state, then invalidate
+      // the steady-state loader. Failure-isolated: on any error we log and press
       // on (the phase still flips to completed; persona regenerates later).
-      await commitPersona(deps, input.state, log)
+      await commitPersona(deps, effectiveState, log)
 
-      // (3) Projects — DB rows + topic bindings + on-disk materialization.
-      // Returns the projects that actually landed (created/existing, not the
-      // soft-deleted skips) so the per-project opening step below can seed each
-      // one's chat.
+      // (3) Projects — DB rows + topic bindings + on-disk materialization from the
+      // live phase_state. Returns the projects that actually landed (created/
+      // existing, not the soft-deleted skips) so the per-project opening step below
+      // can seed each one's chat.
       const materialized = await materializeProjects(
         deps,
-        input.state,
+        effectiveState,
         import_result,
         now,
         log,
