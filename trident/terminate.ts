@@ -20,10 +20,13 @@
  *   2. runs the SAME terminal-observer chain the loop uses — or RECORDS why it
  *      didn't (`skipped_reason`), so a deliberate skip is explicit, never silent.
  *
- * Deliberate skips are first-class: `/code stop` passes `runObservers:false`
- * because it already replies to the user synchronously, so firing delivery would
- * DOUBLE-notify. The board delete path fires the full chain (`runObservers`
- * defaults true) — that is the F6a fix.
+ * Deliberate skips are first-class: the `runObservers:false` option suppresses the
+ * WHOLE chain for a caller that wants a bare terminal write. `/code stop` does NOT
+ * use it — it replies to the user synchronously (so a delivery post would
+ * DOUBLE-notify), yet its bound board card must still be reconciled, so it composes
+ * a NO-OP delivery hook + the real board-reconcile observer instead (Codex r6). The
+ * board delete path fires the full chain (delivery + reconcile + skill-forge) — the
+ * original F6a fix.
  *
  * Observer failures are caught + logged here (not propagated): these callers are
  * best-effort cancel paths (the row is already committed terminal), so a delivery

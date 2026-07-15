@@ -213,6 +213,29 @@ describe('/code <task> creates a code_trident_runs row', () => {
     expect(stop!.error).toBeUndefined()
   })
 
+  test('§F6a (r6): a board-bound /code stop RECONCILES the card (marks failed) without a duplicate delivery', async () => {
+    // /code stop skips delivery (it replies synchronously) but MUST still reconcile
+    // the bound card via the board-reconcile observer — the same reconcile the board
+    // DELETE path runs. A stop that only wrote the phase (pre-r6) left the card
+    // showing a stale "building" state.
+    const detached: Array<{ run_id: string; outcome: 'done' | 'failed' }> = []
+    const board = boardStub({
+      detachRun: async (_slug, run_id, outcome) => {
+        detached.push({ run_id, outcome })
+        return null
+      },
+    })
+    const created = (await parseAndExecuteCodeCommand('/code --item item-1 build', ctx({ work_board: board })))!
+      .data as { run_id: string }
+
+    const stop = await parseAndExecuteCodeCommand('/code stop', ctx({ work_board: board }))
+
+    expect(stop!.text).toContain('Stopped')
+    expect(store.get(created.run_id)!.phase).toBe('stopped')
+    // The card was reconciled: a stopped run maps to the `failed` board outcome.
+    expect(detached).toEqual([{ run_id: created.run_id, outcome: 'failed' }])
+  })
+
   test('§F6a race: /code stop reports accurately when the run finished first (lost race)', async () => {
     // The run is active when `resolveStopTarget` reads it, but the tick loop wins
     // the terminal transition (commits `done`) before `terminate()` executes. The

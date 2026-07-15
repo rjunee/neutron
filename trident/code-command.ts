@@ -25,6 +25,8 @@
 import type { Topic } from '@neutronai/channels/types.ts'
 import type { MergeMode, TridentRun, TridentRunStore } from './store.ts'
 import { buildTridentTerminator } from './terminate.ts'
+import { buildBoardReconcileObserver, type TridentBoardReconciler } from './board-reconcile.ts'
+import { composeTerminalHook } from './terminal-observer.ts'
 import { dispatchBoardBoundBuild, type TridentBoardBinder } from './board-dispatch.ts'
 
 export type CodeCommand =
@@ -266,12 +268,18 @@ async function executeStop(
       : { text: `🛠 No in-flight \`/code\` build to stop in project \`${ctx.project_slug}\`.` }
   }
   // §F6a — route the terminal write through the ONE `terminate()` chokepoint.
-  // `runObservers:false`: this command replies to the user synchronously (below),
-  // so firing the delivery observer would DOUBLE-notify. The chokepoint records
-  // the deliberate skip (`caller_notifies`) rather than silently bypassing it.
-  const result = await buildTridentTerminator({ store: ctx.store }).terminate(target.id, 'stopped', {
-    runObservers: false,
-  })
+  // `/code stop` replies to the user synchronously (below), so firing the DELIVERY
+  // observer would DOUBLE-notify — but the bound board card MUST still be
+  // reconciled (marked failed, retry binding preserved), exactly as the board
+  // DELETE path does (Codex r6). So run the NON-delivery board-reconcile observer
+  // under a NO-OP delivery hook: the card reconciles without a second chat post.
+  const reconcile =
+    typeof ctx.work_board.detachRun === 'function'
+      ? buildBoardReconcileObserver(ctx.work_board as TridentBoardReconciler)
+      : null
+  const observer =
+    reconcile !== null ? composeTerminalHook({ onTerminal: async (): Promise<void> => {} }, [reconcile]) : null
+  const result = await buildTridentTerminator({ store: ctx.store, observer }).terminate(target.id, 'stopped', {})
   // The `resolveStopTarget` read can go stale in the await gap: the tick loop may
   // finish the run first, so the atomic transition LOSES (`won:false`). Report
   // accurately rather than claim a stop that never happened (Codex r4, mirrors the
