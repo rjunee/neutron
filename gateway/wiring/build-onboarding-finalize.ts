@@ -282,11 +282,17 @@ export function buildOnboardingFinalize(deps: OnboardingFinalizeDeps): Onboardin
       // materialization). Persona compose above is the dominant await; a field/project
       // the owner added DURING it (e.g. the post-turn extractor persisting one more
       // primary project, then its finalize coalescing into THIS run) is still picked up
-      // here and materialized. This narrows the mutate-during-finalize window (Codex F8
-      // r3/r4) to just the materialize→terminal-write span. Closing that residual span
-      // fully needs a CAS terminal write (durable-row revision support the store lacks
-      // today) — tracked as [[f8-finalize-cas-followup]]; real-world impact is a single
-      // project named in the last sub-second of onboarding, which the owner can re-create.
+      // here and materialized.
+      //
+      // OPTIMISTIC READ-COMPARE-MATERIALIZE LOOP (Codex F8 r5). Even after re-reading,
+      // a project could land DURING materializeProjects' awaits and then be permanently
+      // suppressed once we mark `completed`. Close that window WITHOUT store CAS support:
+      // materialize, then RE-READ; if the project set grew, re-materialize the fuller
+      // (idempotent) set and re-check. Fall through to the terminal write ONLY on a
+      // re-read that shows NO change — and because NO await separates that stable check
+      // from the `completed` upsert below, no mutation can interleave in the gap
+      // (single-threaded), so a completed row can never suppress an un-materialized
+      // project. Bounded to avoid a pathological livelock of continuous mutation.
       let materializeState = effectiveState
       try {
         const fresh = await deps.stateStore.get(deps.project_slug, input.user_id)
@@ -306,22 +312,50 @@ export function buildOnboardingFinalize(deps: OnboardingFinalizeDeps): Onboardin
 
       // Prefer the freshest row's import_result; fall back to the caller's (e.g. when a
       // read failed and we're on the passed-in snapshot).
-      const materializeImportResult =
-        materializeState.phase_state['import_result'] !== null &&
-        typeof materializeState.phase_state['import_result'] === 'object'
-          ? (materializeState.phase_state['import_result'] as ImportResult)
+      const deriveImportResult = (s: OnboardingState): ImportResult | null =>
+        s.phase_state['import_result'] !== null && typeof s.phase_state['import_result'] === 'object'
+          ? (s.phase_state['import_result'] as ImportResult)
           : null
-      const import_result = materializeImportResult ?? input.import_result ?? null
+      // Stable comparison key for the materialization-driving project set (the field the
+      // post-turn extractor mutates). Set-equality via sort so order can't false-trigger.
+      const projectSetKey = (s: OnboardingState): string => {
+        const raw = s.phase_state['primary_projects']
+        const arr = Array.isArray(raw) ? (raw as unknown[]).map(String) : []
+        return [...arr].sort().join(',')
+      }
 
-      // Returns the projects that actually landed (created/existing, not the
-      // soft-deleted skips) so the per-project opening step below can seed each chat.
-      const materialized = await materializeProjects(
-        deps,
-        materializeState,
-        import_result,
-        now,
-        log,
-      )
+      let import_result = deriveImportResult(materializeState) ?? input.import_result ?? null
+      // Returns the projects that actually landed (created/existing, not the soft-deleted
+      // skips) so the per-project opening step below can seed each chat.
+      let materialized = await materializeProjects(deps, materializeState, import_result, now, log)
+
+      const MAX_MATERIALIZE_REPASSES = 4
+      for (let pass = 0; pass < MAX_MATERIALIZE_REPASSES; pass++) {
+        let after: OnboardingState | null
+        try {
+          after = await deps.stateStore.get(deps.project_slug, input.user_id)
+        } catch (err) {
+          log('warn', 'finalize: post-materialize re-read failed; completing with current set', {
+            err: errStr(err),
+          })
+          break
+        }
+        if (after === null) break
+        if (after.phase === 'completed') {
+          log('info', 'finalize: completed concurrently; no-op', { user_id: input.user_id })
+          return
+        }
+        if (projectSetKey(after) === projectSetKey(materializeState)) break // stable — safe to complete
+        // A project landed during materialize — re-materialize the fuller set (idempotent).
+        materializeState = after
+        import_result = deriveImportResult(after) ?? import_result
+        materialized = await materializeProjects(deps, after, import_result, now, log)
+        if (pass === MAX_MATERIALIZE_REPASSES - 1) {
+          log('warn', 'finalize: project set still churning after max repasses; completing', {
+            user_id: input.user_id,
+          })
+        }
+      }
 
       // (4) Terminal state — flip to `completed`. Load-bearing: if THIS write fails
       // the owner is NOT completed, so SURFACE the failure (reject) rather than

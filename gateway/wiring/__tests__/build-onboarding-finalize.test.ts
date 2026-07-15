@@ -232,6 +232,65 @@ test('finalize picks up a project persisted DURING the run — interleaved mutat
   expect(names).toContain('Beta') // the interleaved write is materialized, not suppressed
 })
 
+test('finalize re-materializes a project that lands DURING materialization — post-materialize re-read loop (F8 r5)', async () => {
+  const h = makeHarness()
+  const seeded = await h.stateStore.upsert({
+    project_slug: PROJECT_SLUG,
+    user_id: USER_ID,
+    phase: 'persona_reviewed',
+    phase_state_patch: {
+      user_first_name: 'Sam',
+      agent_name: 'Atlas',
+      primary_projects: ['Alpha'],
+    },
+  })
+
+  const real = h.stateStore
+  let injected = false
+  // True once materialize has created Alpha's project row — i.e. we're in a
+  // POST-materialize read (the pre-materialize read runs before any project row exists).
+  const alphaMaterialized = (): boolean =>
+    (h.db.raw().query('SELECT 1 FROM projects WHERE id = ?').get(slugifyProjectId('Alpha')) as
+      | unknown
+      | null) != null
+
+  // Wrap get() to inject 'Beta' EXACTLY ONCE on the first post-materialize read —
+  // simulating the extractor persisting one more project DURING materialization, the
+  // exact window Codex F8 r5 flagged. The read-compare loop must then re-materialize Beta
+  // (and complete only once a re-read is stable), rather than suppressing it via completed.
+  const mutatingStore: OnboardingStateStore = {
+    async get(slug, uid) {
+      const state = await real.get(slug, uid)
+      const projects = (state?.phase_state['primary_projects'] as string[] | undefined) ?? []
+      if (!injected && state !== null && alphaMaterialized() && !projects.includes('Beta')) {
+        injected = true
+        await real.upsert({
+          project_slug: PROJECT_SLUG,
+          user_id: USER_ID,
+          phase: 'persona_reviewed',
+          phase_state_patch: { primary_projects: ['Alpha', 'Beta'] },
+        })
+        return real.get(slug, uid)
+      }
+      return state
+    },
+    async upsert(inp) { return real.upsert(inp) },
+    async rekey(a, b, c) { return real.rekey(a, b, c) },
+    async delete(slug, uid) { return real.delete(slug, uid) },
+    async deleteByOwner(slug) { return real.deleteByOwner(slug) },
+  }
+  const finalizer = buildOnboardingFinalize({ ...h.deps, stateStore: mutatingStore })
+  await finalizer.finalize({ user_id: USER_ID, topic_id: TOPIC_ID, state: seeded })
+
+  expect(injected).toBe(true) // the mutation-during-materialize actually fired
+  const names = (
+    h.db.raw().query('SELECT name FROM projects ORDER BY name').all() as { name: string }[]
+  ).map((r) => r.name)
+  expect(names).toContain('Alpha')
+  expect(names).toContain('Beta') // re-materialized by the loop, NOT suppressed by completed
+  expect((await real.get(PROJECT_SLUG, USER_ID))?.phase).toBe('completed')
+})
+
 test('finalize operates on the LIVE durable state, not a stale caller snapshot (F8 r3)', async () => {
   const h = makeHarness()
   // Snapshot A — the state a caller captured with ONE project.
