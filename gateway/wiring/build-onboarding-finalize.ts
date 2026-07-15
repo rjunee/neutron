@@ -319,11 +319,13 @@ export function buildOnboardingFinalize(deps: OnboardingFinalizeDeps): Onboardin
       // materialized: the projects that actually landed (created/existing, not the
       // soft-deleted skips) — the per-project opening step below seeds each one's chat.
       let materialized: MaterializedProject[] = []
-      // Every project id THIS run materialized across ALL passes — so that if a project an
-      // earlier (stale) pass created is DROPPED by a later pass (removed from
-      // primary_projects / added to dropped_projects), we can reconcile it away after
-      // completion instead of leaving a stray live row (Codex F8 r8/r11).
-      const materializedIdsAllPasses = new Set<string>()
+      // Every project id THIS run CREATED across ALL passes (NOT pre-existing rows it
+      // merely bound to) — so that if a project an earlier (stale) pass created is DROPPED
+      // by a later pass (removed from primary_projects / added to dropped_projects), we can
+      // reconcile it away after completion instead of leaving a stray live row. Tracking
+      // only `row_created` rows means the reconcile can NEVER soft-delete a project the
+      // owner already had (Codex F8 r11/r12).
+      const createdIdsAllPasses = new Set<string>()
       const MAX_FINALIZE_PASSES = 5
       let completed = false
       for (let pass = 0; pass < MAX_FINALIZE_PASSES && !completed; pass++) {
@@ -332,7 +334,7 @@ export function buildOnboardingFinalize(deps: OnboardingFinalizeDeps): Onboardin
         // (3) Projects — DB rows + topic bindings + on-disk materialization from workState.
         import_result = deriveImportResult(workState) ?? input.import_result ?? null
         materialized = await materializeProjects(deps, workState, import_result, now, log)
-        for (const m of materialized) materializedIdsAllPasses.add(m.project_id)
+        for (const m of materialized) if (m.row_created) createdIdsAllPasses.add(m.project_id)
 
         // (4) ATOMIC terminal write — complete IFF nothing changed since we read workState.
         let casOk: boolean
@@ -399,14 +401,16 @@ export function buildOnboardingFinalize(deps: OnboardingFinalizeDeps): Onboardin
       }
 
       // (4b) RECONCILE REMOVALS. The CAS committed against the FINAL workState, whose
-      // `materialized` set is authoritative. If an earlier (stale) pass created a project
+      // `materialized` set is authoritative. If an earlier (stale) pass CREATED a project
       // that the final state DROPPED (removed from primary_projects / listed in
       // dropped_projects), its live row would linger. Soft-delete every id THIS run
-      // materialized across all passes that is NOT in the final set (Codex F8 r11). Runs
-      // only after a successful atomic completion, so it can never race the CAS. Best-
-      // effort + idempotent (guarded on `deleted_at IS NULL`); a failure never un-completes.
+      // CREATED across all passes that is NOT in the final set (Codex F8 r11/r12). Only
+      // this-run-created rows are candidates, so a project the owner already had is never
+      // touched. Runs only after a successful atomic completion, so it can never race the
+      // CAS. Best-effort + idempotent (guarded on `deleted_at IS NULL`); a failure never
+      // un-completes.
       const finalIds = new Set(materialized.map((m) => m.project_id))
-      for (const id of materializedIdsAllPasses) {
+      for (const id of createdIdsAllPasses) {
         if (finalIds.has(id)) continue
         try {
           await deps.db.run(
@@ -600,21 +604,21 @@ async function emitProjectOpenings(
  * persona can regenerate later, and finalize must still complete onboarding.
  */
 /**
- * Phases the finalizer may legitimately complete FROM — a conversational marker where the
- * interview's required fields have been gathered. It must NEVER stamp `completed` over a
- * terminal row or a LIVE import phase (that would finalize on top of an in-flight import,
- * violating the composer's import guard). The caller validates the initial phase; finalize
- * re-checks after every mid-run re-read, and the terminal CAS pins the exact phase too.
+ * The ONLY phases the Path-1 finalizer may legitimately complete FROM — the two
+ * conversational markers at which every required field has been gathered and the wow /
+ * import-consumed flows converge:
+ *   - `persona_reviewed` — the wow-moment path (persona synthesized + reviewed).
+ *   - `work_interview_gap_fill` — the import-consumed / field-complete path.
+ * This is an explicit ALLOWLIST (not a denylist): a row in any EARLY phase (`signup`,
+ * `identity_oauth`, `instance_provisioned`, `ai_substrate_offered`, …) has no legal edge
+ * to `completed` and must never be finalized — nor a terminal row, nor a live-import phase
+ * (that would finalize on top of an in-flight import). The caller validates the initial
+ * phase, finalize re-checks after every mid-run re-read, and the terminal CAS pins the
+ * exact phase, so completion can only ever land from an allowlisted phase (Codex F8 r12).
  */
-const NON_FINALIZABLE_PHASES = new Set<string>([
-  'completed',
-  'failed',
-  'import_upload_pending',
-  'import_running',
-  'import_analysis_presented',
-])
+const FINALIZABLE_PHASES = new Set<string>(['persona_reviewed', 'work_interview_gap_fill'])
 function isFinalizablePhase(phase: string): boolean {
-  return !NON_FINALIZABLE_PHASES.has(phase)
+  return FINALIZABLE_PHASES.has(phase)
 }
 
 async function commitPersona(
@@ -674,6 +678,13 @@ interface MaterializedProject {
   name: string
   /** True iff materialized from a hobby/interest answer (steers the kickoff). */
   is_interest: boolean
+  /**
+   * True iff THIS call created the `projects` row (ensureProjectRow outcome
+   * `'created'`), false for a pre-existing row it merely bound to. The finalizer's
+   * dropped-project reconciliation soft-deletes ONLY rows THIS run created — never a
+   * project the owner already had (Codex F8 r12).
+   */
+  row_created: boolean
   /**
    * The materializer's per-project outcome — `slice_chunk_count` /
    * `summary_written` / `llm_docs` are the strongest "enough signal" proxies
@@ -751,6 +762,7 @@ async function materializeProjects(
         project_id: bind_id,
         name: project.name.trim(),
         is_interest: project.is_interest === true,
+        row_created: outcome === 'created',
         outcome: materializeOutcome,
       })
     } catch (err) {

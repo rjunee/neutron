@@ -408,6 +408,77 @@ test('finalize RECONCILES a project dropped mid-run — soft-deletes the stale r
   expect(alpha?.deleted_at).not.toBeNull()
 })
 
+test('dropped-project reconciliation NEVER soft-deletes a PRE-EXISTING project (F8 r12)', async () => {
+  const h = makeHarness()
+  // Alpha exists BEFORE onboarding — a project the owner already had.
+  const iso = new Date(0).toISOString()
+  await h.db.run(
+    `INSERT INTO projects
+       (id, name, description, persona, privacy_mode, billing_mode, created_at, updated_at)
+     VALUES (?, ?, ?, NULL, 'private', 'personal', ?, ?)`,
+    [slugifyProjectId('Alpha'), 'Alpha', 'pre-existing', iso, iso],
+  )
+  const seeded = await h.stateStore.upsert({
+    project_slug: PROJECT_SLUG,
+    user_id: USER_ID,
+    phase: 'persona_reviewed',
+    phase_state_patch: { user_first_name: 'Sam', agent_name: 'Atlas', primary_projects: ['Alpha'] },
+  })
+
+  // Pass 0 BINDS the pre-existing Alpha (row_created=false), then commit() drops it for Beta.
+  let mutated = false
+  const persona: PersonaComposerLike = {
+    async compose() { return { draft_id: 'x', status: 'composed' } },
+    async commit() {
+      if (!mutated) {
+        mutated = true
+        await h.stateStore.upsert({
+          project_slug: PROJECT_SLUG,
+          user_id: USER_ID,
+          phase: 'persona_reviewed',
+          phase_state_patch: { primary_projects: ['Beta'], dropped_projects: ['Alpha'] },
+        })
+      }
+      return { committed_at: 0, git_sha: null, paths: [] }
+    },
+  }
+  const finalizer = buildOnboardingFinalize({ ...h.deps, personaComposer: persona })
+  await finalizer.finalize({ user_id: USER_ID, topic_id: TOPIC_ID, state: seeded })
+
+  expect((await h.stateStore.get(PROJECT_SLUG, USER_ID))?.phase).toBe('completed')
+  // Alpha existed before this run (row_created=false), so reconciliation must NOT touch it.
+  const alpha = h.db
+    .raw()
+    .query('SELECT deleted_at FROM projects WHERE id = ?')
+    .get(slugifyProjectId('Alpha')) as { deleted_at: number | null } | null
+  expect(alpha?.deleted_at, 'pre-existing Alpha must stay live').toBeNull()
+})
+
+test('finalize does NOT complete a row in an early (non-finalizable) phase (allowlist) (F8 r12)', async () => {
+  const h = makeHarness()
+  // An early phase that has no legal edge to `completed`. Even with fields present, the
+  // finalizer's phase allowlist must refuse it (a denylist would have wrongly accepted it).
+  const seeded = await h.stateStore.upsert({
+    project_slug: PROJECT_SLUG,
+    user_id: USER_ID,
+    phase: 'ai_substrate_offered',
+    phase_state_patch: { user_first_name: 'Sam', agent_name: 'Atlas', primary_projects: ['Alpha'] },
+  })
+  let composed = 0
+  const persona: PersonaComposerLike = {
+    async compose() { composed += 1; return { draft_id: 'x', status: 'composed' } },
+    async commit() { return { committed_at: 0, git_sha: null, paths: [] } },
+  }
+  const finalizer = buildOnboardingFinalize({ ...h.deps, personaComposer: persona })
+  await finalizer.finalize({ user_id: USER_ID, topic_id: TOPIC_ID, state: seeded })
+
+  // Refused: phase unchanged, no persona composed, no project rows.
+  expect((await h.stateStore.get(PROJECT_SLUG, USER_ID))?.phase).toBe('ai_substrate_offered')
+  expect(composed).toBe(0)
+  expect((h.db.raw().query('SELECT COUNT(*) AS n FROM projects').get() as { n: number }).n).toBe(0)
+  expect(h.onboardingCompleted).toEqual([])
+})
+
 test('finalize ABORTS (never completes) if the phase transitions to a live import mid-run (F8 r10)', async () => {
   const h = makeHarness()
   const seeded = await h.stateStore.upsert({
