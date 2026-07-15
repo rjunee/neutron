@@ -53,6 +53,14 @@ export interface PersistedSecretSpec {
   dir: string
   /** Minimum trusted length; a shorter persisted value is rotated. */
   minLen: number
+  /**
+   * Optional extra trust predicate on the on-disk value (BEYOND length). A
+   * persisted value that fails it is treated as WEAK/COMPROMISED and ROTATED to a
+   * fresh minted one — so, e.g., a low-entropy `.owner-bearer` file can't be trusted
+   * on a wide bind just because it clears the length floor (Codex). Length-only when
+   * omitted.
+   */
+  validate?: (value: string) => boolean
   /** Mint a fresh high-entropy value (NO trailing newline; the writer adds one). */
   mint: () => string
   /** Basename prefix for the atomic-rename temp file. */
@@ -82,7 +90,11 @@ type ReadResult =
  * the fd (no second path-based open → no TOCTOU). Only a value meeting the
  * length floor is trusted.
  */
-function readPersistedSecret(path: string, minLen: number): ReadResult {
+function readPersistedSecret(
+  path: string,
+  minLen: number,
+  validate?: (value: string) => boolean,
+): ReadResult {
   let fd: number
   try {
     fd = fs.openSync(path, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW)
@@ -103,6 +115,9 @@ function readPersistedSecret(path: string, minLen: number): ReadResult {
     const value = fs.readFileSync(fd, 'utf8').trim()
     // Empty / short / weak persisted value is invalid → rotate to a fresh one.
     if (value.length < minLen) return { kind: 'reject' }
+    // Extra trust predicate (e.g. entropy) — a length-clearing but WEAK value
+    // (guessable owner bearer) must also rotate, not be trusted (Codex).
+    if (validate !== undefined && !validate(value)) return { kind: 'reject' }
     return { kind: 'ok', value }
   } catch {
     return { kind: 'reject' }
@@ -181,7 +196,7 @@ function installFreshSecret(spec: PersistedSecretSpec): string | null {
     return null
   }
   // ALWAYS re-read: whoever renamed LAST is what every process converges on.
-  const back = readPersistedSecret(spec.path, spec.minLen)
+  const back = readPersistedSecret(spec.path, spec.minLen, spec.validate)
   return back.kind === 'ok' ? back.value : null
 }
 
@@ -361,7 +376,7 @@ export function resolvePersistedSecret(spec: PersistedSecretSpec): PersistedSecr
   // Fast path: an existing VALID secret is returned UNCHANGED — no lock, no
   // write, no rotation (the single-process loopback dogfood happy path: one
   // no-follow read).
-  const first = readPersistedSecret(spec.path, spec.minLen)
+  const first = readPersistedSecret(spec.path, spec.minLen, spec.validate)
   if (first.kind === 'ok') return { value: first.value, source: 'persisted' }
 
   try {
@@ -379,7 +394,7 @@ export function resolvePersistedSecret(spec: PersistedSecretSpec): PersistedSecr
       try {
         // A prior rotator may have already installed a valid secret in a window
         // before we got the lock → ADOPT it, don't overwrite (first-writer-wins).
-        const underLock = readPersistedSecret(spec.path, spec.minLen)
+        const underLock = readPersistedSecret(spec.path, spec.minLen, spec.validate)
         if (underLock.kind === 'ok') return { value: underLock.value, source: 'persisted' }
         const installed = installFreshSecret(spec)
         if (installed !== null) return { value: installed, source: 'persisted' }
@@ -389,13 +404,13 @@ export function resolvePersistedSecret(spec: PersistedSecretSpec): PersistedSecr
       }
     }
     // A competitor holds the lock → adopt their secret the moment it lands.
-    const cur = readPersistedSecret(spec.path, spec.minLen)
+    const cur = readPersistedSecret(spec.path, spec.minLen, spec.validate)
     if (cur.kind === 'ok') return { value: cur.value, source: 'persisted' }
     __persistedSecretTiming.sleep(LOCK_WAIT_STEP_MS)
   }
 
   // Final adopt attempt — a late writer may have just landed the secret.
-  const late = readPersistedSecret(spec.path, spec.minLen)
+  const late = readPersistedSecret(spec.path, spec.minLen, spec.validate)
   if (late.kind === 'ok') return { value: late.value, source: 'persisted' }
 
   spec.log.warn(spec.unconvergedEvent, { path: spec.path, note: spec.unconvergedNote })

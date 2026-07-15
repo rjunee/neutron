@@ -21,6 +21,7 @@ import { join } from 'node:path'
 import {
   OWNER_BEARER_ENV_VAR,
   OWNER_BEARER_MIN_LEN,
+  hasSufficientBearerEntropy,
   isValidThreadedBearer,
   ownerBearerPath,
   resolveOwnerBearer,
@@ -72,25 +73,49 @@ describe('resolveOwnerBearer — env override', () => {
     })
   })
 
-  it('a SHORT write does NOT persist a TRUNCATED bearer — the mint falls back to ephemeral (Codex Medium)', () => {
-    // The persist calls writeSync in a FULL-write loop. Simulate a kernel that
-    // flushes a few bytes then can write no more: the loop must ABORT (not rename a
-    // truncated secret into place, which the length-only verify could still accept).
-    let calls = 0
-    const spy = spyOn(fs, 'writeSync').mockImplementation(((): number => {
-      calls += 1
-      return calls === 1 ? 4 : 0 // 4 bytes "written", then 0 → loop aborts
+  it('a SHORT write on the SECRET file does NOT persist a TRUNCATED bearer — falls back to ephemeral (Codex Medium)', () => {
+    // The persist writes the secret via a FULL-write loop. Simulate a kernel that
+    // flushes a few bytes of the SECRET then can write no more → the loop must ABORT
+    // (not rename a truncated secret into place). Delegate the STRING lock-token
+    // write to the real fs so lock acquisition succeeds and the secret loop is
+    // actually reached; only the BUFFER secret write is short-circuited.
+    const realWrite = fs.writeSync.bind(fs)
+    let secretCalls = 0
+    const spy = spyOn(fs, 'writeSync').mockImplementation(((
+      fd: number,
+      data: unknown,
+      ...rest: unknown[]
+    ): number => {
+      if (typeof data === 'string') {
+        return (realWrite as (fd: number, data: unknown, ...r: unknown[]) => number)(fd, data, ...rest)
+      }
+      // Buffer path = the secret-write loop: flush 4 bytes then stall.
+      secretCalls += 1
+      return secretCalls === 1 ? 4 : 0
     }) as typeof fs.writeSync)
     try {
       // No env → resolveOwnerBearer MINTS a bearer and tries to persist it.
       const res = resolveOwnerBearer(home, {})
-      // Persist aborted on the short write → NOT accepted as a persisted credential
-      // (so on a wide bind the ephemeral source fails closed rather than serving a
-      // truncated, weaker bearer).
+      expect(secretCalls).toBeGreaterThan(0) // the SECRET loop was actually reached
+      // Persist aborted on the short write → NOT accepted as a persisted credential,
+      // and NO truncated file was installed (the tmp was unlinked, target absent).
       expect(res.source).not.toBe('persisted')
+      expect(fs.existsSync(ownerBearerPath(home))).toBe(false)
     } finally {
       spy.mockRestore()
     }
+  })
+
+  it('a persisted 0600 but LOW-ENTROPY .owner-bearer file is ROTATED, not trusted (Codex High)', () => {
+    // Plant a guessable but length-clearing bearer at the target path, 0600.
+    const path = ownerBearerPath(home)
+    fs.writeFileSync(path, `${'a'.repeat(20)}\n`, { mode: 0o600 })
+    fs.chmodSync(path, 0o600)
+    const res = resolveOwnerBearer(home, {})
+    // The weak file is rotated to a fresh MINTED bearer, not returned verbatim.
+    expect(res.value).not.toBe('a'.repeat(20))
+    expect(res.value).toMatch(/^nbt_/)
+    expect(hasSufficientBearerEntropy(res.value)).toBe(true)
   })
 
   it('treats an EMPTY / whitespace-only env override as UNSET → mints+persists', () => {

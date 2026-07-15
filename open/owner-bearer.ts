@@ -167,6 +167,10 @@ export function resolveOwnerBearer(
     lockPath: ownerBearerLockPath(neutronHome),
     dir: neutronHome,
     minLen: OWNER_BEARER_MIN_LEN,
+    // A persisted `.owner-bearer` that clears the length floor but is LOW-ENTROPY
+    // (guessable) must ROTATE, not be trusted — otherwise a planted/legacy weak file
+    // would authenticate the owner on a wide bind, defeating the env-path entropy gate.
+    validate: hasSufficientBearerEntropy,
     mint: mintOwnerBearer,
     tmpPrefix: '.owner-bearer.tmp',
     log,
