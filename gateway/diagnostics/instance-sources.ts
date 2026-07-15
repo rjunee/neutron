@@ -77,13 +77,13 @@ export function buildInstanceDiagnosticsSources(
     // Source = `system_events` — O4's product-wide degradation journal (the
     // deliberate silent fail-soft / degrade decisions: core-install failures,
     // credential cooldown-saturation, REPL restart-cap, cron errors, orphaned
-    // imports, …). Bounded at the DB (`ORDER BY ts DESC, id DESC LIMIT`) — a
-    // long-lived instance reads + parses at most `maxEvents` rows per hit, not
-    // the whole history. Already newest-first. NOT filtered by project_slug:
-    // Open is single-owner and many degrade decisions are process-wide
-    // (`project_slug: null`); the row's own `project_slug` is surfaced so a
-    // consumer can see the scope.
-    recentEvents: () => systemEvents.listRecent(maxEvents),
+    // imports, …). SCOPED to this instance's slug OR process-wide (`project_slug
+    // IS NULL`) rows — the sibling cron/import sources filter the same way and the
+    // endpoint is instance-scoped, so an unscoped read would DISCLOSE another
+    // slug's events/payloads and let foreign rows starve in-scope ones out of the
+    // window (Codex). The scope predicate is applied at the DB before the LIMIT;
+    // still newest-first and bounded to `maxEvents` rows per hit.
+    recentEvents: () => systemEvents.listRecentForScope(project_slug, maxEvents),
     replRegistry: () => ({
       path: registryPath,
       // Propagate corruption/read errors as a throw → the section renders

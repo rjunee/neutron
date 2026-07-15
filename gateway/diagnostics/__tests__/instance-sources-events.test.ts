@@ -80,4 +80,40 @@ describe('buildInstanceDiagnosticsSources — recent_events reads system_events'
     expect(ev.available).toBe(true)
     expect(ev.events).toEqual([])
   })
+
+  it('SCOPES to this slug + process-wide (NULL) rows — a foreign slug is neither disclosed nor allowed to starve in-scope rows', async () => {
+    const store = new SystemEventsStore({ db })
+    // In-scope (demo) + process-wide (NULL) rows.
+    await store.record({
+      event: 'core_install_failed',
+      module: 'cores',
+      level: 'error',
+      project_slug: SLUG,
+      ts: 100,
+      payload: { core_slug: 'email' },
+    })
+    await store.record({ event: 'gbrain_unavailable', module: 'gbrain', level: 'warn', ts: 110 }) // NULL scope
+    // A FOREIGN-slug row that is the NEWEST — under an UNSCOPED `LIMIT` it would
+    // both leak into this instance's report AND (with a tight limit) starve the
+    // in-scope rows out of the window.
+    await store.record({
+      event: 'credential_all_cooldown',
+      module: 'credentials',
+      level: 'error',
+      project_slug: 'other-slug',
+      ts: 999,
+      payload: { secret: 'must-not-leak' },
+    })
+
+    // Tight limit (2) so the newest foreign row WOULD displace an in-scope row if unscoped.
+    const ev = composeDiagnostics(
+      buildInstanceDiagnosticsSources({ db, project_slug: SLUG, owner_home: tmp, maxRecentEvents: 2 }),
+    ).recent_events
+    expect(ev.available).toBe(true)
+    const events = ev.events!
+    // No cross-project disclosure — the foreign slug never appears.
+    expect(events.some((e) => e.project_slug === 'other-slug')).toBe(false)
+    // Both in-scope + process-wide rows survive (foreign didn't starve them).
+    expect(events.map((e) => e.event).sort()).toEqual(['core_install_failed', 'gbrain_unavailable'])
+  })
 })

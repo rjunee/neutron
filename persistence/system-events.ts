@@ -250,6 +250,27 @@ export class SystemEventsStore implements SystemEventSink {
           )
     return rows.map((r) => rowToPersisted(r))
   }
+
+  /**
+   * Read-only: the most-recent `limit` events for a diagnostics SCOPE — rows whose
+   * `project_slug` matches `project_slug` OR are process-wide (`NULL`) — newest
+   * first. The scope predicate is applied BEFORE the `LIMIT` so foreign-slug rows
+   * can neither be DISCLOSED into an instance-scoped report nor STARVE in-scope /
+   * process-wide rows out of the window (O5 diagnostics, Codex). `limit <= 0` → `[]`.
+   */
+  listRecentForScope(project_slug: string, limit: number): PersistedSystemEvent[] {
+    if (!Number.isFinite(limit) || limit <= 0) return []
+    const n = Math.floor(limit)
+    const rows = this.db.all<SystemEventRow, [string, number]>(
+      `SELECT id, ts, level, module, event_name, payload_json, project_slug, duration_ms
+         FROM system_events
+        WHERE project_slug = ? OR project_slug IS NULL
+        ORDER BY ts DESC, id DESC
+        LIMIT ?`,
+      [project_slug, n],
+    )
+    return rows.map((r) => rowToPersisted(r))
+  }
 }
 
 interface SystemEventRow {
