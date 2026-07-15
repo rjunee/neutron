@@ -108,6 +108,112 @@ describe('McpServer', () => {
     expect(seenProjectId).toBeNull()
   })
 
+  test('X6: bindActiveProject wraps the handler with the caller-threaded project_id (native sink path)', async () => {
+    const reg = new ToolRegistry()
+    let boundWith: string | null | undefined = 'unset'
+    let activeAtHandlerEntry: string | null | undefined = 'unset'
+    // A real ambient binder — records the id it bound and exposes it for the
+    // handler's synchronous-entry read (mirrors AsyncLocalStorage semantics: the
+    // frame is bound synchronously around the handler, read at its first line).
+    let ambient: string | null | undefined
+    const binder = <T,>(project_id: string | null | undefined, fn: () => T): T => {
+      boundWith = project_id
+      const prev = ambient
+      ambient = project_id
+      try {
+        return fn()
+      } finally {
+        ambient = prev
+      }
+    }
+    reg.register({
+      name: 'peek',
+      description: '',
+      input_schema: sampleSchema,
+      output_schema: sampleSchema,
+      capability_required: 'read:project_data',
+      approval_policy: 'auto',
+      handler: async () => {
+        activeAtHandlerEntry = ambient
+        return { ok: true }
+      },
+    })
+    const server = new McpServer({ project_slug: 'owner-slug', registry: reg, bindActiveProject: binder })
+    // No topic context — the topic-agnostic sink threads the active project directly.
+    await server.dispatch({ tool_name: 'peek', args: {}, call_id: 'c', project_id: 'acme' })
+    expect(boundWith).toBe('acme')
+    expect(activeAtHandlerEntry).toBe('acme')
+  })
+
+  test('X6: bindActiveProject binds the bound TopicContext project_id (resolveBound path)', async () => {
+    const reg = new ToolRegistry()
+    let boundWith: string | null | undefined = 'unset'
+    const binder = <T,>(project_id: string | null | undefined, fn: () => T): T => {
+      boundWith = project_id
+      return fn()
+    }
+    reg.register({
+      name: 'peek',
+      description: '',
+      input_schema: sampleSchema,
+      output_schema: sampleSchema,
+      capability_required: 'read:project_data',
+      approval_policy: 'auto',
+      handler: async () => ({ ok: true }),
+    })
+    const server = new McpServer({ project_slug: 'owner-slug', registry: reg, bindActiveProject: binder })
+    const ctx: TopicContext = {
+      topic_id: 'topic-1',
+      project_id: 'acme',
+      speaker_user_id: null,
+      call_id: 'call-1',
+    }
+    await withTopicContext(ctx, async () => server.dispatch({ tool_name: 'peek', args: {}, call_id: 'call-1' }))
+    expect(boundWith).toBe('acme')
+  })
+
+  test('X6: bindActiveProject binds null when neither a topic nor a threaded project_id is present', async () => {
+    const reg = new ToolRegistry()
+    let boundWith: string | null | undefined = 'unset'
+    const binder = <T,>(project_id: string | null | undefined, fn: () => T): T => {
+      boundWith = project_id
+      return fn()
+    }
+    reg.register({
+      name: 'peek',
+      description: '',
+      input_schema: sampleSchema,
+      output_schema: sampleSchema,
+      capability_required: 'read:project_data',
+      approval_policy: 'auto',
+      handler: async () => ({ ok: true }),
+    })
+    const server = new McpServer({ project_slug: 'owner-slug', registry: reg, bindActiveProject: binder })
+    await server.dispatch({ tool_name: 'peek', args: {}, call_id: 'c' })
+    expect(boundWith).toBeNull()
+  })
+
+  test('X6: default bindActiveProject is a pass-through — dispatch works with no hook wired', async () => {
+    const reg = new ToolRegistry()
+    let ran = false
+    reg.register({
+      name: 'peek',
+      description: '',
+      input_schema: sampleSchema,
+      output_schema: sampleSchema,
+      capability_required: 'read:project_data',
+      approval_policy: 'auto',
+      handler: async () => {
+        ran = true
+        return { ok: true }
+      },
+    })
+    const server = new McpServer({ project_slug: 'owner-slug', registry: reg })
+    const result = await server.dispatch({ tool_name: 'peek', args: {}, call_id: 'c', project_id: 'acme' })
+    expect(ran).toBe(true)
+    expect(result).toEqual({ ok: true })
+  })
+
   test('unknown tool throws', async () => {
     const reg = new ToolRegistry()
     const server = new McpServer({ project_slug: 'project-A', registry: reg })

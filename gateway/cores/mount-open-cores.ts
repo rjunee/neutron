@@ -214,9 +214,13 @@ export async function mountOpenCores(
   // Calendar are forced to GLOBAL scope by SERVICE_SCOPE (no per-project
   // re-consent), a project's own Drive (`google_workspace`) + static service
   // tokens resolve per-project → global. Reads the ACTIVE project from the
-  // ambient `runWithActiveProject` frame the chat-command path binds; on the
-  // General topic / MCP-tool path the frame is absent → global scope (= today's
-  // per-instance behavior, no regression). `oauthTokens` is always constructed;
+  // ambient `runWithActiveProject` frame the agent's native MCP-tool path binds
+  // at the tool boundary (X6: `McpServer` wired with
+  // `bindActiveProject: runWithActiveProject`); on the General topic, a
+  // system/cron dispatch, or the in-process chat-command Core filters (which call
+  // their Core client directly, not through `McpServer.dispatch`) the frame is
+  // absent → global scope (= today's per-instance behavior, no regression).
+  // `oauthTokens` is always constructed;
   // it's the resolver's global fallback (used only when live per the gate below).
   const credentialResolver = new CoreCredentialResolver({
     owner_slug: input.project_slug,

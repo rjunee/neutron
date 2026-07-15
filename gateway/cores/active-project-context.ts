@@ -7,16 +7,26 @@
  * closure that carries no per-call arguments — so the active project id can't be
  * threaded through the closure signature without touching every `@neutronai/*`
  * Core package. Instead we bind the active project id as ambient async context
- * at the in-process dispatch boundary that already parses it (the chat-command
- * filter — `gateway/http/chat-bridge.ts`), and the `CoreCredentialResolver`
- * reads it back when the accessor fires. Because the chat-command path is a
- * single in-process `await` chain, the `AsyncLocalStorage` frame propagates
+ * (`AsyncLocalStorage`) around the tool handler at the in-process dispatch
+ * boundary (X6: `McpServer.dispatch`, wired with `bindActiveProject:
+ * runWithActiveProject` — the ONLY production binder), and the
+ * `CoreCredentialResolver` reads it back when the accessor fires. Because the
+ * handler runs as a single in-process `await` chain, the frame propagates
  * straight through to the accessor call.
  *
- * When NO frame is bound (the General topic, or the CC-spawn MCP-tool path which
- * crosses a process + loopback-HTTP boundary the frame can't follow) the active
- * project id resolves to '' → GLOBAL scope, which is exactly the pre-D2
- * per-instance behavior: safe, no regression.
+ * The agent's native MCP-tool path crosses a process + loopback-HTTP boundary an
+ * in-memory frame cannot follow — so X6 does NOT try to propagate it. Instead the
+ * originating project_id is THREADED through the tool-call envelope
+ * (`ReplSession.projectId → McpServer.dispatch({project_id})`) and re-bound as a
+ * FRESH frame in the gateway process AT THE TOOL BOUNDARY (`McpServer` is wired
+ * with `bindActiveProject: runWithActiveProject`), so a Core tool's credential
+ * accessor resolves per-project on the agent's native tool path.
+ *
+ * When NO frame is bound (the General topic, a system/cron dispatch, or the
+ * in-process chat-command Core filters which call their Core client directly and
+ * do NOT cross `McpServer.dispatch`) the active project id resolves to '' →
+ * GLOBAL scope, which is exactly the pre-D2 per-instance behavior: safe, no
+ * regression.
  */
 
 import { AsyncLocalStorage } from 'node:async_hooks'
@@ -34,7 +44,7 @@ const storage = new AsyncLocalStorage<ActiveProjectFrame>()
  * every `await` `fn` roots synchronously — including a Core client's lazy
  * `accessToken()` closure.
  */
-export function runWithActiveProject<T>(project_id: string | undefined, fn: () => T): T {
+export function runWithActiveProject<T>(project_id: string | null | undefined, fn: () => T): T {
   return storage.run({ project_id: (project_id ?? '').trim() }, fn)
 }
 
