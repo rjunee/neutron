@@ -67,6 +67,7 @@ import { capProposedProjects } from '@neutronai/onboarding/interview/phase-promp
 import {
   buildScaffoldMaterializer,
   ensureProjectRow,
+  softDeleteProjectRow,
 } from './project-create.ts'
 import {
   buildProjectDocReader,
@@ -377,6 +378,42 @@ export function buildOnboardingFinalize(deps: OnboardingFinalizeDeps): Onboardin
         throw err instanceof Error ? err : new Error(String(err))
       }
       if (!casOk) {
+        // A mutation (or a concurrent completion) landed in the materialize→CAS window. We
+        // materialized `stableState`'s projects but did NOT complete; if the fresh state has
+        // since DROPPED any project THIS run just CREATED, its row is now orphaned. Clean it
+        // up so no stale project lingers (Codex F8 r16). Only this-run-created rows are
+        // touched (never a pre-existing project, r12); the on-disk files are left as harmless
+        // orphans (no live project binds them). Best-effort — a failure never blocks the
+        // defer. The retry re-stabilizes and materializes the fresh set idempotently.
+        try {
+          const fresh = await deps.stateStore.get(deps.project_slug, input.user_id)
+          if (fresh !== null) {
+            const wanted = new Set(
+              resolveProjects(fresh, deriveImportResult(fresh) ?? import_result).map((p) =>
+                slugifyProjectId(p.name),
+              ),
+            )
+            for (const m of materialized) {
+              if (!m.row_created || wanted.has(m.project_id)) continue
+              try {
+                await softDeleteProjectRow(deps.db, m.project_id, now())
+                log('info', 'finalize: cleaned a project dropped in the materialize→CAS window', {
+                  user_id: input.user_id,
+                  project_id: m.project_id,
+                })
+              } catch (err) {
+                log('warn', 'finalize: materialize→CAS cleanup failed', {
+                  project_id: m.project_id,
+                  err: errStr(err),
+                })
+              }
+            }
+          }
+        } catch (err) {
+          log('warn', 'finalize: materialize→CAS cleanup skipped (fresh read failed)', {
+            err: errStr(err),
+          })
+        }
         log('info', 'finalize: state moved in the materialize→complete window; deferring', {
           user_id: input.user_id,
         })
@@ -660,6 +697,13 @@ interface MaterializedProject {
   /** True iff materialized from a hobby/interest answer (steers the kickoff). */
   is_interest: boolean
   /**
+   * True iff THIS call CREATED the `projects` row (ensureProjectRow outcome `'created'`),
+   * false for a pre-existing row it merely bound to. The materialize→CAS-loss cleanup
+   * soft-deletes ONLY rows THIS run created — never a project the owner already had
+   * (Codex F8 r12/r16).
+   */
+  row_created: boolean
+  /**
    * The materializer's per-project outcome — `slice_chunk_count` /
    * `summary_written` / `llm_docs` are the strongest "enough signal" proxies
    * (real transcript history matched this project). Previously discarded here;
@@ -736,6 +780,7 @@ async function materializeProjects(
         project_id: bind_id,
         name: project.name.trim(),
         is_interest: project.is_interest === true,
+        row_created: outcome === 'created',
         outcome: materializeOutcome,
       })
     } catch (err) {

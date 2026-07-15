@@ -496,6 +496,59 @@ test('finalize refuses a non-finalizable phase even when the live read THROWS �
   expect(h.onboardingCompleted).toEqual([])
 })
 
+test('finalize cleans up a project dropped in the materialize→CAS window (no stale live row) (F8 r16)', async () => {
+  const h = makeHarness()
+  const seeded = await h.stateStore.upsert({
+    project_slug: PROJECT_SLUG,
+    user_id: USER_ID,
+    phase: 'persona_reviewed',
+    phase_state_patch: { user_first_name: 'Sam', agent_name: 'Atlas', primary_projects: ['Alpha'] },
+  })
+
+  // A CAS wrapper injects the mutation in the exact materialize→CAS window: on the CAS call
+  // it first drops Alpha for Beta, THEN delegates (so the real CAS loses). finalize
+  // materialized Alpha on the stable [Alpha] state; the CAS-loss cleanup must soft-delete
+  // that now-orphaned Alpha row (created this run, dropped by the fresh state).
+  const real = h.stateStore
+  let casCalls = 0
+  const casWrapper: OnboardingStateStore = {
+    async get(slug, uid) { return real.get(slug, uid) },
+    async upsert(inp) { return real.upsert(inp) },
+    async rekey(a, b, c) { return real.rekey(a, b, c) },
+    async delete(slug, uid) { return real.delete(slug, uid) },
+    async deleteByOwner(slug) { return real.deleteByOwner(slug) },
+    async completeIfPhaseStateMatches(inp) {
+      casCalls += 1
+      if (casCalls === 1) {
+        await real.upsert({
+          project_slug: PROJECT_SLUG,
+          user_id: USER_ID,
+          phase: 'persona_reviewed',
+          phase_state_patch: { primary_projects: ['Beta'], dropped_projects: ['Alpha'] },
+        })
+      }
+      return real.completeIfPhaseStateMatches(inp) // now fails — state changed under it
+    },
+  }
+  const finalizer = buildOnboardingFinalize({ ...h.deps, stateStore: casWrapper })
+  const result = await finalizer.finalize({ user_id: USER_ID, topic_id: TOPIC_ID, state: seeded })
+
+  expect(result).toBe(false) // CAS lost → deferred
+  // Alpha was created on the stable state, then dropped in the window → soft-deleted.
+  const alpha = h.db
+    .raw()
+    .query('SELECT deleted_at FROM projects WHERE id = ?')
+    .get(slugifyProjectId('Alpha')) as { deleted_at: number | null } | null
+  expect(alpha, 'Alpha row exists').not.toBeNull()
+  expect(alpha?.deleted_at, 'Alpha soft-deleted').not.toBeNull()
+  // No LIVE stale project row remains.
+  expect(
+    (h.db.raw().query('SELECT COUNT(*) AS n FROM projects WHERE deleted_at IS NULL').get() as {
+      n: number
+    }).n,
+  ).toBe(0)
+})
+
 test('finalize ABORTS (never completes) if the phase transitions to a live import mid-run (F8 r10)', async () => {
   const h = makeHarness()
   const seeded = await h.stateStore.upsert({
