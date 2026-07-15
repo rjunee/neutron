@@ -12,10 +12,14 @@
  * This boots the REAL Open composition over a live `Bun.serve`, seeds a Trident
  * run bound to a Work-Board card and routed to the owner's app socket, then
  * DELETEs the card through the REAL HTTP surface and asserts the observer chain
- * actually ran — the run is persisted `stopped` AND its terminal DELIVERY reaches
- * the socket EXACTLY once. Delivery is the observable that distinguishes the wired
- * chokepoint from the unbound fallback (the fallback runs no observers → zero
- * delivery frames → this test reds).
+ * actually ran — the run is persisted `stopped`, its terminal DELIVERY reaches the
+ * socket EXACTLY once, AND the live transition fans a fresh `projects_changed`.
+ * Delivery + the rail fan are the OBSERVABLE effects that distinguish the wired
+ * chokepoint from the unbound fallback (which runs no observers → zero delivery
+ * frames + no post-delete rail fan → this test reds). The board-reconcile observer
+ * also runs (the run's `project_slug` matches the card scope), but its effect is
+ * masked here by the card delete that follows — it is asserted directly in the
+ * `board-reconcile` / `code-command` unit suites.
  *
  * The substrate is MOCKED; a synthetic credential makes the live-agent /
  * work-board path compose (so the terminator actually binds).
@@ -170,11 +174,13 @@ describe('Open board terminate() wiring (§F6a composition boundary)', () => {
     const scope = workBoardScopeKey('owner', 'acme')
 
     // A live Trident run, routed to the owner's app socket so its terminal
-    // delivery is observable, bound to a Work-Board card.
+    // delivery is observable, bound to a Work-Board card. `project_slug` IS the
+    // board scope key (as `dispatchBoardBoundBuild` sets it), so the reconcile
+    // observer's `detachRun(run.project_slug, …)` targets THIS card's scope.
     const runStore = new TridentRunStore(harness.db)
     const run = await runStore.create({
       slug: 'cancel-me',
-      project_slug: 'owner',
+      project_slug: scope,
       repo_path: '/tmp/repo',
       task: 'wire the export button',
       chat_id: OWNER_TOPIC,
@@ -233,7 +239,7 @@ describe('Open board terminate() wiring (§F6a composition boundary)', () => {
     const runStore = new TridentRunStore(harness.db)
     const run = await runStore.create({
       slug: 'already-done',
-      project_slug: 'owner',
+      project_slug: scope,
       repo_path: '/tmp/repo',
       task: 'finished build',
       chat_id: OWNER_TOPIC,
