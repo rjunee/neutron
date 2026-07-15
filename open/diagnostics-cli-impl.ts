@@ -6,10 +6,13 @@
  * memory / chat / import broken?" from the CLI, WITHOUT journalctl. It opens
  * the per-instance `project.db` READ-ONLY (WAL lets it read alongside the live
  * server) and composes the on-disk diagnostic sections via the SAME pure
- * `composeDiagnostics` the admin endpoint uses. In-process-only sections
- * (credential-pool health, in-memory cores install failures) are not visible
- * off-process, so they render `{ available: false }` here — the running
- * instance's `GET /api/app/admin/diagnostics` (admin tab) has the full picture.
+ * `composeDiagnostics` the admin endpoint uses. In-process-only sections (the
+ * live credential-pool probe) are not visible off-process, so they render
+ * `{ available: false }` here — the running instance's
+ * `GET /api/app/admin/diagnostics` (admin tab) has the full picture. Everything
+ * on disk IS visible, including core-install failures: those land in the
+ * `system_events` journal (`core_install_failed`) and surface in the recent-
+ * events section here just as they do on the endpoint.
  *
  * READ-ONLY: opens the DB with `readonly: true` + `create: false` and only
  * reads. It never migrates, never writes.
@@ -131,15 +134,15 @@ export function formatDiagnosticsText(report: DiagnosticsReport): string {
     }
   }
 
-  // recent events — source is gateway_events (onboarding/gateway telemetry),
-  // NOT the operational system_events journal (that table lands with unit O4).
+  // recent events — source is the operational system_events journal (O4): the
+  // deliberate silent fail-soft / degrade decisions across every band.
   const ev = report.recent_events
   if (!ev.available) {
-    lines.push(`recent events (gateway_events): ${ev.note ?? 'no events'}`)
+    lines.push(`recent events (system_events): ${ev.note ?? 'no events'}`)
   } else if ((ev.events?.length ?? 0) === 0) {
-    lines.push(`recent events (gateway_events): none`)
+    lines.push(`recent events (system_events): none`)
   } else {
-    lines.push(`recent events (gateway_events, newest first, ${ev.events!.length}):`)
+    lines.push(`recent events (system_events, newest first, ${ev.events!.length}):`)
     for (const e of ev.events!.slice(0, 15)) {
       lines.push(`  - ${fmtTime(e.ts)} [${e.level ?? '?'}] ${e.module ?? '?'}/${e.event ?? '?'}`)
     }

@@ -16,9 +16,8 @@
  */
 
 import { join } from 'node:path'
-import type { ProjectDb } from '@neutronai/persistence/index.ts'
+import { SystemEventsStore, type ProjectDb } from '@neutronai/persistence/index.ts'
 import { CronStateStore } from '@neutronai/cron/state.ts'
-import { OnboardingTelemetry } from '@neutronai/onboarding/telemetry/event-emitter.ts'
 import { loadRegistry } from '@neutronai/runtime/adapters/claude-code/persistent/repl-registry.ts'
 import {
   hasUsableCredential,
@@ -57,7 +56,7 @@ export function buildInstanceDiagnosticsSources(
   const { db, project_slug, owner_home } = input
   const maxEvents = input.maxRecentEvents ?? DEFAULT_MAX_RECENT_EVENTS
   const cronStore = new CronStateStore(db)
-  const telemetry = new OnboardingTelemetry({ db })
+  const systemEvents = new SystemEventsStore({ db })
   const registryPath = join(owner_home, REPL_REGISTRY_RELPATH)
 
   const sources: DiagnosticsSources = {
@@ -75,11 +74,16 @@ export function buildInstanceDiagnosticsSources(
           ORDER BY started_at DESC`,
         [project_slug],
       ),
-    // Source = `gateway_events` (onboarding/gateway telemetry), NOT operational
-    // `system_events` (that table lands with unit O4). Bounded at the DB
-    // (`ORDER BY ts DESC LIMIT`) — a long-lived instance reads + parses at most
-    // `maxEvents` rows per hit, not the whole history. Already newest-first.
-    recentEvents: () => telemetry.listRecent(project_slug, maxEvents),
+    // Source = `system_events` — O4's product-wide degradation journal (the
+    // deliberate silent fail-soft / degrade decisions: core-install failures,
+    // credential cooldown-saturation, REPL restart-cap, cron errors, orphaned
+    // imports, …). Bounded at the DB (`ORDER BY ts DESC, id DESC LIMIT`) — a
+    // long-lived instance reads + parses at most `maxEvents` rows per hit, not
+    // the whole history. Already newest-first. NOT filtered by project_slug:
+    // Open is single-owner and many degrade decisions are process-wide
+    // (`project_slug: null`); the row's own `project_slug` is surfaced so a
+    // consumer can see the scope.
+    recentEvents: () => systemEvents.listRecent(maxEvents),
     replRegistry: () => ({
       path: registryPath,
       // Propagate corruption/read errors as a throw → the section renders

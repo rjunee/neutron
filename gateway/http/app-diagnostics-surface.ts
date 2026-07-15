@@ -25,17 +25,31 @@
  * READ-ONLY: the injected `diagnostics` closure composes existing reads only
  * (see `gateway/diagnostics/`). No writes, no degrade-decision changes.
  *
- * HONEST PARTIAL — deferred sections (accepted deferrals, tracked follow-ups):
- * O5 surfaces every source reachable read-only from this seam. Three spec items
- * are DELIBERATELY not surfaced here because each is blocked on other work, and
- * forcing them would breach the additive/read-only mandate or fabricate data:
- *   - core_install failures → after unit X2 (`defineCore()` manifest⊄handlers
- *     hard-fail / `/api/cores` degraded surface). `CoresModuleState.failures` is
- *     in-process graph-module state with no read handle at this seam; consume
- *     X2's surface in a follow-up instead of threading a bespoke graph ref now.
- *   - system_events rename → after unit O4 (which creates `system_events`). The
- *     events section reads `gateway_events` (onboarding/gateway telemetry) and is
- *     LABELLED as such — it is NOT the operational system_events journal yet.
+ * `recent_events` reads O4's operational `system_events` journal (unit O4 is
+ * now merged — #319). That journal already carries every band's deliberate
+ * silent-degrade decisions, so `core_install_failed` (emitted by X2's
+ * `install-bundled.ts`), `credential_all_cooldown`, `repl_session_capped`,
+ * `cron_job_error`, `import_orphaned`, … all surface here for free — the
+ * question "why is memory / chat / import / a Core broken?" is answerable from
+ * the journal tail without journalctl.
+ *
+ * HONEST PARTIAL — remaining accepted deferrals (tracked follow-ups):
+ *   - a DEDICATED `core_install` section (beyond the `core_install_failed`
+ *     rows already in `recent_events`) → `CoresModuleState.failures` is
+ *     in-process graph-module state built by `installBundledCores` DEEP in
+ *     `composeProductionGraph`, with no read handle at this composer seam.
+ *     Threading a bespoke graph ref just to duplicate what the journal already
+ *     shows would be a cross-module change beyond O5's additive/read-only
+ *     mandate; consume X2's `/api/cores` degraded surface in a follow-up.
+ *   - `GET /healthz?deep=1` → the default `/healthz` is served by the boot
+ *     shell's terminal `defaultHealthzHandler` (`gateway/index.ts`), which
+ *     holds only `{ project_slug, bootedAt }`. A deep variant would thread a
+ *     diagnostics provider through the composition contract into the boot shell
+ *     AND — since `/healthz` is UNAUTHENTICATED (load-balancer liveness) —
+ *     demands a deliberate coarse-summary-vs-full-report decision so it cannot
+ *     leak internal state (latch reasons, credential cooldowns, REPL pids). The
+ *     full report is already reachable owner-gated at this endpoint + via
+ *     `neutron doctor`; deferred rather than half-built.
  *   - REPL `lastDataAt` → needs a persistence decision (it is an in-memory
  *     PtySession field, absent from repl-registry.json, unreachable off-process);
  *     surfacing it would be a behaviour change, out of O5's read-only scope. The

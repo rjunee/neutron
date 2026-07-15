@@ -87,6 +87,36 @@ describe('collectCliDiagnostics', () => {
     expect(result.report.import_jobs.jobs?.[0]).toMatchObject({ job_id: 'j1', status: 'failed', error_code: 'rate_limit' })
   })
 
+  it('surfaces a system_events degrade row (O4 journal) off-process', () => {
+    const dbPath = join(tmp, 'project.db')
+    const db = ProjectDb.open(dbPath)
+    applyMigrationsToProjectDb(db)
+    // A `core_install_failed` degrade — the exact "why is a Core broken?" signal
+    // the journal makes visible without journalctl.
+    db.runSync(
+      `INSERT INTO system_events (id, ts, level, module, event_name, payload_json, project_slug, duration_ms)
+       VALUES ('e1', 500, 'error', 'cores', 'core_install_failed', ?, 'demo', NULL)`,
+      [JSON.stringify({ core_slug: 'email', code: 'manifest_invalid' })],
+    )
+    db.close()
+
+    const result = collectCliDiagnostics(envFor(dbPath))
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    const ev = result.report.recent_events
+    expect(ev.available).toBe(true)
+    expect(ev.events?.[0]).toMatchObject({
+      ts: 500,
+      level: 'error',
+      module: 'cores',
+      event: 'core_install_failed',
+      project_slug: 'demo',
+      payload: { core_slug: 'email', code: 'manifest_invalid' },
+    })
+    // the printer labels the section as the operational system_events journal
+    expect(formatDiagnosticsText(result.report)).toContain('recent events (system_events')
+  })
+
   it('scopes cron jobs to THIS instance slug (no cross-project leak)', () => {
     const dbPath = join(tmp, 'project.db')
     const db = ProjectDb.open(dbPath)
