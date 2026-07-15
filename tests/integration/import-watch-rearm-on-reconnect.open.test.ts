@@ -124,6 +124,46 @@ async function seedStrandedImportRow(db: ProjectDb): Promise<void> {
   })
 }
 
+// F8 NEGATIVE boundary — a conversational-marker row that is NOT finalize-ready:
+// required fields are still missing (no agent_personality, fewer than the required
+// primary projects). The boot finalize recovery MUST leave it alone (the readiness
+// gate says next_to_collect !== null), or a restart would prematurely "complete" an
+// onboarding the owner never finished. Boot with no socket and assert it stays put.
+async function seedIncompleteConversationalRow(db: ProjectDb): Promise<void> {
+  const seedStore = new SqliteOnboardingStateStore({ db })
+  await seedStore.upsert({
+    project_slug: 'owner',
+    user_id: 'owner',
+    phase: 'work_interview_gap_fill',
+    phase_state_patch: {
+      user_first_name: 'Riya',
+      signup_via: 'web',
+      // Deliberately incomplete: no primary_projects, no agent_personality → the
+      // finalize readiness gate reports fields still outstanding.
+    },
+  })
+}
+
+// F8 NEGATIVE boundary — an import still IN-FLIGHT (phase `import_running`). The boot
+// sweep may re-arm the import machinery for this row, but the FINALIZE recovery must
+// never fire on an import-active phase: finalizing on top of a running import would
+// race the import's own consume/materialize. Assert it never reaches `completed`.
+async function seedInFlightImportRow(db: ProjectDb): Promise<void> {
+  const seedStore = new SqliteOnboardingStateStore({ db })
+  await seedStore.upsert({
+    project_slug: 'owner',
+    user_id: 'owner',
+    phase: 'import_running',
+    phase_state_patch: {
+      user_first_name: 'Riya',
+      signup_via: 'web',
+      primary_projects: ['Acme Launch', 'Infra', 'Garden'],
+      non_work_interests: ['climbing'],
+      agent_personality: 'warm and direct',
+    },
+  })
+}
+
 // `seedBeforeCompose` = true → the row exists when the composition-boot re-arm scans
 // (so the boot scan consumes it — the offline-restart path). false → the row is absent
 // at boot; the test seeds it AFTER composition so ONLY `on_session_open` (reconnect)
@@ -303,4 +343,27 @@ describe('Open import-watch re-arm on reconnect (restart resilience)', () => {
     ws.close()
     await sleep(50)
   }, 45_000)
+
+  test('F8 NEGATIVE — boot does NOT finalize a conversational row that is missing required fields', async () => {
+    // The mirror of the finalize-recovery test: a `work_interview_gap_fill` row that
+    // is NOT ready (required fields still outstanding). `rearmFromDurableState`'s
+    // finalize recovery must respect the readiness gate and leave it at
+    // `work_interview_gap_fill` — a restart must never "complete" an unfinished
+    // onboarding. Boot with no socket; give the boot sweep + a few ticks to run.
+    harness = await startHarness({ seedFn: seedIncompleteConversationalRow })
+    await sleep(2_000) // let the boot sweep + any tick run
+    expect(currentPhase(harness.db)).toBe('work_interview_gap_fill')
+    expect(currentPhase(harness.db)).not.toBe('completed')
+  }, 30_000)
+
+  test('F8 NEGATIVE — boot does NOT finalize a row whose import is still in-flight', async () => {
+    // An `import_running` row (import not yet done). The finalize recovery must skip
+    // import-active phases entirely — finalizing on top of a running import would race
+    // its consume/materialize. Assert it never reaches `completed` across a settle
+    // window (it may be re-armed / advanced by the import machinery, but MUST NOT be
+    // finalized).
+    harness = await startHarness({ seedFn: seedInFlightImportRow })
+    await sleep(2_000)
+    expect(currentPhase(harness.db)).not.toBe('completed')
+  }, 30_000)
 })
