@@ -14,7 +14,7 @@
  */
 
 import { describe, test, expect } from 'bun:test'
-import { mkdtempSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, writeFileSync, existsSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -159,6 +159,29 @@ describe('reflect dedup (deterministic, no LLM)', () => {
     expect(bodies.some((b) => b.startsWith('Merged near-duplicate'))).toBe(true)
   })
 
+  test('a loser whose on-disk deletion FAILS is retained + not counted as merged', async () => {
+    const owner = tmpOwner()
+    await seed(owner, 'company', 'acme', 'Acme', 'Acme is a developer-tools SaaS company.', [
+      { ts: '2026-07-01T00:00:00.000Z', source: 'chat:owner', body: 'a' },
+      { ts: '2026-07-02T00:00:00.000Z', source: 'chat:owner', body: 'b' },
+    ])
+    await seed(owner, 'company', 'acme-co', 'Acme Co', 'Acme is a developer-tools SaaS company.', [
+      { ts: '2026-07-01T00:00:00.000Z', source: 'chat:owner', body: 'c' },
+    ])
+    // removeFile always rejects with a NON-ENOENT error → deletion "fails".
+    const report = await runReflectPass({
+      ...baseDeps(owner),
+      removeFile: async (): Promise<void> => {
+        const err = new Error('EACCES') as NodeJS.ErrnoException
+        err.code = 'EACCES'
+        throw err
+      },
+    })
+    // Merge is NOT reported (both files still on disk), and the loser survives.
+    expect(report.merged).toBe(0)
+    expect(existsSync(join(owner, 'entities', 'companies', 'acme-co.md'))).toBe(true)
+  })
+
   test('distinct pages are NOT merged', async () => {
     const owner = tmpOwner()
     await seed(owner, 'company', 'acme', 'Acme', 'Acme is a developer-tools SaaS company.', [
@@ -171,6 +194,38 @@ describe('reflect dedup (deterministic, no LLM)', () => {
     expect(report.merged).toBe(0)
     expect(await readPage(owner, 'companies', 'acme')).not.toBeNull()
     expect(await readPage(owner, 'companies', 'globex')).not.toBeNull()
+  })
+})
+
+describe('reflect path containment (untrusted frontmatter slug)', () => {
+  test('a page with a traversal slug is skipped — never read or deleted', async () => {
+    const owner = tmpOwner()
+    // A REAL secret outside the entities tree the traversal would target.
+    writeFileSync(join(owner, 'secret.md'), '# TOP SECRET\n\nsomething private\n')
+    // A page file whose FRONTMATTER slug escapes the entities dir. The enumerator
+    // trusts the frontmatter slug, so the pass must reject it by grammar.
+    mkdirSync(join(owner, 'entities', 'companies'), { recursive: true })
+    writeFileSync(
+      join(owner, 'entities', 'companies', 'evil.md'),
+      '---\nslug: ../../secret\ntype: company\nname: Evil\n---\n\nEvil corp.\n\n---\n\n## Timeline\n\n',
+    )
+    // A legit page so the pass still has work to do.
+    await seed(owner, 'company', 'good', 'Good', 'Good is a real company.', [
+      { ts: '2026-07-01T00:00:00.000Z', source: 'chat:owner', body: 'note' },
+    ])
+    const deleted: string[] = []
+    const report = await runReflectPass({
+      ...baseDeps(owner),
+      deletePage: async (slug: string): Promise<void> => {
+        deleted.push(slug)
+      },
+    })
+    // The traversal page never counted, the secret is untouched, nothing merged.
+    expect(report.merged).toBe(0)
+    expect(deleted).not.toContain('../../secret')
+    expect(existsSync(join(owner, 'secret.md'))).toBe(true)
+    const secret = await readFile(join(owner, 'secret.md'), 'utf8')
+    expect(secret).toContain('TOP SECRET') // never deleted
   })
 })
 
@@ -208,6 +263,32 @@ describe('reflect reserved-kind extraction (meeting/project/original)', () => {
     const meeting = await readPage(owner, 'meetings', 'q3-board-meeting')
     expect(meeting).not.toBeNull()
     expect(extractCompiledTruth(meeting!)).toContain('Q3 Board Meeting')
+  })
+
+  test('re-extraction is APPEND-ONLY over an existing reserved page (no clobber)', async () => {
+    const owner = tmpOwner()
+    // A pre-existing, RICH project page with multiple facts + a wikilink edge.
+    const rich =
+      '# Perfect Recall\n\nA memory-uplift initiative. Sponsored by [[sarah-patel]]. Targets Q4 GA.'
+    await seed(owner, 'project', 'perfect-recall', 'Perfect Recall', rich, [
+      { ts: '2026-07-01T00:00:00.000Z', source: 'seed', body: 'kicked off' },
+    ])
+    // The reflect extraction re-mentions it with only ONE thin fact.
+    const { substrate } = scriptedSubstrate((prompt) =>
+      prompt.includes('DIGEST:')
+        ? JSON.stringify({
+            entities: [{ name: 'Perfect Recall', kind: 'project', fact: 'in progress' }],
+          })
+        : '{"entities":[]}',
+    )
+    await runReflectPass({ ...baseDeps(owner), substrate })
+    // The rich compiled-truth (both facts + the wikilink) is preserved verbatim —
+    // never replaced by the one-fact digest, so no edge/fact is retracted.
+    const page = await readPage(owner, 'projects', 'perfect-recall')
+    const ct = extractCompiledTruth(page!)
+    expect(ct).toContain('memory-uplift initiative')
+    expect(ct).toContain('Targets Q4 GA')
+    expect(ct).toContain('[[sarah-patel]]') // graph edge intact
   })
 })
 

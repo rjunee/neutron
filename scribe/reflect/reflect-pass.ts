@@ -44,6 +44,7 @@ import {
   mergeTimeline,
 } from '@neutronai/runtime/entity-format.ts'
 import { collectMemoryIndexEntries } from '@neutronai/runtime/memory-index.ts'
+import { SLUG_REGEX } from '@neutronai/runtime/entity-slug.ts'
 import type { Substrate } from '@neutronai/runtime/substrate.ts'
 import { getBestModel } from '@neutronai/runtime/models.ts'
 import { drainToText } from '@neutronai/runtime/substrate-text.ts'
@@ -111,6 +112,13 @@ export interface ReflectPassDeps {
   maxReservedDigestChars?: number
   /** Per-dispatch watchdog (ms). Default `DEFAULT_REFLECT_WATCHDOG_MS`. */
   watchdogMs?: number
+  /**
+   * On-disk page-removal seam (dedup loser deletion). Defaults to `fs.unlink`.
+   * Injected so a test can assert the failure path (a loser whose deletion fails
+   * is RETAINED among survivors and NOT counted as merged). Must reject on a real
+   * removal failure; an already-absent file (ENOENT) is treated as removed.
+   */
+  removeFile?: (path: string) => Promise<void>
   /** Clock injection for determinism. Defaults to `Date.now`. */
   now?: () => number
   /** Failure sink. Defaults to a structured warn. */
@@ -215,6 +223,12 @@ async function loadAllPages(ownerDataDir: string): Promise<LoadedPage[]> {
   const entries = await collectMemoryIndexEntries(ownerDataDir, { kinds: ENTITY_KINDS })
   const pages: LoadedPage[] = []
   for (const e of entries) {
+    // PATH CONTAINMENT: the enumerator derives `slug` from untrusted frontmatter,
+    // so a hostile `slug: ../../outside/secret` would let the reconstructed
+    // `join(...)` escape the entities tree on the subsequent read AND on a later
+    // dedup `unlink`. Reject anything that is not a clean single-segment entity
+    // slug (the shared grammar — no `/`, no `.`) before we ever touch the path.
+    if (!SLUG_REGEX.test(e.slug)) continue
     const path = join(ownerDataDir, 'entities', KIND_TO_DIR[e.kind], `${e.slug}.md`)
     let body: string
     try {
@@ -270,9 +284,13 @@ async function dedupPages(
         continue
       }
       try {
-        const survivor = await mergeCluster(members, deps, now)
+        const { survivor, retained, deleted } = await mergeCluster(members, deps, now)
         survivors.push(survivor)
-        report.merged += members.length - 1
+        // A loser whose canonical (on-disk) deletion FAILED is retained as its own
+        // survivor and NOT counted as merged — telemetry never claims a
+        // consolidation that left both files on disk (a later pass retries it).
+        for (const r of retained) survivors.push(r)
+        report.merged += deleted
       } catch (err) {
         // Merge failed — keep every member as its own survivor (no data lost).
         logFailure('reflect: merge failed', err)
@@ -296,7 +314,7 @@ async function mergeCluster(
   members: LoadedPage[],
   deps: ReflectPassDeps,
   now: () => number,
-): Promise<LoadedPage> {
+): Promise<{ survivor: LoadedPage; retained: LoadedPage[]; deleted: number }> {
   const ranked = [...members].sort((a, b) => {
     if (b.timeline.length !== a.timeline.length) return b.timeline.length - a.timeline.length
     if (b.compiledTruth.length !== a.compiledTruth.length) {
@@ -363,13 +381,30 @@ async function mergeCluster(
   for (const row of unionTimeline.slice(1)) await writeOne(row)
 
   // Remove each loser: disk first (canonical), then best-effort brain mirror.
+  // The survivor has ALREADY absorbed every loser's content above, so a failed
+  // disk deletion is NOT data loss — it just leaves a duplicate. We therefore
+  // RETAIN a loser whose deletion genuinely failed (it stays a survivor, is not
+  // counted as merged, and a later pass retries the collapse) rather than
+  // dropping it from the inventory while its file lingers (Codex RB3 medium).
+  const removeFile = deps.removeFile ?? unlink
+  const retained: LoadedPage[] = []
+  let deleted = 0
   for (const l of losers) {
     const path = join(deps.ownerDataDir, 'entities', KIND_TO_DIR[l.kind], `${l.slug}.md`)
+    let removed = false
     try {
-      await unlink(path)
-    } catch {
-      // already gone / unreadable — the survivor still carries the merged content
+      await removeFile(path)
+      removed = true
+    } catch (err) {
+      // ENOENT = already gone = the desired end state; anything else is a real
+      // failure that must NOT be reported as a successful merge.
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') removed = true
     }
+    if (!removed) {
+      retained.push(l)
+      continue // leave the brain mirror alone too — disk is still authoritative
+    }
+    deleted += 1
     if (deps.deletePage !== undefined) {
       try {
         await deps.deletePage(l.slug)
@@ -380,10 +415,14 @@ async function mergeCluster(
   }
 
   return {
-    ...survivor,
-    compiledTruth: mergedCompiledTruth,
-    timeline: unionTimeline,
-    frontmatter,
+    survivor: {
+      ...survivor,
+      compiledTruth: mergedCompiledTruth,
+      timeline: unionTimeline,
+      frontmatter,
+    },
+    retained,
+    deleted,
   }
 }
 
@@ -470,8 +509,15 @@ function renderPageForResynth(page: LoadedPage): string {
 /**
  * EXTRACT the reserved kinds (meeting/project/original) from a corpus digest in
  * ONE batched LLM call, then write each through the entity-writer → GBrain path.
- * A conservative single-pass writer: fresh compiled-truth per entity, one
- * timeline row; `writeEntity` dedups on re-run.
+ *
+ * APPEND-ONLY over an EXISTING reserved page (the Nova-scribe / write-to-gbrain
+ * rule): `writeEntity` renders `body.compiledTruth` as a FULL REPLACEMENT and
+ * retracts every graph edge present before but absent now, so composing a fresh
+ * one-fact page over a richer existing meeting/project/note would erase its prior
+ * facts AND edges. So for an existing page we PRESERVE its compiled-truth +
+ * frontmatter verbatim and only append the timeline row; the durable new fact
+ * lives in the append-only timeline. Only a genuinely NEW entity gets a
+ * freshly-composed page (Codex RB3 high).
  */
 async function extractReservedKinds(
   survivors: LoadedPage[],
@@ -495,21 +541,28 @@ async function extractReservedKinds(
   for (const e of entities) {
     const slug = slugify(e.name)
     if (slug === null) continue
-    const fact = e.fact !== undefined && e.fact.length > 0 ? e.fact : `Identified during reflect (${e.kind}).`
-    const compiledTruth = `# ${e.name}\n\n${fact.endsWith('.') ? fact : `${fact}.`}\n`
     try {
+      // Read any existing page for (kind, slug): preserve it (append-only) or
+      // compose fresh. The slug came from `slugify` → grammar-safe path.
+      const existing = await readExistingReservedPage(deps.ownerDataDir, e.kind, slug)
+      const compiledTruth =
+        existing !== null
+          ? existing.compiledTruth // preserve verbatim — never clobber prior truth/edges
+          : `# ${e.name}\n\n${(e.fact ?? `Identified during reflect (${e.kind}).`).replace(/\.?$/, '.')}\n`
+      const frontmatter: Record<string, unknown> = {
+        ...(existing?.frontmatter ?? {}),
+        slug,
+        type: e.kind,
+        name: existing !== null ? (existing.frontmatter['name'] ?? e.name) : e.name,
+        source: `reflect:${deps.ownSlug}`,
+      }
       const out = await deps.writeEntity(
         {
           ownerDataDir: deps.ownerDataDir,
           kind: e.kind,
           slug,
           body: {
-            frontmatter: {
-              slug,
-              type: e.kind,
-              name: e.name,
-              source: `reflect:${deps.ownSlug}`,
-            },
+            frontmatter,
             compiledTruth,
             timelineAppend: {
               ts: nowIso,
@@ -522,11 +575,29 @@ async function extractReservedKinds(
         },
         deps.syncHook !== undefined ? { syncHook: deps.syncHook } : {},
       )
-      if (out.changed) report.reservedWritten += 1
+      if (out.changed && existing === null) report.reservedWritten += 1
     } catch (err) {
       logFailure('reflect: reserved write failed', err)
     }
   }
+}
+
+/** Read an existing reserved-kind page's compiled-truth + frontmatter, or null
+ *  when it doesn't exist yet. `slug` is grammar-safe (from `slugify`). */
+async function readExistingReservedPage(
+  ownerDataDir: string,
+  kind: EntityKind,
+  slug: string,
+): Promise<{ compiledTruth: string; frontmatter: Record<string, unknown> } | null> {
+  if (!SLUG_REGEX.test(slug)) return null
+  const path = join(ownerDataDir, 'entities', KIND_TO_DIR[kind], `${slug}.md`)
+  let body: string
+  try {
+    body = await readFile(path, 'utf8')
+  } catch {
+    return null
+  }
+  return { compiledTruth: extractCompiledTruth(body), frontmatter: parseFrontmatter(body) }
 }
 
 /** Concatenate page titles + compiled-truth (+ a couple of recent timeline rows)
