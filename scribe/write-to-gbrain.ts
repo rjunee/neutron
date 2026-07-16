@@ -518,17 +518,19 @@ function mergeExistingCompiledTruth(existing: string, page: PlannedPage, superse
  * target sentence and keeps the rest, so neither a stale sibling sentence lingers
  * nor an unrelated fact is deleted wholesale.
  *
- * ALL-OR-NOTHING within a sentence, VERBATIM otherwise (Codex data-loss blockers):
- * a sentence is dropped ONLY when EVERY relation it asserts is a superseded target;
- * a COMPOUND sentence that also carries a still-current relation OR descriptive
- * prose (`Works at [[oldco]] and advises [[boardco]] on acquisitions since 2019.`)
- * is KEPT BYTE-FOR-BYTE — never deleted and never reconstructed from templates
- * (which would lose the unrelated fact AND the hand-authored prose). The trade-off
- * is intentional + safe: a superseded relation embedded in a compound sentence is
- * left in place (under-remove rather than mangle prose). Scribe's own rendered
- * prose is one relation per sentence, so a real chat-time supersession always hits
- * the clean single-relation path; only hand-authored/imported compound prose is
- * spared (its graph edge follows the KG's one-edge-per-pair collapse regardless).
+ * SINGLE-SENTENCE ONLY, VERBATIM otherwise (Codex data-loss blockers): a sentence
+ * is dropped ONLY when it is PURELY a single generated relationship assertion for a
+ * superseded target (`pureSupersededSentence` — exactly one graph relation, and the
+ * sentence normalises to the `RELATION_SENTENCE` template). ANYTHING else — a
+ * COMPOUND sentence asserting more than one relation, or a single relation wrapped
+ * in descriptive prose (`Works at [[oldco]] and advises [[boardco]] on acquisitions
+ * since 2019.`) — is KEPT BYTE-FOR-BYTE, never deleted and never reconstructed. The
+ * trade-off is intentional + safe: a superseded relation embedded in a compound /
+ * prose sentence is left in place (under-remove rather than mangle hand-authored
+ * text). Scribe's own rendered prose is one relation per sentence, so a real
+ * chat-time supersession always hits the clean single-relation path; only
+ * hand-authored/imported compound prose is spared (its graph edge follows the KG's
+ * one-edge-per-pair collapse regardless).
  *
  * A sentence qualifies purely by what it would contribute to the graph, computed
  * with the SAME `extractTypedLinks` + `splitSentencesWithOffsets` the edge
@@ -585,11 +587,14 @@ function stripSupersededSentences(existing: string, page: PlannedPage): string {
   // hand-authored prose (`Works at [[oldco]] as principal engineer since 2019.`)
   // fails (b) → kept verbatim; alias/markdown wikilink forms still pass (a)+(b)
   // because normalisation collapses them to the same bare slug (Codex).
-  // Normalise references → bare slugs, drop surrounding whitespace + trailing
-  // sentence punctuation (the sentence spans exclude the terminator, the templates
-  // include it), so only the meaningful content is compared.
+  // Normalise references → bare slugs, LOWERCASE (the edge extractor's verb match
+  // is case-insensitive, so a hand-authored `works at [[oldco]].` IS a live edge
+  // and must match the capitalised template — Codex), and drop surrounding
+  // whitespace + trailing sentence punctuation (spans exclude the terminator, the
+  // templates include it), so only the meaningful content is compared.
   const canon = (s: string): string =>
     normaliseSentence(s)
+      .toLowerCase()
       .trim()
       .replace(/[.!?]+$/, '')
       .trim()

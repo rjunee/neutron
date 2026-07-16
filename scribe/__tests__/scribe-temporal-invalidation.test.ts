@@ -596,6 +596,63 @@ describe('RB4 temporal invalidation (belief evolution) — real PGLite round-tri
     expect(edgesTo(links, 'thetaco', 'works_at').length).toBe(1) // CURRENT
   }, 60_000)
 
+  test('flag ON: a LOWERCASE generated sentence is invalidated (removal is case-insensitive, matching the extractor)', async () => {
+    const ownerDataDir = mkdtempSync(join(tmpdir(), 'scribe-rb4-lower-'))
+    const syncHook = new GBrainSyncHook({
+      memoryStore: new GBrainMemoryStore(client),
+      gbrainMcp: client,
+    })
+    await client.call('put_page', {
+      slug: 'lwold',
+      content: '---\nslug: lwold\ntype: company\n---\n\nA company.\n',
+    })
+    // A hand-authored LOWERCASE `works at [[lwold]].` — the edge extractor matches
+    // verbs case-insensitively, so this IS a live works_at edge.
+    await writeEntity(
+      {
+        ownerDataDir,
+        kind: 'person',
+        slug: 'lena-oz',
+        originInstance: 'rb4',
+        receivingInstanceSlug: 'rb4',
+        body: {
+          frontmatter: { slug: 'lena-oz', type: 'person', name: 'Lena Oz' },
+          compiledTruth: '# Lena Oz\n\nAn engineer.\n\n## Relationships\n\n- works at [[lwold]].\n',
+          timelineAppend: { ts: new Date(t0).toISOString(), source: 'import:onboarding', body: 'seeded' },
+        },
+      },
+      { syncHook },
+    )
+    let links = await client.call('get_links', { slug: 'lena-oz' })
+    expect(edgesTo(links, 'lwold', 'works_at').length).toBe(1) // lowercase → still an edge
+
+    const scribe = createScribe({
+      substrate: cannedSubstrate(factSupersede('Lena Oz', 'Lwold', 'Lwnew')),
+      syncHook,
+      ownerDataDir,
+      project_slug: 'rb4-lower',
+      budget: createState(join(ownerDataDir, '.scribe-budget.json'), t0),
+      writeEntity,
+      now: () => t0 + 1000,
+      supersede: true,
+    })
+    const out = await scribe.extractAndWrite({
+      text: 'Lena Oz has moved on from Lwold and now works at Lwnew, leading their platform engineering team full time.',
+      observed_at: t0 + 1000,
+    })
+    expect(out.ran).toBe(true)
+
+    const compiled = extractCompiledTruth(
+      readFileSync(join(ownerDataDir, 'entities', 'people', 'lena-oz.md'), 'utf8'),
+    )
+    expect(compiled).not.toContain('[[lwold]]') // the lowercase sentence WAS retired
+    expect(compiled).toContain('Works at [[lwnew]].')
+
+    links = await client.call('get_links', { slug: 'lena-oz' })
+    expect(edgesTo(links, 'lwold', 'works_at').length).toBe(0) // INVALIDATED
+    expect(edgesTo(links, 'lwnew', 'works_at').length).toBe(1) // CURRENT
+  }, 60_000)
+
   test('flag ON: a MARKDOWN-link assertion is invalidated (removal matches [Oldmark](oldmark), not only wikilinks)', async () => {
     const ownerDataDir = mkdtempSync(join(tmpdir(), 'scribe-rb4-mdlink-'))
     const syncHook = new GBrainSyncHook({
