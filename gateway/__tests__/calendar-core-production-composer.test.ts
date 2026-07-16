@@ -1,3 +1,4 @@
+import { asOwnerHandle } from '@neutronai/persistence/index.ts'
 /**
  * Calendar Core S1 — production-composer reachability guard.
  *
@@ -68,7 +69,7 @@ import {
 import { STUB_PLATFORM } from '@neutronai/runtime/__tests__/stub-platform.ts'
 
 const REPO_ROOT = join(import.meta.dir, '..', '..')
-const OWNER = 'cal-composer-project'
+const OWNER = asOwnerHandle('cal-composer-project')
 const PROJECT_A = 'demo-A'
 const PROJECT_B = 'demo-B'
 

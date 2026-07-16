@@ -12,6 +12,7 @@
  */
 
 import type { ApiKeyProvider, ApiKeyStore } from './api-key-store.ts'
+import { asOwnerHandle, type OwnerHandle } from '@neutronai/persistence/index.ts'
 import {
   newCredentialPool,
   type CredentialPool,
@@ -19,8 +20,8 @@ import {
 } from '@neutronai/runtime/credential-pool.ts'
 
 export interface BuildBYOApiKeyPoolInput {
-  /** Frozen `internal_handle` — see auth/secrets-store.ts file header. */
-  internal_handle: string
+  /** Frozen `internal_handle` (branded `OwnerHandle`) — see auth/secrets-store.ts file header. */
+  internal_handle: OwnerHandle
   provider: ApiKeyProvider
   api_keys: ApiKeyStore
   /** Defaults to `'least_used'` so a multi-key pool rotates fairly. */
@@ -48,7 +49,9 @@ export async function buildBYOApiKeyPool(
   const credentials: Array<{ id: string; kind: 'api_key'; secret: string }> = []
   for (const row of rows) {
     const plaintext = await input.api_keys.resolveSecret({
-      internal_handle: row.internal_handle,
+      // `row.internal_handle` is the frozen handle read back from the DB row
+      // (stored via a branded boundary), so re-branding it is sound.
+      internal_handle: asOwnerHandle(row.internal_handle),
       provider: row.provider,
       label: row.label,
     })

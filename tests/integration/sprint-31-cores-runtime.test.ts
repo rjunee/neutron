@@ -1,3 +1,4 @@
+import { asOwnerHandle } from '@neutronai/persistence/index.ts'
 /**
  * Sprint 31 — P3 Cores runtime behavioral spec.
  *
@@ -46,7 +47,7 @@ let secretsStore: SecretsStore
 let audit: SecretAuditLog
 let installs: CoreInstallationsStore
 
-const OWNER = 'owner-zero'
+const OWNER = asOwnerHandle('owner-zero')
 
 beforeEach(() => {
   tmp = mkdtempSync(join(tmpdir(), 'sprint-31-spec-'))

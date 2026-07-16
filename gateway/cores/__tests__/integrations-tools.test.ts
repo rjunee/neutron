@@ -1,3 +1,4 @@
+import { asOwnerHandle } from '@neutronai/persistence/index.ts'
 /**
  * WAVE 2 Track A — agent-native Integrations chat-tool tests.
  *
@@ -24,7 +25,7 @@ import { OAuthTokenManager, GOOGLE_REVOKE_URL } from '../oauth-token-manager.ts'
 import { buildIntegrationsTools } from '../integrations-tools.ts'
 
 const REPO_ROOT = join(import.meta.dir, '..', '..', '..')
-const OWNER = 'integrations-tools-test'
+const OWNER = asOwnerHandle('integrations-tools-test')
 
 const cleanups: Array<() => void | Promise<void>> = []
 afterEach(async () => {

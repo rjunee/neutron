@@ -1,3 +1,4 @@
+import { asOwnerHandle } from '@neutronai/persistence/index.ts'
 /**
  * Sprint 23 — Max paste-token credential-resolution path (OPEN carve).
  *
@@ -54,7 +55,7 @@ import { selectCredential } from '@neutronai/runtime/credential-pool.ts'
 
 const NOW_FIXED = 1_700_000_000_000
 const PASTED_TOKEN = 'sk-ant-oat01-goodXXXX'
-const OWNER = 'alice'
+const OWNER = asOwnerHandle('alice')
 
 let root: string
 let dataDir: string

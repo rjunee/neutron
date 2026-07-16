@@ -1,3 +1,4 @@
+import { asOwnerHandle } from '@neutronai/persistence/index.ts'
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { mkdirSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
@@ -71,7 +72,7 @@ describe('install lifecycle — Email-Managed Core happy path', () => {
     const coreDir = copyEmailManagedIntoFixture(env.tmp)
     const prompter = new GmailOauthPrompter('ya29.test-gmail-access')
     const result = await installCore({
-      project_slug: 'owner_a',
+      project_slug: asOwnerHandle('owner_a'),
       coreDir,
       projectDb: env.projectDb,
       dataDir: env.dataDir,
@@ -94,7 +95,7 @@ describe('install lifecycle — Email-Managed Core happy path', () => {
 
     // Exactly one audit `put` row — for the OAuth token.
     const rows = await env.audit.list({
-      project_slug: 'owner_a',
+      project_slug: asOwnerHandle('owner_a'),
       core_slug: CORE_SLUG,
     })
     const puts = rows.filter((r) => r.op === 'put')
@@ -105,7 +106,7 @@ describe('install lifecycle — Email-Managed Core happy path', () => {
 
     // Persisted via the platform store — the live token is readable.
     const stored = await env.secretsStore.list({
-      internal_handle: 'owner_a',
+      internal_handle: asOwnerHandle('owner_a'),
       kind: 'oauth_token',
     })
     expect(stored.length).toBe(1)
@@ -119,7 +120,7 @@ describe('install lifecycle — Email-Managed Core happy path', () => {
     const coreDir = copyEmailManagedIntoFixture(env.tmp)
     const prompter = new GmailOauthPrompter()
     await installCore({
-      project_slug: 'owner_b',
+      project_slug: asOwnerHandle('owner_b'),
       coreDir,
       projectDb: env.projectDb,
       dataDir: env.dataDir,
@@ -130,7 +131,7 @@ describe('install lifecycle — Email-Managed Core happy path', () => {
     })
 
     await uninstallCore({
-      project_slug: 'owner_b',
+      project_slug: asOwnerHandle('owner_b'),
       core_slug: CORE_SLUG,
       projectDb: env.projectDb,
       dataDir: env.dataDir,
@@ -145,14 +146,14 @@ describe('install lifecycle — Email-Managed Core happy path', () => {
 
     // Secret deleted as part of uninstall.
     const stored = await env.secretsStore.list({
-      internal_handle: 'owner_b',
+      internal_handle: asOwnerHandle('owner_b'),
       kind: 'oauth_token',
     })
     expect(stored.find((r) => r.label === OAUTH_SECRET_LABEL)).toBeUndefined()
 
     // Audit log includes the delete row.
     const rows = await env.audit.list({
-      project_slug: 'owner_b',
+      project_slug: asOwnerHandle('owner_b'),
       core_slug: CORE_SLUG,
     })
     const deletes = rows.filter((r) => r.op === 'delete')
@@ -168,7 +169,7 @@ describe('install lifecycle — Email-Managed Core OAuth gating', () => {
     let caught: unknown
     try {
       await installCore({
-        project_slug: 'owner_c',
+        project_slug: asOwnerHandle('owner_c'),
         coreDir,
         projectDb: env.projectDb,
         dataDir: env.dataDir,

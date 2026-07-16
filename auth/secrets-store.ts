@@ -50,7 +50,7 @@ import {
 } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { createCipheriv, createDecipheriv, randomUUID } from 'node:crypto'
-import type { ProjectDb } from '@neutronai/persistence/index.ts'
+import type { ProjectDb, OwnerHandle } from '@neutronai/persistence/index.ts'
 
 const KEY_LENGTH_BYTES = 32 // 256-bit AES
 const IV_LENGTH_BYTES = 12 // GCM standard
@@ -182,9 +182,10 @@ export class SecretsStoreError extends Error {
 export interface PutInput {
   /**
    * Frozen `internal_handle` for the owning project — see file header.
-   * Callers MUST pass the FROZEN registry PK, not the mutable url_slug.
+   * Branded `OwnerHandle`: the compiler rejects a bare/mutable `url_slug`
+   * string here (the 2026-05-12 credential-loss bug is now a type error).
    */
-  internal_handle: string
+  internal_handle: OwnerHandle
   kind: SecretKind
   label: string
   plaintext: string
@@ -192,15 +193,15 @@ export interface PutInput {
 }
 
 export interface GetInput {
-  /** Frozen `internal_handle` — see file header. */
-  internal_handle: string
+  /** Frozen `internal_handle` (branded `OwnerHandle`) — see file header. */
+  internal_handle: OwnerHandle
   kind: SecretKind
   label: string
 }
 
 export interface ListInput {
-  /** Frozen `internal_handle` — see file header. */
-  internal_handle: string
+  /** Frozen `internal_handle` (branded `OwnerHandle`) — see file header. */
+  internal_handle: OwnerHandle
   kind?: SecretKind
 }
 

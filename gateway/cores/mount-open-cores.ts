@@ -55,7 +55,7 @@ import { OAuthTokenManager } from './oauth-token-manager.ts'
 import { CoreCredentialResolver } from './core-credential-resolver.ts'
 import type { ProjectCredentialStore } from '@neutronai/project-credentials/store.ts'
 import { buildCalendarCacheResolver } from './calendar-wiring.ts'
-import { ProjectDb } from '@neutronai/persistence/index.ts'
+import { ProjectDb, asOwnerHandle } from '@neutronai/persistence/index.ts'
 import type { Substrate, AgentSpec } from '@neutronai/runtime/substrate.ts'
 import type { SecretsStore } from '@neutronai/auth/secrets-store.ts'
 import { getBestModel } from '@neutronai/runtime/models.ts'
@@ -182,12 +182,20 @@ export async function mountOpenCores(
   const default_project_id = input.default_project_id ?? 'default'
   const substrate = input.substrate ?? null
 
+  // N1: brand the frozen owner handle ONCE, at the point it enters the
+  // credential subsystem. `input.project_slug` IS the frozen `internal_handle`
+  // on Open (owner-identity: `internal_handle === url_slug`, no rename
+  // machinery); Managed freezes it at provisioning. Every credential boundary
+  // below demands the branded value, so a mutable `url_slug` can never reach a
+  // secret lookup (the 2026-05-12 incident is a compile error now).
+  const ownerHandle = asOwnerHandle(input.project_slug)
+
   // ── Optional-until-credentialed Google OAuth ───────────────────────────────
   const googleClientId = env[GOOGLE_CLIENT_ID_ENV] ?? ''
   const oauthConfigured = googleClientId.length > 0
   const oauthTokens = new OAuthTokenManager({
     secretsStore: input.secretsStore,
-    internal_handle: input.project_slug,
+    internal_handle: ownerHandle,
     client_id: googleClientId,
     client_secret: env[GOOGLE_CLIENT_SECRET_ENV] ?? '',
   })
@@ -223,7 +231,7 @@ export async function mountOpenCores(
   // `oauthTokens` is always constructed;
   // it's the resolver's global fallback (used only when live per the gate below).
   const credentialResolver = new CoreCredentialResolver({
-    owner_slug: input.project_slug,
+    owner_slug: ownerHandle,
     store: input.projectCredentialStore,
     oauthTokens,
   })

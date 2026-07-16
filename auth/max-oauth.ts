@@ -49,6 +49,7 @@
  */
 
 import { SecretsStore, SecretsStoreError } from './secrets-store.ts'
+import type { OwnerHandle } from '@neutronai/persistence/index.ts'
 import { PROBE_MODEL } from '@neutronai/runtime/models.ts'
 
 const DEFAULT_SUB_LABEL = 'default'
@@ -122,8 +123,8 @@ export interface MaxOAuthClientDeps {
 }
 
 export interface PersistPasteTokenInput {
-  /** Frozen `internal_handle` — see auth/secrets-store.ts file header. */
-  internal_handle: string
+  /** Frozen `internal_handle` (branded `OwnerHandle`) — see auth/secrets-store.ts file header. */
+  internal_handle: OwnerHandle
   /** The literal output of `claude setup-token` on the user's machine. */
   token: string
   /** Override the sub label (default `'default'`). */
@@ -132,7 +133,7 @@ export interface PersistPasteTokenInput {
 
 export interface PersistPasteTokenResult {
   id: string
-  /** Frozen `internal_handle` — see auth/secrets-store.ts file header. */
+  /** Frozen `internal_handle` (echoed back from the branded input). */
   internal_handle: string
   expires_at: number
   sub_label: string
@@ -400,7 +401,7 @@ export class MaxOAuthClient {
    * still-valid paste token sits on disk.
    */
   async getAccessToken(
-    internal_handle: string,
+    internal_handle: OwnerHandle,
     sub_label?: string,
   ): Promise<{ access_token: string; expires_at: number } | null> {
     const label = sub_label ?? DEFAULT_SUB_LABEL
@@ -450,14 +451,14 @@ export class MaxOAuthClient {
    * revoke endpoint for `claude setup-token` — Anthropic owns rotation
    * — so this is purely a local cleanup.
    */
-  async revoke(internal_handle: string, sub_label?: string): Promise<void> {
+  async revoke(internal_handle: OwnerHandle, sub_label?: string): Promise<void> {
     const label = sub_label ?? DEFAULT_SUB_LABEL
     await this.removeIfExists(internal_handle, 'max_oauth_refresh', label)
     await this.removeIfExists(internal_handle, 'max_oauth_access', `${label}:access`)
   }
 
   private async removeIfExists(
-    internal_handle: string,
+    internal_handle: OwnerHandle,
     kind: 'max_oauth_refresh' | 'max_oauth_access',
     label: string,
   ): Promise<void> {

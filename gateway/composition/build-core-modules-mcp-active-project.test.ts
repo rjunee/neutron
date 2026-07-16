@@ -1,3 +1,4 @@
+import { asOwnerHandle } from '@neutronai/persistence/index.ts'
 /**
  * X6 (2026-07-15) — the PRODUCTION WIRING guard for per-project credential
  * scoping on the agent's native tool path.
@@ -41,7 +42,7 @@ import { buildCoreModules } from './build-core-modules.ts'
 import type { CompositionInput } from '../composition.ts'
 import type { ModuleContext } from '../module-graph.ts'
 
-const OWNER = 'x6-composition-test'
+const OWNER = asOwnerHandle('x6-composition-test')
 const PROJECT = 'proj-alpha'
 
 const cleanups: Array<() => void> = []

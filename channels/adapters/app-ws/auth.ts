@@ -41,7 +41,13 @@ export type AppWsAuthMode = 'dev-bypass' | 'hs256'
 export interface AppWsAuthResolved {
   /** Stable id derived from the JWT (or the raw dev-bypass token). */
   user_id: string
-  /** Instance slug the connection is authorized for. */
+  /**
+   * Instance slug the connection is authorized for — the gateway's own frozen
+   * owner handle. Credential surfaces construct an `OwnerHandle` from this via
+   * `asOwnerHandle(resolved.project_slug)` at the point it is resolved from auth
+   * (the spec's known-good construction site); the shared auth-resolved types
+   * stay plain `string` so N1 doesn't trigger the full N2/N3 rename.
+   */
   project_slug: string
   /** Auth mode that produced this result — surfaced in logs only. */
   mode: AppWsAuthMode

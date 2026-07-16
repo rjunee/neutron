@@ -1,3 +1,4 @@
+import { asOwnerHandle } from '@neutronai/persistence/index.ts'
 /**
  * WAVE 1 credential-management — onboarding OPTIONAL-key store + activate.
  *
@@ -30,7 +31,7 @@ import { selectCredential } from '@neutronai/runtime/credential-pool.ts'
 import { storeOptionalKey } from '@neutronai/onboarding/optional-keys.ts'
 
 const NOW_FIXED = 1_700_000_000_000
-const OWNER = 'alice'
+const OWNER = asOwnerHandle('alice')
 const OPENAI_KEY = 'sk-proj-onboarding-abc123DEF456'
 
 let root: string

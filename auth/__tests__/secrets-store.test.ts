@@ -1,3 +1,4 @@
+import { asOwnerHandle } from '@neutronai/persistence/index.ts'
 import { afterEach, beforeEach, expect, test } from 'bun:test'
 import { mkdtempSync, rmSync, existsSync, readFileSync, writeFileSync, mkdirSync, statSync, chmodSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -115,7 +116,7 @@ function buildStore(): SecretsStore {
 test('put + get round-trips an arbitrary plaintext via AES-256-GCM', async () => {
   const store = buildStore()
   const result = await store.put({
-    internal_handle: 'alice',
+    internal_handle: asOwnerHandle('alice'),
     kind: 'byo_api_key',
     label: 'anthropic:prod',
     plaintext: 'sk-ant-secret-token-1',
@@ -123,7 +124,7 @@ test('put + get round-trips an arbitrary plaintext via AES-256-GCM', async () =>
   expect(typeof result.id).toBe('string')
   expect(result.id.length).toBeGreaterThan(0)
   const decrypted = await store.get({
-    internal_handle: 'alice',
+    internal_handle: asOwnerHandle('alice'),
     kind: 'byo_api_key',
     label: 'anthropic:prod',
   })
@@ -133,7 +134,7 @@ test('put + get round-trips an arbitrary plaintext via AES-256-GCM', async () =>
 test('get returns null for missing rows', async () => {
   const store = buildStore()
   const decrypted = await store.get({
-    internal_handle: 'alice',
+    internal_handle: asOwnerHandle('alice'),
     kind: 'byo_api_key',
     label: 'missing',
   })
@@ -143,14 +144,14 @@ test('get returns null for missing rows', async () => {
 test('put rejects duplicate (project_slug, kind, label) with duplicate_label code', async () => {
   const store = buildStore()
   await store.put({
-    internal_handle: 'alice',
+    internal_handle: asOwnerHandle('alice'),
     kind: 'byo_api_key',
     label: 'anthropic:prod',
     plaintext: 'first',
   })
   await expect(
     store.put({
-      internal_handle: 'alice',
+      internal_handle: asOwnerHandle('alice'),
       kind: 'byo_api_key',
       label: 'anthropic:prod',
       plaintext: 'second',
@@ -162,16 +163,16 @@ test('rotate replaces ciphertext and stamps rotated_at', async () => {
   let nowVal = 1_700_000_000_000
   const store = new SecretsStore({ data_dir: dataDir, db, now: () => nowVal })
   const { id } = await store.put({
-    internal_handle: 'alice',
+    internal_handle: asOwnerHandle('alice'),
     kind: 'byo_api_key',
     label: 'k1',
     plaintext: 'v1',
   })
   nowVal += 60_000
   await store.rotate(id, 'v2')
-  const current = await store.get({ internal_handle: 'alice', kind: 'byo_api_key', label: 'k1' })
+  const current = await store.get({ internal_handle: asOwnerHandle('alice'), kind: 'byo_api_key', label: 'k1' })
   expect(current).toBe('v2')
-  const list = await store.list({ internal_handle: 'alice' })
+  const list = await store.list({ internal_handle: asOwnerHandle('alice') })
   expect(list[0]?.rotated_at).toBe(nowVal)
 })
 
@@ -185,24 +186,24 @@ test('rotate on unknown id throws not_found', async () => {
 test('delete removes the row; subsequent get returns null', async () => {
   const store = buildStore()
   const { id } = await store.put({
-    internal_handle: 'alice',
+    internal_handle: asOwnerHandle('alice'),
     kind: 'byo_api_key',
     label: 'k',
     plaintext: 'v',
   })
   await store.delete(id)
-  const after = await store.get({ internal_handle: 'alice', kind: 'byo_api_key', label: 'k' })
+  const after = await store.get({ internal_handle: asOwnerHandle('alice'), kind: 'byo_api_key', label: 'k' })
   expect(after).toBeNull()
 })
 
 test('list filters by project_slug and optional kind', async () => {
   const store = buildStore()
-  await store.put({ internal_handle: 'alice', kind: 'byo_api_key', label: 'k1', plaintext: 'v' })
-  await store.put({ internal_handle: 'alice', kind: 'webhook_secret', label: 'k2', plaintext: 'v' })
-  await store.put({ internal_handle: 'bobby', kind: 'byo_api_key', label: 'k3', plaintext: 'v' })
-  const aliceAll = await store.list({ internal_handle: 'alice' })
+  await store.put({ internal_handle: asOwnerHandle('alice'), kind: 'byo_api_key', label: 'k1', plaintext: 'v' })
+  await store.put({ internal_handle: asOwnerHandle('alice'), kind: 'webhook_secret', label: 'k2', plaintext: 'v' })
+  await store.put({ internal_handle: asOwnerHandle('bobby'), kind: 'byo_api_key', label: 'k3', plaintext: 'v' })
+  const aliceAll = await store.list({ internal_handle: asOwnerHandle('alice') })
   expect(aliceAll.map((r) => r.label).sort()).toEqual(['k1', 'k2'])
-  const aliceKeys = await store.list({ internal_handle: 'alice', kind: 'byo_api_key' })
+  const aliceKeys = await store.list({ internal_handle: asOwnerHandle('alice'), kind: 'byo_api_key' })
   expect(aliceKeys.map((r) => r.label)).toEqual(['k1'])
 })
 
@@ -272,7 +273,7 @@ test('ensureKey throws key_missing_after_restore when the keyfile is absent but 
 test('SecretsStore constructor fails loud on a restored data dir: rows exist, keyfile does not', async () => {
   // Step 1: a store writes a secret + its keyfile — the ORIGINAL machine.
   const original = buildStore()
-  await original.put({ internal_handle: 'alice', kind: 'byo_api_key', label: 'k', plaintext: 'v' })
+  await original.put({ internal_handle: asOwnerHandle('alice'), kind: 'byo_api_key', label: 'k', plaintext: 'v' })
 
   // Step 2: simulate a neutron-backup.sh restore — the DB (carrying that row)
   // comes back, but `.neutron-aes-key` (excluded from the bundle) does not.
@@ -379,7 +380,7 @@ test('SecretsStore decrypts an envelope written by the legacy EncryptedBotTokenS
 test('decrypt of a tampered envelope throws SecretsStoreError(decrypt_failed)', async () => {
   const store = buildStore()
   await store.put({
-    internal_handle: 'alice',
+    internal_handle: asOwnerHandle('alice'),
     kind: 'byo_api_key',
     label: 'k',
     plaintext: 'secret',
@@ -390,20 +391,20 @@ test('decrypt of a tampered envelope throws SecretsStoreError(decrypt_failed)', 
     ['{"v":1,"iv_b64":"aaa","ct_b64":"bbb","tag_b64":"ccc"}', 'alice', 'byo_api_key', 'k'],
   )
   await expect(
-    store.get({ internal_handle: 'alice', kind: 'byo_api_key', label: 'k' }),
+    store.get({ internal_handle: asOwnerHandle('alice'), kind: 'byo_api_key', label: 'k' }),
   ).rejects.toBeInstanceOf(SecretsStoreError)
 })
 
 test('expires_at is persisted when supplied (used by Max OAuth access tokens)', async () => {
   const store = buildStore()
   await store.put({
-    internal_handle: 'alice',
+    internal_handle: asOwnerHandle('alice'),
     kind: 'max_oauth_access',
     label: 'default:access',
     plaintext: 'access-tok',
     expires_at: 1_800_000_000_000,
   })
-  const list = await store.list({ internal_handle: 'alice', kind: 'max_oauth_access' })
+  const list = await store.list({ internal_handle: asOwnerHandle('alice'), kind: 'max_oauth_access' })
   expect(list).toHaveLength(1)
   expect(list[0]?.expires_at).toBe(1_800_000_000_000)
 })
@@ -414,7 +415,7 @@ test('get returns null for an expired secret (expires_at <= now)', async () => {
   let nowVal = 1_700_000_000_000
   const store = new SecretsStore({ data_dir: dataDir, db, now: () => nowVal })
   await store.put({
-    internal_handle: 'alice',
+    internal_handle: asOwnerHandle('alice'),
     kind: 'max_oauth_access',
     label: 'default:access',
     plaintext: 'access-soon-stale',
@@ -422,29 +423,29 @@ test('get returns null for an expired secret (expires_at <= now)', async () => {
   })
   // Within window — returns the plaintext.
   expect(
-    await store.get({ internal_handle: 'alice', kind: 'max_oauth_access', label: 'default:access' }),
+    await store.get({ internal_handle: asOwnerHandle('alice'), kind: 'max_oauth_access', label: 'default:access' }),
   ).toBe('access-soon-stale')
   // Advance past expiry — get returns null.
   nowVal += 5_000
   expect(
-    await store.get({ internal_handle: 'alice', kind: 'max_oauth_access', label: 'default:access' }),
+    await store.get({ internal_handle: asOwnerHandle('alice'), kind: 'max_oauth_access', label: 'default:access' }),
   ).toBeNull()
   // The row still exists in storage — list shows it. Callers can rotate
   // or sweep based on listing.
-  const list = await store.list({ internal_handle: 'alice', kind: 'max_oauth_access' })
+  const list = await store.list({ internal_handle: asOwnerHandle('alice'), kind: 'max_oauth_access' })
   expect(list).toHaveLength(1)
 })
 
 test('rows without expires_at are returned regardless of clock', async () => {
   const store = buildStore()
   await store.put({
-    internal_handle: 'alice',
+    internal_handle: asOwnerHandle('alice'),
     kind: 'byo_api_key',
     label: 'permanent',
     plaintext: 'never-expires',
   })
   expect(
-    await store.get({ internal_handle: 'alice', kind: 'byo_api_key', label: 'permanent' }),
+    await store.get({ internal_handle: asOwnerHandle('alice'), kind: 'byo_api_key', label: 'permanent' }),
   ).toBe('never-expires')
 })
 
@@ -460,7 +461,7 @@ test('post-rename: a secret written keyed on internal_handle is still readable a
   // shape the persist-paste-token path lands on disk at first-time
   // provisioning.
   const store = buildStore()
-  const internal_handle = 't-example1'
+  const internal_handle = asOwnerHandle('t-example1')
   await store.put({
     internal_handle,
     kind: 'max_oauth_refresh',
@@ -495,7 +496,11 @@ test('post-rename: a secret written keyed on internal_handle is still readable a
   expect(refreshUnderHandle).toBe('sk-ant-paste-token-from-first-boot')
 
   const refreshUnderNewSlug = await store.get({
-    internal_handle: new_url_slug,
+    // Simulate the 2026-05-12 bug: a caller wrongly treats the MUTABLE
+    // url_slug as the handle. The branded boundary now makes passing the raw
+    // string a COMPILE error; branding it here reproduces the historical
+    // wrong-key read, which still returns null (row keyed on the frozen handle).
+    internal_handle: asOwnerHandle(new_url_slug),
     kind: 'max_oauth_refresh',
     label: 'default',
   })

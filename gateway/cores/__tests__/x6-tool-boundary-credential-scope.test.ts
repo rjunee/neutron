@@ -1,3 +1,4 @@
+import { asOwnerHandle } from '@neutronai/persistence/index.ts'
 /**
  * X6 (2026-07-15) — per-project credential scoping on the agent's NATIVE TOOL
  * PATH.
@@ -38,7 +39,7 @@ import { McpServer } from '@neutronai/mcp/server.ts'
 import { CoreCredentialResolver } from '../core-credential-resolver.ts'
 import { runWithActiveProject } from '../active-project-context.ts'
 
-const OWNER = 'x6-boundary-test'
+const OWNER = asOwnerHandle('x6-boundary-test')
 const PROJECT = 'proj-alpha'
 
 const cleanups: Array<() => void> = []

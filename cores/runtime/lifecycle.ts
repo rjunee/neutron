@@ -46,7 +46,7 @@
 import type { NeutronManifest, SecretsAccessor } from '@neutronai/cores-sdk'
 import { buildSecretsAccessor } from '@neutronai/cores-sdk'
 import type { SecretsStore } from '@neutronai/auth/secrets-store.ts'
-import type { ProjectDb } from '@neutronai/persistence/index.ts'
+import type { OwnerHandle, ProjectDb } from '@neutronai/persistence/index.ts'
 
 import { CoreInstallError } from './errors.ts'
 import {
@@ -109,7 +109,8 @@ export interface SecretsPrompter {
 }
 
 export interface InstallCoreInput {
-  project_slug: string
+  /** Frozen owner handle (branded); the caller constructs it at its known-good source. */
+  project_slug: OwnerHandle
   /** Absolute path to the Core's directory on disk. */
   coreDir: string
   projectDb: ProjectDb
@@ -312,7 +313,7 @@ export async function uninstallCoreGlobally(
 }
 
 async function driveSecretsInstall(input: {
-  project_slug: string
+  project_slug: OwnerHandle
   core_slug: string
   manifest: NeutronManifest
   secretsStore: SecretsStore
@@ -446,9 +447,10 @@ async function persistOrRotate(input: {
    * the FROZEN `internal_handle`. At first install
    * `project_slug === internal_handle`, so this mapping is a no-op for
    * fresh instances; after a rename, the caller MUST pass the frozen
-   * handle here. See `auth/secrets-store.ts` file header.
+   * handle here. See `auth/secrets-store.ts` file header. Branded `OwnerHandle`
+   * so the "MUST pass the frozen handle" contract is compiler-enforced.
    */
-  project_slug: string
+  project_slug: OwnerHandle
   kind: 'byo_api_key' | 'webhook_secret' | 'oauth_token' | 'oauth_client'
   label: string
   plaintext: string
@@ -466,7 +468,7 @@ async function persistOrRotate(input: {
     return
   }
   const putInput: {
-    internal_handle: string
+    internal_handle: OwnerHandle
     kind: 'byo_api_key' | 'webhook_secret' | 'oauth_token' | 'oauth_client'
     label: string
     plaintext: string
@@ -502,7 +504,7 @@ export async function stopCore(input: ConfigureCoreInput): Promise<void> {
 }
 
 export interface UninstallCoreInput {
-  project_slug: string
+  project_slug: OwnerHandle
   core_slug: string
   projectDb: ProjectDb
   dataDir: string
@@ -619,7 +621,7 @@ export async function uninstallCore(input: UninstallCoreInput): Promise<void> {
 }
 
 export interface UpgradeCoreInput {
-  project_slug: string
+  project_slug: OwnerHandle
   newCoreDir: string
   projectDb: ProjectDb
   dataDir: string

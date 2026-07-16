@@ -30,7 +30,7 @@
  * returns METADATA ONLY (never ciphertext or plaintext).
  */
 
-import type { ProjectDb } from '@neutronai/persistence/index.ts'
+import type { ProjectDb, OwnerHandle } from '@neutronai/persistence/index.ts'
 
 /** '' is the global-scope sentinel — a real project id is always 1..128 chars. */
 export const GLOBAL_PROJECT_ID = ''
@@ -242,7 +242,7 @@ export class ProjectCredentialStore {
    * (owner_slug, project_id, service) unique key so a re-set replaces the token
    * in place and preserves `created_at`. Returns metadata only.
    */
-  async set(owner_slug: string, input: SetCredentialInput): Promise<ProjectCredentialRecord> {
+  async set(owner_slug: OwnerHandle, input: SetCredentialInput): Promise<ProjectCredentialRecord> {
     if (input.scope !== 'project' && input.scope !== 'global') {
       throw new ProjectCredentialValidationError('invalid_scope', "scope must be 'project' or 'global'")
     }
@@ -277,7 +277,7 @@ export class ProjectCredentialStore {
   }
 
   /** List a project's OWN (scope='project') credentials — metadata only. */
-  listForProject(owner_slug: string, project_id: string): ProjectCredentialRecord[] {
+  listForProject(owner_slug: OwnerHandle, project_id: string): ProjectCredentialRecord[] {
     const rows = this.db
       .prepare<CredentialDbRow, [string, string]>(
         `SELECT ${META_COLS} FROM project_credentials
@@ -289,7 +289,7 @@ export class ProjectCredentialStore {
   }
 
   /** List the GLOBAL (instance-wide default) credentials — metadata only. */
-  listGlobal(owner_slug: string): ProjectCredentialRecord[] {
+  listGlobal(owner_slug: OwnerHandle): ProjectCredentialRecord[] {
     const rows = this.db
       .prepare<CredentialDbRow, [string]>(
         `SELECT ${META_COLS} FROM project_credentials
@@ -301,7 +301,7 @@ export class ProjectCredentialStore {
   }
 
   /** A single credential's metadata by exact key, or null. */
-  getMeta(owner_slug: string, project_id: string, service: string): ProjectCredentialRecord | null {
+  getMeta(owner_slug: OwnerHandle, project_id: string, service: string): ProjectCredentialRecord | null {
     const row = this.db
       .prepare<CredentialDbRow, [string, string, string]>(
         `SELECT ${META_COLS} FROM project_credentials
@@ -318,7 +318,7 @@ export class ProjectCredentialStore {
    * unset. When `project_id` is '' / undefined (e.g. the General topic), only
    * the global default is consulted.
    */
-  resolve(owner_slug: string, project_id: string | undefined, service: string): ResolvedCredential | null {
+  resolve(owner_slug: OwnerHandle, project_id: string | undefined, service: string): ResolvedCredential | null {
     const svc = service.trim().toLowerCase()
     const pid = (project_id ?? '').trim()
     // 1. per-project override (only when we have a real project id)
@@ -342,7 +342,7 @@ export class ProjectCredentialStore {
    * service that resolves for this project, project scope winning over global.
    * Drives the agent's "services available in this project" awareness block.
    */
-  listAvailableServices(owner_slug: string, project_id: string | undefined): AvailableService[] {
+  listAvailableServices(owner_slug: OwnerHandle, project_id: string | undefined): AvailableService[] {
     const byService = new Map<string, CredentialScope>()
     // Global defaults first, project overrides second (so project wins).
     for (const g of this.listGlobal(owner_slug)) {
@@ -364,7 +364,7 @@ export class ProjectCredentialStore {
    * false when nothing matched (so the surface can 404). `project_id` is ''
    * for a global-scope delete.
    */
-  async delete(owner_slug: string, project_id: string, service: string): Promise<boolean> {
+  async delete(owner_slug: OwnerHandle, project_id: string, service: string): Promise<boolean> {
     const svc = service.trim().toLowerCase()
     const existing = this.getRow(owner_slug, project_id, svc)
     if (existing === null) return false
@@ -377,7 +377,7 @@ export class ProjectCredentialStore {
 
   // ── internals ──────────────────────────────────────────────────────────
 
-  private getRow(owner_slug: string, project_id: string, service: string): CredentialDbRow | null {
+  private getRow(owner_slug: OwnerHandle, project_id: string, service: string): CredentialDbRow | null {
     return this.db
       .prepare<CredentialDbRow, [string, string, string]>(
         `SELECT id, owner_slug, project_id, scope, service, ciphertext, label, created_at, updated_at, expires_at

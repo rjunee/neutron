@@ -1,3 +1,4 @@
+import { asOwnerHandle } from '@neutronai/persistence/index.ts'
 import { afterEach, beforeEach, expect, test } from 'bun:test'
 import { mkdtempSync, mkdirSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -20,7 +21,7 @@ let workdir: string
 let db: ProjectDb
 let dataDir: string
 let secretsStore: SecretsStore
-const OWNER = 'alice'
+const OWNER = asOwnerHandle('alice')
 const LABEL = 'google_calendar'
 
 beforeEach(() => {

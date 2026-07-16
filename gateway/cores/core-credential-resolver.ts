@@ -29,6 +29,7 @@
 
 import type { OAuthTokenManager } from './oauth-token-manager.ts'
 import type { ProjectCredentialStore } from '@neutronai/project-credentials/store.ts'
+import type { OwnerHandle } from '@neutronai/persistence/index.ts'
 import { currentActiveProjectId } from './active-project-context.ts'
 
 /**
@@ -62,8 +63,12 @@ export function scopeForService(service: string): ServiceScope {
 }
 
 export interface CoreCredentialResolverInput {
-  /** Server-derived owner boundary (the instance's `project_slug`). */
-  owner_slug: string
+  /**
+   * Server-derived owner boundary — the FROZEN instance handle (branded
+   * `OwnerHandle`). Constructed via `asOwnerHandle` at the resolution source;
+   * a mutable `url_slug` is a compile error.
+   */
+  owner_slug: OwnerHandle
   /** The canonical per-project credential store (shared with the CRUD surface). */
   store: ProjectCredentialStore
   /**
@@ -80,7 +85,7 @@ export interface CoreCredentialResolverInput {
  * and the `project_credentials` → OAuth-manager → unset fallback chain.
  */
 export class CoreCredentialResolver {
-  private readonly owner_slug: string
+  private readonly owner_slug: OwnerHandle
   private readonly store: ProjectCredentialStore
   private readonly oauthTokens: OAuthTokenManager | null
 

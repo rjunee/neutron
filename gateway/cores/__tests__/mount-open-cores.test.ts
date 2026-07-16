@@ -1,3 +1,4 @@
+import { asOwnerHandle } from '@neutronai/persistence/index.ts'
 /**
  * Parity gap #2 (Cores→Open) — `mountOpenCores` wiring tests.
  *
@@ -21,7 +22,7 @@ import { ToolRegistry } from '@neutronai/tools/registry.ts'
 import { installBundledCores } from '../install-bundled.ts'
 import { mountOpenCores, GOOGLE_CLIENT_ID_ENV } from '../mount-open-cores.ts'
 
-const OWNER = 'mount-open-cores-test'
+const OWNER = asOwnerHandle('mount-open-cores-test')
 const REPO_ROOT = join(import.meta.dir, '..', '..', '..')
 
 const cleanups: Array<() => void> = []

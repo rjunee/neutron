@@ -19,6 +19,7 @@
 import { chmodSync, mkdirSync, writeFileSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { SecretsStore, SecretsStoreError } from './secrets-store.ts'
+import type { OwnerHandle } from '@neutronai/persistence/index.ts'
 
 const DEFAULT_SUB_LABEL = 'default'
 const DEFAULT_DEVICE_AUTH_URL = 'https://auth.openai.com/oauth/device/code'
@@ -69,8 +70,8 @@ export interface ChatGPTOAuthClientDeps {
 }
 
 export interface DeviceCodeStartInput {
-  /** Frozen `internal_handle` — see auth/secrets-store.ts file header. */
-  internal_handle: string
+  /** Frozen `internal_handle` (branded `OwnerHandle`) — see auth/secrets-store.ts file header. */
+  internal_handle: OwnerHandle
   sub_label?: string
 }
 
@@ -84,8 +85,8 @@ export interface DeviceCodeStartResult {
 }
 
 export interface DeviceCodePollInput {
-  /** Frozen `internal_handle` — see auth/secrets-store.ts file header. */
-  internal_handle: string
+  /** Frozen `internal_handle` (branded `OwnerHandle`) — see auth/secrets-store.ts file header. */
+  internal_handle: OwnerHandle
   device_code: string
   sub_label?: string
 }
@@ -279,8 +280,8 @@ export class ChatGPTOAuthClient {
    * uses tokens.access_token for `chatgpt_token_only` mode.
    */
   async writeCodexAuthFile(input: {
-    /** Frozen `internal_handle` — see auth/secrets-store.ts file header. */
-    internal_handle: string
+    /** Frozen `internal_handle` (branded `OwnerHandle`) — see auth/secrets-store.ts file header. */
+    internal_handle: OwnerHandle
     target_path: string
     sub_label?: string
   }): Promise<{ path: string }> {
@@ -338,7 +339,7 @@ export class ChatGPTOAuthClient {
   }
 
   private async removeIfExists(
-    internal_handle: string,
+    internal_handle: OwnerHandle,
     kind: 'chatgpt_oauth',
     label: string,
   ): Promise<void> {

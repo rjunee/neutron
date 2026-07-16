@@ -50,6 +50,7 @@ import {
   type Provider,
 } from '@neutronai/runtime/adapters/select-substrate.ts'
 import type { GptResponsesApiSubstrateOptions } from '@neutronai/runtime/adapters/gpt-5-5-api/index.ts'
+import { asOwnerHandle } from '@neutronai/persistence/index.ts'
 import type { CodexCliSubstrateOptions } from '@neutronai/runtime/adapters/gpt-5-5-codex-cli/index.ts'
 import type { McpToolResolver } from '@neutronai/contracts/mcp-tool-resolver.ts'
 import type { ToolDef } from '@neutronai/core-sdk/types.ts'
@@ -182,7 +183,9 @@ export async function resolveScrubbedAuthEnv(
     input.internal_handle.length > 0
   ) {
     try {
-      const fresh = await input.oauthRefresh.loadAccessToken(input.internal_handle)
+      // `input.internal_handle` is the frozen instance handle (guarded string
+      // above); brand it for the OAuth-refresh credential lookup.
+      const fresh = await input.oauthRefresh.loadAccessToken(asOwnerHandle(input.internal_handle))
       if (fresh !== null && fresh.access_token.length > 0) {
         activeSecret = fresh.access_token
       }

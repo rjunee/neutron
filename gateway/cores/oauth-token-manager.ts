@@ -21,6 +21,7 @@
  */
 
 import type { SecretsStore } from '@neutronai/auth/secrets-store.ts'
+import type { OwnerHandle } from '@neutronai/persistence/index.ts'
 
 /** Default lead time before expiry to trigger a refresh (ms). 60s. */
 export const DEFAULT_REFRESH_LEAD_MS = 60_000
@@ -41,7 +42,8 @@ export type FetchLike = (
 
 export interface OAuthTokenManagerOptions {
   secretsStore: SecretsStore
-  internal_handle: string
+  /** Frozen owner handle (branded `OwnerHandle`) — keys every SecretsStore row. */
+  internal_handle: OwnerHandle
   /** OAuth client id + secret — wired from env. */
   client_id: string
   client_secret: string
@@ -119,7 +121,7 @@ const META_LABEL_SUFFIX = ':meta'
 
 export class OAuthTokenManager {
   private readonly secretsStore: SecretsStore
-  private readonly internal_handle: string
+  private readonly internal_handle: OwnerHandle
   private readonly client_id: string
   private readonly client_secret: string
   private readonly refreshLeadMs: number
@@ -469,7 +471,7 @@ export class OAuthTokenManager {
       return
     }
     const putInput: {
-      internal_handle: string
+      internal_handle: OwnerHandle
       kind: 'oauth_token'
       label: string
       plaintext: string

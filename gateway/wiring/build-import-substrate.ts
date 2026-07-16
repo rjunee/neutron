@@ -45,6 +45,7 @@ import {
   createClaudeCodeSubstrateAuto,
   type ClaudeCodeSubstrateOptions,
 } from '@neutronai/runtime/adapters/claude-code/index.ts'
+import { asOwnerHandle } from '@neutronai/persistence/index.ts'
 import {
   reportFailure,
   reportSuccess,
@@ -340,7 +341,7 @@ export function buildImportSubstrate(
           input.internal_handle.length > 0
         ) {
           try {
-            const fresh = await input.oauthRefresh.loadAccessToken(input.internal_handle)
+            const fresh = await input.oauthRefresh.loadAccessToken(asOwnerHandle(input.internal_handle))
             if (fresh !== null && fresh.access_token.length > 0) {
               activeSecret = fresh.access_token
             }

@@ -34,6 +34,7 @@
  */
 
 import type { SecretsStore } from '@neutronai/auth/secrets-store.ts'
+import { asOwnerHandle } from '@neutronai/persistence/index.ts'
 import { TelegramAdapter } from '@neutronai/channels/adapters/telegram/index.ts'
 import { TelegramClient } from '@neutronai/channels/adapters/telegram/client.ts'
 import type { IncomingEventReceiver } from '@neutronai/channels/types.ts'
@@ -112,19 +113,22 @@ export async function buildTelegramWebhookSurface(
     input.url_slug !== undefined && input.url_slug.length > 0
       ? input.url_slug
       : input.internal_handle
+  // `internal_handle` is the FROZEN registry PK (distinct from `url_slug`
+  // above); brand it once for the secret lookups.
+  const owner_handle = asOwnerHandle(input.internal_handle)
   const [botToken, webhookSecret, botUserIdRaw] = await Promise.all([
     input.secrets.get({
-      internal_handle: input.internal_handle,
+      internal_handle: owner_handle,
       kind: 'bot_token',
       label: 'telegram',
     }),
     input.secrets.get({
-      internal_handle: input.internal_handle,
+      internal_handle: owner_handle,
       kind: 'webhook_secret',
       label: 'telegram',
     }),
     input.secrets.get({
-      internal_handle: input.internal_handle,
+      internal_handle: owner_handle,
       kind: 'channel_metadata',
       label: 'telegram-bot-user-id',
     }),

@@ -24,6 +24,7 @@
 import { decodeJwt } from 'jose'
 
 import type { SecretsStore } from '@neutronai/auth/secrets-store.ts'
+import type { OwnerHandle } from '@neutronai/persistence/index.ts'
 import type { Membership } from '@neutronai/jwt-validator/index.ts'
 
 /** Refresh the access JWT once it's within this many seconds of expiry. */
@@ -61,8 +62,8 @@ export interface FederatedStatus {
 
 export interface FederatedTokenStoreDeps {
   secrets: SecretsStore
-  /** Frozen registry PK for this instance (NOT the mutable url_slug). */
-  internal_handle: string
+  /** Frozen registry PK for this instance (branded `OwnerHandle`, NOT the mutable url_slug). */
+  internal_handle: OwnerHandle
   /** Base URL of the identity service, e.g. https://auth.example.test */
   auth_base_url: string
   fetch?: FetchLike
@@ -82,7 +83,7 @@ export class FederatedConnectError extends Error {
 
 export class FederatedTokenStore {
   private readonly secrets: SecretsStore
-  private readonly internalHandle: string
+  private readonly internalHandle: OwnerHandle
   private readonly authBase: string
   private readonly fetchImpl: FetchLike
   private readonly now: () => number

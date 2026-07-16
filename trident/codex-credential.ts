@@ -22,6 +22,7 @@
 
 import type { ProjectCredentialStore } from '@neutronai/project-credentials/store.ts'
 import type { CredentialScope } from '@neutronai/project-credentials/store.ts'
+import type { OwnerHandle } from '@neutronai/persistence/index.ts'
 import {
   codexProjectHome,
   deriveCodexStatus,
@@ -110,7 +111,7 @@ export class CodexCredentialService {
    * the store AND written to the scope's `CODEX_HOME/auth.json`, so
    * `codex-review.sh` sees it connected.
    */
-  async connect(owner_slug: string, pasted: unknown, target?: CodexTarget): Promise<CodexConnectResult> {
+  async connect(owner_slug: OwnerHandle, pasted: unknown, target?: CodexTarget): Promise<CodexConnectResult> {
     const { scope, project_id } = this.normalizeTarget(target)
     const v = validateCodexSubscriptionAuth(pasted, this.now)
     if (!v.ok || v.normalized === undefined) {
@@ -138,7 +139,7 @@ export class CodexCredentialService {
    * supplied and that project has an override it reports the override; otherwise
    * the global default. `scope` names which supplied it.
    */
-  status(owner_slug: string, target?: CodexTarget): CodexStatusResult {
+  status(owner_slug: OwnerHandle, target?: CodexTarget): CodexStatusResult {
     const project_id = (target?.project_id ?? '').trim()
     const resolved = this.store.resolve(owner_slug, project_id, CODEX_CREDENTIAL_SERVICE)
     const stored = resolved?.plaintext ?? null
@@ -163,7 +164,7 @@ export class CodexCredentialService {
    * override (the global default stays). Removing the global default leaves any
    * project overrides intact.
    */
-  async disconnect(owner_slug: string, target?: CodexTarget): Promise<{ ok: boolean }> {
+  async disconnect(owner_slug: OwnerHandle, target?: CodexTarget): Promise<{ ok: boolean }> {
     const { scope, project_id } = this.normalizeTarget(target)
     const removed = await this.store.delete(owner_slug, project_id, CODEX_CREDENTIAL_SERVICE)
     removeCodexAuth(this.homeFor(scope, project_id))
@@ -178,7 +179,7 @@ export class CodexCredentialService {
    * when neither an override nor a global default is set (→ codex "not
    * connected" → Claude-only review, never a blocker).
    */
-  resolveActiveCodexHome(owner_slug: string, project_id?: string): string | null {
+  resolveActiveCodexHome(owner_slug: OwnerHandle, project_id?: string): string | null {
     const resolved = this.store.resolve(owner_slug, project_id, CODEX_CREDENTIAL_SERVICE)
     if (resolved === null) return null
     const home =
@@ -196,7 +197,7 @@ export class CodexCredentialService {
    * to call unconditionally at wiring. (Per-project overrides self-heal lazily in
    * `resolveActiveCodexHome`.)
    */
-  ensureMaterialized(owner_slug: string): boolean {
+  ensureMaterialized(owner_slug: OwnerHandle): boolean {
     if (readMaterializedAuth(this.codexHome) !== null) return true
     // Global-only lookup (project_id undefined → the resolver consults only the
     // global default), so a stray project override never materializes here.
