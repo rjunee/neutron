@@ -882,7 +882,7 @@ export function buildLiveAgentTurn(
         reflectionFragment,
         availableServicesFragment,
         onboardingContextFragment,
-      ].filter((s): s is string => s !== null && s.length > 0)
+      ].filter((s): s is string => s !== null && s.trim().length > 0)
       prompt =
         warmPrefix.length > 0 ? `${warmPrefix.join('\n\n')}\n\n${turn.user_text}` : turn.user_text
     } else {

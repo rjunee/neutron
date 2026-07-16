@@ -210,6 +210,33 @@ describe('build-live-agent-turn — RB2 (a) warm-turn reflection re-splice', () 
     expect(specs[1]!.prompt).toContain('second')
   })
 
+  test('a WHITESPACE-ONLY reflection context is a clean no-op on a warm turn (parity with the cold trim)', async () => {
+    // A fragment that is all whitespace carries no content — the warm filter must
+    // treat it exactly like an empty/null one (the cold path trims), so the warm
+    // prompt is JUST the user message with no blank-line padding spliced in.
+    const specs: AgentSpec[] = []
+    const sent: ChatOutbound[] = []
+    const reflection: LiveAgentReflectionSeam = {
+      loadContext: () => '   \n  ',
+      onTurnComplete: () => {},
+    }
+    const run = buildLiveAgentTurn({
+      substrate: makeStubSubstrate(specs, ['reply one', 'reply two']),
+      personaLoader: { async load(): Promise<string> { return 'PERSONA_MARKER' } },
+      reflection,
+      buttonStore: store,
+      project_slug: 'alice',
+      owner_home: tmp,
+      now: () => now,
+    })
+    await run(makeTurn({ sent, user_text: 'first' }))
+    await run(makeTurn({ sent, user_text: 'second' }))
+    // Mutation-kill: with `s.length > 0` the whitespace fragment would be spliced in
+    // and the prompt would become `"   \n\n\n\nsecond"` — the trim makes it exactly the
+    // user text.
+    expect(specs[1]!.prompt).toBe('second')
+  })
+
   test('SECURITY: the warm splice carries the reflection fragment VERBATIM (hardening lives in the fragment)', async () => {
     // The escape/cap/framing hardening is a `reflection/context.ts` property (unit-
     // tested in reflection/__tests__/index.test.ts with hostile-delimiter + oversized
