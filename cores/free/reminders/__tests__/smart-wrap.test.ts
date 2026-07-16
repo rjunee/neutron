@@ -53,21 +53,28 @@ describe('Shape B — smart-wrap', () => {
     expect(result.message.endsWith('Original reminder: walk the dogs')).toBe(true)
   })
 
-  test('locked-prelude SNAPSHOT — fire-time agent branch detection depends on this literal', () => {
-    // Pin the byte-exact prelude. ANY change here is a deliberate
-    // diff that breaks every existing Shape-B reminder until the
-    // fire-time agent prompt is updated in lockstep. Brief § 7
-    // invariant 11. C4-a2 (SD1): the home-dir prompt token rename to
-    // {{OWNER_HOME}} — lockstep done in the same PR (9 prompt files + the template-alias
-    // in prompts/template.ts keeps PRE-rename persisted bodies firing).
+  test('locked-prelude SNAPSHOT — pins the persisted Shape-B body byte-for-byte', () => {
+    // Pin the byte-exact prelude. ANY change here is a deliberate diff
+    // that changes every existing Shape-B reminder's stored body. N7
+    // (2026-07): the prelude now names ONLY Open-real fire-time context
+    // (the project STATUS.md via the compose agent's read tools + the
+    // clock) — no `weather.sh`/`gog`/`tg-post.sh`, which Open does not ship.
     expect(SMART_WRAP_PRELUDE).toBe(
       'Compose a smart version of this reminder using available context ' +
-        '(current weather via {{OWNER_HOME}}/scripts/weather.sh --for-reminder, ' +
-        'calendar via gog calendar events --today, recent project state from ' +
-        '{{OWNER_HOME}}/Projects/<slug>/STATUS.md, time of day). Keep it 1-3 ' +
-        'sentences, action-oriented, no preamble, no em dashes. If no useful ' +
+        '(recent project state from {{OWNER_HOME}}/Projects/<slug>/STATUS.md read ' +
+        'with your Read/Glob/Grep tools, the day of week and time of day). Keep it ' +
+        '1-3 sentences, action-oriented, no preamble, no em dashes. If no useful ' +
         'context is available, deliver the original message verbatim.',
     )
+  })
+
+  test('the locked prelude references no machinery absent from Open', () => {
+    // N7 acceptance: the stored Shape-B instruction must not point the
+    // fire-time agent at Vajra-only scripts the Open repo does not carry.
+    expect(SMART_WRAP_PRELUDE).not.toContain('weather.sh')
+    expect(SMART_WRAP_PRELUDE).not.toContain('tg-post.sh')
+    expect(SMART_WRAP_PRELUDE).not.toContain('scripts/')
+    expect(SMART_WRAP_PRELUDE).not.toContain('gog ')
   })
 
   test('the persisted message contains the verbatim body — fire-time agent reads it', () => {

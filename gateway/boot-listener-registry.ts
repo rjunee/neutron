@@ -147,7 +147,7 @@ export function resolveOwnerRegistryRow(input: {
     const canonical = byHandle.url_slug
     const warn = input.warn ?? ((m: string) => moduleLog.warn(m))
     warn(
-      `[gateway] project_slug arg was internal_handle, resolved to url_slug=${canonical}; the systemd unit's NEUTRON_INSTANCE_SLUG env / .url_slug file should be regenerated to match — see scripts/install/regenerate-owner-slug-dropin.sh`,
+      `[gateway] project_slug arg was internal_handle, resolved to url_slug=${canonical}; the systemd unit's NEUTRON_INSTANCE_SLUG env / .url_slug file is stale — update it to "${canonical}" (edit the unit's Environment=NEUTRON_INSTANCE_SLUG= line or write the .url_slug file, then reload + restart the unit) so the arg matches the registry and this fallback stops firing`,
     )
     return { project_slug: canonical, row: byHandle, fallback_used: true }
   }
