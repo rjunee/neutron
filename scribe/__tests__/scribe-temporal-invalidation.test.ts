@@ -986,7 +986,7 @@ describe('RB4 temporal invalidation (belief evolution) — real PGLite round-tri
   //    dropped (no data loss). Bounded trade-off: a superseded relation embedded
   //    in a compound sentence is left in place rather than destroying a sibling.
 
-  test('flag ON: a compound sentence with a still-current relation is NOT deleted (no data loss)', async () => {
+  test('flag ON: a compound sentence — superseded relation removed, sibling re-rendered (no data loss)', async () => {
     const ownerDataDir = mkdtempSync(join(tmpdir(), 'scribe-rb4-compound-'))
     const syncHook = new GBrainSyncHook({
       memoryStore: new GBrainMemoryStore(client),
@@ -1039,15 +1039,19 @@ describe('RB4 temporal invalidation (belief evolution) — real PGLite round-tri
 
     const onDisk = readFileSync(join(ownerDataDir, 'entities', 'people', 'cwen-ash.md'), 'utf8')
     const compiled = extractCompiledTruth(onDisk)
-    // SAFETY: the compound sentence (and its still-current advises) is preserved…
-    expect(compiled).toContain('Works at [[cwoold]] and advises [[cwboard]].')
-    expect(compiled).toContain('Works at [[cwnew]].') // the new fact accretes
-    // …no fabricated supersession note (nothing was actually retired).
+    // The superseded works_at is RETIRED from compiled-truth (current truth only)…
+    expect(compiled).not.toContain('[[cwoold]]')
+    // …while the still-current advises SIBLING is preserved as a clean sentence
+    // (re-rendered — NOT deleted), and the new employment accretes.
+    expect(compiled).toContain('Advises [[cwboard]].')
+    expect(compiled).toContain('Works at [[cwnew]].')
+    // The transition was genuine → recorded once in the dated timeline.
     const timeline = extractTimeline(onDisk)
-    expect(timeline.some((e) => e.body.includes('superseded'))).toBe(false)
+    expect(timeline.some((e) => e.body.includes('superseded works_at: cwoold → cwnew'))).toBe(true)
 
-    // The unrelated advisory edge is intact; the new employment edge is added.
+    // Graph reflects current truth: stale employment gone, advisory intact, new employment added.
     links = await client.call('get_links', { slug: 'cwen-ash' })
+    expect(edgesTo(links, 'cwoold', 'works_at').length).toBe(0) // INVALIDATED
     expect(edgesTo(links, 'cwboard', 'advises').length).toBe(1) // PRESERVED (no data loss)
     expect(edgesTo(links, 'cwnew', 'works_at').length).toBe(1) // ADDED
   }, 60_000)
@@ -1114,5 +1118,56 @@ describe('RB4 temporal invalidation (belief evolution) — real PGLite round-tri
     links = await client.call('get_links', { slug: 'sam-orr' })
     expect(edgesTo(links, 'smold', 'advises').length).toBe(1) // PRESERVED
     expect(edgesTo(links, 'smnew', 'works_at').length).toBe(1) // ADDED
+  }, 60_000)
+
+  test('flag ON: a later DISTINCT update reusing the same prior does NOT inherit a stale supersession note', async () => {
+    const ownerDataDir = mkdtempSync(join(tmpdir(), 'scribe-rb4-reuseprior-'))
+    const syncHook = new GBrainSyncHook({
+      memoryStore: new GBrainMemoryStore(client),
+      gbrainMcp: client,
+    })
+    const mk = (json: string, ts: number): ReturnType<typeof createScribe> =>
+      createScribe({
+        substrate: cannedSubstrate(json),
+        syncHook,
+        ownerDataDir,
+        project_slug: 'rb4-reuseprior',
+        budget: createState(join(ownerDataDir, '.scribe-budget.json'), t0),
+        writeEntity,
+        now: () => ts,
+        supersede: true,
+      })
+
+    // 1) works_at Oldrx, then 2) genuine supersession Oldrx → Newrx.
+    await mk(factA('Rex Doe', 'Oldrx'), t0).extractAndWrite({
+      text: 'Rex Doe is a staff engineer at Oldrx, where he has anchored the platform team for years now.',
+      observed_at: t0,
+    })
+    await mk(factSupersede('Rex Doe', 'Oldrx', 'Newrx'), t0 + 1000).extractAndWrite({
+      text: 'Rex Doe has moved on from Oldrx and now works at Newrx, leading their infrastructure group day to day.',
+      observed_at: t0 + 1000,
+    })
+
+    // 3) A LATER, DISTINCT turn reuses the SAME prior (Oldrx) with a DIFFERENT
+    //    replacement (Otherrx). Oldrx is already gone, so this retires nothing.
+    await mk(factSupersede('Rex Doe', 'Oldrx', 'Otherrx'), t0 + 2000).extractAndWrite({
+      text: 'Rex Doe also picked up an advisory-turned-role at Otherrx recently, adding to an already full plate.',
+      observed_at: t0 + 2000,
+    })
+
+    const onDisk = readFileSync(join(ownerDataDir, 'entities', 'people', 'rex-doe.md'), 'utf8')
+    const timeline = extractTimeline(onDisk)
+    // The FIRST, genuine transition is recorded exactly once…
+    expect(timeline.filter((e) => e.body.includes('superseded works_at: oldrx → newrx')).length).toBe(1)
+    // …and the distinct third turn does NOT fabricate a `oldrx → otherrx` note
+    // (it retired nothing) — it records the additive assertion instead.
+    expect(timeline.some((e) => e.body.includes('superseded works_at: oldrx → otherrx'))).toBe(false)
+    expect(timeline.some((e) => e.body.includes('works_at otherrx'))).toBe(true)
+
+    // Graph: Oldrx gone (retired by turn 2); Newrx + Otherrx both current.
+    const links = await client.call('get_links', { slug: 'rex-doe' })
+    expect(edgesTo(links, 'oldrx', 'works_at').length).toBe(0)
+    expect(edgesTo(links, 'newrx', 'works_at').length).toBe(1)
+    expect(edgesTo(links, 'otherrx', 'works_at').length).toBe(1)
   }, 60_000)
 })

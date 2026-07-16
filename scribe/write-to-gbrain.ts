@@ -261,26 +261,33 @@ export async function writeExtractionToGBrain(
           ? mergeExistingCompiledTruth(existing.compiledTruth, page, supersede)
           : { compiledTruth: composeNewCompiledTruth(page), supersededTargets: new Set<string>() }
       const compiledTruth = merged.compiledTruth
-      // A `(predicate, prior-object)` is a GENUINE supersession — worth a dated
-      // `superseded …` timeline note — iff it was actually retired from this
-      // page's compiled-truth on THIS write (`supersededTargets`) OR the earlier
-      // write that retired it already recorded that note in the timeline. The
-      // second arm is what keeps a REPLAY idempotent: on replay the prior sentence
-      // is already gone (so `supersededTargets` is empty), but the recorded note
-      // is still in `timelineBodies`, so we reproduce the SAME body → byte-identical
-      // page → `changed:false`. A marker whose prior was NEVER asserted here (new
-      // subject / stale marker) satisfies neither arm → additive note, no fabricated
-      // supersession. Deterministic across replays (Codex).
-      const recognizedSupersedes = new Set<string>(merged.supersededTargets)
-      if (supersede && existing !== null) {
+      // A FULL transition `(predicate, prior, replacement)` is a GENUINE
+      // supersession — worth a dated `superseded …` note — iff EITHER:
+      //   (a) the prior was actually retired from compiled-truth on THIS write
+      //       (`supersededTargets` has `(pred, prior)`) and the replacement is
+      //       this relation's new object, OR
+      //   (b) the EXACT transition note is already in the timeline (recorded by the
+      //       earlier write that retired it).
+      // Arm (b) keeps a REPLAY idempotent: on replay the prior sentence is already
+      // gone (empty `supersededTargets`), but the recorded note reproduces the SAME
+      // body → byte-identical page → `changed:false`. Keying on the WHOLE transition
+      // (incl. replacement) stops a later DISTINCT update to the same prior from
+      // inheriting a stale note; a marker whose prior was never asserted satisfies
+      // neither arm → additive note, no fabricated supersession (Codex).
+      const recognizedTransitions = new Set<string>()
+      if (supersede) {
         for (const r of page.relations) {
           if (r.supersedes === undefined) continue
           const priorSlug = slugify(r.supersedes)
-          if (priorSlug === null) continue
-          const key = `${r.predicate}\x1f${priorSlug}`
-          if (recognizedSupersedes.has(key)) continue
-          if (existing.timelineBodies.some((b) => b.includes(supersedeNotePrefix(r.predicate, priorSlug)))) {
-            recognizedSupersedes.add(key)
+          const objSlug = slugify(r.object)
+          if (priorSlug === null || objSlug === null) continue
+          if (merged.supersededTargets.has(`${r.predicate}\x1f${priorSlug}`)) {
+            recognizedTransitions.add(`${r.predicate}\x1f${priorSlug}\x1f${objSlug}`) // (a)
+          }
+        }
+        if (existing !== null) {
+          for (const b of existing.timelineBodies) {
+            for (const t of parseSupersedeTransitions(b)) recognizedTransitions.add(t) // (b)
           }
         }
       }
@@ -309,7 +316,7 @@ export async function writeExtractionToGBrain(
             timelineAppend: {
               ts: input.ts,
               source: timelineSource,
-              body: timelineBody(page, supersede, recognizedSupersedes),
+              body: timelineBody(page, supersede, recognizedTransitions),
             },
           },
           // M2.6 Ph1 (#83) — own-origin stamp by default (chat / Cores: origin
@@ -394,22 +401,22 @@ function orderPagesObjectsFirst(bySlug: Map<string, PlannedPage>): PlannedPage[]
  *  never re-derive a graph edge — the graph half is driven purely off
  *  compiled-truth. OFF (default) → byte-for-byte today's fact-only body.
  *
- *  `recognizedSupersedes` is the set of `(predicate, prior-object)` triples that
- *  are GENUINE supersessions for this page — retired from compiled-truth on this
- *  write OR already recorded as superseded in its timeline (so a replay stays
- *  byte-identical). A `superseded …` note is recorded ONLY for a marker in that
- *  set; a `supersedes` marker whose prior was never asserted (new subject /
- *  stale/hallucinated marker) degrades to a plain additive `<pred> <obj>` note —
- *  no fabricated invalidation history (Codex). */
+ *  `recognizedTransitions` is the set of FULL `(predicate, prior, replacement)`
+ *  transitions that are GENUINE supersessions for this page — retired from
+ *  compiled-truth on this write OR the exact note already recorded in its timeline
+ *  (so a replay stays byte-identical). A `superseded …` note is recorded ONLY for
+ *  a transition in that set; a `supersedes` marker whose prior was never asserted
+ *  (new subject / stale marker) or was superseded to a DIFFERENT object degrades
+ *  to a plain additive `<pred> <obj>` note — no fabricated history (Codex). */
 function timelineBody(
   page: PlannedPage,
   supersede: boolean,
-  recognizedSupersedes: ReadonlySet<string>,
+  recognizedTransitions: ReadonlySet<string>,
 ): string {
   const fact = page.fact?.trim()
   const base = fact !== undefined && fact.length > 0 ? `Chat mention — ${fact}` : 'Mentioned in chat'
   if (!supersede) return base
-  const notes = relationNotes(page, recognizedSupersedes)
+  const notes = relationNotes(page, recognizedTransitions)
   return notes.length > 0 ? `${base} · ${notes.join('; ')}` : base
 }
 
@@ -420,17 +427,32 @@ function supersedeNotePrefix(predicate: string, priorSlug: string): string {
   return `superseded ${predicate}: ${priorSlug} → `
 }
 
+/** Parse every `superseded <pred>: <prior> → <replacement>` transition recorded in
+ *  a timeline body into `${pred}\x1f${prior}\x1f${replacement}` keys. Used to
+ *  RECOGNISE a replay of the SAME transition (keyed on the full triple, including
+ *  the replacement) so a later DISTINCT update to the same prior can't inherit a
+ *  stale supersession note. Slugs + predicate are space-free, so `\S+` is exact. */
+function parseSupersedeTransitions(body: string): string[] {
+  const out: string[] = []
+  const re = /superseded (\S+): (\S+) → (\S+)/g
+  let m: RegExpExecArray | null
+  while ((m = re.exec(body)) !== null) out.push(`${m[1]}\x1f${m[2]}\x1f${m[3]}`)
+  return out
+}
+
 /**
  * RB4 — deterministic, edge-inert notes recording each of the page's relation
  * assertions for the dated timeline. A relation whose `supersedes` marker is a
- * GENUINE supersession (its `(predicate, prior)` is in `recognizedSupersedes`)
- * records the transition (`superseded <pred>: prior → obj`); every other relation
- * — a plain assertion OR a `supersedes` marker that matched no prior (new subject
- * / stale marker) — records the additive assertion (`<pred> obj`), so the ORIGINAL
- * dated belief is captured in history and no supersession is fabricated. Deduped;
- * bare slugs + underscored predicate so nothing re-extracts a triple from this text.
+ * GENUINE supersession — its FULL transition `(predicate, prior, replacement)` is
+ * in `recognizedTransitions` (retired this write, or the exact note is already in
+ * the timeline) — records the transition (`superseded <pred>: prior → obj`); every
+ * other relation — a plain assertion, a marker that matched no prior (new subject
+ * / stale marker), or a marker whose prior was superseded to a DIFFERENT object —
+ * records the additive assertion (`<pred> obj`), so the ORIGINAL dated belief is
+ * captured in history and no supersession is fabricated. Deduped; bare slugs +
+ * underscored predicate so nothing re-extracts a triple from this text.
  */
-function relationNotes(page: PlannedPage, recognizedSupersedes: ReadonlySet<string>): string[] {
+function relationNotes(page: PlannedPage, recognizedTransitions: ReadonlySet<string>): string[] {
   const notes: string[] = []
   const seen = new Set<string>()
   for (const r of page.relations) {
@@ -441,7 +463,7 @@ function relationNotes(page: PlannedPage, recognizedSupersedes: ReadonlySet<stri
       if (
         priorSlug !== null &&
         priorSlug !== objSlug &&
-        recognizedSupersedes.has(`${r.predicate}\x1f${priorSlug}`)
+        recognizedTransitions.has(`${r.predicate}\x1f${priorSlug}\x1f${objSlug}`)
       ) {
         const key = `x\x1f${r.predicate}\x1f${priorSlug}\x1f${objSlug}`
         if (!seen.has(key)) {
@@ -457,6 +479,29 @@ function relationNotes(page: PlannedPage, recognizedSupersedes: ReadonlySet<stri
     notes.push(`${r.predicate} ${objSlug}`)
   }
   return notes
+}
+
+/** Render a single `${predicate}\x1f${objSlug}` triple key back into its
+ *  compiled-truth SENTENCE (no bullet), via the same `RELATION_SENTENCE`
+ *  templates the writer emits. Used to re-render the SURVIVING relations of a
+ *  dropped compound sentence so a superseded relation is removed without losing
+ *  its still-current siblings. */
+function renderTripleKey(key: string): string {
+  const [predicate, objSlug] = key.split('\x1f')
+  const tmpl = RELATION_SENTENCE[predicate ?? ''] ?? RELATION_SENTENCE['mentions']!
+  return tmpl(objSlug ?? '')
+}
+
+/** Order-preserving de-duplication. */
+function dedupeInOrder(keys: readonly string[]): string[] {
+  const seen = new Set<string>()
+  const out: string[] = []
+  for (const k of keys) {
+    if (seen.has(k)) continue
+    seen.add(k)
+    out.push(k)
+  }
+  return out
 }
 
 /** Render the relationship bullet lines for a page, deduped by (predicate,
@@ -623,19 +668,15 @@ function stripSupersededSentences(
   // just triggers an extract that returns no triple; a false NEGATIVE would let a
   // superseded markdown-link assertion survive, so the gate must not miss `](`.
   const hasRef = (s: string): boolean => s.includes('[[') || s.includes('](')
-  // Classify a single sentence by what it would contribute to the graph:
-  //   - `hits`       — the superseded target keys it asserts, and
-  //   - `allTargets` — whether EVERY relation it asserts is a superseded target
-  //                    (so dropping the whole sentence deletes nothing current).
-  // A compound sentence that also asserts a non-target relation → allTargets:false
-  // → NOT dropped (Codex data-loss guard).
-  const classifySentence = (text: string): { hits: string[]; allTargets: boolean } => {
-    if (!hasRef(text)) return { hits: [], allTargets: false }
-    const keys = extractTypedLinks(`${text}\n`, page.slug, opts).map(
+  // Every graph triple a single sentence would contribute, as `${pred}\x1f${obj}`
+  // keys (deduped, in extractor order) — computed with the SAME extractor the
+  // edge layer uses, so aliases + verb variants + same-object collapse all match
+  // exactly as the graph sees them.
+  const sentenceKeys = (text: string): string[] => {
+    if (!hasRef(text)) return []
+    return extractTypedLinks(`${text}\n`, page.slug, opts).map(
       (t) => `${t.predicate}\x1f${t.object}`,
     )
-    const hits = keys.filter((k) => targets.has(k))
-    return { hits, allTargets: keys.length > 0 && keys.every((k) => targets.has(k)) }
   }
 
   const outLines: string[] = []
@@ -652,16 +693,22 @@ function stripSupersededSentences(
     let droppedAny = false
     for (const span of spans) {
       const raw = content.slice(span.start, span.end)
-      const { hits, allTargets } = classifySentence(raw)
-      // Drop the sentence ONLY when every relation it asserts is superseded —
-      // never when it also carries a still-current relation (would be data loss).
-      if (hits.length > 0 && allTargets) {
+      const keys = sentenceKeys(raw)
+      const hitKeys = keys.filter((k) => targets.has(k))
+      if (hitKeys.length > 0) {
+        // This sentence asserts a superseded relation. Retire it — but PRESERVE
+        // any still-current sibling relation in the same sentence by RE-RENDERING
+        // the survivors as clean one-relation sentences (never delete them, and
+        // never leave the stale one behind). A plain single-relation sentence has
+        // no survivors → it simply drops.
         droppedAny = true
-        for (const k of hits) removed.add(k) // record what was ACTUALLY retired
+        for (const k of hitKeys) removed.add(k) // record what was ACTUALLY retired
+        const survivors = keys.filter((k) => !targets.has(k))
+        for (const k of dedupeInOrder(survivors)) kept.push(renderTripleKey(k))
         continue
       }
-      // Preserve the surviving sentence with its original terminator (or a
-      // normalising period when it had none).
+      // No superseded relation here — preserve the sentence with its original
+      // terminator (or a normalising period when it had none).
       const term = content[span.end]
       const trimmed = raw.trim()
       if (trimmed.length === 0) continue
