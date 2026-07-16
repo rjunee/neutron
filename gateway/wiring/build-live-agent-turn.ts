@@ -473,6 +473,24 @@ export interface BuildLiveAgentTurnInput {
    */
   workBoardSnapshot?: (project_slug: string, project_id: string | undefined) => string | null
   /**
+   * RC3 ([BEHAVIOR]) — the agent-nexus re-grounding seam. Returns the ALREADY-
+   * FORMATTED, escaped `<agent_nexus>` DATA block of the recent decision/handoff/
+   * learning events OTHER agents recorded on this project (an overnight trident
+   * run's Argus verdict, an owner correction reflection captured), or `null` when
+   * the log is empty / the read failed. ASYNC because the nexus sidecar read is
+   * async (unlike the sync in-memory work board). Keyed on BOTH the instance
+   * `project_slug` (owner boundary) and the real per-turn `project_id` (undefined
+   * on General) so the reader scopes to the SAME `.nexus` RC2's emitters wrote to.
+   * Injected on EVERY turn like the work board (cold → `instance_fragments`; warm
+   * → spliced before the user's message). Wired ONLY when the shared perfect-recall
+   * flag is on (the composer builds no `NexusStore` otherwise), so RC3 ships DARK.
+   * Best-effort: a throwing/absent seam degrades to no block, never kills the turn.
+   */
+  nexusSnapshot?: (
+    project_slug: string,
+    project_id: string | undefined,
+  ) => Promise<string | null>
+  /**
    * Per-project "available services" awareness (Settings-tab credentials).
    * Returns the ALREADY-FORMATTED, escaped `<available_services>` DATA block
    * for the active project — which external services are credentialed
@@ -780,6 +798,22 @@ export function buildLiveAgentTurn(
         })
       }
     }
+    // RC3 — agent-nexus re-grounding. Read the recent decision/handoff/learning
+    // events OTHER agents recorded on this project ONCE for this turn, formatted as
+    // the escaped `<agent_nexus>` DATA block. ASYNC (the nexus sidecar read is
+    // async). Best-effort like the board: a throwing/absent seam (or an empty log)
+    // degrades to no block, never kills the turn.
+    let nexusFragment: string | null = null
+    if (input.nexusSnapshot !== undefined) {
+      try {
+        nexusFragment = await input.nexusSnapshot(turn.project_slug, turn.project_id)
+      } catch (err) {
+        moduleLog.warn('nexus_snapshot_failed', {
+          project: turn.project_slug,
+          error: err instanceof Error ? err.message : String(err),
+        })
+      }
+    }
     // Onboarding per-turn grounding (e.g. the import analysis the agent already
     // presented) — re-resolved EVERY onboarding turn so a warm session can act on
     // state that landed after the cold first turn (the import completes minutes
@@ -804,6 +838,7 @@ export function buildLiveAgentTurn(
       // the user's message (onboarding context LAST so it's most salient).
       const warmPrefix = [
         workBoardFragment,
+        nexusFragment,
         availableServicesFragment,
         onboardingContextFragment,
       ].filter((s): s is string => s !== null && s.length > 0)
@@ -822,6 +857,7 @@ export function buildLiveAgentTurn(
         workBoardFragment,
         onboardingContextFragment,
         availableServicesFragment,
+        nexusFragment,
       )
     }
 
@@ -1201,6 +1237,7 @@ async function composeFirstTurnPrompt(
   boardFragment?: string | null,
   onboardingContextFragment?: string | null,
   availableServicesFragmentRaw?: string | null,
+  nexusFragmentRaw?: string | null,
 ): Promise<string> {
   let persona = ''
   try {
@@ -1261,6 +1298,14 @@ async function composeFirstTurnPrompt(
     availableServicesFragmentRaw.trim().length > 0
       ? availableServicesFragmentRaw
       : null
+  // RC3 — the `<agent_nexus>` block is an UNCONDITIONAL fragment on the cold turn
+  // so the shared coordination log folds into the cacheable system prefix (warm
+  // turns re-splice the fresh block). Already `<agent_nexus>`-delimited + escaped
+  // at the seam; null on an empty/un-emitted nexus (the dark/no-op default).
+  const nexusFragment =
+    typeof nexusFragmentRaw === 'string' && nexusFragmentRaw.trim().length > 0
+      ? nexusFragmentRaw
+      : null
   // Per-turn onboarding grounding (import-analysis the agent already presented).
   // Sits LAST so it governs this turn most strongly — the owner is curating it.
   const onboardingContext =
@@ -1272,6 +1317,7 @@ async function composeFirstTurnPrompt(
     ...(projectPersonaFragment !== null ? [projectPersonaFragment] : []),
     scopeFragment,
     ...(workBoardFragment !== null ? [workBoardFragment] : []),
+    ...(nexusFragment !== null ? [nexusFragment] : []),
     ...(availableServicesFragment !== null ? [availableServicesFragment] : []),
     ...(onboardingFragment !== null ? [onboardingFragment] : []),
     ...(onboardingContext !== null ? [onboardingContext] : []),
