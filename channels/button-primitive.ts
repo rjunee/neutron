@@ -101,6 +101,39 @@ export function normalizeChannelKindForButton(
 }
 
 /**
+ * The channel-kind tokens that may be PERSISTED to
+ * `button_prompts.resolution_channel_kind` on a NEW WRITE. Deliberately WIDER
+ * than {@link ChannelKindForButton}: it mirrors the FULL live
+ * {@link import('./types.ts').ChannelKind} enum, so the live persist paths that
+ * carry the sentinel markers — `'webhook'` (sweepExpired `__timeout__` / inert
+ * agent turns) and `'cli'` — are never rejected. Keep in sync with `ChannelKind`.
+ */
+const WRITABLE_CHANNEL_KINDS: ReadonlySet<string> = new Set([
+  'telegram',
+  'app_socket',
+  'webhook',
+  'cli',
+])
+
+/**
+ * Validate + canonicalize a `channel_kind` token for a NEW WRITE to
+ * `button_prompts`. Maps the legacy hyphen `'app-socket'` → canonical
+ * `'app_socket'`, accepts every live `ChannelKind` token (including the
+ * `'cli'`/`'webhook'` sentinels), and returns null for a genuinely unknown
+ * token so the store REJECTS the write rather than persisting a corrupt value.
+ *
+ * This is the WRITE-side counterpart to {@link normalizeChannelKindForButton}
+ * (the button-subset read normalizer). The READ / replay path intentionally
+ * preserves an already-stored unknown token verbatim (provenance); only a fresh
+ * write is gated here.
+ */
+export function canonicalizeWritableChannelKind(raw: string | null | undefined): string | null {
+  if (raw === null || raw === undefined) return null
+  const canonical = raw === LEGACY_APP_SOCKET_CHANNEL_KIND ? 'app_socket' : raw
+  return WRITABLE_CHANNEL_KINDS.has(canonical) ? canonical : null
+}
+
+/**
  * The channel-agnostic INPUT primitive for a tappable option.
  *
  * ── L6 (option-shape unification) ─────────────────────────────────────────

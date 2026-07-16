@@ -27,10 +27,11 @@ import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import {
   LEGACY_APP_SOCKET_CHANNEL_KIND,
+  canonicalizeWritableChannelKind,
   normalizeChannelKindForButton,
   type ButtonChoice,
 } from '../button-primitive.ts'
-import { ButtonStore } from '../button-store.ts'
+import { ButtonStore, ButtonStoreError } from '../button-store.ts'
 import { DefaultButtonRouter } from '../button-routing.ts'
 
 describe('normalizeChannelKindForButton (dual-read)', () => {
@@ -55,6 +56,28 @@ describe('normalizeChannelKindForButton (dual-read)', () => {
     expect(normalizeChannelKindForButton('cli')).toBeNull() // buttons never carry 'cli'
     expect(normalizeChannelKindForButton('slack')).toBeNull()
     expect(normalizeChannelKindForButton('')).toBeNull()
+  })
+})
+
+describe('canonicalizeWritableChannelKind (write-boundary validator)', () => {
+  test('accepts the FULL live ChannelKind set (incl. the cli/webhook sentinels)', () => {
+    // Wider than the button subset — must NOT regress the sweepExpired→'webhook'
+    // / project-create→'cli' live persist paths.
+    expect(canonicalizeWritableChannelKind('telegram')).toBe('telegram')
+    expect(canonicalizeWritableChannelKind('app_socket')).toBe('app_socket')
+    expect(canonicalizeWritableChannelKind('webhook')).toBe('webhook')
+    expect(canonicalizeWritableChannelKind('cli')).toBe('cli')
+  })
+
+  test('maps the legacy hyphen → canonical on write', () => {
+    expect(canonicalizeWritableChannelKind('app-socket')).toBe('app_socket')
+  })
+
+  test('rejects a genuinely-unknown / absent token (null = reject)', () => {
+    expect(canonicalizeWritableChannelKind('slack')).toBeNull()
+    expect(canonicalizeWritableChannelKind('')).toBeNull()
+    expect(canonicalizeWritableChannelKind(null)).toBeNull()
+    expect(canonicalizeWritableChannelKind(undefined)).toBeNull()
   })
 })
 
@@ -215,6 +238,71 @@ describe('ButtonStore channel_kind persistence', () => {
       .get(prompt.prompt_id)
     expect(row?.resolved_at).toBeNull()
     expect(row?.resolution_channel_kind).toBeNull()
+  })
+
+  test('(a-write) resolve() REJECTS an unknown token + leaves the row unresolved', async () => {
+    const prompt = { prompt_id: crypto.randomUUID(), body: 'q', options: [{ label: 'A', body: 'a', value: 'a' }], allow_freeform: false }
+    await store.emit(prompt, { topic_id: 'topic-reject' })
+    await expect(
+      store.resolve({
+        choice: {
+          prompt_id: prompt.prompt_id,
+          choice_value: 'a',
+          chosen_at: now + 1,
+          speaker_user_id: 'user-x',
+          channel_kind: 'slack' as unknown as 'app_socket',
+        },
+      }),
+    ).rejects.toBeInstanceOf(ButtonStoreError)
+    // The row must NOT be mutated — it stays unresolved (no corrupt token wrote).
+    const row = db
+      .prepare<{ resolved_at: number | null; resolution_channel_kind: string | null }, [string]>(
+        `SELECT resolved_at, resolution_channel_kind FROM button_prompts WHERE prompt_id = ?`,
+      )
+      .get(prompt.prompt_id)
+    expect(row?.resolved_at).toBeNull()
+    expect(row?.resolution_channel_kind).toBeNull()
+  })
+
+  test('(b-write) persistInertUserTurn REJECTS an unknown token + writes no row', async () => {
+    await expect(
+      store.persistInertUserTurn({
+        topic_id: 'topic-inert-bad',
+        text: 'hello',
+        speaker_user_id: 'user-y',
+        channel_kind: 'slack',
+      }),
+    ).rejects.toBeInstanceOf(ButtonStoreError)
+    const count = db
+      .prepare<{ c: number }, [string]>(
+        `SELECT COUNT(*) AS c FROM button_prompts WHERE topic_id = ?`,
+      )
+      .get('topic-inert-bad')
+    expect(count?.c).toBe(0)
+  })
+
+  test('(c-write) cli / webhook / app_socket / telegram are ACCEPTED on write; app-socket normalizes', async () => {
+    const cases: Array<[string, string]> = [
+      ['cli', 'cli'],
+      ['webhook', 'webhook'],
+      ['app_socket', 'app_socket'],
+      ['telegram', 'telegram'],
+      ['app-socket', 'app_socket'], // legacy hyphen normalizes on write
+    ]
+    for (const [input, expected] of cases) {
+      const { prompt_id } = await store.persistInertUserTurn({
+        topic_id: `topic-ok-${input}`,
+        text: 't',
+        speaker_user_id: 'user-z',
+        channel_kind: input,
+      })
+      const row = db
+        .prepare<{ resolution_channel_kind: string | null }, [string]>(
+          `SELECT resolution_channel_kind FROM button_prompts WHERE prompt_id = ?`,
+        )
+        .get(prompt_id)
+      expect(row?.resolution_channel_kind).toBe(expected)
+    }
   })
 
   test('(d-provenance) an unknown persisted token replays VERBATIM, not swapped to the caller', async () => {
