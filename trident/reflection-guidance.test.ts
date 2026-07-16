@@ -111,24 +111,26 @@ describe('buildReflectionGuidance — owner-corrections advisory-suffix derivati
       const body = 'a'.repeat(MAX_REFLECTION_GUIDANCE_CHARS + 5000)
       const out = buildReflectionGuidance(body)
       expect(out).toContain('… (owner corrections truncated)')
-      // Exactly the cap of the payload is retained — not the full oversized body.
+      // `a` doesn't expand under escaping, so exactly the cap of the payload is
+      // retained — not the full oversized body.
       expect(out).toContain('a'.repeat(MAX_REFLECTION_GUIDANCE_CHARS))
       expect(out).not.toContain('a'.repeat(MAX_REFLECTION_GUIDANCE_CHARS + 1))
-      // The whole guidance stays bounded (cap + framing/wrapper overhead, not +5000).
       expect(out.length).toBeLessThan(MAX_REFLECTION_GUIDANCE_CHARS + 1500)
     })
 
-    test('truncation never splits an XML entity (cap applied to RAW text before escaping)', () => {
-      // A block of all `<` (each escapes to 4 chars). Cap the RAW input, then escape —
-      // so the output contains only WHOLE `&lt;` entities, never a split `&l`.
-      const body = '<'.repeat(MAX_REFLECTION_GUIDANCE_CHARS + 100)
+    test('EXPANSION-HEAVY input is still bounded (cap is on the ESCAPED length)', () => {
+      // Every `<` escapes to `&lt;` (4×). A raw-length cap would ship a ~4× suffix;
+      // the escaped-length cap keeps the block at MAX escaped chars.
+      const body = '<'.repeat(MAX_REFLECTION_GUIDANCE_CHARS * 4) // ~16k escaped
       const out = buildReflectionGuidance(body)
-      // Exactly MAX raw `<` → MAX whole `&lt;` entities (the trusted wrapper tags are
-      // the only unescaped `<`); no bare/split entity remnants.
-      const entities = out.match(/&lt;/g) ?? []
-      expect(entities.length).toBe(MAX_REFLECTION_GUIDANCE_CHARS)
-      expect(out).not.toMatch(/&l(?!t;)/) // no `&l` that isn't part of `&lt;`
       expect(out).toContain('… (owner corrections truncated)')
+      // MAX escaped chars of `&lt;` (4 chars each) → MAX/4 whole entities, no split.
+      const entities = out.match(/&lt;/g) ?? []
+      expect(entities.length).toBe(MAX_REFLECTION_GUIDANCE_CHARS / 4)
+      expect(out).not.toMatch(/&l(?!t;)/) // no `&l` that isn't part of `&lt;`
+      // The whole suffix stays bounded near the cap (framing/wrapper/marker overhead),
+      // NOT the ~16k an unescaped-cap would have shipped.
+      expect(out.length).toBeLessThan(MAX_REFLECTION_GUIDANCE_CHARS + 1500)
     })
   })
 

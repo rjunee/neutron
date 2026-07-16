@@ -54,14 +54,31 @@ function escapeData(text: string): string {
 }
 
 /**
- * Hard char cap on the reflection block BEFORE escaping/wrapping. The reflection
- * stores cap ENTRY COUNTS (12 corrections / diary window) but NOT field lengths, so a
- * single pathological correction/diary line could otherwise inflate BOTH the launcher
- * prompt and every Forge prompt (cost / context overflow). Cap the raw text (so a
- * truncation never splits an escape entity), then append a visible marker. 4000 chars
+ * Hard char cap on the ESCAPED reflection block. The reflection stores cap ENTRY
+ * COUNTS (12 corrections / diary window) but NOT field lengths, so a single
+ * pathological correction/diary line could otherwise inflate BOTH the launcher prompt
+ * and every Forge prompt (cost / context overflow). The cap is on the ESCAPED length —
+ * the length that actually reaches the prompt budget — because escaping expands
+ * (`<` → `&lt;` is 4×), so a raw-length cap could still ship a ~4× suffix. 4000 chars
  * is generous for real corrections yet bounds a runaway entry.
  */
 export const MAX_REFLECTION_GUIDANCE_CHARS = 4000
+
+/**
+ * Hard-cap an ALREADY-ESCAPED string to `max` chars, backing the cut off a straddled
+ * trailing XML entity (`&…;`) and a split surrogate pair so truncation is always on a
+ * clean boundary. Mirrors `gateway/nexus/nexus-fragment.ts`'s `capEscaped`. Returns
+ * `{ text, truncated }`.
+ */
+function capEscaped(escaped: string, max: number): { text: string; truncated: boolean } {
+  if (escaped.length <= max) return { text: escaped, truncated: false }
+  let cut = max
+  const amp = escaped.lastIndexOf('&', cut - 1)
+  if (amp !== -1 && escaped.indexOf(';', amp) >= cut) cut = amp // don't split `&…;`
+  const last = escaped.charCodeAt(cut - 1)
+  if (cut > 0 && last >= 0xd800 && last <= 0xdbff) cut -= 1 // don't split a surrogate pair
+  return { text: escaped.slice(0, cut), truncated: true }
+}
 
 /**
  * Derive the owner-corrections GUIDANCE suffix from a reflection context block.
@@ -75,13 +92,11 @@ export const MAX_REFLECTION_GUIDANCE_CHARS = 4000
  */
 export function buildReflectionGuidance(reflectionContext: unknown): string {
   if (typeof reflectionContext !== 'string' || reflectionContext.trim().length === 0) return ''
-  const raw = reflectionContext.trim()
-  // Cap the RAW text first (so truncation never splits an XML entity), then escape.
-  const overflow = raw.length > MAX_REFLECTION_GUIDANCE_CHARS
-  const bounded = overflow ? raw.slice(0, MAX_REFLECTION_GUIDANCE_CHARS) : raw
-  const block = overflow
-    ? `${escapeData(bounded)}\n… (owner corrections truncated)`
-    : escapeData(bounded)
+  // Escape FIRST, then cap the ESCAPED length (the length that reaches the prompt
+  // budget) on a clean entity boundary — so an expansion-heavy block (all `<`) can't
+  // ship a ~4× suffix past the cap.
+  const { text, truncated } = capEscaped(escapeData(reflectionContext.trim()), MAX_REFLECTION_GUIDANCE_CHARS)
+  const block = truncated ? `${text}\n… (owner corrections truncated)` : text
   return [
     '', // blank-line separator from the task above
     '',
