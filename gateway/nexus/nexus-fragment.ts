@@ -85,15 +85,27 @@ function escapeData(text: string): string {
   return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
 }
 
-/** Collapse whitespace + hard-cap a body to one compact, escaped line. A body
- *  longer than the cap keeps its first `MAX_BODY_CHARS` chars and gains a
- *  trailing ellipsis so the truncation is visible (mirrors the emitter's
- *  `truncate`). Escaping runs AFTER the slice so an entity boundary can't be
- *  split mid-escape. */
+/** Hard-cap an ALREADY-ESCAPED string to `max` chars (the length that actually
+ *  reaches the prompt budget — capping the RAW text is not enough, since one `&`
+ *  escapes to 5 chars `&amp;` and could blow the budget 5x). Backs the cut off
+ *  from (a) a straddled trailing XML entity `&…;` and (b) a split surrogate pair,
+ *  so the truncation is always on a clean boundary, then appends a visible ellipsis. */
+function capEscaped(escaped: string, max: number): string {
+  if (escaped.length <= max) return escaped
+  let cut = max
+  const amp = escaped.lastIndexOf('&', cut - 1)
+  if (amp !== -1 && escaped.indexOf(';', amp) >= cut) cut = amp // don't split `&amp;`
+  const last = escaped.charCodeAt(cut - 1)
+  if (cut > 0 && last >= 0xd800 && last <= 0xdbff) cut -= 1 // don't split a surrogate pair
+  return `${escaped.slice(0, cut)}…`
+}
+
+/** Collapse whitespace + hard-cap a body to one compact, escaped line. The cap is
+ *  applied to the ESCAPED output (via `capEscaped`) so the budget holds even for
+ *  escape-heavy bodies (e.g. a run of `&`). */
 function bodyLine(body: string): string {
   const flat = body.replace(/\s+/g, ' ').trim()
-  const capped = flat.length > MAX_BODY_CHARS ? `${flat.slice(0, MAX_BODY_CHARS)}…` : flat
-  return escapeData(capped)
+  return capEscaped(escapeData(flat), MAX_BODY_CHARS)
 }
 
 /** Render an event's typed refs as escaped, capped `kind:ref` POINTERS. Long
@@ -103,7 +115,7 @@ function refsSuffix(refs_json: string | null): string {
   if (refs.length === 0) return ''
   const shown = refs
     .slice(0, MAX_REFS_PER_EVENT)
-    .map((r) => escapeData(`${r.kind}:${r.ref}`.slice(0, MAX_REF_CHARS)))
+    .map((r) => capEscaped(escapeData(`${r.kind}:${r.ref}`), MAX_REF_CHARS))
   const more = refs.length > MAX_REFS_PER_EVENT ? `, +${refs.length - MAX_REFS_PER_EVENT} more` : ''
   return ` (refs: ${shown.join(', ')}${more})`
 }

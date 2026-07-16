@@ -161,6 +161,35 @@ describe('formatAgentNexusFragment (pure)', () => {
     expect(line.match(/Z/g)!.length).toBe(240)
   })
 
+  it('caps the ESCAPED body — an escape-heavy run of `&`/`<`/`>` cannot blow the budget (Codex RC3 r4)', () => {
+    // Pre-fix: the cap ran on the RAW text, so `'&'.repeat(240)` passed the 240 cap then
+    // expanded to 240*5=1200 chars of `&amp;`. The cap must apply to the ESCAPED output.
+    for (const ch of ['&', '<', '>']) {
+      const body = ch.repeat(240)
+      // The BULLET line (starts `- [`), not the `<agent_nexus>` tag line (which contains `<`).
+      const bullet = formatAgentNexusFragment([ev({ body })])!
+        .split('\n')
+        .find((l) => l.startsWith('- ['))!
+      // The escaped bullet stays bounded (≤240-char body + prefix + '…'), NEVER the
+      // ~1200-char unbounded expansion; and it never ends mid-entity (no dangling `&amp`).
+      expect(bullet.length).toBeLessThan(320)
+      expect(bullet).toContain('…')
+      expect(/&(amp|lt|gt)$/.test(bullet)).toBe(false)
+    }
+  })
+
+  it('does not split a non-BMP surrogate pair at the body cap boundary', () => {
+    // 🎯 (U+1F3AF) is a surrogate pair (2 UTF-16 units). A run that straddles the cap must
+    // not leave a lone half-surrogate.
+    const body = '🎯'.repeat(200) // 400 UTF-16 units → over the 240 cap
+    const bullet = formatAgentNexusFragment([ev({ body })])!
+      .split('\n')
+      .find((l) => l.startsWith('- ['))!
+    // No lone surrogate: the whole rendered line round-trips through UTF-8 without a U+FFFD.
+    expect(Buffer.from(bullet, 'utf8').toString('utf8')).toBe(bullet)
+    expect(bullet).toContain('…')
+  })
+
   it('caps ref COUNT at 6 and marks ref overflow; caps each ref to 120 chars', () => {
     const refs = Array.from({ length: 8 }, (_, i) => ({ kind: 'url' as const, ref: `r${i}` }))
     const out = formatAgentNexusFragment([ev({ refs_json: JSON.stringify(refs) })])
