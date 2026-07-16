@@ -176,6 +176,35 @@ test('SupervisedLoop.stop quiesces an in-flight tick (the mechanism the composer
   expect(events).toEqual(['tick-start', 'tick-end']) // tick settled before stop() returned
 })
 
+test('a composer failure after the memory wiring does NOT leak the reflect interval', async () => {
+  // The reflect loop is armed LAST (after every failure-prone validation), so a
+  // composer throw can't leave a running interval that boot() never gets a cleanup
+  // for. Force a failure (remove the cookie secret → the composer rejects during a
+  // later validation) with the flag ON, and prove — via a setInterval spy keyed on
+  // the reflect loop's unique 24h cadence — that the loop never armed.
+  process.env['NEUTRON_PERFECT_RECALL'] = '1'
+  delete process.env['NEUTRON_ONBOARDING_CHAT_COOKIE_SECRET']
+  const realSetInterval = globalThis.setInterval
+  let reflectIntervalArmed = 0
+  globalThis.setInterval = ((fn: () => void, ms?: number, ...rest: unknown[]) => {
+    if (ms === DEFAULT_REFLECT_INTERVAL_MS) reflectIntervalArmed += 1
+    return (realSetInterval as (...a: unknown[]) => unknown)(fn, ms, ...rest)
+  }) as unknown as typeof globalThis.setInterval
+  const substrateFactory = (opts: ClaudeCodeSubstrateOptions): Substrate => ({
+    start: () => cannedHandle(opts.substrate_instance_id),
+  })
+  const db = ProjectDb.open(process.env['NEUTRON_DB_PATH']!)
+  applyMigrations(db.raw())
+  try {
+    const composer = buildOpenGraphComposer({ env: process.env, substrateFactory })
+    await expect(composer({ db, project_slug: 'owner' })).rejects.toThrow()
+    expect(reflectIntervalArmed).toBe(0) // the loop never armed → no leaked timer
+  } finally {
+    globalThis.setInterval = realSetInterval
+    db.close()
+  }
+})
+
 test('flag OFF (default) → reflect-consolidation is NOT armed', async () => {
   const { composition, close } = await bootComposer()
   try {
