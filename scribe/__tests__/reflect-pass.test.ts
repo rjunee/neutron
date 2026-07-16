@@ -14,7 +14,7 @@
  */
 
 import { describe, test, expect } from 'bun:test'
-import { mkdtempSync, mkdirSync, writeFileSync, existsSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, writeFileSync, existsSync, symlinkSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -246,6 +246,26 @@ describe('reflect path containment (untrusted frontmatter slug)', () => {
     // the canonical page survives intact.
     expect(report.merged).toBe(0)
     expect(existsSync(join(owner, 'entities', 'companies', 'good.md'))).toBe(true)
+  })
+
+  test('a symlinked kind dir is never traversed for read OR delete', async () => {
+    const owner = tmpOwner()
+    // An OUTSIDE directory holding two would-be-duplicate pages.
+    const outside = mkdtempSync(join(tmpdir(), 'reflect-outside-'))
+    const page = (name: string): string =>
+      `---\nslug: ${name}\ntype: company\nname: ${name}\n---\n\nAcme is a developer-tools SaaS company.\n\n---\n\n## Timeline\n\n- 2026-07-01T00:00:00.000Z | s | x\n`
+    writeFileSync(join(outside, 'acme.md'), page('acme'))
+    writeFileSync(join(outside, 'acme-co.md'), page('acme-co'))
+    // entities/companies is a SYMLINK to the outside dir (an ancestor redirect).
+    mkdirSync(join(owner, 'entities'), { recursive: true })
+    symlinkSync(outside, join(owner, 'entities', 'companies'))
+
+    const report = await runReflectPass(baseDeps(owner))
+    // The symlinked kind dir is rejected by containment → no pages loaded, no
+    // merge, and NEITHER outside file is deleted.
+    expect(report.merged).toBe(0)
+    expect(existsSync(join(outside, 'acme.md'))).toBe(true)
+    expect(existsSync(join(outside, 'acme-co.md'))).toBe(true)
   })
 })
 

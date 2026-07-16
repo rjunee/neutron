@@ -31,7 +31,7 @@
  * and NEVER incurs LLM cost under test.
  */
 
-import { readFile, unlink, readdir, realpath, open as fsOpen } from 'node:fs/promises'
+import { unlink, readdir, realpath, open as fsOpen } from 'node:fs/promises'
 import { constants as fsConstants } from 'node:fs'
 import { join, dirname, sep } from 'node:path'
 import {
@@ -236,15 +236,10 @@ export async function runReflectPass(deps: ReflectPassDeps): Promise<ReflectRepo
  */
 async function loadAllPages(ownerDataDir: string): Promise<LoadedPage[]> {
   const pages: LoadedPage[] = []
-  const realOwner = await safeRealpath(ownerDataDir)
-  if (realOwner === null) return pages
-  const entitiesDir = join(ownerDataDir, 'entities')
-  const realRoot = await safeRealpath(entitiesDir)
-  if (realRoot === null || !isPathUnder(realOwner, realRoot)) return pages
   for (const kind of ENTITY_KINDS) {
-    const dir = join(entitiesDir, KIND_TO_DIR[kind])
-    const realDir = await safeRealpath(dir)
-    if (realDir === null || !isPathUnder(realRoot, realDir)) continue // symlinked/absent
+    const contained = await containedKindDir(ownerDataDir, kind)
+    if (contained === null) continue // absent / symlinked ancestor → skip the kind
+    const { dir, realRoot } = contained
     let names: string[]
     try {
       names = await readdir(dir)
@@ -279,6 +274,33 @@ async function loadAllPages(ownerDataDir: string): Promise<LoadedPage[]> {
     }
   }
   return pages
+}
+
+/**
+ * Resolve `<ownerDataDir>/entities/<kind-dir>` ONLY when it currently canonicalises
+ * UNDER the owner (entities root under owner AND kind dir under that root). Returns
+ * `{ dir, realRoot }` or null. Called fresh at each use — enumeration, the pre-unlink
+ * revalidation, and the reserved-page read — so an ancestor swapped to a symlink
+ * pointing outside the owner (e.g. `entities/companies -> /outside`) between the
+ * scan and a later mutation is caught right before that mutation (the memory-index
+ * TOCTOU discipline). The irreducible sub-call residual (a swap between this final
+ * check and the very next syscall) is not closable in portable Node
+ * (needs Linux `openat2`/`RESOLVE_BENEATH`) and is accepted under the single-owner
+ * local threat model — the same residual `runtime/memory-index.ts` documents.
+ */
+async function containedKindDir(
+  ownerDataDir: string,
+  kind: EntityKind,
+): Promise<{ dir: string; realRoot: string } | null> {
+  const realOwner = await safeRealpath(ownerDataDir)
+  if (realOwner === null) return null
+  const entitiesDir = join(ownerDataDir, 'entities')
+  const realRoot = await safeRealpath(entitiesDir)
+  if (realRoot === null || !isPathUnder(realOwner, realRoot)) return null
+  const dir = join(entitiesDir, KIND_TO_DIR[kind])
+  const realDir = await safeRealpath(dir)
+  if (realDir === null || !isPathUnder(realRoot, realDir)) return null
+  return { dir, realRoot }
 }
 
 /** `realpath` → null instead of throwing (missing path / broken link). */
@@ -462,7 +484,17 @@ async function mergeCluster(
   const retained: LoadedPage[] = []
   let deleted = 0
   for (const l of losers) {
-    const path = join(deps.ownerDataDir, 'entities', KIND_TO_DIR[l.kind], `${l.slug}.md`)
+    // TOCTOU: several awaited writes happened above, so RE-VALIDATE the kind dir's
+    // containment immediately before unlink — a `entities/<dir>` swapped to a
+    // symlink-to-outside during those awaits would otherwise let the unlink escape
+    // the owner. A failed revalidation retains the loser (never deletes through a
+    // now-uncontained ancestor).
+    const contained = await containedKindDir(deps.ownerDataDir, l.kind)
+    if (contained === null) {
+      retained.push(l)
+      continue
+    }
+    const path = join(contained.dir, `${l.slug}.md`)
     let removed = false
     try {
       await removeFile(path)
@@ -655,31 +687,32 @@ async function extractReservedKinds(
 }
 
 /** Read an existing reserved-kind page's compiled-truth + frontmatter, or null
- *  when it doesn't exist yet. `slug` is grammar-safe (from `slugify`). */
+ *  when it doesn't exist yet. Symlink-contained via the SAME hardened reader the
+ *  scan uses (revalidated kind dir + `O_NOFOLLOW` leaf), so a symlinked page /
+ *  ancestor can't make this read escape the owner. `slug` is grammar-safe (from
+ *  `slugify`). */
 async function readExistingReservedPage(
   ownerDataDir: string,
   kind: EntityKind,
   slug: string,
 ): Promise<{ compiledTruth: string; frontmatter: Record<string, unknown> } | null> {
   if (!SLUG_REGEX.test(slug)) return null
-  const path = join(ownerDataDir, 'entities', KIND_TO_DIR[kind], `${slug}.md`)
-  let body: string
-  try {
-    body = await readFile(path, 'utf8')
-  } catch {
-    return null
-  }
-  return { compiledTruth: extractCompiledTruth(body), frontmatter: parseFrontmatter(body) }
+  const contained = await containedKindDir(ownerDataDir, kind)
+  if (contained === null) return null
+  const read = await readContainedFile(join(contained.dir, `${slug}.md`), contained.realRoot)
+  if (read === null) return null
+  return { compiledTruth: extractCompiledTruth(read.body), frontmatter: parseFrontmatter(read.body) }
 }
 
-/** Concatenate page titles + compiled-truth (+ a couple of recent timeline rows)
- *  into a budget-capped digest for the reserved-kind extraction. */
+/** Concatenate page titles + compiled-truth (+ the two NEWEST timeline rows —
+ *  `extractTimeline` returns rows newest-first) into a budget-capped digest for
+ *  the reserved-kind extraction. */
 function buildCorpusDigest(pages: LoadedPage[], budgetChars: number): string {
   const parts: string[] = []
   let used = 0
   for (const p of pages) {
     const recent = p.timeline
-      .slice(0, 2)
+      .slice(0, 2) // newest-first ordering ⇒ the two most recent rows
       .map((e) => `  · ${e.body}`)
       .join('\n')
     const block = `### ${p.title} (${p.kind})\n${p.compiledTruth.trim()}${recent.length > 0 ? `\n${recent}` : ''}`
