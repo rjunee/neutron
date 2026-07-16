@@ -37,6 +37,21 @@ export interface ExtractedRelation {
   predicate: string
   /** Object display name (the related entity). */
   object: string
+  /**
+   * RB4 temporal invalidation (belief evolution) — OPTIONAL supersede marker.
+   * OBJECT REPLACEMENT ONLY: the display name of a PRIOR object that this
+   * relation's NEW object replaces for the SAME (subject, predicate) — e.g.
+   * `works_at NewCo` with `supersedes: "OldCo"` after a job move. Keys the prior
+   * fact by its object identity on the SAME subject. It does NOT model an entity
+   * rename or an ended-without-replacement affiliation (no prior relation object
+   * to retire — out of RB4 scope). Acted on ONLY under
+   * the shared `NEUTRON_PERFECT_RECALL` flag (`write-to-gbrain.ts` supersede
+   * path): the superseded object's compiled-truth sentence is dropped (so the
+   * gbrain edge falls out via the writer's existing `removedLinks`→`remove_link`
+   * machinery) while the append-only timeline keeps the dated history. Flag OFF
+   * → parsed but ignored (pure accretion, exactly as today).
+   */
+  supersedes?: string
 }
 
 export interface ScribeExtraction {
@@ -75,8 +90,36 @@ Hard rules:
 MESSAGE:
 `
 
-export function composeExtractionPrompt(text: string): string {
-  return `${SCRIBE_EXTRACTION_PROMPT}${text.trim()}\n`
+/**
+ * RB4 supersede guidance — spliced into the extraction prompt ONLY when the
+ * shared perfect-recall flag is on (see `composeExtractionPrompt`). Teaches the
+ * extractor to emit the optional `relations[].supersedes` marker for the ONE
+ * case the mechanism implements: OBJECT REPLACEMENT — a subject gains a NEW
+ * object for the SAME predicate, retiring the prior object (the spec's "moved
+ * job / changed company" = `works_at OldCo → works_at NewCo`). It deliberately
+ * does NOT advertise entity renames or ended-without-replacement affiliations —
+ * `supersedes` keys on a prior relation OBJECT, so those have nothing to invalidate
+ * (they are genuinely larger mechanisms, out of RB4 scope). Kept OUT of the
+ * default prompt so the flag-off extraction contract is byte-identical to today's.
+ */
+export const SUPERSEDE_GUIDANCE = `Belief evolution (optional): use ONLY when you assert a NEW relation that REPLACES a prior value of the SAME (subject, predicate) — the same subject now has a DIFFERENT object for a predicate it already had (e.g. a person changed employer, so an earlier \`works_at\` now points to a new company). Set "supersedes" on that new relation to the display name of the PRIOR object it replaces:
+  { "subject": "Alice", "predicate": "works_at", "object": "NewCo", "supersedes": "OldCo" }
+This retires the subject's prior (predicate, object) fact and asserts the new object in its place.
+Do NOT use "supersedes" for anything else. In particular:
+- NOT for renaming an entity itself ("Acme is now called NewCo") — that is an entity-identity change, not a replaced relation object; just extract the entities normally and OMIT "supersedes".
+- NOT for an ended relationship with NO replacement ("Jane left OldCo", no new employer) — there is no new object to point to; OMIT "supersedes".
+Only set it when the SAME subject gains a NEW object for the SAME predicate. Omit it for a brand-new, additive fact. Never guess.
+`
+
+export function composeExtractionPrompt(
+  text: string,
+  opts?: { supersede?: boolean },
+): string {
+  const base =
+    opts?.supersede === true
+      ? SCRIBE_EXTRACTION_PROMPT.replace('MESSAGE:\n', `${SUPERSEDE_GUIDANCE}\nMESSAGE:\n`)
+      : SCRIBE_EXTRACTION_PROMPT
+  return `${base}${text.trim()}\n`
 }
 
 export interface RunExtractionDeps {
@@ -86,6 +129,13 @@ export interface RunExtractionDeps {
   model_preference?: ReadonlyArray<string>
   /** Output token budget. Defaults to 2048 — extraction JSON is small. */
   max_tokens?: number
+  /**
+   * RB4 — when true, splice the supersede guidance into the extraction prompt so
+   * the extractor may emit `relations[].supersedes` (belief evolution). Gated by
+   * the shared `NEUTRON_PERFECT_RECALL` flag at the wiring layer. Default false
+   * → the prompt is byte-identical to today's.
+   */
+  supersede?: boolean
 }
 
 /**
@@ -103,7 +153,7 @@ export async function runExtraction(
   signal?: AbortSignal,
 ): Promise<ScribeExtraction> {
   const handle = deps.substrate.start({
-    prompt: composeExtractionPrompt(text),
+    prompt: composeExtractionPrompt(text, { supersede: deps.supersede === true }),
     tools: [],
     model_preference:
       deps.model_preference !== undefined && deps.model_preference.length > 0
@@ -180,7 +230,12 @@ function normRelations(v: unknown): ExtractedRelation[] {
     const object = typeof r['object'] === 'string' ? r['object'].trim() : ''
     if (subject.length === 0 || object.length === 0) continue
     if (!VALID_PREDICATES.has(predicate)) continue
-    out.push({ subject, predicate, object })
+    const rel: ExtractedRelation = { subject, predicate, object }
+    // RB4 — carry the optional supersede marker through when present + non-empty.
+    // Harmless when the perfect-recall flag is off (the writer ignores it).
+    const supersedes = typeof r['supersedes'] === 'string' ? r['supersedes'].trim() : ''
+    if (supersedes.length > 0) rel.supersedes = supersedes
+    out.push(rel)
   }
   return out
 }

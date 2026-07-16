@@ -47,12 +47,48 @@ import {
   extractCompiledTruth,
   parseFrontmatter,
 } from '@neutronai/runtime/entity-format.ts'
+import {
+  extractTypedLinks,
+  normaliseSentence,
+  splitSentencesWithOffsets,
+} from '@neutronai/runtime/auto-link.ts'
 import type { EntityKind, SyncHook } from '@neutronai/runtime/entity-writer.ts'
 import { entitySlugify } from '@neutronai/runtime/entity-slug.ts'
+import { neutralizeAbandonedSettle } from '@neutronai/logger/fire-and-forget.ts'
 import { createLogger } from '@neutronai/logger'
 
 const writeGbrainLog = createLogger('scribe')
 import type { ExtractedEntity, ExtractedRelation, ScribeExtraction } from './extract.ts'
+
+/**
+ * Per-`${kind}/${slug}` serialization for scribe's READ→strip/merge→WRITE of a
+ * page. The entity-writer's own lock (RA1) only guards its render→rename; scribe
+ * computes the FULL-REPLACEMENT compiled-truth + merged frontmatter from a read
+ * that happens OUTSIDE that lock, so two concurrent same-subject scribe writes (a
+ * supersession + an unrelated additive relation) would each read the same base
+ * page and the second commit would clobber the first — undoing the invalidation or
+ * losing the other relation (Codex lost-update). This module-level lock makes the
+ * whole read→merge→writeEntity critical section atomic per key. It is a SEPARATE
+ * map from the entity-writer's lock, so the inner `writeEntity` (which re-locks the
+ * same key on ITS map) never deadlocks. Same `withLock` idiom as `persistence/db.ts`
+ * / `entity-writer.ts`: swallow-`.then` sequencing baton + delete-when-drained. */
+const scribePageLocks = new Map<string, Promise<void>>()
+
+function withScribePageLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
+  const prev = scribePageLocks.get(key) ?? Promise.resolve()
+  const next = prev.then(fn)
+  const settled = next.then(
+    () => undefined,
+    () => undefined,
+  )
+  scribePageLocks.set(key, settled)
+  neutralizeAbandonedSettle(
+    settled.then(() => {
+      if (scribePageLocks.get(key) === settled) scribePageLocks.delete(key)
+    }),
+  )
+  return next
+}
 
 /**
  * Minimal `writeEntity` surface — lets tests inject a recorder without pulling
@@ -133,6 +169,18 @@ export interface WriteExtractionDeps {
   syncHook?: SyncHook
   /** Failure sink. Defaults to console.warn. */
   logFailure?: (err: unknown, ctx: { kind: EntityKind; slug: string }) => void
+  /**
+   * RB4 temporal invalidation — the shared `NEUTRON_PERFECT_RECALL` gate,
+   * resolved at the wiring layer (`open/wiring/memory.ts`). When true, a relation
+   * carrying a `supersedes` marker DROPS the superseded object's sentence(s) from
+   * the subject's compiled-truth (so the writer's existing
+   * `removedLinks`→`remove_link` machinery invalidates the stale gbrain edge and
+   * `add_link` asserts the current one), and the superseding write records the
+   * transition in the append-only timeline (dated history preserved). When false
+   * (the default), `supersedes` is ignored entirely → pure accretion, byte-for-
+   * byte today's behaviour.
+   */
+  supersede?: boolean
 }
 
 export interface WriteExtractionReport {
@@ -180,6 +228,9 @@ export async function writeExtractionToGBrain(
   deps: WriteExtractionDeps,
 ): Promise<WriteExtractionReport> {
   const report: WriteExtractionReport = { pages_written: 0, pages_skipped: 0, edges_emitted: 0 }
+  // RB4 — the perfect-recall supersede gate. OFF (default) → the merge stays
+  // strictly append-only and the `supersedes` markers are inert (pure accretion).
+  const supersede = deps.supersede === true
 
   // 1. Plan a page per entity, keyed + deduped by slug.
   const bySlug = new Map<string, PlannedPage>()
@@ -231,54 +282,67 @@ export async function writeExtractionToGBrain(
 
   for (const page of orderPagesObjectsFirst(bySlug)) {
     try {
-      // Preserve an existing page's compiled-truth + frontmatter (append-only /
-      // merge); compose fresh for a new entity. See the module header for the
-      // data-loss rationale.
-      const existing = await readExistingPage(input.ownerDataDir, page.kind, page.slug)
-      const compiledTruth =
-        existing !== null
-          ? mergeExistingCompiledTruth(existing.compiledTruth, page)
-          : composeNewCompiledTruth(page)
-      // Merge frontmatter: preserve every existing key (mention_count, category,
-      // basis, cadence_hint, …) and only set the keys scribe authoritatively
-      // owns. `writeEntity` does NOT merge frontmatter, so without this the
-      // populator's fields would be clobbered on the first chat touch.
-      const frontmatter: Record<string, unknown> = {
-        ...(existing?.frontmatter ?? {}),
-        slug: page.slug,
-        type: page.kind,
-        name: page.name,
-        source: input.source,
-      }
-      const out = await deps.writeEntity(
-        {
-          ownerDataDir: input.ownerDataDir,
-          kind: page.kind,
+      // Serialize the WHOLE read→strip/merge→writeEntity per (kind,slug) so a
+      // concurrent same-subject scribe write can't clobber this one's full-
+      // replacement compiled-truth (Codex lost-update; see `withScribePageLock`).
+      const out = await withScribePageLock(`${page.kind}/${page.slug}`, async () => {
+        // Preserve an existing page's compiled-truth + frontmatter (append-only /
+        // merge); compose fresh for a new entity. See the module header for the
+        // data-loss rationale. Read INSIDE the lock so the merge sees the latest.
+        const existing = await readExistingPage(input.ownerDataDir, page.kind, page.slug)
+        // RB4 — under the flag, DROP any superseded prior sentence from an existing
+        // page's compiled-truth (belief evolution); the writer's `removedLinks` diff
+        // then invalidates the stale gbrain edge. The append-only timeline is the
+        // durable history: each write records its relation assertions ADDITIVELY (a
+        // pure function of the extraction — see `timelineBody`), so a superseded
+        // belief that was first recorded under the flag keeps its own dated
+        // `<pred> <obj>` row at its original time, and nothing is ever rewritten or
+        // fabricated. No state-dependent transition note ⇒ replays are byte-identical.
+        const compiledTruth =
+          existing !== null
+            ? mergeExistingCompiledTruth(existing.compiledTruth, page, supersede)
+            : composeNewCompiledTruth(page)
+        // Merge frontmatter: preserve every existing key (mention_count, category,
+        // basis, cadence_hint, …) and only set the keys scribe authoritatively
+        // owns. `writeEntity` does NOT merge frontmatter, so without this the
+        // populator's fields would be clobbered on the first chat touch.
+        const frontmatter: Record<string, unknown> = {
+          ...(existing?.frontmatter ?? {}),
           slug: page.slug,
-          body: {
-            frontmatter,
-            compiledTruth,
-            // Append-only provenance. Deterministic body (same for new + existing
-            // pages on identical input) so the writer's (ts,source,body) timeline
-            // dedup makes a repeated identical turn a true no-op.
-            timelineAppend: {
-              ts: input.ts,
-              source: timelineSource,
-              body: timelineBody(page),
+          type: page.kind,
+          name: page.name,
+          source: input.source,
+        }
+        return deps.writeEntity(
+          {
+            ownerDataDir: input.ownerDataDir,
+            kind: page.kind,
+            slug: page.slug,
+            body: {
+              frontmatter,
+              compiledTruth,
+              // Append-only provenance. Deterministic body (same for new + existing
+              // pages on identical input) so the writer's (ts,source,body) timeline
+              // dedup makes a repeated identical turn a true no-op.
+              timelineAppend: {
+                ts: input.ts,
+                source: timelineSource,
+                body: timelineBody(page, supersede),
+              },
             },
+            // M2.6 Ph1 (#83) — own-origin stamp by default (chat / Cores: origin
+            // === receiving → guard passes). M2.6 Ph4 — the syndication path sets
+            // `originSlug` to the member local_slug (foreign) + carries the owner-
+            // approval-derived whitelist so the boundary guard accepts it.
+            originInstance: input.originSlug ?? input.ownSlug,
+            receivingInstanceSlug: input.ownSlug,
+            ...(input.allowPersistOrigins !== undefined
+              ? { allowPersistOrigins: input.allowPersistOrigins }
+              : {}),
           },
-          // M2.6 Ph1 (#83) — own-origin stamp by default (chat / Cores: origin
-          // === receiving → guard passes). M2.6 Ph4 — the syndication path sets
-          // `originSlug` to the member local_slug (foreign) + carries the owner-
-          // approval-derived whitelist so the boundary guard accepts it.
-          originInstance: input.originSlug ?? input.ownSlug,
-          receivingInstanceSlug: input.ownSlug,
-          ...(input.allowPersistOrigins !== undefined
-            ? { allowPersistOrigins: input.allowPersistOrigins }
-            : {}),
-        },
-        writeDeps,
-      )
+          writeDeps,
+        )
+      })
       if (out.changed) {
         report.pages_written += 1
         report.edges_emitted += Array.isArray(out.newLinks) ? out.newLinks.length : 0
@@ -334,12 +398,55 @@ function orderPagesObjectsFirst(bySlug: Map<string, PlannedPage>): PlannedPage[]
   return emitted
 }
 
-/** Deterministic timeline-entry body for a page — identical across the new-page
- *  and existing-page paths for the same input so the writer's (ts,source,body)
- *  dedup makes a repeated identical turn a no-op. */
-function timelineBody(page: PlannedPage): string {
+/** Cosmetic, human-visible separator between the fact base and the additive
+ *  relation notes in a timeline body. */
+const NOTES_SEP = ' · '
+
+/** Deterministic timeline-entry body for a page — a PURE FUNCTION of the
+ *  extraction, so the writer's (ts,source,body) dedup makes a repeated identical
+ *  turn a true no-op (idempotent replay — no state dependence, nothing to
+ *  fabricate, no timeline text parsed).
+ *
+ *  RB4 — when `supersede` is on, the page's RELATION ASSERTIONS are recorded
+ *  ADDITIVELY in the (append-only, dated) timeline body alongside the fact. This
+ *  is what makes the timeline the durable history: the ORIGINAL `works_at oldco`
+ *  write lands a dated `works_at oldco` row at its OWN observation time, so when a
+ *  later turn supersedes it (dropping the sentence from compiled-truth + the
+ *  gbrain edge), the original dated belief still lives in history — untouched,
+ *  because the timeline is append-only. There is NO separate "superseded X → Y"
+ *  note: the current truth is carried by compiled-truth + the edge, and the
+ *  before/after beliefs are each an additive dated row. Slugs are bare (no
+ *  `[[wikilink]]`, no `works at <slug>` verb phrasing) so the timeline text can
+ *  never re-derive a graph edge. OFF (default) → byte-for-byte today's fact-only body. */
+function timelineBody(page: PlannedPage, supersede: boolean): string {
   const fact = page.fact?.trim()
-  return fact !== undefined && fact.length > 0 ? `Chat mention — ${fact}` : 'Mentioned in chat'
+  const base = fact !== undefined && fact.length > 0 ? `Chat mention — ${fact}` : 'Mentioned in chat'
+  if (!supersede) return base
+  const notes = relationNotes(page)
+  return notes.length > 0 ? `${base}${NOTES_SEP}${notes.join('; ')}` : base
+}
+
+/**
+ * RB4 — deterministic, edge-inert ADDITIVE notes recording each of the page's
+ * relation assertions for the dated timeline (`<pred> <obj>`). A pure function of
+ * `page.relations` — no dependence on prior state, so a replay reproduces the
+ * SAME body (idempotent) and nothing is ever fabricated. The supersession itself
+ * is reflected by compiled-truth removal + edge invalidation, not by a timeline
+ * note; the retired belief survives as its OWN earlier additive row. Deduped; bare
+ * slugs + underscored predicate so nothing re-extracts a triple from this text.
+ */
+function relationNotes(page: PlannedPage): string[] {
+  const notes: string[] = []
+  const seen = new Set<string>()
+  for (const r of page.relations) {
+    const objSlug = slugify(r.object)
+    if (objSlug === null || objSlug === page.slug) continue
+    const key = `${r.predicate}\x1f${objSlug}`
+    if (seen.has(key)) continue
+    seen.add(key)
+    notes.push(`${r.predicate} ${objSlug}`)
+  }
+  return notes
 }
 
 /** Render the relationship bullet lines for a page, deduped by (predicate,
@@ -400,8 +507,16 @@ function composeNewCompiledTruth(page: PlannedPage): string {
  * collapses. The new *fact* is NOT written into compiled-truth (it lands in the
  * append-only timeline instead), so the entity's prose is never rewritten.
  */
-function mergeExistingCompiledTruth(existing: string, page: PlannedPage): string {
-  const base = existing.replace(/\s+$/, '') // trim trailing whitespace; we re-add \n
+function mergeExistingCompiledTruth(existing: string, page: PlannedPage, supersede: boolean): string {
+  // RB4 — when perfect-recall is on, DROP the superseded object's sentence(s)
+  // from the existing compiled-truth BEFORE the append pass. That single edit is
+  // what turns accretion into belief-evolution: the writer's diff then sees the
+  // stale triple in the OLD compiled-truth but not the NEW one, so `removedLinks`
+  // carries it and the sync hook `remove_link`s the stale gbrain edge — while the
+  // append below asserts the CURRENT fact and the append-only timeline keeps the
+  // dated history. A no-op when no relation carries `supersedes`.
+  const stripped = supersede ? stripSupersededSentences(existing, page) : existing
+  const base = stripped.replace(/\s+$/, '') // trim trailing whitespace; we re-add \n
   const newLines: string[] = []
   for (const line of renderRelationLines(page)) {
     // `line` is `- <verb> [[objSlug]].`. Each (predicate, object) maps to a
@@ -422,6 +537,153 @@ function mergeExistingCompiledTruth(existing: string, page: PlannedPage): string
   if (!hasRelHeader) parts.push('## Relationships', '')
   parts.push(...newLines)
   return parts.join('\n') + '\n'
+}
+
+/**
+ * RB4 temporal invalidation — excise from the existing compiled-truth exactly
+ * the SENTENCE(S) that assert a superseded `(predicate, prior-object)` triple,
+ * one target per superseding relation on this page. Everything else is preserved
+ * byte-for-byte.
+ *
+ * PREDICATE-SCOPED, not object-blind (Codex RB4 r1 blocker 1): `works_at NewCo,
+ * supersedes OldCo` retires ONLY the `works_at [[oldco]]` assertion — a separate
+ * current `Advises [[oldco]].` survives.
+ *
+ * SENTENCE-granular, not line-granular (Codex RB4 r2 blocker): a line carrying
+ * several sentences (`Works at [[oldco]]. Advises [[boardco]].`) drops just the
+ * target sentence and keeps the rest, so neither a stale sibling sentence lingers
+ * nor an unrelated fact is deleted wholesale.
+ *
+ * SINGLE-SENTENCE ONLY, VERBATIM otherwise (Codex data-loss blockers): a sentence
+ * is dropped ONLY when it is PURELY a single generated relationship assertion for a
+ * superseded target (`pureSupersededSentence` — exactly one graph relation, and the
+ * sentence normalises to the `RELATION_SENTENCE` template). ANYTHING else — a
+ * COMPOUND sentence asserting more than one relation, or a single relation wrapped
+ * in descriptive prose (`Works at [[oldco]] and advises [[boardco]] on acquisitions
+ * since 2019.`) — is KEPT BYTE-FOR-BYTE, never deleted and never reconstructed. The
+ * trade-off is intentional + safe: a superseded relation embedded in a compound /
+ * prose sentence is left in place (under-remove rather than mangle hand-authored
+ * text). Scribe's own rendered prose is one relation per sentence, so a real
+ * chat-time supersession always hits the clean single-relation path; only
+ * hand-authored/imported compound prose is spared (its graph edge follows the KG's
+ * one-edge-per-pair collapse regardless).
+ *
+ * A sentence qualifies purely by what it would contribute to the graph, computed
+ * with the SAME `extractTypedLinks` + `splitSentencesWithOffsets` the edge
+ * extractor uses — so ALIASED wikilinks (`[[oldco|OldCo]]`) and every verb
+ * phrasing are matched exactly as the graph sees them (Codex RB4 r1 blocker 2),
+ * never a brittle literal `[[oldco]]` substring. INHERENT KG BOUND: the extractor
+ * collapses one object to its STRONGEST predicate (one edge per subject-object
+ * pair — the pre-existing gbrain model, not RB4-specific). So a superseded
+ * predicate that is NOT an object's live edge (e.g. `works_at [[x]]` where the
+ * same `[[x]]` is also `advises`d, which wins) has no distinct edge to retire and
+ * is intentionally left alone — its graph edge (`advises x`) is already the
+ * current truth, and removing it would destroy that stronger relation. Excising the sentence removes the
+ * triple from the NEW compiled-truth → the writer's `removedLinks` diff surfaces
+ * `works_at oldco` → the sync hook's (predicate-blind) `remove_link` clears the
+ * pair and its add-pass re-asserts any survivor edge (still present in the new
+ * truth). The prior belief lives on in the append-only, dated timeline. Guards
+ * skip a `supersedes` that resolves to the same slug as the new object.
+ */
+function stripSupersededSentences(existing: string, page: PlannedPage): string {
+  // Targets: `${predicate}\x1f${priorSlug}` triples to retire from compiled-truth.
+  const targets = new Set<string>()
+  for (const r of page.relations) {
+    if (r.supersedes === undefined) continue
+    const priorSlug = slugify(r.supersedes)
+    const objSlug = slugify(r.object)
+    if (priorSlug === null || objSlug === null) continue
+    if (priorSlug === objSlug) continue // not a real supersession
+    targets.add(`${r.predicate}\x1f${priorSlug}`)
+  }
+  if (targets.size === 0) return existing
+
+  const opts = { sourceKind: page.kind, source: 'rb4-supersede-scan' } as const
+  // Cheap superset gate for "this text carries an entity reference the edge
+  // extractor would see" — a `[[wikilink]]` (bare or aliased) OR a `[…](slug)`
+  // markdown link (`auto-link.ts:collectRefs` recognises BOTH). A false positive
+  // just triggers an extract that returns no triple; a false NEGATIVE would let a
+  // superseded markdown-link assertion survive, so the gate must not miss `](`.
+  const hasRef = (s: string): boolean => s.includes('[[') || s.includes('](')
+  // Every graph triple a single sentence would contribute, as `${pred}\x1f${obj}`
+  // keys (deduped, in extractor order) — computed with the SAME extractor the
+  // edge layer uses, so aliases + verb variants + same-object collapse all match
+  // exactly as the graph sees them.
+  const sentenceKeys = (text: string): string[] => {
+    if (!hasRef(text)) return []
+    return extractTypedLinks(`${text}\n`, page.slug, opts).map(
+      (t) => `${t.predicate}\x1f${t.object}`,
+    )
+  }
+  // Is this sentence PURELY a single generated relationship assertion for a
+  // superseded target — i.e. safe to drop with NOTHING to lose? It must (a) assert
+  // exactly ONE graph relation, which is a superseded target, AND (b) normalise
+  // (references → bare slugs, the extractor's own transform) to EXACTLY the
+  // normalised `RELATION_SENTENCE` template for that relation. Any extra
+  // hand-authored prose (`Works at [[oldco]] as principal engineer since 2019.`)
+  // fails (b) → kept verbatim; alias/markdown wikilink forms still pass (a)+(b)
+  // because normalisation collapses them to the same bare slug (Codex).
+  // Normalise references → bare slugs, LOWERCASE (the edge extractor's verb match
+  // is case-insensitive, so a hand-authored `works at [[oldco]].` IS a live edge
+  // and must match the capitalised template — Codex), and drop surrounding
+  // whitespace + trailing sentence punctuation (spans exclude the terminator, the
+  // templates include it), so only the meaningful content is compared.
+  const canon = (s: string): string =>
+    normaliseSentence(s)
+      .toLowerCase()
+      .trim()
+      .replace(/[.!?]+$/, '')
+      .trim()
+  const pureSupersededSentence = (text: string, keys: string[]): string | null => {
+    if (keys.length !== 1) return null
+    const key = keys[0]!
+    if (!targets.has(key)) return null
+    const [predicate, objSlug] = key.split('\x1f')
+    const tmpl = RELATION_SENTENCE[predicate ?? ''] ?? RELATION_SENTENCE['mentions']!
+    return canon(text) === canon(tmpl(objSlug ?? '')) ? key : null
+  }
+
+  const outLines: string[] = []
+  for (const line of existing.split('\n')) {
+    if (!hasRef(line)) {
+      outLines.push(line) // fast path: no entity reference → untouched
+      continue
+    }
+    // Strip any leading list-bullet so it isn't folded into the first sentence.
+    const bullet = /^(\s*(?:[-*+]|\d+[.)])\s+)/.exec(line)?.[0] ?? ''
+    const content = line.slice(bullet.length)
+    const spans = splitSentencesWithOffsets(content)
+    // Identify the DROP ranges over the original `content` — a pure superseded
+    // sentence PLUS its terminator and the whitespace up to the next sentence, so
+    // the surviving text stays BYTE-EXACT (no trim, no whitespace normalisation).
+    const drops: Array<[number, number]> = []
+    for (let i = 0; i < spans.length; i += 1) {
+      const span = spans[i]!
+      const pureKey = pureSupersededSentence(content.slice(span.start, span.end), sentenceKeys(content.slice(span.start, span.end)))
+      if (pureKey === null) continue
+      const from = span.start
+      const to = i + 1 < spans.length ? spans[i + 1]!.start : content.length
+      drops.push([from, to])
+    }
+    if (drops.length === 0) {
+      outLines.push(line) // nothing to retire on this line → keep byte-for-byte
+      continue
+    }
+    // Splice the drop ranges out of `content`, keeping every other byte exactly.
+    let rebuilt = ''
+    let cursor = 0
+    for (const [from, to] of drops) {
+      rebuilt += content.slice(cursor, from)
+      cursor = to
+    }
+    rebuilt += content.slice(cursor)
+    // Trim only the OUTER whitespace (the separator that flanked a dropped sentence);
+    // whitespace BETWEEN surviving sentences is inside `rebuilt` and stays byte-exact.
+    rebuilt = rebuilt.trim()
+    if (rebuilt.length === 0) continue // the whole line was superseded → drop it
+    outLines.push(`${bullet}${rebuilt}`)
+  }
+  return outLines.join('\n')
 }
 
 /** What scribe needs to preserve from an existing on-disk page: its compiled-

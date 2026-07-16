@@ -206,6 +206,11 @@ export function wireMemory(ctx: OpenWiringContext): WiredMemory {
           ownerDataDir: owner_home,
           project_slug,
           budget: createState(defaultStatePath(owner_home)),
+          // RB4 temporal invalidation (belief evolution) — dark behind the shared
+          // perfect-recall flag. OFF → scribe stays pure-accretion (today's
+          // behaviour); ON → a `supersedes` marker retires the stale
+          // compiled-truth sentence + gbrain edge while the timeline keeps history.
+          supersede: isPerfectRecallEnabled(env),
         })
       : null
 
