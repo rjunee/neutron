@@ -1,8 +1,8 @@
 /**
  * @neutronai/cores-sdk — reconciliation guard contract.
  *
- * Per Topline `CM-DASHBOARD-PLAN.md` § 4 + the Topline cross-topic
- * confirmation (2026-05-08): every Core that materializes derived
+ * Per the Cores dashboard-analytics reconciliation requirement
+ * (design confirmed 2026-05-08): every Core that materializes derived
  * tables MUST register a guard that compares the headline metric
  * computed against the derived tables to the same metric direct-
  * queried against the source-of-truth table. If the relative drift
