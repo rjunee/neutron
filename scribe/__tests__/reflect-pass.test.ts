@@ -162,7 +162,6 @@ describe('reflect dedup (deterministic, no LLM)', () => {
     expect(bodies).toContain('First mention of Acme')
     expect(bodies).toContain('Acme raised a Series B')
     expect(bodies).toContain('Acme Inc hired a new CTO') // loser's history survived
-    expect(bodies.some((b) => b.startsWith('Merged near-duplicate'))).toBe(true)
   })
 
   test('a loser whose on-disk deletion FAILS is retained + not counted as merged', async () => {
@@ -175,15 +174,23 @@ describe('reflect dedup (deterministic, no LLM)', () => {
       { ts: '2026-07-01T00:00:00.000Z', source: 'chat:owner', body: 'c' },
     ])
     // deleteEntity always throws → deletion "fails".
-    const report = await runReflectPass({
-      ...baseDeps(owner),
-      deleteEntity: async (): Promise<{ deleted: boolean; conflict: boolean }> => {
-        throw new Error('EACCES')
-      },
-    })
+    const failingDelete = async (): Promise<{ deleted: boolean; conflict: boolean }> => {
+      throw new Error('EACCES')
+    }
+    const report = await runReflectPass({ ...baseDeps(owner), deleteEntity: failingDelete })
     // Merge is NOT reported (both files still on disk), and the loser survives.
     expect(report.merged).toBe(0)
     expect(existsSync(join(owner, 'entities', 'companies', 'acme-co.md'))).toBe(true)
+
+    // IDEMPOTENCE after a partial merge: the survivor got the loser's fold once;
+    // a SECOND pass (deletion still failing) must NOT append a duplicate fold. The
+    // survivor body is byte-identical across the retry.
+    const afterFirst = await readPage(owner, 'companies', 'acme')
+    const report2 = await runReflectPass({ ...baseDeps(owner), deleteEntity: failingDelete })
+    expect(report2.merged).toBe(0)
+    const afterSecond = await readPage(owner, 'companies', 'acme')
+    expect(afterSecond).toBe(afterFirst) // no duplicate "## Merged from" / timeline growth
+    expect((afterSecond!.match(/## Merged from acme-co/g) ?? []).length).toBe(1)
   })
 
   test('a concurrent write to a cluster member aborts the merge (no clobber, no wrong delete)', async () => {

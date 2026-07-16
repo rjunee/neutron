@@ -261,7 +261,7 @@ export async function runReflectPass(deps: ReflectPassDeps): Promise<ReflectRepo
 
   // ── Step 1 — DEDUP (deterministic, no LLM). Do it FIRST so re-synthesis + the
   //    reserved digest see the collapsed set.
-  const survivors = await dedupPages(pages, deps, report, now, logFailure)
+  const survivors = await dedupPages(pages, deps, report, logFailure)
 
   // ── Step 2 — RE-SYNTHESIZE compiled-truth from timelines (LLM, edge-guarded).
   if (deps.substrate !== undefined) {
@@ -412,7 +412,6 @@ async function dedupPages(
   pages: LoadedPage[],
   deps: ReflectPassDeps,
   report: ReflectReport,
-  now: () => number,
   logFailure: (msg: string, err: unknown) => void,
 ): Promise<LoadedPage[]> {
   const threshold = deps.jaccardThreshold ?? DEFAULT_JACCARD_THRESHOLD
@@ -437,7 +436,7 @@ async function dedupPages(
         continue
       }
       try {
-        const merged = await mergeCluster(members, deps, now)
+        const merged = await mergeCluster(members, deps)
         if (merged === null) {
           // A member changed on disk since the snapshot (a concurrent user write)
           // — abort this cluster's merge and keep every member as-is; a later pass
@@ -473,7 +472,6 @@ async function dedupPages(
 async function mergeCluster(
   members: LoadedPage[],
   deps: ReflectPassDeps,
-  now: () => number,
 ): Promise<{ survivor: LoadedPage; retained: LoadedPage[]; deleted: number } | null> {
   // EARLY ABORT (optimization + avoids folding a stale copy): if any member
   // changed on disk since the snapshot, skip the whole cluster now — a later pass
@@ -494,13 +492,19 @@ async function mergeCluster(
   const survivor = ranked[0]!
   const losers = ranked.slice(1)
 
-  // Fold the losers' compiled-truth into the survivor so their graph edges carry
-  // over. Keep it verbatim under a labelled section; the writer's edge extractor
-  // re-derives the union of triples from the combined compiled-truth.
+  // Fold each loser's compiled-truth into the survivor so their graph edges carry
+  // over — but IDEMPOTENTLY: skip a `## Merged from <slug>` section already present
+  // (a heading keyed on the loser slug). This makes a REPEATED merge (e.g. a prior
+  // pass wrote the survivor but its loser deletion failed and the loser lingers) a
+  // true no-op instead of appending duplicate sections every pass. Deterministic:
+  // no timestamps, no `now()` — so nothing accretes across passes.
   const foldSections = losers
     .map((l) => {
       const body = l.compiledTruth.trim()
-      return body.length > 0 ? `## Merged from ${l.slug}\n\n${body}` : ''
+      const heading = `## Merged from ${l.slug}`
+      if (body.length === 0) return ''
+      if (survivor.compiledTruth.includes(heading)) return '' // already folded → skip
+      return `${heading}\n\n${body}`
     })
     .filter((s) => s.length > 0)
   const mergedCompiledTruth =
@@ -508,17 +512,13 @@ async function mergeCluster(
       ? `${survivor.compiledTruth.trimEnd()}\n\n${foldSections.join('\n\n')}\n`
       : survivor.compiledTruth
 
-  // The union timeline: every member's rows plus a dated merge marker.
-  const nowIso = new Date(now()).toISOString()
-  const marker: TimelineEntry = {
-    ts: nowIso,
-    source: `reflect:dedup:${deps.ownSlug}`,
-    body: `Merged near-duplicate ${survivor.kind} page(s): ${losers.map((l) => l.slug).join(', ')}`,
-  }
-  const unionTimeline = mergeTimeline(
-    members.flatMap((m) => m.timeline),
-    marker,
-  )
+  // History preservation is the union of the members' DATED timeline rows — each
+  // deterministic (its own ts/source/body), so re-merging a lingering loser
+  // re-appends the SAME rows, which the writer dedups → no growth. (No synthetic
+  // dated marker: a `now()`-stamped row would defeat that dedup and accrete a new
+  // row every pass while a loser deletion keeps failing.)
+  const allRows = members.flatMap((m) => m.timeline)
+  const unionTimeline = allRows.reduce<TimelineEntry[]>((acc, row) => mergeTimeline(acc, row), [])
 
   const frontmatter: Record<string, unknown> = {
     ...survivor.frontmatter,

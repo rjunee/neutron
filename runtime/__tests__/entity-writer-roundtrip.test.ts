@@ -22,6 +22,7 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import {
   writeEntity,
+  deleteEntity,
   type EntityWriteInput,
   _renderEntityPage,
   _extractCompiledTruth,
@@ -148,6 +149,81 @@ describe('runtime/entity-writer — roundtrip', () => {
       expect(onDisk.indexOf('row-B')).toBeLessThan(onDisk.indexOf('row-A'))
       // The duplicate row-A appears exactly once.
       expect(onDisk.split('row-A').length - 1).toBe(1)
+    })
+  })
+
+  describe('RB3 deleteEntity (atomic guarded delete)', () => {
+    test('unconditional delete removes the page', async () => {
+      const first = await writeEntity(aliceInput())
+      const out = await deleteEntity({ ownerDataDir: ownerDir, kind: 'person', slug: 'alice-founder' })
+      expect(out.deleted).toBe(true)
+      expect(out.conflict).toBe(false)
+      await expect(fs.readFile(first.path, 'utf8')).rejects.toThrow()
+    })
+
+    test('guarded delete: matching precondition removes; mismatch preserves', async () => {
+      const first = await writeEntity(aliceInput())
+      const current = await fs.readFile(first.path, 'utf8')
+      // Mismatch → conflict, file preserved byte-for-byte.
+      const bad = await deleteEntity({
+        ownerDataDir: ownerDir,
+        kind: 'person',
+        slug: 'alice-founder',
+        precondition: { ifBodyEquals: 'STALE' },
+      })
+      expect(bad).toMatchObject({ deleted: false, conflict: true })
+      expect(await fs.readFile(first.path, 'utf8')).toBe(current)
+      // Match → deleted.
+      const good = await deleteEntity({
+        ownerDataDir: ownerDir,
+        kind: 'person',
+        slug: 'alice-founder',
+        precondition: { ifBodyEquals: current },
+      })
+      expect(good).toMatchObject({ deleted: true, conflict: false })
+      await expect(fs.readFile(first.path, 'utf8')).rejects.toThrow()
+    })
+
+    test('absent target → deleted:true (idempotent end state)', async () => {
+      const out = await deleteEntity({ ownerDataDir: ownerDir, kind: 'person', slug: 'never-existed' })
+      expect(out).toMatchObject({ deleted: true, conflict: false })
+    })
+
+    test('invalid kind / slug are rejected', async () => {
+      await expect(
+        deleteEntity({ ownerDataDir: ownerDir, kind: 'bogus' as 'person', slug: 'x' }),
+      ).rejects.toThrow(/unknown kind/)
+      await expect(
+        deleteEntity({ ownerDataDir: ownerDir, kind: 'person', slug: '../escape' }),
+      ).rejects.toThrow(/slug must match/)
+    })
+
+    test('a symlinked leaf is rejected (never followed)', async () => {
+      const dir = resolve(ownerDir, 'entities', 'people')
+      await fs.mkdir(dir, { recursive: true })
+      const outside = join(ownerDir, 'outside-secret.md')
+      await fs.writeFile(outside, 'secret')
+      await fs.symlink(outside, join(dir, 'linky.md'))
+      await expect(
+        deleteEntity({ ownerDataDir: ownerDir, kind: 'person', slug: 'linky' }),
+      ).rejects.toThrow(/symlink/)
+      // The outside file is untouched.
+      expect(await fs.readFile(outside, 'utf8')).toBe('secret')
+    })
+
+    test('a same-key write and delete serialize (no interleave)', async () => {
+      await writeEntity(aliceInput())
+      const order: string[] = []
+      const upd = aliceInput()
+      upd.body.compiledTruth = '## State\n\nUpdated.\n'
+      // Fire a write and a delete on the SAME key concurrently; the shared per-key
+      // lock serializes them — neither observes a half-written state.
+      const w = writeEntity(upd).then(() => order.push('write'))
+      const d = deleteEntity({ ownerDataDir: ownerDir, kind: 'person', slug: 'alice-founder' }).then(
+        (r) => order.push(`delete:${r.deleted}`),
+      )
+      await Promise.all([w, d])
+      expect(order.length).toBe(2) // both completed without throwing
     })
   })
 
