@@ -2,8 +2,8 @@
  * @neutronai/cores-sdk — Core manifest (Zod schema for the `"neutron"` block
  * in a Core's `package.json`).
  *
- * This is the contract first-party Cores (Topline `dtc-analytics`, future
- * Acme/Northwind analytics, etc.) build against BEFORE the full Cores
+ * This is the contract first-party Cores (the reference `dtc-analytics`
+ * Core, future Acme/Northwind analytics, etc.) build against BEFORE the full Cores
  * runtime ships in P3 (engineering-plan § B.P3). The shape is deliberately
  * narrow — only what a Core author needs to declare at install time.
  *
@@ -267,8 +267,8 @@ export type BillingMeter = BillingHookDef
  * `core-sdk/types.ts:LinkedSourceDef` so a manifest passes both
  * validators.
  *
- * `kind` is a free-form string per § A.3.5 — Topline's `dtc-analytics`
- * declares `shopify`, `google-ads`, `meta-ads`, `amazon-ads`, etc.
+ * `kind` is a free-form string per § A.3.5 — the reference `dtc-analytics`
+ * Core declares `shopify`, `google-ads`, `meta-ads`, `amazon-ads`, etc.
  * `core-sdk`'s closed `LinkedSourceKind` enum is informational only
  * (used by built-in Cores like `gmail`); the validator accepts any
  * non-empty string so first-party Cores can integrate with novel

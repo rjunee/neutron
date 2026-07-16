@@ -1,8 +1,8 @@
 /**
  * @neutronai/cores-sdk — public barrel.
  *
- * Stable contract first-party Cores (Topline `dtc-analytics`, future
- * Acme/Northwind analytics, etc.) build against BEFORE the full
+ * Stable contract first-party Cores (the reference `dtc-analytics`
+ * Core, future Acme/Northwind analytics, etc.) build against BEFORE the full
  * Cores runtime ships in P3. Everything exported here is a stable
  * v1 surface; the runtime swap-in happens in P3 with no caller-side
  * code changes (the dev-mode stubs are replaced with platform-backed

@@ -1,6 +1,6 @@
 # `@neutron/cores-sdk` — Contract & Migration Guide
 
-This is the contract first-party Cores (Topline `dtc-analytics`, future
+This is the contract first-party Cores (the reference `dtc-analytics` Core, future
 Acme/Northwind analytics, etc.) build against **before** the full
 Cores runtime ships in P3. The interfaces here are deliberately stable
 v1 — when P3 lands, dev-mode stubs become platform-backed
@@ -161,7 +161,7 @@ The `validator` is the only thing that changes — the `mountCoreRoutes(app, {va
 
 ## How to write a first-party Core
 
-Walkthrough using a hypothetical `dtc-analytics` Core (Topline's actual use case). All paths are Core-relative.
+Walkthrough using a hypothetical `dtc-analytics` Core (the reference first-party analytics use case). All paths are Core-relative.
 
 ### 1. Declare the manifest in your `package.json`
 
@@ -365,7 +365,7 @@ Both factories require `NEUTRON_DEV_AUTH=1` in the env (or `bypass_env_guard: tr
 
 ## Per-Core data lifecycle (engineering-plan § A.3)
 
-Per the locked decision: per-Core data lives in named tables in `project.db` by default, with a separate `<core>.db` only when a Core needs isolated lifecycle. Topline's `dtc-analytics` wants an isolated DuckDB analytical store, so it ships:
+Per the locked decision: per-Core data lives in named tables in `project.db` by default, with a separate `<core>.db` only when a Core needs isolated lifecycle. The reference `dtc-analytics` Core wants an isolated DuckDB analytical store, so it ships:
 
 - `project.db` — Neutron-standard project state (users, sessions, OAuth tokens encrypted, audit log) — owned by the platform
 - `dtc-analytics.db` — DuckDB analytical store (raw + materialized CM tables) — owned by the Core
@@ -467,7 +467,7 @@ the former closed-union-vs-open-regex split (and the casts that bridged them at
 ## Out of scope (delegated to other sprints/phases)
 
 - Real platform-backed implementations beyond stubs (P3)
-- The `dtc-analytics` Core itself (Topline builds against this SDK; separate sprint)
+- The `dtc-analytics` Core itself (the reference first-party Core builds against this SDK; separate sprint)
 - Cores marketplace registry, dependency resolver, billing meter aggregation (P3+)
 - Multi-Core per-project runtime — Cores running side-by-side in one project (P3+)
 - Telegram-channel Core surface mounting (P3+)

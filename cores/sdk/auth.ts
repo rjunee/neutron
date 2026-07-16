@@ -409,7 +409,7 @@ export function buildPlatformJwtValidator(
  * process env. Cores that accidentally instantiate this in a prod
  * config will fail loud at boot rather than quietly skipping auth.
  *
- * Typical use (Topline `dtc-analytics` dev boot):
+ * Typical use (`dtc-analytics` dev boot):
  *
  * ```ts
  * const validator = process.env.NODE_ENV === 'production'

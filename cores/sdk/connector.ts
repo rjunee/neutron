@@ -2,7 +2,7 @@
  * @neutronai/cores-sdk — Connector interface.
  *
  * A Core implements a `Connector` per third-party data source it
- * integrates with (Topline `dtc-analytics` ships `ShopifyConnector`,
+ * integrates with (the reference `dtc-analytics` Core ships `ShopifyConnector`,
  * `GoogleAdsConnector`, etc.). The platform doesn't dictate transport
  * or pagination — every Connector composes the same shape so the Cores
  * runtime (P3) can drive them uniformly: schedule fetches, persist
