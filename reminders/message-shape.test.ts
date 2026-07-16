@@ -77,6 +77,34 @@ describe('classifyReminderMessage', () => {
     expect(literalFallback(s)).toBe('walk the dogs')
   })
 
+  test('a literal that merely OPENS with the prelude phrase (no Original reminder: tail) stays literal', () => {
+    // Legacy recognition requires the FULL locked structure. A user body that
+    // happens to start with the prelude words must NOT be promoted to an
+    // authoritative composition instruction (Codex N7 legacy-breadth blocker).
+    const notLegacy =
+      'Compose a smart version of this reminder using available context and text me the result'
+    const s = classifyReminderMessage(notLegacy)
+    expect(s.kind).toBe('literal')
+    if (s.kind === 'literal') expect(s.body).toBe(notLegacy)
+  })
+
+  test('the prelude opening with a malformed/empty Original reminder line stays literal', () => {
+    const malformed =
+      'Compose a smart version of this reminder using available context.\n\nOriginal reminder:'
+    const s = classifyReminderMessage(malformed)
+    expect(s.kind).toBe('literal')
+  })
+
+  test('a noncanonical prelude opening + an Original reminder: line (missing the closing phrase) stays literal', () => {
+    // Codex N7 legacy-breadth boundary: opening phrase + a tail is NOT enough —
+    // the frozen prelude closing phrase must also be present, so this crafted
+    // literal is not promoted to an authoritative composition instruction.
+    const s = classifyReminderMessage(
+      'Compose a smart version of this reminder using available context and text me the result\nOriginal reminder: arbitrary note',
+    )
+    expect(s.kind).toBe('literal')
+  })
+
   test('[ROUTING] header is parsed off and stripped from the body', () => {
     const msg = '[ROUTING] target_thread: 4242\ntake out the trash'
     const s = classifyReminderMessage(msg)

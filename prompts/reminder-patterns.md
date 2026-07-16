@@ -18,7 +18,7 @@ These patterns work on top of `prompts/reminder-agent-base.md` (voice, rules, ou
 |---|---|---|---|
 | [nag-until-done](#pattern-nag-until-done) | Recurring | Fires until disabled; nudges toward a file-detectable completion | Trade-show planning, book drafts, deal closures, contractor bids |
 | [escalating-urgency](#pattern-escalating-urgency) | Recurring | Fires until disabled; tone escalates as the deadline nears | Tax filing, passport renewal, contract signing |
-| [daily-countdown](#pattern-daily-countdown) | Daily | Naturally winds down once the event passes | Anniversary prep, trip departure, product launch |
+| [daily-countdown](#pattern-daily-countdown) | Daily | Recurring until disabled; once the event passes it nudges to turn it off | Anniversary prep, trip departure, product launch |
 | [check-in-cadence](#pattern-check-in-cadence) | Recurring | Fires until disabled; asks a habit question each time | Habit formation, therapy homework, weekly review |
 | [context-aware-one-shot](#pattern-context-aware-one-shot) | One-shot | Auto-deletes after firing once | Meeting prep, trip day-of, milestone nudges |
 
@@ -109,7 +109,7 @@ Compose the nudge:
 
 ## Pattern: daily-countdown
 
-**When to use:** a future event with a fixed date where each day's nudge is a distinct piece of prep work leading up to it. Simpler than `escalating-urgency` because there's no "done" check — the reminder just naturally winds down when the event passes.
+**When to use:** a future event with a fixed date where each day's nudge is a distinct piece of prep work leading up to it. Simpler than `escalating-urgency` because there's no "done" check. Like the other recurring patterns it fires until disabled — the fire-time agent only composes and cannot retire the reminder — so once the event passes it nudges the user to turn it off.
 
 **Required inputs:**
 - `TAG`
@@ -137,7 +137,7 @@ Compose the nudge:
 1. Compute offset = today - EVENT_DATE (negative = days until) from the current date you were given.
 2. If today's offset matches an entry above, compose that item as a short nudge.
 3. If today's offset falls between entries, use the most recent earlier entry and frame it around the days remaining.
-4. If the event has already passed, compose a single "FILL:<event> was recently, how'd it go?" line.
+4. If the event has already passed, compose a single line noting FILL:<event> is done and that this reminder can be turned off now (it keeps firing daily until disabled).
 5. Always produce a message — delivery is automatic and you cannot skip a day. Follow the base voice rules: short, no em dashes, no preamble.
 ```
 

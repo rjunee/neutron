@@ -50,12 +50,23 @@ const ROUTING_RE = /^\s*\[ROUTING\]\s*target_thread:\s*(\S+)\s*$/i
 const SMART_RE = /^\s*\[smart\]\s*/i
 // BACKWARD-COMPAT: reminders persisted BEFORE the `[smart]` sentinel was added
 // to the composer (`smart-wrap.ts`) open directly with the locked smart-wrap
-// prelude and carry NO sentinel. Recognize that distinctive prelude opening so
-// a row stored under the old format is still classified as `smart-wrap` (and
-// degrades via its `Original reminder:` tail) instead of falling through to
-// `literal` and posting the whole composition instruction. Keep this in sync
-// with `SMART_WRAP_PRELUDE`'s opening line in `cores/free/reminders/src/smart-wrap.ts`.
-const LEGACY_SMART_PRELUDE_RE = /^\s*Compose a smart version of this reminder using available context/i
+// prelude and carry NO sentinel. Recognize the FULL distinctive legacy structure
+// so such a row is still classified as `smart-wrap` (degrading via its tail)
+// instead of falling through to `literal` and posting the whole instruction.
+// Recognition requires ALL THREE frozen markers the old composer always wrote,
+// so a plain user literal that merely opens with the prelude phrase is NOT
+// promoted into an authoritative composition instruction:
+//   1. the prelude OPENING phrase (first line), and
+//   2. the prelude's distinctive CLOSING phrase, present across every historical
+//      prelude variant (weather-shell, owner-home-path, and path-free), and
+//   3. the trailing `Original reminder:` payload with a non-empty body.
+// These are FROZEN legacy markers (they detect old persisted bytes) — they do
+// not track the current `SMART_WRAP_PRELUDE`, which now carries the `[smart]`
+// sentinel and is matched by `SMART_RE` above before this ever runs.
+const LEGACY_SMART_PRELUDE_OPEN_RE =
+  /^\s*Compose a smart version of this reminder using available context/i
+const LEGACY_SMART_PRELUDE_CLOSE_RE = /deliver the original message verbatim\b/i
+const LEGACY_ORIGINAL_TAIL_RE = /(?:^|\n)Original reminder:\s*\S/i
 // Anchored to a SINGLE line (no `/m`): the shape is decided from the first
 // post-routing line only. A `PATTERN:` line buried later in the body — e.g.
 // inside a smart-wrap "Original reminder: ..." tail carrying arbitrary user
@@ -110,9 +121,16 @@ export function classifyReminderMessage(message: string): ReminderShape {
     }
   }
 
-  // Legacy (pre-sentinel) smart-wrap row: the body opens with the locked prelude
-  // and has no `[smart]` to strip, so the whole body IS the instruction.
-  if (LEGACY_SMART_PRELUDE_RE.test(firstLine)) {
+  // Legacy (pre-sentinel) smart-wrap row: the body opens with the locked prelude,
+  // carries the prelude's distinctive closing phrase, AND ends with the composer's
+  // `Original reminder:` tail — with no `[smart]` to strip, so the whole body IS
+  // the instruction. All three frozen markers are required so a plain literal that
+  // merely opens with the prelude phrase stays literal.
+  if (
+    LEGACY_SMART_PRELUDE_OPEN_RE.test(firstLine) &&
+    LEGACY_SMART_PRELUDE_CLOSE_RE.test(trimmed) &&
+    LEGACY_ORIGINAL_TAIL_RE.test(trimmed)
+  ) {
     return {
       kind: 'smart-wrap',
       instruction: trimmed,
