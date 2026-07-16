@@ -77,7 +77,7 @@ describe('install lifecycle — Calendar Core happy path', () => {
     const coreDir = copyCalendarIntoFixture(env.tmp)
     const prompter = new GoogleOauthPrompter('ya29.test-access')
     const result = await installCore({
-      project_slug: asOwnerHandle('owner_a'),
+      owner_slug: asOwnerHandle('owner_a'),
       coreDir,
       projectDb: env.projectDb,
       dataDir: env.dataDir,
@@ -99,7 +99,7 @@ describe('install lifecycle — Calendar Core happy path', () => {
 
     // Exactly one audit `put` row — for the OAuth token.
     const rows = await env.audit.list({
-      project_slug: asOwnerHandle('owner_a'),
+      owner_slug: asOwnerHandle('owner_a'),
       core_slug: CORE_SLUG,
     })
     const puts = rows.filter((r) => r.op === 'put')
@@ -121,7 +121,7 @@ describe('install lifecycle — Calendar Core happy path', () => {
     const coreDir = copyCalendarIntoFixture(env.tmp)
     const prompter = new GoogleOauthPrompter()
     await installCore({
-      project_slug: asOwnerHandle('owner_b'),
+      owner_slug: asOwnerHandle('owner_b'),
       coreDir,
       projectDb: env.projectDb,
       dataDir: env.dataDir,
@@ -132,7 +132,7 @@ describe('install lifecycle — Calendar Core happy path', () => {
     })
 
     await uninstallCore({
-      project_slug: asOwnerHandle('owner_b'),
+      owner_slug: asOwnerHandle('owner_b'),
       core_slug: CORE_SLUG,
       projectDb: env.projectDb,
       dataDir: env.dataDir,
@@ -154,7 +154,7 @@ describe('install lifecycle — Calendar Core happy path', () => {
 
     // Audit log includes the delete row.
     const rows = await env.audit.list({
-      project_slug: asOwnerHandle('owner_b'),
+      owner_slug: asOwnerHandle('owner_b'),
       core_slug: CORE_SLUG,
     })
     const deletes = rows.filter((r) => r.op === 'delete')
@@ -170,7 +170,7 @@ describe('install lifecycle — Calendar Core OAuth gating', () => {
     let caught: unknown
     try {
       await installCore({
-        project_slug: asOwnerHandle('owner_c'),
+        owner_slug: asOwnerHandle('owner_c'),
         coreDir,
         projectDb: env.projectDb,
         dataDir: env.dataDir,

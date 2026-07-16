@@ -165,7 +165,7 @@ describe('buildTools — capability-gated dispatch', () => {
     // writes a `tool_call outcome=ok` row, proving the capability
     // guard ran.
     const auditRows = await audit.list({
-      project_slug: OWNER,
+      owner_slug: OWNER,
       core_slug: 'codegen_core',
     })
     const successRows = auditRows.filter((r) => r.outcome === 'ok')
@@ -615,7 +615,7 @@ describe('buildTools — capability-gated dispatch', () => {
     // hit the not-found branch — audit logs that as `error`, not
     // `capability_denied`).
     const denied = await audit.listDenied({
-      project_slug: OWNER,
+      owner_slug: OWNER,
       core_slug: 'codegen_core',
     })
     const labels = new Set(denied.map((r) => r.label))
@@ -633,7 +633,7 @@ describe('buildTools — capability-gated dispatch', () => {
     const guard = new CapabilityGuard({
       manifest: m,
       core_slug: 'codegen_core',
-      project_slug: OWNER,
+      owner_slug: OWNER,
       audit,
     })
 

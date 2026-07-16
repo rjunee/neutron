@@ -16,7 +16,7 @@ import { parseJsonColumn } from '@neutronai/persistence/index.ts'
 export type CoreDataLayout = 'tables' | 'sidecar'
 
 export interface CoreInstallationRecord {
-  project_slug: string
+  owner_slug: string
   core_slug: string
   package_name: string
   package_version: string
@@ -33,7 +33,7 @@ export interface CoreInstallationRecord {
 }
 
 export interface RecordInstallInput {
-  project_slug: string
+  owner_slug: string
   core_slug: string
   package_name: string
   package_version: string
@@ -43,7 +43,7 @@ export interface RecordInstallInput {
 }
 
 export interface UpdateVersionInput {
-  project_slug: string
+  owner_slug: string
   core_slug: string
   package_version: string
   capabilities: string[]
@@ -83,6 +83,8 @@ interface CoreGlobalInstallationRow {
 }
 
 interface CoreInstallationRow {
+  // SQL column name remains `project_slug`; value is the owner/instance slug
+  // (N4: TS-side domain identifiers are `owner_slug`, the frozen column is not).
   project_slug: string
   core_slug: string
   package_name: string
@@ -114,12 +116,12 @@ export class CoreInstallationsStore {
   async record(input: RecordInstallInput): Promise<CoreInstallationRecord> {
     if (input.data_layout === 'sidecar' && (input.sidecar_db_path === undefined || input.sidecar_db_path === null)) {
       throw new Error(
-        `core_installations.record: data_layout='sidecar' requires sidecar_db_path (project=${input.project_slug} core=${input.core_slug})`,
+        `core_installations.record: data_layout='sidecar' requires sidecar_db_path (project=${input.owner_slug} core=${input.core_slug})`,
       )
     }
     if (input.data_layout === 'tables' && input.sidecar_db_path !== undefined) {
       throw new Error(
-        `core_installations.record: data_layout='tables' must NOT supply sidecar_db_path (project=${input.project_slug} core=${input.core_slug})`,
+        `core_installations.record: data_layout='tables' must NOT supply sidecar_db_path (project=${input.owner_slug} core=${input.core_slug})`,
       )
     }
     const ts = this.now()
@@ -144,7 +146,7 @@ export class CoreInstallationsStore {
          stopped_at = NULL,
          uninstalled_at = NULL`,
       [
-        input.project_slug,
+        input.owner_slug,
         input.core_slug,
         input.package_name,
         input.package_version,
@@ -154,17 +156,17 @@ export class CoreInstallationsStore {
         ts,
       ],
     )
-    const got = await this.get(input.project_slug, input.core_slug)
+    const got = await this.get(input.owner_slug, input.core_slug)
     if (got === null) {
       // Defensive — the row we just inserted should always read back.
       throw new Error(
-        `core_installations.record: post-insert read returned null for project=${input.project_slug} core=${input.core_slug}`,
+        `core_installations.record: post-insert read returned null for project=${input.owner_slug} core=${input.core_slug}`,
       )
     }
     return got
   }
 
-  async get(project_slug: string, core_slug: string): Promise<CoreInstallationRecord | null> {
+  async get(owner_slug: string, core_slug: string): Promise<CoreInstallationRecord | null> {
     const row = this.db
       .get<CoreInstallationRow, [string, string]>(
         `SELECT project_slug, core_slug, package_name, package_version,
@@ -172,12 +174,12 @@ export class CoreInstallationsStore {
                 installed_at, configured_at, started_at, stopped_at, uninstalled_at
            FROM core_installations
           WHERE project_slug = ? AND core_slug = ?`,
-        [project_slug, core_slug],
+        [owner_slug, core_slug],
       )
     return row === null ? null : rowToRecord(row)
   }
 
-  async listForProject(project_slug: string): Promise<CoreInstallationRecord[]> {
+  async listForProject(owner_slug: string): Promise<CoreInstallationRecord[]> {
     const rows = this.db
       .all<CoreInstallationRow, [string]>(
         `SELECT project_slug, core_slug, package_name, package_version,
@@ -185,45 +187,45 @@ export class CoreInstallationsStore {
                 installed_at, configured_at, started_at, stopped_at, uninstalled_at
            FROM core_installations
           WHERE project_slug = ? ORDER BY installed_at`,
-        [project_slug],
+        [owner_slug],
       )
     return rows.map(rowToRecord)
   }
 
-  async listLive(project_slug: string): Promise<CoreInstallationRecord[]> {
-    const all = await this.listForProject(project_slug)
+  async listLive(owner_slug: string): Promise<CoreInstallationRecord[]> {
+    const all = await this.listForProject(owner_slug)
     return all.filter((r) => r.uninstalled_at === null)
   }
 
-  async markConfigured(project_slug: string, core_slug: string): Promise<void> {
+  async markConfigured(owner_slug: string, core_slug: string): Promise<void> {
     await this.db.run(
       `UPDATE core_installations SET configured_at = ?
         WHERE project_slug = ? AND core_slug = ? AND uninstalled_at IS NULL`,
-      [this.now(), project_slug, core_slug],
+      [this.now(), owner_slug, core_slug],
     )
   }
 
-  async markStarted(project_slug: string, core_slug: string): Promise<void> {
+  async markStarted(owner_slug: string, core_slug: string): Promise<void> {
     await this.db.run(
       `UPDATE core_installations SET started_at = ?, stopped_at = NULL
         WHERE project_slug = ? AND core_slug = ? AND uninstalled_at IS NULL`,
-      [this.now(), project_slug, core_slug],
+      [this.now(), owner_slug, core_slug],
     )
   }
 
-  async markStopped(project_slug: string, core_slug: string): Promise<void> {
+  async markStopped(owner_slug: string, core_slug: string): Promise<void> {
     await this.db.run(
       `UPDATE core_installations SET stopped_at = ?
         WHERE project_slug = ? AND core_slug = ? AND uninstalled_at IS NULL`,
-      [this.now(), project_slug, core_slug],
+      [this.now(), owner_slug, core_slug],
     )
   }
 
-  async markUninstalled(project_slug: string, core_slug: string): Promise<void> {
+  async markUninstalled(owner_slug: string, core_slug: string): Promise<void> {
     await this.db.run(
       `UPDATE core_installations SET uninstalled_at = ?, stopped_at = COALESCE(stopped_at, ?)
         WHERE project_slug = ? AND core_slug = ?`,
-      [this.now(), this.now(), project_slug, core_slug],
+      [this.now(), this.now(), owner_slug, core_slug],
     )
   }
 
@@ -236,7 +238,7 @@ export class CoreInstallationsStore {
       [
         input.package_version,
         JSON.stringify(input.capabilities),
-        input.project_slug,
+        input.owner_slug,
         input.core_slug,
       ],
     )
@@ -347,7 +349,7 @@ function rowToRecord(row: CoreInstallationRow): CoreInstallationRecord {
     )
   }
   return {
-    project_slug: row.project_slug,
+    owner_slug: row.project_slug,
     core_slug: row.core_slug,
     package_name: row.package_name,
     package_version: row.package_version,

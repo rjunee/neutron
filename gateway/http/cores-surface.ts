@@ -266,7 +266,7 @@ async function handleInstall(
   // alongside the install confirmation rather than letting the user
   // wonder why the launcher tile is still grey.
   await installations.record({
-    project_slug,
+    owner_slug: project_slug,
     core_slug: core.slug,
     package_name: core.package_name,
     package_version: core.package_version,

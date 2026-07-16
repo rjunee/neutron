@@ -181,7 +181,7 @@ export async function installBundledCores(
       let result: InstallCoreResult | null = null
       try {
         result = await installCore({
-          project_slug: asOwnerHandle(input.project_slug),
+          owner_slug: asOwnerHandle(input.project_slug),
           coreDir: core.coreDir,
           projectDb: input.projectDb,
           dataDir: input.dataDir,
@@ -573,7 +573,7 @@ export async function reinstallFailedCore(
     let result: InstallCoreResult
     try {
       result = await installCore({
-        project_slug: asOwnerHandle(input.project_slug),
+        owner_slug: asOwnerHandle(input.project_slug),
         coreDir: core.coreDir,
         projectDb: input.projectDb,
         dataDir: input.dataDir,
@@ -743,7 +743,7 @@ async function rehydrateExistingInstall(input: {
   }
   const { layout } = decideDataLayout(core.manifest.capabilities, core.slug)
   const namespace = allocateCoreNamespace({
-    project_slug: input.project_slug,
+    owner_slug: input.project_slug,
     slug: core.slug,
     manifest_capabilities: core.manifest.capabilities,
     dataDir: input.dataDir,
@@ -751,7 +751,7 @@ async function rehydrateExistingInstall(input: {
   })
   const auditedStore = buildAuditedSecretsStore(input.secretsStore, {
     audit: input.audit,
-    project_slug: input.project_slug,
+    owner_slug: input.project_slug,
     core_slug: core.slug,
   })
   const accessor = buildSecretsAccessor(

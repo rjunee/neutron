@@ -82,7 +82,7 @@ describe('buildTools — capability-gated dispatch', () => {
     const { tools } = makeTools()
     await tools.drive_upload({ name: 'a.txt', mime_type: 'text/plain', content: 'x' })
     await tools.docs_create({ title: 'D' })
-    const rows = await audit.list({ project_slug: OWNER, core_slug: 'google_workspace_core' })
+    const rows = await audit.list({ owner_slug: OWNER, core_slug: 'google_workspace_core' })
     const ok = rows.filter((r) => r.outcome === 'ok')
     const toolNames = new Set(ok.map((r) => r.label))
     expect(toolNames.has('drive_upload')).toBe(true)

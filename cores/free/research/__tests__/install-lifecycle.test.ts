@@ -56,7 +56,7 @@ describe('install lifecycle — Research Core round-trip', () => {
     const coreDir = copyResearchIntoFixture(env.tmp)
     const prompter = new NoopPrompter()
     const result = await installCore({
-      project_slug: asOwnerHandle('owner_a'),
+      owner_slug: asOwnerHandle('owner_a'),
       coreDir,
       projectDb: env.projectDb,
       dataDir: env.dataDir,
@@ -80,7 +80,7 @@ describe('install lifecycle — Research Core round-trip', () => {
 
     // Research declares zero secrets — no secrets prompts must fire.
     const rows = await env.audit.list({
-      project_slug: asOwnerHandle('owner_a'),
+      owner_slug: asOwnerHandle('owner_a'),
       core_slug: CORE_SLUG,
     })
     expect(rows.filter((r) => r.op === 'put')).toHaveLength(0)
@@ -90,7 +90,7 @@ describe('install lifecycle — Research Core round-trip', () => {
     const coreDir = copyResearchIntoFixture(env.tmp)
     const prompter = new NoopPrompter()
     const installed = await installCore({
-      project_slug: asOwnerHandle('owner_b'),
+      owner_slug: asOwnerHandle('owner_b'),
       coreDir,
       projectDb: env.projectDb,
       dataDir: env.dataDir,
@@ -104,7 +104,7 @@ describe('install lifecycle — Research Core round-trip', () => {
     }
 
     await uninstallCore({
-      project_slug: asOwnerHandle('owner_b'),
+      owner_slug: asOwnerHandle('owner_b'),
       core_slug: CORE_SLUG,
       projectDb: env.projectDb,
       dataDir: env.dataDir,

@@ -34,42 +34,46 @@ afterEach(() => {
 
 test('record + list round-trip', async () => {
   await audit.record({
-    project_slug: 't1', core_slug: 'tasks', op: 'get',
+    owner_slug: 't1', core_slug: 'tasks', op: 'get',
     kind: 'oauth_token', label: 'google', outcome: 'ok',
   })
   now = 2_000_100
   await audit.record({
-    project_slug: 't1', core_slug: 'tasks', op: 'put',
+    owner_slug: 't1', core_slug: 'tasks', op: 'put',
     kind: 'byo_api_key', label: 'shopify', outcome: 'capability_denied',
     error: 'core did not declare secret',
   })
-  const rows = await audit.list({ project_slug: 't1', core_slug: 'tasks' })
+  const rows = await audit.list({ owner_slug: 't1', core_slug: 'tasks' })
   expect(rows.length).toBe(2)
   expect(rows[0]?.ts).toBe(2_000_100)
   expect(rows[0]?.outcome).toBe('capability_denied')
   expect(rows[0]?.error).toBe('core did not declare secret')
   expect(rows[1]?.outcome).toBe('ok')
+  // N4 boundary: the `project_slug` SQL column surfaces on the domain entry as
+  // the renamed `owner_slug`; the legacy key must be absent.
+  expect(rows[0]?.owner_slug).toBe('t1')
+  expect((rows[0] as unknown as Record<string, unknown>)['project_slug']).toBeUndefined()
 })
 
 test('listDenied filters non-ok rows', async () => {
-  await audit.record({ project_slug: 't1', core_slug: 'a', op: 'get',
+  await audit.record({ owner_slug: 't1', core_slug: 'a', op: 'get',
     kind: 'oauth_token', label: 'google', outcome: 'ok' })
-  await audit.record({ project_slug: 't1', core_slug: 'a', op: 'get',
+  await audit.record({ owner_slug: 't1', core_slug: 'a', op: 'get',
     kind: 'byo_api_key', label: 'stripe', outcome: 'capability_denied' })
-  await audit.record({ project_slug: 't1', core_slug: 'a', op: 'get',
+  await audit.record({ owner_slug: 't1', core_slug: 'a', op: 'get',
     kind: 'byo_api_key', label: 'shopify', outcome: 'not_found' })
 
-  const denied = await audit.listDenied({ project_slug: 't1' })
+  const denied = await audit.listDenied({ owner_slug: 't1' })
   expect(denied).toHaveLength(1)
   expect(denied[0]?.label).toBe('stripe')
 })
 
 test('recordToolCall writes op=tool_call kind=tool', async () => {
   await audit.recordToolCall({
-    project_slug: 't1', core_slug: 'tasks', tool_name: 'list_tasks',
+    owner_slug: 't1', core_slug: 'tasks', tool_name: 'list_tasks',
     outcome: 'capability_denied', error: 'no manifest entry',
   })
-  const rows = await audit.list({ project_slug: 't1' })
+  const rows = await audit.list({ owner_slug: 't1' })
   expect(rows[0]?.op).toBe('tool_call')
   expect(rows[0]?.kind).toBe('tool')
   expect(rows[0]?.label).toBe('list_tasks')
@@ -77,11 +81,11 @@ test('recordToolCall writes op=tool_call kind=tool', async () => {
 })
 
 test('list filters by project when no core_slug supplied', async () => {
-  await audit.record({ project_slug: 't1', core_slug: 'a', op: 'get',
+  await audit.record({ owner_slug: 't1', core_slug: 'a', op: 'get',
     kind: 'oauth_token', label: 'google', outcome: 'ok' })
-  await audit.record({ project_slug: 't2', core_slug: 'a', op: 'get',
+  await audit.record({ owner_slug: 't2', core_slug: 'a', op: 'get',
     kind: 'oauth_token', label: 'google', outcome: 'ok' })
-  const rows = await audit.list({ project_slug: 't1' })
+  const rows = await audit.list({ owner_slug: 't1' })
   expect(rows).toHaveLength(1)
 })
 
@@ -129,10 +133,10 @@ class FakePlatformStore implements PlatformSecretsStore {
 test('buildAuditedSecretsStore writes ok-row on get', async () => {
   const store = new FakePlatformStore()
   await store.put({ owner_handle: 't1', kind: 'oauth_token', label: 'google', plaintext: 'tok' })
-  const wrapped = buildAuditedSecretsStore(store, { audit, project_slug: 't1', core_slug: 'tasks' })
+  const wrapped = buildAuditedSecretsStore(store, { audit, owner_slug: 't1', core_slug: 'tasks' })
   const got = await wrapped.get({ owner_handle: 't1', kind: 'oauth_token', label: 'google' })
   expect(got).toBe('tok')
-  const rows = await audit.list({ project_slug: 't1', core_slug: 'tasks' })
+  const rows = await audit.list({ owner_slug: 't1', core_slug: 'tasks' })
   // 1 row from the put (which wasn't audited — direct call) + 1 row from get
   // Actually: only the wrapped get is audited.
   expect(rows.some((r) => r.op === 'get' && r.outcome === 'ok' && r.label === 'google')).toBe(true)
@@ -140,9 +144,9 @@ test('buildAuditedSecretsStore writes ok-row on get', async () => {
 
 test('buildAuditedSecretsStore writes not_found on missing', async () => {
   const store = new FakePlatformStore()
-  const wrapped = buildAuditedSecretsStore(store, { audit, project_slug: 't1', core_slug: 'tasks' })
+  const wrapped = buildAuditedSecretsStore(store, { audit, owner_slug: 't1', core_slug: 'tasks' })
   expect(await wrapped.get({ owner_handle: 't1', kind: 'oauth_token', label: 'google' })).toBeNull()
-  const rows = await audit.list({ project_slug: 't1', core_slug: 'tasks' })
+  const rows = await audit.list({ owner_slug: 't1', core_slug: 'tasks' })
   expect(rows[0]?.op).toBe('get')
   expect(rows[0]?.outcome).toBe('not_found')
 })
@@ -150,28 +154,28 @@ test('buildAuditedSecretsStore writes not_found on missing', async () => {
 test('buildAuditedSecretsStore writes error row + rethrows', async () => {
   const store = new FakePlatformStore()
   store.failNext = true
-  const wrapped = buildAuditedSecretsStore(store, { audit, project_slug: 't1', core_slug: 'tasks' })
+  const wrapped = buildAuditedSecretsStore(store, { audit, owner_slug: 't1', core_slug: 'tasks' })
   await expect(wrapped.get({ owner_handle: 't1', kind: 'oauth_token', label: 'google' })).rejects.toThrow('boom')
-  const rows = await audit.list({ project_slug: 't1', core_slug: 'tasks' })
+  const rows = await audit.list({ owner_slug: 't1', core_slug: 'tasks' })
   expect(rows[0]?.outcome).toBe('error')
   expect(rows[0]?.error).toBe('boom')
 })
 
 test('buildAuditedSecretsStore audits put + rotate', async () => {
   const store = new FakePlatformStore()
-  const wrapped = buildAuditedSecretsStore(store, { audit, project_slug: 't1', core_slug: 'tasks' })
+  const wrapped = buildAuditedSecretsStore(store, { audit, owner_slug: 't1', core_slug: 'tasks' })
   await wrapped.put({ owner_handle: 't1', kind: 'oauth_token', label: 'google', plaintext: 'tok' })
   await wrapped.rotate?.('id-1', 'tok2')
-  const rows = await audit.list({ project_slug: 't1' })
+  const rows = await audit.list({ owner_slug: 't1' })
   expect(rows.find((r) => r.op === 'put' && r.outcome === 'ok')).toBeDefined()
   expect(rows.find((r) => r.op === 'rotate' && r.outcome === 'ok')).toBeDefined()
 })
 
 test('buildAuditedSecretsStore audits list call', async () => {
   const store = new FakePlatformStore()
-  const wrapped = buildAuditedSecretsStore(store, { audit, project_slug: 't1', core_slug: 'tasks' })
+  const wrapped = buildAuditedSecretsStore(store, { audit, owner_slug: 't1', core_slug: 'tasks' })
   await wrapped.list({ owner_handle: 't1' })
-  const rows = await audit.list({ project_slug: 't1' })
+  const rows = await audit.list({ owner_slug: 't1' })
   expect(rows[0]?.op).toBe('list')
   expect(rows[0]?.outcome).toBe('ok')
   expect(rows[0]?.label).toBe('*')
@@ -182,38 +186,38 @@ test('buildAuditedSecretsStore audits list call', async () => {
 test('record stamps the log default author_id', async () => {
   const ownerAudit = new SecretAuditLog({ db: projectDb, now: () => now, author_id: 'owner' })
   await ownerAudit.record({
-    project_slug: 't1', core_slug: 'tasks', op: 'get',
+    owner_slug: 't1', core_slug: 'tasks', op: 'get',
     kind: 'oauth_token', label: 'google', outcome: 'ok',
   })
-  const rows = await ownerAudit.list({ project_slug: 't1' })
+  const rows = await ownerAudit.list({ owner_slug: 't1' })
   expect(rows[0]?.author_id).toBe('owner')
 })
 
 test('per-call author_id overrides the log default', async () => {
   const ownerAudit = new SecretAuditLog({ db: projectDb, now: () => now, author_id: 'owner' })
   await ownerAudit.record({
-    project_slug: 't1', core_slug: 'tasks', op: 'get',
+    owner_slug: 't1', core_slug: 'tasks', op: 'get',
     kind: 'oauth_token', label: 'google', outcome: 'ok', author_id: 'alice',
   })
-  const rows = await ownerAudit.list({ project_slug: 't1' })
+  const rows = await ownerAudit.list({ owner_slug: 't1' })
   expect(rows[0]?.author_id).toBe('alice')
 })
 
 test('author_id is null when neither default nor per-call author is set', async () => {
   await audit.record({
-    project_slug: 't1', core_slug: 'tasks', op: 'get',
+    owner_slug: 't1', core_slug: 'tasks', op: 'get',
     kind: 'oauth_token', label: 'google', outcome: 'ok',
   })
-  const rows = await audit.list({ project_slug: 't1' })
+  const rows = await audit.list({ owner_slug: 't1' })
   expect(rows[0]?.author_id).toBeNull()
 })
 
 test('recordToolCall carries per-call author_id', async () => {
   await audit.recordToolCall({
-    project_slug: 't1', core_slug: 'tasks', tool_name: 'create_event',
+    owner_slug: 't1', core_slug: 'tasks', tool_name: 'create_event',
     outcome: 'ok', author_id: 'bob',
   })
-  const rows = await audit.list({ project_slug: 't1' })
+  const rows = await audit.list({ owner_slug: 't1' })
   expect(rows[0]?.op).toBe('tool_call')
   expect(rows[0]?.author_id).toBe('bob')
 })
@@ -222,19 +226,19 @@ test('buildAuditedSecretsStore stamps the log default author on get rows', async
   const ownerAudit = new SecretAuditLog({ db: projectDb, now: () => now, author_id: 'owner' })
   const store = new FakePlatformStore()
   await store.put({ owner_handle: 't1', kind: 'oauth_token', label: 'google', plaintext: 'tok' })
-  const wrapped = buildAuditedSecretsStore(store, { audit: ownerAudit, project_slug: 't1', core_slug: 'tasks' })
+  const wrapped = buildAuditedSecretsStore(store, { audit: ownerAudit, owner_slug: 't1', core_slug: 'tasks' })
   await wrapped.get({ owner_handle: 't1', kind: 'oauth_token', label: 'google' })
-  const rows = await ownerAudit.list({ project_slug: 't1', core_slug: 'tasks' })
+  const rows = await ownerAudit.list({ owner_slug: 't1', core_slug: 'tasks' })
   expect(rows.find((r) => r.op === 'get')?.author_id).toBe('owner')
 })
 
 test('audit log respects limit', async () => {
   for (let i = 0; i < 5; i++) {
     now = 2_000_000 + i
-    await audit.record({ project_slug: 't1', core_slug: 'a', op: 'get',
+    await audit.record({ owner_slug: 't1', core_slug: 'a', op: 'get',
       kind: 'oauth_token', label: `lbl-${i}`, outcome: 'ok' })
   }
-  const rows = await audit.list({ project_slug: 't1', limit: 2 })
+  const rows = await audit.list({ owner_slug: 't1', limit: 2 })
   expect(rows).toHaveLength(2)
   expect(rows[0]?.label).toBe('lbl-4')
   expect(rows[1]?.label).toBe('lbl-3')

@@ -198,7 +198,7 @@ describe('reminders_update — capability gate', () => {
       extras.reminders_update({ id: 'whatever', message: 'x' }),
     ).rejects.toThrow(CapabilityDeniedError)
     const denied = await audit.listDenied({
-      project_slug: OWNER,
+      owner_slug: OWNER,
       core_slug: 'reminders_core',
     })
     const labels = new Set(denied.map((r) => r.label))

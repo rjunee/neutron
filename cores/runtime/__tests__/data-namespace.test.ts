@@ -66,7 +66,7 @@ test('sidecarDbPath shape', () => {
 
 test('allocateCoreNamespace tables: returns prefix + creates nothing on disk', () => {
   const ns = allocateCoreNamespace({
-    project_slug: 't1', slug: 'tasks',
+    owner_slug: 't1', slug: 'tasks',
     manifest_capabilities: ['read:project.db'],
     dataDir, layout: 'tables',
   })
@@ -77,7 +77,7 @@ test('allocateCoreNamespace tables: returns prefix + creates nothing on disk', (
 
 test('allocateCoreNamespace sidecar: opens new SQLite file', () => {
   const ns = allocateCoreNamespace({
-    project_slug: 't1', slug: 'dtc',
+    owner_slug: 't1', slug: 'dtc',
     manifest_capabilities: ['read:dtc.db'],
     dataDir, layout: 'sidecar',
   })
@@ -96,7 +96,7 @@ test('releaseCoreNamespace tables: drops every core_<slug>_* table', async () =>
   await projectDb.exec('CREATE TABLE core_other_thing (id TEXT)')
 
   await releaseCoreNamespace({
-    project_slug: 't1', slug: 'tasks', layout: 'tables',
+    owner_slug: 't1', slug: 'tasks', layout: 'tables',
     projectDb, dataDir,
   })
 
@@ -120,7 +120,7 @@ test('releaseCoreNamespace tables: drops every core_<slug>_* table', async () =>
 test('releaseCoreNamespace sidecar: deletes file + WAL siblings', async () => {
   const path = sidecarDbPath(dataDir, 'dtc')
   const ns = allocateCoreNamespace({
-    project_slug: 't1', slug: 'dtc',
+    owner_slug: 't1', slug: 'dtc',
     manifest_capabilities: ['write:dtc.db'],
     dataDir, layout: 'sidecar',
   })
@@ -130,7 +130,7 @@ test('releaseCoreNamespace sidecar: deletes file + WAL siblings', async () => {
   await ns.sidecar_db.run(`INSERT INTO x VALUES (?)`, ['a'])
 
   await releaseCoreNamespace({
-    project_slug: 't1', slug: 'dtc', layout: 'sidecar',
+    owner_slug: 't1', slug: 'dtc', layout: 'sidecar',
     projectDb, dataDir, sidecarDb: ns.sidecar_db,
   })
 

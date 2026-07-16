@@ -389,7 +389,7 @@ describe('app-admin — connectors', () => {
     const h = await startGateway()
     try {
       await h.coresStore.record({
-        project_slug: PROJECT_SLUG,
+        owner_slug: PROJECT_SLUG,
         core_slug: 'tasks',
         package_name: '@neutronai/core-tasks',
         package_version: '0.1.0',
@@ -397,7 +397,7 @@ describe('app-admin — connectors', () => {
         data_layout: 'tables',
       })
       await h.coresStore.record({
-        project_slug: PROJECT_SLUG,
+        owner_slug: PROJECT_SLUG,
         core_slug: 'reminders',
         package_name: '@neutronai/core-reminders',
         package_version: '0.2.0',
@@ -421,7 +421,7 @@ describe('app-admin — connectors', () => {
     const h = await startGateway()
     try {
       await h.coresStore.record({
-        project_slug: PROJECT_SLUG,
+        owner_slug: PROJECT_SLUG,
         core_slug: 'mine',
         package_name: '@neutronai/core-mine',
         package_version: '0.1.0',
@@ -429,7 +429,7 @@ describe('app-admin — connectors', () => {
         data_layout: 'tables',
       })
       await h.coresStore.record({
-        project_slug: 'someone-else',
+        owner_slug: 'someone-else',
         core_slug: 'theirs',
         package_name: '@neutronai/core-theirs',
         package_version: '0.1.0',

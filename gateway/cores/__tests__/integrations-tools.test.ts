@@ -206,7 +206,7 @@ test('integrations_disconnect on an OAuth account flags affected Cores dependenc
   // install_state, so the Core stayed "installed" with a silently-broken dep.
   const installs = new CoreInstallationsStore({ db: b.db })
   await installs.record({
-    project_slug: OWNER,
+    owner_slug: OWNER,
     core_slug: 'google_workspace_core',
     package_name: '@neutronai/google-workspace-core',
     package_version: '0.0.0',

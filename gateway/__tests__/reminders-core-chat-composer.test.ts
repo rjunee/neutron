@@ -347,7 +347,7 @@ test('`reminders_update` MCP tool dispatch through the production composer wires
   expect(result.message).toBe('a — updated via MCP')
   // Audit log records an outcome=ok row for reminders_update.
   const rows = await harness.audit.list({
-    project_slug: OWNER,
+    owner_slug: OWNER,
     core_slug: 'reminders_core',
   })
   const okRows = rows.filter(

@@ -122,7 +122,7 @@ test('installCore: tables-layout no-secrets happy path', async () => {
   }))
   const prompter = new RecordingPrompter()
   const result = await installCore({
-    project_slug: OWNER,
+    owner_slug: OWNER,
     coreDir: dir,
     projectDb, dataDir,
     secretsStore, audit, installations: installs, prompter,
@@ -140,7 +140,7 @@ test('installCore: sidecar-layout when manifest declares <slug>.db capability', 
   }))
   const prompter = new RecordingPrompter()
   const result = await installCore({
-    project_slug: OWNER,
+    owner_slug: OWNER,
     coreDir: dir,
     projectDb, dataDir,
     secretsStore, audit, installations: installs, prompter,
@@ -161,7 +161,7 @@ test('installCore: prompts for declared secrets + writes audit ok rows', async (
   }))
   const prompter = new RecordingPrompter()
   await installCore({
-    project_slug: OWNER,
+    owner_slug: OWNER,
     coreDir: dir,
     projectDb, dataDir,
     secretsStore, audit, installations: installs, prompter,
@@ -169,7 +169,7 @@ test('installCore: prompts for declared secrets + writes audit ok rows', async (
   expect(prompter.apiKeys).toContain('byo_api_key:sendgrid')
   expect(prompter.oauthTokens).toContain('google')
 
-  const audits = await audit.list({ project_slug: OWNER, core_slug: 'mailer' })
+  const audits = await audit.list({ owner_slug: OWNER, core_slug: 'mailer' })
   expect(audits.find((r) => r.kind === 'byo_api_key' && r.label === 'sendgrid' && r.outcome === 'ok')).toBeDefined()
   expect(audits.find((r) => r.kind === 'oauth_token' && r.label === 'google' && r.outcome === 'ok')).toBeDefined()
 
@@ -186,7 +186,7 @@ test('installCore: required secret skipped → CoreInstallError', async () => {
   prompter.apiResponse = null
   await expect(
     installCore({
-      project_slug: OWNER,
+      owner_slug: OWNER,
       coreDir: dir, projectDb, dataDir,
       secretsStore, audit, installations: installs, prompter,
     }),
@@ -200,7 +200,7 @@ test('installCore: optional secret skipped does not block install', async () => 
   const prompter = new RecordingPrompter()
   prompter.apiResponse = null
   const result = await installCore({
-    project_slug: OWNER,
+    owner_slug: OWNER,
     coreDir: dir, projectDb, dataDir,
     secretsStore, audit, installations: installs, prompter,
   })
@@ -210,9 +210,9 @@ test('installCore: optional secret skipped does not block install', async () => 
 test('installCore: rejects duplicate live install (same version)', async () => {
   const dir = writeCorePackage('tasks', manifestFor({}))
   const prompter = new RecordingPrompter()
-  await installCore({ project_slug: OWNER, coreDir: dir, projectDb, dataDir, secretsStore, audit, installations: installs, prompter })
+  await installCore({ owner_slug: OWNER, coreDir: dir, projectDb, dataDir, secretsStore, audit, installations: installs, prompter })
   await expect(
-    installCore({ project_slug: OWNER, coreDir: dir, projectDb, dataDir, secretsStore, audit, installations: installs, prompter }),
+    installCore({ owner_slug: OWNER, coreDir: dir, projectDb, dataDir, secretsStore, audit, installations: installs, prompter }),
   ).rejects.toThrow(expect.objectContaining({ code: 'duplicate_install' }))
 })
 
@@ -222,7 +222,7 @@ test('installCore: SecretsAccessor enforces capability gate against undeclared s
   }))
   const prompter = new RecordingPrompter()
   const result = await installCore({
-    project_slug: OWNER, coreDir: dir, projectDb, dataDir,
+    owner_slug: OWNER, coreDir: dir, projectDb, dataDir,
     secretsStore, audit, installations: installs, prompter,
   })
   // Declared (kind, label) → ok.
@@ -237,14 +237,14 @@ test('uninstallCore: drops Core tables, deletes secrets, calls revokeOAuth', asy
     secrets: [{ kind: 'oauth_token', label: 'google', required: true }],
   }))
   const prompter = new RecordingPrompter()
-  await installCore({ project_slug: OWNER, coreDir: dir, projectDb, dataDir, secretsStore, audit, installations: installs, prompter })
+  await installCore({ owner_slug: OWNER, coreDir: dir, projectDb, dataDir, secretsStore, audit, installations: installs, prompter })
 
   // Manually create a Core-namespaced table.
   await projectDb.exec('CREATE TABLE core_mailer_log (id TEXT)')
 
   const revoked: Array<{ kind: string; label: string }> = []
   await uninstallCore({
-    project_slug: OWNER, core_slug: 'mailer',
+    owner_slug: OWNER, core_slug: 'mailer',
     projectDb, dataDir, secretsStore, audit, installations: installs,
     revokeOAuth: async (s) => { revoked.push(s) },
   })
@@ -269,16 +269,16 @@ test('uninstallCore: drops Core tables, deletes secrets, calls revokeOAuth', asy
 test('uninstallCore: idempotent on already-uninstalled', async () => {
   const dir = writeCorePackage('tasks', manifestFor({}))
   const prompter = new RecordingPrompter()
-  await installCore({ project_slug: OWNER, coreDir: dir, projectDb, dataDir, secretsStore, audit, installations: installs, prompter })
-  await uninstallCore({ project_slug: OWNER, core_slug: 'tasks', projectDb, dataDir, secretsStore, audit, installations: installs })
+  await installCore({ owner_slug: OWNER, coreDir: dir, projectDb, dataDir, secretsStore, audit, installations: installs, prompter })
+  await uninstallCore({ owner_slug: OWNER, core_slug: 'tasks', projectDb, dataDir, secretsStore, audit, installations: installs })
   // Second call → no throw.
-  await uninstallCore({ project_slug: OWNER, core_slug: 'tasks', projectDb, dataDir, secretsStore, audit, installations: installs })
+  await uninstallCore({ owner_slug: OWNER, core_slug: 'tasks', projectDb, dataDir, secretsStore, audit, installations: installs })
 })
 
 test('uninstallCore: throws unknown_core when never installed', async () => {
   await expect(
     uninstallCore({
-      project_slug: OWNER, core_slug: 'nope',
+      owner_slug: OWNER, core_slug: 'nope',
       projectDb, dataDir, secretsStore, audit, installations: installs,
     }),
   ).rejects.toThrow(expect.objectContaining({ code: 'unknown_core' }))
@@ -289,7 +289,7 @@ test('upgradeCore: REMOVE-only capability change rolls forward without consent',
     capabilities: ['read:project.db', 'write:project.db'],
   }))
   const prompter = new RecordingPrompter()
-  await installCore({ project_slug: OWNER, coreDir: dir, projectDb, dataDir, secretsStore, audit, installations: installs, prompter })
+  await installCore({ owner_slug: OWNER, coreDir: dir, projectDb, dataDir, secretsStore, audit, installations: installs, prompter })
 
   // Re-write the package with fewer capabilities (REMOVE) and bumped version.
   writeFileSync(join(dir, 'package.json'), JSON.stringify({
@@ -298,7 +298,7 @@ test('upgradeCore: REMOVE-only capability change rolls forward without consent',
   }))
 
   const result = await upgradeCore({
-    project_slug: OWNER, newCoreDir: dir,
+    owner_slug: OWNER, newCoreDir: dir,
     projectDb, dataDir, secretsStore, audit, installations: installs, prompter,
   })
   expect(result.installation.package_version).toBe('0.2.0')
@@ -311,7 +311,7 @@ test('upgradeCore: ADD without consent → capability_escalation_requires_consen
     capabilities: ['read:project.db'],
   }))
   const prompter = new RecordingPrompter()
-  await installCore({ project_slug: OWNER, coreDir: dir, projectDb, dataDir, secretsStore, audit, installations: installs, prompter })
+  await installCore({ owner_slug: OWNER, coreDir: dir, projectDb, dataDir, secretsStore, audit, installations: installs, prompter })
 
   writeFileSync(join(dir, 'package.json'), JSON.stringify({
     name: '@test/tasks', version: '0.2.0', type: 'module',
@@ -320,7 +320,7 @@ test('upgradeCore: ADD without consent → capability_escalation_requires_consen
 
   await expect(
     upgradeCore({
-      project_slug: OWNER, newCoreDir: dir,
+      owner_slug: OWNER, newCoreDir: dir,
       projectDb, dataDir, secretsStore, audit, installations: installs, prompter,
     }),
   ).rejects.toThrow(expect.objectContaining({ code: 'capability_escalation_requires_consent' }))
@@ -332,7 +332,7 @@ test('upgradeCore: ADD with consent rolls forward + prompts for newly-declared s
     secrets: [{ kind: 'byo_api_key', label: 'sendgrid', required: true }],
   }))
   const prompter = new RecordingPrompter()
-  await installCore({ project_slug: OWNER, coreDir: dir, projectDb, dataDir, secretsStore, audit, installations: installs, prompter })
+  await installCore({ owner_slug: OWNER, coreDir: dir, projectDb, dataDir, secretsStore, audit, installations: installs, prompter })
 
   // New manifest adds a capability AND a new secret.
   writeFileSync(join(dir, 'package.json'), JSON.stringify({
@@ -349,7 +349,7 @@ test('upgradeCore: ADD with consent rolls forward + prompts for newly-declared s
   prompter.oauthTokens = []
   prompter.apiKeys = []
   const result = await upgradeCore({
-    project_slug: OWNER, newCoreDir: dir,
+    owner_slug: OWNER, newCoreDir: dir,
     projectDb, dataDir, secretsStore, audit, installations: installs, prompter,
     consent_acknowledged: true,
   })
@@ -365,7 +365,7 @@ test('upgradeCore: ADD with consent rolls forward + prompts for newly-declared s
 test('upgradeCore: layout change tables→sidecar rejected', async () => {
   const dir = writeCorePackage('tasks', manifestFor({ capabilities: ['read:project.db'] }))
   const prompter = new RecordingPrompter()
-  await installCore({ project_slug: OWNER, coreDir: dir, projectDb, dataDir, secretsStore, audit, installations: installs, prompter })
+  await installCore({ owner_slug: OWNER, coreDir: dir, projectDb, dataDir, secretsStore, audit, installations: installs, prompter })
 
   writeFileSync(join(dir, 'package.json'), JSON.stringify({
     name: '@test/tasks', version: '0.2.0', type: 'module',
@@ -374,7 +374,7 @@ test('upgradeCore: layout change tables→sidecar rejected', async () => {
 
   await expect(
     upgradeCore({
-      project_slug: OWNER, newCoreDir: dir,
+      owner_slug: OWNER, newCoreDir: dir,
       projectDb, dataDir, secretsStore, audit, installations: installs, prompter,
       consent_acknowledged: true,
     }),

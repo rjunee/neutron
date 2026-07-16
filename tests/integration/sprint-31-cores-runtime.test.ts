@@ -130,7 +130,7 @@ test('Sprint 31 — synthetic Core install → tool call → audit → uninstall
   // 1. Install — drives loader + namespace + secrets prompt.
   const prompter = new TestPrompter()
   const installed = await installCore({
-    project_slug: OWNER, coreDir,
+    owner_slug: OWNER, coreDir,
     projectDb, dataDir, secretsStore, audit, installations: installs, prompter,
   })
   expect(installed.core.slug).toBe('synthetic')
@@ -145,7 +145,7 @@ test('Sprint 31 — synthetic Core install → tool call → audit → uninstall
   // The secret was persisted via the prompter + a put audit row landed.
   expect(await secretsStore.get({ owner_handle: OWNER, kind: 'byo_api_key', label: 'sendgrid',
   })).toBe('sg.test-token')
-  const installAudits = await audit.list({ project_slug: OWNER, core_slug: 'synthetic' })
+  const installAudits = await audit.list({ owner_slug: OWNER, core_slug: 'synthetic' })
   expect(installAudits.find((a) => a.op === 'put' && a.label === 'sendgrid' && a.outcome === 'ok')).toBeDefined()
 
   // 2. SecretsAccessor capability gate — declared OK, undeclared denied.
@@ -157,7 +157,7 @@ test('Sprint 31 — synthetic Core install → tool call → audit → uninstall
   // The Cores-runtime audit log saw the SDK-side gate-passing get (the
   // wrapped store wrote a row). Specifically, the byo_api_key/sendgrid
   // get audited as 'ok'.
-  const afterAccessAudits = await audit.list({ project_slug: OWNER, core_slug: 'synthetic' })
+  const afterAccessAudits = await audit.list({ owner_slug: OWNER, core_slug: 'synthetic' })
   expect(afterAccessAudits.find((a) =>
     a.op === 'get' && a.kind === 'byo_api_key' && a.label === 'sendgrid' && a.outcome === 'ok',
   )).toBeDefined()
@@ -165,7 +165,7 @@ test('Sprint 31 — synthetic Core install → tool call → audit → uninstall
   // 3. CapabilityGuard exercise on a wrapped tool handler.
   const guard = new CapabilityGuard({
     manifest: installed.core.manifest, core_slug: installed.core.slug,
-    project_slug: OWNER, audit,
+    owner_slug: OWNER, audit,
   })
   const listThings = guard.wrapToolHandler({
     tool_name: 'list_things',
@@ -175,7 +175,7 @@ test('Sprint 31 — synthetic Core install → tool call → audit → uninstall
   const result = await listThings({ limit: 10 })
   expect(result.count).toBe(0)
   // Audit row landed with outcome=ok.
-  const okRow = (await audit.list({ project_slug: OWNER, core_slug: 'synthetic' }))
+  const okRow = (await audit.list({ owner_slug: OWNER, core_slug: 'synthetic' }))
     .find((a) => a.op === 'tool_call' && a.label === 'list_things' && a.outcome === 'ok')
   expect(okRow).toBeDefined()
 
@@ -186,7 +186,7 @@ test('Sprint 31 — synthetic Core install → tool call → audit → uninstall
     fn: async () => ({ x: 1 }),
   })
   await expect(rogue({})).rejects.toThrow(CapabilityDeniedError)
-  const deniedRow = (await audit.list({ project_slug: OWNER, core_slug: 'synthetic' }))
+  const deniedRow = (await audit.list({ owner_slug: OWNER, core_slug: 'synthetic' }))
     .find((a) => a.op === 'tool_call' && a.label === 'rogue_tool' && a.outcome === 'capability_denied')
   expect(deniedRow).toBeDefined()
 
@@ -226,7 +226,7 @@ test('Sprint 31 — synthetic Core install → tool call → audit → uninstall
   // 5. Uninstall — drops core_synthetic_* tables, deletes secret, marks row uninstalled.
   const revoked: Array<{ kind: string; label: string }> = []
   await uninstallCore({
-    project_slug: OWNER, core_slug: 'synthetic',
+    owner_slug: OWNER, core_slug: 'synthetic',
     projectDb, dataDir, secretsStore, audit, installations: installs,
     revokeOAuth: async (s) => { revoked.push(s) },
   })
@@ -250,7 +250,7 @@ test('Sprint 31 — synthetic Core install → tool call → audit → uninstall
 
   // Final audit-log shape: exactly one capability_denied row + at least one
   // tool_call=ok + at least one secret put + delete entry.
-  const finalAudits = await audit.list({ project_slug: OWNER, core_slug: 'synthetic', limit: 200 })
+  const finalAudits = await audit.list({ owner_slug: OWNER, core_slug: 'synthetic', limit: 200 })
   expect(finalAudits.filter((a) => a.outcome === 'capability_denied')).toHaveLength(1)
   expect(finalAudits.find((a) => a.op === 'tool_call' && a.outcome === 'ok')).toBeDefined()
   expect(finalAudits.find((a) => a.op === 'put' && a.label === 'sendgrid' && a.outcome === 'ok')).toBeDefined()

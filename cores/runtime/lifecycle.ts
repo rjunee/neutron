@@ -110,7 +110,7 @@ export interface SecretsPrompter {
 
 export interface InstallCoreInput {
   /** Frozen owner handle (branded); the caller constructs it at its known-good source. */
-  project_slug: OwnerHandle
+  owner_slug: OwnerHandle
   /** Absolute path to the Core's directory on disk. */
   coreDir: string
   projectDb: ProjectDb
@@ -140,14 +140,14 @@ export async function installCore(
   // Reject duplicate live installs. An idempotent re-install (same slug,
   // same version) is allowed but logs that we're replacing — the
   // installations-store record() upsert handles the row.
-  const existing = await input.installations.get(input.project_slug, core.slug)
+  const existing = await input.installations.get(input.owner_slug, core.slug)
   if (existing !== null && existing.uninstalled_at === null) {
     if (existing.package_version === core.package_version) {
       // Same version — refuse to clobber. Caller should call upgrade()
       // explicitly if they want to roll forward.
       throw new CoreInstallError(
         'duplicate_install',
-        `core=${core.slug} version=${core.package_version} is already installed for project=${input.project_slug}`,
+        `core=${core.slug} version=${core.package_version} is already installed for project=${input.owner_slug}`,
         {
           core_slug: core.slug,
           existing_version: existing.package_version,
@@ -171,7 +171,7 @@ export async function installCore(
 
   // 3. Allocate namespace.
   const namespace = allocateCoreNamespace({
-    project_slug: input.project_slug,
+    owner_slug: input.owner_slug,
     slug: core.slug,
     manifest_capabilities: core.manifest.capabilities,
     dataDir: input.dataDir,
@@ -180,7 +180,7 @@ export async function installCore(
 
   // 4. Drive secrets prompts.
   await driveSecretsInstall({
-    project_slug: input.project_slug,
+    owner_slug: input.owner_slug,
     core_slug: core.slug,
     manifest: core.manifest,
     secretsStore: input.secretsStore,
@@ -190,7 +190,7 @@ export async function installCore(
 
   // 5. Record installation.
   const installation = await input.installations.record({
-    project_slug: input.project_slug,
+    owner_slug: input.owner_slug,
     core_slug: core.slug,
     package_name: core.package_name,
     package_version: core.package_version,
@@ -204,7 +204,7 @@ export async function installCore(
   // 6. Build the capability-gated accessor wrapping the audited store.
   const auditedStore = buildAuditedSecretsStore(input.secretsStore, {
     audit: input.audit,
-    project_slug: input.project_slug,
+    owner_slug: input.owner_slug,
     core_slug: core.slug,
   })
   const accessor = buildSecretsAccessor(
@@ -216,7 +216,7 @@ export async function installCore(
       // at install time (owner_handle === project_slug for a fresh
       // instance). A future plumb-through of owner_handle distinct
       // from project_slug lands in a follow-up.
-      owner_handle: input.project_slug,
+      owner_handle: input.owner_slug,
       store: auditedStore,
       core_id: core.slug,
     },
@@ -313,7 +313,7 @@ export async function uninstallCoreGlobally(
 }
 
 async function driveSecretsInstall(input: {
-  project_slug: OwnerHandle
+  owner_slug: OwnerHandle
   core_slug: string
   manifest: NeutronManifest
   secretsStore: SecretsStore
@@ -340,13 +340,13 @@ async function driveSecretsInstall(input: {
       }
       await persistOrRotate({
         secretsStore: input.secretsStore,
-        project_slug: input.project_slug,
+        owner_slug: input.owner_slug,
         kind: secret.kind,
         label: secret.label,
         plaintext,
       })
       await input.audit.record({
-        project_slug: input.project_slug,
+        owner_slug: input.owner_slug,
         core_slug: input.core_slug,
         op: 'put',
         kind: secret.kind,
@@ -373,14 +373,14 @@ async function driveSecretsInstall(input: {
       }
       await persistOrRotate({
         secretsStore: input.secretsStore,
-        project_slug: input.project_slug,
+        owner_slug: input.owner_slug,
         kind: secret.kind,
         label: secret.label,
         plaintext: ok.access_token,
         ...(ok.expires_at !== undefined ? { expires_at: ok.expires_at } : {}),
       })
       await input.audit.record({
-        project_slug: input.project_slug,
+        owner_slug: input.owner_slug,
         core_slug: input.core_slug,
         op: 'put',
         kind: secret.kind,
@@ -416,13 +416,13 @@ async function driveSecretsInstall(input: {
       })
       await persistOrRotate({
         secretsStore: input.secretsStore,
-        project_slug: input.project_slug,
+        owner_slug: input.owner_slug,
         kind: secret.kind,
         label: secret.label,
         plaintext: blob,
       })
       await input.audit.record({
-        project_slug: input.project_slug,
+        owner_slug: input.owner_slug,
         core_slug: input.core_slug,
         op: 'put',
         kind: secret.kind,
@@ -450,14 +450,14 @@ async function persistOrRotate(input: {
    * handle here. See `auth/secrets-store.ts` file header. Branded `OwnerHandle`
    * so the "MUST pass the frozen handle" contract is compiler-enforced.
    */
-  project_slug: OwnerHandle
+  owner_slug: OwnerHandle
   kind: 'byo_api_key' | 'webhook_secret' | 'oauth_token' | 'oauth_client'
   label: string
   plaintext: string
   expires_at?: number
 }): Promise<void> {
   const existing = await input.secretsStore.list({
-    owner_handle: input.project_slug,
+    owner_handle: input.owner_slug,
     kind: input.kind,
   })
   const match = existing.find((r) => r.label === input.label)
@@ -474,7 +474,7 @@ async function persistOrRotate(input: {
     plaintext: string
     expires_at?: number
   } = {
-    owner_handle: input.project_slug,
+    owner_handle: input.owner_slug,
     kind: input.kind,
     label: input.label,
     plaintext: input.plaintext,
@@ -484,7 +484,7 @@ async function persistOrRotate(input: {
 }
 
 export interface ConfigureCoreInput {
-  project_slug: string
+  owner_slug: string
   core_slug: string
   installations: CoreInstallationsStore
 }
@@ -492,19 +492,19 @@ export interface ConfigureCoreInput {
 /** Mark the Core as configured. v1 surface; per-Core configure RPC body
  *  shape is a subsequent sprint. */
 export async function configureCore(input: ConfigureCoreInput): Promise<void> {
-  await input.installations.markConfigured(input.project_slug, input.core_slug)
+  await input.installations.markConfigured(input.owner_slug, input.core_slug)
 }
 
 export async function startCore(input: ConfigureCoreInput): Promise<void> {
-  await input.installations.markStarted(input.project_slug, input.core_slug)
+  await input.installations.markStarted(input.owner_slug, input.core_slug)
 }
 
 export async function stopCore(input: ConfigureCoreInput): Promise<void> {
-  await input.installations.markStopped(input.project_slug, input.core_slug)
+  await input.installations.markStopped(input.owner_slug, input.core_slug)
 }
 
 export interface UninstallCoreInput {
-  project_slug: OwnerHandle
+  owner_slug: OwnerHandle
   core_slug: string
   projectDb: ProjectDb
   dataDir: string
@@ -519,13 +519,13 @@ export interface UninstallCoreInput {
 
 export async function uninstallCore(input: UninstallCoreInput): Promise<void> {
   const installation = await input.installations.get(
-    input.project_slug,
+    input.owner_slug,
     input.core_slug,
   )
   if (installation === null) {
     throw new CoreInstallError(
       'unknown_core',
-      `core=${input.core_slug} is not installed in project=${input.project_slug}`,
+      `core=${input.core_slug} is not installed in project=${input.owner_slug}`,
       { core_slug: input.core_slug },
     )
   }
@@ -537,7 +537,7 @@ export async function uninstallCore(input: UninstallCoreInput): Promise<void> {
   // 1. Release namespace.
   if (installation.data_layout === 'sidecar') {
     await releaseCoreNamespace({
-      project_slug: input.project_slug,
+      owner_slug: input.owner_slug,
       slug: input.core_slug,
       layout: 'sidecar',
       projectDb: input.projectDb,
@@ -545,7 +545,7 @@ export async function uninstallCore(input: UninstallCoreInput): Promise<void> {
     })
   } else {
     await releaseCoreNamespace({
-      project_slug: input.project_slug,
+      owner_slug: input.owner_slug,
       slug: input.core_slug,
       layout: 'tables',
       projectDb: input.projectDb,
@@ -559,7 +559,7 @@ export async function uninstallCore(input: UninstallCoreInput): Promise<void> {
   // package directory cleanup). The audited platform store's `list`
   // returns every row for the project; we filter against the
   // capabilities we recorded at install time.
-  const rows = await input.secretsStore.list({ owner_handle: input.project_slug })
+  const rows = await input.secretsStore.list({ owner_handle: input.owner_slug })
   // Match anything kind∈managed-secret-kinds AND label that the install
   // capabilities suggest is owned by this Core. Conservative: we only
   // delete rows whose (kind, label) match the snapshot we'd have audited
@@ -581,7 +581,7 @@ export async function uninstallCore(input: UninstallCoreInput): Promise<void> {
         await input.revokeOAuth({ kind: row.kind, label: row.label })
       } catch (err) {
         await input.audit.record({
-          project_slug: input.project_slug,
+          owner_slug: input.owner_slug,
           core_slug: input.core_slug,
           op: 'delete',
           kind: row.kind,
@@ -595,7 +595,7 @@ export async function uninstallCore(input: UninstallCoreInput): Promise<void> {
     try {
       await input.secretsStore.delete(row.id)
       await input.audit.record({
-        project_slug: input.project_slug,
+        owner_slug: input.owner_slug,
         core_slug: input.core_slug,
         op: 'delete',
         kind: row.kind,
@@ -604,7 +604,7 @@ export async function uninstallCore(input: UninstallCoreInput): Promise<void> {
       })
     } catch (err) {
       await input.audit.record({
-        project_slug: input.project_slug,
+        owner_slug: input.owner_slug,
         core_slug: input.core_slug,
         op: 'delete',
         kind: row.kind,
@@ -617,11 +617,11 @@ export async function uninstallCore(input: UninstallCoreInput): Promise<void> {
   }
 
   // 3. Mark uninstalled.
-  await input.installations.markUninstalled(input.project_slug, input.core_slug)
+  await input.installations.markUninstalled(input.owner_slug, input.core_slug)
 }
 
 export interface UpgradeCoreInput {
-  project_slug: OwnerHandle
+  owner_slug: OwnerHandle
   newCoreDir: string
   projectDb: ProjectDb
   dataDir: string
@@ -650,11 +650,11 @@ export async function upgradeCore(
   input: UpgradeCoreInput,
 ): Promise<UpgradeCoreResult> {
   const newCore = loadCoreFromDir(input.newCoreDir)
-  const existing = await input.installations.get(input.project_slug, newCore.slug)
+  const existing = await input.installations.get(input.owner_slug, newCore.slug)
   if (existing === null || existing.uninstalled_at !== null) {
     throw new CoreInstallError(
       'unknown_core',
-      `cannot upgrade — core=${newCore.slug} has no live install in project=${input.project_slug}`,
+      `cannot upgrade — core=${newCore.slug} has no live install in project=${input.owner_slug}`,
       { core_slug: newCore.slug },
     )
   }
@@ -702,7 +702,7 @@ export async function upgradeCore(
   if (added.length > 0) {
     // Collect labels already persisted for this project.
     const existingLabels = new Set<string>()
-    const all = await input.secretsStore.list({ owner_handle: input.project_slug })
+    const all = await input.secretsStore.list({ owner_handle: input.owner_slug })
     for (const r of all) existingLabels.add(`${r.kind}:${r.label}`)
 
     // Re-run the install-secrets driver with a manifest filtered down
@@ -715,7 +715,7 @@ export async function upgradeCore(
       ),
     }
     await driveSecretsInstall({
-      project_slug: input.project_slug,
+      owner_slug: input.owner_slug,
       core_slug: newCore.slug,
       manifest: newOnlyManifest,
       secretsStore: input.secretsStore,
@@ -726,12 +726,12 @@ export async function upgradeCore(
 
   // Roll forward the row.
   await input.installations.updateVersion({
-    project_slug: input.project_slug,
+    owner_slug: input.owner_slug,
     core_slug: newCore.slug,
     package_version: newCore.package_version,
     capabilities: [...newCore.manifest.capabilities],
   })
-  const updated = await input.installations.get(input.project_slug, newCore.slug)
+  const updated = await input.installations.get(input.owner_slug, newCore.slug)
   if (updated === null) {
     throw new CoreInstallError(
       'unknown_core',
