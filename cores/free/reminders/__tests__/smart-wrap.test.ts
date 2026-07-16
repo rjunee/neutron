@@ -74,6 +74,17 @@ describe('Shape B — smart-wrap', () => {
     expect(degraded).not.toContain('STATUS.md')
   })
 
+  test('a multiline body containing "PATTERN:" still classifies as smart-wrap and preserves the body', () => {
+    // Codex N7 blocker 2 repro through the real composer: user text with a
+    // "PATTERN:" line must not flip the composed body into the pattern shape.
+    const composer = buildSmartWrapComposer({ loadPattern: fakeLoader })
+    const body = 'first line\nPATTERN: made-up-thing\nlast line'
+    const result = composer.compose({ body, mode: { kind: 'smart_wrap' } })
+    const shape = classifyReminderMessage(result.message)
+    expect(shape.kind).toBe('smart-wrap')
+    expect(literalFallback(shape)).toBe(body)
+  })
+
   test('locked-prelude SNAPSHOT — pins the persisted Shape-B body byte-for-byte', () => {
     // Pin the byte-exact prelude. ANY change here is a deliberate diff
     // that changes every existing Shape-B reminder's stored body. N7

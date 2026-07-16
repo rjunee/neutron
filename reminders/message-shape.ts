@@ -48,7 +48,19 @@ export type ReminderShape =
 
 const ROUTING_RE = /^\s*\[ROUTING\]\s*target_thread:\s*(\S+)\s*$/i
 const SMART_RE = /^\s*\[smart\]\s*/i
-const PATTERN_RE = /^\s*PATTERN:\s*([\w-]+)\s*$/im
+// Anchored to a SINGLE line (no `/m`): the shape is decided from the first
+// post-routing line only. A `PATTERN:` line buried later in the body — e.g.
+// inside a smart-wrap "Original reminder: ..." tail carrying arbitrary user
+// text — must NOT hijack classification (Codex N7 blocker 2).
+const PATTERN_LINE_RE = /^\s*PATTERN:\s*([\w-]+)\s*$/i
+
+/** The first non-empty line of an already-trimmed body (or '' if none). */
+function firstNonEmptyLine(text: string): string {
+  for (const line of text.split('\n')) {
+    if (line.trim().length > 0) return line
+  }
+  return ''
+}
 
 /**
  * Strip a leading `[ROUTING] target_thread: <id>` header (only when it is the
@@ -76,7 +88,21 @@ export function classifyReminderMessage(message: string): ReminderShape {
   const { routing_topic, rest } = stripRoutingHeader(message)
   const trimmed = rest.trim()
 
-  const patternMatch = PATTERN_RE.exec(trimmed)
+  // Classify from the FIRST post-routing line only, so a marker appearing on a
+  // later line cannot override the leading shape. The `[smart]` sentinel takes
+  // precedence over `PATTERN:` — a smart-wrap body opens with the sentinel and
+  // may legitimately carry the word "PATTERN:" deeper in the user's text.
+  const firstLine = firstNonEmptyLine(trimmed)
+
+  if (SMART_RE.test(firstLine)) {
+    return {
+      kind: 'smart-wrap',
+      instruction: trimmed.replace(SMART_RE, '').trim(),
+      routing_topic,
+    }
+  }
+
+  const patternMatch = PATTERN_LINE_RE.exec(firstLine)
   if (patternMatch !== null) {
     const pattern = (patternMatch[1] ?? '').toLowerCase()
     return {
@@ -84,14 +110,6 @@ export function classifyReminderMessage(message: string): ReminderShape {
       pattern,
       known: KNOWN_REMINDER_PATTERNS.includes(pattern),
       block: trimmed,
-      routing_topic,
-    }
-  }
-
-  if (SMART_RE.test(rest)) {
-    return {
-      kind: 'smart-wrap',
-      instruction: rest.replace(SMART_RE, '').trim(),
       routing_topic,
     }
   }

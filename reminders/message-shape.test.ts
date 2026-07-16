@@ -42,6 +42,22 @@ describe('classifyReminderMessage', () => {
     }
   })
 
+  test('classifies from the FIRST line only — a later PATTERN: line does not hijack a literal', () => {
+    // Codex N7 blocker 2: PATTERN detection must be anchored to the leading
+    // line, so arbitrary user text mentioning "PATTERN:" stays literal.
+    const s = classifyReminderMessage('remind me to fix the PATTERN: parser bug\nnotes below')
+    expect(s.kind).toBe('literal')
+  })
+
+  test('the [smart] sentinel wins over a PATTERN: line buried in the body', () => {
+    // A smart-wrap body carries the user's original text verbatim in its tail;
+    // a "PATTERN: ..." line there must NOT flip the whole thing to a pattern.
+    const s = classifyReminderMessage(
+      '[smart] compose a context-aware nudge\n\nOriginal reminder: first line\nPATTERN: made-up-thing\nlast line',
+    )
+    expect(s.kind).toBe('smart-wrap')
+  })
+
   test('[ROUTING] header is parsed off and stripped from the body', () => {
     const msg = '[ROUTING] target_thread: 4242\ntake out the trash'
     const s = classifyReminderMessage(msg)
