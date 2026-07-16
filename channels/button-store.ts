@@ -365,7 +365,9 @@ export class ButtonStore {
         now,
         input.text,
         input.speaker_user_id,
-        input.channel_kind,
+        // N6 dual-read (persistence boundary) — normalize a legacy hyphen token
+        // to canonical, falling back to the raw value for an unknown kind.
+        normalizeChannelKindForButton(input.channel_kind) ?? input.channel_kind,
       ],
     )
     return { prompt_id }
@@ -567,7 +569,7 @@ export class ButtonStore {
           choice_value: row.resolution_value ?? '',
           chosen_at: row.resolved_at,
           speaker_user_id: row.resolution_speaker_user_id ?? choice.speaker_user_id,
-          // N6 dual-read — a row persisted before migration 0099 carries the
+          // N6 dual-read — a row persisted before migration 0104 carries the
           // legacy hyphen 'app-socket'; normalize it to the canonical
           // 'app_socket' on read so the replayed prior choice routes
           // identically to a freshly-written one. Falls back to the live
@@ -596,7 +598,11 @@ export class ButtonStore {
           choice.choice_value,
           choice.freeform_text ?? null,
           choice.speaker_user_id,
-          choice.channel_kind,
+          // N6 dual-read (persistence boundary) — normalize before the write so
+          // a legacy hyphen token handed in by a runtime caller lands canonical
+          // in resolution_channel_kind. Falls back to the raw value for an
+          // unrecognized token rather than nulling a caller-supplied kind.
+          normalizeChannelKindForButton(choice.channel_kind) ?? choice.channel_kind,
           choice.prompt_id,
         ],
       )

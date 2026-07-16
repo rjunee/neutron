@@ -67,7 +67,7 @@ export const RESERVED_OPTION_VALUES: ReadonlySet<string> = new Set([
  *
  * The pre-N6 hyphen spelling `'app-socket'` was PERSISTED in
  * `button_prompts.resolution_channel_kind` by every prior build; migration
- * 0099 normalizes those rows, and {@link normalizeChannelKindForButton}
+ * 0104 normalizes those rows, and {@link normalizeChannelKindForButton}
  * tolerates the legacy token on read + off the wire (the dual-read window) so
  * an in-flight row written just before the migration still routes correctly.
  */
@@ -75,7 +75,7 @@ export type ChannelKindForButton = 'telegram' | 'app_socket' | 'webhook'
 
 /**
  * The pre-N6 hyphen spelling of the app-socket button channel kind. Persisted
- * in `button_prompts.resolution_channel_kind` before migration 0099; still
+ * in `button_prompts.resolution_channel_kind` before migration 0104; still
  * accepted on read via {@link normalizeChannelKindForButton}. Do NOT write it
  * on any new path — the canonical token is `'app_socket'`.
  */

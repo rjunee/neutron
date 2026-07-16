@@ -25,7 +25,7 @@
  *     `delivered: false`.
  */
 
-import { decodePromptIdWire, ROUTING_PREFIX, type ButtonChoice, type ChannelKindForButton } from './button-primitive.ts'
+import { decodePromptIdWire, normalizeChannelKindForButton, ROUTING_PREFIX, type ButtonChoice, type ChannelKindForButton } from './button-primitive.ts'
 import { ButtonStoreError, type ButtonStore } from './button-store.ts'
 
 export interface RouteChoiceInput {
@@ -76,6 +76,13 @@ export class DefaultButtonRouter implements ButtonRouter {
   async routeChoice(input: RouteChoiceInput): Promise<RouteChoiceResult> {
     const chosen_at = input.chosen_at ?? this.now()
 
+    // N6 dual-read (ingress boundary) — `RouteChoiceInput.channel_kind` is
+    // typed to the canonical vocabulary, but a runtime/legacy caller (an
+    // in-flight process, or a client sending the pre-unification hyphen off
+    // the wire) may still hand us `'app-socket'`. Normalize once here so both
+    // the returned choice AND the value ButtonStore persists are canonical.
+    const channel_kind = normalizeChannelKindForButton(input.channel_kind) ?? input.channel_kind
+
     // Pass the observation time so the get() expiry check uses the same
     // wall clock the caller witnessed — avoids the race where a tap
     // observed before expires_at could be rejected if routing takes long
@@ -87,7 +94,7 @@ export class DefaultButtonRouter implements ButtonRouter {
         choice_value: input.raw_value,
         chosen_at,
         speaker_user_id: input.speaker_user_id,
-        channel_kind: input.channel_kind,
+        channel_kind,
       }
       if (input.freeform_text !== undefined) choice.freeform_text = input.freeform_text
       return { delivered: false, choice, was_new: false }
@@ -110,14 +117,14 @@ export class DefaultButtonRouter implements ButtonRouter {
     // match an option is a crafted/hostile payload; reject with
     // delivered:false rather than coercing to __freeform__, which would
     // let an attacker force-resolve any active prompt.
-    if (input.channel_kind === 'telegram') {
+    if (channel_kind === 'telegram') {
       if (matchedOption === undefined) {
         const undeliverable: ButtonChoice = {
           prompt_id: input.prompt_id,
           choice_value: input.raw_value,
           chosen_at,
           speaker_user_id: input.speaker_user_id,
-          channel_kind: input.channel_kind,
+          channel_kind,
         }
         if (input.freeform_text !== undefined) undeliverable.freeform_text = input.freeform_text
         return { delivered: false, choice: undeliverable, prompt, was_new: false }
@@ -134,7 +141,7 @@ export class DefaultButtonRouter implements ButtonRouter {
           choice_value: input.raw_value,
           chosen_at,
           speaker_user_id: input.speaker_user_id,
-          channel_kind: input.channel_kind,
+          channel_kind,
         }
         if (input.freeform_text !== undefined) undeliverable.freeform_text = input.freeform_text
         return { delivered: false, choice: undeliverable, prompt, was_new: false }
@@ -146,7 +153,7 @@ export class DefaultButtonRouter implements ButtonRouter {
       choice_value,
       chosen_at,
       speaker_user_id: input.speaker_user_id,
-      channel_kind: input.channel_kind,
+      channel_kind,
     }
     if (freeform_text !== undefined) choice.freeform_text = freeform_text
 

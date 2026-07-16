@@ -31,6 +31,7 @@ import {
   type ButtonChoice,
 } from '../button-primitive.ts'
 import { ButtonStore } from '../button-store.ts'
+import { DefaultButtonRouter } from '../button-routing.ts'
 
 describe('normalizeChannelKindForButton (dual-read)', () => {
   test('maps the legacy hyphen onto the canonical underscore token', () => {
@@ -136,5 +137,34 @@ describe('ButtonStore channel_kind persistence', () => {
     const replay = await store.resolve({ choice: { ...choice, chosen_at: now + 2 } })
     expect(replay.was_new).toBe(false)
     expect(replay.choice.channel_kind).toBe('app_socket')
+  })
+
+  test('(a-wire) a legacy hyphen token off the wire routes + persists canonically', async () => {
+    const router = new DefaultButtonRouter({ store, now: () => now })
+    const prompt = { prompt_id: crypto.randomUUID(), body: 'q', options: [{ label: 'A', body: 'a', value: 'a' }], allow_freeform: false }
+    await store.emit(prompt, { topic_id: 'topic-wire' })
+
+    // A runtime/legacy caller hands the pre-unification hyphen token (the type
+    // excludes it, so cast to model the wire/runtime value the contract must
+    // still tolerate).
+    const result = await router.routeChoice({
+      prompt_id: prompt.prompt_id,
+      raw_value: 'a',
+      speaker_user_id: 'user-3',
+      channel_kind: 'app-socket' as unknown as 'app_socket',
+      chosen_at: now + 1,
+    })
+
+    // Returned choice is canonical...
+    expect(result.delivered).toBe(true)
+    expect(result.choice.channel_kind).toBe('app_socket')
+
+    // ...and so is the persisted column.
+    const row = db
+      .prepare<{ resolution_channel_kind: string | null }, [string]>(
+        `SELECT resolution_channel_kind FROM button_prompts WHERE prompt_id = ?`,
+      )
+      .get(prompt.prompt_id)
+    expect(row?.resolution_channel_kind).toBe('app_socket')
   })
 })
