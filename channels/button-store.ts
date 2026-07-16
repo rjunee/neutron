@@ -23,10 +23,10 @@ import type { ProjectDb } from '@neutronai/persistence/index.ts'
 import { parseJsonColumn } from '@neutronai/persistence/index.ts'
 import {
   validateButtonPrompt,
+  normalizeChannelKindForButton,
   type ButtonChoice,
   type ButtonOption,
   type ButtonPrompt,
-  type ChannelKindForButton,
   DEFAULT_EXPIRES_IN_MS,
 } from './button-primitive.ts'
 
@@ -567,7 +567,12 @@ export class ButtonStore {
           choice_value: row.resolution_value ?? '',
           chosen_at: row.resolved_at,
           speaker_user_id: row.resolution_speaker_user_id ?? choice.speaker_user_id,
-          channel_kind: (row.resolution_channel_kind as ChannelKindForButton | null) ?? choice.channel_kind,
+          // N6 dual-read — a row persisted before migration 0099 carries the
+          // legacy hyphen 'app-socket'; normalize it to the canonical
+          // 'app_socket' on read so the replayed prior choice routes
+          // identically to a freshly-written one. Falls back to the live
+          // choice's channel_kind when the column is null/unrecognized.
+          channel_kind: normalizeChannelKindForButton(row.resolution_channel_kind) ?? choice.channel_kind,
         }
         if (row.resolution_freeform_text !== null) {
           priorChoice.freeform_text = row.resolution_freeform_text

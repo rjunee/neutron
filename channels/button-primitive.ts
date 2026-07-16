@@ -56,7 +56,46 @@ export const RESERVED_OPTION_VALUES: ReadonlySet<string> = new Set([
   '__cancel__',
 ])
 
-export type ChannelKindForButton = 'telegram' | 'app-socket' | 'webhook'
+/**
+ * The button-vocabulary channel kind. N6 (2026-07-16) unified the app-socket
+ * spelling with the base {@link import('./types.ts').ChannelKind} enum: this
+ * vocabulary now uses the SAME underscore `'app_socket'` token, so
+ * `ChannelKindForButton` is a strict SUBSET of `ChannelKind` (buttons never
+ * carry `'cli'`). `'webhook'` is retained — it is a LIVE synthetic marker the
+ * `ButtonStore` writes onto system-generated resolutions (`sweepExpired`'s
+ * `__timeout__`, `persistInertAgentTurn`), not an adapterless dead member.
+ *
+ * The pre-N6 hyphen spelling `'app-socket'` was PERSISTED in
+ * `button_prompts.resolution_channel_kind` by every prior build; migration
+ * 0099 normalizes those rows, and {@link normalizeChannelKindForButton}
+ * tolerates the legacy token on read + off the wire (the dual-read window) so
+ * an in-flight row written just before the migration still routes correctly.
+ */
+export type ChannelKindForButton = 'telegram' | 'app_socket' | 'webhook'
+
+/**
+ * The pre-N6 hyphen spelling of the app-socket button channel kind. Persisted
+ * in `button_prompts.resolution_channel_kind` before migration 0099; still
+ * accepted on read via {@link normalizeChannelKindForButton}. Do NOT write it
+ * on any new path — the canonical token is `'app_socket'`.
+ */
+export const LEGACY_APP_SOCKET_CHANNEL_KIND = 'app-socket'
+
+/**
+ * Dual-read normalizer for a persisted / wire `channel_kind` string in the
+ * button vocabulary. Maps the legacy hyphen `'app-socket'` onto the canonical
+ * underscore `'app_socket'` and passes through the other canonical tokens.
+ * Returns null for an absent or unrecognized value so callers can fall back
+ * to a live-context default rather than persisting a corrupt token.
+ */
+export function normalizeChannelKindForButton(
+  raw: string | null | undefined,
+): ChannelKindForButton | null {
+  if (raw === null || raw === undefined) return null
+  if (raw === LEGACY_APP_SOCKET_CHANNEL_KIND) return 'app_socket'
+  if (raw === 'telegram' || raw === 'app_socket' || raw === 'webhook') return raw
+  return null
+}
 
 /**
  * The channel-agnostic INPUT primitive for a tappable option.

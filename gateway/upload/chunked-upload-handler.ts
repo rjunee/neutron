@@ -808,7 +808,7 @@ export function buildChunkedUploadHandler(
           uid: input.uid,
           gid: input.gid,
           topic_id,
-          channel_kind: 'app-socket',
+          channel_kind: 'app_socket',
         }
         if (parsed?.user_id !== undefined) ctx.user_id = parsed.user_id
         return ctx

@@ -229,7 +229,7 @@ describe('button-primitive cross-channel — app-socket round-trip (S5)', () => 
         prompt_id: parsed.prompt_id,
         raw_value: parsed.raw_value,
         speaker_user_id: parsed.speaker_user_id,
-        channel_kind: 'app-socket',
+        channel_kind: 'app_socket',
         ...(parsed.freeform_text !== undefined ? { freeform_text: parsed.freeform_text } : {}),
       })
       if (result.delivered) {
@@ -258,7 +258,7 @@ describe('button-primitive cross-channel — app-socket round-trip (S5)', () => 
 
     expect(appSocketChoice).not.toBeNull()
     expect(appSocketChoice!.choice_value).toBe(optAValue)
-    expect(appSocketChoice!.channel_kind).toBe('app-socket')
+    expect(appSocketChoice!.channel_kind).toBe('app_socket')
 
     // Re-delivery: same envelope should resolve idempotently with was_new=false.
     let secondResult: Awaited<ReturnType<DefaultButtonRouter['routeChoice']>> | null = null
@@ -266,7 +266,7 @@ describe('button-primitive cross-channel — app-socket round-trip (S5)', () => 
       prompt_id: start_prompt_id,
       raw_value: optAValue,
       speaker_user_id: 'u-as-1',
-      channel_kind: 'app-socket',
+      channel_kind: 'app_socket',
     })
     expect(secondResult.delivered).toBe(true)
     expect(secondResult.was_new).toBe(false)
@@ -323,7 +323,7 @@ describe('button-primitive cross-channel — app-socket round-trip (S5)', () => 
       prompt_id: emitB.prompt_id,
       raw_value: optAValue,
       speaker_user_id: 'u',
-      channel_kind: 'app-socket',
+      channel_kind: 'app_socket',
     })
 
     expect(tgResult.delivered).toBe(true)

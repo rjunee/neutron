@@ -78,7 +78,7 @@ function buildDeps(owner_home: string, recorder: Recorder): ImportUploadDeps {
     gid: process.getgid?.() ?? 0,
     project_slug: 'test-project',
     topic_id: 'chat',
-    channel_kind: 'app-socket',
+    channel_kind: 'app_socket',
   }
   return {
     resolveInstanceContext: async () => ctx,

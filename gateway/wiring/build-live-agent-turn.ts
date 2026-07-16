@@ -1239,7 +1239,7 @@ async function resolvePreviousRowWithUserText(
           topic_id: turn.topic_id,
           text: turn.user_text,
           speaker_user_id: turn.user_id,
-          channel_kind: 'app-socket',
+          channel_kind: 'app_socket',
         })
       }
       return latest !== null && typeof latest.body === 'string' ? latest.body : null
@@ -1252,7 +1252,7 @@ async function resolvePreviousRowWithUserText(
         freeform_text: turn.user_text,
         chosen_at: observed_at,
         speaker_user_id: turn.user_id,
-        channel_kind: 'app-socket',
+        channel_kind: 'app_socket',
       },
     })
     return priorBody

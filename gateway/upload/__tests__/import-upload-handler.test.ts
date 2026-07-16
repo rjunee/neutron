@@ -62,7 +62,7 @@ function buildDeps(opts: {
   gid?: number
   project_slug?: string
   topic_id?: string
-  channel_kind?: 'app-socket' | 'telegram' | 'webhook'
+  channel_kind?: 'app_socket' | 'telegram' | 'webhook'
   recorder: RecorderResult
   notifyResult?: AdvanceResult
   notifyThrows?: Error
@@ -75,7 +75,7 @@ function buildDeps(opts: {
     gid: opts.gid ?? process.getgid?.() ?? 0,
     project_slug: opts.project_slug ?? 'test-project',
     topic_id: opts.topic_id ?? 'chat',
-    channel_kind: opts.channel_kind ?? 'app-socket',
+    channel_kind: opts.channel_kind ?? 'app_socket',
   }
   const deps: ImportUploadDeps = {
     resolveInstanceContext: async () => ctx,
@@ -356,7 +356,7 @@ describe('handleImportUpload', () => {
       recorder,
       project_slug: 'casey',
       topic_id: 'chat-42',
-      channel_kind: 'app-socket',
+      channel_kind: 'app_socket',
     })
     const res = await handleImportUpload(
       buildRequest({
@@ -392,7 +392,7 @@ describe('handleImportUpload', () => {
         gid: process.getgid?.() ?? 0,
         project_slug: 'casey',
         topic_id: topicId,
-        channel_kind: 'app-socket',
+        channel_kind: 'app_socket',
       }
       return ctx
     }
@@ -430,7 +430,7 @@ describe('handleImportUpload', () => {
       gid: process.getgid?.() ?? 0,
       project_slug: 'casey',
       topic_id: extractTopicIdFromRequest(req) ?? TOPIC_ID_FALLBACK,
-      channel_kind: 'app-socket',
+      channel_kind: 'app_socket',
     })
     const baseDeps = buildDeps({ owner_home, recorder })
     const deps: ImportUploadDeps = {
@@ -459,7 +459,7 @@ describe('handleImportUpload', () => {
       gid: process.getgid?.() ?? 0,
       project_slug: 'casey',
       topic_id: extractTopicIdFromRequest(req) ?? TOPIC_ID_FALLBACK,
-      channel_kind: 'app-socket',
+      channel_kind: 'app_socket',
     })
     const baseDeps = buildDeps({ owner_home, recorder })
     const deps: ImportUploadDeps = {

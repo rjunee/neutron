@@ -660,7 +660,7 @@ export class InterviewEngine implements EngineInternals {
       project_slug: input.project_slug,
       topic_id,
       user_id,
-      channel_kind: signup_via === 'telegram' ? 'telegram' : 'app-socket',
+      channel_kind: signup_via === 'telegram' ? 'telegram' : 'app_socket',
       observed_at,
     }
 

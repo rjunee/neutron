@@ -158,7 +158,7 @@ describe('DefaultButtonRouter.routeChoice', () => {
       prompt_id: prompt.prompt_id,
       raw_value: 'My freeform answer',
       speaker_user_id: 'u-1',
-      channel_kind: 'app-socket',
+      channel_kind: 'app_socket',
     })
     expect(out.delivered).toBe(true)
     expect(out.choice.choice_value).toBe('__freeform__')
@@ -186,7 +186,7 @@ describe('DefaultButtonRouter.routeChoice', () => {
       raw_value: '__freeform__',
       freeform_text: 'a literal answer',
       speaker_user_id: 'u-1',
-      channel_kind: 'app-socket',
+      channel_kind: 'app_socket',
     })
     expect(out.delivered).toBe(true)
     expect(out.choice.freeform_text).toBe('a literal answer')
@@ -214,7 +214,7 @@ describe('DefaultButtonRouter.routeChoice', () => {
       prompt_id: prompt.prompt_id,
       raw_value: '__cancel__',
       speaker_user_id: 'u-1',
-      channel_kind: 'app-socket',
+      channel_kind: 'app_socket',
     })
     expect(out.delivered).toBe(true)
     expect(out.choice.choice_value).toBe('__cancel__')

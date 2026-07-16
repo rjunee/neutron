@@ -306,7 +306,7 @@ describe('chat-topics surface — GET /api/v1/chat/topics', () => {
         choice_value: 'continue',
         chosen_at: now,
         speaker_user_id: USER_ID,
-        channel_kind: 'app-socket',
+        channel_kind: 'app_socket',
       },
     })
 
