@@ -755,42 +755,36 @@ function stripSupersededSentences(
     const bullet = /^(\s*(?:[-*+]|\d+[.)])\s+)/.exec(line)?.[0] ?? ''
     const content = line.slice(bullet.length)
     const spans = splitSentencesWithOffsets(content)
-    const kept: string[] = []
-    let droppedAny = false
-    for (const span of spans) {
-      const raw = content.slice(span.start, span.end)
-      const keys = sentenceKeys(raw)
-      // Drop a sentence ONLY when it is PURELY a generated relationship assertion for
-      // a superseded target (no sibling relation, no descriptive prose). Anything
-      // else — a compound sentence OR a single relation wrapped in hand-authored
-      // prose — is KEPT VERBATIM: never destroy or reconstruct hand-authored content
-      // (Codex). Safe under-removal; scribe's own one-relation-per-sentence prose
-      // always hits this clean path, so real chat-time supersessions invalidate.
-      const pureKey = pureSupersededSentence(raw, keys)
-      if (pureKey !== null) {
-        droppedAny = true
-        removed.add(pureKey) // record what was ACTUALLY retired
-        continue
-      }
-      // Keep the sentence VERBATIM (either no target, or a compound sentence we
-      // won't mangle) with its original terminator (or a normalising period).
-      const term = content[span.end]
-      const trimmed = raw.trim()
-      if (trimmed.length === 0) continue
-      kept.push(
-        term === '.' || term === '!' || term === '?'
-          ? `${trimmed}${term}`
-          : /[.!?]$/.test(trimmed)
-            ? trimmed
-            : `${trimmed}.`,
-      )
+    // Identify the DROP ranges over the original `content` — a pure superseded
+    // sentence PLUS its terminator and the whitespace up to the next sentence, so
+    // the surviving text stays BYTE-EXACT (no trim, no whitespace normalisation).
+    const drops: Array<[number, number]> = []
+    for (let i = 0; i < spans.length; i += 1) {
+      const span = spans[i]!
+      const pureKey = pureSupersededSentence(content.slice(span.start, span.end), sentenceKeys(content.slice(span.start, span.end)))
+      if (pureKey === null) continue
+      removed.add(pureKey) // record what was ACTUALLY retired
+      const from = span.start
+      const to = i + 1 < spans.length ? spans[i + 1]!.start : content.length
+      drops.push([from, to])
     }
-    if (!droppedAny) {
-      outLines.push(line) // nothing to retire on this line → keep verbatim
+    if (drops.length === 0) {
+      outLines.push(line) // nothing to retire on this line → keep byte-for-byte
       continue
     }
-    if (kept.length === 0) continue // the whole line was superseded → drop it
-    outLines.push(`${bullet}${kept.join(' ')}`)
+    // Splice the drop ranges out of `content`, keeping every other byte exactly.
+    let rebuilt = ''
+    let cursor = 0
+    for (const [from, to] of drops) {
+      rebuilt += content.slice(cursor, from)
+      cursor = to
+    }
+    rebuilt += content.slice(cursor)
+    // Trim only the OUTER whitespace (the separator that flanked a dropped sentence);
+    // whitespace BETWEEN surviving sentences is inside `rebuilt` and stays byte-exact.
+    rebuilt = rebuilt.trim()
+    if (rebuilt.length === 0) continue // the whole line was superseded → drop it
+    outLines.push(`${bullet}${rebuilt}`)
   }
   return { text: outLines.join('\n'), removed }
 }

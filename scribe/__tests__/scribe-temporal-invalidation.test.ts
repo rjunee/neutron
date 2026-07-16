@@ -1114,6 +1114,69 @@ describe('RB4 temporal invalidation (belief evolution) — real PGLite round-tri
     expect(timeline.some((e) => e.body.includes('superseded'))).toBe(false)
   }, 60_000)
 
+  test('flag ON: dropping one sentence on a MIXED line preserves the survivors byte-for-byte (whitespace intact)', async () => {
+    const ownerDataDir = mkdtempSync(join(tmpdir(), 'scribe-rb4-mixed-'))
+    const syncHook = new GBrainSyncHook({
+      memoryStore: new GBrainMemoryStore(client),
+      gbrainMcp: client,
+    })
+    for (const slug of ['mxold', 'mxa', 'mxb']) {
+      await client.call('put_page', {
+        slug,
+        content: `---\nslug: ${slug}\ntype: company\n---\n\nA company.\n`,
+      })
+    }
+    // One LINE, three sentences; sentence 0 is a pure generated `Works at` form,
+    // the two survivors are separated by TWO spaces (unusual, hand-authored).
+    const SURVIVORS = 'Advises [[mxa]].  Founded [[mxb]].' // NOTE: two spaces
+    await writeEntity(
+      {
+        ownerDataDir,
+        kind: 'person',
+        slug: 'max-ito',
+        originInstance: 'rb4',
+        receivingInstanceSlug: 'rb4',
+        body: {
+          frontmatter: { slug: 'max-ito', type: 'person', name: 'Max Ito' },
+          compiledTruth: `# Max Ito\n\nAn operator.\n\n## Relationships\n\n- Works at [[mxold]]. ${SURVIVORS}\n`,
+          timelineAppend: { ts: new Date(t0).toISOString(), source: 'import:onboarding', body: 'seeded' },
+        },
+      },
+      { syncHook },
+    )
+
+    const scribe = createScribe({
+      substrate: cannedSubstrate(factSupersede('Max Ito', 'Mxold', 'Mxnew')),
+      syncHook,
+      ownerDataDir,
+      project_slug: 'rb4-mixed',
+      budget: createState(join(ownerDataDir, '.scribe-budget.json'), t0),
+      writeEntity,
+      now: () => t0 + 1000,
+      supersede: true,
+    })
+    const out = await scribe.extractAndWrite({
+      text: 'Max Ito has moved on from Mxold and now works at Mxnew, running their platform group these days full time.',
+      observed_at: t0 + 1000,
+    })
+    expect(out.ran).toBe(true)
+
+    const compiled = extractCompiledTruth(
+      readFileSync(join(ownerDataDir, 'entities', 'people', 'max-ito.md'), 'utf8'),
+    )
+    // The pure `Works at [[mxold]]` sentence is retired; the survivors keep their
+    // ORIGINAL bytes — including the double space between them (no normalisation).
+    expect(compiled).not.toContain('[[mxold]]')
+    expect(compiled).toContain(`- ${SURVIVORS}`)
+    expect(compiled).toContain('Works at [[mxnew]].')
+
+    const links = await client.call('get_links', { slug: 'max-ito' })
+    expect(edgesTo(links, 'mxold', 'works_at').length).toBe(0) // retired
+    expect(edgesTo(links, 'mxa', 'advises').length).toBe(1) // survivor edge
+    expect(edgesTo(links, 'mxb', 'founded').length).toBe(1) // survivor edge
+    expect(edgesTo(links, 'mxnew', 'works_at').length).toBe(1) // added
+  }, 60_000)
+
   test('flag ON: a same-object multi-predicate sentence is not destroyed; the collapsed edge survives', async () => {
     const ownerDataDir = mkdtempSync(join(tmpdir(), 'scribe-rb4-multipred-'))
     const syncHook = new GBrainSyncHook({
