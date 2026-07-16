@@ -980,4 +980,139 @@ describe('RB4 temporal invalidation (belief evolution) — real PGLite round-tri
     const timeline = extractTimeline(afterReplay)
     expect(timeline.filter((e) => e.body.includes('works_at newiv')).length).toBe(0)
   }, 60_000)
+
+  // ── Multiple relations WITHIN one sentence: removal is ALL-OR-NOTHING per
+  //    sentence — a compound sentence carrying a still-current relation is NEVER
+  //    dropped (no data loss). Bounded trade-off: a superseded relation embedded
+  //    in a compound sentence is left in place rather than destroying a sibling.
+
+  test('flag ON: a compound sentence with a still-current relation is NOT deleted (no data loss)', async () => {
+    const ownerDataDir = mkdtempSync(join(tmpdir(), 'scribe-rb4-compound-'))
+    const syncHook = new GBrainSyncHook({
+      memoryStore: new GBrainMemoryStore(client),
+      gbrainMcp: client,
+    })
+
+    await client.call('put_page', {
+      slug: 'cwoold',
+      content: '---\nslug: cwoold\ntype: company\n---\n\nA company.\n',
+    })
+    await client.call('put_page', {
+      slug: 'cwboard',
+      content: '---\nslug: cwboard\ntype: company\n---\n\nA company.\n',
+    })
+    // ONE sentence asserting TWO relations to DIFFERENT objects.
+    await writeEntity(
+      {
+        ownerDataDir,
+        kind: 'person',
+        slug: 'cwen-ash',
+        originInstance: 'rb4',
+        receivingInstanceSlug: 'rb4',
+        body: {
+          frontmatter: { slug: 'cwen-ash', type: 'person', name: 'Cwen Ash' },
+          compiledTruth:
+            '# Cwen Ash\n\nAn operator.\n\n## Relationships\n\n- Works at [[cwoold]] and advises [[cwboard]].\n',
+          timelineAppend: { ts: new Date(t0).toISOString(), source: 'import:onboarding', body: 'seeded' },
+        },
+      },
+      { syncHook },
+    )
+    let links = await client.call('get_links', { slug: 'cwen-ash' })
+    expect(edgesTo(links, 'cwboard', 'advises').length).toBe(1)
+
+    const scribe = createScribe({
+      substrate: cannedSubstrate(factSupersede('Cwen Ash', 'Cwoold', 'Cwnew')),
+      syncHook,
+      ownerDataDir,
+      project_slug: 'rb4-compound',
+      budget: createState(join(ownerDataDir, '.scribe-budget.json'), t0),
+      writeEntity,
+      now: () => t0 + 1000,
+      supersede: true,
+    })
+    const out = await scribe.extractAndWrite({
+      text: 'Cwen Ash has moved on from Cwoold and now works at Cwnew, running their reliability org day to day.',
+      observed_at: t0 + 1000,
+    })
+    expect(out.ran).toBe(true)
+
+    const onDisk = readFileSync(join(ownerDataDir, 'entities', 'people', 'cwen-ash.md'), 'utf8')
+    const compiled = extractCompiledTruth(onDisk)
+    // SAFETY: the compound sentence (and its still-current advises) is preserved…
+    expect(compiled).toContain('Works at [[cwoold]] and advises [[cwboard]].')
+    expect(compiled).toContain('Works at [[cwnew]].') // the new fact accretes
+    // …no fabricated supersession note (nothing was actually retired).
+    const timeline = extractTimeline(onDisk)
+    expect(timeline.some((e) => e.body.includes('superseded'))).toBe(false)
+
+    // The unrelated advisory edge is intact; the new employment edge is added.
+    links = await client.call('get_links', { slug: 'cwen-ash' })
+    expect(edgesTo(links, 'cwboard', 'advises').length).toBe(1) // PRESERVED (no data loss)
+    expect(edgesTo(links, 'cwnew', 'works_at').length).toBe(1) // ADDED
+  }, 60_000)
+
+  test('flag ON: a same-object multi-predicate sentence is not destroyed; the collapsed edge survives', async () => {
+    const ownerDataDir = mkdtempSync(join(tmpdir(), 'scribe-rb4-multipred-'))
+    const syncHook = new GBrainSyncHook({
+      memoryStore: new GBrainMemoryStore(client),
+      gbrainMcp: client,
+    })
+
+    await client.call('put_page', {
+      slug: 'smold',
+      content: '---\nslug: smold\ntype: company\n---\n\nA company.\n',
+    })
+    // ONE sentence, TWO predicates, SAME object — the graph collapses it to the
+    // strongest predicate (advises), so `advises smold` is the live edge.
+    await writeEntity(
+      {
+        ownerDataDir,
+        kind: 'person',
+        slug: 'sam-orr',
+        originInstance: 'rb4',
+        receivingInstanceSlug: 'rb4',
+        body: {
+          frontmatter: { slug: 'sam-orr', type: 'person', name: 'Sam Orr' },
+          // Two refs to the SAME object with different predicates in ONE sentence:
+          // the extractor collapses to the strongest (advises), so `advises smold`
+          // is the live edge and there is no `works_at smold` edge.
+          compiledTruth: '# Sam Orr\n\nAn operator.\n\n## Relationships\n\n- Advises [[smold]] and works at [[smold]].\n',
+          timelineAppend: { ts: new Date(t0).toISOString(), source: 'import:onboarding', body: 'seeded' },
+        },
+      },
+      { syncHook },
+    )
+    let links = await client.call('get_links', { slug: 'sam-orr' })
+    expect(edgesTo(links, 'smold', 'advises').length).toBe(1) // collapsed strongest edge
+
+    const scribe = createScribe({
+      substrate: cannedSubstrate(factSupersede('Sam Orr', 'Smold', 'Smnew')),
+      syncHook,
+      ownerDataDir,
+      project_slug: 'rb4-multipred',
+      budget: createState(join(ownerDataDir, '.scribe-budget.json'), t0),
+      writeEntity,
+      now: () => t0 + 1000,
+      supersede: true,
+    })
+    const out = await scribe.extractAndWrite({
+      text: 'Sam Orr has picked up a new role at Smnew this quarter and is ramping up on their platform team.',
+      observed_at: t0 + 1000,
+    })
+    expect(out.ran).toBe(true)
+
+    const onDisk = readFileSync(join(ownerDataDir, 'entities', 'people', 'sam-orr.md'), 'utf8')
+    const compiled = extractCompiledTruth(onDisk)
+    // SAFETY: the multi-predicate sentence survives (advises smold not destroyed).
+    expect(compiled).toContain('Advises [[smold]] and works at [[smold]].')
+    expect(compiled).toContain('Works at [[smnew]].') // the new fact accretes
+    const timeline = extractTimeline(onDisk)
+    expect(timeline.some((e) => e.body.includes('superseded'))).toBe(false) // no fabrication
+
+    // The collapsed advises edge is intact; the new employment edge is added.
+    links = await client.call('get_links', { slug: 'sam-orr' })
+    expect(edgesTo(links, 'smold', 'advises').length).toBe(1) // PRESERVED
+    expect(edgesTo(links, 'smnew', 'works_at').length).toBe(1) // ADDED
+  }, 60_000)
 })

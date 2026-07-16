@@ -573,6 +573,15 @@ function mergeExistingCompiledTruth(
  * target sentence and keeps the rest, so neither a stale sibling sentence lingers
  * nor an unrelated fact is deleted wholesale.
  *
+ * ALL-OR-NOTHING within a sentence (Codex data-loss blocker): a sentence is
+ * dropped ONLY when EVERY relation it asserts is a superseded target. A COMPOUND
+ * sentence that also carries a still-current relation (`Works at [[oldco]] and
+ * advises [[boardco]].`) is KEPT — deleting it would destroy the unrelated
+ * `advises boardco` fact. The trade-off is intentional and safe: a superseded
+ * relation embedded in a compound sentence is left in place (under-remove rather
+ * than destroy); scribe's own rendered prose is one relation per sentence, so
+ * this only spares hand-authored/imported compound prose.
+ *
  * A sentence qualifies purely by what it would contribute to the graph, computed
  * with the SAME `extractTypedLinks` + `splitSentencesWithOffsets` the edge
  * extractor uses — so ALIASED wikilinks (`[[oldco|OldCo]]`) and every verb
@@ -614,13 +623,19 @@ function stripSupersededSentences(
   // just triggers an extract that returns no triple; a false NEGATIVE would let a
   // superseded markdown-link assertion survive, so the gate must not miss `](`.
   const hasRef = (s: string): boolean => s.includes('[[') || s.includes('](')
-  // Which superseded targets does this single sentence assert? (Empty when none.)
-  const sentenceTargetsHit = (text: string): string[] => {
-    if (!hasRef(text)) return []
-    const triples = extractTypedLinks(`${text}\n`, page.slug, opts)
-    return triples
-      .map((t) => `${t.predicate}\x1f${t.object}`)
-      .filter((k) => targets.has(k))
+  // Classify a single sentence by what it would contribute to the graph:
+  //   - `hits`       — the superseded target keys it asserts, and
+  //   - `allTargets` — whether EVERY relation it asserts is a superseded target
+  //                    (so dropping the whole sentence deletes nothing current).
+  // A compound sentence that also asserts a non-target relation → allTargets:false
+  // → NOT dropped (Codex data-loss guard).
+  const classifySentence = (text: string): { hits: string[]; allTargets: boolean } => {
+    if (!hasRef(text)) return { hits: [], allTargets: false }
+    const keys = extractTypedLinks(`${text}\n`, page.slug, opts).map(
+      (t) => `${t.predicate}\x1f${t.object}`,
+    )
+    const hits = keys.filter((k) => targets.has(k))
+    return { hits, allTargets: keys.length > 0 && keys.every((k) => targets.has(k)) }
   }
 
   const outLines: string[] = []
@@ -637,8 +652,10 @@ function stripSupersededSentences(
     let droppedAny = false
     for (const span of spans) {
       const raw = content.slice(span.start, span.end)
-      const hits = sentenceTargetsHit(raw)
-      if (hits.length > 0) {
+      const { hits, allTargets } = classifySentence(raw)
+      // Drop the sentence ONLY when every relation it asserts is superseded —
+      // never when it also carries a still-current relation (would be data loss).
+      if (hits.length > 0 && allTargets) {
         droppedAny = true
         for (const k of hits) removed.add(k) // record what was ACTUALLY retired
         continue
