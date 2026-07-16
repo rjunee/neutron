@@ -46,7 +46,7 @@ GOAL: FILL:<one-sentence description of what done looks like>
 CONTEXT (human-readable, for nudge composition):
 FILL:<2-5 lines of relevant background so each nudge can reference it>
 
-CHECK_PATHS: FILL:<file globs to read, e.g. {{OWNER_HOME}}/Projects/acme/STATUS.md, {{OWNER_HOME}}/Projects/acme/*canton*.md>
+CHECK_PATHS: FILL:<file globs to read, e.g. Projects/acme/STATUS.md, Projects/acme/*canton*.md>
 CHECK_CRITERIA: FILL:<what indicates done — "trip booked", "flights confirmed", "status: complete">
 
 Compose one crisp 1-3 sentence nudge toward the GOAL:
@@ -162,7 +162,7 @@ PATTERN: check-in-cadence
 TAG: FILL:<distinctive-tag>
 HABIT: FILL:<what habit>
 QUESTION: FILL:<single question>
-LOG_FILE: FILL:<absolute path, e.g. {{OWNER_HOME}}/Projects/biohacking/checkin-log.md>
+LOG_FILE: FILL:<workspace-relative path, e.g. Projects/biohacking/checkin-log.md>
 
 Compose the check-in:
 1. If LOG_FILE exists, read the last few entries with your read tools to understand the recent trajectory.
@@ -192,7 +192,7 @@ The user's reply arrives through the chat topic and is handled there — you onl
 PATTERN: context-aware-one-shot
 TOPIC: FILL:<short topic>
 
-CONTEXT: FILL:<what on-disk project state is relevant, e.g. {{OWNER_HOME}}/Projects/<slug>/STATUS.md>
+CONTEXT: FILL:<what on-disk project state is relevant, e.g. Projects/<slug>/STATUS.md>
 OUTPUT_SHAPE: FILL:<what the final message should look like, e.g. "names the next milestone and suggests one concrete step">
 
 Compose the message:

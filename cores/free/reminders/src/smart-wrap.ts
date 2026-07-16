@@ -50,19 +50,20 @@ export type ReminderPatternName = typeof REMINDER_PATTERN_NAMES[number]
 /**
  * The locked smart-wrap prelude — an explicit fire-time composition
  * instruction persisted into the reminder body for Shape B. It names
- * ONLY Open-real context sources: the destination project's `STATUS.md`,
- * read by the fire-time compose agent's read-only Read/Glob/Grep tools
- * (`reminders/dispatcher.ts` wires exactly those and `reminders/context.ts`
- * reads STATUS.md), plus the clock. It deliberately references NO external
- * shell tooling — Open ships no weather / telegram-post / calendar CLI
- * helpers; the dispatcher composes the nudge and posts it through the
- * internal `ReminderOutbound` seam. Calendar / weather can be layered
- * later behind the same `ReminderContextSource.gather` seam without
- * touching this string.
+ * ONLY Open-real context sources: the destination project's recent state
+ * from its `STATUS.md` (the dispatcher's `ReminderContextSource` gathers
+ * that content and hands it to the compose agent, which also has read-only
+ * Read/Glob/Grep — `reminders/dispatcher.ts` + `reminders/context.ts`),
+ * plus the clock. It deliberately references NO external shell tooling —
+ * Open ships no weather / telegram-post / calendar CLI helpers; the
+ * dispatcher composes the nudge and posts it through the internal
+ * `ReminderOutbound` seam.
  *
- * `{{OWNER_HOME}}` is left un-substituted in the persisted body — the
- * composer stores the literal so an owner-home rename doesn't poison
- * existing reminders; the fire-time prompt loader substitutes it.
+ * The prelude carries NO template tokens (`{{...}}`): the persisted body is
+ * fed to the fire-time substrate VERBATIM by `buildReminderPrompt`
+ * (`reminders/prompt.ts`) with no template substitution, so any
+ * `{{OWNER_HOME}}` here would reach the agent unresolved as a literal,
+ * nonexistent path. It stays path-free instead.
  *
  * Exported so the snapshot test + the production-composer integration
  * test can compare the persisted `message` field against this literal
@@ -70,10 +71,10 @@ export type ReminderPatternName = typeof REMINDER_PATTERN_NAMES[number]
  */
 export const SMART_WRAP_PRELUDE: string =
   'Compose a smart version of this reminder using available context ' +
-  '(recent project state from {{OWNER_HOME}}/Projects/<slug>/STATUS.md read ' +
-  'with your Read/Glob/Grep tools, the day of week and time of day). Keep it ' +
-  '1-3 sentences, action-oriented, no preamble, no em dashes. If no useful ' +
-  'context is available, deliver the original message verbatim.'
+  "(the destination project's recent state from its STATUS.md, plus the day " +
+  'of week and time of day). Keep it 1-3 sentences, action-oriented, no ' +
+  'preamble, no em dashes. If no useful context is available, deliver the ' +
+  'original message verbatim.'
 
 /**
  * The body the user typed is appended after the prelude as a trailing

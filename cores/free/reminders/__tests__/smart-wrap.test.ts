@@ -9,6 +9,7 @@ import {
   isReminderPatternName,
 } from '../src/smart-wrap.ts'
 import { classifyReminderMessage, literalFallback } from '@neutronai/reminders/message-shape.ts'
+import { buildReminderPrompt } from '@neutronai/reminders/prompt.ts'
 
 const FAKE_PATTERN_BODY =
   'PATTERN: nag-until-done\nTAG: FILL:<distinctive-tag>\nGOAL: FILL:<one-sentence>\n\nTASK: Each morning, compose a nudge...'
@@ -89,24 +90,43 @@ describe('Shape B — smart-wrap', () => {
     // Pin the byte-exact prelude. ANY change here is a deliberate diff
     // that changes every existing Shape-B reminder's stored body. N7
     // (2026-07): the prelude now names ONLY Open-real fire-time context
-    // (the project STATUS.md via the compose agent's read tools + the
-    // clock) — no `weather.sh`/`gog`/`tg-post.sh`, which Open does not ship.
+    // (the project STATUS.md gathered by the dispatcher + the clock) — no
+    // `weather.sh`/`gog`/`tg-post.sh`, which Open does not ship, and no
+    // `{{OWNER_HOME}}` token (the stored body is fed to the substrate
+    // verbatim, so a template token would reach the agent unresolved).
     expect(SMART_WRAP_PRELUDE).toBe(
       'Compose a smart version of this reminder using available context ' +
-        '(recent project state from {{OWNER_HOME}}/Projects/<slug>/STATUS.md read ' +
-        'with your Read/Glob/Grep tools, the day of week and time of day). Keep it ' +
-        '1-3 sentences, action-oriented, no preamble, no em dashes. If no useful ' +
-        'context is available, deliver the original message verbatim.',
+        "(the destination project's recent state from its STATUS.md, plus the day " +
+        'of week and time of day). Keep it 1-3 sentences, action-oriented, no ' +
+        'preamble, no em dashes. If no useful context is available, deliver the ' +
+        'original message verbatim.',
     )
   })
 
-  test('the locked prelude references no machinery absent from Open', () => {
+  test('the locked prelude references no machinery absent from Open and carries no unresolved template token', () => {
     // N7 acceptance: the stored Shape-B instruction must not point the
-    // fire-time agent at Vajra-only scripts the Open repo does not carry.
+    // fire-time agent at Vajra-only scripts the Open repo does not carry,
+    // nor at a `{{...}}` token that never gets substituted at fire time.
     expect(SMART_WRAP_PRELUDE).not.toContain('weather.sh')
     expect(SMART_WRAP_PRELUDE).not.toContain('tg-post.sh')
     expect(SMART_WRAP_PRELUDE).not.toContain('scripts/')
     expect(SMART_WRAP_PRELUDE).not.toContain('gog ')
+    expect(SMART_WRAP_PRELUDE).not.toMatch(/\{\{[^}]+\}\}/)
+  })
+
+  test('the generated fire-time AgentSpec.prompt for a Shape-B reminder has no unresolved {{...}} tokens', () => {
+    // Codex N7 blocker: the persisted body flows through classify ->
+    // buildReminderPrompt VERBATIM (no template substitution at fire time),
+    // so anything the composer bakes in reaches the substrate literally.
+    // Guard the whole composer -> classifier -> prompt-builder chain.
+    const composer = buildSmartWrapComposer({ loadPattern: fakeLoader })
+    const message = composer.compose({ body: 'walk the dogs', mode: { kind: 'smart_wrap' } }).message
+    const prompt = buildReminderPrompt({
+      shape: classifyReminderMessage(message),
+      context: '',
+      now_iso: '2026-07-15T12:00:00Z',
+    })
+    expect(prompt).not.toMatch(/\{\{[^}]+\}\}/)
   })
 
   test('the persisted message contains the verbatim body — fire-time agent reads it', () => {
