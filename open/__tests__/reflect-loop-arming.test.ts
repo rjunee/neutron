@@ -27,6 +27,7 @@ import type { Event } from '@neutronai/runtime/events.ts'
 import type { Substrate } from '@neutronai/runtime/substrate.ts'
 import type { ClaudeCodeSubstrateOptions } from '@neutronai/runtime/adapters/claude-code/index.ts'
 import { DEFAULT_REFLECT_INTERVAL_MS } from '@neutronai/scribe/index.ts'
+import { SupervisedLoop } from '@neutronai/loop'
 import { buildOpenGraphComposer } from '../composer.ts'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
@@ -116,6 +117,45 @@ async function bootComposer(): Promise<{
     },
   }
 }
+
+test('shutdown quiesces an in-flight reflect tick BEFORE memory close begins', async () => {
+  // The composer registers the reflect loop's quiescing stop() cleanup BEFORE the
+  // memory cleanups (which start gbrainMemory.close()), and realmode_cleanups drain
+  // in forward order. So an in-flight tick must fully settle before memory close —
+  // otherwise a tick mid-syncHook/deletePage could hit a closing GBrain. This
+  // reproduces that exact ordering with a gated tick + a fake memory-close cleanup.
+  const events: string[] = []
+  let releaseTick!: () => void
+  const gate = new Promise<void>((r) => {
+    releaseTick = r
+  })
+  const loop = new SupervisedLoop({
+    name: 'reflect-consolidation',
+    intervalMs: 60_000,
+    tick: async (): Promise<void> => {
+      events.push('tick-start')
+      await gate // hold the tick "in flight" (mid syncHook/deletePage)
+      events.push('tick-end')
+    },
+  })
+  loop.start()
+  void loop.runOnce() // drive one tick; it now parks on the gate
+
+  // The composer's registration order: loop stop FIRST, then the memory close.
+  const cleanups: Array<() => void | Promise<void>> = [
+    async () => {
+      await loop.stop()
+    },
+    () => {
+      events.push('memory-close')
+    },
+  ]
+  // Release the tick shortly after the drain starts awaiting stop().
+  setTimeout(() => releaseTick(), 10)
+  for (const c of cleanups) await c() // forward-order drain (drainRealmodeCleanups)
+
+  expect(events).toEqual(['tick-start', 'tick-end', 'memory-close'])
+})
 
 test('flag OFF (default) → reflect-consolidation is NOT armed', async () => {
   const { composition, close } = await bootComposer()

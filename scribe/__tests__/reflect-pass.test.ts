@@ -182,6 +182,42 @@ describe('reflect dedup (deterministic, no LLM)', () => {
     expect(existsSync(join(owner, 'entities', 'companies', 'acme-co.md'))).toBe(true)
   })
 
+  test('a concurrent write to a cluster member aborts the merge (no clobber, no wrong delete)', async () => {
+    const owner = tmpOwner()
+    await seed(owner, 'company', 'acme', 'Acme', 'Acme is a developer-tools SaaS company.', [
+      { ts: '2026-07-01T00:00:00.000Z', source: 'chat:owner', body: 'a' },
+      { ts: '2026-07-02T00:00:00.000Z', source: 'chat:owner', body: 'b' },
+    ])
+    await seed(owner, 'company', 'acme-co', 'Acme Co', 'Acme is a developer-tools SaaS company.', [
+      { ts: '2026-07-01T00:00:00.000Z', source: 'chat:owner', body: 'c' },
+    ])
+    const report = await runReflectPass({
+      ...baseDeps(owner),
+      // A concurrent user write lands on the loser AFTER the snapshot, BEFORE merge.
+      onAfterSnapshot: async (): Promise<void> => {
+        await writeEntity({
+          ownerDataDir: owner,
+          kind: 'company',
+          slug: 'acme-co',
+          body: {
+            frontmatter: { slug: 'acme-co', type: 'company', name: 'Acme Co', source: 'chat' },
+            compiledTruth: 'Acme is a developer-tools SaaS company.',
+            timelineAppend: { ts: '2026-07-09T00:00:00.000Z', source: 'chat:owner', body: 'FRESH concurrent fact' },
+          },
+          originInstance: OWN,
+          receivingInstanceSlug: OWN,
+        })
+      },
+    })
+    // The CAS re-read sees the loser changed → the merge aborts: nothing merged,
+    // both files survive, and the concurrent fact is intact.
+    expect(report.merged).toBe(0)
+    expect(existsSync(join(owner, 'entities', 'companies', 'acme.md'))).toBe(true)
+    expect(existsSync(join(owner, 'entities', 'companies', 'acme-co.md'))).toBe(true)
+    const loser = await readPage(owner, 'companies', 'acme-co')
+    expect(extractTimeline(loser!).map((e) => e.body)).toContain('FRESH concurrent fact')
+  })
+
   test('distinct pages are NOT merged', async () => {
     const owner = tmpOwner()
     await seed(owner, 'company', 'acme', 'Acme', 'Acme is a developer-tools SaaS company.', [
@@ -448,6 +484,55 @@ describe('reflect cost confinement (tiered-write discipline)', () => {
     const bodies = extractTimeline(page!).map((e) => e.body)
     expect(bodies).toEqual(['r3', 'r2', 'r1'])
     expect(bodies.some((b) => b.includes('Consolidated'))).toBe(false)
+  })
+
+  test('a concurrent write DURING the resynth LLM call is not clobbered', async () => {
+    const owner = tmpOwner()
+    await seed(owner, 'person', 'nadia', 'Nadia', 'Nadia is an engineer.', [
+      { ts: '2026-07-01T00:00:00.000Z', source: 'chat:owner', body: 'r1' },
+      { ts: '2026-07-02T00:00:00.000Z', source: 'chat:owner', body: 'r2' },
+      { ts: '2026-07-03T00:00:00.000Z', source: 'chat:owner', body: 'r3' },
+    ])
+    // A substrate whose resynth call lands a concurrent user fact DURING the LLM
+    // window, then returns a STALE full-replacement that omits that fact.
+    const substrate: Substrate = {
+      start(spec): SessionHandle {
+        const isResynth = !spec.prompt.includes('DIGEST:')
+        const concurrent = isResynth
+          ? writeEntity({
+              ownerDataDir: owner,
+              kind: 'person',
+              slug: 'nadia',
+              body: {
+                frontmatter: { slug: 'nadia', type: 'person', name: 'Nadia', source: 'chat' },
+                compiledTruth: 'Nadia is an engineer. Promoted to staff.',
+                timelineAppend: { ts: '2026-07-09T00:00:00.000Z', source: 'chat:owner', body: 'promo' },
+              },
+              originInstance: OWN,
+              receivingInstanceSlug: OWN,
+            })
+          : Promise.resolve(undefined)
+        async function* gen(): AsyncGenerator<Event> {
+          await concurrent // the concurrent write lands DURING the LLM call
+          yield { kind: 'token', text: isResynth ? 'Nadia is a senior engineer.' : '{"entities":[]}' }
+          yield { kind: 'completion', usage: { input_tokens: 1, output_tokens: 1 }, substrate_instance_id: 'fake' }
+        }
+        return {
+          events: gen(),
+          async respondToTool(): Promise<void> {
+            throw new Error('no tools')
+          },
+          async cancel(): Promise<void> {},
+          tool_resolution: 'internal',
+        }
+      },
+    }
+    const report = await runReflectPass({ ...baseDeps(owner), substrate })
+    // The CAS re-read sees the on-disk truth changed → the stale rewrite is skipped.
+    expect(report.resynthesized).toBe(0)
+    const ct = extractCompiledTruth((await readPage(owner, 'people', 'nadia'))!)
+    expect(ct).toContain('Promoted to staff') // concurrent fact survived
+    expect(ct).not.toContain('senior engineer') // stale rewrite NOT applied
   })
 
   test('reserved extraction sees the SAME-pass consolidated truth (freshness)', async () => {

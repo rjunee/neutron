@@ -123,6 +123,12 @@ export interface ReflectPassDeps {
   now?: () => number
   /** Failure sink. Defaults to a structured warn. */
   logFailure?: (msg: string, err: unknown) => void
+  /**
+   * Test-only seam fired ONCE right after the corpus snapshot, before any
+   * mutation. Lets a test inject a deterministic concurrent write to prove the
+   * compare-and-swap guards back off instead of clobbering it. Unused in production.
+   */
+  onAfterSnapshot?: () => void | Promise<void>
 }
 
 export interface ReflectReport {
@@ -138,7 +144,9 @@ export interface ReflectReport {
   llmCalls: number
 }
 
-/** One enumerated + read entity page. */
+/** One enumerated + read entity page. `raw` is the EXACT on-disk body at snapshot
+ *  time — the compare-and-swap baseline that lets a mutating step (merge/unlink/
+ *  re-synthesis) detect a concurrent user write and back off instead of clobbering. */
 interface LoadedPage {
   kind: EntityKind
   slug: string
@@ -146,6 +154,7 @@ interface LoadedPage {
   compiledTruth: string
   timeline: TimelineEntry[]
   frontmatter: Record<string, unknown>
+  raw: string
 }
 
 /** Extract the set of `[[slug]]` (or `[[slug|alias]]`) wikilink targets in text —
@@ -200,6 +209,16 @@ export async function runReflectPass(deps: ReflectPassDeps): Promise<ReflectRepo
     return report
   }
   report.scanned = pages.length
+
+  // Test seam: a deterministic concurrent write can be injected here to exercise
+  // the compare-and-swap guards below. No-op in production.
+  if (deps.onAfterSnapshot !== undefined) {
+    try {
+      await deps.onAfterSnapshot()
+    } catch (err) {
+      logFailure('reflect: onAfterSnapshot hook threw', err)
+    }
+  }
 
   // ── Step 1 — DEDUP (deterministic, no LLM). Do it FIRST so re-synthesis + the
   //    reserved digest see the collapsed set.
@@ -270,6 +289,7 @@ async function loadAllPages(ownerDataDir: string): Promise<LoadedPage[]> {
         compiledTruth: extractCompiledTruth(read.body),
         timeline: extractTimeline(read.body),
         frontmatter: fm,
+        raw: read.body,
       })
     }
   }
@@ -378,13 +398,20 @@ async function dedupPages(
         continue
       }
       try {
-        const { survivor, retained, deleted } = await mergeCluster(members, deps, now)
-        survivors.push(survivor)
+        const merged = await mergeCluster(members, deps, now)
+        if (merged === null) {
+          // A member changed on disk since the snapshot (a concurrent user write)
+          // — abort this cluster's merge and keep every member as-is; a later pass
+          // re-clusters the fresh content. No stale write, no wrong delete.
+          for (const m of members) survivors.push(m)
+          continue
+        }
+        survivors.push(merged.survivor)
         // A loser whose canonical (on-disk) deletion FAILED is retained as its own
         // survivor and NOT counted as merged — telemetry never claims a
         // consolidation that left both files on disk (a later pass retries it).
-        for (const r of retained) survivors.push(r)
-        report.merged += deleted
+        for (const r of merged.retained) survivors.push(r)
+        report.merged += merged.deleted
       } catch (err) {
         // Merge failed — keep every member as its own survivor (no data lost).
         logFailure('reflect: merge failed', err)
@@ -408,7 +435,16 @@ async function mergeCluster(
   members: LoadedPage[],
   deps: ReflectPassDeps,
   now: () => number,
-): Promise<{ survivor: LoadedPage; retained: LoadedPage[]; deleted: number }> {
+): Promise<{ survivor: LoadedPage; retained: LoadedPage[]; deleted: number } | null> {
+  // COMPARE-AND-SWAP guard: re-read every member and confirm it is byte-identical
+  // to the snapshot the merge is based on. If ANY member changed on disk since the
+  // snapshot (a concurrent scribe/user write between enumeration and here), abort
+  // — merging from a stale snapshot would drop the new content AND deleting the
+  // loser would destroy it. A later pass re-clusters the current content.
+  for (const m of members) {
+    const current = await reloadRawBody(deps.ownerDataDir, m.kind, m.slug)
+    if (current === null || current !== m.raw) return null
+  }
   const ranked = [...members].sort((a, b) => {
     if (b.timeline.length !== a.timeline.length) return b.timeline.length - a.timeline.length
     if (b.compiledTruth.length !== a.compiledTruth.length) {
@@ -574,6 +610,14 @@ async function resynthesizePages(
       // report a phantom consolidation, grow the timeline every pass, and keep the
       // page permanently above the row gate. Only a genuine change is written.
       if (next === page.compiledTruth.trim()) continue
+      // COMPARE-AND-SWAP: re-read the CURRENT compiled-truth right before the
+      // (full-replacement) write. The LLM call took time; a concurrent scribe/user
+      // write may have landed a new fact meanwhile. If the on-disk truth no longer
+      // matches the snapshot the LLM consolidated, SKIP — writing the stale rewrite
+      // would clobber that concurrent fact (Codex RB3). A later pass re-synthesizes
+      // the fresh content.
+      const current = await readContainedPage(deps.ownerDataDir, page.kind, page.slug)
+      if (current === null || current.compiledTruth.trim() !== page.compiledTruth.trim()) continue
       const frontmatter: Record<string, unknown> = {
         ...page.frontmatter,
         slug: page.slug,
@@ -663,7 +707,7 @@ async function extractReservedKinds(
     try {
       // Read any existing page for (kind, slug). The slug came from `slugify` →
       // grammar-safe path.
-      const existing = await readExistingReservedPage(deps.ownerDataDir, e.kind, slug)
+      const existing = await readContainedPage(deps.ownerDataDir, e.kind, slug)
       const fact = e.fact !== undefined && e.fact.trim().length > 0 ? e.fact.trim() : undefined
       let compiledTruth: string
       if (existing === null) {
@@ -714,22 +758,37 @@ async function extractReservedKinds(
   }
 }
 
-/** Read an existing reserved-kind page's compiled-truth + frontmatter, or null
- *  when it doesn't exist yet. Symlink-contained via the SAME hardened reader the
- *  scan uses (revalidated kind dir + `O_NOFOLLOW` leaf), so a symlinked page /
- *  ancestor can't make this read escape the owner. `slug` is grammar-safe (from
- *  `slugify`). */
-async function readExistingReservedPage(
+/** Read a page's CURRENT on-disk state (raw body + parsed compiled-truth +
+ *  frontmatter), or null when absent. Symlink-contained via the SAME hardened
+ *  reader the scan uses (revalidated kind dir + `O_NOFOLLOW` leaf), so a symlinked
+ *  page / ancestor can't make this read escape the owner. `slug` is grammar-safe.
+ *  Used both to read an existing reserved page (append-only merge) and as the
+ *  compare-and-swap re-read for re-synthesis. */
+async function readContainedPage(
   ownerDataDir: string,
   kind: EntityKind,
   slug: string,
-): Promise<{ compiledTruth: string; frontmatter: Record<string, unknown> } | null> {
+): Promise<{ raw: string; compiledTruth: string; frontmatter: Record<string, unknown> } | null> {
   if (!SLUG_REGEX.test(slug)) return null
   const contained = await containedKindDir(ownerDataDir, kind)
   if (contained === null) return null
   const read = await readContainedFile(join(contained.dir, `${slug}.md`), contained.realRoot)
   if (read === null) return null
-  return { compiledTruth: extractCompiledTruth(read.body), frontmatter: parseFrontmatter(read.body) }
+  return {
+    raw: read.body,
+    compiledTruth: extractCompiledTruth(read.body),
+    frontmatter: parseFrontmatter(read.body),
+  }
+}
+
+/** The raw on-disk body for the dedup compare-and-swap, or null when absent. */
+async function reloadRawBody(
+  ownerDataDir: string,
+  kind: EntityKind,
+  slug: string,
+): Promise<string | null> {
+  const page = await readContainedPage(ownerDataDir, kind, slug)
+  return page === null ? null : page.raw
 }
 
 /** Concatenate page titles + compiled-truth (+ the two NEWEST timeline rows —
