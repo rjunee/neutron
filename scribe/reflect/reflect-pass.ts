@@ -864,17 +864,30 @@ async function reloadRawBody(
 
 /** Concatenate page titles + compiled-truth (+ the two NEWEST timeline rows —
  *  `extractTimeline` returns rows newest-first) into a budget-capped digest for
- *  the reserved-kind extraction. */
+ *  the reserved-kind extraction.
+ *
+ *  Robust against an oversized page: each page's block is capped at HALF the
+ *  budget (so no single page can dominate / starve the rest), and a block that
+ *  still doesn't fit the REMAINING budget is SKIPPED with `continue` — never
+ *  `break` — so a large EARLY page can't empty the digest and disable reserved
+ *  extraction for every later (small) page (Codex RB3). */
 function buildCorpusDigest(pages: LoadedPage[], budgetChars: number): string {
+  const perPageCap = Math.max(1, Math.floor(budgetChars / 2))
   const parts: string[] = []
   let used = 0
   for (const p of pages) {
+    if (used >= budgetChars) break // budget fully consumed
     const recent = p.timeline
       .slice(0, 2) // newest-first ordering ⇒ the two most recent rows
       .map((e) => `  · ${e.body}`)
       .join('\n')
-    const block = `### ${p.title} (${p.kind})\n${p.compiledTruth.trim()}${recent.length > 0 ? `\n${recent}` : ''}`
-    if (used + block.length > budgetChars) break
+    let block = `### ${p.title} (${p.kind})\n${p.compiledTruth.trim()}${recent.length > 0 ? `\n${recent}` : ''}`
+    // Cap a single oversized page so it contributes a prefix without starving
+    // later pages.
+    if (block.length > perPageCap) block = block.slice(0, perPageCap)
+    // If it still doesn't fit what's left, SKIP it (continue) and try later,
+    // smaller pages — never abandon the rest of the corpus.
+    if (used + block.length + 2 > budgetChars) continue
     parts.push(block)
     used += block.length + 2
   }

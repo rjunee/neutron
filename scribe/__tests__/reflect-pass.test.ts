@@ -516,6 +516,36 @@ describe('reflect reserved-kind extraction (meeting/project/original)', () => {
     expect(extractCompiledTruth(meeting!)).toContain('Q3 Board Meeting')
   })
 
+  test('an oversized EARLY page does not disable reserved extraction for later pages', async () => {
+    const owner = tmpOwner()
+    // A PERSON page whose compiled-truth ALONE exceeds the digest budget. Since
+    // `loadAllPages` enumerates kinds in ENTITY_KINDS order (person BEFORE company),
+    // this oversized page is digested first — under the old `break` it emptied the
+    // digest and skipped reserved extraction for the whole corpus. Now it is
+    // per-page-capped + skipped-past so the later company page still digests.
+    await seed(owner, 'person', 'bigco-notes', 'BigCo Notes', 'X '.repeat(400).trim(), [
+      { ts: '2026-07-01T00:00:00.000Z', source: 'chat:owner', body: 'r' },
+    ])
+    // A small COMPANY page (enumerated AFTER the person) that evidences a meeting.
+    await seed(
+      owner,
+      'company',
+      'acme',
+      'Acme',
+      'Acme reviewed plans at the Q3 Board Meeting.',
+      [{ ts: '2026-07-02T00:00:00.000Z', source: 'chat:owner', body: 'met at Q3 board meeting' }],
+    )
+    const { substrate } = scriptedSubstrate((prompt) =>
+      prompt.includes('DIGEST:') && prompt.includes('Q3 Board Meeting')
+        ? JSON.stringify({ entities: [{ name: 'Q3 Board Meeting', kind: 'meeting', fact: 'Sarah presented' }] })
+        : '{"entities":[]}',
+    )
+    // A small budget so the first page alone would blow it (repro of the boundary).
+    const report = await runReflectPass({ ...baseDeps(owner), substrate, maxReservedDigestChars: 300 })
+    expect(report.reservedWritten).toBeGreaterThanOrEqual(1)
+    expect(await readPage(owner, 'meetings', 'q3-board-meeting')).not.toBeNull()
+  })
+
   test('re-extraction ADDITIVELY MERGES over an existing reserved page (new fact durable, no clobber)', async () => {
     const owner = tmpOwner()
     // A pre-existing, RICH project page with multiple facts + a wikilink edge.
