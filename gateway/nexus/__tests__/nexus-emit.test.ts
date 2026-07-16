@@ -28,20 +28,23 @@ import {
 
 /* ─── flag ────────────────────────────────────────────────────────── */
 
-describe('isPerfectRecallEnabled', () => {
-  it('is off by default (unset / empty / other values)', () => {
+// The re-export MUST stay byte-identical to the canonical predicate in
+// `runtime/perfect-recall-flag.ts` (RB1 made that the single source; this module
+// re-exports it for RC2's existing consumers). Same full accepted/rejected token
+// matrix the direct module test pins, so a drift in EITHER surface is caught.
+describe('isPerfectRecallEnabled (re-exported from runtime/perfect-recall-flag.ts)', () => {
+  it('is off by default (unset / empty / whitespace-only / opt-out tokens)', () => {
     expect(isPerfectRecallEnabled({})).toBe(false)
     expect(isPerfectRecallEnabled({ NEUTRON_PERFECT_RECALL: undefined })).toBe(false)
-    expect(isPerfectRecallEnabled({ NEUTRON_PERFECT_RECALL: '0' })).toBe(false)
-    expect(isPerfectRecallEnabled({ NEUTRON_PERFECT_RECALL: 'no' })).toBe(false)
-    expect(isPerfectRecallEnabled({ NEUTRON_PERFECT_RECALL: 'off' })).toBe(false)
+    for (const raw of ['', '   ', '0', 'no', 'off', 'false', 'none', 'disabled']) {
+      expect(isPerfectRecallEnabled({ NEUTRON_PERFECT_RECALL: raw })).toBe(false)
+    }
   })
 
-  it('is on for 1 / true (case-insensitive, trimmed)', () => {
-    expect(isPerfectRecallEnabled({ NEUTRON_PERFECT_RECALL: '1' })).toBe(true)
-    expect(isPerfectRecallEnabled({ NEUTRON_PERFECT_RECALL: 'true' })).toBe(true)
-    expect(isPerfectRecallEnabled({ NEUTRON_PERFECT_RECALL: 'TRUE' })).toBe(true)
-    expect(isPerfectRecallEnabled({ NEUTRON_PERFECT_RECALL: '  true  ' })).toBe(true)
+  it('is on for the full opt-in token set (case-insensitive, trimmed)', () => {
+    for (const raw of ['1', 'true', 'on', 'enabled', 'yes', 'all', 'TRUE', '  true  ']) {
+      expect(isPerfectRecallEnabled({ NEUTRON_PERFECT_RECALL: raw })).toBe(true)
+    }
   })
 })
 

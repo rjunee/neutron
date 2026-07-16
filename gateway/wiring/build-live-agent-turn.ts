@@ -504,6 +504,18 @@ export interface BuildLiveAgentTurnInput {
     project_slug: string,
     project_id: string | undefined,
   ) => string | null
+  /**
+   * RB1 (perfect-recall lane) — the breadth memory-index manifest. Returns the
+   * ALREADY-FORMATTED, escaped `<memory_index>` DATA block (a pointers-only map
+   * of the entities the owner's memory knows about: `slug → title → one-line`
+   * for people/companies/concepts) so the agent can name — and then
+   * `memory_search` — an entity it was never told about in-conversation. Unlike
+   * the work board this is injected ONCE per (instance, topic) session: it folds
+   * into the cold-turn `instance_fragments` only (stable breadth, not per-turn
+   * state), so warm turns don't re-splice it. Omitted when the perfect-recall
+   * flag is off; best-effort (a throwing/absent seam degrades to no block).
+   */
+  memoryIndexSnapshot?: () => Promise<string | null> | string | null
   /** The SAME ButtonStore the engine emits through (persistence + history). */
   buttonStore: ButtonStore
   /** Operator audit trail — same TranscriptWriter the engine appends to. */
@@ -1312,10 +1324,32 @@ async function composeFirstTurnPrompt(
     typeof onboardingContextFragment === 'string' && onboardingContextFragment.trim().length > 0
       ? onboardingContextFragment
       : null
+  // RB1 (perfect-recall) — the breadth memory-index manifest. Resolved ONLY on
+  // the cold first turn (this function) so it folds into `instance_fragments`
+  // once per (instance, topic) session — it's stable breadth, not per-turn
+  // state, so warm turns never re-splice it. Best-effort: a throwing/absent seam
+  // (or the flag being off → seam omitted) degrades to no block. Sits near the
+  // scope block (breadth grounding), before the this-turn onboarding curation.
+  let memoryIndexFragment: string | null = null
+  if (input.memoryIndexSnapshot !== undefined) {
+    try {
+      memoryIndexFragment = (await input.memoryIndexSnapshot()) ?? null
+    } catch (err) {
+      moduleLog.warn('memory_index_snapshot_failed', {
+        project: turn.project_slug,
+        error: err instanceof Error ? err.message : String(err),
+      })
+    }
+  }
+  const memoryIndex =
+    memoryIndexFragment !== null && memoryIndexFragment.trim().length > 0
+      ? memoryIndexFragment
+      : null
   const instance_fragments = [
     doctrineFragment,
     ...(projectPersonaFragment !== null ? [projectPersonaFragment] : []),
     scopeFragment,
+    ...(memoryIndex !== null ? [memoryIndex] : []),
     ...(workBoardFragment !== null ? [workBoardFragment] : []),
     ...(nexusFragment !== null ? [nexusFragment] : []),
     ...(availableServicesFragment !== null ? [availableServicesFragment] : []),

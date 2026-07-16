@@ -28,10 +28,17 @@ import { createReflection, type Reflection } from '@neutronai/reflection/index.t
 import { NexusStore } from '@neutronai/gateway/nexus/nexus-store.ts'
 import {
   emitNexusEvent,
-  isPerfectRecallEnabled,
   reflectionLearningEvent,
 } from '@neutronai/gateway/nexus/nexus-emit.ts'
 import { workBoardScopeKey } from '@neutronai/work-board/store.ts'
+// The ONE canonical perfect-recall flag (RB lane). `gateway/nexus/nexus-emit.ts`
+// re-exports THIS same predicate, so RC2 and RB1 read identical opt-in semantics
+// off the same NEUTRON_PERFECT_RECALL var.
+import { isPerfectRecallEnabled } from '@neutronai/runtime/perfect-recall-flag.ts'
+import {
+  wrapSyncHookWithMemoryIndex,
+  type MemoryIndexWorkHandle,
+} from '@neutronai/runtime/memory-index.ts'
 import { OWNER_USER_ID } from '../owner-identity.ts'
 import type { OpenWiringContext } from './context.ts'
 import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
@@ -45,6 +52,21 @@ export interface WiredMemory {
   scribe: Scribe | null
   /** Diary + corrections-log self-improvement loop (always built). */
   reflection: Reflection
+  /**
+   * RB1 (perfect-recall) — cold-turn read of the breadth memory-index manifest,
+   * with a synchronous regenerate-on-absent fallback (coalesced with the write
+   * path). `undefined` when the perfect-recall flag is off. The composer wraps
+   * the returned body as the `<memory_index>` injection fragment.
+   */
+  memoryIndexRead: (() => Promise<string | null>) | undefined
+  /**
+   * RB1 (perfect-recall) — LATE-BIND the active work-board handles provider. The
+   * work-board store is constructed AFTER `wireMemory` in the composer, so the
+   * regenerator holds a stable thunk that this setter fills in once the store
+   * exists. Resolved fresh at each manifest generation (never a boot-time
+   * snapshot). No-op when the flag is off.
+   */
+  setMemoryIndexWorkHandles: (provider: () => ReadonlyArray<MemoryIndexWorkHandle>) => void
   /** Fire-and-forget per-turn hook threaded into the chat-bridge; undefined LLM-less. */
   scribeOnUserTurn: ((input: UserTurnInput) => void) | undefined
   /**
@@ -143,7 +165,39 @@ export function wireMemory(ctx: OpenWiringContext): WiredMemory {
   cleanups.push(() => {
     fireAndForget('memory.close', gbrainMemory.close())
   })
-  const gbrainSyncHook = gbrainMemory.syncHook
+  // RB1 (perfect-recall lane, default-off flag) — when the flag is on, wrap the
+  // gbrain syncHook so EVERY entity write (chat scribe, onboarding materializer,
+  // Path-1 finalize — they all share this one hook) also regenerates the durable
+  // breadth manifest at `entities/INDEX.md`. Backend-neutral: the wrapper reads
+  // the portable entity pages, never gbrain, so it survives a memory-backend
+  // swap. Coalesced + best-effort — a manifest failure is logged and never
+  // disturbs the entity-write path. Off by default → the raw hook is threaded
+  // unchanged (zero behavior change).
+  // Late-bound active work-board handles provider (see WiredMemory.setMemory…).
+  let workHandlesProvider: (() => ReadonlyArray<MemoryIndexWorkHandle>) | null = null
+  const memoryIndexHook = isPerfectRecallEnabled(env)
+    ? wrapSyncHookWithMemoryIndex(gbrainMemory.syncHook, owner_home, {
+        logFailure: (err) =>
+          fireAndForget(
+            'memory.index',
+            Promise.reject(err instanceof Error ? err : new Error(String(err))),
+          ),
+        workHandlesProvider: () => workHandlesProvider?.() ?? [],
+      })
+    : null
+  const gbrainSyncHook = memoryIndexHook ?? gbrainMemory.syncHook
+  // Bootstrap the manifest at boot when the flag is on, so a corpus that ALREADY
+  // exists (entities written while the flag was off, then flipped on across a
+  // restart) is advertised on the very next cold turn WITHOUT waiting for a new
+  // entity write. Coalesced + best-effort — a no-op when there are no entities.
+  if (memoryIndexHook !== null) memoryIndexHook.regenerate()
+  const memoryIndexRead: (() => Promise<string | null>) | undefined =
+    memoryIndexHook !== null ? () => memoryIndexHook.read() : undefined
+  const setMemoryIndexWorkHandles = (
+    provider: () => ReadonlyArray<MemoryIndexWorkHandle>,
+  ): void => {
+    workHandlesProvider = provider
+  }
   const scribe: Scribe | null =
     scribeSubstrate !== null
       ? createScribe({
@@ -253,6 +307,8 @@ export function wireMemory(ctx: OpenWiringContext): WiredMemory {
     reflection,
     scribeOnUserTurn,
     nexus,
+    memoryIndexRead,
+    setMemoryIndexWorkHandles,
     cleanups,
   }
 }

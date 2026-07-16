@@ -47,16 +47,15 @@ const log = createLogger('nexus-emit')
  * The ONE shared feature gate for the R-behavior block (plan §14.6). Off by
  * default: the recall/coordination uplift ships DARK until an operator opts in,
  * so RC2's emitters — and RC3's reader — are inert on an un-flagged instance.
- * Accepts `1` / `true` (case-insensitive) as on; anything else is off.
+ *
+ * RB1 made `runtime/perfect-recall-flag.ts` the single source of truth (the
+ * low-level leaf both the gateway nexus wiring AND the runtime memory-index
+ * wiring can import); this re-export keeps every existing RC2 consumer importing
+ * `isPerfectRecallEnabled` from here while they all resolve to that one predicate
+ * (same `NEUTRON_PERFECT_RECALL` var, opt-in tokens `1`/`true`/`yes`/`on`/
+ * `enabled`/`all`).
  */
-export function isPerfectRecallEnabled(
-  env: Record<string, string | undefined>,
-): boolean {
-  const raw = env['NEUTRON_PERFECT_RECALL']
-  if (raw === undefined) return false
-  const v = raw.trim().toLowerCase()
-  return v === '1' || v === 'true'
-}
+export { isPerfectRecallEnabled } from '@neutronai/runtime/perfect-recall-flag.ts'
 
 /** Keep a nexus body pointers-lean AND under the store's hard cap. Long content
  *  belongs behind a `ref`, never inlined; this is a belt so a runaway task

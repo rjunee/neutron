@@ -380,6 +380,24 @@ export class WorkBoardStore {
       .map(rowToItem)
   }
 
+  /**
+   * Active + next (status != done) across ALL scopes for the owner (General +
+   * every project), ordered by scope then `sort_order`. The durable memory-index
+   * manifest (RB1) is an OWNER-WIDE breadth surface regenerated at entity-write
+   * time — when there is no "current project" — so it aggregates active work from
+   * every board rather than a single scope. A pure read; no writer.
+   */
+  listAllActive(): WorkBoardItem[] {
+    return this.db
+      .prepare<WorkBoardItemDbRow, []>(
+        `SELECT ${COLS} FROM work_board_items
+          WHERE status != 'done'
+          ORDER BY project_slug ASC, sort_order ASC`,
+      )
+      .all()
+      .map(rowToItem)
+  }
+
   /** Completed (status = done) reverse-chronological (newest first). */
   listCompleted(project_slug: string): WorkBoardItem[] {
     return this.db
