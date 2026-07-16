@@ -101,9 +101,13 @@ describe('agent-nexus per-turn injection (RC3)', () => {
     // Cold turn → folded into instance_fragments (the cacheable system prefix).
     expect(specs[0]!.prompt).toContain('NEXUS-MARKER-XYZ')
     expect(specs[0]!.prompt).toContain('<agent_nexus>')
-    // Warm turn → spliced before the user's message (every-turn re-grounding).
-    expect(specs[1]!.prompt).toContain('NEXUS-MARKER-XYZ')
-    expect(specs[1]!.prompt).toContain('second message')
+    // Warm turn → spliced BEFORE the user's message (every-turn re-grounding). Assert the
+    // ORDER, not just presence — a swap to `${user_text}\n\n${nexus}` would break the
+    // re-grounding/salience contract while independent contains() checks still passed.
+    const warm = specs[1]!.prompt
+    expect(warm).toContain('NEXUS-MARKER-XYZ')
+    expect(warm).toContain('second message')
+    expect(warm.indexOf('NEXUS-MARKER-XYZ')).toBeLessThan(warm.indexOf('second message'))
   })
 
   test('a null snapshot (empty log) injects no block', async () => {
