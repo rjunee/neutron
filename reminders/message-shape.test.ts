@@ -58,6 +58,25 @@ describe('classifyReminderMessage', () => {
     expect(s.kind).toBe('smart-wrap')
   })
 
+  test('BACKWARD-COMPAT: a legacy sentinel-less smart-wrap row (old persisted bytes) still classifies as smart-wrap', () => {
+    // Reminders persisted BEFORE the `[smart]` sentinel was added to the composer
+    // open directly with the locked prelude and carry NO sentinel. Without legacy
+    // recognition these fall through to `literal` and post the whole composition
+    // instruction. This pins the old persisted format (prelude opening + the
+    // `Original reminder:` tail the old composer wrote).
+    const legacy =
+      'Compose a smart version of this reminder using available context ' +
+      '(recent project state from {{OWNER_HOME}}/Projects/<slug>/STATUS.md read ' +
+      'with your Read/Glob/Grep tools, the day of week and time of day). Keep it ' +
+      '1-3 sentences, action-oriented, no preamble, no em dashes. If no useful ' +
+      'context is available, deliver the original message verbatim.\n\n' +
+      'Original reminder: walk the dogs'
+    const s = classifyReminderMessage(legacy)
+    expect(s.kind).toBe('smart-wrap')
+    // The no-LLM degrade posts the user's original phrase, NOT the whole prelude.
+    expect(literalFallback(s)).toBe('walk the dogs')
+  })
+
   test('[ROUTING] header is parsed off and stripped from the body', () => {
     const msg = '[ROUTING] target_thread: 4242\ntake out the trash'
     const s = classifyReminderMessage(msg)
