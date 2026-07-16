@@ -133,6 +133,18 @@ export interface WriteExtractionDeps {
   syncHook?: SyncHook
   /** Failure sink. Defaults to console.warn. */
   logFailure?: (err: unknown, ctx: { kind: EntityKind; slug: string }) => void
+  /**
+   * RB4 temporal invalidation — the shared `NEUTRON_PERFECT_RECALL` gate,
+   * resolved at the wiring layer (`open/wiring/memory.ts`). When true, a relation
+   * carrying a `supersedes` marker DROPS the superseded object's sentence(s) from
+   * the subject's compiled-truth (so the writer's existing
+   * `removedLinks`→`remove_link` machinery invalidates the stale gbrain edge and
+   * `add_link` asserts the current one), and the superseding write records the
+   * transition in the append-only timeline (dated history preserved). When false
+   * (the default), `supersedes` is ignored entirely → pure accretion, byte-for-
+   * byte today's behaviour.
+   */
+  supersede?: boolean
 }
 
 export interface WriteExtractionReport {
@@ -180,6 +192,9 @@ export async function writeExtractionToGBrain(
   deps: WriteExtractionDeps,
 ): Promise<WriteExtractionReport> {
   const report: WriteExtractionReport = { pages_written: 0, pages_skipped: 0, edges_emitted: 0 }
+  // RB4 — the perfect-recall supersede gate. OFF (default) → the merge stays
+  // strictly append-only and the `supersedes` markers are inert (pure accretion).
+  const supersede = deps.supersede === true
 
   // 1. Plan a page per entity, keyed + deduped by slug.
   const bySlug = new Map<string, PlannedPage>()
@@ -237,7 +252,7 @@ export async function writeExtractionToGBrain(
       const existing = await readExistingPage(input.ownerDataDir, page.kind, page.slug)
       const compiledTruth =
         existing !== null
-          ? mergeExistingCompiledTruth(existing.compiledTruth, page)
+          ? mergeExistingCompiledTruth(existing.compiledTruth, page, supersede)
           : composeNewCompiledTruth(page)
       // Merge frontmatter: preserve every existing key (mention_count, category,
       // basis, cadence_hint, …) and only set the keys scribe authoritatively
@@ -264,7 +279,7 @@ export async function writeExtractionToGBrain(
             timelineAppend: {
               ts: input.ts,
               source: timelineSource,
-              body: timelineBody(page),
+              body: timelineBody(page, supersede),
             },
           },
           // M2.6 Ph1 (#83) — own-origin stamp by default (chat / Cores: origin
@@ -336,10 +351,42 @@ function orderPagesObjectsFirst(bySlug: Map<string, PlannedPage>): PlannedPage[]
 
 /** Deterministic timeline-entry body for a page — identical across the new-page
  *  and existing-page paths for the same input so the writer's (ts,source,body)
- *  dedup makes a repeated identical turn a no-op. */
-function timelineBody(page: PlannedPage): string {
+ *  dedup makes a repeated identical turn a no-op.
+ *
+ *  RB4 — when `supersede` is on and this page carries a superseding relation, the
+ *  transition is recorded in the (append-only, dated) timeline body so the prior
+ *  belief is preserved in history even after it leaves compiled-truth. The
+ *  superseded object is referenced in a deliberately non-triggering form (an
+ *  arrow, no `works at <slug>` verb pattern) so it can never re-derive an edge —
+ *  the graph half is driven purely off compiled-truth. */
+function timelineBody(page: PlannedPage, supersede: boolean): string {
   const fact = page.fact?.trim()
-  return fact !== undefined && fact.length > 0 ? `Chat mention — ${fact}` : 'Mentioned in chat'
+  const base = fact !== undefined && fact.length > 0 ? `Chat mention — ${fact}` : 'Mentioned in chat'
+  if (!supersede) return base
+  const notes = supersedeNotes(page)
+  return notes.length > 0 ? `${base} · ${notes.join('; ')}` : base
+}
+
+/**
+ * RB4 — one-line supersession notes for the timeline body. For each relation
+ * carrying a valid `supersedes` marker, `prior-slug → new-slug (predicate)`.
+ * Slugs are bare (no `[[wikilink]]`, no verb phrasing) so nothing re-extracts a
+ * triple from the timeline text.
+ */
+function supersedeNotes(page: PlannedPage): string[] {
+  const notes: string[] = []
+  const seen = new Set<string>()
+  for (const r of page.relations) {
+    if (r.supersedes === undefined) continue
+    const priorSlug = slugify(r.supersedes)
+    const objSlug = slugify(r.object)
+    if (priorSlug === null || objSlug === null || priorSlug === objSlug) continue
+    const key = `${r.predicate}\x1f${priorSlug}\x1f${objSlug}`
+    if (seen.has(key)) continue
+    seen.add(key)
+    notes.push(`superseded ${r.predicate}: ${priorSlug} → ${objSlug}`)
+  }
+  return notes
 }
 
 /** Render the relationship bullet lines for a page, deduped by (predicate,
@@ -400,8 +447,20 @@ function composeNewCompiledTruth(page: PlannedPage): string {
  * collapses. The new *fact* is NOT written into compiled-truth (it lands in the
  * append-only timeline instead), so the entity's prose is never rewritten.
  */
-function mergeExistingCompiledTruth(existing: string, page: PlannedPage): string {
-  const base = existing.replace(/\s+$/, '') // trim trailing whitespace; we re-add \n
+function mergeExistingCompiledTruth(
+  existing: string,
+  page: PlannedPage,
+  supersede: boolean,
+): string {
+  // RB4 — when perfect-recall is on, DROP the superseded object's sentence(s)
+  // from the existing compiled-truth BEFORE the append pass. That single edit is
+  // what turns accretion into belief-evolution: the writer's diff then sees the
+  // stale triple in the OLD compiled-truth but not the NEW one, so `removedLinks`
+  // carries it and the sync hook `remove_link`s the stale gbrain edge — while the
+  // append below asserts the CURRENT fact and the append-only timeline keeps the
+  // dated history. A no-op when no relation carries `supersedes`.
+  const stripped = supersede ? stripSupersededSentences(existing, page) : existing
+  const base = stripped.replace(/\s+$/, '') // trim trailing whitespace; we re-add \n
   const newLines: string[] = []
   for (const line of renderRelationLines(page)) {
     // `line` is `- <verb> [[objSlug]].`. Each (predicate, object) maps to a
@@ -422,6 +481,37 @@ function mergeExistingCompiledTruth(existing: string, page: PlannedPage): string
   if (!hasRelHeader) parts.push('## Relationships', '')
   parts.push(...newLines)
   return parts.join('\n') + '\n'
+}
+
+/**
+ * RB4 temporal invalidation — remove every existing compiled-truth LINE that
+ * references a superseded object's wikilink `[[prior-slug]]`, for each relation
+ * on this page that carries a `supersedes` marker. Predicate-BLIND on purpose,
+ * mirroring GBrain's `remove_link` (which soft-deletes ALL link_types for a
+ * `{from,to}` pair): a superseding fact retires whatever the subject previously
+ * asserted about the prior object — a same-predicate job move (`works_at OldCo`)
+ * or a cross-predicate correction alike. The dropped sentence stops feeding the
+ * compiled-truth→triple extraction, so the writer's `removedLinks` diff picks it
+ * up and the sync hook invalidates the stale edge; the prior belief survives in
+ * the append-only, dated timeline. Guards skip a `supersedes` that resolves to
+ * the same slug as the new object (a no-op / mis-emit).
+ */
+function stripSupersededSentences(existing: string, page: PlannedPage): string {
+  const priorSlugs = new Set<string>()
+  for (const r of page.relations) {
+    if (r.supersedes === undefined) continue
+    const priorSlug = slugify(r.supersedes)
+    const objSlug = slugify(r.object)
+    if (priorSlug === null || objSlug === null) continue
+    if (priorSlug === objSlug) continue // not a real supersession
+    priorSlugs.add(priorSlug)
+  }
+  if (priorSlugs.size === 0) return existing
+  const wikilinks = [...priorSlugs].map((s) => `[[${s}]]`)
+  const kept = existing
+    .split('\n')
+    .filter((line) => !wikilinks.some((w) => line.includes(w)))
+  return kept.join('\n')
 }
 
 /** What scribe needs to preserve from an existing on-disk page: its compiled-
