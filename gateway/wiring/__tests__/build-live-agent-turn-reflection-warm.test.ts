@@ -77,54 +77,112 @@ function makeTurn(over: Partial<LiveAgentTurnRequest> & { sent: ChatOutbound[] }
   }
 }
 
+/**
+ * A controllable reflection seam backed by REAL in-memory persistence — `loadContext`
+ * reads exactly what `onTurnComplete` has PERSISTED, so the turn-1 → persist → turn-2
+ * READ flow is exercised end to end (NOT a call-count fake). It models the production
+ * async fire-and-forget detector:
+ *   - `mode: 'immediate'` — a detected correction is persisted synchronously inside
+ *     `onTurnComplete` (the judge that has already resolved by the next turn).
+ *   - `mode: 'pending'` — a detected correction is HELD until `flush()` (the judge that
+ *     hasn't resolved yet), so an instantly-fired follow-up out-races the persist.
+ * "Detection" is a deterministic cue (user text starting with `no,`) standing in for
+ * the LLM judge, so the test is about the SPLICE timing, not the judge.
+ */
+function makeReflectionSeam(mode: 'immediate' | 'pending'): {
+  seam: LiveAgentReflectionSeam
+  flush: () => void
+} {
+  const persisted: string[] = []
+  const pending: string[] = []
+  const seam: LiveAgentReflectionSeam = {
+    loadContext: () =>
+      persisted.length > 0
+        ? `<learned_corrections>\n${persisted.map((c) => `- ${c}`).join('\n')}\n</learned_corrections>`
+        : null,
+    onTurnComplete: (turn) => {
+      if (!turn.user_text.toLowerCase().startsWith('no,')) return // no correction cue
+      const learned = turn.user_text.replace(/^no,\s*/i, '')
+      if (mode === 'immediate') persisted.push(learned)
+      else pending.push(learned)
+    },
+  }
+  const flush = (): void => {
+    while (pending.length > 0) persisted.push(pending.shift() as string)
+  }
+  return { seam, flush }
+}
+
 describe('build-live-agent-turn — RB2 (a) warm-turn reflection re-splice', () => {
-  test('a mid-session correction re-appears on the NEXT warm turn (not just a new session)', async () => {
+  test('a correction PERSISTED by turn 1 re-appears on warm turn 2 (real persistence flow)', async () => {
     const specs: AgentSpec[] = []
     const sent: ChatOutbound[] = []
-    // Simulate the owner giving a correction 20 min into the session: the block the
-    // reflection layer returns GROWS between turn 1 (cold) and turn 2 (warm).
-    let loadCount = 0
-    const reflection: LiveAgentReflectionSeam = {
-      loadContext: () => {
-        loadCount++
-        return loadCount === 1
-          ? '<learned_corrections>\n- always default to staging\n</learned_corrections>'
-          : '<learned_corrections>\n- always default to staging\n- never force-push to main\n</learned_corrections>'
-      },
-      onTurnComplete: () => {},
-    }
+    // Immediate detector: turn 1's onTurnComplete actually PERSISTS the correction; the
+    // warm turn 2 re-reads the store via loadContext and must surface it.
+    const { seam } = makeReflectionSeam('immediate')
     const run = buildLiveAgentTurn({
       substrate: makeStubSubstrate(specs, ['reply one', 'reply two']),
       personaLoader: { async load(): Promise<string> { return 'PERSONA_MARKER' } },
-      reflection,
+      reflection: seam,
       buttonStore: store,
       project_slug: 'alice',
       owner_home: tmp,
       now: () => now,
     })
 
-    // Turn 1 — COLD first turn on the topic.
-    await run(makeTurn({ sent, user_text: 'deploy the change' }))
-    // Turn 2 — WARM turn on the SAME topic (the correction was given between them).
+    // Turn 1 — COLD. The correction isn't persisted YET when loadContext runs at the
+    // start of the turn; onTurnComplete persists it after the reply.
+    await run(makeTurn({ sent, user_text: 'no, never force-push to main' }))
+    // Turn 2 — WARM on the SAME topic.
     await run(makeTurn({ sent, user_text: 'ok what next' }))
 
-    // loadContext() is read ONCE PER TURN (both cold and warm), not once per session.
-    expect(loadCount).toBe(2)
-
-    // Turn 1 (cold) carries the pre-correction block, folded into the full system
-    // prompt (PERSONA_MARKER present).
-    expect(specs[0]!.prompt).toContain('always default to staging')
-    expect(specs[0]!.prompt).not.toContain('never force-push to main')
+    // Turn 1 (cold) carries the full system prompt but NO reflection block yet (the
+    // correction isn't stored until onTurnComplete runs after the reply). Assert on the
+    // `<learned_corrections>` TAG, which only the reflection fragment emits — the raw
+    // phrase also appears in the cold turn's <recent_conversation> echo of the user line.
     expect(specs[0]!.prompt).toContain('PERSONA_MARKER')
+    expect(specs[0]!.prompt).not.toContain('<learned_corrections>')
 
-    // Turn 2 is a genuine WARM turn — no re-sent system prompt (the warm REPL keeps
-    // it in its own transcript), so PERSONA_MARKER is absent…
+    // Turn 2 is a genuine WARM turn (no re-sent system prompt)…
     expect(specs[1]!.prompt).not.toContain('PERSONA_MARKER')
-    // …and yet the FRESH reflection block — including the mid-session correction —
-    // is re-spliced before the user's message. MUTATION-KILL: gating the re-splice
-    // back to first-turn-only drops this and the assertion fails.
+    // …and the REAL persisted correction is re-spliced before the user's message.
+    // MUTATION-KILL: gating the re-splice back to first-turn-only drops this.
+    expect(specs[1]!.prompt).toContain('<learned_corrections>')
     expect(specs[1]!.prompt).toContain('never force-push to main')
     expect(specs[1]!.prompt).toContain('ok what next')
+  })
+
+  test('an instantly-fired follow-up out-races the async persist; it lands once the detector resolves', async () => {
+    const specs: AgentSpec[] = []
+    const sent: ChatOutbound[] = []
+    // Pending detector: the correction submitted on turn 1 is NOT persisted synchronously.
+    const { seam, flush } = makeReflectionSeam('pending')
+    const run = buildLiveAgentTurn({
+      substrate: makeStubSubstrate(specs, ['reply one', 'reply two', 'reply three']),
+      personaLoader: { async load(): Promise<string> { return 'PERSONA_MARKER' } },
+      reflection: seam,
+      buttonStore: store,
+      project_slug: 'alice',
+      owner_home: tmp,
+      now: () => now,
+    })
+
+    // Turn 1 (cold): submit a correction; the async detector holds it PENDING (unpersisted).
+    await run(makeTurn({ sent, user_text: 'no, never force-push to main' }))
+    // Turn 2 (warm): fired IMMEDIATELY after — the detector hasn't persisted yet.
+    await run(makeTurn({ sent, user_text: 'and one more thing' }))
+
+    // HONEST CONTRACT: the just-submitted correction has NOT persisted, so it is ABSENT
+    // on the immediately-next warm turn — RB2 (a) does not synchronously guarantee it.
+    expect(specs[1]!.prompt).not.toContain('never force-push to main')
+    expect(specs[1]!.prompt).not.toContain('<learned_corrections>')
+
+    // The async judge resolves + persists.
+    flush()
+    // Turn 3 (warm): now that it's persisted, the very next warm turn re-splices it.
+    await run(makeTurn({ sent, user_text: 'now what' }))
+    expect(specs[2]!.prompt).toContain('<learned_corrections>')
+    expect(specs[2]!.prompt).toContain('never force-push to main')
   })
 
   test('an empty reflection context is a clean no-op on a warm turn (no bare tag)', async () => {

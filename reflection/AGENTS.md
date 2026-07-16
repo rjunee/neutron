@@ -32,12 +32,16 @@ the judge and threads the `Reflection` instance into `buildLiveAgentTurn`
   it re-splices before the user's message via the same per-turn seam the
   `<work_board>` fragment uses (RB2 (a)). So the warm session adopts past
   corrections + recent diary and applies them **silently** (no "I noted that"
-  announcement), and a correction given mid-session re-appears on the NEXT warm
-  turn — not only in a brand-new session. The block stays capped (12 corrections
-  / 3 days); RB2 removed the first-turn-only gate, not the cap;
+  announcement). Precise contract: the CURRENTLY-PERSISTED corrections re-appear on
+  **every** warm turn (RB2 removed the first-turn-**only** gate, not the cap — still
+  12 corrections / 3 days). It is NOT a synchronous guarantee that a just-submitted
+  correction shows up on the immediately-next turn: detection is async fire-and-forget
+  (below), so a correction typically lands by the next turn, but an instantly-fired
+  follow-up can out-race the persist and see it one turn later;
 - every completed turn calls `onTurnComplete({ user_text, agent_text, scope })`
   — pre-gate → LLM judge → on a hit, append to the corrections-log + drop a
-  diary breadcrumb.
+  diary breadcrumb. This is **fire-and-forget** (non-blocking): the persist happens
+  AFTER the async judge resolves, never on the turn's critical path.
 
 Beyond chat, the reflection context also reaches the **trident Forge builder**
 (RB2 (b)): `open/composer.ts` wires `resolve_reflection_context` →

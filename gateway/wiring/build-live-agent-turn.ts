@@ -829,9 +829,16 @@ export function buildLiveAgentTurn(
     // RB2 (a) — the reflection layer's learned-corrections + recent-diary block,
     // resolved ONCE PER TURN (exactly like the work board + nexus) so it re-splices
     // on WARM turns too, not only the cold first turn. Before RB2 this was loaded
-    // ONLY inside `composeFirstTurnPrompt` (cold), so a correction the owner gave
-    // 20 min into a session didn't resurface until a brand-new session; now the
-    // fresh block is spliced before the user's message on every warm turn as well.
+    // ONLY inside `composeFirstTurnPrompt` (cold), so any correction the reflection
+    // layer had persisted mid-session didn't resurface until a brand-new session; now
+    // the FRESH block is re-read + spliced before the user's message on every warm
+    // turn. What RB2 (a) guarantees is precise: the CURRENTLY-PERSISTED corrections
+    // re-appear every warm turn. It does NOT force a just-submitted correction to
+    // surface on the immediately-next turn — correction DETECTION is intentionally
+    // async fire-and-forget (`reflection.onTurnComplete`; an LLM judge that persists
+    // AFTER it resolves, F3 — blocking every chat turn on it would be an unacceptable
+    // latency regression), so a correction typically lands by the next turn but an
+    // instantly-fired follow-up can out-race the persist and see it one turn later.
     // Already capped in the reflection layer (12 corrections / 3 days) — RB2 does
     // NOT change the cap, only the first-turn-only gate. Best-effort: a
     // throwing/absent seam degrades to no block, and an empty context stays null so
