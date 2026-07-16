@@ -207,6 +207,48 @@ describe('reflect dedup (deterministic, no LLM)', () => {
     expect(deletedSlugs).not.toContain('shared')
   })
 
+  test('cross-kind collision CREATED after the snapshot is still not evicted (live recheck)', async () => {
+    const owner = tmpOwner()
+    const boiler = 'Acme is an enterprise developer-tools SaaS company building platform tooling.'
+    await seed(owner, 'company', 'acme', 'Acme', boiler, [
+      { ts: '2026-07-01T00:00:00.000Z', source: 'chat:owner', body: 'a' },
+      { ts: '2026-07-02T00:00:00.000Z', source: 'chat:owner', body: 'b' },
+    ])
+    await seed(owner, 'company', 'shared', 'Acme Shared', boiler, [
+      { ts: '2026-07-03T00:00:00.000Z', source: 'chat:owner', body: 'company-shared-row' },
+    ])
+    const deletedSlugs: string[] = []
+    const report = await runReflectPass({
+      ...baseDeps(owner),
+      // A person 'shared' is created AFTER the snapshot (not in the stale index) and
+      // synced to the kind-blind GBrain key. The live pre-delete recheck must still
+      // see it and skip the bare-slug brain delete.
+      onAfterSnapshot: async (): Promise<void> => {
+        await writeEntity({
+          ownerDataDir: owner,
+          kind: 'person',
+          slug: 'shared',
+          body: {
+            frontmatter: { slug: 'shared', type: 'person', name: 'Shared Person', source: 'chat' },
+            compiledTruth: 'Shared is a person the owner knows.',
+            timelineAppend: { ts: '2026-07-09T00:00:00.000Z', source: 'chat:owner', body: 'person-row' },
+          },
+          originInstance: OWN,
+          receivingInstanceSlug: OWN,
+        })
+      },
+      deletePage: async (slug: string): Promise<void> => {
+        deletedSlugs.push(slug)
+      },
+    })
+    expect(report.merged).toBe(1)
+    expect(await readPage(owner, 'companies', 'shared')).toBeNull() // company loser gone
+    expect(await readPage(owner, 'people', 'shared')).not.toBeNull() // the mid-pass person survives
+    // MUTATION-KILL: a stale-snapshot check would miss the mid-pass person and call
+    // deletePage('shared'); the LIVE recheck skips it.
+    expect(deletedSlugs).not.toContain('shared')
+  })
+
   test('a loser whose on-disk deletion FAILS is retained + not counted as merged', async () => {
     const owner = tmpOwner()
     const boiler = 'Acme is an enterprise developer-tools SaaS company building platform tooling.'

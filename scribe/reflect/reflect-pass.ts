@@ -259,20 +259,9 @@ export async function runReflectPass(deps: ReflectPassDeps): Promise<ReflectRepo
     }
   }
 
-  // A slug → {kinds} index over the WHOLE snapshot (all kinds). GBrain keys pages
-  // by slug ALONE (kind-blind), so this lets the dedup deletion detect when a
-  // loser's slug is ALSO claimed by a live entity of a DIFFERENT kind and skip the
-  // (bare-slug) GBrain delete rather than evict that sibling.
-  const slugKinds = new Map<string, Set<EntityKind>>()
-  for (const p of pages) {
-    const set = slugKinds.get(p.slug)
-    if (set === undefined) slugKinds.set(p.slug, new Set([p.kind]))
-    else set.add(p.kind)
-  }
-
   // ── Step 1 — DEDUP (deterministic, no LLM). Do it FIRST so re-synthesis + the
   //    reserved digest see the collapsed set.
-  const survivors = await dedupPages(pages, deps, report, slugKinds, logFailure)
+  const survivors = await dedupPages(pages, deps, report, logFailure)
 
   // ── Step 2 — RE-SYNTHESIZE compiled-truth from timelines (LLM, edge-guarded).
   if (deps.substrate !== undefined) {
@@ -423,7 +412,6 @@ async function dedupPages(
   pages: LoadedPage[],
   deps: ReflectPassDeps,
   report: ReflectReport,
-  slugKinds: Map<string, Set<EntityKind>>,
   logFailure: (msg: string, err: unknown) => void,
 ): Promise<LoadedPage[]> {
   const threshold = deps.jaccardThreshold ?? DEFAULT_JACCARD_THRESHOLD
@@ -448,7 +436,7 @@ async function dedupPages(
         continue
       }
       try {
-        const merged = await mergeCluster(members, deps, slugKinds, logFailure)
+        const merged = await mergeCluster(members, deps, logFailure)
         if (merged === null) {
           // A member changed on disk since the snapshot (a concurrent user write)
           // — abort this cluster's merge and keep every member as-is; a later pass
@@ -485,7 +473,6 @@ async function dedupPages(
 async function mergeCluster(
   members: LoadedPage[],
   deps: ReflectPassDeps,
-  slugKinds: Map<string, Set<EntityKind>>,
   logFailure: (msg: string, err: unknown) => void,
 ): Promise<{ survivor: LoadedPage; retained: LoadedPage[]; deleted: number } | null> {
   // EARLY ABORT (optimization): if any member changed on disk since the snapshot,
@@ -596,17 +583,26 @@ async function mergeCluster(
       // KIND-QUALIFY the GBrain page deletion. GBrain keys pages by slug ALONE
       // (kind-blind), so a bare-slug `delete_page(loserSlug)` could EVICT a live
       // sibling entity of a DIFFERENT kind that collided on this slug (dedup is
-      // within-kind, and the on-disk delete is kind-qualified, but the brain
-      // delete was not). The reflect pass holds the whole multi-kind on-disk
-      // snapshot, so it detects such a collision deterministically: if any OTHER
-      // kind still claims this slug, SKIP the brain delete — the disk loser is
-      // already gone; leaving the sibling's brain page intact is correct.
-      const kindsForSlug = slugKinds.get(l.slug)
-      const collidesOtherKind =
-        kindsForSlug !== undefined && [...kindsForSlug].some((k) => k !== l.kind)
-      if (collidesOtherKind) {
+      // within-kind, and the on-disk delete is kind-qualified, but the brain delete
+      // was not). Re-check the disk LIVE — across every OTHER kind — IMMEDIATELY
+      // before the brain delete (not the stale start-of-pass snapshot, which would
+      // miss a sibling CREATED mid-pass): if any other-kind page for this slug
+      // exists now, SKIP the brain delete. The disk loser is already gone; leaving
+      // the sibling's brain page intact is correct. (Residual: a create between this
+      // check and the delete — the same microtask-window TOCTOU documented on the
+      // other single-owner-local paths; closing it fully needs a kind/version-aware
+      // backend delete.)
+      let siblingKind: EntityKind | null = null
+      for (const k of ENTITY_KINDS) {
+        if (k === l.kind) continue
+        if ((await reloadRawBody(deps.ownerDataDir, k, l.slug)) !== null) {
+          siblingKind = k
+          break
+        }
+      }
+      if (siblingKind !== null) {
         logFailure(
-          `reflect: brain delete skipped — slug '${l.slug}' is shared by another entity kind (kind='${l.kind}')`,
+          `reflect: brain delete skipped — slug '${l.slug}' is claimed by a live '${siblingKind}' page (loser kind='${l.kind}')`,
           null,
         )
       } else {
