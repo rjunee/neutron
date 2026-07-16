@@ -29,6 +29,9 @@ const NEAR_BOUNDARY_NON_FORGE = [
   'forge:fixer',
   'forge:fixture',
   'forge:fix-round-', // empty suffix
+  'forge:fix-round-0', // zero is not a real fix round (round ≥ 2)
+  'forge:fix-round-00', // leading-zero
+  'forge:fix-round-01', // leading-zero
   'forge:fix-round-argus', // alphabetic suffix (a mislabelled reviewer)
   'forge:fix-round-1a', // mixed suffix
   'forge:fix-round--1', // signed

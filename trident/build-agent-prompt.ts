@@ -36,11 +36,12 @@
  * bookkeeping role: the independent merge gate must never carry the untrusted block.
  */
 /** The EXACT Forge fix-round label grammar the workflow emits: `forge:fix-round-<n>`
- *  where `<n>` is a positive integer (`inner-workflow.mjs`:
- *  `` label: `forge:fix-round-${round}` ``). Anchored + numeric so no near-boundary
- *  label (`forge:fix-round-`, `forge:fix-round-argus`, `forge:fixture`, …) can slip
- *  onto the receives-reflection side of the trust boundary. */
-const FORGE_FIX_ROUND_RE = /^forge:fix-round-\d+$/
+ *  where `<n>` is a POSITIVE integer with NO leading zero (`inner-workflow.mjs`:
+ *  `` label: `forge:fix-round-${round}` `` — `round` is ≥ 2 in the fix loop).
+ *  Anchored + `[1-9]\d*` so no near-boundary label (`forge:fix-round-`,
+ *  `forge:fix-round-0`, `forge:fix-round-00`, `forge:fix-round-argus`,
+ *  `forge:fixture`, …) can slip onto the receives-reflection side of the boundary. */
+const FORGE_FIX_ROUND_RE = /^forge:fix-round-[1-9]\d*$/
 
 export function agentReceivesReflection(role: string): boolean {
   // EXACT grammar match (defense-in-depth for the trust boundary): the ONLY Forge
