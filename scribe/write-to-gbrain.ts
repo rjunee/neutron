@@ -45,7 +45,6 @@ import { resolve } from 'node:path'
 import {
   KIND_TO_DIR,
   extractCompiledTruth,
-  extractTimeline,
   parseFrontmatter,
 } from '@neutronai/runtime/entity-format.ts'
 import {
@@ -252,63 +251,22 @@ export async function writeExtractionToGBrain(
 
   for (const page of orderPagesObjectsFirst(bySlug)) {
     try {
-      // Untrusted-LLM guard: an extraction may carry CONFLICTING supersedes for one
-      // (predicate, prior) — `works_at NewA supersedes OldCo` AND `works_at NewB
-      // supersedes OldCo`. Resolve deterministically so history can't be fabricated
-      // (two `OldCo → …` notes). No-op for the normal single-replacement case.
-      if (supersede) page.relations = resolveConflictingSupersedes(page.relations)
       // Preserve an existing page's compiled-truth + frontmatter (append-only /
       // merge); compose fresh for a new entity. See the module header for the
       // data-loss rationale.
       const existing = await readExistingPage(input.ownerDataDir, page.kind, page.slug)
-      // `supersededTargets` is the set of `(predicate, prior-object)` triples this
-      // write ACTUALLY retired from an existing page's compiled-truth. A brand-new
-      // page (or an existing page that never asserted the claimed prior) retires
-      // nothing → empty set → no fabricated "superseded …" timeline note (Codex).
-      const merged =
+      // RB4 — under the flag, DROP any superseded prior sentence from an existing
+      // page's compiled-truth (belief evolution); the writer's `removedLinks` diff
+      // then invalidates the stale gbrain edge. The append-only timeline is the
+      // durable history: each write records its relation assertions ADDITIVELY (a
+      // pure function of the extraction — see `timelineBody`), so a superseded
+      // belief that was first recorded under the flag keeps its own dated
+      // `<pred> <obj>` row at its original time, and nothing is ever rewritten or
+      // fabricated. No state-dependent transition note ⇒ replays are byte-identical.
+      const compiledTruth =
         existing !== null
           ? mergeExistingCompiledTruth(existing.compiledTruth, page, supersede)
-          : { compiledTruth: composeNewCompiledTruth(page), supersededTargets: new Set<string>() }
-      const compiledTruth = merged.compiledTruth
-      // A FULL transition `(predicate, prior, replacement)` is a GENUINE
-      // supersession — worth a dated `superseded …` note — iff EITHER:
-      //   (a) the prior was actually retired from compiled-truth on THIS write
-      //       (`supersededTargets` has `(pred, prior)`) and the replacement is
-      //       this relation's new object, OR
-      //   (b) the EXACT transition note is already in a timeline entry with the
-      //       SAME `(ts, source)` as THIS write — i.e. this is a true REPLAY of the
-      //       write that originally retired it.
-      // Arm (b) keeps a REPLAY idempotent: on replay the prior sentence is already
-      // gone (empty `supersededTargets`), but the recorded note reproduces the SAME
-      // body → byte-identical page → `changed:false`. Scoping arm (b) to the SAME
-      // `(ts, source)` is essential: a LATER re-delivery of the same transition (a
-      // different ts) is NOT a replay — it retired nothing, so it must degrade to an
-      // additive note rather than stamp a SECOND dated supersession. Keying on the
-      // WHOLE transition (incl. replacement) additionally stops a later DISTINCT
-      // update to the same prior from inheriting a stale note; a marker whose prior
-      // was never asserted satisfies neither arm → additive note (Codex).
-      const recognizedTransitions = new Set<string>()
-      if (supersede) {
-        for (const r of page.relations) {
-          if (r.supersedes === undefined) continue
-          const priorSlug = slugify(r.supersedes)
-          const objSlug = slugify(r.object)
-          if (priorSlug === null || objSlug === null) continue
-          if (merged.supersededTargets.has(`${r.predicate}\x1f${priorSlug}`)) {
-            recognizedTransitions.add(`${r.predicate}\x1f${priorSlug}\x1f${objSlug}`) // (a)
-          }
-        }
-        if (existing !== null) {
-          for (const e of existing.timelineEntries) {
-            if (e.ts !== input.ts || e.source !== timelineSource) continue // replay only
-            // Parse ONLY the trusted notes segment — never the model-controlled fact
-            // base — so a fact containing `superseded …` text can't be recognised (b).
-            for (const t of parseSupersedeTransitions(timelineNotesSegment(e.body))) {
-              recognizedTransitions.add(t)
-            }
-          }
-        }
-      }
+          : composeNewCompiledTruth(page)
       // Merge frontmatter: preserve every existing key (mention_count, category,
       // basis, cadence_hint, …) and only set the keys scribe authoritatively
       // owns. `writeEntity` does NOT merge frontmatter, so without this the
@@ -334,7 +292,7 @@ export async function writeExtractionToGBrain(
             timelineAppend: {
               ts: input.ts,
               source: timelineSource,
-              body: timelineBody(page, supersede, recognizedTransitions),
+              body: timelineBody(page, supersede),
             },
           },
           // M2.6 Ph1 (#83) — own-origin stamp by default (chat / Cores: origin
@@ -404,170 +362,55 @@ function orderPagesObjectsFirst(bySlug: Map<string, PlannedPage>): PlannedPage[]
   return emitted
 }
 
-/** Deterministic timeline-entry body for a page — identical across the new-page
- *  and existing-page paths for the same input so the writer's (ts,source,body)
- *  dedup makes a repeated identical turn a no-op.
- *
- *  RB4 — when `supersede` is on, the page's RELATION ASSERTIONS are recorded in
- *  the (append-only, dated) timeline body alongside the fact. This is what makes
- *  the timeline the durable history: the ORIGINAL `works_at oldco` write lands a
- *  dated row naming that assertion at its OWN observation time, so when a later
- *  turn supersedes it (dropping the sentence from compiled-truth), the original
- *  dated belief still lives in history — and the superseding turn adds its OWN
- *  dated `superseded works_at: oldco → newco` row. Slugs are bare (no
- *  `[[wikilink]]`, no `works at <slug>` verb phrasing) so the timeline text can
- *  never re-derive a graph edge — the graph half is driven purely off
- *  compiled-truth. OFF (default) → byte-for-byte today's fact-only body.
- *
- *  `recognizedTransitions` is the set of FULL `(predicate, prior, replacement)`
- *  transitions that are GENUINE supersessions for this page — retired from
- *  compiled-truth on this write OR the exact note already recorded in its timeline
- *  (so a replay stays byte-identical). A `superseded …` note is recorded ONLY for
- *  a transition in that set; a `supersedes` marker whose prior was never asserted
- *  (new subject / stale marker) or was superseded to a DIFFERENT object degrades
- *  to a plain additive `<pred> <obj>` note — no fabricated history (Codex). */
-/** The UNFORGEABLE machine boundary marking the start of the (system-generated,
- *  slug-only) supersession NOTES within a timeline body. A control character
- *  (Unit Separator) that the extraction/model never emits in a fact and that
- *  pre-RB4 / flag-off bodies (stored verbatim, never containing it) cannot carry —
- *  so replay recognition can trust ONLY entries this feature emitted, immune to a
- *  legacy free-form fact that happens to read like a note (Codex). Flag-on facts
- *  are additionally stripped of it. `NOTES_SEP` is the cosmetic, human-visible
- *  separator rendered just before the (invisible) mark. */
-const NOTES_MARK = '\x1f'
+/** Cosmetic, human-visible separator between the fact base and the additive
+ *  relation notes in a timeline body. */
 const NOTES_SEP = ' · '
 
-function timelineBody(
-  page: PlannedPage,
-  supersede: boolean,
-  recognizedTransitions: ReadonlySet<string>,
-): string {
+/** Deterministic timeline-entry body for a page — a PURE FUNCTION of the
+ *  extraction, so the writer's (ts,source,body) dedup makes a repeated identical
+ *  turn a true no-op (idempotent replay — no state dependence, nothing to
+ *  fabricate, no timeline text parsed).
+ *
+ *  RB4 — when `supersede` is on, the page's RELATION ASSERTIONS are recorded
+ *  ADDITIVELY in the (append-only, dated) timeline body alongside the fact. This
+ *  is what makes the timeline the durable history: the ORIGINAL `works_at oldco`
+ *  write lands a dated `works_at oldco` row at its OWN observation time, so when a
+ *  later turn supersedes it (dropping the sentence from compiled-truth + the
+ *  gbrain edge), the original dated belief still lives in history — untouched,
+ *  because the timeline is append-only. There is NO separate "superseded X → Y"
+ *  note: the current truth is carried by compiled-truth + the edge, and the
+ *  before/after beliefs are each an additive dated row. Slugs are bare (no
+ *  `[[wikilink]]`, no `works at <slug>` verb phrasing) so the timeline text can
+ *  never re-derive a graph edge. OFF (default) → byte-for-byte today's fact-only body. */
+function timelineBody(page: PlannedPage, supersede: boolean): string {
   const fact = page.fact?.trim()
-  if (!supersede) {
-    // Flag OFF — byte-identical to today (no notes, no sanitisation).
-    return fact !== undefined && fact.length > 0 ? `Chat mention — ${fact}` : 'Mentioned in chat'
-  }
-  // Flag ON — strip the reserved mark from the model-controlled fact so it can
-  // never forge the notes boundary, then append the trusted notes AFTER the mark.
-  const safeFact =
-    fact !== undefined && fact.length > 0 ? fact.replace(/\x1f/g, '') : undefined
-  const base = safeFact !== undefined ? `Chat mention — ${safeFact}` : 'Mentioned in chat'
-  const notes = relationNotes(page, recognizedTransitions)
-  return notes.length > 0 ? `${base}${NOTES_SEP}${NOTES_MARK}${notes.join('; ')}` : base
-}
-
-/** Extract the trusted NOTES segment of a timeline body — everything after the
- *  UNFORGEABLE mark (the fact base precedes it and is never parsed). A body without
- *  the mark (a legacy / flag-off entry) yields no notes → nothing recognised. */
-function timelineNotesSegment(body: string): string {
-  const idx = body.indexOf(NOTES_MARK)
-  return idx === -1 ? '' : body.slice(idx + NOTES_MARK.length)
-}
-
-/** The stable, edge-inert prefix of a supersession timeline note. Centralised so
- *  the write-side note and the replay-recognition scan can never drift. Bare
- *  slugs + underscored predicate → nothing re-extracts a triple from it. */
-function supersedeNotePrefix(predicate: string, priorSlug: string): string {
-  return `superseded ${predicate}: ${priorSlug} → `
-}
-
-/** Parse every `superseded <pred>: <prior> → <replacement>` transition recorded in
- *  a timeline body into `${pred}\x1f${prior}\x1f${replacement}` keys. Used to
- *  RECOGNISE a replay of the SAME transition (keyed on the full triple, including
- *  the replacement) so a later DISTINCT update to the same prior can't inherit a
- *  stale supersession note. Slugs + predicate are space-free, so `\S+` is exact. */
-function parseSupersedeTransitions(body: string): string[] {
-  const out: string[] = []
-  // Predicate is `[a-z0-9_]+`; slugs are `[a-z0-9-]+`. Tight classes so the match
-  // STOPS at the `; ` that joins multiple notes (a greedy `\S+` would swallow the
-  // `;` into the replacement and break replay recognition — Codex).
-  const re = /superseded ([a-z0-9_]+): ([a-z0-9-]+) → ([a-z0-9-]+)/g
-  let m: RegExpExecArray | null
-  while ((m = re.exec(body)) !== null) out.push(`${m[1]}\x1f${m[2]}\x1f${m[3]}`)
-  return out
+  const base = fact !== undefined && fact.length > 0 ? `Chat mention — ${fact}` : 'Mentioned in chat'
+  if (!supersede) return base
+  const notes = relationNotes(page)
+  return notes.length > 0 ? `${base}${NOTES_SEP}${notes.join('; ')}` : base
 }
 
 /**
- * RB4 — deterministic, edge-inert notes recording each of the page's relation
- * assertions for the dated timeline. A relation whose `supersedes` marker is a
- * GENUINE supersession — its FULL transition `(predicate, prior, replacement)` is
- * in `recognizedTransitions` (retired this write, or the exact note is already in
- * the timeline) — records the transition (`superseded <pred>: prior → obj`); every
- * other relation — a plain assertion, a marker that matched no prior (new subject
- * / stale marker), or a marker whose prior was superseded to a DIFFERENT object —
- * records the additive assertion (`<pred> obj`), so the ORIGINAL dated belief is
- * captured in history and no supersession is fabricated. Deduped; bare slugs +
- * underscored predicate so nothing re-extracts a triple from this text.
+ * RB4 — deterministic, edge-inert ADDITIVE notes recording each of the page's
+ * relation assertions for the dated timeline (`<pred> <obj>`). A pure function of
+ * `page.relations` — no dependence on prior state, so a replay reproduces the
+ * SAME body (idempotent) and nothing is ever fabricated. The supersession itself
+ * is reflected by compiled-truth removal + edge invalidation, not by a timeline
+ * note; the retired belief survives as its OWN earlier additive row. Deduped; bare
+ * slugs + underscored predicate so nothing re-extracts a triple from this text.
  */
-function relationNotes(page: PlannedPage, recognizedTransitions: ReadonlySet<string>): string[] {
+function relationNotes(page: PlannedPage): string[] {
   const notes: string[] = []
   const seen = new Set<string>()
   for (const r of page.relations) {
     const objSlug = slugify(r.object)
     if (objSlug === null || objSlug === page.slug) continue
-    if (r.supersedes !== undefined) {
-      const priorSlug = slugify(r.supersedes)
-      if (
-        priorSlug !== null &&
-        priorSlug !== objSlug &&
-        recognizedTransitions.has(`${r.predicate}\x1f${priorSlug}\x1f${objSlug}`)
-      ) {
-        const key = `x\x1f${r.predicate}\x1f${priorSlug}\x1f${objSlug}`
-        if (!seen.has(key)) {
-          seen.add(key)
-          notes.push(`${supersedeNotePrefix(r.predicate, priorSlug)}${objSlug}`)
-        }
-        continue
-      }
-    }
-    const key = `a\x1f${r.predicate}\x1f${objSlug}`
+    const key = `${r.predicate}\x1f${objSlug}`
     if (seen.has(key)) continue
     seen.add(key)
     notes.push(`${r.predicate} ${objSlug}`)
   }
   return notes
-}
-
-/**
- * RB4 untrusted-LLM guard — deterministically resolve CONFLICTING supersedes.
- * When an extraction carries more than one `supersedes` marker for the SAME
- * `(predicate, prior-object)` pointing at DIFFERENT new objects (`works_at NewA
- * supersedes OldCo` AND `works_at NewB supersedes OldCo`), exactly one may claim
- * the supersession — otherwise the single retired OldCo assertion would be recorded
- * as two contradictory transitions (`OldCo → NewA`, `OldCo → NewB`). The winner is
- * the lexicographically-smallest new-object slug (stable, order-independent); the
- * losers are DEMOTED to plain additive relations (their `supersedes` dropped) so
- * their fact still accretes (no data loss) but claims no supersession. Returns the
- * same array reference when there is no conflict (the overwhelming common case).
- */
-function resolveConflictingSupersedes(relations: ExtractedRelation[]): ExtractedRelation[] {
-  const byPrior = new Map<string, ExtractedRelation[]>()
-  for (const r of relations) {
-    if (r.supersedes === undefined) continue
-    const priorSlug = slugify(r.supersedes)
-    const objSlug = slugify(r.object)
-    if (priorSlug === null || objSlug === null || priorSlug === objSlug) continue
-    const key = `${r.predicate}\x1f${priorSlug}`
-    const arr = byPrior.get(key)
-    if (arr === undefined) byPrior.set(key, [r])
-    else arr.push(r)
-  }
-  const losers = new Set<ExtractedRelation>()
-  for (const arr of byPrior.values()) {
-    if (arr.length < 2) continue
-    if (new Set(arr.map((r) => slugify(r.object))).size < 2) continue // same replacement repeated
-    let winner = arr[0]!
-    for (const r of arr) {
-      if ((slugify(r.object) ?? '') < (slugify(winner.object) ?? '')) winner = r
-    }
-    for (const r of arr) if (r !== winner) losers.add(r)
-  }
-  if (losers.size === 0) return relations
-  // Demote losers to additive relations (drop `supersedes`) via shallow copies so
-  // the underlying extraction objects are never mutated.
-  return relations.map((r) =>
-    losers.has(r) ? { subject: r.subject, predicate: r.predicate, object: r.object } : r,
-  )
 }
 
 /** Render the relationship bullet lines for a page, deduped by (predicate,
@@ -628,25 +471,16 @@ function composeNewCompiledTruth(page: PlannedPage): string {
  * collapses. The new *fact* is NOT written into compiled-truth (it lands in the
  * append-only timeline instead), so the entity's prose is never rewritten.
  */
-function mergeExistingCompiledTruth(
-  existing: string,
-  page: PlannedPage,
-  supersede: boolean,
-): { compiledTruth: string; supersededTargets: Set<string> } {
+function mergeExistingCompiledTruth(existing: string, page: PlannedPage, supersede: boolean): string {
   // RB4 — when perfect-recall is on, DROP the superseded object's sentence(s)
   // from the existing compiled-truth BEFORE the append pass. That single edit is
   // what turns accretion into belief-evolution: the writer's diff then sees the
   // stale triple in the OLD compiled-truth but not the NEW one, so `removedLinks`
   // carries it and the sync hook `remove_link`s the stale gbrain edge — while the
   // append below asserts the CURRENT fact and the append-only timeline keeps the
-  // dated history. A no-op when no relation carries `supersedes`. The returned
-  // `supersededTargets` is the set of `(predicate, prior-object)` triples ACTUALLY
-  // retired — the timeline records a `superseded …` note only for these (a marker
-  // that matched no prior assertion is NOT reported → no fabricated history).
-  const stripResult = supersede
-    ? stripSupersededSentences(existing, page)
-    : { text: existing, removed: new Set<string>() }
-  const base = stripResult.text.replace(/\s+$/, '') // trim trailing whitespace; we re-add \n
+  // dated history. A no-op when no relation carries `supersedes`.
+  const stripped = supersede ? stripSupersededSentences(existing, page) : existing
+  const base = stripped.replace(/\s+$/, '') // trim trailing whitespace; we re-add \n
   const newLines: string[] = []
   for (const line of renderRelationLines(page)) {
     // `line` is `- <verb> [[objSlug]].`. Each (predicate, object) maps to a
@@ -660,13 +494,13 @@ function mergeExistingCompiledTruth(
   if (newLines.length === 0) {
     // Nothing new to add to the graph — preserve the page exactly. The new
     // timeline entry (added by writeEntity) is the only change.
-    return { compiledTruth: base + '\n', supersededTargets: stripResult.removed }
+    return base + '\n'
   }
   const hasRelHeader = /^##\s+Relationships\s*$/im.test(base)
   const parts = [base, '']
   if (!hasRelHeader) parts.push('## Relationships', '')
   parts.push(...newLines)
-  return { compiledTruth: parts.join('\n') + '\n', supersededTargets: stripResult.removed }
+  return parts.join('\n') + '\n'
 }
 
 /**
@@ -712,17 +546,8 @@ function mergeExistingCompiledTruth(
  * pair and its add-pass re-asserts any survivor edge (still present in the new
  * truth). The prior belief lives on in the append-only, dated timeline. Guards
  * skip a `supersedes` that resolves to the same slug as the new object.
- *
- * Returns the surviving `text` PLUS `removed` — the set of `(predicate,
- * prior-object)` target keys whose sentence was ACTUALLY excised. A `supersedes`
- * marker whose prior was never asserted here contributes a target but excises
- * nothing, so it is absent from `removed` → the caller records no fabricated
- * `superseded …` history for it (Codex).
  */
-function stripSupersededSentences(
-  existing: string,
-  page: PlannedPage,
-): { text: string; removed: Set<string> } {
+function stripSupersededSentences(existing: string, page: PlannedPage): string {
   // Targets: `${predicate}\x1f${priorSlug}` triples to retire from compiled-truth.
   const targets = new Set<string>()
   for (const r of page.relations) {
@@ -733,8 +558,7 @@ function stripSupersededSentences(
     if (priorSlug === objSlug) continue // not a real supersession
     targets.add(`${r.predicate}\x1f${priorSlug}`)
   }
-  const removed = new Set<string>()
-  if (targets.size === 0) return { text: existing, removed }
+  if (targets.size === 0) return existing
 
   const opts = { sourceKind: page.kind, source: 'rb4-supersede-scan' } as const
   // Cheap superset gate for "this text carries an entity reference the edge
@@ -796,7 +620,6 @@ function stripSupersededSentences(
       const span = spans[i]!
       const pureKey = pureSupersededSentence(content.slice(span.start, span.end), sentenceKeys(content.slice(span.start, span.end)))
       if (pureKey === null) continue
-      removed.add(pureKey) // record what was ACTUALLY retired
       const from = span.start
       const to = i + 1 < spans.length ? spans[i + 1]!.start : content.length
       drops.push([from, to])
@@ -819,21 +642,15 @@ function stripSupersededSentences(
     if (rebuilt.length === 0) continue // the whole line was superseded → drop it
     outLines.push(`${bullet}${rebuilt}`)
   }
-  return { text: outLines.join('\n'), removed }
+  return outLines.join('\n')
 }
 
 /** What scribe needs to preserve from an existing on-disk page: its compiled-
- *  truth slice (for append-only merge), its parsed frontmatter (so the
- *  populator's `mention_count`/`category`/… survive the rewrite), and its
- *  existing timeline ENTRIES (so a REPLAY of a supersession — an entry with the
- *  SAME `(ts, source)` — still recognises the prior belief recorded there and
- *  reproduces a byte-identical body, keeping the repeated turn a true no-op; a
- *  LATER re-delivery at a different ts is NOT a replay and must not resurrect the
- *  note). */
+ *  truth slice (for append-only merge) and its parsed frontmatter (so the
+ *  populator's `mention_count`/`category`/… survive the rewrite). */
 interface ExistingPage {
   compiledTruth: string
   frontmatter: Record<string, unknown>
-  timelineEntries: ReadonlyArray<{ ts: string; source: string; body: string }>
 }
 
 /**
@@ -855,11 +672,7 @@ async function readExistingPage(
   } catch {
     return null // ENOENT (new page) or unreadable — treat as fresh
   }
-  return {
-    compiledTruth: extractCompiledTruth(body),
-    frontmatter: parseFrontmatter(body),
-    timelineEntries: extractTimeline(body),
-  }
+  return { compiledTruth: extractCompiledTruth(body), frontmatter: parseFrontmatter(body) }
 }
 
 /**

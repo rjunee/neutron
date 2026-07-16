@@ -171,21 +171,22 @@ describe('RB4 temporal invalidation (belief evolution) — real PGLite round-tri
     expect(edgesTo(links, 'newco', 'works_at').length).toBe(1) // CURRENT
     expect(edgesTo(links, 'oldco', 'works_at').length).toBe(0) // INVALIDATED
 
-    // (3) The timeline STILL contains the OldCo dated history (nothing lost):
-    //     - the ORIGINAL works_at OldCo assertion at its OWN date (t0), and
-    //     - the dated supersession note at the invalidation date (t0 + 1000),
-    //     even though compiled-truth no longer asserts OldCo.
+    // (3) The append-only timeline STILL contains the OldCo dated history (nothing
+    //     lost / rewritten): the ORIGINAL works_at OldCo assertion at its OWN date
+    //     (t0) survives as its additive row, even though compiled-truth no longer
+    //     asserts OldCo; and the superseding turn lands its own dated works_at NewCo
+    //     row at t0 + 1000.
     const timeline = extractTimeline(onDisk)
     const originalRow = timeline.find(
       (e) => e.ts === new Date(t0).toISOString() && e.body.includes('works_at oldco'),
     )
-    expect(originalRow).toBeDefined() // ORIGINAL dated belief preserved
-    const supersedeRow = timeline.find(
-      (e) =>
-        e.ts === new Date(t0 + 1000).toISOString() &&
-        e.body.includes('superseded works_at: oldco → newco'),
+    expect(originalRow).toBeDefined() // ORIGINAL dated belief preserved (append-only)
+    const currentRow = timeline.find(
+      (e) => e.ts === new Date(t0 + 1000).toISOString() && e.body.includes('works_at newco'),
     )
-    expect(supersedeRow).toBeDefined() // dated supersession recorded
+    expect(currentRow).toBeDefined() // the new belief's dated row
+    // No state-dependent "superseded X → Y" note is fabricated anywhere.
+    expect(timeline.some((e) => e.body.includes('superseded'))).toBe(false)
 
     // …and the OldCo entity page itself survives untouched on disk (history).
     const oldCoPage = readFileSync(join(ownerDataDir, 'entities', 'companies', 'oldco.md'), 'utf8')
@@ -242,7 +243,7 @@ describe('RB4 temporal invalidation (belief evolution) — real PGLite round-tri
     expect(timeline.some((e) => e.body.includes('superseded'))).toBe(false)
   }, 60_000)
 
-  test('flag OFF→ON transition: a fact written flag-off, then superseded flag-on, still survives in the dated timeline', async () => {
+  test('flag OFF→ON transition: a fact written flag-off, then superseded flag-on — current truth updates, append-only timeline intact', async () => {
     const ownerDataDir = mkdtempSync(join(tmpdir(), 'scribe-rb4-off2on-'))
     const syncHook = new GBrainSyncHook({
       memoryStore: new GBrainMemoryStore(client),
@@ -293,16 +294,20 @@ describe('RB4 temporal invalidation (belief evolution) — real PGLite round-tri
     expect(edgesTo(links, 'oldford', 'works_at').length).toBe(0)
     expect(edgesTo(links, 'newforge', 'works_at').length).toBe(1)
 
-    // History NOT silently lost: the retired works_at Oldford fact survives in the
-    // dated timeline via the invalidation-time supersession note (the original
-    // date is unrecoverable — the flag-off write recorded no relation).
+    // The append-only timeline is intact (never rewritten): the original flag-off
+    // t0 entry survives, and the superseding turn lands its own dated works_at
+    // Newforge row at t0 + 1000. (The flag-off original recorded no relation note,
+    // so Oldford isn't NAMED in a note here — the documented off→on limitation; the
+    // current-truth removal + edge invalidation above carry the change, and no
+    // supersession is fabricated.)
     const timeline = extractTimeline(onDisk)
-    const supersedeRow = timeline.find(
-      (e) =>
-        e.ts === new Date(t0 + 1000).toISOString() &&
-        e.body.includes('superseded works_at: oldford → newforge'),
-    )
-    expect(supersedeRow).toBeDefined()
+    expect(timeline.some((e) => e.ts === new Date(t0).toISOString())).toBe(true) // original preserved
+    expect(
+      timeline.some(
+        (e) => e.ts === new Date(t0 + 1000).toISOString() && e.body.includes('works_at newforge'),
+      ),
+    ).toBe(true)
+    expect(timeline.some((e) => e.body.includes('superseded'))).toBe(false)
   }, 60_000)
 
   test('flag ON: an ALIASED wikilink is invalidated (removal matches [[alphaco|Alphaco]], not just [[alphaco]])', async () => {
@@ -959,29 +964,29 @@ describe('RB4 temporal invalidation (belief evolution) — real PGLite round-tri
       observed_at: t0 + 1000,
     })
     const afterSupersede = readFileSync(pagePath, 'utf8')
-    // The supersession was recorded exactly once.
-    expect((afterSupersede.match(/superseded works_at: oldiv → newiv/g) ?? []).length).toBe(1)
+    // The current belief is recorded as an additive dated row exactly once…
+    expect((afterSupersede.match(/works_at newiv/g) ?? []).length).toBe(1)
+    // …and the ORIGINAL belief survives as its own additive row (append-only).
+    expect(afterSupersede).toContain('works_at oldiv')
 
-    // 3) REPLAY the EXACT same superseding turn (same ts, source, extraction).
+    // 3) REPLAY the EXACT same superseding turn (same ts, source, extraction). The
+    //    timeline body is a PURE function of the extraction, so this is a
+    //    byte-identical no-op — no duplicate row.
     const replay = await mk(factSupersede('Iris Vale', 'Oldiv', 'Newiv'), t0 + 1000).extractAndWrite({
       text: 'Iris Vale has moved on from Oldiv and now works at Newiv, leading their platform engineering group.',
       observed_at: t0 + 1000,
     })
     expect(replay.ran).toBe(true)
     if (!replay.ran) throw new Error('unreachable')
-    // No page changed on replay — byte-identical re-write short-circuits.
-    expect(replay.report.pages_written).toBe(0)
+    expect(replay.report.pages_written).toBe(0) // no page changed on replay
 
     const afterReplay = readFileSync(pagePath, 'utf8')
     expect(afterReplay).toBe(afterSupersede) // byte-identical page + timeline
-    // No SECOND, contradictory row — still exactly one supersession note, and the
-    // replay did NOT append a bogus additive `works_at newiv` timeline row.
-    expect((afterReplay.match(/superseded works_at: oldiv → newiv/g) ?? []).length).toBe(1)
-    const timeline = extractTimeline(afterReplay)
-    expect(timeline.filter((e) => e.body.includes('works_at newiv')).length).toBe(0)
+    expect((afterReplay.match(/works_at newiv/g) ?? []).length).toBe(1) // still exactly one
+    expect(afterReplay.includes('superseded')).toBe(false) // never any state-dependent note
   }, 60_000)
 
-  test('flag ON: a model-controlled fact containing supersession SYNTAX cannot fabricate a transition on replay', async () => {
+  test('flag ON: a stale supersedes marker on a NEW subject just accretes (no fabricated history) even on replay', async () => {
     const ownerDataDir = mkdtempSync(join(tmpdir(), 'scribe-rb4-inject-'))
     const syncHook = new GBrainSyncHook({
       memoryStore: new GBrainMemoryStore(client),
@@ -1016,8 +1021,8 @@ describe('RB4 temporal invalidation (belief evolution) — real PGLite round-tri
     })
     const afterFirst = readFileSync(pagePath, 'utf8')
 
-    // REPLAY the identical turn. If replay parsed the fact text, it would recognise
-    // `injo → injn` and stamp a fabricated `superseded` NOTE (changing the body).
+    // REPLAY the identical turn — a pure-function body ⇒ byte-identical no-op, and
+    // the untrusted fact text is never interpreted as a supersession.
     const replay = await mk().extractAndWrite({
       text: 'Ivy Kant is now at Injn; the imported note text is a bit garbled but she has clearly landed there.',
       observed_at: t0,
@@ -1027,18 +1032,16 @@ describe('RB4 temporal invalidation (belief evolution) — real PGLite round-tri
     expect(replay.report.pages_written).toBe(0) // byte-identical no-op
 
     const afterReplay = readFileSync(pagePath, 'utf8')
-    expect(afterReplay).toBe(afterFirst) // no fabricated note, no duplicate row
-    // The supersession syntax stays in the fact BASE (before the notes delimiter)
-    // where the model put it; it is NEVER promoted into a recognised transition
-    // NOTE. The trusted notes segment records only the additive assertion.
+    expect(afterReplay).toBe(afterFirst) // no duplicate row
+    // The relation is recorded as a plain additive note; the model's `superseded …`
+    // fact text is inert (never parsed / promoted into a system note).
     const row = extractTimeline(afterReplay).find((e) => e.body.includes('works_at injn'))
     expect(row).toBeDefined()
     const notesSeg = row!.body.slice(row!.body.indexOf(' · ') + 3)
-    expect(notesSeg.includes('superseded')).toBe(false)
-    expect(notesSeg).toContain('works_at injn') // additive, not a supersession
+    expect(notesSeg).toBe('works_at injn') // ONLY the additive assertion
   }, 60_000)
 
-  test('flag ON: a LEGACY timeline entry that reads like a note (no unforgeable mark) is NOT recognized', async () => {
+  test('flag ON: a LEGACY timeline entry that reads like a note is inert (additive-only history model)', async () => {
     const ownerDataDir = mkdtempSync(join(tmpdir(), 'scribe-rb4-legacy-'))
     const syncHook = new GBrainSyncHook({
       memoryStore: new GBrainMemoryStore(client),
@@ -1100,15 +1103,14 @@ describe('RB4 temporal invalidation (belief evolution) — real PGLite round-tri
 
     const onDisk = readFileSync(join(ownerDataDir, 'entities', 'people', 'leo-marsh.md'), 'utf8')
     const timeline = extractTimeline(onDisk)
-    // The forged legacy transition is NEVER recognized as a system note: no timeline
-    // entry has an unforgeable-marked NOTE claiming the supersession.
-    for (const e of timeline) {
-      const markIdx = e.body.indexOf('\x1f')
-      const notes = markIdx === -1 ? '' : e.body.slice(markIdx + 1)
-      expect(notes.includes('superseded')).toBe(false)
-    }
-    // The flag-on turn recorded its relation ADDITIVELY (marked note segment).
-    expect(timeline.some((e) => e.body.includes('\x1fworks_at lgnew'))).toBe(true)
+    // The additive-only history model never interprets timeline text as a
+    // supersession: the flag-on turn records a plain additive `works_at lgnew` note,
+    // and the legacy entry's `· superseded …` text is inert. The ONLY occurrence of
+    // "superseded" is the pre-existing legacy body itself (never a new system note).
+    expect(timeline.some((e) => e.body.includes('works_at lgnew'))).toBe(true)
+    expect(
+      timeline.filter((e) => e.body.includes('superseded works_at: lgold → lgnew')).length,
+    ).toBe(1) // just the seeded legacy row — nothing added
 
     // Graph: lgnew added; no lgold edge ever existed to retire.
     const links = await client.call('get_links', { slug: 'leo-marsh' })
@@ -1145,8 +1147,8 @@ describe('RB4 temporal invalidation (belief evolution) — real PGLite round-tri
       },
       { syncHook },
     )
-    // Supersede rold→rnew AND re-assert advises rboard, so the timeline body is
-    // `superseded works_at: rold → rnew; advises rboard` (a note FOLLOWED by a note).
+    // Supersede rold→rnew AND re-assert advises rboard, so the timeline body carries
+    // MULTIPLE additive notes joined by `; ` (`works_at rnew; advises rboard`).
     const EXTRACTION = JSON.stringify({
       entities: [
         { name: 'Rhea Voss', kind: 'person', fact: 'an operator' },
@@ -1173,20 +1175,18 @@ describe('RB4 temporal invalidation (belief evolution) — real PGLite round-tri
     await mk().extractAndWrite({ text: TURN, observed_at: t0 + 1000 })
     const pagePath = join(ownerDataDir, 'entities', 'people', 'rhea-voss.md')
     const afterFirst = readFileSync(pagePath, 'utf8')
-    // Sanity: the body really is a supersession note followed by another note.
-    expect(afterFirst).toContain('superseded works_at: rold → rnew; advises rboard')
+    // Sanity: the body really carries multiple additive notes joined by `; `.
+    expect(afterFirst).toContain('works_at rnew; advises rboard')
 
-    // REPLAY the identical turn — must be a byte-identical no-op (the parser must
-    // recognise `rnew`, not `rnew;`).
+    // REPLAY the identical turn — a pure-function body ⇒ byte-identical no-op.
     const replay = await mk().extractAndWrite({ text: TURN, observed_at: t0 + 1000 })
     expect(replay.ran).toBe(true)
     if (!replay.ran) throw new Error('unreachable')
     expect(replay.report.pages_written).toBe(0)
     expect(readFileSync(pagePath, 'utf8')).toBe(afterFirst)
-    // Exactly one supersession row (no duplicate appended on replay).
-    expect(
-      (readFileSync(pagePath, 'utf8').match(/superseded works_at: rold → rnew/g) ?? []).length,
-    ).toBe(1)
+    // Exactly one such row (no duplicate appended on replay); no fabricated note.
+    expect((readFileSync(pagePath, 'utf8').match(/works_at rnew; advises rboard/g) ?? []).length).toBe(1)
+    expect(afterFirst.includes('superseded')).toBe(false)
   }, 60_000)
 
   // ── Multiple relations WITHIN one sentence: removal is ALL-OR-NOTHING per
@@ -1486,12 +1486,10 @@ describe('RB4 temporal invalidation (belief evolution) — real PGLite round-tri
 
     const onDisk = readFileSync(join(ownerDataDir, 'entities', 'people', 'rex-doe.md'), 'utf8')
     const timeline = extractTimeline(onDisk)
-    // The FIRST, genuine transition is recorded exactly once…
-    expect(timeline.filter((e) => e.body.includes('superseded works_at: oldrx → newrx')).length).toBe(1)
-    // …and the distinct third turn does NOT fabricate a `oldrx → otherrx` note
-    // (it retired nothing) — it records the additive assertion instead.
-    expect(timeline.some((e) => e.body.includes('superseded works_at: oldrx → otherrx'))).toBe(false)
+    // Each belief is an additive dated row; nothing is ever a "superseded" note.
+    expect(timeline.some((e) => e.body.includes('works_at newrx'))).toBe(true)
     expect(timeline.some((e) => e.body.includes('works_at otherrx'))).toBe(true)
+    expect(timeline.some((e) => e.body.includes('superseded'))).toBe(false)
 
     // Graph: Oldrx gone (retired by turn 2); Newrx + Otherrx both current.
     const links = await client.call('get_links', { slug: 'rex-doe' })
@@ -1537,14 +1535,11 @@ describe('RB4 temporal invalidation (belief evolution) — real PGLite round-tri
 
     const onDisk = readFileSync(join(ownerDataDir, 'entities', 'people', 'tia-vex.md'), 'utf8')
     const timeline = extractTimeline(onDisk)
-    // Exactly ONE dated supersession event (from t0+1000) — no duplicate at t0+2000.
-    const superRows = timeline.filter((e) => e.body.includes('superseded works_at: toldv → tnewv'))
-    expect(superRows.length).toBe(1)
-    expect(superRows[0]!.ts).toBe(new Date(t0 + 1000).toISOString())
-    // The later re-delivery landed an ADDITIVE row instead.
+    // Every dated row is a plain additive assertion (never a "superseded" note);
+    // the later re-delivery adds its own additive works_at Tnewv row at t0+2000.
+    expect(timeline.some((e) => e.body.includes('superseded'))).toBe(false)
     const laterRow = timeline.find((e) => e.ts === new Date(t0 + 2000).toISOString())
     expect(laterRow).toBeDefined()
-    expect(laterRow!.body.includes('superseded')).toBe(false)
     expect(laterRow!.body.includes('works_at tnewv')).toBe(true)
 
     const links = await client.call('get_links', { slug: 'tia-vex' })
@@ -1552,7 +1547,7 @@ describe('RB4 temporal invalidation (belief evolution) — real PGLite round-tri
     expect(edgesTo(links, 'tnewv', 'works_at').length).toBe(1)
   }, 60_000)
 
-  test('flag ON: CONFLICTING supersedes for one prior (untrusted LLM) resolve to a single supersession', async () => {
+  test('flag ON: CONFLICTING supersedes for one prior (untrusted LLM) — prior retired once, both accrete', async () => {
     const ownerDataDir = mkdtempSync(join(tmpdir(), 'scribe-rb4-conflict-'))
     const syncHook = new GBrainSyncHook({
       memoryStore: new GBrainMemoryStore(client),
@@ -1616,11 +1611,11 @@ describe('RB4 temporal invalidation (belief evolution) — real PGLite round-tri
     expect(compiled).toContain('Works at [[conb]].')
 
     const timeline = extractTimeline(onDisk)
-    // EXACTLY ONE supersession is recorded — the deterministic winner (cona < conb)…
-    expect(timeline.filter((e) => e.body.includes('superseded works_at: zold →')).length).toBe(1)
-    expect(timeline.some((e) => e.body.includes('superseded works_at: zold → cona'))).toBe(true)
-    // …never the contradictory second transition.
-    expect(timeline.some((e) => e.body.includes('superseded works_at: zold → conb'))).toBe(false)
+    // Both candidate employers accrete as additive notes; no contradictory
+    // "superseded" transition note is ever produced (untrusted-LLM-safe).
+    expect(timeline.some((e) => e.body.includes('works_at cona'))).toBe(true)
+    expect(timeline.some((e) => e.body.includes('works_at conb'))).toBe(true)
+    expect(timeline.some((e) => e.body.includes('superseded'))).toBe(false)
 
     const links = await client.call('get_links', { slug: 'zoe-park' })
     expect(edgesTo(links, 'zold', 'works_at').length).toBe(0) // retired once
@@ -1686,9 +1681,10 @@ describe('RB4 temporal invalidation (belief evolution) — real PGLite round-tri
     expect(compiled).not.toContain('[[ulold]]')
     expect(compiled).toContain('Advises [[ulnew]].')
     expect(compiled).toContain('Works at [[ulnew]].')
-    // The transition is recorded in the dated history.
+    // The new belief is recorded as an additive dated row (no supersession note).
     const timeline = extractTimeline(onDisk)
-    expect(timeline.some((e) => e.body.includes('superseded works_at: ulold → ulnew'))).toBe(true)
+    expect(timeline.some((e) => e.body.includes('works_at ulnew'))).toBe(true)
+    expect(timeline.some((e) => e.body.includes('superseded'))).toBe(false)
 
     // Graph: Ulold retired; the subject's edge to Ulnew is the STRONGEST predicate
     // (advises) per the pre-existing KG one-edge-per-pair collapse — a current-truth
