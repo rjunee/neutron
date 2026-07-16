@@ -76,12 +76,28 @@ export class DefaultButtonRouter implements ButtonRouter {
   async routeChoice(input: RouteChoiceInput): Promise<RouteChoiceResult> {
     const chosen_at = input.chosen_at ?? this.now()
 
-    // N6 dual-read (ingress boundary) — `RouteChoiceInput.channel_kind` is
-    // typed to the canonical vocabulary, but a runtime/legacy caller (an
-    // in-flight process, or a client sending the pre-unification hyphen off
-    // the wire) may still hand us `'app-socket'`. Normalize once here so both
-    // the returned choice AND the value ButtonStore persists are canonical.
-    const channel_kind = normalizeChannelKindForButton(input.channel_kind) ?? input.channel_kind
+    // N6 dual-read + validation (ingress trust boundary) —
+    // `RouteChoiceInput.channel_kind` is typed to the canonical vocabulary, but
+    // a runtime/legacy caller (an in-flight process, or a client sending the
+    // pre-unification hyphen off the wire) may still hand us `'app-socket'`.
+    // Normalize once here so both the returned choice AND the value ButtonStore
+    // persists are canonical. A token that does NOT normalize to a supported
+    // button channel is an unsupported/corrupt channel: reject it before any
+    // store write so a bogus value can never enter `resolution_channel_kind`
+    // (nor slip past the Telegram hostile-payload guard by masquerading as a
+    // non-Telegram channel).
+    const channel_kind = normalizeChannelKindForButton(input.channel_kind)
+    if (channel_kind === null) {
+      const choice: ButtonChoice = {
+        prompt_id: input.prompt_id,
+        choice_value: input.raw_value,
+        chosen_at,
+        speaker_user_id: input.speaker_user_id,
+        channel_kind: input.channel_kind,
+      }
+      if (input.freeform_text !== undefined) choice.freeform_text = input.freeform_text
+      return { delivered: false, choice, was_new: false }
+    }
 
     // Pass the observation time so the get() expiry check uses the same
     // wall clock the caller witnessed — avoids the race where a tap

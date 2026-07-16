@@ -27,6 +27,7 @@ import {
   type ButtonChoice,
   type ButtonOption,
   type ButtonPrompt,
+  type ChannelKindForButton,
   DEFAULT_EXPIRES_IN_MS,
 } from './button-primitive.ts'
 
@@ -572,9 +573,14 @@ export class ButtonStore {
           // N6 dual-read — a row persisted before migration 0104 carries the
           // legacy hyphen 'app-socket'; normalize it to the canonical
           // 'app_socket' on read so the replayed prior choice routes
-          // identically to a freshly-written one. Falls back to the live
-          // choice's channel_kind when the column is null/unrecognized.
-          channel_kind: normalizeChannelKindForButton(row.resolution_channel_kind) ?? choice.channel_kind,
+          // identically to a freshly-written one. An UNRECOGNIZED persisted
+          // token is preserved VERBATIM (provenance fidelity — never silently
+          // rewritten to the duplicate caller's channel); only a truly NULL
+          // column falls back to the live choice's channel_kind.
+          channel_kind:
+            normalizeChannelKindForButton(row.resolution_channel_kind) ??
+            (row.resolution_channel_kind as ChannelKindForButton | null) ??
+            choice.channel_kind,
         }
         if (row.resolution_freeform_text !== null) {
           priorChoice.freeform_text = row.resolution_freeform_text

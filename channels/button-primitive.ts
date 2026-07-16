@@ -85,8 +85,11 @@ export const LEGACY_APP_SOCKET_CHANNEL_KIND = 'app-socket'
  * Dual-read normalizer for a persisted / wire `channel_kind` string in the
  * button vocabulary. Maps the legacy hyphen `'app-socket'` onto the canonical
  * underscore `'app_socket'` and passes through the other canonical tokens.
- * Returns null for an absent or unrecognized value so callers can fall back
- * to a live-context default rather than persisting a corrupt token.
+ * Returns null for an absent or unrecognized token — that null is the SIGNAL
+ * the ingress trust boundary (`DefaultButtonRouter.routeChoice`) uses to REJECT
+ * an unsupported channel rather than resolve + persist a corrupt value. Read /
+ * replay callers that must not lose provenance keep the raw persisted token
+ * when this returns null (see `ButtonStore.resolve`).
  */
 export function normalizeChannelKindForButton(
   raw: string | null | undefined,
