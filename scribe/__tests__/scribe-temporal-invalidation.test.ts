@@ -374,4 +374,147 @@ describe('RB4 temporal invalidation (belief evolution) — real PGLite round-tri
     expect(edgesTo(links, 'oldco', 'advises').length).toBe(1) // PRESERVED
     expect(edgesTo(links, 'newco', 'works_at').length).toBe(1) // CURRENT
   }, 60_000)
+
+  test('flag ON: removal is SENTENCE-granular — same-line sibling sentence (same object) survives', async () => {
+    const ownerDataDir = mkdtempSync(join(tmpdir(), 'scribe-rb4-sent1-'))
+    const syncHook = new GBrainSyncHook({
+      memoryStore: new GBrainMemoryStore(client),
+      gbrainMcp: client,
+    })
+
+    await client.call('put_page', {
+      slug: 'oldco',
+      content: '---\nslug: oldco\ntype: company\n---\n\nA company.\n',
+    })
+    // TWO sentences on ONE line, same object. (Line-granular removal would leave
+    // the stale `Works at` sentence — Codex RB4 r2 repro 1.)
+    await writeEntity(
+      {
+        ownerDataDir,
+        kind: 'person',
+        slug: 'dave-roe',
+        originInstance: 'rb4',
+        receivingInstanceSlug: 'rb4',
+        body: {
+          frontmatter: { slug: 'dave-roe', type: 'person', name: 'Dave Roe' },
+          compiledTruth:
+            '# Dave Roe\n\nAn operator.\n\n## Relationships\n\n- Advises [[oldco]]. Works at [[oldco]].\n',
+          timelineAppend: { ts: new Date(t0).toISOString(), source: 'import:onboarding', body: 'seeded' },
+        },
+      },
+      { syncHook },
+    )
+
+    const scribe = createScribe({
+      substrate: cannedSubstrate(
+        JSON.stringify({
+          entities: [
+            { name: 'Dave Roe', kind: 'person', fact: 'an operator' },
+            { name: 'NewCo', kind: 'company', fact: 'his new employer' },
+          ],
+          relations: [
+            { subject: 'Dave Roe', predicate: 'works_at', object: 'NewCo', supersedes: 'OldCo' },
+          ],
+        }),
+      ),
+      syncHook,
+      ownerDataDir,
+      project_slug: 'rb4-sent1',
+      budget: createState(join(ownerDataDir, '.scribe-budget.json'), t0),
+      writeEntity,
+      now: () => t0 + 1000,
+      supersede: true,
+    })
+    const out = await scribe.extractAndWrite({
+      text: 'Dave Roe stepped down from OldCo and now works at NewCo, but he still advises the OldCo leadership team.',
+      observed_at: t0 + 1000,
+    })
+    expect(out.ran).toBe(true)
+
+    const compiled = extractCompiledTruth(
+      readFileSync(join(ownerDataDir, 'entities', 'people', 'dave-roe.md'), 'utf8'),
+    )
+    // ONLY the works_at [[oldco]] sentence is gone; the sibling Advises survives.
+    expect(compiled).toContain('Advises [[oldco]].') // PRESERVED (same-line sibling)
+    expect(compiled).not.toContain('Works at [[oldco]]') // RETIRED
+    expect(compiled).toContain('Works at [[newco]].') // CURRENT
+  }, 60_000)
+
+  test('flag ON: removal is SENTENCE-granular — same-line UNRELATED-object sentence is not deleted', async () => {
+    const ownerDataDir = mkdtempSync(join(tmpdir(), 'scribe-rb4-sent2-'))
+    const syncHook = new GBrainSyncHook({
+      memoryStore: new GBrainMemoryStore(client),
+      gbrainMcp: client,
+    })
+
+    await client.call('put_page', {
+      slug: 'oldco',
+      content: '---\nslug: oldco\ntype: company\n---\n\nA company.\n',
+    })
+    await client.call('put_page', {
+      slug: 'boardco',
+      content: '---\nslug: boardco\ntype: company\n---\n\nA company.\n',
+    })
+    // Two sentences on ONE line, DIFFERENT objects. (Line-granular removal would
+    // delete the unrelated `advises boardco` fact — Codex RB4 r2 repro 2.)
+    await writeEntity(
+      {
+        ownerDataDir,
+        kind: 'person',
+        slug: 'erin-vale',
+        originInstance: 'rb4',
+        receivingInstanceSlug: 'rb4',
+        body: {
+          frontmatter: { slug: 'erin-vale', type: 'person', name: 'Erin Vale' },
+          compiledTruth:
+            '# Erin Vale\n\nAn operator.\n\n## Relationships\n\n- Works at [[oldco]]. Advises [[boardco]].\n',
+          timelineAppend: { ts: new Date(t0).toISOString(), source: 'import:onboarding', body: 'seeded' },
+        },
+      },
+      { syncHook },
+    )
+    let links = await client.call('get_links', { slug: 'erin-vale' })
+    expect(edgesTo(links, 'oldco', 'works_at').length).toBe(1)
+    expect(edgesTo(links, 'boardco', 'advises').length).toBe(1)
+
+    const scribe = createScribe({
+      substrate: cannedSubstrate(
+        JSON.stringify({
+          entities: [
+            { name: 'Erin Vale', kind: 'person', fact: 'an operator' },
+            { name: 'NewCo', kind: 'company', fact: 'her new employer' },
+          ],
+          relations: [
+            { subject: 'Erin Vale', predicate: 'works_at', object: 'NewCo', supersedes: 'OldCo' },
+          ],
+        }),
+      ),
+      syncHook,
+      ownerDataDir,
+      project_slug: 'rb4-sent2',
+      budget: createState(join(ownerDataDir, '.scribe-budget.json'), t0),
+      writeEntity,
+      now: () => t0 + 1000,
+      supersede: true,
+    })
+    const out = await scribe.extractAndWrite({
+      text: 'Erin Vale left OldCo to work at NewCo full-time, though she continues to advise the BoardCo directors.',
+      observed_at: t0 + 1000,
+    })
+    expect(out.ran).toBe(true)
+
+    const compiled = extractCompiledTruth(
+      readFileSync(join(ownerDataDir, 'entities', 'people', 'erin-vale.md'), 'utf8'),
+    )
+    // The unrelated same-line advises boardco assertion SURVIVES.
+    expect(compiled).toContain('Advises [[boardco]].') // PRESERVED (unrelated object)
+    expect(compiled).not.toContain('Works at [[oldco]]') // RETIRED
+    expect(compiled).toContain('Works at [[newco]].') // CURRENT
+
+    // Graph: stale works_at oldco gone; advises boardco intact; works_at newco added.
+    links = await client.call('get_links', { slug: 'erin-vale' })
+    expect(edgesTo(links, 'oldco', 'works_at').length).toBe(0) // INVALIDATED
+    expect(edgesTo(links, 'boardco', 'advises').length).toBe(1) // PRESERVED
+    expect(edgesTo(links, 'newco', 'works_at').length).toBe(1) // CURRENT
+  }, 60_000)
 })

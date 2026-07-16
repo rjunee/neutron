@@ -403,12 +403,19 @@ function normaliseSlug(raw: string): string | null {
   return s
 }
 
-interface SentenceSpan {
+export interface SentenceSpan {
   start: number
   end: number
 }
 
-function splitSentencesWithOffsets(body: string): SentenceSpan[] {
+/**
+ * Split `body` into sentence spans (offsets EXCLUDE the terminating `.!?` and
+ * newlines). Exported so consumers that must edit prose at the SAME granularity
+ * the edge extractor reasons at — notably scribe's RB4 temporal-invalidation
+ * removal (`scribe/write-to-gbrain.ts`) — split identically and never desync
+ * from what becomes a graph edge.
+ */
+export function splitSentencesWithOffsets(body: string): SentenceSpan[] {
   // Treat `.`, `!`, `?` as terminators only when followed by whitespace,
   // EOL, or end-of-string. That keeps `.md`, `.com`, decimal numbers,
   // and the URL-shaped trailers inside markdown links intact. Newlines

@@ -47,7 +47,7 @@ import {
   extractCompiledTruth,
   parseFrontmatter,
 } from '@neutronai/runtime/entity-format.ts'
-import { extractTypedLinks } from '@neutronai/runtime/auto-link.ts'
+import { extractTypedLinks, splitSentencesWithOffsets } from '@neutronai/runtime/auto-link.ts'
 import type { EntityKind, SyncHook } from '@neutronai/runtime/entity-writer.ts'
 import { entitySlugify } from '@neutronai/runtime/entity-slug.ts'
 import { createLogger } from '@neutronai/logger'
@@ -485,25 +485,30 @@ function mergeExistingCompiledTruth(
 }
 
 /**
- * RB4 temporal invalidation — drop every existing compiled-truth LINE that
- * asserts a superseded `(predicate, prior-object)` triple, one target per
- * superseding relation on this page.
+ * RB4 temporal invalidation — excise from the existing compiled-truth exactly
+ * the SENTENCE(S) that assert a superseded `(predicate, prior-object)` triple,
+ * one target per superseding relation on this page. Everything else is preserved
+ * byte-for-byte.
  *
- * PREDICATE-SCOPED, not object-blind: the marker `works_at NewCo, supersedes
- * OldCo` retires ONLY the prior `works_at [[oldco]]` assertion — a separate,
- * still-current `Advises [[oldco]].` line survives (Codex RB4 r1 blocker 1). A
- * line qualifies purely by what it would contribute to the graph, computed with
- * the SAME `extractTypedLinks` the writer uses — so ALIASED wikilinks
- * (`[[oldco|OldCo]]`) and every verb-phrasing variant are matched exactly as the
- * edge extractor sees them (Codex RB4 r1 blocker 2), never a brittle literal
- * `[[oldco]]` substring.
+ * PREDICATE-SCOPED, not object-blind (Codex RB4 r1 blocker 1): `works_at NewCo,
+ * supersedes OldCo` retires ONLY the `works_at [[oldco]]` assertion — a separate
+ * current `Advises [[oldco]].` survives.
  *
- * Dropping the line removes the triple from the NEW compiled-truth, so the
- * writer's `removedLinks` diff surfaces `works_at oldco` → the sync hook's
- * (predicate-blind) `remove_link` clears the pair and its add-pass re-asserts any
- * survivor edge (e.g. `advises oldco`, still present in the new truth). The prior
- * belief lives on in the append-only, dated timeline. Guards skip a `supersedes`
- * that resolves to the same slug as the new object (a no-op / mis-emit).
+ * SENTENCE-granular, not line-granular (Codex RB4 r2 blocker): a line carrying
+ * several sentences (`Works at [[oldco]]. Advises [[boardco]].`) drops just the
+ * target sentence and keeps the rest, so neither a stale sibling sentence lingers
+ * nor an unrelated fact is deleted wholesale.
+ *
+ * A sentence qualifies purely by what it would contribute to the graph, computed
+ * with the SAME `extractTypedLinks` + `splitSentencesWithOffsets` the edge
+ * extractor uses — so ALIASED wikilinks (`[[oldco|OldCo]]`) and every verb
+ * phrasing are matched exactly as the graph sees them (Codex RB4 r1 blocker 2),
+ * never a brittle literal `[[oldco]]` substring. Excising the sentence removes the
+ * triple from the NEW compiled-truth → the writer's `removedLinks` diff surfaces
+ * `works_at oldco` → the sync hook's (predicate-blind) `remove_link` clears the
+ * pair and its add-pass re-asserts any survivor edge (still present in the new
+ * truth). The prior belief lives on in the append-only, dated timeline. Guards
+ * skip a `supersedes` that resolves to the same slug as the new object.
  */
 function stripSupersededSentences(existing: string, page: PlannedPage): string {
   // Targets: `${predicate}\x1f${priorSlug}` triples to retire from compiled-truth.
@@ -517,17 +522,54 @@ function stripSupersededSentences(existing: string, page: PlannedPage): string {
     targets.add(`${r.predicate}\x1f${priorSlug}`)
   }
   if (targets.size === 0) return existing
-  const kept = existing.split('\n').filter((line) => {
-    if (!line.includes('[[')) return true // fast path: no wikilink → keeps
-    // Extract what THIS line would contribute to the graph (subject = this
-    // page), then drop the line iff it asserts a superseded (predicate, object).
-    const triples = extractTypedLinks(`${line}\n`, page.slug, {
-      sourceKind: page.kind,
-      source: 'rb4-supersede-scan',
-    })
-    return !triples.some((t) => targets.has(`${t.predicate}\x1f${t.object}`))
-  })
-  return kept.join('\n')
+
+  const opts = { sourceKind: page.kind, source: 'rb4-supersede-scan' } as const
+  // A single sentence asserts a superseded target?
+  const sentenceHitsTarget = (text: string): boolean => {
+    if (!text.includes('[[')) return false
+    const triples = extractTypedLinks(`${text}\n`, page.slug, opts)
+    return triples.some((t) => targets.has(`${t.predicate}\x1f${t.object}`))
+  }
+
+  const outLines: string[] = []
+  for (const line of existing.split('\n')) {
+    if (!line.includes('[[')) {
+      outLines.push(line) // fast path: no wikilink → untouched
+      continue
+    }
+    // Strip any leading list-bullet so it isn't folded into the first sentence.
+    const bullet = /^(\s*(?:[-*+]|\d+[.)])\s+)/.exec(line)?.[0] ?? ''
+    const content = line.slice(bullet.length)
+    const spans = splitSentencesWithOffsets(content)
+    const kept: string[] = []
+    let droppedAny = false
+    for (const span of spans) {
+      const raw = content.slice(span.start, span.end)
+      if (sentenceHitsTarget(raw)) {
+        droppedAny = true
+        continue
+      }
+      // Preserve the surviving sentence with its original terminator (or a
+      // normalising period when it had none).
+      const term = content[span.end]
+      const trimmed = raw.trim()
+      if (trimmed.length === 0) continue
+      kept.push(
+        term === '.' || term === '!' || term === '?'
+          ? `${trimmed}${term}`
+          : /[.!?]$/.test(trimmed)
+            ? trimmed
+            : `${trimmed}.`,
+      )
+    }
+    if (!droppedAny) {
+      outLines.push(line) // nothing to retire on this line → keep verbatim
+      continue
+    }
+    if (kept.length === 0) continue // the whole line was superseded → drop it
+    outLines.push(`${bullet}${kept.join(' ')}`)
+  }
+  return outLines.join('\n')
 }
 
 /** What scribe needs to preserve from an existing on-disk page: its compiled-
