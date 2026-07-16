@@ -486,8 +486,13 @@ function inferPredicate(
  * `[alias](people/slug.md)` references to bare `slug` form so verb
  * regexes can match them as positional tokens. Non-reference text is
  * preserved verbatim.
+ *
+ * Exported so a consumer editing prose at the SAME granularity the edge extractor
+ * reasons at — scribe's RB4 supersession removal, which must recognise a purely-
+ * generated relationship sentence (in ANY wikilink/markdown-link form) vs one
+ * carrying extra hand-authored prose — normalises references identically.
  */
-function normaliseSentence(text: string): string {
+export function normaliseSentence(text: string): string {
   let out = text
   out = out.replace(/\[\[([^\]|]+?)(?:\|[^\]]*)?\]\]/g, (_full, raw: string) => {
     const slug = normaliseSlug(raw)

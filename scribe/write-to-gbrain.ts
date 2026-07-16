@@ -48,7 +48,11 @@ import {
   extractTimeline,
   parseFrontmatter,
 } from '@neutronai/runtime/entity-format.ts'
-import { extractTypedLinks, splitSentencesWithOffsets } from '@neutronai/runtime/auto-link.ts'
+import {
+  extractTypedLinks,
+  normaliseSentence,
+  splitSentencesWithOffsets,
+} from '@neutronai/runtime/auto-link.ts'
 import type { EntityKind, SyncHook } from '@neutronai/runtime/entity-writer.ts'
 import { entitySlugify } from '@neutronai/runtime/entity-slug.ts'
 import { createLogger } from '@neutronai/logger'
@@ -716,6 +720,30 @@ function stripSupersededSentences(
       (t) => `${t.predicate}\x1f${t.object}`,
     )
   }
+  // Is this sentence PURELY a single generated relationship assertion for a
+  // superseded target — i.e. safe to drop with NOTHING to lose? It must (a) assert
+  // exactly ONE graph relation, which is a superseded target, AND (b) normalise
+  // (references → bare slugs, the extractor's own transform) to EXACTLY the
+  // normalised `RELATION_SENTENCE` template for that relation. Any extra
+  // hand-authored prose (`Works at [[oldco]] as principal engineer since 2019.`)
+  // fails (b) → kept verbatim; alias/markdown wikilink forms still pass (a)+(b)
+  // because normalisation collapses them to the same bare slug (Codex).
+  // Normalise references → bare slugs, drop surrounding whitespace + trailing
+  // sentence punctuation (the sentence spans exclude the terminator, the templates
+  // include it), so only the meaningful content is compared.
+  const canon = (s: string): string =>
+    normaliseSentence(s)
+      .trim()
+      .replace(/[.!?]+$/, '')
+      .trim()
+  const pureSupersededSentence = (text: string, keys: string[]): string | null => {
+    if (keys.length !== 1) return null
+    const key = keys[0]!
+    if (!targets.has(key)) return null
+    const [predicate, objSlug] = key.split('\x1f')
+    const tmpl = RELATION_SENTENCE[predicate ?? ''] ?? RELATION_SENTENCE['mentions']!
+    return canon(text) === canon(tmpl(objSlug ?? '')) ? key : null
+  }
 
   const outLines: string[] = []
   for (const line of existing.split('\n')) {
@@ -732,18 +760,16 @@ function stripSupersededSentences(
     for (const span of spans) {
       const raw = content.slice(span.start, span.end)
       const keys = sentenceKeys(raw)
-      const hitKeys = keys.filter((k) => targets.has(k))
-      // Drop a sentence ONLY when EVERY relation it asserts is a superseded target
-      // (`hitKeys` covers all of `keys`). A COMPOUND sentence that also carries a
-      // still-current relation — or descriptive prose around it — is KEPT VERBATIM:
-      // never destroy or reconstruct hand-authored content (Codex). The trade-off
-      // is intentional + safe: a superseded relation embedded in a compound sentence
-      // is left in place (under-remove rather than mangle prose). Scribe's own
-      // rendered prose is one relation per sentence, so a real chat-time supersession
-      // always hits this clean path.
-      if (hitKeys.length > 0 && hitKeys.length === keys.length) {
+      // Drop a sentence ONLY when it is PURELY a generated relationship assertion for
+      // a superseded target (no sibling relation, no descriptive prose). Anything
+      // else — a compound sentence OR a single relation wrapped in hand-authored
+      // prose — is KEPT VERBATIM: never destroy or reconstruct hand-authored content
+      // (Codex). Safe under-removal; scribe's own one-relation-per-sentence prose
+      // always hits this clean path, so real chat-time supersessions invalidate.
+      const pureKey = pureSupersededSentence(raw, keys)
+      if (pureKey !== null) {
         droppedAny = true
-        for (const k of hitKeys) removed.add(k) // record what was ACTUALLY retired
+        removed.add(pureKey) // record what was ACTUALLY retired
         continue
       }
       // Keep the sentence VERBATIM (either no target, or a compound sentence we

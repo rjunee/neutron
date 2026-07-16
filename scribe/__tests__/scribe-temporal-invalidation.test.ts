@@ -1057,6 +1057,63 @@ describe('RB4 temporal invalidation (belief evolution) — real PGLite round-tri
     expect(edgesTo(links, 'cwnew', 'works_at').length).toBe(1) // ADDED
   }, 60_000)
 
+  test('flag ON: a SINGLE-relation sentence wrapped in descriptive prose is kept byte-for-byte (prose not lost)', async () => {
+    const ownerDataDir = mkdtempSync(join(tmpdir(), 'scribe-rb4-prose-'))
+    const syncHook = new GBrainSyncHook({
+      memoryStore: new GBrainMemoryStore(client),
+      gbrainMcp: client,
+    })
+
+    await client.call('put_page', {
+      slug: 'prold',
+      content: '---\nslug: prold\ntype: company\n---\n\nA company.\n',
+    })
+    // ONE graph relation, but WRAPPED in hand-authored descriptive prose that
+    // exists nowhere else. This is NOT a scribe-generated `Works at [[x]].` sentence.
+    const PROSE = '- Works at [[prold]] as principal engineer since 2019.'
+    await writeEntity(
+      {
+        ownerDataDir,
+        kind: 'person',
+        slug: 'priya-rao',
+        originInstance: 'rb4',
+        receivingInstanceSlug: 'rb4',
+        body: {
+          frontmatter: { slug: 'priya-rao', type: 'person', name: 'Priya Rao' },
+          compiledTruth: `# Priya Rao\n\nAn engineer.\n\n## Relationships\n\n${PROSE}\n`,
+          timelineAppend: { ts: new Date(t0).toISOString(), source: 'import:onboarding', body: 'seeded' },
+        },
+      },
+      { syncHook },
+    )
+
+    const scribe = createScribe({
+      substrate: cannedSubstrate(factSupersede('Priya Rao', 'Prold', 'Prnew')),
+      syncHook,
+      ownerDataDir,
+      project_slug: 'rb4-prose',
+      budget: createState(join(ownerDataDir, '.scribe-budget.json'), t0),
+      writeEntity,
+      now: () => t0 + 1000,
+      supersede: true,
+    })
+    const out = await scribe.extractAndWrite({
+      text: 'Priya Rao has moved on from Prold and now works at Prnew, leading their platform group at present.',
+      observed_at: t0 + 1000,
+    })
+    expect(out.ran).toBe(true)
+
+    const onDisk = readFileSync(join(ownerDataDir, 'entities', 'people', 'priya-rao.md'), 'utf8')
+    const compiled = extractCompiledTruth(onDisk)
+    // PROSE SAFETY: the descriptive sentence survives BYTE-FOR-BYTE (the removal
+    // path only drops sentences that EXACTLY match a generated relationship form).
+    expect(compiled).toContain(PROSE)
+    expect(compiled).toContain('Works at [[prnew]].') // new fact accretes
+    // Nothing was retired from the prose sentence → no fabricated supersession note.
+    const timeline = extractTimeline(onDisk)
+    expect(timeline.some((e) => e.body.includes('superseded'))).toBe(false)
+  }, 60_000)
+
   test('flag ON: a same-object multi-predicate sentence is not destroyed; the collapsed edge survives', async () => {
     const ownerDataDir = mkdtempSync(join(tmpdir(), 'scribe-rb4-multipred-'))
     const syncHook = new GBrainSyncHook({
