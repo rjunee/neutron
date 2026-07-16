@@ -54,7 +54,7 @@ import type { SessionHandle } from '@neutronai/runtime/session-handle.ts'
 import type { TridentRun } from './store.ts'
 import { FABLE_MODEL, SONNET_MODEL, FAST_MODEL, getBestModel } from '@neutronai/runtime/models.ts'
 import { DEFAULT_SETTLE_TIMEOUT_MS } from './liveness.ts'
-import { buildReflectionPreamble } from './reflection-preamble.ts'
+import { buildReflectionGuidance } from './reflection-guidance.ts'
 import { fileURLToPath } from 'node:url'
 import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
 
@@ -214,15 +214,17 @@ export function buildWorkflowArgs(input: InnerLoopInput): Record<string, unknown
     // Per-project CODEX_HOME for the optional cross-model review; null → the
     // workflow treats codex as not-connected and reviews Claude-only.
     codexHome: input.codex_home ?? null,
-    // RB2 (b) — the owner-corrections PREAMBLE, DERIVED HERE (testable TS) from the
-    // owner's recent reflection corrections/diary block and threaded READY-TO-PREPEND
-    // to the inner workflow, which prepends it verbatim to the FORGE BUILDER path
-    // ONLY (forge:build + fix rounds) so owner corrections steer what gets built —
-    // NEVER the independent argus review gate (trust boundary, see build-agent-
-    // prompt.ts). Empty string for a null/whitespace/non-string context → the
-    // workflow prepends nothing (a clean no-op). The `.mjs` cannot import this helper
-    // (no module resolution), so the boundary logic lives here.
-    reflectionPreamble: buildReflectionPreamble(input.reflection_context),
+    // RB2 (b) — the owner-corrections GUIDANCE, DERIVED HERE (testable TS) from the
+    // owner's recent reflection corrections/diary block and threaded READY as a
+    // framed, `<owner_reflection>`-delimited advisory SUFFIX. The workflow APPENDS it
+    // (never prepends — it stays lower-priority than the fixed contract/task in a
+    // tool-enabled agent) to the FORGE BUILDER path ONLY (forge:build + fix rounds)
+    // so owner corrections steer what gets built — NEVER the independent argus review
+    // gate (trust boundary, see build-agent-prompt.ts). Empty string for a
+    // null/whitespace/non-string context → the workflow appends nothing (a clean
+    // no-op). The `.mjs` cannot import this helper (no module resolution), so the
+    // derivation lives here.
+    reflectionGuidance: buildReflectionGuidance(input.reflection_context),
     // FABLE-ORCHESTRATOR model routing (SPEC § Fable-orchestrator, 2026-07-02).
     // The single-source-of-truth model IDS resolved from runtime/models.ts and
     // threaded to the inner workflow, which routes them per-role by agent label

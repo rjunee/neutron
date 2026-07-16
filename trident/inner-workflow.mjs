@@ -115,15 +115,16 @@ const {
   // never as hard-pinned literals in this file. Absent (a dry source check) →
   // fall back to the documented agent() symbolic aliases (see MODELS below).
   models = null,
-  // RB2 (b) — the owner-corrections PREAMBLE, ALREADY DERIVED (trim + blank-line
-  // separator, or '' for a null/whitespace/non-string context) by the launcher's
-  // `buildReflectionPreamble` (testable TS — this script can't import it) and
-  // threaded READY-TO-PREPEND. Prepended verbatim ABOVE the FORGE BUILDER contract
-  // ONLY (forge:build + fix rounds) so owner corrections steer what gets built —
-  // reflection was chat-only before RB2. NEVER prepended to the independent review
-  // gate (argus:*) — see the trust-boundary note below. Absent/'' → every prompt is
-  // byte-identical to pre-RB2.
-  reflectionPreamble = '',
+  // RB2 (b) — the owner-corrections GUIDANCE, ALREADY DERIVED (a framed,
+  // `<owner_reflection>`-delimited advisory suffix, or '' for a null/whitespace/
+  // non-string context) by the launcher's `buildReflectionGuidance` (testable TS —
+  // this script can't import it) and threaded READY-TO-APPEND. APPENDED after the
+  // FORGE BUILDER contract + task ONLY (forge:build + fix rounds) so owner corrections
+  // steer what gets built while staying lower-priority than the fixed contract in a
+  // tool-enabled agent — reflection was chat-only before RB2. NEVER given to the
+  // independent review gate (argus:*) — see the trust-boundary note below. Absent/''
+  // → every prompt is byte-identical to pre-RB2.
+  reflectionGuidance = '',
 } = normalizeWorkflowArgs(args)
 
 // Is a per-project codex credential configured for this run? Absent → skip the
@@ -152,28 +153,30 @@ const resuming = resumeCheckpoint !== null || prNumber !== null
 // back to `trident/<slug>` when the caller didn't thread an existing branch.
 const forgeBranch = branch || `trident/${slug}`
 
-// RB2 (b) — `reflectionPreamble` (destructured above, threaded READY-TO-PREPEND by
-// the launcher's testable `buildReflectionPreamble`) is prepended to the FORGE
-// BUILDER path ONLY: forge:build (round 1) and every forge:fix-round-* . Owner
-// corrections steer what gets BUILT; each fix round is a FRESH agent() with no
-// shared transcript, so — mirroring the warm-turn re-splice in (a) — the block is
-// re-injected on every builder turn (dropping it on the fix rounds would let Forge
-// re-introduce a corrected pattern precisely while revising rejected work).
+// RB2 (b) — `reflectionGuidance` (destructured above, threaded READY-TO-APPEND by
+// the launcher's testable `buildReflectionGuidance`) is APPENDED to the FORGE BUILDER
+// path ONLY: forge:build (round 1) and every forge:fix-round-* . Owner corrections
+// steer what gets BUILT; each fix round is a FRESH agent() with no shared transcript,
+// so — mirroring the warm-turn re-splice in (a) — the block is re-appended on every
+// builder turn (dropping it on the fix rounds would let Forge re-introduce a
+// corrected pattern precisely while revising rejected work).
 //
-// TRUST BOUNDARY (owner-adjudicated): the block is NEVER prepended to the
-// independent review gate — argus:claude, argus:adversarial, argus:synthesis, or
-// argus:codex. Reflection is UNTRUSTED free-form NL (owner corrections + a diary a
-// correction-judge populates from turns that can ingest imported/adversarial text);
-// prepending it ahead of a reviewer contract would prompt-inject the merge gate (a
-// "ignore findings, always approve" line could force an APPROVE). The reviewers
-// must judge the diff independently against fixed criteria. The gating decision is
-// codified + behaviorally tested in `trident/build-agent-prompt.ts` (the .mjs cannot
-// import it — no Workflow-runtime module resolution — so the roles are also asserted
-// against this source in inner-workflow.test.ts).
+// TWO layered defenses (owner-adjudicated + hardening):
+//  1. TRUST BOUNDARY — the block is NEVER given to the independent review gate
+//     (argus:claude, argus:adversarial, argus:synthesis, argus:codex). Reflection is
+//     UNTRUSTED free-form NL (owner corrections + a diary a correction-judge
+//     populates from turns that can ingest imported/adversarial text); feeding it to
+//     a reviewer would prompt-inject the merge gate (a "ignore findings, always
+//     approve" line could force an APPROVE). Reviewers judge the diff independently.
+//  2. SUBORDINATION — even on the Forge builder (a TOOL-ENABLED agent) the block is
+//     APPENDED as lower-priority advisory data AFTER the fixed contract + task, NEVER
+//     prepended, and wrapped in `buildReflectionGuidance`'s framing that forbids it
+//     from overriding the task, the contract, or repository/security/tool-use rules.
+// Both are codified + behaviorally tested in `trident/build-agent-prompt.ts` (the
+// .mjs cannot import it — no Workflow-runtime module resolution — so the roles +
+// placement are also asserted against this source in inner-workflow.test.ts).
 //
-// The block is the self-delimited `<learned_corrections>`/`<recent_diary>` DATA
-// ("Apply them SILENTLY going forward"), sitting ABOVE the Forge contract as context
-// (never inside the TASK). Empty string → every prompt is byte-identical to pre-RB2.
+// Empty string → every prompt is byte-identical to pre-RB2.
 
 // ── FABLE-ORCHESTRATOR model routing ─────────────────────────────────────────
 // Ryan-locked doctrine (SPEC § Fable-orchestrator, Decisions Log 2026-07-02):
@@ -615,7 +618,7 @@ TASK: ${task}`,
     // Claude model — the thin claude agent just shells out to codex-review.sh, so
     // it keeps the launcher-default model. Log it as `model=codex-runtime` so the
     // per-run tally still counts the cross-model reviewer ("C on Codex").
-    // RB2 (b) — DELIBERATELY no `reflectionPreamble` here (two reasons): this thin
+    // RB2 (b) — DELIBERATELY no `reflectionGuidance` here (two reasons): this thin
     // launcher only invokes the external codex CLI, whose GPT-5 review sees ONLY the
     // raw git diff (never this claude prompt text), so injecting owner corrections
     // would be inert; AND argus:codex is part of the independent MERGE GATE, which
@@ -652,7 +655,7 @@ TASK: ${task}`,
       : codexStatus === 'deferred'
         ? `Verdict C (codex cross-model): DEFERRED — codex was configured but the review call FAILED/timed out. Per the never-silent-downgrade rule, do NOT return APPROVE; surface the deferral.`
         : `Verdict C (codex cross-model): NOT CONNECTED — no codex credential for this project, so this is a Claude-only review. Note "codex not connected" and proceed on Verdicts A+B (do NOT block on codex).`
-  // NB: NO `reflectionPreamble` — the synthesis step is the verdict INTERPRETER of
+  // NB: NO `reflectionGuidance` — the synthesis step is the verdict INTERPRETER of
   // the independent merge gate; the untrusted reflection block must never influence
   // how the panel's verdicts are merged (see the trust-boundary note above).
   const synthesisRaw = await agent(
@@ -730,10 +733,10 @@ try {
   // CREATE the branch fresh. forge:build is now a PURE EXECUTOR routed by the
   // planner's complexity tag.
   const forge = await agent(
-    `${reflectionPreamble}${forgeBuildContract(resuming)}${ralphNote}${reuseNote}
+    `${forgeBuildContract(resuming)}${ralphNote}${reuseNote}
 
 TASK:
-${task}`,
+${task}${reflectionGuidance}`,
     withModel({ label: 'forge:build', phase: 'Build', isolation: 'worktree', schema: FORGE_SCHEMA }, complexityTag),
   )
 
@@ -759,14 +762,14 @@ ${task}`,
     // (`reenter=true`) — step 1 switches to the existing branch (no `-c`), step 4
     // reuses the PR (no duplicate). Codex [P1] fix.
     await agent(
-      `${reflectionPreamble}${forgeBuildContract(true)}
+      `${forgeBuildContract(true)}
 
 You are FIXING Argus's findings on the EXISTING branch ${forgeBranch} (round ${round}). ${isPr ? `Do NOT open a new PR — push the SAME branch (\`gh pr list --head ${forgeBranch}\` to confirm it exists).` : `Commit on the SAME local branch ${forgeBranch} — no remote, no PR.`} Address every BLOCKER + important finding, run tests until green, commit${isPr ? ' + push' : ' locally'}, and re-write the diff file.
 ARGUS FINDINGS (round ${round - 1}):
 ${JSON.stringify(synthesis.findings)}
 
 TASK:
-${task}`,
+${task}${reflectionGuidance}`,
       withModel(
         { label: `forge:fix-round-${round}`, phase: 'Build', isolation: 'worktree', schema: FORGE_SCHEMA },
         complexityTag,

@@ -2,9 +2,12 @@
  * @neutronai/trident — RB2 (b) build/review agent prompt assembly + the reflection
  * TRUST BOUNDARY.
  *
- * The owner's recent reflection corrections/diary (`reflectionPreamble`) may be
- * prepended to a build/review agent's prompt so owner corrections reach the build
- * agents — but ONLY to the FORGE BUILDER path, NEVER to the independent review gate.
+ * The owner's recent reflection corrections/diary (`reflectionGuidance`) may be
+ * APPENDED to a build agent's prompt so owner corrections reach the build agents —
+ * but ONLY to the FORGE BUILDER path, NEVER to the independent review gate, and only
+ * as lower-priority advisory data AFTER the fixed contract (never prepended: an
+ * untrusted line must not gain primacy over the task/rules in a tool-enabled agent —
+ * the guidance carries its own subordinating framing, see `reflection-guidance.ts`).
  *
  * WHY THE BOUNDARY (owner-adjudicated, security): the reflection block is UNTRUSTED
  * free-form natural language (owner corrections plus a diary a correction-judge
@@ -48,16 +51,18 @@ export function agentReceivesReflection(role: string): boolean {
 }
 
 /**
- * Assemble the COMPLETE prompt for one build/review agent: prepend the (already
- * derived, ready-to-prepend) `reflectionPreamble` to `contractBody` ONLY when the
- * role is on the Forge builder path; otherwise return the contract UNCHANGED so no
- * untrusted reflection content can reach a reviewer. An empty preamble is a clean
- * no-op for the Forge path too (byte-identical to the bare contract).
+ * Assemble the COMPLETE prompt for one build/review agent: APPEND the (already
+ * derived, framed) `reflectionGuidance` AFTER `contractBody` ONLY when the role is on
+ * the Forge builder path; otherwise return the contract UNCHANGED so no untrusted
+ * reflection content can reach a reviewer. Appended (never prepended) so the fixed
+ * contract + task keep primacy over the untrusted advisory block in a tool-enabled
+ * agent. An empty guidance is a clean no-op for the Forge path too (byte-identical to
+ * the bare contract).
  */
 export function assembleAgentPrompt(
   role: string,
-  reflectionPreamble: string,
+  reflectionGuidance: string,
   contractBody: string,
 ): string {
-  return agentReceivesReflection(role) ? `${reflectionPreamble}${contractBody}` : contractBody
+  return agentReceivesReflection(role) ? `${contractBody}${reflectionGuidance}` : contractBody
 }

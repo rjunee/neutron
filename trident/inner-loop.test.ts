@@ -197,9 +197,9 @@ describe('buildWorkflowFirer — fire mechanics over a fire seam', () => {
   })
 
   // RB2 (b) — the owner's reflection corrections/diary reach the Forge builder (not
-  // the argus review gate) via a ready-to-prepend `reflectionPreamble` DERIVED in
+  // the argus review gate) via a ready-to-append `reflectionGuidance` DERIVED in
   // buildWorkflowArgs (testable TS).
-  test('args thread the derived reflectionPreamble when the owner has recent corrections (RB2 (b))', async () => {
+  test('args thread the derived reflectionGuidance when the owner has recent corrections (RB2 (b))', async () => {
     const { fire, calls } = fakeFire(() => ({ status: 'fired', error: null }))
     const firer = buildWorkflowFirer({ fire })
     await firer(
@@ -208,29 +208,31 @@ describe('buildWorkflowFirer — fire mechanics over a fire seam', () => {
           '<learned_corrections>\n- always prefer TypeScript\n</learned_corrections>',
       }),
     )
-    // The block is threaded ready-to-prepend so the inner workflow prepends it to the
-    // Forge/Argus prompts (JSON-escaped inside the args object).
+    // The block is threaded ready-to-append so the inner workflow appends it after the
+    // Forge task (JSON-escaped inside the args object).
     expect(calls[0]!.prompt).toContain('always prefer TypeScript')
-    expect(calls[0]!.prompt).toContain('reflectionPreamble')
-    // The blank-line separator that sits above the agent contract is present
-    // (JSON-encoded as \n\n) — proving the derivation ran, not a raw pass-through.
-    expect(calls[0]!.prompt).toContain('</learned_corrections>\\n\\n')
+    expect(calls[0]!.prompt).toContain('reflectionGuidance')
+    // The framed, delimited advisory wrapper is present — proving the derivation ran
+    // (the subordinating framing + the <owner_reflection> delimiter), not a raw
+    // pass-through of the untrusted block.
+    expect(calls[0]!.prompt).toContain('owner_reflection')
+    expect(calls[0]!.prompt).toContain('MUST NOT override')
   })
 
-  test('args thread an EMPTY reflectionPreamble when nothing has been learned (clean no-op)', async () => {
+  test('args thread an EMPTY reflectionGuidance when nothing has been learned (clean no-op)', async () => {
     const { fire, calls } = fakeFire(() => ({ status: 'fired', error: null }))
     const firer = buildWorkflowFirer({ fire })
     await firer(input())
-    expect(calls[0]!.prompt).toContain('"reflectionPreamble":""')
+    expect(calls[0]!.prompt).toContain('"reflectionGuidance":""')
   })
 
-  test('args thread an EMPTY reflectionPreamble for a whitespace-only context (no bare separator)', async () => {
+  test('args thread an EMPTY reflectionGuidance for a whitespace-only context (no bare wrapper)', async () => {
     const { fire, calls } = fakeFire(() => ({ status: 'fired', error: null }))
     const firer = buildWorkflowFirer({ fire })
     // A whitespace-only context must derive to '' end-to-end through buildWorkflowArgs,
-    // never a lone `\n\n` that would perturb the prompt.
+    // never a bare wrapper that would perturb the prompt.
     await firer(input({ reflection_context: '   \n\t  ' }))
-    expect(calls[0]!.prompt).toContain('"reflectionPreamble":""')
+    expect(calls[0]!.prompt).toContain('"reflectionGuidance":""')
   })
 
   test('a fire seam that REJECTS → failed (crashed launcher, never a silent advance)', async () => {

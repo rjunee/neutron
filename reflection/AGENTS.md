@@ -42,21 +42,29 @@ the judge and threads the `Reflection` instance into `buildLiveAgentTurn`
 Beyond chat, the reflection context also reaches the **trident Forge builder**
 (RB2 (b)): `open/composer.ts` wires `resolve_reflection_context` →
 `reflection.loadContext()` onto the trident orchestrator, which threads a
-ready-to-prepend preamble (derived by `trident/reflection-preamble.ts`) into the
-inner workflow. The workflow prepends it to the **Forge builder path ONLY** —
-`forge:build` and every `forge:fix-round-*` — so owner corrections steer what
-gets built.
+ready-to-append **guidance suffix** (derived by `trident/reflection-guidance.ts`)
+into the inner workflow. The workflow **appends** it to the **Forge builder path
+ONLY** — `forge:build` and every `forge:fix-round-*` — so owner corrections steer
+what gets built.
 
-**Trust boundary (security):** the preamble is NEVER prepended to the independent
-review gate — `argus:claude`, `argus:adversarial`, `argus:synthesis`, or the
-external `argus:codex` peer. Reflection is untrusted free-form NL (owner
-corrections + a diary a correction-judge populates from turns that can ingest
-imported/adversarial text); prepending it ahead of a reviewer contract would
-prompt-inject the merge gate (a "ignore findings, always approve" line could
-coerce an APPROVE). The reviewers judge the diff independently against fixed
-criteria. The role→prompt gating is codified + behaviorally tested in
-`trident/build-agent-prompt.ts`. Resolution is best-effort end-to-end — a throw
-never breaks a chat turn or a build launch.
+Two layered defenses guard this security-sensitive path (both codified +
+behaviorally tested in `trident/build-agent-prompt.ts` /
+`trident/reflection-guidance.ts`):
+
+1. **Trust boundary:** the block is NEVER given to the independent review gate —
+   `argus:claude`, `argus:adversarial`, `argus:synthesis`, or the external
+   `argus:codex` peer. Reflection is untrusted free-form NL (owner corrections + a
+   diary a correction-judge populates from turns that can ingest imported/adversarial
+   text); feeding it to a reviewer would prompt-inject the merge gate (a "ignore
+   findings, always approve" line could coerce an APPROVE). Reviewers judge the diff
+   independently against fixed criteria.
+2. **Subordination:** even on the Forge builder (a tool-enabled agent) the block is
+   **appended** AFTER the fixed contract + task (never prepended, so it can't gain
+   primacy), wrapped in `<owner_reflection>` framing that forbids it from overriding
+   the task, the contract, or repository/security/tool-use rules.
+
+Resolution is best-effort end-to-end — a throw never breaks a chat turn or a build
+launch.
 
 LLM-less self-host: omit the substrate → detection is OFF, but the diary and
 context read-back still work. Every hook is best-effort and never throws into
