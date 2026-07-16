@@ -801,4 +801,132 @@ describe('RB4 temporal invalidation (belief evolution) — real PGLite round-tri
     links = await client.call('get_links', { slug: 'jane-poll' })
     expect(edgesTo(links, 'endco', 'works_at').length).toBe(1) // RETAINED
   }, 60_000)
+
+  // ── Marker with NO matching prior assertion → NO fabricated supersession note.
+  //    A `supersedes` marker is a MODEL claim; if the prior triple was never
+  //    asserted, the timeline must NOT record a `superseded …` note (that would be
+  //    fabricated history). The new object is still asserted additively. ────────
+
+  test('flag ON: a supersedes marker on a BRAND-NEW subject records NO fabricated supersession (additive only)', async () => {
+    const ownerDataDir = mkdtempSync(join(tmpdir(), 'scribe-rb4-newsubj-'))
+    const syncHook = new GBrainSyncHook({
+      memoryStore: new GBrainMemoryStore(client),
+      gbrainMcp: client,
+    })
+
+    // Empty owner dir — Nova and Nbold have NEVER existed. The model still emits a
+    // supersedes marker (`works_at Nbnew supersedes Nbold`).
+    const scribe = createScribe({
+      substrate: cannedSubstrate(
+        JSON.stringify({
+          entities: [
+            { name: 'Nova Byrd', kind: 'person', fact: 'an engineer' },
+            { name: 'Nbnew', kind: 'company', fact: 'her employer' },
+          ],
+          relations: [
+            { subject: 'Nova Byrd', predicate: 'works_at', object: 'Nbnew', supersedes: 'Nbold' },
+          ],
+        }),
+      ),
+      syncHook,
+      ownerDataDir,
+      project_slug: 'rb4-newsubj',
+      budget: createState(join(ownerDataDir, '.scribe-budget.json'), t0),
+      writeEntity,
+      now: () => t0,
+      supersede: true,
+    })
+    const out = await scribe.extractAndWrite({
+      text: 'Nova Byrd is an engineer who now works at Nbnew, leading the reliability team on the platform side.',
+      observed_at: t0,
+    })
+    expect(out.ran).toBe(true)
+
+    const onDisk = readFileSync(join(ownerDataDir, 'entities', 'people', 'nova-byrd.md'), 'utf8')
+    const compiled = extractCompiledTruth(onDisk)
+    expect(compiled).toContain('Works at [[nbnew]].') // the new fact IS asserted
+
+    const timeline = extractTimeline(onDisk)
+    // NO fabricated supersession — Nbold was never a belief here.
+    expect(timeline.some((e) => e.body.includes('superseded'))).toBe(false)
+    expect(timeline.some((e) => e.body.includes('Nbold') || e.body.includes('nbold'))).toBe(false)
+    // …the marker degrades to a plain ADDITIVE note instead.
+    expect(timeline.some((e) => e.body.includes('works_at nbnew'))).toBe(true)
+
+    const links = await client.call('get_links', { slug: 'nova-byrd' })
+    expect(edgesTo(links, 'nbnew', 'works_at').length).toBe(1) // asserted
+    expect(edgesTo(links, 'nbold', 'works_at').length).toBe(0) // never existed
+  }, 60_000)
+
+  test('flag ON: a supersedes marker whose claimed prior the subject NEVER asserted removes nothing + fabricates no note', async () => {
+    const ownerDataDir = mkdtempSync(join(tmpdir(), 'scribe-rb4-stale-'))
+    const syncHook = new GBrainSyncHook({
+      memoryStore: new GBrainMemoryStore(client),
+      gbrainMcp: client,
+    })
+
+    await client.call('put_page', {
+      slug: 'realco',
+      content: '---\nslug: realco\ntype: company\n---\n\nA company.\n',
+    })
+    // Uma works at Realco — she has NEVER worked at "Ufold".
+    await writeEntity(
+      {
+        ownerDataDir,
+        kind: 'person',
+        slug: 'uma-frost',
+        originInstance: 'rb4',
+        receivingInstanceSlug: 'rb4',
+        body: {
+          frontmatter: { slug: 'uma-frost', type: 'person', name: 'Uma Frost' },
+          compiledTruth: '# Uma Frost\n\nAn engineer.\n\n## Relationships\n\n- Works at [[realco]].\n',
+          timelineAppend: { ts: new Date(t0).toISOString(), source: 'import:onboarding', body: 'seeded' },
+        },
+      },
+      { syncHook },
+    )
+
+    // A turn claims `works_at Ufnew supersedes Ufold` — but Uma never asserted Ufold.
+    const scribe = createScribe({
+      substrate: cannedSubstrate(
+        JSON.stringify({
+          entities: [
+            { name: 'Uma Frost', kind: 'person', fact: 'an engineer' },
+            { name: 'Ufnew', kind: 'company', fact: 'a new engagement' },
+          ],
+          relations: [
+            { subject: 'Uma Frost', predicate: 'works_at', object: 'Ufnew', supersedes: 'Ufold' },
+          ],
+        }),
+      ),
+      syncHook,
+      ownerDataDir,
+      project_slug: 'rb4-stale',
+      budget: createState(join(ownerDataDir, '.scribe-budget.json'), t0),
+      writeEntity,
+      now: () => t0 + 1000,
+      supersede: true,
+    })
+    const out = await scribe.extractAndWrite({
+      text: 'Uma Frost has picked up a new engagement at Ufnew this quarter, on top of everything else she is juggling right now.',
+      observed_at: t0 + 1000,
+    })
+    expect(out.ran).toBe(true)
+
+    const onDisk = readFileSync(join(ownerDataDir, 'entities', 'people', 'uma-frost.md'), 'utf8')
+    const compiled = extractCompiledTruth(onDisk)
+    // NO unrelated removal — the real prior fact survives; the new one accretes.
+    expect(compiled).toContain('Works at [[realco]].') // PRESERVED (not touched by a stale marker)
+    expect(compiled).toContain('Works at [[ufnew]].') // additive
+
+    const timeline = extractTimeline(onDisk)
+    // NO fabricated supersession note (Ufold was never asserted).
+    expect(timeline.some((e) => e.body.includes('superseded'))).toBe(false)
+    expect(timeline.some((e) => e.body.includes('ufold'))).toBe(false)
+    expect(timeline.some((e) => e.body.includes('works_at ufnew'))).toBe(true) // additive note
+
+    const links = await client.call('get_links', { slug: 'uma-frost' })
+    expect(edgesTo(links, 'realco', 'works_at').length).toBe(1) // PRESERVED
+    expect(edgesTo(links, 'ufnew', 'works_at').length).toBe(1) // ADDED
+  }, 60_000)
 })

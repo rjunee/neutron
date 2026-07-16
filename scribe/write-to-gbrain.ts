@@ -251,10 +251,15 @@ export async function writeExtractionToGBrain(
       // merge); compose fresh for a new entity. See the module header for the
       // data-loss rationale.
       const existing = await readExistingPage(input.ownerDataDir, page.kind, page.slug)
-      const compiledTruth =
+      // `supersededTargets` is the set of `(predicate, prior-object)` triples this
+      // write ACTUALLY retired from an existing page's compiled-truth. A brand-new
+      // page (or an existing page that never asserted the claimed prior) retires
+      // nothing → empty set → no fabricated "superseded …" timeline note (Codex).
+      const merged =
         existing !== null
           ? mergeExistingCompiledTruth(existing.compiledTruth, page, supersede)
-          : composeNewCompiledTruth(page)
+          : { compiledTruth: composeNewCompiledTruth(page), supersededTargets: new Set<string>() }
+      const compiledTruth = merged.compiledTruth
       // Merge frontmatter: preserve every existing key (mention_count, category,
       // basis, cadence_hint, …) and only set the keys scribe authoritatively
       // owns. `writeEntity` does NOT merge frontmatter, so without this the
@@ -280,7 +285,7 @@ export async function writeExtractionToGBrain(
             timelineAppend: {
               ts: input.ts,
               source: timelineSource,
-              body: timelineBody(page, supersede),
+              body: timelineBody(page, supersede, merged.supersededTargets),
             },
           },
           // M2.6 Ph1 (#83) — own-origin stamp by default (chat / Cores: origin
@@ -363,24 +368,37 @@ function orderPagesObjectsFirst(bySlug: Map<string, PlannedPage>): PlannedPage[]
  *  dated `superseded works_at: oldco → newco` row. Slugs are bare (no
  *  `[[wikilink]]`, no `works at <slug>` verb phrasing) so the timeline text can
  *  never re-derive a graph edge — the graph half is driven purely off
- *  compiled-truth. OFF (default) → byte-for-byte today's fact-only body. */
-function timelineBody(page: PlannedPage, supersede: boolean): string {
+ *  compiled-truth. OFF (default) → byte-for-byte today's fact-only body.
+ *
+ *  `supersededTargets` is the set of `(predicate, prior-object)` triples this
+ *  write ACTUALLY retired from the existing compiled-truth. A `superseded …` note
+ *  is recorded ONLY for a marker in that set; a `supersedes` marker whose prior
+ *  was never asserted (new subject / stale/hallucinated marker) degrades to a
+ *  plain additive `<pred> <obj>` note — no fabricated invalidation history (Codex). */
+function timelineBody(
+  page: PlannedPage,
+  supersede: boolean,
+  supersededTargets: ReadonlySet<string>,
+): string {
   const fact = page.fact?.trim()
   const base = fact !== undefined && fact.length > 0 ? `Chat mention — ${fact}` : 'Mentioned in chat'
   if (!supersede) return base
-  const notes = relationNotes(page)
+  const notes = relationNotes(page, supersededTargets)
   return notes.length > 0 ? `${base} · ${notes.join('; ')}` : base
 }
 
 /**
  * RB4 — deterministic, edge-inert notes recording each of the page's relation
- * assertions for the dated timeline. A superseding relation records the
- * transition (`superseded <pred>: prior → obj`); a plain relation records the
- * assertion (`<pred> obj`) so the ORIGINAL dated belief is captured in history
- * before any later supersession removes it from compiled-truth. Deduped; bare
- * slugs + underscored predicate so nothing re-extracts a triple from this text.
+ * assertions for the dated timeline. A relation whose `supersedes` marker
+ * ACTUALLY retired a prior compiled-truth assertion (its `(predicate, prior)`
+ * is in `supersededTargets`) records the transition (`superseded <pred>: prior →
+ * obj`); every other relation — a plain assertion OR a `supersedes` marker that
+ * matched no prior (new subject / stale marker) — records the additive assertion
+ * (`<pred> obj`), so the ORIGINAL dated belief is captured in history and no
+ * supersession is fabricated. Deduped; bare slugs + underscored predicate so
+ * nothing re-extracts a triple from this text.
  */
-function relationNotes(page: PlannedPage): string[] {
+function relationNotes(page: PlannedPage, supersededTargets: ReadonlySet<string>): string[] {
   const notes: string[] = []
   const seen = new Set<string>()
   for (const r of page.relations) {
@@ -388,7 +406,11 @@ function relationNotes(page: PlannedPage): string[] {
     if (objSlug === null || objSlug === page.slug) continue
     if (r.supersedes !== undefined) {
       const priorSlug = slugify(r.supersedes)
-      if (priorSlug !== null && priorSlug !== objSlug) {
+      if (
+        priorSlug !== null &&
+        priorSlug !== objSlug &&
+        supersededTargets.has(`${r.predicate}\x1f${priorSlug}`)
+      ) {
         const key = `x\x1f${r.predicate}\x1f${priorSlug}\x1f${objSlug}`
         if (!seen.has(key)) {
           seen.add(key)
@@ -467,16 +489,21 @@ function mergeExistingCompiledTruth(
   existing: string,
   page: PlannedPage,
   supersede: boolean,
-): string {
+): { compiledTruth: string; supersededTargets: Set<string> } {
   // RB4 — when perfect-recall is on, DROP the superseded object's sentence(s)
   // from the existing compiled-truth BEFORE the append pass. That single edit is
   // what turns accretion into belief-evolution: the writer's diff then sees the
   // stale triple in the OLD compiled-truth but not the NEW one, so `removedLinks`
   // carries it and the sync hook `remove_link`s the stale gbrain edge — while the
   // append below asserts the CURRENT fact and the append-only timeline keeps the
-  // dated history. A no-op when no relation carries `supersedes`.
-  const stripped = supersede ? stripSupersededSentences(existing, page) : existing
-  const base = stripped.replace(/\s+$/, '') // trim trailing whitespace; we re-add \n
+  // dated history. A no-op when no relation carries `supersedes`. The returned
+  // `supersededTargets` is the set of `(predicate, prior-object)` triples ACTUALLY
+  // retired — the timeline records a `superseded …` note only for these (a marker
+  // that matched no prior assertion is NOT reported → no fabricated history).
+  const stripResult = supersede
+    ? stripSupersededSentences(existing, page)
+    : { text: existing, removed: new Set<string>() }
+  const base = stripResult.text.replace(/\s+$/, '') // trim trailing whitespace; we re-add \n
   const newLines: string[] = []
   for (const line of renderRelationLines(page)) {
     // `line` is `- <verb> [[objSlug]].`. Each (predicate, object) maps to a
@@ -490,13 +517,13 @@ function mergeExistingCompiledTruth(
   if (newLines.length === 0) {
     // Nothing new to add to the graph — preserve the page exactly. The new
     // timeline entry (added by writeEntity) is the only change.
-    return base + '\n'
+    return { compiledTruth: base + '\n', supersededTargets: stripResult.removed }
   }
   const hasRelHeader = /^##\s+Relationships\s*$/im.test(base)
   const parts = [base, '']
   if (!hasRelHeader) parts.push('## Relationships', '')
   parts.push(...newLines)
-  return parts.join('\n') + '\n'
+  return { compiledTruth: parts.join('\n') + '\n', supersededTargets: stripResult.removed }
 }
 
 /**
@@ -524,8 +551,17 @@ function mergeExistingCompiledTruth(
  * pair and its add-pass re-asserts any survivor edge (still present in the new
  * truth). The prior belief lives on in the append-only, dated timeline. Guards
  * skip a `supersedes` that resolves to the same slug as the new object.
+ *
+ * Returns the surviving `text` PLUS `removed` — the set of `(predicate,
+ * prior-object)` target keys whose sentence was ACTUALLY excised. A `supersedes`
+ * marker whose prior was never asserted here contributes a target but excises
+ * nothing, so it is absent from `removed` → the caller records no fabricated
+ * `superseded …` history for it (Codex).
  */
-function stripSupersededSentences(existing: string, page: PlannedPage): string {
+function stripSupersededSentences(
+  existing: string,
+  page: PlannedPage,
+): { text: string; removed: Set<string> } {
   // Targets: `${predicate}\x1f${priorSlug}` triples to retire from compiled-truth.
   const targets = new Set<string>()
   for (const r of page.relations) {
@@ -536,7 +572,8 @@ function stripSupersededSentences(existing: string, page: PlannedPage): string {
     if (priorSlug === objSlug) continue // not a real supersession
     targets.add(`${r.predicate}\x1f${priorSlug}`)
   }
-  if (targets.size === 0) return existing
+  const removed = new Set<string>()
+  if (targets.size === 0) return { text: existing, removed }
 
   const opts = { sourceKind: page.kind, source: 'rb4-supersede-scan' } as const
   // Cheap superset gate for "this text carries an entity reference the edge
@@ -545,11 +582,13 @@ function stripSupersededSentences(existing: string, page: PlannedPage): string {
   // just triggers an extract that returns no triple; a false NEGATIVE would let a
   // superseded markdown-link assertion survive, so the gate must not miss `](`.
   const hasRef = (s: string): boolean => s.includes('[[') || s.includes('](')
-  // A single sentence asserts a superseded target?
-  const sentenceHitsTarget = (text: string): boolean => {
-    if (!hasRef(text)) return false
+  // Which superseded targets does this single sentence assert? (Empty when none.)
+  const sentenceTargetsHit = (text: string): string[] => {
+    if (!hasRef(text)) return []
     const triples = extractTypedLinks(`${text}\n`, page.slug, opts)
-    return triples.some((t) => targets.has(`${t.predicate}\x1f${t.object}`))
+    return triples
+      .map((t) => `${t.predicate}\x1f${t.object}`)
+      .filter((k) => targets.has(k))
   }
 
   const outLines: string[] = []
@@ -566,8 +605,10 @@ function stripSupersededSentences(existing: string, page: PlannedPage): string {
     let droppedAny = false
     for (const span of spans) {
       const raw = content.slice(span.start, span.end)
-      if (sentenceHitsTarget(raw)) {
+      const hits = sentenceTargetsHit(raw)
+      if (hits.length > 0) {
         droppedAny = true
+        for (const k of hits) removed.add(k) // record what was ACTUALLY retired
         continue
       }
       // Preserve the surviving sentence with its original terminator (or a
@@ -590,7 +631,7 @@ function stripSupersededSentences(existing: string, page: PlannedPage): string {
     if (kept.length === 0) continue // the whole line was superseded → drop it
     outLines.push(`${bullet}${kept.join(' ')}`)
   }
-  return outLines.join('\n')
+  return { text: outLines.join('\n'), removed }
 }
 
 /** What scribe needs to preserve from an existing on-disk page: its compiled-
