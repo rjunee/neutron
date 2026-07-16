@@ -79,6 +79,9 @@ describe('agent-nexus per-turn injection (RC3)', () => {
   test('the nexus block is injected into BOTH the cold AND the warm turn prompt', async () => {
     const specs: AgentSpec[] = []
     const sent: ChatOutbound[] = []
+    // Distinct snapshot PER CALL so a read-once-and-cache impl (reuse the cold snapshot on
+    // every warm turn) is caught: the warm turn must carry the SECOND call's fresh block.
+    let nexusCalls = 0
     const run = buildLiveAgentTurn({
       substrate: makeStubSubstrate(specs),
       personaLoader: {
@@ -86,7 +89,10 @@ describe('agent-nexus per-turn injection (RC3)', () => {
           return ''
         },
       },
-      nexusSnapshot: async () => NEXUS,
+      nexusSnapshot: async () => {
+        nexusCalls += 1
+        return `<agent_nexus>\nNEXUS-MARKER-CALL-${nexusCalls}\n</agent_nexus>`
+      },
       buttonStore: store,
       project_slug: 'alice',
       owner_home: tmp,
@@ -98,16 +104,19 @@ describe('agent-nexus per-turn injection (RC3)', () => {
     await run(makeTurn(sent, 'second message')) // warm
 
     expect(specs.length).toBe(2)
-    // Cold turn → folded into instance_fragments (the cacheable system prefix).
-    expect(specs[0]!.prompt).toContain('NEXUS-MARKER-XYZ')
+    // The snapshot is re-read EVERY turn (every-turn re-grounding), not read-once-cached.
+    expect(nexusCalls).toBe(2)
+    // Cold turn → the FIRST call's block, folded into instance_fragments (cacheable prefix).
+    expect(specs[0]!.prompt).toContain('NEXUS-MARKER-CALL-1')
     expect(specs[0]!.prompt).toContain('<agent_nexus>')
-    // Warm turn → spliced BEFORE the user's message (every-turn re-grounding). Assert the
-    // ORDER, not just presence — a swap to `${user_text}\n\n${nexus}` would break the
-    // re-grounding/salience contract while independent contains() checks still passed.
+    // Warm turn → the SECOND (fresh) call's block, spliced BEFORE the user's message.
+    // Assert the FRESH marker (not the cached CALL-1) AND the order — a swap to
+    // `${user_text}\n\n${nexus}` or a cache would both be caught.
     const warm = specs[1]!.prompt
-    expect(warm).toContain('NEXUS-MARKER-XYZ')
+    expect(warm).toContain('NEXUS-MARKER-CALL-2')
+    expect(warm).not.toContain('NEXUS-MARKER-CALL-1')
     expect(warm).toContain('second message')
-    expect(warm.indexOf('NEXUS-MARKER-XYZ')).toBeLessThan(warm.indexOf('second message'))
+    expect(warm.indexOf('NEXUS-MARKER-CALL-2')).toBeLessThan(warm.indexOf('second message'))
   })
 
   test('a null snapshot (empty log) injects no block', async () => {
