@@ -98,6 +98,23 @@ describe('WorkBoardStore', () => {
     expect(orders[orders.length - 1]).toBe(Math.max(...orders))
   })
 
+  test('listAllActive aggregates active items across ALL scopes (General + projects)', async () => {
+    const store = new WorkBoardStore(db)
+    await store.create(SLUG, { title: 'general item' }) // General/owner scope
+    const proj = await store.create('proj-123', { title: 'project item' }) // a project scope
+    const done = await store.create('proj-123', { title: 'finished item' })
+    await store.complete('proj-123', done.id) // excluded (status=done)
+
+    const all = store.listAllActive()
+    const titles = all.map((it) => it.title)
+    expect(titles).toContain('general item')
+    expect(titles).toContain('project item')
+    expect(titles).not.toContain('finished item')
+    // Single-scope listActive would MISS the project item.
+    expect(store.listActive(SLUG).map((it) => it.title)).not.toContain('project item')
+    expect(all.some((it) => it.id === proj.id)).toBe(true)
+  })
+
   test('re-completing an already-done item does NOT refresh completed_at or reorder history', async () => {
     let tick = 0
     const store = new WorkBoardStore(db, {

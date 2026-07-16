@@ -107,6 +107,7 @@ import { mkdirSync } from 'node:fs'
 import { join as joinPath } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { constantTimeEqual } from '@neutronai/runtime/constant-time-equal.ts'
+import { formatMemoryIndexFragment } from '@neutronai/runtime/memory-index.ts'
 import { DocSearchIndex } from '@neutronai/doc-search/store.ts'
 import { DocSearchRuntime } from '@neutronai/doc-search/runtime.ts'
 import { buildLiveProjectEnumerator } from './doc-search-live-enumerator.ts'
@@ -1036,6 +1037,8 @@ export function buildOpenGraphComposer(
       reflection,
       scribeOnUserTurn,
       nexus: nexusStore,
+      memoryIndexRead,
+      setMemoryIndexWorkHandles,
       cleanups: memoryCleanups,
     } = wireMemory(wiringCtx)
     for (const cleanup of memoryCleanups) realmodeCleanups.push(cleanup)
@@ -2159,6 +2162,20 @@ export function buildOpenGraphComposer(
     const workBoardStore = new WorkBoardStore(db, {
       onChange: (changedKey: string): void => fanWorkBoardChanged(changedKey),
     })
+    // RB1 (perfect-recall) — now that the work-board store exists, bind the
+    // memory-index's active-work provider so the durable breadth manifest also
+    // advertises active work handles (§RB1). The manifest is OWNER-WIDE (built at
+    // entity-write time, when there is no "current project"), so it aggregates
+    // active work across ALL scopes — General AND every project — not just
+    // General. Resolved FRESH on each manifest generation. No-op when the flag is
+    // off (`memoryIndexRead === undefined`).
+    if (memoryIndexRead !== undefined) {
+      setMemoryIndexWorkHandles(() =>
+        workBoardStore
+          .listAllActive()
+          .map((item) => ({ id: item.id, title: item.title, status: item.status })),
+      )
+    }
     // M1 on-disk spec + ▶ play button — the ONE service that persists a card's
     // full ask to a user-visible `Projects/<id>/docs/plans/<slug>.md` doc (setting
     // the card's `design_doc_ref`) and resolves that doc back as the build's spec
@@ -2885,6 +2902,22 @@ export function buildOpenGraphComposer(
               formatAvailableServicesFragment(
                 projectCredentialStore.listAvailableServices(slug, project_id),
               ),
+            // RB1 (perfect-recall lane, default-off flag) — inject the breadth
+            // memory-index manifest on the cold turn so the agent knows what
+            // entities exist to `memory_search`. `memoryIndexRead` (present only
+            // when the shared flag is on) does a cold-turn read of the durable,
+            // portable `entities/INDEX.md` WITH a synchronous regenerate-on-absent
+            // fallback (coalesced with the write path) so a just-written entity is
+            // never raced away; here we only wrap it as escaped `<memory_index>`
+            // DATA. Best-effort (a null read → no block).
+            ...(memoryIndexRead !== undefined
+              ? {
+                  memoryIndexSnapshot: async (): Promise<string | null> => {
+                    const body = await memoryIndexRead()
+                    return body !== null ? formatMemoryIndexFragment(body) : null
+                  },
+                }
+              : {}),
             buttonStore: landing.buttonStore,
             project_slug,
             owner_home,
