@@ -929,4 +929,55 @@ describe('RB4 temporal invalidation (belief evolution) — real PGLite round-tri
     expect(edgesTo(links, 'realco', 'works_at').length).toBe(1) // PRESERVED
     expect(edgesTo(links, 'ufnew', 'works_at').length).toBe(1) // ADDED
   }, 60_000)
+
+  test('flag ON: REPLAYING the identical superseding turn is a byte-identical no-op (idempotent)', async () => {
+    const ownerDataDir = mkdtempSync(join(tmpdir(), 'scribe-rb4-replay-'))
+    const syncHook = new GBrainSyncHook({
+      memoryStore: new GBrainMemoryStore(client),
+      gbrainMcp: client,
+    })
+    const mk = (json: string, ts: number): ReturnType<typeof createScribe> =>
+      createScribe({
+        substrate: cannedSubstrate(json),
+        syncHook,
+        ownerDataDir,
+        project_slug: 'rb4-replay',
+        budget: createState(join(ownerDataDir, '.scribe-budget.json'), t0),
+        writeEntity,
+        now: () => ts,
+        supersede: true,
+      })
+    const pagePath = join(ownerDataDir, 'entities', 'people', 'iris-vale.md')
+
+    // 1) Original works_at Oldiv, then 2) supersede to Newiv.
+    await mk(factA('Iris Vale', 'Oldiv'), t0).extractAndWrite({
+      text: 'Iris Vale is a staff engineer at Oldiv, where she has led the platform team for several years now.',
+      observed_at: t0,
+    })
+    await mk(factSupersede('Iris Vale', 'Oldiv', 'Newiv'), t0 + 1000).extractAndWrite({
+      text: 'Iris Vale has moved on from Oldiv and now works at Newiv, leading their platform engineering group.',
+      observed_at: t0 + 1000,
+    })
+    const afterSupersede = readFileSync(pagePath, 'utf8')
+    // The supersession was recorded exactly once.
+    expect((afterSupersede.match(/superseded works_at: oldiv → newiv/g) ?? []).length).toBe(1)
+
+    // 3) REPLAY the EXACT same superseding turn (same ts, source, extraction).
+    const replay = await mk(factSupersede('Iris Vale', 'Oldiv', 'Newiv'), t0 + 1000).extractAndWrite({
+      text: 'Iris Vale has moved on from Oldiv and now works at Newiv, leading their platform engineering group.',
+      observed_at: t0 + 1000,
+    })
+    expect(replay.ran).toBe(true)
+    if (!replay.ran) throw new Error('unreachable')
+    // No page changed on replay — byte-identical re-write short-circuits.
+    expect(replay.report.pages_written).toBe(0)
+
+    const afterReplay = readFileSync(pagePath, 'utf8')
+    expect(afterReplay).toBe(afterSupersede) // byte-identical page + timeline
+    // No SECOND, contradictory row — still exactly one supersession note, and the
+    // replay did NOT append a bogus additive `works_at newiv` timeline row.
+    expect((afterReplay.match(/superseded works_at: oldiv → newiv/g) ?? []).length).toBe(1)
+    const timeline = extractTimeline(afterReplay)
+    expect(timeline.filter((e) => e.body.includes('works_at newiv')).length).toBe(0)
+  }, 60_000)
 })

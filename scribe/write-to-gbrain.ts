@@ -45,6 +45,7 @@ import { resolve } from 'node:path'
 import {
   KIND_TO_DIR,
   extractCompiledTruth,
+  extractTimeline,
   parseFrontmatter,
 } from '@neutronai/runtime/entity-format.ts'
 import { extractTypedLinks, splitSentencesWithOffsets } from '@neutronai/runtime/auto-link.ts'
@@ -260,6 +261,29 @@ export async function writeExtractionToGBrain(
           ? mergeExistingCompiledTruth(existing.compiledTruth, page, supersede)
           : { compiledTruth: composeNewCompiledTruth(page), supersededTargets: new Set<string>() }
       const compiledTruth = merged.compiledTruth
+      // A `(predicate, prior-object)` is a GENUINE supersession — worth a dated
+      // `superseded …` timeline note — iff it was actually retired from this
+      // page's compiled-truth on THIS write (`supersededTargets`) OR the earlier
+      // write that retired it already recorded that note in the timeline. The
+      // second arm is what keeps a REPLAY idempotent: on replay the prior sentence
+      // is already gone (so `supersededTargets` is empty), but the recorded note
+      // is still in `timelineBodies`, so we reproduce the SAME body → byte-identical
+      // page → `changed:false`. A marker whose prior was NEVER asserted here (new
+      // subject / stale marker) satisfies neither arm → additive note, no fabricated
+      // supersession. Deterministic across replays (Codex).
+      const recognizedSupersedes = new Set<string>(merged.supersededTargets)
+      if (supersede && existing !== null) {
+        for (const r of page.relations) {
+          if (r.supersedes === undefined) continue
+          const priorSlug = slugify(r.supersedes)
+          if (priorSlug === null) continue
+          const key = `${r.predicate}\x1f${priorSlug}`
+          if (recognizedSupersedes.has(key)) continue
+          if (existing.timelineBodies.some((b) => b.includes(supersedeNotePrefix(r.predicate, priorSlug)))) {
+            recognizedSupersedes.add(key)
+          }
+        }
+      }
       // Merge frontmatter: preserve every existing key (mention_count, category,
       // basis, cadence_hint, …) and only set the keys scribe authoritatively
       // owns. `writeEntity` does NOT merge frontmatter, so without this the
@@ -285,7 +309,7 @@ export async function writeExtractionToGBrain(
             timelineAppend: {
               ts: input.ts,
               source: timelineSource,
-              body: timelineBody(page, supersede, merged.supersededTargets),
+              body: timelineBody(page, supersede, recognizedSupersedes),
             },
           },
           // M2.6 Ph1 (#83) — own-origin stamp by default (chat / Cores: origin
@@ -370,35 +394,43 @@ function orderPagesObjectsFirst(bySlug: Map<string, PlannedPage>): PlannedPage[]
  *  never re-derive a graph edge — the graph half is driven purely off
  *  compiled-truth. OFF (default) → byte-for-byte today's fact-only body.
  *
- *  `supersededTargets` is the set of `(predicate, prior-object)` triples this
- *  write ACTUALLY retired from the existing compiled-truth. A `superseded …` note
- *  is recorded ONLY for a marker in that set; a `supersedes` marker whose prior
- *  was never asserted (new subject / stale/hallucinated marker) degrades to a
- *  plain additive `<pred> <obj>` note — no fabricated invalidation history (Codex). */
+ *  `recognizedSupersedes` is the set of `(predicate, prior-object)` triples that
+ *  are GENUINE supersessions for this page — retired from compiled-truth on this
+ *  write OR already recorded as superseded in its timeline (so a replay stays
+ *  byte-identical). A `superseded …` note is recorded ONLY for a marker in that
+ *  set; a `supersedes` marker whose prior was never asserted (new subject /
+ *  stale/hallucinated marker) degrades to a plain additive `<pred> <obj>` note —
+ *  no fabricated invalidation history (Codex). */
 function timelineBody(
   page: PlannedPage,
   supersede: boolean,
-  supersededTargets: ReadonlySet<string>,
+  recognizedSupersedes: ReadonlySet<string>,
 ): string {
   const fact = page.fact?.trim()
   const base = fact !== undefined && fact.length > 0 ? `Chat mention — ${fact}` : 'Mentioned in chat'
   if (!supersede) return base
-  const notes = relationNotes(page, supersededTargets)
+  const notes = relationNotes(page, recognizedSupersedes)
   return notes.length > 0 ? `${base} · ${notes.join('; ')}` : base
+}
+
+/** The stable, edge-inert prefix of a supersession timeline note. Centralised so
+ *  the write-side note and the replay-recognition scan can never drift. Bare
+ *  slugs + underscored predicate → nothing re-extracts a triple from it. */
+function supersedeNotePrefix(predicate: string, priorSlug: string): string {
+  return `superseded ${predicate}: ${priorSlug} → `
 }
 
 /**
  * RB4 — deterministic, edge-inert notes recording each of the page's relation
- * assertions for the dated timeline. A relation whose `supersedes` marker
- * ACTUALLY retired a prior compiled-truth assertion (its `(predicate, prior)`
- * is in `supersededTargets`) records the transition (`superseded <pred>: prior →
- * obj`); every other relation — a plain assertion OR a `supersedes` marker that
- * matched no prior (new subject / stale marker) — records the additive assertion
- * (`<pred> obj`), so the ORIGINAL dated belief is captured in history and no
- * supersession is fabricated. Deduped; bare slugs + underscored predicate so
- * nothing re-extracts a triple from this text.
+ * assertions for the dated timeline. A relation whose `supersedes` marker is a
+ * GENUINE supersession (its `(predicate, prior)` is in `recognizedSupersedes`)
+ * records the transition (`superseded <pred>: prior → obj`); every other relation
+ * — a plain assertion OR a `supersedes` marker that matched no prior (new subject
+ * / stale marker) — records the additive assertion (`<pred> obj`), so the ORIGINAL
+ * dated belief is captured in history and no supersession is fabricated. Deduped;
+ * bare slugs + underscored predicate so nothing re-extracts a triple from this text.
  */
-function relationNotes(page: PlannedPage, supersededTargets: ReadonlySet<string>): string[] {
+function relationNotes(page: PlannedPage, recognizedSupersedes: ReadonlySet<string>): string[] {
   const notes: string[] = []
   const seen = new Set<string>()
   for (const r of page.relations) {
@@ -409,12 +441,12 @@ function relationNotes(page: PlannedPage, supersededTargets: ReadonlySet<string>
       if (
         priorSlug !== null &&
         priorSlug !== objSlug &&
-        supersededTargets.has(`${r.predicate}\x1f${priorSlug}`)
+        recognizedSupersedes.has(`${r.predicate}\x1f${priorSlug}`)
       ) {
         const key = `x\x1f${r.predicate}\x1f${priorSlug}\x1f${objSlug}`
         if (!seen.has(key)) {
           seen.add(key)
-          notes.push(`superseded ${r.predicate}: ${priorSlug} → ${objSlug}`)
+          notes.push(`${supersedeNotePrefix(r.predicate, priorSlug)}${objSlug}`)
         }
         continue
       }
@@ -635,11 +667,15 @@ function stripSupersededSentences(
 }
 
 /** What scribe needs to preserve from an existing on-disk page: its compiled-
- *  truth slice (for append-only merge) and its parsed frontmatter (so the
- *  populator's `mention_count`/`category`/… survive the rewrite). */
+ *  truth slice (for append-only merge), its parsed frontmatter (so the
+ *  populator's `mention_count`/`category`/… survive the rewrite), and its
+ *  existing timeline-entry bodies (so a REPLAY of a supersession still recognises
+ *  the prior belief — recorded there by the earlier write — and reproduces a
+ *  byte-identical body, keeping the repeated turn a true no-op). */
 interface ExistingPage {
   compiledTruth: string
   frontmatter: Record<string, unknown>
+  timelineBodies: string[]
 }
 
 /**
@@ -661,7 +697,11 @@ async function readExistingPage(
   } catch {
     return null // ENOENT (new page) or unreadable — treat as fresh
   }
-  return { compiledTruth: extractCompiledTruth(body), frontmatter: parseFrontmatter(body) }
+  return {
+    compiledTruth: extractCompiledTruth(body),
+    frontmatter: parseFrontmatter(body),
+    timelineBodies: extractTimeline(body).map((e) => e.body),
+  }
 }
 
 /**
