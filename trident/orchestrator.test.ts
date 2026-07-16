@@ -520,7 +520,8 @@ describe('orchestrator — RB2 (b) reflection-context threading to build agents'
     const run = await createRun({ project_slug: 't1' })
     await runToTerminal(h, run.id)
     // The resolver was called with the launching run, and its block was threaded to
-    // the inner workflow so Forge + Argus re-ground on owner corrections.
+    // the inner workflow so the Forge builder (not the argus review gate) re-grounds
+    // on owner corrections.
     expect(seen).toContain('t1')
     expect(h.inputs[0]?.reflection_context).toContain('never force-push to main')
   })

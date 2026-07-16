@@ -32,13 +32,19 @@
  * `forge:fix-round-*`. FALSE for every reviewer/synthesis/peer role and any
  * bookkeeping role: the independent merge gate must never carry the untrusted block.
  */
+/** The EXACT Forge fix-round label grammar the workflow emits: `forge:fix-round-<n>`
+ *  where `<n>` is a positive integer (`inner-workflow.mjs`:
+ *  `` label: `forge:fix-round-${round}` ``). Anchored + numeric so no near-boundary
+ *  label (`forge:fix-round-`, `forge:fix-round-argus`, `forge:fixture`, …) can slip
+ *  onto the receives-reflection side of the trust boundary. */
+const FORGE_FIX_ROUND_RE = /^forge:fix-round-\d+$/
+
 export function agentReceivesReflection(role: string): boolean {
   // EXACT grammar match (defense-in-depth for the trust boundary): the ONLY Forge
   // builder labels the workflow emits are `forge:build` and `forge:fix-round-<n>`.
-  // A loose `startsWith('forge:fix')` would also admit a hypothetical `forge:fixer`
-  // / `forge:fixture` — narrow to the exact `forge:fix-round-` prefix so a
-  // mis-labelled agent can never accidentally fall on the receives-reflection side.
-  return role === 'forge:build' || role.startsWith('forge:fix-round-')
+  // Anything else — a reviewer role, a bookkeeping role, or a mislabelled/near-
+  // boundary `forge:fix*` — must fall on the EXCLUDED side.
+  return role === 'forge:build' || FORGE_FIX_ROUND_RE.test(role)
 }
 
 /**

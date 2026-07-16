@@ -19,9 +19,24 @@ import { buildReflectionPreamble } from './reflection-preamble.ts'
 const FORGE_ROLES = ['forge:build', 'forge:fix-round-1', 'forge:fix-round-2', 'forge:fix-round-9']
 const REVIEWER_ROLES = ['argus:claude', 'argus:adversarial', 'argus:synthesis', 'argus:codex']
 const OTHER_ROLES = ['plan:fable', 'cleanup:worktree', 'checkpoint', '']
-// Near-boundary labels the workflow NEVER emits — a loose `startsWith('forge:fix')`
-// would wrongly admit these onto the receives-reflection side.
-const NEAR_BOUNDARY_NON_FORGE = ['forge:fix', 'forge:fixer', 'forge:fixture', 'forge:', 'forge']
+// Near-boundary labels the workflow NEVER emits — a loose prefix/`startsWith` match
+// would wrongly admit these onto the receives-reflection side. Covers empty suffix,
+// alphabetic/mixed suffix, signed/decimal numbers, whitespace, and prefix collisions.
+const NEAR_BOUNDARY_NON_FORGE = [
+  'forge:fix',
+  'forge:fixer',
+  'forge:fixture',
+  'forge:fix-round-', // empty suffix
+  'forge:fix-round-argus', // alphabetic suffix (a mislabelled reviewer)
+  'forge:fix-round-1a', // mixed suffix
+  'forge:fix-round--1', // signed
+  'forge:fix-round-1.5', // decimal
+  'forge:fix-round-1 ', // trailing whitespace
+  ' forge:fix-round-1', // leading whitespace
+  'forge:fix-round-1:argus', // suffix collision
+  'forge:',
+  'forge',
+]
 
 describe('agentReceivesReflection — the reflection trust boundary', () => {
   test('the FORGE builder path (build + every fix round) receives reflection', () => {

@@ -196,8 +196,9 @@ describe('buildWorkflowFirer — fire mechanics over a fire seam', () => {
     expect(calls[0]!.prompt).toContain('"codexHome":null')
   })
 
-  // RB2 (b) — the owner's reflection corrections/diary reach the build agents via a
-  // ready-to-prepend `reflectionPreamble` DERIVED in buildWorkflowArgs (testable TS).
+  // RB2 (b) — the owner's reflection corrections/diary reach the Forge builder (not
+  // the argus review gate) via a ready-to-prepend `reflectionPreamble` DERIVED in
+  // buildWorkflowArgs (testable TS).
   test('args thread the derived reflectionPreamble when the owner has recent corrections (RB2 (b))', async () => {
     const { fire, calls } = fakeFire(() => ({ status: 'fired', error: null }))
     const firer = buildWorkflowFirer({ fire })

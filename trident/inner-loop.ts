@@ -216,11 +216,12 @@ export function buildWorkflowArgs(input: InnerLoopInput): Record<string, unknown
     codexHome: input.codex_home ?? null,
     // RB2 (b) — the owner-corrections PREAMBLE, DERIVED HERE (testable TS) from the
     // owner's recent reflection corrections/diary block and threaded READY-TO-PREPEND
-    // to the inner workflow, which prepends it verbatim to each Claude build/review
-    // agent (Forge build + fix rounds, argus rubric/adversarial/synthesis) so owner
-    // corrections reach build agents. Empty string for a null/whitespace/non-string
-    // context → the workflow prepends nothing (a clean no-op). The `.mjs` cannot
-    // import this helper (no module resolution), so the boundary logic lives here.
+    // to the inner workflow, which prepends it verbatim to the FORGE BUILDER path
+    // ONLY (forge:build + fix rounds) so owner corrections steer what gets built —
+    // NEVER the independent argus review gate (trust boundary, see build-agent-
+    // prompt.ts). Empty string for a null/whitespace/non-string context → the
+    // workflow prepends nothing (a clean no-op). The `.mjs` cannot import this helper
+    // (no module resolution), so the boundary logic lives here.
     reflectionPreamble: buildReflectionPreamble(input.reflection_context),
     // FABLE-ORCHESTRATOR model routing (SPEC § Fable-orchestrator, 2026-07-02).
     // The single-source-of-truth model IDS resolved from runtime/models.ts and
