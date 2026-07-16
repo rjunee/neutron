@@ -290,7 +290,7 @@ import { buildBoardReconcileObserver } from '@neutronai/trident/board-reconcile.
 import { buildTridentTerminator, type TridentTerminator } from '@neutronai/trident/terminate.ts'
 import type { WorkBoardStartResult } from '@neutronai/gateway/http/work-board-surface.ts'
 import { formatWorkBoardFragment } from '@neutronai/work-board/fragment.ts'
-import { buildAgentNexusSnapshot } from '@neutronai/gateway/nexus/nexus-fragment.ts'
+import { buildNexusReaderSeam } from './wiring/nexus-reader-seam.ts'
 import { InMemoryConsumedTokens } from '@neutronai/runtime/consumed-tokens-in-memory.ts'
 import type {
   AppSocketButtonPromptRouter,
@@ -1056,6 +1056,12 @@ export function buildOpenGraphComposer(
       nexus: nexusStore,
       observers: [skillForgeOnRunTerminal],
     })
+
+    // RC3 ([BEHAVIOR]) — the live-agent turn's agent-nexus READER seam. Flag-gated
+    // + scope-composed in `buildNexusReaderSeam`: `undefined` when perfect-recall
+    // is off (`nexusStore` null) so no seam is wired (RC3 ships DARK). Reuses the
+    // SAME `NexusStore` `wireMemory` built, so the reader reads what RC2 wrote.
+    const nexusReaderSeam = buildNexusReaderSeam(nexusStore)
 
     // ── Free Cores → Open boot (Vajra parity gap #2) ───────────────────────
     // Compose the bundled free Cores (Calendar / Email / Google-Workspace /
@@ -2865,20 +2871,11 @@ export function buildOpenGraphComposer(
             // decision/handoff/learning events OTHER agents recorded on THIS
             // project (an overnight trident Argus verdict, an owner correction)
             // and inject the escaped `<agent_nexus>` DATA block so the chat turn
-            // re-grounds on cross-agent state. Scoped through the SAME
-            // `workBoardScopeKey` RC2's emitters write to (General → owner slug),
-            // so the reader sees exactly what the producers wrote. Wired ONLY when
-            // the perfect-recall flag is on (`nexusStore !== null`) — RC3 ships
-            // DARK; the seam is simply absent otherwise (unchanged behaviour).
-            ...(nexusStore !== null
-              ? {
-                  nexusSnapshot: (
-                    slug: string,
-                    project_id: string | undefined,
-                  ): Promise<string | null> =>
-                    buildAgentNexusSnapshot(nexusStore, workBoardScopeKey(slug, project_id)),
-                }
-              : {}),
+            // re-grounds on cross-agent state. The flag gate + `workBoardScopeKey`
+            // scope composition live in `buildNexusReaderSeam` (a tested wiring
+            // unit): `undefined` when perfect-recall is off (`nexusStore` null) →
+            // RC3 ships DARK, the seam is simply absent (unchanged behaviour).
+            ...(nexusReaderSeam !== undefined ? { nexusSnapshot: nexusReaderSeam } : {}),
             // Available-services awareness — the project-scoped credential
             // picture (per-project ∪ global default), so the agent knows which
             // external services it can use in THIS project and gracefully
