@@ -211,19 +211,35 @@ describe('runtime/entity-writer — roundtrip', () => {
       expect(await fs.readFile(outside, 'utf8')).toBe('secret')
     })
 
-    test('a same-key write and delete serialize (no interleave)', async () => {
-      await writeEntity(aliceInput())
-      const order: string[] = []
+    test('a same-key write and delete serialize — the write is never torn away', async () => {
+      const seeded = await writeEntity(aliceInput())
+      const base = await fs.readFile(seeded.path, 'utf8')
       const upd = aliceInput()
       upd.body.compiledTruth = '## State\n\nUpdated.\n'
-      // Fire a write and a delete on the SAME key concurrently; the shared per-key
-      // lock serializes them — neither observes a half-written state.
-      const w = writeEntity(upd).then(() => order.push('write'))
-      const d = deleteEntity({ ownerDataDir: ownerDir, kind: 'person', slug: 'alice-founder' }).then(
-        (r) => order.push(`delete:${r.deleted}`),
-      )
-      await Promise.all([w, d])
-      expect(order.length).toBe(2) // both completed without throwing
+      // Fire concurrently on the SAME key: a full-replacement write (→"Updated")
+      // and a GUARDED delete whose precondition is the SEEDED body. The per-key
+      // lock forces one of two clean orders — never an interleave:
+      //   • delete-first: precondition matches → page removed → the write then
+      //     RECREATES it ("Updated"). Page exists.
+      //   • write-first: page is "Updated" → the delete's precondition (seeded
+      //     body) MISMATCHES → conflict, no unlink. Page exists.
+      // Either way the page EXISTS afterwards with the written content. Without the
+      // shared lock, the delete could read the seeded body then unlink the page the
+      // write just created → page GONE. So "page exists + Updated" proves serialization.
+      const [, del] = await Promise.all([
+        writeEntity(upd),
+        deleteEntity({
+          ownerDataDir: ownerDir,
+          kind: 'person',
+          slug: 'alice-founder',
+          precondition: { ifBodyEquals: base },
+        }),
+      ])
+      const onDisk = await fs.readFile(seeded.path, 'utf8') // throws if the page was torn away
+      expect(onDisk).toContain('Updated.')
+      // The delete either removed-then-write-recreated, or conflicted — never a
+      // silent success that dropped the write.
+      expect(del.deleted === true || del.conflict === true).toBe(true)
     })
   })
 

@@ -118,12 +118,33 @@ async function bootComposer(): Promise<{
   }
 }
 
-test('shutdown quiesces an in-flight reflect tick BEFORE memory close begins', async () => {
-  // The composer registers the reflect loop's quiescing stop() cleanup BEFORE the
-  // memory cleanups (which start gbrainMemory.close()), and realmode_cleanups drain
-  // in forward order. So an in-flight tick must fully settle before memory close —
-  // otherwise a tick mid-syncHook/deletePage could hit a closing GBrain. This
-  // reproduces that exact ordering with a gated tick + a fake memory-close cleanup.
+test('the REAL composer wires the reflect-stop cleanup into realmode_cleanups', async () => {
+  // Composer-boundary proof (not a fabricated loop): boot the real flagged Open
+  // composer, then drain the ACTUAL `composition.realmode_cleanups`. The reflect
+  // loop must go active → inactive as a result — i.e. the composer genuinely
+  // registered the loop's quiescing stop() into the cleanup set. Fails if that
+  // cleanup is ever dropped (the loop would stay active after the drain).
+  process.env['NEUTRON_PERFECT_RECALL'] = '1'
+  const { composition, close } = await bootComposer()
+  try {
+    const reg = composition.loop_registry
+    expect(reg?.get(REFLECT_LOOP)?.isActive?.()).toBe(true) // armed before shutdown
+    // Drain the cleanups the COMPOSER actually registered (forward order, the
+    // same order the gateway shutdown runner uses).
+    for (const cleanup of composition.realmode_cleanups ?? []) {
+      await cleanup()
+    }
+    expect(reg?.get(REFLECT_LOOP)?.isActive?.()).toBe(false) // real stop cleanup ran
+  } finally {
+    await close()
+  }
+})
+
+test('SupervisedLoop.stop quiesces an in-flight tick (the mechanism the composer relies on)', async () => {
+  // The composer registers the reflect loop's quiescing stop() BEFORE the memory
+  // cleanups, and realmode_cleanups drain in forward order — so an in-flight tick
+  // fully settles before gbrainMemory.close() is even called. This pins the
+  // underlying quiesce mechanism: stop() does not resolve until a running tick ends.
   const events: string[] = []
   let releaseTick!: () => void
   const gate = new Promise<void>((r) => {
@@ -141,20 +162,18 @@ test('shutdown quiesces an in-flight reflect tick BEFORE memory close begins', a
   loop.start()
   void loop.runOnce() // drive one tick; it now parks on the gate
 
-  // The composer's registration order: loop stop FIRST, then the memory close.
-  const cleanups: Array<() => void | Promise<void>> = [
-    async () => {
-      await loop.stop()
-    },
-    () => {
-      events.push('memory-close')
-    },
-  ]
-  // Release the tick shortly after the drain starts awaiting stop().
-  setTimeout(() => releaseTick(), 10)
-  for (const c of cleanups) await c() // forward-order drain (drainRealmodeCleanups)
+  let stopResolved = false
+  const stopping = loop.stop().then(() => {
+    stopResolved = true
+  })
+  await Promise.resolve() // let microtasks flush; stop() must still be pending
+  expect(stopResolved).toBe(false) // stop() is BLOCKED on the in-flight tick
+  expect(events).toEqual(['tick-start'])
 
-  expect(events).toEqual(['tick-start', 'tick-end', 'memory-close'])
+  releaseTick()
+  await stopping
+  expect(stopResolved).toBe(true)
+  expect(events).toEqual(['tick-start', 'tick-end']) // tick settled before stop() returned
 })
 
 test('flag OFF (default) → reflect-consolidation is NOT armed', async () => {
