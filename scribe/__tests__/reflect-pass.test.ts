@@ -189,8 +189,10 @@ describe('reflect dedup (deterministic, no LLM)', () => {
     const report2 = await runReflectPass({ ...baseDeps(owner), deleteEntity: failingDelete })
     expect(report2.merged).toBe(0)
     const afterSecond = await readPage(owner, 'companies', 'acme')
-    expect(afterSecond).toBe(afterFirst) // no duplicate "## Merged from" / timeline growth
-    expect((afterSecond!.match(/## Merged from acme-co/g) ?? []).length).toBe(1)
+    expect(afterSecond).toBe(afterFirst) // byte-identical retry → no timeline growth
+    // The survivor never absorbs the loser's PROSE (timeline-only merge), so a
+    // partial merge leaves no stale fold to accumulate.
+    expect(afterSecond).not.toContain('Merged from')
   })
 
   test('a concurrent write to a cluster member aborts the merge (no clobber, no wrong delete)', async () => {
@@ -259,12 +261,18 @@ describe('reflect dedup (deterministic, no LLM)', () => {
       return out
     }
     const report = await runReflectPass({ ...baseDeps(owner), writeEntity: wrapped })
-    // The per-loser re-read before unlink sees the concurrent write → the loser is
-    // retained (not deleted), so its fresh fact is never lost.
+    // The atomic CAS-delete sees the concurrent write → the loser is retained (not
+    // deleted), so its fresh fact is never lost.
     expect(report.merged).toBe(0)
     expect(existsSync(join(owner, 'entities', 'companies', 'acme-io.md'))).toBe(true)
     const loser = await readPage(owner, 'companies', 'acme-io')
     expect(extractTimeline(loser!).map((e) => e.body)).toContain('FRESH loser fact')
+    // BOUNDARY: the retained loser was genuinely UNMERGED — the survivor never
+    // absorbed its prose (timeline-only merge), so the survivor's compiled-truth
+    // is exactly its own, with no stale loser content copied in.
+    const survivorCt = extractCompiledTruth((await readPage(owner, 'companies', 'acme'))!)
+    expect(survivorCt).not.toContain('Merged from')
+    expect(survivorCt.trim()).toBe('Acme is a developer-tools SaaS company.')
   })
 
   test('distinct pages are NOT merged', async () => {

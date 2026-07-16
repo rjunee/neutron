@@ -464,17 +464,18 @@ async function dedupPages(
  * Merge a near-duplicate cluster (>= 2 pages, same kind) into one survivor.
  * Survivor = the page with the most timeline history (tie: longest
  * compiled-truth, then lexicographically-smallest slug) — deterministic. The
- * survivor's compiled-truth is its own body plus a "Merged from" section carrying
- * the losers' compiled-truth verbatim (their `[[wikilinks]]` re-extract onto the
- * survivor); its timeline absorbs the union of every member's rows. Each loser is
- * removed from disk and best-effort from the brain.
+ * survivor KEEPS its own compiled-truth (the near-duplicate losers are subsumed
+ * by it); its timeline absorbs the union of every member's dated rows (history
+ * preserved). Each loser is then atomically deleted from disk (+ best-effort from
+ * the brain). Nothing of a loser is copied into the survivor's compiled-truth, so
+ * a loser whose deletion later conflicts is genuinely unmerged.
  */
 async function mergeCluster(
   members: LoadedPage[],
   deps: ReflectPassDeps,
 ): Promise<{ survivor: LoadedPage; retained: LoadedPage[]; deleted: number } | null> {
-  // EARLY ABORT (optimization + avoids folding a stale copy): if any member
-  // changed on disk since the snapshot, skip the whole cluster now — a later pass
+  // EARLY ABORT (optimization): if any member changed on disk since the snapshot,
+  // skip the whole cluster now — a later pass
   // re-clusters the fresh content. This is NOT the safety mechanism (that is the
   // survivor write's atomic `precondition` + the per-loser re-read before unlink,
   // below); it just avoids a wasted survivor write + a stale fold in the common
@@ -492,31 +493,17 @@ async function mergeCluster(
   const survivor = ranked[0]!
   const losers = ranked.slice(1)
 
-  // Fold each loser's compiled-truth into the survivor so their graph edges carry
-  // over — but IDEMPOTENTLY: skip a `## Merged from <slug>` section already present
-  // (a heading keyed on the loser slug). This makes a REPEATED merge (e.g. a prior
-  // pass wrote the survivor but its loser deletion failed and the loser lingers) a
-  // true no-op instead of appending duplicate sections every pass. Deterministic:
-  // no timestamps, no `now()` — so nothing accretes across passes.
-  const foldSections = losers
-    .map((l) => {
-      const body = l.compiledTruth.trim()
-      const heading = `## Merged from ${l.slug}`
-      if (body.length === 0) return ''
-      if (survivor.compiledTruth.includes(heading)) return '' // already folded → skip
-      return `${heading}\n\n${body}`
-    })
-    .filter((s) => s.length > 0)
-  const mergedCompiledTruth =
-    foldSections.length > 0
-      ? `${survivor.compiledTruth.trimEnd()}\n\n${foldSections.join('\n\n')}\n`
-      : survivor.compiledTruth
-
-  // History preservation is the union of the members' DATED timeline rows — each
-  // deterministic (its own ts/source/body), so re-merging a lingering loser
-  // re-appends the SAME rows, which the writer dedups → no growth. (No synthetic
-  // dated marker: a `now()`-stamped row would defeat that dedup and accrete a new
-  // row every pass while a loser deletion keeps failing.)
+  // TIMELINE-ONLY MERGE. We do NOT fold a loser's compiled-truth into the
+  // survivor: the survivor is the RICHEST member (most timeline, then longest
+  // compiled-truth), and the pages are NEAR-DUPLICATES by the Jaccard bar, so the
+  // survivor's own compiled-truth already subsumes them. This is what keeps the
+  // merge safe under concurrency — the survivor write never copies a loser's
+  // (possibly-about-to-change) prose, so a loser whose deletion later conflicts is
+  // genuinely UNMERGED (nothing of it was written into the survivor). What IS
+  // preserved is HISTORY: the union of every member's DATED timeline rows, each
+  // deterministic (its own ts/source/body), so re-appending a lingering loser's
+  // rows on a later pass is a writer-deduped no-op (no growth). The survivor's
+  // compiled-truth is unchanged, so no graph edge is ever added or retracted here.
   const allRows = members.flatMap((m) => m.timeline)
   const unionTimeline = allRows.reduce<TimelineEntry[]>((acc, row) => mergeTimeline(acc, row), [])
 
@@ -528,20 +515,19 @@ async function mergeCluster(
     source: `reflect:${deps.ownSlug}`,
   }
 
-  // ONE atomic survivor write: the merged compiled-truth (establishes the union
-  // edge set) plus EVERY union-timeline row folded in a single call (the writer
-  // accepts a row array, deduped on ts/source/body). `precondition` makes the
-  // write conditional — INSIDE the writer's per-key lock — on the survivor still
-  // being byte-identical to the snapshot: a concurrent write to the survivor
-  // between snapshot and here flips this to a no-op conflict, so nothing is
-  // clobbered. On conflict we abort the WHOLE cluster (delete no loser) so a
-  // later pass re-clusters the fresh content.
+  // ONE atomic survivor write: the survivor's UNCHANGED compiled-truth + every
+  // union-timeline row in a single call (the writer accepts a row array, deduped
+  // on ts/source/body). `precondition` makes the write conditional — INSIDE the
+  // writer's per-key lock — on the survivor still being byte-identical to the
+  // snapshot: a concurrent write to the survivor flips this to a no-op conflict.
+  // On conflict we abort the WHOLE cluster (delete no loser) so a later pass
+  // re-clusters the fresh content.
   const out = await deps.writeEntity(
     {
       ownerDataDir: deps.ownerDataDir,
       kind: survivor.kind,
       slug: survivor.slug,
-      body: { frontmatter, compiledTruth: mergedCompiledTruth, timelineAppend: unionTimeline },
+      body: { frontmatter, compiledTruth: survivor.compiledTruth, timelineAppend: unionTimeline },
       originInstance: deps.ownSlug,
       receivingInstanceSlug: deps.ownSlug,
       precondition: { ifBodyEquals: survivor.raw },
@@ -597,7 +583,7 @@ async function mergeCluster(
   return {
     survivor: {
       ...survivor,
-      compiledTruth: mergedCompiledTruth,
+      compiledTruth: survivor.compiledTruth,
       timeline: unionTimeline,
       frontmatter,
       raw: newSurvivorRaw,
