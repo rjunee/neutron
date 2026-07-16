@@ -157,7 +157,7 @@ describe('ND2 — solicited Path-1 upload at a conversational phase starts a job
       project_slug: OWNER,
       topic_id: TOPIC,
       user_id: USER,
-      channel_kind: 'app-socket',
+      channel_kind: 'app_socket',
       source: 'claude',
       observed_at: NOW_MS + 1_000,
     })
@@ -191,7 +191,7 @@ describe('ND2 — solicited Path-1 upload at a conversational phase starts a job
       project_slug: OWNER,
       topic_id: TOPIC,
       user_id: USER,
-      channel_kind: 'app-socket',
+      channel_kind: 'app_socket',
       source: 'claude',
       observed_at: NOW_MS + 1_000,
     })
@@ -224,7 +224,7 @@ describe('ND2 — solicited Path-1 upload at a conversational phase starts a job
       project_slug: OWNER,
       topic_id: TOPIC,
       user_id: USER,
-      channel_kind: 'app-socket',
+      channel_kind: 'app_socket',
       source: 'claude',
       observed_at: NOW_MS + 1_000,
     })
@@ -243,7 +243,7 @@ describe('ND2 — solicited Path-1 upload at a conversational phase starts a job
       project_slug: OWNER,
       topic_id: TOPIC,
       user_id: USER,
-      channel_kind: 'app-socket',
+      channel_kind: 'app_socket',
       source: 'claude',
       observed_at: NOW_MS + 1_000,
     })
@@ -265,7 +265,7 @@ describe('ND2 — solicited Path-1 upload at a conversational phase starts a job
       project_slug: OWNER,
       topic_id: TOPIC,
       user_id: USER,
-      channel_kind: 'app-socket',
+      channel_kind: 'app_socket',
       source: 'claude',
       observed_at: NOW_MS + 1_000,
     })
@@ -282,7 +282,7 @@ describe('ND2 — solicited Path-1 upload at a conversational phase starts a job
       project_slug: OWNER,
       topic_id: TOPIC,
       user_id: USER,
-      channel_kind: 'app-socket',
+      channel_kind: 'app_socket',
       source: 'claude',
       observed_at: NOW_MS + 1_000,
     })
@@ -310,7 +310,7 @@ describe('ND2 — solicited Path-1 upload at a conversational phase starts a job
       project_slug: OWNER,
       topic_id: TOPIC,
       user_id: USER,
-      channel_kind: 'app-socket',
+      channel_kind: 'app_socket',
       source: 'claude',
       observed_at: NOW_MS + 1_000,
     })
@@ -331,7 +331,7 @@ describe('ND2 — solicited Path-1 upload at a conversational phase starts a job
       project_slug: OWNER,
       topic_id: TOPIC,
       user_id: USER,
-      channel_kind: 'app-socket',
+      channel_kind: 'app_socket',
       source: 'claude',
       observed_at: NOW_MS + 1_000,
     })
@@ -348,7 +348,7 @@ describe('ND2 — solicited Path-1 upload at a conversational phase starts a job
       project_slug: OWNER,
       topic_id: TOPIC,
       user_id: USER,
-      channel_kind: 'app-socket',
+      channel_kind: 'app_socket',
       source: 'claude',
       observed_at: NOW_MS + 1_000,
     })
@@ -364,7 +364,7 @@ describe('ND2 — solicited Path-1 upload at a conversational phase starts a job
       project_slug: OWNER,
       topic_id: TOPIC,
       user_id: USER,
-      channel_kind: 'app-socket',
+      channel_kind: 'app_socket',
       source: 'claude',
       observed_at: NOW_MS + 1_000,
     })
@@ -377,7 +377,7 @@ describe('ND2 — solicited Path-1 upload at a conversational phase starts a job
       project_slug: OWNER,
       topic_id: TOPIC,
       user_id: USER,
-      channel_kind: 'app-socket',
+      channel_kind: 'app_socket',
       source: 'claude',
       observed_at: NOW_MS + 2_000,
     })
@@ -444,7 +444,7 @@ describe('ND2 — solicited Path-1 upload at a conversational phase starts a job
       project_slug: OWNER,
       topic_id: TOPIC,
       user_id: USER,
-      channel_kind: 'app-socket',
+      channel_kind: 'app_socket',
       source: 'claude',
       observed_at: NOW_MS + 1_000,
     })
@@ -474,7 +474,7 @@ describe('ND2 — solicited Path-1 upload at a conversational phase starts a job
         project_slug: OWNER,
         topic_id: TOPIC,
         user_id: USER,
-        channel_kind: 'app-socket',
+        channel_kind: 'app_socket',
         source: 'claude',
         observed_at: NOW_MS + 1_000,
       }),
@@ -482,7 +482,7 @@ describe('ND2 — solicited Path-1 upload at a conversational phase starts a job
         project_slug: OWNER,
         topic_id: TOPIC,
         user_id: USER,
-        channel_kind: 'app-socket',
+        channel_kind: 'app_socket',
         source: 'claude',
         observed_at: NOW_MS + 1_001,
       }),

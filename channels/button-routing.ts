@@ -25,7 +25,7 @@
  *     `delivered: false`.
  */
 
-import { decodePromptIdWire, ROUTING_PREFIX, type ButtonChoice, type ChannelKindForButton } from './button-primitive.ts'
+import { decodePromptIdWire, normalizeChannelKindForButton, ROUTING_PREFIX, type ButtonChoice, type ChannelKindForButton } from './button-primitive.ts'
 import { ButtonStoreError, type ButtonStore } from './button-store.ts'
 
 export interface RouteChoiceInput {
@@ -46,8 +46,16 @@ export interface RouteChoiceResult {
   /** True when the choice was applied to a prompt; false on unknown prompt_id
    *  or on a non-matching value when allow_freeform=false. */
   delivered: boolean
-  /** Always populated — even on `delivered:false`, callers may want to log. */
-  choice: ButtonChoice
+  /** Populated whenever the channel is a valid `ChannelKindForButton` — even on
+   *  `delivered:false` (unknown prompt / non-matching value), callers may want to
+   *  log it. ABSENT only when the ingress channel itself is invalid/corrupt (no
+   *  honest `ButtonChoice` can be built); `rejected_channel_kind` carries the raw
+   *  value in that case. */
+  choice?: ButtonChoice
+  /** The raw, unrecognized channel token when the ingress channel was rejected
+   *  as invalid (N6 trust boundary). Present iff `choice` is absent. For
+   *  diagnostics only — never persisted. */
+  rejected_channel_kind?: string
   /** Populated when `delivered: true`. Absent on `delivered:false` so a caller
    *  using `result.prompt.body` defensively crashes loudly. */
   prompt?: import('./button-primitive.ts').ButtonPrompt
@@ -76,6 +84,29 @@ export class DefaultButtonRouter implements ButtonRouter {
   async routeChoice(input: RouteChoiceInput): Promise<RouteChoiceResult> {
     const chosen_at = input.chosen_at ?? this.now()
 
+    // N6 dual-read + validation (ingress trust boundary) —
+    // `RouteChoiceInput.channel_kind` is typed to the canonical vocabulary, but
+    // a runtime/legacy caller (an in-flight process, or a client sending the
+    // pre-unification hyphen off the wire) may still hand us `'app-socket'`.
+    // Normalize once here so both the returned choice AND the value ButtonStore
+    // persists are canonical. A token that does NOT normalize to a supported
+    // button channel is an unsupported/corrupt channel: reject it before any
+    // store write so a bogus value can never enter `resolution_channel_kind`
+    // (nor slip past the Telegram hostile-payload guard by masquerading as a
+    // non-Telegram channel).
+    const channel_kind = normalizeChannelKindForButton(input.channel_kind)
+    if (channel_kind === null) {
+      // The ingress channel is unsupported/corrupt: we cannot honestly build a
+      // `ButtonChoice` (its `channel_kind` is `ChannelKindForButton`), so omit
+      // `choice` entirely and surface the raw token for diagnostics only. Reject
+      // before any store read/write so a bogus value never enters the DB.
+      return {
+        delivered: false,
+        was_new: false,
+        rejected_channel_kind: String(input.channel_kind),
+      }
+    }
+
     // Pass the observation time so the get() expiry check uses the same
     // wall clock the caller witnessed — avoids the race where a tap
     // observed before expires_at could be rejected if routing takes long
@@ -87,7 +118,7 @@ export class DefaultButtonRouter implements ButtonRouter {
         choice_value: input.raw_value,
         chosen_at,
         speaker_user_id: input.speaker_user_id,
-        channel_kind: input.channel_kind,
+        channel_kind,
       }
       if (input.freeform_text !== undefined) choice.freeform_text = input.freeform_text
       return { delivered: false, choice, was_new: false }
@@ -110,14 +141,14 @@ export class DefaultButtonRouter implements ButtonRouter {
     // match an option is a crafted/hostile payload; reject with
     // delivered:false rather than coercing to __freeform__, which would
     // let an attacker force-resolve any active prompt.
-    if (input.channel_kind === 'telegram') {
+    if (channel_kind === 'telegram') {
       if (matchedOption === undefined) {
         const undeliverable: ButtonChoice = {
           prompt_id: input.prompt_id,
           choice_value: input.raw_value,
           chosen_at,
           speaker_user_id: input.speaker_user_id,
-          channel_kind: input.channel_kind,
+          channel_kind,
         }
         if (input.freeform_text !== undefined) undeliverable.freeform_text = input.freeform_text
         return { delivered: false, choice: undeliverable, prompt, was_new: false }
@@ -134,7 +165,7 @@ export class DefaultButtonRouter implements ButtonRouter {
           choice_value: input.raw_value,
           chosen_at,
           speaker_user_id: input.speaker_user_id,
-          channel_kind: input.channel_kind,
+          channel_kind,
         }
         if (input.freeform_text !== undefined) undeliverable.freeform_text = input.freeform_text
         return { delivered: false, choice: undeliverable, prompt, was_new: false }
@@ -146,7 +177,7 @@ export class DefaultButtonRouter implements ButtonRouter {
       choice_value,
       chosen_at,
       speaker_user_id: input.speaker_user_id,
-      channel_kind: input.channel_kind,
+      channel_kind,
     }
     if (freeform_text !== undefined) choice.freeform_text = freeform_text
 

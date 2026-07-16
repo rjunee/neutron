@@ -192,7 +192,7 @@ describe('ISSUES #98 — explicit switch must not auto-import the abandoned sour
       project_slug: OWNER,
       topic_id: TOPIC,
       user_id: USER,
-      channel_kind: 'app-socket',
+      channel_kind: 'app_socket',
       source: 'chatgpt',
       observed_at: NOW_MS + 2_000,
     })
@@ -226,7 +226,7 @@ describe('ISSUES #98 — explicit switch must not auto-import the abandoned sour
       project_slug: OWNER,
       topic_id: TOPIC,
       user_id: USER,
-      channel_kind: 'app-socket',
+      channel_kind: 'app_socket',
       source: 'chatgpt',
       observed_at: NOW_MS + 2_000,
     })
@@ -252,7 +252,7 @@ describe('ISSUES #98 — explicit switch must not auto-import the abandoned sour
       project_slug: OWNER,
       topic_id: TOPIC,
       user_id: USER,
-      channel_kind: 'app-socket',
+      channel_kind: 'app_socket',
       source: 'claude',
       observed_at: NOW_MS + 2_000,
     })
@@ -279,7 +279,7 @@ describe('ISSUES #98 — explicit switch must not auto-import the abandoned sour
       project_slug: OWNER,
       topic_id: TOPIC,
       user_id: USER,
-      channel_kind: 'app-socket',
+      channel_kind: 'app_socket',
       source: 'claude',
       observed_at: NOW_MS + 3_000,
     })
@@ -308,7 +308,7 @@ describe('ISSUES #98 — explicit switch must not auto-import the abandoned sour
       project_slug: OWNER,
       topic_id: TOPIC,
       user_id: USER,
-      channel_kind: 'app-socket',
+      channel_kind: 'app_socket',
       source: 'claude',
       observed_at: NOW_MS + 2_000,
     })
@@ -338,7 +338,7 @@ describe('ISSUES #98 — explicit switch must not auto-import the abandoned sour
       project_slug: OWNER,
       topic_id: TOPIC,
       user_id: USER,
-      channel_kind: 'app-socket',
+      channel_kind: 'app_socket',
       source: 'chatgpt',
       observed_at: NOW_MS + 2_000,
     })

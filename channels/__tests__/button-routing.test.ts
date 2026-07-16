@@ -100,7 +100,7 @@ describe('DefaultButtonRouter.routeChoice', () => {
     })
     expect(out.delivered).toBe(true)
     expect(out.was_new).toBe(true)
-    expect(out.choice.choice_value).toBe('opt-A')
+    expect(out.choice?.choice_value).toBe('opt-A')
     expect(out.prompt?.prompt_id).toBe(prompt.prompt_id)
   })
 
@@ -132,7 +132,7 @@ describe('DefaultButtonRouter.routeChoice', () => {
     })
     expect(a.was_new).toBe(true)
     expect(b.was_new).toBe(false)
-    expect(b.choice.choice_value).toBe('opt-A')
+    expect(b.choice?.choice_value).toBe('opt-A')
   })
 
   test('Telegram non-matching value NEVER falls back to freeform (Codex r8 P2)', async () => {
@@ -148,7 +148,7 @@ describe('DefaultButtonRouter.routeChoice', () => {
       channel_kind: 'telegram',
     })
     expect(out.delivered).toBe(false)
-    expect(out.choice.choice_value).toBe('My freeform answer')
+    expect(out.choice?.choice_value).toBe('My freeform answer')
   })
 
   test('app-socket non-matching value with allow_freeform=true resolves as __freeform__', async () => {
@@ -158,11 +158,11 @@ describe('DefaultButtonRouter.routeChoice', () => {
       prompt_id: prompt.prompt_id,
       raw_value: 'My freeform answer',
       speaker_user_id: 'u-1',
-      channel_kind: 'app-socket',
+      channel_kind: 'app_socket',
     })
     expect(out.delivered).toBe(true)
-    expect(out.choice.choice_value).toBe('__freeform__')
-    expect(out.choice.freeform_text).toBe('My freeform answer')
+    expect(out.choice?.choice_value).toBe('__freeform__')
+    expect(out.choice?.freeform_text).toBe('My freeform answer')
   })
 
   test('non-matching value with allow_freeform=false → delivered:false', async () => {
@@ -186,10 +186,10 @@ describe('DefaultButtonRouter.routeChoice', () => {
       raw_value: '__freeform__',
       freeform_text: 'a literal answer',
       speaker_user_id: 'u-1',
-      channel_kind: 'app-socket',
+      channel_kind: 'app_socket',
     })
     expect(out.delivered).toBe(true)
-    expect(out.choice.freeform_text).toBe('a literal answer')
+    expect(out.choice?.freeform_text).toBe('a literal answer')
   })
 
   test('Telegram callback carrying a reserved sentinel is REJECTED (Codex r8 P2)', async () => {
@@ -214,10 +214,10 @@ describe('DefaultButtonRouter.routeChoice', () => {
       prompt_id: prompt.prompt_id,
       raw_value: '__cancel__',
       speaker_user_id: 'u-1',
-      channel_kind: 'app-socket',
+      channel_kind: 'app_socket',
     })
     expect(out.delivered).toBe(true)
-    expect(out.choice.choice_value).toBe('__cancel__')
+    expect(out.choice?.choice_value).toBe('__cancel__')
   })
 
   test('callback for an expired-but-not-yet-swept prompt → delivered:false', async () => {

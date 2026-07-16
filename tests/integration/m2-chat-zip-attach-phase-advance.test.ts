@@ -155,7 +155,7 @@ describe('M2 chat-upload UX — engine ZIP attach phase contract', () => {
       project_slug: OWNER,
       topic_id: TOPIC,
       user_id: USER,
-      channel_kind: 'app-socket',
+      channel_kind: 'app_socket',
       source: 'chatgpt',
     })
     // The engine ALWAYS transitions phase out of `import_upload_pending`
@@ -179,7 +179,7 @@ describe('M2 chat-upload UX — engine ZIP attach phase contract', () => {
       project_slug: OWNER,
       topic_id: TOPIC,
       user_id: USER,
-      channel_kind: 'app-socket',
+      channel_kind: 'app_socket',
       source: 'chatgpt',
     })
     expect(result.outcome).toBe('no_active_prompt')
@@ -211,7 +211,7 @@ describe('M2 chat-upload UX — engine ZIP attach phase contract', () => {
       project_slug: OWNER,
       topic_id: TOPIC,
       user_id: USER,
-      channel_kind: 'app-socket',
+      channel_kind: 'app_socket',
       source: 'chatgpt',
     })
     // The import MUST start — NOT a silent no_active_prompt that orphans
@@ -236,7 +236,7 @@ describe('M2 chat-upload UX — engine ZIP attach phase contract', () => {
       project_slug: OWNER,
       topic_id: TOPIC,
       user_id: USER,
-      channel_kind: 'app-socket',
+      channel_kind: 'app_socket',
       source: 'chatgpt',
     })
     expect(result.outcome).toBe('no_active_prompt')
@@ -268,7 +268,7 @@ describe('M2 chat-upload UX — engine ZIP attach phase contract', () => {
       project_slug: OWNER,
       topic_id: TOPIC,
       user_id: USER,
-      channel_kind: 'app-socket',
+      channel_kind: 'app_socket',
       source: 'chatgpt',
     })
     // The engine still transitions to import_running but stamps a

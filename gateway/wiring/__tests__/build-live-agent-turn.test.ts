@@ -588,7 +588,7 @@ describe('build-live-agent-turn — failure shapes (anti-silence contract)', () 
         freeform_text: 'thanks!',
         chosen_at: now,
         speaker_user_id: 'u-1',
-        channel_kind: 'app-socket',
+        channel_kind: 'app_socket',
       },
     })
     now += 500

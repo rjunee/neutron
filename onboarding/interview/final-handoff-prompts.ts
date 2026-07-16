@@ -60,11 +60,11 @@ export type FinalHandoffShape = 'initial' | 'mobile-app' | 'telegram-bind' | 'sk
 
 export interface BuildFinalHandoffPromptSpecInput {
   /**
-   * 'app-socket' (web chat) → 3 buttons. 'telegram' → 2 buttons (no
+   * 'app_socket' (web chat) → 3 buttons. 'telegram' → 2 buttons (no
    * Telegram-bot CTA). The engine forwards `channel_kind` from the
    * inbound directly.
    */
-  channel_kind: 'app-socket' | 'telegram'
+  channel_kind: 'app_socket' | 'telegram'
   /**
    * The user's first name when known. Used to soften the opening
    * sentence; absent → fall back to "You're all set."

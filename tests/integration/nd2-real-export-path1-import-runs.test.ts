@@ -152,7 +152,7 @@ describe('ND2 real-export — Path-1 conversational upload STARTS the import', (
           gid: process.getgid?.() ?? 0,
           project_slug: 'test-owner',
           topic_id: 'chat',
-          channel_kind: 'app-socket',
+          channel_kind: 'app_socket',
           user_id: 'test-user',
         }),
         engine,

@@ -124,7 +124,7 @@ async function seedHistory(store: ButtonStore, count: number): Promise<void> {
         choice_value: 'yes',
         chosen_at: created + 1_000,
         speaker_user_id: USER_ID,
-        channel_kind: 'app-socket' as const,
+        channel_kind: 'app_socket' as const,
       }
       await seedStore.resolve({ choice })
     } else {
@@ -278,7 +278,7 @@ describe('chat-history surface — GET /api/v1/chat/history', () => {
         choice_value: 'a',
         chosen_at: now - 119_000,
         speaker_user_id: USER_ID,
-        channel_kind: 'app-socket',
+        channel_kind: 'app_socket',
       },
     })
     const ghost = buildButtonPrompt({
@@ -313,7 +313,7 @@ describe('chat-history surface — GET /api/v1/chat/history', () => {
         choice_value: 'opt_a',
         chosen_at: Date.now(),
         speaker_user_id: USER_ID,
-        channel_kind: 'app-socket',
+        channel_kind: 'app_socket',
       },
     })
     // Hand-patch options_json to garbage so the per-row parser
@@ -359,7 +359,7 @@ describe('chat-history surface — GET /api/v1/chat/history', () => {
         choice_value: 'opt_a',
         chosen_at: Date.now(),
         speaker_user_id: USER_ID,
-        channel_kind: 'app-socket',
+        channel_kind: 'app_socket',
       },
     })
     // 2) Freeform — freeform_text wins over value lookup.
@@ -375,7 +375,7 @@ describe('chat-history surface — GET /api/v1/chat/history', () => {
         choice_value: '__freeform__',
         chosen_at: Date.now() + 100,
         speaker_user_id: USER_ID,
-        channel_kind: 'app-socket',
+        channel_kind: 'app_socket',
         freeform_text: 'hello from a human',
       },
     })

@@ -23,6 +23,8 @@ import type { ProjectDb } from '@neutronai/persistence/index.ts'
 import { parseJsonColumn } from '@neutronai/persistence/index.ts'
 import {
   validateButtonPrompt,
+  normalizeChannelKindForButton,
+  canonicalizeWritableChannelKind,
   type ButtonChoice,
   type ButtonOption,
   type ButtonPrompt,
@@ -347,6 +349,17 @@ export class ButtonStore {
     if (typeof input.text !== 'string' || input.text.length === 0) {
       throw new ButtonStoreError('invalid_prompt', `persistInertUserTurn requires non-empty text`)
     }
+    // N6 write-boundary validation — canonicalize the legacy hyphen and REJECT a
+    // genuinely-unknown channel token rather than persisting it verbatim (a
+    // corrupt `resolution_channel_kind`). Accepts every live ChannelKind
+    // (incl. the 'cli'/'webhook' sentinels).
+    const canonicalKind = canonicalizeWritableChannelKind(input.channel_kind)
+    if (canonicalKind === null) {
+      throw new ButtonStoreError(
+        'invalid_prompt',
+        `persistInertUserTurn: unsupported channel_kind=${JSON.stringify(input.channel_kind)}`,
+      )
+    }
     const prompt_id = randomUUID()
     const now = this.now()
     await this.db.run(
@@ -365,7 +378,7 @@ export class ButtonStore {
         now,
         input.text,
         input.speaker_user_id,
-        input.channel_kind,
+        canonicalKind,
       ],
     )
     return { prompt_id }
@@ -529,13 +542,14 @@ export class ButtonStore {
    * caller can diff inputs vs persisted.
    */
   async resolve(input: ResolveInput): Promise<ResolveResult> {
-    const choice = input.choice
-    if (typeof choice.prompt_id !== 'string' || choice.prompt_id.length === 0) {
+    const rawChoice = input.choice
+    if (typeof rawChoice.prompt_id !== 'string' || rawChoice.prompt_id.length === 0) {
       throw new ButtonStoreError(
         'invalid_prompt',
         `choice.prompt_id required`,
       )
     }
+    const choice = rawChoice
     return await this.db.transaction(async (tx) => {
       const row = tx
         .prepare<PromptRow, [string]>(
@@ -567,7 +581,17 @@ export class ButtonStore {
           choice_value: row.resolution_value ?? '',
           chosen_at: row.resolved_at,
           speaker_user_id: row.resolution_speaker_user_id ?? choice.speaker_user_id,
-          channel_kind: (row.resolution_channel_kind as ChannelKindForButton | null) ?? choice.channel_kind,
+          // N6 dual-read — a row persisted before migration 0104 carries the
+          // legacy hyphen 'app-socket'; normalize it to the canonical
+          // 'app_socket' on read so the replayed prior choice routes
+          // identically to a freshly-written one. An UNRECOGNIZED persisted
+          // token is preserved VERBATIM (provenance fidelity — never silently
+          // rewritten to the duplicate caller's channel); only a truly NULL
+          // column falls back to the live choice's channel_kind.
+          channel_kind:
+            normalizeChannelKindForButton(row.resolution_channel_kind) ??
+            (row.resolution_channel_kind as ChannelKindForButton | null) ??
+            choice.channel_kind,
         }
         if (row.resolution_freeform_text !== null) {
           priorChoice.freeform_text = row.resolution_freeform_text
@@ -578,6 +602,30 @@ export class ButtonStore {
           choice: priorChoice,
         }
       }
+      // N6 write-boundary validation (NEW resolution only) — a fresh resolution
+      // is a BUTTON-vocabulary write: it constructs + returns a `ButtonChoice`,
+      // whose `channel_kind` is `ChannelKindForButton` (telegram | app_socket |
+      // webhook — buttons never carry 'cli'). Validate against that subset via
+      // `normalizeChannelKindForButton`: it maps the legacy hyphen 'app-socket'
+      // → 'app_socket' and REJECTS anything outside the subset (including 'cli'
+      // and truly-unknown tokens) rather than letting `?? raw` smuggle a corrupt
+      // value into `resolution_channel_kind`. A direct store caller can bypass
+      // the router's ingress guard, so this is the authoritative write gate — the
+      // throw happens BEFORE the UPDATE, so the row stays unresolved. (The replay
+      // branch above never reaches here; it preserves the stored token verbatim
+      // for provenance.)
+      const canonicalKind = normalizeChannelKindForButton(choice.channel_kind)
+      if (canonicalKind === null) {
+        throw new ButtonStoreError(
+          'invalid_prompt',
+          `unsupported channel_kind=${JSON.stringify(choice.channel_kind)} for prompt_id=${choice.prompt_id}`,
+        )
+      }
+      // The persisted choice — canonical channel_kind (no cast needed: the
+      // subset normalizer already returns `ChannelKindForButton`) so the stored
+      // column and the returned `ResolveResult.choice` ("choice as persisted")
+      // agree.
+      const persistedChoice: ButtonChoice = { ...choice, channel_kind: canonicalKind }
       await tx.run(
         `UPDATE button_prompts
             SET resolved_at = ?,
@@ -587,18 +635,18 @@ export class ButtonStore {
                 resolution_channel_kind = ?
           WHERE prompt_id = ?`,
         [
-          choice.chosen_at,
-          choice.choice_value,
-          choice.freeform_text ?? null,
-          choice.speaker_user_id,
-          choice.channel_kind,
-          choice.prompt_id,
+          persistedChoice.chosen_at,
+          persistedChoice.choice_value,
+          persistedChoice.freeform_text ?? null,
+          persistedChoice.speaker_user_id,
+          persistedChoice.channel_kind,
+          persistedChoice.prompt_id,
         ],
       )
       return {
         prompt: rowToPrompt(row),
         was_new: true,
-        choice,
+        choice: persistedChoice,
       }
     })
   }
@@ -993,6 +1041,17 @@ export class ButtonStore {
         )
       }
       if (input.require_unresolved && row.resolved_at !== null) return false
+      // N6 write-boundary validation — same canonical-or-reject gate as resolve()
+      // / persistInertUserTurn. sweepExpired synthesizes the live 'webhook'
+      // sentinel (accepted); a genuinely-unknown token is rejected rather than
+      // persisted verbatim.
+      const canonicalKind = canonicalizeWritableChannelKind(input.choice.channel_kind)
+      if (canonicalKind === null) {
+        throw new ButtonStoreError(
+          'invalid_prompt',
+          `markResolved: unsupported channel_kind=${JSON.stringify(input.choice.channel_kind)} for prompt_id=${input.prompt_id}`,
+        )
+      }
       await tx.run(
         `UPDATE button_prompts
             SET resolved_at = ?,
@@ -1006,7 +1065,7 @@ export class ButtonStore {
           input.choice.choice_value,
           input.choice.freeform_text ?? null,
           input.choice.speaker_user_id,
-          input.choice.channel_kind,
+          canonicalKind,
           input.prompt_id,
         ],
       )

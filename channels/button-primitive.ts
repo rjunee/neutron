@@ -56,7 +56,82 @@ export const RESERVED_OPTION_VALUES: ReadonlySet<string> = new Set([
   '__cancel__',
 ])
 
-export type ChannelKindForButton = 'telegram' | 'app-socket' | 'webhook'
+/**
+ * The button-vocabulary channel kind. N6 (2026-07-16) unified the app-socket
+ * spelling with the base {@link import('./types.ts').ChannelKind} enum: this
+ * vocabulary now uses the SAME underscore `'app_socket'` token, so
+ * `ChannelKindForButton` is a strict SUBSET of `ChannelKind` (buttons never
+ * carry `'cli'`). `'webhook'` is retained — it is a LIVE synthetic marker the
+ * `ButtonStore` writes onto system-generated resolutions (`sweepExpired`'s
+ * `__timeout__`, `persistInertAgentTurn`), not an adapterless dead member.
+ *
+ * The pre-N6 hyphen spelling `'app-socket'` was PERSISTED in
+ * `button_prompts.resolution_channel_kind` by every prior build; migration
+ * 0104 normalizes those rows, and {@link normalizeChannelKindForButton}
+ * tolerates the legacy token on read + off the wire (the dual-read window) so
+ * an in-flight row written just before the migration still routes correctly.
+ */
+export type ChannelKindForButton = 'telegram' | 'app_socket' | 'webhook'
+
+/**
+ * The pre-N6 hyphen spelling of the app-socket button channel kind. Persisted
+ * in `button_prompts.resolution_channel_kind` before migration 0104; still
+ * accepted on read via {@link normalizeChannelKindForButton}. Do NOT write it
+ * on any new path — the canonical token is `'app_socket'`.
+ */
+export const LEGACY_APP_SOCKET_CHANNEL_KIND = 'app-socket'
+
+/**
+ * Dual-read normalizer for a persisted / wire `channel_kind` string in the
+ * button vocabulary. Maps the legacy hyphen `'app-socket'` onto the canonical
+ * underscore `'app_socket'` and passes through the other canonical tokens.
+ * Returns null for an absent or unrecognized token — that null is the SIGNAL
+ * the ingress trust boundary (`DefaultButtonRouter.routeChoice`) uses to REJECT
+ * an unsupported channel rather than resolve + persist a corrupt value. Read /
+ * replay callers that must not lose provenance keep the raw persisted token
+ * when this returns null (see `ButtonStore.resolve`).
+ */
+export function normalizeChannelKindForButton(
+  raw: string | null | undefined,
+): ChannelKindForButton | null {
+  if (raw === null || raw === undefined) return null
+  if (raw === LEGACY_APP_SOCKET_CHANNEL_KIND) return 'app_socket'
+  if (raw === 'telegram' || raw === 'app_socket' || raw === 'webhook') return raw
+  return null
+}
+
+/**
+ * The channel-kind tokens that may be PERSISTED to
+ * `button_prompts.resolution_channel_kind` on a NEW WRITE. Deliberately WIDER
+ * than {@link ChannelKindForButton}: it mirrors the FULL live
+ * {@link import('./types.ts').ChannelKind} enum, so the live persist paths that
+ * carry the sentinel markers — `'webhook'` (sweepExpired `__timeout__` / inert
+ * agent turns) and `'cli'` — are never rejected. Keep in sync with `ChannelKind`.
+ */
+const WRITABLE_CHANNEL_KINDS: ReadonlySet<string> = new Set([
+  'telegram',
+  'app_socket',
+  'webhook',
+  'cli',
+])
+
+/**
+ * Validate + canonicalize a `channel_kind` token for a NEW WRITE to
+ * `button_prompts`. Maps the legacy hyphen `'app-socket'` → canonical
+ * `'app_socket'`, accepts every live `ChannelKind` token (including the
+ * `'cli'`/`'webhook'` sentinels), and returns null for a genuinely unknown
+ * token so the store REJECTS the write rather than persisting a corrupt value.
+ *
+ * This is the WRITE-side counterpart to {@link normalizeChannelKindForButton}
+ * (the button-subset read normalizer). The READ / replay path intentionally
+ * preserves an already-stored unknown token verbatim (provenance); only a fresh
+ * write is gated here.
+ */
+export function canonicalizeWritableChannelKind(raw: string | null | undefined): string | null {
+  if (raw === null || raw === undefined) return null
+  const canonical = raw === LEGACY_APP_SOCKET_CHANNEL_KIND ? 'app_socket' : raw
+  return WRITABLE_CHANNEL_KINDS.has(canonical) ? canonical : null
+}
 
 /**
  * The channel-agnostic INPUT primitive for a tappable option.

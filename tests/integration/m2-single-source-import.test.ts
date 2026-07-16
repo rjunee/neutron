@@ -119,7 +119,7 @@ async function notify(env: TestEnv, source: 'chatgpt' | 'claude', observed_at: n
     project_slug: OWNER,
     topic_id: TOPIC,
     user_id: USER,
-    channel_kind: 'app-socket',
+    channel_kind: 'app_socket',
     source,
     observed_at,
   })

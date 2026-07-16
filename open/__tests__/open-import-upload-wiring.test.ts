@@ -215,7 +215,7 @@ describe('Open import-upload surface wiring', () => {
         // The real app-ws session persists the `app:<user>` topic (mirrors what
         // an app-surface upload sends); `user_id` is the store key. `signup_via`
         // stays 'web' — there is no 'app' value and the upload path's
-        // channel_kind:'app-socket' resolves signup_via to 'web' upstream too.
+        // channel_kind:'app_socket' resolves signup_via to 'web' upstream too.
         topic_id: 'app:owner',
         user_id: 'owner',
         signup_via: 'web',

@@ -267,7 +267,7 @@ export interface ImportUploadInstanceContext {
   topic_id: string
   /** Channel kind so the engine's button-emit shapes match the WS
    *  surface the user is interacting with. Web uploads use
-   *  `'app-socket'` to mirror the chat-bridge channel kind. */
+   *  `'app_socket'` to mirror the chat-bridge channel kind. */
   channel_kind: ChannelKindForButton
   /** Onboarding user_id — used to thread (project_slug, user_id) into
    *  the engine state lookup post-instance-isolation (migration 0034).
@@ -529,7 +529,7 @@ export function buildImportUploadHandler(
           gid: input.gid,
           project_slug: input.project_slug,
           topic_id,
-          channel_kind: 'app-socket',
+          channel_kind: 'app_socket',
         }
         if (parsed?.user_id !== undefined) ctx.user_id = parsed.user_id
         return ctx
