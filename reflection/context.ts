@@ -23,6 +23,14 @@ export interface BuildReflectionContextInput {
   diary_days?: number
   /** Max diary entries to surface. Defaults to 8. */
   diary_limit?: number
+  /**
+   * Include the agent's free-form `<recent_diary>` reflections. Defaults to true
+   * (the chat read path). The TRIDENT BUILD path passes `false` to surface ONLY the
+   * structured `<learned_corrections>` (owner-correction-derived) and EXCLUDE the
+   * free-form diary — a tighter trust boundary for the tool-enabled build agent
+   * (RB2 (b); the diary is the loosest, most import/adversarial-influenced surface).
+   */
+  include_diary?: boolean
   /** Override the wall clock (tests). */
   now?: number
 }
@@ -44,15 +52,18 @@ export function buildReflectionContext(input: BuildReflectionContextInput): stri
   }
 
   let diary: ReturnType<typeof readRecentDiary> = []
-  try {
-    diary = readRecentDiary({
-      ownerDataDir: input.ownerDataDir,
-      days: input.diary_days ?? 3,
-      limit: input.diary_limit ?? 8,
-      ...(input.now !== undefined ? { now: input.now } : {}),
-    })
-  } catch {
-    diary = []
+  // The build path opts OUT of the diary (include_diary === false) — corrections only.
+  if (input.include_diary !== false) {
+    try {
+      diary = readRecentDiary({
+        ownerDataDir: input.ownerDataDir,
+        days: input.diary_days ?? 3,
+        limit: input.diary_limit ?? 8,
+        ...(input.now !== undefined ? { now: input.now } : {}),
+      })
+    } catch {
+      diary = []
+    }
   }
 
   if (corrections.length === 0 && diary.length === 0) return null

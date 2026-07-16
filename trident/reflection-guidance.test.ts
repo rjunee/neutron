@@ -7,7 +7,11 @@
  */
 import { describe, expect, test } from 'bun:test'
 
-import { buildReflectionGuidance, REFLECTION_GUIDANCE_FRAMING } from './reflection-guidance.ts'
+import {
+  buildReflectionGuidance,
+  REFLECTION_GUIDANCE_FRAMING,
+  MAX_REFLECTION_GUIDANCE_CHARS,
+} from './reflection-guidance.ts'
 
 // The block carries semantic tags from reflection/context.ts; buildReflectionGuidance
 // XML-ESCAPES the whole (untrusted) block, so `<learned_corrections>` reaches the
@@ -85,6 +89,47 @@ describe('buildReflectionGuidance — owner-corrections advisory-suffix derivati
     expect(buildReflectionGuidance({ block: 'x' })).toBe('')
     expect(buildReflectionGuidance(['x'])).toBe('')
     expect(buildReflectionGuidance(true)).toBe('')
+  })
+
+  describe('SIZE CAP — a runaway correction/diary entry cannot inflate the prompt', () => {
+    // `a` chars have no XML-significant chars, so escaped length == raw length here.
+    test('below the cap → the full block passes through untruncated', () => {
+      const body = 'a'.repeat(MAX_REFLECTION_GUIDANCE_CHARS - 100)
+      const out = buildReflectionGuidance(body)
+      expect(out).toContain(body)
+      expect(out).not.toContain('truncated')
+    })
+
+    test('at the cap → untruncated', () => {
+      const body = 'a'.repeat(MAX_REFLECTION_GUIDANCE_CHARS)
+      const out = buildReflectionGuidance(body)
+      expect(out).toContain(body)
+      expect(out).not.toContain('truncated')
+    })
+
+    test('above the cap → truncated to the cap with a visible marker', () => {
+      const body = 'a'.repeat(MAX_REFLECTION_GUIDANCE_CHARS + 5000)
+      const out = buildReflectionGuidance(body)
+      expect(out).toContain('… (owner corrections truncated)')
+      // Exactly the cap of the payload is retained — not the full oversized body.
+      expect(out).toContain('a'.repeat(MAX_REFLECTION_GUIDANCE_CHARS))
+      expect(out).not.toContain('a'.repeat(MAX_REFLECTION_GUIDANCE_CHARS + 1))
+      // The whole guidance stays bounded (cap + framing/wrapper overhead, not +5000).
+      expect(out.length).toBeLessThan(MAX_REFLECTION_GUIDANCE_CHARS + 1500)
+    })
+
+    test('truncation never splits an XML entity (cap applied to RAW text before escaping)', () => {
+      // A block of all `<` (each escapes to 4 chars). Cap the RAW input, then escape —
+      // so the output contains only WHOLE `&lt;` entities, never a split `&l`.
+      const body = '<'.repeat(MAX_REFLECTION_GUIDANCE_CHARS + 100)
+      const out = buildReflectionGuidance(body)
+      // Exactly MAX raw `<` → MAX whole `&lt;` entities (the trusted wrapper tags are
+      // the only unescaped `<`); no bare/split entity remnants.
+      const entities = out.match(/&lt;/g) ?? []
+      expect(entities.length).toBe(MAX_REFLECTION_GUIDANCE_CHARS)
+      expect(out).not.toMatch(/&l(?!t;)/) // no `&l` that isn't part of `&lt;`
+      expect(out).toContain('… (owner corrections truncated)')
+    })
   })
 
   // The inner workflow composes each Forge builder prompt as exactly

@@ -54,6 +54,16 @@ function escapeData(text: string): string {
 }
 
 /**
+ * Hard char cap on the reflection block BEFORE escaping/wrapping. The reflection
+ * stores cap ENTRY COUNTS (12 corrections / diary window) but NOT field lengths, so a
+ * single pathological correction/diary line could otherwise inflate BOTH the launcher
+ * prompt and every Forge prompt (cost / context overflow). Cap the raw text (so a
+ * truncation never splits an escape entity), then append a visible marker. 4000 chars
+ * is generous for real corrections yet bounds a runaway entry.
+ */
+export const MAX_REFLECTION_GUIDANCE_CHARS = 4000
+
+/**
  * Derive the owner-corrections GUIDANCE suffix from a reflection context block.
  *
  * Returns `''` (a clean no-op — the Forge prompt stays byte-identical to pre-RB2) for
@@ -65,12 +75,19 @@ function escapeData(text: string): string {
  */
 export function buildReflectionGuidance(reflectionContext: unknown): string {
   if (typeof reflectionContext !== 'string' || reflectionContext.trim().length === 0) return ''
+  const raw = reflectionContext.trim()
+  // Cap the RAW text first (so truncation never splits an XML entity), then escape.
+  const overflow = raw.length > MAX_REFLECTION_GUIDANCE_CHARS
+  const bounded = overflow ? raw.slice(0, MAX_REFLECTION_GUIDANCE_CHARS) : raw
+  const block = overflow
+    ? `${escapeData(bounded)}\n… (owner corrections truncated)`
+    : escapeData(bounded)
   return [
     '', // blank-line separator from the task above
     '',
     '<owner_reflection>',
     REFLECTION_GUIDANCE_FRAMING,
-    escapeData(reflectionContext.trim()),
+    block,
     '</owner_reflection>',
   ].join('\n')
 }

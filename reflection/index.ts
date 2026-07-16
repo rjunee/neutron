@@ -77,8 +77,17 @@ export interface ReflectionTurn {
 }
 
 export interface Reflection {
-  /** Read path: the context block to inject into a first-turn system prompt. */
+  /** Read path: the context block to inject into a first-turn system prompt.
+   *  Includes both `<learned_corrections>` and the free-form `<recent_diary>`. */
   loadContext(): string | null
+  /**
+   * RB2 (b) — the BUILD read path: `<learned_corrections>` ONLY (the structured,
+   * owner-correction-derived surface), EXCLUDING the free-form `<recent_diary>`.
+   * Used for the trident Forge builder, a tool-enabled agent, so the loosest,
+   * most import/adversarial-influenced surface (the diary) never reaches it. Returns
+   * null when there are no corrections yet.
+   */
+  loadBuildContext(): string | null
   /** Write path (fire-and-forget): detect + log a correction from one exchange. */
   onTurnComplete(turn: ReflectionTurn): void
   /** Programmatic diary write (the agent's own journal). */
@@ -100,6 +109,16 @@ export function createReflection(deps: CreateReflectionDeps): Reflection {
         return buildReflectionContext({ ownerDataDir })
       } catch (err) {
         log.warn('load_context_failed', { err: errMsg(err) })
+        return null
+      }
+    },
+
+    loadBuildContext(): string | null {
+      try {
+        // Corrections only — exclude the free-form diary for the tool-enabled builder.
+        return buildReflectionContext({ ownerDataDir, include_diary: false })
+      } catch (err) {
+        log.warn('load_build_context_failed', { err: errMsg(err) })
         return null
       }
     },

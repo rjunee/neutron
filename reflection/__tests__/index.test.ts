@@ -7,7 +7,7 @@ import type { Substrate } from '@neutronai/runtime/substrate.ts'
 import type { Event } from '@neutronai/runtime/events.ts'
 import type { SessionHandle } from '@neutronai/runtime/session-handle.ts'
 
-import { createReflection } from '../index.ts'
+import { createReflection, appendCorrection } from '../index.ts'
 import { NexusStore } from '@neutronai/gateway/nexus/nexus-store.ts'
 import { emitNexusEvent, reflectionLearningEvent } from '@neutronai/gateway/nexus/nexus-emit.ts'
 
@@ -118,6 +118,40 @@ describe('createReflection — correction detected → logged → retrievable �
     expect(ctx).toContain('<learned_corrections>')
     expect(ctx).toContain('default to staging unless told otherwise')
     expect(ctx).toContain('Apply them SILENTLY')
+  })
+
+  test('loadBuildContext returns CORRECTIONS ONLY (excludes the diary) for the builder (RB2 (b))', () => {
+    const r = createReflection({ ownerDataDir: tmp })
+    appendCorrection({
+      ownerDataDir: tmp,
+      wrong: 'used JS',
+      right: 'always prefer TypeScript',
+      why: 'house style',
+      scope: 'general',
+      source: 'no, use TS',
+      observed_at: Date.now(),
+    })
+    r.appendDiary({ text: 'A FREEFORM DIARY LINE that must never reach a tool-enabled builder' })
+
+    // The CHAT read path carries both corrections AND the free-form diary.
+    const chat = r.loadContext()
+    expect(chat).toContain('always prefer TypeScript')
+    expect(chat).toContain('<recent_diary>')
+    expect(chat).toContain('A FREEFORM DIARY LINE')
+
+    // The BUILD read path carries corrections ONLY — the diary (loosest surface) is
+    // excluded from the tool-enabled Forge builder.
+    const build = r.loadBuildContext()
+    expect(build).toContain('always prefer TypeScript')
+    expect(build).toContain('<learned_corrections>')
+    expect(build).not.toContain('<recent_diary>')
+    expect(build).not.toContain('A FREEFORM DIARY LINE')
+  })
+
+  test('loadBuildContext is null when there are no corrections (diary alone does not qualify)', () => {
+    const r = createReflection({ ownerDataDir: tmp })
+    r.appendDiary({ text: 'only a diary entry, no corrections yet' })
+    expect(r.loadBuildContext()).toBeNull()
   })
 
   test('a non-corrective turn that passes the pre-gate is judged but not logged', async () => {
