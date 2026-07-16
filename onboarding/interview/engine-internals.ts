@@ -1622,7 +1622,10 @@ export function readNonWorkInterestNames(
  */
 export function serializeDraft(draft: PersonaDraft): Record<string, unknown> {
   return {
-    owner_slug: draft.owner_slug,
+    // Persisted phase_state key stays `project_slug` (round-trips with
+    // `readPersonaDraft`'s frozen `o['project_slug']` read, and keeps existing
+    // persisted onboarding_state drafts readable). Domain field is owner_slug.
+    project_slug: draft.owner_slug,
     draft_id: draft.draft_id,
     soul_md: draft.soul_md,
     user_md: draft.user_md,
