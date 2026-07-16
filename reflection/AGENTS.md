@@ -27,12 +27,27 @@ capture durable *entity* knowledge; this layer is the *self-improvement* loop:
 the judge and threads the `Reflection` instance into `buildLiveAgentTurn`
 (`gateway/wiring/build-live-agent-turn.ts`):
 
-- the FIRST turn on each (instance, topic) splices `loadContext()` into its
-  system context — so the warm session adopts past corrections + recent diary
-  and applies them **silently** (no "I noted that" announcement);
+- `loadContext()` is resolved **every turn** (cold AND warm) and spliced into the
+  turn — on the cold first turn it folds into the system context; on warm turns
+  it re-splices before the user's message via the same per-turn seam the
+  `<work_board>` fragment uses (RB2 (a)). So the warm session adopts past
+  corrections + recent diary and applies them **silently** (no "I noted that"
+  announcement), and a correction given mid-session re-appears on the NEXT warm
+  turn — not only in a brand-new session. The block stays capped (12 corrections
+  / 3 days); RB2 removed the first-turn-only gate, not the cap;
 - every completed turn calls `onTurnComplete({ user_text, agent_text, scope })`
   — pre-gate → LLM judge → on a hit, append to the corrections-log + drop a
   diary breadcrumb.
+
+Beyond chat, the reflection context also reaches the **trident build agents**
+(RB2 (b)): `open/composer.ts` wires `resolve_reflection_context` →
+`reflection.loadContext()` onto the trident orchestrator, which threads a
+ready-to-prepend preamble (derived by `trident/reflection-preamble.ts`) into the
+inner workflow. The workflow prepends it to every Claude build/review agent
+(Forge build + fix rounds, argus rubric/adversarial/synthesis) so owner
+corrections reach the builders too; the external `argus:codex` peer is excluded
+(it reviews only the raw diff). Resolution is best-effort end-to-end — a throw
+never breaks a chat turn or a build launch.
 
 LLM-less self-host: omit the substrate → detection is OFF, but the diary and
 context read-back still work. Every hook is best-effort and never throws into

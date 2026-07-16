@@ -97,6 +97,20 @@ export interface BuildTridentOrchestratorOptions {
    *  honors a project override wherever a real project id is supplied. Returns
    *  null → codex not connected → Claude-only review. */
   resolve_codex_home?: (run: TridentRun) => string | null
+  /**
+   * RB2 (b) — resolve the owner's recent reflection corrections/diary block for a
+   * launching run, threaded into the inner workflow so the build agents (Forge +
+   * Argus) re-ground on owner corrections on their FIRST turn (reflection was
+   * chat-only before RB2). The composer wires this to the SAME `reflection`
+   * instance the live-agent chat turn reads (`reflection.loadContext()`), so the
+   * corrections a build agent sees are the same ones chat applies. Returns null
+   * when nothing has been learned / the reflection layer is absent → a clean
+   * no-op (the workflow splices no block). Reflection is not scope-filtered
+   * (owner-wide corrections), so the `run` argument is accepted for parity with
+   * the codex resolver but need not be consulted. Invoked BEST-EFFORT: a throwing
+   * resolver degrades to no context and never fails the launch (see `launch()`).
+   */
+  resolve_reflection_context?: (run: TridentRun) => string | null
   /** Override the merge/cleanup deps (else built from `run_host`). */
   merge_deps?: MergeCleanupDeps
   /**
@@ -305,6 +319,23 @@ export function buildTridentOrchestrator(
       }
     }
 
+    // RB2 (b) — resolve the owner's reflection corrections/diary block BEST-EFFORT
+    // before the fire. A reflection-store read must NEVER break a build launch: this
+    // resolver is invoked OUTSIDE the `firePromise` error handling, so an
+    // uncaught throw would escape `launch()` to the tick loop's log-only catch,
+    // leaving the run stuck non-terminal with no dispatch id and retrying every tick
+    // (Codex r4 [P1]). Mirror the chat path (`build-live-agent-turn.ts`), which
+    // catches `loadContext()` and degrades to no context. Silent degrade to null —
+    // the orchestrator has no logger and surfaces faults via its AdvanceOutcome.
+    let reflection_context: string | null = null
+    if (opts.resolve_reflection_context) {
+      try {
+        reflection_context = opts.resolve_reflection_context(launchRun)
+      } catch {
+        reflection_context = null
+      }
+    }
+
     // FIRE the workflow. The launching turn settles in seconds; the build runs
     // detached in the background and persists its own result to the DB. Tracked
     // in `inflight` only so tests/shutdown can drain the (fast) fire turn.
@@ -319,6 +350,11 @@ export function buildTridentOrchestrator(
       codex_home: opts.resolve_codex_home
         ? opts.resolve_codex_home(launchRun)
         : (opts.codex_home ?? null),
+      // RB2 (b) — the owner's recent reflection corrections/diary block (resolved
+      // best-effort above), threaded into the inner workflow so Forge + Argus
+      // re-ground on owner corrections. Null when no resolver / nothing learned / a
+      // read failed.
+      reflection_context,
     })
     const tracked = firePromise.then(
       () => undefined,

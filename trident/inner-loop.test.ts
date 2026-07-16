@@ -196,6 +196,42 @@ describe('buildWorkflowFirer — fire mechanics over a fire seam', () => {
     expect(calls[0]!.prompt).toContain('"codexHome":null')
   })
 
+  // RB2 (b) — the owner's reflection corrections/diary reach the build agents via a
+  // ready-to-prepend `reflectionPreamble` DERIVED in buildWorkflowArgs (testable TS).
+  test('args thread the derived reflectionPreamble when the owner has recent corrections (RB2 (b))', async () => {
+    const { fire, calls } = fakeFire(() => ({ status: 'fired', error: null }))
+    const firer = buildWorkflowFirer({ fire })
+    await firer(
+      input({
+        reflection_context:
+          '<learned_corrections>\n- always prefer TypeScript\n</learned_corrections>',
+      }),
+    )
+    // The block is threaded ready-to-prepend so the inner workflow prepends it to the
+    // Forge/Argus prompts (JSON-escaped inside the args object).
+    expect(calls[0]!.prompt).toContain('always prefer TypeScript')
+    expect(calls[0]!.prompt).toContain('reflectionPreamble')
+    // The blank-line separator that sits above the agent contract is present
+    // (JSON-encoded as \n\n) — proving the derivation ran, not a raw pass-through.
+    expect(calls[0]!.prompt).toContain('</learned_corrections>\\n\\n')
+  })
+
+  test('args thread an EMPTY reflectionPreamble when nothing has been learned (clean no-op)', async () => {
+    const { fire, calls } = fakeFire(() => ({ status: 'fired', error: null }))
+    const firer = buildWorkflowFirer({ fire })
+    await firer(input())
+    expect(calls[0]!.prompt).toContain('"reflectionPreamble":""')
+  })
+
+  test('args thread an EMPTY reflectionPreamble for a whitespace-only context (no bare separator)', async () => {
+    const { fire, calls } = fakeFire(() => ({ status: 'fired', error: null }))
+    const firer = buildWorkflowFirer({ fire })
+    // A whitespace-only context must derive to '' end-to-end through buildWorkflowArgs,
+    // never a lone `\n\n` that would perturb the prompt.
+    await firer(input({ reflection_context: '   \n\t  ' }))
+    expect(calls[0]!.prompt).toContain('"reflectionPreamble":""')
+  })
+
   test('a fire seam that REJECTS → failed (crashed launcher, never a silent advance)', async () => {
     const fire: FireInnerWorkflow = async () => {
       throw new Error('unexpected launcher crash')

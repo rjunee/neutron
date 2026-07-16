@@ -115,6 +115,17 @@ const {
   // never as hard-pinned literals in this file. Absent (a dry source check) →
   // fall back to the documented agent() symbolic aliases (see MODELS below).
   models = null,
+  // RB2 (b) — the owner-corrections PREAMBLE, ALREADY DERIVED (trim + blank-line
+  // separator, or '' for a null/whitespace/non-string context) by the launcher's
+  // `buildReflectionPreamble` (testable TS — this script can't import it) and
+  // threaded READY-TO-PREPEND. Prepended verbatim ABOVE each Claude build/review
+  // agent's contract (Forge build + fix rounds, argus rubric/adversarial/synthesis)
+  // so owner corrections reach build agents — reflection was chat-only before RB2.
+  // It sits ABOVE the contract as context, NOT inside the TASK (so Argus never
+  // reads a correction as an acceptance criterion). Absent/'' → every prompt is
+  // byte-identical to pre-RB2. The argus:codex peer is excluded by design (see its
+  // exclusion note — the external GPT-5 review sees only the raw diff).
+  reflectionPreamble = '',
 } = normalizeWorkflowArgs(args)
 
 // Is a per-project codex credential configured for this run? Absent → skip the
@@ -142,6 +153,21 @@ const resuming = resumeCheckpoint !== null || prNumber !== null
 // even if Forge fails before returning a result (see the finally block). Falls
 // back to `trident/<slug>` when the caller didn't thread an existing branch.
 const forgeBranch = branch || `trident/${slug}`
+
+// RB2 (b) — `reflectionPreamble` (destructured above, threaded READY-TO-PREPEND by
+// the launcher's testable `buildReflectionPreamble`) is prepended to EACH Claude
+// build/review agent's prompt: forge:build (round 1), every forge:fix-round-* ,
+// argus:claude (rubric), argus:adversarial, AND argus:synthesis (the final-verdict
+// merger). Each is a FRESH agent() with no shared transcript, so — mirroring the
+// warm-turn re-splice in (a) — the block is re-injected on every one; dropping it on
+// the fix rounds would let Forge re-introduce a corrected pattern precisely while
+// revising rejected work (Codex r1 [P1]). The block is ALREADY the self-delimited,
+// self-describing `<learned_corrections>`/`<recent_diary>` DATA ("Apply them
+// SILENTLY going forward") — it sits ABOVE the agent's own contract as context,
+// never inside the TASK (so Argus never reads a correction as an acceptance
+// criterion). Empty string → every prompt is byte-identical to pre-RB2. The
+// argus:codex peer is DELIBERATELY excluded (see its exclusion note — the external
+// GPT-5 review sees only the raw diff, so the preamble would be inert there).
 
 // ── FABLE-ORCHESTRATOR model routing ─────────────────────────────────────────
 // Ryan-locked doctrine (SPEC § Fable-orchestrator, Decisions Log 2026-07-02):
@@ -554,14 +580,14 @@ async function reviewAndSynthesize(diffFile, round) {
   const reviewers = [
     () =>
       agent(
-        `${ARGUS_RUBRIC}
+        `${reflectionPreamble}${ARGUS_RUBRIC}
 Review the diff at ${diffFile} for the TASK below. Return your verdict + findings.
 TASK: ${task}`,
         withModel({ label: 'argus:claude', phase: 'Review', schema: VERDICT_SCHEMA }),
       ),
     () =>
       agent(
-        `You are ARGUS-ADVERSARIAL (independent, read-only). ${NO_INTERACTIVE_RULE} ${REDIRECT_RULE}
+        `${reflectionPreamble}You are ARGUS-ADVERSARIAL (independent, read-only). ${NO_INTERACTIVE_RULE} ${REDIRECT_RULE}
 Independently try to REFUTE the change at ${diffFile}: hunt NaN/overflow/off-by-one edges, hidden invariants, and untested boundaries. Evidence-gate EVERY claim (file:line or a concrete repro). Do NOT modify files. NEVER exit silently — if you cannot verify part of it, say so.
 TASK: ${task}`,
         withModel({ label: 'argus:adversarial', phase: 'Review', schema: VERDICT_SCHEMA }),
@@ -572,6 +598,11 @@ TASK: ${task}`,
     // Claude model — the thin claude agent just shells out to codex-review.sh, so
     // it keeps the launcher-default model. Log it as `model=codex-runtime` so the
     // per-run tally still counts the cross-model reviewer ("C on Codex").
+    // RB2 (b) — DELIBERATELY no `reflectionPreamble` here: this thin launcher only
+    // invokes the external codex CLI, whose GPT-5 review sees ONLY the raw git diff
+    // (never this claude prompt text), so injecting owner corrections here would be
+    // inert AND misleading. The corrections reach the synthesis step (below) that
+    // weighs this peer's verdict, and the two Claude reviewers above.
     log('trident.agent label=argus:codex model=codex-runtime effort=n/a')
     reviewers.push(() =>
       agent(codexReviewerPrompt(diffFile), {
@@ -604,7 +635,7 @@ TASK: ${task}`,
         ? `Verdict C (codex cross-model): DEFERRED — codex was configured but the review call FAILED/timed out. Per the never-silent-downgrade rule, do NOT return APPROVE; surface the deferral.`
         : `Verdict C (codex cross-model): NOT CONNECTED — no codex credential for this project, so this is a Claude-only review. Note "codex not connected" and proceed on Verdicts A+B (do NOT block on codex).`
   const synthesisRaw = await agent(
-    `Synthesise these INDEPENDENT review verdicts into ONE final verdict, applying ASYMMETRIC GATING:
+    `${reflectionPreamble}Synthesise these INDEPENDENT review verdicts into ONE final verdict, applying ASYMMETRIC GATING:
 - A finding MORE THAN ONE reviewer raises → keep it as confirmed.
 - ONE credible, evidence-backed BLOCKER is enough to VETO APPROVE (minority-veto) → verdict REQUEST_CHANGES.
 - A single-reviewer NON-blocking finding → keep it but label it 'unverified' (surface it; do NOT block merge on it alone).
@@ -678,7 +709,7 @@ try {
   // CREATE the branch fresh. forge:build is now a PURE EXECUTOR routed by the
   // planner's complexity tag.
   const forge = await agent(
-    `${forgeBuildContract(resuming)}${ralphNote}${reuseNote}
+    `${reflectionPreamble}${forgeBuildContract(resuming)}${ralphNote}${reuseNote}
 
 TASK:
 ${task}`,
@@ -707,7 +738,7 @@ ${task}`,
     // (`reenter=true`) — step 1 switches to the existing branch (no `-c`), step 4
     // reuses the PR (no duplicate). Codex [P1] fix.
     await agent(
-      `${forgeBuildContract(true)}
+      `${reflectionPreamble}${forgeBuildContract(true)}
 
 You are FIXING Argus's findings on the EXISTING branch ${forgeBranch} (round ${round}). ${isPr ? `Do NOT open a new PR — push the SAME branch (\`gh pr list --head ${forgeBranch}\` to confirm it exists).` : `Commit on the SAME local branch ${forgeBranch} — no remote, no PR.`} Address every BLOCKER + important finding, run tests until green, commit${isPr ? ' + push' : ' locally'}, and re-write the diff file.
 ARGUS FINDINGS (round ${round - 1}):

@@ -398,3 +398,52 @@ describe('inner-workflow.mjs — exec-model terminal-result harvest signal', () 
     expect(SRC).toContain('terminal-failure write ALSO failed')
   })
 })
+
+describe('inner-workflow.mjs — RB2 (b) reflection corrections reach the build agents', () => {
+  // NOTE: this script is NOT runnable under bun/node (Workflow-runtime globals +
+  // top-level return — see the file header), so its prompt ASSEMBLY can only be
+  // source-asserted. The DERIVATION boundary logic (null/whitespace/non-string →
+  // no-op) is executed behaviorally in `reflection-preamble.test.ts`, and the
+  // args-threading end-to-end in `inner-loop.test.ts` (buildWorkflowArgs).
+  test('destructures the ready-to-prepend reflectionPreamble from the args contract (defaults to \'\')', () => {
+    // The preamble is DERIVED in the launcher (testable TS) and threaded ready — the
+    // .mjs carries NO derivation logic of its own (that would be un-executable here).
+    expect(SRC).toContain("reflectionPreamble = '',")
+    expect(SRC).not.toContain('reflectionContext')
+  })
+
+  test('prepends the reflection preamble to the Forge build FIRST-turn prompt', () => {
+    // The forge:build first turn carries the owner corrections ABOVE its contract.
+    // Mutation-kill: dropping `${reflectionPreamble}` here (reverting to
+    // chat-only reflection) fails this assertion.
+    expect(SRC).toContain('`${reflectionPreamble}${forgeBuildContract(resuming)}${ralphNote}${reuseNote}')
+  })
+
+  test('prepends the reflection preamble to EVERY Forge fix-round prompt too (Codex r1 [P1])', () => {
+    // Each `forge:fix-round-*` is a FRESH agent with no shared transcript, so the
+    // corrections must be re-injected — otherwise Forge loses them precisely while
+    // revising rejected work. The fix-round prompt re-enters via
+    // `forgeBuildContract(true)`; assert the preamble sits above it.
+    expect(SRC).toContain('`${reflectionPreamble}${forgeBuildContract(true)}')
+  })
+
+  test('prepends the reflection preamble to BOTH Argus reviewer first-turn prompts', () => {
+    // argus:claude (rubric) + argus:adversarial both re-ground on owner corrections.
+    expect(SRC).toContain('`${reflectionPreamble}${ARGUS_RUBRIC}')
+    expect(SRC).toContain('`${reflectionPreamble}You are ARGUS-ADVERSARIAL')
+  })
+
+  test('prepends the reflection preamble to the Argus SYNTHESIS verdict-merger too', () => {
+    // argus:synthesis (the final-verdict merger) also weighs owner corrections.
+    expect(SRC).toContain('`${reflectionPreamble}Synthesise these INDEPENDENT review verdicts')
+  })
+
+  test('DELIBERATELY omits the preamble from the argus:codex external-peer launcher', () => {
+    // The thin argus:codex launcher only shells out to the codex CLI (GPT-5 reviews
+    // the raw diff), so the preamble would be inert there. It must NOT be spliced
+    // onto `codexReviewerPrompt`, and the exclusion is documented in-source.
+    expect(SRC).toContain('agent(codexReviewerPrompt(diffFile), {')
+    expect(SRC).not.toContain('`${reflectionPreamble}${codexReviewerPrompt')
+    expect(SRC).toContain('DELIBERATELY no `reflectionPreamble` here')
+  })
+})

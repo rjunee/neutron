@@ -473,6 +473,12 @@ export function buildCoreModules(
         if (tridentWiring.resolve_codex_home !== undefined) {
           orchestratorOpts.resolve_codex_home = tridentWiring.resolve_codex_home
         }
+        // RB2 (b) — thread the owner's reflection corrections/diary resolver so the
+        // inner workflow re-grounds the build agents (Forge + Argus) on owner
+        // corrections on their first turn (reflection was chat-only before RB2).
+        if (tridentWiring.resolve_reflection_context !== undefined) {
+          orchestratorOpts.resolve_reflection_context = tridentWiring.resolve_reflection_context
+        }
         const codexHome = tridentWiring.codex_home ?? process.env['NEUTRON_CODEX_HOME']
         if (codexHome !== undefined && codexHome.length > 0) {
           orchestratorOpts.codex_home = codexHome

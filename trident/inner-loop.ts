@@ -54,6 +54,7 @@ import type { SessionHandle } from '@neutronai/runtime/session-handle.ts'
 import type { TridentRun } from './store.ts'
 import { FABLE_MODEL, SONNET_MODEL, FAST_MODEL, getBestModel } from '@neutronai/runtime/models.ts'
 import { DEFAULT_SETTLE_TIMEOUT_MS } from './liveness.ts'
+import { buildReflectionPreamble } from './reflection-preamble.ts'
 import { fileURLToPath } from 'node:url'
 import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
 
@@ -71,6 +72,13 @@ export interface InnerLoopInput {
    *  codex reviewer runs `trident/codex-review.sh` with this CODEX_HOME; null → the
    *  review runs Claude-only + a "codex not connected" note (never a blocker). */
   codex_home?: string | null
+  /** RB2 (b) — the owner's recent reflection corrections/diary, ALREADY formatted
+   *  as the `<learned_corrections>`/`<recent_diary>` block by the reflection layer
+   *  (or null when nothing has been learned). Threaded into the workflow args so the
+   *  FIRST turn of the build agents (Forge + Argus) re-grounds on owner corrections
+   *  — reflection was chat-only before RB2. Null/empty → a clean no-op (no block
+   *  spliced into any agent prompt), so a fresh instance's prompts are unchanged. */
+  reflection_context?: string | null
 }
 
 /**
@@ -205,6 +213,14 @@ export function buildWorkflowArgs(input: InnerLoopInput): Record<string, unknown
     // Per-project CODEX_HOME for the optional cross-model review; null → the
     // workflow treats codex as not-connected and reviews Claude-only.
     codexHome: input.codex_home ?? null,
+    // RB2 (b) — the owner-corrections PREAMBLE, DERIVED HERE (testable TS) from the
+    // owner's recent reflection corrections/diary block and threaded READY-TO-PREPEND
+    // to the inner workflow, which prepends it verbatim to each Claude build/review
+    // agent (Forge build + fix rounds, argus rubric/adversarial/synthesis) so owner
+    // corrections reach build agents. Empty string for a null/whitespace/non-string
+    // context → the workflow prepends nothing (a clean no-op). The `.mjs` cannot
+    // import this helper (no module resolution), so the boundary logic lives here.
+    reflectionPreamble: buildReflectionPreamble(input.reflection_context),
     // FABLE-ORCHESTRATOR model routing (SPEC § Fable-orchestrator, 2026-07-02).
     // The single-source-of-truth model IDS resolved from runtime/models.ts and
     // threaded to the inner workflow, which routes them per-role by agent label

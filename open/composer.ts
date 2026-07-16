@@ -3505,6 +3505,13 @@ export function buildOpenGraphComposer(
               resolve_codex_home: (run) =>
                 codexCredentialService.resolveActiveCodexHome(asOwnerHandle(run.project_slug)),
               codex_home: codexHome,
+              // RB2 (b) — thread the owner's recent reflection corrections/diary into
+              // the inner workflow so the build agents (Forge + Argus) re-ground on
+              // owner corrections on their FIRST turn (reflection was chat-only
+              // before RB2). Reuses the SAME `reflection` instance the live-agent
+              // chat turn reads; corrections are owner-wide (not scope-filtered), so
+              // the run arg is unused. Null when nothing is learned → a clean no-op.
+              resolve_reflection_context: (): string | null => reflection.loadContext(),
               // X5 — no `delivery_sink` override: the trident module falls back to
               // the graph's `channels` router, which IS `channelRouter` (passed as
               // `composition.channel_router` above) with the durable app-ws adapter

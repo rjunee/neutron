@@ -116,6 +116,16 @@ export interface MiscCompositionInput {
       run: import('@neutronai/trident/store.ts').TridentRun,
     ) => string | null
     /**
+     * RB2 (b) — resolve the owner's recent reflection corrections/diary block for a
+     * launching run. The composer wires this to the SAME `reflection` instance the
+     * live-agent chat turn reads (`reflection.loadContext()`), so owner corrections
+     * reach the build agents (Forge + Argus) on their first turn — reflection was
+     * chat-only before RB2. Returns null when nothing is learned → a clean no-op.
+     */
+    resolve_reflection_context?: (
+      run: import('@neutronai/trident/store.ts').TridentRun,
+    ) => string | null
+    /**
      * Bounded Forge merge-conflict resolver (#342). Threaded into the trident
      * orchestrator's merge deps so a LOCAL-mode merge that hits a rebase conflict
      * (a 2nd/3rd parallel same-project build replaying onto a sibling's merge) is
