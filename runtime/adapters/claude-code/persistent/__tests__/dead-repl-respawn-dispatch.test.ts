@@ -1,12 +1,12 @@
 /**
- * wedge-respawn-dispatch.test.ts — ported VERBATIM from Nova
+ * dead-repl-respawn-dispatch.test.ts — ported VERBATIM from Nova
  * `gateway/wedge-respawn-dispatch.test.ts`. The load-bearing contract:
  * `markInFlight` fires EXACTLY when plan.ok && execute.ok; every refusal/throw
  * path leaves it untouched so the next tick can retry.
  */
 
 import { describe, it, expect } from 'bun:test'
-import { dispatchWedgeRespawn } from '../wedge-respawn-dispatch.ts'
+import { dispatchWedgeRespawn } from '../dead-repl-respawn-dispatch.ts'
 
 describe('dispatchWedgeRespawn', () => {
   it('fires execute + markInFlight when plan and execute both ok', () => {

@@ -241,7 +241,7 @@ fi
 # (0x00) byte. So a banned token embedded next to a NUL is INVISIBLE to the whole
 # gate, forever. That is not hypothetical: the history-import hash-seed `tenant:`
 # token (tasks/history-import-seeder.ts) and a retired multi-tenant fixture path
-# (…/wedge-detector.test.ts) both evaded a "zero-tolerance" gate this exact way
+# (…/dead-repl-detector.test.ts) both evaded a "zero-tolerance" gate this exact way
 # until 2026-07-03. This tripwire closes the whole class: any tracked file that
 # contains a NUL byte is a hard finding UNLESS it is a known binary-asset class
 # (images/fonts/archives/compiled — exempt by extension) or is exempted by exact

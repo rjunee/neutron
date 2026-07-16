@@ -27,7 +27,7 @@ export function resolveOpenAiAuth(opts: OpenAiResolveAuthOptions = {}): OpenAiRe
   const apiKey = opts.api_key ?? env['OPENAI_API_KEY']
   if (!apiKey) {
     throw new Error(
-      'gpt-5-5-api adapter: no OPENAI_API_KEY resolved. Subscription OAuth is NOT supported on this adapter (use the gpt-5-5-codex-cli adapter for that path).',
+      'openai-responses adapter: no OPENAI_API_KEY resolved. Subscription OAuth is NOT supported on this adapter (use the codex-cli adapter for that path).',
     )
   }
   return {

@@ -2,11 +2,11 @@
  * @neutronai/contracts — MCP tool-resolver callable shape (L2 leaf).
  *
  * L2 (2026-07) — `McpToolResolver` extracted VERBATIM out of
- * `runtime/adapters/gpt-5-5-api/mcp-shim.ts` into this node-free leaf
+ * `runtime/adapters/openai-responses/mcp-shim.ts` into this node-free leaf
  * (critic-layering.md §2.1 edge #11: `mcp → runtime`). `mcp/server.ts` now
  * imports the type directly from here instead of reaching into `runtime`,
  * severing that edge. `mcp-shim.ts` keeps a re-export so any other existing
- * import specifier (e.g. `runtime/adapters/gpt-5-5-api/index.ts`) stays
+ * import specifier (e.g. `runtime/adapters/openai-responses/index.ts`) stays
  * valid (test-policy §2.2 barrel rule).
  */
 

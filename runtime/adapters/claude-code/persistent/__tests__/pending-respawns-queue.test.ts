@@ -1,6 +1,6 @@
 /**
  * pending-respawns-queue.test.ts — ported from Nova `zombie-respawn-queue.test.ts`
- * + `disk-recovery.test.ts` Scenario 6 (persistence round-trip, corrupt-JSON
+ * + `jsonl-resumability.test.ts` Scenario 6 (persistence round-trip, corrupt-JSON
  * resilience, partial-drain). The restart-idempotent deferred-respawn queue
  * (S2 § 2 row #11).
  */

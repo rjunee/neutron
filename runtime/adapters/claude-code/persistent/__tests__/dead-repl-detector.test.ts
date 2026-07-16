@@ -1,5 +1,5 @@
 /**
- * wedge-detector.test.ts — ported from Nova `gateway/topic-wedge-detector.test.ts`.
+ * dead-repl-detector.test.ts — ported from Nova `gateway/topic-wedge-detector.test.ts`.
  * Detection table (adapted to pooled-child + dev-channel `/health`) + the 6
  * ordered decision gates + alert dedupe. The pure cores lift verbatim.
  */
@@ -13,7 +13,7 @@ import {
   detectReplWedged,
   type ReplWedgeProbe,
   type WedgeActionContext,
-} from '../wedge-detector.ts'
+} from '../dead-repl-detector.ts'
 
 const base: ReplWedgeProbe = { hasChild: true, childAlive: true, healthOk: true, ccReady: true }
 

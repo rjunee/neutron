@@ -49,9 +49,9 @@ import {
   selectSubstrateFactory,
   type Provider,
 } from '@neutronai/runtime/adapters/select-substrate.ts'
-import type { GptResponsesApiSubstrateOptions } from '@neutronai/runtime/adapters/gpt-5-5-api/index.ts'
+import type { GptResponsesApiSubstrateOptions } from '@neutronai/runtime/adapters/openai-responses/index.ts'
 import { asOwnerHandle } from '@neutronai/persistence/index.ts'
-import type { CodexCliSubstrateOptions } from '@neutronai/runtime/adapters/gpt-5-5-codex-cli/index.ts'
+import type { CodexCliSubstrateOptions } from '@neutronai/runtime/adapters/codex-cli/index.ts'
 import type { McpToolResolver } from '@neutronai/contracts/mcp-tool-resolver.ts'
 import type { ToolDef } from '@neutronai/core-sdk/types.ts'
 import {
@@ -493,7 +493,7 @@ export interface OpenAiFamilyProviderConfig {
   model_preference?: ReadonlyArray<string>
   /** Override the OpenAI Responses endpoint (tests). */
   endpoint?: string
-  /** Cap tool-call rounds per turn (gpt-5-5-api adapter). */
+  /** Cap tool-call rounds per turn (openai-responses adapter). */
   max_tool_rounds?: number
   /**
    * Extra env overlay for the adapter. For codex-cli this is where the selected
@@ -506,7 +506,7 @@ export interface OpenAiFamilyProviderConfig {
   /** codex-cli: override the `codex` binary path. */
   codex_bin?: string
   /**
-   * Test seam — override `fetch` for the gpt-5-5-api adapter (mirrors the
+   * Test seam — override `fetch` for the openai-responses adapter (mirrors the
    * adapter's own `fetchImpl`). Production leaves this unset. Lets the composer's
    * OpenAI path be unit-tested end-to-end against a mocked Responses stream
    * without a live `OPENAI_API_KEY`.

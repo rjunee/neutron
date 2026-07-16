@@ -1,5 +1,5 @@
 /**
- * wedged-prompt-detector.test.ts — P0: WEDGED-INTERACTIVE-PROMPT detect + recover
+ * interactive-prompt-deadlock-detector.test.ts — P0: WEDGED-INTERACTIVE-PROMPT detect + recover
  * (master-table row #1). Each test pins a ported Vajra gate / lesson:
  *   • the detector FIRES on a synthetic AskUserQuestion frame with ALL gates
  *     (footer + live `^❯` cursor) — but only after the 2-tick stability gate;
@@ -21,7 +21,7 @@ import {
   WEDGE_BOTTOM_N,
   WEDGED_PROMPT_DETECTOR_ID,
   type WedgeRecoveryDeps,
-} from '../wedged-prompt-detector.ts'
+} from '../interactive-prompt-deadlock-detector.ts'
 import { buildDetectorContext } from '../output-scan.ts'
 import type { Key } from '../keystrokes.ts'
 

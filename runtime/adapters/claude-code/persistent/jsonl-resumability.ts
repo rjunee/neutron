@@ -1,5 +1,5 @@
 /**
- * disk-recovery.ts — classify a failed-probe / pending REPL entry as RESUMABLE
+ * jsonl-resumability.ts — classify a failed-probe / pending REPL entry as RESUMABLE
  * by reading the topic's transcript JSONL from disk (Vajra mechanism #20,
  * cross-cutting invariant #5: "disk JSONL is the source of truth").
  *
@@ -96,14 +96,14 @@ function parseRecordTimestamp(rec: unknown): number | undefined {
 }
 
 /** Injectable fs seam (tests pass fakes; production defaults to `node:fs`). */
-export interface DiskRecoveryDeps {
+export interface JsonlResumabilityDeps {
   existsSync: (p: string) => boolean
   readFileSync: (p: string) => string
   statMtimeMs: (p: string) => number
   statSizeBytes: (p: string) => number
 }
 
-const defaultDeps: DiskRecoveryDeps = {
+const defaultDeps: JsonlResumabilityDeps = {
   existsSync: (p) => existsSync(p),
   readFileSync: (p) => readFileSync(p, 'utf8'),
   statMtimeMs: (p) => statSync(p).mtimeMs,
@@ -122,7 +122,7 @@ export function readSessionJsonlMeta(
   sessionId: string,
   cwd: string,
   projectsDir?: string,
-  deps: DiskRecoveryDeps = defaultDeps,
+  deps: JsonlResumabilityDeps = defaultDeps,
 ): JsonlMeta {
   const path = sessionJsonlPath(sessionId, cwd, projectsDir)
   const absent: JsonlMeta = { exists: false, sizeBytes: 0, mtimeMs: 0, realTurnCount: 0 }
@@ -198,7 +198,7 @@ export function classifyEntryResumable(
   now: number,
   opts: ClassifyResumableOptions = {},
   projectsDir?: string,
-  deps: DiskRecoveryDeps = defaultDeps,
+  deps: JsonlResumabilityDeps = defaultDeps,
 ): ClassifyResumableResult {
   const meta = readSessionJsonlMeta(entry.sessionId, entry.cwd, projectsDir, deps)
   return classifyResumable(meta, now, opts)

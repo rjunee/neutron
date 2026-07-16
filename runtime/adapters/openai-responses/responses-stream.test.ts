@@ -25,7 +25,7 @@ async function collect(gen: AsyncGenerator<Event, void, void>): Promise<Event[]>
   return out
 }
 
-describe('gpt-5-5-api responses-stream', () => {
+describe('openai-responses responses-stream', () => {
   test('output_text deltas → token, response.completed → completion with response.id as session.id', async () => {
     const body = ssePayload([
       { event: 'response.created', data: { type: 'response.created', response: { id: 'resp_1' } } },

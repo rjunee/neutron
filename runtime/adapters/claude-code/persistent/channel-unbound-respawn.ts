@@ -1,5 +1,5 @@
 /**
- * channel-wedge-respawn.ts — P1: bounded respawn for the channel-MCP-unwired
+ * channel-unbound-respawn.ts — P1: bounded respawn for the channel-MCP-unwired
  * wedge (port row #6).
  *
  * § Terminal-detection port, master-table row #6 + cross-cutting invariant §6

@@ -1,5 +1,5 @@
 /**
- * wedge-detector.ts — decide whether a persistent REPL the pool BELIEVES is
+ * dead-repl-detector.ts — decide whether a persistent REPL the pool BELIEVES is
  * warm is silently wedged, and what to do about it (substrate-lift S2 § 2 row
  * #14 / § 6 acceptance #1).
  *

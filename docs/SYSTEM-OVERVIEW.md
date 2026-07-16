@@ -3108,7 +3108,7 @@ themselves land in follow-on P0/P1 PRs). See
   compact-resume / rate-limit-stop + the P2 rate-limit/overload **banner** alert
   (notify-only, row #10) all register the same way.
 
-## Wedged-interactive-prompt detect + recover (P0) — `wedged-prompt-detector.ts`
+## Wedged-interactive-prompt detect + recover (P0) — `interactive-prompt-deadlock-detector.ts`
 
 The flagship terminal detector (master-table row #1). When `claude` renders an
 `AskUserQuestion` / arrow-menu **mid-turn**, the REPL deadlocks — the chat
@@ -3245,7 +3245,7 @@ A mid-turn API 5xx — `Overloaded` / `internal_server_error` / `rate_limit_erro
 `completion` never resolves, so the user sees **nothing**: the turn dies silently
 (Ryan 2026-06-16). None of the other detectors catch this — the PTY-ring
 detectors (above) key off live TUI signatures, the stuck-turn watchdog (below)
-keys off an *unanswered real-user turn* going stale, and the wedge-detector keys
+keys off an *unanswered real-user turn* going stale, and the dead-repl-detector keys
 off process liveness / HTTP. A turn the model *started* but a 5xx killed before
 any reply is a distinct gap. This closes master-table **row #11**.
 
@@ -3366,7 +3366,7 @@ chased a non-bug. The string detector + its test were **removed**.
   blocking MCP-load path so the single dev-channel server connects + handshakes
   before the first input — a belt-and-suspenders that makes `/channel-bound` land
   promptly, **NOT** the wedge fix.
-- **Bounded respawn (`channel-wedge-respawn.ts`, invariant §6).** Unchanged: a
+- **Bounded respawn (`channel-unbound-respawn.ts`, invariant §6).** Unchanged: a
   `channel-wedged` assertion throws `ChannelWedgedSpawnError`; the spawn path
   retries up to **`MAX_FLEET_RESPAWNS = 2`**, then fires **exactly one** operator
   alert and gives up — no infinite loop. A spawn/channel failure that still
@@ -3386,7 +3386,7 @@ chased a non-bug. The string detector + its test were **removed**.
   round-trips DESPITE the benign warning (opt-in `NEUTRON_PTY_E2E=1`, skipped in
   CI — needs a real claude binary + credentials).
 
-## Disk-JSONL recovery + restart-rate crash-loop guard (#20) — `disk-recovery.ts` + `restart-rate.ts`
+## Disk-JSONL recovery + restart-rate crash-loop guard (#20) — `jsonl-resumability.ts` + `restart-rate.ts`
 
 The cross-restart recovery substrate (master-table row #20). It encodes one
 hard-won lesson: **disk JSONL is the source of truth; the in-memory
@@ -3404,7 +3404,7 @@ path:
   respawns.json` BEFORE the drain `setTimeout`s fire; `drainPendingRespawns`
   reads that file at boot (and on every watchdog tick) and replays the dropped
   inbound via the dev-channel `/message` sink — no surviving timer required.
-- **Disk-JSONL resumability classifier (NEW, `disk-recovery.ts`).** When the
+- **Disk-JSONL resumability classifier (NEW, `jsonl-resumability.ts`).** When the
   boot-drain meets a pending entry whose owning substrate has not re-registered
   yet (the cross-restart-before-first-turn case), it no longer just skips
   blindly: it reads the topic's transcript JSONL and classifies it. The pure

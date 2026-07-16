@@ -1,5 +1,5 @@
 /**
- * wedge-respawn-dispatch.ts — thin orchestrator that runs the
+ * dead-repl-respawn-dispatch.ts — thin orchestrator that runs the
  * `planRespawn → executeRespawn → markInFlight` sequence for the
  * `respawn-and-alert` branch of the REPL wedge detector.
  *

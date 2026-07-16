@@ -11,8 +11,8 @@
  *
  *   - `runtime/adapters/claude-code/`        — same-user multi-sub Claude Max OAuth pool
  *                                              (per Atlas's session-id portability research)
- *   - `runtime/adapters/gpt-5-5-codex-cli/`  — Codex CLI device-code OAuth + BYO API key pool
- *   - `runtime/adapters/gpt-5-5-api/`        — OpenAI API key pool (BYO; no subscription path)
+ *   - `runtime/adapters/codex-cli/`  — Codex CLI device-code OAuth + BYO API key pool
+ *   - `runtime/adapters/openai-responses/`        — OpenAI API key pool (BYO; no subscription path)
  *
  * Adapters call `selectCredential(pool)` to pick a credential, then
  * `reportSuccess(pool, id)` after a 2xx and `reportFailure(pool, id, status,

@@ -63,7 +63,7 @@ export interface McpServerOptions {
 
 /**
  * The MCP server consumed by every substrate adapter. The shape mirrors
- * `McpToolResolver` so the gpt-5-5-api adapter can use it directly via the
+ * `McpToolResolver` so the openai-responses adapter can use it directly via the
  * mcp-shim — `server.resolve` IS a McpToolResolver.
  */
 export class McpServer {

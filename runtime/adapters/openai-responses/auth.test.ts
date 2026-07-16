@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test'
 
 import { resolveOpenAiAuth } from './auth.ts'
 
-describe('gpt-5-5-api auth', () => {
+describe('openai-responses auth', () => {
   test('explicit api_key wins over env', () => {
     const out = resolveOpenAiAuth({ api_key: 'sk-explicit', env: { OPENAI_API_KEY: 'sk-env' } })
     expect(out.headers['authorization']).toBe('Bearer sk-explicit')

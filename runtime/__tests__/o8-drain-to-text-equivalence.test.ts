@@ -9,7 +9,7 @@
  *                and — faithfully — NO finally→cancel hookup, which is exactly the
  *                property that makes an early `cancel()` on an unsettled turn
  *                poison the warm session).
- *   2. `gen`   — a native `async function*` generator (the gpt-5-5-api adapter's
+ *   2. `gen`   — a native `async function*` generator (the openai-responses adapter's
  *                shape: it `yield`s each `Event`).
  *   3. `array` — a hand-rolled async iterator over an array, exposing `return()`
  *                (a third, minimal substrate shape).
