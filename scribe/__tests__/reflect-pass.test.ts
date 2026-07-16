@@ -402,4 +402,52 @@ describe('reflect cost confinement (tiered-write discipline)', () => {
     expect(extractCompiledTruth(page!)).toContain('leads the data team')
     expect(extractCompiledTruth(page!)).toContain('[[initech]]') // edge kept
   })
+
+  test('an UNCHANGED re-synthesis is a true no-op (no write, no marker, no count)', async () => {
+    const owner = tmpOwner()
+    const truth = 'Works at [[initech]].'
+    await seed(owner, 'person', 'lee', 'Lee', truth, [
+      { ts: '2026-07-01T00:00:00.000Z', source: 'chat:owner', body: 'r1' },
+      { ts: '2026-07-02T00:00:00.000Z', source: 'chat:owner', body: 'r2' },
+      { ts: '2026-07-03T00:00:00.000Z', source: 'chat:owner', body: 'r3' },
+    ])
+    // The LLM returns the already-consolidated truth verbatim.
+    const { substrate } = scriptedSubstrate((prompt) =>
+      prompt.includes('DIGEST:') ? '{"entities":[]}' : truth,
+    )
+    const report = await runReflectPass({ ...baseDeps(owner), substrate })
+    expect(report.resynthesized).toBe(0) // no phantom consolidation
+    const page = await readPage(owner, 'people', 'lee')
+    // No marker row was appended — the timeline is exactly the 3 seeded rows.
+    const bodies = extractTimeline(page!).map((e) => e.body)
+    expect(bodies).toEqual(['r3', 'r2', 'r1'])
+    expect(bodies.some((b) => b.includes('Consolidated'))).toBe(false)
+  })
+
+  test('reserved extraction sees the SAME-pass consolidated truth (freshness)', async () => {
+    const owner = tmpOwner()
+    // Compiled-truth does NOT mention the project; the timeline does. Re-synthesis
+    // lifts it into compiled-truth, and the reserved extraction (same pass) must
+    // then see it.
+    await seed(owner, 'person', 'mira', 'Mira', 'Mira is a product manager.', [
+      { ts: '2026-07-01T00:00:00.000Z', source: 'chat:owner', body: 'kicked off Project Zephyr' },
+      { ts: '2026-07-02T00:00:00.000Z', source: 'chat:owner', body: 'r2' },
+      { ts: '2026-07-03T00:00:00.000Z', source: 'chat:owner', body: 'r3' },
+    ])
+    const { substrate } = scriptedSubstrate((prompt) => {
+      if (prompt.includes('DIGEST:')) {
+        // Only emit the project when the digest ALREADY carries the consolidated
+        // mention — proving extraction ran on post-resynthesis content.
+        return prompt.includes('Project Zephyr')
+          ? JSON.stringify({ entities: [{ name: 'Project Zephyr', kind: 'project', fact: 'led by Mira' }] })
+          : '{"entities":[]}'
+      }
+      // Re-synthesis lifts the project from the timeline into compiled-truth.
+      return 'Mira is a product manager leading Project Zephyr.'
+    })
+    const report = await runReflectPass({ ...baseDeps(owner), substrate })
+    expect(report.resynthesized).toBe(1)
+    expect(report.reservedWritten).toBeGreaterThanOrEqual(1)
+    expect(await readPage(owner, 'projects', 'project-zephyr')).not.toBeNull()
+  })
 })

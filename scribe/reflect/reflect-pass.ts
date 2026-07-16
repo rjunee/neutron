@@ -569,6 +569,11 @@ async function resynthesizePages(
       const next = raw.trim()
       if (next.length === 0) continue
       if (!preservesEdges(page.compiledTruth, next)) continue // would drop an edge → reject
+      // IDEMPOTENCE: if the LLM returned the already-consolidated truth (no real
+      // change), do NOT write — appending a marker row would rewrite the page,
+      // report a phantom consolidation, grow the timeline every pass, and keep the
+      // page permanently above the row gate. Only a genuine change is written.
+      if (next === page.compiledTruth.trim()) continue
       const frontmatter: Record<string, unknown> = {
         ...page.frontmatter,
         slug: page.slug,
@@ -595,7 +600,14 @@ async function resynthesizePages(
         },
         deps.syncHook !== undefined ? { syncHook: deps.syncHook } : {},
       )
-      if (out.changed) report.resynthesized += 1
+      if (out.changed) {
+        report.resynthesized += 1
+        // Keep the in-memory page current so the SAME-pass reserved-kind
+        // extraction (step 3) digests the freshly consolidated truth — a fact
+        // lifted from timeline into compiled-truth can drive a reserved entity in
+        // this pass, not only the next one.
+        page.compiledTruth = next
+      }
     } catch (err) {
       logFailure('reflect: resynth failed', err)
     }
