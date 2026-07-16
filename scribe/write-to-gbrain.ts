@@ -266,14 +266,18 @@ export async function writeExtractionToGBrain(
       //   (a) the prior was actually retired from compiled-truth on THIS write
       //       (`supersededTargets` has `(pred, prior)`) and the replacement is
       //       this relation's new object, OR
-      //   (b) the EXACT transition note is already in the timeline (recorded by the
-      //       earlier write that retired it).
+      //   (b) the EXACT transition note is already in a timeline entry with the
+      //       SAME `(ts, source)` as THIS write — i.e. this is a true REPLAY of the
+      //       write that originally retired it.
       // Arm (b) keeps a REPLAY idempotent: on replay the prior sentence is already
       // gone (empty `supersededTargets`), but the recorded note reproduces the SAME
-      // body → byte-identical page → `changed:false`. Keying on the WHOLE transition
-      // (incl. replacement) stops a later DISTINCT update to the same prior from
-      // inheriting a stale note; a marker whose prior was never asserted satisfies
-      // neither arm → additive note, no fabricated supersession (Codex).
+      // body → byte-identical page → `changed:false`. Scoping arm (b) to the SAME
+      // `(ts, source)` is essential: a LATER re-delivery of the same transition (a
+      // different ts) is NOT a replay — it retired nothing, so it must degrade to an
+      // additive note rather than stamp a SECOND dated supersession. Keying on the
+      // WHOLE transition (incl. replacement) additionally stops a later DISTINCT
+      // update to the same prior from inheriting a stale note; a marker whose prior
+      // was never asserted satisfies neither arm → additive note (Codex).
       const recognizedTransitions = new Set<string>()
       if (supersede) {
         for (const r of page.relations) {
@@ -286,8 +290,9 @@ export async function writeExtractionToGBrain(
           }
         }
         if (existing !== null) {
-          for (const b of existing.timelineBodies) {
-            for (const t of parseSupersedeTransitions(b)) recognizedTransitions.add(t) // (b)
+          for (const e of existing.timelineEntries) {
+            if (e.ts !== input.ts || e.source !== timelineSource) continue // replay only
+            for (const t of parseSupersedeTransitions(e.body)) recognizedTransitions.add(t) // (b)
           }
         }
       }
@@ -733,13 +738,15 @@ function stripSupersededSentences(
 /** What scribe needs to preserve from an existing on-disk page: its compiled-
  *  truth slice (for append-only merge), its parsed frontmatter (so the
  *  populator's `mention_count`/`category`/… survive the rewrite), and its
- *  existing timeline-entry bodies (so a REPLAY of a supersession still recognises
- *  the prior belief — recorded there by the earlier write — and reproduces a
- *  byte-identical body, keeping the repeated turn a true no-op). */
+ *  existing timeline ENTRIES (so a REPLAY of a supersession — an entry with the
+ *  SAME `(ts, source)` — still recognises the prior belief recorded there and
+ *  reproduces a byte-identical body, keeping the repeated turn a true no-op; a
+ *  LATER re-delivery at a different ts is NOT a replay and must not resurrect the
+ *  note). */
 interface ExistingPage {
   compiledTruth: string
   frontmatter: Record<string, unknown>
-  timelineBodies: string[]
+  timelineEntries: ReadonlyArray<{ ts: string; source: string; body: string }>
 }
 
 /**
@@ -764,7 +771,7 @@ async function readExistingPage(
   return {
     compiledTruth: extractCompiledTruth(body),
     frontmatter: parseFrontmatter(body),
-    timelineBodies: extractTimeline(body).map((e) => e.body),
+    timelineEntries: extractTimeline(body),
   }
 }
 

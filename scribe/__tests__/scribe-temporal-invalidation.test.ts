@@ -1170,4 +1170,56 @@ describe('RB4 temporal invalidation (belief evolution) — real PGLite round-tri
     expect(edgesTo(links, 'newrx', 'works_at').length).toBe(1)
     expect(edgesTo(links, 'otherrx', 'works_at').length).toBe(1)
   }, 60_000)
+
+  test('flag ON: re-delivering the SAME transition at a LATER ts is additive, not a second supersession', async () => {
+    const ownerDataDir = mkdtempSync(join(tmpdir(), 'scribe-rb4-later-'))
+    const syncHook = new GBrainSyncHook({
+      memoryStore: new GBrainMemoryStore(client),
+      gbrainMcp: client,
+    })
+    const mk = (json: string, ts: number): ReturnType<typeof createScribe> =>
+      createScribe({
+        substrate: cannedSubstrate(json),
+        syncHook,
+        ownerDataDir,
+        project_slug: 'rb4-later',
+        budget: createState(join(ownerDataDir, '.scribe-budget.json'), t0),
+        writeEntity,
+        now: () => ts,
+        supersede: true,
+      })
+
+    await mk(factA('Tia Vex', 'Toldv'), t0).extractAndWrite({
+      text: 'Tia Vex is a staff engineer at Toldv, where she has run the platform team for a good while now.',
+      observed_at: t0,
+    })
+    // Genuine supersession at t0+1000 → records the transition once.
+    await mk(factSupersede('Tia Vex', 'Toldv', 'Tnewv'), t0 + 1000).extractAndWrite({
+      text: 'Tia Vex has moved on from Toldv and now works at Tnewv, leading their reliability org day to day.',
+      observed_at: t0 + 1000,
+    })
+    // The SAME transition re-delivered at a DIFFERENT (later) ts. This is NOT a
+    // replay — Toldv is already gone, so it retired nothing and must NOT stamp a
+    // second dated supersession; it records the current fact additively.
+    await mk(factSupersede('Tia Vex', 'Toldv', 'Tnewv'), t0 + 2000).extractAndWrite({
+      text: 'Tia Vex, now at Tnewv (no longer Toldv), continues to scale their reliability practice this half.',
+      observed_at: t0 + 2000,
+    })
+
+    const onDisk = readFileSync(join(ownerDataDir, 'entities', 'people', 'tia-vex.md'), 'utf8')
+    const timeline = extractTimeline(onDisk)
+    // Exactly ONE dated supersession event (from t0+1000) — no duplicate at t0+2000.
+    const superRows = timeline.filter((e) => e.body.includes('superseded works_at: toldv → tnewv'))
+    expect(superRows.length).toBe(1)
+    expect(superRows[0]!.ts).toBe(new Date(t0 + 1000).toISOString())
+    // The later re-delivery landed an ADDITIVE row instead.
+    const laterRow = timeline.find((e) => e.ts === new Date(t0 + 2000).toISOString())
+    expect(laterRow).toBeDefined()
+    expect(laterRow!.body.includes('superseded')).toBe(false)
+    expect(laterRow!.body.includes('works_at tnewv')).toBe(true)
+
+    const links = await client.call('get_links', { slug: 'tia-vex' })
+    expect(edgesTo(links, 'toldv', 'works_at').length).toBe(0)
+    expect(edgesTo(links, 'tnewv', 'works_at').length).toBe(1)
+  }, 60_000)
 })
