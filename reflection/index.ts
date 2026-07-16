@@ -115,8 +115,10 @@ export function createReflection(deps: CreateReflectionDeps): Reflection {
 
     loadBuildContext(): string | null {
       try {
-        // Corrections only — exclude the free-form diary for the tool-enabled builder.
-        return buildReflectionContext({ ownerDataDir, include_diary: false })
+        // Corrections only (exclude the free-form diary), RAW (harden=false): the
+        // trident guidance builder does its own escape/cap/framing when it wraps the
+        // block in `<owner_reflection>`, so hardening here too would double-escape.
+        return buildReflectionContext({ ownerDataDir, include_diary: false, harden: false })
       } catch (err) {
         log.warn('load_build_context_failed', { err: errMsg(err) })
         return null
