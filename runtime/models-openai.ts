@@ -9,7 +9,7 @@
  * **Rule:** never hardcode an OpenAI model id outside this file. Add an alias
  * here if you need one. Same discipline as `runtime/models.ts`.
  *
- * The gpt-5-5-api adapter does adapter-internal rotation over
+ * The openai-responses adapter does adapter-internal rotation over
  * `AgentSpec.model_preference: string[]`; the composer's OpenAI path remaps the
  * caller's (Claude-shaped) `model_preference` to {@link getOpenAiModelPreference}
  * before dispatch. GPT-5.6 is the current top-tier default with GPT-5.5 as the
@@ -40,7 +40,7 @@ export const OPENAI_FAST_MODEL: string =
 
 /**
  * The `model_preference` list for an OpenAI-family conversational turn: best model
- * first, then the rotation fallback. The gpt-5-5-api adapter tries these in order,
+ * first, then the rotation fallback. The openai-responses adapter tries these in order,
  * advancing on retryable errors. Returns a FRESH array (caller can't mutate the
  * default).
  *

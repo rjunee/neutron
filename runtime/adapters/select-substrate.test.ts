@@ -6,8 +6,8 @@ import {
   type Provider,
 } from './select-substrate.ts'
 import { createClaudeCodeSubstrateAuto } from './claude-code/index.ts'
-import { createGptResponsesApiSubstrate } from './gpt-5-5-api/index.ts'
-import { createCodexCliSubstrate } from './gpt-5-5-codex-cli/index.ts'
+import { createGptResponsesApiSubstrate } from './openai-responses/index.ts'
+import { createCodexCliSubstrate } from './codex-cli/index.ts'
 
 describe('select-substrate', () => {
   test("select('anthropic') returns the Claude Code factory VERBATIM (default backend, unchanged)", () => {

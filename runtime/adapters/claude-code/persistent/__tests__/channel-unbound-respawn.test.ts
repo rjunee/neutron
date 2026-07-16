@@ -1,5 +1,5 @@
 /**
- * channel-wedge-respawn.test.ts — the bounded channel-wedged respawn loop (port
+ * channel-unbound-respawn.test.ts — the bounded channel-wedged respawn loop (port
  * row #6, cross-cutting invariant §6). Asserts: a clean retry recovers; the
  * wedge persisting past the cap fires EXACTLY ONE operator alert and stops
  * (capped at MAX_FLEET_RESPAWNS = 2, then alert-only — no infinite loop); and a
@@ -11,7 +11,7 @@ import {
   runBoundedChannelWedgeRespawn,
   MAX_FLEET_RESPAWNS,
   type ChannelWedgeAttemptResult,
-} from '../channel-wedge-respawn.ts'
+} from '../channel-unbound-respawn.ts'
 
 const wedged = (): ChannelWedgeAttemptResult<string> => ({
   ok: false,

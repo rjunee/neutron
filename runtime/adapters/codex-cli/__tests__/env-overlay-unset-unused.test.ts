@@ -2,7 +2,7 @@
  * ISSUES #67 (2026-05-28) — Codex-CLI env-overlay leak regression suite.
  *
  * Mirrors PR #332's ISSUES #49 fix at the Codex-CLI adapter spawn site
- * (`runtime/adapters/gpt-5-5-codex-cli/exec.ts`). Before this fix the
+ * (`runtime/adapters/codex-cli/exec.ts`). Before this fix the
  * `node:child_process.spawn` env arg was `{ ...process.env, ...spawn_env }`,
  * so every host env var inherited into the subprocess — including a
  * leftover `OPENAI_API_KEY` from the gateway box. On a `codex_oauth`

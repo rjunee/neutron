@@ -1,5 +1,5 @@
 /**
- * wedged-prompt-detector.ts — P0: WEDGED-INTERACTIVE-PROMPT detect + recover.
+ * interactive-prompt-deadlock-detector.ts — P0: WEDGED-INTERACTIVE-PROMPT detect + recover.
  *
  * § Terminal-detection port, master-table row #1 (docs/research/vajra-terminal-
  * detection-keystroke-port-2026-06-25.md), the dispatch-locked flagship. Ports

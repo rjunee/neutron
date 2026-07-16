@@ -35,7 +35,7 @@
  *     the passive default never does.
  *
  * **Why the default never bills.** A plain `OPENAI_API_KEY` is already
- * consumed by the GPT BYO LLM adapter (`runtime/adapters/gpt-5-5-api/
+ * consumed by the GPT BYO LLM adapter (`runtime/adapters/openai-responses/
  * auth.ts`). Defaulting to cloud embeddings off its mere presence would
  * silently bill every GPT-BYO user for embeddings — so the DEFAULT never
  * looks at any OpenAI key at all; it only ever activates the free local

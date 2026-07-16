@@ -1,5 +1,5 @@
 /**
- * gpt-5-5-api: model-rotation exhaustion must PRESERVE the upstream classification
+ * openai-responses: model-rotation exhaustion must PRESERVE the upstream classification
  * (audit BLOCKER 2). When every model in `model_preference` 429s, the terminal
  * error the adapter emits must still carry the `HTTP 429` prefix + `retry_after_ms`
  * so the composer's credential-pool wrapper can cool the (rate-limited) credential.
@@ -47,7 +47,7 @@ async function collect(events: AsyncIterable<Event>): Promise<Event[]> {
   return out
 }
 
-describe('gpt-5-5-api exhaustion classification', () => {
+describe('openai-responses exhaustion classification', () => {
   test('two-model 429 exhaustion → terminal error keeps HTTP 429 prefix + retry_after_ms', async () => {
     const gpt = createGptResponsesApiSubstrate({
       env: { OPENAI_API_KEY: 'sk' },
@@ -127,7 +127,7 @@ describe('gpt-5-5-api exhaustion classification', () => {
   })
 })
 
-describe('gpt-5-5-api model-not-found + operator override', () => {
+describe('openai-responses model-not-found + operator override', () => {
   test('404 on the primary model → LOUD actionable terminal error naming the model + override env (not a silent exit)', async () => {
     const notFoundFetch = (async () =>
       new Response('{"error":{"message":"The model does not exist"}}', {
@@ -180,7 +180,7 @@ describe('gpt-5-5-api model-not-found + operator override', () => {
   })
 })
 
-describe('gpt-5-5-api expired-session replay', () => {
+describe('openai-responses expired-session replay', () => {
   test('previous_response_id rejected as expired → adapter REPLAYS full history WITHOUT it and SUCCEEDS (no lost history)', async () => {
     const bodies: Array<Record<string, unknown>> = []
     let call = 0

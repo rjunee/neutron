@@ -31,7 +31,7 @@
  *     the falling edge, so a still-present condition can never re-fire.
  *
  *   - `rateLimited(key, ms)` — the wedge-alert cooldown
- *     (runtime/…/persistent/wedge-detector.ts `decideWedgeAction` +
+ *     (runtime/…/persistent/dead-repl-detector.ts `decideWedgeAction` +
  *     pool-state.ts `wedgeAlertState`): suppressed while
  *     `now - last < ms`; the timestamp is stamped ONLY when a line is
  *     actually sent (the original sets `wedgeAlertState` only inside

@@ -445,7 +445,7 @@ export function resolveOpenLlmPool(
 /**
  * SWAPPABLE PROVIDER — resolve the single-owner OpenAI credential pool for a box
  * that opted into `provider:'openai'`. BYO `OPENAI_API_KEY` ONLY (no
- * subscription OAuth — per the gpt-5-5-api adapter's ToS). Single-entry
+ * subscription OAuth — per the openai-responses adapter's ToS). Single-entry
  * `env_vars` ⇒ never classified as a cross-instance shared key. Returns null
  * when no OpenAI key is present (the composer then degrades to Claude Code).
  */

@@ -266,7 +266,7 @@ function startResponsesSession(
     respondToTool() {
       return Promise.reject(
         new Error(
-          'gpt-5-5-api adapter: respondToTool called on caller-facing tool_resolution=internal substrate (caller bug; the mcp-shim resolves tools transparently)',
+          'openai-responses adapter: respondToTool called on caller-facing tool_resolution=internal substrate (caller bug; the mcp-shim resolves tools transparently)',
         ),
       )
     },

@@ -11,7 +11,7 @@
  * THE PROBLEM. A PTY child's live cwd can drift from the session's canonical cwd
  * — e.g. a Bash `cd` into a worktree that later gets merged/removed leaves the
  * child pinned to a dead directory, while the session's canonical project dir is
- * still perfectly valid. The wedge watchdog (`wedge-detector.ts`) keys off
+ * still perfectly valid. The wedge watchdog (`dead-repl-detector.ts`) keys off
  * liveness + `/health` and is blind to this: the child is alive and answering,
  * just rooted in the wrong place. Inbound turns then run from a stale/dead dir.
  *

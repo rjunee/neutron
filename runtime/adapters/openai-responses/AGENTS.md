@@ -1,4 +1,4 @@
-# AGENTS.md — runtime/adapters/gpt-5-5-api
+# AGENTS.md — runtime/adapters/openai-responses
 
 This module owns the GPT-5.5 Responses API substrate adapter — `Substrate.start(spec) → SessionHandle` against `https://api.openai.com/v1/responses`. Caller-facing `tool_resolution: 'internal'` (load-bearing: the upstream Responses API is `external`, but `mcp-shim.ts` translates so Cores stay on the locked CC pattern). Composition: `auth.ts` resolves BYO `OPENAI_API_KEY` only (no subscription-OAuth — that's the codex-cli adapter's exclusive domain) → `multi-model-rotation.ts` walks `model_preference[]` on retryable error → `responses-stream.ts` POSTs and parses SSE → `mcp-shim.ts` resolves any upstream `tool_call` events via the per-instance MCP resolver and re-streams via `previous_response_id` continuation → `index.ts` ties it as `createGptResponsesApiSubstrate(options)`.
 

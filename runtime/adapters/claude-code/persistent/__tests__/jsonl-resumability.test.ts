@@ -1,5 +1,5 @@
 /**
- * disk-recovery.test.ts — JSONL-resumability classifier for the boot-drain
+ * jsonl-resumability.test.ts — JSONL-resumability classifier for the boot-drain
  * (Vajra mechanism #20, "disk JSONL is the source of truth"). Proves a
  * failed-probe / scheduled-but-lost entry with a live transcript is classified
  * RESUMABLE from disk, and that a pending entry persisted to disk is recovered
@@ -16,9 +16,9 @@ import {
   readSessionJsonlMeta,
   isRealTurnRecord,
   sessionJsonlPath,
-  type DiskRecoveryDeps,
+  type JsonlResumabilityDeps,
   type JsonlMeta,
-} from '../disk-recovery.ts'
+} from '../jsonl-resumability.ts'
 import {
   drainPendingRespawns,
   type PersistentReplSubstrateOptions,
@@ -32,7 +32,7 @@ function meta(over: Partial<JsonlMeta> = {}): JsonlMeta {
 }
 
 /** Build an in-memory fs seam holding one transcript at the given session path. */
-function fakeDeps(contents: string, mtimeMs = NOW): DiskRecoveryDeps {
+function fakeDeps(contents: string, mtimeMs = NOW): JsonlResumabilityDeps {
   return {
     existsSync: () => true,
     readFileSync: () => contents,
@@ -46,7 +46,7 @@ const userTurn = (ts: string) =>
 const asstTurn = (ts: string) =>
   JSON.stringify({ type: 'assistant', message: { role: 'assistant', content: 'yo' }, timestamp: ts })
 
-describe('disk-recovery — isRealTurnRecord', () => {
+describe('jsonl-resumability — isRealTurnRecord', () => {
   it('accepts user/assistant message lines', () => {
     expect(isRealTurnRecord({ type: 'user', message: {} })).toBe(true)
     expect(isRealTurnRecord({ type: 'assistant', message: {} })).toBe(true)
@@ -60,7 +60,7 @@ describe('disk-recovery — isRealTurnRecord', () => {
   })
 })
 
-describe('disk-recovery — classifyResumable (pure)', () => {
+describe('jsonl-resumability — classifyResumable (pure)', () => {
   it('no file on disk → not resumable (no-jsonl)', () => {
     const r = classifyResumable(meta({ exists: false, sizeBytes: 0, mtimeMs: 0, realTurnCount: 0 }), NOW)
     expect(r).toEqual({ resumable: false, reason: 'no-jsonl' })
@@ -101,7 +101,7 @@ describe('disk-recovery — classifyResumable (pure)', () => {
   })
 })
 
-describe('disk-recovery — readSessionJsonlMeta (fs seam)', () => {
+describe('jsonl-resumability — readSessionJsonlMeta (fs seam)', () => {
   it('counts real turns and records the last real turn timestamp', () => {
     const t1 = new Date(NOW - 2000).toISOString()
     const t2 = new Date(NOW - 1000).toISOString()
@@ -128,7 +128,7 @@ describe('disk-recovery — readSessionJsonlMeta (fs seam)', () => {
   })
 })
 
-describe('disk-recovery — boot-drain recovers a disk-persisted entry with NO surviving timer', () => {
+describe('jsonl-resumability — boot-drain recovers a disk-persisted entry with NO surviving timer', () => {
   it('a pending entry whose owner is unregistered is classified resumable from its live JSONL', async () => {
     // Simulate a pre-restart persist: an entry written to the pending queue on disk.
     const home = mkdtempSync(join(tmpdir(), 'neutron-dr-'))

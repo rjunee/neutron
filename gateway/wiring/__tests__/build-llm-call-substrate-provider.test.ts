@@ -6,7 +6,7 @@
  *      `createClaudeCodeSubstrateAuto` seam + option bag as today (the openai
  *      config, even when present, is untouched).
  *   2. providerResolver / provider = 'openai' ⇒ routes each turn through the
- *      gpt-5-5-api adapter (driven by a mocked Responses stream), remaps
+ *      openai-responses adapter (driven by a mocked Responses stream), remaps
  *      model_preference, and feeds the SEPARATE OpenAI pool.
  *   3. Missing OpenAI config / mcpResolver ⇒ degrades LOUDLY (terminal error).
  *   4. per-turn granularity: the resolver flips provider between dispatches.

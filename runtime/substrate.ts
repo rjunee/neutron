@@ -14,8 +14,8 @@
  * implementations land in this codebase:
  *
  *   1. `runtime/adapters/claude-code/`        — Anthropic Messages API (P1)
- *   2. `runtime/adapters/gpt-5-5-codex-cli/`  — Codex CLI shell-out (P1)
- *   3. `runtime/adapters/gpt-5-5-api/`        — OpenAI Responses API (P1)
+ *   2. `runtime/adapters/codex-cli/`  — Codex CLI shell-out (P1)
+ *   3. `runtime/adapters/openai-responses/`        — OpenAI Responses API (P1)
  *
  * The Private/open-weight adapter is deferred to P4 per `engineering-plan.md`
  * line 325. All adapters expose the same `SessionHandle` shape so Cores can be
@@ -31,7 +31,7 @@ import type { SessionHandle } from './session-handle.ts'
  * for stateless substrates that need full history replay (open-weight, and as
  * a fallback for CC if the local transcript JSONL is missing). An adapter that
  * maintains its own continuity ignores `messages` once it has a live session:
- * the gpt-5-5-api adapter resumes via `previous_response_id`; the shipped
+ * the openai-responses adapter resumes via `previous_response_id`; the shipped
  * persistent-REPL CC adapter keeps continuity through its warm pool +
  * registry-resume and does NOT consume `spec.session.id` (see `AgentSpec.session`).
  *
@@ -53,7 +53,7 @@ export interface Message {
  *   composes this with `messages` / `session` history.
  *
  * - `session?: { id, last_active_at }` — cross-turn continuity hint, honored
- *   per-adapter. The gpt-5-5-api adapter resumes via `previous_response_id`.
+ *   per-adapter. The openai-responses adapter resumes via `previous_response_id`.
  *   **The shipped persistent-REPL CC adapter does NOT consume `session.id`** —
  *   its cross-turn continuity is pool-key + registry-driven: a warm REPL keyed
  *   by `poolKeyFor(options)` (substrate_instance_id, user_id, project_id,
@@ -96,7 +96,7 @@ export interface Message {
  *   Only the persistent-REPL adapter reads it; other substrates ignore it.
  *
  * - `metering_context?: { project_id }` — populated ONLY for the
- *   Private substrate (per-instance rented H100), where gpt-5-5-api carries
+ *   Private substrate (per-instance rented H100), where openai-responses carries
  *   it for the meter writer. The CC adapter does NOT meter off it (Anthropic
  *   bills the owner's own subscription), but it DOES read `project_id` as a
  *   last-resort fallback for warm-pool project keying when the live

@@ -53,8 +53,8 @@ import {
 } from '../build-llm-call-substrate.ts'
 import { isFreezeTimeout } from '../build-live-agent-turn.ts'
 import { is429ErrorMessage } from '@neutronai/onboarding/history-import/rate-limit.ts'
-import { startResponsesStream } from '@neutronai/runtime/adapters/gpt-5-5-api/responses-stream.ts'
-import { ChannelWedgedSpawnError } from '@neutronai/runtime/adapters/claude-code/persistent/channel-wedge-respawn.ts'
+import { startResponsesStream } from '@neutronai/runtime/adapters/openai-responses/responses-stream.ts'
+import { ChannelWedgedSpawnError } from '@neutronai/runtime/adapters/claude-code/persistent/channel-unbound-respawn.ts'
 import {
   assertReplAlive,
   type SpawnAssertionDeps,
@@ -114,7 +114,7 @@ function extractFromSource(srcPath: string, pattern: RegExp, label: string): str
 
 /** Drive `startResponsesStream` against an injected fetch returning `status` — this
  *  executes the REAL `HTTP ${status}: <body>` producer template
- *  (runtime/adapters/gpt-5-5-api/responses-stream.ts:79-88) and returns the
+ *  (runtime/adapters/openai-responses/responses-stream.ts:79-88) and returns the
  *  error event's `.message`. The fetch seam is the network boundary, NOT the
  *  classifier seam under test, so injecting it is not "mocking past the seam". */
 async function realHttpStatusProducerMessage(status: number, body: string): Promise<string> {
@@ -141,7 +141,7 @@ async function realHttpStatusProducerMessage(status: number, body: string): Prom
 // ───────────────────────────────────────────────────────────────────────────
 
 test('G6 · parseHttpStatusFromMessage pins the REAL `HTTP <status>:` producer (gpt-5-5 adapter), all cooldown-relevant statuses', async () => {
-  // Producer: runtime/adapters/gpt-5-5-api/responses-stream.ts:83/87 —
+  // Producer: runtime/adapters/openai-responses/responses-stream.ts:83/87 —
   // `message: \`HTTP ${status}: ${truncate(text, 400)}\`` on any !response.ok.
   for (const status of [429, 402, 401, 500, 408]) {
     const producedMsg = await realHttpStatusProducerMessage(status, 'upstream body text')
@@ -226,7 +226,7 @@ test('G6 · detectBinaryNotFound requires a `claude` mention for the ENOENT / no
 // ───────────────────────────────────────────────────────────────────────────
 
 test('G6 · detectChannelWedged pins the REAL ChannelWedgedSpawnError producer message (constructed live)', () => {
-  // Producer: runtime/adapters/claude-code/persistent/channel-wedge-respawn.ts:87-94
+  // Producer: runtime/adapters/claude-code/persistent/channel-unbound-respawn.ts:87-94
   //   super(`persistent-repl: spawn failed (channel-wedged; ${detail ?? ''})`)
   const err = new ChannelWedgedSpawnError('sess-key', 'pid=4242 port=51999')
   expect(err.message).toBe('persistent-repl: spawn failed (channel-wedged; pid=4242 port=51999)')

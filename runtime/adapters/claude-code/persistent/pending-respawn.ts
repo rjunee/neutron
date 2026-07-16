@@ -1,7 +1,7 @@
 // persistent-repl-substrate.ts → pending-respawn.ts
 // The pending-respawns queue drain (D2 split).
 
-import { classifyEntryResumable } from './disk-recovery.ts'
+import { classifyEntryResumable } from './jsonl-resumability.ts'
 import { clearPendingRespawns, loadPendingRespawns, planZombieRespawns, removeEntryBySessionKey, savePendingRespawns } from './pending-respawns-queue.ts'
 import { supervisedBySessionKey } from './pool-state.ts'
 import type { PersistentReplSubstrateOptions } from './types.ts'

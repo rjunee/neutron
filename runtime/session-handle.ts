@@ -17,7 +17,7 @@
  *   Callers branch on this to decide whether to wire a tool runner.
  *
  * `result: unknown` deliberately matches the locked spec's `result: any` slot
- * (substrate-specific shape; gpt-5-5-api's mcp-shim and CC's internal MCP both
+ * (substrate-specific shape; openai-responses's mcp-shim and CC's internal MCP both
  * pass JSON-shaped values that the substrate parses on its own terms). Strict
  * mode in this codebase forbids `any`, so the spec's `any` is encoded as the
  * widest safe TypeScript type, `unknown`. Behaviorally identical for callers.

@@ -29,7 +29,7 @@ import {
   getReplSinkInfo,
   shutdownAllPersistentRepls,
 } from '@neutronai/runtime/adapters/claude-code/persistent/persistent-repl-substrate.ts'
-import { createGptResponsesApiSubstrate } from '@neutronai/runtime/adapters/gpt-5-5-api/index.ts'
+import { createGptResponsesApiSubstrate } from '@neutronai/runtime/adapters/openai-responses/index.ts'
 import { getOpenAiModelPreference, OPENAI_BEST_MODEL } from '@neutronai/runtime/models-openai.ts'
 import { selectSubstrateFactory } from '@neutronai/runtime/adapters/select-substrate.ts'
 

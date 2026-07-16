@@ -72,7 +72,7 @@ describe('contracts/ leaf: symbols defined + old sites shim through', () => {
 
   test('mcp-tool-resolver.ts owns McpToolResolver; mcp-shim.ts re-exports', () => {
     const leaf = read('contracts/mcp-tool-resolver.ts')
-    const oldSite = read('runtime/adapters/gpt-5-5-api/mcp-shim.ts')
+    const oldSite = read('runtime/adapters/openai-responses/mcp-shim.ts')
     expect(leaf).toContain('export interface McpToolResolver')
     expect(oldSite).not.toContain('export interface McpToolResolver')
     expect(oldSite).toContain("from '@neutronai/contracts/mcp-tool-resolver.ts'")
@@ -135,6 +135,6 @@ describe('critic-layering.md §2.1 DAG cuts #1, #7, #9, #10, #11: consumers flip
   test('edge #11 (mcp → runtime, McpToolResolver): mcp/server.ts imports from contracts/', () => {
     const src = read('mcp/server.ts')
     expect(src).toContain("import type { McpToolResolver } from '@neutronai/contracts/mcp-tool-resolver.ts'")
-    expect(src).not.toContain('runtime/adapters/gpt-5-5-api/mcp-shim.ts')
+    expect(src).not.toContain('runtime/adapters/openai-responses/mcp-shim.ts')
   })
 })

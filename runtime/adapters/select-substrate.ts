@@ -34,11 +34,11 @@ import {
 import {
   createGptResponsesApiSubstrate,
   type GptResponsesApiSubstrateOptions,
-} from './gpt-5-5-api/index.ts'
+} from './openai-responses/index.ts'
 import {
   createCodexCliSubstrate,
   type CodexCliSubstrateOptions,
-} from './gpt-5-5-codex-cli/index.ts'
+} from './codex-cli/index.ts'
 
 /**
  * The conversational/utility model provider a project can select. `anthropic`

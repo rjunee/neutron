@@ -16,7 +16,7 @@
  * (bottom-N positional guards, `^❯` cursor anchoring, doc-quote guards) must
  * operate on the raw line-split text BEFORE normalising — use {@link stripAnsi}
  * (escapes gone, line structure + spaces kept) for line-anchored matches like
- * the wedged-prompt cursor anchor. See `wedged-prompt-detector.ts`.
+ * the wedged-prompt cursor anchor. See `interactive-prompt-deadlock-detector.ts`.
  */
 
 /** Drop ANSI/CSI/OSC escapes but KEEP whitespace + newlines, so a line-anchored

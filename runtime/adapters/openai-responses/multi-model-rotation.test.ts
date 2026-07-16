@@ -6,7 +6,7 @@ import {
   rotate,
 } from './multi-model-rotation.ts'
 
-describe('gpt-5-5-api multi-model rotation', () => {
+describe('openai-responses multi-model rotation', () => {
   test('currentModel returns the first preference initially', () => {
     const s = newRotationState(['gpt-5.6', 'gpt-5.5'])
     const d = currentModel(s)
