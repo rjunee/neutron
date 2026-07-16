@@ -31,8 +31,9 @@
  * and NEVER incurs LLM cost under test.
  */
 
-import { readFile, unlink } from 'node:fs/promises'
-import { join } from 'node:path'
+import { readFile, unlink, readdir, realpath, open as fsOpen } from 'node:fs/promises'
+import { constants as fsConstants } from 'node:fs'
+import { join, dirname, sep } from 'node:path'
 import {
   ENTITY_KINDS,
   KIND_TO_DIR,
@@ -43,7 +44,6 @@ import {
   parseFrontmatter,
   mergeTimeline,
 } from '@neutronai/runtime/entity-format.ts'
-import { collectMemoryIndexEntries } from '@neutronai/runtime/memory-index.ts'
 import { SLUG_REGEX } from '@neutronai/runtime/entity-slug.ts'
 import type { Substrate } from '@neutronai/runtime/substrate.ts'
 import { getBestModel } from '@neutronai/runtime/models.ts'
@@ -218,34 +218,106 @@ export async function runReflectPass(deps: ReflectPassDeps): Promise<ReflectRepo
   return report
 }
 
-/** Enumerate every kind's pages and read each full body from disk. */
+/**
+ * Enumerate + read every kind's pages. IDENTITY IS THE FILENAME, never the
+ * frontmatter slug: the writer always names a page `<slug>.md`, but a
+ * hand-planted / corrupt page can carry a frontmatter `slug` that DISAGREES with
+ * its filename (or even aliases another page's slug). Keying identity — and every
+ * later read/unlink path — off the ACTUAL basename keeps the path exact (so a
+ * dedup delete can only ever remove the file it enumerated) and closes the
+ * slug-alias delete-the-wrong-file boundary (Codex RB3). A page whose
+ * frontmatter `slug` is present and disagrees with its filename is REJECTED
+ * (corrupt/hostile), never silently reconciled.
+ *
+ * Full symlink containment, mirroring `runtime/memory-index.ts`: the entities
+ * root + each kind dir must realpath UNDER the owner (a symlinked ancestor →
+ * skipped), and each leaf is opened `O_NOFOLLOW` with stat/read through the held
+ * fd (a symlinked leaf → skipped; the final-component check→read swap is closed).
+ */
 async function loadAllPages(ownerDataDir: string): Promise<LoadedPage[]> {
-  const entries = await collectMemoryIndexEntries(ownerDataDir, { kinds: ENTITY_KINDS })
   const pages: LoadedPage[] = []
-  for (const e of entries) {
-    // PATH CONTAINMENT: the enumerator derives `slug` from untrusted frontmatter,
-    // so a hostile `slug: ../../outside/secret` would let the reconstructed
-    // `join(...)` escape the entities tree on the subsequent read AND on a later
-    // dedup `unlink`. Reject anything that is not a clean single-segment entity
-    // slug (the shared grammar — no `/`, no `.`) before we ever touch the path.
-    if (!SLUG_REGEX.test(e.slug)) continue
-    const path = join(ownerDataDir, 'entities', KIND_TO_DIR[e.kind], `${e.slug}.md`)
-    let body: string
+  const realOwner = await safeRealpath(ownerDataDir)
+  if (realOwner === null) return pages
+  const entitiesDir = join(ownerDataDir, 'entities')
+  const realRoot = await safeRealpath(entitiesDir)
+  if (realRoot === null || !isPathUnder(realOwner, realRoot)) return pages
+  for (const kind of ENTITY_KINDS) {
+    const dir = join(entitiesDir, KIND_TO_DIR[kind])
+    const realDir = await safeRealpath(dir)
+    if (realDir === null || !isPathUnder(realRoot, realDir)) continue // symlinked/absent
+    let names: string[]
     try {
-      body = await readFile(path, 'utf8')
+      names = await readdir(dir)
     } catch {
-      continue // vanished / unreadable between scan and read — skip
+      continue
     }
-    pages.push({
-      kind: e.kind,
-      slug: e.slug,
-      title: e.title,
-      compiledTruth: extractCompiledTruth(body),
-      timeline: extractTimeline(body),
-      frontmatter: parseFrontmatter(body),
-    })
+    for (const name of names) {
+      if (!name.endsWith('.md') || name.startsWith('.')) continue
+      const basename = name.slice(0, -'.md'.length)
+      // Basename must be a clean entity slug (a readdir name can't contain `/`,
+      // but this also rejects `.`-only / grammar-invalid names).
+      if (!SLUG_REGEX.test(basename)) continue
+      const read = await readContainedFile(join(dir, name), realRoot)
+      if (read === null) continue // symlinked leaf / escapes root / unreadable
+      const fm = parseFrontmatter(read.body)
+      // Reject a frontmatter slug that disagrees with the filename (corrupt or a
+      // hostile alias of another page) — identity stays the filename.
+      const fmSlug = typeof fm['slug'] === 'string' ? (fm['slug'] as string).trim() : ''
+      if (fmSlug.length > 0 && fmSlug !== basename) continue
+      const title =
+        typeof fm['name'] === 'string' && (fm['name'] as string).trim().length > 0
+          ? (fm['name'] as string).trim()
+          : basename
+      pages.push({
+        kind,
+        slug: basename,
+        title,
+        compiledTruth: extractCompiledTruth(read.body),
+        timeline: extractTimeline(read.body),
+        frontmatter: fm,
+      })
+    }
   }
   return pages
+}
+
+/** `realpath` → null instead of throwing (missing path / broken link). */
+async function safeRealpath(p: string): Promise<string | null> {
+  try {
+    return await realpath(p)
+  } catch {
+    return null
+  }
+}
+
+/** True iff canonical `child` is `root` or nested under it. */
+function isPathUnder(root: string, child: string): boolean {
+  return child === root || child.startsWith(root.endsWith(sep) ? root : root + sep)
+}
+
+/**
+ * Read a `.md` file with full symlink containment (mirrors
+ * `runtime/memory-index.ts:readContainedFile`): the parent must canonicalise
+ * under `realBoundary`, the leaf is opened `O_NOFOLLOW`, and stat/read go through
+ * the held fd. Returns null on any rejection. Fail-closed.
+ */
+async function readContainedFile(
+  filePath: string,
+  realBoundary: string,
+): Promise<{ body: string } | null> {
+  const realParent = await safeRealpath(dirname(filePath))
+  if (realParent === null || !isPathUnder(realBoundary, realParent)) return null
+  let fh: Awaited<ReturnType<typeof fsOpen>> | null = null
+  try {
+    fh = await fsOpen(filePath, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW)
+    const stat = await fh.stat()
+    if (!stat.isFile()) return null
+    return { body: await fh.readFile('utf8') }
+  } catch {
+    return null
+  } finally {
+    if (fh !== null) await fh.close().catch(() => undefined)
+  }
 }
 
 /**

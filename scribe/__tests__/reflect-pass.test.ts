@@ -227,6 +227,26 @@ describe('reflect path containment (untrusted frontmatter slug)', () => {
     const secret = await readFile(join(owner, 'secret.md'), 'utf8')
     expect(secret).toContain('TOP SECRET') // never deleted
   })
+
+  test('a slug-alias page cannot cause deletion of an unrelated canonical page', async () => {
+    const owner = tmpOwner()
+    // The canonical page `good.md` (frontmatter slug matches filename).
+    await seed(owner, 'company', 'good', 'Good', 'Good is a real developer-tools company.', [
+      { ts: '2026-07-01T00:00:00.000Z', source: 'chat:owner', body: 'note' },
+    ])
+    // A hostile ALIAS: filename `evil.md`, frontmatter `slug: good` + identical body
+    // (would cluster with `good` and, under filename-from-slug reconstruction,
+    // resolve both cluster members to `good.md` → unlink the canonical page).
+    writeFileSync(
+      join(owner, 'entities', 'companies', 'evil.md'),
+      '---\nslug: good\ntype: company\nname: Good\n---\n\nGood is a real developer-tools company.\n\n---\n\n## Timeline\n\n',
+    )
+    const report = await runReflectPass(baseDeps(owner))
+    // The alias is rejected (identity = filename, mismatch skipped): no merge, and
+    // the canonical page survives intact.
+    expect(report.merged).toBe(0)
+    expect(existsSync(join(owner, 'entities', 'companies', 'good.md'))).toBe(true)
+  })
 })
 
 describe('reflect reserved-kind extraction (meeting/project/original)', () => {
