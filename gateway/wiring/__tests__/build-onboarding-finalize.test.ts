@@ -22,6 +22,7 @@ import { SqliteOnboardingStateStore } from '@neutronai/onboarding/interview/sqli
 import type { OnboardingStateStore } from '@neutronai/onboarding/interview/state-store.ts'
 import { slugifyProjectId } from '@neutronai/onboarding/wow-moment/project-identity.ts'
 import { MAX_ANALYSIS_PROJECTS } from '@neutronai/onboarding/interview/phase-prompts.ts'
+import { buildScaffoldMaterializer, ensureProjectRow } from '../project-create.ts'
 import {
   buildOnboardingFinalize,
   type OnboardingFinalizeDeps,
@@ -81,6 +82,16 @@ function makeHarness(): Harness {
     db,
     stateStore,
     personaLoader: { invalidate: (f?: string): void => void invalidated.push(f ?? '*') },
+    // C8 — the finalizer now receives the create-project seams injected (they
+    // live in the composition layer). Wire the REAL shared primitives so test
+    // behaviour is byte-identical to the pre-C8 in-module calls.
+    ensureProjectRow,
+    materializer: buildScaffoldMaterializer({
+      owner_home: ownerHome,
+      project_slug: PROJECT_SLUG,
+      db,
+      now: () => 1_700_000_000_000,
+    }),
     emitProjectsChanged: (uid: string): void => void projectsChanged.push(uid),
     emitOnboardingCompleted: (uid: string): void => void onboardingCompleted.push(uid),
     now: () => 1_700_000_000_000,
