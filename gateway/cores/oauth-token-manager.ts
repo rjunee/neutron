@@ -43,7 +43,7 @@ export type FetchLike = (
 export interface OAuthTokenManagerOptions {
   secretsStore: SecretsStore
   /** Frozen owner handle (branded `OwnerHandle`) — keys every SecretsStore row. */
-  internal_handle: OwnerHandle
+  owner_handle: OwnerHandle
   /** OAuth client id + secret — wired from env. */
   client_id: string
   client_secret: string
@@ -121,7 +121,7 @@ const META_LABEL_SUFFIX = ':meta'
 
 export class OAuthTokenManager {
   private readonly secretsStore: SecretsStore
-  private readonly internal_handle: OwnerHandle
+  private readonly owner_handle: OwnerHandle
   private readonly client_id: string
   private readonly client_secret: string
   private readonly refreshLeadMs: number
@@ -134,7 +134,7 @@ export class OAuthTokenManager {
 
   constructor(opts: OAuthTokenManagerOptions) {
     this.secretsStore = opts.secretsStore
-    this.internal_handle = opts.internal_handle
+    this.owner_handle = opts.owner_handle
     this.client_id = opts.client_id
     this.client_secret = opts.client_secret
     this.refreshLeadMs = opts.refresh_lead_ms ?? DEFAULT_REFRESH_LEAD_MS
@@ -271,13 +271,13 @@ export class OAuthTokenManager {
     // get the expires_at; SecretsStore.get returns the plaintext but
     // not the expiry, so this list call is necessary.
     const rows = await this.secretsStore.list({
-      internal_handle: this.internal_handle,
+      owner_handle: this.owner_handle,
       kind: 'oauth_token',
     })
     const accessRow = rows.find((r) => r.label === label) ?? null
     const expiresAt = accessRow?.expires_at ?? null
     const cached = await this.secretsStore.get({
-      internal_handle: this.internal_handle,
+      owner_handle: this.owner_handle,
       kind: 'oauth_token',
       label,
     })
@@ -297,7 +297,7 @@ export class OAuthTokenManager {
 
   private async runRefresh(label: string): Promise<string> {
     const refresh = await this.secretsStore.get({
-      internal_handle: this.internal_handle,
+      owner_handle: this.owner_handle,
       kind: 'oauth_token',
       label: refreshLabel(label),
     })
@@ -377,7 +377,7 @@ export class OAuthTokenManager {
    */
   async disconnect(label: string): Promise<{ deleted: boolean }> {
     const refresh = await this.secretsStore.get({
-      internal_handle: this.internal_handle,
+      owner_handle: this.owner_handle,
       kind: 'oauth_token',
       label: refreshLabel(label),
     })
@@ -392,7 +392,7 @@ export class OAuthTokenManager {
       }
     }
     const rows = await this.secretsStore.list({
-      internal_handle: this.internal_handle,
+      owner_handle: this.owner_handle,
       kind: 'oauth_token',
     })
     let deleted = false
@@ -409,7 +409,7 @@ export class OAuthTokenManager {
 
   async getStatus(label: string): Promise<OAuthTokenStatus> {
     const rows = await this.secretsStore.list({
-      internal_handle: this.internal_handle,
+      owner_handle: this.owner_handle,
       kind: 'oauth_token',
     })
     const accessRow = rows.find((r) => r.label === label) ?? null
@@ -429,7 +429,7 @@ export class OAuthTokenManager {
     let meta: OAuthTokenMeta | null = null
     if (metaRow !== null) {
       const raw = await this.secretsStore.get({
-        internal_handle: this.internal_handle,
+        owner_handle: this.owner_handle,
         kind: 'oauth_token',
         label: metaLabel(label),
       })
@@ -460,7 +460,7 @@ export class OAuthTokenManager {
     expires_at?: number
   }): Promise<void> {
     const existing = await this.secretsStore.list({
-      internal_handle: this.internal_handle,
+      owner_handle: this.owner_handle,
       kind: input.kind,
     })
     const match = existing.find((r) => r.label === input.label)
@@ -471,13 +471,13 @@ export class OAuthTokenManager {
       return
     }
     const putInput: {
-      internal_handle: OwnerHandle
+      owner_handle: OwnerHandle
       kind: 'oauth_token'
       label: string
       plaintext: string
       expires_at?: number
     } = {
-      internal_handle: this.internal_handle,
+      owner_handle: this.owner_handle,
       kind: input.kind,
       label: input.label,
       plaintext: input.plaintext,
@@ -491,7 +491,7 @@ export class OAuthTokenManager {
     update: (prev: OAuthTokenMeta) => OAuthTokenMeta,
   ): Promise<void> {
     const raw = await this.secretsStore.get({
-      internal_handle: this.internal_handle,
+      owner_handle: this.owner_handle,
       kind: 'oauth_token',
       label: metaLabel(label),
     })

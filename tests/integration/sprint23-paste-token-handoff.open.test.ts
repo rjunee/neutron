@@ -119,21 +119,21 @@ test('owner pastes Max OAuth token → probe 200 → persist → resolver return
   // 2. Persist — writes BOTH refresh AND access rows (same value; paste
   //    tokens have no separate access/refresh distinction).
   const persisted = await maxClient.persistPasteToken({
-    internal_handle: OWNER,
+    owner_handle: OWNER,
     token: PASTED_TOKEN,
   })
-  expect(persisted.internal_handle).toBe(OWNER)
+  expect(persisted.owner_handle).toBe(OWNER)
 
   expect(
     await secrets.get({
-      internal_handle: OWNER,
+      owner_handle: OWNER,
       kind: 'max_oauth_refresh',
       label: 'default',
     }),
   ).toBe(PASTED_TOKEN)
   expect(
     await secrets.get({
-      internal_handle: OWNER,
+      owner_handle: OWNER,
       kind: 'max_oauth_access',
       label: 'default:access',
     }),
@@ -143,7 +143,7 @@ test('owner pastes Max OAuth token → probe 200 → persist → resolver return
   const apiKeys = new ApiKeyStore({ db, secrets })
   const maxOAuth = wrapMaxOAuthSource(maxClient)
   const pool = await resolveLlmCredentials({
-    internal_handle: OWNER,
+    owner_handle: OWNER,
     apiKeys,
     provider: 'anthropic',
     env_vars: ['ANTHROPIC_API_KEY_ALICE', 'ANTHROPIC_API_KEY'],
@@ -174,13 +174,13 @@ test('returning owner with pre-seeded Max tokens resolves to CLAUDE_CODE_OAUTH_T
   // Pre-seed Max paste-token rows (returning-owner path — no probe, no
   // re-paste; the encrypted store already holds the credential).
   await secrets.put({
-    internal_handle: OWNER,
+    owner_handle: OWNER,
     kind: 'max_oauth_refresh',
     label: 'default',
     plaintext: 'pre-seeded-token',
   })
   await secrets.put({
-    internal_handle: OWNER,
+    owner_handle: OWNER,
     kind: 'max_oauth_access',
     label: 'default:access',
     plaintext: 'pre-seeded-token',
@@ -201,7 +201,7 @@ test('returning owner with pre-seeded Max tokens resolves to CLAUDE_CODE_OAUTH_T
   const apiKeys = new ApiKeyStore({ db, secrets })
   const maxOAuth = wrapMaxOAuthSource(maxClient)
   const pool = await resolveLlmCredentials({
-    internal_handle: OWNER,
+    owner_handle: OWNER,
     apiKeys,
     provider: 'anthropic',
     env_vars: ['ANTHROPIC_API_KEY_ALICE', 'ANTHROPIC_API_KEY'],
@@ -236,12 +236,12 @@ test('re-paste replaces the stored token (idempotent) and the resolver returns t
     now: () => NOW_FIXED,
   })
 
-  await maxClient.persistPasteToken({ internal_handle: OWNER, token: 'first' })
-  await maxClient.persistPasteToken({ internal_handle: OWNER, token: 'second' })
+  await maxClient.persistPasteToken({ owner_handle: OWNER, token: 'first' })
+  await maxClient.persistPasteToken({ owner_handle: OWNER, token: 'second' })
 
   // Only the latest value survives for the default label.
   const refreshList = await secrets.list({
-    internal_handle: OWNER,
+    owner_handle: OWNER,
     kind: 'max_oauth_refresh',
   })
   expect(refreshList.filter((r) => r.label === 'default')).toHaveLength(1)
@@ -249,7 +249,7 @@ test('re-paste replaces the stored token (idempotent) and the resolver returns t
   const apiKeys = new ApiKeyStore({ db, secrets })
   const maxOAuth = wrapMaxOAuthSource(maxClient)
   const pool = await resolveLlmCredentials({
-    internal_handle: OWNER,
+    owner_handle: OWNER,
     apiKeys,
     provider: 'anthropic',
     env_vars: ['ANTHROPIC_API_KEY'],

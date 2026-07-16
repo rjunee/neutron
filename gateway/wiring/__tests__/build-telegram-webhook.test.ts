@@ -89,7 +89,7 @@ async function captureLogs<T>(
 
 async function seedBotToken(): Promise<void> {
   await secrets.put({
-    internal_handle: OWNER,
+    owner_handle: OWNER,
     kind: 'bot_token',
     label: 'telegram',
     plaintext: 'tok-abc',
@@ -98,7 +98,7 @@ async function seedBotToken(): Promise<void> {
 
 async function seedWebhookSecret(value = 'super-secret-token-abc123'): Promise<void> {
   await secrets.put({
-    internal_handle: OWNER,
+    owner_handle: OWNER,
     kind: 'webhook_secret',
     label: 'telegram',
     plaintext: value,
@@ -107,7 +107,7 @@ async function seedWebhookSecret(value = 'super-secret-token-abc123'): Promise<v
 
 async function seedBotUserId(value: string): Promise<void> {
   await secrets.put({
-    internal_handle: OWNER,
+    owner_handle: OWNER,
     kind: 'channel_metadata',
     label: 'telegram-bot-user-id',
     plaintext: value,
@@ -122,7 +122,7 @@ describe('buildTelegramWebhookSurface', () => {
 
     const recv = recordingReceiver()
     const surface = await buildTelegramWebhookSurface({
-      internal_handle: OWNER,
+      owner_handle: OWNER,
       secrets,
       receiver: recv,
     })
@@ -172,7 +172,7 @@ describe('buildTelegramWebhookSurface', () => {
     await seedBotUserId('123456789')
 
     const surface = await buildTelegramWebhookSurface({
-      internal_handle: OWNER,
+      owner_handle: OWNER,
       secrets,
       receiver: recordingReceiver(),
     })
@@ -200,7 +200,7 @@ describe('buildTelegramWebhookSurface', () => {
 
     const binds: Array<{ payload: string; from_user_id: string; chat_id: string }> = []
     const surface = await buildTelegramWebhookSurface({
-      internal_handle: OWNER,
+      owner_handle: OWNER,
       secrets,
       receiver: recordingReceiver(),
       on_bind_command: async (cmd) => {
@@ -242,7 +242,7 @@ describe('buildTelegramWebhookSurface', () => {
 
     const { result, info, warn } = await captureLogs(() =>
       buildTelegramWebhookSurface({
-        internal_handle: OWNER,
+        owner_handle: OWNER,
         secrets,
         receiver: recv,
       }),
@@ -260,7 +260,7 @@ describe('buildTelegramWebhookSurface', () => {
 
     const { result, info, warn } = await captureLogs(() =>
       buildTelegramWebhookSurface({
-        internal_handle: OWNER,
+        owner_handle: OWNER,
         secrets,
         receiver: recv,
       }),
@@ -278,7 +278,7 @@ describe('buildTelegramWebhookSurface', () => {
 
     const { result, info, warn } = await captureLogs(() =>
       buildTelegramWebhookSurface({
-        internal_handle: OWNER,
+        owner_handle: OWNER,
         secrets,
         receiver: recv,
       }),
@@ -296,7 +296,7 @@ describe('buildTelegramWebhookSurface', () => {
 
     const { result, info, warn } = await captureLogs(() =>
       buildTelegramWebhookSurface({
-        internal_handle: OWNER,
+        owner_handle: OWNER,
         secrets,
         receiver: recv,
       }),
@@ -321,7 +321,7 @@ describe('buildTelegramWebhookSurface', () => {
 
     const { result, info, warn } = await captureLogs(() =>
       buildTelegramWebhookSurface({
-        internal_handle: OWNER,
+        owner_handle: OWNER,
         secrets,
         receiver: recv,
       }),

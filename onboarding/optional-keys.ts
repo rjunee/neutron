@@ -51,7 +51,7 @@ export type OptionalKeyProvider = 'anthropic' | 'openai' | 'gemini'
  */
 export interface OptionalKeyApiKeyStore {
   add(input: {
-    internal_handle: string
+    owner_handle: string
     provider: OptionalKeyProvider
     label: string
     plaintext: string
@@ -233,8 +233,8 @@ export interface StoreOptionalKeyResult {
 }
 
 export interface StoreOptionalKeyInput {
-  /** Frozen `internal_handle` for the instance (see auth/secrets-store.ts). */
-  internal_handle: string
+  /** Frozen `owner_handle` for the instance (see auth/secrets-store.ts). */
+  owner_handle: string
   id: OptionalKeyId
   plaintext: string
   /** Override the default ApiKeyStore label (e.g. to avoid a dup). */
@@ -300,7 +300,7 @@ export async function storeOptionalKey(
 
   try {
     await apiKeys.add({
-      internal_handle: input.internal_handle,
+      owner_handle: input.owner_handle,
       provider,
       label,
       plaintext: input.plaintext.trim(),

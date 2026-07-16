@@ -7,7 +7,7 @@
  *   - No Caddy, no sudoers, no `/srv/neutron`, no slug-rename
  *     machinery, no identity-service-network-call.
  *   - The "owner" is whoever invoked `bun start`; the Open boot shell
- *     constructs this adapter with the single instance's `internal_handle`
+ *     constructs this adapter with the single instance's `owner_handle`
  *     + `url_slug` + `owner_home` baked in.
  *
  * Managed-only operations (slug-rename, install-token, connect
@@ -277,8 +277,8 @@ export function buildLocalPlatformAdapter(
       return null
     },
 
-    resolveOwnerByInternalHandle(internal_handle: string): PlatformInstanceInfo | null {
-      if (internal_handle === selfOwner.internal_handle) return selfOwner
+    resolveOwnerByOwnerHandle(owner_handle: string): PlatformInstanceInfo | null {
+      if (owner_handle === selfOwner.owner_handle) return selfOwner
       return null
     },
 

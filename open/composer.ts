@@ -620,7 +620,7 @@ export function buildOpenGraphComposer(
     const owner_home = resolveNeutronHome(env)
     const static_dir = resolveLandingStaticDir(env)
     // Single-owner: the frozen instance handle IS the boot slug.
-    const internal_handle = project_slug
+    const owner_handle = project_slug
     const instanceInfo = resolveOpenInstanceInfo({ project_slug, owner_home, env })
 
     // S2 (b) — the BIND HOST decides whether the predictable dev-bypass bearer
@@ -744,7 +744,7 @@ export function buildOpenGraphComposer(
         : undefined
     const wiringCtx: OpenWiringContext = {
       llmPool,
-      internal_handle,
+      owner_handle,
       owner_home,
       project_slug,
       env,
@@ -842,7 +842,7 @@ export function buildOpenGraphComposer(
           build_substrate: makeEphemeralSubstrate('cc-dispatch'),
         }),
         report: dispatchReport,
-        instance_key: internal_handle,
+        instance_key: owner_handle,
         // Phase 2b — the board-binding chokepoint: every dispatch must carry a
         // valid, sufficiently-specified board_item_id (else rejected) and is
         // bound to its Plan item for the duration of the run.
@@ -953,9 +953,9 @@ export function buildOpenGraphComposer(
       llmPool !== null
         ? buildLlmCallSubstrate({
             pool: llmPool,
-            substrate_instance_id: `cc-synthesis-${internal_handle}`,
+            substrate_instance_id: `cc-synthesis-${owner_handle}`,
             cwd: owner_home,
-            internal_handle,
+            owner_handle,
             user_id: OWNER_USER_ID,
             project_slug,
             skip_permissions: true,
@@ -1152,7 +1152,7 @@ export function buildOpenGraphComposer(
     const phaseSpecResolver = await buildPhaseSpecResolver({
       substrate: llmCallSubstrate,
       env,
-      internal_handle,
+      owner_handle,
       log_slug: project_slug,
       owner_data_dir: owner_home,
       personaLoader,
@@ -1373,7 +1373,7 @@ export function buildOpenGraphComposer(
     // The `buildLandingStack({...})` call — the onboarding InterviewEngine + chat
     // UI + WS surface — moves into `wireLandingStack(ctx, deps)`. Fields already
     // on the narrow wiring context (`db` / `project_slug` / `owner_home` /
-    // `internal_handle` / `env`) come from `wiringCtx`; the ~20 composed locals
+    // `owner_handle` / `env`) come from `wiringCtx`; the ~20 composed locals
     // (the late-bound routers, install-token handler, onboarding LLM hooks, the
     // synthesis import substrate, the shared GBrain sync hook) thread through the
     // typed `deps` bag. `importUseSynthesis: true` and the per-request

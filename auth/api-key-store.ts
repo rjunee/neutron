@@ -7,10 +7,10 @@
  * decrypting every secret on every list call.
  *
  * **2026-05-12 rename-canonicalisation fix:** identity column is the
- * owner's FROZEN `internal_handle` (not the mutable `url_slug`). See
+ * owner's FROZEN `owner_handle` (not the mutable `url_slug`). See
  * `auth/secrets-store.ts` file header for the full rationale. The SQL
  * column is still named `project_slug` for compat; the TypeScript surface
- * uses `internal_handle` to make the contract explicit.
+ * uses `owner_handle` to make the contract explicit.
  *
  * Migration 0009 adds the `api_keys` table.
  */
@@ -24,11 +24,11 @@ export type ApiKeyProvider = 'anthropic' | 'openai' | 'gemini'
 export interface ApiKeyRow {
   id: string
   /**
-   * Frozen `internal_handle` for the owning project. SQL column is named
+   * Frozen `owner_handle` for the owning project. SQL column is named
    * `project_slug` for historical reasons; the value is the FROZEN
    * registry PK, not the mutable url_slug.
    */
-  internal_handle: string
+  owner_handle: string
   provider: ApiKeyProvider
   label: string
   secret_id: string
@@ -38,7 +38,7 @@ export interface ApiKeyRow {
 
 interface ApiKeyDbRow {
   id: string
-  /** SQL column name remains `project_slug`; value is the frozen internal_handle. */
+  /** SQL column name remains `project_slug`; value is the frozen owner_handle. */
   project_slug: string
   provider: string
   label: string
@@ -61,16 +61,16 @@ export class ApiKeyStoreError extends Error {
 }
 
 export interface AddApiKeyInput {
-  /** Frozen `internal_handle` (branded `OwnerHandle`) — see file header. */
-  internal_handle: OwnerHandle
+  /** Frozen `owner_handle` (branded `OwnerHandle`) — see file header. */
+  owner_handle: OwnerHandle
   provider: ApiKeyProvider
   label: string
   plaintext: string
 }
 
 export interface ListApiKeysInput {
-  /** Frozen `internal_handle` (branded `OwnerHandle`) — see file header. */
-  internal_handle: OwnerHandle
+  /** Frozen `owner_handle` (branded `OwnerHandle`) — see file header. */
+  owner_handle: OwnerHandle
   provider?: ApiKeyProvider
 }
 
@@ -97,7 +97,7 @@ export class ApiKeyStore {
     let putResult: { id: string }
     try {
       putResult = await this.secrets.put({
-        internal_handle: input.internal_handle,
+        owner_handle: input.owner_handle,
         kind: 'byo_api_key',
         label: `${input.provider}:${input.label}`,
         plaintext: input.plaintext,
@@ -106,7 +106,7 @@ export class ApiKeyStore {
       if (err instanceof SecretsStoreError && err.code === 'duplicate_label') {
         throw new ApiKeyStoreError(
           'duplicate_label',
-          `api key already exists for instance=${input.internal_handle} provider=${input.provider} label=${input.label}`,
+          `api key already exists for instance=${input.owner_handle} provider=${input.provider} label=${input.label}`,
           err,
         )
       }
@@ -117,7 +117,7 @@ export class ApiKeyStore {
         `INSERT INTO api_keys
            (id, project_slug, provider, label, secret_id, added_at, last_used_at)
          VALUES (?, ?, ?, ?, ?, ?, NULL)`,
-        [id, input.internal_handle, input.provider, input.label, putResult.id, now],
+        [id, input.owner_handle, input.provider, input.label, putResult.id, now],
       )
     } catch (err) {
       // Rollback the secret row to avoid orphaning a ciphertext.
@@ -129,7 +129,7 @@ export class ApiKeyStore {
       if (isUniqueViolation(err)) {
         throw new ApiKeyStoreError(
           'duplicate_label',
-          `api_keys row exists for instance=${input.internal_handle} provider=${input.provider} label=${input.label}`,
+          `api_keys row exists for instance=${input.owner_handle} provider=${input.provider} label=${input.label}`,
           err,
         )
       }
@@ -145,24 +145,24 @@ export class ApiKeyStore {
             .all<ApiKeyDbRow, [string]>(
               `SELECT id, project_slug, provider, label, secret_id, added_at, last_used_at
                  FROM api_keys WHERE project_slug = ? ORDER BY added_at DESC`,
-              [input.internal_handle],
+              [input.owner_handle],
             )
         : this.db
             .all<ApiKeyDbRow, [string, string]>(
               `SELECT id, project_slug, provider, label, secret_id, added_at, last_used_at
                  FROM api_keys WHERE project_slug = ? AND provider = ? ORDER BY added_at DESC`,
-              [input.internal_handle, input.provider],
+              [input.owner_handle, input.provider],
             )
     return rows.map(toRow)
   }
 
   async resolveSecret(input: {
-    internal_handle: OwnerHandle
+    owner_handle: OwnerHandle
     provider: ApiKeyProvider
     label: string
   }): Promise<string | null> {
     const plaintext = await this.secrets.get({
-      internal_handle: input.internal_handle,
+      owner_handle: input.owner_handle,
       kind: 'byo_api_key',
       label: `${input.provider}:${input.label}`,
     })
@@ -183,7 +183,7 @@ export class ApiKeyStore {
   }
 
   async delete(input: {
-    internal_handle: OwnerHandle
+    owner_handle: OwnerHandle
     provider: ApiKeyProvider
     label: string
   }): Promise<void> {
@@ -193,11 +193,11 @@ export class ApiKeyStore {
           `SELECT id, project_slug, provider, label, secret_id, added_at, last_used_at
              FROM api_keys WHERE project_slug = ? AND provider = ? AND label = ?`,
         )
-        .get(input.internal_handle, input.provider, input.label)
+        .get(input.owner_handle, input.provider, input.label)
       if (row === null) {
         throw new ApiKeyStoreError(
           'not_found',
-          `api key not found for instance=${input.internal_handle} provider=${input.provider} label=${input.label}`,
+          `api key not found for instance=${input.owner_handle} provider=${input.provider} label=${input.label}`,
         )
       }
       await tx.run(`DELETE FROM api_keys WHERE id = ?`, [row.id])
@@ -205,7 +205,7 @@ export class ApiKeyStore {
     // Drop the secret row outside the transaction; the secrets store has its
     // own connection-level locking and lives in the same DB.
     try {
-      const all = await this.secrets.list({ internal_handle: input.internal_handle, kind: 'byo_api_key' })
+      const all = await this.secrets.list({ owner_handle: input.owner_handle, kind: 'byo_api_key' })
       const matching = all.find(
         (r) => r.label === `${input.provider}:${input.label}`,
       )
@@ -231,7 +231,7 @@ function toRow(row: ApiKeyDbRow): ApiKeyRow {
   }
   return {
     id: row.id,
-    internal_handle: row.project_slug,
+    owner_handle: row.project_slug,
     provider: row.provider,
     label: row.label,
     secret_id: row.secret_id,

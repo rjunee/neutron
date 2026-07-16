@@ -92,7 +92,7 @@ async function startHarness(): Promise<Harness> {
   // first OAuth completes, so `/status` answers `not-connected` instead of 404.
   const store = new FederatedTokenStore({
     secrets,
-    internal_handle: INTERNAL_HANDLE,
+    owner_handle: INTERNAL_HANDLE,
     auth_base_url: AUTH_BASE,
   })
   const surface = createAppConnectAuthSurface({

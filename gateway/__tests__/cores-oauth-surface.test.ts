@@ -128,7 +128,7 @@ async function makeBench(): Promise<Bench> {
   const pending = new CoresOAuthPendingStore({ db })
   const tokens = new OAuthTokenManager({
     secretsStore: secrets,
-    internal_handle: OWNER,
+    owner_handle: OWNER,
     client_id: 'cid',
     client_secret: 'csecret',
     fetch: fakeFetch,

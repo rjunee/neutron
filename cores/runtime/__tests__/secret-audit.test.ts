@@ -89,13 +89,13 @@ class FakePlatformStore implements PlatformSecretsStore {
   rows = new Map<string, { id: string; plaintext: string; expires_at?: number }>()
   nextId = 1
   failNext = false
-  async get(input: { internal_handle: string; kind: string; label: string }): Promise<string | null> {
+  async get(input: { owner_handle: string; kind: string; label: string }): Promise<string | null> {
     if (this.failNext) { this.failNext = false; throw new Error('boom') }
-    const r = this.rows.get(`${input.internal_handle}:${input.kind}:${input.label}`)
+    const r = this.rows.get(`${input.owner_handle}:${input.kind}:${input.label}`)
     return r?.plaintext ?? null
   }
-  async put(input: { internal_handle: string; kind: string; label: string; plaintext: string; expires_at?: number }): Promise<{ id: string }> {
-    const k = `${input.internal_handle}:${input.kind}:${input.label}`
+  async put(input: { owner_handle: string; kind: string; label: string; plaintext: string; expires_at?: number }): Promise<{ id: string }> {
+    const k = `${input.owner_handle}:${input.kind}:${input.label}`
     if (this.rows.has(k)) throw new Error('duplicate_label')
     const id = `id-${this.nextId++}`
     const row: { id: string; plaintext: string; expires_at?: number } = { id, plaintext: input.plaintext }
@@ -103,11 +103,11 @@ class FakePlatformStore implements PlatformSecretsStore {
     this.rows.set(k, row)
     return { id }
   }
-  async list(input: { internal_handle: string; kind?: string }): Promise<Array<{ id: string; kind: string; label: string }>> {
+  async list(input: { owner_handle: string; kind?: string }): Promise<Array<{ id: string; kind: string; label: string }>> {
     const out: Array<{ id: string; kind: string; label: string }> = []
     for (const [k, v] of this.rows) {
       const [t, kind, label] = k.split(':') as [string, string, string]
-      if (t !== input.internal_handle) continue
+      if (t !== input.owner_handle) continue
       if (input.kind !== undefined && kind !== input.kind) continue
       out.push({ id: v.id, kind, label })
     }
@@ -128,9 +128,9 @@ class FakePlatformStore implements PlatformSecretsStore {
 
 test('buildAuditedSecretsStore writes ok-row on get', async () => {
   const store = new FakePlatformStore()
-  await store.put({ internal_handle: 't1', kind: 'oauth_token', label: 'google', plaintext: 'tok' })
+  await store.put({ owner_handle: 't1', kind: 'oauth_token', label: 'google', plaintext: 'tok' })
   const wrapped = buildAuditedSecretsStore(store, { audit, project_slug: 't1', core_slug: 'tasks' })
-  const got = await wrapped.get({ internal_handle: 't1', kind: 'oauth_token', label: 'google' })
+  const got = await wrapped.get({ owner_handle: 't1', kind: 'oauth_token', label: 'google' })
   expect(got).toBe('tok')
   const rows = await audit.list({ project_slug: 't1', core_slug: 'tasks' })
   // 1 row from the put (which wasn't audited — direct call) + 1 row from get
@@ -141,7 +141,7 @@ test('buildAuditedSecretsStore writes ok-row on get', async () => {
 test('buildAuditedSecretsStore writes not_found on missing', async () => {
   const store = new FakePlatformStore()
   const wrapped = buildAuditedSecretsStore(store, { audit, project_slug: 't1', core_slug: 'tasks' })
-  expect(await wrapped.get({ internal_handle: 't1', kind: 'oauth_token', label: 'google' })).toBeNull()
+  expect(await wrapped.get({ owner_handle: 't1', kind: 'oauth_token', label: 'google' })).toBeNull()
   const rows = await audit.list({ project_slug: 't1', core_slug: 'tasks' })
   expect(rows[0]?.op).toBe('get')
   expect(rows[0]?.outcome).toBe('not_found')
@@ -151,7 +151,7 @@ test('buildAuditedSecretsStore writes error row + rethrows', async () => {
   const store = new FakePlatformStore()
   store.failNext = true
   const wrapped = buildAuditedSecretsStore(store, { audit, project_slug: 't1', core_slug: 'tasks' })
-  await expect(wrapped.get({ internal_handle: 't1', kind: 'oauth_token', label: 'google' })).rejects.toThrow('boom')
+  await expect(wrapped.get({ owner_handle: 't1', kind: 'oauth_token', label: 'google' })).rejects.toThrow('boom')
   const rows = await audit.list({ project_slug: 't1', core_slug: 'tasks' })
   expect(rows[0]?.outcome).toBe('error')
   expect(rows[0]?.error).toBe('boom')
@@ -160,7 +160,7 @@ test('buildAuditedSecretsStore writes error row + rethrows', async () => {
 test('buildAuditedSecretsStore audits put + rotate', async () => {
   const store = new FakePlatformStore()
   const wrapped = buildAuditedSecretsStore(store, { audit, project_slug: 't1', core_slug: 'tasks' })
-  await wrapped.put({ internal_handle: 't1', kind: 'oauth_token', label: 'google', plaintext: 'tok' })
+  await wrapped.put({ owner_handle: 't1', kind: 'oauth_token', label: 'google', plaintext: 'tok' })
   await wrapped.rotate?.('id-1', 'tok2')
   const rows = await audit.list({ project_slug: 't1' })
   expect(rows.find((r) => r.op === 'put' && r.outcome === 'ok')).toBeDefined()
@@ -170,7 +170,7 @@ test('buildAuditedSecretsStore audits put + rotate', async () => {
 test('buildAuditedSecretsStore audits list call', async () => {
   const store = new FakePlatformStore()
   const wrapped = buildAuditedSecretsStore(store, { audit, project_slug: 't1', core_slug: 'tasks' })
-  await wrapped.list({ internal_handle: 't1' })
+  await wrapped.list({ owner_handle: 't1' })
   const rows = await audit.list({ project_slug: 't1' })
   expect(rows[0]?.op).toBe('list')
   expect(rows[0]?.outcome).toBe('ok')
@@ -221,9 +221,9 @@ test('recordToolCall carries per-call author_id', async () => {
 test('buildAuditedSecretsStore stamps the log default author on get rows', async () => {
   const ownerAudit = new SecretAuditLog({ db: projectDb, now: () => now, author_id: 'owner' })
   const store = new FakePlatformStore()
-  await store.put({ internal_handle: 't1', kind: 'oauth_token', label: 'google', plaintext: 'tok' })
+  await store.put({ owner_handle: 't1', kind: 'oauth_token', label: 'google', plaintext: 'tok' })
   const wrapped = buildAuditedSecretsStore(store, { audit: ownerAudit, project_slug: 't1', core_slug: 'tasks' })
-  await wrapped.get({ internal_handle: 't1', kind: 'oauth_token', label: 'google' })
+  await wrapped.get({ owner_handle: 't1', kind: 'oauth_token', label: 'google' })
   const rows = await ownerAudit.list({ project_slug: 't1', core_slug: 'tasks' })
   expect(rows.find((r) => r.op === 'get')?.author_id).toBe('owner')
 })

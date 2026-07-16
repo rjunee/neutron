@@ -211,12 +211,12 @@ export async function installCore(
     { manifest: core.manifest },
     {
       // 2026-05-12 — the SDK now keys SecretsStore reads on the FROZEN
-      // `internal_handle` (see `auth/secrets-store.ts` header). The
+      // `owner_handle` (see `auth/secrets-store.ts` header). The
       // cores lifecycle's `project_slug` field carries the same value
-      // at install time (internal_handle === project_slug for a fresh
-      // instance). A future plumb-through of internal_handle distinct
+      // at install time (owner_handle === project_slug for a fresh
+      // instance). A future plumb-through of owner_handle distinct
       // from project_slug lands in a follow-up.
-      internal_handle: input.project_slug,
+      owner_handle: input.project_slug,
       store: auditedStore,
       core_id: core.slug,
     },
@@ -444,8 +444,8 @@ async function persistOrRotate(input: {
   /**
    * 2026-05-12 — the Cores lifecycle uses `project_slug` as its
    * caller-facing identity; on-disk SecretsStore writes are keyed on
-   * the FROZEN `internal_handle`. At first install
-   * `project_slug === internal_handle`, so this mapping is a no-op for
+   * the FROZEN `owner_handle`. At first install
+   * `project_slug === owner_handle`, so this mapping is a no-op for
    * fresh instances; after a rename, the caller MUST pass the frozen
    * handle here. See `auth/secrets-store.ts` file header. Branded `OwnerHandle`
    * so the "MUST pass the frozen handle" contract is compiler-enforced.
@@ -457,7 +457,7 @@ async function persistOrRotate(input: {
   expires_at?: number
 }): Promise<void> {
   const existing = await input.secretsStore.list({
-    internal_handle: input.project_slug,
+    owner_handle: input.project_slug,
     kind: input.kind,
   })
   const match = existing.find((r) => r.label === input.label)
@@ -468,13 +468,13 @@ async function persistOrRotate(input: {
     return
   }
   const putInput: {
-    internal_handle: OwnerHandle
+    owner_handle: OwnerHandle
     kind: 'byo_api_key' | 'webhook_secret' | 'oauth_token' | 'oauth_client'
     label: string
     plaintext: string
     expires_at?: number
   } = {
-    internal_handle: input.project_slug,
+    owner_handle: input.project_slug,
     kind: input.kind,
     label: input.label,
     plaintext: input.plaintext,
@@ -559,7 +559,7 @@ export async function uninstallCore(input: UninstallCoreInput): Promise<void> {
   // package directory cleanup). The audited platform store's `list`
   // returns every row for the project; we filter against the
   // capabilities we recorded at install time.
-  const rows = await input.secretsStore.list({ internal_handle: input.project_slug })
+  const rows = await input.secretsStore.list({ owner_handle: input.project_slug })
   // Match anything kind∈managed-secret-kinds AND label that the install
   // capabilities suggest is owned by this Core. Conservative: we only
   // delete rows whose (kind, label) match the snapshot we'd have audited
@@ -702,7 +702,7 @@ export async function upgradeCore(
   if (added.length > 0) {
     // Collect labels already persisted for this project.
     const existingLabels = new Set<string>()
-    const all = await input.secretsStore.list({ internal_handle: input.project_slug })
+    const all = await input.secretsStore.list({ owner_handle: input.project_slug })
     for (const r of all) existingLabels.add(`${r.kind}:${r.label}`)
 
     // Re-run the install-secrets driver with a manifest filtered down

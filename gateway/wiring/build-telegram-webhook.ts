@@ -48,16 +48,16 @@ const moduleLog = createLogger('telegram-webhook-composer')
 
 export interface BuildTelegramWebhookSurfaceInput {
   /**
-   * 2026-05-12 — frozen `internal_handle` for the SecretsStore lookup
+   * 2026-05-12 — frozen `owner_handle` for the SecretsStore lookup
    * (see `auth/secrets-store.ts` file header). Was previously
    * `project_slug`; the rename is mandatory because renamed instances
    * keep their bot secrets at the original handle.
    */
-  internal_handle: string
+  owner_handle: string
   /**
    * Mutable `url_slug` — used ONLY for log readability so journald
    * greps match the user-facing identifier. Optional; defaults to
-   * `internal_handle` when unset.
+   * `owner_handle` when unset.
    */
   url_slug?: string
   secrets: SecretsStore
@@ -112,23 +112,23 @@ export async function buildTelegramWebhookSurface(
   const log_slug =
     input.url_slug !== undefined && input.url_slug.length > 0
       ? input.url_slug
-      : input.internal_handle
-  // `internal_handle` is the FROZEN registry PK (distinct from `url_slug`
+      : input.owner_handle
+  // `owner_handle` is the FROZEN registry PK (distinct from `url_slug`
   // above); brand it once for the secret lookups.
-  const owner_handle = asOwnerHandle(input.internal_handle)
+  const owner_handle = asOwnerHandle(input.owner_handle)
   const [botToken, webhookSecret, botUserIdRaw] = await Promise.all([
     input.secrets.get({
-      internal_handle: owner_handle,
+      owner_handle,
       kind: 'bot_token',
       label: 'telegram',
     }),
     input.secrets.get({
-      internal_handle: owner_handle,
+      owner_handle,
       kind: 'webhook_secret',
       label: 'telegram',
     }),
     input.secrets.get({
-      internal_handle: owner_handle,
+      owner_handle,
       kind: 'channel_metadata',
       label: 'telegram-bot-user-id',
     }),

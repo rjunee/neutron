@@ -66,7 +66,7 @@ function makeCtx(
       strategy: 'fill_first',
       credentials: [{ id: 'anthropic:test', kind: 'api_key', secret: 'sk-test' }],
     }),
-    internal_handle: 'owner',
+    owner_handle: 'owner',
     owner_home: '/tmp/owner-home',
     project_slug: 'owner',
     env: {} as NodeJS.ProcessEnv,

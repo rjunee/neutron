@@ -77,7 +77,7 @@ test('BLOCKER #3 — composer default-builds a non-null ImportResumeReadinessPro
     project_slug: OWNER,
     owner_home: ownerHome,
     static_dir: workdir,
-    internal_handle: 't-aaaaaaaa',
+    owner_handle: 't-aaaaaaaa',
     // Deliberately omitted: importUseSynthesis / importResumeReadiness.
     // The probe default-build (build-landing-stack.ts, the
     // `importResumeReadiness` const) is unconditional — it does not
@@ -157,7 +157,7 @@ test('K11c (Codex r1) — a legacy non-zip source is NOT resumable even with a f
     project_slug: OWNER,
     owner_home: ownerHome,
     static_dir: workdir,
-    internal_handle: 't-aaaaaaaa',
+    owner_handle: 't-aaaaaaaa',
   })
   const probe = pieces.importResumeReadiness!
   // A legacy `gmail-oauth` row can still exist (migration 0040's
@@ -191,7 +191,7 @@ test('BLOCKER #3 — explicit null override still opts out of the probe (legacy 
     project_slug: OWNER,
     owner_home: ownerHome,
     static_dir: workdir,
-    internal_handle: 't-aaaaaaaa',
+    owner_handle: 't-aaaaaaaa',
     importResumeReadiness: null,
   })
   expect(pieces.importResumeReadiness).toBeNull()

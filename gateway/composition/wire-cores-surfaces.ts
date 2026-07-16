@@ -60,7 +60,7 @@ export async function wireCoresSurfaces(
       const { OAuthTokenManager } = await import('../cores/oauth-token-manager.ts')
       const tokens = new OAuthTokenManager({
         secretsStore,
-        internal_handle: asOwnerHandle(input.project_slug),
+        owner_handle: asOwnerHandle(input.project_slug),
         client_id: input.cores.oauth?.clientId ?? '',
         client_secret: input.cores.oauth?.clientSecret ?? '',
         onInvalidGrant: async (label) => {

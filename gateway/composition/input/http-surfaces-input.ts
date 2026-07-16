@@ -72,14 +72,14 @@ export interface HttpSurfacesCompositionInput {
   }
   /**
    * P1.5 § 1.5.5 — POST /internal/cache-invalidate handler. Production
-   * wires the JWT slug-history LRU's `invalidateInternalHandle` callback
+   * wires the JWT slug-history LRU's `invalidateOwnerHandle` callback
    * here so the rename orchestrator can push-invalidate after a rename
    * commits. Optional; when omitted the route falls through to the
    * default 404 chain (the LRU's pull-style 5min TTL fallback covers
    * the gap with acceptable staleness, per P1.5 detailed design § 1.5.5).
    */
   internal_cache_invalidate?: {
-    invalidateInternalHandle: (internal_handle: string) => void
+    invalidateOwnerHandle: (owner_handle: string) => void
     expectedToken: string
   }
   /**

@@ -70,8 +70,8 @@ export interface ChatGPTOAuthClientDeps {
 }
 
 export interface DeviceCodeStartInput {
-  /** Frozen `internal_handle` (branded `OwnerHandle`) — see auth/secrets-store.ts file header. */
-  internal_handle: OwnerHandle
+  /** Frozen `owner_handle` (branded `OwnerHandle`) — see auth/secrets-store.ts file header. */
+  owner_handle: OwnerHandle
   sub_label?: string
 }
 
@@ -85,8 +85,8 @@ export interface DeviceCodeStartResult {
 }
 
 export interface DeviceCodePollInput {
-  /** Frozen `internal_handle` (branded `OwnerHandle`) — see auth/secrets-store.ts file header. */
-  internal_handle: OwnerHandle
+  /** Frozen `owner_handle` (branded `OwnerHandle`) — see auth/secrets-store.ts file header. */
+  owner_handle: OwnerHandle
   device_code: string
   sub_label?: string
 }
@@ -181,7 +181,7 @@ export class ChatGPTOAuthClient {
     }
     const interval =
       typeof body.interval === 'number' ? body.interval * 1_000 : this.config.poll_interval_ms
-    void input // input.internal_handle is reserved for telemetry by callers
+    void input // input.owner_handle is reserved for telemetry by callers
     const result: DeviceCodeStartResult = {
       device_code: body.device_code,
       user_code: body.user_code,
@@ -233,7 +233,7 @@ export class ChatGPTOAuthClient {
         const obtained_at = this.now()
         const expires_at = obtained_at + (body.expires_in ?? 3_600) * 1_000
         const refreshLabel = sub_label
-        await this.removeIfExists(input.internal_handle, 'chatgpt_oauth', refreshLabel)
+        await this.removeIfExists(input.owner_handle, 'chatgpt_oauth', refreshLabel)
         // Store the full ChatGPT bundle (refresh + access + id) WITHOUT a
         // row-level `expires_at`. Codex review fix: setting expires_at to
         // the access-token expiry would make `SecretsStore.get()` return
@@ -253,7 +253,7 @@ export class ChatGPTOAuthClient {
           obtained_at,
         }
         await this.secrets.put({
-          internal_handle: input.internal_handle,
+          owner_handle: input.owner_handle,
           kind: 'chatgpt_oauth',
           label: refreshLabel,
           plaintext: JSON.stringify(payload),
@@ -280,21 +280,21 @@ export class ChatGPTOAuthClient {
    * uses tokens.access_token for `chatgpt_token_only` mode.
    */
   async writeCodexAuthFile(input: {
-    /** Frozen `internal_handle` (branded `OwnerHandle`) — see auth/secrets-store.ts file header. */
-    internal_handle: OwnerHandle
+    /** Frozen `owner_handle` (branded `OwnerHandle`) — see auth/secrets-store.ts file header. */
+    owner_handle: OwnerHandle
     target_path: string
     sub_label?: string
   }): Promise<{ path: string }> {
     const sub_label = input.sub_label ?? DEFAULT_SUB_LABEL
     const stored = await this.secrets.get({
-      internal_handle: input.internal_handle,
+      owner_handle: input.owner_handle,
       kind: 'chatgpt_oauth',
       label: sub_label,
     })
     if (stored === null) {
       throw new ChatGPTOAuthError(
         'not_found',
-        `no ChatGPT OAuth token for instance=${input.internal_handle} sub=${sub_label}`,
+        `no ChatGPT OAuth token for instance=${input.owner_handle} sub=${sub_label}`,
       )
     }
     let parsed: {
@@ -339,11 +339,11 @@ export class ChatGPTOAuthClient {
   }
 
   private async removeIfExists(
-    internal_handle: OwnerHandle,
+    owner_handle: OwnerHandle,
     kind: 'chatgpt_oauth',
     label: string,
   ): Promise<void> {
-    const existing = await this.secrets.list({ internal_handle, kind })
+    const existing = await this.secrets.list({ owner_handle, kind })
     for (const row of existing) {
       if (row.label === label) {
         try {

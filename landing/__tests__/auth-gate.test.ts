@@ -712,16 +712,16 @@ describe('evaluateAuthGate — slug-rename AUTH-LOOP fix (2026-06-05)', () => {
   ): Parameters<typeof evaluateAuthGate>[1] {
     return {
       ...buildGateOpts(km),
-      internal_handle: INTERNAL_HANDLE,
+      owner_handle: INTERNAL_HANDLE,
       ownerRegistry: {
         // Registry reflects the post-rename CURRENT url_slug for OUR handle.
-        getCurrentUrlSlugByInternalHandle: (ih): string | null =>
+        getCurrentUrlSlugByOwnerHandle: (ih): string | null =>
           ih === INTERNAL_HANDLE ? NEW_SLUG : null,
       },
       slugHistoryStore: {
         // OLD_SLUG is a non-expired historical slug for OUR handle only.
-        lookup: async ({ old_slug, internal_handle }) =>
-          old_slug === OLD_SLUG && internal_handle === INTERNAL_HANDLE
+        lookup: async ({ old_slug, owner_handle }) =>
+          old_slug === OLD_SLUG && owner_handle === INTERNAL_HANDLE
             ? { expires_at_ms: Date.now() + 5 * 60 * 1000 }
             : null,
       },
@@ -776,7 +776,7 @@ describe('evaluateAuthGate — slug-rename AUTH-LOOP fix (2026-06-05)', () => {
       req,
       buildShimGateOpts(km, {
         ownerRegistry: {
-          getCurrentUrlSlugByInternalHandle: (): string | null => {
+          getCurrentUrlSlugByOwnerHandle: (): string | null => {
             throw new Error('registry unreachable')
           },
         },
@@ -794,7 +794,7 @@ describe('evaluateAuthGate — slug-rename AUTH-LOOP fix (2026-06-05)', () => {
     const req = makeBrowserRequest(
       `https://vibe.neutron.example/chat?start=${encodeURIComponent(token)}`,
     )
-    // buildGateOpts has no internal_handle / shims wired.
+    // buildGateOpts has no owner_handle / shims wired.
     const decision = await evaluateAuthGate(req, buildGateOpts(km))
     expect(decision.kind).toBe('redirect-to-signin')
   })

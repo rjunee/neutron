@@ -161,7 +161,7 @@ export interface BuildImportSubstrateInput {
    * max_oauth branch, the pool's secret is just the access token that
    * happened to be valid at composer-build time. Max access tokens
    * have a finite TTL (`expires_at`) and MUST be refreshed via the
-   * `MaxOAuthClient.getAccessToken(internal_handle)` path before
+   * `MaxOAuthClient.getAccessToken(owner_handle)` path before
    * each dispatch — otherwise a long-lived gateway process starts
    * returning 401/`substrate_error` for every import once the token
    * expires, user-visible only on the new T7 import surface.
@@ -179,10 +179,10 @@ export interface BuildImportSubstrateInput {
    */
   oauthRefresh?: OAuthCredentialSource
   /**
-   * Frozen `internal_handle` passed to `oauthRefresh.loadAccessToken(...)`.
+   * Frozen `owner_handle` passed to `oauthRefresh.loadAccessToken(...)`.
    * Required when `oauthRefresh` is wired; ignored otherwise.
    */
-  internal_handle?: string
+  owner_handle?: string
   /**
    * SWAPPABLE MODEL PROVIDER — see `BuildLlmCallSubstrateInput.provider`. Absent
    * ⇒ `'anthropic'` (Claude Code), BYTE-IDENTICAL to the pre-provider import
@@ -337,11 +337,11 @@ export function buildImportSubstrate(
         if (
           isOauthLike &&
           input.oauthRefresh !== undefined &&
-          typeof input.internal_handle === 'string' &&
-          input.internal_handle.length > 0
+          typeof input.owner_handle === 'string' &&
+          input.owner_handle.length > 0
         ) {
           try {
-            const fresh = await input.oauthRefresh.loadAccessToken(asOwnerHandle(input.internal_handle))
+            const fresh = await input.oauthRefresh.loadAccessToken(asOwnerHandle(input.owner_handle))
             if (fresh !== null && fresh.access_token.length > 0) {
               activeSecret = fresh.access_token
             }

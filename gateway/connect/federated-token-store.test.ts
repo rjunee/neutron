@@ -68,7 +68,7 @@ describe('FederatedTokenStore', () => {
     const { fetch } = fetchReturning({ '/redeem': () => jsonResponse(redeemBody()) })
     const store = new FederatedTokenStore({
       secrets,
-      internal_handle: HANDLE,
+      owner_handle: HANDLE,
       auth_base_url: 'https://auth.neutron.example',
       fetch,
       now: () => NOW,
@@ -83,7 +83,7 @@ describe('FederatedTokenStore', () => {
     const { fetch } = fetchReturning({ '/redeem': () => jsonResponse({ error: 'x' }, 400) })
     const store = new FederatedTokenStore({
       secrets,
-      internal_handle: HANDLE,
+      owner_handle: HANDLE,
       auth_base_url: 'https://auth.neutron.example',
       fetch,
       now: () => NOW,
@@ -95,7 +95,7 @@ describe('FederatedTokenStore', () => {
     const { fetch, calls } = fetchReturning({ '/redeem': () => jsonResponse(redeemBody()) })
     const store = new FederatedTokenStore({
       secrets,
-      internal_handle: HANDLE,
+      owner_handle: HANDLE,
       auth_base_url: 'https://auth.neutron.example',
       fetch,
       now: () => NOW,
@@ -121,7 +121,7 @@ describe('FederatedTokenStore', () => {
     let nowMs = NOW
     const store = new FederatedTokenStore({
       secrets,
-      internal_handle: HANDLE,
+      owner_handle: HANDLE,
       auth_base_url: 'https://auth.neutron.example',
       fetch,
       now: () => nowMs,
@@ -141,7 +141,7 @@ describe('FederatedTokenStore', () => {
     })
     const store = new FederatedTokenStore({
       secrets,
-      internal_handle: HANDLE,
+      owner_handle: HANDLE,
       auth_base_url: 'https://auth.neutron.example',
       fetch,
       now: () => nowMs,
@@ -160,7 +160,7 @@ describe('FederatedTokenStore', () => {
     })
     const store = new FederatedTokenStore({
       secrets,
-      internal_handle: HANDLE,
+      owner_handle: HANDLE,
       auth_base_url: 'https://auth.neutron.example',
       fetch,
       now: () => nowMs,
@@ -175,7 +175,7 @@ describe('FederatedTokenStore', () => {
     const { fetch } = fetchReturning({ '/redeem': () => jsonResponse(redeemBody()) })
     const store = new FederatedTokenStore({
       secrets,
-      internal_handle: HANDLE,
+      owner_handle: HANDLE,
       auth_base_url: 'https://auth.neutron.example',
       fetch,
       now: () => NOW,

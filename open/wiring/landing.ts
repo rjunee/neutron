@@ -10,7 +10,7 @@
  * accumulating-synthesis import substrate, and the shared GBrain sync hook —
  * threaded here through an explicit typed `deps` bag. Fields already carried by
  * the narrow wiring context (`db` / `project_slug` / `owner_home` /
- * `internal_handle` / `env`) come from `ctx`.
+ * `owner_handle` / `env`) come from `ctx`.
  *
  * CARE (invariants pinned by `open/__tests__/open-wiring-landing.test.ts`):
  *   - `importUseSynthesis: true` is passed VERBATIM — it opts the single-owner
@@ -114,7 +114,7 @@ export function wireLandingStack(
     appWsButtonPromptRouter: deps.appWsButtonPromptRouter,
     appWsImportProgressRouter: deps.appWsImportProgressRouter,
     static_dir: deps.static_dir,
-    internal_handle: ctx.internal_handle,
+    owner_handle: ctx.owner_handle,
     platform: deps.platform,
     cookieToUserClaim: deps.cookieToUserClaim,
     // ISSUES #318 — app-level Claude-auth gate (defense in depth for the

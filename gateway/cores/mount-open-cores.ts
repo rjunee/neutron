@@ -183,8 +183,8 @@ export async function mountOpenCores(
   const substrate = input.substrate ?? null
 
   // N1: brand the frozen owner handle ONCE, at the point it enters the
-  // credential subsystem. `input.project_slug` IS the frozen `internal_handle`
-  // on Open (owner-identity: `internal_handle === url_slug`, no rename
+  // credential subsystem. `input.project_slug` IS the frozen `owner_handle`
+  // on Open (owner-identity: `owner_handle === url_slug`, no rename
   // machinery); Managed freezes it at provisioning. Every credential boundary
   // below demands the branded value, so a mutable `url_slug` can never reach a
   // secret lookup (the 2026-05-12 incident is a compile error now).
@@ -195,7 +195,7 @@ export async function mountOpenCores(
   const oauthConfigured = googleClientId.length > 0
   const oauthTokens = new OAuthTokenManager({
     secretsStore: input.secretsStore,
-    internal_handle: ownerHandle,
+    owner_handle: ownerHandle,
     client_id: googleClientId,
     client_secret: env[GOOGLE_CLIENT_SECRET_ENV] ?? '',
   })

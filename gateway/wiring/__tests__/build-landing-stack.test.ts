@@ -97,7 +97,7 @@ test('buildLandingStack: returns { fetch, websocket } against a real ProjectDb',
     project_slug: 'alice',
     owner_home: ownerHome,
     static_dir: REPO_LANDING_DIR,
-    internal_handle: 't-aaaaaaaa',
+    owner_handle: 't-aaaaaaaa',
   })
   expect(typeof stack.fetch).toBe('function')
   expect(stack.websocket).toBeDefined()
@@ -112,7 +112,7 @@ test('buildLandingStack: TranscriptWriter materializes <owner_home>/persona/onbo
     project_slug: 'alice',
     owner_home: ownerHome,
     static_dir: REPO_LANDING_DIR,
-    internal_handle: 't-aaaaaaaa',
+    owner_handle: 't-aaaaaaaa',
   })
   // TranscriptWriter's constructor mkdir-recurses the parent dir AND
   // touches an empty file (transcript.ts:51-53). Asserting the file
@@ -134,24 +134,24 @@ test('buildLandingStack: throws when static_dir is missing chat-react.html', () 
       project_slug: 'alice',
       owner_home: join(workdir, 'project-home'),
       static_dir: emptyDir,
-      internal_handle: 't-aaaaaaaa',
+      owner_handle: 't-aaaaaaaa',
     }),
   ).toThrow(/landing static_dir missing chat-react\.html/)
 })
 
 // Argus r2 [BLOCKING #1] regression — the factory must REJECT an empty
-// internal_handle at boot. The field pins per-instance identity; the guard
+// owner_handle at boot. The field pins per-instance identity; the guard
 // keeps a misconfigured composer from booting with an empty handle.
-test('buildLandingStack: throws when internal_handle is empty (P1.5 § 1.5.5 guard)', () => {
+test('buildLandingStack: throws when owner_handle is empty (P1.5 § 1.5.5 guard)', () => {
   expect(() =>
     buildLandingStack({
       db,
       project_slug: 'alice',
       owner_home: join(workdir, 'project-home'),
       static_dir: REPO_LANDING_DIR,
-      internal_handle: '',
+      owner_handle: '',
     }),
-  ).toThrow(/internal_handle is required/)
+  ).toThrow(/owner_handle is required/)
 })
 
 // ---------------------------------------------------------------------------

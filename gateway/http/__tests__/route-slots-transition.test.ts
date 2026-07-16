@@ -232,7 +232,7 @@ function fullyWiredInput(calls: string[]): ComposeHttpHandlerInput {
     },
     devMintSession: disclaim('dev-mint-session'),
     internalCacheInvalidateHandler: {
-      invalidateInternalHandle: (): void => {},
+      invalidateOwnerHandle: (): void => {},
       expectedToken: 'transition-secret',
     },
     adminRespawn: disclaim('admin-respawn'),
@@ -424,7 +424,7 @@ function fullComposition(): RouteSlotComposition {
     landing_server: { fetch: () => new Response('x'), websocket: NOOP_WS },
     telegram_webhook: { handler: async () => new Response('x') },
     internal_cache_invalidate: {
-      invalidateInternalHandle: (): void => {},
+      invalidateOwnerHandle: (): void => {},
       expectedToken: 't',
     },
     slug_check_handler: async () => new Response('x'),

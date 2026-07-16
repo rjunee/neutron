@@ -34,14 +34,14 @@ describe('InMemorySlugHistoryCache', () => {
       ttl_ms: 60_000,
       now: () => NOW_MS,
     })
-    const a = await cache.lookup({ old_slug: 'sam', internal_handle: 't-x', now_ms: NOW_MS })
-    const b = await cache.lookup({ old_slug: 'sam', internal_handle: 't-x', now_ms: NOW_MS })
+    const a = await cache.lookup({ old_slug: 'sam', owner_handle: 't-x', now_ms: NOW_MS })
+    const b = await cache.lookup({ old_slug: 'sam', owner_handle: 't-x', now_ms: NOW_MS })
     expect(a?.expires_at_ms).toBe(NOW_MS + 86_400_000)
     expect(b?.expires_at_ms).toBe(NOW_MS + 86_400_000)
     expect(inner_calls).toBe(1)
   })
 
-  test('invalidateInternalHandle drops cached entries for that handle', async () => {
+  test('invalidateOwnerHandle drops cached entries for that handle', async () => {
     let inner_calls = 0
     const inner: SlugHistoryShimStore = {
       async lookup() {
@@ -50,9 +50,9 @@ describe('InMemorySlugHistoryCache', () => {
       },
     }
     const cache = new InMemorySlugHistoryCache({ inner, ttl_ms: 60_000, now: () => NOW_MS })
-    await cache.lookup({ old_slug: 'sam', internal_handle: 't-x', now_ms: NOW_MS })
-    cache.invalidateInternalHandle('t-x')
-    await cache.lookup({ old_slug: 'sam', internal_handle: 't-x', now_ms: NOW_MS })
+    await cache.lookup({ old_slug: 'sam', owner_handle: 't-x', now_ms: NOW_MS })
+    cache.invalidateOwnerHandle('t-x')
+    await cache.lookup({ old_slug: 'sam', owner_handle: 't-x', now_ms: NOW_MS })
     expect(inner_calls).toBe(2)
   })
 
@@ -63,7 +63,7 @@ describe('InMemorySlugHistoryCache', () => {
       },
     }
     const cache = new InMemorySlugHistoryCache({ inner, ttl_ms: 60_000, now: () => NOW_MS })
-    const r = await cache.lookup({ old_slug: 'sam', internal_handle: 't-x', now_ms: NOW_MS })
+    const r = await cache.lookup({ old_slug: 'sam', owner_handle: 't-x', now_ms: NOW_MS })
     // Inner stored expires_at < now; cache helper returns it but caller-side check (in
     // chat-bridge) handles the expiry. Here we just confirm pass-through.
     expect(r).not.toBeNull()
@@ -77,7 +77,7 @@ describe('buildSlugHistoryShimFromRegistry', () => {
     const shim = buildSlugHistoryShimFromRegistry({
       lookup: () => ({ expires_at: sec_now + 86_400 }),
     })
-    const r = await shim.lookup({ old_slug: 'sam', internal_handle: 't-x', now_ms: ms_now })
+    const r = await shim.lookup({ old_slug: 'sam', owner_handle: 't-x', now_ms: ms_now })
     expect(r).not.toBeNull()
     expect(r?.expires_at_ms).toBe((sec_now + 86_400) * 1000)
   })
@@ -86,7 +86,7 @@ describe('buildSlugHistoryShimFromRegistry', () => {
     const shim = buildSlugHistoryShimFromRegistry({
       lookup: () => undefined,
     })
-    const r = await shim.lookup({ old_slug: 'x', internal_handle: 't-y', now_ms: 0 })
+    const r = await shim.lookup({ old_slug: 'x', owner_handle: 't-y', now_ms: 0 })
     expect(r).toBeNull()
   })
 
@@ -96,7 +96,7 @@ describe('buildSlugHistoryShimFromRegistry', () => {
     const shim = buildSlugHistoryShimFromRegistry({
       lookup: () => ({ expires_at: sec_now - 1 }),
     })
-    const r = await shim.lookup({ old_slug: 'x', internal_handle: 't-y', now_ms: ms_now })
+    const r = await shim.lookup({ old_slug: 'x', owner_handle: 't-y', now_ms: ms_now })
     expect(r).toBeNull()
   })
 })

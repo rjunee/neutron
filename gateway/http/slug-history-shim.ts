@@ -15,12 +15,12 @@
  */
 export interface SlugHistoryShimStore {
   /**
-   * Returns the row matching (`old_slug`, `internal_handle`) when
+   * Returns the row matching (`old_slug`, `owner_handle`) when
    * present and non-expired, else null.
    */
   lookup(input: {
     old_slug: string
-    internal_handle: string
+    owner_handle: string
     now_ms: number
   }): Promise<{ expires_at_ms: number } | null>
 }
@@ -44,10 +44,10 @@ export class InMemorySlugHistoryCache implements SlugHistoryShimStore {
 
   async lookup(input: {
     old_slug: string
-    internal_handle: string
+    owner_handle: string
     now_ms: number
   }): Promise<{ expires_at_ms: number } | null> {
-    const key = `${input.old_slug}::${input.internal_handle}`
+    const key = `${input.old_slug}::${input.owner_handle}`
     const cached = this.cache.get(key)
     if (cached !== undefined && this.now() - cached.cached_at_ms < this.ttl_ms) {
       if (cached.expires_at_ms >= input.now_ms) {
@@ -68,9 +68,9 @@ export class InMemorySlugHistoryCache implements SlugHistoryShimStore {
   }
 
   /** Push-style invalidate fired by the rename orchestrator. */
-  invalidateInternalHandle(internal_handle: string): void {
+  invalidateOwnerHandle(owner_handle: string): void {
     for (const key of [...this.cache.keys()]) {
-      if (key.endsWith(`::${internal_handle}`)) {
+      if (key.endsWith(`::${owner_handle}`)) {
         this.cache.delete(key)
       }
     }
@@ -89,12 +89,12 @@ export function buildSlugHistoryShimFromRegistry(input: {
   /** Function returning a slug_history row (sync, like SlugHistoryStore.lookup). */
   lookup: (
     old_slug: string,
-    internal_handle: string,
+    owner_handle: string,
   ) => { expires_at: number } | undefined
 }): SlugHistoryShimStore {
   return {
-    async lookup({ old_slug, internal_handle, now_ms }) {
-      const row = input.lookup(old_slug, internal_handle)
+    async lookup({ old_slug, owner_handle, now_ms }) {
+      const row = input.lookup(old_slug, owner_handle)
       if (row === undefined) return null
       const expires_at_ms = row.expires_at * 1000
       if (expires_at_ms < now_ms) return null

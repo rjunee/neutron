@@ -51,7 +51,7 @@ describe('persistChosenAvatar', () => {
     let caught: unknown
     try {
       await persistChosenAvatar(
-        { internal_handle: 't-22222222', owner_home: ownerHome, bot_token: null },
+        { owner_handle: 't-22222222', owner_home: ownerHome, bot_token: null },
         {},
       )
     } catch (err) {
@@ -69,7 +69,7 @@ describe('persistChosenAvatar', () => {
       },
     }
     const result = await persistChosenAvatar(
-      { internal_handle: 't-22222222', owner_home: ownerHome, bot_token: null },
+      { owner_handle: 't-22222222', owner_home: ownerHome, bot_token: null },
       deps,
     )
     expect(result.canonical_path).toBe(canonical)
@@ -86,7 +86,7 @@ describe('persistChosenAvatar', () => {
       },
     }
     const result = await persistChosenAvatar(
-      { internal_handle: null, owner_home: ownerHome, bot_token: null },
+      { owner_handle: null, owner_home: ownerHome, bot_token: null },
       deps,
     )
     expect(result.registry_updated).toBe(false)
@@ -98,7 +98,7 @@ describe('persistChosenAvatar', () => {
       setAgentAvatarPath: async () => false, // soft-fail signal
     }
     const result = await persistChosenAvatar(
-      { internal_handle: 't-22222222', owner_home: ownerHome, bot_token: null },
+      { owner_handle: 't-22222222', owner_home: ownerHome, bot_token: null },
       deps,
     )
     expect(result.canonical_path).toBe(canonical)
@@ -114,7 +114,7 @@ describe('persistChosenAvatar', () => {
     let caught: unknown
     try {
       await persistChosenAvatar(
-        { internal_handle: 't-22222222', owner_home: ownerHome, bot_token: null },
+        { owner_handle: 't-22222222', owner_home: ownerHome, bot_token: null },
         deps,
       )
     } catch (err) {
@@ -141,7 +141,7 @@ describe('persistChosenAvatar', () => {
       fetcher: fakeFetcher as unknown as typeof fetch,
     }
     const result = await persistChosenAvatar(
-      { internal_handle: null, owner_home: ownerHome, bot_token: 'BOT_TOKEN' },
+      { owner_handle: null, owner_home: ownerHome, bot_token: 'BOT_TOKEN' },
       deps,
     )
     expect(result.bot_avatar_pushed).toBe(true)
@@ -158,7 +158,7 @@ describe('persistChosenAvatar', () => {
       },
     }
     const result = await persistChosenAvatar(
-      { internal_handle: null, owner_home: ownerHome, bot_token: 'BOT_TOKEN' },
+      { owner_handle: null, owner_home: ownerHome, bot_token: 'BOT_TOKEN' },
       deps,
     )
     expect(result.bot_avatar_pushed).toBe(false)
@@ -175,7 +175,7 @@ describe('persistChosenAvatar', () => {
       },
     }
     const result = await persistChosenAvatar(
-      { internal_handle: null, owner_home: ownerHome, bot_token: null },
+      { owner_handle: null, owner_home: ownerHome, bot_token: null },
       deps,
     )
     expect(result.bot_avatar_pushed).toBe(false)
@@ -196,7 +196,7 @@ describe('persistChosenAvatar', () => {
     }
     const result = await persistChosenAvatar(
       {
-        internal_handle: 't-22222222',
+        owner_handle: 't-22222222',
         owner_home: ownerHome,
         bot_token: 'BOT_TOKEN',
       },
@@ -233,7 +233,7 @@ describe('buildProfilePicEngineHook', () => {
 
     const hook = buildProfilePicEngineHook({
       pipeline,
-      internal_handle: 't-22222222',
+      owner_handle: 't-22222222',
       owner_home,
       setAgentAvatarPath: async (h, p) => {
         registryCalls.push([h, p])
@@ -318,7 +318,7 @@ describe('buildProfilePicEngineHook', () => {
     const pipeline = new ProfilePicPipeline({ db, owner_home, gemini })
     const hook = buildProfilePicEngineHook({
       pipeline,
-      internal_handle: null,
+      owner_handle: null,
       owner_home,
       getBotToken: () => null,
       imageUrlBuilder: (c) => `/x/${c.candidate_id}.png`,
@@ -375,7 +375,7 @@ describe('buildProfilePicEngineHook', () => {
     })
     const hook = buildProfilePicEngineHook({
       pipeline,
-      internal_handle: null,
+      owner_handle: null,
       owner_home,
       getBotToken: () => null,
       imageUrlBuilder: () => '/x.png',

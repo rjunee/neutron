@@ -70,7 +70,7 @@ test('onboarding-captured OpenAI key → resolver reads it → effective embedde
   const secrets = new SecretsStore({ data_dir: dataDir, db })
   const apiKeys = new ApiKeyStore({ db, secrets })
   const res = await storeOptionalKey(apiKeys, {
-    internal_handle: OWNER,
+    owner_handle: OWNER,
     id: 'openai_api_key',
     plaintext: OPENAI_KEY,
   })
@@ -80,7 +80,7 @@ test('onboarding-captured OpenAI key → resolver reads it → effective embedde
   const resolved = await resolveOnboardingOpenAiKey({
     db,
     owner_home: dataDir,
-    internal_handle: OWNER,
+    owner_handle: OWNER,
     project_slug: OWNER,
   })
   expect(resolved).toBe(OPENAI_KEY)
@@ -105,7 +105,7 @@ test('no key stored → resolver returns undefined → effective embedder is the
   const resolved = await resolveOnboardingOpenAiKey({
     db,
     owner_home: dataDir,
-    internal_handle: OWNER,
+    owner_handle: OWNER,
     project_slug: OWNER,
   })
   expect(resolved).toBeUndefined()
@@ -127,7 +127,7 @@ test('a bare env OPENAI_API_KEY (LLM BYO key) does NOT silently activate CLOUD e
   const resolved = await resolveOnboardingOpenAiKey({
     db,
     owner_home: dataDir,
-    internal_handle: OWNER,
+    owner_handle: OWNER,
   })
   expect(resolved).toBeUndefined()
   const embedder = resolveEffectiveEmbedder({

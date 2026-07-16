@@ -641,8 +641,8 @@ test('Codex r5 P1 — Max OAuth refresh is called on every start() (token freshn
   const refreshCalls: string[] = []
   let tokenCounter = 0
   const oauthRefresh = {
-    async loadAccessToken(internal_handle: string) {
-      refreshCalls.push(internal_handle)
+    async loadAccessToken(owner_handle: string) {
+      refreshCalls.push(owner_handle)
       tokenCounter += 1
       return { access_token: `fresh-token-${tokenCounter}`, expires_at: Date.now() + 3600_000 }
     },
@@ -654,7 +654,7 @@ test('Codex r5 P1 — Max OAuth refresh is called on every start() (token freshn
     cwd: workdir,
     substrateFactory,
     oauthRefresh,
-    internal_handle: 't-casey-0001',
+    owner_handle: 't-casey-0001',
   })
   // Drive two start() calls — assert the refresher is called BOTH times
   // and each call uses the FRESH token (not the stale boot-time secret).
@@ -691,7 +691,7 @@ test('Codex r5 P1 — oauthRefresh returning null falls back to cached pool secr
     cwd: workdir,
     substrateFactory,
     oauthRefresh,
-    internal_handle: 't-casey-0001',
+    owner_handle: 't-casey-0001',
   })
   const h = sub!.start(runSpec())
   for await (const _ev of h.events) {
@@ -717,7 +717,7 @@ test('Codex r5 P1 — oauthRefresh throwing surfaces a substrate error event (ca
     cwd: workdir,
     substrateFactory,
     oauthRefresh,
-    internal_handle: 't-casey-0001',
+    owner_handle: 't-casey-0001',
   })
   const h = sub!.start(runSpec())
   const events = []

@@ -62,7 +62,7 @@ function startOpenHarness(): Harness {
   mkdirSync(projectRoot, { recursive: true })
   const platform = buildLocalPlatformAdapter({
     selfOwner: {
-      internal_handle: 'h_demo',
+      owner_handle: 'h_demo',
       url_slug: PROJECT_SLUG,
       owner_home,
       agent_name: null,
@@ -134,7 +134,7 @@ function startManagedHarness(): Harness {
   // config), reproducing the same surface code path with no Managed import.
   const baseAdapter = buildLocalPlatformAdapter({
     selfOwner: {
-      internal_handle: 'h_demo',
+      owner_handle: 'h_demo',
       url_slug: PROJECT_SLUG,
       owner_home,
       agent_name: null,

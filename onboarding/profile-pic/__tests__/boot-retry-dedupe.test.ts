@@ -111,7 +111,7 @@ describe('ISSUE #43 — fresh-pending dedupe in engine-hook', () => {
     const store = pipeline.pendingCallStore()!
     const hook = buildProfilePicEngineHook({
       pipeline,
-      internal_handle: null,
+      owner_handle: null,
       owner_home: join(tmp, 'home'),
       getBotToken: () => null,
       imageUrlBuilder: ({ candidate_id }) => `/profile-pic/candidate/${candidate_id}.png`,
@@ -179,7 +179,7 @@ describe('ISSUE #43 — fresh-pending dedupe in engine-hook', () => {
     const store = pipeline.pendingCallStore()!
     const hook = buildProfilePicEngineHook({
       pipeline,
-      internal_handle: null,
+      owner_handle: null,
       owner_home: join(tmp, 'home'),
       getBotToken: () => null,
       imageUrlBuilder: ({ candidate_id }) => `/profile-pic/candidate/${candidate_id}.png`,
@@ -233,7 +233,7 @@ describe('ISSUE #43 — fresh-pending dedupe in engine-hook', () => {
     const store = pipeline.pendingCallStore()!
     const hook = buildProfilePicEngineHook({
       pipeline,
-      internal_handle: null,
+      owner_handle: null,
       owner_home: join(tmp, 'home'),
       getBotToken: () => null,
       imageUrlBuilder: ({ candidate_id }) => `/profile-pic/candidate/${candidate_id}.png`,
@@ -287,7 +287,7 @@ describe('ISSUE #43 — fresh-pending dedupe in engine-hook', () => {
     const store = pipeline.pendingCallStore()!
     const hook = buildProfilePicEngineHook({
       pipeline,
-      internal_handle: null,
+      owner_handle: null,
       owner_home: join(tmp, 'home'),
       getBotToken: () => null,
       imageUrlBuilder: ({ candidate_id }) => `/profile-pic/candidate/${candidate_id}.png`,

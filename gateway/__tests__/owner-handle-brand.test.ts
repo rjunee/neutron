@@ -31,9 +31,9 @@ test('SecretsStore.get rejects a raw string slug and accepts a branded OwnerHand
   async function _typecheck(store: SecretsStore): Promise<void> {
     // @ts-expect-error — a bare string (a possibly-mutable url_slug) is NOT a
     // valid credential key; the branded boundary rejects it at compile time.
-    await store.get({ internal_handle: rawSlug, kind: 'byo_api_key', label: 'k' })
+    await store.get({ owner_handle: rawSlug, kind: 'byo_api_key', label: 'k' })
     // The branded, known-good handle typechecks.
-    await store.get({ internal_handle: asOwnerHandle(rawSlug), kind: 'byo_api_key', label: 'k' })
+    await store.get({ owner_handle: asOwnerHandle(rawSlug), kind: 'byo_api_key', label: 'k' })
   }
   void _typecheck
   expect(typeof _typecheck).toBe('function')
@@ -42,9 +42,9 @@ test('SecretsStore.get rejects a raw string slug and accepts a branded OwnerHand
 test('ApiKeyStore.add rejects a raw string slug and accepts a branded OwnerHandle', () => {
   async function _typecheck(store: ApiKeyStore): Promise<void> {
     // @ts-expect-error — raw string rejected at the ApiKeyStore boundary.
-    await store.add({ internal_handle: rawSlug, provider: 'anthropic', label: 'l', plaintext: 'p' })
+    await store.add({ owner_handle: rawSlug, provider: 'anthropic', label: 'l', plaintext: 'p' })
     await store.add({
-      internal_handle: asOwnerHandle(rawSlug),
+      owner_handle: asOwnerHandle(rawSlug),
       provider: 'anthropic',
       label: 'l',
       plaintext: 'p',
@@ -88,15 +88,15 @@ test('CodexCredentialService.status rejects a raw string slug and accepts a bran
   expect(typeof _typecheck).toBe('function')
 })
 
-test('ResolveLlmCredentialsInput.internal_handle rejects a raw string slug', () => {
-  const _bad: Pick<ResolveLlmCredentialsInput, 'internal_handle'> = {
+test('ResolveLlmCredentialsInput.owner_handle rejects a raw string slug', () => {
+  const _bad: Pick<ResolveLlmCredentialsInput, 'owner_handle'> = {
     // @ts-expect-error — the LLM-credential resolver must demand the frozen handle.
-    internal_handle: rawSlug,
+    owner_handle: rawSlug,
   }
-  const _good: Pick<ResolveLlmCredentialsInput, 'internal_handle'> = {
-    internal_handle: asOwnerHandle(rawSlug),
+  const _good: Pick<ResolveLlmCredentialsInput, 'owner_handle'> = {
+    owner_handle: asOwnerHandle(rawSlug),
   }
   void _bad
   void _good
-  expect(_good.internal_handle).toBe(asOwnerHandle(rawSlug))
+  expect(_good.owner_handle).toBe(asOwnerHandle(rawSlug))
 })

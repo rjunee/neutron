@@ -88,7 +88,7 @@ export interface SurfaceHandler {
  * shared HTTP secret (`X-Internal-Token`); comparison is constant-time.
  */
 export interface InternalCacheInvalidateConfig {
-  invalidateInternalHandle: (internal_handle: string) => void
+  invalidateOwnerHandle: (owner_handle: string) => void
   /** Shared secret. Comparison is constant-time via XOR fold. */
   expectedToken: string
 }
@@ -219,17 +219,17 @@ async function handleCacheInvalidate(
   if (!constantTimeStringEquals(supplied, handler.expectedToken)) {
     return new Response('forbidden', { status: 403 })
   }
-  let body: { internal_handle?: unknown } = {}
+  let body: { owner_handle?: unknown } = {}
   try {
-    body = (await req.json()) as { internal_handle?: unknown }
+    body = (await req.json()) as { owner_handle?: unknown }
   } catch {
     return new Response('invalid json', { status: 400 })
   }
-  const internal_handle = body.internal_handle
-  if (typeof internal_handle !== 'string' || internal_handle.length === 0) {
-    return new Response('missing internal_handle', { status: 400 })
+  const owner_handle = body.owner_handle
+  if (typeof owner_handle !== 'string' || owner_handle.length === 0) {
+    return new Response('missing owner_handle', { status: 400 })
   }
-  handler.invalidateInternalHandle(internal_handle)
+  handler.invalidateOwnerHandle(owner_handle)
   return new Response('{"ok":true}', {
     status: 200,
     headers: { 'Content-Type': 'application/json' },
@@ -302,7 +302,7 @@ export const ROUTE_SLOTS = [
   }),
   // 0. Internal cache invalidation — P1.5 § 1.5.5. Token-gated
   //    (X-Internal-Token, constant-time compare). The rename orchestrator
-  //    POSTs `{ internal_handle }` after a slug rename commits.
+  //    POSTs `{ owner_handle }` after a slug rename commits.
   slot({
     key: 'internalCacheInvalidateHandler',
     rung: 'internal-cache-invalidate',

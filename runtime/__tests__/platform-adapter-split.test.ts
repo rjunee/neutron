@@ -27,7 +27,7 @@ void _roundTripB
 function localAdapter(): PlatformAdapter {
   return buildLocalPlatformAdapter({
     selfOwner: {
-      internal_handle: 't-local-001',
+      owner_handle: 't-local-001',
       url_slug: 'local',
       owner_home: '/tmp/neutron-split-test',
       agent_name: null,
@@ -41,11 +41,11 @@ describe('PlatformAdapter Open/Managed split', () => {
   test('every Managed-only op throws PlatformOperationUnsupportedError on Local', async () => {
     const p = localAdapter()
     await expect(
-      p.renameSlug({ internal_handle: 't', current_url_slug: 'a', new_url_slug: 'b' }),
+      p.renameSlug({ owner_handle: 't', current_url_slug: 'a', new_url_slug: 'b' }),
     ).rejects.toBeInstanceOf(PlatformOperationUnsupportedError)
     await expect(
       p.mintInstallToken({
-        internal_handle: 't',
+        owner_handle: 't',
         identity: { provider: 'google', sub: 's', email: 'e@x.co' },
         audience: 'a',
         ttl_s: 60,
@@ -60,7 +60,7 @@ describe('PlatformAdapter Open/Managed split', () => {
       }),
     ).rejects.toBeInstanceOf(PlatformOperationUnsupportedError)
     await expect(
-      p.provisionManagerBot({ internal_handle: 't', bot_name_hint: 'b' }),
+      p.provisionManagerBot({ owner_handle: 't', bot_name_hint: 'b' }),
     ).rejects.toBeInstanceOf(PlatformOperationUnsupportedError)
     await expect(p.reloadCaddy()).rejects.toBeInstanceOf(PlatformOperationUnsupportedError)
     await expect(p.regenerateSudoers()).rejects.toBeInstanceOf(
@@ -81,7 +81,7 @@ describe('PlatformAdapter Open/Managed split', () => {
 
   test('Open-core methods keep real single-instance behavior', () => {
     const p = localAdapter()
-    expect(p.resolveOwnerBySlug('local')?.internal_handle).toBe('t-local-001')
+    expect(p.resolveOwnerBySlug('local')?.owner_handle).toBe('t-local-001')
     expect(p.resolveOwnerBySlug('nope')).toBeNull()
     expect(p.capabilities.slug_rename).toBe(false)
     expect(p.slugAvailability.check({ slug: 'valid-slug' }).available).toBe(true)

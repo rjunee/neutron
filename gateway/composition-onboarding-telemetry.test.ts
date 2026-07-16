@@ -70,7 +70,7 @@ test('onboarding-telemetry module composes OnboardingTelemetry + sinks even with
 })
 
 test('2026-06-19 overnight-engine: production graph ALWAYS registers overnight_handler (replaces the check-in stub)', async () => {
-  // Action 07 registers the `overnight-<internal_handle>` JOB at wow-moment
+  // Action 07 registers the `overnight-<owner_handle>` JOB at wow-moment
   // dispatch time; the real engine HANDLER must already exist in the
   // production CronHandlerRegistry or every scheduler tick logs
   // "skipping job … handler overnight_handler not registered".

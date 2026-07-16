@@ -86,7 +86,7 @@ export interface PersonalityCharacterSuggesterInput {
   non_work_interests: ReadonlyArray<string>
   user_supplied_corrections: ReadonlyArray<string>
   /**
-   * Stable per-instance seed (project_slug / internal_handle) used ONLY to
+   * Stable per-instance seed (project_slug / owner_handle) used ONLY to
    * diversify the static fallback deterministically so two fresh instances
    * with zero signal don't see the identical list. Never sent to the LLM.
    * `Math.random()` is intentionally NOT used (banned for reproducibility).

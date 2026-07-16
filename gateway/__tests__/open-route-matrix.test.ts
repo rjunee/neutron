@@ -170,7 +170,7 @@ async function bootOpenGraph(): Promise<GraphHarness> {
     },
     telegram_webhook: { handler: async (): Promise<Response> => sentinel('telegram') },
     internal_cache_invalidate: {
-      invalidateInternalHandle: (): void => {},
+      invalidateOwnerHandle: (): void => {},
       // Token-gated inside the handler; a probe without the header 403s
       // (OWNED — a 404 would mean the route never mounted).
       expectedToken: 'internal-secret',

@@ -97,7 +97,7 @@ describe('C6 — shared env tiers resolve identically in Open and Managed', () =
       // 'open' mode so the shared-tier gate never refuses the API key.
       const managedCred = cred(
         await resolveLlmCredentials({
-          internal_handle: asOwnerHandle('owner'),
+          owner_handle: asOwnerHandle('owner'),
           apiKeys: EMPTY_STORE,
           provider: 'anthropic',
           env_vars: ['ANTHROPIC_API_KEY'],
@@ -124,7 +124,7 @@ describe('C6 — ambient tier is Open-only and threads NO token', () => {
 
     // Managed never enables the ambient tier for the SAME inputs.
     const managedPool = await resolveLlmCredentials({
-      internal_handle: asOwnerHandle('owner'),
+      owner_handle: asOwnerHandle('owner'),
       apiKeys: EMPTY_STORE,
       provider: 'anthropic',
       env_vars: ['ANTHROPIC_API_KEY'],

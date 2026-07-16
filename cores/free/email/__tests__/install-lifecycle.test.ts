@@ -106,7 +106,7 @@ describe('install lifecycle — Email-Managed Core happy path', () => {
 
     // Persisted via the platform store — the live token is readable.
     const stored = await env.secretsStore.list({
-      internal_handle: asOwnerHandle('owner_a'),
+      owner_handle: asOwnerHandle('owner_a'),
       kind: 'oauth_token',
     })
     expect(stored.length).toBe(1)
@@ -146,7 +146,7 @@ describe('install lifecycle — Email-Managed Core happy path', () => {
 
     // Secret deleted as part of uninstall.
     const stored = await env.secretsStore.list({
-      internal_handle: asOwnerHandle('owner_b'),
+      owner_handle: asOwnerHandle('owner_b'),
       kind: 'oauth_token',
     })
     expect(stored.find((r) => r.label === OAUTH_SECRET_LABEL)).toBeUndefined()

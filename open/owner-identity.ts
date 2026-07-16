@@ -44,8 +44,8 @@ export function resolveOwnerSlug(env: NodeJS.ProcessEnv = process.env): string {
 /**
  * Build the single local instance's `PlatformInstanceInfo`. The boot shell
  * passes `project_slug` (the value `boot()` resolved + froze) so the
- * adapter's `url_slug` / `internal_handle` agree with every cookie / token
- * equality check downstream. On Open `internal_handle === url_slug` (there
+ * adapter's `url_slug` / `owner_handle` agree with every cookie / token
+ * equality check downstream. On Open `owner_handle === url_slug` (there
  * is no rename machinery to make them diverge).
  */
 export function resolveOpenInstanceInfo(input: {
@@ -56,7 +56,7 @@ export function resolveOpenInstanceInfo(input: {
   const env = input.env ?? process.env
   const agentName = env['NEUTRON_AGENT_NAME']
   return {
-    internal_handle: input.project_slug,
+    owner_handle: input.project_slug,
     url_slug: input.project_slug,
     owner_home: input.owner_home,
     agent_name: typeof agentName === 'string' && agentName.length > 0 ? agentName : null,

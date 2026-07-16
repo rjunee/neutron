@@ -76,7 +76,7 @@ function makeCtx(overrides: Partial<OpenWiringContext> = {}): OpenWiringContext 
       strategy: 'fill_first',
       credentials: [{ id: 'anthropic:test', kind: 'api_key', secret: 'sk-test' }],
     }),
-    internal_handle: 'owner',
+    owner_handle: 'owner',
     owner_home: tmpDir,
     project_slug: 'owner',
     env: {} as NodeJS.ProcessEnv,

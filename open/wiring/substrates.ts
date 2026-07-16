@@ -54,7 +54,7 @@ export interface WiredSubstrates {
  * rest of the closure consumes.
  */
 export function wireSubstrates(ctx: OpenWiringContext): WiredSubstrates {
-  const { llmPool, substrateFactory, internal_handle, owner_home, project_slug, prewarmSubstrate } =
+  const { llmPool, substrateFactory, owner_handle, owner_home, project_slug, prewarmSubstrate } =
     ctx
 
   // SWAPPABLE PROVIDER — the CONVERSATIONAL provider option bag. Applied ONLY to
@@ -165,9 +165,9 @@ export function wireSubstrates(ctx: OpenWiringContext): WiredSubstrates {
     conversationalAvailable
       ? buildLlmCallSubstrate({
           ...anthropicPoolArg,
-          substrate_instance_id: `cc-llm-${internal_handle}`,
+          substrate_instance_id: `cc-llm-${owner_handle}`,
           cwd: owner_home,
-          internal_handle,
+          owner_handle,
           user_id: OWNER_USER_ID,
           project_slug,
           skip_permissions: true,
@@ -218,9 +218,9 @@ export function wireSubstrates(ctx: OpenWiringContext): WiredSubstrates {
     conversationalAvailable
       ? buildLlmCallSubstrate({
           ...anthropicPoolArg,
-          substrate_instance_id: `cc-agent-${internal_handle}`,
+          substrate_instance_id: `cc-agent-${owner_handle}`,
           cwd: owner_home,
-          internal_handle,
+          owner_handle,
           user_id: OWNER_USER_ID,
           project_slug,
           skip_permissions: true,
@@ -288,9 +288,9 @@ export function wireSubstrates(ctx: OpenWiringContext): WiredSubstrates {
           ? null
           : buildLlmCallSubstrate({
               pool: llmPool,
-              substrate_instance_id: `${instance_prefix}-${internal_handle}`,
+              substrate_instance_id: `${instance_prefix}-${owner_handle}`,
               cwd,
-              internal_handle,
+              owner_handle,
               user_id: OWNER_USER_ID,
               project_slug,
               skip_permissions: true,
@@ -335,9 +335,9 @@ export function wireSubstrates(ctx: OpenWiringContext): WiredSubstrates {
     for (let i = 0; i < cwd.length; i++) h = (((h << 5) + h) ^ cwd.charCodeAt(i)) >>> 0
     const built = buildLlmCallSubstrate({
       pool: llmPool,
-      substrate_instance_id: `cc-trident-fire-${internal_handle}-${h.toString(36)}`,
+      substrate_instance_id: `cc-trident-fire-${owner_handle}-${h.toString(36)}`,
       cwd,
-      internal_handle,
+      owner_handle,
       user_id: OWNER_USER_ID,
       project_slug,
       skip_permissions: true,

@@ -427,14 +427,14 @@ export interface MaxOAuthEngineHook {
  */
 export interface MaxOauthSecretsStore {
   put(input: {
-    internal_handle: string
+    owner_handle: string
     kind: 'byo_api_key' | 'max_oauth_refresh' | 'max_oauth_access'
     label: string
     plaintext: string
     expires_at?: number
   }): Promise<{ id: string }>
   list(input: {
-    internal_handle: string
+    owner_handle: string
     kind?: 'byo_api_key' | 'max_oauth_refresh' | 'max_oauth_access'
   }): Promise<ReadonlyArray<{ id: string; label: string; kind: string }>>
 }
@@ -740,7 +740,7 @@ export interface ImportResumeReadinessProbe {
 export interface SlugPickerEngineHookInput {
   /**
    * Current url_slug at engine call time. The hook resolves the
-   * canonical current url_slug via its own internal_handle lookup so
+   * canonical current url_slug via its own owner_handle lookup so
    * a stale `project_slug` post-rename (pre-redirect) does not trip
    * `renameUrlSlug`'s optimistic-lock check.
    */
@@ -852,7 +852,7 @@ export interface InterviewEngineDeps {
    * shipped in Sprint 20 but population was deferred to "post-agent-
    * naming P2 work" — this is now. Production wires this in
    * `gateway/wiring/build-landing-stack.ts` to the
-   * registry's `setAgentName(internal_handle, agent_name)`; tests
+   * registry's `setAgentName(owner_handle, agent_name)`; tests
    * inject a recorder.
    *
    * Failures are caught + logged inside the engine — a registry write
@@ -950,7 +950,7 @@ export interface InterviewEngineDeps {
   importResumeReadiness?: ImportResumeReadinessProbe
   /**
    * 2026-05-13 — slug-history lookup wired in for the no-restart-rename
-   * lazy-rekey path in `start()`. When provided alongside `internal_handle`,
+   * lazy-rekey path in `start()`. When provided alongside `owner_handle`,
    * the engine looks up old slugs for this instance and lazily rekeys an
    * in-progress onboarding row to the requested new slug on the first
    * `start()` call after a rename + restart. When either is omitted, the
@@ -959,13 +959,13 @@ export interface InterviewEngineDeps {
    */
   slugHistory?: SlugHistoryLookup
   /**
-   * 2026-05-13 — this gateway's frozen `internal_handle`. Scopes the
+   * 2026-05-13 — this gateway's frozen `owner_handle`. Scopes the
    * `slugHistory` lookup so the lazy-rekey path can never pull state
    * from a different instance's history. Optional for back-compat; tests
    * that don't exercise rename-recovery can omit it and the fallback
    * stays inert.
    */
-  internal_handle?: string
+  owner_handle?: string
   now?: () => number
   /** UUID factory; injected for test determinism. */
   uuid?: () => string
@@ -1157,22 +1157,22 @@ export interface PersonaComposerHook {
  * `rename-url-slug.ts` in the Managed provisioning layer), `engine.start(NEW)` would
  * find no row and reset the user to S1.
  *
- * This hook lets the engine, scoped to its own `internal_handle`, find
+ * This hook lets the engine, scoped to its own `owner_handle`, find
  * old slugs that historically mapped to this instance, look up the row
  * under the old slug, and lazily rekey it to the requested new slug —
  * preserving in-progress onboarding state across the rename/restart
  * boundary.
  *
- * Cross-instance safety: the lookup is scoped by `internal_handle` (the
+ * Cross-instance safety: the lookup is scoped by `owner_handle` (the
  * gateway's frozen identifier) so a malicious or misrouted caller
  * cannot pull state from a different instance's history.
  */
 export interface SlugHistoryLookup {
   /**
-   * Return all old_slugs in slug_history for the given internal_handle.
-   * Empty list (or unknown internal_handle) → no fallback fires.
+   * Return all old_slugs in slug_history for the given owner_handle.
+   * Empty list (or unknown owner_handle) → no fallback fires.
    */
-  listOldSlugsForInternalHandle(internal_handle: string): Promise<string[]>
+  listOldSlugsForOwnerHandle(owner_handle: string): Promise<string[]>
 }
 
 /**

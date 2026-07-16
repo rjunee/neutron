@@ -786,7 +786,7 @@ export function createLandingServer(options: LandingServerOptions): LandingServe
       // per-instance gateway when a returning user signed in via the
       // identity service: `identity/main.ts:onReturningWebSignin` builds
       // a per-instance deep link once the owner has picked a real URL
-      // slug (`url_slug !== internal_handle`) so the user lands on
+      // slug (`url_slug !== owner_handle`) so the user lands on
       // `<slug>.<apex>` from the first hop instead of the shared
       // `chat.<apex>` host. The token IS the auth gate (validated by
       // `/chat`'s `validateStartToken` immediately downstream); this

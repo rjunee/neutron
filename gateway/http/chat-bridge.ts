@@ -140,19 +140,19 @@ export class InMemoryWebChatSessionProjectRegistry
  * Narrow registry interface used by the JWT validator (Change 3 — accept
  * a new-slug JWT against a gateway whose `expected_project_slug` is still
  * the OLD slug, by looking up the registry's CURRENT `url_slug` for the
- * frozen `internal_handle` and accepting iff the claim matches it).
+ * frozen `owner_handle` and accepting iff the claim matches it).
  *
  * Implemented by `buildOwnerRegistryLookupFromRegistry(ownersRegistry)`
  * against a `OwnersRegistry`; tests can pass an in-memory stub.
  */
 export interface OwnerRegistryLookup {
   /**
-   * Returns the CURRENT `url_slug` for the given `internal_handle`, or
+   * Returns the CURRENT `url_slug` for the given `owner_handle`, or
    * null when the instance row is missing. Hot-path: every JWT-mismatch
    * connect runs this once; backing store is a single indexed SQLite
    * SELECT.
    */
-  getCurrentUrlSlugByInternalHandle(internal_handle: string): string | null
+  getCurrentUrlSlugByOwnerHandle(owner_handle: string): string | null
 }
 
 /**
@@ -165,17 +165,17 @@ export interface OwnerRegistryLookup {
  * `OwnersRegistry` so this Open-classified module no longer takes
  * an import edge on the Managed registry concrete. The Managed
  * production `OwnersRegistry` structurally satisfies the parameter
- * shape; tests can pass an in-memory `{ getByInternalHandle: ... }`
+ * shape; tests can pass an in-memory `{ getByOwnerHandle: ... }`
  * stub.
  */
 export function buildOwnerRegistryLookupFromRegistry(registry: {
-  getByInternalHandle(
-    internal_handle: string,
+  getByOwnerHandle(
+    owner_handle: string,
   ): { url_slug: string } | undefined
 }): OwnerRegistryLookup {
   return {
-    getCurrentUrlSlugByInternalHandle(internal_handle: string): string | null {
-      const row = registry.getByInternalHandle(internal_handle)
+    getCurrentUrlSlugByOwnerHandle(owner_handle: string): string | null {
+      const row = registry.getByOwnerHandle(owner_handle)
       if (row === undefined) return null
       return row.url_slug
     },

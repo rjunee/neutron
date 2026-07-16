@@ -180,7 +180,7 @@ describe('ISSUE #45 — completed pending row with job_id short-circuits', () =>
     const handles = buildSpyingPipeline()
     const hook = buildProfilePicEngineHook({
       pipeline: handles.pipeline,
-      internal_handle: null,
+      owner_handle: null,
       owner_home: '/tmp/dummy',
       getBotToken: () => null,
       imageUrlBuilder: ({ candidate_id }) =>
@@ -247,7 +247,7 @@ describe('ISSUE #45 — completed pending row with job_id short-circuits', () =>
     const handles = buildSpyingPipeline()
     const hook = buildProfilePicEngineHook({
       pipeline: handles.pipeline,
-      internal_handle: null,
+      owner_handle: null,
       owner_home: '/tmp/dummy',
       getBotToken: () => null,
       imageUrlBuilder: ({ candidate_id }) =>
@@ -292,7 +292,7 @@ describe('ISSUE #45 — completed pending row without job_id falls through (lega
     const handles = buildSpyingPipeline()
     const hook = buildProfilePicEngineHook({
       pipeline: handles.pipeline,
-      internal_handle: null,
+      owner_handle: null,
       owner_home: '/tmp/dummy',
       getBotToken: () => null,
       imageUrlBuilder: ({ candidate_id }) =>

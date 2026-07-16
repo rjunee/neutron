@@ -164,16 +164,16 @@ export interface AuthGateOptions {
   resolvePendingRedirect?: (current_host: string) => Promise<string | null>
   /**
    * 2026-06-05 slug-rename AUTH-LOOP fix. This gateway's frozen-at-boot
-   * `internal_handle`. Required for the two slug-rename shims below — both
+   * `owner_handle`. Required for the two slug-rename shims below — both
    * resolve BY this handle (never by the attacker-controlled claim) so a
    * token bound to a DIFFERENT instance whose claim happens to name a slug
    * in our registry cannot pass. When unset, the shims are inert and the
    * gate falls back to strict `claim === project_slug` equality.
    */
-  internal_handle?: string
+  owner_handle?: string
   /**
    * 2026-06-05 slug-rename AUTH-LOOP fix — registry shim. Returns the
-   * instance's CURRENT `url_slug` for the given `internal_handle`. Mirrors
+   * instance's CURRENT `url_slug` for the given `owner_handle`. Mirrors
    * the WS-upgrade path (`gateway/http/chat-bridge.ts:validateStartToken`):
    * a NEW-slug `?start` token minted by a rename the per-instance gateway
    * hasn't RESTARTED for (so `opts.project_slug` is still the OLD slug) is
@@ -184,19 +184,19 @@ export interface AuthGateOptions {
    * docs/plans/slug-rename-auth-loop-2026-06-05.md.
    */
   ownerRegistry?: {
-    getCurrentUrlSlugByInternalHandle(internal_handle: string): string | null
+    getCurrentUrlSlugByOwnerHandle(owner_handle: string): string | null
   }
   /**
    * 2026-06-05 slug-rename AUTH-LOOP fix — slug-history shim. Accepts an
    * OLD-slug `?start` token within the post-rename grace window (P1.5
    * § 1.5.5). Same store shape the WS-path shim consumes; cross-instance
-   * safety is enforced by the `internal_handle` precondition above. Fails
+   * safety is enforced by the `owner_handle` precondition above. Fails
    * closed on a backing-store throw (rather than accept under uncertainty).
    */
   slugHistoryStore?: {
     lookup(input: {
       old_slug: string
-      internal_handle: string
+      owner_handle: string
       now_ms: number
     }): Promise<{ expires_at_ms: number } | null>
   }
@@ -214,7 +214,7 @@ export interface AuthGateOptions {
  *   3. Slug-history shim — the claim is a non-expired OLD slug for this
  *      instance (grace window after a rename).
  *
- * Cross-instance safety: (2)+(3) are gated on `opts.internal_handle` and
+ * Cross-instance safety: (2)+(3) are gated on `opts.owner_handle` and
  * resolve BY our own handle — never by the (caller-supplied) claim — so a
  * token bound to a different instance cannot pass even if its slug collides
  * with a name in our registry. Both shims FAIL CLOSED (a registry/DB throw
@@ -227,11 +227,11 @@ async function startTokenSlugMatchesInstance(
   now_ms: number,
 ): Promise<boolean> {
   if (constantTimeEqual(claimSlug, opts.project_slug)) return true
-  const ih = opts.internal_handle
+  const ih = opts.owner_handle
   if (ih === undefined || ih.length === 0) return false
   if (opts.ownerRegistry !== undefined) {
     try {
-      const current = opts.ownerRegistry.getCurrentUrlSlugByInternalHandle(ih)
+      const current = opts.ownerRegistry.getCurrentUrlSlugByOwnerHandle(ih)
       if (current !== null && constantTimeEqual(current, claimSlug)) return true
     } catch {
       // Fail-closed — fall through to the slug-history shim.
@@ -241,7 +241,7 @@ async function startTokenSlugMatchesInstance(
     try {
       const match = await opts.slugHistoryStore.lookup({
         old_slug: claimSlug,
-        internal_handle: ih,
+        owner_handle: ih,
         now_ms,
       })
       if (match !== null && match.expires_at_ms >= now_ms) return true

@@ -255,7 +255,7 @@ export function buildAuditedSecretsStore(
 ): PlatformSecretsStore {
   const { audit, project_slug, core_slug } = options
   const wrapper: PlatformSecretsStore = {
-    async get(input: { internal_handle: string; kind: string; label: string }): Promise<string | null> {
+    async get(input: { owner_handle: string; kind: string; label: string }): Promise<string | null> {
       try {
         const got = await store.get(input)
         await audit.record({
@@ -281,7 +281,7 @@ export function buildAuditedSecretsStore(
       }
     },
     async put(input: {
-      internal_handle: string
+      owner_handle: string
       kind: string
       label: string
       plaintext: string
@@ -312,7 +312,7 @@ export function buildAuditedSecretsStore(
       }
     },
     async list(input: {
-      internal_handle: string
+      owner_handle: string
       kind?: string
     }): Promise<Array<PlatformSecretsStoreListItem>> {
       try {

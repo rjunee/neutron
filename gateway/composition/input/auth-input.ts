@@ -76,14 +76,14 @@ export interface AuthGateManagedComposition {
      * instead of 302→OAuth looping. See
      * `landing/auth-gate.ts:AuthGateOptions` for field semantics.
      */
-    internal_handle?: string
+    owner_handle?: string
     ownerRegistry?: {
-      getCurrentUrlSlugByInternalHandle(internal_handle: string): string | null
+      getCurrentUrlSlugByOwnerHandle(owner_handle: string): string | null
     }
     slugHistoryStore?: {
       lookup(input: {
         old_slug: string
-        internal_handle: string
+        owner_handle: string
         now_ms: number
       }): Promise<{ expires_at_ms: number } | null>
     }

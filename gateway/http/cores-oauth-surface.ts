@@ -106,7 +106,7 @@ export interface CoresOAuthSurfaceOptions {
   tools: ToolRegistry
   /** Backend factories — passed through to reinstall. */
   backends?: CoreBackendFactoryMap
-  /** Frozen internal_handle for this instance. */
+  /** Frozen owner_handle for this instance. */
   project_slug: string
   /** Public base URL of identity (e.g. https://auth.example.test). */
   identityBaseUrl: string

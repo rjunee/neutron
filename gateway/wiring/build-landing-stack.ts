@@ -80,17 +80,17 @@ export interface BuildLandingStackInput {
   appWsButtonPromptRouter?: AppSocketButtonPromptRouter
   appWsImportProgressRouter?: AppSocketImportProgressRouter
   /**
-   * P1.5 § 1.5.5 — frozen `internal_handle` for THIS instance (per-instance
+   * P1.5 § 1.5.5 — frozen `owner_handle` for THIS instance (per-instance
    * identity). The `/ws/chat` JWT slug-history shim that once consumed this
    * was excised with the dead ChatBridge (K11b0); the field stays required
    * and boot-validated (a non-empty value) so a misconfigured composer fails
    * loudly rather than booting with an empty identity.
    */
-  internal_handle: string
+  owner_handle: string
   /**
    * 2026-05-13 — engine-side slug-history lookup for the no-restart-rename
    * lazy-rekey path in `InterviewEngine.start`. Production wires this
-   * against the registry's `SlugHistoryStore.listForInternalHandle(...)`
+   * against the registry's `SlugHistoryStore.listForOwnerHandle(...)`
    * adapter (returns `old_slug[]` for THIS instance only). Optional for
    * back-compat — when omitted, the lazy-rekey fallback in `engine.start`
    * stays inert and a deploy / restart mid-onboarding-after-rename loses
@@ -599,8 +599,8 @@ export interface OnboardingEnginePieces {
 export function buildOnboardingEnginePieces(
   input: BuildLandingStackInput,
 ): OnboardingEnginePieces {
-  if (typeof input.internal_handle !== 'string' || input.internal_handle.length === 0) {
-    throw new Error('buildOnboardingEnginePieces: internal_handle is required (P1.5 § 1.5.5)')
+  if (typeof input.owner_handle !== 'string' || input.owner_handle.length === 0) {
+    throw new Error('buildOnboardingEnginePieces: owner_handle is required (P1.5 § 1.5.5)')
   }
   const buttonStore = new ButtonStore({ db: input.db })
   const stateStore = new SqliteOnboardingStateStore({ db: input.db })
@@ -784,15 +784,15 @@ export function buildOnboardingEnginePieces(
     ...(input.personaSummarizer !== undefined
       ? { personaSummarizer: input.personaSummarizer }
       : {}),
-    // T2 r2 — internal_handle threads through to the engine even when
+    // T2 r2 — owner_handle threads through to the engine even when
     // engineSlugHistory is absent, so dispatchWowAndAdvance can pass the
     // FROZEN identity (NOT the mutable url_slug) into the hook. Without
     // this, a rename across the wow_fired transition would have the
     // dispatcher key its persistence rows under the post-rename slug,
     // orphaning the pre-rename state.
     ...(engineSlugHistory !== null
-      ? { slugHistory: engineSlugHistory, internal_handle: input.internal_handle }
-      : { internal_handle: input.internal_handle }),
+      ? { slugHistory: engineSlugHistory, owner_handle: input.owner_handle }
+      : { owner_handle: input.owner_handle }),
     // 2026-05-28 — Max OAuth + per-instance SecretsStore. Pre-2026-05-28
     // these deps were NEVER wired into the production engine despite
     // existing as optional fields on InterviewEngineDeps, which broke
@@ -854,8 +854,8 @@ export function buildLandingStack(input: BuildLandingStackInput): LandingStackWi
   // Argus r2 [BLOCKING #1] — assert at boot so a misconfigured composer
   // bricks loudly here rather than silently disabling the shim and
   // 401'ing every old-slug JWT post-rename in prod.
-  if (typeof input.internal_handle !== 'string' || input.internal_handle.length === 0) {
-    throw new Error('buildLandingStack: internal_handle is required (P1.5 § 1.5.5)')
+  if (typeof input.owner_handle !== 'string' || input.owner_handle.length === 0) {
+    throw new Error('buildLandingStack: owner_handle is required (P1.5 § 1.5.5)')
   }
   const pieces = buildOnboardingEnginePieces(input)
   const { engine, registry, stateStore, importJobRunner, importPayloadResolver, buttonStore } =

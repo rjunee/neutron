@@ -79,7 +79,7 @@ function personInput(slug: string, name: string): EntityWriteInput {
 function makeCtx(): OpenWiringContext {
   return {
     llmPool: null,
-    internal_handle: OWNER,
+    owner_handle: OWNER,
     owner_home: ownerDir,
     project_slug: OWNER,
     env: { NEUTRON_PERFECT_RECALL: '1' } as NodeJS.ProcessEnv,

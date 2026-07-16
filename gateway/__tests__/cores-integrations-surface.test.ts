@@ -74,7 +74,7 @@ async function makeBench() {
   // SecretsStore rows, so OAuth-slot status still renders.
   const tokens = new OAuthTokenManager({
     secretsStore: secrets,
-    internal_handle: OWNER,
+    owner_handle: OWNER,
     client_id: '',
     client_secret: '',
     fetch: fakeFetch,
@@ -104,20 +104,20 @@ test('GET /api/cores/integrations lists OAuth + API-key slots with status (no Go
   const b = await makeBench()
   // Seed one connected Google account + one stored API key.
   await b.secrets.put({
-    internal_handle: OWNER,
+    owner_handle: OWNER,
     kind: 'oauth_token',
     label: 'gmail_compose',
     plaintext: 'access',
     expires_at: Date.now() + 3_600_000,
   })
   await b.secrets.put({
-    internal_handle: OWNER,
+    owner_handle: OWNER,
     kind: 'oauth_token',
     label: metaLabel('gmail_compose'),
     plaintext: JSON.stringify({ email: 'me@example.com', scopes: [] }),
   })
   await b.secrets.put({
-    internal_handle: OWNER,
+    owner_handle: OWNER,
     kind: 'byo_api_key',
     label: 'tavily',
     plaintext: 'tvly-1',
@@ -149,14 +149,14 @@ test('POST then DELETE /api/cores/api-keys/tavily mutates stored state (no Googl
   })
   expect(setRes.status).toBe(200)
   expect(
-    await b.secrets.get({ internal_handle: OWNER, kind: 'byo_api_key', label: 'tavily' }),
+    await b.secrets.get({ owner_handle: OWNER, kind: 'byo_api_key', label: 'tavily' }),
   ).toBe('tvly-set')
 
   const delRes = await authed(b.base, '/api/cores/api-keys/tavily', { method: 'DELETE' })
   expect(delRes.status).toBe(200)
   expect((await delRes.json() as { deleted: boolean }).deleted).toBe(true)
   expect(
-    await b.secrets.get({ internal_handle: OWNER, kind: 'byo_api_key', label: 'tavily' }),
+    await b.secrets.get({ owner_handle: OWNER, kind: 'byo_api_key', label: 'tavily' }),
   ).toBeNull()
 })
 

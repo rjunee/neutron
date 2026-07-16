@@ -77,7 +77,7 @@ async function makeBench() {
   }) as (input: string | URL | Request, init?: RequestInit) => Promise<Response>
   const tokens = new OAuthTokenManager({
     secretsStore: secrets,
-    internal_handle: OWNER,
+    owner_handle: OWNER,
     client_id: 'cid',
     client_secret: 'csecret',
     fetch: fakeFetch,
@@ -92,14 +92,14 @@ async function seedOAuth(
   email: string,
 ): Promise<void> {
   await secrets.put({
-    internal_handle: OWNER,
+    owner_handle: OWNER,
     kind: 'oauth_token',
     label,
     plaintext: 'access-token',
     expires_at: Date.now() + 3_600_000,
   })
   await secrets.put({
-    internal_handle: OWNER,
+    owner_handle: OWNER,
     kind: 'oauth_token',
     label: metaLabel(label),
     plaintext: JSON.stringify({
@@ -179,7 +179,7 @@ test('setApiKey stores then rotates the value (real state mutation)', async () =
     value: 'tvly-first',
   })
   expect(
-    await b.secrets.get({ internal_handle: OWNER, kind: 'byo_api_key', label: 'tavily' }),
+    await b.secrets.get({ owner_handle: OWNER, kind: 'byo_api_key', label: 'tavily' }),
   ).toBe('tvly-first')
 
   // Rotate over the existing row — replaceAtomic keeps a single row.
@@ -191,9 +191,9 @@ test('setApiKey stores then rotates the value (real state mutation)', async () =
     value: 'tvly-second',
   })
   expect(
-    await b.secrets.get({ internal_handle: OWNER, kind: 'byo_api_key', label: 'tavily' }),
+    await b.secrets.get({ owner_handle: OWNER, kind: 'byo_api_key', label: 'tavily' }),
   ).toBe('tvly-second')
-  const rows = await b.secrets.list({ internal_handle: OWNER, kind: 'byo_api_key' })
+  const rows = await b.secrets.list({ owner_handle: OWNER, kind: 'byo_api_key' })
   expect(rows.filter((r) => r.label === 'tavily')).toHaveLength(1)
 })
 
@@ -214,7 +214,7 @@ test('deleteApiKey clears a stored key + is idempotent', async () => {
   })
   expect(first.deleted).toBe(true)
   expect(
-    await b.secrets.get({ internal_handle: OWNER, kind: 'byo_api_key', label: 'tavily' }),
+    await b.secrets.get({ owner_handle: OWNER, kind: 'byo_api_key', label: 'tavily' }),
   ).toBeNull()
   // Second delete is a no-op.
   const second = await deleteApiKey({
@@ -278,10 +278,10 @@ test('system openai_api_key slot shares storage with the onboarding key (ND1)', 
   })
   // Shared secret — readable as the onboarding embeddings key.
   expect(
-    await apiKeys.resolveSecret({ internal_handle: OWNER, provider: 'openai', label: 'onboarding' }),
+    await apiKeys.resolveSecret({ owner_handle: OWNER, provider: 'openai', label: 'onboarding' }),
   ).toBe('sk-from-admin-panel')
   // Metadata row exists → credential resolution (GPT-5 reviews) sees it.
-  expect((await apiKeys.list({ internal_handle: OWNER, provider: 'openai' })).length).toBe(1)
+  expect((await apiKeys.list({ owner_handle: OWNER, provider: 'openai' })).length).toBe(1)
 
   // Now reads connected.
   const after = await buildIntegrationsStatus({
@@ -302,7 +302,7 @@ test('system openai_api_key slot shares storage with the onboarding key (ND1)', 
     value: 'sk-rotated',
   })
   expect(
-    await apiKeys.resolveSecret({ internal_handle: OWNER, provider: 'openai', label: 'onboarding' }),
+    await apiKeys.resolveSecret({ owner_handle: OWNER, provider: 'openai', label: 'onboarding' }),
   ).toBe('sk-rotated')
 
   // Delete clears BOTH the secret AND the metadata row (no orphan → a later
@@ -316,13 +316,13 @@ test('system openai_api_key slot shares storage with the onboarding key (ND1)', 
   })
   expect(del.deleted).toBe(true)
   expect(
-    await apiKeys.resolveSecret({ internal_handle: OWNER, provider: 'openai', label: 'onboarding' }),
+    await apiKeys.resolveSecret({ owner_handle: OWNER, provider: 'openai', label: 'onboarding' }),
   ).toBeNull()
-  expect((await apiKeys.list({ internal_handle: OWNER, provider: 'openai' })).length).toBe(0)
+  expect((await apiKeys.list({ owner_handle: OWNER, provider: 'openai' })).length).toBe(0)
 
   // Idempotent re-add after delete (proves no orphan metadata row blocks it).
-  await apiKeys.add({ internal_handle: OWNER, provider: 'openai', label: 'onboarding', plaintext: 'sk-reonboard' })
+  await apiKeys.add({ owner_handle: OWNER, provider: 'openai', label: 'onboarding', plaintext: 'sk-reonboard' })
   expect(
-    await apiKeys.resolveSecret({ internal_handle: OWNER, provider: 'openai', label: 'onboarding' }),
+    await apiKeys.resolveSecret({ owner_handle: OWNER, provider: 'openai', label: 'onboarding' }),
   ).toBe('sk-reonboard')
 })

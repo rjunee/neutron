@@ -88,7 +88,7 @@ function stubAdapter(): PlatformAdapter {
       sanitize: (s: string) => s,
     },
     resolveOwnerBySlug: () => null,
-    resolveOwnerByInternalHandle: () => null,
+    resolveOwnerByOwnerHandle: () => null,
     renameSlug: async () => ({ status: 'rejected', reason: 'invalid_format' }),
     mintInstallToken: async () => {
       throw new Error('not supported')
