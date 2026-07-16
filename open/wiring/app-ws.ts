@@ -793,7 +793,7 @@ export function wireAppWs(ctx: OpenWiringContext, deps: WireAppWsDeps): WiredApp
       if (scribeOnUserTurn !== undefined) {
         try {
           scribeOnUserTurn({
-            project_slug,
+            owner_slug: project_slug,
             user_id: event.user.channel_user_id,
             topic_id: turnTopicId,
             text: userText,
@@ -1088,7 +1088,7 @@ export function wireAppWs(ctx: OpenWiringContext, deps: WireAppWsDeps): WiredApp
       if (scribeOnUserTurn !== undefined) {
         try {
           scribeOnUserTurn({
-            project_slug,
+            owner_slug: project_slug,
             user_id,
             topic_id: turnTopicId,
             text: replyText,

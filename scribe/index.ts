@@ -106,7 +106,7 @@ export {
 
 /** Input the chat-bridge hands scribe after a real user turn. */
 export interface UserTurnInput {
-  project_slug: string
+  owner_slug: string
   user_id: string
   topic_id: string
   text: string
@@ -144,7 +144,7 @@ export interface CreateScribeDeps {
   /** Per-instance Zone-B data dir; the entity-writer appends `/entities`. */
   ownerDataDir: string
   /** Instance slug — provenance source pointer for timeline entries. */
-  project_slug: string
+  owner_slug: string
   /** Per-instance budget governor state (created at composer boot). */
   budget: BudgetState
   /** Model preference. Defaults to Opus (`[BEST_MODEL]`) inside runExtraction. */
@@ -185,7 +185,7 @@ export interface Scribe {
     text: string
     observed_at?: number
     trigger?: ScribeTrigger
-    /** Timeline provenance pointer. Defaults to `chat:<project_slug>`. */
+    /** Timeline provenance pointer. Defaults to `chat:<owner_slug>`. */
     source?: string
   }): Promise<ScribeOutcome>
   /**
@@ -228,7 +228,7 @@ export function createScribe(deps: CreateScribeDeps): Scribe {
   }): Promise<ScribeOutcome> {
     const trigger: ScribeTrigger = input.trigger ?? 'chat'
     const ts = input.observed_at ?? now()
-    const source = input.source ?? `chat:${deps.project_slug}`
+    const source = input.source ?? `chat:${deps.owner_slug}`
     if (!shouldExtract(input.text)) {
       return { ran: false, reason: 'filtered' }
     }
@@ -260,7 +260,7 @@ export function createScribe(deps: CreateScribeDeps): Scribe {
           // Own-origin author attribution — this node's own slug. (The
           // content-sync foreign-origin path was removed with the mesh,
           // connect-spec §2.1.)
-          ownSlug: deps.project_slug,
+          ownSlug: deps.owner_slug,
           // Multi-author attribution (connect-spec §4.3): record WHO the turn
           // came from in the entry's timeline provenance, when known.
           ...(input.author !== undefined ? { author: input.author } : {}),
