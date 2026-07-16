@@ -19,6 +19,9 @@ import { buildReflectionPreamble } from './reflection-preamble.ts'
 const FORGE_ROLES = ['forge:build', 'forge:fix-round-1', 'forge:fix-round-2', 'forge:fix-round-9']
 const REVIEWER_ROLES = ['argus:claude', 'argus:adversarial', 'argus:synthesis', 'argus:codex']
 const OTHER_ROLES = ['plan:fable', 'cleanup:worktree', 'checkpoint', '']
+// Near-boundary labels the workflow NEVER emits — a loose `startsWith('forge:fix')`
+// would wrongly admit these onto the receives-reflection side.
+const NEAR_BOUNDARY_NON_FORGE = ['forge:fix', 'forge:fixer', 'forge:fixture', 'forge:', 'forge']
 
 describe('agentReceivesReflection — the reflection trust boundary', () => {
   test('the FORGE builder path (build + every fix round) receives reflection', () => {
@@ -31,6 +34,14 @@ describe('agentReceivesReflection — the reflection trust boundary', () => {
 
   test('non-builder bookkeeping/planner roles are excluded too', () => {
     for (const role of OTHER_ROLES) expect(agentReceivesReflection(role)).toBe(false)
+  })
+
+  test('near-boundary non-Forge labels are EXCLUDED (exact forge:fix-round- grammar)', () => {
+    // Defense-in-depth: only `forge:build` + `forge:fix-round-<n>` receive reflection;
+    // a mislabelled `forge:fix` / `forge:fixer` / `forge:fixture` must NOT.
+    for (const role of NEAR_BOUNDARY_NON_FORGE) {
+      expect(agentReceivesReflection(role)).toBe(false)
+    }
   })
 })
 

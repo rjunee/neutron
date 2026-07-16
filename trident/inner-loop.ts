@@ -75,9 +75,10 @@ export interface InnerLoopInput {
   /** RB2 (b) — the owner's recent reflection corrections/diary, ALREADY formatted
    *  as the `<learned_corrections>`/`<recent_diary>` block by the reflection layer
    *  (or null when nothing has been learned). Threaded into the workflow args so the
-   *  FIRST turn of the build agents (Forge + Argus) re-grounds on owner corrections
-   *  — reflection was chat-only before RB2. Null/empty → a clean no-op (no block
-   *  spliced into any agent prompt), so a fresh instance's prompts are unchanged. */
+   *  FORGE BUILDER (forge:build + fix rounds) re-grounds on owner corrections —
+   *  reflection was chat-only before RB2. NOT the review gate: the workflow injects
+   *  it into Forge ONLY, never argus:* (trust boundary, see `build-agent-prompt.ts`).
+   *  Null/empty → a clean no-op (no block spliced), so a fresh instance is unchanged. */
   reflection_context?: string | null
 }
 

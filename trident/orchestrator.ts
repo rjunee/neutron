@@ -99,11 +99,13 @@ export interface BuildTridentOrchestratorOptions {
   resolve_codex_home?: (run: TridentRun) => string | null
   /**
    * RB2 (b) — resolve the owner's recent reflection corrections/diary block for a
-   * launching run, threaded into the inner workflow so the build agents (Forge +
-   * Argus) re-ground on owner corrections on their FIRST turn (reflection was
-   * chat-only before RB2). The composer wires this to the SAME `reflection`
-   * instance the live-agent chat turn reads (`reflection.loadContext()`), so the
-   * corrections a build agent sees are the same ones chat applies. Returns null
+   * launching run, threaded into the inner workflow so the FORGE BUILDER (forge:build
+   * + fix rounds) re-grounds on owner corrections (reflection was chat-only before
+   * RB2). NOT the independent review gate: the workflow injects it into Forge ONLY,
+   * never argus:* (trust boundary — see `build-agent-prompt.ts`). The composer wires
+   * this to the SAME `reflection` instance the live-agent chat turn reads
+   * (`reflection.loadContext()`), so the corrections Forge sees are the same ones
+   * chat applies. Returns null
    * when nothing has been learned / the reflection layer is absent → a clean
    * no-op (the workflow splices no block). Reflection is not scope-filtered
    * (owner-wide corrections), so the `run` argument is accepted for parity with
@@ -351,8 +353,9 @@ export function buildTridentOrchestrator(
         ? opts.resolve_codex_home(launchRun)
         : (opts.codex_home ?? null),
       // RB2 (b) — the owner's recent reflection corrections/diary block (resolved
-      // best-effort above), threaded into the inner workflow so Forge + Argus
-      // re-ground on owner corrections. Null when no resolver / nothing learned / a
+      // best-effort above), threaded into the inner workflow so the FORGE BUILDER
+      // (not the argus review gate) re-grounds on owner corrections. Null when no
+      // resolver / nothing learned / a
       // read failed.
       reflection_context,
     })

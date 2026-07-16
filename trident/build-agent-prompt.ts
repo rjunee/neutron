@@ -33,7 +33,12 @@
  * bookkeeping role: the independent merge gate must never carry the untrusted block.
  */
 export function agentReceivesReflection(role: string): boolean {
-  return role === 'forge:build' || role.startsWith('forge:fix')
+  // EXACT grammar match (defense-in-depth for the trust boundary): the ONLY Forge
+  // builder labels the workflow emits are `forge:build` and `forge:fix-round-<n>`.
+  // A loose `startsWith('forge:fix')` would also admit a hypothetical `forge:fixer`
+  // / `forge:fixture` — narrow to the exact `forge:fix-round-` prefix so a
+  // mis-labelled agent can never accidentally fall on the receives-reflection side.
+  return role === 'forge:build' || role.startsWith('forge:fix-round-')
 }
 
 /**

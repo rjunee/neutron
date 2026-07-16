@@ -119,8 +119,9 @@ export interface MiscCompositionInput {
      * RB2 (b) — resolve the owner's recent reflection corrections/diary block for a
      * launching run. The composer wires this to the SAME `reflection` instance the
      * live-agent chat turn reads (`reflection.loadContext()`), so owner corrections
-     * reach the build agents (Forge + Argus) on their first turn — reflection was
-     * chat-only before RB2. Returns null when nothing is learned → a clean no-op.
+     * reach the FORGE BUILDER (forge:build + fix rounds) — NOT the independent argus
+     * review gate (trust boundary — see `trident/build-agent-prompt.ts`). Reflection
+     * was chat-only before RB2. Returns null when nothing is learned → a clean no-op.
      */
     resolve_reflection_context?: (
       run: import('@neutronai/trident/store.ts').TridentRun,
