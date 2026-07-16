@@ -240,6 +240,69 @@ describe('RB4 temporal invalidation (belief evolution) — real PGLite round-tri
     expect(timeline.some((e) => e.body.includes('superseded'))).toBe(false)
   }, 60_000)
 
+  test('flag OFF→ON transition: a fact written flag-off, then superseded flag-on, still survives in the dated timeline', async () => {
+    const ownerDataDir = mkdtempSync(join(tmpdir(), 'scribe-rb4-off2on-'))
+    const syncHook = new GBrainSyncHook({
+      memoryStore: new GBrainMemoryStore(client),
+      gbrainMcp: client,
+    })
+
+    // 1) Original works_at OldCo written with the flag OFF — so it carries NO
+    //    relation note of its own (fact-only timeline body), the pre-RB4 shape.
+    const off = await createScribe({
+      substrate: cannedSubstrate(FACT_A),
+      syncHook,
+      ownerDataDir,
+      project_slug: 'rb4-off2on',
+      budget: createState(join(ownerDataDir, '.scribe-budget.json'), t0),
+      writeEntity,
+      now: () => t0,
+      // supersede omitted → OFF
+    }).extractAndWrite({
+      text: 'Alice Ng is a staff engineer at OldCo, her longtime employer, where she leads the platform team and mentors the juniors.',
+      observed_at: t0,
+    })
+    expect(off.ran).toBe(true)
+
+    // 2) The flag is later ENABLED; a superseding turn arrives.
+    const on = await createScribe({
+      substrate: cannedSubstrate(FACT_SUPERSEDE),
+      syncHook,
+      ownerDataDir,
+      project_slug: 'rb4-off2on',
+      budget: createState(join(ownerDataDir, '.scribe-budget.json'), t0),
+      writeEntity,
+      now: () => t0 + 1000,
+      supersede: true, // flag now ON
+    }).extractAndWrite({
+      text: 'Alice Ng just moved on from OldCo — she now works at NewCo, leading their infrastructure group, and is no longer at OldCo.',
+      observed_at: t0 + 1000,
+    })
+    expect(on.ran).toBe(true)
+
+    const onDisk = readFileSync(join(ownerDataDir, 'entities', 'people', 'alice-ng.md'), 'utf8')
+    const compiled = extractCompiledTruth(onDisk)
+    // Current truth: OldCo retired, NewCo present.
+    expect(compiled).not.toContain('[[oldco]]')
+    expect(compiled).toContain('Works at [[newco]].')
+
+    // Graph reflects current truth.
+    const links = await client.call('get_links', { slug: 'alice-ng' })
+    expect(edgesTo(links, 'oldco', 'works_at').length).toBe(0)
+    expect(edgesTo(links, 'newco', 'works_at').length).toBe(1)
+
+    // History NOT silently lost: the retired works_at OldCo fact survives in the
+    // dated timeline via the invalidation-time supersession note (the original
+    // date is unrecoverable — the flag-off write recorded no relation).
+    const timeline = extractTimeline(onDisk)
+    const supersedeRow = timeline.find(
+      (e) =>
+        e.ts === new Date(t0 + 1000).toISOString() &&
+        e.body.includes('superseded works_at: oldco → newco'),
+    )
+    expect(supersedeRow).toBeDefined()
+  }, 60_000)
+
   test('flag ON: an ALIASED wikilink is invalidated (removal matches [[oldco|OldCo]], not just [[oldco]])', async () => {
     const ownerDataDir = mkdtempSync(join(tmpdir(), 'scribe-rb4-alias-'))
     const syncHook = new GBrainSyncHook({
