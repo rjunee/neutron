@@ -60,6 +60,7 @@ import {
   type AppWsOutbound,
   type AppWsOutboundAgentMessage,
   type AppWsOutboundAgentMessageDocRef,
+  type AppWsOutboundAgentMessageOption,
   type AppWsOutboundAgentMessageUploadAffordance,
   type AppWsOutboundEditUpdate,
   type AppWsOutboundReactionUpdate,
@@ -217,6 +218,12 @@ export class AppWsAdapter implements ChannelAdapter {
           role: 'agent',
           body: envelope.body,
           project_id: envelope.project_id ?? null,
+          // W3a — stamp the agent message's structured presentation metadata
+          // (options / prompt_id / kind / citations / image_urls / doc_refs /
+          // allow_freeform / upload_affordance) EXACTLY as the live-push
+          // envelope carried it, so a later `resume` replay re-hydrates the
+          // same structured message instead of a plain text bubble.
+          meta: agentMessageMetaFromEnvelope(envelope),
           created_at: envelope.ts,
         })
         envelope.seq = result.row.seq
@@ -960,7 +967,173 @@ export function appChatRowToEnvelope(row: AppChatRow): AppWsOutbound {
     seq: row.seq,
   }
   if (row.project_id !== null) env.project_id = row.project_id
+  // W3a — re-apply the structured agent metadata persisted at send time so a
+  // resume replay re-hydrates buttons / citations / doc-links at full
+  // fidelity rather than as a plain text bubble.
+  if (row.meta !== null) applyPersistedAgentMeta(env, row.meta)
   return env
+}
+
+/**
+ * W3a — the agent-message envelope fields that carry structured PRESENTATION
+ * metadata (everything the client needs to re-render a rich agent bubble on
+ * resume). Deliberately EXCLUDES: `body`/`message_id`/`ts`/`seq`/`project_id`
+ * (already dedicated columns), `system_notice` (ephemeral — never persisted),
+ * and `delivered_by`/`read_by` (receipt-managed, folded in separately).
+ */
+const AGENT_META_KEYS = [
+  'prompt_id',
+  'options',
+  'allow_freeform',
+  'kind',
+  'citations',
+  'image_urls',
+  'doc_refs',
+  'deep_link',
+  'upload_affordance',
+] as const
+
+/**
+ * W3a — project the structured presentation fields off a live-push agent
+ * envelope into the opaque `meta` blob persisted on the chat_log row. Returns
+ * `null` when the message carries none (a plain agent bubble), so a user echo
+ * / plain reply stores a NULL `meta_json`. Empty arrays are treated as absent
+ * to match the `PRESENT` predicate the G2 parity matrix uses.
+ */
+function agentMessageMetaFromEnvelope(
+  env: AppWsOutboundAgentMessage,
+): Record<string, unknown> | null {
+  const source = env as unknown as Record<string, unknown>
+  const meta: Record<string, unknown> = {}
+  for (const key of AGENT_META_KEYS) {
+    const value = source[key]
+    if (value === undefined) continue
+    if (Array.isArray(value) && value.length === 0) continue
+    meta[key] = value
+  }
+  return Object.keys(meta).length > 0 ? meta : null
+}
+
+/**
+ * W3a — re-hydrate the persisted structured fields onto a replayed agent
+ * envelope. Every field is defensively re-validated (the blob is trusted at
+ * write time but a corrupt / partial row must degrade to a plain bubble, never
+ * throw and never inject a malformed field the client can't render).
+ */
+function applyPersistedAgentMeta(
+  env: AppWsOutboundAgentMessage,
+  meta: Readonly<Record<string, unknown>>,
+): void {
+  const promptId = meta['prompt_id']
+  if (typeof promptId === 'string' && promptId.length > 0) env.prompt_id = promptId
+
+  const kind = meta['kind']
+  if (kind === 'buttons' || kind === 'image-gallery') env.kind = kind
+
+  const allowFreeform = meta['allow_freeform']
+  if (typeof allowFreeform === 'boolean') env.allow_freeform = allowFreeform
+
+  const deepLink = meta['deep_link']
+  if (typeof deepLink === 'string' && deepLink.length > 0) env.deep_link = deepLink
+
+  const options = cleanPersistedOptions(meta['options'])
+  if (options.length > 0) env.options = options
+
+  const citations = cleanPersistedCitations(meta['citations'])
+  if (citations.length > 0) env.citations = citations
+
+  const imageUrls = cleanPersistedImageUrls(meta['image_urls'])
+  if (imageUrls.length > 0) env.image_urls = imageUrls
+
+  const docRefs = cleanPersistedDocRefs(meta['doc_refs'])
+  if (docRefs.length > 0) env.doc_refs = docRefs
+
+  const uploadAffordance = sanitizeUploadAffordance(meta['upload_affordance'])
+  if (uploadAffordance !== null) env.upload_affordance = uploadAffordance
+}
+
+/** W3a — re-validate persisted button options → the canonical wire shape. */
+function cleanPersistedOptions(raw: unknown): AppWsOutboundAgentMessageOption[] {
+  if (!Array.isArray(raw)) return []
+  const out: AppWsOutboundAgentMessageOption[] = []
+  for (const entry of raw) {
+    if (entry === null || typeof entry !== 'object') continue
+    const r = entry as Record<string, unknown>
+    if (typeof r['label'] !== 'string' || typeof r['body'] !== 'string' || typeof r['value'] !== 'string') {
+      continue
+    }
+    const option: AppWsOutboundAgentMessageOption = {
+      label: r['label'],
+      body: r['body'],
+      value: r['value'],
+    }
+    if (typeof r['image_url'] === 'string' && r['image_url'].length > 0) {
+      option.image_url = r['image_url']
+    }
+    const decoration = cleanOptionDecoration(r['decoration'])
+    if (decoration !== undefined) option.decoration = decoration
+    out.push(option)
+  }
+  return out
+}
+
+/**
+ * W3a — re-validate a persisted option `decoration` down to the wire contract
+ * (`style` ∈ {default,destructive,primary}, `icon_custom_emoji_id` a non-empty
+ * string). Returns `undefined` when nothing valid survives, so a corrupt blob
+ * yields an option with NO decoration rather than a malformed one the client
+ * can't render.
+ */
+function cleanOptionDecoration(
+  raw: unknown,
+): NonNullable<AppWsOutboundAgentMessageOption['decoration']> | undefined {
+  if (raw === null || typeof raw !== 'object') return undefined
+  const r = raw as Record<string, unknown>
+  const decoration: NonNullable<AppWsOutboundAgentMessageOption['decoration']> = {}
+  const style = r['style']
+  if (style === 'default' || style === 'destructive' || style === 'primary') {
+    decoration.style = style
+  }
+  const icon = r['icon_custom_emoji_id']
+  if (typeof icon === 'string' && icon.length > 0) decoration.icon_custom_emoji_id = icon
+  return Object.keys(decoration).length > 0 ? decoration : undefined
+}
+
+/** W3a — re-validate persisted citations → `{ title, url }` pairs. */
+function cleanPersistedCitations(raw: unknown): { title: string; url: string }[] {
+  if (!Array.isArray(raw)) return []
+  const out: { title: string; url: string }[] = []
+  for (const entry of raw) {
+    if (entry === null || typeof entry !== 'object') continue
+    const r = entry as Record<string, unknown>
+    if (typeof r['title'] === 'string' && typeof r['url'] === 'string') {
+      out.push({ title: r['title'], url: r['url'] })
+    }
+  }
+  return out
+}
+
+/** W3a — re-validate persisted image URLs → non-empty strings. */
+function cleanPersistedImageUrls(raw: unknown): string[] {
+  if (!Array.isArray(raw)) return []
+  return raw.filter((u): u is string => typeof u === 'string' && u.length > 0)
+}
+
+/** W3a — re-validate persisted (already channel-resolved) doc refs. */
+function cleanPersistedDocRefs(raw: unknown): AppWsOutboundAgentMessageDocRef[] {
+  if (!Array.isArray(raw)) return []
+  const out: AppWsOutboundAgentMessageDocRef[] = []
+  for (const entry of raw) {
+    if (entry === null || typeof entry !== 'object') continue
+    const r = entry as Record<string, unknown>
+    if (typeof r['label'] !== 'string' || typeof r['url'] !== 'string' || typeof r['path'] !== 'string') {
+      continue
+    }
+    const project_id = r['project_id']
+    if (project_id !== null && typeof project_id !== 'string') continue
+    out.push({ label: r['label'], url: r['url'], project_id, path: r['path'] })
+  }
+  return out
 }
 
 /** Best-effort `app:<user_id>` or `app:<user_id>:<project_id>` → `<user_id>`;

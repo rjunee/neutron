@@ -98,3 +98,39 @@ describe('AppChatStore — resume replay (WHERE seq > N ORDER BY seq)', () => {
     expect(row?.attachments).toEqual(['/api/app/upload/abc', '/api/app/upload/def'])
   })
 })
+
+describe('AppChatStore — W3a structured agent meta', () => {
+  it('round-trips the opaque meta blob through a replay', async () => {
+    const meta = {
+      prompt_id: '00000000-0000-4000-8000-000000000abc',
+      kind: 'buttons',
+      options: [{ label: 'Yes', body: 'Yes', value: 'yes' }],
+      citations: [{ title: 'Docs', url: 'https://example.test/d' }],
+    }
+    await store.append({
+      topic_id: TOPIC, message_id: 'm1', role: 'agent', body: 'pick', meta, created_at: 1,
+    })
+    const [row] = await store.replayAfter(TOPIC, 0)
+    expect(row?.meta).toEqual(meta)
+  })
+
+  it('persists NULL meta for a message that carries none', async () => {
+    await store.append({ topic_id: TOPIC, message_id: 'm1', role: 'agent', body: 'plain', created_at: 1 })
+    // An empty-object meta collapses to NULL (matches the PRESENT predicate).
+    await store.append({ topic_id: TOPIC, message_id: 'm2', role: 'agent', body: 'also plain', meta: {}, created_at: 2 })
+    const rows = await store.replayAfter(TOPIC, 0)
+    expect(rows.map((r) => r.meta)).toEqual([null, null])
+  })
+
+  it('degrades a corrupt / non-object meta_json to null on replay (never throws)', async () => {
+    await store.append({ topic_id: TOPIC, message_id: 'bad-json', role: 'agent', body: 'a', created_at: 1 })
+    await store.append({ topic_id: TOPIC, message_id: 'array', role: 'agent', body: 'b', created_at: 2 })
+    await store.append({ topic_id: TOPIC, message_id: 'scalar', role: 'agent', body: 'c', created_at: 3 })
+    // Corrupt the durable column out-of-band to simulate a bad / older write.
+    db.raw().query('UPDATE app_chat_messages SET meta_json = ? WHERE message_id = ?').run('{not json', 'bad-json')
+    db.raw().query('UPDATE app_chat_messages SET meta_json = ? WHERE message_id = ?').run('[1,2,3]', 'array')
+    db.raw().query('UPDATE app_chat_messages SET meta_json = ? WHERE message_id = ?').run('"just a string"', 'scalar')
+    const rows = await store.replayAfter(TOPIC, 0)
+    expect(rows.map((r) => r.meta)).toEqual([null, null, null])
+  })
+})

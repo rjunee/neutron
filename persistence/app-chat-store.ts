@@ -32,6 +32,14 @@ export interface AppChatRow {
   project_id: string | null
   /** Attachment URLs, or null when the message carried none. */
   attachments: ReadonlyArray<string> | null
+  /**
+   * W3a — structured agent-message presentation metadata (button `options`,
+   * `prompt_id`, `kind`, `citations`, `image_urls`, `doc_refs`,
+   * `allow_freeform`, `upload_affordance`), or null. Opaque here: the app-ws
+   * adapter owns the shape and re-validates on replay. Always null for user
+   * messages.
+   */
+  meta: Readonly<Record<string, unknown>> | null
   created_at: number
 }
 
@@ -44,6 +52,8 @@ export interface AppChatAppendInput {
   client_msg_id?: string | null
   project_id?: string | null
   attachments?: ReadonlyArray<string> | null
+  /** W3a — structured agent-message metadata; see {@link AppChatRow.meta}. */
+  meta?: Readonly<Record<string, unknown>> | null
   created_at: number
 }
 
@@ -91,11 +101,12 @@ interface MessageRow {
   client_msg_id: string | null
   project_id: string | null
   attachments_json: string | null
+  meta_json: string | null
   created_at: number
 }
 
 const MESSAGE_COLUMNS = `topic_id, seq, message_id, role, body, client_msg_id, project_id,
-                    attachments_json, created_at`
+                    attachments_json, meta_json, created_at`
 
 export interface AppChatStoreOptions {
   db: ProjectDb
@@ -121,6 +132,9 @@ export class AppChatStore implements AppChatMessageLog {
       input.attachments !== undefined && input.attachments !== null && input.attachments.length > 0
         ? JSON.stringify([...input.attachments])
         : null
+    const meta = input.meta ?? null
+    const meta_json =
+      meta !== null && Object.keys(meta).length > 0 ? JSON.stringify(meta) : null
 
     return this.core.transaction<AppChatAppendResult>((tx) => {
       // Idempotency: a re-sent user message (offline-queue flush, double-tap,
@@ -137,8 +151,8 @@ export class AppChatStore implements AppChatMessageLog {
       tx.runSync(
         `INSERT INTO app_chat_messages
            (topic_id, seq, message_id, role, body, client_msg_id, project_id,
-            attachments_json, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            attachments_json, meta_json, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           input.topic_id,
           seq,
@@ -148,6 +162,7 @@ export class AppChatStore implements AppChatMessageLog {
           client_msg_id,
           project_id,
           attachments_json,
+          meta_json,
           input.created_at,
         ],
       )
@@ -161,6 +176,7 @@ export class AppChatStore implements AppChatMessageLog {
         client_msg_id,
         project_id,
         attachments: input.attachments !== undefined ? (input.attachments ?? null) : null,
+        meta: meta_json !== null ? meta : null,
         created_at: input.created_at,
       }
       return { row, was_new: true }
@@ -189,6 +205,14 @@ function rowFrom(r: MessageRow): AppChatRow {
       attachments = parsed.filter((x): x is string => typeof x === 'string')
     }
   }
+  let meta: Readonly<Record<string, unknown>> | null = null
+  if (r.meta_json !== null) {
+    // Corrupt-policy: silent reset to null (replay degrades to a plain bubble).
+    const parsed = parseJsonColumn(r.meta_json, { onCorrupt: 'fallback', fallback: null })
+    if (parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      meta = parsed as Readonly<Record<string, unknown>>
+    }
+  }
   return {
     topic_id: r.topic_id,
     seq: r.seq,
@@ -198,6 +222,7 @@ function rowFrom(r: MessageRow): AppChatRow {
     client_msg_id: r.client_msg_id,
     project_id: r.project_id,
     attachments,
+    meta,
     created_at: r.created_at,
   }
 }
