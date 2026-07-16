@@ -533,29 +533,6 @@ function resolveConflictingSupersedes(relations: ExtractedRelation[]): Extracted
   )
 }
 
-/** Render a single `${predicate}\x1f${objSlug}` triple key back into its
- *  compiled-truth SENTENCE (no bullet), via the same `RELATION_SENTENCE`
- *  templates the writer emits. Used to re-render the SURVIVING relations of a
- *  dropped compound sentence so a superseded relation is removed without losing
- *  its still-current siblings. */
-function renderTripleKey(key: string): string {
-  const [predicate, objSlug] = key.split('\x1f')
-  const tmpl = RELATION_SENTENCE[predicate ?? ''] ?? RELATION_SENTENCE['mentions']!
-  return tmpl(objSlug ?? '')
-}
-
-/** Order-preserving de-duplication. */
-function dedupeInOrder(keys: readonly string[]): string[] {
-  const seen = new Set<string>()
-  const out: string[] = []
-  for (const k of keys) {
-    if (seen.has(k)) continue
-    seen.add(k)
-    out.push(k)
-  }
-  return out
-}
-
 /** Render the relationship bullet lines for a page, deduped by (predicate,
  *  object) and skipping self-edges. */
 function renderRelationLines(page: PlannedPage): string[] {
@@ -670,14 +647,17 @@ function mergeExistingCompiledTruth(
  * target sentence and keeps the rest, so neither a stale sibling sentence lingers
  * nor an unrelated fact is deleted wholesale.
  *
- * ALL-OR-NOTHING within a sentence (Codex data-loss blocker): a sentence is
- * dropped ONLY when EVERY relation it asserts is a superseded target. A COMPOUND
- * sentence that also carries a still-current relation (`Works at [[oldco]] and
- * advises [[boardco]].`) is KEPT — deleting it would destroy the unrelated
- * `advises boardco` fact. The trade-off is intentional and safe: a superseded
- * relation embedded in a compound sentence is left in place (under-remove rather
- * than destroy); scribe's own rendered prose is one relation per sentence, so
- * this only spares hand-authored/imported compound prose.
+ * ALL-OR-NOTHING within a sentence, VERBATIM otherwise (Codex data-loss blockers):
+ * a sentence is dropped ONLY when EVERY relation it asserts is a superseded target;
+ * a COMPOUND sentence that also carries a still-current relation OR descriptive
+ * prose (`Works at [[oldco]] and advises [[boardco]] on acquisitions since 2019.`)
+ * is KEPT BYTE-FOR-BYTE — never deleted and never reconstructed from templates
+ * (which would lose the unrelated fact AND the hand-authored prose). The trade-off
+ * is intentional + safe: a superseded relation embedded in a compound sentence is
+ * left in place (under-remove rather than mangle prose). Scribe's own rendered
+ * prose is one relation per sentence, so a real chat-time supersession always hits
+ * the clean single-relation path; only hand-authored/imported compound prose is
+ * spared (its graph edge follows the KG's one-edge-per-pair collapse regardless).
  *
  * A sentence qualifies purely by what it would contribute to the graph, computed
  * with the SAME `extractTypedLinks` + `splitSentencesWithOffsets` the edge
@@ -753,20 +733,21 @@ function stripSupersededSentences(
       const raw = content.slice(span.start, span.end)
       const keys = sentenceKeys(raw)
       const hitKeys = keys.filter((k) => targets.has(k))
-      if (hitKeys.length > 0) {
-        // This sentence asserts a superseded relation. Retire it — but PRESERVE
-        // any still-current sibling relation in the same sentence by RE-RENDERING
-        // the survivors as clean one-relation sentences (never delete them, and
-        // never leave the stale one behind). A plain single-relation sentence has
-        // no survivors → it simply drops.
+      // Drop a sentence ONLY when EVERY relation it asserts is a superseded target
+      // (`hitKeys` covers all of `keys`). A COMPOUND sentence that also carries a
+      // still-current relation — or descriptive prose around it — is KEPT VERBATIM:
+      // never destroy or reconstruct hand-authored content (Codex). The trade-off
+      // is intentional + safe: a superseded relation embedded in a compound sentence
+      // is left in place (under-remove rather than mangle prose). Scribe's own
+      // rendered prose is one relation per sentence, so a real chat-time supersession
+      // always hits this clean path.
+      if (hitKeys.length > 0 && hitKeys.length === keys.length) {
         droppedAny = true
         for (const k of hitKeys) removed.add(k) // record what was ACTUALLY retired
-        const survivors = keys.filter((k) => !targets.has(k))
-        for (const k of dedupeInOrder(survivors)) kept.push(renderTripleKey(k))
         continue
       }
-      // No superseded relation here — preserve the sentence with its original
-      // terminator (or a normalising period when it had none).
+      // Keep the sentence VERBATIM (either no target, or a compound sentence we
+      // won't mangle) with its original terminator (or a normalising period).
       const term = content[span.end]
       const trimmed = raw.trim()
       if (trimmed.length === 0) continue

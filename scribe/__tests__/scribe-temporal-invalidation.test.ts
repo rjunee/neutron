@@ -986,7 +986,7 @@ describe('RB4 temporal invalidation (belief evolution) — real PGLite round-tri
   //    dropped (no data loss). Bounded trade-off: a superseded relation embedded
   //    in a compound sentence is left in place rather than destroying a sibling.
 
-  test('flag ON: a compound sentence — superseded relation removed, sibling re-rendered (no data loss)', async () => {
+  test('flag ON: a compound sentence with descriptive prose is kept BYTE-FOR-BYTE (no prose destroyed)', async () => {
     const ownerDataDir = mkdtempSync(join(tmpdir(), 'scribe-rb4-compound-'))
     const syncHook = new GBrainSyncHook({
       memoryStore: new GBrainMemoryStore(client),
@@ -1001,7 +1001,9 @@ describe('RB4 temporal invalidation (belief evolution) — real PGLite round-tri
       slug: 'cwboard',
       content: '---\nslug: cwboard\ntype: company\n---\n\nA company.\n',
     })
-    // ONE sentence asserting TWO relations to DIFFERENT objects.
+    // ONE hand-authored compound sentence: two relations to DIFFERENT objects PLUS
+    // descriptive prose that exists nowhere else.
+    const COMPOUND = '- Works at [[cwoold]] and advises [[cwboard]] on acquisitions since 2019.'
     await writeEntity(
       {
         ownerDataDir,
@@ -1011,8 +1013,7 @@ describe('RB4 temporal invalidation (belief evolution) — real PGLite round-tri
         receivingInstanceSlug: 'rb4',
         body: {
           frontmatter: { slug: 'cwen-ash', type: 'person', name: 'Cwen Ash' },
-          compiledTruth:
-            '# Cwen Ash\n\nAn operator.\n\n## Relationships\n\n- Works at [[cwoold]] and advises [[cwboard]].\n',
+          compiledTruth: `# Cwen Ash\n\nAn operator.\n\n## Relationships\n\n${COMPOUND}\n`,
           timelineAppend: { ts: new Date(t0).toISOString(), source: 'import:onboarding', body: 'seeded' },
         },
       },
@@ -1039,19 +1040,19 @@ describe('RB4 temporal invalidation (belief evolution) — real PGLite round-tri
 
     const onDisk = readFileSync(join(ownerDataDir, 'entities', 'people', 'cwen-ash.md'), 'utf8')
     const compiled = extractCompiledTruth(onDisk)
-    // The superseded works_at is RETIRED from compiled-truth (current truth only)…
-    expect(compiled).not.toContain('[[cwoold]]')
-    // …while the still-current advises SIBLING is preserved as a clean sentence
-    // (re-rendered — NOT deleted), and the new employment accretes.
-    expect(compiled).toContain('Advises [[cwboard]].')
+    // PROSE SAFETY: the hand-authored compound sentence — including the descriptive
+    // "on acquisitions since 2019" — survives BYTE-FOR-BYTE (never reconstructed).
+    expect(compiled).toContain(COMPOUND)
+    // The new employment accretes; no supersession is fabricated (nothing retired
+    // from this compound sentence — the conservative, prose-preserving path).
     expect(compiled).toContain('Works at [[cwnew]].')
-    // The transition was genuine → recorded once in the dated timeline.
     const timeline = extractTimeline(onDisk)
-    expect(timeline.some((e) => e.body.includes('superseded works_at: cwoold → cwnew'))).toBe(true)
+    expect(timeline.some((e) => e.body.includes('superseded'))).toBe(false)
 
-    // Graph reflects current truth: stale employment gone, advisory intact, new employment added.
+    // The unrelated advisory edge is intact; the new employment edge is added. The
+    // embedded works_at cwoold is left in place (bounded under-invalidation — the
+    // documented trade-off for not mangling hand-authored prose).
     links = await client.call('get_links', { slug: 'cwen-ash' })
-    expect(edgesTo(links, 'cwoold', 'works_at').length).toBe(0) // INVALIDATED
     expect(edgesTo(links, 'cwboard', 'advises').length).toBe(1) // PRESERVED (no data loss)
     expect(edgesTo(links, 'cwnew', 'works_at').length).toBe(1) // ADDED
   }, 60_000)
