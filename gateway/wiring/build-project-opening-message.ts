@@ -142,7 +142,7 @@ export function buildProjectOpeningMessageComposer(
     } catch (err) {
       const reason = err instanceof Error ? err.message : String(err ?? 'unknown')
       moduleLog.warn('llm_call_failed_fallback_deterministic', {
-        instance: input.project_slug,
+        instance: input.owner_slug,
         user: input.user_id,
         project: input.name,
         model,
@@ -155,7 +155,7 @@ export function buildProjectOpeningMessageComposer(
     const body = extractOpeningBody(text)
     if (body === null) {
       moduleLog.warn('llm_unusable_body_fallback_deterministic', {
-        instance: input.project_slug,
+        instance: input.owner_slug,
         user: input.user_id,
         project: input.name,
       })

@@ -52,7 +52,7 @@ let db: ProjectDb
 let buttonStore: ButtonStore
 let stateStore: InMemoryOnboardingStateStore
 let transcript: TranscriptWriter
-let sentPrompts: Array<{ project_slug: string; topic_id: string; prompt: ButtonPrompt }>
+let sentPrompts: Array<{ owner_slug: string; topic_id: string; prompt: ButtonPrompt }>
 
 /** A runner + resolver that record the sources they're asked to import, so a
  *  test can assert an import was (or was NOT) actually started. */
@@ -116,7 +116,7 @@ async function seedPhase(
 ): Promise<void> {
   await stateStore.upsert({
     user_id: USER,
-    project_slug: OWNER,
+    owner_slug: OWNER,
     phase,
     phase_state_patch: {
       topic_id: TOPIC,
@@ -154,7 +154,7 @@ describe('ND2 — solicited Path-1 upload at a conversational phase starts a job
     await seedPhase('work_interview_gap_fill')
 
     const out = await engine.notifyImportUpload({
-      project_slug: OWNER,
+      owner_slug: OWNER,
       topic_id: TOPIC,
       user_id: USER,
       channel_kind: 'app_socket',
@@ -188,7 +188,7 @@ describe('ND2 — solicited Path-1 upload at a conversational phase starts a job
     expect(await stateStore.get(OWNER, USER)).toBeNull()
 
     const out = await engine.notifyImportUpload({
-      project_slug: OWNER,
+      owner_slug: OWNER,
       topic_id: TOPIC,
       user_id: USER,
       channel_kind: 'app_socket',
@@ -221,7 +221,7 @@ describe('ND2 — solicited Path-1 upload at a conversational phase starts a job
     expect(await stateStore.get(OWNER, USER)).toBeNull()
 
     const out = await engine.notifyImportUpload({
-      project_slug: OWNER,
+      owner_slug: OWNER,
       topic_id: TOPIC,
       user_id: USER,
       channel_kind: 'app_socket',
@@ -240,7 +240,7 @@ describe('ND2 — solicited Path-1 upload at a conversational phase starts a job
     const engine = buildEngine({ deploymentMode: 'managed', importAffordanceOffered: true, ...stack })
 
     const out = await engine.notifyImportUpload({
-      project_slug: OWNER,
+      owner_slug: OWNER,
       topic_id: TOPIC,
       user_id: USER,
       channel_kind: 'app_socket',
@@ -262,7 +262,7 @@ describe('ND2 — solicited Path-1 upload at a conversational phase starts a job
     // source from the zip and passes it here. The started runner source must be
     // the SNIFFED one.
     await engine.notifyImportUpload({
-      project_slug: OWNER,
+      owner_slug: OWNER,
       topic_id: TOPIC,
       user_id: USER,
       channel_kind: 'app_socket',
@@ -279,7 +279,7 @@ describe('ND2 — solicited Path-1 upload at a conversational phase starts a job
     await seedPhase('work_interview_gap_fill')
 
     const out = await engine.notifyImportUpload({
-      project_slug: OWNER,
+      owner_slug: OWNER,
       topic_id: TOPIC,
       user_id: USER,
       channel_kind: 'app_socket',
@@ -307,7 +307,7 @@ describe('ND2 — solicited Path-1 upload at a conversational phase starts a job
     await seedPhase('work_interview_gap_fill')
 
     const out = await engine.notifyImportUpload({
-      project_slug: OWNER,
+      owner_slug: OWNER,
       topic_id: TOPIC,
       user_id: USER,
       channel_kind: 'app_socket',
@@ -328,7 +328,7 @@ describe('ND2 — solicited Path-1 upload at a conversational phase starts a job
     await seedPhase('work_interview_gap_fill', { import_job_id: 'pre-existing-job' })
 
     const out = await engine.notifyImportUpload({
-      project_slug: OWNER,
+      owner_slug: OWNER,
       topic_id: TOPIC,
       user_id: USER,
       channel_kind: 'app_socket',
@@ -345,7 +345,7 @@ describe('ND2 — solicited Path-1 upload at a conversational phase starts a job
     await seedPhase('completed')
 
     const out = await engine.notifyImportUpload({
-      project_slug: OWNER,
+      owner_slug: OWNER,
       topic_id: TOPIC,
       user_id: USER,
       channel_kind: 'app_socket',
@@ -361,7 +361,7 @@ describe('ND2 — solicited Path-1 upload at a conversational phase starts a job
     const engine = buildEngine({ deploymentMode: 'open', importAffordanceOffered: true, ...stack })
 
     const first = await engine.notifyImportUpload({
-      project_slug: OWNER,
+      owner_slug: OWNER,
       topic_id: TOPIC,
       user_id: USER,
       channel_kind: 'app_socket',
@@ -374,7 +374,7 @@ describe('ND2 — solicited Path-1 upload at a conversational phase starts a job
     // import_running with a job, so this hits the non-null `alreadyHasImportJob`
     // guard — no duplicate job.
     const second = await engine.notifyImportUpload({
-      project_slug: OWNER,
+      owner_slug: OWNER,
       topic_id: TOPIC,
       user_id: USER,
       channel_kind: 'app_socket',
@@ -428,7 +428,7 @@ describe('ND2 — solicited Path-1 upload at a conversational phase starts a job
     // in the underlying store (what the recheck will observe).
     await stateStore.upsert({
       user_id: USER,
-      project_slug: OWNER,
+      owner_slug: OWNER,
       phase: 'import_running',
       phase_state_patch: {
         topic_id: TOPIC,
@@ -441,7 +441,7 @@ describe('ND2 — solicited Path-1 upload at a conversational phase starts a job
     })
 
     const out = await engine.notifyImportUpload({
-      project_slug: OWNER,
+      owner_slug: OWNER,
       topic_id: TOPIC,
       user_id: USER,
       channel_kind: 'app_socket',
@@ -471,7 +471,7 @@ describe('ND2 — solicited Path-1 upload at a conversational phase starts a job
 
     const [a, b] = await Promise.all([
       engine.notifyImportUpload({
-        project_slug: OWNER,
+        owner_slug: OWNER,
         topic_id: TOPIC,
         user_id: USER,
         channel_kind: 'app_socket',
@@ -479,7 +479,7 @@ describe('ND2 — solicited Path-1 upload at a conversational phase starts a job
         observed_at: NOW_MS + 1_000,
       }),
       engine.notifyImportUpload({
-        project_slug: OWNER,
+        owner_slug: OWNER,
         topic_id: TOPIC,
         user_id: USER,
         channel_kind: 'app_socket',

@@ -17,7 +17,7 @@ function oneAlert(): WatchdogAlert {
   return {
     id: 'alert-1',
     kind: 'gateway_heartbeat',
-    project_slug: 'owner',
+    owner_slug: 'owner',
     detected_at: 1,
     resolved_at: null,
     payload: {},

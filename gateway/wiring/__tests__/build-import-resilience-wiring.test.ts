@@ -107,7 +107,7 @@ test('BLOCKER #3 — composer default-builds a non-null ImportResumeReadinessPro
   )
   expect(
     await probe.isResumable({
-      project_slug: OWNER,
+      owner_slug: OWNER,
       user_id: USER,
       source: 'chatgpt-zip' as ImportSource,
       job_id: 'j-resumable',
@@ -117,7 +117,7 @@ test('BLOCKER #3 — composer default-builds a non-null ImportResumeReadinessPro
   rmSync(zipPath)
   expect(
     await probe.isResumable({
-      project_slug: OWNER,
+      owner_slug: OWNER,
       user_id: USER,
       source: 'chatgpt-zip' as ImportSource,
       job_id: 'j-resumable',
@@ -134,7 +134,7 @@ test('BLOCKER #3 — composer default-builds a non-null ImportResumeReadinessPro
   )
   expect(
     await probe.isResumable({
-      project_slug: OWNER,
+      owner_slug: OWNER,
       user_id: USER,
       source: 'chatgpt-zip' as ImportSource,
       job_id: 'j-completed',
@@ -143,7 +143,7 @@ test('BLOCKER #3 — composer default-builds a non-null ImportResumeReadinessPro
   // Unknown job_id → false.
   expect(
     await probe.isResumable({
-      project_slug: OWNER,
+      owner_slug: OWNER,
       user_id: USER,
       source: 'chatgpt-zip' as ImportSource,
       job_id: 'j-missing',
@@ -177,7 +177,7 @@ test('K11c (Codex r1) — a legacy non-zip source is NOT resumable even with a f
   )
   expect(
     await probe.isResumable({
-      project_slug: OWNER,
+      owner_slug: OWNER,
       user_id: USER,
       source: 'gmail-oauth' as unknown as ImportSource,
       job_id: 'j-oauth',

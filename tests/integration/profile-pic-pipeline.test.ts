@@ -83,7 +83,7 @@ test('2-of-3 mocked-success Gemini run lands 2 candidates + canonical pick (< 60
   })
 
   const { job_id } = await pipeline.start({
-    project_slug: 'mira',
+    owner_slug: 'mira',
     archetype_hint: 'Odin/Thoth/Padmasambhava',
     prompt: 'A wise raven-keeper, scribe, lotus-born teacher.',
   })

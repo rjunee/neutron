@@ -115,7 +115,7 @@ describe('RB4 extraction boundary — createScribe propagates the supersede flag
       substrate: recordingSubstrate(specs),
       syncHook: { async onEntityWrite(): Promise<void> {} } as SyncHook,
       ownerDataDir: mkdtempSync(join(tmpdir(), 'scribe-sb-')),
-      project_slug: 'acme',
+      owner_slug: 'acme',
       budget: createState(join(mkdtempSync(join(tmpdir(), 'scribe-sb-b-')), '.s.json'), t0),
       writeEntity: noopWriteEntity,
       now: () => t0,

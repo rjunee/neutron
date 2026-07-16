@@ -117,7 +117,7 @@ export interface ProjectKickoffDeps {
   /** OWNER_ROOT — `<owner_home>/Projects/<id>/docs/` is where kickoff docs land. */
   owner_home: string
   /** Instance internal handle (indexer origin). */
-  project_slug: string
+  owner_slug: string
   /** CC-substrate doc composer. Null → doc actions are unavailable (work projects
    *  then fall through to `null`; hobbies fall through to engaging questions). */
   composer: ProjectKickoffComposer | null
@@ -154,7 +154,7 @@ export function buildProjectKickoff(deps: ProjectKickoffDeps): ProjectKickoff {
     deps.log ??
     ((msg: string, meta?: Record<string, unknown>): void => {
       moduleLog.warn(msg, {
-        project: deps.project_slug,
+        project: deps.owner_slug,
         meta: meta !== undefined ? safeMeta(meta) : undefined,
       })
     })
@@ -368,7 +368,7 @@ async function tryDraftDoc(
   if (deps.indexer !== null && deps.indexer !== undefined) {
     try {
       await deps.indexer({
-        project_slug: input.project_id,
+        owner_slug: input.project_id,
         name: input.name,
         body: indexPageBody(input, plan, body),
         source_path: `Projects/${input.project_id}`,

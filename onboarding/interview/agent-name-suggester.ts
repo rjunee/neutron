@@ -90,7 +90,7 @@ export interface AgentNameSuggesterInput {
   /** Optional blended archetypes the synth layer produced. Treated as
    *  inspiration only, never as instructions. */
   archetypes: ReadonlyArray<string>
-  /** Stable per-instance seed (project_slug) used ONLY to diversify the
+  /** Stable per-instance seed (owner_slug) used ONLY to diversify the
    *  static fallback deterministically. Never sent to the LLM. */
   seed: string | null
 }
@@ -152,7 +152,7 @@ export function buildDiverseAgentNameFallback(
  * Back-compat constant — the original Sage / Vera / Orin triple. Matches
  * `DEFAULT_AGENT_NAME_SUGGESTIONS` in `phase-prompts.ts` so the static-spec
  * render path stays byte-identical. Live fallbacks now go through
- * `buildDiverseAgentNameFallback(project_slug)` for per-instance variety; this
+ * `buildDiverseAgentNameFallback(owner_slug)` for per-instance variety; this
  * constant is retained for importers/tests that referenced it directly.
  */
 export const STATIC_AGENT_NAME_FALLBACK: AgentNameSuggestions = {

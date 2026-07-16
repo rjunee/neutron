@@ -144,7 +144,7 @@ describe('S15 — composeProductionGraph boots the cron scheduler', () => {
     const job_id = 'job-s15-finishes'
     await stateStore.upsert({
       user_id: 'test-user',
-      project_slug: OWNER,
+      owner_slug: OWNER,
       phase: 'import_running',
       phase_state_patch: {
         topic_id: TOPIC,
@@ -157,7 +157,7 @@ describe('S15 — composeProductionGraph boots the cron scheduler', () => {
     })
     runnerResults.set(job_id, {
       job_id,
-      project_slug: OWNER,
+      owner_slug: OWNER,
       source: 'chatgpt-zip',
       status: 'completed',
       dollars_spent: 1.2,

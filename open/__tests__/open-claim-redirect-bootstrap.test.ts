@@ -92,7 +92,7 @@ async function preSeedCompletedOwner(): Promise<void> {
   try {
     applyMigrations(db.raw())
     await new SqliteOnboardingStateStore({ db }).upsert({
-      project_slug: 'owner',
+      owner_slug: 'owner',
       user_id: 'owner',
       phase: 'completed',
     })

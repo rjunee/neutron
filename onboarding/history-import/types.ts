@@ -366,7 +366,7 @@ export interface ImportResult {
 /** ImportJob — what the runner persists + what `status()` returns. */
 export interface ImportJob {
   job_id: string
-  project_slug: string
+  owner_slug: string
   source: ImportSource
   status: ImportJobStatus
   dollars_spent: number

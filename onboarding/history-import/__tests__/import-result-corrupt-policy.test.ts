@@ -50,7 +50,7 @@ function fixture(over: Partial<ImportResult> = {}): ImportResult {
 async function seed(job_id: string, r: ImportResult): Promise<void> {
   await persistImportResult(db, {
     job_id,
-    project_slug: 'general',
+    owner_slug: 'general',
     source: 'chatgpt-zip',
     result: r,
     partial: false,

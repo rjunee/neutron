@@ -37,7 +37,7 @@ afterEach(() => {
 test('parse-ok: valid phase_state_json round-trips through the codec', async () => {
   const store = new SqliteOnboardingStateStore({ db })
   await store.upsert({
-    project_slug: OWNER,
+    owner_slug: OWNER,
     user_id: USER,
     phase: 'signup',
     phase_state_patch: { topic_id: 't-123', step: 2 },
@@ -50,7 +50,7 @@ test('parse-ok: valid phase_state_json round-trips through the codec', async () 
 test('corrupt-policy: malformed phase_state_json silently resets to {} on read', async () => {
   const store = new SqliteOnboardingStateStore({ db })
   await store.upsert({
-    project_slug: OWNER,
+    owner_slug: OWNER,
     user_id: USER,
     phase: 'signup',
     phase_state_patch: { topic_id: 't-123' },
@@ -69,7 +69,7 @@ test('corrupt-policy: malformed phase_state_json silently resets to {} on read',
 test('corrupt-policy: a non-object phase_state_json also resets to {} (shape guard)', async () => {
   const store = new SqliteOnboardingStateStore({ db })
   await store.upsert({
-    project_slug: OWNER,
+    owner_slug: OWNER,
     user_id: USER,
     phase: 'signup',
     phase_state_patch: { topic_id: 't-123' },

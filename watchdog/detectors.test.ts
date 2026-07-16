@@ -42,7 +42,7 @@ describe('HeartbeatDetector', () => {
   test('fires when last heartbeat is older than threshold', async () => {
     let now = 100_000
     const tracker: HeartbeatTracker = { lastHeartbeatAt: () => now - 60_000 }
-    const detector = new HeartbeatDetector({ project_slug: 't1', tracker, threshold_ms: 30_000, now: () => now })
+    const detector = new HeartbeatDetector({ owner_slug: 't1', tracker, threshold_ms: 30_000, now: () => now })
     const alerts = await detector.detect()
     expect(alerts.length).toBe(1)
     expect(alerts[0]?.kind).toBe('gateway_heartbeat')
@@ -51,7 +51,7 @@ describe('HeartbeatDetector', () => {
   test('quiet when fresh', async () => {
     let now = 100_000
     const tracker: HeartbeatTracker = { lastHeartbeatAt: () => now - 1_000 }
-    const detector = new HeartbeatDetector({ project_slug: 't1', tracker, threshold_ms: 30_000, now: () => now })
+    const detector = new HeartbeatDetector({ owner_slug: 't1', tracker, threshold_ms: 30_000, now: () => now })
     expect((await detector.detect()).length).toBe(0)
   })
 })
@@ -64,7 +64,7 @@ describe('StuckAgentDetector', () => {
     now += 20 * 60_000
     reg.register({ name: 'fresh', pid: 9_999_992, tool_name: 't' })
     const detector = new StuckAgentDetector({
-      project_slug: 't1',
+      owner_slug: 't1',
       process_registry: reg,
       inactivity_threshold_ms: 15 * 60_000,
       now: () => now,
@@ -82,7 +82,7 @@ describe('CrashedAgentDetector', () => {
     reg.register({ name: 'alive', pid: 9_999_992, tool_name: 't' })
     const probe: PidLivenessProbe = { isAlive: (pid) => pid === 9_999_992 }
     const detector = new CrashedAgentDetector({
-      project_slug: 't1',
+      owner_slug: 't1',
       process_registry: reg,
       pid_probe: probe,
     })
@@ -103,7 +103,7 @@ describe('CrashedAgentDetector', () => {
     reg.register({ name: 'dead', pid: 9_999_991, tool_name: 't' })
     const probe: PidLivenessProbe = { isAlive: () => false }
     const detector = new CrashedAgentDetector({
-      project_slug: 't1',
+      owner_slug: 't1',
       process_registry: reg,
       pid_probe: probe,
     })
@@ -133,7 +133,7 @@ describe('CrashedAgentDetector', () => {
     // pid 1 is dead; the respawn's pid 2 is alive.
     const probe: PidLivenessProbe = { isAlive: (pid) => pid === 2 }
     const detector = new CrashedAgentDetector({
-      project_slug: 't1',
+      owner_slug: 't1',
       process_registry: reg,
       pid_probe: probe,
     })
@@ -161,7 +161,7 @@ describe('CrashedAgentDetector', () => {
     // Both pid 1 and pid 2 are dead.
     const probe: PidLivenessProbe = { isAlive: () => false }
     const detector = new CrashedAgentDetector({
-      project_slug: 't1',
+      owner_slug: 't1',
       process_registry: reg,
       pid_probe: probe,
     })
@@ -208,7 +208,7 @@ describe('CrashedAgentDetector', () => {
 
       // pid 2 is alive; only the ENQUEUED pid-1 crash can fire (probe forced alive).
       const detector = new CrashedAgentDetector({
-        project_slug: 'owner',
+        owner_slug: 'owner',
         process_registry: reg,
         pid_probe: { isAlive: () => true },
       })
@@ -236,7 +236,7 @@ describe('CrashedAgentDetector', () => {
       h.unregister()
       expect(reg.listPendingCrashes().length).toBe(0)
       const detector = new CrashedAgentDetector({
-        project_slug: 'owner',
+        owner_slug: 'owner',
         process_registry: reg,
         pid_probe: { isAlive: () => true },
       })
@@ -260,12 +260,12 @@ describe('OverrunCronDetector', () => {
     const state = new CronStateStore(db)
     await state.record({
       job_name: 'slow-job',
-      project_slug: 't1',
+      owner_slug: 't1',
       fired_at: 1000,
       duration_ms: 30_000,
       status: 'ok',
     })
-    const detector = new OverrunCronDetector({ project_slug: 't1', jobs, state })
+    const detector = new OverrunCronDetector({ owner_slug: 't1', jobs, state })
     const alerts = await detector.detect()
     expect(alerts.length).toBe(1)
     expect(alerts[0]?.payload['job_name']).toBe('slow-job')
@@ -281,10 +281,10 @@ describe('OverrunCronDetector', () => {
       expected_duration_ms: 5_000,
     })
     const state = new CronStateStore(db)
-    const detector = new OverrunCronDetector({ project_slug: 't1', jobs, state })
+    const detector = new OverrunCronDetector({ owner_slug: 't1', jobs, state })
 
     // Run A overruns → one alert; commit simulates the supervisor's delivery.
-    await state.record({ job_name: 'slow-job', project_slug: 't1', fired_at: 1000, duration_ms: 30_000, status: 'ok' })
+    await state.record({ job_name: 'slow-job', owner_slug: 't1', fired_at: 1000, duration_ms: 30_000, status: 'ok' })
     const a = await detector.detect()
     expect(a.length).toBe(1)
     for (const x of a) detector.commit(x)
@@ -293,7 +293,7 @@ describe('OverrunCronDetector', () => {
 
     // Run B (a DIFFERENT run of the same job) ALSO overruns → a NEW alert, not
     // swallowed by the still-open job-name incident (the round-1 over-correction).
-    await state.record({ job_name: 'slow-job', project_slug: 't1', fired_at: 2000, duration_ms: 40_000, status: 'ok' })
+    await state.record({ job_name: 'slow-job', owner_slug: 't1', fired_at: 2000, duration_ms: 40_000, status: 'ok' })
     const b = await detector.detect()
     expect(b.length).toBe(1)
     for (const x of b) detector.commit(x)
@@ -310,7 +310,7 @@ describe('DbLockContentionDetector', () => {
     let count = 0
     const counter: BusyRetryCounter = { exhaustionCount: () => count }
     const detector = new DbLockContentionDetector({
-      project_slug: 't1',
+      owner_slug: 't1',
       counter,
       window_ms: 60_000,
       threshold_per_window: 5,
@@ -343,7 +343,7 @@ describe('DbLockContentionDetector', () => {
     // Constructed at boot with counter 0 — the module composes here, seeding the
     // baseline. The supervisor would only call detect() 30 s later.
     const detector = new DbLockContentionDetector({
-      project_slug: 't1',
+      owner_slug: 't1',
       counter,
       window_ms: 60_000,
       threshold_per_window: 5,
@@ -363,7 +363,7 @@ describe('DbLockContentionDetector', () => {
     let count = 1_000 // large historical exhaustion total already accrued
     const counter: BusyRetryCounter = { exhaustionCount: () => count }
     const detector = new DbLockContentionDetector({
-      project_slug: 't1',
+      owner_slug: 't1',
       counter,
       window_ms: 60_000,
       threshold_per_window: 5,
@@ -389,7 +389,7 @@ describe('SubstrateCooldownDetector', () => {
       ],
     })
     const detector = new SubstrateCooldownDetector({
-      project_slug: 't1',
+      owner_slug: 't1',
       pool,
       substrate_kind: 'gpt-5-5-api',
     })
@@ -407,7 +407,7 @@ describe('SubstrateCooldownDetector', () => {
     })
     for (const c of pool.credentials) c.cooldown_until = now + 60_000
     const detector = new SubstrateCooldownDetector({
-      project_slug: 't1',
+      owner_slug: 't1',
       pool,
       substrate_kind: 'gpt-5-5-api',
       now: () => now,

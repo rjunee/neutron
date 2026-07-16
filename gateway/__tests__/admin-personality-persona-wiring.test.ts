@@ -129,7 +129,7 @@ async function startHarness(): Promise<Harness> {
 
   const callResolver = async (): Promise<void> => {
     await resolver.resolve({
-      project_slug: OWNER,
+      owner_slug: OWNER,
       topic_id: 'web:user-1',
       user_id: 'user-1',
       signup_via: 'web',

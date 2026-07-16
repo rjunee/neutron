@@ -33,7 +33,7 @@ afterEach(() => {
 function staleHeartbeatDetector(): HeartbeatDetector {
   let now = 1_000_000
   const tracker: HeartbeatTracker = { lastHeartbeatAt: () => now - 60_000 }
-  return new HeartbeatDetector({ project_slug: 'owner', tracker, threshold_ms: 30_000, now: () => (now += 1) })
+  return new HeartbeatDetector({ owner_slug: 'owner', tracker, threshold_ms: 30_000, now: () => (now += 1) })
 }
 
 describe('WatchdogSupervisor — COMMIT-ON-SUCCESS (round-3)', () => {
@@ -165,7 +165,7 @@ describe('WatchdogSupervisor — exactly-once across a failing commit (round-8)'
         {
           id: alertId,
           kind: 'db_lock_contention',
-          project_slug: 'owner',
+          owner_slug: 'owner',
           detected_at: 1,
           resolved_at: null,
           payload: {},
@@ -217,7 +217,7 @@ describe('WatchdogSupervisor — exactly-once across a failing commit (round-8)'
               {
                 id: alertId,
                 kind: 'db_lock_contention',
-                project_slug: 'owner',
+                owner_slug: 'owner',
                 detected_at: 1,
                 resolved_at: null,
                 payload: {},

@@ -50,7 +50,7 @@ describe('reminder fire path (tick → dispatcher → compose → post)', () => 
     const store = new ReminderStore(db)
     let now = 1_700_000_000_000
     const created = await store.create({
-      project_slug: 'globex',
+      owner_slug: 'globex',
       topic_id: 'topic-globex',
       fire_at: now / 1000 - 60,
       message: 'submit the Q3 expense report',
@@ -90,7 +90,7 @@ describe('reminder fire path (tick → dispatcher → compose → post)', () => 
     const store = new ReminderStore(db)
     let now = 1_700_000_000_000
     const r = await store.createRecurring({
-      project_slug: 'biohacking',
+      owner_slug: 'biohacking',
       topic_id: 'topic-bio',
       fire_at: now / 1000 - 60,
       message: 'PATTERN: check-in-cadence\nHABIT: meditation\nQUESTION: did you sit today?',
@@ -117,7 +117,7 @@ describe('reminder fire path (tick → dispatcher → compose → post)', () => 
     const store = new ReminderStore(db)
     let now = 1_700_000_000_000
     await store.create({
-      project_slug: 'general',
+      owner_slug: 'general',
       topic_id: null,
       fire_at: now / 1000 - 60,
       message: 'call mom',
@@ -143,7 +143,7 @@ describe('reminder fire path (tick → dispatcher → compose → post)', () => 
     const store = new ReminderStore(db)
     let now = 1_700_000_000_000
     const r = await store.create({
-      project_slug: 'p',
+      owner_slug: 'p',
       topic_id: 't',
       fire_at: now / 1000 - 60,
       message: 'must reach the user',
@@ -173,13 +173,13 @@ describe('reminder fire path (tick → dispatcher → compose → post)', () => 
     const store = new ReminderStore(db)
     let now = 1_700_000_000_000
     const bad = await store.create({
-      project_slug: 'p',
+      owner_slug: 'p',
       topic_id: 'boom',
       fire_at: now / 1000 - 120,
       message: 'this one explodes on post',
     })
     const good = await store.create({
-      project_slug: 'p',
+      owner_slug: 'p',
       topic_id: 'ok',
       fire_at: now / 1000 - 60,
       message: 'this one delivers',

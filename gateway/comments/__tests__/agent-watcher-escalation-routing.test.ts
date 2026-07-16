@@ -259,7 +259,7 @@ async function seedUserCommentInProject(
 }
 
 const RESOLVE_BUNDLE = {
-  project_slug: PROJECT_SLUG,
+  owner_slug: PROJECT_SLUG,
   topic_id: `web:${USER_ID}`,
   user_id: USER_ID,
   signup_via: 'web' as const,

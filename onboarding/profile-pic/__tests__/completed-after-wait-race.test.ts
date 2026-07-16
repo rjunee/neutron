@@ -57,7 +57,7 @@ afterEach(() => {
 // ────────────────────────────────────────────────────────────────────
 
 interface SeedOptions {
-  project_slug: string
+  owner_slug: string
   user_id: string
   /**
    * Stamp this `job_id` on the pending row. Pass `null` to model the
@@ -85,7 +85,7 @@ function seedCompletedState(opts: SeedOptions): void {
        (id, project_slug, status, archetype_hint, started_at, completed_at,
         fallback_used, failure_count)
      VALUES (?, ?, 'ready', NULL, ?, ?, 0, 0)`,
-    [opts.jobs_row_id, opts.project_slug, now - 30_000, now - 5_000],
+    [opts.jobs_row_id, opts.owner_slug, now - 30_000, now - 5_000],
   )
   // 2. The corresponding candidate row.
   db.raw().run(
@@ -109,7 +109,7 @@ function seedCompletedState(opts: SeedOptions): void {
      VALUES (?, ?, ?, ?, NULL, ?, ?, ?, 'completed', 1, ?)`,
     [
       `req-${opts.jobs_row_id}`,
-      opts.project_slug,
+      opts.owner_slug,
       opts.user_id,
       'boot-retry prompt',
       now - 30_000,
@@ -170,7 +170,7 @@ function buildSpyingPipeline(): SpyingPipelineHandles {
 describe('ISSUE #45 — completed pending row with job_id short-circuits', () => {
   test('engine hook surfaces stored candidates without firing pipeline.start', async () => {
     seedCompletedState({
-      project_slug: 't-race',
+      owner_slug: 't-race',
       user_id: 'u-race',
       pending_row_job_id: 'job-123',
       jobs_row_id: 'job-123',
@@ -191,7 +191,7 @@ describe('ISSUE #45 — completed pending row with job_id short-circuits', () =>
     })
 
     const outcome = await hook.ensureCandidates({
-      project_slug: 't-race',
+      owner_slug: 't-race',
       topic_id: 'topic-race',
       user_id: 'u-race',
       agent_name: null,
@@ -258,7 +258,7 @@ describe('ISSUE #45 — completed pending row with job_id short-circuits', () =>
     })
 
     const outcome = await hook.ensureCandidates({
-      project_slug: 't-multi',
+      owner_slug: 't-multi',
       topic_id: 'topic-multi',
       user_id: 'u-multi',
       agent_name: null,
@@ -282,7 +282,7 @@ describe('ISSUE #45 — completed pending row with job_id short-circuits', () =>
 describe('ISSUE #45 — completed pending row without job_id falls through (legacy)', () => {
   test('pipeline.start IS called when job_id is NULL', async () => {
     seedCompletedState({
-      project_slug: 't-legacy',
+      owner_slug: 't-legacy',
       user_id: 'u-legacy',
       pending_row_job_id: null, // legacy row; no job reference
       jobs_row_id: 'job-orphan',
@@ -304,7 +304,7 @@ describe('ISSUE #45 — completed pending row without job_id falls through (lega
     })
 
     const outcome = await hook.ensureCandidates({
-      project_slug: 't-legacy',
+      owner_slug: 't-legacy',
       topic_id: 'topic-legacy',
       user_id: 'u-legacy',
       agent_name: null,
@@ -340,7 +340,7 @@ describe('ISSUE #45 — pipeline.run stamps job_id on pending rows', () => {
     const handles = buildSpyingPipeline()
     const store = handles.pipeline.pendingCallStore()!
     const { job_id } = await handles.pipeline.start({
-      project_slug: 't-stamp',
+      owner_slug: 't-stamp',
       user_id: 'u-stamp',
       prompt: 'a portrait under desert dusk',
     })
@@ -359,7 +359,7 @@ describe('ISSUE #45 — pipeline.run stamps job_id on pending rows', () => {
     // such rows through the legacy fall-through branch.
     const store = new ProfilePicPendingStore({ db })
     const { request_id } = await store.recordPending({
-      project_slug: 't-no-stamp',
+      owner_slug: 't-no-stamp',
       user_id: 'u-no-stamp',
       prompt: 'no job reference',
     })

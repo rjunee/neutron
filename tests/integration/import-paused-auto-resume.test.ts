@@ -87,7 +87,7 @@ function makeRunner(): ImportJobRunnerHook {
   return {
     start: async (input) => {
       runnerStartCalls.push({
-        project_slug: input.project_slug,
+        project_slug: input.owner_slug,
         source: input.source,
       })
       jobIdCounter += 1
@@ -147,7 +147,7 @@ test('cron auto-resume cycle: persistent 429 → paused → cooldown → resume 
   const original_job_id = 'job-original'
   await stateStore.upsert({
     user_id: 'test-user',
-    project_slug: OWNER,
+    owner_slug: OWNER,
     phase: 'import_running',
     phase_state_patch: {
       topic_id: TOPIC,
@@ -160,7 +160,7 @@ test('cron auto-resume cycle: persistent 429 → paused → cooldown → resume 
   })
   runnerStatuses.set(original_job_id, {
     job_id: original_job_id,
-    project_slug: OWNER,
+    owner_slug: OWNER,
     source: 'chatgpt-zip',
     status: 'rate_limit_paused',
     dollars_spent: 1.2,
@@ -175,12 +175,12 @@ test('cron auto-resume cycle: persistent 429 → paused → cooldown → resume 
   const handler = buildImportRunningHandler({ engine, db, now: () => now_ms })
   const jobs = new CronJobRegistry()
   const handlers = new CronHandlerRegistry()
-  registerImportRunningCron({ project_slug: OWNER, jobs, handlers, handler })
+  registerImportRunningCron({ owner_slug: OWNER, jobs, handlers, handler })
   const scheduler = new CronScheduler({
     jobs,
     handlers,
     db,
-    project_slug: OWNER,
+    owner_slug: OWNER,
     now: () => now_ms,
   })
 
@@ -211,7 +211,7 @@ test('cron auto-resume cycle: persistent 429 → paused → cooldown → resume 
   now_ms = T0 + COOLDOWN_AFTER_PAUSED_MS + 1000 // 1 s past cooldown
   runnerStatuses.set('job-resumed-1', {
     job_id: 'job-resumed-1',
-    project_slug: OWNER,
+    owner_slug: OWNER,
     source: 'chatgpt-zip',
     status: 'rate_limit_paused',
     dollars_spent: 0, // Pass-1 cache reuse → no new spend
@@ -249,7 +249,7 @@ test('cron auto-resume cycle: persistent 429 → paused → cooldown → resume 
     COOLDOWN_AFTER_PAUSED_MS + 1000
   runnerStatuses.set('job-resumed-2', {
     job_id: 'job-resumed-2',
-    project_slug: OWNER,
+    owner_slug: OWNER,
     source: 'chatgpt-zip',
     status: 'completed',
     dollars_spent: 0.05,
@@ -280,7 +280,7 @@ test('paused row with no last_paused_at (legacy pre-migration-0041) resumes on t
   const original_job_id = 'job-legacy'
   await stateStore.upsert({
     user_id: 'test-user',
-    project_slug: OWNER,
+    owner_slug: OWNER,
     phase: 'import_running',
     phase_state_patch: {
       topic_id: TOPIC,
@@ -297,7 +297,7 @@ test('paused row with no last_paused_at (legacy pre-migration-0041) resumes on t
   // tick.
   runnerStatuses.set(original_job_id, {
     job_id: original_job_id,
-    project_slug: OWNER,
+    owner_slug: OWNER,
     source: 'chatgpt-zip',
     status: 'rate_limit_paused',
     dollars_spent: 0,
@@ -312,18 +312,18 @@ test('paused row with no last_paused_at (legacy pre-migration-0041) resumes on t
   const handler = buildImportRunningHandler({ engine, db, now: () => now_ms })
   const jobs = new CronJobRegistry()
   const handlers = new CronHandlerRegistry()
-  registerImportRunningCron({ project_slug: OWNER, jobs, handlers, handler })
+  registerImportRunningCron({ owner_slug: OWNER, jobs, handlers, handler })
   const scheduler = new CronScheduler({
     jobs,
     handlers,
     db,
-    project_slug: OWNER,
+    owner_slug: OWNER,
     now: () => now_ms,
   })
 
   runnerStatuses.set('job-resumed-1', {
     job_id: 'job-resumed-1',
-    project_slug: OWNER,
+    owner_slug: OWNER,
     source: 'chatgpt-zip',
     status: 'pass1-running',
     dollars_spent: 0,
@@ -344,7 +344,7 @@ test('runner.start failure during resume keeps the prior job_id; cron retries ne
   const original_job_id = 'job-original'
   await stateStore.upsert({
     user_id: 'test-user',
-    project_slug: OWNER,
+    owner_slug: OWNER,
     phase: 'import_running',
     phase_state_patch: {
       topic_id: TOPIC,
@@ -357,7 +357,7 @@ test('runner.start failure during resume keeps the prior job_id; cron retries ne
   })
   runnerStatuses.set(original_job_id, {
     job_id: original_job_id,
-    project_slug: OWNER,
+    owner_slug: OWNER,
     source: 'chatgpt-zip',
     status: 'rate_limit_paused',
     dollars_spent: 0,
@@ -395,12 +395,12 @@ test('runner.start failure during resume keeps the prior job_id; cron retries ne
   const handler = buildImportRunningHandler({ engine, db, now: () => now_ms })
   const jobs = new CronJobRegistry()
   const handlers = new CronHandlerRegistry()
-  registerImportRunningCron({ project_slug: OWNER, jobs, handlers, handler })
+  registerImportRunningCron({ owner_slug: OWNER, jobs, handlers, handler })
   const scheduler = new CronScheduler({
     jobs,
     handlers,
     db,
-    project_slug: OWNER,
+    owner_slug: OWNER,
     now: () => now_ms,
   })
 

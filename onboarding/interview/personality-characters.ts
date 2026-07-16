@@ -28,7 +28,7 @@ export interface PersonalityCharacterSuggestions {
 /**
  * Back-compat constant — the original (monotone) fallback. Retained for
  * importers/tests that referenced it directly; the LIVE fallback path now
- * goes through `buildDiverseCharacterFallback(project_slug)` for per-instance
+ * goes through `buildDiverseCharacterFallback(owner_slug)` for per-instance
  * variety (male/female/neutral, serious/playful) so two fresh instances no
  * longer see the identical five male sages.
  */

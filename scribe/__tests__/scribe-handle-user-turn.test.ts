@@ -16,7 +16,7 @@
  * NOTE on propagation: `handleUserTurn` forwards ONLY `text` / `observed_at` /
  * `author` into `extractAndWrite` (trigger is pinned to `'chat'`); the turn's
  * `user_id` / `topic_id` are intentionally NOT threaded — scribe is per-instance
- * and derives `source` / own-origin slug from its OWN configured `project_slug`.
+ * and derives `source` / own-origin slug from its OWN configured `owner_slug`.
  *
  * Mutation guards (each assertion below fails if propagation breaks):
  *   - stop forwarding the turn text → the substrate prompt no longer contains
@@ -116,7 +116,7 @@ function makeHarness(extractionJson: string): {
     substrate,
     syncHook: noopSyncHook,
     ownerDataDir: mkdtempSync(join(tmpdir(), 'scribe-wire-')),
-    project_slug: 'acme',
+    owner_slug: 'acme',
     budget: createState(join(mkdtempSync(join(tmpdir(), 'scribe-wire-b-')), '.s.json'), t0),
     writeEntity: recordingWriteEntity,
     now: () => t0,
@@ -131,7 +131,7 @@ describe('scribe.handleUserTurn — direct extract→substrate→write wiring', 
     // Call the scribe hook DIRECTLY (production shape is `(i) => scribe.handleUserTurn(i)`),
     // NOT through any chat surface. `handleUserTurn` is fire-and-forget/void.
     scribe.handleUserTurn({
-      project_slug: 'acme',
+      owner_slug: 'acme',
       user_id: 'u-1',
       topic_id: 'web:u-1',
       text: LONG_TURN,
@@ -155,7 +155,7 @@ describe('scribe.handleUserTurn — direct extract→substrate→write wiring', 
     const { scribe, writes } = makeHarness(EXTRACTION_JSON)
 
     scribe.handleUserTurn({
-      project_slug: 'acme',
+      owner_slug: 'acme',
       user_id: 'u-1',
       topic_id: 'web:u-1',
       text: LONG_TURN,
@@ -179,7 +179,7 @@ describe('scribe.handleUserTurn — direct extract→substrate→write wiring', 
     expect(northstar.kind).toBe('company')
     expect(northstar.name).toBe('Northstar')
 
-    // Provenance: source is `chat:<scribe project_slug>`; the author id folds
+    // Provenance: source is `chat:<scribe owner_slug>`; the author id folds
     // into the timeline provenance. Own-origin stamps both instance slugs to
     // the scribe's own slug (passes the write-boundary quarantine guard).
     for (const w of writes.values()) {

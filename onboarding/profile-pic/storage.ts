@@ -357,12 +357,12 @@ export interface BuildProfilePicEngineHookInput {
    */
   pendingStore?: ProfilePicPendingStore | null
   /**
-   * `user_id` resolver. The engine hook receives `project_slug` /
+   * `user_id` resolver. The engine hook receives `owner_slug` /
    * `topic_id` / `user_id` per call; this hook is for upstream wiring
    * that wants to override (e.g. when the engine hasn't plumbed user_id
    * into the hook input yet). Optional.
    */
-  resolveUserId?: (input: { project_slug: string; user_id: string }) => string | null
+  resolveUserId?: (input: { owner_slug: string; user_id: string }) => string | null
   /**
    * ISSUE #43 — fresh-pending detection window. When the latest pending
    * row in `pendingStore` is younger than this, `ensureCandidates`
@@ -422,12 +422,12 @@ export function buildProfilePicEngineHook(
           const resolvedUserId =
             input.resolveUserId !== undefined
               ? input.resolveUserId({
-                  project_slug: hookInput.project_slug,
+                  owner_slug: hookInput.owner_slug,
                   user_id: hookInput.user_id,
                 })
               : hookInput.user_id
           const latest = await pendingStore.latestForUser(
-            hookInput.project_slug,
+            hookInput.owner_slug,
             resolvedUserId,
           )
           if (latest !== null) {
@@ -523,7 +523,7 @@ export function buildProfilePicEngineHook(
           }
         }
         const startInput: Parameters<typeof input.pipeline.start>[0] = {
-          project_slug: hookInput.project_slug,
+          owner_slug: hookInput.owner_slug,
           prompt: input.buildPromptForCandidates({
             agent_name: hookInput.agent_name,
             archetype_hint: hookInput.archetype_hint,
@@ -650,7 +650,7 @@ export function buildProfilePicEngineHook(
       // creates a fresh job_id internally so candidates don't collide
       // with the prior set on disk.
       return await this.ensureCandidates({
-        project_slug: hookInput.project_slug,
+        owner_slug: hookInput.owner_slug,
         topic_id: hookInput.topic_id,
         user_id: hookInput.user_id,
         agent_name: hookInput.agent_name,

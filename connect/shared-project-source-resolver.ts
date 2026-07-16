@@ -58,7 +58,7 @@ export async function resolveSharedProjectSources(
     .filter((m) => m.kind === 'workspace' && m.slug !== input.user_instance_slug)
     .map((m) => m.slug)
   // Dedup defensively — the identity table is PK'd on (user_id,
-  // project_slug) so dupes shouldn't occur, but a belt-and-braces dedup
+  // owner_slug) so dupes shouldn't occur, but a belt-and-braces dedup
   // keeps the fan-out from double-minting on a malformed claim.
   const seen = new Set<string>()
 

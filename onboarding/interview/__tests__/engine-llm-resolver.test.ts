@@ -63,7 +63,7 @@ interface Harness {
   buttonStore: ButtonStore
   stateStore: InMemoryOnboardingStateStore
   transcript: TranscriptWriter
-  sentPrompts: Array<{ project_slug: string; topic_id: string; prompt: ButtonPrompt }>
+  sentPrompts: Array<{ owner_slug: string; topic_id: string; prompt: ButtonPrompt }>
   observedBundles: PhaseContextBundle[]
   engine: InterviewEngine
 }
@@ -81,7 +81,7 @@ function buildHarness(opts: {
   })
   const sentPrompts: Harness['sentPrompts'] = []
   const observedBundles: PhaseContextBundle[] = []
-  const sender = async (input: { project_slug: string; topic_id: string; prompt: ButtonPrompt }) => {
+  const sender = async (input: { owner_slug: string; topic_id: string; prompt: ButtonPrompt }) => {
     sentPrompts.push(input)
     return { message_id: `msg-${sentPrompts.length}`, was_new: true }
   }
@@ -134,13 +134,13 @@ async function emitSignup(
   const phase_state_patch: Record<string, unknown> = { topic_id, user_id, signup_via }
   if (opts.tg_first_name !== undefined) phase_state_patch['tg_first_name'] = opts.tg_first_name
   await h.stateStore.upsert({
-    project_slug: 't1',
+    owner_slug: 't1',
     user_id,
     phase: 'signup',
     phase_state_patch,
   })
   return h.engine.emitPhasePrompt({
-    project_slug: 't1',
+    owner_slug: 't1',
     user_id,
     topic_id,
     phase: 'signup',
@@ -391,7 +391,7 @@ describe('InterviewEngine — phaseSpecResolver wiring (via emitPhasePrompt)', (
       })
       await engine2.emitPhasePrompt({
         user_id: 'u-1',
-        project_slug: 't1',
+        owner_slug: 't1',
         topic_id: 'web:user-1',
         phase: 'signup',
         observed_at: Date.now(),
@@ -473,7 +473,7 @@ describe('InterviewEngine — REAL resolver body↔options desync (option-bearin
     try {
       // Engine has advanced past signup; it is now emitting the import offer.
       await h.stateStore.upsert({
-        project_slug: 't1',
+        owner_slug: 't1',
         user_id: 'u-1',
         phase: 'ai_substrate_offered',
         phase_state_patch: {
@@ -483,7 +483,7 @@ describe('InterviewEngine — REAL resolver body↔options desync (option-bearin
         },
       })
       await h.engine.emitPhasePrompt({
-        project_slug: 't1',
+        owner_slug: 't1',
         user_id: 'u-1',
         topic_id: 'web:user-1',
         phase: 'ai_substrate_offered',

@@ -116,7 +116,7 @@ export type ProjectDocComposer = (input: ComposeProjectDocInput) => Promise<stri
  */
 export type ProjectPageIndexFn = (input: {
   /** The project id (folder name under Projects/). */
-  project_slug: string
+  owner_slug: string
   name: string
   /** Rendered page body (project overview + transcript summary digest). */
   body: string
@@ -127,7 +127,7 @@ export type ProjectPageIndexFn = (input: {
 export interface ProjectMaterializerDeps {
   /** OWNER_ROOT (per project-folder-convention § 2.0). */
   owner_home: string
-  project_slug: string
+  owner_slug: string
   /** Project DB — read-only here (import_pass1_chunks slicing). */
   db: ProjectDb
   now(): number
@@ -136,7 +136,7 @@ export interface ProjectMaterializerDeps {
   /** Test seam — git subprocess runner. Default shells out to `git`. */
   runGit?: (args: string[], cwd: string) => Promise<void>
   /** Failure sink. Defaults to the `project-materializer` logger. */
-  logFailure?: (stage: string, project_slug: string, err: unknown) => void
+  logFailure?: (stage: string, owner_slug: string, err: unknown) => void
 }
 
 export interface MaterializeProjectInput {
@@ -147,7 +147,7 @@ export interface MaterializeProjectInput {
 }
 
 export interface MaterializeOutcome {
-  project_slug: string
+  owner_slug: string
   reason: 'created' | 'already_materialized' | 'failed'
   /** Repo-relative doc paths written THIS run. */
   docs_written: string[]
@@ -188,10 +188,10 @@ interface RetainedChunkRow {
 export function buildProjectMaterializer(deps: ProjectMaterializerDeps): ProjectMaterializer {
   const logFailure =
     deps.logFailure ??
-    ((stage: string, project_slug: string, err: unknown): void => {
+    ((stage: string, owner_slug: string, err: unknown): void => {
       log.warn('failure', {
-        owner_project: deps.project_slug,
-        project: project_slug,
+        owner_project: deps.owner_slug,
+        project: owner_slug,
         stage,
         error: err instanceof Error ? err.message : String(err),
       })
@@ -202,7 +202,7 @@ export function buildProjectMaterializer(deps: ProjectMaterializerDeps): Project
     async materialize(input: MaterializeProjectInput): Promise<MaterializeOutcome> {
       const slug = input.slug
       const out: MaterializeOutcome = {
-        project_slug: slug,
+        owner_slug: slug,
         reason: 'created',
         docs_written: [],
         slice_chunk_count: 0,
@@ -382,7 +382,7 @@ async function gitInitAndCommit(
   slug: string,
   runGit: (args: string[], cwd: string) => Promise<void>,
   out: MaterializeOutcome,
-  logFailure: (stage: string, project_slug: string, err: unknown) => void,
+  logFailure: (stage: string, owner_slug: string, err: unknown) => void,
 ): Promise<void> {
   try {
     if (!existsSync(join(root, '.git'))) {
@@ -429,7 +429,7 @@ async function repairGitIfNeeded(
   slug: string,
   runGit: (args: string[], cwd: string) => Promise<void>,
   out: MaterializeOutcome,
-  logFailure: (stage: string, project_slug: string, err: unknown) => void,
+  logFailure: (stage: string, owner_slug: string, err: unknown) => void,
 ): Promise<void> {
   if (existsSync(join(root, '.git'))) {
     try {
@@ -455,7 +455,7 @@ async function runIndexerStep(
   input: MaterializeProjectInput,
   root: string,
   out: MaterializeOutcome,
-  logFailure: (stage: string, project_slug: string, err: unknown) => void,
+  logFailure: (stage: string, owner_slug: string, err: unknown) => void,
 ): Promise<void> {
   if (deps.indexer === null || deps.indexer === undefined) return
   const name = input.project.name.trim()
@@ -463,14 +463,14 @@ async function runIndexerStep(
   const related = findRelatedImportSignal(name, input.import_result)
   try {
     await deps.indexer({
-      project_slug: out.project_slug,
+      owner_slug: out.owner_slug,
       name,
       body: renderIndexPageBody(name, context, related, out, root),
-      source_path: `Projects/${out.project_slug}`,
+      source_path: `Projects/${out.owner_slug}`,
     })
     out.indexed = true
   } catch (err) {
-    logFailure('index', out.project_slug, err)
+    logFailure('index', out.owner_slug, err)
   }
 }
 
@@ -792,7 +792,7 @@ function renderIndexPageBody(
       // Best-effort — the page body stands without the summary section.
     }
   }
-  lines.push(`Project folder: Projects/${out.project_slug}/`)
+  lines.push(`Project folder: Projects/${out.owner_slug}/`)
   return `${lines.join('\n').trimEnd()}\n`
 }
 

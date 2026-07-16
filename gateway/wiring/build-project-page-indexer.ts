@@ -50,10 +50,10 @@ export function buildProjectPageIndexer(
     // Entity slugs are stricter than project ids (`^[a-z0-9][a-z0-9-]*$`
     // vs slugifyProjectId's `[a-z0-9._-]`); normalize through the same
     // slugifier the import populator uses so e.g. "v2.0_beta" → "v2-0-beta".
-    const slug = entitySlugify(page.project_slug) ?? entitySlugify(page.name)
+    const slug = entitySlugify(page.owner_slug) ?? entitySlugify(page.name)
     if (slug === null) {
       throw new Error(
-        `project-page-indexer: project "${page.project_slug}" yields no valid entity slug`,
+        `project-page-indexer: project "${page.owner_slug}" yields no valid entity slug`,
       )
     }
     const ts = new Date(now()).toISOString()

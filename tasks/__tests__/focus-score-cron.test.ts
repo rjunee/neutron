@@ -121,14 +121,14 @@ describe('recomputeFocusScoresForProject', () => {
     const handler = buildFocusScoreRecomputeHandler({ db })
     const r1 = await handler({
       job_name: 'tasks-focus-score-t1',
-      project_slug: 't1',
+      owner_slug: 't1',
       fired_at: Date.now(),
     })
     expect(r1.status).toBe('skipped')
     await store.create({ project_slug: 't1', title: 'one' })
     const r2 = await handler({
       job_name: 'tasks-focus-score-t1',
-      project_slug: 't1',
+      owner_slug: 't1',
       fired_at: Date.now(),
     })
     expect(r2.status).toBe('ok')

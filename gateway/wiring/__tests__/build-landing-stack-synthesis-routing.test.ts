@@ -102,7 +102,7 @@ test('importUseSynthesis routes the engine import hook to the accumulating synth
   expect(pieces.importJobRunner).not.toBeNull()
   const runner = pieces.importJobRunner!
   const { job_id } = await runner.start({
-    project_slug: 'owner',
+    owner_slug: 'owner',
     user_id: 'u-owner',
     source: 'claude-zip',
     payload: Buffer.from('zip'),

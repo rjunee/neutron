@@ -93,7 +93,7 @@ async function preSeedOwner(phase: 'completed' | 'failed' = 'completed'): Promis
   try {
     applyMigrations(db.raw())
     await new SqliteOnboardingStateStore({ db }).upsert({
-      project_slug: 'owner',
+      owner_slug: 'owner',
       user_id: 'owner',
       phase,
     })

@@ -61,7 +61,7 @@ describe('watchdog six modes — supervisor wires every detector + persists + no
     // 1. heartbeat: tracker reports an OLD heartbeat
     const tracker: HeartbeatTracker = { lastHeartbeatAt: () => now - 60_000 }
     const heartbeat = new HeartbeatDetector({
-      project_slug: owner,
+      owner_slug: owner,
       tracker,
       threshold_ms: 30_000,
       now: nowFn,
@@ -73,7 +73,7 @@ describe('watchdog six modes — supervisor wires every detector + persists + no
     // re-mutate the just-registered record so its activity is older than the threshold
     procReg.list()[0]!.last_activity_at = now - 30 * 60_000
     const stuck = new StuckAgentDetector({
-      project_slug: owner,
+      owner_slug: owner,
       process_registry: procReg,
       inactivity_threshold_ms: 15 * 60_000,
       now: nowFn,
@@ -84,7 +84,7 @@ describe('watchdog six modes — supervisor wires every detector + persists + no
     procReg2.register({ name: 'dead', pid: 9_999_991, tool_name: 't' })
     const probe: PidLivenessProbe = { isAlive: () => false }
     const crashed = new CrashedAgentDetector({
-      project_slug: owner,
+      owner_slug: owner,
       process_registry: procReg2,
       pid_probe: probe,
     })
@@ -101,19 +101,19 @@ describe('watchdog six modes — supervisor wires every detector + persists + no
     const state = new CronStateStore(db)
     await state.record({
       job_name: 'long-running',
-      project_slug: owner,
+      owner_slug: owner,
       fired_at: now / 1000,
       duration_ms: 30_000,
       status: 'ok',
     })
-    const overrun = new OverrunCronDetector({ project_slug: owner, jobs, state })
+    const overrun = new OverrunCronDetector({ owner_slug: owner, jobs, state })
 
     // 5. db_lock_contention: counter delta exceeds threshold within window
     let exhaustionCount = 0
     const counter: BusyRetryCounter = { exhaustionCount: () => exhaustionCount }
     let dbLockNow = now
     const dbLock = new DbLockContentionDetector({
-      project_slug: owner,
+      owner_slug: owner,
       counter,
       window_ms: 60_000,
       threshold_per_window: 3,
@@ -127,7 +127,7 @@ describe('watchdog six modes — supervisor wires every detector + persists + no
     })
     pool.credentials[0]!.cooldown_until = now + 60_000
     const sat = new SubstrateCooldownDetector({
-      project_slug: owner,
+      owner_slug: owner,
       pool,
       substrate_kind: 'gpt-5-5-api',
       now: nowFn,

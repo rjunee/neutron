@@ -7,7 +7,7 @@
  *   Prod composes the owner persona at Path-1 finalize, NOT the
  *   (dead-in-prod, K11b1-deleted) engine phase-walk:
  *     gateway/wiring/build-onboarding-finalize.ts:453
- *       → buildComposeInput(project_slug, state)        [engine-internals.ts:1806, LIVE post-K11b1]
+ *       → buildComposeInput(owner_slug, state)        [engine-internals.ts:1806, LIVE post-K11b1]
  *       → PersonaComposer.compose(...)                  [onboarding/persona-gen/compose.ts]
  *
  *   The finalize survivor `build-onboarding-finalize.test.ts` injects a
@@ -86,7 +86,7 @@ const CAPTURED_PHASE_STATE: Record<string, unknown> = {
 function makeState(phase_state: Record<string, unknown>): OnboardingState {
   const now = Date.now()
   return {
-    project_slug: PROJECT_SLUG,
+    owner_slug: PROJECT_SLUG,
     user_id: USER_ID,
     phase: 'persona_synthesizing',
     phase_state,
@@ -131,7 +131,7 @@ describe('K11a6-rem2 — buildComposeInput → PersonaComposer.compose (Path-1 f
   test('(a) phase_state → ComposeInput.signals / user_facts field-mapping is correct', () => {
     const ci = buildComposeInput(PROJECT_SLUG, makeState(CAPTURED_PHASE_STATE))
 
-    expect(ci.project_slug).toBe(PROJECT_SLUG)
+    expect(ci.owner_slug).toBe(PROJECT_SLUG)
 
     // signals: display_name = agent_name; agent voice-subject fields.
     expect(ci.signals.display_name).toBe('Sage')

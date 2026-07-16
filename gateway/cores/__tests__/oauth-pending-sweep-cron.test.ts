@@ -50,7 +50,7 @@ test('handler returns skipped when no expired rows exist', async () => {
   })
   const result = await handler({
     job_name: 'cores-oauth-pending-sweep-alice',
-    project_slug: 'alice',
+    owner_slug: 'alice',
     fired_at: 1_700_000_000_000,
   })
   expect(result.status).toBe('skipped')
@@ -87,7 +87,7 @@ test('handler deletes expired rows and returns ok', async () => {
   const handler = buildCoresOAuthPendingSweepHandler({ db, now: () => nowVal })
   const result = await handler({
     job_name: 'cores-oauth-pending-sweep-alice',
-    project_slug: 'alice',
+    owner_slug: 'alice',
     fired_at: nowVal,
   })
   expect(result.status).toBe('ok')

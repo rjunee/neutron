@@ -4,14 +4,14 @@
  * Isolation spec § 6.1 #3 — composite-key contract for onboarding state.
  *
  * Verifies that BOTH `InMemoryOnboardingStateStore` and
- * `SqliteOnboardingStateStore` honour the new (project_slug, user_id) PK
+ * `SqliteOnboardingStateStore` honour the new (owner_slug, user_id) PK
  * contract:
  *
  *   - `get(slug, userA)` returns null when only `(slug, userB)` row exists.
  *   - `upsert({slug, userA, ...})` does NOT overwrite an existing
  *     `(slug, userB)` row.
  *   - `delete(slug, userA)` does NOT delete `(slug, userB)`.
- *   - `rekey(oldSlug, newSlug)` rekeys EVERY row whose project_slug=oldSlug.
+ *   - `rekey(oldSlug, newSlug)` rekeys EVERY row whose owner_slug=oldSlug.
  *   - rekey collision check is per-(new_slug, user_id).
  *
  * Anti-pattern guard: every assert reads the actual store contents back.
@@ -55,7 +55,7 @@ function makeImpls(): Array<{ name: string; store: OnboardingStateStore }> {
 
 test('get(project, userA) returns null when only (project, userB) row exists', async () => {
   for (const { name, store } of makeImpls()) {
-    await store.upsert({ project_slug: OWNER, user_id: USER_B, phase: 'signup' })
+    await store.upsert({ owner_slug: OWNER, user_id: USER_B, phase: 'signup' })
     const a = await store.get(OWNER, USER_A)
     const b = await store.get(OWNER, USER_B)
     expect(a, `${name}: userA must be null`).toBeNull()
@@ -68,13 +68,13 @@ test('get(project, userA) returns null when only (project, userB) row exists', a
 test('upsert({project, userA}) does NOT overwrite an existing (project, userB) row', async () => {
   for (const { name, store } of makeImpls()) {
     await store.upsert({
-      project_slug: OWNER,
+      owner_slug: OWNER,
       user_id: USER_B,
       phase: 'projects_proposed',
       phase_state_patch: { primary_projects: ['Topline'] },
     })
     await store.upsert({
-      project_slug: OWNER,
+      owner_slug: OWNER,
       user_id: USER_A,
       phase: 'signup',
     })
@@ -92,8 +92,8 @@ test('upsert({project, userA}) does NOT overwrite an existing (project, userB) r
 
 test('delete(project, userA) does NOT delete (project, userB)', async () => {
   for (const { name, store } of makeImpls()) {
-    await store.upsert({ project_slug: OWNER, user_id: USER_A, phase: 'signup' })
-    await store.upsert({ project_slug: OWNER, user_id: USER_B, phase: 'signup' })
+    await store.upsert({ owner_slug: OWNER, user_id: USER_A, phase: 'signup' })
+    await store.upsert({ owner_slug: OWNER, user_id: USER_B, phase: 'signup' })
     await store.delete(OWNER, USER_A)
     expect(await store.get(OWNER, USER_A), `${name}: userA gone`).toBeNull()
     expect(await store.get(OWNER, USER_B), `${name}: userB intact`).not.toBeNull()
@@ -103,15 +103,15 @@ test('delete(project, userA) does NOT delete (project, userB)', async () => {
 
 test('rekey rekeys EVERY row whose project_slug=oldSlug regardless of user_id', async () => {
   for (const { name, store } of makeImpls()) {
-    await store.upsert({ project_slug: 'old', user_id: USER_A, phase: 'signup' })
+    await store.upsert({ owner_slug: 'old', user_id: USER_A, phase: 'signup' })
     await store.upsert({
-      project_slug: 'old',
+      owner_slug: 'old',
       user_id: USER_B,
       phase: 'projects_proposed',
     })
 
     const rekeyed = await store.rekey('old', 'new', USER_A)
-    expect(rekeyed?.project_slug, `${name}: rekeyed slug`).toBe('new')
+    expect(rekeyed?.owner_slug, `${name}: rekeyed slug`).toBe('new')
     expect(rekeyed?.user_id, `${name}: rekeyed user`).toBe(USER_A)
     expect(await store.get('old', USER_A), `${name}: old userA gone`).toBeNull()
     expect(await store.get('old', USER_B), `${name}: old userB gone`).toBeNull()
@@ -127,8 +127,8 @@ test('rekey rekeys EVERY row whose project_slug=oldSlug regardless of user_id', 
 
 test('rekey throws when (newSlug, userA) already exists', async () => {
   for (const { name, store } of makeImpls()) {
-    await store.upsert({ project_slug: 'old', user_id: USER_A, phase: 'signup' })
-    await store.upsert({ project_slug: 'new', user_id: USER_A, phase: 'signup' })
+    await store.upsert({ owner_slug: 'old', user_id: USER_A, phase: 'signup' })
+    await store.upsert({ owner_slug: 'new', user_id: USER_A, phase: 'signup' })
     await expect(store.rekey('old', 'new', USER_A), `${name}: collision`).rejects.toThrow(/collision/)
     // Both rows still exist (atomic rejection).
     expect(await store.get('old', USER_A), `${name}: old row intact`).not.toBeNull()
@@ -140,10 +140,10 @@ test('rekey throws when (newSlug, userA) already exists', async () => {
 
 test('rekey succeeds when (newSlug, userOther) exists but the rekey moves (oldSlug, userA)', async () => {
   for (const { name, store } of makeImpls()) {
-    await store.upsert({ project_slug: 'old', user_id: USER_A, phase: 'signup' })
-    await store.upsert({ project_slug: 'new', user_id: USER_B, phase: 'signup' })
+    await store.upsert({ owner_slug: 'old', user_id: USER_A, phase: 'signup' })
+    await store.upsert({ owner_slug: 'new', user_id: USER_B, phase: 'signup' })
     const rekeyed = await store.rekey('old', 'new', USER_A)
-    expect(rekeyed?.project_slug, `${name}: rekeyed`).toBe('new')
+    expect(rekeyed?.owner_slug, `${name}: rekeyed`).toBe('new')
     expect(rekeyed?.user_id, `${name}: rekeyed user`).toBe(USER_A)
     // Both users now under 'new'.
     expect(await store.get('new', USER_A), `${name}: new userA`).not.toBeNull()
@@ -156,8 +156,8 @@ test('Sqlite: concurrent upserts on the same project_slug but different user_ids
   const store = new SqliteOnboardingStateStore({ db })
   // SQLite serializes writes per-connection — both upserts complete.
   await Promise.all([
-    store.upsert({ project_slug: OWNER, user_id: USER_A, phase: 'signup' }),
-    store.upsert({ project_slug: OWNER, user_id: USER_B, phase: 'signup' }),
+    store.upsert({ owner_slug: OWNER, user_id: USER_A, phase: 'signup' }),
+    store.upsert({ owner_slug: OWNER, user_id: USER_B, phase: 'signup' }),
   ])
   expect(await store.get(OWNER, USER_A)).not.toBeNull()
   expect(await store.get(OWNER, USER_B)).not.toBeNull()

@@ -83,7 +83,7 @@ export const defaultResultDocWriter: ResultDocWriter = {
     mkdirSync(dirname(abs), { recursive: true })
     const body =
       `# Overnight result — ${item.id}\n\n` +
-      `- Project: ${item.project_slug}\n` +
+      `- Project: ${item.owner_slug}\n` +
       `- Task: ${item.description}\n` +
       `- Agent: ${item.agent_role}${item.ralph ? ' (ralph)' : ''}\n` +
       `- Trident run: ${item.trident_run_id ?? '(none)'} (${item.trident_slug ?? '-'})\n` +
@@ -114,7 +114,7 @@ export function buildOvernightTridentSeam(
         : input.task
       const run = await tridentStore.create({
         slug: input.slug,
-        project_slug: input.project_slug,
+        project_slug: input.owner_slug,
         repo_path: input.repo_path,
         task,
         ralph: input.ralph,
@@ -208,7 +208,7 @@ export interface BuildOvernightEngineInput {
   result_docs?: ResultDocWriter
   listOptedInProjects?: () => OptedInProject[]
   /** Resolve a project slug → bound Telegram topic id (else General). */
-  resolveProjectTopic?: (project_slug: string) => string | null
+  resolveProjectTopic?: (owner_slug: string) => string | null
   log?: (msg: string) => void
 }
 

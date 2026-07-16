@@ -5,7 +5,7 @@
  * column but nothing ever wrote a non-legacy value, so the per-attempt
  * `onboarding_metrics` view collapsed every restart/resume into one row.
  *
- * 2026-05-19 — ISSUES #2: every store call keys on (project_slug, user_id).
+ * 2026-05-19 — ISSUES #2: every store call keys on (owner_slug, user_id).
  */
 
 import { afterEach, beforeEach, expect, test } from 'bun:test'
@@ -39,7 +39,7 @@ test('InMemory: upsert mints a fresh attempt_id on first write', async () => {
   const store = new InMemoryOnboardingStateStore({
     newAttemptId: () => `attempt-${++counter}`,
   })
-  const state = await store.upsert({ project_slug: 't1', user_id: USER, phase: 'signup' })
+  const state = await store.upsert({ owner_slug: 't1', user_id: USER, phase: 'signup' })
   expect(state.attempt_id).toBe('attempt-1')
 })
 
@@ -48,16 +48,16 @@ test('InMemory: upsert preserves attempt_id across phase advances', async () => 
   const store = new InMemoryOnboardingStateStore({
     newAttemptId: () => `attempt-${++counter}`,
   })
-  await store.upsert({ project_slug: 't1', user_id: USER, phase: 'signup' })
-  const advanced = await store.upsert({ project_slug: 't1', user_id: USER, phase: 'agent_name_chosen' })
+  await store.upsert({ owner_slug: 't1', user_id: USER, phase: 'signup' })
+  const advanced = await store.upsert({ owner_slug: 't1', user_id: USER, phase: 'agent_name_chosen' })
   expect(advanced.attempt_id).toBe('attempt-1')
   expect(counter).toBe(1)
 })
 
 test('InMemory: distinct owners get distinct attempt_ids', async () => {
   const store = new InMemoryOnboardingStateStore()
-  const a = await store.upsert({ project_slug: 't1', user_id: USER, phase: 'signup' })
-  const b = await store.upsert({ project_slug: 't2', user_id: USER, phase: 'signup' })
+  const a = await store.upsert({ owner_slug: 't1', user_id: USER, phase: 'signup' })
+  const b = await store.upsert({ owner_slug: 't2', user_id: USER, phase: 'signup' })
   expect(a.attempt_id).not.toBe(b.attempt_id)
   expect(a.attempt_id.length).toBeGreaterThan(0)
   expect(b.attempt_id.length).toBeGreaterThan(0)
@@ -68,7 +68,7 @@ test('Sqlite: upsert mints a fresh attempt_id on insert', async () => {
     db,
     newAttemptId: () => 'fixed-attempt',
   })
-  const state = await store.upsert({ project_slug: 't1', user_id: USER, phase: 'signup' })
+  const state = await store.upsert({ owner_slug: 't1', user_id: USER, phase: 'signup' })
   expect(state.attempt_id).toBe('fixed-attempt')
   // Round-trip via get — the column persists.
   const reloaded = await store.get('t1', USER)
@@ -81,8 +81,8 @@ test('Sqlite: upsert preserves attempt_id across phase updates', async () => {
     db,
     newAttemptId: () => `attempt-${++counter}`,
   })
-  await store.upsert({ project_slug: 't1', user_id: USER, phase: 'signup' })
-  await store.upsert({ project_slug: 't1', user_id: USER, phase: 'agent_name_chosen' })
+  await store.upsert({ owner_slug: 't1', user_id: USER, phase: 'signup' })
+  await store.upsert({ owner_slug: 't1', user_id: USER, phase: 'agent_name_chosen' })
   const final = await store.get('t1', USER)
   expect(final?.attempt_id).toBe('attempt-1')
   expect(counter).toBe(1)
@@ -99,11 +99,11 @@ test('Sqlite: second upsert RETURN VALUE carries attempt_id (Argus IMPORTANT #2 
     db,
     newAttemptId: () => 'mint-once',
   })
-  const first = await store.upsert({ project_slug: 't1', user_id: USER, phase: 'signup' })
+  const first = await store.upsert({ owner_slug: 't1', user_id: USER, phase: 'signup' })
   expect(first.attempt_id).toBe('mint-once')
-  const second = await store.upsert({ project_slug: 't1', user_id: USER, phase: 'agent_name_chosen' })
+  const second = await store.upsert({ owner_slug: 't1', user_id: USER, phase: 'agent_name_chosen' })
   expect(second.attempt_id).toBe('mint-once')
-  const third = await store.upsert({ project_slug: 't1', user_id: USER, phase: 'persona_reviewed' })
+  const third = await store.upsert({ owner_slug: 't1', user_id: USER, phase: 'persona_reviewed' })
   expect(third.attempt_id).toBe('mint-once')
 })
 
@@ -134,7 +134,7 @@ test('Sqlite: rekey carries attempt_id to the renamed slug', async () => {
     db,
     newAttemptId: () => 'pre-rename',
   })
-  await store.upsert({ project_slug: 'old-slug', user_id: USER, phase: 'signup' })
+  await store.upsert({ owner_slug: 'old-slug', user_id: USER, phase: 'signup' })
   const rekeyed = await store.rekey('old-slug', 'new-slug', USER)
   expect(rekeyed?.attempt_id).toBe('pre-rename')
   const reloaded = await store.get('new-slug', USER)

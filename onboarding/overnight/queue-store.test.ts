@@ -38,7 +38,7 @@ describe('OvernightQueueStore', () => {
     const store = new OvernightQueueStore(db)
     const item = await store.create({
       id: 'owk-20260619-001',
-      project_slug: 'acme',
+      owner_slug: 'acme',
       description: 'Deepen pricing analysis',
     })
     expect(item.agent_role).toBe('forge')
@@ -55,7 +55,7 @@ describe('OvernightQueueStore', () => {
     const store = new OvernightQueueStore(db)
     const item = await store.create({
       id: 'owk-20260619-002',
-      project_slug: 'globex',
+      owner_slug: 'globex',
       description: 'Build the importer',
       agent_role: 'atlas',
       priority: 'P1',
@@ -71,7 +71,7 @@ describe('OvernightQueueStore', () => {
 
   test('update patches only provided fields + persists trident link', async () => {
     const store = new OvernightQueueStore(db)
-    await store.create({ id: 'owk-20260619-003', project_slug: 'acme', description: 'x' })
+    await store.create({ id: 'owk-20260619-003', owner_slug: 'acme', description: 'x' })
     const updated = await store.update('owk-20260619-003', {
       status: 'in-flight',
       trident_run_id: 'run-abc',
@@ -88,11 +88,11 @@ describe('OvernightQueueStore', () => {
 
   test('listByStatus + countInFlight', async () => {
     const store = new OvernightQueueStore(db)
-    await store.create({ id: 'owk-20260619-010', project_slug: 'a', description: 'q1' })
-    await store.create({ id: 'owk-20260619-011', project_slug: 'a', description: 'q2' })
+    await store.create({ id: 'owk-20260619-010', owner_slug: 'a', description: 'q1' })
+    await store.create({ id: 'owk-20260619-011', owner_slug: 'a', description: 'q2' })
     const inflight = await store.create({
       id: 'owk-20260619-012',
-      project_slug: 'b',
+      owner_slug: 'b',
       description: 'r1',
     })
     await store.update(inflight.id, { status: 'in-flight' })

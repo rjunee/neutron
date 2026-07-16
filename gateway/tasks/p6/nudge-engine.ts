@@ -546,7 +546,7 @@ export function buildNudgeEngineHandler(deps: NudgeEngineHandlerDeps): CronHandl
   return async (ctx) => {
     const input: NudgePassInput = {
       db: deps.db,
-      project_slug: ctx.project_slug,
+      project_slug: ctx.owner_slug,
       llm: deps.llm,
     }
     if (deps.personaLoader !== undefined) {

@@ -47,7 +47,7 @@ let db: ProjectDb
 let buttonStore: ButtonStore
 let stateStore: InMemoryOnboardingStateStore
 let transcript: TranscriptWriter
-let sentPrompts: Array<{ project_slug: string; topic_id: string; prompt: ButtonPrompt }>
+let sentPrompts: Array<{ owner_slug: string; topic_id: string; prompt: ButtonPrompt }>
 
 function buildEngine(importJobRunner: ImportJobRunnerHook): InterviewEngine {
   return new InterviewEngine({
@@ -80,7 +80,7 @@ function scriptedRunner(job: ImportJob): { runner: ImportJobRunnerHook; cancels:
 async function seedImportRunningNoSignupVia(job_id: string, started_at: number): Promise<void> {
   await stateStore.upsert({
     user_id: USER,
-    project_slug: OWNER,
+    owner_slug: OWNER,
     phase: 'import_running',
     phase_state_patch: {
       topic_id: TOPIC,
@@ -128,7 +128,7 @@ describe('pollImportRunningTick — signup_via absent must NOT strand (ND-A)', (
     const T0 = 5_000_000_000_000
     const job: ImportJob = {
       job_id: 'job-nd-a-progress',
-      project_slug: OWNER,
+      owner_slug: OWNER,
       source: 'claude-zip',
       status: 'pass1-running',
       dollars_spent: 0,
@@ -142,7 +142,7 @@ describe('pollImportRunningTick — signup_via absent must NOT strand (ND-A)', (
     await seedImportRunningNoSignupVia('job-nd-a-progress', T0)
 
     const out = await engine.pollImportRunningTick({
-      project_slug: OWNER,
+      owner_slug: OWNER,
       user_id: USER,
       observed_at: T0 + 5 * MIN,
     })
@@ -158,7 +158,7 @@ describe('pollImportRunningTick — signup_via absent must NOT strand (ND-A)', (
     const T0 = 6_000_000_000_000
     const job: ImportJob = {
       job_id: 'job-nd-a-complete',
-      project_slug: OWNER,
+      owner_slug: OWNER,
       source: 'claude-zip',
       status: 'pass1-running',
       dollars_spent: 0,
@@ -173,7 +173,7 @@ describe('pollImportRunningTick — signup_via absent must NOT strand (ND-A)', (
 
     // A first tick while still reading — must advance the import, not strand.
     let out = await engine.pollImportRunningTick({
-      project_slug: OWNER,
+      owner_slug: OWNER,
       user_id: USER,
       observed_at: T0 + 10 * MIN,
     })
@@ -185,7 +185,7 @@ describe('pollImportRunningTick — signup_via absent must NOT strand (ND-A)', (
     job.pass1_chunks_done = 8
     job.result = SAMPLE_RESULT
     out = await engine.pollImportRunningTick({
-      project_slug: OWNER,
+      owner_slug: OWNER,
       user_id: USER,
       observed_at: T0 + 12 * MIN,
     })

@@ -14,7 +14,7 @@ export type CronHandlerStatus = 'ok' | 'skipped' | 'error'
 
 export interface CronHandlerContext {
   job_name: string
-  project_slug: string
+  owner_slug: string
   /** Wall-clock unix-ms when this fire began. */
   fired_at: number
 }

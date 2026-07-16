@@ -33,12 +33,12 @@ afterEach(() => {
 
 async function seedTerminal(
   id: string,
-  project_slug: string,
+  owner_slug: string,
   status: 'completed' | 'failed',
   result: string,
   window = WINDOW_DATE,
 ): Promise<void> {
-  await queue.create({ id, project_slug, description: `task ${id}`, context_relpath: 'docs/x.md' })
+  await queue.create({ id, owner_slug, description: `task ${id}`, context_relpath: 'docs/x.md' })
   await queue.update(id, {
     status,
     result,
@@ -54,7 +54,7 @@ describe('selectWindowTransitions', () => {
     // A different window — must be excluded.
     await seedTerminal('owk-20260619-003', 'acme', 'completed', 'PR#9', '2026-06-18')
     // Still queued — excluded.
-    await queue.create({ id: 'owk-20260619-004', project_slug: 'acme', description: 'q' })
+    await queue.create({ id: 'owk-20260619-004', owner_slug: 'acme', description: 'q' })
     const sel = selectWindowTransitions(queue.list(), WINDOW_DATE)
     expect(sel.map((i) => i.id).sort()).toEqual(['owk-20260619-001', 'owk-20260619-002'])
   })

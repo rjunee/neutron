@@ -156,19 +156,19 @@ describe('app-reminders surface — GET list', () => {
   it('orders pending reminders by fire_at ascending', async () => {
     // Seed via the store so we don't depend on the create endpoint.
     await harness.store.create({
-      project_slug: 'demo',
+      owner_slug: 'demo',
       topic_id: appProjectTopicId(PROJECT_ID),
       fire_at: FIXED_NOW_S + 3000,
       message: 'later',
     })
     await harness.store.create({
-      project_slug: 'demo',
+      owner_slug: 'demo',
       topic_id: appProjectTopicId(PROJECT_ID),
       fire_at: FIXED_NOW_S + 1000,
       message: 'soon',
     })
     await harness.store.create({
-      project_slug: 'demo',
+      owner_slug: 'demo',
       topic_id: appProjectTopicId(PROJECT_ID),
       fire_at: FIXED_NOW_S + 2000,
       message: 'middle',
@@ -184,13 +184,13 @@ describe('app-reminders surface — GET list', () => {
 
   it('isolates reminders by project_id (topic_id encoding)', async () => {
     await harness.store.create({
-      project_slug: 'demo',
+      owner_slug: 'demo',
       topic_id: appProjectTopicId(PROJECT_ID),
       fire_at: FIXED_NOW_S + 1000,
       message: 'demo reminder',
     })
     await harness.store.create({
-      project_slug: 'demo',
+      owner_slug: 'demo',
       topic_id: appProjectTopicId(OTHER_PROJECT_ID),
       fire_at: FIXED_NOW_S + 1000,
       message: 'other reminder',
@@ -198,7 +198,7 @@ describe('app-reminders surface — GET list', () => {
     // Also seed an instance-wide reminder (topic_id NULL) that should NOT
     // appear in either project's tab.
     await harness.store.create({
-      project_slug: 'demo',
+      owner_slug: 'demo',
       topic_id: null,
       fire_at: FIXED_NOW_S + 1000,
       message: 'engine-only reminder',
@@ -228,7 +228,7 @@ describe('app-reminders surface — GET list', () => {
   describe('include_id widening (ISSUE #38)', () => {
     it('includes a fired reminder in the same project when ?include_id matches', async () => {
       const created = await harness.store.create({
-        project_slug: 'demo',
+        owner_slug: 'demo',
         topic_id: appProjectTopicId(PROJECT_ID),
         fire_at: FIXED_NOW_S + 60,
         message: 'will fire',
@@ -253,7 +253,7 @@ describe('app-reminders surface — GET list', () => {
 
     it('does not duplicate a pending reminder already in the list when include_id matches', async () => {
       const created = await harness.store.create({
-        project_slug: 'demo',
+        owner_slug: 'demo',
         topic_id: appProjectTopicId(PROJECT_ID),
         fire_at: FIXED_NOW_S + 60,
         message: 'still pending',
@@ -272,7 +272,7 @@ describe('app-reminders surface — GET list', () => {
 
     it('silently ignores include_id pointing to a different project (no cross-topic leak)', async () => {
       const other = await harness.store.create({
-        project_slug: 'demo',
+        owner_slug: 'demo',
         topic_id: appProjectTopicId(OTHER_PROJECT_ID),
         fire_at: FIXED_NOW_S + 60,
         message: 'other project',
@@ -312,7 +312,7 @@ describe('app-reminders surface — GET list', () => {
       // Regression-pin: the default (no include_id) path must NOT
       // change shape — the existing client baseline shouldn't notice.
       await harness.store.create({
-        project_slug: 'demo',
+        owner_slug: 'demo',
         topic_id: appProjectTopicId(PROJECT_ID),
         fire_at: FIXED_NOW_S + 60,
         message: 'pending row',
@@ -444,7 +444,7 @@ describe('app-reminders surface — POST snooze', () => {
 
   it('updates fire_at for a pending reminder', async () => {
     const created = await harness.store.create({
-      project_slug: 'demo',
+      owner_slug: 'demo',
       topic_id: appProjectTopicId(PROJECT_ID),
       fire_at: FIXED_NOW_S + 60,
       message: 'wake up',
@@ -463,7 +463,7 @@ describe('app-reminders surface — POST snooze', () => {
 
   it('refuses to snooze a reminder from a different project', async () => {
     const otherProjectReminder = await harness.store.create({
-      project_slug: 'demo',
+      owner_slug: 'demo',
       topic_id: appProjectTopicId(OTHER_PROJECT_ID),
       fire_at: FIXED_NOW_S + 60,
       message: 'cross-project leak attempt',
@@ -509,7 +509,7 @@ describe('app-reminders surface — POST snooze', () => {
 
   it('rejects a snooze into the past', async () => {
     const created = await harness.store.create({
-      project_slug: 'demo',
+      owner_slug: 'demo',
       topic_id: appProjectTopicId(PROJECT_ID),
       fire_at: FIXED_NOW_S + 60,
       message: 'x',
@@ -529,7 +529,7 @@ describe('app-reminders surface — POST snooze', () => {
 
   it('returns 409 when the reminder is already cancelled', async () => {
     const created = await harness.store.create({
-      project_slug: 'demo',
+      owner_slug: 'demo',
       topic_id: appProjectTopicId(PROJECT_ID),
       fire_at: FIXED_NOW_S + 60,
       message: 'x',
@@ -560,7 +560,7 @@ describe('app-reminders surface — POST cancel', () => {
 
   it('removes a pending reminder from the project list', async () => {
     const created = await harness.store.create({
-      project_slug: 'demo',
+      owner_slug: 'demo',
       topic_id: appProjectTopicId(PROJECT_ID),
       fire_at: FIXED_NOW_S + 60,
       message: 'x',
@@ -581,7 +581,7 @@ describe('app-reminders surface — POST cancel', () => {
 
   it('refuses to cancel a reminder from a different project', async () => {
     const otherProjectReminder = await harness.store.create({
-      project_slug: 'demo',
+      owner_slug: 'demo',
       topic_id: appProjectTopicId(OTHER_PROJECT_ID),
       fire_at: FIXED_NOW_S + 60,
       message: 'cross-project leak attempt',
@@ -596,7 +596,7 @@ describe('app-reminders surface — POST cancel', () => {
 
   it('returns 409 when the reminder is already fired', async () => {
     const created = await harness.store.create({
-      project_slug: 'demo',
+      owner_slug: 'demo',
       topic_id: appProjectTopicId(PROJECT_ID),
       fire_at: FIXED_NOW_S + 60,
       message: 'x',

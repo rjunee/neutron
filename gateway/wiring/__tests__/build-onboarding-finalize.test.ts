@@ -78,7 +78,7 @@ function makeHarness(): Harness {
   const onboardingCompleted: string[] = []
   const deps: OnboardingFinalizeDeps = {
     owner_home: ownerHome,
-    project_slug: PROJECT_SLUG,
+    owner_slug: PROJECT_SLUG,
     db,
     stateStore,
     personaLoader: { invalidate: (f?: string): void => void invalidated.push(f ?? '*') },
@@ -104,7 +104,7 @@ function makeHarness(): Harness {
 test('CONCURRENT finalize (boot + reconnect) does the work EXACTLY ONCE — atomic in-flight claim (F8 P1)', async () => {
   const h = makeHarness()
   const seeded = await h.stateStore.upsert({
-    project_slug: PROJECT_SLUG,
+    owner_slug: PROJECT_SLUG,
     user_id: USER_ID,
     phase: 'persona_reviewed',
     phase_state_patch: {
@@ -142,7 +142,7 @@ test('CONCURRENT finalize (boot + reconnect) does the work EXACTLY ONCE — atom
 test('CONCURRENT finalize whose TERMINAL write FAILS — both callers observe the failure, none falsely succeeds (F8 r2)', async () => {
   const h = makeHarness()
   const seeded = await h.stateStore.upsert({
-    project_slug: PROJECT_SLUG,
+    owner_slug: PROJECT_SLUG,
     user_id: USER_ID,
     phase: 'persona_reviewed',
     phase_state_patch: {
@@ -202,7 +202,7 @@ test('CONCURRENT finalize whose TERMINAL write FAILS — both callers observe th
 test('finalize materializes the FRESHEST state when phase_state changes during stabilize (F8 r4/r6)', async () => {
   const h = makeHarness()
   const seeded = await h.stateStore.upsert({
-    project_slug: PROJECT_SLUG,
+    owner_slug: PROJECT_SLUG,
     user_id: USER_ID,
     phase: 'persona_reviewed',
     phase_state_patch: {
@@ -226,7 +226,7 @@ test('finalize materializes the FRESHEST state when phase_state changes during s
       if (!injected && state !== null && !projects.includes('Beta')) {
         injected = true
         await real.upsert({
-          project_slug: PROJECT_SLUG,
+          owner_slug: PROJECT_SLUG,
           user_id: USER_ID,
           phase: 'persona_reviewed',
           phase_state_patch: { agent_personality: 'warm and direct', primary_projects: ['Alpha', 'Beta'] },
@@ -258,7 +258,7 @@ test('finalize materializes the FRESHEST state when phase_state changes during s
 test('finalize picks up a NON-primary-projects field changed during stabilize (whole-phase_state stability) (F8 r6)', async () => {
   const h = makeHarness()
   const seeded = await h.stateStore.upsert({
-    project_slug: PROJECT_SLUG,
+    owner_slug: PROJECT_SLUG,
     user_id: USER_ID,
     phase: 'persona_reviewed',
     phase_state_patch: {
@@ -280,7 +280,7 @@ test('finalize picks up a NON-primary-projects field changed during stabilize (w
       if (!injected && state !== null && !state.phase_state['non_work_interests']) {
         injected = true
         await real.upsert({
-          project_slug: PROJECT_SLUG,
+          owner_slug: PROJECT_SLUG,
           user_id: USER_ID,
           phase: 'persona_reviewed',
           phase_state_patch: { non_work_interests: ['climbing'] },
@@ -307,7 +307,7 @@ test('finalize picks up a NON-primary-projects field changed during stabilize (w
 test('finalize DEFERS with ZERO side effects under continuous churn — never stabilizes, creates no projects (F8 r7/r8/r15)', async () => {
   const h = makeHarness()
   const seeded = await h.stateStore.upsert({
-    project_slug: PROJECT_SLUG,
+    owner_slug: PROJECT_SLUG,
     user_id: USER_ID,
     phase: 'persona_reviewed',
     phase_state_patch: {
@@ -330,7 +330,7 @@ test('finalize DEFERS with ZERO side effects under continuous churn — never st
       if (state !== null && state.phase !== 'completed') {
         reads += 1
         await real.upsert({
-          project_slug: PROJECT_SLUG,
+          owner_slug: PROJECT_SLUG,
           user_id: USER_ID,
           phase: 'persona_reviewed',
           phase_state_patch: { primary_projects: Array.from({ length: reads + 1 }, (_, i) => `P${i}`) },
@@ -362,7 +362,7 @@ test('finalize DEFERS with ZERO side effects under continuous churn — never st
 test('finalize ABORTS on a deleted durable row (successful null read) — no persona/project side effects (F8 r11)', async () => {
   const h = makeHarness()
   const seeded = await h.stateStore.upsert({
-    project_slug: PROJECT_SLUG,
+    owner_slug: PROJECT_SLUG,
     user_id: USER_ID,
     phase: 'persona_reviewed',
     phase_state_patch: { user_first_name: 'Sam', agent_name: 'Atlas', primary_projects: ['Alpha'] },
@@ -392,7 +392,7 @@ test('finalize does NOT materialize a project the stable state has DROPPED (no s
   // on the stable state, materialize resolves projects with drops EXCLUDED — Alpha is never
   // created, so there is no orphaned row (the failure mode reconciliation used to chase).
   const seeded = await h.stateStore.upsert({
-    project_slug: PROJECT_SLUG,
+    owner_slug: PROJECT_SLUG,
     user_id: USER_ID,
     phase: 'persona_reviewed',
     phase_state_patch: {
@@ -427,7 +427,7 @@ test('finalize NEVER deletes a PRE-EXISTING project the owner already had (no re
     [slugifyProjectId('Alpha'), 'Alpha', 'pre-existing', iso, iso],
   )
   const seeded = await h.stateStore.upsert({
-    project_slug: PROJECT_SLUG,
+    owner_slug: PROJECT_SLUG,
     user_id: USER_ID,
     phase: 'persona_reviewed',
     phase_state_patch: { user_first_name: 'Sam', agent_name: 'Atlas', primary_projects: ['Alpha'] },
@@ -448,7 +448,7 @@ test('finalize does NOT complete a row in an early (non-finalizable) phase (allo
   // An early phase that has no legal edge to `completed`. Even with fields present, the
   // finalizer's phase allowlist must refuse it (a denylist would have wrongly accepted it).
   const seeded = await h.stateStore.upsert({
-    project_slug: PROJECT_SLUG,
+    owner_slug: PROJECT_SLUG,
     user_id: USER_ID,
     phase: 'ai_substrate_offered',
     phase_state_patch: { user_first_name: 'Sam', agent_name: 'Atlas', primary_projects: ['Alpha'] },
@@ -471,7 +471,7 @@ test('finalize does NOT complete a row in an early (non-finalizable) phase (allo
 test('finalize refuses a non-finalizable phase even when the live read THROWS — snapshot fallback stays allowlist-guarded (F8 r13)', async () => {
   const h = makeHarness()
   const seeded = await h.stateStore.upsert({
-    project_slug: PROJECT_SLUG,
+    owner_slug: PROJECT_SLUG,
     user_id: USER_ID,
     phase: 'ai_substrate_offered',
     phase_state_patch: { user_first_name: 'Sam', agent_name: 'Atlas', primary_projects: ['Alpha'] },
@@ -510,7 +510,7 @@ test('finalize refuses a non-finalizable phase even when the live read THROWS �
 test('finalize DEFERS on a mutation in the materialize→CAS window WITHOUT unsafely deleting the created row (F8 r16/r17)', async () => {
   const h = makeHarness()
   const seeded = await h.stateStore.upsert({
-    project_slug: PROJECT_SLUG,
+    owner_slug: PROJECT_SLUG,
     user_id: USER_ID,
     phase: 'persona_reviewed',
     phase_state_patch: { user_first_name: 'Sam', agent_name: 'Atlas', primary_projects: ['Alpha'] },
@@ -533,7 +533,7 @@ test('finalize DEFERS on a mutation in the materialize→CAS window WITHOUT unsa
       casCalls += 1
       if (casCalls === 1) {
         await real.upsert({
-          project_slug: PROJECT_SLUG,
+          owner_slug: PROJECT_SLUG,
           user_id: USER_ID,
           phase: 'persona_reviewed',
           phase_state_patch: { primary_projects: ['Beta'], dropped_projects: ['Alpha'] },
@@ -560,7 +560,7 @@ test('finalize DEFERS on a mutation in the materialize→CAS window WITHOUT unsa
 test('finalize ABORTS (never completes) if the phase transitions to a live import mid-run (F8 r10)', async () => {
   const h = makeHarness()
   const seeded = await h.stateStore.upsert({
-    project_slug: PROJECT_SLUG,
+    owner_slug: PROJECT_SLUG,
     user_id: USER_ID,
     phase: 'persona_reviewed',
     phase_state_patch: {
@@ -581,7 +581,7 @@ test('finalize ABORTS (never completes) if the phase transitions to a live impor
       const state = await real.get(slug, uid)
       if (!mutated && state !== null && state.phase === 'persona_reviewed') {
         mutated = true
-        await real.upsert({ project_slug: PROJECT_SLUG, user_id: USER_ID, phase: 'import_running' })
+        await real.upsert({ owner_slug: PROJECT_SLUG, user_id: USER_ID, phase: 'import_running' })
         return real.get(slug, uid)
       }
       return state
@@ -607,7 +607,7 @@ test('finalize operates on the LIVE durable state, not a stale caller snapshot (
   const h = makeHarness()
   // Snapshot A — the state a caller captured with ONE project.
   const snapA = await h.stateStore.upsert({
-    project_slug: PROJECT_SLUG,
+    owner_slug: PROJECT_SLUG,
     user_id: USER_ID,
     phase: 'persona_reviewed',
     phase_state_patch: {
@@ -620,7 +620,7 @@ test('finalize operates on the LIVE durable state, not a stale caller snapshot (
   // the coalescing boundary: a newer caller persisted more, then the older caller's
   // run wins the race carrying the stale snapshot A.
   await h.stateStore.upsert({
-    project_slug: PROJECT_SLUG,
+    owner_slug: PROJECT_SLUG,
     user_id: USER_ID,
     phase: 'persona_reviewed',
     phase_state_patch: { primary_projects: ['Alpha', 'Beta'] },
@@ -644,7 +644,7 @@ test('finalize completes onboarding: persona, projects row, rail refresh', async
 
   // Seed an in-flight onboarding row with two named projects.
   const seeded = await h.stateStore.upsert({
-    project_slug: PROJECT_SLUG,
+    owner_slug: PROJECT_SLUG,
     user_id: USER_ID,
     phase: 'persona_reviewed',
     phase_state_patch: {
@@ -703,7 +703,7 @@ test('finalize completes onboarding: persona, projects row, rail refresh', async
 test('finalize is idempotent: a second call on a completed row is a no-op', async () => {
   const h = makeHarness()
   const seeded = await h.stateStore.upsert({
-    project_slug: PROJECT_SLUG,
+    owner_slug: PROJECT_SLUG,
     user_id: USER_ID,
     phase: 'persona_reviewed',
     phase_state_patch: { primary_projects: ['Topline Revenue'] },
@@ -739,7 +739,7 @@ test('finalize is idempotent: a second call on a completed row is a no-op', asyn
 test('finalize does NOT emit the onboarding-complete signal when the terminal upsert fails', async () => {
   const h = makeHarness()
   const seeded = await h.stateStore.upsert({
-    project_slug: PROJECT_SLUG,
+    owner_slug: PROJECT_SLUG,
     user_id: USER_ID,
     phase: 'persona_reviewed',
     phase_state_patch: { primary_projects: ['Topline Revenue'] },
@@ -787,7 +787,7 @@ test('finalize reuses a pre-existing project whose name slugifies to the same id
   expect(slugifyProjectId('Acme')).toBe('acme') // guards the premise: id 'x' ≠ slug 'acme'
 
   const seeded = await h.stateStore.upsert({
-    project_slug: PROJECT_SLUG,
+    owner_slug: PROJECT_SLUG,
     user_id: USER_ID,
     phase: 'persona_reviewed',
     phase_state_patch: { primary_projects: ['Acme'] },
@@ -826,7 +826,7 @@ test('finalize reuses a pre-existing project whose name slugifies to the same id
 test('finalize materializes from import_result.proposed_projects when supplied', async () => {
   const h = makeHarness()
   const seeded = await h.stateStore.upsert({
-    project_slug: PROJECT_SLUG,
+    owner_slug: PROJECT_SLUG,
     user_id: USER_ID,
     phase: 'persona_reviewed',
     // No primary_projects in phase_state — the import_result drives projects.
@@ -867,7 +867,7 @@ test('finalize unions interview-named projects with import_result.proposed_proje
   // The owner named three projects conversationally; the import proposed a
   // partially-overlapping set ('Acme' overlaps; 'Infra' is import-only).
   const seeded = await h.stateStore.upsert({
-    project_slug: PROJECT_SLUG,
+    owner_slug: PROJECT_SLUG,
     user_id: USER_ID,
     phase: 'persona_reviewed',
     phase_state_patch: {
@@ -915,7 +915,7 @@ test('finalize honors a curation DROP — a dropped project is never materialize
   // extractor subtracted 'Infra' from primary_projects AND recorded it under
   // dropped_projects. The import's proposed_projects STILL lists 'Infra'.
   const seeded = await h.stateStore.upsert({
-    project_slug: PROJECT_SLUG,
+    owner_slug: PROJECT_SLUG,
     user_id: USER_ID,
     phase: 'persona_reviewed',
     phase_state_patch: {
@@ -976,7 +976,7 @@ test('finalize caps the IMPORT contribution to the displayed set — proposed pr
   // import_result (9 proposed) and assert the import OVERFLOW (8th/9th) is not
   // materialized.
   const seeded = await h.stateStore.upsert({
-    project_slug: PROJECT_SLUG,
+    owner_slug: PROJECT_SLUG,
     user_id: USER_ID,
     phase: 'persona_reviewed',
     phase_state_patch: {
@@ -1023,7 +1023,7 @@ test('finalize preserves an EXPLICIT user add even when its name collides with a
   // proposal — beyond the displayed cap. The cap reconciliation must NOT drop the
   // owner's explicit add: finalized = displayed ∪ explicit-adds, so it is created.
   const seeded = await h.stateStore.upsert({
-    project_slug: PROJECT_SLUG,
+    owner_slug: PROJECT_SLUG,
     user_id: USER_ID,
     phase: 'persona_reviewed',
     phase_state_patch: {
@@ -1078,7 +1078,7 @@ test('finalize emits a General closing message + one per-project opening (items 
   }
 
   const seeded = await h.stateStore.upsert({
-    project_slug: PROJECT_SLUG,
+    owner_slug: PROJECT_SLUG,
     user_id: USER_ID,
     phase: 'persona_reviewed',
     phase_state_patch: {
@@ -1127,7 +1127,7 @@ test('no-context project opens with the HONEST prompt, not a fabricated status (
   // A thin chat-answer project: no import, no rationale → materializer flags it
   // has_context=false → the opening must ask for context, never fabricate one.
   const seeded = await h.stateStore.upsert({
-    project_slug: PROJECT_SLUG,
+    owner_slug: PROJECT_SLUG,
     user_id: USER_ID,
     phase: 'persona_reviewed',
     phase_state_patch: { user_first_name: 'Sam', primary_projects: ['Mystery Thing'] },
@@ -1152,7 +1152,7 @@ test('a project WITH import context keeps a real summary opening (not the honest
     emitChatMessage: (input): void => void emitted.push(input),
   }
   const seeded = await h.stateStore.upsert({
-    project_slug: PROJECT_SLUG,
+    owner_slug: PROJECT_SLUG,
     user_id: USER_ID,
     phase: 'persona_reviewed',
     phase_state_patch: { user_first_name: 'Sam', primary_projects: ['Topline Revenue'] },
@@ -1196,7 +1196,7 @@ test('finalize with NO projects emits an honest closing (no "I created your proj
   }
   // No primary_projects → nothing materializes.
   const seeded = await h.stateStore.upsert({
-    project_slug: PROJECT_SLUG,
+    owner_slug: PROJECT_SLUG,
     user_id: USER_ID,
     phase: 'persona_reviewed',
     phase_state_patch: { user_first_name: 'Sam', agent_name: 'Atlas', primary_projects: [] },
@@ -1219,7 +1219,7 @@ test('finalize with NO projects emits an honest closing (no "I created your proj
 test('finalize without an emitChatMessage seam still completes (no closing/opening)', async () => {
   const h = makeHarness() // deps has NO emitChatMessage
   const seeded = await h.stateStore.upsert({
-    project_slug: PROJECT_SLUG,
+    owner_slug: PROJECT_SLUG,
     user_id: USER_ID,
     phase: 'persona_reviewed',
     phase_state_patch: { primary_projects: ['Topline Revenue'] },
@@ -1239,7 +1239,7 @@ test('finalize without an emitChatMessage seam still completes (no closing/openi
 test('finalize materializes hobby/interest answers as projects (non_work_interests + inferred_interests)', async () => {
   const h = makeHarness()
   const seeded = await h.stateStore.upsert({
-    project_slug: PROJECT_SLUG,
+    owner_slug: PROJECT_SLUG,
     user_id: USER_ID,
     phase: 'persona_reviewed',
     phase_state_patch: {
@@ -1282,7 +1282,7 @@ test('finalize materializes hobby/interest answers as projects (non_work_interes
 test('finalize dedups a hobby against a same-named work project (work wins, one row)', async () => {
   const h = makeHarness()
   const seeded = await h.stateStore.upsert({
-    project_slug: PROJECT_SLUG,
+    owner_slug: PROJECT_SLUG,
     user_id: USER_ID,
     phase: 'persona_reviewed',
     phase_state_patch: {
@@ -1311,7 +1311,7 @@ test('finalize dedups a hobby against a same-named work project (work wins, one 
 test('finalize honors a dropped hobby (dropped_projects excludes the interest slug)', async () => {
   const h = makeHarness()
   const seeded = await h.stateStore.upsert({
-    project_slug: PROJECT_SLUG,
+    owner_slug: PROJECT_SLUG,
     user_id: USER_ID,
     phase: 'persona_reviewed',
     phase_state_patch: {
@@ -1364,7 +1364,7 @@ test('finalize emits the agentic kickoff body when the kickoff fires (one dedupe
   }
 
   const seeded = await h.stateStore.upsert({
-    project_slug: PROJECT_SLUG,
+    owner_slug: PROJECT_SLUG,
     user_id: USER_ID,
     phase: 'persona_reviewed',
     phase_state_patch: { primary_projects: ['Topline Revenue', 'Quiet Corner'] },

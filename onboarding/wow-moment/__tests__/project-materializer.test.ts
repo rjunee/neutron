@@ -44,7 +44,7 @@ const noopGit = async (): Promise<void> => {}
 function buildDeps(overrides: Partial<ProjectMaterializerDeps> = {}): ProjectMaterializerDeps {
   return {
     owner_home: dir,
-    project_slug: 't1',
+    owner_slug: 't1',
     db,
     now: () => 1_700_000_000_000,
     runGit: noopGit,
@@ -330,7 +330,7 @@ describe('project-materializer', () => {
           gitCalls.push(args)
         },
         indexer: async (i) => {
-          indexed.push(i.project_slug)
+          indexed.push(i.owner_slug)
         },
       }),
     )

@@ -95,7 +95,7 @@ async function startHarness(): Promise<Harness> {
     engine: {
       notifyImportUpload: async (input) => {
         engineCalls.push({
-          project_slug: input.project_slug,
+          project_slug: input.owner_slug,
           topic_id: input.topic_id,
           user_id: input.user_id,
           source: input.source,
@@ -110,7 +110,7 @@ async function startHarness(): Promise<Harness> {
         const result: AdvanceResult = {
           outcome: 'advanced',
           state: {
-            project_slug: input.project_slug,
+            project_slug: input.owner_slug,
             phase: 'import_running',
             phase_state: { import_job_id: 'job-test-001' },
             last_advanced_at: Date.now(),

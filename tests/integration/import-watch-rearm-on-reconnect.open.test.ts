@@ -109,7 +109,7 @@ async function waitFor(pred: () => boolean, timeoutMs = 20_000): Promise<void> {
 async function seedStrandedImportRow(db: ProjectDb): Promise<void> {
   const seedStore = new SqliteOnboardingStateStore({ db })
   await seedStore.upsert({
-    project_slug: 'owner',
+    owner_slug: 'owner',
     user_id: 'owner',
     phase: 'import_analysis_presented',
     phase_state_patch: {
@@ -132,7 +132,7 @@ async function seedStrandedImportRow(db: ProjectDb): Promise<void> {
 async function seedIncompleteConversationalRow(db: ProjectDb): Promise<void> {
   const seedStore = new SqliteOnboardingStateStore({ db })
   await seedStore.upsert({
-    project_slug: 'owner',
+    owner_slug: 'owner',
     user_id: 'owner',
     phase: 'work_interview_gap_fill',
     phase_state_patch: {
@@ -151,7 +151,7 @@ async function seedIncompleteConversationalRow(db: ProjectDb): Promise<void> {
 async function seedInFlightImportRow(db: ProjectDb): Promise<void> {
   const seedStore = new SqliteOnboardingStateStore({ db })
   await seedStore.upsert({
-    project_slug: 'owner',
+    owner_slug: 'owner',
     user_id: 'owner',
     phase: 'import_running',
     phase_state_patch: {
@@ -179,7 +179,7 @@ async function seedInFlightImportRow(db: ProjectDb): Promise<void> {
 async function seedStrandedCompletableRow(db: ProjectDb): Promise<void> {
   const seedStore = new SqliteOnboardingStateStore({ db })
   await seedStore.upsert({
-    project_slug: 'owner',
+    owner_slug: 'owner',
     user_id: 'owner',
     phase: 'work_interview_gap_fill',
     phase_state_patch: {

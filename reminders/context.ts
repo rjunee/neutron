@@ -39,7 +39,7 @@ export interface BuildStatusMdContextSourceInput {
  * `<owner_home>/Projects/<destination_project_id>/STATUS.md` for the
  * reminder's DESTINATION project. The destination id is derived from the
  * reminder's `topic_id` upstream (`deriveReminderProjectId`) and passed in —
- * it is NOT `reminder.project_slug` (the fixed instance/owner slug), which for
+ * it is NOT `reminder.owner_slug` (the fixed instance/owner slug), which for
  * project reminders would point at the wrong / empty STATUS.md.
  *
  * The id is sanitized (`sanitizeProjectId`) before it becomes a path segment,

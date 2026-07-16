@@ -187,7 +187,7 @@ export function createPushDispatcher(opts: PushDispatcherOptions): PushDispatche
   }
 
   async function pushReminder(reminder: Reminder): Promise<PushResult> {
-    const tokens = opts.store.listByOwner(reminder.project_slug)
+    const tokens = opts.store.listByOwner(reminder.owner_slug)
     const messages: ExpoPushMessage[] = tokens.map((t) => ({
       to: t.device_token,
       title: reminderTitle,
@@ -196,11 +196,11 @@ export function createPushDispatcher(opts: PushDispatcherOptions): PushDispatche
       data: {
         kind: 'reminder',
         reminder_id: reminder.id,
-        project_slug: reminder.project_slug,
+        project_slug: reminder.owner_slug,
         ...(reminder.topic_id !== null ? { topic_id: reminder.topic_id } : {}),
       },
     }))
-    return await dispatch(reminder.project_slug, messages)
+    return await dispatch(reminder.owner_slug, messages)
   }
   return {
     pushReminder,

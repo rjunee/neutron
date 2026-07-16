@@ -76,21 +76,21 @@ async function seedCompleted(opts: {
   // gateway_events.id when another instance starts at 1 again.
   const telemetry = new OnboardingTelemetry({ db })
   await telemetry.emit({
-    project_slug: OWNER,
+    owner_slug: OWNER,
     user_id: USER,
     event: 'signup.started',
     payload: { via: 'tg' },
     ts: opts.signup_at,
   })
   await telemetry.emit({
-    project_slug: OWNER,
+    owner_slug: OWNER,
     user_id: USER,
     event: 'onboarding.wow_dispatched',
     payload: { fired_count: 4, total_actions: 7 },
     ts: opts.completed_at - 1000,
   })
   await telemetry.emit({
-    project_slug: OWNER,
+    owner_slug: OWNER,
     user_id: USER,
     event: 'onboarding.completed',
     payload: { time_to_wow_ms: 1, total_dollars: 1, wow_actions_fired: [] },
@@ -113,7 +113,7 @@ test('cron handler fires at +4 weeks + 1 minute, emits prompt + open row', async
     now: () => now,
   })
 
-  const result = await handler({ job_name: `sean-ellis-${OWNER}`, project_slug: OWNER, fired_at: now })
+  const result = await handler({ job_name: `sean-ellis-${OWNER}`, owner_slug: OWNER, fired_at: now })
   expect(result.status).toBe('ok')
   expect(channel.emitted.length).toBe(1)
   const prompt = channel.emitted[0]?.prompt
@@ -151,7 +151,7 @@ test('handler skips before the 4-week window elapses', async () => {
     now: () => now,
   })
 
-  const result = await handler({ job_name: `sean-ellis-${OWNER}`, project_slug: OWNER, fired_at: now })
+  const result = await handler({ job_name: `sean-ellis-${OWNER}`, owner_slug: OWNER, fired_at: now })
   expect(result.status).toBe('skipped')
   expect(channel.emitted.length).toBe(0)
 })
@@ -167,7 +167,7 @@ test('handler skips when no completed onboarding exists', async () => {
     resolveContext: async () => ({ user_id: USER, topic_id: TOPIC }),
     now: () => 1,
   })
-  const result = await handler({ job_name: `sean-ellis-${OWNER}`, project_slug: OWNER, fired_at: 1 })
+  const result = await handler({ job_name: `sean-ellis-${OWNER}`, owner_slug: OWNER, fired_at: 1 })
   expect(result.status).toBe('skipped')
   expect(result.detail).toBe('no_completed_onboarding')
 })
@@ -186,8 +186,8 @@ test('idempotent: a second tick after the prompt is open does NOT re-emit', asyn
     now: () => now,
   })
 
-  await handler({ job_name: `sean-ellis-${OWNER}`, project_slug: OWNER, fired_at: now })
-  const second = await handler({ job_name: `sean-ellis-${OWNER}`, project_slug: OWNER, fired_at: now + 1000 })
+  await handler({ job_name: `sean-ellis-${OWNER}`, owner_slug: OWNER, fired_at: now })
+  const second = await handler({ job_name: `sean-ellis-${OWNER}`, owner_slug: OWNER, fired_at: now + 1000 })
   expect(second.status).toBe('skipped')
   expect(second.detail).toBe('already_emitted')
   expect(channel.emitted.length).toBe(1)
@@ -206,7 +206,7 @@ test('tap [B] freeform records response_kind + freeform_text + emits sean_ellis_
     resolveContext: async () => ({ user_id: USER, topic_id: TOPIC }),
     now: () => now,
   })
-  await handler({ job_name: `sean-ellis-${OWNER}`, project_slug: OWNER, fired_at: now })
+  await handler({ job_name: `sean-ellis-${OWNER}`, owner_slug: OWNER, fired_at: now })
 
   const store = new SeanEllisStore(db)
   const row = store.latestForOwner(OWNER)
@@ -222,7 +222,7 @@ test('tap [B] freeform records response_kind + freeform_text + emits sean_ellis_
   })
 
   const result = await collector.recordResponse({
-    project_slug: OWNER,
+    owner_slug: OWNER,
     response_id: row!.id,
     user_id: USER,
     response_kind: 'somewhat_disappointed',
@@ -258,7 +258,7 @@ test('tap [A] very_disappointed: response recorded, no markdown append', async (
     resolveContext: async () => ({ user_id: USER, topic_id: TOPIC }),
     now: () => now,
   })
-  await handler({ job_name: `sean-ellis-${OWNER}`, project_slug: OWNER, fired_at: now })
+  await handler({ job_name: `sean-ellis-${OWNER}`, owner_slug: OWNER, fired_at: now })
 
   const store = new SeanEllisStore(db)
   const row = store.latestForOwner(OWNER)!
@@ -273,7 +273,7 @@ test('tap [A] very_disappointed: response recorded, no markdown append', async (
   })
 
   const result = await collector.recordResponse({
-    project_slug: OWNER,
+    owner_slug: OWNER,
     response_id: row.id,
     user_id: USER,
     response_kind: 'very_disappointed',
@@ -287,7 +287,7 @@ test('tap [A] very_disappointed: response recorded, no markdown append', async (
 })
 
 test('buildSeanEllisJob name fits the 64-char cron-name budget for typical slugs', () => {
-  const job = buildSeanEllisJob({ project_slug: 'workspace-acme-launch-team-prod' })
+  const job = buildSeanEllisJob({ owner_slug: 'workspace-acme-launch-team-prod' })
   expect(job.name.length).toBeLessThanOrEqual(64)
   expect(job.handler).toBe('onboarding.sean_ellis_survey')
   expect(job.schedule.kind).toBe('interval_ms')
@@ -319,7 +319,7 @@ test('Codex r5 P1: handler stores the channel-delivered prompt_id, not the local
 
   await handler({
     job_name: `sean-ellis-${OWNER}`,
-    project_slug: OWNER,
+    owner_slug: OWNER,
     fired_at: completed_at + FOUR_WEEKS_MS + 60 * 1000,
   })
 
@@ -347,14 +347,14 @@ test('Codex r2 P1: multi-user project — older eligible user is surveyed even w
     [userB, oneWeekAgo],
   ] as const) {
     await telemetry.emit({
-      project_slug: OWNER_W,
+      owner_slug: OWNER_W,
       user_id,
       event: 'signup.started',
       payload: { via: 'tg' },
       ts: completed_at - 30 * 60 * 1000,
     })
     await telemetry.emit({
-      project_slug: OWNER_W,
+      owner_slug: OWNER_W,
       user_id,
       event: 'onboarding.completed',
       payload: { time_to_wow_ms: 1, total_dollars: 1, wow_actions_fired: [] },
@@ -373,7 +373,7 @@ test('Codex r2 P1: multi-user project — older eligible user is surveyed even w
 
   const result = await handler({
     job_name: `sean-ellis-${OWNER_W}`,
-    project_slug: OWNER_W,
+    owner_slug: OWNER_W,
     fired_at: now_ts,
   })
   expect(result.status).toBe('ok')
@@ -390,7 +390,7 @@ test('Codex r2 P1: multi-user project — older eligible user is surveyed even w
   // re-emit to userA.
   const second = await handler({
     job_name: `sean-ellis-${OWNER_W}`,
-    project_slug: OWNER_W,
+    owner_slug: OWNER_W,
     fired_at: now_ts + 1000,
   })
   expect(second.status).toBe('skipped')

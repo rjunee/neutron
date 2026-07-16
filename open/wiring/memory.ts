@@ -221,7 +221,7 @@ export function wireMemory(ctx: OpenWiringContext): WiredMemory {
           substrate: scribeSubstrate,
           syncHook: gbrainSyncHook,
           ownerDataDir: owner_home,
-          project_slug,
+          owner_slug: project_slug,
           budget: createState(defaultStatePath(owner_home)),
           // RB4 temporal invalidation (belief evolution) — dark behind the shared
           // perfect-recall flag. OFF → scribe stays pure-accretion (today's

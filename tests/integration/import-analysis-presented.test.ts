@@ -170,7 +170,7 @@ async function landAtImportRunning(opts: { import_result: ImportResult | null; i
   const job_id = 'job-1'
   await stateStore.upsert({
     user_id: USER,
-    project_slug: OWNER,
+    owner_slug: OWNER,
     phase: 'import_running',
     phase_state_patch: {
       topic_id: TOPIC,
@@ -185,7 +185,7 @@ async function landAtImportRunning(opts: { import_result: ImportResult | null; i
   if (opts.import_failed === true) {
     runnerResults.set(job_id, {
       job_id,
-      project_slug: OWNER,
+      owner_slug: OWNER,
       source: 'chatgpt-zip',
       status: 'failed',
       dollars_spent: 0,
@@ -200,7 +200,7 @@ async function landAtImportRunning(opts: { import_result: ImportResult | null; i
   }
   const stamped: ImportJob = {
     job_id,
-    project_slug: OWNER,
+    owner_slug: OWNER,
     source: 'chatgpt-zip',
     status: 'completed',
     dollars_spent: 1.2,
@@ -224,7 +224,7 @@ async function landAtImportRunning(opts: { import_result: ImportResult | null; i
  * `engine.start` used to funnel through.
  */
 async function pollToAnalysisPresented(engine: InterviewEngine): Promise<void> {
-  await engine.pollImportRunningTick({ project_slug: OWNER, user_id: USER, observed_at: 2 })
+  await engine.pollImportRunningTick({ owner_slug: OWNER, user_id: USER, observed_at: 2 })
 }
 
 beforeEach(() => {

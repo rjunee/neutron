@@ -115,7 +115,7 @@ function fakeClient(tickets: ExpoPushTicket[]): FakeClient {
 function makeReminder(): Reminder {
   return {
     id: 'r-after-signout',
-    project_slug: 'demo',
+    owner_slug: 'demo',
     topic_id: 'app-project:demo',
     fire_at: 1700000000,
     message: 'walk the dog',

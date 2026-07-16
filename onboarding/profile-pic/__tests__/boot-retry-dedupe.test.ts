@@ -81,7 +81,7 @@ describe('ISSUE #43 — fresh-pending dedupe in engine-hook', () => {
     // still in flight upstream.
     const seedStore = new ProfilePicPendingStore({ db, now: () => thirtySecondsAgo })
     await seedStore.recordPending({
-      project_slug: 't-43-fresh',
+      owner_slug: 't-43-fresh',
       user_id: 'u-43-fresh',
       prompt: 'in-flight gemini call',
       archetype_hint: 'krishna',
@@ -121,7 +121,7 @@ describe('ISSUE #43 — fresh-pending dedupe in engine-hook', () => {
     })
 
     const outcome = await hook.ensureCandidates({
-      project_slug: 't-43-fresh',
+      owner_slug: 't-43-fresh',
       topic_id: 'topic-43-fresh',
       user_id: 'u-43-fresh',
       agent_name: 'Nova',
@@ -150,7 +150,7 @@ describe('ISSUE #43 — fresh-pending dedupe in engine-hook', () => {
     // of the freshness window.
     const seedStore = new ProfilePicPendingStore({ db, now: () => ninetySecondsAgo })
     await seedStore.recordPending({
-      project_slug: 't-43-stale',
+      owner_slug: 't-43-stale',
       user_id: 'u-43-stale',
       prompt: 'presumed-dead call',
       archetype_hint: 'odin',
@@ -190,7 +190,7 @@ describe('ISSUE #43 — fresh-pending dedupe in engine-hook', () => {
     })
 
     const outcome = await hook.ensureCandidates({
-      project_slug: 't-43-stale',
+      owner_slug: 't-43-stale',
       topic_id: 'topic-43-stale',
       user_id: 'u-43-stale',
       agent_name: 'Nova',
@@ -215,7 +215,7 @@ describe('ISSUE #43 — fresh-pending dedupe in engine-hook', () => {
     const fixedNow = 2_000_000_000
     const seedStore = new ProfilePicPendingStore({ db, now: () => fixedNow - 5_000 })
     await seedStore.recordPending({
-      project_slug: 't-43-jid',
+      owner_slug: 't-43-jid',
       user_id: 'u-43-jid',
       prompt: 'fresh',
     })
@@ -243,7 +243,7 @@ describe('ISSUE #43 — fresh-pending dedupe in engine-hook', () => {
     })
 
     const outcome = await hook.ensureCandidates({
-      project_slug: 't-43-jid',
+      owner_slug: 't-43-jid',
       topic_id: 'topic-43-jid',
       user_id: 'u-43-jid',
       agent_name: null,
@@ -263,7 +263,7 @@ describe('ISSUE #43 — fresh-pending dedupe in engine-hook', () => {
     const fixedNow = 2_000_000_000
     const seedStore = new ProfilePicPendingStore({ db, now: () => fixedNow - 5_000 })
     await seedStore.recordPending({
-      project_slug: 't-43-tunable',
+      owner_slug: 't-43-tunable',
       user_id: 'u-43-tunable',
       prompt: 'short window',
     })
@@ -299,7 +299,7 @@ describe('ISSUE #43 — fresh-pending dedupe in engine-hook', () => {
     })
 
     const outcome = await hook.ensureCandidates({
-      project_slug: 't-43-tunable',
+      owner_slug: 't-43-tunable',
       topic_id: 'topic-43-tunable',
       user_id: 'u-43-tunable',
       agent_name: null,

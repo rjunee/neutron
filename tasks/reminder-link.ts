@@ -97,7 +97,7 @@ export async function createLinkedReminder(input: {
   const createdAt = new Date().toISOString()
   const reminder = await ctx.projectDb.transaction(async () => {
     const r = await ctx.remindersStore.create({
-      project_slug: task.project_slug,
+      owner_slug: task.project_slug,
       topic_id: task.project_id === '' ? null : `app-project:${task.project_id}`,
       fire_at: fireAt,
       message: task.title,

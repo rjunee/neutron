@@ -80,14 +80,14 @@ function importProposedCount(phase_state: Record<string, unknown>): number {
  * new table) per the brief's "make divergence observable" scope.
  */
 function logProjectFunnel(args: {
-  project_slug: string
+  owner_slug: string
   stage: string
   proposed: number
   presented: number
   confirmed: number
 }): void {
   log.info('project_funnel', {
-    project: args.project_slug,
+    project: args.owner_slug,
     stage: args.stage,
     proposed: args.proposed,
     presented: args.presented,
@@ -175,9 +175,9 @@ export async function consumeProjectsProposedChoice(
     // buttons. (When the conversational router is active it handles the
     // share-freeform reply upstream; this is the deterministic capture.)
     if (awaiting_share_freeform && choice_value === '__freeform__') {
-      self.invalidateResolvedSpec(input.project_slug, 'projects_proposed')
+      self.invalidateResolvedSpec(input.owner_slug, 'projects_proposed')
       await self.resolvePhasePromptSpec(
-        input.project_slug,
+        input.owner_slug,
         input.user_id,
         'projects_proposed',
       )
@@ -194,7 +194,7 @@ export async function consumeProjectsProposedChoice(
             "I couldn't pick out specific projects from that. Try listing one per line, or comma-separated.",
         }
         const stayed = await self.deps.stateStore.upsert({
-          project_slug: input.project_slug,
+          owner_slug: input.owner_slug,
           user_id: input.user_id,
           phase: 'projects_proposed',
           phase_state_patch: stay_patch,
@@ -207,17 +207,17 @@ export async function consumeProjectsProposedChoice(
         // spec and never renders the rejection guidance into the body
         // — the user sees the same "share your projects" body they
         // tapped through to land here.
-        self.invalidateResolvedSpec(input.project_slug, 'projects_proposed')
+        self.invalidateResolvedSpec(input.owner_slug, 'projects_proposed')
         let final_state: OnboardingState | null = null
         const emit = await self.emitPhasePrompt({
-          project_slug: input.project_slug,
+          owner_slug: input.owner_slug,
           user_id: input.user_id,
           topic_id: input.topic_id,
           phase: 'projects_proposed',
           observed_at,
           pre_send_state_upsert: async (prompt_id: string) => {
             final_state = await self.deps.stateStore.upsert({
-              project_slug: input.project_slug,
+              owner_slug: input.owner_slug,
               user_id: input.user_id,
               phase: 'projects_proposed',
               phase_state_patch: { active_prompt_id: prompt_id },
@@ -240,7 +240,7 @@ export async function consumeProjectsProposedChoice(
         projects_proposed_rejection: null,
       }
       const stayed = await self.deps.stateStore.upsert({
-        project_slug: input.project_slug,
+        owner_slug: input.owner_slug,
         user_id: input.user_id,
         phase: 'projects_proposed',
         phase_state_patch: stay_patch,
@@ -253,17 +253,17 @@ export async function consumeProjectsProposedChoice(
       // `emitPhasePrompt` re-emits the empty "share what you're
       // working on" body even though the user just listed real
       // projects.
-      self.invalidateResolvedSpec(input.project_slug, 'projects_proposed')
+      self.invalidateResolvedSpec(input.owner_slug, 'projects_proposed')
       let final_state: OnboardingState | null = null
       const emit = await self.emitPhasePrompt({
-        project_slug: input.project_slug,
+        owner_slug: input.owner_slug,
         user_id: input.user_id,
         topic_id: input.topic_id,
         phase: 'projects_proposed',
         observed_at,
         pre_send_state_upsert: async (prompt_id: string) => {
           final_state = await self.deps.stateStore.upsert({
-            project_slug: input.project_slug,
+            owner_slug: input.owner_slug,
             user_id: input.user_id,
             phase: 'projects_proposed',
             phase_state_patch: { active_prompt_id: prompt_id },
@@ -279,7 +279,7 @@ export async function consumeProjectsProposedChoice(
     }
 
     if (choice_value === PROJECTS_PROPOSED_SHARE_WORK && !awaiting_share_freeform) {
-      self.invalidateResolvedSpec(input.project_slug, 'projects_proposed')
+      self.invalidateResolvedSpec(input.owner_slug, 'projects_proposed')
       const stay_patch: Record<string, unknown> = {
         active_prompt_id: null,
         last_choice_value: choice_value,
@@ -287,7 +287,7 @@ export async function consumeProjectsProposedChoice(
         projects_proposed_rejection: null,
       }
       const stayed = await self.deps.stateStore.upsert({
-        project_slug: input.project_slug,
+        owner_slug: input.owner_slug,
         user_id: input.user_id,
         phase: 'projects_proposed',
         phase_state_patch: stay_patch,
@@ -295,14 +295,14 @@ export async function consumeProjectsProposedChoice(
       })
       let final_state: OnboardingState | null = null
       const emit = await self.emitPhasePrompt({
-        project_slug: input.project_slug,
+        owner_slug: input.owner_slug,
         user_id: input.user_id,
         topic_id: input.topic_id,
         phase: 'projects_proposed',
         observed_at,
         pre_send_state_upsert: async (prompt_id: string) => {
           final_state = await self.deps.stateStore.upsert({
-            project_slug: input.project_slug,
+            owner_slug: input.owner_slug,
             user_id: input.user_id,
             phase: 'projects_proposed',
             phase_state_patch: { active_prompt_id: prompt_id },
@@ -338,14 +338,14 @@ export async function consumeProjectsProposedChoice(
         projects_proposed_share_freeform: null,
       }
       const advanced = await self.deps.stateStore.upsert({
-        project_slug: input.project_slug,
+        owner_slug: input.owner_slug,
         user_id: input.user_id,
         phase: 'persona_synthesizing',
         phase_state_patch: advance_patch,
         advanced_at: observed_at,
       })
       let advanced_final = AUTO_SKIP_PHASES.has(advanced.phase)
-        ? await self.walkAutoSkip(input.project_slug, advanced, observed_at)
+        ? await self.walkAutoSkip(input.owner_slug, advanced, observed_at)
         : advanced
       if (advanced_final.phase === 'persona_synthesizing') {
         advanced_final = await self.synthesizePersona(input, advanced_final, observed_at)
@@ -355,14 +355,14 @@ export async function consumeProjectsProposedChoice(
       if (next_spec !== undefined && !TERMINAL_PHASES.has(next_phase_final)) {
         let final_state: OnboardingState | null = null
         const emit = await self.emitPhasePrompt({
-          project_slug: input.project_slug,
+          owner_slug: input.owner_slug,
           user_id: input.user_id,
           topic_id: input.topic_id,
           phase: next_phase_final,
           observed_at,
           pre_send_state_upsert: async (prompt_id: string) => {
             final_state = await self.deps.stateStore.upsert({
-              project_slug: input.project_slug,
+              owner_slug: input.owner_slug,
               user_id: input.user_id,
               phase: next_phase_final,
               phase_state_patch: { active_prompt_id: prompt_id },
@@ -372,7 +372,7 @@ export async function consumeProjectsProposedChoice(
         })
         if (final_state === null) {
           final_state =
-            (await self.deps.stateStore.get(input.project_slug, input.user_id)) ??
+            (await self.deps.stateStore.get(input.owner_slug, input.user_id)) ??
             advanced_final
         }
         return { outcome: 'advanced', state: final_state, prompt_id: emit.prompt_id }
@@ -394,7 +394,7 @@ export async function consumeProjectsProposedChoice(
     // observable instead of silent. `presented` is what the user could see
     // (capped at MAX_ANALYSIS_PROJECTS); `confirmed` is what we shell.
     logProjectFunnel({
-      project_slug: input.project_slug,
+      owner_slug: input.owner_slug,
       stage: 'projects_proposed_confirm',
       proposed: importProposedCount(state.phase_state as Record<string, unknown>),
       presented: Math.min(
@@ -426,14 +426,14 @@ export async function consumeProjectsProposedChoice(
       projects_proposed_rejection: null,
     }
     const advanced = await self.deps.stateStore.upsert({
-      project_slug: input.project_slug,
+      owner_slug: input.owner_slug,
       user_id: input.user_id,
       phase: 'persona_synthesizing',
       phase_state_patch: advance_patch,
       advanced_at: observed_at,
     })
     let advanced_final = AUTO_SKIP_PHASES.has(advanced.phase)
-      ? await self.walkAutoSkip(input.project_slug, advanced, observed_at)
+      ? await self.walkAutoSkip(input.owner_slug, advanced, observed_at)
       : advanced
     if (advanced_final.phase === 'persona_synthesizing') {
       advanced_final = await self.synthesizePersona(input, advanced_final, observed_at)
@@ -443,14 +443,14 @@ export async function consumeProjectsProposedChoice(
     if (next_spec !== undefined && !TERMINAL_PHASES.has(next_phase_final)) {
       let final_state: OnboardingState | null = null
       const emit = await self.emitPhasePrompt({
-        project_slug: input.project_slug,
+        owner_slug: input.owner_slug,
         user_id: input.user_id,
         topic_id: input.topic_id,
         phase: next_phase_final,
         observed_at,
         pre_send_state_upsert: async (prompt_id: string) => {
           final_state = await self.deps.stateStore.upsert({
-            project_slug: input.project_slug,
+            owner_slug: input.owner_slug,
             user_id: input.user_id,
             phase: next_phase_final,
             phase_state_patch: { active_prompt_id: prompt_id },
@@ -459,7 +459,7 @@ export async function consumeProjectsProposedChoice(
         },
       })
       if (final_state === null) {
-        final_state = (await self.deps.stateStore.get(input.project_slug, input.user_id)) ?? advanced_final
+        final_state = (await self.deps.stateStore.get(input.owner_slug, input.user_id)) ?? advanced_final
       }
       return { outcome: 'advanced', state: final_state, prompt_id: emit.prompt_id }
     }
@@ -540,17 +540,17 @@ export async function autoConfirmProjectsProposedAndAdvance(
     // The auto-confirm gate-collapse only applies when there IS a reviewed
     // list to collapse the redundant second approval on.
     if (confirmed.length === 0) {
-      self.invalidateResolvedSpec(input.project_slug, 'projects_proposed')
+      self.invalidateResolvedSpec(input.owner_slug, 'projects_proposed')
       let final_state: OnboardingState | null = null
       const emit = await self.emitPhasePrompt({
-        project_slug: input.project_slug,
+        owner_slug: input.owner_slug,
         user_id: input.user_id,
         topic_id: input.topic_id,
         phase: 'projects_proposed',
         observed_at,
         pre_send_state_upsert: async (prompt_id: string) => {
           final_state = await self.deps.stateStore.upsert({
-            project_slug: input.project_slug,
+            owner_slug: input.owner_slug,
             user_id: input.user_id,
             phase: 'projects_proposed',
             phase_state_patch: { active_prompt_id: prompt_id },
@@ -560,7 +560,7 @@ export async function autoConfirmProjectsProposedAndAdvance(
       })
       if (final_state === null) {
         final_state =
-          (await self.deps.stateStore.get(input.project_slug, input.user_id)) ?? state
+          (await self.deps.stateStore.get(input.owner_slug, input.user_id)) ?? state
       }
       return {
         outcome: 'reemitted_current',
@@ -582,7 +582,7 @@ export async function autoConfirmProjectsProposedAndAdvance(
     // `primary_projects`; with the additive-merge + extraction-prompt fixes
     // upstream it should equal the user's full named set (picks + additions).
     logProjectFunnel({
-      project_slug: input.project_slug,
+      owner_slug: input.owner_slug,
       stage: 'gate_collapse_auto_confirm',
       proposed: importProposedCount(phase_state),
       presented: Math.min(importProposedCount(phase_state), MAX_ANALYSIS_PROJECTS),
@@ -596,14 +596,14 @@ export async function autoConfirmProjectsProposedAndAdvance(
       projects_proposed_share_freeform: null,
     }
     const advanced = await self.deps.stateStore.upsert({
-      project_slug: input.project_slug,
+      owner_slug: input.owner_slug,
       user_id: input.user_id,
       phase: 'persona_synthesizing',
       phase_state_patch: advance_patch,
       advanced_at: observed_at,
     })
     let advanced_final = AUTO_SKIP_PHASES.has(advanced.phase)
-      ? await self.walkAutoSkip(input.project_slug, advanced, observed_at)
+      ? await self.walkAutoSkip(input.owner_slug, advanced, observed_at)
       : advanced
     if (advanced_final.phase === 'persona_synthesizing') {
       advanced_final = await self.synthesizePersona(input, advanced_final, observed_at)
@@ -613,14 +613,14 @@ export async function autoConfirmProjectsProposedAndAdvance(
     if (next_spec !== undefined && !TERMINAL_PHASES.has(next_phase_final)) {
       let final_state: OnboardingState | null = null
       const emit = await self.emitPhasePrompt({
-        project_slug: input.project_slug,
+        owner_slug: input.owner_slug,
         user_id: input.user_id,
         topic_id: input.topic_id,
         phase: next_phase_final,
         observed_at,
         pre_send_state_upsert: async (prompt_id: string) => {
           final_state = await self.deps.stateStore.upsert({
-            project_slug: input.project_slug,
+            owner_slug: input.owner_slug,
             user_id: input.user_id,
             phase: next_phase_final,
             phase_state_patch: { active_prompt_id: prompt_id },
@@ -629,7 +629,7 @@ export async function autoConfirmProjectsProposedAndAdvance(
         },
       })
       if (final_state === null) {
-        final_state = (await self.deps.stateStore.get(input.project_slug, input.user_id)) ?? advanced_final
+        final_state = (await self.deps.stateStore.get(input.owner_slug, input.user_id)) ?? advanced_final
       }
       return { outcome: 'advanced', state: final_state, prompt_id: emit.prompt_id }
     }

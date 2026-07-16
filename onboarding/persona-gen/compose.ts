@@ -49,7 +49,7 @@ export class PersonaError extends Error {
 }
 
 export interface PersonaDraft {
-  project_slug: string
+  owner_slug: string
   draft_id: string
   soul_md: string
   user_md: string
@@ -60,7 +60,7 @@ export interface PersonaDraft {
 }
 
 export interface ComposeInput {
-  project_slug: string
+  owner_slug: string
   /**
    * P2 v2 § 7.1 — pre-computed archetype blend. Optional: when omitted,
    * the composer derives the blend at synthesis time from
@@ -107,8 +107,8 @@ export interface PersonaComposerDeps {
   /** Filesystem writer + git commit hooks; tests inject. */
   fsWriter?: { write(path: string, content: string): Promise<void> }
   gitCommit?: (paths: ReadonlyArray<string>, message: string) => Promise<{ sha: string }>
-  /** Instance home dir resolver; defaults to <cwd>/data/<project_slug>/persona. */
-  ownerHomeFor?: (project_slug: string) => string
+  /** Instance home dir resolver; defaults to <cwd>/data/<owner_slug>/persona. */
+  ownerHomeFor?: (owner_slug: string) => string
   now?: () => number
   /**
    * P2 v2 § 0 locked decision #9 + § 7.1 — curated archetype library
@@ -207,7 +207,7 @@ export class PersonaComposer {
     }
 
     return {
-      project_slug: input.project_slug,
+      owner_slug: input.owner_slug,
       draft_id,
       soul_md: drafts.soul,
       user_md: drafts.user,
@@ -260,8 +260,8 @@ export class PersonaComposer {
       )
     }
     const home = this.deps.ownerHomeFor !== undefined
-      ? this.deps.ownerHomeFor(draft.project_slug)
-      : join(process.cwd(), 'data', draft.project_slug, 'persona')
+      ? this.deps.ownerHomeFor(draft.owner_slug)
+      : join(process.cwd(), 'data', draft.owner_slug, 'persona')
     if (!existsSync(home)) mkdirSync(home, { recursive: true })
     const paths = [
       join(home, 'SOUL.md'),

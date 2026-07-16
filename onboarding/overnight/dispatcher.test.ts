@@ -117,7 +117,7 @@ describe('window gating', () => {
     const p = makeProject('acme', { contextFiles: { 'docs/spec.md': 'spec' } })
     await queue.create({
       id: 'owk-20260619-001',
-      project_slug: 'acme',
+      owner_slug: 'acme',
       description: 'x',
       context_relpath: 'docs/spec.md',
     })
@@ -136,7 +136,7 @@ describe('item runs AS a Trident run; brief reports the REAL result', () => {
     const p = makeProject('acme', { contextFiles: { 'docs/spec.md': '# spec\nbuild the importer' } })
     await queue.create({
       id: 'owk-20260619-001',
-      project_slug: 'acme',
+      owner_slug: 'acme',
       description: 'Build the importer',
       priority: 'P1',
       context_relpath: 'docs/spec.md',
@@ -207,7 +207,7 @@ describe('item runs AS a Trident run; brief reports the REAL result', () => {
     const p = makeProject('acme', { contextFiles: { 'docs/spec.md': 'spec' } })
     await queue.create({
       id: 'owk-20260619-002',
-      project_slug: 'acme',
+      owner_slug: 'acme',
       description: 'Risky build',
       context_relpath: 'docs/spec.md',
     })
@@ -234,7 +234,7 @@ describe('item runs AS a Trident run; brief reports the REAL result', () => {
 describe('[context:] hard gate at dispatch', () => {
   test('an item with no context is rejected, not dispatched', async () => {
     const p = makeProject('acme')
-    await queue.create({ id: 'owk-20260619-010', project_slug: 'acme', description: 'no ctx' })
+    await queue.create({ id: 'owk-20260619-010', owner_slug: 'acme', description: 'no ctx' })
     const trident = new FakeTrident()
     const rejections: string[] = []
     const d = makeDispatcher(trident, [p], INSIDE_WINDOW, {
@@ -252,7 +252,7 @@ describe('[context:] hard gate at dispatch', () => {
     const p = makeProject('acme')
     await queue.create({
       id: 'owk-20260619-011',
-      project_slug: 'acme',
+      owner_slug: 'acme',
       description: 'bad ctx',
       context_relpath: 'docs/ghost.md',
     })
@@ -272,7 +272,7 @@ describe('budget + concurrency caps', () => {
     for (let i = 1; i <= 3; i++) {
       await queue.create({
         id: `owk-20260619-02${i}`,
-        project_slug: 'acme',
+        owner_slug: 'acme',
         description: `t${i}`,
         context_relpath: 'docs/spec.md',
       })
@@ -290,7 +290,7 @@ describe('budget + concurrency caps', () => {
     for (let i = 1; i <= 3; i++) {
       await queue.create({
         id: `owk-20260619-03${i}`,
-        project_slug: 'acme',
+        owner_slug: 'acme',
         description: `t${i}`,
         context_relpath: 'docs/spec.md',
       })
@@ -309,14 +309,14 @@ describe('budget + concurrency caps', () => {
     const p = makeProject('acme', { contextFiles: { 'docs/spec.md': 'spec' } })
     await queue.create({
       id: 'owk-20260619-040',
-      project_slug: 'acme',
+      owner_slug: 'acme',
       description: 'low',
       priority: 'P3',
       context_relpath: 'docs/spec.md',
     })
     await queue.create({
       id: 'owk-20260619-041',
-      project_slug: 'acme',
+      owner_slug: 'acme',
       description: 'high',
       priority: 'P1',
       context_relpath: 'docs/spec.md',
@@ -359,7 +359,7 @@ describe('real TridentRunStore seam', () => {
     const p = makeProject('acme', { contextFiles: { 'docs/spec.md': 'spec' } })
     await queue.create({
       id: 'owk-20260619-050',
-      project_slug: 'acme',
+      owner_slug: 'acme',
       description: 'real run',
       context_relpath: 'docs/spec.md',
     })

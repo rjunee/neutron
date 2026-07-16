@@ -249,7 +249,7 @@ describe('buildProfilePicEngineHook', () => {
     })
 
     const ensure = await hook.ensureCandidates({
-      project_slug: 't-22222222',
+      owner_slug: 't-22222222',
       topic_id: 'web:u-1',
       user_id: 'u-1',
       agent_name: 'Nova',
@@ -264,7 +264,7 @@ describe('buildProfilePicEngineHook', () => {
     )
 
     const commit = await hook.commitPick({
-      project_slug: 't-22222222',
+      owner_slug: 't-22222222',
       topic_id: 'web:u-1',
       user_id: 'u-1',
       job_id: ensure.job_id,
@@ -331,7 +331,7 @@ describe('buildProfilePicEngineHook', () => {
 
     const start = Date.now()
     const ensure = await hook.ensureCandidates({
-      project_slug: 't-22222222',
+      owner_slug: 't-22222222',
       topic_id: 'web:u-1',
       user_id: 'u-1',
       agent_name: 'Nova',
@@ -383,7 +383,7 @@ describe('buildProfilePicEngineHook', () => {
       wait_for_candidates: true,
     })
     const ensure = await hook.ensureCandidates({
-      project_slug: 't-22222222',
+      owner_slug: 't-22222222',
       topic_id: 'web:u-1',
       user_id: 'u-1',
       agent_name: 'Nova',

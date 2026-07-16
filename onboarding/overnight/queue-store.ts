@@ -22,7 +22,7 @@ export type OvernightStatus = 'queued' | 'in-flight' | 'completed' | 'failed'
 
 export interface OvernightItem {
   id: string
-  project_slug: string
+  owner_slug: string
   agent_role: OvernightAgentRole
   priority: OvernightPriority
   description: string
@@ -46,7 +46,7 @@ export interface OvernightItem {
 
 export interface CreateOvernightItemInput {
   id: string
-  project_slug: string
+  owner_slug: string
   description: string
   agent_role?: OvernightAgentRole
   priority?: OvernightPriority
@@ -132,7 +132,7 @@ export class OvernightQueueStore {
     const ts = input.created_at ?? this.now()
     const item: OvernightItem = {
       id: input.id,
-      project_slug: input.project_slug,
+      owner_slug: input.owner_slug,
       agent_role: input.agent_role ?? 'forge',
       priority: input.priority ?? 'P3',
       description: input.description,
@@ -153,7 +153,7 @@ export class OvernightQueueStore {
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         item.id,
-        item.project_slug,
+        item.owner_slug,
         item.agent_role,
         item.priority,
         item.description,
@@ -192,12 +192,12 @@ export class OvernightQueueStore {
       .map(rowToItem)
   }
 
-  listByProject(project_slug: string): OvernightItem[] {
+  listByProject(owner_slug: string): OvernightItem[] {
     return this.db
       .prepare<OvernightItemDbRow, [string]>(
         `SELECT ${COLS} FROM overnight_queue WHERE project_slug = ? ORDER BY created_at ASC`,
       )
-      .all(project_slug)
+      .all(owner_slug)
       .map(rowToItem)
   }
 
@@ -277,7 +277,7 @@ export class OvernightQueueStore {
 function rowToItem(row: OvernightItemDbRow): OvernightItem {
   return {
     id: row.id,
-    project_slug: row.project_slug,
+    owner_slug: row.project_slug,
     agent_role: row.agent_role,
     priority: row.priority,
     description: row.description,

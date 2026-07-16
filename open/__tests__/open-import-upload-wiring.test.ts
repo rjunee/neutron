@@ -208,7 +208,7 @@ describe('Open import-upload surface wiring', () => {
     // stub of the outcome.
     const stateStore = new SqliteOnboardingStateStore({ db: harness.db })
     await stateStore.upsert({
-      project_slug: 'owner',
+      owner_slug: 'owner',
       user_id: 'owner',
       phase: 'import_upload_pending',
       phase_state_patch: {

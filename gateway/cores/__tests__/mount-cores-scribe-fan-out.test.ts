@@ -75,7 +75,7 @@ function makeScribe(
     substrate: cannedSubstrate(JSON.stringify(extraction)),
     syncHook: noopSyncHook,
     ownerDataDir: owner_home,
-    project_slug: 'acme',
+    owner_slug: 'acme',
     budget: createState(join(owner_home, '.scribe-budget.json'), t0),
     writeEntity,
     now: () => t0,

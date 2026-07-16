@@ -64,7 +64,7 @@ const action04: WowActionModule = {
       ],
       allow_freeform: false,
       idempotency: {
-        project_slug: ctx.project_slug,
+        project_slug: ctx.owner_slug,
         topic_id: ctx.topic_id,
         seed: `wow:04:${redactTitle(task.title)}`,
       },
@@ -117,7 +117,7 @@ function overdueFromStore(
   const store = ctx.task_store
   if (store === undefined) return []
   const rows: Task[] = store.list({
-    project_slug: ctx.project_slug,
+    project_slug: ctx.owner_slug,
     status: 'open',
     order: 'focus_score',
     limit: 8,

@@ -127,7 +127,7 @@ export async function consumeAgentNameChosenChoice(
     const validation = candidate === null ? null : validateAgentName(candidate)
 
     if (validation === null || !validation.ok) {
-      self.invalidateResolvedSpec(input.project_slug, 'agent_name_chosen')
+      self.invalidateResolvedSpec(input.owner_slug, 'agent_name_chosen')
       const reason =
         validation === null
           ? "I need a name — try something like Sage, Vera, or Atlas."
@@ -143,7 +143,7 @@ export async function consumeAgentNameChosenChoice(
         agent_name_chosen_attempt_count: next_attempts,
       }
       const stayed = await self.deps.stateStore.upsert({
-        project_slug: input.project_slug,
+        owner_slug: input.owner_slug,
         user_id: input.user_id,
         phase: 'agent_name_chosen',
         phase_state_patch: stay_patch,
@@ -151,7 +151,7 @@ export async function consumeAgentNameChosenChoice(
       })
       let final_state: OnboardingState | null = null
       const emit = await self.emitPhasePrompt({
-        project_slug: input.project_slug,
+        owner_slug: input.owner_slug,
         user_id: input.user_id,
         topic_id: input.topic_id,
         phase: 'agent_name_chosen',
@@ -159,7 +159,7 @@ export async function consumeAgentNameChosenChoice(
         seed_suffix: `attempt=${next_attempts}`,
         pre_send_state_upsert: async (prompt_id: string) => {
           final_state = await self.deps.stateStore.upsert({
-            project_slug: input.project_slug,
+            owner_slug: input.owner_slug,
             user_id: input.user_id,
             phase: 'agent_name_chosen',
             phase_state_patch: { active_prompt_id: prompt_id },
@@ -188,12 +188,12 @@ export async function consumeAgentNameChosenChoice(
       if (self.deps.personaSync !== undefined) {
         try {
           await self.deps.personaSync.recordAgentName({
-            project_slug: input.project_slug,
+            owner_slug: input.owner_slug,
             agent_name,
           })
         } catch (err) {
           log.warn('persona_sync_record_agent_name_failed', {
-            project: input.project_slug,
+            project: input.owner_slug,
             error: err instanceof Error ? err.message : String(err),
           })
         }
@@ -217,7 +217,7 @@ export async function consumeAgentNameChosenChoice(
         // not in the open sequence.
       }
       const open_advanced = await self.deps.stateStore.upsert({
-        project_slug: input.project_slug,
+        owner_slug: input.owner_slug,
         user_id: input.user_id,
         phase: 'projects_proposed',
         phase_state_patch: open_advance_patch,
@@ -249,7 +249,7 @@ export async function consumeAgentNameChosenChoice(
     // and persist it so resolver + handler agree.
     const user_first_name_for_slug = readString(state.phase_state, 'user_first_name')
     const computed = self.computeSlugSuggestionsForPhase({
-      project_slug: input.project_slug,
+      owner_slug: input.owner_slug,
       agent_name,
       user_first_name: user_first_name_for_slug,
     })
@@ -259,12 +259,12 @@ export async function consumeAgentNameChosenChoice(
     if (self.deps.personaSync !== undefined) {
       try {
         await self.deps.personaSync.recordAgentName({
-          project_slug: input.project_slug,
+          owner_slug: input.owner_slug,
           agent_name,
         })
       } catch (err) {
         log.warn('persona_sync_record_agent_name_failed', {
-          project: input.project_slug,
+          project: input.owner_slug,
           error: err instanceof Error ? err.message : String(err),
         })
       }
@@ -289,7 +289,7 @@ export async function consumeAgentNameChosenChoice(
       slug_picker_rejection: null,
     }
     const advanced = await self.deps.stateStore.upsert({
-      project_slug: input.project_slug,
+      owner_slug: input.owner_slug,
       user_id: input.user_id,
       phase: 'slug_chosen',
       phase_state_patch: advance_patch,
@@ -297,14 +297,14 @@ export async function consumeAgentNameChosenChoice(
     })
     let final_state: OnboardingState | null = null
     const emit = await self.emitPhasePrompt({
-      project_slug: input.project_slug,
+      owner_slug: input.owner_slug,
       user_id: input.user_id,
       topic_id: input.topic_id,
       phase: 'slug_chosen',
       observed_at,
       pre_send_state_upsert: async (prompt_id: string) => {
         final_state = await self.deps.stateStore.upsert({
-          project_slug: input.project_slug,
+          owner_slug: input.owner_slug,
           user_id: input.user_id,
           phase: 'slug_chosen',
           phase_state_patch: { active_prompt_id: prompt_id },
@@ -313,7 +313,7 @@ export async function consumeAgentNameChosenChoice(
       },
     })
     if (final_state === null) {
-      final_state = (await self.deps.stateStore.get(input.project_slug, input.user_id)) ?? advanced
+      final_state = (await self.deps.stateStore.get(input.owner_slug, input.user_id)) ?? advanced
     }
     return { outcome: 'advanced', state: final_state, prompt_id: emit.prompt_id }
   }
@@ -335,7 +335,7 @@ export async function consumeAgentNameChosenChoice(
  */
 export function getOrStartCharacterSuggestions(
   self: EngineInternals,
-    project_slug: string,
+    owner_slug: string,
     user_id: string,
     phase_state: Record<string, unknown>,
   ): Promise<CharacterSuggesterResult> | null {
@@ -348,7 +348,7 @@ export function getOrStartCharacterSuggestions(
       user_supplied_corrections:
         readStringArray(phase_state, 'user_supplied_corrections') ?? [],
       // Per-instance seed diversifies the static fallback deterministically.
-      seed: project_slug,
+      seed: owner_slug,
     }
     // Fingerprint the SIGNAL fields so a later work-interview turn that adds
     // a signal supersedes an earlier partial-signal pre-compute (Codex P2)
@@ -359,14 +359,14 @@ export function getOrStartCharacterSuggestions(
       input.non_work_interests,
       input.user_supplied_corrections,
     ])
-    const key = self.suggestionKeyPrefix(project_slug, user_id) + fp
+    const key = self.suggestionKeyPrefix(owner_slug, user_id) + fp
     const existing = self.pendingCharacterSuggestions.get(key)
     if (existing !== undefined) return existing
     // Signals changed → evict the superseded-fingerprint entry(ies) for this
     // instance/user so the warm cache holds at most one (the latest).
     self.clearPendingSuggestions(
       self.pendingCharacterSuggestions as Map<string, Promise<unknown>>,
-      project_slug,
+      owner_slug,
       user_id,
     )
     const p = (async (): Promise<CharacterSuggesterResult> => {
@@ -374,12 +374,12 @@ export function getOrStartCharacterSuggestions(
         return await suggester.generate(input)
       } catch (err) {
         log.warn('character_suggester_generate_failed', {
-          project: project_slug,
+          project: owner_slug,
           error: err instanceof Error ? err.message : String(err),
         })
         return {
           suggestions: cloneCharacterSuggestions(
-            buildDiverseCharacterFallback(project_slug),
+            buildDiverseCharacterFallback(owner_slug),
           ),
           source: 'fallback',
         }
@@ -414,7 +414,7 @@ export function getOrStartCharacterSuggestions(
  *  contract — persistence is foreground-only). */
 export function getOrStartAgentNameSuggestions(
   self: EngineInternals,
-    project_slug: string,
+    owner_slug: string,
     user_id: string,
     phase_state: Record<string, unknown>,
   ): Promise<AgentNameSuggesterResult> | null {
@@ -426,7 +426,7 @@ export function getOrStartAgentNameSuggestions(
       non_work_interests: readStringArray(phase_state, 'non_work_interests') ?? [],
       agent_personality: readString(phase_state, 'agent_personality'),
       archetypes: readStringArray(phase_state, 'archetypes') ?? [],
-      seed: project_slug,
+      seed: owner_slug,
     }
     // Fingerprint includes the chosen personality + work signals so a
     // re-pick (or added signal) supersedes a stale pre-compute (Codex P2).
@@ -437,12 +437,12 @@ export function getOrStartAgentNameSuggestions(
       input.non_work_interests,
       input.archetypes,
     ])
-    const key = self.suggestionKeyPrefix(project_slug, user_id) + fp
+    const key = self.suggestionKeyPrefix(owner_slug, user_id) + fp
     const existing = self.pendingAgentNameSuggestions.get(key)
     if (existing !== undefined) return existing
     self.clearPendingSuggestions(
       self.pendingAgentNameSuggestions as Map<string, Promise<unknown>>,
-      project_slug,
+      owner_slug,
       user_id,
     )
     const p = (async (): Promise<AgentNameSuggesterResult> => {
@@ -450,12 +450,12 @@ export function getOrStartAgentNameSuggestions(
         return await suggester.generate(input)
       } catch (err) {
         log.warn('agent_name_suggester_generate_failed', {
-          project: project_slug,
+          project: owner_slug,
           error: err instanceof Error ? err.message : String(err),
         })
         return {
           suggestions: cloneAgentNameSuggestions(
-            buildDiverseAgentNameFallback(project_slug),
+            buildDiverseAgentNameFallback(owner_slug),
           ),
           source: 'fallback',
         }
@@ -507,8 +507,8 @@ export function suggestionFingerprint(
 
 export function suggestionKeyPrefix(
   self: EngineInternals,
-  project_slug: string,
+  owner_slug: string,
   user_id: string,
 ): string {
-    return `${project_slug}::${user_id}::`
+    return `${owner_slug}::${user_id}::`
   }

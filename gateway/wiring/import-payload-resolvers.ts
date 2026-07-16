@@ -45,7 +45,7 @@ export type DnsLookupAll = (
 export class FilesystemImportPayloadResolver implements ImportPayloadResolver {
   constructor(private readonly owner_home: string) {}
 
-  async resolve(input: { project_slug: string; user_id: string; source: ImportSource }) {
+  async resolve(input: { owner_slug: string; user_id: string; source: ImportSource }) {
     const filename = filenameFor(input.source)
     if (filename === null) return null
     const path = join(this.owner_home, 'imports', filename)
@@ -77,7 +77,7 @@ export class UrlPasteImportPayloadResolver implements ImportPayloadResolver {
   private static readonly MAX_BYTES = 256 * 1024 * 1024 // 256 MB
   constructor(
     private readonly stateLookup: (input: {
-      project_slug: string
+      owner_slug: string
       /** ISSUES #2 (2026-05-19) — second PK component. */
       user_id: string
       source: ImportSource
@@ -87,7 +87,7 @@ export class UrlPasteImportPayloadResolver implements ImportPayloadResolver {
       dnsLookupDefault(host, { all: true }),
   ) {}
 
-  async resolve(input: { project_slug: string; user_id: string; source: ImportSource }) {
+  async resolve(input: { owner_slug: string; user_id: string; source: ImportSource }) {
     const url = await this.stateLookup(input)
     if (url === null || url.length === 0) return null
     let parsed: URL
@@ -244,7 +244,7 @@ function isPrivateOrInternalHost(hostname: string): boolean {
 export class ChainedImportPayloadResolver implements ImportPayloadResolver {
   constructor(private readonly chain: ReadonlyArray<ImportPayloadResolver>) {}
 
-  async resolve(input: { project_slug: string; user_id: string; source: ImportSource }) {
+  async resolve(input: { owner_slug: string; user_id: string; source: ImportSource }) {
     for (const r of this.chain) {
       const v = await r.resolve(input)
       if (v !== null) return v
@@ -266,7 +266,7 @@ export type { Pass1ChunkResult }
  * two surfaces agree byte-for-byte on what's resumable:
  *
  *   1. SELECT `status, source` from `import_jobs` WHERE (job_id,
- *      project_slug). When the row is absent OR status is NOT in
+ *      owner_slug). When the row is absent OR status is NOT in
  *      `{cancelled, rate_limit_paused, failed}`, the probe returns
  *      false (no button).
  *   2. For `*-zip` sources, also verify the source ZIP exists at
@@ -280,7 +280,7 @@ export type { Pass1ChunkResult }
 export interface BuildImportResumeReadinessProbeInput {
   db: ProjectDb
   owner_home: string
-  project_slug: string
+  owner_slug: string
   /** Test seam: `existsSync` shim. Defaults to `node:fs.existsSync`. */
   fs?: { existsSync: (p: string) => boolean }
 }
@@ -298,7 +298,7 @@ export function buildImportResumeReadinessProbe(
             `SELECT status, source FROM import_jobs
               WHERE job_id = ? AND project_slug = ?
               LIMIT 1`,
-            [probeInput.job_id, input.project_slug],
+            [probeInput.job_id, input.owner_slug],
           )
       } catch {
         return false

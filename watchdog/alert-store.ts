@@ -12,6 +12,8 @@ import type { WatchdogAlert, WatchdogKind } from './types.ts'
 interface RawAlertRow {
   id: string
   kind: string
+  // SQL column name remains `project_slug`; value is the owner/instance slug
+  // (N4: TS-side domain identifiers are `owner_slug`, the frozen column is not).
   project_slug: string
   detected_at: number
   resolved_at: number | null
@@ -38,7 +40,7 @@ export class AlertStore {
       [
         alert.id,
         alert.kind,
-        alert.project_slug,
+        alert.owner_slug,
         alert.detected_at,
         alert.resolved_at,
         JSON.stringify(alert.payload),
@@ -53,7 +55,7 @@ export class AlertStore {
     )
   }
 
-  listOpen(project_slug: string): WatchdogAlert[] {
+  listOpen(owner_slug: string): WatchdogAlert[] {
     return this.db
       .prepare<RawAlertRow, [string]>(
         `SELECT id, kind, project_slug, detected_at, resolved_at, payload_json
@@ -61,12 +63,12 @@ export class AlertStore {
           WHERE project_slug = ? AND resolved_at IS NULL
           ORDER BY detected_at ASC`,
       )
-      .all(project_slug)
+      .all(owner_slug)
       .map(rowToAlert)
   }
 
   /** Snapshot of all alerts (open + resolved), for tests + observability. */
-  listAll(project_slug: string): WatchdogAlert[] {
+  listAll(owner_slug: string): WatchdogAlert[] {
     return this.db
       .prepare<RawAlertRow, [string]>(
         `SELECT id, kind, project_slug, detected_at, resolved_at, payload_json
@@ -74,7 +76,7 @@ export class AlertStore {
           WHERE project_slug = ?
           ORDER BY detected_at ASC`,
       )
-      .all(project_slug)
+      .all(owner_slug)
       .map(rowToAlert)
   }
 }
@@ -83,7 +85,7 @@ function rowToAlert(r: RawAlertRow): WatchdogAlert {
   return {
     id: r.id,
     kind: r.kind as WatchdogKind,
-    project_slug: r.project_slug,
+    owner_slug: r.project_slug,
     detected_at: r.detected_at,
     resolved_at: r.resolved_at,
     payload: parseJsonColumn(r.payload_json, { onCorrupt: 'throw' }) as Record<string, unknown>,

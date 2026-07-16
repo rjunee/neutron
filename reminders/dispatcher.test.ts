@@ -13,7 +13,7 @@ import type { Reminder } from './store.ts'
 function makeReminder(over: Partial<Reminder> = {}): Reminder {
   return {
     id: 'r1',
-    project_slug: 'proj',
+    owner_slug: 'proj',
     topic_id: 'topic-1',
     fire_at: 1_700_000_000,
     message: 'take out the trash',
@@ -62,7 +62,7 @@ describe('buildReminderDispatcher — composition + post', () => {
 
     expect(llm.specs[0]!.prompt).toContain('water the office plants')
     // Metered to the DESTINATION project derived from topic_id, not the
-    // instance project_slug ('proj'). Default makeReminder's raw topic_id
+    // instance owner_slug ('proj'). Default makeReminder's raw topic_id
     // ('topic-1') IS the destination project id (Reminders Core shape).
     expect(llm.specs[0]!.metering_context?.project_id).toBe('topic-1')
   })
@@ -179,7 +179,7 @@ describe('buildReminderDispatcher — composition + post', () => {
 
   // BLOCKING fix (Argus PR #7) — a PROJECT reminder gathers context for AND
   // meters to its DESTINATION project (encoded in topic_id), not the fixed
-  // instance project_slug.
+  // instance owner_slug.
   test('project reminder gathers context + meters by the topic_id project, not project_slug', async () => {
     const outbound = recordingOutbound()
     const llm = recordingLlm('composed')
@@ -189,16 +189,16 @@ describe('buildReminderDispatcher — composition + post', () => {
       llm,
       context: {
         gather: (reminder, project_id) => {
-          gathered.push({ slug: reminder.project_slug, project_id })
+          gathered.push({ slug: reminder.owner_slug, project_id })
           return `ctx for ${project_id}`
         },
       },
     })
 
-    // App-surface shape: project_slug is the instance, topic_id carries the
+    // App-surface shape: owner_slug is the instance, topic_id carries the
     // destination project as `app-project:<project_id>`.
     await d.dispatch(
-      makeReminder({ project_slug: 'owner-instance', topic_id: 'app-project:acme-app' }),
+      makeReminder({ owner_slug: 'owner-instance', topic_id: 'app-project:acme-app' }),
     )
 
     // Context source saw the destination project id, not the instance slug...
@@ -218,7 +218,7 @@ describe('buildReminderDispatcher — composition + post', () => {
       context: { gather: (_r, project_id) => { gathered.push(project_id); return '' } },
     })
 
-    await d.dispatch(makeReminder({ project_slug: 'home-instance', topic_id: null }))
+    await d.dispatch(makeReminder({ owner_slug: 'home-instance', topic_id: null }))
 
     expect(gathered).toEqual(['home-instance'])
     expect(llm.specs[0]!.metering_context?.project_id).toBe('home-instance')
@@ -242,7 +242,7 @@ describe('buildReminderDispatcher — composition + post', () => {
 describe('deriveReminderProjectId', () => {
   const base: Reminder = {
     id: 'r',
-    project_slug: 'instance-slug',
+    owner_slug: 'instance-slug',
     topic_id: null,
     fire_at: 0,
     message: 'm',

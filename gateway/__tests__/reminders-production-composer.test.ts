@@ -178,7 +178,7 @@ async function seedReminder(
   fire_at_offset_seconds: number = 3600,
 ): Promise<{ id: string }> {
   const created = await store.create({
-    project_slug: OWNER,
+    owner_slug: OWNER,
     topic_id: appProjectTopicId(PROJECT),
     fire_at: Math.floor(Date.now() / 1000) + fire_at_offset_seconds,
     message,
@@ -383,7 +383,7 @@ test('convert-to-task returns 501 not_implemented when adapter is unwired (sanit
     })
     try {
       const created = await store.create({
-        project_slug: OWNER,
+        owner_slug: OWNER,
         topic_id: appProjectTopicId(PROJECT),
         fire_at: Math.floor(Date.now() / 1000) + 3600,
         message: 'noop',

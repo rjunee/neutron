@@ -65,7 +65,7 @@ export function buildInstanceDiagnosticsSources(
     // Filter to THIS instance's slug — `list()` returns every project's rows
     // (cron_state is keyed by (job, project)); the sibling import/event sources
     // filter the same way, and the owner-gated endpoint is instance-scoped.
-    cronJobs: () => cronStore.list().filter((r) => r.project_slug === project_slug),
+    cronJobs: () => cronStore.list().filter((r) => r.owner_slug === project_slug),
     importJobs: () =>
       db.all<ImportRowish>(
         `SELECT job_id, source, status, started_at, completed_at, error_code, error_message

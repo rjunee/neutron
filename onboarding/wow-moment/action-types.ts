@@ -119,7 +119,7 @@ export interface GmailDraftClient {
  */
 export interface BriefSubstrate {
   composeBrief(input: {
-    project_slug: string
+    owner_slug: string
     interview: WowInterviewState
     import_result: ImportResult | null
   }): Promise<{ body: string; tokens_used: number }>
@@ -130,7 +130,7 @@ export interface BriefSubstrate {
  * `run`. The action-runner builds this from the dispatcher's signals.
  */
 export interface WowActionContext {
-  project_slug: string
+  owner_slug: string
   topic_id: string
   /** Per-instance home dir (where persona files + cron state live). */
   owner_home: string

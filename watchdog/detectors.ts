@@ -26,7 +26,7 @@ import { IncidentEdgeTracker } from './incident.ts'
 import type { WatchdogAlert, WatchdogDetector, WatchdogKind } from './types.ts'
 
 export interface CommonDetectorOptions {
-  project_slug: string
+  owner_slug: string
   now?: () => number
 }
 
@@ -58,7 +58,7 @@ export interface HeartbeatDetectorOptions extends CommonDetectorOptions {
 export class HeartbeatDetector implements WatchdogDetector {
   readonly kind: WatchdogKind = 'gateway_heartbeat'
   private readonly tracker: HeartbeatTracker
-  private readonly project_slug: string
+  private readonly owner_slug: string
   private readonly now: () => number
   private readonly threshold_ms: number
   private readonly incidents = new IncidentEdgeTracker()
@@ -72,7 +72,7 @@ export class HeartbeatDetector implements WatchdogDetector {
 
   constructor(opts: HeartbeatDetectorOptions) {
     this.tracker = opts.tracker
-    this.project_slug = opts.project_slug
+    this.owner_slug = opts.owner_slug
     this.now = opts.now ?? Date.now
     this.threshold_ms = opts.threshold_ms ?? 30_000
   }
@@ -83,13 +83,13 @@ export class HeartbeatDetector implements WatchdogDetector {
     const firing = last !== null && now - last > this.threshold_ms
     // Incident-edge: fire ONCE while the heartbeat stays stale, and again only
     // after it recovers then goes stale anew (Blocker-1 fix).
-    const risen = this.incidents.candidates(firing ? [this.project_slug] : [], (key) =>
+    const risen = this.incidents.candidates(firing ? [this.owner_slug] : [], (key) =>
       newAlertId(this.kind, key, now),
     )
     return risen.map(({ id }) => ({
       id,
       kind: this.kind,
-      project_slug: this.project_slug,
+      owner_slug: this.owner_slug,
       detected_at: now / 1000,
       resolved_at: null,
       payload: { last_heartbeat_at: last, age_ms: last === null ? 0 : now - last },
@@ -110,7 +110,7 @@ export interface StuckAgentDetectorOptions extends CommonDetectorOptions {
 export class StuckAgentDetector implements WatchdogDetector {
   readonly kind: WatchdogKind = 'stuck_agent'
   private readonly registry: ProcessRegistry
-  private readonly project_slug: string
+  private readonly owner_slug: string
   private readonly now: () => number
   private readonly threshold_ms: number
   private readonly incidents = new IncidentEdgeTracker()
@@ -124,7 +124,7 @@ export class StuckAgentDetector implements WatchdogDetector {
 
   constructor(opts: StuckAgentDetectorOptions) {
     this.registry = opts.process_registry
-    this.project_slug = opts.project_slug
+    this.owner_slug = opts.owner_slug
     this.now = opts.now ?? Date.now
     this.threshold_ms = opts.inactivity_threshold_ms ?? 15 * 60_000
   }
@@ -143,7 +143,7 @@ export class StuckAgentDetector implements WatchdogDetector {
       return {
         id,
         kind: this.kind,
-        project_slug: this.project_slug,
+        owner_slug: this.owner_slug,
         detected_at: now / 1000,
         resolved_at: null,
         payload: {
@@ -188,14 +188,14 @@ export interface CrashedAgentDetectorOptions extends CommonDetectorOptions {
 export class CrashedAgentDetector implements WatchdogDetector {
   readonly kind: WatchdogKind = 'crashed_agent'
   private readonly registry: ProcessRegistry
-  private readonly project_slug: string
+  private readonly owner_slug: string
   private readonly now: () => number
   private readonly probe: PidLivenessProbe
   private readonly incidents = new IncidentEdgeTracker()
 
   constructor(opts: CrashedAgentDetectorOptions) {
     this.registry = opts.process_registry
-    this.project_slug = opts.project_slug
+    this.owner_slug = opts.owner_slug
     this.now = opts.now ?? Date.now
     this.probe = opts.pid_probe ?? DefaultPidLivenessProbe
   }
@@ -234,7 +234,7 @@ export class CrashedAgentDetector implements WatchdogDetector {
       return {
         id,
         kind: this.kind,
-        project_slug: this.project_slug,
+        owner_slug: this.owner_slug,
         detected_at: now / 1000,
         resolved_at: null,
         payload: {
@@ -284,7 +284,7 @@ export class OverrunCronDetector implements WatchdogDetector {
   readonly kind: WatchdogKind = 'overrun_cron'
   private readonly jobs: CronJobRegistry
   private readonly state: CronStateStore
-  private readonly project_slug: string
+  private readonly owner_slug: string
   private readonly now: () => number
   private readonly default_expected_ms: number
   private readonly incidents = new IncidentEdgeTracker()
@@ -299,7 +299,7 @@ export class OverrunCronDetector implements WatchdogDetector {
   constructor(opts: OverrunCronDetectorOptions) {
     this.jobs = opts.jobs
     this.state = opts.state
-    this.project_slug = opts.project_slug
+    this.owner_slug = opts.owner_slug
     this.now = opts.now ?? Date.now
     this.default_expected_ms = opts.default_expected_ms ?? 10 * 60_000
   }
@@ -308,7 +308,7 @@ export class OverrunCronDetector implements WatchdogDetector {
     const now = this.now()
     const payloads = new Map<string, Record<string, unknown>>()
     for (const job of this.jobs.list()) {
-      const state = this.state.get(job.name, this.project_slug)
+      const state = this.state.get(job.name, this.owner_slug)
       if (!state || state.last_run_duration_ms === null) continue
       const expected = job.expected_duration_ms ?? this.default_expected_ms
       if (state.last_run_duration_ms <= expected) continue
@@ -330,7 +330,7 @@ export class OverrunCronDetector implements WatchdogDetector {
     return risen.map(({ key, id }) => ({
       id,
       kind: this.kind,
-      project_slug: this.project_slug,
+      owner_slug: this.owner_slug,
       detected_at: now / 1000,
       resolved_at: null,
       payload: payloads.get(key)!,
@@ -362,7 +362,7 @@ export interface DbLockDetectorOptions extends CommonDetectorOptions {
 export class DbLockContentionDetector implements WatchdogDetector {
   readonly kind: WatchdogKind = 'db_lock_contention'
   private readonly counter: BusyRetryCounter
-  private readonly project_slug: string
+  private readonly owner_slug: string
   private readonly now: () => number
   private readonly window_ms: number
   private readonly threshold: number
@@ -378,7 +378,7 @@ export class DbLockContentionDetector implements WatchdogDetector {
 
   constructor(opts: DbLockDetectorOptions) {
     this.counter = opts.counter
-    this.project_slug = opts.project_slug
+    this.owner_slug = opts.owner_slug
     this.now = opts.now ?? Date.now
     this.window_ms = opts.window_ms ?? 60_000
     this.threshold = opts.threshold_per_window ?? 5
@@ -410,13 +410,13 @@ export class DbLockContentionDetector implements WatchdogDetector {
     // Incident-edge: sustained contention keeps `delta` at/over threshold across
     // ticks — fire once per contention incident, re-fire only after it subsides
     // below threshold and crosses again (Blocker-1 fix).
-    const risen = this.incidents.candidates(firing ? [this.project_slug] : [], (key) =>
+    const risen = this.incidents.candidates(firing ? [this.owner_slug] : [], (key) =>
       newAlertId(this.kind, key, now),
     )
     return risen.map(({ id }) => ({
       id,
       kind: this.kind,
-      project_slug: this.project_slug,
+      owner_slug: this.owner_slug,
       detected_at: now / 1000,
       resolved_at: null,
       payload: {
@@ -441,7 +441,7 @@ export interface SubstrateCooldownDetectorOptions extends CommonDetectorOptions 
 export class SubstrateCooldownDetector implements WatchdogDetector {
   readonly kind: WatchdogKind = 'substrate_cooldown_saturation'
   private readonly pool: CredentialPool
-  private readonly project_slug: string
+  private readonly owner_slug: string
   private readonly substrate_kind: string
   private readonly now: () => number
   private readonly incidents = new IncidentEdgeTracker()
@@ -455,7 +455,7 @@ export class SubstrateCooldownDetector implements WatchdogDetector {
 
   constructor(opts: SubstrateCooldownDetectorOptions) {
     this.pool = opts.pool
-    this.project_slug = opts.project_slug
+    this.owner_slug = opts.owner_slug
     this.substrate_kind = opts.substrate_kind
     this.now = opts.now ?? Date.now
   }
@@ -476,7 +476,7 @@ export class SubstrateCooldownDetector implements WatchdogDetector {
     return risen.map(({ id }) => ({
       id,
       kind: this.kind,
-      project_slug: this.project_slug,
+      owner_slug: this.owner_slug,
       detected_at: now / 1000,
       resolved_at: null,
       payload: {

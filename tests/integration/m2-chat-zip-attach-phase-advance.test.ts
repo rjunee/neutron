@@ -146,13 +146,13 @@ describe('M2 chat-upload UX — engine ZIP attach phase contract', () => {
   test('user in import_upload_pending + ZIP upload → advances to import_running', async () => {
     await env.stateStore.upsert({
       user_id: USER,
-      project_slug: OWNER,
+      owner_slug: OWNER,
       phase: 'import_upload_pending',
       phase_state_patch: { ai_substrate_used: 'chatgpt' },
       advanced_at: 1,
     })
     const result = await env.engine.notifyImportUpload({
-      project_slug: OWNER,
+      owner_slug: OWNER,
       topic_id: TOPIC,
       user_id: USER,
       channel_kind: 'app_socket',
@@ -170,13 +170,13 @@ describe('M2 chat-upload UX — engine ZIP attach phase contract', () => {
   test('user in ai_substrate_offered + ZIP upload with NO recorded substrate → no_active_prompt + visible notice (no silent drop)', async () => {
     await env.stateStore.upsert({
       user_id: USER,
-      project_slug: OWNER,
+      owner_slug: OWNER,
       phase: 'ai_substrate_offered',
       phase_state_patch: {},
       advanced_at: 1,
     })
     const result = await env.engine.notifyImportUpload({
-      project_slug: OWNER,
+      owner_slug: OWNER,
       topic_id: TOPIC,
       user_id: USER,
       channel_kind: 'app_socket',
@@ -202,13 +202,13 @@ describe('M2 chat-upload UX — engine ZIP attach phase contract', () => {
     // POST now completes and lands here.
     await env.stateStore.upsert({
       user_id: USER,
-      project_slug: OWNER,
+      owner_slug: OWNER,
       phase: 'ai_substrate_offered',
       phase_state_patch: { ai_substrate_used: 'chatgpt' },
       advanced_at: 1,
     })
     const result = await env.engine.notifyImportUpload({
-      project_slug: OWNER,
+      owner_slug: OWNER,
       topic_id: TOPIC,
       user_id: USER,
       channel_kind: 'app_socket',
@@ -227,13 +227,13 @@ describe('M2 chat-upload UX — engine ZIP attach phase contract', () => {
     // silently import the stale source — and must NOT silently drop it.
     await env.stateStore.upsert({
       user_id: USER,
-      project_slug: OWNER,
+      owner_slug: OWNER,
       phase: 'ai_substrate_offered',
       phase_state_patch: { ai_substrate_used: 'claude' },
       advanced_at: 1,
     })
     const result = await env.engine.notifyImportUpload({
-      project_slug: OWNER,
+      owner_slug: OWNER,
       topic_id: TOPIC,
       user_id: USER,
       channel_kind: 'app_socket',
@@ -259,13 +259,13 @@ describe('M2 chat-upload UX — engine ZIP attach phase contract', () => {
     env = buildEnv({ resolverReturnsNull: true })
     await env.stateStore.upsert({
       user_id: USER,
-      project_slug: OWNER,
+      owner_slug: OWNER,
       phase: 'import_upload_pending',
       phase_state_patch: { ai_substrate_used: 'chatgpt' },
       advanced_at: 1,
     })
     const result = await env.engine.notifyImportUpload({
-      project_slug: OWNER,
+      owner_slug: OWNER,
       topic_id: TOPIC,
       user_id: USER,
       channel_kind: 'app_socket',

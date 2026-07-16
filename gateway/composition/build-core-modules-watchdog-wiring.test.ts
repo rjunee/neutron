@@ -120,7 +120,7 @@ describe('F4 — build-core-modules watchdog + process-registry wiring', () => {
     })
     await cron.state.record({
       job_name: 'slow-job',
-      project_slug: 'alice',
+      owner_slug: 'alice',
       fired_at: NOW / 1000,
       duration_ms: 30_000,
       status: 'ok',

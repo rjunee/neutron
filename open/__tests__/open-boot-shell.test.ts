@@ -113,7 +113,7 @@ async function seedOnboardingState(): Promise<void> {
   const db = ProjectDb.open(dbPath)
   try {
     const store = new SqliteOnboardingStateStore({ db })
-    await store.upsert({ project_slug: 'owner', user_id: 'owner', phase: 'signup' })
+    await store.upsert({ owner_slug: 'owner', user_id: 'owner', phase: 'signup' })
   } finally {
     db.close()
   }

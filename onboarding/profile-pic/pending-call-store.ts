@@ -76,7 +76,7 @@ interface RawPendingRow {
 }
 
 export interface RecordPendingInput {
-  project_slug: string
+  owner_slug: string
   /** Engine-layer identifier; pipeline doesn't always have one. */
   user_id?: string | null
   prompt: string
@@ -150,7 +150,7 @@ export class ProfilePicPendingStore {
        VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, 'pending', 0, ?)`,
       [
         request_id,
-        input.project_slug,
+        input.owner_slug,
         input.user_id ?? null,
         input.prompt,
         input.archetype_hint ?? null,
@@ -283,7 +283,7 @@ export class ProfilePicPendingStore {
   }
 
   /**
-   * Latest row (by started_at DESC) for the given (project_slug, user_id)
+   * Latest row (by started_at DESC) for the given (owner_slug, user_id)
    * tuple. The engine reads this on phase-enter to decide which user-
    * visible state to surface (still-generating / completed-ready /
    * expired-retry / failed-retry).
@@ -291,7 +291,7 @@ export class ProfilePicPendingStore {
    * `user_id` null/undefined matches rows written with NULL user_id.
    */
   async latestForUser(
-    project_slug: string,
+    owner_slug: string,
     user_id: string | null,
   ): Promise<ProfilePicPendingRow | null> {
     const row =
@@ -304,7 +304,7 @@ export class ProfilePicPendingStore {
                  FROM profile_pic_pending
                 WHERE project_slug = ? AND user_id IS NULL
                 ORDER BY started_at DESC LIMIT 1`,
-              [project_slug],
+              [owner_slug],
             )
         : this.db
             .get<RawPendingRow, [string, string]>(
@@ -314,7 +314,7 @@ export class ProfilePicPendingStore {
                  FROM profile_pic_pending
                 WHERE project_slug = ? AND user_id = ?
                 ORDER BY started_at DESC LIMIT 1`,
-              [project_slug, user_id],
+              [owner_slug, user_id],
             )
     if (row === null) return null
     return toRow(row)

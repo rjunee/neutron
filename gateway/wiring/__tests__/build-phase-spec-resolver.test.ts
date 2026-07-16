@@ -240,7 +240,7 @@ describe('typing-indicator wiring', () => {
     })
     expect(resolver).not.toBeNull()
     await resolver!.resolve({
-      project_slug: 't1',
+      owner_slug: 't1',
       topic_id: 'web:user-1',
       user_id: 'user-1',
       signup_via: 'web',
@@ -278,7 +278,7 @@ describe('typing-indicator wiring', () => {
       webRegistry: registry,
     })
     await resolver!.resolve({
-      project_slug: 't1',
+      owner_slug: 't1',
       topic_id: 'tg:123:0',
       user_id: 'tg-user-123',
       signup_via: 'telegram',
@@ -332,7 +332,7 @@ describe('skills-loader composition (Sprint A — GBrain methodology integration
     })
     expect(resolver).not.toBeNull()
     await resolver!.resolve({
-      project_slug: 't1',
+      owner_slug: 't1',
       topic_id: 'web:user-1',
       user_id: 'user-1',
       signup_via: 'web',
@@ -381,7 +381,7 @@ describe('skills-loader composition (Sprint A — GBrain methodology integration
         owner_data_dir,
       })
       await resolver!.resolve({
-        project_slug: 't1',
+        owner_slug: 't1',
         topic_id: 'web:user-1',
         user_id: 'user-1',
         signup_via: 'web',
@@ -439,7 +439,7 @@ describe('skills-loader composition (Sprint A — GBrain methodology integration
     })
 
     const bundle = {
-      project_slug: 't1',
+      owner_slug: 't1',
       topic_id: 'web:user-1',
       user_id: 'user-1',
       signup_via: 'web' as const,
@@ -482,7 +482,7 @@ describe('persona-loader composition (ISSUE #30 — v0.1.85)', () => {
   // so a PATCH lands on the very next agent turn.
 
   const bundle = {
-    project_slug: 't1',
+    owner_slug: 't1',
     topic_id: 'web:user-1',
     user_id: 'user-1',
     signup_via: 'web' as const,
@@ -660,7 +660,7 @@ describe('escalation-loader composition (P7.2 S3 — production wire-through)', 
   // only the upstream substrate stubbed via fakeSubstrate.
 
   const bundle = {
-    project_slug: 't1',
+    owner_slug: 't1',
     topic_id: 'web:user-1',
     user_id: 'user-1',
     signup_via: 'web' as const,

@@ -64,7 +64,7 @@ export type ProfilePicJobStatus =
 
 export interface ProfilePicJob {
   id: string
-  project_slug: string
+  owner_slug: string
   status: ProfilePicJobStatus
   archetype_hint: string | null
   started_at: number
@@ -121,7 +121,7 @@ export interface ProfilePicPipelineDeps {
 }
 
 export interface StartProfilePicInput {
-  project_slug: string
+  owner_slug: string
   /** Free-form archetype hint — normalized into one of the 12 fallback slugs. */
   archetype_hint?: string
   /** The composed Gemini prompt. Production derives this from SOUL.md + archetype blend. */
@@ -130,7 +130,7 @@ export interface StartProfilePicInput {
   candidates_per_call?: number
   /**
    * Engine-layer user id. Threaded into the durable pending-call store
-   * so the engine's phase-enter lookup can scope to a single (project_slug,
+   * so the engine's phase-enter lookup can scope to a single (owner_slug,
    * user_id) tuple. Optional — the pipeline itself never reads it.
    */
   user_id?: string
@@ -218,7 +218,7 @@ export class ProfilePicPipeline {
          (id, project_slug, status, archetype_hint, started_at, completed_at,
           fallback_used, failure_count)
        VALUES (?, ?, 'queued', ?, ?, NULL, 0, 0)`,
-      [job_id, input.project_slug, input.archetype_hint ?? null, started_at],
+      [job_id, input.owner_slug, input.archetype_hint ?? null, started_at],
     )
     const promise = this.run(job_id, input).finally(() => {
       this.inflight.delete(job_id)
@@ -255,7 +255,7 @@ export class ProfilePicPipeline {
       )
     return {
       id: row.id,
-      project_slug: row.project_slug,
+      owner_slug: row.project_slug,
       status: row.status as ProfilePicJobStatus,
       archetype_hint: row.archetype_hint,
       started_at: row.started_at,
@@ -417,7 +417,7 @@ export class ProfilePicPipeline {
         // 'completed' row's job_id and surfaces those candidates instead
         // of firing a duplicate `pipeline.start`.
         const recorded = await this.pendingStore.recordPending({
-          project_slug: input.project_slug,
+          owner_slug: input.owner_slug,
           user_id: input.user_id ?? null,
           prompt: input.prompt,
           archetype_hint: input.archetype_hint ?? null,

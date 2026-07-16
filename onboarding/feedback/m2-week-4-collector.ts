@@ -57,7 +57,7 @@ export interface M2FeedbackCollectorDeps {
 }
 
 export interface RecordResponseInput {
-  project_slug: string
+  owner_slug: string
   /** The open `sean_ellis_responses.id`; supplied by the inbound callback router. */
   response_id: string
   user_id: string
@@ -122,7 +122,7 @@ export class M2FeedbackCollector {
     const payload: SeanEllisResponsePayload = { response: input.response_kind }
     if (input.freeform_text !== undefined) payload.freeform = input.freeform_text
     await this.telemetry.emit({
-      project_slug: input.project_slug,
+      owner_slug: input.owner_slug,
       user_id: input.user_id,
       event: 'onboarding.sean_ellis_response',
       payload,
@@ -131,7 +131,7 @@ export class M2FeedbackCollector {
     let appended = false
     if (input.freeform_text !== undefined && input.freeform_text.trim().length > 0) {
       const entry = formatMarkdownEntry({
-        project_slug: input.project_slug,
+        owner_slug: input.owner_slug,
         response_kind: input.response_kind,
         freeform_text: input.freeform_text,
         timestamp_ms: ts,
@@ -149,7 +149,7 @@ export class M2FeedbackCollector {
    * `applyFreeformFollowUp`.
    */
   async markPending(input: {
-    project_slug: string
+    owner_slug: string
     response_id: string
     pending_response_kind: M2ResponseKind
   }): Promise<void> {
@@ -169,7 +169,7 @@ export class M2FeedbackCollector {
    * can fall through to the default unprompted-message handler.
    */
   async applyFreeformFollowUp(input: {
-    project_slug: string
+    owner_slug: string
     user_id: string
     freeform_text: string
     response_id?: string
@@ -177,12 +177,12 @@ export class M2FeedbackCollector {
     const store = new SeanEllisStore(this.db)
     const row =
       input.response_id !== undefined
-        ? store.byId({ project_slug: input.project_slug, id: input.response_id })
-        : store.latestPendingForUser(input.project_slug, input.user_id)
+        ? store.byId({ owner_slug: input.owner_slug, id: input.response_id })
+        : store.latestPendingForUser(input.owner_slug, input.user_id)
     if (row === null || row.pending_response_kind === null) return null
     if (row.pending_response_kind === 'no_response') return null
     return this.recordResponse({
-      project_slug: input.project_slug,
+      owner_slug: input.owner_slug,
       response_id: row.id,
       user_id: input.user_id,
       response_kind: row.pending_response_kind,
@@ -219,11 +219,11 @@ export class M2FeedbackCollector {
  *     deliver tap + freeform on the same inbound — we accept both).
  */
 export interface SeanEllisChoiceRouterInput {
-  project_slug: string
+  owner_slug: string
   user_id: string
   /**
    * The open `sean_ellis_responses.id`. Production looks this up via
-   * `SeanEllisStore.byPromptId(project_slug, choice.prompt_id)` before
+   * `SeanEllisStore.byPromptId(owner_slug, choice.prompt_id)` before
    * calling.
    */
   response_id: string
@@ -247,7 +247,7 @@ export async function routeSeanEllisChoice(
   // [B] without freeform yet → park the choice; do NOT finalize the row.
   if (response_kind === 'somewhat_disappointed' && input.freeform_text === undefined) {
     await collector.markPending({
-      project_slug: input.project_slug,
+      owner_slug: input.owner_slug,
       response_id: input.response_id,
       pending_response_kind: response_kind,
     })
@@ -256,7 +256,7 @@ export async function routeSeanEllisChoice(
 
   // [A] / [C], or [B] with freeform on the same inbound → finalize.
   const recordInput: RecordResponseInput = {
-    project_slug: input.project_slug,
+    owner_slug: input.owner_slug,
     response_id: input.response_id,
     user_id: input.user_id,
     response_kind,
@@ -275,7 +275,7 @@ export async function routeSeanEllisChoice(
  * pending row was found.
  */
 export interface SeanEllisFreeformInput {
-  project_slug: string
+  owner_slug: string
   user_id: string
   freeform_text: string
   /** Optional precise lookup; when omitted, finds the most-recent pending row for the user. */
@@ -303,7 +303,7 @@ function mapChoiceToResponseKind(choice_value: string): M2ResponseKind | null {
  * Sam reads in chronological order.
  */
 export function formatMarkdownEntry(input: {
-  project_slug: string
+  owner_slug: string
   response_kind: M2ResponseKind
   freeform_text: string
   timestamp_ms: number
@@ -313,7 +313,7 @@ export function formatMarkdownEntry(input: {
     '',
     '---',
     '',
-    `## ${iso} — \`${input.project_slug}\` (${input.response_kind})`,
+    `## ${iso} — \`${input.owner_slug}\` (${input.response_kind})`,
     '',
     input.freeform_text.trim(),
     '',

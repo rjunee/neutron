@@ -119,7 +119,7 @@ export interface BuildRoutedSendImportProgressOptions {
 }
 
 export interface SendImportProgressArgs {
-  project_slug: string
+  owner_slug: string
   topic_id: string
   event: {
     type: 'import_progress'
@@ -150,7 +150,7 @@ export interface SendImportProgressArgs {
 export function buildRoutedSendImportProgress(
   opts: BuildRoutedSendImportProgressOptions,
 ): (input: SendImportProgressArgs) => Promise<{ delivered: boolean }> {
-  return async ({ project_slug, topic_id, event }) => {
+  return async ({ owner_slug, topic_id, event }) => {
     if (topic_id.startsWith('web:')) {
       const ok = opts.webRegistry.send(topic_id, event)
       // Light-touch observability — no body content, just shape +
@@ -158,7 +158,7 @@ export function buildRoutedSendImportProgress(
       // `[chat-bridge] sendImportProgress event=route ...`.
       moduleLog.info('route', {
         channel: 'web',
-        project: project_slug,
+        project: owner_slug,
         topic: topic_id,
         job: event.job_id,
         status: event.status,
@@ -171,7 +171,7 @@ export function buildRoutedSendImportProgress(
     }
     // Onboarding consolidation (2026-06-26) — app-socket route.
     if (topic_id.startsWith('app:') && opts.appSocketRouter?.send !== undefined) {
-      return await opts.appSocketRouter.send({ project_slug, topic_id, event })
+      return await opts.appSocketRouter.send({ owner_slug, topic_id, event })
     }
     // Telegram + unknown channels: silent drop. The terminal-state
     // agent_message still lands on these channels via the regular
@@ -179,7 +179,7 @@ export function buildRoutedSendImportProgress(
     if (!topic_id.startsWith('tg:') && !topic_id.startsWith('app:')) {
       moduleLog.warn('drop', {
         reason: 'unknown-channel',
-        project: project_slug,
+        project: owner_slug,
         topic: topic_id,
         job: event.job_id,
       })
@@ -191,7 +191,7 @@ export function buildRoutedSendImportProgress(
 export function buildRoutedSendButtonPrompt(
   opts: BuildRoutedSendButtonPromptOptions,
 ): SendButtonPromptFn {
-  return async ({ project_slug, topic_id, prompt }) => {
+  return async ({ owner_slug, topic_id, prompt }) => {
     if (topic_id.startsWith('web:')) {
       // NOTE (D3, 2026-07) — the web route intentionally renders WITHOUT the
       // optional `topic_id` stamp, preserving the exact pre-split behavior
@@ -221,7 +221,7 @@ export function buildRoutedSendButtonPrompt(
       const body_sha8 = createHash('sha256').update(prompt.body).digest('hex').slice(0, 8)
       moduleLog.info('route', {
         channel: 'web',
-        project: project_slug,
+        project: owner_slug,
         topic: topic_id,
         prompt: prompt.prompt_id,
         options: prompt.options.length,
@@ -232,7 +232,7 @@ export function buildRoutedSendButtonPrompt(
       return { message_id: prompt.prompt_id, was_new: ok }
     }
     if (topic_id.startsWith('tg:') && opts.telegramSender !== undefined) {
-      return await opts.telegramSender({ project_slug, topic_id, prompt })
+      return await opts.telegramSender({ owner_slug, topic_id, prompt })
     }
     // Onboarding consolidation (2026-06-26) — app-socket route. Onboarding
     // prompts addressed to `app:<user_id>` fan out over the unified
@@ -240,7 +240,7 @@ export function buildRoutedSendButtonPrompt(
     // translates the ButtonPrompt → the app-ws `agent_message` envelope (which
     // already carries options/prompt_id/allow_freeform/kind/upload_affordance).
     if (topic_id.startsWith('app:') && opts.appSocketRouter?.send !== undefined) {
-      return await opts.appSocketRouter.send({ project_slug, topic_id, prompt })
+      return await opts.appSocketRouter.send({ owner_slug, topic_id, prompt })
     }
     // No sender for this topic_id. Surface explicitly so a misrouted
     // prefix (Telegram instance on a web-only deploy, or a future
@@ -250,7 +250,7 @@ export function buildRoutedSendButtonPrompt(
     // far side — this log line gives the operator a foothold.
     moduleLog.warn('drop', {
       reason: 'unknown-channel-or-no-sender',
-      project: project_slug,
+      project: owner_slug,
       topic: topic_id,
       prompt: prompt.prompt_id,
     })

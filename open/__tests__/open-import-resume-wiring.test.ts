@@ -188,7 +188,7 @@ async function seedResumablePriorImport(h: Harness, priorJobId: string): Promise
 
   const stateStore = new SqliteOnboardingStateStore({ db: h.db })
   await stateStore.upsert({
-    project_slug: 'owner',
+    owner_slug: 'owner',
     user_id: 'owner',
     phase: 'import_analysis_presented',
     phase_state_patch: {
@@ -261,7 +261,7 @@ describe('Open import-resume surface wiring', () => {
     // from the "no onboarding state" 409.
     const stateStore = new SqliteOnboardingStateStore({ db: harness.db })
     await stateStore.upsert({
-      project_slug: 'owner',
+      owner_slug: 'owner',
       user_id: 'owner',
       phase: 'import_analysis_presented',
       phase_state_patch: {},

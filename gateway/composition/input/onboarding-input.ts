@@ -25,7 +25,7 @@ export interface OnboardingCompositionInput {
     /** Sean Ellis cron config — register only when this is supplied. */
     sean_ellis?: {
       channel: SeanEllisChannel
-      resolveContext: (input: { project_slug: string; user_id: string }) => Promise<
+      resolveContext: (input: { owner_slug: string; user_id: string }) => Promise<
         { topic_id: string } | null
       >
       /** Override hourly tick interval; defaults to 1h. */

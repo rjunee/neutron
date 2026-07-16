@@ -113,8 +113,8 @@ export interface PersonaComposerLike {
 
 export interface OnboardingFinalizeDeps {
   owner_home: string
-  /** Instance internal handle / project_slug (logging + materializer origin). */
-  project_slug: string
+  /** Instance internal handle / owner_slug (logging + materializer origin). */
+  owner_slug: string
   db: ProjectDb
   stateStore: OnboardingStateStore
   /** Steady-state persona reader — call .invalidate() after committing persona files. */
@@ -137,7 +137,7 @@ export interface OnboardingFinalizeDeps {
    */
   ensureProjectRow: (
     db: ProjectDb,
-    project_slug: string,
+    owner_slug: string,
     project: CapturedProject,
     slug: string,
     import_result: ImportResult | null,
@@ -253,7 +253,7 @@ export function buildOnboardingFinalize(deps: OnboardingFinalizeDeps): Onboardin
     ((level, msg, meta): void => {
       // eslint-disable-next-line no-console
       console[level === 'error' ? 'error' : level === 'warn' ? 'warn' : 'log'](
-        `[onboarding-finalize] project=${deps.project_slug} ${msg}${
+        `[onboarding-finalize] project=${deps.owner_slug} ${msg}${
           meta !== undefined ? ` ${safeMeta(meta)}` : ''
         }`,
       )
@@ -288,7 +288,7 @@ export function buildOnboardingFinalize(deps: OnboardingFinalizeDeps): Onboardin
       // read fails.
       let effectiveState = input.state
       try {
-        const live = await deps.stateStore.get(deps.project_slug, input.user_id)
+        const live = await deps.stateStore.get(deps.owner_slug, input.user_id)
         if (live === null) {
           // A SUCCESSFUL read that finds NO row: the durable row was deleted / reset. Do
           // NOT finalize a ghost from a stale caller snapshot (that would commit persona +
@@ -339,7 +339,7 @@ export function buildOnboardingFinalize(deps: OnboardingFinalizeDeps): Onboardin
       for (let pass = 0; pass < MAX_STABILIZE_PASSES; pass++) {
         let reread: OnboardingState | null
         try {
-          reread = await deps.stateStore.get(deps.project_slug, input.user_id)
+          reread = await deps.stateStore.get(deps.owner_slug, input.user_id)
         } catch (err) {
           log('warn', 'finalize: stabilize re-read failed; deferring to next trigger', {
             err: errStr(err),
@@ -390,7 +390,7 @@ export function buildOnboardingFinalize(deps: OnboardingFinalizeDeps): Onboardin
       let casOk: boolean
       try {
         casOk = await deps.stateStore.completeIfPhaseStateMatches({
-          project_slug: deps.project_slug,
+          owner_slug: deps.owner_slug,
           user_id: input.user_id,
           expected_phase: stableState.phase,
           expected_phase_state: stableState.phase_state,
@@ -648,7 +648,7 @@ async function commitPersona(
 ): Promise<void> {
   try {
     const composer = deps.personaComposer ?? buildDefaultPersonaComposer(deps.owner_home)
-    const composeInput = buildComposeInput(deps.project_slug, state)
+    const composeInput = buildComposeInput(deps.owner_slug, state)
     const draft = await composer.compose(composeInput)
     await composer.commit(draft)
     deps.personaLoader.invalidate()
@@ -748,7 +748,7 @@ async function materializeProjects(
     try {
       const { outcome, bind_id } = await deps.ensureProjectRow(
         deps.db,
-        deps.project_slug,
+        deps.owner_slug,
         project,
         slug,
         import_result,

@@ -752,7 +752,7 @@ describe('informed interview — grounded in imported content', () => {
     expect(q?.text).toContain('Apollo launch')
     expect(q?.references_person).toBe(true)
     expect(q?.text).toContain('Sam')
-    expect(q?.project_slug).toBe('apollo-launch')
+    expect(q?.owner_slug).toBe('apollo-launch')
 
     const queue = buildInformedQuestionQueue(result.user_model)
     expect(queue.length).toBeGreaterThanOrEqual(1)

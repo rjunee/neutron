@@ -133,7 +133,7 @@ export interface WriteExtractionInput {
    * M2.6 Ph1 (#83) — the receiving instance's own slug. Chat content is
    * own-origin, so this stamps BOTH `originInstance` and `receivingInstanceSlug`
    * on every `writeEntity` call → the quarantine guard passes it. Threaded
-   * from `createScribe`'s `project_slug`.
+   * from `createScribe`'s `owner_slug`.
    */
   ownSlug: string
   /**

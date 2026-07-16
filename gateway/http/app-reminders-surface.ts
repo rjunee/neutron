@@ -244,7 +244,7 @@ function handleList(
       // other project_slug-comparison site but missed this one.
       if (
         extra !== null &&
-        !ownerSlugMismatch(extra.project_slug, project_slug) &&
+        !ownerSlugMismatch(extra.owner_slug, project_slug) &&
         extra.topic_id === topic_id
       ) {
         reminders = [...reminders, toListItem(extra)]
@@ -307,7 +307,7 @@ async function handleCreate(
     })
   }
   await store.create({
-    project_slug,
+    owner_slug: project_slug,
     topic_id,
     fire_at,
     message,
@@ -362,7 +362,7 @@ async function handleSnooze(
   const owner_check = store.get(reminder_id)
   if (
     owner_check === null ||
-    ownerSlugMismatch(owner_check.project_slug, project_slug) ||
+    ownerSlugMismatch(owner_check.owner_slug, project_slug) ||
     owner_check.topic_id !== topic_id
   ) {
     return jsonResponse(404, {
@@ -409,7 +409,7 @@ async function handleConvertToTask(
   const owner_check = store.get(reminder_id)
   if (
     owner_check === null ||
-    ownerSlugMismatch(owner_check.project_slug, project_slug) ||
+    ownerSlugMismatch(owner_check.owner_slug, project_slug) ||
     owner_check.topic_id !== topic_id
   ) {
     return jsonResponse(404, {
@@ -509,7 +509,7 @@ async function handleCancel(
   const owner_check = store.get(reminder_id)
   if (
     owner_check === null ||
-    ownerSlugMismatch(owner_check.project_slug, project_slug) ||
+    ownerSlugMismatch(owner_check.owner_slug, project_slug) ||
     owner_check.topic_id !== topic_id
   ) {
     return jsonResponse(404, {

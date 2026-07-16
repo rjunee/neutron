@@ -70,7 +70,7 @@ export function teardown(fix: TestFixture): void {
 }
 
 export interface BuildCtxOverrides {
-  project_slug?: string
+  owner_slug?: string
   topic_id?: string
   interview?: WowInterviewState
   import_result?: ImportResult | null
@@ -115,11 +115,11 @@ export function buildContext(
   fix: TestFixture,
   overrides: BuildCtxOverrides = {},
 ): WowActionContext {
-  const project_slug = overrides.project_slug ?? 't1'
+  const owner_slug = overrides.owner_slug ?? 't1'
   const topic_id = overrides.topic_id ?? 'topic-1'
   let counter = 0
   const ctx: WowActionContext = {
-    project_slug,
+    owner_slug,
     topic_id,
     owner_home: fix.dir,
     interview: overrides.interview ?? {

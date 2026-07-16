@@ -44,7 +44,7 @@ function scheduler(handler: () => Promise<{ status: 'ok' | 'error'; detail?: str
   })
   const handlers = new CronHandlerRegistry()
   handlers.register('h', handler)
-  return new CronScheduler({ jobs, handlers, db, project_slug: 't1' })
+  return new CronScheduler({ jobs, handlers, db, owner_slug: 't1' })
 }
 
 describe('CronScheduler — loop-inventory health (defect #4)', () => {
@@ -76,7 +76,7 @@ describe('CronScheduler — loop-inventory health (defect #4)', () => {
     // unknown job — fireOnceInner returns before the normal path, but still stamps.
     const jobs = new CronJobRegistry()
     const handlers = new CronHandlerRegistry()
-    const sched = new CronScheduler({ jobs, handlers, db, project_slug: 't1' })
+    const sched = new CronScheduler({ jobs, handlers, db, owner_slug: 't1' })
     await sched.fireOnce('nope')
     let health = sched.describe().health()
     expect(health.lastError).not.toBeNull()
@@ -123,7 +123,7 @@ describe('CronScheduler — loop-inventory health (defect #4)', () => {
       await gate
       return { status: 'ok' as const }
     })
-    const sched = new CronScheduler({ jobs, handlers, db, project_slug: 't1' })
+    const sched = new CronScheduler({ jobs, handlers, db, owner_slug: 't1' })
     sched.start() // binds the job into `running` so the overlap path is reachable
 
     // First fire sets in_flight=true synchronously (up to the handler await) and
@@ -163,7 +163,7 @@ describe('CronScheduler — loop-inventory health (defect #4)', () => {
     })
     const handlers = new CronHandlerRegistry()
     handlers.register('h', async () => ({ status: 'ok' as const }))
-    const sched = new CronScheduler({ jobs, handlers, db: localDb, project_slug: 't1' })
+    const sched = new CronScheduler({ jobs, handlers, db: localDb, owner_slug: 't1' })
     localDb.close() // make the record() tail throw
 
     let threw = false
