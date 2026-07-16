@@ -92,7 +92,7 @@ export class PlatformOperationUnsupportedError extends Error {
  * the full Managed registry row type.
  */
 export interface PlatformInstanceInfo {
-  internal_handle: string
+  owner_handle: string
   url_slug: string
   owner_home: string
   agent_name: string | null
@@ -121,7 +121,7 @@ export interface PlatformInstanceInfo {
 export interface SlugAvailabilityProbe {
   check(input: {
     slug: string
-    selfInternalHandle?: string
+    selfOwnerHandle?: string
   }): SlugAvailability
   sanitize(input: string): string | null
 }
@@ -141,7 +141,7 @@ export interface SlugAvailabilityProbe {
  * restart driver wired through the chat-bridge slug-picker hook.
  */
 export interface RenameSlugInput {
-  internal_handle: string
+  owner_handle: string
   current_url_slug: string
   new_url_slug: string
 }
@@ -162,8 +162,8 @@ export interface RenameSlugResult {
  * service to mint against and no install-token landing page.
  */
 export interface InstallTokenInput {
-  /** Frozen internal_handle of the instance the token is being minted for. */
-  internal_handle: string
+  /** Frozen owner_handle of the instance the token is being minted for. */
+  owner_handle: string
   /** OAuth identity of the requesting user (email, sub, provider). */
   identity: {
     provider: 'google' | 'apple'
@@ -242,7 +242,7 @@ export interface ConnectCallResult {
  * operation is Managed-tier orchestration.
  */
 export interface ProvisionManagerBotInput {
-  internal_handle: string
+  owner_handle: string
   bot_name_hint: string
 }
 
@@ -254,7 +254,7 @@ export interface ProvisionManagerBotResult {
 /**
  * Sprint B (2026-05-20) — narrow structural alias for the Managed
  * `OwnersRegistry` lookup chat-bridge uses to resolve an instance's
- * CURRENT `url_slug` by frozen `internal_handle`. The Managed concrete
+ * CURRENT `url_slug` by frozen `owner_handle`. The Managed concrete
  * `OwnersRegistry` structurally satisfies this alias; Open boot
  * supplies a stub that returns the single local instance's slug for the
  * boot-time handle and null otherwise.
@@ -265,12 +265,12 @@ export interface ProvisionManagerBotResult {
  */
 export interface OwnerRegistryLookup {
   /**
-   * Returns the CURRENT `url_slug` for the given `internal_handle`, or
+   * Returns the CURRENT `url_slug` for the given `owner_handle`, or
    * null when the instance row is missing. Hot-path: every JWT-mismatch
    * connect runs this once; backing store is a single indexed SQLite
    * SELECT on Managed and a constant-time check on Open.
    */
-  getCurrentUrlSlugByInternalHandle(internal_handle: string): string | null
+  getCurrentUrlSlugByOwnerHandle(owner_handle: string): string | null
 }
 
 /**
@@ -283,7 +283,7 @@ export interface OwnerRegistryLookup {
  */
 export interface GatewayRestartDriver {
   refreshAfterRename(input: {
-    internal_handle: string
+    owner_handle: string
     owner_home: string
     new_url_slug: string
     previous_url_slug: string
@@ -308,7 +308,7 @@ export interface GatewayRestartDriver {
  */
 export interface RenameOrchestratorDeps {
   registry: {
-    getByInternalHandle(handle: string): unknown
+    getByOwnerHandle(handle: string): unknown
     [key: string]: unknown
   }
   slugHistory: unknown
@@ -471,12 +471,12 @@ export interface PlatformAdapter {
   resolveOwnerBySlug(url_slug: string): PlatformInstanceInfo | null
 
   /**
-   * Look up an instance by frozen `internal_handle`.
+   * Look up an instance by frozen `owner_handle`.
    *
    * Open: same single-instance lookup logic as `resolveOwnerBySlug`.
-   * Managed: delegates to `OwnersRegistry.getByInternalHandle(...)`.
+   * Managed: delegates to `OwnersRegistry.getByOwnerHandle(...)`.
    */
-  resolveOwnerByInternalHandle(internal_handle: string): PlatformInstanceInfo | null
+  resolveOwnerByOwnerHandle(owner_handle: string): PlatformInstanceInfo | null
 
   /**
    * Slug rename orchestrator — Managed-only.

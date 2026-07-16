@@ -34,7 +34,7 @@ test('returns null when the project has no BYO key for the requested provider', 
   const secrets = new SecretsStore({ data_dir: dataDir, db })
   const api_keys = new ApiKeyStore({ db, secrets })
   const pool = await buildBYOApiKeyPool({
-    internal_handle: asOwnerHandle('alice'),
+    owner_handle: asOwnerHandle('alice'),
     provider: 'anthropic',
     api_keys,
   })
@@ -45,19 +45,19 @@ test('builds a credential pool with one entry per stored key and exposes plainte
   const secrets = new SecretsStore({ data_dir: dataDir, db })
   const api_keys = new ApiKeyStore({ db, secrets })
   await api_keys.add({
-    internal_handle: asOwnerHandle('alice'),
+    owner_handle: asOwnerHandle('alice'),
     provider: 'anthropic',
     label: 'k1',
     plaintext: 'sk-ant-1',
   })
   await api_keys.add({
-    internal_handle: asOwnerHandle('alice'),
+    owner_handle: asOwnerHandle('alice'),
     provider: 'anthropic',
     label: 'k2',
     plaintext: 'sk-ant-2',
   })
   const pool = await buildBYOApiKeyPool({
-    internal_handle: asOwnerHandle('alice'),
+    owner_handle: asOwnerHandle('alice'),
     provider: 'anthropic',
     api_keys,
   })
@@ -79,10 +79,10 @@ test('builds a credential pool with one entry per stored key and exposes plainte
 test('only includes the requested provider', async () => {
   const secrets = new SecretsStore({ data_dir: dataDir, db })
   const api_keys = new ApiKeyStore({ db, secrets })
-  await api_keys.add({ internal_handle: asOwnerHandle('alice'), provider: 'anthropic', label: 'a', plaintext: 'a' })
-  await api_keys.add({ internal_handle: asOwnerHandle('alice'), provider: 'openai', label: 'b', plaintext: 'b' })
+  await api_keys.add({ owner_handle: asOwnerHandle('alice'), provider: 'anthropic', label: 'a', plaintext: 'a' })
+  await api_keys.add({ owner_handle: asOwnerHandle('alice'), provider: 'openai', label: 'b', plaintext: 'b' })
   const pool = await buildBYOApiKeyPool({
-    internal_handle: asOwnerHandle('alice'),
+    owner_handle: asOwnerHandle('alice'),
     provider: 'anthropic',
     api_keys,
   })

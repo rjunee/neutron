@@ -83,7 +83,7 @@ export interface SlugAvailability {
  * structural typing keeps Open code free of any Managed import.
  */
 export interface SlugRegistryProbe {
-  getBySlug(url_slug: string): { internal_handle: string } | undefined
+  getBySlug(url_slug: string): { owner_handle: string } | undefined
 }
 
 /**
@@ -103,10 +103,10 @@ export interface CheckSlugAvailabilityInput {
   /**
    * Optional self-instance exemption. When the caller is renaming an instance
    * TO its own current slug (CAS-no-op) the registry lookup would
-   * otherwise report 'taken'. Pass the renaming instance's internal_handle
+   * otherwise report 'taken'. Pass the renaming instance's owner_handle
    * to allow that case.
    */
-  selfInternalHandle?: string
+  selfOwnerHandle?: string
 }
 
 export function checkSlugAvailability(
@@ -131,8 +131,8 @@ export function checkSlugAvailability(
   const taken = input.registry.getBySlug(slug)
   if (taken !== undefined) {
     if (
-      input.selfInternalHandle !== undefined &&
-      taken.internal_handle === input.selfInternalHandle
+      input.selfOwnerHandle !== undefined &&
+      taken.owner_handle === input.selfOwnerHandle
     ) {
       return { slug, available: true, reason: null }
     }

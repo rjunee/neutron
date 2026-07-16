@@ -108,7 +108,7 @@ export interface ResolveScrubbedAuthEnvInput {
   /** Max OAuth refresh handle — refreshes oauth-like creds at dispatch. */
   oauthRefresh?: OAuthCredentialSource
   /** Handle keyed against `oauthRefresh.loadAccessToken`. */
-  internal_handle?: string
+  owner_handle?: string
 }
 
 export interface ResolveScrubbedAuthEnvResult {
@@ -179,13 +179,13 @@ export async function resolveScrubbedAuthEnv(
   if (
     isOauthLike &&
     input.oauthRefresh !== undefined &&
-    typeof input.internal_handle === 'string' &&
-    input.internal_handle.length > 0
+    typeof input.owner_handle === 'string' &&
+    input.owner_handle.length > 0
   ) {
     try {
-      // `input.internal_handle` is the frozen instance handle (guarded string
+      // `input.owner_handle` is the frozen instance handle (guarded string
       // above); brand it for the OAuth-refresh credential lookup.
-      const fresh = await input.oauthRefresh.loadAccessToken(asOwnerHandle(input.internal_handle))
+      const fresh = await input.oauthRefresh.loadAccessToken(asOwnerHandle(input.owner_handle))
       if (fresh !== null && fresh.access_token.length > 0) {
         activeSecret = fresh.access_token
       }
@@ -326,14 +326,14 @@ export interface BuildLlmCallSubstrateInput {
   onSizeAlert?: (info: { sessionKey: string; severity: SizeSeverity; sizeBytes: number }) => void
   onRateLimitBanner?: (notice: RateLimitBannerNotice) => void | Promise<void>
   /**
-   * Optional `internal_handle` keyed against `oauthRefresh.loadAccessToken`.
+   * Optional `owner_handle` keyed against `oauthRefresh.loadAccessToken`.
    * Required when `oauthRefresh` is wired; ignored otherwise.
    *
    * Optional (not mandatory) because some LLM call sites are platform-
    * internal rather than per-instance — for those, the resolver picks a
    * BYO or shared env credential and no Max OAuth refresh is needed.
    */
-  internal_handle?: string
+  owner_handle?: string
   /** Max OAuth refresh handle — see build-import-substrate.ts for context. */
   oauthRefresh?: OAuthCredentialSource
   /**
@@ -607,8 +607,8 @@ export function buildLlmCallSubstrate(
           if (input.pool !== undefined) helperInput.pool = input.pool
           if (input.resolvePool !== undefined) helperInput.resolvePool = input.resolvePool
           if (input.oauthRefresh !== undefined) helperInput.oauthRefresh = input.oauthRefresh
-          if (input.internal_handle !== undefined) {
-            helperInput.internal_handle = input.internal_handle
+          if (input.owner_handle !== undefined) {
+            helperInput.owner_handle = input.owner_handle
           }
           resolved = await resolveScrubbedAuthEnv(helperInput)
         } catch (err) {

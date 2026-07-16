@@ -91,7 +91,7 @@ test('importUseSynthesis routes the engine import hook to the accumulating synth
     project_slug: 'owner',
     owner_home: ownerHome,
     static_dir: workdir,
-    internal_handle: 't-owner001',
+    owner_handle: 't-owner001',
     // The Step 2b opt-in + the accumulating synthesis substrate + a
     // deterministic zip parser.
     importUseSynthesis: true,

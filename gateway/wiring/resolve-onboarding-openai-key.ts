@@ -34,7 +34,7 @@ const moduleLog = createLogger('gbrain-memory')
 export async function resolveOnboardingOpenAiKey(input: {
   db: ProjectDb
   owner_home: string
-  internal_handle: string
+  owner_handle: string
   /** Optional, for clearer warn logs only. */
   project_slug?: string
 }): Promise<string | undefined> {
@@ -45,14 +45,14 @@ export async function resolveOnboardingOpenAiKey(input: {
     })
     return (
       (await apiKeys.resolveSecret({
-        internal_handle: asOwnerHandle(input.internal_handle),
+        owner_handle: asOwnerHandle(input.owner_handle),
         provider: 'openai',
         label: ONBOARDING_OPENAI_LABEL,
       })) ?? undefined
     )
   } catch (err) {
     moduleLog.warn('onboarding_openai_key_unresolved', {
-      project: input.project_slug ?? input.internal_handle,
+      project: input.project_slug ?? input.owner_handle,
       error: err instanceof Error ? err.message : String(err),
     })
     return undefined

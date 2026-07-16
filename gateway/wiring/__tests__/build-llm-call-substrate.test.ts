@@ -903,7 +903,7 @@ test('oauthRefresh returning fresh token threads that token into env, not the ca
     cwd: workdir,
     substrateFactory,
     oauthRefresh,
-    internal_handle: 't-1',
+    owner_handle: 't-1',
   })
   const handle = sub!.start(runSpec())
   for await (const _ev of handle.events) {

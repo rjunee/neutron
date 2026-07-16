@@ -111,13 +111,13 @@ export interface SecretsAccessor {
  * `auth/secrets-store.ts`.
  *
  * **2026-05-12 rename-canonicalisation fix:** identity field renamed
- * from `project_slug` → `internal_handle`. Per `auth/secrets-store.ts`
+ * from `project_slug` → `owner_handle`. Per `auth/secrets-store.ts`
  * file header, the value MUST be the FROZEN registry handle, not the
  * mutable url_slug — otherwise renamed instances silently lose all
  * stored credentials.
  *
  * Rotation note: the platform `put()` is INSERT-only — it raises a
- * `duplicate_label` error if `(internal_handle, kind, label)` already
+ * `duplicate_label` error if `(owner_handle, kind, label)` already
  * exists. Rotation goes through `rotate(id, plaintext)`, with `id`
  * resolved via `list()`. The SDK's `SecretsAccessor.put()` hides this
  * fork — see `buildSecretsAccessor` below.
@@ -135,12 +135,12 @@ export interface PlatformSecretsStoreListItem {
 
 export interface PlatformSecretsStore {
   get(input: {
-    internal_handle: string
+    owner_handle: string
     kind: string
     label: string
   }): Promise<string | null>
   put(input: {
-    internal_handle: string
+    owner_handle: string
     kind: string
     label: string
     plaintext: string
@@ -163,7 +163,7 @@ export interface PlatformSecretsStore {
     options?: { expires_at?: number },
   ): Promise<void>
   list(input: {
-    internal_handle: string
+    owner_handle: string
     kind?: string
   }): Promise<Array<PlatformSecretsStoreListItem>>
 }
@@ -209,13 +209,13 @@ function isDuplicateLabelError(err: unknown): boolean {
 
 export interface BuildSecretsAccessorOptions extends Record<string, unknown> {
   /**
-   * 2026-05-12 — frozen `internal_handle` for the instance (see
+   * 2026-05-12 — frozen `owner_handle` for the instance (see
    * `auth/secrets-store.ts` file header). The SDK no longer accepts
    * the mutable `url_slug` here because the platform store keys all
    * rows on the frozen handle — branded `OwnerHandle` makes a raw string
    * a compile error at this public entry point.
    */
-  internal_handle: OwnerHandle
+  owner_handle: OwnerHandle
   store: PlatformSecretsStore
   /** Core package name — surfaced in error messages + (P3) audit log. */
   core_id: string
@@ -240,7 +240,7 @@ export function buildSecretsAccessor(
         })
       }
       return options.store.get({
-        internal_handle: options.internal_handle,
+        owner_handle: options.owner_handle,
         kind,
         label,
       })
@@ -263,7 +263,7 @@ export function buildSecretsAccessor(
       // if absent, insert. Critical for OAuth re-auth + BYOK update
       // flows that overwrite the same label.
       const existing = await options.store.list({
-        internal_handle: options.internal_handle,
+        owner_handle: options.owner_handle,
         kind,
       })
       const match = existing.find((r) => r.label === label)
@@ -292,13 +292,13 @@ export function buildSecretsAccessor(
         return
       }
       const putInput: {
-        internal_handle: string
+        owner_handle: string
         kind: string
         label: string
         plaintext: string
         expires_at?: number
       } = {
-        internal_handle: options.internal_handle,
+        owner_handle: options.owner_handle,
         kind,
         label,
         plaintext,
@@ -315,7 +315,7 @@ export function buildSecretsAccessor(
         // OAuth callbacks / boot flows refreshing the same token.
         if (!isDuplicateLabelError(err)) throw err
         const post = await options.store.list({
-          internal_handle: options.internal_handle,
+          owner_handle: options.owner_handle,
           kind,
         })
         const winner = post.find((r) => r.label === label)
@@ -333,7 +333,7 @@ export function buildSecretsAccessor(
       }
     },
     async list(): Promise<Array<{ kind: SecretKind; label: string }>> {
-      const all = await options.store.list({ internal_handle: options.internal_handle })
+      const all = await options.store.list({ owner_handle: options.owner_handle })
       return all
         .filter((s) => isDeclared(declared, s.kind, s.label))
         .map((s) => ({ kind: s.kind as SecretKind, label: s.label }))

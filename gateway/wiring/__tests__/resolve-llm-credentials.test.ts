@@ -80,13 +80,13 @@ afterEach(() => {
 
 test('store has key → returns pool with that secret + INFO log', async () => {
   await api_keys.add({
-    internal_handle: asOwnerHandle('casey-test'),
+    owner_handle: asOwnerHandle('casey-test'),
     provider: 'anthropic',
     label: 'primary',
     plaintext: 'sk-ant-stored',
   })
   const pool = await resolveLlmCredentials({
-    internal_handle: asOwnerHandle('casey-test'),
+    owner_handle: asOwnerHandle('casey-test'),
     apiKeys: api_keys,
     provider: 'anthropic',
     env_vars: ['ANTHROPIC_API_KEY_CASEY_TEST', 'ANTHROPIC_API_KEY'],
@@ -102,7 +102,7 @@ test('store has key → returns pool with that secret + INFO log', async () => {
 
 test('no store, per-project env present → returns pool + INFO log (not WARN)', async () => {
   const pool = await resolveLlmCredentials({
-    internal_handle: asOwnerHandle('casey-test'),
+    owner_handle: asOwnerHandle('casey-test'),
     apiKeys: api_keys,
     provider: 'anthropic',
     env_vars: ['ANTHROPIC_API_KEY_CASEY_TEST', 'ANTHROPIC_API_KEY'],
@@ -125,7 +125,7 @@ test('no store, per-project env present → returns pool + INFO log (not WARN)',
 
 test('no store, only shared env present → returns pool + WARN log', async () => {
   const pool = await resolveLlmCredentials({
-    internal_handle: asOwnerHandle('casey-test'),
+    owner_handle: asOwnerHandle('casey-test'),
     apiKeys: api_keys,
     provider: 'anthropic',
     env_vars: ['ANTHROPIC_API_KEY_CASEY_TEST', 'ANTHROPIC_API_KEY'],
@@ -149,7 +149,7 @@ test('no store, only shared env present → returns pool + WARN log', async () =
 
 test('empty env values are skipped — first non-empty wins', async () => {
   const pool = await resolveLlmCredentials({
-    internal_handle: asOwnerHandle('casey-test'),
+    owner_handle: asOwnerHandle('casey-test'),
     apiKeys: api_keys,
     provider: 'anthropic',
     env_vars: [
@@ -178,7 +178,7 @@ test('empty env values are skipped — first non-empty wins', async () => {
 
 test('nothing anywhere → returns null + no logs', async () => {
   const pool = await resolveLlmCredentials({
-    internal_handle: asOwnerHandle('casey-test'),
+    owner_handle: asOwnerHandle('casey-test'),
     apiKeys: api_keys,
     provider: 'anthropic',
     env_vars: ['ANTHROPIC_API_KEY_CASEY_TEST', 'ANTHROPIC_API_KEY'],
@@ -193,7 +193,7 @@ test('single env var entry that hits is treated as per-project, not shared (no W
   // Edge case: when env_vars has only 1 entry, the `i > 0` guard prevents
   // it being classified as "shared" — single-entry callers signal intent.
   const pool = await resolveLlmCredentials({
-    internal_handle: asOwnerHandle('casey-test'),
+    owner_handle: asOwnerHandle('casey-test'),
     apiKeys: api_keys,
     provider: 'anthropic',
     env_vars: ['ANTHROPIC_API_KEY_ONLY'],
@@ -212,13 +212,13 @@ test('Sprint 22 — max_oauth wins over store + env when token is present (kind=
   // Stash a BYO key in the store + a per-instance env var so we can prove
   // max_oauth wins over BOTH.
   await api_keys.add({
-    internal_handle: asOwnerHandle('casey-test'),
+    owner_handle: asOwnerHandle('casey-test'),
     provider: 'anthropic',
     label: 'primary',
     plaintext: 'sk-ant-stored',
   })
   const pool = await resolveLlmCredentials({
-    internal_handle: asOwnerHandle('casey-test'),
+    owner_handle: asOwnerHandle('casey-test'),
     apiKeys: api_keys,
     provider: 'anthropic',
     env_vars: ['ANTHROPIC_API_KEY_CASEY_TEST', 'ANTHROPIC_API_KEY'],
@@ -250,13 +250,13 @@ test('Sprint 22 — max_oauth wins over store + env when token is present (kind=
 
 test('Sprint 22 — max_oauth returning null falls through to store (BYO)', async () => {
   await api_keys.add({
-    internal_handle: asOwnerHandle('casey-test'),
+    owner_handle: asOwnerHandle('casey-test'),
     provider: 'anthropic',
     label: 'primary',
     plaintext: 'sk-ant-stored',
   })
   const pool = await resolveLlmCredentials({
-    internal_handle: asOwnerHandle('casey-test'),
+    owner_handle: asOwnerHandle('casey-test'),
     apiKeys: api_keys,
     provider: 'anthropic',
     env_vars: ['ANTHROPIC_API_KEY'],
@@ -275,13 +275,13 @@ test('Sprint 22 — max_oauth returning null falls through to store (BYO)', asyn
 
 test('Sprint 22 — max_oauth throwing falls through to next source with WARN', async () => {
   await api_keys.add({
-    internal_handle: asOwnerHandle('casey-test'),
+    owner_handle: asOwnerHandle('casey-test'),
     provider: 'anthropic',
     label: 'primary',
     plaintext: 'sk-ant-stored',
   })
   const pool = await resolveLlmCredentials({
-    internal_handle: asOwnerHandle('casey-test'),
+    owner_handle: asOwnerHandle('casey-test'),
     apiKeys: api_keys,
     provider: 'anthropic',
     env_vars: ['ANTHROPIC_API_KEY'],
@@ -306,7 +306,7 @@ test('Sprint 22 — max_oauth empty access_token treated as null (no pool emitte
   // Defense-in-depth: an empty string from a misbehaving source must
   // NOT mint a pool with empty Bearer header.
   const pool = await resolveLlmCredentials({
-    internal_handle: asOwnerHandle('casey-test'),
+    owner_handle: asOwnerHandle('casey-test'),
     apiKeys: api_keys,
     provider: 'anthropic',
     env_vars: ['ANTHROPIC_API_KEY'],
@@ -326,7 +326,7 @@ test('Sprint 22 — gemini provider receives undefined maxOAuth, returns null wh
   // Gemini has no max-oauth path in M1; verify the resolver behaves
   // identically to pre-Sprint-22 when `maxOAuth` is undefined.
   const pool = await resolveLlmCredentials({
-    internal_handle: asOwnerHandle('casey-test'),
+    owner_handle: asOwnerHandle('casey-test'),
     apiKeys: api_keys,
     provider: 'gemini',
     env_vars: ['GEMINI_API_KEY_CASEY_TEST', 'GEMINI_API_KEY'],
@@ -344,7 +344,7 @@ test("provider='openai' resolves an api_key pool from OPENAI_API_KEY (tier 4), n
   // maxOAuth is undefined and the env-OAuth (tier 2) + ambient (tier 5) tiers
   // are correctly anthropic-only no-ops.
   const pool = await resolveLlmCredentials({
-    internal_handle: asOwnerHandle('casey-test'),
+    owner_handle: asOwnerHandle('casey-test'),
     apiKeys: api_keys,
     provider: 'openai',
     env_vars: ['OPENAI_API_KEY'],
@@ -364,7 +364,7 @@ test("provider='openai' with a stray CLAUDE_CODE_OAUTH_TOKEN in env is NOT hijac
   // not resolve the anthropic OAuth token for an openai request — tier 2 is
   // anthropic-only.
   const pool = await resolveLlmCredentials({
-    internal_handle: asOwnerHandle('casey-test'),
+    owner_handle: asOwnerHandle('casey-test'),
     apiKeys: api_keys,
     provider: 'openai',
     env_vars: ['OPENAI_API_KEY'],
@@ -382,7 +382,7 @@ test("provider='openai' with a stray CLAUDE_CODE_OAUTH_TOKEN in env is NOT hijac
 
 test("provider='openai' with no OpenAI key returns null (→ reconnect/skip)", async () => {
   const pool = await resolveLlmCredentials({
-    internal_handle: asOwnerHandle('casey-test'),
+    owner_handle: asOwnerHandle('casey-test'),
     apiKeys: api_keys,
     provider: 'openai',
     env_vars: ['OPENAI_API_KEY'],
@@ -400,7 +400,7 @@ test('T15 — process-env CLAUDE_CODE_OAUTH_TOKEN only → returns oauth-kind po
   // EnvironmentFile). Resolver must emit an oauth-kind pool so the
   // import substrate maps it onto Bearer auth.
   const pool = await resolveLlmCredentials({
-    internal_handle: asOwnerHandle('casey-test'),
+    owner_handle: asOwnerHandle('casey-test'),
     apiKeys: api_keys,
     provider: 'anthropic',
     env_vars: ['ANTHROPIC_API_KEY_CASEY_TEST', 'ANTHROPIC_API_KEY'],
@@ -433,7 +433,7 @@ test('T15 — DB Max (source 0) wins over CLAUDE_CODE_OAUTH_TOKEN (source 0.5)',
   // box. This protects production instances that happen to inherit a stale
   // CLAUDE_CODE_OAUTH_TOKEN from the operator's process env.
   const pool = await resolveLlmCredentials({
-    internal_handle: asOwnerHandle('casey-test'),
+    owner_handle: asOwnerHandle('casey-test'),
     apiKeys: api_keys,
     provider: 'anthropic',
     env_vars: ['ANTHROPIC_API_KEY_CASEY_TEST', 'ANTHROPIC_API_KEY'],
@@ -472,13 +472,13 @@ test('T15 — CLAUDE_CODE_OAUTH_TOKEN (source 0.5) wins over ApiKeyStore (source
   // x-api-key fragment when Max-OAuth headers are what the user
   // actually wants to exercise).
   await api_keys.add({
-    internal_handle: asOwnerHandle('casey-test'),
+    owner_handle: asOwnerHandle('casey-test'),
     provider: 'anthropic',
     label: 'primary',
     plaintext: 'sk-ant-stored-byo',
   })
   const pool = await resolveLlmCredentials({
-    internal_handle: asOwnerHandle('casey-test'),
+    owner_handle: asOwnerHandle('casey-test'),
     apiKeys: api_keys,
     provider: 'anthropic',
     env_vars: ['ANTHROPIC_API_KEY_CASEY_TEST', 'ANTHROPIC_API_KEY'],
@@ -504,7 +504,7 @@ test('T15 — empty CLAUDE_CODE_OAUTH_TOKEN string is treated as unset (falls th
   // must NOT mint an oauth pool with an empty Bearer header. Falls
   // through to the next source (here: per-instance API key env var).
   const pool = await resolveLlmCredentials({
-    internal_handle: asOwnerHandle('casey-test'),
+    owner_handle: asOwnerHandle('casey-test'),
     apiKeys: api_keys,
     provider: 'anthropic',
     env_vars: ['ANTHROPIC_API_KEY_CASEY_TEST', 'ANTHROPIC_API_KEY'],
@@ -534,13 +534,13 @@ test('T15 — max_oauth THROWS + CLAUDE_CODE_OAUTH_TOKEN set + BYO store key →
   // CLAUDE_CODE_OAUTH_TOKEN must not short-circuit the BYO recovery
   // path. Verified: tier 0.5 is skipped when source 0 threw.
   await api_keys.add({
-    internal_handle: asOwnerHandle('casey-test'),
+    owner_handle: asOwnerHandle('casey-test'),
     provider: 'anthropic',
     label: 'primary',
     plaintext: 'sk-ant-stored-recovery',
   })
   const pool = await resolveLlmCredentials({
-    internal_handle: asOwnerHandle('casey-test'),
+    owner_handle: asOwnerHandle('casey-test'),
     apiKeys: api_keys,
     provider: 'anthropic',
     env_vars: ['ANTHROPIC_API_KEY'],
@@ -578,7 +578,7 @@ test('T15 — gemini provider ignores CLAUDE_CODE_OAUTH_TOKEN (Anthropic-only en
   // must NOT silently mint an oauth pool — those providers fall through
   // to their own per-instance + shared env API-key sources.
   const pool = await resolveLlmCredentials({
-    internal_handle: asOwnerHandle('casey-test'),
+    owner_handle: asOwnerHandle('casey-test'),
     apiKeys: api_keys,
     provider: 'gemini',
     env_vars: ['GEMINI_API_KEY_CASEY_TEST', 'GEMINI_API_KEY'],
@@ -608,7 +608,7 @@ test('T15 — gemini provider ignores CLAUDE_CODE_OAUTH_TOKEN (Anthropic-only en
 
 test('managed mode: shared env key is REFUSED → null + refusal WARN (reconnect signal)', async () => {
   const pool = await resolveLlmCredentials({
-    internal_handle: asOwnerHandle('casey-test'),
+    owner_handle: asOwnerHandle('casey-test'),
     apiKeys: api_keys,
     provider: 'anthropic',
     env_vars: ['ANTHROPIC_API_KEY_CASEY_TEST', 'ANTHROPIC_API_KEY'],
@@ -639,7 +639,7 @@ test('managed mode: shared env key is REFUSED → null + refusal WARN (reconnect
 // (the WARN-checking test above). This test documents the accepted new behavior.
 test('K11b2: retired NEUTRON_DEPLOYMENT_MODE alias → open → shared key IS usable (isolation now keyed on NEUTRON_ROLE only)', async () => {
   const pool = await resolveLlmCredentials({
-    internal_handle: asOwnerHandle('casey-test'),
+    owner_handle: asOwnerHandle('casey-test'),
     apiKeys: api_keys,
     provider: 'anthropic',
     env_vars: ['ANTHROPIC_API_KEY_CASEY_TEST', 'ANTHROPIC_API_KEY'],
@@ -660,7 +660,7 @@ test('K11b2: retired NEUTRON_DEPLOYMENT_MODE alias → open → shared key IS us
 
 test('connect mode: shared env key also refused (only open may use it)', async () => {
   const pool = await resolveLlmCredentials({
-    internal_handle: asOwnerHandle('casey-test'),
+    owner_handle: asOwnerHandle('casey-test'),
     apiKeys: api_keys,
     provider: 'anthropic',
     env_vars: ['ANTHROPIC_API_KEY_CASEY_TEST', 'ANTHROPIC_API_KEY'],
@@ -674,7 +674,7 @@ test('connect mode: shared env key also refused (only open may use it)', async (
 
 test('managed mode: per-project tiers stay INTACT (per-project env resolves)', async () => {
   const pool = await resolveLlmCredentials({
-    internal_handle: asOwnerHandle('casey-test'),
+    owner_handle: asOwnerHandle('casey-test'),
     apiKeys: api_keys,
     provider: 'anthropic',
     env_vars: ['ANTHROPIC_API_KEY_CASEY_TEST', 'ANTHROPIC_API_KEY'],
@@ -691,13 +691,13 @@ test('managed mode: per-project tiers stay INTACT (per-project env resolves)', a
 
 test('managed mode: SecretsStore tier stays INTACT (BYO key resolves)', async () => {
   await api_keys.add({
-    internal_handle: asOwnerHandle('casey-test'),
+    owner_handle: asOwnerHandle('casey-test'),
     provider: 'anthropic',
     label: 'primary',
     plaintext: 'sk-ant-stored',
   })
   const pool = await resolveLlmCredentials({
-    internal_handle: asOwnerHandle('casey-test'),
+    owner_handle: asOwnerHandle('casey-test'),
     apiKeys: api_keys,
     provider: 'anthropic',
     env_vars: ['ANTHROPIC_API_KEY_CASEY_TEST', 'ANTHROPIC_API_KEY'],
@@ -713,7 +713,7 @@ test('managed mode: SecretsStore tier stays INTACT (BYO key resolves)', async ()
 
 test('managed mode: Max OAuth tier stays INTACT and wins', async () => {
   const pool = await resolveLlmCredentials({
-    internal_handle: asOwnerHandle('casey-test'),
+    owner_handle: asOwnerHandle('casey-test'),
     apiKeys: api_keys,
     provider: 'anthropic',
     env_vars: ['ANTHROPIC_API_KEY_CASEY_TEST', 'ANTHROPIC_API_KEY'],
@@ -735,7 +735,7 @@ test('managed mode: Max OAuth tier stays INTACT and wins', async () => {
 
 test('open mode (explicit): shared env fallback still resolves — OSS self-host unbroken', async () => {
   const pool = await resolveLlmCredentials({
-    internal_handle: asOwnerHandle('casey-test'),
+    owner_handle: asOwnerHandle('casey-test'),
     apiKeys: api_keys,
     provider: 'anthropic',
     env_vars: ['ANTHROPIC_API_KEY_CASEY_TEST', 'ANTHROPIC_API_KEY'],

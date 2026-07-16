@@ -53,7 +53,7 @@ export interface CoresIntegrationsSurfaceOptions {
    * consistent. Optional: Core slots are secret-only.
    */
   db?: ProjectDb
-  /** Frozen internal_handle for this instance. */
+  /** Frozen owner_handle for this instance. */
   project_slug: string
   /** App bearer resolver. */
   auth: AppWsAuthResolver

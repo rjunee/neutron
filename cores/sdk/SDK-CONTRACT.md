@@ -96,7 +96,7 @@ Throws `PlatformJwtError(code, message)` with codes: `token_invalid` | `token_ex
 
 ### `secrets.ts` — `SecretsAccessor` (capability-gated)
 
-`buildSecretsAccessor({manifest|secrets}, {internal_handle, store, core_id})` wraps the platform's `SecretsStore` (`auth/secrets-store.ts`, AES-256-GCM keyfile). Every `get/put/list` call:
+`buildSecretsAccessor({manifest|secrets}, {owner_handle, store, core_id})` wraps the platform's `SecretsStore` (`auth/secrets-store.ts`, AES-256-GCM keyfile). Every `get/put/list` call:
 
 1. Looks up `(kind, label)` in the Core's manifest `secrets[]`.
 2. If absent: throws `CapabilityDeniedError`. The Core never sees the plaintext.
@@ -312,7 +312,7 @@ if (adminMountPath !== null) {
 import { buildSecretsAccessor } from '@neutron/cores-sdk'
 
 const secrets = buildSecretsAccessor({manifest}, {
-  internal_handle: SLUG,
+  owner_handle: SLUG,
   store: platformSecretsStore, // injected — duck-typed against PlatformSecretsStore
   core_id: pkg.name,
 })

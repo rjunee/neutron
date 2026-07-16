@@ -302,7 +302,7 @@ export async function verifyStartTokenCryptographic(
  * shim), so the concrete identity here is immaterial.
  */
 const TESTKIT_SELF_OWNER: PlatformInstanceInfo = {
-  internal_handle: 't-start-token-testkit-0001',
+  owner_handle: 't-start-token-testkit-0001',
   url_slug: 'testkit',
   owner_home: '/tmp/neutron-start-token-testkit',
   agent_name: null,

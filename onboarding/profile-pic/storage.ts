@@ -116,7 +116,7 @@ export interface ProfilePicStorageDeps {
    * Throws on real DB failures (caller wraps in ProfilePicStorageError).
    */
   setAgentAvatarPath?: (
-    internal_handle: string,
+    owner_handle: string,
     agent_avatar_path: string | null,
   ) => Promise<boolean | void>
   /**
@@ -132,7 +132,7 @@ export interface ProfilePicStorageDeps {
 
 export interface PersistChosenAvatarInput {
   /** Frozen registry handle (`t-<8 hex>`). NULL skips the registry write. */
-  internal_handle: string | null
+  owner_handle: string | null
   /** Per-instance data dir. Pipeline + storage agree on this layout. */
   owner_home: string
   /**
@@ -162,7 +162,7 @@ export interface PersistChosenAvatarResult {
  *
  * Sequence:
  *   1. Verify canonical disk path exists; throw `canonical_missing` if not.
- *   2. If `setAgentAvatarPath` wired AND `internal_handle` non-null:
+ *   2. If `setAgentAvatarPath` wired AND `owner_handle` non-null:
  *      update the registry pointer; throw `registry_failed` on error.
  *   3. If `setBotAvatar` wired AND `bot_token` non-null: read the
  *      canonical bytes + push to Telegram. Failures here log + report
@@ -191,11 +191,11 @@ export async function persistChosenAvatar(
   let registry_updated = false
   if (
     deps.setAgentAvatarPath !== undefined &&
-    typeof input.internal_handle === 'string' &&
-    input.internal_handle.length > 0
+    typeof input.owner_handle === 'string' &&
+    input.owner_handle.length > 0
   ) {
     try {
-      const r = await deps.setAgentAvatarPath(input.internal_handle, canonical_path)
+      const r = await deps.setAgentAvatarPath(input.owner_handle, canonical_path)
       // Codex r4 P2 — honor the soft-fail signal. `false` means the
       // setter ran but didn't actually update (e.g. migration 0005
       // missing). Treat as not-updated so the commit transcript +
@@ -204,7 +204,7 @@ export async function persistChosenAvatar(
     } catch (err) {
       throw new ProfilePicStorageError(
         'registry_failed',
-        `setAgentAvatarPath failed for handle=${input.internal_handle}`,
+        `setAgentAvatarPath failed for handle=${input.owner_handle}`,
         err,
       )
     }
@@ -265,7 +265,7 @@ export async function persistChosenAvatar(
  * outcome shape onto the pipeline's one. Production composers wire:
  *
  *   - `pipeline` — `new ProfilePicPipeline({ db, owner_home, gemini })`
- *   - `internal_handle` — frozen registry handle for THIS instance
+ *   - `owner_handle` — frozen registry handle for THIS instance
  *   - `owner_home` — same as the pipeline's
  *   - `setAgentAvatarPath` — `(h, p) => registry.setAgentAvatarPath(h, p)`
  *     against an RW registry handle opened from `NEUTRON_REGISTRY_DB_PATH`
@@ -277,7 +277,7 @@ export async function persistChosenAvatar(
 export interface BuildProfilePicEngineHookInput {
   pipeline: ProfilePicPipeline
   /** Frozen registry handle. Threaded into `persistChosenAvatar`. */
-  internal_handle: string | null
+  owner_handle: string | null
   /** Per-instance data dir. */
   owner_home: string
   /** Registry pointer setter (RW). Optional — when absent, the registry
@@ -625,7 +625,7 @@ export function buildProfilePicEngineHook(
         const bot_token = await Promise.resolve(input.getBotToken())
         result = await persistChosenAvatar(
           {
-            internal_handle: input.internal_handle,
+            owner_handle: input.owner_handle,
             owner_home: input.owner_home,
             bot_token: bot_token ?? null,
           },

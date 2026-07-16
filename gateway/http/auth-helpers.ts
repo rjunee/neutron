@@ -32,8 +32,8 @@ export function ownerSlugMismatch(actual: string, expected: string): boolean {
 }
 
 /**
- * Resolve an instance slug (either the frozen `internal_handle` OR the
- * current renameable `url_slug`) to its canonical `internal_handle`.
+ * Resolve an instance slug (either the frozen `owner_handle` OR the
+ * current renameable `url_slug`) to its canonical `owner_handle`.
  * Returns `null` when the slug matches no instance in the registry.
  */
 export type OwnerHandleResolver = (slug: string) => string | null
@@ -44,21 +44,21 @@ export type OwnerHandleResolver = (slug: string) => string | null
  * match needs. Structural so tests can pass the real registry or a stub.
  */
 export interface OwnerHandleLookup {
-  getByInternalHandle(internal_handle: string): { internal_handle: string } | undefined
-  getBySlug(url_slug: string): { internal_handle: string } | undefined
+  getByOwnerHandle(owner_handle: string): { owner_handle: string } | undefined
+  getBySlug(url_slug: string): { owner_handle: string } | undefined
 }
 
 /**
  * Build a `OwnerHandleResolver` over the instances registry. Tries the
- * frozen `internal_handle` first (the common case for gateway-bound
+ * frozen `owner_handle` first (the common case for gateway-bound
  * slugs from `NEUTRON_INSTANCE_SLUG`), then the current `url_slug` (the
  * common case for session-cookie slugs minted from the public
  * subdomain).
  */
 export function buildOwnerHandleResolver(registry: OwnerHandleLookup): OwnerHandleResolver {
   return (slug: string): string | null => {
-    const row = registry.getByInternalHandle(slug) ?? registry.getBySlug(slug)
-    return row?.internal_handle ?? null
+    const row = registry.getByOwnerHandle(slug) ?? registry.getBySlug(slug)
+    return row?.owner_handle ?? null
   }
 }
 
@@ -68,14 +68,14 @@ export function buildOwnerHandleResolver(registry: OwnerHandleLookup): OwnerHand
  * `ownerSlugMismatch` above compares raw slug STRINGS — which breaks
  * the moment an instance's `url_slug` is renamed post-onboarding: the
  * session cookie carries the NEW url_slug (e.g. "kairos") while the
- * per-instance gateway stays bound to the frozen `internal_handle`
+ * per-instance gateway stays bound to the frozen `owner_handle`
  * (`NEUTRON_INSTANCE_SLUG=t-33333333`), so every cookie-authed surface
  * 401'd `project_mismatch` and the sidebar rendered General-only.
  *
  * INVARIANT: a url_slug rename must NEVER break cookie-authed HTTP
- * requests. Instance identity is the frozen `internal_handle`; the
+ * requests. Instance identity is the frozen `owner_handle`; the
  * renameable `url_slug` is presentation. This helper resolves BOTH
- * sides through the instances registry to their `internal_handle` and
+ * sides through the instances registry to their `owner_handle` and
  * compares those (timing-safe). A side that resolves to no instance
  * falls back to its raw value so two unknown-but-equal slugs still
  * match (test fixtures, registry-less compositions) and an unknown

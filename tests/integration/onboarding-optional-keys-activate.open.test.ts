@@ -60,7 +60,7 @@ test('provided OpenAI key → stored via ApiKeyStore → resolver ACTIVATES the 
 
   // The onboarding step hands the pasted key to the canonical seam.
   const res = await storeOptionalKey(apiKeys, {
-    internal_handle: OWNER,
+    owner_handle: OWNER,
     id: 'openai_api_key',
     plaintext: OPENAI_KEY,
   })
@@ -68,13 +68,13 @@ test('provided OpenAI key → stored via ApiKeyStore → resolver ACTIVATES the 
   expect(res.provider).toBe('openai')
 
   // It is now a real ApiKeyStore row.
-  const rows = await apiKeys.list({ internal_handle: OWNER, provider: 'openai' })
+  const rows = await apiKeys.list({ owner_handle: OWNER, provider: 'openai' })
   expect(rows).toHaveLength(1)
   expect(rows[0]?.label).toBe('onboarding')
 
   // The gateway resolver picks it up → the OpenAI adapter is ACTIVATED.
   const pool = await resolveLlmCredentials({
-    internal_handle: OWNER,
+    owner_handle: OWNER,
     apiKeys,
     provider: 'openai',
     env_vars: ['OPENAI_API_KEY'],
@@ -92,7 +92,7 @@ test('SKIPPED OpenAI key → no OpenAI surface, but Claude (Anthropic) still res
 
   // The user SKIPPED the optional OpenAI offer — nothing is stored.
   const openaiPool = await resolveLlmCredentials({
-    internal_handle: OWNER,
+    owner_handle: OWNER,
     apiKeys,
     provider: 'openai',
     env_vars: ['OPENAI_API_KEY'],
@@ -103,7 +103,7 @@ test('SKIPPED OpenAI key → no OpenAI surface, but Claude (Anthropic) still res
   // The system still works on Claude alone: the Anthropic substrate (here a
   // shared-env key, the OSS single-instance 'open' default) resolves.
   const anthropicPool = await resolveLlmCredentials({
-    internal_handle: OWNER,
+    owner_handle: OWNER,
     apiKeys,
     provider: 'anthropic',
     env_vars: ['ANTHROPIC_API_KEY'],

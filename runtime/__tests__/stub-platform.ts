@@ -39,7 +39,7 @@ import type {
 } from '@neutronai/runtime/platform-adapter.ts'
 
 export const STUB_OWNER: PlatformInstanceInfo = {
-  internal_handle: 't-test-stub-0001',
+  owner_handle: 't-test-stub-0001',
   url_slug: 'stub',
   owner_home: '/tmp/neutron-test-stub',
   agent_name: null,

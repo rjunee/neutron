@@ -567,7 +567,7 @@ describe('Argus r1 BLOCKER 2 — phase-enter handler queries pendingStore', () =
 
     const hook = buildProfilePicEngineHook({
       pipeline,
-      internal_handle: null,
+      owner_handle: null,
       owner_home: '/tmp/dummy',
       getBotToken: () => null,
       imageUrlBuilder: ({ candidate_id }) => `/profile-pic/candidate/${candidate_id}.png`,
@@ -623,7 +623,7 @@ describe('Argus r1 BLOCKER 2 — phase-enter handler queries pendingStore', () =
 
     const hook = buildProfilePicEngineHook({
       pipeline,
-      internal_handle: null,
+      owner_handle: null,
       owner_home: '/tmp/dummy',
       getBotToken: () => null,
       imageUrlBuilder: ({ candidate_id }) => `/profile-pic/candidate/${candidate_id}.png`,
@@ -826,7 +826,7 @@ function buildEngineHookOver(
 ): ProfilePicEngineHook {
   return buildProfilePicEngineHook({
     pipeline,
-    internal_handle: null,
+    owner_handle: null,
     owner_home: '/tmp/dummy',
     getBotToken: () => null,
     imageUrlBuilder: ({ candidate_id }) => `/profile-pic/candidate/${candidate_id}.png`,

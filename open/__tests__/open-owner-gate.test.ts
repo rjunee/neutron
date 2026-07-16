@@ -63,7 +63,7 @@ afterEach(() => {
 function makeCtx(env: NodeJS.ProcessEnv = {} as NodeJS.ProcessEnv): OpenWiringContext {
   return {
     llmPool: null,
-    internal_handle: PROJECT_SLUG,
+    owner_handle: PROJECT_SLUG,
     owner_home: tmpDir,
     project_slug: PROJECT_SLUG,
     env,

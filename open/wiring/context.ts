@@ -42,7 +42,7 @@ export interface OpenWiringContext {
    */
   substrateFactory?: (opts: ClaudeCodeSubstrateOptions) => Substrate
   /** Frozen single-owner instance handle (== boot slug). Substrate pool key. */
-  internal_handle: string
+  owner_handle: string
   /** Owner HOME base dir (substrate cwd + GBrain/scribe/reflection data root). */
   owner_home: string
   /** Boot-frozen project slug (metering + pool key). */

@@ -38,8 +38,8 @@ class InMemoryPlatformStore implements PlatformSecretsStore {
     { id: string; plaintext: string; expires_at?: number }
   >()
   private nextId = 1
-  async get(input: { internal_handle: string; kind: string; label: string }): Promise<string | null> {
-    const row = this.rows.get(`${input.internal_handle}:${input.kind}:${input.label}`)
+  async get(input: { owner_handle: string; kind: string; label: string }): Promise<string | null> {
+    const row = this.rows.get(`${input.owner_handle}:${input.kind}:${input.label}`)
     if (row === undefined) return null
     if (row.expires_at !== undefined && row.expires_at <= Date.now()) {
       return null
@@ -47,13 +47,13 @@ class InMemoryPlatformStore implements PlatformSecretsStore {
     return row.plaintext
   }
   async put(input: {
-    internal_handle: string
+    owner_handle: string
     kind: string
     label: string
     plaintext: string
     expires_at?: number
   }): Promise<{ id: string }> {
-    const key = `${input.internal_handle}:${input.kind}:${input.label}`
+    const key = `${input.owner_handle}:${input.kind}:${input.label}`
     if (this.rows.has(key)) {
       throw new Error('duplicate_label')
     }
@@ -84,7 +84,7 @@ class InMemoryPlatformStore implements PlatformSecretsStore {
     }
     throw new Error('not_found')
   }
-  async list(input: { internal_handle: string; kind?: string }): Promise<Array<{ id: string; kind: string; label: string }>> {
+  async list(input: { owner_handle: string; kind?: string }): Promise<Array<{ id: string; kind: string; label: string }>> {
     const out: Array<{ id: string; kind: string; label: string }> = []
     for (const [k, v] of this.rows) {
       const parts = k.split(':')
@@ -92,7 +92,7 @@ class InMemoryPlatformStore implements PlatformSecretsStore {
       const slug = parts[0] ?? ''
       const kind = parts[1] ?? ''
       const label = parts.slice(2).join(':')
-      if (slug !== input.internal_handle) continue
+      if (slug !== input.owner_handle) continue
       if (input.kind !== undefined && kind !== input.kind) continue
       out.push({ id: v.id, kind, label })
     }
@@ -114,7 +114,7 @@ describe('secrets — capability gating (production accessor)', () => {
     const store = new InMemoryPlatformStore()
     const accessor = buildSecretsAccessor(
       { manifest },
-      { internal_handle: asOwnerHandle('topline'), store, core_id: '@neutronai/dtc-analytics' },
+      { owner_handle: asOwnerHandle('topline'), store, core_id: '@neutronai/dtc-analytics' },
     )
     await accessor.put('byo_api_key', 'shopify', 'sk_test_123')
     expect(await accessor.get('byo_api_key', 'shopify')).toBe('sk_test_123')
@@ -134,7 +134,7 @@ describe('secrets — capability gating (production accessor)', () => {
     const store = new InMemoryPlatformStore()
     const accessor = buildSecretsAccessor(
       { manifest },
-      { internal_handle: asOwnerHandle('topline'), store, core_id: '@neutronai/dtc-analytics' },
+      { owner_handle: asOwnerHandle('topline'), store, core_id: '@neutronai/dtc-analytics' },
     )
     await expect(accessor.get('byo_api_key', 'stripe')).rejects.toBeInstanceOf(
       CapabilityDeniedError,
@@ -146,7 +146,7 @@ describe('secrets — capability gating (production accessor)', () => {
     const store = new InMemoryPlatformStore()
     const accessor = buildSecretsAccessor(
       { manifest },
-      { internal_handle: asOwnerHandle('topline'), store, core_id: '@neutronai/dtc-analytics' },
+      { owner_handle: asOwnerHandle('topline'), store, core_id: '@neutronai/dtc-analytics' },
     )
     await expect(accessor.put('byo_api_key', 'shopify', 'sk')).rejects.toBeInstanceOf(
       CapabilityDeniedError,
@@ -166,7 +166,7 @@ describe('secrets — capability gating (production accessor)', () => {
     const store = new InMemoryPlatformStore()
     const accessor = buildSecretsAccessor(
       { manifest },
-      { internal_handle: asOwnerHandle('topline'), store, core_id: '@neutronai/dtc-analytics' },
+      { owner_handle: asOwnerHandle('topline'), store, core_id: '@neutronai/dtc-analytics' },
     )
     const past = Date.now() - 1000
     await accessor.put('oauth_token', 'google', 'access_token_v1', {
@@ -190,7 +190,7 @@ describe('secrets — capability gating (production accessor)', () => {
     const store = new InMemoryPlatformStore()
     const accessor = buildSecretsAccessor(
       { manifest },
-      { internal_handle: asOwnerHandle('topline'), store, core_id: '@neutronai/dtc-analytics' },
+      { owner_handle: asOwnerHandle('topline'), store, core_id: '@neutronai/dtc-analytics' },
     )
     // Insert with expiry in the future (token still valid).
     await accessor.put('oauth_token', 'google', 'access_v1', {
@@ -250,7 +250,7 @@ describe('secrets — capability gating (production accessor)', () => {
     }
     const accessor = buildSecretsAccessor(
       { manifest },
-      { internal_handle: asOwnerHandle('topline'), store, core_id: 'x' },
+      { owner_handle: asOwnerHandle('topline'), store, core_id: 'x' },
     )
     // Pre-seed via a side-channel: simulate the racing writer
     // landing INSERT after our list() but before our put().
@@ -289,7 +289,7 @@ describe('secrets — capability gating (production accessor)', () => {
     }
     const accessor = buildSecretsAccessor(
       { manifest },
-      { internal_handle: asOwnerHandle('topline'), store, core_id: 'x' },
+      { owner_handle: asOwnerHandle('topline'), store, core_id: 'x' },
     )
     await expect(accessor.put('byo_api_key', 'shopify', 'sk')).rejects.toBeInstanceOf(
       CapabilityDeniedError,
@@ -309,7 +309,7 @@ describe('secrets — capability gating (production accessor)', () => {
     const store = new InMemoryPlatformStore()
     const accessor = buildSecretsAccessor(
       { manifest },
-      { internal_handle: asOwnerHandle('topline'), store, core_id: '@neutronai/dtc-analytics' },
+      { owner_handle: asOwnerHandle('topline'), store, core_id: '@neutronai/dtc-analytics' },
     )
     await accessor.put('byo_api_key', 'shopify', 'sk_test_123')
     // Re-put under the same (kind, label) — should rotate, not throw.
@@ -330,20 +330,20 @@ describe('secrets — capability gating (production accessor)', () => {
     const store = new InMemoryPlatformStore()
     // Pre-seed the store with both declared and undeclared secrets.
     await store.put({
-      internal_handle: asOwnerHandle('topline'),
+      owner_handle: asOwnerHandle('topline'),
       kind: 'byo_api_key',
       label: 'shopify',
       plaintext: 'a',
     })
     await store.put({
-      internal_handle: asOwnerHandle('topline'),
+      owner_handle: asOwnerHandle('topline'),
       kind: 'byo_api_key',
       label: 'stripe',
       plaintext: 'b',
     })
     const accessor = buildSecretsAccessor(
       { manifest },
-      { internal_handle: asOwnerHandle('topline'), store, core_id: '@neutronai/dtc-analytics' },
+      { owner_handle: asOwnerHandle('topline'), store, core_id: '@neutronai/dtc-analytics' },
     )
     const list = await accessor.list()
     expect(list).toEqual([{ kind: 'byo_api_key', label: 'shopify' }])

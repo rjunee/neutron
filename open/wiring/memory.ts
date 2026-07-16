@@ -85,7 +85,7 @@ export interface WiredMemory {
  * The composer appends the returned `cleanups` onto its `realmodeCleanups`.
  */
 export function wireMemory(ctx: OpenWiringContext): WiredMemory {
-  const { llmPool, substrateFactory, internal_handle, owner_home, project_slug, env, db } = ctx
+  const { llmPool, substrateFactory, owner_handle, owner_home, project_slug, env, db } = ctx
   const cleanups: Array<() => void> = []
 
   // ── Scribe: chat-time entity extraction → GBrain (P0 daily-driver) ─────
@@ -107,9 +107,9 @@ export function wireMemory(ctx: OpenWiringContext): WiredMemory {
     llmPool !== null
       ? buildLlmCallSubstrate({
           pool: llmPool,
-          substrate_instance_id: `cc-scribe-${internal_handle}`,
+          substrate_instance_id: `cc-scribe-${owner_handle}`,
           cwd: owner_home,
-          internal_handle,
+          owner_handle,
           user_id: OWNER_USER_ID,
           project_slug,
           skip_permissions: true,
@@ -135,7 +135,7 @@ export function wireMemory(ctx: OpenWiringContext): WiredMemory {
   //
   // ND1: activate GBrain semantic embeddings from the owner's onboarding-
   // captured OpenAI key (ApiKeyStore, provider=openai label=onboarding;
-  // internal_handle == project_slug). When present, GBrain serves with
+  // owner_handle == project_slug). When present, GBrain serves with
   // OpenAI `text-embedding-3-large`; absent → keyword + graph default.
   //
   // LAZY resolution (not an eager read here): this composition runs ONCE at
@@ -160,7 +160,7 @@ export function wireMemory(ctx: OpenWiringContext): WiredMemory {
     env,
     syncStateSink: gbrainSyncStateSink,
     resolveOpenAiKey: () =>
-      resolveOnboardingOpenAiKey({ db, owner_home, internal_handle, project_slug }),
+      resolveOnboardingOpenAiKey({ db, owner_home, owner_handle, project_slug }),
   })
   cleanups.push(() => {
     fireAndForget('memory.close', gbrainMemory.close())
@@ -230,9 +230,9 @@ export function wireMemory(ctx: OpenWiringContext): WiredMemory {
     llmPool !== null
       ? buildLlmCallSubstrate({
           pool: llmPool,
-          substrate_instance_id: `cc-reflection-${internal_handle}`,
+          substrate_instance_id: `cc-reflection-${owner_handle}`,
           cwd: owner_home,
-          internal_handle,
+          owner_handle,
           user_id: OWNER_USER_ID,
           project_slug,
           skip_permissions: true,

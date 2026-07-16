@@ -226,7 +226,7 @@ test('install layer: Google Cores are HIDDEN with no grant, LIVE once the OAuth 
   // then install → the prompter surfaces it and the Calendar Core installs LIVE.
   const b = makeBench()
   await b.secretsStore.put({
-    internal_handle: OWNER,
+    owner_handle: OWNER,
     kind: 'oauth_token',
     label: 'google_calendar',
     plaintext: 'access-token',

@@ -4,7 +4,7 @@
  * Reproduces the live prod bug: after the post-onboarding slug picker
  * renames an owner's `url_slug` (t-33333333 → kairos), the browser's
  * session cookie carries the NEW url_slug while the per-instance gateway
- * stays bound to the frozen `internal_handle`
+ * stays bound to the frozen `owner_handle`
  * (`NEUTRON_INSTANCE_SLUG=t-33333333`). The cookie→claim resolver returns
  * `project_slug = row.url_slug` ("kairos"), the sidebar surface's
  * defense-in-depth guard compares it RAW against `opts.project_slug`
@@ -14,7 +14,7 @@
  *
  * INVARIANT under test: a url_slug rename must NEVER break cookie-authed
  * HTTP requests. The instance-identity match must compare the STABLE
- * `internal_handle`, never the renameable `url_slug`.
+ * `owner_handle`, never the renameable `url_slug`.
  *
  * The harness wires the REAL production chain end-to-end:
  *   real OwnersRegistry (insert + updateUrlSlug rename)
@@ -59,14 +59,14 @@ const COOKIE_SECRET = 'test-cookie-secret-32-chars-long!!'
  * registry module the Open split strips, but the Open production code under
  * test (`buildCookieUserClaim` + the instance-handle resolver) consumes it
  * through the narrow `CookieClaimRegistry` lookup contract only
- * (`getByInternalHandle` → {internal_handle, url_slug, owner_user_id},
- * `getBySlug` → {internal_handle}). This in-memory fake satisfies that exact
+ * (`getByOwnerHandle` → {owner_handle, url_slug, owner_user_id},
+ * `getBySlug` → {owner_handle}). This in-memory fake satisfies that exact
  * contract and keeps the same `insert` / `updateUrlSlug` fixture API the test
  * uses to build the renamed-instance prod shape — so the resolvers run the
  * identical canonical-internal-handle comparison without a Managed import.
  */
 interface FakeInstanceRow {
-  internal_handle: string
+  owner_handle: string
   url_slug: string
   owner_user_id: string | null
 }
@@ -75,13 +75,13 @@ class FakeInstancesRegistry implements CookieClaimRegistry {
   private readonly byHandle = new Map<string, FakeInstanceRow>()
 
   insert(row: {
-    internal_handle: string
+    owner_handle: string
     url_slug: string
     owner_user_id: string | null
     [key: string]: unknown
   }): void {
-    this.byHandle.set(row.internal_handle, {
-      internal_handle: row.internal_handle,
+    this.byHandle.set(row.owner_handle, {
+      owner_handle: row.owner_handle,
       url_slug: row.url_slug,
       owner_user_id: row.owner_user_id,
     })
@@ -90,23 +90,23 @@ class FakeInstancesRegistry implements CookieClaimRegistry {
   /** Mirrors the registry's CAS rename: only commits when the current
    *  url_slug matches `casExpected`. */
   updateUrlSlug(
-    internal_handle: string,
+    owner_handle: string,
     new_url_slug: string,
     casExpected: string,
   ): boolean {
-    const row = this.byHandle.get(internal_handle)
+    const row = this.byHandle.get(owner_handle)
     if (row === undefined || row.url_slug !== casExpected) return false
     row.url_slug = new_url_slug
     return true
   }
 
-  getByInternalHandle(internal_handle: string): FakeInstanceRow | undefined {
-    return this.byHandle.get(internal_handle)
+  getByOwnerHandle(owner_handle: string): FakeInstanceRow | undefined {
+    return this.byHandle.get(owner_handle)
   }
 
-  getBySlug(url_slug: string): { internal_handle: string } | undefined {
+  getBySlug(url_slug: string): { owner_handle: string } | undefined {
     for (const row of this.byHandle.values()) {
-      if (row.url_slug === url_slug) return { internal_handle: row.internal_handle }
+      if (row.url_slug === url_slug) return { owner_handle: row.owner_handle }
     }
     return undefined
   }
@@ -125,7 +125,7 @@ async function startRenamedOwnerGateway(): Promise<Harness> {
   // --- registry with a RENAMED instance row (the prod shape) ---
   const registry = new FakeInstancesRegistry()
   registry.insert({
-    internal_handle: INTERNAL_HANDLE,
+    owner_handle: INTERNAL_HANDLE,
     url_slug: INTERNAL_HANDLE, // first-issued slug == internal handle
     kind: 'user',
     tier: 'managed-shared',
@@ -153,7 +153,7 @@ async function startRenamedOwnerGateway(): Promise<Harness> {
   // gateway env carries the INTERNAL handle (NEUTRON_INSTANCE_SLUG). ---
   const resolveUserClaim = buildCookieUserClaim({
     cookie_secret: COOKIE_SECRET,
-    internal_handle: INTERNAL_HANDLE,
+    owner_handle: INTERNAL_HANDLE,
     registry,
   })
   const resolveOwnerHandle = buildOwnerHandleResolver(registry)
@@ -282,7 +282,7 @@ describe('slug-rename project-identity match — cookie-authed surfaces', () => 
 
   test('cookie for a DIFFERENT project is still rejected (cross-project guard intact)', async () => {
     await harness.registry.insert({
-      internal_handle: 't-66666666',
+      owner_handle: 't-66666666',
       url_slug: 'other-project',
       kind: 'user',
       tier: 'managed-shared',

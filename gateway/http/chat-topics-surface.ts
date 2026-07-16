@@ -81,7 +81,7 @@ export interface ChatTopicsSurfaceOptions {
   /** The project_slug this surface is bound to (defense-in-depth check). */
   project_slug: string
   /**
-   * Canonical slug → internal_handle resolver (2026-06-10 slug-rename
+   * Canonical slug → owner_handle resolver (2026-06-10 slug-rename
    * P0). Production wires `buildOwnerHandleResolver(ownersRegistry)`
    * so the identity guard compares frozen internal handles, not
    * renameable url_slugs — a post-onboarding slug rename must never

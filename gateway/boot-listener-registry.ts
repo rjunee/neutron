@@ -30,7 +30,7 @@ const DEFAULT_LISTEN_PORT = 7_800
 /**
  * Resolve the platform instances-registry SQLite path. The per-instance
  * gateway opens this read-only at boot to (a) look up its own
- * `internal_handle` keyed by `url_slug` and (b) wire the JWT
+ * `owner_handle` keyed by `url_slug` and (b) wire the JWT
  * slug-history shim against the live `slug_history` table.
  *
  * Resolution order mirrors the provisioning CLI's `defaultRegistryDbPath`
@@ -69,7 +69,7 @@ export function resolveRegistryDbPath(env: NodeJS.ProcessEnv = process.env): str
 }
 
 /**
- * Look up the boot instance's registry row with an `internal_handle` fallback.
+ * Look up the boot instance's registry row with an `owner_handle` fallback.
  *
  * Primary path: `requested_slug` matches the row's `url_slug`. This is the
  * common case — the systemd unit's `NEUTRON_INSTANCE_SLUG` env (or the
@@ -77,11 +77,11 @@ export function resolveRegistryDbPath(env: NodeJS.ProcessEnv = process.env): str
  * current user-visible slug.
  *
  * Fallback path: the unit was booted with a stale value that still matches
- * the frozen `internal_handle` (e.g. `t-aaaaaaaa`). This happens when an
+ * the frozen `owner_handle` (e.g. `t-aaaaaaaa`). This happens when an
  * orchestrator slug-rename updates the registry's `url_slug` but the
  * per-instance systemd unit's slug env / .url_slug file is
  * not regenerated in lockstep — the unit's instance name is keyed to
- * `internal_handle` (correctly, since handles are stable across renames),
+ * `owner_handle` (correctly, since handles are stable across renames),
  * so it can still find the row by handle. The composer canonicalises
  * `project_slug` to the row's `url_slug` and the caller logs a one-line
  * WARN telling the operator to regenerate the drop-in.
@@ -90,7 +90,7 @@ export function resolveRegistryDbPath(env: NodeJS.ProcessEnv = process.env): str
  * JWT slug-history shim / connect routing silently.
  *
  * Incident of record: 2026-05-10, live instance renamed from
- * its frozen `internal_handle` to a custom `url_slug`; the per-instance unit's
+ * its frozen `owner_handle` to a custom `url_slug`; the per-instance unit's
  * `NEUTRON_INSTANCE_SLUG` (still the handle) was not regenerated, so the gateway
  * crash-looped on every restart for 41+ cycles before a manual
  * `slug-rename.conf` drop-in landed. See
@@ -104,21 +104,21 @@ export function resolveRegistryDbPath(env: NodeJS.ProcessEnv = process.env): str
  * typing closes the gap without a provisioning-module import edge.
  */
 export interface BootOwnerRow {
-  internal_handle: string
+  owner_handle: string
   url_slug: string
   owner_user_id?: string | null
 }
 
 /**
  * Structural alias for the registry methods the boot shell actually
- * invokes (`getBySlug` + `getByInternalHandle`). The Managed concrete
+ * invokes (`getBySlug` + `getByOwnerHandle`). The Managed concrete
  * `OwnersRegistry` (constructed via the dynamic
  * provisioning-module registry import at composer-build time)
  * structurally satisfies this alias.
  */
 export interface BootOwnersRegistry {
   getBySlug(url_slug: string): BootOwnerRow | undefined
-  getByInternalHandle(internal_handle: string): BootOwnerRow | undefined
+  getByOwnerHandle(owner_handle: string): BootOwnerRow | undefined
 }
 
 export interface OwnerRegistryLookupResult {
@@ -127,7 +127,7 @@ export interface OwnerRegistryLookupResult {
   project_slug: string
   /** The registry row. */
   row: BootOwnerRow
-  /** True iff we fell back from `getBySlug` to `getByInternalHandle`. */
+  /** True iff we fell back from `getBySlug` to `getByOwnerHandle`. */
   fallback_used: boolean
 }
 
@@ -142,17 +142,17 @@ export function resolveOwnerRegistryRow(input: {
   if (bySlug !== undefined) {
     return { project_slug: input.requested_slug, row: bySlug, fallback_used: false }
   }
-  const byHandle = input.registry.getByInternalHandle(input.requested_slug)
+  const byHandle = input.registry.getByOwnerHandle(input.requested_slug)
   if (byHandle !== undefined) {
     const canonical = byHandle.url_slug
     const warn = input.warn ?? ((m: string) => moduleLog.warn(m))
     warn(
-      `[gateway] project_slug arg was internal_handle, resolved to url_slug=${canonical}; the systemd unit's NEUTRON_INSTANCE_SLUG env / .url_slug file is stale — update it to "${canonical}" (edit the unit's Environment=NEUTRON_INSTANCE_SLUG= line or write the .url_slug file, then reload + restart the unit) so the arg matches the registry and this fallback stops firing`,
+      `[gateway] project_slug arg was owner_handle, resolved to url_slug=${canonical}; the systemd unit's NEUTRON_INSTANCE_SLUG env / .url_slug file is stale — update it to "${canonical}" (edit the unit's Environment=NEUTRON_INSTANCE_SLUG= line or write the .url_slug file, then reload + restart the unit) so the arg matches the registry and this fallback stops firing`,
     )
     return { project_slug: canonical, row: byHandle, fallback_used: true }
   }
   throw new Error(
-    `[composer] project=${input.requested_slug} not found in registry at ${input.registry_db_path} — refuse to boot rather than disable the JWT slug-history shim silently. Tried getBySlug + getByInternalHandle fallback; both missed.`,
+    `[composer] project=${input.requested_slug} not found in registry at ${input.registry_db_path} — refuse to boot rather than disable the JWT slug-history shim silently. Tried getBySlug + getByOwnerHandle fallback; both missed.`,
   )
 }
 

@@ -2,7 +2,7 @@
  * @neutronai/auth — multi-secret encrypted-at-rest store.
  *
  * Generalizes `EncryptedBotTokenStore` (the per-instance bot token store,
- * P1 S4) into a multi-secret store keyed by `(internal_handle, kind, label)`.
+ * P1 S4) into a multi-secret store keyed by `(owner_handle, kind, label)`.
  * The AES-256-GCM envelope shape `{ v: 1, iv_b64, ct_b64, tag_b64 }` is
  * unchanged — a token written by the legacy per-instance bot store decrypts
  * unchanged via this module.
@@ -11,19 +11,19 @@
  * the mutable `project_slug` (== `url_slug`). After an instance rename, the
  * gateway boot canonicalised `project_slug` to the row's NEW `url_slug`,
  * but secret rows persisted at the ORIGINAL `url_slug` (== initial
- * `internal_handle`) became invisible — Max OAuth + BYO API key reads
+ * `owner_handle`) became invisible — Max OAuth + BYO API key reads
  * silently returned null, dropping the chat surface to the gate page.
  *
- * The fix: callers MUST pass the FROZEN `internal_handle` (the registry
+ * The fix: callers MUST pass the FROZEN `owner_handle` (the registry
  * row's PK, locked at provisioning time) as this store's identity
  * parameter, NOT the mutable `url_slug`. The on-disk SQL column is still
  * literally named `project_slug` (no migration; the value is just a
  * string) but every TypeScript API surface in this module uses
- * `internal_handle` so the contract is explicit.
+ * `owner_handle` so the contract is explicit.
  *
  * Code that does cross-instance API calls / DNS / Caddy routing legitimately
  * uses the mutable `url_slug`. Anything that hits THIS store must use
- * `internal_handle`.
+ * `owner_handle`.
  *
  * Keyfile path is `<owner_home>/.neutron-aes-key`. The legacy bot-token
  * store ships its keyfile at the same path (verified in the legacy
@@ -122,11 +122,11 @@ export type SecretKind =
 export interface SecretRecord {
   id: string
   /**
-   * Frozen `internal_handle` for the owning project. SQL column is named
+   * Frozen `owner_handle` for the owning project. SQL column is named
    * `project_slug` for historical reasons; the value is the FROZEN
    * registry PK, not the mutable url_slug.
    */
-  internal_handle: string
+  owner_handle: string
   kind: SecretKind
   label: string
   ciphertext: string
@@ -151,7 +151,7 @@ interface EncryptedEnvelope {
 
 interface SecretRow {
   id: string
-  /** SQL column name remains `project_slug`; value is the frozen internal_handle. */
+  /** SQL column name remains `project_slug`; value is the frozen owner_handle. */
   project_slug: string
   kind: string
   label: string
@@ -181,11 +181,11 @@ export class SecretsStoreError extends Error {
 
 export interface PutInput {
   /**
-   * Frozen `internal_handle` for the owning project — see file header.
+   * Frozen `owner_handle` for the owning project — see file header.
    * Branded `OwnerHandle`: the compiler rejects a bare/mutable `url_slug`
    * string here (the 2026-05-12 credential-loss bug is now a type error).
    */
-  internal_handle: OwnerHandle
+  owner_handle: OwnerHandle
   kind: SecretKind
   label: string
   plaintext: string
@@ -193,15 +193,15 @@ export interface PutInput {
 }
 
 export interface GetInput {
-  /** Frozen `internal_handle` (branded `OwnerHandle`) — see file header. */
-  internal_handle: OwnerHandle
+  /** Frozen `owner_handle` (branded `OwnerHandle`) — see file header. */
+  owner_handle: OwnerHandle
   kind: SecretKind
   label: string
 }
 
 export interface ListInput {
-  /** Frozen `internal_handle` (branded `OwnerHandle`) — see file header. */
-  internal_handle: OwnerHandle
+  /** Frozen `owner_handle` (branded `OwnerHandle`) — see file header. */
+  owner_handle: OwnerHandle
   kind?: SecretKind
 }
 
@@ -232,7 +232,7 @@ export class SecretsStore {
          VALUES (?, ?, ?, ?, ?, ?, NULL, ?)`,
         [
           id,
-          input.internal_handle,
+          input.owner_handle,
           input.kind,
           input.label,
           ciphertext,
@@ -244,7 +244,7 @@ export class SecretsStore {
       if (isUniqueViolation(err)) {
         throw new SecretsStoreError(
           'duplicate_label',
-          `secret already exists for instance=${input.internal_handle} kind=${input.kind} label=${input.label}`,
+          `secret already exists for instance=${input.owner_handle} kind=${input.kind} label=${input.label}`,
           err,
         )
       }
@@ -259,7 +259,7 @@ export class SecretsStore {
         `SELECT id, project_slug, kind, label, ciphertext, created_at, rotated_at, expires_at
            FROM secrets
           WHERE project_slug = ? AND kind = ? AND label = ?`,
-        [input.internal_handle, input.kind, input.label],
+        [input.owner_handle, input.kind, input.label],
       )
     if (row === null) return null
     // Codex review fix: honor expires_at — an expired row behaves like a
@@ -287,13 +287,13 @@ export class SecretsStore {
             .all<SecretRow, [string]>(
               `SELECT id, project_slug, kind, label, ciphertext, created_at, rotated_at, expires_at
                  FROM secrets WHERE project_slug = ? ORDER BY created_at DESC`,
-              [input.internal_handle],
+              [input.owner_handle],
             )
         : this.db
             .all<SecretRow, [string, string]>(
               `SELECT id, project_slug, kind, label, ciphertext, created_at, rotated_at, expires_at
                  FROM secrets WHERE project_slug = ? AND kind = ? ORDER BY created_at DESC`,
-              [input.internal_handle, input.kind],
+              [input.owner_handle, input.kind],
             )
     return rows.map(rowToRecord)
   }
@@ -306,7 +306,7 @@ export class SecretsStore {
    * rows.
    *
    * The transaction does, for each input entry:
-   *   1. DELETE any existing rows for `(internal_handle, kind, label)`.
+   *   1. DELETE any existing rows for `(owner_handle, kind, label)`.
    *   2. INSERT the new ciphertext.
    * Wrapped in BEGIN/COMMIT — if any step throws, the whole
    * transaction rolls back and the previous values stay intact.
@@ -326,7 +326,7 @@ export class SecretsStore {
       for (const { entry } of prepared) {
         await tx.run(
           `DELETE FROM secrets WHERE project_slug = ? AND kind = ? AND label = ?`,
-          [entry.internal_handle, entry.kind, entry.label],
+          [entry.owner_handle, entry.kind, entry.label],
         )
       }
       for (const { entry, id, ciphertext } of prepared) {
@@ -337,7 +337,7 @@ export class SecretsStore {
              VALUES (?, ?, ?, ?, ?, ?, NULL, ?)`,
             [
               id,
-              entry.internal_handle,
+              entry.owner_handle,
               entry.kind,
               entry.label,
               ciphertext,
@@ -349,7 +349,7 @@ export class SecretsStore {
           if (isUniqueViolation(err)) {
             throw new SecretsStoreError(
               'duplicate_label',
-              `secret already exists for instance=${entry.internal_handle} kind=${entry.kind} label=${entry.label}`,
+              `secret already exists for instance=${entry.owner_handle} kind=${entry.kind} label=${entry.label}`,
               err,
             )
           }
@@ -427,7 +427,7 @@ function rowToRecord(row: SecretRow): SecretRecord {
   }
   return {
     id: row.id,
-    internal_handle: row.project_slug,
+    owner_handle: row.project_slug,
     kind: row.kind,
     label: row.label,
     ciphertext: row.ciphertext,

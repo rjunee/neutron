@@ -63,7 +63,7 @@ export interface FederatedStatus {
 export interface FederatedTokenStoreDeps {
   secrets: SecretsStore
   /** Frozen registry PK for this instance (branded `OwnerHandle`, NOT the mutable url_slug). */
-  internal_handle: OwnerHandle
+  owner_handle: OwnerHandle
   /** Base URL of the identity service, e.g. https://auth.example.test */
   auth_base_url: string
   fetch?: FetchLike
@@ -83,14 +83,14 @@ export class FederatedConnectError extends Error {
 
 export class FederatedTokenStore {
   private readonly secrets: SecretsStore
-  private readonly internalHandle: OwnerHandle
+  private readonly ownerHandle: OwnerHandle
   private readonly authBase: string
   private readonly fetchImpl: FetchLike
   private readonly now: () => number
 
   constructor(deps: FederatedTokenStoreDeps) {
     this.secrets = deps.secrets
-    this.internalHandle = deps.internal_handle
+    this.ownerHandle = deps.owner_handle
     this.authBase = deps.auth_base_url.replace(/\/+$/, '')
     this.fetchImpl = deps.fetch ?? ((input, init) => globalThis.fetch(input, init))
     this.now = deps.now ?? ((): number => Date.now())
@@ -98,7 +98,7 @@ export class FederatedTokenStore {
 
   private async loadBlob(): Promise<FederationBlob | null> {
     const raw = await this.secrets.get({
-      internal_handle: this.internalHandle,
+      owner_handle: this.ownerHandle,
       kind: SECRET_KIND,
       label: SECRET_LABEL,
     })
@@ -113,7 +113,7 @@ export class FederatedTokenStore {
   private async saveBlob(blob: FederationBlob): Promise<void> {
     await this.secrets.replaceAtomic([
       {
-        internal_handle: this.internalHandle,
+        owner_handle: this.ownerHandle,
         kind: SECRET_KIND,
         label: SECRET_LABEL,
         plaintext: JSON.stringify(blob),
@@ -163,7 +163,7 @@ export class FederatedTokenStore {
   /** Drop the stored credential (the user disconnected). Idempotent. */
   async disconnect(): Promise<void> {
     const records = await this.secrets.list({
-      internal_handle: this.internalHandle,
+      owner_handle: this.ownerHandle,
       kind: SECRET_KIND,
     })
     for (const rec of records) {

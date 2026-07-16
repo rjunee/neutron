@@ -440,7 +440,7 @@ function buildOpenHandler(opts: OpenHandlerOpts = {}): {
   const startTokenAuth = buildLocalStartTokenAuth(COOKIE_SECRET)
   const ctx: OpenWiringContext = {
     llmPool: null,
-    internal_handle: OPEN_SLUG,
+    owner_handle: OPEN_SLUG,
     owner_home: openTmpDir,
     project_slug: OPEN_SLUG,
     env: {} as NodeJS.ProcessEnv,

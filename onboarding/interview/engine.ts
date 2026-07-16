@@ -523,10 +523,10 @@ export class InterviewEngine implements EngineInternals {
   /**
    * Returns the frozen identity to key SecretsStore rows by. Per
    * `auth/secrets-store.ts:11-26` (2026-05-12 rename-canonicalisation
-   * fix) callers MUST pass the FROZEN `internal_handle` — NOT the
+   * fix) callers MUST pass the FROZEN `owner_handle` — NOT the
    * mutable `url_slug` (== `project_slug` post-canonicalisation) — so
    * that secret rows survive an instance rename. When this engine is
-   * wired with `deps.internal_handle` (production via
+   * wired with `deps.owner_handle` (production via
    * `build-landing-stack.ts`), that frozen value is used. Tests and
    * legacy callers that don't supply it fall back to `project_slug`
    * for back-compat: pre-rename, the two values are identical, so the
@@ -535,10 +535,10 @@ export class InterviewEngine implements EngineInternals {
    */
   secretsIdentity(project_slug: string): string {
     if (
-      typeof this.deps.internal_handle === 'string' &&
-      this.deps.internal_handle.length > 0
+      typeof this.deps.owner_handle === 'string' &&
+      this.deps.owner_handle.length > 0
     ) {
-      return this.deps.internal_handle
+      return this.deps.owner_handle
     }
     return project_slug
   }
@@ -1929,7 +1929,7 @@ export class InterviewEngine implements EngineInternals {
    * path), falls back to the single-suggestion path (agent-name-derived
    * primary, no alts).
    *
-   * `selfInternalHandle` is intentionally omitted — the picker computes
+   * `selfOwnerHandle` is intentionally omitted — the picker computes
    * suggestions BEFORE the user accepts; the active instance's `url_slug`
    * is included in the availability check exactly once (when the user
    * actually picks the slug, via `processSlugPickerReply`).

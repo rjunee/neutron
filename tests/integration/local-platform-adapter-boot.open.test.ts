@@ -48,7 +48,7 @@ function buildBaseCompositionInput(db: ProjectDb): Omit<CompositionInput, 'platf
 }
 
 const SELF_OWNER: PlatformInstanceInfo = {
-  internal_handle: 't-local-001',
+  owner_handle: 't-local-001',
   url_slug: 'local',
   owner_home: '/tmp/neutron-open-local',
   agent_name: 'Neutron',
@@ -115,10 +115,10 @@ describe('LocalPlatformAdapter — boot integration (Sprint B)', () => {
     expect(platform.resolveOwnerBySlug('soren')).toBeNull()
   })
 
-  test('LocalPlatformAdapter.resolveOwnerByInternalHandle returns the self instance', () => {
+  test('LocalPlatformAdapter.resolveOwnerByOwnerHandle returns the self instance', () => {
     const platform = buildLocalPlatformAdapter({ selfOwner: SELF_OWNER })
-    expect(platform.resolveOwnerByInternalHandle('t-local-001')).toEqual(SELF_OWNER)
-    expect(platform.resolveOwnerByInternalHandle('t-other')).toBeNull()
+    expect(platform.resolveOwnerByOwnerHandle('t-local-001')).toEqual(SELF_OWNER)
+    expect(platform.resolveOwnerByOwnerHandle('t-other')).toBeNull()
   })
 
   test('LocalPlatformAdapter.slugAvailability.check returns available for grammar-legal slugs', () => {
@@ -152,14 +152,14 @@ describe('LocalPlatformAdapter — boot integration (Sprint B)', () => {
     const platform = buildLocalPlatformAdapter({ selfOwner: SELF_OWNER })
     await expect(
       platform.renameSlug({
-        internal_handle: 't-local-001',
+        owner_handle: 't-local-001',
         current_url_slug: 'local',
         new_url_slug: 'forseti',
       }),
     ).rejects.toBeInstanceOf(PlatformOperationUnsupportedError)
     await expect(
       platform.mintInstallToken({
-        internal_handle: 't-local-001',
+        owner_handle: 't-local-001',
         identity: { provider: 'google', sub: 'sub', email: 'a@b.c' },
         audience: 'local',
         ttl_s: 60,
@@ -174,7 +174,7 @@ describe('LocalPlatformAdapter — boot integration (Sprint B)', () => {
       }),
     ).rejects.toBeInstanceOf(PlatformOperationUnsupportedError)
     await expect(
-      platform.provisionManagerBot({ internal_handle: 't-local-001', bot_name_hint: 'bot' }),
+      platform.provisionManagerBot({ owner_handle: 't-local-001', bot_name_hint: 'bot' }),
     ).rejects.toBeInstanceOf(PlatformOperationUnsupportedError)
     await expect(platform.reloadCaddy()).rejects.toBeInstanceOf(
       PlatformOperationUnsupportedError,

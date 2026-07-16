@@ -30,7 +30,7 @@ const HANDLE = 'alice'
 const OPENAI_KEY = 'sk-proj-abc123DEF456'
 
 interface Added {
-  internal_handle: string
+  owner_handle: string
   provider: OptionalKeyProvider
   label: string
   plaintext: string
@@ -46,7 +46,7 @@ function makeFakeStore(opts?: { failDuplicate?: boolean }): {
     async add(input) {
       const dup = added.some(
         (a) =>
-          a.internal_handle === input.internal_handle &&
+          a.owner_handle === input.owner_handle &&
           a.provider === input.provider &&
           a.label === input.label,
       )
@@ -114,7 +114,7 @@ test('the OpenAI offer rejects an Anthropic substrate key with a pointed reason'
 test('storeOptionalKey persists a valid OpenAI key via the api-key store', async () => {
   const { store, added } = makeFakeStore()
   const res = await storeOptionalKey(store, {
-    internal_handle: HANDLE,
+    owner_handle: HANDLE,
     id: 'openai_api_key',
     plaintext: `  ${OPENAI_KEY}  `, // whitespace is trimmed before storage
   })
@@ -124,7 +124,7 @@ test('storeOptionalKey persists a valid OpenAI key via the api-key store', async
   expect(res.capability.length).toBeGreaterThan(0)
   expect(added).toHaveLength(1)
   expect(added[0]).toMatchObject({
-    internal_handle: HANDLE,
+    owner_handle: HANDLE,
     provider: 'openai',
     label: ONBOARDING_OPENAI_LABEL,
     plaintext: OPENAI_KEY,
@@ -134,7 +134,7 @@ test('storeOptionalKey persists a valid OpenAI key via the api-key store', async
 test('storeOptionalKey rejects an invalid value WITHOUT writing', async () => {
   const { store, added } = makeFakeStore()
   const res = await storeOptionalKey(store, {
-    internal_handle: HANDLE,
+    owner_handle: HANDLE,
     id: 'openai_api_key',
     plaintext: 'sk-ant-oat01-xxx',
   })
@@ -146,7 +146,7 @@ test('storeOptionalKey rejects an invalid value WITHOUT writing', async () => {
 test('re-pasting the same OpenAI key is idempotent (duplicate → stored, not error)', async () => {
   const { store } = makeFakeStore()
   const first = await storeOptionalKey(store, {
-    internal_handle: HANDLE,
+    owner_handle: HANDLE,
     id: 'openai_api_key',
     plaintext: OPENAI_KEY,
   })
@@ -154,7 +154,7 @@ test('re-pasting the same OpenAI key is idempotent (duplicate → stored, not er
   // Second add throws duplicate_label inside the fake; storeOptionalKey
   // must absorb it and still report `stored`.
   const second = await storeOptionalKey(store, {
-    internal_handle: HANDLE,
+    owner_handle: HANDLE,
     id: 'openai_api_key',
     plaintext: OPENAI_KEY,
   })
@@ -164,7 +164,7 @@ test('re-pasting the same OpenAI key is idempotent (duplicate → stored, not er
 test('codex_auth is guidance-only — never writes a per-instance secret', async () => {
   const { store, added } = makeFakeStore()
   const res = await storeOptionalKey(store, {
-    internal_handle: HANDLE,
+    owner_handle: HANDLE,
     id: 'codex_auth',
     plaintext: 'anything',
   })

@@ -303,22 +303,22 @@ test('persistPasteToken writes BOTH max_oauth_refresh AND max_oauth_access with 
   const fixedNow = 1_700_000_000_000
   const { client, secrets } = buildClient({ now: () => fixedNow })
   const result = await client.persistPasteToken({
-    internal_handle: asOwnerHandle('alice'),
+    owner_handle: asOwnerHandle('alice'),
     token: 'sk-ant-oat01-paste',
   })
-  expect(result.internal_handle).toBe('alice')
+  expect(result.owner_handle).toBe('alice')
   expect(result.sub_label).toBe('default')
   // 365d ahead of fixed now — default TTL.
   const expectedExpiry = fixedNow + 365 * 24 * 60 * 60 * 1_000
   expect(result.expires_at).toBe(expectedExpiry)
 
   const refresh = await secrets.get({
-    internal_handle: asOwnerHandle('alice'),
+    owner_handle: asOwnerHandle('alice'),
     kind: 'max_oauth_refresh',
     label: 'default',
   })
   const access = await secrets.get({
-    internal_handle: asOwnerHandle('alice'),
+    owner_handle: asOwnerHandle('alice'),
     kind: 'max_oauth_access',
     label: 'default:access',
   })
@@ -328,17 +328,17 @@ test('persistPasteToken writes BOTH max_oauth_refresh AND max_oauth_access with 
 
 test('persistPasteToken replaces an existing row (idempotent re-paste)', async () => {
   const { client, secrets } = buildClient({})
-  await client.persistPasteToken({ internal_handle: asOwnerHandle('alice'), token: 'first' })
-  await client.persistPasteToken({ internal_handle: asOwnerHandle('alice'), token: 'second' })
+  await client.persistPasteToken({ owner_handle: asOwnerHandle('alice'), token: 'first' })
+  await client.persistPasteToken({ owner_handle: asOwnerHandle('alice'), token: 'second' })
 
   const refresh = await secrets.get({
-    internal_handle: asOwnerHandle('alice'),
+    owner_handle: asOwnerHandle('alice'),
     kind: 'max_oauth_refresh',
     label: 'default',
   })
   expect(refresh).toBe('second')
   const refreshList = await secrets.list({
-    internal_handle: asOwnerHandle('alice'),
+    owner_handle: asOwnerHandle('alice'),
     kind: 'max_oauth_refresh',
   })
   // Only one row left for the default label.
@@ -349,13 +349,13 @@ test('Codex Sprint 23 r6 P2 — persistPasteToken is ATOMIC: a mid-sequence writ
   // Pre-seed an existing pair to verify rollback preserves them.
   const { client, secrets } = buildClient({})
   await secrets.put({
-    internal_handle: asOwnerHandle('alice'),
+    owner_handle: asOwnerHandle('alice'),
     kind: 'max_oauth_refresh',
     label: 'default',
     plaintext: 'old-token',
   })
   await secrets.put({
-    internal_handle: asOwnerHandle('alice'),
+    owner_handle: asOwnerHandle('alice'),
     kind: 'max_oauth_access',
     label: 'default:access',
     plaintext: 'old-token',
@@ -370,19 +370,19 @@ test('Codex Sprint 23 r6 P2 — persistPasteToken is ATOMIC: a mid-sequence writ
     throw new Error('synthetic-mid-write-failure')
   }) as typeof secrets.replaceAtomic
   await expect(
-    client.persistPasteToken({ internal_handle: asOwnerHandle('alice'), token: 'new-token' }),
+    client.persistPasteToken({ owner_handle: asOwnerHandle('alice'), token: 'new-token' }),
   ).rejects.toThrow('synthetic-mid-write-failure')
   // Old rows still intact.
   expect(
     await secrets.get({
-      internal_handle: asOwnerHandle('alice'),
+      owner_handle: asOwnerHandle('alice'),
       kind: 'max_oauth_refresh',
       label: 'default',
     }),
   ).toBe('old-token')
   expect(
     await secrets.get({
-      internal_handle: asOwnerHandle('alice'),
+      owner_handle: asOwnerHandle('alice'),
       kind: 'max_oauth_access',
       label: 'default:access',
     }),
@@ -398,7 +398,7 @@ test('persistPasteToken honors paste_token_ttl_ms override', async () => {
     paste_token_ttl_ms: 60_000,
   })
   const result = await client.persistPasteToken({
-    internal_handle: asOwnerHandle('alice'),
+    owner_handle: asOwnerHandle('alice'),
     token: 'tok',
   })
   expect(result.expires_at).toBe(fixedNow + 60_000)
@@ -415,7 +415,7 @@ test('getAccessToken returns null when no row exists', async () => {
 test('getAccessToken returns the cached access row', async () => {
   const fixedNow = 1_700_000_000_000
   const { client } = buildClient({ now: () => fixedNow })
-  await client.persistPasteToken({ internal_handle: asOwnerHandle('alice'), token: 'tok-x' })
+  await client.persistPasteToken({ owner_handle: asOwnerHandle('alice'), token: 'tok-x' })
   const out = await client.getAccessToken(asOwnerHandle('alice'))
   expect(out).not.toBeNull()
   expect(out!.access_token).toBe('tok-x')
@@ -433,7 +433,7 @@ test('Codex Sprint 23 r8 P1 — getAccessToken falls back to refresh row when ac
     now: () => now,
     paste_token_ttl_ms: 1_000,
   })
-  await client.persistPasteToken({ internal_handle: asOwnerHandle('alice'), token: 'tok-y' })
+  await client.persistPasteToken({ owner_handle: asOwnerHandle('alice'), token: 'tok-y' })
   now += 5_000 // access row is now stale by ~4s
 
   const out = await client.getAccessToken(asOwnerHandle('alice'))
@@ -444,7 +444,7 @@ test('Codex Sprint 23 r8 P1 — getAccessToken falls back to refresh row when ac
 
   // The on-disk access row reflects the new expiry.
   const accessList = await secrets.list({
-    internal_handle: asOwnerHandle('alice'),
+    owner_handle: asOwnerHandle('alice'),
     kind: 'max_oauth_access',
   })
   const accessRow = accessList.find((r) => r.label === 'default:access')!
@@ -462,7 +462,7 @@ test('Codex Sprint 23 r8 P1 — getAccessToken falls back to a refresh-only row 
   // by re-rendering the gate.
   const { client, secrets } = buildClient({})
   await secrets.put({
-    internal_handle: asOwnerHandle('alice'),
+    owner_handle: asOwnerHandle('alice'),
     kind: 'max_oauth_refresh',
     label: 'default',
     plaintext: 'paste-only-leftover',
@@ -477,15 +477,15 @@ test('Codex Sprint 23 r8 P1 — getAccessToken falls back to a refresh-only row 
 
 test('revoke drops both rows locally without making any HTTP calls', async () => {
   const { client, calls, secrets } = buildClient({})
-  await client.persistPasteToken({ internal_handle: asOwnerHandle('alice'), token: 'gone' })
+  await client.persistPasteToken({ owner_handle: asOwnerHandle('alice'), token: 'gone' })
   await client.revoke(asOwnerHandle('alice'))
   const refresh = await secrets.get({
-    internal_handle: asOwnerHandle('alice'),
+    owner_handle: asOwnerHandle('alice'),
     kind: 'max_oauth_refresh',
     label: 'default',
   })
   const access = await secrets.get({
-    internal_handle: asOwnerHandle('alice'),
+    owner_handle: asOwnerHandle('alice'),
     kind: 'max_oauth_access',
     label: 'default:access',
   })

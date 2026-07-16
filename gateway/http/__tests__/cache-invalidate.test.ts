@@ -12,7 +12,7 @@ describe('POST /internal/cache-invalidate', () => {
     const invalidated: string[] = []
     const composed = composeHttpHandler({
       internalCacheInvalidateHandler: {
-        invalidateInternalHandle: (h) => invalidated.push(h),
+        invalidateOwnerHandle: (h) => invalidated.push(h),
         expectedToken: 'shared-secret',
       },
       defaultHandler,
@@ -23,7 +23,7 @@ describe('POST /internal/cache-invalidate', () => {
         'X-Internal-Token': 'shared-secret',
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({ internal_handle: 't-aaaaaaaa' }),
+      body: JSON.stringify({ owner_handle: 't-aaaaaaaa' }),
     })
     const res = await composed.fetch(req, {} as never)
     expect(res.status).toBe(200)
@@ -33,7 +33,7 @@ describe('POST /internal/cache-invalidate', () => {
   test('rejects 403 on missing or wrong token', async () => {
     const composed = composeHttpHandler({
       internalCacheInvalidateHandler: {
-        invalidateInternalHandle: () => undefined,
+        invalidateOwnerHandle: () => undefined,
         expectedToken: 'shared-secret',
       },
       defaultHandler,
@@ -45,17 +45,17 @@ describe('POST /internal/cache-invalidate', () => {
           'X-Internal-Token': tok,
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({ internal_handle: 't-aaaaaaaa' }),
+        body: JSON.stringify({ owner_handle: 't-aaaaaaaa' }),
       })
       const res = await composed.fetch(req, {} as never)
       expect(res.status).toBe(403)
     }
   })
 
-  test('rejects 400 on missing internal_handle', async () => {
+  test('rejects 400 on missing owner_handle', async () => {
     const composed = composeHttpHandler({
       internalCacheInvalidateHandler: {
-        invalidateInternalHandle: () => undefined,
+        invalidateOwnerHandle: () => undefined,
         expectedToken: 'shared-secret',
       },
       defaultHandler,
@@ -78,7 +78,7 @@ describe('POST /internal/cache-invalidate', () => {
     })
     const req = new Request('http://x/internal/cache-invalidate', {
       method: 'POST',
-      body: JSON.stringify({ internal_handle: 't-x' }),
+      body: JSON.stringify({ owner_handle: 't-x' }),
     })
     const res = await composed.fetch(req, {} as never)
     expect(res.status).toBe(200)

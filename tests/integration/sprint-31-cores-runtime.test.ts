@@ -143,7 +143,7 @@ test('Sprint 31 — synthetic Core install → tool call → audit → uninstall
   expect(row?.package_version).toBe('0.1.0')
 
   // The secret was persisted via the prompter + a put audit row landed.
-  expect(await secretsStore.get({ internal_handle: OWNER, kind: 'byo_api_key', label: 'sendgrid',
+  expect(await secretsStore.get({ owner_handle: OWNER, kind: 'byo_api_key', label: 'sendgrid',
   })).toBe('sg.test-token')
   const installAudits = await audit.list({ project_slug: OWNER, core_slug: 'synthetic' })
   expect(installAudits.find((a) => a.op === 'put' && a.label === 'sendgrid' && a.outcome === 'ok')).toBeDefined()
@@ -238,7 +238,7 @@ test('Sprint 31 — synthetic Core install → tool call → audit → uninstall
   expect(remaining).toHaveLength(0)
 
   // Secret gone.
-  expect(await secretsStore.get({ internal_handle: OWNER, kind: 'byo_api_key', label: 'sendgrid',
+  expect(await secretsStore.get({ owner_handle: OWNER, kind: 'byo_api_key', label: 'sendgrid',
   })).toBeNull()
 
   // revokeOAuth fired for the byo_api_key (best-effort across all kinds).

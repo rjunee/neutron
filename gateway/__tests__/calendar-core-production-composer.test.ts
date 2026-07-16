@@ -244,7 +244,7 @@ async function startHarness(): Promise<Harness> {
   // Seed the Google OAuth access token row so the production Google
   // client can dispatch through the stubbed REST endpoint.
   await secrets.put({
-    internal_handle: OWNER,
+    owner_handle: OWNER,
     kind: 'oauth_token',
     label: OAUTH_SECRET_LABEL,
     plaintext: 'ya29.fake-test-token',

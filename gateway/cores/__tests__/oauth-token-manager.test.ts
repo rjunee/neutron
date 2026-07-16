@@ -74,7 +74,7 @@ test('exchangeAndPersist writes three rows + ciphertexts != plaintext', async ()
   }) as unknown as (input: string | URL | Request, init?: RequestInit) => Promise<Response>
   const mgr = new OAuthTokenManager({
     secretsStore,
-    internal_handle: OWNER,
+    owner_handle: OWNER,
     client_id: 'cid',
     client_secret: 'csecret',
     fetch: fakeFetch,
@@ -86,7 +86,7 @@ test('exchangeAndPersist writes three rows + ciphertexts != plaintext', async ()
     redirect_uri: 'https://auth/cb',
     labels: [LABEL],
   })
-  const rows = await secretsStore.list({ internal_handle: OWNER, kind: 'oauth_token' })
+  const rows = await secretsStore.list({ owner_handle: OWNER, kind: 'oauth_token' })
   const labels = rows.map((r) => r.label).sort()
   expect(labels).toEqual([LABEL, metaLabel(LABEL), refreshLabel(LABEL)].sort())
   // Ciphertext is not the plaintext.
@@ -99,7 +99,7 @@ test('exchangeAndPersist writes three rows + ciphertexts != plaintext', async ()
   expect(refreshRow.expires_at).toBeNull()
   // meta row contains scopes + email.
   const metaPlain = await secretsStore.get({
-    internal_handle: OWNER,
+    owner_handle: OWNER,
     kind: 'oauth_token',
     label: metaLabel(LABEL),
   })
@@ -114,7 +114,7 @@ test('getAccessToken returns cached value when not expired', async () => {
   // and the OAuthTokenManager's refresh-lead computation share a clock.
   const mgr = new OAuthTokenManager({
     secretsStore,
-    internal_handle: OWNER,
+    owner_handle: OWNER,
     client_id: 'cid',
     client_secret: 'csecret',
     fetch: (async () => {
@@ -149,7 +149,7 @@ test('getAccessToken refreshes via Google when expired + rotates row + updates m
   }) as unknown as (input: string | URL | Request, init?: RequestInit) => Promise<Response>
   const mgr = new OAuthTokenManager({
     secretsStore,
-    internal_handle: OWNER,
+    owner_handle: OWNER,
     client_id: 'cid',
     client_secret: 'csecret',
     fetch: fakeFetch,
@@ -169,7 +169,7 @@ test('getAccessToken refreshes via Google when expired + rotates row + updates m
   expect(fetchCalls.length).toBe(1)
   // Meta row's last_refresh_outcome is 'ok'.
   const metaPlain = await secretsStore.get({
-    internal_handle: OWNER,
+    owner_handle: OWNER,
     kind: 'oauth_token',
     label: metaLabel(LABEL),
   })
@@ -188,7 +188,7 @@ test('getAccessToken on invalid_grant throws + onInvalidGrant fires', async () =
   const fired: string[] = []
   const mgr = new OAuthTokenManager({
     secretsStore,
-    internal_handle: OWNER,
+    owner_handle: OWNER,
     client_id: 'cid',
     client_secret: 'csecret',
     fetch: fakeFetch,
@@ -211,7 +211,7 @@ test('getAccessToken on invalid_grant throws + onInvalidGrant fires', async () =
   })
   expect(fired).toEqual([LABEL])
   const metaPlain = await secretsStore.get({
-    internal_handle: OWNER,
+    owner_handle: OWNER,
     kind: 'oauth_token',
     label: metaLabel(LABEL),
   })
@@ -238,7 +238,7 @@ test('concurrent getAccessToken calls share one fetch (refresh dedupe)', async (
   }) as unknown as (input: string | URL | Request, init?: RequestInit) => Promise<Response>
   const mgr = new OAuthTokenManager({
     secretsStore,
-    internal_handle: OWNER,
+    owner_handle: OWNER,
     client_id: 'cid',
     client_secret: 'csecret',
     fetch: fakeFetch,
@@ -270,7 +270,7 @@ test('disconnect deletes all three rows + best-effort revoke', async () => {
   }) as unknown as (input: string | URL | Request, init?: RequestInit) => Promise<Response>
   const mgr = new OAuthTokenManager({
     secretsStore,
-    internal_handle: OWNER,
+    owner_handle: OWNER,
     client_id: 'cid',
     client_secret: 'csecret',
     fetch: fakeFetch,
@@ -285,14 +285,14 @@ test('disconnect deletes all three rows + best-effort revoke', async () => {
   })
   const result = await mgr.disconnect(LABEL)
   expect(result.deleted).toBe(true)
-  const rows = await secretsStore.list({ internal_handle: OWNER, kind: 'oauth_token' })
+  const rows = await secretsStore.list({ owner_handle: OWNER, kind: 'oauth_token' })
   expect(rows.length).toBe(0)
 })
 
 test('getStatus reports not-connected when no rows exist', async () => {
   const mgr = new OAuthTokenManager({
     secretsStore,
-    internal_handle: OWNER,
+    owner_handle: OWNER,
     client_id: 'cid',
     client_secret: 'csecret',
     fetch: (async () => jsonResponse(404, {})) as unknown as (
@@ -309,7 +309,7 @@ test('getStatus reports not-connected when no rows exist', async () => {
 test('OAuthRefreshError carries no_refresh_token code when refresh row absent', async () => {
   const mgr = new OAuthTokenManager({
     secretsStore,
-    internal_handle: OWNER,
+    owner_handle: OWNER,
     client_id: 'cid',
     client_secret: 'csecret',
     fetch: (async () => jsonResponse(404, {})) as unknown as (
@@ -320,7 +320,7 @@ test('OAuthRefreshError carries no_refresh_token code when refresh row absent', 
   })
   // Insert ONLY the access row (no :refresh) — expired so refresh runs.
   await secretsStore.put({
-    internal_handle: OWNER,
+    owner_handle: OWNER,
     kind: 'oauth_token',
     label: LABEL,
     plaintext: 'access-stale',

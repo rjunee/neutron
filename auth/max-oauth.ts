@@ -123,8 +123,8 @@ export interface MaxOAuthClientDeps {
 }
 
 export interface PersistPasteTokenInput {
-  /** Frozen `internal_handle` (branded `OwnerHandle`) — see auth/secrets-store.ts file header. */
-  internal_handle: OwnerHandle
+  /** Frozen `owner_handle` (branded `OwnerHandle`) — see auth/secrets-store.ts file header. */
+  owner_handle: OwnerHandle
   /** The literal output of `claude setup-token` on the user's machine. */
   token: string
   /** Override the sub label (default `'default'`). */
@@ -133,8 +133,8 @@ export interface PersistPasteTokenInput {
 
 export interface PersistPasteTokenResult {
   id: string
-  /** Frozen `internal_handle` (echoed back from the branded input). */
-  internal_handle: string
+  /** Frozen `owner_handle` (echoed back from the branded input). */
+  owner_handle: string
   expires_at: number
   sub_label: string
 }
@@ -354,13 +354,13 @@ export class MaxOAuthClient {
     // land or none — the previous tokens stay intact on rollback.
     const [refreshRecord] = await this.secrets.replaceAtomic([
       {
-        internal_handle: input.internal_handle,
+        owner_handle: input.owner_handle,
         kind: 'max_oauth_refresh',
         label: refreshLabel,
         plaintext: input.token,
       },
       {
-        internal_handle: input.internal_handle,
+        owner_handle: input.owner_handle,
         kind: 'max_oauth_access',
         label: accessLabel,
         plaintext: input.token,
@@ -369,7 +369,7 @@ export class MaxOAuthClient {
     ])
     return {
       id: refreshRecord!.id,
-      internal_handle: input.internal_handle,
+      owner_handle: input.owner_handle,
       expires_at,
       sub_label,
     }
@@ -401,19 +401,19 @@ export class MaxOAuthClient {
    * still-valid paste token sits on disk.
    */
   async getAccessToken(
-    internal_handle: OwnerHandle,
+    owner_handle: OwnerHandle,
     sub_label?: string,
   ): Promise<{ access_token: string; expires_at: number } | null> {
     const label = sub_label ?? DEFAULT_SUB_LABEL
     const accessLabel = `${label}:access`
 
     const cached = await this.secrets.get({
-      internal_handle,
+      owner_handle,
       kind: 'max_oauth_access',
       label: accessLabel,
     })
     if (cached !== null && cached.length > 0) {
-      const records = await this.secrets.list({ internal_handle, kind: 'max_oauth_access' })
+      const records = await this.secrets.list({ owner_handle, kind: 'max_oauth_access' })
       const row = records.find((r) => r.label === accessLabel)
       if (row !== undefined && row.expires_at !== null) {
         return { access_token: cached, expires_at: row.expires_at }
@@ -428,16 +428,16 @@ export class MaxOAuthClient {
     // row (which holds the SAME value for Sprint 23 paste tokens)
     // and re-promote it into a fresh access row.
     const refresh = await this.secrets.get({
-      internal_handle,
+      owner_handle,
       kind: 'max_oauth_refresh',
       label,
     })
     if (refresh === null || refresh.length === 0) return null
 
     const expires_at = this.now() + this.pasteTokenTtlMs
-    await this.removeIfExists(internal_handle, 'max_oauth_access', accessLabel)
+    await this.removeIfExists(owner_handle, 'max_oauth_access', accessLabel)
     await this.secrets.put({
-      internal_handle,
+      owner_handle,
       kind: 'max_oauth_access',
       label: accessLabel,
       plaintext: refresh,
@@ -451,18 +451,18 @@ export class MaxOAuthClient {
    * revoke endpoint for `claude setup-token` — Anthropic owns rotation
    * — so this is purely a local cleanup.
    */
-  async revoke(internal_handle: OwnerHandle, sub_label?: string): Promise<void> {
+  async revoke(owner_handle: OwnerHandle, sub_label?: string): Promise<void> {
     const label = sub_label ?? DEFAULT_SUB_LABEL
-    await this.removeIfExists(internal_handle, 'max_oauth_refresh', label)
-    await this.removeIfExists(internal_handle, 'max_oauth_access', `${label}:access`)
+    await this.removeIfExists(owner_handle, 'max_oauth_refresh', label)
+    await this.removeIfExists(owner_handle, 'max_oauth_access', `${label}:access`)
   }
 
   private async removeIfExists(
-    internal_handle: OwnerHandle,
+    owner_handle: OwnerHandle,
     kind: 'max_oauth_refresh' | 'max_oauth_access',
     label: string,
   ): Promise<void> {
-    const existing = await this.secrets.list({ internal_handle, kind })
+    const existing = await this.secrets.list({ owner_handle, kind })
     for (const row of existing) {
       if (row.label === label) {
         try {

@@ -174,7 +174,7 @@ test('installCore: prompts for declared secrets + writes audit ok rows', async (
   expect(audits.find((r) => r.kind === 'oauth_token' && r.label === 'google' && r.outcome === 'ok')).toBeDefined()
 
   // Round-trip the persisted secret.
-  const tok = await secretsStore.get({ internal_handle: OWNER, kind: 'oauth_token', label: 'google' })
+  const tok = await secretsStore.get({ owner_handle: OWNER, kind: 'oauth_token', label: 'google' })
   expect(tok).toBe('oauth-token')
 })
 
@@ -256,7 +256,7 @@ test('uninstallCore: drops Core tables, deletes secrets, calls revokeOAuth', asy
   expect(tbl).toBeNull()
 
   // Secret deleted.
-  expect(await secretsStore.get({ internal_handle: OWNER, kind: 'oauth_token', label: 'google' })).toBeNull()
+  expect(await secretsStore.get({ owner_handle: OWNER, kind: 'oauth_token', label: 'google' })).toBeNull()
 
   // revokeOAuth invoked at least once for the oauth_token row.
   expect(revoked.some((r) => r.label === 'google')).toBe(true)

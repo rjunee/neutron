@@ -74,7 +74,7 @@ export interface OAuthCredentialSource {
    * the owner has not connected their OAuth-backed subscription yet
    * — the resolver then falls through to BYO / env-var sources.
    *
-   * 2026-05-12 — the value passed is the FROZEN `internal_handle`,
+   * 2026-05-12 — the value passed is the FROZEN `owner_handle`,
    * NOT the mutable `url_slug`. See `auth/secrets-store.ts` file
    * header for the full rationale.
    *
@@ -84,13 +84,13 @@ export interface OAuthCredentialSource {
    * resolver itself catches + logs + falls through (see implementation).
    */
   loadAccessToken: (
-    internal_handle: OwnerHandle,
+    owner_handle: OwnerHandle,
   ) => Promise<{ access_token: string; expires_at: number } | null>
 }
 
 export interface ResolveLlmCredentialsInput {
   /**
-   * 2026-05-12 — frozen `internal_handle` for the instance (see
+   * 2026-05-12 — frozen `owner_handle` for the instance (see
    * `auth/secrets-store.ts` file header). Was previously `project_slug`;
    * renamed because the SecretsStore / ApiKeyStore lookups inside the
    * resolver MUST key on the frozen handle, not the mutable url_slug,
@@ -100,12 +100,12 @@ export interface ResolveLlmCredentialsInput {
    * names from `url_slug` (the user-visible identifier in operator
    * env files); the resolver accepts that as a separate field.
    */
-  internal_handle: OwnerHandle
+  owner_handle: OwnerHandle
   /**
    * Mutable `url_slug` used ONLY for log line readability + telemetry.
    * Per-instance env-var lookups derive their suffix from this so
    * operators set `ANTHROPIC_API_KEY_<URL_SLUG_UPPER>` in their unit
-   * files. Empty string falls back to `internal_handle` for
+   * files. Empty string falls back to `owner_handle` for
    * back-compat.
    */
   url_slug?: string
@@ -308,11 +308,11 @@ export async function resolveLlmCredentials(
 ): Promise<CredentialPool | null> {
   // Log under the user-facing url_slug when available so journald greps
   // line up with the instance the operator knows; fall back to
-  // internal_handle when url_slug isn't threaded through.
+  // owner_handle when url_slug isn't threaded through.
   const log_slug =
     input.url_slug !== undefined && input.url_slug.length > 0
       ? input.url_slug
-      : input.internal_handle
+      : input.owner_handle
   // Tier 1 — Sprint 22 Anthropic Max OAuth (async). Only fires when the caller
   // wired `maxOAuth` (production composer wires it for provider==='anthropic';
   // gemini / openai pass undefined).
@@ -320,7 +320,7 @@ export async function resolveLlmCredentials(
   if (input.maxOAuth !== undefined) {
     let tokens: { access_token: string; expires_at: number } | null = null
     try {
-      tokens = await input.maxOAuth.loadAccessToken(input.internal_handle)
+      tokens = await input.maxOAuth.loadAccessToken(input.owner_handle)
     } catch (err) {
       // Defense-in-depth: a refresh failure / network blip should NOT
       // brick the resolver — fall through to BYO/env so an instance with
@@ -374,7 +374,7 @@ export async function resolveLlmCredentials(
 
   // Tier 3 — BYO ApiKeyStore (async). Lazily reached only when tiers 1-2 miss.
   const stored = await buildBYOApiKeyPool({
-    internal_handle: input.internal_handle,
+    owner_handle: input.owner_handle,
     provider: input.provider,
     api_keys: input.apiKeys,
   })
@@ -412,12 +412,12 @@ export async function resolveLlmCredentials(
  */
 export function wrapMaxOAuthSource(client: {
   getAccessToken: (
-    internal_handle: OwnerHandle,
+    owner_handle: OwnerHandle,
     sub_label?: string,
   ) => Promise<{ access_token: string; expires_at: number } | null>
 }): OAuthCredentialSource {
   return {
-    loadAccessToken: async (internal_handle: OwnerHandle) =>
-      client.getAccessToken(internal_handle),
+    loadAccessToken: async (owner_handle: OwnerHandle) =>
+      client.getAccessToken(owner_handle),
   }
 }

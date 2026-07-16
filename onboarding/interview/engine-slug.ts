@@ -64,7 +64,7 @@ export {
  * path), falls back to the single-suggestion path (agent-name-derived
  * primary, no alts).
  *
- * `selfInternalHandle` is intentionally omitted — the picker computes
+ * `selfOwnerHandle` is intentionally omitted — the picker computes
  * suggestions BEFORE the user accepts; the active instance's `url_slug`
  * is included in the availability check exactly once (when the user
  * actually picks the slug, via `processSlugPickerReply`).

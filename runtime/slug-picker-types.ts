@@ -36,7 +36,7 @@ export interface RenameUrlSlugStep {
  * a cast.
  */
 export interface RenameUrlSlugResultShape {
-  internal_handle?: string
+  owner_handle?: string
   old_url_slug?: string
   new_url_slug?: string
   redirect_route_id?: string

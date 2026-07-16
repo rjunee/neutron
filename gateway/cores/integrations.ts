@@ -278,7 +278,7 @@ export async function buildIntegrationsStatus(
 
   // One list() read (no decrypt) → label-presence set for every api-key.
   const rows = await input.secretsStore.list({
-    internal_handle: asOwnerHandle(input.project_slug),
+    owner_handle: asOwnerHandle(input.project_slug),
     kind: 'byo_api_key',
   })
   const present = new Set(rows.map((r) => r.label))
@@ -352,16 +352,16 @@ export async function setApiKey(
     const apiKeys = new ApiKeyStore({ db: input.db, secrets: input.secretsStore })
     const { provider, label } = slot.api_key_store
     try {
-      await apiKeys.delete({ internal_handle: asOwnerHandle(input.project_slug), provider, label })
+      await apiKeys.delete({ owner_handle: asOwnerHandle(input.project_slug), provider, label })
     } catch (err) {
       if (!(err instanceof ApiKeyStoreError && err.code === 'not_found')) throw err
     }
-    await apiKeys.add({ internal_handle: asOwnerHandle(input.project_slug), provider, label, plaintext: value })
+    await apiKeys.add({ owner_handle: asOwnerHandle(input.project_slug), provider, label, plaintext: value })
     return { stored: true }
   }
   await input.secretsStore.replaceAtomic([
     {
-      internal_handle: asOwnerHandle(input.project_slug),
+      owner_handle: asOwnerHandle(input.project_slug),
       kind: 'byo_api_key',
       label: slotSecretsLabel(input.label, slot),
       plaintext: value,
@@ -401,7 +401,7 @@ export async function deleteApiKey(
     const apiKeys = new ApiKeyStore({ db: input.db, secrets: input.secretsStore })
     const { provider, label } = slot.api_key_store
     try {
-      await apiKeys.delete({ internal_handle: asOwnerHandle(input.project_slug), provider, label })
+      await apiKeys.delete({ owner_handle: asOwnerHandle(input.project_slug), provider, label })
       return { deleted: true }
     } catch (err) {
       if (err instanceof ApiKeyStoreError && err.code === 'not_found') return { deleted: false }
@@ -410,7 +410,7 @@ export async function deleteApiKey(
   }
   const storageLabel = slotSecretsLabel(input.label, slot)
   const rows = await input.secretsStore.list({
-    internal_handle: asOwnerHandle(input.project_slug),
+    owner_handle: asOwnerHandle(input.project_slug),
     kind: 'byo_api_key',
   })
   const match = rows.find((r) => r.label === storageLabel)

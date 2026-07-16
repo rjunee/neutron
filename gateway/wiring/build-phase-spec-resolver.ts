@@ -123,7 +123,7 @@ export interface BuildPhaseSpecResolverInput {
    * spliced in via `composeSystemPrompt`.
    *
    * Resolves to the instance data path under `NEUTRON_HOME` (defaulting to
-   * `/srv/neutron`) when omitted AND `internal_handle` is supplied (production default).
+   * `/srv/neutron`) when omitted AND `owner_handle` is supplied (production default).
    * Tests pass an explicit path.
    *
    * Pass `null` to skip skills loading entirely (back-compat for
@@ -140,7 +140,7 @@ export interface BuildPhaseSpecResolverInput {
    * (string or null), this field is ignored. Defaults to 'unknown'
    * if needed for the fallback path.
    */
-  internal_handle?: string
+  owner_handle?: string
   /**
    * ISSUE #30 (v0.1.85) — persona-file loader. When supplied, the LLM
    * wrapper reads `<owner_home>/persona/{SOUL,USER,priority-map}.md`
@@ -232,7 +232,7 @@ export async function buildPhaseSpecResolver(
     return null
   }
 
-  const log_slug = input.log_slug ?? input.internal_handle ?? 'unknown'
+  const log_slug = input.log_slug ?? input.owner_handle ?? 'unknown'
 
   if (input.substrate === null) {
     moduleLog.info('llm_disabled_no_substrate', { project: log_slug })
@@ -312,7 +312,7 @@ export async function buildPhaseSpecResolver(
           const [conventions, persona, escalation] = await Promise.all([
             loadConventionsForResolver({
               owner_data_dir: input.owner_data_dir,
-              internal_handle: input.internal_handle,
+              owner_handle: input.owner_handle,
               env: input.env,
               log_slug,
             }),
@@ -457,7 +457,7 @@ export function buildAnthropicLlmCall(input: {
  *
  * Sprint A — GBrain methodology integration v2 (2026-05-12).
  *
- * 2026-05-31 — `internal_handle` made optional. Only consulted by the
+ * 2026-05-31 — `owner_handle` made optional. Only consulted by the
  * instance-skills fallback path (under `NEUTRON_HOME`),
  * which fires when `owner_data_dir` is undefined. Defaults to
  * 'unknown' for that fallback when omitted — production wires it
@@ -466,14 +466,14 @@ export function buildAnthropicLlmCall(input: {
  */
 async function loadConventionsForResolver(input: {
   owner_data_dir: string | null | undefined
-  internal_handle: string | undefined
+  owner_handle: string | undefined
   env: NodeJS.ProcessEnv
   log_slug: string
 }): Promise<string> {
   if (input.owner_data_dir === null) return ''
   const skillsDir = resolveSkillsDir({
     owner_data_dir: input.owner_data_dir,
-    internal_handle: input.internal_handle ?? 'unknown',
+    owner_handle: input.owner_handle ?? 'unknown',
     env: input.env,
   })
   try {
@@ -491,14 +491,14 @@ async function loadConventionsForResolver(input: {
 
 function resolveSkillsDir(input: {
   owner_data_dir: string | undefined
-  internal_handle: string
+  owner_handle: string
   env: NodeJS.ProcessEnv
 }): string {
   if (input.owner_data_dir !== undefined && input.owner_data_dir.length > 0) {
     return `${trimTrailingSlash(input.owner_data_dir)}/skills`
   }
   const neutronHome = input.env['NEUTRON_HOME'] ?? '/srv/neutron'
-  return `${trimTrailingSlash(neutronHome)}/owners/${input.internal_handle}/skills`
+  return `${trimTrailingSlash(neutronHome)}/owners/${input.owner_handle}/skills`
 }
 
 function trimTrailingSlash(p: string): string {

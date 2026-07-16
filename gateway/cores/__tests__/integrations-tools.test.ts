@@ -74,7 +74,7 @@ async function makeBench() {
   }) as (input: string | URL | Request, init?: RequestInit) => Promise<Response>
   const tokens = new OAuthTokenManager({
     secretsStore: secrets,
-    internal_handle: OWNER,
+    owner_handle: OWNER,
     client_id: 'cid',
     client_secret: 'csecret',
     fetch: fakeFetch,
@@ -139,7 +139,7 @@ test('integrations_connect on an API-key slot stores the key (state mutation)', 
   expect(out.connected).toBe(true)
   // The secret is actually persisted where the Research Core reads it.
   expect(
-    await b.secrets.get({ internal_handle: OWNER, kind: 'byo_api_key', label: 'tavily' }),
+    await b.secrets.get({ owner_handle: OWNER, kind: 'byo_api_key', label: 'tavily' }),
   ).toBe('tvly-from-chat')
 })
 
@@ -167,7 +167,7 @@ test('integrations_disconnect on an OAuth account deletes the stored tokens', as
   const b = await makeBench()
   // Seed a connected Google account.
   await b.secrets.put({
-    internal_handle: OWNER,
+    owner_handle: OWNER,
     kind: 'oauth_token',
     label: 'google_workspace',
     plaintext: 'access',
@@ -175,7 +175,7 @@ test('integrations_disconnect on an OAuth account deletes the stored tokens', as
   })
   expect(
     await b.secrets.get({
-      internal_handle: OWNER,
+      owner_handle: OWNER,
       kind: 'oauth_token',
       label: 'google_workspace',
     }),
@@ -189,7 +189,7 @@ test('integrations_disconnect on an OAuth account deletes the stored tokens', as
   expect(out.disconnected).toBe(true)
   expect(
     await b.secrets.get({
-      internal_handle: OWNER,
+      owner_handle: OWNER,
       kind: 'oauth_token',
       label: 'google_workspace',
     }),
@@ -217,7 +217,7 @@ test('integrations_disconnect on an OAuth account flags affected Cores dependenc
   expect(readInstallState(b.db, 'google_workspace_core')).toBe('install_ok')
 
   await b.secrets.put({
-    internal_handle: OWNER,
+    owner_handle: OWNER,
     kind: 'oauth_token',
     label: 'google_workspace',
     plaintext: 'access',
@@ -250,7 +250,7 @@ test('integrations_disconnect on an API-key slot clears the stored key', async (
   expect(out.kind).toBe('api_key')
   expect(out.disconnected).toBe(true)
   expect(
-    await b.secrets.get({ internal_handle: OWNER, kind: 'byo_api_key', label: 'tavily' }),
+    await b.secrets.get({ owner_handle: OWNER, kind: 'byo_api_key', label: 'tavily' }),
   ).toBeNull()
 })
 

@@ -490,13 +490,13 @@ export class SecretsStorePrompter implements SecretsPrompter {
     required: boolean
   }): Promise<{ access_token: string; expires_at?: number } | null> {
     const value = await this.opts.secretsStore.get({
-      internal_handle: asOwnerHandle(this.opts.project_slug),
+      owner_handle: asOwnerHandle(this.opts.project_slug),
       kind: 'oauth_token',
       label: input.label,
     })
     if (value === null) return null
     const rows = await this.opts.secretsStore.list({
-      internal_handle: asOwnerHandle(this.opts.project_slug),
+      owner_handle: asOwnerHandle(this.opts.project_slug),
       kind: 'oauth_token',
     })
     const row = rows.find((r) => r.label === input.label)
@@ -757,7 +757,7 @@ async function rehydrateExistingInstall(input: {
   const accessor = buildSecretsAccessor(
     { manifest: core.manifest },
     {
-      internal_handle: asOwnerHandle(input.project_slug),
+      owner_handle: asOwnerHandle(input.project_slug),
       store: auditedStore,
       core_id: core.slug,
     },
