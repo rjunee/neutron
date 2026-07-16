@@ -169,13 +169,21 @@ describe('RB4 temporal invalidation (belief evolution) — real PGLite round-tri
     expect(edgesTo(links, 'newco', 'works_at').length).toBe(1) // CURRENT
     expect(edgesTo(links, 'oldco', 'works_at').length).toBe(0) // INVALIDATED
 
-    // (3) The timeline STILL contains the OldCo dated entry (history preserved):
-    //     the supersession is recorded as a dated timeline row naming old-co,
-    //     even though compiled-truth no longer asserts it.
+    // (3) The timeline STILL contains the OldCo dated history (nothing lost):
+    //     - the ORIGINAL works_at OldCo assertion at its OWN date (t0), and
+    //     - the dated supersession note at the invalidation date (t0 + 1000),
+    //     even though compiled-truth no longer asserts OldCo.
     const timeline = extractTimeline(onDisk)
-    const supersedeRow = timeline.find((e) => e.body.includes('oldco'))
-    expect(supersedeRow).toBeDefined()
-    expect(supersedeRow!.ts).toBe(new Date(t0 + 1000).toISOString())
+    const originalRow = timeline.find(
+      (e) => e.ts === new Date(t0).toISOString() && e.body.includes('works_at oldco'),
+    )
+    expect(originalRow).toBeDefined() // ORIGINAL dated belief preserved
+    const supersedeRow = timeline.find(
+      (e) =>
+        e.ts === new Date(t0 + 1000).toISOString() &&
+        e.body.includes('superseded works_at: oldco → newco'),
+    )
+    expect(supersedeRow).toBeDefined() // dated supersession recorded
 
     // …and the OldCo entity page itself survives untouched on disk (history).
     const oldCoPage = readFileSync(join(ownerDataDir, 'entities', 'companies', 'oldco.md'), 'utf8')

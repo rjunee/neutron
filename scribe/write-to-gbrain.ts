@@ -354,38 +354,53 @@ function orderPagesObjectsFirst(bySlug: Map<string, PlannedPage>): PlannedPage[]
  *  and existing-page paths for the same input so the writer's (ts,source,body)
  *  dedup makes a repeated identical turn a no-op.
  *
- *  RB4 — when `supersede` is on and this page carries a superseding relation, the
- *  transition is recorded in the (append-only, dated) timeline body so the prior
- *  belief is preserved in history even after it leaves compiled-truth. The
- *  superseded object is referenced in a deliberately non-triggering form (an
- *  arrow, no `works at <slug>` verb pattern) so it can never re-derive an edge —
- *  the graph half is driven purely off compiled-truth. */
+ *  RB4 — when `supersede` is on, the page's RELATION ASSERTIONS are recorded in
+ *  the (append-only, dated) timeline body alongside the fact. This is what makes
+ *  the timeline the durable history: the ORIGINAL `works_at oldco` write lands a
+ *  dated row naming that assertion at its OWN observation time, so when a later
+ *  turn supersedes it (dropping the sentence from compiled-truth), the original
+ *  dated belief still lives in history — and the superseding turn adds its OWN
+ *  dated `superseded works_at: oldco → newco` row. Slugs are bare (no
+ *  `[[wikilink]]`, no `works at <slug>` verb phrasing) so the timeline text can
+ *  never re-derive a graph edge — the graph half is driven purely off
+ *  compiled-truth. OFF (default) → byte-for-byte today's fact-only body. */
 function timelineBody(page: PlannedPage, supersede: boolean): string {
   const fact = page.fact?.trim()
   const base = fact !== undefined && fact.length > 0 ? `Chat mention — ${fact}` : 'Mentioned in chat'
   if (!supersede) return base
-  const notes = supersedeNotes(page)
+  const notes = relationNotes(page)
   return notes.length > 0 ? `${base} · ${notes.join('; ')}` : base
 }
 
 /**
- * RB4 — one-line supersession notes for the timeline body. For each relation
- * carrying a valid `supersedes` marker, `prior-slug → new-slug (predicate)`.
- * Slugs are bare (no `[[wikilink]]`, no verb phrasing) so nothing re-extracts a
- * triple from the timeline text.
+ * RB4 — deterministic, edge-inert notes recording each of the page's relation
+ * assertions for the dated timeline. A superseding relation records the
+ * transition (`superseded <pred>: prior → obj`); a plain relation records the
+ * assertion (`<pred> obj`) so the ORIGINAL dated belief is captured in history
+ * before any later supersession removes it from compiled-truth. Deduped; bare
+ * slugs + underscored predicate so nothing re-extracts a triple from this text.
  */
-function supersedeNotes(page: PlannedPage): string[] {
+function relationNotes(page: PlannedPage): string[] {
   const notes: string[] = []
   const seen = new Set<string>()
   for (const r of page.relations) {
-    if (r.supersedes === undefined) continue
-    const priorSlug = slugify(r.supersedes)
     const objSlug = slugify(r.object)
-    if (priorSlug === null || objSlug === null || priorSlug === objSlug) continue
-    const key = `${r.predicate}\x1f${priorSlug}\x1f${objSlug}`
+    if (objSlug === null || objSlug === page.slug) continue
+    if (r.supersedes !== undefined) {
+      const priorSlug = slugify(r.supersedes)
+      if (priorSlug !== null && priorSlug !== objSlug) {
+        const key = `x\x1f${r.predicate}\x1f${priorSlug}\x1f${objSlug}`
+        if (!seen.has(key)) {
+          seen.add(key)
+          notes.push(`superseded ${r.predicate}: ${priorSlug} → ${objSlug}`)
+        }
+        continue
+      }
+    }
+    const key = `a\x1f${r.predicate}\x1f${objSlug}`
     if (seen.has(key)) continue
     seen.add(key)
-    notes.push(`superseded ${r.predicate}: ${priorSlug} → ${objSlug}`)
+    notes.push(`${r.predicate} ${objSlug}`)
   }
   return notes
 }
