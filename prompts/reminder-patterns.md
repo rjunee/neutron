@@ -136,9 +136,9 @@ DAILY SCRIPT (compose the item matching today's offset from EVENT_DATE):
 Compose the nudge:
 1. Compute offset = today - EVENT_DATE (negative = days until) from the current date you were given.
 2. If today's offset matches an entry above, compose that item as a short nudge.
-3. If the event has already passed, compose a single "FILL:<event> was recently, how'd it go?" line.
-4. If today's offset has no script entry, there's nothing to say — output an empty message.
-5. Follow the base voice rules: short, no em dashes, no preamble.
+3. If today's offset falls between entries, use the most recent earlier entry and frame it around the days remaining.
+4. If the event has already passed, compose a single "FILL:<event> was recently, how'd it go?" line.
+5. Always produce a message — delivery is automatic and you cannot skip a day. Follow the base voice rules: short, no em dashes, no preamble.
 ```
 
 **Example seeds:** anniversary prep (gift → dinner reservation → flowers → day-of message), product launch countdown, trip departure prep.

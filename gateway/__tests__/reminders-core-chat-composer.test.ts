@@ -59,6 +59,7 @@ import { STUB_PLATFORM } from '@neutronai/runtime/__tests__/stub-platform.ts'
 import {
   CORE_SOURCE_TAG,
   SMART_WRAP_PRELUDE,
+  SMART_WRAP_SENTINEL,
   buildExtraTools,
   buildReminderStoreBackend,
   buildSmartWrapComposer,
@@ -254,13 +255,13 @@ test('Shape A literal — `/remind <body> <when>` persists verbatim message + Co
   expect(row.fire_at).toBeLessThanOrEqual(nowSec + 1810)
 })
 
-test('Shape B smart-wrap — persisted message STARTS with the locked prelude and ENDS with the body', async () => {
+test('Shape B smart-wrap — persisted message STARTS with the [smart] sentinel + locked prelude and ENDS with the body', async () => {
   const res = await sendChat(harness.base, '/remind smart walk the dogs in 1h')
   expect(res.status).toBe(200)
   const pending = harness.store.listPending(OWNER)
   expect(pending).toHaveLength(1)
   const row = pending[0]!
-  expect(row.message.startsWith(SMART_WRAP_PRELUDE)).toBe(true)
+  expect(row.message.startsWith(`${SMART_WRAP_SENTINEL}${SMART_WRAP_PRELUDE}`)).toBe(true)
   expect(row.message.endsWith('Original reminder: walk the dogs')).toBe(true)
   expect(row.source).toBe(CORE_SOURCE_TAG)
 })

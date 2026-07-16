@@ -99,6 +99,21 @@ export function classifyReminderMessage(message: string): ReminderShape {
   return { kind: 'literal', body: trimmed, routing_topic }
 }
 
+/**
+ * Pull the user's original phrase out of a smart-wrap instruction for the
+ * no-LLM degrade. The Reminders Core composer appends the raw body as a
+ * trailing `Original reminder: <body>` line (`smart-wrap.ts`), so when no
+ * substrate is available we post that verbatim rather than the composition
+ * instruction itself. Falls back to the whole instruction for a hand-authored
+ * `[smart] ...` body that carries no such marker.
+ */
+const ORIGINAL_REMINDER_RE = /(?:^|\n)Original reminder:\s*([\s\S]+?)\s*$/i
+function smartWrapLiteralLine(instruction: string): string {
+  const m = ORIGINAL_REMINDER_RE.exec(instruction)
+  const original = (m?.[1] ?? '').trim()
+  return original.length > 0 ? original : instruction
+}
+
 /** Pull a human-readable line out of a pattern block for the no-LLM degrade. */
 function patternLiteralLine(block: string): string {
   for (const key of ['GOAL', 'TASK', 'EVENT', 'HABIT', 'TOPIC']) {
@@ -120,7 +135,7 @@ export function literalFallback(shape: ReminderShape): string {
     case 'literal':
       return shape.body
     case 'smart-wrap':
-      return shape.instruction
+      return smartWrapLiteralLine(shape.instruction)
     case 'pattern':
       return patternLiteralLine(shape.block)
   }

@@ -78,9 +78,22 @@ export const SMART_WRAP_PRELUDE: string =
 /**
  * The body the user typed is appended after the prelude as a trailing
  * "Original reminder: <body>" line. The fire-time agent reads this
- * exact prefix to locate the user's literal phrase.
+ * exact prefix to locate the user's literal phrase, and the no-LLM
+ * degrade (`literalFallback` in `@neutronai/reminders/message-shape.ts`)
+ * extracts it to post the user's original words rather than the
+ * composition instruction.
  */
 const ORIGINAL_REMINDER_PREFIX = 'Original reminder: '
+
+/**
+ * Leading sentinel that marks a persisted body as a Shape-B composition
+ * instruction. The fire-time classifier (`classifyReminderMessage` in
+ * `@neutronai/reminders/message-shape.ts`) routes a body to the
+ * `smart-wrap` branch ONLY when it opens with this sentinel — without it
+ * the prelude would be misclassified as a plain `literal` and posted
+ * verbatim. Kept in lockstep with that module's `SMART_RE`.
+ */
+export const SMART_WRAP_SENTINEL = '[smart] '
 
 export type ReminderMode =
   | { kind: 'literal' }
@@ -150,7 +163,7 @@ export function buildSmartWrapComposer(deps: SmartWrapDeps): SmartWrapComposer {
         }
       }
       if (mode.kind === 'smart_wrap') {
-        const message = `${SMART_WRAP_PRELUDE}\n\n${ORIGINAL_REMINDER_PREFIX}${input.body}`
+        const message = `${SMART_WRAP_SENTINEL}${SMART_WRAP_PRELUDE}\n\n${ORIGINAL_REMINDER_PREFIX}${input.body}`
         return {
           message,
           composed: true,

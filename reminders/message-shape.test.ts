@@ -85,6 +85,19 @@ describe('literalFallback', () => {
     )
   })
 
+  test('smart-wrap with an "Original reminder:" tail → degrades to the original phrase, not the instruction', () => {
+    // The Reminders Core composer persists `[smart] <prelude>\n\nOriginal
+    // reminder: <body>`; the no-LLM degrade must post <body>, never the
+    // composition prelude. Regression for N7 Codex blocker 1.
+    const composed =
+      '[smart] Compose a smart version of this reminder using available context ' +
+      '(recent project state from STATUS.md, the day of week and time of day).\n\n' +
+      'Original reminder: walk the dogs'
+    const out = literalFallback(classifyReminderMessage(composed))
+    expect(out).toBe('walk the dogs')
+    expect(out).not.toContain('Compose a smart version')
+  })
+
   test('pattern → GOAL line, FILL marker stripped, never raw scaffold', () => {
     const out = literalFallback(
       classifyReminderMessage('PATTERN: nag-until-done\nGOAL: FILL:book the Canton Fair trip'),

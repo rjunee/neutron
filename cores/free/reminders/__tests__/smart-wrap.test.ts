@@ -3,10 +3,12 @@ import { describe, expect, test } from 'bun:test'
 import {
   REMINDER_PATTERN_NAMES,
   SMART_WRAP_PRELUDE,
+  SMART_WRAP_SENTINEL,
   UnknownReminderPatternError,
   buildSmartWrapComposer,
   isReminderPatternName,
 } from '../src/smart-wrap.ts'
+import { classifyReminderMessage, literalFallback } from '@neutronai/reminders/message-shape.ts'
 
 const FAKE_PATTERN_BODY =
   'PATTERN: nag-until-done\nTAG: FILL:<distinctive-tag>\nGOAL: FILL:<one-sentence>\n\nTASK: Each morning, compose a nudge...'
@@ -49,8 +51,27 @@ describe('Shape B — smart-wrap', () => {
     })
     expect(result.composed).toBe(true)
     expect(result.audit.mode).toBe('smart_wrap')
-    expect(result.message.startsWith(SMART_WRAP_PRELUDE)).toBe(true)
+    // Persisted body opens with the [smart] sentinel so the fire-time
+    // classifier routes it to the smart-wrap branch, then the locked prelude.
+    expect(result.message.startsWith(`${SMART_WRAP_SENTINEL}${SMART_WRAP_PRELUDE}`)).toBe(true)
     expect(result.message.endsWith('Original reminder: walk the dogs')).toBe(true)
+  })
+
+  test('the composed body classifies as smart-wrap and degrades to the original phrase without an LLM', () => {
+    // Cross-boundary guard: the create-time composer (this Core) and the
+    // fire-time classifier (@neutronai/reminders) must agree. Regression for
+    // N7 Codex blocker 1 — before the [smart] sentinel these bodies fell into
+    // the literal branch and the no-LLM dispatch posted the whole composition
+    // instruction instead of the reminder.
+    const composer = buildSmartWrapComposer({ loadPattern: fakeLoader })
+    const result = composer.compose({ body: 'walk the dogs', mode: { kind: 'smart_wrap' } })
+    const shape = classifyReminderMessage(result.message)
+    expect(shape.kind).toBe('smart-wrap')
+    // No-LLM graceful degrade posts the user's original words, never the prelude.
+    const degraded = literalFallback(shape)
+    expect(degraded).toBe('walk the dogs')
+    expect(degraded).not.toContain('Compose a smart version')
+    expect(degraded).not.toContain('STATUS.md')
   })
 
   test('locked-prelude SNAPSHOT — pins the persisted Shape-B body byte-for-byte', () => {
