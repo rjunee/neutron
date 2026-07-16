@@ -231,4 +231,147 @@ describe('RB4 temporal invalidation (belief evolution) — real PGLite round-tri
     const timeline = extractTimeline(onDisk)
     expect(timeline.some((e) => e.body.includes('superseded'))).toBe(false)
   }, 60_000)
+
+  test('flag ON: an ALIASED wikilink is invalidated (removal matches [[oldco|OldCo]], not just [[oldco]])', async () => {
+    const ownerDataDir = mkdtempSync(join(tmpdir(), 'scribe-rb4-alias-'))
+    const syncHook = new GBrainSyncHook({
+      memoryStore: new GBrainMemoryStore(client),
+      gbrainMcp: client,
+    })
+
+    // Pre-create the edge endpoint, then seed a person page whose ONLY oldco
+    // assertion uses the ALIASED wikilink form the graph extractor supports.
+    await client.call('put_page', {
+      slug: 'oldco',
+      content: '---\nslug: oldco\ntype: company\n---\n\nFormer employer.\n',
+    })
+    await writeEntity(
+      {
+        ownerDataDir,
+        kind: 'person',
+        slug: 'cara-lee',
+        originInstance: 'rb4',
+        receivingInstanceSlug: 'rb4',
+        body: {
+          frontmatter: { slug: 'cara-lee', type: 'person', name: 'Cara Lee' },
+          compiledTruth: '# Cara Lee\n\nAn engineer.\n\n## Relationships\n\n- Works at [[oldco|OldCo]].\n',
+          timelineAppend: { ts: new Date(t0).toISOString(), source: 'import:onboarding', body: 'seeded' },
+        },
+      },
+      { syncHook },
+    )
+    // The aliased line produced a real works_at edge.
+    let links = await client.call('get_links', { slug: 'cara-lee' })
+    expect(edgesTo(links, 'oldco', 'works_at').length).toBe(1)
+
+    // Supersede it via scribe (flag ON).
+    const scribe = createScribe({
+      substrate: cannedSubstrate(
+        JSON.stringify({
+          entities: [
+            { name: 'Cara Lee', kind: 'person', fact: 'an engineer' },
+            { name: 'NewCo', kind: 'company', fact: 'her new employer' },
+          ],
+          relations: [
+            { subject: 'Cara Lee', predicate: 'works_at', object: 'NewCo', supersedes: 'OldCo' },
+          ],
+        }),
+      ),
+      syncHook,
+      ownerDataDir,
+      project_slug: 'rb4-alias',
+      budget: createState(join(ownerDataDir, '.scribe-budget.json'), t0),
+      writeEntity,
+      now: () => t0 + 1000,
+      supersede: true,
+    })
+    const out = await scribe.extractAndWrite({
+      text: 'Cara Lee has moved on from OldCo and now works at NewCo, leading their platform engineering team full time.',
+      observed_at: t0 + 1000,
+    })
+    expect(out.ran).toBe(true)
+
+    const onDisk = readFileSync(join(ownerDataDir, 'entities', 'people', 'cara-lee.md'), 'utf8')
+    const compiled = extractCompiledTruth(onDisk)
+    // The ALIASED oldco assertion is gone; NewCo is current.
+    expect(compiled).not.toContain('[[oldco') // neither [[oldco]] nor [[oldco|…]]
+    expect(compiled).toContain('Works at [[newco]].')
+
+    // The stale edge is invalidated; the current one reflects NewCo.
+    links = await client.call('get_links', { slug: 'cara-lee' })
+    expect(edgesTo(links, 'oldco', 'works_at').length).toBe(0) // INVALIDATED (aliased)
+    expect(edgesTo(links, 'newco', 'works_at').length).toBe(1) // CURRENT
+  }, 60_000)
+
+  test('flag ON: supersede is PREDICATE-SCOPED — an unrelated current fact about the SAME object survives', async () => {
+    const ownerDataDir = mkdtempSync(join(tmpdir(), 'scribe-rb4-scope-'))
+    const syncHook = new GBrainSyncHook({
+      memoryStore: new GBrainMemoryStore(client),
+      gbrainMcp: client,
+    })
+
+    await client.call('put_page', {
+      slug: 'oldco',
+      content: '---\nslug: oldco\ntype: company\n---\n\nA company Bob is tied to.\n',
+    })
+    // Bob both WORKS AT and ADVISES oldco. The graph collapses the pair to the
+    // strongest predicate (advises ≺ works_at), so the live oldco edge is
+    // `advises`. Superseding works_at must NOT disturb the advises assertion.
+    await writeEntity(
+      {
+        ownerDataDir,
+        kind: 'person',
+        slug: 'bob-tan',
+        originInstance: 'rb4',
+        receivingInstanceSlug: 'rb4',
+        body: {
+          frontmatter: { slug: 'bob-tan', type: 'person', name: 'Bob Tan' },
+          compiledTruth:
+            '# Bob Tan\n\nAn operator.\n\n## Relationships\n\n- Advises [[oldco]].\n- Works at [[oldco|OldCo]].\n',
+          timelineAppend: { ts: new Date(t0).toISOString(), source: 'import:onboarding', body: 'seeded' },
+        },
+      },
+      { syncHook },
+    )
+    let links = await client.call('get_links', { slug: 'bob-tan' })
+    expect(edgesTo(links, 'oldco', 'advises').length).toBe(1) // strongest → the live edge
+
+    const scribe = createScribe({
+      substrate: cannedSubstrate(
+        JSON.stringify({
+          entities: [
+            { name: 'Bob Tan', kind: 'person', fact: 'an operator' },
+            { name: 'NewCo', kind: 'company', fact: 'his new employer' },
+          ],
+          relations: [
+            { subject: 'Bob Tan', predicate: 'works_at', object: 'NewCo', supersedes: 'OldCo' },
+          ],
+        }),
+      ),
+      syncHook,
+      ownerDataDir,
+      project_slug: 'rb4-scope',
+      budget: createState(join(ownerDataDir, '.scribe-budget.json'), t0),
+      writeEntity,
+      now: () => t0 + 1000,
+      supersede: true,
+    })
+    const out = await scribe.extractAndWrite({
+      text: 'Bob Tan left his day job at OldCo and now works at NewCo, though he still advises the OldCo board on strategy.',
+      observed_at: t0 + 1000,
+    })
+    expect(out.ran).toBe(true)
+
+    const onDisk = readFileSync(join(ownerDataDir, 'entities', 'people', 'bob-tan.md'), 'utf8')
+    const compiled = extractCompiledTruth(onDisk)
+    // The works_at line is retired; the unrelated Advises assertion SURVIVES.
+    expect(compiled).not.toContain('Works at [[oldco')
+    expect(compiled).toContain('Advises [[oldco]].') // PRESERVED (different predicate)
+    expect(compiled).toContain('Works at [[newco]].') // current
+
+    // The advises edge to oldco is intact; works_at newco is added.
+    links = await client.call('get_links', { slug: 'bob-tan' })
+    expect(edgesTo(links, 'oldco', 'advises').length).toBe(1) // PRESERVED
+    expect(edgesTo(links, 'newco', 'works_at').length).toBe(1) // CURRENT
+  }, 60_000)
 })

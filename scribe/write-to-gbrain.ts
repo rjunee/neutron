@@ -47,6 +47,7 @@ import {
   extractCompiledTruth,
   parseFrontmatter,
 } from '@neutronai/runtime/entity-format.ts'
+import { extractTypedLinks } from '@neutronai/runtime/auto-link.ts'
 import type { EntityKind, SyncHook } from '@neutronai/runtime/entity-writer.ts'
 import { entitySlugify } from '@neutronai/runtime/entity-slug.ts'
 import { createLogger } from '@neutronai/logger'
@@ -484,33 +485,48 @@ function mergeExistingCompiledTruth(
 }
 
 /**
- * RB4 temporal invalidation — remove every existing compiled-truth LINE that
- * references a superseded object's wikilink `[[prior-slug]]`, for each relation
- * on this page that carries a `supersedes` marker. Predicate-BLIND on purpose,
- * mirroring GBrain's `remove_link` (which soft-deletes ALL link_types for a
- * `{from,to}` pair): a superseding fact retires whatever the subject previously
- * asserted about the prior object — a same-predicate job move (`works_at OldCo`)
- * or a cross-predicate correction alike. The dropped sentence stops feeding the
- * compiled-truth→triple extraction, so the writer's `removedLinks` diff picks it
- * up and the sync hook invalidates the stale edge; the prior belief survives in
- * the append-only, dated timeline. Guards skip a `supersedes` that resolves to
- * the same slug as the new object (a no-op / mis-emit).
+ * RB4 temporal invalidation — drop every existing compiled-truth LINE that
+ * asserts a superseded `(predicate, prior-object)` triple, one target per
+ * superseding relation on this page.
+ *
+ * PREDICATE-SCOPED, not object-blind: the marker `works_at NewCo, supersedes
+ * OldCo` retires ONLY the prior `works_at [[oldco]]` assertion — a separate,
+ * still-current `Advises [[oldco]].` line survives (Codex RB4 r1 blocker 1). A
+ * line qualifies purely by what it would contribute to the graph, computed with
+ * the SAME `extractTypedLinks` the writer uses — so ALIASED wikilinks
+ * (`[[oldco|OldCo]]`) and every verb-phrasing variant are matched exactly as the
+ * edge extractor sees them (Codex RB4 r1 blocker 2), never a brittle literal
+ * `[[oldco]]` substring.
+ *
+ * Dropping the line removes the triple from the NEW compiled-truth, so the
+ * writer's `removedLinks` diff surfaces `works_at oldco` → the sync hook's
+ * (predicate-blind) `remove_link` clears the pair and its add-pass re-asserts any
+ * survivor edge (e.g. `advises oldco`, still present in the new truth). The prior
+ * belief lives on in the append-only, dated timeline. Guards skip a `supersedes`
+ * that resolves to the same slug as the new object (a no-op / mis-emit).
  */
 function stripSupersededSentences(existing: string, page: PlannedPage): string {
-  const priorSlugs = new Set<string>()
+  // Targets: `${predicate}\x1f${priorSlug}` triples to retire from compiled-truth.
+  const targets = new Set<string>()
   for (const r of page.relations) {
     if (r.supersedes === undefined) continue
     const priorSlug = slugify(r.supersedes)
     const objSlug = slugify(r.object)
     if (priorSlug === null || objSlug === null) continue
     if (priorSlug === objSlug) continue // not a real supersession
-    priorSlugs.add(priorSlug)
+    targets.add(`${r.predicate}\x1f${priorSlug}`)
   }
-  if (priorSlugs.size === 0) return existing
-  const wikilinks = [...priorSlugs].map((s) => `[[${s}]]`)
-  const kept = existing
-    .split('\n')
-    .filter((line) => !wikilinks.some((w) => line.includes(w)))
+  if (targets.size === 0) return existing
+  const kept = existing.split('\n').filter((line) => {
+    if (!line.includes('[[')) return true // fast path: no wikilink → keeps
+    // Extract what THIS line would contribute to the graph (subject = this
+    // page), then drop the line iff it asserts a superseded (predicate, object).
+    const triples = extractTypedLinks(`${line}\n`, page.slug, {
+      sourceKind: page.kind,
+      source: 'rb4-supersede-scan',
+    })
+    return !triples.some((t) => targets.has(`${t.predicate}\x1f${t.object}`))
+  })
   return kept.join('\n')
 }
 
