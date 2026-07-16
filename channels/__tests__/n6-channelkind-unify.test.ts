@@ -264,6 +264,32 @@ describe('ButtonStore channel_kind persistence', () => {
     expect(row?.resolution_channel_kind).toBeNull()
   })
 
+  test('(a-write-cli) resolve() REJECTS the non-button "cli" token (buttons never carry cli)', async () => {
+    // resolve() returns a ButtonChoice (ChannelKindForButton), so it validates
+    // against the button subset — 'cli' is a topics/ChannelKind sentinel that
+    // never legitimately reaches a button_prompts resolution.
+    const prompt = { prompt_id: crypto.randomUUID(), body: 'q', options: [{ label: 'A', body: 'a', value: 'a' }], allow_freeform: false }
+    await store.emit(prompt, { topic_id: 'topic-cli' })
+    await expect(
+      store.resolve({
+        choice: {
+          prompt_id: prompt.prompt_id,
+          choice_value: 'a',
+          chosen_at: now + 1,
+          speaker_user_id: 'user-cli',
+          channel_kind: 'cli' as unknown as 'app_socket',
+        },
+      }),
+    ).rejects.toBeInstanceOf(ButtonStoreError)
+    const row = db
+      .prepare<{ resolved_at: number | null; resolution_channel_kind: string | null }, [string]>(
+        `SELECT resolved_at, resolution_channel_kind FROM button_prompts WHERE prompt_id = ?`,
+      )
+      .get(prompt.prompt_id)
+    expect(row?.resolved_at).toBeNull()
+    expect(row?.resolution_channel_kind).toBeNull()
+  })
+
   test('(b-write) persistInertUserTurn REJECTS an unknown token + writes no row', async () => {
     await expect(
       store.persistInertUserTurn({

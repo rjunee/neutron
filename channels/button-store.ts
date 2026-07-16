@@ -602,25 +602,30 @@ export class ButtonStore {
           choice: priorChoice,
         }
       }
-      // N6 write-boundary validation (NEW resolution only) — a fresh write must
-      // persist a canonical token. Map the legacy hyphen 'app-socket' →
-      // 'app_socket' and accept every live ChannelKind (incl. the 'cli'/'webhook'
-      // sentinels); REJECT a genuinely-unknown token rather than letting `?? raw`
-      // smuggle it into `resolution_channel_kind`. A direct store caller can
-      // bypass the router's ingress guard, so this is the authoritative write
-      // gate — the throw happens BEFORE the UPDATE, so the row stays unresolved.
-      // (The replay branch above never reaches here; it preserves the stored
-      // token verbatim for provenance.)
-      const canonicalKind = canonicalizeWritableChannelKind(choice.channel_kind)
+      // N6 write-boundary validation (NEW resolution only) — a fresh resolution
+      // is a BUTTON-vocabulary write: it constructs + returns a `ButtonChoice`,
+      // whose `channel_kind` is `ChannelKindForButton` (telegram | app_socket |
+      // webhook — buttons never carry 'cli'). Validate against that subset via
+      // `normalizeChannelKindForButton`: it maps the legacy hyphen 'app-socket'
+      // → 'app_socket' and REJECTS anything outside the subset (including 'cli'
+      // and truly-unknown tokens) rather than letting `?? raw` smuggle a corrupt
+      // value into `resolution_channel_kind`. A direct store caller can bypass
+      // the router's ingress guard, so this is the authoritative write gate — the
+      // throw happens BEFORE the UPDATE, so the row stays unresolved. (The replay
+      // branch above never reaches here; it preserves the stored token verbatim
+      // for provenance.)
+      const canonicalKind = normalizeChannelKindForButton(choice.channel_kind)
       if (canonicalKind === null) {
         throw new ButtonStoreError(
           'invalid_prompt',
           `unsupported channel_kind=${JSON.stringify(choice.channel_kind)} for prompt_id=${choice.prompt_id}`,
         )
       }
-      // The persisted choice — canonical channel_kind so the stored column and
-      // the returned `ResolveResult.choice` ("choice as persisted") agree.
-      const persistedChoice: ButtonChoice = { ...choice, channel_kind: canonicalKind as ChannelKindForButton }
+      // The persisted choice — canonical channel_kind (no cast needed: the
+      // subset normalizer already returns `ChannelKindForButton`) so the stored
+      // column and the returned `ResolveResult.choice` ("choice as persisted")
+      // agree.
+      const persistedChoice: ButtonChoice = { ...choice, channel_kind: canonicalKind }
       await tx.run(
         `UPDATE button_prompts
             SET resolved_at = ?,
