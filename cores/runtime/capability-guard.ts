@@ -19,7 +19,7 @@
  *
  * The composition shape:
  *
- *     guard = new CapabilityGuard({manifest, core_slug, project_slug, audit})
+ *     guard = new CapabilityGuard({manifest, core_slug, owner_slug, audit})
  *     handler = guard.wrapToolHandler({tool_name, capability_required, fn})
  *     await handler(input)
  *
@@ -39,7 +39,7 @@ import type { SecretAuditLog } from './secret-audit.ts'
 export interface CapabilityGuardOptions {
   manifest: NeutronManifest
   core_slug: string
-  project_slug: string
+  owner_slug: string
   audit: SecretAuditLog
   /**
    * Multi-author attribution (connect-spec §4.3 layer 3). The author whose turn
@@ -63,7 +63,7 @@ export type ToolCheckResult =
 export class CapabilityGuard {
   private readonly manifest: NeutronManifest
   private readonly core_slug: string
-  private readonly project_slug: string
+  private readonly owner_slug: string
   private readonly audit: SecretAuditLog
   private readonly author_id: string | undefined
   private readonly toolMap: Map<string, string>
@@ -71,7 +71,7 @@ export class CapabilityGuard {
   constructor(options: CapabilityGuardOptions) {
     this.manifest = options.manifest
     this.core_slug = options.core_slug
-    this.project_slug = options.project_slug
+    this.owner_slug = options.owner_slug
     this.audit = options.audit
     this.author_id = options.author_id
     // Pre-index tools[] for O(1) lookup. The manifest is small but
@@ -124,7 +124,7 @@ export class CapabilityGuard {
       return
     }
     await this.audit.recordToolCall({
-      project_slug: this.project_slug,
+      owner_slug: this.owner_slug,
       core_slug: this.core_slug,
       tool_name: input.tool_name,
       outcome: 'capability_denied',
@@ -157,7 +157,7 @@ export class CapabilityGuard {
       try {
         const out = await input.fn(toolInput)
         await this.audit.recordToolCall({
-          project_slug: this.project_slug,
+          owner_slug: this.owner_slug,
           core_slug: this.core_slug,
           tool_name,
           outcome: 'ok',
@@ -166,7 +166,7 @@ export class CapabilityGuard {
         return out
       } catch (err) {
         await this.audit.recordToolCall({
-          project_slug: this.project_slug,
+          owner_slug: this.owner_slug,
           core_slug: this.core_slug,
           tool_name,
           outcome: 'error',

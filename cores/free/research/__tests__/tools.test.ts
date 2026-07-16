@@ -139,7 +139,7 @@ describe('buildTools — capability-gated dispatch', () => {
 
     // Audit log: each capability-guarded dispatch records an `ok` row.
     const auditRows = await audit.list({
-      project_slug: OWNER,
+      owner_slug: OWNER,
       core_slug: 'research_core',
     })
     const successRows = auditRows.filter((row) => row.outcome === 'ok')
@@ -520,7 +520,7 @@ describe('buildTools — capability-gated dispatch', () => {
 
     // The audit log has a capability_denied row for research_start.
     const denied = await audit.listDenied({
-      project_slug: OWNER,
+      owner_slug: OWNER,
       core_slug: 'research_core',
     })
     const labels = new Set(denied.map((r) => r.label))
@@ -534,7 +534,7 @@ describe('buildTools — capability-gated dispatch', () => {
     const guard = new CapabilityGuard({
       manifest: m,
       core_slug: 'research_core',
-      project_slug: OWNER,
+      owner_slug: OWNER,
       audit,
     })
     const result = guard.check({

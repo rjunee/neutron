@@ -201,7 +201,7 @@ describe('app-tabs surface — Core union (PR-2)', () => {
   it('folds a PER-PROJECT-installed Core tab into the project set, with <project_id> substituted', async () => {
     const { store } = openStore()
     await store.record({
-      project_slug: PROJECT_SLUG,
+      owner_slug: PROJECT_SLUG,
       core_slug: 'calendar_core',
       package_name: '@neutronai/calendar-core',
       package_version: '1.0.0',
@@ -238,7 +238,7 @@ describe('app-tabs surface — Core union (PR-2)', () => {
   it('does NOT leak a per-project Core into the GLOBAL set', async () => {
     const { store } = openStore()
     await store.record({
-      project_slug: PROJECT_SLUG,
+      owner_slug: PROJECT_SLUG,
       core_slug: 'calendar_core',
       package_name: '@neutronai/calendar-core',
       package_version: '1.0.0',

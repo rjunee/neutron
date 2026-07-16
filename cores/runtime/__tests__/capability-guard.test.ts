@@ -61,19 +61,19 @@ afterEach(() => {
 })
 
 test('check returns ok for declared tool with matching capability', () => {
-  const guard = new CapabilityGuard({ manifest: MANIFEST, core_slug: 'tasks', project_slug: 't1', audit })
+  const guard = new CapabilityGuard({ manifest: MANIFEST, core_slug: 'tasks', owner_slug: 't1', audit })
   expect(guard.check({ tool_name: 'list_tasks', capability_required: 'read:project.db' }).ok).toBe(true)
 })
 
 test('check returns tool_not_declared for unknown tool', () => {
-  const guard = new CapabilityGuard({ manifest: MANIFEST, core_slug: 'tasks', project_slug: 't1', audit })
+  const guard = new CapabilityGuard({ manifest: MANIFEST, core_slug: 'tasks', owner_slug: 't1', audit })
   const r = guard.check({ tool_name: 'rogue', capability_required: 'read:project.db' })
   expect(r.ok).toBe(false)
   if (!r.ok) expect(r.code).toBe('tool_not_declared')
 })
 
 test('check returns capability_mismatch when capability_required does not match manifest', () => {
-  const guard = new CapabilityGuard({ manifest: MANIFEST, core_slug: 'tasks', project_slug: 't1', audit })
+  const guard = new CapabilityGuard({ manifest: MANIFEST, core_slug: 'tasks', owner_slug: 't1', audit })
   const r = guard.check({ tool_name: 'list_tasks', capability_required: 'write:project.db' })
   expect(r.ok).toBe(false)
   if (!r.ok) expect(r.code).toBe('capability_mismatch')
@@ -96,33 +96,33 @@ test('check returns capability_not_declared if capability is not in manifest.cap
       },
     ],
   }
-  const guard = new CapabilityGuard({ manifest: broken, core_slug: 'tasks', project_slug: 't1', audit })
+  const guard = new CapabilityGuard({ manifest: broken, core_slug: 'tasks', owner_slug: 't1', audit })
   const r = guard.check({ tool_name: 'list_tasks', capability_required: 'read:project.db' })
   expect(r.ok).toBe(false)
   if (!r.ok) expect(r.code).toBe('capability_not_declared')
 })
 
 test('assertOrDeny throws CapabilityDeniedError + writes audit row on deny', async () => {
-  const guard = new CapabilityGuard({ manifest: MANIFEST, core_slug: 'tasks', project_slug: 't1', audit })
+  const guard = new CapabilityGuard({ manifest: MANIFEST, core_slug: 'tasks', owner_slug: 't1', audit })
   await expect(
     guard.assertOrDeny({ tool_name: 'rogue', capability_required: 'read:project.db' }),
   ).rejects.toThrow(CapabilityDeniedError)
 
-  const rows = await audit.list({ project_slug: 't1' })
+  const rows = await audit.list({ owner_slug: 't1' })
   expect(rows[0]?.op).toBe('tool_call')
   expect(rows[0]?.label).toBe('rogue')
   expect(rows[0]?.outcome).toBe('capability_denied')
 })
 
 test('assertOrDeny is a no-op on success (no audit row written here)', async () => {
-  const guard = new CapabilityGuard({ manifest: MANIFEST, core_slug: 'tasks', project_slug: 't1', audit })
+  const guard = new CapabilityGuard({ manifest: MANIFEST, core_slug: 'tasks', owner_slug: 't1', audit })
   await guard.assertOrDeny({ tool_name: 'list_tasks', capability_required: 'read:project.db' })
-  const rows = await audit.list({ project_slug: 't1' })
+  const rows = await audit.list({ owner_slug: 't1' })
   expect(rows).toHaveLength(0)
 })
 
 test('wrapToolHandler: success path runs handler + writes ok audit row', async () => {
-  const guard = new CapabilityGuard({ manifest: MANIFEST, core_slug: 'tasks', project_slug: 't1', audit })
+  const guard = new CapabilityGuard({ manifest: MANIFEST, core_slug: 'tasks', owner_slug: 't1', audit })
   const wrapped = guard.wrapToolHandler({
     tool_name: 'list_tasks',
     capability_required: 'read:project.db',
@@ -130,32 +130,32 @@ test('wrapToolHandler: success path runs handler + writes ok audit row', async (
   })
   const out = await wrapped({ id: 5 })
   expect(out.echo).toBe(10)
-  const rows = await audit.list({ project_slug: 't1' })
+  const rows = await audit.list({ owner_slug: 't1' })
   expect(rows[0]?.outcome).toBe('ok')
   expect(rows[0]?.label).toBe('list_tasks')
 })
 
 test('wrapToolHandler: deny path rejects + writes capability_denied row', async () => {
-  const guard = new CapabilityGuard({ manifest: MANIFEST, core_slug: 'tasks', project_slug: 't1', audit })
+  const guard = new CapabilityGuard({ manifest: MANIFEST, core_slug: 'tasks', owner_slug: 't1', audit })
   const wrapped = guard.wrapToolHandler({
     tool_name: 'rogue',
     capability_required: 'read:project.db',
     fn: async () => ({ ok: true }),
   })
   await expect(wrapped({})).rejects.toThrow(CapabilityDeniedError)
-  const rows = await audit.list({ project_slug: 't1' })
+  const rows = await audit.list({ owner_slug: 't1' })
   expect(rows[0]?.outcome).toBe('capability_denied')
 })
 
 test('wrapToolHandler: inner-handler throw writes error row + rethrows', async () => {
-  const guard = new CapabilityGuard({ manifest: MANIFEST, core_slug: 'tasks', project_slug: 't1', audit })
+  const guard = new CapabilityGuard({ manifest: MANIFEST, core_slug: 'tasks', owner_slug: 't1', audit })
   const wrapped = guard.wrapToolHandler({
     tool_name: 'list_tasks',
     capability_required: 'read:project.db',
     fn: async () => { throw new Error('inner_failure') },
   })
   await expect(wrapped({})).rejects.toThrow('inner_failure')
-  const rows = await audit.list({ project_slug: 't1' })
+  const rows = await audit.list({ owner_slug: 't1' })
   expect(rows[0]?.outcome).toBe('error')
   expect(rows[0]?.error).toBe('inner_failure')
 })
@@ -164,7 +164,7 @@ test('wrapToolHandler: inner-handler throw writes error row + rethrows', async (
 
 test('guard stamps the triggering author_id on tool_call rows (ok + deny + error)', async () => {
   const guard = new CapabilityGuard({
-    manifest: MANIFEST, core_slug: 'tasks', project_slug: 't1', audit, author_id: 'alice',
+    manifest: MANIFEST, core_slug: 'tasks', owner_slug: 't1', audit, author_id: 'alice',
   })
   // ok path
   const ok = guard.wrapToolHandler({
@@ -183,19 +183,19 @@ test('guard stamps the triggering author_id on tool_call rows (ok + deny + error
   })
   await expect(boom({})).rejects.toThrow('boom')
 
-  const rows = await audit.list({ project_slug: 't1' })
+  const rows = await audit.list({ owner_slug: 't1' })
   expect(rows.length).toBe(3)
   for (const r of rows) expect(r.author_id).toBe('alice')
 })
 
 test('guard without author_id leaves the audit-log default to decide attribution', async () => {
   const ownerAudit = new SecretAuditLog({ db: projectDb, author_id: 'owner' })
-  const guard = new CapabilityGuard({ manifest: MANIFEST, core_slug: 'tasks', project_slug: 't1', audit: ownerAudit })
+  const guard = new CapabilityGuard({ manifest: MANIFEST, core_slug: 'tasks', owner_slug: 't1', audit: ownerAudit })
   const wrapped = guard.wrapToolHandler({
     tool_name: 'list_tasks', capability_required: 'read:project.db',
     fn: async () => ({ ok: true }),
   })
   await wrapped({})
-  const rows = await ownerAudit.list({ project_slug: 't1' })
+  const rows = await ownerAudit.list({ owner_slug: 't1' })
   expect(rows[0]?.author_id).toBe('owner')
 })

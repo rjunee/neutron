@@ -66,7 +66,7 @@ export function buildExtraTools(deps: ExtraToolDeps): BuiltExtraTools {
   const guard = new CapabilityGuard({
     manifest: deps.manifest,
     core_slug: CORE_SLUG,
-    project_slug: deps.project_slug,
+    owner_slug: deps.project_slug,
     audit: deps.audit,
   })
   const userId = deps.user_id ?? deps.project_slug

@@ -82,7 +82,7 @@ export interface CoreNamespaceSidecar {
 export type CoreNamespace = CoreNamespaceTables | CoreNamespaceSidecar
 
 export interface AllocateNamespaceInput {
-  project_slug: string
+  owner_slug: string
   slug: string
   manifest_capabilities: ReadonlyArray<string>
   /** Instance data dir; sidecar files land at `<dataDir>/cores/<slug>.db`. */
@@ -147,7 +147,7 @@ export function allocateCoreNamespace(input: AllocateNamespaceInput): CoreNamesp
  * AFTER this returns; we don't touch `core_installations`.
  */
 export async function releaseCoreNamespace(input: {
-  project_slug: string
+  owner_slug: string
   slug: string
   layout: CoreDataLayout
   /** Project DB — required for table layout to drop tables. */

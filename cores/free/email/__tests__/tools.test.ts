@@ -79,7 +79,7 @@ describe('buildTools — capability-gated dispatch', () => {
     expect(results.map((r) => r.id)).toEqual(['new', 'old'])
 
     const auditRows = await audit.list({
-      project_slug: OWNER,
+      owner_slug: OWNER,
       core_slug: 'email_managed_core',
     })
     const ok = auditRows.filter((r) => r.outcome === 'ok')
@@ -349,7 +349,7 @@ describe('buildTools — capability-gated dispatch', () => {
     expect(message.label_ids).toContain('SENT')
     expect(message.label_ids).not.toContain('DRAFT')
     // Audit row for the send dispatch.
-    const rows = await audit.list({ project_slug: OWNER, core_slug: 'email_managed_core' })
+    const rows = await audit.list({ owner_slug: OWNER, core_slug: 'email_managed_core' })
     const ok = rows.filter((r) => r.outcome === 'ok' && r.label === 'email_send')
     expect(ok.length).toBeGreaterThanOrEqual(1)
   })
@@ -407,7 +407,7 @@ describe('buildTools — capability-gated dispatch', () => {
     expect(message.id).toBe('msg-1')
 
     const denied = await audit.listDenied({
-      project_slug: OWNER,
+      owner_slug: OWNER,
       core_slug: 'email_managed_core',
     })
     const labels = new Set(denied.map((r) => r.label))
@@ -458,7 +458,7 @@ describe('buildTools — capability-gated dispatch', () => {
     const guard = new CapabilityGuard({
       manifest: m,
       core_slug: 'email_managed_core',
-      project_slug: OWNER,
+      owner_slug: OWNER,
       audit,
     })
 

@@ -96,7 +96,7 @@ describe('buildTools — capability-guarded MCP dispatch', () => {
       backend,
     })
     await tools.scrape_instagram({ url: 'https://instagram.com/p/x/' })
-    const rows = await audit.list({ project_slug: OWNER })
+    const rows = await audit.list({ owner_slug: OWNER })
     expect(rows.some((r) => r.op === 'tool_call' && r.outcome === 'ok')).toBe(true)
   })
 

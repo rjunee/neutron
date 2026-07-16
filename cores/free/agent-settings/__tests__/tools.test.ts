@@ -642,7 +642,7 @@ describe('agent-settings tools — capability gate + audit', () => {
     await tools.list_projects({})
     await tools.rename_project({ old_name: 'P', new_name: 'Q' })
 
-    const rows = await audit.list({ project_slug: OWNER, core_slug: 'agent_settings' })
+    const rows = await audit.list({ owner_slug: OWNER, core_slug: 'agent_settings' })
     const ok = rows.filter((r) => r.outcome === 'ok')
     const labels = new Set(ok.map((r) => r.label))
     expect(labels.has('list_projects')).toBe(true)
@@ -670,7 +670,7 @@ describe('agent-settings tools — capability gate + audit', () => {
     expect(list.projects.some((p) => p.id === 'p')).toBe(true)
 
     const denied = await audit.listDenied({
-      project_slug: OWNER,
+      owner_slug: OWNER,
       core_slug: 'agent_settings',
     })
     const labels = new Set(denied.map((r) => r.label))

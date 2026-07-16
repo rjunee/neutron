@@ -97,7 +97,7 @@ describe('buildTools — capability-gated dispatch', () => {
     // Every successful dispatch writes an audit row — proves the
     // capability guard ran on the success path.
     const auditRows = await audit.list({
-      project_slug: OWNER,
+      owner_slug: OWNER,
       core_slug: 'tasks_core',
     })
     const successRows = auditRows.filter((r) => r.outcome === 'ok')
@@ -254,7 +254,7 @@ describe('buildTools — capability-gated dispatch', () => {
     expect(list.results).toEqual([])
 
     const denied = await audit.listDenied({
-      project_slug: OWNER,
+      owner_slug: OWNER,
       core_slug: 'tasks_core',
     })
     const labels = new Set(denied.map((r) => r.label))
@@ -316,7 +316,7 @@ describe('buildTools — capability-gated dispatch', () => {
     })
     await expect(tools.tasks_pick_next!({})).rejects.toThrow(CapabilityDeniedError)
     const denied = await audit.listDenied({
-      project_slug: OWNER,
+      owner_slug: OWNER,
       core_slug: 'tasks_core',
     })
     expect(denied.some((r) => r.label === 'tasks_pick_next')).toBe(true)
@@ -356,7 +356,7 @@ describe('buildTools — capability-gated dispatch', () => {
     const guard = new CapabilityGuard({
       manifest: m,
       core_slug: 'tasks_core',
-      project_slug: OWNER,
+      owner_slug: OWNER,
       audit,
     })
 

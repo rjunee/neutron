@@ -89,7 +89,7 @@ describe('buildTools — capability-gated dispatch', () => {
 
     // Verify a `secret_audit_log` row was written for every dispatch —
     // proves the capability guard ran on the success path.
-    const auditRows = await audit.list({ project_slug: OWNER, core_slug: 'reminders_core' })
+    const auditRows = await audit.list({ owner_slug: OWNER, core_slug: 'reminders_core' })
     const successRows = auditRows.filter((row) => row.outcome === 'ok')
     expect(successRows.length).toBeGreaterThanOrEqual(3)
     const toolNames = new Set(successRows.map((row) => row.label))
@@ -381,7 +381,7 @@ describe('buildTools — capability-gated dispatch', () => {
 
     // Confirm capability_denied audit rows for the three write tools.
     const denied = await audit.listDenied({
-      project_slug: OWNER,
+      owner_slug: OWNER,
       core_slug: 'reminders_core',
     })
     const labels = new Set(denied.map((r) => r.label))
@@ -481,7 +481,7 @@ describe('buildTools — capability-gated dispatch', () => {
     const guard = new CapabilityGuard({
       manifest: m,
       core_slug: 'reminders_core',
-      project_slug: OWNER,
+      owner_slug: OWNER,
       audit,
     })
 

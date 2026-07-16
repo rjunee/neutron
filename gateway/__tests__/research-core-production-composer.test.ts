@@ -421,7 +421,7 @@ test('research_deep MCP tool dispatch through the production composer wires capa
   expect(result.status).toBe('completed')
   // Audit log records an outcome=ok row for research_deep.
   const rows = await harness.audit.list({
-    project_slug: OWNER,
+    owner_slug: OWNER,
     core_slug: 'research_core',
   })
   const okRows = rows.filter(

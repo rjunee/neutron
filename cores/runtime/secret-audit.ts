@@ -44,7 +44,7 @@ export type SecretAuditOutcome =
 export interface SecretAuditEntry {
   id: string
   ts: number
-  project_slug: string
+  owner_slug: string
   core_slug: string
   op: SecretAuditOp
   kind: string
@@ -75,6 +75,8 @@ export interface SecretAuditLogOptions {
 interface AuditRow {
   id: string
   ts: number
+  // SQL column name remains `project_slug`; value is the owner/instance slug
+  // (N4: TS-side domain identifiers are `owner_slug`, the frozen column is not).
   project_slug: string
   core_slug: string
   op: string
@@ -97,7 +99,7 @@ export class SecretAuditLog {
   }
 
   async record(input: {
-    project_slug: string
+    owner_slug: string
     core_slug: string
     op: SecretAuditOp
     kind: string
@@ -115,7 +117,7 @@ export class SecretAuditLog {
       [
         id,
         this.now(),
-        input.project_slug,
+        input.owner_slug,
         input.core_slug,
         input.op,
         input.kind,
@@ -128,7 +130,7 @@ export class SecretAuditLog {
   }
 
   async recordToolCall(input: {
-    project_slug: string
+    owner_slug: string
     core_slug: string
     tool_name: string
     outcome: SecretAuditOutcome
@@ -137,7 +139,7 @@ export class SecretAuditLog {
     author_id?: string
   }): Promise<void> {
     await this.record({
-      project_slug: input.project_slug,
+      owner_slug: input.owner_slug,
       core_slug: input.core_slug,
       op: 'tool_call',
       kind: 'tool',
@@ -150,7 +152,7 @@ export class SecretAuditLog {
 
   /** Read the recent audit tail for a project + Core. Most-recent first. */
   async list(input: {
-    project_slug: string
+    owner_slug: string
     core_slug?: string
     limit?: number
   }): Promise<SecretAuditEntry[]> {
@@ -161,20 +163,20 @@ export class SecretAuditLog {
             `SELECT id, ts, project_slug, core_slug, op, kind, label, outcome, error, author_id
                FROM secret_audit_log WHERE project_slug = ?
                ORDER BY ts DESC LIMIT ?`,
-            [input.project_slug, limit],
+            [input.owner_slug, limit],
           )
       : this.db
           .all<AuditRow, [string, string, number]>(
             `SELECT id, ts, project_slug, core_slug, op, kind, label, outcome, error, author_id
                FROM secret_audit_log WHERE project_slug = ? AND core_slug = ?
                ORDER BY ts DESC LIMIT ?`,
-            [input.project_slug, input.core_slug, limit],
+            [input.owner_slug, input.core_slug, limit],
           )
     return rows.map(rowToEntry)
   }
 
   async listDenied(input: {
-    project_slug: string
+    owner_slug: string
     core_slug?: string
     limit?: number
   }): Promise<SecretAuditEntry[]> {
@@ -185,14 +187,14 @@ export class SecretAuditLog {
             `SELECT id, ts, project_slug, core_slug, op, kind, label, outcome, error, author_id
                FROM secret_audit_log WHERE project_slug = ? AND outcome = 'capability_denied'
                ORDER BY ts DESC LIMIT ?`,
-            [input.project_slug, limit],
+            [input.owner_slug, limit],
           )
       : this.db
           .all<AuditRow, [string, string, number]>(
             `SELECT id, ts, project_slug, core_slug, op, kind, label, outcome, error, author_id
                FROM secret_audit_log WHERE project_slug = ? AND core_slug = ? AND outcome = 'capability_denied'
                ORDER BY ts DESC LIMIT ?`,
-            [input.project_slug, input.core_slug, limit],
+            [input.owner_slug, input.core_slug, limit],
           )
     return rows.map(rowToEntry)
   }
@@ -214,7 +216,7 @@ function rowToEntry(row: AuditRow): SecretAuditEntry {
   return {
     id: row.id,
     ts: row.ts,
-    project_slug: row.project_slug,
+    owner_slug: row.project_slug,
     core_slug: row.core_slug,
     op: row.op,
     kind: row.kind,
@@ -249,17 +251,17 @@ export function buildAuditedSecretsStore(
   store: PlatformSecretsStore,
   options: {
     audit: SecretAuditLog
-    project_slug: string
+    owner_slug: string
     core_slug: string
   },
 ): PlatformSecretsStore {
-  const { audit, project_slug, core_slug } = options
+  const { audit, owner_slug, core_slug } = options
   const wrapper: PlatformSecretsStore = {
     async get(input: { owner_handle: string; kind: string; label: string }): Promise<string | null> {
       try {
         const got = await store.get(input)
         await audit.record({
-          project_slug,
+          owner_slug,
           core_slug,
           op: 'get',
           kind: input.kind,
@@ -269,7 +271,7 @@ export function buildAuditedSecretsStore(
         return got
       } catch (err) {
         await audit.record({
-          project_slug,
+          owner_slug,
           core_slug,
           op: 'get',
           kind: input.kind,
@@ -290,7 +292,7 @@ export function buildAuditedSecretsStore(
       try {
         const r = await store.put(input)
         await audit.record({
-          project_slug,
+          owner_slug,
           core_slug,
           op: 'put',
           kind: input.kind,
@@ -300,7 +302,7 @@ export function buildAuditedSecretsStore(
         return r
       } catch (err) {
         await audit.record({
-          project_slug,
+          owner_slug,
           core_slug,
           op: 'put',
           kind: input.kind,
@@ -318,7 +320,7 @@ export function buildAuditedSecretsStore(
       try {
         const r = await store.list(input)
         await audit.record({
-          project_slug,
+          owner_slug,
           core_slug,
           op: 'list',
           kind: input.kind ?? '*',
@@ -328,7 +330,7 @@ export function buildAuditedSecretsStore(
         return r
       } catch (err) {
         await audit.record({
-          project_slug,
+          owner_slug,
           core_slug,
           op: 'list',
           kind: input.kind ?? '*',
@@ -350,7 +352,7 @@ export function buildAuditedSecretsStore(
       try {
         await innerRotate(id, new_plaintext, rotateOptions)
         await audit.record({
-          project_slug,
+          owner_slug,
           core_slug,
           op: 'rotate',
           // We don't know (kind, label) without an extra read; record the
@@ -362,7 +364,7 @@ export function buildAuditedSecretsStore(
         })
       } catch (err) {
         await audit.record({
-          project_slug,
+          owner_slug,
           core_slug,
           op: 'rotate',
           kind: 'rotate',

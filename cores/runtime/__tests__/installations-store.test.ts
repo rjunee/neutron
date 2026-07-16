@@ -33,7 +33,7 @@ afterEach(() => {
 
 test('record + get round-trip for tables layout', async () => {
   const rec = await store.record({
-    project_slug: 't1',
+    owner_slug: 't1',
     core_slug: 'tasks',
     package_name: '@neutronai/tasks',
     package_version: '0.1.0',
@@ -45,15 +45,21 @@ test('record + get round-trip for tables layout', async () => {
   expect(rec.data_layout).toBe('tables')
   expect(rec.sidecar_db_path).toBeNull()
   expect(rec.capabilities).toEqual(['read:project.db', 'write:project.db'])
+  // N4 boundary: the `project_slug` SQL column surfaces on the domain record as
+  // the renamed `owner_slug`; the legacy key must be absent.
+  expect(rec.owner_slug).toBe('t1')
+  expect((rec as unknown as Record<string, unknown>)['project_slug']).toBeUndefined()
 
   const got = await store.get('t1', 'tasks')
   expect(got?.package_version).toBe('0.1.0')
+  expect(got?.owner_slug).toBe('t1')
+  expect((got as unknown as Record<string, unknown>)['project_slug']).toBeUndefined()
 })
 
 test('record sidecar layout requires sidecar_db_path', async () => {
   await expect(
     store.record({
-      project_slug: 't1',
+      owner_slug: 't1',
       core_slug: 'dtc',
       package_name: '@neutronai/dtc-analytics',
       package_version: '0.1.0',
@@ -66,7 +72,7 @@ test('record sidecar layout requires sidecar_db_path', async () => {
 test('record tables layout rejects sidecar_db_path', async () => {
   await expect(
     store.record({
-      project_slug: 't1',
+      owner_slug: 't1',
       core_slug: 'x',
       package_name: '@x/x',
       package_version: '1.0.0',
@@ -79,12 +85,12 @@ test('record tables layout rejects sidecar_db_path', async () => {
 
 test('listForProject + listLive', async () => {
   await store.record({
-    project_slug: 't1', core_slug: 'a', package_name: '@x/a', package_version: '1.0.0',
+    owner_slug: 't1', core_slug: 'a', package_name: '@x/a', package_version: '1.0.0',
     capabilities: [], data_layout: 'tables',
   })
   now = 1_000_100
   await store.record({
-    project_slug: 't1', core_slug: 'b', package_name: '@x/b', package_version: '1.0.0',
+    owner_slug: 't1', core_slug: 'b', package_name: '@x/b', package_version: '1.0.0',
     capabilities: [], data_layout: 'tables',
   })
   now = 1_000_200
@@ -98,7 +104,7 @@ test('listForProject + listLive', async () => {
 
 test('lifecycle markers update timestamps', async () => {
   await store.record({
-    project_slug: 't1', core_slug: 'a', package_name: '@x/a', package_version: '1.0.0',
+    owner_slug: 't1', core_slug: 'a', package_name: '@x/a', package_version: '1.0.0',
     capabilities: [], data_layout: 'tables',
   })
   now = 1_000_100
@@ -116,11 +122,11 @@ test('lifecycle markers update timestamps', async () => {
 
 test('updateVersion rolls forward package_version + capabilities', async () => {
   await store.record({
-    project_slug: 't1', core_slug: 'a', package_name: '@x/a', package_version: '1.0.0',
+    owner_slug: 't1', core_slug: 'a', package_name: '@x/a', package_version: '1.0.0',
     capabilities: ['read:project.db'], data_layout: 'tables',
   })
   await store.updateVersion({
-    project_slug: 't1', core_slug: 'a',
+    owner_slug: 't1', core_slug: 'a',
     package_version: '1.1.0',
     capabilities: ['read:project.db', 'write:project.db'],
   })
@@ -131,7 +137,7 @@ test('updateVersion rolls forward package_version + capabilities', async () => {
 
 test('record after markUninstalled re-installs with cleared lifecycle markers', async () => {
   await store.record({
-    project_slug: 't1', core_slug: 'a', package_name: '@x/a', package_version: '1.0.0',
+    owner_slug: 't1', core_slug: 'a', package_name: '@x/a', package_version: '1.0.0',
     capabilities: ['read:project.db'], data_layout: 'tables',
   })
   now = 1_000_100
@@ -141,7 +147,7 @@ test('record after markUninstalled re-installs with cleared lifecycle markers', 
 
   now = 1_000_500
   const re = await store.record({
-    project_slug: 't1', core_slug: 'a', package_name: '@x/a', package_version: '1.2.0',
+    owner_slug: 't1', core_slug: 'a', package_name: '@x/a', package_version: '1.2.0',
     capabilities: ['read:project.db', 'write:project.db'], data_layout: 'tables',
   })
   expect(re.installed_at).toBe(1_000_500)
@@ -175,7 +181,7 @@ test('recordGlobal + getGlobal round-trip', async () => {
 
 test('global installs are SEPARATE from per-project installs (no key collision)', async () => {
   await store.record({
-    project_slug: 't1',
+    owner_slug: 't1',
     core_slug: 'demo_core',
     package_name: '@neutronai/demo-core',
     package_version: '1.0.0',

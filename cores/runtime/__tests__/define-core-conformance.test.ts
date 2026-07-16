@@ -66,6 +66,10 @@ function stubDeps(manifest: unknown): Record<string, unknown> {
   const noopBackend: unknown = new Proxy(noopFn, { get: () => noopFn })
   const base: Record<string, unknown> = {
     manifest,
+    // Core `ToolDeps` public contract is still keyed `project_slug` (fed by the
+    // composition/boot seam, an N1-flagged boot-slug follow-up). N4 renamed the
+    // cores-runtime side (`CapabilityGuardOptions.owner_slug`); the core adapts
+    // `owner_slug: deps.project_slug` at `buildTools`. Fixture must match ToolDeps.
     project_slug: 'conformance',
     audit: { record: noopFn, put: noopFn, get: noopFn },
   }

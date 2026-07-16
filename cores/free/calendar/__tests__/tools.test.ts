@@ -88,7 +88,7 @@ describe('buildTools — capability-gated dispatch', () => {
 
     // Every successful dispatch writes an audit row.
     const auditRows = await audit.list({
-      project_slug: OWNER,
+      owner_slug: OWNER,
       core_slug: 'calendar_core',
     })
     const successRows = auditRows.filter((r) => r.outcome === 'ok')
@@ -327,7 +327,7 @@ describe('buildTools — capability-gated dispatch', () => {
     expect(list.results).toEqual([])
 
     const denied = await audit.listDenied({
-      project_slug: OWNER,
+      owner_slug: OWNER,
       core_slug: 'calendar_core',
     })
     const labels = new Set(denied.map((r) => r.label))
@@ -347,7 +347,7 @@ describe('buildTools — capability-gated dispatch', () => {
     const guard = new CapabilityGuard({
       manifest: m,
       core_slug: 'calendar_core',
-      project_slug: OWNER,
+      owner_slug: OWNER,
       audit,
     })
 
