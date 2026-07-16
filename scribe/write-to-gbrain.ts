@@ -248,6 +248,11 @@ export async function writeExtractionToGBrain(
 
   for (const page of orderPagesObjectsFirst(bySlug)) {
     try {
+      // Untrusted-LLM guard: an extraction may carry CONFLICTING supersedes for one
+      // (predicate, prior) — `works_at NewA supersedes OldCo` AND `works_at NewB
+      // supersedes OldCo`. Resolve deterministically so history can't be fabricated
+      // (two `OldCo → …` notes). No-op for the normal single-replacement case.
+      if (supersede) page.relations = resolveConflictingSupersedes(page.relations)
       // Preserve an existing page's compiled-truth + frontmatter (append-only /
       // merge); compose fresh for a new entity. See the module header for the
       // data-loss rationale.
@@ -484,6 +489,48 @@ function relationNotes(page: PlannedPage, recognizedTransitions: ReadonlySet<str
     notes.push(`${r.predicate} ${objSlug}`)
   }
   return notes
+}
+
+/**
+ * RB4 untrusted-LLM guard — deterministically resolve CONFLICTING supersedes.
+ * When an extraction carries more than one `supersedes` marker for the SAME
+ * `(predicate, prior-object)` pointing at DIFFERENT new objects (`works_at NewA
+ * supersedes OldCo` AND `works_at NewB supersedes OldCo`), exactly one may claim
+ * the supersession — otherwise the single retired OldCo assertion would be recorded
+ * as two contradictory transitions (`OldCo → NewA`, `OldCo → NewB`). The winner is
+ * the lexicographically-smallest new-object slug (stable, order-independent); the
+ * losers are DEMOTED to plain additive relations (their `supersedes` dropped) so
+ * their fact still accretes (no data loss) but claims no supersession. Returns the
+ * same array reference when there is no conflict (the overwhelming common case).
+ */
+function resolveConflictingSupersedes(relations: ExtractedRelation[]): ExtractedRelation[] {
+  const byPrior = new Map<string, ExtractedRelation[]>()
+  for (const r of relations) {
+    if (r.supersedes === undefined) continue
+    const priorSlug = slugify(r.supersedes)
+    const objSlug = slugify(r.object)
+    if (priorSlug === null || objSlug === null || priorSlug === objSlug) continue
+    const key = `${r.predicate}\x1f${priorSlug}`
+    const arr = byPrior.get(key)
+    if (arr === undefined) byPrior.set(key, [r])
+    else arr.push(r)
+  }
+  const losers = new Set<ExtractedRelation>()
+  for (const arr of byPrior.values()) {
+    if (arr.length < 2) continue
+    if (new Set(arr.map((r) => slugify(r.object))).size < 2) continue // same replacement repeated
+    let winner = arr[0]!
+    for (const r of arr) {
+      if ((slugify(r.object) ?? '') < (slugify(winner.object) ?? '')) winner = r
+    }
+    for (const r of arr) if (r !== winner) losers.add(r)
+  }
+  if (losers.size === 0) return relations
+  // Demote losers to additive relations (drop `supersedes`) via shallow copies so
+  // the underlying extraction objects are never mutated.
+  return relations.map((r) =>
+    losers.has(r) ? { subject: r.subject, predicate: r.predicate, object: r.object } : r,
+  )
 }
 
 /** Render a single `${predicate}\x1f${objSlug}` triple key back into its

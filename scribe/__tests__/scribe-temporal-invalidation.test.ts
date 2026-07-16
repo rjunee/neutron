@@ -1222,4 +1222,80 @@ describe('RB4 temporal invalidation (belief evolution) — real PGLite round-tri
     expect(edgesTo(links, 'toldv', 'works_at').length).toBe(0)
     expect(edgesTo(links, 'tnewv', 'works_at').length).toBe(1)
   }, 60_000)
+
+  test('flag ON: CONFLICTING supersedes for one prior (untrusted LLM) resolve to a single supersession', async () => {
+    const ownerDataDir = mkdtempSync(join(tmpdir(), 'scribe-rb4-conflict-'))
+    const syncHook = new GBrainSyncHook({
+      memoryStore: new GBrainMemoryStore(client),
+      gbrainMcp: client,
+    })
+
+    await client.call('put_page', {
+      slug: 'zold',
+      content: '---\nslug: zold\ntype: company\n---\n\nA company.\n',
+    })
+    await writeEntity(
+      {
+        ownerDataDir,
+        kind: 'person',
+        slug: 'zoe-park',
+        originInstance: 'rb4',
+        receivingInstanceSlug: 'rb4',
+        body: {
+          frontmatter: { slug: 'zoe-park', type: 'person', name: 'Zoe Park' },
+          compiledTruth: '# Zoe Park\n\nAn engineer.\n\n## Relationships\n\n- Works at [[zold]].\n',
+          timelineAppend: { ts: new Date(t0).toISOString(), source: 'import:onboarding', body: 'seeded' },
+        },
+      },
+      { syncHook },
+    )
+
+    // The extractor (untrusted) emits TWO conflicting supersedes of the same prior.
+    const scribe = createScribe({
+      substrate: cannedSubstrate(
+        JSON.stringify({
+          entities: [
+            { name: 'Zoe Park', kind: 'person', fact: 'an engineer' },
+            { name: 'Cona', kind: 'company', fact: 'employer A' },
+            { name: 'Conb', kind: 'company', fact: 'employer B' },
+          ],
+          relations: [
+            { subject: 'Zoe Park', predicate: 'works_at', object: 'Cona', supersedes: 'Zold' },
+            { subject: 'Zoe Park', predicate: 'works_at', object: 'Conb', supersedes: 'Zold' },
+          ],
+        }),
+      ),
+      syncHook,
+      ownerDataDir,
+      project_slug: 'rb4-conflict',
+      budget: createState(join(ownerDataDir, '.scribe-budget.json'), t0),
+      writeEntity,
+      now: () => t0 + 1000,
+      supersede: true,
+    })
+    const out = await scribe.extractAndWrite({
+      text: 'Zoe Park has left Zold; the notes are muddled on whether she landed at Cona or Conb, but it is one of them now.',
+      observed_at: t0 + 1000,
+    })
+    expect(out.ran).toBe(true)
+
+    const onDisk = readFileSync(join(ownerDataDir, 'entities', 'people', 'zoe-park.md'), 'utf8')
+    const compiled = extractCompiledTruth(onDisk)
+    // Zold is retired once; both candidate employers accrete (no data loss).
+    expect(compiled).not.toContain('[[zold]]')
+    expect(compiled).toContain('Works at [[cona]].')
+    expect(compiled).toContain('Works at [[conb]].')
+
+    const timeline = extractTimeline(onDisk)
+    // EXACTLY ONE supersession is recorded — the deterministic winner (cona < conb)…
+    expect(timeline.filter((e) => e.body.includes('superseded works_at: zold →')).length).toBe(1)
+    expect(timeline.some((e) => e.body.includes('superseded works_at: zold → cona'))).toBe(true)
+    // …never the contradictory second transition.
+    expect(timeline.some((e) => e.body.includes('superseded works_at: zold → conb'))).toBe(false)
+
+    const links = await client.call('get_links', { slug: 'zoe-park' })
+    expect(edgesTo(links, 'zold', 'works_at').length).toBe(0) // retired once
+    expect(edgesTo(links, 'cona', 'works_at').length).toBe(1)
+    expect(edgesTo(links, 'conb', 'works_at').length).toBe(1)
+  }, 60_000)
 })
