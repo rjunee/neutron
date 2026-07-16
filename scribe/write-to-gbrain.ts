@@ -474,7 +474,10 @@ function supersedeNotePrefix(predicate: string, priorSlug: string): string {
  *  stale supersession note. Slugs + predicate are space-free, so `\S+` is exact. */
 function parseSupersedeTransitions(body: string): string[] {
   const out: string[] = []
-  const re = /superseded (\S+): (\S+) → (\S+)/g
+  // Predicate is `[a-z0-9_]+`; slugs are `[a-z0-9-]+`. Tight classes so the match
+  // STOPS at the `; ` that joins multiple notes (a greedy `\S+` would swallow the
+  // `;` into the replacement and break replay recognition — Codex).
+  const re = /superseded ([a-z0-9_]+): ([a-z0-9-]+) → ([a-z0-9-]+)/g
   let m: RegExpExecArray | null
   while ((m = re.exec(body)) !== null) out.push(`${m[1]}\x1f${m[2]}\x1f${m[3]}`)
   return out

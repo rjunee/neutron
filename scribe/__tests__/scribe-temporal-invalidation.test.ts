@@ -1038,6 +1038,79 @@ describe('RB4 temporal invalidation (belief evolution) — real PGLite round-tri
     expect(notesSeg).toContain('works_at injn') // additive, not a supersession
   }, 60_000)
 
+  test('flag ON: replaying a turn whose supersession note is FOLLOWED by another note stays byte-identical', async () => {
+    const ownerDataDir = mkdtempSync(join(tmpdir(), 'scribe-rb4-multireplay-'))
+    const syncHook = new GBrainSyncHook({
+      memoryStore: new GBrainMemoryStore(client),
+      gbrainMcp: client,
+    })
+    for (const slug of ['rold', 'rboard']) {
+      await client.call('put_page', {
+        slug,
+        content: `---\nslug: ${slug}\ntype: company\n---\n\nA company.\n`,
+      })
+    }
+    // Rhea works_at rold and advises rboard.
+    await writeEntity(
+      {
+        ownerDataDir,
+        kind: 'person',
+        slug: 'rhea-voss',
+        originInstance: 'rb4',
+        receivingInstanceSlug: 'rb4',
+        body: {
+          frontmatter: { slug: 'rhea-voss', type: 'person', name: 'Rhea Voss' },
+          compiledTruth:
+            '# Rhea Voss\n\nAn operator.\n\n## Relationships\n\n- Works at [[rold]].\n- Advises [[rboard]].\n',
+          timelineAppend: { ts: new Date(t0).toISOString(), source: 'import:onboarding', body: 'seeded' },
+        },
+      },
+      { syncHook },
+    )
+    // Supersede rold→rnew AND re-assert advises rboard, so the timeline body is
+    // `superseded works_at: rold → rnew; advises rboard` (a note FOLLOWED by a note).
+    const EXTRACTION = JSON.stringify({
+      entities: [
+        { name: 'Rhea Voss', kind: 'person', fact: 'an operator' },
+        { name: 'Rnew', kind: 'company', fact: 'her new employer' },
+        { name: 'Rboard', kind: 'company', fact: 'a board' },
+      ],
+      relations: [
+        { subject: 'Rhea Voss', predicate: 'works_at', object: 'Rnew', supersedes: 'Rold' },
+        { subject: 'Rhea Voss', predicate: 'advises', object: 'Rboard' },
+      ],
+    })
+    const mk = (): ReturnType<typeof createScribe> =>
+      createScribe({
+        substrate: cannedSubstrate(EXTRACTION),
+        syncHook,
+        ownerDataDir,
+        project_slug: 'rb4-multireplay',
+        budget: createState(join(ownerDataDir, '.scribe-budget.json'), t0),
+        writeEntity,
+        now: () => t0 + 1000,
+        supersede: true,
+      })
+    const TURN = 'Rhea Voss moved from Rold to Rnew and keeps advising Rboard on the side this year.'
+    await mk().extractAndWrite({ text: TURN, observed_at: t0 + 1000 })
+    const pagePath = join(ownerDataDir, 'entities', 'people', 'rhea-voss.md')
+    const afterFirst = readFileSync(pagePath, 'utf8')
+    // Sanity: the body really is a supersession note followed by another note.
+    expect(afterFirst).toContain('superseded works_at: rold → rnew; advises rboard')
+
+    // REPLAY the identical turn — must be a byte-identical no-op (the parser must
+    // recognise `rnew`, not `rnew;`).
+    const replay = await mk().extractAndWrite({ text: TURN, observed_at: t0 + 1000 })
+    expect(replay.ran).toBe(true)
+    if (!replay.ran) throw new Error('unreachable')
+    expect(replay.report.pages_written).toBe(0)
+    expect(readFileSync(pagePath, 'utf8')).toBe(afterFirst)
+    // Exactly one supersession row (no duplicate appended on replay).
+    expect(
+      (readFileSync(pagePath, 'utf8').match(/superseded works_at: rold → rnew/g) ?? []).length,
+    ).toBe(1)
+  }, 60_000)
+
   // ── Multiple relations WITHIN one sentence: removal is ALL-OR-NOTHING per
   //    sentence — a compound sentence carrying a still-current relation is NEVER
   //    dropped (no data loss). Bounded trade-off: a superseded relation embedded
