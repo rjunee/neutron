@@ -23,6 +23,7 @@ import type { SessionHandle } from '@neutronai/runtime/session-handle.ts'
 import type { Event } from '@neutronai/runtime/events.ts'
 import {
   writeEntity,
+  deleteEntity,
   type EntityKind,
 } from '@neutronai/runtime/entity-writer.ts'
 import { extractTimeline, extractCompiledTruth } from '@neutronai/runtime/entity-format.ts'
@@ -30,6 +31,7 @@ import {
   runReflectPass,
   type ReflectPassDeps,
   type ReflectWriteEntity,
+  type ReflectDeleteEntity,
 } from '../reflect/reflect-pass.ts'
 
 const realWrite = writeEntity as unknown as ReflectWriteEntity
@@ -177,21 +179,23 @@ describe('reflect dedup (deterministic, no LLM)', () => {
     const failingDelete = async (): Promise<{ deleted: boolean; conflict: boolean }> => {
       throw new Error('EACCES')
     }
+    const survivorBefore = await readPage(owner, 'companies', 'acme')
     const report = await runReflectPass({ ...baseDeps(owner), deleteEntity: failingDelete })
     // Merge is NOT reported (both files still on disk), and the loser survives.
     expect(report.merged).toBe(0)
     expect(existsSync(join(owner, 'entities', 'companies', 'acme-co.md'))).toBe(true)
 
-    // IDEMPOTENCE after a partial merge: the survivor got the loser's fold once;
-    // a SECOND pass (deletion still failing) must NOT append a duplicate fold. The
-    // survivor body is byte-identical across the retry.
+    // DELETE-FIRST: because every loser deletion failed, NO survivor write happened
+    // at all — the survivor is byte-identical to before the pass. So the retained
+    // loser is genuinely, wholly UNMERGED: its row `c` is NOT on the survivor, and
+    // there is no fold. Nothing accretes on retries either.
     const afterFirst = await readPage(owner, 'companies', 'acme')
+    expect(afterFirst).toBe(survivorBefore) // survivor untouched by the failed merge
     const report2 = await runReflectPass({ ...baseDeps(owner), deleteEntity: failingDelete })
     expect(report2.merged).toBe(0)
     const afterSecond = await readPage(owner, 'companies', 'acme')
-    expect(afterSecond).toBe(afterFirst) // byte-identical retry → no timeline growth
-    // The survivor never absorbs the loser's PROSE (timeline-only merge), so a
-    // partial merge leaves no stale fold to accumulate.
+    expect(afterSecond).toBe(afterFirst) // byte-identical retry → no growth
+    expect(extractTimeline(afterSecond!).map((e) => e.body)).not.toContain('c')
     expect(afterSecond).not.toContain('Merged from')
   })
 
@@ -231,7 +235,7 @@ describe('reflect dedup (deterministic, no LLM)', () => {
     expect(extractTimeline(loser!).map((e) => e.body)).toContain('FRESH concurrent fact')
   })
 
-  test('atomic guard: a loser write DURING the survivor write is not deleted', async () => {
+  test('atomic guard: a loser write racing the atomic delete → retained + genuinely unmerged', async () => {
     const owner = tmpOwner()
     await seed(owner, 'company', 'acme', 'Acme', 'Acme is a developer-tools SaaS company.', [
       { ts: '2026-07-01T00:00:00.000Z', source: 'chat:owner', body: 'a' },
@@ -240,11 +244,11 @@ describe('reflect dedup (deterministic, no LLM)', () => {
     await seed(owner, 'company', 'acme-io', 'Acme IO', 'Acme is a developer-tools SaaS company.', [
       { ts: '2026-07-01T00:00:00.000Z', source: 'chat:owner', body: 'c' },
     ])
-    // A writer wrapper: right AFTER the survivor (acme) commits — and BEFORE the
-    // loser re-read/unlink — land a concurrent user write on the loser.
-    const wrapped: ReflectWriteEntity = async (input, d) => {
-      const out = await realWrite(input, d)
-      if (input.slug === 'acme') {
+    // A delete wrapper: land a concurrent user write on the loser RIGHT BEFORE the
+    // atomic delete runs. The real deleteEntity then re-reads under its lock, sees
+    // the changed body vs the precondition, and conflicts → the loser is retained.
+    const wrappedDelete: ReflectDeleteEntity = async (input) => {
+      if (input.slug === 'acme-io') {
         await writeEntity({
           ownerDataDir: owner,
           kind: 'company',
@@ -258,21 +262,62 @@ describe('reflect dedup (deterministic, no LLM)', () => {
           receivingInstanceSlug: OWN,
         })
       }
-      return out
+      return deleteEntity(input)
     }
-    const report = await runReflectPass({ ...baseDeps(owner), writeEntity: wrapped })
-    // The atomic CAS-delete sees the concurrent write → the loser is retained (not
-    // deleted), so its fresh fact is never lost.
+    const report = await runReflectPass({ ...baseDeps(owner), deleteEntity: wrappedDelete })
+    // The atomic delete conflicts → the loser is retained with its fresh fact...
     expect(report.merged).toBe(0)
     expect(existsSync(join(owner, 'entities', 'companies', 'acme-io.md'))).toBe(true)
     const loser = await readPage(owner, 'companies', 'acme-io')
     expect(extractTimeline(loser!).map((e) => e.body)).toContain('FRESH loser fact')
-    // BOUNDARY: the retained loser was genuinely UNMERGED — the survivor never
-    // absorbed its prose (timeline-only merge), so the survivor's compiled-truth
-    // is exactly its own, with no stale loser content copied in.
-    const survivorCt = extractCompiledTruth((await readPage(owner, 'companies', 'acme'))!)
-    expect(survivorCt).not.toContain('Merged from')
-    expect(survivorCt.trim()).toBe('Acme is a developer-tools SaaS company.')
+    // ...and — delete-first — the survivor never absorbed ANYTHING of the retained
+    // loser: not its prose AND not its timeline row `c`. Genuinely unmerged.
+    const survivor = await readPage(owner, 'companies', 'acme')
+    const survivorBodies = extractTimeline(survivor!).map((e) => e.body)
+    expect(survivorBodies).not.toContain('c') // loser history NOT copied in
+    expect(extractCompiledTruth(survivor!).trim()).toBe('Acme is a developer-tools SaaS company.')
+  })
+
+  test('compensation: a survivor conflict AFTER deleting a loser restores the loser (no history lost)', async () => {
+    const owner = tmpOwner()
+    await seed(owner, 'company', 'acme', 'Acme', 'Acme is a developer-tools SaaS company.', [
+      { ts: '2026-07-01T00:00:00.000Z', source: 'chat:owner', body: 'a' },
+      { ts: '2026-07-02T00:00:00.000Z', source: 'chat:owner', body: 'b' },
+    ])
+    await seed(owner, 'company', 'acme-co', 'Acme Co', 'Acme is a developer-tools SaaS company.', [
+      { ts: '2026-07-03T00:00:00.000Z', source: 'chat:owner', body: 'c' },
+    ])
+    // Delete-first deletes acme-co, THEN writes the survivor. Make that survivor
+    // write conflict by concurrently editing acme just before it commits — so the
+    // deleted loser's history would be lost unless compensation restores it.
+    let mutated = false
+    const wrapped: ReflectWriteEntity = async (input, d) => {
+      if (input.slug === 'acme' && input.precondition !== undefined && !mutated) {
+        mutated = true
+        await writeEntity({
+          ownerDataDir: owner,
+          kind: 'company',
+          slug: 'acme',
+          body: {
+            frontmatter: { slug: 'acme', type: 'company', name: 'Acme', source: 'chat' },
+            compiledTruth: 'Acme is a developer-tools SaaS company.',
+            timelineAppend: { ts: '2026-07-09T00:00:00.000Z', source: 'chat:owner', body: 'CONCURRENT survivor edit' },
+          },
+          originInstance: OWN,
+          receivingInstanceSlug: OWN,
+        })
+      }
+      return realWrite(input, d)
+    }
+    const report = await runReflectPass({ ...baseDeps(owner), writeEntity: wrapped })
+    expect(report.merged).toBe(0) // survivor conflict → merge aborted
+    // The loser was deleted then RESTORED by compensation — its history survives.
+    expect(existsSync(join(owner, 'entities', 'companies', 'acme-co.md'))).toBe(true)
+    expect(extractTimeline((await readPage(owner, 'companies', 'acme-co'))!).map((e) => e.body)).toContain('c')
+    // The survivor kept the concurrent edit (never clobbered by the stale merge).
+    expect(extractTimeline((await readPage(owner, 'companies', 'acme'))!).map((e) => e.body)).toContain(
+      'CONCURRENT survivor edit',
+    )
   })
 
   test('distinct pages are NOT merged', async () => {

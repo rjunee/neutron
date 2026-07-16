@@ -211,6 +211,31 @@ describe('runtime/entity-writer — roundtrip', () => {
       expect(await fs.readFile(outside, 'utf8')).toBe('secret')
     })
 
+    test('a symlinked kind-dir (within-tree redirect) is rejected', async () => {
+      const outsideDir = join(ownerDir, 'outside-people')
+      await fs.mkdir(outsideDir, { recursive: true })
+      await fs.writeFile(join(outsideDir, 'victim.md'), 'victim')
+      await fs.mkdir(resolve(ownerDir, 'entities'), { recursive: true })
+      // entities/people -> outside-people (an ancestor redirect).
+      await fs.symlink(outsideDir, resolve(ownerDir, 'entities', 'people'))
+      await expect(
+        deleteEntity({ ownerDataDir: ownerDir, kind: 'person', slug: 'victim' }),
+      ).rejects.toThrow(/symlink/)
+      expect(await fs.readFile(join(outsideDir, 'victim.md'), 'utf8')).toBe('victim')
+    })
+
+    test('a symlinked entities-root is rejected', async () => {
+      const outsideRoot = join(ownerDir, 'outside-entities')
+      await fs.mkdir(join(outsideRoot, 'people'), { recursive: true })
+      await fs.writeFile(join(outsideRoot, 'people', 'victim.md'), 'victim')
+      // entities -> outside-entities.
+      await fs.symlink(outsideRoot, resolve(ownerDir, 'entities'))
+      await expect(
+        deleteEntity({ ownerDataDir: ownerDir, kind: 'person', slug: 'victim' }),
+      ).rejects.toThrow(/symlink/)
+      expect(await fs.readFile(join(outsideRoot, 'people', 'victim.md'), 'utf8')).toBe('victim')
+    })
+
     test('a same-key write and delete serialize — the write is never torn away', async () => {
       const seeded = await writeEntity(aliceInput())
       const base = await fs.readFile(seeded.path, 'utf8')

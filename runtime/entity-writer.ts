@@ -339,9 +339,16 @@ async function deleteEntityLocked(input: DeleteEntityInput): Promise<DeleteEntit
   if (!isUnder(entitiesRoot, targetPath)) {
     throw new EntityWriteError('path_escape', `target path escapes entities root: ${targetPath}`)
   }
-  // Reject a symlink on any segment we delete through — an ancestor swapped to a
-  // symlink-to-outside can't redirect the unlink. Checked INSIDE the lock, so it
-  // is TOCTOU-atomic vs same-key writes.
+  // Reject a symlink on the entities-root, kind-dir, and leaf — the same
+  // containment `writeEntity` applies (a within-tree redirect like a symlinked
+  // `entities/` or `entities/people` or `people/alice.md -> /outside` is refused).
+  // Checked INSIDE the lock, so it is TOCTOU-atomic vs same-key writes. NOTE (as
+  // for `writeEntity`): `ownerDataDir` is the TRUSTED caller-supplied root and is
+  // path-resolved (not realpath'd), so a symlinked `ownerDataDir` / an ancestor
+  // ABOVE it is followed — that is the single-owner local threat model, not an
+  // escape (the alias points at the owner's own tree). Callers that accept an
+  // untrusted `ownerDataDir` must canonicalize it first (the reflect pass scans
+  // under a realpath-contained root before ever calling this).
   await rejectSymlinkAt(entitiesRoot)
   await rejectSymlinkAt(targetDir)
   await rejectSymlinkAt(targetPath)
