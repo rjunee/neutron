@@ -61,6 +61,7 @@ function buildHarness(opts: {
   no_advance_hang_ms?: number
   codex_home?: string | null
   resolve_codex_home?: (run: TridentRun) => string | null
+  resolve_reflection_context?: (run: TridentRun) => string | null
   resolve_conflict?: import('./merge.ts').MergeConflictResolver
   on_terminal?: TridentTerminalHook
 }): Harness {
@@ -89,6 +90,8 @@ function buildHarness(opts: {
   if (opts.no_advance_hang_ms !== undefined) o.no_advance_hang_ms = opts.no_advance_hang_ms
   if (opts.codex_home !== undefined) o.codex_home = opts.codex_home
   if (opts.resolve_codex_home !== undefined) o.resolve_codex_home = opts.resolve_codex_home
+  if (opts.resolve_reflection_context !== undefined)
+    o.resolve_reflection_context = opts.resolve_reflection_context
   if (opts.resolve_conflict !== undefined) o.resolve_conflict = opts.resolve_conflict
   const orch = buildTridentOrchestrator(o)
   const loop = new TridentTickLoop({
@@ -501,6 +504,52 @@ describe('orchestrator — CODEX_HOME resolution', () => {
     const run = await createRun({ project_slug: 't1' })
     await runToTerminal(h, run.id)
     expect(h.inputs[0]?.codex_home).toBeNull()
+  })
+})
+
+describe('orchestrator — RB2 (b) reflection-context threading to build agents', () => {
+  test('threads the resolved reflection block into the launching run input', async () => {
+    const seen: string[] = []
+    const h = buildHarness({
+      plan: () => ({ result: { verdict: 'APPROVE', prNumber: 9, branch: 'feat-x' } }),
+      resolve_reflection_context: (run) => {
+        seen.push(run.project_slug)
+        return '<learned_corrections>\n- never force-push to main\n</learned_corrections>'
+      },
+    })
+    const run = await createRun({ project_slug: 't1' })
+    await runToTerminal(h, run.id)
+    // The resolver was called with the launching run, and its block was threaded to
+    // the inner workflow so the Forge builder (not the argus review gate) re-grounds
+    // on owner corrections.
+    expect(seen).toContain('t1')
+    expect(h.inputs[0]?.reflection_context).toContain('never force-push to main')
+  })
+
+  test('threads null when no reflection resolver is wired (clean no-op)', async () => {
+    const h = buildHarness({
+      plan: () => ({ result: { verdict: 'APPROVE', prNumber: 9, branch: 'feat-x' } }),
+    })
+    const run = await createRun({ project_slug: 't1' })
+    await runToTerminal(h, run.id)
+    expect(h.inputs[0]?.reflection_context ?? null).toBeNull()
+  })
+
+  test('a THROWING reflection resolver degrades to null and still launches (Codex r4 [P1])', async () => {
+    // A reflection-store read failure must NEVER strand a build: the resolver is
+    // best-effort, so a throw degrades to no corrections context and the workflow
+    // still fires (the run is NOT left stuck non-terminal, retrying every tick).
+    const h = buildHarness({
+      plan: () => ({ result: { verdict: 'APPROVE', prNumber: 9, branch: 'feat-x' } }),
+      resolve_reflection_context: () => {
+        throw new Error('reflection store read boom')
+      },
+    })
+    const run = await createRun({ project_slug: 't1' })
+    await runToTerminal(h, run.id)
+    // The workflow was fired (an input was captured) with a null reflection context.
+    expect(h.inputs).toHaveLength(1)
+    expect(h.inputs[0]?.reflection_context ?? null).toBeNull()
   })
 })
 

@@ -826,6 +826,34 @@ export function buildLiveAgentTurn(
         })
       }
     }
+    // RB2 (a) — the reflection layer's learned-corrections + recent-diary block,
+    // resolved ONCE PER TURN (exactly like the work board + nexus) so it re-splices
+    // on WARM turns too, not only the cold first turn. Before RB2 this was loaded
+    // ONLY inside `composeFirstTurnPrompt` (cold), so any correction the reflection
+    // layer had persisted mid-session didn't resurface until a brand-new session; now
+    // the FRESH block is re-read + spliced before the user's message on every warm
+    // turn. What RB2 (a) guarantees is precise: the CURRENTLY-PERSISTED corrections
+    // re-appear every warm turn. It does NOT force a just-submitted correction to
+    // surface on the immediately-next turn — correction DETECTION is intentionally
+    // async fire-and-forget (`reflection.onTurnComplete`; an LLM judge that persists
+    // AFTER it resolves, F3 — blocking every chat turn on it would be an unacceptable
+    // latency regression), so a correction typically lands by the next turn but an
+    // instantly-fired follow-up can out-race the persist and see it one turn later.
+    // Already capped in the reflection layer (12 corrections / 3 days) — RB2 does
+    // NOT change the cap, only the first-turn-only gate. Best-effort: a
+    // throwing/absent seam degrades to no block, and an empty context stays null so
+    // the splice is a clean no-op (no bare `<reflection>` tag).
+    let reflectionFragment: string | null = null
+    if (input.reflection !== undefined) {
+      try {
+        reflectionFragment = input.reflection.loadContext()
+      } catch (err) {
+        moduleLog.warn('reflection_context_failed', {
+          project: turn.project_slug,
+          error: err instanceof Error ? err.message : String(err),
+        })
+      }
+    }
     // Onboarding per-turn grounding (e.g. the import analysis the agent already
     // presented) — re-resolved EVERY onboarding turn so a warm session can act on
     // state that landed after the cold first turn (the import completes minutes
@@ -851,9 +879,10 @@ export function buildLiveAgentTurn(
       const warmPrefix = [
         workBoardFragment,
         nexusFragment,
+        reflectionFragment,
         availableServicesFragment,
         onboardingContextFragment,
-      ].filter((s): s is string => s !== null && s.length > 0)
+      ].filter((s): s is string => s !== null && s.trim().length > 0)
       prompt =
         warmPrefix.length > 0 ? `${warmPrefix.join('\n\n')}\n\n${turn.user_text}` : turn.user_text
     } else {
@@ -870,6 +899,7 @@ export function buildLiveAgentTurn(
         onboardingContextFragment,
         availableServicesFragment,
         nexusFragment,
+        reflectionFragment,
       )
     }
 
@@ -1250,6 +1280,7 @@ async function composeFirstTurnPrompt(
   onboardingContextFragment?: string | null,
   availableServicesFragmentRaw?: string | null,
   nexusFragmentRaw?: string | null,
+  reflectionBlockRaw?: string | null,
 ): Promise<string> {
   let persona = ''
   try {
@@ -1382,21 +1413,17 @@ async function composeFirstTurnPrompt(
     ].join('\n\n')
   }
   const history = await renderRecentHistoryBlock(input.buttonStore, turn.topic_id, wall_now)
-  // WAVE 2 P1 — splice the reflection layer's learned-corrections + recent-diary
-  // block so this topic's warm session adopts the owner's past corrections on
-  // its first turn and applies them silently. Best-effort: a throwing/absent
-  // seam degrades to no block, never kills the turn.
-  let reflectionBlock: string | null = null
-  if (input.reflection !== undefined) {
-    try {
-      reflectionBlock = input.reflection.loadContext()
-    } catch (err) {
-      moduleLog.warn('reflection_context_failed', {
-        project: turn.project_slug,
-        error: err instanceof Error ? err.message : String(err),
-      })
-    }
-  }
+  // WAVE 2 P1 / RB2 (a) — splice the reflection layer's learned-corrections +
+  // recent-diary block so this topic's warm session adopts the owner's past
+  // corrections on its first turn and applies them silently. RB2: the block is now
+  // resolved ONCE in the per-turn body (like the work board + nexus) and threaded
+  // in here, so the SAME fresh block also re-splices on warm turns — the cold-turn
+  // placement (between the system prefix and the recent-history block) is
+  // unchanged. Null/empty (nothing learned, or a throwing/absent seam) → no block.
+  const reflectionBlock =
+    typeof reflectionBlockRaw === 'string' && reflectionBlockRaw.trim().length > 0
+      ? reflectionBlockRaw
+      : null
   const parts = [system]
   if (reflectionBlock !== null && reflectionBlock.trim().length > 0) parts.push(reflectionBlock)
   if (history !== null) parts.push(history)

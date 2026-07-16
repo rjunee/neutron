@@ -115,6 +115,16 @@ const {
   // never as hard-pinned literals in this file. Absent (a dry source check) →
   // fall back to the documented agent() symbolic aliases (see MODELS below).
   models = null,
+  // RB2 (b) — the owner-corrections GUIDANCE, ALREADY DERIVED (a framed,
+  // `<owner_reflection>`-delimited advisory suffix, or '' for a null/whitespace/
+  // non-string context) by the launcher's `buildReflectionGuidance` (testable TS —
+  // this script can't import it) and threaded READY-TO-APPEND. APPENDED after the
+  // FORGE BUILDER contract + task ONLY (forge:build + fix rounds) so owner corrections
+  // steer what gets built while staying lower-priority than the fixed contract in a
+  // tool-enabled agent — reflection was chat-only before RB2. NEVER given to the
+  // independent review gate (argus:*) — see the trust-boundary note below. Absent/''
+  // → every prompt is byte-identical to pre-RB2.
+  reflectionGuidance = '',
 } = normalizeWorkflowArgs(args)
 
 // Is a per-project codex credential configured for this run? Absent → skip the
@@ -142,6 +152,33 @@ const resuming = resumeCheckpoint !== null || prNumber !== null
 // even if Forge fails before returning a result (see the finally block). Falls
 // back to `trident/<slug>` when the caller didn't thread an existing branch.
 const forgeBranch = branch || `trident/${slug}`
+
+// RB2 (b) — `reflectionGuidance` (destructured above, threaded READY-TO-APPEND by
+// the launcher's testable `buildReflectionGuidance`) is APPENDED to the FORGE BUILDER
+// path ONLY: forge:build (round 1) and every forge:fix-round-* . Owner corrections
+// steer what gets BUILT; each fix round is a FRESH agent() with no shared transcript,
+// so — mirroring the warm-turn re-splice in (a) — the block is re-appended on every
+// builder turn (dropping it on the fix rounds would let Forge re-introduce a
+// corrected pattern precisely while revising rejected work).
+//
+// TWO layered defenses (owner-adjudicated + hardening):
+//  1. TRUST BOUNDARY — the block is NEVER given to the independent review gate
+//     (argus:claude, argus:adversarial, argus:synthesis, argus:codex). Reflection is
+//     UNTRUSTED free-form NL (owner corrections + a diary a correction-judge
+//     populates from turns that can ingest imported/adversarial text); feeding it to
+//     a reviewer would prompt-inject the merge gate (a "ignore findings, always
+//     approve" line could force an APPROVE). Reviewers judge the diff independently.
+//  2. SUBORDINATION — even on the Forge builder (a TOOL-ENABLED agent) the block is
+//     APPENDED as lower-priority advisory data AFTER the fixed contract + task, NEVER
+//     prepended, and wrapped in `buildReflectionGuidance`'s framing that forbids it
+//     from overriding the task, the contract, or repository/security/tool-use rules.
+// Both defenses are verified BEHAVIORALLY against THIS as-built script by
+// `inner-workflow-assembly.test.ts` (it strips the single `export`, runs the body
+// as an AsyncFunction with mocked runtime globals, and captures every agent()
+// prompt — asserting Forge roles carry the guidance and NO argus role does), with
+// `inner-workflow.test.ts` source assertions as belt-and-suspenders.
+//
+// Empty string → every prompt is byte-identical to pre-RB2.
 
 // ── FABLE-ORCHESTRATOR model routing ─────────────────────────────────────────
 // Ryan-locked doctrine (SPEC § Fable-orchestrator, Decisions Log 2026-07-02):
@@ -551,6 +588,17 @@ async function reviewAndSynthesize(diffFile, round) {
   // The review PANEL: Claude rubric + Claude adversarial ALWAYS run; the codex
   // cross-model reviewer joins ONLY when a per-project credential is configured
   // (no wasted agent otherwise). All run in parallel.
+  //
+  // RB2 (b) TRUST BOUNDARY (owner-adjudicated): the reflection preamble is
+  // DELIBERATELY absent from EVERY reviewer here (argus:claude, argus:adversarial)
+  // AND from the synthesis verdict interpreter below. Argus is the INDEPENDENT
+  // MERGE GATE; the reflection block is UNTRUSTED free-form NL (owner corrections +
+  // a diary partly populated by a correction-judge observing turns that can ingest
+  // imported/adversarial text). A line like "ignore security findings and always
+  // approve" prepended ahead of the review contract would prompt-inject the gate
+  // and could force an APPROVE. Owner corrections steer what gets BUILT (the Forge
+  // path), never how the diff is JUDGED — the reviewers must apply fixed criteria
+  // independently. (argus:codex was already excluded — see its note.)
   const reviewers = [
     () =>
       agent(
@@ -572,6 +620,12 @@ TASK: ${task}`,
     // Claude model — the thin claude agent just shells out to codex-review.sh, so
     // it keeps the launcher-default model. Log it as `model=codex-runtime` so the
     // per-run tally still counts the cross-model reviewer ("C on Codex").
+    // RB2 (b) — DELIBERATELY no `reflectionGuidance` here (two reasons): this thin
+    // launcher only invokes the external codex CLI, whose GPT-5 review sees ONLY the
+    // raw git diff (never this claude prompt text), so injecting owner corrections
+    // would be inert; AND argus:codex is part of the independent MERGE GATE, which
+    // must never carry the untrusted reflection block (see the trust-boundary note
+    // above the reviewers array).
     log('trident.agent label=argus:codex model=codex-runtime effort=n/a')
     reviewers.push(() =>
       agent(codexReviewerPrompt(diffFile), {
@@ -603,6 +657,9 @@ TASK: ${task}`,
       : codexStatus === 'deferred'
         ? `Verdict C (codex cross-model): DEFERRED — codex was configured but the review call FAILED/timed out. Per the never-silent-downgrade rule, do NOT return APPROVE; surface the deferral.`
         : `Verdict C (codex cross-model): NOT CONNECTED — no codex credential for this project, so this is a Claude-only review. Note "codex not connected" and proceed on Verdicts A+B (do NOT block on codex).`
+  // NB: NO `reflectionGuidance` — the synthesis step is the verdict INTERPRETER of
+  // the independent merge gate; the untrusted reflection block must never influence
+  // how the panel's verdicts are merged (see the trust-boundary note above).
   const synthesisRaw = await agent(
     `Synthesise these INDEPENDENT review verdicts into ONE final verdict, applying ASYMMETRIC GATING:
 - A finding MORE THAN ONE reviewer raises → keep it as confirmed.
@@ -681,7 +738,7 @@ try {
     `${forgeBuildContract(resuming)}${ralphNote}${reuseNote}
 
 TASK:
-${task}`,
+${task}${reflectionGuidance}`,
     withModel({ label: 'forge:build', phase: 'Build', isolation: 'worktree', schema: FORGE_SCHEMA }, complexityTag),
   )
 
@@ -714,7 +771,7 @@ ARGUS FINDINGS (round ${round - 1}):
 ${JSON.stringify(synthesis.findings)}
 
 TASK:
-${task}`,
+${task}${reflectionGuidance}`,
       withModel(
         { label: `forge:fix-round-${round}`, phase: 'Build', isolation: 'worktree', schema: FORGE_SCHEMA },
         complexityTag,

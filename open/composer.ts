@@ -3505,6 +3505,16 @@ export function buildOpenGraphComposer(
               resolve_codex_home: (run) =>
                 codexCredentialService.resolveActiveCodexHome(asOwnerHandle(run.project_slug)),
               codex_home: codexHome,
+              // RB2 (b) — thread the owner's structured CORRECTIONS into the inner
+              // workflow so the FORGE BUILDER (forge:build + fix rounds) re-grounds on
+              // them — NOT the independent argus review gate (trust boundary — verified
+              // in trident/inner-workflow-assembly.test.ts). `loadBuildContext()`
+              // returns CORRECTIONS ONLY (excludes the free-form diary — the loosest,
+              // most import/adversarial-influenced surface — from the tool-enabled
+              // builder). Reflection was chat-only before RB2; corrections are
+              // owner-wide (not scope-filtered), so the run arg is unused. Null →
+              // a clean no-op.
+              resolve_reflection_context: (): string | null => reflection.loadBuildContext(),
               // X5 — no `delivery_sink` override: the trident module falls back to
               // the graph's `channels` router, which IS `channelRouter` (passed as
               // `composition.channel_router` above) with the durable app-ws adapter

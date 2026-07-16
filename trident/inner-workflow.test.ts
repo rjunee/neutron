@@ -398,3 +398,64 @@ describe('inner-workflow.mjs — exec-model terminal-result harvest signal', () 
     expect(SRC).toContain('terminal-failure write ALSO failed')
   })
 })
+
+describe('inner-workflow.mjs — RB2 (b) reflection trust boundary + subordination', () => {
+  // The ROLE→prompt gating + placement are covered BEHAVIORALLY against the as-built
+  // script by `inner-workflow-assembly.test.ts` (a mock-execution harness that captures
+  // real agent() prompts) and the derivation by `reflection-guidance.test.ts`. These
+  // source assertions are belt-and-suspenders: the guidance is APPENDED after the task
+  // on the Forge builder sites and NOWHERE on the review-gate sites.
+  test('destructures the ready-to-append reflectionGuidance from the args contract (defaults to \'\')', () => {
+    // The guidance is DERIVED in the launcher (testable TS) and threaded ready — the
+    // .mjs carries NO derivation logic of its own (that would be un-executable here).
+    expect(SRC).toContain("reflectionGuidance = '',")
+    expect(SRC).not.toContain('reflectionPreamble')
+    expect(SRC).not.toContain('reflectionContext')
+  })
+
+  test('APPENDS the reflection guidance AFTER the Forge build task (never before the contract)', () => {
+    // Subordination: the fixed contract + task keep primacy; the untrusted advisory
+    // block is appended at the very end. `${task}${reflectionGuidance}` — not prepended.
+    expect(SRC).toContain('TASK:\n${task}${reflectionGuidance}')
+    // Belt: the guidance never precedes the Forge contract.
+    expect(SRC).not.toContain('${reflectionGuidance}${forgeBuildContract')
+  })
+
+  test('APPENDS the reflection guidance AFTER the task on EVERY Forge fix-round prompt too', () => {
+    // Each `forge:fix-round-*` is a FRESH agent, so the corrections are re-appended
+    // (else Forge loses them while revising) — still after the task, never before.
+    const appendSites = SRC.match(/TASK:\n\$\{task\}\$\{reflectionGuidance\}/g) ?? []
+    expect(appendSites).toHaveLength(2) // forge:build + the forge:fix-round-* prompt
+  })
+
+  // SECURITY (FIX 1) — the reflection block is UNTRUSTED NL; giving it to a reviewer
+  // would prompt-inject the independent MERGE GATE. It must appear on NO
+  // reviewer/synthesis/peer site. Mutation-kills: adding `reflectionGuidance` to any
+  // argus prompt fails here.
+  test('argus:claude reviewer prompt EXCLUDES reflection (starts at the bare rubric)', () => {
+    expect(SRC).toContain('`${ARGUS_RUBRIC}')
+    expect(SRC).not.toContain('reflectionGuidance}${ARGUS_RUBRIC')
+  })
+
+  test('argus:adversarial reviewer prompt EXCLUDES reflection', () => {
+    expect(SRC).toContain('`You are ARGUS-ADVERSARIAL (independent, read-only).')
+    expect(SRC).not.toContain('reflectionGuidance}You are ARGUS-ADVERSARIAL')
+  })
+
+  test('argus:synthesis verdict-interpreter EXCLUDES reflection', () => {
+    expect(SRC).toContain('`Synthesise these INDEPENDENT review verdicts')
+    expect(SRC).not.toContain('reflectionGuidance}Synthesise these INDEPENDENT review verdicts')
+  })
+
+  test('argus:codex external-peer launcher EXCLUDES reflection', () => {
+    expect(SRC).toContain('agent(codexReviewerPrompt(diffFile), {')
+    expect(SRC).not.toContain('reflectionGuidance}${codexReviewerPrompt')
+  })
+
+  test('the ONLY prompt-assembly uses of reflectionGuidance are the two Forge builder sites', () => {
+    // A stray `${reflectionGuidance}` interpolation anywhere else (e.g. a reviewer
+    // prompt) is caught here: exactly two template-interpolation append sites, both Forge.
+    const spliceSites = SRC.match(/\$\{reflectionGuidance\}/g) ?? []
+    expect(spliceSites).toHaveLength(2)
+  })
+})
