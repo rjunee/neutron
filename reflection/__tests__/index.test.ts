@@ -192,17 +192,47 @@ describe('createReflection — correction detected → logged → retrievable �
     expect(ctx).toContain('&lt;/learned_corrections&gt;')
   })
 
-  test('SIZE CAP: a huge diary entry is capped with no partial entity at the cut', () => {
+  test('SIZE CAP: a huge diary entry is capped, entity-safe, with BALANCED tags', () => {
     const r = createReflection({ ownerDataDir: tmp })
     r.appendDiary({ text: '<'.repeat(20000) }) // → &lt; × 20000 = 80k escaped chars
     const ctx = r.loadContext()
     expect(ctx).not.toBeNull()
     // Bounded near the cap (framing + wrapper + marker overhead), not ~80k.
     expect(ctx!.length).toBeLessThan(MAX_REFLECTION_CONTEXT_CHARS + 500)
-    expect(ctx).toContain('reflection context truncated')
+    // The truncation marker sits INSIDE the block…
+    expect(ctx).toContain('… (truncated)')
+    // …and the trusted CLOSING tag is ALWAYS emitted (never truncated away) — so the
+    // following user message can't fall inside an unterminated reflection block.
+    expect((ctx!.match(/<recent_diary>/g) ?? []).length).toBe(1)
+    expect((ctx!.match(/<\/recent_diary>/g) ?? []).length).toBe(1)
+    // The whole fragment ends with the trusted close tag, not mid-content.
+    expect(ctx!.trimEnd().endsWith('</recent_diary>')).toBe(true)
     // No split/partial XML entity at the truncation boundary.
     expect(ctx).not.toMatch(/&l(?!t;)/) // no `&l` that isn't part of `&lt;`
     expect(ctx).not.toMatch(/&(?!(amp|lt|gt);)/) // every `&` is a complete entity
+  })
+
+  test('SIZE CAP: BOTH sections huge → both stay balanced and the total is bounded', () => {
+    const r = createReflection({ ownerDataDir: tmp })
+    appendCorrection({
+      ownerDataDir: tmp,
+      wrong: '<'.repeat(9000),
+      right: '<'.repeat(9000),
+      why: '<'.repeat(9000),
+      scope: 'general',
+      source: 's',
+      observed_at: Date.now(),
+    })
+    r.appendDiary({ text: '<'.repeat(9000) })
+    const ctx = r.loadContext()
+    expect(ctx).not.toBeNull()
+    expect(ctx!.length).toBeLessThan(MAX_REFLECTION_CONTEXT_CHARS + 500)
+    // Every section's tag pair is balanced despite the truncation.
+    expect((ctx!.match(/<learned_corrections>/g) ?? []).length).toBe(1)
+    expect((ctx!.match(/<\/learned_corrections>/g) ?? []).length).toBe(1)
+    expect((ctx!.match(/<recent_diary>/g) ?? []).length).toBe(1)
+    expect((ctx!.match(/<\/recent_diary>/g) ?? []).length).toBe(1)
+    expect(ctx).not.toMatch(/&(?!(amp|lt|gt);)/)
   })
 
   test('a non-corrective turn that passes the pre-gate is judged but not logged', async () => {

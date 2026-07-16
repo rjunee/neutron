@@ -124,6 +124,16 @@ export function buildReflectionContext(input: BuildReflectionContextInput): stri
   const harden = input.harden !== false
   const esc = harden ? escapeData : (s: string): string => s
 
+  // When hardening, the cap applies to each section's untrusted CONTENT ONLY — the
+  // trusted `<…>` wrapper + closing tags are ALWAYS emitted, so a runaway entry can
+  // never truncate away a closing tag and leave the following user message inside an
+  // unterminated block. Split the content budget across the active sections.
+  const activeSections = (corrections.length > 0 ? 1 : 0) + (diary.length > 0 ? 1 : 0)
+  const perSectionBudget =
+    harden && activeSections > 0
+      ? Math.max(200, Math.floor((MAX_REFLECTION_CONTEXT_CHARS - CONTEXT_WRAPPER_RESERVE) / activeSections))
+      : Number.POSITIVE_INFINITY
+
   const parts: string[] = []
 
   if (corrections.length > 0) {
@@ -135,13 +145,15 @@ export function buildReflectionContext(input: BuildReflectionContextInput): stri
       return `- ${esc(c.right)}${was}${why}`
     })
     parts.push(
-      [
-        '<learned_corrections>',
-        'Things the owner has corrected you on before. Apply them SILENTLY going',
-        'forward — do NOT announce that you remember or noted them:',
-        ...lines,
-        '</learned_corrections>',
-      ].join('\n'),
+      wrapSection(
+        'learned_corrections',
+        [
+          'Things the owner has corrected you on before. Apply them SILENTLY going',
+          'forward — do NOT announce that you remember or noted them:',
+        ],
+        lines,
+        perSectionBudget,
+      ),
     )
   }
 
@@ -149,21 +161,41 @@ export function buildReflectionContext(input: BuildReflectionContextInput): stri
     // Escape the free-form diary TEXT (the loosest surface) — the date is generated.
     const lines = diary.map((e) => `- ${e.date}: ${esc(e.text)}`)
     parts.push(
-      [
-        '<recent_diary>',
-        'Your own recent short reflections, for continuity across sessions:',
-        ...lines,
-        '</recent_diary>',
-      ].join('\n'),
+      wrapSection(
+        'recent_diary',
+        ['Your own recent short reflections, for continuity across sessions:'],
+        lines,
+        perSectionBudget,
+      ),
     )
   }
 
   const body = parts.join('\n')
-  if (!harden) return body
+  // Prepend the advisory framing only when hardening (the raw build block gets its own
+  // framing downstream in `trident/reflection-guidance.ts`).
+  return harden ? `${REFLECTION_DATA_FRAMING}\n${body}` : body
+}
 
-  // Prepend the advisory framing, then entity-safe-cap the whole fragment so a runaway
-  // entry can't inflate every warm-turn prompt (truncation never splits an escape entity).
-  const framed = `${REFLECTION_DATA_FRAMING}\n${body}`
-  const { text, truncated } = capEscaped(framed, MAX_REFLECTION_CONTEXT_CHARS)
-  return truncated ? `${text}\n… (reflection context truncated)` : text
+/** Reserve (chars) held back from `MAX_REFLECTION_CONTEXT_CHARS` for the trusted
+ *  framing + per-section wrapper tags + headers + truncation markers, so the CONTENT
+ *  budget leaves room for them and the total fragment stays near the cap. */
+const CONTEXT_WRAPPER_RESERVE = 900
+
+/**
+ * Wrap one section's (escaped) data lines in its trusted `<tag>` … `</tag>` boundary,
+ * capping ONLY the data content to `budget` (entity-safe). The opening tag, header, and
+ * — critically — the CLOSING tag are ALWAYS emitted, so truncation can never strip a
+ * terminator and let following text escape the section. A truncation marker sits INSIDE
+ * the block, before the close tag.
+ */
+function wrapSection(
+  tag: string,
+  headerLines: string[],
+  dataLines: string[],
+  budget: number,
+): string {
+  const joined = dataLines.join('\n')
+  const { text, truncated } = capEscaped(joined, budget)
+  const content = truncated ? `${text}\n… (truncated)` : text
+  return [`<${tag}>`, ...headerLines, content, `</${tag}>`].join('\n')
 }
