@@ -97,6 +97,60 @@ describe('runtime/entity-writer — roundtrip', () => {
     expect(entries.filter((e) => e.endsWith('.tmp'))).toEqual([])
   })
 
+  describe('RB3 optimistic-concurrency precondition', () => {
+    test('ifBodyEquals mismatch → conflict, no write (concurrent change preserved)', async () => {
+      const first = await writeEntity(aliceInput())
+      const onDisk = await fs.readFile(first.path, 'utf8')
+      // Attempt a write whose precondition expects a DIFFERENT (stale) body.
+      const stale = aliceInput()
+      stale.body.compiledTruth = '## State\n\nStale rewrite.\n'
+      stale.precondition = { ifBodyEquals: 'NOT THE CURRENT BODY' }
+      const out = await writeEntity(stale)
+      expect(out.conflict).toBe(true)
+      expect(out.changed).toBe(false)
+      // The on-disk body is byte-untouched.
+      expect(await fs.readFile(first.path, 'utf8')).toBe(onDisk)
+    })
+
+    test('ifBodyEquals match → the write commits', async () => {
+      const first = await writeEntity(aliceInput())
+      const current = await fs.readFile(first.path, 'utf8')
+      const upd = aliceInput()
+      upd.body.compiledTruth = '## State\n\nUpdated.\n'
+      upd.precondition = { ifBodyEquals: current }
+      const out = await writeEntity(upd)
+      expect(out.conflict).toBeFalsy()
+      expect(out.changed).toBe(true)
+      expect(await fs.readFile(first.path, 'utf8')).toContain('Updated.')
+    })
+
+    test('ifBodyEquals:null asserts absence → conflict when the page already exists', async () => {
+      await writeEntity(aliceInput())
+      const fresh = aliceInput()
+      fresh.precondition = { ifBodyEquals: null }
+      const out = await writeEntity(fresh)
+      expect(out.conflict).toBe(true)
+      expect(out.changed).toBe(false)
+    })
+
+    test('an array timelineAppend folds every row in ONE write (deduped)', async () => {
+      const input = aliceInput()
+      input.body.timelineAppend = [
+        { ts: '2026-04-11T00:00:00Z', source: 's', body: 'row-A' },
+        { ts: '2026-04-12T00:00:00Z', source: 's', body: 'row-B' },
+        { ts: '2026-04-11T00:00:00Z', source: 's', body: 'row-A' }, // dup → folded once
+      ]
+      const out = await writeEntity(input)
+      const onDisk = await fs.readFile(out.path, 'utf8')
+      expect(onDisk).toContain('row-A')
+      expect(onDisk).toContain('row-B')
+      // Newest-first ordering: row-B (Apr 12) precedes row-A (Apr 11).
+      expect(onDisk.indexOf('row-B')).toBeLessThan(onDisk.indexOf('row-A'))
+      // The duplicate row-A appears exactly once.
+      expect(onDisk.split('row-A').length - 1).toBe(1)
+    })
+  })
+
   test('rendering is deterministic: same input → same bytes (lexicographic frontmatter)', () => {
     // The frontmatter renderer sorts keys; the writer renders timeline
     // newest-first. Verify both via the exported render helper.

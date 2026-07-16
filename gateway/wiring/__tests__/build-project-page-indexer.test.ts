@@ -56,7 +56,10 @@ describe('build-project-page-indexer', () => {
     expect(input.body.frontmatter['type']).toBe('project')
     expect(input.body.frontmatter['project_dir']).toBe('Projects/topline')
     expect(input.body.compiledTruth).toContain('Billing SaaS')
-    expect(input.body.timelineAppend.ts).toBe('2023-11-14T22:13:20.000Z')
+    const appended = Array.isArray(input.body.timelineAppend)
+      ? input.body.timelineAppend[0]
+      : input.body.timelineAppend
+    expect(appended.ts).toBe('2023-11-14T22:13:20.000Z')
     expect(deps?.syncHook).toBe(syncHook)
   })
 

@@ -98,11 +98,13 @@ export interface EntityWriteBody {
    */
   compiledTruth: string
   /**
-   * One new timeline entry to merge. If a row with the same `(ts, source,
-   * body)` already exists on disk, the merge is a no-op. The writer keeps
-   * timeline rows in reverse-chronological order (newest first).
+   * New timeline entry (or entries) to merge. If a row with the same `(ts,
+   * source, body)` already exists on disk, that row is a no-op. The writer keeps
+   * timeline rows in reverse-chronological order (newest first). An ARRAY lets a
+   * caller fold several rows in ONE atomic write (e.g. the reflect dedup merge
+   * moving a loser's whole timeline onto the survivor without N separate writes).
    */
-  timelineAppend: TimelineEntry
+  timelineAppend: TimelineEntry | readonly TimelineEntry[]
 }
 
 export interface EntityWriteInput {
@@ -134,6 +136,25 @@ export interface EntityWriteInput {
    * in this trident; a later cleanup removes it.
    */
   allowPersistOrigins?: ReadonlyArray<string>
+  /**
+   * OPTIMISTIC-CONCURRENCY precondition (RB3). When set, the write is committed
+   * ONLY if the current on-disk body still matches the expectation — the check
+   * runs INSIDE the per-(kind,slug) write lock, after the writer's own read and
+   * before the render/rename, so it is ATOMIC with respect to every other
+   * `writeEntity` on the same key. A mismatch returns `{ changed: false,
+   * conflict: true }` WITHOUT writing (never clobbers the concurrent change).
+   * Absent → today's unconditional behaviour.
+   *
+   * This is what lets a long-running batch (the reflect pass) full-replace a
+   * page's compiled-truth safely: it snapshots the raw body, does its
+   * (LLM / merge) work, then writes with `ifBodyEquals: <snapshot>` — a user
+   * write that landed meanwhile flips the write to a no-op conflict.
+   */
+  precondition?: {
+    /** Commit only if the current on-disk body EXACTLY equals this string;
+     *  `null` asserts the page must NOT exist yet (guards a fresh-compose). */
+    readonly ifBodyEquals: string | null
+  }
 }
 
 export interface EntityWriteOutput {
@@ -143,6 +164,12 @@ export interface EntityWriteOutput {
   newLinks: Triple[]
   /** `false` when the rendered body matches what's already on disk. */
   changed: boolean
+  /**
+   * RB3 — `true` when a `precondition` was supplied and the current on-disk body
+   * did NOT match it, so the write was SKIPPED to avoid clobbering a concurrent
+   * change. `changed` is false in this case. Absent/false otherwise.
+   */
+  conflict?: boolean
 }
 
 /**
@@ -303,8 +330,23 @@ async function writeEntityLocked(
     }
   }
 
-  const existingTimeline = existing !== undefined ? extractTimeline(existing) : []
-  const mergedTimeline = mergeTimeline(existingTimeline, body.timelineAppend)
+  // RB3 optimistic-concurrency precondition — checked HERE, inside the write lock,
+  // against the body we just read, so it is atomic vs every other same-key write.
+  // A mismatch aborts WITHOUT writing (never clobbers a concurrent change).
+  if (input.precondition !== undefined) {
+    const { ifBodyEquals } = input.precondition
+    const matches = ifBodyEquals === null ? existing === undefined : existing === ifBodyEquals
+    if (!matches) {
+      return { path: targetPath, newLinks: [], changed: false, conflict: true }
+    }
+  }
+
+  // Fold one OR many timeline rows in a single write (dedup on ts/source/body).
+  const appends: readonly TimelineEntry[] = Array.isArray(body.timelineAppend)
+    ? body.timelineAppend
+    : [body.timelineAppend as TimelineEntry]
+  let mergedTimeline = existing !== undefined ? extractTimeline(existing) : []
+  for (const entry of appends) mergedTimeline = mergeTimeline(mergedTimeline, entry)
   const rendered = renderEntityPage({
     frontmatter: body.frontmatter,
     compiledTruth: body.compiledTruth,
@@ -427,7 +469,10 @@ function validateInput(input: EntityWriteInput): void {
     )
   }
   validateFrontmatter(input.body.frontmatter, input.kind, input.slug)
-  validateTimelineEntry(input.body.timelineAppend)
+  const appends = Array.isArray(input.body.timelineAppend)
+    ? input.body.timelineAppend
+    : [input.body.timelineAppend as TimelineEntry]
+  for (const entry of appends) validateTimelineEntry(entry)
   if (typeof input.body.compiledTruth !== 'string') {
     throw new EntityWriteError(
       'invalid_frontmatter',

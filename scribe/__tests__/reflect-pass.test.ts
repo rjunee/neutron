@@ -26,7 +26,13 @@ import {
   type EntityKind,
 } from '@neutronai/runtime/entity-writer.ts'
 import { extractTimeline, extractCompiledTruth } from '@neutronai/runtime/entity-format.ts'
-import { runReflectPass, type ReflectPassDeps } from '../reflect/reflect-pass.ts'
+import {
+  runReflectPass,
+  type ReflectPassDeps,
+  type ReflectWriteEntity,
+} from '../reflect/reflect-pass.ts'
+
+const realWrite = writeEntity as unknown as ReflectWriteEntity
 
 const OWN = 'owner'
 const t0 = Date.parse('2026-07-16T00:00:00.000Z')
@@ -216,6 +222,44 @@ describe('reflect dedup (deterministic, no LLM)', () => {
     expect(existsSync(join(owner, 'entities', 'companies', 'acme-co.md'))).toBe(true)
     const loser = await readPage(owner, 'companies', 'acme-co')
     expect(extractTimeline(loser!).map((e) => e.body)).toContain('FRESH concurrent fact')
+  })
+
+  test('atomic guard: a loser write DURING the survivor write is not deleted', async () => {
+    const owner = tmpOwner()
+    await seed(owner, 'company', 'acme', 'Acme', 'Acme is a developer-tools SaaS company.', [
+      { ts: '2026-07-01T00:00:00.000Z', source: 'chat:owner', body: 'a' },
+      { ts: '2026-07-02T00:00:00.000Z', source: 'chat:owner', body: 'b' },
+    ])
+    await seed(owner, 'company', 'acme-io', 'Acme IO', 'Acme is a developer-tools SaaS company.', [
+      { ts: '2026-07-01T00:00:00.000Z', source: 'chat:owner', body: 'c' },
+    ])
+    // A writer wrapper: right AFTER the survivor (acme) commits — and BEFORE the
+    // loser re-read/unlink — land a concurrent user write on the loser.
+    const wrapped: ReflectWriteEntity = async (input, d) => {
+      const out = await realWrite(input, d)
+      if (input.slug === 'acme') {
+        await writeEntity({
+          ownerDataDir: owner,
+          kind: 'company',
+          slug: 'acme-io',
+          body: {
+            frontmatter: { slug: 'acme-io', type: 'company', name: 'Acme IO', source: 'chat' },
+            compiledTruth: 'Acme is a developer-tools SaaS company.',
+            timelineAppend: { ts: '2026-07-09T00:00:00.000Z', source: 'chat:owner', body: 'FRESH loser fact' },
+          },
+          originInstance: OWN,
+          receivingInstanceSlug: OWN,
+        })
+      }
+      return out
+    }
+    const report = await runReflectPass({ ...baseDeps(owner), writeEntity: wrapped })
+    // The per-loser re-read before unlink sees the concurrent write → the loser is
+    // retained (not deleted), so its fresh fact is never lost.
+    expect(report.merged).toBe(0)
+    expect(existsSync(join(owner, 'entities', 'companies', 'acme-io.md'))).toBe(true)
+    const loser = await readPage(owner, 'companies', 'acme-io')
+    expect(extractTimeline(loser!).map((e) => e.body)).toContain('FRESH loser fact')
   })
 
   test('distinct pages are NOT merged', async () => {
@@ -533,6 +577,45 @@ describe('reflect cost confinement (tiered-write discipline)', () => {
     const ct = extractCompiledTruth((await readPage(owner, 'people', 'nadia'))!)
     expect(ct).toContain('Promoted to staff') // concurrent fact survived
     expect(ct).not.toContain('senior engineer') // stale rewrite NOT applied
+  })
+
+  test('atomic precondition: a write landing just before the resynth write is not clobbered', async () => {
+    const owner = tmpOwner()
+    await seed(owner, 'person', 'omar', 'Omar', 'Omar is a designer.', [
+      { ts: '2026-07-01T00:00:00.000Z', source: 'chat:owner', body: 'r1' },
+      { ts: '2026-07-02T00:00:00.000Z', source: 'chat:owner', body: 'r2' },
+      { ts: '2026-07-03T00:00:00.000Z', source: 'chat:owner', body: 'r3' },
+    ])
+    // A writer wrapper: right BEFORE the reflect resynth write commits, land a
+    // concurrent user write. The writer's precondition (checked inside its lock,
+    // AFTER this concurrent write) must catch the mismatch and refuse to clobber.
+    let injected = false
+    const wrapped: ReflectWriteEntity = async (input, d) => {
+      if (!injected && input.slug === 'omar' && input.body.compiledTruth.includes('senior')) {
+        injected = true
+        await writeEntity({
+          ownerDataDir: owner,
+          kind: 'person',
+          slug: 'omar',
+          body: {
+            frontmatter: { slug: 'omar', type: 'person', name: 'Omar', source: 'chat' },
+            compiledTruth: 'Omar is a designer. Now a manager.',
+            timelineAppend: { ts: '2026-07-09T00:00:00.000Z', source: 'chat:owner', body: 'promo' },
+          },
+          originInstance: OWN,
+          receivingInstanceSlug: OWN,
+        })
+      }
+      return realWrite(input, d)
+    }
+    const { substrate } = scriptedSubstrate((p) =>
+      p.includes('DIGEST:') ? '{"entities":[]}' : 'Omar is a senior designer.',
+    )
+    const report = await runReflectPass({ ...baseDeps(owner), writeEntity: wrapped, substrate })
+    expect(report.resynthesized).toBe(0) // precondition conflict → no write
+    const ct = extractCompiledTruth((await readPage(owner, 'people', 'omar'))!)
+    expect(ct).toContain('Now a manager') // concurrent fact survived
+    expect(ct).not.toContain('senior designer') // stale rewrite NOT applied
   })
 
   test('reserved extraction sees the SAME-pass consolidated truth (freshness)', async () => {

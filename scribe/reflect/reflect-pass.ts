@@ -49,8 +49,32 @@ import type { Substrate } from '@neutronai/runtime/substrate.ts'
 import { getBestModel } from '@neutronai/runtime/models.ts'
 import { drainToText } from '@neutronai/runtime/substrate-text.ts'
 import { createLogger } from '@neutronai/logger'
-import { type WriteEntityFn, slugify } from '../write-to-gbrain.ts'
+import { slugify } from '../write-to-gbrain.ts'
 import type { SyncHook } from '@neutronai/runtime/entity-writer.ts'
+
+/**
+ * The entity-writer surface the reflect pass needs — a superset of scribe's
+ * `WriteEntityFn` that also carries the RB3 optimistic-concurrency `precondition`
+ * (atomic CAS inside the writer's per-key lock) + the `conflict` result and the
+ * multi-row `timelineAppend`. The real `runtime/entity-writer.ts:writeEntity`
+ * satisfies it; tests inject a matching recorder.
+ */
+export type ReflectWriteEntity = (
+  input: {
+    ownerDataDir: string
+    kind: EntityKind
+    slug: string
+    body: {
+      frontmatter: Record<string, unknown>
+      compiledTruth: string
+      timelineAppend: TimelineEntry | readonly TimelineEntry[]
+    }
+    originInstance: string
+    receivingInstanceSlug: string
+    precondition?: { ifBodyEquals: string | null }
+  },
+  deps?: { syncHook?: SyncHook },
+) => Promise<{ path: string; changed: boolean; newLinks: unknown[]; conflict?: boolean }>
 import {
   clusterNearDuplicates,
   DEFAULT_JACCARD_THRESHOLD,
@@ -85,7 +109,7 @@ export interface ReflectPassDeps {
   /** Own instance slug — the own-origin stamp for every `writeEntity` call. */
   ownSlug: string
   /** Entity-writer surface (defaults to the real `writeEntity` at the wiring layer). */
-  writeEntity: WriteEntityFn
+  writeEntity: ReflectWriteEntity
   /** Per-instance GBrain sync hook, fanned into every write. Optional (LLM-less/no-brain). */
   syncHook?: SyncHook
   /**
@@ -436,14 +460,14 @@ async function mergeCluster(
   deps: ReflectPassDeps,
   now: () => number,
 ): Promise<{ survivor: LoadedPage; retained: LoadedPage[]; deleted: number } | null> {
-  // COMPARE-AND-SWAP guard: re-read every member and confirm it is byte-identical
-  // to the snapshot the merge is based on. If ANY member changed on disk since the
-  // snapshot (a concurrent scribe/user write between enumeration and here), abort
-  // — merging from a stale snapshot would drop the new content AND deleting the
-  // loser would destroy it. A later pass re-clusters the current content.
+  // EARLY ABORT (optimization + avoids folding a stale copy): if any member
+  // changed on disk since the snapshot, skip the whole cluster now — a later pass
+  // re-clusters the fresh content. This is NOT the safety mechanism (that is the
+  // survivor write's atomic `precondition` + the per-loser re-read before unlink,
+  // below); it just avoids a wasted survivor write + a stale fold in the common
+  // concurrent-write case.
   for (const m of members) {
-    const current = await reloadRawBody(deps.ownerDataDir, m.kind, m.slug)
-    if (current === null || current !== m.raw) return null
+    if ((await reloadRawBody(deps.ownerDataDir, m.kind, m.slug)) !== m.raw) return null
   }
   const ranked = [...members].sort((a, b) => {
     if (b.timeline.length !== a.timeline.length) return b.timeline.length - a.timeline.length
@@ -489,44 +513,52 @@ async function mergeCluster(
     source: `reflect:${deps.ownSlug}`,
   }
 
-  // Write the survivor's merged compiled-truth ONCE (this establishes the edge
-  // set), then fold in every union-timeline row via the writer's single-append
-  // seam — each `writeEntity` merges one row into the on-disk timeline (dedup on
-  // ts/source/body), so the survivor ends up with the whole union while the
-  // compiled-truth (hence the edges) is written exactly once.
-  const writeOne = (append: TimelineEntry): Promise<unknown> =>
-    deps.writeEntity(
-      {
-        ownerDataDir: deps.ownerDataDir,
-        kind: survivor.kind,
-        slug: survivor.slug,
-        body: { frontmatter, compiledTruth: mergedCompiledTruth, timelineAppend: append },
-        originInstance: deps.ownSlug,
-        receivingInstanceSlug: deps.ownSlug,
-      },
-      deps.syncHook !== undefined ? { syncHook: deps.syncHook } : {},
-    )
-  // First append seeds the merged compiled-truth; the rest only grow the timeline.
-  await writeOne(unionTimeline[0] ?? marker)
-  for (const row of unionTimeline.slice(1)) await writeOne(row)
+  // ONE atomic survivor write: the merged compiled-truth (establishes the union
+  // edge set) plus EVERY union-timeline row folded in a single call (the writer
+  // accepts a row array, deduped on ts/source/body). `precondition` makes the
+  // write conditional — INSIDE the writer's per-key lock — on the survivor still
+  // being byte-identical to the snapshot: a concurrent write to the survivor
+  // between snapshot and here flips this to a no-op conflict, so nothing is
+  // clobbered. On conflict we abort the WHOLE cluster (delete no loser) so a
+  // later pass re-clusters the fresh content.
+  const out = await deps.writeEntity(
+    {
+      ownerDataDir: deps.ownerDataDir,
+      kind: survivor.kind,
+      slug: survivor.slug,
+      body: { frontmatter, compiledTruth: mergedCompiledTruth, timelineAppend: unionTimeline },
+      originInstance: deps.ownSlug,
+      receivingInstanceSlug: deps.ownSlug,
+      precondition: { ifBodyEquals: survivor.raw },
+    },
+    deps.syncHook !== undefined ? { syncHook: deps.syncHook } : {},
+  )
+  if (out.conflict === true) return null // survivor changed concurrently → abort
 
-  // Remove each loser: disk first (canonical), then best-effort brain mirror.
-  // The survivor has ALREADY absorbed every loser's content above, so a failed
-  // disk deletion is NOT data loss — it just leaves a duplicate. We therefore
-  // RETAIN a loser whose deletion genuinely failed (it stays a survivor, is not
-  // counted as merged, and a later pass retries the collapse) rather than
-  // dropping it from the inventory while its file lingers (Codex RB3 medium).
+  // Remove each loser: disk first (canonical), then best-effort brain mirror. The
+  // survivor has absorbed every loser's content above. A loser is deleted ONLY
+  // when it is STILL byte-identical to the snapshot the survivor merged (re-read
+  // immediately before unlink) — a concurrent write to a loser after the snapshot
+  // RETAINS it (its fresh content wasn't merged, so deleting it would lose data);
+  // a later pass re-clusters. A failed/uncontained deletion also retains it. Only
+  // a confirmed deletion counts as merged.
   const removeFile = deps.removeFile ?? unlink
   const retained: LoadedPage[] = []
   let deleted = 0
   for (const l of losers) {
-    // TOCTOU: several awaited writes happened above, so RE-VALIDATE the kind dir's
-    // containment immediately before unlink — a `entities/<dir>` swapped to a
-    // symlink-to-outside during those awaits would otherwise let the unlink escape
-    // the owner. A failed revalidation retains the loser (never deletes through a
-    // now-uncontained ancestor).
+    // RE-VALIDATE containment (a `entities/<dir>` swapped to a symlink-to-outside
+    // during the survivor write would otherwise let the unlink escape the owner)
+    // AND re-read the loser body: only delete it if it still matches what the
+    // survivor merged (no concurrent write landed on it).
     const contained = await containedKindDir(deps.ownerDataDir, l.kind)
     if (contained === null) {
+      retained.push(l)
+      continue
+    }
+    const currentLoser = await reloadRawBody(deps.ownerDataDir, l.kind, l.slug)
+    if (currentLoser !== l.raw) {
+      // Concurrent write (or vanished) since the snapshot → its content wasn't
+      // merged; retain it rather than destroy the new data.
       retained.push(l)
       continue
     }
@@ -610,14 +642,6 @@ async function resynthesizePages(
       // report a phantom consolidation, grow the timeline every pass, and keep the
       // page permanently above the row gate. Only a genuine change is written.
       if (next === page.compiledTruth.trim()) continue
-      // COMPARE-AND-SWAP: re-read the CURRENT compiled-truth right before the
-      // (full-replacement) write. The LLM call took time; a concurrent scribe/user
-      // write may have landed a new fact meanwhile. If the on-disk truth no longer
-      // matches the snapshot the LLM consolidated, SKIP — writing the stale rewrite
-      // would clobber that concurrent fact (Codex RB3). A later pass re-synthesizes
-      // the fresh content.
-      const current = await readContainedPage(deps.ownerDataDir, page.kind, page.slug)
-      if (current === null || current.compiledTruth.trim() !== page.compiledTruth.trim()) continue
       const frontmatter: Record<string, unknown> = {
         ...page.frontmatter,
         slug: page.slug,
@@ -625,6 +649,12 @@ async function resynthesizePages(
         name: page.title,
         source: `reflect:${deps.ownSlug}`,
       }
+      // ATOMIC COMPARE-AND-SWAP: the full-replacement write commits ONLY if the
+      // page is still byte-identical to the snapshot the LLM consolidated from
+      // (`ifBodyEquals: page.raw`), checked inside the writer's per-key lock. The
+      // LLM call took time; a concurrent scribe/user write that landed meanwhile
+      // flips this to a no-op conflict, so the stale rewrite never clobbers it. A
+      // later pass re-synthesizes the fresh content.
       const out = await deps.writeEntity(
         {
           ownerDataDir: deps.ownerDataDir,
@@ -641,6 +671,7 @@ async function resynthesizePages(
           },
           originInstance: deps.ownSlug,
           receivingInstanceSlug: deps.ownSlug,
+          precondition: { ifBodyEquals: page.raw },
         },
         deps.syncHook !== undefined ? { syncHook: deps.syncHook } : {},
       )
@@ -730,6 +761,11 @@ async function extractReservedKinds(
         name: existing !== null ? (existing.frontmatter['name'] ?? e.name) : e.name,
         source: `reflect:${deps.ownSlug}`,
       }
+      // ATOMIC COMPARE-AND-SWAP: a NEW page commits only if none exists yet
+      // (`ifBodyEquals: null`); an existing page commits only if it is still
+      // byte-identical to the `existing` snapshot the append was computed from.
+      // Either way a concurrent write between the read above and the writer's lock
+      // flips this to a no-op conflict, never clobbering it.
       const out = await deps.writeEntity(
         {
           ownerDataDir: deps.ownerDataDir,
@@ -746,11 +782,12 @@ async function extractReservedKinds(
           },
           originInstance: deps.ownSlug,
           receivingInstanceSlug: deps.ownSlug,
+          precondition: { ifBodyEquals: existing === null ? null : existing.raw },
         },
         deps.syncHook !== undefined ? { syncHook: deps.syncHook } : {},
       )
       // Count any real write — a new page OR an existing page that gained a fact
-      // (the skip above already excluded the no-op case).
+      // (the skip above + a concurrent-write conflict both leave `changed` false).
       if (out.changed) report.reservedWritten += 1
     } catch (err) {
       logFailure('reflect: reserved write failed', err)
