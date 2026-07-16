@@ -195,7 +195,7 @@ describe('resume-on-boot expired path', () => {
     const allRows = db
       .raw()
       .query<{ request_id: string; status: string; owner_slug: string }, []>(
-        `SELECT request_id, status, project_slug FROM profile_pic_pending ORDER BY started_at ASC`,
+        `SELECT request_id, status, project_slug AS owner_slug FROM profile_pic_pending ORDER BY started_at ASC`,
       )
       .all()
     expect(allRows).toHaveLength(2)

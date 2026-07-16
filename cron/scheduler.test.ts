@@ -98,6 +98,10 @@ describe('CronScheduler.fireOnce', () => {
     const state = new CronStateStore(db).get('vault-backup', 't1')
     expect(state?.last_run_status).toBe('ok')
     expect(state?.last_run_at).toBe(1_000)
+    // N4 boundary: the returned record exposes the DOMAIN name `owner_slug`
+    // (projected via `project_slug AS owner_slug`), never the frozen SQL column.
+    expect(state?.owner_slug).toBe('t1')
+    expect((state as unknown as Record<string, unknown>)?.['project_slug']).toBeUndefined()
   })
 
   test('handler throw → status=error + error captured in state', async () => {
@@ -179,7 +183,7 @@ describe('O4 — cron_job_error degrade journal (rising edge)', () => {
     await scheduler.fireOnce('flaky') // error→error: NO emit (rising-edge dedup)
     await scheduler.fireOnce('flaky') // error→error: NO emit
     expect(rows).toHaveLength(1)
-    expect(rows[0]).toMatchObject({ event: 'cron_job_error', module: 'cron', owner_slug: 't1' })
+    expect(rows[0]).toMatchObject({ event: 'cron_job_error', module: 'cron', project_slug: 't1' })
     expect(rows[0]?.payload).toMatchObject({ job_name: 'flaky', error: 'handler boom' })
   })
 

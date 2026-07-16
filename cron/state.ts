@@ -12,9 +12,10 @@ import type { CronHandlerStatus } from './handlers.ts'
 
 export interface CronStateRow {
   job_name: string
-  // SQL column name remains `project_slug`; value is the owner/instance slug
-  // (N4: TS-side domain identifiers are `owner_slug`, the frozen column is not).
-  project_slug: string
+  // Domain field is `owner_slug`; the frozen SQL column is `project_slug` and the
+  // SELECTs below project it via `project_slug AS owner_slug` so the returned
+  // record carries the domain name while the DDL column stays frozen (N4).
+  owner_slug: string
   last_run_at: number | null
   last_run_status: CronHandlerStatus | null
   last_run_error: string | null
@@ -27,7 +28,7 @@ export class CronStateStore {
   get(job_name: string, owner_slug: string): CronStateRow | null {
     const row = this.db
       .prepare<CronStateRow, [string, string]>(
-        `SELECT job_name, project_slug, last_run_at, last_run_status,
+        `SELECT job_name, project_slug AS owner_slug, last_run_at, last_run_status,
                 last_run_error, last_run_duration_ms
            FROM cron_state WHERE job_name = ? AND project_slug = ?`,
       )
@@ -66,7 +67,7 @@ export class CronStateStore {
   list(): CronStateRow[] {
     return this.db
       .prepare<CronStateRow, []>(
-        `SELECT job_name, project_slug, last_run_at, last_run_status,
+        `SELECT job_name, project_slug AS owner_slug, last_run_at, last_run_status,
                 last_run_error, last_run_duration_ms
            FROM cron_state ORDER BY job_name`,
       )
