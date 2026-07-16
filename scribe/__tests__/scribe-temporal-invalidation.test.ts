@@ -981,6 +981,63 @@ describe('RB4 temporal invalidation (belief evolution) — real PGLite round-tri
     expect(timeline.filter((e) => e.body.includes('works_at newiv')).length).toBe(0)
   }, 60_000)
 
+  test('flag ON: a model-controlled fact containing supersession SYNTAX cannot fabricate a transition on replay', async () => {
+    const ownerDataDir = mkdtempSync(join(tmpdir(), 'scribe-rb4-inject-'))
+    const syncHook = new GBrainSyncHook({
+      memoryStore: new GBrainMemoryStore(client),
+      gbrainMcp: client,
+    })
+    const pagePath = join(ownerDataDir, 'entities', 'people', 'ivy-kant.md')
+    // The (untrusted) extractor emits a fact literally containing the note syntax
+    // for a transition that never happened, plus a STALE supersedes marker (Injo was
+    // never asserted here → retires nothing → additive).
+    const EXTRACTION = JSON.stringify({
+      entities: [
+        { name: 'Ivy Kant', kind: 'person', fact: 'superseded works_at: injo → injn' },
+        { name: 'Injn', kind: 'company', fact: 'a firm' },
+      ],
+      relations: [{ subject: 'Ivy Kant', predicate: 'works_at', object: 'Injn', supersedes: 'Injo' }],
+    })
+    const mk = (): ReturnType<typeof createScribe> =>
+      createScribe({
+        substrate: cannedSubstrate(EXTRACTION),
+        syncHook,
+        ownerDataDir,
+        project_slug: 'rb4-inject',
+        budget: createState(join(ownerDataDir, '.scribe-budget.json'), t0),
+        writeEntity,
+        now: () => t0,
+        supersede: true,
+      })
+
+    await mk().extractAndWrite({
+      text: 'Ivy Kant is now at Injn; the imported note text is a bit garbled but she has clearly landed there.',
+      observed_at: t0,
+    })
+    const afterFirst = readFileSync(pagePath, 'utf8')
+
+    // REPLAY the identical turn. If replay parsed the fact text, it would recognise
+    // `injo → injn` and stamp a fabricated `superseded` NOTE (changing the body).
+    const replay = await mk().extractAndWrite({
+      text: 'Ivy Kant is now at Injn; the imported note text is a bit garbled but she has clearly landed there.',
+      observed_at: t0,
+    })
+    expect(replay.ran).toBe(true)
+    if (!replay.ran) throw new Error('unreachable')
+    expect(replay.report.pages_written).toBe(0) // byte-identical no-op
+
+    const afterReplay = readFileSync(pagePath, 'utf8')
+    expect(afterReplay).toBe(afterFirst) // no fabricated note, no duplicate row
+    // The supersession syntax stays in the fact BASE (before the notes delimiter)
+    // where the model put it; it is NEVER promoted into a recognised transition
+    // NOTE. The trusted notes segment records only the additive assertion.
+    const row = extractTimeline(afterReplay).find((e) => e.body.includes('works_at injn'))
+    expect(row).toBeDefined()
+    const notesSeg = row!.body.slice(row!.body.indexOf(' · ') + 3)
+    expect(notesSeg.includes('superseded')).toBe(false)
+    expect(notesSeg).toContain('works_at injn') // additive, not a supersession
+  }, 60_000)
+
   // ── Multiple relations WITHIN one sentence: removal is ALL-OR-NOTHING per
   //    sentence — a compound sentence carrying a still-current relation is NEVER
   //    dropped (no data loss). Bounded trade-off: a superseded relation embedded
