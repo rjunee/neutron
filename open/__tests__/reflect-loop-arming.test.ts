@@ -205,6 +205,31 @@ test('a composer failure after the memory wiring does NOT leak the reflect inter
   }
 })
 
+test('arming rollback: a throwing timer leaves the loop stopped (composer failure-atomicity)', async () => {
+  // The composer arms the reflect loop as `register(...); try { start() } catch {
+  // await stop(); throw }`. This pins the rollback mechanism it relies on: a loop
+  // whose timer constructor throws surfaces the throw, and stop() afterwards is a
+  // clean no-op that leaves the loop inactive (no dangling timer).
+  const loop = new SupervisedLoop({
+    name: 'reflect-consolidation',
+    intervalMs: 60_000,
+    tick: async (): Promise<void> => {},
+    setTimer: () => {
+      throw new Error('timer creation failed')
+    },
+  })
+  // Mirror the composer: start() throws → roll back with stop() → re-throw.
+  let threw = false
+  try {
+    loop.start()
+  } catch {
+    threw = true
+    await loop.stop() // rollback must not throw
+  }
+  expect(threw).toBe(true)
+  expect(loop.describe().isActive?.()).toBe(false) // no live/dangling timer
+})
+
 test('flag OFF (default) → reflect-consolidation is NOT armed', async () => {
   const { composition, close } = await bootComposer()
   try {

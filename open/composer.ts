@@ -3367,7 +3367,15 @@ export function buildOpenGraphComposer(
     // off) → no-op.
     if (reflectLoop !== null) {
       loopRegistry.register(reflectLoop.describe())
-      reflectLoop.start()
+      // Failure-atomic: if arming the timer throws, STOP the (partially-started)
+      // loop before re-throwing so composition never rejects with a live/dangling
+      // reflect timer — same discipline as the dispatch lifecycle watchdog above.
+      try {
+        reflectLoop.start()
+      } catch (err) {
+        await reflectLoop.stop()
+        throw err
+      }
     }
 
     return {

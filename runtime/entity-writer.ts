@@ -48,7 +48,7 @@
  * no I/O outside the file write, no error surface change.
  */
 
-import { promises as fs } from 'node:fs'
+import { promises as fs, constants as fsConstants } from 'node:fs'
 import { resolve, sep } from 'node:path'
 import { extractTypedLinks, type Triple } from './auto-link.ts'
 import {
@@ -339,30 +339,48 @@ async function deleteEntityLocked(input: DeleteEntityInput): Promise<DeleteEntit
   if (!isUnder(entitiesRoot, targetPath)) {
     throw new EntityWriteError('path_escape', `target path escapes entities root: ${targetPath}`)
   }
-  // Reject a symlink on the entities-root, kind-dir, and leaf — the same
-  // containment `writeEntity` applies (a within-tree redirect like a symlinked
-  // `entities/` or `entities/people` or `people/alice.md -> /outside` is refused).
-  // Checked INSIDE the lock, so it is TOCTOU-atomic vs same-key writes. NOTE (as
-  // for `writeEntity`): `ownerDataDir` is the TRUSTED caller-supplied root and is
+  // Containment (within-tree redirects) — matches `writeEntity`. NOTE (as for
+  // `writeEntity`): `ownerDataDir` is the TRUSTED caller-supplied root and is
   // path-resolved (not realpath'd), so a symlinked `ownerDataDir` / an ancestor
   // ABOVE it is followed — that is the single-owner local threat model, not an
-  // escape (the alias points at the owner's own tree). Callers that accept an
-  // untrusted `ownerDataDir` must canonicalize it first (the reflect pass scans
-  // under a realpath-contained root before ever calling this).
+  // escape. Callers that accept an untrusted `ownerDataDir` must canonicalize it
+  // first (the reflect pass scans under a realpath-contained root before calling this).
   await rejectSymlinkAt(entitiesRoot)
   await rejectSymlinkAt(targetDir)
-  await rejectSymlinkAt(targetPath)
 
+  // Read the body for the precondition through an `O_NOFOLLOW` fd (never follows a
+  // symlinked LEAF — a `people/alice.md -> /outside` swap fails to open). Reading
+  // via the HELD fd closes the leaf check→read swap for the read itself.
   let existing: string | undefined
   try {
-    existing = await fs.readFile(targetPath, 'utf8')
+    const fh = await fs.open(targetPath, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW)
+    try {
+      existing = await fh.readFile('utf8')
+    } finally {
+      await fh.close().catch(() => undefined)
+    }
   } catch (err) {
     if (isENOENT(err)) return { path: targetPath, deleted: true, conflict: false } // already gone
+    // ELOOP / symlinked leaf → refuse (never delete through a leaf symlink target).
+    if ((err as NodeJS.ErrnoException).code === 'ELOOP') {
+      throw new EntityWriteError('symlink_rejected', `path is a symlink: ${targetPath}`)
+    }
     throw new EntityWriteError('read_failed', `failed to read ${targetPath}: ${errMsg(err)}`)
   }
   if (input.precondition !== undefined && existing !== input.precondition.ifBodyEquals) {
     return { path: targetPath, deleted: false, conflict: true }
   }
+  // TOCTOU: the precondition read is an awaited gap, so RE-VALIDATE the ancestor
+  // dirs IMMEDIATELY before the unlink — a swap of `entities/` or `entities/<kind>`
+  // to a symlink-to-outside during that gap is caught here. `unlink` itself never
+  // follows the final component (it removes a symlinked leaf, not its target), so
+  // the residual is only an ancestor swapped between THIS check and the unlink —
+  // not closable in portable Node (needs Linux `openat2`/`RESOLVE_BENEATH`),
+  // accepted under the single-owner local threat model (same residual the
+  // memory-index scan/write paths document).
+  await rejectSymlinkAt(entitiesRoot)
+  await rejectSymlinkAt(targetDir)
+  await rejectSymlinkAt(targetPath)
   try {
     await fs.unlink(targetPath)
   } catch (err) {
