@@ -75,6 +75,34 @@ export {
   type CalendarPayloadSource,
   type EmailPayloadSource,
 } from './compose-payload.ts'
+// RB3 — the consolidation / reflect batch pass (perfect-recall lane). The pass
+// logic + its Jaccard dedup + reserved-kind extraction live here; the composer
+// (open/wiring/memory.ts) drives it on a `SupervisedLoop`, gated on the shared
+// `NEUTRON_PERFECT_RECALL` flag so it NEVER arms — and costs zero tokens — by default.
+export {
+  runReflectPass,
+  DEFAULT_REFLECT_INTERVAL_MS,
+  DEFAULT_REFLECT_WATCHDOG_MS,
+  DEFAULT_MAX_RESYNTH_PAGES,
+  DEFAULT_MAX_RESERVED_DIGEST_CHARS,
+  DEFAULT_RESYNTH_MIN_TIMELINE_ROWS,
+  type ReflectPassDeps,
+  type ReflectReport,
+} from './reflect/reflect-pass.ts'
+export {
+  clusterNearDuplicates,
+  jaccard,
+  tokenize,
+  DEFAULT_JACCARD_THRESHOLD,
+  type DedupCandidate,
+} from './reflect/jaccard.ts'
+export {
+  composeReservedPrompt,
+  parseReservedExtraction,
+  RESERVED_EXTRACTION_PROMPT,
+  type ReservedEntity,
+  type ReservedKind,
+} from './reflect/reserved-kinds.ts'
 
 /** Input the chat-bridge hands scribe after a real user turn. */
 export interface UserTurnInput {

@@ -23,6 +23,13 @@ import { createGbrainSyncStateStore } from '@neutronai/gateway/wiring/gbrain-syn
 import { resolveOnboardingOpenAiKey } from '@neutronai/gateway/wiring/resolve-onboarding-openai-key.ts'
 import { createScribe, type Scribe, type UserTurnInput } from '@neutronai/scribe/index.ts'
 import { createState, defaultStatePath } from '@neutronai/scribe/scribe-budget.ts'
+import {
+  runReflectPass,
+  DEFAULT_REFLECT_INTERVAL_MS,
+  type ReflectPassDeps,
+} from '@neutronai/scribe/index.ts'
+import { writeEntity as defaultWriteEntity } from '@neutronai/runtime/entity-writer.ts'
+import { SupervisedLoop } from '@neutronai/loop'
 import { mountCoresScribeFanOut } from '@neutronai/gateway/cores/mount-cores-scribe-fan-out.ts'
 import { createReflection, type Reflection } from '@neutronai/reflection/index.ts'
 import { NexusStore } from '@neutronai/gateway/nexus/nexus-store.ts'
@@ -76,6 +83,16 @@ export interface WiredMemory {
    * producers write through one store. Torn down via `cleanups`.
    */
   nexus: NexusStore | null
+  /**
+   * RB3 ([BEHAVIOR]) — the scheduled "reflect" consolidation loop, behind the
+   * shared `NEUTRON_PERFECT_RECALL` flag. `null` when the flag is off (the
+   * default) → the loop NEVER arms and NO LLM cost is ever incurred. When on, the
+   * composer registers `describe()` into the LoopRegistry, `start()`s it, and
+   * `stop()`s it on shutdown (register-before-start, quiescing stop). A
+   * `SupervisedLoop` whose tick runs `runReflectPass` (dedup + re-synthesis +
+   * reserved-kind extraction) once per `DEFAULT_REFLECT_INTERVAL_MS`.
+   */
+  reflectLoop: SupervisedLoop | null
   /** Teardown hooks (GBrain close, Cores fan-out stop) in registration order. */
   cleanups: Array<() => void>
 }
@@ -305,6 +322,62 @@ export function wireMemory(ctx: OpenWiringContext): WiredMemory {
     })
   }
 
+  // ── RB3 ([BEHAVIOR]) — the scheduled "reflect" consolidation loop ──────────
+  // The tiered-write autonomy uplift: deterministic work runs on every save
+  // (Scribe/entity-writer, above — untouched), and the LLM-heavy consolidation
+  // is confined to THIS scheduled batch. Behind the shared perfect-recall flag
+  // so it NEVER arms — and spends ZERO tokens — by default. When on, a
+  // `SupervisedLoop` runs `runReflectPass` (Jaccard dedup + timeline
+  // re-synthesis + reserved meeting/project/original extraction) once per
+  // `DEFAULT_REFLECT_INTERVAL_MS`. The composer registers/starts/stops it
+  // (register-before-start; quiescing stop) exactly like the other loops.
+  //
+  // A DEDICATED ephemeral `cc-reflect-*` substrate isolates the batch LLM cost
+  // from the chat REPL (same shape as `cc-scribe-*` / `cc-reflection-*`). Gated
+  // on `llmPool`: an LLM-less box gets a dedup-only pass (no substrate → steps 2
+  // and 3 are skipped), so the flag still degrades gracefully. `immediate:false`
+  // means the first tick is one interval away — a flagged boot never fires an
+  // LLM call synchronously at startup.
+  let reflectLoop: SupervisedLoop | null = null
+  if (isPerfectRecallEnabled(env)) {
+    const reflectSubstrate =
+      llmPool !== null
+        ? buildLlmCallSubstrate({
+            pool: llmPool,
+            substrate_instance_id: `cc-reflect-${owner_handle}`,
+            cwd: owner_home,
+            owner_handle,
+            user_id: OWNER_USER_ID,
+            project_slug,
+            skip_permissions: true,
+            ephemeral: true,
+            ...(substrateFactory !== undefined ? { substrateFactory } : {}),
+          })
+        : null
+    const reflectDeps: ReflectPassDeps = {
+      ownerDataDir: owner_home,
+      ownSlug: project_slug,
+      // Same cast the scribe path uses: the real writer satisfies the minimal
+      // `WriteEntityFn` surface (an extra optional field on the input is fine).
+      writeEntity: defaultWriteEntity as unknown as ReflectPassDeps['writeEntity'],
+      syncHook: gbrainSyncHook,
+      // Best-effort brain-side removal of a merged-away loser page, through the
+      // backend-neutral `MemoryStore.delete` seam (no gbrain internals leak here).
+      deletePage: (slug: string): Promise<void> =>
+        gbrainMemory.memoryStore.delete({ id: slug }).then(() => undefined),
+      ...(reflectSubstrate !== null ? { substrate: reflectSubstrate } : {}),
+    }
+    reflectLoop = new SupervisedLoop({
+      name: 'reflect-consolidation',
+      intervalMs: DEFAULT_REFLECT_INTERVAL_MS,
+      tick: async (): Promise<void> => {
+        await runReflectPass(reflectDeps)
+      },
+    })
+    // NOTE: register/start/stop is owned by the composer (it holds the
+    // LoopRegistry + realmode cleanups), matching the lifecycle-watchdog pattern.
+  }
+
   return {
     gbrainMemory,
     gbrainSyncHook,
@@ -314,6 +387,7 @@ export function wireMemory(ctx: OpenWiringContext): WiredMemory {
     nexus,
     memoryIndexRead,
     setMemoryIndexWorkHandles,
+    reflectLoop,
     cleanups,
   }
 }

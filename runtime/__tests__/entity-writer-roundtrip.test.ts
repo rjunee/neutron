@@ -22,6 +22,7 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import {
   writeEntity,
+  deleteEntity,
   type EntityWriteInput,
   _renderEntityPage,
   _extractCompiledTruth,
@@ -95,6 +96,176 @@ describe('runtime/entity-writer — roundtrip', () => {
     const peopleDir = resolve(ownerDir, 'entities', 'people')
     const entries = await fs.readdir(peopleDir)
     expect(entries.filter((e) => e.endsWith('.tmp'))).toEqual([])
+  })
+
+  describe('RB3 optimistic-concurrency precondition', () => {
+    test('ifBodyEquals mismatch → conflict, no write (concurrent change preserved)', async () => {
+      const first = await writeEntity(aliceInput())
+      const onDisk = await fs.readFile(first.path, 'utf8')
+      // Attempt a write whose precondition expects a DIFFERENT (stale) body.
+      const stale = aliceInput()
+      stale.body.compiledTruth = '## State\n\nStale rewrite.\n'
+      stale.precondition = { ifBodyEquals: 'NOT THE CURRENT BODY' }
+      const out = await writeEntity(stale)
+      expect(out.conflict).toBe(true)
+      expect(out.changed).toBe(false)
+      // The on-disk body is byte-untouched.
+      expect(await fs.readFile(first.path, 'utf8')).toBe(onDisk)
+    })
+
+    test('ifBodyEquals match → the write commits', async () => {
+      const first = await writeEntity(aliceInput())
+      const current = await fs.readFile(first.path, 'utf8')
+      const upd = aliceInput()
+      upd.body.compiledTruth = '## State\n\nUpdated.\n'
+      upd.precondition = { ifBodyEquals: current }
+      const out = await writeEntity(upd)
+      expect(out.conflict).toBeFalsy()
+      expect(out.changed).toBe(true)
+      expect(await fs.readFile(first.path, 'utf8')).toContain('Updated.')
+    })
+
+    test('ifBodyEquals:null asserts absence → conflict when the page already exists', async () => {
+      await writeEntity(aliceInput())
+      const fresh = aliceInput()
+      fresh.precondition = { ifBodyEquals: null }
+      const out = await writeEntity(fresh)
+      expect(out.conflict).toBe(true)
+      expect(out.changed).toBe(false)
+    })
+
+    test('an array timelineAppend folds every row in ONE write (deduped)', async () => {
+      const input = aliceInput()
+      input.body.timelineAppend = [
+        { ts: '2026-04-11T00:00:00Z', source: 's', body: 'row-A' },
+        { ts: '2026-04-12T00:00:00Z', source: 's', body: 'row-B' },
+        { ts: '2026-04-11T00:00:00Z', source: 's', body: 'row-A' }, // dup → folded once
+      ]
+      const out = await writeEntity(input)
+      const onDisk = await fs.readFile(out.path, 'utf8')
+      expect(onDisk).toContain('row-A')
+      expect(onDisk).toContain('row-B')
+      // Newest-first ordering: row-B (Apr 12) precedes row-A (Apr 11).
+      expect(onDisk.indexOf('row-B')).toBeLessThan(onDisk.indexOf('row-A'))
+      // The duplicate row-A appears exactly once.
+      expect(onDisk.split('row-A').length - 1).toBe(1)
+    })
+  })
+
+  describe('RB3 deleteEntity (atomic guarded delete)', () => {
+    test('unconditional delete removes the page', async () => {
+      const first = await writeEntity(aliceInput())
+      const out = await deleteEntity({ ownerDataDir: ownerDir, kind: 'person', slug: 'alice-founder' })
+      expect(out.deleted).toBe(true)
+      expect(out.conflict).toBe(false)
+      await expect(fs.readFile(first.path, 'utf8')).rejects.toThrow()
+    })
+
+    test('guarded delete: matching precondition removes; mismatch preserves', async () => {
+      const first = await writeEntity(aliceInput())
+      const current = await fs.readFile(first.path, 'utf8')
+      // Mismatch → conflict, file preserved byte-for-byte.
+      const bad = await deleteEntity({
+        ownerDataDir: ownerDir,
+        kind: 'person',
+        slug: 'alice-founder',
+        precondition: { ifBodyEquals: 'STALE' },
+      })
+      expect(bad).toMatchObject({ deleted: false, conflict: true })
+      expect(await fs.readFile(first.path, 'utf8')).toBe(current)
+      // Match → deleted.
+      const good = await deleteEntity({
+        ownerDataDir: ownerDir,
+        kind: 'person',
+        slug: 'alice-founder',
+        precondition: { ifBodyEquals: current },
+      })
+      expect(good).toMatchObject({ deleted: true, conflict: false })
+      await expect(fs.readFile(first.path, 'utf8')).rejects.toThrow()
+    })
+
+    test('absent target → deleted:true (idempotent end state)', async () => {
+      const out = await deleteEntity({ ownerDataDir: ownerDir, kind: 'person', slug: 'never-existed' })
+      expect(out).toMatchObject({ deleted: true, conflict: false })
+    })
+
+    test('invalid kind / slug are rejected', async () => {
+      await expect(
+        deleteEntity({ ownerDataDir: ownerDir, kind: 'bogus' as 'person', slug: 'x' }),
+      ).rejects.toThrow(/unknown kind/)
+      await expect(
+        deleteEntity({ ownerDataDir: ownerDir, kind: 'person', slug: '../escape' }),
+      ).rejects.toThrow(/slug must match/)
+    })
+
+    test('a symlinked leaf is rejected (never followed)', async () => {
+      const dir = resolve(ownerDir, 'entities', 'people')
+      await fs.mkdir(dir, { recursive: true })
+      const outside = join(ownerDir, 'outside-secret.md')
+      await fs.writeFile(outside, 'secret')
+      await fs.symlink(outside, join(dir, 'linky.md'))
+      await expect(
+        deleteEntity({ ownerDataDir: ownerDir, kind: 'person', slug: 'linky' }),
+      ).rejects.toThrow(/symlink/)
+      // The outside file is untouched.
+      expect(await fs.readFile(outside, 'utf8')).toBe('secret')
+    })
+
+    test('a symlinked kind-dir (within-tree redirect) is rejected', async () => {
+      const outsideDir = join(ownerDir, 'outside-people')
+      await fs.mkdir(outsideDir, { recursive: true })
+      await fs.writeFile(join(outsideDir, 'victim.md'), 'victim')
+      await fs.mkdir(resolve(ownerDir, 'entities'), { recursive: true })
+      // entities/people -> outside-people (an ancestor redirect).
+      await fs.symlink(outsideDir, resolve(ownerDir, 'entities', 'people'))
+      await expect(
+        deleteEntity({ ownerDataDir: ownerDir, kind: 'person', slug: 'victim' }),
+      ).rejects.toThrow(/symlink/)
+      expect(await fs.readFile(join(outsideDir, 'victim.md'), 'utf8')).toBe('victim')
+    })
+
+    test('a symlinked entities-root is rejected', async () => {
+      const outsideRoot = join(ownerDir, 'outside-entities')
+      await fs.mkdir(join(outsideRoot, 'people'), { recursive: true })
+      await fs.writeFile(join(outsideRoot, 'people', 'victim.md'), 'victim')
+      // entities -> outside-entities.
+      await fs.symlink(outsideRoot, resolve(ownerDir, 'entities'))
+      await expect(
+        deleteEntity({ ownerDataDir: ownerDir, kind: 'person', slug: 'victim' }),
+      ).rejects.toThrow(/symlink/)
+      expect(await fs.readFile(join(outsideRoot, 'people', 'victim.md'), 'utf8')).toBe('victim')
+    })
+
+    test('a same-key write and delete serialize — the write is never torn away', async () => {
+      const seeded = await writeEntity(aliceInput())
+      const base = await fs.readFile(seeded.path, 'utf8')
+      const upd = aliceInput()
+      upd.body.compiledTruth = '## State\n\nUpdated.\n'
+      // Fire concurrently on the SAME key: a full-replacement write (→"Updated")
+      // and a GUARDED delete whose precondition is the SEEDED body. The per-key
+      // lock forces one of two clean orders — never an interleave:
+      //   • delete-first: precondition matches → page removed → the write then
+      //     RECREATES it ("Updated"). Page exists.
+      //   • write-first: page is "Updated" → the delete's precondition (seeded
+      //     body) MISMATCHES → conflict, no unlink. Page exists.
+      // Either way the page EXISTS afterwards with the written content. Without the
+      // shared lock, the delete could read the seeded body then unlink the page the
+      // write just created → page GONE. So "page exists + Updated" proves serialization.
+      const [, del] = await Promise.all([
+        writeEntity(upd),
+        deleteEntity({
+          ownerDataDir: ownerDir,
+          kind: 'person',
+          slug: 'alice-founder',
+          precondition: { ifBodyEquals: base },
+        }),
+      ])
+      const onDisk = await fs.readFile(seeded.path, 'utf8') // throws if the page was torn away
+      expect(onDisk).toContain('Updated.')
+      // The delete either removed-then-write-recreated, or conflicted — never a
+      // silent success that dropped the write.
+      expect(del.deleted === true || del.conflict === true).toBe(true)
+    })
   })
 
   test('rendering is deterministic: same input → same bytes (lexicographic frontmatter)', () => {

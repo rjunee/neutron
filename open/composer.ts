@@ -1039,8 +1039,32 @@ export function buildOpenGraphComposer(
       nexus: nexusStore,
       memoryIndexRead,
       setMemoryIndexWorkHandles,
+      reflectLoop,
       cleanups: memoryCleanups,
     } = wireMemory(wiringCtx)
+
+    // RB3 ([BEHAVIOR]) — the scheduled reflect-consolidation loop, when the
+    // perfect-recall flag is on (`wireMemory` returns null otherwise, so this is
+    // a no-op by default and the loop NEVER arms).
+    //
+    // Its quiescing `stop()` cleanup is registered HERE, BEFORE the memory
+    // cleanups, so shutdown (forward-order drain) QUIESCES an in-flight reflect
+    // tick before `gbrainMemory.close()` begins — otherwise a tick mid-`syncHook`
+    // / `deletePage` could run against a closing GBrain (Codex RB3). But the loop
+    // is NOT started here: the actual `register`+`start` is DEFERRED to the very
+    // end of the composition (see `reflectLoop.start()` below), so a later
+    // composition failure (e.g. a validation throw) can't leave a running interval
+    // that boot() never receives a cleanup for. `stop()` on a not-yet-started loop
+    // is a safe no-op, so registering the cleanup early is harmless.
+    if (reflectLoop !== null) {
+      realmodeCleanups.push(async () => {
+        try {
+          await reflectLoop.stop()
+        } catch {
+          // best-effort shutdown cleanup — stop() never rejects
+        }
+      })
+    }
     for (const cleanup of memoryCleanups) realmodeCleanups.push(cleanup)
 
     // RC2 ([BEHAVIOR]) — the tick loop's `on_run_terminal` = the skill-forge audit
@@ -3333,6 +3357,25 @@ export function buildOpenGraphComposer(
       // so an in-flight lifecycle tick fully drains before the DB closes and can
       // never persist / prune against a closing database (round-7 High 2).
       realmodeCleanups.push(() => lifecycleWatchdog.stop())
+    }
+
+    // RB3 ([BEHAVIOR]) — ARM the reflect-consolidation loop LAST, after every
+    // failure-prone composition step above has succeeded, so a composer throw can
+    // never leak a running interval (its quiescing stop() cleanup was already
+    // registered before the memory cleanups, for shutdown ordering). Register-
+    // before-start (dup-name → throw at boot, before the timer arms). Null (flag
+    // off) → no-op.
+    if (reflectLoop !== null) {
+      loopRegistry.register(reflectLoop.describe())
+      // Failure-atomic: if arming the timer throws, STOP the (partially-started)
+      // loop before re-throwing so composition never rejects with a live/dangling
+      // reflect timer — same discipline as the dispatch lifecycle watchdog above.
+      try {
+        reflectLoop.start()
+      } catch (err) {
+        await reflectLoop.stop()
+        throw err
+      }
     }
 
     return {

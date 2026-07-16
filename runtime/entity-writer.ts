@@ -48,7 +48,7 @@
  * no I/O outside the file write, no error surface change.
  */
 
-import { promises as fs } from 'node:fs'
+import { promises as fs, constants as fsConstants } from 'node:fs'
 import { resolve, sep } from 'node:path'
 import { extractTypedLinks, type Triple } from './auto-link.ts'
 import {
@@ -98,11 +98,13 @@ export interface EntityWriteBody {
    */
   compiledTruth: string
   /**
-   * One new timeline entry to merge. If a row with the same `(ts, source,
-   * body)` already exists on disk, the merge is a no-op. The writer keeps
-   * timeline rows in reverse-chronological order (newest first).
+   * New timeline entry (or entries) to merge. If a row with the same `(ts,
+   * source, body)` already exists on disk, that row is a no-op. The writer keeps
+   * timeline rows in reverse-chronological order (newest first). An ARRAY lets a
+   * caller fold several rows in ONE atomic write (e.g. the reflect dedup merge
+   * moving a loser's whole timeline onto the survivor without N separate writes).
    */
-  timelineAppend: TimelineEntry
+  timelineAppend: TimelineEntry | readonly TimelineEntry[]
 }
 
 export interface EntityWriteInput {
@@ -134,6 +136,25 @@ export interface EntityWriteInput {
    * in this trident; a later cleanup removes it.
    */
   allowPersistOrigins?: ReadonlyArray<string>
+  /**
+   * OPTIMISTIC-CONCURRENCY precondition (RB3). When set, the write is committed
+   * ONLY if the current on-disk body still matches the expectation — the check
+   * runs INSIDE the per-(kind,slug) write lock, after the writer's own read and
+   * before the render/rename, so it is ATOMIC with respect to every other
+   * `writeEntity` on the same key. A mismatch returns `{ changed: false,
+   * conflict: true }` WITHOUT writing (never clobbers the concurrent change).
+   * Absent → today's unconditional behaviour.
+   *
+   * This is what lets a long-running batch (the reflect pass) full-replace a
+   * page's compiled-truth safely: it snapshots the raw body, does its
+   * (LLM / merge) work, then writes with `ifBodyEquals: <snapshot>` — a user
+   * write that landed meanwhile flips the write to a no-op conflict.
+   */
+  precondition?: {
+    /** Commit only if the current on-disk body EXACTLY equals this string;
+     *  `null` asserts the page must NOT exist yet (guards a fresh-compose). */
+    readonly ifBodyEquals: string | null
+  }
 }
 
 export interface EntityWriteOutput {
@@ -143,6 +164,12 @@ export interface EntityWriteOutput {
   newLinks: Triple[]
   /** `false` when the rendered body matches what's already on disk. */
   changed: boolean
+  /**
+   * RB3 — `true` when a `precondition` was supplied and the current on-disk body
+   * did NOT match it, so the write was SKIPPED to avoid clobbering a concurrent
+   * change. `changed` is false in this case. Absent/false otherwise.
+   */
+  conflict?: boolean
 }
 
 /**
@@ -263,6 +290,106 @@ export async function writeEntity(
   )
 }
 
+export interface DeleteEntityInput {
+  ownerDataDir: string
+  kind: EntityKind
+  slug: string
+  /**
+   * Optimistic-concurrency guard: delete ONLY if the current on-disk body still
+   * equals this exactly. Runs INSIDE the same per-(kind,slug) lock as
+   * `writeEntity`, so no concurrent same-key write can interleave between the
+   * check and the unlink — the delete is atomic vs writes (RB3). Absent →
+   * unconditional delete.
+   */
+  precondition?: { ifBodyEquals: string }
+}
+
+export interface DeleteEntityOutput {
+  path: string
+  /** True when the page was removed (or was already absent). */
+  deleted: boolean
+  /** True when a `precondition` was supplied but the current body didn't match
+   *  (nothing deleted). */
+  conflict: boolean
+}
+
+/**
+ * RB3 — atomically delete an entity page under the SAME per-(kind,slug) write
+ * lock as `writeEntity`, with an optional body precondition. Because it shares
+ * the lock map, a concurrent `writeEntity` on the same key CANNOT land between
+ * the precondition read and the unlink — so a fresh write is never silently
+ * deleted (the reflect dedup loser-deletion race). Path is symlink-contained
+ * exactly like the write path. An already-absent file is `deleted: true` (the
+ * desired end state); a precondition mismatch is `conflict: true, deleted: false`.
+ */
+export async function deleteEntity(input: DeleteEntityInput): Promise<DeleteEntityOutput> {
+  if (!ENTITY_KINDS.includes(input.kind)) {
+    throw new EntityWriteError('invalid_kind', `unknown kind: ${input.kind}`)
+  }
+  if (typeof input.slug !== 'string' || !SLUG_REGEX.test(input.slug)) {
+    throw new EntityWriteError('invalid_slug', `slug must match [a-z0-9][a-z0-9-]*, got "${input.slug}"`)
+  }
+  return withWriteLock(`${input.kind}/${input.slug}`, () => deleteEntityLocked(input))
+}
+
+async function deleteEntityLocked(input: DeleteEntityInput): Promise<DeleteEntityOutput> {
+  const entitiesRoot = resolve(input.ownerDataDir, 'entities')
+  const targetDir = resolve(entitiesRoot, KIND_TO_DIR[input.kind])
+  const targetPath = resolve(targetDir, `${input.slug}.md`)
+  if (!isUnder(entitiesRoot, targetPath)) {
+    throw new EntityWriteError('path_escape', `target path escapes entities root: ${targetPath}`)
+  }
+  // Containment (within-tree redirects) — matches `writeEntity`. NOTE (as for
+  // `writeEntity`): `ownerDataDir` is the TRUSTED caller-supplied root and is
+  // path-resolved (not realpath'd), so a symlinked `ownerDataDir` / an ancestor
+  // ABOVE it is followed — that is the single-owner local threat model, not an
+  // escape. Callers that accept an untrusted `ownerDataDir` must canonicalize it
+  // first (the reflect pass scans under a realpath-contained root before calling this).
+  await rejectSymlinkAt(entitiesRoot)
+  await rejectSymlinkAt(targetDir)
+
+  // Read the body for the precondition through an `O_NOFOLLOW` fd (never follows a
+  // symlinked LEAF — a `people/alice.md -> /outside` swap fails to open). Reading
+  // via the HELD fd closes the leaf check→read swap for the read itself.
+  let existing: string | undefined
+  try {
+    const fh = await fs.open(targetPath, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW)
+    try {
+      existing = await fh.readFile('utf8')
+    } finally {
+      await fh.close().catch(() => undefined)
+    }
+  } catch (err) {
+    if (isENOENT(err)) return { path: targetPath, deleted: true, conflict: false } // already gone
+    // ELOOP / symlinked leaf → refuse (never delete through a leaf symlink target).
+    if ((err as NodeJS.ErrnoException).code === 'ELOOP') {
+      throw new EntityWriteError('symlink_rejected', `path is a symlink: ${targetPath}`)
+    }
+    throw new EntityWriteError('read_failed', `failed to read ${targetPath}: ${errMsg(err)}`)
+  }
+  if (input.precondition !== undefined && existing !== input.precondition.ifBodyEquals) {
+    return { path: targetPath, deleted: false, conflict: true }
+  }
+  // TOCTOU: the precondition read is an awaited gap, so RE-VALIDATE the ancestor
+  // dirs IMMEDIATELY before the unlink — a swap of `entities/` or `entities/<kind>`
+  // to a symlink-to-outside during that gap is caught here. `unlink` itself never
+  // follows the final component (it removes a symlinked leaf, not its target), so
+  // the residual is only an ancestor swapped between THIS check and the unlink —
+  // not closable in portable Node (needs Linux `openat2`/`RESOLVE_BENEATH`),
+  // accepted under the single-owner local threat model (same residual the
+  // memory-index scan/write paths document).
+  await rejectSymlinkAt(entitiesRoot)
+  await rejectSymlinkAt(targetDir)
+  await rejectSymlinkAt(targetPath)
+  try {
+    await fs.unlink(targetPath)
+  } catch (err) {
+    if (isENOENT(err)) return { path: targetPath, deleted: true, conflict: false }
+    throw new EntityWriteError('write_failed', `failed to unlink ${targetPath}: ${errMsg(err)}`)
+  }
+  return { path: targetPath, deleted: true, conflict: false }
+}
+
 async function writeEntityLocked(
   input: EntityWriteInput,
   deps: WriteEntityDeps,
@@ -303,8 +430,23 @@ async function writeEntityLocked(
     }
   }
 
-  const existingTimeline = existing !== undefined ? extractTimeline(existing) : []
-  const mergedTimeline = mergeTimeline(existingTimeline, body.timelineAppend)
+  // RB3 optimistic-concurrency precondition — checked HERE, inside the write lock,
+  // against the body we just read, so it is atomic vs every other same-key write.
+  // A mismatch aborts WITHOUT writing (never clobbers a concurrent change).
+  if (input.precondition !== undefined) {
+    const { ifBodyEquals } = input.precondition
+    const matches = ifBodyEquals === null ? existing === undefined : existing === ifBodyEquals
+    if (!matches) {
+      return { path: targetPath, newLinks: [], changed: false, conflict: true }
+    }
+  }
+
+  // Fold one OR many timeline rows in a single write (dedup on ts/source/body).
+  const appends: readonly TimelineEntry[] = Array.isArray(body.timelineAppend)
+    ? body.timelineAppend
+    : [body.timelineAppend as TimelineEntry]
+  let mergedTimeline = existing !== undefined ? extractTimeline(existing) : []
+  for (const entry of appends) mergedTimeline = mergeTimeline(mergedTimeline, entry)
   const rendered = renderEntityPage({
     frontmatter: body.frontmatter,
     compiledTruth: body.compiledTruth,
@@ -427,7 +569,10 @@ function validateInput(input: EntityWriteInput): void {
     )
   }
   validateFrontmatter(input.body.frontmatter, input.kind, input.slug)
-  validateTimelineEntry(input.body.timelineAppend)
+  const appends = Array.isArray(input.body.timelineAppend)
+    ? input.body.timelineAppend
+    : [input.body.timelineAppend as TimelineEntry]
+  for (const entry of appends) validateTimelineEntry(entry)
   if (typeof input.body.compiledTruth !== 'string') {
     throw new EntityWriteError(
       'invalid_frontmatter',
