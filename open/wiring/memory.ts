@@ -344,9 +344,9 @@ export function wireMemory(ctx: OpenWiringContext): WiredMemory {
       llmPool !== null
         ? buildLlmCallSubstrate({
             pool: llmPool,
-            substrate_instance_id: `cc-reflect-${internal_handle}`,
+            substrate_instance_id: `cc-reflect-${owner_handle}`,
             cwd: owner_home,
-            internal_handle,
+            owner_handle,
             user_id: OWNER_USER_ID,
             project_slug,
             skip_permissions: true,
