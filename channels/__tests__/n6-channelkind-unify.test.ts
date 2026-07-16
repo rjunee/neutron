@@ -180,7 +180,7 @@ describe('ButtonStore channel_kind persistence', () => {
 
     // Returned choice is canonical...
     expect(result.delivered).toBe(true)
-    expect(result.choice.channel_kind).toBe('app_socket')
+    expect(result.choice?.channel_kind).toBe('app_socket')
 
     // ...and so is the persisted column.
     const row = db
@@ -229,8 +229,12 @@ describe('ButtonStore channel_kind persistence', () => {
     })
 
     // Rejected at the trust boundary — the prompt is NOT resolved and the
-    // corrupt token never reaches resolution_channel_kind.
+    // corrupt token never reaches resolution_channel_kind. The result honestly
+    // omits `choice` (no valid ButtonChoice can be built) and surfaces the raw
+    // token as `rejected_channel_kind` for diagnostics only.
     expect(result.delivered).toBe(false)
+    expect(result.choice).toBeUndefined()
+    expect(result.rejected_channel_kind).toBe('slack')
     const row = db
       .prepare<{ resolved_at: number | null; resolution_channel_kind: string | null }, [string]>(
         `SELECT resolved_at, resolution_channel_kind FROM button_prompts WHERE prompt_id = ?`,

@@ -46,8 +46,16 @@ export interface RouteChoiceResult {
   /** True when the choice was applied to a prompt; false on unknown prompt_id
    *  or on a non-matching value when allow_freeform=false. */
   delivered: boolean
-  /** Always populated — even on `delivered:false`, callers may want to log. */
-  choice: ButtonChoice
+  /** Populated whenever the channel is a valid `ChannelKindForButton` — even on
+   *  `delivered:false` (unknown prompt / non-matching value), callers may want to
+   *  log it. ABSENT only when the ingress channel itself is invalid/corrupt (no
+   *  honest `ButtonChoice` can be built); `rejected_channel_kind` carries the raw
+   *  value in that case. */
+  choice?: ButtonChoice
+  /** The raw, unrecognized channel token when the ingress channel was rejected
+   *  as invalid (N6 trust boundary). Present iff `choice` is absent. For
+   *  diagnostics only — never persisted. */
+  rejected_channel_kind?: string
   /** Populated when `delivered: true`. Absent on `delivered:false` so a caller
    *  using `result.prompt.body` defensively crashes loudly. */
   prompt?: import('./button-primitive.ts').ButtonPrompt
@@ -88,15 +96,15 @@ export class DefaultButtonRouter implements ButtonRouter {
     // non-Telegram channel).
     const channel_kind = normalizeChannelKindForButton(input.channel_kind)
     if (channel_kind === null) {
-      const choice: ButtonChoice = {
-        prompt_id: input.prompt_id,
-        choice_value: input.raw_value,
-        chosen_at,
-        speaker_user_id: input.speaker_user_id,
-        channel_kind: input.channel_kind,
+      // The ingress channel is unsupported/corrupt: we cannot honestly build a
+      // `ButtonChoice` (its `channel_kind` is `ChannelKindForButton`), so omit
+      // `choice` entirely and surface the raw token for diagnostics only. Reject
+      // before any store read/write so a bogus value never enters the DB.
+      return {
+        delivered: false,
+        was_new: false,
+        rejected_channel_kind: String(input.channel_kind),
       }
-      if (input.freeform_text !== undefined) choice.freeform_text = input.freeform_text
-      return { delivered: false, choice, was_new: false }
     }
 
     // Pass the observation time so the get() expiry check uses the same

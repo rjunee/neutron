@@ -124,7 +124,7 @@ function makeCallbackHandler() {
           // surfaces the ButtonChoice HERE. The engine.advance phase-walk that
           // used to consume it is deleted by K11b1; the choice-delivery
           // contract lives entirely in the router/store.
-          receivedChoiceValues.push(result.choice.choice_value)
+          if (result.choice !== undefined) receivedChoiceValues.push(result.choice.choice_value)
         }
         return result
       },
@@ -232,7 +232,7 @@ describe('button-primitive cross-channel — app-socket round-trip (S5)', () => 
         channel_kind: 'app_socket',
         ...(parsed.freeform_text !== undefined ? { freeform_text: parsed.freeform_text } : {}),
       })
-      if (result.delivered) {
+      if (result.delivered && result.choice !== undefined) {
         appSocketChoice = result.choice
       }
     })
@@ -336,7 +336,8 @@ describe('button-primitive cross-channel — app-socket round-trip (S5)', () => 
       speaker_user_id: c.speaker_user_id,
       ...(c.freeform_text !== undefined ? { freeform_text: c.freeform_text } : {}),
     })
-    expect(norm(tgResult.choice)).toEqual(norm(asResult.choice))
+    // Both are valid-channel (delivered) routes, so choice is always present here.
+    expect(norm(tgResult.choice!)).toEqual(norm(asResult.choice!))
 
     server.close()
     dbA.close()
