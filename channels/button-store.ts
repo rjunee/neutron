@@ -532,13 +532,22 @@ export class ButtonStore {
    * caller can diff inputs vs persisted.
    */
   async resolve(input: ResolveInput): Promise<ResolveResult> {
-    const choice = input.choice
-    if (typeof choice.prompt_id !== 'string' || choice.prompt_id.length === 0) {
+    const rawChoice = input.choice
+    if (typeof rawChoice.prompt_id !== 'string' || rawChoice.prompt_id.length === 0) {
       throw new ButtonStoreError(
         'invalid_prompt',
         `choice.prompt_id required`,
       )
     }
+    // N6 dual-read (canonicalize once) — map a legacy hyphen 'app-socket' handed
+    // in by a runtime caller onto the canonical 'app_socket' BEFORE both the
+    // persist and the return, so `resolution_channel_kind` and the returned
+    // `ResolveResult.choice` (contract: "choice as persisted") never disagree.
+    // An unrecognized token is preserved verbatim (provenance fidelity).
+    const choice: ButtonChoice =
+      normalizeChannelKindForButton(rawChoice.channel_kind) === null
+        ? rawChoice
+        : { ...rawChoice, channel_kind: normalizeChannelKindForButton(rawChoice.channel_kind) as ChannelKindForButton }
     return await this.db.transaction(async (tx) => {
       const row = tx
         .prepare<PromptRow, [string]>(
@@ -604,11 +613,8 @@ export class ButtonStore {
           choice.choice_value,
           choice.freeform_text ?? null,
           choice.speaker_user_id,
-          // N6 dual-read (persistence boundary) — normalize before the write so
-          // a legacy hyphen token handed in by a runtime caller lands canonical
-          // in resolution_channel_kind. Falls back to the raw value for an
-          // unrecognized token rather than nulling a caller-supplied kind.
-          normalizeChannelKindForButton(choice.channel_kind) ?? choice.channel_kind,
+          // `choice` was already canonicalized at the top of resolve().
+          choice.channel_kind,
           choice.prompt_id,
         ],
       )

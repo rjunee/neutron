@@ -168,6 +168,30 @@ describe('ButtonStore channel_kind persistence', () => {
     expect(row?.resolution_channel_kind).toBe('app_socket')
   })
 
+  test('(c-direct) resolve() canonicalizes a legacy token for BOTH the return + the column', async () => {
+    const prompt = { prompt_id: crypto.randomUUID(), body: 'q', options: [{ label: 'A', body: 'a', value: 'a' }], allow_freeform: false }
+    await store.emit(prompt, { topic_id: 'topic-direct' })
+    const res = await store.resolve({
+      choice: {
+        prompt_id: prompt.prompt_id,
+        choice_value: 'a',
+        chosen_at: now + 1,
+        speaker_user_id: 'user-d',
+        channel_kind: 'app-socket' as unknown as 'app_socket', // legacy token straight to the store
+      },
+    })
+    // ResolveResult.choice ("choice as persisted") is canonical...
+    expect(res.was_new).toBe(true)
+    expect(res.choice.channel_kind).toBe('app_socket')
+    // ...and matches the persisted column exactly (no return/column disagreement).
+    const row = db
+      .prepare<{ resolution_channel_kind: string | null }, [string]>(
+        `SELECT resolution_channel_kind FROM button_prompts WHERE prompt_id = ?`,
+      )
+      .get(prompt.prompt_id)
+    expect(row?.resolution_channel_kind).toBe('app_socket')
+  })
+
   test('(d-reject) an unknown runtime token is rejected at ingress + never persisted', async () => {
     const router = new DefaultButtonRouter({ store, now: () => now })
     const prompt = { prompt_id: crypto.randomUUID(), body: 'q', options: [{ label: 'A', body: 'a', value: 'a' }], allow_freeform: true }
