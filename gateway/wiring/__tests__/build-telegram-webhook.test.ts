@@ -1,3 +1,4 @@
+import { asOwnerHandle } from '@neutronai/persistence/index.ts'
 /**
  * Sprint 19 Phase 4 — buildTelegramWebhookSurface factory tests.
  *
@@ -34,7 +35,7 @@ let dataDir: string
 let db: ProjectDb
 let secrets: SecretsStore
 
-const OWNER = 'alice'
+const OWNER = asOwnerHandle('alice')
 
 beforeEach(() => {
   workdir = mkdtempSync(join(tmpdir(), 'neutron-build-tg-webhook-'))

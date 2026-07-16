@@ -31,7 +31,7 @@
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
-import { emitSystemEvent, type ProjectDb } from '@neutronai/persistence/index.ts'
+import { asOwnerHandle, emitSystemEvent, type ProjectDb } from '@neutronai/persistence/index.ts'
 import type { ToolRegistry } from '@neutronai/tools/registry.ts'
 import type {
   ApprovalPolicy,
@@ -181,7 +181,7 @@ export async function installBundledCores(
       let result: InstallCoreResult | null = null
       try {
         result = await installCore({
-          project_slug: input.project_slug,
+          project_slug: asOwnerHandle(input.project_slug),
           coreDir: core.coreDir,
           projectDb: input.projectDb,
           dataDir: input.dataDir,
@@ -490,13 +490,13 @@ export class SecretsStorePrompter implements SecretsPrompter {
     required: boolean
   }): Promise<{ access_token: string; expires_at?: number } | null> {
     const value = await this.opts.secretsStore.get({
-      internal_handle: this.opts.project_slug,
+      internal_handle: asOwnerHandle(this.opts.project_slug),
       kind: 'oauth_token',
       label: input.label,
     })
     if (value === null) return null
     const rows = await this.opts.secretsStore.list({
-      internal_handle: this.opts.project_slug,
+      internal_handle: asOwnerHandle(this.opts.project_slug),
       kind: 'oauth_token',
     })
     const row = rows.find((r) => r.label === input.label)
@@ -573,7 +573,7 @@ export async function reinstallFailedCore(
     let result: InstallCoreResult
     try {
       result = await installCore({
-        project_slug: input.project_slug,
+        project_slug: asOwnerHandle(input.project_slug),
         coreDir: core.coreDir,
         projectDb: input.projectDb,
         dataDir: input.dataDir,
@@ -757,7 +757,7 @@ async function rehydrateExistingInstall(input: {
   const accessor = buildSecretsAccessor(
     { manifest: core.manifest },
     {
-      internal_handle: input.project_slug,
+      internal_handle: asOwnerHandle(input.project_slug),
       store: auditedStore,
       core_id: core.slug,
     },

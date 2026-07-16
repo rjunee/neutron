@@ -1,3 +1,4 @@
+import { asOwnerHandle } from '@neutronai/persistence/index.ts'
 import { afterEach, beforeEach, expect, test } from 'bun:test'
 import {
   chmodSync,
@@ -92,7 +93,7 @@ test('startDeviceFlow returns user_code + verification_uri + expires_at', async 
       },
     ],
   })
-  const result = await client.startDeviceFlow({ internal_handle: 'alice' })
+  const result = await client.startDeviceFlow({ internal_handle: asOwnerHandle('alice') })
   expect(result.device_code).toBe('dev-1')
   expect(result.user_code).toBe('CODE-1')
   expect(result.verification_uri).toBe('https://chatgpt.test/activate')
@@ -118,14 +119,14 @@ test('pollUntilAuthorized stores the access + refresh tokens on success', async 
     ],
   })
   const r = await client.pollUntilAuthorized({
-    internal_handle: 'alice',
+    internal_handle: asOwnerHandle('alice'),
     device_code: 'dev-1',
     poll_interval_ms: 10,
   })
   expect(r.authorized).toBe(true)
   expect(r.expires_at).toBe(now + 1_800_000)
   const stored = await secrets.get({
-    internal_handle: 'alice',
+    internal_handle: asOwnerHandle('alice'),
     kind: 'chatgpt_oauth',
     label: 'default',
   })
@@ -144,7 +145,7 @@ test('pollUntilAuthorized surfaces access_denied as a typed error', async () => 
   })
   await expect(
     client.pollUntilAuthorized({
-      internal_handle: 'alice',
+      internal_handle: asOwnerHandle('alice'),
       device_code: 'dev-1',
       poll_interval_ms: 10,
     }),
@@ -173,7 +174,7 @@ test('pollUntilAuthorized expires after the configured deadline', async () => {
   }
   await expect(
     client.pollUntilAuthorized({
-      internal_handle: 'alice',
+      internal_handle: asOwnerHandle('alice'),
       device_code: 'dev-1',
       poll_interval_ms: 10,
     }),
@@ -197,13 +198,13 @@ test('writeCodexAuthFile writes a Codex-CLI shaped JSON to the target path', asy
     ],
   })
   await client.pollUntilAuthorized({
-    internal_handle: 'alice',
+    internal_handle: asOwnerHandle('alice'),
     device_code: 'dev',
     poll_interval_ms: 10,
   })
   const target = join(workdir, 'codex-auth.json')
   const result = await client.writeCodexAuthFile({
-    internal_handle: 'alice',
+    internal_handle: asOwnerHandle('alice'),
     target_path: target,
   })
   expect(result.path).toBe(target)
@@ -221,7 +222,7 @@ test('writeCodexAuthFile throws not_found when no token is stored', async () => 
   const { client } = buildClient({})
   await expect(
     client.writeCodexAuthFile({
-      internal_handle: 'alice',
+      internal_handle: asOwnerHandle('alice'),
       target_path: join(workdir, 'codex-auth.json'),
     }),
   ).rejects.toBeInstanceOf(ChatGPTOAuthError)
@@ -246,14 +247,14 @@ test('stored ChatGPT bundle stays readable after the access-token expiry', async
     ],
   })
   await client.pollUntilAuthorized({
-    internal_handle: 'alice',
+    internal_handle: asOwnerHandle('alice'),
     device_code: 'd',
     poll_interval_ms: 10,
   })
   // Advance time well past the access-token expiry.
   now += 10 * 60_000
   const stored = await secrets.get({
-    internal_handle: 'alice',
+    internal_handle: asOwnerHandle('alice'),
     kind: 'chatgpt_oauth',
     label: 'default',
   })
@@ -273,7 +274,7 @@ test('stored ChatGPT bundle stays readable after the access-token expiry', async
   // writeCodexAuthFile still succeeds because the row isn't expired.
   const target = join(workdir, 'codex-auth.json')
   await client.writeCodexAuthFile({
-    internal_handle: 'alice',
+    internal_handle: asOwnerHandle('alice'),
     target_path: target,
   })
 })
@@ -301,7 +302,7 @@ test('last_refresh stamps the token issue time, not the file-write time', async 
     ],
   })
   await client.pollUntilAuthorized({
-    internal_handle: 'alice',
+    internal_handle: asOwnerHandle('alice'),
     device_code: 'dev',
     poll_interval_ms: 10,
   })
@@ -309,7 +310,7 @@ test('last_refresh stamps the token issue time, not the file-write time', async 
   now = issueTime + 60 * 60 * 1_000
   const target = join(workdir, 'codex-auth.json')
   await client.writeCodexAuthFile({
-    internal_handle: 'alice',
+    internal_handle: asOwnerHandle('alice'),
     target_path: target,
   })
   const onDisk = JSON.parse(readFileSync(target, 'utf8')) as {
@@ -341,7 +342,7 @@ test('writeCodexAuthFile force-tightens mode to 0o600 on a pre-existing 0o644 fi
     ],
   })
   await client.pollUntilAuthorized({
-    internal_handle: 'alice',
+    internal_handle: asOwnerHandle('alice'),
     device_code: 'dev',
     poll_interval_ms: 10,
   })
@@ -355,7 +356,7 @@ test('writeCodexAuthFile force-tightens mode to 0o600 on a pre-existing 0o644 fi
   expect((statSync(target).mode & 0o777) & 0o077).not.toBe(0)
 
   await client.writeCodexAuthFile({
-    internal_handle: 'alice',
+    internal_handle: asOwnerHandle('alice'),
     target_path: target,
   })
 

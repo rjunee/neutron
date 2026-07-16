@@ -1,3 +1,4 @@
+import { asOwnerHandle } from '@neutronai/persistence/index.ts'
 /**
  * M2.5 (Argus r1 BLOCKER #2) — production-composer reachability guard for the
  * Open-mode connect auth surface + the federated shared-projects path.
@@ -47,7 +48,7 @@ import {
 } from '@neutronai/landing/session-cookie.ts'
 
 const OWNER = 'open-client-owner'
-const INTERNAL_HANDLE = 'ih-open-client'
+const INTERNAL_HANDLE = asOwnerHandle('ih-open-client')
 const AUTH_BASE = 'https://auth.neutron.example'
 // M2.5 follow-up #6 (ISSUES #84) — the surface is now session-gated, so the
 // reachability fetches below carry a valid session cookie minted with this

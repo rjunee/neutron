@@ -1,3 +1,4 @@
+import { asOwnerHandle } from '@neutronai/persistence/index.ts'
 import { afterEach, beforeEach, expect, test } from 'bun:test'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -28,7 +29,7 @@ let secretsStore: SecretsStore
 let audit: SecretAuditLog
 let installs: CoreInstallationsStore
 
-const OWNER = 't1'
+const OWNER = asOwnerHandle('t1')
 
 function manifestFor(opts: {
   capabilities?: string[]

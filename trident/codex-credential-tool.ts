@@ -16,6 +16,7 @@
 import type { JsonSchemaDocument } from '@neutronai/core-sdk/types.ts'
 import type { ToolRegistry } from '@neutronai/tools/registry.ts'
 import type { CodexCredentialService } from './codex-credential.ts'
+import { asOwnerHandle } from '@neutronai/persistence/index.ts'
 
 export const CODEX_STATUS_TOOL = 'codex_status'
 export const CODEX_CONNECT_TOOL = 'codex_connect'
@@ -75,7 +76,7 @@ export function registerCodexCredentialToolSurface(
     capability_required: 'read:project_data',
     approval_policy: 'auto',
     handler: async (_args, ctx) => {
-      return { ...deps.service.status(ctx.project_slug) }
+      return { ...deps.service.status(asOwnerHandle(ctx.project_slug)) }
     },
   })
 
@@ -92,7 +93,7 @@ export function registerCodexCredentialToolSurface(
     approval_policy: 'prompt-user',
     handler: async (args, ctx) => {
       const a = (args ?? {}) as ConnectArgs
-      const result = await deps.service.connect(ctx.project_slug, a.auth)
+      const result = await deps.service.connect(asOwnerHandle(ctx.project_slug), a.auth)
       if (!result.ok) {
         return { ok: false, error: result.error ?? 'could not connect Codex', ...(result.code !== undefined ? { code: result.code } : {}) }
       }

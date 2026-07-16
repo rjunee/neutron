@@ -32,7 +32,7 @@
  */
 
 import type { CredentialPool } from '@neutronai/runtime/credential-pool.ts'
-import { emitSystemEvent, resolveSystemEventSink } from '@neutronai/persistence/index.ts'
+import { asOwnerHandle, emitSystemEvent, resolveSystemEventSink } from '@neutronai/persistence/index.ts'
 import {
   resolveEnvOAuthTier,
   resolveApiKeyEnvTier,
@@ -1114,7 +1114,7 @@ export function buildOpenGraphComposer(
       codexHome,
     })
     try {
-      codexCredentialService.ensureMaterialized(project_slug)
+      codexCredentialService.ensureMaterialized(asOwnerHandle(project_slug))
     } catch (err) {
       log.warn('codex_ensure_materialized_failed', { error: err instanceof Error ? err.message : String(err) })
     }
@@ -2900,7 +2900,8 @@ export function buildOpenGraphComposer(
             // the real per-project dimension (undefined on General).
             availableServicesSnapshot: (slug: string, project_id: string | undefined): string =>
               formatAvailableServicesFragment(
-                projectCredentialStore.listAvailableServices(slug, project_id),
+                // `slug` is the owner boundary (frozen handle) — brand at the call.
+                projectCredentialStore.listAvailableServices(asOwnerHandle(slug), project_id),
               ),
             // RB1 (perfect-recall lane, default-off flag) — inject the breadth
             // memory-index manifest on the cold turn so the agent knows what
@@ -3502,7 +3503,7 @@ export function buildOpenGraphComposer(
               // for any project id it is given. `codex_home` (static global dir)
               // stays as the dev/legacy fallback (see build-core-modules).
               resolve_codex_home: (run) =>
-                codexCredentialService.resolveActiveCodexHome(run.project_slug),
+                codexCredentialService.resolveActiveCodexHome(asOwnerHandle(run.project_slug)),
               codex_home: codexHome,
               // X5 — no `delivery_sink` override: the trident module falls back to
               // the graph's `channels` router, which IS `channelRouter` (passed as

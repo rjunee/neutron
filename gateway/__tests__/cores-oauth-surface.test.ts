@@ -1,3 +1,4 @@
+import { asOwnerHandle } from '@neutronai/persistence/index.ts'
 /**
  * Cores OAuth secret-resolution sprint — `/api/cores/oauth/google/*`
  * HTTP surface tests.
@@ -41,7 +42,7 @@ import { createCoresOAuthSurface } from '../http/cores-oauth-surface.ts'
 import { signInternalRequest } from '@neutronai/runtime/internal-signature.ts'
 
 const REPO_ROOT = join(import.meta.dir, '..', '..')
-const OWNER = 'oauth-test'
+const OWNER = asOwnerHandle('oauth-test')
 const SHARED_SECRET = 'test-shared-secret'
 const REDIRECT_URI = 'https://auth.test/oauth/cores/google/callback'
 const OWNER_BASE_URL = 'https://oauth-test.neutron.example'

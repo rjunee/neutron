@@ -24,6 +24,7 @@
  * plaintext never leave the store.
  */
 
+import { asOwnerHandle, type OwnerHandle } from '@neutronai/persistence/index.ts'
 import { sanitizeProjectId } from '@neutronai/channels/adapters/app-ws/envelope.ts'
 import type { AppWsAuthResolver } from '@neutronai/channels/adapters/app-ws/auth.ts'
 import {
@@ -78,7 +79,10 @@ export function createProjectCredentialsSurface(
       if ('code' in resolved) {
         return jsonError(401, resolved.code, resolved.message)
       }
-      const owner_slug = resolved.project_slug
+      // Server-derived owner boundary — construct the branded handle at the
+      // point it is resolved from auth (the spec's known-good construction
+      // site). `resolved.project_slug` is the bearer's authorized instance.
+      const owner_slug = asOwnerHandle(resolved.project_slug)
       const method = req.method
 
       // Collection path: `/credentials`.
@@ -120,7 +124,7 @@ export function createProjectCredentialsSurface(
 async function handleSet(
   req: Request,
   store: ProjectCredentialStore,
-  owner_slug: string,
+  owner_slug: OwnerHandle,
   project_id: string,
 ): Promise<Response> {
   const body = await readJsonBody(req)
@@ -152,7 +156,7 @@ async function handleSet(
 
 async function handleDelete(
   store: ProjectCredentialStore,
-  owner_slug: string,
+  owner_slug: OwnerHandle,
   project_id: string,
   service: string,
   url: URL,

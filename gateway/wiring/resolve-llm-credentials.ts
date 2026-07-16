@@ -51,6 +51,7 @@
 
 import type { ApiKeyStore, ApiKeyProvider } from '@neutronai/auth/api-key-store.ts'
 import { buildBYOApiKeyPool } from '@neutronai/auth/byo-api-key-fallback.ts'
+import type { OwnerHandle } from '@neutronai/persistence/index.ts'
 import { resolveDeploymentMode } from '../deployment-mode.ts'
 import {
   newCredentialPool,
@@ -83,7 +84,7 @@ export interface OAuthCredentialSource {
    * resolver itself catches + logs + falls through (see implementation).
    */
   loadAccessToken: (
-    internal_handle: string,
+    internal_handle: OwnerHandle,
   ) => Promise<{ access_token: string; expires_at: number } | null>
 }
 
@@ -99,7 +100,7 @@ export interface ResolveLlmCredentialsInput {
    * names from `url_slug` (the user-visible identifier in operator
    * env files); the resolver accepts that as a separate field.
    */
-  internal_handle: string
+  internal_handle: OwnerHandle
   /**
    * Mutable `url_slug` used ONLY for log line readability + telemetry.
    * Per-instance env-var lookups derive their suffix from this so
@@ -411,12 +412,12 @@ export async function resolveLlmCredentials(
  */
 export function wrapMaxOAuthSource(client: {
   getAccessToken: (
-    internal_handle: string,
+    internal_handle: OwnerHandle,
     sub_label?: string,
   ) => Promise<{ access_token: string; expires_at: number } | null>
 }): OAuthCredentialSource {
   return {
-    loadAccessToken: async (internal_handle: string) =>
+    loadAccessToken: async (internal_handle: OwnerHandle) =>
       client.getAccessToken(internal_handle),
   }
 }

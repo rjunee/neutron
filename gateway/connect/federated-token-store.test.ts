@@ -1,3 +1,4 @@
+import { asOwnerHandle } from '@neutronai/persistence/index.ts'
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -13,7 +14,7 @@ import {
 
 const NOW = 1_700_000_000_000
 const NOW_SEC = Math.floor(NOW / 1000)
-const HANDLE = 'tnt_handle_1'
+const HANDLE = asOwnerHandle('tnt_handle_1')
 
 let dir: string
 let db: ProjectDb

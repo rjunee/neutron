@@ -1,3 +1,4 @@
+import { asOwnerHandle } from '@neutronai/persistence/index.ts'
 /**
  * WAVE 2 Track A — Integrations aggregation + mutation unit tests.
  *
@@ -41,7 +42,7 @@ import {
 } from '../integrations.ts'
 
 const REPO_ROOT = join(import.meta.dir, '..', '..', '..')
-const OWNER = 'integrations-test'
+const OWNER = asOwnerHandle('integrations-test')
 
 const cleanups: Array<() => void | Promise<void>> = []
 afterEach(async () => {

@@ -1,3 +1,4 @@
+import { asOwnerHandle } from '@neutronai/persistence/index.ts'
 /**
  * WAVE 2 Track A — `/api/cores/integrations` + `/api/cores/api-keys/*`
  * HTTP surface tests (dedicated `cores-integrations-surface.ts`).
@@ -34,7 +35,7 @@ import { OAuthTokenManager, GOOGLE_REVOKE_URL, metaLabel } from '../cores/oauth-
 import { createCoresIntegrationsSurface } from '../http/cores-integrations-surface.ts'
 
 const REPO_ROOT = join(import.meta.dir, '..', '..')
-const OWNER = 'integrations-surface-test'
+const OWNER = asOwnerHandle('integrations-surface-test')
 
 const cleanups: Array<() => void | Promise<void>> = []
 afterEach(async () => {

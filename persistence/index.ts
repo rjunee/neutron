@@ -1,4 +1,5 @@
 export { ProjectDb, STARTUP_PRAGMAS, type OpenOptions, type RunSyncResult } from './db.ts'
+export { asOwnerHandle, type OwnerHandle } from './owner-handle.ts'
 export {
   openSidecar,
   parseJsonColumn,

@@ -1,3 +1,4 @@
+import { asOwnerHandle } from '@neutronai/persistence/index.ts'
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -16,8 +17,8 @@ let db: ProjectDb
 let crypto: SecretsStore
 // The owner boundary (server-derived instance handle); two distinct owners
 // exercise the leak-gate.
-const OWNER = 'acme'
-const OTHER_OWNER = 'northwind'
+const OWNER = asOwnerHandle('acme')
+const OTHER_OWNER = asOwnerHandle('northwind')
 
 beforeEach(() => {
   tmp = mkdtempSync(join(tmpdir(), 'neutron-project-creds-'))

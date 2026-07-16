@@ -1,3 +1,4 @@
+import { asOwnerHandle } from '@neutronai/persistence/index.ts'
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { mkdirSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
@@ -55,7 +56,7 @@ describe('install lifecycle — Research Core round-trip', () => {
     const coreDir = copyResearchIntoFixture(env.tmp)
     const prompter = new NoopPrompter()
     const result = await installCore({
-      project_slug: 'owner_a',
+      project_slug: asOwnerHandle('owner_a'),
       coreDir,
       projectDb: env.projectDb,
       dataDir: env.dataDir,
@@ -79,7 +80,7 @@ describe('install lifecycle — Research Core round-trip', () => {
 
     // Research declares zero secrets — no secrets prompts must fire.
     const rows = await env.audit.list({
-      project_slug: 'owner_a',
+      project_slug: asOwnerHandle('owner_a'),
       core_slug: CORE_SLUG,
     })
     expect(rows.filter((r) => r.op === 'put')).toHaveLength(0)
@@ -89,7 +90,7 @@ describe('install lifecycle — Research Core round-trip', () => {
     const coreDir = copyResearchIntoFixture(env.tmp)
     const prompter = new NoopPrompter()
     const installed = await installCore({
-      project_slug: 'owner_b',
+      project_slug: asOwnerHandle('owner_b'),
       coreDir,
       projectDb: env.projectDb,
       dataDir: env.dataDir,
@@ -103,7 +104,7 @@ describe('install lifecycle — Research Core round-trip', () => {
     }
 
     await uninstallCore({
-      project_slug: 'owner_b',
+      project_slug: asOwnerHandle('owner_b'),
       core_slug: CORE_SLUG,
       projectDb: env.projectDb,
       dataDir: env.dataDir,

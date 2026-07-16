@@ -30,6 +30,7 @@
  * `{ ok, status: 'connected', scope }` after materializing to the scope's CODEX_HOME.
  */
 
+import { asOwnerHandle } from '@neutronai/persistence/index.ts'
 import { sanitizeProjectId } from '@neutronai/channels/adapters/app-ws/envelope.ts'
 import type { AppWsAuthResolver } from '@neutronai/channels/adapters/app-ws/auth.ts'
 import type { CodexCredentialService, CodexTarget } from '@neutronai/trident/codex-credential.ts'
@@ -78,7 +79,9 @@ export function createCodexCredentialSurface(
 
       const resolved = await resolveBearer(req, auth)
       if ('code' in resolved) return jsonError(401, resolved.code, resolved.message)
-      const owner_slug = resolved.project_slug
+      // Server-derived owner boundary — construct the branded handle at the
+      // point it is resolved from auth (the spec's known-good construction site).
+      const owner_slug = asOwnerHandle(resolved.project_slug)
 
       switch (req.method) {
         case 'GET': {

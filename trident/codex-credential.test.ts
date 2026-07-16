@@ -1,3 +1,4 @@
+import { asOwnerHandle } from '@neutronai/persistence/index.ts'
 /**
  * `trident/codex-credential.ts` — the connect/status/disconnect service over the
  * #149 ProjectCredentialStore, plus the end-to-end VERIFY: after connect, the
@@ -20,7 +21,7 @@ import { CODEX_CREDENTIAL_SERVICE, CodexCredentialService } from './codex-creden
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const REVIEW_SCRIPT = join(HERE, 'codex-review.sh')
-const OWNER = 'owner'
+const OWNER = asOwnerHandle('owner')
 
 let tmp: string
 let db: ProjectDb

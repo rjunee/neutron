@@ -26,7 +26,7 @@
 import { ApiKeyStore } from '@neutronai/auth/api-key-store.ts'
 import { SecretsStore } from '@neutronai/auth/secrets-store.ts'
 import { ONBOARDING_OPENAI_LABEL } from '@neutronai/onboarding/optional-keys.ts'
-import type { ProjectDb } from '@neutronai/persistence/index.ts'
+import { asOwnerHandle, type ProjectDb } from '@neutronai/persistence/index.ts'
 import { createLogger } from '@neutronai/logger'
 
 const moduleLog = createLogger('gbrain-memory')
@@ -45,7 +45,7 @@ export async function resolveOnboardingOpenAiKey(input: {
     })
     return (
       (await apiKeys.resolveSecret({
-        internal_handle: input.internal_handle,
+        internal_handle: asOwnerHandle(input.internal_handle),
         provider: 'openai',
         label: ONBOARDING_OPENAI_LABEL,
       })) ?? undefined

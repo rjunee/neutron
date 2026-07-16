@@ -1,3 +1,4 @@
+import { asOwnerHandle } from '@neutronai/persistence/index.ts'
 /**
  * Open foundational-Trident prod-boot wiring — the anti-"built-but-not-wired"
  * gate for the `/code <task>` autonomous build runner.
@@ -218,11 +219,11 @@ describe('Open foundational-Trident prod-boot wiring', () => {
     expect(typeof composition.trident!.codex_home).toBe('string')
     const codexSvc = composition.codex_credential!.service
     const connect = await codexSvc.connect(
-      'owner',
+      asOwnerHandle('owner'),
       JSON.stringify({ tokens: { access_token: 'a', refresh_token: 'r' }, last_refresh: 'x' }),
     )
     expect(connect.ok).toBe(true)
-    expect(codexSvc.status('owner').status).toBe('connected')
+    expect(codexSvc.status(asOwnerHandle('owner')).status).toBe('connected')
 
     for (const cleanup of composition.realmode_cleanups ?? []) {
       try {

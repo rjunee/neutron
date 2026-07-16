@@ -1,3 +1,4 @@
+import { asOwnerHandle } from '@neutronai/persistence/index.ts'
 import { afterEach, beforeEach, expect, test } from 'bun:test'
 import { mkdtempSync, rmSync, mkdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -39,7 +40,7 @@ function buildStores(now: () => number = () => 1_700_000_000_000): {
 test('add stores ciphertext via SecretsStore + writes api_keys metadata row', async () => {
   const { api_keys, secrets } = buildStores()
   const result = await api_keys.add({
-    internal_handle: 'alice',
+    internal_handle: asOwnerHandle('alice'),
     provider: 'anthropic',
     label: 'prod',
     plaintext: 'sk-ant-prod-1',
@@ -47,14 +48,14 @@ test('add stores ciphertext via SecretsStore + writes api_keys metadata row', as
   expect(typeof result.id).toBe('string')
   expect(typeof result.secret_id).toBe('string')
 
-  const list = await api_keys.list({ internal_handle: 'alice' })
+  const list = await api_keys.list({ internal_handle: asOwnerHandle('alice') })
   expect(list).toHaveLength(1)
   expect(list[0]?.provider).toBe('anthropic')
   expect(list[0]?.label).toBe('prod')
   expect(list[0]?.last_used_at).toBeNull()
 
   const plaintext = await secrets.get({
-    internal_handle: 'alice',
+    internal_handle: asOwnerHandle('alice'),
     kind: 'byo_api_key',
     label: 'anthropic:prod',
   })
@@ -64,14 +65,14 @@ test('add stores ciphertext via SecretsStore + writes api_keys metadata row', as
 test('duplicate add raises ApiKeyStoreError(duplicate_label)', async () => {
   const { api_keys } = buildStores()
   await api_keys.add({
-    internal_handle: 'alice',
+    internal_handle: asOwnerHandle('alice'),
     provider: 'anthropic',
     label: 'prod',
     plaintext: 'k1',
   })
   await expect(
     api_keys.add({
-      internal_handle: 'alice',
+      internal_handle: asOwnerHandle('alice'),
       provider: 'anthropic',
       label: 'prod',
       plaintext: 'k2',
@@ -82,13 +83,13 @@ test('duplicate add raises ApiKeyStoreError(duplicate_label)', async () => {
 test('resolveSecret decrypts the stored value via the SecretsStore', async () => {
   const { api_keys } = buildStores()
   await api_keys.add({
-    internal_handle: 'alice',
+    internal_handle: asOwnerHandle('alice'),
     provider: 'openai',
     label: 'main',
     plaintext: 'sk-openai-zzz',
   })
   const fetched = await api_keys.resolveSecret({
-    internal_handle: 'alice',
+    internal_handle: asOwnerHandle('alice'),
     provider: 'openai',
     label: 'main',
   })
@@ -97,12 +98,12 @@ test('resolveSecret decrypts the stored value via the SecretsStore', async () =>
 
 test('list filters by project + optional provider', async () => {
   const { api_keys } = buildStores()
-  await api_keys.add({ internal_handle: 'alice', provider: 'anthropic', label: 'a', plaintext: 'k' })
-  await api_keys.add({ internal_handle: 'alice', provider: 'openai', label: 'b', plaintext: 'k' })
-  await api_keys.add({ internal_handle: 'bobby', provider: 'anthropic', label: 'c', plaintext: 'k' })
-  const aliceAll = await api_keys.list({ internal_handle: 'alice' })
+  await api_keys.add({ internal_handle: asOwnerHandle('alice'), provider: 'anthropic', label: 'a', plaintext: 'k' })
+  await api_keys.add({ internal_handle: asOwnerHandle('alice'), provider: 'openai', label: 'b', plaintext: 'k' })
+  await api_keys.add({ internal_handle: asOwnerHandle('bobby'), provider: 'anthropic', label: 'c', plaintext: 'k' })
+  const aliceAll = await api_keys.list({ internal_handle: asOwnerHandle('alice') })
   expect(aliceAll.map((r) => r.label).sort()).toEqual(['a', 'b'])
-  const aliceAnthropic = await api_keys.list({ internal_handle: 'alice', provider: 'anthropic' })
+  const aliceAnthropic = await api_keys.list({ internal_handle: asOwnerHandle('alice'), provider: 'anthropic' })
   expect(aliceAnthropic.map((r) => r.label)).toEqual(['a'])
 })
 
@@ -110,14 +111,14 @@ test('markUsed bumps last_used_at; unknown id throws not_found', async () => {
   let nowVal = 1_700_000_000_000
   const { api_keys } = buildStores(() => nowVal)
   const { id } = await api_keys.add({
-    internal_handle: 'alice',
+    internal_handle: asOwnerHandle('alice'),
     provider: 'gemini',
     label: 'main',
     plaintext: 'g',
   })
   nowVal += 5_000
   await api_keys.markUsed(id)
-  const list = await api_keys.list({ internal_handle: 'alice' })
+  const list = await api_keys.list({ internal_handle: asOwnerHandle('alice') })
   expect(list[0]?.last_used_at).toBe(nowVal)
   await expect(api_keys.markUsed('does-not-exist')).rejects.toBeInstanceOf(ApiKeyStoreError)
 })
@@ -125,16 +126,16 @@ test('markUsed bumps last_used_at; unknown id throws not_found', async () => {
 test('delete drops both api_keys row AND the underlying secret', async () => {
   const { api_keys, secrets } = buildStores()
   await api_keys.add({
-    internal_handle: 'alice',
+    internal_handle: asOwnerHandle('alice'),
     provider: 'anthropic',
     label: 'tmp',
     plaintext: 'k',
   })
-  await api_keys.delete({ internal_handle: 'alice', provider: 'anthropic', label: 'tmp' })
-  const list = await api_keys.list({ internal_handle: 'alice' })
+  await api_keys.delete({ internal_handle: asOwnerHandle('alice'), provider: 'anthropic', label: 'tmp' })
+  const list = await api_keys.list({ internal_handle: asOwnerHandle('alice') })
   expect(list).toHaveLength(0)
   const stale = await secrets.get({
-    internal_handle: 'alice',
+    internal_handle: asOwnerHandle('alice'),
     kind: 'byo_api_key',
     label: 'anthropic:tmp',
   })

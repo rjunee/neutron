@@ -1,3 +1,4 @@
+import { asOwnerHandle } from '@neutronai/persistence/index.ts'
 /**
  * D2 (2026-07-01) — CoreCredentialResolver wiring tests.
  *
@@ -27,7 +28,7 @@ import type { OAuthTokenManager } from '../oauth-token-manager.ts'
 import { CoreCredentialResolver, scopeForService } from '../core-credential-resolver.ts'
 import { runWithActiveProject } from '../active-project-context.ts'
 
-const OWNER = 'cred-resolver-test'
+const OWNER = asOwnerHandle('cred-resolver-test')
 const PROJECT = 'proj-alpha'
 
 const cleanups: Array<() => void> = []
@@ -204,4 +205,33 @@ test('accessorFor fail-soft: a resolver throw becomes null (Core degrades, never
   const resolver = new CoreCredentialResolver({ owner_slug: OWNER, store, oauthTokens: throwingOAuth })
   // google_workspace has no project_credentials row → hits the throwing OAuth fallback.
   expect(await resolver.accessorFor('google_workspace')()).toBeNull()
+})
+
+// ── 2026-05-12 rename-regression (behavioral) ────────────────────────────────
+// Proves the composition seam keys credentials on the FROZEN owner handle: a
+// value written under the frozen handle is invisible when the resolver is keyed
+// on the (post-rename) mutable url_slug — the exact silent-credential-loss the
+// OwnerHandle brand exists to prevent, demonstrated at runtime (not just types).
+test('rename regression: a credential written under the frozen handle is NOT readable under a renamed url_slug', async () => {
+  const store = makeStore()
+  const FROZEN = asOwnerHandle('acme-frozen-handle')
+  const RENAMED_URL_SLUG = asOwnerHandle('acme-renamed') // what a rename would canonicalise the url_slug to
+
+  // Seed a global service token under the FROZEN handle (the provisioning shape).
+  await store.set(FROZEN, { service: 'meta_ads', plaintext: 'secret-token', scope: 'global' })
+
+  // The resolver keyed on the FROZEN handle finds it.
+  const frozenResolver = new CoreCredentialResolver({ owner_slug: FROZEN, store, oauthTokens: null })
+  expect(await frozenResolver.resolve('meta_ads')).toBe('secret-token')
+
+  // The resolver keyed on the RENAMED url_slug misses entirely — the 2026-05-12
+  // outage. The brand makes constructing this wrong resolver require an explicit
+  // asOwnerHandle of a value known to be the url_slug (a code smell), but if it
+  // happens the credential is silently absent, exactly as this test pins.
+  const renamedResolver = new CoreCredentialResolver({ owner_slug: RENAMED_URL_SLUG, store, oauthTokens: null })
+  expect(await renamedResolver.resolve('meta_ads')).toBeNull()
+
+  // And the store itself keys on the exact handle (direct assertion).
+  expect(store.resolve(FROZEN, undefined, 'meta_ads')?.plaintext).toBe('secret-token')
+  expect(store.resolve(RENAMED_URL_SLUG, undefined, 'meta_ads')).toBeNull()
 })

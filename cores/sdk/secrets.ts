@@ -34,6 +34,7 @@ import {
   writeFileSync,
 } from 'node:fs'
 import { dirname } from 'node:path'
+import type { OwnerHandle } from '@neutronai/persistence/index.ts'
 
 import { CapabilityDeniedError } from './errors.ts'
 import type { ManifestSecret, NeutronManifest } from './manifest.ts'
@@ -211,9 +212,10 @@ export interface BuildSecretsAccessorOptions extends Record<string, unknown> {
    * 2026-05-12 — frozen `internal_handle` for the instance (see
    * `auth/secrets-store.ts` file header). The SDK no longer accepts
    * the mutable `url_slug` here because the platform store keys all
-   * rows on the frozen handle.
+   * rows on the frozen handle — branded `OwnerHandle` makes a raw string
+   * a compile error at this public entry point.
    */
-  internal_handle: string
+  internal_handle: OwnerHandle
   store: PlatformSecretsStore
   /** Core package name — surfaced in error messages + (P3) audit log. */
   core_id: string

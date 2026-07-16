@@ -1,3 +1,4 @@
+import { asOwnerHandle } from '@neutronai/persistence/index.ts'
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -56,7 +57,7 @@ describe('install lifecycle — Code-Gen Core round-trip', () => {
     const coreDir = copyCodegenIntoFixture(env.tmp)
     const prompter = new NoopPrompter()
     const result = await installCore({
-      project_slug: 'owner_a',
+      project_slug: asOwnerHandle('owner_a'),
       coreDir,
       projectDb: env.projectDb,
       dataDir: env.dataDir,
@@ -82,7 +83,7 @@ describe('install lifecycle — Code-Gen Core round-trip', () => {
 
     // Code-Gen declares zero secrets — no secrets prompts must fire.
     const rows = await env.audit.list({
-      project_slug: 'owner_a',
+      project_slug: asOwnerHandle('owner_a'),
       core_slug: CORE_SLUG,
     })
     expect(rows.filter((r) => r.op === 'put')).toHaveLength(0)
@@ -92,7 +93,7 @@ describe('install lifecycle — Code-Gen Core round-trip', () => {
     const coreDir = copyCodegenIntoFixture(env.tmp)
     const prompter = new NoopPrompter()
     await installCore({
-      project_slug: 'owner_b',
+      project_slug: asOwnerHandle('owner_b'),
       coreDir,
       projectDb: env.projectDb,
       dataDir: env.dataDir,
@@ -103,7 +104,7 @@ describe('install lifecycle — Code-Gen Core round-trip', () => {
     })
 
     await uninstallCore({
-      project_slug: 'owner_b',
+      project_slug: asOwnerHandle('owner_b'),
       core_slug: CORE_SLUG,
       projectDb: env.projectDb,
       dataDir: env.dataDir,

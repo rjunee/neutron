@@ -16,7 +16,7 @@
  */
 
 import { randomUUID } from 'node:crypto'
-import type { ProjectDb } from '@neutronai/persistence/index.ts'
+import type { ProjectDb, OwnerHandle } from '@neutronai/persistence/index.ts'
 import { SecretsStore, SecretsStoreError } from './secrets-store.ts'
 
 export type ApiKeyProvider = 'anthropic' | 'openai' | 'gemini'
@@ -61,16 +61,16 @@ export class ApiKeyStoreError extends Error {
 }
 
 export interface AddApiKeyInput {
-  /** Frozen `internal_handle` — see file header. */
-  internal_handle: string
+  /** Frozen `internal_handle` (branded `OwnerHandle`) — see file header. */
+  internal_handle: OwnerHandle
   provider: ApiKeyProvider
   label: string
   plaintext: string
 }
 
 export interface ListApiKeysInput {
-  /** Frozen `internal_handle` — see file header. */
-  internal_handle: string
+  /** Frozen `internal_handle` (branded `OwnerHandle`) — see file header. */
+  internal_handle: OwnerHandle
   provider?: ApiKeyProvider
 }
 
@@ -157,7 +157,7 @@ export class ApiKeyStore {
   }
 
   async resolveSecret(input: {
-    internal_handle: string
+    internal_handle: OwnerHandle
     provider: ApiKeyProvider
     label: string
   }): Promise<string | null> {
@@ -183,7 +183,7 @@ export class ApiKeyStore {
   }
 
   async delete(input: {
-    internal_handle: string
+    internal_handle: OwnerHandle
     provider: ApiKeyProvider
     label: string
   }): Promise<void> {
