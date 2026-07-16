@@ -539,17 +539,23 @@ function stripSupersededSentences(existing: string, page: PlannedPage): string {
   if (targets.size === 0) return existing
 
   const opts = { sourceKind: page.kind, source: 'rb4-supersede-scan' } as const
+  // Cheap superset gate for "this text carries an entity reference the edge
+  // extractor would see" — a `[[wikilink]]` (bare or aliased) OR a `[…](slug)`
+  // markdown link (`auto-link.ts:collectRefs` recognises BOTH). A false positive
+  // just triggers an extract that returns no triple; a false NEGATIVE would let a
+  // superseded markdown-link assertion survive, so the gate must not miss `](`.
+  const hasRef = (s: string): boolean => s.includes('[[') || s.includes('](')
   // A single sentence asserts a superseded target?
   const sentenceHitsTarget = (text: string): boolean => {
-    if (!text.includes('[[')) return false
+    if (!hasRef(text)) return false
     const triples = extractTypedLinks(`${text}\n`, page.slug, opts)
     return triples.some((t) => targets.has(`${t.predicate}\x1f${t.object}`))
   }
 
   const outLines: string[] = []
   for (const line of existing.split('\n')) {
-    if (!line.includes('[[')) {
-      outLines.push(line) // fast path: no wikilink → untouched
+    if (!hasRef(line)) {
+      outLines.push(line) // fast path: no entity reference → untouched
       continue
     }
     // Strip any leading list-bullet so it isn't folded into the first sentence.
