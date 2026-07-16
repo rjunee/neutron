@@ -305,7 +305,7 @@ describe('reflect reserved-kind extraction (meeting/project/original)', () => {
     expect(extractCompiledTruth(meeting!)).toContain('Q3 Board Meeting')
   })
 
-  test('re-extraction is APPEND-ONLY over an existing reserved page (no clobber)', async () => {
+  test('re-extraction ADDITIVELY MERGES over an existing reserved page (new fact durable, no clobber)', async () => {
     const owner = tmpOwner()
     // A pre-existing, RICH project page with multiple facts + a wikilink edge.
     const rich =
@@ -313,22 +313,48 @@ describe('reflect reserved-kind extraction (meeting/project/original)', () => {
     await seed(owner, 'project', 'perfect-recall', 'Perfect Recall', rich, [
       { ts: '2026-07-01T00:00:00.000Z', source: 'seed', body: 'kicked off' },
     ])
-    // The reflect extraction re-mentions it with only ONE thin fact.
+    // The reflect extraction surfaces a NEW durable fact.
     const { substrate } = scriptedSubstrate((prompt) =>
       prompt.includes('DIGEST:')
         ? JSON.stringify({
-            entities: [{ name: 'Perfect Recall', kind: 'project', fact: 'in progress' }],
+            entities: [{ name: 'Perfect Recall', kind: 'project', fact: 'Now in private beta' }],
           })
         : '{"entities":[]}',
     )
-    await runReflectPass({ ...baseDeps(owner), substrate })
-    // The rich compiled-truth (both facts + the wikilink) is preserved verbatim —
-    // never replaced by the one-fact digest, so no edge/fact is retracted.
+    const report = await runReflectPass({ ...baseDeps(owner), substrate })
     const page = await readPage(owner, 'projects', 'perfect-recall')
     const ct = extractCompiledTruth(page!)
+    // Prior facts + the wikilink edge are preserved (nothing retracted)...
     expect(ct).toContain('memory-uplift initiative')
     expect(ct).toContain('Targets Q4 GA')
     expect(ct).toContain('[[sarah-patel]]') // graph edge intact
+    // ...AND the new fact reached COMPILED-TRUTH (durable + graph-extractable),
+    // not just the timeline.
+    expect(ct).toContain('Now in private beta')
+    expect(report.reservedWritten).toBeGreaterThanOrEqual(1)
+  })
+
+  test('re-extracting an ALREADY-present fact is a no-op (no unbounded growth)', async () => {
+    const owner = tmpOwner()
+    await seed(
+      owner,
+      'project',
+      'perfect-recall',
+      'Perfect Recall',
+      '# Perfect Recall\n\nA memory-uplift initiative. Now in private beta.',
+      [{ ts: '2026-07-01T00:00:00.000Z', source: 'seed', body: 'kicked off' }],
+    )
+    const { substrate } = scriptedSubstrate((prompt) =>
+      prompt.includes('DIGEST:')
+        ? JSON.stringify({
+            entities: [{ name: 'Perfect Recall', kind: 'project', fact: 'Now in private beta' }],
+          })
+        : '{"entities":[]}',
+    )
+    const report = await runReflectPass({ ...baseDeps(owner), substrate })
+    expect(report.reservedWritten).toBe(0) // fact already present → no write
+    const tl = extractTimeline((await readPage(owner, 'projects', 'perfect-recall'))!)
+    expect(tl.length).toBe(1) // no reserved timeline row appended
   })
 })
 

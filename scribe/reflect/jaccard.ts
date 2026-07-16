@@ -25,19 +25,33 @@ export interface DedupCandidate {
 }
 
 /**
- * Tokenise text into a lowercased set of word tokens (length >= 2, split on any
- * non-alphanumeric run). A SET, not a bag: Jaccard is set-based, so repeated
- * words don't skew the score. Wikilink brackets/punctuation fall out naturally,
- * leaving the bare slug/word tokens, so two pages asserting the same relation in
- * different prose still overlap on the entity tokens.
+ * Tokenise text into a lowercased SET of word tokens using Unicode-aware
+ * segmentation (`Intl.Segmenter`, word granularity). This matters for scripts
+ * WITHOUT spaces (Japanese, Chinese, …): a plain `[^a-z0-9]` split would drop
+ * every non-ASCII character, so two identical CJK pages would tokenise to the
+ * empty set and could never be detected as duplicates. Segmentation splits
+ * `株式会社アクメは…` into real word tokens instead.
+ *
+ * A SET, not a bag (Jaccard is set-based, so repeats don't skew the score). Only
+ * word-like segments are kept, punctuation/whitespace/brackets fall out, and a
+ * length-1 ASCII token (`a`, English filler) is dropped — but a length-1
+ * NON-ASCII token (a single CJK word) is kept, since it can be a whole word.
  */
 export function tokenize(text: string): Set<string> {
   const out = new Set<string>()
-  for (const tok of text.toLowerCase().split(/[^a-z0-9]+/)) {
-    if (tok.length >= 2) out.add(tok)
+  for (const { segment, isWordLike } of WORD_SEGMENTER.segment(text.toLowerCase())) {
+    if (isWordLike !== true) continue
+    // Drop only short PURELY-ASCII tokens (English filler like `a`); keep every
+    // non-ASCII word, including single CJK characters.
+    if (segment.length < 2 && /^[\x00-\x7f]*$/.test(segment)) continue
+    out.add(segment)
   }
   return out
 }
+
+/** One shared word segmenter (locale-agnostic). Construction is non-trivial, so
+ *  it is hoisted out of the hot `tokenize` loop. */
+const WORD_SEGMENTER = new Intl.Segmenter(undefined, { granularity: 'word' })
 
 /**
  * Jaccard similarity |A∩B| / |A∪B| over two token sets. Two empty sets are

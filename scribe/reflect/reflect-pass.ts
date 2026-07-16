@@ -626,14 +626,17 @@ function renderPageForResynth(page: LoadedPage): string {
  * EXTRACT the reserved kinds (meeting/project/original) from a corpus digest in
  * ONE batched LLM call, then write each through the entity-writer → GBrain path.
  *
- * APPEND-ONLY over an EXISTING reserved page (the Nova-scribe / write-to-gbrain
+ * ADDITIVE-MERGE over an EXISTING reserved page (the Nova-scribe / write-to-gbrain
  * rule): `writeEntity` renders `body.compiledTruth` as a FULL REPLACEMENT and
  * retracts every graph edge present before but absent now, so composing a fresh
  * one-fact page over a richer existing meeting/project/note would erase its prior
- * facts AND edges. So for an existing page we PRESERVE its compiled-truth +
- * frontmatter verbatim and only append the timeline row; the durable new fact
- * lives in the append-only timeline. Only a genuinely NEW entity gets a
- * freshly-composed page (Codex RB3 high).
+ * facts AND edges. So for an existing page we KEEP its compiled-truth verbatim and
+ * only APPEND a genuinely new fact sentence (never already present) — so a newly
+ * discovered fact reaches BOTH the compiled-truth AND, via the writer's
+ * compiled-truth-only edge extractor, the graph, while no prior fact/edge is
+ * retracted (`removedLinks` stays empty). A fact already present (or an absent
+ * fact) is a true no-op — no write, no timeline growth. A genuinely NEW entity
+ * gets a freshly-composed page (Codex RB3).
  */
 async function extractReservedKinds(
   survivors: LoadedPage[],
@@ -658,13 +661,24 @@ async function extractReservedKinds(
     const slug = slugify(e.name)
     if (slug === null) continue
     try {
-      // Read any existing page for (kind, slug): preserve it (append-only) or
-      // compose fresh. The slug came from `slugify` → grammar-safe path.
+      // Read any existing page for (kind, slug). The slug came from `slugify` →
+      // grammar-safe path.
       const existing = await readExistingReservedPage(deps.ownerDataDir, e.kind, slug)
-      const compiledTruth =
-        existing !== null
-          ? existing.compiledTruth // preserve verbatim — never clobber prior truth/edges
-          : `# ${e.name}\n\n${(e.fact ?? `Identified during reflect (${e.kind}).`).replace(/\.?$/, '.')}\n`
+      const fact = e.fact !== undefined && e.fact.trim().length > 0 ? e.fact.trim() : undefined
+      let compiledTruth: string
+      if (existing === null) {
+        // New entity — freshly compose the page.
+        compiledTruth = `# ${e.name}\n\n${(fact ?? `Identified during reflect (${e.kind}).`).replace(/\.?$/, '.')}\n`
+      } else {
+        // Existing entity — additive merge: keep prior truth verbatim and APPEND a
+        // genuinely new fact sentence (so it reaches compiled-truth + the graph)
+        // without retracting any prior fact/edge. Nothing new → true no-op.
+        const factSentence = fact !== undefined ? fact.replace(/\.?$/, '.') : undefined
+        if (factSentence === undefined || existing.compiledTruth.includes(factSentence)) {
+          continue // no new durable fact for this page → skip (no write, no growth)
+        }
+        compiledTruth = `${existing.compiledTruth.trimEnd()}\n\n${factSentence}\n`
+      }
       const frontmatter: Record<string, unknown> = {
         ...(existing?.frontmatter ?? {}),
         slug,
@@ -691,7 +705,9 @@ async function extractReservedKinds(
         },
         deps.syncHook !== undefined ? { syncHook: deps.syncHook } : {},
       )
-      if (out.changed && existing === null) report.reservedWritten += 1
+      // Count any real write — a new page OR an existing page that gained a fact
+      // (the skip above already excluded the no-op case).
+      if (out.changed) report.reservedWritten += 1
     } catch (err) {
       logFailure('reflect: reserved write failed', err)
     }

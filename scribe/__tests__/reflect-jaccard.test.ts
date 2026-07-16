@@ -41,6 +41,14 @@ describe('jaccard', () => {
     expect(jaccard(tokenize(''), tokenize(''))).toBe(0)
     expect(jaccard(tokenize('a'), tokenize(''))).toBe(0) // 'a' dropped → empty
   })
+
+  test('non-ASCII (CJK) content tokenizes and matches when identical', () => {
+    // A plain [^a-z0-9] split would drop every CJK char → empty set → never match.
+    const jp = '株式会社アクメは開発者ツールを構築する会社です'
+    const toks = tokenize(jp)
+    expect(toks.size).toBeGreaterThan(1) // segmented into real word tokens
+    expect(jaccard(toks, tokenize(jp))).toBe(1) // identical CJK strings match
+  })
 })
 
 describe('clusterNearDuplicates', () => {
