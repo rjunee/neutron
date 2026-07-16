@@ -20,12 +20,13 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { newCredentialPool } from '@neutronai/runtime/credential-pool.ts'
-import type { Substrate } from '@neutronai/runtime/substrate.ts'
+import type { Substrate, AgentSpec } from '@neutronai/runtime/substrate.ts'
 import type { SessionHandle } from '@neutronai/runtime/session-handle.ts'
 import type { Event } from '@neutronai/runtime/events.ts'
 import type { ClaudeCodeSubstrateOptions } from '@neutronai/runtime/adapters/claude-code/index.ts'
 import type { OpenWiringContext } from '../wiring/context.ts'
 import { wireMemory } from '../wiring/memory.ts'
+import { SUPERSEDE_GUIDANCE } from '@neutronai/scribe/extract.ts'
 import { workBoardScopeKey } from '@neutronai/work-board/store.ts'
 
 let tmpDir: string
@@ -246,6 +247,53 @@ describe('wireMemory', () => {
       // …and BOTH are per-call ephemeral (one-shot isolation).
       expect(scribeOpts!.ephemeral).toBe(true)
       expect(reflectionOpts!.ephemeral).toBe(true)
+    } finally {
+      await runCleanups(w.cleanups)
+    }
+  }, 15_000)
+
+  // RB4 — the flag actually REACHES the wired scribe. A prompt-capturing factory
+  // proves that `wireMemory` threads `isPerfectRecallEnabled(env)` all the way into
+  // the scribe's extraction prompt: a mutation dropping `supersede:
+  // isPerfectRecallEnabled(env)` at the createScribe call site fails THIS test.
+  const captureScribePrompts = (): {
+    prompts: string[]
+    factory: (opts: ClaudeCodeSubstrateOptions) => Substrate
+  } => {
+    const prompts: string[] = []
+    const factory = (opts: ClaudeCodeSubstrateOptions): Substrate => ({
+      start: (spec: AgentSpec): SessionHandle => {
+        if (typeof spec.prompt === 'string') prompts.push(spec.prompt)
+        return cannedHandle(opts.substrate_instance_id)
+      },
+    })
+    return { prompts, factory }
+  }
+  const SCRIBE_TURN =
+    'Alice Ng moved from OldCo to NewCo this quarter and now leads their platform reliability team.'
+
+  test('RB4: NEUTRON_PERFECT_RECALL=on threads supersede guidance into the wired scribe prompt', async () => {
+    const { prompts, factory } = captureScribePrompts()
+    const w = wireMemory(
+      makeCtx({ env: { NEUTRON_PERFECT_RECALL: '1' } as NodeJS.ProcessEnv, substrateFactory: factory }),
+    )
+    try {
+      expect(w.scribe).not.toBeNull()
+      await w.scribe!.extractAndWrite({ text: SCRIBE_TURN, observed_at: Date.now() })
+      // The dispatched extraction prompt carries the supersede guidance.
+      expect(prompts.some((p) => p.includes(SUPERSEDE_GUIDANCE))).toBe(true)
+    } finally {
+      await runCleanups(w.cleanups)
+    }
+  }, 15_000)
+
+  test('RB4: flag OFF → the wired scribe prompt has NO supersede guidance (dark by default)', async () => {
+    const { prompts, factory } = captureScribePrompts()
+    const w = wireMemory(makeCtx({ env: {} as NodeJS.ProcessEnv, substrateFactory: factory }))
+    try {
+      await w.scribe!.extractAndWrite({ text: SCRIBE_TURN, observed_at: Date.now() })
+      expect(prompts.length).toBeGreaterThan(0) // the scribe DID dispatch…
+      expect(prompts.some((p) => p.includes(SUPERSEDE_GUIDANCE))).toBe(false) // …without guidance
     } finally {
       await runCleanups(w.cleanups)
     }
