@@ -166,6 +166,47 @@ describe('reflect dedup (deterministic, no LLM)', () => {
     expect(bodies).toContain('Acme Inc hired a new CTO') // loser's history survived
   })
 
+  test('cross-kind slug collision: the GBrain delete is SKIPPED (no sibling eviction)', async () => {
+    const owner = tmpOwner()
+    const boiler = 'Acme is an enterprise developer-tools SaaS company building platform tooling.'
+    // Two DUPLICATE company pages that cluster (shared boilerplate). `acme` has
+    // more history → survivor; `shared` → loser (its slug is `shared`).
+    await seed(owner, 'company', 'acme', 'Acme', boiler, [
+      { ts: '2026-07-01T00:00:00.000Z', source: 'chat:owner', body: 'a' },
+      { ts: '2026-07-02T00:00:00.000Z', source: 'chat:owner', body: 'b' },
+    ])
+    await seed(owner, 'company', 'shared', 'Acme Shared', boiler, [
+      { ts: '2026-07-03T00:00:00.000Z', source: 'chat:owner', body: 'company-shared-row' },
+    ])
+    // A PERSON that COLLIDES on the bare slug `shared` — it is the current GBrain
+    // page for slug "shared" (GBrain keys by slug alone, kind-blind).
+    await seed(owner, 'person', 'shared', 'Shared Person', 'Shared is a person the owner knows.', [
+      { ts: '2026-07-04T00:00:00.000Z', source: 'chat:owner', body: 'person-row' },
+    ])
+
+    const deletedSlugs: string[] = []
+    const report = await runReflectPass({
+      ...baseDeps(owner),
+      deletePage: async (slug: string): Promise<void> => {
+        deletedSlugs.push(slug)
+      },
+    })
+
+    // The COMPANY dedup collapsed (disk delete is kind-qualified → companies/shared.md gone).
+    expect(report.merged).toBe(1)
+    expect(await readPage(owner, 'companies', 'shared')).toBeNull()
+    expect(extractTimeline((await readPage(owner, 'companies', 'acme'))!).map((e) => e.body)).toContain(
+      'company-shared-row',
+    )
+    // The PERSON 'shared' page is untouched on disk...
+    expect(await readPage(owner, 'people', 'shared')).not.toBeNull()
+    // ...and — the fix — the bare-slug GBrain delete was SKIPPED for 'shared' (a
+    // different kind still claims it), so the person's GBrain page is NOT evicted.
+    // MUTATION-KILL: reverting to unconditional deps.deletePage(l.slug) puts
+    // 'shared' in deletedSlugs and fails here.
+    expect(deletedSlugs).not.toContain('shared')
+  })
+
   test('a loser whose on-disk deletion FAILS is retained + not counted as merged', async () => {
     const owner = tmpOwner()
     const boiler = 'Acme is an enterprise developer-tools SaaS company building platform tooling.'
