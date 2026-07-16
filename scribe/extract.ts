@@ -39,9 +39,12 @@ export interface ExtractedRelation {
   object: string
   /**
    * RB4 temporal invalidation (belief evolution) — OPTIONAL supersede marker.
-   * The display name of a PRIOR object whose fact this relation makes stale
-   * (e.g. `works_at NewCo` with `supersedes: "OldCo"` after a job move). Keys the
-   * prior fact by its object identity on the SAME subject. Acted on ONLY under
+   * OBJECT REPLACEMENT ONLY: the display name of a PRIOR object that this
+   * relation's NEW object replaces for the SAME (subject, predicate) — e.g.
+   * `works_at NewCo` with `supersedes: "OldCo"` after a job move. Keys the prior
+   * fact by its object identity on the SAME subject. It does NOT model an entity
+   * rename or an ended-without-replacement affiliation (no prior relation object
+   * to retire — out of RB4 scope). Acted on ONLY under
    * the shared `NEUTRON_PERFECT_RECALL` flag (`write-to-gbrain.ts` supersede
    * path): the superseded object's compiled-truth sentence is dropped (so the
    * gbrain edge falls out via the writer's existing `removedLinks`→`remove_link`
@@ -90,14 +93,22 @@ MESSAGE:
 /**
  * RB4 supersede guidance — spliced into the extraction prompt ONLY when the
  * shared perfect-recall flag is on (see `composeExtractionPrompt`). Teaches the
- * extractor to emit the optional `relations[].supersedes` marker when the turn
- * clearly states a prior fact is now stale (a job move, a rename, a changed
- * affiliation). Kept OUT of the default prompt so the flag-off extraction
- * contract is byte-identical to today's.
+ * extractor to emit the optional `relations[].supersedes` marker for the ONE
+ * case the mechanism implements: OBJECT REPLACEMENT — a subject gains a NEW
+ * object for the SAME predicate, retiring the prior object (the spec's "moved
+ * job / changed company" = `works_at OldCo → works_at NewCo`). It deliberately
+ * does NOT advertise entity renames or ended-without-replacement affiliations —
+ * `supersedes` keys on a prior relation OBJECT, so those have nothing to invalidate
+ * (they are genuinely larger mechanisms, out of RB4 scope). Kept OUT of the
+ * default prompt so the flag-off extraction contract is byte-identical to today's.
  */
-export const SUPERSEDE_GUIDANCE = `Belief evolution (optional): when the message CLEARLY states a fact has CHANGED — a person changed jobs, a company was renamed, an affiliation ended — set "supersedes" on the NEW relation to the display name of the PRIOR object it replaces:
+export const SUPERSEDE_GUIDANCE = `Belief evolution (optional): use ONLY when you assert a NEW relation that REPLACES a prior value of the SAME (subject, predicate) — the same subject now has a DIFFERENT object for a predicate it already had (e.g. a person changed employer, so an earlier \`works_at\` now points to a new company). Set "supersedes" on that new relation to the display name of the PRIOR object it replaces:
   { "subject": "Alice", "predicate": "works_at", "object": "NewCo", "supersedes": "OldCo" }
-Only set "supersedes" when the message makes the replacement explicit. Omit it for a brand-new, additive fact. Never guess.
+This retires the subject's prior (predicate, object) fact and asserts the new object in its place.
+Do NOT use "supersedes" for anything else. In particular:
+- NOT for renaming an entity itself ("Acme is now called NewCo") — that is an entity-identity change, not a replaced relation object; just extract the entities normally and OMIT "supersedes".
+- NOT for an ended relationship with NO replacement ("Jane left OldCo", no new employer) — there is no new object to point to; OMIT "supersedes".
+Only set it when the SAME subject gains a NEW object for the SAME predicate. Omit it for a brand-new, additive fact. Never guess.
 `
 
 export function composeExtractionPrompt(

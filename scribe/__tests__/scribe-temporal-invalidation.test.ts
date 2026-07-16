@@ -651,4 +651,154 @@ describe('RB4 temporal invalidation (belief evolution) — real PGLite round-tri
     expect(edgesTo(links, 'oldmark', 'works_at').length).toBe(0) // INVALIDATED (markdown link)
     expect(edgesTo(links, 'newmark', 'works_at').length).toBe(1) // CURRENT
   }, 60_000)
+
+  // ── Out-of-scope phrasings: RB4 is OBJECT-REPLACEMENT only. An entity RENAME
+  //    and an ENDED affiliation with NO replacement are NOT modelled — the
+  //    restricted prompt no longer asks for a `supersedes` marker on them, so
+  //    such a turn just accretes normally. These pin the graceful outcome (no
+  //    misleading invalidation, no bogus supersession note) + keep it mutation-
+  //    stable (flag ON throughout). ──────────────────────────────────────────
+
+  test('flag ON: an entity RENAME ("Renco is now Zephyr") does NOT invalidate the subject\'s existing relation', async () => {
+    const ownerDataDir = mkdtempSync(join(tmpdir(), 'scribe-rb4-rename-'))
+    const syncHook = new GBrainSyncHook({
+      memoryStore: new GBrainMemoryStore(client),
+      gbrainMcp: client,
+    })
+
+    await client.call('put_page', {
+      slug: 'renco',
+      content: '---\nslug: renco\ntype: company\n---\n\nA company.\n',
+    })
+    // Rae works at Renco.
+    await writeEntity(
+      {
+        ownerDataDir,
+        kind: 'person',
+        slug: 'rae-kade',
+        originInstance: 'rb4',
+        receivingInstanceSlug: 'rb4',
+        body: {
+          frontmatter: { slug: 'rae-kade', type: 'person', name: 'Rae Kade' },
+          compiledTruth: '# Rae Kade\n\nAn engineer.\n\n## Relationships\n\n- Works at [[renco]].\n',
+          timelineAppend: { ts: new Date(t0).toISOString(), source: 'import:onboarding', body: 'seeded' },
+        },
+      },
+      { syncHook },
+    )
+    let links = await client.call('get_links', { slug: 'rae-kade' })
+    expect(edgesTo(links, 'renco', 'works_at').length).toBe(1)
+
+    // A RENAME turn. The restricted prompt does NOT ask for `supersedes` on a
+    // rename (the entity's own identity changed — nothing to key on), so the
+    // faithful extraction carries only entities + an additive `mentions`, NO
+    // supersede marker.
+    const scribe = createScribe({
+      substrate: cannedSubstrate(
+        JSON.stringify({
+          entities: [
+            { name: 'Rae Kade', kind: 'person', fact: 'an engineer' },
+            { name: 'Renco', kind: 'company', fact: 'now called Zephyr' },
+            { name: 'Zephyr', kind: 'company', fact: 'the renamed Renco' },
+          ],
+          relations: [{ subject: 'Rae Kade', predicate: 'mentions', object: 'Zephyr' }],
+        }),
+      ),
+      syncHook,
+      ownerDataDir,
+      project_slug: 'rb4-rename',
+      budget: createState(join(ownerDataDir, '.scribe-budget.json'), t0),
+      writeEntity,
+      now: () => t0 + 1000,
+      supersede: true, // flag ON — yet a rename must NOT trigger invalidation
+    })
+    const out = await scribe.extractAndWrite({
+      text: 'Renco has rebranded and is now called Zephyr; Rae Kade still remembers the old name from her early days there.',
+      observed_at: t0 + 1000,
+    })
+    expect(out.ran).toBe(true)
+
+    const onDisk = readFileSync(join(ownerDataDir, 'entities', 'people', 'rae-kade.md'), 'utf8')
+    const compiled = extractCompiledTruth(onDisk)
+    // GRACEFUL: the prior employment is NOT retracted (rename is out of scope);
+    // the additive mention accretes; NO supersession is fabricated.
+    expect(compiled).toContain('Works at [[renco]].') // PRESERVED (not invalidated)
+    expect(compiled).toContain('Mentions [[zephyr]].') // additive accretion
+    const timeline = extractTimeline(onDisk)
+    expect(timeline.some((e) => e.body.includes('superseded'))).toBe(false) // no bogus note
+
+    // The existing edge is intact; no edge was invalidated by the rename.
+    links = await client.call('get_links', { slug: 'rae-kade' })
+    expect(edgesTo(links, 'renco', 'works_at').length).toBe(1) // PRESERVED
+  }, 60_000)
+
+  test('flag ON: an ENDED affiliation with NO replacement ("Jane left Endco") does NOT retract or fabricate a supersession', async () => {
+    const ownerDataDir = mkdtempSync(join(tmpdir(), 'scribe-rb4-ended-'))
+    const syncHook = new GBrainSyncHook({
+      memoryStore: new GBrainMemoryStore(client),
+      gbrainMcp: client,
+    })
+
+    await client.call('put_page', {
+      slug: 'endco',
+      content: '---\nslug: endco\ntype: company\n---\n\nA company.\n',
+    })
+    // Jane works at Endco.
+    await writeEntity(
+      {
+        ownerDataDir,
+        kind: 'person',
+        slug: 'jane-poll',
+        originInstance: 'rb4',
+        receivingInstanceSlug: 'rb4',
+        body: {
+          frontmatter: { slug: 'jane-poll', type: 'person', name: 'Jane Poll' },
+          compiledTruth: '# Jane Poll\n\nAn engineer.\n\n## Relationships\n\n- Works at [[endco]].\n',
+          timelineAppend: { ts: new Date(t0).toISOString(), source: 'import:onboarding', body: 'seeded' },
+        },
+      },
+      { syncHook },
+    )
+    let links = await client.call('get_links', { slug: 'jane-poll' })
+    expect(edgesTo(links, 'endco', 'works_at').length).toBe(1)
+
+    // An ENDED-affiliation turn with NO new employer: there is no new object to
+    // point at, so the restricted prompt does NOT ask for `supersedes`. The
+    // faithful extraction has NO replacing relation.
+    const scribe = createScribe({
+      substrate: cannedSubstrate(
+        JSON.stringify({
+          entities: [
+            { name: 'Jane Poll', kind: 'person', fact: 'has left her role at Endco' },
+            { name: 'Endco', kind: 'company', fact: 'her former employer' },
+          ],
+          relations: [],
+        }),
+      ),
+      syncHook,
+      ownerDataDir,
+      project_slug: 'rb4-ended',
+      budget: createState(join(ownerDataDir, '.scribe-budget.json'), t0),
+      writeEntity,
+      now: () => t0 + 1000,
+      supersede: true, // flag ON — yet an ended affiliation must NOT trigger invalidation
+    })
+    const out = await scribe.extractAndWrite({
+      text: 'Jane Poll has left her role at Endco and is taking some time off before deciding what she wants to do next.',
+      observed_at: t0 + 1000,
+    })
+    expect(out.ran).toBe(true)
+
+    const onDisk = readFileSync(join(ownerDataDir, 'entities', 'people', 'jane-poll.md'), 'utf8')
+    const compiled = extractCompiledTruth(onDisk)
+    // GRACEFUL: RB4 does not retract an ended-without-replacement affiliation
+    // (out of scope) — the fact persists, and NO supersession is fabricated.
+    expect(compiled).toContain('Works at [[endco]].') // RETAINED (not retracted)
+    const timeline = extractTimeline(onDisk)
+    expect(timeline.some((e) => e.body.includes('superseded'))).toBe(false) // no bogus note
+
+    // The edge is untouched — no invalidation on an ended affiliation.
+    links = await client.call('get_links', { slug: 'jane-poll' })
+    expect(edgesTo(links, 'endco', 'works_at').length).toBe(1) // RETAINED
+  }, 60_000)
 })
