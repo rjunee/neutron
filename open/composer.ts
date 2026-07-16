@@ -236,6 +236,8 @@ import { resolveProjectEmoji } from '@neutronai/contracts/default-emoji.ts'
 import {
   createProjectRow,
   materializeProjectScaffold,
+  ensureProjectRow,
+  buildScaffoldMaterializer,
   type ProjectScaffoldDeps,
 } from '@neutronai/gateway/wiring/project-create.ts'
 import type { CreateProjectToolService } from '@neutronai/gateway/wiring/create-project-tool.ts'
@@ -2405,6 +2407,14 @@ export function buildOpenGraphComposer(
             ...(projectDocComposer !== null ? { projectDocComposer } : {}),
             ...(projectKickoff !== null ? { projectKickoff } : {}),
             gbrainSyncHook,
+            // C8 — inject the shared create-project seams (composition layer;
+            // project-create.ts) the finalizer used to import directly. Same
+            // functions/instance the create-project capability + the pre-C8
+            // in-module `buildScaffoldMaterializer(deps)` used: `scaffoldDeps`
+            // carries the identical owner_home/project_slug/db/projectDocComposer/
+            // gbrainSyncHook, so the materializer is behaviour-identical.
+            ensureProjectRow,
+            materializer: buildScaffoldMaterializer(scaffoldDeps),
             emitProjectsChanged: (user_id: string): void => emitProjectsChangedIfChanged(user_id),
             emitOnboardingCompleted: (user_id: string): void => fanOnboardingCompleted(user_id),
             emitChatMessage: (input): Promise<void> =>
