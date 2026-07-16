@@ -1039,9 +1039,27 @@ export function buildOpenGraphComposer(
       nexus: nexusStore,
       memoryIndexRead,
       setMemoryIndexWorkHandles,
+      reflectLoop,
       cleanups: memoryCleanups,
     } = wireMemory(wiringCtx)
     for (const cleanup of memoryCleanups) realmodeCleanups.push(cleanup)
+
+    // RB3 ([BEHAVIOR]) — arm the scheduled reflect-consolidation loop when the
+    // perfect-recall flag is on (`wireMemory` returns null otherwise, so this is
+    // a no-op by default and the loop NEVER arms). Register-before-start
+    // (failure-atomic, dup-name → throw at boot) then quiescing stop on shutdown,
+    // exactly like the chunked-upload sweeper + the dispatch lifecycle watchdog.
+    if (reflectLoop !== null) {
+      loopRegistry.register(reflectLoop.describe())
+      reflectLoop.start()
+      realmodeCleanups.push(async () => {
+        try {
+          await reflectLoop.stop()
+        } catch {
+          // best-effort shutdown cleanup — stop() never rejects
+        }
+      })
+    }
 
     // RC2 ([BEHAVIOR]) — the tick loop's `on_run_terminal` = the skill-forge audit
     // + (flag-gated) the RC2 nexus producer, each ISOLATED (see
