@@ -212,10 +212,10 @@ export async function installCore(
     {
       // 2026-05-12 — the SDK now keys SecretsStore reads on the FROZEN
       // `owner_handle` (see `auth/secrets-store.ts` header). The
-      // cores lifecycle's `project_slug` field carries the same value
-      // at install time (owner_handle === project_slug for a fresh
+      // cores lifecycle's `owner_slug` field carries the same value
+      // at install time (owner_handle === owner_slug for a fresh
       // instance). A future plumb-through of owner_handle distinct
-      // from project_slug lands in a follow-up.
+      // from owner_slug lands in a follow-up.
       owner_handle: input.owner_slug,
       store: auditedStore,
       core_id: core.slug,
@@ -442,10 +442,10 @@ async function driveSecretsInstall(input: {
 async function persistOrRotate(input: {
   secretsStore: SecretsStore
   /**
-   * 2026-05-12 — the Cores lifecycle uses `project_slug` as its
+   * 2026-05-12 — the Cores lifecycle uses `owner_slug` as its
    * caller-facing identity; on-disk SecretsStore writes are keyed on
    * the FROZEN `owner_handle`. At first install
-   * `project_slug === owner_handle`, so this mapping is a no-op for
+   * `owner_slug === owner_handle`, so this mapping is a no-op for
    * fresh instances; after a rename, the caller MUST pass the frozen
    * handle here. See `auth/secrets-store.ts` file header. Branded `OwnerHandle`
    * so the "MUST pass the frozen handle" contract is compiler-enforced.

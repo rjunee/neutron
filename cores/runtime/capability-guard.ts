@@ -19,7 +19,7 @@
  *
  * The composition shape:
  *
- *     guard = new CapabilityGuard({manifest, core_slug, project_slug, audit})
+ *     guard = new CapabilityGuard({manifest, core_slug, owner_slug, audit})
  *     handler = guard.wrapToolHandler({tool_name, capability_required, fn})
  *     await handler(input)
  *
