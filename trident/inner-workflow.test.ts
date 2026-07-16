@@ -400,12 +400,11 @@ describe('inner-workflow.mjs — exec-model terminal-result harvest signal', () 
 })
 
 describe('inner-workflow.mjs — RB2 (b) reflection trust boundary + subordination', () => {
-  // This script is NOT runnable/importable under bun/node (Workflow-runtime globals +
-  // top-level return + no module resolution — see the file header), so the ROLE→prompt
-  // gating + placement are codified + executed behaviorally in `build-agent-prompt.ts`
-  // (see `build-agent-prompt.test.ts`) and the derivation in `reflection-guidance.test.ts`.
-  // These source assertions BIND the real `.mjs` sites: the guidance is APPENDED after
-  // the task on the Forge builder sites and NOWHERE on the review-gate sites.
+  // The ROLE→prompt gating + placement are covered BEHAVIORALLY against the as-built
+  // script by `inner-workflow-assembly.test.ts` (a mock-execution harness that captures
+  // real agent() prompts) and the derivation by `reflection-guidance.test.ts`. These
+  // source assertions are belt-and-suspenders: the guidance is APPENDED after the task
+  // on the Forge builder sites and NOWHERE on the review-gate sites.
   test('destructures the ready-to-append reflectionGuidance from the args contract (defaults to \'\')', () => {
     // The guidance is DERIVED in the launcher (testable TS) and threaded ready — the
     // .mjs carries NO derivation logic of its own (that would be un-executable here).

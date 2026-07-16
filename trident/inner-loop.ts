@@ -77,7 +77,7 @@ export interface InnerLoopInput {
    *  (or null when nothing has been learned). Threaded into the workflow args so the
    *  FORGE BUILDER (forge:build + fix rounds) re-grounds on owner corrections —
    *  reflection was chat-only before RB2. NOT the review gate: the workflow injects
-   *  it into Forge ONLY, never argus:* (trust boundary, see `build-agent-prompt.ts`).
+   *  it into Forge ONLY, never argus:* (trust boundary — verified in `inner-workflow-assembly.test.ts`).
    *  Null/empty → a clean no-op (no block spliced), so a fresh instance is unchanged. */
   reflection_context?: string | null
 }
@@ -220,7 +220,7 @@ export function buildWorkflowArgs(input: InnerLoopInput): Record<string, unknown
     // agents the workflow APPENDS it (never prepends — it stays lower-priority than
     // the fixed contract/task in a tool-enabled agent) to the FORGE BUILDER path ONLY
     // (forge:build + fix rounds) so owner corrections steer what gets built — NEVER
-    // the independent argus review gate (trust boundary, see build-agent-prompt.ts).
+    // the independent argus review gate (trust boundary — verified in inner-workflow-assembly.test.ts).
     // Like EVERY workflow arg (`task`, `models`, `codexHome`) this value also transits
     // the fire-LAUNCHER's prompt (it embeds the args JSON); that launcher is a
     // locked-down fire-and-reply agent told to treat `args` as OPAQUE DATA and never

@@ -120,7 +120,7 @@ export interface MiscCompositionInput {
      * launching run. The composer wires this to the SAME `reflection` instance the
      * live-agent chat turn reads (`reflection.loadContext()`), so owner corrections
      * reach the FORGE BUILDER (forge:build + fix rounds) — NOT the independent argus
-     * review gate (trust boundary — see `trident/build-agent-prompt.ts`). Reflection
+     * review gate (trust boundary — verified in `trident/inner-workflow-assembly.test.ts`). Reflection
      * was chat-only before RB2. Returns null when nothing is learned → a clean no-op.
      */
     resolve_reflection_context?: (

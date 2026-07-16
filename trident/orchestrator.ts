@@ -102,7 +102,7 @@ export interface BuildTridentOrchestratorOptions {
    * launching run, threaded into the inner workflow so the FORGE BUILDER (forge:build
    * + fix rounds) re-grounds on owner corrections (reflection was chat-only before
    * RB2). NOT the independent review gate: the workflow injects it into Forge ONLY,
-   * never argus:* (trust boundary — see `build-agent-prompt.ts`). The composer wires
+   * never argus:* (trust boundary — enforced in `inner-workflow.mjs`, verified in `inner-workflow-assembly.test.ts`). The composer wires
    * this to the SAME `reflection` instance the live-agent chat turn reads
    * (`reflection.loadContext()`), so the corrections Forge sees are the same ones
    * chat applies. Returns null

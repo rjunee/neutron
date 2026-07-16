@@ -48,8 +48,8 @@ ONLY** — `forge:build` and every `forge:fix-round-*` — so owner corrections 
 what gets built.
 
 Two layered defenses guard this security-sensitive path (both codified +
-behaviorally tested in `trident/build-agent-prompt.ts` /
-`trident/reflection-guidance.ts`):
+behaviorally tested against the as-built workflow in
+`trident/inner-workflow-assembly.test.ts` + `trident/reflection-guidance.ts`):
 
 1. **Trust boundary:** the block is NEVER given to the independent review gate —
    `argus:claude`, `argus:adversarial`, `argus:synthesis`, or the external

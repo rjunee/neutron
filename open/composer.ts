@@ -3508,7 +3508,7 @@ export function buildOpenGraphComposer(
               // RB2 (b) — thread the owner's recent reflection corrections/diary into
               // the inner workflow so the FORGE BUILDER (forge:build + fix rounds)
               // re-grounds on owner corrections — NOT the independent argus review
-              // gate (trust boundary, see trident/build-agent-prompt.ts). Reflection
+              // gate (trust boundary — verified in trident/inner-workflow-assembly.test.ts). Reflection
               // was chat-only before RB2. Reuses the SAME `reflection` instance the
               // live-agent chat turn reads; corrections are owner-wide (not
               // scope-filtered), so the run arg is unused. Null → a clean no-op.

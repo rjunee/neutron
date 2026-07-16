@@ -172,9 +172,11 @@ const forgeBranch = branch || `trident/${slug}`
 //     APPENDED as lower-priority advisory data AFTER the fixed contract + task, NEVER
 //     prepended, and wrapped in `buildReflectionGuidance`'s framing that forbids it
 //     from overriding the task, the contract, or repository/security/tool-use rules.
-// Both are codified + behaviorally tested in `trident/build-agent-prompt.ts` (the
-// .mjs cannot import it — no Workflow-runtime module resolution — so the roles +
-// placement are also asserted against this source in inner-workflow.test.ts).
+// Both defenses are verified BEHAVIORALLY against THIS as-built script by
+// `inner-workflow-assembly.test.ts` (it strips the single `export`, runs the body
+// as an AsyncFunction with mocked runtime globals, and captures every agent()
+// prompt — asserting Forge roles carry the guidance and NO argus role does), with
+// `inner-workflow.test.ts` source assertions as belt-and-suspenders.
 //
 // Empty string → every prompt is byte-identical to pre-RB2.
 
