@@ -59,6 +59,7 @@ export {
 export {
   REMINDER_PATTERN_NAMES,
   SMART_WRAP_PRELUDE,
+  SMART_WRAP_SENTINEL,
   UnknownReminderPatternError,
   buildSmartWrapComposer,
   isReminderPatternName,

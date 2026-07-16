@@ -8,21 +8,20 @@
  *
  *   Shape A (literal)     — the input `body` verbatim.
  *   Shape B (smart_wrap)  — prepend the LOCKED smart-wrap prelude so
- *                           the fire-time agent fetches context (weather,
- *                           calendar, STATUS.md) and composes a fresh
+ *                           the fire-time agent gathers context (the
+ *                           project's STATUS.md) and composes a fresh
  *                           message at fire time.
  *   Shape C (pattern)     — load a named pattern body from
  *                           `prompts/reminder-patterns.md` verbatim +
  *                           substitute caller-supplied `FILL:<slot>`
  *                           markers.
  *
- * The Shape-B prelude string is byte-identical (modulo `{{OWNER_HOME}}`
- * template substitution) to the Nova `remind` skill's Shape-B block.
- * The fire-time agent's branch detection relies on the exact opening
- * "Compose a smart version of this reminder ..." prefix; changing this
- * literal would break fire-time composition for every existing
- * smart-wrapped reminder. The snapshot test in
- * `__tests__/smart-wrap.test.ts` pins the prelude bytes so any future
+ * The Shape-B prelude is an explicit composition instruction persisted
+ * into the reminder body. It is stored verbatim (modulo `{{OWNER_HOME}}`
+ * template substitution at fire time) and names only Open-real context
+ * sources. Changing this literal changes the stored body of every
+ * existing smart-wrapped reminder, so the snapshot test in
+ * `__tests__/smart-wrap.test.ts` pins the prelude bytes and any future
  * drift surfaces as a deliberate diff.
  *
  * Shape C delegates pattern resolution to a caller-supplied
@@ -49,18 +48,22 @@ export const REMINDER_PATTERN_NAMES = [
 export type ReminderPatternName = typeof REMINDER_PATTERN_NAMES[number]
 
 /**
- * The locked smart-wrap prelude. Lifted verbatim from the Nova `remind`
- * SKILL.md "Shape B" block with the path-template substitution
- * (`scripts/...` → `{{OWNER_HOME}}/scripts/...`, `Projects/...` →
- * `{{OWNER_HOME}}/Projects/...`) — the same substitution Nova's
- * prompts/ lift applied.
+ * The locked smart-wrap prelude — an explicit fire-time composition
+ * instruction persisted into the reminder body for Shape B. It names
+ * ONLY Open-real context sources: the destination project's recent state
+ * from its `STATUS.md` (the dispatcher's `ReminderContextSource` gathers
+ * that content and hands it to the compose agent, which also has read-only
+ * Read/Glob/Grep — `reminders/dispatcher.ts` + `reminders/context.ts`),
+ * plus the clock. It deliberately references NO external shell tooling —
+ * Open ships no weather / telegram-post / calendar CLI helpers; the
+ * dispatcher composes the nudge and posts it through the internal
+ * `ReminderOutbound` seam.
  *
- * The fire-time agent (`prompts/reminder-agent-base.md`) reads the
- * `Compose a smart version of this reminder ...` opening line as the
- * Shape-B detection trigger. The template substitution happens at fire
- * time via the existing prompt-template loader, NOT in the composer —
- * the composer stores the un-substituted literal so an owner-home
- * rename doesn't poison existing reminders.
+ * The prelude carries NO template tokens (`{{...}}`): the persisted body is
+ * fed to the fire-time substrate VERBATIM by `buildReminderPrompt`
+ * (`reminders/prompt.ts`) with no template substitution, so any
+ * `{{OWNER_HOME}}` here would reach the agent unresolved as a literal,
+ * nonexistent path. It stays path-free instead.
  *
  * Exported so the snapshot test + the production-composer integration
  * test can compare the persisted `message` field against this literal
@@ -68,18 +71,30 @@ export type ReminderPatternName = typeof REMINDER_PATTERN_NAMES[number]
  */
 export const SMART_WRAP_PRELUDE: string =
   'Compose a smart version of this reminder using available context ' +
-  '(current weather via {{OWNER_HOME}}/scripts/weather.sh --for-reminder, ' +
-  'calendar via gog calendar events --today, recent project state from ' +
-  '{{OWNER_HOME}}/Projects/<slug>/STATUS.md, time of day). Keep it 1-3 ' +
-  'sentences, action-oriented, no preamble, no em dashes. If no useful ' +
-  'context is available, deliver the original message verbatim.'
+  "(the destination project's recent state from its STATUS.md, plus the day " +
+  'of week and time of day). Keep it 1-3 sentences, action-oriented, no ' +
+  'preamble, no em dashes. If no useful context is available, deliver the ' +
+  'original message verbatim.'
 
 /**
  * The body the user typed is appended after the prelude as a trailing
  * "Original reminder: <body>" line. The fire-time agent reads this
- * exact prefix to locate the user's literal phrase.
+ * exact prefix to locate the user's literal phrase, and the no-LLM
+ * degrade (`literalFallback` in `@neutronai/reminders/message-shape.ts`)
+ * extracts it to post the user's original words rather than the
+ * composition instruction.
  */
 const ORIGINAL_REMINDER_PREFIX = 'Original reminder: '
+
+/**
+ * Leading sentinel that marks a persisted body as a Shape-B composition
+ * instruction. The fire-time classifier (`classifyReminderMessage` in
+ * `@neutronai/reminders/message-shape.ts`) routes a body to the
+ * `smart-wrap` branch ONLY when it opens with this sentinel — without it
+ * the prelude would be misclassified as a plain `literal` and posted
+ * verbatim. Kept in lockstep with that module's `SMART_RE`.
+ */
+export const SMART_WRAP_SENTINEL = '[smart] '
 
 export type ReminderMode =
   | { kind: 'literal' }
@@ -149,7 +164,7 @@ export function buildSmartWrapComposer(deps: SmartWrapDeps): SmartWrapComposer {
         }
       }
       if (mode.kind === 'smart_wrap') {
-        const message = `${SMART_WRAP_PRELUDE}\n\n${ORIGINAL_REMINDER_PREFIX}${input.body}`
+        const message = `${SMART_WRAP_SENTINEL}${SMART_WRAP_PRELUDE}\n\n${ORIGINAL_REMINDER_PREFIX}${input.body}`
         return {
           message,
           composed: true,

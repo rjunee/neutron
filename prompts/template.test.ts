@@ -129,12 +129,19 @@ describe('loadPrompt', () => {
     }
   })
 
-  test('the reminder prompts substitute {{TELEGRAM_CHAT_ID}} (no baked-in chat id survives)', () => {
+  test('the reminder prompts resolve cleanly and carry no Telegram chat id (delivery is the internal outbound seam, not tg-post)', () => {
+    // N7 (2026-07): Open reminders are composed by the fire-time agent and
+    // posted through the gateway's ReminderOutbound seam, NOT by shelling out
+    // to `tg-post.sh <chat_id>`. So the reminder prompts reference no
+    // {{TELEGRAM_CHAT_ID}} and bake in no literal chat id — only the
+    // owner-home path token, which must still substitute cleanly.
     for (const name of ['reminder-agent-base.md', 'reminder-patterns.md']) {
       const out = loadPrompt(name, SYNTHETIC_VARS)
-      // The owner chat id was actually injected — not left as literal text.
-      expect(out).toContain(SYNTHETIC_CHAT_ID)
       expect(out).not.toContain('{{TELEGRAM_CHAT_ID}}')
+      expect(out).not.toContain(SYNTHETIC_CHAT_ID)
+      expect(out).toContain(SYNTHETIC_OWNER_HOME)
+      // Nothing unresolved leaks through.
+      expect(out).not.toMatch(/\{\{[A-Z_][A-Z0-9_]*\}\}/)
     }
   })
 
@@ -193,7 +200,9 @@ describe('buildPromptVars', () => {
       TELEGRAM_CHAT_ID: SYNTHETIC_CHAT_ID,
     })
     const out = loadPrompt('reminder-agent-base.md', vars)
-    expect(out).toContain(SYNTHETIC_CHAT_ID)
+    // End-to-end: buildPromptVars → loadPrompt substitutes the owner-home
+    // path and leaves no unresolved uppercase template tokens.
+    expect(out).toContain(SYNTHETIC_OWNER_HOME)
     expect(out).not.toMatch(/\{\{[A-Z_][A-Z0-9_]*\}\}/)
   })
 })

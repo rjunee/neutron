@@ -42,6 +42,69 @@ describe('classifyReminderMessage', () => {
     }
   })
 
+  test('classifies from the FIRST line only — a later PATTERN: line does not hijack a literal', () => {
+    // Codex N7 blocker 2: PATTERN detection must be anchored to the leading
+    // line, so arbitrary user text mentioning "PATTERN:" stays literal.
+    const s = classifyReminderMessage('remind me to fix the PATTERN: parser bug\nnotes below')
+    expect(s.kind).toBe('literal')
+  })
+
+  test('the [smart] sentinel wins over a PATTERN: line buried in the body', () => {
+    // A smart-wrap body carries the user's original text verbatim in its tail;
+    // a "PATTERN: ..." line there must NOT flip the whole thing to a pattern.
+    const s = classifyReminderMessage(
+      '[smart] compose a context-aware nudge\n\nOriginal reminder: first line\nPATTERN: made-up-thing\nlast line',
+    )
+    expect(s.kind).toBe('smart-wrap')
+  })
+
+  test('BACKWARD-COMPAT: a legacy sentinel-less smart-wrap row (old persisted bytes) still classifies as smart-wrap', () => {
+    // Reminders persisted BEFORE the `[smart]` sentinel was added to the composer
+    // open directly with the locked prelude and carry NO sentinel. Without legacy
+    // recognition these fall through to `literal` and post the whole composition
+    // instruction. This pins the old persisted format (prelude opening + the
+    // `Original reminder:` tail the old composer wrote).
+    const legacy =
+      'Compose a smart version of this reminder using available context ' +
+      '(recent project state from {{OWNER_HOME}}/Projects/<slug>/STATUS.md read ' +
+      'with your Read/Glob/Grep tools, the day of week and time of day). Keep it ' +
+      '1-3 sentences, action-oriented, no preamble, no em dashes. If no useful ' +
+      'context is available, deliver the original message verbatim.\n\n' +
+      'Original reminder: walk the dogs'
+    const s = classifyReminderMessage(legacy)
+    expect(s.kind).toBe('smart-wrap')
+    // The no-LLM degrade posts the user's original phrase, NOT the whole prelude.
+    expect(literalFallback(s)).toBe('walk the dogs')
+  })
+
+  test('a literal that merely OPENS with the prelude phrase (no Original reminder: tail) stays literal', () => {
+    // Legacy recognition requires the FULL locked structure. A user body that
+    // happens to start with the prelude words must NOT be promoted to an
+    // authoritative composition instruction (Codex N7 legacy-breadth blocker).
+    const notLegacy =
+      'Compose a smart version of this reminder using available context and text me the result'
+    const s = classifyReminderMessage(notLegacy)
+    expect(s.kind).toBe('literal')
+    if (s.kind === 'literal') expect(s.body).toBe(notLegacy)
+  })
+
+  test('the prelude opening with a malformed/empty Original reminder line stays literal', () => {
+    const malformed =
+      'Compose a smart version of this reminder using available context.\n\nOriginal reminder:'
+    const s = classifyReminderMessage(malformed)
+    expect(s.kind).toBe('literal')
+  })
+
+  test('a noncanonical prelude opening + an Original reminder: line (missing the closing phrase) stays literal', () => {
+    // Codex N7 legacy-breadth boundary: opening phrase + a tail is NOT enough —
+    // the frozen prelude closing phrase must also be present, so this crafted
+    // literal is not promoted to an authoritative composition instruction.
+    const s = classifyReminderMessage(
+      'Compose a smart version of this reminder using available context and text me the result\nOriginal reminder: arbitrary note',
+    )
+    expect(s.kind).toBe('literal')
+  })
+
   test('[ROUTING] header is parsed off and stripped from the body', () => {
     const msg = '[ROUTING] target_thread: 4242\ntake out the trash'
     const s = classifyReminderMessage(msg)
@@ -83,6 +146,19 @@ describe('literalFallback', () => {
     expect(literalFallback(classifyReminderMessage('[smart] ping about standup'))).toBe(
       'ping about standup',
     )
+  })
+
+  test('smart-wrap with an "Original reminder:" tail → degrades to the original phrase, not the instruction', () => {
+    // The Reminders Core composer persists `[smart] <prelude>\n\nOriginal
+    // reminder: <body>`; the no-LLM degrade must post <body>, never the
+    // composition prelude. Regression for N7 Codex blocker 1.
+    const composed =
+      '[smart] Compose a smart version of this reminder using available context ' +
+      '(recent project state from STATUS.md, the day of week and time of day).\n\n' +
+      'Original reminder: walk the dogs'
+    const out = literalFallback(classifyReminderMessage(composed))
+    expect(out).toBe('walk the dogs')
+    expect(out).not.toContain('Compose a smart version')
   })
 
   test('pattern → GOAL line, FILL marker stripped, never raw scaffold', () => {
