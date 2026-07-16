@@ -31,6 +31,7 @@ import { GBrainMemoryStore } from '@neutronai/gbrain-memory/gbrain-memory-store.
 import { GBrainSyncHook } from '@neutronai/gbrain-memory/GBrainSyncHook.ts'
 import { writeEntity } from '@neutronai/runtime/entity-writer.ts'
 import { createScribe } from '../index.ts'
+import { writeExtractionToGBrain } from '../write-to-gbrain.ts'
 import { createState } from '../scribe-budget.ts'
 import { bootPgliteBrain } from '@neutronai/gbrain-memory/__tests__/boot-pglite-brain.ts'
 
@@ -1750,4 +1751,87 @@ describe('RB4 temporal invalidation (belief evolution) — real PGLite round-tri
     expect(edgesTo(links, 'ulold', 'works_at').length).toBe(0) // RETIRED
     expect(edgesTo(links, 'ulnew', 'advises').length).toBe(1) // strongest edge to the replacement
   }, 60_000)
+})
+
+// ── Concurrency: scribe's READ→strip/merge→WRITE of a page must be atomic per
+//    (kind,slug) so two concurrent same-subject writes (a supersession + an
+//    unrelated additive relation) can't clobber each other (Codex lost-update).
+//    Real filesystem + real writeEntity; no gbrain needed (compiled-truth on disk
+//    is the source of truth for edges). ─────────────────────────────────────────
+describe('RB4 concurrent same-subject writes are atomic (no lost update)', () => {
+  const seedAndRace = async (
+    order: 'A-then-B' | 'B-then-A' | 'concurrent',
+  ): Promise<string> => {
+    const dir = mkdtempSync(join(tmpdir(), 'scribe-rb4-race-'))
+    // Seed: Aria works_at Cco.
+    await writeEntity(
+      {
+        ownerDataDir: dir,
+        kind: 'person',
+        slug: 'aria-lume',
+        originInstance: 'x',
+        receivingInstanceSlug: 'x',
+        body: {
+          frontmatter: { slug: 'aria-lume', type: 'person', name: 'Aria Lume' },
+          compiledTruth: '# Aria Lume\n\nAn engineer.\n\n## Relationships\n\n- Works at [[cco]].\n',
+          timelineAppend: { ts: new Date(t0).toISOString(), source: 'seed', body: 'seeded' },
+        },
+      },
+      {},
+    )
+    // A: supersede Cco → Dco. B: unrelated additive advises Bboard.
+    const A = (): Promise<unknown> =>
+      writeExtractionToGBrain(
+        {
+          extraction: {
+            entities: [
+              { name: 'Aria Lume', kind: 'person' },
+              { name: 'Dco', kind: 'company' },
+            ],
+            relations: [{ subject: 'Aria Lume', predicate: 'works_at', object: 'Dco', supersedes: 'Cco' }],
+          },
+          ownerDataDir: dir,
+          source: 'chat:x',
+          ts: new Date(t0 + 1000).toISOString(),
+          ownSlug: 'x',
+        },
+        { writeEntity, supersede: true },
+      )
+    const B = (): Promise<unknown> =>
+      writeExtractionToGBrain(
+        {
+          extraction: {
+            entities: [
+              { name: 'Aria Lume', kind: 'person' },
+              { name: 'Bboard', kind: 'company' },
+            ],
+            relations: [{ subject: 'Aria Lume', predicate: 'advises', object: 'Bboard' }],
+          },
+          ownerDataDir: dir,
+          source: 'chat:x',
+          ts: new Date(t0 + 2000).toISOString(),
+          ownSlug: 'x',
+        },
+        { writeEntity, supersede: true },
+      )
+    if (order === 'A-then-B') {
+      await A()
+      await B()
+    } else if (order === 'B-then-A') {
+      await B()
+      await A()
+    } else {
+      await Promise.all([A(), B()])
+    }
+    return extractCompiledTruth(readFileSync(join(dir, 'entities', 'people', 'aria-lume.md'), 'utf8'))
+  }
+
+  for (const order of ['A-then-B', 'B-then-A', 'concurrent'] as const) {
+    test(`order=${order}: supersession applied AND unrelated relation preserved`, async () => {
+      const compiled = await seedAndRace(order)
+      expect(compiled).not.toContain('[[cco]]') // supersession applied (not restored)
+      expect(compiled).toContain('Works at [[dco]].') // current employment
+      expect(compiled).toContain('Advises [[bboard]].') // unrelated additive NOT lost
+    }, 30_000)
+  }
 })

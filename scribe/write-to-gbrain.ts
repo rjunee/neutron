@@ -54,10 +54,41 @@ import {
 } from '@neutronai/runtime/auto-link.ts'
 import type { EntityKind, SyncHook } from '@neutronai/runtime/entity-writer.ts'
 import { entitySlugify } from '@neutronai/runtime/entity-slug.ts'
+import { neutralizeAbandonedSettle } from '@neutronai/logger/fire-and-forget.ts'
 import { createLogger } from '@neutronai/logger'
 
 const writeGbrainLog = createLogger('scribe')
 import type { ExtractedEntity, ExtractedRelation, ScribeExtraction } from './extract.ts'
+
+/**
+ * Per-`${kind}/${slug}` serialization for scribe's READ→strip/merge→WRITE of a
+ * page. The entity-writer's own lock (RA1) only guards its render→rename; scribe
+ * computes the FULL-REPLACEMENT compiled-truth + merged frontmatter from a read
+ * that happens OUTSIDE that lock, so two concurrent same-subject scribe writes (a
+ * supersession + an unrelated additive relation) would each read the same base
+ * page and the second commit would clobber the first — undoing the invalidation or
+ * losing the other relation (Codex lost-update). This module-level lock makes the
+ * whole read→merge→writeEntity critical section atomic per key. It is a SEPARATE
+ * map from the entity-writer's lock, so the inner `writeEntity` (which re-locks the
+ * same key on ITS map) never deadlocks. Same `withLock` idiom as `persistence/db.ts`
+ * / `entity-writer.ts`: swallow-`.then` sequencing baton + delete-when-drained. */
+const scribePageLocks = new Map<string, Promise<void>>()
+
+function withScribePageLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
+  const prev = scribePageLocks.get(key) ?? Promise.resolve()
+  const next = prev.then(fn)
+  const settled = next.then(
+    () => undefined,
+    () => undefined,
+  )
+  scribePageLocks.set(key, settled)
+  neutralizeAbandonedSettle(
+    settled.then(() => {
+      if (scribePageLocks.get(key) === settled) scribePageLocks.delete(key)
+    }),
+  )
+  return next
+}
 
 /**
  * Minimal `writeEntity` surface — lets tests inject a recorder without pulling
@@ -251,62 +282,67 @@ export async function writeExtractionToGBrain(
 
   for (const page of orderPagesObjectsFirst(bySlug)) {
     try {
-      // Preserve an existing page's compiled-truth + frontmatter (append-only /
-      // merge); compose fresh for a new entity. See the module header for the
-      // data-loss rationale.
-      const existing = await readExistingPage(input.ownerDataDir, page.kind, page.slug)
-      // RB4 — under the flag, DROP any superseded prior sentence from an existing
-      // page's compiled-truth (belief evolution); the writer's `removedLinks` diff
-      // then invalidates the stale gbrain edge. The append-only timeline is the
-      // durable history: each write records its relation assertions ADDITIVELY (a
-      // pure function of the extraction — see `timelineBody`), so a superseded
-      // belief that was first recorded under the flag keeps its own dated
-      // `<pred> <obj>` row at its original time, and nothing is ever rewritten or
-      // fabricated. No state-dependent transition note ⇒ replays are byte-identical.
-      const compiledTruth =
-        existing !== null
-          ? mergeExistingCompiledTruth(existing.compiledTruth, page, supersede)
-          : composeNewCompiledTruth(page)
-      // Merge frontmatter: preserve every existing key (mention_count, category,
-      // basis, cadence_hint, …) and only set the keys scribe authoritatively
-      // owns. `writeEntity` does NOT merge frontmatter, so without this the
-      // populator's fields would be clobbered on the first chat touch.
-      const frontmatter: Record<string, unknown> = {
-        ...(existing?.frontmatter ?? {}),
-        slug: page.slug,
-        type: page.kind,
-        name: page.name,
-        source: input.source,
-      }
-      const out = await deps.writeEntity(
-        {
-          ownerDataDir: input.ownerDataDir,
-          kind: page.kind,
+      // Serialize the WHOLE read→strip/merge→writeEntity per (kind,slug) so a
+      // concurrent same-subject scribe write can't clobber this one's full-
+      // replacement compiled-truth (Codex lost-update; see `withScribePageLock`).
+      const out = await withScribePageLock(`${page.kind}/${page.slug}`, async () => {
+        // Preserve an existing page's compiled-truth + frontmatter (append-only /
+        // merge); compose fresh for a new entity. See the module header for the
+        // data-loss rationale. Read INSIDE the lock so the merge sees the latest.
+        const existing = await readExistingPage(input.ownerDataDir, page.kind, page.slug)
+        // RB4 — under the flag, DROP any superseded prior sentence from an existing
+        // page's compiled-truth (belief evolution); the writer's `removedLinks` diff
+        // then invalidates the stale gbrain edge. The append-only timeline is the
+        // durable history: each write records its relation assertions ADDITIVELY (a
+        // pure function of the extraction — see `timelineBody`), so a superseded
+        // belief that was first recorded under the flag keeps its own dated
+        // `<pred> <obj>` row at its original time, and nothing is ever rewritten or
+        // fabricated. No state-dependent transition note ⇒ replays are byte-identical.
+        const compiledTruth =
+          existing !== null
+            ? mergeExistingCompiledTruth(existing.compiledTruth, page, supersede)
+            : composeNewCompiledTruth(page)
+        // Merge frontmatter: preserve every existing key (mention_count, category,
+        // basis, cadence_hint, …) and only set the keys scribe authoritatively
+        // owns. `writeEntity` does NOT merge frontmatter, so without this the
+        // populator's fields would be clobbered on the first chat touch.
+        const frontmatter: Record<string, unknown> = {
+          ...(existing?.frontmatter ?? {}),
           slug: page.slug,
-          body: {
-            frontmatter,
-            compiledTruth,
-            // Append-only provenance. Deterministic body (same for new + existing
-            // pages on identical input) so the writer's (ts,source,body) timeline
-            // dedup makes a repeated identical turn a true no-op.
-            timelineAppend: {
-              ts: input.ts,
-              source: timelineSource,
-              body: timelineBody(page, supersede),
+          type: page.kind,
+          name: page.name,
+          source: input.source,
+        }
+        return deps.writeEntity(
+          {
+            ownerDataDir: input.ownerDataDir,
+            kind: page.kind,
+            slug: page.slug,
+            body: {
+              frontmatter,
+              compiledTruth,
+              // Append-only provenance. Deterministic body (same for new + existing
+              // pages on identical input) so the writer's (ts,source,body) timeline
+              // dedup makes a repeated identical turn a true no-op.
+              timelineAppend: {
+                ts: input.ts,
+                source: timelineSource,
+                body: timelineBody(page, supersede),
+              },
             },
+            // M2.6 Ph1 (#83) — own-origin stamp by default (chat / Cores: origin
+            // === receiving → guard passes). M2.6 Ph4 — the syndication path sets
+            // `originSlug` to the member local_slug (foreign) + carries the owner-
+            // approval-derived whitelist so the boundary guard accepts it.
+            originInstance: input.originSlug ?? input.ownSlug,
+            receivingInstanceSlug: input.ownSlug,
+            ...(input.allowPersistOrigins !== undefined
+              ? { allowPersistOrigins: input.allowPersistOrigins }
+              : {}),
           },
-          // M2.6 Ph1 (#83) — own-origin stamp by default (chat / Cores: origin
-          // === receiving → guard passes). M2.6 Ph4 — the syndication path sets
-          // `originSlug` to the member local_slug (foreign) + carries the owner-
-          // approval-derived whitelist so the boundary guard accepts it.
-          originInstance: input.originSlug ?? input.ownSlug,
-          receivingInstanceSlug: input.ownSlug,
-          ...(input.allowPersistOrigins !== undefined
-            ? { allowPersistOrigins: input.allowPersistOrigins }
-            : {}),
-        },
-        writeDeps,
-      )
+          writeDeps,
+        )
+      })
       if (out.changed) {
         report.pages_written += 1
         report.edges_emitted += Array.isArray(out.newLinks) ? out.newLinks.length : 0
