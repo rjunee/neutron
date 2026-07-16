@@ -30,12 +30,19 @@
  *
  * PINNED KNOWN-DIVERGENCE SNAPSHOT — this test asserts today's divergence
  * AS divergent so it is GREEN today. It is the contract W3 (transcript
- * unification) later flips to full parity: W3 may ONLY change the
- * `DROPPED` entries below to `PRESENT` (and delete the matching
- * divergence comments) — it must not need to touch the harness. See
- * `docs/plans/2026-07-02-world-class-refactor-plan.md` §G2 / §W3.
+ * unification) later flips to full parity: W3/W3a may ONLY change the
+ * `DROPPED` entries below to `PRESENT` (and update the matching divergence
+ * comments) — it must not need to touch the harness. See
+ * `docs/plans/2026-07-02-world-class-refactor-plan.md` §G2 / §W3a / §W3.
  *
- * ── WHY EACH FIELD DROPS TODAY (re-derived against HEAD, 2026-07-03) ──
+ * ── W3a UPDATE (2026-07): the resume-fidelity stage-0 fix landed. The WS
+ * resume path (b) now round-trips ALL FOUR structured fields through the
+ * `app_chat_messages.meta_json` column (`AppWsAdapter.send` stamps it,
+ * `appChatRowToEnvelope` re-applies it), so its column below flipped from
+ * DROPPED to PRESENT. The HTTP-history path (a) still diverges — that column
+ * is W3's (full transcript unification) to flip.
+ *
+ * ── WHY EACH FIELD DROPS / SURVIVES (re-derived against HEAD) ──
  *
  *  Path (a) HTTP history — the wire shape `ChatHistoryTurn`
  *    (`channels/button-store.ts` → `type ChatHistoryTurn`) carries ONLY
@@ -48,19 +55,19 @@
  *                    citations column or field — structurally unstorable.
  *      • doc_refs  → DROPPED: same — no doc_refs column/field on the prompt.
  *
- *  Path (b) WS resume replay — `appChatRowToEnvelope` reconstructs the
- *    agent envelope from an `AppChatRow` (`persistence/app-chat-store.ts`),
- *    which persists ONLY `{ body, role, message_id, seq, client_msg_id,
- *    project_id, attachments, created_at }`. There is NO structured slot
- *    for options/prompt_id/citations/doc_refs, so a resume yields a PLAIN
- *    agent bubble → ALL FOUR DROPPED. This is the row that the SAME live
- *    `send()` in path (c) persisted, so the drop is proven at the real
+ *  Path (b) WS resume replay — `appChatRowToEnvelope` reconstructs the agent
+ *    envelope from an `AppChatRow` (`persistence/app-chat-store.ts`). W3a added
+ *    the nullable `meta_json` slot: `send()` stamps the agent message's
+ *    structured fields (options/prompt_id/citations/doc_refs + kind/image_urls/
+ *    allow_freeform/upload_affordance) at persist time, and the replay
+ *    re-applies them → ALL FOUR PRESENT. This is the SAME row the live
+ *    `send()` in path (c) persisted, so the round-trip is proven at the real
  *    persistence seam, not by a mock.
  *
  *  Path (c) live push — `outgoingToEnvelope` maps ALL FOUR from
  *    `OutgoingMessage.inline_choices` + `adapter_options` → full fidelity.
- *    This is the only full-fidelity path today; both HYDRATION paths (a, b)
- *    diverge from it, which is exactly what W3 unifies.
+ *    After W3a the WS resume path (b) matches it; only the HTTP-history path
+ *    (a) still diverges, which is exactly what the remaining W3 work unifies.
  */
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
@@ -291,43 +298,45 @@ describe('G2 — hydration-parity characterization (3-transcript fidelity matrix
         '\n',
     )
 
-    // ── PINNED KNOWN-DIVERGENCE SNAPSHOT ────────────────────────────────
-    // W3 flips this whole-matrix assertion to full parity by turning the
-    // DROPPED cells PRESENT. It should need to change ONLY this literal
-    // (and the mirrored per-field asserts below).
+    // ── PINNED DIVERGENCE SNAPSHOT (post-W3a) ───────────────────────────
+    // W3a flipped the `wsResume` column to PRESENT (durable meta_json
+    // round-trip). W3 flips the remaining `httpHistory` DROPPED cells to
+    // PRESENT. It should need to change ONLY this literal (and the mirrored
+    // per-field asserts below).
     const PINNED: Matrix = {
-      // options: only the live push carries the button list; both hydration
-      // paths drop it (history keeps resolution_text only; resume is plain).
-      options: { httpHistory: 'DROPPED', wsResume: 'DROPPED', livePush: 'PRESENT' },
-      // prompt_id: survives on HTTP history (it's a button_prompts column),
-      // but the app-chat row has no prompt_id slot, so resume drops it.
-      prompt_id: { httpHistory: 'PRESENT', wsResume: 'DROPPED', livePush: 'PRESENT' },
-      // citations: unstorable on both hydration paths (no column/field).
-      citations: { httpHistory: 'DROPPED', wsResume: 'DROPPED', livePush: 'PRESENT' },
-      // doc_refs: unstorable on both hydration paths (no column/field).
-      doc_refs: { httpHistory: 'DROPPED', wsResume: 'DROPPED', livePush: 'PRESENT' },
+      // options: live push + WS resume (via meta_json) carry the button list;
+      // HTTP history keeps resolution_text only, so it still drops the list.
+      options: { httpHistory: 'DROPPED', wsResume: 'PRESENT', livePush: 'PRESENT' },
+      // prompt_id: survives on HTTP history (a button_prompts column) AND on
+      // resume (W3a persists it in meta_json).
+      prompt_id: { httpHistory: 'PRESENT', wsResume: 'PRESENT', livePush: 'PRESENT' },
+      // citations: resume round-trips them (meta_json); HTTP history has no
+      // column/field so it remains unstorable there.
+      citations: { httpHistory: 'DROPPED', wsResume: 'PRESENT', livePush: 'PRESENT' },
+      // doc_refs: same — round-trips on resume, unstorable on HTTP history.
+      doc_refs: { httpHistory: 'DROPPED', wsResume: 'PRESENT', livePush: 'PRESENT' },
     }
     expect(actual).toEqual(PINNED)
 
-    // ── Mirrored per-field asserts (explicit divergence, W3 flips these) ─
+    // ── Mirrored per-field asserts ──────────────────────────────────────
     // Live push is the full-fidelity reference on every field.
     expect(actual.options.livePush).toBe('PRESENT')
     expect(actual.prompt_id.livePush).toBe('PRESENT')
     expect(actual.citations.livePush).toBe('PRESENT')
     expect(actual.doc_refs.livePush).toBe('PRESENT')
 
-    // DIVERGENT (W3 → PRESENT): options dropped on both hydration paths.
+    // PARITY (W3a): the WS resume path now matches live push on all four.
+    expect(actual.options.wsResume).toBe('PRESENT')
+    expect(actual.prompt_id.wsResume).toBe('PRESENT')
+    expect(actual.citations.wsResume).toBe('PRESENT')
+    expect(actual.doc_refs.wsResume).toBe('PRESENT')
+
+    // DIVERGENT (W3 → PRESENT): HTTP history still strips options/citations/
+    // doc_refs; prompt_id survives there as a real column.
     expect(actual.options.httpHistory).toBe('DROPPED')
-    expect(actual.options.wsResume).toBe('DROPPED')
-    // DIVERGENT (W3 → PRESENT): prompt_id survives HTTP history, dropped on resume.
     expect(actual.prompt_id.httpHistory).toBe('PRESENT')
-    expect(actual.prompt_id.wsResume).toBe('DROPPED')
-    // DIVERGENT (W3 → PRESENT): citations dropped on both hydration paths.
     expect(actual.citations.httpHistory).toBe('DROPPED')
-    expect(actual.citations.wsResume).toBe('DROPPED')
-    // DIVERGENT (W3 → PRESENT): doc_refs dropped on both hydration paths.
     expect(actual.doc_refs.httpHistory).toBe('DROPPED')
-    expect(actual.doc_refs.wsResume).toBe('DROPPED')
 
     // ── Concrete evidence the live push really carried the fields (proves
     //    the DROPPED cells are a real per-path strip, not an empty turn) ──
@@ -335,9 +344,15 @@ describe('G2 — hydration-parity characterization (3-transcript fidelity matrix
     expect(livePush.prompt_id).toBe(PINNED_PROMPT_ID)
     expect(livePush.citations?.[0]?.url).toBe(TURN_CITATIONS[0].url)
     expect(livePush.doc_refs?.[0]?.path).toBe(TURN_DOC_REFS[0].path)
-    // And the resume envelope is the SAME logical message (same body) —
-    // it just lost the structured slots at the persistence seam.
+    // And the resume envelope is the SAME logical message AND — post-W3a —
+    // carries the SAME structured fields the live push did (round-tripped
+    // through the durable meta_json column, not re-derived).
     expect(wsResume.body).toBe(TURN_BODY)
+    expect(wsResume.options?.map((o) => o.value)).toEqual(['yes', 'no'])
+    expect(wsResume.prompt_id).toBe(PINNED_PROMPT_ID)
+    expect(wsResume.kind).toBe('buttons')
+    expect(wsResume.citations?.[0]?.url).toBe(TURN_CITATIONS[0].url)
+    expect(wsResume.doc_refs?.[0]?.path).toBe(TURN_DOC_REFS[0].path)
     // And the HTTP-history turn is the SAME turn (same body + prompt_id).
     expect(httpTurn['body']).toBe(TURN_BODY)
     expect(httpTurn['prompt_id']).toBe(PINNED_PROMPT_ID)

@@ -169,7 +169,7 @@ describe('AppWsAdapter.send — outgoing → envelope', () => {
           row: {
             topic_id: 'app:sam', seq: ++seq, message_id: 'x', role: 'agent' as const,
             body: input.body, client_msg_id: null, project_id: null, attachments: null,
-            created_at: FROZEN_NOW,
+            meta: null, created_at: FROZEN_NOW,
           },
           was_new: true,
         }

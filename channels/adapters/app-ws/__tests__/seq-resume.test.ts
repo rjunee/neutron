@@ -98,6 +98,64 @@ describe('AppWsAdapter — resume replay reconstructs envelopes', () => {
   })
 })
 
+describe('AppWsAdapter — W3a resume re-hydrates structured agent metadata', () => {
+  it('round-trips options/prompt_id/kind/citations/doc_refs through a resume replay', async () => {
+    const { adapter, captured } = setup()
+    const PROMPT_ID = '00000000-0000-4000-8000-000000000abc'
+    const projectTopic: Topic = { ...topic, project_id: 'proj-1' }
+    const out: OutgoingMessage = {
+      topic: projectTopic,
+      text: 'Here are your options.',
+      inline_choices: [
+        { label: 'Yes', callback_data: 'yes' },
+        { label: 'No', callback_data: 'no' },
+      ],
+      adapter_options: {
+        prompt_id: PROMPT_ID,
+        kind: 'buttons',
+        allow_freeform: false,
+        citations: [{ title: 'Docs', url: 'https://example.test/doc' }],
+        image_urls: ['https://cdn.example/img.png'],
+        doc_refs: [{ label: 'Plan', path: 'docs/plans/plan.md', project_id: 'proj-1' }],
+        project_id: 'proj-1',
+      },
+    }
+    await adapter.send(out)
+
+    // The live-push envelope carries the full structured shape.
+    const live = captured.at(-1) as unknown as Record<string, unknown>
+    expect(live['type']).toBe('agent_message')
+
+    // A resume replay reconstructs the SAME structured envelope from the
+    // durable meta_json column — not a plain text bubble.
+    const [replayed] = await adapter.replayAfter(CHANNEL_TOPIC, 0)
+    const env = replayed as unknown as Record<string, unknown>
+    expect(env['type']).toBe('agent_message')
+    expect(env['body']).toBe('Here are your options.')
+    expect(env['prompt_id']).toBe(PROMPT_ID)
+    expect(env['kind']).toBe('buttons')
+    expect(env['allow_freeform']).toBe(false)
+    expect((env['options'] as { value: string }[]).map((o) => o.value)).toEqual(['yes', 'no'])
+    expect((env['citations'] as { url: string }[])[0]?.url).toBe('https://example.test/doc')
+    expect(env['image_urls']).toEqual(['https://cdn.example/img.png'])
+    expect((env['doc_refs'] as { path: string }[])[0]?.path).toBe('docs/plans/plan.md')
+    expect(env['project_id']).toBe('proj-1')
+  })
+
+  it('replays a plain agent message with no structured fields (meta stays absent)', async () => {
+    const { adapter } = setup()
+    await adapter.send({ topic, text: 'just text' })
+    const [replayed] = await adapter.replayAfter(CHANNEL_TOPIC, 0)
+    const env = replayed as unknown as Record<string, unknown>
+    expect(env['type']).toBe('agent_message')
+    expect(env['body']).toBe('just text')
+    expect(env['options']).toBeUndefined()
+    expect(env['prompt_id']).toBeUndefined()
+    expect(env['citations']).toBeUndefined()
+    expect(env['doc_refs']).toBeUndefined()
+  })
+})
+
 describe('AppWsAdapter — no durable log (legacy)', () => {
   it('omits seq and returns [] for replay when no chat_log is wired', async () => {
     const registry = new InMemoryAppWsSessionRegistry()

@@ -453,7 +453,7 @@ CREATE TABLE app_chat_messages (
     client_msg_id    TEXT,
     project_id       TEXT,
     attachments_json TEXT,
-    created_at       INTEGER NOT NULL,
+    created_at       INTEGER NOT NULL, meta_json TEXT,
     PRIMARY KEY (topic_id, seq)
 ) STRICT
 
