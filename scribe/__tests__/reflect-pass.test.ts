@@ -168,35 +168,35 @@ describe('reflect dedup (deterministic, no LLM)', () => {
 
   test('a loser whose on-disk deletion FAILS is retained + not counted as merged', async () => {
     const owner = tmpOwner()
-    await seed(owner, 'company', 'acme', 'Acme', 'Acme is a developer-tools SaaS company.', [
+    const boiler = 'Acme is an enterprise developer-tools SaaS company building platform tooling.'
+    await seed(owner, 'company', 'acme', 'Acme', boiler, [
       { ts: '2026-07-01T00:00:00.000Z', source: 'chat:owner', body: 'a' },
       { ts: '2026-07-02T00:00:00.000Z', source: 'chat:owner', body: 'b' },
     ])
-    await seed(owner, 'company', 'acme-co', 'Acme Co', 'Acme is a developer-tools SaaS company.', [
+    // The loser shares the boilerplate (clusters) but carries a UNIQUE edge.
+    await seed(owner, 'company', 'acme-co', 'Acme Co', `${boiler} Advises [[globex]].`, [
       { ts: '2026-07-01T00:00:00.000Z', source: 'chat:owner', body: 'c' },
     ])
     // deleteEntity always throws → deletion "fails".
     const failingDelete = async (): Promise<{ deleted: boolean; conflict: boolean }> => {
       throw new Error('EACCES')
     }
-    const survivorBefore = await readPage(owner, 'companies', 'acme')
     const report = await runReflectPass({ ...baseDeps(owner), deleteEntity: failingDelete })
-    // Merge is NOT reported (both files still on disk), and the loser survives.
+    // Merge is NOT reported (deletion failed), but SURVIVOR-FIRST means the survivor
+    // durably absorbed the loser's content before the (failed) delete — so no loss.
     expect(report.merged).toBe(0)
     expect(existsSync(join(owner, 'entities', 'companies', 'acme-co.md'))).toBe(true)
-
-    // DELETE-FIRST: because every loser deletion failed, NO survivor write happened
-    // at all — the survivor is byte-identical to before the pass. So the retained
-    // loser is genuinely, wholly UNMERGED: its row `c` is NOT on the survivor, and
-    // there is no fold. Nothing accretes on retries either.
     const afterFirst = await readPage(owner, 'companies', 'acme')
-    expect(afterFirst).toBe(survivorBefore) // survivor untouched by the failed merge
+    // The survivor holds the loser's unique edge + its history row.
+    expect(afterFirst).toContain('[[globex]]')
+    expect(extractTimeline(afterFirst!).map((e) => e.body)).toContain('c')
+
+    // IDEMPOTENCE: a SECOND pass (deletion still failing) is byte-identical — the
+    // content-idempotent fold never re-adds an already-present loser body.
     const report2 = await runReflectPass({ ...baseDeps(owner), deleteEntity: failingDelete })
     expect(report2.merged).toBe(0)
     const afterSecond = await readPage(owner, 'companies', 'acme')
-    expect(afterSecond).toBe(afterFirst) // byte-identical retry → no growth
-    expect(extractTimeline(afterSecond!).map((e) => e.body)).not.toContain('c')
-    expect(afterSecond).not.toContain('Merged from')
+    expect(afterSecond).toBe(afterFirst) // no duplicate fold / timeline growth
   })
 
   test('a concurrent write to a cluster member aborts the merge (no clobber, no wrong delete)', async () => {
@@ -265,20 +265,52 @@ describe('reflect dedup (deterministic, no LLM)', () => {
       return deleteEntity(input)
     }
     const report = await runReflectPass({ ...baseDeps(owner), deleteEntity: wrappedDelete })
-    // The atomic delete conflicts → the loser is retained with its fresh fact...
+    // The atomic delete's CAS sees the concurrent write → conflict → the loser is
+    // RETAINED with its fresh fact (never destroyed)...
     expect(report.merged).toBe(0)
     expect(existsSync(join(owner, 'entities', 'companies', 'acme-io.md'))).toBe(true)
     const loser = await readPage(owner, 'companies', 'acme-io')
     expect(extractTimeline(loser!).map((e) => e.body)).toContain('FRESH loser fact')
-    // ...and — delete-first — the survivor never absorbed ANYTHING of the retained
-    // loser: not its prose AND not its timeline row `c`. Genuinely unmerged.
+    // ...and — survivor-first, so no loss — the survivor durably absorbed the
+    // loser's SNAPSHOT history (row `c`) before the delete was attempted. The
+    // loser's FRESH fact stays on the (retained) loser; a later pass folds it in.
     const survivor = await readPage(owner, 'companies', 'acme')
     const survivorBodies = extractTimeline(survivor!).map((e) => e.body)
-    expect(survivorBodies).not.toContain('c') // loser history NOT copied in
-    expect(extractCompiledTruth(survivor!).trim()).toBe('Acme is a developer-tools SaaS company.')
+    expect(survivorBodies).toContain('c') // snapshot history durable before delete
+    expect(survivorBodies).not.toContain('FRESH loser fact') // fresh content stays on the loser
   })
 
-  test('compensation: a survivor conflict AFTER deleting a loser restores the loser (no history lost)', async () => {
+  test("a near-duplicate loser's UNIQUE fact + edge are preserved into the survivor", async () => {
+    const owner = tmpOwner()
+    // Both pages cross the Jaccard bar (shared boilerplate) but the LOSER alone
+    // asserts `[[important-client]]` — Jaccard similarity ≠ semantic subsumption.
+    await seed(
+      owner,
+      'company',
+      'acme',
+      'Acme',
+      'Acme is an enterprise developer-tools SaaS company building platform tooling.',
+      [{ ts: '2026-07-01T00:00:00.000Z', source: 'chat:owner', body: 'a' }, { ts: '2026-07-02T00:00:00.000Z', source: 'chat:owner', body: 'b' }],
+    )
+    await seed(
+      owner,
+      'company',
+      'acme-inc',
+      'Acme Inc',
+      'Acme is an enterprise developer-tools SaaS company building platform tooling. Advises [[important-client]].',
+      [{ ts: '2026-07-03T00:00:00.000Z', source: 'chat:owner', body: 'c' }],
+    )
+    const report = await runReflectPass(baseDeps(owner))
+    expect(report.merged).toBe(1)
+    expect(await readPage(owner, 'companies', 'acme-inc')).toBeNull() // collapsed
+    // The loser's UNIQUE edge survived into the survivor (folded before deletion),
+    // so `[[important-client]]` is not silently discarded.
+    const survivor = await readPage(owner, 'companies', 'acme')
+    expect(extractCompiledTruth(survivor!)).toContain('[[important-client]]')
+    expect(extractTimeline(survivor!).map((e) => e.body)).toContain('c') // history too
+  })
+
+  test('a survivor conflict aborts the merge WITHOUT deleting the loser (no loss)', async () => {
     const owner = tmpOwner()
     await seed(owner, 'company', 'acme', 'Acme', 'Acme is a developer-tools SaaS company.', [
       { ts: '2026-07-01T00:00:00.000Z', source: 'chat:owner', body: 'a' },
@@ -287,9 +319,9 @@ describe('reflect dedup (deterministic, no LLM)', () => {
     await seed(owner, 'company', 'acme-co', 'Acme Co', 'Acme is a developer-tools SaaS company.', [
       { ts: '2026-07-03T00:00:00.000Z', source: 'chat:owner', body: 'c' },
     ])
-    // Delete-first deletes acme-co, THEN writes the survivor. Make that survivor
-    // write conflict by concurrently editing acme just before it commits — so the
-    // deleted loser's history would be lost unless compensation restores it.
+    // Survivor-first: make the survivor write conflict by concurrently editing acme
+    // just before it commits. The merge aborts BEFORE any loser is deleted — so no
+    // page and no history is lost, and no compensation is needed.
     let mutated = false
     const wrapped: ReflectWriteEntity = async (input, d) => {
       if (input.slug === 'acme' && input.precondition !== undefined && !mutated) {
@@ -310,11 +342,11 @@ describe('reflect dedup (deterministic, no LLM)', () => {
       return realWrite(input, d)
     }
     const report = await runReflectPass({ ...baseDeps(owner), writeEntity: wrapped })
-    expect(report.merged).toBe(0) // survivor conflict → merge aborted
-    // The loser was deleted then RESTORED by compensation — its history survives.
+    expect(report.merged).toBe(0) // aborted on survivor conflict
+    // The loser was NEVER deleted (survivor-first aborts before any delete).
     expect(existsSync(join(owner, 'entities', 'companies', 'acme-co.md'))).toBe(true)
     expect(extractTimeline((await readPage(owner, 'companies', 'acme-co'))!).map((e) => e.body)).toContain('c')
-    // The survivor kept the concurrent edit (never clobbered by the stale merge).
+    // The survivor kept the concurrent edit (the stale merge never clobbered it).
     expect(extractTimeline((await readPage(owner, 'companies', 'acme'))!).map((e) => e.body)).toContain(
       'CONCURRENT survivor edit',
     )

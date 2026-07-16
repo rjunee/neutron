@@ -464,22 +464,21 @@ async function dedupPages(
  * Merge a near-duplicate cluster (>= 2 pages, same kind) into one survivor.
  * Survivor = the page with the most timeline history (tie: longest
  * compiled-truth, then lexicographically-smallest slug) — deterministic. The
- * survivor KEEPS its own compiled-truth (the near-duplicate losers are subsumed
- * by it); its timeline absorbs the union of every member's dated rows (history
- * preserved). Each loser is then atomically deleted from disk (+ best-effort from
- * the brain). Nothing of a loser is copied into the survivor's compiled-truth, so
- * a loser whose deletion later conflicts is genuinely unmerged.
+ * survivor ABSORBS each loser's compiled-truth (content-idempotent fold, so unique
+ * facts + graph edges survive) plus the union of every member's dated timeline
+ * rows (history), then — and only after that write is durable — each loser is
+ * atomically CAS-deleted. Because the survivor holds a loser's content BEFORE the
+ * loser is removed, no history can be lost even if a delete or the process fails.
  */
 async function mergeCluster(
   members: LoadedPage[],
   deps: ReflectPassDeps,
 ): Promise<{ survivor: LoadedPage; retained: LoadedPage[]; deleted: number } | null> {
   // EARLY ABORT (optimization): if any member changed on disk since the snapshot,
-  // skip the whole cluster now — a later pass
-  // re-clusters the fresh content. This is NOT the safety mechanism (that is the
-  // survivor write's atomic `precondition` + the per-loser re-read before unlink,
-  // below); it just avoids a wasted survivor write + a stale fold in the common
-  // concurrent-write case.
+  // skip the whole cluster now — a later pass re-clusters the fresh content. Not
+  // the safety mechanism (that is the atomic precondition on the survivor write +
+  // the atomic CAS on each loser delete, below); it just avoids wasted work in the
+  // common concurrent-write case.
   for (const m of members) {
     if ((await reloadRawBody(deps.ownerDataDir, m.kind, m.slug)) !== m.raw) return null
   }
@@ -493,44 +492,33 @@ async function mergeCluster(
   const survivor = ranked[0]!
   const losers = ranked.slice(1)
 
-  // TIMELINE-ONLY, DELETE-FIRST MERGE. The survivor is the RICHEST member and the
-  // pages are NEAR-DUPLICATES by the Jaccard bar, so the survivor's own
-  // compiled-truth subsumes them — we never copy a loser's prose (hence no graph
-  // edge is added/retracted, and nothing stale is ever folded). History is the
-  // union of the SUCCESSFULLY-DELETED losers' dated timeline rows.
+  // SURVIVOR-FIRST MERGE. Jaccard similarity does NOT imply semantic subsumption —
+  // a near-duplicate loser can still hold a durable fact / graph edge the survivor
+  // lacks (e.g. a unique `[[client]]`). So the survivor ABSORBS each loser's
+  // compiled-truth (preserving its edges, which the writer re-extracts from the
+  // combined truth) plus the union of every member's dated timeline rows.
   //
-  // Order matters: DELETE the losers FIRST, then write the survivor with ONLY the
-  // deleted losers' history. So a loser whose atomic delete CONFLICTS (a
-  // concurrent write) is RETAINED and its rows are NOT written onto the survivor —
-  // it is genuinely, wholly unmerged. Each delete is atomic under the writer's
-  // per-key lock (a concurrent loser write can't interleave between the body
-  // precondition check and the unlink).
-  const deleteEntityFn = deps.deleteEntity ?? realDeleteEntity
-  const retained: LoadedPage[] = []
-  const deletedLosers: LoadedPage[] = []
-  for (const l of losers) {
-    let removed = false
-    try {
-      const del = await deleteEntityFn({
-        ownerDataDir: deps.ownerDataDir,
-        kind: l.kind,
-        slug: l.slug,
-        precondition: { ifBodyEquals: l.raw },
-      })
-      removed = del.deleted && del.conflict !== true
-    } catch {
-      removed = false // uncontained / failed delete → retain
-    }
-    if (removed) deletedLosers.push(l)
-    else retained.push(l)
-  }
+  // The fold is CONTENT-IDEMPOTENT: a loser body already substring-present in the
+  // survivor is not re-added, so a repeated merge (e.g. a lingering loser whose
+  // deletion keeps failing) never accretes duplicate sections.
+  //
+  // ORDER: write the survivor FIRST, then delete the losers. So the survivor
+  // DURABLY holds a loser's content BEFORE that loser is removed — a loser is
+  // deleted only if it still byte-matches the snapshot the survivor just absorbed
+  // (atomic CAS on `l.raw`). A loser that changed concurrently fails that CAS and
+  // is RETAINED (its fresh content is safe on disk; the survivor holds its prior
+  // snapshot, and a later pass folds the new content + collapses). No delete ever
+  // precedes a durable survivor write → NO history can be lost, and no compensation
+  // is needed.
+  const foldSections = losers
+    .map((l) => l.compiledTruth.trim())
+    .filter((body) => body.length > 0 && !survivor.compiledTruth.includes(body))
+  const mergedCompiledTruth =
+    foldSections.length > 0
+      ? `${survivor.compiledTruth.trimEnd()}\n\n${foldSections.map((b) => `## Merged\n\n${b}`).join('\n\n')}\n`
+      : survivor.compiledTruth
 
-  // Nothing collapsed (every loser was retained) → no survivor write.
-  if (deletedLosers.length === 0) {
-    return { survivor, retained, deleted: 0 }
-  }
-
-  const unionTimeline = [survivor, ...deletedLosers]
+  const unionTimeline = members
     .flatMap((m) => m.timeline)
     .reduce<TimelineEntry[]>((acc, row) => mergeTimeline(acc, row), [])
 
@@ -542,54 +530,53 @@ async function mergeCluster(
     source: `reflect:${deps.ownSlug}`,
   }
 
-  // ONE atomic survivor write: the survivor's UNCHANGED compiled-truth + the
-  // deleted losers' history rows, guarded by `ifBodyEquals: survivor.raw`.
+  // ONE atomic survivor write: the merged (loser-folded) compiled-truth + the union
+  // timeline, guarded by `ifBodyEquals: survivor.raw`. A concurrent survivor write
+  // flips this to a no-op conflict → abort the whole cluster (delete no loser).
   const out = await deps.writeEntity(
     {
       ownerDataDir: deps.ownerDataDir,
       kind: survivor.kind,
       slug: survivor.slug,
-      body: { frontmatter, compiledTruth: survivor.compiledTruth, timelineAppend: unionTimeline },
+      body: { frontmatter, compiledTruth: mergedCompiledTruth, timelineAppend: unionTimeline },
       originInstance: deps.ownSlug,
       receivingInstanceSlug: deps.ownSlug,
       precondition: { ifBodyEquals: survivor.raw },
     },
     deps.syncHook !== undefined ? { syncHook: deps.syncHook } : {},
   )
-  if (out.conflict === true) {
-    // The survivor changed concurrently AFTER we deleted the losers — their
-    // history would be lost. COMPENSATE by re-creating each deleted loser from its
-    // snapshot (only if still absent; a concurrent re-create is left alone), then
-    // abort the merge so a later pass retries against the fresh survivor.
-    for (const l of deletedLosers) {
-      try {
-        await deps.writeEntity(
-          {
-            ownerDataDir: deps.ownerDataDir,
-            kind: l.kind,
-            slug: l.slug,
-            body: {
-              frontmatter: { ...l.frontmatter, slug: l.slug, type: l.kind },
-              compiledTruth: l.compiledTruth,
-              timelineAppend: l.timeline,
-            },
-            originInstance: deps.ownSlug,
-            receivingInstanceSlug: deps.ownSlug,
-            precondition: { ifBodyEquals: null },
-          },
-          deps.syncHook !== undefined ? { syncHook: deps.syncHook } : {},
-        )
-      } catch {
-        // best-effort restore; a later pass reconciles
-      }
-    }
-    return null
-  }
+  if (out.conflict === true) return null // survivor changed concurrently → abort, delete nothing
 
-  // The deleted losers' brain mirrors (best-effort) come off AFTER the survivor
-  // durably absorbed their history.
+  // Re-read the survivor's NEW on-disk bytes as the fresh CAS baseline, so a
+  // SAME-PASS re-synthesis of this merged survivor uses the post-merge body as
+  // `ifBodyEquals` (not the stale pre-merge snapshot, which would always conflict).
+  const newSurvivorRaw = (await reloadRawBody(deps.ownerDataDir, survivor.kind, survivor.slug)) ?? survivor.raw
+
+  // Now delete each loser ATOMICALLY, only if it STILL matches the snapshot the
+  // survivor just absorbed (CAS on `l.raw`, under the writer's per-key lock — a
+  // concurrent loser write can't interleave). A conflict/failure retains the loser
+  // (its content is durably in the survivor, so no loss; a later pass reconciles).
+  // Only a confirmed delete counts + fans the best-effort brain-mirror removal.
+  const deleteEntityFn = deps.deleteEntity ?? realDeleteEntity
+  const retained: LoadedPage[] = []
   let deleted = 0
-  for (const l of deletedLosers) {
+  for (const l of losers) {
+    let removed = false
+    try {
+      const del = await deleteEntityFn({
+        ownerDataDir: deps.ownerDataDir,
+        kind: l.kind,
+        slug: l.slug,
+        precondition: { ifBodyEquals: l.raw },
+      })
+      removed = del.deleted && del.conflict !== true
+    } catch {
+      removed = false
+    }
+    if (!removed) {
+      retained.push(l)
+      continue
+    }
     deleted += 1
     if (deps.deletePage !== undefined) {
       try {
@@ -600,15 +587,10 @@ async function mergeCluster(
     }
   }
 
-  // Re-read the survivor's NEW on-disk bytes as the fresh CAS baseline, so a
-  // SAME-PASS re-synthesis of this merged survivor uses the post-merge body as
-  // `ifBodyEquals` (not the stale pre-merge snapshot, which would always conflict).
-  const newSurvivorRaw = (await reloadRawBody(deps.ownerDataDir, survivor.kind, survivor.slug)) ?? survivor.raw
-
   return {
     survivor: {
       ...survivor,
-      compiledTruth: survivor.compiledTruth,
+      compiledTruth: mergedCompiledTruth,
       timeline: unionTimeline,
       frontmatter,
       raw: newSurvivorRaw,
