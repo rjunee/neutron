@@ -1298,4 +1298,74 @@ describe('RB4 temporal invalidation (belief evolution) — real PGLite round-tri
     expect(edgesTo(links, 'cona', 'works_at').length).toBe(1)
     expect(edgesTo(links, 'conb', 'works_at').length).toBe(1)
   }, 60_000)
+
+  test('flag ON: superseding into an object already carrying a stronger predicate — prior retired, KG keeps the strongest edge', async () => {
+    const ownerDataDir = mkdtempSync(join(tmpdir(), 'scribe-rb4-stronger-'))
+    const syncHook = new GBrainSyncHook({
+      memoryStore: new GBrainMemoryStore(client),
+      gbrainMcp: client,
+    })
+
+    await client.call('put_page', {
+      slug: 'ulold',
+      content: '---\nslug: ulold\ntype: company\n---\n\nA company.\n',
+    })
+    await client.call('put_page', {
+      slug: 'ulnew',
+      content: '---\nslug: ulnew\ntype: company\n---\n\nA company.\n',
+    })
+    // The subject already ADVISES ulnew (stronger than works_at) and works_at ulold.
+    await writeEntity(
+      {
+        ownerDataDir,
+        kind: 'person',
+        slug: 'uwe-lang',
+        originInstance: 'rb4',
+        receivingInstanceSlug: 'rb4',
+        body: {
+          frontmatter: { slug: 'uwe-lang', type: 'person', name: 'Uwe Lang' },
+          compiledTruth:
+            '# Uwe Lang\n\nAn operator.\n\n## Relationships\n\n- Works at [[ulold]].\n- Advises [[ulnew]].\n',
+          timelineAppend: { ts: new Date(t0).toISOString(), source: 'import:onboarding', body: 'seeded' },
+        },
+      },
+      { syncHook },
+    )
+    let links = await client.call('get_links', { slug: 'uwe-lang' })
+    expect(edgesTo(links, 'ulold', 'works_at').length).toBe(1)
+    expect(edgesTo(links, 'ulnew', 'advises').length).toBe(1)
+
+    const scribe = createScribe({
+      substrate: cannedSubstrate(factSupersede('Uwe Lang', 'Ulold', 'Ulnew')),
+      syncHook,
+      ownerDataDir,
+      project_slug: 'rb4-stronger',
+      budget: createState(join(ownerDataDir, '.scribe-budget.json'), t0),
+      writeEntity,
+      now: () => t0 + 1000,
+      supersede: true,
+    })
+    const out = await scribe.extractAndWrite({
+      text: 'Uwe Lang has moved on from Ulold and now works at Ulnew, the firm he had already been advising for a while.',
+      observed_at: t0 + 1000,
+    })
+    expect(out.ran).toBe(true)
+
+    const onDisk = readFileSync(join(ownerDataDir, 'entities', 'people', 'uwe-lang.md'), 'utf8')
+    const compiled = extractCompiledTruth(onDisk)
+    // The prior is retired; the new employment prose accretes; the advisory stays.
+    expect(compiled).not.toContain('[[ulold]]')
+    expect(compiled).toContain('Advises [[ulnew]].')
+    expect(compiled).toContain('Works at [[ulnew]].')
+    // The transition is recorded in the dated history.
+    const timeline = extractTimeline(onDisk)
+    expect(timeline.some((e) => e.body.includes('superseded works_at: ulold → ulnew'))).toBe(true)
+
+    // Graph: Ulold retired; the subject's edge to Ulnew is the STRONGEST predicate
+    // (advises) per the pre-existing KG one-edge-per-pair collapse — a current-truth
+    // edge to Ulnew, not a separate works_at edge.
+    links = await client.call('get_links', { slug: 'uwe-lang' })
+    expect(edgesTo(links, 'ulold', 'works_at').length).toBe(0) // RETIRED
+    expect(edgesTo(links, 'ulnew', 'advises').length).toBe(1) // strongest edge to the replacement
+  }, 60_000)
 })

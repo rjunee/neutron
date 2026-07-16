@@ -683,7 +683,13 @@ function mergeExistingCompiledTruth(
  * with the SAME `extractTypedLinks` + `splitSentencesWithOffsets` the edge
  * extractor uses — so ALIASED wikilinks (`[[oldco|OldCo]]`) and every verb
  * phrasing are matched exactly as the graph sees them (Codex RB4 r1 blocker 2),
- * never a brittle literal `[[oldco]]` substring. Excising the sentence removes the
+ * never a brittle literal `[[oldco]]` substring. INHERENT KG BOUND: the extractor
+ * collapses one object to its STRONGEST predicate (one edge per subject-object
+ * pair — the pre-existing gbrain model, not RB4-specific). So a superseded
+ * predicate that is NOT an object's live edge (e.g. `works_at [[x]]` where the
+ * same `[[x]]` is also `advises`d, which wins) has no distinct edge to retire and
+ * is intentionally left alone — its graph edge (`advises x`) is already the
+ * current truth, and removing it would destroy that stronger relation. Excising the sentence removes the
  * triple from the NEW compiled-truth → the writer's `removedLinks` diff surfaces
  * `works_at oldco` → the sync hook's (predicate-blind) `remove_link` clears the
  * pair and its add-pass re-asserts any survivor edge (still present in the new
