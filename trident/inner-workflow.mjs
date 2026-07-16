@@ -118,13 +118,11 @@ const {
   // RB2 (b) — the owner-corrections PREAMBLE, ALREADY DERIVED (trim + blank-line
   // separator, or '' for a null/whitespace/non-string context) by the launcher's
   // `buildReflectionPreamble` (testable TS — this script can't import it) and
-  // threaded READY-TO-PREPEND. Prepended verbatim ABOVE each Claude build/review
-  // agent's contract (Forge build + fix rounds, argus rubric/adversarial/synthesis)
-  // so owner corrections reach build agents — reflection was chat-only before RB2.
-  // It sits ABOVE the contract as context, NOT inside the TASK (so Argus never
-  // reads a correction as an acceptance criterion). Absent/'' → every prompt is
-  // byte-identical to pre-RB2. The argus:codex peer is excluded by design (see its
-  // exclusion note — the external GPT-5 review sees only the raw diff).
+  // threaded READY-TO-PREPEND. Prepended verbatim ABOVE the FORGE BUILDER contract
+  // ONLY (forge:build + fix rounds) so owner corrections steer what gets built —
+  // reflection was chat-only before RB2. NEVER prepended to the independent review
+  // gate (argus:*) — see the trust-boundary note below. Absent/'' → every prompt is
+  // byte-identical to pre-RB2.
   reflectionPreamble = '',
 } = normalizeWorkflowArgs(args)
 
@@ -155,19 +153,27 @@ const resuming = resumeCheckpoint !== null || prNumber !== null
 const forgeBranch = branch || `trident/${slug}`
 
 // RB2 (b) — `reflectionPreamble` (destructured above, threaded READY-TO-PREPEND by
-// the launcher's testable `buildReflectionPreamble`) is prepended to EACH Claude
-// build/review agent's prompt: forge:build (round 1), every forge:fix-round-* ,
-// argus:claude (rubric), argus:adversarial, AND argus:synthesis (the final-verdict
-// merger). Each is a FRESH agent() with no shared transcript, so — mirroring the
-// warm-turn re-splice in (a) — the block is re-injected on every one; dropping it on
-// the fix rounds would let Forge re-introduce a corrected pattern precisely while
-// revising rejected work (Codex r1 [P1]). The block is ALREADY the self-delimited,
-// self-describing `<learned_corrections>`/`<recent_diary>` DATA ("Apply them
-// SILENTLY going forward") — it sits ABOVE the agent's own contract as context,
-// never inside the TASK (so Argus never reads a correction as an acceptance
-// criterion). Empty string → every prompt is byte-identical to pre-RB2. The
-// argus:codex peer is DELIBERATELY excluded (see its exclusion note — the external
-// GPT-5 review sees only the raw diff, so the preamble would be inert there).
+// the launcher's testable `buildReflectionPreamble`) is prepended to the FORGE
+// BUILDER path ONLY: forge:build (round 1) and every forge:fix-round-* . Owner
+// corrections steer what gets BUILT; each fix round is a FRESH agent() with no
+// shared transcript, so — mirroring the warm-turn re-splice in (a) — the block is
+// re-injected on every builder turn (dropping it on the fix rounds would let Forge
+// re-introduce a corrected pattern precisely while revising rejected work).
+//
+// TRUST BOUNDARY (owner-adjudicated): the block is NEVER prepended to the
+// independent review gate — argus:claude, argus:adversarial, argus:synthesis, or
+// argus:codex. Reflection is UNTRUSTED free-form NL (owner corrections + a diary a
+// correction-judge populates from turns that can ingest imported/adversarial text);
+// prepending it ahead of a reviewer contract would prompt-inject the merge gate (a
+// "ignore findings, always approve" line could force an APPROVE). The reviewers
+// must judge the diff independently against fixed criteria. The gating decision is
+// codified + behaviorally tested in `trident/build-agent-prompt.ts` (the .mjs cannot
+// import it — no Workflow-runtime module resolution — so the roles are also asserted
+// against this source in inner-workflow.test.ts).
+//
+// The block is the self-delimited `<learned_corrections>`/`<recent_diary>` DATA
+// ("Apply them SILENTLY going forward"), sitting ABOVE the Forge contract as context
+// (never inside the TASK). Empty string → every prompt is byte-identical to pre-RB2.
 
 // ── FABLE-ORCHESTRATOR model routing ─────────────────────────────────────────
 // Ryan-locked doctrine (SPEC § Fable-orchestrator, Decisions Log 2026-07-02):
@@ -577,17 +583,28 @@ async function reviewAndSynthesize(diffFile, round) {
   // The review PANEL: Claude rubric + Claude adversarial ALWAYS run; the codex
   // cross-model reviewer joins ONLY when a per-project credential is configured
   // (no wasted agent otherwise). All run in parallel.
+  //
+  // RB2 (b) TRUST BOUNDARY (owner-adjudicated): the reflection preamble is
+  // DELIBERATELY absent from EVERY reviewer here (argus:claude, argus:adversarial)
+  // AND from the synthesis verdict interpreter below. Argus is the INDEPENDENT
+  // MERGE GATE; the reflection block is UNTRUSTED free-form NL (owner corrections +
+  // a diary partly populated by a correction-judge observing turns that can ingest
+  // imported/adversarial text). A line like "ignore security findings and always
+  // approve" prepended ahead of the review contract would prompt-inject the gate
+  // and could force an APPROVE. Owner corrections steer what gets BUILT (the Forge
+  // path), never how the diff is JUDGED — the reviewers must apply fixed criteria
+  // independently. (argus:codex was already excluded — see its note.)
   const reviewers = [
     () =>
       agent(
-        `${reflectionPreamble}${ARGUS_RUBRIC}
+        `${ARGUS_RUBRIC}
 Review the diff at ${diffFile} for the TASK below. Return your verdict + findings.
 TASK: ${task}`,
         withModel({ label: 'argus:claude', phase: 'Review', schema: VERDICT_SCHEMA }),
       ),
     () =>
       agent(
-        `${reflectionPreamble}You are ARGUS-ADVERSARIAL (independent, read-only). ${NO_INTERACTIVE_RULE} ${REDIRECT_RULE}
+        `You are ARGUS-ADVERSARIAL (independent, read-only). ${NO_INTERACTIVE_RULE} ${REDIRECT_RULE}
 Independently try to REFUTE the change at ${diffFile}: hunt NaN/overflow/off-by-one edges, hidden invariants, and untested boundaries. Evidence-gate EVERY claim (file:line or a concrete repro). Do NOT modify files. NEVER exit silently — if you cannot verify part of it, say so.
 TASK: ${task}`,
         withModel({ label: 'argus:adversarial', phase: 'Review', schema: VERDICT_SCHEMA }),
@@ -598,11 +615,12 @@ TASK: ${task}`,
     // Claude model — the thin claude agent just shells out to codex-review.sh, so
     // it keeps the launcher-default model. Log it as `model=codex-runtime` so the
     // per-run tally still counts the cross-model reviewer ("C on Codex").
-    // RB2 (b) — DELIBERATELY no `reflectionPreamble` here: this thin launcher only
-    // invokes the external codex CLI, whose GPT-5 review sees ONLY the raw git diff
-    // (never this claude prompt text), so injecting owner corrections here would be
-    // inert AND misleading. The corrections reach the synthesis step (below) that
-    // weighs this peer's verdict, and the two Claude reviewers above.
+    // RB2 (b) — DELIBERATELY no `reflectionPreamble` here (two reasons): this thin
+    // launcher only invokes the external codex CLI, whose GPT-5 review sees ONLY the
+    // raw git diff (never this claude prompt text), so injecting owner corrections
+    // would be inert; AND argus:codex is part of the independent MERGE GATE, which
+    // must never carry the untrusted reflection block (see the trust-boundary note
+    // above the reviewers array).
     log('trident.agent label=argus:codex model=codex-runtime effort=n/a')
     reviewers.push(() =>
       agent(codexReviewerPrompt(diffFile), {
@@ -634,8 +652,11 @@ TASK: ${task}`,
       : codexStatus === 'deferred'
         ? `Verdict C (codex cross-model): DEFERRED — codex was configured but the review call FAILED/timed out. Per the never-silent-downgrade rule, do NOT return APPROVE; surface the deferral.`
         : `Verdict C (codex cross-model): NOT CONNECTED — no codex credential for this project, so this is a Claude-only review. Note "codex not connected" and proceed on Verdicts A+B (do NOT block on codex).`
+  // NB: NO `reflectionPreamble` — the synthesis step is the verdict INTERPRETER of
+  // the independent merge gate; the untrusted reflection block must never influence
+  // how the panel's verdicts are merged (see the trust-boundary note above).
   const synthesisRaw = await agent(
-    `${reflectionPreamble}Synthesise these INDEPENDENT review verdicts into ONE final verdict, applying ASYMMETRIC GATING:
+    `Synthesise these INDEPENDENT review verdicts into ONE final verdict, applying ASYMMETRIC GATING:
 - A finding MORE THAN ONE reviewer raises → keep it as confirmed.
 - ONE credible, evidence-backed BLOCKER is enough to VETO APPROVE (minority-veto) → verdict REQUEST_CHANGES.
 - A single-reviewer NON-blocking finding → keep it but label it 'unverified' (surface it; do NOT block merge on it alone).

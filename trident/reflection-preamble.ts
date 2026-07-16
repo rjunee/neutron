@@ -1,11 +1,12 @@
 /**
  * @neutronai/trident — RB2 (b) reflection-preamble derivation.
  *
- * The owner's recent reflection corrections/diary reach the build agents (Forge +
- * Argus) by being prepended to each Claude build/review agent's prompt in the inner
- * workflow. The DERIVATION of that preamble — null/whitespace/non-string context is
- * a clean no-op (''), a real block becomes the block + a blank-line separator — is
- * extracted HERE as a pure, importable unit so it is verified BEHAVIORALLY.
+ * The owner's recent reflection corrections/diary reach the FORGE BUILDER agents by
+ * being prepended to the Forge build + fix-round prompts in the inner workflow (NOT
+ * the independent review gate — see the trust boundary in `build-agent-prompt.ts`).
+ * The DERIVATION of that preamble — null/whitespace/non-string context is a clean
+ * no-op (''), a real block becomes the block + a blank-line separator — is extracted
+ * HERE as a pure, importable unit so it is verified BEHAVIORALLY.
  *
  * Why not inline it in `trident/inner-workflow.mjs`? That script is NOT runnable
  * under plain bun/node (its `agent`/`parallel`/`phase` globals are injected by the

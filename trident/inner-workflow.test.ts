@@ -399,12 +399,13 @@ describe('inner-workflow.mjs — exec-model terminal-result harvest signal', () 
   })
 })
 
-describe('inner-workflow.mjs — RB2 (b) reflection corrections reach the build agents', () => {
-  // NOTE: this script is NOT runnable under bun/node (Workflow-runtime globals +
-  // top-level return — see the file header), so its prompt ASSEMBLY can only be
-  // source-asserted. The DERIVATION boundary logic (null/whitespace/non-string →
-  // no-op) is executed behaviorally in `reflection-preamble.test.ts`, and the
-  // args-threading end-to-end in `inner-loop.test.ts` (buildWorkflowArgs).
+describe('inner-workflow.mjs — RB2 (b) reflection trust boundary (Forge-only)', () => {
+  // This script is NOT runnable/importable under bun/node (Workflow-runtime globals +
+  // top-level return + no module resolution — see the file header), so the ROLE→prompt
+  // gating is codified + executed behaviorally in `build-agent-prompt.ts` (see
+  // `build-agent-prompt.test.ts`) and the derivation in `reflection-preamble.test.ts`.
+  // These source assertions BIND the real `.mjs` sites to that boundary: the preamble
+  // is prepended on the Forge builder sites and NOWHERE on the review-gate sites.
   test('destructures the ready-to-prepend reflectionPreamble from the args contract (defaults to \'\')', () => {
     // The preamble is DERIVED in the launcher (testable TS) and threaded ready — the
     // .mjs carries NO derivation logic of its own (that would be un-executable here).
@@ -413,37 +414,43 @@ describe('inner-workflow.mjs — RB2 (b) reflection corrections reach the build 
   })
 
   test('prepends the reflection preamble to the Forge build FIRST-turn prompt', () => {
-    // The forge:build first turn carries the owner corrections ABOVE its contract.
-    // Mutation-kill: dropping `${reflectionPreamble}` here (reverting to
-    // chat-only reflection) fails this assertion.
     expect(SRC).toContain('`${reflectionPreamble}${forgeBuildContract(resuming)}${ralphNote}${reuseNote}')
   })
 
-  test('prepends the reflection preamble to EVERY Forge fix-round prompt too (Codex r1 [P1])', () => {
+  test('prepends the reflection preamble to EVERY Forge fix-round prompt too', () => {
     // Each `forge:fix-round-*` is a FRESH agent with no shared transcript, so the
-    // corrections must be re-injected — otherwise Forge loses them precisely while
-    // revising rejected work. The fix-round prompt re-enters via
-    // `forgeBuildContract(true)`; assert the preamble sits above it.
+    // corrections must be re-injected — otherwise Forge loses them while revising.
     expect(SRC).toContain('`${reflectionPreamble}${forgeBuildContract(true)}')
   })
 
-  test('prepends the reflection preamble to BOTH Argus reviewer first-turn prompts', () => {
-    // argus:claude (rubric) + argus:adversarial both re-ground on owner corrections.
-    expect(SRC).toContain('`${reflectionPreamble}${ARGUS_RUBRIC}')
-    expect(SRC).toContain('`${reflectionPreamble}You are ARGUS-ADVERSARIAL')
+  // SECURITY (FIX 1) — the reflection block is UNTRUSTED NL; prepending it ahead of a
+  // reviewer contract would prompt-inject the independent MERGE GATE. It must appear
+  // on NO reviewer/synthesis/peer site. These are the mutation-kills: re-adding
+  // `${reflectionPreamble}` ahead of any argus prompt fails here.
+  test('argus:claude reviewer prompt EXCLUDES the preamble (starts at the bare rubric)', () => {
+    expect(SRC).toContain('`${ARGUS_RUBRIC}')
+    expect(SRC).not.toContain('`${reflectionPreamble}${ARGUS_RUBRIC}')
   })
 
-  test('prepends the reflection preamble to the Argus SYNTHESIS verdict-merger too', () => {
-    // argus:synthesis (the final-verdict merger) also weighs owner corrections.
-    expect(SRC).toContain('`${reflectionPreamble}Synthesise these INDEPENDENT review verdicts')
+  test('argus:adversarial reviewer prompt EXCLUDES the preamble', () => {
+    expect(SRC).toContain('`You are ARGUS-ADVERSARIAL (independent, read-only).')
+    expect(SRC).not.toContain('`${reflectionPreamble}You are ARGUS-ADVERSARIAL')
   })
 
-  test('DELIBERATELY omits the preamble from the argus:codex external-peer launcher', () => {
-    // The thin argus:codex launcher only shells out to the codex CLI (GPT-5 reviews
-    // the raw diff), so the preamble would be inert there. It must NOT be spliced
-    // onto `codexReviewerPrompt`, and the exclusion is documented in-source.
+  test('argus:synthesis verdict-interpreter EXCLUDES the preamble', () => {
+    expect(SRC).toContain('`Synthesise these INDEPENDENT review verdicts')
+    expect(SRC).not.toContain('`${reflectionPreamble}Synthesise these INDEPENDENT review verdicts')
+  })
+
+  test('argus:codex external-peer launcher EXCLUDES the preamble', () => {
     expect(SRC).toContain('agent(codexReviewerPrompt(diffFile), {')
     expect(SRC).not.toContain('`${reflectionPreamble}${codexReviewerPrompt')
-    expect(SRC).toContain('DELIBERATELY no `reflectionPreamble` here')
+  })
+
+  test('the ONLY prompt-assembly uses of reflectionPreamble are the two Forge builder sites', () => {
+    // A stray `${reflectionPreamble}` splice anywhere else (e.g. a reviewer prompt)
+    // is caught here: exactly two template-interpolation prepend sites exist, both Forge.
+    const spliceSites = SRC.match(/`\$\{reflectionPreamble\}/g) ?? []
+    expect(spliceSites).toHaveLength(2)
   })
 })

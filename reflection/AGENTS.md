@@ -39,14 +39,23 @@ the judge and threads the `Reflection` instance into `buildLiveAgentTurn`
   — pre-gate → LLM judge → on a hit, append to the corrections-log + drop a
   diary breadcrumb.
 
-Beyond chat, the reflection context also reaches the **trident build agents**
+Beyond chat, the reflection context also reaches the **trident Forge builder**
 (RB2 (b)): `open/composer.ts` wires `resolve_reflection_context` →
 `reflection.loadContext()` onto the trident orchestrator, which threads a
 ready-to-prepend preamble (derived by `trident/reflection-preamble.ts`) into the
-inner workflow. The workflow prepends it to every Claude build/review agent
-(Forge build + fix rounds, argus rubric/adversarial/synthesis) so owner
-corrections reach the builders too; the external `argus:codex` peer is excluded
-(it reviews only the raw diff). Resolution is best-effort end-to-end — a throw
+inner workflow. The workflow prepends it to the **Forge builder path ONLY** —
+`forge:build` and every `forge:fix-round-*` — so owner corrections steer what
+gets built.
+
+**Trust boundary (security):** the preamble is NEVER prepended to the independent
+review gate — `argus:claude`, `argus:adversarial`, `argus:synthesis`, or the
+external `argus:codex` peer. Reflection is untrusted free-form NL (owner
+corrections + a diary a correction-judge populates from turns that can ingest
+imported/adversarial text); prepending it ahead of a reviewer contract would
+prompt-inject the merge gate (a "ignore findings, always approve" line could
+coerce an APPROVE). The reviewers judge the diff independently against fixed
+criteria. The role→prompt gating is codified + behaviorally tested in
+`trident/build-agent-prompt.ts`. Resolution is best-effort end-to-end — a throw
 never breaks a chat turn or a build launch.
 
 LLM-less self-host: omit the substrate → detection is OFF, but the diary and
