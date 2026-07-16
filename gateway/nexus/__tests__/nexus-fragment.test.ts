@@ -179,9 +179,10 @@ describe('formatAgentNexusFragment (pure)', () => {
   })
 
   it('does not split a non-BMP surrogate pair at the body cap boundary', () => {
-    // 🎯 (U+1F3AF) is a surrogate pair (2 UTF-16 units). A run that straddles the cap must
-    // not leave a lone half-surrogate.
-    const body = '🎯'.repeat(200) // 400 UTF-16 units → over the 240 cap
+    // 🎯 (U+1F3AF) is a surrogate pair (2 UTF-16 units). The ODD-length 'A' prefix shifts
+    // the 240-char cut to land MID-pair (an even-only body would always cut between emojis,
+    // so deleting the surrogate-protection would still pass) — this exercises the real split.
+    const body = 'A' + '🎯'.repeat(200) // 1 + 400 UTF-16 units; the cut at 240 straddles a pair
     const bullet = formatAgentNexusFragment([ev({ body })])!
       .split('\n')
       .find((l) => l.startsWith('- ['))!
