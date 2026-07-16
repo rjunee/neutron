@@ -31,7 +31,7 @@
  * and NEVER incurs LLM cost under test.
  */
 
-import { unlink, readdir, realpath, open as fsOpen } from 'node:fs/promises'
+import { readdir, realpath, open as fsOpen } from 'node:fs/promises'
 import { constants as fsConstants } from 'node:fs'
 import { join, dirname, sep } from 'node:path'
 import {
@@ -50,7 +50,20 @@ import { getBestModel } from '@neutronai/runtime/models.ts'
 import { drainToText } from '@neutronai/runtime/substrate-text.ts'
 import { createLogger } from '@neutronai/logger'
 import { slugify } from '../write-to-gbrain.ts'
-import type { SyncHook } from '@neutronai/runtime/entity-writer.ts'
+import { deleteEntity as realDeleteEntity, type SyncHook } from '@neutronai/runtime/entity-writer.ts'
+
+/**
+ * Atomic entity-page delete surface (RB3). Shares the entity-writer's per-key
+ * lock, so a concurrent same-key write cannot interleave between the precondition
+ * check and the unlink. The real `runtime/entity-writer.ts:deleteEntity`
+ * satisfies it; tests inject a recorder.
+ */
+export type ReflectDeleteEntity = (input: {
+  ownerDataDir: string
+  kind: EntityKind
+  slug: string
+  precondition?: { ifBodyEquals: string }
+}) => Promise<{ deleted: boolean; conflict: boolean }>
 
 /**
  * The entity-writer surface the reflect pass needs — a superset of scribe's
@@ -137,12 +150,14 @@ export interface ReflectPassDeps {
   /** Per-dispatch watchdog (ms). Default `DEFAULT_REFLECT_WATCHDOG_MS`. */
   watchdogMs?: number
   /**
-   * On-disk page-removal seam (dedup loser deletion). Defaults to `fs.unlink`.
-   * Injected so a test can assert the failure path (a loser whose deletion fails
-   * is RETAINED among survivors and NOT counted as merged). Must reject on a real
-   * removal failure; an already-absent file (ENOENT) is treated as removed.
+   * Atomic dedup loser-deletion seam. Defaults to the real
+   * `runtime/entity-writer.ts:deleteEntity`, which unlinks under the SAME per-key
+   * lock as `writeEntity` with a body precondition — so a concurrent write to the
+   * loser can't be silently deleted. Injected in tests to drive the conflict /
+   * failure paths (a conflicted or failed deletion RETAINS the loser and is NOT
+   * counted as merged).
    */
-  removeFile?: (path: string) => Promise<void>
+  deleteEntity?: ReflectDeleteEntity
   /** Clock injection for determinism. Defaults to `Date.now`. */
   now?: () => number
   /** Failure sink. Defaults to a structured warn. */
@@ -535,46 +550,39 @@ async function mergeCluster(
   )
   if (out.conflict === true) return null // survivor changed concurrently → abort
 
-  // Remove each loser: disk first (canonical), then best-effort brain mirror. The
-  // survivor has absorbed every loser's content above. A loser is deleted ONLY
-  // when it is STILL byte-identical to the snapshot the survivor merged (re-read
-  // immediately before unlink) — a concurrent write to a loser after the snapshot
-  // RETAINS it (its fresh content wasn't merged, so deleting it would lose data);
-  // a later pass re-clusters. A failed/uncontained deletion also retains it. Only
-  // a confirmed deletion counts as merged.
-  const removeFile = deps.removeFile ?? unlink
+  // Re-read the survivor's NEW on-disk bytes as the fresh CAS baseline, so a
+  // SAME-PASS re-synthesis of this merged survivor uses the post-merge body as
+  // `ifBodyEquals` (not the stale pre-merge snapshot, which would always
+  // conflict and waste an LLM call).
+  const newSurvivorRaw = (await reloadRawBody(deps.ownerDataDir, survivor.kind, survivor.slug)) ?? survivor.raw
+
+  // Delete each loser ATOMICALLY under the entity-writer's per-key lock with a
+  // body precondition: the delete commits only if the loser is STILL byte-
+  // identical to the snapshot the survivor merged. Because the delete shares the
+  // write lock, a concurrent write to the loser can't interleave between the
+  // check and the unlink — so a fresh write is never silently deleted; it flips
+  // the delete to a `conflict` and the loser is RETAINED (its content wasn't
+  // merged). A failed delete also retains. Only a confirmed delete counts + fans
+  // the best-effort brain-mirror removal.
+  const deleteEntityFn = deps.deleteEntity ?? realDeleteEntity
   const retained: LoadedPage[] = []
   let deleted = 0
   for (const l of losers) {
-    // RE-VALIDATE containment (a `entities/<dir>` swapped to a symlink-to-outside
-    // during the survivor write would otherwise let the unlink escape the owner)
-    // AND re-read the loser body: only delete it if it still matches what the
-    // survivor merged (no concurrent write landed on it).
-    const contained = await containedKindDir(deps.ownerDataDir, l.kind)
-    if (contained === null) {
-      retained.push(l)
-      continue
-    }
-    const currentLoser = await reloadRawBody(deps.ownerDataDir, l.kind, l.slug)
-    if (currentLoser !== l.raw) {
-      // Concurrent write (or vanished) since the snapshot → its content wasn't
-      // merged; retain it rather than destroy the new data.
-      retained.push(l)
-      continue
-    }
-    const path = join(contained.dir, `${l.slug}.md`)
     let removed = false
     try {
-      await removeFile(path)
-      removed = true
-    } catch (err) {
-      // ENOENT = already gone = the desired end state; anything else is a real
-      // failure that must NOT be reported as a successful merge.
-      if ((err as NodeJS.ErrnoException).code === 'ENOENT') removed = true
+      const del = await deleteEntityFn({
+        ownerDataDir: deps.ownerDataDir,
+        kind: l.kind,
+        slug: l.slug,
+        precondition: { ifBodyEquals: l.raw },
+      })
+      removed = del.deleted && del.conflict !== true
+    } catch {
+      removed = false // uncontained / failed delete → retain
     }
     if (!removed) {
       retained.push(l)
-      continue // leave the brain mirror alone too — disk is still authoritative
+      continue
     }
     deleted += 1
     if (deps.deletePage !== undefined) {
@@ -592,6 +600,7 @@ async function mergeCluster(
       compiledTruth: mergedCompiledTruth,
       timeline: unionTimeline,
       frontmatter,
+      raw: newSurvivorRaw,
     },
     retained,
     deleted,

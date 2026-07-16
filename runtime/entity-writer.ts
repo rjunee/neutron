@@ -290,6 +290,81 @@ export async function writeEntity(
   )
 }
 
+export interface DeleteEntityInput {
+  ownerDataDir: string
+  kind: EntityKind
+  slug: string
+  /**
+   * Optimistic-concurrency guard: delete ONLY if the current on-disk body still
+   * equals this exactly. Runs INSIDE the same per-(kind,slug) lock as
+   * `writeEntity`, so no concurrent same-key write can interleave between the
+   * check and the unlink — the delete is atomic vs writes (RB3). Absent →
+   * unconditional delete.
+   */
+  precondition?: { ifBodyEquals: string }
+}
+
+export interface DeleteEntityOutput {
+  path: string
+  /** True when the page was removed (or was already absent). */
+  deleted: boolean
+  /** True when a `precondition` was supplied but the current body didn't match
+   *  (nothing deleted). */
+  conflict: boolean
+}
+
+/**
+ * RB3 — atomically delete an entity page under the SAME per-(kind,slug) write
+ * lock as `writeEntity`, with an optional body precondition. Because it shares
+ * the lock map, a concurrent `writeEntity` on the same key CANNOT land between
+ * the precondition read and the unlink — so a fresh write is never silently
+ * deleted (the reflect dedup loser-deletion race). Path is symlink-contained
+ * exactly like the write path. An already-absent file is `deleted: true` (the
+ * desired end state); a precondition mismatch is `conflict: true, deleted: false`.
+ */
+export async function deleteEntity(input: DeleteEntityInput): Promise<DeleteEntityOutput> {
+  if (!ENTITY_KINDS.includes(input.kind)) {
+    throw new EntityWriteError('invalid_kind', `unknown kind: ${input.kind}`)
+  }
+  if (typeof input.slug !== 'string' || !SLUG_REGEX.test(input.slug)) {
+    throw new EntityWriteError('invalid_slug', `slug must match [a-z0-9][a-z0-9-]*, got "${input.slug}"`)
+  }
+  return withWriteLock(`${input.kind}/${input.slug}`, () => deleteEntityLocked(input))
+}
+
+async function deleteEntityLocked(input: DeleteEntityInput): Promise<DeleteEntityOutput> {
+  const entitiesRoot = resolve(input.ownerDataDir, 'entities')
+  const targetDir = resolve(entitiesRoot, KIND_TO_DIR[input.kind])
+  const targetPath = resolve(targetDir, `${input.slug}.md`)
+  if (!isUnder(entitiesRoot, targetPath)) {
+    throw new EntityWriteError('path_escape', `target path escapes entities root: ${targetPath}`)
+  }
+  // Reject a symlink on any segment we delete through — an ancestor swapped to a
+  // symlink-to-outside can't redirect the unlink. Checked INSIDE the lock, so it
+  // is TOCTOU-atomic vs same-key writes.
+  await rejectSymlinkAt(entitiesRoot)
+  await rejectSymlinkAt(targetDir)
+  await rejectSymlinkAt(targetPath)
+
+  let existing: string | undefined
+  try {
+    existing = await fs.readFile(targetPath, 'utf8')
+  } catch (err) {
+    if (isENOENT(err)) return { path: targetPath, deleted: true, conflict: false } // already gone
+    throw new EntityWriteError('read_failed', `failed to read ${targetPath}: ${errMsg(err)}`)
+  }
+  if (input.precondition !== undefined && existing !== input.precondition.ifBodyEquals) {
+    return { path: targetPath, deleted: false, conflict: true }
+  }
+  try {
+    await fs.unlink(targetPath)
+  } catch (err) {
+    if (isENOENT(err)) return { path: targetPath, deleted: true, conflict: false }
+    throw new EntityWriteError('write_failed', `failed to unlink ${targetPath}: ${errMsg(err)}`)
+  }
+  return { path: targetPath, deleted: true, conflict: false }
+}
+
 async function writeEntityLocked(
   input: EntityWriteInput,
   deps: WriteEntityDeps,

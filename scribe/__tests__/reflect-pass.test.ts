@@ -174,13 +174,11 @@ describe('reflect dedup (deterministic, no LLM)', () => {
     await seed(owner, 'company', 'acme-co', 'Acme Co', 'Acme is a developer-tools SaaS company.', [
       { ts: '2026-07-01T00:00:00.000Z', source: 'chat:owner', body: 'c' },
     ])
-    // removeFile always rejects with a NON-ENOENT error → deletion "fails".
+    // deleteEntity always throws → deletion "fails".
     const report = await runReflectPass({
       ...baseDeps(owner),
-      removeFile: async (): Promise<void> => {
-        const err = new Error('EACCES') as NodeJS.ErrnoException
-        err.code = 'EACCES'
-        throw err
+      deleteEntity: async (): Promise<{ deleted: boolean; conflict: boolean }> => {
+        throw new Error('EACCES')
       },
     })
     // Merge is NOT reported (both files still on disk), and the loser survives.
@@ -643,5 +641,31 @@ describe('reflect cost confinement (tiered-write discipline)', () => {
     expect(report.resynthesized).toBe(1)
     expect(report.reservedWritten).toBeGreaterThanOrEqual(1)
     expect(await readPage(owner, 'projects', 'project-zephyr')).not.toBeNull()
+  })
+
+  test('a merged survivor can still be re-synthesized in the SAME pass (fresh CAS baseline)', async () => {
+    const owner = tmpOwner()
+    // Two near-duplicate people (enough rows to clear the resynth gate) → they
+    // merge into a survivor, which must then re-synthesize in the same pass (its
+    // CAS baseline is the POST-merge body, not the stale pre-merge snapshot).
+    await seed(owner, 'person', 'rob', 'Rob', 'Rob is a staff engineer at [[globex]].', [
+      { ts: '2026-07-01T00:00:00.000Z', source: 'chat:owner', body: 'r1' },
+      { ts: '2026-07-02T00:00:00.000Z', source: 'chat:owner', body: 'r2' },
+      { ts: '2026-07-03T00:00:00.000Z', source: 'chat:owner', body: 'r3' },
+    ])
+    await seed(owner, 'person', 'rob-smith', 'Rob Smith', 'Rob is a staff engineer at [[globex]].', [
+      { ts: '2026-07-04T00:00:00.000Z', source: 'chat:owner', body: 'r4' },
+    ])
+    const { substrate } = scriptedSubstrate((p) =>
+      p.includes('DIGEST:')
+        ? '{"entities":[]}'
+        : 'Rob is a staff engineer at [[globex]] and mentors the platform team.',
+    )
+    const report = await runReflectPass({ ...baseDeps(owner), substrate })
+    expect(report.merged).toBe(1) // the pair collapsed
+    expect(report.resynthesized).toBe(1) // and the survivor was re-synthesized SAME pass
+    const ct = extractCompiledTruth((await readPage(owner, 'people', 'rob'))!)
+    expect(ct).toContain('mentors the platform team') // resynth applied
+    expect(ct).toContain('[[globex]]') // edge preserved
   })
 })
