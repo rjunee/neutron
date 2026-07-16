@@ -444,14 +444,21 @@ with cross-references noted inline.
 94. `tenant:` prefix + a raw-NUL hash seed feed task-id determinism — fix the leak-gate-hiding byte,
     freeze the word itself (task IDs are persisted). `tasks/history-import-seeder.ts:63`.
     Protects: **G7** (Leak-gate NUL tripwire + retired-token cleanup).
-95. `SecretsStore` identity: the frozen `internal_handle`, NOT `url_slug`; the SQL column keeps its
-    old name (`project_slug`) by design. `auth/secrets-store.ts:10-27`.
-    Protects: **N1** (Identity glossary + branded handle type), **N3** (internal_handle rename,
-    ABI-facing files).
-96. Cross-repo ABI property names (`internal_handle` option bags; `realmode-composer`/
-    `boot-helpers` export names + paths) are reachable only via `NEUTRON_GRAPH_COMPOSER_MODULE` —
-    invisible to in-repo grep. `gateway/index.ts:540` (the composer-module resolution seam).
-    Protects: **M1**, **N3**.
+95. `SecretsStore` identity: the frozen `owner_handle` (renamed from `internal_handle` in N2/N3),
+    NOT `url_slug`; the SQL column keeps its old name (`project_slug`) by design. The TS identity is
+    the branded `OwnerHandle` type (N1) — passing a raw string is a compile error at this boundary.
+    `auth/secrets-store.ts:10-27`, `persistence/owner-handle.ts`.
+    Protects: **N1** (Identity glossary + branded handle type). N2/N3 `internal_handle`→`owner_handle`
+    rename DONE; the frozen-vs-mutable resolution at the Managed boot seam is the deferred credential-loss
+    fix (see #107).
+96. Cross-repo ABI property names (`owner_handle` option bags — renamed from `internal_handle` in
+    N2/N3; `realmode-composer`/`boot-helpers` export names + paths) are reachable only via
+    `NEUTRON_GRAPH_COMPOSER_MODULE` — invisible to in-repo grep. The N2/N3 rename is ABI-safe because
+    Open is a vendored submodule in Managed (`vendor/neutron`) so the identifier propagates atomically
+    on submodule bump; Managed's own code carries only provenance comments, no concrete impl of the
+    renamed interface methods (verified against live neutron-managed). `gateway/index.ts:540` (the
+    composer-module resolution seam).
+    Protects: **M1**.
 97. `packageNameToSlug` couples core-package renames to already-installed data — a rename must
     ship a compat/migration path, not a pure rename. `cores/runtime/loader.ts:61-81`.
     Protects: **N4** (project_slug → owner_slug), **N5** (Directory/name hygiene).
@@ -491,8 +498,13 @@ with cross-references noted inline.
      `auth/secrets-store.ts:8-27,208-210,257-302,448-471`.
      Protects: **S3** (Secrets-at-rest hygiene).
 107. The `SecretsStore` SQL column is literally named `project_slug` but holds the FROZEN
-     `internal_handle`; a caller passing `url_slug` silently loses all credentials — enforced by
-     prose convention only. `auth/secrets-store.ts:10-27`. (Cross-ref #95.)
+     `owner_handle` (renamed from `internal_handle` in N2/N3); a caller passing `url_slug` silently
+     loses all credentials. Now enforced at the store boundary by the branded `OwnerHandle` type (N1)
+     — a raw string is a compile error — NOT prose convention alone. RESIDUAL: on Managed the boot
+     seam still brands the *mutable* `url_slug` as the handle (`resolveOwnerSlugFromConfig` reads
+     `.url_slug`), so the brand types the boundary without proving frozen-ness there; threading the
+     frozen registry handle + the paired Managed boot change is the deferred credential-loss fix.
+     `auth/secrets-store.ts:10-27`, `persistence/owner-handle.ts`. (Cross-ref #95.)
      Protects: **N1**, **S3** (branded-type fix belongs to security per the report).
 108. Credential-pool threading into spawns explicitly UNSETS `ANTHROPIC_API_KEY`/
      `ANTHROPIC_AUTH_TOKEN`/`CLAUDE_CODE_OAUTH_TOKEN` before setting ONLY the selected credential;
