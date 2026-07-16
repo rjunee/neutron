@@ -290,6 +290,7 @@ import { buildBoardReconcileObserver } from '@neutronai/trident/board-reconcile.
 import { buildTridentTerminator, type TridentTerminator } from '@neutronai/trident/terminate.ts'
 import type { WorkBoardStartResult } from '@neutronai/gateway/http/work-board-surface.ts'
 import { formatWorkBoardFragment } from '@neutronai/work-board/fragment.ts'
+import { buildAgentNexusSnapshot } from '@neutronai/gateway/nexus/nexus-fragment.ts'
 import { InMemoryConsumedTokens } from '@neutronai/runtime/consumed-tokens-in-memory.ts'
 import type {
   AppSocketButtonPromptRouter,
@@ -2860,6 +2861,24 @@ export function buildOpenGraphComposer(
               formatWorkBoardFragment(
                 workBoardStore.listActive(workBoardScopeKey(slug, project_id)),
               ),
+            // RC3 ([BEHAVIOR]) — agent-nexus re-grounding. Read the recent
+            // decision/handoff/learning events OTHER agents recorded on THIS
+            // project (an overnight trident Argus verdict, an owner correction)
+            // and inject the escaped `<agent_nexus>` DATA block so the chat turn
+            // re-grounds on cross-agent state. Scoped through the SAME
+            // `workBoardScopeKey` RC2's emitters write to (General → owner slug),
+            // so the reader sees exactly what the producers wrote. Wired ONLY when
+            // the perfect-recall flag is on (`nexusStore !== null`) — RC3 ships
+            // DARK; the seam is simply absent otherwise (unchanged behaviour).
+            ...(nexusStore !== null
+              ? {
+                  nexusSnapshot: (
+                    slug: string,
+                    project_id: string | undefined,
+                  ): Promise<string | null> =>
+                    buildAgentNexusSnapshot(nexusStore, workBoardScopeKey(slug, project_id)),
+                }
+              : {}),
             // Available-services awareness — the project-scoped credential
             // picture (per-project ∪ global default), so the agent knows which
             // external services it can use in THIS project and gracefully
