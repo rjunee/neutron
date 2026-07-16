@@ -134,7 +134,7 @@ export function buildFocusScoreRecomputeHandler(
   return async (ctx) => {
     const result = await recomputeFocusScoresForProject({
       db: deps.db,
-      project_slug: ctx.project_slug,
+      project_slug: ctx.owner_slug,
       now,
     })
     if (result.scanned === 0) {

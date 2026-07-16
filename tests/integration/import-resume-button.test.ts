@@ -149,7 +149,7 @@ async function seedFailedAndFireCron(
     jobs,
     handlers,
     db,
-    project_slug: OWNER,
+    owner_slug: OWNER,
     now: () => observed_at,
   })
   await scheduler.fireOnce(`onboarding-import-running-${OWNER}`)

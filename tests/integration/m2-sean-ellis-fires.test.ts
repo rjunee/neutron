@@ -132,7 +132,7 @@ test('Sean Ellis cron fires at +4 weeks via real CronScheduler.fireOnce; tap [B]
     jobs,
     handlers,
     db,
-    project_slug: OWNER,
+    owner_slug: OWNER,
     now: () => clock.now,
   })
 

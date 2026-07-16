@@ -146,7 +146,7 @@ describe('failed-import → import_analysis_presented (S14)', () => {
       jobs,
       handlers,
       db,
-      project_slug: OWNER,
+      owner_slug: OWNER,
       now: () => T0 + 30_000,
     })
 
@@ -255,7 +255,7 @@ describe('failed-import → import_analysis_presented (S14)', () => {
       jobs,
       handlers,
       db,
-      project_slug: OWNER,
+      owner_slug: OWNER,
       now: () => T0 + 30_000,
     })
 
@@ -312,7 +312,7 @@ describe('failed-import → import_analysis_presented (S14)', () => {
       jobs,
       handlers,
       db,
-      project_slug: OWNER,
+      owner_slug: OWNER,
       now: () => T0 + 15_000,
     })
 
@@ -363,7 +363,7 @@ describe('failed-import → import_analysis_presented (S14)', () => {
       jobs,
       handlers,
       db,
-      project_slug: OWNER,
+      owner_slug: OWNER,
       now: () => T0 + 15_000,
     })
 
@@ -415,7 +415,7 @@ describe('failed-import → import_analysis_presented (S14)', () => {
       jobs,
       handlers,
       db,
-      project_slug: OWNER,
+      owner_slug: OWNER,
       now: () => T0 + 15_000,
     })
 

@@ -217,7 +217,7 @@ describe('engine hard-timeout backstop (Parts B+C)', () => {
       jobs,
       handlers,
       db,
-      project_slug: OWNER,
+      owner_slug: OWNER,
       now: () => observed_at,
     })
 
@@ -306,7 +306,7 @@ describe('engine hard-timeout backstop (Parts B+C)', () => {
       jobs,
       handlers,
       db,
-      project_slug: OWNER,
+      owner_slug: OWNER,
       now: () => observed_at,
     })
 
@@ -373,7 +373,7 @@ describe('engine hard-timeout backstop (Parts B+C)', () => {
       jobs,
       handlers,
       db,
-      project_slug: OWNER,
+      owner_slug: OWNER,
       now: () => observed_at,
     })
 

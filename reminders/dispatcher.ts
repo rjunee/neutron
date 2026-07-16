@@ -37,7 +37,7 @@ const dispatcherLog = createLogger('reminder-dispatcher')
 /** Where a composed reminder body is posted. */
 export interface ReminderOutboundInput {
   topic_id: string
-  project_slug: string
+  owner_slug: string
   body: string
   reminder_id: string
 }
@@ -51,7 +51,7 @@ export interface ReminderOutbound {
 export interface ReminderContextSource {
   /**
    * `project_id` is the DESTINATION project the reminder composes against
-   * (see {@link deriveReminderProjectId}) — NOT the instance `project_slug`.
+   * (see {@link deriveReminderProjectId}) — NOT the instance `owner_slug`.
    * The source uses it to locate the right project's state (e.g. STATUS.md).
    */
   gather(reminder: Reminder, project_id: string): string | Promise<string>
@@ -62,30 +62,30 @@ export interface ReminderContextSource {
  * stored `topic_id`. For project reminders the engine stores the destination
  * project in `topic_id` (Reminders Core persists the raw `project_id`; the app
  * surface persists `app-project:<project_id>`; an already-web-shaped topic is
- * `web:<user_id>:<project_id>`), while `project_slug` is the FIXED instance /
- * owner slug. Keying context + metering off `project_slug` reads the wrong
+ * `web:<user_id>:<project_id>`), while `owner_slug` is the FIXED instance /
+ * owner slug. Keying context + metering off `owner_slug` reads the wrong
  * project's STATUS.md and meters every project reminder to the owner — this
  * bridges to the actual destination, mirroring `resolveTopicId` in
  * `open/composer.ts`.
  *
  * `null` / empty topic, or a General `web:<user_id>` topic with no project
- * segment, → the instance slug (`project_slug`), preserving instance-level
+ * segment, → the instance slug (`owner_slug`), preserving instance-level
  * behaviour. A `[ROUTING]` header is a thread destination, not a project, so
  * it is deliberately NOT consulted here (only `reminder.topic_id` is).
  */
 export function deriveReminderProjectId(reminder: Reminder): string {
   const topic = reminder.topic_id
-  if (topic === null || topic.trim().length === 0) return reminder.project_slug
+  if (topic === null || topic.trim().length === 0) return reminder.owner_slug
   if (topic.startsWith('app-project:')) {
     const id = topic.slice('app-project:'.length)
-    return id.length > 0 ? id : reminder.project_slug
+    return id.length > 0 ? id : reminder.owner_slug
   }
   if (topic.startsWith('web:')) {
     // `web:<user_id>` (General) → instance; `web:<user_id>:<project_id>` → project.
     const sep = topic.indexOf(':', 'web:'.length)
-    if (sep < 0) return reminder.project_slug
+    if (sep < 0) return reminder.owner_slug
     const id = topic.slice(sep + 1)
-    return id.length > 0 ? id : reminder.project_slug
+    return id.length > 0 ? id : reminder.owner_slug
   }
   // Raw engine destination = the project_id itself (Reminders Core path).
   return topic
@@ -264,7 +264,7 @@ export function buildReminderDispatcher(input: BuildReminderDispatcherInput): Re
       const body = await compose(reminder, shape, destination_project_id)
       const accepted = await input.outbound.post({
         topic_id,
-        project_slug: reminder.project_slug,
+        owner_slug: reminder.owner_slug,
         body,
         reminder_id: reminder.id,
       })

@@ -278,14 +278,14 @@ describe('app-focus surface — aggregation + sort', () => {
     // Reminder firing in 2h, originating from PROJECT_B's app-socket topic.
     const reminderTopic = `app:${OWNER}:${PROJECT_B}:sam`
     const reminder = await harness.reminders.create({
-      project_slug: OWNER,
+      owner_slug: OWNER,
       topic_id: reminderTopic,
       fire_at: (FROZEN_NOW + 2 * 60 * 60 * 1000) / 1000,
       message: 'check on the launch checklist',
     })
     // Reminder past 24h horizon — must NOT surface.
     await harness.reminders.create({
-      project_slug: OWNER,
+      owner_slug: OWNER,
       topic_id: reminderTopic,
       fire_at: (FROZEN_NOW + 3 * 24 * 60 * 60 * 1000) / 1000,
       message: 'next-week ping',
@@ -318,13 +318,13 @@ describe('app-focus surface — aggregation + sort', () => {
     // missed the originating project. This regression pin asserts
     // both shapes resolve to the same project_id.
     const r1 = await harness.reminders.create({
-      project_slug: OWNER,
+      owner_slug: OWNER,
       topic_id: `app-project:${PROJECT_A}`,
       fire_at: (FROZEN_NOW + 60 * 60 * 1000) / 1000,
       message: 'from reminders tab',
     })
     const r2 = await harness.reminders.create({
-      project_slug: OWNER,
+      owner_slug: OWNER,
       topic_id: `app:${OWNER}:${PROJECT_A}:sam`,
       fire_at: (FROZEN_NOW + 2 * 60 * 60 * 1000) / 1000,
       message: 'from chat',
@@ -339,7 +339,7 @@ describe('app-focus surface — aggregation + sort', () => {
 
   it('surfaces reminders with a non-app-socket topic_id as instance-level (project_id="")', async () => {
     const reminder = await harness.reminders.create({
-      project_slug: OWNER,
+      owner_slug: OWNER,
       // Telegram thread id, not the app-socket synthetic format.
       topic_id: '123456789',
       fire_at: (FROZEN_NOW + 60 * 60 * 1000) / 1000,
@@ -361,7 +361,7 @@ describe('app-focus surface — aggregation + sort', () => {
       source: 'chat',
     })
     const reminder = await harness.reminders.create({
-      project_slug: OWNER,
+      owner_slug: OWNER,
       topic_id: `app:${OWNER}:${PROJECT_A}:sam`,
       fire_at: (FROZEN_NOW + 60 * 60 * 1000) / 1000,
       message: 'check email',
@@ -378,7 +378,7 @@ describe('app-focus surface — aggregation + sort', () => {
   it('truncates oversized reminder body in the title', async () => {
     const long = 'lorem ipsum dolor sit amet '.repeat(20)
     const reminder = await harness.reminders.create({
-      project_slug: OWNER,
+      owner_slug: OWNER,
       topic_id: `app:${OWNER}:${PROJECT_A}:sam`,
       fire_at: (FROZEN_NOW + 60 * 60 * 1000) / 1000,
       message: long,
@@ -426,13 +426,13 @@ describe('app-focus surface — project isolation', () => {
 
   it('never returns another project\'s reminders', async () => {
     await harness.reminders.create({
-      project_slug: OWNER,
+      owner_slug: OWNER,
       topic_id: `app:${OWNER}:${PROJECT_A}:sam`,
       fire_at: (FROZEN_NOW + 60 * 60 * 1000) / 1000,
       message: 'mine',
     })
     await harness.reminders.create({
-      project_slug: OTHER_OWNER,
+      owner_slug: OTHER_OWNER,
       topic_id: `app:${OTHER_OWNER}:${PROJECT_A}:casey`,
       fire_at: (FROZEN_NOW + 60 * 60 * 1000) / 1000,
       message: 'theirs',
@@ -558,14 +558,14 @@ describe('app-focus surface — bucket boundaries', () => {
     // landing AT now + 24h precisely must be included (closed interval).
     const exactlyAtHorizon = (FROZEN_NOW + 24 * 60 * 60 * 1000) / 1000
     const r = await harness.reminders.create({
-      project_slug: OWNER,
+      owner_slug: OWNER,
       topic_id: `app-project:${PROJECT_A}`,
       fire_at: exactlyAtHorizon,
       message: 'on the line',
     })
     // And one a second past the boundary — must be excluded.
     const past = await harness.reminders.create({
-      project_slug: OWNER,
+      owner_slug: OWNER,
       topic_id: `app-project:${PROJECT_A}`,
       fire_at: exactlyAtHorizon + 1,
       message: 'just over',

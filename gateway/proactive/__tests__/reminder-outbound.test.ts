@@ -17,7 +17,7 @@ describe('buildButtonStoreReminderOutbound → Deliver seam', () => {
       return { prompt_id: 'p1', persisted: true, delivered_live: true }
     }
     const ro = buildButtonStoreReminderOutbound({ deliver })
-    const ok = await ro.post({ topic_id: 'app:owner', project_slug: 'owner', body: 'take a break', reminder_id: 'r1' })
+    const ok = await ro.post({ topic_id: 'app:owner', owner_slug: 'owner', body: 'take a break', reminder_id: 'r1' })
 
     expect(ok).toBe(true)
     expect(calls).toHaveLength(1)
@@ -28,7 +28,7 @@ describe('buildButtonStoreReminderOutbound → Deliver seam', () => {
   it('persisted:false → post returns false (no durable row was written)', async () => {
     const deliver: Deliver = async () => ({ prompt_id: null, persisted: false, delivered_live: false })
     const ro = buildButtonStoreReminderOutbound({ deliver })
-    expect(await ro.post({ topic_id: 'app:owner', project_slug: 'owner', body: 'hi', reminder_id: 'r1' })).toBe(false)
+    expect(await ro.post({ topic_id: 'app:owner', owner_slug: 'owner', body: 'hi', reminder_id: 'r1' })).toBe(false)
   })
 
   it('a LIVE-PUSH failure still returns post(true) — the durable row is the guarantee', async () => {
@@ -36,6 +36,6 @@ describe('buildButtonStoreReminderOutbound → Deliver seam', () => {
     // reminder IS durably recorded; post reports success independent of live delivery.
     const deliver: Deliver = async () => ({ prompt_id: 'p1', persisted: true, delivered_live: false })
     const ro = buildButtonStoreReminderOutbound({ deliver })
-    expect(await ro.post({ topic_id: 'app:owner', project_slug: 'owner', body: 'hi', reminder_id: 'r1' })).toBe(true)
+    expect(await ro.post({ topic_id: 'app:owner', owner_slug: 'owner', body: 'hi', reminder_id: 'r1' })).toBe(true)
   })
 })

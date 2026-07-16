@@ -360,7 +360,7 @@ describe('cron wiring', () => {
     const handler = buildTaskPrioritizeHandler({ db, llm: null })
     const empty = await handler({
       job_name: 'tasks-prioritize-t1',
-      project_slug: 't1',
+      owner_slug: 't1',
       fired_at: Date.now(),
     })
     expect(empty.status).toBe('skipped')
@@ -368,7 +368,7 @@ describe('cron wiring', () => {
     await store.create({ project_slug: 't1', title: 'one', priority: 2 })
     const ok = await handler({
       job_name: 'tasks-prioritize-t1',
-      project_slug: 't1',
+      owner_slug: 't1',
       fired_at: Date.now(),
     })
     expect(ok.status).toBe('ok')

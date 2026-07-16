@@ -328,7 +328,7 @@ export function buildSeanEllisHandler(deps: SeanEllisHandlerDeps): CronHandler {
            FROM onboarding_metrics
           WHERE project_slug = ? AND completed_at IS NOT NULL
           ORDER BY completed_at ASC`,
-        [ctx.project_slug],
+        [ctx.owner_slug],
       )
 
     if (completedRows.length === 0) {
@@ -346,7 +346,7 @@ export function buildSeanEllisHandler(deps: SeanEllisHandlerDeps): CronHandler {
         skipped_in_window += 1
         continue
       }
-      const existing = store.latestForUser(ctx.project_slug, row.user_id)
+      const existing = store.latestForUser(ctx.owner_slug, row.user_id)
       if (existing !== null) {
         skipped_already_emitted += 1
         continue
@@ -372,7 +372,7 @@ export function buildSeanEllisHandler(deps: SeanEllisHandlerDeps): CronHandler {
 
     const emitted_ids: string[] = []
     for (const { user_id, elapsed } of eligible) {
-      const context = await deps.resolveContext({ project_slug: ctx.project_slug, user_id })
+      const context = await deps.resolveContext({ project_slug: ctx.owner_slug, user_id })
       if (context === null) {
         // Skip this user without aborting the whole tick — other users
         // in the same instance may still be resolvable.
@@ -392,7 +392,7 @@ export function buildSeanEllisHandler(deps: SeanEllisHandlerDeps): CronHandler {
         }),
         allow_freeform: true,
         idempotency: {
-          project_slug: ctx.project_slug,
+          project_slug: ctx.owner_slug,
           topic_id: context.topic_id,
           seed: `sean-ellis-week-4:${user_id}`,
         },
@@ -416,7 +416,7 @@ export function buildSeanEllisHandler(deps: SeanEllisHandlerDeps): CronHandler {
 
       const emitted_at = now()
       const { id } = await store.insertOpen({
-        project_slug: ctx.project_slug,
+        project_slug: ctx.owner_slug,
         user_id,
         prompt_emitted_at: emitted_at,
         // Codex r4 + r5 P1: persist the channel-delivered prompt_id so the
@@ -426,7 +426,7 @@ export function buildSeanEllisHandler(deps: SeanEllisHandlerDeps): CronHandler {
       })
 
       await deps.telemetry.emit({
-        project_slug: ctx.project_slug,
+        project_slug: ctx.owner_slug,
         user_id,
         event: 'onboarding.sean_ellis_prompt_emitted',
         payload: {

@@ -180,7 +180,7 @@ test('cron auto-resume cycle: persistent 429 → paused → cooldown → resume 
     jobs,
     handlers,
     db,
-    project_slug: OWNER,
+    owner_slug: OWNER,
     now: () => now_ms,
   })
 
@@ -317,7 +317,7 @@ test('paused row with no last_paused_at (legacy pre-migration-0041) resumes on t
     jobs,
     handlers,
     db,
-    project_slug: OWNER,
+    owner_slug: OWNER,
     now: () => now_ms,
   })
 
@@ -400,7 +400,7 @@ test('runner.start failure during resume keeps the prior job_id; cron retries ne
     jobs,
     handlers,
     db,
-    project_slug: OWNER,
+    owner_slug: OWNER,
     now: () => now_ms,
   })
 

@@ -19,7 +19,7 @@ export type WatchdogKind =
 export interface WatchdogAlert {
   id: string
   kind: WatchdogKind
-  project_slug: string
+  owner_slug: string
   detected_at: number
   resolved_at: number | null
   payload: Record<string, unknown>

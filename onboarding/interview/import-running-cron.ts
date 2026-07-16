@@ -146,14 +146,14 @@ export function buildImportRunningHandler(
                   ''
                 ) <> ''`,
       )
-      .all(ctx.project_slug)
+      .all(ctx.owner_slug)
 
     // S15 (2026-05-17) — tick log proves cron is actually firing in
     // journald. Pre-S15 the scheduler never started, so this line never
     // appeared; once it stops appearing in steady-state (or the count
     // stays > 0 for > 15 min on a single instance), operators have a
     // direct signal pointing at the cron tier rather than the engine.
-    log.info('tick', { project: ctx.project_slug, in_flight_imports: rows.length })
+    log.info('tick', { project: ctx.owner_slug, in_flight_imports: rows.length })
 
     if (rows.length === 0) {
       return { status: 'skipped', detail: 'no_in_flight_imports' }

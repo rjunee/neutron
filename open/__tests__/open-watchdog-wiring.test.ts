@@ -136,7 +136,7 @@ describe('Open supervision-watchdog prod-boot wiring (F4)', () => {
       const alert: WatchdogAlert = {
         id: 'test-alert-1',
         kind: 'gateway_heartbeat',
-        project_slug: 'owner',
+        owner_slug: 'owner',
         detected_at: Date.now() / 1000,
         resolved_at: null,
         payload: { age_ms: 99_000 },
@@ -197,7 +197,7 @@ describe('Open supervision-watchdog prod-boot wiring (F4)', () => {
       const alert: WatchdogAlert = {
         id: 'deferred-alert-1',
         kind: 'gateway_heartbeat',
-        project_slug: 'owner',
+        owner_slug: 'owner',
         detected_at: Date.now() / 1000,
         resolved_at: null,
         payload: { age_ms: 99_000 },

@@ -522,7 +522,7 @@ export function buildCoreModules(
         jobs,
         handlers,
         db: input.db,
-        project_slug: input.project_slug,
+        owner_slug: input.project_slug,
       })
       // P1 S4 doesn't auto-start jobs — handlers are wired by the modules
       // that own each job (vault-backup, focus_score_recompute, …) BEFORE scheduler.start.
@@ -548,18 +548,18 @@ export function buildCoreModules(
       const cron = ctx.graph.get<{ jobs: CronJobRegistry; state: CronStateStore }>('cron')
       supervisor.registerDetector(
         new HeartbeatDetector({
-          project_slug: input.project_slug,
+          owner_slug: input.project_slug,
           tracker: input.heartbeat_tracker,
         }),
       )
       supervisor.registerDetector(
         new StuckAgentDetector({
-          project_slug: input.project_slug,
+          owner_slug: input.project_slug,
           process_registry: processRegistry,
         }),
       )
       const crashedOpts: ConstructorParameters<typeof CrashedAgentDetector>[0] = {
-        project_slug: input.project_slug,
+        owner_slug: input.project_slug,
         process_registry: processRegistry,
       }
       if (input.pid_probe !== undefined) crashedOpts.pid_probe = input.pid_probe
@@ -573,7 +573,7 @@ export function buildCoreModules(
       // 4. overrun_cron — a cron job whose last run overran its expected budget.
       supervisor.registerDetector(
         new OverrunCronDetector({
-          project_slug: input.project_slug,
+          owner_slug: input.project_slug,
           jobs: cron.jobs,
           state: cron.state,
         }),
@@ -582,7 +582,7 @@ export function buildCoreModules(
       //    over a window (write-path starvation under lock contention).
       supervisor.registerDetector(
         new DbLockContentionDetector({
-          project_slug: input.project_slug,
+          owner_slug: input.project_slug,
           counter: { exhaustionCount: () => busyRetryExhaustionCount() },
         }),
       )
@@ -592,7 +592,7 @@ export function buildCoreModules(
       //    six always wired).
       supervisor.registerDetector(
         new SubstrateCooldownDetector({
-          project_slug: input.project_slug,
+          owner_slug: input.project_slug,
           pool: input.watchdog_credential_pool ?? {
             credentials: [],
             strategy: 'fill_first',

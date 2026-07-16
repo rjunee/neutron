@@ -56,7 +56,7 @@ export interface SchedulerOptions {
   jobs: CronJobRegistry
   handlers: CronHandlerRegistry
   db: ProjectDb
-  project_slug: string
+  owner_slug: string
   /** Injectable clock for tests. Default Date.now. */
   now?: () => number
   /**
@@ -88,7 +88,7 @@ interface RunningJob {
 export class CronScheduler {
   private readonly state: CronStateStore
   private readonly running = new Map<string, RunningJob>()
-  private readonly project_slug: string
+  private readonly owner_slug: string
   private readonly handlers: CronHandlerRegistry
   private readonly jobs: CronJobRegistry
   private readonly now: () => number
@@ -133,7 +133,7 @@ export class CronScheduler {
   constructor(options: SchedulerOptions) {
     this.jobs = options.jobs
     this.handlers = options.handlers
-    this.project_slug = options.project_slug
+    this.owner_slug = options.owner_slug
     this.state = new CronStateStore(options.db)
     this.now = options.now ?? Date.now
     this.timeZone = options.timeZone ?? hostTimeZone()
@@ -267,7 +267,7 @@ export class CronScheduler {
     const nowMs = this.now()
     const prev = previousFireAtOrBefore(entry.spec, nowMs, this.timeZone)
     if (prev !== null) {
-      const state = this.state.get(name, this.project_slug)
+      const state = this.state.get(name, this.owner_slug)
       const lastRunMs = state?.last_run_at != null ? state.last_run_at * 1000 : null
       if (lastRunMs === null || lastRunMs < prev) {
         // Missed the most-recent scheduled instant → catch up exactly ONCE,
@@ -482,7 +482,7 @@ export class CronScheduler {
     let detail: string | undefined
     let error: string | null = null
     try {
-      const result = await handler({ job_name: name, project_slug: this.project_slug, fired_at })
+      const result = await handler({ job_name: name, owner_slug: this.owner_slug, fired_at })
       status = result.status
       detail = result.detail
     } catch (err) {
@@ -500,7 +500,7 @@ export class CronScheduler {
     try {
       await this.state.record({
         job_name: name,
-        project_slug: this.project_slug,
+        owner_slug: this.owner_slug,
         fired_at: fired_at / 1000,
         duration_ms,
         status,
@@ -527,7 +527,7 @@ export class CronScheduler {
           event: 'cron_job_error',
           module: 'cron',
           level: 'error',
-          project_slug: this.project_slug,
+          project_slug: this.owner_slug,
           payload: { job_name: name, error: reason ?? undefined, duration_ms },
         }))
       }
@@ -543,7 +543,7 @@ export class CronScheduler {
     const fired_at = this.now()
     await this.state.record({
       job_name: name,
-      project_slug: this.project_slug,
+      owner_slug: this.owner_slug,
       fired_at: fired_at / 1000,
       duration_ms: 0,
       status: 'skipped',

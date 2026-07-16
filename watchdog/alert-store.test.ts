@@ -26,7 +26,7 @@ describe('AlertStore', () => {
     await store.record({
       id: 'a1',
       kind: 'stuck_agent',
-      project_slug: 't1',
+      owner_slug: 't1',
       detected_at: 1000,
       resolved_at: null,
       payload: { pid: 999, name: 'agent-1' },
@@ -42,7 +42,7 @@ describe('AlertStore', () => {
     await store.record({
       id: 'a1',
       kind: 'crashed_agent',
-      project_slug: 't1',
+      owner_slug: 't1',
       detected_at: 1000,
       resolved_at: null,
       payload: {},

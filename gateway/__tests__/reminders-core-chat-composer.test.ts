@@ -381,7 +381,7 @@ test('source-preservation — update on an organic engine row (source=NULL) stay
   // Write an organic row direct via the engine (simulating a gateway
   // reminder-agent / wow-moment lifestyle nudge).
   const organic = await harness.store.create({
-    project_slug: OWNER,
+    owner_slug: OWNER,
     topic_id: PROJECT,
     fire_at: Math.floor(Date.now() / 1000) + 3600,
     message: 'organic',

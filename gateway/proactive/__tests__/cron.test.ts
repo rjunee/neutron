@@ -70,7 +70,7 @@ afterEach(() => {
   h.close()
 })
 
-const ctx = (job_name: string) => ({ job_name, project_slug: 'demo', fired_at: NOON_LA_MS })
+const ctx = (job_name: string) => ({ job_name, owner_slug: 'demo', fired_at: NOON_LA_MS })
 
 describe('registerMorningBriefCron', () => {
   it('registers the job + handler and the handler posts on tick', async () => {

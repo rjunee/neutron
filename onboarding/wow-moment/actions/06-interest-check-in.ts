@@ -79,7 +79,7 @@ const action06: WowActionModule = {
 
     const createInput: CreateRecurringReminderInput = {
       id: reminder_id,
-      project_slug: ctx.project_slug,
+      owner_slug: ctx.project_slug,
       topic_id: ctx.topic_id,
       fire_at: first_fire_at,
       message: reminder_body,

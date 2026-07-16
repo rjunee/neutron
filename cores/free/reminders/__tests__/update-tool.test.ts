@@ -142,7 +142,7 @@ describe('reminders_update — source preservation invariants', () => {
     // Core never owned (symmetric inverse of the snooze r3 invariant).
     const { extras } = makeFull()
     const organic = await store.create({
-      project_slug: OWNER,
+      owner_slug: OWNER,
       topic_id: null,
       fire_at: 1_700_000_500,
       message: 'organic',
@@ -160,7 +160,7 @@ describe('reminders_update — source preservation invariants', () => {
   test('preserves recurrence on a recurring row (uses createRecurring)', async () => {
     const { extras } = makeFull()
     const recurring = await store.createRecurring({
-      project_slug: OWNER,
+      owner_slug: OWNER,
       topic_id: null,
       fire_at: 1_700_000_000,
       message: 'weekly thing',

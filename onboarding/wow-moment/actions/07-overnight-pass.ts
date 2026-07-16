@@ -73,7 +73,7 @@ const action07: WowActionModule = {
     const fired_at = ctx.now()
     await ctx.cron_state.record({
       job_name,
-      project_slug: ctx.project_slug,
+      owner_slug: ctx.project_slug,
       fired_at: fired_at / 1000,
       duration_ms: 0,
       status: 'ok',

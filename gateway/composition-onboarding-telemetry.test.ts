@@ -85,7 +85,7 @@ test('2026-06-19 overnight-engine: production graph ALWAYS registers overnight_h
     // records a clean row.
     const result = await handler!({
       job_name: 'overnight-project-1',
-      project_slug: noOpInputBase.project_slug,
+      owner_slug: noOpInputBase.project_slug,
       fired_at: Date.now(),
     })
     expect(result.status).toBe('ok')

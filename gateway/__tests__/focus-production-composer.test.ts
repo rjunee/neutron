@@ -187,7 +187,7 @@ async function seedReminder(
   fire_at_offset_seconds = 3600,
 ): Promise<{ id: string }> {
   const created = await store.create({
-    project_slug: OWNER,
+    owner_slug: OWNER,
     topic_id: appProjectTopicId(PROJECT),
     fire_at: Math.floor(Date.now() / 1000) + fire_at_offset_seconds,
     message,

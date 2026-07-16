@@ -161,7 +161,7 @@ describe('crashed-agent watchdog — real spawn exit handler (F4)', () => {
       // The detector reports it — pid probe forced alive so ONLY the enqueued crash
       // (not pid-liveness) can drive the alert.
       const detector = new CrashedAgentDetector({
-        project_slug: 'owner',
+        owner_slug: 'owner',
         process_registry: reg,
         pid_probe: { isAlive: () => true },
       })
@@ -192,7 +192,7 @@ describe('crashed-agent watchdog — real spawn exit handler (F4)', () => {
       // Unregistered outright — nothing for the detector to see.
       expect(reg.size()).toBe(0)
       const detector = new CrashedAgentDetector({
-        project_slug: 'owner',
+        owner_slug: 'owner',
         process_registry: reg,
         pid_probe: { isAlive: () => true },
       })
@@ -217,7 +217,7 @@ describe('crashed-agent watchdog — real spawn exit handler (F4)', () => {
 
       expect(reg.size()).toBe(0) // dropped, NOT marked crashed
       const detector = new CrashedAgentDetector({
-        project_slug: 'owner',
+        owner_slug: 'owner',
         process_registry: reg,
         pid_probe: { isAlive: () => true },
       })

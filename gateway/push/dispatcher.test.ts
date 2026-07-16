@@ -80,7 +80,7 @@ function throwingClient(err: unknown): FakeClient {
 function makeReminder(overrides: Partial<Reminder> = {}): Reminder {
   return {
     id: 'r-1',
-    project_slug: 't1',
+    owner_slug: 't1',
     topic_id: 'app-project:demo',
     fire_at: 1700000000,
     message: 'walk the dog',
@@ -217,7 +217,7 @@ describe('PushDispatcher.pushReminder', () => {
     })
     const client = fakeClient([{ status: 'ok' }])
     const dispatcher = createPushDispatcher({ store, client })
-    await dispatcher.pushReminder(makeReminder({ project_slug: 't1' }))
+    await dispatcher.pushReminder(makeReminder({ owner_slug: 't1' }))
     expect(client.calls.length).toBe(1)
     expect(client.calls[0]?.length).toBe(1)
     expect(client.calls[0]?.[0]?.to).toBe('tok-1')

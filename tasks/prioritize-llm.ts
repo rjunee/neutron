@@ -435,7 +435,7 @@ export function buildTaskPrioritizeHandler(deps: {
   return async (ctx) => {
     const passInput: PrioritizeTasksForProjectInput = {
       db: deps.db,
-      project_slug: ctx.project_slug,
+      project_slug: ctx.owner_slug,
       llm: deps.llm,
     }
     if (deps.now !== undefined) passInput.now = deps.now

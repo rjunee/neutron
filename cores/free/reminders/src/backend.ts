@@ -298,7 +298,7 @@ export function buildReminderStoreBackend(
   const store = new ReminderStore(opts.projectDb)
 
   function ownsRow(row: Reminder | null): row is Reminder {
-    return row !== null && row.project_slug === opts.project_slug
+    return row !== null && row.owner_slug === opts.project_slug
   }
 
   return {
@@ -322,7 +322,7 @@ export function buildReminderStoreBackend(
           )
         }
         const cron_input: CreateRecurringReminderInput = {
-          project_slug: opts.project_slug,
+          owner_slug: opts.project_slug,
           topic_id: input.project_id ?? null,
           fire_at: input.fire_at,
           message: input.message,
@@ -348,7 +348,7 @@ export function buildReminderStoreBackend(
           )
         }
         const recurring_input: CreateRecurringReminderInput = {
-          project_slug: opts.project_slug,
+          owner_slug: opts.project_slug,
           topic_id: input.project_id ?? null,
           fire_at: input.fire_at,
           message: input.message,
@@ -359,7 +359,7 @@ export function buildReminderStoreBackend(
         return { id: row.id, fire_at: row.fire_at }
       }
       const create_input: CreateReminderInput = {
-        project_slug: opts.project_slug,
+        owner_slug: opts.project_slug,
         topic_id: input.project_id ?? null,
         fire_at: input.fire_at,
         message: input.message,
@@ -430,7 +430,7 @@ export function buildReminderStoreBackend(
         let replacement: Reminder
         if (original.recurrence_spec !== null) {
           replacement = await txStore.createRecurring({
-            project_slug: original.project_slug,
+            owner_slug: original.owner_slug,
             topic_id: original.topic_id,
             fire_at: input.new_fire_at,
             message: original.message,
@@ -439,7 +439,7 @@ export function buildReminderStoreBackend(
           })
         } else if (original.recurrence !== null) {
           replacement = await txStore.createRecurring({
-            project_slug: original.project_slug,
+            owner_slug: original.owner_slug,
             topic_id: original.topic_id,
             fire_at: input.new_fire_at,
             message: original.message,
@@ -448,7 +448,7 @@ export function buildReminderStoreBackend(
           })
         } else {
           replacement = await txStore.create({
-            project_slug: original.project_slug,
+            owner_slug: original.owner_slug,
             topic_id: original.topic_id,
             fire_at: input.new_fire_at,
             message: original.message,
@@ -502,7 +502,7 @@ export function buildReminderStoreBackend(
         let replacement: Reminder
         if (original.recurrence_spec !== null) {
           const create_input: CreateRecurringReminderInput = {
-            project_slug: original.project_slug,
+            owner_slug: original.owner_slug,
             topic_id: original.topic_id,
             fire_at: original.fire_at,
             message: input.message,
@@ -514,7 +514,7 @@ export function buildReminderStoreBackend(
           replacement = await txStore.createRecurring(create_input)
         } else if (original.recurrence !== null) {
           const create_input: CreateRecurringReminderInput = {
-            project_slug: original.project_slug,
+            owner_slug: original.owner_slug,
             topic_id: original.topic_id,
             fire_at: original.fire_at,
             message: input.message,
@@ -527,7 +527,7 @@ export function buildReminderStoreBackend(
           replacement = await txStore.createRecurring(create_input)
         } else {
           const create_input: CreateReminderInput = {
-            project_slug: original.project_slug,
+            owner_slug: original.owner_slug,
             topic_id: original.topic_id,
             fire_at: original.fire_at,
             message: input.message,

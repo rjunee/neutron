@@ -38,7 +38,7 @@ describe('HeartbeatPulse', () => {
     let now = 100_000
     const pulse = new HeartbeatPulse({ now: () => now })
     const detector = new HeartbeatDetector({
-      project_slug: 'owner',
+      owner_slug: 'owner',
       tracker: pulse,
       threshold_ms: 30_000,
       now: () => now,
@@ -70,7 +70,7 @@ describe('HeartbeatPulse', () => {
     const pulse = new HeartbeatPulse({ now: () => now })
     pulse.pulse()
     const detector = new HeartbeatDetector({
-      project_slug: 'owner',
+      owner_slug: 'owner',
       tracker: pulse,
       threshold_ms: 30_000,
       now: () => now,
@@ -92,7 +92,7 @@ describe('HeartbeatPulse', () => {
     const pulse = new HeartbeatPulse({ now: () => now })
     pulse.pulse()
     const detector = new HeartbeatDetector({
-      project_slug: 'owner',
+      owner_slug: 'owner',
       tracker: pulse,
       threshold_ms: 30_000,
       now: () => now,
@@ -121,7 +121,7 @@ describe('HeartbeatPulse', () => {
     const pulse = new HeartbeatPulse({ now: () => now })
     pulse.pulse()
     const detector = new HeartbeatDetector({
-      project_slug: 'owner',
+      owner_slug: 'owner',
       tracker: pulse,
       threshold_ms: 30_000,
       now: () => now,
@@ -139,7 +139,7 @@ describe('HeartbeatPulse', () => {
     let now = 0
     const neverStale = { lastHeartbeatAt: () => now }
     const detector = new HeartbeatDetector({
-      project_slug: 'owner',
+      owner_slug: 'owner',
       tracker: neverStale,
       threshold_ms: 30_000,
       now: () => now,

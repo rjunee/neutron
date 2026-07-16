@@ -173,7 +173,7 @@ describe('Bug 1 (2026-05-21, v0.1.75) — import_progress envelope from cron tic
       jobs,
       handlers,
       db,
-      project_slug: OWNER,
+      owner_slug: OWNER,
       now: () => T0 + 5_000,
     })
 
@@ -243,7 +243,7 @@ describe('Bug 1 (2026-05-21, v0.1.75) — import_progress envelope from cron tic
       jobs,
       handlers,
       db,
-      project_slug: OWNER,
+      owner_slug: OWNER,
       now: () => T0 + 10_000,
     })
 
@@ -319,7 +319,7 @@ describe('Bug 1 (2026-05-21, v0.1.75) — import_progress envelope from cron tic
       jobs,
       handlers,
       db,
-      project_slug: OWNER,
+      owner_slug: OWNER,
       now: () => T0 + 5_000,
     })
 
@@ -382,7 +382,7 @@ describe('Bug 1 (2026-05-21, v0.1.75) — import_progress envelope from cron tic
       jobs,
       handlers,
       db,
-      project_slug: OWNER,
+      owner_slug: OWNER,
       now: () => T0 + 5_000,
     })
 
@@ -454,7 +454,7 @@ describe('Bug 1 (2026-05-21, v0.1.75) — import_progress envelope from cron tic
       jobs,
       handlers,
       db,
-      project_slug: OWNER,
+      owner_slug: OWNER,
       now: () => T0 + 5_000,
     })
 
@@ -524,7 +524,7 @@ describe('2026-05-31 — ETA suffix on Pass-1 progress body', () => {
       jobs,
       handlers,
       db,
-      project_slug: OWNER,
+      owner_slug: OWNER,
       now: () => T0,
     })
 
@@ -574,7 +574,7 @@ describe('2026-05-31 — ETA suffix on Pass-1 progress body', () => {
       jobs,
       handlers,
       db,
-      project_slug: OWNER,
+      owner_slug: OWNER,
       now: () => T0,
     })
 
@@ -624,7 +624,7 @@ describe('2026-05-31 — ETA suffix on Pass-1 progress body', () => {
       jobs,
       handlers,
       db,
-      project_slug: OWNER,
+      owner_slug: OWNER,
       now: () => T0,
     })
 
@@ -673,7 +673,7 @@ describe('2026-05-31 — ETA suffix on Pass-1 progress body', () => {
       jobs,
       handlers,
       db,
-      project_slug: OWNER,
+      owner_slug: OWNER,
       now: () => T0,
     })
 
@@ -735,7 +735,7 @@ describe('2026-05-31 — ETA suffix on Pass-1 progress body', () => {
       jobs,
       handlers,
       db,
-      project_slug: OWNER,
+      owner_slug: OWNER,
       now: () => T0,
     })
 

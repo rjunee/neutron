@@ -20,7 +20,7 @@ import type { CronJobDef, CronSchedule } from './jobs.ts'
 
 export interface EmitInput {
   job: CronJobDef
-  project_slug: string
+  owner_slug: string
   /** Absolute path the .service ExecStart points at (the gateway entry). */
   exec_start: string
   /** Per-instance Unix user the service runs as. */
@@ -35,8 +35,8 @@ export interface EmittedUnits {
 }
 
 export function emitTimerUnits(input: EmitInput): EmittedUnits {
-  const { job, project_slug } = input
-  const safeName = `${job.name}-${project_slug}`
+  const { job, owner_slug } = input
+  const safeName = `${job.name}-${owner_slug}`
   const timer_unit_name = `neutron-cron-${safeName}.timer`
   const service_unit_name = `neutron-cron-${safeName}.service`
   const timer_contents = renderTimer(job, service_unit_name)
@@ -70,7 +70,7 @@ function renderService(job: CronJobDef, input: EmitInput): string {
     'Type=oneshot',
     `User=${input.user}`,
     `Environment=NEUTRON_CRON_JOB=${job.name}`,
-    `Environment=NEUTRON_INSTANCE_SLUG=${input.project_slug}`,
+    `Environment=NEUTRON_INSTANCE_SLUG=${input.owner_slug}`,
     `ExecStart=${input.exec_start}`,
     'StandardOutput=journal',
     'StandardError=journal',

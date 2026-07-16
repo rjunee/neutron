@@ -11,7 +11,7 @@ let owner_home: string
 function reminder(over: Partial<Reminder> = {}): Reminder {
   return {
     id: 'r',
-    project_slug: 'instance-slug',
+    owner_slug: 'instance-slug',
     topic_id: null,
     fire_at: 0,
     message: 'm',
@@ -48,7 +48,7 @@ describe('buildStatusMdContextSource', () => {
     writeStatus('instance-slug', 'WRONG — instance status')
     const src = buildStatusMdContextSource({ owner_home })
 
-    const ctx = src.gather(reminder({ project_slug: 'instance-slug' }), 'acme-app') as string
+    const ctx = src.gather(reminder({ owner_slug: 'instance-slug' }), 'acme-app') as string
 
     expect(ctx).toContain('Launch is T-2 days')
     expect(ctx).toContain('acme-app')

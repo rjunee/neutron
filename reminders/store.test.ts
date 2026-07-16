@@ -24,7 +24,7 @@ describe('ReminderStore', () => {
   test('create + get round-trip', async () => {
     const store = new ReminderStore(db)
     const r = await store.create({
-      project_slug: 't1',
+      owner_slug: 't1',
       topic_id: 'topic-1',
       fire_at: 1700000000,
       message: 'remember the milk',
@@ -38,7 +38,7 @@ describe('ReminderStore', () => {
   test('cancel pending reminder', async () => {
     const store = new ReminderStore(db)
     const r = await store.create({
-      project_slug: 't1',
+      owner_slug: 't1',
       topic_id: null,
       fire_at: 1700000000,
       message: 'x',
@@ -51,9 +51,9 @@ describe('ReminderStore', () => {
 
   test('listDue returns only pending reminders with fire_at <= as_of', async () => {
     const store = new ReminderStore(db)
-    await store.create({ project_slug: 't1', topic_id: null, fire_at: 1000, message: 'a' })
-    await store.create({ project_slug: 't1', topic_id: null, fire_at: 2000, message: 'b' })
-    await store.create({ project_slug: 't1', topic_id: null, fire_at: 3000, message: 'c' })
+    await store.create({ owner_slug: 't1', topic_id: null, fire_at: 1000, message: 'a' })
+    await store.create({ owner_slug: 't1', topic_id: null, fire_at: 2000, message: 'b' })
+    await store.create({ owner_slug: 't1', topic_id: null, fire_at: 3000, message: 'c' })
     const due = store.listDue(1500)
     expect(due.map((r) => r.message)).toEqual(['a'])
     const all = store.listDue(5000)
@@ -62,7 +62,7 @@ describe('ReminderStore', () => {
 
   test('markFired flips status only when pending', async () => {
     const store = new ReminderStore(db)
-    const r = await store.create({ project_slug: 't1', topic_id: null, fire_at: 100, message: 'x' })
+    const r = await store.create({ owner_slug: 't1', topic_id: null, fire_at: 100, message: 'x' })
     await store.markFired(r.id)
     const got = store.get(r.id)
     expect(got?.status).toBe('fired')
@@ -74,8 +74,8 @@ describe('ReminderStore', () => {
 
   test('listPending sorts oldest-due first and skips fired/cancelled', async () => {
     const store = new ReminderStore(db)
-    const a = await store.create({ project_slug: 't1', topic_id: null, fire_at: 1000, message: 'a' })
-    await store.create({ project_slug: 't1', topic_id: null, fire_at: 500, message: 'b' })
+    const a = await store.create({ owner_slug: 't1', topic_id: null, fire_at: 1000, message: 'a' })
+    await store.create({ owner_slug: 't1', topic_id: null, fire_at: 500, message: 'b' })
     await store.markFired(a.id)
     const pending = store.listPending('t1')
     expect(pending.map((r) => r.message)).toEqual(['b'])
@@ -83,9 +83,9 @@ describe('ReminderStore', () => {
 
   test('listPendingByTopic scopes results to (project, topic_id) pair', async () => {
     const store = new ReminderStore(db)
-    await store.create({ project_slug: 't1', topic_id: 'app-project:demo', fire_at: 200, message: 'demo' })
-    await store.create({ project_slug: 't1', topic_id: 'app-project:other', fire_at: 100, message: 'other' })
-    await store.create({ project_slug: 't1', topic_id: null, fire_at: 50, message: 'orphan' })
+    await store.create({ owner_slug: 't1', topic_id: 'app-project:demo', fire_at: 200, message: 'demo' })
+    await store.create({ owner_slug: 't1', topic_id: 'app-project:other', fire_at: 100, message: 'other' })
+    await store.create({ owner_slug: 't1', topic_id: null, fire_at: 50, message: 'orphan' })
     const demo = store.listPendingByTopic('t1', 'app-project:demo')
     expect(demo.map((r) => r.message)).toEqual(['demo'])
     const other = store.listPendingByTopic('t1', 'app-project:other')
@@ -98,7 +98,7 @@ describe('ReminderStore', () => {
   test('reschedule updates fire_at for a pending row and returns true', async () => {
     const store = new ReminderStore(db)
     const r = await store.create({
-      project_slug: 't1',
+      owner_slug: 't1',
       topic_id: 'app-project:demo',
       fire_at: 1000,
       message: 'x',
@@ -110,7 +110,7 @@ describe('ReminderStore', () => {
   test('reschedule returns false for cancelled / fired / missing rows', async () => {
     const store = new ReminderStore(db)
     const r = await store.create({
-      project_slug: 't1',
+      owner_slug: 't1',
       topic_id: 'app-project:demo',
       fire_at: 1000,
       message: 'x',
@@ -126,7 +126,7 @@ describe('ReminderStore', () => {
   test('createRecurring with a coarse label round-trips recurrence, leaves recurrence_spec null', async () => {
     const store = new ReminderStore(db)
     const r = await store.createRecurring({
-      project_slug: 't1',
+      owner_slug: 't1',
       topic_id: null,
       fire_at: 1700000000,
       message: 'weekly',
@@ -140,7 +140,7 @@ describe('ReminderStore', () => {
   test('createRecurring with a cron spec round-trips recurrence_spec, leaves recurrence null', async () => {
     const store = new ReminderStore(db)
     const r = await store.createRecurring({
-      project_slug: 't1',
+      owner_slug: 't1',
       topic_id: null,
       fire_at: 1700000000,
       message: 'daily 9am',
@@ -154,7 +154,7 @@ describe('ReminderStore', () => {
   test('one-shot create leaves both cadence columns null', async () => {
     const store = new ReminderStore(db)
     const r = await store.create({
-      project_slug: 't1',
+      owner_slug: 't1',
       topic_id: null,
       fire_at: 1700000000,
       message: 'once',
@@ -166,7 +166,7 @@ describe('ReminderStore', () => {
 
   test('createRecurring enforces exactly-one cadence (rejects both / neither)', async () => {
     const store = new ReminderStore(db)
-    const base = { project_slug: 't1', topic_id: null, fire_at: 1700000000, message: 'x' }
+    const base = { owner_slug: 't1', topic_id: null, fire_at: 1700000000, message: 'x' }
     await expect(
       store.createRecurring({ ...base, recurrence: 'weekly', recurrence_spec: '0 9 * * *' }),
     ).rejects.toThrow()

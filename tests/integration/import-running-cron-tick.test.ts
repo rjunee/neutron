@@ -186,7 +186,7 @@ describe('import-running cron-tick (S12)', () => {
       jobs,
       handlers,
       db,
-      project_slug: OWNER,
+      owner_slug: OWNER,
       now: () => T0 + 15_000,
     })
 
@@ -233,7 +233,7 @@ describe('import-running cron-tick (S12)', () => {
       jobs,
       handlers,
       db,
-      project_slug: OWNER,
+      owner_slug: OWNER,
       now: () => T0 + 30_000,
     })
 
@@ -334,7 +334,7 @@ describe('import-running cron-tick (S12)', () => {
       jobs,
       handlers,
       db,
-      project_slug: OWNER,
+      owner_slug: OWNER,
       now: () => T0 + 10_000,
     })
 

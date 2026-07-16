@@ -37,9 +37,9 @@ describe('ReminderTickLoop.runOnce', () => {
   test('fires due reminders + flips status to fired', async () => {
     const store = new ReminderStore(db)
     let now = 10_000_000
-    await store.create({ project_slug: 't1', topic_id: null, fire_at: now / 1000 - 100, message: 'a' })
-    await store.create({ project_slug: 't1', topic_id: null, fire_at: now / 1000 - 50, message: 'b' })
-    await store.create({ project_slug: 't1', topic_id: null, fire_at: now / 1000 + 1000, message: 'future' })
+    await store.create({ owner_slug: 't1', topic_id: null, fire_at: now / 1000 - 100, message: 'a' })
+    await store.create({ owner_slug: 't1', topic_id: null, fire_at: now / 1000 - 50, message: 'b' })
+    await store.create({ owner_slug: 't1', topic_id: null, fire_at: now / 1000 + 1000, message: 'future' })
     const dispatcher = recordingDispatcher()
     const loop = new ReminderTickLoop({ store, dispatcher, now: () => now })
 
@@ -53,7 +53,7 @@ describe('ReminderTickLoop.runOnce', () => {
     const store = new ReminderStore(db)
     let now = 10_000_000
     for (let i = 0; i < 5; i++) {
-      await store.create({ project_slug: 't1', topic_id: null, fire_at: now / 1000 - 100, message: `r${i}` })
+      await store.create({ owner_slug: 't1', topic_id: null, fire_at: now / 1000 - 100, message: `r${i}` })
     }
     const dispatcher = recordingDispatcher()
     const loop = new ReminderTickLoop({ store, dispatcher, now: () => now, per_tick_limit: 2 })
@@ -65,8 +65,8 @@ describe('ReminderTickLoop.runOnce', () => {
   test('dispatcher errors do not abort the tick (other reminders still fire)', async () => {
     const store = new ReminderStore(db)
     const now = 10_000_000
-    await store.create({ project_slug: 't1', topic_id: null, fire_at: now / 1000 - 100, message: 'fail' })
-    await store.create({ project_slug: 't1', topic_id: null, fire_at: now / 1000 - 50, message: 'ok' })
+    await store.create({ owner_slug: 't1', topic_id: null, fire_at: now / 1000 - 100, message: 'fail' })
+    await store.create({ owner_slug: 't1', topic_id: null, fire_at: now / 1000 - 50, message: 'ok' })
     const dispatcher: ReminderDispatcher = {
       dispatch: async (r) => {
         if (r.message === 'fail') throw new Error('nope')
@@ -88,7 +88,7 @@ describe('ReminderTickLoop.runOnce', () => {
     const store = new ReminderStore(db)
     const now = 10_000_000
     const r = await store.create({
-      project_slug: 't1',
+      owner_slug: 't1',
       topic_id: null,
       fire_at: now / 1000 - 100,
       message: 'claim-first',
@@ -121,7 +121,7 @@ describe('ReminderTickLoop.runOnce', () => {
     const store = new ReminderStore(db)
     const now_sec = 10_000_000
     const r = await store.createRecurring({
-      project_slug: 't1',
+      owner_slug: 't1',
       topic_id: null,
       fire_at: now_sec - 10,
       message: 'weekly-claim-first',
@@ -153,7 +153,7 @@ describe('ReminderTickLoop.runOnce', () => {
     const store = new ReminderStore(db)
     const now = 10_000_000
     const r = await store.create({
-      project_slug: 't1',
+      owner_slug: 't1',
       topic_id: null,
       fire_at: now / 1000 - 100,
       message: 'rejected-post',
@@ -183,7 +183,7 @@ describe('ReminderTickLoop.runOnce', () => {
     const now_sec = 10_000_000
     const initial_fire = now_sec - 10
     const r = await store.createRecurring({
-      project_slug: 't1',
+      owner_slug: 't1',
       topic_id: null,
       fire_at: initial_fire,
       message: 'weekly-rejected',
@@ -210,7 +210,7 @@ describe('ReminderTickLoop.runOnce', () => {
     const initial_fire = now_sec - 10
     const owner_new_fire = now_sec + 99_999 // owner moves it far into the future
     const r = await store.createRecurring({
-      project_slug: 't1',
+      owner_slug: 't1',
       topic_id: null,
       fire_at: initial_fire,
       message: 'weekly-raced',
@@ -239,13 +239,13 @@ describe('ReminderTickLoop.runOnce', () => {
     const now_sec = 10_000_000
     const initial_fire = now_sec - 10
     const oneShot = await store.create({
-      project_slug: 't1',
+      owner_slug: 't1',
       topic_id: null,
       fire_at: now_sec - 5,
       message: 'one-shot',
     })
     const recurring = await store.createRecurring({
-      project_slug: 't1',
+      owner_slug: 't1',
       topic_id: null,
       fire_at: initial_fire,
       message: 'weekly check-in',
@@ -274,7 +274,7 @@ describe('ReminderTickLoop.runOnce', () => {
     const now_ms = Date.UTC(2026, 0, 15, 8, 0, 0)
     const now_sec = now_ms / 1000
     const cron = await store.createRecurring({
-      project_slug: 't1',
+      owner_slug: 't1',
       topic_id: null,
       fire_at: now_sec - 10, // already due
       message: 'daily 9am',
@@ -303,7 +303,7 @@ describe('ReminderTickLoop.runOnce', () => {
     // "now" = 2026-01-15 09:30 UTC — today's 09:00 fire is past.
     const now_ms = Date.UTC(2026, 0, 15, 9, 30, 0)
     const cron = await store.createRecurring({
-      project_slug: 't1',
+      owner_slug: 't1',
       topic_id: null,
       fire_at: now_ms / 1000 - 10,
       message: 'daily 9am',
@@ -321,7 +321,7 @@ describe('ReminderTickLoop.runOnce', () => {
     // recurrence_spec bypasses the tool-boundary validator here (store is
     // deliberately opaque), so simulate a poison row reaching the tick loop.
     const poison = await store.createRecurring({
-      project_slug: 't1',
+      owner_slug: 't1',
       topic_id: null,
       fire_at: now_ms / 1000 - 10,
       message: 'broken',
@@ -344,7 +344,7 @@ describe('ReminderTickLoop.runOnce', () => {
     // in the past. Floor at now+60s.
     const old_fire = now_sec - 30 * 24 * 60 * 60
     const recurring = await store.createRecurring({
-      project_slug: 't1',
+      owner_slug: 't1',
       topic_id: null,
       fire_at: old_fire,
       message: 'weekly stale',
@@ -362,13 +362,13 @@ describe('ReminderTickLoop.runOnce', () => {
     const store = new ReminderStore(db)
     const now = 10_000_000
     const a = await store.create({
-      project_slug: 't1',
+      owner_slug: 't1',
       topic_id: null,
       fire_at: now / 1000 - 100,
       message: 'a',
     })
     const b = await store.create({
-      project_slug: 't1',
+      owner_slug: 't1',
       topic_id: null,
       fire_at: now / 1000 - 50,
       message: 'b',
@@ -401,13 +401,13 @@ describe('ReminderTickLoop.runOnce', () => {
     const store = new ReminderStore(db)
     const now = 10_000_000
     await store.create({
-      project_slug: 't1',
+      owner_slug: 't1',
       topic_id: null,
       fire_at: now / 1000 - 100,
       message: 'first',
     })
     await store.create({
-      project_slug: 't1',
+      owner_slug: 't1',
       topic_id: null,
       fire_at: now / 1000 - 50,
       message: 'second',
@@ -438,7 +438,7 @@ describe('ReminderTickLoop.runOnce', () => {
     const now_sec = 10_000_000
     const initial = now_sec - 10
     const recurring = await store.createRecurring({
-      project_slug: 't1',
+      owner_slug: 't1',
       topic_id: null,
       fire_at: initial,
       message: 'weekly',
@@ -470,7 +470,7 @@ describe('ReminderTickLoop.runOnce', () => {
     const store = new ReminderStore(db)
     const now = 10_000_000
     await store.create({
-      project_slug: 't1',
+      owner_slug: 't1',
       topic_id: null,
       fire_at: now / 1000 - 1,
       message: 'a',
@@ -484,7 +484,7 @@ describe('ReminderTickLoop.runOnce', () => {
     const store = new ReminderStore(db)
     const now = 10_000_000
     await store.create({
-      project_slug: 't1',
+      owner_slug: 't1',
       topic_id: null,
       fire_at: now / 1000 - 1,
       message: 'broken',
@@ -515,7 +515,7 @@ describe('ReminderTickLoop.runOnce', () => {
   test('runOnce while a previous tick is in-flight returns skipped', async () => {
     const store = new ReminderStore(db)
     const now = 10_000_000
-    await store.create({ project_slug: 't1', topic_id: null, fire_at: now / 1000 - 100, message: 'a' })
+    await store.create({ owner_slug: 't1', topic_id: null, fire_at: now / 1000 - 100, message: 'a' })
     let release!: () => void
     const block = new Promise<void>((r) => { release = r })
     const dispatcher: ReminderDispatcher = { dispatch: () => block }

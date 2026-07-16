@@ -32,7 +32,7 @@ export const ALL_REMINDER_RECURRENCES: ReadonlyArray<ReminderRecurrence> = [
 
 export interface Reminder {
   id: string
-  project_slug: string
+  owner_slug: string
   topic_id: string | null
   fire_at: number
   message: string
@@ -63,7 +63,7 @@ export interface Reminder {
 export interface CreateReminderInput {
   /** Optional caller-supplied id; UUID generated if absent. */
   id?: string
-  project_slug: string
+  owner_slug: string
   topic_id: string | null
   /** unix-seconds fire time (UTC). */
   fire_at: number
@@ -80,7 +80,7 @@ export interface CreateReminderInput {
 export interface CreateRecurringReminderInput {
   /** Optional caller-supplied id; UUID generated if absent. */
   id?: string
-  project_slug: string
+  owner_slug: string
   topic_id: string | null
   /** unix-seconds for the FIRST occurrence (UTC). */
   fire_at: number
@@ -104,6 +104,8 @@ export interface CreateRecurringReminderInput {
 
 interface ReminderDbRow {
   id: string
+  // SQL column name remains `project_slug`; value is the owner/instance slug
+  // (N4: TS-side domain identifiers are `owner_slug`, the frozen column is not).
   project_slug: string
   topic_id: string | null
   fire_at: number
@@ -131,11 +133,11 @@ export class ReminderStore {
       `INSERT INTO reminders
          (id, project_slug, topic_id, fire_at, message, status, recurrence, recurrence_spec, source, created_at)
        VALUES (?, ?, ?, ?, ?, 'pending', NULL, NULL, ?, ?)`,
-      [id, input.project_slug, input.topic_id, input.fire_at, input.message, source, created_at],
+      [id, input.owner_slug, input.topic_id, input.fire_at, input.message, source, created_at],
     )
     return {
       id,
-      project_slug: input.project_slug,
+      owner_slug: input.owner_slug,
       topic_id: input.topic_id,
       fire_at: input.fire_at,
       message: input.message,
@@ -183,7 +185,7 @@ export class ReminderStore {
        VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?)`,
       [
         id,
-        input.project_slug,
+        input.owner_slug,
         input.topic_id,
         input.fire_at,
         input.message,
@@ -195,7 +197,7 @@ export class ReminderStore {
     )
     return {
       id,
-      project_slug: input.project_slug,
+      owner_slug: input.owner_slug,
       topic_id: input.topic_id,
       fire_at: input.fire_at,
       message: input.message,
@@ -332,7 +334,7 @@ export class ReminderStore {
   }
 
   /** Snapshot of pending reminders for an instance (oldest-due first). */
-  listPending(project_slug: string): Reminder[] {
+  listPending(owner_slug: string): Reminder[] {
     return this.db
       .prepare<ReminderDbRow, [string]>(
         `SELECT ${COLS}
@@ -340,7 +342,7 @@ export class ReminderStore {
           WHERE project_slug = ? AND status = 'pending'
           ORDER BY fire_at ASC`,
       )
-      .all(project_slug)
+      .all(owner_slug)
       .map(rowToReminder)
   }
 
@@ -356,7 +358,7 @@ export class ReminderStore {
    * SQL layer keeps the request flat-cost.
    */
   listPendingFiringBefore(
-    project_slug: string,
+    owner_slug: string,
     cutoff_s: number,
     limit: number,
   ): Reminder[] {
@@ -368,7 +370,7 @@ export class ReminderStore {
           ORDER BY fire_at ASC
           LIMIT ?`,
       )
-      .all(project_slug, cutoff_s, limit)
+      .all(owner_slug, cutoff_s, limit)
       .map(rowToReminder)
   }
 
@@ -382,7 +384,7 @@ export class ReminderStore {
    * regardless of the comparison value, so a Core's cleanup pass
    * never sweeps the engine's own reminders.
    */
-  listPendingBySource(project_slug: string, source: string): Reminder[] {
+  listPendingBySource(owner_slug: string, source: string): Reminder[] {
     return this.db
       .prepare<ReminderDbRow, [string, string]>(
         `SELECT ${COLS}
@@ -390,7 +392,7 @@ export class ReminderStore {
           WHERE project_slug = ? AND status = 'pending' AND source = ?
           ORDER BY fire_at ASC`,
       )
-      .all(project_slug, source)
+      .all(owner_slug, source)
       .map(rowToReminder)
   }
 
@@ -403,7 +405,7 @@ export class ReminderStore {
    *
    * Mirrors `listPending` ordering (fire_at ASC, next-firing first).
    */
-  listPendingByTopic(project_slug: string, topic_id: string): Reminder[] {
+  listPendingByTopic(owner_slug: string, topic_id: string): Reminder[] {
     return this.db
       .prepare<ReminderDbRow, [string, string]>(
         `SELECT ${COLS}
@@ -411,7 +413,7 @@ export class ReminderStore {
           WHERE project_slug = ? AND status = 'pending' AND topic_id = ?
           ORDER BY fire_at ASC`,
       )
-      .all(project_slug, topic_id)
+      .all(owner_slug, topic_id)
       .map(rowToReminder)
   }
 
@@ -438,7 +440,7 @@ export class ReminderStore {
 function rowToReminder(row: ReminderDbRow): Reminder {
   return {
     id: row.id,
-    project_slug: row.project_slug,
+    owner_slug: row.project_slug,
     topic_id: row.topic_id,
     fire_at: row.fire_at,
     message: row.message,

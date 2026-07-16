@@ -90,7 +90,7 @@ describe('CronScheduler.fireOnce', () => {
       jobs,
       handlers,
       db,
-      project_slug: 't1',
+      owner_slug: 't1',
       now: () => now,
     })
     const result = await scheduler.fireOnce('vault-backup')
@@ -110,7 +110,7 @@ describe('CronScheduler.fireOnce', () => {
       handler: 'h',
     })
     handlers.register('h', async () => { throw new Error('boom') })
-    const scheduler = new CronScheduler({ jobs, handlers, db, project_slug: 't1' })
+    const scheduler = new CronScheduler({ jobs, handlers, db, owner_slug: 't1' })
     const result = await scheduler.fireOnce('a')
     expect(result.status).toBe('error')
     expect(result.detail).toBe('boom')
@@ -123,7 +123,7 @@ describe('CronScheduler.fireOnce', () => {
       jobs: new CronJobRegistry(),
       handlers: new CronHandlerRegistry(),
       db,
-      project_slug: 't1',
+      owner_slug: 't1',
     })
     const result = await scheduler.fireOnce('nope')
     expect(result.status).toBe('error')
@@ -164,7 +164,7 @@ describe('O4 — cron_job_error degrade journal (rising edge)', () => {
       return { status: 'ok' as const }
     })
     return {
-      scheduler: new CronScheduler({ jobs, handlers, db, project_slug: 't1' }),
+      scheduler: new CronScheduler({ jobs, handlers, db, owner_slug: 't1' }),
       setMode: (m) => {
         mode = m
       },
@@ -179,7 +179,7 @@ describe('O4 — cron_job_error degrade journal (rising edge)', () => {
     await scheduler.fireOnce('flaky') // error→error: NO emit (rising-edge dedup)
     await scheduler.fireOnce('flaky') // error→error: NO emit
     expect(rows).toHaveLength(1)
-    expect(rows[0]).toMatchObject({ event: 'cron_job_error', module: 'cron', project_slug: 't1' })
+    expect(rows[0]).toMatchObject({ event: 'cron_job_error', module: 'cron', owner_slug: 't1' })
     expect(rows[0]?.payload).toMatchObject({ job_name: 'flaky', error: 'handler boom' })
   })
 
@@ -196,7 +196,7 @@ describe('O4 — cron_job_error degrade journal (rising edge)', () => {
     })
     // Returned (not thrown) error — `error` stays null, reason is in `detail`.
     handlers.register('h', async () => ({ status: 'error' as const, detail: 'remote returned 503' }))
-    const scheduler = new CronScheduler({ jobs, handlers, db, project_slug: 't1' })
+    const scheduler = new CronScheduler({ jobs, handlers, db, owner_slug: 't1' })
     await scheduler.fireOnce('remote')
     expect(rows).toHaveLength(1)
     expect(rows[0]?.payload).toMatchObject({ job_name: 'remote', error: 'remote returned 503' })
@@ -238,7 +238,7 @@ describe('O4 — cron_job_error degrade journal (rising edge)', () => {
       throw new Error('handler boom')
     })
     // Scheduler NOT started → no per-job in_flight entry to serialize the fires.
-    const scheduler = new CronScheduler({ jobs, handlers, db, project_slug: 't1' })
+    const scheduler = new CronScheduler({ jobs, handlers, db, owner_slug: 't1' })
     const f1 = scheduler.fireOnce('flaky')
     const f2 = scheduler.fireOnce('flaky')
     // Wait until both handlers are parked at the barrier, then release together.
@@ -267,7 +267,7 @@ describe('O4 — cron_job_error degrade journal (rising edge)', () => {
         return { id: 'x' }
       },
     })
-    const okScheduler = new CronScheduler({ jobs, handlers, db, project_slug: 't1' })
+    const okScheduler = new CronScheduler({ jobs, handlers, db, owner_slug: 't1' })
     const okResult = await okScheduler.fireOnce('good')
     expect(okResult.status).toBe('ok')
     expect(recorded).toBe(0)
@@ -289,7 +289,7 @@ describe('O4 — cron_job_error degrade journal (rising edge)', () => {
         throw new Error('journal write failed')
       },
     })
-    const badScheduler = new CronScheduler({ jobs: jobs2, handlers: handlers2, db, project_slug: 't1' })
+    const badScheduler = new CronScheduler({ jobs: jobs2, handlers: handlers2, db, owner_slug: 't1' })
     const badResult = await badScheduler.fireOnce('bad')
     expect(badResult.status).toBe('error')
     expect(badResult.detail).toBe('degrade boom')
@@ -322,7 +322,7 @@ describe('CronScheduler.stop — §F1 quiescing shutdown', () => {
       finished = true
       return { status: 'ok' }
     })
-    const scheduler = new CronScheduler({ jobs, handlers, db, project_slug: 't1' })
+    const scheduler = new CronScheduler({ jobs, handlers, db, owner_slug: 't1' })
     scheduler.start()
     // Wait for the interval to fire and the handler to block on the gate.
     for (let i = 0; i < 100 && !entered; i++) await sleep(2)
@@ -366,7 +366,7 @@ describe('CronScheduler.stop — §F1 quiescing shutdown', () => {
       finished = true
       return { status: 'ok' }
     })
-    const scheduler = new CronScheduler({ jobs, handlers, db, project_slug: 't1' })
+    const scheduler = new CronScheduler({ jobs, handlers, db, owner_slug: 't1' })
     // Manual operator trigger — drive fireOnce() DIRECTLY (no start()/timer).
     const fireP = scheduler.fireOnce('manual')
     for (let i = 0; i < 100 && !entered; i++) await sleep(2)
@@ -411,7 +411,7 @@ describe('CronScheduler.start — runtime registrations (S15 Codex r1 P1)', () =
       jobs,
       handlers,
       db,
-      project_slug: 't-runtime',
+      owner_slug: 't-runtime',
     })
     // start() FIRST — snapshot the (empty) registry.
     scheduler.start()
@@ -454,7 +454,7 @@ describe('CronScheduler.start — runtime registrations (S15 Codex r1 P1)', () =
       jobs,
       handlers,
       db,
-      project_slug: 't-pre',
+      owner_slug: 't-pre',
     })
     scheduler.start()
     await new Promise((resolve) => setTimeout(resolve, 130))
@@ -488,7 +488,7 @@ describe('CronScheduler.start — runtime registrations (S15 Codex r1 P1)', () =
       jobs,
       handlers,
       db,
-      project_slug: 't-cycle',
+      owner_slug: 't-cycle',
     })
     scheduler.start()
     scheduler.stop()
@@ -528,7 +528,7 @@ describe('CronScheduler — calendar / wall-clock schedules (T2)', () => {
       jobs,
       handlers,
       db,
-      project_slug: 't-cal',
+      owner_slug: 't-cal',
       now: () => now,
       timeZone: UTC,
     })
@@ -561,7 +561,7 @@ describe('CronScheduler — calendar / wall-clock schedules (T2)', () => {
     // instant, so there is nothing to catch up.
     await new CronStateStore(db).record({
       job_name: 'daily-nine-2',
-      project_slug: 't-cal2',
+      owner_slug: 't-cal2',
       fired_at: wallClockToEpoch(2026, 6, 7, 9, 30, 0, UTC) / 1000,
       duration_ms: 1,
       status: 'ok',
@@ -570,7 +570,7 @@ describe('CronScheduler — calendar / wall-clock schedules (T2)', () => {
       jobs,
       handlers,
       db,
-      project_slug: 't-cal2',
+      owner_slug: 't-cal2',
       now: () => now,
       timeZone: UTC,
     })
@@ -605,7 +605,7 @@ describe('CronScheduler — calendar / wall-clock schedules (T2)', () => {
     // Suppress catch-up: record a run just before "now".
     await new CronStateStore(db).record({
       job_name: 'daily-nine-3',
-      project_slug: 't-cal3',
+      owner_slug: 't-cal3',
       fired_at: (scheduled - 1000) / 1000,
       duration_ms: 1,
       status: 'ok',
@@ -614,7 +614,7 @@ describe('CronScheduler — calendar / wall-clock schedules (T2)', () => {
       jobs,
       handlers,
       db,
-      project_slug: 't-cal3',
+      owner_slug: 't-cal3',
       now: () => now,
       timeZone: UTC,
     })
@@ -650,7 +650,7 @@ describe('CronScheduler — calendar / wall-clock schedules (T2)', () => {
     let now = scheduled - 250
     await new CronStateStore(db).record({
       job_name: 'daily-chunk',
-      project_slug: 't-chunk',
+      owner_slug: 't-chunk',
       fired_at: (scheduled - 1000) / 1000,
       duration_ms: 1,
       status: 'ok',
@@ -659,7 +659,7 @@ describe('CronScheduler — calendar / wall-clock schedules (T2)', () => {
       jobs,
       handlers,
       db,
-      project_slug: 't-chunk',
+      owner_slug: 't-chunk',
       now: () => now,
       timeZone: UTC,
       maxTimerDelayMs: 40,
@@ -696,7 +696,7 @@ describe('CronScheduler — calendar / wall-clock schedules (T2)', () => {
     // burst-replay would fire ~4 times — Persistent=true semantics fire ONCE.
     await new CronStateStore(db).record({
       job_name: 'daily-burst',
-      project_slug: 't-burst',
+      owner_slug: 't-burst',
       fired_at: wallClockToEpoch(2026, 6, 3, 9, 0, 0, UTC) / 1000,
       duration_ms: 1,
       status: 'ok',
@@ -706,7 +706,7 @@ describe('CronScheduler — calendar / wall-clock schedules (T2)', () => {
       jobs,
       handlers,
       db,
-      project_slug: 't-burst',
+      owner_slug: 't-burst',
       now: () => now,
       timeZone: UTC,
     })
@@ -743,7 +743,7 @@ describe('CronScheduler — calendar / wall-clock schedules (T2)', () => {
     })
     await new CronStateStore(db).record({
       job_name: 'daily-slow',
-      project_slug: 't-slow',
+      owner_slug: 't-slow',
       fired_at: (scheduled - 1000) / 1000,
       duration_ms: 1,
       status: 'ok',
@@ -752,7 +752,7 @@ describe('CronScheduler — calendar / wall-clock schedules (T2)', () => {
       jobs,
       handlers,
       db,
-      project_slug: 't-slow',
+      owner_slug: 't-slow',
       now: () => now,
       timeZone: UTC,
     })
@@ -791,7 +791,7 @@ describe('CronScheduler — calendar / wall-clock schedules (T2)', () => {
       jobs,
       handlers,
       db,
-      project_slug: 't-mix',
+      owner_slug: 't-mix',
       now: () => now,
       timeZone: UTC,
     })
@@ -800,7 +800,7 @@ describe('CronScheduler — calendar / wall-clock schedules (T2)', () => {
     // AFTER start() reads cron_state and spuriously trigger the catch-up path.
     await new CronStateStore(db).record({
       job_name: 'calendar-job',
-      project_slug: 't-mix',
+      owner_slug: 't-mix',
       fired_at: now / 1000,
       duration_ms: 1,
       status: 'ok',
@@ -832,7 +832,7 @@ describe('CronScheduler — calendar / wall-clock schedules (T2)', () => {
       jobs,
       handlers,
       db,
-      project_slug: 't-cal4',
+      owner_slug: 't-cal4',
       now: () => now,
       timeZone: UTC,
     })

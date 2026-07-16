@@ -63,11 +63,11 @@ export function buildCoresOAuthPendingSweepHandler(
       deleted = await store.sweepExpired(now())
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)
-      moduleLog.warn('sweep_failed', { project: ctx.project_slug, error: message })
+      moduleLog.warn('sweep_failed', { project: ctx.owner_slug, error: message })
       return { status: 'error', detail: message }
     }
     if (deleted > 0) {
-      moduleLog.info('swept', { project: ctx.project_slug, swept: deleted })
+      moduleLog.info('swept', { project: ctx.owner_slug, swept: deleted })
       return { status: 'ok', detail: `swept=${deleted}` }
     }
     return { status: 'skipped', detail: 'no_expired_rows' }

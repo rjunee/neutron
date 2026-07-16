@@ -168,7 +168,7 @@ describe('nudge engine wiring threads instance_metadata.timezone end-to-end', ()
 
     const result = await handler({
       job_name: 'tasks-nudge-t-nyc',
-      project_slug: OWNER,
+      owner_slug: OWNER,
       fired_at: CROSSOVER_NOW_UTC,
     })
     expect(result.status).toBe('ok')
@@ -206,7 +206,7 @@ describe('nudge engine wiring threads instance_metadata.timezone end-to-end', ()
 
     const result = await handler({
       job_name: 'tasks-nudge-t-la',
-      project_slug: OWNER,
+      owner_slug: OWNER,
       fired_at: CROSSOVER_NOW_UTC,
     })
     expect(result.status).toBe('ok')
@@ -244,7 +244,7 @@ describe('nudge engine wiring threads instance_metadata.timezone end-to-end', ()
 
     const result = await handler({
       job_name: 'tasks-nudge-t-no-row',
-      project_slug: OWNER,
+      owner_slug: OWNER,
       fired_at: CROSSOVER_NOW_UTC,
     })
     expect(result.status).toBe('ok')

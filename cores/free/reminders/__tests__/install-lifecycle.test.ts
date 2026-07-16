@@ -160,7 +160,7 @@ describe('install lifecycle — Reminders Core round-trip', () => {
     // own reminder agent or a wow-moment lifestyle nudge.
     const rawStore = new ReminderStore(env.projectDb)
     const organic = await rawStore.create({
-      project_slug: ownerSlug,
+      owner_slug: ownerSlug,
       topic_id: null,
       fire_at: 1_700_000_003,
       message: 'organic-engine-row',
@@ -260,7 +260,7 @@ describe('install lifecycle — Reminders Core round-trip', () => {
     // source tag, simulating the gateway's own reminder agents.
     const rawStore = new ReminderStore(env.projectDb)
     const organic = await rawStore.create({
-      project_slug: ownerSlug,
+      owner_slug: ownerSlug,
       topic_id: null,
       fire_at: 1_700_000_100,
       message: 'organic-engine-row',

@@ -3226,7 +3226,7 @@ export function buildOpenGraphComposer(
     const watchdogNotifier: WatchdogNotifier = {
       notify: async (alert: WatchdogAlert): Promise<void> => {
         try {
-          const body = `⚠️ Supervisor alert: ${alert.kind} (${alert.project_slug})`
+          const body = `⚠️ Supervisor alert: ${alert.kind} (${alert.owner_slug})`
           const env: AppWsOutboundAgentMessage = {
             v: 1,
             type: 'agent_message',
@@ -3261,7 +3261,7 @@ export function buildOpenGraphComposer(
           event: 'watchdog_alert',
           module: 'watchdog',
           level: 'warn',
-          project_slug: alert.project_slug,
+          project_slug: alert.owner_slug,
           payload: { id: alert.id, kind: alert.kind, ...alert.payload },
         })
       },
