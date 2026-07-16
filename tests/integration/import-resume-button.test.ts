@@ -64,7 +64,7 @@ function makeRunner(): ImportJobRunnerHook {
       // Seed the new runner result so the post-resume cron sees it.
       runnerResults.set(nextRunnerJobId, {
         job_id: nextRunnerJobId,
-        project_slug: OWNER,
+        owner_slug: OWNER,
         source: 'chatgpt-zip',
         status: 'pass1-running',
         dollars_spent: 0,
@@ -88,7 +88,7 @@ function makePayloadResolver(): ImportPayloadResolver {
 }
 
 let probeCalls: Array<{
-  project_slug: string
+  owner_slug: string
   user_id: string
   source: string
   job_id: string
@@ -125,7 +125,7 @@ async function seedFailedAndFireCron(
 ): Promise<void> {
   runnerResults.set(prior_job_id, {
     job_id: prior_job_id,
-    project_slug: OWNER,
+    owner_slug: OWNER,
     source: 'chatgpt-zip',
     status: 'failed',
     dollars_spent: 0.8,
@@ -144,7 +144,7 @@ async function seedFailedAndFireCron(
   })
   const jobs = new CronJobRegistry()
   const handlers = new CronHandlerRegistry()
-  registerImportRunningCron({ project_slug: OWNER, jobs, handlers, handler })
+  registerImportRunningCron({ owner_slug: OWNER, jobs, handlers, handler })
   const scheduler = new CronScheduler({
     jobs,
     handlers,
@@ -183,7 +183,7 @@ describe('resume_import button surface', () => {
     const PRIOR = 'job-old'
     await stateStore.upsert({
       user_id: USER,
-      project_slug: OWNER,
+      owner_slug: OWNER,
       phase: 'import_running',
       phase_state_patch: {
         topic_id: TOPIC,
@@ -221,7 +221,7 @@ describe('resume_import button surface', () => {
     probeIsResumable = false
     await stateStore.upsert({
       user_id: USER,
-      project_slug: OWNER,
+      owner_slug: OWNER,
       phase: 'import_running',
       phase_state_patch: {
         topic_id: TOPIC,

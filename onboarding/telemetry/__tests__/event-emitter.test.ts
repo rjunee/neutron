@@ -59,7 +59,7 @@ function deterministicUuid(): () => string {
 /** Build one event of each name with realistic payloads so the table
  *  insert exercises every code path. */
 function eventForName(name: typeof ALL_ONBOARDING_EVENT_NAMES[number]): OnboardingEvent {
-  const base = { project_slug: 't1', user_id: 'u1', ts: 1_700_000_000_000 }
+  const base = { owner_slug: 't1', user_id: 'u1', ts: 1_700_000_000_000 }
   switch (name) {
     case 'signup.started':
       return { ...base, event: name, payload: { via: 'tg' } }
@@ -204,7 +204,7 @@ test('moduleForEventName routes signup.* → signup, onboarding.* → onboarding
 test('payload JSON round-trips faithfully through the SQL row', async () => {
   const telemetry = new OnboardingTelemetry({ db, uuid: deterministicUuid() })
   await telemetry.emit({
-    project_slug: 't1',
+    owner_slug: 't1',
     user_id: 'u1',
     event: 'onboarding.completed',
     payload: {
@@ -225,14 +225,14 @@ test('payload JSON round-trips faithfully through the SQL row', async () => {
 test('duration_ms is optional and round-trips when set', async () => {
   const telemetry = new OnboardingTelemetry({ db, uuid: deterministicUuid() })
   await telemetry.emit({
-    project_slug: 't1',
+    owner_slug: 't1',
     user_id: 'u1',
     event: 'onboarding.import_pass2_complete',
     payload: { source: 'chatgpt-zip', total_dollars: 1, entities: 1, projects: 1, tasks: 1 },
     duration_ms: 5_000,
   })
   await telemetry.emit({
-    project_slug: 't1',
+    owner_slug: 't1',
     user_id: 'u1',
     event: 'onboarding.import_started',
     payload: { source: 'chatgpt-zip' },
@@ -254,7 +254,7 @@ test('eventLogger throw does NOT roll back the SQL row', async () => {
     uuid: deterministicUuid(),
   })
   await telemetry.emit({
-    project_slug: 't1',
+    owner_slug: 't1',
     user_id: 'u1',
     event: 'onboarding.button_emitted',
     payload: { prompt_id: 'p1', idempotency_collapsed: false, options_count: 2 },
@@ -273,7 +273,7 @@ test('buildStdoutEventLogger writes one JSON line per event', () => {
     id: 'id-1',
     ts: 1,
     level: 'info',
-    project_slug: 't',
+    owner_slug: 't',
     user_id: 'u',
     attempt_id: 'a-1',
     module: 'onboarding',
@@ -291,21 +291,21 @@ test('signup events filter to module=signup; onboarding_metrics view aggregates 
   const telemetry = new OnboardingTelemetry({ db, uuid: deterministicUuid() })
   const start = 1_700_000_000_000
   await telemetry.emit({
-    project_slug: 't1',
+    owner_slug: 't1',
     user_id: 'u1',
     event: 'signup.started',
     payload: { via: 'tg' },
     ts: start,
   })
   await telemetry.emit({
-    project_slug: 't1',
+    owner_slug: 't1',
     user_id: 'u1',
     event: 'onboarding.wow_dispatched',
     payload: { fired_count: 4, total_actions: 7 },
     ts: start + 30 * 60 * 1000,
   })
   await telemetry.emit({
-    project_slug: 't1',
+    owner_slug: 't1',
     user_id: 'u1',
     event: 'onboarding.completed',
     payload: { time_to_wow_ms: 30 * 60 * 1000, total_dollars: 1, wow_actions_fired: [] },
@@ -345,14 +345,14 @@ test('Codex r2 P1: view scopes wow_actions / sean_ellis on (project_slug, user_i
   // Both users start onboarding so the view has rows for both.
   for (const user_id of [userA, userB]) {
     await telemetry.emit({
-      project_slug: OWNER_W,
+      owner_slug: OWNER_W,
       user_id,
       event: 'signup.started',
       payload: { via: 'tg' },
       ts: baseAt,
     })
     await telemetry.emit({
-      project_slug: OWNER_W,
+      owner_slug: OWNER_W,
       user_id,
       event: 'onboarding.completed',
       payload: { time_to_wow_ms: 1, total_dollars: 1, wow_actions_fired: [] },
@@ -363,7 +363,7 @@ test('Codex r2 P1: view scopes wow_actions / sean_ellis on (project_slug, user_i
   // userA has 3 wow_action_fired events (2 succeeded), userB has 1 (failed).
   for (let i = 0; i < 3; i++) {
     await telemetry.emit({
-      project_slug: OWNER_W,
+      owner_slug: OWNER_W,
       user_id: userA,
       event: 'onboarding.wow_action_fired',
       payload: { action_id: `0${i + 1}`, success: i < 2 },
@@ -371,7 +371,7 @@ test('Codex r2 P1: view scopes wow_actions / sean_ellis on (project_slug, user_i
     })
   }
   await telemetry.emit({
-    project_slug: OWNER_W,
+    owner_slug: OWNER_W,
     user_id: userB,
     event: 'onboarding.wow_action_fired',
     payload: { action_id: '01', success: false },
@@ -380,14 +380,14 @@ test('Codex r2 P1: view scopes wow_actions / sean_ellis on (project_slug, user_i
 
   // Each user has their own sean_ellis response.
   await telemetry.emit({
-    project_slug: OWNER_W,
+    owner_slug: OWNER_W,
     user_id: userA,
     event: 'onboarding.sean_ellis_response',
     payload: { response: 'very_disappointed' },
     ts: baseAt + 1000,
   })
   await telemetry.emit({
-    project_slug: OWNER_W,
+    owner_slug: OWNER_W,
     user_id: userB,
     event: 'onboarding.sean_ellis_response',
     payload: { response: 'somewhat_disappointed' },
@@ -623,9 +623,9 @@ test('listRecent bounds the read at the DB (ORDER BY ts DESC LIMIT), newest-firs
   // Emit 5 events for one instance (+ one for a different instance to prove scoping).
   const payload = { time_to_wow_ms: 1, total_dollars: 0, wow_actions_fired: [] as string[] }
   for (let i = 0; i < 5; i++) {
-    await telemetry.emit({ project_slug: 'inst', user_id: 'u', event: 'onboarding.completed', payload })
+    await telemetry.emit({ owner_slug: 'inst', user_id: 'u', event: 'onboarding.completed', payload })
   }
-  await telemetry.emit({ project_slug: 'other', user_id: 'u', event: 'onboarding.completed', payload })
+  await telemetry.emit({ owner_slug: 'other', user_id: 'u', event: 'onboarding.completed', payload })
 
   // Bounded: at most `limit` rows come back, even though 5 exist.
   const recent = telemetry.listRecent('inst', 2)
@@ -637,7 +637,7 @@ test('listRecent bounds the read at the DB (ORDER BY ts DESC LIMIT), newest-firs
   const newestTwo = allAsc.slice(-2).reverse()
   expect(recent.map((e) => e.ts)).toEqual(newestTwo)
   // Scoped to the instance — the 'other' row never appears.
-  expect(recent.every((e) => e.project_slug === 'inst')).toBe(true)
+  expect(recent.every((e) => e.owner_slug === 'inst')).toBe(true)
   // limit <= 0 short-circuits to [].
   expect(telemetry.listRecent('inst', 0)).toEqual([])
 })

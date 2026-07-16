@@ -400,7 +400,7 @@ export async function handleImportUpload(
   //    bridge via the engine's own state-store + button emit path.
   try {
     const advance = await deps.engine.notifyImportUpload({
-      project_slug: ctx.project_slug,
+      owner_slug: ctx.project_slug,
       topic_id: ctx.topic_id,
       user_id: ctx.user_id ?? '',
       channel_kind: ctx.channel_kind,

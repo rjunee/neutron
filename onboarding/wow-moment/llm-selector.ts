@@ -47,7 +47,7 @@ export interface WowSelectorCollectedData {
 }
 
 export interface WowSelectorInput {
-  project_slug: string
+  owner_slug: string
   collected_data: WowSelectorCollectedData
   import_result: ImportResult | null
   candidates: ReadonlyArray<WowActionId>
@@ -157,7 +157,7 @@ export async function pickWowActions(
   } catch (err) {
     log('warn', 'wow-selector LLM call failed; falling back to deterministic predicates', {
       error: errorMessage(err),
-      project_slug: input.project_slug,
+      owner_slug: input.owner_slug,
     })
     return fallbackPick({ input, deps, reason: 'llm_error', max_picks })
   }
@@ -166,7 +166,7 @@ export async function pickWowActions(
   if (parsed === null) {
     log('warn', 'wow-selector LLM returned unparseable JSON; falling back', {
       raw_preview: raw.slice(0, 200),
-      project_slug: input.project_slug,
+      owner_slug: input.owner_slug,
     })
     return fallbackPick({ input, deps, reason: 'parse_error', max_picks })
   }
@@ -181,7 +181,7 @@ export async function pickWowActions(
   if (validated === null) {
     log('warn', 'wow-selector pick failed validation; falling back', {
       raw_preview: raw.slice(0, 200),
-      project_slug: input.project_slug,
+      owner_slug: input.owner_slug,
     })
     return fallbackPick({ input, deps, reason: 'invalid_pick', max_picks })
   }
@@ -285,7 +285,7 @@ function fallbackPick(args: FallbackArgs): WowSelectorResult {
 }
 
 interface UserPayload {
-  project_slug: string
+  owner_slug: string
   candidates: ReadonlyArray<string>
   collected_data: WowSelectorCollectedData
   import_summary?: {
@@ -298,7 +298,7 @@ interface UserPayload {
 
 function buildUserPayload(input: WowSelectorInput): string {
   const payload: UserPayload = {
-    project_slug: input.project_slug,
+    owner_slug: input.owner_slug,
     candidates: input.candidates,
     collected_data: input.collected_data,
   }

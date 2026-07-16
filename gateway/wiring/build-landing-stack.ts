@@ -659,7 +659,7 @@ export function buildOnboardingEnginePieces(
     input.importPayloadResolver === undefined
       ? new ChainedImportPayloadResolver([
           new UrlPasteImportPayloadResolver(async (resolveInput) => {
-            const row = await stateStore.get(resolveInput.project_slug, resolveInput.user_id)
+            const row = await stateStore.get(resolveInput.owner_slug, resolveInput.user_id)
             if (row === null) return null
             const v = row.phase_state[`import_paste_url_${resolveInput.source}`]
             return typeof v === 'string' && v.length > 0 ? v : null
@@ -714,7 +714,7 @@ export function buildOnboardingEnginePieces(
       ? buildImportResumeReadinessProbe({
           db: input.db,
           owner_home: input.owner_home,
-          project_slug: input.project_slug,
+          owner_slug: input.project_slug,
         })
       : input.importResumeReadiness
   // Sprint B (2026-05-17) — Argus r2 BLOCKING: do NOT thread

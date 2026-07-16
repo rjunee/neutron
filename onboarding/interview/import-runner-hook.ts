@@ -40,10 +40,10 @@ import type {
  */
 export interface ImportJobRunnerHook {
   start(input: {
-    project_slug: string
+    owner_slug: string
     /**
      * ISSUES #2 (2026-05-19) — onboarding_state PK is composite. Threaded so
-     * the runner can resolve the right (project_slug, user_id) row.
+     * the runner can resolve the right (owner_slug, user_id) row.
      */
     user_id: string
     source: ImportSource

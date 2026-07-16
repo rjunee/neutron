@@ -367,7 +367,7 @@ export type OnboardingEvent = {
   [K in OnboardingEventName]: {
     ts?: number
     level?: OnboardingEventLevel
-    project_slug: string
+    owner_slug: string
     user_id: string
     /** Sprint 30 — onboarding attempt correlator (groups view rows). */
     attempt_id?: string
@@ -394,7 +394,7 @@ export interface PersistedOnboardingEvent {
   id: string
   ts: number
   level: OnboardingEventLevel
-  project_slug: string
+  owner_slug: string
   user_id: string
   /** Sprint 30 — per-attempt correlator. Always populated on persist. */
   attempt_id: string
@@ -425,7 +425,7 @@ export interface OnboardingTelemetryDeps {
   /**
    * Sprint 30 — per-instance attempt-id resolver. When an event is emitted
    * without an explicit `attempt_id`, the telemetry awaits this resolver
-   * (passing the event's project_slug + user_id) and stamps the result
+   * (passing the event's owner_slug + user_id) and stamps the result
    * onto the row. When the resolver is absent OR returns null, the
    * column falls back to `LEGACY_ATTEMPT_ID`.
    *
@@ -435,7 +435,7 @@ export interface OnboardingTelemetryDeps {
    * stamps each event's attempt_id verbatim).
    */
   resolveAttemptId?: (input: {
-    project_slug: string
+    owner_slug: string
     user_id: string
   }) => Promise<string | null> | string | null
 }
@@ -455,7 +455,7 @@ export class OnboardingTelemetry {
   private readonly uuid: () => string
   private readonly now: () => number
   private readonly resolveAttemptId?: (input: {
-    project_slug: string
+    owner_slug: string
     user_id: string
   }) => Promise<string | null> | string | null
 
@@ -478,7 +478,7 @@ export class OnboardingTelemetry {
       attempt_id = event.attempt_id
     } else if (this.resolveAttemptId !== undefined) {
       const resolved = await this.resolveAttemptId({
-        project_slug: event.project_slug,
+        owner_slug: event.owner_slug,
         user_id: event.user_id,
       })
       attempt_id = resolved !== null && resolved !== undefined && resolved.length > 0
@@ -491,7 +491,7 @@ export class OnboardingTelemetry {
       id,
       ts,
       level,
-      project_slug: event.project_slug,
+      owner_slug: event.owner_slug,
       user_id: event.user_id,
       attempt_id,
       module,
@@ -508,7 +508,7 @@ export class OnboardingTelemetry {
         id,
         ts,
         level,
-        event.project_slug,
+        event.owner_slug,
         event.user_id,
         attempt_id,
         module,
@@ -533,14 +533,14 @@ export class OnboardingTelemetry {
    * Read-only convenience: list every event for an instance in ts ASC order.
    * Used by the m2-telemetry-roundtrip test + observability endpoint.
    */
-  list(project_slug: string): PersistedOnboardingEvent[] {
+  list(owner_slug: string): PersistedOnboardingEvent[] {
     const rows = this.db.all<GatewayEventRow, [string]>(
       `SELECT id, ts, level, project_slug, user_id, attempt_id, module, event_name,
               payload_json, duration_ms
          FROM gateway_events
         WHERE project_slug = ?
         ORDER BY ts ASC, id ASC`,
-      [project_slug],
+      [owner_slug],
     )
     return rows.map((r) => rowToPersistedEvent(r))
   }
@@ -552,7 +552,7 @@ export class OnboardingTelemetry {
    * the DB so a long-lived instance's diagnostics hit reads + parses at most
    * `limit` rows. `limit <= 0` returns `[]`.
    */
-  listRecent(project_slug: string, limit: number): PersistedOnboardingEvent[] {
+  listRecent(owner_slug: string, limit: number): PersistedOnboardingEvent[] {
     if (!Number.isFinite(limit) || limit <= 0) return []
     const rows = this.db.all<GatewayEventRow, [string, number]>(
       `SELECT id, ts, level, project_slug, user_id, attempt_id, module, event_name,
@@ -561,7 +561,7 @@ export class OnboardingTelemetry {
         WHERE project_slug = ?
         ORDER BY ts DESC, id DESC
         LIMIT ?`,
-      [project_slug, Math.floor(limit)],
+      [owner_slug, Math.floor(limit)],
     )
     return rows.map((r) => rowToPersistedEvent(r))
   }
@@ -585,7 +585,7 @@ function rowToPersistedEvent(r: GatewayEventRow): PersistedOnboardingEvent {
     id: r.id,
     ts: r.ts,
     level: r.level,
-    project_slug: r.project_slug,
+    owner_slug: r.project_slug,
     user_id: r.user_id,
     attempt_id: r.attempt_id,
     module: r.module,
@@ -645,8 +645,8 @@ export function buildProductionOnboardingTelemetry(input: {
   // (SqliteOnboardingStateStore.resolveOrMintAttemptId); this factory no
   // longer writes the table directly (migrations/table-ownership.json).
   const stateStore = new SqliteOnboardingStateStore({ db: input.db })
-  deps.resolveAttemptId = async ({ project_slug, user_id }) => {
-    return stateStore.resolveOrMintAttemptId(project_slug, user_id)
+  deps.resolveAttemptId = async ({ owner_slug, user_id }) => {
+    return stateStore.resolveOrMintAttemptId(owner_slug, user_id)
   }
   return new OnboardingTelemetry(deps)
 }

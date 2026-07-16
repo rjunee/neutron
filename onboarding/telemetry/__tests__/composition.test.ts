@@ -42,7 +42,7 @@ test('bridgeWowEventLogger fans recordFired through OnboardingTelemetry → gate
   const wow = new WowTelemetry({ db, eventLogger: wowEventLogger })
 
   await wow.recordFired({
-    project_slug: 'casey',
+    owner_slug: 'casey',
     action_id: '01-first-week-brief',
     fired_at: 1_700_000_000_000,
     success: true,
@@ -68,14 +68,14 @@ test('bridgeWowEventLogger fans recordEngaged through OnboardingTelemetry', asyn
   const wow = new WowTelemetry({ db, eventLogger: wowEventLogger })
 
   await wow.recordFired({
-    project_slug: 'casey',
+    owner_slug: 'casey',
     action_id: '01-first-week-brief',
     fired_at: 1_700_000_000_000,
     success: true,
     success_reason: 'ok',
   })
   await wow.recordEngaged({
-    project_slug: 'casey',
+    owner_slug: 'casey',
     action_id: '01-first-week-brief',
     engagement: 'opened',
     occurred_at: 1_700_000_001_000,
@@ -91,33 +91,33 @@ test('composeOnboardingTelemetrySinks returns one sink per surface', async () =>
   const telemetry = new OnboardingTelemetry({ db })
   const sinks = composeOnboardingTelemetrySinks(telemetry)
 
-  await sinks.signup.started({ project_slug: 'casey', user_id: 'u', via: 'tg' })
+  await sinks.signup.started({ owner_slug: 'casey', user_id: 'u', via: 'tg' })
   await sinks.interview.phaseAdvanced({
-    project_slug: 'casey',
+    owner_slug: 'casey',
     user_id: 'u',
     from: 'signup',
     to: 'agent_name_chosen',
   })
   await sinks.archetype.picked({
-    project_slug: 'casey',
+    owner_slug: 'casey',
     user_id: 'u',
     archetype_slugs: ['athena'],
     used_llm_extension: false,
   })
-  await sinks.import.started({ project_slug: 'casey', user_id: 'u', source: 'chatgpt-zip' })
+  await sinks.import.started({ owner_slug: 'casey', user_id: 'u', source: 'chatgpt-zip' })
   await sinks.persona.committed({
-    project_slug: 'casey',
+    owner_slug: 'casey',
     user_id: 'u',
     draft_id: 'd1',
   })
   await sinks.profile_pic.generated({
-    project_slug: 'casey',
+    owner_slug: 'casey',
     user_id: 'u',
     job_id: 'pp1',
     candidate_count: 3,
   })
   await sinks.completion.completed({
-    project_slug: 'casey',
+    owner_slug: 'casey',
     user_id: 'u',
     time_to_wow_ms: 30 * 60 * 1000,
     total_dollars: 1,
@@ -142,7 +142,7 @@ test('bridgeWowEventLogger ignores unknown event names instead of throwing', asy
   const telemetry = new OnboardingTelemetry({ db })
   const wowEventLogger = bridgeWowEventLogger(telemetry, { user_id: 'u' })
   expect(() =>
-    wowEventLogger({ event: 'unknown.event', payload: { project_slug: 'casey' } }),
+    wowEventLogger({ event: 'unknown.event', payload: { owner_slug: 'casey' } }),
   ).not.toThrow()
   // No row landed.
   expect(telemetry.list('casey').length).toBe(0)

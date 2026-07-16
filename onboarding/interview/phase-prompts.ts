@@ -491,7 +491,7 @@ export interface BuildImportAnalysisPresentedPromptSpecInput {
    *   - The source ZIP is still on disk at
    *     `<owner_home>/imports/<source>.zip` (for *-zip sources).
    *   - The cached `import_pass1_chunks` rows are reusable (per-chunk
-   *     hash dedup keyed by `(project_slug, source, chunk_hash)`).
+   *     hash dedup keyed by `(owner_slug, source, chunk_hash)`).
    *
    * Idempotent: once a resumed run lands `completed`, the engine
    * suppresses this flag on subsequent re-emits so the user doesn't

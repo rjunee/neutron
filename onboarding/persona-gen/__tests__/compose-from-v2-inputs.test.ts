@@ -148,7 +148,7 @@ describe('persona-gen consumes v2 collected_data', () => {
         ownerHomeFor: (slug: string): string => join(tmp, slug, 'persona'),
       })
       const input: ComposeInput = {
-        project_slug: 'casey',
+        owner_slug: 'casey',
         archetype_blend: composeFromFreeText(CASEY_PERSONALITY, { library: lib }),
         signals: {
           display_name: 'Sage',

@@ -2349,7 +2349,7 @@ export function buildOpenGraphComposer(
       onboardingAnthropicClient !== null
         ? buildProjectKickoff({
             owner_home,
-            project_slug,
+            owner_slug: project_slug,
             composer: buildProjectKickoffComposer({ client: onboardingAnthropicClient }),
             indexer: buildProjectPageIndexer({
               ownerDataDir: owner_home,
@@ -2448,7 +2448,7 @@ export function buildOpenGraphComposer(
       onboardingAnthropicClient !== null
         ? buildOnboardingFinalize({
             owner_home,
-            project_slug,
+            owner_slug: project_slug,
             db,
             stateStore: onboardingStateStore,
             personaLoader,
@@ -2566,7 +2566,7 @@ export function buildOpenGraphComposer(
         ? buildPostTurnExtractor({
             anthropicClient: onboardingAnthropicClient,
             stateStore: onboardingStateStore,
-            project_slug,
+            owner_slug: project_slug,
             hasInFlightImport: probeInFlightImport,
             onComplete: async ({ user_id, state }): Promise<void> => {
               if (onboardingFinalizer === null) return
@@ -2636,7 +2636,7 @@ export function buildOpenGraphComposer(
             // (plus a consumed stamp) shallow-merges, preserving the engine's
             // merged primary_projects / non_work_interests / import_result.
             const consumed = await onboardingStateStore.upsert({
-              project_slug,
+              owner_slug: project_slug,
               user_id,
               phase: 'work_interview_gap_fill',
               phase_state_patch: { active_prompt_id: null, import_consumed_at: Date.now() },
@@ -2859,7 +2859,7 @@ export function buildOpenGraphComposer(
                 if (captured === null) return { finalized: false }
                 // Persist the settled field (shallow-merge; phase unchanged).
                 const next = await onboardingStateStore.upsert({
-                  project_slug,
+                  owner_slug: project_slug,
                   user_id,
                   phase: st.phase,
                   phase_state_patch: { [captured.field]: captured.value },

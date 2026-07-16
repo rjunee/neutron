@@ -150,7 +150,7 @@ describe('buildSynthesisImportJobRunner — synthesis → engine bridge', () => 
       },
       writeSeed(seed: ProjectSeed): WriteProjectSeedOutcome {
         seedsWritten.push(seed)
-        return { project_slug: seed.slug, reason: 'created', docs_written: ['STATUS.md'], transcripts_written: 1 }
+        return { owner_slug: seed.slug, reason: 'created', docs_written: ['STATUS.md'], transcripts_written: 1 }
       },
     }
     let parseCalls = 0
@@ -164,7 +164,7 @@ describe('buildSynthesisImportJobRunner — synthesis → engine bridge', () => 
     })
 
     const { job_id } = await runner.start({
-      project_slug: 'owner',
+      owner_slug: 'owner',
       user_id: 'u-owner',
       source: 'claude-zip',
       payload: Buffer.from('zip-bytes'),
@@ -228,7 +228,7 @@ describe('buildSynthesisImportJobRunner — synthesis → engine bridge', () => 
         return null
       },
       writeSeed(seed: ProjectSeed): WriteProjectSeedOutcome {
-        return { project_slug: seed.slug, reason: 'created', docs_written: ['STATUS.md'], transcripts_written: 1 }
+        return { owner_slug: seed.slug, reason: 'created', docs_written: ['STATUS.md'], transcripts_written: 1 }
       },
     }
     const runner = buildSynthesisImportJobRunner({
@@ -237,7 +237,7 @@ describe('buildSynthesisImportJobRunner — synthesis → engine bridge', () => 
       parse: () => fakeRecords(),
     })
     const { job_id } = await runner.start({
-      project_slug: 'owner',
+      owner_slug: 'owner',
       user_id: 'u-owner',
       source: 'claude-zip',
       payload: Buffer.from('zip'),
@@ -301,7 +301,7 @@ describe('buildSynthesisImportJobRunner — synthesis → engine bridge', () => 
     const runner = buildSynthesisImportJobRunner({ db: freshDb(), synthesis, parse: () => fakeRecords() })
 
     const { job_id } = await runner.start({
-      project_slug: 'owner',
+      owner_slug: 'owner',
       user_id: 'u-owner',
       source: 'claude-zip',
       payload: Buffer.from('zip'),
@@ -325,7 +325,7 @@ describe('buildSynthesisImportJobRunner — synthesis → engine bridge', () => 
     const synthesis = buildSynthesisSession({ substrate: null, owner_home: ownerHome })
     const runner = buildSynthesisImportJobRunner({ db: freshDb(), synthesis, parse: () => fakeRecords() })
     const { job_id } = await runner.start({
-      project_slug: 'owner',
+      owner_slug: 'owner',
       user_id: 'u-owner',
       source: 'claude-zip',
       payload: Buffer.from('zip'),
@@ -366,7 +366,7 @@ describe('buildSynthesisImportJobRunner — synthesis → engine bridge', () => 
         return null
       },
       writeSeed(seed: ProjectSeed): WriteProjectSeedOutcome {
-        return { project_slug: seed.slug, reason: 'created', docs_written: [], transcripts_written: 0 }
+        return { owner_slug: seed.slug, reason: 'created', docs_written: [], transcripts_written: 0 }
       },
     }
     const runner = buildSynthesisImportJobRunner({
@@ -375,7 +375,7 @@ describe('buildSynthesisImportJobRunner — synthesis → engine bridge', () => 
       parse: () => fakeRecords(),
     })
     const { job_id } = await runner.start({
-      project_slug: 'owner',
+      owner_slug: 'owner',
       user_id: 'u-owner',
       source: 'claude-zip',
       payload: Buffer.from('zip'),
@@ -415,7 +415,7 @@ describe('buildSynthesisImportJobRunner — synthesis → engine bridge', () => 
         return null
       },
       writeSeed(seed: ProjectSeed): WriteProjectSeedOutcome {
-        return { project_slug: seed.slug, reason: 'created', docs_written: [], transcripts_written: 0 }
+        return { owner_slug: seed.slug, reason: 'created', docs_written: [], transcripts_written: 0 }
       },
     }
     const runner = buildSynthesisImportJobRunner({
@@ -424,7 +424,7 @@ describe('buildSynthesisImportJobRunner — synthesis → engine bridge', () => 
       parse: () => fakeRecords(),
     })
     const { job_id } = await runner.start({
-      project_slug: 'owner',
+      owner_slug: 'owner',
       user_id: 'u-owner',
       source: 'claude-zip',
       payload: Buffer.from('zip'),
@@ -444,12 +444,12 @@ describe('buildSynthesisImportJobRunner — synthesis → engine bridge', () => 
         return null
       },
       writeSeed(seed: ProjectSeed): WriteProjectSeedOutcome {
-        return { project_slug: seed.slug, reason: 'created', docs_written: ['STATUS.md'], transcripts_written: 1 }
+        return { owner_slug: seed.slug, reason: 'created', docs_written: ['STATUS.md'], transcripts_written: 1 }
       },
     }
     const runner = buildSynthesisImportJobRunner({ db, synthesis: fakeSynthesis, parse: () => fakeRecords() })
     const { job_id } = await runner.start({
-      project_slug: 'owner',
+      owner_slug: 'owner',
       user_id: 'u-owner',
       source: 'claude-zip',
       payload: Buffer.from('zip'),
@@ -493,13 +493,13 @@ describe('buildSynthesisImportJobRunner — synthesis → engine bridge', () => 
         return null
       },
       writeSeed(seed: ProjectSeed): WriteProjectSeedOutcome {
-        return { project_slug: seed.slug, reason: 'created', docs_written: ['STATUS.md'], transcripts_written: 1 }
+        return { owner_slug: seed.slug, reason: 'created', docs_written: ['STATUS.md'], transcripts_written: 1 }
       },
     }
     // Process 1: run the import to completion.
     const runner1 = buildSynthesisImportJobRunner({ db, synthesis: fakeSynthesis, parse: () => fakeRecords() })
     const { job_id } = await runner1.start({
-      project_slug: 'owner',
+      owner_slug: 'owner',
       user_id: 'u-owner',
       source: 'claude-zip',
       payload: Buffer.from('zip'),
@@ -536,7 +536,7 @@ describe('buildSynthesisImportJobRunner — synthesis → engine bridge', () => 
         return null
       },
       writeSeed(seed: ProjectSeed): WriteProjectSeedOutcome {
-        return { project_slug: seed.slug, reason: 'created', docs_written: ['STATUS.md'], transcripts_written: 1 }
+        return { owner_slug: seed.slug, reason: 'created', docs_written: ['STATUS.md'], transcripts_written: 1 }
       },
     }
     // Inject a failure on the `status='completed'` UPDATE — the SECOND write in the
@@ -579,7 +579,7 @@ describe('buildSynthesisImportJobRunner — synthesis → engine bridge', () => 
 
     const runner = buildSynthesisImportJobRunner({ db, synthesis: fakeSynthesis, parse: () => fakeRecords() })
     const { job_id } = await runner.start({
-      project_slug: 'owner',
+      owner_slug: 'owner',
       user_id: 'u-owner',
       source: 'claude-zip',
       payload: Buffer.from('zip'),
@@ -623,12 +623,12 @@ describe('buildSynthesisImportJobRunner — synthesis → engine bridge', () => 
         db.raw().run(
           `UPDATE import_jobs SET status = 'cancelled', completed_at = 1 WHERE status = 'pass1-running'`,
         )
-        return { project_slug: seed.slug, reason: 'created', docs_written: ['STATUS.md'], transcripts_written: 1 }
+        return { owner_slug: seed.slug, reason: 'created', docs_written: ['STATUS.md'], transcripts_written: 1 }
       },
     }
     const runner = buildSynthesisImportJobRunner({ db, synthesis: fakeSynthesis, parse: () => fakeRecords() })
     const { job_id } = await runner.start({
-      project_slug: 'owner',
+      owner_slug: 'owner',
       user_id: 'u-owner',
       source: 'claude-zip',
       payload: Buffer.from('zip'),
@@ -669,12 +669,12 @@ describe('buildSynthesisImportJobRunner — synthesis → engine bridge', () => 
         return null
       },
       writeSeed(seed: ProjectSeed): WriteProjectSeedOutcome {
-        return { project_slug: seed.slug, reason: 'created', docs_written: [], transcripts_written: 0 }
+        return { owner_slug: seed.slug, reason: 'created', docs_written: [], transcripts_written: 0 }
       },
     }
     const runner = buildSynthesisImportJobRunner({ db, synthesis: fakeSynthesis, parse: () => fakeRecords() })
     const { job_id } = await runner.start({
-      project_slug: 'owner',
+      owner_slug: 'owner',
       user_id: 'u-owner',
       source: 'claude-zip',
       payload: Buffer.from('zip'),
@@ -709,12 +709,12 @@ describe('buildSynthesisImportJobRunner — synthesis → engine bridge', () => 
         return null
       },
       writeSeed(seed: ProjectSeed): WriteProjectSeedOutcome {
-        return { project_slug: seed.slug, reason: 'created', docs_written: ['STATUS.md'], transcripts_written: 1 }
+        return { owner_slug: seed.slug, reason: 'created', docs_written: ['STATUS.md'], transcripts_written: 1 }
       },
     }
     const runner = buildSynthesisImportJobRunner({ db, synthesis: fakeSynthesis, parse: () => fakeRecords() })
     const { job_id } = await runner.start({
-      project_slug: 'owner',
+      owner_slug: 'owner',
       user_id: 'u-owner',
       source: 'claude-zip',
       payload: Buffer.from('zip'),
@@ -838,7 +838,7 @@ describe('buildSynthesisImportJobRunner — raw transcripts materialize on a fre
       const runner = buildSynthesisImportJobRunner({ db: freshDb(), synthesis })
       const payload = readFileSync(join(FIXTURES, fx.file))
       const { job_id } = await runner.start({
-        project_slug: 'owner',
+        owner_slug: 'owner',
         user_id: 'u-owner',
         source: fx.source,
         payload,

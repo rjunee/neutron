@@ -102,7 +102,7 @@ function buildHandler(opts: {
     engine: {
       notifyImportUpload: async (params) => {
         opts.recorder.calls.push({
-          project_slug: params.project_slug,
+          project_slug: params.owner_slug,
           topic_id: params.topic_id,
           source: params.source,
         })

@@ -22,7 +22,7 @@
  * `engine.ts` keeps the same-turn cache field + accessors + the public
  * `resolvePhasePromptSpec` cache-wrapper, which now calls
  * `resolvePhasePromptSpecUncached(this, …)` — so the cache semantics
- * (what's cached, keyed on `${project_slug}:${phase}`, cleared at the top
+ * (what's cached, keyed on `${owner_slug}:${phase}`, cleared at the top
  * of every public entry point, invalidated per-entry by the advance path)
  * are byte-for-byte unchanged.
  *
@@ -83,7 +83,7 @@ const log = createLogger('onboarding-engine')
 
 export async function resolvePhasePromptSpecUncached(
   self: EngineInternals,
-    project_slug: string,
+    owner_slug: string,
     user_id: string,
     phase: OnboardingPhase,
   ): Promise<PhasePromptSpec | null> {
@@ -110,7 +110,7 @@ export async function resolvePhasePromptSpecUncached(
       phase === 'import_analysis_presented'
     ) {
       try {
-        const s = await self.deps.stateStore.get(project_slug, user_id)
+        const s = await self.deps.stateStore.get(owner_slug, user_id)
         const ps = (s?.phase_state ?? {}) as Record<string, unknown>
         const already = readMemoizedCharacterSuggestions(
           ps['personality_character_suggestions'],
@@ -120,7 +120,7 @@ export async function resolvePhasePromptSpecUncached(
           (readStringArray(ps, 'non_work_interests') ?? []).length > 0 ||
           (readStringArray(ps, 'user_supplied_corrections') ?? []).length > 0
         if (already === null && hasSignal) {
-          fireAndForget('engine-spec-resolution.getOrStartCharacterSuggestions', self.getOrStartCharacterSuggestions(project_slug, user_id, ps))
+          fireAndForget('engine-spec-resolution.getOrStartCharacterSuggestions', self.getOrStartCharacterSuggestions(owner_slug, user_id, ps))
         }
       } catch {
         // Non-fatal — the personality_offered render falls back to its own
@@ -134,7 +134,7 @@ export async function resolvePhasePromptSpecUncached(
       // This is the recovery path after extractAgentNameFromFreeform
       // returned null and the engine stayed at signup rather than
       // advancing with garbage `agent_name`.
-      const state = await self.deps.stateStore.get(project_slug, user_id)
+      const state = await self.deps.stateStore.get(owner_slug, user_id)
       if (
         state !== null &&
         (state.phase_state as Record<string, unknown>)['clarify_name_reprompt'] === true
@@ -148,7 +148,7 @@ export async function resolvePhasePromptSpecUncached(
         }
       }
       const llmSpec = await resolveLlmSpec(self, {
-        project_slug,
+        owner_slug,
         topic_id: null,
         user_id,
         phase,
@@ -159,7 +159,7 @@ export async function resolvePhasePromptSpecUncached(
       return STATIC_PHASE_SPECS[phase] ?? null
     }
     if (phase === 'slug_chosen') {
-      const state = await self.deps.stateStore.get(project_slug, user_id)
+      const state = await self.deps.stateStore.get(owner_slug, user_id)
       const phase_state = state?.phase_state ?? {}
       const ps = phase_state as Record<string, unknown>
       const rejection = readString(ps, 'slug_picker_rejection')
@@ -173,7 +173,7 @@ export async function resolvePhasePromptSpecUncached(
       // the agent name) so existing tests + the slug-picker bridge keep
       // working byte-for-byte.
       const computed = self.computeSlugSuggestionsForPhase({
-        project_slug,
+        owner_slug,
         agent_name,
         user_first_name,
       })
@@ -195,7 +195,7 @@ export async function resolvePhasePromptSpecUncached(
       // on the live CC session (`post-turn-extractor.ts`); this body builder
       // just renders the persisted `primary_projects` via
       // `buildProjectsProposedPromptSpec`.
-      const state = await self.deps.stateStore.get(project_slug, user_id)
+      const state = await self.deps.stateStore.get(owner_slug, user_id)
       const phase_state = (state?.phase_state ?? {}) as Record<string, unknown>
       const rejection = readString(phase_state, 'projects_proposed_rejection')
       const projects = readStringArray(phase_state, 'primary_projects') ?? []
@@ -213,7 +213,7 @@ export async function resolvePhasePromptSpecUncached(
     // off `phase_state.ai_substrate_used` (set by
     // `advanceFromAiSubstrateOfferedToUpload` at the prior phase).
     if (phase === 'import_upload_pending') {
-      const state = await self.deps.stateStore.get(project_slug, user_id)
+      const state = await self.deps.stateStore.get(owner_slug, user_id)
       const phase_state = (state?.phase_state ?? {}) as Record<string, unknown>
       const raw = phase_state['ai_substrate_used']
       const ai_substrate_used: AiSubstrateSource | null =
@@ -228,7 +228,7 @@ export async function resolvePhasePromptSpecUncached(
     // project / interest names — they pass through verbatim because
     // they're signals from the user's own data.
     if (phase === 'import_analysis_presented') {
-      const state = await self.deps.stateStore.get(project_slug, user_id)
+      const state = await self.deps.stateStore.get(owner_slug, user_id)
       const phase_state = (state?.phase_state ?? {}) as Record<string, unknown>
       const user_first_name = readString(phase_state, 'user_first_name')
       const import_source = readImportSource(phase_state, 'import_source')
@@ -266,7 +266,7 @@ export async function resolvePhasePromptSpecUncached(
       ) {
         try {
           can_resume_import = await self.deps.importResumeReadiness.isResumable({
-            project_slug,
+            owner_slug,
             user_id,
             source: import_source,
             job_id: probe_job_id,
@@ -277,7 +277,7 @@ export async function resolvePhasePromptSpecUncached(
           // do NOT bubble; the analysis-presented body still ships.
           // eslint-disable-next-line no-console
           log.warn('import_resume_readiness_threw', {
-            project: project_slug,
+            project: owner_slug,
             job: probe_job_id,
             error: err instanceof Error ? err.message : String(err),
           })
@@ -312,7 +312,7 @@ export async function resolvePhasePromptSpecUncached(
     // On suggester failure the static fallback constant ships — the
     // user always sees a 5-character body.
     if (phase === 'personality_offered') {
-      const state = await self.deps.stateStore.get(project_slug, user_id)
+      const state = await self.deps.stateStore.get(owner_slug, user_id)
       const phase_state = (state?.phase_state ?? {}) as Record<string, unknown>
       const v2_rejection = readString(phase_state, 'personality_offered_rejection')
 
@@ -340,7 +340,7 @@ export async function resolvePhasePromptSpecUncached(
         // 6s-timeout inline call that fell back to the monotone static list
         // 100% of the time (suggester-timeout incident).
         const pending = self.getOrStartCharacterSuggestions(
-          project_slug,
+          owner_slug,
           user_id,
           phase_state,
         )
@@ -358,7 +358,7 @@ export async function resolvePhasePromptSpecUncached(
           // resume-window timer. Best-effort.
           try {
             await self.deps.stateStore.upsert({
-              project_slug,
+              owner_slug,
               user_id,
               phase: 'personality_offered',
               phase_state_patch: {
@@ -369,14 +369,14 @@ export async function resolvePhasePromptSpecUncached(
             })
           } catch (err) {
             log.warn('persist_character_suggestions_failed', {
-              project: project_slug,
+              project: owner_slug,
               error: err instanceof Error ? err.message : String(err),
             })
           }
           if (result.source === 'llm') {
             self.clearPendingSuggestions(
               self.pendingCharacterSuggestions as Map<string, Promise<unknown>>,
-              project_slug,
+              owner_slug,
               user_id,
             )
           }
@@ -422,7 +422,7 @@ export async function resolvePhasePromptSpecUncached(
     // missing-bullets case by returning null to force the static
     // bullet-bearing fallback.
     if (phase === 'agent_name_chosen') {
-      const state = await self.deps.stateStore.get(project_slug, user_id)
+      const state = await self.deps.stateStore.get(owner_slug, user_id)
       const phase_state = (state?.phase_state ?? {}) as Record<string, unknown>
       const rejection = readString(phase_state, 'agent_name_chosen_rejection')
 
@@ -450,7 +450,7 @@ export async function resolvePhasePromptSpecUncached(
         // BEST_MODEL). 2026-06-04: replaces the old 6s-timeout inline call
         // that fell back to Sage/Vera/Orin 100% of the time.
         const pending = self.getOrStartAgentNameSuggestions(
-          project_slug,
+          owner_slug,
           user_id,
           phase_state,
         )
@@ -466,7 +466,7 @@ export async function resolvePhasePromptSpecUncached(
           // the upsert doesn't reset the resume-window timer. Best-effort.
           try {
             await self.deps.stateStore.upsert({
-              project_slug,
+              owner_slug,
               user_id,
               phase: 'agent_name_chosen',
               phase_state_patch: {
@@ -477,14 +477,14 @@ export async function resolvePhasePromptSpecUncached(
             })
           } catch (err) {
             log.warn('persist_agent_name_suggestions_failed', {
-              project: project_slug,
+              project: owner_slug,
               error: err instanceof Error ? err.message : String(err),
             })
           }
           if (result.source === 'llm') {
             self.clearPendingSuggestions(
               self.pendingAgentNameSuggestions as Map<string, Promise<unknown>>,
-              project_slug,
+              owner_slug,
               user_id,
             )
           }
@@ -529,7 +529,7 @@ export async function resolvePhasePromptSpecUncached(
     // a misconfigured environment still advances the user instead of
     // stalling on an empty body.
     if (phase === 'persona_reviewed' && self.deps.personaComposer !== undefined) {
-      const state = await self.deps.stateStore.get(project_slug, user_id)
+      const state = await self.deps.stateStore.get(owner_slug, user_id)
       const phase_state = (state?.phase_state ?? {}) as Record<string, unknown>
       const draft = readPersonaDraft(phase_state)
       const sub_step = readPersonaReviewSubStep(phase_state)
@@ -562,7 +562,7 @@ export async function resolvePhasePromptSpecUncached(
             summary = await self.deps.personaSummarizer.summarize(summarizer_input)
           } catch (err) {
             log.warn('persona_summarizer_failed', {
-              project: project_slug,
+              project: owner_slug,
               error: err instanceof Error ? err.message : String(err),
             })
             summary = staticPersonaSummary(summarizer_input)
@@ -575,7 +575,7 @@ export async function resolvePhasePromptSpecUncached(
         // memoization upsert doesn't reset the resume-window timer.
         try {
           await self.deps.stateStore.upsert({
-            project_slug,
+            owner_slug,
             user_id,
             phase: 'persona_reviewed',
             phase_state_patch: { persona_reviewed_summary: summary },
@@ -583,7 +583,7 @@ export async function resolvePhasePromptSpecUncached(
           })
         } catch (err) {
           log.warn('persist_persona_reviewed_summary_failed', {
-            project: project_slug,
+            project: owner_slug,
             error: err instanceof Error ? err.message : String(err),
           })
         }
@@ -637,7 +637,7 @@ export async function resolvePhasePromptSpecUncached(
     // prompt bodies that ship as no-ops" anti-pattern CLAUDE.md
     // forbids (root § "Spec is the source of truth — HARD RULE").
     if (phase === 'persona_synthesizing' && self.deps.personaComposer !== undefined) {
-      const state = await self.deps.stateStore.get(project_slug, user_id)
+      const state = await self.deps.stateStore.get(owner_slug, user_id)
       const phase_state = (state?.phase_state ?? {}) as Record<string, unknown>
       const failure = readString(phase_state, 'persona_compose_failure_reason')
       if (failure !== null) {
@@ -656,7 +656,7 @@ export async function resolvePhasePromptSpecUncached(
     // enabled, LLM error) — fall through to the static `PHASE_PROMPTS`
     // table so a partial rollout / model outage stays user-invisible.
     const llmSpec = await resolveLlmSpec(self, {
-      project_slug,
+      owner_slug,
       topic_id: null,
       user_id,
       phase,
@@ -681,7 +681,7 @@ export async function resolvePhasePromptSpecUncached(
 export async function resolveLlmSpec(
   self: EngineInternals,
   input: {
-    project_slug: string
+    owner_slug: string
     topic_id: string | null
     user_id: string | null
     phase: OnboardingPhase
@@ -712,7 +712,7 @@ export async function resolveLlmSpec(
     const state =
       input.state ??
       (input.user_id !== null && input.user_id.length > 0
-        ? await self.deps.stateStore.get(input.project_slug, input.user_id)
+        ? await self.deps.stateStore.get(input.owner_slug, input.user_id)
         : null)
     const phase_state = (state?.phase_state ?? {}) as Record<string, unknown>
     const signup_via =
@@ -741,7 +741,7 @@ export async function resolveLlmSpec(
     }
     const recent_turns = readRecentTurns(self, 6)
     const bundle: PhaseContextBundle = {
-      project_slug: input.project_slug,
+      owner_slug: input.owner_slug,
       topic_id,
       user_id,
       signup_via,
@@ -758,7 +758,7 @@ export async function resolveLlmSpec(
     } catch (err) {
       log.warn('phase_spec_resolver_threw', {
         phase: input.phase,
-        project: input.project_slug,
+        project: input.owner_slug,
         error: err instanceof Error ? err.message : String(err),
       })
       return null

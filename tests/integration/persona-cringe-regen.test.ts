@@ -78,7 +78,7 @@ describe('persona cringe-check regen integration', () => {
       let caught: PersonaError | null = null
       try {
         await composer.compose({
-          project_slug: 'cringe-test',
+          owner_slug: 'cringe-test',
           archetype_blend: blend,
           signals: cringeySignals,
           user_facts: { display_name: 'Test User' },

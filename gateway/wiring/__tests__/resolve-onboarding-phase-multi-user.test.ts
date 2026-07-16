@@ -36,9 +36,9 @@ afterEach(() => {
 
 test('loadCurrentOnboardingPhase returns the right user phase when multiple users exist', async () => {
   const store = new SqliteOnboardingStateStore({ db })
-  await store.upsert({ project_slug: 't', user_id: 'u-A', phase: 'signup' })
+  await store.upsert({ owner_slug: 't', user_id: 'u-A', phase: 'signup' })
   await store.upsert({
-    project_slug: 't',
+    owner_slug: 't',
     user_id: 'u-B',
     phase: 'persona_reviewed',
   })
@@ -49,7 +49,7 @@ test('loadCurrentOnboardingPhase returns the right user phase when multiple user
 
 test('loadCurrentOnboardingPhase returns null for a user that has no row on the project', async () => {
   const store = new SqliteOnboardingStateStore({ db })
-  await store.upsert({ project_slug: 't', user_id: 'u-A', phase: 'signup' })
+  await store.upsert({ owner_slug: 't', user_id: 'u-A', phase: 'signup' })
   expect(loadCurrentOnboardingPhase(db, 't', 'u-A')).toBe('signup')
   expect(loadCurrentOnboardingPhase(db, 't', 'u-other')).toBeNull()
 })

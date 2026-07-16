@@ -107,7 +107,7 @@ function buildEnv(): TestEnv {
 async function seedSource(env: TestEnv, source: 'chatgpt' | 'claude'): Promise<void> {
   await env.stateStore.upsert({
     user_id: USER,
-    project_slug: OWNER,
+    owner_slug: OWNER,
     phase: 'import_upload_pending',
     phase_state_patch: { ai_substrate_used: source },
     advanced_at: 1,
@@ -116,7 +116,7 @@ async function seedSource(env: TestEnv, source: 'chatgpt' | 'claude'): Promise<v
 
 async function notify(env: TestEnv, source: 'chatgpt' | 'claude', observed_at: number) {
   return env.engine.notifyImportUpload({
-    project_slug: OWNER,
+    owner_slug: OWNER,
     topic_id: TOPIC,
     user_id: USER,
     channel_kind: 'app_socket',

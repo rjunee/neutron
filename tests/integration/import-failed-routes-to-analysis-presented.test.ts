@@ -107,7 +107,7 @@ describe('failed-import → import_analysis_presented (S14)', () => {
     // shape (signup captures user_first_name before import).
     await stateStore.upsert({
       user_id: USER,
-      project_slug: OWNER,
+      owner_slug: OWNER,
       phase: 'import_running',
       phase_state_patch: {
         topic_id: TOPIC,
@@ -125,7 +125,7 @@ describe('failed-import → import_analysis_presented (S14)', () => {
     // 4 attempts → job marked failed).
     runnerResults.set(job_id, {
       job_id,
-      project_slug: OWNER,
+      owner_slug: OWNER,
       source: 'chatgpt-zip',
       status: 'failed',
       dollars_spent: 0.8,
@@ -140,7 +140,7 @@ describe('failed-import → import_analysis_presented (S14)', () => {
     const handler = buildImportRunningHandler({ engine, db, now: () => T0 + 30_000 })
     const jobs = new CronJobRegistry()
     const handlers = new CronHandlerRegistry()
-    registerImportRunningCron({ project_slug: OWNER, jobs, handlers, handler })
+    registerImportRunningCron({ owner_slug: OWNER, jobs, handlers, handler })
 
     const scheduler = new CronScheduler({
       jobs,
@@ -219,7 +219,7 @@ describe('failed-import → import_analysis_presented (S14)', () => {
 
     await stateStore.upsert({
       user_id: USER,
-      project_slug: OWNER,
+      owner_slug: OWNER,
       phase: 'import_running',
       phase_state_patch: {
         topic_id: TOPIC,
@@ -234,7 +234,7 @@ describe('failed-import → import_analysis_presented (S14)', () => {
 
     runnerResults.set(job_id, {
       job_id,
-      project_slug: OWNER,
+      owner_slug: OWNER,
       source: 'chatgpt-zip',
       status: 'cancelled',
       dollars_spent: 0.12,
@@ -249,7 +249,7 @@ describe('failed-import → import_analysis_presented (S14)', () => {
     const handler = buildImportRunningHandler({ engine, db, now: () => T0 + 30_000 })
     const jobs = new CronJobRegistry()
     const handlers = new CronHandlerRegistry()
-    registerImportRunningCron({ project_slug: OWNER, jobs, handlers, handler })
+    registerImportRunningCron({ owner_slug: OWNER, jobs, handlers, handler })
 
     const scheduler = new CronScheduler({
       jobs,
@@ -279,7 +279,7 @@ describe('failed-import → import_analysis_presented (S14)', () => {
 
     await stateStore.upsert({
       user_id: USER,
-      project_slug: OWNER,
+      owner_slug: OWNER,
       phase: 'import_running',
       phase_state_patch: {
         topic_id: TOPIC,
@@ -293,7 +293,7 @@ describe('failed-import → import_analysis_presented (S14)', () => {
 
     runnerResults.set(job_id, {
       job_id,
-      project_slug: OWNER,
+      owner_slug: OWNER,
       source: 'chatgpt-zip',
       status: 'cancelled',
       dollars_spent: 0,
@@ -307,7 +307,7 @@ describe('failed-import → import_analysis_presented (S14)', () => {
     const handler = buildImportRunningHandler({ engine, db, now: () => T0 + 15_000 })
     const jobs = new CronJobRegistry()
     const handlers = new CronHandlerRegistry()
-    registerImportRunningCron({ project_slug: OWNER, jobs, handlers, handler })
+    registerImportRunningCron({ owner_slug: OWNER, jobs, handlers, handler })
     const scheduler = new CronScheduler({
       jobs,
       handlers,
@@ -331,7 +331,7 @@ describe('failed-import → import_analysis_presented (S14)', () => {
 
     await stateStore.upsert({
       user_id: USER,
-      project_slug: OWNER,
+      owner_slug: OWNER,
       phase: 'import_running',
       phase_state_patch: {
         topic_id: TOPIC,
@@ -345,7 +345,7 @@ describe('failed-import → import_analysis_presented (S14)', () => {
 
     runnerResults.set(job_id, {
       job_id,
-      project_slug: OWNER,
+      owner_slug: OWNER,
       source: 'chatgpt-zip',
       status: 'cancelled',
       dollars_spent: 0,
@@ -358,7 +358,7 @@ describe('failed-import → import_analysis_presented (S14)', () => {
     const handler = buildImportRunningHandler({ engine, db, now: () => T0 + 15_000 })
     const jobs = new CronJobRegistry()
     const handlers = new CronHandlerRegistry()
-    registerImportRunningCron({ project_slug: OWNER, jobs, handlers, handler })
+    registerImportRunningCron({ owner_slug: OWNER, jobs, handlers, handler })
     const scheduler = new CronScheduler({
       jobs,
       handlers,
@@ -382,7 +382,7 @@ describe('failed-import → import_analysis_presented (S14)', () => {
 
     await stateStore.upsert({
       user_id: USER,
-      project_slug: OWNER,
+      owner_slug: OWNER,
       phase: 'import_running',
       phase_state_patch: {
         topic_id: TOPIC,
@@ -396,7 +396,7 @@ describe('failed-import → import_analysis_presented (S14)', () => {
 
     runnerResults.set(job_id, {
       job_id,
-      project_slug: OWNER,
+      owner_slug: OWNER,
       source: 'chatgpt-zip',
       status: 'failed',
       dollars_spent: 0,
@@ -410,7 +410,7 @@ describe('failed-import → import_analysis_presented (S14)', () => {
     const handler = buildImportRunningHandler({ engine, db, now: () => T0 + 15_000 })
     const jobs = new CronJobRegistry()
     const handlers = new CronHandlerRegistry()
-    registerImportRunningCron({ project_slug: OWNER, jobs, handlers, handler })
+    registerImportRunningCron({ owner_slug: OWNER, jobs, handlers, handler })
     const scheduler = new CronScheduler({
       jobs,
       handlers,

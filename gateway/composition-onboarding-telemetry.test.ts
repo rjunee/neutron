@@ -110,7 +110,7 @@ test('Sprint 30 (Codex r1 P1 + r2 P1) — telemetry resolveAttemptId mints-on-mi
     // deterministic across UUID variants.
     await surface.telemetry.emit({
       ts: 1_000_000,
-      project_slug: noOpInputBase.project_slug,
+      owner_slug: noOpInputBase.project_slug,
       user_id: 'u-1',
       event: 'signup.started',
       payload: { via: 'web' },
@@ -119,7 +119,7 @@ test('Sprint 30 (Codex r1 P1 + r2 P1) — telemetry resolveAttemptId mints-on-mi
     // Resolver minted a row + a UUID. Subsequent events reuse it.
     await surface.telemetry.emit({
       ts: 2_000_000,
-      project_slug: noOpInputBase.project_slug,
+      owner_slug: noOpInputBase.project_slug,
       user_id: 'u-1',
       event: 'onboarding.phase_advanced',
       payload: { from: 'signup', to: 'agent_name_chosen' },
@@ -158,7 +158,7 @@ test('Sprint 30 (Codex r2 P1) — pre-existing onboarding_state.attempt_id wins 
       composed: ComposedTelemetrySinks
     }>('onboarding-telemetry')
     await surface.telemetry.emit({
-      project_slug: 'project-1',
+      owner_slug: 'project-1',
       user_id: 'u-1',
       event: 'signup.started',
       payload: { via: 'web' },

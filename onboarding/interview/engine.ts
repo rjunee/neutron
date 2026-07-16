@@ -471,7 +471,7 @@ export class InterviewEngine implements EngineInternals {
   readonly deploymentMode: OnboardingDeploymentMode
 
   /**
-   * Per-(project_slug, user_id) serialization tail for `notifyImportUpload`.
+   * Per-(owner_slug, user_id) serialization tail for `notifyImportUpload`.
    * Single-owner Open runs in ONE process, so chaining same-user upload
    * notifications here fully eliminates the upload-vs-upload race in the
    * no-state import-start path (Codex r1 P2): two simultaneous fresh-install
@@ -524,23 +524,23 @@ export class InterviewEngine implements EngineInternals {
    * Returns the frozen identity to key SecretsStore rows by. Per
    * `auth/secrets-store.ts:11-26` (2026-05-12 rename-canonicalisation
    * fix) callers MUST pass the FROZEN `owner_handle` — NOT the
-   * mutable `url_slug` (== `project_slug` post-canonicalisation) — so
+   * mutable `url_slug` (== `owner_slug` post-canonicalisation) — so
    * that secret rows survive an instance rename. When this engine is
    * wired with `deps.owner_handle` (production via
    * `build-landing-stack.ts`), that frozen value is used. Tests and
-   * legacy callers that don't supply it fall back to `project_slug`
+   * legacy callers that don't supply it fall back to `owner_slug`
    * for back-compat: pre-rename, the two values are identical, so the
    * fallback is harmless until a rename occurs (and those legacy
    * callers don't exercise the rename path).
    */
-  secretsIdentity(project_slug: string): string {
+  secretsIdentity(owner_slug: string): string {
     if (
       typeof this.deps.owner_handle === 'string' &&
       this.deps.owner_handle.length > 0
     ) {
       return this.deps.owner_handle
     }
-    return project_slug
+    return owner_slug
   }
 
 
@@ -602,10 +602,10 @@ export class InterviewEngine implements EngineInternals {
    * double-fire collapses to a single channel send.
    */
   async pollImportRunningTick(input: {
-    project_slug: string
+    owner_slug: string
     /**
      * ISSUES #2 (2026-05-19) — second PK component. The cron's row scan
-     * (see `import-running-cron.ts`) now projects (project_slug, user_id)
+     * (see `import-running-cron.ts`) now projects (owner_slug, user_id)
      * pairs and calls this method once per pair.
      */
     user_id: string
@@ -621,7 +621,7 @@ export class InterviewEngine implements EngineInternals {
     state: OnboardingState | null
   }> {
     const observed_at = input.observed_at ?? this.now()
-    const state = await this.deps.stateStore.get(input.project_slug, input.user_id)
+    const state = await this.deps.stateStore.get(input.owner_slug, input.user_id)
     if (state === null) return { outcome: 'no_active_job', state: null }
     if (state.phase !== 'import_running') {
       return { outcome: 'no_active_job', state }
@@ -657,7 +657,7 @@ export class InterviewEngine implements EngineInternals {
       return { outcome: 'missing_channel_context', state }
     }
     const advanceInput: AdvanceInput = {
-      project_slug: input.project_slug,
+      owner_slug: input.owner_slug,
       topic_id,
       user_id,
       channel_kind: signup_via === 'telegram' ? 'telegram' : 'app_socket',
@@ -734,19 +734,19 @@ export class InterviewEngine implements EngineInternals {
    *     visible recovery path.
    */
   async notifyImportUpload(input: {
-    project_slug: string
+    owner_slug: string
     topic_id: string
     user_id: string
     channel_kind: ChannelKindForButton
     source: 'chatgpt' | 'claude'
     observed_at?: number
   }): Promise<AdvanceResult> {
-    // Serialize per (project_slug, user_id) so concurrent uploads for the same
+    // Serialize per (owner_slug, user_id) so concurrent uploads for the same
     // fresh-install owner can't race the no-state import-start path (Codex r1
     // P2). The body (`notifyImportUploadLocked`) is the real logic; the recheck
     // re-entry inside it calls the locked body DIRECTLY (not this wrapper) so it
     // never re-acquires this tail and deadlocks.
-    const key = `${input.project_slug}:${input.user_id}`
+    const key = `${input.owner_slug}:${input.user_id}`
     const prev = this.importUploadSerial.get(key) ?? Promise.resolve()
     const run = prev
       .catch(() => undefined)
@@ -760,7 +760,7 @@ export class InterviewEngine implements EngineInternals {
   }
 
   private async notifyImportUploadLocked(input: {
-    project_slug: string
+    owner_slug: string
     topic_id: string
     user_id: string
     channel_kind: ChannelKindForButton
@@ -769,7 +769,7 @@ export class InterviewEngine implements EngineInternals {
   }): Promise<AdvanceResult> {
     this.clearResolvedSpecCache()
     const observed_at = input.observed_at ?? this.now()
-    const state = await this.deps.stateStore.get(input.project_slug, input.user_id)
+    const state = await this.deps.stateStore.get(input.owner_slug, input.user_id)
     if (state === null) {
       // M1 (#130 regression) — open-mode Path-1 upload with NO onboarding_state
       // row yet. The open-mode live-agent onboarding (open/composer.ts) NEVER
@@ -811,21 +811,21 @@ export class InterviewEngine implements EngineInternals {
         // no unbounded recursion). The residual truly-simultaneous window (both
         // requests read null twice before either writes) matches the non-null
         // path's own non-atomic `alreadyHasImportJob` check.
-        const recheck = await this.deps.stateStore.get(input.project_slug, input.user_id)
+        const recheck = await this.deps.stateStore.get(input.owner_slug, input.user_id)
         if (recheck !== null) {
           // Call the LOCKED body, not the public wrapper — we already hold the
           // per-user serialization tail; re-acquiring it would deadlock.
           return await this.notifyImportUploadLocked({ ...input, observed_at })
         }
         const advanceInput: AdvanceInput = {
-          project_slug: input.project_slug,
+          owner_slug: input.owner_slug,
           topic_id: input.topic_id,
           user_id: input.user_id,
           channel_kind: input.channel_kind,
           observed_at,
         }
         const seeded = await this.deps.stateStore.upsert({
-          project_slug: input.project_slug,
+          owner_slug: input.owner_slug,
           user_id: input.user_id,
           // Same non-terminal conversational marker the extractor creates the
           // row at (so `isOnboardingActive` stays true and persona-gen reads it
@@ -855,7 +855,7 @@ export class InterviewEngine implements EngineInternals {
     }
     if (TERMINAL_PHASES.has(state.phase)) return { outcome: 'noop_terminal', state }
     const advanceInput: AdvanceInput = {
-      project_slug: input.project_slug,
+      owner_slug: input.owner_slug,
       topic_id: input.topic_id,
       user_id: input.user_id,
       channel_kind: input.channel_kind,
@@ -1050,7 +1050,7 @@ export class InterviewEngine implements EngineInternals {
    * the user had landed on that phase organically.
    */
   async walkAutoSkip(
-    project_slug: string,
+    owner_slug: string,
     state: OnboardingState,
     observed_at: number,
   ): Promise<OnboardingState> {
@@ -1077,7 +1077,7 @@ export class InterviewEngine implements EngineInternals {
         entry_patch['slug_picker_rejection'] = null
       }
       cur = await this.deps.stateStore.upsert({
-        project_slug,
+        owner_slug,
         user_id: cur.user_id,
         phase: next_phase,
         phase_state_patch: entry_patch,
@@ -1171,7 +1171,7 @@ export class InterviewEngine implements EngineInternals {
   ): Promise<void> {
     const seed = canonicalPromptSeed({ body, options: [] })
     const idempotency_key = deriveIdempotencyKey({
-      project_slug: input.project_slug,
+      project_slug: input.owner_slug,
       topic_id: input.topic_id,
       seed: `router_text:${phase}:${observed_at}:${seed}`,
     })
@@ -1186,7 +1186,7 @@ export class InterviewEngine implements EngineInternals {
     if (emit.was_new || !emit.was_delivered) {
       try {
         const sendResult = await this.deps.sendButtonPrompt({
-          project_slug: input.project_slug,
+          owner_slug: input.owner_slug,
           topic_id: input.topic_id,
           prompt: emit.prompt,
         })
@@ -1205,7 +1205,7 @@ export class InterviewEngine implements EngineInternals {
         // and continue so the engine still returns a meaningful
         // AdvanceResult.
         log.warn('send_agent_text_failed', {
-          project: input.project_slug,
+          project: input.owner_slug,
           phase,
           error: err instanceof Error ? err.message : String(err),
         })
@@ -1432,7 +1432,7 @@ export class InterviewEngine implements EngineInternals {
    * stitches it onto `phase_state.import_job_id` so subsequent poll
    * ticks see the new job. The cached Pass-1 chunks survive across
    * `runner.start` calls (per-chunk dedup is keyed by
-   * `(project_slug, source, chunk_hash)`, not by job_id), so the new
+   * `(owner_slug, source, chunk_hash)`, not by job_id), so the new
    * attempt picks up at $0 from wherever the prior one paused.
    *
    * Returns `{ state }` (the freshly upserted onboarding-state row with
@@ -1599,7 +1599,7 @@ export class InterviewEngine implements EngineInternals {
    * `active_prompt_id = null` and gets routed as no-active-prompt.
    */
   async emitPhasePrompt(input: {
-    project_slug: string
+    owner_slug: string
     /**
      * ISSUES #2 (2026-05-19) — second PK component on `onboarding_state`.
      * Threaded so the spec resolver can read the correct (instance, user)
@@ -1624,7 +1624,7 @@ export class InterviewEngine implements EngineInternals {
     // (re-add when the Cores image-gen substrate ships). The
     // Sprint 28 `ensureProfilePicCandidates` pre-emit hook is no longer
     // reachable from any v2 phase.
-    const spec = await this.resolvePhasePromptSpec(input.project_slug, input.user_id, input.phase)
+    const spec = await this.resolvePhasePromptSpec(input.owner_slug, input.user_id, input.phase)
     if (spec === null) {
       throw new InterviewError(
         input.phase,
@@ -1654,7 +1654,7 @@ export class InterviewEngine implements EngineInternals {
         ? `:${input.seed_suffix}`
         : ''
     const idempotency_key = deriveIdempotencyKey({
-      project_slug: input.project_slug,
+      project_slug: input.owner_slug,
       topic_id: input.topic_id,
       seed: `${input.phase}:${seed}${seedTail}`,
     })
@@ -1686,7 +1686,7 @@ export class InterviewEngine implements EngineInternals {
       let sendResult: Awaited<ReturnType<typeof this.deps.sendButtonPrompt>>
       try {
         sendResult = await this.deps.sendButtonPrompt({
-          project_slug: input.project_slug,
+          owner_slug: input.owner_slug,
           topic_id: input.topic_id,
           prompt: emit.prompt,
         })
@@ -1720,7 +1720,7 @@ export class InterviewEngine implements EngineInternals {
         })
       } else {
         log.warn('emit_phase_prompt_send_undelivered', {
-          project: input.project_slug,
+          project: input.owner_slug,
           topic: input.topic_id,
           prompt: emit.prompt_id,
           phase: input.phase,
@@ -1748,7 +1748,7 @@ export class InterviewEngine implements EngineInternals {
    * itself is now a clean free-text question.
    */
   async resolvePhasePromptSpec(
-    project_slug: string,
+    owner_slug: string,
     user_id: string,
     phase: OnboardingPhase,
   ): Promise<PhasePromptSpec | null> {
@@ -1759,16 +1759,16 @@ export class InterviewEngine implements EngineInternals {
     // case — once for routing, once for the re-emit. Cache lives for
     // the duration of one public entry-point call and is cleared at
     // the top of `advance` / `acceptChoice` / `start`.
-    const cached = this.readResolvedSpec(project_slug, phase)
+    const cached = this.readResolvedSpec(owner_slug, phase)
     if (cached !== null) return cached
-    const spec = await resolvePhasePromptSpecUncached(this, project_slug, user_id, phase)
-    if (spec !== null) this.writeResolvedSpec(project_slug, phase, spec)
+    const spec = await resolvePhasePromptSpecUncached(this, owner_slug, user_id, phase)
+    if (spec !== null) this.writeResolvedSpec(owner_slug, phase, spec)
     return spec
   }
 
   /**
    * 2026-06-04 (onboarding-suggester-llm-timeout) — in-flight suggester
-   * generations keyed by `${project_slug}::${user_id}`. The suggester LLM
+   * generations keyed by `${owner_slug}::${user_id}`. The suggester LLM
    * call runs on the CC-spawn substrate and takes seconds; these maps let
    * the engine (a) start a generation EARLY (background pre-compute during
    * the work-interview phase) and (b) dedupe so the later body-render
@@ -1794,7 +1794,7 @@ export class InterviewEngine implements EngineInternals {
    * LLM twice for one user turn. Cleared at the start of every public
    * engine entry point (`start`, `advance`, `acceptChoice`).
    *
-   * Cache key: `${project_slug}:${phase}`. The cache is intentionally
+   * Cache key: `${owner_slug}:${phase}`. The cache is intentionally
    * scoped per call, NOT a long-lived memoization — the bundle the
    * driver sees includes the transcript-so-far, which changes between
    * user turns; a long-lived cache would serve stale prompts.
@@ -1805,11 +1805,11 @@ export class InterviewEngine implements EngineInternals {
    * Cache helpers — guarded `get` / `set` / `clear` so call sites do
    * not stringify the key inline.
    */
-  private readResolvedSpec(project_slug: string, phase: OnboardingPhase): PhasePromptSpec | null {
-    return this.resolvedSpecCache.get(`${project_slug}:${phase}`) ?? null
+  private readResolvedSpec(owner_slug: string, phase: OnboardingPhase): PhasePromptSpec | null {
+    return this.resolvedSpecCache.get(`${owner_slug}:${phase}`) ?? null
   }
-  private writeResolvedSpec(project_slug: string, phase: OnboardingPhase, spec: PhasePromptSpec): void {
-    this.resolvedSpecCache.set(`${project_slug}:${phase}`, spec)
+  private writeResolvedSpec(owner_slug: string, phase: OnboardingPhase, spec: PhasePromptSpec): void {
+    this.resolvedSpecCache.set(`${owner_slug}:${phase}`, spec)
   }
   private clearResolvedSpecCache(): void {
     this.resolvedSpecCache.clear()
@@ -1820,8 +1820,8 @@ export class InterviewEngine implements EngineInternals {
    * next `resolvePhasePromptSpec` call rebuilds and picks up the
    * fresh `clarify_name_reprompt` flag.
    */
-  invalidateResolvedSpec(project_slug: string, phase: OnboardingPhase): void {
-    this.resolvedSpecCache.delete(`${project_slug}:${phase}`)
+  invalidateResolvedSpec(owner_slug: string, phase: OnboardingPhase): void {
+    this.resolvedSpecCache.delete(`${owner_slug}:${phase}`)
   }
 
   // ----------------------------------------------------------------------
@@ -1831,8 +1831,8 @@ export class InterviewEngine implements EngineInternals {
   // results to phase_state themselves so a reload reads the memoized picks.
   // ----------------------------------------------------------------------
 
-  suggestionKeyPrefix(project_slug: string, user_id: string): string {
-    return slugSuggestionKeyPrefix(this, project_slug, user_id)
+  suggestionKeyPrefix(owner_slug: string, user_id: string): string {
+    return slugSuggestionKeyPrefix(this, owner_slug, user_id)
   }
 
   /**
@@ -1856,11 +1856,11 @@ export class InterviewEngine implements EngineInternals {
    *  persisted a real result. */
   clearPendingSuggestions(
     map: Map<string, Promise<unknown>>,
-    project_slug: string,
+    owner_slug: string,
     user_id: string,
     except?: string,
   ): void {
-    const prefix = this.suggestionKeyPrefix(project_slug, user_id)
+    const prefix = this.suggestionKeyPrefix(owner_slug, user_id)
     for (const k of [...map.keys()]) {
       if (k.startsWith(prefix) && k !== except) map.delete(k)
     }
@@ -1899,21 +1899,21 @@ export class InterviewEngine implements EngineInternals {
    * latency-hiding warm cache.
    */
   getOrStartCharacterSuggestions(
-    project_slug: string,
+    owner_slug: string,
     user_id: string,
     phase_state: Record<string, unknown>,
   ): Promise<CharacterSuggesterResult> | null {
-    return slugGetOrStartCharacterSuggestions(this, project_slug, user_id, phase_state)
+    return slugGetOrStartCharacterSuggestions(this, owner_slug, user_id, phase_state)
   }
 
   /** Agent-name mirror of `getOrStartCharacterSuggestions` (same no-DB-write
    *  contract — persistence is foreground-only). */
   getOrStartAgentNameSuggestions(
-    project_slug: string,
+    owner_slug: string,
     user_id: string,
     phase_state: Record<string, unknown>,
   ): Promise<AgentNameSuggesterResult> | null {
-    return slugGetOrStartAgentNameSuggestions(this, project_slug, user_id, phase_state)
+    return slugGetOrStartAgentNameSuggestions(this, owner_slug, user_id, phase_state)
   }
 
   /**
@@ -1935,7 +1935,7 @@ export class InterviewEngine implements EngineInternals {
    * actually picks the slug, via `processSlugPickerReply`).
    */
   computeSlugSuggestionsForPhase(input: {
-    project_slug: string
+    owner_slug: string
     agent_name: string | null
     user_first_name: string | null
   }): { primary: string | null; alts: ReadonlyArray<string> } {
@@ -1981,7 +1981,7 @@ export class InterviewEngine implements EngineInternals {
    *
    * Codex P1 #2 + P1 #3: when `new_slug` is set (rename succeeded), the
    * onboarding_state row has already been rekeyed by the caller from
-   * `input.project_slug` (OLD) to `new_slug`. The advance writes under
+   * `input.owner_slug` (OLD) to `new_slug`. The advance writes under
    * `new_slug` so the renamed gateway can find the row on reconnect.
    * The next-phase prompt is intentionally NOT emitted on the live
    * socket because the redirect envelope has already fired and the WS
@@ -2052,7 +2052,7 @@ export class InterviewEngine implements EngineInternals {
    *     succeeded but the advance upsert never completed in the prior
    *     turn — don't re-compose, let the caller advance through).
    *
-   * Idempotency: at most one in-flight compose per (project_slug,
+   * Idempotency: at most one in-flight compose per (owner_slug,
    * observed_at) window. Both call-sites (`normalAdvance` and
    * `emitCurrentPhasePrompt`) run inside `advance()` which holds the
    * per-instance ordering via `clearResolvedSpecCache` + sequential

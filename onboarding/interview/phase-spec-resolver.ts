@@ -74,7 +74,7 @@ export interface PhaseRecentTurn {
  */
 export interface PhaseContextBundle {
   /** Frozen across the whole interview. */
-  project_slug: string
+  owner_slug: string
   /** `web:<user_id>` or `tg:<chat_id>:<thread_id>`. The resolver passes
    *  this through to the `onLlmStart` / `onLlmEnd` callbacks (typing
    *  indicators) but never uses it for the LLM call itself. */
@@ -1542,7 +1542,7 @@ export function buildLlmPhaseSpecResolver(
         })
         log('warn', 'llm call failed; falling back to static spec', {
           phase: bundle.phase,
-          project_slug: bundle.project_slug,
+          owner_slug: bundle.owner_slug,
           err: err instanceof Error ? err.message : String(err),
         })
         return null
@@ -1553,7 +1553,7 @@ export function buildLlmPhaseSpecResolver(
       if (parsed === null) {
         log('warn', 'malformed llm output; falling back to static spec', {
           phase: bundle.phase,
-          project_slug: bundle.project_slug,
+          owner_slug: bundle.owner_slug,
           raw_head: raw.slice(0, 200),
         })
         return null
@@ -1584,7 +1584,7 @@ export function buildLlmPhaseSpecResolver(
           'option-bearing phase resolved option-less; using static spec to keep body/options in-phase',
           {
             phase: bundle.phase,
-            project_slug: bundle.project_slug,
+            owner_slug: bundle.owner_slug,
             body_head: parsed.body.slice(0, 80),
           },
         )

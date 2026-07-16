@@ -54,7 +54,7 @@ test('persist → load round-trips the full result', () => {
   return (async () => {
     await persistImportResult(db, {
       job_id: 'job-1',
-      project_slug: 'general',
+      owner_slug: 'general',
       source: 'chatgpt-zip',
       result: r,
       partial: false,
@@ -85,7 +85,7 @@ test('upsert on job_id: a partial write is overwritten by the full write', () =>
   return (async () => {
     await persistImportResult(db, {
       job_id: 'job-2',
-      project_slug: 'general',
+      owner_slug: 'general',
       source: 'claude-zip',
       result: fixture({ proposed_projects: [] }),
       partial: true,
@@ -93,7 +93,7 @@ test('upsert on job_id: a partial write is overwritten by the full write', () =>
     })
     await persistImportResult(db, {
       job_id: 'job-2',
-      project_slug: 'general',
+      owner_slug: 'general',
       source: 'claude-zip',
       result: fixture({
         proposed_projects: [{ name: 'Final', rationale: 'done', suggested_topics: [] }],
@@ -123,7 +123,7 @@ test('malformed legacy interests column degrades gracefully', () => {
   return (async () => {
     await persistImportResult(db, {
       job_id: 'job-3',
-      project_slug: 'general',
+      owner_slug: 'general',
       source: 'chatgpt-zip',
       result: fixture(),
       partial: false,

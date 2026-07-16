@@ -70,7 +70,7 @@ let db: ProjectDb
 let buttonStore: ButtonStore
 let stateStore: InMemoryOnboardingStateStore
 let transcript: TranscriptWriter
-let sentPrompts: Array<{ project_slug: string; topic_id: string; prompt: ButtonPrompt }>
+let sentPrompts: Array<{ owner_slug: string; topic_id: string; prompt: ButtonPrompt }>
 
 function buildEngine(opts: {
   importJobRunner?: ImportJobRunnerHook
@@ -136,7 +136,7 @@ async function seedState(
 ): Promise<void> {
   await stateStore.upsert({
     user_id: USER,
-    project_slug: OWNER,
+    owner_slug: OWNER,
     phase,
     phase_state_patch: {
       topic_id: TOPIC,
@@ -189,7 +189,7 @@ describe('ISSUES #98 — explicit switch must not auto-import the abandoned sour
 
     // The abandoned ChatGPT upload completes AFTER the switch but BEFORE a tap.
     const out = await engine.notifyImportUpload({
-      project_slug: OWNER,
+      owner_slug: OWNER,
       topic_id: TOPIC,
       user_id: USER,
       channel_kind: 'app_socket',
@@ -223,7 +223,7 @@ describe('ISSUES #98 — explicit switch must not auto-import the abandoned sour
 
     // The user's own ChatGPT upload lands → honored, not orphaned.
     const out = await engine.notifyImportUpload({
-      project_slug: OWNER,
+      owner_slug: OWNER,
       topic_id: TOPIC,
       user_id: USER,
       channel_kind: 'app_socket',
@@ -249,7 +249,7 @@ describe('ISSUES #98 — explicit switch must not auto-import the abandoned sour
     })
 
     const out = await engine.notifyImportUpload({
-      project_slug: OWNER,
+      owner_slug: OWNER,
       topic_id: TOPIC,
       user_id: USER,
       channel_kind: 'app_socket',
@@ -276,7 +276,7 @@ describe('ISSUES #98 — explicit switch must not auto-import the abandoned sour
 
     // Now the Claude upload lands → honored.
     const out = await engine.notifyImportUpload({
-      project_slug: OWNER,
+      owner_slug: OWNER,
       topic_id: TOPIC,
       user_id: USER,
       channel_kind: 'app_socket',
@@ -305,7 +305,7 @@ describe('ISSUES #98 — explicit switch must not auto-import the abandoned sour
 
     // The user's own Claude upload lands → honored, NOT refused.
     const out = await engine.notifyImportUpload({
-      project_slug: OWNER,
+      owner_slug: OWNER,
       topic_id: TOPIC,
       user_id: USER,
       channel_kind: 'app_socket',
@@ -335,7 +335,7 @@ describe('ISSUES #98 — explicit switch must not auto-import the abandoned sour
 
     // The in-flight ChatGPT upload lands → honored, not refused.
     const out = await engine.notifyImportUpload({
-      project_slug: OWNER,
+      owner_slug: OWNER,
       topic_id: TOPIC,
       user_id: USER,
       channel_kind: 'app_socket',

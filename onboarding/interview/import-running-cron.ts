@@ -23,7 +23,7 @@
  * prompt, budget-exceeded partial-value prompt) fire.
  *
  * Wiring shape (per-project cron registration):
- *   - `name`: `onboarding-import-running-<project_slug>`
+ *   - `name`: `onboarding-import-running-<owner_slug>`
  *   - `handler`: `'onboarding.import_running_tick'`
  *   - `schedule`: `{ kind: 'interval_ms', interval_ms: 15s default }`
  *
@@ -89,7 +89,7 @@ export const ONBOARDING_IMPORT_RUNNING_HANDLER_NAME =
 
 /**
  * Row shape returned by the SQL scan. ISSUES #2 (2026-05-19) — the scan
- * now projects (project_slug, user_id) so the handler can dispatch one
+ * now projects (owner_slug, user_id) so the handler can dispatch one
  * tick per user. `engine.pollImportRunningTick(...)` re-reads the full
  * state itself so the handler does not race against a concurrent
  * advance that landed between scan + tick.
@@ -118,7 +118,7 @@ export interface ImportRunningHandlerDeps {
  *      `phase = 'import_running'` AND `import_job_id` non-empty in the
  *      phase_state JSON. Per-project DB so the result set is at most one
  *      row.
- *   2. For each row, call `engine.pollImportRunningTick(project_slug)`.
+ *   2. For each row, call `engine.pollImportRunningTick(owner_slug)`.
  *      The engine reads its own state, resolves channel context, checks
  *      the runner status, and advances on terminal states (suppressing
  *      the in-progress emit so polling is silent on the channel).
@@ -169,7 +169,7 @@ export function buildImportRunningHandler(
     for (const row of rows) {
       try {
         const result = await deps.engine.pollImportRunningTick({
-          project_slug: row.project_slug,
+          owner_slug: row.project_slug,
           user_id: row.user_id,
           observed_at: fired_at,
         })
@@ -231,12 +231,12 @@ export function buildImportRunningHandler(
  * 64-char ceiling.
  */
 export function buildImportRunningJob(input: {
-  project_slug: string
+  owner_slug: string
   interval_ms?: number
 }): CronJobDef {
   return {
-    name: `onboarding-import-running-${input.project_slug}`,
-    description: `Onboarding import-running cron tick for ${input.project_slug}`,
+    name: `onboarding-import-running-${input.owner_slug}`,
+    description: `Onboarding import-running cron tick for ${input.owner_slug}`,
     schedule: {
       kind: 'interval_ms',
       interval_ms:
@@ -259,7 +259,7 @@ export function buildImportRunningJob(input: {
  * across the same registries instance is a no-op.
  */
 export function registerImportRunningCron(input: {
-  project_slug: string
+  owner_slug: string
   jobs: CronJobRegistry
   handlers: CronHandlerRegistry
   handler: CronHandler
@@ -268,10 +268,10 @@ export function registerImportRunningCron(input: {
   const job =
     input.interval_ms !== undefined
       ? buildImportRunningJob({
-          project_slug: input.project_slug,
+          owner_slug: input.owner_slug,
           interval_ms: input.interval_ms,
         })
-      : buildImportRunningJob({ project_slug: input.project_slug })
+      : buildImportRunningJob({ owner_slug: input.owner_slug })
   input.jobs.register(job)
   if (input.handlers.get(ONBOARDING_IMPORT_RUNNING_HANDLER_NAME) === undefined) {
     input.handlers.register(ONBOARDING_IMPORT_RUNNING_HANDLER_NAME, input.handler)
@@ -289,7 +289,7 @@ export function registerImportRunningCron(input: {
       : DEFAULT_IMPORT_RUNNING_TICK_INTERVAL_MS) / 1_000,
   )
   log.info('registered_handler', {
-    project: input.project_slug,
+    project: input.owner_slug,
     job: job.name,
     recurrence_seconds,
   })

@@ -11,12 +11,12 @@ import { PersonaError } from '../persona-gen/compose.ts'
 import type { PersonaFile } from '../persona-gen/cringe-check.ts'
 
 export interface PersonaEditStore {
-  latest(project_slug: string): Promise<PersonaDraft | null>
+  latest(owner_slug: string): Promise<PersonaDraft | null>
   put(draft: PersonaDraft): Promise<void>
 }
 
 export interface PersonaEditRequest {
-  project_slug: string
+  owner_slug: string
   file: PersonaFile
   edit: LineEdit
 }
@@ -34,7 +34,7 @@ export async function handlePersonaEdit(
   store: PersonaEditStore,
   req: PersonaEditRequest,
 ): Promise<PersonaEditResponse> {
-  const draft = await store.latest(req.project_slug)
+  const draft = await store.latest(req.owner_slug)
   if (draft === null) return { status: 'no_draft' }
   let next: PersonaDraft
   try {

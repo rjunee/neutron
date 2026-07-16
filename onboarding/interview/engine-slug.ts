@@ -72,7 +72,7 @@ export {
 export function computeSlugSuggestionsForPhase(
   self: EngineInternals,
   input: {
-    project_slug: string
+    owner_slug: string
     agent_name: string | null
     user_first_name: string | null
   }): { primary: string | null; alts: ReadonlyArray<string> } {
@@ -170,7 +170,7 @@ export async function consumeSlugChosenChoice(
       const prior_attempts =
         readNumber(state.phase_state, 'slug_picker_attempt_count') ?? 0
       const stateNext = await self.deps.stateStore.upsert({
-        project_slug: input.project_slug,
+        owner_slug: input.owner_slug,
         user_id: input.user_id,
         phase: 'slug_chosen',
         phase_state_patch: {
@@ -186,7 +186,7 @@ export async function consumeSlugChosenChoice(
     if (choice_value === 'skip-slug') {
       self.deps.transcript.append({
         role: 'system',
-        body: `slug-picker: skipped (current url_slug=${input.project_slug} kept)`,
+        body: `slug-picker: skipped (current url_slug=${input.owner_slug} kept)`,
         phase: state.phase,
         button_prompt_id: choice.prompt_id,
         button_choice: choice_value,
@@ -247,7 +247,7 @@ export async function consumeSlugChosenChoice(
 
     // Drive the hook.
     const hookInput: SlugPickerEngineHookInput = {
-      project_slug: input.project_slug,
+      owner_slug: input.owner_slug,
       topic_id: input.topic_id,
       user_id: input.user_id,
       raw_input,
@@ -306,12 +306,12 @@ export async function consumeSlugChosenChoice(
       const restartSkipped = gatewayStep?.status === 'skipped'
       self.deps.transcript.append({
         role: 'system',
-        body: `slug-picker: renamed ${input.project_slug} → ${new_slug} (gateway-refresh=${gatewayStep?.status ?? 'unknown'})`,
+        body: `slug-picker: renamed ${input.owner_slug} → ${new_slug} (gateway-refresh=${gatewayStep?.status ?? 'unknown'})`,
         phase: state.phase,
       })
       if (restartCommitted) {
         try {
-          await self.deps.stateStore.rekey(input.project_slug, new_slug, input.user_id)
+          await self.deps.stateStore.rekey(input.owner_slug, new_slug, input.user_id)
         } catch (err) {
           self.deps.transcript.append({
             role: 'system',
@@ -364,7 +364,7 @@ export async function consumeSlugChosenChoice(
  *
  * Codex P1 #2 + P1 #3: when `new_slug` is set (rename succeeded), the
  * onboarding_state row has already been rekeyed by the caller from
- * `input.project_slug` (OLD) to `new_slug`. The advance writes under
+ * `input.owner_slug` (OLD) to `new_slug`. The advance writes under
  * `new_slug` so the renamed gateway can find the row on reconnect.
  * The next-phase prompt is intentionally NOT emitted on the live
  * socket because the redirect envelope has already fired and the WS
@@ -410,13 +410,13 @@ export async function advanceFromSlugChosen(
     // gateway-restart was committed (Codex r8 'success' branch) the
     // caller rekey'd the row to the new slug, so we upsert under the
     // new slug. Otherwise (skipped/partial gateway-restart, or skip
-    // path) the row is still under the original project_slug so we
+    // path) the row is still under the original owner_slug so we
     // upsert under that — Codex r9 [P1] keeps state recoverable on
     // refresh against the still-running OLD gateway.
-    const effective_project_slug =
-      new_slug !== undefined && restartCommitted === true ? new_slug : input.project_slug
+    const effective_owner_slug =
+      new_slug !== undefined && restartCommitted === true ? new_slug : input.owner_slug
     const advanced = await self.deps.stateStore.upsert({
-      project_slug: effective_project_slug,
+      owner_slug: effective_owner_slug,
       user_id: input.user_id,
       phase: next_phase,
       phase_state_patch: slug_outcome_patch,
@@ -455,9 +455,9 @@ export async function advanceFromSlugChosen(
     // already reviewed at import_analysis_presented, auto-confirm and
     // advance straight to persona_synthesizing on the live socket.
     const advance_input: AdvanceInput =
-      effective_project_slug === input.project_slug
+      effective_owner_slug === input.owner_slug
         ? input
-        : { ...input, project_slug: effective_project_slug }
+        : { ...input, owner_slug: effective_owner_slug }
     return await autoConfirmProjectsProposedAndAdvance(
       self,
       advance_input,
@@ -482,7 +482,7 @@ export async function persistRejectionAndReEmit(
     const prior_attempts = readNumber(state.phase_state, 'slug_picker_attempt_count') ?? 0
     const next_attempts = prior_attempts + 1
     const updated = await self.deps.stateStore.upsert({
-      project_slug: input.project_slug,
+      owner_slug: input.owner_slug,
       user_id: input.user_id,
       phase: 'slug_chosen',
       phase_state_patch: {
@@ -507,7 +507,7 @@ export async function reEmitSlugChosen(
     observed_at: number,
     reason: string | null,
   ): Promise<AdvanceResult> {
-    const spec = await self.resolvePhasePromptSpec(input.project_slug, input.user_id, 'slug_chosen')
+    const spec = await self.resolvePhasePromptSpec(input.owner_slug, input.user_id, 'slug_chosen')
     if (spec === null) {
       return { outcome: 'no_active_prompt', state }
     }
@@ -517,7 +517,7 @@ export async function reEmitSlugChosen(
       options: spec.options.map((o) => ({ value: o.value })),
     })
     const idempotency_key = deriveIdempotencyKey({
-      project_slug: input.project_slug,
+      project_slug: input.owner_slug,
       topic_id: input.topic_id,
       seed: `slug_chosen:${attempt_count}:${seed}`,
     })
@@ -530,7 +530,7 @@ export async function reEmitSlugChosen(
     })
     const emit = await self.deps.buttonStore.emit(prompt, { topic_id: input.topic_id })
     const updated = await self.deps.stateStore.upsert({
-      project_slug: input.project_slug,
+      owner_slug: input.owner_slug,
       user_id: input.user_id,
       phase: 'slug_chosen',
       phase_state_patch: { active_prompt_id: emit.prompt_id, topic_id: input.topic_id },
@@ -539,7 +539,7 @@ export async function reEmitSlugChosen(
     if (emit.was_new || !emit.was_delivered) {
       try {
         await self.deps.sendButtonPrompt({
-          project_slug: input.project_slug,
+          owner_slug: input.owner_slug,
           topic_id: input.topic_id,
           prompt: emit.prompt,
         })

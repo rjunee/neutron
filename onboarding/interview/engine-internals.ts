@@ -407,7 +407,7 @@ export interface SlugPickerEngineHook {
  */
 export interface MaxOAuthEngineHook {
   startHandoff(input: {
-    project_slug: string
+    owner_slug: string
     user_id: string
   }): Promise<{ url: string }>
 }
@@ -467,7 +467,7 @@ export interface ProfilePicEngineHook {
 }
 
 export interface ProfilePicHookEnsureInput {
-  project_slug: string
+  owner_slug: string
   topic_id: string
   user_id: string
   /** The chosen agent name (captured at the name_chosen transition). May
@@ -520,7 +520,7 @@ export type ProfilePicHookEnsureOutcome =
     }
 
 export interface ProfilePicHookCommitInput {
-  project_slug: string
+  owner_slug: string
   topic_id: string
   user_id: string
   /** The pipeline's job id (returned from a prior `ensureCandidates`). */
@@ -541,7 +541,7 @@ export type ProfilePicHookCommitOutcome =
     }
 
 export interface ProfilePicHookRegenInput {
-  project_slug: string
+  owner_slug: string
   topic_id: string
   user_id: string
   agent_name: string | null
@@ -579,7 +579,7 @@ export interface WowDispatcherHook {
 }
 
 export interface WowDispatcherHookInput {
-  project_slug: string
+  owner_slug: string
   topic_id: string
   /** Per-instance home dir (where persona files + cron state live). The
    *  engine doesn't itself know this — the production composer's hook
@@ -672,7 +672,7 @@ export interface WowDispatcherHookOutcome {
 export type WowPushEmitter = (input: WowPushEmitterInput) => Promise<void>
 
 export interface WowPushEmitterInput {
-  project_slug: string
+  owner_slug: string
   user_id: string
   topic_id: string
 }
@@ -703,7 +703,7 @@ export type { ImportJobRunnerHook } from './import-runner-hook.ts'
  */
 export interface ImportPayloadResolver {
   resolve(input: {
-    project_slug: string
+    owner_slug: string
     /** ISSUES #2 (2026-05-19) — second PK component on the onboarding-state row. */
     user_id: string
     source: ImportSource
@@ -730,7 +730,7 @@ export interface ImportPayloadResolver {
  */
 export interface ImportResumeReadinessProbe {
   isResumable(input: {
-    project_slug: string
+    owner_slug: string
     user_id: string
     source: ImportSource
     job_id: string
@@ -741,10 +741,10 @@ export interface SlugPickerEngineHookInput {
   /**
    * Current url_slug at engine call time. The hook resolves the
    * canonical current url_slug via its own owner_handle lookup so
-   * a stale `project_slug` post-rename (pre-redirect) does not trip
+   * a stale `owner_slug` post-rename (pre-redirect) does not trip
    * `renameUrlSlug`'s optimistic-lock check.
    */
-  project_slug: string
+  owner_slug: string
   topic_id: string
   user_id: string
   raw_input: string
@@ -769,7 +769,7 @@ export interface SlugPickerEngineHookInput {
  */
 export interface OnboardingHandoffHook {
   emitProjectSeeds(input: {
-    project_slug: string
+    owner_slug: string
     user_id: string
     /**
      * Projects pulled from `phase_state.primary_projects_confirmed`
@@ -884,7 +884,7 @@ export interface InterviewEngineDeps {
    * convention. The composer hook receives this on `commit` so the
    * engine never needs to know the absolute path itself.
    */
-  ownerHomeFor?: (project_slug: string) => string
+  ownerHomeFor?: (owner_slug: string) => string
   /**
    * LLM-driven phase-spec resolver (sprint: LLM-driven onboarding prompts,
    * 2026-05-09). When provided AND the phase is in the resolver's
@@ -1089,7 +1089,7 @@ export interface InterviewEngineDeps {
  */
 export interface PersonaSyncHook {
   recordAgentName(input: {
-    project_slug: string
+    owner_slug: string
     agent_name: string | null
   }): Promise<void>
   /**
@@ -1100,7 +1100,7 @@ export interface PersonaSyncHook {
    * the indexed lookup downstream services read.
    */
   recordUserFirstName?(input: {
-    project_slug: string
+    owner_slug: string
     user_first_name: string | null
   }): Promise<void>
   /**
@@ -1112,7 +1112,7 @@ export interface PersonaSyncHook {
    * production composer wires it alongside the other two methods.
    */
   recordAgentPersonality?(input: {
-    project_slug: string
+    owner_slug: string
     agent_personality: string | null
   }): Promise<void>
 }
@@ -1183,7 +1183,7 @@ export interface SlugHistoryLookup {
  */
 export interface SendButtonPromptFn {
   (input: {
-    project_slug: string
+    owner_slug: string
     topic_id: string
     prompt: ButtonPrompt
   }): Promise<{ message_id: string; was_new: boolean }>
@@ -1206,7 +1206,7 @@ export interface SendButtonPromptFn {
  */
 export interface SendImportProgressFn {
   (input: {
-    project_slug: string
+    owner_slug: string
     topic_id: string
     event: {
       type: 'import_progress'
@@ -1242,7 +1242,7 @@ export interface SendImportProgressFn {
 }
 
 export interface StartInput {
-  project_slug: string
+  owner_slug: string
   topic_id: string
   user_id: string
   signup_via: 'telegram' | 'web'
@@ -1283,7 +1283,7 @@ export interface StartResult {
  * typed a freeform message that did not correspond to an active prompt.
  */
 export interface AdvanceInput {
-  project_slug: string
+  owner_slug: string
   topic_id: string
   user_id: string
   channel_kind: ChannelKindForButton
@@ -1622,7 +1622,7 @@ export function readNonWorkInterestNames(
  */
 export function serializeDraft(draft: PersonaDraft): Record<string, unknown> {
   return {
-    project_slug: draft.project_slug,
+    owner_slug: draft.owner_slug,
     draft_id: draft.draft_id,
     soul_md: draft.soul_md,
     user_md: draft.user_md,
@@ -1660,7 +1660,7 @@ export function readPersonaDraft(
   }
   const status = o['status']
   return {
-    project_slug: o['project_slug'],
+    owner_slug: o['project_slug'],
     draft_id: o['draft_id'],
     soul_md: o['soul_md'],
     user_md: o['user_md'],
@@ -1711,7 +1711,7 @@ export function readPersonaReviewSubStep(
  * land curated voice fragments at synthesis time.
  */
 export function buildComposeInput(
-  project_slug: string,
+  owner_slug: string,
   state: OnboardingState,
 ): PersonaComposeInput {
   const phase_state = state.phase_state as Record<string, unknown>
@@ -1741,7 +1741,7 @@ export function buildComposeInput(
   const contemplative_phrases = readStringArray(phase_state, 'contemplative_phrases')
   const regen_hint = readString(phase_state, 'persona_regen_hint')
   return {
-    project_slug,
+    owner_slug,
     signals: {
       display_name: agent_name,
       ...(user_first_name !== null ? { user_first_name } : {}),
@@ -1785,7 +1785,7 @@ export function buildComposeInput(
  * path so downstream consumers can distinguish.
  */
 export function stubDraft(
-  project_slug: string,
+  owner_slug: string,
   compose_input: PersonaComposeInput,
   picked:
     | typeof PERSONA_SYNTH_USE_BASIC
@@ -1800,7 +1800,7 @@ export function stubDraft(
   const user = `# USER.md\n\n_${tag}_\n\n- **Name:** ${display_name}\n`
   const priority_map = `# priority-map.md\n\n_${tag}_\n\nPrograms will be ranked as you keep working with me.\n`
   return {
-    project_slug,
+    owner_slug,
     draft_id: `stub-${Date.now()}-${tag}`,
     soul_md: soul,
     user_md: user,
@@ -1876,7 +1876,7 @@ export interface EngineInternals {
 
   // --- non-extracted cross-called methods ---
   emitPhasePrompt(input: {
-    project_slug: string
+    owner_slug: string
     user_id: string
     topic_id: string
     phase: OnboardingPhase
@@ -1884,8 +1884,8 @@ export interface EngineInternals {
     pre_send_state_upsert?: (prompt_id: string) => Promise<void>
     seed_suffix?: string
   }): Promise<{ prompt_id: string }>
-  invalidateResolvedSpec(project_slug: string, phase: OnboardingPhase): void
-  secretsIdentity(project_slug: string): string
+  invalidateResolvedSpec(owner_slug: string, phase: OnboardingPhase): void
+  secretsIdentity(owner_slug: string): string
   sendAgentText(
     input: AdvanceInput,
     phase: OnboardingPhase,
@@ -1893,7 +1893,7 @@ export interface EngineInternals {
     observed_at: number,
   ): Promise<void>
   walkAutoSkip(
-    project_slug: string,
+    owner_slug: string,
     state: OnboardingState,
     observed_at: number,
   ): Promise<OnboardingState>
@@ -2024,7 +2024,7 @@ export interface EngineInternals {
   // --- R5 / audit P2-4 — non-extracted methods cross-called by the
   //     extracted persona free functions in `engine-persona.ts` ---
   getOrStartAgentNameSuggestions(
-    project_slug: string,
+    owner_slug: string,
     user_id: string,
     phase_state: Record<string, unknown>,
   ): Promise<AgentNameSuggesterResult> | null
@@ -2074,13 +2074,13 @@ export interface EngineInternals {
   readonly pendingAgentNameSuggestions: Map<string, Promise<AgentNameSuggesterResult>>
   clearPendingSuggestions(
     map: Map<string, Promise<unknown>>,
-    project_slug: string,
+    owner_slug: string,
     user_id: string,
     except?: string,
   ): void
   capPendingSuggestions(map: Map<string, Promise<unknown>>): void
   resolvePhasePromptSpec(
-    project_slug: string,
+    owner_slug: string,
     user_id: string,
     phase: OnboardingPhase,
   ): Promise<PhasePromptSpec | null>
@@ -2096,12 +2096,12 @@ export interface EngineInternals {
     observed_at: number,
   ): Promise<AdvanceResult>
   getOrStartCharacterSuggestions(
-    project_slug: string,
+    owner_slug: string,
     user_id: string,
     phase_state: Record<string, unknown>,
   ): Promise<CharacterSuggesterResult> | null
   computeSlugSuggestionsForPhase(input: {
-    project_slug: string
+    owner_slug: string
     agent_name: string | null
     user_first_name: string | null
   }): { primary: string | null; alts: ReadonlyArray<string> }
@@ -2133,7 +2133,7 @@ export interface EngineInternals {
     observed_at: number,
     reason: string | null,
   ): Promise<AdvanceResult>
-  suggestionKeyPrefix(project_slug: string, user_id: string): string
+  suggestionKeyPrefix(owner_slug: string, user_id: string): string
   suggestionFingerprint(
     parts: ReadonlyArray<string | ReadonlyArray<string>>,
   ): string

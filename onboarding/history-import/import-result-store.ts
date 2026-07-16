@@ -40,7 +40,7 @@ interface ImportResultRow {
 
 export interface PersistImportResultInput {
   job_id: string
-  project_slug: string
+  owner_slug: string
   source: ImportSource
   result: ImportResult
   partial: boolean
@@ -57,7 +57,7 @@ export async function persistImportResult(
   db: ProjectDb,
   input: PersistImportResultInput,
 ): Promise<void> {
-  const { job_id, project_slug, source, result, partial, now } = input
+  const { job_id, owner_slug, source, result, partial, now } = input
   const conv_count_raw = (result as ImportResult & { conversation_count?: number })
     .conversation_count
   const conversation_count =
@@ -92,7 +92,7 @@ export async function persistImportResult(
        synthesizer_model = excluded.synthesizer_model`,
     [
       job_id,
-      project_slug,
+      owner_slug,
       source,
       JSON.stringify(result.proposed_projects),
       JSON.stringify(result.proposed_tasks),

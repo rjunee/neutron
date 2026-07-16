@@ -82,7 +82,7 @@ function buildDeps(opts: {
     engine: {
       notifyImportUpload: async (input) => {
         opts.recorder.calls.push({
-          project_slug: input.project_slug,
+          project_slug: input.owner_slug,
           topic_id: input.topic_id,
           source: input.source,
         })

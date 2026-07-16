@@ -35,7 +35,7 @@ const fake: ImportJobRunnerHook = {
     if (job_id === 'missing') return null
     return {
       job_id,
-      project_slug: 'general',
+      owner_slug: 'general',
       source: 'chatgpt-zip',
       status: 'completed',
       dollars_spent: 0,
@@ -59,7 +59,7 @@ const alias: HookViaEngine = fake
 void alias
 
 test('start returns a job_id', async () => {
-  expect(await fake.start({ project_slug: 'general', user_id: 'u', source: 'chatgpt-zip', payload: Buffer.from('') })).toEqual({
+  expect(await fake.start({ owner_slug: 'general', user_id: 'u', source: 'chatgpt-zip', payload: Buffer.from('') })).toEqual({
     job_id: 'job-chatgpt-zip',
   })
 })

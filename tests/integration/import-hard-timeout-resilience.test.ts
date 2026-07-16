@@ -150,7 +150,7 @@ describe('engine hard-timeout backstop (Parts B+C)', () => {
 
     await stateStore.upsert({
       user_id: USER,
-      project_slug: OWNER,
+      owner_slug: OWNER,
       phase: 'import_running',
       phase_state_patch: {
         topic_id: TOPIC,
@@ -176,7 +176,7 @@ describe('engine hard-timeout backstop (Parts B+C)', () => {
     // with NO forward progress since the T0 anchor.
     runnerResults.set(job_id, {
       job_id,
-      project_slug: OWNER,
+      owner_slug: OWNER,
       source: 'chatgpt-zip',
       status: 'pass1-running',
       dollars_spent: 1.5,
@@ -211,7 +211,7 @@ describe('engine hard-timeout backstop (Parts B+C)', () => {
     })
     const jobs = new CronJobRegistry()
     const handlers = new CronHandlerRegistry()
-    registerImportRunningCron({ project_slug: OWNER, jobs, handlers, handler })
+    registerImportRunningCron({ owner_slug: OWNER, jobs, handlers, handler })
 
     const scheduler = new CronScheduler({
       jobs,
@@ -250,7 +250,7 @@ describe('engine hard-timeout backstop (Parts B+C)', () => {
 
     await stateStore.upsert({
       user_id: USER,
-      project_slug: OWNER,
+      owner_slug: OWNER,
       phase: 'import_running',
       phase_state_patch: {
         topic_id: TOPIC,
@@ -274,7 +274,7 @@ describe('engine hard-timeout backstop (Parts B+C)', () => {
     // with NO forward progress since the T0 anchor.
     runnerResults.set(job_id, {
       job_id,
-      project_slug: OWNER,
+      owner_slug: OWNER,
       source: 'chatgpt-zip',
       status: 'pass1-running',
       dollars_spent: 0.05,
@@ -300,7 +300,7 @@ describe('engine hard-timeout backstop (Parts B+C)', () => {
     })
     const jobs = new CronJobRegistry()
     const handlers = new CronHandlerRegistry()
-    registerImportRunningCron({ project_slug: OWNER, jobs, handlers, handler })
+    registerImportRunningCron({ owner_slug: OWNER, jobs, handlers, handler })
 
     const scheduler = new CronScheduler({
       jobs,
@@ -332,7 +332,7 @@ describe('engine hard-timeout backstop (Parts B+C)', () => {
 
     await stateStore.upsert({
       user_id: USER,
-      project_slug: OWNER,
+      owner_slug: OWNER,
       phase: 'import_running',
       phase_state_patch: {
         topic_id: TOPIC,
@@ -348,7 +348,7 @@ describe('engine hard-timeout backstop (Parts B+C)', () => {
     // 919 chunks → ~153-min budget. Job has been running 14 min only.
     runnerResults.set(job_id, {
       job_id,
-      project_slug: OWNER,
+      owner_slug: OWNER,
       source: 'chatgpt-zip',
       status: 'pass1-running',
       dollars_spent: 0.27,
@@ -367,7 +367,7 @@ describe('engine hard-timeout backstop (Parts B+C)', () => {
     })
     const jobs = new CronJobRegistry()
     const handlers = new CronHandlerRegistry()
-    registerImportRunningCron({ project_slug: OWNER, jobs, handlers, handler })
+    registerImportRunningCron({ owner_slug: OWNER, jobs, handlers, handler })
 
     const scheduler = new CronScheduler({
       jobs,

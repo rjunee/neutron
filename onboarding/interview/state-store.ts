@@ -15,13 +15,13 @@
  *   - `InMemoryOnboardingStateStore` — process-local; the S1 default
  *
  * S2's SqliteOnboardingStateStore writes the row to `onboarding_state`
- * (table created in migration 0011; PK re-keyed to `(project_slug, user_id)`
+ * (table created in migration 0011; PK re-keyed to `(owner_slug, user_id)`
  * in migration 0034 — ISSUES #2). The engine's dependency-injection slot
  * accepts either implementation; the in-memory one stays exported for unit
  * tests forever.
  *
  * 2026-05-19 — ISSUES #2 (project-isolation) — every method now keys on
- * (project_slug, user_id) per migration 0034. See §§ 2-4 of the
+ * (owner_slug, user_id) per migration 0034. See §§ 2-4 of the
  * onboarding-state isolation brief.
  */
 
@@ -30,7 +30,7 @@ import { randomUUID } from 'node:crypto'
 import type { OnboardingPhase } from './phase.ts'
 
 export interface OnboardingState {
-  project_slug: string
+  owner_slug: string
   /**
    * ISSUES #2 (2026-05-19) — second PK component. The platform user_id
    * that owns this onboarding journey. Format: `google:<sub>`,
@@ -85,7 +85,7 @@ export interface OnboardingState {
 }
 
 export interface UpsertOnboardingStateInput {
-  project_slug: string
+  owner_slug: string
   /** ISSUES #2 — second PK component. See OnboardingState.user_id. */
   user_id: string
   phase: OnboardingPhase
@@ -119,7 +119,7 @@ export interface UpsertOnboardingStateInput {
 
 export interface OnboardingStateStore {
   /** Returns the row, or null if this (instance, user) has not started onboarding. */
-  get(project_slug: string, user_id: string): Promise<OnboardingState | null>
+  get(owner_slug: string, user_id: string): Promise<OnboardingState | null>
 
   /**
    * Atomically upsert. If absent, the row is created with the given phase
@@ -128,12 +128,12 @@ export interface OnboardingStateStore {
    * merge — caller controls deeper structure). The implementation MUST
    * advance `last_advanced_at` to the supplied (or current) wall clock.
    *
-   * Keyed on (input.project_slug, input.user_id).
+   * Keyed on (input.owner_slug, input.user_id).
    */
   upsert(input: UpsertOnboardingStateInput): Promise<OnboardingState>
 
   /**
-   * P1.5 / Sprint 21 — re-key every row whose `project_slug = old` to
+   * P1.5 / Sprint 21 — re-key every row whose `owner_slug = old` to
    * `new`. A slug rename is instance-scoped: every user's onboarding row
    * on the renamed instance moves to the new slug in one atomic step.
    * Returns the rekeyed state for the caller's `user_id` if it had a
@@ -145,24 +145,24 @@ export interface OnboardingStateStore {
    * a user_id that ALSO has a row under the old slug, the implementation
    * must throw — the caller must guarantee uniqueness via the rename
    * orchestrator's slug-availability pre-flight. (Existing rows under
-   * `new_project_slug` for DIFFERENT user_ids are fine; the rebuild
+   * `new_owner_slug` for DIFFERENT user_ids are fine; the rebuild
    * preserves them.)
    */
   rekey(
-    old_project_slug: string,
-    new_project_slug: string,
+    old_owner_slug: string,
+    new_owner_slug: string,
     user_id: string,
   ): Promise<OnboardingState | null>
 
   /** Drop a single (instance, user) row. Used in tests + by `/admin/.../onboarding/reset`. */
-  delete(project_slug: string, user_id: string): Promise<void>
+  delete(owner_slug: string, user_id: string): Promise<void>
 
   /**
    * ISSUES #2 (2026-05-19) — drop EVERY row for an instance. Used by admin
    * tooling that wants to wipe a whole instance's onboarding rows in one
-   * shot (replacing the pre-isolation `delete(project_slug)` semantics).
+   * shot (replacing the pre-isolation `delete(owner_slug)` semantics).
    */
-  deleteByOwner(project_slug: string): Promise<void>
+  deleteByOwner(owner_slug: string): Promise<void>
 
   /**
    * F8 — ATOMIC compare-and-set completion. Flip this (instance, user) row to
@@ -186,7 +186,7 @@ export interface OnboardingStateStore {
    * against the exact (phase, phase_state) that was composed + materialized.
    */
   completeIfPhaseStateMatches(input: {
-    project_slug: string
+    owner_slug: string
     user_id: string
     expected_phase: string
     expected_phase_state: Record<string, unknown>
@@ -200,8 +200,8 @@ export interface InMemoryOnboardingStateStoreOptions {
   newAttemptId?: () => string
 }
 
-function compositeKey(project_slug: string, user_id: string): string {
-  return `${project_slug}\x00${user_id}`
+function compositeKey(owner_slug: string, user_id: string): string {
+  return `${owner_slug}\x00${user_id}`
 }
 
 export class InMemoryOnboardingStateStore implements OnboardingStateStore {
@@ -214,8 +214,8 @@ export class InMemoryOnboardingStateStore implements OnboardingStateStore {
     this.newAttemptId = opts.newAttemptId ?? ((): string => randomUUID())
   }
 
-  async get(project_slug: string, user_id: string): Promise<OnboardingState | null> {
-    const row = this.rows.get(compositeKey(project_slug, user_id))
+  async get(owner_slug: string, user_id: string): Promise<OnboardingState | null> {
+    const row = this.rows.get(compositeKey(owner_slug, user_id))
     if (row === undefined) return null
     // Defensive copy — callers must not mutate stored state directly.
     return cloneState(row)
@@ -223,7 +223,7 @@ export class InMemoryOnboardingStateStore implements OnboardingStateStore {
 
   async upsert(input: UpsertOnboardingStateInput): Promise<OnboardingState> {
     const advanced_at = input.advanced_at ?? this.now()
-    const key = compositeKey(input.project_slug, input.user_id)
+    const key = compositeKey(input.owner_slug, input.user_id)
     const existing = this.rows.get(key)
     const merged_phase_state: Record<string, unknown> = existing
       ? { ...existing.phase_state, ...(input.phase_state_patch ?? {}) }
@@ -251,7 +251,7 @@ export class InMemoryOnboardingStateStore implements OnboardingStateStore {
               : existing.onboarding_handoff_emitted_at,
         }
       : {
-          project_slug: input.project_slug,
+          owner_slug: input.owner_slug,
           user_id: input.user_id,
           phase: input.phase,
           phase_state: merged_phase_state,
@@ -270,18 +270,18 @@ export class InMemoryOnboardingStateStore implements OnboardingStateStore {
   }
 
   async rekey(
-    old_project_slug: string,
-    new_project_slug: string,
+    old_owner_slug: string,
+    new_owner_slug: string,
     user_id: string,
   ): Promise<OnboardingState | null> {
-    if (old_project_slug === new_project_slug) {
-      const existing = this.rows.get(compositeKey(old_project_slug, user_id))
+    if (old_owner_slug === new_owner_slug) {
+      const existing = this.rows.get(compositeKey(old_owner_slug, user_id))
       return existing === undefined ? null : cloneState(existing)
     }
-    // Snapshot the entries to rekey (every row whose project_slug=old).
+    // Snapshot the entries to rekey (every row whose owner_slug=old).
     const toMove: Array<{ user_id: string; row: OnboardingState }> = []
     for (const [k, row] of this.rows) {
-      if (row.project_slug === old_project_slug) {
+      if (row.owner_slug === old_owner_slug) {
         toMove.push({ user_id: row.user_id, row })
         void k
       }
@@ -290,42 +290,42 @@ export class InMemoryOnboardingStateStore implements OnboardingStateStore {
     // (so two users on the same instance aren't false-positive collided
     // when only one is being rekeyed).
     for (const { user_id: u } of toMove) {
-      if (this.rows.has(compositeKey(new_project_slug, u))) {
+      if (this.rows.has(compositeKey(new_owner_slug, u))) {
         throw new Error(
-          `OnboardingStateStore.rekey: collision — row already exists under new_project_slug=${new_project_slug} user_id=${u}`,
+          `OnboardingStateStore.rekey: collision — row already exists under new_project_slug=${new_owner_slug} user_id=${u}`,
         )
       }
     }
     let returnRow: OnboardingState | null = null
     for (const { user_id: u, row } of toMove) {
-      const rekeyed: OnboardingState = { ...row, project_slug: new_project_slug }
-      this.rows.delete(compositeKey(old_project_slug, u))
-      this.rows.set(compositeKey(new_project_slug, u), rekeyed)
+      const rekeyed: OnboardingState = { ...row, owner_slug: new_owner_slug }
+      this.rows.delete(compositeKey(old_owner_slug, u))
+      this.rows.set(compositeKey(new_owner_slug, u), rekeyed)
       if (u === user_id) returnRow = rekeyed
     }
     return returnRow === null ? null : cloneState(returnRow)
   }
 
-  async delete(project_slug: string, user_id: string): Promise<void> {
-    this.rows.delete(compositeKey(project_slug, user_id))
+  async delete(owner_slug: string, user_id: string): Promise<void> {
+    this.rows.delete(compositeKey(owner_slug, user_id))
   }
 
-  async deleteByOwner(project_slug: string): Promise<void> {
+  async deleteByOwner(owner_slug: string): Promise<void> {
     for (const [k, row] of Array.from(this.rows)) {
-      if (row.project_slug === project_slug) {
+      if (row.owner_slug === owner_slug) {
         this.rows.delete(k)
       }
     }
   }
 
   async completeIfPhaseStateMatches(input: {
-    project_slug: string
+    owner_slug: string
     user_id: string
     expected_phase: string
     expected_phase_state: Record<string, unknown>
     completed_at: number
   }): Promise<boolean> {
-    const key = compositeKey(input.project_slug, input.user_id)
+    const key = compositeKey(input.owner_slug, input.user_id)
     const existing = this.rows.get(key)
     if (existing === undefined) return false
     // Never re-complete a terminal row (defense-in-depth; expected_phase would normally

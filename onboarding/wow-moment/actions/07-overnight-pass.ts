@@ -15,7 +15,7 @@
  * reporter internally, so the cron just needs to tick often enough to
  * scan, advance in-flight Trident runs, and fire the morning brief.
  *
- * Reversibility: the cron job has slug `overnight-<project_slug>`;
+ * Reversibility: the cron job has slug `overnight-<owner_slug>`;
  * removing the registration cancels it.
  *
  * Failure mode: cron-store write retries via `persistence/retry.ts`
@@ -29,9 +29,9 @@ const HANDLER_NAME = 'overnight_handler'
 /** ~30-min tick — the engine gates window/budget/reporter internally. */
 const INTERVAL_MS = 30 * 60 * 1000
 
-function jobNameFor(project_slug: string): string {
+function jobNameFor(owner_slug: string): string {
   // cron job name regex is lowercase alnum + dashes only; collapse '_'.
-  return `overnight-${project_slug.replace(/_/g, '-')}`
+  return `overnight-${owner_slug.replace(/_/g, '-')}`
 }
 
 const action07: WowActionModule = {
@@ -43,7 +43,7 @@ const action07: WowActionModule = {
   },
 
   async run(ctx: WowActionContext): Promise<WowActionResult> {
-    const job_name = jobNameFor(ctx.project_slug)
+    const job_name = jobNameFor(ctx.owner_slug)
     // Idempotent — if the registry already has this job, skip the
     // re-registration. Re-running is a no-op success rather than a
     // duplicate-entry error.
@@ -58,14 +58,14 @@ const action07: WowActionModule = {
     try {
       ctx.cron_jobs.register({
         name: job_name,
-        description: `autonomous overnight-work engine for project ${ctx.project_slug}`,
+        description: `autonomous overnight-work engine for project ${ctx.owner_slug}`,
         schedule: { kind: 'interval_ms', interval_ms: INTERVAL_MS },
         handler: HANDLER_NAME,
         skip_if_running: true,
       })
     } catch (err) {
       throw new Error(
-        `failed to register overnight cron for project ${ctx.project_slug}: ${(err as Error).message}`,
+        `failed to register overnight cron for project ${ctx.owner_slug}: ${(err as Error).message}`,
       )
     }
     // Mark the cron_state row so observability can answer "when was
@@ -73,7 +73,7 @@ const action07: WowActionModule = {
     const fired_at = ctx.now()
     await ctx.cron_state.record({
       job_name,
-      owner_slug: ctx.project_slug,
+      owner_slug: ctx.owner_slug,
       fired_at: fired_at / 1000,
       duration_ms: 0,
       status: 'ok',

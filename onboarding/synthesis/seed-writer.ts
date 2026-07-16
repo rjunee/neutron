@@ -40,11 +40,11 @@ export interface WriteProjectSeedDeps {
   now(): number
   /** Optional signal lookup so the history doc can title each routed transcript. */
   signalsById?: ReadonlyMap<string, ConversationSignal>
-  logFailure?: (project_slug: string, stage: string, err: unknown) => void
+  logFailure?: (owner_slug: string, stage: string, err: unknown) => void
 }
 
 export interface WriteProjectSeedOutcome {
-  project_slug: string
+  owner_slug: string
   reason: 'created' | 'already_seeded' | 'failed'
   /** Repo-relative paths written this run. */
   docs_written: string[]
@@ -63,7 +63,7 @@ export function writeProjectSeed(
 ): WriteProjectSeedOutcome {
   const logFailure = deps.logFailure ?? defaultLogFailure
   const out: WriteProjectSeedOutcome = {
-    project_slug: seed.slug,
+    owner_slug: seed.slug,
     reason: 'created',
     docs_written: [],
     transcripts_written: 0,
@@ -203,9 +203,9 @@ function firstSentence(s: string, maxChars: number): string {
 
 const log = createLogger('seed-writer')
 
-function defaultLogFailure(project_slug: string, stage: string, err: unknown): void {
+function defaultLogFailure(owner_slug: string, stage: string, err: unknown): void {
   log.warn('failure', {
-    project: project_slug,
+    project: owner_slug,
     stage,
     error: err instanceof Error ? err.message : String(err),
   })

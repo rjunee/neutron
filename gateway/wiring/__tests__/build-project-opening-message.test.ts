@@ -35,7 +35,7 @@ function makeInput(overrides: Partial<ComposeProjectOpeningInput> = {}): Compose
       transcript_summary: 'Key decision: the note converts at a $8M cap.',
       status_md: null,
     },
-    project_slug: 'sam',
+    owner_slug: 'sam',
     user_id: 'u-1',
     ...overrides,
   }

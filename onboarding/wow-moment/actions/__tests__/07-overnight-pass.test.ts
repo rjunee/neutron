@@ -45,7 +45,7 @@ describe('action 07-overnight-pass', () => {
   })
 
   test('underscore in project_slug normalized to dash for job_name', async () => {
-    const ctx = buildContext(fix, { project_slug: 'workspace_one' })
+    const ctx = buildContext(fix, { owner_slug: 'workspace_one' })
     await action07.run(ctx)
     expect(fix.cron_jobs.get('overnight-workspace-one')).toBeDefined()
   })

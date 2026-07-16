@@ -112,7 +112,7 @@ export class ActionRunner {
       const fired_at = ctx.now()
       const triggerThrewPayload = withExplanation({ error: errorMessage(err) }, explanation)
       await this.telemetry.recordFired({
-        project_slug: ctx.project_slug,
+        owner_slug: ctx.owner_slug,
         action_id,
         fired_at,
         success: false,
@@ -128,7 +128,7 @@ export class ActionRunner {
     if (!triggered) {
       const fired_at = ctx.now()
       await this.telemetry.recordFired({
-        project_slug: ctx.project_slug,
+        owner_slug: ctx.owner_slug,
         action_id,
         fired_at,
         success: false,
@@ -153,7 +153,7 @@ export class ActionRunner {
     const fired_at = ctx.now()
     const payload = withExplanation(result.redacted_payload, explanation)
     await this.telemetry.recordFired({
-      project_slug: ctx.project_slug,
+      owner_slug: ctx.owner_slug,
       action_id,
       fired_at,
       success: result.fired,

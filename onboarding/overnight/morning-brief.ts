@@ -32,7 +32,7 @@ export interface MorningBriefDeps {
   /** The General / main topic id for the high-level summary. */
   general_topic_id: string
   /** Resolve a project slug to its bound topic; null → route to General. */
-  resolveProjectTopic?(project_slug: string): string | null
+  resolveProjectTopic?(owner_slug: string): string | null
   now(): number
   tz?: string
   /** Override the window date being reported (else derived from `now`). */
@@ -75,10 +75,10 @@ export function selectWindowTransitions(
 function rollupByProject(items: OvernightItem[]): ProjectRollup[] {
   const map = new Map<string, ProjectRollup>()
   for (const i of items) {
-    let r = map.get(i.project_slug)
+    let r = map.get(i.owner_slug)
     if (!r) {
-      r = { slug: i.project_slug, completed: [], failed: [] }
-      map.set(i.project_slug, r)
+      r = { slug: i.owner_slug, completed: [], failed: [] }
+      map.set(i.owner_slug, r)
     }
     if (i.status === 'completed') r.completed.push(i)
     else r.failed.push(i)

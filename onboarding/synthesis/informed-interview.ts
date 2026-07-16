@@ -22,7 +22,7 @@ export interface InformedQuestion {
   /** The question text to ask the user. */
   text: string
   /** The project slug the question is grounded in (for the accept → populate hop). */
-  project_slug: string
+  owner_slug: string
   /** True iff the question references a specific person from the model. */
   references_person: boolean
 }
@@ -56,7 +56,7 @@ export function buildInformedQuestion(
 
   return {
     text,
-    project_slug: candidate.slug,
+    owner_slug: candidate.slug,
     references_person: person !== null,
   }
 }
@@ -73,7 +73,7 @@ export function buildInformedQuestionQueue(model: UserModel): InformedQuestion[]
     const q = buildInformedQuestion(model, { skip_slugs: [...handled] })
     if (q === null) break
     out.push(q)
-    handled.add(q.project_slug)
+    handled.add(q.owner_slug)
   }
   return out
 }

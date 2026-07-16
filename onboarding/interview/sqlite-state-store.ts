@@ -3,7 +3,7 @@
  *
  * Per docs/plans/P2-onboarding.md § 2.8. Persists `onboarding_state` rows
  * (migration 0011 created the table; migration 0034 supersedes 0011 for
- * PK shape — composite PK on `(project_slug, user_id)`) and exposes the
+ * PK shape — composite PK on `(owner_slug, user_id)`) and exposes the
  * same `OnboardingStateStore` interface the InMemoryOnboardingStateStore
  * does so the engine can swap them.
  *
@@ -13,7 +13,7 @@
  * because it's one statement; mid-turn crashes leave the row at the prior
  * phase, and the engine re-emits the prompt on the next start/advance.
  *
- * 2026-05-19 — ISSUES #2: keyed on (project_slug, user_id) per migration
+ * 2026-05-19 — ISSUES #2: keyed on (owner_slug, user_id) per migration
  * 0034. The on-disk PK is composite; every SELECT/INSERT/UPDATE/DELETE
  * threads user_id through.
  */
@@ -63,7 +63,7 @@ export class SqliteOnboardingStateStore implements OnboardingStateStore {
     this.newAttemptId = opts.newAttemptId ?? ((): string => randomUUID())
   }
 
-  async get(project_slug: string, user_id: string): Promise<OnboardingState | null> {
+  async get(owner_slug: string, user_id: string): Promise<OnboardingState | null> {
     const row = this.db
       .prepare<OnboardingStateRow, [string, string]>(
         `SELECT project_slug, user_id, phase, phase_state_json, started_at,
@@ -72,7 +72,7 @@ export class SqliteOnboardingStateStore implements OnboardingStateStore {
                 wow_pushed_at, onboarding_handoff_emitted_at
            FROM onboarding_state WHERE project_slug = ? AND user_id = ?`,
       )
-      .get(project_slug, user_id)
+      .get(owner_slug, user_id)
     // Codex r3 P1: defensive — bun:sqlite returns null on miss but other
     // adapters might surface undefined; check both so a brand-new owner's
     // first request never crashes here.
@@ -91,7 +91,7 @@ export class SqliteOnboardingStateStore implements OnboardingStateStore {
                   wow_pushed_at, onboarding_handoff_emitted_at
              FROM onboarding_state WHERE project_slug = ? AND user_id = ?`,
         )
-        .get(input.project_slug, input.user_id)
+        .get(input.owner_slug, input.user_id)
       // Codex r3 P1: guard both null and undefined misses.
       const existing: OnboardingStateRow | null =
         existing_row === null || existing_row === undefined ? null : existing_row
@@ -104,7 +104,7 @@ export class SqliteOnboardingStateStore implements OnboardingStateStore {
 
       if (existing === null) {
         const next: OnboardingState = {
-          project_slug: input.project_slug,
+          owner_slug: input.owner_slug,
           user_id: input.user_id,
           phase: input.phase,
           phase_state: merged_phase_state,
@@ -126,7 +126,7 @@ export class SqliteOnboardingStateStore implements OnboardingStateStore {
               wow_pushed_at, onboarding_handoff_emitted_at)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [
-            next.project_slug,
+            next.owner_slug,
             next.user_id,
             next.phase,
             phase_state_json,
@@ -188,12 +188,12 @@ export class SqliteOnboardingStateStore implements OnboardingStateStore {
           wow_fired_int,
           wow_pushed_at,
           onboarding_handoff_emitted_at,
-          input.project_slug,
+          input.owner_slug,
           input.user_id,
         ],
       )
       return {
-        project_slug: existing.project_slug,
+        owner_slug: existing.project_slug,
         user_id: existing.user_id,
         phase: input.phase,
         phase_state: merged_phase_state,
@@ -211,16 +211,16 @@ export class SqliteOnboardingStateStore implements OnboardingStateStore {
   }
 
   async rekey(
-    old_project_slug: string,
-    new_project_slug: string,
+    old_owner_slug: string,
+    new_owner_slug: string,
     user_id: string,
   ): Promise<OnboardingState | null> {
-    if (old_project_slug === new_project_slug) {
-      return await this.get(old_project_slug, user_id)
+    if (old_owner_slug === new_owner_slug) {
+      return await this.get(old_owner_slug, user_id)
     }
     return await this.db.transaction(async (tx) => {
       // Collision check across the whole rekey: for every row whose
-      // project_slug=old, ensure no (new, user_id) row already exists.
+      // owner_slug=old, ensure no (new, user_id) row already exists.
       // (Different user_ids under `new` that ALSO have rows under `old`
       // would each collide; the rename orchestrator guarantees this
       // doesn't happen via slug-availability pre-flight.)
@@ -233,16 +233,16 @@ export class SqliteOnboardingStateStore implements OnboardingStateStore {
               AND n.user_id = o.user_id
             WHERE o.project_slug = ?`,
         )
-        .all(new_project_slug, old_project_slug)
+        .all(new_owner_slug, old_owner_slug)
       if (collisions.length > 0) {
         const ids = collisions.map((c) => c.user_id).join(', ')
         throw new Error(
-          `SqliteOnboardingStateStore.rekey: collision — row already exists under new_project_slug=${new_project_slug} for user_id(s) ${ids}`,
+          `SqliteOnboardingStateStore.rekey: collision — row already exists under new_project_slug=${new_owner_slug} for user_id(s) ${ids}`,
         )
       }
       await tx.run(
         `UPDATE onboarding_state SET project_slug = ? WHERE project_slug = ?`,
-        [new_project_slug, old_project_slug],
+        [new_owner_slug, old_owner_slug],
       )
       const row = tx
         .prepare<OnboardingStateRow, [string, string]>(
@@ -252,7 +252,7 @@ export class SqliteOnboardingStateStore implements OnboardingStateStore {
                   wow_pushed_at, onboarding_handoff_emitted_at
              FROM onboarding_state WHERE project_slug = ? AND user_id = ?`,
         )
-        .get(new_project_slug, user_id)
+        .get(new_owner_slug, user_id)
       if (row === null || row === undefined) return null
       return rowToState(row)
     })
@@ -274,19 +274,19 @@ export class SqliteOnboardingStateStore implements OnboardingStateStore {
    * telemetry inlined (`randomUUID()` / `Date.now()`), so production behaviour
    * is identical while the store's existing test seams now apply.
    */
-  async resolveOrMintAttemptId(project_slug: string, user_id: string): Promise<string> {
+  async resolveOrMintAttemptId(owner_slug: string, user_id: string): Promise<string> {
     return this.db.transaction(async (tx) => {
       const existing = tx
         .prepare<{ attempt_id: string }, [string, string]>(
           `SELECT attempt_id FROM onboarding_state WHERE project_slug = ? AND user_id = ?`,
         )
-        .get(project_slug, user_id)
+        .get(owner_slug, user_id)
       if (existing !== null && existing.attempt_id.length > 0) {
         return existing.attempt_id
       }
       const fresh = this.newAttemptId()
       const ts = this.now()
-      // ISSUES #2 (2026-05-19) — onboarding_state PK is (project_slug,
+      // ISSUES #2 (2026-05-19) — onboarding_state PK is (owner_slug,
       // user_id) per migration 0034. Mint-on-miss inserts a row for
       // this (instance, user) pair; the engine's subsequent start()
       // upsert merges over it.
@@ -296,33 +296,33 @@ export class SqliteOnboardingStateStore implements OnboardingStateStore {
             last_advanced_at, completed_at, import_job_id,
             persona_files_committed, wow_fired, attempt_id)
          VALUES (?, ?, 'signup', '{}', ?, ?, NULL, NULL, 0, 0, ?)`,
-        [project_slug, user_id, ts, ts, fresh],
+        [owner_slug, user_id, ts, ts, fresh],
       )
       const reread = tx
         .prepare<{ attempt_id: string }, [string, string]>(
           `SELECT attempt_id FROM onboarding_state WHERE project_slug = ? AND user_id = ?`,
         )
-        .get(project_slug, user_id)
+        .get(owner_slug, user_id)
       return reread?.attempt_id ?? fresh
     })
   }
 
-  async delete(project_slug: string, user_id: string): Promise<void> {
+  async delete(owner_slug: string, user_id: string): Promise<void> {
     await this.db.run(
       `DELETE FROM onboarding_state WHERE project_slug = ? AND user_id = ?`,
-      [project_slug, user_id],
+      [owner_slug, user_id],
     )
   }
 
-  async deleteByOwner(project_slug: string): Promise<void> {
+  async deleteByOwner(owner_slug: string): Promise<void> {
     await this.db.run(
       `DELETE FROM onboarding_state WHERE project_slug = ?`,
-      [project_slug],
+      [owner_slug],
     )
   }
 
   async completeIfPhaseStateMatches(input: {
-    project_slug: string
+    owner_slug: string
     user_id: string
     expected_phase: string
     expected_phase_state: Record<string, unknown>
@@ -346,7 +346,7 @@ export class SqliteOnboardingStateStore implements OnboardingStateStore {
           AND phase = ?
           AND phase NOT IN ('completed', 'failed')
           AND phase_state_json = ?`,
-      [input.completed_at, this.now(), input.project_slug, input.user_id, input.expected_phase, expected_json],
+      [input.completed_at, this.now(), input.owner_slug, input.user_id, input.expected_phase, expected_json],
     )
     return res.changes === 1
   }
@@ -354,7 +354,7 @@ export class SqliteOnboardingStateStore implements OnboardingStateStore {
 
 function rowToState(row: OnboardingStateRow): OnboardingState {
   return {
-    project_slug: row.project_slug,
+    owner_slug: row.project_slug,
     user_id: row.user_id,
     phase: row.phase as OnboardingPhase,
     phase_state: parseJson(row.phase_state_json) ?? {},

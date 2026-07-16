@@ -275,7 +275,7 @@ export function buildSynthesisImportJobRunner(
       await db.transaction(async (tx) => {
         await persistImportResult(tx, {
           job_id,
-          project_slug,
+          owner_slug: project_slug,
           source,
           result: importResult,
           partial: false,
@@ -324,13 +324,13 @@ export function buildSynthesisImportJobRunner(
             pass1_chunks_total, chunks_total_known, started_at, completed_at,
             error_code, error_message)
          VALUES (?, ?, ?, 'queued', 0, 0, 0, 0, ?, NULL, NULL, NULL)`,
-        [job_id, inp.project_slug, inp.source, now()],
+        [job_id, inp.owner_slug, inp.source, now()],
       )
       // Fire-and-forget: the engine polls `status` on its own clock (initial
       // poll + the 5s import-running cron tick). Any escape is swallowed so a
       // background failure surfaces as a `failed` job, never an unhandled
       // rejection.
-      fireAndForget('build-synthesis-import-runner.runJob', runJob(job_id, inp.project_slug, inp.source, inp.payload), (err) => {
+      fireAndForget('build-synthesis-import-runner.runJob', runJob(job_id, inp.owner_slug, inp.source, inp.payload), (err) => {
         logFailure(`run_job:${job_id}`, err)
         // Mark the job failed (async) via a NESTED fireAndForget so onError stays
         // synchronous-safe AND the persist failure is itself counted/logged.
@@ -355,7 +355,7 @@ export function buildSynthesisImportJobRunner(
       if (row === null) return null
       const job: ImportJob = {
         job_id: row.job_id,
-        project_slug: row.project_slug,
+        owner_slug: row.project_slug,
         source: row.source as ImportSource,
         status: row.status as ImportJobStatus,
         dollars_spent: row.dollars_spent,

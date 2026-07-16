@@ -81,7 +81,7 @@ describe('ProfilePicPipeline lifecycle', () => {
       gemini: buildClient(fn),
     })
     const { job_id } = await pipeline.start({
-      project_slug: 't1',
+      owner_slug: 't1',
       archetype_hint: 'odin',
       prompt: 'A wise raven-keeper.',
     })
@@ -117,7 +117,7 @@ describe('ProfilePicPipeline lifecycle', () => {
       failure_budget: 3,
     })
     const { job_id } = await pipeline.start({
-      project_slug: 't1',
+      owner_slug: 't1',
       archetype_hint: 'thoth',
       prompt: 'A scribe of the gods.',
     })
@@ -149,7 +149,7 @@ describe('ProfilePicPipeline lifecycle', () => {
       failure_budget: 3,
     })
     const { job_id } = await pipeline.start({
-      project_slug: 't1',
+      owner_slug: 't1',
       archetype_hint: 'padmasambhava',
       prompt: 'A fearless lotus-born teacher.',
     })
@@ -171,7 +171,7 @@ describe('ProfilePicPipeline lifecycle', () => {
       gemini: null,
     })
     const { job_id } = await pipeline.start({
-      project_slug: 't1',
+      owner_slug: 't1',
       archetype_hint: 'krishna',
       prompt: 'A pastoral charmer.',
     })
@@ -196,7 +196,7 @@ describe('ProfilePicPipeline lifecycle', () => {
     // Do NOT await the background job — pretend the user tapped [B]
     // immediately.
     const { job_id } = await pipeline.start({
-      project_slug: 't1',
+      owner_slug: 't1',
       archetype_hint: 'athena',
       prompt: 'A wise weaver.',
     })
@@ -217,7 +217,7 @@ describe('ProfilePicPipeline lifecycle', () => {
       gemini: null,
     })
     const { job_id } = await pipeline.start({
-      project_slug: 't1',
+      owner_slug: 't1',
       archetype_hint: 'shiva',
       prompt: 'A dancer who dissolves the world.',
     })
@@ -255,7 +255,7 @@ describe('ProfilePicPipeline lifecycle', () => {
       gemini: buildClient(fn),
     })
     const { job_id } = await pipeline.start({
-      project_slug: 't1',
+      owner_slug: 't1',
       archetype_hint: 'odin',
       prompt: 'p',
     })
@@ -292,7 +292,7 @@ describe('ProfilePicPipeline lifecycle', () => {
       gemini: buildClient(fn),
     })
     const { job_id } = await pipeline.start({
-      project_slug: 't1',
+      owner_slug: 't1',
       archetype_hint: 'curie',
       prompt: 'p',
     })
@@ -314,7 +314,7 @@ describe('ProfilePicPipeline lifecycle', () => {
       gemini: null,
     })
     const { job_id } = await pipeline.start({
-      project_slug: 't1',
+      owner_slug: 't1',
       archetype_hint: 'Odin/Thoth/Padmasambhava',
       prompt: 'p',
     })
@@ -368,7 +368,7 @@ describe('ProfilePicPipeline lifecycle', () => {
       fallback: new FallbackGallery({ data_dir: missingDir }),
     })
     const { job_id } = await pipeline.start({
-      project_slug: 't1',
+      owner_slug: 't1',
       archetype_hint: 'odin',
       prompt: 'p',
     })
@@ -396,7 +396,7 @@ describe('ProfilePicPipeline lifecycle', () => {
       gemini: buildClient(fn),
     })
     const { job_id } = await pipeline.start({
-      project_slug: 't1',
+      owner_slug: 't1',
       prompt: 'p',
     })
     await pipeline.awaitJob(job_id)

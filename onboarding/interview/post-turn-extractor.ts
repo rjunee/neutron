@@ -100,7 +100,7 @@ export interface PostTurnExtractorDeps {
   /** Substrate-backed onboarding client (same warm cc-llm path). */
   anthropicClient: AnthropicMessagesClient
   stateStore: OnboardingStateStore
-  project_slug: string
+  owner_slug: string
   /**
    * Fired ONCE, the turn the 5 required fields first become complete and no
    * import is in flight. The caller (composer) wires persona compose+commit,
@@ -138,7 +138,7 @@ export interface OnboardingTurn {
 export interface PostTurnExtractor {
   /**
    * Fire-and-forget. Returns immediately; the extraction + persist run in the
-   * background and swallow all errors. Serialized per (project_slug, user_id)
+   * background and swallow all errors. Serialized per (owner_slug, user_id)
    * so concurrent turns never race the read-modify-write of the array fields.
    */
   onTurnComplete(turn: OnboardingTurn): void
@@ -161,7 +161,7 @@ export function buildPostTurnExtractor(deps: PostTurnExtractorDeps): PostTurnExt
 
   async function runOnce(turn: OnboardingTurn): Promise<OnboardingState | null> {
     const observed_at = turn.observed_at ?? Date.now()
-    const prior = await deps.stateStore.get(deps.project_slug, turn.user_id)
+    const prior = await deps.stateStore.get(deps.owner_slug, turn.user_id)
     // Terminal → nothing to do (already onboarded).
     if (prior !== null && (prior.phase === 'completed' || prior.phase === 'failed')) {
       return null
@@ -199,7 +199,7 @@ export function buildPostTurnExtractor(deps: PostTurnExtractorDeps): PostTurnExt
     // import-merged `primary_projects`/`non_work_interests` arrays with a patch
     // built from the pre-merge snapshot (Codex r3 P2 — the store shallow-merges,
     // so a stale array REPLACES the fresh one).
-    const fresh = (await deps.stateStore.get(deps.project_slug, turn.user_id)) ?? prior
+    const fresh = (await deps.stateStore.get(deps.owner_slug, turn.user_id)) ?? prior
     if (fresh !== null && (fresh.phase === 'completed' || fresh.phase === 'failed')) {
       // A sibling turn (or the import pipeline) finalized while we extracted —
       // never resurrect a terminal row.
@@ -279,7 +279,7 @@ export function buildPostTurnExtractor(deps: PostTurnExtractorDeps): PostTurnExt
           ? fresh.phase
           : IMPORT_RUNNING_PHASE
       current = await deps.stateStore.upsert({
-        project_slug: deps.project_slug,
+        owner_slug: deps.owner_slug,
         user_id: turn.user_id,
         phase: next_phase,
         phase_state_patch: patch,
@@ -302,7 +302,7 @@ export function buildPostTurnExtractor(deps: PostTurnExtractorDeps): PostTurnExt
         // share a per-owner lock / transaction — deferred (see E2E report).
         const lateInFlight =
           deps.hasInFlightImport !== undefined ? await deps.hasInFlightImport() : false
-        const latest = await deps.stateStore.get(deps.project_slug, turn.user_id)
+        const latest = await deps.stateStore.get(deps.owner_slug, turn.user_id)
         if (latest !== null && (latest.phase === 'completed' || latest.phase === 'failed')) {
           // A racing path already finalized — don't double-fire.
           return latest
@@ -325,7 +325,7 @@ export function buildPostTurnExtractor(deps: PostTurnExtractorDeps): PostTurnExt
   }
 
   function onTurnComplete(turn: OnboardingTurn): void {
-    const key = `${deps.project_slug}:${turn.user_id}`
+    const key = `${deps.owner_slug}:${turn.user_id}`
     const prev = chains.get(key) ?? Promise.resolve()
     const run = prev.then(() =>
       runOnce(turn).then(

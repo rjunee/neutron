@@ -106,7 +106,7 @@ beforeEach(async () => {
   // Seed an onboarding row so the handler's user_id pulls from it.
   await stateStore.upsert({
     user_id: USER,
-    project_slug: OWNER,
+    owner_slug: OWNER,
     phase: 'import_analysis_presented',
     phase_state_patch: {
       topic_id: 'web:u',
@@ -268,7 +268,7 @@ describe('POST /api/import/<job_id>/resume', () => {
     // pre-existing user row is updated; no phantom row appears.
     await stateStore.upsert({
       user_id: USER,
-      project_slug: OWNER,
+      owner_slug: OWNER,
       phase: 'import_analysis_presented',
       phase_state_patch: {
         topic_id: 'web:u',
@@ -328,7 +328,7 @@ describe('POST /api/import/<job_id>/resume', () => {
     await stateStore.delete(OWNER, USER)
     await stateStore.upsert({
       user_id: USER,
-      project_slug: OWNER,
+      owner_slug: OWNER,
       phase: 'import_analysis_presented',
       phase_state_patch: {
         topic_id: 'web:u',

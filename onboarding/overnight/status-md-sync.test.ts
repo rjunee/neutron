@@ -15,7 +15,7 @@ import {
 
 function item(partial: Partial<OvernightItem> & { id: string }): OvernightItem {
   return {
-    project_slug: 'acme',
+    owner_slug: 'acme',
     agent_role: 'forge',
     priority: 'P3',
     description: 'do a thing',

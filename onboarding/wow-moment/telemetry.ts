@@ -56,7 +56,7 @@ export type WowEngagement =
   | 'discarded'
 
 export interface WowFiredEvent {
-  project_slug: string
+  owner_slug: string
   action_id: WowActionId
   fired_at: number
   success: boolean
@@ -67,7 +67,7 @@ export interface WowFiredEvent {
 }
 
 export interface WowEngagedEvent {
-  project_slug: string
+  owner_slug: string
   action_id: WowActionId
   engagement: WowEngagement
   occurred_at: number
@@ -144,7 +144,7 @@ export class WowTelemetry {
        VALUES (?, ?, ?, ?, ?, ?, NULL, ?)`,
       [
         id,
-        input.project_slug,
+        input.owner_slug,
         input.action_id,
         input.fired_at,
         input.success ? 1 : 0,
@@ -156,7 +156,7 @@ export class WowTelemetry {
       await this.eventLogger({
         event: 'onboarding.wow_action_fired',
         payload: {
-          project_slug: input.project_slug,
+          owner_slug: input.owner_slug,
           action_id: input.action_id,
           fired_at: input.fired_at,
           success: input.success,
@@ -189,7 +189,7 @@ export class WowTelemetry {
              ORDER BY fired_at DESC LIMIT 1
           )
           RETURNING id`,
-      [input.engagement, input.project_slug, input.action_id],
+      [input.engagement, input.owner_slug, input.action_id],
     )
     if (updated.changes === 0) {
       const id = this.uuid()
@@ -198,14 +198,14 @@ export class WowTelemetry {
            (id, project_slug, action_id, fired_at, success, success_reason,
             engagement, redacted_payload_json)
          VALUES (?, ?, ?, ?, 0, 'engagement_only', ?, '{}')`,
-        [id, input.project_slug, input.action_id, input.occurred_at, input.engagement],
+        [id, input.owner_slug, input.action_id, input.occurred_at, input.engagement],
       )
     }
     if (this.eventLogger !== undefined) {
       await this.eventLogger({
         event: 'onboarding.wow_action_engaged',
         payload: {
-          project_slug: input.project_slug,
+          owner_slug: input.owner_slug,
           action_id: input.action_id,
           engagement: input.engagement,
           occurred_at: input.occurred_at,
@@ -220,7 +220,7 @@ export class WowTelemetry {
    * surface in insertion order, which matches dispatch order — the
    * dispatcher calls actions sequentially).
    */
-  list(project_slug: string): WowEventRow[] {
+  list(owner_slug: string): WowEventRow[] {
     const rows = this.db
       .all<WowEventDbRow, [string]>(
         `SELECT id, project_slug, action_id, fired_at, success, success_reason,
@@ -228,7 +228,7 @@ export class WowTelemetry {
            FROM wow_events
           WHERE project_slug = ?
           ORDER BY fired_at ASC, rowid ASC`,
-        [project_slug],
+        [owner_slug],
       )
     return rows.map((r) => ({
       id: r.id,

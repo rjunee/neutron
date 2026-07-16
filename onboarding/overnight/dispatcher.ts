@@ -139,7 +139,7 @@ const PRIORITY_RANK: Record<OvernightPriority, number> = { P1: 0, P2: 1, P3: 2 }
 // =============================================================================
 
 export interface OvernightTridentCreateInput {
-  project_slug: string
+  owner_slug: string
   repo_path: string
   task: string
   slug: string
@@ -187,7 +187,7 @@ export interface ResultDocWriter {
 
 export interface RejectionSink {
   (input: {
-    project_slug: string
+    owner_slug: string
     item: OvernightItem
     reason: ContextGateRejectionReason
     detail: string
@@ -291,7 +291,7 @@ export class OvernightDispatcher {
       allocated.add(id)
       await this.deps.store.create({
         id,
-        project_slug: p.slug,
+        owner_slug: p.slug,
         description: b.description,
         agent_role: b.agent_role,
         priority: b.priority,
@@ -324,7 +324,7 @@ export class OvernightDispatcher {
     // Highest priority first, then oldest queued.
     const queued = this.deps.store
       .listByStatus('queued')
-      .filter((i) => repoBySlug.has(i.project_slug))
+      .filter((i) => repoBySlug.has(i.owner_slug))
       .sort((a, b) => {
         if (PRIORITY_RANK[a.priority] !== PRIORITY_RANK[b.priority]) {
           return PRIORITY_RANK[a.priority] - PRIORITY_RANK[b.priority]
@@ -340,7 +340,7 @@ export class OvernightDispatcher {
     for (const item of queued) {
       if (inflight >= maxConcurrent) break
       if (started >= maxPerWindow) break
-      const p = repoBySlug.get(item.project_slug)
+      const p = repoBySlug.get(item.owner_slug)
       if (!p) continue
 
       // HARD GATE — double-enforced at dispatch.
@@ -348,18 +348,18 @@ export class OvernightDispatcher {
       if (!gate.ok) {
         rejected++
         this.deps.on_rejection?.({
-          project_slug: item.project_slug,
+          owner_slug: item.owner_slug,
           item,
           reason: gate.reason ?? 'missing-context-tag',
           detail: gate.detail ?? 'context gate failed',
         })
-        this.log(`reject ${item.id} (${item.project_slug}): ${gate.detail}`)
+        this.log(`reject ${item.id} (${item.owner_slug}): ${gate.detail}`)
         continue
       }
 
       try {
         const handle = await this.deps.trident.createRun({
-          project_slug: item.project_slug,
+          owner_slug: item.owner_slug,
           repo_path: p.repo_root,
           task: item.description,
           slug: tridentSlugFor(item),
@@ -427,7 +427,7 @@ export class OvernightDispatcher {
       // Write the real result into the repo so the work is auditable on disk.
       const p = this.deps
         .listOptedInProjects()
-        .find((x) => x.slug === item.project_slug)
+        .find((x) => x.slug === item.owner_slug)
       if (p) {
         try {
           this.deps.result_docs.writeResultDoc(p.repo_root, { ...item, result }, result)
@@ -441,7 +441,7 @@ export class OvernightDispatcher {
         result,
         finished_at: new Date(nowMs).toISOString(),
       })
-      dirtyProjects.add(item.project_slug)
+      dirtyProjects.add(item.owner_slug)
       if (terminalOk) completed++
       else failed++
       this.log(`advance ${item.id} → ${terminalOk ? 'completed' : 'failed'} (${result})`)

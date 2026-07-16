@@ -180,7 +180,7 @@ export function buildScaffoldMaterializer(
   const now = deps.now ?? ((): number => Date.now())
   return buildProjectMaterializer({
     owner_home: deps.owner_home,
-    project_slug: deps.project_slug,
+    owner_slug: deps.project_slug,
     db: deps.db,
     now,
     composer: deps.projectDocComposer ?? null,

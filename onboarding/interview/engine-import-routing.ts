@@ -87,7 +87,7 @@ export async function reconcileSwitchIntentFromFreeform(
     const next_intent: 'chatgpt' | 'claude' | null = computed.intent
     if (next_intent === priorIntent) return state
     const updated = await self.deps.stateStore.upsert({
-      project_slug: input.project_slug,
+      owner_slug: input.owner_slug,
       user_id: input.user_id,
       phase: state.phase,
       phase_state_patch: {
@@ -122,7 +122,7 @@ export async function reEmitImportSourceSelection(
     // The cached import_upload_pending dynamic spec is now stale (the user
     // is leaving it); drop it so a later re-entry rebuilds against the new
     // source.
-    self.invalidateResolvedSpec(input.project_slug, 'import_upload_pending')
+    self.invalidateResolvedSpec(input.owner_slug, 'import_upload_pending')
 
     // ISSUES #98 — record explicit source-switch INTENT. The reroute fires on
     // ANY freeform (ISSUES #84), but when the user's text UNAMBIGUOUSLY names a
@@ -150,7 +150,7 @@ export async function reEmitImportSourceSelection(
 
     let updated: OnboardingState | null = null
     const emit = await self.emitPhasePrompt({
-      project_slug: input.project_slug,
+      owner_slug: input.owner_slug,
       user_id: input.user_id,
       topic_id: input.topic_id,
       phase: 'ai_substrate_offered',
@@ -158,7 +158,7 @@ export async function reEmitImportSourceSelection(
       seed_suffix: `source-switch:${observed_at}`,
       pre_send_state_upsert: async (prompt_id: string) => {
         updated = await self.deps.stateStore.upsert({
-          project_slug: input.project_slug,
+          owner_slug: input.owner_slug,
           user_id: input.user_id,
           phase: 'ai_substrate_offered',
           // NON-DESTRUCTIVE: deliberately does NOT touch `ai_substrate_used`
@@ -181,7 +181,7 @@ export async function reEmitImportSourceSelection(
     })
     if (updated === null) {
       updated = (await self.deps.stateStore.get(
-        input.project_slug,
+        input.owner_slug,
         input.user_id,
       )) as OnboardingState
     }
@@ -334,7 +334,7 @@ export async function consumeAiSubstrateOfferedChoice(
     if (self.deps.importPayloadResolver !== undefined) {
       try {
         payload = await self.deps.importPayloadResolver.resolve({
-          project_slug: input.project_slug,
+          owner_slug: input.owner_slug,
           user_id: input.user_id,
           source,
         })
@@ -369,7 +369,7 @@ export async function consumeAiSubstrateOfferedChoice(
     let job_id: string
     try {
       const r = await self.deps.importJobRunner.start({
-        project_slug: self.secretsIdentity(input.project_slug),
+        owner_slug: self.secretsIdentity(input.owner_slug),
         user_id: input.user_id,
         source,
         payload,
@@ -392,7 +392,7 @@ export async function consumeAiSubstrateOfferedChoice(
         phase: state.phase,
       })
       const advancedToRunning = await self.deps.stateStore.upsert({
-        project_slug: input.project_slug,
+        owner_slug: input.owner_slug,
         user_id: input.user_id,
         phase: 'import_running',
         phase_state_patch: {
@@ -425,7 +425,7 @@ export async function consumeAiSubstrateOfferedChoice(
     // import (cached chunks, empty export, immediate failure) lands on
     // archetype_picked without forcing the user to re-tap.
     const advanced = await self.deps.stateStore.upsert({
-      project_slug: input.project_slug,
+      owner_slug: input.owner_slug,
       user_id: input.user_id,
       phase: 'import_running',
       phase_state_patch: {
@@ -479,7 +479,7 @@ export async function reEmitImportOfferedPaste(
     const prior_attempts = readNumber(state.phase_state, 'import_offered_retry_count') ?? 0
     const next_attempts = prior_attempts + 1
     await self.deps.stateStore.upsert({
-      project_slug: input.project_slug,
+      owner_slug: input.owner_slug,
       user_id: input.user_id,
       phase: 'ai_substrate_offered',
       phase_state_patch: {
@@ -494,7 +494,7 @@ export async function reEmitImportOfferedPaste(
       options: options.map((o) => ({ value: o.value })),
     })
     const idempotency_key = deriveIdempotencyKey({
-      project_slug: input.project_slug,
+      project_slug: input.owner_slug,
       topic_id: input.topic_id,
       seed: `import_offered_paste:${next_attempts}:${seed}`,
     })
@@ -507,7 +507,7 @@ export async function reEmitImportOfferedPaste(
     })
     const emit = await self.deps.buttonStore.emit(prompt, { topic_id: input.topic_id })
     const final_state = await self.deps.stateStore.upsert({
-      project_slug: input.project_slug,
+      owner_slug: input.owner_slug,
       user_id: input.user_id,
       phase: 'ai_substrate_offered',
       phase_state_patch: { active_prompt_id: emit.prompt_id, topic_id: input.topic_id },
@@ -516,7 +516,7 @@ export async function reEmitImportOfferedPaste(
     if (emit.was_new || !emit.was_delivered) {
       try {
         await self.deps.sendButtonPrompt({
-          project_slug: input.project_slug,
+          owner_slug: input.owner_slug,
           topic_id: input.topic_id,
           prompt: emit.prompt,
         })
@@ -559,7 +559,7 @@ export async function acceptPastedImportUrlAndStart(
     // Stash the URL where the resolver can find it.
     const url_key = `import_paste_url_${source}`
     const updated = await self.deps.stateStore.upsert({
-      project_slug: input.project_slug,
+      owner_slug: input.owner_slug,
       user_id: input.user_id,
       phase: 'ai_substrate_offered',
       phase_state_patch: {
@@ -577,7 +577,7 @@ export async function acceptPastedImportUrlAndStart(
     if (self.deps.importPayloadResolver !== undefined) {
       try {
         payload = await self.deps.importPayloadResolver.resolve({
-          project_slug: input.project_slug,
+          owner_slug: input.owner_slug,
           user_id: input.user_id,
           source,
         })
@@ -605,7 +605,7 @@ export async function acceptPastedImportUrlAndStart(
     let job_id: string
     try {
       const r = await self.deps.importJobRunner.start({
-        project_slug: self.secretsIdentity(input.project_slug),
+        owner_slug: self.secretsIdentity(input.owner_slug),
         user_id: input.user_id,
         source,
         payload,
@@ -631,7 +631,7 @@ export async function acceptPastedImportUrlAndStart(
       phase: state.phase,
     })
     const advanced = await self.deps.stateStore.upsert({
-      project_slug: input.project_slug,
+      owner_slug: input.owner_slug,
       user_id: input.user_id,
       phase: 'import_running',
       phase_state_patch: {
@@ -683,7 +683,7 @@ export async function advanceFromAiSubstrateOfferedToUpload(
     )
     const re_pick_clears_staged = staged.length >= 1 && staged[0] !== ai_substrate_used
     const advanced = await self.deps.stateStore.upsert({
-      project_slug: input.project_slug,
+      owner_slug: input.owner_slug,
       user_id: input.user_id,
       phase: next_phase,
       phase_state_patch: {
@@ -713,14 +713,14 @@ export async function advanceFromAiSubstrateOfferedToUpload(
     }
     let final_state: OnboardingState | null = null
     const emit = await self.emitPhasePrompt({
-      project_slug: input.project_slug,
+      owner_slug: input.owner_slug,
       user_id: input.user_id,
       topic_id: input.topic_id,
       phase: next_phase,
       observed_at,
       pre_send_state_upsert: async (prompt_id: string) => {
         final_state = await self.deps.stateStore.upsert({
-          project_slug: input.project_slug,
+          owner_slug: input.owner_slug,
           user_id: input.user_id,
           phase: next_phase,
           phase_state_patch: { active_prompt_id: prompt_id },
@@ -729,7 +729,7 @@ export async function advanceFromAiSubstrateOfferedToUpload(
       },
     })
     if (final_state === null) {
-      final_state = (await self.deps.stateStore.get(input.project_slug, input.user_id)) as OnboardingState
+      final_state = (await self.deps.stateStore.get(input.owner_slug, input.user_id)) as OnboardingState
     }
     return { outcome: 'advanced', state: final_state, prompt_id: emit.prompt_id }
   }
@@ -751,7 +751,7 @@ export async function advanceFromAiSubstrateOffered(
       )
     }
     const advanced = await self.deps.stateStore.upsert({
-      project_slug: input.project_slug,
+      owner_slug: input.owner_slug,
       user_id: input.user_id,
       phase: next_phase,
       phase_state_patch: {
@@ -772,20 +772,20 @@ export async function advanceFromAiSubstrateOffered(
     // generic consumeChoice tail does, plus emit the next phase's
     // prompt so the user sees the archetype-picked body.
     let advanced_final = AUTO_SKIP_PHASES.has(next_phase)
-      ? await self.walkAutoSkip(input.project_slug, advanced, observed_at)
+      ? await self.walkAutoSkip(input.owner_slug, advanced, observed_at)
       : advanced
     const next_spec = STATIC_PHASE_SPECS[advanced_final.phase]
     if (next_spec !== undefined && !TERMINAL_PHASES.has(advanced_final.phase)) {
       let final_state: OnboardingState | null = null
       const emit = await self.emitPhasePrompt({
-        project_slug: input.project_slug,
+        owner_slug: input.owner_slug,
         user_id: input.user_id,
         topic_id: input.topic_id,
         phase: advanced_final.phase,
         observed_at,
         pre_send_state_upsert: async (prompt_id: string) => {
           final_state = await self.deps.stateStore.upsert({
-            project_slug: input.project_slug,
+            owner_slug: input.owner_slug,
             user_id: input.user_id,
             phase: advanced_final.phase,
             phase_state_patch: { active_prompt_id: prompt_id },
@@ -794,7 +794,7 @@ export async function advanceFromAiSubstrateOffered(
         },
       })
       if (final_state === null) {
-        final_state = (await self.deps.stateStore.get(input.project_slug, input.user_id)) ?? advanced_final
+        final_state = (await self.deps.stateStore.get(input.owner_slug, input.user_id)) ?? advanced_final
       }
       return { outcome: 'advanced', state: final_state, prompt_id: emit.prompt_id }
     }
@@ -1043,7 +1043,7 @@ export async function pollImportRunningAndAdvance(
       // the first poll — never on every silent 5s cron tick. Mirrors
       // `attemptAutoResumeFromPaused`'s phase_state_patch upsert shape.
       state = await self.deps.stateStore.upsert({
-        project_slug: input.project_slug,
+        owner_slug: input.owner_slug,
         user_id: input.user_id,
         phase: 'import_running',
         phase_state_patch: {
@@ -1280,7 +1280,7 @@ export async function pollImportRunningAndAdvance(
         // body copy from it.
         try {
           await self.deps.sendImportProgress({
-            project_slug: input.project_slug,
+            owner_slug: input.owner_slug,
             topic_id: input.topic_id,
             event: {
               type: 'import_progress',
@@ -1295,7 +1295,7 @@ export async function pollImportRunningAndAdvance(
         } catch (err) {
           // Best-effort — the next 5 s tick will retry. Don't bubble.
           log.warn('import_progress_send_failed', {
-            project: input.project_slug,
+            project: input.owner_slug,
             topic: input.topic_id,
             job: job_id,
             error: err instanceof Error ? err.message : String(err),
@@ -1378,7 +1378,7 @@ export async function attemptAutoResumeFromPaused(
     let payload: ChunkerInput | null = null
     try {
       payload = await self.deps.importPayloadResolver.resolve({
-        project_slug: input.project_slug,
+        owner_slug: input.owner_slug,
         user_id: input.user_id,
         source,
       })
@@ -1401,7 +1401,7 @@ export async function attemptAutoResumeFromPaused(
     let new_job_id: string
     try {
       const r = await self.deps.importJobRunner.start({
-        project_slug: self.secretsIdentity(input.project_slug),
+        owner_slug: self.secretsIdentity(input.owner_slug),
         user_id: input.user_id,
         source,
         payload,
@@ -1445,7 +1445,7 @@ export async function attemptAutoResumeFromPaused(
       phase: state.phase,
     })
     const next_state = await self.deps.stateStore.upsert({
-      project_slug: input.project_slug,
+      owner_slug: input.owner_slug,
       user_id: input.user_id,
       phase: 'import_running',
       phase_state_patch: {
@@ -1603,27 +1603,27 @@ export async function advanceFromImportRunningOnComplete(
       }
     }
     const advanced = await self.deps.stateStore.upsert({
-      project_slug: input.project_slug,
+      owner_slug: input.owner_slug,
       user_id: input.user_id,
       phase: next_phase,
       phase_state_patch,
       advanced_at: observed_at,
     })
     let advanced_final = AUTO_SKIP_PHASES.has(next_phase)
-      ? await self.walkAutoSkip(input.project_slug, advanced, observed_at)
+      ? await self.walkAutoSkip(input.owner_slug, advanced, observed_at)
       : advanced
     const next_spec = STATIC_PHASE_SPECS[advanced_final.phase]
     if (next_spec !== undefined && !TERMINAL_PHASES.has(advanced_final.phase)) {
       let final_state: OnboardingState | null = null
       const emit = await self.emitPhasePrompt({
-        project_slug: input.project_slug,
+        owner_slug: input.owner_slug,
         user_id: input.user_id,
         topic_id: input.topic_id,
         phase: advanced_final.phase,
         observed_at,
         pre_send_state_upsert: async (prompt_id: string) => {
           final_state = await self.deps.stateStore.upsert({
-            project_slug: input.project_slug,
+            owner_slug: input.owner_slug,
             user_id: input.user_id,
             phase: advanced_final.phase,
             phase_state_patch: { active_prompt_id: prompt_id },
@@ -1632,7 +1632,7 @@ export async function advanceFromImportRunningOnComplete(
         },
       })
       if (final_state === null) {
-        final_state = (await self.deps.stateStore.get(input.project_slug, input.user_id)) ?? advanced_final
+        final_state = (await self.deps.stateStore.get(input.owner_slug, input.user_id)) ?? advanced_final
       }
       return { outcome: 'advanced', state: final_state, prompt_id: emit.prompt_id }
     }
@@ -1678,7 +1678,7 @@ export async function emitImportRunningPromptSpec(
     const prior_attempts = readNumber(state.phase_state, 'import_running_attempt_count') ?? 0
     const next_attempts = prior_attempts + 1
     const pre_emit_state = await self.deps.stateStore.upsert({
-      project_slug: input.project_slug,
+      owner_slug: input.owner_slug,
       user_id: input.user_id,
       phase: 'import_running',
       phase_state_patch: {
@@ -1694,7 +1694,7 @@ export async function emitImportRunningPromptSpec(
       options: spec.options.map((o) => ({ value: o.value })),
     })
     const idempotency_key = deriveIdempotencyKey({
-      project_slug: input.project_slug,
+      project_slug: input.owner_slug,
       topic_id: input.topic_id,
       seed: `import_running:${opts.sub_step}:${next_attempts}:${seed}`,
     })
@@ -1707,7 +1707,7 @@ export async function emitImportRunningPromptSpec(
     })
     const emit = await self.deps.buttonStore.emit(prompt, { topic_id: input.topic_id })
     const updated = await self.deps.stateStore.upsert({
-      project_slug: input.project_slug,
+      owner_slug: input.owner_slug,
       user_id: input.user_id,
       phase: 'import_running',
       phase_state_patch: { active_prompt_id: emit.prompt_id, topic_id: input.topic_id },
@@ -1716,7 +1716,7 @@ export async function emitImportRunningPromptSpec(
     if (emit.was_new || !emit.was_delivered) {
       try {
         await self.deps.sendButtonPrompt({
-          project_slug: input.project_slug,
+          owner_slug: input.owner_slug,
           topic_id: input.topic_id,
           prompt: emit.prompt,
         })
@@ -1726,7 +1726,7 @@ export async function emitImportRunningPromptSpec(
           'import_running',
           'send_failed',
           true,
-          `failed to send import_running ${opts.sub_step} prompt for project=${input.project_slug}`,
+          `failed to send import_running ${opts.sub_step} prompt for project=${input.owner_slug}`,
           err,
         )
       }
@@ -1801,7 +1801,7 @@ export async function consumeImportRunningChoice(
         }
         const url_key = `import_paste_url_${source}`
         const updated = await self.deps.stateStore.upsert({
-          project_slug: input.project_slug,
+          owner_slug: input.owner_slug,
           user_id: input.user_id,
           phase: 'import_running',
           phase_state_patch: { [url_key]: url, import_failure_reason: null },
@@ -1853,7 +1853,7 @@ export async function retryImportRunning(
     if (self.deps.importPayloadResolver !== undefined) {
       try {
         payload = await self.deps.importPayloadResolver.resolve({
-          project_slug: input.project_slug,
+          owner_slug: input.owner_slug,
           user_id: input.user_id,
           source,
         })
@@ -1888,7 +1888,7 @@ export async function retryImportRunning(
     let job_id: string
     try {
       const r = await self.deps.importJobRunner.start({
-        project_slug: self.secretsIdentity(input.project_slug),
+        owner_slug: self.secretsIdentity(input.owner_slug),
         user_id: input.user_id,
         source,
         payload,
@@ -1907,7 +1907,7 @@ export async function retryImportRunning(
       })
     }
     const updated = await self.deps.stateStore.upsert({
-      project_slug: input.project_slug,
+      owner_slug: input.owner_slug,
       user_id: input.user_id,
       phase: 'import_running',
       phase_state_patch: {
@@ -1952,7 +1952,7 @@ export async function startImportAndAdvanceToRunning(
     if (self.deps.importPayloadResolver !== undefined) {
       try {
         payload = await self.deps.importPayloadResolver.resolve({
-          project_slug: advanceInput.project_slug,
+          owner_slug: advanceInput.owner_slug,
           user_id: advanceInput.user_id,
           source: runnerSource,
         })
@@ -1983,7 +1983,7 @@ export async function startImportAndAdvanceToRunning(
     let job_id: string
     try {
       const r = await self.deps.importJobRunner.start({
-        project_slug: self.secretsIdentity(advanceInput.project_slug),
+        owner_slug: self.secretsIdentity(advanceInput.owner_slug),
         user_id: advanceInput.user_id,
         source: runnerSource,
         payload,
@@ -2012,7 +2012,7 @@ export async function startImportAndAdvanceToRunning(
     })
 
     const advanced = await self.deps.stateStore.upsert({
-      project_slug: advanceInput.project_slug,
+      owner_slug: advanceInput.owner_slug,
       user_id: advanceInput.user_id,
       phase: 'import_running',
       phase_state_patch: {
@@ -2037,7 +2037,7 @@ export async function advanceToImportRunningFailed(
     failure_reason: string,
   ): Promise<AdvanceResult> {
     const advanced = await self.deps.stateStore.upsert({
-      project_slug: input.project_slug,
+      owner_slug: input.owner_slug,
       user_id: input.user_id,
       phase: 'import_running',
       phase_state_patch: {

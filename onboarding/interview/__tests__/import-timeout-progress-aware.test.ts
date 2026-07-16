@@ -173,7 +173,7 @@ let db: ProjectDb
 let buttonStore: ButtonStore
 let stateStore: InMemoryOnboardingStateStore
 let transcript: TranscriptWriter
-let sentPrompts: Array<{ project_slug: string; topic_id: string; prompt: ButtonPrompt }>
+let sentPrompts: Array<{ owner_slug: string; topic_id: string; prompt: ButtonPrompt }>
 
 function buildEngine(importJobRunner: ImportJobRunnerHook): InterviewEngine {
   return new InterviewEngine({
@@ -209,7 +209,7 @@ function scriptedRunner(job: ImportJob): {
 async function seedImportRunning(job_id: string, started_at: number): Promise<void> {
   await stateStore.upsert({
     user_id: USER,
-    project_slug: OWNER,
+    owner_slug: OWNER,
     phase: 'import_running',
     phase_state_patch: {
       topic_id: TOPIC,
@@ -257,7 +257,7 @@ describe('pollImportRunningTick — progress-aware timeout (integration)', () =>
     const T0 = 5_000_000_000_000
     const job: ImportJob = {
       job_id: 'job-slow',
-      project_slug: OWNER,
+      owner_slug: OWNER,
       source: 'claude-zip',
       status: 'pass1-running',
       dollars_spent: 0,
@@ -276,7 +276,7 @@ describe('pollImportRunningTick — progress-aware timeout (integration)', () =>
     for (let i = 1; i <= 10; i += 1) {
       job.pass1_chunks_done = i
       const out = await engine.pollImportRunningTick({
-        project_slug: OWNER,
+        owner_slug: OWNER,
         user_id: USER,
         observed_at: T0 + (5 + i * 4) * MIN,
       })
@@ -290,7 +290,7 @@ describe('pollImportRunningTick — progress-aware timeout (integration)', () =>
     job.pass1_chunks_done = 8
     job.result = SAMPLE_RESULT
     const done = await engine.pollImportRunningTick({
-      project_slug: OWNER,
+      owner_slug: OWNER,
       user_id: USER,
       observed_at: T0 + 50 * MIN,
     })
@@ -303,7 +303,7 @@ describe('pollImportRunningTick — progress-aware timeout (integration)', () =>
     const T0 = 6_000_000_000_000
     const job: ImportJob = {
       job_id: 'job-consolidate',
-      project_slug: OWNER,
+      owner_slug: OWNER,
       source: 'claude-zip',
       status: 'pass1-running',
       dollars_spent: 0, // Max-OAuth: no dollar signal during synthesis
@@ -318,7 +318,7 @@ describe('pollImportRunningTick — progress-aware timeout (integration)', () =>
 
     // Tick at minute 20 — still reading (7/8). Initializes the anchor.
     let out = await engine.pollImportRunningTick({
-      project_slug: OWNER,
+      owner_slug: OWNER,
       user_id: USER,
       observed_at: T0 + 20 * MIN,
     })
@@ -328,7 +328,7 @@ describe('pollImportRunningTick — progress-aware timeout (integration)', () =>
     // advance resets the anchor; we enter the silent consolidate phase.
     job.pass1_chunks_done = 8
     out = await engine.pollImportRunningTick({
-      project_slug: OWNER,
+      owner_slug: OWNER,
       user_id: USER,
       observed_at: T0 + 31 * MIN,
     })
@@ -338,7 +338,7 @@ describe('pollImportRunningTick — progress-aware timeout (integration)', () =>
     // pass1-running) — past the old flat 15-min cap AND past the 30-min
     // floor. The generous consolidate window protects it. (Owner's failure.)
     out = await engine.pollImportRunningTick({
-      project_slug: OWNER,
+      owner_slug: OWNER,
       user_id: USER,
       observed_at: T0 + 34 * MIN,
     })
@@ -350,7 +350,7 @@ describe('pollImportRunningTick — progress-aware timeout (integration)', () =>
     job.status = 'completed'
     job.result = SAMPLE_RESULT
     const done = await engine.pollImportRunningTick({
-      project_slug: OWNER,
+      owner_slug: OWNER,
       user_id: USER,
       observed_at: T0 + 35 * MIN,
     })
@@ -363,7 +363,7 @@ describe('pollImportRunningTick — progress-aware timeout (integration)', () =>
     const T0 = 7_000_000_000_000
     const job: ImportJob = {
       job_id: 'job-stuck',
-      project_slug: OWNER,
+      owner_slug: OWNER,
       source: 'claude-zip',
       status: 'pass1-running',
       dollars_spent: 0,
@@ -378,7 +378,7 @@ describe('pollImportRunningTick — progress-aware timeout (integration)', () =>
 
     // Tick 1 at minute 31 (past floor) — initializes the anchor.
     let out = await engine.pollImportRunningTick({
-      project_slug: OWNER,
+      owner_slug: OWNER,
       user_id: USER,
       observed_at: T0 + 31 * MIN,
     })
@@ -386,7 +386,7 @@ describe('pollImportRunningTick — progress-aware timeout (integration)', () =>
 
     // Tick 2 well past the no-progress window with the job UNCHANGED → stuck.
     out = await engine.pollImportRunningTick({
-      project_slug: OWNER,
+      owner_slug: OWNER,
       user_id: USER,
       observed_at: T0 + 31 * MIN + IMPORT_NO_PROGRESS_WINDOW_MS + 2 * MIN,
     })
@@ -417,7 +417,7 @@ describe('O4 — import_orphaned degrade journal', () => {
       const engine = buildEngine(runner)
       await seedImportRunning('ghost', T0)
       const out = await engine.pollImportRunningTick({
-        project_slug: OWNER,
+        owner_slug: OWNER,
         user_id: USER,
         observed_at: T0 + 1000,
       })
@@ -450,7 +450,7 @@ describe('O4 — import_orphaned degrade journal', () => {
       const engine = buildEngine(runner)
       await seedImportRunning('ghost2', T0)
       const out = await engine.pollImportRunningTick({
-        project_slug: OWNER,
+        owner_slug: OWNER,
         user_id: USER,
         observed_at: T0 + 1000,
       })

@@ -38,7 +38,7 @@ function uuidFactory(seed: string): () => string {
 describe('buildPortraitWaitPrompt', () => {
   test('emits the [A] Wait / [B] Gallery / [C] Upload triad with locked body copy', () => {
     const prompt = buildPortraitWaitPrompt({
-      project_slug: 'alice',
+      owner_slug: 'alice',
       topic_id: 'topic-onboarding',
       job_id: 'job-1',
       uuid: uuidFactory('aa'),
@@ -61,13 +61,13 @@ describe('buildPortraitWaitPrompt', () => {
 
   test('idempotency_key is deterministic — same (project, topic, job_id) → same key', () => {
     const a = buildPortraitWaitPrompt({
-      project_slug: 'alice',
+      owner_slug: 'alice',
       topic_id: 'topic-onboarding',
       job_id: 'job-stable',
       uuid: uuidFactory('a'),
     })
     const b = buildPortraitWaitPrompt({
-      project_slug: 'alice',
+      owner_slug: 'alice',
       topic_id: 'topic-onboarding',
       job_id: 'job-stable',
       uuid: uuidFactory('b'),
@@ -87,12 +87,12 @@ describe('buildPortraitWaitPrompt', () => {
 
   test('idempotency_key flips when job_id changes (no cross-job collision)', () => {
     const a = buildPortraitWaitPrompt({
-      project_slug: 'alice',
+      owner_slug: 'alice',
       topic_id: 'topic-onboarding',
       job_id: 'job-1',
     })
     const b = buildPortraitWaitPrompt({
-      project_slug: 'alice',
+      owner_slug: 'alice',
       topic_id: 'topic-onboarding',
       job_id: 'job-2',
     })
@@ -101,7 +101,7 @@ describe('buildPortraitWaitPrompt', () => {
 
   test('omitting uuid still produces a valid prompt (default randomUUID path)', () => {
     const prompt = buildPortraitWaitPrompt({
-      project_slug: 'alice',
+      owner_slug: 'alice',
       topic_id: 'topic-onboarding',
       job_id: 'job-default-uuid',
     })
@@ -116,7 +116,7 @@ describe('buildPortraitWaitPrompt', () => {
 describe('buildPortraitPickPrompt', () => {
   test('1 candidate → single [A] option, no Regenerate', () => {
     const prompt = buildPortraitPickPrompt({
-      project_slug: 'alice',
+      owner_slug: 'alice',
       topic_id: 'topic-onboarding',
       job_id: 'job-1',
       candidate_ids: ['cand-1'],
@@ -133,7 +133,7 @@ describe('buildPortraitPickPrompt', () => {
 
   test('2 candidates with allow_regenerate=true → [A][B][C] Regenerate', () => {
     const prompt = buildPortraitPickPrompt({
-      project_slug: 'alice',
+      owner_slug: 'alice',
       topic_id: 'topic-onboarding',
       job_id: 'job-2',
       candidate_ids: ['cand-1', 'cand-2'],
@@ -151,7 +151,7 @@ describe('buildPortraitPickPrompt', () => {
 
   test('3 candidates with allow_regenerate=true → [A][B][C][D] Regenerate', () => {
     const prompt = buildPortraitPickPrompt({
-      project_slug: 'alice',
+      owner_slug: 'alice',
       topic_id: 'topic-onboarding',
       job_id: 'job-3',
       candidate_ids: ['c1', 'c2', 'c3'],
@@ -167,7 +167,7 @@ describe('buildPortraitPickPrompt', () => {
 
   test('3 candidates without allow_regenerate → no Regenerate option', () => {
     const prompt = buildPortraitPickPrompt({
-      project_slug: 'alice',
+      owner_slug: 'alice',
       topic_id: 'topic-onboarding',
       job_id: 'job-no-regen',
       candidate_ids: ['c1', 'c2', 'c3'],
@@ -179,7 +179,7 @@ describe('buildPortraitPickPrompt', () => {
   test('candidate values flow through verbatim (engine routes the tap back to pipeline.pick)', () => {
     const ids = ['ce0a7a48', 'b71d-fff', 'long-but-37-byte-cap-ok']
     const prompt = buildPortraitPickPrompt({
-      project_slug: 'alice',
+      owner_slug: 'alice',
       topic_id: 'topic-onboarding',
       job_id: 'job-verbatim',
       candidate_ids: ids,
@@ -189,12 +189,12 @@ describe('buildPortraitPickPrompt', () => {
 
   test('idempotency_key is deterministic and distinct from the wait-prompt key', () => {
     const wait = buildPortraitWaitPrompt({
-      project_slug: 'alice',
+      owner_slug: 'alice',
       topic_id: 'topic-onboarding',
       job_id: 'job-shared',
     })
     const pick = buildPortraitPickPrompt({
-      project_slug: 'alice',
+      owner_slug: 'alice',
       topic_id: 'topic-onboarding',
       job_id: 'job-shared',
       candidate_ids: ['c1'],
@@ -213,7 +213,7 @@ describe('buildPortraitPickPrompt', () => {
   test('zero candidates → throws (contract: 1-3 only)', () => {
     expect(() =>
       buildPortraitPickPrompt({
-        project_slug: 'alice',
+        owner_slug: 'alice',
         topic_id: 'topic-onboarding',
         job_id: 'job-x',
         candidate_ids: [],
@@ -224,7 +224,7 @@ describe('buildPortraitPickPrompt', () => {
   test('four candidates → throws (contract: 1-3 only)', () => {
     expect(() =>
       buildPortraitPickPrompt({
-        project_slug: 'alice',
+        owner_slug: 'alice',
         topic_id: 'topic-onboarding',
         job_id: 'job-x',
         candidate_ids: ['c1', 'c2', 'c3', 'c4'],
@@ -234,7 +234,7 @@ describe('buildPortraitPickPrompt', () => {
 
   test('omitting uuid still produces a valid prompt (default randomUUID path)', () => {
     const prompt = buildPortraitPickPrompt({
-      project_slug: 'alice',
+      owner_slug: 'alice',
       topic_id: 'topic-onboarding',
       job_id: 'job-default-uuid',
       candidate_ids: ['c1'],

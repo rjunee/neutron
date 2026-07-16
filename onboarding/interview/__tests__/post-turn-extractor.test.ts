@@ -87,7 +87,7 @@ test('extractor persists fields and fires onComplete when the 4 required fields 
   const extractor = buildPostTurnExtractor({
     anthropicClient: client,
     stateStore: store,
-    project_slug: SLUG,
+    owner_slug: SLUG,
     onComplete: ({ user_id }) => {
       completedWith = { user_id }
     },
@@ -118,7 +118,7 @@ test('extractor does NOT complete while fields are still missing', async () => {
   const extractor = buildPostTurnExtractor({
     anthropicClient: client,
     stateStore: store,
-    project_slug: SLUG,
+    owner_slug: SLUG,
     onComplete: () => {
       completed = true
     },
@@ -136,12 +136,12 @@ test('extractor does NOT complete while fields are still missing', async () => {
 
 test('extractor is a no-op once onboarding is completed (terminal phase)', async () => {
   const store = new InMemoryOnboardingStateStore()
-  await store.upsert({ project_slug: SLUG, user_id: USER, phase: 'completed', completed_at: 1 })
+  await store.upsert({ owner_slug: SLUG, user_id: USER, phase: 'completed', completed_at: 1 })
   let called = false
   const extractor = buildPostTurnExtractor({
     anthropicClient: stubClient(['{}']),
     stateStore: store,
-    project_slug: SLUG,
+    owner_slug: SLUG,
     onComplete: () => {
       called = true
     },
@@ -176,7 +176,7 @@ test('in-flight import SUPPRESSES project-discovery fields and DEFERS completion
   const extractor = buildPostTurnExtractor({
     anthropicClient: stubClient([ALL_FIVE]),
     stateStore: store,
-    project_slug: SLUG,
+    owner_slug: SLUG,
     // A real import is live → project discovery is owned by the import; the
     // extractor must NOT persist project-discovery fields (2026-07-01 SEV1) NOR
     // finalize on top of it.
@@ -211,7 +211,7 @@ test('NO import in flight → project-discovery fields persist normally (gate of
       JSON.stringify({ primary_projects: ['Topline', 'Acme'], non_work_interests: ['climbing'] }),
     ]),
     stateStore: store,
-    project_slug: SLUG,
+    owner_slug: SLUG,
     hasInFlightImport: async () => false, // no import → the SEV1 gate must NOT fire
   })
   const state = await extractor.runOnce({
@@ -229,7 +229,7 @@ test('an in-flight job at an interview phase ADOPTS import_running (no downgrade
   // Fresh row reads as the interview marker (the upload inserted the job row but
   // its phase='import_running' upsert hasn't landed / is racing this turn).
   await store.upsert({
-    project_slug: SLUG,
+    owner_slug: SLUG,
     user_id: USER,
     phase: 'work_interview_gap_fill',
     phase_state_patch: { user_first_name: 'Sam', import_job_id: 'synth-live' },
@@ -244,7 +244,7 @@ test('an in-flight job at an interview phase ADOPTS import_running (no downgrade
     // adopt-import_running write.
     anthropicClient: stubClient([JSON.stringify({ agent_personality: 'warm and direct' })]),
     stateStore: store,
-    project_slug: SLUG,
+    owner_slug: SLUG,
     hasInFlightImport: async () => true, // a job is genuinely live
     onComplete: () => {
       completed = true
@@ -269,7 +269,7 @@ test('completion proceeds once the import is no longer in flight', async () => {
   const extractor = buildPostTurnExtractor({
     anthropicClient: stubClient([ALL_FIVE]),
     stateStore: store,
-    project_slug: SLUG,
+    owner_slug: SLUG,
     hasInFlightImport: async () => false, // import terminal/absent → safe to finish
     onComplete: () => {
       completed = true
@@ -287,7 +287,7 @@ test('completion proceeds once the import is no longer in flight', async () => {
 test('an upload that lands AFTER the first probe but before finalize still blocks completion (Codex r2 P2)', async () => {
   const store = new InMemoryOnboardingStateStore()
   await store.upsert({
-    project_slug: SLUG,
+    owner_slug: SLUG,
     user_id: USER,
     phase: 'work_interview_gap_fill',
     phase_state_patch: {
@@ -306,7 +306,7 @@ test('an upload that lands AFTER the first probe but before finalize still block
   const extractor = buildPostTurnExtractor({
     anthropicClient: stubClient([JSON.stringify({ non_work_interests: ['climbing'] })]),
     stateStore: store,
-    project_slug: SLUG,
+    owner_slug: SLUG,
     hasInFlightImport: async () => {
       probes += 1
       return probes >= 2
@@ -329,7 +329,7 @@ test('a concurrent upload that advances the row to import_running mid-extraction
   const store = new InMemoryOnboardingStateStore()
   // Seed a row at the interview marker with 4/5 fields already collected.
   await store.upsert({
-    project_slug: SLUG,
+    owner_slug: SLUG,
     user_id: USER,
     phase: 'work_interview_gap_fill',
     phase_state_patch: {
@@ -349,7 +349,7 @@ test('a concurrent upload that advances the row to import_running mid-extraction
     messages: {
       create: async () => {
         await store.upsert({
-          project_slug: SLUG,
+          owner_slug: SLUG,
           user_id: USER,
           phase: 'import_running',
           phase_state_patch: { import_job_id: 'synth-xyz' },
@@ -362,7 +362,7 @@ test('a concurrent upload that advances the row to import_running mid-extraction
   const extractor = buildPostTurnExtractor({
     anthropicClient: racingClient,
     stateStore: store,
-    project_slug: SLUG,
+    owner_slug: SLUG,
     onComplete: () => {
       completed = true
     },
@@ -387,7 +387,7 @@ test('a curation DROP is honored during import review (drops are never gated) �
   // Import review phase: the import already merged its proposals into
   // primary_projects and the owner is reviewing them.
   await store.upsert({
-    project_slug: SLUG,
+    owner_slug: SLUG,
     user_id: USER,
     phase: 'import_analysis_presented',
     phase_state_patch: {
@@ -400,7 +400,7 @@ test('a curation DROP is honored during import review (drops are never gated) �
     // The owner explicitly rejects an import-proposed project during review.
     anthropicClient: stubClient([JSON.stringify({ removed_projects: ['Family Home'] })]),
     stateStore: store,
-    project_slug: SLUG,
+    owner_slug: SLUG,
     hasInFlightImport: async () => true, // import still in flight/review
   })
   const state = await extractor.runOnce({
@@ -419,7 +419,7 @@ test('a terse no-op turn AFTER an import is consumed still finalizes (no stall)'
   // Post-consume state: all 5 fields present (incl. the import-merged projects),
   // import_result stamped, phase back at the interview marker, import terminal.
   await store.upsert({
-    project_slug: SLUG,
+    owner_slug: SLUG,
     user_id: USER,
     phase: 'work_interview_gap_fill',
     phase_state_patch: {
@@ -436,7 +436,7 @@ test('a terse no-op turn AFTER an import is consumed still finalizes (no stall)'
   const extractor = buildPostTurnExtractor({
     anthropicClient: stubClient(['{}']), // terse turn → empty patch
     stateStore: store,
-    project_slug: SLUG,
+    owner_slug: SLUG,
     hasInFlightImport: async () => false, // import already terminal
     onComplete: () => {
       completed = true
@@ -457,7 +457,7 @@ test('a turn that extracts an array does NOT clobber import-merged array values 
   const store = new InMemoryOnboardingStateStore()
   // Pre-LLM row: just the one interview project.
   await store.upsert({
-    project_slug: SLUG,
+    owner_slug: SLUG,
     user_id: USER,
     phase: 'work_interview_gap_fill',
     phase_state_patch: { user_first_name: 'Sam', primary_projects: ['Topline'] },
@@ -470,7 +470,7 @@ test('a turn that extracts an array does NOT clobber import-merged array values 
     messages: {
       create: async () => {
         await store.upsert({
-          project_slug: SLUG,
+          owner_slug: SLUG,
           user_id: USER,
           phase: 'work_interview_gap_fill',
           phase_state_patch: { primary_projects: ['Topline', 'ImportedA', 'ImportedB'] },
@@ -483,7 +483,7 @@ test('a turn that extracts an array does NOT clobber import-merged array values 
   const extractor = buildPostTurnExtractor({
     anthropicClient: racingClient,
     stateStore: store,
-    project_slug: SLUG,
+    owner_slug: SLUG,
     hasInFlightImport: async () => false,
   })
   const state = await extractor.runOnce({
@@ -507,7 +507,7 @@ test('extractor swallows LLM failure (never throws) — fire-and-forget safety',
   const extractor = buildPostTurnExtractor({
     anthropicClient: throwingClient,
     stateStore: store,
-    project_slug: SLUG,
+    owner_slug: SLUG,
   })
   // The LLM throwing must NOT reject the call (fire-and-forget). Nothing is
   // extracted this turn, and no onboarding_state row is created from an empty

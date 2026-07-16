@@ -76,21 +76,21 @@ async function seedCompleted(opts: {
   // gateway_events.id when another instance starts at 1 again.
   const telemetry = new OnboardingTelemetry({ db })
   await telemetry.emit({
-    project_slug: OWNER,
+    owner_slug: OWNER,
     user_id: USER,
     event: 'signup.started',
     payload: { via: 'tg' },
     ts: opts.signup_at,
   })
   await telemetry.emit({
-    project_slug: OWNER,
+    owner_slug: OWNER,
     user_id: USER,
     event: 'onboarding.wow_dispatched',
     payload: { fired_count: 4, total_actions: 7 },
     ts: opts.completed_at - 1000,
   })
   await telemetry.emit({
-    project_slug: OWNER,
+    owner_slug: OWNER,
     user_id: USER,
     event: 'onboarding.completed',
     payload: { time_to_wow_ms: 1, total_dollars: 1, wow_actions_fired: [] },
@@ -222,7 +222,7 @@ test('tap [B] freeform records response_kind + freeform_text + emits sean_ellis_
   })
 
   const result = await collector.recordResponse({
-    project_slug: OWNER,
+    owner_slug: OWNER,
     response_id: row!.id,
     user_id: USER,
     response_kind: 'somewhat_disappointed',
@@ -273,7 +273,7 @@ test('tap [A] very_disappointed: response recorded, no markdown append', async (
   })
 
   const result = await collector.recordResponse({
-    project_slug: OWNER,
+    owner_slug: OWNER,
     response_id: row.id,
     user_id: USER,
     response_kind: 'very_disappointed',
@@ -287,7 +287,7 @@ test('tap [A] very_disappointed: response recorded, no markdown append', async (
 })
 
 test('buildSeanEllisJob name fits the 64-char cron-name budget for typical slugs', () => {
-  const job = buildSeanEllisJob({ project_slug: 'workspace-acme-launch-team-prod' })
+  const job = buildSeanEllisJob({ owner_slug: 'workspace-acme-launch-team-prod' })
   expect(job.name.length).toBeLessThanOrEqual(64)
   expect(job.handler).toBe('onboarding.sean_ellis_survey')
   expect(job.schedule.kind).toBe('interval_ms')
@@ -347,14 +347,14 @@ test('Codex r2 P1: multi-user project — older eligible user is surveyed even w
     [userB, oneWeekAgo],
   ] as const) {
     await telemetry.emit({
-      project_slug: OWNER_W,
+      owner_slug: OWNER_W,
       user_id,
       event: 'signup.started',
       payload: { via: 'tg' },
       ts: completed_at - 30 * 60 * 1000,
     })
     await telemetry.emit({
-      project_slug: OWNER_W,
+      owner_slug: OWNER_W,
       user_id,
       event: 'onboarding.completed',
       payload: { time_to_wow_ms: 1, total_dollars: 1, wow_actions_fired: [] },

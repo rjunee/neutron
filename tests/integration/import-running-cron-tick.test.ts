@@ -128,7 +128,7 @@ describe('import-running cron-tick (S12)', () => {
     const engine = makeEngine(() => 1_700_000_000_000)
     const handler = buildImportRunningHandler({ engine, db, now: () => 1_700_000_000_000 })
     registerImportRunningCron({
-      project_slug: OWNER,
+      owner_slug: OWNER,
       jobs,
       handlers,
       handler,
@@ -153,7 +153,7 @@ describe('import-running cron-tick (S12)', () => {
     const job_id = 'job-in-flight'
     await stateStore.upsert({
       user_id: 'test-user',
-      project_slug: OWNER,
+      owner_slug: OWNER,
       phase: 'import_running',
       phase_state_patch: {
         topic_id: TOPIC,
@@ -166,7 +166,7 @@ describe('import-running cron-tick (S12)', () => {
     })
     runnerResults.set(job_id, {
       job_id,
-      project_slug: OWNER,
+      owner_slug: OWNER,
       source: 'chatgpt-zip',
       status: 'pass1-running',
       dollars_spent: 0.4,
@@ -180,7 +180,7 @@ describe('import-running cron-tick (S12)', () => {
     const handler = buildImportRunningHandler({ engine, db, now: () => T0 + 15_000 })
     const jobs = new CronJobRegistry()
     const handlers = new CronHandlerRegistry()
-    registerImportRunningCron({ project_slug: OWNER, jobs, handlers, handler })
+    registerImportRunningCron({ owner_slug: OWNER, jobs, handlers, handler })
 
     const scheduler = new CronScheduler({
       jobs,
@@ -211,7 +211,7 @@ describe('import-running cron-tick (S12)', () => {
     const job_id = 'job-finishes'
     await stateStore.upsert({
       user_id: 'test-user',
-      project_slug: OWNER,
+      owner_slug: OWNER,
       phase: 'import_running',
       phase_state_patch: {
         topic_id: TOPIC,
@@ -227,7 +227,7 @@ describe('import-running cron-tick (S12)', () => {
     const handler = buildImportRunningHandler({ engine, db, now: () => T0 + 30_000 })
     const jobs = new CronJobRegistry()
     const handlers = new CronHandlerRegistry()
-    registerImportRunningCron({ project_slug: OWNER, jobs, handlers, handler })
+    registerImportRunningCron({ owner_slug: OWNER, jobs, handlers, handler })
 
     const scheduler = new CronScheduler({
       jobs,
@@ -240,7 +240,7 @@ describe('import-running cron-tick (S12)', () => {
     // Tick #1 — runner still running. Silent skip.
     runnerResults.set(job_id, {
       job_id,
-      project_slug: OWNER,
+      owner_slug: OWNER,
       source: 'chatgpt-zip',
       status: 'pass1-running',
       dollars_spent: 0.1,
@@ -262,7 +262,7 @@ describe('import-running cron-tick (S12)', () => {
     // phase_state.
     runnerResults.set(job_id, {
       job_id,
-      project_slug: OWNER,
+      owner_slug: OWNER,
       source: 'chatgpt-zip',
       status: 'completed',
       dollars_spent: 1.2,
@@ -304,7 +304,7 @@ describe('import-running cron-tick (S12)', () => {
     const T0 = 1_700_000_000_000
     await stateStore.upsert({
       user_id: 'test-user',
-      project_slug: OWNER,
+      owner_slug: OWNER,
       phase: 'import_running',
       phase_state_patch: {
         topic_id: TOPIC,
@@ -319,7 +319,7 @@ describe('import-running cron-tick (S12)', () => {
     // race winning over the cron tick).
     await stateStore.upsert({
       user_id: 'test-user',
-      project_slug: OWNER,
+      owner_slug: OWNER,
       phase: 'import_analysis_presented',
       phase_state_patch: {},
       advanced_at: T0 + 5_000,
@@ -329,7 +329,7 @@ describe('import-running cron-tick (S12)', () => {
     const handler = buildImportRunningHandler({ engine, db, now: () => T0 + 10_000 })
     const jobs = new CronJobRegistry()
     const handlers = new CronHandlerRegistry()
-    registerImportRunningCron({ project_slug: OWNER, jobs, handlers, handler })
+    registerImportRunningCron({ owner_slug: OWNER, jobs, handlers, handler })
     const scheduler = new CronScheduler({
       jobs,
       handlers,

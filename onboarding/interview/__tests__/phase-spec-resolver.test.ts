@@ -46,7 +46,7 @@ const PICK_ONLY_INTENT: PhaseIntent = {
 function makeBundle(overrides: Partial<PhaseContextBundle> = {}): PhaseContextBundle {
   const intent = PHASE_INTENTS['signup']!
   return {
-    project_slug: 't1',
+    owner_slug: 't1',
     topic_id: 'web:user-1',
     user_id: 'user-1',
     signup_via: 'web',

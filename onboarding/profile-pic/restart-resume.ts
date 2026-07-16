@@ -32,7 +32,7 @@
  *
  * Auto-retry semantics: when a row transitions pending → expired AND
  * `auto_retry_attempted` was 0, the boot hook fires one new
- * `pipeline.start(...)` against the same (project_slug, prompt). The new
+ * `pipeline.start(...)` against the same (owner_slug, prompt). The new
  * row gets its own request_id; the old row stays at 'expired' so the
  * engine UX can still surface "previous attempt timed out, retry?"
  * (the auto-retry is invisible to the user — they just see fresh
@@ -158,7 +158,7 @@ async function fireAutoRetry(
 ): Promise<string | null> {
   try {
     const startInput: StartProfilePicInput = {
-      project_slug: row.project_slug,
+      owner_slug: row.project_slug,
       prompt: row.prompt,
     }
     if (row.user_id !== null) startInput.user_id = row.user_id

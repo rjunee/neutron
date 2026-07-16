@@ -53,7 +53,7 @@ const action05: WowActionModule = {
         ],
         allow_freeform: false,
         idempotency: {
-          project_slug: ctx.project_slug,
+          project_slug: ctx.owner_slug,
           topic_id: ctx.topic_id,
           seed: 'wow:05:scope-needed',
         },
@@ -96,7 +96,7 @@ const action05: WowActionModule = {
       ],
       allow_freeform: false,
       idempotency: {
-        project_slug: ctx.project_slug,
+        project_slug: ctx.owner_slug,
         topic_id: ctx.topic_id,
         seed: `wow:05:${thread.thread_id}`,
       },

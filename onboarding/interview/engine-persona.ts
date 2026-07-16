@@ -224,7 +224,7 @@ export async function consumePersonalityOfferedChoice(
       // Stay + re-emit with the rejection reason. Spec § 3.9 advance
       // criterion: "extracted_fields.agent_personality extracted and
       // ≥ 4 chars" — anything shorter loops back without persisting.
-      self.invalidateResolvedSpec(input.project_slug, 'personality_offered')
+      self.invalidateResolvedSpec(input.owner_slug, 'personality_offered')
       const reason =
         "I didn't catch what you'd like — tell me in a few words (or describe a style you have in mind)."
       const prior_attempts =
@@ -238,7 +238,7 @@ export async function consumePersonalityOfferedChoice(
         personality_offered_attempt_count: next_attempts,
       }
       const stayed = await self.deps.stateStore.upsert({
-        project_slug: input.project_slug,
+        owner_slug: input.owner_slug,
         user_id: input.user_id,
         phase: 'personality_offered',
         phase_state_patch: stay_patch,
@@ -246,7 +246,7 @@ export async function consumePersonalityOfferedChoice(
       })
       let final_state: OnboardingState | null = null
       const emit = await self.emitPhasePrompt({
-        project_slug: input.project_slug,
+        owner_slug: input.owner_slug,
         user_id: input.user_id,
         topic_id: input.topic_id,
         phase: 'personality_offered',
@@ -254,7 +254,7 @@ export async function consumePersonalityOfferedChoice(
         seed_suffix: `attempt=${next_attempts}`,
         pre_send_state_upsert: async (prompt_id: string) => {
           final_state = await self.deps.stateStore.upsert({
-            project_slug: input.project_slug,
+            owner_slug: input.owner_slug,
             user_id: input.user_id,
             phase: 'personality_offered',
             phase_state_patch: { active_prompt_id: prompt_id },
@@ -280,12 +280,12 @@ export async function consumePersonalityOfferedChoice(
     ) {
       try {
         await self.deps.personaSync.recordAgentPersonality({
-          project_slug: input.project_slug,
+          owner_slug: input.owner_slug,
           agent_personality,
         })
       } catch (err) {
         log.warn('persona_sync_record_agent_personality_failed', {
-          project: input.project_slug,
+          project: input.owner_slug,
           error: err instanceof Error ? err.message : String(err),
         })
       }
@@ -312,7 +312,7 @@ export async function consumePersonalityOfferedChoice(
       personality_character_suggestions: null,
     }
     const advanced = await self.deps.stateStore.upsert({
-      project_slug: input.project_slug,
+      owner_slug: input.owner_slug,
       user_id: input.user_id,
       phase: 'agent_name_chosen',
       phase_state_patch: advance_patch,
@@ -325,20 +325,20 @@ export async function consumePersonalityOfferedChoice(
     // forget; persists only real picks. Names can't pre-compute earlier
     // than this turn because they depend on the just-chosen personality.
     fireAndForget('engine-persona.getOrStartAgentNameSuggestions', self.getOrStartAgentNameSuggestions(
-      input.project_slug,
+      input.owner_slug,
       input.user_id,
       (advanced.phase_state ?? {}) as Record<string, unknown>,
     ))
     let final_state: OnboardingState | null = null
     const emit = await self.emitPhasePrompt({
-      project_slug: input.project_slug,
+      owner_slug: input.owner_slug,
       user_id: input.user_id,
       topic_id: input.topic_id,
       phase: 'agent_name_chosen',
       observed_at,
       pre_send_state_upsert: async (prompt_id: string) => {
         final_state = await self.deps.stateStore.upsert({
-          project_slug: input.project_slug,
+          owner_slug: input.owner_slug,
           user_id: input.user_id,
           phase: 'agent_name_chosen',
           phase_state_patch: { active_prompt_id: prompt_id },
@@ -347,7 +347,7 @@ export async function consumePersonalityOfferedChoice(
       },
     })
     if (final_state === null) {
-      final_state = (await self.deps.stateStore.get(input.project_slug, input.user_id)) ?? advanced
+      final_state = (await self.deps.stateStore.get(input.owner_slug, input.user_id)) ?? advanced
     }
     return { outcome: 'advanced', state: final_state, prompt_id: emit.prompt_id }
   }
@@ -373,7 +373,7 @@ export async function consumePersonalityOfferedChoice(
  *     succeeded but the advance upsert never completed in the prior
  *     turn — don't re-compose, let the caller advance through).
  *
- * Idempotency: at most one in-flight compose per (project_slug,
+ * Idempotency: at most one in-flight compose per (owner_slug,
  * observed_at) window. Both call-sites (`normalAdvance` and
  * `emitCurrentPhasePrompt`) run inside `advance()` which holds the
  * per-instance ordering via `clearResolvedSpecCache` + sequential
@@ -437,14 +437,14 @@ export async function synthesizePersona(
         return state
       }
       return await self.deps.stateStore.upsert({
-        project_slug: input.project_slug,
+        owner_slug: input.owner_slug,
         user_id: input.user_id,
         phase: 'persona_reviewed',
         phase_state_patch: { active_prompt_id: null },
         advanced_at: observed_at,
       })
     }
-    const compose_input = buildComposeInput(input.project_slug, state)
+    const compose_input = buildComposeInput(input.owner_slug, state)
     let draft: PersonaDraft
     try {
       draft = await hook.compose(compose_input)
@@ -461,7 +461,7 @@ export async function synthesizePersona(
         phase: 'persona_synthesizing',
       })
       const failed = await self.deps.stateStore.upsert({
-        project_slug: input.project_slug,
+        owner_slug: input.owner_slug,
         user_id: input.user_id,
         phase: 'persona_synthesizing',
         phase_state_patch: {
@@ -477,14 +477,14 @@ export async function synthesizePersona(
       // prompt body at all.
       let final_state: OnboardingState | null = null
       await self.emitPhasePrompt({
-        project_slug: input.project_slug,
+        owner_slug: input.owner_slug,
         user_id: input.user_id,
         topic_id: input.topic_id,
         phase: 'persona_synthesizing',
         observed_at,
         pre_send_state_upsert: async (prompt_id: string) => {
           final_state = await self.deps.stateStore.upsert({
-            project_slug: input.project_slug,
+            owner_slug: input.owner_slug,
             user_id: input.user_id,
             phase: 'persona_synthesizing',
             phase_state_patch: { active_prompt_id: prompt_id },
@@ -508,7 +508,7 @@ export async function synthesizePersona(
       )
     }
     return await self.deps.stateStore.upsert({
-      project_slug: input.project_slug,
+      owner_slug: input.owner_slug,
       user_id: input.user_id,
       phase: 'persona_reviewed',
       phase_state_patch: {
@@ -557,7 +557,7 @@ export async function consumePersonaSynthesizingChoice(
     }
 
     if (choice_value === PERSONA_SYNTH_RETRY) {
-      const compose_input = buildComposeInput(input.project_slug, state)
+      const compose_input = buildComposeInput(input.owner_slug, state)
       let draft: PersonaDraft
       try {
         draft = await hook.compose(compose_input)
@@ -571,7 +571,7 @@ export async function consumePersonaSynthesizingChoice(
         const retry_count =
           (readNumber(phase_state, 'persona_synth_retry_count') ?? 0) + 1
         const updated = await self.deps.stateStore.upsert({
-          project_slug: input.project_slug,
+          owner_slug: input.owner_slug,
           user_id: input.user_id,
           phase: 'persona_synthesizing',
           phase_state_patch: {
@@ -583,7 +583,7 @@ export async function consumePersonaSynthesizingChoice(
         })
         let final_state: OnboardingState | null = null
         const emit = await self.emitPhasePrompt({
-          project_slug: input.project_slug,
+          owner_slug: input.owner_slug,
           user_id: input.user_id,
           topic_id: input.topic_id,
           phase: 'persona_synthesizing',
@@ -591,7 +591,7 @@ export async function consumePersonaSynthesizingChoice(
           seed_suffix: `retry=${retry_count}`,
           pre_send_state_upsert: async (prompt_id: string) => {
             final_state = await self.deps.stateStore.upsert({
-              project_slug: input.project_slug,
+              owner_slug: input.owner_slug,
               user_id: input.user_id,
               phase: 'persona_synthesizing',
               phase_state_patch: { active_prompt_id: prompt_id },
@@ -618,8 +618,8 @@ export async function consumePersonaSynthesizingChoice(
       choice_value === PERSONA_SYNTH_USE_BASIC ||
       choice_value === PERSONA_SYNTH_SKIP
     ) {
-      const compose_input = buildComposeInput(input.project_slug, state)
-      const stub = stubDraft(input.project_slug, compose_input, choice_value)
+      const compose_input = buildComposeInput(input.owner_slug, state)
+      const stub = stubDraft(input.owner_slug, compose_input, choice_value)
       self.deps.transcript.append({
         role: 'system',
         body:
@@ -649,7 +649,7 @@ export async function consumePersonaSynthesizingChoice(
     const retry_count =
       (readNumber(phase_state, 'persona_synth_retry_count') ?? 0) + 1
     await self.deps.stateStore.upsert({
-      project_slug: input.project_slug,
+      owner_slug: input.owner_slug,
       user_id: input.user_id,
       phase: 'persona_synthesizing',
       phase_state_patch: {
@@ -658,10 +658,10 @@ export async function consumePersonaSynthesizingChoice(
       },
       advanced_at: observed_at,
     })
-    self.invalidateResolvedSpec(input.project_slug, 'persona_synthesizing')
+    self.invalidateResolvedSpec(input.owner_slug, 'persona_synthesizing')
     let final_state: OnboardingState | null = null
     const emit = await self.emitPhasePrompt({
-      project_slug: input.project_slug,
+      owner_slug: input.owner_slug,
       user_id: input.user_id,
       topic_id: input.topic_id,
       phase: 'persona_synthesizing',
@@ -669,7 +669,7 @@ export async function consumePersonaSynthesizingChoice(
       seed_suffix: `retry=${retry_count}`,
       pre_send_state_upsert: async (prompt_id: string) => {
         final_state = await self.deps.stateStore.upsert({
-          project_slug: input.project_slug,
+          owner_slug: input.owner_slug,
           user_id: input.user_id,
           phase: 'persona_synthesizing',
           phase_state_patch: { active_prompt_id: prompt_id },
@@ -678,7 +678,7 @@ export async function consumePersonaSynthesizingChoice(
       },
     })
     if (final_state === null) {
-      final_state = (await self.deps.stateStore.get(input.project_slug, input.user_id)) as OnboardingState
+      final_state = (await self.deps.stateStore.get(input.owner_slug, input.user_id)) as OnboardingState
     }
     return {
       outcome: 'reemitted_current',
@@ -702,7 +702,7 @@ export async function advancePersonaSynthToReviewed(
       )
     }
     const advanced = await self.deps.stateStore.upsert({
-      project_slug: input.project_slug,
+      owner_slug: input.owner_slug,
       user_id: input.user_id,
       phase: 'persona_reviewed',
       phase_state_patch: {
@@ -716,14 +716,14 @@ export async function advancePersonaSynthToReviewed(
     })
     let final_state: OnboardingState | null = null
     const emit = await self.emitPhasePrompt({
-      project_slug: input.project_slug,
+      owner_slug: input.owner_slug,
       user_id: input.user_id,
       topic_id: input.topic_id,
       phase: 'persona_reviewed',
       observed_at,
       pre_send_state_upsert: async (prompt_id: string) => {
         final_state = await self.deps.stateStore.upsert({
-          project_slug: input.project_slug,
+          owner_slug: input.owner_slug,
           user_id: input.user_id,
           phase: 'persona_reviewed',
           phase_state_patch: { active_prompt_id: prompt_id },
@@ -747,7 +747,7 @@ export async function reEmitPersonaReviewed(
     const attempt = readNumber(phase_state, 'persona_review_attempt_count') ?? 0
     const next_attempt = attempt + 1
     await self.deps.stateStore.upsert({
-      project_slug: input.project_slug,
+      owner_slug: input.owner_slug,
       user_id: input.user_id,
       phase: 'persona_reviewed',
       phase_state_patch: {
@@ -759,10 +759,10 @@ export async function reEmitPersonaReviewed(
     })
     // Invalidate the cached spec — the sub_step / rejection_reason
     // change must surface in the next emit.
-    self.invalidateResolvedSpec(input.project_slug, 'persona_reviewed')
+    self.invalidateResolvedSpec(input.owner_slug, 'persona_reviewed')
     let final_state: OnboardingState | null = null
     const emit = await self.emitPhasePrompt({
-      project_slug: input.project_slug,
+      owner_slug: input.owner_slug,
       user_id: input.user_id,
       topic_id: input.topic_id,
       phase: 'persona_reviewed',
@@ -770,7 +770,7 @@ export async function reEmitPersonaReviewed(
       seed_suffix: `attempt=${next_attempt}`,
       pre_send_state_upsert: async (prompt_id: string) => {
         final_state = await self.deps.stateStore.upsert({
-          project_slug: input.project_slug,
+          owner_slug: input.owner_slug,
           user_id: input.user_id,
           phase: 'persona_reviewed',
           phase_state_patch: { active_prompt_id: prompt_id },
@@ -779,7 +779,7 @@ export async function reEmitPersonaReviewed(
       },
     })
     if (final_state === null) {
-      final_state = (await self.deps.stateStore.get(input.project_slug, input.user_id)) as OnboardingState
+      final_state = (await self.deps.stateStore.get(input.owner_slug, input.user_id)) as OnboardingState
     }
     return {
       outcome: 'reemitted_current',

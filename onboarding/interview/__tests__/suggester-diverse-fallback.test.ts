@@ -5,7 +5,7 @@
  * Pins the fix for Sam's 2026-06-04 report: every onboarding showed the
  * identical five male sages + same three names because the LLM path timed
  * out 100% of the time and the fallback was a single monotone constant.
- * The new fallback is deterministic per `seed` (project_slug, NOT
+ * The new fallback is deterministic per `seed` (owner_slug, NOT
  * `Math.random()`), spans gender + tone, and differs across instances.
  */
 

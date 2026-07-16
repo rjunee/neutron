@@ -23,7 +23,7 @@ describe('PersonaComposer compose + applyEdit + commit', () => {
         cringeChecker: buildCringeChecker({ threshold: 3 }),
       })
       const draft = await composer.compose({
-        project_slug: 't1',
+        owner_slug: 't1',
         archetype_blend: blend,
         signals: { display_name: 'Alex' },
         user_facts: { display_name: 'Alex' },
@@ -48,7 +48,7 @@ describe('PersonaComposer compose + applyEdit + commit', () => {
         cringeChecker: buildCringeChecker({ threshold: 3 }),
       })
       const draft = await composer.compose({
-        project_slug: 't1',
+        owner_slug: 't1',
         archetype_blend: blend,
         signals: { display_name: 'Alex' },
         user_facts: { display_name: 'Alex' },
@@ -77,7 +77,7 @@ describe('PersonaComposer compose + applyEdit + commit', () => {
         cringeChecker: buildCringeChecker({ threshold: 3 }),
       })
       const draft = await composer.compose({
-        project_slug: 't1',
+        owner_slug: 't1',
         archetype_blend: blend,
         signals: { display_name: 'A' },
         user_facts: { display_name: 'A' },
@@ -105,7 +105,7 @@ describe('PersonaComposer compose + applyEdit + commit', () => {
         ownerHomeFor: (_slug) => join(tmp, 'home', _slug),
       })
       const draft = await composer.compose({
-        project_slug: 't1',
+        owner_slug: 't1',
         archetype_blend: blend,
         signals: { display_name: 'A' },
         user_facts: { display_name: 'A' },

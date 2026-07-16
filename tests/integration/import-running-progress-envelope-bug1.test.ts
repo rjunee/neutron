@@ -104,7 +104,7 @@ function makeEngine(now: () => number): InterviewEngine {
     },
     sendImportProgress: async (input) => {
       sentProgress.push({
-        project_slug: input.project_slug,
+        project_slug: input.owner_slug,
         topic_id: input.topic_id,
         event: input.event,
       })
@@ -140,7 +140,7 @@ describe('Bug 1 (2026-05-21, v0.1.75) — import_progress envelope from cron tic
     const job_id = 'job-progress-pass1'
     await stateStore.upsert({
       user_id: USER,
-      project_slug: OWNER,
+      owner_slug: OWNER,
       phase: 'import_running',
       phase_state_patch: {
         topic_id: TOPIC,
@@ -153,7 +153,7 @@ describe('Bug 1 (2026-05-21, v0.1.75) — import_progress envelope from cron tic
     })
     runnerResults.set(job_id, {
       job_id,
-      project_slug: OWNER,
+      owner_slug: OWNER,
       source: 'claude-zip',
       status: 'pass1-running',
       dollars_spent: 0.21,
@@ -168,7 +168,7 @@ describe('Bug 1 (2026-05-21, v0.1.75) — import_progress envelope from cron tic
     const handler = buildImportRunningHandler({ engine, db, now: () => T0 + 5_000 })
     const jobs = new CronJobRegistry()
     const handlers = new CronHandlerRegistry()
-    registerImportRunningCron({ project_slug: OWNER, jobs, handlers, handler })
+    registerImportRunningCron({ owner_slug: OWNER, jobs, handlers, handler })
     const scheduler = new CronScheduler({
       jobs,
       handlers,
@@ -209,7 +209,7 @@ describe('Bug 1 (2026-05-21, v0.1.75) — import_progress envelope from cron tic
     const job_id = 'job-progress-pass2'
     await stateStore.upsert({
       user_id: USER,
-      project_slug: OWNER,
+      owner_slug: OWNER,
       phase: 'import_running',
       phase_state_patch: {
         topic_id: TOPIC,
@@ -222,7 +222,7 @@ describe('Bug 1 (2026-05-21, v0.1.75) — import_progress envelope from cron tic
     })
     runnerResults.set(job_id, {
       job_id,
-      project_slug: OWNER,
+      owner_slug: OWNER,
       source: 'chatgpt-zip',
       status: 'pass2-running',
       dollars_spent: 1.74,
@@ -238,7 +238,7 @@ describe('Bug 1 (2026-05-21, v0.1.75) — import_progress envelope from cron tic
     const handler = buildImportRunningHandler({ engine, db, now: () => T0 + 10_000 })
     const jobs = new CronJobRegistry()
     const handlers = new CronHandlerRegistry()
-    registerImportRunningCron({ project_slug: OWNER, jobs, handlers, handler })
+    registerImportRunningCron({ owner_slug: OWNER, jobs, handlers, handler })
     const scheduler = new CronScheduler({
       jobs,
       handlers,
@@ -271,7 +271,7 @@ describe('Bug 1 (2026-05-21, v0.1.75) — import_progress envelope from cron tic
     const job_id = 'job-completed'
     await stateStore.upsert({
       user_id: USER,
-      project_slug: OWNER,
+      owner_slug: OWNER,
       phase: 'import_running',
       phase_state_patch: {
         topic_id: TOPIC,
@@ -284,7 +284,7 @@ describe('Bug 1 (2026-05-21, v0.1.75) — import_progress envelope from cron tic
     })
     runnerResults.set(job_id, {
       job_id,
-      project_slug: OWNER,
+      owner_slug: OWNER,
       source: 'claude-zip',
       status: 'completed',
       dollars_spent: 1.74,
@@ -314,7 +314,7 @@ describe('Bug 1 (2026-05-21, v0.1.75) — import_progress envelope from cron tic
     const handler = buildImportRunningHandler({ engine, db, now: () => T0 + 5_000 })
     const jobs = new CronJobRegistry()
     const handlers = new CronHandlerRegistry()
-    registerImportRunningCron({ project_slug: OWNER, jobs, handlers, handler })
+    registerImportRunningCron({ owner_slug: OWNER, jobs, handlers, handler })
     const scheduler = new CronScheduler({
       jobs,
       handlers,
@@ -337,7 +337,7 @@ describe('Bug 1 (2026-05-21, v0.1.75) — import_progress envelope from cron tic
     const handlers = new CronHandlerRegistry()
     const engine = makeEngine(() => 1_700_000_000_000)
     const handler = buildImportRunningHandler({ engine, db, now: () => 1_700_000_000_000 })
-    registerImportRunningCron({ project_slug: OWNER, jobs, handlers, handler })
+    registerImportRunningCron({ owner_slug: OWNER, jobs, handlers, handler })
     const job = jobs.get(`onboarding-import-running-${OWNER}`)!
     expect(job.schedule.kind).toBe('interval_ms')
     if (job.schedule.kind === 'interval_ms') {
@@ -350,7 +350,7 @@ describe('Bug 1 (2026-05-21, v0.1.75) — import_progress envelope from cron tic
     const job_id = 'job-audit'
     await stateStore.upsert({
       user_id: USER,
-      project_slug: OWNER,
+      owner_slug: OWNER,
       phase: 'import_running',
       phase_state_patch: {
         topic_id: TOPIC,
@@ -363,7 +363,7 @@ describe('Bug 1 (2026-05-21, v0.1.75) — import_progress envelope from cron tic
     })
     runnerResults.set(job_id, {
       job_id,
-      project_slug: OWNER,
+      owner_slug: OWNER,
       source: 'claude-zip',
       status: 'pass1-running',
       dollars_spent: 0.05,
@@ -377,7 +377,7 @@ describe('Bug 1 (2026-05-21, v0.1.75) — import_progress envelope from cron tic
     const handler = buildImportRunningHandler({ engine, db, now: () => T0 + 5_000 })
     const jobs = new CronJobRegistry()
     const handlers = new CronHandlerRegistry()
-    registerImportRunningCron({ project_slug: OWNER, jobs, handlers, handler })
+    registerImportRunningCron({ owner_slug: OWNER, jobs, handlers, handler })
     const scheduler = new CronScheduler({
       jobs,
       handlers,
@@ -422,7 +422,7 @@ describe('Bug 1 (2026-05-21, v0.1.75) — import_progress envelope from cron tic
     const job_id = 'job-streaming-fallback'
     await stateStore.upsert({
       user_id: USER,
-      project_slug: OWNER,
+      owner_slug: OWNER,
       phase: 'import_running',
       phase_state_patch: {
         topic_id: TOPIC,
@@ -435,7 +435,7 @@ describe('Bug 1 (2026-05-21, v0.1.75) — import_progress envelope from cron tic
     })
     runnerResults.set(job_id, {
       job_id,
-      project_slug: OWNER,
+      owner_slug: OWNER,
       source: 'claude-zip',
       status: 'pass1-running',
       dollars_spent: 0.09,
@@ -449,7 +449,7 @@ describe('Bug 1 (2026-05-21, v0.1.75) — import_progress envelope from cron tic
     const handler = buildImportRunningHandler({ engine, db, now: () => T0 + 5_000 })
     const jobs = new CronJobRegistry()
     const handlers = new CronHandlerRegistry()
-    registerImportRunningCron({ project_slug: OWNER, jobs, handlers, handler })
+    registerImportRunningCron({ owner_slug: OWNER, jobs, handlers, handler })
     const scheduler = new CronScheduler({
       jobs,
       handlers,
@@ -490,7 +490,7 @@ describe('2026-05-31 — ETA suffix on Pass-1 progress body', () => {
     const job_id = 'job-eta'
     await stateStore.upsert({
       user_id: USER,
-      project_slug: OWNER,
+      owner_slug: OWNER,
       phase: 'import_running',
       phase_state_patch: {
         topic_id: TOPIC,
@@ -505,7 +505,7 @@ describe('2026-05-31 — ETA suffix on Pass-1 progress body', () => {
     // ETA = (60s / 5) * 95 / 60s = 19 min remaining.
     runnerResults.set(job_id, {
       job_id,
-      project_slug: OWNER,
+      owner_slug: OWNER,
       source: 'claude-zip',
       status: 'pass1-running',
       dollars_spent: 0,
@@ -519,7 +519,7 @@ describe('2026-05-31 — ETA suffix on Pass-1 progress body', () => {
     const handler = buildImportRunningHandler({ engine, db, now: () => T0 })
     const jobs = new CronJobRegistry()
     const handlers = new CronHandlerRegistry()
-    registerImportRunningCron({ project_slug: OWNER, jobs, handlers, handler })
+    registerImportRunningCron({ owner_slug: OWNER, jobs, handlers, handler })
     const scheduler = new CronScheduler({
       jobs,
       handlers,
@@ -542,7 +542,7 @@ describe('2026-05-31 — ETA suffix on Pass-1 progress body', () => {
     const job_id = 'job-no-eta'
     await stateStore.upsert({
       user_id: USER,
-      project_slug: OWNER,
+      owner_slug: OWNER,
       phase: 'import_running',
       phase_state_patch: {
         topic_id: TOPIC,
@@ -555,7 +555,7 @@ describe('2026-05-31 — ETA suffix on Pass-1 progress body', () => {
     })
     runnerResults.set(job_id, {
       job_id,
-      project_slug: OWNER,
+      owner_slug: OWNER,
       source: 'claude-zip',
       status: 'pass1-running',
       dollars_spent: 0,
@@ -569,7 +569,7 @@ describe('2026-05-31 — ETA suffix on Pass-1 progress body', () => {
     const handler = buildImportRunningHandler({ engine, db, now: () => T0 })
     const jobs = new CronJobRegistry()
     const handlers = new CronHandlerRegistry()
-    registerImportRunningCron({ project_slug: OWNER, jobs, handlers, handler })
+    registerImportRunningCron({ owner_slug: OWNER, jobs, handlers, handler })
     const scheduler = new CronScheduler({
       jobs,
       handlers,
@@ -592,7 +592,7 @@ describe('2026-05-31 — ETA suffix on Pass-1 progress body', () => {
     const job_id = 'job-no-eta-streaming'
     await stateStore.upsert({
       user_id: USER,
-      project_slug: OWNER,
+      owner_slug: OWNER,
       phase: 'import_running',
       phase_state_patch: {
         topic_id: TOPIC,
@@ -605,7 +605,7 @@ describe('2026-05-31 — ETA suffix on Pass-1 progress body', () => {
     })
     runnerResults.set(job_id, {
       job_id,
-      project_slug: OWNER,
+      owner_slug: OWNER,
       source: 'claude-zip',
       status: 'pass1-running',
       dollars_spent: 0,
@@ -619,7 +619,7 @@ describe('2026-05-31 — ETA suffix on Pass-1 progress body', () => {
     const handler = buildImportRunningHandler({ engine, db, now: () => T0 })
     const jobs = new CronJobRegistry()
     const handlers = new CronHandlerRegistry()
-    registerImportRunningCron({ project_slug: OWNER, jobs, handlers, handler })
+    registerImportRunningCron({ owner_slug: OWNER, jobs, handlers, handler })
     const scheduler = new CronScheduler({
       jobs,
       handlers,
@@ -641,7 +641,7 @@ describe('2026-05-31 — ETA suffix on Pass-1 progress body', () => {
     const job_id = 'job-no-eta-done'
     await stateStore.upsert({
       user_id: USER,
-      project_slug: OWNER,
+      owner_slug: OWNER,
       phase: 'import_running',
       phase_state_patch: {
         topic_id: TOPIC,
@@ -654,7 +654,7 @@ describe('2026-05-31 — ETA suffix on Pass-1 progress body', () => {
     })
     runnerResults.set(job_id, {
       job_id,
-      project_slug: OWNER,
+      owner_slug: OWNER,
       source: 'claude-zip',
       status: 'pass1-running',
       dollars_spent: 0,
@@ -668,7 +668,7 @@ describe('2026-05-31 — ETA suffix on Pass-1 progress body', () => {
     const handler = buildImportRunningHandler({ engine, db, now: () => T0 })
     const jobs = new CronJobRegistry()
     const handlers = new CronHandlerRegistry()
-    registerImportRunningCron({ project_slug: OWNER, jobs, handlers, handler })
+    registerImportRunningCron({ owner_slug: OWNER, jobs, handlers, handler })
     const scheduler = new CronScheduler({
       jobs,
       handlers,
@@ -703,7 +703,7 @@ describe('2026-05-31 — ETA suffix on Pass-1 progress body', () => {
     const job_id = 'job-almost-done'
     await stateStore.upsert({
       user_id: USER,
-      project_slug: OWNER,
+      owner_slug: OWNER,
       phase: 'import_running',
       phase_state_patch: {
         topic_id: TOPIC,
@@ -716,7 +716,7 @@ describe('2026-05-31 — ETA suffix on Pass-1 progress body', () => {
     })
     runnerResults.set(job_id, {
       job_id,
-      project_slug: OWNER,
+      owner_slug: OWNER,
       source: 'claude-zip',
       status: 'pass1-running',
       dollars_spent: 0,
@@ -730,7 +730,7 @@ describe('2026-05-31 — ETA suffix on Pass-1 progress body', () => {
     const handler = buildImportRunningHandler({ engine, db, now: () => T0 })
     const jobs = new CronJobRegistry()
     const handlers = new CronHandlerRegistry()
-    registerImportRunningCron({ project_slug: OWNER, jobs, handlers, handler })
+    registerImportRunningCron({ owner_slug: OWNER, jobs, handlers, handler })
     const scheduler = new CronScheduler({
       jobs,
       handlers,

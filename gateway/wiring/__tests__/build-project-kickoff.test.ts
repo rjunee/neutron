@@ -53,14 +53,14 @@ function recordingIndexer(): {
 } {
   const calls: Array<{ project_slug: string; body: string }> = []
   const fn: NonNullable<ProjectKickoffDeps['indexer']> = async (page) => {
-    calls.push({ project_slug: page.project_slug, body: page.body })
+    calls.push({ project_slug: page.owner_slug, body: page.body })
   }
   return { fn, calls }
 }
 
 function outcome(over: Partial<MaterializeOutcome> = {}): MaterializeOutcome {
   return {
-    project_slug: 'p',
+    owner_slug: 'p',
     reason: 'created',
     docs_written: [],
     slice_chunk_count: 0,
@@ -92,7 +92,7 @@ test('thin work project → null (fall back to deterministic opening)', async ()
   const composer = stubComposer('# unused')
   const kickoff = buildProjectKickoff({
     owner_home: home,
-    project_slug: 'acme',
+    owner_slug: 'acme',
     composer,
     now: () => NOW,
     log: () => {},
@@ -108,7 +108,7 @@ test('rich work project → draft-doc: writes doc, presents tappable marker, ind
   const idx = recordingIndexer()
   const kickoff = buildProjectKickoff({
     owner_home: home,
-    project_slug: 'acme',
+    owner_slug: 'acme',
     composer,
     indexer: idx.fn,
     now: () => NOW,
@@ -153,7 +153,7 @@ test('draft-doc create-if-missing: an existing doc is never clobbered → null',
   const composer = stubComposer('# fresh draft')
   const kickoff = buildProjectKickoff({
     owner_home: home,
-    project_slug: 'acme',
+    owner_slug: 'acme',
     composer,
     now: () => NOW,
     log: () => {},
@@ -171,7 +171,7 @@ test('rich work project → deadline-offer when an upcoming related deadline exi
   const composer = stubComposer('# unused')
   const kickoff = buildProjectKickoff({
     owner_home: home,
-    project_slug: 'acme',
+    owner_slug: 'acme',
     composer,
     now: () => NOW,
     log: () => {},
@@ -196,7 +196,7 @@ test('overdue / far-future deadlines do not trigger an offer', async () => {
   const home = ownerHome()
   const kickoff = buildProjectKickoff({
     owner_home: home,
-    project_slug: 'acme',
+    owner_slug: 'acme',
     composer: stubComposer('x'),
     now: () => NOW,
     log: () => {},
@@ -217,7 +217,7 @@ test('thin hobby → engaging questions (never null, never a doc)', async () => 
   const composer = stubComposer('# unused')
   const kickoff = buildProjectKickoff({
     owner_home: home,
-    project_slug: 'acme',
+    owner_slug: 'acme',
     composer,
     now: () => NOW,
     log: () => {},
@@ -239,7 +239,7 @@ test('rich hobby → interest-research: drafts light notes + indexes them', asyn
   const idx = recordingIndexer()
   const kickoff = buildProjectKickoff({
     owner_home: home,
-    project_slug: 'acme',
+    owner_slug: 'acme',
     composer,
     indexer: idx.fn,
     now: () => NOW,
@@ -270,7 +270,7 @@ test('rich hobby with a failing composer degrades to engaging questions (not nul
   }
   const kickoff = buildProjectKickoff({
     owner_home: home,
-    project_slug: 'acme',
+    owner_slug: 'acme',
     composer: failing,
     now: () => NOW,
     log: () => {},
@@ -294,7 +294,7 @@ test('rich work with a failing composer → null (better nothing than a bad job)
   }
   const kickoff = buildProjectKickoff({
     owner_home: home,
-    project_slug: 'acme',
+    owner_slug: 'acme',
     composer: failing,
     now: () => NOW,
     log: () => {},

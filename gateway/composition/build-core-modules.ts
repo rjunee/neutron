@@ -662,7 +662,7 @@ export function buildCoreModules(
         }
         const handler = buildSeanEllisHandler(handlerDeps)
         const registerInput: Parameters<typeof registerSeanEllisCron>[0] = {
-          project_slug: input.project_slug,
+          owner_slug: input.project_slug,
           jobs: cron.jobs,
           handlers: cron.handlers,
           handler,
@@ -689,7 +689,7 @@ export function buildCoreModules(
           db: input.db,
         })
         const registerInput: Parameters<typeof registerImportRunningCron>[0] = {
-          project_slug: input.project_slug,
+          owner_slug: input.project_slug,
           jobs: cron.jobs,
           handlers: cron.handlers,
           handler,

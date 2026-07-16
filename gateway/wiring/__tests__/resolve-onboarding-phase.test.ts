@@ -45,7 +45,7 @@ describe('loadCurrentOnboardingPhase', () => {
 
   test('returns the phase string when a row exists for THIS project slug', async () => {
     const store = new SqliteOnboardingStateStore({ db })
-    await store.upsert({ project_slug: 't', user_id: 'test-user', phase: 'signup' })
+    await store.upsert({ owner_slug: 't', user_id: 'test-user', phase: 'signup' })
     expect(loadCurrentOnboardingPhase(db, 't', 'test-user')).toBe('signup')
   })
 
@@ -59,7 +59,7 @@ describe('loadCurrentOnboardingPhase', () => {
     // phase under the old slug would gate `/chat` on the new slug
     // incorrectly.
     const store = new SqliteOnboardingStateStore({ db, now: () => 1_000 })
-    await store.upsert({ project_slug: 'old-slug', user_id: 'test-user', phase: 'signup' })
+    await store.upsert({ owner_slug: 'old-slug', user_id: 'test-user', phase: 'signup' })
     const store2 = new SqliteOnboardingStateStore({ db, now: () => 2_000 })
     // Note: this row's last_advanced_at is LATER than the old-slug
     // row, so an unscoped ORDER BY would surface it. With the slug
@@ -70,7 +70,7 @@ describe('loadCurrentOnboardingPhase', () => {
     // `OnboardingPhase` member. The typed `upsert` can't write it, so we
     // seed a placeholder then patch the raw `phase` column, exactly as a
     // stale on-disk row would still carry it.
-    await store2.upsert({ project_slug: 'rogue-slug', user_id: 'test-user', phase: 'persona_reviewed' })
+    await store2.upsert({ owner_slug: 'rogue-slug', user_id: 'test-user', phase: 'persona_reviewed' })
     db.raw().exec(`UPDATE onboarding_state SET phase = 'max_oauth_offered' WHERE project_slug = 'rogue-slug'`)
     expect(loadCurrentOnboardingPhase(db, 'old-slug', 'test-user')).toBe('signup')
     expect(loadCurrentOnboardingPhase(db, 'new-slug-no-row', 'test-user')).toBeNull()
@@ -85,7 +85,7 @@ describe('loadCurrentOnboardingPhase', () => {
     // placeholder row, patch the raw column to the legacy string, then prove
     // it flows load → gate correctly.
     const store = new SqliteOnboardingStateStore({ db })
-    await store.upsert({ project_slug: 't', user_id: 'legacy-user', phase: 'persona_reviewed' })
+    await store.upsert({ owner_slug: 't', user_id: 'legacy-user', phase: 'persona_reviewed' })
     db.raw().exec(`UPDATE onboarding_state SET phase = 'wow_fired' WHERE project_slug = 't' AND user_id = 'legacy-user'`)
     const loaded = loadCurrentOnboardingPhase(db, 't', 'legacy-user')
     expect(loaded).toBe('wow_fired')

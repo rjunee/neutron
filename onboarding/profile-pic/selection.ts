@@ -33,7 +33,7 @@ export const PORTRAIT_PICK_PROMPT_BODY =
   'Your portraits are ready. Pick the one that feels right, or regenerate for a fresh set.'
 
 export interface BuildPortraitWaitPromptInput {
-  project_slug: string
+  owner_slug: string
   topic_id: string
   job_id: string
   uuid?: () => string
@@ -54,7 +54,7 @@ export function buildPortraitWaitPrompt(input: BuildPortraitWaitPromptInput): Bu
     ],
     allow_freeform: false,
     idempotency: {
-      project_slug: input.project_slug,
+      project_slug: input.owner_slug,
       topic_id: input.topic_id,
       seed: `portrait-wait:${input.job_id}`,
     },
@@ -64,7 +64,7 @@ export function buildPortraitWaitPrompt(input: BuildPortraitWaitPromptInput): Bu
 }
 
 export interface BuildPortraitPickPromptInput {
-  project_slug: string
+  owner_slug: string
   topic_id: string
   job_id: string
   /** The candidate ids the user can pick from. 1-3 entries. */
@@ -103,7 +103,7 @@ export function buildPortraitPickPrompt(input: BuildPortraitPickPromptInput): Bu
     options,
     allow_freeform: false,
     idempotency: {
-      project_slug: input.project_slug,
+      project_slug: input.owner_slug,
       topic_id: input.topic_id,
       seed: `portrait-pick:${input.job_id}`,
     },

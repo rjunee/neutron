@@ -74,7 +74,7 @@ beforeEach(() => {
     },
     status: async (job_id: string): Promise<ImportJob | null> => ({
       job_id,
-      project_slug: 'test-owner',
+      owner_slug: 'test-owner',
       source: 'claude-zip',
       status: 'pass1-running',
       dollars_spent: 0,

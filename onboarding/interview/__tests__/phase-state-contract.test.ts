@@ -74,7 +74,7 @@ describe('phase_state MERGE contract — both stores agree', () => {
   test('first upsert (no existing row) → phase_state === the patch', async () => {
     for (const [label, store] of eachStore()) {
       const out = await store.upsert({
-        project_slug: `p-${label}`,
+        owner_slug: `p-${label}`,
         user_id: 'u-1',
         phase: 'signup',
         phase_state_patch: { a: 1, b: 'x' },
@@ -87,14 +87,14 @@ describe('phase_state MERGE contract — both stores agree', () => {
   test('a patch SHALLOW-merges: patch keys override, unlisted keys are preserved', async () => {
     for (const [label, store] of eachStore()) {
       await store.upsert({
-        project_slug: `p-${label}`,
+        owner_slug: `p-${label}`,
         user_id: 'u-1',
         phase: 'signup',
         phase_state_patch: { keep: 'me', override: 'old' },
         advanced_at: 1_000,
       })
       const out = await store.upsert({
-        project_slug: `p-${label}`,
+        owner_slug: `p-${label}`,
         user_id: 'u-1',
         phase: 'signup',
         phase_state_patch: { override: 'new', added: true },
@@ -111,14 +111,14 @@ describe('phase_state MERGE contract — both stores agree', () => {
   test('a null value in the patch is STORED as null (the active_prompt_id CLEAR contract) and does not drop sibling keys', async () => {
     for (const [label, store] of eachStore()) {
       await store.upsert({
-        project_slug: `p-${label}`,
+        owner_slug: `p-${label}`,
         user_id: 'u-1',
         phase: 'signup',
         phase_state_patch: { active_prompt_id: 'prompt-1', sibling: 'kept' },
         advanced_at: 1_000,
       })
       const out = await store.upsert({
-        project_slug: `p-${label}`,
+        owner_slug: `p-${label}`,
         user_id: 'u-1',
         phase: 'signup',
         phase_state_patch: { active_prompt_id: null },
@@ -139,7 +139,7 @@ describe('phase_state MERGE contract — both stores agree', () => {
       primary_projects: ['Northwind', 'Acme'],
     }
     await sqlite.upsert({
-      project_slug: 'p-json',
+      owner_slug: 'p-json',
       user_id: 'u-1',
       phase: 'signup',
       phase_state_patch: nested,
@@ -161,14 +161,14 @@ describe('phase_state MERGE contract — both stores agree', () => {
     ]
     for (let i = 0; i < sequence.length; i += 1) {
       await inMemory.upsert({
-        project_slug: 'parity',
+        owner_slug: 'parity',
         user_id: 'u-1',
         phase: 'signup',
         phase_state_patch: sequence[i]!,
         advanced_at: 1_000 + i,
       })
       await sqlite.upsert({
-        project_slug: 'parity',
+        owner_slug: 'parity',
         user_id: 'u-1',
         phase: 'signup',
         phase_state_patch: sequence[i]!,

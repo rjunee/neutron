@@ -218,7 +218,7 @@ export function buildImportResumeHandler(
     let payload
     try {
       payload = await input.payloadResolver.resolve({
-        project_slug: input.project_slug,
+        owner_slug: input.project_slug,
         user_id,
         source,
       })
@@ -238,7 +238,7 @@ export function buildImportResumeHandler(
     let new_job_id: string
     try {
       const r = await input.runner.start({
-        project_slug: input.project_slug,
+        owner_slug: input.project_slug,
         user_id,
         source,
         payload,
@@ -272,7 +272,7 @@ export function buildImportResumeHandler(
     // both fields keeps phase_state aligned with the new job.
     try {
       await input.stateStore.upsert({
-        project_slug: input.project_slug,
+        owner_slug: input.project_slug,
         user_id,
         phase: 'import_running',
         phase_state_patch: {

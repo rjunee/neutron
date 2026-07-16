@@ -79,21 +79,21 @@ test('Sean Ellis cron fires at +4 weeks via real CronScheduler.fireOnce; tap [B]
   const initialNow = completed_at + FOUR_WEEKS_MS - 60 * 60 * 1000
   const telemetry = new OnboardingTelemetry({ db })
   await telemetry.emit({
-    project_slug: OWNER,
+    owner_slug: OWNER,
     user_id: USER,
     event: 'signup.started',
     payload: { via: 'tg' },
     ts: completed_at - 30 * 60 * 1000,
   })
   await telemetry.emit({
-    project_slug: OWNER,
+    owner_slug: OWNER,
     user_id: USER,
     event: 'onboarding.wow_dispatched',
     payload: { fired_count: 4, total_actions: 7 },
     ts: completed_at - 1000,
   })
   await telemetry.emit({
-    project_slug: OWNER,
+    owner_slug: OWNER,
     user_id: USER,
     event: 'onboarding.completed',
     payload: { time_to_wow_ms: 30 * 60 * 1000, total_dollars: 1, wow_actions_fired: [] },
@@ -120,7 +120,7 @@ test('Sean Ellis cron fires at +4 weeks via real CronScheduler.fireOnce; tap [B]
   // The integration test exercises the same path the per-instance gateway
   // boot will use, proving the cron actually wires up.
   registerSeanEllisCron({
-    project_slug: OWNER,
+    owner_slug: OWNER,
     jobs,
     handlers,
     handler,
@@ -177,7 +177,7 @@ test('Sean Ellis cron fires at +4 weeks via real CronScheduler.fireOnce; tap [B]
     now: () => clock.now + 30_000,
   })
   const collectorOut = await collector.recordResponse({
-    project_slug: OWNER,
+    owner_slug: OWNER,
     response_id: open!.id,
     user_id: USER,
     response_kind: 'somewhat_disappointed',

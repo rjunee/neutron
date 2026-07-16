@@ -47,14 +47,14 @@ function makeImpls(): Array<{ name: string; store: OnboardingStateStore }> {
 test('completes iff phase_state is unchanged since the read', async () => {
   for (const { name, store } of makeImpls()) {
     const row = await store.upsert({
-      project_slug: OWNER,
+      owner_slug: OWNER,
       user_id: USER,
       phase: 'persona_reviewed',
       phase_state_patch: { primary_projects: ['Alpha'], agent_name: 'Atlas' },
     })
 
     const ok = await store.completeIfPhaseStateMatches({
-      project_slug: OWNER,
+      owner_slug: OWNER,
       user_id: USER,
       expected_phase: row.phase,
       expected_phase_state: row.phase_state,
@@ -73,21 +73,21 @@ test('completes iff phase_state is unchanged since the read', async () => {
 test('does NOT complete when phase_state changed since the read (returns false, row untouched)', async () => {
   for (const { name, store } of makeImpls()) {
     const stale = await store.upsert({
-      project_slug: OWNER,
+      owner_slug: OWNER,
       user_id: USER,
       phase: 'persona_reviewed',
       phase_state_patch: { primary_projects: ['Alpha'] },
     })
     // A concurrent write lands AFTER the caller captured `stale`.
     await store.upsert({
-      project_slug: OWNER,
+      owner_slug: OWNER,
       user_id: USER,
       phase: 'persona_reviewed',
       phase_state_patch: { primary_projects: ['Alpha', 'Beta'] },
     })
 
     const ok = await store.completeIfPhaseStateMatches({
-      project_slug: OWNER,
+      owner_slug: OWNER,
       user_id: USER,
       expected_phase: stale.phase,
       expected_phase_state: stale.phase_state, // the STALE snapshot
@@ -105,20 +105,20 @@ test('does NOT complete when phase_state changed since the read (returns false, 
 test('does NOT complete when the PHASE changed (to a live-import phase) even if phase_state is unchanged (F8 r10)', async () => {
   for (const { name, store } of makeImpls()) {
     const row = await store.upsert({
-      project_slug: OWNER,
+      owner_slug: OWNER,
       user_id: USER,
       phase: 'persona_reviewed',
       phase_state_patch: { primary_projects: ['Alpha'] },
     })
     // A concurrent transition to a live-import phase WITHOUT touching phase_state.
     await store.upsert({
-      project_slug: OWNER,
+      owner_slug: OWNER,
       user_id: USER,
       phase: 'import_running',
     })
 
     const ok = await store.completeIfPhaseStateMatches({
-      project_slug: OWNER,
+      owner_slug: OWNER,
       user_id: USER,
       expected_phase: row.phase, // 'persona_reviewed' — the phase we processed
       expected_phase_state: row.phase_state, // unchanged
@@ -135,14 +135,14 @@ test('does NOT complete when the PHASE changed (to a live-import phase) even if 
 test('does NOT re-complete an already-terminal row; false for an absent row', async () => {
   for (const { name, store } of makeImpls()) {
     const row = await store.upsert({
-      project_slug: OWNER,
+      owner_slug: OWNER,
       user_id: USER,
       phase: 'completed',
       phase_state_patch: { primary_projects: ['Alpha'] },
       completed_at: 1,
     })
     const ok = await store.completeIfPhaseStateMatches({
-      project_slug: OWNER,
+      owner_slug: OWNER,
       user_id: USER,
       expected_phase: row.phase,
       expected_phase_state: row.phase_state,
@@ -152,7 +152,7 @@ test('does NOT re-complete an already-terminal row; false for an absent row', as
     expect((await store.get(OWNER, USER))?.completed_at, `${name}: completed_at not overwritten`).toBe(1)
 
     const absent = await store.completeIfPhaseStateMatches({
-      project_slug: OWNER,
+      owner_slug: OWNER,
       user_id: 'nobody',
       expected_phase: 'persona_reviewed',
       expected_phase_state: {},

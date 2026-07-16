@@ -60,7 +60,7 @@
  * and the composer degrades to import-signal-only input).
  *
  * Idempotency: each opening uses an `idempotency_key` derived from
- * `(project_slug, topic_id, 'onboarding_handoff_seed')` so a re-fire on
+ * `(owner_slug, topic_id, 'onboarding_handoff_seed')` so a re-fire on
  * engine retry collapses onto the same row (the engine's existing
  * wow_fired re-entry guard prevents this for completed flows, but the
  * key is belt-and-braces against a future regression).
@@ -183,7 +183,7 @@ export interface ComposeProjectOpeningInput {
    * project-scoped syntheses over the retained transcript slices.
    */
   project_docs: ProjectOpeningDocs
-  project_slug: string
+  owner_slug: string
   user_id: string
 }
 
@@ -193,11 +193,11 @@ export type ComposeProjectOpeningFn = (
 
 /**
  * Doc-read seam. Production default reads
- * `<owner_home>/Projects/<project_slug>/<relpath>` (built via
+ * `<owner_home>/Projects/<owner_slug>/<relpath>` (built via
  * `buildProjectDocReader`); tests inject a stub. Returns null when the
  * file does not exist or cannot be read — never throws.
  */
-export type ReadProjectDocFn = (project_slug: string, relpath: string) => string | null
+export type ReadProjectDocFn = (owner_slug: string, relpath: string) => string | null
 
 export interface BuildOnboardingHandoffOptions {
   /** Per-instance button-prompt store. The opening rows persist here so the
@@ -254,9 +254,9 @@ export interface BuildOnboardingHandoffOptions {
  * Exported for unit testing + the landing-stack wiring.
  */
 export function buildProjectDocReader(opts: { owner_home: string }): ReadProjectDocFn {
-  return (project_slug: string, relpath: string): string | null => {
+  return (owner_slug: string, relpath: string): string | null => {
     try {
-      const abs = join(opts.owner_home, 'Projects', project_slug, relpath)
+      const abs = join(opts.owner_home, 'Projects', owner_slug, relpath)
       if (!existsSync(abs)) return null
       const content = readFileSync(abs, 'utf8')
       if (content.trim().length === 0) return null

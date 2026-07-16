@@ -139,7 +139,7 @@ async function startHarness(seedPhase: OnboardingPhase, extraPhaseState: Record<
 
   const seedStore = new SqliteOnboardingStateStore({ db })
   await seedStore.upsert({
-    project_slug: 'owner',
+    owner_slug: 'owner',
     user_id: 'owner',
     phase: seedPhase,
     phase_state_patch: { ...COMPLETE_PHASE_STATE, ...extraPhaseState },

@@ -79,7 +79,7 @@ const action06: WowActionModule = {
 
     const createInput: CreateRecurringReminderInput = {
       id: reminder_id,
-      owner_slug: ctx.project_slug,
+      owner_slug: ctx.owner_slug,
       topic_id: ctx.topic_id,
       fire_at: first_fire_at,
       message: reminder_body,
@@ -95,7 +95,7 @@ const action06: WowActionModule = {
       ],
       allow_freeform: true,
       idempotency: {
-        project_slug: ctx.project_slug,
+        project_slug: ctx.owner_slug,
         topic_id: ctx.topic_id,
         seed: `wow:06:${reminder_id}`,
       },

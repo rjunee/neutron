@@ -99,7 +99,7 @@ function asOnboardingEventName(name: string): OnboardingEventName | null {
 
 /**
  * `WowTelemetry`'s eventLogger fires with `{event, payload}`; the wow
- * module already includes `project_slug` + `user_engagement` /
+ * module already includes `owner_slug` + `user_engagement` /
  * `success_reason` / `action_id` etc. inside `payload`. The bridge pulls
  * those forward into the typed `OnboardingTelemetry.emit(...)` call.
  *
@@ -118,13 +118,13 @@ export function bridgeWowEventLogger(
   return async ({ event, payload }) => {
     const onboardingName = asOnboardingEventName(event)
     if (onboardingName === null) return
-    const project_slug = typeof payload.project_slug === 'string' ? payload.project_slug : null
-    if (project_slug === null) return
+    const owner_slug = typeof payload.owner_slug === 'string' ? payload.owner_slug : null
+    if (owner_slug === null) return
     if (onboardingName === 'onboarding.wow_action_fired') {
       const action_id = typeof payload.action_id === 'string' ? payload.action_id : '<unknown>'
       const success = typeof payload.success === 'boolean' ? payload.success : false
       await telemetry.emit({
-        project_slug,
+        owner_slug,
         user_id: defaults.user_id,
         event: 'onboarding.wow_action_fired',
         payload: { action_id, success },
@@ -141,7 +141,7 @@ export function bridgeWowEventLogger(
       // wow side set verbatim.
       const engagement = typeof payload.engagement === 'string' ? payload.engagement : 'kept'
       await telemetry.emit({
-        project_slug,
+        owner_slug,
         user_id: defaults.user_id,
         event: 'onboarding.wow_action_engaged',
         payload: {
@@ -160,36 +160,36 @@ export function bridgeWowEventLogger(
 // ---------- Per-surface sinks the existing modules call ----------------------
 
 export interface InterviewTelemetrySink {
-  phaseAdvanced(input: { project_slug: string; user_id: string; from: string; to: string }): Promise<void>
+  phaseAdvanced(input: { owner_slug: string; user_id: string; from: string; to: string }): Promise<void>
   buttonEmitted(input: {
-    project_slug: string
+    owner_slug: string
     user_id: string
     prompt_id: string
     idempotency_collapsed: boolean
     options_count: number
   }): Promise<void>
   buttonChosen(input: {
-    project_slug: string
+    owner_slug: string
     user_id: string
     prompt_id: string
     choice_value: string
     latency_ms: number
   }): Promise<void>
   buttonFreeform(input: {
-    project_slug: string
+    owner_slug: string
     user_id: string
     prompt_id: string
     freeform_length: number
   }): Promise<void>
-  buttonTimeout(input: { project_slug: string; user_id: string; prompt_id: string }): Promise<void>
+  buttonTimeout(input: { owner_slug: string; user_id: string; prompt_id: string }): Promise<void>
 }
 
 export function bridgeInterviewTelemetry(telemetry: OnboardingTelemetry): InterviewTelemetrySink {
   return {
-    phaseAdvanced: async ({ project_slug, user_id, from, to }) => {
+    phaseAdvanced: async ({ owner_slug, user_id, from, to }) => {
       const payload: PhaseAdvancedPayload = { from, to }
       await telemetry.emit({
-        project_slug,
+        owner_slug,
         user_id,
         event: 'onboarding.phase_advanced',
         payload,
@@ -197,7 +197,7 @@ export function bridgeInterviewTelemetry(telemetry: OnboardingTelemetry): Interv
     },
     buttonEmitted: async (input) => {
       await telemetry.emit({
-        project_slug: input.project_slug,
+        owner_slug: input.owner_slug,
         user_id: input.user_id,
         event: 'onboarding.button_emitted',
         payload: {
@@ -209,7 +209,7 @@ export function bridgeInterviewTelemetry(telemetry: OnboardingTelemetry): Interv
     },
     buttonChosen: async (input) => {
       await telemetry.emit({
-        project_slug: input.project_slug,
+        owner_slug: input.owner_slug,
         user_id: input.user_id,
         event: 'onboarding.button_chosen',
         payload: {
@@ -221,7 +221,7 @@ export function bridgeInterviewTelemetry(telemetry: OnboardingTelemetry): Interv
     },
     buttonFreeform: async (input) => {
       await telemetry.emit({
-        project_slug: input.project_slug,
+        owner_slug: input.owner_slug,
         user_id: input.user_id,
         event: 'onboarding.button_freeform',
         payload: {
@@ -232,7 +232,7 @@ export function bridgeInterviewTelemetry(telemetry: OnboardingTelemetry): Interv
     },
     buttonTimeout: async (input) => {
       await telemetry.emit({
-        project_slug: input.project_slug,
+        owner_slug: input.owner_slug,
         user_id: input.user_id,
         event: 'onboarding.button_timeout',
         payload: { prompt_id: input.prompt_id },
@@ -243,20 +243,20 @@ export function bridgeInterviewTelemetry(telemetry: OnboardingTelemetry): Interv
 
 export interface ImportTelemetrySink {
   started(input: {
-    project_slug: string
+    owner_slug: string
     user_id: string
     source: string
     payload_size_bytes?: number
   }): Promise<void>
   pass1ChunkDone(input: {
-    project_slug: string
+    owner_slug: string
     user_id: string
     source: string
     chunk_index: number
     chunk_dollars: number
   }): Promise<void>
   pass2Complete(input: {
-    project_slug: string
+    owner_slug: string
     user_id: string
     source: string
     total_dollars: number
@@ -268,9 +268,9 @@ export interface ImportTelemetrySink {
 
 export function bridgeImportTelemetry(telemetry: OnboardingTelemetry): ImportTelemetrySink {
   return {
-    started: async ({ project_slug, user_id, source, payload_size_bytes }) => {
+    started: async ({ owner_slug, user_id, source, payload_size_bytes }) => {
       await telemetry.emit({
-        project_slug,
+        owner_slug,
         user_id,
         event: 'onboarding.import_started',
         payload:
@@ -279,9 +279,9 @@ export function bridgeImportTelemetry(telemetry: OnboardingTelemetry): ImportTel
             : { source },
       })
     },
-    pass1ChunkDone: async ({ project_slug, user_id, source, chunk_index, chunk_dollars }) => {
+    pass1ChunkDone: async ({ owner_slug, user_id, source, chunk_index, chunk_dollars }) => {
       await telemetry.emit({
-        project_slug,
+        owner_slug,
         user_id,
         event: 'onboarding.import_pass1_chunk_done',
         payload: { source, chunk_index, chunk_dollars },
@@ -289,7 +289,7 @@ export function bridgeImportTelemetry(telemetry: OnboardingTelemetry): ImportTel
     },
     pass2Complete: async (input) => {
       await telemetry.emit({
-        project_slug: input.project_slug,
+        owner_slug: input.owner_slug,
         user_id: input.user_id,
         event: 'onboarding.import_pass2_complete',
         payload: {
@@ -306,26 +306,26 @@ export function bridgeImportTelemetry(telemetry: OnboardingTelemetry): ImportTel
 
 export interface PersonaTelemetrySink {
   drafted(input: {
-    project_slug: string
+    owner_slug: string
     user_id: string
     draft_id: string
     files: ReadonlyArray<'soul' | 'user' | 'priority_map'>
   }): Promise<void>
   cringeFlagged(input: {
-    project_slug: string
+    owner_slug: string
     user_id: string
     file: 'soul' | 'user' | 'priority_map'
     flags: number
     reasons: string[]
   }): Promise<void>
   regen(input: {
-    project_slug: string
+    owner_slug: string
     user_id: string
     file: 'soul' | 'user' | 'priority_map'
     attempt: number
   }): Promise<void>
   committed(input: {
-    project_slug: string
+    owner_slug: string
     user_id: string
     draft_id: string
     git_sha?: string
@@ -336,7 +336,7 @@ export function bridgePersonaTelemetry(telemetry: OnboardingTelemetry): PersonaT
   return {
     drafted: async (input) => {
       await telemetry.emit({
-        project_slug: input.project_slug,
+        owner_slug: input.owner_slug,
         user_id: input.user_id,
         event: 'onboarding.persona_drafted',
         payload: { draft_id: input.draft_id, files: input.files },
@@ -344,7 +344,7 @@ export function bridgePersonaTelemetry(telemetry: OnboardingTelemetry): PersonaT
     },
     cringeFlagged: async (input) => {
       await telemetry.emit({
-        project_slug: input.project_slug,
+        owner_slug: input.owner_slug,
         user_id: input.user_id,
         event: 'onboarding.persona_cringe_flagged',
         payload: { file: input.file, flags: input.flags, reasons: input.reasons },
@@ -352,7 +352,7 @@ export function bridgePersonaTelemetry(telemetry: OnboardingTelemetry): PersonaT
     },
     regen: async (input) => {
       await telemetry.emit({
-        project_slug: input.project_slug,
+        owner_slug: input.owner_slug,
         user_id: input.user_id,
         event: 'onboarding.persona_regen',
         payload: { file: input.file, attempt: input.attempt },
@@ -360,7 +360,7 @@ export function bridgePersonaTelemetry(telemetry: OnboardingTelemetry): PersonaT
     },
     committed: async (input) => {
       await telemetry.emit({
-        project_slug: input.project_slug,
+        owner_slug: input.owner_slug,
         user_id: input.user_id,
         event: 'onboarding.persona_committed',
         payload:
@@ -374,14 +374,14 @@ export function bridgePersonaTelemetry(telemetry: OnboardingTelemetry): PersonaT
 
 export interface ProfilePicTelemetrySink {
   generated(input: {
-    project_slug: string
+    owner_slug: string
     user_id: string
     job_id: string
     candidate_count: number
   }): Promise<void>
-  userUploaded(input: { project_slug: string; user_id: string; job_id: string }): Promise<void>
+  userUploaded(input: { owner_slug: string; user_id: string; job_id: string }): Promise<void>
   fallback(input: {
-    project_slug: string
+    owner_slug: string
     user_id: string
     job_id: string
     archetype_slug: string
@@ -394,7 +394,7 @@ export function bridgeProfilePicTelemetry(
   return {
     generated: async (input) => {
       await telemetry.emit({
-        project_slug: input.project_slug,
+        owner_slug: input.owner_slug,
         user_id: input.user_id,
         event: 'onboarding.profile_pic_generated',
         payload: { job_id: input.job_id, candidate_count: input.candidate_count },
@@ -402,7 +402,7 @@ export function bridgeProfilePicTelemetry(
     },
     userUploaded: async (input) => {
       await telemetry.emit({
-        project_slug: input.project_slug,
+        owner_slug: input.owner_slug,
         user_id: input.user_id,
         event: 'onboarding.profile_pic_user_uploaded',
         payload: { job_id: input.job_id },
@@ -410,7 +410,7 @@ export function bridgeProfilePicTelemetry(
     },
     fallback: async (input) => {
       await telemetry.emit({
-        project_slug: input.project_slug,
+        owner_slug: input.owner_slug,
         user_id: input.user_id,
         event: 'onboarding.profile_pic_fallback',
         payload: { job_id: input.job_id, archetype_slug: input.archetype_slug },
@@ -421,13 +421,13 @@ export function bridgeProfilePicTelemetry(
 
 export interface ArchetypeTelemetrySink {
   picked(input: {
-    project_slug: string
+    owner_slug: string
     user_id: string
     archetype_slugs: string[]
     used_llm_extension: boolean
   }): Promise<void>
   llmExtension(input: {
-    project_slug: string
+    owner_slug: string
     user_id: string
     archetype_name: string
     cache_hit: boolean
@@ -438,7 +438,7 @@ export function bridgeArchetypeTelemetry(telemetry: OnboardingTelemetry): Archet
   return {
     picked: async (input) => {
       await telemetry.emit({
-        project_slug: input.project_slug,
+        owner_slug: input.owner_slug,
         user_id: input.user_id,
         event: 'onboarding.archetype_picked',
         payload: {
@@ -449,7 +449,7 @@ export function bridgeArchetypeTelemetry(telemetry: OnboardingTelemetry): Archet
     },
     llmExtension: async (input) => {
       await telemetry.emit({
-        project_slug: input.project_slug,
+        owner_slug: input.owner_slug,
         user_id: input.user_id,
         event: 'onboarding.archetype_llm_extension',
         payload: { archetype_name: input.archetype_name, cache_hit: input.cache_hit },
@@ -460,19 +460,19 @@ export function bridgeArchetypeTelemetry(telemetry: OnboardingTelemetry): Archet
 
 export interface SignupTelemetrySink {
   started(input: {
-    project_slug: string
+    owner_slug: string
     user_id: string
     via: 'tg' | 'web'
     referrer?: string
   }): Promise<void>
   oauthComplete(input: {
-    project_slug: string
+    owner_slug: string
     user_id: string
     provider: 'google' | 'apple'
     oauth_user_id: string
   }): Promise<void>
   instanceProvisioned(input: {
-    project_slug: string
+    owner_slug: string
     user_id: string
     slug: string
     tier: string
@@ -484,7 +484,7 @@ export function bridgeSignupTelemetry(telemetry: OnboardingTelemetry): SignupTel
   return {
     started: async (input) => {
       await telemetry.emit({
-        project_slug: input.project_slug,
+        owner_slug: input.owner_slug,
         user_id: input.user_id,
         event: 'signup.started',
         payload:
@@ -495,7 +495,7 @@ export function bridgeSignupTelemetry(telemetry: OnboardingTelemetry): SignupTel
     },
     oauthComplete: async (input) => {
       await telemetry.emit({
-        project_slug: input.project_slug,
+        owner_slug: input.owner_slug,
         user_id: input.user_id,
         event: 'signup.oauth_complete',
         payload: { provider: input.provider, oauth_user_id: input.oauth_user_id },
@@ -503,7 +503,7 @@ export function bridgeSignupTelemetry(telemetry: OnboardingTelemetry): SignupTel
     },
     instanceProvisioned: async (input) => {
       await telemetry.emit({
-        project_slug: input.project_slug,
+        owner_slug: input.owner_slug,
         user_id: input.user_id,
         event: 'signup.instance_provisioned',
         payload: { slug: input.slug, tier: input.tier, durationMs: input.durationMs },
@@ -514,26 +514,26 @@ export function bridgeSignupTelemetry(telemetry: OnboardingTelemetry): SignupTel
 
 export interface CompletionTelemetrySink {
   wowDispatched(input: {
-    project_slug: string
+    owner_slug: string
     user_id: string
     fired_count: number
     total_actions: number
   }): Promise<void>
   completed(input: {
-    project_slug: string
+    owner_slug: string
     user_id: string
     time_to_wow_ms: number
     total_dollars: number
     wow_actions_fired: string[]
   }): Promise<void>
   abandoned(input: {
-    project_slug: string
+    owner_slug: string
     user_id: string
     last_phase: string
     gap_ms: number
   }): Promise<void>
   failed(input: {
-    project_slug: string
+    owner_slug: string
     user_id: string
     phase: string
     reason: string
@@ -544,7 +544,7 @@ export function bridgeCompletionTelemetry(telemetry: OnboardingTelemetry): Compl
   return {
     wowDispatched: async (input) => {
       await telemetry.emit({
-        project_slug: input.project_slug,
+        owner_slug: input.owner_slug,
         user_id: input.user_id,
         event: 'onboarding.wow_dispatched',
         payload: { fired_count: input.fired_count, total_actions: input.total_actions },
@@ -552,7 +552,7 @@ export function bridgeCompletionTelemetry(telemetry: OnboardingTelemetry): Compl
     },
     completed: async (input) => {
       await telemetry.emit({
-        project_slug: input.project_slug,
+        owner_slug: input.owner_slug,
         user_id: input.user_id,
         event: 'onboarding.completed',
         payload: {
@@ -564,7 +564,7 @@ export function bridgeCompletionTelemetry(telemetry: OnboardingTelemetry): Compl
     },
     abandoned: async (input) => {
       await telemetry.emit({
-        project_slug: input.project_slug,
+        owner_slug: input.owner_slug,
         user_id: input.user_id,
         event: 'onboarding.abandoned',
         payload: { last_phase: input.last_phase, gap_ms: input.gap_ms },
@@ -572,7 +572,7 @@ export function bridgeCompletionTelemetry(telemetry: OnboardingTelemetry): Compl
     },
     failed: async (input) => {
       await telemetry.emit({
-        project_slug: input.project_slug,
+        owner_slug: input.owner_slug,
         user_id: input.user_id,
         event: 'onboarding.failed',
         payload: { phase: input.phase, reason: input.reason },

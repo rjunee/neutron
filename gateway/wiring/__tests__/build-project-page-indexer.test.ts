@@ -39,7 +39,7 @@ describe('build-project-page-indexer', () => {
     })
 
     await index({
-      project_slug: 'topline',
+      owner_slug: 'topline',
       name: 'Topline',
       body: '# Topline\n\nBilling SaaS.\n',
       source_path: 'Projects/topline',
@@ -72,7 +72,7 @@ describe('build-project-page-indexer', () => {
     })
     // slugifyProjectId allows [._] — entity slugs do not.
     await index({
-      project_slug: 'v2.0_beta',
+      owner_slug: 'v2.0_beta',
       name: 'V2.0 Beta',
       body: '# V2.0 Beta\n',
       source_path: 'Projects/v2.0_beta',

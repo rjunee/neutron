@@ -17,7 +17,7 @@
  *      m2-week-4 feedback collector.
  *
  * Cron registration shape:
- *   - `name`: `onboarding.sean_ellis_survey_<project_slug>`
+ *   - `name`: `onboarding.sean_ellis_survey_<owner_slug>`
  *   - `handler`: 'onboarding.sean_ellis_survey'
  *   - `schedule`: { kind: 'interval_ms', interval_ms: 1h }
  *
@@ -125,7 +125,7 @@ export class SeanEllisStore {
   constructor(private readonly db: ProjectDb) {}
 
   async insertOpen(input: {
-    project_slug: string
+    owner_slug: string
     user_id: string
     prompt_emitted_at: number
     /** Codex r4 P1 — store the prompt id so channel callbacks can find this row. */
@@ -140,7 +140,7 @@ export class SeanEllisStore {
        VALUES (?, ?, ?, ?, NULL, 'no_response', NULL, ?, NULL)`,
       [
         id,
-        input.project_slug,
+        input.owner_slug,
         input.user_id,
         input.prompt_emitted_at,
         input.prompt_id ?? null,
@@ -153,7 +153,7 @@ export class SeanEllisStore {
     `id, project_slug, user_id, prompt_emitted_at, responded_at,
      response_kind, freeform_text, prompt_id, pending_response_kind`
 
-  latestForOwner(project_slug: string): SeanEllisRow | null {
+  latestForOwner(owner_slug: string): SeanEllisRow | null {
     const row = this.db
       .get<SeanEllisDbRow, [string]>(
         `SELECT ${SeanEllisStore.SELECT_COLUMNS}
@@ -161,7 +161,7 @@ export class SeanEllisStore {
           WHERE project_slug = ?
           ORDER BY prompt_emitted_at DESC
           LIMIT 1`,
-        [project_slug],
+        [owner_slug],
       )
     return row ?? null
   }
@@ -170,7 +170,7 @@ export class SeanEllisStore {
    * Per-(instance, user) lookup — production uses this so a workspace instance
    * with multiple onboarded members surveys each member exactly once.
    */
-  latestForUser(project_slug: string, user_id: string): SeanEllisRow | null {
+  latestForUser(owner_slug: string, user_id: string): SeanEllisRow | null {
     const row = this.db
       .get<SeanEllisDbRow, [string, string]>(
         `SELECT ${SeanEllisStore.SELECT_COLUMNS}
@@ -178,7 +178,7 @@ export class SeanEllisStore {
           WHERE project_slug = ? AND user_id = ?
           ORDER BY prompt_emitted_at DESC
           LIMIT 1`,
-        [project_slug, user_id],
+        [owner_slug, user_id],
       )
     return row ?? null
   }
@@ -189,26 +189,26 @@ export class SeanEllisStore {
    * arrives — only `prompt_id` is on the wire, so the row must be
    * recoverable by it. Instance-scoped to keep workspace instances isolated.
    */
-  byPromptId(project_slug: string, prompt_id: string): SeanEllisRow | null {
+  byPromptId(owner_slug: string, prompt_id: string): SeanEllisRow | null {
     const row = this.db
       .get<SeanEllisDbRow, [string, string]>(
         `SELECT ${SeanEllisStore.SELECT_COLUMNS}
            FROM sean_ellis_responses
           WHERE project_slug = ? AND prompt_id = ?
           LIMIT 1`,
-        [project_slug, prompt_id],
+        [owner_slug, prompt_id],
       )
     return row ?? null
   }
 
-  byId(input: { project_slug: string; id: string }): SeanEllisRow | null {
+  byId(input: { owner_slug: string; id: string }): SeanEllisRow | null {
     const row = this.db
       .get<SeanEllisDbRow, [string, string]>(
         `SELECT ${SeanEllisStore.SELECT_COLUMNS}
            FROM sean_ellis_responses
           WHERE project_slug = ? AND id = ?
           LIMIT 1`,
-        [input.project_slug, input.id],
+        [input.owner_slug, input.id],
       )
     return row ?? null
   }
@@ -221,7 +221,7 @@ export class SeanEllisStore {
    * case: Telegram callback delivers the tap, the next freeform inbound
    * is a separate update with no prompt_id reference).
    */
-  latestPendingForUser(project_slug: string, user_id: string): SeanEllisRow | null {
+  latestPendingForUser(owner_slug: string, user_id: string): SeanEllisRow | null {
     const row = this.db
       .get<SeanEllisDbRow, [string, string]>(
         `SELECT ${SeanEllisStore.SELECT_COLUMNS}
@@ -231,7 +231,7 @@ export class SeanEllisStore {
             AND responded_at IS NULL
           ORDER BY prompt_emitted_at DESC
           LIMIT 1`,
-        [project_slug, user_id],
+        [owner_slug, user_id],
       )
     return row ?? null
   }
@@ -283,13 +283,13 @@ export interface SeanEllisHandlerDeps {
   telemetry: OnboardingTelemetry
   channel: SeanEllisChannel
   /**
-   * Resolves the topic_id for a given (project_slug, user_id) so the
+   * Resolves the topic_id for a given (owner_slug, user_id) so the
    * survey lands on that user's onboarding topic. Returns null when the
    * topic can't be resolved (e.g. the user has since left the instance);
    * the handler skips that user without erroring.
    */
   resolveContext: (input: {
-    project_slug: string
+    owner_slug: string
     user_id: string
   }) => Promise<{ topic_id: string } | null>
   /** Window for "is it 4 weeks since completed_at" — defaults to FOUR_WEEKS_MS. */
@@ -372,7 +372,7 @@ export function buildSeanEllisHandler(deps: SeanEllisHandlerDeps): CronHandler {
 
     const emitted_ids: string[] = []
     for (const { user_id, elapsed } of eligible) {
-      const context = await deps.resolveContext({ project_slug: ctx.owner_slug, user_id })
+      const context = await deps.resolveContext({ owner_slug: ctx.owner_slug, user_id })
       if (context === null) {
         // Skip this user without aborting the whole tick — other users
         // in the same instance may still be resolvable.
@@ -416,7 +416,7 @@ export function buildSeanEllisHandler(deps: SeanEllisHandlerDeps): CronHandler {
 
       const emitted_at = now()
       const { id } = await store.insertOpen({
-        project_slug: ctx.owner_slug,
+        owner_slug: ctx.owner_slug,
         user_id,
         prompt_emitted_at: emitted_at,
         // Codex r4 + r5 P1: persist the channel-delivered prompt_id so the
@@ -426,7 +426,7 @@ export function buildSeanEllisHandler(deps: SeanEllisHandlerDeps): CronHandler {
       })
 
       await deps.telemetry.emit({
-        project_slug: ctx.owner_slug,
+        owner_slug: ctx.owner_slug,
         user_id,
         event: 'onboarding.sean_ellis_prompt_emitted',
         payload: {
@@ -453,7 +453,7 @@ export function buildSeanEllisHandler(deps: SeanEllisHandlerDeps): CronHandler {
  * instance CronJobRegistry alongside the rest of the onboarding crons.
  */
 export function buildSeanEllisJob(input: {
-  project_slug: string
+  owner_slug: string
   interval_ms?: number
 }): CronJobDef {
   // Cron job name budget is 64 chars (validateJobName /^[a-z][a-z0-9-]{0,63}$/);
@@ -461,8 +461,8 @@ export function buildSeanEllisJob(input: {
   // own slug allocation is ≤ 50 chars (instance-provisioning/allocate-slug.ts),
   // so this fits with margin.
   return {
-    name: `sean-ellis-${input.project_slug}`,
-    description: `Sean Ellis 4-week PMF survey trigger for ${input.project_slug}`,
+    name: `sean-ellis-${input.owner_slug}`,
+    description: `Sean Ellis 4-week PMF survey trigger for ${input.owner_slug}`,
     schedule: {
       kind: 'interval_ms',
       interval_ms: input.interval_ms ?? DEFAULT_CHECK_INTERVAL_MS,
@@ -492,7 +492,7 @@ export function buildSeanEllisJob(input: {
  * that gap so the production scheduler actually fires the survey.
  */
 export function registerSeanEllisCron(input: {
-  project_slug: string
+  owner_slug: string
   jobs: CronJobRegistry
   handlers: CronHandlerRegistry
   /** The handler that drives the actual emit; built via `buildSeanEllisHandler`. */
@@ -500,8 +500,8 @@ export function registerSeanEllisCron(input: {
   interval_ms?: number
 }): { job_name: string } {
   const job = input.interval_ms !== undefined
-    ? buildSeanEllisJob({ project_slug: input.project_slug, interval_ms: input.interval_ms })
-    : buildSeanEllisJob({ project_slug: input.project_slug })
+    ? buildSeanEllisJob({ owner_slug: input.owner_slug, interval_ms: input.interval_ms })
+    : buildSeanEllisJob({ owner_slug: input.owner_slug })
   input.jobs.register(job)
   if (input.handlers.get(SEAN_ELLIS_HANDLER_NAME) === undefined) {
     input.handlers.register(SEAN_ELLIS_HANDLER_NAME, input.handler)

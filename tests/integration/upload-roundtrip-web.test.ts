@@ -54,12 +54,12 @@ beforeEach(() => {
 
   const runner: ImportJobRunnerHook = {
     start: async (input) => {
-      runnerCalls.push({ project_slug: input.project_slug, source: input.source })
+      runnerCalls.push({ project_slug: input.owner_slug, source: input.source })
       return { job_id: `job-${runnerCalls.length}` }
     },
     status: async (job_id: string): Promise<ImportJob | null> => ({
       job_id,
-      project_slug: 'test-owner',
+      owner_slug: 'test-owner',
       source: 'chatgpt-zip',
       status: 'pass1-running',
       dollars_spent: 0,
@@ -110,7 +110,7 @@ describe('upload roundtrip — web', () => {
     // Land the owner at `import_upload_pending`.
     await stateStore.upsert({
       user_id: 'test-user',
-      project_slug: 'test-owner',
+      owner_slug: 'test-owner',
       phase: 'import_upload_pending',
       phase_state_patch: { ai_substrate_used: 'chatgpt' },
       advanced_at: 1,
@@ -175,7 +175,7 @@ describe('upload roundtrip — web', () => {
   test('upload on a owner not in import_upload_pending is a no-op advance', async () => {
     await stateStore.upsert({
       user_id: 'test-user',
-      project_slug: 'test-owner',
+      owner_slug: 'test-owner',
       phase: 'signup',
       phase_state_patch: {},
       advanced_at: 1,

@@ -88,7 +88,7 @@ describe('pending row survives process restart', () => {
     // Insert a row manually (simulates the pipeline beginning a call).
     const store1 = new ProfilePicPendingStore({ db, now: () => 1_000_000 })
     const { request_id } = await store1.recordPending({
-      project_slug: 't1',
+      owner_slug: 't1',
       user_id: 'u1',
       prompt: 'wise raven-keeper',
     })
@@ -135,7 +135,7 @@ describe('resume-on-boot expired path', () => {
 
     const seedStore = new ProfilePicPendingStore({ db, now: () => sixMinAgo })
     const { request_id } = await seedStore.recordPending({
-      project_slug: 't1',
+      owner_slug: 't1',
       user_id: 'u1',
       prompt: 'stalwart guardian',
     })
@@ -194,7 +194,7 @@ describe('resume-on-boot expired path', () => {
     // is observable (status is whatever the in-process call landed at).
     const allRows = db
       .raw()
-      .query<{ request_id: string; status: string; project_slug: string }, []>(
+      .query<{ request_id: string; status: string; owner_slug: string }, []>(
         `SELECT request_id, status, project_slug FROM profile_pic_pending ORDER BY started_at ASC`,
       )
       .all()
@@ -203,7 +203,7 @@ describe('resume-on-boot expired path', () => {
     expect(allRows[0]!.status).toBe('expired')
     // Second row corresponds to the auto-retry call.
     expect(allRows[1]!.status).toBe('completed')
-    expect(allRows[1]!.project_slug).toBe('t1')
+    expect(allRows[1]!.owner_slug).toBe('t1')
 
     // The pipeline.start did one Gemini call.
     expect(generateCalls).toBe(1)
@@ -219,7 +219,7 @@ describe('resume-on-boot expired path', () => {
 
     const seedStore = new ProfilePicPendingStore({ db, now: () => sixMinAgo })
     const { request_id } = await seedStore.recordPending({
-      project_slug: 't2',
+      owner_slug: 't2',
       user_id: 'u2',
       prompt: 'silent watcher',
     })
@@ -299,7 +299,7 @@ describe('resume-on-boot failed path', () => {
     // Engine hook surfaces "previous attempt failed, retry?" as the reason.
     const hook = buildEngineHookOver(pipeline, store)
     const outcome = await hook.ensureCandidates({
-      project_slug: 't3',
+      owner_slug: 't3',
       topic_id: 'topic-1',
       user_id: 'u3',
       agent_name: null,
@@ -320,7 +320,7 @@ describe('resume-on-boot failed path', () => {
 
     const seedStore = new ProfilePicPendingStore({ db, now: () => tenMinAgo })
     const { request_id } = await seedStore.recordPending({
-      project_slug: 't4',
+      owner_slug: 't4',
       user_id: 'u4',
       prompt: 'distant memory',
     })
@@ -367,7 +367,7 @@ describe('happy-path: same-process completion', () => {
     const store = pipeline.pendingCallStore()!
 
     const { job_id } = await pipeline.start({
-      project_slug: 'project-happy',
+      owner_slug: 'project-happy',
       user_id: 'user-happy',
       archetype_hint: 'krishna',
       prompt: 'A radiant flute-keeper.',
@@ -403,7 +403,7 @@ describe('happy-path: same-process completion', () => {
     const store = pipeline.pendingCallStore()!
 
     const { job_id } = await pipeline.start({
-      project_slug: 'project-fail',
+      owner_slug: 'project-fail',
       user_id: 'user-fail',
       prompt: 'will not land',
     })
@@ -435,7 +435,7 @@ describe('engine hook reads the durable store on phase-enter', () => {
 
     const seedStore = new ProfilePicPendingStore({ db, now: () => sixMinAgo })
     await seedStore.recordPending({
-      project_slug: 't-eng',
+      owner_slug: 't-eng',
       user_id: 'u-eng',
       prompt: 'first attempt',
     })
@@ -458,7 +458,7 @@ describe('engine hook reads the durable store on phase-enter', () => {
 
     const hook = buildEngineHookOver(pipeline, store)
     const outcome = await hook.ensureCandidates({
-      project_slug: 't-eng',
+      owner_slug: 't-eng',
       topic_id: 'topic-eng',
       user_id: 'u-eng',
       agent_name: null,
@@ -500,7 +500,7 @@ describe('engine hook reads the durable store on phase-enter', () => {
     // Land a completed row. With migration 0047 the pending row carries
     // the originating job_id.
     const { job_id } = await pipeline.start({
-      project_slug: 't-comp',
+      owner_slug: 't-comp',
       user_id: 'u-comp',
       prompt: 'first attempt',
     })
@@ -514,7 +514,7 @@ describe('engine hook reads the durable store on phase-enter', () => {
     // candidates and does NOT fire pipeline.start again.
     const hook = buildEngineHookOver(pipeline, store, { wait_for_candidates: true })
     const outcome = await hook.ensureCandidates({
-      project_slug: 't-comp',
+      owner_slug: 't-comp',
       topic_id: 'topic-comp',
       user_id: 'u-comp',
       agent_name: null,
@@ -553,14 +553,14 @@ describe('Argus r1 BLOCKER 2 — phase-enter handler queries pendingStore', () =
     })
     const realStore = pipeline.pendingCallStore()!
 
-    const spy: Array<{ project_slug: string; user_id: string | null }> = []
+    const spy: Array<{ owner_slug: string; user_id: string | null }> = []
     const spyingStore = {
       ...realStore,
       latestForUser: async (
-        project_slug: string,
+        owner_slug: string,
         user_id: string | null,
       ): Promise<null> => {
-        spy.push({ project_slug, user_id })
+        spy.push({ owner_slug, user_id })
         return null
       },
     } as unknown as ProfilePicPendingStore
@@ -578,7 +578,7 @@ describe('Argus r1 BLOCKER 2 — phase-enter handler queries pendingStore', () =
     })
 
     await hook.ensureCandidates({
-      project_slug: 't-spy',
+      owner_slug: 't-spy',
       topic_id: 'topic-spy',
       user_id: 'u-spy',
       agent_name: null,
@@ -586,7 +586,7 @@ describe('Argus r1 BLOCKER 2 — phase-enter handler queries pendingStore', () =
     })
 
     expect(spy).toHaveLength(1)
-    expect(spy[0]?.project_slug).toBe('t-spy')
+    expect(spy[0]?.owner_slug).toBe('t-spy')
     expect(spy[0]?.user_id).toBe('u-spy')
     expect(calls).toBe(1) // pipeline.start fired exactly once (no short-circuit on null)
   })
@@ -606,7 +606,7 @@ describe('Argus r1 BLOCKER 2 — phase-enter handler queries pendingStore', () =
     })
     const realStore = pipeline.pendingCallStore()!
     const { job_id } = await pipeline.start({
-      project_slug: 't-prior',
+      owner_slug: 't-prior',
       user_id: 'u-prior',
       prompt: 'prior',
     })
@@ -634,7 +634,7 @@ describe('Argus r1 BLOCKER 2 — phase-enter handler queries pendingStore', () =
     })
 
     await hook.ensureCandidates({
-      project_slug: 't-prior',
+      owner_slug: 't-prior',
       topic_id: 'topic-prior',
       user_id: 'u-prior',
       agent_name: null,
@@ -659,7 +659,7 @@ describe('Argus r1 BLOCKER 3 — auto-retry preserves archetype_hint', () => {
     // Seed a stale pending row WITH archetype_hint set.
     const seedStore = new ProfilePicPendingStore({ db, now: () => sixMinAgo })
     const { request_id } = await seedStore.recordPending({
-      project_slug: 't-arch',
+      owner_slug: 't-arch',
       user_id: 'u-arch',
       prompt: 'a flute-keeper in soft dusk light',
       archetype_hint: ARCHETYPE,
@@ -673,7 +673,7 @@ describe('Argus r1 BLOCKER 3 — auto-retry preserves archetype_hint', () => {
     // assert archetype_hint propagates intact (not collapsed to the
     // FALLBACK_DEFAULT_SLUG via missing-hint fallback).
     const started: Array<{
-      project_slug: string
+      owner_slug: string
       archetype_hint?: string
       prompt: string
       user_id?: string
@@ -691,7 +691,7 @@ describe('Argus r1 BLOCKER 3 — auto-retry preserves archetype_hint', () => {
     const realStart = pipeline.start.bind(pipeline)
     pipeline.start = async (input) => {
       const captured: typeof started[number] = {
-        project_slug: input.project_slug,
+        owner_slug: input.owner_slug,
         prompt: input.prompt,
       }
       if (input.archetype_hint !== undefined) captured.archetype_hint = input.archetype_hint
@@ -714,7 +714,7 @@ describe('Argus r1 BLOCKER 3 — auto-retry preserves archetype_hint', () => {
     expect(result.auto_retries_fired).toBe(1)
     expect(started).toHaveLength(1)
     expect(started[0]?.archetype_hint).toBe(ARCHETYPE)
-    expect(started[0]?.project_slug).toBe('t-arch')
+    expect(started[0]?.owner_slug).toBe('t-arch')
     expect(started[0]?.user_id).toBe('u-arch')
     expect(started[0]?.prompt).toBe('a flute-keeper in soft dusk light')
 
@@ -742,7 +742,7 @@ describe('Argus r1 BLOCKER 3 — auto-retry preserves archetype_hint', () => {
 
     const seedStore = new ProfilePicPendingStore({ db, now: () => sixMinAgo })
     await seedStore.recordPending({
-      project_slug: 't-arch-null',
+      owner_slug: 't-arch-null',
       user_id: 'u-arch-null',
       prompt: 'no archetype recorded',
       // archetype_hint omitted intentionally.
@@ -789,7 +789,7 @@ describe('fresh-window behavior', () => {
 
     const seedStore = new ProfilePicPendingStore({ db, now: () => justNow })
     const { request_id } = await seedStore.recordPending({
-      project_slug: 't-fresh',
+      owner_slug: 't-fresh',
       user_id: 'u-fresh',
       prompt: 'still running upstream',
     })
