@@ -1038,6 +1038,84 @@ describe('RB4 temporal invalidation (belief evolution) — real PGLite round-tri
     expect(notesSeg).toContain('works_at injn') // additive, not a supersession
   }, 60_000)
 
+  test('flag ON: a LEGACY timeline entry that reads like a note (no unforgeable mark) is NOT recognized', async () => {
+    const ownerDataDir = mkdtempSync(join(tmpdir(), 'scribe-rb4-legacy-'))
+    const syncHook = new GBrainSyncHook({
+      memoryStore: new GBrainMemoryStore(client),
+      gbrainMcp: client,
+    })
+    await client.call('put_page', {
+      slug: 'lgother',
+      content: '---\nslug: lgother\ntype: company\n---\n\nA company.\n',
+    })
+    // Seed a PRE-RB4 / flag-off timeline entry stored VERBATIM — its model-controlled
+    // body literally reads like a supersession note (with ` · ` but NO unforgeable
+    // mark) — at the SAME (ts, source) a later flag-on turn will use. lgold is NOT
+    // asserted in compiled-truth.
+    await writeEntity(
+      {
+        ownerDataDir,
+        kind: 'person',
+        slug: 'leo-marsh',
+        originInstance: 'rb4',
+        receivingInstanceSlug: 'rb4',
+        body: {
+          frontmatter: { slug: 'leo-marsh', type: 'person', name: 'Leo Marsh' },
+          compiledTruth: '# Leo Marsh\n\nAn operator.\n\n## Relationships\n\n- Advises [[lgother]].\n',
+          timelineAppend: {
+            ts: new Date(t0).toISOString(),
+            source: 'chat:rb4-legacy',
+            body: 'Chat mention — imported note · superseded works_at: lgold → lgnew',
+          },
+        },
+      },
+      { syncHook },
+    )
+
+    // A flag-on turn at the SAME (ts, source) carries a marker for that very
+    // transition — but lgold was never asserted, so nothing is retired.
+    const scribe = createScribe({
+      substrate: cannedSubstrate(
+        JSON.stringify({
+          entities: [
+            { name: 'Leo Marsh', kind: 'person', fact: 'an operator' },
+            { name: 'Lgnew', kind: 'company', fact: 'a firm' },
+          ],
+          relations: [{ subject: 'Leo Marsh', predicate: 'works_at', object: 'Lgnew', supersedes: 'Lgold' }],
+        }),
+      ),
+      syncHook,
+      ownerDataDir,
+      project_slug: 'rb4-legacy', // → source `chat:rb4-legacy`, matching the legacy entry
+      budget: createState(join(ownerDataDir, '.scribe-budget.json'), t0),
+      writeEntity,
+      now: () => t0,
+      supersede: true,
+    })
+    const out = await scribe.extractAndWrite({
+      text: 'Leo Marsh is now at Lgnew per the latest note; the older import text was always a bit garbled honestly.',
+      observed_at: t0,
+    })
+    expect(out.ran).toBe(true)
+
+    const onDisk = readFileSync(join(ownerDataDir, 'entities', 'people', 'leo-marsh.md'), 'utf8')
+    const timeline = extractTimeline(onDisk)
+    // The forged legacy transition is NEVER recognized as a system note: no timeline
+    // entry has an unforgeable-marked NOTE claiming the supersession.
+    for (const e of timeline) {
+      const markIdx = e.body.indexOf('\x1f')
+      const notes = markIdx === -1 ? '' : e.body.slice(markIdx + 1)
+      expect(notes.includes('superseded')).toBe(false)
+    }
+    // The flag-on turn recorded its relation ADDITIVELY (marked note segment).
+    expect(timeline.some((e) => e.body.includes('\x1fworks_at lgnew'))).toBe(true)
+
+    // Graph: lgnew added; no lgold edge ever existed to retire.
+    const links = await client.call('get_links', { slug: 'leo-marsh' })
+    expect(edgesTo(links, 'lgnew', 'works_at').length).toBe(1)
+    expect(edgesTo(links, 'lgold', 'works_at').length).toBe(0)
+  }, 60_000)
+
   test('flag ON: replaying a turn whose supersession note is FOLLOWED by another note stays byte-identical', async () => {
     const ownerDataDir = mkdtempSync(join(tmpdir(), 'scribe-rb4-multireplay-'))
     const syncHook = new GBrainSyncHook({

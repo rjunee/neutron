@@ -426,11 +426,16 @@ function orderPagesObjectsFirst(bySlug: Map<string, PlannedPage>): PlannedPage[]
  *  a transition in that set; a `supersedes` marker whose prior was never asserted
  *  (new subject / stale marker) or was superseded to a DIFFERENT object degrades
  *  to a plain additive `<pred> <obj>` note — no fabricated history (Codex). */
-/** The reserved delimiter separating the (model-controlled) fact base from the
- *  (system-generated, slug-only) supersession NOTES. Replay recognition parses
- *  ONLY the segment after the first occurrence, and the fact is sanitised of the
- *  `·` so it can never forge this boundary. */
-const NOTES_DELIM = ' · '
+/** The UNFORGEABLE machine boundary marking the start of the (system-generated,
+ *  slug-only) supersession NOTES within a timeline body. A control character
+ *  (Unit Separator) that the extraction/model never emits in a fact and that
+ *  pre-RB4 / flag-off bodies (stored verbatim, never containing it) cannot carry —
+ *  so replay recognition can trust ONLY entries this feature emitted, immune to a
+ *  legacy free-form fact that happens to read like a note (Codex). Flag-on facts
+ *  are additionally stripped of it. `NOTES_SEP` is the cosmetic, human-visible
+ *  separator rendered just before the (invisible) mark. */
+const NOTES_MARK = '\x1f'
+const NOTES_SEP = ' · '
 
 function timelineBody(
   page: PlannedPage,
@@ -442,22 +447,21 @@ function timelineBody(
     // Flag OFF — byte-identical to today (no notes, no sanitisation).
     return fact !== undefined && fact.length > 0 ? `Chat mention — ${fact}` : 'Mentioned in chat'
   }
-  // Flag ON — the notes segment is trusted, structured history that replay
-  // recognition parses. STRIP the reserved `·` from the model-controlled fact so
-  // it can neither forge the notes boundary nor smuggle a `superseded …` note into
-  // the parsed segment (Codex prompt-injection guard).
+  // Flag ON — strip the reserved mark from the model-controlled fact so it can
+  // never forge the notes boundary, then append the trusted notes AFTER the mark.
   const safeFact =
-    fact !== undefined && fact.length > 0 ? fact.replace(/·/g, '-') : undefined
+    fact !== undefined && fact.length > 0 ? fact.replace(/\x1f/g, '') : undefined
   const base = safeFact !== undefined ? `Chat mention — ${safeFact}` : 'Mentioned in chat'
   const notes = relationNotes(page, recognizedTransitions)
-  return notes.length > 0 ? `${base}${NOTES_DELIM}${notes.join('; ')}` : base
+  return notes.length > 0 ? `${base}${NOTES_SEP}${NOTES_MARK}${notes.join('; ')}` : base
 }
 
 /** Extract the trusted NOTES segment of a timeline body — everything after the
- *  first reserved delimiter (the fact base precedes it and is never parsed). */
+ *  UNFORGEABLE mark (the fact base precedes it and is never parsed). A body without
+ *  the mark (a legacy / flag-off entry) yields no notes → nothing recognised. */
 function timelineNotesSegment(body: string): string {
-  const idx = body.indexOf(NOTES_DELIM)
-  return idx === -1 ? '' : body.slice(idx + NOTES_DELIM.length)
+  const idx = body.indexOf(NOTES_MARK)
+  return idx === -1 ? '' : body.slice(idx + NOTES_MARK.length)
 }
 
 /** The stable, edge-inert prefix of a supersession timeline note. Centralised so
