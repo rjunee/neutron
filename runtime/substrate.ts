@@ -23,7 +23,7 @@
  * inside each adapter via `model_preference: string[]`.
  */
 
-import type { ToolDef } from '@neutronai/core-sdk/types.ts'
+import type { ToolDef } from '@neutronai/cores-sdk/manifest'
 import type { SessionHandle } from './session-handle.ts'
 
 /**

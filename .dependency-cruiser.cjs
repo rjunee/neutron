@@ -31,7 +31,6 @@ const L = {
     '^persistence',
     '^migrations',
     '^chat-core',
-    '^core-sdk',
     '^cores/sdk',
     '^jwt-validator',
     '^prompts',
@@ -85,7 +84,7 @@ module.exports = {
     // (docs/, scripts/, tests/, bin/, skills/) is out of scope for the
     // layering ratchet.
     includeOnly:
-      '^(gateway|runtime|scribe|reflection|gbrain-memory|reminders|trident|agent-dispatch|tasks|skill-forge|cron|doc-search|message-search|cores|prompts|mcp|tools|migrations|persistence|core-sdk|jwt-validator|channels|chat-core|connect|watchdog|auth|onboarding|landing|app|open|tabs|work-board|project-credentials|contracts|wire-types|config|logger|loop)/',
+      '^(gateway|runtime|scribe|reflection|gbrain-memory|reminders|trident|agent-dispatch|tasks|skill-forge|cron|doc-search|message-search|cores|prompts|mcp|tools|migrations|persistence|jwt-validator|channels|chat-core|connect|watchdog|auth|onboarding|landing|app|open|tabs|work-board|project-credentials|contracts|wire-types|config|logger|loop)/',
     // Test-file policy (verifier amendment, plan §G4): the measured 28-module
     // SCC is WITH test files; production-only it's 19. Test edges are exempted
     // from the band-ordering rules PER-RULE (via `from.pathNot: TEST`), NOT
@@ -114,7 +113,7 @@ module.exports = {
     },
     {
       name: 'contracts-are-leaves',
-      comment: 'Contracts & leaves (persistence, migrations, chat-core, core-sdk, ' +
+      comment: 'Contracts & leaves (persistence, migrations, chat-core, ' +
         'cores/sdk, jwt-validator, prompts, tabs) must not import anything above them.',
       severity: 'error',
       from: { path: L.contracts, pathNot: TEST },

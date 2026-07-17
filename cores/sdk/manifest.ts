@@ -16,8 +16,9 @@
  *
  * X3 — one manifest contract: this is the SINGLE manifest schema. The former
  * `core-sdk/` hand validator + JSON-schema mirror (zero production callers)
- * were deleted and `core-sdk/` reduced to a one-release path-shim that
- * re-exports the types below. Capabilities: the schema validates the OPEN
+ * were deleted, and the brief one-release path-shim that re-exported the types
+ * below has since been removed too — all consumers import this package
+ * (`@neutronai/cores-sdk`) directly. Capabilities: the schema validates the OPEN
  * `<verb>:<resource>` string (a Core may declare a third-party / sidecar
  * capability the platform doesn't enumerate — `connect:google-ads`,
  * `read:notes.db`); the platform-KNOWN subset lives here too as
@@ -115,7 +116,8 @@ export const KNOWN_CAPABILITIES = [
 export type KnownCapability = (typeof KNOWN_CAPABILITIES)[number]
 
 /**
- * Back-compat alias for the one-release `@neutronai/core-sdk` path-shim.
+ * Back-compat alias retained for consumers migrated off the removed
+ * `@neutronai/core-sdk` path-shim (e.g. `mcp/surfaces/neutron-tools.ts`).
  * @deprecated import `KnownCapability` (or the open `Capability`) from
  * `@neutronai/cores-sdk` instead.
  */
@@ -635,8 +637,9 @@ function collectWarnings(input: unknown): ValidationWarning[] {
  * `safeParseManifest` (one validation implementation), then Zod issues are
  * mapped to the legacy `ERROR_CODES` and the two advisory warnings the schema
  * doesn't encode are layered on. Returns the legacy discriminated
- * `ValidationResult` (never throws) for the one-release `@neutronai/core-sdk`
- * barrel. New code SHOULD use `safeParseManifest` / `NeutronManifestSchema`.
+ * `ValidationResult` (never throws) — the retained legacy surface once exposed
+ * by the removed `@neutronai/core-sdk` barrel. New code SHOULD use
+ * `safeParseManifest` / `NeutronManifestSchema`.
  */
 export function validateNeutronManifest(input: unknown): ValidationResult {
   const warnings = collectWarnings(input)

@@ -13,7 +13,7 @@ Cross-refs:
 - `docs/engineering-plan.md § D.10` — third-party auth + secrets, capability gating per § D.10.4
 - `docs/engineering-plan.md § E` — locked decision: npm-shape Core authoring with `"neutron"` section in `package.json`
 - internal design notes — reconciliation guard (1% drift, fail loud)
-- `core-sdk/types.ts` — a one-release path-shim that re-exports this package's types (X3 merged the former parallel P0 surface in); see "Relationship to `core-sdk/`" below.
+- `core-sdk/` (removed) — X3 merged the former parallel P0 surface into this package; the brief one-release path-shim that re-exported these types has since been deleted and all consumers import `@neutronai/cores-sdk` directly. See "Relationship to `core-sdk/`" below.
 
 ---
 
@@ -422,10 +422,11 @@ The P3 install pipeline will allocate the on-disk file + register the capability
 **X3 — one manifest contract.** There is now a SINGLE manifest schema: this
 package (`cores/sdk/manifest.ts`, Zod). The former `core-sdk/` hand validator
 (`validateNeutronManifest()`, 650 lines) + its JSON-Schema mirror
-(`manifest.schema.json`) had ZERO production callers and were deleted;
-`core-sdk/` is now a one-release **path-shim** that re-exports the pure types +
-the platform-known helpers (`KNOWN_CAPABILITIES`, `isKnownCapability`,
-`isValidSemverRange`) from this package. New code imports `@neutronai/cores-sdk`.
+(`manifest.schema.json`) had ZERO production callers and were deleted. The
+`core-sdk/` path-shim that briefly re-exported the pure types + the
+platform-known helpers (`KNOWN_CAPABILITIES`, `isKnownCapability`,
+`isValidSemverRange`) has now been removed too: all consumers import the types
+and helpers directly from `@neutronai/cores-sdk` (`./manifest`).
 
 Validate a manifest with `parseManifest` / `safeParseManifest` /
 `NeutronManifestSchema`. The schema locks the required-fields list

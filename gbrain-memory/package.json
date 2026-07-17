@@ -5,7 +5,7 @@
   "private": true,
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.29.0",
-    "@neutronai/core-sdk": "workspace:*",
+    "@neutronai/cores-sdk": "workspace:*",
     "@neutronai/logger": "workspace:*",
     "@neutronai/mcp": "workspace:*",
     "@neutronai/runtime": "workspace:*",

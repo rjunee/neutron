@@ -47,7 +47,7 @@ export type CodegenToolName = (typeof TOOL_NAMES)[number]
  * state is a task tracker (per-project sidecar `code_tasks` table;
  * see § 6.2 of the brief). Three additional capabilities are declared:
  *
- *   - `agent:dispatch_subagent` (already in core-sdk closed enum;
+ *   - `agent:dispatch_subagent` (already in the cores-sdk closed enum;
  *     Code-Gen is the FIRST production caller via `runtime/subagent/`).
  *   - `host:gh` (NEW — gates `gh` CLI invocation by the gateway host).
  *   - `network:github` (NEW — gates github.com REST calls; composed

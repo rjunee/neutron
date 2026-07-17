@@ -15,7 +15,6 @@
     "@neutronai/config": "workspace:*",
     "@neutronai/connect": "workspace:*",
     "@neutronai/contracts": "workspace:*",
-    "@neutronai/core-sdk": "workspace:*",
     "@neutronai/cores-runtime": "workspace:*",
     "@neutronai/cores-sdk": "workspace:*",
     "@neutronai/cron": "workspace:*",

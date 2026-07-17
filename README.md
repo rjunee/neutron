@@ -247,7 +247,7 @@ The repo is a Bun workspace, grouped into five layers (bottom-up):
 ┌──────────────────────────────────────────────────────────────┐
 │  PRODUCT SURFACES   onboarding/  app/  landing/  prompts/      │
 ├──────────────────────────────────────────────────────────────┤
-│  CORES              core-sdk/  cores/sdk  cores/runtime        │
+│  CORES              cores/sdk  cores/runtime                   │
 │                     cores/free/{tasks,reminders,calendar,      │
 │                       email,research,code-gen,agent-settings,  │
 │                       google-workspace,scraping}               │
@@ -384,9 +384,9 @@ from your exported chat history, so the agent knows you from session one.
 A **Core** is Neutron's plugin unit — a package with a `"neutron"` manifest
 block declaring its id, capabilities, tools, secrets, and data namespace. The
 single manifest contract is the Zod schema in **`cores/sdk/`**
-(`@neutronai/cores-sdk`, workspace-internal — not published to npm). The older
-`core-sdk/` package is a one-release path-shim that re-exports those types (its
-hand validator + JSON-schema mirror were dead code and were removed).
+(`@neutronai/cores-sdk`, workspace-internal — not published to npm). The former
+`core-sdk/` path-shim (its hand validator + JSON-schema mirror were dead code)
+has been removed now that all consumers import `@neutronai/cores-sdk` directly.
 `cores/runtime/` owns the install lifecycle (validate manifest → allocate a
 per-Core data namespace → walk OAuth secrets if needed → register → start) and
 enforces the **capability gate on every tool call**.

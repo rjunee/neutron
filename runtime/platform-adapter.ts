@@ -41,7 +41,7 @@
  *     direct import via the adapter; ships LocalPlatformAdapter
  *     (Open stub) + ManagedPlatformAdapter (current behavior).
  *     EXPLICITLY OUT OF SCOPE: physical repo split (Sprint C),
- *     publishing @neutronai/core-sdk (Sprint E), check-open-purity
+ *     publishing @neutronai/cores-sdk (Sprint E), check-open-purity
  *     lint (Sprint F).
  */
 

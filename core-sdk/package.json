@@ -1,9 +1,0 @@
-{
-  "name": "@neutronai/core-sdk",
-  "type": "module",
-  "main": "./index.ts",
-  "private": true,
-  "dependencies": {
-    "@neutronai/cores-sdk": "workspace:*"
-  }
-}

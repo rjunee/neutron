@@ -33,7 +33,6 @@
     "tools",
     "migrations",
     "persistence",
-    "core-sdk",
     "jwt-validator",
     "channels",
     "chat-core",

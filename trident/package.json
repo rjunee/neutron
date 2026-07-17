@@ -6,7 +6,7 @@
   "dependencies": {
     "@neutronai/auth": "workspace:*",
     "@neutronai/channels": "workspace:*",
-    "@neutronai/core-sdk": "workspace:*",
+    "@neutronai/cores-sdk": "workspace:*",
     "@neutronai/logger": "workspace:*",
     "@neutronai/loop": "workspace:*",
     "@neutronai/migrations": "workspace:*",

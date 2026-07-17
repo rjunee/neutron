@@ -40,7 +40,7 @@ import type {
 /**
  * Minimal structural view of a manifest secret declaration — only the
  * fields this module reads. Defined locally (rather than importing
- * `core-sdk`'s `ManifestSecret`) so the bundled registry's slightly looser
+ * `@neutronai/cores-sdk`'s `ManifestSecret`) so the bundled registry's slightly looser
  * `scope?: string | undefined` shape stays assignable under
  * `exactOptionalPropertyTypes`.
  */
