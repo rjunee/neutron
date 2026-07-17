@@ -35,8 +35,8 @@
  *
  * Spec-vs-current diff (the brief's mandatory section):
  *
- *   SPEC § 3.4: import_running is a transit phase that advances to
- *   import_analysis_presented when the ImportJobRunner completes.
+ *   Intended contract: import_running is a transit phase that advances
+ *   to import_analysis_presented when the ImportJobRunner completes.
  *   Detection mechanism: cron-tick polling per § S5.
  *
  *   CURRENT WIRING (pre-S12): engine.notifyImportUpload polls once. No

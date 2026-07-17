@@ -1884,10 +1884,11 @@ pass. Each pass clears + re-ranks the full open set, so no row keeps a stale ran
 Every surface already requests this order, so the LLM ranking flows to every
 rendered list with no per-caller change; with no rows ranked yet it degrades to
 pure focus-score ordering. The
-prioritize cron is wired in `gateway/composition/build-core-modules.ts` behind
-`tasks.enable_task_prioritize_cron` + `tasks.task_prioritizer.llm` (mirrors the
-focus-score / nudge-engine gates); registering it with a null llm is safe — the
-handler runs the deterministic fallback until a credential exists.
+prioritize cron is wired in `gateway/composition/build-core-modules.ts` gated
+SOLELY by `tasks.enable_task_prioritize_cron` (it registers whenever that is
+true); `tasks.task_prioritizer.llm` is an OPTIONAL dependency, not a second gate —
+registering with a null llm is safe, the handler runs the deterministic ranking
+until a credential exists.
 
 ## Reminders — cadence + fire-time composition (`reminders/`)
 
@@ -3592,8 +3593,10 @@ loop, started once per instance alongside the wedge watchdog
   captured when a runner is built once at boot):** the onboarding warm-pool
   pre-warm (`open/composer.ts` `prewarmSubstrate` — the spawn that HEATS the REPL
   and stamps `record.model`), the live-agent turn runner
-  (`build-live-agent-turn.ts`, resolved inside the per-turn body), the LLM router
-  default (`build-llm-router.ts`), the project-opening / project-doc / phase-spec
+  (`build-live-agent-turn.ts`, resolved inside the per-turn body), the onboarding
+  post-turn extractor (`onboarding/interview/post-turn-extractor.ts`, resolves via
+  `getBestModel()` — the successor to the deleted `build-llm-router.ts`/`llm-router.ts`
+  after K11b1 #243), the project-opening / project-doc / phase-spec
   / agent-watcher composers, the one-shot Core LLM (`mount-open-cores.ts`), the
   onboarding suggesters + post-turn extractor, the synthesis/scribe/reflection
   defaults, and the import Pass-1/Pass-2 callers. The agent-dispatch
@@ -4014,10 +4017,16 @@ checked by `scripts/ci/typecheck-all.sh`'s dynamic tsconfig matrix.
 
 ## Onboarding project removal ("ignore X")
 
-At `projects_proposed` the freeform reply routes through the LLM router
-(`llm-router.ts`), which extracts a `removed_projects` array; the engine merges
-`union(seeded, extracted) minus removed_projects` so a named project is dropped
-before materialization. Removal verbs include drop / cut / skip / remove /
+At `projects_proposed` the freeform reply is processed by the onboarding post-turn
+extractor (`onboarding/interview/post-turn-extractor.ts` — successor to the deleted
+`llm-router.ts` after K11b1 #243). It extracts a transient `removed_projects` array,
+subtracts those names from `phase_state.primary_projects`, AND records the explicit
+drops under `phase_state.dropped_projects` (additive across turns; a later explicit
+re-add of a name clears its prior drop). At finalization, `resolveProjects` in
+`onboarding/openings/finalize.ts` EXCLUDES `dropped_projects` from BOTH union sources
+(`phase_state.primary_projects` and the import's re-pulled `proposed_projects`) so a
+named project is never materialized — the deleted engine/router no longer performs this
+merge. Removal verbs include drop / cut / skip / remove /
 **ignore / exclude / leave out / don't set up** (the last four added 2026-06-20
 after "ignore real estate investing" was acknowledged but not honored). Projects
 are also renameable/deletable later from settings — the prompt copy says so.

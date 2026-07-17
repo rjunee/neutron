@@ -428,7 +428,7 @@ resolve_src_dir() {
 
 # Installer data-dir default. The shared resolve_neutron_home floors at the
 # LEGACY flat $HOME/neutron; upgrade that floor to the hardened nested
-# $HOME/neutron/data (single ~/neutron umbrella, SPEC § 2.6) while honoring any
+# $HOME/neutron/data (single ~/neutron umbrella, SPEC § 2.8 — Naming registry) while honoring any
 # explicit pin. A user who wants a different data dir pins NEUTRON_HOME to ANY
 # other path — that is returned verbatim and never upgraded. uninstall.sh carries
 # a byte-identical copy so both agree on the dir to create/remove.

@@ -1,16 +1,31 @@
 # Refactor Orchestration — STATUS (resume anchor)
 
-**Purpose:** the live state of the autonomous refactor window. Read this + the plan
-(`docs/plans/2026-07-02-world-class-refactor-plan.md` §1.5 protocol, §17 checklist) at
-the top of every orchestrator turn. This file is the single source of truth for "where
-are we"; the plan is the source of truth for "what/how". Keep this file updated as units
-land — it is what a fresh context reads to resume without re-deriving anything.
+> **✅ WINDOW CLOSED — 2026-07-16. This resume anchor is now historical.** The world-class refactor
+> window is COMPLETE: all trident-executed units merged through K10 (#375); the tail landed as
+> #311–#390. Deliberate non-merges in the Open tree: **MG-3 = KEEP** (#374), **N3-credential =
+> DEFERRED**, **W3 = DEFERRED** (+ W4/W6 native-shell slipped post-window; **K4b** slug-flow
+> deletion also deferred) — tracked as GitHub issues. (Separately, the **M-lane M1–M6** is Managed
+> cross-repo in `neutron-managed`, so it stays unchecked in the plan §17 ledger. N2 + the N3 rename
+> landed together in #367; only N3-credential is deferred.) The `SPEC.md` completion section carries
+> the single complete account. For the
+> authoritative current state read `SPEC.md` §"The world-class refactor window — COMPLETE
+> (2026-07-16)" + the `SPEC.md` Decisions Log, and the per-unit ticks in the plan
+> (`docs/plans/2026-07-02-world-class-refactor-plan.md` §17). The orchestration log below is
+> preserved as provenance; only this file's window-state marker has been flipped to CLOSED.
+
+**Purpose (HISTORICAL — window CLOSED; superseded by `SPEC.md`).** While the window was OPEN this
+file was the live resume anchor — the single source of truth for "where are we", read at the top of
+every orchestrator turn alongside the plan (`docs/plans/2026-07-02-world-class-refactor-plan.md`
+§1.5 protocol, §17 checklist). That role has ended: the window is complete, so nothing updates this
+file anymore and a fresh context should resume from `SPEC.md` (see the banner) + the plan §17 ledger.
+The description below is retained as-written for provenance.
 
 ---
 
 ## Snapshot
 
-- **Window state:** OPEN (kicked off 2026-07-03). All other work on these repos paused.
+- **Window state:** CLOSED 2026-07-16 (kicked off 2026-07-03) — all tail units merged through K10;
+  see the CLOSED banner at the top of this file. Historical snapshot below.
 - **Driver:** this orchestrator session — Opus 4.8, `/effort high`, ultracode OFF.
   High-judgment/low-token: adjudicates diff-vs-acceptance, reconciles line-drift, ticks
   §17, merges. Building is delegated to per-unit worktree agents on routed models.

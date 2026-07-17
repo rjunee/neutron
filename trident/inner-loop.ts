@@ -229,7 +229,8 @@ export function buildWorkflowArgs(input: InnerLoopInput): Record<string, unknown
     // workflow appends nothing (a clean no-op). The `.mjs` cannot import this helper
     // (no module resolution), so the derivation lives here.
     reflectionGuidance: buildReflectionGuidance(input.reflection_context),
-    // FABLE-ORCHESTRATOR model routing (SPEC § Fable-orchestrator, 2026-07-02).
+    // FABLE-ORCHESTRATOR model routing (model routing per the refactor plan protocol,
+    // `docs/plans/2026-07-02-world-class-refactor-plan.md` § 1.5; introduced 2026-07-02).
     // The single-source-of-truth model IDS resolved from runtime/models.ts and
     // threaded to the inner workflow, which routes them per-role by agent label
     // (plan:fable + argus:synthesis → fable; forge:* → sonnet/opus by the
