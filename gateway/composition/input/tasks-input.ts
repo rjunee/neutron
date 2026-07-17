@@ -91,6 +91,8 @@ export interface TasksCompositionInput {
       llm: LlmCallFn | null
       personaLoader?: PersonaPromptLoader | null
       timezone?: string
+      /** Override Date.now (test seam). Production uses the real clock. */
+      now?: () => number
       timeout_ms?: number
       model?: string
     }
