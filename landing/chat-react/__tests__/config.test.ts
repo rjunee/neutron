@@ -5,7 +5,10 @@ import {
   appWsTopicId,
   buildWsUrl,
   decodeJwtSub,
+  detectClientTimezone,
   resolveBootstrapConfig,
+  wsUrlForScope,
+  type BootstrapConfig,
   type WindowLike,
 } from '../config.ts'
 
@@ -50,6 +53,104 @@ describe('buildWsUrl + appWsTopicId', () => {
   })
   it('forms app:<user_id> topics', () => {
     expect(appWsTopicId('sam')).toBe('app:sam')
+  })
+  // ISSUES #40 — the owner's IANA zone rides the same connect query string.
+  it('appends tz when a timezone is supplied', () => {
+    const u = buildWsUrl('https:', 'h.test', 't', null, 'dev-1', 'America/New_York')
+    expect(u).toContain('tz=America%2FNew_York')
+  })
+  it('omits tz when null / undefined / empty', () => {
+    expect(buildWsUrl('https:', 'h.test', 't', null, 'dev-1', null)).not.toContain('tz=')
+    expect(buildWsUrl('https:', 'h.test', 't', null, 'dev-1')).not.toContain('tz=')
+    expect(buildWsUrl('https:', 'h.test', 't', null, 'dev-1', '')).not.toContain('tz=')
+  })
+})
+
+describe('detectClientTimezone', () => {
+  it('returns the runtime IANA zone (a non-empty string in the bun test env)', () => {
+    const tz = detectClientTimezone()
+    // The test runtime always resolves a zone; assert it is a plausible IANA id.
+    expect(typeof tz).toBe('string')
+    expect((tz as string).length).toBeGreaterThan(0)
+    // A real IANA identifier constructs cleanly with Intl.
+    expect(() => new Intl.DateTimeFormat(undefined, { timeZone: tz as string })).not.toThrow()
+  })
+  it('returns the resolved zone when the injected resolver yields one', () => {
+    expect(detectClientTimezone(() => 'America/New_York')).toBe('America/New_York')
+  })
+  // BLOCKER 2 mutation-kill — removing the try/catch or the empty/missing guard
+  // reddens these (each would otherwise return '' / throw instead of null).
+  it('returns null when Intl THROWS', () => {
+    expect(
+      detectClientTimezone(() => {
+        throw new RangeError('no Intl timezone support')
+      }),
+    ).toBeNull()
+  })
+  it('returns null when the resolver yields empty / missing', () => {
+    expect(detectClientTimezone(() => '')).toBeNull()
+    expect(detectClientTimezone(() => undefined)).toBeNull()
+  })
+  it('a null detection makes the ws url OMIT tz (no empty tz= param)', () => {
+    const noTz = detectClientTimezone(() => {
+      throw new Error('boom')
+    })
+    const u = buildWsUrl('https:', 'h.test', 't', null, 'dev-1', noTz)
+    expect(u).not.toContain('tz=')
+  })
+})
+
+describe('resolveBootstrapConfig threads the detected timezone', () => {
+  it('sets config.timeZone and includes tz on the initial ws url', () => {
+    const cfg = resolveBootstrapConfig(win({ __neutron_user_id: 'sam' }))
+    // The detected zone (always present in the test env) is captured on the
+    // config AND rides the initial bootstrap ws url.
+    expect(typeof cfg.timeZone).toBe('string')
+    expect((cfg.timeZone as string).length).toBeGreaterThan(0)
+    expect(cfg.wsUrl).toContain('tz=')
+  })
+})
+
+// ISSUES #40 — the URL FACTORY the controller calls for EVERY connect (initial,
+// project switch, reconnect). This is the mutation-kill for BLOCKER 1: dropping
+// `config.timeZone` from the per-scope build (as the old main.tsx `wsUrlFor` did)
+// reddens these.
+describe('wsUrlForScope — per-connect url factory carries tz', () => {
+  function cfg(over: Partial<BootstrapConfig> = {}): BootstrapConfig {
+    return {
+      wsUrl: 'wss://h.test/ws/app/chat?platform=web&token=t',
+      topicId: 'app:sam',
+      userId: 'sam',
+      projectId: null,
+      projects: [],
+      origin: 'https://h.test',
+      deviceId: 'dev-1',
+      timeZone: 'America/New_York',
+      token: 'dev:sam',
+      ...over,
+    }
+  }
+
+  it('carries tz on the General (null project) socket url', () => {
+    expect(wsUrlForScope(cfg(), null)).toContain('tz=America%2FNew_York')
+  })
+
+  it('carries tz on a PROJECT-SWITCH socket url (not just the initial connect)', () => {
+    const u = wsUrlForScope(cfg(), 'proj-9')
+    expect(u).toContain('project_id=proj-9')
+    expect(u).toContain('tz=America%2FNew_York')
+  })
+
+  it('omits tz when the runtime resolved no zone (timeZone null or absent)', () => {
+    expect(wsUrlForScope(cfg({ timeZone: null }), 'proj-9')).not.toContain('tz=')
+    // Field entirely absent (older config literal) → also omits tz.
+    const { timeZone: _omit, ...noTz } = cfg()
+    expect(wsUrlForScope(noTz as BootstrapConfig, 'proj-9')).not.toContain('tz=')
+  })
+
+  it('honors an explicit wsUrlOverride verbatim (dev/test single fixed socket)', () => {
+    const u = wsUrlForScope(cfg({ wsUrlOverride: 'wss://fixed.test/ws' }), 'proj-9')
+    expect(u).toBe('wss://fixed.test/ws')
   })
 })
 

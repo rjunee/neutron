@@ -61,6 +61,7 @@ import {
   createAppWsSurface,
   type AppWsSurface,
 } from '@neutronai/gateway/http/app-ws-surface.ts'
+import { persistOwnerTimezoneIfChanged } from '@neutronai/gateway/storage/owner-metadata.ts'
 import type { AppWsAuthResolver } from '@neutronai/channels/adapters/app-ws/auth.ts'
 import type { AppWsSessionRegistry } from '@neutronai/channels/adapters/app-ws/session-registry.ts'
 import type { ChatCommandFilter } from '@neutronai/contracts/chat-command-filter.ts'
@@ -1105,6 +1106,30 @@ export function wireAppWs(ctx: OpenWiringContext, deps: WireAppWsDeps): WiredApp
       }
       // FIX 1 (#85) — refresh the rail if this turn changed the project set.
       emitProjectsChangedIfChanged(user_id)
+    },
+    // ISSUES #40 (owner-timezone WRITE path) — persist the IANA zone the client
+    // reported on connect so the daily nudge keys the owner's local day on THEIR
+    // zone (the #378 `readOwnerTimezone` consumer), not the LA default.
+    //
+    // AUTHORIZATION: the app-ws auth resolver binds MANY `user_id`s to the same
+    // instance `project_slug` (a shared project can carry non-owner guests), so
+    // authentication alone is not enough — the owner timezone drives the OWNER's
+    // nudges, so ONLY the instance owner may change it. Gate on
+    // `user_id === OWNER_USER_ID` and SILENTLY IGNORE a non-owner (no persist, no
+    // socket error). Keyed on the socket's auth-resolved `ownerSlug` (single-owner
+    // Open → the instance slug this `db` is scoped to); `persistOwnerTimezoneIfChanged`
+    // then validates the IANA id (garbage rejected, never written) and de-dupes
+    // (unchanged → no redundant upsert). Best-effort — the surface wraps this
+    // fire-and-forget, so a persist failure can't disturb the chat socket.
+    on_client_timezone: async ({ user_id, project_slug: ownerSlug, tz }) => {
+      if (user_id !== OWNER_USER_ID) {
+        log.warn('owner_timezone_non_owner_rejected', { project: project_slug, user: user_id })
+        return
+      }
+      const result = await persistOwnerTimezoneIfChanged(db, ownerSlug, tz)
+      if (result === 'invalid') {
+        log.warn('owner_timezone_rejected', { project: project_slug, tz })
+      }
     },
   })
 
