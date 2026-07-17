@@ -117,6 +117,6 @@ Cross-refs:
 
 - `docs/plans/tasks-core-tier1-brief.md` — S1 sprint brief (this work)
 - `docs/SYSTEM-OVERVIEW.md § 8.7.1` — narrative + integration map
-- `SPEC.md § Phases→Steps` — Tier 1 Cores buildout order (TODO(K10): root SPEC.md not yet in this repo; K10 recreates it)
+- `SPEC.md § Phases→Steps` — Tier 1 Cores (free-Core inventory)
 - `cores/sdk/SDK-CONTRACT.md` — manifest contract
 - `tasks/store.ts` — canonical substrate

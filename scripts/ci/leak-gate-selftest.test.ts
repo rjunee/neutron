@@ -129,19 +129,43 @@ describe('G8 leak-gate — planted findings FAIL', () => {
     }
   })
 
-  test('RT1: a root SPEC.md trips forbidden-path (Ralph-mode tripwire)', () => {
-    // `detectRalphMode` (trident/git-mode.ts) flips a repo into Ralph-governed
-    // mode the instant a root SPEC.md exists. An accidental root SPEC.md mid
-    // refactor-window would silently change `/code` behavior, so it's banned
-    // as a forbidden root file exactly like STATUS.md/ISSUES.md/etc.
+  test('the retained forbidden root files each trip forbidden-path', () => {
+    // K10 un-banned SPEC.md but the remaining FORBIDDEN_EXACT entries stay
+    // banned as carve tripwires against Managed's private root docs re-entering
+    // the public tree. Pin EACH one individually so deleting any entry from the
+    // list fails this suite (Codex P2 — the `signup/` prefix test alone did not
+    // cover FORBIDDEN_EXACT).
+    for (const name of ['STATUS.md', 'ISSUES.md', 'CLAUDE.md', 'AGENTS.md']) {
+      const dir = freshTree()
+      try {
+        writeFileSync(join(dir, name), '# forbidden root file\n')
+        const { code, out } = runGate(dir)
+        expect(out).toContain('[forbidden-path]')
+        expect(out).toContain(name)
+        expect(out).toContain('LEAK GATE: FAIL')
+        expect(code).toBe(1)
+      } finally {
+        rmSync(dir, { recursive: true, force: true })
+      }
+    }
+  })
+
+  test('RT1: a root SPEC.md is allowed (K10 intentionally introduced one)', () => {
+    // K10 lands a real root `SPEC.md` (the public master spec), which flips the
+    // repo into Ralph-governed mode (`detectRalphMode` keys off a root SPEC.md).
+    // That flip is now INTENDED, so a root SPEC.md must NOT trip forbidden-path.
+    // This test is the inversion of the pre-K10 tripwire, which banned a root
+    // SPEC.md; it pins that an otherwise-clean tree WITH a root SPEC.md stays
+    // silent. The remaining root files (STATUS.md/ISSUES.md/CLAUDE.md/AGENTS.md)
+    // stay banned — covered by the "forbidden Managed structural path" test and
+    // the FORBIDDEN_EXACT list.
     const dir = freshTree()
     try {
       writeFileSync(join(dir, 'SPEC.md'), '# spec\n')
       const { code, out } = runGate(dir)
-      expect(out).toContain('[forbidden-path]')
-      expect(out).toContain('SPEC.md')
-      expect(out).toContain('LEAK GATE: FAIL')
-      expect(code).toBe(1)
+      expect(out).not.toContain('[forbidden-path]')
+      expect(out).toContain('LEAK GATE: SILENT')
+      expect(code).toBe(0)
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }

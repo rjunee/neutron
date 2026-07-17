@@ -61,7 +61,7 @@ Cross-refs:
 
 - `docs/plans/research-core-tier1-brief.md` — S1 sprint brief (the
   locked spec for this directory).
-- `SPEC.md § Phases→Steps` — Tier 1 Cores buildout (TODO(K10): root SPEC.md not yet in this repo; K10 recreates it)
+- `SPEC.md § Phases→Steps` — Tier 1 Cores (free-Core inventory)
 - `cores/sdk/SDK-CONTRACT.md` — author-facing API (incl. the new
   `network:browse` capability semantics)
 - `cores/runtime/` — install / capability gating / audit log

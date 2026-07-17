@@ -44,4 +44,4 @@ The markdown-first surface modelled on Vajra (`~/vajra/tasks.md`, `~/vajra/gatew
 
 This module must NOT be the source of truth for STATUS.md narrative (the DB owns the projection block; narrative outside the marked block stays user-owned) or duplicate reminder state (`reminders/` owns reminders).
 
-Cross-refs: `docs/engineering-plan.md § B.P6`, `docs/plans/P6-task-system-overhaul-sprint-brief.md`, `SPEC.md § Phases→Steps` (TODO(K10): root SPEC.md not yet in this repo; K10 recreates it), STATUS.md decisions log entries from 2026-04-25 (per-project tabs + Focus view).
+Cross-refs: `docs/engineering-plan.md § B.P6`, `docs/plans/P6-task-system-overhaul-sprint-brief.md`, `SPEC.md § Phases→Steps`, `docs/plans/wave3-tabbed-interface-build-plan.md` (per-project tabs + Focus view).
