@@ -73,4 +73,21 @@ describe('InMemoryWebChatSenderRegistry', () => {
     reg.unregister('web:u-1', sendA)
     expect(reg.send('web:u-1', { type: 'agent_message', body: 'x' })).toBe(false)
   })
+  test('send PROPAGATES a throwing sender — MUST NOT swallow (T10; INVARIANTS #36/#70)', () => {
+    // LOAD-BEARING guarantee: when the per-socket sender throws (closed WS),
+    // send() RE-THROWS so the onboarding engine's `sendButtonPrompt` converts it
+    // to `InterviewError('send_failed')`, leaves the row's `delivered_at` NULL,
+    // and reconnect re-emit recovers the user. Catching here silently downgrades
+    // a delivery failure to a wrongly-stamped `delivered` row (the T10 silent-drop
+    // class). This assertion DISCRIMINATES where deliver.test cannot: wrapping
+    // `sender(event)` in a swallowing try/catch in the source — whether it then
+    // returns true OR false — makes this expectation FAIL (mutation-kill), while
+    // deliver's best-effort push already swallows the throw so its
+    // `delivered_live:false` assertion stays green under the try/catch→false form.
+    const reg = new InMemoryWebChatSenderRegistry()
+    reg.register('web:u-1', () => {
+      throw new Error('closed ws')
+    })
+    expect(() => reg.send('web:u-1', { type: 'agent_message', body: 'hi' })).toThrow('closed ws')
+  })
 })
