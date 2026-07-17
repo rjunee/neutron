@@ -1460,6 +1460,12 @@ export function buildOpenGraphComposer(
       uploadGid,
       importWatchHolder,
       loopRegistry,
+      // S1/S2 — the `/api/upload/*` routes are non-gated at the HTTP layer, so
+      // the wide-bind owner-bearer gate is enforced at the handler `auth` seam.
+      // Reuses the SAME `bindIsLoopback` classification + `appWsToken` owner
+      // bearer the app-ws surface's `appOwnerAuth` gate uses.
+      bindIsLoopback,
+      ownerBearer: appWsToken,
     })
     // The sweeper `stop()` hook collected into `wireUploads`'s `cleanups` is
     // re-registered HERE, at the carve site, so it lands at the SAME point in the

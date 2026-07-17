@@ -64,6 +64,20 @@ export interface WireUploadsDeps {
    * `CompositionInput.loop_registry` so the gateway boot line inventories it too.
    */
   loopRegistry: LoopRegistry
+  /**
+   * S1/S2 wide-bind upload gate. True when the gateway binds ONLY loopback
+   * (`isLoopbackBindHost(bindHost)`); on loopback the upload `auth` shim allows
+   * all (unchanged dev ergonomics). On a WIDE bind the shim requires the owner
+   * bearer below.
+   */
+  bindIsLoopback: boolean
+  /**
+   * The per-install owner bearer (== the app-ws `appWsToken` / `selectAppWsToken`).
+   * On a WIDE bind an upload must present `Authorization: Bearer <ownerBearer>` or
+   * it is rejected before any disk write / engine notify. Mirrors the app-ws /
+   * docs / credentials surfaces' owner gate.
+   */
+  ownerBearer: string
 }
 
 export interface WiredUploads {
@@ -89,8 +103,19 @@ export async function wireUploads(
   deps: WireUploadsDeps,
 ): Promise<WiredUploads> {
   const { db, owner_home, project_slug } = ctx
-  const { landing, uploadUid, uploadGid, importWatchHolder, loopRegistry } = deps
+  const { landing, uploadUid, uploadGid, importWatchHolder, loopRegistry, bindIsLoopback, ownerBearer } =
+    deps
   const cleanups: Array<() => void | Promise<void>> = []
+
+  // S1/S2 — the `/api/upload/*` routes are in the NON-GATED HTTP route set, so
+  // the wide-bind fail-closed guarantee has to be enforced at the handler `auth`
+  // seam (there is no upstream cookie/bearer gate). On loopback this allows all
+  // (dev unchanged); on a WIDE bind an upload MUST present the owner bearer or it
+  // is rejected before any body parse, disk write, or engine notify. The SAME
+  // shim gates both the single-shot and chunked handlers. Mirrors the app-ws
+  // `appOwnerAuth` gate (open/composer.ts).
+  const { buildUploadOwnerBearerAuth } = await import('@neutronai/gateway/upload/upload-auth.ts')
+  const uploadAuth = buildUploadOwnerBearerAuth({ bindIsLoopback, ownerBearer })
 
   // Path 1 — the upload handler still drives the engine's import pipeline
   // (synthesis + cron write the project DOCUMENTS), but Path 1 has no accept
@@ -117,6 +142,7 @@ export async function wireUploads(
     gid: uploadGid,
     project_slug,
     engine: engineForUpload,
+    auth: uploadAuth,
     onTopicIdMissing: () => {
       log.warn('topic_id_missing', {
         header: TOPIC_ID_HEADER,
@@ -152,6 +178,7 @@ export async function wireUploads(
     project_slug,
     engine: engineForUpload,
     store: uploadSessionStore,
+    auth: uploadAuth,
     onTopicIdMissing: () => {
       log.warn('chunked_topic_id_missing', { header: TOPIC_ID_HEADER, fallback: TOPIC_ID_FALLBACK })
     },

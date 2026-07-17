@@ -457,6 +457,14 @@ export interface BuildImportUploadHandlerInput {
   project_slug: string
   engine: Pick<InterviewEngine, 'notifyImportUpload'>
   /**
+   * Optional owner-bearer auth gate — threaded from the composer's wide-bind
+   * policy (`open/wiring/uploads.ts` → `buildUploadOwnerBearerAuth`). On a
+   * loopback bind it allows all (unchanged dev behaviour); on a WIDE bind it
+   * REQUIRES `Authorization: Bearer <owner_bearer>` and the handler 401s before
+   * any disk write / engine notify. Absent → allow-all (composer-direct embeds /
+   * legacy tests that never wire a wide bind). */
+  auth?: ImportUploadDeps['auth']
+  /**
    * Optional sink for the once-per-process deprecation log fired when the
    * inbound `X-Neutron-Topic-Id` header is missing. The per-instance
    * gateway wires this to a one-shot `console.warn`; tests pass a recorder.
@@ -536,6 +544,7 @@ export function buildImportUploadHandler(
       },
       engine: input.engine,
     }
+    if (input.auth !== undefined) deps.auth = input.auth
     if (input.fs !== undefined) deps.fs = input.fs
     if (input.maxBytes !== undefined) deps.maxBytes = input.maxBytes
     return handleImportUpload(req, deps)
