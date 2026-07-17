@@ -759,6 +759,13 @@ export interface BuildChunkedUploadHandlerInput {
   project_slug: string
   engine: Pick<InterviewEngine, 'notifyImportUpload'>
   store: UploadSessionStore
+  /**
+   * Optional owner-bearer auth gate — same contract + wiring as the legacy
+   * single-shot handler (`import-upload-handler.ts`). On a loopback bind it
+   * allows all; on a WIDE bind it REQUIRES `Authorization: Bearer <owner_bearer>`
+   * and the handler 401s before any disk write / engine notify. Absent →
+   * allow-all. */
+  auth?: ChunkedUploadDeps['auth']
   /** Filesystem shim — defaulted to `node:fs/promises` inside the closure. */
   fs?: ChunkedUploadFs
   /** Override the size cap (tests). */
@@ -816,6 +823,7 @@ export function buildChunkedUploadHandler(
       engine: input.engine,
       store: input.store,
     }
+    if (input.auth !== undefined) deps.auth = input.auth
     if (input.fs !== undefined) deps.fs = input.fs
     if (input.maxBytes !== undefined) deps.maxBytes = input.maxBytes
     if (input.chunkSizeBytes !== undefined) deps.chunkSizeBytes = input.chunkSizeBytes

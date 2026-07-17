@@ -92,6 +92,8 @@ describe('wireUploads — handler wiring + sweeper cleanup + resume null-guard',
       uploadGid: process.getgid?.() ?? 0,
       importWatchHolder,
       loopRegistry: new LoopRegistry(),
+      bindIsLoopback: true,
+      ownerBearer: 'test-owner-bearer',
     })
     expect(typeof w.import_upload_handler).toBe('function')
     expect(typeof w.chunked_upload_handler).toBe('function')
@@ -111,6 +113,8 @@ describe('wireUploads — handler wiring + sweeper cleanup + resume null-guard',
       uploadGid: process.getgid?.() ?? 0,
       importWatchHolder,
       loopRegistry: new LoopRegistry(),
+      bindIsLoopback: true,
+      ownerBearer: 'test-owner-bearer',
     })
     expect(w.import_resume_handler).toBeUndefined()
     // The upload surface is still fully wired regardless of the resume guard.
@@ -130,6 +134,8 @@ describe('wireUploads — handler wiring + sweeper cleanup + resume null-guard',
       uploadGid: process.getgid?.() ?? 0,
       importWatchHolder,
       loopRegistry: new LoopRegistry(),
+      bindIsLoopback: true,
+      ownerBearer: 'test-owner-bearer',
     })
     expect(w.import_resume_handler).toBeUndefined()
     // The upload surface is still fully wired regardless of the resume guard.
@@ -150,6 +156,8 @@ describe('wireUploads — late-bound importWatchHolder reader/setter share one r
       uploadGid: process.getgid?.() ?? 0,
       importWatchHolder,
       loopRegistry: new LoopRegistry(),
+      bindIsLoopback: true,
+      ownerBearer: 'test-owner-bearer',
     })
 
     // SET the watch LATE — exactly as the composer does far downstream, on the
@@ -179,5 +187,96 @@ describe('wireUploads — late-bound importWatchHolder reader/setter share one r
     // user_id through both, proving the reader + setter share one reference.
     expect(notified).toEqual(['owner'])
     expect(watched).toEqual(['owner'])
+  })
+})
+
+describe('wireUploads — S1/S2 wide-bind owner-bearer gate is threaded into BOTH handlers', () => {
+  // Proves the composer wiring (`auth: uploadAuth` on both handler builds) is
+  // live: on a WIDE bind an upload with no/invalid bearer is REJECTED before any
+  // disk write or engine notify, and a valid owner bearer is accepted. A mutation
+  // that drops `auth: uploadAuth` from either handler build fails these.
+  const WIDE_BEARER = 'wide-bind-owner-bearer-abc123'
+
+  function uploadForm(): FormData {
+    const form = new FormData()
+    const ab = new ArrayBuffer(ZIP_FIXTURE.byteLength)
+    new Uint8Array(ab).set(ZIP_FIXTURE)
+    form.append('file', new File([ab], 'claude.zip', { type: 'application/zip' }))
+    return form
+  }
+
+  test('single-shot handler: wide bind rejects no-bearer, accepts owner bearer', async () => {
+    const importWatchHolder: { watch?: (user_id: string) => void } = {}
+    const notified: string[] = []
+    const w = await wireUploads(makeCtx(), {
+      landing: makeLanding({ onNotify: (input) => notified.push(input.user_id) }),
+      uploadUid: process.getuid?.() ?? 0,
+      uploadGid: process.getgid?.() ?? 0,
+      importWatchHolder,
+      loopRegistry: new LoopRegistry(),
+      bindIsLoopback: false,
+      ownerBearer: WIDE_BEARER,
+    })
+
+    // No bearer → rejected, nothing written, engine NOT called.
+    const rejected = await w.import_upload_handler(
+      new Request('http://box.local/api/upload/claude', {
+        method: 'POST',
+        headers: { 'x-neutron-topic-id': appWsTopicId('owner') },
+        body: uploadForm(),
+      }),
+    )
+    expect(rejected.status).toBe(401)
+    expect(existsSync(join(tmpDir, 'imports'))).toBe(false)
+    expect(notified).toEqual([])
+
+    // Valid owner bearer → accepted, written, engine called.
+    const accepted = await w.import_upload_handler(
+      new Request('http://box.local/api/upload/claude', {
+        method: 'POST',
+        headers: { 'x-neutron-topic-id': appWsTopicId('owner'), authorization: `Bearer ${WIDE_BEARER}` },
+        body: uploadForm(),
+      }),
+    )
+    expect(accepted.status).toBe(200)
+    expect(existsSync(join(tmpDir, 'imports', 'claude.zip'))).toBe(true)
+    expect(notified).toEqual(['owner'])
+    for (const c of w.cleanups) c()
+  })
+
+  test('chunked handler: wide bind rejects no-bearer start, accepts owner bearer', async () => {
+    const importWatchHolder: { watch?: (user_id: string) => void } = {}
+    const w = await wireUploads(makeCtx(), {
+      landing: makeLanding({ onNotify: () => {} }),
+      uploadUid: process.getuid?.() ?? 0,
+      uploadGid: process.getgid?.() ?? 0,
+      importWatchHolder,
+      loopRegistry: new LoopRegistry(),
+      bindIsLoopback: false,
+      ownerBearer: WIDE_BEARER,
+    })
+
+    const startBody = JSON.stringify({
+      filename: 'export.zip',
+      total_bytes: 4096,
+      mime_type: 'application/zip',
+    })
+
+    const rejected = await w.chunked_upload_handler(
+      new Request('http://box.local/api/upload/chatgpt/start', { method: 'POST', body: startBody }),
+    )
+    expect(rejected?.status).toBe(401)
+    // No sparse `.part` file was created on the reject path.
+    expect(existsSync(join(tmpDir, 'imports'))).toBe(false)
+
+    const accepted = await w.chunked_upload_handler(
+      new Request('http://box.local/api/upload/chatgpt/start', {
+        method: 'POST',
+        headers: { authorization: `Bearer ${WIDE_BEARER}` },
+        body: startBody,
+      }),
+    )
+    expect(accepted?.status).toBe(200)
+    for (const c of w.cleanups) c()
   })
 })
