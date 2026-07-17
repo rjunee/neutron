@@ -35,6 +35,7 @@ import {
   resolveOwnerDay,
 } from '../tasks/p6/nudge-engine.ts'
 import {
+  persistOwnerTimezoneIfChanged,
   readOwnerTimezone,
   writeOwnerTimezone,
 } from '../storage/owner-metadata.ts'
@@ -466,6 +467,39 @@ describe('build-core-modules composes instance_metadata.timezone into the nudge 
     expect(pick!.day).toBe(
       resolveOwnerDay(CROSSOVER_NOW_UTC, 'America/New_York'),
     )
+    expect(pick!.day).not.toBe(
+      resolveOwnerDay(CROSSOVER_NOW_UTC, DEFAULT_OWNER_TIMEZONE),
+    )
+  })
+
+  test('ISSUES #40 WRITE-PATH round-trip: a client-reported NYC zone persists → composed cron keys the NYC day (not LA)', async () => {
+    // The FULL loop this unit closes: the app-ws surface receives the client's
+    // reported IANA zone on connect and calls `persistOwnerTimezoneIfChanged`
+    // (the SAME server chokepoint the `on_client_timezone` hook binds). That
+    // write is what the #378 read (`readOwnerTimezone`, wired into the composer)
+    // consumes — so a non-LA owner's daily nudge keys on THEIR local day.
+    const OWNER = 't-client-roundtrip'
+    // 1) Client sends "America/New_York" → validated + persisted.
+    expect(await persistOwnerTimezoneIfChanged(h.db, OWNER, 'America/New_York')).toBe(
+      'written',
+    )
+    // 2) The nudge cron's read now resolves the owner's actual zone.
+    expect(readOwnerTimezone(h.db, OWNER)).toBe('America/New_York')
+
+    const t1 = await h.tasks.create({
+      project_slug: OWNER,
+      title: 'NYC focus',
+      priority: 3,
+    })
+    // 3) The REAL composed cron keys the pick on the NYC day, not the LA default.
+    await fireComposedNudge(OWNER, t1.id)
+
+    const pick = readPick(h.db, OWNER)
+    expect(pick).not.toBeNull()
+    expect(pick!.day).toBe('2026-05-24')
+    expect(pick!.day).toBe(resolveOwnerDay(CROSSOVER_NOW_UTC, 'America/New_York'))
+    // Discriminator: had the write path been a no-op (LA default), this would be
+    // '2026-05-23'.
     expect(pick!.day).not.toBe(
       resolveOwnerDay(CROSSOVER_NOW_UTC, DEFAULT_OWNER_TIMEZONE),
     )

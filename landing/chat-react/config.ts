@@ -92,6 +92,17 @@ export interface BootstrapConfig {
    *  read-tick self-exclusion). Carried on the WS URL `&device_id=`. */
   deviceId: string
   /**
+   * ISSUES #40 — the browser/OS IANA timezone
+   * (`Intl.DateTimeFormat().resolvedOptions().timeZone`) detected ONCE at boot.
+   * Carried on the WS URL `&tz=` so the gateway persists it for the daily nudge.
+   * Resolved once here and reused for EVERY per-scope socket URL the controller
+   * rebuilds (see `main.tsx` `wsUrlFor`), so a project switch keeps sending it.
+   * `null` when the runtime can't resolve a zone → the `tz` param is omitted.
+   * Optional + defaults to undefined so existing config literals (tests) need no
+   * change; `resolveBootstrapConfig` always sets it.
+   */
+  timeZone?: string | null
+  /**
    * BUG 1 (auto-start) — true when the owner has NOT finished onboarding, so a
    * FRESH onboarding session shows a "setting things up…" loader (not the
    * "Send a message to begin." empty state) while the server pushes the first
@@ -177,14 +188,34 @@ export function decodeJwtSub(token: string | undefined | null): string | null {
   }
 }
 
+/**
+ * ISSUES #40 — detect the browser/OS IANA timezone
+ * (`Intl.DateTimeFormat().resolvedOptions().timeZone`, e.g. `America/New_York`)
+ * so the gateway can persist it and the daily nudge keys the owner's local day
+ * on THEIR zone. Guarded: returns `null` if `Intl` is unavailable or resolves no
+ * zone, so the connect path simply omits `tz` and the server keeps its default.
+ */
+export function detectClientTimezone(
+  resolve: () => string | undefined = () =>
+    new Intl.DateTimeFormat().resolvedOptions().timeZone,
+): string | null {
+  try {
+    const tz = resolve()
+    return typeof tz === 'string' && tz.length > 0 ? tz : null
+  } catch {
+    return null
+  }
+}
+
 /** Build the app-ws WebSocket URL for a host + token (+ optional project +
- *  optional device id for receipt attribution). */
+ *  optional device id for receipt attribution + optional IANA timezone). */
 export function buildWsUrl(
   protocol: string,
   host: string,
   token: string,
   projectId: string | null,
   deviceId?: string,
+  timeZone?: string | null,
 ): string {
   const scheme = protocol === 'https:' ? 'wss:' : 'ws:'
   const params = new URLSearchParams()
@@ -192,7 +223,34 @@ export function buildWsUrl(
   params.set('token', token)
   if (projectId !== null && projectId.length > 0) params.set('project_id', projectId)
   if (deviceId !== undefined && deviceId.length > 0) params.set('device_id', deviceId)
+  // ISSUES #40 — ride the owner's IANA zone on the existing connect query string
+  // (alongside platform/device_id). The gateway validates + de-dupes it, so a
+  // reconnect reporting the same zone is a server-side no-op.
+  if (timeZone !== undefined && timeZone !== null && timeZone.length > 0) {
+    params.set('tz', timeZone)
+  }
   return `${scheme}//${host}/ws/app/chat?${params.toString()}`
+}
+
+/**
+ * The per-scope socket URL FACTORY the controller calls for EVERY connect —
+ * the initial open, a project switch, and a reconnect (`main.tsx` `wsUrlFor`
+ * delegates here). Honors an explicit `wsUrlOverride` (dev/test single fixed
+ * socket) verbatim; otherwise derives the URL from the resolved config, carrying
+ * `token` / `device_id` AND — ISSUES #40 — the boot-detected IANA `tz`, so every
+ * reconnect keeps reporting the owner's zone (not just the first bootstrap URL).
+ */
+export function wsUrlForScope(config: BootstrapConfig, projectId: string | null): string {
+  if (config.wsUrlOverride !== undefined) return config.wsUrlOverride
+  const u = new URL(config.origin)
+  return buildWsUrl(
+    u.protocol,
+    u.host,
+    config.token,
+    projectId,
+    config.deviceId,
+    config.timeZone ?? null,
+  )
 }
 
 /** Mint a per-page-load device id. Stability across reloads isn't required for
@@ -228,9 +286,20 @@ export function resolveBootstrapConfig(win: WindowLike): BootstrapConfig {
       ? win.__neutron_active_project_id
       : null
   const deviceId = makeDeviceId()
+  // ISSUES #40 — detect the owner's IANA zone ONCE and reuse it for every
+  // per-scope socket URL the controller later rebuilds (`main.tsx` `wsUrlFor`),
+  // so a project switch never drops the `tz`.
+  const timeZone = detectClientTimezone()
   const wsUrl =
     win.__neutron_app_ws_url ??
-    buildWsUrl(win.location.protocol, win.location.host, appWsToken, projectId, deviceId)
+    buildWsUrl(
+      win.location.protocol,
+      win.location.host,
+      appWsToken,
+      projectId,
+      deviceId,
+      timeZone,
+    )
   const origin = `${win.location.protocol}//${win.location.host}`
   const config: BootstrapConfig = {
     wsUrl,
@@ -240,6 +309,7 @@ export function resolveBootstrapConfig(win: WindowLike): BootstrapConfig {
     projects,
     origin,
     deviceId,
+    timeZone,
     token: appWsToken,
     onboardingActive: win.__neutron_onboarding_active === true,
   }

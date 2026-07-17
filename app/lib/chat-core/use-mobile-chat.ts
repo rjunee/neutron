@@ -30,7 +30,8 @@ import * as Notifications from 'expo-notifications';
 
 import type { ChatMessage, ConnStatus, ReactionAction } from '@neutronai/chat-core';
 
-import { httpToWs, loadAppConfig } from '../config';
+import { loadAppConfig } from '../config';
+import { buildWsUrl } from './ws-url';
 import { useAuthSession } from '../session';
 import {
   buildRenderRows,
@@ -74,23 +75,9 @@ export interface UseMobileChatResult {
   selfDeviceId: string;
 }
 
-/** Build the native chat WS URL for this user + project. The `device_id` is
- *  carried so the gateway attributes this device's read receipts (Track B
- *  Phase 4); the same id is handed to the session for read-tick self-exclusion. */
-function buildWsUrl(
-  baseUrl: string,
-  token: string,
-  projectId: string,
-  deviceId: string,
-): string {
-  const wsBase = httpToWs(baseUrl).replace(/\/+$/, '');
-  const params = new URLSearchParams();
-  params.set('token', token);
-  if (projectId.length > 0) params.set('project_id', projectId);
-  params.set('platform', 'native');
-  params.set('device_id', deviceId);
-  return `${wsBase}/ws/app/chat?${params.toString()}`;
-}
+// ISSUES #40 — `buildWsUrl` + `detectClientTimezone` now live in the pure,
+// unit-tested `./ws-url` module (extracted so the timezone-capture path is
+// testable without react-native/expo in the bun runtime).
 
 /** A per-session device id. Stability across launches isn't required for
  *  correctness here — the mobile UI only reports reads for AGENT messages

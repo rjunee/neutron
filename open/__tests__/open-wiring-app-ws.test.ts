@@ -22,6 +22,7 @@ import { join } from 'node:path'
 
 import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
+import { readOwnerTimezone } from '@neutronai/gateway/storage/owner-metadata.ts'
 import { AppWsAdapter } from '@neutronai/channels/adapters/app-ws/adapter.ts'
 import { InMemoryAppWsSessionRegistry } from '@neutronai/channels/adapters/app-ws/session-registry.ts'
 import type { AppWsAuthResolver } from '@neutronai/channels/adapters/app-ws/auth.ts'
@@ -264,5 +265,127 @@ describe('wireAppWs — recovered-reply drain on reconnect (O6)', () => {
 
     // The `recoveredReplyDrain?.(…)` optional call must not throw when omitted.
     await expect(wired.appWsSurface.websocket.open!(fakeOpenWs('app:owner'))).resolves.toBeUndefined()
+  })
+})
+
+/**
+ * ISSUES #40 — the PRODUCTION owner-timezone WRITE path exercised end-to-end
+ * through the REAL `wireAppWs` seam: the composer binds `on_client_timezone` to
+ * `persistOwnerTimezoneIfChanged(db, project_slug, tz)`, and the app-ws surface
+ * fires it in `open()` from the socket's captured `tz`. These drive that exact
+ * wiring against the migrated project.db, so the #378 `readOwnerTimezone`
+ * consumer resolves the persisted zone.
+ *
+ * Mutation-kill: DELETING `on_client_timezone` from `wireAppWs` (or dropping the
+ * `data.tz` fire in the surface) makes the persisted-zone assertions go red —
+ * unlike the surface-level test (own recorder) or the direct-persist round-trip,
+ * this is the only test that fails if the production seam is unwired.
+ */
+describe('wireAppWs — owner-timezone persistence (ISSUES #40, production seam)', () => {
+  /** Open the wired surface with a socket that reports `tz` (or none) for a
+   *  given channel `user_id` (defaults to the instance OWNER). */
+  async function openWithTz(
+    wired: ReturnType<typeof wireAppWs>,
+    tz: string | undefined,
+    user_id = 'owner',
+  ): Promise<void> {
+    const data: Record<string, unknown> = {
+      surface: 'app_ws',
+      user_id,
+      project_slug: 'owner',
+      channel_topic_id: `app:${user_id}`,
+    }
+    if (tz !== undefined) data.tz = tz
+    await wired.appWsSurface.websocket.open!(
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      { data, send: () => 1 } as any,
+    )
+  }
+
+  /** The write is fire-and-forget; poll until it lands (or a bounded timeout). */
+  async function waitForZone(expected: string): Promise<void> {
+    for (let i = 0; i < 100; i++) {
+      if (readOwnerTimezone(db, 'owner') === expected) return
+      await new Promise((r) => setTimeout(r, 2))
+    }
+  }
+
+  /** Let any pending fire-and-forget settle (for negative/no-write assertions). */
+  async function settle(): Promise<void> {
+    await new Promise((r) => setTimeout(r, 30))
+  }
+
+  test('the OWNER reporting a zone persists it via the real wiring → readOwnerTimezone resolves it', async () => {
+    const { deps } = buildDeps()
+    const wired = wireAppWs(buildCtx(), deps)
+    expect(readOwnerTimezone(db, 'owner')).toBeNull()
+
+    // user_id defaults to the instance OWNER ('owner' === OWNER_USER_ID).
+    await openWithTz(wired, 'America/New_York')
+    await waitForZone('America/New_York')
+    expect(readOwnerTimezone(db, 'owner')).toBe('America/New_York')
+  })
+
+  test('AUTHORIZATION: a NON-owner user_id reporting a zone is REJECTED — the owner tz is NOT written', async () => {
+    // The app-ws auth resolver binds many user_ids to the same instance
+    // project_slug (shared-project guests / other device identities). A guest
+    // must NOT be able to rewrite the OWNER's timezone (it drives the owner's
+    // nudges). The wiring gates on `user_id === OWNER_USER_ID` and silently
+    // ignores others. Mutation-kill: DELETING that gate lets this guest write
+    // land, flipping the assertion below red.
+    const { deps } = buildDeps()
+    const wired = wireAppWs(buildCtx(), deps)
+    expect(readOwnerTimezone(db, 'owner')).toBeNull()
+
+    await openWithTz(wired, 'Asia/Singapore', 'guest-not-owner')
+    await settle()
+    // The owner's stored timezone is UNCHANGED (still absent).
+    expect(readOwnerTimezone(db, 'owner')).toBeNull()
+  })
+
+  test('AUTHORIZATION: a non-owner cannot OVERWRITE the owner-set zone', async () => {
+    const { deps } = buildDeps()
+    const wired = wireAppWs(buildCtx(), deps)
+    // Owner sets NYC first.
+    await openWithTz(wired, 'America/New_York')
+    await waitForZone('America/New_York')
+    // A guest then reports a different zone — it must be ignored, NYC stands.
+    await openWithTz(wired, 'Asia/Singapore', 'guest-not-owner')
+    await settle()
+    expect(readOwnerTimezone(db, 'owner')).toBe('America/New_York')
+  })
+
+  test('no reported zone → nothing is written (absent boundary)', async () => {
+    const { deps } = buildDeps()
+    const wired = wireAppWs(buildCtx(), deps)
+
+    await openWithTz(wired, undefined)
+    await settle()
+    expect(readOwnerTimezone(db, 'owner')).toBeNull()
+  })
+
+  test('a garbage (IANA-shaped but unknown) zone is rejected → nothing written (invalid boundary)', async () => {
+    const { deps } = buildDeps()
+    const wired = wireAppWs(buildCtx(), deps)
+
+    await openWithTz(wired, 'Foo/Bar')
+    await settle()
+    expect(readOwnerTimezone(db, 'owner')).toBeNull()
+  })
+
+  test('an unchanged zone on reconnect stays put (unchanged boundary) and a genuine change updates it', async () => {
+    const { deps } = buildDeps()
+    const wired = wireAppWs(buildCtx(), deps)
+
+    await openWithTz(wired, 'America/New_York')
+    await waitForZone('America/New_York')
+    // Reconnect reporting the SAME zone — idempotent, still NYC.
+    await openWithTz(wired, 'America/New_York')
+    await settle()
+    expect(readOwnerTimezone(db, 'owner')).toBe('America/New_York')
+    // A genuine change is honored on the next connect.
+    await openWithTz(wired, 'Asia/Singapore')
+    await waitForZone('Asia/Singapore')
+    expect(readOwnerTimezone(db, 'owner')).toBe('Asia/Singapore')
   })
 })

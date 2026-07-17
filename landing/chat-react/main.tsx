@@ -18,9 +18,9 @@ import { WebChatSession, createWebStore } from '@neutronai/chat-core'
 
 import { ProjectShell } from './ProjectShell.tsx'
 import {
-  buildWsUrl,
   resolveBootstrapConfig,
   topicForProject,
+  wsUrlForScope,
   type BootstrapConfig,
   type WindowLike,
 } from './config.ts'
@@ -73,11 +73,10 @@ async function boot(): Promise<void> {
   // the URL tells the server to bind the PER-PROJECT topic (`app:<user>:<id>`);
   // General omits it. An explicit `__neutron_app_ws_url` override (dev/test)
   // wins verbatim — a single fixed socket, no per-project query.
-  const wsUrlFor = (projectId: string | null): string => {
-    if (config.wsUrlOverride !== undefined) return config.wsUrlOverride
-    const u = new URL(config.origin)
-    return buildWsUrl(u.protocol, u.host, config.token, projectId, config.deviceId)
-  }
+  // ISSUES #40 — delegate to the shared, unit-tested URL factory so EVERY connect
+  // (initial + project switch + reconnect) carries the boot-detected IANA `tz`,
+  // not just the initial `config.wsUrl`.
+  const wsUrlFor = (projectId: string | null): string => wsUrlForScope(config, projectId)
   const controller = new NeutronChatController({
     projectId: config.projectId,
     // FIX 1 — seed the rail from the bootstrap, then keep it reactive so

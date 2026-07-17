@@ -47,6 +47,7 @@ import {
   sanitizeDeviceId,
   sanitizePlatform,
   sanitizeProjectId,
+  sanitizeTimezone,
   type AppWsOutbound,
 } from '@neutronai/channels/adapters/app-ws/envelope.ts'
 import type { AppWsAuthResolver } from '@neutronai/channels/adapters/app-ws/auth.ts'
@@ -222,6 +223,18 @@ export interface AppWsSocketData {
    * clients that don't report one (those just aren't tracked for receipts).
    */
   device_id?: string
+  /**
+   * ISSUES #40 — the owner's IANA timezone reported on the upgrade query string
+   * (`tz=America/New_York`), boundary-sanitized (`sanitizeTimezone`). The web +
+   * mobile clients read it from `Intl.DateTimeFormat().resolvedOptions().timeZone`
+   * and append it to the same connect query string that already carries
+   * `platform` / `device_id`. Consumed ONCE in `open` (fired at
+   * `on_client_timezone`, which validates + idempotently persists it), so the
+   * daily nudge keys the owner's local day on THEIR zone. Absent when the client
+   * doesn't report one (legacy client, or a runtime whose `Intl` can't resolve a
+   * zone) — the read then falls back to `DEFAULT_OWNER_TIMEZONE`.
+   */
+  tz?: string
   /** Captured ONCE in `open` so identity-aware unregister works. */
   send?: (env: AppWsOutbound) => void
 }
@@ -315,6 +328,34 @@ export interface CreateAppWsSurfaceOptions {
     choice_value: string
     freeform_text?: string
   }) => Promise<void>
+  /**
+   * ISSUES #40 (owner-timezone WRITE path) — fired ONCE per WS `open` when the
+   * client reported a boundary-valid `tz` on the upgrade query string. The Open
+   * wiring binds it to `persistOwnerTimezoneIfChanged(db, project_slug, tz)`
+   * (validate IANA → de-dupe → upsert `instance_metadata.timezone`), so the
+   * nudge cron's `readOwnerTimezone` resolves the owner's actual zone.
+   *
+   * `project_slug` is the SOCKET's auth-resolved owner/instance slug (NOT a
+   * client-supplied value), so the write is owner-auth-gated by the same upgrade
+   * auth every frame rides: a bad-origin / bad-token / bad-bearer upgrade is
+   * rejected BEFORE `open`, so this hook never fires for an unauthenticated
+   * connection.
+   *
+   * `user_id` is the auth-resolved CHANNEL user for this socket. The app-ws auth
+   * resolver binds many `user_id`s to the SAME instance `project_slug` (a shared
+   * project can have non-owner guests), so the consumer MUST additionally gate
+   * on identity: the owner timezone drives the OWNER's nudges, so only the
+   * instance owner may change it. This surface stays identity-agnostic and
+   * FORWARDS `user_id`; the Open wiring enforces `user_id === OWNER_USER_ID`.
+   *
+   * Must never throw — the surface fires it best-effort so a persist failure
+   * can't tear down the socket.
+   */
+  on_client_timezone?: (input: {
+    user_id: string
+    project_slug: string
+    tz: string
+  }) => void | Promise<void>
 }
 
 export function createAppWsSurface(opts: CreateAppWsSurfaceOptions): AppWsSurface {
@@ -329,6 +370,7 @@ export function createAppWsSurface(opts: CreateAppWsSurfaceOptions): AppWsSurfac
   const allowedWebOrigins = normalizeWebOrigins(opts.allowed_web_origins ?? [])
   const on_session_open = opts.on_session_open
   const on_button_choice = opts.on_button_choice
+  const on_client_timezone = opts.on_client_timezone
 
   return {
     adapter,
@@ -410,6 +452,13 @@ export function createAppWsSurface(opts: CreateAppWsSurfaceOptions): AppWsSurfac
         const device_id =
           (raw_device_id !== null ? sanitizeDeviceId(raw_device_id) : null) ??
           `conn-${crypto.randomUUID()}`
+        // ISSUES #40 — capture the owner's IANA `tz` from the upgrade query
+        // string (the SAME connect handshake that carries platform/device_id).
+        // Boundary-sanitized here; the authoritative IANA validation + de-duped
+        // persist runs in `on_client_timezone` (fired in `open`). Absent /
+        // malformed → no capture (the read falls back to the LA default).
+        const raw_tz = url.searchParams.get('tz')
+        const tz = raw_tz !== null ? sanitizeTimezone(raw_tz) : null
         // Per-project chat (web): bind the socket to a PER-PROJECT topic
         // `app:<user>:<project>` so persistence + seq + resume + fan-out all
         // scope to that project, and the agent loop picks the project up from
@@ -431,6 +480,7 @@ export function createAppWsSurface(opts: CreateAppWsSurfaceOptions): AppWsSurfac
         }
         if (project_id !== null) data.project_id = project_id
         if (platform !== null) data.platform = platform
+        if (tz !== null) data.tz = tz
         const upgraded = server.upgrade(req, { data })
         if (!upgraded) {
           return new Response('upgrade failed', { status: 426 })
@@ -521,6 +571,34 @@ export function createAppWsSurface(opts: CreateAppWsSurfaceOptions): AppWsSurfac
           project: data.project_id ?? '-',
           platform: data.platform ?? '-',
         })
+        // ISSUES #40 — persist the owner's reported IANA timezone (validate +
+        // de-dupe + upsert) keyed on the SOCKET's auth-resolved `project_slug`,
+        // so the daily nudge keys the owner's local day on their zone. Owner-
+        // auth-gated by construction: a bad-origin/token/bearer upgrade never
+        // reaches `open`. Best-effort + fire-and-forget — a persist failure must
+        // never tear down the chat socket, and the next connect re-reports.
+        if (on_client_timezone !== undefined && data.tz !== undefined) {
+          const channelUserId = data.user_id
+          const ownerSlug = data.project_slug
+          const reportedTz = data.tz
+          fireAndForget(
+            'app-ws.on_client_timezone',
+            // Async IIFE so even a SYNC-throwing hook becomes a rejected promise
+            // fireAndForget contains — a hook failure can never tear down the socket.
+            (async () =>
+              on_client_timezone({
+                user_id: channelUserId,
+                project_slug: ownerSlug,
+                tz: reportedTz,
+              }))(),
+            (err: unknown) => {
+              moduleLog.warn('on_client_timezone_failed', {
+                instance: data.project_slug,
+                error: err instanceof Error ? err.message : String(err),
+              })
+            },
+          )
+        }
         // Onboarding consolidation (2026-06-26) — after session_ready, give the
         // composer a chance to fire the FIRST onboarding prompt over this socket
         // when the owner hasn't finished onboarding. Wrapped so a hook failure

@@ -380,6 +380,31 @@ export function sanitizeDeviceId(raw: unknown): string | null {
   return raw
 }
 
+/** ISSUES #40 — bound the IANA `tz` reported on the WS upgrade query string.
+ *  The longest real identifier is 31 chars; 64 is comfortable headroom. */
+export const MAX_TIMEZONE_LEN = 64
+
+/**
+ * Boundary-sanitize an IANA `tz` from the untrusted upgrade query string
+ * (ISSUES #40 owner-timezone capture). This is a CHEAP node-free shape guard —
+ * trim, length cap, and an IANA-shaped charset (`Area/Location`, letters,
+ * digits, `/ _ + -`) — NOT the authoritative check. The real IANA validation
+ * (`Intl.DateTimeFormat`) runs server-side in
+ * `persistOwnerTimezoneIfChanged` before any write, so a syntactically-plausible
+ * but unknown zone (`Foo/Bar`) still gets rejected there and never persisted.
+ * Returns the cleaned value or `null` (absent / malformed → the surface simply
+ * doesn't capture a zone for this connection). Mirrors `sanitizeDeviceId`.
+ */
+export function sanitizeTimezone(raw: unknown): string | null {
+  if (typeof raw !== 'string') return null
+  const tz = raw.trim()
+  if (tz.length === 0 || tz.length > MAX_TIMEZONE_LEN) return null
+  // IANA identifiers are ASCII `Area/Location` — letters, digits, and the
+  // punctuation `/ _ + -` (e.g. `America/Argentina/Buenos_Aires`, `Etc/GMT+5`).
+  if (!/^[A-Za-z0-9/_+-]+$/.test(tz)) return null
+  return tz
+}
+
 /** Track B Phase 4 — synthetic device id the gateway attributes to the agent
  *  loop when it reads (picks up) an inbound user message. Lets a single-device
  *  sender see the read tick the moment the agent acts, with no second device.
