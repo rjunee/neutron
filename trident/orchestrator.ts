@@ -127,6 +127,18 @@ export interface BuildTridentOrchestratorOptions {
   /** Mint the per-dispatch tracking id (test seam). Defaults to crypto.randomUUID. */
   mint_run_id?: () => string
   /**
+   * RALPH RE-FIRE (#362) — null the row's `inner_result` column OUT-OF-BAND for a
+   * re-fired Ralph run. `save`/`saveIfActive` DELIBERATELY never write `inner_result`
+   * (it is workflow-owned, so the launch persist can't clobber a result the detached
+   * workflow wrote), so a re-fire (which resets the run to launch the next task) must
+   * null the harvested intermediate result SEPARATELY — otherwise the reset row would
+   * be re-harvested every tick and the loop would re-fire forever on the same result.
+   * Wired from the store: `(id) => store.update(id, { inner_result: null }).then(() => {})`.
+   * Omitted → a no-op default; only Ralph multi-task runs ever reach the re-fire path,
+   * so non-Ralph callers/tests are unaffected. MUST be wired wherever Ralph builds run.
+   */
+  clear_inner_result?: (run_id: string) => Promise<void>
+  /**
    * How long a FIRED workflow may run with no terminal `inner_result` AND no
    * fresh checkpoint before it is reaped as stalled (the build runs detached, so
    * the tick loop owns build liveness). Measured from `last_advanced_at`, which
@@ -250,6 +262,7 @@ export function buildTridentOrchestrator(
     )
   const on_orphaned = opts.on_orphaned_session ?? 'redispatch'
   const mint = opts.mint_run_id ?? (() => crypto.randomUUID())
+  const clearInnerResult = opts.clear_inner_result ?? (async () => {})
   const maxInflightMs = opts.max_inflight_ms ?? DEFAULT_MAX_INFLIGHT_MS
   const noAdvanceHangMs = opts.no_advance_hang_ms ?? NO_ADVANCE_HANG_MS
 
@@ -404,9 +417,85 @@ export function buildTridentOrchestrator(
 
   /** Apply a harvested, decoded inner result to the run (merge on a SERVER-GATED
    *  APPROVE, else fail). */
+  /**
+   * RALPH RE-FIRE (#362) — the harvested inner iteration built ONE task but MORE
+   * remain (`remaining_tasks > 0`). Per the Ralph one-task-per-fresh-context
+   * discipline the build is NOT done: reset the run to a launchable state so the
+   * NEXT tick fires a FRESH inner iteration (re-plan against the committed
+   * IMPLEMENTATION_PLAN.md + build the next top task, reusing the branch/PR), rather
+   * than merging after task 1 (the bug #362 fixes). Bounded by `max_ralph_rounds`
+   * (via the run's `ralph_round` counter) so a non-converging planner fails loudly
+   * instead of re-firing forever.
+   *
+   * `inner_result` is nulled OUT-OF-BAND (`clearInnerResult`) because `saveIfActive`
+   * never writes that column — without the clear the reset row would be re-harvested
+   * next tick and re-fire on the same intermediate result endlessly.
+   */
+  async function refireNextRalphTask(run: TridentRun, result: InnerResult): Promise<AdvanceOutcome> {
+    fired.delete(run.id)
+    redispatched.delete(run.id)
+    const pr = result.pr_number ?? run.pr
+    const branch = result.branch ?? run.branch
+    const remaining = result.remaining_tasks ?? 0
+    const nextRalphRound = run.ralph_round + 1
+
+    // Clear the harvested intermediate result up front (both the fail and the
+    // re-launch path need the row to stop presenting a harvestable result).
+    await clearInnerResult(run.id)
+
+    if (nextRalphRound > run.max_ralph_rounds) {
+      const failed: TridentRun = {
+        ...failedRun(
+          run,
+          `Ralph loop hit max_ralph_rounds (${run.max_ralph_rounds}) without converging ` +
+            `(${remaining} task(s) still unbuilt)`,
+          false,
+        ),
+        pr,
+        branch,
+        harvested_at: nowMs(),
+        inner_result: null,
+        inner_verdict: 'REQUEST_CHANGES',
+      }
+      return { run: failed, changed: true, waiting: false, note: 'ralph loop → failed (max ralph rounds)' }
+    }
+
+    // Reset to launchable: clear the sub-agent slot so `step()` re-fires, bump the
+    // ralph-round counter, and preserve branch/PR + the workflow-written
+    // 'ralph-task-built' `inner_checkpoint` (non-null, NOT 'argus-approved') so the
+    // next fire resumes onto the branch and re-plans without the approved
+    // short-circuit. `harvested_at` is deliberately left unstamped — this is a
+    // NON-terminal continuation, not a terminal outer-harvest.
+    const next: TridentRun = {
+      ...run,
+      ralph_round: nextRalphRound,
+      pr,
+      branch,
+      subagent_run_id: null,
+      subagent_status: null,
+      inner_result: null,
+      inner_verdict: null,
+      last_advanced_at: now(),
+    }
+    return {
+      run: next,
+      changed: true,
+      waiting: false,
+      note: `ralph task built (${remaining} remain) → re-fire iteration ${nextRalphRound}/${run.max_ralph_rounds}`,
+    }
+  }
+
   async function applyResult(run: TridentRun, result: InnerResult): Promise<AdvanceOutcome> {
     fired.delete(run.id)
     redispatched.delete(run.id)
+
+    // RALPH RE-FIRE (#362) — checked FIRST, before the terminal-harvest stamp: an
+    // intermediate iteration with tasks still remaining is NOT a merge/fail, so it
+    // must not stamp `harvested_at` (the terminal-harvest marker) nor run the merge
+    // provenance gate. Re-fire a fresh iteration for the next task instead.
+    if (result.remaining_tasks !== null && result.remaining_tasks > 0) {
+      return refireNextRalphTask(run, result)
+    }
 
     // RC2 — STAMP the durable outer-harvest marker up front, so EVERY outcome
     // this function returns (done / provenance-reject / exhausted / merge-fail)
