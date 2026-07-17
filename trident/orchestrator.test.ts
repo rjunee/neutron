@@ -49,6 +49,9 @@ interface Harness {
   complete: () => Promise<void>
   hostCalls: string[][]
   inputs: InnerLoopInput[]
+  /** RALPH RE-FIRE (#362) — every atomic reset patch `persist_refire_reset` was
+   *  called with (assert the crash-safe bundle: inner_result + slot + ralph_round). */
+  refirePatches: import('./store.ts').TridentRunUpdate[]
 }
 
 function buildHarness(opts: {
@@ -66,6 +69,7 @@ function buildHarness(opts: {
   on_terminal?: TridentTerminalHook
 }): Harness {
   const hostCalls: string[][] = []
+  const refirePatches: import('./store.ts').TridentRunUpdate[] = []
   const now = opts.now ?? (() => new Date(0).toISOString())
   // Bind the store to the SAME clock as the orchestrator so `last_advanced_at`
   // (re-stamped by store.save) and the orchestrator's stall computation share one
@@ -83,9 +87,13 @@ function buildHarness(opts: {
     run_host: host,
     base_branch: 'main',
     now,
-    // RALPH RE-FIRE (#362) — null the harvested `inner_result` out-of-band so a
-    // re-fired run isn't re-harvested (production wires the identical seam).
-    clear_inner_result: (id) => store.update(id, { inner_result: null }).then(() => {}),
+    // RALPH RE-FIRE (#362) — persist the re-fire reset atomically out-of-band so a
+    // re-fired run isn't re-harvested (production wires the identical seam). The spy
+    // records each patch to assert the crash-safe bundle, then applies it for real.
+    persist_refire_reset: (id, patch) => {
+      refirePatches.push(patch)
+      return store.update(id, patch).then(() => {})
+    },
   }
   if (opts.on_orphaned_session !== undefined) o.on_orphaned_session = opts.on_orphaned_session
   if (opts.mint_run_id !== undefined) o.mint_run_id = opts.mint_run_id
@@ -102,7 +110,7 @@ function buildHarness(opts: {
     step: orch.step,
     ...(opts.on_terminal !== undefined ? { on_terminal: opts.on_terminal } : {}),
   })
-  return { loop, complete: sim.drain, hostCalls, inputs: sim.inputs }
+  return { loop, complete: sim.drain, hostCalls, inputs: sim.inputs, refirePatches }
 }
 
 /** Tick, then simulate the in-flight workflow finishing (write its result), so a
@@ -375,6 +383,19 @@ describe('orchestrator — RALPH RE-FIRE (#362): multi-task build re-fires per t
     expect(afterRefire.subagent_run_id).toBeNull()
     expect(afterRefire.ralph_round).toBe(1)
     expect(isTerminalPhase(afterRefire.phase)).toBe(false)
+
+    // CRASH-SAFETY (Codex [P2]): the reset is ONE atomic patch that bundles the
+    // inner_result clear WITH the sub-agent-slot release AND the ralph_round bump — so
+    // no crash can strand the row as (inner_result=null, stale terminal sub-agent),
+    // which step() would reap as terminal-but-garbled. And it NEVER touches `phase`
+    // (that stays for saveIfActive's race guard, so a cancel can't be resurrected).
+    expect(h.refirePatches).toHaveLength(1)
+    const patch = h.refirePatches[0]!
+    expect(patch.inner_result).toBeNull()
+    expect(patch.subagent_run_id).toBeNull()
+    expect(patch.subagent_status).toBeNull()
+    expect(patch.ralph_round).toBe(1)
+    expect('phase' in patch).toBe(false)
 
     // The loop still converges to a merge.
     const final = await runToTerminal(h, run.id)

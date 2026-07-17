@@ -77,7 +77,7 @@ import {
 } from './merge.ts'
 import { ARGUS_DIFF_LINE_LIMIT } from './prompts.ts'
 import { isTerminalPhase, type AdvanceOutcome } from './state-machine.ts'
-import type { TridentRun } from './store.ts'
+import type { TridentRun, TridentRunUpdate } from './store.ts'
 import { DEFAULT_MAX_INFLIGHT_MS, NO_ADVANCE_HANG_MS } from './liveness.ts'
 
 export interface TridentStep {
@@ -142,17 +142,23 @@ export interface BuildTridentOrchestratorOptions {
   /** Mint the per-dispatch tracking id (test seam). Defaults to crypto.randomUUID. */
   mint_run_id?: () => string
   /**
-   * RALPH RE-FIRE (#362) — null the row's `inner_result` column OUT-OF-BAND for a
-   * re-fired Ralph run. `save`/`saveIfActive` DELIBERATELY never write `inner_result`
-   * (it is workflow-owned, so the launch persist can't clobber a result the detached
-   * workflow wrote), so a re-fire (which resets the run to launch the next task) must
-   * null the harvested intermediate result SEPARATELY — otherwise the reset row would
-   * be re-harvested every tick and the loop would re-fire forever on the same result.
-   * Wired from the store: `(id) => store.update(id, { inner_result: null }).then(() => {})`.
-   * Omitted → a no-op default; only Ralph multi-task runs ever reach the re-fire path,
-   * so non-Ralph callers/tests are unaffected. MUST be wired wherever Ralph builds run.
+   * RALPH RE-FIRE (#362) — persist the re-fire reset patch OUT-OF-BAND in ONE atomic
+   * store UPDATE. `save`/`saveIfActive` DELIBERATELY never write `inner_result` (it is
+   * workflow-owned, so the launch persist can't clobber a result the detached workflow
+   * wrote), so a re-fire — which must null the harvested intermediate result AND reset
+   * the sub-agent slot together — cannot go through them. This seam writes the whole
+   * reset (`inner_result=null` + the released sub-agent slot + the bumped
+   * `ralph_round`) as a SINGLE row UPDATE, so the durable row is never left in the
+   * inconsistent `inner_result=null` + stale-terminal-sub-agent state that `step()`
+   * would reap as "terminal-but-garbled" if the process crashed between two writes
+   * (Codex review [P2]). The patch NEVER includes `phase`, so it cannot resurrect a
+   * concurrently force-terminated run (that stays terminal; `saveIfActive` owns the
+   * race-guarded phase write). Wired from the store:
+   * `(id, patch) => store.update(id, patch).then(() => {})`. Omitted → a no-op default;
+   * only Ralph multi-task runs reach the re-fire path, so non-Ralph callers/tests are
+   * unaffected. MUST be wired wherever Ralph builds run.
    */
-  clear_inner_result?: (run_id: string) => Promise<void>
+  persist_refire_reset?: (run_id: string, patch: TridentRunUpdate) => Promise<void>
   /**
    * How long a FIRED workflow may run with no terminal `inner_result` AND no
    * fresh checkpoint before it is reaped as stalled (the build runs detached, so
@@ -277,7 +283,7 @@ export function buildTridentOrchestrator(
     )
   const on_orphaned = opts.on_orphaned_session ?? 'redispatch'
   const mint = opts.mint_run_id ?? (() => crypto.randomUUID())
-  const clearInnerResult = opts.clear_inner_result ?? (async () => {})
+  const persistRefireReset = opts.persist_refire_reset ?? (async () => {})
   const maxInflightMs = opts.max_inflight_ms ?? DEFAULT_MAX_INFLIGHT_MS
   const noAdvanceHangMs = opts.no_advance_hang_ms ?? NO_ADVANCE_HANG_MS
 
@@ -442,9 +448,14 @@ export function buildTridentOrchestrator(
    * (via the run's `ralph_round` counter) so a non-converging planner fails loudly
    * instead of re-firing forever.
    *
-   * `inner_result` is nulled OUT-OF-BAND (`clearInnerResult`) because `saveIfActive`
-   * never writes that column — without the clear the reset row would be re-harvested
-   * next tick and re-fire on the same intermediate result endlessly.
+   * The reset is persisted OUT-OF-BAND in ONE atomic UPDATE (`persistRefireReset`)
+   * because `saveIfActive` never writes `inner_result` (workflow-owned). Bundling the
+   * `inner_result=null` clear WITH the sub-agent-slot release + `ralph_round` bump in a
+   * single row write means a crash can never strand the row in the inconsistent
+   * (inner_result=null, stale terminal sub-agent) state `step()` would reap as
+   * "terminal-but-garbled" (Codex review [P2]). It never writes `phase`, so it can't
+   * resurrect a concurrently force-terminated run; `saveIfActive` still commits the
+   * (unchanged, non-terminal) phase under its race guard.
    */
   async function refireNextRalphTask(run: TridentRun, result: InnerResult): Promise<AdvanceOutcome> {
     fired.delete(run.id)
@@ -454,11 +465,12 @@ export function buildTridentOrchestrator(
     const remaining = result.remaining_tasks ?? 0
     const nextRalphRound = run.ralph_round + 1
 
-    // Clear the harvested intermediate result up front (both the fail and the
-    // re-launch path need the row to stop presenting a harvestable result).
-    await clearInnerResult(run.id)
-
     if (nextRalphRound > run.max_ralph_rounds) {
+      // Non-convergence cap: fail loudly. No out-of-band clear needed — the run goes
+      // TERMINAL (`saveIfActive` commits `phase='failed'`), and `listNonTerminal`
+      // never reloads a terminal row, so the stale `inner_result` is inert. (If a
+      // crash beats that commit, the next tick re-harvests, re-enters here, and fails
+      // again — idempotent.)
       const failed: TridentRun = {
         ...failedRun(
           run,
@@ -469,18 +481,35 @@ export function buildTridentOrchestrator(
         pr,
         branch,
         harvested_at: nowMs(),
-        inner_result: null,
         inner_verdict: 'REQUEST_CHANGES',
       }
       return { run: failed, changed: true, waiting: false, note: 'ralph loop → failed (max ralph rounds)' }
     }
 
-    // Reset to launchable: clear the sub-agent slot so `step()` re-fires, bump the
-    // ralph-round counter, and preserve branch/PR + the workflow-written
-    // 'ralph-task-built' `inner_checkpoint` (non-null, NOT 'argus-approved') so the
-    // next fire resumes onto the branch and re-plans without the approved
-    // short-circuit. `harvested_at` is deliberately left unstamped — this is a
-    // NON-terminal continuation, not a terminal outer-harvest.
+    // ATOMIC reset to launchable: null the harvested `inner_result`, release the
+    // sub-agent slot (so `step()` re-fires next tick), and bump `ralph_round` — all in
+    // ONE store UPDATE, so any crash leaves a coherent, re-fireable row. Branch/PR and
+    // the workflow-written 'ralph-task-built' `inner_checkpoint` (non-null, NOT
+    // 'argus-approved') are preserved so the next fire resumes onto the branch and
+    // re-plans the next task without the approved short-circuit. `phase` is
+    // deliberately excluded (see the seam doc): it stays whatever it is, so a
+    // concurrently cancelled run is never resurrected.
+    const resetPatch: TridentRunUpdate = {
+      inner_result: null,
+      subagent_run_id: null,
+      subagent_status: null,
+      ralph_round: nextRalphRound,
+      inner_verdict: null,
+      pr,
+      branch,
+    }
+    await persistRefireReset(run.id, resetPatch)
+
+    // The returned run mirrors the atomic patch (+ the unchanged non-terminal phase)
+    // so the tick's race-guarded `saveIfActive` idempotently re-commits it — and, if a
+    // force-terminate won the row meanwhile, is skipped (the atomic patch above never
+    // moved `phase`, so nothing resurrects the cancelled run). `harvested_at` is left
+    // unstamped — this is a NON-terminal continuation, not a terminal outer-harvest.
     const next: TridentRun = {
       ...run,
       ralph_round: nextRalphRound,

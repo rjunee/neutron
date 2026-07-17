@@ -40,10 +40,16 @@ after task 1.
   infinite loop) — instead of merging. Each re-fire is a brand-new `Workflow`
   launch harvested by the outer loop (fresh context, no accumulation), reusing the
   existing durable `code_trident_runs` row + crash-recovery model.
-- `inner_result` is nulled OUT-OF-BAND via a new `clear_inner_result` seam
-  (`save`/`saveIfActive` deliberately never write that workflow-owned column), so
-  a re-fired/reset row is not re-harvested into an endless loop. Wired from the
-  store in `gateway/composition/build-core-modules.ts` and the test harness.
+- The re-fire reset is persisted OUT-OF-BAND in ONE atomic UPDATE via a new
+  `persist_refire_reset` seam (`save`/`saveIfActive` deliberately never write the
+  workflow-owned `inner_result` column). The single write bundles the
+  `inner_result=null` clear WITH the sub-agent-slot release + the `ralph_round`
+  bump, so a crash can never strand the row in the (inner_result=null, stale
+  terminal sub-agent) state `step()` would reap as "terminal-but-garbled" — the
+  crash-recovery guarantee holds (Codex cross-model review [P2]). The patch never
+  writes `phase`, so it can't resurrect a concurrently force-terminated run;
+  `saveIfActive` still owns the race-guarded phase commit. Wired from the store in
+  `gateway/composition/build-core-modules.ts` and the test harness.
 
 **Dead-code decision.** The `state-machine.ts` Ralph cycle (`computeTransition`
 `ralph-plan`/`ralph-task` branches) is KEPT, not deleted: it remains the
