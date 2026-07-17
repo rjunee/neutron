@@ -2,6 +2,34 @@
 
 Per docs/plans/code-gen-core-tier1-brief.md.
 
+## Current file layout (reconciled 2026-07-17)
+
+The dated **S0/S1/S2** sections below are point-in-time build-trail provenance; several file names
+they cite (`src/mcp-tools-extra.ts`, `src/chat-commands.ts`, `src/runtime-runner.ts`,
+`src/judgment.ts`, `src/prompts/*-system.ts`) predate a later reorganization and **no longer
+resolve**. The current `src/` homes:
+
+- `src/backend.ts` — the `CodegenRunner` interface + orchestrator with two reference runners:
+  `buildInMemoryCodegenRunner` (the deterministic test fake) and `buildSkeletonCodegenRunner` (which
+  throws `CodegenNotConfiguredError`). The production substrate-backed runner is **deferred** (Tier-2
+  follow-up per the sprint brief's "Out of scope"); production wiring is currently retired — boot
+  installs the skeleton at `gateway/boot-cores-factories.ts` (so an uninjected `codegen_dispatch`
+  legacy MCP-tool call fails loud + actionable). NOTE: the daily-driver `/code <task>` command does
+  NOT go through this Core — it bypasses Code-Gen Core and runs through foundational Trident (the
+  Code-Gen Core gateway wrapper was retired in #47). The orchestrator is shape-compatible with the
+  real runner once it lands.
+- `src/host-runners.ts` — host-process runner INTERFACES (`gh` / `git` / `bun test`) + the test stub
+  `buildStubHostRunners`. No production `child_process.spawn` adapter exists in-tree today.
+- `src/substrate-runtime.ts` — the opaque LLM-call closure + sub-agent dispatcher adapter
+  (mirrors the Research Core's `substrate-runtime.ts`).
+- `src/tools.ts` — capability-guarded MCP tool wiring (`codegen_dispatch` / `codegen_status` /
+  `codegen_fetch` / `codegen_cancel`).
+- `src/tool-handlers.ts` — worktree-scoped tool-call dispatch handlers (read/write/edit/bash/grep/glob).
+- `src/manifest.ts` — the Core manifest (+ in-tree Forge/Argus/judge prompt text).
+- `src/sidecar/store.ts` — per-project SQLite sidecar CRUD.
+- `src/worktree-resolver.ts` — per-project git worktree resolver.
+- `src/ui/{launcher-icon,app-tab-surface}.ts` — launcher tile + app-tab metadata.
+
 ## S0 (initial scaffold, 2026-05-18)
 
 Manifest + 3 MCP tools (codegen_dispatch / codegen_status /

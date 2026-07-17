@@ -92,18 +92,35 @@ A Bun workspace grouped bottom-up into five layers:
 
 - **Edge / transport** — `channels/` (adapters + the `ButtonPrompt` cross-channel
   envelope), `landing/` (web chat server + auth gate), `auth/` (secrets +
-  paste-token client), `connect/` (share projects across instances).
+  paste-token client), `connect/` (share projects across instances), `chat-core/`
+  (the shared client/server sync core over `/ws/app/chat`), `client-core/` (the
+  shared `GatewayHttpClient` + unified error), `jwt-validator/` (session-token
+  verification).
 - **Substrate / runtime** — `gateway/` (the composition root: opens the DB, runs
-  migrations, wires the module graph, binds HTTP/WS), `runtime/` (the
-  `Substrate`/`Event` contract, the Claude Code adapter, the credential pool),
-  `persistence/` + `migrations/`, `cron/`, `reminders/`, `tasks/`, `tools/`,
-  `mcp/`, `watchdog/`.
+  migrations, wires the module graph, binds HTTP/WS), `open/` (the product
+  entry — `open/server.ts` is the actual `bun` process a self-host runs; by
+  default it composes `gateway/` into the single-owner Open server, but it can
+  boot an injected graph via the `NEUTRON_GRAPH_COMPOSER_MODULE` seam, so running
+  from `open/` does not by itself imply Open deployment mode — see MG-3),
+  `runtime/` (the `Substrate`/`Event`
+  contract, the Claude Code adapter, the credential pool), `persistence/` +
+  `migrations/`, `cron/`, `reminders/`, `tasks/`, `tools/`, `mcp/`, `watchdog/`,
+  `trident/` (the autonomous Forge→Argus build/merge pipeline behind `/code`),
+  `agent-dispatch/`, `skill-forge/`, `config/` (the frozen `BootConfig` leaf),
+  `logger/`, `loop/`.
 - **Memory** — `gbrain-memory/` (the sole durable memory store), `scribe/`
-  (extraction as a side effect of talking), `runtime/entity-writer` (the privacy
-  gate every write passes through).
+  (extraction as a side effect of talking), `reflection/` (the reflection judge),
+  `runtime/entity-writer` (the privacy gate every write passes through),
+  `doc-search/` + `message-search/` (retrieval indexes).
 - **Cores** — `cores/{sdk,runtime}` + `cores/free/*` (the free-tier
   Cores).
-- **Product surfaces** — `onboarding/`, `app/` (Expo), `landing/`, `prompts/`.
+- **Product surfaces** — `onboarding/`, `app/` (Expo), `landing/`, `prompts/`,
+  `tabs/`, `work-board/`, `project-credentials/`.
+
+Under all five sit the node-free shared contract leaves — `contracts/` (wire/type
+contracts, e.g. `LlmCallFn`, `OnboardingPhase`) and `wire-types/` (the canonical
+cross-surface option shapes) — the lowest depcruise band, imported downward-only
+by every layer above.
 
 The refactor window's target module DAG makes these layer edges **real package
 boundaries** (a directed graph with no upward or cyclic imports); the boundary
@@ -267,13 +284,20 @@ could follow it). A post-completion fresh-eyes audit closed a punch-list (a
 wide-bind upload-auth hole, a timezone-read wiring gap, a build-fragile
 one-release shim, a missing sender-propagate regression test).
 
-The few non-merged items are deliberate, not gaps: **MG-3** (the
-`NEUTRON_GRAPH_COMPOSER_MODULE` composer seam) is KEPT by decision (the OSS-split
+The non-merged items are deliberate, not gaps, and fall into three buckets (the
+per-unit ledger is the plan §17 checklist). **Kept / deferred by decision:**
+**MG-3** (the `NEUTRON_GRAPH_COMPOSER_MODULE` composer seam) is KEPT (the OSS-split
 boundary — see the Decisions Log); **N3-credential** (frozen-handle threading at
 the Managed boot seam) is DEFERRED — it cannot fire without live hosted owners
-that rename; **W3** (transcript unification, XL) is DEFERRED as scoped feature
-work. These plus the known engineering follow-ups now live as tracked GitHub
-issues, not private memory.
+that rename (the ABI-facing `internal_handle`→`owner_handle` rename that is the
+rest of N3 landed with N2 in #367). **Deferred feature work (post-window):** **W3**
+(transcript unification, XL) plus the native-shell `[BEHAVIOR]` pair **W4** (Expo
+shell conversion) and **W6** (native-shell↔WebView bridge) — the native app is
+unpublished, so they slipped past the window; and **K4b** (the onboarding
+slug-flow deletion) stays deferred. **Tracked elsewhere / not a window gap:** the
+**M-lane (M1–M6)** is Managed cross-repo, tracked in `neutron-managed` (not this
+repo's ledger). All of the above plus the known engineering follow-ups now live as
+tracked GitHub issues, not private memory.
 
 ### Post-window feature backlog
 
@@ -313,6 +337,27 @@ pointer]`. Immutable — entries are never removed or rewritten; a superseded
 decision stays with a "superseded" note. This log is the single home for the
 dated record of each locked decision; the body describes the resulting
 architecture and points here.
+
+### 2026-07-17
+
+- **Owner-timezone (ISSUES #40) — capture approach LOCKED: browser/OS IANA zone → `writeOwnerTimezone`.**
+  The owner's timezone is captured from the client's own IANA zone
+  (`Intl.DateTimeFormat().resolvedOptions().timeZone`) rather than inferred server-side, then persisted
+  through `writeOwnerTimezone`. This entry records the DECIDED approach; the read wiring landed in #378,
+  and the WRITE path (client detection + `tz` on the connect query string + gateway persist) lands
+  SEPARATELY — it is **not yet in this tree** (in flight on its own branch). Once it merges, scheduling/nudge
+  timestamps resolve against the owner's real zone; until then the server keeps its default.
+- **Post-window doc-drift closeout (audit P2 #7/#8 + NITS).** Reconciled the lagging bookkeeping to
+  git ground truth: the refactor plan §17 checklist now ticks every merged tail unit with its PR#
+  (#311–#390) and the `refactor-orchestration-STATUS.md` resume anchor is marked CLOSED; SPEC §2.2
+  Layering was completed (added `open/`, `trident/`, `contracts/`, and the other load-bearing
+  workspaces the list omitted); and stale current-state doc pointers were repointed to their real
+  successors (`build-llm-router.ts`/`llm-router.ts` → `onboarding/interview/post-turn-extractor.ts`;
+  deleted `wow-push-emitter.ts` and `acceptChoice` invariants retired; the `§2.6`/`§3.4`/
+  `§Fable-orchestrator` dangling section citations in live source fixed or dropped — dated
+  AS_BUILT/audit-snapshot provenance left as-is). Docs-only; no behavior change.
+  [`docs/plans/2026-07-02-world-class-refactor-plan.md` §17, `SPEC.md` §2.2, `docs/INVARIANTS.md`,
+  `docs/SYSTEM-OVERVIEW.md`]
 
 ### 2026-07-16
 

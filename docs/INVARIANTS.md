@@ -206,9 +206,10 @@ with cross-references noted inline.
 42. Engagement gate fails soft to `all_messages` — a DB read error must never drop a chat turn.
     `gateway/http/chat-bridge.ts:2749-2791`.
     Protects: **D3**.
-43. wow-push emitter fails CLOSED (skip + warn, never `pushAll`) for privacy, while calendar/email
-    briefs intentionally DO `pushAll` — opposite policies, both correct.
-    `gateway/wow-push-emitter.ts:105-171`.
+43. **RETIRED (K11d #248).** The wow-push emitter (`gateway/wow-push-emitter.ts`) was deleted with
+    the dead wow-push / final-handoff / max_oauth cluster, so the fail-closed-vs-`pushAll` contrast is
+    moot. The surviving half of the policy — calendar/email briefs intentionally DO `pushAll` — remains
+    correct and lives on in the brief dispatchers.
     Protects: unprotected — covered by review only.
 44. GBrain latch + remove-before-add + append-only merge is the fail-soft, exactly-once-logging
     contract; chat turns must never crash on memory writes.
@@ -274,10 +275,13 @@ with cross-references noted inline.
 59. `walkAutoSkip` and the resolver's `AUTO_SKIP` null-return are a matched pair; splitting one
     without the other silently changes skip behavior. `engine.ts:~7813-7820`.
     Protects: **D9a–D9d**.
-60. 83 test files pin engine.ts behavior; the dead `acceptChoice` path is itself tested, so test
-    migration is part of its deletion, not optional. `onboarding/interview/engine.ts:1322`
-    (acceptChoice path), pinned by `onboarding/interview/__tests__/`.
-    Protects: **K4** (Engine dead surface: acceptChoice + slug flow).
+60. **DONE (K4a #219).** The dead `acceptChoice` path was deleted and its coverage migrated per this
+    invariant's mandate; only historical name-mentions survive in `onboarding/interview/engine.ts`
+    comments (the old `engine.ts:1322` anchor now points at unrelated import-routing code). The K4
+    known-divergence — `__cancel__` wrongly advancing signup on the generic route — is pinned by a
+    characterization test and owned by a later onboarding-flow fix unit. The general rule still holds:
+    many test files pin `engine.ts` behavior, so removing an engine surface must migrate its coverage.
+    Protects: **K4** (Engine dead surface: acceptChoice + slug flow) — K4a merged (#219); K4b slug-flow deletion deferred.
 61. `sink.register` runs BEFORE `ptyHost.spawn` in the persistent-repl substrate.
     `persistent-repl-substrate.ts:~1678-1694`.
     Protects: **D1** (PoolRuntime reification).

@@ -107,7 +107,8 @@ const {
   // thread it falls back to the repo-of-record copy (same precedent as
   // codex-review.sh below).
   checkpointScript = null,
-  // FABLE-ORCHESTRATOR model routing (SPEC § Fable-orchestrator, 2026-07-02).
+  // FABLE-ORCHESTRATOR model routing (model routing per the refactor plan protocol,
+  // `docs/plans/2026-07-02-world-class-refactor-plan.md` § 1.5).
   // The per-role model IDS, resolved from the single-source-of-truth registry
   // (runtime/models.ts) in the launcher (`buildWorkflowArgs`) and threaded in
   // here: `{ fable, opus, sonnet, fast }`. This workflow script has NO module
@@ -181,7 +182,8 @@ const forgeBranch = branch || `trident/${slug}`
 // Empty string → every prompt is byte-identical to pre-RB2.
 
 // ── FABLE-ORCHESTRATOR model routing ─────────────────────────────────────────
-// Ryan-locked doctrine (SPEC § Fable-orchestrator, Decisions Log 2026-07-02):
+// Ryan-locked doctrine (refactor plan § 1.5 model-routing protocol; window
+// ground rules locked in the SPEC Decisions Log 2026-07-02):
 // Fable 5 is the ORCHESTRATOR — the max-reasoning THINKER. It does the
 // high-value work (plan:fable planning/decomposition + argus:synthesis
 // verdict-merge). Opus and Sonnet are SUBORDINATE EXECUTORS carrying out Fable's

@@ -2000,18 +2000,28 @@ the R-behavior block (RB*/RC2/RC3) is the perfect-recall uplift, sequenced last 
 
 ## 17. Unit checklist (tick on merge)
 
+> **WINDOW CLOSED 2026-07-16.** All trident-executed units merged through K10 (#375); the tail
+> landed as PRs #311–#390. Deliberate non-merges in the Open tree: **MG-3 = KEEP** (#374 — composer
+> seam kept, the OSS-split boundary), **N3-credential = DEFERRED**, **W3 = DEFERRED** (with the
+> W4/W6 native-shell `[BEHAVIOR]` units slipping post-window; **K4b** onboarding slug-flow deletion
+> also deferred) — all tracked as GitHub issues, not private memory. The **M-lane (M1–M6)** stays
+> unchecked below because it is Managed cross-repo, tracked in `neutron-managed` (not this git log).
+> (N2 + the N3 rename landed together in #367; only the N3-credential sub-part is deferred.)
+> Ticks below reconciled to git ground truth on 2026-07-17. See `SPEC.md` §"The world-class refactor
+> window — COMPLETE (2026-07-16)" + the Decisions Log (`SPEC.md`).
+
 - [x] G1 ✅ #203 · [x] G2 ✅ #211 · [x] G3 ✅ #205 · [x] G4 ✅ #210 · [x] G5 ✅ #204 · [x] G6 ✅ #206 · [x] G7 ✅ #208 · [x] G8 ✅ #213 · [x] G9 ✅ #209 · [x] G10 ✅ #202
-- [x] K1 · [x] K2 · [x] K3 · [x] K4a (K4b deferred) · [x] K5 · [x] K6 ✅ #225 · [x] K7 ✅ #224 · [x] K8 · [x] K9 · [ ] K10 · [x] K11 ✅ #240/#242/#243/#247/#248/#251/#257 (fully closed)
+- [x] K1 · [x] K2 · [x] K3 · [x] K4a (K4b deferred) · [x] K5 · [x] K6 ✅ #225 · [x] K7 ✅ #224 · [x] K8 · [x] K9 · [x] K10 ✅ #375 · [x] K11 ✅ #240/#242/#243/#247/#248/#251/#257 (fully closed)
 - Window auxiliary units: [x] FX1 ✅ #226 (`/code` pre-check narrow) · [x] FX2 ✅ #227 (K3 coverage restore) · [x] RT1 ✅ #228 (Ralph/SPEC tripwire) · [x] K11-pre ✅ #229 (K11a6 test re-anchor) · [x] M0 ✅ neutron-managed#123 (Managed CI)
 - [x] L1 ✅ #253 · [x] L2 ✅ #255 · [x] L3 ✅ #262 · [x] L4 ✅ #258 · [x] L5 ✅ #280 · [x] L6 ✅ #270 · [x] L7 ✅ #260 — **L-PHASE COMPLETE**
-- [x] C1 ✅ #265 · [x] C2 ✅ #268 · [x] C3a ✅ #272 · [x] C3b ✅ #274 · [x] C3c ✅ #276 · [x] C3d ✅ #278 · [x] C4 ✅ #283 · [~] C5a ✅ #302 (route-manifest half — LANDING_PATHS→generated `landing/routes.ts`; **C5b auth-gate-seam unification DEFERRED, owner-gated** — see note) · [x] C6 ✅ #293 · [ ] C7 · [ ] C8
-- [x] D1 ✅ #282 · [x] D2 ✅ #294 · [ ] D3 · [x] D4 ✅ #285 · [x] D5 ✅ #290 · [x] D6 ✅ #289 · [ ] D7 · [x] D8 ✅ #298 · [x] D9a ✅ #286 · [ ] D9b (MOOT — K11*) · [x] D9c ✅ #300 (ProjectsProposedFlow — router/consumeChoice core already K11b1-deleted) · [x] D9d ✅ #305 (PHASE_DESCRIPTORS + exhaustiveness; STATIC_PHASE_SPECS left — undefined-semantics leaf) — **D9-PHASE COMPLETE**
-- [x] P1 ✅ #284 · [x] P2 ✅ #297 · [x] P3 ✅ #292 · [x] P4 ✅ #304 (table-ownership map + conformance test) · [x] P5 ✅ #299 · [ ] P6 · [ ] P7 · [x] P8 ✅ #307 (single entity-format codec; +pre-existing splitTopLevelCommas backslash fix at the seam) · [x] P9 ✅ #309 (gbrain_sync_state observability, fail-soft byte-identical) · [x] P10 ✅ #303 · [x] P11 ✅ #308 (typed JSON codecs on contract columns via P3 parseJsonColumn)
-- [ ] F1 · [ ] F2 · [ ] F3 · [ ] F4 · [ ] F5 · [ ] F6 · [x] F7 ✅ #296 · [ ] F8 · [x] F9 ✅ #194 (pilot)
-- [x] O1 ✅ #295 · [ ] O2 · [ ] O3 · [ ] O4 · [ ] O5 · [ ] O6 · [ ] O7 · [ ] O8
-- [ ] X1 · [ ] X2 · [ ] X3 · [ ] X4 · [ ] X5 · [ ] X6
-- [x] W0 ✅ (docs/specs/ux-architecture-option-d-2026-07-03.md) · [ ] W1 · [~] W2 FREEZE landed (web already converged on ONE shared react-markdown pipeline; legacy `landing/markdown.ts` long deleted; RN hand-parser extracted to a platform-free parse layer + kind-surface `tsc`-frozen + characterized) — "one grammar in the tree" acceptance is W4-gated: the RN grammar is frozen, not removed, and dies/replaced when the native chat surface is retired · [ ] W3a · [ ] W3 · [ ] W4 · [x] W5 ✅ #263 · [ ] W6 · [ ] W7 · [x] W8 ✅ #197
-- [x] M0 ✅ neutron-managed#123 (Managed CI) · [ ] M1 · [ ] M2 · [ ] M3 (riders — MG-1 ✅ managed#124 relocation-tolerant contract gate landed) · [ ] M4 · [ ] M5 · [ ] M6
-- [ ] N1 · [ ] N2 · [ ] N3 · [ ] N4 · [ ] N5 · [ ] N6 · [ ] N7 · [ ] N8
-- [x] S0 ✅ #287 (WS same-origin + per-boot token; NOTE: /api/app/* `dev:owner` bypass closure is deferred to S1 per scope) · [ ] S1 · [ ] S2 · [ ] S3
-- [x] RA1 ✅ #288 · [ ] RA2 · [ ] RA3 · [ ] RA4 · [ ] RA5 · [ ] RC1 · [ ] RB1 · [ ] RB2 · [ ] RC2 · [ ] RC3 · [ ] RB3 · [ ] RB4
+- [x] C1 ✅ #265 · [x] C2 ✅ #268 · [x] C3a ✅ #272 · [x] C3b ✅ #274 · [x] C3c ✅ #276 · [x] C3d ✅ #278 · [x] C4 ✅ #283 · [x] C5a ✅ #302 (route-manifest half — LANDING_PATHS→generated `landing/routes.ts`) · [x] C5b ✅ #312 (auth-gate-seam unification — the previously owner-gated half landed; `openFetch` + `composition.auth_gate` unified into one gate seam, both modes e2e-pinned) · [x] C6 ✅ #293 · [x] C7 ✅ #348 · [x] C8 ✅ #358
+- [x] D1 ✅ #282 · [x] D2 ✅ #294 · [x] D3 ✅ #333 · [x] D4 ✅ #285 · [x] D5 ✅ #290 · [x] D6 ✅ #289 · [x] D7 ✅ #329 · [x] D8 ✅ #298 · [x] D9a ✅ #286 · [ ] D9b (MOOT — K11*) · [x] D9c ✅ #300 (ProjectsProposedFlow — router/consumeChoice core already K11b1-deleted) · [x] D9d ✅ #305 (PHASE_DESCRIPTORS + exhaustiveness; STATIC_PHASE_SPECS left — undefined-semantics leaf) — **D9-PHASE COMPLETE**
+- [x] P1 ✅ #284 · [x] P2 ✅ #297 · [x] P3 ✅ #292 · [x] P4 ✅ #304 (table-ownership map + conformance test) · [x] P5 ✅ #299 · [x] P6 ✅ #349 · [x] P7 ✅ #317 · [x] P8 ✅ #307 (single entity-format codec; +pre-existing splitTopLevelCommas backslash fix at the seam) · [x] P9 ✅ #309 (gbrain_sync_state observability, fail-soft byte-identical) · [x] P10 ✅ #303 · [x] P11 ✅ #308 (typed JSON codecs on contract columns via P3 parseJsonColumn)
+- [x] F1 ✅ #313 · [x] F2 ✅ #340 · [x] F3 ✅ #339 · [x] F4 ✅ #323 · [x] F5 ✅ #353 · [x] F6 ✅ #343 · [x] F7 ✅ #296 · [x] F8 ✅ #354 · [x] F9 ✅ #194 (pilot)
+- [x] O1 ✅ #295 · [x] O2 ✅ #345 · [x] O3 ✅ #335 · [x] O4 ✅ #319 · [x] O5 ✅ #314/#347 · [x] O6 ✅ #342 · [x] O7 ✅ #344 · [x] O8 ✅ #337
+- [x] X1 ✅ #322 · [x] X2 ✅ #318 · [x] X3 ✅ #315 · [x] X4 ✅ #320 · [x] X5 ✅ #352 · [x] X6 ✅ #355
+- [x] W0 ✅ (docs/specs/ux-architecture-option-d-2026-07-03.md) · [x] W1a ✅ #334 (client-core base — `GatewayHttpClient` + unified `GatewayClientError`; the full view-model migration is post-window W-lane continuation) · [x] W2 ✅ #356 (native grammar FREEZE + platform-free parse layer; web already converged on ONE shared react-markdown pipeline, legacy `landing/markdown.ts` long deleted; "one grammar in the tree" acceptance stays W4-gated — the RN grammar is frozen, not removed, and dies/replaced when the native chat surface is retired) · [x] W3a ✅ #359 (resume-fidelity stage-0 — persist structured agent-message meta) · [ ] W3 DEFERRED (transcript unification, XL — scoped feature work; tracked GitHub issue) · [ ] W4 DEFERRED — post-window `[BEHAVIOR]` Expo shell conversion (native app unpublished; slipped post-window) · [x] W5 ✅ #263 · [ ] W6 DEFERRED — post-window `[BEHAVIOR]` native-shell↔WebView resilience bridge (pairs with W4) · [x] W7 ✅ #321 · [x] W8 ✅ #197
+- [x] M0 ✅ neutron-managed#123 (Managed CI) · [ ] M1 · [ ] M2 · [ ] M3 (riders — MG-1 ✅ managed#124 relocation-tolerant contract gate landed; **MG-3 = KEEP ✅ #374** — the `NEUTRON_GRAPH_COMPOSER_MODULE` composer seam is kept by decision, the OSS-split boundary, NOT deleted) · [ ] M4 · [ ] M5 · [ ] M6 <br>*(M-lane = Managed cross-repo `neutron-managed`; tracked there, not in this git log)*
+- [x] N1 ✅ #362 · [x] N2 ✅ #367 (internal_handle→owner_handle non-ABI sweep — unified with the N3 rename into one ABI-safe PR) · [~] N3 — the ABI-facing `internal_handle`→`owner_handle` rename landed in #367; **N3-credential** (frozen-handle threading at the Managed boot seam) DEFERRED — cannot fire without live hosted owners that rename; tracked GitHub issue · [x] N4 ✅ #372 · [x] N5 ✅ #368 · [x] N6 ✅ #371 · [x] N7 ✅ #364 · [x] N8 ✅ #365
+- [x] S0 ✅ #287 (WS same-origin + per-boot token; NOTE: /api/app/* `dev:owner` bypass closure is deferred to S1 per scope) · [x] S1 ✅ #351 · [x] S2 ✅ #336 · [x] S3 ✅ #338
+- [x] RA1 ✅ #288 · [x] RA2 ✅ #350 · [x] RA3 ✅ #324 · [x] RA4 ✅ #341 · [x] RA5 ✅ #316 · [x] RC1 ✅ #311 · [x] RB1 ✅ #361 · [x] RB2 ✅ #363 · [x] RC2 ✅ #357 · [x] RC3 ✅ #360 · [x] RB3 ✅ #369 · [x] RB4 ✅ #366
