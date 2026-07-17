@@ -13,7 +13,7 @@
  *                       prompt-user; a metered key paste is rejected, never stored)
  */
 
-import type { JsonSchemaDocument } from '@neutronai/core-sdk/types.ts'
+import type { JsonSchemaDocument } from '@neutronai/cores-sdk/manifest'
 import type { ToolRegistry } from '@neutronai/tools/registry.ts'
 import type { CodexCredentialService } from './codex-credential.ts'
 import { asOwnerHandle } from '@neutronai/persistence/index.ts'

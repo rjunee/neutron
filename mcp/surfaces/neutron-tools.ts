@@ -14,7 +14,7 @@
 
 import type { ToolRegistry } from '@neutronai/tools/registry.ts'
 import type { ToolHandler, ToolRegistration } from '@neutronai/tools/registry.ts'
-import type { NeutronCapability } from '@neutronai/core-sdk/types.ts'
+import type { NeutronCapability } from '@neutronai/cores-sdk/manifest'
 
 const objectSchema = { type: 'object', properties: {}, additionalProperties: true } as const
 

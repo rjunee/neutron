@@ -22,7 +22,7 @@
  * the loop, exactly like `/code`.
  */
 
-import type { JsonSchemaDocument } from '@neutronai/core-sdk/types.ts'
+import type { JsonSchemaDocument } from '@neutronai/cores-sdk/manifest'
 import type { ToolRegistry } from '@neutronai/tools/registry.ts'
 import type { Topic } from '@neutronai/channels/types.ts'
 import {

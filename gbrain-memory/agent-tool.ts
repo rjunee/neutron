@@ -36,7 +36,7 @@
  * plain JSON the registry serialises into the agent's `tool_result`.
  */
 
-import type { JsonSchemaDocument } from '@neutronai/core-sdk/types.ts'
+import type { JsonSchemaDocument } from '@neutronai/cores-sdk/manifest'
 import type { ToolRegistry } from '@neutronai/tools/registry.ts'
 import type { MemoryStore } from './memory-store.ts'
 

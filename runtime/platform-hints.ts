@@ -22,7 +22,7 @@ export type ChannelKind = 'telegram' | 'cli' | 'email' | 'discord' | 'slack' | '
 
 /**
  * The exhaustive list of named hint fragments. The same naming discipline as
- * `core-sdk` capabilities — adding a new hint REQUIRES extending this tuple
+ * `cores-sdk` capabilities — adding a new hint REQUIRES extending this tuple
  * so any selector branch that omits it is a compile-time inconsistency.
  */
 export const KNOWN_PLATFORM_HINTS = [

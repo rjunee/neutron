@@ -53,7 +53,7 @@ import type { GptResponsesApiSubstrateOptions } from '@neutronai/runtime/adapter
 import { asOwnerHandle } from '@neutronai/persistence/index.ts'
 import type { CodexCliSubstrateOptions } from '@neutronai/runtime/adapters/codex-cli/index.ts'
 import type { McpToolResolver } from '@neutronai/contracts/mcp-tool-resolver.ts'
-import type { ToolDef } from '@neutronai/core-sdk/types.ts'
+import type { ToolDef } from '@neutronai/cores-sdk/manifest'
 import {
   reportFailure,
   reportSuccess,

@@ -68,7 +68,7 @@ export const WRITE_CAPABILITY = 'write:research_core.db' as const
  *  `src/web-fetch-allowlist.ts`. */
 export const BROWSE_CAPABILITY = 'network:browse' as const
 
-/** S1 — sub-agent dispatch capability (already in core-sdk closed enum).
+/** S1 — sub-agent dispatch capability (already in the cores-sdk closed enum).
  *  Declared so `/research deep` can spawn the in-process Haiku-4.5
  *  harness via the runtime sub-agent dispatcher. */
 export const SUBAGENT_CAPABILITY = 'agent:dispatch_subagent' as const

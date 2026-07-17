@@ -24,7 +24,7 @@
 
 import { FAST_MODEL } from '@neutronai/runtime/models.ts'
 import type { AgentSpec, Substrate } from '@neutronai/runtime/substrate.ts'
-import type { ToolDef } from '@neutronai/core-sdk/types.ts'
+import type { ToolDef } from '@neutronai/cores-sdk/manifest'
 import { collectTokensToString } from '@neutronai/runtime/collect-tokens.ts'
 import { classifyReminderMessage, literalFallback, type ReminderShape } from './message-shape.ts'
 import { buildReminderPrompt } from './prompt.ts'

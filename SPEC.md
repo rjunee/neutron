@@ -101,7 +101,7 @@ A Bun workspace grouped bottom-up into five layers:
 - **Memory** — `gbrain-memory/` (the sole durable memory store), `scribe/`
   (extraction as a side effect of talking), `runtime/entity-writer` (the privacy
   gate every write passes through).
-- **Cores** — `core-sdk/` + `cores/{sdk,runtime}` + `cores/free/*` (the free-tier
+- **Cores** — `cores/{sdk,runtime}` + `cores/free/*` (the free-tier
   Cores).
 - **Product surfaces** — `onboarding/`, `app/` (Expo), `landing/`, `prompts/`.
 

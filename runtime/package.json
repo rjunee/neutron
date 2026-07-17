@@ -7,7 +7,7 @@
     "@modelcontextprotocol/sdk": "^1.29.0",
     "@neutronai/app": "workspace:*",
     "@neutronai/contracts": "workspace:*",
-    "@neutronai/core-sdk": "workspace:*",
+    "@neutronai/cores-sdk": "workspace:*",
     "@neutronai/gbrain-memory": "workspace:*",
     "@neutronai/jwt-validator": "workspace:*",
     "@neutronai/logger": "workspace:*",

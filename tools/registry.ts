@@ -18,7 +18,7 @@
  *   prefer loud-on-boot over silent-overwrite-by-load-order.
  *
  * - Schema validation is JSON-Schema-shaped (loose `Record<string, unknown>`)
- *   per the locked Core SDK contract in `core-sdk/types.ts`. A real
+ *   per the locked Core SDK contract in `@neutronai/cores-sdk/manifest`. A real
  *   schema-validator (Ajv / similar) is plugged in by callers; the registry
  *   itself is unopinionated about validation engine.
  *
@@ -31,7 +31,7 @@
  *   JSON-serialisable data; throws bubble up as `error` events.
  */
 
-import type { Capability, JsonSchemaDocument } from '@neutronai/core-sdk/types.ts'
+import type { Capability, JsonSchemaDocument } from '@neutronai/cores-sdk/manifest'
 
 export type ApprovalPolicy = 'auto' | 'prompt-user' | 'prompt-admin'
 

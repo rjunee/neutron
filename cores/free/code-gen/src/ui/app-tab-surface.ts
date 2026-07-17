@@ -6,9 +6,9 @@
  * path 404s gracefully and the launcher renders its routing-error
  * toast.
  *
- * The `app_tab` surface kind was added to `cores/sdk/manifest.ts` Zod
- * schema + `core-sdk/types.ts:UiComponentSurface` in the Notes Core
- * S1 sprint (PR #240). No SDK surgery this sprint.
+ * The `app_tab` surface kind was added to the `cores/sdk/manifest.ts` Zod
+ * schema (`UiComponentSurface`) in the Notes Core S1 sprint (PR #240). No
+ * SDK surgery this sprint.
  *
  * Per docs/plans/code-gen-core-tier1-brief.md § 3.1 +  § 3.7.
  */

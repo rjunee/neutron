@@ -24,7 +24,7 @@
  * `design_doc_ref` schemes are allow-listed at the store.
  */
 
-import type { JsonSchemaDocument } from '@neutronai/core-sdk/types.ts'
+import type { JsonSchemaDocument } from '@neutronai/cores-sdk/manifest'
 import type { ToolRegistry } from '@neutronai/tools/registry.ts'
 import {
   WorkBoardValidationError,

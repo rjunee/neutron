@@ -19,7 +19,7 @@
  * surfaces a Trident build's terminal result asynchronously.
  */
 
-import type { JsonSchemaDocument } from '@neutronai/core-sdk/types.ts'
+import type { JsonSchemaDocument } from '@neutronai/cores-sdk/manifest'
 import type { ToolCallContext, ToolRegistry } from '@neutronai/tools/registry.ts'
 import { workBoardScopeKey } from '@neutronai/work-board/store.ts'
 import { DISPATCH_KINDS, type DispatchKind } from './prompts.ts'

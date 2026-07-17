@@ -5,7 +5,7 @@
   "private": true,
   "dependencies": {
     "@neutronai/chat-core": "workspace:*",
-    "@neutronai/core-sdk": "workspace:*",
+    "@neutronai/cores-sdk": "workspace:*",
     "@neutronai/tools": "workspace:*"
   }
 }

@@ -30,7 +30,7 @@ import type { CoreDataLayout } from './installations-store.ts'
 /**
  * The `<verb>:<resource>` capability strings that gate a Core's access
  * to the shared project DB. `read:project.db` and `write:project.db` are
- * the canonical pair declared in `core-sdk/types.ts:NeutronCapability` —
+ * the canonical pair declared in `cores/sdk/manifest.ts` (`KnownCapability`) —
  * the only accepted forms. The pre-rename aliases were dropped in the
  * ZERO-back-compat sweep (§ 2.3); the gate accepts the project vocabulary
  * exclusively.
