@@ -26,10 +26,11 @@ export const APP_TAB_META = {
   label: 'Tasks',
   emoji: '✅',
   /**
-   * Order hint among project tabs (lower = earlier). Tasks Core sits
-   * between Notes (~20) and Reminders (~40) per the locked Cores order
-   * in `SPEC.md § Phases→Steps` (TODO(K10): root SPEC.md not yet in
-   * this repo; K10 recreates it).
+   * Order hint among project tabs (lower = earlier). The per-tab `order`
+   * hints across sibling Cores define the display sequence — Tasks sits
+   * between Notes (~20) and Reminders (~40). (See the Tier-1 free-Core
+   * inventory in `SPEC.md § Phases→Steps`; the tab order is these hints,
+   * not a Core buildout sequence.)
    */
   order: 30,
 } as const

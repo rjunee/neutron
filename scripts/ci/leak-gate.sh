@@ -197,11 +197,14 @@ echo
 # ── Tier 3: structural ────────────────────────────────────────────────────────
 echo "── Tier 3: structural ─────────────────────────────────────────────────"
 FORBIDDEN_PREFIXES='tenancy/ tenant-provisioning/ signup/ identity/ proxy/'
-# RT1 tripwire — K10 removes SPEC.md from this list when it intentionally
-# introduces a root SPEC.md (`detectRalphMode` in trident/git-mode.ts flips a
-# repo into Ralph-governed mode the instant a root SPEC.md exists, so an
-# ACCIDENTAL one mid-window would silently change `/code` behavior).
-FORBIDDEN_EXACT='STATUS.md ISSUES.md CLAUDE.md AGENTS.md SPEC.md'
+# RT1 tripwire — root `SPEC.md` is DELIBERATELY absent from this list as of K10.
+# K10 intentionally introduces a root SPEC.md (the public master spec), which
+# flips the repo into Ralph-governed mode (`detectRalphMode` in
+# trident/git-mode.ts keys off a root SPEC.md). That flip is now INTENDED, so a
+# root SPEC.md must NOT trip forbidden-path. The remaining root files stay
+# banned as carve tripwires against Managed's private root docs re-entering the
+# public tree (STATUS.md/ISSUES.md/CLAUDE.md/AGENTS.md).
+FORBIDDEN_EXACT='STATUS.md ISSUES.md CLAUDE.md AGENTS.md'
 forbidden_path_hits() {
   local f p
   while IFS= read -r f; do

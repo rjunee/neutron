@@ -14,7 +14,7 @@
  * manifest metadata — the actual launcher tab lands in P5.3.
  *
  * Cross-refs:
- * - SPEC.md § Phases→Steps (Tier 1 Cores buildout; TODO(K10): root SPEC.md not yet in this repo)
+ * - SPEC.md § Phases→Steps (Tier 1 free-Core inventory)
  * - docs/research/neutron-cores-marketplace-split-2026-05-17.md (2-tier model)
  * - cores/sdk/SDK-CONTRACT.md (the API surface this Core consumes)
  * - cores/runtime (install / capability gate / audit log)

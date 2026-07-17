@@ -99,9 +99,9 @@ export interface BoardBoundBuildDeps {
   /** Defaults to `detectMergeMode` over the production probe. Test seam. */
   resolveMergeMode?: () => Promise<MergeMode>
   /**
-   * RT1 refactor-window override: default is forced `false` (see the
-   * dispatch body); an explicit resolver still wins. K10 restores the
-   * `detectRalphMode` default. Test seam.
+   * Resolve whether this build is governed (Ralph mode). Defaults to
+   * `detectRalphMode` over the production probe — a `SPEC.md` at the git
+   * root governs. An explicit resolver still wins. Test seam.
    */
   resolveRalph?: () => Promise<boolean>
   chat_id?: string | null
@@ -174,21 +174,15 @@ export async function dispatchBoardBoundBuild(
       deps.project_slug,
     )
     merge_mode = await (deps.resolveMergeMode ?? (() => detectMergeMode(repo_path, defaultGitModeProbe())))()
-    // RT1 window override (refactor-window tripwire, part b) — force
-    // non-governed builds for the DURATION OF THE REFACTOR WINDOW. Neither
+    // K10 restored the governed default (the refactor-window `resolveRalph =
+    // false` override is gone): a root `SPEC.md` on the resolved workspace's
+    // git root flips the build into Ralph mode via `detectRalphMode`. Neither
     // production caller (the `/code` chat command nor the agent-native
-    // `work_board_dispatch_build` tool) currently supplies `resolveRalph`, so
-    // this chokepoint's fallback is the live behavior for every real build.
-    // Normally it would fall through to `detectRalphMode` — real `SPEC.md`
-    // detection — but that would flip a build governed the instant a root
-    // `SPEC.md` slips into the tree mid-window (belt-and-suspenders with the
-    // leak-gate `forbidden-path` rule, which bans a root SPEC.md outright).
-    // K10 removes this line (restoring `detectRalphMode(repo_path,
-    // defaultRalphModeProbe())` below) when it intentionally introduces a
-    // real root SPEC.md and Ralph mode is meant to engage again. An explicit
-    // caller-supplied `deps.resolveRalph` (tests, or a future composition
-    // root override) still wins — only the DEFAULT is forced false.
-    ralph = await (deps.resolveRalph ?? (() => Promise.resolve(false)))()
+    // `work_board_dispatch_build` tool) supplies `resolveRalph`, so this is
+    // the live behavior for every real build; an explicit caller-supplied
+    // `deps.resolveRalph` (tests, or a future composition-root override)
+    // still wins.
+    ralph = await (deps.resolveRalph ?? (() => detectRalphMode(repo_path, defaultRalphModeProbe())))()
   } catch (err) {
     return {
       ok: false,

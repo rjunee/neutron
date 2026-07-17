@@ -96,7 +96,7 @@ row preserves NULL source so cancelOwnedReminders leaves it alone".
 
 ## Cross-refs
 
-- `SPEC.md § Phases→Steps` — Tier 1 Cores buildout sequence (TODO(K10): root SPEC.md not yet in this repo; K10 recreates it)
+- `SPEC.md § Phases→Steps` — Tier 1 Cores (free-Core inventory)
 - `docs/research/neutron-cores-marketplace-split-2026-05-17.md` — 2-tier Cores model
 - `cores/sdk/SDK-CONTRACT.md` — author-facing API
 - `docs/research/AS-BUILT-archive-2026-07.md` (formerly root `AS-BUILT.md`; the

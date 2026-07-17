@@ -8,7 +8,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { applyMigrations } from '@neutronai/migrations/runner.ts'
@@ -106,6 +106,61 @@ describe('work_board_dispatch_build tool', () => {
     expect(run.phase).toBe('forge-init')
     expect(run.task).toBe('build the export')
     expect(attached).toEqual([{ id: 'ready', run_id: out.run_id as string }])
+  })
+
+  test('RT1 (tool): no resolveRalph override + a root SPEC.md → persisted ralph=true', async () => {
+    // The agent-native production path (`work_board_dispatch_build`) shares the
+    // `dispatchBoardBoundBuild` core with `/code` and does NOT supply
+    // `resolveRalph` in production, so the K10 flip must engage here too. Point
+    // repo_path at a dir WITH a root SPEC.md and omit the override.
+    const specDir = mkdtempSync(join(tmpdir(), 'neutron-wb-build-spec-'))
+    writeFileSync(join(specDir, 'SPEC.md'), '# spec\n')
+    try {
+      const reg = new ToolRegistry()
+      registerTridentBuildToolSurface(reg, {
+        store,
+        work_board: board(),
+        repo_path: specDir,
+        resolveBuildRepo: async (home) => home, // identity — repo_path stays specDir
+        resolveMergeMode: async () => 'local',
+        // resolveRalph deliberately OMITTED — exercises the detectRalphMode default.
+      })
+      const out = (await reg.get(WORK_BOARD_DISPATCH_BUILD_TOOL)!.handler(
+        { board_item_id: 'ready', task: 'build the export' },
+        ctx,
+      )) as Record<string, unknown>
+      expect(out.ok).toBe(true)
+      expect(store.get(out.run_id as string)!.ralph).toBe(true)
+    } finally {
+      rmSync(specDir, { recursive: true, force: true })
+    }
+  })
+
+  test('RT1 (tool): no resolveRalph override + NO root SPEC.md → persisted ralph=false', async () => {
+    // The ungoverned boundary of the same agent-native path: no override + no
+    // SPEC.md stays legacy. A regression that force-injected `resolveRalph:
+    // false` in the tool adapter would fail the positive test above; one that
+    // force-enabled Ralph would fail this. Together they pin the SPEC.md gate.
+    const noSpecDir = mkdtempSync(join(tmpdir(), 'neutron-wb-build-nospec-'))
+    try {
+      const reg = new ToolRegistry()
+      registerTridentBuildToolSurface(reg, {
+        store,
+        work_board: board(),
+        repo_path: noSpecDir,
+        resolveBuildRepo: async (home) => home,
+        resolveMergeMode: async () => 'local',
+        // resolveRalph deliberately OMITTED; no SPEC.md on disk.
+      })
+      const out = (await reg.get(WORK_BOARD_DISPATCH_BUILD_TOOL)!.handler(
+        { board_item_id: 'ready', task: 'build the export' },
+        ctx,
+      )) as Record<string, unknown>
+      expect(out.ok).toBe(true)
+      expect(store.get(out.run_id as string)!.ralph).toBe(false)
+    } finally {
+      rmSync(noSpecDir, { recursive: true, force: true })
+    }
   })
 
   test('#339 — resolve_delivery stamps the originating chat topic (from ctx.project_id) onto the run', async () => {

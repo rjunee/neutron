@@ -31,7 +31,7 @@
  *
  * Cross-refs:
  *   - docs/plans/calendar-core-tier1-brief.md (the spec this Core ships)
- *   - SPEC.md § Phases→Steps (Tier 1 Cores buildout; TODO(K10): root SPEC.md not yet in this repo)
+ *   - SPEC.md § Phases→Steps (Tier 1 free-Core inventory)
  *   - docs/research/neutron-cores-marketplace-split-2026-05-17.md (2-tier model)
  *   - cores/sdk/SDK-CONTRACT.md (the API surface this Core consumes)
  *   - gateway/cores/oauth-token-manager.ts (OAuth substrate this Core depends on)
