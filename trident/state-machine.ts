@@ -27,6 +27,18 @@
  * The transition graph itself (`computeTransition`) is pure + fully unit
  * tested now so PR-3/PR-4 only wire I/O, never re-derive control flow.
  * ─────────────────────────────────────────────────────────────────────
+ * SHIPPED-ARCHITECTURE NOTE (Trident v2 exec-model): production no longer
+ * drives this per-phase graph for the inner loop. The live Forge→Argus→fix
+ * loop is one native CC Dynamic Workflow (`inner-workflow.mjs`), and the
+ * Ralph plan→task→repeat cycle (`ralph-plan`/`ralph-task` below) is driven
+ * by the OUTER `orchestrator.ts` via the `remaining_tasks` re-fire
+ * (`refireNextRalphTask`, #362) — NOT by `computeTransition`. This module is
+ * RETAINED for: the `stubAdvanceDeps` restart-safe no-op fallback (wired when
+ * the exec-model orchestrator is absent), one-commit revertibility, and its
+ * role as the executable cross-repo parity anchor for Vajra's `/trident` skill
+ * loop (`vajra-fixes.test.ts`). Its `ralph-plan`/`ralph-task`/`forge-fix`
+ * branches are therefore not reached in the shipped exec-model path.
+ * ─────────────────────────────────────────────────────────────────────
  */
 
 import type { TridentPhase, TridentRun } from './store.ts'

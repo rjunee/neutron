@@ -31,6 +31,15 @@
  *      outer/human gate); on REQUEST_CHANGES / failed-provenance → phase `failed`
  *      with a named reason (recoverable: re-run), never a silent success.
  *
+ *      RALPH RE-FIRE (#362): a harvested result carrying `remaining_tasks > 0` is
+ *      an INTERMEDIATE Ralph iteration — one task built, more remain. Instead of
+ *      merging (the bug: multi-task builds shipped after task 1), `applyResult`
+ *      RE-FIRES a fresh inner iteration for the next task (`refireNextRalphTask`:
+ *      reset the sub-agent slot, keep branch/PR + the 'ralph-task-built' resume
+ *      checkpoint, bump `ralph_round`, cap at `max_ralph_rounds`). This — not
+ *      `state-machine.ts` — is where the live plan→task→repeat loop is driven in
+ *      the exec model.
+ *
  *   3. CRASH RECOVERY. The durable row is authoritative; harvest works across a
  *      process restart because the result lives in the DB, not in memory. A
  *      persisted `subagent_run_id` this process did NOT fire (lost on restart)
@@ -41,8 +50,14 @@
  *      past `max_inflight_ms` with no checkpoint is reaped as a stalled run.
  *
  * `state-machine.ts` (`computeTransition`/`advanceTridentRun`) is intentionally
- * KEPT intact (its unit tests + one-commit revertibility) even though this prod
- * step no longer drives the per-phase graph for the inner loop.
+ * KEPT intact — for its `stubAdvanceDeps` restart-safe no-op fallback (used when
+ * trident isn't wired to the exec-model orchestrator), its unit tests, its
+ * one-commit revertibility, AND its role as the executable cross-repo PARITY
+ * anchor for Vajra's `/trident` skill loop (`vajra-fixes.test.ts`). The exec-model
+ * step above no longer drives its per-phase graph for the inner loop; in
+ * particular the Ralph plan→task→repeat cycle is now driven HERE via the
+ * `remaining_tasks` re-fire (`refireNextRalphTask`, #362), NOT by
+ * `computeTransition`'s `ralph-plan`/`ralph-task` branches.
  */
 
 import { cleanupAfterMerge, type MergeCleanupDeps } from './git-mode.ts'

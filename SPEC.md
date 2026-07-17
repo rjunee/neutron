@@ -340,6 +340,21 @@ architecture and points here.
 
 ### 2026-07-17
 
+- **Trident Ralph re-fire — multi-task builds now build EVERY task before merge (#362).** Fixed a real bug:
+  Trident v2 Ralph mode built only `plan.topTask` then merged (`plan.remainingTasks` was logged-only; the
+  outer harvest merged on inner APPROVE with no remaining check), so a multi-task `IMPLEMENTATION_PLAN.md`
+  build shipped incomplete after task 1. The plan→task→repeat cycle is restored as REAL exec-model behavior:
+  the inner workflow emits `remainingTasks` in its typed terminal result and, when `>0`, builds the one task
+  and SKIPS review; the OUTER loop (`orchestrator.applyResult` → `refireNextRalphTask`) re-fires a FRESH
+  inner iteration per remaining task (one task / fresh context — reuse branch/PR + the `'ralph-task-built'`
+  resume checkpoint, bump `ralph_round`, cap at `max_ralph_rounds`) and only reviews→merges at `remaining==0`.
+  No feature flags. The now-superseded `state-machine.ts` Ralph cycle (`computeTransition`) is KEPT — it stays
+  the `stubAdvanceDeps` restart-safe fallback + the executable Vajra `/trident` parity anchor
+  (`vajra-fixes.test.ts`) + one-commit revert point; stale "this drives the loop" comments were corrected to
+  point at the orchestrator. FLAGGED for the trident-architecture review (a human + Argus may prefer deleting
+  the retained cycle). Real multi-task E2E added (inner-workflow body + orchestrator/store/tick).
+  [`trident/inner-workflow.mjs`, `trident/inner-loop.ts`, `trident/orchestrator.ts`,
+  `gateway/composition/build-core-modules.ts`, `docs/AS_BUILT.md`]
 - **UPDATE (2026-07-17) — Owner-timezone (ISSUES #40) WRITE path LANDED in #392.** Supersedes the "not yet
   in this tree / in flight on its own branch" status of the earlier 2026-07-17 entry below. The WRITE path
   is now in the tree: the web + Expo clients capture their own IANA zone
