@@ -340,6 +340,20 @@ architecture and points here.
 
 ### 2026-07-17
 
+- **UPDATE (2026-07-17) — Owner-timezone (ISSUES #40) WRITE path LANDED in #392.** Supersedes the "not yet
+  in this tree / in flight on its own branch" status of the earlier 2026-07-17 entry below. The WRITE path
+  is now in the tree: the web + Expo clients capture their own IANA zone
+  (`Intl.DateTimeFormat().resolvedOptions().timeZone` — web once at boot, mobile per connect) and report it
+  as `tz=` on the `/ws/app/chat` upgrade query string; the gateway boundary-checks it (`sanitizeTimezone`) and, once per WS
+  `open` in `on_client_timezone`, AUTHORIZES by owner identity (`user_id === OWNER_USER_ID` — a non-owner
+  guest on the shared instance slug is ignored, logged server-side with no client-visible error) before
+  idempotently persisting a valid, changed zone via `persistOwnerTimezoneIfChanged` → `writeOwnerTimezone`,
+  the row keyed on the auth-resolved instance `project_slug` (the persistence key, not the authorization
+  principal). Its one consumer today is the idle-nudge engine, which now keys the daily nudge pick's
+  day-boundary on the owner's real zone (the proactive brief + reminder schedulers still use the host-local
+  zone). [`open/wiring/app-ws.ts`,
+  `channels/adapters/app-ws/envelope.ts`, `gateway/storage/owner-metadata.ts`, `landing/chat-react/config.ts`,
+  `app/lib/chat-core/ws-url.ts`]
 - **Owner-timezone (ISSUES #40) — capture approach LOCKED: browser/OS IANA zone → `writeOwnerTimezone`.**
   The owner's timezone is captured from the client's own IANA zone
   (`Intl.DateTimeFormat().resolvedOptions().timeZone`) rather than inferred server-side, then persisted
