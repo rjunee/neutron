@@ -31,6 +31,9 @@ export interface SimResult {
   round?: number
   /** The `checkpoint` field inside the result JSON (self-asserted). */
   checkpoint?: string | null
+  /** RALPH RE-FIRE (#362) — tasks still unbuilt after this iteration; `> 0` drives
+   *  an outer re-fire. Omit (→ undefined, serialized absent) for single-task runs. */
+  remainingTasks?: number | null
 }
 
 /** Build the compact JSON the workflow writes into `inner_result`. */
@@ -42,6 +45,9 @@ export function simResultJson(sim: SimResult): string {
     verdict: sim.verdict ?? null,
     round: sim.round ?? 1,
     checkpoint: sim.checkpoint ?? null,
+    // Only emit when the test set it (mirrors the .mjs, which omits it for
+    // non-Ralph runs); `parseInnerResult` treats an absent field as null.
+    ...(sim.remainingTasks !== undefined ? { remainingTasks: sim.remainingTasks } : {}),
   })
 }
 

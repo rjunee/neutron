@@ -94,6 +94,15 @@ export interface InnerResult {
   branch: string | null
   round: number
   checkpoint: string | null
+  /**
+   * RALPH RE-FIRE (#362) — the count of Ralph tasks still UNCHECKED after the one
+   * this inner iteration built. `> 0` is the outer loop's signal to RE-FIRE a fresh
+   * inner iteration for the next task (build one task per fresh context) instead of
+   * merging after task 1; `0` (the final task, or a non-Ralph run) takes the normal
+   * merge/fail path. `null` when the column predates #362 / omits the field — treated
+   * as 0 (no re-fire) so legacy rows and single-task builds are unchanged.
+   */
+  remaining_tasks: number | null
 }
 
 /** The terminal outcome of FIRING the workflow (NOT the build result). */
@@ -294,6 +303,11 @@ export function parseInnerResult(raw: string | null | undefined): InnerResult | 
     branch: typeof p.branch === 'string' ? p.branch : null,
     round: typeof p.round === 'number' && Number.isFinite(p.round) ? p.round : 0,
     checkpoint: typeof p.checkpoint === 'string' ? p.checkpoint : null,
+    // RALPH RE-FIRE (#362). Absent/garbled → null (treated as no re-fire).
+    remaining_tasks:
+      typeof p.remainingTasks === 'number' && Number.isFinite(p.remainingTasks)
+        ? Math.max(0, Math.trunc(p.remainingTasks))
+        : null,
   }
 }
 

@@ -484,6 +484,14 @@ export function buildCoreModules(
         if (codexHome !== undefined && codexHome.length > 0) {
           orchestratorOpts.codex_home = codexHome
         }
+        // RALPH RE-FIRE (#362) — the seam that atomically persists a re-fired Ralph
+        // run's reset (null the harvested `inner_result` + release the sub-agent slot +
+        // bump ralph_round) out-of-band in ONE store UPDATE. save/saveIfActive never
+        // write `inner_result`; the single atomic write also avoids the crash window
+        // that would otherwise strand the row as terminal-but-garbled. A multi-task
+        // Ralph build re-fires a fresh inner iteration per remaining task.
+        orchestratorOpts.persist_refire_reset = (id, patch) =>
+          store.update(id, patch).then(() => {})
         const orchestrator = buildTridentOrchestrator(orchestratorOpts)
         loop = new TridentTickLoop({ store, step: orchestrator.step, on_terminal, ...transitionOpt })
         drain = orchestrator.drain

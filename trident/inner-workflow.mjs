@@ -716,6 +716,11 @@ try {
   // forge:build executes it directly (routed to Opus by the missing-tag default).
   let complexityTag = null
   let ralphNote = ''
+  // RALPH RE-FIRE (#362) — the count of tasks still UNCHECKED after the one this
+  // iteration builds. >0 means the outer loop must re-fire a FRESH inner iteration
+  // for the next task instead of merging after task 1 (the bug this fixes). Stays 0
+  // for non-Ralph (single-task) runs, which never re-fire.
+  let ralphRemaining = 0
   if (ralph === true) {
     const plan = await agent(
       planFablePrompt(resuming),
@@ -730,7 +735,8 @@ try {
     }
     complexityTag = plan.complexity
     ralphNote = ralphExecuteNote(plan)
-    log(`trident-v2 plan:fable → topTask="${plan.topTask}" complexity=${plan.complexity} remaining=${plan.remainingTasks}`)
+    ralphRemaining = Number.isFinite(plan.remainingTasks) ? Math.max(0, Math.trunc(plan.remainingTasks)) : 0
+    log(`trident-v2 plan:fable → topTask="${plan.topTask}" complexity=${plan.complexity} remaining=${ralphRemaining}`)
   }
 
   // Round 1: re-enter only on a genuine crash-resume (`resuming`); otherwise
@@ -749,6 +755,39 @@ ${task}${reflectionGuidance}`,
 
   // C1 checkpoint — Forge done (PR + branch persisted).
   await checkpoint('forge-done', { pr })
+
+  // ── RALPH RE-FIRE (#362) — build ONE task per fresh context ──────────────────
+  // In Ralph mode with tasks still remaining after this one, the build is NOT
+  // done: per the one-task-per-fresh-context discipline we must build the NEXT
+  // task in a FRESH inner iteration, not merge after task 1. So SKIP the
+  // review→fix→merge terminal path here and hand a TYPED intermediate result back
+  // to the OUTER loop (orchestrator.applyResult), which re-fires a fresh iteration
+  // (re-plan against the now-committed IMPLEMENTATION_PLAN.md + build the next top
+  // task, reusing this branch/PR). Only the FINAL task (remaining == 0) — and
+  // every non-Ralph run — falls through to the review→fix→merge path below, so the
+  // WHOLE cumulative diff is reviewed exactly once before merge.
+  //
+  // The intermediate result carries `remainingTasks` (the outer's re-fire signal)
+  // and checkpoint 'ralph-task-built' — deliberately NOT 'argus-approved', so the
+  // outer's merge provenance gate can never fire on an unreviewed intermediate,
+  // and a resume re-enters the branch (only 'argus-approved' short-circuits).
+  if (ralph === true && ralphRemaining > 0) {
+    log(`trident-v2 ralph: task built, ${ralphRemaining} task(s) remain → hand back to outer loop for re-fire`)
+    await checkpoint('ralph-task-built', { pr })
+    const refireResult = {
+      ok: true,
+      prNumber: pr,
+      branch: forgeBranch,
+      // Unreviewed intermediate — no Argus verdict yet (the outer re-fires, never
+      // merges, on remainingTasks>0). Kept non-APPROVE as belt-and-suspenders.
+      verdict: 'REQUEST_CHANGES',
+      round,
+      checkpoint: 'ralph-task-built',
+      remainingTasks: ralphRemaining,
+    }
+    await writeTerminalResult(refireResult)
+    return refireResult
+  }
 
   const diffFile = forge.diffFile
 
@@ -801,6 +840,9 @@ ${task}${reflectionGuidance}`,
     verdict: finalVerdict,
     round,
     checkpoint: finalVerdict === 'APPROVE' ? 'argus-approved' : 'argus-request-changes',
+    // 0 here (the FINAL Ralph task, or a non-Ralph run) → the outer loop does NOT
+    // re-fire; it runs the normal merge (APPROVE) / fail (REQUEST_CHANGES) path.
+    remainingTasks: ralphRemaining,
   }
   await writeTerminalResult(terminalResult)
   return terminalResult
@@ -823,6 +865,9 @@ ${task}${reflectionGuidance}`,
     verdict: 'REQUEST_CHANGES',
     round,
     checkpoint: 'inner-error',
+    // A THROWN iteration NEVER re-fires (a failure is a failure — recoverable via a
+    // fresh /code run, same as before #362). 0 keeps the outer off the re-fire path.
+    remainingTasks: 0,
   }
   try {
     await writeTerminalResult(failureResult)

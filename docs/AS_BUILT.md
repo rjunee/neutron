@@ -10,6 +10,67 @@ Running log of what shipped, newest first. One entry per merged change.
 > `docs/research/AS-BUILT-docs-archive-2026-07.md`. This file is the ONE live
 > changelog going forward.
 
+## 2026-07-17 — Trident Ralph re-fire: multi-task builds build every task before merge (#362)
+
+**Bug.** Trident v2 Ralph mode built only the FIRST task then merged. The inner
+workflow (`trident/inner-workflow.mjs`) planned once, built `plan.topTask`, and
+`log()`-ged `plan.remainingTasks` but never consumed it — it fell straight through
+to review→merge. The outer harvest (`orchestrator.applyResult`) mapped inner
+APPROVE → done+merge with no remaining-tasks check. The real plan→task→repeat
+cycle existed only as DEAD code in `state-machine.ts` (`computeTransition`), which
+the exec-model orchestrator no longer drives. Net effect: a multi-task,
+spec-driven (`IMPLEMENTATION_PLAN.md`) Ralph build silently shipped INCOMPLETE
+after task 1.
+
+**Fix — re-fire, one fresh context per task (no flags, real behavior).**
+- `inner-workflow.mjs`: in Ralph mode capture `plan.remainingTasks`. When `> 0`,
+  build the ONE task, then return a TYPED intermediate result
+  (`checkpoint='ralph-task-built'`, `remainingTasks>0`, verdict non-APPROVE)
+  WITHOUT reviewing. Only the FINAL task (`remaining==0`) — and every non-Ralph
+  run — runs the review→fix→merge path, so the WHOLE cumulative diff is reviewed
+  exactly once before merge. `remainingTasks` is threaded through the terminal +
+  failure results too (both `0`/no-re-fire).
+- `inner-loop.ts`: `InnerResult` + `parseInnerResult` decode `remaining_tasks`
+  (absent/garbled → null = no re-fire; legacy rows unchanged).
+- `orchestrator.ts`: `applyResult` re-fires a FRESH inner iteration when
+  `remaining_tasks>0` (`refireNextRalphTask`) — reset the sub-agent slot, preserve
+  branch/PR + the `'ralph-task-built'` resume checkpoint (so the next fire
+  re-enters the branch and re-plans the next task; only `'argus-approved'`
+  short-circuits), bump `ralph_round`, cap at `max_ralph_rounds` (fail loudly, no
+  infinite loop) — instead of merging. Each re-fire is a brand-new `Workflow`
+  launch harvested by the outer loop (fresh context, no accumulation), reusing the
+  existing durable `code_trident_runs` row + crash-recovery model.
+- The re-fire reset is persisted OUT-OF-BAND in ONE atomic UPDATE via a new
+  `persist_refire_reset` seam (`save`/`saveIfActive` deliberately never write the
+  workflow-owned `inner_result` column). The single write bundles the
+  `inner_result=null` clear WITH the sub-agent-slot release + the `ralph_round`
+  bump, so a crash can never strand the row in the (inner_result=null, stale
+  terminal sub-agent) state `step()` would reap as "terminal-but-garbled" — the
+  crash-recovery guarantee holds (Codex cross-model review [P2]). The patch never
+  writes `phase`, so it can't resurrect a concurrently force-terminated run;
+  `saveIfActive` still owns the race-guarded phase commit. Wired from the store in
+  `gateway/composition/build-core-modules.ts` and the test harness.
+
+**Dead-code decision.** The `state-machine.ts` Ralph cycle (`computeTransition`
+`ralph-plan`/`ralph-task` branches) is KEPT, not deleted: it remains the
+`stubAdvanceDeps` restart-safe no-op fallback and the executable cross-repo parity
+anchor for Vajra's `/trident` skill loop (`vajra-fixes.test.ts`), and offers
+one-commit revertibility. The re-fire is implemented at the exec-model layer
+(orchestrator), which is where the live loop actually runs; the now-stale module
+comments in `orchestrator.ts` + `state-machine.ts` were corrected to say so, so no
+reader mistakes the state machine for the live driver. (Flagged for the trident
+architecture review — a human + Argus may prefer deletion.)
+
+**Tests (real, multi-task).**
+- `trident/inner-workflow-ralph-refire.test.ts` drives the REAL `.mjs` body:
+  `remaining>0` builds one task + SKIPS review + emits the re-fire result;
+  `remaining==0` reviews + approves.
+- `trident/orchestrator.test.ts` drives store+tick+orchestrator+migrations
+  end-to-end: a 3-task plan re-fires TWICE (fresh context each, resume-folded onto
+  one branch/PR), merges exactly ONCE at `remaining==0`, bounds a non-converging
+  planner at `max_ralph_rounds`, and never re-harvests a cleared row.
+- Full `trident/` suite green (451 pass at commit time; +E2E).
+
 ## 2026-07-04 — K9: router-thinking-budget deleted (refactor unit K9)
 
 **Decision: DELETE** `runtime/adapters/claude-code/router-thinking-budget.ts` (+ its

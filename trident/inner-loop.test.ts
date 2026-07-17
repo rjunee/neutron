@@ -98,6 +98,7 @@ describe('parseInnerResult — decode the typed terminal column', () => {
       verdict: 'APPROVE',
       round: 2,
       checkpoint: 'argus-approved',
+      remainingTasks: 0,
     })
     expect(parseInnerResult(raw)).toEqual({
       ok: true,
@@ -106,7 +107,17 @@ describe('parseInnerResult — decode the typed terminal column', () => {
       branch: 'feat-x',
       round: 2,
       checkpoint: 'argus-approved',
+      remaining_tasks: 0,
     })
+  })
+  test('decodes remainingTasks (the #362 Ralph re-fire signal); absent → null', () => {
+    const withRemaining = parseInnerResult(
+      JSON.stringify({ verdict: 'REQUEST_CHANGES', checkpoint: 'ralph-task-built', remainingTasks: 3 }),
+    )
+    expect(withRemaining?.remaining_tasks).toBe(3)
+    // Absent field (legacy/non-Ralph rows) → null (no re-fire).
+    const withoutRemaining = parseInnerResult(JSON.stringify({ verdict: 'APPROVE' }))
+    expect(withoutRemaining?.remaining_tasks).toBeNull()
   })
   test('null/empty/garbage → null (still in flight)', () => {
     expect(parseInnerResult(null)).toBeNull()
@@ -124,6 +135,7 @@ describe('parseInnerResult — decode the typed terminal column', () => {
       branch: null,
       round: 0,
       checkpoint: null,
+      remaining_tasks: null,
     })
   })
 })

@@ -49,6 +49,9 @@ interface Harness {
   complete: () => Promise<void>
   hostCalls: string[][]
   inputs: InnerLoopInput[]
+  /** RALPH RE-FIRE (#362) — every atomic reset patch `persist_refire_reset` was
+   *  called with (assert the crash-safe bundle: inner_result + slot + ralph_round). */
+  refirePatches: import('./store.ts').TridentRunUpdate[]
 }
 
 function buildHarness(opts: {
@@ -66,6 +69,7 @@ function buildHarness(opts: {
   on_terminal?: TridentTerminalHook
 }): Harness {
   const hostCalls: string[][] = []
+  const refirePatches: import('./store.ts').TridentRunUpdate[] = []
   const now = opts.now ?? (() => new Date(0).toISOString())
   // Bind the store to the SAME clock as the orchestrator so `last_advanced_at`
   // (re-stamped by store.save) and the orchestrator's stall computation share one
@@ -83,6 +87,13 @@ function buildHarness(opts: {
     run_host: host,
     base_branch: 'main',
     now,
+    // RALPH RE-FIRE (#362) — persist the re-fire reset atomically out-of-band so a
+    // re-fired run isn't re-harvested (production wires the identical seam). The spy
+    // records each patch to assert the crash-safe bundle, then applies it for real.
+    persist_refire_reset: (id, patch) => {
+      refirePatches.push(patch)
+      return store.update(id, patch).then(() => {})
+    },
   }
   if (opts.on_orphaned_session !== undefined) o.on_orphaned_session = opts.on_orphaned_session
   if (opts.mint_run_id !== undefined) o.mint_run_id = opts.mint_run_id
@@ -99,7 +110,7 @@ function buildHarness(opts: {
     step: orch.step,
     ...(opts.on_terminal !== undefined ? { on_terminal: opts.on_terminal } : {}),
   })
-  return { loop, complete: sim.drain, hostCalls, inputs: sim.inputs }
+  return { loop, complete: sim.drain, hostCalls, inputs: sim.inputs, refirePatches }
 }
 
 /** Tick, then simulate the in-flight workflow finishing (write its result), so a
@@ -242,6 +253,154 @@ describe('orchestrator — REQUEST_CHANGES (maxRounds exhausted) → failed', ()
     expect(final.failure_reason).toContain('without Argus APPROVE')
     expect(final.inner_verdict).toBe('REQUEST_CHANGES')
     expect(h.hostCalls.map((c) => c.join(' ')).some((c) => c.includes('pr merge'))).toBe(false)
+  })
+})
+
+describe('orchestrator — RALPH RE-FIRE (#362): multi-task build re-fires per task, merges once at 0', () => {
+  // The bug: a multi-task Ralph build shipped after ONLY task 1 (the inner loop
+  // built plan.topTask, then the outer merged with no remaining-tasks check). The
+  // fix: the inner iteration emits `remainingTasks`; the outer RE-FIRES a fresh
+  // iteration per remaining task and merges only when it reaches 0.
+  //
+  // This drives the REAL orchestrator + store + tick + migrations end-to-end with
+  // a simulated inner workflow that returns remaining=2 → 1 → 0 (APPROVE) across
+  // successive fires — the production harvest/re-fire/merge path, not a unit test
+  // on the dead state-machine.
+  test('a 3-task plan re-fires twice (fresh context each) and merges only at remaining=0', async () => {
+    // Per-fire script: each fire is a SEPARATE inner iteration (fresh context). The
+    // firer records every InnerLoopInput so we can assert re-fires + resume folding.
+    let fireCount = 0
+    const branch = 'trident/multi-task'
+    const h = buildHarness({
+      plan: (): SimPlan => {
+        fireCount += 1
+        if (fireCount === 1) {
+          // Task 1 built, 2 remain → intermediate re-fire result (NOT reviewed).
+          return {
+            result: { verdict: 'REQUEST_CHANGES', prNumber: 55, branch, remainingTasks: 2, checkpoint: 'ralph-task-built' },
+            argusCheckpoint: 'ralph-task-built',
+          }
+        }
+        if (fireCount === 2) {
+          // Task 2 built, 1 remains → another re-fire.
+          return {
+            result: { verdict: 'REQUEST_CHANGES', prNumber: 55, branch, remainingTasks: 1, checkpoint: 'ralph-task-built' },
+            argusCheckpoint: 'ralph-task-built',
+          }
+        }
+        // Task 3 (final) built, 0 remain → reviewed + APPROVED → the merge path.
+        return {
+          result: { verdict: 'APPROVE', prNumber: 55, branch, remainingTasks: 0, checkpoint: 'argus-approved' },
+          argusCheckpoint: 'argus-approved',
+        }
+      },
+    })
+    const run = await createRun({ ralph: true, branch, merge_mode: 'pr' as MergeMode })
+
+    const final = await runToTerminal(h, run.id)
+
+    // Only the FINAL task's APPROVE merged — and it merged exactly once.
+    expect(final.phase).toBe('done')
+    expect(final.inner_verdict).toBe('APPROVE')
+    expect(final.inner_checkpoint).toBe('argus-approved')
+    const mergeCalls = h.hostCalls.map((c) => c.join(' ')).filter((c) => c.includes('gh pr merge'))
+    expect(mergeCalls).toEqual(['gh pr merge 55 --squash'])
+
+    // THREE inner iterations fired — one per task (the bug shipped after ONE).
+    expect(h.inputs.length).toBe(3)
+    // Each re-fire is a FRESH context (a brand-new Workflow launch), and fires 2 & 3
+    // RESUME onto the same branch via the workflow-written 'ralph-task-built'
+    // checkpoint (re-plan the next task; never accumulate one context).
+    expect(h.inputs[0]!.resume_checkpoint ?? null).toBeNull()
+    expect(h.inputs[1]!.resume_checkpoint).toBe('ralph-task-built')
+    expect(h.inputs[2]!.resume_checkpoint).toBe('ralph-task-built')
+    // The branch/PR is reused across every iteration — never a duplicate build.
+    expect(h.inputs.every((i) => i.run.branch === branch)).toBe(true)
+
+    // The ralph-round counter advanced once per re-fire (bounds the loop).
+    expect(final.ralph_round).toBe(2)
+    // harvested_at is stamped only on the TERMINAL harvest (the merge), not the
+    // intermediate re-fires.
+    expect(final.harvested_at).not.toBeNull()
+  })
+
+  test('a Ralph build that never converges fails at max_ralph_rounds (no infinite re-fire)', async () => {
+    // A planner that ALWAYS reports a task still remaining — the fix must fail
+    // loudly at the cap rather than re-fire forever.
+    const h = buildHarness({
+      plan: (): SimPlan => ({
+        result: { verdict: 'REQUEST_CHANGES', prNumber: 9, branch: 'trident/loops', remainingTasks: 5, checkpoint: 'ralph-task-built' },
+        argusCheckpoint: 'ralph-task-built',
+      }),
+    })
+    const run = await createRun({
+      ralph: true,
+      branch: 'trident/loops',
+      merge_mode: 'pr' as MergeMode,
+      max_ralph_rounds: 3,
+    })
+
+    const final = await runToTerminal(h, run.id, 40)
+    expect(final.phase).toBe('failed')
+    expect(final.failure_reason).toContain('max_ralph_rounds')
+    // Never merged.
+    expect(h.hostCalls.map((c) => c.join(' ')).some((c) => c.includes('pr merge'))).toBe(false)
+    // Bounded: re-fired exactly max_ralph_rounds times before failing (fire 1 +
+    // 3 re-fires = the run stops climbing at the cap).
+    expect(final.ralph_round).toBe(3)
+  })
+
+  test('the intermediate re-fire never leaves a harvestable inner_result behind (no re-harvest loop)', async () => {
+    // Regression guard for the wiring trap: saveIfActive never writes inner_result,
+    // so a re-fire that failed to null it out-of-band would re-harvest the SAME
+    // intermediate result every tick and spin forever. Assert the column is cleared
+    // after the re-fire tick.
+    let fireCount = 0
+    const h = buildHarness({
+      plan: (): SimPlan => {
+        fireCount += 1
+        return fireCount === 1
+          ? {
+              result: { verdict: 'REQUEST_CHANGES', prNumber: 3, branch: 'trident/clr', remainingTasks: 1, checkpoint: 'ralph-task-built' },
+              argusCheckpoint: 'ralph-task-built',
+            }
+          : {
+              result: { verdict: 'APPROVE', prNumber: 3, branch: 'trident/clr', remainingTasks: 0, checkpoint: 'argus-approved' },
+              argusCheckpoint: 'argus-approved',
+            }
+      },
+    })
+    const run = await createRun({ ralph: true, branch: 'trident/clr', merge_mode: 'pr' as MergeMode })
+
+    // Tick 1: fire iteration 1. Drain writes the intermediate result.
+    await h.loop.runOnce()
+    await h.complete()
+    // Tick 2: harvest the intermediate → re-fire. The row must be reset launchable
+    // with inner_result CLEARED and the sub-agent slot released.
+    await h.loop.runOnce()
+    const afterRefire = store.get(run.id)!
+    expect(afterRefire.inner_result).toBeNull()
+    expect(afterRefire.subagent_run_id).toBeNull()
+    expect(afterRefire.ralph_round).toBe(1)
+    expect(isTerminalPhase(afterRefire.phase)).toBe(false)
+
+    // CRASH-SAFETY (Codex [P2]): the reset is ONE atomic patch that bundles the
+    // inner_result clear WITH the sub-agent-slot release AND the ralph_round bump — so
+    // no crash can strand the row as (inner_result=null, stale terminal sub-agent),
+    // which step() would reap as terminal-but-garbled. And it NEVER touches `phase`
+    // (that stays for saveIfActive's race guard, so a cancel can't be resurrected).
+    expect(h.refirePatches).toHaveLength(1)
+    const patch = h.refirePatches[0]!
+    expect(patch.inner_result).toBeNull()
+    expect(patch.subagent_run_id).toBeNull()
+    expect(patch.subagent_status).toBeNull()
+    expect(patch.ralph_round).toBe(1)
+    expect('phase' in patch).toBe(false)
+
+    // The loop still converges to a merge.
+    const final = await runToTerminal(h, run.id)
+    expect(final.phase).toBe('done')
+    expect(h.inputs.length).toBe(2)
   })
 })
 
