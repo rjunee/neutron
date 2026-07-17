@@ -2855,3 +2855,25 @@ DEFERRED (no live renaming owners → the credential-loss incident can't fire;
 INVARIANTS #107). Frozen boundaries (`project_slug` in SQL columns / JWT+healthz
 wire keys / `ResolvedAuth` types / published Cores SDK / project-sense work-board)
 are intentional, documented.
+
+**#377–#392 — post-window audit punch-list + closeout.** A fresh-eyes audit certified
+the window production-solid; its punch-list was fixed: **#377** fail-closed owner-bearer
+gate on BOTH upload handlers (single-shot + chunked) for wide binds (a hole in the
+S1/S2 fail-closed guarantee — unauthenticated ZIP write on `0.0.0.0`); **#378** wired
+`readOwnerTimezone` into the nudge cron (ISSUES #40 read side); **#387** a discriminating
+sender-registry propagate regression (INVARIANTS #36/#70; the old test was
+non-discriminating); **#388** repointed the 15 importers of the one-release `core-sdk`
+shim to `@neutronai/cores-sdk/manifest` + deleted the shim package (52→51 tsconfigs);
+**#391** docs reconciliation (plan §17 + STATUS ledgers → git ground truth,
+window-CLOSED banner, SPEC §2.2 completed, stale SYSTEM-OVERVIEW/INVARIANTS/AGENTS
+pointers + dangling §N citations fixed); **#392** owner-timezone WRITE path closing
+ISSUES #40 end-to-end — web + mobile detect the IANA zone (`Intl…timeZone`) and thread
+it on every app-ws connect (initial + project-switch + reconnect); the server sanitizes
+(trim/64-cap/IANA-validate), gates the persist on the OWNER identity (`user_id ===
+OWNER_USER_ID` — a shared-project guest cannot rewrite the owner's zone), and writes via
+`writeOwnerTimezone` only on change. Deferred (tracked as GitHub issues #379–#389): the
+dead-code cleanup (two careful attempts each hit a dead-but-INTENTIONALLY-RETAINED
+landmine — `max-oauth-multi-sub` is Managed-consumed, the wow-moment cluster is reserved
+for a queued plan — so an aggressive sweep is contraindicated here) + the known
+engineering follow-ups (RA2/F8/P6/O5/F6/Core-scheduler) + W3 transcript unification. A
+second fresh-eyes certification audit followed this closeout.
