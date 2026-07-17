@@ -147,10 +147,16 @@ with cross-references noted inline.
     degrades to a no-seq live emit, never drops. `buttonStore.emit` failure likewise must not eat
     the live reply. `adapter.ts:174-199`, `build-live-agent-turn.ts:988-994`.
     Protects: **F5**.
-29. Drain loops: email triage stub throws by design; substrate-callers must not break on the
-    completion event; scribe/reflection abort checks precede buffer append.
-    `onboarding/history-import/substrate-callers.ts:486-510`, `scribe/extract.ts:141-153`,
-    `reflection/detector.ts:166-178`.
+29. Drain loops (post-O8): the ONE consolidated drain is `drainToOutcome`/`drainToText` — on the
+    terminal `completion` event it RETURNS the accumulated text as `completed` (there is NO
+    keep-draining-past-completion mode), and an `abort` WINS A TIE against a raced
+    `completion`/`error`/pending pull (re-check the signal before returning any terminal outcome).
+    The scribe/reflection callers no longer keep a local drain loop — they DELEGATE to `drainToText`
+    with `keepAliveExempt: true` (their watchdog abort CANCELS the handle / abandon-poisons the warm
+    session, whereas the default drain aborts WITHOUT cancelling); the email triage stub throws by design.
+    `runtime/substrate-text.ts:~227-320` (the shared drain — the per-chunk
+    `onboarding/history-import/substrate-callers.ts` caller was deleted in #216), `scribe/extract.ts:~164-174`,
+    `reflection/detector.ts:~141-151`.
     Protects: **O8** (drainToText consolidation), **D5** (email backend split).
 30. Sidecar resolvers: mismatch error codes are per-core contracts; init-dedup finally-clears the
     pending map; adding traversal guards to email/code-gen/calendar is a scheduled behavior change,
@@ -170,8 +176,9 @@ with cross-references noted inline.
     Protects: **K6** (Changelog consolidation), **K7** (Docs truth pass), **K10** (repoints
     prompts), **G7** (Leak-gate NUL tripwire).
 34. `app/` bundle purity: the shared wire-types package must never import node-only modules or it
-    bricks the Expo/Metro build — this constraint, not laziness, created the hand-written mirrors.
-    `app/lib/ws-envelope.ts:4-7` (the `node:sqlite`-bricks-the-RN-bundle comment).
+    bricks the Expo/Metro build — this constraint, not laziness, drove the L6 consolidation into the
+    node-free leaf. `wire-types/app-ws-envelope.ts:1-13` (the node-free rationale; the former
+    hand-mirror `app/lib/ws-envelope.ts` was consolidated into this leaf and deleted in #270).
     Protects: **L6** (`@neutronai/wire-types` leaf).
 35. Open composer's env-mutation-as-DI trick + `open/server.ts` process.env writes are duplicated
     across the two boot paths and must converge to one implementation. `open/server.ts:58-73`.
@@ -225,9 +232,13 @@ with cross-references noted inline.
 47. 429 exhaustion routes to `rate_limit_paused` (resumable), never `failed`; the cooling-off
     overlay on `error_message` must be cleared on success. `job-runner.ts:1414-1427,1604-1619`.
     Protects: **O3**.
-48. `drainSubstrateEvents` must NOT break on the completion event — adapter teardown depends on
-    the iterator finishing; an "early-return on completion" cleanup breaks teardown.
-    `substrate-callers.ts:486-510`.
+48. The consolidated substrate drain RETURNS on the terminal `completion` event (it does not keep
+    iterating past it) and tears the SETTLED iterator down via a fire-and-forget `iter.return()` —
+    that teardown must NEVER be awaited (a poison-flag no-op that could otherwise hang on a
+    misbehaving adapter), and `abort` must win a tie against a raced completion.
+    `runtime/substrate-text.ts:~290-325` (the O8 drain; the old `substrate-callers.ts`
+    `drainSubstrateEvents` loop was deleted in #216 — the import substrate's completion→reportSuccess
+    proxy now lives in `gateway/wiring/build-import-substrate.ts:436-455`).
     Protects: **O8**.
 49. Cron missed-fire catch-up fires exactly once; unsupported grammar warns + skips — converting
     the warn+skip into a throw bricks boot for Managed-grammar jobs.
@@ -351,8 +362,10 @@ with cross-references noted inline.
     boot load federation code. `gateway/composition.ts:119`, `runtime/platform-adapter-local.ts:140`.
     Protects: **L3** (Remaining DAG edge cuts) — encodes the `connect-is-dynamic-only` rule.
 77. The Expo (`app/`) bundle must never transitively import server workspaces (`node:sqlite`
-    bricks the RN bundle) — this is WHY `app/lib/ws-envelope.ts`, `doc-links.ts`, `tabs-client.ts`
-    exist as hand mirrors. `app/lib/ws-envelope.ts:4-7` (the constraint comment). (Cross-ref #34.)
+    bricks the RN bundle) — this is WHY the client mirrors (`app/lib/doc-links.ts`,
+    `tabs-client.ts`, now L6 re-export shims) and the node-free `@neutronai/wire-types` leaf exist.
+    `wire-types/app-ws-envelope.ts:1-13` (the constraint rationale; the former `app/lib/ws-envelope.ts`
+    mirror was consolidated into this leaf and deleted in #270). (Cross-ref #34.)
     Protects: **L6**, **W1**.
 78. Gateway's export surface is a cross-repo ABI — the Managed deploy-gate keys on 8 literal
     surfaces in `neutron-managed/src/ops/open-contract.ts` (path+substring matched, NOT
@@ -469,7 +482,9 @@ with cross-references noted inline.
     neutron-managed (`src/ops/open-contract.ts:51-63`): Managed does NOT env-inject it today (each
     hosted owner boots the stock single-owner `open/server.ts`) but DELIBERATELY retains it so a later
     composer stays possible without an Open change. Deleting it would undo the OSS split — so KEPT,
-    not deleted (has fail-fast guards + a boot-through-seam test at `graph-composer-env-seam.test.ts`).
+    not deleted (has fail-fast guards in `gateway/index.ts` `loadGraphComposerFromEnv` + boot-through-seam
+    coverage: `open/__tests__/open-boot-shell.test.ts` boots the real shell through the seam, and the
+    `gateway/__tests__/open-route-matrix.test.ts` / `managed-route-matrix.test.ts` ratchets pin the composed graph).
     Protects: **M1**, **MG-3** (resolved KEEP).
 97. `packageNameToSlug` couples core-package renames to already-installed data — a rename must
     ship a compat/migration path, not a pure rename. `cores/runtime/loader.ts:61-81`.
@@ -499,7 +514,7 @@ with cross-references noted inline.
      Protects: **K10**.
 105. `deploymentMode`/`isLegalTransition` `'managed'` defaults are pinned by test matrices — rename
      the vocabulary token, do not change the default VALUES.
-     `onboarding/engine.ts:573`, `phase.ts:146-158`.
+     `onboarding/interview/engine.ts:~489` (`deploymentMode ?? 'managed'`), `onboarding/interview/phase.ts:~133` (`isLegalTransition`).
      Protects: **N4**.
 
 ## 11. Security & config (`critic-security-config.md`)

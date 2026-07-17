@@ -1388,39 +1388,27 @@ platform's *separate* vault-deeplink convention (the `vault.example.test`
 redirector for the owner's own notes) — neither is part of a project's document
 flow.
 
-### Web Tasks tab (WAVE 3 PR-8)
+### Tasks — backend live, web builtin tab REMOVED
 
-The builtin **Tasks** tab (`mount.target === 'tasks'`) renders
-`chat-react/TasksTab.tsx` — a dynamic React/AJAX list of the project's tasks
-inside `ProjectShell`, with agent+user-parity CRUD (add / complete / reprioritize
-/ cancel / delete). It adds **no gateway/backend changes**: it reads + writes over
-the existing project tasks surface (`gateway/http/app-tasks-surface.ts`) through
-`chat-react/tasks-client.ts` (`WebTasksClient`, the web twin of
-`app/lib/tasks-client.ts`: bearer-authed off `config.token`, base URL
-`config.origin`, wire types re-declared client-side so the bundle stays
-gateway-free).
+Tasks is **not** a builtin tab (Ryan directive, 2026-06-30 — see the tab-registry
+note above): the web builtin Tasks tab and its client (`TasksTab.tsx` +
+`chat-react/tasks-client.ts` + their tests) were removed, with no builtin
+replacement. The Tasks Core ships its OWN UI surfaces instead — a `launcher_icon`
+plus an `app_tab` at `/projects/<project_id>/tasks` (`cores/free/tasks/package.json`
+`ui_components`); a Core-contributed tab is the forward path, but note the
+`CoreTabContribution` union the registry gathers consumes a `project_tab`
+ui_component (`tabs/registry.ts`), which this Core does NOT yet declare — so no
+Core webview tab is wired to it today.
 
-- **Order is the engine's.** The list fetches with `order=focus_score`, the PR-7
-  LLM-primary prioritized ordering (`tasks/prioritize-llm.ts`): ranked rows first
-  by `llm_rank`, fresh rows interleaved by `focus_score`. The tab NEVER re-sorts —
-  `tasks/store.ts` is the single source of truth — so what the agent ranked is
-  what the user sees. Each row surfaces its `llm_rank` (`#N`) and the LLM's
-  one-line `llm_reason`.
-- **Agent + user parity.** Every action hits the same canonical `TaskStore` the
-  agent's `cores/free/tasks` backend writes; the server returns the canonical row
-  and the list re-fetches after every mutation. **Reprioritize** is a PATCH of the
-  0-3 `priority` field (the column the focus-score reads), so a user nudge feeds
-  the next prioritize pass. Open tasks **Cancel** (soft); already-closed rows
-  **Delete** (hard). A status filter toggles Open ⇄ All.
-- **Robustness.** A monotonic `listSeq` guard drops a slow fetch that lands after
-  a newer one; a per-row `busyId` guard blocks double-fires; a project-change
-  reset clears a stale list so project A's tasks never linger under project B.
-
-No feature flag — the tab renders directly. CSS (`ctask-*`) lives in
-`chat-react.html`. Tests: `chat-react/__tests__/tasks-client.test.ts` (pure:
-routes incl. the `order=focus_score` default, `priorityLabel`/`clampPriority`/
-`formatDue`) + `tasks-tab.test.tsx` (happy-dom: prioritized server order with
-rank+reason, complete, reprioritize PATCH, add).
+The tasks *backend* stays live and agent-writable. The prioritized ordering is
+LLM-primary (`tasks/prioritize-llm.ts`): ranked rows first by `llm_rank`, fresh
+rows interleaved by `focus_score`, with `tasks/store.ts` the single source of
+truth (`order=focus_score`, `#N` rank + one-line `llm_reason`). The read/write
+HTTP surface is `gateway/http/app-tasks-surface.ts`; the mobile client is
+`app/lib/tasks-client.ts` (bearer-authed off `config.token`). Every mutation hits
+the same canonical `TaskStore` the agent's `cores/free/tasks` backend writes:
+**Reprioritize** PATCHes the 0-3 `priority` field (the column the focus-score
+reads), Open tasks **Cancel** (soft), already-closed rows **Delete** (hard).
 
 ### Cores install-SCOPE (WAVE 3 PR-2)
 
@@ -2760,24 +2748,41 @@ state-machine skeleton; **PR-3 wired the real agentic loop** (below).
   (`max_ralph_rounds`, default 20). The pure `computeTransition` owns the
   control flow; `deps.classify` reads the sub-agent outcome. PR-2 shipped
   `stubAdvanceDeps` (always "running"); PR-3 supersedes it with a real
-  spawn+poll+merge `step` (below).
+  fire+harvest+merge `step` (below).
 - **The loop** (PR-3) — `buildTridentOrchestrator` (`trident/orchestrator.ts`)
-  composes the real loop into a tick `step`: (1) spawn the current phase's
-  Forge/Argus substrate session — the single `subagent_run_id === null`-
-  guarded spawn site, so a re-entrant tick never double-spawns; (2) poll +
-  transition via the pure `advanceTridentRun`; (3) merge on `done`.
-  `TridentSessionManager` (`trident/session.ts`) bridges a blocking
-  `TridentDispatch` (Forge/Argus turn → terminal text) onto the poll model
-  and parses the verdict; `trident/prompts.ts` owns the ported Forge/Argus
-  prompts + parsers + the **oversized-diff guard** (`chooseArgusScope`:
-  never read a >3000-line diff in one shot). **Prompt single-source (P1-3):**
-  the Forge/Argus contract bodies LIVE on disk at `prompts/forge.md` /
-  `prompts/argus.md` and are read fresh per render via `@neutronai/prompts`
-  `loadPrompt` (`loadForgeTemplate()` / `loadArgusTemplate()`), so the files
-  the team edits ARE what the spawned agent receives (no inline-vs-file drift).
-  All four dispatchable roles resolve their prompt from disk BY TYPE: forge/argus
-  as the user-message contract (`trident/prompts.ts`), atlas/sentinel as the
-  system persona (`trident/agent-prompts.ts`, via `dispatchAgent`). `trident/merge.ts` fills the
+  composes the real loop into a tick `step`. The inner Forge→Argus→fix loop is
+  ONE native CC Workflow (`trident/inner-workflow.mjs`), so the tick is
+  fire-and-harvest, NOT spawn-and-poll-in-turn: (1) FIRE the current phase's
+  inner workflow on a warm substrate (`trident/inner-loop.ts`) at the single
+  `subagent_run_id === null`-guarded fire site — so a re-entrant tick never
+  double-fires — then the launching turn settles immediately; (2) on a later
+  tick, HARVEST the typed terminal result the workflow persisted to the DB
+  (`parseInnerResult`, `trident/inner-loop.ts`) and apply it via `applyResult`,
+  which constructs the terminal `done` / `failed` state directly
+  (`trident/orchestrator.ts`); (3) merge on `done`, server-gating a
+  merge-eligible `APPROVE` against the Argus checkpoint. (The legacy per-phase
+  state machine `computeTransition` / `advanceTridentRun` (`trident/state-machine.ts`)
+  is KEPT for its unit tests + one-commit revertibility but no longer drives the
+  production inner-loop graph. The v1 blocking-dispatch `TridentSessionManager` /
+  `trident/session.ts` bridge — which parsed the verdict from one held-open
+  Forge/Argus turn — was deleted in #221.) The **oversized-diff guard** is a
+  PROMPT-LEVEL ADVISORY, not a measured/partitioned check: `trident/inner-workflow.mjs`'s
+  `ARGUS_RUBRIC` instructs the reviewer in natural language to "never read a
+  >~3000-line diff in one shot" and to review the meaty commits one-by-one instead
+  (the `3000` is a literal in that rubric string). The `ARGUS_DIFF_LINE_LIMIT`
+  constant (`trident/prompts.ts`, also 3000) is SEPARATE — read only by
+  `computeDiffLineCount` (`trident/orchestrator.ts`), a non-live helper kept for
+  Vajra-parity tests / revertibility, not wired into the production loop.
+  **Prompt source:** the live
+  Forge/Argus execution contract is INLINED in `trident/inner-workflow.mjs` (the
+  FORGE builder + `ARGUS_RUBRIC` + `FORGE_SCHEMA`) — the single live source, fired
+  per run by `trident/inner-loop.ts`. `trident/prompts.ts`'s v1 render/parse loop
+  was deleted with `session.ts` (only `ARGUS_DIFF_LINE_LIMIT` survives), and the
+  `prompts/forge.md` / `prompts/argus.md` files are kept as NON-LIVE human
+  reference (nothing loads them at runtime). The ONLY disk-loaded prompts are the
+  atlas/sentinel SYSTEM personas (`prompts/{atlas,sentinel}.md` via
+  `@neutronai/prompts` `loadPrompt`, `trident/agent-prompts.ts` → `dispatchAgent`).
+  `trident/merge.ts` fills the
   `'pr'` (`gh pr merge --squash`) and `'local'` (`git merge --no-ff`) merge
   bodies — **no `git worktree remove`** (Open uses plain branches). Battle-
   tested Vajra fixes are mapped (see `trident/vajra-fixes.test.ts`): no
@@ -3783,6 +3788,29 @@ live agent's onboarding seam carries the interview until the owner is onboarded,
 then it is steady-state chat. A free-Core slash command is intercepted first by
 the chained `chat_command_filter` (`app-ws-surface.ts:605` / `:783`).
 
+**Owner-timezone capture on connect (ISSUES #40, WRITE path landed #392).** The
+web + Expo clients detect their own IANA zone client-side
+(`Intl.DateTimeFormat().resolvedOptions().timeZone` via `detectClientTimezone` —
+web captures it ONCE at boot and stores it on `config` (`landing/chat-react/config.ts`),
+mobile re-evaluates it per connect as a default arg of `buildWsUrl`
+(`app/lib/chat-core/ws-url.ts`)) and report it as `tz=` on the `/ws/app/chat`
+upgrade query string. The server boundary-sanitizes it
+(`sanitizeTimezone`, `channels/adapters/app-ws/envelope.ts`), then — once per WS
+`open`, in the `on_client_timezone` handler (`open/wiring/app-ws.ts`) — is
+AUTHORIZED by owner identity: only `user_id === OWNER_USER_ID` proceeds (a
+non-owner guest on a shared instance is ignored — logged server-side, no
+client-visible error — since one instance `project_slug` binds many `user_id`s).
+It then idempotently persists a valid, changed zone via
+`persistOwnerTimezoneIfChanged` → `writeOwnerTimezone`
+(`gateway/storage/owner-metadata.ts`), the row keyed on the auth-resolved instance
+`project_slug` (never a client-supplied identity). Its ONE consumer today is the
+idle-nudge engine (`gateway/composition/build-core-modules.ts` reads it per tick),
+which keys the daily nudge pick's day-boundary on the owner's real zone instead of
+the hardcoded `DEFAULT_OWNER_TIMEZONE`; the proactive morning brief and reminder
+schedulers still resolve their own host-local zone. A legacy client that reports no
+`tz` performs no write, leaving any previously stored zone unchanged; with no
+stored metadata the nudge engine falls back to `DEFAULT_OWNER_TIMEZONE`.
+
 > K11b0 (2026-07-06): the legacy `/ws/chat` `ChatBridge` this section once
 > described (`handleInbound` / `isLiveAgentEligible` / `handleProjectTopicInbound`,
 > client `landing/chat.ts`) was excised — it was fully dead in production. The
@@ -3831,7 +3859,12 @@ the user text). Layer order, top to bottom:
 4. `<live_agent_context>` — the this-turn scope block + a `<recent_conversation>`
    short-term-memory splice.
 
-**Client surface (`landing/chat.ts`).**
+**Client surface — historical (the vanilla `landing/chat.ts` web client, excised
+K11b0 2026-07-06).** The live owner UI is the React client (`landing/chat-react/`,
+e.g. `ChatApp.tsx`) on the `/ws/app/chat` app-ws transport (see "Routing (server)"
+above); the notes below describe the RETIRED vanilla client and are kept as
+historical context for the loader / topic-switch / envelope-routing invariants
+that carried over (the surviving live-agent mechanics live in `build-live-agent-turn.ts`).
 - *First-load loader.* The "Setting things up…" indicator covers a FRESH
   onboarding's page-load → WS-open → first-prompt window and clears on first
   rendered content. A RESUMED returning session (`session_ready` with
@@ -3850,28 +3883,27 @@ the user text). Layer order, top to bottom:
   message whose `topic_id` matches the focused topic (otherwise it routes to that
   topic's own view / hydrates on switch). So EVERY outbound web envelope stamps
   the destination `topic_id` — the live-agent reply + cold-start/failure bodies
-  (`build-live-agent-turn.ts`), the wow `sendText`/`emitPrompt`
-  (`build-wow-dispatcher.ts`), the recovered-reply replay
+  (`build-live-agent-turn.ts`), the wow `sendText`/`emitPrompt` (`build-wow-dispatcher.ts`
+  — this dead wow-push cluster was deleted in K11d #248), the recovered-reply replay
   (`recovered-reply-store.ts`), and the chat-bridge command/failure/`agent_ack`/
   `error`/slug-rename envelopes (`chat-bridge.ts`). Without it an async
   notification (a wow-moment, a reconnect-replayed recovered reply) painted into
   whatever topic was focused (cross-project bleed). The app-ws (Expo mobile)
   surface carries `project_id`/`message_id` on its own envelope shape instead.
-- *Wow brief persistence (2026-06-20).* The wow channel adapter's `sendText`
-  (`buildWowChannelAdapter`, `gateway/wiring/build-landing-stack.ts`)
-  persists every delivered agent statement — notably action 01's first-week
-  brief — to `button_prompts` as an inert, already-resolved agent-bubble turn so
-  it survives a reload. Best-effort on the success path only (try/catch); it
-  never disturbs the load-bearing throw-on-undelivered routing.
-- *Truthful first-week brief (2026-06-20).* Action 01's overnight section
-  (`appendOvernightPreview`, `onboarding/wow-moment/actions/01-first-week-brief.ts`)
-  reads the REAL `overnight_queue` for the project at render time
-  (`OvernightQueueStore.listByProject`, filtered to `queued`/`in-flight`). It
-  reflects genuinely-queued rows when present, and otherwise OFFERS overnight
-  work / reminders rather than asserting a schedule. It never claims scheduled
-  overnight work or set reminders unless the real tables back it (owner DB at
-  onboarding: 0 queue rows, 0 reminders). Option B (wiring real overnight work
-  at onboarding) is a logged post-launch follow-up.
+- *Wow brief persistence (2026-06-20) — since DELETED (K11d #248).* The wow
+  channel adapter's `sendText` (`buildWowChannelAdapter`) persisted every
+  delivered agent statement — notably action 01's first-week brief — to
+  `button_prompts` as an inert, already-resolved agent-bubble turn so it survived
+  a reload. The wow-push cluster (`buildWowChannelAdapter`, action 01
+  `01-first-week-brief.ts`, `appendOvernightPreview`) was dead-in-prod and was
+  deleted in #248; only wow-moment actions 04–07 remain.
+- *Truthful first-week brief (2026-06-20) — DELETED with the cluster above (#248).*
+  Action 01's overnight section (`appendOvernightPreview`)
+  read the REAL `overnight_queue` for the project at render time
+  (`OvernightQueueStore.listByProject`, filtered to `queued`/`in-flight`): it
+  reflected genuinely-queued rows when present, and otherwise OFFERED overnight
+  work / reminders rather than asserting a schedule, never claiming scheduled
+  overnight work or set reminders unless the real tables backed it.
 - *No fake unread badge (2026-06-20).* The Open topics surface
   (`open/chat-topics-surface.ts`) reports `unread_count: 0` for every topic.
   There is no per-topic last-read marker, so a real unread count cannot be
