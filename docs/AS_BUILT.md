@@ -2834,3 +2834,24 @@ seeds silently on the first frame, and announces a RISING running count as
 slides down (`--ease-out`, reduced-motion → no slide), auto-retracts after ~3s,
 and swipe-up / ✕ dismisses. Tests: `work-activity.test.tsx` (itemRunning; seed vs
 announce; per-project filter; drawer render/auto-close/✕). Browser-verified visual.
+
+**#375 — K10: public root `SPEC.md` + Ralph governed mode (world-class refactor
+window CLOSED).** The refactor window (`docs/plans/2026-07-02-world-class-refactor-plan.md`)
+is complete. K10 introduces the public master `SPEC.md` (governance preamble,
+Architecture §2.1-2.8, § Phases → Steps, immutable Decisions Log), removes it from
+leak-gate `FORBIDDEN_EXACT` (inverting the RT1 tripwire), repoints the 11
+`TODO(K10)` comments, and lifts the window's `resolveRalph=false` override so
+`detectRalphMode` governs trident builds whose workspace is a checkout of this
+tree (NOT arbitrary user-project `/code`, which build in a fresh SPEC-less
+`Projects/<slug>/code` workspace). **Window tail shipped this session:** the
+perfect-recall lane (RB1 #361 memory-index / RB2 #363 reflection re-splice / RB3
+#369 reflect-cron / RB4 #366 temporal-invalidation, RC1-3 Nexus), the naming lane
+(N1 #362 OwnerHandle brand, N2/N3 #367 `internal_handle`→`owner_handle`, N4
+#370/#372 `project_slug`→`owner_slug` instance-sense, N5 #368 dir-hygiene, N6 #371
+ChannelKind data-migration, N7 #364 ghost-refs, N8 #365 codename glossary), plus
+F5/F6/F8/O2-O8/S1-3/X5/X6/W2/W3a and Managed M4/M5/M6. **Owner-adjudicated
+decisions:** MG-3 = KEEP (OSS-split composer seam, INVARIANTS #96); N3-credential =
+DEFERRED (no live renaming owners → the credential-loss incident can't fire;
+INVARIANTS #107). Frozen boundaries (`project_slug` in SQL columns / JWT+healthz
+wire keys / `ResolvedAuth` types / published Cores SDK / project-sense work-board)
+are intentional, documented.
