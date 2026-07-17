@@ -117,6 +117,22 @@ export interface NudgeEngineHandlerDeps {
   now?: () => number
   /** Override IANA timezone (test seam; production reads instance_metadata). */
   timezone?: string
+  /**
+   * Resolve the owner's IANA timezone AT EACH tick, keyed on the DISPATCHED
+   * `owner_slug` (NOT a composition-time capture). Production wires this to
+   * read `instance_metadata.timezone` per-invocation (the schema contract in
+   * migrations/0045_p6_1_nudge_staleness.sql resolves the zone "at engine
+   * invocation") so a mid-run timezone change takes effect on the next tick
+   * without a gateway restart. Keying on `owner_slug` matters in the hosted
+   * first-handler-wins model (`registerNudgeEngineCron`): one shared handler
+   * services every instance's tick via `ctx.owner_slug`, so the resolver must
+   * look up the tick's owner — matching how the rest of the pass already
+   * queries `deps.db` with `project_slug = ctx.owner_slug`. Returns
+   * `undefined` when the instance has no stored zone → the pass falls back to
+   * the static `timezone` then `DEFAULT_OWNER_TIMEZONE`. When it returns a
+   * value it WINS over the static `timezone` field.
+   */
+  resolveTimezone?: (owner_slug: string) => string | undefined
   /** Override the LLM call timeout. Default `DEFAULT_NUDGE_TIMEOUT_MS`. */
   timeout_ms?: number
   /** Override model id. Default `DEFAULT_NUDGE_MODEL`. */
@@ -553,7 +569,14 @@ export function buildNudgeEngineHandler(deps: NudgeEngineHandlerDeps): CronHandl
       input.personaLoader = deps.personaLoader
     }
     if (deps.now !== undefined) input.now = deps.now
-    if (deps.timezone !== undefined) input.timezone = deps.timezone
+    // Resolve the zone at THIS tick (contract: "at engine invocation"), keyed
+    // on the dispatched owner so the shared hosted handler picks the right
+    // instance's zone. A per-tick resolver result wins over the static
+    // `timezone`; when it returns undefined we fall through to the static
+    // field, then the pass's own `DEFAULT_OWNER_TIMEZONE` default.
+    const resolvedTz = deps.resolveTimezone?.(ctx.owner_slug)
+    if (resolvedTz !== undefined) input.timezone = resolvedTz
+    else if (deps.timezone !== undefined) input.timezone = deps.timezone
     if (deps.timeout_ms !== undefined) input.timeout_ms = deps.timeout_ms
     if (deps.model !== undefined) input.model = deps.model
     if (deps.demotion_threshold !== undefined) {

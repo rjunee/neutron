@@ -74,6 +74,7 @@ import {
   buildNudgeEngineHandler,
   registerNudgeEngineCron,
 } from '../tasks/p6/nudge-engine.ts'
+import { readOwnerTimezone } from '../storage/owner-metadata.ts'
 import { ProactiveStateStore } from '../proactive/state-store.ts'
 import {
   buildIdleNudgeSweepHandler,
@@ -923,7 +924,31 @@ export function buildCoreModules(
         if (ne.personaLoader !== undefined) {
           nudgeHandlerDeps.personaLoader = ne.personaLoader
         }
-        if (ne.timezone !== undefined) nudgeHandlerDeps.timezone = ne.timezone
+        // ISSUES #40 — resolve the owner's timezone from `instance_metadata`
+        // so the daily nudge pick keys `current_focus_pick.day` on the
+        // owner's actual wall clock, not the LA-hardcoded
+        // `DEFAULT_OWNER_TIMEZONE`. Precedence: an explicit config override
+        // (test / composer seam) wins; else a PER-TICK resolver that reads the
+        // stored per-instance zone at each engine invocation (the migration
+        // 0045 contract resolves the zone "at engine invocation" — so a
+        // mid-run timezone change takes effect on the next tick without a
+        // restart). `readOwnerTimezone` returns null → the pass falls back to
+        // `DEFAULT_OWNER_TIMEZONE` (legacy instances provisioned before
+        // migration 0050, or any instance whose column is unset).
+        if (ne.timezone !== undefined) {
+          nudgeHandlerDeps.timezone = ne.timezone
+        } else {
+          // Key the read on the DISPATCHED owner_slug (not the composition-time
+          // `input.project_slug`): the hosted first-handler-wins model shares
+          // one handler across instances, so the resolver must look up the
+          // tick's owner — consistent with the pass querying `input.db` by
+          // `ctx.owner_slug`.
+          nudgeHandlerDeps.resolveTimezone = (
+            owner_slug: string,
+          ): string | undefined =>
+            readOwnerTimezone(input.db, owner_slug) ?? undefined
+        }
+        if (ne.now !== undefined) nudgeHandlerDeps.now = ne.now
         if (ne.timeout_ms !== undefined) {
           nudgeHandlerDeps.timeout_ms = ne.timeout_ms
         }
