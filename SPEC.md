@@ -1,8 +1,8 @@
 ---
 title: "SPEC.md — Neutron Open (master spec)"
-last_updated: 2026-07-16 (K10 — public in-repo master spec introduced; the last trident-executed unit of the world-class refactor window)
+last_updated: 2026-07-16 (world-class refactor window CLOSED — all tail units merged through K10; post-audit punch-list closed; deferrals tracked as GitHub issues)
 ---
-<!-- CURRENT: world-class-refactor/tail (K10 — last trident-executed unit; window still has open units) -->
+<!-- CURRENT: steady-state (world-class refactor window COMPLETE; feature development resuming) -->
 
 # SPEC.md — Neutron Open
 
@@ -34,7 +34,7 @@ code; they NEVER rewrite it — the owner owns it.
 | Concern | Doc |
 |---|---|
 | Decisions + architecture + roadmap (this file) | `/SPEC.md` |
-| Current build queue (agent-regenerated, disposable) | `/IMPLEMENTATION_PLAN.md` |
+| Current build queue (agent-regenerated on demand, disposable; may be absent when idle) | `/IMPLEMENTATION_PLAN.md` |
 | Chronological build log (append-only provenance) | `docs/AS_BUILT.md` |
 | How it works NOW (living architecture detail, under this spec) | `docs/SYSTEM-OVERVIEW.md` |
 | Load-bearing invariants (per-merge checklist) | `docs/INVARIANTS.md` |
@@ -256,17 +256,24 @@ NOT a numbered buildout sequence — historical build order lives in
 - [x] **Agent settings** — `cores/free/agent-settings`
 - [x] **Code-Gen** — `cores/free/code-gen` — the `/code` build runtime, folded into foundational Trident (no capability gate)
 
-### Current wave — the world-class refactor window
+### The world-class refactor window — COMPLETE (2026-07-16)
 
-The active frontier is the refactor window. Its unit backlog — the atomic-unit
-specs WITH per-unit status — is `docs/plans/2026-07-02-world-class-refactor-plan.md`;
-do NOT duplicate it here, and note that many units remain open. K10 (this unit —
-public in-repo SPEC.md) is sequenced as the **last trident-executed unit**:
-introducing this file makes a trident build against this checkout governed
-(`detectRalphMode` sees the root SPEC.md), so no trident-dispatched unit may
-follow it. K10's "last" is about that trident
-sequencing, not window completion — remaining units land by other means or
-defer.
+The world-class refactor window is DONE. Its unit backlog + per-unit status is
+`docs/plans/2026-07-02-world-class-refactor-plan.md` (do NOT duplicate it here).
+All executed units merged through K10 (the public in-repo SPEC.md — the last
+**trident-executed** unit: introducing this file makes a trident build against
+this checkout governed via `detectRalphMode`, so no trident-dispatched unit
+could follow it). A post-completion fresh-eyes audit closed a punch-list (a
+wide-bind upload-auth hole, a timezone-read wiring gap, a build-fragile
+one-release shim, a missing sender-propagate regression test).
+
+The few non-merged items are deliberate, not gaps: **MG-3** (the
+`NEUTRON_GRAPH_COMPOSER_MODULE` composer seam) is KEPT by decision (the OSS-split
+boundary — see the Decisions Log); **N3-credential** (frozen-handle threading at
+the Managed boot seam) is DEFERRED — it cannot fire without live hosted owners
+that rename; **W3** (transcript unification, XL) is DEFERRED as scoped feature
+work. These plus the known engineering follow-ups now live as tracked GitHub
+issues, not private memory.
 
 ### Post-window feature backlog
 
@@ -309,6 +316,18 @@ architecture and points here.
 
 ### 2026-07-16
 
+- **World-class refactor window CLOSED + post-completion audit.** All executed
+  units merged through K10. A fresh-eyes audit certified the tree production-solid
+  (renames preserved every frozen wire/SQL boundary; perfect-recall lane dark by
+  default; cross-unit concurrency composes; security shipped as specified) and
+  surfaced a punch-list, now closed: fail-closed owner-bearer gate on the
+  wide-bind upload surfaces (#377), owner-timezone read wiring (#378, ISSUES #40 —
+  the WRITE path is a filed follow-up), the `core-sdk` one-release shim
+  repointed+deleted (#388), and a discriminating sender-propagate regression test
+  (#387). Deferrals now tracked as GitHub issues (owner-timezone write, RA2
+  serve-probe, F8/P6 interleaving tests, O5 emitter-scoping, F6 rail-fan, Core
+  scheduler swallow, W3 transcript unification, dead-code cleanup). MG-3 = KEEP,
+  N3-credential = DEFERRED (both below). [audit + #377/#378/#387/#388, issues #379–#389]
 - **K10 — public in-repo SPEC.md introduced; the last trident-executed unit.**
   This file lands as the governed root spec — the last trident-executed unit of
   the refactor window (introducing it flips trident's default resolver back to
