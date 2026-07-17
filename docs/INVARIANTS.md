@@ -458,7 +458,15 @@ with cross-references noted inline.
     on submodule bump; Managed's own code carries only provenance comments, no concrete impl of the
     renamed interface methods (verified against live neutron-managed). `gateway/index.ts:540` (the
     composer-module resolution seam).
-    Protects: **M1**.
+    **MG-3 RESOLVED = KEEP (2026-07-16, owner-approved).** The seam is the C2 OSS-split boundary: it
+    lets the PUBLIC Open boot shell dynamic-import Managed's PRIVATE production composer
+    (`realmode-composer.ts`, which carries proprietary signup/provisioning/identity/proxy edges that
+    can't ship public) at deploy time, without Open naming any Managed path. Verified against live
+    neutron-managed (`src/ops/open-contract.ts:51-63`): Managed does NOT env-inject it today (each
+    hosted owner boots the stock single-owner `open/server.ts`) but DELIBERATELY retains it so a later
+    composer stays possible without an Open change. Deleting it would undo the OSS split — so KEPT,
+    not deleted (has fail-fast guards + a boot-through-seam test at `graph-composer-env-seam.test.ts`).
+    Protects: **M1**, **MG-3** (resolved KEEP).
 97. `packageNameToSlug` couples core-package renames to already-installed data — a rename must
     ship a compat/migration path, not a pure rename. `cores/runtime/loader.ts:61-81`.
     Protects: **N4** (project_slug → owner_slug), **N5** (Directory/name hygiene).
@@ -503,7 +511,10 @@ with cross-references noted inline.
      — a raw string is a compile error — NOT prose convention alone. RESIDUAL: on Managed the boot
      seam still brands the *mutable* `url_slug` as the handle (`resolveOwnerSlugFromConfig` reads
      `.url_slug`), so the brand types the boundary without proving frozen-ness there; threading the
-     frozen registry handle + the paired Managed boot change is the deferred credential-loss fix.
+     frozen registry handle + the paired Managed boot change is the deferred credential-loss fix
+     (**N3-credential DEFERRED 2026-07-16, owner-approved**: with no production and no hosted owners
+     that rename, the incident cannot fire or be meaningfully tested, and Open's side already keys on
+     `owner_handle`; revisit when Managed hosts live renaming owners — see [[refactor-n3-owner-handle-incident]]).
      `auth/secrets-store.ts:10-27`, `persistence/owner-handle.ts`. (Cross-ref #95.)
      Protects: **N1**, **S3** (branded-type fix belongs to security per the report).
 108. Credential-pool threading into spawns explicitly UNSETS `ANTHROPIC_API_KEY`/
