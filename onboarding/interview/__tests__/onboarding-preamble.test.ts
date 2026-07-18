@@ -23,6 +23,10 @@ import {
   buildOnboardingStepGuardFragment,
   IMPORT_DECISION_OPTIONS,
 } from '../onboarding-preamble.ts'
+import {
+  auditRequiredFields,
+  REQUIRED_FIELDS_IN_PRIORITY_ORDER,
+} from '../required-fields-audit.ts'
 
 /** A phase_state with the 3 non-button fields filled, so the audit's only
  *  remaining gap is the button-driven personality step. (agent_name was dropped
@@ -149,6 +153,176 @@ describe('buildOnboardingStepGuardFragment — deterministic IMPORT guard (2026-
       expect(frag as string).toContain('never settled by')
       expect(frag as string).toContain('`[[OPTIONS]]` block')
     }
+  })
+})
+
+describe('buildOnboardingStepGuardFragment — AUDIT-DRIVEN total coverage (2026-07-18)', () => {
+  /**
+   * REGRESSION — Ryan's EXACT live deadlock. Read from the real row in
+   * ~/neutron/data/project.db on 2026-07-18: phase=work_interview_gap_fill,
+   * completed_at=NULL. The import produced `topics:[]`, so nothing ever
+   * backfilled `non_work_interests`.
+   *
+   * `import_job_id` is what settles `import_decision` here (an import that
+   * ACTUALLY ran IS the decision — required-fields-audit.ts `isFilled`), which is
+   * precisely why both hardcoded guard checks were satisfied while the audit
+   * still required a fifth field.
+   *
+   * ON MAIN THIS FAILS: the old guard checked only `import_decision` +
+   * `agent_personality`, found both settled, and returned null — no forcing
+   * instruction for the missing interests, so the agent went silent forever
+   * while the finalize gate correctly refused to complete.
+   */
+  const RYAN_STUCK_STATE = {
+    user_first_name: 'Ryan',
+    signup_via: 'web',
+    import_job_id: 'synth-f95edf223877f2f9',
+    import_source: 'chatgpt-zip',
+    primary_projects: [
+      'Tabs (Tabs Labs LLC)',
+      'Pristine Labs (Glow / Flow)',
+      'Family & Personal Health',
+      'Quintessential Megacorp (QMC) — Holdco & Operations',
+      'Spiritual Practice: Buddhism, Shamanism & Magic',
+      'Amascence / AmaSense Fragrance',
+    ],
+    agent_personality: 'Yoda',
+    // non_work_interests: ABSENT — the unaskable blocker.
+  } as const
+
+  it("REGRESSION: Ryan's stuck state still forces the interests ask (was null on main)", () => {
+    const out = buildOnboardingStepGuardFragment(RYAN_STUCK_STATE, { import_offered: true })
+
+    // The whole bug: this was null, so the agent was told nothing and went quiet.
+    expect(out).not.toBeNull()
+    const frag = out as string
+
+    // It must NAME the missing ask, unmistakably and un-skippably.
+    expect(frag).toContain('STILL OPEN - INTERESTS')
+    expect(frag).toContain('OUTSIDE of work')
+    expect(frag).toContain('CANNOT finish without it')
+    expect(frag).toContain('You may not wrap up / finalize')
+
+    // Interests are FREE TEXT: the ask must be forced WITHOUT an options block.
+    expect(frag).toContain('Do NOT attach an [[OPTIONS]] block')
+
+    // And it must not re-ask the steps that ARE settled.
+    expect(frag).not.toContain('STILL OPEN - HISTORY IMPORT')
+    expect(frag).not.toContain('STILL OPEN - PERSONALITY')
+  })
+
+  it('the audit and the guard agree exactly: guard is null iff finalize would fire', () => {
+    // The invariant the deadlock violated. `next_to_collect` non-null (finalize
+    // refuses) MUST imply a non-null guard (the agent is told what to ask).
+    const audit = auditRequiredFields(RYAN_STUCK_STATE, { import_offered: true })
+    expect(audit.next_to_collect).toBe('non_work_interests')
+    expect(buildOnboardingStepGuardFragment(RYAN_STUCK_STATE, { import_offered: true })).not.toBeNull()
+
+    // Fill the last gap → audit clears AND the guard falls silent, together.
+    const settled = { ...RYAN_STUCK_STATE, non_work_interests: ['surfing'] }
+    expect(auditRequiredFields(settled, { import_offered: true }).next_to_collect).toBeNull()
+    expect(buildOnboardingStepGuardFragment(settled, { import_offered: true })).toBeNull()
+  })
+
+  /**
+   * ANTI-RECURRENCE. Iterates the REAL exported required set, so a field added to
+   * the audit with no guard copy fails here. (It also fails `tsc` — the copy
+   * table is a `Record<RequiredField, StepGuardCopy>`, so a new union member is a
+   * missing-property error. Belt and braces: type-check catches the omission at
+   * build time, this catches copy that exists but never renders.)
+   */
+  describe('EXHAUSTIVENESS: every required field is askable', () => {
+    /** All five filled, so removing exactly one isolates that field. */
+    const ALL_FILLED: Record<string, unknown> = {
+      user_first_name: 'Ryan',
+      import_decision: 'chatgpt',
+      primary_projects: ['A', 'B', 'C'],
+      non_work_interests: ['surfing'],
+      agent_personality: 'Yoda',
+    }
+
+    /** The phrase each field's block must surface, so "non-null" isn't enough. */
+    const MARKER: Record<string, string> = {
+      user_first_name: 'STILL OPEN - OWNER NAME',
+      import_decision: 'STILL OPEN - HISTORY IMPORT',
+      primary_projects: 'STILL OPEN - PROJECTS',
+      non_work_interests: 'STILL OPEN - INTERESTS',
+      agent_personality: 'STILL OPEN - PERSONALITY',
+    }
+
+    it('sanity: the all-filled baseline really is silent', () => {
+      expect(buildOnboardingStepGuardFragment(ALL_FILLED, { import_offered: true })).toBeNull()
+    })
+
+    for (const field of REQUIRED_FIELDS_IN_PRIORITY_ORDER) {
+      it(`${field}: missing alone yields a fragment naming it`, () => {
+        const state = { ...ALL_FILLED }
+        delete state[field]
+
+        const out = buildOnboardingStepGuardFragment(state, { import_offered: true })
+        expect(out).not.toBeNull()
+        const frag = out as string
+
+        // Every required field MUST have copy — none may be unaskable.
+        const marker = MARKER[field]
+        expect(marker).toBeDefined()
+        expect(frag).toContain(marker as string)
+
+        // And it must carry the no-finalize contract.
+        expect(frag).toContain('You may not wrap up / finalize')
+
+        // Only THIS field is asked about — no spurious re-asks of settled steps.
+        for (const other of REQUIRED_FIELDS_IN_PRIORITY_ORDER) {
+          if (other === field) continue
+          expect(frag).not.toContain(MARKER[other] as string)
+        }
+      })
+    }
+  })
+
+  it('NO REGRESSION: button-driven steps still carry their exact locked option lists', () => {
+    // The 06-30 (personality) and 07-18 (import) fixes must survive intact.
+    const bothOpen = buildOnboardingStepGuardFragment(
+      { user_first_name: 'Ryan', primary_projects: ['A', 'B', 'C'], non_work_interests: ['x'] },
+      { import_offered: true },
+    ) as string
+
+    expect(bothOpen).toContain('`[[OPTIONS]]` block')
+    for (const o of IMPORT_DECISION_OPTIONS) {
+      expect(bothOpen).toContain(o.label)
+    }
+    expect(bothOpen).toContain('Sherlock')
+    expect(bothOpen).toContain('MUST NOT say you are skipping it')
+    expect(bothOpen).toContain('never settled by')
+  })
+
+  it('respects conditionality: never asks for an import this box cannot run', () => {
+    // import_offered omitted → the field is out of scope, so no block, even though
+    // no decision was ever captured.
+    const out = buildOnboardingStepGuardFragment({
+      user_first_name: 'Ryan',
+      primary_projects: ['A', 'B', 'C'],
+      non_work_interests: ['x'],
+    }) as string
+    expect(out).not.toBeNull()
+    expect(out).toContain('STILL OPEN - PERSONALITY')
+    expect(out).not.toContain('STILL OPEN - HISTORY IMPORT')
+  })
+
+  it('free-text steps are never dressed up as button steps', () => {
+    // Interests alone open: the fragment must forbid an options block, and must
+    // NOT carry the button-step instruction (nothing button-driven is pending).
+    const out = buildOnboardingStepGuardFragment(
+      {
+        user_first_name: 'Ryan',
+        import_decision: 'neither',
+        primary_projects: ['A', 'B', 'C'],
+        agent_personality: 'Yoda',
+      },
+      { import_offered: true },
+    ) as string
+    expect(out).toContain('Do NOT attach an [[OPTIONS]] block')
+    expect(out).not.toContain('MUST be presented as a `[[OPTIONS]]` block')
   })
 })
 

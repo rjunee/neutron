@@ -10,6 +10,75 @@ Running log of what shipped, newest first. One entry per merged change.
 > `docs/research/AS-BUILT-docs-archive-2026-07.md`. This file is the ONE live
 > changelog going forward.
 
+## 2026-07-18 — Onboarding: the step guard becomes AUDIT-DRIVEN (fixes a live finalize deadlock)
+
+**Bug (live, P0, Ryan's fresh install).** Onboarding hung forever after the
+personality step and could never finalize. The real row in
+`~/neutron/data/project.db`: `phase='work_interview_gap_fill'`,
+`completed_at=NULL`, `persona_files_committed=0`, with a `phase_state` holding
+`user_first_name=Ryan`, a settled import (`import_job_id`), 6 `primary_projects`
+and `agent_personality='Yoda'` — but NO `non_work_interests` (his import analysed
+to `topics:[]`, so nothing backfilled it).
+
+`auditRequiredFields` correctly refused to finalize on `non_work_interests`
+(`post-turn-extractor.ts` finalize gate). But `buildOnboardingStepGuardFragment`
+(`onboarding/interview/onboarding-preamble.ts`) inspected only TWO hardcoded
+fields — `import_decision` and `agent_personality` — and with both settled it
+returned `null`. The live agent therefore received no forcing instruction for the
+one field still blocking it, concluded onboarding was over, and went silent.
+**The audit required a field the guard could never ask for.**
+
+**Root defect (the general one, not the symptom).** The guard's coverage set was a
+hardcoded SUBSET of the audit's required set. Any required field outside that
+subset is an unaskable blocker, so adding required field #6 later would have
+silently reintroduced the same deadlock.
+
+**Fix — derive the guard from the audit.** `buildOnboardingStepGuardFragment` now
+walks `auditRequiredFields(...).missing` (in the audit's own priority order) and
+renders one copy block per missing field from `STEP_GUARD_COPY`, typed
+`Record<RequiredField, StepGuardCopy>`. It returns `null` exactly when finalize
+would fire — the guard and the gate can no longer disagree. Two presentation
+categories:
+- **`'buttons'`** (`import_decision`, `agent_personality`) — keep the existing
+  `[[OPTIONS]]` hard-requirement and their exact locked option lists/wording, so
+  the 2026-06-30 and 2026-07-18 fixes are not regressed.
+- **`'free_text'`** (`user_first_name`, `primary_projects`, `non_work_interests`)
+  — force the ASK in plain conversational form and EXPLICITLY forbid an
+  `[[OPTIONS]]` block. The interests copy states outright that onboarding CANNOT
+  finish until it is answered.
+
+Conditionality is respected: `import_decision` renders only when `import_offered`
+is true, so a box with no import substrate is never asked a question it cannot
+honor.
+
+**Anti-recurrence is structural, not a convention.** The `Record<RequiredField,
+StepGuardCopy>` makes a new union member without guard copy a COMPILE-TIME error
+— verified by temporarily adding a 6th field, which produced
+`TS2741: Property 'future_field_six' is missing ... but required in type
+'Record<RequiredField, StepGuardCopy>'` at `onboarding-preamble.ts`. A runtime
+exhaustiveness test iterating the newly exported
+`REQUIRED_FIELDS_IN_PRIORITY_ORDER` (`required-fields-audit.ts`) closes the loop
+for copy that exists but never renders.
+
+**Docs corrected.** The docblocks in `required-fields-audit.ts` and
+`onboarding-preamble.ts` claimed finalize "triggers once personality is settled".
+That was false and it masked this deadlock: personality is priority 5, but
+`non_work_interests` is audited BEFORE it at priority 4, so a run can have
+personality settled and still be blocked.
+
+**Tests.** `onboarding/interview/__tests__/onboarding-preamble.test.ts` (33 pass)
+gains the Ryan-state regression, the per-field exhaustiveness sweep, the
+button-list non-regression and the conditionality/free-text-shape cases.
+`tests/integration/onboarding-interests-deadlock.open.test.ts` is new and boots
+the whole stack (real composer, real `onboardingContext` closure, real post-turn
+extractor, real finalize gate + finalizer; the ONLY fake is the substrate, i.e.
+the model): from Ryan's exact stuck state the guard forces the interests ask, the
+owner — modelled faithfully, answering only what they were actually asked —
+replies in free text, and onboarding REACHES `phase='completed'` with
+`completed_at` stamped. Pre-fix both the regression and the E2E fail on `main`
+(the E2E times out waiting for an ask that never comes — the deadlock reproduced
+literally).
+
 ## 2026-07-18 — Onboarding: the welcome opener is guarded DURABLY, not per-process
 
 **Bug (live, fresh install, screenshot-confirmed).** The onboarding opener

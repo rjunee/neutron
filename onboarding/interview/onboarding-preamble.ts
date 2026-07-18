@@ -9,9 +9,12 @@
  * post-turn extractor (`post-turn-extractor.ts`) scribes the structured profile
  * out of the conversation in the background.
  *
- * The four fields the extractor + `required-fields-audit.ts` need before
- * onboarding completes: the user's first name, ≥3 work projects/focus areas,
- * ≥1 non-work interest, and the agent's personality.
+ * The fields the extractor + `required-fields-audit.ts` need before onboarding
+ * completes: the user's first name, the history-import decision (only when an
+ * import is offered on this box), ≥3 work projects/focus areas, ≥1 non-work
+ * interest, and the agent's personality. `buildOnboardingStepGuardFragment`
+ * derives its per-turn forcing copy from that SAME audit (2026-07-18), so every
+ * required field is askable — see that function for the deadlock it fixes.
  *
  * 2026-07-01 (DROP the agent-NAME step): Neutron Open is an agent ORCHESTRATOR,
  * not a personal agent, so onboarding NEVER asks the owner to name it. The
@@ -23,6 +26,7 @@ import { STATIC_PERSONALITY_CHARACTER_FALLBACK } from './personality-characters.
 import {
   auditRequiredFields,
   type ImportDecision,
+  type RequiredField,
   type RequiredFieldsAuditOptions,
 } from './required-fields-audit.ts'
 
@@ -228,68 +232,183 @@ export function buildOnboardingPreamble(input: OnboardingPreambleInput): string 
  * (`IMPORT_DECISION_OPTIONS`) and forbids assuming a skip. The import step is
  * only audited when the caller passes `import_offered: true` (composer:
  * `importSubstrate !== null`), so a box that cannot run an import is never
- * blocked on a question it must not ask. Returns null once every button-driven
- * step is settled.
+ * blocked on a question it must not ask.
  *
- * Because it re-injects every turn, the agent cannot drift past the personality
- * step without rendering the buttons — making the step reliable rather than
- * LLM-whim — while still leaving room for a free-text answer (the [[OPTIONS]]
- * block always carries a "Something else" / "I'll describe it" escape and the
- * owner can ignore the buttons and type).
+ * 2026-07-18 (AUDIT-DRIVEN — total coverage): the guard no longer inspects a
+ * hardcoded subset of fields. It walks `auditRequiredFields(...).missing` and
+ * emits one copy block per missing field from `STEP_GUARD_COPY`, a
+ * `Record<RequiredField, StepGuardCopy>` — so the set the guard can ASK for is
+ * the set the audit REQUIRES, by construction.
+ *
+ * THE BUG that forced this (live deadlock, Ryan's fresh install): with the two
+ * hardcoded button fields settled the guard returned null while the audit still
+ * required `non_work_interests`. The model got no forcing instruction, concluded
+ * onboarding was done, and went silent; the finalize gate correctly refused to
+ * complete. Onboarding hung forever — the audit required a field the guard could
+ * not ask for. Any future required field would have reintroduced it; now the
+ * `Record` fails type-check instead. See `STEP_GUARD_COPY`.
+ *
+ * Returns null only when NO required field is missing — i.e. exactly when the
+ * finalize gate would fire.
+ *
+ * Because it re-injects every turn, the agent cannot drift past a required step
+ * — making each step reliable rather than LLM-whim. Button steps still leave
+ * room for a typed answer (the [[OPTIONS]] block always carries a "Something
+ * else" / "I'll describe it" escape and the owner can ignore the buttons).
  */
 export function buildOnboardingStepGuardFragment(
   phase_state: Readonly<Record<string, unknown>>,
   options?: Readonly<RequiredFieldsAuditOptions>,
 ): string | null {
   const audit = auditRequiredFields(phase_state, options)
-  const missing = new Set(audit.missing)
-  const needsImportDecision = missing.has('import_decision')
-  const needsPersonality = missing.has('agent_personality')
-  if (!needsImportDecision && !needsPersonality) return null
+  if (audit.missing.length === 0) return null
+
+  // Drive the fragment off the AUDIT, in the audit's own priority order. Every
+  // missing field contributes its copy block — there is no hardcoded subset to
+  // fall out of sync with the required set.
+  const blocks = audit.missing.map((field) => STEP_GUARD_COPY[field])
+  const hasButtonStep = blocks.some((b) => b.presentation === 'buttons')
+  const hasFreeTextStep = blocks.some((b) => b.presentation === 'free_text')
+
   const lines: string[] = []
   lines.push('<onboarding_required_steps>')
   lines.push(
-    'REQUIRED-STEP GUARD: the step(s) below are button-driven and MUST be',
-    'presented as a `[[OPTIONS]]` block (see "Offering choices") — never answered on',
-    'the owner\'s behalf and never silently skipped. You may not wrap up / finalize',
-    'onboarding until they are settled.',
+    'REQUIRED-STEP GUARD: the step(s) below are STILL UNANSWERED. None of them may be',
+    "answered on the owner's behalf, inferred, or silently skipped.",
+    'You may not wrap up / finalize onboarding until every one of them is settled.',
   )
-  if (needsImportDecision) {
-    lines.push('')
+  if (hasButtonStep) {
     lines.push(
-      'STILL OPEN - HISTORY IMPORT: the owner has NOT told you whether they want to bring',
-      'over their existing ChatGPT or Claude history. They have NOT declined it, so you',
-      'MUST NOT say you are skipping it, MUST NOT assume they have no export, and MUST NOT',
-      'treat silence (or an answer to a different question, like their name) as a decision.',
-      'As soon as you have their first name, and BEFORE the work questions, ask this and',
-      'present EXACTLY these tappable options (do not reword them, do not add others):',
-    )
-    for (const o of IMPORT_DECISION_OPTIONS) {
-      lines.push(`  - ${o.label}`)
-    }
-    lines.push(
-      'Tell them they can export from ChatGPT/Claude settings and then drag-and-drop or',
-      'attach the .zip right here. They may also simply type their answer instead of',
-      'tapping ("I have Claude history", "skip") - that counts, and either way you only',
-      'ask this once.',
+      'Steps marked BUTTONS are button-driven and MUST be presented as a `[[OPTIONS]]` block',
+      '(see "Offering choices").',
     )
   }
-  if (needsPersonality) {
-    lines.push('')
+  if (hasFreeTextStep) {
     lines.push(
-      'STILL OPEN - PERSONALITY: you have NOT yet settled the personality/voice the owner',
-      'wants from you. It is never settled by free text alone. The next time it is natural',
-      'in the conversation (and BEFORE you wrap up), you MUST ask which voice they want',
-      'and present THESE named archetypes as',
-      'a tappable [[OPTIONS]] block (plus a "Something else (I\'ll describe it)" option).',
-      'Do not invent a different list, and do not skip the buttons:',
+      'Steps marked ASK are ordinary conversational questions: ask them in plain prose.',
+      'Do NOT attach an [[OPTIONS]] block to them.',
     )
-    for (const c of DEFINED_PERSONALITY_CHARACTERS) {
-      lines.push(`  - ${c.name}`)
-    }
+  }
+  for (const block of blocks) {
+    lines.push('')
+    lines.push(...block.lines())
   }
   lines.push('</onboarding_required_steps>')
   return lines.join('\n')
+}
+
+/**
+ * One copy block per required step.
+ *
+ * `presentation` splits the two shapes a required step can take:
+ *   - `'buttons'`  — settled by tapping a locked option list, so the guard HARD-
+ *                    REQUIRES an `[[OPTIONS]]` block (import decision, personality).
+ *   - `'free_text'`— an ordinary conversational ask with no fixed answer set, so
+ *                    the guard forces the QUESTION and explicitly forbids an
+ *                    `[[OPTIONS]]` block (there is nothing to enumerate).
+ */
+interface StepGuardCopy {
+  readonly presentation: 'buttons' | 'free_text'
+  readonly lines: () => string[]
+}
+
+/**
+ * TOTAL-COVERAGE COPY TABLE (2026-07-18 audit-driven guard).
+ *
+ * THE BUG this fixes (live deadlock, Ryan's fresh install): the guard used to
+ * inspect exactly two hardcoded fields (`import_decision`, `agent_personality`)
+ * while the audit required FIVE. With both button steps settled the guard
+ * returned null, so the model received no forcing instruction for the still-
+ * missing `non_work_interests`, believed onboarding was over, and went silent —
+ * while `auditRequiredFields` correctly refused to finalize on that same field.
+ * The audit required a field the guard could never ask for: an unaskable
+ * blocker, and onboarding hung forever with `completed_at=NULL`.
+ *
+ * THE FIX is structural, not a fifth `if`. Typing this table as
+ * `Record<RequiredField, StepGuardCopy>` makes total coverage a COMPILE-TIME
+ * guarantee: adding a member to the `RequiredField` union without adding its
+ * copy here is a TypeScript error (missing property), so a future required
+ * field #6 cannot reintroduce the deadlock. The anti-recurrence test
+ * (`onboarding-preamble.test.ts`) closes the loop at runtime by iterating
+ * `REQUIRED_FIELDS_IN_PRIORITY_ORDER` and asserting each field alone yields a
+ * non-null fragment naming it.
+ *
+ * `user_first_name` and `primary_projects` are normally pre-filled by signup and
+ * the import, so their blocks rarely render — but "rarely" is precisely the
+ * assumption that produced this deadlock, so they get real copy too.
+ */
+const STEP_GUARD_COPY: Record<RequiredField, StepGuardCopy> = {
+  user_first_name: {
+    presentation: 'free_text',
+    lines: () => [
+      'STILL OPEN - OWNER NAME (ASK): you do NOT know what the owner wants to be called.',
+      'Ask them, in plain conversation, what their first name is.',
+      'Do NOT attach an [[OPTIONS]] block (there is nothing to enumerate), do NOT guess a',
+      'name from their email or handle, and do NOT proceed as though you already have it.',
+    ],
+  },
+  import_decision: {
+    presentation: 'buttons',
+    lines: () => {
+      const lines = [
+        'STILL OPEN - HISTORY IMPORT (BUTTONS): the owner has NOT told you whether they want to bring',
+        'over their existing ChatGPT or Claude history. They have NOT declined it, so you',
+        'MUST NOT say you are skipping it, MUST NOT assume they have no export, and MUST NOT',
+        'treat silence (or an answer to a different question, like their name) as a decision.',
+        'As soon as you have their first name, and BEFORE the work questions, ask this and',
+        'present EXACTLY these tappable options (do not reword them, do not add others):',
+      ]
+      for (const o of IMPORT_DECISION_OPTIONS) {
+        lines.push(`  - ${o.label}`)
+      }
+      lines.push(
+        'Tell them they can export from ChatGPT/Claude settings and then drag-and-drop or',
+        'attach the .zip right here. They may also simply type their answer instead of',
+        'tapping ("I have Claude history", "skip") - that counts, and either way you only',
+        'ask this once.',
+      )
+      return lines
+    },
+  },
+  primary_projects: {
+    presentation: 'free_text',
+    lines: () => [
+      'STILL OPEN - PROJECTS (ASK): you do not yet have at least THREE things the owner is',
+      'actively working on or focused on. Ask them, in plain conversation, what they spend',
+      'their time on - the projects, businesses, or efforts that matter right now.',
+      'Do NOT attach an [[OPTIONS]] block (you cannot enumerate their life for them), do NOT',
+      'invent projects, and keep asking until you genuinely have three or more.',
+    ],
+  },
+  non_work_interests: {
+    presentation: 'free_text',
+    lines: () => [
+      'STILL OPEN - INTERESTS (ASK): you do not yet know a single thing the owner cares about',
+      'OUTSIDE of work. This is a REQUIRED step and onboarding CANNOT finish without it, so',
+      'you must not wind down, say goodbye, or go quiet until they have answered. Ask them,',
+      'in plain conversation, what they are into when they are not working - hobbies, what',
+      'they read or watch, how they spend a free weekend. Do NOT attach an [[OPTIONS]] block',
+      '(there is no fixed list of human interests), do NOT infer it from their projects, and',
+      'do NOT accept your own guess as their answer.',
+    ],
+  },
+  agent_personality: {
+    presentation: 'buttons',
+    lines: () => {
+      const lines = [
+        'STILL OPEN - PERSONALITY (BUTTONS): you have NOT yet settled the personality/voice the owner',
+        'wants from you. It is never settled by free text alone. The next time it is natural',
+        'in the conversation (and BEFORE you wrap up), you MUST ask which voice they want',
+        'and present THESE named archetypes as',
+        'a tappable [[OPTIONS]] block (plus a "Something else (I\'ll describe it)" option).',
+        'Do not invent a different list, and do not skip the buttons:',
+      ]
+      for (const c of DEFINED_PERSONALITY_CHARACTERS) {
+        lines.push(`  - ${c.name}`)
+      }
+      return lines
+    },
+  },
 }
 
 /**

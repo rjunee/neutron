@@ -1222,6 +1222,33 @@ rather than waiting on the global diff-gate. Subscriber:
 >   turn via the `LiveAgentOnboardingSeam.onboardingContext` seam (joined with the
 >   import-analysis grounding), so the agent cannot drift past the personality step
 >   without rendering the buttons — reliable, not LLM-whim, still inside Path-1.
+>   **The guard is now AUDIT-DRIVEN, with total coverage by construction
+>   (2026-07-18).** It previously inspected a HARDCODED SUBSET of the required set —
+>   just `import_decision` + `agent_personality` — while `auditRequiredFields`
+>   required five fields. Any required field outside that subset was an UNASKABLE
+>   BLOCKER, which produced a live deadlock on Ryan's fresh install: with both
+>   button steps settled the guard returned `null`, so the agent got no forcing
+>   instruction for the still-missing `non_work_interests` (his import analysed to
+>   `topics:[]`), believed onboarding was over and went silent, while the finalize
+>   gate correctly refused to complete — `phase='work_interview_gap_fill'`,
+>   `completed_at=NULL`, forever. The guard now walks
+>   `auditRequiredFields(...).missing` and renders one copy block per missing field
+>   from `STEP_GUARD_COPY`, a `Record<RequiredField, StepGuardCopy>`; it returns
+>   `null` exactly when finalize would fire. Two presentation categories:
+>   `'buttons'` steps (`import_decision`, `agent_personality`) keep their existing
+>   locked `[[OPTIONS]]` lists and wording verbatim; `'free_text'` steps
+>   (`user_first_name`, `primary_projects`, `non_work_interests`) force the ASK in
+>   plain prose and EXPLICITLY forbid an `[[OPTIONS]]` block. Conditionality is
+>   respected — `import_decision` only renders when `import_offered` is true, so a
+>   box with no import substrate is never asked a question it cannot honor.
+>   **Anti-recurrence is structural:** the `Record` makes a new `RequiredField`
+>   without guard copy a COMPILE-TIME error (verified: TS2741), and an
+>   exhaustiveness test iterating the exported
+>   `REQUIRED_FIELDS_IN_PRIORITY_ORDER` asserts every field alone yields a
+>   fragment naming it. (Also corrected: the docblocks claiming finalize "triggers
+>   once personality is settled" — personality is priority 5, but
+>   `non_work_interests` is audited BEFORE it at priority 4, which is what made the
+>   false comment mask this deadlock.)
 > - **Cold-turn budget raised 360s → 600s (item 4a).** #138's 360s still hard-failed
 >   a real onboarding work-question turn at ~5.5min under fleet/dogfood load; 10
 >   minutes leaves comfortable headroom over the observed worst case, with the

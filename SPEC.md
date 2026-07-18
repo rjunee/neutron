@@ -1,6 +1,6 @@
 ---
 title: "SPEC.md — Neutron Open (master spec)"
-last_updated: 2026-07-18 (welcome-seed guard made durable — a one-shot emit is gated on persisted state, never on per-process memory; refactor window remains CLOSED)
+last_updated: 2026-07-18 (onboarding step guard made AUDIT-DRIVEN — fixes the live finalize deadlock on a required field the guard could not ask for; refactor window remains CLOSED)
 ---
 <!-- CURRENT: steady-state (world-class refactor window COMPLETE; feature development resuming) -->
 
@@ -339,6 +339,30 @@ dated record of each locked decision; the body describes the resulting
 architecture and points here.
 
 ### 2026-07-18
+
+- **The onboarding step guard is AUDIT-DRIVEN: every required field is askable, by construction.** Fixed a live
+  P0 deadlock on a fresh install — onboarding hung after the personality step and could never finalize
+  (`phase='work_interview_gap_fill'`, `completed_at=NULL`, `persona_files_committed=0`, with name + a settled
+  import + 6 `primary_projects` + `agent_personality='Yoda'`, but no `non_work_interests` because the import
+  analysed to `topics:[]`). `auditRequiredFields` correctly refused to finalize on `non_work_interests`, but
+  `buildOnboardingStepGuardFragment` inspected only the two HARDCODED button fields (`import_decision`,
+  `agent_personality`); with both settled it returned `null`, so the agent got no forcing instruction, believed
+  onboarding was over, and went silent. The general defect — LOCKED as fixed here — is that the guard's coverage
+  set was a hardcoded SUBSET of the audit's required set, making any field outside it an UNASKABLE BLOCKER (a
+  6th required field would have silently reintroduced the hang). The guard now derives its work from
+  `auditRequiredFields(...).missing` and renders one block per missing field from `STEP_GUARD_COPY`, typed
+  `Record<RequiredField, StepGuardCopy>`, returning `null` exactly when finalize would fire. Two presentation
+  categories: BUTTON-DRIVEN steps keep their existing `[[OPTIONS]]` hard-requirement and locked option lists
+  verbatim (no regression of the 06-30 / 07-18 fixes); FREE-TEXT steps (`user_first_name`, `primary_projects`,
+  `non_work_interests`) force the ask in plain prose and EXPLICITLY forbid an `[[OPTIONS]]` block.
+  Conditionality preserved (`import_decision` only when `import_offered`). Anti-recurrence is STRUCTURAL: a new
+  `RequiredField` without copy fails TYPE-CHECK (verified TS2741), plus a runtime exhaustiveness test over the
+  exported `REQUIRED_FIELDS_IN_PRIORITY_ORDER`. Also corrected the docblocks claiming finalize "triggers once
+  personality is settled" — false, and it masked this bug (`non_work_interests` is priority 4, personality 5).
+  No feature flags, one code path.
+  [`onboarding/interview/onboarding-preamble.ts`, `onboarding/interview/required-fields-audit.ts`,
+  `onboarding/interview/__tests__/onboarding-preamble.test.ts`,
+  `tests/integration/onboarding-interests-deadlock.open.test.ts`, `docs/SYSTEM-OVERVIEW.md`, `docs/AS_BUILT.md`]
 
 - **A one-shot emit is gated on DURABLE state, never on per-process memory.** Fixed a live fresh-install bug:
   the onboarding welcome opener was emitted TWICE into the owner's General topic. The seed was guarded by an
