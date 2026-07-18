@@ -1091,8 +1091,11 @@ test('finalize emits a General closing message + one per-project opening (items 
   const finalizer = buildOnboardingFinalize(deps)
   await finalizer.finalize({ user_id: USER_ID, topic_id: TOPIC_ID, state: seeded })
 
-  // Exactly one General closing (project_id === null) pointing at the rail + Work.
-  const closings = emitted.filter((e) => e.project_id === null)
+  // Exactly one General closing pointing at the rail + Work. Keyed on the
+  // dedupe_key, not on `project_id === null`: the General topic now also carries
+  // the STARTING message (2026-07-18) that fires before the openings, so
+  // "project_id is null" is no longer synonymous with "the closing".
+  const closings = emitted.filter((e) => e.dedupe_key === 'onboarding_closing')
   expect(closings).toHaveLength(1)
   expect(closings[0]!.user_id).toBe(USER_ID)
   expect(closings[0]!.body).toMatch(/left rail/i)

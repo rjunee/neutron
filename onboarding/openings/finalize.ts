@@ -77,6 +77,24 @@ import {
 import type { ProjectKickoff } from './kickoff.ts'
 
 /**
+ * Path-1 STARTING message (2026-07-18) — emitted into the owner's General topic
+ * the instant finalize commits to materializing projects, BEFORE persona compose
+ * / project materialization / the per-project opening composes.
+ *
+ * THE BUG (live, Ryan's install 2026-07-18): with 9 projects the openings landed
+ * one at a time over SEVERAL MINUTES (each is an LLM compose) and the ONE message
+ * telling the owner what to do next — the closing — arrived dead last. Projects
+ * silently appeared in the rail with zero orientation and the owner asked "its
+ * unclear what im supposed to do next". This message closes that silent window.
+ *
+ * Same `deps.emitChatMessage` seam + `project_id: null` (General) as the closing;
+ * its own stable `dedupe_key` so a re-entered finalize never double-posts it.
+ * Em-dash-free (Sam hard rule).
+ */
+const ONBOARDING_STARTING_MESSAGE =
+  "Got it, setting up your projects now. One moment while I put everything together."
+
+/**
  * Item 6 (Path-1 closing handoff, 2026-06-30) — the deterministic closing
  * message emitted into the owner's General topic right after onboarding
  * finalizes + the project rail refreshes. Path-1 finalize previously emitted NO
@@ -84,9 +102,13 @@ import type { ProjectKickoff } from './kickoff.ts'
  * that projects had been created or where to find them. Points the owner at the
  * populated left rail; uses "Work" (the user-facing name for the per-project
  * work board) per the M1 UX redesign rename (was "Plan"). Em-dash-free (Sam hard rule).
+ *
+ * 2026-07-18: the copy now names BOTH affordances explicitly — click into each
+ * project in the left rail, AND ask general questions right here in this chat.
+ * The owner had no idea the General chat stayed available after onboarding.
  */
 const ONBOARDING_CLOSING_MESSAGE =
-  "You're all set. I've created your projects - they're in the left rail. Open one to find its Work, Documents, and Chat, and we can dig in whenever you're ready."
+  "You're all set. I've created your projects and they're in the left rail. Click into each one to find its Work, Documents, and Chat. If you have any general questions, just ask me right here in this chat."
 
 /**
  * No-projects variant of the closing (item 6). The finalizer intentionally
@@ -375,8 +397,41 @@ export function buildOnboardingFinalize(deps: OnboardingFinalizeDeps): Onboardin
       }
 
       // (3) Persona + projects from the STABLE state — the ONLY place side effects happen.
-      await commitPersona(deps, stableState, log)
       const import_result = deriveImportResult(stableState) ?? input.import_result ?? null
+
+      // (3a) STARTING message (2026-07-18) — emitted BEFORE persona compose,
+      // materialization, and the per-project opening composes, i.e. before the
+      // multi-minute silent window the owner used to sit through. Conditions
+      // mirror the closing's: only when the `emitChatMessage` seam is wired, and
+      // ONLY when there is actually something to materialize (resolveProjects is
+      // the very list `materializeProjects` iterates) so we never promise projects
+      // on the zero-project path. Best-effort: an emit failure must never block
+      // finalize. Its own stable `dedupe_key` means a re-entered finalize (a
+      // deferred CAS retry, boot recovery) never shows the owner this twice — the
+      // composer keys the durable row on it and suppresses the live re-send.
+      //
+      // The count EXCLUDES slugs held by a soft-deleted `projects` row: those are
+      // projects the owner already deleted, `ensureProjectRow` reports them
+      // `skipped` and never resurrects them, so counting them would promise
+      // projects that will never land and then contradict itself with the
+      // no-projects closing (Codex P2). The residual dishonest window — EVERY
+      // `ensureProjectRow` call THROWING after this point — is a DB failure, where
+      // a slightly-wrong message is not the owner's problem.
+      const pendingProjectCount = countMaterializableProjects(deps, stableState, import_result)
+      if (deps.emitChatMessage !== undefined && pendingProjectCount > 0) {
+        try {
+          await deps.emitChatMessage({
+            user_id: input.user_id,
+            project_id: null,
+            body: ONBOARDING_STARTING_MESSAGE,
+            dedupe_key: 'onboarding_starting',
+          })
+        } catch (err) {
+          log('warn', 'finalize: starting message emit failed', { err: errStr(err) })
+        }
+      }
+
+      const persona_committed = await commitPersona(deps, stableState, log)
       // materialized: the projects that landed (created/existing, not soft-deleted skips) —
       // the per-project opening step below seeds each one's chat.
       const materialized = await materializeProjects(deps, stableState, import_result, now, log)
@@ -395,6 +450,16 @@ export function buildOnboardingFinalize(deps: OnboardingFinalizeDeps): Onboardin
           expected_phase: stableState.phase,
           expected_phase_state: stableState.phase_state,
           completed_at: now(),
+          // THE BUG (live, 2026-07-18): `persona_files_committed` read 0 in the DB
+          // even though SOUL.md / USER.md / priority-map.md were on disk. Nothing on
+          // the Path-1 finalize path ever wrote the flag — `commitPersona` writes the
+          // files + invalidates the loader but persists nothing, and the terminal CAS
+          // UPDATE set only phase/completed_at/wow_fired. The column therefore sat at
+          // its schema DEFAULT 0 forever (migrations/0043_onboarding_state_wow_pushed_at.sql:53).
+          // Carried on the SAME atomic terminal write rather than a second upsert, so
+          // it can never disagree with the completion it describes, and it stays
+          // truthful when persona compose failed (best-effort ⇒ false, not "completed").
+          persona_files_committed: persona_committed,
         })
       } catch (err) {
         throw err instanceof Error ? err : new Error(String(err))
@@ -487,12 +552,65 @@ export function buildOnboardingFinalize(deps: OnboardingFinalizeDeps): Onboardin
 }
 
 /**
+ * How many of the resolved projects can actually LAND, for the STARTING message's
+ * "do not promise projects that aren't coming" gate.
+ *
+ * Applies the same two reductions `materializeProjects` does before it ever calls
+ * `ensureProjectRow`: dedupe by slug (two names can normalize to one project_id),
+ * and drop any slug already held by a SOFT-DELETED `projects` row (the owner
+ * deleted that project; `ensureProjectRow` reports it `skipped` and never
+ * resurrects it — `gateway/wiring/project-create.ts`, the `deleted_at IS NOT NULL`
+ * probe). Read-only and best-effort: a query failure counts the project as
+ * materializable, which degrades to the pre-existing behaviour rather than
+ * silently suppressing the owner's progress message.
+ */
+function countMaterializableProjects(
+  deps: OnboardingFinalizeDeps,
+  state: OnboardingState,
+  import_result: ImportResult | null,
+): number {
+  const seen = new Set<string>()
+  let count = 0
+  for (const project of resolveProjects(state, import_result)) {
+    const slug = slugifyProjectId(project.name)
+    if (seen.has(slug)) continue
+    seen.add(slug)
+    try {
+      const deleted = deps.db.get<{ id: string }, [string]>(
+        `SELECT id FROM projects WHERE id = ? AND deleted_at IS NOT NULL`,
+        [slug],
+      )
+      if (deleted !== null && deleted !== undefined) continue
+    } catch {
+      // Fall through — count it; the message is best-effort, the probe is an
+      // honesty refinement, not a gate we should fail closed on.
+    }
+    count += 1
+  }
+  return count
+}
+
+/**
  * Compose + emit the per-project opening message for each materialized project.
  * Reuses the SAME deterministic opening composer + doc reader the legacy
  * phase-machine handoff (`build-onboarding-handoff.ts`) used, so Path-1 and the
  * legacy path produce identical opening prose. Each project is isolated; a doc-
  * read or emit failure for one project is logged and skipped.
+ *
+ * CONCURRENCY (2026-07-18): projects are composed through a bounded worker pool
+ * rather than one strictly-serial `await` per project. Each opening is an LLM
+ * compose (the agentic kickoff), so with 9 projects the serial loop kept the owner
+ * waiting SEVERAL MINUTES for the closing handoff that follows it. The openings are
+ * mutually independent — each targets its OWN project topic (`project_id`), reads
+ * only its own on-disk docs, and shares no mutable state — so ordering across
+ * projects carries no meaning and interleaving changes no observable outcome.
+ * Error isolation is UNCHANGED: the per-project try/catch still wraps one project's
+ * whole compose+emit, so a failure is logged and never blocks its siblings or the
+ * closing. The pool is BOUNDED (not an unbounded Promise.all) so a large import
+ * cannot fan N simultaneous substrate sessions at the CC substrate.
  */
+const OPENING_COMPOSE_CONCURRENCY = 3
+
 async function emitProjectOpenings(
   deps: OnboardingFinalizeDeps,
   user_id: string,
@@ -501,10 +619,13 @@ async function emitProjectOpenings(
   log: NonNullable<OnboardingFinalizeDeps['log']>,
 ): Promise<void> {
   if (materialized.length === 0 || deps.emitChatMessage === undefined) return
+  // Bind the narrowed seam once: the per-project closure below can't carry the
+  // `!== undefined` narrowing of a mutable `deps` property across a callback.
+  const emitChatMessage = deps.emitChatMessage
   const readProjectDoc = buildProjectDocReader({ owner_home: deps.owner_home })
   const proposedByName = indexProposedProjects(import_result)
-  for (const project of materialized) {
-    try {
+  const emitOneOpening = async (project: MaterializedProject): Promise<void> => {
+      try {
       const docs: ProjectOpeningDocs = {
         readme: readProjectDoc(project.project_id, 'README.md'),
         transcript_summary: readProjectDoc(
@@ -569,12 +690,12 @@ async function emitProjectOpenings(
             : buildDeterministicProjectOpening(project.name, effectiveMatch, docs)
         body = finalizeOpeningBody(composition.body)
       }
-      if (body.trim().length === 0) continue
+      if (body.trim().length === 0) return
       // SAME dedupe key as the deterministic opening: the agentic kickoff fills
       // the ONE per-project opening slot, so it is one-time by construction and
       // the on-connect opening recovery (open/composer.ts ensureProjectOpeningOnEntry)
       // collapses onto the same durable row instead of double-posting.
-      await deps.emitChatMessage({
+      await emitChatMessage({
         user_id,
         project_id: project.project_id,
         body,
@@ -587,6 +708,25 @@ async function emitProjectOpenings(
       })
     }
   }
+
+  // Bounded worker pool: `OPENING_COMPOSE_CONCURRENCY` workers pull from one
+  // shared cursor until the list is drained. `emitOneOpening` never rejects (it
+  // owns the per-project try/catch), so no worker can die and strand the queue,
+  // and awaiting all workers still means EVERY opening has settled before the
+  // closing message is emitted.
+  let cursor = 0
+  const worker = async (): Promise<void> => {
+    for (;;) {
+      const index = cursor
+      cursor += 1
+      const project = materialized[index]
+      if (project === undefined) return
+      await emitOneOpening(project)
+    }
+  }
+  await Promise.all(
+    Array.from({ length: Math.min(OPENING_COMPOSE_CONCURRENCY, materialized.length) }, worker),
+  )
 }
 
 // ---------------------------------------------------------------------------
@@ -645,7 +785,7 @@ async function commitPersona(
   deps: OnboardingFinalizeDeps,
   state: OnboardingState,
   log: NonNullable<OnboardingFinalizeDeps['log']>,
-): Promise<void> {
+): Promise<boolean> {
   try {
     const composer = deps.personaComposer ?? buildDefaultPersonaComposer(deps.owner_home)
     const composeInput = buildComposeInput(deps.owner_slug, state)
@@ -653,8 +793,10 @@ async function commitPersona(
     await composer.commit(draft)
     deps.personaLoader.invalidate()
     log('info', 'persona committed + loader invalidated', {})
+    return true
   } catch (err) {
     log('warn', 'persona compose/commit failed; continuing', { err: errStr(err) })
+    return false
   }
 }
 

@@ -1057,6 +1057,39 @@ rather than waiting on the global diff-gate. Subscriber:
 >   making the client read per-project topics; the opening lands on the project's
 >   canonical app-ws topic, reconciled at merge.
 
+> **Finalize message sequence + progress signal (2026-07-18).** The finalize
+> message order is now **STARTING → per-project openings (bounded-concurrent) →
+> CLOSING**, all through the one `emitChatMessage` seam
+> (`onboarding/openings/finalize.ts`). THE BUG (live, Ryan's install): each opening
+> is an LLM compose and they ran strictly serially, so with 9 projects they
+> trickled into the rail over SEVERAL MINUTES with no explanation and the one
+> message that says what to do next — the closing — arrived dead last ("its unclear
+> what im supposed to do next"). Three changes:
+> - **STARTING message** (`ONBOARDING_STARTING_MESSAGE`, dedupe_key
+>   `onboarding_starting`) is emitted into the General topic BEFORE persona
+>   compose / materialization / the opening composes — the earliest point at which
+>   finalize commits to side effects. It fires only when `emitChatMessage` is wired
+>   AND `resolveProjects(...)` is non-empty, so the zero-project path never promises
+>   projects. Its own stable dedupe_key means a re-entered finalize (deferred-CAS
+>   retry, boot recovery) can never show it twice.
+> - **Closing copy** now names BOTH post-onboarding affordances: click into each
+>   project in the left rail, AND ask general questions right here in the General
+>   chat. The `..._NO_PROJECTS` variant is unchanged (no rail claim when no rail).
+> - **Openings run through a bounded worker pool** (`OPENING_COMPOSE_CONCURRENCY = 3`)
+>   instead of a serial `await` per project. They are mutually independent (each
+>   targets its own project topic and reads only its own docs), per-project error
+>   isolation is unchanged, and the pool is bounded so a large import cannot fan N
+>   simultaneous substrate sessions.
+>
+> Also fixed in the same pass: `onboarding_state.persona_files_committed` sat at
+> its schema DEFAULT 0 forever on Path 1 (verified live: the persona files existed
+> on disk while the column read 0). Nothing ever wrote it — `commitPersona` writes
+> the files + invalidates the loader but persists nothing, and the terminal CAS
+> UPDATE set only phase/completed_at/wow_fired. `commitPersona` now returns whether
+> it succeeded and the flag rides the SAME atomic terminal write
+> (`completeIfPhaseStateMatches`), monotonically (`MAX(col, ?)`), so a later
+> persona failure can never clear a genuinely committed persona.
+
 > **Hobby projects + one-time agentic per-project kickoff (2026-07-01).** Two
 > onboarding-end upgrades to what a fresh install produces, both landing in
 > `build-onboarding-finalize.ts`:
