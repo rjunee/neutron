@@ -370,6 +370,16 @@ export function wireAppWs(ctx: OpenWiringContext, deps: WireAppWsDeps): WiredApp
   // in-memory bookkeeping to get out of sync. Fail-CLOSED on a store error: a
   // missing greeting is recoverable on the next connect, a duplicate one is the
   // bug being fixed here.
+  //
+  // DELIBERATE (Codex review, 2026-07-18): the runner treats a `buttonStore.emit`
+  // failure as non-fatal and ships the reply anyway (`persist_failed`), so a
+  // greeting can in principle be DELIVERED but UNPERSISTED, and this gate will
+  // re-seed it on the next connect. That is the correct outcome, not a gap: the
+  // client hydrates its transcript from exactly the rows this reads, so an
+  // unpersisted greeting is one the owner will NOT see after a reload — leaving
+  // them on the empty "Setting things up…" loader is the strictly worse failure,
+  // and it is the wedge the old per-process mark actually caused. The guard is
+  // deliberately keyed to what the owner can SEE, not to what we once attempted.
   const hasBeenGreeted = async (channel_topic_id: string): Promise<boolean> => {
     const now = Date.now()
     try {
