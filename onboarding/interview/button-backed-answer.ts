@@ -111,6 +111,16 @@ const MENTIONS_CHATGPT_RE = /\b(chatgpt|open ?ai|gpt)\b/i
 const MENTIONS_CLAUDE_RE = /\b(claude|anthropic)\b/i
 
 /**
+ * A negation attached to the provider it precedes ("no ChatGPT for me", "I don't
+ * have a Claude export") — as opposed to a negation of something ELSE followed by
+ * a provider choice ("no, my Claude one"). The clause separator is the
+ * discriminator, so the window deliberately stops at a comma as well as at
+ * sentence punctuation.
+ */
+const NEGATED_PROVIDER_RE =
+  /\b(no|not|don'?t|do not|never|without)\b[^.?!,]{0,24}?\b(chatgpt|open ?ai|gpt|claude|anthropic)\b/i
+
+/**
  * Normalize an import answer (a tapped option label OR free text) into the
  * locked `chatgpt | claude | neither` vocabulary. Returns null when the answer
  * is genuinely ambiguous — including "I have both" — so the guard simply
@@ -126,10 +136,19 @@ export function classifyImportDecision(raw: string): ImportDecision | null {
     (o) => o.label.toLowerCase() === text.toLowerCase(),
   )
   if (tapped !== undefined) return tapped.decision
-  if (IMPORT_DECLINE_RE.test(text) || IMPORT_BARE_NO_RE.test(text)) return 'neither'
   const chatgpt = MENTIONS_CHATGPT_RE.test(text)
   const claude = MENTIONS_CLAUDE_RE.test(text)
+  // BOTH providers named — checked FIRST, before any decline matcher (Codex
+  // review). A contrastive answer like "I don't have ChatGPT history, only
+  // Claude" carries a decline phrase AND an explicit pick, and reading the
+  // decline would durably record the OPPOSITE of what the owner chose. Treat it
+  // as ambiguous so the guard re-asks with buttons: a re-ask is recoverable, a
+  // wrong capture is not.
   if (chatgpt && claude) return null
+  // A single provider that is itself negated ("no ChatGPT for me") is a decline,
+  // not a selection.
+  if ((chatgpt || claude) && NEGATED_PROVIDER_RE.test(text)) return 'neither'
+  if (IMPORT_DECLINE_RE.test(text) || IMPORT_BARE_NO_RE.test(text)) return 'neither'
   if (chatgpt) return 'chatgpt'
   if (claude) return 'claude'
   return null

@@ -184,6 +184,35 @@ describe('captureButtonBackedRequiredField — import decision (2026-07-18)', ()
     expect(out).toEqual({ field: 'import_decision', value: 'claude' })
   })
 
+  it('a CONTRASTIVE answer never records the opposite of the explicit pick', () => {
+    // "I don't have ChatGPT history, only Claude" carries a decline phrase AND a
+    // selection. Reading the decline would durably record `neither` and stop the
+    // guard asking, silently denying the owner the import they just asked for.
+    // Ambiguous → capture nothing → the guard re-asks with buttons.
+    for (const text of [
+      "I don't have ChatGPT history, only Claude",
+      'no chatgpt export, but I do have claude',
+    ]) {
+      const out = captureButtonBackedRequiredField({
+        phase_state: { ...NAME_ONLY },
+        user_text: text,
+        prior_agent_options: importOptions(),
+      })
+      expect(out).toBeNull()
+    }
+  })
+
+  it('a negation attached to the ONLY named provider is a decline', () => {
+    for (const text of ['no chatgpt for me', 'not the claude one', 'no gpt export here']) {
+      const out = captureButtonBackedRequiredField({
+        phase_state: { ...NAME_ONLY },
+        user_text: text,
+        prior_agent_options: importOptions(),
+      })
+      expect(out).toEqual({ field: 'import_decision', value: 'neither' })
+    }
+  })
+
   it('an AMBIGUOUS answer captures nothing (the guard re-asks rather than inventing one)', () => {
     for (const text of ['I have both', 'hmm', 'what do you mean?']) {
       const out = captureButtonBackedRequiredField({
