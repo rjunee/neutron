@@ -309,6 +309,62 @@ describe('buildOnboardingStepGuardFragment — AUDIT-DRIVEN total coverage (2026
     expect(out).not.toContain('STILL OPEN - HISTORY IMPORT')
   })
 
+  describe('import in flight: project-discovery steps are DEFERRED, not forced (Codex P2)', () => {
+    /**
+     * The guard and `buildImportInFlightSteerFragment` are joined into the SAME
+     * prompt (open/composer.ts). The steer forbids project discovery during an
+     * upload, and the extractor deliberately DROPS `primary_projects` /
+     * `non_work_interests` while importing (`PROJECT_DISCOVERY_FIELDS`,
+     * post-turn-extractor.ts). An audit-driven guard that forced those asks
+     * anyway would contradict the steer AND solicit an answer that is discarded.
+     */
+    const MID_IMPORT = {
+      user_first_name: 'Ryan',
+      import_decision: 'chatgpt',
+      // primary_projects + non_work_interests: absent, pending the import.
+    } as const
+
+    it('does not ask for projects or interests while the import is running', () => {
+      const out = buildOnboardingStepGuardFragment(MID_IMPORT, {
+        import_offered: true,
+        import_in_flight: true,
+      })
+      expect(out).not.toBeNull()
+      const frag = out as string
+      expect(frag).not.toContain('STILL OPEN - PROJECTS')
+      expect(frag).not.toContain('STILL OPEN - INTERESTS')
+      // Import-INDEPENDENT progress is still forced, so the interview continues.
+      expect(frag).toContain('STILL OPEN - PERSONALITY')
+    })
+
+    it('returns null when EVERY remaining step is deferred (nothing to force yet)', () => {
+      const out = buildOnboardingStepGuardFragment(
+        { ...MID_IMPORT, agent_personality: 'Yoda' },
+        { import_offered: true, import_in_flight: true },
+      )
+      expect(out).toBeNull()
+    })
+
+    it('resumes forcing them the moment the import is no longer in flight', () => {
+      // Deferred, never dropped: the same state with the import landed forces both.
+      const frag = buildOnboardingStepGuardFragment(MID_IMPORT, {
+        import_offered: true,
+        import_in_flight: false,
+      }) as string
+      expect(frag).toContain('STILL OPEN - PROJECTS')
+      expect(frag).toContain('STILL OPEN - INTERESTS')
+    })
+
+    it("defaults to not-in-flight, so Ryan's stuck state is unaffected", () => {
+      // The deadlock fix must not be weakened by the deferral: his import was
+      // long finished, so the interests ask is still forced with no option passed.
+      const frag = buildOnboardingStepGuardFragment(RYAN_STUCK_STATE, {
+        import_offered: true,
+      }) as string
+      expect(frag).toContain('STILL OPEN - INTERESTS')
+    })
+  })
+
   it('free-text steps are never dressed up as button steps', () => {
     // Interests alone open: the fragment must forbid an options block, and must
     // NOT carry the button-step instruction (nothing button-driven is pending).

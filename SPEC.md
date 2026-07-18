@@ -355,7 +355,10 @@ architecture and points here.
   categories: BUTTON-DRIVEN steps keep their existing `[[OPTIONS]]` hard-requirement and locked option lists
   verbatim (no regression of the 06-30 / 07-18 fixes); FREE-TEXT steps (`user_first_name`, `primary_projects`,
   `non_work_interests`) force the ask in plain prose and EXPLICITLY forbid an `[[OPTIONS]]` block.
-  Conditionality preserved (`import_decision` only when `import_offered`). Anti-recurrence is STRUCTURAL: a new
+  Conditionality preserved (`import_decision` only when `import_offered`), and the two project-discovery fields
+  are DEFERRED while a history import is in flight — forcing them mid-import would contradict
+  `buildImportInFlightSteerFragment` (joined into the same prompt) and solicit answers the extractor drops;
+  import-INDEPENDENT steps stay forced and the deferred ones resume once the import lands. Anti-recurrence is STRUCTURAL: a new
   `RequiredField` without copy fails TYPE-CHECK (verified TS2741), plus a runtime exhaustiveness test over the
   exported `REQUIRED_FIELDS_IN_PRIORITY_ORDER`. Also corrected the docblocks claiming finalize "triggers once
   personality is settled" — false, and it masked this bug (`non_work_interests` is priority 4, personality 5).

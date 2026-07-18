@@ -258,7 +258,7 @@ export function buildOnboardingPreamble(input: OnboardingPreambleInput): string 
  */
 export function buildOnboardingStepGuardFragment(
   phase_state: Readonly<Record<string, unknown>>,
-  options?: Readonly<RequiredFieldsAuditOptions>,
+  options?: Readonly<StepGuardOptions>,
 ): string | null {
   const audit = auditRequiredFields(phase_state, options)
   if (audit.missing.length === 0) return null
@@ -266,7 +266,25 @@ export function buildOnboardingStepGuardFragment(
   // Drive the fragment off the AUDIT, in the audit's own priority order. Every
   // missing field contributes its copy block — there is no hardcoded subset to
   // fall out of sync with the required set.
-  const blocks = audit.missing.map((field) => STEP_GUARD_COPY[field])
+  //
+  // …EXCEPT the project-discovery fields while a history import is in flight.
+  // They are DEFERRED, not dropped: the import owns project discovery, the
+  // extractor deliberately refuses to persist them during the upload
+  // (`PROJECT_DISCOVERY_FIELDS`, post-turn-extractor.ts), and the composer
+  // injects `buildImportInFlightSteerFragment` — which forbids project questions
+  // — into the SAME prompt as this guard (open/composer.ts). Forcing the ask here
+  // would hand the model two contradictory instructions and, worse, invite the
+  // owner to answer a question whose answer is then silently discarded. Once the
+  // import lands and is consumed, `import_in_flight` goes false and these blocks
+  // resume — so the field is still never unaskable, only asked at the right time.
+  const suppressed =
+    options?.import_in_flight === true
+      ? audit.missing.filter((field) => STEP_GUARD_COPY[field].deferred_during_import)
+      : []
+  const forcing = audit.missing.filter((field) => !suppressed.includes(field))
+  if (forcing.length === 0) return null
+
+  const blocks = forcing.map((field) => STEP_GUARD_COPY[field])
   const hasButtonStep = blocks.some((b) => b.presentation === 'buttons')
   const hasFreeTextStep = blocks.some((b) => b.presentation === 'free_text')
 
@@ -309,7 +327,27 @@ export function buildOnboardingStepGuardFragment(
  */
 interface StepGuardCopy {
   readonly presentation: 'buttons' | 'free_text'
+  /**
+   * Whether this step must be DEFERRED (not forced) while a history import is
+   * uploading/analyzing. True exactly for the project-discovery fields the
+   * extractor refuses to persist during an import (`PROJECT_DISCOVERY_FIELDS`,
+   * post-turn-extractor.ts) — asking for them mid-import contradicts
+   * `buildImportInFlightSteerFragment` (injected into the same prompt) and
+   * solicits an answer that is then dropped. The import-INDEPENDENT steps stay
+   * forced, so the interview keeps making progress during the upload.
+   */
+  readonly deferred_during_import: boolean
   readonly lines: () => string[]
+}
+
+/** Guard options: the audit's field-scope options plus the in-flight import state. */
+export interface StepGuardOptions extends RequiredFieldsAuditOptions {
+  /**
+   * Whether a history import is uploading / being analyzed right now (composer
+   * derives this from the durable import phase OR the in-flight probe). Defaults
+   * to false, which preserves the pre-2026-07-18 behavior for every other caller.
+   */
+  import_in_flight?: boolean
 }
 
 /**
@@ -340,6 +378,7 @@ interface StepGuardCopy {
 const STEP_GUARD_COPY: Record<RequiredField, StepGuardCopy> = {
   user_first_name: {
     presentation: 'free_text',
+    deferred_during_import: false,
     lines: () => [
       'STILL OPEN - OWNER NAME (ASK): you do NOT know what the owner wants to be called.',
       'Ask them, in plain conversation, what their first name is.',
@@ -349,6 +388,7 @@ const STEP_GUARD_COPY: Record<RequiredField, StepGuardCopy> = {
   },
   import_decision: {
     presentation: 'buttons',
+    deferred_during_import: false,
     lines: () => {
       const lines = [
         'STILL OPEN - HISTORY IMPORT (BUTTONS): the owner has NOT told you whether they want to bring',
@@ -372,6 +412,7 @@ const STEP_GUARD_COPY: Record<RequiredField, StepGuardCopy> = {
   },
   primary_projects: {
     presentation: 'free_text',
+    deferred_during_import: true,
     lines: () => [
       'STILL OPEN - PROJECTS (ASK): you do not yet have at least THREE things the owner is',
       'actively working on or focused on. Ask them, in plain conversation, what they spend',
@@ -382,6 +423,7 @@ const STEP_GUARD_COPY: Record<RequiredField, StepGuardCopy> = {
   },
   non_work_interests: {
     presentation: 'free_text',
+    deferred_during_import: true,
     lines: () => [
       'STILL OPEN - INTERESTS (ASK): you do not yet know a single thing the owner cares about',
       'OUTSIDE of work. This is a REQUIRED step and onboarding CANNOT finish without it, so',
@@ -394,6 +436,7 @@ const STEP_GUARD_COPY: Record<RequiredField, StepGuardCopy> = {
   },
   agent_personality: {
     presentation: 'buttons',
+    deferred_during_import: false,
     lines: () => {
       const lines = [
         'STILL OPEN - PERSONALITY (BUTTONS): you have NOT yet settled the personality/voice the owner',

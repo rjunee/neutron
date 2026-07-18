@@ -51,6 +51,21 @@ Conditionality is respected: `import_decision` renders only when `import_offered
 is true, so a box with no import substrate is never asked a question it cannot
 honor.
 
+**Deferred (not dropped) during a history import.** Making the guard audit-driven
+newly put `primary_projects` / `non_work_interests` in its scope — the two
+`PROJECT_DISCOVERY_FIELDS` the extractor deliberately refuses to persist while an
+import is uploading/analyzing, and which `buildImportInFlightSteerFragment`
+(joined into the SAME prompt at `open/composer.ts`) explicitly forbids asking
+about. Forcing them mid-import would have handed the model contradictory
+instructions and solicited answers that are then silently discarded (caught by
+cross-model review). `StepGuardCopy` therefore carries
+`deferred_during_import`, the guard takes an `import_in_flight` option, and the
+composer now resolves `importInFlight` BEFORE building the guard so it can be
+threaded in. Import-INDEPENDENT steps (`user_first_name`, `agent_personality`)
+stay forced, so the interview keeps progressing during the upload; the deferred
+steps resume the moment the import lands. Deferred, never dropped — the field is
+still never unaskable, only asked at the right time.
+
 **Anti-recurrence is structural, not a convention.** The `Record<RequiredField,
 StepGuardCopy>` makes a new union member without guard copy a COMPILE-TIME error
 — verified by temporarily adding a 6th field, which produced

@@ -1240,7 +1240,15 @@ rather than waiting on the global diff-gate. Subscriber:
 >   (`user_first_name`, `primary_projects`, `non_work_interests`) force the ASK in
 >   plain prose and EXPLICITLY forbid an `[[OPTIONS]]` block. Conditionality is
 >   respected — `import_decision` only renders when `import_offered` is true, so a
->   box with no import substrate is never asked a question it cannot honor.
+>   box with no import substrate is never asked a question it cannot honor. The two
+>   `PROJECT_DISCOVERY_FIELDS` (`primary_projects`, `non_work_interests`) are
+>   DEFERRED while a history import is in flight (`StepGuardCopy.deferred_during_
+>   import` + the guard's `import_in_flight` option; the composer now resolves
+>   `importInFlight` BEFORE building the guard so it can thread it in): forcing them
+>   mid-import would contradict `buildImportInFlightSteerFragment`, which is joined
+>   into the SAME prompt, and would solicit answers the extractor drops.
+>   Import-INDEPENDENT steps stay forced and the deferred ones resume once the
+>   import lands — deferred, never dropped.
 >   **Anti-recurrence is structural:** the `Record` makes a new `RequiredField`
 >   without guard copy a COMPILE-TIME error (verified: TS2741), and an
 >   exhaustiveness test iterating the exported
