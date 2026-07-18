@@ -2530,6 +2530,16 @@ export function buildOpenGraphComposer(
     // recover (on_session_open only re-armed the watcher). Make import
     // completion an authoritative finalize trigger. Idempotent (finalize no-ops
     // a `completed` row). Returns true iff it finalized.
+    // IMPORT STEP GUARD (2026-07-18) — is a history import genuinely offerable
+    // on this box? This ONE expression already decides whether the preamble
+    // renders the import offer and whether the upload affordance exists, so it
+    // is also the right gate for auditing the import DECISION as a required
+    // step. Threaded into every `auditRequiredFields` call on the live path (the
+    // step guard, both finalize gates, and the post-turn extractor) so the guard
+    // that forces the step and the gates that end onboarding can never disagree
+    // about whether the step is in scope.
+    const importOffered = importSubstrate !== null
+    const requiredFieldsOptions = { import_offered: importOffered } as const
     const finalizeImportOnboardingIfReady = async (
       user_id: string,
       st: Awaited<ReturnType<typeof onboardingStateStore.get>>,
@@ -2548,7 +2558,8 @@ export function buildOpenGraphComposer(
         st.phase === 'import_analysis_presented'
       )
         return false
-      if (auditRequiredFields(st.phase_state).next_to_collect !== null) return false
+      if (auditRequiredFields(st.phase_state, requiredFieldsOptions).next_to_collect !== null)
+        return false
       if (await probeInFlightImport()) return false
       const importResult =
         st.phase_state['import_result'] !== null &&
@@ -2574,6 +2585,7 @@ export function buildOpenGraphComposer(
             stateStore: onboardingStateStore,
             owner_slug: project_slug,
             hasInFlightImport: probeInFlightImport,
+            import_offered: importOffered,
             onComplete: async ({ user_id, state }): Promise<void> => {
               if (onboardingFinalizer === null) return
               // Pass the import analysis through to materialization when an
@@ -2770,7 +2782,7 @@ export function buildOpenGraphComposer(
     // The onboarding interview preamble (offer history import only when a
     // synthesis substrate exists to actually run it).
     const onboardingPreambleText = buildOnboardingPreamble({
-      import_offered: importSubstrate !== null,
+      import_offered: importOffered,
     })
     // The live-agent onboarding seam — active while the owner isn't onboarded.
     const onboardingSeam: LiveAgentOnboardingSeam | undefined =
@@ -2797,7 +2809,10 @@ export function buildOpenGraphComposer(
                 //  2. IMPORT-ANALYSIS grounding — only when an import ran (re-injects
                 //     the proposed/curated project set so the warm session honors
                 //     "drop X" / "keep the rest").
-                const stepGuard = buildOnboardingStepGuardFragment(st.phase_state)
+                const stepGuard = buildOnboardingStepGuardFragment(
+                  st.phase_state,
+                  requiredFieldsOptions,
+                )
                 // IMPORT-IN-FLIGHT steer (SEV1 2026-07-01) — while a history
                 // import is uploading/analyzing, tell the agent NOT to do project
                 // discovery (real projects come from the import). Authoritative:
@@ -2838,7 +2853,7 @@ export function buildOpenGraphComposer(
               }
             },
             uploadAffordance: (): { source: 'chatgpt' | 'claude' } | null =>
-              importSubstrate !== null ? { source: 'chatgpt' } : null,
+              importOffered ? { source: 'chatgpt' } : null,
             // BUG 1/2 fix (2026-06-30, Ryan live test) — deterministic
             // button-backed answer capture, run + awaited at turn-START (before
             // the step-guard grounding reads phase_state). Persists agent_name /
@@ -2875,7 +2890,10 @@ export function buildOpenGraphComposer(
                 // now (idempotent) and tell the runner to suppress its wrap-up so the
                 // single deterministic closing owns the ending. `finalizeImport-
                 // OnboardingIfReady` re-checks readiness + fires finalize.
-                if (auditRequiredFields(next.phase_state).next_to_collect === null) {
+                if (
+                  auditRequiredFields(next.phase_state, requiredFieldsOptions).next_to_collect ===
+                  null
+                ) {
                   const finalized = await finalizeImportOnboardingIfReady(user_id, next)
                   if (finalized) {
                     emitProjectsChangedIfChanged(user_id)

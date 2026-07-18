@@ -94,6 +94,18 @@ export interface ExtractedFields {
     cadence_hint?: 'weekly' | 'monthly' | 'occasional'
   }>
   agent_personality?: string
+  /**
+   * IMPORT STEP GUARD (2026-07-18) — the owner's answer to the history-import
+   * offer, normalized to the locked vocabulary. The DETERMINISTIC turn-start
+   * capture (`button-backed-answer.ts`) owns this field whenever the owner is
+   * replying to the guard's `[[OPTIONS]]` ask; this key is the same background
+   * fallback the extractor already provides for `agent_personality`, covering
+   * the case where the owner VOLUNTEERS the answer with no button context ("I
+   * don't have any history to import" before being asked). Conservative: emit
+   * only on an explicit statement, never inferred from silence — an assumed
+   * skip is the exact bug the guard exists to stop.
+   */
+  import_decision?: 'chatgpt' | 'claude' | 'neither'
   time_style?: string
   work_pattern?: string
   rituals?: ReadonlyArray<string>

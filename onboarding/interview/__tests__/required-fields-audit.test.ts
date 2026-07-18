@@ -133,6 +133,82 @@ describe('auditRequiredFields — agent_name is NOT required (DROP the agent-NAM
   })
 })
 
+describe('auditRequiredFields — import_decision (IMPORT STEP GUARD, 2026-07-18)', () => {
+  test('is NOT audited when no import is offered (legacy 4-field partition intact)', () => {
+    const audit = auditRequiredFields({ ...FULL_STATE })
+    expect(audit.filled).not.toContain('import_decision')
+    expect(audit.missing).not.toContain('import_decision')
+    expect(audit.next_to_collect).toBeNull()
+  })
+
+  test('gates finalize when offered and unanswered — even with every other field filled', () => {
+    const audit = auditRequiredFields({ ...FULL_STATE }, { import_offered: true })
+    expect(audit.missing).toContain('import_decision')
+    expect(audit.next_to_collect).toBe('import_decision')
+  })
+
+  test('sits right after the name in priority order (the preamble asks it there)', () => {
+    // Name missing too → the name still wins; import is next.
+    const noName = auditRequiredFields(
+      { ...FULL_STATE, user_first_name: null },
+      { import_offered: true },
+    )
+    expect(noName.next_to_collect).toBe('user_first_name')
+    expect(noName.missing.indexOf('import_decision')).toBe(1)
+    // The reported live bug's exact row: name only, nothing else.
+    const nameOnly = auditRequiredFields(
+      { user_first_name: 'Ryan', signup_via: 'web' },
+      { import_offered: true },
+    )
+    expect(nameOnly.next_to_collect).toBe('import_decision')
+  })
+
+  test('each locked answer settles it', () => {
+    for (const decision of ['chatgpt', 'claude', 'neither'] as const) {
+      const audit = auditRequiredFields(
+        { ...FULL_STATE, import_decision: decision },
+        { import_offered: true },
+      )
+      expect(audit.filled).toContain('import_decision')
+      expect(audit.next_to_collect).toBeNull()
+    }
+  })
+
+  test('an import that ACTUALLY ran settles it without an explicit answer', () => {
+    // Uploading an export IS the decision — never re-ask someone mid-import.
+    const withJob = auditRequiredFields(
+      { ...FULL_STATE, import_job_id: 'job-1' },
+      { import_offered: true },
+    )
+    expect(withJob.next_to_collect).toBeNull()
+    const withResult = auditRequiredFields(
+      { ...FULL_STATE, import_result: { proposed_projects: [] } },
+      { import_offered: true },
+    )
+    expect(withResult.next_to_collect).toBeNull()
+  })
+
+  test('empty / whitespace-only decision is still missing', () => {
+    expect(
+      auditRequiredFields({ ...FULL_STATE, import_decision: '  ' }, { import_offered: true })
+        .next_to_collect,
+    ).toBe('import_decision')
+  })
+
+  test('does not disturb the other fields priority order when offered', () => {
+    const audit = auditRequiredFields(
+      { user_first_name: 'Ryan', import_decision: 'neither' },
+      { import_offered: true },
+    )
+    expect(audit.next_to_collect).toBe('primary_projects')
+    expect(audit.missing).toEqual([
+      'primary_projects',
+      'non_work_interests',
+      'agent_personality',
+    ])
+  })
+})
+
 describe('auditRequiredFields — empty / malformed state', () => {
   test('empty state → all missing, priority order preserved', () => {
     const audit = auditRequiredFields({})

@@ -1,6 +1,6 @@
 ---
 title: "SPEC.md — Neutron Open (master spec)"
-last_updated: 2026-07-16 (world-class refactor window CLOSED — all tail units merged through K10; post-audit punch-list closed; deferrals tracked as GitHub issues)
+last_updated: 2026-07-18 (onboarding import decision made deterministic via the existing per-turn step guard; refactor window remains CLOSED)
 ---
 <!-- CURRENT: steady-state (world-class refactor window COMPLETE; feature development resuming) -->
 
@@ -337,6 +337,28 @@ pointer]`. Immutable — entries are never removed or rewritten; a superseded
 decision stays with a "superseded" note. This log is the single home for the
 dated record of each locked decision; the body describes the resulting
 architecture and points here.
+
+### 2026-07-18
+
+- **Onboarding's history-import decision is a DETERMINISTIC per-turn step, captured durably — the guard is the
+  gate, not the phase machine.** Fixed a live fresh-install bug: the owner replied with nothing but their first
+  name and the assistant announced "we'll skip the import for now", narrating a decision the owner never made
+  (`phase_state` held only `user_first_name` + `signup_via`). The import offer existed ONLY as prose in
+  `buildOnboardingPreamble` with ZERO capture, so the step was LLM whim. Resolved by EXTENDING the existing
+  deterministic per-turn mechanism rather than adding a gate: `import_decision` becomes a tracked required
+  field (`required-fields-audit.ts`, priority slot directly after `user_first_name`, CONDITIONAL on
+  `import_offered` so a box with no import substrate is never blocked, and auto-settled by an import that
+  actually ran), `buildOnboardingStepGuardFragment` is generalized past its single `agent_personality` check to
+  also force the `[[OPTIONS]]` ask, and the SAME turn-start `captureButtonBackedRequiredField` settles the
+  answer from a tap OR free text (`chatgpt|claude|neither`; ambiguity captures nothing so the guard re-asks).
+  This is the same mechanism built 2026-06-30 for the identical prose-only failure on the personality step. No
+  feature flags, no dual paths, no second gate; the orphaned phase-machine code (`engine.advance` /
+  `ai_substrate_offered` / `LEGAL_TRANSITIONS`) is deliberately left in place — its removal is a SEPARATE step
+  gated on this being proven live. Tests exercise the real composer + graph + app-WS + ButtonStore seam (only
+  the substrate is faked), because this bug class recurred while tests mocked past it.
+  [`onboarding/interview/required-fields-audit.ts`, `onboarding/interview/onboarding-preamble.ts`,
+  `onboarding/interview/button-backed-answer.ts`, `onboarding/interview/post-turn-extractor.ts`,
+  `open/composer.ts`, `tests/integration/onboarding-import-step-guard.open.test.ts`, `docs/AS_BUILT.md`]
 
 ### 2026-07-17
 

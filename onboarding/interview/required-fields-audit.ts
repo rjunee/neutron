@@ -22,11 +22,30 @@
  * `agent_name_chosen` phase (untouched, kept for Managed), but the shared audit
  * no longer HARD-REQUIRES a name.
  *
- * Priority order (Sam-locked):
+ * 2026-07-18 (IMPORT STEP GUARD): the history-import DECISION becomes a tracked
+ * required step. The import offer previously existed only as PROSE in
+ * `onboarding-preamble.ts` with ZERO capture, so the live agent routinely
+ * narrated a decision the owner never made ("Got it, we'll skip the import for
+ * now…" after the owner had only typed their name). Making it an audited field
+ * lets the SAME deterministic per-turn guard that made the personality step
+ * reliable (`buildOnboardingStepGuardFragment`, built 2026-06-30 for the
+ * identical prose-only failure) also force the import step.
+ *
+ * It is CONDITIONAL, not unconditional: it is audited only when the caller says
+ * an import is actually offered on this box (`options.import_offered`, which the
+ * composer derives from `importSubstrate !== null` — the same expression that
+ * decides whether the preamble renders the offer at all). The default is
+ * `false`, so every pre-existing caller — including the legacy phase-machine
+ * engine — audits exactly the 4 Sam-locked fields it always did.
+ *
+ * Priority order (Sam-locked, with the import decision slotted where the
+ * preamble already places the ask — RIGHT AFTER the name and BEFORE the work
+ * questions, so the box can analyse real history before the interview probes):
  *   1. user_first_name       (collected at signup, S3)
- *   2. primary_projects      (≥3 entries, collected via import + gap_fill)
- *   3. non_work_interests    (≥1 entry,   collected via import + gap_fill)
- *   4. agent_personality     (collected at personality_offered)
+ *   2. import_decision       (chatgpt | claude | neither; only when offered)
+ *   3. primary_projects      (≥3 entries, collected via import + gap_fill)
+ *   4. non_work_interests    (≥1 entry,   collected via import + gap_fill)
+ *   5. agent_personality     (collected at personality_offered)
  *
  * The auditor's `next_to_collect` returns the highest-priority missing
  * field. The work_interview_gap_fill handler asks for that field; on the
@@ -35,12 +54,32 @@
  * advances to `personality_offered`.
  */
 
-/** The four required fields, in Sam-locked priority order. */
+/** The required fields, in Sam-locked priority order. */
 export type RequiredField =
   | 'user_first_name'
+  | 'import_decision'
   | 'primary_projects'
   | 'non_work_interests'
   | 'agent_personality'
+
+/**
+ * The owner's answer to the history-import offer. Locked vocabulary — the guard
+ * renders exactly these three choices and the deterministic capture normalizes
+ * every tap/free-text answer into one of them.
+ */
+export type ImportDecision = 'chatgpt' | 'claude' | 'neither'
+
+/** Options that decide which required fields are IN SCOPE for this audit. */
+export interface RequiredFieldsAuditOptions {
+  /**
+   * Whether a history import is genuinely offerable on this box (composer:
+   * `importSubstrate !== null`). When false/omitted, `import_decision` is not
+   * audited at all — it appears in neither `filled` nor `missing` — so a box
+   * with no import substrate can still finalize, and every legacy caller keeps
+   * its exact pre-2026-07-18 4-field partition.
+   */
+  import_offered?: boolean
+}
 
 /**
  * Required-field-collected partition. The phase machine reads
@@ -77,6 +116,13 @@ export interface RequiredFieldsAudit {
  */
 export interface RequiredFieldsState {
   readonly user_first_name?: string | null
+  /**
+   * The history-import decision (2026-07-18). Written by the deterministic
+   * turn-start capture (`button-backed-answer.ts`) and, as a fallback for a
+   * volunteered answer with no button context, by the post-turn LLM extractor.
+   * Only audited when `options.import_offered` is true.
+   */
+  readonly import_decision?: ImportDecision | string | null
   readonly primary_projects?: ReadonlyArray<unknown>
   readonly non_work_interests?: ReadonlyArray<unknown>
   readonly agent_personality?: string | null
@@ -99,6 +145,7 @@ export interface RequiredFieldsState {
 /** § 4.4 priority order — locked. */
 const PRIORITY: ReadonlyArray<RequiredField> = [
   'user_first_name',
+  'import_decision',
   'primary_projects',
   'non_work_interests',
   'agent_personality',
@@ -121,13 +168,20 @@ const PRIORITY: ReadonlyArray<RequiredField> = [
  *   - non_work_interests entry that's an empty string or empty object
  *     → still counted toward length (callers sanitize at extract time;
  *     the audit's job is structural presence, not content validation)
+ *   - `import_decision` with `options.import_offered` unset/false → SKIPPED
+ *     entirely (neither filled nor missing)
  */
 export function auditRequiredFields(
   state: Readonly<RequiredFieldsState> | Readonly<Record<string, unknown>>,
+  options?: Readonly<RequiredFieldsAuditOptions>,
 ): RequiredFieldsAudit {
   const filled: RequiredField[] = []
   const missing: RequiredField[] = []
+  const importOffered = options?.import_offered === true
   for (const field of PRIORITY) {
+    // Out-of-scope field: not audited, so it can neither gate finalize nor show
+    // up in the partition (keeps every legacy 4-field caller byte-identical).
+    if (field === 'import_decision' && !importOffered) continue
     if (isFilled(field, state as Record<string, unknown>)) {
       filled.push(field)
     } else {
@@ -148,6 +202,18 @@ function isFilled(
   switch (field) {
     case 'user_first_name':
       return isNonEmptyString(state['user_first_name'])
+    case 'import_decision':
+      // An explicitly captured answer settles it — and so does an import that
+      // ACTUALLY happened: uploading an export IS the decision, so a run that
+      // reached the upload/analysis path must never be re-asked. `import_job_id`
+      // is (re)stamped by every upload; `import_result` is stamped by the engine
+      // once the analysis lands. Derived from state alone, so no phase-machine
+      // coupling is introduced here.
+      return (
+        isNonEmptyString(state['import_decision']) ||
+        isNonEmptyString(state['import_job_id']) ||
+        isNonNullObject(state['import_result'])
+      )
     case 'primary_projects':
       return isArrayOfMinLength(state['primary_projects'], 3)
     case 'non_work_interests':
@@ -159,6 +225,10 @@ function isFilled(
 
 function isNonEmptyString(value: unknown): boolean {
   return typeof value === 'string' && value.trim().length > 0
+}
+
+function isNonNullObject(value: unknown): boolean {
+  return typeof value === 'object' && value !== null
 }
 
 function isArrayOfMinLength(value: unknown, min: number): boolean {

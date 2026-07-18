@@ -10,6 +10,76 @@ Running log of what shipped, newest first. One entry per merged change.
 > `docs/research/AS-BUILT-docs-archive-2026-07.md`. This file is the ONE live
 > changelog going forward.
 
+## 2026-07-18 — Onboarding: the history-import decision becomes a deterministic step
+
+**Bug (live, fresh install).** The assistant asked "what should I call you?", the
+owner replied only "Ryan", and the assistant answered "Got it, we'll skip the
+import for now..." and moved on. The owner was never offered the import and never
+chose to skip it. The DB agreed: `onboarding_state.phase='work_interview_gap_fill'`,
+`phase_state_json={"user_first_name":"Ryan","signup_via":"web"}` — no import
+decision captured anywhere. The offer existed ONLY as prose in
+`onboarding/interview/onboarding-preamble.ts` (`buildOnboardingPreamble`), with
+ZERO capture, so whether the step happened at all was LLM whim and the model
+routinely narrated a decision the owner never made.
+
+**Fix — extend the EXISTING per-turn guard; no new gate.** Onboarding stays
+LLM-driven plus a deterministic per-turn guard (SPEC Decisions Log 2026-07-18
+LOCKED); the phase machine is NOT the gate and is untouched here. This reuses the
+mechanism built 2026-06-30 for the IDENTICAL prose-only failure on the personality
+step ("a fresh-install run showed ZERO option buttons") — same call site, same code
+path, one more audited step.
+
+- `required-fields-audit.ts` — `import_decision` joins the Sam-locked required
+  fields, slotted directly after `user_first_name` (where the preamble already
+  places the ask: right after the name, before the work questions). It is
+  CONDITIONAL on a new `options.import_offered`, which DEFAULTS TO FALSE, so every
+  pre-existing caller (including the legacy engine) keeps its exact 4-field
+  partition and a box with no import substrate can still finalize. An import that
+  actually ran (`import_job_id` / `import_result` on `phase_state`) settles the
+  field on its own — uploading an export IS the decision, so a mid-import owner is
+  never re-asked.
+- `onboarding-preamble.ts` — `buildOnboardingStepGuardFragment` is generalized
+  past its single `agent_personality` check: while `import_decision` is missing it
+  HARD-REQUIRES the ask as an `[[OPTIONS]]` block over the locked
+  `IMPORT_DECISION_OPTIONS` menu (ChatGPT / Claude / neither), and explicitly
+  forbids saying it is skipping the import, assuming no export exists, or reading
+  an answer to a different question as a decision. The personality section is
+  byte-identical (pinned by a test that diffs the two renderings).
+- `button-backed-answer.ts` — the SAME turn-start capture (awaited before the
+  guard reads `phase_state`, `gateway/wiring/build-live-agent-turn.ts`) now also
+  settles `import_decision`, normalizing taps AND free text into
+  `chatgpt|claude|neither`. Free text is first-class: "I have claude history",
+  "skip", "I don't have a Claude export" all land. Ambiguity (e.g. "I have both")
+  captures NOTHING so the guard simply re-asks — a false `neither` is precisely
+  the bug — while `"no, my claude one"` stays `claude` rather than being swallowed
+  by the decline matcher. The import and personality anchors are disjoint option
+  menus, so the two steps can never cross-capture.
+- `extracted-fields.ts` + `post-turn-extractor.ts` — `import_decision` gets a home
+  on the existing background extractor as the fallback for an answer VOLUNTEERED
+  with no button context (never inferred from silence). The extractor's finalize
+  gate takes `import_offered` too, so it cannot finalize out from under a step the
+  live guard is still forcing.
+- `open/composer.ts` — threads `import_offered` (`importSubstrate !== null`, the
+  same expression that already decides whether the offer renders and whether the
+  upload affordance exists) into the step guard, BOTH finalize gates, and the
+  extractor, so the guard and the gates can never disagree about scope.
+
+No feature flags, no dual code paths, no second gate. The orphaned phase-machine
+code (`engine.advance` / `ai_substrate_offered` / `LEGAL_TRANSITIONS`) is left
+alone — its removal is a separate step gated on this being proven live.
+
+**Tests exercise the LIVE path.** This bug class has recurred because tests mocked
+past the real seam, so `tests/integration/onboarding-import-step-guard.open.test.ts`
+boots the real composer + production graph + app WebSocket + ButtonStore and fakes
+ONLY the substrate (the model). The import question's `[[OPTIONS]]` block travels
+the real persistence path (stripped from `body`, durable in `options_json`) before
+returning as the `prior_agent_options` the capture keys on. Covered: a name-only
+turn carries the guard's import step and leaves `import_decision` unset; a tapped
+option and a free-text answer each persist durably and stop the re-ask; a free-text
+"skip" records `neither`; the personality step is unchanged on the same path. Unit
+coverage added for the audit's conditional field, the guard fragment, and the
+capture classifier.
+
 ## 2026-07-17 — Trident Ralph re-fire: multi-task builds build every task before merge (#362)
 
 **Bug.** Trident v2 Ralph mode built only the FIRST task then merged. The inner

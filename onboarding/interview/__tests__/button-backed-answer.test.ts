@@ -18,7 +18,10 @@
 import { describe, expect, it } from 'bun:test'
 
 import { captureButtonBackedRequiredField } from '../button-backed-answer.ts'
-import { DEFINED_PERSONALITY_CHARACTER_NAMES } from '../onboarding-preamble.ts'
+import {
+  DEFINED_PERSONALITY_CHARACTER_NAMES,
+  IMPORT_DECISION_OPTIONS,
+} from '../onboarding-preamble.ts'
 
 /** The 3 non-button required fields already filled, so the only open step is the
  *  button-driven personality. */
@@ -113,6 +116,157 @@ describe('captureButtonBackedRequiredField — no name step (DROP the agent-NAME
       prior_agent_options: ['Sage', 'Atlas', 'Nova', "I'll choose my own"],
     })
     expect(out).toBeNull()
+  })
+})
+
+describe('captureButtonBackedRequiredField — import decision (2026-07-18)', () => {
+  /** The DURABLE option values of the guard's import step, as the ButtonStore
+   *  row holds them. */
+  const importOptions = (): string[] => IMPORT_DECISION_OPTIONS.map((o) => o.label)
+  /** The live-bug row: name captured, nothing else. */
+  const NAME_ONLY = { user_first_name: 'Ryan', signup_via: 'web' } as const
+
+  it('TAP of each option settles import_decision with the locked vocabulary', () => {
+    for (const o of IMPORT_DECISION_OPTIONS) {
+      const out = captureButtonBackedRequiredField({
+        phase_state: { ...NAME_ONLY },
+        user_text: o.label,
+        prior_agent_options: importOptions(),
+      })
+      expect(out).toEqual({ field: 'import_decision', value: o.decision })
+    }
+  })
+
+  it('FREE TEXT naming a provider is captured (buttons are not the only path)', () => {
+    const cases: ReadonlyArray<[string, string]> = [
+      ['I have claude history', 'claude'],
+      ['yeah, a ChatGPT export', 'chatgpt'],
+      ['my openai one', 'chatgpt'],
+      ['anthropic please', 'claude'],
+    ]
+    for (const [text, expected] of cases) {
+      const out = captureButtonBackedRequiredField({
+        phase_state: { ...NAME_ONLY },
+        user_text: text,
+        prior_agent_options: importOptions(),
+      })
+      expect(out).toEqual({ field: 'import_decision', value: expected })
+    }
+  })
+
+  it('FREE TEXT declines are captured as "neither" — including a provider-naming decline', () => {
+    for (const text of [
+      'skip',
+      'neither',
+      'no thanks',
+      'not now',
+      "I don't have a Claude export",
+      'nothing to import',
+    ]) {
+      const out = captureButtonBackedRequiredField({
+        phase_state: { ...NAME_ONLY },
+        user_text: text,
+        prior_agent_options: importOptions(),
+      })
+      expect(out).toEqual({ field: 'import_decision', value: 'neither' })
+    }
+  })
+
+  it('a leading "no" that still names a provider is NOT read as a skip', () => {
+    // "no, my Claude one" is a correction, not a decline. A false `neither` is
+    // exactly the bug this guard exists to stop, so the decline matcher must not
+    // swallow it.
+    const out = captureButtonBackedRequiredField({
+      phase_state: { ...NAME_ONLY },
+      user_text: 'no, my claude one',
+      prior_agent_options: importOptions(),
+    })
+    expect(out).toEqual({ field: 'import_decision', value: 'claude' })
+  })
+
+  it('a CONTRASTIVE answer never records the opposite of the explicit pick', () => {
+    // "I don't have ChatGPT history, only Claude" carries a decline phrase AND a
+    // selection. Reading the decline would durably record `neither` and stop the
+    // guard asking, silently denying the owner the import they just asked for.
+    // Ambiguous → capture nothing → the guard re-asks with buttons.
+    for (const text of [
+      "I don't have ChatGPT history, only Claude",
+      'no chatgpt export, but I do have claude',
+    ]) {
+      const out = captureButtonBackedRequiredField({
+        phase_state: { ...NAME_ONLY },
+        user_text: text,
+        prior_agent_options: importOptions(),
+      })
+      expect(out).toBeNull()
+    }
+  })
+
+  it('a negation attached to the ONLY named provider is a decline', () => {
+    for (const text of ['no chatgpt for me', 'not the claude one', 'no gpt export here']) {
+      const out = captureButtonBackedRequiredField({
+        phase_state: { ...NAME_ONLY },
+        user_text: text,
+        prior_agent_options: importOptions(),
+      })
+      expect(out).toEqual({ field: 'import_decision', value: 'neither' })
+    }
+  })
+
+  it('an AMBIGUOUS answer captures nothing (the guard re-asks rather than inventing one)', () => {
+    for (const text of ['I have both', 'hmm', 'what do you mean?']) {
+      const out = captureButtonBackedRequiredField({
+        phase_state: { ...NAME_ONLY },
+        user_text: text,
+        prior_agent_options: importOptions(),
+      })
+      expect(out).toBeNull()
+    }
+  })
+
+  it('never fires without the import step actually having been presented', () => {
+    const out = captureButtonBackedRequiredField({
+      phase_state: { ...NAME_ONLY },
+      user_text: 'skip',
+      prior_agent_options: ['Tell me more', 'Later'],
+    })
+    expect(out).toBeNull()
+  })
+
+  it('stops capturing once settled (explicitly, or by an import that actually ran)', () => {
+    for (const settled of [
+      { import_decision: 'neither' },
+      { import_job_id: 'job-1' },
+      { import_result: { proposed_projects: [] } },
+    ]) {
+      const out = captureButtonBackedRequiredField({
+        phase_state: { ...NAME_ONLY, ...settled },
+        user_text: 'Import my ChatGPT history',
+        prior_agent_options: importOptions(),
+      })
+      expect(out).toBeNull()
+    }
+  })
+
+  it('the import step and the personality step never cross-capture', () => {
+    // An import answer can never become a personality...
+    expect(
+      captureButtonBackedRequiredField({
+        phase_state: { ...BASE },
+        user_text: 'Import my Claude history',
+        prior_agent_options: importOptions(),
+      }),
+    ).toEqual({ field: 'import_decision', value: 'claude' })
+    // ...and an archetype tap is still a personality even while the import
+    // decision is open (the two menus are disjoint anchors).
+    const archetype = DEFINED_PERSONALITY_CHARACTER_NAMES[0]!
+    expect(
+      captureButtonBackedRequiredField({
+        phase_state: { ...BASE },
+        user_text: `${archetype} — some vibe`,
+        prior_agent_options: personalityOptions(),
+      }),
+    ).toEqual({ field: 'agent_personality', value: `${archetype} — some vibe` })
   })
 })
 
