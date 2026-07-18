@@ -20,7 +20,11 @@
  */
 
 import { STATIC_PERSONALITY_CHARACTER_FALLBACK } from './personality-characters.ts'
-import { auditRequiredFields } from './required-fields-audit.ts'
+import {
+  auditRequiredFields,
+  type ImportDecision,
+  type RequiredFieldsAuditOptions,
+} from './required-fields-audit.ts'
 
 export interface OnboardingPreambleInput {
   /** Whether an AI history-import (ChatGPT/Claude) is offered on this box. */
@@ -53,6 +57,30 @@ const DEFINED_PERSONALITY_CHARACTERS: ReadonlyArray<{ name: string; why: string 
  */
 export const DEFINED_PERSONALITY_CHARACTER_NAMES: ReadonlyArray<string> =
   DEFINED_PERSONALITY_CHARACTERS.map((c) => c.name)
+
+/**
+ * The DEFINED history-import choice menu (2026-07-18 import step guard). The
+ * import offer used to live ONLY as prose in `buildOnboardingPreamble` with no
+ * capture at all, so the live agent regularly narrated a decision the owner
+ * never made ("Got it, we'll skip the import for now…" right after the owner
+ * typed nothing but their first name). These three labels are what the step
+ * guard forces the agent to render as an `[[OPTIONS]]` block, and they are the
+ * anchor the deterministic capture (`button-backed-answer.ts`) matches against
+ * to recognise "the prior agent message WAS the import step" — exactly the
+ * lock-step contract `DEFINED_PERSONALITY_CHARACTER_NAMES` provides for the
+ * personality step, so the matcher can never drift from what is rendered.
+ *
+ * Labels avoid em dashes on purpose (the preamble forbids them in owner-facing
+ * copy, and the option text is sent back VERBATIM when tapped).
+ */
+export const IMPORT_DECISION_OPTIONS: ReadonlyArray<{
+  decision: ImportDecision
+  label: string
+}> = [
+  { decision: 'chatgpt', label: 'Import my ChatGPT history' },
+  { decision: 'claude', label: 'Import my Claude history' },
+  { decision: 'neither', label: "Neither, skip the import" },
+]
 
 export function buildOnboardingPreamble(input: OnboardingPreambleInput): string {
   const lines: string[] = []
@@ -186,7 +214,22 @@ export function buildOnboardingPreamble(input: OnboardingPreambleInput): string 
  * 2026-07-01 (DROP the agent-NAME step): the former second half of this guard —
  * a `needsName` branch that forced a name-suggestion `[[OPTIONS]]` block once
  * personality was set — is gone. Neutron Open never asks the owner to name the
- * orchestrator, so personality is the only button-driven required step.
+ * orchestrator.
+ *
+ * 2026-07-18 (IMPORT STEP GUARD): the guard is generalized past its single
+ * `agent_personality` check and now ALSO forces the history-import decision,
+ * because that step had the EXACT failure the 06-30 fix was built for. It lived
+ * only as prose in `buildOnboardingPreamble` with no capture, so on a fresh
+ * install the owner replied with nothing but their first name and the agent
+ * announced "Got it, we'll skip the import for now…" — narrating a decision the
+ * owner never made, with `phase_state` holding no import answer at all. Same
+ * mechanism, same call site, one more audited step: while `import_decision` is
+ * missing the fragment HARD-REQUIRES the `[[OPTIONS]]` ask
+ * (`IMPORT_DECISION_OPTIONS`) and forbids assuming a skip. The import step is
+ * only audited when the caller passes `import_offered: true` (composer:
+ * `importSubstrate !== null`), so a box that cannot run an import is never
+ * blocked on a question it must not ask. Returns null once every button-driven
+ * step is settled.
  *
  * Because it re-injects every turn, the agent cannot drift past the personality
  * step without rendering the buttons — making the step reliable rather than
@@ -196,28 +239,54 @@ export function buildOnboardingPreamble(input: OnboardingPreambleInput): string 
  */
 export function buildOnboardingStepGuardFragment(
   phase_state: Readonly<Record<string, unknown>>,
+  options?: Readonly<RequiredFieldsAuditOptions>,
 ): string | null {
-  const audit = auditRequiredFields(phase_state)
-  const needsPersonality = new Set(audit.missing).has('agent_personality')
-  if (!needsPersonality) return null
+  const audit = auditRequiredFields(phase_state, options)
+  const missing = new Set(audit.missing)
+  const needsImportDecision = missing.has('import_decision')
+  const needsPersonality = missing.has('agent_personality')
+  if (!needsImportDecision && !needsPersonality) return null
   const lines: string[] = []
   lines.push('<onboarding_required_steps>')
   lines.push(
-    'REQUIRED-STEP GUARD: the personality step is button-driven and MUST be',
-    'presented as a `[[OPTIONS]]` block (see "Offering choices") — never settled by',
-    'free text alone and never silently skipped. You may not wrap up / finalize',
-    'onboarding until it is settled.',
+    'REQUIRED-STEP GUARD: the step(s) below are button-driven and MUST be',
+    'presented as a `[[OPTIONS]]` block (see "Offering choices") — never answered on',
+    'the owner\'s behalf and never silently skipped. You may not wrap up / finalize',
+    'onboarding until they are settled.',
   )
-  lines.push('')
-  lines.push(
-    'STILL OPEN - PERSONALITY: you have NOT yet settled the personality/voice the owner',
-    'wants from you. The next time it is natural in the conversation (and BEFORE you',
-    'wrap up), you MUST ask which voice they want and present THESE named archetypes as',
-    'a tappable [[OPTIONS]] block (plus a "Something else (I\'ll describe it)" option).',
-    'Do not invent a different list, and do not skip the buttons:',
-  )
-  for (const c of DEFINED_PERSONALITY_CHARACTERS) {
-    lines.push(`  - ${c.name}`)
+  if (needsImportDecision) {
+    lines.push('')
+    lines.push(
+      'STILL OPEN - HISTORY IMPORT: the owner has NOT told you whether they want to bring',
+      'over their existing ChatGPT or Claude history. They have NOT declined it, so you',
+      'MUST NOT say you are skipping it, MUST NOT assume they have no export, and MUST NOT',
+      'treat silence (or an answer to a different question, like their name) as a decision.',
+      'As soon as you have their first name, and BEFORE the work questions, ask this and',
+      'present EXACTLY these tappable options (do not reword them, do not add others):',
+    )
+    for (const o of IMPORT_DECISION_OPTIONS) {
+      lines.push(`  - ${o.label}`)
+    }
+    lines.push(
+      'Tell them they can export from ChatGPT/Claude settings and then drag-and-drop or',
+      'attach the .zip right here. They may also simply type their answer instead of',
+      'tapping ("I have Claude history", "skip") - that counts, and either way you only',
+      'ask this once.',
+    )
+  }
+  if (needsPersonality) {
+    lines.push('')
+    lines.push(
+      'STILL OPEN - PERSONALITY: you have NOT yet settled the personality/voice the owner',
+      'wants from you. It is never settled by free text alone. The next time it is natural',
+      'in the conversation (and BEFORE you wrap up), you MUST ask which voice they want',
+      'and present THESE named archetypes as',
+      'a tappable [[OPTIONS]] block (plus a "Something else (I\'ll describe it)" option).',
+      'Do not invent a different list, and do not skip the buttons:',
+    )
+    for (const c of DEFINED_PERSONALITY_CHARACTERS) {
+      lines.push(`  - ${c.name}`)
+    }
   }
   lines.push('</onboarding_required_steps>')
   return lines.join('\n')

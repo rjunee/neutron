@@ -21,6 +21,7 @@ import {
   buildImportAnalysisContextFragment,
   buildOnboardingPreamble,
   buildOnboardingStepGuardFragment,
+  IMPORT_DECISION_OPTIONS,
 } from '../onboarding-preamble.ts'
 
 /** A phase_state with the 3 non-button fields filled, so the audit's only
@@ -70,6 +71,84 @@ describe('buildOnboardingStepGuardFragment — deterministic personality guard (
       agent_name: 'Atlas',
     })
     expect(withStaleName).toBeNull()
+  })
+})
+
+describe('buildOnboardingStepGuardFragment — deterministic IMPORT guard (2026-07-18)', () => {
+  /** The EXACT live row from the 2026-07-18 fresh install: the owner replied with
+   *  nothing but their name, and the agent announced "we'll skip the import for
+   *  now" — a decision the owner never made, with no capture anywhere. */
+  const NAME_ONLY = { user_first_name: 'Ryan', signup_via: 'web' } as const
+
+  it('forces the import [[OPTIONS]] step when the decision is missing and an import is offered', () => {
+    const out = buildOnboardingStepGuardFragment(NAME_ONLY, { import_offered: true })
+    expect(out).not.toBeNull()
+    expect(out as string).toContain('STILL OPEN - HISTORY IMPORT')
+    expect(out as string).toContain('[[OPTIONS]]')
+    // The three locked choices, verbatim (the capture anchors on these labels).
+    for (const o of IMPORT_DECISION_OPTIONS) {
+      expect(out as string).toContain(o.label)
+    }
+    // The hard contract: an unanswered import may NOT be narrated as a skip.
+    expect(out as string).toContain('MUST NOT say you are skipping it')
+    expect(out as string).toContain('You may not wrap up / finalize')
+  })
+
+  it('is silent about the import when no import is offered on this box', () => {
+    const out = buildOnboardingStepGuardFragment(NAME_ONLY)
+    // Personality is still open, so the guard is live — but it must not demand a
+    // decision about an import this box cannot run.
+    expect(out).not.toBeNull()
+    expect(out as string).not.toContain('HISTORY IMPORT')
+  })
+
+  it('stops re-asking once the decision is captured', () => {
+    for (const decision of ['chatgpt', 'claude', 'neither']) {
+      const out = buildOnboardingStepGuardFragment(
+        { ...NAME_ONLY, import_decision: decision },
+        { import_offered: true },
+      )
+      expect(out as string).not.toContain('HISTORY IMPORT')
+    }
+  })
+
+  it('returns null only once BOTH button-driven steps are settled', () => {
+    const stillImport = buildOnboardingStepGuardFragment(
+      { ...NON_BUTTON_FIELDS_FILLED, agent_personality: 'warm and direct' },
+      { import_offered: true },
+    )
+    expect(stillImport).not.toBeNull()
+    expect(stillImport as string).toContain('HISTORY IMPORT')
+
+    const settled = buildOnboardingStepGuardFragment(
+      {
+        ...NON_BUTTON_FIELDS_FILLED,
+        agent_personality: 'warm and direct',
+        import_decision: 'neither',
+      },
+      { import_offered: true },
+    )
+    expect(settled).toBeNull()
+  })
+
+  it('NON-REGRESSION: the personality step is unchanged by the import step', () => {
+    // Byte-identical personality section whether or not the import step is also
+    // being forced — the 06-30 guarantee must survive the generalization.
+    const legacy = buildOnboardingStepGuardFragment({ ...NON_BUTTON_FIELDS_FILLED })
+    const withImport = buildOnboardingStepGuardFragment(
+      { ...NON_BUTTON_FIELDS_FILLED },
+      { import_offered: true },
+    )
+    const personalitySection = (frag: string): string =>
+      frag.slice(frag.indexOf('STILL OPEN - PERSONALITY'))
+    expect(personalitySection(legacy as string)).toBe(personalitySection(withImport as string))
+    // And the pre-existing hard-require copy is intact in both.
+    for (const frag of [legacy, withImport]) {
+      expect(frag as string).toContain('PERSONALITY')
+      expect(frag as string).toContain('Sherlock')
+      expect(frag as string).toContain('never settled by')
+      expect(frag as string).toContain('`[[OPTIONS]]` block')
+    }
   })
 })
 

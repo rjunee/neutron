@@ -22,8 +22,15 @@
  * declines (e.g. a personality described after tapping "Something else").
  *
  * 2026-07-01 (DROP the agent-NAME step): the former `agent_name` capture branch
- * is gone — Neutron Open never asks the owner to name the orchestrator, so
- * personality is the only button-backed required field this settles.
+ * is gone — Neutron Open never asks the owner to name the orchestrator.
+ *
+ * 2026-07-18 (IMPORT STEP GUARD): `import_decision` joins `agent_personality` as
+ * a button-backed field this settles. The history-import offer had NO capture at
+ * all — it was prose in the preamble — so the live agent narrated skips the owner
+ * never chose. Reusing THIS turn-start path (rather than adding a second capture
+ * mechanism) means the answer lands in `phase_state` before the step guard reads
+ * it, so the guard stops re-asking on the very next turn, exactly as it does for
+ * personality.
  *
  * It is deliberately conservative: it only fires when the PRIOR agent message
  * carried a persisted option set (a genuine choice step), and it anchors the
@@ -37,7 +44,11 @@
  * never fire in production.
  */
 
-import { DEFINED_PERSONALITY_CHARACTER_NAMES } from './onboarding-preamble.ts'
+import {
+  DEFINED_PERSONALITY_CHARACTER_NAMES,
+  IMPORT_DECISION_OPTIONS,
+} from './onboarding-preamble.ts'
+import type { ImportDecision } from './required-fields-audit.ts'
 
 /**
  * Escape-hatch option lines that must NEVER settle a field — the owner is
@@ -73,8 +84,73 @@ export interface CaptureButtonBackedInput {
 }
 
 export interface CapturedButtonBackedField {
-  field: 'agent_personality'
+  field: 'agent_personality' | 'import_decision'
   value: string
+}
+
+/** The import-step option labels, lowercased once for anchor matching. */
+const IMPORT_OPTION_LABELS_LC: ReadonlyArray<string> = IMPORT_DECISION_OPTIONS.map((o) =>
+  o.label.toLowerCase(),
+)
+
+/**
+ * A DECLINE of the import. Checked BEFORE the provider matchers on purpose: "I
+ * don't have a Claude export" names a provider but is a decline, and reading it
+ * as `claude` would strand the owner on an upload they cannot do.
+ *
+ * The bare leading "no" is deliberately narrowed to answers that name NO
+ * provider, so "no, my Claude one" stays a `claude` answer rather than being
+ * swallowed as a skip. Getting this direction wrong is the expensive one — a
+ * false `neither` is precisely the "we'll skip the import for now" bug.
+ */
+const IMPORT_DECLINE_RE =
+  /\b(skip|neither|none|nope|nah|no thanks|not now|not right now|maybe later|later|pass|don'?t have|do not have|haven'?t got|have no|no export|no history|nothing to import)\b/i
+const IMPORT_BARE_NO_RE = /^no\b(?!.*\b(chatgpt|open ?ai|gpt|claude|anthropic)\b)/i
+
+const MENTIONS_CHATGPT_RE = /\b(chatgpt|open ?ai|gpt)\b/i
+const MENTIONS_CLAUDE_RE = /\b(claude|anthropic)\b/i
+
+/**
+ * Normalize an import answer (a tapped option label OR free text) into the
+ * locked `chatgpt | claude | neither` vocabulary. Returns null when the answer
+ * is genuinely ambiguous — including "I have both" — so the guard simply
+ * re-asks with buttons rather than durably recording a decision the owner did
+ * not make. A conservative decline-to-capture is always recoverable; a wrong
+ * capture is not.
+ */
+export function classifyImportDecision(raw: string): ImportDecision | null {
+  const text = raw.trim()
+  if (text.length === 0) return null
+  // An exact tap of a presented option is unambiguous — take it verbatim.
+  const tapped = IMPORT_DECISION_OPTIONS.find(
+    (o) => o.label.toLowerCase() === text.toLowerCase(),
+  )
+  if (tapped !== undefined) return tapped.decision
+  if (IMPORT_DECLINE_RE.test(text) || IMPORT_BARE_NO_RE.test(text)) return 'neither'
+  const chatgpt = MENTIONS_CHATGPT_RE.test(text)
+  const claude = MENTIONS_CLAUDE_RE.test(text)
+  if (chatgpt && claude) return null
+  if (chatgpt) return 'chatgpt'
+  if (claude) return 'claude'
+  return null
+}
+
+/** Did the prior agent message present the history-import choice step? */
+function presentedImportDecision(option_body_lc: string): boolean {
+  return IMPORT_OPTION_LABELS_LC.some((label) => option_body_lc.includes(label))
+}
+
+/**
+ * The import decision is already settled when it was captured, or when an
+ * import ACTUALLY ran (uploading an export IS the decision). Mirrors
+ * `required-fields-audit.ts`'s `isFilled('import_decision')` so the capture and
+ * the guard can never disagree about whether the step is open.
+ */
+function importDecisionSettled(phase_state: Readonly<Record<string, unknown>>): boolean {
+  if (isNonEmptyString(phase_state['import_decision'])) return true
+  if (isNonEmptyString(phase_state['import_job_id'])) return true
+  const result = phase_state['import_result']
+  return typeof result === 'object' && result !== null
 }
 
 function isNonEmptyString(value: unknown): value is string {
@@ -105,10 +181,6 @@ export function captureButtonBackedRequiredField(
 ): CapturedButtonBackedField | null {
   const value = input.user_text.trim()
   if (value.length === 0) return null
-  if (isEscapeChoice(value)) return null
-
-  // Personality already settled → nothing to capture.
-  if (isNonEmptyString(input.phase_state['agent_personality'])) return null
 
   // Only a genuine choice step (the prior agent question carried a persisted
   // option set) is eligible — this is what keeps arbitrary conversational turns
@@ -124,6 +196,28 @@ export function captureButtonBackedRequiredField(
   const presentedPersonality = DEFINED_PERSONALITY_CHARACTER_NAMES.some((n) =>
     optionBody.includes(n.toLowerCase()),
   )
+
+  // ── IMPORT DECISION (2026-07-18). Checked before personality and mutually
+  // exclusive with it: the two steps are anchored on disjoint option menus, so
+  // an import yes/no can never settle a personality (the guard the 06-30 fix
+  // already relied on) and vice versa. Free text counts here — the owner may
+  // type "I have claude history" or "skip" instead of tapping — but only in
+  // reply to the step that actually asked, and only when it normalizes to the
+  // locked vocabulary. An ambiguous answer captures NOTHING, leaving the guard
+  // to re-ask rather than inventing a decision (the whole point of this fix).
+  if (!presentedPersonality && !importDecisionSettled(input.phase_state)) {
+    if (presentedImportDecision(optionBody)) {
+      const decision = classifyImportDecision(value)
+      if (decision !== null) return { field: 'import_decision', value: decision }
+    }
+    return null
+  }
+
+  if (isEscapeChoice(value)) return null
+
+  // Personality already settled → nothing to capture.
+  if (isNonEmptyString(input.phase_state['agent_personality'])) return null
+
   if (!presentedPersonality) return null
 
   // Was the answer an exact tap of a presented option? (Clean, unambiguous.)
