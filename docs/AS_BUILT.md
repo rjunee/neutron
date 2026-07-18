@@ -10,6 +10,53 @@ Running log of what shipped, newest first. One entry per merged change.
 > `docs/research/AS-BUILT-docs-archive-2026-07.md`. This file is the ONE live
 > changelog going forward.
 
+## 2026-07-18 — Onboarding: the welcome opener is guarded DURABLY, not per-process
+
+**Bug (live, fresh install, screenshot-confirmed).** The onboarding opener
+("…what should I call you?") was emitted TWICE into the owner's General topic.
+
+**Root cause.** `on_session_open` (`open/wiring/app-ws.ts`) gated the auto-start
+welcome seed on `seededOnboardingTopics`, an in-memory per-PROCESS `Set`. The
+opener it guards is DURABLE: the live runner persists the composed reply as a
+`button_prompts` row (`gateway/wiring/build-live-agent-turn.ts:1096`) BEFORE it
+sends it (:1126). So the guard's lifetime was strictly shorter than the thing it
+guarded — any new process (restart / redeploy / crash / the service bounce a
+fresh install performs) began with an empty `Set`, re-seeded on top of the
+persisted opener, and the client hydrated BOTH.
+
+Two candidate causes were REFUTED by reading the code rather than assumed: there
+is only ONE seed call site (`open/wiring/app-ws.ts:978`; the line-356 reference
+was the `Set` declaration, not a second emitter), and the `outcome === 'failed'`
+self-heal `delete(...)` could not double-emit — for a `seed_turn` both `'failed'`
+returns (:1055, :1069) happen strictly BEFORE the reply is composed, persisted,
+or sent, so a failed seed leaves no row and delivers no message. Concurrent
+same-process connects were already safe (the `Set.add` was synchronous).
+
+**Fix — replace the weak guard with the durable one already used next door.**
+`hasBeenGreeted` reads `landing.buttonStore.latestTurnByTopic` for the General
+topic — the SAME "does this topic already have a turn?" check
+`ensureProjectOpeningOnEntry` uses for per-project openings. Because the opener
+persists before it sends and a failed seed persists nothing, that one check is
+simultaneously the de-dupe AND the self-heal, so the compensating
+`seededOnboardingTopics.delete(...)` calls are DELETED with no replacement. The
+in-memory structure is demoted to `seedInFlightByTopic`, a pure single-flight
+latch: the durable read is itself an `await`, so the promise is registered
+synchronously (nothing awaited between the `get` miss and the `set`) and a second
+racing connect awaits the first instead of dispatching its own turn. Fail-CLOSED
+on a store error — a missing greeting is recoverable on the next connect, a
+duplicate one is this bug. No flag, no dual path.
+
+**Test.** `tests/integration/onboarding-welcome-seed-once.open.test.ts` boots a
+real composer + production graph + app WebSocket (only the substrate is faked)
+and counts EMITTED openers — durable rows, live frames, and dispatched turns —
+across a single connect, two rapid concurrent connects, and a reconnect after a
+genuine process teardown against the same persisted store. Verified to fail on
+the pre-fix code (2 openers after restart) and pass on the fix (1). A test that
+asserted `Set` bookkeeping would have passed against the bug.
+
+[`open/wiring/app-ws.ts`, `tests/integration/onboarding-welcome-seed-once.open.test.ts`,
+`docs/SYSTEM-OVERVIEW.md`]
+
 ## 2026-07-18 — Onboarding: the history-import decision becomes a deterministic step
 
 **Bug (live, fresh install).** The assistant asked "what should I call you?", the

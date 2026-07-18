@@ -1,6 +1,6 @@
 ---
 title: "SPEC.md — Neutron Open (master spec)"
-last_updated: 2026-07-18 (onboarding import decision made deterministic via the existing per-turn step guard; refactor window remains CLOSED)
+last_updated: 2026-07-18 (welcome-seed guard made durable — a one-shot emit is gated on persisted state, never on per-process memory; refactor window remains CLOSED)
 ---
 <!-- CURRENT: steady-state (world-class refactor window COMPLETE; feature development resuming) -->
 
@@ -339,6 +339,21 @@ dated record of each locked decision; the body describes the resulting
 architecture and points here.
 
 ### 2026-07-18
+
+- **A one-shot emit is gated on DURABLE state, never on per-process memory.** Fixed a live fresh-install bug:
+  the onboarding welcome opener was emitted TWICE into the owner's General topic. The seed was guarded by an
+  in-memory per-process `Set` (`seededOnboardingTopics`) while the opener it guards is persisted to
+  `button_prompts` BEFORE it is sent — a guard whose lifetime is shorter than the effect it guards, so every
+  restart re-emitted on top of the durable copy. The rule this locks in, beyond the one call site: if an effect
+  is durable, its guard must read the SAME durable state. `on_session_open` now asks
+  `buttonStore.latestTurnByTopic` ("does this topic already have a turn?" — the identical check
+  `ensureProjectOpeningOnEntry` already used for per-project openings), and in-memory state is demoted to a
+  pure single-flight latch for connects that race before the first row exists. Because a failed seed persists
+  nothing, that one check is BOTH the de-dupe and the failure self-heal, so the compensating
+  `delete(...)` bookkeeping was deleted rather than reworked. No flag, no dual path. The live-path test
+  asserts EMITTED openers across a real process restart, not guard bookkeeping — a bookkeeping test passes
+  against this bug. [`open/wiring/app-ws.ts`,
+  `tests/integration/onboarding-welcome-seed-once.open.test.ts`, `docs/SYSTEM-OVERVIEW.md`, `docs/AS_BUILT.md`]
 
 - **Onboarding's history-import decision is a DETERMINISTIC per-turn step, captured durably — the guard is the
   gate, not the phase machine.** Fixed a live fresh-install bug: the owner replied with nothing but their first

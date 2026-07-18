@@ -1126,6 +1126,24 @@ rather than waiting on the global diff-gate. Subscriber:
 >   the welcome instead of showing a stuck error. A failed REAL user turn still
 >   gets the anti-silence bubble.
 
+> **The welcome-seed guard is DURABLE, not per-process (2026-07-18, Ryan live
+> fresh install).** SUPERSEDES the `seededOnboardingTopics` mechanism described
+> in the block above. The opener was emitted TWICE into the owner's General topic
+> on a fresh install. The seed was gated on an in-memory per-PROCESS `Set`, but
+> the opener itself is DURABLE — the live runner persists it as a `button_prompts`
+> row (`gateway/wiring/build-live-agent-turn.ts`) BEFORE it sends. So every new
+> process (restart, redeploy, crash, the service bounce a fresh install performs)
+> started with an empty `Set`, re-seeded on top of the already-persisted opener,
+> and the client hydrated BOTH. `on_session_open` now asks the durable store —
+> `buttonStore.latestTurnByTopic` on the General topic, the SAME "does this topic
+> already have a turn?" check `ensureProjectOpeningOnEntry` already uses for
+> per-project openings — and the in-memory map is demoted to a pure SINGLE-FLIGHT
+> latch for connects that race before the first row exists (two tabs). The
+> failure self-heal above needs no explicit bookkeeping anymore and its
+> compensating `delete(...)` is GONE: a failed seed returns before persisting
+> anything, so the durable gate re-fires it on the next connect by construction.
+> One guard, one code path, no flag.
+
 > **Turn timeout is ACTIVITY-BASED, not a fixed wall clock; freezes auto-retry +
 > get a Retry affordance (2026-07-01, Ryan live-test).** The `COLD_TURN_TIMEOUT_MS`
 > (600s) / `DEFAULT_TURN_TIMEOUT_MS` (180s) fixed budgets above were themselves the
