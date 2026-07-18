@@ -94,6 +94,13 @@ replies in free text, and onboarding REACHES `phase='completed'` with
 (the E2E times out waiting for an ask that never comes — the deadlock reproduced
 literally).
 
+**Full suite:** `main` baseline 10665 pass / 9 skip / 104 fail / 2 errors;
+this change 10690 pass / 9 skip / 92 fail / 2 errors (+25 pass, −12 fail, +13
+tests). Not a clean suite: 56 of the 92 are the known-flaky local `happy-dom`
+React-client tests, which is what the −12 swing reflects — no React code was
+touched. No failure is attributable to this change (the branch failure list
+contains none of the added or touched onboarding suites).
+
 ## 2026-07-18 — Onboarding: the welcome opener is guarded DURABLY, not per-process
 
 **Bug (live, fresh install, screenshot-confirmed).** The onboarding opener
