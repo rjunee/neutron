@@ -28,6 +28,7 @@ import { join } from 'node:path'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { SqliteOnboardingStateStore } from '@neutronai/onboarding/interview/sqlite-state-store.ts'
+import { slugifyProjectId } from '@neutronai/onboarding/wow-moment/project-identity.ts'
 import { buildScaffoldMaterializer, ensureProjectRow } from '../project-create.ts'
 import {
   buildOnboardingFinalize,
@@ -47,6 +48,7 @@ interface Emitted {
 }
 
 interface Harness {
+  db: ProjectDb
   stateStore: SqliteOnboardingStateStore
   emitted: Emitted[]
   deps: OnboardingFinalizeDeps
@@ -96,7 +98,7 @@ function makeHarness(opts: { personaFails?: boolean } = {}): Harness {
     log: (): void => {},
     personaComposer: fakePersonaComposer(opts.personaFails === true),
   }
-  return { stateStore, emitted, deps }
+  return { db, stateStore, emitted, deps }
 }
 
 async function seed(h: Harness, projects: string[]): Promise<Awaited<ReturnType<SqliteOnboardingStateStore['upsert']>>> {
@@ -205,6 +207,31 @@ test('ZERO-project finalize emits NO starting message and a closing that promise
   expect(body.length).toBeGreaterThan(0)
   expect(body.toLowerCase()).not.toContain('left rail')
   expect(body.toLowerCase()).not.toContain("i've created your projects")
+})
+
+test('every project already SOFT-DELETED: no starting message, so the promise never contradicts the close', async () => {
+  const h = makeHarness()
+  // The owner previously deleted both projects. `ensureProjectRow` reports these
+  // `skipped` and never resurrects them, so nothing will land and the starting
+  // message must not promise otherwise (Codex P2).
+  for (const name of ['Topline Revenue', 'Garden Rebuild']) {
+    const iso = new Date(NOW).toISOString()
+    h.db.run(
+      `INSERT INTO projects (id, name, created_at, updated_at, deleted_at) VALUES (?, ?, ?, ?, ?)`,
+      [slugifyProjectId(name), name, iso, iso, iso],
+    )
+  }
+  const seeded = await seed(h, ['Topline Revenue', 'Garden Rebuild'])
+
+  await buildOnboardingFinalize(h.deps).finalize({
+    user_id: USER_ID,
+    topic_id: TOPIC_ID,
+    state: seeded,
+  })
+
+  expect(startingMessages(h.emitted)).toHaveLength(0)
+  expect(openingMessages(h.emitted)).toHaveLength(0)
+  expect(closingMessage(h.emitted)?.body.toLowerCase()).not.toContain('left rail')
 })
 
 test('persona_files_committed is PERSISTED true by the terminal write after a successful finalize', async () => {

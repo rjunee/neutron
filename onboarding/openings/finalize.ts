@@ -409,7 +409,15 @@ export function buildOnboardingFinalize(deps: OnboardingFinalizeDeps): Onboardin
       // finalize. Its own stable `dedupe_key` means a re-entered finalize (a
       // deferred CAS retry, boot recovery) never shows the owner this twice — the
       // composer keys the durable row on it and suppresses the live re-send.
-      const pendingProjectCount = resolveProjects(stableState, import_result).length
+      //
+      // The count EXCLUDES slugs held by a soft-deleted `projects` row: those are
+      // projects the owner already deleted, `ensureProjectRow` reports them
+      // `skipped` and never resurrects them, so counting them would promise
+      // projects that will never land and then contradict itself with the
+      // no-projects closing (Codex P2). The residual dishonest window — EVERY
+      // `ensureProjectRow` call THROWING after this point — is a DB failure, where
+      // a slightly-wrong message is not the owner's problem.
+      const pendingProjectCount = countMaterializableProjects(deps, stableState, import_result)
       if (deps.emitChatMessage !== undefined && pendingProjectCount > 0) {
         try {
           await deps.emitChatMessage({
@@ -541,6 +549,45 @@ export function buildOnboardingFinalize(deps: OnboardingFinalizeDeps): Onboardin
       return tracked
     },
   }
+}
+
+/**
+ * How many of the resolved projects can actually LAND, for the STARTING message's
+ * "do not promise projects that aren't coming" gate.
+ *
+ * Applies the same two reductions `materializeProjects` does before it ever calls
+ * `ensureProjectRow`: dedupe by slug (two names can normalize to one project_id),
+ * and drop any slug already held by a SOFT-DELETED `projects` row (the owner
+ * deleted that project; `ensureProjectRow` reports it `skipped` and never
+ * resurrects it — `gateway/wiring/project-create.ts`, the `deleted_at IS NOT NULL`
+ * probe). Read-only and best-effort: a query failure counts the project as
+ * materializable, which degrades to the pre-existing behaviour rather than
+ * silently suppressing the owner's progress message.
+ */
+function countMaterializableProjects(
+  deps: OnboardingFinalizeDeps,
+  state: OnboardingState,
+  import_result: ImportResult | null,
+): number {
+  const seen = new Set<string>()
+  let count = 0
+  for (const project of resolveProjects(state, import_result)) {
+    const slug = slugifyProjectId(project.name)
+    if (seen.has(slug)) continue
+    seen.add(slug)
+    try {
+      const deleted = deps.db.get<{ id: string }, [string]>(
+        `SELECT id FROM projects WHERE id = ? AND deleted_at IS NOT NULL`,
+        [slug],
+      )
+      if (deleted !== null && deleted !== undefined) continue
+    } catch {
+      // Fall through — count it; the message is best-effort, the probe is an
+      // honesty refinement, not a gate we should fail closed on.
+    }
+    count += 1
+  }
+  return count
 }
 
 /**
