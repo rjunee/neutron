@@ -16,8 +16,18 @@
  * 2026-07-01 (Neutron Open — DROP the agent-NAME step): `agent_name` is no
  * longer a required field. Neutron Open is an agent ORCHESTRATOR, not a
  * personal agent, so onboarding never asks the owner to name it — only its
- * personality (→ SOUL.md). The audit therefore drops to 4 required fields and
- * finalize (`next_to_collect === null`) triggers once personality is settled.
+ * personality (→ SOUL.md). The audit therefore drops to 4 required fields.
+ *
+ * NB (corrected 2026-07-18): this comment used to say finalize
+ * (`next_to_collect === null`) "triggers once personality is settled". That was
+ * FALSE and it masked a live deadlock. Personality sits at priority 5 — LAST —
+ * so it is the last field ASKED, but `next_to_collect` is the highest-priority
+ * MISSING field, and `non_work_interests` (priority 4) is audited BEFORE it. A
+ * run can therefore have personality settled and still be blocked on interests,
+ * which is exactly the state Ryan's fresh install wedged in on 2026-07-18.
+ * Finalize triggers when EVERY in-scope field is filled — never off any one of
+ * them.
+ *
  * The legacy phase-machine engine still writes `phase_state.agent_name` at its
  * `agent_name_chosen` phase (untouched, kept for Managed), but the shared audit
  * no longer HARD-REQUIRES a name.
@@ -142,14 +152,25 @@ export interface RequiredFieldsState {
   readonly removed_projects?: ReadonlyArray<unknown>
 }
 
-/** § 4.4 priority order — locked. */
-const PRIORITY: ReadonlyArray<RequiredField> = [
+/**
+ * § 4.4 priority order — locked.
+ *
+ * EXPORTED (2026-07-18, audit-driven step guard) so the guard's anti-recurrence
+ * test can iterate the REAL required set rather than a hand-copied list: a field
+ * added here but given no guard copy fails that test, and the guard's
+ * `Record<RequiredField, …>` copy table fails TYPE-CHECK. Between them, no
+ * required field can be unaskable.
+ */
+export const REQUIRED_FIELDS_IN_PRIORITY_ORDER: ReadonlyArray<RequiredField> = [
   'user_first_name',
   'import_decision',
   'primary_projects',
   'non_work_interests',
   'agent_personality',
 ]
+
+/** Internal alias kept for readability at the audit's use-sites. */
+const PRIORITY = REQUIRED_FIELDS_IN_PRIORITY_ORDER
 
 /**
  * Audit which required fields are filled.

@@ -2809,21 +2809,28 @@ export function buildOpenGraphComposer(
                 //  2. IMPORT-ANALYSIS grounding — only when an import ran (re-injects
                 //     the proposed/curated project set so the warm session honors
                 //     "drop X" / "keep the rest").
-                const stepGuard = buildOnboardingStepGuardFragment(
-                  st.phase_state,
-                  requiredFieldsOptions,
-                )
                 // IMPORT-IN-FLIGHT steer (SEV1 2026-07-01) — while a history
                 // import is uploading/analyzing, tell the agent NOT to do project
                 // discovery (real projects come from the import). Authoritative:
                 // the durable import phase OR the in-flight probe (which now also
                 // catches an in-progress chunked upload before the import_jobs row
                 // exists), so it holds across the whole upload window.
+                //
+                // Resolved BEFORE the step guard on purpose (2026-07-18): the guard
+                // is now audit-driven, so it would otherwise force the
+                // project-discovery asks that THIS steer forbids and that the
+                // extractor drops mid-import — two contradictory instructions in one
+                // prompt. Threading it in lets the guard defer exactly those steps
+                // (Codex P2).
                 const importInFlight =
                   st.phase === 'import_upload_pending' ||
                   st.phase === 'import_running' ||
                   st.phase === 'import_analysis_presented' ||
                   (await probeInFlightImport())
+                const stepGuard = buildOnboardingStepGuardFragment(st.phase_state, {
+                  ...requiredFieldsOptions,
+                  import_in_flight: importInFlight,
+                })
                 const importSteer = buildImportInFlightSteerFragment(importInFlight)
                 const ir = st.phase_state['import_result']
                 const importResult =
