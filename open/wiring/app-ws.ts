@@ -350,10 +350,44 @@ export function wireAppWs(ctx: OpenWiringContext, deps: WireAppWsDeps): WiredApp
   const cleanups: Array<() => void> = []
   const onboardingStateStore = landing.stateStore
 
-  // Path 1 auto-start de-dupe: topics whose onboarding opener we've already
-  // seeded THIS process, so a quick reconnect doesn't double-open the
-  // interview. Mirrors the live runner's own per-process `contextSent` guard.
-  const seededOnboardingTopics = new Set<string>()
+  // Path 1 auto-start de-dupe (2026-07-18 fresh-install fix) — SINGLE-FLIGHT
+  // ONLY. This map holds the IN-PROGRESS seed for a topic so two sockets that
+  // connect in the same tick (two tabs, a reconnect racing the first open)
+  // cannot both dispatch a welcome turn while neither has persisted a row yet.
+  // It is NOT the "already greeted" memory: that question is answered DURABLY
+  // from `buttonStore` (see `hasBeenGreeted` below), because a per-process Set
+  // silently re-seeds on every new process — the actual live duplicate.
+  // Entries are deleted the moment the seed settles, success or failure.
+  const seedInFlightByTopic = new Map<string, Promise<void>>()
+  // The durable answer to "has this topic already been greeted?" — the live
+  // runner PERSISTS the composed reply as a `button_prompts` row BEFORE it
+  // sends it (`gateway/wiring/build-live-agent-turn.ts:1096` precedes the
+  // `sendSafe` at :1126), and a failed seed returns before either (:1055,
+  // :1069) leaving no row at all. So a visible row on this topic means the
+  // owner has already received an opener (or has already spoken and been
+  // answered) — and its ABSENCE means a prior seed genuinely failed and must be
+  // re-fired. That makes this check both the de-dupe AND the self-heal, with no
+  // in-memory bookkeeping to get out of sync. Fail-CLOSED on a store error: a
+  // missing greeting is recoverable on the next connect, a duplicate one is the
+  // bug being fixed here.
+  const hasBeenGreeted = async (channel_topic_id: string): Promise<boolean> => {
+    const now = Date.now()
+    try {
+      const latest = await landing.buttonStore.latestTurnByTopic({
+        topic_id: channel_topic_id,
+        before: now,
+        now,
+      })
+      return latest !== null
+    } catch (err) {
+      log.warn('onboarding_seed_greeted_check_failed', {
+        project: project_slug,
+        topic: channel_topic_id,
+        error: err instanceof Error ? err.message : String(err),
+      })
+      return true
+    }
+  }
   // Path-1 closing + per-project opening delivery (items 6/7). Deliver a
   // finalize-composed agent message the SAME way a live-agent reply is
   // delivered: persist a durable `button_prompts` history row on the topic
@@ -966,45 +1000,58 @@ export function wireAppWs(ctx: OpenWiringContext, deps: WireAppWsDeps): WiredApp
         // the deterministic per-project opening finalize already delivered. A
         // materialized project is always steady-state, so never seed it.
         const isGeneralTopic = channel_topic_id === appWsTopicId(user_id)
-        if (
-          isGeneralTopic &&
-          appWsChatTurn !== null &&
-          !seededOnboardingTopics.has(channel_topic_id)
-        ) {
-          seededOnboardingTopics.add(channel_topic_id)
-          // Typing while the agent composes its onboarding opener.
-          emitAppWsTyping(channel_topic_id, 'start')
-          try {
-            const seedResult = await appWsChatTurn({
-              project_slug,
-              user_id,
-              topic_id: channel_topic_id,
-              user_text:
-                '(The owner just opened the chat to begin onboarding. Greet them warmly by opening the conversation and asking your very first question now — start by asking what they would like you to call them. Do not wait for them to speak first.)',
-              send: buildAppWsSendReply(channel_topic_id),
-              observed_at: Date.now(),
-              seed_turn: true,
-            })
-            // Self-heal a FAILED welcome seed (e.g. a cold spawn that still
-            // timed out): the live runner stays silent on a seed failure (no
-            // persisted error bubble), so CLEAR the per-process seeded mark
-            // here too — otherwise this topic stays "seeded" for the process
-            // and a reload/re-subscribe would skip re-firing, stranding the
-            // owner on the empty "Setting things up…" loader. Dropping the mark
-            // makes the next on_session_open regenerate the welcome.
-            if (
-              seedResult !== null &&
-              typeof seedResult === 'object' &&
-              (seedResult as { outcome?: unknown }).outcome === 'failed'
-            ) {
-              seededOnboardingTopics.delete(channel_topic_id)
+        if (isGeneralTopic && appWsChatTurn !== null) {
+          // Two gates, in this order:
+          //  1. DURABLE — has this topic already been greeted? Survives a
+          //     restart/redeploy, which the old per-process Set did not: a fresh
+          //     process re-seeded on top of a persisted opener and the client
+          //     hydrated BOTH (the reported fresh-install duplicate).
+          //  2. SINGLE-FLIGHT — is a seed for this topic already running? Two
+          //     sockets can pass gate 1 together (neither has persisted yet), so
+          //     the second one awaits the first instead of dispatching its own.
+          // The DURABLE check lives INSIDE the single-flight promise, not before
+          // it: it is itself an `await`, so hoisting it out would let two
+          // connects both read "not greeted" and both dispatch. Registering the
+          // promise synchronously — with nothing awaited between the `get` miss
+          // and the `set` — is what makes the second connect wait on the first.
+          const inFlight = seedInFlightByTopic.get(channel_topic_id)
+          if (inFlight !== undefined) {
+            await inFlight
+          } else {
+            const seeding = (async (): Promise<void> => {
+              if (await hasBeenGreeted(channel_topic_id)) return
+              // Typing while the agent composes its onboarding opener.
+              emitAppWsTyping(channel_topic_id, 'start')
+              try {
+                await appWsChatTurn({
+                  project_slug,
+                  user_id,
+                  topic_id: channel_topic_id,
+                  user_text:
+                    '(The owner just opened the chat to begin onboarding. Greet them warmly by opening the conversation and asking your very first question now — start by asking what they would like you to call them. Do not wait for them to speak first.)',
+                  send: buildAppWsSendReply(channel_topic_id),
+                  observed_at: Date.now(),
+                  seed_turn: true,
+                })
+              } catch (err) {
+                // Defensive — the runner owns its own failures. A throw needs no
+                // compensating bookkeeping now: a failed seed persists no row, so
+                // the durable gate re-fires it on the next connect.
+                log.warn('onboarding_seed_failed', {
+                  project: project_slug,
+                  topic: channel_topic_id,
+                  error: err instanceof Error ? err.message : String(err),
+                })
+              } finally {
+                emitAppWsTyping(channel_topic_id, 'end')
+              }
+            })()
+            seedInFlightByTopic.set(channel_topic_id, seeding)
+            try {
+              await seeding
+            } finally {
+              seedInFlightByTopic.delete(channel_topic_id)
             }
-          } catch {
-            // A throw (defensive — the runner owns its failures) must also not
-            // leave the topic falsely marked seeded; let reload re-fire.
-            seededOnboardingTopics.delete(channel_topic_id)
-          } finally {
-            emitAppWsTyping(channel_topic_id, 'end')
           }
         }
       } else {
