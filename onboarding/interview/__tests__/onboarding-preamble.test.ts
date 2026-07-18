@@ -365,6 +365,33 @@ describe('buildOnboardingStepGuardFragment — AUDIT-DRIVEN total coverage (2026
     })
   })
 
+  it('free-text steps carry the stale-read acknowledgement clause (Codex P2 #2)', () => {
+    /**
+     * Free-text fields have NO deterministic turn-start capture: `capture
+     * RequiredAnswer` only settles BUTTON-backed fields
+     * (`captureButtonBackedRequiredField`, open/composer.ts), so a prose answer
+     * is persisted only by the fire-and-forget post-turn extractor, which runs
+     * AFTER the reply. The guard therefore reads stale `phase_state` on the very
+     * turn the owner answers — the same stale-read that made the 06-30 guard
+     * re-ask a just-tapped answer, which was fixed for buttons by the capture.
+     * Buttons cannot regress here; free text has no such capture, so the guard
+     * must say so explicitly rather than order a duplicate ask.
+     */
+    const frag = buildOnboardingStepGuardFragment(RYAN_STUCK_STATE, {
+      import_offered: true,
+    }) as string
+    expect(frag).toContain('NEVER re-ask a question they just')
+    expect(frag).toContain('treat it')
+    expect(frag).toContain('as ANSWERED')
+    // It is scoped to the free-text steps: a button-only guard does not carry it
+    // (the deterministic capture already settles those before the guard reads).
+    const buttonsOnly = buildOnboardingStepGuardFragment(
+      { user_first_name: 'Ryan', primary_projects: ['A', 'B', 'C'], non_work_interests: ['x'] },
+      { import_offered: true },
+    ) as string
+    expect(buttonsOnly).not.toContain('NEVER re-ask a question they just')
+  })
+
   it('free-text steps are never dressed up as button steps', () => {
     // Interests alone open: the fragment must forbid an options block, and must
     // NOT carry the button-step instruction (nothing button-driven is pending).

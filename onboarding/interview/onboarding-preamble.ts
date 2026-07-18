@@ -305,6 +305,11 @@ export function buildOnboardingStepGuardFragment(
     lines.push(
       'Steps marked ASK are ordinary conversational questions: ask them in plain prose.',
       'Do NOT attach an [[OPTIONS]] block to them.',
+      'IMPORTANT - this list is built from what was saved BEFORE the current message, and a',
+      'free-text answer is only recorded a moment AFTER you reply. So if the owner has JUST',
+      'answered one of these in their latest message, it will still be listed here: treat it',
+      'as ANSWERED, acknowledge it naturally and move on. NEVER re-ask a question they just',
+      'answered. This list tells you what may not be SKIPPED, not what to repeat.',
     )
   }
   for (const block of blocks) {
