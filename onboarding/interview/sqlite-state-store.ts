@@ -327,6 +327,7 @@ export class SqliteOnboardingStateStore implements OnboardingStateStore {
     expected_phase: string
     expected_phase_state: Record<string, unknown>
     completed_at: number
+    persona_files_committed?: boolean
   }): Promise<boolean> {
     // ATOMIC CAS in a SINGLE guarded UPDATE: flip to `completed` iff the row's CURRENT
     // `phase` equals the phase the caller processed AND its stored `phase_state_json` is
@@ -341,12 +342,26 @@ export class SqliteOnboardingStateStore implements OnboardingStateStore {
     const expected_json = JSON.stringify(input.expected_phase_state)
     const res = this.db.runSync(
       `UPDATE onboarding_state
-          SET phase = 'completed', completed_at = ?, wow_fired = 1, last_advanced_at = ?
+          SET phase = 'completed', completed_at = ?, wow_fired = 1, last_advanced_at = ?,
+              persona_files_committed = MAX(persona_files_committed, ?)
         WHERE project_slug = ? AND user_id = ?
           AND phase = ?
           AND phase NOT IN ('completed', 'failed')
           AND phase_state_json = ?`,
-      [input.completed_at, this.now(), input.owner_slug, input.user_id, input.expected_phase, expected_json],
+      [
+        input.completed_at,
+        this.now(),
+        // `MAX(col, ?)` raises the flag when the caller committed persona and is a
+        // no-op otherwise — the terminal write can never CLEAR an already-committed
+        // persona (see the `OnboardingStateStore` interface doc). Before this the
+        // UPDATE touched only phase/completed_at/wow_fired, so the column stayed at
+        // its DEFAULT 0 for the whole Path-1 lifetime even with the files on disk.
+        input.persona_files_committed === true ? 1 : 0,
+        input.owner_slug,
+        input.user_id,
+        input.expected_phase,
+        expected_json,
+      ],
     )
     return res.changes === 1
   }

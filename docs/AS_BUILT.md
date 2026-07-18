@@ -10,6 +10,55 @@ Running log of what shipped, newest first. One entry per merged change.
 > `docs/research/AS-BUILT-docs-archive-2026-07.md`. This file is the ONE live
 > changelog going forward.
 
+## 2026-07-18 — Onboarding finalize: a progress signal, an orienting closing, concurrent openings
+
+**Bug (live, Ryan's install).** `onboarding/openings/finalize.ts` awaited
+`emitProjectOpenings(...)` — one LLM compose per project — for EVERY materialized
+project before emitting the closing. With 9 projects the openings landed one at a
+time over several minutes with zero explanation, and the one message that tells the
+owner what to do next arrived dead last. Projects silently appeared in the rail with
+no orientation. Ryan: "its unclear what im supposed to do next."
+
+**Fix (messaging + ordering only; the completion gate is untouched).**
+1. **STARTING message** — `ONBOARDING_STARTING_MESSAGE` ("Got it, setting up your
+   projects now. One moment while I put everything together.") emitted into the
+   owner's General topic through the SAME `deps.emitChatMessage` seam, BEFORE
+   persona compose / materialization / the opening composes. Gated on the same
+   `emitChatMessage !== undefined` condition as the closing AND on
+   `resolveProjects(...).length > 0` (the exact list `materializeProjects` iterates)
+   so it never fires when there is nothing to materialize. Its own stable
+   `dedupe_key: 'onboarding_starting'` — a joined finalize shares the in-flight
+   promise, a re-finalize of a completed row returns at the gate, and a
+   deferred-CAS retry collapses on the composer's dedupe row.
+2. **Closing copy** now names BOTH affordances: click into each project in the left
+   rail, and ask general questions right here in the General chat.
+   `ONBOARDING_CLOSING_MESSAGE_NO_PROJECTS` is unchanged (no rail claim, no rail).
+3. **Openings run concurrently** through a bounded worker pool
+   (`OPENING_COMPOSE_CONCURRENCY = 3`). The openings are mutually independent — each
+   targets its own project topic and reads only its own on-disk docs — and the
+   per-project try/catch (error isolation) is unchanged. Bounded rather than a bare
+   `Promise.all` so a large import cannot fan N simultaneous substrate sessions.
+
+**Also fixed: `persona_files_committed` was never persisted.** Verified live: the
+persona files existed on disk (`persona/SOUL.md`, `USER.md`, `priority-map.md`)
+while the column read 0. Root cause: NOTHING on the Path-1 finalize path ever wrote
+it — `commitPersona` writes the files + invalidates the loader but persists nothing,
+and the terminal CAS `UPDATE` set only `phase`/`completed_at`/`wow_fired`
+(`onboarding/interview/sqlite-state-store.ts`), so the column sat at its schema
+DEFAULT 0 (`migrations/0043_onboarding_state_wow_pushed_at.sql:53`). `commitPersona`
+now returns whether it succeeded and the flag rides the SAME atomic terminal write
+via a new optional `persona_files_committed` input on
+`completeIfPhaseStateMatches` — monotonic (`MAX(persona_files_committed, ?)`), so a
+later finalize whose persona compose failed can never clear a committed persona.
+
+**Tests** — `gateway/wiring/__tests__/finalize-progress-messaging.test.ts` (6 tests,
+real ProjectDb + real SqliteOnboardingStateStore + the real create-project seams;
+asserts the emitted message stream): starting-first-and-once, closing-last naming
+both affordances, joined/re-entered finalize never duplicating the starting
+message, the zero-project path emitting no starting message and no rail claim,
+`persona_files_committed` true after a successful finalize, and false when persona
+compose failed.
+
 ## 2026-07-18 — Onboarding: the step guard becomes AUDIT-DRIVEN (fixes a live finalize deadlock)
 
 **Bug (live, P0, Ryan's fresh install).** Onboarding hung forever after the

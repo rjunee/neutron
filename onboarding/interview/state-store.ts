@@ -191,6 +191,15 @@ export interface OnboardingStateStore {
     expected_phase: string
     expected_phase_state: Record<string, unknown>
     completed_at: number
+    /**
+     * Set the `persona_files_committed` flag as part of this SAME atomic terminal
+     * write (2026-07-18). Nothing on the finalize path used to persist it, so the
+     * column sat at its schema DEFAULT 0 forever even though the persona files were
+     * on disk. MONOTONIC: `true` raises the flag, `false`/omitted LEAVE it alone —
+     * a later finalize whose persona compose failed must never clear a genuinely
+     * committed persona.
+     */
+    persona_files_committed?: boolean
   }): Promise<boolean>
 }
 
@@ -324,6 +333,7 @@ export class InMemoryOnboardingStateStore implements OnboardingStateStore {
     expected_phase: string
     expected_phase_state: Record<string, unknown>
     completed_at: number
+    persona_files_committed?: boolean
   }): Promise<boolean> {
     const key = compositeKey(input.owner_slug, input.user_id)
     const existing = this.rows.get(key)
@@ -345,6 +355,10 @@ export class InMemoryOnboardingStateStore implements OnboardingStateStore {
       completed_at: input.completed_at,
       wow_fired: true,
       last_advanced_at: this.now(),
+      // Monotonic raise — never clear an already-committed persona (see the
+      // interface doc on `persona_files_committed`).
+      persona_files_committed:
+        existing.persona_files_committed || input.persona_files_committed === true,
     })
     return true
   }
