@@ -10,6 +10,39 @@ Running log of what shipped, newest first. One entry per merged change.
 > `docs/research/AS-BUILT-docs-archive-2026-07.md`. This file is the ONE live
 > changelog going forward.
 
+## 2026-07-19 — favicon: the SVG was invalid XML, so browsers rendered nothing
+
+**Bug (live, Ryan's tenant, reproduced independently).** No favicon on
+`n9ac626b4acaded8c.neutron.computer/chat`. Survived a hard refresh and a fresh
+incognito tab, so it was not a cache artifact.
+
+**Root cause.** `landing/favicon.svg` was NOT well-formed XML. Its explanatory
+comment referenced the CSS custom property `--accent`, and an XML comment may
+not contain a double-hyphen. `xmllint` verdict:
+
+```
+favicon.svg:4: parser error : Comment must not contain '--' (double-hyphen)
+```
+
+Browsers parse SVG strictly as XML, so the asset served **200 with the correct
+`image/svg+xml` content-type and byte-correct contents** and then rendered as
+NOTHING. Every signal short of actually rendering it looked healthy, which is
+why route/allowlist/caching inspection kept coming back clean. Confirmed by
+rendering the served bytes: pre-fix produces an XML parser-error page, post-fix
+produces the atom mark.
+
+**Fix.** Reworded the comment so it contains no `--`. Plus
+`landing/__tests__/svg-assets-wellformed.test.ts`, which asserts every shipped
+SVG has no `--` inside a comment — verified RED against the broken asset and
+GREEN after. The class matters more than the instance: any future SVG with a
+CSS-variable mention in a comment fails the same way, silently.
+
+**Adjacent gaps found while diagnosing, NOT fixed here** (separate PR in flight):
+`/favicon.ico` 404s and is absent from the route allowlist (browsers request it
+by default and cache the 404 negatively), `HEAD /favicon.svg` 404s while GET
+succeeds (the brand-asset handler is GET-only), and the apex host serves no
+brand assets at all.
+
 ## 2026-07-18 — Test isolation: the process-global `react` module mock is gone
 
 **Defect (test infrastructure only; no product surface change).** Three `app/`

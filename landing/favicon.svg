@@ -1,8 +1,8 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#007aff" stroke-width="1.6" role="img" aria-label="Neutron">
   <!-- The ⚛ atom mark — geometry copied from landing/chat-react/ChatApp.tsx AtomMark()
        (the rail-header icon): a center dot + 3 rotated electron-orbit ellipses. A favicon
-       can't read page CSS vars, so the accent is a FIXED hex (the light-theme --accent
-       #007aff from chat-react.html) rather than currentColor. Square, centered viewBox
+       can't read page CSS vars, so the accent is a FIXED hex (the light-theme accent token
+       (#007aff) from chat-react.html) rather than currentColor. Square, centered viewBox
        so it reads at 16px on the browser tab. -->
   <circle cx="12" cy="12" r="1.7" fill="#007aff" stroke="none" />
   <ellipse cx="12" cy="12" rx="10" ry="4.3" />
