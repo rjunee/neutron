@@ -341,9 +341,13 @@ async function spawnSession(
       const now = Date.now()
       session.lastDataAt = now
       // F4 — feed the watchdog's live-process view: any child output is activity,
-      // so keep the ProcessRegistry entry fresh (stuck-agent = no activity past
-      // the threshold). Guarded no-op when no ambient registry is registered; the
-      // handle identity-guards so it only ever touches THIS child's entry.
+      // so keep the ProcessRegistry entry fresh. NOTE this is `last_activity_at`
+      // ONLY — it is NOT what stuck-agent measures. Stuck is `busy_since` (an
+      // OUTSTANDING dispatched turn, marked from pool.ts), because for a
+      // request/response REPL silence between turns is the normal resting state,
+      // so output-age judged every healthy warm session stuck. Guarded no-op when
+      // no ambient registry is registered; the handle identity-guards so it only
+      // ever touches THIS child's entry.
       liveHandle?.touch()
       const target = scanChild
       if (target === undefined) return

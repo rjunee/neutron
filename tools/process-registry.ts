@@ -77,9 +77,13 @@ export interface ProcessRegisterInput {
 }
 
 /**
- * Inactivity threshold for the stuck-agent watchdog. Exposed so the
- * watchdog can bind it directly. Default matches Nova's 15-minute
- * stuck-agent threshold (`gateway/topic-process.ts` lifecycle).
+ * How long a DISPATCHED TURN may stay outstanding before the stuck-agent
+ * watchdog judges it stuck. Exposed so the watchdog can bind it directly.
+ * Default matches Nova's 15-minute stuck-agent threshold
+ * (`gateway/topic-process.ts` lifecycle).
+ *
+ * Measured from `busy_since` (turn start), NOT from `last_activity_at`
+ * (output age) — see {@link ProcessRecord.busy_since} for why.
  */
 export const STUCK_PROCESS_INACTIVITY_MS = 15 * 60_000
 
