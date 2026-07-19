@@ -1079,9 +1079,26 @@ export function wireAppWs(ctx: OpenWiringContext, deps: WireAppWsDeps): WiredApp
         // nothing re-signals — the redirect would be lost forever. Deriving it
         // from the persisted completed state here makes it recoverable. Gated on
         // the env so it is a strict NO-OP on Open self-host; sent only to the
-        // connecting topic. The client's `claimRedirected` latch keeps it at-
-        // most-once per load, and once the owner claims they move to a host
-        // without the env, so this never loops post-claim.
+        // connecting topic.
+        //
+        // ONE-SHOT IS DURABLE, NOT PER-LOAD (2026-07-19 fix — infinite claim
+        // loop, hit live). The client's `claimRedirected` latch lives on the
+        // controller INSTANCE, so it only dedupes within a single page load.
+        // The previous comment here claimed the loop was impossible because
+        // "once the owner claims they move to a host without the env" — that is
+        // FALSE. Claiming a personal URL renames `url_slug`; it does NOT change
+        // the tenant process or its environment, so the SAME process (still
+        // carrying NEUTRON_POST_ONBOARDING_CLAIM_URL) serves the claimed host.
+        // Result: every fresh load re-armed the latch, this replay fired again,
+        // and the owner bounced chat → claim ("already set") → chat → claim,
+        // forever, locked out of a healthy instance.
+        //
+        // The fix is the durable stamp this row has always carried and nothing
+        // ever wrote: `onboarding_handoff_emitted_at` (migration 0052). Emit
+        // only while it is null, then stamp it — so the signal is at-most-once
+        // for the OWNER, across reloads, reconnects and restarts, instead of
+        // at-most-once per page load. A `null` stamp still means "never sent",
+        // so a genuinely-dropped first frame is still recovered exactly once.
         const claimUrl = env['NEUTRON_POST_ONBOARDING_CLAIM_URL']
         if (typeof claimUrl === 'string' && claimUrl.length > 0) {
           // This branch is reached for BOTH terminal phases (`isOnboardingActive`
@@ -1089,13 +1106,34 @@ export function wireAppWs(ctx: OpenWiringContext, deps: WireAppWsDeps): WiredApp
           // persisted phase being exactly `completed` — a `failed` onboarding
           // never had the completion transition and must NOT redirect to claim.
           const st = await onboardingStateStore.get(project_slug, user_id)
-          if (st !== null && st.phase === 'completed') {
+          if (st !== null && st.phase === 'completed' && st.onboarding_handoff_emitted_at === null) {
             const completedFrame: AppWsOutboundOnboardingCompleted = {
               v: 1,
               type: 'onboarding_completed',
               ts: Date.now(),
             }
             appWsRegistry.send(channel_topic_id, completedFrame)
+            // Stamp AFTER the send so a throwing send leaves it null and the
+            // next connect retries, rather than burning the one shot on a frame
+            // that never left. Best-effort: a failed stamp must not wedge the
+            // connect path — the worst case is one extra replay, which is the
+            // pre-fix behaviour, not a regression.
+            try {
+              await onboardingStateStore.upsert({
+                owner_slug: project_slug,
+                user_id,
+                phase: st.phase,
+                phase_state_patch: {},
+                advanced_at: st.last_advanced_at,
+                onboarding_handoff_emitted_at: Date.now(),
+              })
+            } catch (err) {
+              log.warn('onboarding_handoff_stamp_failed', {
+                project: project_slug,
+                user: user_id,
+                error: err instanceof Error ? err.message : String(err),
+              })
+            }
           }
         }
       }

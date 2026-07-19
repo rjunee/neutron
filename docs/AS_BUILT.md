@@ -10,6 +10,39 @@ Running log of what shipped, newest first. One entry per merged change.
 > `docs/research/AS-BUILT-docs-archive-2026-07.md`. This file is the ONE live
 > changelog going forward.
 
+## 2026-07-19 — claim redirect is one-shot per OWNER (durable), not per page load
+
+**Bug (live, Ryan's managed instance).** After claiming a personal URL the owner
+was LOCKED OUT by an infinite loop: chat → the claim page ("Your personal URL is
+already set") → "Open my workspace" → chat → claim, forever, on a healthy
+instance.
+
+**Root cause.** `on_session_open` (`open/wiring/app-ws.ts`) replays a one-shot
+`onboarding_completed` frame on EVERY connect whose persisted phase is
+`completed` when `NEUTRON_POST_ONBOARDING_CLAIM_URL` is set. The React client
+navigates to the claim page on that frame, deduped by `claimRedirected` — a
+field on the CONTROLLER INSTANCE, so it dedupes only within one page load. Every
+reload built a fresh controller and re-armed it.
+
+The pre-fix code justified the replay with a comment asserting the loop was
+impossible because "once the owner claims they move to a host without the env".
+That was FALSE: claiming renames `url_slug`, it does NOT change the tenant
+process or its environment, so the SAME process — still carrying the claim URL —
+serves the claimed host. Verified against the live process environment.
+
+**Fix.** Gate the replay on `onboarding_handoff_emitted_at` (migration 0052 — a
+column the schema has always carried and NOTHING ever wrote; built-but-not-wired,
+the persona-gen class) and stamp it AFTER a successful send, so a throwing send
+leaves it null and retries rather than burning the one shot. The signal is now
+at-most-once for the OWNER across reloads, reconnects and restarts.
+
+**Test** (`tests/integration/claim-redirect-once.open.test.ts`): boots a real
+composer + production graph + app WebSocket and counts frames across TWO
+successive connects, plus across a genuine process restart. **Verified to
+reproduce the live loop pre-fix** (reconnect emits a second frame: expected 0,
+received 1) and pass after. No unauthenticated HTTP probe could see this — the
+status codes are identical either way; it only exists across a reload.
+
 ## 2026-07-18 — Favicon: the tab icon renders again (root cause = an invisible SVG, not a serving gap)
 
 Ryan reported NO favicon on his tenant chat tab (`https://<slug>.neutron.computer/chat`),
