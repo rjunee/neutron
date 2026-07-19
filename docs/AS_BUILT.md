@@ -10,6 +10,38 @@ Running log of what shipped, newest first. One entry per merged change.
 > `docs/research/AS-BUILT-docs-archive-2026-07.md`. This file is the ONE live
 > changelog going forward.
 
+## 2026-07-19 — REVERT: project openings are strictly serial again (cross-project data corruption)
+
+**Bug (live, Ryan's managed install).** Project chat openings carried the WRONG
+project's content: the `ostro` topic opened with Video & Film Production's plan,
+`video-film-production` opened with DTC Ecommerce's — each project received the
+PREVIOUS project's body while keeping its own correct name. The on-disk
+`STATUS.md` files were correct throughout, so materialization was never at fault.
+
+**Cause — a regression this repo introduced the same day.** The 2026-07-18
+finalize-UX change replaced the serial opening loop with a bounded worker pool
+(concurrency 3) to cut the multi-minute silence. The composer beneath
+`deps.projectKickoff` dispatches through the shared CC-substrate LLM client,
+which is not safe for overlapping in-flight turns from this call site, so
+concurrent composes returned each other's answers.
+
+**Fix.** Reverted to a strictly serial loop, with the reasoning recorded inline
+so it is not "optimised" again. The latency the pool targeted is already
+addressed correctly by the STARTING message emitted before the loop — the owner
+is told what is happening rather than watching silence. Concurrency here is a
+correctness question, not a tuning knob.
+
+**Test** (`gateway/wiring/__tests__/finalize-progress-messaging.test.ts`): pins
+that every project's body belongs to THAT project. The fake kickoff composer
+deliberately models the real failure — a shared client with ONE in-flight slot —
+because a fake that is a pure function of its input CANNOT reproduce the bug and
+passes under the pooled implementation too (the first version of this test fell
+into exactly that trap and was rewritten). **Verified: serial 8 pass / 0 fail;
+pooled 1 fail with `Expected PLAN-FOR:dtc-ecommerce, Received PLAN-FOR:ostro`.**
+
+**NOTE — existing data is NOT repaired by this fix.** Openings already persisted
+with crossed bodies stay wrong; they were composed before the revert.
+
 ## 2026-07-19 — claim redirect is one-shot per OWNER (durable), not per page load
 
 **Bug (live, Ryan's managed instance).** After claiming a personal URL the owner
