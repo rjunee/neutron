@@ -12,14 +12,13 @@
  * Reload — which re-fetches the canonical body via `fetchFile`.
  */
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
-
 import { type BinarySourceResolver } from '../../lib/markdown-render';
 import {
   DocsClient,
   freshEditorState,
   type DocFile,
 } from '../../lib/docs-client';
+import { reactHooks, type HookRuntime } from '../../lib/hook-runtime';
 import { useProjectScopedAsync } from './use-project-scoped-async';
 import { formatError, normalizeRel, type EditorMode } from './docs-shared';
 
@@ -41,12 +40,17 @@ export interface UseDocFile {
   resolveBinary: BinarySourceResolver | undefined;
 }
 
-export function useDocFile(params: {
-  client: DocsClient | null;
-  project_id: string;
-}): UseDocFile {
+export function useDocFile(
+  params: {
+    client: DocsClient | null;
+    project_id: string;
+  },
+  /** Injectable dispatcher — see `lib/hook-runtime.ts`. Real React by default. */
+  hooks: HookRuntime = reactHooks,
+): UseDocFile {
+  const { useCallback, useEffect, useMemo, useState } = hooks;
   const { client, project_id } = params;
-  const fileGate = useProjectScopedAsync(project_id, client);
+  const fileGate = useProjectScopedAsync(project_id, client, hooks);
 
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
   const [file, setFile] = useState<DocFile | null>(null);

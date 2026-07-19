@@ -90,7 +90,13 @@ describe('useProjectScopedAsync — committed reset-on-switch (never during rend
     // change (its dep was `fetchTree = f(client, project_id)`). A gate
     // keyed on `projectId` alone would let a request from a stale
     // session commit under a refreshed one.
-    expect(src).toMatch(/useProjectScopedAsync\(\s*projectId: string,\s*client: unknown,?\s*\)/);
+    // The trailing `hooks: HookRuntime = reactHooks` is the injected React
+    // dispatcher (see `lib/hook-runtime.ts`) — pinned here too, so the
+    // SCOPE parameters stay exactly `(projectId, client)` and a third
+    // scope input can't be smuggled in behind the injection point.
+    expect(src).toMatch(
+      /useProjectScopedAsync\(\s*projectId: string,\s*client: unknown,\s*(?:\/\*\*[\s\S]*?\*\/\s*)?hooks: HookRuntime = reactHooks,\s*\)/,
+    );
     expect(src).toMatch(/seenScope\.current\.projectId\s*!==\s*projectId/);
     expect(src).toMatch(/seenScope\.current\.client\s*!==\s*client/);
     // The reset effect depends on both scope inputs.
@@ -110,7 +116,10 @@ describe('useDocMutations — ONE gate for ALL mutations (fixed 4× in review)',
     // The behavioural bail-on-switch coverage lives in
     // docs-mutations-race.test.ts (all seven mutations). Here we only
     // pin the STRUCTURAL single-gate guarantee.
-    expect(src).toContain('const mutateGate = useProjectScopedAsync(project_id, client);');
+    // `hooks` is the injected dispatcher forwarded down (see
+    // `lib/hook-runtime.ts`); the gate's SCOPE is still exactly
+    // (project_id, client).
+    expect(src).toContain('const mutateGate = useProjectScopedAsync(project_id, client, hooks);');
     expect(src).not.toMatch(/new RequestGate\(/);
   });
 

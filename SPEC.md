@@ -1,6 +1,6 @@
 ---
 title: "SPEC.md — Neutron Open (master spec)"
-last_updated: 2026-07-18 (onboarding step guard made AUDIT-DRIVEN — fixes the live finalize deadlock on a required field the guard could not ask for; refactor window remains CLOSED)
+last_updated: 2026-07-18 (test isolation: the process-global `react` module mock is replaced by hook-runtime DI — the suite no longer depends on file execution order; refactor window remains CLOSED)
 ---
 <!-- CURRENT: steady-state (world-class refactor window COMPLETE; feature development resuming) -->
 
@@ -339,6 +339,20 @@ dated record of each locked decision; the body describes the resulting
 architecture and points here.
 
 ### 2026-07-18
+
+- **A test NEVER `mock.module`s a module the rest of the repo depends on — it INJECTS.** Bun's `mock.module` is
+  global to the test process and is NOT undone by `mock.restore()`. Three `app/` tests stubbed the react hook
+  dispatcher with `mock.module('react', ...)`; once any of them ran, every later test rendering through
+  `react-dom` got the stub (`ReactSharedInternals.S` undefined, thrown inside react-dom-client) — ~92 failures
+  at `main` b1007876, and a suite whose pass/fail depended on file execution ORDER, which is how a genuine
+  regression hides. The remedy is ordinary DI, never a wider mock, a preload shim, or a split test command
+  (those hide the coupling): `app/lib/hook-runtime.ts` exports `HookRuntime` + the real `reactHooks`, and each
+  unit takes it as an optional trailing argument (a prop for `DiagnosticsPane`) defaulting to real React, so
+  the substitution is scoped to one call. Production callers are unchanged. No test was skipped, weakened or
+  deleted. The narrow exception this LOCKS: module-mocking is still allowed for a module bun genuinely cannot
+  load (`react-native` is Flow-typed and unparseable), because there is no working implementation for the stub
+  to displace. [`app/lib/hook-runtime.ts`, `app/features/docs/*`, `app/features/admin/DiagnosticsPane.tsx`,
+  `docs/AS_BUILT.md`]
 
 - **The onboarding step guard is AUDIT-DRIVEN: every required field is askable, by construction.** Fixed a live
   P0 deadlock on a fresh install — onboarding hung after the personality step and could never finalize
