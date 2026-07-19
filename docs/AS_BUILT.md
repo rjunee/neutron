@@ -91,8 +91,13 @@ retargeted at the new signatures. They still pin exactly what they pinned:
 accounted for, and `useDocMutations` still acquires exactly ONE gate.
 
 **Suite result** (single `bun test` at the repo root, clean tree):
-before 10699 pass / 93 fail / 2 errors → after 10812 pass / 0 fail / 0 errors,
-9 skipped in both (unchanged).
+before 10699 pass / 9 skip / 93 fail / 2 errors (exit 1) → after 10809 pass /
+9 skip / 0 fail / 0 errors (exit 0). The skip count is IDENTICAL — nothing was
+skipped to reach the number. The total ran RISES 10801 → 10818 across the same
+963 files, because the two "errors" were whole-file evaluation failures
+(`landing/chat-react/__tests__/html-doc.test.tsx` could not even evaluate
+`require('react-dom/client')` under the stub), so those files' tests never ran
+at all before.
 
 [`app/lib/hook-runtime.ts`, `app/features/docs/use-project-scoped-async.ts`,
 `app/features/docs/use-doc-file.ts`, `app/features/docs/use-doc-tree.ts`,
