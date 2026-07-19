@@ -14,10 +14,27 @@
  * `isLatest(token)`-before-setState guards in each hook.
  */
 
-import { beforeEach, describe, expect, it, mock } from 'bun:test';
+import { beforeEach, describe, expect, it } from 'bun:test';
 import * as RealReact from 'react';
 
 import { DocsClientError } from '../lib/docs-client';
+import { type HookRuntime } from '../lib/hook-runtime';
+import { useDocFile as realUseDocFile } from '../features/docs/use-doc-file';
+import { useDocHistory as realUseDocHistory } from '../features/docs/use-doc-history';
+import { useDocTree as realUseDocTree } from '../features/docs/use-doc-tree';
+import { useDeepLinkAnchor as realUseDeepLinkAnchor } from '../features/docs/use-deep-link-anchor';
+
+// The hook drivers below pass DELIBERATELY PARTIAL fixtures (a `DocFile`
+// with only the fields the code path reads, a bare `CommitSummary`, …).
+// That was type-invisible while these modules were `await import`ed into an
+// `any`; with the static imports it would now be a compile error, so each
+// hook is aliased through one explicit loose signature. This preserves the
+// pre-existing typing of the drivers EXACTLY — no assertion is relaxed.
+type LooseHook = (params: any, hooks: HookRuntime) => any;
+const useDocFile = realUseDocFile as LooseHook;
+const useDocTree = realUseDocTree as LooseHook;
+const useDocHistory = realUseDocHistory as LooseHook;
+const useDeepLinkAnchor = realUseDeepLinkAnchor as LooseHook;
 
 // ── ordered-slot react hook stub + committed-effect runner ────────────
 type Slot = { v?: unknown; current?: unknown; lastDeps?: unknown[]; cleanup?: unknown };
@@ -29,12 +46,19 @@ function depsEqual(a: unknown[] | undefined, b: unknown[]): boolean {
   if (a === undefined || a.length !== b.length) return false;
   return a.every((x, i) => Object.is(x, b[i]));
 }
-// Spread the REAL react so every other export (useReducer, createElement,
-// jsx internals, …) survives — only the five dispatcher hooks are
-// overridden. This keeps the mock from breaking any other test file's
-// react imports if module isolation ever interleaves. (react-native is
-// NOT mocked: useDeepLinkAnchor's `ScrollView` value-import loads the
-// real module fine and is never instantiated here.)
+// The stub is INJECTED into each hook under test (their optional
+// `hooks: HookRuntime` parameter — see `lib/hook-runtime.ts`), never
+// installed globally. `mock.module('react', ...)` was the old mechanism;
+// it is process-global in bun and is NOT undone by `mock.restore()`, so
+// it left every later test in the run rendering against this stub
+// (~92 failures, all `ReactSharedInternals.S` inside react-dom). With
+// injection the substitution is scoped to these call sites, so nothing
+// here can depend on — or affect — test file execution ORDER.
+//
+// Real react is spread in so the non-dispatcher members of `HookRuntime`
+// (`useReducer`, unused by these hooks) are genuine; the five dispatcher
+// hooks below are the ones under test control. (react-native is not
+// involved: `useDeepLinkAnchor`'s `ScrollView` is a type-only import.)
 const reactStub = {
   ...RealReact,
   useState<T>(init: T | (() => T)): [T, (n: T | ((p: T) => T)) => void] {
@@ -59,8 +83,7 @@ const reactStub = {
     if (slots[i] === undefined) slots[i] = {};
     frameEffects.push({ slot: slots[i]!, fn, deps });
   },
-};
-mock.module('react', () => ({ ...reactStub, default: reactStub }));
+} as unknown as HookRuntime;
 // NB: react-native is NOT mocked and NOT imported by any hook under test.
 // All four read hooks are RN-runtime-free — useDeepLinkAnchor's
 // `ScrollView` is a type-only import — so this suite never loads (or
@@ -109,7 +132,6 @@ interface Calls {
   fetchFile: unknown[];
 }
 let calls: Calls;
-let hooks: any;
 let client: any;
 
 function resetHarness(): void {
@@ -126,27 +148,19 @@ function resetHarness(): void {
   };
 }
 
-beforeEach(async () => {
+// The hooks are now plain STATIC imports: with the dispatcher injected
+// there is no mock to register before the module graph links, so no
+// import-ordering dance is needed (and no `mock.restore()` to get wrong).
+beforeEach(() => {
   resetHarness();
-  hooks = {
-    useDocFile: (await import('../features/docs/use-doc-file')).useDocFile,
-    useDocTree: (await import('../features/docs/use-doc-tree')).useDocTree,
-    useDocHistory: (await import('../features/docs/use-doc-history')).useDocHistory,
-    useDeepLinkAnchor: (await import('../features/docs/use-deep-link-anchor')).useDeepLinkAnchor,
-  };
 });
-// NB: no mock.restore() — mirroring the CI-proven diagnostics-pane-render
-// test, the module mocks persist for THIS file. Restoring react-native
-// mid-run corrupts its module state for chunk-mates that import the real
-// module (run-tests.sh groups files per process). The react stub spreads
-// the real module and the RN stub is a superset, so persistence is safe.
 
 // Harness drives the hooks directly against the stubbed dispatcher.
 function drive<T>(fn: () => T): T { idx = 0; frameEffects = []; const r = fn(); commitEffects(); return r; }
 
 // ── useDocFile ────────────────────────────────────────────────────────
 describe('useDocFile — read race guard (:66)', () => {
-  const renderFile = (project_id: string, c = client) => drive(() => hooks.useDocFile({ client: c, project_id }));
+  const renderFile = (project_id: string, c = client) => drive(() => useDocFile({ client: c, project_id }, reactStub));
 
   it('overlapping reads: the NEWER read wins; the older late response is dropped', async () => {
     let api = renderFile('P');
@@ -193,7 +207,7 @@ describe('useDocFile — read race guard (:66)', () => {
 describe('useDocTree — tree race guard + loading cleanup', () => {
   const setError = (v: unknown) => calls.setError.push(v);
   const renderTree = (project_id: string, c = client) =>
-    drive(() => hooks.useDocTree({ client: c, project_id, setError }));
+    drive(() => useDocTree({ client: c, project_id, setError }, reactStub));
 
   it('fetches on mount and commits the tree', async () => {
     let api = renderTree('P'); // mount effect → tree[0]
@@ -239,7 +253,7 @@ describe('useDocHistory — history race guard (:84)', () => {
   const setError = (v: unknown) => calls.setError.push(v);
   const FILE = { path: 'notes/a.md', content: '', size_bytes: 0, modified_at: 1 };
   const renderHist = (project_id: string, c = client, file = FILE) =>
-    drive(() => hooks.useDocHistory({ client: c, project_id, file, setError }));
+    drive(() => useDocHistory({ client: c, project_id, file, setError }, reactStub));
   const entry = (sha: string) => ({ sha, message: sha, author_date: '2026-01-01T00:00:00Z' });
 
   it('newer load wins; the older late page is dropped', async () => {
@@ -351,7 +365,7 @@ describe('useDeepLinkAnchor — auto-select (:116) + malformed no-op', () => {
     fetchFile: (...a: unknown[]) => { calls.fetchFile.push(a); return Promise.resolve(); },
   };
   const renderAnchor = (over: Record<string, unknown>) =>
-    drive(() => hooks.useDeepLinkAnchor({ loadingTree: false, ...base, ...over }));
+    drive(() => useDeepLinkAnchor({ loadingTree: false, ...base, ...over }, reactStub));
 
   it('a valid markdown anchor selects the target + fetches it', () => {
     renderAnchor({ pathParam: 'notes/a.md' });

@@ -19,7 +19,6 @@
  * gate by construction.
  */
 
-import { useCallback, useEffect, useState } from 'react';
 
 import {
   DocsClient,
@@ -31,6 +30,7 @@ import {
   type DocTreeNode,
   type VersionContent,
 } from '../../lib/docs-client';
+import { reactHooks, type HookRuntime } from '../../lib/hook-runtime';
 import { useProjectScopedAsync } from './use-project-scoped-async';
 import { formatError, type EditorMode } from './docs-shared';
 
@@ -64,7 +64,8 @@ export interface UseDocMutations {
   handleRename: (node: DocTreeNode, to_path: string) => Promise<void>;
 }
 
-export function useDocMutations(params: {
+export function useDocMutations(
+  params: {
   client: DocsClient | null;
   project_id: string;
   // ── file cluster ──
@@ -90,7 +91,11 @@ export function useDocMutations(params: {
   setHistoryOpen: React.Dispatch<React.SetStateAction<boolean>>;
   setRevertConfirm: React.Dispatch<React.SetStateAction<CommitSummary | null>>;
   setRevertingSha: React.Dispatch<React.SetStateAction<string | null>>;
-}): UseDocMutations {
+},
+  /** Injectable dispatcher — see `lib/hook-runtime.ts`. Real React by default. */
+  hooks: HookRuntime = reactHooks,
+): UseDocMutations {
+  const { useCallback, useEffect, useState } = hooks;
   const {
     client,
     project_id,
@@ -117,7 +122,7 @@ export function useDocMutations(params: {
   } = params;
 
   // THE single mutation gate. Shared by every handler below.
-  const mutateGate = useProjectScopedAsync(project_id, client);
+  const mutateGate = useProjectScopedAsync(project_id, client, hooks);
 
   const [saving, setSaving] = useState(false);
   const [newFileOpen, setNewFileOpen] = useState(false);

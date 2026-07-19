@@ -43,9 +43,8 @@
  * cluster doesn't reimplement it.
  */
 
-import { useEffect, useMemo, useRef } from 'react';
-
 import { RequestGate } from '../../lib/docs-client';
+import { reactHooks, type HookRuntime } from '../../lib/hook-runtime';
 
 export interface ProjectScopedGate {
   /** Grab a token before the first await. The latest token wins. */
@@ -57,7 +56,10 @@ export interface ProjectScopedGate {
 export function useProjectScopedAsync(
   projectId: string,
   client: unknown,
+  /** Injectable dispatcher — see `lib/hook-runtime.ts`. Real React by default. */
+  hooks: HookRuntime = reactHooks,
 ): ProjectScopedGate {
+  const { useEffect, useMemo, useRef } = hooks;
   const gate = useMemo(() => new RequestGate(), []);
   const seenScope = useRef<{ projectId: string; client: unknown }>({ projectId, client });
   // reset-on-scope-change: invalidate every in-flight token on a

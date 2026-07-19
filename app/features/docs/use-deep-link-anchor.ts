@@ -11,7 +11,6 @@
  * never race across separate effects with overlapping dep arrays.
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { ScrollView } from 'react-native';
 
 import {
@@ -22,6 +21,7 @@ import {
   type AnchorLineSpan,
 } from '../../lib/anchor-lines';
 import { isBinaryExtension, type AnchorRow, type DocFile } from '../../lib/docs-client';
+import { reactHooks, type HookRuntime } from '../../lib/hook-runtime';
 import {
   BODY_LINE_HEIGHT,
   MARKDOWN_SCROLL_PADDING_TOP,
@@ -40,7 +40,8 @@ export interface UseDeepLinkAnchor {
   }) => string | null;
 }
 
-export function useDeepLinkAnchor(params: {
+export function useDeepLinkAnchor(
+  params: {
   pathParam?: string;
   lineParam?: string;
   rangeParam?: string;
@@ -52,7 +53,11 @@ export function useDeepLinkAnchor(params: {
   setFile: React.Dispatch<React.SetStateAction<DocFile | null>>;
   setSelectedPath: React.Dispatch<React.SetStateAction<string | null>>;
   fetchFile: (path: string) => Promise<void>;
-}): UseDeepLinkAnchor {
+},
+  /** Injectable dispatcher — see `lib/hook-runtime.ts`. Real React by default. */
+  hooks: HookRuntime = reactHooks,
+): UseDeepLinkAnchor {
+  const { useCallback, useEffect, useMemo, useRef, useState } = hooks;
   const {
     pathParam,
     lineParam,

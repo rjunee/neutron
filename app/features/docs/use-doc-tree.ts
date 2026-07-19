@@ -11,9 +11,9 @@
  * also precedes the refetch's `acquire()`.
  */
 
-import { useCallback, useEffect, useState } from 'react';
 
 import { DocsClient, type DocTreeNode } from '../../lib/docs-client';
+import { reactHooks, type HookRuntime } from '../../lib/hook-runtime';
 import { useProjectScopedAsync } from './use-project-scoped-async';
 import { formatError } from './docs-shared';
 
@@ -24,13 +24,18 @@ export interface UseDocTree {
   fetchTree: () => Promise<void>;
 }
 
-export function useDocTree(params: {
-  client: DocsClient | null;
-  project_id: string;
-  setError: React.Dispatch<React.SetStateAction<string | null>>;
-}): UseDocTree {
+export function useDocTree(
+  params: {
+    client: DocsClient | null;
+    project_id: string;
+    setError: React.Dispatch<React.SetStateAction<string | null>>;
+  },
+  /** Injectable dispatcher — see `lib/hook-runtime.ts`. Real React by default. */
+  hooks: HookRuntime = reactHooks,
+): UseDocTree {
+  const { useCallback, useEffect, useState } = hooks;
   const { client, project_id, setError } = params;
-  const treeGate = useProjectScopedAsync(project_id, client);
+  const treeGate = useProjectScopedAsync(project_id, client, hooks);
 
   const [tree, setTree] = useState<DocTreeNode[]>([]);
   const [loadingTree, setLoadingTree] = useState(true);

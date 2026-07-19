@@ -16,6 +16,7 @@ import * as RealReact from 'react';
 
 import type { DiagnosticsReport } from '../lib/admin-client';
 import type { DiagnosticsAction, DiagnosticsState } from '../lib/diagnostics-pane-helpers';
+import { type HookRuntime } from '../lib/hook-runtime';
 
 // ── react-native host stubs: each primitive becomes an inspectable element with
 //    its props (testID, onPress, accessibilityState, children) preserved. ──────
@@ -47,6 +48,13 @@ mock.module('react-native', () => ({
 let currentState: DiagnosticsState;
 let capturedEffect: (() => void) | null = null;
 let dispatched: DiagnosticsAction[] = [];
+// The dispatcher stub is INJECTED via DiagnosticsPane's optional `hooks`
+// prop (see `lib/hook-runtime.ts`) — it is NOT installed globally. The old
+// `mock.module('react', ...)` was process-global in bun and survived
+// `mock.restore()`, so every test file that ran after this one rendered
+// against this stub (~92 failures, all `ReactSharedInternals.S` raised
+// inside react-dom). Injection confines it to this file's own calls, so
+// nothing here depends on — or perturbs — test execution ORDER.
 const reactStub = {
   ...RealReact,
   useReducer: () => [currentState, (a: DiagnosticsAction) => dispatched.push(a)] as const,
@@ -54,10 +62,11 @@ const reactStub = {
     capturedEffect = fn;
   },
   useCallback: <T>(fn: T) => fn,
-};
-mock.module('react', () => ({ ...reactStub, default: reactStub }));
+} as unknown as HookRuntime;
 
-// Imported AFTER the mocks are registered.
+// Imported AFTER the react-native mock is registered (that one still has to
+// be a module mock: react-native is Flow-typed and cannot be parsed by bun,
+// so there is no real module to inject host components from).
 const { DiagnosticsPane } = await import('../features/admin/DiagnosticsPane');
 
 interface El {
@@ -150,7 +159,7 @@ describe('DiagnosticsPane component boundary', () => {
   it('fetches on mount and dispatches fetch-start → fetch-success (resolved)', async () => {
     const rep = report('demo');
     const { client, calls } = makeClient(() => Promise.resolve(rep));
-    DiagnosticsPane({ client }); // registers the mount effect via our useEffect stub
+    DiagnosticsPane({ client, hooks: reactStub }); // registers the mount effect via our useEffect stub
     expect(capturedEffect).not.toBeNull();
     await capturedEffect!(); await flush(); // run the mount effect + settle
     // wiring regression (removing `void fetchOne()`) would leave this at 0.
@@ -164,7 +173,7 @@ describe('DiagnosticsPane component boundary', () => {
 
   it('a REJECTED mount fetch dispatches fetch-start → fetch-error (with the formatted message)', async () => {
     const { client } = makeClient(() => Promise.reject(new Error('network boom')));
-    DiagnosticsPane({ client });
+    DiagnosticsPane({ client, hooks: reactStub });
     await capturedEffect!();
     await flush();
     expect(dispatched[0]).toEqual({ type: 'fetch-start' });
@@ -175,7 +184,7 @@ describe('DiagnosticsPane component boundary', () => {
   it('initial load renders ONLY the spinner (no report yet)', () => {
     const { client } = makeClient();
     currentState = { data: null, loading: true, error: null };
-    const tree = DiagnosticsPane({ client });
+    const tree = DiagnosticsPane({ client, hooks: reactStub });
     expect(hasHostType(tree, 'ActivityIndicator')).toBe(true);
     expect(findByTestId(tree, 'admin-diagnostics-refresh')).toBeUndefined();
   });
@@ -183,7 +192,7 @@ describe('DiagnosticsPane component boundary', () => {
   it('loaded state renders sections + a working Refresh control that re-fetches', async () => {
     const { client, calls } = makeClient();
     currentState = { data: report('demo'), loading: false, error: null };
-    const tree = DiagnosticsPane({ client });
+    const tree = DiagnosticsPane({ client, hooks: reactStub });
     // sections rendered (at least the section cards + their titles are present)
     const sectionIds = [...walk(expand(tree))]
       .map((el) => el.props.testID)
@@ -207,14 +216,14 @@ describe('DiagnosticsPane component boundary', () => {
   it('error state renders the error banner', () => {
     const { client } = makeClient();
     currentState = { data: report('demo'), loading: false, error: 'network down' };
-    const tree = DiagnosticsPane({ client });
+    const tree = DiagnosticsPane({ client, hooks: reactStub });
     expect(textContains(tree, 'network down')).toBe(true);
   });
 
   it('refresh-in-flight keeps the report on screen (spinner NOT full-screen) + disables the button', () => {
     const { client } = makeClient();
     currentState = { data: report('demo'), loading: true, error: null };
-    const tree = DiagnosticsPane({ client });
+    const tree = DiagnosticsPane({ client, hooks: reactStub });
     // report still visible (not blanked to a bare spinner)
     expect(findByTestId(tree, 'admin-diagnostics-refresh')).toBeDefined();
     const refresh = findByTestId(tree, 'admin-diagnostics-refresh')!;

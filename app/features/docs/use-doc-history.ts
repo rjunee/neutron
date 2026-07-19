@@ -15,7 +15,6 @@
  * stale-closure trap.
  */
 
-import { useCallback, useEffect, useRef, useState } from 'react';
 
 import {
   DocsClient,
@@ -24,6 +23,7 @@ import {
   type DocFile,
   type VersionContent,
 } from '../../lib/docs-client';
+import { reactHooks, type HookRuntime } from '../../lib/hook-runtime';
 import { useProjectScopedAsync } from './use-project-scoped-async';
 import { formatError } from './docs-shared';
 
@@ -50,14 +50,19 @@ export interface UseDocHistory {
   handleExitPreview: () => void;
 }
 
-export function useDocHistory(params: {
-  client: DocsClient | null;
-  project_id: string;
-  file: DocFile | null;
-  setError: React.Dispatch<React.SetStateAction<string | null>>;
-}): UseDocHistory {
+export function useDocHistory(
+  params: {
+    client: DocsClient | null;
+    project_id: string;
+    file: DocFile | null;
+    setError: React.Dispatch<React.SetStateAction<string | null>>;
+  },
+  /** Injectable dispatcher — see `lib/hook-runtime.ts`. Real React by default. */
+  hooks: HookRuntime = reactHooks,
+): UseDocHistory {
+  const { useCallback, useEffect, useRef, useState } = hooks;
   const { client, project_id, file, setError } = params;
-  const historyGate = useProjectScopedAsync(project_id, client);
+  const historyGate = useProjectScopedAsync(project_id, client, hooks);
 
   const [historyOpen, setHistoryOpen] = useState(false);
   const [historyLoading, setHistoryLoading] = useState(false);

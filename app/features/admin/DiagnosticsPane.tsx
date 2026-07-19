@@ -8,7 +8,9 @@
  * renders its own note.
  */
 
-import React, { useCallback, useEffect, useReducer } from 'react';
+import React from 'react';
+
+import { reactHooks, type HookRuntime } from '../../lib/hook-runtime';
 import { ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 
 import { AdminClient } from '../../lib/admin-client';
@@ -64,7 +66,18 @@ function Row({ label, value }: { label: string; value: string }) {
   );
 }
 
-export function DiagnosticsPane({ client }: { client: AdminClient }) {
+export function DiagnosticsPane({
+  client,
+  // Injectable dispatcher — see `lib/hook-runtime.ts`. Real React by default;
+  // the component-boundary test passes a stub so it can control `useReducer`
+  // state and capture the mount effect WITHOUT mocking the global `react`
+  // module (which polluted every later test in the process).
+  hooks = reactHooks,
+}: {
+  client: AdminClient;
+  hooks?: HookRuntime;
+}) {
+  const { useCallback, useEffect, useReducer } = hooks;
   const [{ data, loading, error }, dispatch] = useReducer(
     diagnosticsReducer,
     initialDiagnosticsState,

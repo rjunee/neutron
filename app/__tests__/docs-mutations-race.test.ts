@@ -31,9 +31,12 @@
  * once the B render is committed, exactly like React.
  */
 
-import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
+import { beforeEach, describe, expect, it } from 'bun:test';
+import * as RealReact from 'react';
 
 import { DocsClientError } from '../lib/docs-client';
+import { type HookRuntime } from '../lib/hook-runtime';
+import { useDocMutations as realUseDocMutations } from '../features/docs/use-doc-mutations';
 
 // ── ordered-slot react hook stub with a committed-effect runner ───────
 type Slot = { v?: unknown; current?: unknown; lastDeps?: unknown[]; cleanup?: unknown };
@@ -46,7 +49,16 @@ function depsEqual(a: unknown[] | undefined, b: unknown[]): boolean {
   return a.every((x, i) => Object.is(x, b[i]));
 }
 
+// INJECTED into `useDocMutations` via its optional `hooks: HookRuntime`
+// parameter (see `lib/hook-runtime.ts`) — NOT installed globally. The old
+// `mock.module('react', ...)` here was process-global in bun and survived
+// `mock.restore()`, so it silently replaced react for every test file that
+// ran after this one (~92 failures of the form `ReactSharedInternals.S`
+// inside react-dom). Injection scopes the stub to this file's own calls.
 const reactStub = {
+  // `useReducer` is unused by `useDocMutations`; the real one satisfies the
+  // HookRuntime contract without pretending to a behaviour under test.
+  useReducer: RealReact.useReducer,
   useState<T>(init: T | (() => T)): [T, (next: T | ((p: T) => T)) => void] {
     const i = idx++;
     if (slots[i] === undefined) {
@@ -76,9 +88,16 @@ const reactStub = {
     if (slots[i] === undefined) slots[i] = {};
     frameEffects.push({ slot: slots[i]!, fn, deps });
   },
-};
-mock.module('react', () => reactStub);
+} as unknown as HookRuntime;
 
+// The hook drivers below pass DELIBERATELY PARTIAL fixtures (a `DocFile`
+// with only the fields the code path reads, a bare `CommitSummary`, …).
+// That was type-invisible while these modules were `await import`ed into an
+// `any`; with the static imports it would now be a compile error, so each
+// hook is aliased through one explicit loose signature. This preserves the
+// pre-existing typing of the drivers EXACTLY — no assertion is relaxed.
+type LooseHook = (params: any, hooks: HookRuntime) => any;
+const useDocMutations = realUseDocMutations as LooseHook;
 function commitEffects(): void {
   for (const e of frameEffects) {
     if (!depsEqual(e.slot.lastDeps, e.deps)) {
@@ -152,7 +171,6 @@ let calls: Trackers;
 let q: Record<Op, { d: Deferred<unknown>; args: unknown[] }[]>;
 let served: Record<Op, number>;
 
-let useDocMutations: any;
 let fakeClient: any;
 
 function op(name: Op, args: unknown[], value?: unknown): Promise<unknown> {
@@ -214,11 +232,6 @@ beforeEach(async () => {
     deleteBinary: (...args: unknown[]) => op('deleteBinary', args),
     uploadBinary: (...args: unknown[]) => op('uploadBinary', args),
   };
-  ({ useDocMutations } = await import('../features/docs/use-doc-mutations'));
-});
-
-afterEach(() => {
-  mock.restore();
 });
 
 const OPEN_FILE = { path: 'notes/a.md', content: 'hello', modified_at: 111, size_bytes: 5 };
@@ -230,30 +243,33 @@ function render(project_id: string, client: unknown = fakeClient) {
   // Deliberate test harness: `useDocMutations` is driven directly against
   // the stubbed react dispatcher, not from a real component render.
   // eslint-disable-next-line react-hooks/rules-of-hooks
-  const api = useDocMutations({
-    client,
-    project_id,
-    file: OPEN_FILE,
-    selectedPath: OPEN_FILE.path,
-    draftContent: 'edited body',
-    mode: 'edit',
-    setFile: (v: unknown) => calls.setFile.push(v),
-    setSelectedPath: (v: unknown) => calls.setSelectedPath.push(v),
-    setDraftContent: (v: unknown) => calls.setDraftContent.push(v),
-    setMode: (v: unknown) => calls.setMode.push(v),
-    setConflict: (v: unknown) => calls.setConflict.push(v),
-    setError: (v: unknown) => calls.setError.push(v),
-    fetchFile: (...a: unknown[]) => op('fetchFile', a) as Promise<void>,
-    fetchTree: (...a: unknown[]) => op('fetchTree', a) as Promise<void>,
-    setTree: (v: unknown) => calls.setTree.push(v),
-    loadHistory: (...a: unknown[]) => op('loadHistory', a) as Promise<void>,
-    setPreviewVersion: (v: unknown) => calls.setPreviewVersion.push(v),
-    setHistoryEntries: () => {},
-    setHistoryCursor: () => {},
-    setHistoryOpen: () => {},
-    setRevertConfirm: (v: unknown) => calls.setRevertConfirm.push(v),
-    setRevertingSha: () => {},
-  });
+  const api = useDocMutations(
+    {
+      client,
+      project_id,
+      file: OPEN_FILE,
+      selectedPath: OPEN_FILE.path,
+      draftContent: 'edited body',
+      mode: 'edit',
+      setFile: (v: unknown) => calls.setFile.push(v),
+      setSelectedPath: (v: unknown) => calls.setSelectedPath.push(v),
+      setDraftContent: (v: unknown) => calls.setDraftContent.push(v),
+      setMode: (v: unknown) => calls.setMode.push(v),
+      setConflict: (v: unknown) => calls.setConflict.push(v),
+      setError: (v: unknown) => calls.setError.push(v),
+      fetchFile: (...a: unknown[]) => op('fetchFile', a) as Promise<void>,
+      fetchTree: (...a: unknown[]) => op('fetchTree', a) as Promise<void>,
+      setTree: (v: unknown) => calls.setTree.push(v),
+      loadHistory: (...a: unknown[]) => op('loadHistory', a) as Promise<void>,
+      setPreviewVersion: (v: unknown) => calls.setPreviewVersion.push(v),
+      setHistoryEntries: () => {},
+      setHistoryCursor: () => {},
+      setHistoryOpen: () => {},
+      setRevertConfirm: (v: unknown) => calls.setRevertConfirm.push(v),
+      setRevertingSha: () => {},
+    },
+    reactStub,
+  );
   commitEffects();
   return api;
 }
