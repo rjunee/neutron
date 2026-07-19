@@ -97,6 +97,28 @@ alerts; settled turn clears; superseded-turn late settle cannot clear; throwing
 turn leaves no permanently-busy record; dying process leaves none either while its
 crash stays reportable; chattering-but-never-completing turn now alerts.
 
+`runtime/adapters/claude-code/persistent/__tests__/stuck-agent-turn-wiring.test.ts`
+covers the DISPATCH SITE itself — `pool.ts` is the only production writer of
+`busy_since`, and every other test seeds the registry by hand, so deleting the
+wiring left the suite green while the detector went permanently dead in
+production (the "built but never wired" pattern). It drives a real turn through
+`createPersistentReplSubstrate` against a gated fake PTY host and asserts busy
+mid-turn / clear after settle / clear after cancel. Mutation-verified both ways:
+removing `markTurnStarted` or `markTurnSettled` fails it.
+
+Incident dedup is keyed `(name, pid, turn_id)`, not `(name, pid)`. A warm REPL
+serves many turns under one pid; without the turn in the key, a second wedged
+turn would be suppressed forever by the first turn's still-open key whenever the
+first settles and the next wedges between detector ticks.
+
+**Boundaries.** `stuck_agent` is a narrow backstop, not broad protection: the
+per-turn driver watchdog abandons on 90 s of PTY silence and caps turns at 45
+min, so the band `stuck_agent` uniquely covers is a continuously-emitting turn
+that never settles for 15-45 min. And because `markTurnStarted` fires only after
+`getOrSpawnSession` + `waitForReplIdle`, a turn wedged in the pre-turn
+spawn/handshake phase is not stuck-detectable — it is bounded by
+`waitForReplIdle`'s own `maxMs` cap instead.
+
 ## 2026-07-18 — Test isolation: the process-global `react` module mock is gone
 
 **Defect (test infrastructure only; no product surface change).** Three `app/`

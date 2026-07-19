@@ -190,6 +190,43 @@ describe('StuckAgentDetector', () => {
     expect(alerts[0]?.payload['turn_id']).toBe('inc:2')
   })
 
+  // DEDUP KEY carries the TURN (F4 round-2 Major). A warm REPL serves many turns
+  // under one (name, pid). If the incident key were (name, pid) only, the FIRST
+  // wedged turn's key would stay open across its settle, and a SECOND turn that
+  // wedges on the same session before a tick observes the idle gap would be
+  // suppressed forever — that process could never alert again for the rest of
+  // its life.
+  test('a SECOND wedged turn on the same warm REPL still alerts after the first one alerted', async () => {
+    let now = 100_000
+    const reg = new ProcessRegistry({ now: () => now })
+    reg.register({ name: 'repl', pid: 4_242, tool_name: 'cc-repl' })
+    const detector = new StuckAgentDetector({
+      owner_slug: 't1',
+      process_registry: reg,
+      inactivity_threshold_ms: 15 * 60_000,
+      now: () => now,
+    })
+
+    // Turn 1 wedges and is reported (and committed, as the supervisor does).
+    reg.markTurnStarted('repl', 4_242, 'inc:1')
+    now += 16 * 60_000
+    const first = await detector.detect()
+    expect(first.length).toBe(1)
+    expect(first[0]?.payload['turn_id']).toBe('inc:1')
+    detector.commit(first[0]!)
+    // Still open on the next tick → no duplicate for the SAME turn.
+    expect(await detector.detect()).toEqual([])
+
+    // Turn 1 eventually settles and turn 2 starts and wedges too — all between
+    // ticks, so no tick ever observes the idle gap in between.
+    reg.markTurnSettled('repl', 4_242, 'inc:1')
+    reg.markTurnStarted('repl', 4_242, 'inc:2')
+    now += 16 * 60_000
+    const second = await detector.detect()
+    expect(second.length).toBe(1)
+    expect(second[0]?.payload['turn_id']).toBe('inc:2')
+  })
+
   // MIRROR-IMAGE LEAK. A turn that throws / times out / is cancelled must not
   // latch `busy_since` forever, or this bug returns inverted: permanent alerts
   // instead of permanent silence. The dispatch site settles in a `finally`, and

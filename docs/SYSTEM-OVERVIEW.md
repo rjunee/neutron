@@ -3071,6 +3071,23 @@ and getting them confused produced a user-visible P1.
   the record or moves it to the crash queue via `markCrashed` — both of which
   drop the live record wholesale, so a dead child leaves nothing busy.
 
+  **Scope — `stuck_agent` is a narrow backstop, not broad protection.** The
+  per-turn driver watchdog in the pool catches most wedges an order of magnitude
+  faster: `failFrozen` abandons a turn after 90 s of PTY silence
+  (`TURN_INACTIVITY_MS`, `gateway/wiring/build-live-agent-turn.ts:95`; 180 s for
+  cold/onboarding turns at `:107`) and enforces a 45-minute absolute ceiling
+  (`TURN_ABSOLUTE_CEILING_MS`, `:117`). With `stuck_agent`'s 15-minute threshold
+  (`detectors.ts`), the band it uniquely covers is a turn that keeps emitting
+  output continuously — so the 90 s silence timer never trips — without settling,
+  for 15 to 45 minutes. Real, but narrow. Do not treat a quiet `stuck_agent` as
+  evidence that turns are healthy; the driver watchdog is the primary guard.
+
+  **Not covered: the pre-turn phase.** `markTurnStarted` fires only once the
+  driver assigns `session.activeTurn`, which is *after* `getOrSpawnSession` and
+  `waitForReplIdle`. A turn wedged in spawn or the REPL handshake is therefore
+  invisible to `stuck_agent` — bounded in practice by `waitForReplIdle`'s own
+  `maxMs` cap in `spawn.ts` rather than by this detector.
+
 - **`crashed_agent` = the child EXITED ABNORMALLY** (non-zero code, or an
   external signal we did not send). Unchanged by the above: the exit handler
   enqueues the crash into `pendingCrashes`, keyed `(name, pid)` independently of
