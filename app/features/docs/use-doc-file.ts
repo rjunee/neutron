@@ -12,7 +12,6 @@
  * Reload — which re-fetches the canonical body via `fetchFile`.
  */
 
-
 import { type BinarySourceResolver } from '../../lib/markdown-render';
 import {
   DocsClient,

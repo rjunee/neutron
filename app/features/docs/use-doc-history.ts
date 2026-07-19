@@ -15,7 +15,6 @@
  * stale-closure trap.
  */
 
-
 import {
   DocsClient,
   DocsClientError,

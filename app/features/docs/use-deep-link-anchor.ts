@@ -42,18 +42,18 @@ export interface UseDeepLinkAnchor {
 
 export function useDeepLinkAnchor(
   params: {
-  pathParam?: string;
-  lineParam?: string;
-  rangeParam?: string;
-  folderParam?: string;
-  file: DocFile | null;
-  selectedPath: string | null;
-  mode: EditorMode;
-  loadingTree: boolean;
-  setFile: React.Dispatch<React.SetStateAction<DocFile | null>>;
-  setSelectedPath: React.Dispatch<React.SetStateAction<string | null>>;
-  fetchFile: (path: string) => Promise<void>;
-},
+    pathParam?: string;
+    lineParam?: string;
+    rangeParam?: string;
+    folderParam?: string;
+    file: DocFile | null;
+    selectedPath: string | null;
+    mode: EditorMode;
+    loadingTree: boolean;
+    setFile: React.Dispatch<React.SetStateAction<DocFile | null>>;
+    setSelectedPath: React.Dispatch<React.SetStateAction<string | null>>;
+    fetchFile: (path: string) => Promise<void>;
+  },
   /** Injectable dispatcher — see `lib/hook-runtime.ts`. Real React by default. */
   hooks: HookRuntime = reactHooks,
 ): UseDeepLinkAnchor {

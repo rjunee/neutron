@@ -19,7 +19,6 @@
  * gate by construction.
  */
 
-
 import {
   DocsClient,
   DocsClientError,
@@ -66,32 +65,32 @@ export interface UseDocMutations {
 
 export function useDocMutations(
   params: {
-  client: DocsClient | null;
-  project_id: string;
-  // ── file cluster ──
-  file: DocFile | null;
-  selectedPath: string | null;
-  draftContent: string;
-  mode: EditorMode;
-  setFile: React.Dispatch<React.SetStateAction<DocFile | null>>;
-  setSelectedPath: React.Dispatch<React.SetStateAction<string | null>>;
-  setDraftContent: React.Dispatch<React.SetStateAction<string>>;
-  setMode: React.Dispatch<React.SetStateAction<EditorMode>>;
-  setConflict: React.Dispatch<React.SetStateAction<boolean>>;
-  setError: React.Dispatch<React.SetStateAction<string | null>>;
-  fetchFile: (path: string) => Promise<void>;
-  // ── tree cluster ──
-  fetchTree: () => Promise<void>;
-  setTree: React.Dispatch<React.SetStateAction<DocTreeNode[]>>;
-  // ── history cluster ──
-  loadHistory: (rel: string, cursor?: string) => Promise<void>;
-  setPreviewVersion: React.Dispatch<React.SetStateAction<VersionContent | null>>;
-  setHistoryEntries: React.Dispatch<React.SetStateAction<CommitSummary[]>>;
-  setHistoryCursor: React.Dispatch<React.SetStateAction<string | null>>;
-  setHistoryOpen: React.Dispatch<React.SetStateAction<boolean>>;
-  setRevertConfirm: React.Dispatch<React.SetStateAction<CommitSummary | null>>;
-  setRevertingSha: React.Dispatch<React.SetStateAction<string | null>>;
-},
+    client: DocsClient | null;
+    project_id: string;
+    // ── file cluster ──
+    file: DocFile | null;
+    selectedPath: string | null;
+    draftContent: string;
+    mode: EditorMode;
+    setFile: React.Dispatch<React.SetStateAction<DocFile | null>>;
+    setSelectedPath: React.Dispatch<React.SetStateAction<string | null>>;
+    setDraftContent: React.Dispatch<React.SetStateAction<string>>;
+    setMode: React.Dispatch<React.SetStateAction<EditorMode>>;
+    setConflict: React.Dispatch<React.SetStateAction<boolean>>;
+    setError: React.Dispatch<React.SetStateAction<string | null>>;
+    fetchFile: (path: string) => Promise<void>;
+    // ── tree cluster ──
+    fetchTree: () => Promise<void>;
+    setTree: React.Dispatch<React.SetStateAction<DocTreeNode[]>>;
+    // ── history cluster ──
+    loadHistory: (rel: string, cursor?: string) => Promise<void>;
+    setPreviewVersion: React.Dispatch<React.SetStateAction<VersionContent | null>>;
+    setHistoryEntries: React.Dispatch<React.SetStateAction<CommitSummary[]>>;
+    setHistoryCursor: React.Dispatch<React.SetStateAction<string | null>>;
+    setHistoryOpen: React.Dispatch<React.SetStateAction<boolean>>;
+    setRevertConfirm: React.Dispatch<React.SetStateAction<CommitSummary | null>>;
+    setRevertingSha: React.Dispatch<React.SetStateAction<string | null>>;
+  },
   /** Injectable dispatcher — see `lib/hook-runtime.ts`. Real React by default. */
   hooks: HookRuntime = reactHooks,
 ): UseDocMutations {

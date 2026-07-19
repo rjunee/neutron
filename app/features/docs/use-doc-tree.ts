@@ -11,7 +11,6 @@
  * also precedes the refetch's `acquire()`.
  */
 
-
 import { DocsClient, type DocTreeNode } from '../../lib/docs-client';
 import { reactHooks, type HookRuntime } from '../../lib/hook-runtime';
 import { useProjectScopedAsync } from './use-project-scoped-async';
