@@ -12,8 +12,8 @@ Running log of what shipped, newest first. One entry per merged change.
 
 ## 2026-07-19 — favicon: the SVG was invalid XML, so browsers rendered nothing
 
-**Bug (live, Ryan's tenant, reproduced independently).** No favicon on
-`n9ac626b4acaded8c.neutron.computer/chat`. Survived a hard refresh and a fresh
+**Bug (live, on a hosted tenant, reproduced independently).** No favicon on
+`<tenant-host>/chat`. Survived a hard refresh and a fresh
 incognito tab, so it was not a cache artifact.
 
 **Root cause.** `landing/favicon.svg` was NOT well-formed XML. Its explanatory
