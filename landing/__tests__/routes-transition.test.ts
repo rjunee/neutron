@@ -47,20 +47,49 @@ const PRE_C5_LANDING_PATHS: readonly string[] = [
   '/apple-touch-icon.png',
 ]
 
+/**
+ * Paths added to the manifest AFTER the C5 relocation, newest last. Kept
+ * SEPARATE from the frozen literal above so `PRE_C5_LANDING_PATHS` stays a
+ * truthful snapshot of what C5 moved — rewriting it to absorb later additions
+ * would destroy the audit trail this file exists to provide. Append here (and
+ * to `LANDING_ROUTE_MANIFEST`, in the same order) when the landing↔gateway
+ * routing contract legitimately grows.
+ *
+ *   - `/favicon.ico` — 2026-07-18 favicon sprint. Browsers request it at the
+ *     origin automatically and negatively-cache the 404; without the path in
+ *     the manifest the gateway never routes it to landing, so adding it to
+ *     landing's brand-asset allowlist alone would still have 404'd on Managed.
+ */
+const ADDED_SINCE_C5: readonly string[] = ['/favicon.ico']
+
+/** The manifest the landing↔gateway contract is expected to carry TODAY. */
+const EXPECTED_LANDING_PATHS: readonly string[] = [
+  ...PRE_C5_LANDING_PATHS,
+  ...ADDED_SINCE_C5,
+]
+
 describe('C5 landing route manifest — transition parity', () => {
-  test('generated LANDING_ROUTE_PATHS === frozen pre-C5 literal', () => {
-    expect(LANDING_ROUTE_PATHS.size).toBe(PRE_C5_LANDING_PATHS.length)
-    for (const p of PRE_C5_LANDING_PATHS) {
+  test('generated LANDING_ROUTE_PATHS === frozen pre-C5 literal + declared additions', () => {
+    expect(LANDING_ROUTE_PATHS.size).toBe(EXPECTED_LANDING_PATHS.length)
+    for (const p of EXPECTED_LANDING_PATHS) {
       expect(LANDING_ROUTE_PATHS.has(p)).toBe(true)
     }
-    // No EXTRA member snuck in beyond the frozen set.
+    // No EXTRA member snuck in beyond the frozen set + declared additions.
     for (const p of LANDING_ROUTE_PATHS) {
-      expect(PRE_C5_LANDING_PATHS.includes(p)).toBe(true)
+      expect(EXPECTED_LANDING_PATHS.includes(p)).toBe(true)
     }
   })
 
-  test('manifest declaration order matches the frozen literal', () => {
-    expect([...LANDING_ROUTE_MANIFEST] as string[]).toEqual([...PRE_C5_LANDING_PATHS])
+  test('every C5-era path survived — nothing was dropped by a later addition', () => {
+    // The half of the guardrail that must NEVER be relaxed: additions may grow
+    // the manifest, but no edit may silently remove a path C5 relocated.
+    for (const p of PRE_C5_LANDING_PATHS) {
+      expect(LANDING_ROUTE_PATHS.has(p)).toBe(true)
+    }
+  })
+
+  test('manifest declaration order matches the frozen literal + appended additions', () => {
+    expect([...LANDING_ROUTE_MANIFEST] as string[]).toEqual([...EXPECTED_LANDING_PATHS])
   })
 
   test('the gateway barrel re-exports the SAME single source', () => {
@@ -71,8 +100,8 @@ describe('C5 landing route manifest — transition parity', () => {
   })
 
   describe('isLandingRoute — three-arm decision parity', () => {
-    test('exact-path arm: every frozen path matches (GET, no invite)', () => {
-      for (const p of PRE_C5_LANDING_PATHS) {
+    test('exact-path arm: every manifest path matches (GET, no invite)', () => {
+      for (const p of EXPECTED_LANDING_PATHS) {
         expect(isLandingRoute(p, 'GET', false)).toBe(true)
       }
     })

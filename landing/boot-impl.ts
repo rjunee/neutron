@@ -190,6 +190,9 @@ export async function bootSignup(options: BootSignupOptions = {}): Promise<BootS
   type Asset = { body: Buffer; type: string }
   const assetEntries: Array<readonly [string, string, string]> = [
     ['/favicon.svg', 'favicon.svg', 'image/svg+xml'],
+    // 2026-07-18 — see the matching note in landing/server.ts: browsers probe
+    // `/favicon.ico` at the origin unprompted and negatively-cache the 404.
+    ['/favicon.ico', 'favicon.ico', 'image/x-icon'],
     ['/apple-touch-icon.png', 'apple-touch-icon.png', 'image/png'],
     ['/site.webmanifest', 'site.webmanifest', 'application/manifest+json'],
     ['/logo.svg', 'logo.svg', 'image/svg+xml'],
@@ -218,15 +221,16 @@ export async function bootSignup(options: BootSignupOptions = {}): Promise<BootS
             headers: { 'content-type': 'text/html; charset=utf-8' },
           })
         }
-        if (req.method === 'GET') {
+        // HEAD served alongside GET — same rationale as landing/server.ts.
+        if (req.method === 'GET' || req.method === 'HEAD') {
           const a = assets.get(url.pathname)
           if (a !== undefined) {
-            return new Response(new Uint8Array(a.body), {
-              headers: {
-                'content-type': a.type,
-                'cache-control': 'public, max-age=86400',
-              },
-            })
+            const headers = {
+              'content-type': a.type,
+              'cache-control': 'public, max-age=86400',
+            }
+            if (req.method === 'HEAD') return new Response(null, { headers })
+            return new Response(new Uint8Array(a.body), { headers })
           }
         }
         return await landing.fetch(req, srv)

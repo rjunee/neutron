@@ -4,7 +4,15 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
 <title>Neutron — chat</title>
+<!-- Icon order is deliberate (2026-07-18): the raster .ico is declared FIRST as the
+     universal fallback (older Safari and some embedded/webview browsers ignore SVG
+     favicons entirely), and browsers that do support SVG favicons prefer the
+     type="image/svg+xml" entry regardless of order. Both resolve to the same atom
+     mark — landing/favicon.ico is generated from landing/favicon.svg by
+     scripts/gen-favicon-ico.py, so regenerate it when the SVG changes. -->
+<link rel="icon" href="/favicon.ico" sizes="32x32" />
 <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+<link rel="mask-icon" href="/favicon.svg" color="#4da3ff" />
 <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
 <link rel="manifest" href="/site.webmanifest" />
 <meta name="apple-mobile-web-app-title" content="Neutron" />

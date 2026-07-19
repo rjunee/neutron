@@ -609,9 +609,17 @@ export function createLandingServer(options: LandingServerOptions): LandingServe
   // Add-to-Home-Screen on `<slug>.<base>/chat` produced an icon-less
   // screenshot shortcut. Same literal-match allowlist shape as boot.ts
   // (no path traversal). Missing files fall through to the default 404.
+  //
+  // 2026-07-18 favicon sprint — `/favicon.ico` joins the allowlist. Browsers
+  // request it at the origin as an AUTOMATIC fallback (no markup required) and
+  // negatively-cache the 404 in a favicon store that a hard refresh does not
+  // clear, so a missing .ico is sticky in a way a missing .svg is not. It must
+  // also be listed in `landing/routes.ts:LANDING_ROUTE_MANIFEST` or the gateway
+  // never routes it here at all.
   const brand_assets = new Map<string, { body: Buffer; type: string }>()
   for (const [route, file, type] of [
     ['/favicon.svg', 'favicon.svg', 'image/svg+xml'],
+    ['/favicon.ico', 'favicon.ico', 'image/x-icon'],
     ['/apple-touch-icon.png', 'apple-touch-icon.png', 'image/png'],
     ['/site.webmanifest', 'site.webmanifest', 'application/manifest+json'],
   ] as const) {
@@ -883,15 +891,21 @@ export function createLandingServer(options: LandingServerOptions): LandingServe
       }
       // ISSUES #208 — PWA/brand assets (manifest + icons) so the
       // per-instance chat surface is installable. Mirrors boot.ts headers.
-      if (req.method === 'GET') {
+      //
+      // HEAD is served alongside GET (2026-07-18): a 404 on HEAD for an asset
+      // that demonstrably exists on GET is simply wrong, and some fetchers /
+      // link-checkers / uptime probes HEAD an asset before GETting it. Same
+      // headers, empty body — per RFC 9110 a HEAD response carries the headers
+      // the equivalent GET would, including `content-type`.
+      if (req.method === 'GET' || req.method === 'HEAD') {
         const asset = brand_assets.get(url.pathname)
         if (asset !== undefined) {
-          return new Response(new Uint8Array(asset.body), {
-            headers: {
-              'content-type': asset.type,
-              'cache-control': 'public, max-age=86400',
-            },
-          })
+          const headers = {
+            'content-type': asset.type,
+            'cache-control': 'public, max-age=86400',
+          }
+          if (req.method === 'HEAD') return new Response(null, { headers })
+          return new Response(new Uint8Array(asset.body), { headers })
         }
       }
       if (url.pathname === '/api/v1/sign-up' && req.method === 'GET') {
