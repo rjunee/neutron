@@ -1,11 +1,33 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#007aff" stroke-width="1.6" role="img" aria-label="Neutron">
-  <!-- The ⚛ atom mark — geometry copied from landing/chat-react/ChatApp.tsx AtomMark()
-       (the rail-header icon): a center dot + 3 rotated electron-orbit ellipses. A favicon
-       can't read page CSS vars, so the accent is a FIXED hex (the light-theme accent token
-       (#007aff) from chat-react.html) rather than currentColor. Square, centered viewBox
-       so it reads at 16px on the browser tab. -->
-  <circle cx="12" cy="12" r="1.7" fill="#007aff" stroke="none" />
-  <ellipse cx="12" cy="12" rx="10" ry="4.3" />
-  <ellipse cx="12" cy="12" rx="10" ry="4.3" transform="rotate(60 12 12)" />
-  <ellipse cx="12" cy="12" rx="10" ry="4.3" transform="rotate(120 12 12)" />
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="32" height="32" role="img" aria-label="Neutron">
+  <!-- The ⚛ atom mark — geometry from landing/chat-react/ChatApp.tsx AtomMark()
+       (the rail-header icon): a center dot + 3 rotated electron-orbit ellipses.
+
+       FAVICON-LEGIBILITY (2026-07-18, ISSUES: "no favicon on the chat tab").
+       The 2026-07-03 rewrite (233e0c1b) dropped the opaque background tile the
+       ORIGINAL favicon carried and drew the atom as a transparent, stroke-only
+       outline in the fixed light-theme accent #007aff at stroke-width 1.6 on a
+       0 0 24 24 viewBox. Rendered into a 16px tab slot that stroke lands at
+       ~1.07 device px of mid-blue on TRANSPARENT — against Chrome's near-black
+       dark tab strip it is effectively invisible, which is why the tab read as
+       "no favicon" even though /favicon.svg served 200. Three changes fix it:
+
+         1. Opaque rounded-rect tile (#0b0e14 — the shell's theme-color) so the
+            mark never composites onto an unknown tab-strip colour. This is what
+            the pre-233e0c1b icon did and why it "used to work fine".
+         2. Accent lifted #007aff → #4da3ff. Same blue family as the rail header,
+            but enough luminance over #0b0e14 to survive 16px downsampling.
+         3. 0 0 32 32 viewBox + stroke-width 2.6 → ~1.3 device px at 16px, and a
+            solid r=3.2 core. The core carries recognition at small sizes; the
+            orbits are texture (identical trade to the original's solid r=6 core).
+
+       A favicon can't read page CSS vars, so the accent is a FIXED hex.
+       landing/favicon.ico is the raster fallback, generated from THIS geometry —
+       regenerate it (scripts/gen-favicon-ico.py) whenever this file changes. -->
+  <rect width="32" height="32" rx="7" fill="#0b0e14" />
+  <circle cx="16" cy="16" r="3.2" fill="#4da3ff" />
+  <g fill="none" stroke="#4da3ff" stroke-width="2.6">
+    <ellipse cx="16" cy="16" rx="11.5" ry="4.9" />
+    <ellipse cx="16" cy="16" rx="11.5" ry="4.9" transform="rotate(60 16 16)" />
+    <ellipse cx="16" cy="16" rx="11.5" ry="4.9" transform="rotate(120 16 16)" />
+  </g>
 </svg>

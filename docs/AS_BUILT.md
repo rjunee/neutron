@@ -10,6 +10,63 @@ Running log of what shipped, newest first. One entry per merged change.
 > `docs/research/AS-BUILT-docs-archive-2026-07.md`. This file is the ONE live
 > changelog going forward.
 
+## 2026-07-18 — Favicon: the tab icon renders again (root cause = an invisible SVG, not a serving gap)
+
+Ryan reported NO favicon on his tenant chat tab (`https://<slug>.neutron.computer/chat`),
+"used to work fine", hard refresh no help. Four defects, one of which is the actual cause.
+
+**ROOT CAUSE — the SVG was serving fine and rendering invisibly.** `GET /favicon.svg`
+returned 200 with correct bytes the whole time, and `landing/chat-react.html:7-9` carried
+the `<link rel="icon">` tags; the shell is served verbatim (`landing/server.ts:699-713`
+version-injects only `src="/chat-react.js"`), and the Managed auth gate is decision-only
+(`gateway/http/compose.ts:130-172`), so the markup provably reaches the browser. The
+regression is `233e0c1b` (2026-07-03, the "atom favicon" in this same log at §2026-07-03):
+it replaced an icon that had an OPAQUE `#0b0e14` tile + a solid `r=6/64` core with a
+TRANSPARENT, stroke-only atom in the fixed light-theme accent `#007aff` at `stroke-width
+1.6` on a `0 0 24 24` viewBox. In a 16px tab slot that stroke is `1.6 × 16/24 ≈ 1.07`
+device px of mid-blue composited onto Chrome's near-black dark tab strip — present, but
+imperceptible. Hence "it used to work fine", and hence a hard refresh changing nothing:
+the icon was always loading. `landing/favicon.svg` now restores an opaque rounded tile,
+lifts the accent to `#4da3ff` (same rail-header blue family, enough luminance over
+`#0b0e14`), and moves to `0 0 32 32` @ `stroke-width 2.6` (≈1.3 device px) with a solid
+`r=3.2` core. Verified by rasterising the shipped 16px entry over both a white and a
+`#202124` backdrop.
+
+**`/favicon.ico` now exists and is served.** There was no `.ico` anywhere in the repo, and
+`/favicon.ico` was absent from `LANDING_ROUTE_MANIFEST` (`landing/routes.ts`), so on
+Managed the gateway never routed the path to landing at all — the brand-asset allowlist
+alone would not have been enough. Browsers request it at the origin unprompted and cache
+the 404 negatively in a store a hard refresh does not clear. `landing/favicon.ico` is a
+real 6-size (16→256) ICO generated from the SVG geometry by the committed
+`scripts/gen-favicon-ico.py` (Pillow, dev-only — regenerate when the SVG changes); it is
+declared FIRST in `chat-react.html` + `index.html` as the universal raster fallback, and
+added to `site.webmanifest`.
+
+**HEAD is answered on brand assets.** The handlers in `landing/server.ts` and
+`landing/boot-impl.ts` were `req.method === 'GET'`-only, so `HEAD /favicon.svg` fell
+through to the 404 tail for an asset that demonstrably exists on GET. Both now serve
+`GET || HEAD` with identical headers and an empty HEAD body (RFC 9110).
+
+**APEX — NOT FIXED HERE; it is an out-of-tree neutron-managed defect.** `GET
+https://neutron.computer/favicon.svg` 404s with `{"error":"not found"}`, which is
+`neutron-managed/src/index.ts:642` — the apex is served by the Managed control-plane
+process (`neutron.computer` → `127.0.0.1:7780`, per
+`neutron-managed/scripts/provision-hetzner.sh:451-473`), which has NO static-asset
+allowlist at all. Open's `landing/boot-impl.ts` serves `signup.neutron.computer` (already
+200 on `/favicon.svg`), not the apex, so no change in this repo can fix it. Filed as a
+Managed follow-up: either give the control-plane router an asset allowlist, or repair the
+shadowed `apex-marketing` `file_server` route. The `.ico` + HEAD additions to
+`boot-impl.ts` do improve `signup.neutron.computer` and are kept.
+
+Tests: `landing/__tests__/favicon-serving.test.ts` boots the REAL servers and asserts
+responses, not route-table bookkeeping — `GET /favicon.ico` 200 + a valid ICO container
+header (guards against "fixing" the 404 by aliasing SVG bytes at an `image/x-icon` path),
+`HEAD` parity across all four brand assets, the served `/chat` body carrying the icon
+links AND every declared href resolving 200, the SVG's 16px stroke/contrast budget, and
+the apex-shaped `bootSignup` surface over GET+HEAD.
+`landing/__tests__/routes-transition.test.ts` grows an append-only `ADDED_SINCE_C5` list
+rather than rewriting its frozen pre-C5 snapshot, so the routing audit trail survives.
+
 ## 2026-07-19 — favicon: the SVG was invalid XML, so browsers rendered nothing
 
 **Bug (live, Ryan's tenant, reproduced independently).** No favicon on

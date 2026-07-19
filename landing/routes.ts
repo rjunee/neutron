@@ -71,6 +71,14 @@ export const LANDING_ROUTE_MANIFEST = [
   '/site.webmanifest',
   '/favicon.svg',
   '/apple-touch-icon.png',
+  //   - `/favicon.ico`                    2026-07-18 favicon sprint. Browsers
+  //     request it at the origin automatically (no markup needed) and cache the
+  //     404 negatively; without it in this manifest the gateway never routes the
+  //     path to landing at all, so the brand-asset allowlist alone is not enough.
+  //     APPENDED LAST — `landing/__tests__/routes-transition.test.ts` pins
+  //     declaration order against a frozen pre-C5 snapshot + an append-only
+  //     `ADDED_SINCE_C5` list; keep new paths at the end and mirror them there.
+  '/favicon.ico',
 ] as const
 
 /**
