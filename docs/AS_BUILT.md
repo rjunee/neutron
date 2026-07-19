@@ -10,6 +10,102 @@ Running log of what shipped, newest first. One entry per merged change.
 > `docs/research/AS-BUILT-docs-archive-2026-07.md`. This file is the ONE live
 > changelog going forward.
 
+## 2026-07-18 — Test isolation: the process-global `react` module mock is gone
+
+**Defect (test infrastructure only; no product surface change).** Three `app/`
+test files installed their hook-dispatcher stub with
+`mock.module('react', ...)` — `app/__tests__/docs-read-hooks.test.ts`,
+`app/__tests__/docs-mutations-race.test.ts`,
+`app/__tests__/diagnostics-pane-render.test.ts`. In bun that registration is
+**global to the test process** and is NOT undone by `mock.restore()` (module
+mocks are exempt). Once any one of those files ran, every later test in the
+same process that rendered through `react-dom` received the stub instead of
+real React. Signature: `TypeError: undefined is not an object (evaluating
+'ReactSharedInternals.S')` thrown inside
+`node_modules/react-dom/cjs/react-dom-client.development.js`. Measured blast
+radius at `main` b1007876: ~92 failures. Minimal repro — the SAME file passes
+or fails purely on ORDER:
+
+```
+bun test landing/chat-react/__tests__/work-board-tab.test.tsx                       → 17 pass / 0 fail
+bun test app/__tests__/docs-read-hooks.test.ts <same file>                          → 17 FAIL
+```
+
+That is worse than 92 red lines: a real regression anywhere in the polluted
+tail was indistinguishable from the noise.
+
+**Fix — dependency injection, not a bigger mock.** New
+`app/lib/hook-runtime.ts` exports `HookRuntime` (the six dispatcher hooks) and
+`reactHooks`, the real React implementation. Every unit whose test needs a
+substituted dispatcher now takes it explicitly, defaulting to real React:
+
+- `useProjectScopedAsync(projectId, client, hooks = reactHooks)` — the shared
+  race-guard primitive; it threads the runtime it is given.
+- `useDocFile`, `useDocTree`, `useDocHistory`, `useDeepLinkAnchor`,
+  `useDocMutations` — optional trailing `hooks: HookRuntime = reactHooks`,
+  forwarded to `useProjectScopedAsync` so one injected runtime covers the
+  whole hook subtree.
+- `DiagnosticsPane` — optional `hooks?: HookRuntime` prop (its test invokes the
+  component directly, so a prop is the seam that reaches it).
+
+Production call sites are unchanged and pass nothing. The substitution is now
+scoped to the individual call, so **no execution order can affect any test**.
+The read-hooks and mutations suites also drop their `await import(...)` dance
+for plain static imports — there is no longer a mock that must be registered
+before the module graph links.
+
+**What did NOT change:** no test was skipped, weakened or deleted. Every stub,
+harness and assertion is byte-for-byte the same behaviour; the suites still
+prove the same `isLatest`-before-`setState` race guards, argument fidelity and
+component wiring. The one typing addition is a `LooseHook` alias in the two
+driver tests, which reproduces EXACTLY the typing those drivers had while the
+hooks were `await import`ed into an `any` (the fixtures are deliberately
+partial); `tsc -p app/tsconfig.json` and the root `tsc` are both clean.
+
+**Deliberately still module-mocked:** `mock.module('react-native', ...)` in
+`diagnostics-pane-render.test.ts` and `docs-panes-render.test.ts`. react-native
+is Flow-typed and cannot be parsed by bun at all, so there is no real module
+for any test to load — the stub cannot displace a working implementation the
+way the react stub did, and nothing outside `app/` imports it.
+
+**Second, independent order-dependency fixed in the same pass.**
+`gateway/__tests__/doc-link-production-composer.test.ts` interpolated the
+EAGER `WEB_APP_BASE` constant (frozen at that file's module load) into its
+expected URL, while the rewriter under test recomputes `webAppBase()` per call
+by design (`wire-types/doc-links.ts:127-130`). Two sibling files set
+`NEUTRON_WEB_APP_BASE` at THEIR module load and never restore it
+(`runtime/__tests__/doc-links.test.ts:32`,
+`runtime/__tests__/doc-links-parity.test.ts:21`), so expected and produced
+disagreed purely on ORDER — the test passed alone and failed in the full run.
+The assertion now resolves the base the same way the production code does, so
+it pins the identical rewrite shape under ANY ambient env (verified passing
+both with the var unset and with `NEUTRON_WEB_APP_BASE=https://polluted.example`).
+The env leak in those two runtime files is left as-is and noted: nothing now
+depends on it, and restoring it mid-run would itself race concurrent files.
+
+**Also updated:** `app/__tests__/docs-hooks-invariants.test.ts` — two
+source-text guardrails match the hook signatures by regex, so they were
+retargeted at the new signatures. They still pin exactly what they pinned:
+`useProjectScopedAsync`'s SCOPE parameters are still asserted to be exactly
+`(projectId: string, client: unknown)` with the injected runtime explicitly
+accounted for, and `useDocMutations` still acquires exactly ONE gate.
+
+**Suite result** (single `bun test` at the repo root, clean tree):
+before 10699 pass / 93 fail / 2 errors → after 10812 pass / 0 fail / 0 errors,
+9 skipped in both (unchanged).
+
+[`app/lib/hook-runtime.ts`, `app/features/docs/use-project-scoped-async.ts`,
+`app/features/docs/use-doc-file.ts`, `app/features/docs/use-doc-tree.ts`,
+`app/features/docs/use-doc-history.ts`,
+`app/features/docs/use-deep-link-anchor.ts`,
+`app/features/docs/use-doc-mutations.ts`,
+`app/features/admin/DiagnosticsPane.tsx`,
+`app/__tests__/docs-read-hooks.test.ts`,
+`app/__tests__/docs-mutations-race.test.ts`,
+`app/__tests__/diagnostics-pane-render.test.ts`,
+`app/__tests__/docs-hooks-invariants.test.ts`,
+`gateway/__tests__/doc-link-production-composer.test.ts`]
+
 ## 2026-07-18 — Onboarding finalize: a progress signal, an orienting closing, concurrent openings
 
 **Bug (live, Ryan's install).** `onboarding/openings/finalize.ts` awaited

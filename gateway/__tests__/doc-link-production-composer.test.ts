@@ -54,7 +54,7 @@ import type { TelegramClient } from '@neutronai/channels/adapters/telegram/clien
 import {
   NEUTRON_SCHEME,
   VAULT_REDIRECTOR_BASE,
-  WEB_APP_BASE,
+  webAppBase,
 } from '@neutronai/runtime/doc-links.ts'
 import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
@@ -240,8 +240,17 @@ test('production composer: app-ws web platform rewrites docs:/ + ?line=42 to htt
   expect(captured.length).toBe(1)
   const env = captured[0]!
   if (env.type !== 'agent_message') throw new Error('expected agent_message')
+  // `webAppBase()` (LIVE), not the eagerly-snapshotted `WEB_APP_BASE`
+  // constant: the rewriter under test recomputes the base per call (see
+  // `wire-types/doc-links.ts:127`), while the constant froze at THIS file's
+  // module load. A sibling file that sets the base env at ITS module load
+  // and never restores it (`runtime/__tests__/doc-links.test.ts:32`,
+  // `runtime/__tests__/doc-links-parity.test.ts:21`) therefore made the
+  // expected and produced values disagree purely on execution ORDER.
+  // Resolving both sides the same way pins the identical rewrite shape
+  // under any ambient env — nothing is relaxed.
   expect(env.body).toBe(
-    `See [plan](${WEB_APP_BASE}/projects/acme/docs?path=launch-plan.md&line=42).`,
+    `See [plan](${webAppBase()}/projects/acme/docs?path=launch-plan.md&line=42).`,
   )
 })
 
