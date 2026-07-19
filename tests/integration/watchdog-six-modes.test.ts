@@ -67,11 +67,12 @@ describe('watchdog six modes — supervisor wires every detector + persists + no
       now: nowFn,
     })
 
-    // 2. stuck_agent: registered process whose last_activity_at is ancient
+    // 2. stuck_agent: registered process with an OUTSTANDING TURN that is ancient
     const procReg = new ProcessRegistry({ now: nowFn })
     procReg.register({ name: 'old', pid: 9_999_991, tool_name: 't' })
-    // re-mutate the just-registered record so its activity is older than the threshold
-    procReg.list()[0]!.last_activity_at = now - 30 * 60_000
+    procReg.markTurnStarted('old', 9_999_991, 'inc:1')
+    // re-mutate the just-marked record so its TURN started before the threshold
+    procReg.list()[0]!.busy_since = now - 30 * 60_000
     const stuck = new StuckAgentDetector({
       owner_slug: owner,
       process_registry: procReg,

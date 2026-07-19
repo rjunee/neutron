@@ -103,7 +103,15 @@ export class HeartbeatDetector implements WatchdogDetector {
 
 export interface StuckAgentDetectorOptions extends CommonDetectorOptions {
   process_registry: ProcessRegistry
-  /** Default 15 minutes (matches Nova's stuck-agent threshold). */
+  /**
+   * How long a DISPATCHED TURN may stay outstanding before it is judged stuck.
+   * Default 15 minutes (matches Nova's stuck-agent threshold).
+   *
+   * NOTE: this is measured from when the TURN STARTED, not from the process's
+   * last output. A registered process with no outstanding turn — the resting
+   * state of every warm pooled REPL — is never stuck regardless of how long it
+   * has been quiet.
+   */
   inactivity_threshold_ms?: number
 }
 
@@ -151,7 +159,11 @@ export class StuckAgentDetector implements WatchdogDetector {
           pid: r.pid,
           tool_name: r.tool_name,
           last_activity_at: r.last_activity_at,
-          age_ms: now - r.last_activity_at,
+          // Age of the OUTSTANDING TURN — what "stuck" now means. `busy_since`
+          // is non-null for every record `listStuck` returns.
+          turn_started_at: r.busy_since,
+          turn_id: r.busy_turn_id,
+          age_ms: now - (r.busy_since ?? r.last_activity_at),
         },
       }
     })

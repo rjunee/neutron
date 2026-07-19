@@ -4,6 +4,7 @@
 
 import { createHash, randomBytes } from 'node:crypto'
 import { unlinkSync } from 'node:fs'
+import type { LiveProcessHandle } from '@neutronai/tools/process-registry.ts'
 import type { Api5xxWatcherHandle } from './api5xx-dead-turn-watcher.ts'
 import { OutputScanner } from './output-scan.ts'
 import type { PtyChild } from './pty-host.ts'
@@ -126,6 +127,13 @@ export class ReplSession {
    *  `tmpdir()` forever, directly countering the bounding-growth goal (Argus r5
    *  IMPORTANT). Unlinked on dispose + on child exit (covers pool + crash). */
   configPaths: readonly string[] = []
+  /** F4 — the watchdog live-process handle for THIS incarnation's child, set by
+   *  `spawn.ts` right after it registers the PID. The dispatch site uses it to
+   *  declare a turn outstanding (`markTurnStarted`) and to clear it in a
+   *  `finally` (`markTurnSettled`) — the ONLY input to stuck-agent detection.
+   *  Undefined before the child is registered, and a no-op handle when no
+   *  ambient registry exists (unit tests / LLM-less box). */
+  liveHandle: LiveProcessHandle | undefined
   /** Notices that must reach the user but were produced while NO turn was active.
    *  The resume-picker recovery (row #7) fires during SPAWN — before `start()`
    *  assigns `activeTurn` — so its "session recovered/lost" notice would be a

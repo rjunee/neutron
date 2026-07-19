@@ -371,6 +371,11 @@ async function spawnSession(
     tool_name: 'cc-repl',
     meta: { session_id: sessionId, channel: channelName },
   })
+  // Publish the handle on the session so the DISPATCH site (pool.ts) can declare
+  // a turn outstanding / settled. That outstanding-turn window — NOT this child's
+  // output age — is what stuck-agent detection measures, so an idle warm REPL
+  // between turns is correctly never stuck.
+  session.liveHandle = liveHandle
 
   // Master-table row #11: start the per-turn API-5xx dead-turn JSONL watcher for
   // THIS child's transcript. A mid-turn 5xx (`Overloaded`/`internal_server_error`

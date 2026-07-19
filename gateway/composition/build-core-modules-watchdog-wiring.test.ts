@@ -106,9 +106,16 @@ describe('F4 — build-core-modules watchdog + process-registry wiring', () => {
 
     // Seed a stuck+dead process THROUGH the ambient accessor — proving the
     // process-registry module published itself ambiently (spawn-site parity).
-    registerLiveProcessSafe({ name: 'wedged', pid: 999_999, tool_name: 'cc-repl' })
-    // Age its activity past the 15-min stuck threshold.
-    processRegistry.list()[0]!.last_activity_at = NOW - 30 * 60_000
+    const wedgedHandle = registerLiveProcessSafe({
+      name: 'wedged',
+      pid: 999_999,
+      tool_name: 'cc-repl',
+    })
+    // Give it an OUTSTANDING TURN and age that turn past the 15-min stuck
+    // threshold. Stuck is measured from turn start, not output age — a
+    // registered-but-idle REPL is correctly never stuck.
+    wedgedHandle.markTurnStarted('inc:1')
+    processRegistry.list()[0]!.busy_since = NOW - 30 * 60_000
 
     // Seed an overrun cron row → overrun_cron fires.
     cron.jobs.register({

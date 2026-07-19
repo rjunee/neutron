@@ -3030,6 +3030,53 @@ the `watchdog/` AlertStore) when the registry moves to SQLite-backed
 persistence in S4. (Distinct from the OS-process-level `watchdog/` module, which
 runs the same liveness idea over `tools/process-registry.ts` for crons/tools.)
 
+## Supervisor watchdog — what `stuck_agent` and `crashed_agent` actually mean (`watchdog/detectors.ts`)
+
+The OS-process-level supervisor runs a tick of independent detectors over
+`tools/process-registry.ts` and posts `⚠️ Supervisor alert: <kind>` to the owner.
+Two of them read the live-process view; their definitions are NOT interchangeable
+and getting them confused produced a user-visible P1.
+
+- **`stuck_agent` = A DISPATCHED TURN STOPPED PROGRESSING.** Each `ProcessRecord`
+  carries `busy_since: number | null` plus the owning `busy_turn_id`. The pool
+  driver (`runtime/adapters/claude-code/persistent/pool.ts`) declares a turn
+  outstanding via `LiveProcessHandle.markTurnStarted(turnId)` when it assigns
+  `session.activeTurn`, and clears it with `markTurnSettled(turnId)` **in a
+  `finally`**, so every unwind path — completion, early return, throw, cancel,
+  timeout — settles. `ProcessRegistry.listStuck` returns only records with
+  `busy_since !== null && busy_since < now - threshold`. **A record with
+  `busy_since === null` is never stuck, however long it has been quiet.**
+
+  This replaced a pure age filter over `last_activity_at` (2026-07-18). That
+  field answers "when did this process last EMIT OUTPUT" — it is bumped only from
+  the PTY `onData` handler in `spawn.ts`. But for a request/response REPL,
+  **silence is the normal resting state**: a warm pooled session exists precisely
+  to sit idle between turns so the next message skips a cold start. The detector
+  therefore alerted on correct, healthy, by-design behaviour forever, and got
+  worse with every topic in use (26 false alerts on a fixed half-hourly cadence
+  against two verified-alive `cc-repl` PTYs on Ryan's install). Measuring from
+  turn start also *gains* a signal the old filter missed: a turn that keeps
+  emitting output but never completes (spinner / retry loop) now alerts.
+
+  Both marker mutations are identity-guarded in the same style as
+  `touchIfPid`/`unregisterIfPid` — `markTurnStarted` on `pid`, `markTurnSettled`
+  on `pid` **and** `turn_id` — so a late call from a superseded turn or an old
+  child cannot clear the marker of the turn (or the respawned successor) that
+  replaced it, which would blind the detector to a real wedge.
+
+  Leak prevention is the crux, because a latched `busy_since` would recreate the
+  bug in mirror image (permanent alerts instead of permanent silence). Three
+  independent covers: the `finally` at the dispatch site; the turn-id guard; and
+  process death, where the child-exit handler in `spawn.ts` either `unregister`s
+  the record or moves it to the crash queue via `markCrashed` — both of which
+  drop the live record wholesale, so a dead child leaves nothing busy.
+
+- **`crashed_agent` = the child EXITED ABNORMALLY** (non-zero code, or an
+  external signal we did not send). Unchanged by the above: the exit handler
+  enqueues the crash into `pendingCrashes`, keyed `(name, pid)` independently of
+  the live slot, and the detector reports each once and reaps it on commit. This
+  is a genuinely useful signal and is fully intact.
+
 ## Agent dispatch family — named specialists + ad-hoc spawn (`agent-dispatch/`)
 
 Vajra dispatches a small family of background specialist agents (and ad-hoc

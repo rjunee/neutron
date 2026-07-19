@@ -45,6 +45,28 @@ export interface ProcessRecord {
    * carries this. Absent while the process is live.
    */
   exit_status?: 'crashed'
+  /**
+   * Wall-clock unix-ms at which this process's CURRENTLY-OUTSTANDING dispatched
+   * turn began, or `null` when the process has no outstanding work.
+   *
+   * THIS — not `last_activity_at` — is what "stuck" is measured against. A warm
+   * pooled REPL exists precisely to sit QUIET between turns so the next message
+   * skips a cold start, so silence is its normal RESTING state, not a symptom.
+   * Judging it on output-age alerted forever on correct, healthy, by-design
+   * behaviour (26 false `stuck_agent` alerts on Ryan's install against two
+   * verified-alive `cc-repl` PTYs, 2026-07-18). A record with `busy_since ===
+   * null` is NEVER stuck; a record whose TURN started longer ago than the
+   * threshold is stuck even if the child has been chattering the whole time
+   * (which is the genuine wedge this detector exists to catch).
+   */
+  busy_since: number | null
+  /**
+   * The `ActiveTurn.turnId` (`<incarnation>:<seq>`) owning {@link busy_since},
+   * or `null` when idle. Settling is guarded on it so a late settle from a
+   * superseded/cancelled turn cannot clear the marker of the turn that replaced
+   * it (which would blind the detector to a real wedge).
+   */
+  busy_turn_id: string | null
 }
 
 export interface ProcessRegisterInput {
@@ -98,6 +120,8 @@ export class ProcessRegistry {
       started_at: t,
       last_activity_at: t,
       meta: { ...(input.meta ?? {}) },
+      busy_since: null,
+      busy_turn_id: null,
     }
     this.records.set(input.name, record)
     return record
@@ -120,6 +144,38 @@ export class ProcessRegistry {
     const r = this.records.get(name)
     if (r === undefined || r.pid !== pid) return false
     r.last_activity_at = this.now()
+    return true
+  }
+
+  /**
+   * Mark the entry as having an OUTSTANDING dispatched turn, stamping
+   * `busy_since` at now. Identity-guarded on `pid` (same contract as
+   * {@link touchIfPid}) so a late start from an OLD child cannot mark the NEW
+   * child a respawn installed under the same `name`. Re-marking an already-busy
+   * entry with a DIFFERENT turn re-stamps it — the newer turn is the one now
+   * outstanding, and its age is what matters. Returns true only when the
+   * matching entry was marked.
+   */
+  markTurnStarted(name: string, pid: number, turn_id: string): boolean {
+    const r = this.records.get(name)
+    if (r === undefined || r.pid !== pid) return false
+    r.busy_since = this.now()
+    r.busy_turn_id = turn_id
+    return true
+  }
+
+  /**
+   * Clear the outstanding-turn marker. Identity-guarded on BOTH `pid` AND
+   * `turn_id`: a settle from a superseded turn (a cancelled/timed-out
+   * predecessor whose driver unwinds after the next turn already started) must
+   * NOT clear the successor's marker, or a genuinely wedged turn would go
+   * unreported. Returns true only when the exact `(pid, turn_id)` was cleared.
+   */
+  markTurnSettled(name: string, pid: number, turn_id: string): boolean {
+    const r = this.records.get(name)
+    if (r === undefined || r.pid !== pid || r.busy_turn_id !== turn_id) return false
+    r.busy_since = null
+    r.busy_turn_id = null
     return true
   }
 
@@ -212,10 +268,19 @@ export class ProcessRegistry {
     return [...this.records.values()].sort((a, b) => a.name.localeCompare(b.name))
   }
 
-  /** Snapshot of records whose last_activity_at is older than threshold_ms ago. */
+  /**
+   * Snapshot of records with an OUTSTANDING dispatched turn that started longer
+   * than `threshold_ms` ago — i.e. a turn that stopped progressing.
+   *
+   * Deliberately NOT an age filter over `last_activity_at`: that field answers
+   * "when did this process last EMIT OUTPUT", and for a request/response REPL
+   * silence is the normal resting state between turns, so filtering on it
+   * reported every healthy idle warm session as stuck, forever. A record with
+   * `busy_since === null` has no outstanding work and is never stuck.
+   */
   listStuck(threshold_ms: number = STUCK_PROCESS_INACTIVITY_MS): ProcessRecord[] {
     const cutoff = this.now() - threshold_ms
-    return this.list().filter((r) => r.last_activity_at < cutoff)
+    return this.list().filter((r) => r.busy_since !== null && r.busy_since < cutoff)
   }
 
   size(): number {
@@ -292,6 +357,22 @@ export interface LiveProcessHandle {
    * pid)` is still current (a respawn that replaced it is untouched).
    */
   markCrashed(): void
+  /**
+   * Declare a dispatched turn OUTSTANDING on the owned entry — the clock the
+   * stuck-agent detector actually measures. No-op unless `(registry, name, pid)`
+   * is still current.
+   */
+  markTurnStarted(turnId: string): void
+  /**
+   * Clear the outstanding-turn marker for `turnId`. MUST be called from a
+   * `finally` at the dispatch site so an exception, cancellation, or timeout
+   * cannot latch `busy_since` forever — a latched marker would recreate this bug
+   * in mirror image (permanent alerts instead of permanent silence). The
+   * child-exit paths drop the record wholesale, which covers process death.
+   * No-op unless `(registry, name, pid)` is current AND `turnId` is the turn
+   * currently marked.
+   */
+  markTurnSettled(turnId: string): void
 }
 
 /** Handle returned when there is no ambient registry to write into. */
@@ -299,6 +380,8 @@ const NOOP_LIVE_PROCESS_HANDLE: LiveProcessHandle = {
   touch(): void {},
   unregister(): void {},
   markCrashed(): void {},
+  markTurnStarted(): void {},
+  markTurnSettled(): void {},
 }
 
 /**
@@ -343,6 +426,20 @@ export function registerLiveProcessSafe(input: ProcessRegisterInput): LiveProces
       markCrashed(): void {
         try {
           owner.enqueueCrash(record)
+        } catch {
+          // swallow
+        }
+      },
+      markTurnStarted(turnId: string): void {
+        try {
+          owner.markTurnStarted(name, pid, turnId)
+        } catch {
+          // Observability write — must never perturb the turn it observes.
+        }
+      },
+      markTurnSettled(turnId: string): void {
+        try {
+          owner.markTurnSettled(name, pid, turnId)
         } catch {
           // swallow
         }
