@@ -20,7 +20,7 @@
  * test.
  */
 
-import { test, expect } from 'bun:test'
+import { describe, test, expect } from 'bun:test'
 import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -262,4 +262,61 @@ test('a FAILED persona compose leaves persona_files_committed false (the flag ne
   const row = await h.stateStore.get(OWNER_SLUG, USER_ID)
   expect(row?.phase).toBe('completed')
   expect(row?.persona_files_committed).toBe(false)
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DATA CORRUPTION regression (live, Ryan's managed install 2026-07-19)
+//
+// Project openings were briefly composed through a bounded worker pool to cut
+// the multi-minute silence during finalize. It CROSSED PROJECT CONTENT: the
+// `ostro` topic opened with Video & Film Production's plan, and the
+// `video-film-production` topic opened with DTC Ecommerce's — each project got
+// the PREVIOUS project's body while keeping its own (correct) name. The on-disk
+// STATUS.md files were correct throughout; only the composed openings shifted.
+//
+// The composer beneath `projectKickoff` dispatches through the shared
+// CC-substrate LLM client, which is not safe for overlapping in-flight turns
+// from this call site. This test pins the invariant that actually matters —
+// every project's body belongs to THAT project — so the loop can never be
+// parallelised again without proving it.
+// ─────────────────────────────────────────────────────────────────────────────
+describe('project openings — every body belongs to its OWN project', () => {
+  test('REGRESSION: bodies are never crossed between projects', async () => {
+    const h = makeHarness()
+    // A kickoff composer that echoes the project it was asked about. Under the
+    // pooled implementation the echo landed on a DIFFERENT project's topic.
+    // A kickoff composer that models the REAL failure mode: it dispatches
+    // through a shared client with ONE in-flight slot, exactly like the
+    // CC-substrate LLM client beneath the production composer. Serial callers
+    // are correct; overlapping callers read each other's slot and get the wrong
+    // project's answer back. A fake that is a pure function of its input CANNOT
+    // reproduce this — it would pass under the pooled implementation too (a
+    // trap this test fell into on the first attempt).
+    let sharedSlot: string | null = null
+    h.deps.projectKickoff = {
+      composeKickoff: async (input: { project_id: string; name: string }) => {
+        sharedSlot = input.project_id // claim the single slot
+        await new Promise((r) => setTimeout(r, 5)) // the in-flight window
+        const answered = sharedSlot // whatever occupies it when we return
+        return { body: `PLAN-FOR:${answered}` }
+      },
+    } as unknown as OnboardingFinalizeDeps['projectKickoff']
+
+    const names = ['DTC Ecommerce', 'Video Production', 'Ostro', 'Meditation']
+    const seeded = await seed(h, names)
+    await buildOnboardingFinalize(h.deps).finalize({
+      user_id: USER_ID,
+      topic_id: TOPIC_ID,
+      state: seeded,
+    })
+
+    const openings = h.emitted.filter((e) => e.dedupe_key?.startsWith('onboarding_opening:'))
+    expect(openings.length).toBe(names.length)
+
+    // The invariant: the body composed for project X must land on project X.
+    for (const o of openings) {
+      expect(o.project_id).not.toBeNull()
+      expect(o.body).toContain(`PLAN-FOR:${o.project_id}`)
+    }
+  })
 })

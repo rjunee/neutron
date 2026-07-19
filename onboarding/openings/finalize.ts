@@ -609,8 +609,6 @@ function countMaterializableProjects(
  * closing. The pool is BOUNDED (not an unbounded Promise.all) so a large import
  * cannot fan N simultaneous substrate sessions at the CC substrate.
  */
-const OPENING_COMPOSE_CONCURRENCY = 3
-
 async function emitProjectOpenings(
   deps: OnboardingFinalizeDeps,
   user_id: string,
@@ -709,24 +707,32 @@ async function emitProjectOpenings(
     }
   }
 
-  // Bounded worker pool: `OPENING_COMPOSE_CONCURRENCY` workers pull from one
-  // shared cursor until the list is drained. `emitOneOpening` never rejects (it
-  // owns the per-project try/catch), so no worker can die and strand the queue,
-  // and awaiting all workers still means EVERY opening has settled before the
-  // closing message is emitted.
-  let cursor = 0
-  const worker = async (): Promise<void> => {
-    for (;;) {
-      const index = cursor
-      cursor += 1
-      const project = materialized[index]
-      if (project === undefined) return
-      await emitOneOpening(project)
-    }
+  // STRICTLY SERIAL — one project at a time. Do NOT parallelise this loop.
+  //
+  // REVERTED 2026-07-19 (data corruption, hit live). A bounded worker pool was
+  // introduced here to cut the multi-minute silence during finalize. It CROSSED
+  // PROJECT CONTENT: on Ryan's install the `ostro` topic opened with Video &
+  // Film Production's plan and the `video-film-production` topic opened with DTC
+  // Ecommerce's — each project received the PREVIOUS project's body while
+  // keeping its own (correct) name. The on-disk STATUS.md files were correct
+  // throughout, so materialization was never at fault; only the composed
+  // openings were shifted.
+  //
+  // Root cause is the composer beneath `deps.projectKickoff` — it dispatches
+  // through the shared CC-substrate LLM client, which is not safe for
+  // overlapping in-flight turns from this call site. Concurrency here is a
+  // correctness bug, not a tuning knob: a mis-attributed project plan is far
+  // worse than a slow finalize.
+  //
+  // The latency this was meant to address is already handled the right way, by
+  // the STARTING message emitted before this loop ("setting up your projects
+  // now") — the owner is told what is happening instead of watching silence.
+  // If openings are ever parallelised again it must be behind a composer that
+  // is PROVEN concurrency-safe, with a test asserting every project's body
+  // matches its own name.
+  for (const project of materialized) {
+    await emitOneOpening(project)
   }
-  await Promise.all(
-    Array.from({ length: Math.min(OPENING_COMPOSE_CONCURRENCY, materialized.length) }, worker),
-  )
 }
 
 // ---------------------------------------------------------------------------
