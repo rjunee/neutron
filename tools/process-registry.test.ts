@@ -29,14 +29,45 @@ describe('ProcessRegistry', () => {
     expect(r?.last_activity_at).toBe(1_005_000)
   })
 
-  test('listStuck returns processes whose last_activity_at is older than threshold', () => {
+  test('listStuck returns processes whose OUTSTANDING TURN is older than threshold', () => {
     let now = 1_000_000
     const reg = new ProcessRegistry({ now: () => now })
-    reg.register({ name: 'fresh', pid: 1, tool_name: 't' })
+    reg.register({ name: 'wedged', pid: 1, tool_name: 't' })
+    reg.markTurnStarted('wedged', 1, 'inc:1')
+    // Registered at the SAME long-ago instant and never touched since, but with
+    // NO outstanding turn: the resting state of a warm pooled REPL. Never stuck.
+    reg.register({ name: 'idle-warm', pid: 3, tool_name: 't' })
     now += STUCK_PROCESS_INACTIVITY_MS + 1_000
-    reg.register({ name: 'still-fresh', pid: 2, tool_name: 't' })
+    // A turn that only just started — not stuck yet.
+    reg.register({ name: 'just-started', pid: 2, tool_name: 't' })
+    reg.markTurnStarted('just-started', 2, 'inc:1')
     const stuck = reg.listStuck()
-    expect(stuck.map((r) => r.name)).toEqual(['fresh'])
+    expect(stuck.map((r) => r.name)).toEqual(['wedged'])
+  })
+
+  test('markTurnStarted/markTurnSettled are pid-guarded — a respawned successor is never mutated', () => {
+    const reg = new ProcessRegistry()
+    reg.register({ name: 'repl', pid: 1, tool_name: 't' })
+    // A respawn replaced the entry under the same name with a new pid.
+    reg.unregister('repl')
+    reg.register({ name: 'repl', pid: 2, tool_name: 't' })
+    // The OLD child's handle must not mark or settle the NEW child's entry.
+    expect(reg.markTurnStarted('repl', 1, 'old:1')).toBe(false)
+    expect(reg.list()[0]?.busy_since).toBeNull()
+    reg.markTurnStarted('repl', 2, 'new:1')
+    expect(reg.markTurnSettled('repl', 1, 'old:1')).toBe(false)
+    expect(reg.list()[0]?.busy_turn_id).toBe('new:1')
+  })
+
+  test('markTurnSettled is turn-id-guarded — a stale settle cannot clear a newer turn', () => {
+    const reg = new ProcessRegistry()
+    reg.register({ name: 'repl', pid: 1, tool_name: 't' })
+    reg.markTurnStarted('repl', 1, 'inc:1')
+    reg.markTurnStarted('repl', 1, 'inc:2')
+    expect(reg.markTurnSettled('repl', 1, 'inc:1')).toBe(false)
+    expect(reg.list()[0]?.busy_turn_id).toBe('inc:2')
+    expect(reg.markTurnSettled('repl', 1, 'inc:2')).toBe(true)
+    expect(reg.list()[0]?.busy_since).toBeNull()
   })
 
   test('kill removes the record (even when SIGTERM hits an unknown pid)', () => {

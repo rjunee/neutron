@@ -325,6 +325,12 @@ export function createPersistentReplSubstrate(options: PersistentReplSubstrateOp
           : absoluteCeilingDefaultMs,
       )
 
+      // The turn-id this driver declared OUTSTANDING on the watchdog's
+      // live-process view, if any. Declared OUT here so the `finally` below can
+      // settle it on EVERY unwind — return, throw, cancel, or timeout. A turn
+      // that ended without settling would latch `busy_since` forever and alert
+      // permanently: the exact mirror image of the bug this replaces.
+      let watchdogTurnId: string | undefined
       const driver = (async (): Promise<void> => {
        try {
         try {
@@ -407,6 +413,13 @@ export function createPersistentReplSubstrate(options: PersistentReplSubstrateOp
           turn.settle = res
         })
         session.activeTurn = turn
+        // Declare this turn OUTSTANDING to the watchdog. From here until the
+        // `finally` settles it, this process has work in flight and its age is
+        // measured from NOW — so a turn that stops progressing is reported even
+        // if the child keeps chattering, while a warm REPL between turns (the
+        // resting state) is never stuck.
+        watchdogTurnId = turn.turnId
+        session.liveHandle?.markTurnStarted(turn.turnId)
 
         if (session.channelPort === undefined) {
           turn.settled = true
@@ -600,6 +613,17 @@ export function createPersistentReplSubstrate(options: PersistentReplSubstrateOp
         if (session.activeTurn === turn) session.activeTurn = undefined
         if (release) release()
        } finally {
+         // LEAK PREVENTION (the crux). Settle the watchdog's outstanding-turn
+         // marker on EVERY exit path — normal completion, early return, thrown
+         // error, cancellation, or timeout. Turn-id-guarded inside the registry,
+         // so a late settle from a superseded turn cannot clear the marker of the
+         // turn that replaced it. Process DEATH is covered separately: the
+         // child-exit handler in spawn.ts drops the record entirely (unregister)
+         // or moves it to the crash queue (markCrashed), so a dead child leaves
+         // no busy record behind either way.
+         if (watchdogTurnId !== undefined) {
+           session?.liveHandle?.markTurnSettled(watchdogTurnId)
+         }
          // Dispose the one-shot disposable REPL once its single turn has fully
          // settled (success, error, cancel, or timeout) — it is never reused, so
          // it must not linger warm. Runs for the ephemeral path only; a pooled

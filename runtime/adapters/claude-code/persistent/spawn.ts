@@ -341,9 +341,13 @@ async function spawnSession(
       const now = Date.now()
       session.lastDataAt = now
       // F4 — feed the watchdog's live-process view: any child output is activity,
-      // so keep the ProcessRegistry entry fresh (stuck-agent = no activity past
-      // the threshold). Guarded no-op when no ambient registry is registered; the
-      // handle identity-guards so it only ever touches THIS child's entry.
+      // so keep the ProcessRegistry entry fresh. NOTE this is `last_activity_at`
+      // ONLY — it is NOT what stuck-agent measures. Stuck is `busy_since` (an
+      // OUTSTANDING dispatched turn, marked from pool.ts), because for a
+      // request/response REPL silence between turns is the normal resting state,
+      // so output-age judged every healthy warm session stuck. Guarded no-op when
+      // no ambient registry is registered; the handle identity-guards so it only
+      // ever touches THIS child's entry.
       liveHandle?.touch()
       const target = scanChild
       if (target === undefined) return
@@ -371,6 +375,11 @@ async function spawnSession(
     tool_name: 'cc-repl',
     meta: { session_id: sessionId, channel: channelName },
   })
+  // Publish the handle on the session so the DISPATCH site (pool.ts) can declare
+  // a turn outstanding / settled. That outstanding-turn window — NOT this child's
+  // output age — is what stuck-agent detection measures, so an idle warm REPL
+  // between turns is correctly never stuck.
+  session.liveHandle = liveHandle
 
   // Master-table row #11: start the per-turn API-5xx dead-turn JSONL watcher for
   // THIS child's transcript. A mid-turn 5xx (`Overloaded`/`internal_server_error`

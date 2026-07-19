@@ -69,8 +69,8 @@ rather than rewriting its frozen pre-C5 snapshot, so the routing audit trail sur
 
 ## 2026-07-19 — favicon: the SVG was invalid XML, so browsers rendered nothing
 
-**Bug (live, Ryan's tenant, reproduced independently).** No favicon on
-`n9ac626b4acaded8c.neutron.computer/chat`. Survived a hard refresh and a fresh
+**Bug (live, on a hosted tenant, reproduced independently).** No favicon on
+`<tenant-host>/chat`. Survived a hard refresh and a fresh
 incognito tab, so it was not a cache artifact.
 
 **Root cause.** `landing/favicon.svg` was NOT well-formed XML. Its explanatory
@@ -99,6 +99,82 @@ CSS-variable mention in a comment fails the same way, silently.
 by default and cache the 404 negatively), `HEAD /favicon.svg` 404s while GET
 succeeds (the brand-asset handler is GET-only), and the apex host serves no
 brand assets at all.
+
+## 2026-07-18 — `stuck_agent` now means "a dispatched turn stopped progressing", not "a process is quiet"
+
+**P1 user-visible defect.** Ryan saw a permanent stream of false
+`⚠️ Supervisor alert: stuck_agent` messages in chat on a healthy install, getting
+worse with every topic he used.
+
+**Root cause — a category error.** `watchdog_alerts` rows flagged
+`cc-agent-dev\0owner\0general\0…` (pid 98137) and `…\0owner\0buddhism\0…`
+(pid 22009), `tool_name` `cc-repl`; 26 alerts on a fixed half-hourly cadence, one
+per resident REPL. **Both processes were alive and healthy** — `ps` showed real
+`claude --session-id … --model claude-opus-4-8` PTYs at 6h29m and 4h55m uptime.
+They are the warm per-topic chat REPL sessions, idle only because Ryan was not
+typing in those topics. The chain: `last_activity_at` is bumped ONLY from the PTY
+`onData` handler (`spawn.ts:347`), so it answers "when did this process last EMIT
+OUTPUT"; `ProcessRegistry.listStuck` was a pure age filter over that field; and
+`StuckAgentDetector` read that age as "not progressing". For a request/response
+REPL, silence is the normal resting state — a warm pooled session exists
+precisely to sit idle between turns so the next message skips a cold start. The
+detector was alerting on correct, healthy, by-design behaviour, forever.
+
+(An earlier diagnosis blamed a long-running history import because the screenshot
+timestamps fell in the import window. That was wrong; the import is irrelevant.)
+
+**Fix — model outstanding work explicitly.**
+- `ProcessRecord` gains `busy_since: number | null` + `busy_turn_id: string | null`.
+- `LiveProcessHandle` gains `markTurnStarted(turnId)` / `markTurnSettled(turnId)`,
+  following the existing identity-guarded `touch()` / `markCrashed()` /
+  `unregister()` pattern — `markTurnStarted` guards on `pid`, `markTurnSettled` on
+  `pid` **and** `turn_id`.
+- `listStuck` filters on `busy_since !== null && busy_since < now - threshold`,
+  measuring from TURN START. `busy_since === null` ⇒ never stuck.
+- The pool driver (`pool.ts`) marks started when it assigns `session.activeTurn`
+  and settles **in a `finally`**.
+
+**Leak prevention (the crux — a latched marker would invert the bug into
+permanent alerts).** Three independent covers: the dispatch-site `finally` runs on
+every unwind (completion, return, throw, cancel, timeout); the turn-id guard stops
+a superseded turn's late settle from clearing its successor; and process death
+drops the record wholesale via the existing child-exit paths (`unregister` on
+clean exit, `markCrashed` → crash queue on abnormal exit).
+
+**Side benefit:** measuring from turn start catches a wedge the old filter
+MISSED — a turn that keeps emitting output (spinner / retry loop) but never
+completes had fresh `last_activity_at` throughout and never fired.
+
+`crashed_agent` detection is untouched and fully intact. No feature flags, no dual
+paths, threshold unchanged (15 min), no name/`tool_name` string special-casing.
+
+Tests: regression reproducing Ryan's exact two-REPL situation (fails on `main` —
+emits both false alerts with his real pids); outstanding-turn-past-threshold still
+alerts; settled turn clears; superseded-turn late settle cannot clear; throwing
+turn leaves no permanently-busy record; dying process leaves none either while its
+crash stays reportable; chattering-but-never-completing turn now alerts.
+
+`runtime/adapters/claude-code/persistent/__tests__/stuck-agent-turn-wiring.test.ts`
+covers the DISPATCH SITE itself — `pool.ts` is the only production writer of
+`busy_since`, and every other test seeds the registry by hand, so deleting the
+wiring left the suite green while the detector went permanently dead in
+production (the "built but never wired" pattern). It drives a real turn through
+`createPersistentReplSubstrate` against a gated fake PTY host and asserts busy
+mid-turn / clear after settle / clear after cancel. Mutation-verified both ways:
+removing `markTurnStarted` or `markTurnSettled` fails it.
+
+Incident dedup is keyed `(name, pid, turn_id)`, not `(name, pid)`. A warm REPL
+serves many turns under one pid; without the turn in the key, a second wedged
+turn would be suppressed forever by the first turn's still-open key whenever the
+first settles and the next wedges between detector ticks.
+
+**Boundaries.** `stuck_agent` is a narrow backstop, not broad protection: the
+per-turn driver watchdog abandons on 90 s of PTY silence and caps turns at 45
+min, so the band `stuck_agent` uniquely covers is a continuously-emitting turn
+that never settles for 15-45 min. And because `markTurnStarted` fires only after
+`getOrSpawnSession` + `waitForReplIdle`, a turn wedged in the pre-turn
+spawn/handshake phase is not stuck-detectable — it is bounded by
+`waitForReplIdle`'s own `maxMs` cap instead.
 
 ## 2026-07-18 — Test isolation: the process-global `react` module mock is gone
 

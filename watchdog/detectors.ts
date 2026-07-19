@@ -4,7 +4,9 @@
  * The 6 ports from Nova:
  *
  *   1. gateway_heartbeat — cross-process liveness pulse (project.db row)
- *   2. stuck_agent — registered process with no activity > threshold
+ *   2. stuck_agent — registered process whose OUTSTANDING dispatched turn has
+ *      been in flight > threshold (NOT "a quiet process": silence between turns
+ *      is a warm pooled REPL's normal resting state)
  *   3. crashed_agent — registered process whose pid is gone
  *   4. overrun_cron — cron job's last_run_duration_ms > expected
  *   5. db_lock_contention — busy-retry exhaustions in window > threshold
@@ -103,7 +105,15 @@ export class HeartbeatDetector implements WatchdogDetector {
 
 export interface StuckAgentDetectorOptions extends CommonDetectorOptions {
   process_registry: ProcessRegistry
-  /** Default 15 minutes (matches Nova's stuck-agent threshold). */
+  /**
+   * How long a DISPATCHED TURN may stay outstanding before it is judged stuck.
+   * Default 15 minutes (matches Nova's stuck-agent threshold).
+   *
+   * NOTE: this is measured from when the TURN STARTED, not from the process's
+   * last output. A registered process with no outstanding turn — the resting
+   * state of every warm pooled REPL — is never stuck regardless of how long it
+   * has been quiet.
+   */
   inactivity_threshold_ms?: number
 }
 
@@ -132,14 +142,28 @@ export class StuckAgentDetector implements WatchdogDetector {
   async detect(): Promise<WatchdogAlert[]> {
     const now = this.now()
     const stuck = this.registry.listStuck(this.threshold_ms)
-    // Key PER (name, pid): one alert per stuck process while it stays stuck; a
-    // process that recovers (activity resumes → drops out of listStuck) and later
+    // Key PER (name, pid, TURN): one alert per stuck TURN while it stays stuck; a
+    // process that recovers (the turn settles → drops out of listStuck) and later
     // wedges again re-fires (Blocker-1). A REPLACED process (same name, new pid) is
     // a DISTINCT incident, not suppressed by the old pid's open key (High 1).
-    const byKey = new Map(stuck.map((r) => [procIncidentKey(r.name, r.pid), r]))
+    //
+    // `turn_id` is IN the key deliberately (F4 round-2 Major): a warm REPL serves
+    // many turns under one (name, pid). Without it, a SECOND turn that wedges on
+    // the same session is suppressed forever by the first turn's still-open key
+    // whenever the first turn settles and the next one wedges between detector
+    // ticks — the alert would never fire again for the life of that process.
+    const byKey = new Map(
+      stuck.map((r) => [`${procIncidentKey(r.name, r.pid)}#${r.busy_turn_id}`, r]),
+    )
     const risen = this.incidents.candidates(byKey.keys(), (key) => newAlertId(this.kind, key, now))
     return risen.map(({ key, id }) => {
       const r = byKey.get(key)!
+      // `listStuck` filters `busy_since !== null`, so this is the invariant, not
+      // a hope. Asserted at the boundary rather than defaulted: a fallback to
+      // `last_activity_at` here would silently resurrect the OUTPUT-AGE semantic
+      // this detector exists to repudiate, so if the invariant ever breaks we
+      // want a loud NaN/undefined, not a quiet wrong answer.
+      const turnStartedAt = r.busy_since!
       return {
         id,
         kind: this.kind,
@@ -151,7 +175,10 @@ export class StuckAgentDetector implements WatchdogDetector {
           pid: r.pid,
           tool_name: r.tool_name,
           last_activity_at: r.last_activity_at,
-          age_ms: now - r.last_activity_at,
+          // Age of the OUTSTANDING TURN — what "stuck" now means.
+          turn_started_at: turnStartedAt,
+          turn_id: r.busy_turn_id,
+          age_ms: now - turnStartedAt,
         },
       }
     })

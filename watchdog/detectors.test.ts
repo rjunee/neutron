@@ -57,12 +57,14 @@ describe('HeartbeatDetector', () => {
 })
 
 describe('StuckAgentDetector', () => {
-  test('fires for processes whose last activity is older than threshold', async () => {
+  test('fires for processes whose OUTSTANDING TURN is older than threshold', async () => {
     let now = 100_000
     const reg = new ProcessRegistry({ now: () => now })
     reg.register({ name: 'old', pid: 9_999_991, tool_name: 't' })
+    reg.markTurnStarted('old', 9_999_991, 'inc:1')
     now += 20 * 60_000
     reg.register({ name: 'fresh', pid: 9_999_992, tool_name: 't' })
+    reg.markTurnStarted('fresh', 9_999_992, 'inc:1')
     const detector = new StuckAgentDetector({
       owner_slug: 't1',
       process_registry: reg,
@@ -72,6 +74,204 @@ describe('StuckAgentDetector', () => {
     const alerts = await detector.detect()
     expect(alerts.length).toBe(1)
     expect(alerts[0]?.payload['process_name']).toBe('old')
+  })
+
+  // REGRESSION (2026-07-18). Reproduces Ryan's live install exactly: two warm
+  // per-topic chat REPLs, both ALIVE and HEALTHY (`ps` showed real `claude`
+  // PTYs at 6h29m / 4h55m uptime), quiet only because he was not typing in
+  // those topics. The old age-over-`last_activity_at` filter judged that
+  // resting state "not progressing" and logged 26 `⚠️ Supervisor alert:
+  // stuck_agent` messages on a fixed half-hourly cadence — forever, and worse
+  // with every topic he used. Silence is a request/response REPL's NORMAL
+  // state; only an outstanding turn can be stuck.
+  test('an idle warm REPL with NO in-flight turn NEVER alerts, however long it has been quiet', async () => {
+    let now = 100_000
+    const reg = new ProcessRegistry({ now: () => now })
+    reg.register({
+      name: 'cc-agent-dev\0owner\0general\0anthropic:env_oauth',
+      pid: 98_137,
+      tool_name: 'cc-repl',
+    })
+    reg.register({
+      name: 'cc-agent-dev\0owner\0buddhism\0anthropic:env_oauth',
+      pid: 22_009,
+      tool_name: 'cc-repl',
+    })
+    // Six and a half hours of no output — the real uptimes off Ryan's box.
+    now += 6 * 60 * 60_000 + 29 * 60_000
+    const detector = new StuckAgentDetector({
+      owner_slug: 't1',
+      process_registry: reg,
+      inactivity_threshold_ms: 15 * 60_000,
+      now: () => now,
+    })
+    expect(await detector.detect()).toEqual([])
+    // Still silent an hour later, and on every subsequent tick.
+    now += 60 * 60_000
+    expect(await detector.detect()).toEqual([])
+  })
+
+  test('a SETTLED turn clears the marker — no alert afterwards even once the old turn-start ages out', async () => {
+    let now = 100_000
+    const reg = new ProcessRegistry({ now: () => now })
+    reg.register({ name: 'repl', pid: 4_242, tool_name: 'cc-repl' })
+    reg.markTurnStarted('repl', 4_242, 'inc:1')
+    now += 60_000
+    reg.markTurnSettled('repl', 4_242, 'inc:1')
+    const detector = new StuckAgentDetector({
+      owner_slug: 't1',
+      process_registry: reg,
+      inactivity_threshold_ms: 15 * 60_000,
+      now: () => now,
+    })
+    // Well past the threshold measured from when that turn STARTED.
+    now += 30 * 60_000
+    expect(await detector.detect()).toEqual([])
+  })
+
+  test('a turn that is still outstanding past the threshold DOES alert — the real signal survives', async () => {
+    let now = 100_000
+    const reg = new ProcessRegistry({ now: () => now })
+    reg.register({ name: 'repl', pid: 4_242, tool_name: 'cc-repl' })
+    reg.markTurnStarted('repl', 4_242, 'inc:7')
+    const detector = new StuckAgentDetector({
+      owner_slug: 't1',
+      process_registry: reg,
+      inactivity_threshold_ms: 15 * 60_000,
+      now: () => now,
+    })
+    now += 16 * 60_000
+    const alerts = await detector.detect()
+    expect(alerts.length).toBe(1)
+    expect(alerts[0]?.payload['process_name']).toBe('repl')
+    expect(alerts[0]?.payload['turn_id']).toBe('inc:7')
+  })
+
+  // The wedge that output-age detection MISSES: a turn that keeps emitting
+  // output (a spinner, a retry loop) but never completes. Fresh
+  // `last_activity_at` the whole time, so the old filter never fired.
+  test('a chattering-but-never-completing turn alerts even though output is fresh', async () => {
+    let now = 100_000
+    const reg = new ProcessRegistry({ now: () => now })
+    reg.register({ name: 'repl', pid: 4_242, tool_name: 'cc-repl' })
+    reg.markTurnStarted('repl', 4_242, 'inc:1')
+    const detector = new StuckAgentDetector({
+      owner_slug: 't1',
+      process_registry: reg,
+      inactivity_threshold_ms: 15 * 60_000,
+      now: () => now,
+    })
+    // Output every minute for 20 minutes; the turn never settles.
+    for (let i = 0; i < 20; i++) {
+      now += 60_000
+      reg.touchIfPid('repl', 4_242)
+    }
+    expect((await detector.detect()).length).toBe(1)
+  })
+
+  test('a SUPERSEDED turn settling late cannot clear the successor marker', async () => {
+    let now = 100_000
+    const reg = new ProcessRegistry({ now: () => now })
+    reg.register({ name: 'repl', pid: 4_242, tool_name: 'cc-repl' })
+    reg.markTurnStarted('repl', 4_242, 'inc:1')
+    // Turn 1 is cancelled; turn 2 starts and wedges.
+    reg.markTurnStarted('repl', 4_242, 'inc:2')
+    // Turn 1's driver only now unwinds and settles — it must NOT clear turn 2.
+    expect(reg.markTurnSettled('repl', 4_242, 'inc:1')).toBe(false)
+    const detector = new StuckAgentDetector({
+      owner_slug: 't1',
+      process_registry: reg,
+      inactivity_threshold_ms: 15 * 60_000,
+      now: () => now,
+    })
+    now += 16 * 60_000
+    const alerts = await detector.detect()
+    expect(alerts.length).toBe(1)
+    expect(alerts[0]?.payload['turn_id']).toBe('inc:2')
+  })
+
+  // DEDUP KEY carries the TURN (F4 round-2 Major). A warm REPL serves many turns
+  // under one (name, pid). If the incident key were (name, pid) only, the FIRST
+  // wedged turn's key would stay open across its settle, and a SECOND turn that
+  // wedges on the same session before a tick observes the idle gap would be
+  // suppressed forever — that process could never alert again for the rest of
+  // its life.
+  test('a SECOND wedged turn on the same warm REPL still alerts after the first one alerted', async () => {
+    let now = 100_000
+    const reg = new ProcessRegistry({ now: () => now })
+    reg.register({ name: 'repl', pid: 4_242, tool_name: 'cc-repl' })
+    const detector = new StuckAgentDetector({
+      owner_slug: 't1',
+      process_registry: reg,
+      inactivity_threshold_ms: 15 * 60_000,
+      now: () => now,
+    })
+
+    // Turn 1 wedges and is reported (and committed, as the supervisor does).
+    reg.markTurnStarted('repl', 4_242, 'inc:1')
+    now += 16 * 60_000
+    const first = await detector.detect()
+    expect(first.length).toBe(1)
+    expect(first[0]?.payload['turn_id']).toBe('inc:1')
+    detector.commit(first[0]!)
+    // Still open on the next tick → no duplicate for the SAME turn.
+    expect(await detector.detect()).toEqual([])
+
+    // Turn 1 eventually settles and turn 2 starts and wedges too — all between
+    // ticks, so no tick ever observes the idle gap in between.
+    reg.markTurnSettled('repl', 4_242, 'inc:1')
+    reg.markTurnStarted('repl', 4_242, 'inc:2')
+    now += 16 * 60_000
+    const second = await detector.detect()
+    expect(second.length).toBe(1)
+    expect(second[0]?.payload['turn_id']).toBe('inc:2')
+  })
+
+  // MIRROR-IMAGE LEAK. A turn that throws / times out / is cancelled must not
+  // latch `busy_since` forever, or this bug returns inverted: permanent alerts
+  // instead of permanent silence. The dispatch site settles in a `finally`, and
+  // process DEATH drops the record wholesale via the child-exit paths.
+  test('a turn that throws does not leave a permanently-busy record', async () => {
+    let now = 100_000
+    const reg = new ProcessRegistry({ now: () => now })
+    reg.register({ name: 'repl', pid: 4_242, tool_name: 'cc-repl' })
+    const handleTurn = async (turnId: string): Promise<void> => {
+      reg.markTurnStarted('repl', 4_242, turnId)
+      try {
+        throw new Error('turn blew up mid-flight')
+      } finally {
+        reg.markTurnSettled('repl', 4_242, turnId)
+      }
+    }
+    await expect(handleTurn('inc:1')).rejects.toThrow('turn blew up mid-flight')
+    expect(reg.list()[0]?.busy_since).toBeNull()
+    const detector = new StuckAgentDetector({
+      owner_slug: 't1',
+      process_registry: reg,
+      inactivity_threshold_ms: 15 * 60_000,
+      now: () => now,
+    })
+    now += 60 * 60_000
+    expect(await detector.detect()).toEqual([])
+  })
+
+  test('a process that DIES mid-turn leaves no busy record behind (crash path drops it)', async () => {
+    const reg = new ProcessRegistry()
+    const dispose = pushAmbientProcessRegistry(reg)
+    try {
+      const handle = registerLiveProcessSafe({ name: 'repl', pid: 4_242, tool_name: 'cc-repl' })
+      handle.markTurnStarted('inc:1')
+      expect(reg.list()[0]?.busy_turn_id).toBe('inc:1')
+      // The child-exit path: abnormal exit enqueues the crash and drops the
+      // live record, so nothing stays busy.
+      handle.markCrashed()
+      expect(reg.list()).toEqual([])
+      expect(reg.listStuck(-1)).toEqual([])
+      // …and the crash is still reportable — crashed_agent is untouched.
+      expect(reg.listPendingCrashes().map((r) => r.name)).toEqual(['repl'])
+    } finally {
+      dispose()
+    }
   })
 })
 
