@@ -17,7 +17,9 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import type { GmailClient, GmailMessageMeta } from '@neutronai/email-managed-core'
-import type { PreMeetingBriefFireInput } from '@neutronai/calendar-core'
+import { buildInMemoryGmailClient } from '@neutronai/email-managed-core'
+import type { CalendarClient, PreMeetingBriefFireInput } from '@neutronai/calendar-core'
+import { buildInMemoryCalendarClient } from '@neutronai/calendar-core'
 
 import type { Substrate } from '@neutronai/runtime/substrate.ts'
 import type { Event } from '@neutronai/runtime/events.ts'
@@ -218,23 +220,122 @@ describe('mountCoresScribeFanOut — live on the Open boot path', () => {
     expect(enumerateOwnerProjects(home).sort()).toEqual(['general', 'work'])
   })
 
-  test('mount starts both schedulers; an email tick fans the inbox into scribe→writer; stop() drains + tears down', async () => {
-    const home = freshHome('fanout-mount-')
-    mkdirSync(join(home, 'Projects', 'general'), { recursive: true })
+  test('before arm() no scheduler is started (null); stop() is a clean no-op (composition-failure guarantee)', async () => {
+    // M2-1 acceptance #3: a composition failure BETWEEN wireMemory (construct)
+    // and the composer's arm site must not leave a started scheduler. Construct,
+    // never arm (simulating a throw before the arm point), and assert nothing ran.
+    const home = freshHome('fanout-noarm-')
     const { scribe, written } = makeScribe(
-      { entities: [{ name: 'Acme Logistics', kind: 'company', fact: 'inbound partnership lead' }], relations: [] },
+      { entities: [{ name: 'Nobody', kind: 'person', fact: 'x' }], relations: [] },
       home,
     )
+    const mounted = mountCoresScribeFanOut({ scribe, project_slug: 'acme', owner_home: home })
+    expect(mounted.calendarScheduler).toBeNull()
+    expect(mounted.emailScheduler).toBeNull()
+    // stop() before arm resolves cleanly and touches nothing.
+    await mounted.stop()
+    await mounted.idle()
+    expect(written).toEqual([])
+  })
+
+  test('arm() twice throws (idempotency guard)', () => {
+    const home = freshHome('fanout-armtwice-')
+    const { scribe } = makeScribe({ entities: [], relations: [] }, home)
+    const mounted = mountCoresScribeFanOut({ scribe, project_slug: 'acme', owner_home: home })
+    const clients = {
+      calendarClient: buildInMemoryCalendarClient(),
+      gmailClient: buildInMemoryGmailClient(),
+    }
+    mounted.arm(clients)
+    try {
+      expect(() => mounted.arm(clients)).toThrow(/arm\(\) called more than once/)
+    } finally {
+      // best-effort teardown of the one successful arm
+      void mounted.stop()
+    }
+  })
+
+  test('arm() with in-memory clients arms harmlessly, fans out NOTHING, tears down (OAuth-less box)', async () => {
+    // M2-1 acceptance #2: no Google → in-memory fallbacks → empty calendar/inbox
+    // → schedulers run, no crash, scribe never invoked. Unchanged degrade path.
+    const home = freshHome('fanout-inmem-')
+    mkdirSync(join(home, 'Projects', 'general'), { recursive: true })
+    const { scribe, written } = makeScribe(
+      { entities: [{ name: 'Ghost', kind: 'person', fact: 'never extracted' }], relations: [] },
+      home,
+    )
+    const mounted = mountCoresScribeFanOut({
+      scribe,
+      project_slug: 'acme',
+      owner_home: home,
+      emailLlm: async () => '[]',
+      emailModel: 'haiku',
+      userTz: 'UTC',
+      nowMs: () => t0,
+    })
+    try {
+      mounted.arm({
+        calendarClient: buildInMemoryCalendarClient(), // empty calendar
+        gmailClient: buildInMemoryGmailClient(), // empty inbox
+      })
+      expect(mounted.emailScheduler).not.toBeNull()
+      expect(mounted.calendarScheduler).not.toBeNull()
+      await mounted.emailScheduler!.tick(new Date(t0))
+      await mounted.idle()
+      expect(written).toEqual([]) // empty inbox/calendar → nothing extracted
+    } finally {
+      await mounted.stop()
+    }
+  })
+
+  test('arm() binds the LIVE clients: a gmail message reaches scribe→writer AND the live calendar client is READ', async () => {
+    // M2-1 acceptance #1 (the crux): arm() threads the SAME live clients the
+    // composer's mountOpenCores builds. Pre-M2-1 the fan-out armed with in-memory
+    // fallback clients — so even a CONNECTED Google account fed memory NOTHING
+    // ("wired but does nothing"). Here we prove: (a) a live gmail client returning
+    // 1 message drives an extraction end-to-end into the scribe WRITER, and (b)
+    // the armed calendar scheduler actually READS the live calendar client we
+    // passed (its `list` is invoked) — i.e. it is NOT the disconnected in-memory
+    // stand-in. (The calendar event → scribe → writer path itself is proven
+    // deterministically above via the real `…SchedulerDeps.fire` factory; here we
+    // only need to prove the LIVE client is the one wired.)
+    const home = freshHome('fanout-live-')
+    mkdirSync(join(home, 'Projects', 'general'), { recursive: true })
+    const { scribe, written } = makeScribe(
+      { entities: [{ name: 'Northwind', kind: 'company', fact: 'logistics partner' }], relations: [] },
+      home,
+    )
+
+    // LIVE calendar client — a spy wrapping the in-memory client, seeded with an
+    // event, that records every `list` call so we can prove the scheduler read IT.
+    const inner = buildInMemoryCalendarClient()
+    await inner.create({
+      calendar_id: 'primary',
+      title: 'Roadmap review with Dana Wu',
+      start: '2026-06-15T09:00:00Z',
+      end: '2026-06-15T09:30:00Z',
+      description: 'Discuss Q3 roadmap and staffing in depth.',
+      attendees: ['dana@x.com'],
+    } as never)
+    let calListCalls = 0
+    const calendarClient: CalendarClient = {
+      ...inner,
+      list: async (input) => {
+        calListCalls += 1
+        return inner.list(input)
+      },
+    }
+
+    // LIVE gmail client — 1 inbox message.
     const inboxMsg: GmailMessageMeta = {
-      id: 'mm1',
-      thread_id: 'tt1',
-      subject: 'Partnership with Acme Logistics',
-      from: '"Lee" <lee@acme.io>',
-      snippet: 'Proposing an inbound logistics partnership — pricing tiers, SLAs, and an onboarding timeline to review.',
+      id: 'm1',
+      thread_id: 'th1',
+      subject: 'Logistics deal with Northwind',
+      from: '"Tomas" <tomas@northwind.io>',
+      snippet: 'Following up on the Q3 logistics partnership — terms, volumes, and the rollout timeline in full.',
       internal_date: '2026-06-14T09:00:00Z',
       label_ids: ['INBOX'],
     }
-    // Minimal Gmail client — the tick only calls listMessages.
     const gmailClient = {
       listMessages: async () => ({ results: [inboxMsg] }),
     } as unknown as GmailClient
@@ -243,19 +344,20 @@ describe('mountCoresScribeFanOut — live on the Open boot path', () => {
       scribe,
       project_slug: 'acme',
       owner_home: home,
-      gmailClient,
       emailLlm: async () => '[]',
       emailModel: 'haiku',
       userTz: 'UTC',
-      nowMs: () => t0, // 08:00:00Z → the daily fire window in UTC
+      nowMs: () => t0,
     })
     try {
-      expect(mounted.emailScheduler).toBeDefined()
-      expect(mounted.calendarScheduler).toBeDefined()
-      // Drive a tick at the fire window (idempotent w/ the start() immediate tick).
-      await mounted.emailScheduler.tick(new Date(t0))
+      mounted.arm({ calendarClient, gmailClient })
+      await mounted.emailScheduler!.tick(new Date(t0))
+      await mounted.calendarScheduler!.tick(t0)
       await mounted.idle()
-      expect(written).toContain('company:acme-logistics')
+      // (a) the live gmail message reached the scribe writer.
+      expect(written).toContain('company:northwind')
+      // (b) the armed calendar scheduler READ the live calendar client we passed.
+      expect(calListCalls).toBeGreaterThan(0)
     } finally {
       await mounted.stop()
     }

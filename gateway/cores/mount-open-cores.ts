@@ -144,6 +144,20 @@ export interface MountedOpenCores {
   readonly prompter: SecretsStorePrompter
   /** True when the Google OAuth client is configured (live-cred path possible). */
   readonly oauthConfigured: boolean
+  /**
+   * The live Calendar client (OAuth-backed when Google is connected, in-memory
+   * fallback otherwise) — the SAME instance the `calendar_core` MCP tools + the
+   * `/cal` filter use. Exposed so the composer can arm the scribe Cores→memory
+   * fan-out (`mountCoresScribeFanOut`) with the real client instead of a
+   * disconnected in-memory stand-in.
+   */
+  readonly calendarClient: CalendarClient
+  /**
+   * The live Gmail client (OAuth-backed when Google is connected, in-memory
+   * fallback otherwise) — the SAME instance the `email_managed_core` MCP tools +
+   * the `/email` filter use. Exposed for the same scribe fan-out arming.
+   */
+  readonly gmailClient: GmailClient
   /** Close the per-Core cache/sidecar handles. Register on `realmode_cleanups`. */
   cleanup(): void
 }
@@ -353,6 +367,8 @@ export async function mountOpenCores(
       project_slug: input.project_slug,
     }),
     oauthConfigured,
+    calendarClient,
+    gmailClient,
     cleanup(): void {
       try {
         calendarCache.closeAll()

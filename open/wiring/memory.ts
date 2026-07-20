@@ -31,7 +31,10 @@ import {
 } from '@neutronai/scribe/index.ts'
 import { writeEntity as defaultWriteEntity } from '@neutronai/runtime/entity-writer.ts'
 import { SupervisedLoop } from '@neutronai/loop'
-import { mountCoresScribeFanOut } from '@neutronai/gateway/cores/mount-cores-scribe-fan-out.ts'
+import {
+  mountCoresScribeFanOut,
+  type MountedCoresScribeFanOut,
+} from '@neutronai/gateway/cores/mount-cores-scribe-fan-out.ts'
 import { createReflection, type Reflection } from '@neutronai/reflection/index.ts'
 import { NexusStore } from '@neutronai/gateway/nexus/nexus-store.ts'
 import {
@@ -94,6 +97,15 @@ export interface WiredMemory {
    * reserved-kind extraction) once per `DEFAULT_REFLECT_INTERVAL_MS`.
    */
   reflectLoop: SupervisedLoop | null
+  /**
+   * The Cores→scribe phase-2 fan-out, CONSTRUCTED but NOT armed (its `stop()`
+   * cleanup is already registered into `cleanups`). `null` when LLM-less (no
+   * scribe → no extraction target). The composer ARMS it with the live Google
+   * clients AFTER `mountOpenCores` builds them (late-binding, reflectLoop
+   * precedent). Until armed, no scheduler is started, so a composition failure
+   * between here and the arm leaks nothing.
+   */
+  coresScribeFanOut: MountedCoresScribeFanOut | null
   /** Teardown hooks (GBrain close, Cores fan-out stop) in registration order. */
   cleanups: Array<() => void>
 }
@@ -302,28 +314,35 @@ export function wireMemory(ctx: OpenWiringContext): WiredMemory {
   const scribeOnUserTurn: ((input: UserTurnInput) => void) | undefined =
     scribe !== null ? (input: UserTurnInput): void => scribe.handleUserTurn(input) : undefined
 
-  // ── Cores→scribe phase-2 fan-out (Vajra parity gap #1) ─────────────────
+  // ── Cores→scribe phase-2 fan-out (Vajra parity gap #1 + M2-1) ──────────
   // The chat-turn extractor (`scribeOnUserTurn` above) is only HALF of scribe:
   // the phase-2 Cores→scribe fan-out lets the scheduled Calendar + Email Cores
   // contribute their OWN ambient extraction (today's events / inbox mail →
   // GBrain). That seam (`scribeFanOut` in `gateway/cores/{calendar,email-managed}
   // -wiring.ts`) was built but never threaded — its only callers were tests, so
-  // per-Core memory extraction was DEAD. Mount it here so it runs on the live
-  // single-owner Open boot path, gated on scribe being live (no extraction
-  // target otherwise — LLM-less boxes are unaffected). Until a Google-backed
-  // calendar/gmail client is composed in (separate parity gap), the in-memory
-  // fallback clients yield an empty calendar/inbox, so the schedulers run
-  // harmlessly and fan out nothing; the wire goes live with zero further
-  // changes the moment a real client is supplied. Cleanup drains in-flight
+  // per-Core memory extraction was DEAD. CONSTRUCT it here (gated on scribe being
+  // live — no extraction target otherwise, so LLM-less boxes are unaffected) and
+  // register its `stop()` cleanup EARLY, but do NOT arm it yet: the schedulers
+  // need the live OAuth-backed calendar/gmail clients, which `mountOpenCores`
+  // builds ~100 lines LATER in the composer. So — exactly like `reflectLoop`
+  // (constructed early, cleanup registered early, `start()` deferred to the end
+  // of composition) — the composer calls `coresScribeFanOut.arm({ calendarClient,
+  // gmailClient })` once `mountOpenCores` exists. Until armed nothing is started;
+  // `stop()` is a safe no-op, so a composition failure between here and the arm
+  // leaks no scheduler. This is the M2-1 fix: pre-M2-1 the fan-out was armed here
+  // with in-memory fallback clients, so even a CONNECTED Google account fed
+  // memory NOTHING ("wired but does nothing"). Cleanup drains in-flight
   // extractions + tears the schedulers down at SIGTERM.
+  let coresScribeFanOut: MountedCoresScribeFanOut | null = null
   if (scribe !== null) {
-    const coresFanOut = mountCoresScribeFanOut({
+    coresScribeFanOut = mountCoresScribeFanOut({
       scribe,
       project_slug,
       owner_home,
     })
+    const fanOut = coresScribeFanOut
     cleanups.push(() => {
-      fireAndForget('memory.stop', coresFanOut.stop())
+      fireAndForget('memory.stop', fanOut.stop())
     })
   }
 
@@ -395,6 +414,7 @@ export function wireMemory(ctx: OpenWiringContext): WiredMemory {
     memoryIndexRead,
     setMemoryIndexWorkHandles,
     reflectLoop,
+    coresScribeFanOut,
     cleanups,
   }
 }

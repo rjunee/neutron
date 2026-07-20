@@ -194,6 +194,36 @@ test('optional-until-credentialed: zero creds → in-memory clients, composes, n
   expect(cal).not.toBeNull()
 })
 
+test('exposes the live calendarClient + gmailClient (M2-1: the scribe fan-out arms with THESE instances)', async () => {
+  // M2-1 — mountOpenCores must surface the SAME calendar/gmail client instances
+  // the `calendar_core`/`email_managed_core` tools use, so the composer can arm
+  // the Cores→scribe memory fan-out with the real clients (not the disconnected
+  // in-memory stand-ins the fan-out fell back to pre-M2-1). Zero creds → the
+  // in-memory fallbacks are exposed and are usable.
+  const { db, owner_home, secretsStore, projectCredentialStore, env } = makeBench()
+  const mounted = await mountOpenCores({
+    projectDb: db,
+    owner_home,
+    project_slug: OWNER,
+    secretsStore,
+    projectCredentialStore,
+    env,
+    substrate: null,
+  })
+  cleanups.push(() => mounted.cleanup())
+
+  expect(mounted.calendarClient).toBeDefined()
+  expect(typeof mounted.calendarClient.list).toBe('function')
+  expect(mounted.gmailClient).toBeDefined()
+  expect(typeof mounted.gmailClient.listMessages).toBe('function')
+  // The exposed calendar client is live (empty) — a list against it never throws.
+  const events = await mounted.calendarClient.list({
+    range_start: '2026-06-15T00:00:00Z',
+    range_end: '2026-06-16T00:00:00Z',
+  } as never)
+  expect(Array.isArray(events)).toBe(true)
+})
+
 test('install layer: Google Cores are HIDDEN with no grant, LIVE once the OAuth token exists', async () => {
   // No grant: installBundledCores with the helper's backends + prompter → the
   // Calendar Core's required `google_calendar` secret is unsatisfied, so install
