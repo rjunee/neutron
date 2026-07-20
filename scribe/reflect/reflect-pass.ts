@@ -426,6 +426,7 @@ async function dedupPages(
     const bySlug = new Map(kindPages.map((p) => [p.slug, p]))
     const candidates: DedupCandidate[] = kindPages.map((p) => ({
       slug: p.slug,
+      title: p.title,
       text: `${p.title}\n${p.compiledTruth}`,
     }))
     const clusters = clusterNearDuplicates(candidates, threshold)
@@ -675,6 +676,13 @@ async function resynthesizePages(
       // on this page a silent, permanent no-op (the page would assert the new AND
       // the retired employer forever). Rejecting keeps the page in its prior
       // (template-form, still-supersedable) state; a later pass re-synthesizes.
+      //
+      // FOLLOW-UP (before arming NEUTRON_PERFECT_RECALL): a page whose edges the LLM
+      // repeatedly WON'T canonicalize is re-dispatched every pass — bounded per-pass
+      // by `maxResynthPages`, but unbounded across passes and non-convergent. It is
+      // non-corrupting (the page stays byte-unchanged), so it does not gate this
+      // correctness fix, but arming must add a bounded-retry / give-up watermark so a
+      // permanently-un-canonicalizable page stops being re-dispatched forever.
       if (!allRelationSentencesCanonical(next, page.kind, page.slug)) continue
       // IDEMPOTENCE: if the LLM returned the already-consolidated truth (no real
       // change), do NOT write — appending a marker row would rewrite the page,

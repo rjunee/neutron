@@ -83,10 +83,44 @@ same branch:
   (`allRelationSentencesCanonical`: URL/mailto/anchor sentences ignored, real
   wikilink/entity-markdown-link prose still rejected).
 
+**Round-3 review corrections (Argus).** Two more blocker-1 correctness fixes on the
+same branch — both independently verified by running the real code:
+
+- **Blocker-1 (codex veto) — `stripBoilerplate` stripped ALL H1 headings, erasing
+  factual H1 content.** The round-2 cut dropped every level-1 heading (`level === 1`),
+  not only the generated title H1, so a hand-authored/imported factual H1 (e.g.
+  `# Acquired by Globex`) lost its distinguishing tokens — inflating Jaccard between
+  distinct pages toward an irreversible false merge. Runtime repro on the old branch:
+  `stripBoilerplate('# Acquired by Globex\nbody')` → `'body'`. Fix: `stripBoilerplate`
+  (`scribe/reflect/jaccard.ts`) now takes the page `title` and drops ONLY the H1
+  whose label EQUALS the title (the generated `# <Name>`); every other heading,
+  including a factual H1 whose label differs, is KEPT. `DedupCandidate` gains a
+  `title` field; `dedupPages` (`reflect-pass.ts`) passes `p.title`. Reproduce-then-fix
+  tests in `reflect-jaccard.test.ts` (factual H1 preserved; title H1 still stripped;
+  two pages distinguished only by a factual H1 stay separate).
+- **Blocker-1 (major) — `tokenize` erased ALL numeric/alphanumeric tokens.** The
+  filter keyed on `Intl.Segmenter`'s `isWordLike`, which is `false` for numeric and
+  alphanumeric segments (`2024`, `q1`, `fy2023`, `v1`). Entities separated ONLY by a
+  number tokenised IDENTICALLY and fused at any threshold. Runtime repro:
+  `tokenize('2024')` → `Set{}`, and `clusterNearDuplicates(['Fiscal Year 2023
+  Budget','Fiscal Year 2024 Budget'])` → one cluster. Fix: `tokenize`
+  (`scribe/reflect/jaccard.ts`) now keeps any segment carrying a letter or digit
+  (Unicode `\p{L}|\p{N}`) and drops only single ASCII LETTERS (English filler `a`/`i`),
+  keeping single digits. FY2023 vs FY2024 now score 0.6 < 0.7 → two singletons.
+  Reproduce-then-fix tests in `reflect-jaccard.test.ts`. (The `v1`/`v2`, `Q1`/`Q2`
+  bare-title cases were already safe via the min-2-distinguishing-token gate.)
+- **Round-2 minor (tracking note only) — resynth reject path is non-convergent.** A
+  page whose edges the LLM repeatedly won't canonicalize is re-dispatched every pass
+  (bounded per-pass by `maxResynthPages`, unbounded across passes). Non-corrupting
+  (page stays byte-unchanged) so it does not gate this fix; a code note at the reject
+  site (`reflect-pass.ts`) records that arming must add a bounded-retry / give-up
+  watermark. Not fixed here — follow-up before arming.
+
 Scope discipline: blockers 3 (token budget), 4 (doctor sequencing), the timestamp-
 ordering guard, and the watermark are explicitly NOT touched. `bun test scribe/`
-green (163 pass incl. auto-link; +12 new across both rounds). SYSTEM-OVERVIEW.md
-§ "Entity-page memory (GBrain)" updated with a reflect-pass correctness subsection.
+green (126 pass in the reflect/consolidation slice; +4 new tests this round).
+SYSTEM-OVERVIEW.md § "Entity-page memory (GBrain)" updated with the H1/numeric
+tokenisation refinements.
 
 ## 2026-07-20 — SubstrateProfile refactor (tool-security redesign Step 0)
 

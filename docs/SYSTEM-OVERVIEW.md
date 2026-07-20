@@ -2350,20 +2350,26 @@ optional operator `GBRAIN_SOURCE` / `GBRAIN_BRAIN_ID`.
   carries two correctness fixes so it can never silently corrupt the owner's
   accumulated corpus (memory blockers 1 + 2, 2026-07-20):
   - **Dedup no longer fuses unrelated entities.** `clusterNearDuplicates`
-    (`scribe/reflect/jaccard.ts`) now (a) runs `stripBoilerplate` before scoring —
-    removing ONLY the GENERATED scaffolding (the H1 title, the `## Relationships` /
-    `## Merged` section headings, and the fact-less body sentences `Mentioned in
-    chat (kind: X).` / `Identified during reflect (X).`) so shared template tokens
-    don't drive similarity, while a hand-authored/imported FACTUAL heading (e.g.
-    `## Acquired by Globex`) is KEPT as a distinguishing token — an earlier cut that
-    stripped every heading erased such facts and could still fuse distinct pages;
-    (b) forces a page with
-    fewer than `DEFAULT_MIN_DISTINGUISHING_TOKENS` (2) real tokens to a singleton;
-    and (c) clusters by CLIQUE (every pair similar), not connected-component
-    transitivity. Previously five fact-less company pages collapsed into ONE
-    entity in a single pass. `DEFAULT_JACCARD_THRESHOLD` (0.7) stays configurable
-    via `deps.jaccardThreshold` and must be re-measured on a real corpus before
-    arming. Pinned by `scribe/__tests__/reflect-jaccard.test.ts`.
+    (`scribe/reflect/jaccard.ts`) now (a) runs `stripBoilerplate(text, title)` before
+    scoring — removing ONLY the GENERATED scaffolding (the `## Relationships` /
+    `## Merged` section headings, the fact-less body sentences `Mentioned in chat
+    (kind: X).` / `Identified during reflect (X).`, and the SINGLE H1 whose label
+    equals the page title — the generated `# <Name>`) so shared template tokens don't
+    drive similarity, while EVERY other heading is KEPT as distinguishing content,
+    including a hand-authored/imported factual H1 (e.g. `# Acquired by Globex`) whose
+    label differs from the title. An earlier cut stripped every heading, then every
+    H1 regardless of label, erasing such facts and still fusing distinct pages; (b)
+    forces a page with fewer than `DEFAULT_MIN_DISTINGUISHING_TOKENS` (2) real tokens
+    to a singleton; and (c) clusters by CLIQUE (every pair similar), not
+    connected-component transitivity. `tokenize` keeps numeric and alphanumeric tokens
+    (`2024`, `q1`, `fy2023`, `v2`) — it segments on Unicode word boundaries and keeps
+    any segment with a letter or digit, because `Intl.Segmenter`'s `isWordLike` is
+    false for numbers, which had erased every number-only distinguishing token so
+    entities separated only by a year/quarter/version fused. Previously five fact-less
+    company pages collapsed into ONE entity in a single pass, and `Fiscal Year 2023`
+    vs `Fiscal Year 2024` tokenised identically. `DEFAULT_JACCARD_THRESHOLD` (0.7)
+    stays configurable via `deps.jaccardThreshold` and must be re-measured on a real
+    corpus before arming. Pinned by `scribe/__tests__/reflect-jaccard.test.ts`.
   - **Supersede survives re-synthesis.** `stripSupersededSentences` can only
     retire a graph edge written as a canonical `Verb [[slug]].` template
     sentence; re-synthesis used to rewrite edges into prose, which permanently

@@ -19,11 +19,13 @@
  * and any two fact-less pages scored ~0.71 Jaccard on boilerplate ALONE — the
  * reproduced defect where five unrelated companies (Acme/Globex/…) collapsed into
  * one entity in a single pass. Three guards close it: (a) `stripBoilerplate`
- * removes ONLY the generated template tokens (the H1 title, the `## Relationships`
- * / `## Merged` scaffolding headings, and the fact-less body sentences) before
- * scoring — a hand-authored factual heading like `## Acquired by Globex` is KEPT
- * (memory blocker 1 VETO: stripping every heading erased real facts); (b) a page
- * with fewer than
+ * removes ONLY the generated template tokens (the page-title H1 — the H1 whose
+ * label EQUALS the page title — the `## Relationships` / `## Merged` scaffolding
+ * headings, and the fact-less body sentences) before scoring — a hand-authored
+ * factual heading is KEPT at EVERY level, including a factual H1 like
+ * `# Acquired by Globex` whose label differs from the title (memory blocker 1
+ * VETO: the earlier revision stripped EVERY H1, erasing real facts and enabling an
+ * irreversible false merge); (b) a page with fewer than
  * `DEFAULT_MIN_DISTINGUISHING_TOKENS` non-boilerplate tokens can NEVER anchor a
  * merge; (c) clusters are cliques (pairwise-similar throughout), not transitive
  * chains. `DEFAULT_JACCARD_THRESHOLD` stays configurable and MUST be re-measured
@@ -54,6 +56,10 @@ export const DEFAULT_MIN_DISTINGUISHING_TOKENS = 2
 export interface DedupCandidate {
   /** Stable key (the entity slug) — unique within a kind. */
   readonly slug: string
+  /** Page title. Used to strip ONLY the generated title H1 (the `# <title>`
+   *  heading whose label equals this) as boilerplate, while KEEPING any
+   *  hand-authored factual H1 whose label differs (memory blocker 1 VETO). */
+  readonly title: string
   /** Text the similarity is computed over (title + compiled-truth). */
   readonly text: string
 }
@@ -66,18 +72,31 @@ export interface DedupCandidate {
  * empty set and could never be detected as duplicates. Segmentation splits
  * `株式会社アクメは…` into real word tokens instead.
  *
- * A SET, not a bag (Jaccard is set-based, so repeats don't skew the score). Only
- * word-like segments are kept, punctuation/whitespace/brackets fall out, and a
- * length-1 ASCII token (`a`, English filler) is dropped — but a length-1
- * NON-ASCII token (a single CJK word) is kept, since it can be a whole word.
+ * A SET, not a bag (Jaccard is set-based, so repeats don't skew the score). A
+ * segment is kept iff it carries a LETTER or DIGIT — real words, numbers, and
+ * alphanumerics (`q1`, `fy2024`, `v2`), plus CJK words; punctuation/whitespace
+ * fall out. A length-1 ASCII LETTER (`a`/`i`, English filler) is dropped, but a
+ * single DIGIT (distinguishing) and a length-1 NON-ASCII token (a single CJK word)
+ * are kept.
+ *
+ * NUMERIC-TOKEN DEFECT (memory blocker 1, major, 2026-07-20): the old filter keyed
+ * on `isWordLike`, but `Intl.Segmenter` marks numeric and alphanumeric segments
+ * (`2024`, `q1`, `fy2023`, `v1`) as `isWordLike:false`. That silently erased every
+ * number-only distinguishing token, so entities separated ONLY by a number
+ * (`Fiscal Year 2023` vs `Fiscal Year 2024`, `v1` vs `v2`, `Q1` vs `Q2`) tokenised
+ * IDENTICALLY and fused at any threshold. Keying on "has a letter or digit" instead
+ * keeps those tokens.
  */
 export function tokenize(text: string): Set<string> {
   const out = new Set<string>()
-  for (const { segment, isWordLike } of WORD_SEGMENTER.segment(text.toLowerCase())) {
-    if (isWordLike !== true) continue
-    // Drop only short PURELY-ASCII tokens (English filler like `a`); keep every
-    // non-ASCII word, including single CJK characters.
-    if (segment.length < 2 && /^[\x00-\x7f]*$/.test(segment)) continue
+  for (const { segment } of WORD_SEGMENTER.segment(text.toLowerCase())) {
+    // Keep anything with a letter or digit (words, numbers, alphanumerics, CJK);
+    // drop pure punctuation/whitespace. `isWordLike` is NOT used — it is false for
+    // numeric/alphanumeric segments, which erased number-only distinguishing tokens.
+    if (!/[\p{L}\p{N}]/u.test(segment)) continue
+    // Drop a single ASCII LETTER (English filler like `a`/`i`); KEEP single digits
+    // and every non-ASCII word (a lone CJK character is a whole word).
+    if (segment.length === 1 && /^[a-z]$/.test(segment)) continue
     out.add(segment)
   }
   return out
@@ -99,11 +118,12 @@ const GENERATED_SECTION_HEADINGS: ReadonlySet<string> = new Set(['relationships'
  * Remove BOILERPLATE that carries no distinguishing signal before the text is
  * tokenised for similarity (memory blocker 1). Three constructs are stripped:
  *
- *  1. The generated page-TITLE heading (`# <Name>`). Level-1 is the title slot by
- *     convention — write-to-gbrain `composeNewCompiledTruth` and the reflect-pass
- *     reserved-kind synthesis both emit `# <name>` as the sole H1. The entity NAME
- *     is NOT lost: the dedup candidate prepends the page title separately, so the
- *     name still reaches the token set via the title.
+ *  1. The generated page-TITLE heading — the LEVEL-1 heading whose label EQUALS the
+ *     page `title` (passed in). write-to-gbrain `composeNewCompiledTruth` and the
+ *     reflect-pass reserved-kind synthesis both emit `# <name>` as the title H1.
+ *     Only that exact H1 is dropped; the entity NAME is NOT lost because the dedup
+ *     candidate prepends the page title separately, so the name still reaches the
+ *     token set. When no `title` is supplied, NO H1 is stripped (conservative).
  *  2. The generated SECTION headings (`## Relationships`, `## Merged`) — structural
  *     scaffolding identical across pages. Only these exact machine labels are
  *     dropped.
@@ -115,13 +135,16 @@ const GENERATED_SECTION_HEADINGS: ReadonlySet<string> = new Set(['relationships'
  *     alone.
  *
  * CRITICAL (memory blocker 1 VETO, 2026-07-20): a hand-authored or imported
- * FACTUAL heading — e.g. `## Acquired by Globex` — is DISTINGUISHING content and is
- * KEPT. The earlier revision stripped EVERY heading (`/^#{1,6}.../gm`), which erased
- * such facts and could inflate Jaccard between genuinely-distinct pages, enabling an
- * irreversible false merge. This strip removes only the machine boilerplate, never
- * hand-authored content.
+ * FACTUAL heading — e.g. `## Acquired by Globex`, or even a factual `# Acquired by
+ * Globex` H1 whose label differs from the page title — is DISTINGUISHING content and
+ * is KEPT. An earlier revision stripped EVERY heading, then EVERY H1 regardless of
+ * label; both erased real facts and could inflate Jaccard between genuinely-distinct
+ * pages, enabling an irreversible false merge. This strip removes only the machine
+ * boilerplate: the generated section labels (any level) and the SINGLE H1 whose label
+ * equals `title`. Never hand-authored content.
  */
-export function stripBoilerplate(text: string): string {
+export function stripBoilerplate(text: string, title?: string): string {
+  const titleKey = title?.trim().toLowerCase()
   const kept: string[] = []
   for (const line of text.split('\n')) {
     const h = /^[ \t]*(#{1,6})[ \t]+(.*?)[ \t]*$/.exec(line)
@@ -131,9 +154,12 @@ export function stripBoilerplate(text: string): string {
     }
     const level = h[1]!.length
     const label = h[2]!
-    // Drop the generated H1 title (name preserved via the prepended candidate title)
-    // and the exact generated section labels; keep every other (factual) heading.
-    if (level === 1 || GENERATED_SECTION_HEADINGS.has(label.toLowerCase())) continue
+    // Drop the exact generated section labels (`## Relationships`, `## Merged`) at any
+    // level, and the generated TITLE H1 — the level-1 heading whose label equals the
+    // page title (name preserved via the prepended candidate title). Every OTHER
+    // heading, including a factual H1 whose label != title, is kept (blocker 1 VETO).
+    if (GENERATED_SECTION_HEADINGS.has(label.toLowerCase())) continue
+    if (level === 1 && titleKey !== undefined && label.trim().toLowerCase() === titleKey) continue
     kept.push(line)
   }
   return kept
@@ -186,7 +212,7 @@ export function clusterNearDuplicates(
   minDistinguishingTokens: number = DEFAULT_MIN_DISTINGUISHING_TOKENS,
 ): DedupCandidate[][] {
   const n = candidates.length
-  const tokens = candidates.map((c) => tokenize(stripBoilerplate(c.text)))
+  const tokens = candidates.map((c) => tokenize(stripBoilerplate(c.text, c.title)))
   // A page with too few non-boilerplate tokens has no comparable factual content
   // (at most its own name) and can neither anchor nor join a merge — it is always
   // emitted as its own singleton.

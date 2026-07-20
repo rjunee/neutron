@@ -33,6 +33,19 @@ describe('tokenize', () => {
     // 'acme' appears twice but the set carries it once.
     expect([...t].filter((x) => x === 'acme').length).toBe(1)
   })
+
+  test('KEEPS numeric and alphanumeric tokens (blocker 1 major — numeric-token defect)', () => {
+    // Intl.Segmenter marks these `isWordLike:false`; the old `isWordLike` filter
+    // erased them entirely. Runtime repro on old code: tokenize('2024') === Set{}.
+    expect([...tokenize('2024')]).toEqual(['2024'])
+    expect(tokenize('Fiscal Year 2024').has('2024')).toBe(true)
+    expect(tokenize('Q1 2024 revenue').has('q1')).toBe(true)
+    expect(tokenize('Release FY2023').has('fy2023')).toBe(true)
+    expect(tokenize('version v2').has('v2')).toBe(true)
+    // A single digit is distinguishing and kept; a single ASCII letter is filler.
+    expect(tokenize('page 5').has('5')).toBe(true)
+    expect(tokenize('a page').has('a')).toBe(false)
+  })
 })
 
 describe('jaccard', () => {
@@ -59,7 +72,7 @@ describe('jaccard', () => {
 })
 
 describe('clusterNearDuplicates', () => {
-  const cand = (slug: string, text: string): DedupCandidate => ({ slug, text })
+  const cand = (slug: string, text: string, title = ''): DedupCandidate => ({ slug, title, text })
 
   test('groups near-duplicates and keeps distinct pages as singletons', () => {
     const items = [
@@ -105,7 +118,7 @@ describe('clusterNearDuplicates', () => {
 
 describe('stripBoilerplate', () => {
   test('removes heading lines and the fact-less template sentence, keeps real prose', () => {
-    const factless = stripBoilerplate('Acme\n# Acme\n\nMentioned in chat (kind: company).\n')
+    const factless = stripBoilerplate('Acme\n# Acme\n\nMentioned in chat (kind: company).\n', 'Acme')
     expect(factless).not.toContain('Mentioned in chat')
     expect(factless).not.toContain('# Acme')
     expect(tokenize(factless).has('mentioned')).toBe(false)
@@ -120,7 +133,7 @@ describe('stripBoilerplate', () => {
     // The generated scaffolding labels are boilerplate; a factual heading is not.
     const body =
       'Acme\n# Acme\n\nAcme is a payments startup.\n\n## Acquired by Globex\n\nBought in 2024.\n\n## Relationships\n\n- Works at [[globex]].\n'
-    const out = stripBoilerplate(body)
+    const out = stripBoilerplate(body, 'Acme')
     // Generated H1 title + `## Relationships` scaffolding → gone.
     expect(out).not.toContain('# Acme')
     expect(out).not.toContain('## Relationships')
@@ -133,8 +146,23 @@ describe('stripBoilerplate', () => {
     expect(toks.has('relationships')).toBe(false) // scaffolding token dropped
   })
 
+  test('KEEPS a factual H1 whose label differs from the title (blocker 1 VETO round-2)', () => {
+    // Regression: the round-1 code stripped EVERY H1 (`level === 1`), so a factual
+    // H1 lost its distinguishing tokens. Runtime repro on that code:
+    // stripBoilerplate('# Acquired by Globex\nbody') → 'body'. Now only the TITLE H1
+    // is dropped; a factual H1 (label != title) is kept.
+    const out = stripBoilerplate('# Acquired by Globex\nbody text here', 'Acme')
+    expect(out).toContain('# Acquired by Globex')
+    const toks = tokenize(out)
+    expect(toks.has('acquired')).toBe(true)
+    expect(toks.has('globex')).toBe(true)
+    // The generated TITLE H1 (label == title) IS still stripped as boilerplate.
+    const titled = stripBoilerplate('# Acme\nbody text here', 'Acme')
+    expect(titled).not.toContain('# Acme')
+  })
+
   test('strips the reserved-kind fact-less synthesis fallback sentence', () => {
-    const out = stripBoilerplate('Kickoff\n# Kickoff\n\nIdentified during reflect (meeting).\n')
+    const out = stripBoilerplate('Kickoff\n# Kickoff\n\nIdentified during reflect (meeting).\n', 'Kickoff')
     expect(out).not.toContain('Identified during reflect')
     expect(tokenize(out).has('identified')).toBe(false)
     expect(tokenize(out).has('reflect')).toBe(false)
@@ -146,6 +174,7 @@ describe('memory blocker 1 — fact-less pages must NOT fuse (reproduce-then-fix
   // page, wrapped as reflect-pass builds the candidate: `${title}\n${compiledTruth}`.
   const factless = (name: string, slug: string): DedupCandidate => ({
     slug,
+    title: name,
     text: `${name}\n# ${name}\n\nMentioned in chat (kind: company).\n`,
   })
   const five = [
@@ -182,6 +211,7 @@ describe('memory blocker 1 — fact-less pages must NOT fuse (reproduce-then-fix
     // page's distinguishing tokens, dropping the score well below 0.7.
     const withHeading = (name: string, slug: string, heading: string): DedupCandidate => ({
       slug,
+      title: name,
       // Identical prose blob → without the headings these look like near-duplicates.
       text: `${name}\n# ${name}\n\nA company in the technology sector based in the bay area.\n\n## ${heading}\n`,
     })
@@ -194,16 +224,61 @@ describe('memory blocker 1 — fact-less pages must NOT fuse (reproduce-then-fix
     for (const c of clusters) expect(c.length).toBe(1)
   })
 
+  test('entities distinguished ONLY by a number do NOT fuse (blocker 1 major — numeric defect)', () => {
+    // Argus's exact runtime repro on the branch before the fix:
+    // clusterNearDuplicates(['Fiscal Year 2023 Budget','Fiscal Year 2024 Budget'])
+    // → ONE cluster [fy23,fy24]. The number tokens were ERASED, so both pages
+    // tokenised to {fiscal,year,budget} — IDENTICAL sets → Jaccard 1.0 → fuse at
+    // ANY threshold. With numbers kept, the sets differ by one token each
+    // ({…,2023} vs {…,2024}) → 3/5 = 0.6 < 0.7 → two singletons.
+    const items: DedupCandidate[] = [
+      {
+        slug: 'fy23',
+        title: 'Fiscal Year 2023 Budget',
+        text: 'Fiscal Year 2023 Budget\n# Fiscal Year 2023 Budget\n',
+      },
+      {
+        slug: 'fy24',
+        title: 'Fiscal Year 2024 Budget',
+        text: 'Fiscal Year 2024 Budget\n# Fiscal Year 2024 Budget\n',
+      },
+    ]
+    const clusters = clusterNearDuplicates(items)
+    expect(clusters.length).toBe(2) // FAILS on old code (numbers erased → one cluster)
+    for (const c of clusters) expect(c.length).toBe(1)
+  })
+
+  test('distinct pages distinguished ONLY by a factual H1 do NOT falsely merge (blocker 1 VETO round-2)', () => {
+    // Same shape as the H2-heading test, but the distinguishing content is a
+    // factual H1. The round-1 code stripped EVERY H1, erasing these tokens, so both
+    // pages reduced to {name + shared-prose} and fused. Keeping the factual H1
+    // (label != title) restores the distinguishing tokens.
+    const withH1 = (name: string, slug: string, factH1: string): DedupCandidate => ({
+      slug,
+      title: name,
+      text: `${name}\n# ${name}\n\nA company in the technology sector based in the bay area.\n\n# ${factH1}\n`,
+    })
+    const items = [
+      withH1('Acme', 'acme', 'Acquired by Globex in 2024'),
+      withH1('Zeta', 'zeta', 'Independent and privately held since 1999'),
+    ]
+    const clusters = clusterNearDuplicates(items)
+    expect(clusters.length).toBe(2) // FAILS on old strip-EVERY-H1 (they merge into 1)
+    for (const c of clusters) expect(c.length).toBe(1)
+  })
+
   test('genuine near-duplicates (same entity, overlapping REAL facts) STILL cluster', () => {
     // Real dedup must not be broken by the boilerplate fix.
     const items: DedupCandidate[] = [
       {
         slug: 'acme',
+        title: 'Acme',
         text:
           'Acme\n# Acme\n\nAcme is a fintech startup based in Berlin, founded by [[jane-doe]]. It raised a Series A in 2023 and builds developer payment tooling.\n',
       },
       {
         slug: 'acme-inc',
+        title: 'Acme Inc',
         text:
           'Acme Inc\n# Acme Inc\n\nAcme is a fintech startup based in Berlin, founded by [[jane-doe]]. Raised a Series A in 2023 and builds developer payment tooling.\n',
       },
