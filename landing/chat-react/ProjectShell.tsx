@@ -48,6 +48,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 import { ChatApp, TopicRail, GENERAL_EMOJI, railEmojiFor, useMediaQuery } from './ChatApp.tsx'
 import { DocumentsTab, type DocOpenRequest } from './DocumentsTab.tsx'
+import { PaneErrorBoundary } from './PaneErrorBoundary.tsx'
 import { WorkBoardTab } from './WorkBoardTab.tsx'
 import { IntegrationsTab } from './IntegrationsTab.tsx'
 import { SettingsTab } from './SettingsTab.tsx'
@@ -217,26 +218,33 @@ function TabContent({
   }
   // Builtin Documents — the Obsidian-replacement read+comment surface (PR-5).
   if (tab.mount.target === 'docs') {
+    // #354-class isolation (2026-07-20): Documents does its own network I/O on
+    // project switch, so a failed doc fetch used to crash the ONLY boundary in
+    // the client (ChatApp) and blank the whole screen. Keep its failures local.
     return (
-      <DocumentsTab
-        projectId={projectId}
-        config={config}
-        {...(fetchImpl !== undefined ? { fetchImpl } : {})}
-        {...(docOpenRequest !== undefined ? { openRequest: docOpenRequest } : {})}
-      />
+      <PaneErrorBoundary label="Documents">
+        <DocumentsTab
+          projectId={projectId}
+          config={config}
+          {...(fetchImpl !== undefined ? { fetchImpl } : {})}
+          {...(docOpenRequest !== undefined ? { openRequest: docOpenRequest } : {})}
+        />
+      </PaneErrorBoundary>
     )
   }
   // Builtin Plan (work_board) — the live work-tracker (active+next, completed
   // history), human read+WRITE, applying live `work_board_changed` frames.
   if (tab.mount.target === 'workboard') {
     return (
-      <WorkBoardTab
-        projectId={projectId}
-        config={config}
-        liveSource={controller}
-        {...(fetchImpl !== undefined ? { fetchImpl } : {})}
-        {...(onOpenDocLink !== undefined ? { onOpenDoc: onOpenDocLink } : {})}
-      />
+      <PaneErrorBoundary label="Plan">
+        <WorkBoardTab
+          projectId={projectId}
+          config={config}
+          liveSource={controller}
+          {...(fetchImpl !== undefined ? { fetchImpl } : {})}
+          {...(onOpenDocLink !== undefined ? { onOpenDoc: onOpenDocLink } : {})}
+        />
+      </PaneErrorBoundary>
     )
   }
   // Builtin Admin — the owner-facing OAuth + API-key integrations surface. A
