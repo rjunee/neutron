@@ -407,8 +407,40 @@ export function unlinkSessionConfigs(session: ReplSession): void {
   }
 }
 
+/**
+ * Env vars that let the PARENT process inject code into the child interpreter.
+ * Stripped unconditionally — a CC child must never inherit them.
+ *
+ * WHY (adversarial security review, 2026-07-20): `mergeEnv` starts from the
+ * gateway's whole `process.env` and previously deleted ONLY what a composer
+ * overlay explicitly unset (the three Anthropic auth vars, ISSUES #49). None of
+ * these four were ever named anywhere in this file, so a gateway environment
+ * carrying `NODE_OPTIONS=--require /path/evil.js` — or `LD_PRELOAD` /
+ * `DYLD_INSERT_LIBRARIES` — was arbitrary code execution inside EVERY spawned
+ * Claude child. It required the gateway's own env to be poisoned first, so this
+ * is defense-in-depth rather than a remotely-reachable hole, but there is no
+ * legitimate reason for a child to inherit any of them.
+ *
+ * Deleted here rather than in a composer overlay so it holds for EVERY caller —
+ * a new substrate factory cannot forget it.
+ */
+const CODE_INJECTION_ENV_VARS = [
+  'NODE_OPTIONS',
+  'BUN_INSPECT',
+  'BUN_INSPECT_CONNECT_TO',
+  'LD_PRELOAD',
+  'LD_AUDIT',
+  'LD_LIBRARY_PATH',
+  'DYLD_INSERT_LIBRARIES',
+  'DYLD_LIBRARY_PATH',
+  'DYLD_FRAMEWORK_PATH',
+] as const
+
 export function mergeEnv(overlay: Record<string, string | undefined> | undefined): Record<string, string | undefined> {
   const base: Record<string, string | undefined> = { ...process.env }
+  // Strip interpreter-injection vars BEFORE the overlay, so an explicit overlay
+  // value still wins if a caller ever legitimately needs one (none do today).
+  for (const k of CODE_INJECTION_ENV_VARS) delete base[k]
   if (overlay !== undefined) {
     // ISSUES #49 — an `undefined` overlay value means "DELETE from the inherited
     // env", not "set to undefined". This is the credential-scrub contract: a

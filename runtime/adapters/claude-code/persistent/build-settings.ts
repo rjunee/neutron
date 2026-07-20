@@ -47,7 +47,12 @@ export function buildSettings(input: BuildSettingsInput): string {
       null,
       2,
     ),
-    { mode: 0o644 },
+    // 0600, not 0644 (adversarial security review 2026-07-20). This file is the
+    // session's Stop-hook wiring today and becomes the session's PERMISSION
+    // POLICY under the tool-security redesign. World-readable was already
+    // unnecessary; world-readable security policy would be a hole. Its parent
+    // dir is 0700 per-spawn (spawn.ts).
+    { mode: 0o600 },
   )
   return input.settingsPath
 }

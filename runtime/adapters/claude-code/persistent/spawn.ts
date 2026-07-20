@@ -3,7 +3,7 @@
 // (D2 split).
 
 import { randomUUID, randomBytes } from 'node:crypto'
-import { writeFileSync } from 'node:fs'
+import { mkdirSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { AgentSpec } from '../../../substrate.ts'
@@ -52,7 +52,11 @@ async function spawnSession(
   // instead of cold-spawning a fresh `--session-id`. This is the wiring that
   // closes the S1 context-loss gap.
   const sessionId = resume?.sessionId ?? (options.idGen ?? randomUUID)()
-  const channelName = `neutron-${randomBytes(4).toString('hex')}`
+  // 16 bytes, not 4 (adversarial security review 2026-07-20). This value names
+  // the per-session config files below, and one of them carries the MCP sink
+  // TOKEN in plaintext. 4 bytes is guessable/squattable by any same-uid process;
+  // the path is also visible in `ps` because `--mcp-config <path>` is on argv.
+  const channelName = `neutron-${randomBytes(16).toString('hex')}`
   const ptyHost = options.ptyHost ?? bunTerminalHost
   const devChannelPath = options.devChannelPath ?? DEFAULT_DEV_CHANNEL_PATH
   const toolsBridgePath = options.toolsBridgePath ?? DEFAULT_TOOLS_BRIDGE_PATH
@@ -60,7 +64,17 @@ async function spawnSession(
 
   // Per-session config files (mcp-config wires the dev-channel; settings wires
   // the enforce-reply Stop hook).
-  const cfgBase = join(tmpdir(), `neutron-repl-${channelName}`)
+  //
+  // OWNER-ONLY DIRECTORY (adversarial security review 2026-07-20). These were
+  // previously written directly into a shared `tmpdir()` — the mcp-config at the
+  // process umask (no mode argument at all) — and it carries the MCP sink TOKEN
+  // in plaintext. Any same-uid process could read it and then dispatch tools
+  // against the bridge. A 0700 per-spawn directory plus 0600 files keeps the
+  // token owner-readable; the wider bridge-auth fix (per-session token, session
+  // check before dispatch) is tracked separately.
+  const cfgDir = join(tmpdir(), `neutron-repl-${channelName}`)
+  mkdirSync(cfgDir, { recursive: true, mode: 0o700 })
+  const cfgBase = join(cfgDir, 'session')
   const mcpConfigPath = `${cfgBase}-mcp.json`
   const settingsPath = `${cfgBase}-settings.json`
   const toolsManifestPath = `${cfgBase}-tools.json`
@@ -105,7 +119,7 @@ async function spawnSession(
     }
   }
 
-  writeFileSync(mcpConfigPath, JSON.stringify({ mcpServers }, null, 2))
+  writeFileSync(mcpConfigPath, JSON.stringify({ mcpServers }, null, 2), { mode: 0o600 })
   buildSettings({ settingsPath })
 
   // SECURITY-CRITICAL (Codex-r1-P1): thread the spec's declared tool surface into
