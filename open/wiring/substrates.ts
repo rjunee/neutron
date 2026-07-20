@@ -25,6 +25,12 @@ import {
   buildLlmCallSubstrate,
   type BuildLlmCallSubstrateInput,
 } from '@neutronai/gateway/wiring/build-llm-call-substrate.ts'
+import {
+  PROFILE_PHASE_SPEC,
+  PROFILE_WARM_CHAT,
+  PROFILE_EPHEMERAL,
+  PROFILE_WARM_FIRE,
+} from '@neutronai/gateway/wiring/substrate-profiles.ts'
 import { getOpenAiModelPreference } from '@neutronai/runtime/models-openai.ts'
 import { OWNER_USER_ID } from '../owner-identity.ts'
 import type { Substrate } from '@neutronai/runtime/substrate.ts'
@@ -170,7 +176,9 @@ export function wireSubstrates(ctx: OpenWiringContext): WiredSubstrates {
           owner_handle,
           user_id: OWNER_USER_ID,
           project_slug,
-          skip_permissions: true,
+          // Phase-spec resolver (cc-llm). Security knobs live on the profile —
+          // see substrate-profiles.ts.
+          profile: PROFILE_PHASE_SPEC,
           // Phase-spec: openai provider WITHOUT the tool manifest (no tool bridge),
           // mirroring the Claude path (cc-llm-* never sets enableToolBridge).
           ...phaseSpecProvider,
@@ -223,7 +231,10 @@ export function wireSubstrates(ctx: OpenWiringContext): WiredSubstrates {
           owner_handle,
           user_id: OWNER_USER_ID,
           project_slug,
-          skip_permissions: true,
+          // Owner's WARM conversational REPL (cc-agent) — TRUSTED live chat.
+          // Security knobs live on the profile — see substrate-profiles.ts. Kept
+          // DISTINCT from the untrusted-import profile even though identical today.
+          profile: PROFILE_WARM_CHAT,
           // P0-1 — the owner's WARM conversational REPL is the ONE substrate
           // that opts into the native-MCP tool bridge, so the live chat agent
           // can call Cores/doc-search/memory/reminders mid-reasoning over a
@@ -293,7 +304,9 @@ export function wireSubstrates(ctx: OpenWiringContext): WiredSubstrates {
               owner_handle,
               user_id: OWNER_USER_ID,
               project_slug,
-              skip_permissions: true,
+              // Disposable per-worktree Trident/agent-dispatch REPL. Security
+              // knobs live on the profile — see substrate-profiles.ts.
+              profile: PROFILE_EPHEMERAL,
               ephemeral: true,
               ...(substrateFactory !== undefined ? { substrateFactory } : {}),
             })
@@ -340,7 +353,9 @@ export function wireSubstrates(ctx: OpenWiringContext): WiredSubstrates {
       owner_handle,
       user_id: OWNER_USER_ID,
       project_slug,
-      skip_permissions: true,
+      // Trident v2 FIRE seam — WARM per-repo REPL. Security knobs live on the
+      // profile — see substrate-profiles.ts.
+      profile: PROFILE_WARM_FIRE,
       ...(substrateFactory !== undefined ? { substrateFactory } : {}),
     })
     if (built === null) throw new Error('cc-trident-fire: empty Anthropic credential pool')

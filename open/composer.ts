@@ -71,6 +71,7 @@ import {
   buildLlmCallSubstrate,
   collectTokensToString,
 } from '@neutronai/gateway/wiring/build-llm-call-substrate.ts'
+import { PROFILE_UNTRUSTED_IMPORT } from '@neutronai/gateway/wiring/substrate-profiles.ts'
 import { buildSubstrateWorkflowFire } from '@neutronai/trident/inner-loop.ts'
 import { getBestModel } from '@neutronai/runtime/models.ts'
 import {
@@ -958,7 +959,9 @@ export function buildOpenGraphComposer(
             owner_handle,
             user_id: OWNER_USER_ID,
             project_slug,
-            skip_permissions: true,
+            // Untrusted-input caller (imported chat history = prompt-injection
+            // surface). Security knobs live on the profile — see substrate-profiles.ts.
+            profile: PROFILE_UNTRUSTED_IMPORT,
             ...(substrateFactory !== undefined ? { substrateFactory } : {}),
           })
         : null
