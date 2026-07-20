@@ -10,6 +10,45 @@ Running log of what shipped, newest first. One entry per merged change.
 > `docs/research/AS-BUILT-docs-archive-2026-07.md`. This file is the ONE live
 > changelog going forward.
 
+## 2026-07-20 — M2-1: the Cores→scribe fan-out now receives the LIVE Google clients
+
+Closed a "wired but does nothing" partial-port. The Cores→scribe phase-2 fan-out
+(scheduled Calendar + Email Cores → ambient extraction → GBrain) was CONSTRUCTED
+inside `wireMemory` (`open/wiring/memory.ts`) with NO calendar/gmail clients, so
+`mountCoresScribeFanOut` fell back to fresh `buildInMemoryCalendarClient()` /
+`buildInMemoryGmailClient()` stand-ins. Result: ambient email/calendar → memory
+extraction ran but **emitted nothing by construction, even with Google connected**
+(the module's own comment said as much). Meanwhile `mountOpenCores` already built
+the real OAuth-backed `calendarClient`/`gmailClient` (the SAME instances the
+`calendar_core`/`email_managed_core` MCP tools + `/cal`/`/email` filters use) — but
+never exposed them, and `wireMemory` (composer `open/composer.ts:~1046`) runs
+~100 lines BEFORE `mountOpenCores` (`~:1150`), so they could not simply be passed.
+
+THE FIX — **late-binding**, mirroring the `reflectLoop` precedent (construct early
+/ register cleanup early / arm after the dependency exists):
+- `MountedOpenCores` now exposes `calendarClient` + `gmailClient`
+  (`gateway/cores/mount-open-cores.ts`).
+- `mountCoresScribeFanOut` no longer takes clients or starts anything at
+  construction; it returns a handle with `arm({ calendarClient, gmailClient })`
+  that builds + starts the two schedulers, plus `stop()`/`idle()`. `arm()` is
+  failure-atomic (a throw mid-arm tears down what it started) and single-shot
+  (second call throws); `stop()` is a safe no-op before `arm`
+  (`gateway/cores/mount-cores-scribe-fan-out.ts`).
+- `wireMemory` CONSTRUCTS the fan-out (unarmed) + registers its `stop()` cleanup
+  early, and surfaces it on `WiredMemory.coresScribeFanOut`; the composer ARMS it
+  LAST with `coresWiring.calendarClient` / `coresWiring.gmailClient`, after every
+  failure-prone step — so a composition failure between construct and arm leaks no
+  running scheduler.
+
+Behaviour: OAuth absent → the clients are in-memory fallbacks and the schedulers
+fan out nothing (unchanged, correct degrade for an LLM-less / Google-less box);
+Google connected → real events/mail now flow into GBrain with **zero further
+wiring**. NO feature flag, one code path. Tests: `mount-cores-scribe-fan-out.test.ts`
+(live-client arm → gmail message reaches the scribe writer + the live calendar
+client is read; unarmed → schedulers null + `stop()` clean no-op; in-memory arm →
+fans nothing; arm-twice guard) and `mount-open-cores.test.ts` (clients exposed).
+Suites green: `open/` 334, `gateway/cores/` 76, `scribe/` 109.
+
 ## 2026-07-20 — SubstrateProfile refactor (tool-security redesign Step 0)
 
 BEHAVIOUR-PRESERVING refactor — zero runtime change. Prerequisite (correction #6)

@@ -1043,6 +1043,7 @@ export function buildOpenGraphComposer(
       memoryIndexRead,
       setMemoryIndexWorkHandles,
       reflectLoop,
+      coresScribeFanOut,
       cleanups: memoryCleanups,
     } = wireMemory(wiringCtx)
 
@@ -3391,6 +3392,24 @@ export function buildOpenGraphComposer(
       // so an in-flight lifecycle tick fully drains before the DB closes and can
       // never persist / prune against a closing database (round-7 High 2).
       realmodeCleanups.push(() => lifecycleWatchdog.stop())
+    }
+
+    // M2-1 — ARM the Cores→scribe fan-out with the LIVE Google clients, LAST
+    // (same discipline as reflectLoop below): its `stop()` cleanup was registered
+    // early in `wireMemory` for shutdown ordering, but arming (build + start the
+    // Calendar + Email schedulers) is deferred to here so (a) it binds the REAL
+    // `mountOpenCores` clients — `calendar_core`/`email_managed_core` share these
+    // exact instances, so a CONNECTED Google account now actually feeds ambient
+    // events/mail into memory (pre-M2-1 it armed with in-memory fallbacks and fed
+    // nothing) — and (b) a composition failure before this point leaves no
+    // scheduler started. `arm()` is itself failure-atomic. Null (LLM-less box, no
+    // scribe) → no-op. OAuth-less → the clients are in-memory fallbacks and the
+    // schedulers fan out nothing (unchanged), which is correct.
+    if (coresScribeFanOut !== null) {
+      coresScribeFanOut.arm({
+        calendarClient: coresWiring.calendarClient,
+        gmailClient: coresWiring.gmailClient,
+      })
     }
 
     // RB3 ([BEHAVIOR]) — ARM the reflect-consolidation loop LAST, after every

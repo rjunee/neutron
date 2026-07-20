@@ -283,15 +283,36 @@ already-fetched event/inbox rows to a `scribeFanOut` hook
 > `open/__tests__/open-app-ws-scribe-wiring.test.ts`.
 
 **Wired into the Open boot path** (`open/composer.ts`, gated on scribe being
-live) via `mountCoresScribeFanOut(...)`, which composes both schedulers using the
-built factories, threads the binding, starts them, and registers a drain+teardown
-`stop()` against `realmode_cleanups`. The binding is fire-and-forget (a failed
-extraction never throws into a Core's brief/triage path) and exposes `idle()` for
-clean shutdown draining. Each scheduler owns its own self-tick — **no duplicate
-poller, no extra timer/fetch** beyond the Cores' own cadence. Until a
-Google-OAuth-backed calendar/gmail client is connected, the in-memory fallback
-clients yield an empty calendar/inbox so the schedulers run harmlessly; the
-fan-out goes live with no further wiring the moment a real client is supplied.
+live) via `mountCoresScribeFanOut(...)`, which builds the binding and returns a
+**late-bound handle**. `wireMemory` CONSTRUCTS it (nothing started) and registers
+its drain+teardown `stop()` against `realmode_cleanups` early; the composer ARMS
+it — `coresScribeFanOut.arm({ calendarClient, gmailClient })` — LAST, after
+`mountOpenCores` has built the live Google clients, which is where the two
+schedulers are actually composed from those factories and started. The binding is
+fire-and-forget (a failed extraction never throws into a Core's brief/triage path)
+and exposes `idle()` for clean shutdown draining. Each scheduler owns its own
+self-tick — **no duplicate poller, no extra timer/fetch** beyond the Cores'
+cadence.
+
+> **M2-1 (2026-07-20) — the fan-out now receives the LIVE Google clients.**
+> `mountOpenCores` exposes `calendarClient` + `gmailClient` on `MountedOpenCores`
+> — the SAME instances the `calendar_core`/`email_managed_core` MCP tools + the
+> `/cal` / `/email` filters use (OAuth-backed when Google is connected, in-memory
+> fallback otherwise) — and the composer arms the fan-out with them. Before M2-1
+> the fan-out was constructed inside `wireMemory` with NO clients, so it fell back
+> to fresh in-memory stand-ins and fanned out **nothing even when Google was
+> connected** — the exact "wired but does nothing" partial-port. The
+> **late-binding** shape (construct-early / cleanup-early / arm-after-
+> `mountOpenCores`) mirrors the `reflectLoop` precedent, because the clients are
+> built ~100 lines AFTER `wireMemory` runs. `arm()` is failure-atomic and
+> `stop()` is a safe no-op before `arm`, so a composition failure between
+> construction and the arm leaks no scheduler. With OAuth absent the clients are
+> the in-memory fallbacks and the schedulers fan out nothing (unchanged, correct);
+> with Google connected, real events/mail now flow into GBrain with no further
+> wiring. Regression guards: `gateway/cores/__tests__/mount-cores-scribe-fan-out.test.ts`
+> (live-client arm reaches the writer; unarmed/in-memory fan nothing; arm-twice
+> guard) + `gateway/cores/__tests__/mount-open-cores.test.ts` (clients exposed).
+
 Always-on when scribe is — **no feature flag**. (The Cores' MCP tools + `/cal` /
 `/email` chat surfaces are now composed into Open too — see the next section.)
 
