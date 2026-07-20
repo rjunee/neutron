@@ -64,6 +64,7 @@ import type { Event, SubstrateErrorClass } from '@neutronai/runtime/events.ts'
 import type { SessionHandle } from '@neutronai/runtime/session-handle.ts'
 import type { AgentSpec, Substrate } from '@neutronai/runtime/substrate.ts'
 import type { OAuthCredentialSource } from './resolve-llm-credentials.ts'
+import type { SubstrateProfile } from './substrate-profiles.ts'
 
 /**
  * Discriminated failure reasons for `resolveScrubbedAuthEnv`. Mirrors the
@@ -345,8 +346,29 @@ export interface BuildLlmCallSubstrateInput {
    * When true, thread `--dangerously-skip-permissions` into the spawned
    * `claude` REPL. Managed-tier deployments set this so the headless REPL
    * doesn't block on interactive prompts.
+   *
+   * PREFER `profile` (below) over this raw field for production call sites — it
+   * is retained for backward compat (tests / callers that set the knob inline).
+   * When `profile` is supplied, `profile.skip_permissions` WINS; this field is
+   * the fallback only when no profile is threaded.
    */
   skip_permissions?: boolean
+  /**
+   * SECURITY PROFILE (tool-security redesign Step 0) — the single-source bag of
+   * SECURITY-relevant spawn knobs (`skip_permissions` today; reserved shape for
+   * `permission_mode` / `claude_config_dir` / `extra_env` / `sandbox`). Supplied
+   * by the 8 production sites in place of the inline `skip_permissions: true`
+   * literal so the later permission migration is N constant edits, not 8 risky
+   * per-site edits. See `substrate-profiles.ts`.
+   *
+   * Precedence (all BEHAVIOUR-PRESERVING today, since no profile sets the
+   * reserved fields and no live site sets the legacy per-call inputs): a
+   * profile field WINS over the matching legacy per-call input
+   * (`skip_permissions` / `claude_config_dir` / `extra_env`); an absent profile
+   * field falls back to that input. `permission_mode` and `sandbox` are reserved
+   * shape only and are NOT applied yet (no `ClaudeCodeSubstrateOptions` field).
+   */
+  profile?: SubstrateProfile
   /**
    * Substrate-construction seam. Defaults to `createClaudeCodeSubstrateAuto`
    * (the persistent interactive-REPL substrate — the SOLE production path).
@@ -629,21 +651,34 @@ export function buildLlmCallSubstrate(
         }
         const { env, pool } = resolved
         const cred = { id: resolved.cred_id }
+        // SECURITY-PROFILE resolution (tool-security redesign Step 0). The
+        // security knobs (`skip_permissions` / `claude_config_dir` / `extra_env`)
+        // now live on a single-source `profile`; a profile field WINS over the
+        // matching legacy per-call input, an absent profile field falls back to
+        // it. BEHAVIOUR-PRESERVING today: no profile sets the reserved fields and
+        // no live site sets these per-call inputs, so each `??` resolves to the
+        // exact same value the pre-refactor inline literal produced. The reserved
+        // `profile.permission_mode` / `profile.sandbox` are shape-only (no
+        // `ClaudeCodeSubstrateOptions` field yet) and deliberately NOT applied
+        // here — that is Phase B / Phase D of the redesign.
+        const effectiveSkipPermissions = input.profile?.skip_permissions ?? input.skip_permissions
+        const effectiveClaudeConfigDir = input.profile?.claude_config_dir ?? input.claude_config_dir
+        const effectiveExtraEnv = input.profile?.extra_env ?? input.extra_env
         // Layer the optional `extra_env` overlay AFTER the auth-scrub env so
         // per-substrate spawn knobs (e.g. a `MAX_THINKING_TOKENS=0` classifier
         // knob) win over inherited vars without disturbing the auth scrubbing. The
         // `undefined`-deletes contract is preserved downstream by the REPL spawn
         // env merge.
         const spawnEnv: Record<string, string | undefined> =
-          input.extra_env !== undefined ? { ...env, ...input.extra_env } : env
+          effectiveExtraEnv !== undefined ? { ...env, ...effectiveExtraEnv } : env
         const opts: ClaudeCodeSubstrateOptions = {
           substrate_instance_id: input.substrate_instance_id,
           env: spawnEnv,
         }
         if (input.cwd !== undefined) opts.cwd = input.cwd
-        if (input.claude_config_dir !== undefined) opts.claude_config_dir = input.claude_config_dir
+        if (effectiveClaudeConfigDir !== undefined) opts.claude_config_dir = effectiveClaudeConfigDir
         if (input.claude_bin !== undefined) opts.claude_bin = input.claude_bin
-        if (input.skip_permissions !== undefined) opts.skip_permissions = input.skip_permissions
+        if (effectiveSkipPermissions !== undefined) opts.skip_permissions = effectiveSkipPermissions
         // S3 §2 — fold the SELECTED credential id (#104) + the conversational
         // identity into the warm-pool key. `cred.id` is the `PooledCredential.id`
         // (never the secret); a rotation changes it → re-keys to a fresh REPL under

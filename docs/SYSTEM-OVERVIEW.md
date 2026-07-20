@@ -378,6 +378,16 @@ a slash-command.
   settles; the Forge/Argus/Bash work runs inside the workflow's own nested agents.
   These per-turn surfaces never relax the import REPL, and the MCP tool bridge
   stays OFF on the trident substrates.
+- **Substrate security config is PROFILE-based** (tool-security redesign Step 0,
+  2026-07-20). The security knobs of a `buildLlmCallSubstrate` spawn
+  (`skip_permissions` today; reserved shape for `permission_mode` /
+  `claude_config_dir` / `extra_env` / `sandbox`) live in named
+  `SubstrateProfile` constants in `gateway/wiring/substrate-profiles.ts`
+  (`PROFILE_WARM_CHAT`, `PROFILE_UNTRUSTED_IMPORT`, `PROFILE_PHASE_SPEC`,
+  `PROFILE_TOOLLESS_UTILITY`, `PROFILE_EPHEMERAL`, `PROFILE_WARM_FIRE`), not in
+  per-site inline literals. All six encode today's value byte-for-byte
+  (`skip_permissions: true`); the split into distinct constants is what lets the
+  coming permission migration diverge per caller-trust-class as N constant edits.
 
 ### Native SKILL.md discovery for the agent (P1-5)
 

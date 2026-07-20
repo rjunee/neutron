@@ -18,6 +18,7 @@
  */
 
 import { buildLlmCallSubstrate } from '@neutronai/gateway/wiring/build-llm-call-substrate.ts'
+import { PROFILE_TOOLLESS_UTILITY } from '@neutronai/gateway/wiring/substrate-profiles.ts'
 import { buildGBrainMemory } from '@neutronai/gateway/wiring/build-gbrain-memory.ts'
 import { createGbrainSyncStateStore } from '@neutronai/gateway/wiring/gbrain-sync-state-store.ts'
 import { resolveOnboardingOpenAiKey } from '@neutronai/gateway/wiring/resolve-onboarding-openai-key.ts'
@@ -129,7 +130,9 @@ export function wireMemory(ctx: OpenWiringContext): WiredMemory {
           owner_handle,
           user_id: OWNER_USER_ID,
           project_slug,
-          skip_permissions: true,
+          // Memory lane: toolless one-shot (tools:[] + in-process persistence).
+          // Security knobs live on the profile — see substrate-profiles.ts.
+          profile: PROFILE_TOOLLESS_UTILITY,
           ephemeral: true,
           ...(substrateFactory !== undefined ? { substrateFactory } : {}),
         })
@@ -252,7 +255,9 @@ export function wireMemory(ctx: OpenWiringContext): WiredMemory {
           owner_handle,
           user_id: OWNER_USER_ID,
           project_slug,
-          skip_permissions: true,
+          // Memory lane: toolless one-shot (tools:[] + in-process persistence).
+          // Security knobs live on the profile — see substrate-profiles.ts.
+          profile: PROFILE_TOOLLESS_UTILITY,
           ephemeral: true,
           ...(substrateFactory !== undefined ? { substrateFactory } : {}),
         })
@@ -349,7 +354,9 @@ export function wireMemory(ctx: OpenWiringContext): WiredMemory {
             owner_handle,
             user_id: OWNER_USER_ID,
             project_slug,
-            skip_permissions: true,
+            // Memory lane: toolless one-shot (tools:[] + in-process persistence).
+            // Security knobs live on the profile — see substrate-profiles.ts.
+            profile: PROFILE_TOOLLESS_UTILITY,
             ephemeral: true,
             ...(substrateFactory !== undefined ? { substrateFactory } : {}),
           })

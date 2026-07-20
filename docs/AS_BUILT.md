@@ -10,6 +10,52 @@ Running log of what shipped, newest first. One entry per merged change.
 > `docs/research/AS-BUILT-docs-archive-2026-07.md`. This file is the ONE live
 > changelog going forward.
 
+## 2026-07-20 — SubstrateProfile refactor (tool-security redesign Step 0)
+
+BEHAVIOUR-PRESERVING refactor — zero runtime change. Prerequisite (correction #6)
+for the tool-security redesign (`docs/plans/tool-security-redesign-2026-07-20.md`).
+
+The 8 production `buildLlmCallSubstrate({ ..., skip_permissions: true })` call
+sites each hand-copied the security knob inline. That made the coming permission
+migration (drop `--dangerously-skip-permissions` → `dontAsk`) 8 risky per-site
+edits, which is incompatible with the no-feature-flags rule (a mode-gated scanner
+would be a dual code path). This collapses those inline literals into named,
+single-source `SubstrateProfile` constants so Phase B becomes N constant edits.
+
+**New:** `gateway/wiring/substrate-profiles.ts` — the `SubstrateProfile` type
+(carries the security knobs: `skip_permissions` today; RESERVED shape for
+`permission_mode` / `claude_config_dir` / `extra_env` / `sandbox`, none wired
+yet) plus six named constants: `PROFILE_TOOLLESS_UTILITY` (memory lane:
+cc-scribe/cc-reflection/cc-reflect — toolless one-shots), `PROFILE_WARM_CHAT`
+(cc-agent), `PROFILE_PHASE_SPEC` (cc-llm), `PROFILE_UNTRUSTED_IMPORT`
+(cc-synthesis — history import), `PROFILE_EPHEMERAL` (makeEphemeralSubstrate),
+`PROFILE_WARM_FIRE` (cc-trident-fire). Every constant encodes TODAY's exact
+value byte-for-byte (`{ skip_permissions: true }`). UNTRUSTED_IMPORT and
+WARM_CHAT are DISTINCT constants even though identical today, because the
+redesign diverges them (the untrusted-import grant tightens first).
+
+**Factory:** `buildLlmCallSubstrate` now accepts `profile?: SubstrateProfile`.
+A profile field WINS over the matching legacy per-call input
+(`skip_permissions` / `claude_config_dir` / `extra_env`); an absent profile
+field falls back to it (backward compat for tests/direct callers). The reserved
+`permission_mode` / `sandbox` fields are shape-only and NOT applied (no
+`ClaudeCodeSubstrateOptions` field yet — that is Phase B / D). Runtime logic of
+the factory is otherwise untouched.
+
+**Sites migrated (8):** `open/composer.ts:954` (cc-synthesis),
+`open/wiring/memory.ts` ×3 (cc-scribe / cc-reflection / cc-reflect),
+`open/wiring/substrates.ts` ×4 (cc-llm / cc-agent / makeEphemeralSubstrate /
+makeWarmFireSubstrate) — each now passes `profile: PROFILE_*` instead of the
+inline `skip_permissions: true`.
+
+**Safety net:** `gateway/wiring/__tests__/substrate-profiles.test.ts` — asserts
+(1) every profile equals `{ skip_permissions: true }` exactly, and (2) for each
+of the 8 sites, the RESOLVED `ClaudeCodeSubstrateOptions` from the new `profile:`
+form deep-equals the resolved options from the pre-refactor inline form. Any
+change to a resolved value is a build BUG, caught here. Suite: `bun test
+gateway/wiring/ open/wiring/ runtime/adapters/claude-code/` green (1198 pass, 0
+fail, 3 pre-existing skips).
+
 ## 2026-07-20 — substrate hardening: env injection + config-file exposure
 
 Three fixes found by an adversarial security review of the tool-security
