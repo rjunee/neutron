@@ -10,6 +10,44 @@ Running log of what shipped, newest first. One entry per merged change.
 > `docs/research/AS-BUILT-docs-archive-2026-07.md`. This file is the ONE live
 > changelog going forward.
 
+## 2026-07-20 — substrate hardening: env injection + config-file exposure
+
+Three fixes found by an adversarial security review of the tool-security
+redesign. All are LIVE weaknesses in today's code, independent of that redesign,
+so they ship on their own.
+
+**1. Interpreter-injection env vars were inherited by every child.** `mergeEnv`
+(`runtime/adapters/claude-code/persistent/repl-session.ts`) starts from the
+gateway's whole `process.env` and deleted ONLY what a composer overlay unset (the
+three Anthropic auth vars, ISSUES #49). `NODE_OPTIONS`, `BUN_INSPECT`,
+`LD_PRELOAD`, `LD_AUDIT`, `DYLD_INSERT_LIBRARIES` and friends appeared NOWHERE in
+the file, so a gateway env carrying `NODE_OPTIONS=--require /path/evil.js` was
+arbitrary code execution inside EVERY spawned Claude child. Requires the
+gateway's own environment to be poisoned first — defense-in-depth, not remotely
+reachable — but there is no legitimate reason to inherit any of them. Now
+stripped unconditionally in `mergeEnv` itself, so a new substrate factory cannot
+forget it.
+
+**2. The MCP sink TOKEN was written world-readable.** `spawn.ts` wrote the
+mcp-config with NO mode argument (process umask) into a shared `tmpdir()` path
+with only 4 bytes of entropy — and `--mcp-config <path>` is on the `claude` argv,
+so the path is visible in `ps`. Any same-uid process could read the token. Now: a
+per-spawn `0700` directory, files at `0600`, and 16 bytes of path entropy.
+
+**3. The per-session settings file was `0644`.** It carries the Stop-hook wiring
+today and becomes the session's PERMISSION POLICY under the redesign; a
+world-readable security policy would be a hole. Now `0600`.
+
+**Test** (`__tests__/env-hardening.test.ts`): pins the injection-var strip with
+and without an overlay, confirms the ISSUES #49 credential scrub still holds, and
+confirms `PATH` survives (a naive allow-list would break `bun`, which launches
+the Stop hook and both MCP servers). **Verified RED pre-fix** — 2 of 4 fail
+without the change. Adapter suite: 596 tests, 0 fail.
+
+NOT fixed here, tracked for the redesign: the MCP bridge's per-PROCESS sink token
+and the missing session check before `/tool-call` dispatch, and the
+`ensure-claude-trust.ts` lost-update race.
+
 ## 2026-07-20 — black screen on project switch: per-pane error isolation
 
 **Bug (live, Ryan).** Clicking to a different project sometimes blanked the
