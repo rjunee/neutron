@@ -1,5 +1,75 @@
 # Neutron Memory System — Full Design
 
+> ## ⚠️ DATA-INTEGRITY REVIEW 2026-07-20 — 4 CORRUPTION BLOCKERS. READ BEFORE THE PLAN BELOW.
+>
+> A data-integrity review treated the first consolidation pass as the irreversible migration it is
+> and found four defects that would silently, permanently corrupt the owner's corpus. Three are not
+> mentioned anywhere in the plan below. The reviewer EXECUTED the real dedup code; the orchestrator
+> independently reproduced the headline. **None of the memory build ships until all four are fixed.**
+>
+> ### BLOCKER 1 — auto-merge fuses UNRELATED entities. Reproduced, not hypothetical.
+> `scribe/reflect/jaccard.ts:82-126` clusters by connected components over Jaccard ≥ 0.7 on
+> `title + compiledTruth` (`reflect-pass.ts:424-427`). A fact-less page gets the boilerplate body
+> `# <Name>\n\nMentioned in chat (kind: <kind>).` — so 6 of 7 tokens are boilerplate and the only
+> distinguishing token is the name. Running the REAL functions on five fact-less company pages:
+> `clusters: [[acme, globex, initech, umbrella, soylent]]` — **all five collapse into one entity in
+> a single pass, transitively.** That is exactly the corpus shape that accumulates when dedup has
+> never run — i.e. every real install. The §7.2 tripwire (flag merges that share a normalized NAME)
+> does NOT catch this: Acme and Globex have different names. **FIX before any mutating pass:** strip
+> boilerplate tokens before scoring; require a minimum distinguishing-token count; drop transitive
+> closure (require pairwise similarity across the whole cluster); re-measure the false-merge rate on
+> Ryan's real corpus; quarantine merge-losers under `entities/.quarantine/` for N passes instead of
+> deleting.
+>
+> ### BLOCKER 2 — resynthesis silently disables supersede FOREVER.
+> `stripSupersededSentences` (`write-to-gbrain.ts:637-644`) drops a sentence only when it
+> canon-matches the generated `RELATION_SENTENCE` template. `RESYNTH_PROMPT` (`reflect-pass.ts:628-641`)
+> rewrites compiled-truth into natural prose, which never canon-matches. So **once a page is
+> resynthesized, every future supersede on it is a no-op** — the page asserts `works_at NewCo` AND
+> `works_at OldCo` as current, forever, no error. This design turns both on in the same release.
+> **FIX:** resynth must emit relation assertions in template-canonical form (or key the strip on the
+> graph triple, not sentence shape); add a test that supersede still works on a resynthesized page.
+>
+> ### BLOCKER 3 — "bounded" is COUNT-bounded, not TOKEN-bounded.
+> §6.2 caps dispatches at 200/pass, but `renderPageForResynth` (`reflect-pass.ts:723-728`) inlines
+> the page's ENTIRE unbounded timeline with no truncation. The first pass is the one that meets
+> months of accreted timeline on every page. The codebase already caps the reserved-kind digest at
+> `DEFAULT_MAX_RESERVED_DIGEST_CHARS = 24_000` (`:112`); resynth lacks the equivalent. **FIX:** a
+> per-page input budget (most-recent-N rows + compiled-truth) and a per-pass aggregate token ceiling
+> that aborts the pass; measure Ryan's largest page BEFORE the first pass, gating step 3.
+>
+> ### BLOCKER 4 — reversibility is FALSE as sequenced.
+> The snapshot argument leans on "GBrain is rebuildable via the doctor (§7.4)" — but the doctor is
+> built at §9 step 6, and the first irreversible mutating pass is step 3. **FIX:** move the memory
+> doctor to BEFORE the first mutating pass; verify GBrain-embedding rebuild cost (unverified — if
+> expensive, the snapshot must cover the brain too); the `entities/` tar snapshot is necessary but
+> insufficient alone (the pass also mutates the manifest, nexus, and timeline relation notes).
+>
+> ### ALSO REQUIRED (verified)
+> - **No timestamp ordering on supersede.** `targets` is built from the current extraction against
+>   current compiled-truth (`write-to-gbrain.ts:590-599`); timeline dates are never consulted. Step 1
+>   arms the calendar/email fan-out over HISTORICAL content, so a backfilled 2024 email naming an old
+>   employer can retire the current one. FIX: carry the source turn's observation timestamp; refuse a
+>   supersede whose asserted date precedes the newest timeline row for that (subject, predicate); cap
+>   the fan-out's historical backfill window.
+> - **Watermark can't stamp no-op pages.** `reflect-pass.ts:674` `continue`s before the
+>   `writeEntity` at `:688`, so a stable already-consolidated page never gets stamped and is
+>   re-dispatched every pass forever. FIX: stamp on the no-op path (frontmatter-only CAS, gate the
+>   sync hook on compiled-truth change) or a sidecar watermark store. The `llmCalls === 0` acceptance
+>   test is unachievable until this is fixed.
+> - **Write-AHEAD logs.** The supersede/merge undo record (the exact stripped sentence / both page
+>   bodies) must be durable BEFORE the mutating write, or a crash between loses the only recovery.
+> - **The §9 manual-pass report must contain full bodies, not counts** — counts can't tell a correct
+>   merge from the Acme/Globex fusion. Every merge: both bodies before + merged after + score +
+>   token sets. Every supersede: the exact stripped sentence with context. Every delete: the full body.
+>
+> ### VERIFIED IN THE PLAN'S FAVOUR
+> "Supersede applies to future extractions only, nothing retroactive" is TRUE
+> (`write-to-gbrain.ts:518,591-598`) — no batch job scans old data. The blast radius is genuinely one
+> sentence. The build order is memory-FIRST (its substrates are toolless, so the security permission
+> flip is a no-op for them — see the tool-security doc's revised order).
+
+
 > **STATUS: COMPLETE (design).** Written by Atlas 2026-07-20. Mandate (Ryan): "design and build the full memory system in a robust way, not hacked together." This doc is the DESIGN only; build order in §9. Every code claim cites file:line, re-verified 2026-07-20 at commit cea2f829.
 
 ## Executive summary

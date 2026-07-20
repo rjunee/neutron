@@ -1,5 +1,80 @@
 # Tool Security Redesign — Plan
 
+> ## ⚠️ SPIKE-VERIFIED + DEEPENED 2026-07-20 — READ BEFORE THE PLAN BELOW
+>
+> An adversarial security review plus **two empirical spikes on the installed CC 2.1.215**
+> settled the linchpin questions. Where this block conflicts with the plan below, THIS WINS.
+>
+> ### S7 + S8 RESULTS (run against real `claude -p --permission-mode dontAsk`, not docs)
+>
+> | probe, `--tools Bash`, NO allow rule | result |
+> |---|---|
+> | `cat <file-in-cwd>` | **RAN** |
+> | `cat ~/.ssh/known_hosts`, `cat ~/<home>/credentials.json` (out of cwd) | **DENIED** |
+> | `env \| grep SECRET` | **DENIED** |
+> | `curl https://example.com` (egress) | **DENIED** |
+> | `cat` with a `--disallowed-tools "Bash(cat:*)"` deny rule | **DENIED** |
+> | `cat /etc/hosts && cat ~/.ssh/known_hosts` | **DENIED, silently** — 0 prompt frames rendered, process exited 0 in 24s, agent explained the denial and continued |
+>
+> **CONCLUSION — the design is VIABLE, and both the original doc and the review were wrong:**
+> - The original doc's claim that `dontAsk` is *total* default-deny is FALSE — it auto-allows
+>   reading files **inside the working directory**.
+> - The review's implication that credential reads run is ALSO FALSE — out-of-cwd reads, `env`,
+>   and network egress are all denied.
+> - **The real boundary:** `dontAsk` auto-allows in-cwd reads and denies everything else;
+>   `permissions.deny` rules are authoritative. **Containment recipe:** scope a caller's cwd to a
+>   dedicated non-sensitive directory + deny rules for the rest. That holds.
+> - **S7 (migration linchpin) PASSES:** `dontAsk` denies with NO prompt rendered. So the
+>   `tool-use-approve` auto-presser (`spawn.ts:239-245`) has nothing to press — we can drop
+>   `--dangerously-skip-permissions` WITHOUT fail-open and WITHOUT wedging headless REPLs.
+>
+> ### CORRECTIONS THE REVIEWS FORCED (all re-verified against code)
+>
+> 1. **8 `skip_permissions: true` sites, not 4.** §1.4 misattributes the memory-lane substrates to
+>    `makeEphemeralSubstrate`. They are built inline: `open/wiring/memory.ts:132/255/352`. Plus
+>    `open/composer.ts:961` (cc-synthesis, the history-import / untrusted-input caller) and the four
+>    in `open/wiring/substrates.ts:173/226/296/343`. Phase B executed against the old map would edit
+>    the wrong three files and **leave the memory lane on bypass while recording it migrated.**
+> 2. **The memory lane is already toolless** (`tools: []` at `scribe/extract.ts:157`,
+>    `reflection/detector.ts:134`, `scribe/reflect/reflect-pass.ts:908`) and writes via in-process
+>    functions, NOT agent tools. §4.2's proposed `Read,Grep,Glob` for that class would *widen* it.
+>    Correct §4.2 to `tools: []` for the memory substrates and record the invariant: memory-lane
+>    substrates are toolless; persistence is in-process.
+> 3. **PreToolUse is NOT an authoritative backstop** — hook timeout (600s default), a non-2 exit, or
+>    garbage stdout all **fail OPEN**. And if the env allow-list drops `PATH`, the hook (`bun ...`)
+>    can't launch — silently disabling the backstop. Never design a control whose only enforcement
+>    is PreToolUse; mirror every deny as a `permissions.deny` rule.
+> 4. **Phase D and Phase E contradict.** The sandbox introduces network-approval prompts `dontAsk`
+>    does not suppress; deleting the auto-presser (E) before proving headless sandbox-network
+>    behaviour (S6) ends in a 3am wedge. Prefer an empty network allow-list (no egress) for rituals.
+> 5. **Migration: flip the presser from YES to NO, don't gate it off.** `keys:['1','enter']` →
+>    the deny selection. Fail-closed in every intermediate state, clears residual prompts so nothing
+>    wedges, and removes S7 from the migration's critical path. Strictly better than §5's staged plan.
+> 6. **STEP 0 (new, prerequisite): the `SubstrateProfile` refactor.** 8 hand-copied
+>    `buildLlmCallSubstrate` option bags collapse into one profile-taking factory. Without it, the
+>    no-feature-flags rule and any staged permission migration are mutually exclusive (a mode-gated
+>    scanner is a dual code path). This is what turns Phase B from 8 risky edits into flipping N
+>    constants.
+> 7. **A real-install probe is required** (the doc has only throwaway-REPL spikes): after the flip,
+>    on a live install, assert a real chat turn still edits a project file, a real scribe extraction
+>    still writes an entity page, and a real reflect pass completes. `dontAsk` denying something the
+>    product legitimately needs is a silent capability regression.
+>
+> ### SHIPPED ALREADY (PR #411, independent of this redesign)
+> Interpreter-injection env vars (`NODE_OPTIONS`/`LD_PRELOAD`/`DYLD_INSERT_LIBRARIES`/…) stripped in
+> `mergeEnv`; the MCP sink-token config file moved to a per-spawn 0700 dir / 0600 files / 16-byte
+> entropy; the settings file 0644→0600. STILL OPEN for this redesign: the MCP bridge's per-PROCESS
+> sink token + missing session check before `/tool-call` dispatch (`pool-state.ts:156` vs `:192`),
+> and the `ensure-claude-trust.ts` lost-update race.
+>
+> ### REVISED BUILD ORDER (supersedes §9)
+> Step 0 `SubstrateProfile` refactor (behaviour-preserving) → memory build (see the memory doc; it
+> ships first because its substrates are toolless so the permission flip is a no-op for them) →
+> Phase A (CLAUDE_CONFIG_DIR scope, env allow-list, per-tool manifest check) → Phases B+C+E as ONE
+> atomic PR (flip all callers to dontAsk, write permissions blocks, delete the presser, add the
+> real-install probe) → Phase D native sandbox (gated on S6) → ritual Bash work.
+
+
 > **STATUS: COMPLETE (plan only — no build).**
 > Date: 2026-07-20. Author: Atlas. Ryan-directed. Branch:
 > `tool-security-redesign-2026-07-20` @ base cb870667. Verified against Claude Code
