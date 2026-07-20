@@ -33,6 +33,7 @@ import { writeEntity } from '@neutronai/runtime/entity-writer.ts'
 import { createScribe } from '../index.ts'
 import { writeExtractionToGBrain } from '../write-to-gbrain.ts'
 import { createState } from '../scribe-budget.ts'
+import { runReflectPass } from '../reflect/reflect-pass.ts'
 import { bootPgliteBrain } from '@neutronai/gbrain-memory/__tests__/boot-pglite-brain.ts'
 
 const t0 = Date.now()
@@ -1750,6 +1751,157 @@ describe('RB4 temporal invalidation (belief evolution) — real PGLite round-tri
     links = await client.call('get_links', { slug: 'uwe-lang' })
     expect(edgesTo(links, 'ulold', 'works_at').length).toBe(0) // RETIRED
     expect(edgesTo(links, 'ulnew', 'advises').length).toBe(1) // strongest edge to the replacement
+  }, 60_000)
+
+  // ── MEMORY BLOCKER 2: supersede must still work AFTER a re-synthesis pass ──────
+  //
+  // Before the fix, the reflect pass's RESYNTH rewrote compiled-truth into natural
+  // prose, which `stripSupersededSentences` can never match — so any page that had
+  // been resynthesized silently lost supersede FOREVER (it would assert both the
+  // new AND the retired employer as current). The fix rejects a resynth that
+  // phrases any edge as prose, keeping the page in a form supersede can still
+  // retire. These drive the FULL path end-to-end: resynth (real reflect pass) then
+  // supersede (real scribe), asserting the old relation is GONE.
+
+  test('blocker 2: after a resynth ATTEMPT that would prose-ify the edge, a later supersede STILL retires it', async () => {
+    const ownerDataDir = mkdtempSync(join(tmpdir(), 'scribe-b2-reject-'))
+    const syncHook = new GBrainSyncHook({
+      memoryStore: new GBrainMemoryStore(client),
+      gbrainMcp: client,
+    })
+    await client.call('put_page', { slug: 'b2rold', content: '---\nslug: b2rold\ntype: company\n---\n\nA company.\n' })
+
+    // Seed a CANONICAL page (`Works at [[b2rold]].`) with 3 timeline rows → it
+    // clears the resynth gate.
+    for (const day of ['01', '02', '03']) {
+      await writeEntity(
+        {
+          ownerDataDir,
+          kind: 'person',
+          slug: 'bea-ren',
+          originInstance: 'rb4',
+          receivingInstanceSlug: 'rb4',
+          body: {
+            frontmatter: { slug: 'bea-ren', type: 'person', name: 'Bea Ren' },
+            compiledTruth: '# Bea Ren\n\nAn engineer.\n\n## Relationships\n\n- Works at [[b2rold]].\n',
+            timelineAppend: { ts: `2026-07-${day}T00:00:00.000Z`, source: 'chat:owner', body: `r${day}` },
+          },
+        },
+        { syncHook },
+      )
+    }
+
+    // Reflect resynth: the LLM "tidies" the edge INTO prose. On old main this was
+    // accepted (→ page prose-ified → supersede dead); the fix REJECTS it, so the
+    // page stays canonical.
+    const resynthReport = await runReflectPass({
+      ownerDataDir,
+      ownSlug: 'rb4',
+      writeEntity,
+      syncHook,
+      now: () => t0 + 500,
+      substrate: cannedSubstrate('Bea Ren works at [[b2rold]] as a principal engineer since 2019.'),
+    })
+    expect(resynthReport.resynthesized).toBe(0) // prose resynth rejected → page unchanged
+
+    // Now supersede b2rold → b2rnew via the real scribe path.
+    const scribe = createScribe({
+      substrate: cannedSubstrate(factSupersede('Bea Ren', 'B2rold', 'B2rnew')),
+      syncHook,
+      ownerDataDir,
+      owner_slug: 'rb4',
+      budget: createState(join(ownerDataDir, '.scribe-budget.json'), t0),
+      writeEntity,
+      now: () => t0 + 1000,
+      supersede: true,
+    })
+    const out = await scribe.extractAndWrite({
+      text: 'Bea Ren has moved on from B2rold and now works at B2rnew, leading their platform infrastructure team full time.',
+      observed_at: t0 + 1000,
+    })
+    expect(out.ran).toBe(true)
+
+    const compiled = extractCompiledTruth(
+      readFileSync(join(ownerDataDir, 'entities', 'people', 'bea-ren.md'), 'utf8'),
+    )
+    // THE FIX: the OLD relation sentence is GONE (on main it survives — resynth
+    // had prose-ified it and supersede no-oped).
+    expect(compiled).not.toContain('[[b2rold]]')
+    expect(compiled).toContain('Works at [[b2rnew]].')
+    const links = await client.call('get_links', { slug: 'bea-ren' })
+    expect(edgesTo(links, 'b2rold', 'works_at').length).toBe(0) // retired
+    expect(edgesTo(links, 'b2rnew', 'works_at').length).toBe(1) // current
+  }, 60_000)
+
+  test('blocker 2: a CANONICAL resynth is ACCEPTED and a later supersede still retires the old edge', async () => {
+    const ownerDataDir = mkdtempSync(join(tmpdir(), 'scribe-b2-accept-'))
+    const syncHook = new GBrainSyncHook({
+      memoryStore: new GBrainMemoryStore(client),
+      gbrainMcp: client,
+    })
+    await client.call('put_page', { slug: 'b2cold', content: '---\nslug: b2cold\ntype: company\n---\n\nA company.\n' })
+
+    for (const day of ['01', '02', '03']) {
+      await writeEntity(
+        {
+          ownerDataDir,
+          kind: 'person',
+          slug: 'cyd-orr',
+          originInstance: 'rb4',
+          receivingInstanceSlug: 'rb4',
+          body: {
+            frontmatter: { slug: 'cyd-orr', type: 'person', name: 'Cyd Orr' },
+            compiledTruth: '# Cyd Orr\n\nAn engineer.\n\n## Relationships\n\n- Works at [[b2cold]].\n',
+            timelineAppend: { ts: `2026-07-${day}T00:00:00.000Z`, source: 'chat:owner', body: `r${day}` },
+          },
+        },
+        { syncHook },
+      )
+    }
+
+    // A resynth that CONSOLIDATES (adds a new prose fact) but keeps the edge in
+    // canonical `Works at [[b2cold]].` template form → ACCEPTED, and it genuinely
+    // rewrites the page.
+    const resynthReport = await runReflectPass({
+      ownerDataDir,
+      ownSlug: 'rb4',
+      writeEntity,
+      syncHook,
+      now: () => t0 + 500,
+      substrate: cannedSubstrate('A staff engineer on the platform team.\n\n## Relationships\n\n- Works at [[b2cold]].'),
+    })
+    expect(resynthReport.resynthesized).toBe(1) // canonical resynth accepted
+    const afterResynth = extractCompiledTruth(
+      readFileSync(join(ownerDataDir, 'entities', 'people', 'cyd-orr.md'), 'utf8'),
+    )
+    expect(afterResynth).toContain('platform team') // page really was consolidated
+
+    // Supersede STILL works on the resynthesized page.
+    const scribe = createScribe({
+      substrate: cannedSubstrate(factSupersede('Cyd Orr', 'B2cold', 'B2cnew')),
+      syncHook,
+      ownerDataDir,
+      owner_slug: 'rb4',
+      budget: createState(join(ownerDataDir, '.scribe-budget.json'), t0),
+      writeEntity,
+      now: () => t0 + 1000,
+      supersede: true,
+    })
+    const out = await scribe.extractAndWrite({
+      text: 'Cyd Orr has moved on from B2cold and now works at B2cnew, running their platform infrastructure group these days.',
+      observed_at: t0 + 1000,
+    })
+    expect(out.ran).toBe(true)
+
+    const compiled = extractCompiledTruth(
+      readFileSync(join(ownerDataDir, 'entities', 'people', 'cyd-orr.md'), 'utf8'),
+    )
+    expect(compiled).not.toContain('[[b2cold]]') // retired even after resynth
+    expect(compiled).toContain('Works at [[b2cnew]].')
+    expect(compiled).toContain('platform team') // the consolidated prose survives
+    const links = await client.call('get_links', { slug: 'cyd-orr' })
+    expect(edgesTo(links, 'b2cold', 'works_at').length).toBe(0)
+    expect(edgesTo(links, 'b2cnew', 'works_at').length).toBe(1)
   }, 60_000)
 })
 

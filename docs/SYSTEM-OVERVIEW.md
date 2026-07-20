@@ -2344,6 +2344,30 @@ optional operator `GBRAIN_SOURCE` / `GBRAIN_BRAIN_ID`.
     `gbrain-memory/__tests__/gbrain-doctor.test.ts` (working-vs-broken
     detection + idempotent upgrade + rollback, against injected probes).
 
+- **Reflect-pass consolidation correctness (`scribe/reflect/`) — data-integrity
+  guards.** The batch reflect pass (dedup + re-synthesis + reserved-kind
+  extraction; arming still gated behind default-off `NEUTRON_PERFECT_RECALL`)
+  carries two correctness fixes so it can never silently corrupt the owner's
+  accumulated corpus (memory blockers 1 + 2, 2026-07-20):
+  - **Dedup no longer fuses unrelated entities.** `clusterNearDuplicates`
+    (`scribe/reflect/jaccard.ts`) now (a) runs `stripBoilerplate` before scoring —
+    removing markdown headings + the fact-less body `Mentioned in chat (kind:
+    X).` so shared template tokens don't drive similarity; (b) forces a page with
+    fewer than `DEFAULT_MIN_DISTINGUISHING_TOKENS` (2) real tokens to a singleton;
+    and (c) clusters by CLIQUE (every pair similar), not connected-component
+    transitivity. Previously five fact-less company pages collapsed into ONE
+    entity in a single pass. `DEFAULT_JACCARD_THRESHOLD` (0.7) stays configurable
+    via `deps.jaccardThreshold` and must be re-measured on a real corpus before
+    arming. Pinned by `scribe/__tests__/reflect-jaccard.test.ts`.
+  - **Supersede survives re-synthesis.** `stripSupersededSentences` can only
+    retire a graph edge written as a canonical `Verb [[slug]].` template
+    sentence; re-synthesis used to rewrite edges into prose, which permanently
+    disabled every future supersede on that page. The reflect pass now REJECTS a
+    re-synthesis (`allRelationSentencesCanonical`, `scribe/write-to-gbrain.ts`)
+    that phrases any edge as prose/compound, keeping the page in a still-
+    supersedable form. Pinned by `scribe/__tests__/scribe-temporal-invalidation.test.ts`
+    (resynth→supersede round-trip) + `scribe/__tests__/reflect-pass.test.ts`.
+
 ## Credential management — onboarding OPTIONAL keys (WAVE 1) — `onboarding/optional-keys.ts`
 
 The admin add/rotate path (`app/app/admin.tsx` → the gateway admin surface)

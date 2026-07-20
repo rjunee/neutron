@@ -539,6 +539,108 @@ function mergeExistingCompiledTruth(existing: string, page: PlannedPage, superse
   return parts.join('\n') + '\n'
 }
 
+/** Cheap superset gate: does this text carry an entity reference the edge
+ *  extractor would see — a `[[wikilink]]` (bare or aliased) OR a `[…](slug)`
+ *  markdown link (`auto-link.ts:collectRefs` recognises BOTH)? A false positive
+ *  just triggers an extract that returns no triple; a false NEGATIVE would let a
+ *  superseded assertion survive, so the gate must not miss `](`. */
+function hasEntityRef(s: string): boolean {
+  return s.includes('[[') || s.includes('](')
+}
+
+/** Every graph triple a single sentence would contribute, as `${pred}\x1f${obj}`
+ *  keys (deduped, in extractor order) — computed with the SAME `extractTypedLinks`
+ *  the edge layer uses, so aliases + verb variants + same-object collapse all
+ *  match exactly as the graph sees them. */
+function sentenceTripleKeys(text: string, kind: EntityKind, subjectSlug: string): string[] {
+  if (!hasEntityRef(text)) return []
+  return extractTypedLinks(`${text}\n`, subjectSlug, {
+    sourceKind: kind,
+    source: 'rb4-supersede-scan',
+  }).map((t) => `${t.predicate}\x1f${t.object}`)
+}
+
+/** Normalise a sentence to its comparable content: references → bare slugs (the
+ *  extractor's own transform), LOWERCASE (the verb match is case-insensitive, so
+ *  `works at [[oldco]].` IS a live edge and must match the capitalised template),
+ *  outer whitespace + trailing sentence punctuation dropped (spans exclude the
+ *  terminator; templates include it). */
+function canonSentence(s: string): string {
+  return normaliseSentence(s)
+    .toLowerCase()
+    .trim()
+    .replace(/[.!?]+$/, '')
+    .trim()
+}
+
+/**
+ * If `text` is PURELY a single generated relationship assertion — it asserts
+ * EXACTLY ONE graph triple AND normalises to EXACTLY the `RELATION_SENTENCE`
+ * template for that triple — return that triple key; else null. This is the EXACT
+ * shape that is safe to drop wholesale (nothing else on the sentence to lose):
+ *
+ *  - Used by `stripSupersededSentences` (with a target filter) to retire a
+ *    superseded edge without ever mangling compound / prose-wrapped sentences —
+ *    those fail the single-triple or the template-match check and are KEPT
+ *    BYTE-FOR-BYTE (Codex data-loss blockers).
+ *  - Read POSITIVELY by `allRelationSentencesCanonical`, it is the form every edge
+ *    must be in for supersede to be able to retire it — so a resynth that phrases
+ *    an edge as prose can be REJECTED before it silently disables supersede
+ *    forever (memory blocker 2).
+ *
+ * Aliased (`[[oldco|OldCo]]`) and markdown-link wikilink forms still pass because
+ * normalisation collapses them to the same bare slug.
+ */
+function pureRelationSentence(text: string, kind: EntityKind, subjectSlug: string): string | null {
+  const keys = sentenceTripleKeys(text, kind, subjectSlug)
+  if (keys.length !== 1) return null
+  const key = keys[0]!
+  const [predicate, objSlug] = key.split('\x1f')
+  const tmpl = RELATION_SENTENCE[predicate ?? ''] ?? RELATION_SENTENCE['mentions']!
+  return canonSentence(text) === canonSentence(tmpl(objSlug ?? '')) ? key : null
+}
+
+/**
+ * Iterate the entity-reference-bearing SENTENCES of a compiled-truth body (one
+ * pass over lines → sentence spans, stripping list bullets), yielding each
+ * sentence's raw text. Shared by `stripSupersededSentences` and
+ * `allRelationSentencesCanonical` so both view sentences identically.
+ */
+function* refSentences(compiledTruth: string): Generator<string> {
+  for (const line of compiledTruth.split('\n')) {
+    if (!hasEntityRef(line)) continue
+    const bullet = /^(\s*(?:[-*+]|\d+[.)])\s+)/.exec(line)?.[0] ?? ''
+    const content = line.slice(bullet.length)
+    for (const span of splitSentencesWithOffsets(content)) {
+      const text = content.slice(span.start, span.end)
+      if (hasEntityRef(text)) yield text
+    }
+  }
+}
+
+/**
+ * True iff EVERY entity-reference sentence in `compiledTruth` is a pure template
+ * relation assertion (`pureRelationSentence`) — the exact form
+ * `stripSupersededSentences` can retire. A page that satisfies this keeps FULL
+ * supersede-ability; one that does not has at least one edge (`works_at [[x]]`
+ * wrapped in prose, or a compound multi-link sentence) that supersede can never
+ * strip, so any future supersede on that edge is a silent permanent no-op.
+ *
+ * The reflect pass's re-synthesis post-check uses this to REJECT a consolidation
+ * that would phrase any edge as prose — the fix for memory blocker 2 (resynthesis
+ * silently disabling supersede forever).
+ */
+export function allRelationSentencesCanonical(
+  compiledTruth: string,
+  kind: EntityKind,
+  subjectSlug: string,
+): boolean {
+  for (const text of refSentences(compiledTruth)) {
+    if (pureRelationSentence(text, kind, subjectSlug) === null) return false
+  }
+  return true
+}
+
 /**
  * RB4 temporal invalidation — excise from the existing compiled-truth exactly
  * the SENTENCE(S) that assert a superseded `(predicate, prior-object)` triple,
@@ -598,54 +700,15 @@ function stripSupersededSentences(existing: string, page: PlannedPage): string {
   }
   if (targets.size === 0) return existing
 
-  const opts = { sourceKind: page.kind, source: 'rb4-supersede-scan' } as const
-  // Cheap superset gate for "this text carries an entity reference the edge
-  // extractor would see" — a `[[wikilink]]` (bare or aliased) OR a `[…](slug)`
-  // markdown link (`auto-link.ts:collectRefs` recognises BOTH). A false positive
-  // just triggers an extract that returns no triple; a false NEGATIVE would let a
-  // superseded markdown-link assertion survive, so the gate must not miss `](`.
-  const hasRef = (s: string): boolean => s.includes('[[') || s.includes('](')
-  // Every graph triple a single sentence would contribute, as `${pred}\x1f${obj}`
-  // keys (deduped, in extractor order) — computed with the SAME extractor the
-  // edge layer uses, so aliases + verb variants + same-object collapse all match
-  // exactly as the graph sees them.
-  const sentenceKeys = (text: string): string[] => {
-    if (!hasRef(text)) return []
-    return extractTypedLinks(`${text}\n`, page.slug, opts).map(
-      (t) => `${t.predicate}\x1f${t.object}`,
-    )
-  }
-  // Is this sentence PURELY a single generated relationship assertion for a
-  // superseded target — i.e. safe to drop with NOTHING to lose? It must (a) assert
-  // exactly ONE graph relation, which is a superseded target, AND (b) normalise
-  // (references → bare slugs, the extractor's own transform) to EXACTLY the
-  // normalised `RELATION_SENTENCE` template for that relation. Any extra
-  // hand-authored prose (`Works at [[oldco]] as principal engineer since 2019.`)
-  // fails (b) → kept verbatim; alias/markdown wikilink forms still pass (a)+(b)
-  // because normalisation collapses them to the same bare slug (Codex).
-  // Normalise references → bare slugs, LOWERCASE (the edge extractor's verb match
-  // is case-insensitive, so a hand-authored `works at [[oldco]].` IS a live edge
-  // and must match the capitalised template — Codex), and drop surrounding
-  // whitespace + trailing sentence punctuation (spans exclude the terminator, the
-  // templates include it), so only the meaningful content is compared.
-  const canon = (s: string): string =>
-    normaliseSentence(s)
-      .toLowerCase()
-      .trim()
-      .replace(/[.!?]+$/, '')
-      .trim()
-  const pureSupersededSentence = (text: string, keys: string[]): string | null => {
-    if (keys.length !== 1) return null
-    const key = keys[0]!
-    if (!targets.has(key)) return null
-    const [predicate, objSlug] = key.split('\x1f')
-    const tmpl = RELATION_SENTENCE[predicate ?? ''] ?? RELATION_SENTENCE['mentions']!
-    return canon(text) === canon(tmpl(objSlug ?? '')) ? key : null
-  }
-
+  // A sentence is retired ONLY when it is a pure generated relationship assertion
+  // (`pureRelationSentence` — exactly one graph triple, normalising to the
+  // `RELATION_SENTENCE` template) whose triple is a superseded target. Compound /
+  // prose-wrapped sentences fail `pureRelationSentence` → kept BYTE-FOR-BYTE
+  // (Codex data-loss blockers); scribe's own rendered prose is one relation per
+  // sentence, so a real chat-time supersession always hits the clean path.
   const outLines: string[] = []
   for (const line of existing.split('\n')) {
-    if (!hasRef(line)) {
+    if (!hasEntityRef(line)) {
       outLines.push(line) // fast path: no entity reference → untouched
       continue
     }
@@ -659,8 +722,8 @@ function stripSupersededSentences(existing: string, page: PlannedPage): string {
     const drops: Array<[number, number]> = []
     for (let i = 0; i < spans.length; i += 1) {
       const span = spans[i]!
-      const pureKey = pureSupersededSentence(content.slice(span.start, span.end), sentenceKeys(content.slice(span.start, span.end)))
-      if (pureKey === null) continue
+      const pureKey = pureRelationSentence(content.slice(span.start, span.end), page.kind, page.slug)
+      if (pureKey === null || !targets.has(pureKey)) continue
       const from = span.start
       const to = i + 1 < spans.length ? spans[i + 1]!.start : content.length
       drops.push([from, to])

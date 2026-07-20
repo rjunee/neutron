@@ -693,23 +693,52 @@ describe('reflect cost confinement (tiered-write discipline)', () => {
     expect(extractCompiledTruth(page!)).toContain('[[globex]]')
   })
 
-  test('an edge-preserving re-synthesis IS accepted', async () => {
+  test('an edge-preserving re-synthesis in CANONICAL relation form IS accepted', async () => {
     const owner = tmpOwner()
     await seed(owner, 'person', 'kim', 'Kim', 'Works at [[initech]].', [
       { ts: '2026-07-01T00:00:00.000Z', source: 'chat:owner', body: 'r1' },
       { ts: '2026-07-02T00:00:00.000Z', source: 'chat:owner', body: 'r2' },
       { ts: '2026-07-03T00:00:00.000Z', source: 'chat:owner', body: 'r3' },
     ])
+    // Resynth adds a NEW prose fact BUT keeps the edge as a canonical `Works at
+    // [[initech]].` template sentence (wikilink NOT folded into prose) — the form
+    // supersede can still retire (memory blocker 2). This is now REQUIRED for
+    // acceptance, not merely "the wikilink survives somewhere".
     const { substrate } = scriptedSubstrate((prompt) =>
       prompt.includes('DIGEST:')
         ? '{"entities":[]}'
-        : 'Kim works at [[initech]] and leads the data team.', // preserves the wikilink
+        : 'Kim leads the data team.\n\n## Relationships\n\n- Works at [[initech]].',
     )
     const report = await runReflectPass({ ...baseDeps(owner), substrate })
     expect(report.resynthesized).toBe(1)
     const page = await readPage(owner, 'people', 'kim')
     expect(extractCompiledTruth(page!)).toContain('leads the data team')
-    expect(extractCompiledTruth(page!)).toContain('[[initech]]') // edge kept
+    expect(extractCompiledTruth(page!)).toContain('Works at [[initech]].') // canonical edge kept
+  })
+
+  test('re-synthesis that phrases an edge as PROSE is rejected (memory blocker 2 — reproduce-then-fix)', async () => {
+    const owner = tmpOwner()
+    // Seeded in CANONICAL template form — supersede can retire this.
+    await seed(owner, 'person', 'quinn', 'Quinn', 'Works at [[oldco]].', [
+      { ts: '2026-07-01T00:00:00.000Z', source: 'chat:owner', body: 'r1' },
+      { ts: '2026-07-02T00:00:00.000Z', source: 'chat:owner', body: 'r2' },
+      { ts: '2026-07-03T00:00:00.000Z', source: 'chat:owner', body: 'r3' },
+    ])
+    // The LLM "tidies" the edge INTO prose — preserves the wikilink but folds it
+    // into a descriptive sentence. On old main this was ACCEPTED (only
+    // `preservesEdges` was checked), silently converting the page to a form
+    // supersede can never strip → every future supersede a permanent no-op. The
+    // post-check must now REJECT it and leave the page byte-unchanged.
+    const { substrate } = scriptedSubstrate((prompt) =>
+      prompt.includes('DIGEST:')
+        ? '{"entities":[]}'
+        : 'Quinn works at [[oldco]] as a senior engineer since 2019.',
+    )
+    const report = await runReflectPass({ ...baseDeps(owner), substrate })
+    expect(report.resynthesized).toBe(0) // REJECTED (would disable supersede)
+    const compiled = extractCompiledTruth((await readPage(owner, 'people', 'quinn'))!)
+    expect(compiled).toContain('Works at [[oldco]].') // canonical form preserved
+    expect(compiled).not.toContain('senior engineer') // the prose form was NOT written
   })
 
   test('an UNCHANGED re-synthesis is a true no-op (no write, no marker, no count)', async () => {
@@ -864,13 +893,13 @@ describe('reflect cost confinement (tiered-write discipline)', () => {
     const { substrate } = scriptedSubstrate((p) =>
       p.includes('DIGEST:')
         ? '{"entities":[]}'
-        : 'Rob is a staff engineer at [[globex]] and mentors the platform team.',
+        : 'A staff engineer who mentors the platform team.\n\n## Relationships\n\n- Works at [[globex]].',
     )
     const report = await runReflectPass({ ...baseDeps(owner), substrate })
     expect(report.merged).toBe(1) // the pair collapsed
     expect(report.resynthesized).toBe(1) // and the survivor was re-synthesized SAME pass
     const ct = extractCompiledTruth((await readPage(owner, 'people', 'rob'))!)
     expect(ct).toContain('mentors the platform team') // resynth applied
-    expect(ct).toContain('[[globex]]') // edge preserved
+    expect(ct).toContain('Works at [[globex]].') // edge preserved in canonical form
   })
 })

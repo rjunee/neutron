@@ -10,6 +10,55 @@ Running log of what shipped, newest first. One entry per merged change.
 > `docs/research/AS-BUILT-docs-archive-2026-07.md`. This file is the ONE live
 > changelog going forward.
 
+## 2026-07-20 — Memory consolidation correctness (blockers 1 + 2; NO arming)
+
+Two isolated correctness fixes to the reflect/consolidation algorithms that gate
+the M2-3 memory build. Nothing is armed — `NEUTRON_PERFECT_RECALL` stays default-
+off and this change flips no flag; these protect the owner's real corpus from
+silent permanent corruption once consolidation IS armed. Full definitions:
+`docs/plans/memory-system-design-2026-07-20.md` (blockers 1 + 2).
+
+**Blocker 1 — dedup fused UNRELATED entities (reproduced).**
+`clusterNearDuplicates` (`scribe/reflect/jaccard.ts`) scored Jaccard over
+`title + compiledTruth` with connected-component transitivity. A fact-less page's
+body is pure boilerplate (`# <Name>\n\nMentioned in chat (kind: <kind>).`), so six
+of ~seven tokens were shared template — any two fact-less pages scored ~0.71 and
+five unrelated companies (Acme/Globex/Initech/Umbrella/Soylent) collapsed into ONE
+entity in a single pass. Fix: (a) new `stripBoilerplate` removes heading lines +
+the fact-less template sentence before tokenising; (b) a page with < 2 non-
+boilerplate tokens (`DEFAULT_MIN_DISTINGUISHING_TOKENS`) can never anchor/join a
+merge; (c) clustering is now CLIQUE-based (every pair similar), dropping transitive
+closure. `DEFAULT_JACCARD_THRESHOLD` (0.7) stays configurable via
+`deps.jaccardThreshold` and is flagged UNVALIDATED — must be re-measured on the
+real corpus before arming. Reproduce-then-fix tests in
+`scribe/__tests__/reflect-jaccard.test.ts` (the five fact-less pages now stay 5
+singletons; genuine near-duplicates still merge).
+
+**Blocker 2 — re-synthesis silently disabled supersede FOREVER.**
+`stripSupersededSentences` (`scribe/write-to-gbrain.ts`) retires a superseded edge
+only when its sentence is a pure `RELATION_SENTENCE` template (`Works at [[x]].`).
+The reflect pass's `RESYNTH_PROMPT` rewrote compiled-truth into prose, which never
+canon-matches — so once a page was resynthesized, every future supersede on it was
+a no-op (it would assert `works_at NewCo` AND `works_at OldCo` as current forever).
+Fix (option a, chosen over triple-keying because option b would have reversed the
+deliberate, tested "never delete hand-authored prose" data-loss guard at
+`scribe-temporal-invalidation.test.ts:1255/1326`): the resynth loop now REJECTS a
+rewrite whose edges aren't all in canonical template form (new exported
+`allRelationSentencesCanonical`), and `RESYNTH_PROMPT` instructs one-relation-per-
+template-sentence with no wikilinks in prose. A rejected resynth leaves the page
+byte-unchanged (still supersedable). Refactor: the sentence-canonicalisation
+helpers (`hasEntityRef` / `sentenceTripleKeys` / `canonSentence` /
+`pureRelationSentence` / `refSentences`) are lifted to module scope and shared by
+the strip and the new check — supersede strip semantics are byte-for-byte
+unchanged. Reproduce-then-fix tests: `scribe/__tests__/reflect-pass.test.ts` (prose
+resynth rejected) + `scribe/__tests__/scribe-temporal-invalidation.test.ts` (real
+resynth→supersede round-trip, plus a canonical-resynth-accepted positive path).
+
+Scope discipline: blockers 3 (token budget), 4 (doctor sequencing), the timestamp-
+ordering guard, and the watermark are explicitly NOT touched. `bun test scribe/`
+green (116 pass, +7 new). SYSTEM-OVERVIEW.md § "Entity-page memory (GBrain)"
+updated with a reflect-pass correctness subsection.
+
 ## 2026-07-20 — SubstrateProfile refactor (tool-security redesign Step 0)
 
 BEHAVIOUR-PRESERVING refactor — zero runtime change. Prerequisite (correction #6)

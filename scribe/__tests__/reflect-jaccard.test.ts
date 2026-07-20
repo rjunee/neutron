@@ -2,8 +2,14 @@
  * RB3 reflect — Jaccard near-duplicate clustering (pure, deterministic).
  *   - tokenisation is a set (case-folded, short tokens dropped)
  *   - Jaccard value is |∩|/|∪|; empty sets never "match"
- *   - clustering groups near-duplicates, keeps distinct pages apart, and is
- *     transitive (A~B, B~C ⇒ {A,B,C}) via connected components
+ *   - `stripBoilerplate` removes template scaffolding (heading lines + the
+ *     `Mentioned in chat (kind: X).` fact-less body) before scoring
+ *   - clustering groups near-duplicates, keeps distinct pages apart, forms
+ *     CLIQUES (NOT transitive chains), and never merges a fact-less page
+ *
+ * DATA-INTEGRITY (memory blocker 1): the reproduced defect — five fact-less
+ * company pages fusing into ONE entity in a single pass — is pinned below and
+ * must stay fixed.
  */
 
 import { describe, test, expect } from 'bun:test'
@@ -11,6 +17,7 @@ import {
   tokenize,
   jaccard,
   clusterNearDuplicates,
+  stripBoilerplate,
   DEFAULT_JACCARD_THRESHOLD,
   type DedupCandidate,
 } from '../reflect/jaccard.ts'
@@ -68,17 +75,22 @@ describe('clusterNearDuplicates', () => {
     expect(clusters.length).toBe(2)
   })
 
-  test('clustering is transitive via connected components', () => {
-    // Chain: A~B (share most tokens), B~C, but A and C alone are below the bar.
+  test('clustering forms CLIQUES, not transitive chains (memory blocker 1, guard c)', () => {
+    // Chain: A~B and B~C above the bar, but A and C are BELOW it.
+    //   {one..five,common} vs {two..six,common}  → 5/7 ≈ 0.71  (A~B, B~C)
+    //   {one..five,common} vs {three..seven,common} → 4/8 = 0.5 (A~C, below 0.6)
     const items = [
       cand('a', 'one two three four five common'),
       cand('b', 'two three four five six common'),
       cand('c', 'three four five six seven common'),
     ]
-    const clusters = clusterNearDuplicates(items, 0.5)
-    // If A~B and B~C at 0.5, all three land in ONE component.
-    const withAB = clusters.find((c) => c.some((x) => x.slug === 'a'))
-    expect(withAB?.map((x) => x.slug).sort()).toEqual(['a', 'b', 'c'])
+    const clusters = clusterNearDuplicates(items, 0.6)
+    // Connected components would have fused {a,b,c}; cliques must NOT — C is not
+    // similar enough to A to share A's cluster. A joins B; C stands apart.
+    const withA = clusters.find((c) => c.some((x) => x.slug === 'a'))
+    expect(withA?.map((x) => x.slug).sort()).toEqual(['a', 'b'])
+    const withC = clusters.find((c) => c.some((x) => x.slug === 'c'))
+    expect(withC?.map((x) => x.slug)).toEqual(['c']) // C is its own singleton
   })
 
   test('a high threshold keeps merely-similar pages apart', () => {
@@ -88,5 +100,71 @@ describe('clusterNearDuplicates', () => {
     ]
     expect(clusterNearDuplicates(items, 0.9).length).toBe(2) // below 0.9 → not merged
     expect(clusterNearDuplicates(items, 0.5).length).toBe(1) // above 0.5 → merged
+  })
+})
+
+describe('stripBoilerplate', () => {
+  test('removes heading lines and the fact-less template sentence, keeps real prose', () => {
+    const factless = stripBoilerplate('Acme\n# Acme\n\nMentioned in chat (kind: company).\n')
+    expect(factless).not.toContain('Mentioned in chat')
+    expect(factless).not.toContain('# Acme')
+    expect(tokenize(factless).has('mentioned')).toBe(false)
+    expect(tokenize(factless).has('chat')).toBe(false)
+    expect(tokenize(factless).has('acme')).toBe(true) // the name (from the title) survives
+    // A real prose sentence that merely contains "company" is untouched.
+    const real = stripBoilerplate('Globex is a logistics company founded by [[jane]].')
+    expect(real).toContain('logistics company')
+  })
+})
+
+describe('memory blocker 1 — fact-less pages must NOT fuse (reproduce-then-fix)', () => {
+  // Exactly what write-to-gbrain `composeNewCompiledTruth` emits for a fact-less
+  // page, wrapped as reflect-pass builds the candidate: `${title}\n${compiledTruth}`.
+  const factless = (name: string, slug: string): DedupCandidate => ({
+    slug,
+    text: `${name}\n# ${name}\n\nMentioned in chat (kind: company).\n`,
+  })
+  const five = [
+    factless('Acme', 'acme'),
+    factless('Globex', 'globex'),
+    factless('Initech', 'initech'),
+    factless('Umbrella', 'umbrella'),
+    factless('Soylent', 'soylent'),
+  ]
+
+  test('five fact-less company pages stay SEPARATE (they collapsed into one on old main)', () => {
+    // On the pre-fix code these all shared ~6 boilerplate tokens and scored ~0.71
+    // Jaccard, fusing transitively into a SINGLE entity. After the fix each strips
+    // to just its name ({acme}, {globex}, …) → no shared tokens → five singletons.
+    const clusters = clusterNearDuplicates(five)
+    expect(clusters.length).toBe(5)
+    for (const c of clusters) expect(c.length).toBe(1)
+  })
+
+  test('a page reduced to < 2 distinguishing tokens is never a merge candidate (guard b)', () => {
+    // Two DIFFERENT single-word fact-less names: even at threshold 0 they must not
+    // merge, because each strips to a 1-token set and the min-token gate forces a
+    // singleton before similarity is even considered.
+    const clusters = clusterNearDuplicates([factless('Acme', 'acme'), factless('Globex', 'globex')], 0)
+    expect(clusters.length).toBe(2)
+  })
+
+  test('genuine near-duplicates (same entity, overlapping REAL facts) STILL cluster', () => {
+    // Real dedup must not be broken by the boilerplate fix.
+    const items: DedupCandidate[] = [
+      {
+        slug: 'acme',
+        text:
+          'Acme\n# Acme\n\nAcme is a fintech startup based in Berlin, founded by [[jane-doe]]. It raised a Series A in 2023 and builds developer payment tooling.\n',
+      },
+      {
+        slug: 'acme-inc',
+        text:
+          'Acme Inc\n# Acme Inc\n\nAcme is a fintech startup based in Berlin, founded by [[jane-doe]]. Raised a Series A in 2023 and builds developer payment tooling.\n',
+      },
+    ]
+    const clusters = clusterNearDuplicates(items)
+    expect(clusters.length).toBe(1)
+    expect(clusters[0]!.map((c) => c.slug).sort()).toEqual(['acme', 'acme-inc'])
   })
 })

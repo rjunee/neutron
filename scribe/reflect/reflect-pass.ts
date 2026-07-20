@@ -49,7 +49,7 @@ import type { Substrate } from '@neutronai/runtime/substrate.ts'
 import { getBestModel } from '@neutronai/runtime/models.ts'
 import { drainToText } from '@neutronai/runtime/substrate-text.ts'
 import { createLogger } from '@neutronai/logger'
-import { slugify } from '../write-to-gbrain.ts'
+import { slugify, allRelationSentencesCanonical } from '../write-to-gbrain.ts'
 import { deleteEntity as realDeleteEntity, type SyncHook } from '@neutronai/runtime/entity-writer.ts'
 
 /**
@@ -635,7 +635,8 @@ const RESYNTH_PROMPT = `You are the reflect pass consolidating one knowledge-bas
 Return ONLY the rewritten compiled-truth as markdown — no preamble, no JSON, no code fence, no timeline.
 
 Hard rules:
-- Preserve EVERY \`[[wikilink]]\` that appears in the current compiled-truth — dropping one silently deletes a knowledge-graph edge. Keep them all, in natural sentences.
+- Preserve EVERY \`[[wikilink]]\` that appears in the current compiled-truth — dropping one silently deletes a knowledge-graph edge. Keep them all.
+- Render EVERY relationship as its OWN short sentence of the exact form "<Verb> [[slug]]." — one relationship per sentence. Use these verbs: "Works at [[slug]].", "Founded [[slug]].", "Advises [[slug]].", "Invested in [[slug]].", "Attended [[slug]].", "Met with [[slug]].", and "Mentions [[slug]]." for any other link. Group them together (a "## Relationships" list is ideal). NEVER fold a \`[[wikilink]]\` into descriptive prose and NEVER put two links in one sentence — descriptive prose must contain NO \`[[wikilinks]]\`. (A relationship phrased as prose can never be superseded later, so it would freeze a stale fact forever.)
 - Never invent facts or enrich from outside knowledge. Only consolidate what is already on the page/timeline.
 - Keep it concise and non-redundant. Do not add a timeline or headings that restate the timeline.
 `
@@ -667,6 +668,14 @@ async function resynthesizePages(
       const next = raw.trim()
       if (next.length === 0) continue
       if (!preservesEdges(page.compiledTruth, next)) continue // would drop an edge → reject
+      // SUPERSEDE-SAFETY (memory blocker 2): reject a re-synthesis that phrases any
+      // graph edge as prose or a compound sentence instead of the canonical
+      // `Verb [[slug]].` template. `stripSupersededSentences` can only retire pure
+      // template sentences, so a prose-form edge would make every future supersede
+      // on this page a silent, permanent no-op (the page would assert the new AND
+      // the retired employer forever). Rejecting keeps the page in its prior
+      // (template-form, still-supersedable) state; a later pass re-synthesizes.
+      if (!allRelationSentencesCanonical(next, page.kind, page.slug)) continue
       // IDEMPOTENCE: if the LLM returned the already-consolidated truth (no real
       // change), do NOT write — appending a marker row would rewrite the page,
       // report a phantom consolidation, grow the timeline every pass, and keep the
