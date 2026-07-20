@@ -10,6 +10,46 @@ Running log of what shipped, newest first. One entry per merged change.
 > `docs/research/AS-BUILT-docs-archive-2026-07.md`. This file is the ONE live
 > changelog going forward.
 
+## 2026-07-20 — black screen on project switch: per-pane error isolation
+
+**Bug (live, Ryan).** Clicking to a different project sometimes blanked the
+ENTIRE screen. Console showed the #354 signature ("Tried to unmount a fiber that
+is already unmounted", "An error occurred in one of your React components"),
+plus a 503 on a `docs/file` fetch and a WebSocket that closed before opening.
+
+**Why it was not a #354 regression.** #354's own fix — the memoized assistant-ui
+adapter in `useNeutronChat.ts` — is intact and `snapshot-stability.test.tsx`
+still passes. A DIFFERENT trigger was reaching the same failure.
+
+**The structural defect, which is independent of the trigger.** The client had
+exactly ONE error boundary: `ChatErrorBoundary` at `ChatApp.tsx:1538`, wrapping
+the entire surface. `DocumentsTab` (`ProjectShell.tsx:221`) and `WorkBoardTab`
+both perform their OWN network I/O on project switch and sat inside it with no
+isolation. So a single failed doc fetch took down chat, the rail, the work board
+and the docs pane together — the black screen.
+
+**Fix.** New `PaneErrorBoundary` — deliberately NOT a copy of
+`ChatErrorBoundary`, which owns a whole-surface "Back to General" recovery; this
+one stays visually minor because the point is that everything around it still
+works. `DocumentsTab` and `WorkBoardTab` are now wrapped. A pane failure renders
+a small inline error with a retry and its siblings keep rendering. The console
+line now names the pane, so a bug report says WHICH pane died instead of "a
+React component".
+
+**Test** (`__tests__/pane-error-isolation.test.tsx`): pins the ISOLATION, not any
+one trigger, so it holds whichever fetch fails — a throwing pane degrades locally
+while its siblings survive. **Verified RED** by neutering the boundary's
+`getDerivedStateFromError` (reproducing the pre-fix world where the throw escapes
+to the app-level boundary): the siblings vanish and the test fails. chat-react
+suite: 357 pass / 0 fail.
+
+**NOT fixed here — the trigger.** The 503 came from the docs surface, where
+`comments_unavailable` / `versioning_unavailable` / `binary_unavailable` all
+return 503 for "optional subsystem not wired". The chat-react docs client handles
+ONLY `comments_unavailable` (7 refs); the other two have ZERO handling, and
+`versionStore` is not wired in `open/composer.ts`. That is a real follow-up, but
+the isolation above is what stops any such failure blanking the app.
+
 ## 2026-07-19 — claim redirect is one-shot per OWNER (durable), not per page load
 
 **Bug (live, Ryan's managed instance).** After claiming a personal URL the owner
