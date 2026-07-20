@@ -19,7 +19,11 @@
  * and any two fact-less pages scored ~0.71 Jaccard on boilerplate ALONE — the
  * reproduced defect where five unrelated companies (Acme/Globex/…) collapsed into
  * one entity in a single pass. Three guards close it: (a) `stripBoilerplate`
- * removes the template tokens before scoring; (b) a page with fewer than
+ * removes ONLY the generated template tokens (the H1 title, the `## Relationships`
+ * / `## Merged` scaffolding headings, and the fact-less body sentences) before
+ * scoring — a hand-authored factual heading like `## Acquired by Globex` is KEPT
+ * (memory blocker 1 VETO: stripping every heading erased real facts); (b) a page
+ * with fewer than
  * `DEFAULT_MIN_DISTINGUISHING_TOKENS` non-boilerplate tokens can NEVER anchor a
  * merge; (c) clusters are cliques (pairwise-similar throughout), not transitive
  * chains. `DEFAULT_JACCARD_THRESHOLD` stays configurable and MUST be re-measured
@@ -83,28 +87,59 @@ export function tokenize(text: string): Set<string> {
  *  it is hoisted out of the hot `tokenize` loop. */
 const WORD_SEGMENTER = new Intl.Segmenter(undefined, { granularity: 'word' })
 
+/** Level-2..6 heading LABELS the memory writer generates as pure structural
+ *  scaffolding — identical across every page, zero distinguishing signal. Matched
+ *  case-insensitively and stripped. Sourced from write-to-gbrain
+ *  (`composeNewCompiledTruth` / `mergeExistingCompiledTruth` emit `## Relationships`)
+ *  and reflect-pass `mergeCluster` (emits `## Merged`). ANY OTHER heading is
+ *  treated as hand-authored/imported factual content and PRESERVED. */
+const GENERATED_SECTION_HEADINGS: ReadonlySet<string> = new Set(['relationships', 'merged'])
+
 /**
  * Remove BOILERPLATE that carries no distinguishing signal before the text is
- * tokenised for similarity (memory blocker 1). Two constructs are stripped:
+ * tokenised for similarity (memory blocker 1). Three constructs are stripped:
  *
- *  1. Markdown heading lines (`# <Name>`, `## Relationships`) — structural
- *     scaffolding identical across pages. The entity NAME is not lost: the
- *     dedup candidate prepends the page title separately, so the name still
- *     reaches the token set via the title.
- *  2. The fact-less page's generated body sentence `Mentioned in chat (kind:
- *     <kind>).` — emitted verbatim by write-to-gbrain `composeNewCompiledTruth`
- *     for any entity with no extracted fact. Left in, its `{mentioned, in, chat,
- *     kind, <kind>}` tokens are ~6 of a fact-less page's ~7 tokens, so two
- *     unrelated fact-less pages score ~0.71 Jaccard on this template alone.
+ *  1. The generated page-TITLE heading (`# <Name>`). Level-1 is the title slot by
+ *     convention — write-to-gbrain `composeNewCompiledTruth` and the reflect-pass
+ *     reserved-kind synthesis both emit `# <name>` as the sole H1. The entity NAME
+ *     is NOT lost: the dedup candidate prepends the page title separately, so the
+ *     name still reaches the token set via the title.
+ *  2. The generated SECTION headings (`## Relationships`, `## Merged`) — structural
+ *     scaffolding identical across pages. Only these exact machine labels are
+ *     dropped.
+ *  3. The fact-less page's generated body sentences `Mentioned in chat (kind:
+ *     <kind>).` (write-to-gbrain `composeNewCompiledTruth`) and `Identified during
+ *     reflect (<kind>).` (reflect-pass reserved-kind fallback). Left in, their
+ *     `{mentioned, in, chat, kind, <kind>}` tokens are ~6 of a fact-less page's ~7
+ *     tokens, so two unrelated fact-less pages score ~0.71 Jaccard on this template
+ *     alone.
  *
- * Only the EXACT generated template is matched, so a real prose sentence that
- * happens to contain the word "company" (a legitimate fact) is untouched — the
- * strip removes the machine boilerplate, never hand-authored content.
+ * CRITICAL (memory blocker 1 VETO, 2026-07-20): a hand-authored or imported
+ * FACTUAL heading — e.g. `## Acquired by Globex` — is DISTINGUISHING content and is
+ * KEPT. The earlier revision stripped EVERY heading (`/^#{1,6}.../gm`), which erased
+ * such facts and could inflate Jaccard between genuinely-distinct pages, enabling an
+ * irreversible false merge. This strip removes only the machine boilerplate, never
+ * hand-authored content.
  */
 export function stripBoilerplate(text: string): string {
-  return text
-    .replace(/^[ \t]*#{1,6}[ \t]+.*$/gm, '')
+  const kept: string[] = []
+  for (const line of text.split('\n')) {
+    const h = /^[ \t]*(#{1,6})[ \t]+(.*?)[ \t]*$/.exec(line)
+    if (h === null) {
+      kept.push(line) // not a heading — keep verbatim
+      continue
+    }
+    const level = h[1]!.length
+    const label = h[2]!
+    // Drop the generated H1 title (name preserved via the prepended candidate title)
+    // and the exact generated section labels; keep every other (factual) heading.
+    if (level === 1 || GENERATED_SECTION_HEADINGS.has(label.toLowerCase())) continue
+    kept.push(line)
+  }
+  return kept
+    .join('\n')
     .replace(/Mentioned in chat \(kind:\s*[^)]*\)\.?/gi, '')
+    .replace(/Identified during reflect \(\s*[^)]*\)\.?/gi, '')
 }
 
 /**

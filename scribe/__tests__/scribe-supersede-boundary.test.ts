@@ -35,7 +35,7 @@ import {
 } from '../extract.ts'
 import { createScribe } from '../index.ts'
 import { createState } from '../scribe-budget.ts'
-import type { WriteEntityFn } from '../write-to-gbrain.ts'
+import { allRelationSentencesCanonical, type WriteEntityFn } from '../write-to-gbrain.ts'
 
 const t0 = Date.parse('2026-07-15T00:00:00.000Z')
 
@@ -148,5 +148,39 @@ describe('RB4 extraction boundary — env wiring reaches createScribe.supersede'
     expect(isPerfectRecallEnabled({ NEUTRON_PERFECT_RECALL: 'on' })).toBe(true)
     expect(isPerfectRecallEnabled({})).toBe(false)
     expect(isPerfectRecallEnabled({ NEUTRON_PERFECT_RECALL: 'off' })).toBe(false)
+  })
+})
+
+// Blocker 2's resynth accept-gate: `allRelationSentencesCanonical` decides whether
+// a resynthesized page keeps FULL supersede-ability. It must judge only ENTITY-ref
+// sentences — a plain markdown URL link (`[docs](https://x)`) is not an entity ref
+// (auto-link's collectRefs skips `scheme:` targets), so a page whose edges are all
+// canonical but whose prose cites a URL must stay canonical. The pre-fix gate keyed
+// on the raw `](` substring and treated the URL sentence as ref-bearing, then failed
+// its template check → the WHOLE resynth was rejected, blocking that page's
+// convergence forever (reviewers A + B, round 1 CONFIRMED).
+describe('blocker 2 — resynth accept-gate ignores plain URL links (reproduce-then-fix)', () => {
+  test('a page with canonical edges + a prose sentence carrying a URL link is CANONICAL', () => {
+    const compiled =
+      '# Dev Eng\n\nAn engineer. See [the guide](https://example.com/docs) for the framework.\n\n## Relationships\n\n- Works at [[acme]].\n'
+    // Pre-fix: the URL sentence was treated as an edge sentence, failed the template
+    // match, and this returned false → resynth rejected. Post-fix: true.
+    expect(allRelationSentencesCanonical(compiled, 'person', 'dev-eng')).toBe(true)
+  })
+
+  test('a REAL entity reference folded into prose is still REJECTED (protection intact)', () => {
+    // A markdown link to an ENTITY slug (not a URL) wrapped in prose is a live edge
+    // that supersede can never strip — must still fail the gate.
+    const proseEntity = '# Dev Eng\n\nWorks at [Acme](acme) in Berlin since 2019.\n'
+    expect(allRelationSentencesCanonical(proseEntity, 'person', 'dev-eng')).toBe(false)
+    // Same for a wikilink folded into descriptive prose.
+    const proseWiki = '# Dev Eng\n\nA principal engineer who works at [[acme]] on payments.\n'
+    expect(allRelationSentencesCanonical(proseWiki, 'person', 'dev-eng')).toBe(false)
+  })
+
+  test('a mailto / anchor / absolute-path link is not an entity ref either', () => {
+    const compiled =
+      '# Dev Eng\n\nReach out via [email](mailto:x@y.com) or the [top](#intro) or [home](/index).\n\n## Relationships\n\n- Works at [[acme]].\n'
+    expect(allRelationSentencesCanonical(compiled, 'person', 'dev-eng')).toBe(true)
   })
 })

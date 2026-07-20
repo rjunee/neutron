@@ -54,10 +54,39 @@ unchanged. Reproduce-then-fix tests: `scribe/__tests__/reflect-pass.test.ts` (pr
 resynth rejected) + `scribe/__tests__/scribe-temporal-invalidation.test.ts` (real
 resynth→supersede round-trip, plus a canonical-resynth-accepted positive path).
 
+**Round-2 review corrections (Argus).** Two follow-up correctness fixes on the
+same branch:
+
+- **Blocker-1 VETO — `stripBoilerplate` no longer erases hand-authored headings.**
+  The first cut stripped EVERY markdown heading (`/^#{1,6}.../gm`), which also
+  removed distinguishing FACTUAL headings (e.g. an imported `## Acquired by
+  Globex`), so two genuinely-distinct pages could shed their distinguishing tokens,
+  cross 0.7 Jaccard on the shared boilerplate, and merge irreversibly. Now
+  `stripBoilerplate` (`scribe/reflect/jaccard.ts`) drops ONLY the generated
+  scaffolding — the H1 title (`# <Name>`; the name still reaches the token set via
+  the candidate's prepended title), the exact section labels `## Relationships` /
+  `## Merged`, and the fact-less body sentences (`Mentioned in chat (kind: …).`,
+  `Identified during reflect (…).`). Any other heading is kept. Reproduce-then-fix:
+  `reflect-jaccard.test.ts` — two companies sharing a one-line description but
+  differing only by a factual heading scored 0.8 (merged) on the old strip; they
+  now stay separate.
+- **Blocker-2 gate — supersede/resynth ref detection ignores plain URL links.**
+  `hasEntityRef` keyed on the raw `](` substring, so a legitimate prose sentence
+  carrying a markdown URL link (`[docs](https://x)`) was treated as edge-bearing and
+  failed the template check, over-rejecting the WHOLE resynth and blocking that
+  page's convergence. `hasEntityRef` (`scribe/write-to-gbrain.ts`) now delegates to a
+  new exported `hasEntityReference` (`runtime/auto-link.ts`) that runs the SAME
+  `collectRefs` the edge extractor uses — a `scheme:` URL / `#anchor` / `/absolute`
+  / `..` target is not an entity ref, so it is a true parity gate (no false positive
+  over-rejection, no false negative that could let a superseded assertion survive).
+  Unit tests in `scribe/__tests__/scribe-supersede-boundary.test.ts`
+  (`allRelationSentencesCanonical`: URL/mailto/anchor sentences ignored, real
+  wikilink/entity-markdown-link prose still rejected).
+
 Scope discipline: blockers 3 (token budget), 4 (doctor sequencing), the timestamp-
 ordering guard, and the watermark are explicitly NOT touched. `bun test scribe/`
-green (116 pass, +7 new). SYSTEM-OVERVIEW.md § "Entity-page memory (GBrain)"
-updated with a reflect-pass correctness subsection.
+green (163 pass incl. auto-link; +12 new across both rounds). SYSTEM-OVERVIEW.md
+§ "Entity-page memory (GBrain)" updated with a reflect-pass correctness subsection.
 
 ## 2026-07-20 — SubstrateProfile refactor (tool-security redesign Step 0)
 

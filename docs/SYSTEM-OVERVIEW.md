@@ -2351,8 +2351,13 @@ optional operator `GBRAIN_SOURCE` / `GBRAIN_BRAIN_ID`.
   accumulated corpus (memory blockers 1 + 2, 2026-07-20):
   - **Dedup no longer fuses unrelated entities.** `clusterNearDuplicates`
     (`scribe/reflect/jaccard.ts`) now (a) runs `stripBoilerplate` before scoring —
-    removing markdown headings + the fact-less body `Mentioned in chat (kind:
-    X).` so shared template tokens don't drive similarity; (b) forces a page with
+    removing ONLY the GENERATED scaffolding (the H1 title, the `## Relationships` /
+    `## Merged` section headings, and the fact-less body sentences `Mentioned in
+    chat (kind: X).` / `Identified during reflect (X).`) so shared template tokens
+    don't drive similarity, while a hand-authored/imported FACTUAL heading (e.g.
+    `## Acquired by Globex`) is KEPT as a distinguishing token — an earlier cut that
+    stripped every heading erased such facts and could still fuse distinct pages;
+    (b) forces a page with
     fewer than `DEFAULT_MIN_DISTINGUISHING_TOKENS` (2) real tokens to a singleton;
     and (c) clusters by CLIQUE (every pair similar), not connected-component
     transitivity. Previously five fact-less company pages collapsed into ONE
@@ -2365,8 +2370,13 @@ optional operator `GBRAIN_SOURCE` / `GBRAIN_BRAIN_ID`.
     disabled every future supersede on that page. The reflect pass now REJECTS a
     re-synthesis (`allRelationSentencesCanonical`, `scribe/write-to-gbrain.ts`)
     that phrases any edge as prose/compound, keeping the page in a still-
-    supersedable form. Pinned by `scribe/__tests__/scribe-temporal-invalidation.test.ts`
-    (resynth→supersede round-trip) + `scribe/__tests__/reflect-pass.test.ts`.
+    supersedable form. The gate judges only ENTITY-ref sentences via
+    `runtime/auto-link.ts:hasEntityReference` (the SAME `collectRefs` the edge layer
+    uses), so a prose sentence carrying a plain markdown URL link
+    (`[docs](https://x)`) is not mistaken for an edge and no longer over-rejects the
+    whole page. Pinned by `scribe/__tests__/scribe-temporal-invalidation.test.ts`
+    (resynth→supersede round-trip), `scribe/__tests__/reflect-pass.test.ts`, and
+    `scribe/__tests__/scribe-supersede-boundary.test.ts` (URL-link gate unit tests).
 
 ## Credential management — onboarding OPTIONAL keys (WAVE 1) — `onboarding/optional-keys.ts`
 

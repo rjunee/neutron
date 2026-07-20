@@ -49,6 +49,7 @@ import {
 } from '@neutronai/runtime/entity-format.ts'
 import {
   extractTypedLinks,
+  hasEntityReference,
   normaliseSentence,
   splitSentencesWithOffsets,
 } from '@neutronai/runtime/auto-link.ts'
@@ -539,13 +540,16 @@ function mergeExistingCompiledTruth(existing: string, page: PlannedPage, superse
   return parts.join('\n') + '\n'
 }
 
-/** Cheap superset gate: does this text carry an entity reference the edge
- *  extractor would see — a `[[wikilink]]` (bare or aliased) OR a `[…](slug)`
- *  markdown link (`auto-link.ts:collectRefs` recognises BOTH)? A false positive
- *  just triggers an extract that returns no triple; a false NEGATIVE would let a
- *  superseded assertion survive, so the gate must not miss `](`. */
+/** Does this text carry an entity reference the edge extractor would see — a
+ *  `[[wikilink]]` (bare or aliased) OR a `[…](slug)` markdown link to an ENTITY
+ *  slug? Delegates to `auto-link.ts:hasEntityReference`, which runs the SAME
+ *  `collectRefs` the edge layer uses, so the gate can never drift from what
+ *  actually becomes a triple. A plain URL link (`[docs](https://x)`) is NOT a ref
+ *  (auto-link skips `scheme:` targets), so it no longer over-rejects a whole
+ *  resynth (memory blocker 2 review); and a false NEGATIVE that could let a
+ *  superseded assertion survive is impossible — no `collectRefs` ref ⇒ no triple. */
 function hasEntityRef(s: string): boolean {
-  return s.includes('[[') || s.includes('](')
+  return hasEntityReference(s)
 }
 
 /** Every graph triple a single sentence would contribute, as `${pred}\x1f${obj}`

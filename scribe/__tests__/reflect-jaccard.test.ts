@@ -115,6 +115,30 @@ describe('stripBoilerplate', () => {
     const real = stripBoilerplate('Globex is a logistics company founded by [[jane]].')
     expect(real).toContain('logistics company')
   })
+
+  test('strips ONLY generated section headings; KEEPS hand-authored factual headings (blocker 1 VETO)', () => {
+    // The generated scaffolding labels are boilerplate; a factual heading is not.
+    const body =
+      'Acme\n# Acme\n\nAcme is a payments startup.\n\n## Acquired by Globex\n\nBought in 2024.\n\n## Relationships\n\n- Works at [[globex]].\n'
+    const out = stripBoilerplate(body)
+    // Generated H1 title + `## Relationships` scaffolding → gone.
+    expect(out).not.toContain('# Acme')
+    expect(out).not.toContain('## Relationships')
+    // Hand-authored factual heading → PRESERVED (its tokens must survive to keep
+    // distinct pages apart; the old strip-every-heading regex erased these).
+    expect(out).toContain('## Acquired by Globex')
+    const toks = tokenize(out)
+    expect(toks.has('acquired')).toBe(true)
+    expect(toks.has('globex')).toBe(true)
+    expect(toks.has('relationships')).toBe(false) // scaffolding token dropped
+  })
+
+  test('strips the reserved-kind fact-less synthesis fallback sentence', () => {
+    const out = stripBoilerplate('Kickoff\n# Kickoff\n\nIdentified during reflect (meeting).\n')
+    expect(out).not.toContain('Identified during reflect')
+    expect(tokenize(out).has('identified')).toBe(false)
+    expect(tokenize(out).has('reflect')).toBe(false)
+  })
 })
 
 describe('memory blocker 1 — fact-less pages must NOT fuse (reproduce-then-fix)', () => {
@@ -147,6 +171,27 @@ describe('memory blocker 1 — fact-less pages must NOT fuse (reproduce-then-fix
     // singleton before similarity is even considered.
     const clusters = clusterNearDuplicates([factless('Acme', 'acme'), factless('Globex', 'globex')], 0)
     expect(clusters.length).toBe(2)
+  })
+
+  test('distinct pages with different FACTUAL headings do NOT falsely merge (blocker 1 VETO)', () => {
+    // Two genuinely-different companies that share a generic one-line description
+    // but are distinguished ONLY by a hand-authored factual heading. Under the old
+    // strip-EVERY-heading regex those headings were erased, so both pages reduced to
+    // {name + shared-description tokens} and scored ~0.75 Jaccard → they FUSED
+    // irreversibly into one entity. Keeping the factual headings restores each
+    // page's distinguishing tokens, dropping the score well below 0.7.
+    const withHeading = (name: string, slug: string, heading: string): DedupCandidate => ({
+      slug,
+      // Identical prose blob → without the headings these look like near-duplicates.
+      text: `${name}\n# ${name}\n\nA company in the technology sector based in the bay area.\n\n## ${heading}\n`,
+    })
+    const items = [
+      withHeading('Acme', 'acme', 'Acquired by Globex in 2024'),
+      withHeading('Zeta', 'zeta', 'Independent and privately held since 1999'),
+    ]
+    const clusters = clusterNearDuplicates(items)
+    expect(clusters.length).toBe(2) // FAILS on old strip-all-headings (they merge into 1)
+    for (const c of clusters) expect(c.length).toBe(1)
   })
 
   test('genuine near-duplicates (same entity, overlapping REAL facts) STILL cluster', () => {

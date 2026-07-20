@@ -387,6 +387,26 @@ function collectRefs(body: string): EntityRef[] {
   return refs
 }
 
+/**
+ * True iff `body` carries at least one reference the edge extractor would COLLECT
+ * — a `[[wikilink]]` (bare or aliased) or a `[text](slug)` markdown link whose
+ * target is an ENTITY slug. Exact parity with `collectRefs` by construction (it IS
+ * `collectRefs`), so a consumer that gates "does this prose assert a graph edge?"
+ * can never drift from what actually becomes a triple.
+ *
+ * The distinction that matters for scribe's supersede + resynth-canonical checks:
+ * a plain URL / anchor / absolute-path markdown link (`[docs](https://x)`,
+ * `[top](#h)`, `[f](/a)`) is NOT an entity reference — `collectRefs` skips those —
+ * so this returns false for them. A cheaper `s.includes('](')` test returns true
+ * for a plain URL link and would falsely reject an entire resynth (memory blocker 2
+ * review). Never a false NEGATIVE that could let a superseded assertion survive: if
+ * this is false, `extractTypedLinks` yields no triple from `body`.
+ */
+export function hasEntityReference(body: string): boolean {
+  if (typeof body !== 'string' || body.length === 0) return false
+  return collectRefs(stripCode(body)).length > 0
+}
+
 function normaliseSlug(raw: string): string | null {
   let s = raw.trim()
   if (s.endsWith('.md')) s = s.slice(0, -3)
