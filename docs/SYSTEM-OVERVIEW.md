@@ -671,6 +671,39 @@ rather than waiting on the global diff-gate. Subscriber:
 >    `buildClarifyPoster`) and returns 200 (`work-board-surface.ts`) — never the raw
 >    internal guard text into the work pane.
 
+> **Work Board — trackable work ≠ a Trident build run (#379, WAVE 3.5, 2026-07-20).**
+> The board no longer assumes every card is a build. Three Ryan-locked behaviours
+> (SPEC Decisions Log 2026-07-20; no feature flags, one code path):
+> 1. **ANY substantial work leaves a card — unconditionally.** Card-creation was
+>    only ever compelled by the build-scoped `BUILD_ROUTING_DOCTRINE`
+>    (`gateway/wiring/operating-doctrine.ts`), which is phrased conditionally on the
+>    credential-gated `work_board_dispatch_build` tool — so research / deep work
+>    compelled no card. The new **`WORK_BOARD_TRACKING_DOCTRINE`** ships every turn
+>    on every tenant (it depends ONLY on `work_board_add`, which is always
+>    registered): for ANY substantial/multi-step work — research, analysis, deep
+>    work, OR a build — the agent calls `work_board_add` FIRST, classifies it with
+>    `task_type`, sets `inline_active` while working inline, and marks it done.
+> 2. **The pane auto-opens on ANY active card, not just a live Trident run.**
+>    `summarize()` (`landing/chat-react/WorkBoardTab.tsx`) now emits an **`active`**
+>    count (any `in_progress` OR `inline_active` card in no terminal state, run-bound
+>    or not); `usePlansPaneController` (`PlansPane.tsx`) opens when `running` OR
+>    `active` rises, holds open while any of running/active/failed > 0, and
+>    auto-CLOSES once all three are zero. A plain research card (`linked_run_id:null`)
+>    now opens the pane; before it contributed zero and the pane stayed collapsed.
+> 3. **The ▶ play button / job dispatch routes BY TASK TYPE.** A new
+>    `task_type` column (`build` | `research`, default `build`, migration `0105`) is
+>    threaded through the store, the `work_board_add`/`work_board_update` tools, and
+>    the HTTP create surface. `open/composer.ts` `boardStartBuild` routes via
+>    `work-board/start-routing.ts` `routeBoardStart`: a `research` card dispatches the
+>    background **ATLAS** specialist (agent-dispatch, kind `research`), a `build` card
+>    the autonomous **Trident** Forge→Argus→merge loop. Both funnel through their own
+>    required-item + ask-before-acting gate; the pre-#379 code stamped Trident on
+>    everything. The ▶-research route has no foreground orchestrator (unlike a
+>    `dispatch_agent` sub-task), so its ▶ closure wires the dispatch `completion`
+>    terminal itself — delivering ATLAS's rendered report to the originating chat
+>    topic and marking the card done on success (pane auto-closes) — since the shared
+>    dispatch report sink only logs.
+
 > <!-- SYNC-ON-DEPLOY (trident build reliability #351/#352, 2026-07-03) — flagged
 > for the Managed orchestrator's SYSTEM-OVERVIEW sync. -->
 > **Trident/Work Board — build reliability: worktree isolation + self-healing merge

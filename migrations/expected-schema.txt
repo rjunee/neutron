@@ -1482,7 +1482,8 @@ CREATE TABLE "work_board_items" (
     created_at      TEXT NOT NULL,                  -- ISO-8601 UTC
     updated_at      TEXT NOT NULL,                  -- ISO-8601 UTC
     completed_at    TEXT                            -- ISO-8601 UTC; NULL until status='done'
-) STRICT
+, task_type TEXT NOT NULL DEFAULT 'build'
+        CHECK (task_type IN ('build', 'research'))) STRICT
 
 [table] workspace_members (tbl=workspace_members)
 CREATE TABLE workspace_members (

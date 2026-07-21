@@ -10,6 +10,65 @@ Running log of what shipped, newest first. One entry per merged change.
 > `docs/research/AS-BUILT-docs-archive-2026-07.md`. This file is the ONE live
 > changelog going forward.
 
+## 2026-07-20 — Work Board #379: trackable work ≠ a Trident build run (WAVE 3.5)
+
+Owner-hit while dogfooding: the Work pane didn't populate/auto-open for general
+(non-build) work, and the ▶ play button treated ALL work as a Trident build.
+Root cause was one wrong assumption baked into three layers — "trackable work ==
+a Trident build run". Per SPEC Decisions Log 2026-07-20, all three fixed (Open;
+no feature flags, one code path each):
+
+1. **WRITE — an UNCONDITIONAL "leave a card for ANY substantial work" doctrine.**
+   The only directive that compelled a card was the build-scoped
+   `BUILD_ROUTING_DOCTRINE` (`gateway/wiring/operating-doctrine.ts`), phrased
+   conditionally on the credential-gated `work_board_dispatch_build` tool — so
+   research / analysis / deep work compelled no card. New
+   **`WORK_BOARD_TRACKING_DOCTRINE`** (same file) ships every turn on every
+   tenant (depends ONLY on `work_board_add`, always registered): for ANY
+   substantial/multi-step work — research, analysis, deep work, OR build — call
+   `work_board_add` FIRST, classify with `task_type`, set `inline_active` while
+   working inline, mark done when finished. Spliced into
+   `buildOperatingDoctrineFragment` above the build-scoped heuristic.
+
+2. **DISPLAY — the pane auto-opens on ANY active card + auto-closes on finish.**
+   `summarize()` (`landing/chat-react/WorkBoardTab.tsx`) now emits an `active`
+   count via `isActiveWork()` — any `in_progress` OR `inline_active` card in no
+   terminal state, run-bound or not. `usePlansPaneController`
+   (`landing/chat-react/PlansPane.tsx`) opens when `running` OR `active` rises,
+   holds open while any of running/active/failed > 0, and auto-closes (after the
+   5s settle) once all three are zero. A plain research card
+   (`linked_run_id:null`) now opens the pane; before it contributed zero to the
+   summary (`{running:0,failed:0}`) so the pane stayed collapsed.
+
+3. **ROUTING — the ▶ play button / job dispatch routes BY TASK TYPE.** New
+   `task_type` column (`build` | `research`, default `build`, migration `0105`,
+   STRICT-table `ADD COLUMN` + CHECK) threaded through `work-board/store.ts`, the
+   `work_board_add`/`work_board_update` tools (`work-board/agent-tool.ts`), the
+   spec-doc create (`work-board/spec-doc-service.ts`), and the HTTP create surface
+   (`gateway/http/work-board-surface.ts`). `open/composer.ts` `boardStartBuild`
+   now routes via `work-board/start-routing.ts` `routeBoardStart`: a `research`
+   card dispatches the background **ATLAS** specialist (agent-dispatch, kind
+   `research`, bound to the same card), a `build` card the autonomous **Trident**
+   Forge→Argus→merge loop. Both funnel through their own required-item +
+   ask-before-acting gate (this also closes the chicken-and-egg where a background
+   dispatch was rejected without a pre-existing card — the doctrine now creates the
+   card the dispatch binds to). Because the ▶-research route has NO foreground
+   orchestrator to relay ATLAS's output (unlike a `dispatch_agent` sub-task, whose
+   parent turn owns the report + completion), the ▶ closure wires the dispatch
+   `completion` terminal itself, scoped to this route: it delivers ATLAS's rendered
+   report to the originating app-socket chat topic AND marks the card done on
+   success so the pane auto-closes — the shared dispatch report sink only logs, so
+   without this a ▶-research result would never reach the owner.
+
+Tests (reproduce-then-fix, all verified red on pre-fix behaviour):
+`landing/chat-react/__tests__/plans-pane.test.tsx` (plain in_progress card opens +
+auto-closes on terminal), `gateway/wiring/__tests__/operating-doctrine.test.ts`
+(unconditional card instruction present, NOT gated on `work_board_dispatch_build`),
+`work-board/start-routing.test.ts` (research→atlas, build→trident). Schema snapshot
+regenerated (`migrations/expected-schema.txt`); `migrations/runner.test.ts` version
+list extended to 105.
+
+
 ## 2026-07-20 — M2-3: memory-consolidation correctness — 3 dedup/supersede corruption blockers
 
 Closed the three data-integrity blockers that gate the memory build

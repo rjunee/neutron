@@ -34,12 +34,20 @@ import type { ProjectDb } from '@neutronai/persistence/index.ts'
  *  client-writable status — only the terminal reconcile sets it. */
 export type WorkBoardStatus = 'upcoming' | 'in_progress' | 'done' | 'failed'
 
+/** What KIND of work a card tracks (#379). Drives ▶/dispatch routing: a
+ *  'build' card runs the autonomous Trident (Forge→Argus→merge) loop; a
+ *  'research' card dispatches the background ATLAS specialist. Defaults to
+ *  'build' so every pre-task_type row keeps the original ▶ behaviour. */
+export type WorkBoardTaskType = 'build' | 'research'
+
 /** Public, fully-typed board item. */
 export interface WorkBoardItem {
   id: string
   project_slug: string
   title: string
   status: WorkBoardStatus
+  /** What kind of work this card tracks — drives ▶/dispatch routing (#379). */
+  task_type: WorkBoardTaskType
   sort_order: number
   design_doc_ref: string | null
   /** Lightweight inline (in-topic) work marker. Sub-agent activity is
@@ -56,6 +64,8 @@ export interface WorkBoardItem {
 export interface CreateWorkBoardItemInput {
   title: string
   status?: WorkBoardStatus
+  /** Work kind (#379); defaults to 'build' when omitted. */
+  task_type?: WorkBoardTaskType
   design_doc_ref?: string | null
   /** Test-injectable id; defaults to a fresh ULID. */
   id?: string
@@ -64,6 +74,8 @@ export interface CreateWorkBoardItemInput {
 export interface WorkBoardItemUpdate {
   title?: string
   status?: WorkBoardStatus
+  /** Re-classify a card's work kind (#379). */
+  task_type?: WorkBoardTaskType
   design_doc_ref?: string | null
   /** Phase 2b — the lightweight inline (in-topic) work marker. The agent flags
    *  an item it is working INLINE in the main topic (caret `›`) vs via a bound
@@ -174,7 +186,7 @@ export function workBoardProjectIdForKey(
 }
 
 const COLS =
-  'id, project_slug, title, status, sort_order, design_doc_ref, ' +
+  'id, project_slug, title, status, task_type, sort_order, design_doc_ref, ' +
   'inline_active, linked_run_id, created_at, updated_at, completed_at'
 
 interface WorkBoardItemDbRow {
@@ -182,6 +194,7 @@ interface WorkBoardItemDbRow {
   project_slug: string
   title: string
   status: WorkBoardStatus
+  task_type: WorkBoardTaskType
   sort_order: number
   design_doc_ref: string | null
   inline_active: number
@@ -264,6 +277,7 @@ function rowToItem(row: WorkBoardItemDbRow): WorkBoardItem {
     project_slug: row.project_slug,
     title: row.title,
     status: row.status,
+    task_type: row.task_type,
     sort_order: row.sort_order,
     design_doc_ref: row.design_doc_ref,
     inline_active: row.inline_active === 1,
@@ -311,6 +325,7 @@ export class WorkBoardStore {
       throw new WorkBoardValidationError('invalid_title', 'title must be a non-empty string')
     }
     const status: WorkBoardStatus = input.status ?? 'upcoming'
+    const task_type: WorkBoardTaskType = input.task_type ?? 'build'
     const design_doc_ref = validateDesignDocRef(input.design_doc_ref)
     const completed_at = status === 'done' ? ts : null
 
@@ -319,6 +334,7 @@ export class WorkBoardStore {
       project_slug,
       title,
       status,
+      task_type,
       sort_order: 0,
       design_doc_ref,
       inline_active: false,
@@ -338,12 +354,13 @@ export class WorkBoardStore {
       item.sort_order = max?.next ?? 1
       await tx.run(
         `INSERT INTO work_board_items (${COLS})
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           item.id,
           item.project_slug,
           item.title,
           item.status,
+          item.task_type,
           item.sort_order,
           item.design_doc_ref,
           item.inline_active ? 1 : 0,
@@ -458,6 +475,7 @@ export class WorkBoardStore {
         params.push(val)
       }
       if (title !== undefined) push('title', title)
+      if (patch.task_type !== undefined) push('task_type', patch.task_type)
       if (designDocRef !== undefined) push('design_doc_ref', designDocRef)
       if (patch.inline_active !== undefined) push('inline_active', patch.inline_active ? 1 : 0)
       if (patch.status !== undefined && patch.status !== current.status) {

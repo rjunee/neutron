@@ -83,10 +83,12 @@ import { SubagentRegistry } from '@neutronai/runtime/subagent/registry.ts'
 import { SubagentRegistryStore } from '@neutronai/runtime/subagent/store.ts'
 import { sweepOrphanedDispatchesOnBoot } from '@neutronai/runtime/subagent/boot-sweep.ts'
 import { newControlState } from '@neutronai/runtime/subagent/control.ts'
+import { renderAnnouncementMarkdown } from '@neutronai/runtime/subagent/announce.ts'
 import { HeartbeatPulse } from '@neutronai/watchdog/heartbeat.ts'
 import type { WatchdogAlert, WatchdogNotifier } from '@neutronai/watchdog/types.ts'
 import {
   DispatchService,
+  DispatchValidationError,
   buildBootSweepReport,
   buildCancellableDispatchTurn,
   buildDispatchStuckAlertSink,
@@ -283,6 +285,7 @@ import {
   type PreviewFrom,
 } from './project-rail.ts'
 import { WorkBoardSpecDocService } from '@neutronai/work-board/spec-doc-service.ts'
+import { routeBoardStart } from '@neutronai/work-board/start-routing.ts'
 import { dispatchBoardBoundBuild } from '@neutronai/trident/board-dispatch.ts'
 import { buildForgeConflictResolver } from '@neutronai/trident/conflict-resolver.ts'
 import { buildTridentDelivery } from '@neutronai/trident/delivery.ts'
@@ -2244,14 +2247,15 @@ export function buildOpenGraphComposer(
     // quietly pending. Mirrors the `appWsHolder` late-binding pattern.
     const buildClarifyPoster: { post?: (chatId: string, text: string) => void } = {}
     // ▶ start/retry closure — resolves the card's saved spec (its plans/ doc, else
-    // its title) and dispatches a board-bound build through the SAME chokepoint
-    // (`dispatchBoardBoundBuild`: required-item + ask-before-acting gate +
-    // attachRun binding) the `/code` command + the agent tools use. Gated on the
-    // same live-credential predicate as the trident loop (a build can only run
-    // when the loop can fire it), so the ▶ route degrades to 501 on an LLM-less
-    // box just like `work_board_dispatch_build` is unregistered there.
+    // its title) and dispatches it ROUTED BY TASK TYPE (#379): a 'research' card
+    // goes to the background ATLAS specialist (agent-dispatch), a 'build' card to
+    // the autonomous Trident Forge→Argus→merge loop (`dispatchBoardBoundBuild`).
+    // Both paths funnel through their own required-item + ask-before-acting gate.
+    // The closure exists when EITHER dispatcher is live (trident loop for builds,
+    // dispatch service for research); the branch whose dispatcher is absent on
+    // this box degrades to a clean backend_error, mirroring the pre-#379 501.
     const boardStartBuild =
-      tridentFireInnerWorkflow !== null
+      tridentFireInnerWorkflow !== null || dispatchService !== null
         ? async (slug: string, item: WorkBoardItem): Promise<WorkBoardStartResult> => {
             const task = await workBoardSpecDoc.resolveTaskForItem(slug, {
               title: item.title,
@@ -2259,35 +2263,112 @@ export function buildOpenGraphComposer(
             })
             // #339 — stamp the originating chat topic so the terminal result
             // announces back here (slug is the board scope key; map it to project_id).
-            const chatId = tridentDeliveryChatId(
-              workBoardProjectIdForKey(project_slug, slug) ?? null,
-            )
-            const result = await dispatchBoardBoundBuild(
-              { board_item_id: item.id, task },
-              {
-                store: boardRunStore,
-                board: workBoardStore,
-                project_slug: slug,
-                repo_path: owner_home,
-                channel_kind: 'app_socket',
-                chat_id: chatId,
-                thread_id: null,
+            const projectId = workBoardProjectIdForKey(project_slug, slug) ?? null
+            const chatId = tridentDeliveryChatId(projectId)
+            return routeBoardStart<WorkBoardStartResult>(item, {
+              // 'research' → ATLAS via agent-dispatch (kind 'research'), bound to
+              // this same card so its later report + stuck-alert route back here.
+              research: async (): Promise<WorkBoardStartResult> => {
+                if (dispatchService === null) {
+                  return {
+                    ok: false,
+                    code: 'backend_error',
+                    message: 'agent dispatch is not enabled on this instance',
+                  }
+                }
+                const deliveryTopic =
+                  projectId !== null
+                    ? appWsProjectTopicId(OWNER_USER_ID, projectId)
+                    : appWsTopicId(OWNER_USER_ID)
+                try {
+                  const handle = await dispatchService.dispatch({
+                    kind: 'research',
+                    task,
+                    board_item_id: item.id,
+                    board_scope: slug,
+                    delivery_target: { channel: 'app_socket', binding_id: deliveryTopic },
+                  })
+                  // #379 blocker-C + major-C — the ▶-research route has NO foreground
+                  // orchestrator to relay ATLAS's output or mark the card done (unlike a
+                  // `dispatch_agent` sub-task, whose parent turn owns both). The shared
+                  // dispatch report sink only LOGS, so wire the terminal here, scoped to
+                  // THIS route: (1) deliver ATLAS's report to the originating chat topic,
+                  // and (2) mark the card done on success so the pane auto-closes. The
+                  // completion promise never rejects (service contract); both writes are
+                  // best-effort and never surface as a route error. Not awaited — the ▶
+                  // click returns immediately with the run id; delivery happens on finish.
+                  void handle.completion.then(async (outcome): Promise<void> => {
+                    try {
+                      const env: AppWsOutboundAgentMessage = {
+                        v: 1,
+                        type: 'agent_message',
+                        body: renderAnnouncementMarkdown(outcome.payload),
+                        message_id: `dispatch:${outcome.run_id}`,
+                        ts: Date.now(),
+                      }
+                      appWsRegistry.send(deliveryTopic, env)
+                    } catch {
+                      // app-ws delivery is best-effort — a lost push is not a lost run.
+                    }
+                    try {
+                      if (outcome.status === 'finished') {
+                        await workBoardStore.complete(slug, item.id)
+                      }
+                    } catch {
+                      // board write is best-effort — never break the terminal path.
+                    }
+                  })
+                  return { ok: true, run_id: handle.run_id }
+                } catch (err) {
+                  if (err instanceof DispatchValidationError) {
+                    // #337 — an underspecified card asks a short clarifying question
+                    // IN THE CHAT, never the raw guard text in the work pane.
+                    if (err.code === 'underspecified') {
+                      buildClarifyPoster.post?.(
+                        chatId,
+                        `🔎 "${item.title}" needs a bit more to research — what specifically should I ` +
+                          `dig into, and what would a good answer look like? Add that and hit ▶ again.`,
+                      )
+                    }
+                    return { ok: false, code: err.code, message: err.message }
+                  }
+                  return {
+                    ok: false,
+                    code: 'backend_error',
+                    message: err instanceof Error ? err.message : 'research dispatch failed',
+                  }
+                }
               },
-            )
-            if (result.ok) return { ok: true, run_id: result.run.id }
-            // #337 — an underspecified card must NOT dump the internal guard text
-            // into the work pane. Post a short clarifying question to the CHAT and
-            // leave the item quietly pending; the surface maps this to a 200 (no
-            // error banner). Other rejection codes stay as errors.
-            if (result.code === 'underspecified') {
-              buildClarifyPoster.post?.(
-                tridentDeliveryChatId(workBoardProjectIdForKey(project_slug, slug) ?? null),
-                `🛠 "${item.title}" needs a bit more detail before I can build it — what platform, ` +
-                  `the key features, and any design reference should it target? Add that (or link a ` +
-                  `design doc) and hit ▶ again.`,
-              )
-            }
-            return { ok: false, code: result.code, message: result.message }
+              // 'build' → the autonomous Trident loop (the pre-#379 behaviour).
+              build: async (): Promise<WorkBoardStartResult> => {
+                const result = await dispatchBoardBoundBuild(
+                  { board_item_id: item.id, task },
+                  {
+                    store: boardRunStore,
+                    board: workBoardStore,
+                    project_slug: slug,
+                    repo_path: owner_home,
+                    channel_kind: 'app_socket',
+                    chat_id: chatId,
+                    thread_id: null,
+                  },
+                )
+                if (result.ok) return { ok: true, run_id: result.run.id }
+                // #337 — an underspecified card must NOT dump the internal guard
+                // text into the work pane. Post a short clarifying question to the
+                // CHAT and leave the item quietly pending; the surface maps this to
+                // a 200 (no error banner). Other rejection codes stay as errors.
+                if (result.code === 'underspecified') {
+                  buildClarifyPoster.post?.(
+                    chatId,
+                    `🛠 "${item.title}" needs a bit more detail before I can build it — what platform, ` +
+                      `the key features, and any design reference should it target? Add that (or link a ` +
+                      `design doc) and hit ▶ again.`,
+                  )
+                }
+                return { ok: false, code: result.code, message: result.message }
+              },
+            })
           }
         : undefined
     const workBoardSurface = createWorkBoardSurface({

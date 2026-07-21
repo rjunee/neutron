@@ -8,6 +8,7 @@ function item(partial: Partial<WorkBoardItem>): WorkBoardItem {
     project_slug: 'acme',
     title: 'a title',
     status: 'upcoming',
+    task_type: 'build',
     sort_order: 1,
     design_doc_ref: null,
     inline_active: false,

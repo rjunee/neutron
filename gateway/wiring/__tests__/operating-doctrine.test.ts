@@ -9,6 +9,7 @@ import { describe, expect, test } from 'bun:test'
 import {
   BUILD_ROUTING_DOCTRINE,
   DOCTRINE_PRINCIPLES,
+  WORK_BOARD_TRACKING_DOCTRINE,
   buildOperatingDoctrineFragment,
 } from '../operating-doctrine.ts'
 
@@ -55,6 +56,29 @@ describe('operating-doctrine — principle set', () => {
       // never surfaces the raw rejection text.
       expect(frag).toContain('clarifying question IN THE CHAT')
       expect(frag.toLowerCase()).toContain('never surface the raw rejection')
+    }
+  })
+
+  test('#379 — an UNCONDITIONAL "add a Work Board card for any substantial work" instruction ships every turn, NOT gated on the build-dispatch credential', () => {
+    for (const scope of ['general', 'project'] as const) {
+      const frag = buildOperatingDoctrineFragment(
+        scope === 'project' ? { scope, project_id: 'gondor' } : { scope },
+      )
+      // The unconditional tracking doctrine is present verbatim, every surface.
+      expect(frag).toContain(WORK_BOARD_TRACKING_DOCTRINE)
+      // It compels a card for ANY substantial work — research/analysis/deep-work,
+      // NOT only a build (the pre-#379 gap: card-creation lived ONLY in the
+      // build-scoped BUILD_ROUTING_DOCTRINE, which is conditional on the tool).
+      expect(WORK_BOARD_TRACKING_DOCTRINE.toLowerCase()).toContain('research')
+      expect(WORK_BOARD_TRACKING_DOCTRINE.toLowerCase()).toContain('deep work')
+      expect(WORK_BOARD_TRACKING_DOCTRINE).toContain('work_board_add')
+      // CRITICAL — it does NOT depend on `work_board_dispatch_build` (the
+      // credential-gated build tool). `work_board_add` is ALWAYS registered, so
+      // this instruction is present + active EVEN WHEN the build-dispatch tool is
+      // absent from the surface. That is exactly what BUILD_ROUTING_DOCTRINE (the
+      // conditional one) mentions and this one must not.
+      expect(WORK_BOARD_TRACKING_DOCTRINE).not.toContain('work_board_dispatch_build')
+      expect(BUILD_ROUTING_DOCTRINE).toContain('work_board_dispatch_build')
     }
   })
 

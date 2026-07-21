@@ -36,6 +36,7 @@ import {
   type WorkBoardItem,
   type WorkBoardStatus,
   type WorkBoardStore,
+  type WorkBoardTaskType,
 } from '@neutronai/work-board/store.ts'
 import { isTerminalPhase } from '@neutronai/trident/state-machine.ts'
 import { runProgressForItem } from '@neutronai/trident/run-progress.ts'
@@ -87,7 +88,13 @@ export type WorkBoardStartResult =
  */
 export type WorkBoardCreateCardFn = (
   project_slug: string,
-  input: { title: string; status?: WorkBoardStatus; design_doc_ref?: string | null; spec?: string },
+  input: {
+    title: string
+    status?: WorkBoardStatus
+    task_type?: WorkBoardTaskType
+    design_doc_ref?: string | null
+    spec?: string
+  },
 ) => Promise<WorkBoardItem>
 
 /**
@@ -128,6 +135,7 @@ const WORK_BOARD_PATH_RE =
 
 const MAX_ITEM_ID_LEN = 128
 const VALID_STATUSES: WorkBoardStatus[] = ['upcoming', 'in_progress', 'done']
+const VALID_TASK_TYPES: WorkBoardTaskType[] = ['build', 'research']
 
 export function createWorkBoardSurface(opts: WorkBoardSurfaceOptions): WorkBoardSurface {
   const { store, auth, trident_runs } = opts
@@ -247,6 +255,10 @@ async function handleCreate(
   if (status === false) {
     return jsonError(400, 'invalid_status', `status must be one of ${VALID_STATUSES.join('/')}`)
   }
+  const task_type = readTaskType(fields['task_type'])
+  if (task_type === false) {
+    return jsonError(400, 'invalid_task_type', `task_type must be one of ${VALID_TASK_TYPES.join('/')}`)
+  }
   const design_doc_ref = readOptionalString(fields['design_doc_ref'])
   if (design_doc_ref === false) {
     return jsonError(400, 'invalid_design_doc_ref', 'design_doc_ref must be a string')
@@ -264,12 +276,14 @@ async function handleCreate(
         ? await createCard(project_slug, {
             title,
             ...(status !== null ? { status } : {}),
+            ...(task_type !== null ? { task_type } : {}),
             ...(design_doc_ref !== null ? { design_doc_ref } : {}),
             ...(spec !== null ? { spec } : {}),
           })
         : await store.create(project_slug, {
             title,
             ...(status !== null ? { status } : {}),
+            ...(task_type !== null ? { task_type } : {}),
             ...(design_doc_ref !== null ? { design_doc_ref } : {}),
           })
     return jsonOk({ item, project_id }, 201)
@@ -465,6 +479,13 @@ function readStatus(raw: unknown): WorkBoardStatus | null | false {
   if (typeof raw !== 'string') return false
   if (!VALID_STATUSES.includes(raw as WorkBoardStatus)) return false
   return raw as WorkBoardStatus
+}
+
+function readTaskType(raw: unknown): WorkBoardTaskType | null | false {
+  if (raw === undefined || raw === null) return null
+  if (typeof raw !== 'string') return false
+  if (!VALID_TASK_TYPES.includes(raw as WorkBoardTaskType)) return false
+  return raw as WorkBoardTaskType
 }
 
 /** Optional string: the string, `null` when absent/empty, or `false` when malformed. */

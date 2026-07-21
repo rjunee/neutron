@@ -35,6 +35,7 @@ import {
   type WorkBoardItemUpdate,
   type WorkBoardStatus,
   type WorkBoardStore,
+  type WorkBoardTaskType,
 } from './store.ts'
 import type { WorkBoardSpecDocService } from './spec-doc-service.ts'
 
@@ -45,11 +46,22 @@ export const WORK_BOARD_COMPLETE_TOOL = 'work_board_complete'
 export const WORK_BOARD_REORDER_TOOL = 'work_board_reorder'
 
 const STATUS_VALUES: WorkBoardStatus[] = ['upcoming', 'in_progress', 'done']
+const TASK_TYPE_VALUES: WorkBoardTaskType[] = ['build', 'research']
 
 const statusProp = {
   type: 'string',
   enum: STATUS_VALUES,
   description: "Lane: 'upcoming' (backlog) | 'in_progress' (active) | 'done' (completed).",
+}
+
+const taskTypeProp = {
+  type: 'string',
+  enum: TASK_TYPE_VALUES,
+  description:
+    "What kind of work this card tracks — drives the ▶ dispatch route: 'research' " +
+    '(investigation / analysis / writing → the background ATLAS specialist) or ' +
+    "'build' (code you will build → the autonomous Trident Forge→Argus→merge loop). " +
+    "Defaults to 'build' when omitted.",
 }
 
 const designDocRefProp = {
@@ -65,6 +77,7 @@ const itemSchema: JsonSchemaDocument = {
     id: { type: 'string' },
     title: { type: 'string' },
     status: { type: 'string', enum: STATUS_VALUES },
+    task_type: { type: 'string', enum: TASK_TYPE_VALUES },
     sort_order: { type: 'integer' },
     design_doc_ref: { type: ['string', 'null'] },
     inline_active: { type: 'boolean' },
@@ -95,6 +108,7 @@ const mutationOutputSchema: JsonSchemaDocument = {
 interface AddArgs {
   title?: unknown
   status?: unknown
+  task_type?: unknown
   design_doc_ref?: unknown
   spec?: unknown
 }
@@ -102,6 +116,7 @@ interface UpdateArgs {
   id?: unknown
   title?: unknown
   status?: unknown
+  task_type?: unknown
   design_doc_ref?: unknown
   inline_active?: unknown
 }
@@ -120,6 +135,11 @@ function asString(v: unknown): string | undefined {
 function asStatus(v: unknown): WorkBoardStatus | undefined {
   return typeof v === 'string' && (STATUS_VALUES as string[]).includes(v)
     ? (v as WorkBoardStatus)
+    : undefined
+}
+function asTaskType(v: unknown): WorkBoardTaskType | undefined {
+  return typeof v === 'string' && (TASK_TYPE_VALUES as string[]).includes(v)
+    ? (v as WorkBoardTaskType)
     : undefined
 }
 
@@ -182,6 +202,7 @@ export function registerWorkBoardToolSurface(
       properties: {
         title: { type: 'string', description: 'The ONE-line item text.' },
         status: statusProp,
+        task_type: taskTypeProp,
         design_doc_ref: designDocRefProp,
         spec: {
           type: 'string',
@@ -201,6 +222,7 @@ export function registerWorkBoardToolSurface(
       const a = (args ?? {}) as AddArgs
       const title = asString(a.title) ?? ''
       const status = asStatus(a.status)
+      const task_type = asTaskType(a.task_type)
       const ref = asString(a.design_doc_ref)
       const spec = asString(a.spec)
       const scope = workBoardScopeKey(ctx.project_slug, ctx.project_id)
@@ -210,6 +232,7 @@ export function registerWorkBoardToolSurface(
             await specDoc.createCardWithOptionalSpec(scope, {
               title,
               ...(status !== undefined ? { status } : {}),
+              ...(task_type !== undefined ? { task_type } : {}),
               ...(ref !== undefined ? { design_doc_ref: ref } : {}),
               ...(spec !== undefined ? { spec } : {}),
             }),
@@ -217,6 +240,7 @@ export function registerWorkBoardToolSurface(
         }
         const createInput: CreateWorkBoardItemInput = { title }
         if (status !== undefined) createInput.status = status
+        if (task_type !== undefined) createInput.task_type = task_type
         if (ref !== undefined) createInput.design_doc_ref = ref
         return ok(await store.create(scope, createInput))
       } catch (err) {
@@ -239,6 +263,7 @@ export function registerWorkBoardToolSurface(
         id: { type: 'string', description: 'The item id (from work_board_list).' },
         title: { type: 'string' },
         status: statusProp,
+        task_type: taskTypeProp,
         design_doc_ref: designDocRefProp,
         inline_active: {
           type: 'boolean',
@@ -259,10 +284,12 @@ export function registerWorkBoardToolSurface(
       if (id === undefined) return { ok: false, error: 'id is required' }
       const title = asString(a.title)
       const status = asStatus(a.status)
+      const task_type = asTaskType(a.task_type)
       const ref = asString(a.design_doc_ref)
       const patch: WorkBoardItemUpdate = {}
       if (title !== undefined) patch.title = title
       if (status !== undefined) patch.status = status
+      if (task_type !== undefined) patch.task_type = task_type
       if (ref !== undefined) patch.design_doc_ref = ref
       if (typeof a.inline_active === 'boolean') patch.inline_active = a.inline_active
       try {

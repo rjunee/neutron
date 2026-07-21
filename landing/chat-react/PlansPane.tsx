@@ -89,13 +89,17 @@ export function usePlansPaneController(
   autoCloseMs: number = AUTO_CLOSE_MS,
 ): PaneController {
   const initialSticky = readSticky(projectId)
-  const hasWork = summary.running > 0 || summary.failed > 0
+  // #379 — ANY active card (a plain in_progress/inline research or deep-work
+  // card, `linked_run_id: null`) is work, not just a live Trident run. The pane
+  // opens for `running`, `failed`, OR `active`.
+  const hasWork = summary.running > 0 || summary.failed > 0 || summary.active > 0
   const [open, setOpen] = useState<boolean>(hasWork || initialSticky === true)
   // A manual choice pins the pane against auto-close until the next kickoff. On
   // mount we're pinned only if the open state came from the sticky (not a live
   // run — a live run stays under auto control so it can auto-close when done).
   const pinnedRef = useRef<boolean>(!hasWork && initialSticky !== null)
   const prevRunningRef = useRef<number>(summary.running)
+  const prevActiveRef = useRef<number>(summary.active)
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const clearTimer = useCallback(() => {
@@ -106,30 +110,35 @@ export function usePlansPaneController(
   }, [])
 
   useEffect(() => {
-    const prev = prevRunningRef.current
-    const now = summary.running
-    prevRunningRef.current = now
-    // KICKOFF — the live-run count rose (a NEW plan started, incl. 0→1 and 1→2).
-    // A fresh build takes control back from any manual pin and reveals itself.
-    if (now > prev) {
+    const prevRunning = prevRunningRef.current
+    const prevActive = prevActiveRef.current
+    const nowRunning = summary.running
+    const nowActive = summary.active
+    prevRunningRef.current = nowRunning
+    prevActiveRef.current = nowActive
+    // KICKOFF — the live-run count OR the active-card count rose (a NEW plan/card
+    // started: a Trident run 0→1/1→2, OR a plain in_progress/inline research card
+    // appearing, #379). A fresh kickoff takes control back from any manual pin.
+    if (nowRunning > prevRunning || nowActive > prevActive) {
       clearTimer()
       pinnedRef.current = false
       setOpen(true)
       return
     }
-    // Still running, or a failure demanding attention → keep it open.
-    if (now > 0 || summary.failed > 0) {
+    // Still running, still active, or a failure demanding attention → keep open.
+    if (nowRunning > 0 || nowActive > 0 || summary.failed > 0) {
       clearTimer()
       return
     }
-    // All clear. Auto-close after a settle, unless the user pinned it open.
+    // All clear (no running, no active, no failed). Auto-close after a settle,
+    // unless the user pinned it open.
     if (open && !pinnedRef.current && timerRef.current === null) {
       timerRef.current = setTimeout(() => {
         timerRef.current = null
         setOpen(false)
       }, autoCloseMs)
     }
-  }, [summary.running, summary.failed, open, autoCloseMs, clearTimer])
+  }, [summary.running, summary.failed, summary.active, open, autoCloseMs, clearTimer])
 
   useEffect(() => clearTimer, [clearTimer])
 
@@ -154,6 +163,11 @@ function headerCount(summary: WorkBoardSummary): { text: string; dot: string } |
   if (summary.failed > 0) {
     return { text: `${summary.failed} failed`, dot: 'cwb-dot-failed' }
   }
+  // #379 — a plain active card (research / deep work, no live run) still reads
+  // as work in the header so the auto-opened pane isn't unlabelled.
+  if (summary.active > 0) {
+    return { text: `${summary.active} active`, dot: 'cwb-dot-build' }
+  }
   return null
 }
 
@@ -177,7 +191,7 @@ export function PlansPane({
   /** Test seam — override the auto-close settle. */
   autoCloseMs?: number
 }): React.JSX.Element {
-  const [summary, setSummary] = useState<WorkBoardSummary>({ running: 0, failed: 0 })
+  const [summary, setSummary] = useState<WorkBoardSummary>({ running: 0, failed: 0, active: 0 })
   const onSummary = useCallback((s: WorkBoardSummary) => setSummary(s), [])
   const { open, toggle } = usePlansPaneController(
     projectId,

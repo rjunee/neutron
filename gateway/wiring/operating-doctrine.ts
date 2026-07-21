@@ -67,6 +67,27 @@ export const DOCTRINE_PRINCIPLES: readonly string[] = [
 ]
 
 /**
+ * Work-Board tracking doctrine (#379, WAVE 3.5) — UNCONDITIONAL, ships EVERY
+ * turn on EVERY tenant. "Trackable work" is NOT "a Trident build run": ANY
+ * substantial/multi-step work — research, analysis, deep work, OR a build —
+ * must leave a Work Board card the owner can watch. It depends ONLY on
+ * `work_board_add`, which is ALWAYS registered (no LLM credential required), so
+ * it is safe to compel unconditionally — unlike the build-scoped
+ * `BUILD_ROUTING_DOCTRINE` below, which is gated on the credential-only
+ * `work_board_dispatch_build` tool. Keeping this separate from that heuristic is
+ * the fix for the defect where deep-work/research compelled no card because the
+ * only card-creation directive was build-scoped + credential-conditional.
+ */
+export const WORK_BOARD_TRACKING_DOCTRINE =
+  'Track your work on the Work Board. For ANY substantial or multi-step work — research, ' +
+  'analysis, deep work, OR a build, in ANY project (General included) — leave a trackable card: ' +
+  'call `work_board_add` FIRST (this tool is ALWAYS available to you), classify it with ' +
+  '`task_type` ("research" for investigation/analysis/writing, "build" for code you will build), ' +
+  'set it `inline_active` while you work it in the chat, and mark it done when you finish. The ' +
+  'owner watches the Work list, so real work with no card is invisible to them. A one-shot answer ' +
+  'or small talk needs no card; anything with real substance always does.'
+
+/**
  * Build-routing heuristic (Part B, M-K): the live agent SELF-ROUTES a build
  * request — SIMPLE work inline with its own file tools; COMPLEX work through the
  * autonomous Forge→Argus→merge loop (`work_board_dispatch_build`) — WITHOUT the
@@ -112,6 +133,8 @@ export function buildOperatingDoctrineFragment(input: OperatingDoctrineInput): s
   )
   lines.push('')
   lines.push(principles)
+  lines.push('')
+  lines.push(WORK_BOARD_TRACKING_DOCTRINE)
   lines.push('')
   lines.push(BUILD_ROUTING_DOCTRINE)
   lines.push('')

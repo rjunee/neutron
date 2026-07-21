@@ -224,30 +224,50 @@ function formatCompletedShort(completed_at: string | null): string {
   return `${month} ${Number(m[3])}`
 }
 
+/** True when the item is ACTIVE work in NO terminal state (#379) — an
+ *  `in_progress` card OR one the agent flagged `inline_active`, run-bound or
+ *  not, that is neither `done` nor a failed run. This is what makes a PLAIN
+ *  card (research/deep-work, `linked_run_id: null`) count as work so the pane
+ *  opens for it — not just a live Trident run. */
+function isActiveWork(item: WorkBoardItem): boolean {
+  if (item.status === 'done') return false
+  // A failed run is a terminal state; it is surfaced via `failed`, not `active`.
+  if (item.run_progress !== undefined && resolveStepLabel(item.run_progress) === 'failed') {
+    return false
+  }
+  return item.status === 'in_progress' || item.inline_active
+}
+
 /**
  * A live-activity roll-up of the board, consumed by the desktop slide-out pane
- * (PR-4) to drive its header count + auto-open/close: `running` = items bound to
- * a live (non-terminal) run; `failed` = items whose last run didn't finish. The
- * pane opens when `running` rises, stays open while `running > 0` or `failed >
- * 0`, and auto-closes only once BOTH are zero (all merged/cancelled). Pure so it
- * unit-tests directly.
+ * (PR-4) to drive its header count + auto-open/close:
+ *   - `running` = items bound to a live (non-terminal) Trident run;
+ *   - `failed`  = items whose last run didn't finish;
+ *   - `active`  = ANY in-progress / inline-active card in no terminal state,
+ *     run-bound OR not (#379) — a plain research/deep-work card counts here.
+ * The pane opens when `running` OR `active` rises, stays open while any of the
+ * three is > 0, and auto-closes only once ALL are zero. Pure so it unit-tests
+ * directly.
  */
 export interface WorkBoardSummary {
   running: number
   failed: number
+  active: number
 }
 
 export function summarize(items: readonly WorkBoardItem[]): WorkBoardSummary {
   let running = 0
   let failed = 0
+  let active = 0
   for (const it of items) {
     if (isLinkedRunning(it)) {
       running += 1
     } else if (it.run_progress !== undefined && resolveStepLabel(it.run_progress) === 'failed') {
       failed += 1
     }
+    if (isActiveWork(it)) active += 1
   }
-  return { running, failed }
+  return { running, failed, active }
 }
 
 export function WorkBoardTab({
