@@ -1902,18 +1902,21 @@ export function buildOpenGraphComposer(
               resolve_topic: (reminder) => resolveAppWsReminderTopic(reminder.topic_id),
               // Design doc §Layer 4: 'instance' rituals root at owner_home (the
               // read-only cross-project surface, e.g. morning-brief); 'project'
-              // rituals root at their project dir. v1 (task 5) wires ONLY the
-              // 'instance' root — per-project rooting + write-containment is
-              // task 6 (the containment HARD GATE, design doc T4). Until it
-              // lands a 'project'-scoped ritual FAILS CLOSED (the executor lands
-              // a durable 'skipped' row) rather than silently over-granting the
-              // owner-wide dir (Argus r1 MAJOR — permission over-grant). No
-              // project-scoped ritual can register/fire yet (zero defs until
-              // task 7), so this is defensive.
+              // rituals root at their project dir. v1 wires ONLY the 'instance'
+              // root — per-project rooting is coupled to WRITE-CONTAINMENT, and
+              // the task-6 T5 containment spike returned UNPROVABLE (a per-session
+              // settings.json deny does not fail-closed on the shipping CC
+              // version; see docs/plans/executor-mode-reminders-2026-07-20.md → T5
+              // verdict). Containment therefore moves to its own OS-sandbox
+              // prerequisite sprint; until it lands a 'project'-scoped ritual
+              // FAILS CLOSED (the executor lands a durable 'skipped' row) rather
+              // than silently over-granting the owner-wide dir (Argus r1 MAJOR —
+              // permission over-grant). No project-scoped ritual can register/fire
+              // yet (zero defs until task 7), so this is defensive.
               scope_cwd: (scope) => {
                 if (scope !== 'instance') {
                   throw new Error(
-                    `ritual scope '${scope}' not yet supported: per-project rooting + write-containment lands in task 6`,
+                    `ritual scope '${scope}' not yet supported: per-project rooting + write-containment deferred to the OS-sandbox sprint (T5 containment verdict: UNPROVABLE)`,
                   )
                 }
                 return owner_home

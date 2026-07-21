@@ -156,7 +156,14 @@ export interface RitualExecutorDeps {
   now?: () => number
 }
 
-/** The executor seam the tick loop consumes: `fire(reminder)` never rejects. */
+/**
+ * The executor seam the tick loop consumes. `fire(reminder)` REJECTS on a
+ * STARTUP failure ONLY (validate/spawn/durable-row-write threw so NO
+ * `code_ritual_runs` row landed — see the module header + throw sites below);
+ * the tick's sole caller (`reminders/tick.ts`) MUST catch that rejection and
+ * REVERT its occurrence claim so the fire re-arms. It never rejects once a
+ * durable row exists, and never awaits the detached substrate turn.
+ */
 export interface RitualExecutor {
   fire(reminder: Reminder): Promise<void>
 }
@@ -170,7 +177,8 @@ function mintId(mint: (() => string) | undefined): string {
 
 /**
  * Build the ritual executor. See the module header for the full fire-time
- * contract; `fire()` NEVER throws and NEVER awaits the launched substrate turn.
+ * contract; `fire()` REJECTS on a STARTUP failure (so the tick can revert its
+ * occurrence claim and re-fire) and NEVER awaits the launched substrate turn.
  */
 export function createRitualExecutor(deps: RitualExecutorDeps): RitualExecutor {
   const now = deps.now ?? Date.now
@@ -355,7 +363,10 @@ export function createRitualExecutor(deps: RitualExecutorDeps): RitualExecutor {
 
   return {
     async fire(reminder: Reminder): Promise<void> {
-      // fire() NEVER throws — a fire-time error must not wedge the tick loop.
+      // fire() re-throws a STARTUP failure ONLY (no durable row landed) so the
+      // tick can revert its occurrence claim and re-fire; the detached turn is
+      // fail-soft and can never reject out of here (see the outer catch + module
+      // header). It never rejects once a durable row exists.
       try {
         const ritual_id = reminder.ritual_id
         if (ritual_id === null) {

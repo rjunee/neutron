@@ -2,6 +2,14 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+## 2026-07-21 — Executor-mode reminders task 6 (Argus round-2 doc/forward-guard fixes): fire() contract docs + GATED_WRITE_TOOLS lockstep note + composer verdict comment
+
+Round-3 corrections on PR #426 (branch `trident/executor-mode-reminders`) — documentation/forward-guard only, no behavior change (all fixes are comments; suites unchanged 74/74 on the two touched suites).
+
+- **MINOR — stale `fire()` contract docs corrected.** `reminders/ritual-executor.ts` — the `RitualExecutor` interface doc (was "`fire(reminder)` never rejects") and the `createRitualExecutor` doc (was "`fire()` NEVER throws") contradicted the round-2 fix that makes `fire()` REJECT on a STARTUP failure (module header line 23; throw sites at the `insertRunning`-recovery re-throw and the outer catch). Both now state the real contract — REJECTS on startup failure so the tick (`reminders/tick.ts`) reverts its occurrence claim; never rejects once a durable row exists; never awaits the detached turn — closing a doc trap for future importers of the exported seam (`reminders/index.ts`).
+- **MINOR — `GATED_WRITE_TOOLS` lockstep-maintenance note added.** `reminders/rituals.ts` — the gate is an ENUMERATED denylist (5 built-ins), so a write-capable name NOT in the set (a new built-in, or an `mcp__server__tool` bridge name admitted by `TOOL_TOKEN_RE`) would PASS the gate. Not reachable today (the ritual substrate wires no tool bridge and shipped rituals are read-only with an explicit Read/Glob/Grep allow-list). Comment records the two lockstep lanes + recommends flipping to a read-only ALLOW-LIST (fail-closed for unknown/bridge names) when the OS-sandbox sprint or task 8/9 revisits the gate.
+- **NIT — composer `scope_cwd` comment corrected.** `open/composer.ts` — the block comment + throw message said per-project write-containment "lands in task 6"; task 6's T5 verdict is UNPROVABLE, so containment is deferred to the OS-sandbox prerequisite sprint. Comment + throw string now say so (the fail-closed behavior itself was already correct).
+
 ## 2026-07-21 — Executor-mode reminders task 6 (Argus r1 round-2 fixes): ritual startup fails CLOSED with claim revert; STAY GATED enforced by code
 
 Round-2 corrections on PR #426 (branch `trident/executor-mode-reminders`).

@@ -89,6 +89,19 @@ const WEB_TOOLS = new Set(['WebSearch', 'WebFetch'])
  *
  * When the OS-sandbox sprint lands the sandboxed writing-ritual factory, this gate
  * is lifted (the factory becomes the containment) — see the plan-doc verdict.
+ *
+ * ⚠️ LOCKSTEP-MAINTENANCE (Argus r2 minor — denylist, not allowlist): this is an
+ * ENUMERATED set of built-in write/exec tool names, so a WRITE-CAPABLE tool NOT in
+ * this set slips the gate. Two open lanes to keep in lockstep when either surface
+ * grows: (a) a new built-in write/exec tool must be ADDED here the same PR it
+ * becomes grantable; (b) an MCP bridge tool name (`mcp__server__tool`, admitted by
+ * {@link TOOL_TOKEN_RE}) is write-capable yet unlisted, so it would PASS this gate.
+ * Not reachable today — the ritual substrate wires NO tool bridge (no
+ * `enableToolBridge` on the ritual variant) and the shipped rituals are read-only
+ * with an explicit Read/Glob/Grep allow-list, so no `mcp__*` grant can execute a
+ * write. Revisit at task 8/9 (ritual registration) or when the OS-sandbox sprint
+ * lifts this gate: prefer flipping the gate to an ALLOW-LIST of read-only tools so
+ * the default is fail-closed for any unknown/bridge name, not enumerated-deny.
  */
 export const GATED_WRITE_TOOLS: ReadonlySet<string> = new Set([
   'Bash',
