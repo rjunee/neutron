@@ -14,6 +14,18 @@
 export const MAX_SPAWN_DEPTH = 1
 export const MAX_CHILDREN_PER_AGENT = 5
 export const MAX_CONCURRENT_SUBAGENTS = 8
+/**
+ * SEPARATE ritual concurrency lane (executor-mode reminders, plan task 4). A
+ * scheduled ritual (`agent_kind === 'ritual'`) is a 45-min background REPL that
+ * fires on a cadence; it MUST NOT consume the interactive dispatch cap
+ * (`MAX_CONCURRENT_SUBAGENTS`) or a pile-up of overdue rituals would starve the
+ * owner's `/dispatch` + Trident builds. `spawnSubagent` counts live ritual rows
+ * ONLY against this cap and every other kind ONLY against `MAX_CONCURRENT_SUBAGENTS`
+ * — bidirectional isolation: rituals can't starve interactive dispatch, and a
+ * ritual pileup caps at 2 (extras are refused, recorded as a failed run, and
+ * retried on the next cadence).
+ */
+export const MAX_CONCURRENT_RITUALS = 2
 
 export type SubagentStatus = 'pending' | 'running' | 'finished' | 'crashed' | 'cancelled'
 

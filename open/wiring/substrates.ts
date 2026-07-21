@@ -31,7 +31,9 @@ import {
   PROFILE_WARM_CHAT,
   PROFILE_EPHEMERAL,
   PROFILE_WARM_FIRE,
+  PROFILE_RITUAL,
 } from '@neutronai/gateway/wiring/substrate-profiles.ts'
+import { RITUAL_AGENT_BASE_PROMPT } from '@neutronai/reminders/prompt-path.ts'
 import { getOpenAiModelPreference } from '@neutronai/runtime/models-openai.ts'
 import { OWNER_USER_ID } from '../owner-identity.ts'
 import type { Substrate } from '@neutronai/runtime/substrate.ts'
@@ -57,6 +59,18 @@ export interface WiredSubstrates {
   makeComposeSubstrate: (project_id: string) => Substrate | null
   /** Per-worktree ephemeral factory: `(prefix) => (cwd) => Substrate`. */
   makeEphemeralSubstrate: (instance_prefix: string) => (cwd: string) => Substrate
+  /**
+   * Scheduled-ritual ephemeral factory (`cc-ritual-*`; executor-mode reminders,
+   * plan task 4). A FRESH disposable REPL per fire, rooted at the ritual's scope
+   * cwd, running under `PROFILE_RITUAL` with the shipped `ritual-agent-base.md`
+   * appended as its system prompt (so it runs UNATTENDED, not as the chat
+   * persona). TOOLLESS BRIDGE (no `enableToolBridge`) + NO owner-chat delivery
+   * sinks — the per-RitualDef surface reaches the spawn via `AgentSpec.tools`.
+   * Single-arg `(cwd) => Substrate` so it drops straight into
+   * `buildCancellableDispatchTurn({ build_substrate })`. Throws on an empty pool
+   * (same shape as `makeEphemeralSubstrate`).
+   */
+  makeRitualSubstrate: (cwd: string) => Substrate
   /** Warm per-repo-cwd trident-fire factory (memoized, non-ephemeral). */
   makeWarmFireSubstrate: (cwd: string) => Substrate
   /** Build-time pre-warm promise (never rejects); null when LLM-less. */
@@ -380,6 +394,44 @@ export function wireSubstrates(ctx: OpenWiringContext): WiredSubstrates {
       return s
     }
 
+  // Scheduled-ritual substrate factory (`cc-ritual-*`; executor-mode reminders,
+  // plan task 4). A FRESH ephemeral REPL per fire, rooted at the ritual's scope
+  // cwd. Distinct from `makeEphemeralSubstrate` in three security-relevant ways:
+  //   1. `PROFILE_RITUAL` (its own trust class — the T5 write-containment spike
+  //      and the tool-security redesign tighten THIS grant first);
+  //   2. `append_system_prompt_file: RITUAL_AGENT_BASE_PROMPT` so the REPL runs
+  //      the UNATTENDED-executor persona instead of the interactive chat agent
+  //      (`repl-agent-base.md`) — a scheduled ritual has no user to ask; and
+  //   3. NO `enableToolBridge` and NO owner-chat notice/delivery sinks — the
+  //      per-RitualDef `tool_surface` is granted via `AgentSpec.tools` (the
+  //      `--tools` argv), never via the live-chat tool bridge, and a ritual turn
+  //      never posts raw text/banners to the owner's chat.
+  // Single-arg `(cwd) => Substrate` so it slots straight into
+  // `buildCancellableDispatchTurn({ build_substrate: makeRitualSubstrate })`.
+  const makeRitualSubstrate = (cwd: string): Substrate => {
+    const s =
+      llmPool === null
+        ? null
+        : buildLlmCallSubstrate({
+            pool: llmPool,
+            substrate_instance_id: `cc-ritual-${owner_handle}`,
+            cwd,
+            owner_handle,
+            user_id: OWNER_USER_ID,
+            project_slug,
+            // Scheduled-ritual trust class — security knobs on the profile.
+            profile: PROFILE_RITUAL,
+            ephemeral: true,
+            // Run as the UNATTENDED executor, not the chat persona.
+            append_system_prompt_file: RITUAL_AGENT_BASE_PROMPT,
+            ...(substrateFactory !== undefined ? { substrateFactory } : {}),
+          })
+    if (s === null) {
+      throw new Error('cc-ritual: empty Anthropic credential pool')
+    }
+    return s
+  }
+
   // Trident v2 (Work Board Phase 2a exec-model) — the inner Forge→Argus→fix
   // loop is one native CC Dynamic Workflow. The composer threads a FIRE seam
   // (`buildSubstrateWorkflowFire`); the build-core trident module wraps it with
@@ -432,6 +484,7 @@ export function wireSubstrates(ctx: OpenWiringContext): WiredSubstrates {
     liveAgentSubstrate,
     makeComposeSubstrate,
     makeEphemeralSubstrate,
+    makeRitualSubstrate,
     makeWarmFireSubstrate,
     prewarmReady,
     prewarmSettledRef,

@@ -36,6 +36,7 @@ import {
   PROFILE_UNTRUSTED_IMPORT,
   PROFILE_EPHEMERAL,
   PROFILE_WARM_FIRE,
+  PROFILE_RITUAL,
   type SubstrateProfile,
 } from '../substrate-profiles.ts'
 import type { SessionHandle } from '@neutronai/runtime/session-handle.ts'
@@ -126,6 +127,7 @@ const ALL_PROFILES: ReadonlyArray<{ name: string; profile: SubstrateProfile }> =
   { name: 'PROFILE_UNTRUSTED_IMPORT', profile: PROFILE_UNTRUSTED_IMPORT },
   { name: 'PROFILE_EPHEMERAL', profile: PROFILE_EPHEMERAL },
   { name: 'PROFILE_WARM_FIRE', profile: PROFILE_WARM_FIRE },
+  { name: 'PROFILE_RITUAL', profile: PROFILE_RITUAL },
 ]
 
 test('every profile encodes exactly { skip_permissions: true } (no reserved field wired yet)', () => {
@@ -194,6 +196,18 @@ const SITES: ReadonlyArray<{
     site: 'open/wiring/substrates.ts makeWarmFireSubstrate (cc-trident-fire)',
     profile: PROFILE_WARM_FIRE,
     extra: { substrate_instance_id: 'cc-trident-fire-owner-abc', cwd: '/w', user_id: 'u', project_slug: 'owner' },
+  },
+  {
+    site: 'open/wiring/substrates.ts makeRitualSubstrate (cc-ritual)',
+    profile: PROFILE_RITUAL,
+    extra: {
+      substrate_instance_id: 'cc-ritual-owner',
+      cwd: '/w',
+      user_id: 'u',
+      project_slug: 'owner',
+      ephemeral: true,
+      append_system_prompt_file: '/abs/ritual-agent-base.md',
+    },
   },
 ]
 

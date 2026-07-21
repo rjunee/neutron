@@ -118,6 +118,14 @@ export interface DispatchTurnInput {
   model: string
   timeout_ms: number
   /**
+   * Built-in tool surface for the spawned REPL (`--tools <names>`). The dispatch
+   * family (Atlas/Sentinel/adhoc) passes NOTHING — `undefined` preserves the
+   * historical toolless `tools: []` spec. The ritual executor (plan task 4)
+   * passes its RitualDef `tool_surface` so a scheduled ritual REPL runs with the
+   * exact granted tools (never empty — the #361 toolless-class pin).
+   */
+  tools?: ReadonlyArray<string>
+  /**
    * Cancellation signal. A production `DispatchTurn` (`substrate-turn.ts`) MUST
    * cancel the underlying substrate when this aborts, so a `/dispatch stop` or a
    * watchdog reap actually terminates the spawned subprocess rather than only

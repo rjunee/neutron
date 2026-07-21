@@ -248,6 +248,16 @@ export interface BuildLlmCallSubstrateInput {
   /** Optional cwd override threaded to `createClaudeCodeSubstrateAuto` (defaults to process.cwd()). */
   cwd?: string
   /**
+   * Optional `--append-system-prompt-file` for the spawned REPL, threaded onto
+   * `ClaudeCodeSubstrateOptions.appendSystemPromptFile`
+   * (`persistent/types.ts:216` → emitted `build-repl-argv.ts:109`). ABSENT ⇒
+   * the substrate's default (`repl-agent-base.md`, the CHAT persona) — unchanged
+   * for every existing caller. Set by the ritual executor (plan task 4) to
+   * `reminders/ritual-agent-base.md` so a scheduled ritual REPL runs as an
+   * UNATTENDED executor, not the interactive chat agent.
+   */
+  append_system_prompt_file?: string
+  /**
    * Optional per-instance `CLAUDE_CONFIG_DIR` threaded to the persistent child.
    * When set, the owner authenticates via the interactive-Max-login model (their
    * own `.credentials.json` with a refresh_token under this dir) and the child
@@ -676,6 +686,12 @@ export function buildLlmCallSubstrate(
           env: spawnEnv,
         }
         if (input.cwd !== undefined) opts.cwd = input.cwd
+        // Ritual executor (plan task 4) — a non-default system prompt file so the
+        // scheduled REPL runs as an unattended executor rather than the chat
+        // persona. Absent ⇒ the substrate's `repl-agent-base.md` default.
+        if (input.append_system_prompt_file !== undefined) {
+          opts.appendSystemPromptFile = input.append_system_prompt_file
+        }
         if (effectiveClaudeConfigDir !== undefined) opts.claude_config_dir = effectiveClaudeConfigDir
         if (input.claude_bin !== undefined) opts.claude_bin = input.claude_bin
         if (effectiveSkipPermissions !== undefined) opts.skip_permissions = effectiveSkipPermissions
