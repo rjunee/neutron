@@ -1,16 +1,20 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
+import { SubagentRegistry } from '@neutronai/runtime/subagent/registry.ts'
+import { ApprovalManager } from '@neutronai/tools/approval.ts'
 import { ReminderStore, type Reminder } from './store.ts'
 import {
   ReminderTickLoop,
   type ReminderDispatcher,
   type ReminderFiredHook,
 } from './tick.ts'
-import type { RitualExecutor } from './ritual-executor.ts'
+import { createRitualExecutor, type RitualExecutor, type RitualTurnResult } from './ritual-executor.ts'
+import { createRitualRegistry, type RitualDef } from './rituals.ts'
+import { createRitualRunStore } from './ritual-runs.ts'
 
 let tmp: string
 let db: ProjectDb
@@ -643,25 +647,89 @@ describe('ReminderTickLoop — ritual executor branch', () => {
     expect(dispatcher.fired).toHaveLength(0)
   })
 
-  test('runOnce RESOLVES while the executor turn is still pending (fire-and-forget)', async () => {
+  test('runOnce AWAITS fire() startup (quiescence boundary)', async () => {
     const store = new ReminderStore(db)
     const now = 10_000_000
     const row = await store.create({ owner_slug: 't1', topic_id: null, fire_at: now / 1000 - 100, message: 'slow ritual' })
     tagRitual(row.id, 'slow')
 
-    // fire() returns a promise that NEVER resolves — runOnce must not await it.
-    let seen = false
-    const fire = mock((_r: Reminder): Promise<void> => {
-      seen = true
-      return new Promise<void>(() => {})
+    // fire()'s STARTUP (validate → spawn → durable 'running' row) is awaited by
+    // the tick: it must complete BEFORE runOnce resolves. Only the launched turn
+    // is detached (inside the executor). The pre-fix code detached the whole
+    // startup, so `startupDone` was still false when runOnce resolved.
+    let startupDone = false
+    const fire = mock(async (_r: Reminder): Promise<void> => {
+      await new Promise((r) => setTimeout(r, 5))
+      startupDone = true
     })
     const dispatcher = recordingDispatcher()
     const loop = new ReminderTickLoop({ store, dispatcher, ritual_executor: { fire }, now: () => now })
 
-    // If the tick awaited fire(), this would hang. It resolves → proof.
     const res = await loop.runOnce()
     expect(res.fired).toBe(1)
-    expect(seen).toBe(true)
+    // The awaited startup finished inside the tick body (would be false pre-fix).
+    expect(startupDone).toBe(true)
     expect(fire).toHaveBeenCalled()
+  })
+
+  test('a claimed ritual occurrence + immediate stop() leaves a durable running row — never zero rows', async () => {
+    // The Argus r3 data-loss regression. REAL executor end-to-end: an un-awaited
+    // runOnce() + immediate `await stop()` must leave exactly the durable
+    // 'running' `code_ritual_runs` row inside the quiescence boundary. On the
+    // pre-fix code (fireAndForget around fire()) this is deterministically null:
+    // the tick detached at fireAndForget, stop() resolved with fire()'s first
+    // await still queued, so the run row did not yet exist.
+    const store = new ReminderStore(db)
+    const now = 10_000_000
+
+    const ritualsDir = mkdtempSync(join(tmpdir(), 'neutron-tick-rituals-'))
+    const rdef: RitualDef = {
+      id: 'quiesce-brief',
+      description: 'quiesce regression fixture',
+      scope: 'instance',
+      tool_surface: ['Read'],
+      egress: 'none',
+      silent: true,
+    }
+    const registry = createRitualRegistry({ rituals_dir: ritualsDir })
+    registry.register(rdef)
+    writeFileSync(join(ritualsDir, `${rdef.id}.md`), 'Do the quiesce brief.', 'utf8')
+
+    const runs = createRitualRunStore(db)
+    const ritual_executor = createRitualExecutor({
+      registry,
+      approvals: new ApprovalManager(db, { notify: async () => {} }),
+      project_slug: 'owner',
+      instance_key: 'owner',
+      subagents: new SubagentRegistry(),
+      // The turn NEVER settles — the run stays live at 'running' for the assertion.
+      turn: () => new Promise<RitualTurnResult>(() => {}),
+      runs,
+      outbound: { post: async () => true },
+      resolve_topic: () => 'app:t',
+      resolve_model: () => 'm',
+      scope_cwd: () => tmp,
+      build_approval_check: () => ({ isApproved: () => true }),
+      mint_run_id: () => 'quiesce-run-0',
+    })
+
+    const row = await store.create({ owner_slug: 'owner', topic_id: null, fire_at: now / 1000 - 100, message: 'quiesce ritual' })
+    tagRitual(row.id, 'quiesce-brief')
+
+    const loop = new ReminderTickLoop({ store, dispatcher: recordingDispatcher(), ritual_executor, now: () => now })
+    // Do NOT await the tick; stop() (SupervisedLoop) awaits the in-flight tick.
+    const inflight = loop.runOnce()
+    await loop.stop()
+
+    // Assert in the stop() continuation — determinism depends on NOT sleeping.
+    expect(store.get(row.id)!.status).toBe('fired') // #319 claim consumed
+    const runRow = runs.get('quiesce-run-0')
+    expect(runRow).not.toBeNull()
+    expect(runRow!.status).toBe('running')
+    expect(runRow!.reminder_id).toBe(row.id)
+    expect(runRow!.content_hash).toBeTruthy()
+
+    await inflight
+    rmSync(ritualsDir, { recursive: true, force: true })
   })
 })

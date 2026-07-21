@@ -748,3 +748,74 @@ describe('createRitualExecutor.fire — delivery resilience (task 5)', () => {
     expect(settled!.status).toBe('finished')
   })
 })
+
+// ── Argus r3 fixes — postNotice retry (§267) + truncation ownership ──────────
+describe('createRitualExecutor.fire — postNotice retry + truncation (task 5R)', () => {
+  /** An outbound whose post returns booleans from `script` (last value sticks). */
+  function scriptedOutbound(script: boolean[]): {
+    post: ReturnType<typeof mock>
+    outbound: ReminderOutbound
+  } {
+    let i = 0
+    const post = mock(async (_i: ReminderOutboundInput): Promise<boolean> => {
+      const v = i < script.length ? script[i]! : script[script.length - 1]!
+      i++
+      return v
+    })
+    return { post, outbound: { post } }
+  }
+
+  function buildExec(turn: RitualTurn, outbound: ReminderOutbound, mint: string): ReturnType<typeof createRitualExecutor> {
+    return createRitualExecutor({
+      registry: registryWith(def()),
+      approvals: new ApprovalManager(db, noopNotifier),
+      project_slug: 'owner',
+      instance_key: 'owner',
+      subagents,
+      outbound,
+      resolve_topic: resolveTopic,
+      turn,
+      runs,
+      resolve_model: () => 'm',
+      scope_cwd: () => '/s',
+      build_approval_check: () => approver(true),
+      mint_run_id: () => mint,
+    })
+  }
+
+  test('(a) post()==false → ONE retry then a logged failure notice (§267): exactly 2 calls, no throw', async () => {
+    const { post } = scriptedOutbound([false, false])
+    const turn: RitualTurn = async () => ({ result: 'boom', status: 'failed' })
+    const exec = buildExec(turn, { post }, 'sub-pf')
+    // A single failure → one failure notice (no escalation) → post retried once.
+    await expect(exec.fire(await ritualRow('morning-brief'))).resolves.toBeUndefined()
+    await waitFor(() => post.mock.calls.length >= 2)
+    await new Promise((r) => setTimeout(r, 10))
+    expect(post).toHaveBeenCalledTimes(2)
+  })
+
+  test('(a) post() false then true → 2 calls, notice delivered, no error', async () => {
+    const { post } = scriptedOutbound([false, true])
+    const turn: RitualTurn = async () => ({ result: 'boom', status: 'failed' })
+    const exec = buildExec(turn, { post }, 'sub-pft')
+    await expect(exec.fire(await ritualRow('morning-brief'))).resolves.toBeUndefined()
+    await waitFor(() => post.mock.calls.length >= 2)
+    await new Promise((r) => setTimeout(r, 10))
+    expect(post).toHaveBeenCalledTimes(2)
+  })
+
+  test('(b) long failure reason is whitespace-COLLAPSED then capped at 160 (formatter owns truncation)', async () => {
+    // Internal whitespace runs — the pre-fix executor `.slice(0,160)` truncated
+    // BEFORE collapse and under-filled the notice. The formatter now owns both.
+    const raw = 'x  y '.repeat(80) // 400 chars, double-spaced
+    const turn: RitualTurn = async () => ({ result: raw, status: 'failed' })
+    const rec = recordingOutbound()
+    const exec = buildExec(turn, rec.outbound, 'sub-trunc')
+    await exec.fire(await ritualRow('morning-brief'))
+    await waitFor(() => rec.posts.length >= 1)
+    const oneLine = (s: string): string => s.replace(/\s+/g, ' ').trim()
+    const expectedCollapsed = oneLine(raw).slice(0, 160)
+    expect(expectedCollapsed.length).toBe(160)
+    expect(rec.posts[0]!.body.endsWith(expectedCollapsed)).toBe(true)
+  })
+})

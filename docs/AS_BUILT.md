@@ -2,6 +2,46 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+## 2026-07-21 — Executor-mode reminders task 5 (Argus r3 fixes): ritual startup joins the tick quiescence boundary
+
+Round-3 corrections on PR #426 (branch `trident/executor-mode-reminders`).
+
+- **The tick now AWAITS ritual `fire()` startup — the data-loss window is closed
+  (MAJOR).** `reminders/tick.ts:231` wrapped the whole `ritual_executor.fire(reminder)`
+  in `fireAndForget('ritual-fire', …)`, detaching validation + spawn + the durable
+  `code_ritual_runs` 'running' insert from the tick body. `ReminderTickLoop.stop()`
+  (tick.ts:135-137 → SupervisedLoop quiescence await, `loop/index.ts:319` stop
+  awaits `inflight`) could therefore resolve BETWEEN a consumed #319 claim and its
+  durable run row — a claimed occurrence consumed with NO durable record = data loss
+  on shutdown/crash. Fixed to `await this.ritual_executor.fire(reminder)`
+  (`reminders/tick.ts:231`): claim → validate → durable 'running' row now completes
+  INSIDE the quiescence boundary. Only the long-running substrate TURN stays detached,
+  and that detachment is INTERNAL to the executor (`fireAndForget('ritual-run')`,
+  `reminders/ritual-executor.ts:494`) — the tick never blocks on an up-to-45-min run;
+  startup is milliseconds of local DB writes plus one prompt read. The now-unused
+  `fireAndForget` import was dropped (tick.ts:19) and the guard log key renamed
+  `ritual_fire_sync_throw` → `ritual_fire_threw` (it now also covers async
+  rejections). Regression test: an un-awaited `runOnce()` + immediate `await stop()`
+  with a REAL executor + never-settling turn leaves exactly the durable 'running'
+  row — `reminders/tick.test.ts` "a claimed ritual occurrence + immediate stop()
+  leaves a durable running row — never zero rows" (deterministically null on the
+  pre-fix code).
+- **`postNotice` honors spec §267 — one retry then a logged failure notice (minor a).**
+  `reminders/ritual-executor.ts:169-193`: a `post()==false` result (the durable
+  reply write was swallowed — `gateway/http/deliver.ts:187-188` → `reminder-outbound.ts:41-42`)
+  is retried ONCE; a still-false result logs `ritual_notice_post_not_persisted`. A
+  THROWN post keeps the existing `ritual_notice_post_failed` catch path.
+  `gateway/http/deliver.ts` is unchanged — its `{persisted:false}` reply contract is
+  correct and the consumer honors it.
+- **Executor-side pre-slice dropped; the formatter owns truncation (minor b).**
+  `reminders/ritual-executor.ts:278` no longer `.slice(0, 160)` the settled
+  failure reason before handing it to `formatRitualFailureNotice`
+  (`reminders/ritual-delivery.ts:60-63`), which owns whitespace-collapse THEN the
+  160-char cap. The old pre-slice truncated BEFORE collapse and could under-fill the
+  notice. The `:297` 4000-char DB `failure_reason` cap (a different concern) stays.
+- Tests: `bun test reminders/` 300 pass / 0 fail; `bun test gateway/` + `bun test loop/`
+  green.
+
 ## 2026-07-21 — Executor-mode reminders task 5 (Argus r2 fixes): escalation fires after a cancel-broken streak + insertRunning-failure no longer wedges a ritual
 
 Round-3 corrections on PR #426 (branch `trident/executor-mode-reminders`).

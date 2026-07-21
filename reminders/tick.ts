@@ -16,7 +16,6 @@
 
 import { hostTimeZone, nextCronFire, parseCron } from '@neutronai/cron'
 import { createLogger } from '@neutronai/logger'
-import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
 import { SupervisedLoop, type LoopDescriptor } from '@neutronai/loop'
 
 import { isRecurring, type Reminder, type ReminderRecurrence, type ReminderStore } from './store.ts'
@@ -223,16 +222,24 @@ export class ReminderTickLoop {
         // durable `code_ritual_runs` history rows are the record, and a recurring
         // row has already advanced to its next cadence, so re-firing the same
         // attempt every 30 s (the nudge deliver-or-retry contract) is wrong here.
-        // fire() is fire-and-forget: the tick MUST NOT block up to 45 min on a
-        // ritual, so `runOnce` resolves while the executor's turn is still pending.
+        // fire()'s STARTUP — fail-closed validate → ritual-lane spawn → durable
+        // `code_ritual_runs` 'running' (or skipped/failed) row — is AWAITED so it
+        // completes INSIDE the tick body, i.e. inside SupervisedLoop's stop()
+        // quiescence await (tick.ts:135-137). stop() can therefore never resolve
+        // between a consumed #319 claim and its durable run row (the Argus task-5
+        // data-loss blocker). Only the long-running substrate TURN is detached,
+        // INSIDE the executor (fireAndForget('ritual-run'), ritual-executor.ts step
+        // (f)) — the tick never blocks on an up-to-45-min execution; startup is
+        // milliseconds of local DB writes plus one prompt-file read.
         if (reminder.ritual_id !== null) {
           if (this.ritual_executor !== null) {
             try {
-              fireAndForget('ritual-fire', this.ritual_executor.fire(reminder))
+              await this.ritual_executor.fire(reminder)
             } catch (err) {
-              // fire() is contracted never to throw; guard the synchronous call
-              // defensively so a ritual can never wedge the tick loop.
-              log.error('ritual_fire_sync_throw', {
+              // fire() is contracted never to reject; guard the call defensively
+              // so a ritual can never wedge the tick loop (the guard now also
+              // covers async rejections).
+              log.error('ritual_fire_threw', {
                 reminder: reminder.id,
                 ritual_id: reminder.ritual_id,
                 error: err instanceof Error ? (err.stack ?? err.message) : String(err),

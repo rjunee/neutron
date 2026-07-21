@@ -2,8 +2,10 @@
  * @neutronai/reminders — the RITUAL EXECUTOR (executor-mode reminders, plan task 4).
  *
  * At fire time the tick loop (`reminders/tick.ts`) routes a `ritual_id` row to
- * this executor's `fire()` (fire-and-forget) INSTEAD of the nudge dispatcher. The
- * executor:
+ * this executor's `fire()` INSTEAD of the nudge dispatcher. The tick AWAITS
+ * fire() — but only its STARTUP (validate → spawn → durable 'running' row); the
+ * launched substrate turn is detached INTERNALLY at step (f), so the tick never
+ * blocks on an up-to-45-min run. The executor:
  *   1. VALIDATES the ritual fail-CLOSED (`validateRitualFire` + the content-hash
  *      approval checker built from the row's LIVE cadence). A skip verdict lands a
  *      durable `code_ritual_runs` 'skipped' row and spawns NOTHING.
@@ -165,7 +167,11 @@ function mintId(mint: (() => string) | undefined): string {
 export function createRitualExecutor(deps: RitualExecutorDeps): RitualExecutor {
   const now = deps.now ?? Date.now
 
-  /** Best-effort post of one notice body. NEVER throws (the record is the row). */
+  /** Best-effort post of one notice body. NEVER throws (the record is the row).
+   *  A post()==false (spec §267: the durable reply write was swallowed —
+   *  gateway/http/deliver.ts:187-188 → reminder-outbound.ts:41-42) is retried
+   *  ONCE, then a still-false result is logged as an un-persisted notice. A
+   *  THROWN post keeps the existing catch path ('ritual_notice_post_failed'). */
   async function postNotice(
     topic_id: string,
     owner_slug: string,
@@ -173,7 +179,11 @@ export function createRitualExecutor(deps: RitualExecutorDeps): RitualExecutor {
     body: string,
   ): Promise<void> {
     try {
-      await deps.outbound.post({ topic_id, owner_slug, body, reminder_id })
+      const ok = await deps.outbound.post({ topic_id, owner_slug, body, reminder_id })
+      if (!ok) {
+        const retried = await deps.outbound.post({ topic_id, owner_slug, body, reminder_id })
+        if (!retried) log.error('ritual_notice_post_not_persisted', { reminder_id, topic_id })
+      }
     } catch (err) {
       log.error('ritual_notice_post_failed', {
         reminder_id,
@@ -275,7 +285,10 @@ export function createRitualExecutor(deps: RitualExecutorDeps): RitualExecutor {
     } else {
       // failed / timed_out. A turn-settled failure carries the turn's own text as
       // the reason only when non-empty; otherwise no reason.
-      const settledReason = r.result.trim().length > 0 ? r.result.trim().slice(0, 160) : null
+      // `formatRitualFailureNotice` (ritual-delivery.ts) owns whitespace-collapse
+      // THEN the MAX_REASON_CHARS cap — a pre-slice here would truncate BEFORE
+      // collapse and could under-fill the notice, so pass the full trimmed text.
+      const settledReason = r.result.trim().length > 0 ? r.result.trim() : null
       await surfaceFailure(reminder, ritual_id, runRunId, runStatus, settledReason)
     }
   }
