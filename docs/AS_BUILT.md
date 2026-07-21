@@ -36,14 +36,24 @@ that provably FAILS on the prior main.
     closure; a greedy clique that never over-merges) and requires
     `MIN_DISTINGUISHING_TOKENS` (= 2) non-boilerplate tokens for a page to be a
     merge candidate. The Jaccard threshold stays 0.7, configurable, flagged
-    UNVALIDATED (must be re-measured on a real corpus before arming).
+    UNVALIDATED (must be re-measured on a real corpus before arming). Known accepted
+    residuals to close before arming: (i) two DISTINCT fact-less entities sharing an
+    identical ≥ 2-word name still merge (gated behind the merge name-tripwire);
+    (ii) two DIFFERENT-named entities each asserting the SAME ≥ 3 relation targets
+    can reach 0.714 because relation-verb tokens are not stripped and shared targets
+    inflate overlap (`Bob`/`Carol` each `Works at [[org0/1/2]]`). Fix before arming:
+    strip relation-verb tokens and/or gate a merge on a shared name token.
 - **BLOCKER 2a — supersede survives resynth** (`stripSupersededSentences`,
   `scribe/write-to-gbrain.ts`). The strip is now keyed on the graph TRIPLE
   (predicate, object), not on matching the generated `RELATION_SENTENCE` template.
   On main, once a page was resynthesized into natural prose, every future supersede
   on it was a silent permanent no-op (`works_at NewCo` AND `works_at OldCo`
-  asserted forever). Compound sentences are still spared entirely; a single-relation
-  sentence's descriptive prose is retired to the append-only timeline.
+  asserted forever). Compound sentences are still spared entirely. Accepted residual:
+  a single-relation sentence with descriptive prose is dropped IN FULL — the retired
+  relation persists as an additive dated timeline row (`works_at oldco`), but
+  `stripSupersededSentences` writes NOTHING to the timeline, so the sentence's
+  descriptive detail and any co-located still-current non-edge fact (`earns $400k`)
+  leave current truth and are not re-recorded. Flag-gated (`NEUTRON_PERFECT_RECALL`).
 - **BLOCKER 2b — resynth may not mutate a predicate** (`preservesEdges`,
   `scribe/reflect/reflect-pass.ts`). The accept-gate now compares extracted
   (predicate, object) PAIRS, not just wikilink TARGETS. On main a rewrite that kept

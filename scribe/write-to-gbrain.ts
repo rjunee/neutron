@@ -174,10 +174,12 @@ export interface WriteExtractionDeps {
    * carrying a `supersedes` marker DROPS the superseded object's sentence(s) from
    * the subject's compiled-truth (so the writer's existing
    * `removedLinks`→`remove_link` machinery invalidates the stale gbrain edge and
-   * `add_link` asserts the current one), and the superseding write records the
-   * transition in the append-only timeline (dated history preserved). When false
-   * (the default), `supersedes` is ignored entirely → pure accretion, byte-for-
-   * byte today's behaviour.
+   * `add_link` asserts the current one), and the superseding write records each
+   * RELATION additively as a dated `<pred> <obj>` timeline row (no free-text
+   * "transition" note — the retired relation survives as history via its own
+   * additive row; the dropped sentence's descriptive prose is NOT re-recorded, see
+   * `stripSupersededSentences`). When false (the default), `supersedes` is ignored
+   * entirely → pure accretion, byte-for-byte today's behaviour.
    */
   supersede?: boolean
 }
@@ -567,9 +569,14 @@ function mergeExistingCompiledTruth(existing: string, page: PlannedPage, superse
  * hand-authored compound prose is never mangled. ACCEPTED RESIDUAL (the
  * deliberate cost of "supersede must ALWAYS retire the edge"): a SINGLE-relation
  * sentence carrying extra descriptive prose for the superseded object (`Works at
- * [[oldco]] as principal engineer since 2019.`) is dropped IN FULL — the graph
- * edge is retired and the descriptive detail is retired to the append-only, dated
- * timeline (history is preserved; it just leaves CURRENT compiled-truth).
+ * [[oldco]] as principal engineer since 2019.`) is dropped IN FULL. The retired
+ * RELATION itself survives as its own additive dated timeline row (`works_at
+ * oldco`, written by `timelineBody`/`relationNotes`), but this function is a PURE
+ * compiled-truth transform — it writes NOTHING to the timeline — so the sentence's
+ * descriptive detail ("as principal engineer since 2019") and any co-located
+ * still-current NON-edge fact sharing that one sentence (e.g. "earns $400k") leave
+ * CURRENT compiled-truth and are NOT re-recorded anywhere. That is an accepted
+ * loss of those non-edge details from current truth, isolated behind the flag.
  *
  * A sentence qualifies purely by what it would contribute to the graph, computed
  * with the SAME `extractTypedLinks` + `splitSentencesWithOffsets` the edge
@@ -633,10 +640,12 @@ function stripSupersededSentences(existing: string, page: PlannedPage): string {
   // destroyed. ACCEPTED RESIDUAL (the deliberate trade-off of "supersede must
   // ALWAYS retire the edge"): a SINGLE-relation sentence carrying extra
   // descriptive prose for the superseded object (`Works at [[oldco]] as principal
-  // engineer since 2019.`) is dropped IN FULL — the graph edge is retired and the
-  // descriptive detail is retired to the append-only, dated timeline (history is
-  // never lost, it just leaves compiled-truth). This is the belief-evolution
-  // semantics: a superseded relation is no longer CURRENT truth.
+  // engineer since 2019.`) is dropped IN FULL. The retired relation persists as an
+  // additive dated timeline row (`works_at oldco`), but the descriptive detail —
+  // and any co-located still-current non-edge fact sharing the sentence (e.g.
+  // `earns $400k`) — leaves compiled-truth and is NOT re-recorded (this is a pure
+  // string transform, nothing is written to the timeline here). This is the
+  // belief-evolution semantics: a superseded relation is no longer CURRENT truth.
   const pureSupersededSentence = (keys: string[]): string | null => {
     if (keys.length !== 1) return null
     const key = keys[0]!

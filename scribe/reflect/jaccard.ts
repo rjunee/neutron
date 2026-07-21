@@ -32,6 +32,16 @@
  * MUST be re-measured (false-merge rate on Ryan's actual `entities/`) before
  * consolidation is armed. The threshold is `deps.jaccardThreshold`-configurable
  * precisely so that measurement can tune it without a code change.
+ *
+ * KNOWN RESIDUAL at 0.7 (surfaced in review, to close before arming): two
+ * DIFFERENT-named entities that each assert the SAME set of ≥ 3 relation TARGETS
+ * can reach the bar, because `stripBoilerplate` does NOT strip relation-VERB
+ * tokens (`works`, `at`) and the shared targets inflate overlap. Concretely, `Bob`
+ * and `Carol` pages each carrying `Works at [[org0]]/[[org1]]/[[org2]]` score
+ * `{works,at,org0,org1,org2}` ∩ / ∪ = 5/7 = 0.714 ≥ 0.7 and would cluster. This is
+ * NOT a regression (consolidation is not armed and the threshold is flagged
+ * UNVALIDATED above), but the pre-arming fix is to strip relation-verb tokens
+ * and/or gate a merge on a shared name token — not the raw 0.7 cut alone.
  */
 export const DEFAULT_JACCARD_THRESHOLD = 0.7
 

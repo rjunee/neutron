@@ -2386,16 +2386,29 @@ optional operator `GBRAIN_SOURCE` / `GBRAIN_BRAIN_ID`.
     boilerplate pages (which strip to ~0 tokens) never merge. The Jaccard
     threshold (`DEFAULT_JACCARD_THRESHOLD` = 0.7) is `deps.jaccardThreshold`-
     configurable and flagged UNVALIDATED — it MUST be re-measured on a real corpus
-    before arming. Known accepted residual: two DISTINCT fact-less entities sharing
-    an identical ≥ 2-word name still merge, gated behind the merge name-tripwire.
+    before arming. Known accepted residuals (both to be closed before arming, not
+    silently ignored): (i) two DISTINCT fact-less entities sharing an identical
+    ≥ 2-word name still merge, gated behind the merge name-tripwire; (ii) two
+    DIFFERENT-named entities that each assert the SAME ≥ 3 relation targets can
+    reach the threshold — relation-verb tokens (`works`, `at`) are not stripped and
+    shared targets inflate overlap (e.g. `Bob` / `Carol` pages each with
+    `Works at [[org0]]/[[org1]]/[[org2]]` score 5/7 = 0.714 ≥ 0.7). Neither is a
+    regression (consolidation is NOT armed and the threshold is flagged
+    UNVALIDATED); the fix before arming is to strip relation-verb tokens and/or gate
+    a merge on a shared name token.
   - **Supersede is keyed on the graph TRIPLE, not sentence shape**
     (`stripSupersededSentences`, `scribe/write-to-gbrain.ts`). A superseded
     relation's sentence is retired whenever it asserts exactly one graph relation
     that is a superseded target — REGARDLESS of prose form — so a supersede still
     works after a resynth rewrites compiled-truth into natural prose (previously a
     permanent no-op). Compound sentences (more than one relation) are still spared
-    entirely; a single-relation sentence's non-edge descriptive prose is retired
-    to the append-only timeline (history preserved).
+    entirely. Accepted residual: a single-relation sentence carrying descriptive
+    prose is dropped IN FULL — the retired relation persists as an additive dated
+    timeline row (`works_at oldco`), but `stripSupersededSentences` is a pure
+    compiled-truth transform that writes NOTHING to the timeline, so the sentence's
+    descriptive detail and any co-located still-current non-edge fact (e.g.
+    `earns $400k`) leave current truth and are not re-recorded. Isolated behind
+    the `NEUTRON_PERFECT_RECALL` flag.
   - **Resynth may not drop OR mutate a predicate** (`preservesEdges`,
     `scribe/reflect/reflect-pass.ts`). The accept-gate compares extracted
     (predicate, object) PAIRS, not just wikilink targets, so a rewrite that keeps a

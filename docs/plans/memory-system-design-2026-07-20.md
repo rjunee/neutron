@@ -32,7 +32,14 @@
 > > never over-merges) and gates on `MIN_DISTINGUISHING_TOKENS` (= 2). The Jaccard threshold stays
 > > 0.7, `deps.jaccardThreshold`-configurable, and is flagged UNVALIDATED (re-measure the false-merge
 > > rate on the real corpus before arming). STILL PENDING before arming (unchanged by this PR):
-> > quarantine of merge-losers under `entities/.quarantine/` for N passes. Reproduce-then-fix tests:
+> > quarantine of merge-losers under `entities/.quarantine/` for N passes; AND two known accepted
+> > residuals surfaced in review — (i) two DISTINCT fact-less entities sharing an identical ≥ 2-word
+> > name still merge (gated behind the §7.2 merge name-tripwire), and (ii) two DIFFERENT-named entities
+> > that each assert the SAME ≥ 3 relation targets can reach 0.714 because relation-verb tokens
+> > (`works`, `at`) are not stripped and shared targets inflate overlap (e.g. `Bob`/`Carol` each
+> > `Works at [[org0]]/[[org1]]/[[org2]]` → 5/7 = 0.714 ≥ 0.7). Neither is a regression (consolidation
+> > is NOT armed, threshold UNVALIDATED); the fix before arming is to strip relation-verb tokens and/or
+> > gate a merge on a shared name token. Reproduce-then-fix tests:
 > > `scribe/__tests__/reflect-jaccard.test.ts` (five fact-less pages do NOT cluster; fiscal-year /
 > > v1-v2 / Q1-Q2 stay distinct; factual-heading pair stays distinct; clique-not-transitive;
 > > min-token gate; genuine near-duplicates still cluster).
@@ -51,8 +58,12 @@
 > >   now keys the strip on the graph TRIPLE (a sentence is retired when its ONLY graph relation is a
 > >   superseded target), NOT on canon-matching the `RELATION_SENTENCE` template — so it works
 > >   regardless of prose form and supersede is no longer a no-op after resynth. Compound sentences
-> >   (more than one relation) are still spared entirely; a single-relation sentence's non-edge prose
-> >   is retired to the append-only timeline (accepted residual). Test:
+> >   (more than one relation) are still spared entirely. ACCEPTED RESIDUAL: a single-relation sentence
+> >   carrying descriptive prose is dropped IN FULL — the retired relation persists as an additive dated
+> >   timeline row (`works_at oldco`), but `stripSupersededSentences` is a pure compiled-truth transform
+> >   that writes NOTHING to the timeline, so the sentence's descriptive detail AND any co-located
+> >   still-current non-edge fact sharing that one sentence (e.g. `earns $400k`) leave current truth and
+> >   are NOT re-recorded (an accepted loss of those non-edge details, isolated behind the flag). Test:
 > >   `scribe-temporal-invalidation.test.ts` "a SINGLE-relation PROSE sentence for a superseded
 > >   target IS retired (triple-keyed, not template-shaped)".
 > > - **2b — resynth cannot mutate a predicate.** `preservesEdges` (`scribe/reflect/reflect-pass.ts`)
@@ -62,6 +73,12 @@
 > >   Test: `reflect-pass.test.ts` "a re-synthesis that MUTATES a predicate on a preserved target is
 > >   rejected". (The template-canonical-form alternative in the FIX above was NOT taken — it can't be
 > >   deterministically enforced on LLM output and defeats resynth's natural-prose consolidation.)
+> > - **Known residual (pre-existing, OUT of scope for this PR).** `preservesEdges` is one-directional
+> >   — it rejects any resynth that DROPS or MUTATES a prior edge, but does not reject a resynth that
+> >   ADDS a brand-new `(predicate, object)` edge the original never asserted (a hallucinated wikilink
+> >   passes the accept-gate). This is unchanged from main (the old target-only gate had the same shape)
+> >   and outside blocker-2b (predicate mutation on a preserved target, now correctly rejected). Close
+> >   it before arming by also rejecting `after ⊄ before` (no NEW edge) on the resynth accept-gate.
 >
 > ### BLOCKER 3 — "bounded" is COUNT-bounded, not TOKEN-bounded.
 > §6.2 caps dispatches at 200/pass, but `renderPageForResynth` (`reflect-pass.ts:723-728`) inlines
