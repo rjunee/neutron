@@ -191,6 +191,61 @@ describe('backlink-repair — always-safe holds (orphan / ambiguous)', () => {
   })
 })
 
+describe('backlink-repair — Argus r1 minor: shared per-drain enumeration', () => {
+  test('a BURST of jobs coalesced into one drain all repair correctly (shared existing-slug set)', async () => {
+    // Plant three distinct targets. A write burst enqueues three repair jobs that a
+    // single drain processes; the existing-slug corpus is now enumerated ONCE per
+    // drain (not once per job), so this proves the shared set still repairs every job.
+    plantConcept('whiteboard')
+    plantConcept('sailboat')
+    plantConcept('keyboard')
+
+    const makeFor = async (slug: string, compiled: string) => {
+      const out = await realWriteEntity({
+        ownerDataDir: ownerDir,
+        kind: 'person',
+        slug,
+        body: {
+          frontmatter: { slug, type: 'person' },
+          compiledTruth: compiled,
+          timelineAppend: { ts: new Date(0).toISOString(), source: 'seed', body: 'planted' },
+        },
+        originInstance: 'owner',
+        receivingInstanceSlug: 'owner',
+      })
+      return { path: out.path, body: readFileSync(out.path, 'utf8'), newLinks: out.newLinks }
+    }
+    const a = await makeFor('person-a', 'Uses a [[white-board]].')
+    const b = await makeFor('person-b', 'Sails a [[sail-boat]].')
+    const c = await makeFor('person-c', 'Types on a [[key-board]].')
+
+    const spy = mock(
+      async (input: Parameters<BacklinkWriteEntity>[0], deps?: Parameters<BacklinkWriteEntity>[1]) =>
+        realWriteEntity(input as unknown as EntityWriteInput, deps as never) as unknown as ReturnType<
+          BacklinkWriteEntity
+        >,
+    )
+    const hook = wrapSyncHookWithBacklinkRepair(undefined, {
+      ownerDataDir: ownerDir,
+      ownSlug: 'owner',
+      writeEntity: spy as unknown as BacklinkWriteEntity,
+    })
+
+    // Fire the burst WITHOUT awaiting between calls so all three land in one drain.
+    hook.onEntityWrite({ path: a.path, body: a.body, newLinks: a.newLinks, removedLinks: [] })
+    hook.onEntityWrite({ path: b.path, body: b.body, newLinks: b.newLinks, removedLinks: [] })
+    hook.onEntityWrite({ path: c.path, body: c.body, newLinks: c.newLinks, removedLinks: [] })
+    await hook.idle()
+
+    // Every job repaired against the shared enumeration.
+    expect(hook.stats.repaired).toBe(3)
+    expect(readFileSync(a.path, 'utf8')).toContain('[[whiteboard|white-board]]')
+    expect(readFileSync(b.path, 'utf8')).toContain('[[sailboat|sail-boat]]')
+    expect(readFileSync(c.path, 'utf8')).toContain('[[keyboard|key-board]]')
+    expect(spy).toHaveBeenCalledTimes(3)
+  })
+})
+
 describe('backlink-repair — inner-hook isolation + re-entrancy + conflict', () => {
   test('a rejecting inner hook still schedules repair (finally) AND propagates its rejection', async () => {
     plantConcept('whiteboard')

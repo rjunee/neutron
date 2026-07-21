@@ -252,6 +252,13 @@ export interface RitualRegistry {
    * caller cannot mutate it after registration.
    */
   register(def: RitualDef): void
+  /**
+   * Remove `id` from the registry. Returns `true` if a def was removed, `false`
+   * if the id was not registered. Used by the registration service to ROLL BACK
+   * a registration whose approval-prompt emission failed (Argus r1 MAJOR) so a
+   * re-propose is not blocked by a stranded, promptless registration.
+   */
+  unregister(id: string): boolean
   /** The def for `id`, or undefined if unknown. */
   get(id: string): RitualDef | undefined
   /** Every registered def. */
@@ -286,6 +293,9 @@ export function createRitualRegistry(opts: { rituals_dir: string }): RitualRegis
         def.id,
         Object.freeze({ ...def, tool_surface: Object.freeze([...def.tool_surface]) }),
       )
+    },
+    unregister(id: string): boolean {
+      return byId.delete(id)
     },
     get(id: string): RitualDef | undefined {
       return byId.get(id)

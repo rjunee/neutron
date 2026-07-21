@@ -733,6 +733,26 @@ export function buildLiveAgentTurn(
         priorAgentOptions = []
       }
     }
+    // Argus r1 BLOCKER — a web ritual emits TWO prompts in one turn (content grant
+    // + separate egress grant), so the CONTENT Approve token stops being "the
+    // latest prompt" once the egress prompt lands, and keying the ritual capture
+    // off `latestPromptByTopic` alone makes the content token uncapturable (web
+    // rituals could never be scheduled). Union the recent option set instead —
+    // still T8-safe (a value is eligible only if it was a real offered button in a
+    // recent prompt), kept SEPARATE from onboarding's latest-only capture.
+    let priorRitualOptions: string[] = []
+    if (turn.seed_turn !== true && input.ritualApprovalCapture !== undefined) {
+      try {
+        priorRitualOptions = await input.buttonStore.recentPromptOptionsByTopic({
+          topic_id: turn.topic_id,
+          before: now(),
+          now: now(),
+          limit: 4,
+        })
+      } catch {
+        priorRitualOptions = []
+      }
+    }
     // ── 1. Persist the user turn onto the previous agent row (best-effort).
     // Capture that previous agent reply: the owner's message THIS turn is a
     // response to the PRIOR reply, so correction detection must judge (prior
@@ -764,14 +784,14 @@ export function buildLiveAgentTurn(
     if (
       input.ritualApprovalCapture !== undefined &&
       turn.seed_turn !== true &&
-      priorAgentOptions.length > 0
+      priorRitualOptions.length > 0
     ) {
       try {
         const result = await input.ritualApprovalCapture({
           user_id: turn.user_id,
           user_text: turn.user_text,
           topic_id: turn.topic_id,
-          prior_option_values: priorAgentOptions,
+          prior_option_values: priorRitualOptions,
         })
         if (result !== null) {
           // Persist the deterministic confirmation as an inert history turn +

@@ -215,11 +215,14 @@ export function wrapSyncHookWithBacklinkRepair(
   // one). Bound after construction below.
   let self: BacklinkRepairSyncHook
 
-  async function repairOne(job: {
-    path: string
-    body: string
-    newLinks: readonly { object: string }[]
-  }): Promise<void> {
+  async function repairOne(
+    job: {
+      path: string
+      body: string
+      newLinks: readonly { object: string }[]
+    },
+    existing: Set<string>,
+  ): Promise<void> {
     if (job.newLinks.length === 0) return
     if (inFlight.has(job.path)) return
     const parsed = parseEntityPath(job.path)
@@ -227,7 +230,6 @@ export function wrapSyncHookWithBacklinkRepair(
       logFailure(`backlink-repair: unrecognised entity path ${job.path}`, undefined)
       return
     }
-    const existing = enumerateExistingSlugs(ownerDataDir)
     // Detect broken links + resolve unique hyphen-position candidates.
     const repairs = new Map<string, string>() // broken → fixed
     const seenBroken = new Set<string>()
@@ -300,10 +302,18 @@ export function wrapSyncHookWithBacklinkRepair(
   async function drain(): Promise<void> {
     draining = true
     try {
+      // Enumerate the existing-slug corpus ONCE per drain cycle (Argus r1 minor):
+      // a write burst of N jobs was doing N full readdir scans across all six kind
+      // dirs (O(jobs × corpus)). Repair only REWRITES links inside pages that
+      // already exist — it never creates a new page — so the slug set is stable
+      // across a single drain, and re-scanning per job was pure waste. A page
+      // created by a concurrent non-repair write shows up on the NEXT drain (that
+      // write schedules its own job), so eventual consistency is preserved.
+      const existing = enumerateExistingSlugs(ownerDataDir)
       while (queue.length > 0) {
         const job = queue.shift()!
         try {
-          await repairOne(job)
+          await repairOne(job, existing)
         } catch (err) {
           logFailure('backlink-repair: repair pass threw', err)
         }

@@ -244,4 +244,50 @@ export class ApprovalManager {
       )
       .all(project_slug, tool_name)
   }
+
+  /**
+   * Every durable grant row for `(project_slug, tool_name)` regardless of status,
+   * NEWEST decision first (undecided rows — no `decided_at` — sort last). Generic
+   * query; the ritual layer uses it to report a DENIED grant in `rituals_status`
+   * (`findApproved`/`listPending` alone can only see approved/pending, so a denied
+   * ritual was mis-reported as 'none' — Argus r1 minor). Synchronous prepare/all.
+   */
+  findByToolName(project_slug: string, tool_name: string): ApprovalRow[] {
+    return this.db
+      .prepare<ApprovalRow, [string, string]>(
+        `SELECT id, project_slug, topic_id, tool_name, args_json, status,
+                requested_at, decided_at, decided_by
+           FROM tool_approvals
+          WHERE project_slug = ? AND tool_name = ?
+          ORDER BY decided_at DESC, requested_at DESC`,
+      )
+      .all(project_slug, tool_name)
+  }
+
+  /**
+   * Cancel a still-PENDING request: mark it 'expired' and resolve its waiter with
+   * 'expired'. No-op if the row is already decided/expired/absent. Used to roll
+   * back the approval rows minted for a ritual whose approval-prompt emission
+   * later failed (Argus r1 MAJOR) so no orphan pending grant lingers until the TTL
+   * sweep. Returns true iff a pending row was transitioned.
+   */
+  async cancelPending(id: string): Promise<boolean> {
+    const decided_at = this.now() / 1000
+    // Async `run` (not `runSync`): it routes through the per-instance mutex, so a
+    // cancel issued right after a not-yet-awaited `requestApproval` serializes
+    // AFTER that INSERT rather than racing it (the ritual rollback path fires both
+    // in the same tick). `respondApproval` uses the same async path.
+    await this.db.run(
+      `UPDATE tool_approvals
+         SET status = 'expired', decided_at = ?
+       WHERE id = ? AND status = 'pending'`,
+      [decided_at, id],
+    )
+    const waiter = this.pending.get(id)
+    if (waiter) {
+      this.pending.delete(id)
+      waiter.resolve('expired')
+    }
+    return this.get(id)?.status === 'expired'
+  }
 }

@@ -150,6 +150,7 @@ export type RitualProposalErrorCode =
   | 'duplicate_id'
   | 'exists_on_disk'
   | 'write_failed'
+  | 'emit_failed'
 
 export class RitualProposalError extends Error {
   override readonly name = 'RitualProposalError'
@@ -501,52 +502,101 @@ export function createRitualRegistrationService(
       throw new RitualProposalError('write_failed', `writing ${defPath} failed: ${(err as Error).message}`)
     }
 
-    // ── (i) register (throws on duplicate — already guarded above).
-    registry.register(def)
-
-    // ── (j) request the content-hash-bound approval grant(s). The ids are minted
-    // inside requestRitualApproval and returned so we can encode them into the
-    // button tokens WITHOUT a side-table.
+    // ── (i)–(k) register + request the approval grant(s) + emit the prompts, with
+    // a FULL rollback (Argus r1 MAJOR). Every artifact from here on — registry
+    // registration, the minted approval rows, and the two on-disk files — is torn
+    // back down if ANY step throws (most importantly the awaited `emit`, which
+    // reaches the channel adapter). Without this an emit rejection left a
+    // registered-but-promptless ritual whose files + duplicate guard then blocked
+    // every re-propose — an UNRECOVERABLE pending ritual.
     const cadence = cadenceFor(input.schedule)
-    const approval = requestRitualApproval(approvals, {
-      project_slug,
-      topic_id: approval_topic_id,
-      def,
-      prompt: normalized,
-      cadence,
-    })
+    const rollback = async (approvalIds: readonly string[]): Promise<void> => {
+      try {
+        registry.unregister(def.id)
+      } catch {
+        /* best-effort */
+      }
+      for (const p of [mdPath, defPath]) {
+        try {
+          rmSync(p, { force: true })
+        } catch {
+          /* best-effort */
+        }
+      }
+      for (const aid of approvalIds) {
+        try {
+          await approvals.cancelPending(aid)
+        } catch {
+          /* best-effort */
+        }
+      }
+    }
 
-    // ── (k) emit the CODE-rendered CONTENT approval prompt.
-    const contentBody = renderRitualApprovalBody({
-      def,
-      prompt: normalized,
-      cadence,
-      schedule: input.schedule,
-    })
-    const contentOptions: ButtonOption[] = [
-      { label: 'Approve', body: 'Approve this ritual', value: `rap:${uuidToToken(approval.content_id)}:a` },
-      { label: 'Deny', body: 'Deny this ritual', value: `rap:${uuidToToken(approval.content_id)}:d` },
-    ]
-    await emit({
-      body: contentBody,
-      options: contentOptions,
-      idempotency_key: `ritual-approval:${approval.content_id}`,
-      metadata: { kind: 'ritual-approval', ritual_id: def.id },
-    })
+    // ── (i) register (throws on duplicate — already guarded above).
+    let approval: ReturnType<typeof requestRitualApproval>
+    try {
+      registry.register(def)
+      // ── (j) request the content-hash-bound approval grant(s). The ids are minted
+      // inside requestRitualApproval and returned so we can encode them into the
+      // button tokens WITHOUT a side-table.
+      approval = requestRitualApproval(approvals, {
+        project_slug,
+        topic_id: approval_topic_id,
+        def,
+        prompt: normalized,
+        cadence,
+      })
+    } catch (err) {
+      await rollback([])
+      throw new RitualProposalError(
+        'write_failed',
+        `registering ${JSON.stringify(def.id)} failed: ${(err as Error).message}`,
+      )
+    }
 
-    // For a web def, emit a SEPARATE egress grant prompt (approving content never
-    // implies egress — ritual-approval.ts contract).
-    if (def.egress === 'web' && approval.egress_id !== undefined) {
-      const egressOptions: ButtonOption[] = [
-        { label: 'Approve', body: 'Approve network egress', value: `rap:${uuidToToken(approval.egress_id)}:a` },
-        { label: 'Deny', body: 'Deny network egress', value: `rap:${uuidToToken(approval.egress_id)}:d` },
+    try {
+      // ── (k) emit the CODE-rendered CONTENT approval prompt.
+      const contentBody = renderRitualApprovalBody({
+        def,
+        prompt: normalized,
+        cadence,
+        schedule: input.schedule,
+      })
+      const contentOptions: ButtonOption[] = [
+        { label: 'Approve', body: 'Approve this ritual', value: `rap:${uuidToToken(approval.content_id)}:a` },
+        { label: 'Deny', body: 'Deny this ritual', value: `rap:${uuidToToken(approval.content_id)}:d` },
       ]
       await emit({
-        body: renderEgressGrantBody(def),
-        options: egressOptions,
-        idempotency_key: `ritual-egress-approval:${approval.egress_id}`,
-        metadata: { kind: 'ritual-egress-approval', ritual_id: def.id },
+        body: contentBody,
+        options: contentOptions,
+        idempotency_key: `ritual-approval:${approval.content_id}`,
+        metadata: { kind: 'ritual-approval', ritual_id: def.id },
       })
+
+      // For a web def, emit a SEPARATE egress grant prompt (approving content never
+      // implies egress — ritual-approval.ts contract).
+      if (def.egress === 'web' && approval.egress_id !== undefined) {
+        const egressOptions: ButtonOption[] = [
+          { label: 'Approve', body: 'Approve network egress', value: `rap:${uuidToToken(approval.egress_id)}:a` },
+          { label: 'Deny', body: 'Deny network egress', value: `rap:${uuidToToken(approval.egress_id)}:d` },
+        ]
+        await emit({
+          body: renderEgressGrantBody(def),
+          options: egressOptions,
+          idempotency_key: `ritual-egress-approval:${approval.egress_id}`,
+          metadata: { kind: 'ritual-egress-approval', ritual_id: def.id },
+        })
+      }
+    } catch (err) {
+      const approvalIds =
+        approval.egress_id !== undefined
+          ? [approval.content_id, approval.egress_id]
+          : [approval.content_id]
+      await rollback(approvalIds)
+      throw new RitualProposalError(
+        'emit_failed',
+        `emitting the approval prompt for ${JSON.stringify(def.id)} failed — the proposal was fully rolled back; re-propose: ${(err as Error).message}`,
+      )
     }
 
     log(`ritual propose id=${def.id} pending_approval (egress=${def.egress})`)
@@ -580,7 +630,7 @@ export function createRitualRegistrationService(
       return { body: 'That approval token is not recognized (stale or malformed) — nothing changed.' }
     }
 
-    // ── (c) resolve the row + guard namespace / ownership / status.
+    // ── (c) resolve the row + guard namespace / ownership.
     const row = approvals.get(id)
     if (
       row === null ||
@@ -589,71 +639,109 @@ export function createRitualRegistrationService(
     ) {
       return { body: 'That ritual approval is unknown or no longer valid — nothing changed.' }
     }
+    // Resolve the ritual id from the row args (present on both grants).
+    const ritual_id = parseRitualId(row.args_json)
+
     if (row.status !== 'pending') {
+      // ── RECONCILIATION (Argus r1 BLOCKER) — an already-APPROVED grant whose
+      // scheduling never completed (a transient db/fs failure AFTER respondApproval
+      // stranded it: the decision was durably recorded, but no reminder row exists,
+      // and a re-tap previously dead-ended here). Re-tapping Approve now RE-DRIVES
+      // scheduling, so the owner can self-heal a stranded ritual. A denied/expired
+      // grant is terminal — nothing to reconcile.
+      if (row.status === 'approved' && ritual_id !== null) {
+        return await ensureScheduled(ritual_id)
+      }
       return { body: `That ritual approval was already ${row.status} — nothing changed.` }
     }
 
     const decision: 'approved' | 'denied' = value.endsWith(':a') ? 'approved' : 'denied'
 
+    // ── (d) record the decision (idempotent; owner-attributed). Isolated so a
+    // respondApproval failure returns the TRUE "nothing recorded" message — the
+    // scheduling steps below are separated (ensureScheduled) precisely so a
+    // failure THERE does not mislabel a decision that WAS recorded.
     try {
-      // ── (d) record the decision (idempotent; owner-attributed).
       await approvals.respondApproval(id, decision, input.user_id)
+    } catch (err) {
+      log(`ritual respondApproval error id=${id}: ${(err as Error).message}`)
+      return { body: 'Approval could not be recorded — nothing was changed.' }
+    }
 
-      // Resolve the ritual id from the row args (present on both grants).
-      const ritual_id = parseRitualId(row.args_json)
-      if (ritual_id === null) {
-        return { body: `Recorded (${decision}), but the ritual reference could not be read — nothing scheduled.` }
+    if (ritual_id === null) {
+      return { body: `Recorded (${decision}), but the ritual reference could not be read — nothing scheduled.` }
+    }
+    if (decision === 'denied') {
+      return {
+        body: `Denied. "${ritual_id}" stays registered but will never fire until you approve it.`,
       }
+    }
+    // ── (e) approved → schedule-on-approve IFF the content hash verifies over the
+    // LIVE bytes (also requires the egress grant for web defs).
+    return await ensureScheduled(ritual_id)
+  }
 
-      if (decision === 'denied') {
-        return {
-          body: `Denied. "${ritual_id}" stays registered but will never fire until you approve it.`,
-        }
+  /**
+   * Idempotent "make sure this approved ritual is scheduled". Verifies the content
+   * hash over the LIVE prompt bytes (and, for a web def, the separate egress
+   * grant), then creates the reminder row IFF one does not already exist. Never
+   * throws OUT — a transient store failure returns a message telling the owner to
+   * re-tap Approve, which re-enters via the reconciliation branch above (Argus r1
+   * BLOCKER: an approved-but-unscheduled ritual is no longer permanently stranded).
+   */
+  async function ensureScheduled(ritual_id: string): Promise<{ body: string }> {
+    const def = registry.get(ritual_id)
+    const schedule = readSchedule(ritual_id)
+    if (def === undefined || schedule === null) {
+      return { body: `Approved, but "${ritual_id}" is no longer registered on disk — nothing scheduled.` }
+    }
+    const cadence = cadenceFor(schedule)
+    const checker = createRitualApprovalCheck({ manager: approvals, project_slug, cadence })
+    let liveBytes: string
+    try {
+      liveBytes = readFileSync(registry.promptPathFor(ritual_id), 'utf8')
+    } catch (err) {
+      log(`ritual schedule id=${ritual_id} prompt unreadable: ${(err as Error).message}`)
+      return { body: `Recorded, but "${ritual_id}" could not be scheduled — its prompt file is unreadable; re-propose it.` }
+    }
+    let approved: boolean
+    try {
+      approved = await checker.isApproved(def, liveBytes)
+    } catch (err) {
+      // A broken approval store must fail closed — never schedule on an unverifiable grant.
+      log(`ritual schedule id=${ritual_id} approval check threw: ${(err as Error).message}`)
+      return { body: `Recorded, but "${ritual_id}" could not be verified for scheduling — tap Approve again to retry.` }
+    }
+    if (!approved) {
+      // Content grant alone is not enough for a web def — the separate egress
+      // grant is still pending (or a byte/cadence change dropped the hash).
+      return {
+        body:
+          def.egress === 'web'
+            ? `Recorded. "${ritual_id}" also needs the separate network-egress grant approved before it can be scheduled — tap Approve on that prompt.`
+            : `Recorded, but "${ritual_id}" is not fully approved yet (its content changed since this request) — re-propose to schedule it.`,
       }
+    }
 
-      // ── (e) approved → schedule-on-approve IFF the content hash verifies over
-      // the LIVE bytes (this also requires the egress grant for web defs).
-      const def = registry.get(ritual_id)
-      const schedule = readSchedule(ritual_id)
-      if (def === undefined || schedule === null) {
-        return {
-          body: `Approved, but "${ritual_id}" is no longer registered on disk — nothing scheduled.`,
-        }
-      }
-      const cadence = cadenceFor(schedule)
-      const checker = createRitualApprovalCheck({ manager: approvals, project_slug, cadence })
-      let liveBytes: string
-      try {
-        liveBytes = readFileSync(registry.promptPathFor(ritual_id), 'utf8')
-      } catch (err) {
-        log(`ritual approve id=${ritual_id} prompt unreadable: ${(err as Error).message}`)
-        return { body: 'Approval could not be recorded — nothing was changed.' }
-      }
-      const approved = await checker.isApproved(def, liveBytes)
-      if (!approved) {
-        // Content grant alone is not enough for a web def — the separate egress
-        // grant is still pending (or a byte/cadence change dropped the hash).
-        return {
-          body:
-            def.egress === 'web'
-              ? `Recorded. "${ritual_id}" also needs the separate network-egress grant approved before it can be scheduled — that decision is still pending.`
-              : `Recorded, but "${ritual_id}" is not fully approved yet (its content changed since this request) — re-propose to schedule it.`,
-        }
-      }
-
-      // Never schedule the same ritual twice.
+    // Never schedule the same ritual twice.
+    try {
       if (store.hasPendingRitualRow(ritual_id)) {
         return { body: `Approved — "${ritual_id}" is already scheduled.` }
       }
+    } catch (err) {
+      log(`ritual schedule id=${ritual_id} hasPendingRitualRow threw: ${(err as Error).message}`)
+      return { body: `Recorded, but "${ritual_id}" could not be scheduled right now — tap Approve again to retry.` }
+    }
 
-      // ── schedule-on-approve — the OWNER's act creates the reminder row.
-      const base = {
-        owner_slug: project_slug,
-        topic_id: approval_topic_id,
-        fire_at: schedule.fire_at,
-        message: `ritual:${ritual_id}`,
-        ritual_id,
-      }
+    // ── schedule-on-approve — the OWNER's act creates the reminder row.
+    const base = {
+      owner_slug: project_slug,
+      topic_id: approval_topic_id,
+      fire_at: schedule.fire_at,
+      message: `ritual:${ritual_id}`,
+      ritual_id,
+    }
+    try {
       if (schedule.recurrence !== undefined) {
         await store.createRecurring({ ...base, recurrence: schedule.recurrence })
       } else if (
@@ -664,15 +752,14 @@ export function createRitualRegistrationService(
       } else {
         await store.create(base)
       }
-      log(`ritual approve id=${ritual_id} scheduled cadence=${cadence}`)
-      return {
-        body: `Approved and scheduled: "${ritual_id}" will run ${cadenceWords(schedule)}.`,
-      }
     } catch (err) {
-      // Fail closed on ANY db/fs error — DO NOT schedule.
-      log(`ritual approval error id=${id}: ${(err as Error).message}`)
-      return { body: 'Approval could not be recorded — nothing was changed.' }
+      // The decision is durably recorded; only the reminder-row write failed. Tell
+      // the owner to re-tap Approve — the reconciliation branch re-drives this.
+      log(`ritual schedule id=${ritual_id} create failed: ${(err as Error).message}`)
+      return { body: `Approved, but scheduling "${ritual_id}" hit a transient error — tap Approve again to finish scheduling it.` }
     }
+    log(`ritual approve id=${ritual_id} scheduled cadence=${cadence}`)
+    return { body: `Approved and scheduled: "${ritual_id}" will run ${cadenceWords(schedule)}.` }
   }
 
   function status(): RitualStatusRow[] {
@@ -702,6 +789,24 @@ export function createRitualRegistrationService(
               r.tool_name === ritualEgressApprovalToolName(def.id),
           )
         if (pending) approval = 'pending'
+      }
+      if (approval === 'none') {
+        // Argus r1 minor — surface a DENIED grant instead of mis-reporting 'none'
+        // ('denied' is part of the advertised RitualStatusRow contract).
+        // `findByToolName` returns newest-decision-first; a leading 'denied' row on
+        // EITHER grant (with no approved/pending above) means the owner denied it.
+        try {
+          const latestContent = approvals.findByToolName(project_slug, ritualApprovalToolName(def.id))[0]
+          const latestEgress =
+            def.egress === 'web'
+              ? approvals.findByToolName(project_slug, ritualEgressApprovalToolName(def.id))[0]
+              : undefined
+          if (latestContent?.status === 'denied' || latestEgress?.status === 'denied') {
+            approval = 'denied'
+          }
+        } catch {
+          /* best-effort — a query failure leaves approval='none' */
+        }
       }
       let scheduled = false
       try {

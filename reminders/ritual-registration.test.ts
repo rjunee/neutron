@@ -615,6 +615,177 @@ describe('loadPersistedRitualDefs', () => {
   })
 })
 
+// ── Argus r1 BLOCKER — web content token capturable across two prompts ─────────
+
+describe('Argus r1 BLOCKER — web ritual content token is capturable', () => {
+  test('the CONTENT approve token is absent from the LATEST prompt alone but present in the recent-union → resolves', async () => {
+    const h = makeHarness()
+    await h.service.propose(
+      proposal({
+        id: 'web-blocker',
+        tool_surface: ['Read', 'WebSearch'],
+        egress: 'web',
+        prompt: 'Search the web and summarise.',
+      }),
+    )
+    await settle()
+    expect(h.emitted).toHaveLength(2) // content prompt, then egress prompt
+
+    const contentApprove = h.emitted[0]!.options.find((o) => o.value.endsWith(':a'))!.value
+    const before = Date.now() + 5_000
+    const nowTs = Date.now()
+
+    // (a) THE BUG SHAPE — keying capture off the single latest prompt (egress)
+    // misses the content token, so a web ritual could never be content-approved.
+    const latest = await h.buttonStore.latestPromptByTopic({ topic_id: TOPIC, before, now: nowTs })
+    expect(latest).not.toBeNull()
+    expect(latest!.options.map((o) => o.value)).not.toContain(contentApprove)
+
+    // (b) THE FIX — the recent-union DOES include the content token.
+    const recent = await h.buttonStore.recentPromptOptionsByTopic({
+      topic_id: TOPIC,
+      before,
+      now: nowTs,
+      limit: 4,
+    })
+    expect(recent).toContain(contentApprove)
+
+    // (c) end-to-end — with the recent-union as prior_option_values, the content
+    // grant resolves (content approved; egress still pending, so not yet scheduled).
+    const r = await h.service.handleOwnerButtonAnswer({
+      user_id: OWNER,
+      user_text: contentApprove,
+      topic_id: TOPIC,
+      prior_option_values: recent,
+    })
+    expect(r).not.toBeNull()
+    expect(r!.body.toLowerCase()).toContain('egress')
+    expect(h.respondSpy).toHaveBeenCalledTimes(1)
+    expect(countReminderRows()).toBe(0)
+  })
+})
+
+// ── Argus r1 BLOCKER — approved-but-unscheduled ritual heals on re-tap ─────────
+
+describe('Argus r1 BLOCKER — reconciliation of a stranded approval', () => {
+  test('a transient store failure after respondApproval strands the ritual; re-tapping Approve schedules it', async () => {
+    const h = makeHarness()
+    await h.service.propose(proposal({ id: 'heal', schedule: { fire_at: 1_900_000_500 } }))
+    await settle()
+    const approveValue = h.emitted[0]!.options.find((o) => o.value.endsWith(':a'))!.value
+    const priorOptions = h.emitted[0]!.options.map((o) => o.value)
+    const grant = h.approvals.listPending(SLUG)[0]!
+
+    // First tap — store.create throws ONCE: the decision IS recorded, but no
+    // reminder row is written (the exact post-respondApproval stranding).
+    h.createSpy.mockImplementationOnce(() => {
+      throw new Error('disk full (transient)')
+    })
+    const r1 = await h.service.handleOwnerButtonAnswer({
+      user_id: OWNER,
+      user_text: approveValue,
+      topic_id: TOPIC,
+      prior_option_values: priorOptions,
+    })
+    expect(r1!.body.toLowerCase()).toContain('again') // "tap Approve again"
+    expect(h.approvals.get(grant.id)!.status).toBe('approved') // decision durably recorded
+    expect(countReminderRows()).toBe(0) // stranded — no reminder row
+    expect(h.respondSpy).toHaveBeenCalledTimes(1)
+
+    // Re-tap — the row is no longer pending, so the reconciliation branch RE-DRIVES
+    // scheduling (respondApproval is NOT called again) and the ritual heals.
+    const r2 = await h.service.handleOwnerButtonAnswer({
+      user_id: OWNER,
+      user_text: approveValue,
+      topic_id: TOPIC,
+      prior_option_values: priorOptions,
+    })
+    expect(r2!.body.toLowerCase()).toContain('scheduled')
+    expect(countReminderRows()).toBe(1)
+    expect(h.respondSpy).toHaveBeenCalledTimes(1) // still just the one decision
+  })
+})
+
+// ── Argus r1 MAJOR — emit failure fully rolls back the proposal ───────────────
+
+describe('Argus r1 MAJOR — approval-prompt emission failure rolls back', () => {
+  function serviceWithEmit(emit: () => Promise<void>): {
+    registry: ReturnType<typeof createRitualRegistry>
+    approvals: ApprovalManager
+    service: RitualRegistrationService
+  } {
+    const registry = createRitualRegistry({ rituals_dir })
+    const approvals = new ApprovalManager(db, noopNotifier)
+    const store = new ReminderStore(db)
+    const service = createRitualRegistrationService({
+      registry,
+      rituals_dir,
+      approvals,
+      store,
+      project_slug: SLUG,
+      owner_user_id: OWNER,
+      approval_topic_id: TOPIC,
+      emit,
+    })
+    return { registry, approvals, service }
+  }
+
+  test('a throwing emit unregisters the def, deletes both files, cancels the pending grant, and re-propose works', async () => {
+    let failNext = true
+    const { registry, approvals, service } = serviceWithEmit(async () => {
+      if (failNext) throw new Error('channel adapter down')
+    })
+    await expect(service.propose(proposal({ id: 'rollback' }))).rejects.toThrow(
+      /rolled back|re-propose|emit/i,
+    )
+    // fully torn down
+    expect(registry.get('rollback')).toBeUndefined()
+    expect(existsSync(join(rituals_dir, 'rollback.md'))).toBe(false)
+    expect(existsSync(join(rituals_dir, 'rollback.def.json'))).toBe(false)
+    expect(approvals.listPending(SLUG)).toHaveLength(0) // no orphan pending grant
+
+    // re-propose now succeeds — the duplicate guard / 'wx' EEXIST no longer blocks
+    failNext = false
+    const res = await service.propose(proposal({ id: 'rollback' }))
+    expect(res.status).toBe('pending_approval')
+    expect(registry.get('rollback')).toBeDefined()
+    expect(existsSync(join(rituals_dir, 'rollback.md'))).toBe(true)
+  })
+
+  test('a web def rolls back BOTH the content and egress grants when the content emit throws', async () => {
+    const { approvals, service } = serviceWithEmit(async () => {
+      throw new Error('channel adapter down')
+    })
+    await expect(
+      service.propose(
+        proposal({ id: 'web-rollback', tool_surface: ['Read', 'WebSearch'], egress: 'web', prompt: 'search the web' }),
+      ),
+    ).rejects.toThrow(/rolled back|re-propose|emit/i)
+    // both minted approval rows (content + egress) are cancelled
+    expect(approvals.listPending(SLUG)).toHaveLength(0)
+  })
+})
+
+// ── Argus r1 minor — rituals_status surfaces a denied grant ───────────────────
+
+describe('Argus r1 minor — status reports denied', () => {
+  test('a denied ritual reports approval="denied", not "none"', async () => {
+    const h = makeHarness()
+    await h.service.propose(proposal({ id: 'denyme' }))
+    await settle()
+    const denyValue = h.emitted[0]!.options.find((o) => o.value.endsWith(':d'))!.value
+    await h.service.handleOwnerButtonAnswer({
+      user_id: OWNER,
+      user_text: denyValue,
+      topic_id: TOPIC,
+      prior_option_values: h.emitted[0]!.options.map((o) => o.value),
+    })
+    const row = h.service.status().find((r) => r.ritual_id === 'denyme')!
+    expect(row.approval).toBe('denied')
+    expect(row.scheduled).toBe(false)
+  })
+})
+
 // ── token codec unit ──────────────────────────────────────────────────────────
 
 describe('token codec', () => {
