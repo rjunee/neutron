@@ -74,6 +74,31 @@ const TOOL_TOKEN_RE = /^[A-Za-z][A-Za-z0-9_]*$/
 const WEB_TOOLS = new Set(['WebSearch', 'WebFetch'])
 
 /**
+ * Write/exec-class tools that STAY GATED at fire time until the OS-sandbox
+ * prerequisite sprint lands a sandboxed writing-ritual factory.
+ *
+ * The T5 write-containment spike (docs/plans/executor-mode-reminders-2026-07-20.md
+ * → "T5 write-containment spike verdict") returned **UNPROVABLE**: a per-session
+ * `settings.json` `permissions.deny` does NOT fail-closed cleanly on the shipping
+ * CC version, so a ritual granted Bash/Write/Edit could escape its scope. Overturn 1
+ * makes these tools PORTABLE (approval-gated, not tool-excluded) IN PRINCIPLE — but
+ * until containment is PROVEN they are refused at FIRE TIME (fail-closed), so
+ * "STAY GATED" is enforced by CODE, not by the mere absence of a registration
+ * surface (Argus r1 major forward-guard). Read-only rituals (Read/Glob/Grep + web)
+ * ship unaffected under Layer 1 (`--tools` default-deny + `skip_permissions:true`).
+ *
+ * When the OS-sandbox sprint lands the sandboxed writing-ritual factory, this gate
+ * is lifted (the factory becomes the containment) — see the plan-doc verdict.
+ */
+export const GATED_WRITE_TOOLS: ReadonlySet<string> = new Set([
+  'Bash',
+  'Write',
+  'Edit',
+  'MultiEdit',
+  'NotebookEdit',
+])
+
+/**
  * cwd + write-containment root CLASS at spawn (task 4): 'project' runs rooted at
  * the project folder, 'instance' at the instance root.
  */
@@ -250,12 +275,18 @@ export function createRitualRegistry(opts: { rituals_dir: string }): RitualRegis
  *   root yet (v1 wires only 'instance'; per-project rooting is task 6). The
  *   executor lands this as a durable skip rather than over-granting the
  *   owner-wide dir (Argus r1 MAJOR).
+ * - `gated_tool_surface`: the ritual grants a write/exec-class tool
+ *   ({@link GATED_WRITE_TOOLS} — Bash/Write/Edit/…) which STAYS GATED until the
+ *   OS-sandbox sprint proves fail-closed containment (T5 verdict UNPROVABLE).
+ *   Fail-CLOSED refusal enforced by CODE, not the absence of a registration
+ *   surface (Argus r1 major).
  */
 export type RitualFireSkipReason =
   | 'unknown_ritual'
   | 'missing_prompt'
   | 'unapproved'
   | 'unsupported_scope'
+  | 'gated_tool_surface'
 
 /**
  * The approval seam. Task 3 supplies the real content-hash-bound checker (hash of
@@ -282,6 +313,9 @@ export type RitualFireValidation =
 /**
  * Fail-CLOSED fire-time validation. Order:
  *   1. `ritual_id` malformed or not registered ⇒ { ok:false, 'unknown_ritual' }.
+ *   1b. `tool_surface` grants a gated write/exec tool ({@link GATED_WRITE_TOOLS})
+ *      ⇒ { ok:false, 'gated_tool_surface' } — STAY GATED until the OS-sandbox
+ *      sprint (T5 verdict UNPROVABLE); checked before any disk touch.
  *   2. read `promptPathFor(id)` — a missing / unreadable / empty-or-whitespace /
  *      over-{@link MAX_RITUAL_PROMPT_BYTES} file ⇒ { ok:false, 'missing_prompt' }
  *      (the detail says which).
@@ -308,6 +342,19 @@ export async function validateRitualFire(
   const def = registry.get(ritual_id)
   if (def === undefined) {
     return skip('unknown_ritual', `no registered ritual with id ${JSON.stringify(ritual_id)}`)
+  }
+
+  // STAY GATED (Argus r1 major): a ritual granting any write/exec-class tool is
+  // refused fail-CLOSED until the OS-sandbox sprint proves containment (T5 verdict
+  // UNPROVABLE). Enforced here in code so an approved def can't ship a Bash/Write
+  // ritual through the mere absence of a registration surface. Checked BEFORE the
+  // prompt read / approval so a gated ritual never touches disk.
+  const gated = def.tool_surface.filter((t) => GATED_WRITE_TOOLS.has(t))
+  if (gated.length > 0) {
+    return skip(
+      'gated_tool_surface',
+      `tool_surface grants gated write/exec tool(s) [${gated.join(', ')}] — STAY GATED until the OS-sandbox sprint lands (T5 containment verdict: UNPROVABLE)`,
+    )
   }
 
   let prompt: string

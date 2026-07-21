@@ -537,8 +537,10 @@ describe('ReminderTickLoop.runOnce', () => {
 
 /**
  * Executor-mode reminders (plan task 4) — the ritual dispatch branch. A due row
- * with a non-null `ritual_id` routes to `ritual_executor.fire` (fire-and-forget),
- * NEVER the nudge `dispatcher` + `on_fired`, and NEVER reverts its #319 claim.
+ * with a non-null `ritual_id` routes to `ritual_executor.fire`, NEVER the nudge
+ * `dispatcher` + `on_fired`. A SUCCESSFUL fire()-startup consumes the #319 claim
+ * (the durable run row is the record); a REJECTED fire() is a startup loss and
+ * REVERTS the claim so the occurrence re-fires (Argus r1 BLOCKER).
  */
 describe('ReminderTickLoop — ritual executor branch', () => {
   /** Tag an already-created reminder row as a ritual (task-8 write path not yet live). */
@@ -595,7 +597,7 @@ describe('ReminderTickLoop — ritual executor branch', () => {
     expect(fire.mock.calls[0]![0].id).toBe(ritualRow.id)
   })
 
-  test('a recurring ritual advances (fire_at moves) with NO revert even when fire() rejects', async () => {
+  test('a recurring ritual REVERTS its advance when fire() startup rejects (re-fires next tick)', async () => {
     const store = new ReminderStore(db)
     const now = 10_000_000
     const row = await store.createRecurring({
@@ -608,25 +610,53 @@ describe('ReminderTickLoop — ritual executor branch', () => {
     tagRitual(row.id, 'daily-delta')
     const originalFireAt = row.fire_at
 
-    // fire() rejects — the tick must NOT revert the claim (history rows are the
-    // record; the recurring row already advanced to its next cadence).
+    // fire() REJECTS = a STARTUP loss (no durable code_ritual_runs row landed). The
+    // tick must REVERT the #319 claim so the occurrence re-fires next tick instead
+    // of vanishing with no run + no history (Argus r1 BLOCKER).
     const fire = mock(async (_r: Reminder) => {
-      throw new Error('executor blew up')
+      throw new Error('startup blew up before any durable row')
     })
     const dispatcher = recordingDispatcher()
     const loop = new ReminderTickLoop({ store, dispatcher, ritual_executor: { fire }, now: () => now })
 
     const res = await loop.runOnce()
-    expect(res.fired).toBe(1)
-    expect(fire).toHaveBeenCalled()
-    // The row is STILL pending (recurring) but its fire_at ADVANCED — no revert.
+    // Not counted as fired — the claim was reverted, nothing was consumed.
+    expect(res.fired).toBe(0)
+    expect(fire).toHaveBeenCalledTimes(1)
+    // The row is STILL pending and its fire_at was RESTORED to the original (revert),
+    // so listDue re-picks it.
     const after = store.get(row.id)!
     expect(after.status).toBe('pending')
-    expect(after.fire_at).toBeGreaterThan(originalFireAt)
-    // A second tick at the same `now` finds nothing due (proof the advance stuck).
+    expect(after.fire_at).toBe(originalFireAt)
+    // A second tick at the same `now` finds it due AGAIN and re-fires the executor
+    // (proof the revert stuck; deliver-or-retry preserved for the startup-loss case).
     const res2 = await loop.runOnce()
+    expect(fire).toHaveBeenCalledTimes(2)
     expect(res2.fired).toBe(0)
     // Never fell back to the nudge dispatcher.
+    expect(dispatcher.fired).toHaveLength(0)
+  })
+
+  test('a one-shot ritual REOPENS (re-fires) when fire() startup rejects', async () => {
+    const store = new ReminderStore(db)
+    const now = 10_000_000
+    const row = await store.create({ owner_slug: 't1', topic_id: null, fire_at: now / 1000 - 100, message: 'one-shot ritual' })
+    tagRitual(row.id, 'oneshot-loss')
+
+    const fire = mock(async (_r: Reminder) => {
+      throw new Error('startup blew up')
+    })
+    const dispatcher = recordingDispatcher()
+    const loop = new ReminderTickLoop({ store, dispatcher, ritual_executor: { fire }, now: () => now })
+
+    const res = await loop.runOnce()
+    expect(res.fired).toBe(0)
+    // A one-shot loss is reopened → back to pending (not consumed as 'fired').
+    expect(store.get(row.id)!.status).toBe('pending')
+    // Re-fires on the next tick.
+    const res2 = await loop.runOnce()
+    expect(fire).toHaveBeenCalledTimes(2)
+    expect(res2.fired).toBe(0)
     expect(dispatcher.fired).toHaveLength(0)
   })
 

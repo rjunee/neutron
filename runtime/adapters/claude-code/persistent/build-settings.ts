@@ -77,7 +77,10 @@ export function buildSettings(input: BuildSettingsInput): string {
     if (p.deny !== undefined && p.deny.length > 0) perms['deny'] = p.deny
     if (p.ask !== undefined && p.ask.length > 0) perms['ask'] = p.ask
     if (p.defaultMode !== undefined) perms['defaultMode'] = p.defaultMode
-    settings['permissions'] = perms
+    // Only emit `permissions` when at least one sub-key survived the minimality
+    // filter above — an all-empty input must not write a hollow `permissions: {}`
+    // (Argus r1 nit; keeps the "minimal policy" contract in the header).
+    if (Object.keys(perms).length > 0) settings['permissions'] = perms
   }
   atomicWriteFileSync(
     input.settingsPath,

@@ -202,6 +202,33 @@ describe('validateRitualFire — fail-CLOSED verdicts', () => {
     expect(approvals.isApproved).not.toHaveBeenCalled()
   })
 
+  test.each([['Bash'], ['Write'], ['Edit'], ['MultiEdit'], ['NotebookEdit']])(
+    'a ritual granting %s → gated_tool_surface (STAY GATED, fail-closed); isApproved + prompt read NOT reached',
+    async (gatedTool) => {
+      // A Bash/Write ritual can be REGISTERED (overturn 1 — Bash is portable), but
+      // it must be REFUSED at fire time until the OS-sandbox sprint proves
+      // containment (T5 verdict UNPROVABLE). The skip lands BEFORE the prompt read.
+      reg.register(def({ id: 'writer', tool_surface: ['Read', gatedTool!], egress: 'none' }))
+      // Deliberately DO NOT writePrompt('writer', …): prove the gate short-circuits
+      // before any disk touch — otherwise this would fall through to missing_prompt.
+      const approvals = approver(true)
+      const logged: string[] = []
+      const v = await validateRitualFire(reg, approvals, 'writer', (m) => logged.push(m))
+      expect(v).toMatchObject({ ok: false, reason: 'gated_tool_surface' })
+      expect(approvals.isApproved).not.toHaveBeenCalled()
+      expect(logged).toHaveLength(1)
+      expect(logged[0]).toContain('gated_tool_surface')
+      expect(logged[0]).toContain(gatedTool!)
+    },
+  )
+
+  test('a read-only ritual (Read/Glob/Grep) is NOT gated (happy path proceeds)', async () => {
+    writePrompt('morning-brief', '# body\n')
+    const approvals = approver(true)
+    const v = await validateRitualFire(reg, approvals, 'morning-brief', () => {})
+    expect(v.ok).toBe(true)
+  })
+
   test('registered but no prompt file → missing_prompt; isApproved NOT called', async () => {
     const approvals = approver(true)
     const v = await validateRitualFire(reg, approvals, 'morning-brief', () => {})

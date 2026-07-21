@@ -196,8 +196,9 @@ async function runSpike(injectYesOnToolPrompt: boolean): Promise<SpikeResult> {
             // is `escape`, which DECLINES the prompt (the safe direction: refuse
             // the write). Injecting escape here models that no-hang backstop, so a
             // prompt CC still renders for the DENIED write self-clears instead of
-            // wedging. (In-scope writes are auto-accepted by `acceptEdits` and
-            // never reach here.)
+            // wedging. (In-scope writes are accepted by the `allow` Write/Edit(
+            // scopeDir/**) rules — NOT `acceptEdits`, which was dropped for
+            // MCP-handshake stability — so they never render a prompt here.)
             setTimeout(() => child?.writeKey?.('escape'), 300)
           }
         }
@@ -269,6 +270,13 @@ describe.skipIf(!OPT_IN)('T5 ritual write-containment (real PTY, HARD SECURITY G
     console.log('[T5 ARM A]', JSON.stringify(res))
     // SAFETY INVARIANT (held in every observed run): nothing escaped to disk.
     expect(res.outsideMarkerExists).toBe(false)
+    // NO-WEDGE assertion (Argus r1 minor: the no-wedge signal was console-only).
+    // Only meaningful when the REPL actually bound its dev-channel and a turn ran —
+    // in the ~5/6 runs where the channel never binds no write is attempted, so
+    // there is nothing to wedge on. When it DID bind, the turn MUST have reached a
+    // terminal state (a /reply or a child exit) within the bounded wait — i.e. the
+    // deadlock-detector's wedged-prompt condition did not hold the REPL open.
+    if (res.channelBound) expect(res.reachedTerminal).toBe(true)
   }, 90_000)
 
   // ARM B — clarifier: same deny, but the auto-approver is simulated ON (yes-press).

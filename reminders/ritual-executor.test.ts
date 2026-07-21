@@ -7,7 +7,9 @@
  * spawns a registry `agent_kind:'ritual'` record + a 'running' history row bound
  * to the content hash; the substrate turn receives the exact prompt/tools/model/
  * timeout/cwd; turn settlement drives the run row + registry terminal; a spawn
- * refusal lands a 'failed' row with no registry leak; and `fire()` never rejects.
+ * refusal lands a 'failed' row with no registry leak; and `fire()` REJECTS on a
+ * STARTUP loss (no durable row landed) so the tick reverts the #319 claim, while
+ * resolving whenever a durable row (skipped / failed / running) was written.
  */
 
 import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test'
@@ -491,7 +493,10 @@ describe('createRitualExecutor.fire — spawn refusal + robustness', () => {
     expect(turn).not.toHaveBeenCalled()
   })
 
-  test('fire() NEVER rejects even when the run store write throws', async () => {
+  test('fire() REJECTS when a startup run-store write throws (no durable row → tick reverts claim)', async () => {
+    // Argus r1 BLOCKER: the outer catch used to log-and-RESOLVE any startup throw,
+    // so a scheduled occurrence with NO durable code_ritual_runs row was silently
+    // consumed by the tick. It must now REJECT so the tick reverts the #319 claim.
     const registry = registryWith(def())
     const brokenRuns: RitualRunStore = {
       ...runs,
@@ -514,8 +519,46 @@ describe('createRitualExecutor.fire — spawn refusal + robustness', () => {
       build_approval_check: () => approver(false), // → insertSkipped throws
       mint_run_id: () => 'attempt-x',
     })
-    // Must resolve, not reject.
-    await expect(exec.fire(await ritualRow('morning-brief'))).resolves.toBeUndefined()
+    await expect(exec.fire(await ritualRow('morning-brief'))).rejects.toThrow('db down')
+  })
+
+  test('fire() REJECTS when insertRunning AND insertFailed both throw (total run-store outage)', async () => {
+    // The insertRunning-failure path frees the spawn key, then best-effort writes a
+    // durable failed row. If THAT also throws, NO durable row exists — reject so the
+    // tick reverts the claim (the spawn key was already freed → clean re-fire).
+    const registry = registryWith(def())
+    const brokenRuns: RitualRunStore = {
+      ...runs,
+      insertRunning: async () => {
+        throw new Error('running-row write blew up')
+      },
+      insertFailed: async () => {
+        throw new Error('failed-row write blew up too')
+      },
+    }
+    let n = 0
+    const turn = mock(async (): Promise<RitualTurnResult> => ({ result: 'never runs', status: 'completed' }))
+    const exec = createRitualExecutor({
+      registry,
+      approvals: new ApprovalManager(db, noopNotifier),
+      project_slug: 'owner',
+      instance_key: 'owner',
+      subagents,
+      outbound: passThroughOutbound,
+      resolve_topic: resolveTopic,
+      turn,
+      runs: brokenRuns,
+      resolve_model: () => 'm',
+      scope_cwd: () => '/s',
+      build_approval_check: () => approver(true),
+      mint_run_id: () => `sub-${n++}`,
+    })
+
+    await expect(exec.fire(await ritualRow('morning-brief'))).rejects.toThrow('running-row write blew up')
+    // The spawn key was freed BEFORE the reject, so a re-fire is not wedged as a duplicate.
+    expect(subagents.liveByKey('ritual:morning-brief', 'owner')).toBeUndefined()
+    // The substrate turn never launched (startup failed).
+    expect(turn).not.toHaveBeenCalled()
   })
 })
 

@@ -20,8 +20,16 @@
  *      crashed) with ended_at + a truncated output_summary and the registry record
  *      terminal.
  *
- * `fire()` NEVER throws (a fire-time error must not wedge the tick loop) and NEVER
- * awaits the launched turn.
+ * `fire()` REJECTS on a STARTUP failure and NEVER awaits the launched turn. A
+ * startup failure = validate/spawn/durable-row-write threw so NO `code_ritual_runs`
+ * row landed for this occurrence; propagating it lets the tick REVERT its #319
+ * claim (`reminders/tick.ts`) so the occurrence re-fires next tick instead of being
+ * silently consumed with no run + no history (the Argus data-loss class — a claimed
+ * occurrence must never vanish without a durable record). A startup that DID land a
+ * durable row (skipped / failed / running) resolves normally — the claim is
+ * legitimately consumed. The detached substrate TURN (step (f)) is fire-and-forget
+ * and its settlement is fail-soft (guarded so it can never reject out of `fire()`),
+ * so a rejection from `fire()` is UNAMBIGUOUSLY a startup loss.
  *
  * COMPLETION DELIVERY + FAILURE SURFACING (plan task 5): after the durable
  * `code_ritual_runs` row is written FIRST, the settle chain posts through the ONE
@@ -252,16 +260,29 @@ export function createRitualExecutor(deps: RitualExecutorDeps): RitualExecutor {
             : 'failed'
     const registryStatus =
       r.status === 'completed' ? 'finished' : r.status === 'cancelled' ? 'cancelled' : 'crashed'
-    // Durable row FIRST — the record of the run, before any post.
-    await deps.runs.markTerminal({
-      run_id: runRunId,
-      status: runStatus,
-      ended_at_ms: now(),
-      output_summary: r.result,
-    })
-    // Registry terminal — best-effort (updateTerminal never rejects, but a
-    // late-detached call is defensively guarded so a registry hiccup can never
-    // reject the detached run promise).
+    // Durable row FIRST — the record of the run, before any post. GUARDED: an
+    // unguarded throw here previously jumped to settleCrashed, which retried the
+    // SAME (still-failing) run store and therefore NEVER reached the registry
+    // updateTerminal below — leaking the `ritual:<id>` spawn key (on_duplicate:
+    // 'refuse') until process restart (Argus r2 minor). Guarding it keeps the
+    // key-free step (below) independent of run-history persistence.
+    try {
+      await deps.runs.markTerminal({
+        run_id: runRunId,
+        status: runStatus,
+        ended_at_ms: now(),
+        output_summary: r.result,
+      })
+    } catch (err) {
+      log.error('ritual_run_terminal_persist_failed', {
+        run_id: runRunId,
+        status: runStatus,
+        error: err instanceof Error ? (err.stack ?? err.message) : String(err),
+      })
+    }
+    // Registry terminal — ALWAYS runs, independent of run-history persistence, so
+    // a run-store outage can never leak the `ritual:<id>` spawn key. Guarded so a
+    // registry hiccup can never reject the detached run promise.
     try {
       await deps.subagents.updateTerminal(subagentRunId, { status: registryStatus, ended_at: now() })
     } catch (err) {
@@ -303,12 +324,24 @@ export function createRitualExecutor(deps: RitualExecutorDeps): RitualExecutor {
   ): Promise<void> {
     const message = err instanceof Error ? (err.stack ?? err.message) : String(err)
     log.error('ritual_turn_crashed', { subagent_run_id: subagentRunId, error: message })
-    await deps.runs.markTerminal({
-      run_id: runRunId,
-      status: 'crashed',
-      ended_at_ms: now(),
-      failure_reason: message.slice(0, 4000),
-    })
+    // GUARDED (Argus r2 minor): the run-store write must not skip the registry
+    // key-free below — the `ritual:<id>` spawn key is freed by updateTerminal, and
+    // a persistent run-store error must never leave it live (refusing all future
+    // fires until restart).
+    try {
+      await deps.runs.markTerminal({
+        run_id: runRunId,
+        status: 'crashed',
+        ended_at_ms: now(),
+        failure_reason: message.slice(0, 4000),
+      })
+    } catch (rerr) {
+      log.error('ritual_run_terminal_persist_failed', {
+        run_id: runRunId,
+        status: 'crashed',
+        error: rerr instanceof Error ? (rerr.stack ?? rerr.message) : String(rerr),
+      })
+    }
     try {
       await deps.subagents.updateTerminal(subagentRunId, { status: 'crashed', ended_at: now() })
     } catch (rerr) {
@@ -462,7 +495,14 @@ export function createRitualExecutor(deps: RitualExecutorDeps): RitualExecutor {
               now_ms: now(),
             })
             await surfaceFailure(reminder, ritual_id, failedRunId, 'failed', reason)
+            // A durable 'failed' row landed → the occurrence is legitimately
+            // consumed; resolve (no revert).
+            return
           } catch (surfaceErr) {
+            // The run store is fully down (insertRunning AND insertFailed both
+            // threw): NO durable row exists for this occurrence. Reject so the tick
+            // reverts the #319 claim and the occurrence re-fires — the spawn key was
+            // already freed above, so a re-fire is clean (the Argus data-loss class).
             log.error('ritual_insert_running_failed', {
               reminder: reminder.id,
               ritual_id,
@@ -470,8 +510,8 @@ export function createRitualExecutor(deps: RitualExecutorDeps): RitualExecutor {
               error: message,
               surface_error: surfaceErr instanceof Error ? surfaceErr.message : String(surfaceErr),
             })
+            throw insertErr
           }
-          return
         }
         // Best-effort registry running-flip (service.ts:361-380 precedent — a
         // persist hiccup must not abort the launch; the record is already durable
@@ -508,11 +548,21 @@ export function createRitualExecutor(deps: RitualExecutorDeps): RitualExecutor {
             .catch((err) => settleCrashed(reminder, ritual_id, runRunId, subagentRunId, err)),
         )
       } catch (err) {
+        // STARTUP failure — validate / spawn / durable-row-write threw so NO
+        // `code_ritual_runs` row landed for this occurrence. RE-THROW so the tick
+        // reverts its #319 claim and the occurrence re-fires next tick, instead of
+        // being silently consumed with no run + no history (the Argus data-loss
+        // blocker: the outer catch used to log-and-resolve, dropping the run). The
+        // paths that DID land a durable row (insertSkipped/insertFailed success,
+        // insertRunning-then-durable-failed) `return` above and never reach here;
+        // the detached turn (step (f)) is fire-and-forget and cannot reject through
+        // this catch — so reaching here is unambiguously a startup loss.
         log.error('ritual_fire_unexpected', {
           reminder: reminder.id,
           ritual_id: reminder.ritual_id,
           error: err instanceof Error ? (err.stack ?? err.message) : String(err),
         })
+        throw err
       }
     },
   }

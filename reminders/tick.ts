@@ -221,11 +221,11 @@ export class ReminderTickLoop {
         // nudge dispatcher and NEVER fires the `on_fired` push (a 45-min executor
         // run would push-notify up to 45 min BEFORE any output, even for a silent
         // ritual — task 5 owns ritual delivery). The #319 claim above already
-        // ran (advanceRecurrence for a recurring ritual / markFired for a one-shot)
-        // and is NEVER reverted for a ritual: a claimed attempt is CONSUMED — the
-        // durable `code_ritual_runs` history rows are the record, and a recurring
-        // row has already advanced to its next cadence, so re-firing the same
-        // attempt every 30 s (the nudge deliver-or-retry contract) is wrong here.
+        // ran (advanceRecurrence for a recurring ritual / markFired for a one-shot).
+        // On a SUCCESSFUL fire()-startup the claim is CONSUMED (no revert): the
+        // durable `code_ritual_runs` history row IS the record, and a recurring row
+        // has already advanced to its next cadence, so re-firing the same attempt
+        // every 30 s (the nudge deliver-or-retry contract) is wrong here.
         // fire()'s STARTUP — fail-closed validate → ritual-lane spawn → durable
         // `code_ritual_runs` 'running' (or skipped/failed) row — is AWAITED so it
         // completes INSIDE the tick body, i.e. inside SupervisedLoop's stop()
@@ -235,14 +235,33 @@ export class ReminderTickLoop {
         // INSIDE the executor (fireAndForget('ritual-run'), ritual-executor.ts step
         // (f)) — the tick never blocks on an up-to-45-min execution; startup is
         // milliseconds of local DB writes plus one prompt-file read.
+        //
+        // But a REJECTED fire() is a STARTUP LOSS: validate/spawn/durable-row-write
+        // threw so NO run row landed for this occurrence. REVERT the #319 claim (the
+        // same claimRevert the nudge dispatcher uses) so the occurrence re-fires next
+        // tick instead of vanishing with no run + no history (the Argus r1 BLOCKER:
+        // the executor's outer catch used to swallow the throw and the tick consumed
+        // the claim regardless). The detached substrate TURN is fire-and-forget INSIDE
+        // the executor and its settlement is fail-soft, so a fire() rejection is
+        // unambiguously a startup loss, never a mid-run failure.
         if (reminder.ritual_id !== null) {
           if (this.ritual_executor !== null) {
             try {
               await this.ritual_executor.fire(reminder)
+              fired++
             } catch (err) {
-              // fire() is contracted never to reject; guard the call defensively
-              // so a ritual can never wedge the tick loop (the guard now also
-              // covers async rejections).
+              // Startup loss — revert the claim so the occurrence re-fires. A
+              // recurring row's advance is undone (compare-and-swap, so a concurrent
+              // reschedule isn't clobbered); a one-shot is reopened.
+              try {
+                await claimRevert()
+              } catch (rerr) {
+                log.error('ritual_claim_revert_failed', {
+                  reminder: reminder.id,
+                  ritual_id: reminder.ritual_id,
+                  error: rerr instanceof Error ? (rerr.stack ?? rerr.message) : String(rerr),
+                })
+              }
               log.error('ritual_fire_threw', {
                 reminder: reminder.id,
                 ritual_id: reminder.ritual_id,
@@ -250,14 +269,15 @@ export class ReminderTickLoop {
               })
             }
           } else {
-            // No executor wired (LLM-less box / test): the row is already claimed
-            // — consume it and log. NEVER fall back to the nudge dispatcher.
+            // No executor wired (LLM-less box / test): a PERMANENT condition, not a
+            // transient loss — reverting would re-fire it every tick forever. Consume
+            // the claim and log. NEVER fall back to the nudge dispatcher.
             log.error('ritual_executor_unwired', {
               reminder: reminder.id,
               ritual_id: reminder.ritual_id,
             })
+            fired++
           }
-          fired++
           continue
         }
 

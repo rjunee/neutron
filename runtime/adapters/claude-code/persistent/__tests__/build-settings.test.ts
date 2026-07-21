@@ -99,6 +99,30 @@ describe('buildSettings — task 6 (T5) write-containment permissions block', ()
     expect(parsed.permissions.defaultMode).toBe('default')
   })
 
+  test('an all-empty permissions input emits NO `permissions` key (no hollow {}) (Argus r1 nit)', () => {
+    const dir = freshDir()
+    const settingsPath = join(dir, 'settings.json')
+    // permissions is DEFINED but every sub-array is empty and no defaultMode → the
+    // minimality filter drops all sub-keys, so no `permissions` key is written.
+    buildSettings({
+      settingsPath,
+      hookPath: '/abs/hook.ts',
+      permissions: { allow: [], deny: [], ask: [] },
+    })
+    const parsed = JSON.parse(readFileSync(settingsPath, 'utf8'))
+    expect(parsed.permissions).toBeUndefined()
+    // The Stop hook is still wired (the empty permissions block didn't disturb it).
+    expect(parsed.hooks.Stop).toBeDefined()
+  })
+
+  test('an empty object permissions input emits NO `permissions` key', () => {
+    const dir = freshDir()
+    const settingsPath = join(dir, 'settings.json')
+    buildSettings({ settingsPath, hookPath: '/abs/hook.ts', permissions: {} })
+    const parsed = JSON.parse(readFileSync(settingsPath, 'utf8'))
+    expect(parsed.permissions).toBeUndefined()
+  })
+
   test('permissions file is written 0600 (owner-only security policy)', () => {
     const dir = freshDir()
     const settingsPath = join(dir, 'settings.json')
