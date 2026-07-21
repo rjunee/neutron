@@ -30,19 +30,37 @@
 > > tokens (`2024`, `q1`, `v2`) — this is the numeric-token-drop / ISSUES #373 defect, closed here
 > > as part of blocker 1; (c) `clusterNearDuplicates` forms CLIQUES (no transitive closure, greedy,
 > > never over-merges) and gates on `MIN_DISTINGUISHING_TOKENS` (= 2). The Jaccard threshold stays
-> > 0.7, `deps.jaccardThreshold`-configurable, and is flagged UNVALIDATED (re-measure the false-merge
-> > rate on the real corpus before arming). STILL PENDING before arming (unchanged by this PR):
-> > quarantine of merge-losers under `entities/.quarantine/` for N passes; AND two known accepted
-> > residuals surfaced in review — (i) two DISTINCT fact-less entities sharing an identical ≥ 2-word
-> > name still merge (gated behind the §7.2 merge name-tripwire), and (ii) two DIFFERENT-named entities
-> > that each assert the SAME ≥ 3 relation targets can reach 0.714 because relation-verb tokens
-> > (`works`, `at`) are not stripped and shared targets inflate overlap (e.g. `Bob`/`Carol` each
-> > `Works at [[org0]]/[[org1]]/[[org2]]` → 5/7 = 0.714 ≥ 0.7). Neither is a regression (consolidation
-> > is NOT armed, threshold UNVALIDATED); the fix before arming is to strip relation-verb tokens and/or
-> > gate a merge on a shared name token. Reproduce-then-fix tests:
-> > `scribe/__tests__/reflect-jaccard.test.ts` (five fact-less pages do NOT cluster; fiscal-year /
-> > v1-v2 / Q1-Q2 stay distinct; factual-heading pair stays distinct; clique-not-transitive;
-> > min-token gate; genuine near-duplicates still cluster).
+> > 0.7, `deps.jaccardThreshold`-configurable, and is flagged UNVALIDATED (a TUNING knob — re-measure
+> > the false-merge rate on the real corpus and tune).
+> >
+> > **ARMING PRECONDITION CLOSED 2026-07-20 (M2-3 round 2, branch
+> > trident/executor-mode-reminders).** Consolidation is now ARMED by default (6h reflect loop, P0-4),
+> > so the two false-fusion residuals are no longer left to threshold-tuning — they are blocked
+> > OUTRIGHT by the `isMergeSafeCluster` gate (`scribe/reflect/jaccard.ts`) applied to every candidate
+> > cluster in `dedupPages` BEFORE the irreversible fuse (`scribe/reflect/reflect-pass.ts`; a held
+> > cluster increments `report.held` and is logged loudly):
+> > - **Residual A** — two DISTINCT fact-less entities sharing an identical ≥ 2-word name (two "John
+> >   Smith" pages) score 1.0 and cluster, but the gate's **Gate B** (excluding the name, members must
+> >   still be pairwise ≥ threshold similar on BODY-ONLY tokens) HOLDS them: fact-less bodies collapse
+> >   to empty sets once the name is excluded → body similarity 0 → not fused.
+> > - **Residual B** — two DIFFERENT-named entities (`Bob`/`Carol`) each asserting the SAME ≥ 3 relation
+> >   targets reach 0.714 and cluster, but the gate's **Gate A** (members must share ≥ 1 common NAME
+> >   token) HOLDS them: `Bob`/`Carol` share no name token → not fused.
+> >
+> > A held cluster is a deliberate MISSED merge (the pass's always-safe direction — never an
+> > irreversible false fusion); the loud log lets the owner hand-merge a genuine duplicate the gate was
+> > conservative on. Merge-loser QUARANTINE under `entities/.quarantine/` is NOT implemented and NO
+> > LONGER an arming blocker: the tripwire prevents the false IDENTITY-FUSION that quarantine would only
+> > make recoverable-after-the-fact, and genuine near-duplicate losers are already absorbed into the
+> > survivor before deletion (no content loss). Quarantine remains a possible future belt-and-suspenders
+> > add for the resynth/reserved paths but gates nothing.
+> >
+> > Reproduce-then-fix tests: `scribe/__tests__/reflect-jaccard.test.ts` (five fact-less pages do NOT
+> > cluster; fiscal-year / v1-v2 / Q1-Q2 stay distinct; factual-heading pair stays distinct;
+> > clique-not-transitive; min-token gate; genuine near-duplicates still cluster; `isMergeSafeCluster`
+> > holds residuals A + B and passes genuine near-duplicates) and `scribe/__tests__/reflect-pass.test.ts`
+> > (behavioural, real on-disk: two "John Smith" pages HELD not fused with both surviving; `Bob`/`Carol`
+> > HELD; genuine near-duplicates still merge with `report.held == 0`).
 >
 > ### BLOCKER 2 — resynthesis silently disables supersede FOREVER.
 > `stripSupersededSentences` (`write-to-gbrain.ts:637-644`) drops a sentence only when it

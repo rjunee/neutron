@@ -48,6 +48,15 @@ export interface Reminder {
    */
   recurrence_spec: string | null
   /**
+   * Executor-mode ritual tag. NULL for a plain nudge reminder; set to a
+   * charset-guarded ritual id (`reminders/rituals.ts` RITUAL_ID_RE) when this
+   * row is a ritual dispatch — the tick loop (plan task 4) resolves + validates
+   * it and spawns a scoped sub-agent REPL instead of composing a one-shot nudge.
+   * Opaque TEXT to SQLite; the in-process ritual registry owns validity.
+   * Migration 0106.
+   */
+  ritual_id: string | null
+  /**
    * Optional origin tag. NULL for organic engine writes (gateway
    * reminder agents, wow-moment actions, etc.). A Core that piggybacks
    * on the shared `reminders` table sets this to its package name so
@@ -113,6 +122,7 @@ interface ReminderDbRow {
   status: 'pending' | 'fired' | 'cancelled'
   recurrence: ReminderRecurrence | null
   recurrence_spec: string | null
+  ritual_id: string | null
   source: string | null
   created_at: number
   fired_at: number | null
@@ -120,7 +130,7 @@ interface ReminderDbRow {
 }
 
 const COLS =
-  'id, project_slug, topic_id, fire_at, message, status, recurrence, recurrence_spec, source, created_at, fired_at, cancelled_at'
+  'id, project_slug, topic_id, fire_at, message, status, recurrence, recurrence_spec, ritual_id, source, created_at, fired_at, cancelled_at'
 
 export class ReminderStore {
   constructor(private readonly db: ProjectDb) {}
@@ -129,6 +139,10 @@ export class ReminderStore {
     const id = input.id ?? crypto.randomUUID()
     const created_at = Date.now() / 1000
     const source = input.source ?? null
+    // ritual_id is READ-THROUGH only (migration 0106): the write path lands with
+    // its validation (registration = plan task 8, tick wiring = task 4), so
+    // create() never sets it — the column is omitted from the INSERT and defaults
+    // NULL (a plain nudge row).
     await this.db.run(
       `INSERT INTO reminders
          (id, project_slug, topic_id, fire_at, message, status, recurrence, recurrence_spec, source, created_at)
@@ -144,6 +158,7 @@ export class ReminderStore {
       status: 'pending',
       recurrence: null,
       recurrence_spec: null,
+      ritual_id: null,
       source,
       created_at,
       fired_at: null,
@@ -179,6 +194,7 @@ export class ReminderStore {
     const id = input.id ?? crypto.randomUUID()
     const created_at = Date.now() / 1000
     const source = input.source ?? null
+    // ritual_id is READ-THROUGH only (see create()) — never written here.
     await this.db.run(
       `INSERT INTO reminders
          (id, project_slug, topic_id, fire_at, message, status, recurrence, recurrence_spec, source, created_at)
@@ -204,6 +220,7 @@ export class ReminderStore {
       status: 'pending',
       recurrence,
       recurrence_spec,
+      ritual_id: null,
       source,
       created_at,
       fired_at: null,
@@ -447,6 +464,7 @@ function rowToReminder(row: ReminderDbRow): Reminder {
     status: row.status,
     recurrence: row.recurrence,
     recurrence_spec: row.recurrence_spec,
+    ritual_id: row.ritual_id,
     source: row.source,
     created_at: row.created_at,
     fired_at: row.fired_at,

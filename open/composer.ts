@@ -121,6 +121,7 @@ import { wireMemory } from './wiring/memory.ts'
 import { wireLandingStack } from './wiring/landing.ts'
 import { wireUploads } from './wiring/uploads.ts'
 import { buildOpenOwnerGate } from './wiring/owner-gate.ts'
+import { buildAppWsApprovalNotifier } from './wiring/approval-notifier.ts'
 import { wireAppWs, type OnboardingMsgEmit } from './wiring/app-ws.ts'
 import { MIN_COOKIE_SECRET_LEN } from './session-cookie-secret.ts'
 import { selectAppWsToken, isValidThreadedBearer } from './owner-bearer.ts'
@@ -209,6 +210,11 @@ import {
   buildReminderDispatcher,
   buildSubstrateReminderLlm,
   buildStatusMdContextSource,
+  createRitualRegistry,
+  createRitualExecutor,
+  createRitualRunStore,
+  reapOrphanRitualRuns,
+  RITUAL_RUN_RETENTION_MS,
 } from '@neutronai/reminders/index.ts'
 // L3 (2026-07) — the reminder delivery impl moved UP into the gateway
 // composition band (it reaches the WebChatSenderRegistry + landing protocol).
@@ -768,6 +774,7 @@ export function buildOpenGraphComposer(
       liveAgentSubstrate,
       makeComposeSubstrate,
       makeEphemeralSubstrate,
+      makeRitualSubstrate,
       makeWarmFireSubstrate,
       prewarmReady,
       prewarmSettledRef,
@@ -1050,9 +1057,9 @@ export function buildOpenGraphComposer(
       cleanups: memoryCleanups,
     } = wireMemory(wiringCtx)
 
-    // RB3 ([BEHAVIOR]) — the scheduled reflect-consolidation loop, when the
-    // perfect-recall flag is on (`wireMemory` returns null otherwise, so this is
-    // a no-op by default and the loop NEVER arms).
+    // RB3 ([BEHAVIOR]) — the scheduled reflect-consolidation loop, always armed
+    // now that memory consolidation is ON by default (managed SPEC Decisions Log
+    // 2026-07-20, P0-4). `wireMemory` always returns a live loop.
     //
     // Its quiescing `stop()` cleanup is registered HERE, BEFORE the memory
     // cleanups, so shutdown (forward-order drain) QUIESCES an in-flight reflect
@@ -1063,19 +1070,17 @@ export function buildOpenGraphComposer(
     // composition failure (e.g. a validation throw) can't leave a running interval
     // that boot() never receives a cleanup for. `stop()` on a not-yet-started loop
     // is a safe no-op, so registering the cleanup early is harmless.
-    if (reflectLoop !== null) {
-      realmodeCleanups.push(async () => {
-        try {
-          await reflectLoop.stop()
-        } catch {
-          // best-effort shutdown cleanup — stop() never rejects
-        }
-      })
-    }
+    realmodeCleanups.push(async () => {
+      try {
+        await reflectLoop.stop()
+      } catch {
+        // best-effort shutdown cleanup — stop() never rejects
+      }
+    })
     for (const cleanup of memoryCleanups) realmodeCleanups.push(cleanup)
 
     // RC2 ([BEHAVIOR]) — the tick loop's `on_run_terminal` = the skill-forge audit
-    // + (flag-gated) the RC2 nexus producer, each ISOLATED (see
+    // + the RC2 nexus producer (always live), each ISOLATED (see
     // `buildTridentTerminalObserver`). The nexus producer fires from the tick's
     // POST-COMMIT `on_terminal` seam (AFTER `saveIfActive` commits) rather than
     // inside the harvest, so a discarded (concurrent-terminate) or retried
@@ -1083,18 +1088,18 @@ export function buildOpenGraphComposer(
     // the inner→outer `handoff` + the SERVER-GATED Argus `decision` from the
     // committed row, gated on a GENUINE outer harvest (`isTridentHarvestTerminal`),
     // so a stopped/garbled/reaped row or a pre-verdict Forge failure never
-    // fabricates an authenticated verdict. Reuses the SAME perfect-recall-flagged
-    // `NexusStore` `wireMemory` built (reflection's `learning` emitter rides it);
-    // null store (flag off) → the producer is simply absent (unchanged behaviour).
+    // fabricates an authenticated verdict. Reuses the SAME `NexusStore`
+    // `wireMemory` built (reflection's `learning` emitter rides it), always live
+    // now that the agent-nexus is the base behavior.
     const tridentOnRunTerminal = buildTridentTerminalObserver({
       nexus: nexusStore,
       observers: [skillForgeOnRunTerminal],
     })
 
-    // RC3 ([BEHAVIOR]) — the live-agent turn's agent-nexus READER seam. Flag-gated
-    // + scope-composed in `buildNexusReaderSeam`: `undefined` when perfect-recall
-    // is off (`nexusStore` null) so no seam is wired (RC3 ships DARK). Reuses the
-    // SAME `NexusStore` `wireMemory` built, so the reader reads what RC2 wrote.
+    // RC3 ([BEHAVIOR]) — the live-agent turn's agent-nexus READER seam, always
+    // wired + scope-composed in `buildNexusReaderSeam`. Reuses the SAME
+    // `NexusStore` `wireMemory` built, so the reader reads what RC2 wrote (a
+    // reader over an empty log returns null → no block injected).
     const nexusReaderSeam = buildNexusReaderSeam(nexusStore)
 
     // ── Free Cores → Open boot (Vajra parity gap #2) ───────────────────────
@@ -1851,14 +1856,97 @@ export function buildOpenGraphComposer(
     const reminderGeneralTopic = appWsTopicId(OWNER_USER_ID)
     const resolveAppWsReminderTopic = (_explicit_topic: string | null): string =>
       reminderGeneralTopic
+    // ONE outbound + ONE runs store hoisted so the nudge dispatcher, the ritual
+    // executor, and the boot reap all post through / write to the SAME instances
+    // (one deliver seam, one `code_ritual_runs` writer).
+    const reminderOutbound = buildButtonStoreReminderOutbound({ deliver })
+    const ritualRuns = createRitualRunStore(db)
     const reminder_dispatcher = buildReminderDispatcher({
-      outbound: buildButtonStoreReminderOutbound({ deliver }),
+      outbound: reminderOutbound,
       ...(liveAgentSubstrate !== null
         ? { llm: buildSubstrateReminderLlm(liveAgentSubstrate) }
         : {}),
       context: buildStatusMdContextSource({ owner_home }),
       resolveTopicId: ({ explicit_topic }): string => resolveAppWsReminderTopic(explicit_topic),
     })
+
+    // Executor-mode reminders (plan task 4) — the ritual executor FACTORY. Gated
+    // on `llmPool` exactly like `DispatchService` (no credential → no ritual
+    // surface). Passed into the composition input; `build-core-modules`'
+    // `remindersModule` invokes it with the graph's `ApprovalManager` and wires
+    // the result as the tick loop's ritual dispatch branch. It reuses the SAME
+    // hoisted `subagentRegistry` the dispatch service + Trident loop use (ONE
+    // registry, ONE concurrency model — the ritual lane is isolated INSIDE it),
+    // spawns each ritual turn on the `cc-ritual-*` ephemeral substrate, and
+    // writes durable history to `code_ritual_runs`. The registry is rooted at
+    // `<owner_home>/rituals` with ZERO defs registered until task 7 (bundled
+    // example rituals) / task 8 (agent-callable registration), so no ritual
+    // fires yet — the plumbing is live, the ritual CONTENT is user data.
+    const ritual_executor_factory: CompositionInput['ritual_executor_factory'] =
+      llmPool !== null
+        ? ({ approvals }) =>
+            createRitualExecutor({
+              registry: createRitualRegistry({ rituals_dir: joinPath(owner_home, 'rituals') }),
+              approvals,
+              project_slug,
+              instance_key: owner_handle,
+              subagents: subagentRegistry,
+              turn: buildCancellableDispatchTurn({ build_substrate: makeRitualSubstrate }),
+              // SAME shared runs store the boot reap writes to (task 5).
+              runs: ritualRuns,
+              resolve_model: getBestModel,
+              // Task 5 delivery deps: post ritual terminal events through the SAME
+              // `deliver` seam (via `reminderOutbound`) the nudge dispatcher uses,
+              // to the owner's bare `app:<user>` topic.
+              outbound: reminderOutbound,
+              resolve_topic: (reminder) => resolveAppWsReminderTopic(reminder.topic_id),
+              // Design doc §Layer 4: 'instance' rituals root at owner_home (the
+              // read-only cross-project surface, e.g. morning-brief); 'project'
+              // rituals root at their project dir. v1 wires ONLY the 'instance'
+              // root — per-project rooting is coupled to WRITE-CONTAINMENT, and
+              // the task-6 T5 containment spike returned UNPROVABLE (a per-session
+              // settings.json deny does not fail-closed on the shipping CC
+              // version; see docs/plans/executor-mode-reminders-2026-07-20.md → T5
+              // verdict). Containment therefore moves to its own OS-sandbox
+              // prerequisite sprint; until it lands a 'project'-scoped ritual
+              // FAILS CLOSED (the executor lands a durable 'skipped' row) rather
+              // than silently over-granting the owner-wide dir (Argus r1 MAJOR —
+              // permission over-grant). No project-scoped ritual can register/fire
+              // yet (zero defs until task 7), so this is defensive.
+              scope_cwd: (scope) => {
+                if (scope !== 'instance') {
+                  throw new Error(
+                    `ritual scope '${scope}' not yet supported: per-project rooting + write-containment deferred to the OS-sandbox sprint (T5 containment verdict: UNPROVABLE)`,
+                  )
+                }
+                return owner_home
+              },
+            })
+        : undefined
+
+    // Boot reap + retention prune of `code_ritual_runs` (plan task 5). NOT
+    // llmPool-gated: a 'running' row orphaned by a PRIOR (LLM-enabled) boot must
+    // be reaped + surfaced even on a credential-less boot. `reapOrphanRitualRuns`
+    // is called DIRECTLY (not wrapped in a deferred thunk): its FIRST statement is
+    // a SYNCHRONOUS `listOrphanRunning()` snapshot, and this compose runs BEFORE
+    // `build-core-modules` starts the ritual tick loop — so the snapshot cannot
+    // contain a current-boot 'running' row (`code_ritual_runs` has no boot_id;
+    // ordering IS the current-boot safety). The prune chains after the reap.
+    // fireAndForget precedent: the boot dispatch sweep just above (composer:888).
+    fireAndForget(
+      'composer.reapOrphanRitualRuns',
+      reapOrphanRitualRuns({
+        runs: ritualRuns,
+        outbound: reminderOutbound,
+        topic_id: resolveAppWsReminderTopic(null),
+        owner_slug: project_slug,
+      }).then(() => ritualRuns.pruneOlderThan({ cutoff_ms: Date.now() - RITUAL_RUN_RETENTION_MS })),
+      (err: unknown) => {
+        log.warn('ritual_boot_reap_failed', {
+          error: err instanceof Error ? err.message : String(err),
+        })
+      },
+    )
 
     // ── P1-4 — proactive messaging ACTIVATION (morning brief + idle nudge) ──
     // The proactive modules (`gateway/proactive/*`) were built + tested but
@@ -2237,15 +2325,13 @@ export function buildOpenGraphComposer(
     // advertises active work handles (§RB1). The manifest is OWNER-WIDE (built at
     // entity-write time, when there is no "current project"), so it aggregates
     // active work across ALL scopes — General AND every project — not just
-    // General. Resolved FRESH on each manifest generation. No-op when the flag is
-    // off (`memoryIndexRead === undefined`).
-    if (memoryIndexRead !== undefined) {
-      setMemoryIndexWorkHandles(() =>
-        workBoardStore
-          .listAllActive()
-          .map((item) => ({ id: item.id, title: item.title, status: item.status })),
-      )
-    }
+    // General. Resolved FRESH on each manifest generation. The memory-index is
+    // always wired now (`memoryIndexRead` is always defined).
+    setMemoryIndexWorkHandles(() =>
+      workBoardStore
+        .listAllActive()
+        .map((item) => ({ id: item.id, title: item.title, status: item.status })),
+    )
     // M1 on-disk spec + ▶ play button — the ONE service that persists a card's
     // full ask to a user-visible `Projects/<id>/docs/plans/<slug>.md` doc (setting
     // the card's `design_doc_ref`) and resolves that doc back as the build's spec
@@ -3032,10 +3118,10 @@ export function buildOpenGraphComposer(
             // decision/handoff/learning events OTHER agents recorded on THIS
             // project (an overnight trident Argus verdict, an owner correction)
             // and inject the escaped `<agent_nexus>` DATA block so the chat turn
-            // re-grounds on cross-agent state. The flag gate + `workBoardScopeKey`
-            // scope composition live in `buildNexusReaderSeam` (a tested wiring
-            // unit): `undefined` when perfect-recall is off (`nexusStore` null) →
-            // RC3 ships DARK, the seam is simply absent (unchanged behaviour).
+            // re-grounds on cross-agent state. The `workBoardScopeKey` scope
+            // composition lives in `buildNexusReaderSeam` (a tested wiring unit);
+            // the seam is always wired now (a reader over an empty log returns
+            // null → no block injected).
             ...(nexusReaderSeam !== undefined ? { nexusSnapshot: nexusReaderSeam } : {}),
             // Available-services awareness — the project-scoped credential
             // picture (per-project ∪ global default), so the agent knows which
@@ -3047,22 +3133,18 @@ export function buildOpenGraphComposer(
                 // `slug` is the owner boundary (frozen handle) — brand at the call.
                 projectCredentialStore.listAvailableServices(asOwnerHandle(slug), project_id),
               ),
-            // RB1 (perfect-recall lane, default-off flag) — inject the breadth
+            // RB1 (perfect-recall lane, always on) — inject the breadth
             // memory-index manifest on the cold turn so the agent knows what
-            // entities exist to `memory_search`. `memoryIndexRead` (present only
-            // when the shared flag is on) does a cold-turn read of the durable,
+            // entities exist to `memory_search`. `memoryIndexRead` (always wired)
+            // does a cold-turn read of the durable,
             // portable `entities/INDEX.md` WITH a synchronous regenerate-on-absent
             // fallback (coalesced with the write path) so a just-written entity is
             // never raced away; here we only wrap it as escaped `<memory_index>`
             // DATA. Best-effort (a null read → no block).
-            ...(memoryIndexRead !== undefined
-              ? {
-                  memoryIndexSnapshot: async (): Promise<string | null> => {
-                    const body = await memoryIndexRead()
-                    return body !== null ? formatMemoryIndexFragment(body) : null
-                  },
-                }
-              : {}),
+            memoryIndexSnapshot: async (): Promise<string | null> => {
+              const body = await memoryIndexRead()
+              return body !== null ? formatMemoryIndexFragment(body) : null
+            },
             buttonStore: landing.buttonStore,
             project_slug,
             owner_home,
@@ -3501,19 +3583,17 @@ export function buildOpenGraphComposer(
     // failure-prone composition step above has succeeded, so a composer throw can
     // never leak a running interval (its quiescing stop() cleanup was already
     // registered before the memory cleanups, for shutdown ordering). Register-
-    // before-start (dup-name → throw at boot, before the timer arms). Null (flag
-    // off) → no-op.
-    if (reflectLoop !== null) {
-      loopRegistry.register(reflectLoop.describe())
-      // Failure-atomic: if arming the timer throws, STOP the (partially-started)
-      // loop before re-throwing so composition never rejects with a live/dangling
-      // reflect timer — same discipline as the dispatch lifecycle watchdog above.
-      try {
-        reflectLoop.start()
-      } catch (err) {
-        await reflectLoop.stop()
-        throw err
-      }
+    // before-start (dup-name → throw at boot, before the timer arms). The loop is
+    // always live now (memory consolidation ON by default).
+    loopRegistry.register(reflectLoop.describe())
+    // Failure-atomic: if arming the timer throws, STOP the (partially-started)
+    // loop before re-throwing so composition never rejects with a live/dangling
+    // reflect timer — same discipline as the dispatch lifecycle watchdog above.
+    try {
+      reflectLoop.start()
+    } catch (err) {
+      await reflectLoop.stop()
+      throw err
     }
 
     return {
@@ -3547,11 +3627,21 @@ export function buildOpenGraphComposer(
       // This is what activates the real delivery seam on Open (the bare router
       // the module would otherwise construct has no adapter and throws on send).
       channel_router: channelRouter,
-      approval_notifier: { notify: async () => undefined },
+      // Task 3 — the FIRST real approval surface, replacing the no-op stub.
+      // Consumed by `ApprovalManager` at `build-core-modules.ts:275-278`; the
+      // ritual approval path (`reminders/ritual-approval.ts`) is its first
+      // production caller. App-ws broadcast per the `watchdogNotifier`
+      // precedent above (`appWsRegistry` :2051 satisfies the structural
+      // `ApprovalNotifierRegistry`); plain-text, fail-soft, never prompt bytes.
+      approval_notifier: buildAppWsApprovalNotifier({ registry: appWsRegistry }),
       // F4 — real supervision-watchdog notifier (app-ws + O4 system_events),
       // replacing the no-op. Fully guarded; never throws into the tick.
       watchdog_notifier: watchdogNotifier,
       reminder_dispatcher,
+      // Executor-mode reminders (plan task 4) — the ritual executor factory
+      // (llmPool-gated). `remindersModule` invokes it with the graph's
+      // ApprovalManager and wires the tick's ritual dispatch branch.
+      ...(ritual_executor_factory !== undefined ? { ritual_executor_factory } : {}),
       // P1-4 — proactive brief + idle-nudge sweep go live (see `tasksConfig`).
       tasks: tasksConfig,
       // F4 — real heartbeat source (pulsed by the gateway tick via

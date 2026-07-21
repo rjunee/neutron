@@ -37,7 +37,6 @@ import {
   type MemoryIndexEntry,
   type MemoryIndexWorkHandle,
 } from '../memory-index.ts'
-import { isPerfectRecallEnabled } from '../perfect-recall-flag.ts'
 
 let ownerDir: string
 
@@ -71,21 +70,6 @@ function entityInput(
     },
   }
 }
-
-describe('memory-index — flag', () => {
-  test('default off; explicit opt-in tokens enable', () => {
-    expect(isPerfectRecallEnabled({})).toBe(false)
-    expect(isPerfectRecallEnabled({ NEUTRON_PERFECT_RECALL: '' })).toBe(false)
-    expect(isPerfectRecallEnabled({ NEUTRON_PERFECT_RECALL: 'off' })).toBe(false)
-    expect(isPerfectRecallEnabled({ NEUTRON_PERFECT_RECALL: 'false' })).toBe(false)
-    expect(isPerfectRecallEnabled({ NEUTRON_PERFECT_RECALL: '1' })).toBe(true)
-    expect(isPerfectRecallEnabled({ NEUTRON_PERFECT_RECALL: 'true' })).toBe(true)
-    expect(isPerfectRecallEnabled({ NEUTRON_PERFECT_RECALL: 'on' })).toBe(true)
-    expect(isPerfectRecallEnabled({ NEUTRON_PERFECT_RECALL: 'ENABLED' })).toBe(true)
-    // Whitespace-trimmed (RC2 parity — nexus-emit re-exports THIS predicate).
-    expect(isPerfectRecallEnabled({ NEUTRON_PERFECT_RECALL: '  true  ' })).toBe(true)
-  })
-})
 
 describe('memory-index — firstLineSummary', () => {
   test('skips headings for the first content line, strips markers, caps length', () => {

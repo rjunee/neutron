@@ -69,6 +69,20 @@
         "Pure side-observation — this unit adds visibility, not behavior; the",
         "fail-soft sync path is byte-identical."
       ]
+    },
+    "code_ritual_runs": {
+      "owner": "reminders/ritual-runs.ts",
+      "writers": [
+        "reminders/ritual-runs.ts"
+      ],
+      "notes": [
+        "Executor-mode reminders (plan task 4; migration 0106 PART B). Durable",
+        "ritual run history — one row per fire ATTEMPT (skips included), retained",
+        "on its own window (NOT pruned on the subagent liveness prune). Single-",
+        "writer: `createRitualRunStore` owns every INSERT (skipped/running/failed)",
+        "and the terminal UPDATE (finished/failed/timed_out/crashed + ended_at +",
+        "truncated output_summary). The retention prune lands with plan task 5."
+      ]
     }
   }
 }

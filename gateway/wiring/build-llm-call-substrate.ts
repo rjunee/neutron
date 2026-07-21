@@ -42,6 +42,7 @@ import {
   type RecoveredReply,
   type DeadTurnNotice,
   type RateLimitBannerNotice,
+  type SettingsPermissions,
   type SizeSeverity,
 } from '@neutronai/runtime/adapters/claude-code/index.ts'
 import {
@@ -248,6 +249,16 @@ export interface BuildLlmCallSubstrateInput {
   /** Optional cwd override threaded to `createClaudeCodeSubstrateAuto` (defaults to process.cwd()). */
   cwd?: string
   /**
+   * Optional `--append-system-prompt-file` for the spawned REPL, threaded onto
+   * `ClaudeCodeSubstrateOptions.appendSystemPromptFile`
+   * (`persistent/types.ts:216` → emitted `build-repl-argv.ts:109`). ABSENT ⇒
+   * the substrate's default (`repl-agent-base.md`, the CHAT persona) — unchanged
+   * for every existing caller. Set by the ritual executor (plan task 4) to
+   * `reminders/ritual-agent-base.md` so a scheduled ritual REPL runs as an
+   * UNATTENDED executor, not the interactive chat agent.
+   */
+  append_system_prompt_file?: string
+  /**
    * Optional per-instance `CLAUDE_CONFIG_DIR` threaded to the persistent child.
    * When set, the owner authenticates via the interactive-Max-login model (their
    * own `.credentials.json` with a refresh_token under this dir) and the child
@@ -435,6 +446,23 @@ export interface BuildLlmCallSubstrateInput {
    * content can never reach a Core tool.
    */
   enableToolBridge?: boolean
+  /**
+   * Task 6 (T5 write-containment spike) — when `true`, the spawned REPL does NOT
+   * register the `tool-use-approve` auto-approver, so a `permissions.deny` rule
+   * is load-bearing rather than auto-approved past (incl. Bash). Set ONLY by a
+   * WRITING/Bash-ritual factory; forwarded onto
+   * `ClaudeCodeSubstrateOptions.disableToolUseAutoApprove`. NOT routed through
+   * `SubstrateProfile` — the profile equivalence net freezes `PROFILE_RITUAL`, so
+   * these active knobs are direct call-args a future writing-ritual factory sets
+   * without touching the shared profile constant. Absent ⇒ approver ON. */
+  disableToolUseAutoApprove?: boolean
+  /**
+   * Task 6 (T5 write-containment spike) — optional CC `permissions` block written
+   * into the spawned REPL's per-session `--settings` (deny out-of-scope
+   * Write/Edit/Bash). Paired with `disableToolUseAutoApprove: true` +
+   * `skip_permissions` OFF for a writing ritual. Forwarded onto
+   * `ClaudeCodeSubstrateOptions.permissions`. Absent ⇒ Stop hook only. */
+  permissions?: SettingsPermissions
   /**
    * SWAPPABLE MODEL PROVIDER — the conversational/utility backend for THIS
    * substrate. Absent ⇒ `'anthropic'` (Claude Code) — the default and primary
@@ -676,6 +704,12 @@ export function buildLlmCallSubstrate(
           env: spawnEnv,
         }
         if (input.cwd !== undefined) opts.cwd = input.cwd
+        // Ritual executor (plan task 4) — a non-default system prompt file so the
+        // scheduled REPL runs as an unattended executor rather than the chat
+        // persona. Absent ⇒ the substrate's `repl-agent-base.md` default.
+        if (input.append_system_prompt_file !== undefined) {
+          opts.appendSystemPromptFile = input.append_system_prompt_file
+        }
         if (effectiveClaudeConfigDir !== undefined) opts.claude_config_dir = effectiveClaudeConfigDir
         if (input.claude_bin !== undefined) opts.claude_bin = input.claude_bin
         if (effectiveSkipPermissions !== undefined) opts.skip_permissions = effectiveSkipPermissions
@@ -733,6 +767,14 @@ export function buildLlmCallSubstrate(
         if (input.enableToolBridge !== undefined) {
           opts.enableToolBridge = input.enableToolBridge
         }
+        // Task 6 (T5 write-containment) — forward the ritual write-containment
+        // knobs as DIRECT call-args (never through SubstrateProfile, whose
+        // equivalence net freezes PROFILE_RITUAL). A writing/Bash-ritual factory
+        // sets these so the deny rule fails closed instead of being auto-approved.
+        if (input.disableToolUseAutoApprove !== undefined) {
+          opts.disableToolUseAutoApprove = input.disableToolUseAutoApprove
+        }
+        if (input.permissions !== undefined) opts.permissions = input.permissions
         // `createClaudeCodeSubstrateAuto` UNCONDITIONALLY builds the persistent
         // interactive-REPL substrate (the sole spawn shape post-S3-rip-replace).
         // The `substrateFactory` seam lets tests inject a fake substrate.

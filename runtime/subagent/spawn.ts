@@ -18,7 +18,11 @@
  *      steps 3-4 so a coalescing retry (which adds no child + reuses the live
  *      slot) is never blocked by the child or concurrency caps.
  *   3. live children of `parent_run_id` < MAX_CHILDREN_PER_AGENT (new children only)
- *   4. live registry size < MAX_CONCURRENT_SUBAGENTS
+ *   4. concurrency lane cap. A `ritual` spawn counts ONLY live ritual rows against
+ *      MAX_CONCURRENT_RITUALS; every other kind counts ONLY live non-ritual rows
+ *      against MAX_CONCURRENT_SUBAGENTS. The two lanes are isolated in BOTH
+ *      directions — a ritual pile-up can't starve interactive `/dispatch` + Trident
+ *      (they never share a counter), and rituals cap at their own small ceiling.
  *
  * Returns the freshly-created `SubagentRecord` (status=`pending`). The caller
  * is responsible for kicking off the actual substrate dispatch and calling
@@ -37,6 +41,7 @@
 
 import {
   MAX_CHILDREN_PER_AGENT,
+  MAX_CONCURRENT_RITUALS,
   MAX_CONCURRENT_SUBAGENTS,
   MAX_SPAWN_DEPTH,
   type AgentKind,
@@ -192,11 +197,27 @@ export async function spawnSubagent(
     }
   }
 
+  // Concurrency LANE cap (step 4). Rituals and interactive dispatch occupy
+  // ISOLATED lanes so neither can starve the other: a ritual counts only live
+  // ritual rows against MAX_CONCURRENT_RITUALS; every other kind counts only
+  // live NON-ritual rows against MAX_CONCURRENT_SUBAGENTS. Counting the two
+  // populations separately (rather than one shared `live().length`) is what
+  // makes the isolation bidirectional.
   const live = deps.registry.live()
-  if (live.length >= MAX_CONCURRENT_SUBAGENTS) {
-    throw new Error(
-      `subagent spawn: global concurrency cap hit (${live.length}/${MAX_CONCURRENT_SUBAGENTS}); refusing new spawn`,
-    )
+  if (input.agent_kind === 'ritual') {
+    const liveRituals = live.filter((r) => r.agent_kind === 'ritual').length
+    if (liveRituals >= MAX_CONCURRENT_RITUALS) {
+      throw new Error(
+        `subagent spawn: ritual lane cap hit (${liveRituals}/${MAX_CONCURRENT_RITUALS}); refusing new spawn`,
+      )
+    }
+  } else {
+    const liveNonRitual = live.filter((r) => r.agent_kind !== 'ritual').length
+    if (liveNonRitual >= MAX_CONCURRENT_SUBAGENTS) {
+      throw new Error(
+        `subagent spawn: global concurrency cap hit (${liveNonRitual}/${MAX_CONCURRENT_SUBAGENTS}); refusing new spawn`,
+      )
+    }
   }
 
   const run_id = (deps.mint_run_id ?? defaultMintRunId)()

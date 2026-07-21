@@ -1,6 +1,7 @@
 import type { CredentialPool } from '@neutronai/runtime/credential-pool.ts'
 import type { ReminderDispatcher } from '@neutronai/reminders/tick.ts'
-import type { ApprovalNotifier } from '@neutronai/tools/approval.ts'
+import type { RitualExecutor } from '@neutronai/reminders/ritual-executor.ts'
+import type { ApprovalManager, ApprovalNotifier } from '@neutronai/tools/approval.ts'
 import type {
   HeartbeatTracker,
   PidLivenessProbe,
@@ -14,6 +15,17 @@ export interface NotifierCompositionInput {
   watchdog_notifier: WatchdogNotifier
   /** Reminder dispatcher — substrate-spawn for production, stub for dev. */
   reminder_dispatcher: ReminderDispatcher
+  /**
+   * Executor-mode reminders (plan task 4) — a FACTORY that builds the ritual
+   * executor from the graph's `ApprovalManager` (the approval checker source).
+   * `build-core-modules`' `remindersModule` invokes it (when present) with the
+   * composed `approval` module and wires the result as the tick loop's
+   * `ritual_executor`. The composer owns the rest of the executor's wiring
+   * (subagent registry, `cc-ritual-*` substrate turn, run store, model, scope).
+   * Omitted on an LLM-less box → no ritual surface (ritual rows are consumed +
+   * logged by the tick, never dispatched as nudges).
+   */
+  ritual_executor_factory?: (deps: { approvals: ApprovalManager }) => RitualExecutor
   /** Heartbeat tracker — typically a small in-process pulse counter. */
   heartbeat_tracker: HeartbeatTracker
   /** Optional pid-liveness probe override (used by tests). */

@@ -14,10 +14,29 @@
 export const MAX_SPAWN_DEPTH = 1
 export const MAX_CHILDREN_PER_AGENT = 5
 export const MAX_CONCURRENT_SUBAGENTS = 8
+/**
+ * SEPARATE ritual concurrency lane (executor-mode reminders, plan task 4). A
+ * scheduled ritual (`agent_kind === 'ritual'`) is a 45-min background REPL that
+ * fires on a cadence; it MUST NOT consume the interactive dispatch cap
+ * (`MAX_CONCURRENT_SUBAGENTS`) or a pile-up of overdue rituals would starve the
+ * owner's `/dispatch` + Trident builds. `spawnSubagent` counts live ritual rows
+ * ONLY against this cap and every other kind ONLY against `MAX_CONCURRENT_SUBAGENTS`
+ * — bidirectional isolation: rituals can't starve interactive dispatch, and a
+ * ritual pileup caps at 2 (extras are refused, recorded as a failed run, and
+ * retried on the next cadence).
+ */
+export const MAX_CONCURRENT_RITUALS = 2
 
 export type SubagentStatus = 'pending' | 'running' | 'finished' | 'crashed' | 'cancelled'
 
-export type AgentKind = 'forge' | 'atlas' | 'sentinel' | 'argus' | 'core'
+// 'ritual' (migration 0106) is the executor-mode reminder dispatch kind — a
+// scoped sub-agent REPL spawned by the reminders tick at fire time
+// (`reminders/rituals.ts`). Non-test consumers are either
+// `Partial<Record<AgentKind, …>>` (watchdog, dispatch prompts) or narrow the
+// union with `Exclude` (trident `DispatchAgentKind` excludes both `'core'`
+// and `'ritual'`, so its persona `Record`s stay exhaustive) — never an
+// exhaustive switch over the full union.
+export type AgentKind = 'forge' | 'atlas' | 'sentinel' | 'argus' | 'core' | 'ritual'
 
 export interface SubagentRecord {
   run_id: string

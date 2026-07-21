@@ -2,7 +2,6 @@
  * RC2 — nexus-emit tests.
  *
  * Covers the emitter side of the agent-nexus log:
- *   - the shared perfect-recall flag gate (`isPerfectRecallEnabled`)
  *   - the pure event builders (handoff / decision / learning) — actor/kind/
  *     refs/body shape + pointers-lean truncation
  *   - `emitNexusEvent` fire-and-forget append against a REAL on-disk NexusStore
@@ -19,34 +18,11 @@ import { NexusStore, type AgentNexusEvent } from '../nexus-store.ts'
 import {
   emitNexusEvent,
   emitTridentTerminalEvents,
-  isPerfectRecallEnabled,
   reflectionLearningEvent,
   tridentDecisionEvent,
   tridentHandoffEvent,
   type TridentTerminalRun,
 } from '../nexus-emit.ts'
-
-/* ─── flag ────────────────────────────────────────────────────────── */
-
-// The re-export MUST stay byte-identical to the canonical predicate in
-// `runtime/perfect-recall-flag.ts` (RB1 made that the single source; this module
-// re-exports it for RC2's existing consumers). Same full accepted/rejected token
-// matrix the direct module test pins, so a drift in EITHER surface is caught.
-describe('isPerfectRecallEnabled (re-exported from runtime/perfect-recall-flag.ts)', () => {
-  it('is off by default (unset / empty / whitespace-only / opt-out tokens)', () => {
-    expect(isPerfectRecallEnabled({})).toBe(false)
-    expect(isPerfectRecallEnabled({ NEUTRON_PERFECT_RECALL: undefined })).toBe(false)
-    for (const raw of ['', '   ', '0', 'no', 'off', 'false', 'none', 'disabled']) {
-      expect(isPerfectRecallEnabled({ NEUTRON_PERFECT_RECALL: raw })).toBe(false)
-    }
-  })
-
-  it('is on for the full opt-in token set (case-insensitive, trimmed)', () => {
-    for (const raw of ['1', 'true', 'on', 'enabled', 'yes', 'all', 'TRUE', '  true  ']) {
-      expect(isPerfectRecallEnabled({ NEUTRON_PERFECT_RECALL: raw })).toBe(true)
-    }
-  })
-})
 
 /* ─── pure builders ───────────────────────────────────────────────── */
 

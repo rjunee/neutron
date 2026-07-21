@@ -6,13 +6,13 @@
  *
  *   real `WorkBoardStore`
  *     → the composer's owner-wide active-work provider (`listAllActive().map`)
- *     → `wireMemory`'s flag-gated `wrapSyncHookWithMemoryIndex` regeneration
+ *     → `wireMemory`'s always-on `wrapSyncHookWithMemoryIndex` regeneration
  *     → durable `entities/INDEX.md`
  *     → the cold-turn read seam (`memoryIndexRead`) + `<memory_index>` fragment.
  *
  * Nothing is injected synthetically: the hook, the setter, and the cold-turn
  * read all come from `wireMemory(ctx)` exactly as `open/composer.ts` builds them
- * (flag ON), and the handles travel from the store through the SAME provider
+ * (always on), and the handles travel from the store through the SAME provider
  * shape the composer binds into the generated manifest.
  *
  * Locks the OWNER-WIDE aggregation: an active item under GENERAL and one under a
@@ -74,7 +74,9 @@ function personInput(slug: string, name: string): EntityWriteInput {
  * (`llmPool: null`) so scribe / reflection substrates + the Cores fan-out stay
  * off — but `gbrainMemory` and its RB1-wrapped `syncHook` are built
  * UNCONDITIONALLY, so this exercises the full memory-index wiring with the
- * fewest moving parts. Flag ON → the wrapper + cold-turn read seam are live.
+ * fewest moving parts. The wrapper + cold-turn read seam are always live now
+ * (the perfect-recall lane is the base behavior — managed SPEC Decisions Log
+ * 2026-07-20, P0-4).
  */
 function makeCtx(): OpenWiringContext {
   return {
@@ -82,7 +84,7 @@ function makeCtx(): OpenWiringContext {
     owner_handle: OWNER,
     owner_home: ownerDir,
     project_slug: OWNER,
-    env: { NEUTRON_PERFECT_RECALL: '1' } as NodeJS.ProcessEnv,
+    env: {} as NodeJS.ProcessEnv,
     db,
     prewarmSubstrate: async (): Promise<void> => {},
   }
@@ -113,7 +115,8 @@ describe('RB1 — WorkBoardStore → composer provider → wireMemory → durabl
     // The REAL production wiring — same call `open/composer.ts` makes at boot.
     const w = wireMemory(makeCtx())
     try {
-      // The flag is ON, so the RB1 read seam + late-bind setter are live.
+      // The perfect-recall lane is the base behavior, so the RB1 read seam +
+      // late-bind setter are always live.
       expect(w.memoryIndexRead).toBeDefined()
 
       // Bind the memory-index's active-work provider EXACTLY as the composer does

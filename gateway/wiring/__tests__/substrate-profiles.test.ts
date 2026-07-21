@@ -36,6 +36,7 @@ import {
   PROFILE_UNTRUSTED_IMPORT,
   PROFILE_EPHEMERAL,
   PROFILE_WARM_FIRE,
+  PROFILE_RITUAL,
   type SubstrateProfile,
 } from '../substrate-profiles.ts'
 import type { SessionHandle } from '@neutronai/runtime/session-handle.ts'
@@ -126,6 +127,7 @@ const ALL_PROFILES: ReadonlyArray<{ name: string; profile: SubstrateProfile }> =
   { name: 'PROFILE_UNTRUSTED_IMPORT', profile: PROFILE_UNTRUSTED_IMPORT },
   { name: 'PROFILE_EPHEMERAL', profile: PROFILE_EPHEMERAL },
   { name: 'PROFILE_WARM_FIRE', profile: PROFILE_WARM_FIRE },
+  { name: 'PROFILE_RITUAL', profile: PROFILE_RITUAL },
 ]
 
 test('every profile encodes exactly { skip_permissions: true } (no reserved field wired yet)', () => {
@@ -195,6 +197,18 @@ const SITES: ReadonlyArray<{
     profile: PROFILE_WARM_FIRE,
     extra: { substrate_instance_id: 'cc-trident-fire-owner-abc', cwd: '/w', user_id: 'u', project_slug: 'owner' },
   },
+  {
+    site: 'open/wiring/substrates.ts makeRitualSubstrate (cc-ritual)',
+    profile: PROFILE_RITUAL,
+    extra: {
+      substrate_instance_id: 'cc-ritual-owner',
+      cwd: '/w',
+      user_id: 'u',
+      project_slug: 'owner',
+      ephemeral: true,
+      append_system_prompt_file: '/abs/ritual-agent-base.md',
+    },
+  },
 ]
 
 for (const { site, profile, extra } of SITES) {
@@ -238,4 +252,32 @@ test('a profile skip_permissions value WINS over the legacy inline field', async
 test('no skip_permissions anywhere ⇒ option is left unset (unchanged default)', async () => {
   const opts = await resolveOpts({ substrate_instance_id: 'none', cwd: '/w' })
   expect('skip_permissions' in opts).toBe(false)
+})
+
+// ---------------------------------------------------------------------------
+// 4. Executor-mode reminders (plan task 4) — append_system_prompt_file threading.
+//    The ritual substrate threads its unattended-executor system prompt file
+//    onto ClaudeCodeSubstrateOptions.appendSystemPromptFile; absence keeps the
+//    substrate's default (repl-agent-base.md, the chat persona).
+//
+//    SCOPE (Argus r1): these two tests cover ONLY the build-llm-call-substrate
+//    layer against the FAKE capture factory — they prove the value lands on the
+//    intermediate ClaudeCodeSubstrateOptions bag, NOT that the REAL default
+//    factory forwards it to the spawned argv. That end-to-end wiring (the seam
+//    that actually dropped the prompt) is proven in
+//    `runtime/adapters/claude-code/persistent/__tests__/append-system-prompt-wiring.test.ts`.
+// ---------------------------------------------------------------------------
+
+test('append_system_prompt_file threads onto ClaudeCodeSubstrateOptions.appendSystemPromptFile', async () => {
+  const opts = await resolveOpts({
+    substrate_instance_id: 'cc-ritual',
+    cwd: '/w',
+    append_system_prompt_file: '/abs/ritual-agent-base.md',
+  })
+  expect(opts.appendSystemPromptFile).toBe('/abs/ritual-agent-base.md')
+})
+
+test('absent append_system_prompt_file leaves appendSystemPromptFile unset (default persona)', async () => {
+  const opts = await resolveOpts({ substrate_instance_id: 'no-append', cwd: '/w' })
+  expect('appendSystemPromptFile' in opts).toBe(false)
 })

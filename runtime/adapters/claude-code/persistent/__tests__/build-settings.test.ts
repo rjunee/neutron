@@ -1,5 +1,5 @@
 import { describe, test, expect, afterEach } from 'bun:test'
-import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { buildSettings } from '../build-settings.ts'
@@ -47,5 +47,87 @@ describe('buildSettings — behaviour-preserving atomic write', () => {
     }
     const parsed = JSON.parse(readFileSync(settingsPath, 'utf8'))
     expect(parsed.hooks.Stop[0].hooks[0].command).toBe('bun-b /abs/hook.ts')
+  })
+
+  test('no `permissions` key when none provided (byte-identical to pre-task-6)', () => {
+    const dir = freshDir()
+    const settingsPath = join(dir, 'settings.json')
+    buildSettings({ settingsPath, hookPath: '/abs/hook.ts' })
+    const parsed = JSON.parse(readFileSync(settingsPath, 'utf8'))
+    expect(parsed.permissions).toBeUndefined()
+    expect(Object.keys(parsed)).toEqual(['hooks'])
+  })
+})
+
+describe('buildSettings — task 6 (T5) write-containment permissions block', () => {
+  test('emits the `permissions` block ALONGSIDE the Stop hook', () => {
+    const dir = freshDir()
+    const settingsPath = join(dir, 'settings.json')
+    const scope = '/tmp/ritual-scope'
+    const outside = '/tmp/ritual-outside'
+    buildSettings({
+      settingsPath,
+      hookPath: '/abs/hook.ts',
+      permissions: {
+        allow: [`Write(${scope}/**)`, `Edit(${scope}/**)`],
+        deny: [`Write(${outside}/**)`, `Edit(${outside}/**)`, 'Bash'],
+      },
+    })
+    const parsed = JSON.parse(readFileSync(settingsPath, 'utf8'))
+    // Stop hook intact.
+    expect(parsed.hooks.Stop[0].hooks[0]).toEqual({
+      type: 'command',
+      command: 'bun /abs/hook.ts',
+    })
+    // permissions written verbatim.
+    expect(parsed.permissions.allow).toEqual([`Write(${scope}/**)`, `Edit(${scope}/**)`])
+    expect(parsed.permissions.deny).toEqual([`Write(${outside}/**)`, `Edit(${outside}/**)`, 'Bash'])
+  })
+
+  test('drops empty sub-arrays so a deny-only ritual emits a minimal policy', () => {
+    const dir = freshDir()
+    const settingsPath = join(dir, 'settings.json')
+    buildSettings({
+      settingsPath,
+      hookPath: '/abs/hook.ts',
+      permissions: { allow: [], deny: ['Bash'], defaultMode: 'default' },
+    })
+    const parsed = JSON.parse(readFileSync(settingsPath, 'utf8'))
+    expect(parsed.permissions.allow).toBeUndefined()
+    expect(parsed.permissions.ask).toBeUndefined()
+    expect(parsed.permissions.deny).toEqual(['Bash'])
+    expect(parsed.permissions.defaultMode).toBe('default')
+  })
+
+  test('an all-empty permissions input emits NO `permissions` key (no hollow {}) (Argus r1 nit)', () => {
+    const dir = freshDir()
+    const settingsPath = join(dir, 'settings.json')
+    // permissions is DEFINED but every sub-array is empty and no defaultMode → the
+    // minimality filter drops all sub-keys, so no `permissions` key is written.
+    buildSettings({
+      settingsPath,
+      hookPath: '/abs/hook.ts',
+      permissions: { allow: [], deny: [], ask: [] },
+    })
+    const parsed = JSON.parse(readFileSync(settingsPath, 'utf8'))
+    expect(parsed.permissions).toBeUndefined()
+    // The Stop hook is still wired (the empty permissions block didn't disturb it).
+    expect(parsed.hooks.Stop).toBeDefined()
+  })
+
+  test('an empty object permissions input emits NO `permissions` key', () => {
+    const dir = freshDir()
+    const settingsPath = join(dir, 'settings.json')
+    buildSettings({ settingsPath, hookPath: '/abs/hook.ts', permissions: {} })
+    const parsed = JSON.parse(readFileSync(settingsPath, 'utf8'))
+    expect(parsed.permissions).toBeUndefined()
+  })
+
+  test('permissions file is written 0600 (owner-only security policy)', () => {
+    const dir = freshDir()
+    const settingsPath = join(dir, 'settings.json')
+    buildSettings({ settingsPath, hookPath: '/abs/hook.ts', permissions: { deny: ['Bash'] } })
+    const mode = statSync(settingsPath).mode & 0o777
+    expect(mode).toBe(0o600)
   })
 })

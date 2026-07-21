@@ -168,20 +168,6 @@ export interface WriteExtractionDeps {
   syncHook?: SyncHook
   /** Failure sink. Defaults to console.warn. */
   logFailure?: (err: unknown, ctx: { kind: EntityKind; slug: string }) => void
-  /**
-   * RB4 temporal invalidation — the shared `NEUTRON_PERFECT_RECALL` gate,
-   * resolved at the wiring layer (`open/wiring/memory.ts`). When true, a relation
-   * carrying a `supersedes` marker DROPS the superseded object's sentence(s) from
-   * the subject's compiled-truth (so the writer's existing
-   * `removedLinks`→`remove_link` machinery invalidates the stale gbrain edge and
-   * `add_link` asserts the current one), and the superseding write records each
-   * RELATION additively as a dated `<pred> <obj>` timeline row (no free-text
-   * "transition" note — the retired relation survives as history via its own
-   * additive row; the dropped sentence's descriptive prose is NOT re-recorded, see
-   * `stripSupersededSentences`). When false (the default), `supersedes` is ignored
-   * entirely → pure accretion, byte-for-byte today's behaviour.
-   */
-  supersede?: boolean
 }
 
 export interface WriteExtractionReport {
@@ -229,9 +215,6 @@ export async function writeExtractionToGBrain(
   deps: WriteExtractionDeps,
 ): Promise<WriteExtractionReport> {
   const report: WriteExtractionReport = { pages_written: 0, pages_skipped: 0, edges_emitted: 0 }
-  // RB4 — the perfect-recall supersede gate. OFF (default) → the merge stays
-  // strictly append-only and the `supersedes` markers are inert (pure accretion).
-  const supersede = deps.supersede === true
 
   // 1. Plan a page per entity, keyed + deduped by slug.
   const bySlug = new Map<string, PlannedPage>()
@@ -291,17 +274,17 @@ export async function writeExtractionToGBrain(
         // merge); compose fresh for a new entity. See the module header for the
         // data-loss rationale. Read INSIDE the lock so the merge sees the latest.
         const existing = await readExistingPage(input.ownerDataDir, page.kind, page.slug)
-        // RB4 — under the flag, DROP any superseded prior sentence from an existing
+        // RB4 (always on) — DROP any superseded prior sentence from an existing
         // page's compiled-truth (belief evolution); the writer's `removedLinks` diff
         // then invalidates the stale gbrain edge. The append-only timeline is the
         // durable history: each write records its relation assertions ADDITIVELY (a
         // pure function of the extraction — see `timelineBody`), so a superseded
-        // belief that was first recorded under the flag keeps its own dated
-        // `<pred> <obj>` row at its original time, and nothing is ever rewritten or
-        // fabricated. No state-dependent transition note ⇒ replays are byte-identical.
+        // belief keeps its own dated `<pred> <obj>` row at its original time, and
+        // nothing is ever rewritten or fabricated. No state-dependent transition
+        // note ⇒ replays are byte-identical.
         const compiledTruth =
           existing !== null
-            ? mergeExistingCompiledTruth(existing.compiledTruth, page, supersede)
+            ? mergeExistingCompiledTruth(existing.compiledTruth, page)
             : composeNewCompiledTruth(page)
         // Merge frontmatter: preserve every existing key (mention_count, category,
         // basis, cadence_hint, …) and only set the keys scribe authoritatively
@@ -328,7 +311,7 @@ export async function writeExtractionToGBrain(
               timelineAppend: {
                 ts: input.ts,
                 source: timelineSource,
-                body: timelineBody(page, supersede),
+                body: timelineBody(page),
               },
             },
             // M2.6 Ph1 (#83) — own-origin stamp by default (chat / Cores: origin
@@ -408,21 +391,20 @@ const NOTES_SEP = ' · '
  *  turn a true no-op (idempotent replay — no state dependence, nothing to
  *  fabricate, no timeline text parsed).
  *
- *  RB4 — when `supersede` is on, the page's RELATION ASSERTIONS are recorded
- *  ADDITIVELY in the (append-only, dated) timeline body alongside the fact. This
- *  is what makes the timeline the durable history: the ORIGINAL `works_at oldco`
- *  write lands a dated `works_at oldco` row at its OWN observation time, so when a
- *  later turn supersedes it (dropping the sentence from compiled-truth + the
- *  gbrain edge), the original dated belief still lives in history — untouched,
- *  because the timeline is append-only. There is NO separate "superseded X → Y"
- *  note: the current truth is carried by compiled-truth + the edge, and the
- *  before/after beliefs are each an additive dated row. Slugs are bare (no
- *  `[[wikilink]]`, no `works at <slug>` verb phrasing) so the timeline text can
- *  never re-derive a graph edge. OFF (default) → byte-for-byte today's fact-only body. */
-function timelineBody(page: PlannedPage, supersede: boolean): string {
+ *  RB4 (always on) — the page's RELATION ASSERTIONS are recorded ADDITIVELY in the
+ *  (append-only, dated) timeline body alongside the fact. This is what makes the
+ *  timeline the durable history: the ORIGINAL `works_at oldco` write lands a dated
+ *  `works_at oldco` row at its OWN observation time, so when a later turn
+ *  supersedes it (dropping the sentence from compiled-truth + the gbrain edge),
+ *  the original dated belief still lives in history — untouched, because the
+ *  timeline is append-only. There is NO separate "superseded X → Y" note: the
+ *  current truth is carried by compiled-truth + the edge, and the before/after
+ *  beliefs are each an additive dated row. Slugs are bare (no `[[wikilink]]`, no
+ *  `works at <slug>` verb phrasing) so the timeline text can never re-derive a
+ *  graph edge. */
+function timelineBody(page: PlannedPage): string {
   const fact = page.fact?.trim()
   const base = fact !== undefined && fact.length > 0 ? `Chat mention — ${fact}` : 'Mentioned in chat'
-  if (!supersede) return base
   const notes = relationNotes(page)
   return notes.length > 0 ? `${base}${NOTES_SEP}${notes.join('; ')}` : base
 }
@@ -508,15 +490,15 @@ function composeNewCompiledTruth(page: PlannedPage): string {
  * collapses. The new *fact* is NOT written into compiled-truth (it lands in the
  * append-only timeline instead), so the entity's prose is never rewritten.
  */
-function mergeExistingCompiledTruth(existing: string, page: PlannedPage, supersede: boolean): string {
-  // RB4 — when perfect-recall is on, DROP the superseded object's sentence(s)
-  // from the existing compiled-truth BEFORE the append pass. That single edit is
-  // what turns accretion into belief-evolution: the writer's diff then sees the
-  // stale triple in the OLD compiled-truth but not the NEW one, so `removedLinks`
-  // carries it and the sync hook `remove_link`s the stale gbrain edge — while the
-  // append below asserts the CURRENT fact and the append-only timeline keeps the
-  // dated history. A no-op when no relation carries `supersedes`.
-  const stripped = supersede ? stripSupersededSentences(existing, page) : existing
+function mergeExistingCompiledTruth(existing: string, page: PlannedPage): string {
+  // RB4 (always on) — DROP the superseded object's sentence(s) from the existing
+  // compiled-truth BEFORE the append pass. That single edit is what turns
+  // accretion into belief-evolution: the writer's diff then sees the stale triple
+  // in the OLD compiled-truth but not the NEW one, so `removedLinks` carries it
+  // and the sync hook `remove_link`s the stale gbrain edge — while the append
+  // below asserts the CURRENT fact and the append-only timeline keeps the dated
+  // history. A no-op when no relation carries `supersedes`.
+  const stripped = stripSupersededSentences(existing, page)
   const base = stripped.replace(/\s+$/, '') // trim trailing whitespace; we re-add \n
   const newLines: string[] = []
   for (const line of renderRelationLines(page)) {

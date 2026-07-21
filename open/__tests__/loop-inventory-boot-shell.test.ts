@@ -2,8 +2,10 @@
  * §F2 defect #1 — the COMPLETE loop inventory, driven through the real
  * `boot()` shell (gateway/index.ts), which is the ONLY boundary that starts the
  * gateway-liveness loop (the sd_notify systemd watchdog + `onGatewayTick` pulse
- * at `gateway/index.ts`). The composer/graph boundary starts 6 loops; the boot
- * shell adds the 7th and emits the ONE complete boot inventory line.
+ * at `gateway/index.ts`). The composer/graph boundary starts 7 loops (memory
+ * consolidation is ON by default — managed SPEC Decisions Log 2026-07-20, P0-4 —
+ * so reflect-consolidation always arms); the boot shell adds the 8th and emits
+ * the ONE complete boot inventory line.
  *
  * This test boots the REAL Open server in-process (real Bun.serve, real
  * `buildOpenGraphComposer`, credentialed via a canned substrate so the dispatch
@@ -11,10 +13,16 @@
  * holds the truly-complete set including `gateway-liveness`:
  *
  *   chunked-upload-sweeper, cron, dispatch-lifecycle-watchdog,
- *   gateway-liveness, reminders, trident, watchdog
+ *   gateway-liveness, reflect-consolidation, reminders, trident, watchdog
  *
  * MUTATION-VERIFIED: deleting the gateway-liveness registration in
  * `gateway/index.ts` drops it from the set and this test goes red.
+ *
+ * TIMEOUT budget is 60s (not the usual tight bound): each test boots a REAL
+ * in-process server, and under full-suite parallelism ~55 concurrent composer
+ * boots contend for CPU, so a 30s ceiling flaked (Argus r1 minor). 60s only raises
+ * the ceiling for a genuinely-hung boot (a distinct, louder signal); in isolation
+ * a boot completes in ~1.3s.
  */
 
 import { afterEach, beforeEach, expect, test } from 'bun:test'
@@ -34,12 +42,13 @@ import { __resetAmbientAuthCacheForTests } from '../ambient-claude-auth.ts'
 const HERE = dirname(fileURLToPath(import.meta.url))
 const LANDING_DIR = join(HERE, '..', '..', 'landing')
 
-/** COMPLETE set through the boot shell — 6 composer/graph loops + gateway-liveness. */
+/** COMPLETE set through the boot shell — 7 composer/graph loops + gateway-liveness. */
 const EXPECTED_RUNNING_LOOPS = [
   'chunked-upload-sweeper',
   'cron',
   'dispatch-lifecycle-watchdog',
   'gateway-liveness',
+  'reflect-consolidation',
   'reminders',
   'trident',
   'watchdog',
@@ -79,7 +88,7 @@ afterEach(async () => {
     handle = null
   }
   home.restore()
-}, 30_000)
+}, 60_000)
 
 function cannedHandle(instanceId: string): SessionHandle {
   const events = (async function* (): AsyncGenerator<Event, void, void> {
@@ -118,7 +127,7 @@ function registry(h: BootHandle): ComposedProductionGraph['loopRegistry'] {
 test('the real boot shell starts EXACTLY the complete set incl gateway-liveness', async () => {
   const h = await bootOpen()
   expect(registry(h).names()).toEqual([...EXPECTED_RUNNING_LOOPS])
-}, 30_000)
+}, 60_000)
 
 test('gateway-liveness is a live descriptor with the watchdog cadence', async () => {
   const h = await bootOpen()
@@ -130,7 +139,7 @@ test('gateway-liveness is a live descriptor with the watchdog cadence', async ()
   const health = desc.health()
   expect('lastTickAt' in health).toBe(true)
   expect('lastError' in health).toBe(true)
-}, 30_000)
+}, 60_000)
 
 test('the real boot EMITS exactly ONE complete boot-inventory line (captured from console.log)', async () => {
   // Capture the PRODUCTION console.log emission during the real boot — NOT a
@@ -148,7 +157,7 @@ test('the real boot EMITS exactly ONE complete boot-inventory line (captured fro
   const inventoryLines = lines.filter((l) => l.includes('[loop-registry]'))
   expect(inventoryLines).toHaveLength(1) // exactly one, emitted by the boot shell
   const line = inventoryLines[0]!
-  expect(line).toContain('7 loop(s) running')
+  expect(line).toContain('8 loop(s) running')
   for (const name of EXPECTED_RUNNING_LOOPS) expect(line).toContain(name)
   expect(line).toContain('2 dormant (deferred): [agent-watcher, project-backup-scheduler]')
-}, 30_000)
+}, 60_000)

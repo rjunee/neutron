@@ -2,6 +2,481 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+## 2026-07-21 — Executor-mode reminders task 6R (REQUEST_CHANGES round-4 fixes): 0106 skip_reason CHECK admits gated_tool_surface; sync launch failure settles crashed
+
+Two correctness bugs in the skip-recording / crash-settle paths on PR #426 (branch `trident/executor-mode-reminders`). The T5 security verdict itself PASSED review — the gate (`validateRitualFire` `gated_tool_surface` refusal, `GATED_WRITE_TOOLS`, PROFILE_RITUAL, buildSettings permissions plumbing) is UNTOUCHED; these are the recording/settle paths downstream of it.
+
+- **BLOCKER A — the 0106 `skip_reason` CHECK omitted `'gated_tool_surface'`, re-opening the hot-loop/data-loss class for gated rituals.** The CHECK value list admitted only 4 of the 5 `RitualFireSkipReason` members, but `validateRitualFire` returns `'gated_tool_surface'` for any Bash/Write/Edit/MultiEdit/NotebookEdit ritual (`reminders/rituals.ts:302,367-371`) and the executor persists it verbatim via `insertSkipped` into the STRICT table (`reminders/ritual-executor.ts:389-396`). A gated fire therefore hit `CHECK constraint failed` → `insertSkipped` threw → `fire()` outer catch re-threw → `reminders/tick.ts` `claimRevert` → the occurrence re-fired every 30s tick forever with NO durable `code_ritual_runs` row. FIX: `migrations/0106_ritual_schema.sql:86` — CHECK value list gains `'gated_tool_surface'` (in-place: 0106 is branch-only, absent on main, no recorded checksum in `migrations/runner.ts`, no deployed DB has it — a 0107 would be wrong). `migrations/expected-schema.txt:527` regenerated via `bun migrations/regen-snapshot.ts` (exactly the one CHECK-list line changed). `reminders/ritual-runs.ts:15` stale 3-member header comment corrected to the full 5-member union (doc-only). Tests: `reminders/ritual-runs.test.ts` `test.each` over all 5 members — "insertSkipped accepts every RitualFireSkipReason member against the real 0106 DDL (CHECK lockstep)" — lands a durable row against the REAL migrated DDL (pre-fix, the `gated_tool_surface` case throws `CHECK constraint failed`); `reminders/ritual-executor.test.ts` end-to-end — "gated tool surface (Bash) → durable skipped/gated_tool_surface row, fire() RESOLVES, nothing spawned" (the no-hot-loop proof: `fire()` resolves so the tick does not `claimRevert`).
+- **BLOCKER B — a synchronous launch-construction throw wedged the run.** Step (f) of the executor evaluated `deps.resolve_model()` and the `deps.turn(...)` call itself SYNCHRONOUSLY during the `fireAndForget` argument construction — AFTER the durable 'running' row (`insertRunning`) and the LIVE `ritual:<id>` registry record (`spawnSubagent` `on_duplicate:'refuse'`) already existed. A sync throw skipped the never-yet-attached `.catch`, landed in the outer startup catch and re-threw → the tick reverted the occurrence claim WHILE the spawn key stayed live → every re-fire was refused as a duplicate ('failed' rows) and the original run stuck 'running' until boot reap. FIX: `reminders/ritual-executor.ts:559-579` — the `fireAndForget` launch is wrapped in `try/catch`; a synchronous `launchErr` routes through the SAME `settleCrashed` path as a promise rejection (run row → 'crashed', registry `updateTerminal` frees the spawn key since `liveByKey` counts only pending|running, failure notice via the guarded `surfaceFailure`), then `return` (NOT re-throw) so the occurrence is legitimately consumed — no `claimRevert`, no stuck 'running', no live-key wedge. `settleCrashed` (`reminders/ritual-executor.ts:326-362`) is fully guarded and never rejects, so the bare `await` is safe and keeps the settle inside the tick quiescence boundary (task-5R discipline). The step-(f) comment and the outer-catch comment (`reminders/ritual-executor.ts:581-596`) record the sync hazard; the documented `fire()` contract ("never rejects once a durable row exists") is unchanged — this fix makes the code honor it. Tests: `reminders/ritual-executor.test.ts` — "resolve_model throws synchronously → run settles crashed, spawn key freed, fire() resolves; a re-fire is admitted" (includes the regression half: the second fire of the same ritual is ADMITTED, proving the key was freed) and "turn() throwing synchronously (non-promise) settles crashed identically".
+
+Suites green: `bun test reminders/` (316 pass), `bun test migrations/` (40 pass), `bun test gateway/` (2778 pass, 2 skip); `bun x tsc --noEmit -p reminders/tsconfig.json` clean.
+
+## 2026-07-21 — Executor-mode reminders task 6 (Argus round-2 doc/forward-guard fixes): fire() contract docs + GATED_WRITE_TOOLS lockstep note + composer verdict comment
+
+Round-3 corrections on PR #426 (branch `trident/executor-mode-reminders`) — documentation/forward-guard only, no behavior change (all fixes are comments; suites unchanged 74/74 on the two touched suites).
+
+- **MINOR — stale `fire()` contract docs corrected.** `reminders/ritual-executor.ts` — the `RitualExecutor` interface doc (was "`fire(reminder)` never rejects") and the `createRitualExecutor` doc (was "`fire()` NEVER throws") contradicted the round-2 fix that makes `fire()` REJECT on a STARTUP failure (module header line 23; throw sites at the `insertRunning`-recovery re-throw and the outer catch). Both now state the real contract — REJECTS on startup failure so the tick (`reminders/tick.ts`) reverts its occurrence claim; never rejects once a durable row exists; never awaits the detached turn — closing a doc trap for future importers of the exported seam (`reminders/index.ts`).
+- **MINOR — `GATED_WRITE_TOOLS` lockstep-maintenance note added.** `reminders/rituals.ts` — the gate is an ENUMERATED denylist (5 built-ins), so a write-capable name NOT in the set (a new built-in, or an `mcp__server__tool` bridge name admitted by `TOOL_TOKEN_RE`) would PASS the gate. Not reachable today (the ritual substrate wires no tool bridge and shipped rituals are read-only with an explicit Read/Glob/Grep allow-list). Comment records the two lockstep lanes + recommends flipping to a read-only ALLOW-LIST (fail-closed for unknown/bridge names) when the OS-sandbox sprint or task 8/9 revisits the gate.
+- **NIT — composer `scope_cwd` comment corrected.** `open/composer.ts` — the block comment + throw message said per-project write-containment "lands in task 6"; task 6's T5 verdict is UNPROVABLE, so containment is deferred to the OS-sandbox prerequisite sprint. Comment + throw string now say so (the fail-closed behavior itself was already correct).
+
+## 2026-07-21 — Executor-mode reminders task 6 (Argus r1 round-2 fixes): ritual startup fails CLOSED with claim revert; STAY GATED enforced by code
+
+Round-2 corrections on PR #426 (branch `trident/executor-mode-reminders`).
+
+- **BLOCKER — a ritual startup failure no longer silently consumes the occurrence.** `reminders/ritual-executor.ts` — the `fire()` outer catch used to log-and-RESOLVE any startup throw (`validateRitualFire`, `insertSkipped`, `insertFailed`, or a total run-store outage on the `insertRunning` recovery path), so the tick consumed the #319 claim with NO durable `code_ritual_runs` row and NO launch — a scheduled run lost with one log line. Now `fire()` RE-THROWS a startup failure, and `reminders/tick.ts` reverts the #319 claim (the same `claimRevert` the nudge dispatcher uses: `revertRecurrenceAdvance` for recurring, `reopen` for one-shot) so the occurrence re-fires next tick. Paths that DID land a durable row (skipped/failed/running) still resolve = consume. The detached substrate TURN stays fire-and-forget + fail-soft inside the executor, so a `fire()` rejection is unambiguously a startup loss. The unwired-executor branch still consumes (a permanent condition, not a transient loss). Tests: `reminders/tick.test.ts` (recurring reverts + re-fires, one-shot reopens + re-fires), `reminders/ritual-executor.test.ts` (startup run-store throw → rejects; insertRunning+insertFailed total outage → rejects, spawn key freed, turn never launched).
+- **MINOR — a persistent run-store failure at turn settlement no longer leaks the ritual spawn key.** `reminders/ritual-executor.ts` `settleTerminal`/`settleCrashed` — `runs.markTerminal` was awaited UNGUARDED; a throw jumped to `settleCrashed`, which retried the same failing store and never reached the registry `updateTerminal` that frees `spawn_key ritual:<id>` (`on_duplicate:'refuse'`), refusing all future fires until restart. `markTerminal` is now individually guarded so the registry terminal (key-free) ALWAYS runs, independent of run-history persistence.
+- **MAJOR — "STAY GATED" for Bash/Write rituals is now enforced by CODE, not absence.** `reminders/rituals.ts` — `validateRitualFire` refuses fail-CLOSED any ritual whose `tool_surface` grants a write/exec-class tool (`GATED_WRITE_TOOLS` = `Bash`/`Write`/`Edit`/`MultiEdit`/`NotebookEdit`) with the new `gated_tool_surface` skip verdict, BEFORE any disk read or approval check. A def may still REGISTER a Bash surface (overturn 1 — Bash is portable) but can never FIRE until the OS-sandbox sprint lifts the gate (T5 verdict UNPROVABLE). Read-only rituals unaffected. Test: `reminders/rituals.test.ts` `test.each([Bash,Write,Edit,MultiEdit,NotebookEdit])`.
+- **NITs.** `build-settings.ts` no longer writes a hollow `permissions: {}` for an all-empty input (test added). `ritual-write-containment.e2e.test.ts` — stale `acceptEdits` comment corrected (in-scope acceptance comes from the `allow` rules, not the dropped `acceptEdits`); ARM A now asserts `reachedTerminal` when the channel bound (the no-wedge signal was console-only).
+- Affected suites green: `bun test reminders …` 109/109; full `reminders` + composition + auto-approve-gate 406/406; `tsc --noEmit` 0 errors.
+
+## 2026-07-21 — Executor-mode reminders task 6: T5 write-containment spike (HARD SECURITY GATE) — VERDICT: UNPROVABLE
+
+Substrate-layer plumbing + the real-PTY spike for path-scoped ritual write containment, on PR #426 (branch `trident/executor-mode-reminders`).
+
+- **`buildSettings` writes an optional CC `permissions` block.** `runtime/adapters/claude-code/persistent/build-settings.ts` — new `SettingsPermissions` type (`allow`/`deny`/`ask`/`defaultMode`); when `input.permissions` is set, a `permissions` key is emitted ALONGSIDE the existing `hooks.Stop` block (0600 atomic write preserved, empty sub-arrays dropped). Absent ⇒ byte-identical to the pre-task-6 Stop-hook-only write. Re-exported from the adapter boundary (`index.ts`).
+- **The `tool-use-approve` auto-approver is now gate-able.** `runtime/adapters/claude-code/persistent/spawn.ts` — the register block that presses `['1','enter']`="Yes" on any tool-use permission prompt (incl. Bash via `runthiscommand`, `signatures.ts:89-90`) is wrapped in `if (options.disableToolUseAutoApprove !== true)`. Every OTHER detector — the wedged-prompt deadlock-recovery ladder (`createWedgedPromptDetector()`, the no-hang backstop), disclaimer-dismiss, rate-limit, resume/compact pickers, banners — stays unconditionally registered. `buildSettings({settingsPath})` now forwards `options.permissions` when present.
+- **Two new spawn/substrate options threaded end-to-end (direct call-args, NOT `SubstrateProfile`).** `disableToolUseAutoApprove?` + `permissions?` on `PersistentReplSubstrateOptions` (`persistent/types.ts`), `ClaudeCodeSubstrateOptions` (`runtime/adapters/claude-code/index.ts` + `createClaudeCodeSubstrateAuto` forwarding), and `BuildLlmCallSubstrateInput` (`gateway/wiring/build-llm-call-substrate.ts`, forwarded in the opts-resolution block). NOT routed through `SubstrateProfile` — `PROFILE_RITUAL` stays frozen so `gateway/wiring/__tests__/substrate-profiles.test.ts` equivalence net stays green; a future writing-ritual factory sets these directly.
+- **Tests.** `persistent/__tests__/ritual-auto-approve-gate.test.ts` (fake-host): `disableToolUseAutoApprove:true` ⇒ session scanner does NOT carry `tool-use-approve` while `wedged-interactive-prompt`/disclaimer/rate-limit/compact-resume DO; default carries it. `OutputScanner.has(id)` introspection seam added (`output-scan.ts`). `build-settings.test.ts` extended: permissions block written + Stop hook intact + 0600 + no `permissions` key when unset. `persistent/__tests__/ritual-write-containment.e2e.test.ts` (real PTY, `NEUTRON_PTY_E2E=1`, `describe.skipIf`) — the T5 spike; opt-out suite skips it (605 pass / 3 skip / 0 fail in `persistent/`).
+- **VERDICT: UNPROVABLE** (recorded in `docs/plans/executor-mode-reminders-2026-07-20.md` → "T5 write-containment spike verdict — 2026-07-21"). A ritual REPL with `skip_permissions:false` + a settings `permissions` block bound its dev-channel MCP in only 1/6 real-PTY runs (vs 2/2 for the no-permissions + `skip_permissions:true` sibling control, interleaved on the same box/creds); the one bound run WEDGED on an interactive tool-use permission prompt (neither the in-scope control write nor the out-of-scope write landed, no terminal state). No out-of-scope file ever escaped, but a clean fail-closed-without-wedge was NOT demonstrated. Consequence: an OS-level sandbox (reserved `SubstrateSandboxConfig`) becomes its own prerequisite sprint; Bash/writing rituals STAY GATED; read-only rituals (task 7) ship under Layer 1. The task-6 plumbing is landed and dormant until that sprint.
+
+## 2026-07-21 — Executor-mode reminders task 5 (Argus r3 fixes): ritual startup joins the tick quiescence boundary
+
+Round-3 corrections on PR #426 (branch `trident/executor-mode-reminders`).
+
+- **The tick now AWAITS ritual `fire()` startup — the data-loss window is closed
+  (MAJOR).** `reminders/tick.ts:231` wrapped the whole `ritual_executor.fire(reminder)`
+  in `fireAndForget('ritual-fire', …)`, detaching validation + spawn + the durable
+  `code_ritual_runs` 'running' insert from the tick body. `ReminderTickLoop.stop()`
+  (tick.ts:135-137 → SupervisedLoop quiescence await, `loop/index.ts:319` stop
+  awaits `inflight`) could therefore resolve BETWEEN a consumed #319 claim and its
+  durable run row — a claimed occurrence consumed with NO durable record = data loss
+  on shutdown/crash. Fixed to `await this.ritual_executor.fire(reminder)`
+  (`reminders/tick.ts:231`): claim → validate → durable 'running' row now completes
+  INSIDE the quiescence boundary. Only the long-running substrate TURN stays detached,
+  and that detachment is INTERNAL to the executor (`fireAndForget('ritual-run')`,
+  `reminders/ritual-executor.ts:494`) — the tick never blocks on an up-to-45-min run;
+  startup is milliseconds of local DB writes plus one prompt read. The now-unused
+  `fireAndForget` import was dropped (tick.ts:19) and the guard log key renamed
+  `ritual_fire_sync_throw` → `ritual_fire_threw` (it now also covers async
+  rejections). Regression test: an un-awaited `runOnce()` + immediate `await stop()`
+  with a REAL executor + never-settling turn leaves exactly the durable 'running'
+  row — `reminders/tick.test.ts` "a claimed ritual occurrence + immediate stop()
+  leaves a durable running row — never zero rows" (deterministically null on the
+  pre-fix code).
+- **`postNotice` honors spec §267 — one retry then a logged failure notice (minor a).**
+  `reminders/ritual-executor.ts:169-193`: a `post()==false` result (the durable
+  reply write was swallowed — `gateway/http/deliver.ts:187-188` → `reminder-outbound.ts:41-42`)
+  is retried ONCE; a still-false result logs `ritual_notice_post_not_persisted`. A
+  THROWN post keeps the existing `ritual_notice_post_failed` catch path.
+  `gateway/http/deliver.ts` is unchanged — its `{persisted:false}` reply contract is
+  correct and the consumer honors it.
+- **Executor-side pre-slice dropped; the formatter owns truncation (minor b).**
+  `reminders/ritual-executor.ts:278` no longer `.slice(0, 160)` the settled
+  failure reason before handing it to `formatRitualFailureNotice`
+  (`reminders/ritual-delivery.ts:60-63`), which owns whitespace-collapse THEN the
+  160-char cap. The old pre-slice truncated BEFORE collapse and could under-fill the
+  notice. The `:297` 4000-char DB `failure_reason` cap (a different concern) stays.
+- Tests: `bun test reminders/` 300 pass / 0 fail; `bun test gateway/` + `bun test loop/`
+  green.
+
+## 2026-07-21 — Executor-mode reminders task 5 (Argus r2 fixes): escalation fires after a cancel-broken streak + insertRunning-failure no longer wedges a ritual
+
+Round-3 corrections on PR #426 (branch `trident/executor-mode-reminders`).
+
+- **`shouldEscalate` now re-arms after ANY streak-breaker, not only a success
+  (BLOCKER).** `reminders/ritual-delivery.ts` gated re-arm on the 4th (older) row
+  being `=== 'finished'`, but `cancelled` also breaks a streak (it is outside
+  `FAIL`) — so a fresh 3-failure streak preceded by an operator cancel
+  (`[failed,failed,failed,cancelled]`) NEVER escalated, for the streak's entire
+  life. Fixed to gate on `!FAIL.has(4th.status)`: any non-failure streak-breaker
+  (`finished` OR `cancelled`) re-arms the once-per-streak notice. `FAIL` is now
+  typed over the full `RitualRunStatus` union so the un-narrowed 4th-row status
+  typechecks. The wrong assertion in `reminders/ritual-delivery.test.ts` was
+  corrected to expect `true`.
+- **A run-history write that fails AFTER the subagent spawned no longer wedges
+  the ritual (minor).** `reminders/ritual-executor.ts`: if `insertRunning` throws
+  after `spawnSubagent` persisted its `pending` `ritual:<id>` registry record,
+  the catch now marks that record terminal via `updateTerminal` (which never
+  rejects) so the `on_duplicate:'refuse'` guard's `liveByKey` no longer sees it —
+  every future fire would otherwise be refused as a duplicate with no durable row
+  explaining why. Then a durable `failed` run row + failure notice are landed
+  best-effort. New test in `reminders/ritual-executor.test.ts` proves the key is
+  freed (`liveByKey` undefined, record `crashed`), the failed row exists, the
+  notice posts, and the turn never launches.
+- **`listRecentTerminal` doc now lists `cancelled` (nit).** The interface comment
+  in `reminders/ritual-runs.ts` omitted `cancelled` though the SQL `IN`-clause
+  includes it; corrected to match.
+
+## 2026-07-21 — Executor-mode reminders task 5 (Argus r1 fixes): ritual prompt wiring + scope fail-close + cancel/escalation semantics
+
+Round-2 corrections on PR #426 (branch `trident/executor-mode-reminders`).
+
+- **Ritual REPL prompt now actually reaches the spawned agent (BLOCKER).**
+  `ClaudeCodeSubstrateOptions` gains `appendSystemPromptFile`, and the DEFAULT
+  anthropic factory `createClaudeCodeSubstrateAuto` now FORWARDS it onto
+  `PersistentReplSubstrateOptions` (`runtime/adapters/claude-code/index.ts`). It
+  was dropped there, so a ritual REPL spawned with the CHAT persona
+  (`repl-agent-base.md`) instead of the executor prompt, and the open typecheck
+  failed (TS2339 at `gateway/wiring/build-llm-call-substrate.ts:693`). New
+  end-to-end test `runtime/adapters/claude-code/persistent/__tests__/append-system-prompt-wiring.test.ts`
+  proves the whole chain: the real factory forwards the field AND the spawned
+  argv carries `--append-system-prompt-file` (custom when set, `repl-agent-base.md`
+  default when unset) — replacing the fake-factory coverage that masked it.
+- **Project-scoped rituals fail CLOSED instead of over-granting owner_home
+  (MAJOR).** Design doc §Layer 4: 'instance' rituals root at `owner_home`,
+  'project' rituals at their project dir. v1 wires ONLY the 'instance' root
+  (per-project rooting + write-containment is task 6). The composer's `scope_cwd`
+  (`open/composer.ts`) now THROWS for a non-'instance' scope, and the executor
+  (`reminders/ritual-executor.ts`) resolves the scope cwd BEFORE any 'running'
+  row, landing a durable `skipped` row (new skip reason `unsupported_scope`)
+  rather than silently running a project ritual from the owner-wide dir. No
+  running-row orphan, no escalation.
+- **Operator/shutdown cancel is no longer a scary failure (minor).** New
+  terminal run status `cancelled` (migration `0106`, `RitualRunTerminalStatus`).
+  `settleTerminal` records `cancelled` (not `failed`), posts NO failure notice,
+  and — being outside the `FAIL` set — breaks a consecutive-failure streak rather
+  than feeding the escalation.
+- **Escalation window ordered by COMPLETION (minor).**
+  `RitualRunStore.listRecentTerminal` now orders `ended_at DESC, started_at DESC,
+  run_id DESC` (was `started_at DESC`) so 'consecutive' failures are consecutive
+  by when they finished; `cancelled` rows are included in the terminal window.
+- Migration `0106_ritual_schema.sql` `status`/`skip_reason` CHECK enums extended
+  (`cancelled`, `unsupported_scope`); `migrations/expected-schema.txt` regenerated.
+
+## 2026-07-21 — Executor-mode reminders task 5: completion delivery + failure surfacing + boot reap + 30d retention
+
+A ritual's terminal event now reaches the owner. The detached settle chain writes
+the durable `code_ritual_runs` row FIRST, then posts through the ONE out-of-turn
+delivery seam (`Deliver` → the existing `ReminderOutbound`, concrete impl
+`buildButtonStoreReminderOutbound({ deliver })`) — the SAME instance the nudge
+dispatcher uses — to the owner's bare `app:<user>` topic. Spec of record:
+`docs/plans/executor-mode-reminders-2026-07-20.md`. NO feature flags.
+
+- **Completion delivery** (`reminders/ritual-executor.ts` `settleTerminal`,
+  ~ln 209-267): after `runs.markTerminal(...)`, a `finished` non-silent ritual
+  posts its final text (`r.result.trim()`), or `formatRitualCompletionFallback`
+  when the output is empty; a `silent` ritual posts NOTHING on success. Delivery
+  deps `outbound` + `resolve_topic` are REQUIRED on `RitualExecutorDeps`, so the
+  composer wiring is TypeScript-enforced.
+- **Failure surfacing** (`reminders/ritual-executor.ts` `surfaceFailure`,
+  ~ln 189-215): every failure terminal (failed / timed_out / crashed, plus the
+  spawn-refusal `insertFailed` path ~ln 262-273) posts exactly one one-line
+  notice `Ritual '<id>' <status> (run <run_id>)` (`formatRitualFailureNotice`).
+  Silent suppresses SUCCESS output only — failure notices always post. 'skipped'
+  rows get no notice.
+- **Consecutive-failure escalation** (`shouldEscalate`,
+  `reminders/ritual-delivery.ts`): a deterministic once-per-streak rule over the
+  last 4 terminal rows (`listRecentTerminal({ritual_id, limit:4})`) — fires one
+  `formatRitualEscalationNotice` the moment a streak crosses 3, with zero new
+  state. Checked in `surfaceFailure` after the failure row is written.
+- **Boot reap of orphaned 'running' rows** (`reapOrphanRitualRuns`,
+  `reminders/ritual-delivery.ts`; wired `open/composer.ts` after the ritual
+  factory): a `code_ritual_runs` row a PRIOR boot left 'running' is marked
+  'crashed' (`markTerminal`'s `WHERE status='running'` guard = idempotency) and
+  gets one boot-reap notice. `code_ritual_runs` has NO boot_id — current-boot
+  safety is ORDERING: the driver's FIRST statement is a SYNCHRONOUS
+  `listOrphanRunning()` snapshot taken during compose, before build-core-modules
+  starts the tick loop, so no current-boot 'running' row can exist in it. NOT
+  llmPool-gated (orphans from a prior LLM-enabled boot surface even credential-less).
+- **30-day retention prune** (`RitualRunStore.pruneOlderThan`,
+  `RITUAL_RUN_RETENTION_MS`, `reminders/ritual-runs.ts`): chained after the reap
+  at boot; deletes terminal/skipped rows with `started_at` STRICTLY older than
+  `Date.now() - 30d`, never 'running' rows.
+- **Composer wiring** (`open/composer.ts`): hoisted ONE `reminderOutbound` +
+  ONE `ritualRuns` store shared by the nudge dispatcher, the ritual executor, and
+  the boot reap; executor factory gains `outbound` + `resolve_topic`; the reap +
+  prune fire-and-forget runs unconditionally at compose (fireAndForget precedent
+  `composer:888`).
+- Tests: `reminders/ritual-delivery.test.ts` (formatters + `shouldEscalate` truth
+  table), `reminders/ritual-runs.test.ts` (listRecentTerminal / listOrphanRunning
+  / pruneOlderThan + T6 seeded-orphan reap + idempotence), and T3 behavioural
+  completion added to `reminders/ritual-executor.test.ts` (artifact-on-disk +
+  durable history row + silent + failure-notice variants + escalation streak +
+  post-failure resilience). `bun test reminders/` = 290 pass.
+
+## 2026-07-21 — Executor-mode reminders task 4: executor dispatch branch in the TICK + ritual executor + cc-ritual substrate + ritual lane + code_ritual_runs writer
+
+The live wiring that turns a `ritual_id` reminder row into a scheduled, scoped
+sub-agent REPL. The tick's #319 claim is reused verbatim for ritual rows, but
+they NEVER reach the nudge dispatcher / `on_fired` and NEVER revert their claim —
+every attempt is recorded durably in `code_ritual_runs` instead. Spec of record:
+`docs/plans/executor-mode-reminders-2026-07-20.md`. NO feature flags. Generic
+read-only surface only for now (zero defs registered until task 7).
+
+- **Ritual concurrency lane** (`runtime/subagent/registry.ts` `MAX_CONCURRENT_RITUALS=2`;
+  `runtime/subagent/spawn.ts` cap check): a `ritual` spawn counts ONLY live ritual
+  rows against the 2-cap; every other kind counts ONLY live non-ritual rows against
+  `MAX_CONCURRENT_SUBAGENTS=8`. Bidirectional isolation — a ritual pileup can't
+  starve interactive `/dispatch` + Trident, and 8 live builds never block a ritual.
+- **Tools threading** (`agent-dispatch/service.ts` `DispatchTurnInput.tools?`;
+  `agent-dispatch/substrate-turn.ts`): the runner maps `input.tools` onto stub
+  `AgentSpec` ToolDefs (the `trident/conflict-resolver.ts:80-87` precedent) so a
+  ritual's `tool_surface` reaches the spawned REPL's `--tools` argv. Omitted →
+  the historical toolless `tools:[]` (dispatch family unchanged).
+- **`PROFILE_RITUAL`** (`gateway/wiring/substrate-profiles.ts`) — the scheduled
+  ritual REPL trust class; byte-identical `{skip_permissions:true}` today, kept
+  DISTINCT so the T5 write-containment spike (task 6) tightens THIS grant first.
+  Frozen in the byte-identity equivalence test.
+- **`append_system_prompt_file` threading** (`gateway/wiring/build-llm-call-substrate.ts`
+  `BuildLlmCallSubstrateInput.append_system_prompt_file?` → `ClaudeCodeSubstrateOptions.
+  appendSystemPromptFile`, emitted `build-repl-argv.ts:109`). Absent → the
+  substrate's `repl-agent-base.md` default (chat persona) — unchanged for every caller.
+- **`reminders/ritual-agent-base.md`** (NEW, shipped in the package) — the
+  UNATTENDED-executor system prompt (no user present, never ask, use only granted
+  tools, one final reply). `RITUAL_AGENT_BASE_PROMPT` absolute path exported from
+  `reminders/prompt-path.ts` (module-dir pattern).
+- **`makeRitualSubstrate`** (`open/wiring/substrates.ts`) — a FRESH ephemeral
+  `cc-ritual-*` REPL per fire, `PROFILE_RITUAL`, `append_system_prompt_file:
+  RITUAL_AGENT_BASE_PROMPT`, NO `enableToolBridge`, NO owner-chat sinks; throws on
+  empty pool. Single-arg `(cwd)=>Substrate` so it drops into `buildCancellableDispatchTurn`.
+- **`reminders/ritual-runs.ts`** (NEW) — the SOLE `code_ritual_runs` writer
+  (`migrations/table-ownership.json` entry added). `createRitualRunStore(db)`:
+  `insertSkipped` (started=ended=now, skip_reason) / `insertRunning`
+  (subagent_run_id + content_hash) / `insertFailed` (spawn-refusal; no subagent
+  row) / `markTerminal` (finished|failed|timed_out|crashed + ended_at + output
+  truncated to 4000 chars, guarded `WHERE status='running'`). Async `db.run` only.
+- **`reminders/ritual-executor.ts`** (NEW) — `createRitualExecutor(deps).fire(reminder)`:
+  NEVER throws, NEVER awaits the turn. Validates via `validateRitualFire` + the
+  content-hash checker built from the row's LIVE cadence (skip → durable 'skipped'
+  row, spawns nothing); `spawnSubagent` kind `'ritual'` on the lane (spawn_key
+  `ritual:<id>`, on_duplicate 'refuse'; refusal → 'failed' row, no registry leak);
+  'running' row + best-effort registry running-flip; launches ONE substrate turn
+  detached via `fireAndForget`. Settlement maps completed→finished, timed_out→
+  timed_out, failed/cancelled→failed, rejection→crashed on the run row + drives the
+  registry record terminal. STRUCTURAL `RitualTurn` type (no agent-dispatch import)
+  so the composer passes the SAME `buildCancellableDispatchTurn` closure. NO
+  delivery/notices (task 5).
+- **Tick executor branch** (`reminders/tick.ts`) — `ReminderTickOptions.ritual_executor?`;
+  after the #319 claim a `ritual_id` row routes to `ritual_executor.fire` via
+  `fireAndForget('ritual-fire', …)`, SKIPS the dispatcher + `on_fired`, `fired++`,
+  and is NEVER reverted; `runOnce` resolves while the turn is pending. No executor
+  wired → the (already-claimed) row is consumed + logged, never a nudge fallback.
+  Nudge path byte-identical.
+- **Composition wiring** — `CompositionInput.ritual_executor_factory?` (`gateway/
+  composition/input/notifier-input.ts`); `remindersModule deps:['approval']` builds
+  the executor with the graph's `ApprovalManager` (`gateway/composition/build-core-modules.ts`);
+  the Open composer builds the factory (llmPool-gated) reusing the hoisted
+  `subagentRegistry` + `makeRitualSubstrate` + `getBestModel`, registry rooted
+  `<owner_home>/rituals` (ZERO defs until task 7), scope→owner_home v1 (`open/composer.ts`).
+- **Tests** — `runtime/subagent/spawn-lane.test.ts` (lane isolation both directions);
+  `agent-dispatch/substrate-turn.test.ts` (tools→spec.tools names / omitted→[]);
+  `reminders/tick.test.ts` (ritual→executor not dispatcher/on_fired; nudge contract
+  untouched; recurring ritual advances with NO revert on fire() reject; unwired→
+  consumed+logged; fire-and-forget proof); `reminders/ritual-executor.test.ts`
+  (skip verdicts durable + no spawn; approved → registry 'ritual' + 'running' row
+  content_hash + turn input; each terminal mapping; crash; spawn-cap 'failed' no
+  leak; fire() never rejects); `gateway/wiring/__tests__/substrate-profiles.test.ts`
+  (PROFILE_RITUAL byte-identity + append_system_prompt_file threading);
+  `gateway/composition/build-core-modules-ritual-executor.test.ts` (factory invoked
+  with the graph ApprovalManager + wired as the tick branch, mutation-kill).
+  `bash scripts/ci/depcruise.sh`: NO new cross-band edge.
+
+## 2026-07-21 — Executor-mode reminders task 3: content-hash ritual approval gate + real approval notifier
+
+The approval infrastructure that gates every ritual fire, plus the composer's
+FIRST real `approval_notifier` (was a no-op stub). No new table, no migration —
+durable grants are ordinary `tool_approvals` rows (migration-0004 DDL,
+`migrations/0004_gateway_core.sql:66-79`). Spec of record:
+`docs/plans/executor-mode-reminders-2026-07-20.md`.
+
+- **`ApprovalManager.findApproved(project_slug, tool_name)`** (`tools/approval.ts`)
+  — a generic synchronous query returning every `status='approved'` row for the
+  pair, `ORDER BY decided_at ASC` (mirrors `get`/`listPending`). This is the ONLY
+  ritual-agnostic addition to the platform layer; ALL ritual logic lives in
+  `reminders/` (a legal services→platform edge — `.dependency-cruiser.cjs`
+  `platform-stays-low` forbids the reverse).
+- **`reminders/ritual-approval.ts`** (new; `reminders/package.json` gains
+  `@neutronai/tools`):
+  - `computeRitualContentHash` — SHA-256 hex over a canonical JSON ARRAY of
+    (prompt bytes ‖ SORTED tool surface ‖ scope ‖ cadence ‖ model tier ‖
+    timeout). JSON-array canonicalization is delimiter-injection-proof; sorting
+    the surface makes grant order irrelevant.
+  - `ritualCadenceString` — `spec:<cron>` | `legacy:<coarse>` | `once` from the
+    row's mutually-exclusive `recurrence_spec`/`recurrence` (`reminders/store.ts:41-49`).
+  - `ritualApprovalToolName`/`ritualEgressApprovalToolName` — the namespaced
+    `tool_name` (`ritual:<id>` / `ritual-egress:<id>`); `:` is forbidden in both
+    the ritual id charset and tool tokens, so these never collide with a real tool grant.
+  - `requestRitualApproval` — submits a `prompt-user` request (the FIRST real
+    production caller of `ApprovalManager.requestApproval`) carrying the content
+    hash in `args_json`; an `egress:'web'` def mints a SECOND, separately-approved
+    `ritual-egress:<id>` request bound to the SAME hash (approving content never
+    implicitly approves egress). Returns both decision promises without awaiting.
+  - `createRitualApprovalCheck({manager, project_slug, cadence})` — implements
+    task 2's `RitualApprovalCheck` seam. RECOMPUTES the hash from the LIVE prompt
+    bytes on EVERY `isApproved` call (ported Vajra prompts are mutable files);
+    requires a content grant, and for web defs an egress grant, whose
+    `args_json.content_hash` matches. A malformed `args_json` row is skipped
+    (never a match, never a throw); DB/manager errors PROPAGATE so
+    `validateRitualFire` fail-closes to 'unapproved'. **Design consequence:**
+    a cadence change or a `reminders_update` (atomic cancel+create → new id,
+    `cores/free/reminders/src/mcp-tools-extra.ts:64`) DROPS approval.
+- **`open/wiring/approval-notifier.ts`** (new) — `buildAppWsApprovalNotifier`
+  replaces the composer's `approval_notifier: { notify: async () => undefined }`
+  no-op (`open/composer.ts`, base composition). Broadcasts a PLAIN-TEXT
+  `agent_message` (`Approval requested [<id>]: <tool_name>[ — <description>]`) to
+  every live app-ws topic per the `watchdogNotifier` precedent (composer
+  ~3338-3364); fail-soft throughout (never throws into `ApprovalManager`; one dead
+  socket never stops the rest). NEVER includes prompt bytes / tool surface / args
+  beyond `description`, never Markdown — the rich itemized rendering with the
+  affirmative-act binding is task 8. `appWsRegistry` (composer :2051) satisfies
+  the structural `ApprovalNotifierRegistry` by construction.
+- **NO auto-approval anywhere** — every request is `policy:'prompt-user'`; a
+  bundled ritual stays unapproved (→ fire-time SKIP) until the owner's explicit
+  `respondApproval`. No-self-approval enforcement (`resolution_speaker_user_id`)
+  arrives with task 8's ButtonStore surface.
+- **Tests** — `reminders/ritual-approval.test.ts` (11 cases: hash determinism +
+  per-field sensitivity + order-insensitive surface; cadence-string; single- and
+  dual-grant request with durable-record assertions; end-to-end seam bind over the
+  real registry with an on-disk prompt; RE-VERIFY-EVERY-FIRE prompt-tamper drop;
+  cadence-change drop; egress-separately-approved; denied/pending/malformed
+  non-match; throwing-store fail-closed through `validateRitualFire`; no-auto-approve
+  pending-decision). `tools/approval.test.ts` +1 (`findApproved` slug/tool/status
+  filtering). `open/__tests__/approval-notifier.test.ts` (3: per-topic broadcast +
+  body content, malformed-args fallback, dead-socket resilience). All green;
+  `reminders/` + `tools/` suites 275 pass; dep-cruiser + tsc (reminders/tools/open) clean.
+
+## 2026-07-20 — Executor-mode reminders task 2: ritual schema + registry module (migration 0106)
+
+The persistent + pure-logic foundation of the ritual layer (executor-mode
+reminders — a reminder that spawns a scoped sub-agent REPL at fire time instead of
+composing a nudge). Schema + registry only; the tick dispatch branch, approval
+gate, and completion delivery are plan tasks 3-5. Spec of record:
+`docs/plans/executor-mode-reminders-2026-07-20.md`.
+
+- **Migration `0106_ritual_schema.sql`** — three forward-only DDL units:
+  (A) nullable opaque-TEXT `reminders.ritual_id` (0095 `recurrence_spec`
+  precedent — the in-process registry is the authoritative validator, a CHECK
+  would force a table rebuild per ritual; NULL = nudge row, no backfill); (B) new
+  durable `code_ritual_runs` run-history table (own retention, NOT pruned on the
+  subagent-registry liveness prune, `runtime/subagent/store.ts:171` — the durable
+  answer to "why didn't my morning brief run"; richer status vocab than the
+  registry: `skipped`/`running`/`finished`/`failed`/`timed_out`/`crashed` +
+  `skip_reason` CHECK-coupled to `skipped` via `CHECK ((status='skipped') =
+  (skip_reason IS NOT NULL))`; carries `subagent_run_id`/`content_hash`/
+  `failure_reason`/`output_summary`; a `ritual`+`started_at` index and a partial
+  `live` index); (C) widened `code_subagent_registry.agent_kind` to admit
+  `'ritual'` via create-copy-drop-rename (SQLite cannot ALTER a CHECK), the 0100
+  DDL reproduced verbatim with only the enum widened, STRICT + all CHECKs + both
+  0100 indexes preserved, rows copied by explicit column list. `expected-schema.txt`
+  regenerated (only the three expected shapes — reminders col, new table+indexes,
+  agent_kind enum + the RENAME name-quote); `runner.test.ts` version list + 106.
+  NO `table-ownership.json` entry — coverage is opt-in and this table has no
+  writers yet (the first runtime-writer task adds it).
+- **`AgentKind` widened** (`runtime/subagent/registry.ts:25`) to include `'ritual'`.
+  Consumers are `Partial<Record<AgentKind,…>>` (watchdog, dispatch prompts) OR
+  narrow the union with `Exclude`: trident `DispatchAgentKind` now excludes BOTH
+  `'core'` and `'ritual'` (`trident/agent-prompts.ts:50`) so its persona
+  `Record`s stay exhaustive — a ritual is spawned by the reminders tick with its
+  own `rituals/<id>.md` prompt, never through the trident persona loader (Argus
+  round-2 BLOCKER fix: the earlier "compile-safe, only Partial consumers" claim
+  was false — `PersonaAgentKind` derives from `AgentKind` via non-partial
+  `Record` and broke `tsc`).
+- **`reminders/rituals.ts`** — the pure registry + fail-CLOSED fire-time verdict.
+  `RitualDef` (charset-guarded id `^[a-z0-9][a-z0-9-]{0,63}$` — traversal
+  impossible by construction; `description` non-empty ≤200 chars = the approval
+  capability line [task 8]; `scope` project|instance; `tool_surface` NEVER empty
+  [#361 toolless-class pin], each entry a tool token [`Bash` allowed — overturn 1,
+  security rides the approval gate not exclusion]; `egress` `'none'|'web'`
+  register-time-consistent with the surface; `silent`; NO `requires_approval`,
+  NO `prompt_path`/`model`/`timeout` fields — approval is a separate content-hash
+  record [task 3], prompt derived `rituals/<id>.md`, tier `'best'` + 45-min
+  timeout are module constants). `createRitualRegistry({rituals_dir})` →
+  `register()` (throws on bad id/dup/empty-or-long description/empty surface/bad
+  token/egress-inconsistency; stores a frozen copy) / `get` / `list` /
+  `promptPathFor`. Argus round-2: `assertValid` now also runtime-guards the
+  `scope`/`egress`/`silent`/`tool_surface` field TYPES (a def can arrive from
+  imported user-data JSON the compiler never saw — a bogus `scope:'arbitrary'`
+  or `egress:'bogus'` now FAILS CLOSED at register time instead of slipping past
+  the consistency checks). Argus round-3 extends this to the two regex-validated
+  fields: `def.id` and each `tool_surface` entry now get a `typeof … !== 'string'`
+  guard BEFORE `RegExp.test` (which stringifies its argument, so `42`→`"42"` and
+  `null`→`"null"` would MATCH the charset and register under a non-string Map key
+  / freeze a non-string tool grant into the surface that flows to approval hashing
+  + spawn — now both throw). `validateRitualFire(registry, approvals, id, log)`
+  async → `unknown_ritual` | `missing_prompt` (missing/unreadable/empty/over-256KB;
+  the 256 KiB cap is now enforced from `statSync().size` BEFORE the file is read
+  into memory — Argus round-2 minor) |
+  `unapproved` (false OR THROW — fail CLOSED) | ok. The `RitualApprovalCheck` seam
+  is REQUIRED (no permissive default anywhere), consulted only after the prompt is
+  read. A fail verdict logs once and SKIPs — never degrade-to-nudge, never
+  `tools:[]`.
+- **`reminders/store.ts`** — `ritual_id` is READ-THROUGH only: plumbed through
+  `Reminder`, `ReminderDbRow`, `COLS`, `rowToReminder`, and the two return
+  literals (`ritual_id: null`). Deliberately NOT added to `CreateReminderInput` /
+  `CreateRecurringReminderInput` and NOT written in either INSERT — the only writer
+  lands with its validation (registration = task 8, tick wiring = task 4), so the
+  column defaults NULL untouched. Public surface exported from `reminders/index.ts`.
+- **Tests** — `reminders/rituals.test.ts`: registry round-trip + frozen-copy
+  independence; every `register()` invariant is a throw (bad ids, dup, empty
+  surface, bad token, both egress inconsistencies, empty/over-long description,
+  Bash-surface accepted); all four fire verdicts with `not.toHaveBeenCalled` on
+  early skips and `toHaveBeenCalledWith(def, exact-bytes)` on the approval seam,
+  approval-THROW → unapproved with a single log line, artifact-grounded happy-path
+  marker + no-fallback-shape assertion; constants; 0106 CHECK tests
+  (`agent_kind` ritual ok / bogus rejected, `code_ritual_runs` status +
+  skip_reason invariant) + a rebuild-preserves-data test (apply 0000-0105, insert
+  a legacy `forge` row, apply 0106, assert the row survives field-for-field and
+  `ritual` now inserts). `reminders/store.test.ts`: create() defaults `ritual_id`
+  null + a raw-`UPDATE` read-through round-trip (the write path deliberately
+  doesn't exist yet).
+
+## 2026-07-20 — M2-3 round 2: §7.2 merge-safety gate closes the memory-consolidation arming precondition (Argus r1 BLOCKER)
+
+Task 1 of the executor-mode-reminders branch armed the 6h memory consolidation ON
+by default (P0-4), but the memory-system design named two mitigations as "STILL
+PENDING before arming" (the §7.2 name-tripwire and merge-loser quarantine) and the
+dedup code comments lied about them — `jaccard.ts` claimed "consolidation is not
+armed" (now false) and cited a "§7.2 merge name-tripwire" that had no
+implementation. Argus flagged the armed-without-mitigation state as a corruption
+BLOCKER. This round implements the actual safety gate that prevents the
+irreversible false-fusion and makes the comments true.
+
+- **`isMergeSafeCluster` merge-safety gate** (`scribe/reflect/jaccard.ts`), applied
+  by `dedupPages` to every candidate cluster BEFORE the irreversible fuse
+  (`scribe/reflect/reflect-pass.ts`). Two gates block the two false-positive
+  signatures the 0.7 Jaccard cut alone would let through:
+  - Gate A (**shared name token**) — HOLDS two DIFFERENT-named entities that reach
+    the bar only via shared relation targets (`Bob`/`Carol` each `Works at
+    [[org0]]/[[org1]]/[[org2]]` = 0.714 but share no name token). §7.2 residual B.
+  - Gate B (**corroboration beyond the name**) — excluding the name, members must
+    still be pairwise ≥ threshold similar on BODY-ONLY tokens; HOLDS two DISTINCT
+    fact-less entities sharing an identical name (two "John Smith" pages score 1.0
+    on name tokens but collapse to empty body sets once the name is excluded).
+    §7.2 residual A. Name exclusion is EXPLICIT: each candidate's title tokens are
+    subtracted from its body token set before the pairwise score, because
+    `stripBoilerplate` only removes the generated `# <Name>` H1 — name tokens that
+    appear in PROSE (`John Smith is an engineer at Google` vs `… at Facebook`) would
+    otherwise inflate body Jaccard to 0.75 ≥ 0.7 and irreversibly merge two distinct
+    people; with title tokens subtracted the score drops to 0.667 < 0.7 → correctly
+    HELD (Argus r1 blocker fix).
+- **HELD ≠ merged.** A held cluster keeps every member as its own survivor (the
+  pass's always-safe missed-merge direction), increments the new
+  `ReflectReport.held` counter, and is logged LOUDLY so the owner can hand-merge a
+  genuine duplicate the gate was conservative on. Merge-loser quarantine is NO
+  LONGER an arming blocker — the gate prevents the false identity-fusion outright,
+  and genuine near-duplicate losers are already absorbed into the survivor before
+  deletion (no content loss).
+- **Comments/docs corrected** to match the armed reality: `jaccard.ts`
+  (`DEFAULT_JACCARD_THRESHOLD` + `MIN_DISTINGUISHING_TOKENS` doc), the memory-system
+  design doc's "STILL PENDING before arming" block, and SYSTEM-OVERVIEW's dedup
+  section (which had downgraded "close before arming" to "corpus-tuning follow-up").
+- **Tests** (reproduce-then-fix): `scribe/__tests__/reflect-jaccard.test.ts`
+  (`isMergeSafeCluster` holds residuals A + B, passes genuine near-duplicates,
+  singleton trivially safe) and `scribe/__tests__/reflect-pass.test.ts`
+  (behavioural, real on-disk: two "John Smith" pages HELD with both surviving +
+  nothing deleted + `report.held == 1`; `Bob`/`Carol` HELD; genuine near-duplicates
+  still merge with `report.held == 0`). Suite: 122 scribe tests green.
+- **Argus r1 minors** also addressed: `open/__tests__/reflect-loop-arming.test.ts`
+  leak-guard now spies on `SupervisedLoop.start` keyed on the loop's IDENTITY
+  (`name`), not the no-longer-unique 6h cadence; `open/__tests__/loop-inventory-boot-shell.test.ts`
+  real-boot test timeouts raised 30s→60s to absorb full-suite-parallelism
+  contention (a genuinely-hung boot is still a distinct, louder signal).
+
+NOTE: the executor-mode reminders deliverable (ritual schema, executor dispatch
+branch, approval gate, T5 write-containment) is NOT built by this PR — it is the
+remaining RALPH iterations 2–10 on `IMPLEMENTATION_PLAN.md`. This branch is Task 1
+(consolidation flag-collapse) + its arming precondition. P0-1 M2 is NOT done.
+
 ## 2026-07-20 — #374 Defect 2a: the LIVE onboarding-complete emit stamps the durable handoff marker ONLY on real delivery (kills the residual post-claim bounce)
 
 Closed the OPEN half of the #374 claim-jank fix. The reconnect-recovery replay in
@@ -225,14 +700,48 @@ Trident build run'"). Each ships a reproduce-then-fix test that FAILS on prior m
 > `docs/research/AS-BUILT-docs-archive-2026-07.md`. This file is the ONE live
 > changelog going forward.
 
+## 2026-07-20 — M2-3 / P0-4: `NEUTRON_PERFECT_RECALL` collapsed — perfect-recall lane default-ON, 6h consolidation
+
+Deleted the `NEUTRON_PERFECT_RECALL` feature flag (`runtime/perfect-recall-flag.ts`
++ its test + the sole-consumer `runtime/env-flag-tokens.ts`). The whole
+perfect-recall lane — RB1 memory-index manifest, RB3 reflect-consolidation loop,
+RB4 supersede, RC2 agent-nexus — is now the UNCONDITIONAL default, and the reflect
+consolidation cadence flips 24h→6h ON by default (`DEFAULT_REFLECT_INTERVAL_MS =
+6 * 60 * 60 * 1000`, `scribe/reflect/reflect-pass.ts`). This clears the standing
+no-feature-flags violation (Ryan-locked, no dual code paths) and creates the
+always-running attachment point the dreaming-half-into-core-memory work needs.
+Ryan-locked: consolidation every 6h, ON by default (neutron-managed SPEC Decisions
+Log 2026-07-20; managed SPEC §374-376; deepened plan build-order #1).
+
+- **Four un-gated sites in `open/wiring/memory.ts`** — `memoryIndexHook`
+  (wrap-sync-hook-with-memory-index, RB1), scribe `supersede` (RB4), `nexus =
+  new NexusStore(...)` (RC2), and the `reflectLoop` `SupervisedLoop` (RB3) are all
+  constructed unconditionally. The `WiredMemory` type tightens to non-optional
+  (`memoryIndexRead: () => Promise<string | null>`, `nexus: NexusStore`,
+  `reflectLoop: SupervisedLoop`), so the composer's `reflectLoop !== null` /
+  `memoryIndexRead !== undefined` null-guards are removed (register-before-start +
+  quiescing-stop ordering preserved verbatim).
+- **LLM-less degrade path survives** — the substrate is still `llmPool`-gated
+  (a real runtime condition, not a flag): an LLM-less box gets scribe=null and a
+  dedup-only reflect pass, and `immediate:false` means no boot-time LLM call.
+- **`supersede` option removed from the public scribe surface** (`scribe/extract.ts`,
+  `scribe/index.ts`, `scribe/write-to-gbrain.ts`) — belief-evolution supersede is
+  always on; the RB4 `relations[].supersedes` data marker is unchanged.
+- **`gateway/nexus/nexus-emit.ts`** drops the dead `isPerfectRecallEnabled`
+  re-export (grep-zero importers) and its flag-era doc block.
+- Acceptance: `grep -rn "NEUTRON_PERFECT_RECALL|isPerfectRecallEnabled|perfect-recall-flag"
+  --include='*.ts'` (excl. node_modules) → ZERO hits; a default-env boot constructs +
+  registers + starts the reflect loop at 6h (`reflect-loop-arming.test.ts` asserts
+  `describe().intervalMs === 21_600_000` with NO env var set); `bun test` green.
+
 ## 2026-07-20 — M2-3: memory-consolidation correctness — 3 dedup/supersede corruption blockers
 
 Closed the three data-integrity blockers that gate the memory build
-(memory-system-design-2026-07-20 blockers 1–3). All are correctness fixes to
-flag-gated (`NEUTRON_PERFECT_RECALL`) consolidation code — nothing is armed; the
-flag stays off. These protect the owner's canonical corpus from silent permanent
-corruption once consolidation runs. Each fix ships with a reproduce-then-fix test
-that provably FAILS on the prior main.
+(memory-system-design-2026-07-20 blockers 1–3). All are correctness fixes to the
+consolidation code — now the always-on default (the `NEUTRON_PERFECT_RECALL` flag
+that gated it was collapsed the same day; see the entry above). These protect the
+owner's canonical corpus from silent permanent corruption when consolidation runs.
+Each fix ships with a reproduce-then-fix test that provably FAILS on the prior main.
 
 - **BLOCKER 1 — dedup no longer fuses UNRELATED entities** (`scribe/reflect/jaccard.ts`).
   On main, five fact-less company pages (`# <Name>` + `Mentioned in chat (kind: X).`)
@@ -268,7 +777,8 @@ that provably FAILS on the prior main.
   relation persists as an additive dated timeline row (`works_at oldco`), but
   `stripSupersededSentences` writes NOTHING to the timeline, so the sentence's
   descriptive detail and any co-located still-current non-edge fact (`earns $400k`)
-  leave current truth and are not re-recorded. Flag-gated (`NEUTRON_PERFECT_RECALL`).
+  leave current truth and are not re-recorded. (Runs under the always-on
+  consolidation default — see the flag-collapse entry above.)
 - **BLOCKER 2b — resynth may not mutate a predicate** (`preservesEdges`,
   `scribe/reflect/reflect-pass.ts`). The accept-gate now compares extracted
   (predicate, object) PAIRS, not just wikilink TARGETS. On main a rewrite that kept

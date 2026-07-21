@@ -24,11 +24,9 @@
  * and the per-turn / per-run project scope are known.
  *
  * The whole R-behavior block (RB1/RB2/RC2/RC3/RB3/RB4 — the perfect-recall +
- * agent-coordination uplift) sits behind ONE shared flag so it enables/rolls
- * back atomically (plan §14.6). `isPerfectRecallEnabled` is that shared gate;
- * when it is off the wiring sites construct no store and pass no emitter, so
- * every seam behaves exactly as it does today (no `.nexus/` sidecar is ever
- * touched).
+ * agent-coordination uplift) is the BASE behavior now: the wiring sites always
+ * construct the store and pass the emitter (managed SPEC Decisions Log
+ * 2026-07-20, P0-4 — memory consolidation ON by default).
  */
 
 import { createLogger } from '@neutronai/logger'
@@ -42,20 +40,6 @@ import {
 } from './nexus-store.ts'
 
 const log = createLogger('nexus-emit')
-
-/**
- * The ONE shared feature gate for the R-behavior block (plan §14.6). Off by
- * default: the recall/coordination uplift ships DARK until an operator opts in,
- * so RC2's emitters — and RC3's reader — are inert on an un-flagged instance.
- *
- * RB1 made `runtime/perfect-recall-flag.ts` the single source of truth (the
- * low-level leaf both the gateway nexus wiring AND the runtime memory-index
- * wiring can import); this re-export keeps every existing RC2 consumer importing
- * `isPerfectRecallEnabled` from here while they all resolve to that one predicate
- * (same `NEUTRON_PERFECT_RECALL` var, opt-in tokens `1`/`true`/`yes`/`on`/
- * `enabled`/`all`).
- */
-export { isPerfectRecallEnabled } from '@neutronai/runtime/perfect-recall-flag.ts'
 
 /** Keep a nexus body pointers-lean AND under the store's hard cap. Long content
  *  belongs behind a `ref`, never inlined; this is a belt so a runaway task

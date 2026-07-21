@@ -19,6 +19,7 @@ import { createLogger } from '@neutronai/logger'
 import { SupervisedLoop, type LoopDescriptor } from '@neutronai/loop'
 
 import { isRecurring, type Reminder, type ReminderRecurrence, type ReminderStore } from './store.ts'
+import type { RitualExecutor } from './ritual-executor.ts'
 
 const log = createLogger('reminder-tick')
 
@@ -73,6 +74,20 @@ export interface ReminderTickOptions {
    * that don't care about the push path.
    */
   on_fired?: ReminderFiredHook
+  /**
+   * Executor-mode reminders (plan task 4) — the RITUAL executor. A due row with a
+   * non-null `ritual_id` routes to `ritual_executor.fire(reminder)` INSTEAD of the
+   * nudge `dispatcher` + `on_fired` push. fire()'s STARTUP (validate → ritual-lane
+   * spawn → durable `code_ritual_runs` row) is AWAITED inside the tick so it lands
+   * within stop()'s quiescence boundary — a claimed occurrence can never be
+   * consumed without its durable run row (the Argus task-5 data-loss blocker); only
+   * the long-running substrate TURN is fire-and-forget, detached INSIDE the executor
+   * (see `reminders/ritual-executor.ts` step (f)). Omitted in tests / on an LLM-less
+   * box that has no ritual surface; a ritual row that fires with NO executor wired is
+   * consumed (claimed) and logged (never falls back to the nudge dispatcher — a
+   * ritual is not a nudge). Structural so the composition can pass any `{ fire }`.
+   */
+  ritual_executor?: RitualExecutor
 }
 
 export class ReminderTickLoop {
@@ -83,6 +98,7 @@ export class ReminderTickLoop {
   private readonly now: () => number
   private readonly time_zone: string
   private readonly on_fired: ReminderFiredHook | null
+  private readonly ritual_executor: RitualExecutor | null
   /** Loop scaffolding — single-flight, per-tick catch-all, quiescing stop (§F1). */
   private readonly loop: SupervisedLoop
   private firedCount = 0
@@ -95,6 +111,7 @@ export class ReminderTickLoop {
     this.now = options.now ?? Date.now
     this.time_zone = options.time_zone ?? hostTimeZone()
     this.on_fired = options.on_fired ?? null
+    this.ritual_executor = options.ritual_executor ?? null
     this.loop = new SupervisedLoop({
       name: 'reminders',
       intervalMs: this.interval_ms,
@@ -198,6 +215,70 @@ export class ReminderTickLoop {
           }
           await this.store.markFired(reminder.id)
           claimRevert = () => this.store.reopen(reminder.id)
+        }
+
+        // Executor-mode reminders (plan task 4). A ritual row NEVER reaches the
+        // nudge dispatcher and NEVER fires the `on_fired` push (a 45-min executor
+        // run would push-notify up to 45 min BEFORE any output, even for a silent
+        // ritual — task 5 owns ritual delivery). The #319 claim above already
+        // ran (advanceRecurrence for a recurring ritual / markFired for a one-shot).
+        // On a SUCCESSFUL fire()-startup the claim is CONSUMED (no revert): the
+        // durable `code_ritual_runs` history row IS the record, and a recurring row
+        // has already advanced to its next cadence, so re-firing the same attempt
+        // every 30 s (the nudge deliver-or-retry contract) is wrong here.
+        // fire()'s STARTUP — fail-closed validate → ritual-lane spawn → durable
+        // `code_ritual_runs` 'running' (or skipped/failed) row — is AWAITED so it
+        // completes INSIDE the tick body, i.e. inside SupervisedLoop's stop()
+        // quiescence await (tick.ts:135-137). stop() can therefore never resolve
+        // between a consumed #319 claim and its durable run row (the Argus task-5
+        // data-loss blocker). Only the long-running substrate TURN is detached,
+        // INSIDE the executor (fireAndForget('ritual-run'), ritual-executor.ts step
+        // (f)) — the tick never blocks on an up-to-45-min execution; startup is
+        // milliseconds of local DB writes plus one prompt-file read.
+        //
+        // But a REJECTED fire() is a STARTUP LOSS: validate/spawn/durable-row-write
+        // threw so NO run row landed for this occurrence. REVERT the #319 claim (the
+        // same claimRevert the nudge dispatcher uses) so the occurrence re-fires next
+        // tick instead of vanishing with no run + no history (the Argus r1 BLOCKER:
+        // the executor's outer catch used to swallow the throw and the tick consumed
+        // the claim regardless). The detached substrate TURN is fire-and-forget INSIDE
+        // the executor and its settlement is fail-soft, so a fire() rejection is
+        // unambiguously a startup loss, never a mid-run failure.
+        if (reminder.ritual_id !== null) {
+          if (this.ritual_executor !== null) {
+            try {
+              await this.ritual_executor.fire(reminder)
+              fired++
+            } catch (err) {
+              // Startup loss — revert the claim so the occurrence re-fires. A
+              // recurring row's advance is undone (compare-and-swap, so a concurrent
+              // reschedule isn't clobbered); a one-shot is reopened.
+              try {
+                await claimRevert()
+              } catch (rerr) {
+                log.error('ritual_claim_revert_failed', {
+                  reminder: reminder.id,
+                  ritual_id: reminder.ritual_id,
+                  error: rerr instanceof Error ? (rerr.stack ?? rerr.message) : String(rerr),
+                })
+              }
+              log.error('ritual_fire_threw', {
+                reminder: reminder.id,
+                ritual_id: reminder.ritual_id,
+                error: err instanceof Error ? (err.stack ?? err.message) : String(err),
+              })
+            }
+          } else {
+            // No executor wired (LLM-less box / test): a PERMANENT condition, not a
+            // transient loss — reverting would re-fire it every tick forever. Consume
+            // the claim and log. NEVER fall back to the nudge dispatcher.
+            log.error('ritual_executor_unwired', {
+              reminder: reminder.id,
+              ritual_id: reminder.ritual_id,
+            })
+            fired++
+          }
+          continue
         }
 
         try {

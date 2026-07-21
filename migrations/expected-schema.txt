@@ -69,6 +69,15 @@ CREATE INDEX idx_app_chat_reactions_topic_seq_msg
 CREATE INDEX idx_app_chat_receipts_topic_seq_msg
     ON app_chat_receipts (topic_id, seq, message_id)
 
+[index] idx_code_ritual_runs_live (tbl=code_ritual_runs)
+CREATE INDEX idx_code_ritual_runs_live
+    ON code_ritual_runs (status)
+    WHERE status = 'running'
+
+[index] idx_code_ritual_runs_ritual (tbl=code_ritual_runs)
+CREATE INDEX idx_code_ritual_runs_ritual
+    ON code_ritual_runs (ritual_id, started_at)
+
 [index] idx_code_subagent_registry_live (tbl=code_subagent_registry)
 CREATE INDEX idx_code_subagent_registry_live
     ON code_subagent_registry (status)
@@ -499,13 +508,44 @@ CREATE TABLE button_prompts (
     resolution_channel_kind TEXT
 , kind TEXT) STRICT
 
+[table] code_ritual_runs (tbl=code_ritual_runs)
+CREATE TABLE code_ritual_runs (
+    -- Minted per FIRE ATTEMPT (a UUID) — NOT the subagent run id: a validation
+    -- skip never spawns, so it has no subagent row at all.
+    run_id           TEXT PRIMARY KEY NOT NULL,
+    ritual_id        TEXT NOT NULL,
+    reminder_id      TEXT,
+    project_slug     TEXT,
+    -- The `code_subagent_registry` row when a spawn happened; NULL for skips.
+    subagent_run_id  TEXT,
+    status           TEXT NOT NULL
+                         CHECK (status IN (
+                             'skipped', 'running', 'finished', 'failed', 'timed_out', 'crashed', 'cancelled'
+                         )),
+    skip_reason      TEXT
+                         CHECK (skip_reason IS NULL OR skip_reason IN (
+                             'unknown_ritual', 'missing_prompt', 'unapproved', 'unsupported_scope', 'gated_tool_surface'
+                         )),
+    -- The approved content hash the run fired under (nullable; populated once the
+    -- approval gate lands — plan task 3).
+    content_hash     TEXT,
+    started_at       INTEGER NOT NULL,               -- epoch ms
+    ended_at         INTEGER,                         -- epoch ms
+    -- Truncated final text of the run, kept for history.
+    output_summary   TEXT,
+    failure_reason   TEXT,
+    -- A row is 'skipped' IFF it carries a skip_reason; every non-skipped row
+    -- carries none.
+    CHECK ((status = 'skipped') = (skip_reason IS NOT NULL))
+) STRICT
+
 [table] code_subagent_registry (tbl=code_subagent_registry)
-CREATE TABLE code_subagent_registry (
+CREATE TABLE "code_subagent_registry" (
     run_id              TEXT PRIMARY KEY NOT NULL,
     instance_key        TEXT NOT NULL,
     agent_kind          TEXT NOT NULL
                             CHECK (agent_kind IN (
-                                'forge', 'atlas', 'sentinel', 'argus', 'core'
+                                'forge', 'atlas', 'sentinel', 'argus', 'core', 'ritual'
                             )),
     status              TEXT NOT NULL DEFAULT 'pending'
                             CHECK (status IN (
@@ -1137,7 +1177,7 @@ CREATE TABLE reminders (
     created_at REAL NOT NULL,
     fired_at REAL,                                       -- nullable until fired
     cancelled_at REAL                                    -- nullable until cancelled
-, recurrence TEXT, source TEXT, recurrence_spec TEXT)
+, recurrence TEXT, source TEXT, recurrence_spec TEXT, ritual_id TEXT)
 
 [table] remote_shared_projects (tbl=remote_shared_projects)
 CREATE TABLE remote_shared_projects (

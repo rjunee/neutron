@@ -1,15 +1,19 @@
 /**
  * Focused unit coverage for `open/wiring/memory.ts` (C3a carve).
  *
- * Pins the scribe / GBrain / reflection wiring's observable contract:
- *   - LLM-present: `scribe` + `scribeOnUserTurn` are live, `gbrainMemory` and
- *     its `syncHook` are built, `reflection` is built, and the returned
- *     `cleanups` carry BOTH teardown hooks (GBrain close + Cores fan-out stop)
- *     in registration order (GBrain first);
+ * Pins the scribe / GBrain / reflection wiring's observable contract. The
+ * perfect-recall lane is the BASE behavior now (managed SPEC Decisions Log
+ * 2026-07-20, P0-4 — no flag), so the memory-index wrap + the agent-nexus store
+ * are ALWAYS built:
+ *   - LLM-present: `scribe` + `scribeOnUserTurn` are live, `gbrainMemory` and its
+ *     memory-index-wrapped `syncHook` are built, `reflection` + the nexus store
+ *     are built, and the returned `cleanups` carry THREE teardown hooks (GBrain
+ *     close → nexus closeAll → Cores fan-out stop) in registration order;
  *   - LLM-less (`llmPool: null`): `scribe` is null (no extraction substrate) and
- *     `scribeOnUserTurn` is undefined, but `gbrainMemory` is STILL built
- *     (unconditional) and `reflection` still functions — only the fan-out
- *     cleanup drops (it is gated on a live scribe), so `cleanups` has ONE hook.
+ *     `scribeOnUserTurn` is undefined, but `gbrainMemory` + the nexus store are
+ *     STILL built (unconditional) and `reflection` still functions — only the
+ *     fan-out cleanup drops (it is gated on a live scribe), so `cleanups` has TWO
+ *     hooks (GBrain close + nexus closeAll).
  *
  * Cleanups are always drained in a `finally` so no scheduler timer leaks.
  */
@@ -100,16 +104,20 @@ async function runCleanups(cleanups: Array<() => void>): Promise<void> {
 }
 
 describe('wireMemory', () => {
-  test('LLM-present: scribe live, gbrain + reflection built, BOTH cleanups (gbrain then fan-out)', async () => {
+  test('LLM-present: scribe live, gbrain + reflection + nexus built, THREE cleanups (gbrain, nexus, fan-out)', async () => {
     const w = wireMemory(makeCtx())
     try {
       expect(w.scribe).not.toBeNull()
       expect(w.scribeOnUserTurn).toBeDefined()
       expect(w.gbrainMemory).toBeDefined()
-      expect(w.gbrainSyncHook).toBe(w.gbrainMemory.syncHook)
+      // The memory-index wrap is ALWAYS applied now → the exposed syncHook is the
+      // wrapper, NOT the raw gbrain hook, and the cold-turn read seam is live.
+      expect(w.gbrainSyncHook).not.toBe(w.gbrainMemory.syncHook)
+      expect(w.memoryIndexRead).toBeDefined()
       expect(w.reflection).toBeDefined()
-      // GBrain close is registered first, the Cores fan-out stop second.
-      expect(w.cleanups.length).toBe(2)
+      expect(w.nexus).not.toBeNull()
+      // GBrain close registered first, nexus closeAll second, Cores fan-out third.
+      expect(w.cleanups.length).toBe(3)
     } finally {
       await runCleanups(w.cleanups)
     }
@@ -123,27 +131,18 @@ describe('wireMemory', () => {
       // GBrain memory is unconditional; reflection degrades gracefully.
       expect(w.gbrainMemory).toBeDefined()
       expect(w.reflection).toBeDefined()
-      // Only the GBrain close hook — the fan-out is gated on a live scribe.
-      expect(w.cleanups.length).toBe(1)
-    } finally {
-      await runCleanups(w.cleanups)
-    }
-  }, 15_000)
-
-  // RC2 — the agent-nexus emitter is behind the shared perfect-recall flag.
-  test('perfect-recall OFF (default): no nexus store, no extra cleanup', async () => {
-    const w = wireMemory(makeCtx())
-    try {
-      expect(w.nexus).toBeNull()
-      // Unchanged: GBrain close + Cores fan-out stop.
+      // The nexus store is built unconditionally (not gated on a live scribe).
+      expect(w.nexus).not.toBeNull()
+      // GBrain close + nexus closeAll — the fan-out cleanup is gated on a live scribe.
       expect(w.cleanups.length).toBe(2)
     } finally {
       await runCleanups(w.cleanups)
     }
   }, 15_000)
 
-  test('perfect-recall ON: nexus store built + torn down via cleanups', async () => {
-    const w = wireMemory(makeCtx({ env: { NEUTRON_PERFECT_RECALL: '1' } as NodeJS.ProcessEnv }))
+  // RC2 — the agent-nexus emitter is the base behavior now (always built).
+  test('nexus store always built + torn down via cleanups', async () => {
+    const w = wireMemory(makeCtx())
     try {
       expect(w.nexus).not.toBeNull()
       // The nexus closeAll hook is registered between GBrain and the fan-out.
@@ -166,7 +165,6 @@ describe('wireMemory', () => {
     })
     const w = wireMemory(
       makeCtx({
-        env: { NEUTRON_PERFECT_RECALL: '1' } as NodeJS.ProcessEnv,
         substrateFactory,
       }),
     )
@@ -252,10 +250,10 @@ describe('wireMemory', () => {
     }
   }, 15_000)
 
-  // RB4 — the flag actually REACHES the wired scribe. A prompt-capturing factory
-  // proves that `wireMemory` threads `isPerfectRecallEnabled(env)` all the way into
-  // the scribe's extraction prompt: a mutation dropping `supersede:
-  // isPerfectRecallEnabled(env)` at the createScribe call site fails THIS test.
+  // RB4 — the supersede guidance actually REACHES the wired scribe. A
+  // prompt-capturing factory proves that `wireMemory` builds a scribe whose
+  // extraction prompt always carries the guidance (belief evolution is the base
+  // behavior now): a mutation that stopped splicing the guidance fails THIS test.
   const captureScribePrompts = (): {
     prompts: string[]
     factory: (opts: ClaudeCodeSubstrateOptions) => Substrate
@@ -272,28 +270,15 @@ describe('wireMemory', () => {
   const SCRIBE_TURN =
     'Alice Ng moved from OldCo to NewCo this quarter and now leads their platform reliability team.'
 
-  test('RB4: NEUTRON_PERFECT_RECALL=on threads supersede guidance into the wired scribe prompt', async () => {
+  test('RB4: the wired scribe prompt always carries the supersede guidance', async () => {
     const { prompts, factory } = captureScribePrompts()
-    const w = wireMemory(
-      makeCtx({ env: { NEUTRON_PERFECT_RECALL: '1' } as NodeJS.ProcessEnv, substrateFactory: factory }),
-    )
+    const w = wireMemory(makeCtx({ substrateFactory: factory }))
     try {
       expect(w.scribe).not.toBeNull()
       await w.scribe!.extractAndWrite({ text: SCRIBE_TURN, observed_at: Date.now() })
       // The dispatched extraction prompt carries the supersede guidance.
-      expect(prompts.some((p) => p.includes(SUPERSEDE_GUIDANCE))).toBe(true)
-    } finally {
-      await runCleanups(w.cleanups)
-    }
-  }, 15_000)
-
-  test('RB4: flag OFF → the wired scribe prompt has NO supersede guidance (dark by default)', async () => {
-    const { prompts, factory } = captureScribePrompts()
-    const w = wireMemory(makeCtx({ env: {} as NodeJS.ProcessEnv, substrateFactory: factory }))
-    try {
-      await w.scribe!.extractAndWrite({ text: SCRIBE_TURN, observed_at: Date.now() })
       expect(prompts.length).toBeGreaterThan(0) // the scribe DID dispatch…
-      expect(prompts.some((p) => p.includes(SUPERSEDE_GUIDANCE))).toBe(false) // …without guidance
+      expect(prompts.some((p) => p.includes(SUPERSEDE_GUIDANCE))).toBe(true)
     } finally {
       await runCleanups(w.cleanups)
     }

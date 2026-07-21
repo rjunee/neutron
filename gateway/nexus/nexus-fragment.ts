@@ -38,10 +38,11 @@
  * inlines the referenced artifact. A capped count of events is injected so a busy
  * nexus can never blow up the prompt.
  *
- * DARK by default: the whole R-behavior block sits behind the shared
- * `NEUTRON_PERFECT_RECALL` flag (plan §14.6). When it is off the composer builds
- * no `NexusStore` and wires no reader seam, so RC3 is inert; and a reader over an
- * EMPTY log is a no-op regardless (it returns `null` → no block is injected).
+ * Always wired now: the R-behavior block is the base behavior (managed SPEC
+ * Decisions Log 2026-07-20, P0-4 — memory consolidation ON by default), so the
+ * composer always builds the `NexusStore` and wires the reader seam. A reader
+ * over an EMPTY log is still a no-op (it returns `null` → no block is injected),
+ * so a fresh install with no events costs nothing at the prompt.
  */
 
 import { createLogger } from '@neutronai/logger'

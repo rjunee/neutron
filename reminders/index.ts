@@ -24,6 +24,43 @@ export type {
   ReminderTickOptions,
 } from './tick.ts'
 
+// Executor-mode reminders — the ritual EXECUTOR + its durable run-history writer
+// (plan task 4). The tick dispatch branch routes ritual rows to `fire()`; the
+// composer builds the executor + passes the shared subagent registry / substrate
+// turn / approval manager.
+export { createRitualExecutor } from './ritual-executor.ts'
+export type {
+  RitualExecutor,
+  RitualExecutorDeps,
+  RitualTurn,
+  RitualTurnInput,
+  RitualTurnResult,
+} from './ritual-executor.ts'
+export { RITUAL_AGENT_BASE_PROMPT } from './prompt-path.ts'
+export {
+  createRitualRunStore,
+  MAX_RITUAL_OUTPUT_SUMMARY_CHARS,
+  RITUAL_RUN_RETENTION_MS,
+} from './ritual-runs.ts'
+export type {
+  RitualRunStore,
+  RitualRunRow,
+  RitualRunStatus,
+  RitualRunTerminalStatus,
+} from './ritual-runs.ts'
+
+// Completion delivery + failure surfacing (plan task 5): terminal-event notice
+// formatters, the once-per-streak escalation rule, and the boot-reap driver.
+export {
+  reapOrphanRitualRuns,
+  shouldEscalate,
+  formatRitualFailureNotice,
+  formatRitualCompletionFallback,
+  formatRitualEscalationNotice,
+  formatRitualBootReapNotice,
+  RITUAL_ESCALATION_CONSECUTIVE_FAILURES,
+} from './ritual-delivery.ts'
+
 export {
   buildReminderDispatcher,
   buildSubstrateReminderLlm,
@@ -42,6 +79,42 @@ export type {
 // belongs at the composition root. `reminders` keeps only the `ReminderOutbound`
 // SEAM (exported above from ./dispatcher.ts). An upward move gets no re-export
 // shim here — that would recreate the reminders→gateway edge this cut removes.
+// Executor-mode reminders — the ritual layer (migration 0106). Schema + pure
+// registry/validation only; the tick dispatch branch + approval gate + run-history
+// writer land in plan tasks 3-5.
+export {
+  createRitualRegistry,
+  validateRitualFire,
+  RITUAL_ID_RE,
+  RITUAL_MODEL_TIER,
+  RITUAL_TIMEOUT_MS,
+  MAX_RITUAL_PROMPT_BYTES,
+} from './rituals.ts'
+export type {
+  RitualDef,
+  RitualRegistry,
+  RitualScope,
+  RitualEgress,
+  RitualApprovalCheck,
+  RitualFireValidation,
+  RitualFireSkipReason,
+} from './rituals.ts'
+
+// Content-hash-bound ritual approval gate (migration-0004 tool_approvals rows;
+// plan task 3). The request path + the RitualApprovalCheck implementation.
+export {
+  computeRitualContentHash,
+  ritualCadenceString,
+  ritualApprovalToolName,
+  ritualEgressApprovalToolName,
+  requestRitualApproval,
+  createRitualApprovalCheck,
+} from './ritual-approval.ts'
+export type {
+  RitualContentHashInput,
+  RitualApprovalRequestResult,
+} from './ritual-approval.ts'
+
 export { buildStatusMdContextSource } from './context.ts'
 export {
   classifyReminderMessage,

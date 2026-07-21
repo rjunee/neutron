@@ -37,6 +37,7 @@ import {
 } from './persistent/persistent-repl-substrate.ts'
 import type { DeadTurnNotice } from './persistent/api5xx-dead-turn-watcher.ts'
 import type { SizeSeverity } from './persistent/session-size-watchdog.ts'
+import type { SettingsPermissions } from './persistent/build-settings.ts'
 
 export type { RecoveredReply } from './persistent/persistent-repl-substrate.ts'
 export type { RateLimitBannerNotice } from './persistent/persistent-repl-substrate.ts'
@@ -45,6 +46,10 @@ export type { RateLimitBannerNotice } from './persistent/persistent-repl-substra
 // boundary (never a deep `persistent/*` path).
 export type { DeadTurnNotice } from './persistent/api5xx-dead-turn-watcher.ts'
 export type { SizeSeverity } from './persistent/session-size-watchdog.ts'
+// Task 6 (T5 write-containment) — surface the per-session `permissions` shape at
+// the adapter boundary so a gateway caller wiring a ritual write-containment
+// substrate imports it from HERE, never a deep `persistent/*` path.
+export type { SettingsPermissions } from './persistent/build-settings.ts'
 
 export interface ClaudeCodeSubstrateOptions {
   /**
@@ -169,6 +174,36 @@ export interface ClaudeCodeSubstrateOptions {
    * See `PersistentReplSubstrateOptions.enableToolBridge`.
    */
   enableToolBridge?: boolean
+  /**
+   * Executor-mode reminders (plan task 4/5) — override the spawned REPL's
+   * `--append-system-prompt-file`, forwarded verbatim onto
+   * `PersistentReplSubstrateOptions.appendSystemPromptFile`
+   * (`persistent/types.ts:216` → emitted `build-repl-argv.ts:109`). ABSENT ⇒
+   * the substrate's default (`repl-agent-base.md`, the interactive CHAT persona;
+   * see `spawn.ts` DEFAULT_AGENT_BASE_PROMPT). The ritual executor sets this to
+   * `reminders/ritual-agent-base.md` so a scheduled ritual REPL runs as an
+   * UNATTENDED executor rather than the chat agent. Without forwarding it here a
+   * caller built through `createClaudeCodeSubstrateAuto` (the DEFAULT anthropic
+   * factory — see `select-substrate.ts`) would silently drop the prompt and the
+   * ritual would run as the chat persona.
+   */
+  appendSystemPromptFile?: string
+  /**
+   * Task 6 (T5 write-containment spike) — when `true`, the spawned REPL does NOT
+   * register the `tool-use-approve` auto-approver (which presses "Yes" on any
+   * tool-use permission prompt, incl. Bash). Set by a WRITING/Bash ritual so a
+   * `permissions.deny` rule (below) is load-bearing rather than auto-approved
+   * past. Forwarded onto `PersistentReplSubstrateOptions.disableToolUseAutoApprove`.
+   * Absent ⇒ today's behavior (approver ON). The wedged-prompt deadlock-recovery
+   * ladder stays registered either way (no-hang backstop). */
+  disableToolUseAutoApprove?: boolean
+  /**
+   * Task 6 (T5 write-containment spike) — optional CC `permissions` block written
+   * into the spawned REPL's per-session `--settings` JSON (alongside the Stop
+   * hook). Paired with `disableToolUseAutoApprove: true` + `skip_permissions`
+   * OFF, a `deny` rule fails an out-of-scope write closed headlessly. Forwarded
+   * onto `PersistentReplSubstrateOptions.permissions`. Absent ⇒ Stop hook only. */
+  permissions?: SettingsPermissions
 }
 
 /**
@@ -244,6 +279,21 @@ export function createClaudeCodeSubstrateAuto(options: ClaudeCodeSubstrateOption
   }
   // P0-1 — native-MCP tool bridge opt-in (owner's warm conversational REPL only).
   if (options.enableToolBridge !== undefined) p.enableToolBridge = options.enableToolBridge
+  // Executor-mode reminders (task 4/5) — forward the non-default agent-base prompt
+  // so a scheduled ritual REPL spawns as the UNATTENDED executor persona rather
+  // than the chat agent. Dropping it here (the DEFAULT factory) is exactly what
+  // Argus r1 caught: `spawn.ts` falls back to DEFAULT_AGENT_BASE_PROMPT
+  // (`repl-agent-base.md`) and the ritual runs as the chat persona.
+  if (options.appendSystemPromptFile !== undefined) p.appendSystemPromptFile = options.appendSystemPromptFile
+  // Task 6 (T5 write-containment) — thread the ritual write-containment knobs so a
+  // future writing/Bash-ritual factory can (a) disable the tool-use auto-approver
+  // and (b) install a per-session `permissions` deny block. NOT baked into
+  // PROFILE_RITUAL (the substrate-profiles equivalence net freezes it) — direct
+  // call-args, active only when a caller sets them.
+  if (options.disableToolUseAutoApprove !== undefined) {
+    p.disableToolUseAutoApprove = options.disableToolUseAutoApprove
+  }
+  if (options.permissions !== undefined) p.permissions = options.permissions
 
   // Sprint-2 supervision: derive a per-instance persisted REPL registry + state dir
   // under the instance home and ensure the live watchdog (wedge/crash detect →

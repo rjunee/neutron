@@ -166,4 +166,61 @@ describe('buildCancellableDispatchTurn', () => {
     })
     expect(res.status).toBe('failed')
   })
+
+  // Executor-mode reminders (plan task 4) — the ritual executor passes a
+  // `tools` surface; the dispatch family passes none. The runner maps the
+  // names onto AgentSpec ToolDefs (the `--tools` argv) so the exact granted
+  // surface reaches the spawned REPL.
+  function captureSpec(seen: AgentSpec[]): (cwd: string) => Substrate {
+    return () => ({
+      start(spec: AgentSpec): SessionHandle {
+        seen.push(spec)
+        async function* gen(): AsyncGenerator<Event> {
+          yield completion
+        }
+        return {
+          events: gen(),
+          async respondToTool(): Promise<void> {},
+          async cancel(): Promise<void> {},
+          tool_resolution: 'internal',
+        }
+      },
+    })
+  }
+
+  test('input.tools maps onto spec.tools names (ritual surface reaches the spawn)', async () => {
+    const seen: AgentSpec[] = []
+    const turn = buildCancellableDispatchTurn({ build_substrate: captureSpec(seen) })
+    await turn({
+      kind: 'ritual',
+      system: 'ritual',
+      user_message: 'do the ritual',
+      repo_path: '/w',
+      trident_run_id: 'r5',
+      model: 'm',
+      timeout_ms: 0,
+      tools: ['Read', 'Grep'],
+    })
+    expect(seen).toHaveLength(1)
+    expect(seen[0]!.tools.map((t) => t.name)).toEqual(['Read', 'Grep'])
+    // Each stub ToolDef carries a generic schema + capability (conflict-resolver
+    // precedent) so the argv builder emits a real `--tools` grant.
+    expect(seen[0]!.tools[0]!.capability_required).toBe('fs:project_data')
+  })
+
+  test('omitting input.tools preserves the toolless [] spec (dispatch family unchanged)', async () => {
+    const seen: AgentSpec[] = []
+    const turn = buildCancellableDispatchTurn({ build_substrate: captureSpec(seen) })
+    await turn({
+      kind: 'atlas',
+      system: 'atlas',
+      user_message: 'research',
+      repo_path: '/w',
+      trident_run_id: 'r6',
+      model: 'm',
+      timeout_ms: 0,
+    })
+    expect(seen).toHaveLength(1)
+    expect(seen[0]!.tools).toEqual([])
+  })
 })

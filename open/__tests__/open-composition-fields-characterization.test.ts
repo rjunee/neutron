@@ -97,6 +97,9 @@ const EXPECTED_COMPOSITION_KEYS = [
   'project_slug',
   'realmode_cleanups',
   'reminder_dispatcher',
+  // Executor-mode reminders (plan task 4) — ritual executor factory, set when
+  // a credential resolves (llmPool !== null), like `agent_dispatch`/`trident`.
+  'ritual_executor_factory',
   'skill_forge',
   'tasks',
   'topic_handler',

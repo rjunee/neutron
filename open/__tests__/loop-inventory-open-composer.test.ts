@@ -42,6 +42,9 @@ const EXPECTED_RUNNING_LOOPS = [
   'chunked-upload-sweeper',
   'cron',
   'dispatch-lifecycle-watchdog',
+  // Memory consolidation is ON by default (managed SPEC Decisions Log 2026-07-20,
+  // P0-4), so the reflect-consolidation loop always arms.
+  'reflect-consolidation',
   'reminders',
   'trident',
   'watchdog',
@@ -182,9 +185,9 @@ test('D-7 dormant loops are enumerated + NOT running (no silent dead loop)', () 
   }
 })
 
-test('the ONE boot line names all six running loops + the dormant set', () => {
+test('the ONE boot line names all seven running loops + the dormant set', () => {
   const line = harness.graph.loopRegistry.bootLine('owner', DORMANT_LOOPS)
-  expect(line).toContain('6 loop(s) running')
+  expect(line).toContain('7 loop(s) running')
   for (const name of EXPECTED_RUNNING_LOOPS) expect(line).toContain(name)
   expect(line).toMatch(/cron \(\d+ jobs/)
   expect(line).toContain('2 dormant (deferred): [agent-watcher, project-backup-scheduler]')

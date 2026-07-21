@@ -53,9 +53,24 @@ export function buildCancellableDispatchTurn(
     ((handle: unknown): void => clearTimeout(handle as ReturnType<typeof setTimeout>))
 
   return async (input): Promise<DispatchTurnResult> => {
+    // The dispatch family passes no `tools` → the historical toolless spec
+    // (`--tools ""`). The ritual executor passes a RitualDef `tool_surface`,
+    // which we map onto stub `ToolDef`s (name + generic schema) exactly per the
+    // `trident/conflict-resolver.ts` precedent so the exact granted surface
+    // reaches the spawned REPL's `--tools` argv.
+    const tools: AgentSpec['tools'] =
+      input.tools === undefined
+        ? []
+        : input.tools.map((name) => ({
+            name,
+            description: `Built-in Claude Code tool '${name}' (ritual/dispatch surface)`,
+            input_schema: { type: 'object' },
+            output_schema: { type: 'object' },
+            capability_required: 'fs:project_data',
+          }))
     const spec: AgentSpec = {
       prompt: input.user_message,
-      tools: [],
+      tools,
       model_preference: [input.model],
       ...(opts.max_tokens !== undefined ? { max_tokens: opts.max_tokens } : {}),
     }

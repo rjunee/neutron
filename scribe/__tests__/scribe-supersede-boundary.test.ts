@@ -4,18 +4,16 @@
  * The real-PGLite round-trip (`scribe-temporal-invalidation.test.ts`) drives the
  * write/graph half with a fake substrate that INJECTS `supersedes` directly — so
  * on its own it would still pass if the extraction boundary silently stopped
- * asking the model for the marker. These tests pin that boundary (Codex RB4 r7):
+ * asking the model for the marker. These tests pin that boundary (Codex RB4 r7).
+ * Belief evolution is the BASE behavior now (managed SPEC Decisions Log
+ * 2026-07-20, P0-4 — no flag), so the guidance is ALWAYS present:
  *
- *   1. `composeExtractionPrompt` — flag OFF is byte-identical to the legacy
- *      prompt; flag ON splices in `SUPERSEDE_GUIDANCE`.
+ *   1. `composeExtractionPrompt` — always splices in `SUPERSEDE_GUIDANCE`.
  *   2. `parseExtraction` — the optional `supersedes` marker is preserved when
  *      present and omitted when absent/blank.
- *   3. `createScribe` PROPAGATION — a `supersede: true` scribe dispatches an
- *      extraction prompt containing the guidance (and `false` does not), proving
- *      the flag threads `createScribe → runExtraction → composeExtractionPrompt`.
- *   4. env WIRING — `isPerfectRecallEnabled` (the exact value
- *      `open/wiring/memory.ts` feeds into `createScribe`'s `supersede`) maps the
- *      shared `NEUTRON_PERFECT_RECALL` token.
+ *   3. `createScribe` PROPAGATION — a scribe always dispatches an extraction
+ *      prompt containing the guidance, proving the guidance threads
+ *      `createScribe → runExtraction → composeExtractionPrompt`.
  */
 
 import { describe, test, expect } from 'bun:test'
@@ -26,11 +24,9 @@ import type { Substrate, AgentSpec } from '@neutronai/runtime/substrate.ts'
 import type { Event } from '@neutronai/runtime/events.ts'
 import type { SessionHandle } from '@neutronai/runtime/session-handle.ts'
 import type { SyncHook } from '@neutronai/runtime/entity-writer.ts'
-import { isPerfectRecallEnabled } from '@neutronai/runtime/perfect-recall-flag.ts'
 import {
   composeExtractionPrompt,
   parseExtraction,
-  SCRIBE_EXTRACTION_PROMPT,
   SUPERSEDE_GUIDANCE,
 } from '../extract.ts'
 import { createScribe } from '../index.ts'
@@ -40,17 +36,9 @@ import type { WriteEntityFn } from '../write-to-gbrain.ts'
 const t0 = Date.parse('2026-07-15T00:00:00.000Z')
 
 describe('RB4 extraction boundary — prompt guidance', () => {
-  test('flag OFF is byte-identical to the legacy prompt (no supersede guidance)', () => {
+  test('always splices the supersede guidance in before the message', () => {
     const text = 'Alice moved to NewCo.'
-    const legacy = `${SCRIBE_EXTRACTION_PROMPT}${text}\n`
-    expect(composeExtractionPrompt(text)).toBe(legacy)
-    expect(composeExtractionPrompt(text, { supersede: false })).toBe(legacy)
-    expect(composeExtractionPrompt(text)).not.toContain(SUPERSEDE_GUIDANCE)
-  })
-
-  test('flag ON splices the supersede guidance in before the message', () => {
-    const text = 'Alice moved to NewCo.'
-    const prompt = composeExtractionPrompt(text, { supersede: true })
+    const prompt = composeExtractionPrompt(text)
     expect(prompt).toContain(SUPERSEDE_GUIDANCE)
     expect(prompt).toContain('"supersedes"') // the guidance teaches the marker
     // The turn text still trails the prompt (guidance is spliced ABOVE MESSAGE:).
@@ -109,8 +97,8 @@ const noopWriteEntity: WriteEntityFn = async (i) => ({
   newLinks: [],
 })
 
-describe('RB4 extraction boundary — createScribe propagates the supersede flag to the prompt', () => {
-  const mkScribe = (supersede: boolean, specs: AgentSpec[]): ReturnType<typeof createScribe> =>
+describe('RB4 extraction boundary — createScribe always propagates the guidance to the prompt', () => {
+  const mkScribe = (specs: AgentSpec[]): ReturnType<typeof createScribe> =>
     createScribe({
       substrate: recordingSubstrate(specs),
       syncHook: { async onEntityWrite(): Promise<void> {} } as SyncHook,
@@ -119,34 +107,15 @@ describe('RB4 extraction boundary — createScribe propagates the supersede flag
       budget: createState(join(mkdtempSync(join(tmpdir(), 'scribe-sb-b-')), '.s.json'), t0),
       writeEntity: noopWriteEntity,
       now: () => t0,
-      supersede,
     })
 
   const TURN =
     'Alice Ng just moved on from OldCo — she now works at NewCo, leading their infra team full time.'
 
-  test('supersede ON → the dispatched extraction prompt carries the guidance', async () => {
+  test('the dispatched extraction prompt always carries the guidance', async () => {
     const specs: AgentSpec[] = []
-    await mkScribe(true, specs).extractAndWrite({ text: TURN, observed_at: t0 })
+    await mkScribe(specs).extractAndWrite({ text: TURN, observed_at: t0 })
     expect(specs.length).toBe(1)
     expect(specs[0]!.prompt).toContain(SUPERSEDE_GUIDANCE)
-  })
-
-  test('supersede OFF → the dispatched extraction prompt is the legacy prompt', async () => {
-    const specs: AgentSpec[] = []
-    await mkScribe(false, specs).extractAndWrite({ text: TURN, observed_at: t0 })
-    expect(specs.length).toBe(1)
-    expect(specs[0]!.prompt).not.toContain(SUPERSEDE_GUIDANCE)
-    expect(specs[0]!.prompt).toBe(`${SCRIBE_EXTRACTION_PROMPT}${TURN}\n`)
-  })
-})
-
-describe('RB4 extraction boundary — env wiring reaches createScribe.supersede', () => {
-  test('isPerfectRecallEnabled (the value memory.ts feeds `supersede`) maps NEUTRON_PERFECT_RECALL', () => {
-    // open/wiring/memory.ts wires `supersede: isPerfectRecallEnabled(env)`.
-    expect(isPerfectRecallEnabled({ NEUTRON_PERFECT_RECALL: '1' })).toBe(true)
-    expect(isPerfectRecallEnabled({ NEUTRON_PERFECT_RECALL: 'on' })).toBe(true)
-    expect(isPerfectRecallEnabled({})).toBe(false)
-    expect(isPerfectRecallEnabled({ NEUTRON_PERFECT_RECALL: 'off' })).toBe(false)
   })
 })

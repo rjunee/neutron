@@ -18,6 +18,7 @@ function reminder(over: Partial<Reminder> = {}): Reminder {
     status: 'pending',
     recurrence: null,
     recurrence_spec: null,
+    ritual_id: null,
     source: null,
     created_at: 0,
     fired_at: null,

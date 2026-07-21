@@ -199,3 +199,21 @@ export const PROFILE_EPHEMERAL: SubstrateProfile = {
 export const PROFILE_WARM_FIRE: SubstrateProfile = {
   skip_permissions: true,
 }
+
+/**
+ * The scheduled ritual-executor REPL (`cc-ritual-*`) — executor-mode reminders
+ * (plan task 4). An EPHEMERAL, tool-surface-restricted background REPL that a
+ * cadence fires UNATTENDED; its per-RitualDef `tool_surface` reaches the spawn
+ * via `AgentSpec.tools` (the `--tools` argv), NOT this profile. TODAY:
+ * `skip_permissions: true`, byte-identical to `PROFILE_EPHEMERAL`. Kept DISTINCT
+ * because the T5 write-containment spike (plan task 6) + the tool-security
+ * redesign tighten THIS grant FIRST (a scheduled actor's Bash/writing rituals
+ * are the highest-risk class), so the divergence must be a one-line edit to this
+ * one constant — the same "distinct-though-identical-today" discipline as
+ * `PROFILE_UNTRUSTED_IMPORT` vs `PROFILE_WARM_CHAT`.
+ *
+ * Site: `open/wiring/substrates.ts` (`makeRitualSubstrate` → `cc-ritual-*`).
+ */
+export const PROFILE_RITUAL: SubstrateProfile = {
+  skip_permissions: true,
+}
