@@ -93,7 +93,9 @@ export {
   clusterNearDuplicates,
   jaccard,
   tokenize,
+  stripBoilerplate,
   DEFAULT_JACCARD_THRESHOLD,
+  MIN_DISTINGUISHING_TOKENS,
   type DedupCandidate,
 } from './reflect/jaccard.ts'
 export {

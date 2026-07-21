@@ -1323,7 +1323,15 @@ describe('RB4 temporal invalidation (belief evolution) — real PGLite round-tri
     expect(edgesTo(links, 'cwnew', 'works_at').length).toBe(1) // ADDED
   }, 60_000)
 
-  test('flag ON: a SINGLE-relation sentence wrapped in descriptive prose is kept byte-for-byte (prose not lost)', async () => {
+  // Blocker 2a (memory-system-design-2026-07-20): supersede is keyed on the graph
+  // TRIPLE, not the generated-template sentence SHAPE. A SINGLE-relation PROSE
+  // sentence — the exact shape a reflect RESYNTH produces — for a superseded target
+  // is now retired IN FULL (the graph edge must ALWAYS be retired). This is the
+  // deliberate reversal of the former under-remove behaviour: without it, every
+  // supersede on a resynthesized page was a permanent no-op (works_at NewCo AND
+  // works_at OldCo asserted forever). The descriptive detail leaves CURRENT
+  // compiled-truth but its history lives on in the append-only timeline.
+  test('flag ON: a SINGLE-relation PROSE sentence for a superseded target IS retired (triple-keyed, not template-shaped)', async () => {
     const ownerDataDir = mkdtempSync(join(tmpdir(), 'scribe-rb4-prose-'))
     const syncHook = new GBrainSyncHook({
       memoryStore: new GBrainMemoryStore(client),
@@ -1334,8 +1342,9 @@ describe('RB4 temporal invalidation (belief evolution) — real PGLite round-tri
       slug: 'prold',
       content: '---\nslug: prold\ntype: company\n---\n\nA company.\n',
     })
-    // ONE graph relation, but WRAPPED in hand-authored descriptive prose that
-    // exists nowhere else. This is NOT a scribe-generated `Works at [[x]].` sentence.
+    // ONE graph relation, WRAPPED in prose — NOT the scribe-generated
+    // `Works at [[x]].` template. This is exactly what a reflect RESYNTH emits, so
+    // on main (template-shape gate) the supersede below is a silent no-op.
     const PROSE = '- Works at [[prold]] as principal engineer since 2019.'
     await writeEntity(
       {
@@ -1352,6 +1361,9 @@ describe('RB4 temporal invalidation (belief evolution) — real PGLite round-tri
       },
       { syncHook },
     )
+    // Sanity: the works_at prold edge is live before the supersede.
+    let links = await client.call('get_links', { slug: 'priya-rao' })
+    expect(edgesTo(links, 'prold', 'works_at').length).toBe(1)
 
     const scribe = createScribe({
       substrate: cannedSubstrate(factSupersede('Priya Rao', 'Prold', 'Prnew')),
@@ -1371,11 +1383,17 @@ describe('RB4 temporal invalidation (belief evolution) — real PGLite round-tri
 
     const onDisk = readFileSync(join(ownerDataDir, 'entities', 'people', 'priya-rao.md'), 'utf8')
     const compiled = extractCompiledTruth(onDisk)
-    // PROSE SAFETY: the descriptive sentence survives BYTE-FOR-BYTE (the removal
-    // path only drops sentences that EXACTLY match a generated relationship form).
-    expect(compiled).toContain(PROSE)
-    expect(compiled).toContain('Works at [[prnew]].') // new fact accretes
-    // Nothing was retired from the prose sentence → no fabricated supersession note.
+    // The superseded prose sentence is GONE from CURRENT compiled-truth (edge retired);
+    // the new employment accretes. On main this assertion FAILS (prose kept → no-op).
+    expect(compiled).not.toContain('[[prold]]')
+    expect(compiled).toContain('Works at [[prnew]].')
+
+    // The graph edge is retired to the current truth.
+    links = await client.call('get_links', { slug: 'priya-rao' })
+    expect(edgesTo(links, 'prold', 'works_at').length).toBe(0) // INVALIDATED
+    expect(edgesTo(links, 'prnew', 'works_at').length).toBe(1) // CURRENT
+
+    // No state-dependent "superseded" note is fabricated; history is the timeline.
     const timeline = extractTimeline(onDisk)
     expect(timeline.some((e) => e.body.includes('superseded'))).toBe(false)
   }, 60_000)

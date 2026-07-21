@@ -49,7 +49,6 @@ import {
 } from '@neutronai/runtime/entity-format.ts'
 import {
   extractTypedLinks,
-  normaliseSentence,
   splitSentencesWithOffsets,
 } from '@neutronai/runtime/auto-link.ts'
 import type { EntityKind, SyncHook } from '@neutronai/runtime/entity-writer.ts'
@@ -175,10 +174,12 @@ export interface WriteExtractionDeps {
    * carrying a `supersedes` marker DROPS the superseded object's sentence(s) from
    * the subject's compiled-truth (so the writer's existing
    * `removedLinks`→`remove_link` machinery invalidates the stale gbrain edge and
-   * `add_link` asserts the current one), and the superseding write records the
-   * transition in the append-only timeline (dated history preserved). When false
-   * (the default), `supersedes` is ignored entirely → pure accretion, byte-for-
-   * byte today's behaviour.
+   * `add_link` asserts the current one), and the superseding write records each
+   * RELATION additively as a dated `<pred> <obj>` timeline row (no free-text
+   * "transition" note — the retired relation survives as history via its own
+   * additive row; the dropped sentence's descriptive prose is NOT re-recorded, see
+   * `stripSupersededSentences`). When false (the default), `supersedes` is ignored
+   * entirely → pure accretion, byte-for-byte today's behaviour.
    */
   supersede?: boolean
 }
@@ -554,19 +555,28 @@ function mergeExistingCompiledTruth(existing: string, page: PlannedPage, superse
  * target sentence and keeps the rest, so neither a stale sibling sentence lingers
  * nor an unrelated fact is deleted wholesale.
  *
- * SINGLE-SENTENCE ONLY, VERBATIM otherwise (Codex data-loss blockers): a sentence
- * is dropped ONLY when it is PURELY a single generated relationship assertion for a
- * superseded target (`pureSupersededSentence` — exactly one graph relation, and the
- * sentence normalises to the `RELATION_SENTENCE` template). ANYTHING else — a
- * COMPOUND sentence asserting more than one relation, or a single relation wrapped
- * in descriptive prose (`Works at [[oldco]] and advises [[boardco]] on acquisitions
- * since 2019.`) — is KEPT BYTE-FOR-BYTE, never deleted and never reconstructed. The
- * trade-off is intentional + safe: a superseded relation embedded in a compound /
- * prose sentence is left in place (under-remove rather than mangle hand-authored
- * text). Scribe's own rendered prose is one relation per sentence, so a real
- * chat-time supersession always hits the clean single-relation path; only
- * hand-authored/imported compound prose is spared (its graph edge follows the KG's
- * one-edge-per-pair collapse regardless).
+ * TRIPLE-KEYED, not template-shaped (memory-system-design-2026-07-20 blocker 2a):
+ * a sentence is dropped when it asserts EXACTLY ONE graph relation and that
+ * relation is a superseded target (`pureSupersededSentence`) — keyed purely on the
+ * (predicate, object) TRIPLE it contributes, REGARDLESS of prose form. The former
+ * gate additionally required the sentence to canon-match the generated
+ * `RELATION_SENTENCE` template; after a reflect RESYNTH rewrote compiled-truth
+ * into natural prose that never canon-matches, every subsequent supersede became a
+ * permanent NO-OP (the page asserted `works_at NewCo` AND `works_at OldCo`
+ * forever). Keying on the triple makes supersede survive resynth. A COMPOUND
+ * sentence (more than one graph relation) is STILL spared entirely
+ * (`keys.length !== 1`) — the current-relation sibling is never destroyed and
+ * hand-authored compound prose is never mangled. ACCEPTED RESIDUAL (the
+ * deliberate cost of "supersede must ALWAYS retire the edge"): a SINGLE-relation
+ * sentence carrying extra descriptive prose for the superseded object (`Works at
+ * [[oldco]] as principal engineer since 2019.`) is dropped IN FULL. The retired
+ * RELATION itself survives as its own additive dated timeline row (`works_at
+ * oldco`, written by `timelineBody`/`relationNotes`), but this function is a PURE
+ * compiled-truth transform — it writes NOTHING to the timeline — so the sentence's
+ * descriptive detail ("as principal engineer since 2019") and any co-located
+ * still-current NON-edge fact sharing that one sentence (e.g. "earns $400k") leave
+ * CURRENT compiled-truth and are NOT re-recorded anywhere. That is an accepted
+ * loss of those non-edge details from current truth, isolated behind the flag.
  *
  * A sentence qualifies purely by what it would contribute to the graph, computed
  * with the SAME `extractTypedLinks` + `splitSentencesWithOffsets` the edge
@@ -615,32 +625,31 @@ function stripSupersededSentences(existing: string, page: PlannedPage): string {
       (t) => `${t.predicate}\x1f${t.object}`,
     )
   }
-  // Is this sentence PURELY a single generated relationship assertion for a
-  // superseded target — i.e. safe to drop with NOTHING to lose? It must (a) assert
-  // exactly ONE graph relation, which is a superseded target, AND (b) normalise
-  // (references → bare slugs, the extractor's own transform) to EXACTLY the
-  // normalised `RELATION_SENTENCE` template for that relation. Any extra
-  // hand-authored prose (`Works at [[oldco]] as principal engineer since 2019.`)
-  // fails (b) → kept verbatim; alias/markdown wikilink forms still pass (a)+(b)
-  // because normalisation collapses them to the same bare slug (Codex).
-  // Normalise references → bare slugs, LOWERCASE (the edge extractor's verb match
-  // is case-insensitive, so a hand-authored `works at [[oldco]].` IS a live edge
-  // and must match the capitalised template — Codex), and drop surrounding
-  // whitespace + trailing sentence punctuation (spans exclude the terminator, the
-  // templates include it), so only the meaningful content is compared.
-  const canon = (s: string): string =>
-    normaliseSentence(s)
-      .toLowerCase()
-      .trim()
-      .replace(/[.!?]+$/, '')
-      .trim()
-  const pureSupersededSentence = (text: string, keys: string[]): string | null => {
+  // Is this sentence a single-relation assertion of a SUPERSEDED graph TRIPLE —
+  // i.e. safe to retire? Keyed PURELY on the (predicate, object) triple the
+  // sentence contributes, NOT on matching the generated `RELATION_SENTENCE`
+  // template (blocker 2a): after a resynth rewrites compiled-truth into natural
+  // prose, the sentence never canon-matches the template, so the old
+  // template-shape gate made every post-resynth supersede a permanent NO-OP (the
+  // page asserted `works_at NewCo` AND `works_at OldCo` forever). Now a sentence
+  // qualifies iff it asserts EXACTLY ONE graph relation and that relation is a
+  // superseded target — regardless of prose form, so supersede survives resynth.
+  //
+  // COMPOUND sentences (more than one graph relation) are still spared entirely
+  // (`keys.length !== 1`) — never mangled, the current-relation sibling is never
+  // destroyed. ACCEPTED RESIDUAL (the deliberate trade-off of "supersede must
+  // ALWAYS retire the edge"): a SINGLE-relation sentence carrying extra
+  // descriptive prose for the superseded object (`Works at [[oldco]] as principal
+  // engineer since 2019.`) is dropped IN FULL. The retired relation persists as an
+  // additive dated timeline row (`works_at oldco`), but the descriptive detail —
+  // and any co-located still-current non-edge fact sharing the sentence (e.g.
+  // `earns $400k`) — leaves compiled-truth and is NOT re-recorded (this is a pure
+  // string transform, nothing is written to the timeline here). This is the
+  // belief-evolution semantics: a superseded relation is no longer CURRENT truth.
+  const pureSupersededSentence = (keys: string[]): string | null => {
     if (keys.length !== 1) return null
     const key = keys[0]!
-    if (!targets.has(key)) return null
-    const [predicate, objSlug] = key.split('\x1f')
-    const tmpl = RELATION_SENTENCE[predicate ?? ''] ?? RELATION_SENTENCE['mentions']!
-    return canon(text) === canon(tmpl(objSlug ?? '')) ? key : null
+    return targets.has(key) ? key : null
   }
 
   const outLines: string[] = []
@@ -659,7 +668,7 @@ function stripSupersededSentences(existing: string, page: PlannedPage): string {
     const drops: Array<[number, number]> = []
     for (let i = 0; i < spans.length; i += 1) {
       const span = spans[i]!
-      const pureKey = pureSupersededSentence(content.slice(span.start, span.end), sentenceKeys(content.slice(span.start, span.end)))
+      const pureKey = pureSupersededSentence(sentenceKeys(content.slice(span.start, span.end)))
       if (pureKey === null) continue
       const from = span.start
       const to = i + 1 < spans.length ? spans[i + 1]!.start : content.length
