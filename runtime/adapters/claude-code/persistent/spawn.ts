@@ -120,7 +120,13 @@ async function spawnSession(
   }
 
   writeFileSync(mcpConfigPath, JSON.stringify({ mcpServers }, null, 2), { mode: 0o600 })
-  buildSettings({ settingsPath })
+  // Task 6 (T5 write-containment) — forward the optional `permissions` block onto
+  // the per-session settings write so a ritual write-containment REPL's deny rules
+  // land in `--settings`. Absent ⇒ the Stop-hook-only write, unchanged.
+  buildSettings({
+    settingsPath,
+    ...(options.permissions !== undefined ? { permissions: options.permissions } : {}),
+  })
 
   // SECURITY-CRITICAL (Codex-r1-P1): thread the spec's declared tool surface into
   // the REPL spawn so the persistent path honors `tools: []` exactly like the
@@ -250,13 +256,24 @@ async function spawnSession(
   // is substrate-level (a rendered-screen ring or latch-clear-on-fresh-data);
   // the P0 wedge-recovery detector (#1) is the backstop for a genuinely-stuck
   // prompt. Flagged by Codex cross-model review; tracked for the broader port.
-  session.scanner.register({
-    id: 'tool-use-approve',
-    debounceMs: 5000,
-    present: (ctx) =>
-      TOOL_USE_QUESTION_RE.test(ctx.normalized) && TOOL_USE_SELECTOR_RE.test(ctx.normalized),
-    keys: ['1', 'enter'],
-  })
+  //
+  // TASK 6 (T5 write-containment) — GATE this ONE detector behind
+  // `disableToolUseAutoApprove`. A ritual write-containment REPL pairs
+  // `skip_permissions: false` + a `permissions.deny` rule; leaving the
+  // auto-approver ON would make the deny THEATER (CC renders the approval prompt,
+  // this detector presses "Yes", the write succeeds). Disabling it makes the deny
+  // load-bearing — the prompt (if any) is left for the WEDGED-PROMPT recovery
+  // ladder (#1, registered above, ALWAYS on) so a genuine deadlock still
+  // self-clears. Every OTHER detector stays unconditionally registered.
+  if (options.disableToolUseAutoApprove !== true) {
+    session.scanner.register({
+      id: 'tool-use-approve',
+      debounceMs: 5000,
+      present: (ctx) =>
+        TOOL_USE_QUESTION_RE.test(ctx.normalized) && TOOL_USE_SELECTOR_RE.test(ctx.normalized),
+      keys: ['1', 'enter'],
+    })
+  }
   // P1: /rate-limit-options org-cap auto-stop (master-table row #4). When the
   // Claude org hits its monthly usage cap, CC injects an interactive picker that
   // blocks the REPL until an option is chosen. Ryan 2026-05-23 directive: "I need

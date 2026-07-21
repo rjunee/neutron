@@ -159,6 +159,13 @@ export class OutputScanner {
     return this.detectors.length
   }
 
+  /** Whether a detector with `id` is registered (test/introspection helper).
+   *  Task 6 uses this to prove the `tool-use-approve` auto-approver is present
+   *  by default and absent when `disableToolUseAutoApprove` is set. */
+  has(id: string): boolean {
+    return this.state.has(id)
+  }
+
   /**
    * Run every detector against the current raw ring text and return those that
    * fired on this tick's rising edge. Side-effect-free w.r.t. the PTY: the

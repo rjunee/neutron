@@ -3,6 +3,7 @@
 // rate-limit banner notice dispatcher (D2 split).
 
 import type { DeadTurnNotice } from './api5xx-dead-turn-watcher.ts'
+import type { SettingsPermissions } from './build-settings.ts'
 import { EventChannel } from './event-channel.ts'
 import { buildDetectorContext } from './output-scan.ts'
 import type { SpawnAssertionConfig } from './post-spawn-assertion.ts'
@@ -191,6 +192,26 @@ export interface PersistentReplSubstrateOptions {
   claude_bin?: string
   /** Append `--dangerously-skip-permissions` (managed headless REPLs MUST). */
   skip_permissions?: boolean
+  /**
+   * Task 6 (T5 write-containment spike) — when `true`, DO NOT register the
+   * `tool-use-approve` auto-approver detector (`spawn.ts`) for this session, so a
+   * `permissions.deny` rule (below) is LOAD-BEARING rather than auto-approved
+   * past. Default `undefined` = today's behavior: the auto-approver IS registered
+   * (it presses `['1','enter']` = "Yes" on any tool-use permission prompt, incl.
+   * Bash via `runthiscommand` — `signatures.ts:89-90`). Set by the ritual
+   * write-containment variant ONLY; every OTHER detector (dev-channel disclaimer,
+   * the wedged-prompt deadlock-recovery ladder, rate-limit, resume-picker,
+   * compact-resume, banners) stays unconditionally registered so a genuine wedge
+   * still self-clears (the no-hang backstop). */
+  disableToolUseAutoApprove?: boolean
+  /**
+   * Task 6 (T5 write-containment spike) — optional CC `permissions` block
+   * forwarded to `buildSettings` and written into the per-session `--settings`
+   * JSON alongside the Stop hook. When set on a ritual REPL WITH
+   * `disableToolUseAutoApprove: true` and `skip_permissions` OFF, a `deny` rule
+   * fails a write closed headlessly instead of prompting. Absent ⇒ Stop hook
+   * only (unchanged for every existing caller). */
+  permissions?: SettingsPermissions
   /** Auth/env overlay. `undefined` values delete from `process.env` (scrub). */
   env?: Record<string, string | undefined>
 
