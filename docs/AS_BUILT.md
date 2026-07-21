@@ -29,8 +29,15 @@ gate, and completion delivery are plan tasks 3-5. Spec of record:
   agent_kind enum + the RENAME name-quote); `runner.test.ts` version list + 106.
   NO `table-ownership.json` entry — coverage is opt-in and this table has no
   writers yet (the first runtime-writer task adds it).
-- **`AgentKind` widened** (`runtime/subagent/registry.ts:20`) to include `'ritual'`
-  — compile-safe (only `Partial<Record<AgentKind,…>>` consumers).
+- **`AgentKind` widened** (`runtime/subagent/registry.ts:25`) to include `'ritual'`.
+  Consumers are `Partial<Record<AgentKind,…>>` (watchdog, dispatch prompts) OR
+  narrow the union with `Exclude`: trident `DispatchAgentKind` now excludes BOTH
+  `'core'` and `'ritual'` (`trident/agent-prompts.ts:50`) so its persona
+  `Record`s stay exhaustive — a ritual is spawned by the reminders tick with its
+  own `rituals/<id>.md` prompt, never through the trident persona loader (Argus
+  round-2 BLOCKER fix: the earlier "compile-safe, only Partial consumers" claim
+  was false — `PersonaAgentKind` derives from `AgentKind` via non-partial
+  `Record` and broke `tsc`).
 - **`reminders/rituals.ts`** — the pure registry + fail-CLOSED fire-time verdict.
   `RitualDef` (charset-guarded id `^[a-z0-9][a-z0-9-]{0,63}$` — traversal
   impossible by construction; `description` non-empty ≤200 chars = the approval
@@ -43,8 +50,14 @@ gate, and completion delivery are plan tasks 3-5. Spec of record:
   timeout are module constants). `createRitualRegistry({rituals_dir})` →
   `register()` (throws on bad id/dup/empty-or-long description/empty surface/bad
   token/egress-inconsistency; stores a frozen copy) / `get` / `list` /
-  `promptPathFor`. `validateRitualFire(registry, approvals, id, log)` async →
-  `unknown_ritual` | `missing_prompt` (missing/unreadable/empty/over-256KB) |
+  `promptPathFor`. Argus round-2: `assertValid` now also runtime-guards the
+  `scope`/`egress`/`silent`/`tool_surface` field TYPES (a def can arrive from
+  imported user-data JSON the compiler never saw — a bogus `scope:'arbitrary'`
+  or `egress:'bogus'` now FAILS CLOSED at register time instead of slipping past
+  the consistency checks). `validateRitualFire(registry, approvals, id, log)`
+  async → `unknown_ritual` | `missing_prompt` (missing/unreadable/empty/over-256KB;
+  the 256 KiB cap is now enforced from `statSync().size` BEFORE the file is read
+  into memory — Argus round-2 minor) |
   `unapproved` (false OR THROW — fail CLOSED) | ok. The `RitualApprovalCheck` seam
   is REQUIRED (no permissive default anywhere), consulted only after the prompt is
   read. A fail verdict logs once and SKIPs — never degrade-to-nudge, never

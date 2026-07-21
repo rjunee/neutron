@@ -43,11 +43,15 @@ import type { AgentKind } from '@neutronai/runtime/subagent/registry.ts'
 
 /**
  * Every kind the substrate dispatch closure can serve — `AgentKind` minus
- * the generic `'core'`. The Forge→Argus state machine spawns `'forge'` /
- * `'argus'`; the phase-less `dispatchAgent` path serves `'atlas'` /
- * `'sentinel'`. Used for the `kind` field on a dispatch input.
+ * the generic `'core'` and the reminders-tick `'ritual'` kind. The
+ * Forge→Argus state machine spawns `'forge'` / `'argus'`; the phase-less
+ * `dispatchAgent` path serves `'atlas'` / `'sentinel'`. A `'ritual'` is NOT
+ * a trident persona agent — it is spawned by the reminders fire-time tick
+ * (`reminders/rituals.ts`) with its own on-disk `rituals/<id>.md` prompt,
+ * never through this loader — so it is excluded here. Used for the `kind`
+ * field on a dispatch input.
  */
-export type DispatchAgentKind = Exclude<AgentKind, 'core'>
+export type DispatchAgentKind = Exclude<AgentKind, 'core' | 'ritual'>
 
 /**
  * The persona agents whose SYSTEM prompt is loaded from `prompts/<kind>.md`

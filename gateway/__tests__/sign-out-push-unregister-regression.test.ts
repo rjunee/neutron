@@ -122,6 +122,7 @@ function makeReminder(): Reminder {
     status: 'fired',
     recurrence: null,
     recurrence_spec: null,
+    ritual_id: null,
     source: null,
     created_at: 1699999000,
     fired_at: 1700000005,

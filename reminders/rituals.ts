@@ -36,7 +36,7 @@
  * on the def — the model TIER and timeout are the module CONSTANTS below.
  */
 
-import { readFileSync } from 'node:fs'
+import { readFileSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 
 /**
@@ -163,6 +163,31 @@ export function createRitualRegistry(opts: { rituals_dir: string }): RitualRegis
         `ritual ${JSON.stringify(def.id)}: description exceeds 200 chars (${desc.length})`,
       )
     }
+    // Runtime enum/type guards — the TS types constrain in-tree callers, but a
+    // ritual def can arrive from imported user-data (JSON) where the compiler
+    // never saw it. These fields drive containment (scope), egress
+    // classification, and delivery, so a bogus value must FAIL CLOSED at
+    // register time rather than silently pass the consistency checks below.
+    if (def.scope !== 'project' && def.scope !== 'instance') {
+      throw new Error(
+        `ritual ${JSON.stringify(def.id)}: scope ${JSON.stringify(def.scope)} is not 'project' | 'instance'`,
+      )
+    }
+    if (def.egress !== 'none' && def.egress !== 'web') {
+      throw new Error(
+        `ritual ${JSON.stringify(def.id)}: egress ${JSON.stringify(def.egress)} is not 'none' | 'web'`,
+      )
+    }
+    if (typeof def.silent !== 'boolean') {
+      throw new Error(
+        `ritual ${JSON.stringify(def.id)}: silent must be a boolean (got ${JSON.stringify(def.silent)})`,
+      )
+    }
+    if (!Array.isArray(def.tool_surface)) {
+      throw new Error(
+        `ritual ${JSON.stringify(def.id)}: tool_surface must be an array`,
+      )
+    }
     if (def.tool_surface.length === 0) {
       // #361 toolless-class pin: a ritual with no tools is a silent no-op.
       throw new Error(
@@ -272,14 +297,16 @@ export async function validateRitualFire(
   let prompt: string
   try {
     const path = registry.promptPathFor(def.id)
-    const buf = readFileSync(path)
-    if (buf.byteLength > MAX_RITUAL_PROMPT_BYTES) {
+    // Enforce the byte cap from the on-disk size BEFORE reading the file into
+    // memory, so an oversized prompt is rejected without allocating it.
+    const size = statSync(path).size
+    if (size > MAX_RITUAL_PROMPT_BYTES) {
       return skip(
         'missing_prompt',
-        `prompt ${path} is ${buf.byteLength} bytes (> MAX_RITUAL_PROMPT_BYTES ${MAX_RITUAL_PROMPT_BYTES})`,
+        `prompt ${path} is ${size} bytes (> MAX_RITUAL_PROMPT_BYTES ${MAX_RITUAL_PROMPT_BYTES})`,
       )
     }
-    prompt = buf.toString('utf8')
+    prompt = readFileSync(path, 'utf8')
   } catch (err) {
     return skip('missing_prompt', `prompt file unreadable: ${(err as Error).message}`)
   }

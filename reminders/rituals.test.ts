@@ -118,6 +118,37 @@ describe('register() invariants — every rejection is a throw', () => {
       reg.register(def({ tool_surface: ['Read', 'Bash', 'WebSearch'], egress: 'web' })),
     ).not.toThrow()
   })
+
+  // Runtime enum/type guards — a def from imported user-data (JSON) never saw
+  // the compiler, so a bogus scope/egress/silent must FAIL CLOSED at register().
+  test("bogus scope value throws (imported-data guard)", () => {
+    const reg = createRitualRegistry({ rituals_dir: '/p' })
+    expect(() =>
+      reg.register(def({ scope: 'arbitrary' as unknown as RitualDef['scope'] })),
+    ).toThrow(/scope/)
+  })
+
+  test("bogus egress value throws (imported-data guard)", () => {
+    const reg = createRitualRegistry({ rituals_dir: '/p' })
+    // egress 'bogus' with no web tool would otherwise pass both consistency checks.
+    expect(() =>
+      reg.register(def({ egress: 'bogus' as unknown as RitualDef['egress'] })),
+    ).toThrow(/egress/)
+  })
+
+  test('non-boolean silent throws (imported-data guard)', () => {
+    const reg = createRitualRegistry({ rituals_dir: '/p' })
+    expect(() =>
+      reg.register(def({ silent: 'yes' as unknown as RitualDef['silent'] })),
+    ).toThrow(/silent/)
+  })
+
+  test('non-array tool_surface throws (imported-data guard)', () => {
+    const reg = createRitualRegistry({ rituals_dir: '/p' })
+    expect(() =>
+      reg.register(def({ tool_surface: 'Read' as unknown as RitualDef['tool_surface'] })),
+    ).toThrow(/tool_surface/)
+  })
 })
 
 describe('validateRitualFire — fail-CLOSED verdicts', () => {
