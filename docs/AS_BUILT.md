@@ -2,6 +2,24 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+## 2026-07-21 — Executor-mode reminders task 10: docs close-out + work-board CI fixture fix
+
+Branch `trident/executor-reminders-p2` (PR #427). Docs-only close-out of the executor-mode reminders sprint (engine tasks 0-9 already landed on this branch + PR #426) plus the one CI merge prerequisite.
+
+- **Three doc surfaces updated.** `docs/AS_BUILT.md` — the two new entries above (the a2d93b99 Argus r1 round-2 fixes + this close-out). `docs/SYSTEM-OVERVIEW.md` — a new `## Ritual executor — approval-gated code rituals (reminders/)` section inserted after the Reminders Core section and before `## Proactive messaging`, plus the memory-consolidation cadence text updated for the AS-LANDED Q2 tier split (backlink repair = event-driven on the sync hook; correction-pattern promotion = reflect-pass step 4; daily-delta = bundled ritual). `reminders/AGENTS.md` — full rewrite from the pre-implementation P0 stub to the real reminder-engine + ritual-executor surface.
+- **Work-board CI fixture fix (SEPARATE commit `b5d631ad`).** Pre-existing main fixture rot inherited by every branch: `work-board/store.ts:56` makes `task_type: WorkBoardTaskType` a REQUIRED field of `WorkBoardItem`, but the `item()` fixture at `work-board/fragment.test.ts:5-20` omitted it (the only missing field), so the CI Typecheck matrix was RED on any branch. Added `task_type: 'build',` to the fixture (mirrors store.ts field order). `bunx tsc -p work-board/tsconfig.json` exits 0; `bun test work-board/` 74 pass. The executor branch never touched `work-board/`.
+- **Sprint close.** Executor-mode reminders tasks 0-10 complete across PR #426 (tasks 0-6R, merged to main `63fe4119`) and PR #427 (tasks 7-10, this branch).
+
+## 2026-07-21 — Executor-mode reminders task 9/8 (Argus r1 round-2 fixes, PR #427)
+
+Branch `trident/executor-reminders-p2` — commit `a2d93b99` closing the five Argus round-1 findings on the task-8/9 ritual-registration + backlink-repair work. `tsc` clean; a new regression test lands per fix (`reminders/ritual-registration.test.ts`, `runtime/__tests__/backlink-repair.test.ts`).
+
+- **BLOCKER — web-ritual CONTENT approval was unreachable.** The live-agent capture keyed ritual eligibility off `latestPromptByTopic` (a single prompt), so once the SEPARATE egress-approval prompt landed the CONTENT Approve token was no longer "latest" and failed the T8 persisted-option-set membership check — a web ritual could never be content-approved, hence never scheduled. Added `ButtonStore.recentPromptOptionsByTopic` (`channels/button-store.ts:881` — the union of recent UNRESOLVED prompt option values) and a separate `priorRitualOptions` computed from it in `gateway/wiring/build-live-agent-turn.ts:743,746,787-794`, so both the content and egress tokens stay capturable while the onboarding capture stays latest-only.
+- **BLOCKER — an approved-but-unscheduled ritual could strand.** A transient failure after `respondApproval` left a ritual approved with no reminder row and no self-heal. Extracted an idempotent `ensureScheduled` (`reminders/ritual-registration.ts:653,681,692`, never throws out) and made a re-tap of an already-APPROVED grant RE-DRIVE scheduling; the decision-record step is isolated so a scheduling failure no longer mislabels a recorded decision.
+- **MAJOR — a rejecting approval-prompt `emit` left a registered-but-promptless ritual** whose on-disk files + duplicate guard blocked every re-propose. `propose` now FULLY rolls back on emit failure (`reminders/ritual-registration.ts:590-600` — registry `unregister` + delete both `wx` files + `ApprovalManager.cancelPending` on both grants routed through the async mutex) and throws `emit_failed` (`reminders/ritual-registration.ts:153,597`).
+- **minor — `rituals_status` mis-labeled a DENIED grant as 'none'.** New `ApprovalManager.findByToolName` (`tools/approval.ts:255`) lets status report the real DENIED state.
+- **minor — backlink-repair re-scanned the corpus per job.** The existing-slug enumeration is hoisted to ONCE per drain cycle (`runtime/backlink-repair.ts:302-312` — `enumerateExistingSlugs` inside `drain()` before the queue loop) instead of O(jobs × corpus); eventual consistency preserved because a page created by a concurrent write schedules its own job for the next drain.
+
 ## 2026-07-21 — Executor-mode reminders task 9 (Q2 overturn-2): dreaming's uncovered half INTO CORE MEMORY, split by tier
 
 Branch `trident/executor-reminders-p2` (PR #427). Ryan's Q2 overturn folds the three pieces of Vajra "dreaming" that were NOT covered by scribe/reflect into core memory, split by tier — NOT a separate dreaming ritual. All deterministic where it can be; NO feature flags.
