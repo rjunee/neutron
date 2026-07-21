@@ -254,11 +254,12 @@ describe('migration 0106 — code_ritual_runs CHECKs', () => {
   })
 
   function insertRun(cols: Record<string, string | number | null>): void {
-    const keys = Object.keys(cols)
-    const placeholders = keys.map(() => '?').join(', ')
+    const entries = Object.entries(cols)
+    const placeholders = entries.map(() => '?').join(', ')
+    const values: (string | number | null)[] = entries.map(([, v]) => v)
     db.raw().run(
-      `INSERT INTO code_ritual_runs (${keys.join(', ')}) VALUES (${placeholders})`,
-      keys.map((k) => cols[k]),
+      `INSERT INTO code_ritual_runs (${entries.map(([k]) => k).join(', ')}) VALUES (${placeholders})`,
+      values,
     )
   }
 
