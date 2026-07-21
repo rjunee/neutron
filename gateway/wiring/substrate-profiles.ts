@@ -149,6 +149,22 @@ export const PROFILE_PHASE_SPEC: SubstrateProfile = {
 }
 
 /**
+ * The per-project ISOLATED-COMPOSE substrate (`cc-compose-*`) — composes each
+ * project's onboarding docs (README / transcript-summary / starting-plan) and
+ * its opening message in a per-project-keyed session (#377/#378, Approach A).
+ * A DISTINCT trust class kept separate from `PROFILE_PHASE_SPEC` even though
+ * identical today: its input is UNTRUSTED project-doc-derived content (imported
+ * README/STATUS/transcript slices are a prompt-injection surface), it is TOOLLESS
+ * (never `enableToolBridge`), and it carries NO owner-chat delivery sinks — so
+ * the redesign can tighten its grant independently. TODAY: `skip_permissions: true`.
+ *
+ * Site: `open/wiring/substrates.ts` (`makeComposeSubstrate` → `cc-compose-*`).
+ */
+export const PROFILE_ISOLATED_COMPOSE: SubstrateProfile = {
+  skip_permissions: true,
+}
+
+/**
  * The history-import synthesis substrate (`cc-synthesis-*`) — the UNTRUSTED-input
  * caller (imported chat history is a prompt-injection surface). TODAY:
  * `skip_permissions: true`. Kept DISTINCT from `PROFILE_WARM_CHAT`: this is the

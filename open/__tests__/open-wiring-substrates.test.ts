@@ -113,6 +113,68 @@ describe('wireSubstrates — instance ids + tool-bridge invariants', () => {
     expect(opts!.skip_permissions).toBe(true)
   })
 
+  test('makeComposeSubstrate: per-project ISOLATED compose session — keyed by project_id, distinct pool key from cc-agent, TOOLLESS (#377/#378 white-box)', async () => {
+    const { ctx, captured } = makeCtx()
+    const w = wireSubstrates(ctx)
+    const sAma = w.makeComposeSubstrate('amascence')
+    const sDtc = w.makeComposeSubstrate('dtc-ops')
+    expect(sAma).not.toBeNull()
+    expect(sDtc).not.toBeNull()
+    await drain(sAma!)
+    await drain(sDtc!)
+    const composeOpts = captured.filter((o) => o.substrate_instance_id === 'cc-compose-owner')
+    expect(composeOpts.length).toBe(2)
+    // (b) DISTINCT pool-key namespace from the live-chat cc-agent session, so a
+    // compose can NEVER collide with / evict the owner's live-chat REPL (B1).
+    expect(composeOpts.every((o) => o.substrate_instance_id !== 'cc-agent-owner')).toBe(true)
+    // (a) keyed BY project_id — each compose folds ITS project into the warm-pool
+    // key (S3 §2 project dimension) → a distinct transcript per project (no #378).
+    expect(composeOpts.map((o) => o.project_id)).toEqual(['amascence', 'dtc-ops'])
+    // (c) TOOLLESS + none of the owner-chat delivery sinks (untrusted doc-derived
+    // input has no tool surface and never posts to the owner's chat — B2).
+    for (const o of composeOpts) {
+      expect(o.enableToolBridge).not.toBe(true)
+      expect(o.ephemeral).not.toBe(true)
+      expect(o.onDeadTurnNotice).toBeUndefined()
+      expect(o.onSizeAlert).toBeUndefined()
+      expect(o.onRateLimitBanner).toBeUndefined()
+      expect(o.onRecoveredReply).toBeUndefined()
+      expect(o.delivery_topic_id).toBeUndefined()
+      expect(o.skip_permissions).toBe(true)
+    }
+  })
+
+  test('NO MID-TURN KILL: a compose for project X never shares the cc-agent pool key of an in-flight live turn on X (B1)', async () => {
+    const onRateLimitBanner = (): void => {}
+    const { ctx, captured } = makeCtx({
+      liveAgentNoticeSinks: {
+        onDeadTurnNotice: () => {},
+        onSizeAlert: () => {},
+        onRateLimitBanner,
+      },
+      liveAgentDeliveryTopicId: 'app:owner',
+    })
+    const w = wireSubstrates(ctx)
+    // A live-chat turn for project X is in flight (its cc-agent pool entry).
+    await drain(w.liveAgentSubstrate!)
+    // Compose an opening for the SAME project X concurrently.
+    await drain(w.makeComposeSubstrate('project-x')!)
+    const agent = captured.filter((o) => o.substrate_instance_id === 'cc-agent-owner')
+    const compose = captured.filter((o) => o.substrate_instance_id === 'cc-compose-owner')
+    expect(agent.length).toBe(1)
+    expect(compose.length).toBe(1)
+    // The warm-pool key = (instance_id, user_id, project_id, credential). The
+    // compose's instance id differs from cc-agent's, so even for the SAME project
+    // + owner the two keys can never collide → the live turn's REPL is never
+    // evicted/terminated by a compose (the exact #419 B1 hazard, now closed).
+    expect(compose[0]!.substrate_instance_id).not.toBe(agent[0]!.substrate_instance_id)
+    // And the compose carries NONE of the owner-facing sinks the live agent holds,
+    // so a compose banner/notice never posts to the owner's chat (B2 side-effect).
+    expect(agent[0]!.onRateLimitBanner).toBe(onRateLimitBanner)
+    expect(compose[0]!.onRateLimitBanner).toBeUndefined()
+    expect(compose[0]!.delivery_topic_id).toBeUndefined()
+  })
+
   test('O6: notice + recovered-reply sinks wire ONLY onto cc-agent-* (not cc-llm-*/trident)', async () => {
     const onDeadTurnNotice = (): void => {}
     const onSizeAlert = (): void => {}
@@ -515,6 +577,8 @@ describe('wireSubstrates — pre-warm live reference', () => {
     const w = wireSubstrates(ctx)
     expect(w.llmCallSubstrate).toBeNull()
     expect(w.liveAgentSubstrate).toBeNull()
+    // Compose is LLM-only — no provider → the per-project compose factory returns null.
+    expect(w.makeComposeSubstrate('any-project')).toBeNull()
     expect(w.prewarmReady).toBeNull()
     // No pre-warm to await → settled seeds true immediately.
     expect(w.prewarmSettledRef.settled).toBe(true)

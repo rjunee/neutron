@@ -32,6 +32,7 @@ import {
   PROFILE_TOOLLESS_UTILITY,
   PROFILE_WARM_CHAT,
   PROFILE_PHASE_SPEC,
+  PROFILE_ISOLATED_COMPOSE,
   PROFILE_UNTRUSTED_IMPORT,
   PROFILE_EPHEMERAL,
   PROFILE_WARM_FIRE,
@@ -121,6 +122,7 @@ const ALL_PROFILES: ReadonlyArray<{ name: string; profile: SubstrateProfile }> =
   { name: 'PROFILE_TOOLLESS_UTILITY', profile: PROFILE_TOOLLESS_UTILITY },
   { name: 'PROFILE_WARM_CHAT', profile: PROFILE_WARM_CHAT },
   { name: 'PROFILE_PHASE_SPEC', profile: PROFILE_PHASE_SPEC },
+  { name: 'PROFILE_ISOLATED_COMPOSE', profile: PROFILE_ISOLATED_COMPOSE },
   { name: 'PROFILE_UNTRUSTED_IMPORT', profile: PROFILE_UNTRUSTED_IMPORT },
   { name: 'PROFILE_EPHEMERAL', profile: PROFILE_EPHEMERAL },
   { name: 'PROFILE_WARM_FIRE', profile: PROFILE_WARM_FIRE },
@@ -177,6 +179,11 @@ const SITES: ReadonlyArray<{
     site: 'open/wiring/substrates.ts cc-agent (warm chat)',
     profile: PROFILE_WARM_CHAT,
     extra: { substrate_instance_id: 'cc-agent-owner', cwd: '/w', user_id: 'u', project_slug: 'owner', enableToolBridge: true },
+  },
+  {
+    site: 'open/wiring/substrates.ts makeComposeSubstrate (cc-compose)',
+    profile: PROFILE_ISOLATED_COMPOSE,
+    extra: { substrate_instance_id: 'cc-compose-owner', cwd: '/w', user_id: 'u', project_slug: 'owner' },
   },
   {
     site: 'open/wiring/substrates.ts makeEphemeralSubstrate (cc-trident)',

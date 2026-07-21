@@ -172,7 +172,6 @@ export function buildProjectKickoff(deps: ProjectKickoffDeps): ProjectKickoff {
               relpath: 'starting-notes.md',
               title: `${input.name} - starting notes`,
               label: 'Starting notes',
-              lead: `I did a little digging on ${input.name} and jotted some starting notes to explore`,
             })
             if (doc !== null) return doc
             // Compose failed → fall through to engaging questions (not null):
@@ -196,7 +195,6 @@ export function buildProjectKickoff(deps: ProjectKickoffDeps): ProjectKickoff {
             relpath: 'starting-plan.md',
             title: `${input.name} - starting plan`,
             label: 'Starting plan',
-            lead: `I took a first pass at ${input.name} and drafted a starting plan`,
           })
           if (doc !== null) return doc
         }
@@ -301,8 +299,6 @@ interface DraftDocPlan {
   title: string
   /** Human label for the tappable link. */
   label: string
-  /** Opening-bubble lead-in ("I drafted X ..."). */
-  lead: string
 }
 
 /**
@@ -326,14 +322,16 @@ async function tryDraftDoc(
   // An existing doc means we've already kicked this project off; fall back.
   if (existsSync(abs)) return null
 
+  const ctxLines = contextLines(signal)
   let body: string
   try {
     body = (
       await deps.composer({
         kind,
+        project_id: input.project_id,
         project_name: input.name,
         doc_title: plan.title,
-        context_lines: contextLines(signal),
+        context_lines: ctxLines,
       })
     ).trim()
   } catch (err) {
@@ -382,11 +380,39 @@ async function tryDraftDoc(
     }
   }
 
+  // #377 — the WHOLE opening bubble is LLM-composed + unique per project (no
+  // hardcoded lead). Compose the presenting message in the SAME per-project
+  // isolated compose session (grounded in this project's signal + the doc gist),
+  // then append the tappable doc link. On any compose failure fall back to the
+  // doc's own first paragraph (still LLM-derived + project-unique) — never the
+  // retired shared boilerplate lead.
   const gist = firstProseParagraph(body)
-  const gistClause = gist.length > 0 ? `: ${stripTrailingPunctuation(gist)}` : ''
   const marker = `[${plan.label}](docs:/${input.project_id}/${plan.relpath})`
-  const body_out =
-    `${plan.lead}${gistClause}. Have a look and tell me what to change - ${marker}.`
+  let message = ''
+  try {
+    message = (
+      await deps.composer({
+        kind: 'opening_message',
+        project_id: input.project_id,
+        project_name: input.name,
+        doc_title: plan.title,
+        context_lines:
+          gist.length > 0 ? [...ctxLines, `Drafted document opening: ${gist}`] : ctxLines,
+      })
+    ).trim()
+  } catch (err) {
+    ;(deps.log ?? (() => {}))('kickoff opening-message compose failed; using doc gist', {
+      project: input.name,
+      err: err instanceof Error ? err.message : String(err),
+    })
+  }
+  const lead =
+    message.length > 0
+      ? stripTrailingPunctuation(message)
+      : gist.length > 0
+        ? `${stripTrailingPunctuation(gist)}. Have a look and tell me what to change`
+        : `I drafted a starting ${plan.label.toLowerCase()} for ${input.name}. Have a look and tell me what to change`
+  const body_out = `${lead} - ${marker}.`
   return { body: body_out, action: kind === 'draft_doc' ? 'draft-doc' : 'interest-research', doc_relpath: plan.relpath, indexed }
 }
 

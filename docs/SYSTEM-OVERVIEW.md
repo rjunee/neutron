@@ -385,9 +385,10 @@ a slash-command.
   server.
 - **Security (opt-in per substrate).** Only the owner's WARM conversational
   substrate (`cc-agent-*`) sets `enableToolBridge: true`. The untrusted
-  history-import REPL (`cc-import-*`) and the Trident build / fire REPLs
-  (`cc-trident-*` / `cc-trident-fire-*`) leave it off, so a prompt-injection in
-  untrusted content can never reach a Core tool. The bridge's MCP namespace is
+  history-import REPL (`cc-import-*`), the per-project onboarding-compose REPL
+  (`cc-compose-*` — see "Per-project isolated onboarding compose" below), and the
+  Trident build / fire REPLs (`cc-trident-*` / `cc-trident-fire-*`) leave it off,
+  so a prompt-injection in untrusted content can never reach a Core tool. The bridge's MCP namespace is
   permitted via `--allowedTools mcp__neutron`. The built-in `--tools` surface is
   per-turn (`AgentSpec.tools`): the untrusted import REPL keeps `--tools ""`
   default-deny (no Bash/Read/Skill); the live agent declares
@@ -949,6 +950,30 @@ rather than waiting on the global diff-gate. Subscriber:
 > summary. A project WITH real context keeps the full STATUS + overnight opt-in +
 > real summary opening. A no-context HOBBY still gets the kickoff's engaging
 > questions (its own meaty opening).
+>
+> **Per-project isolated onboarding compose (#377/#378, Approach A, 2026-07-20).**
+> Each project's onboarding docs (README / `docs/transcript-summary.md` — the docs
+> the openings later READ), its agentic-kickoff `starting-plan.md`, and its opening
+> chat MESSAGE are all composed in a PER-PROJECT ISOLATED compose session, NOT the
+> shared owner-wide `cc-llm-*` phase-spec session that used to back them. The
+> composers (`build-project-doc-composer.ts`, `build-project-kickoff-composer.ts`)
+> resolve their `AnthropicMessagesClient` through a `clientForProject(project_id)`
+> factory (`open/composer.ts` `composeClientForProject`) that binds a fresh
+> `cc-compose-*` substrate (`open/wiring/substrates.ts` `makeComposeSubstrate`) with
+> `projectIdResolver: () => project_id`. Because the warm-pool key folds that
+> per-turn project id (S3 §2), every project keys a DISTINCT REPL/transcript → no
+> cross-project content bleed (#378, closed at the SOURCE — the doc materializer —
+> as well as at the openings). The `cc-compose-*` instance id is a DISTINCT pool key
+> from the live-chat `cc-agent-*` session, so composing an opening can never
+> evict/terminate the owner's in-flight live-chat turn; it is TOOLLESS (no
+> `enableToolBridge`, `PROFILE_ISOLATED_COMPOSE`) so untrusted project-doc-derived
+> input has no tool surface; and it wires NONE of the owner-facing notice/delivery
+> sinks, so compose text/banners never post to the owner's chat. The opening MESSAGE
+> is now FULLY LLM-composed + unique per project (#377) — the hardcoded lead
+> scaffolds ("I took a first pass at X and drafted a starting plan" / "I did a
+> little digging on X") are gone; `build-project-kickoff-composer.ts`'s
+> `opening_message` kind writes the bubble, and the kickoff appends the tappable
+> `docs:/` link.
 >
 > **Post-onboarding claim redirect (Managed overlay, 2026-07-01).** At the
 > terminal `completed` transition `build-onboarding-finalize.ts` fires a one-shot

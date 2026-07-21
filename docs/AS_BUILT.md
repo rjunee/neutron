@@ -2,6 +2,53 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+## 2026-07-20 — Per-project isolated onboarding compose (#377 + #378, Approach A)
+
+Closed the two trust-critical onboarding-opening defects (SPEC Decisions Log
+2026-07-20 "Per-project session OPENINGS are FULLY LLM-composed + unique per
+project"), the SAFE way — WITHOUT the two BLOCKERS the prior attempt (#419) hit
+(reusing the live-chat `cc-agent-*` pool key, which could evict an in-flight live
+turn (B1) and open a tool-enabled prompt-injection path (B2)). Each half ships a
+reproduce-then-fix test that FAILS on prior main.
+
+- **#378 cross-project bleed — isolate BOTH the openings AND the doc materializer**
+  (`open/wiring/substrates.ts`, `open/composer.ts`, `gateway/wiring/build-project-doc-composer.ts`,
+  `gateway/wiring/build-project-kickoff-composer.ts`). Previously the project-doc
+  composer (README / `docs/transcript-summary.md`), the agentic-kickoff DOC
+  composer (`starting-plan.md`), and the opening composer ALL shared ONE
+  accumulating owner-wide `cc-llm-*` phase-spec session, so project 2/3's docs +
+  openings echoed project 1. New `makeComposeSubstrate(project_id)` factory builds
+  a per-project `cc-compose-*` substrate with `projectIdResolver: () => project_id`;
+  the composers resolve their client through a `clientForProject(project_id)`
+  factory (`composeClientForProject`). The warm-pool key folds the project id
+  (S3 §2), so each project keys a DISTINCT transcript → no bleed. Closing the DOC
+  MATERIALIZER too (not just the openings) is what fully closes #378 (B3 — the docs
+  FEED the openings).
+- **Approach A safety (fixes #419's B1/B2)** — `cc-compose-*` is a DISTINCT pool-key
+  namespace from live-chat `cc-agent-*`, so a compose can NEVER evict/terminate the
+  owner's in-flight live-chat turn (B1); it is TOOLLESS (no `enableToolBridge`, new
+  `PROFILE_ISOLATED_COMPOSE`) so untrusted project-doc-derived input has no tool
+  surface and cannot persist into a tool-enabled live session (B2); and it wires
+  NONE of the owner-facing notice/delivery sinks, so compose text/banners never
+  post to the owner's chat (B2 side-effect).
+- **#377 hardcoded lead removed — opening is FULLY LLM-composed** (`onboarding/openings/kickoff.ts`,
+  `gateway/wiring/build-project-kickoff-composer.ts`). Dropped the two hardcoded
+  lead scaffolds ("I took a first pass at X and drafted a starting plan" / "I did a
+  little digging on X and jotted some starting notes"). The kickoff composer gains
+  an `opening_message` kind that composes the presenting chat bubble in the SAME
+  per-project isolated session (grounded in the project's signal + the drafted doc
+  gist); the kickoff appends the tappable `docs:/` link. On any message-compose
+  failure it degrades to the doc's own first paragraph (still LLM-derived +
+  project-unique), never the retired boilerplate.
+- **Tests** — `#378` cross-bleed (real composer, 3 projects, isolated vs shared
+  session model — the shared path demonstrates the on-main bleed); white-box
+  isolation (`cc-compose-*` keyed by project_id, distinct pool key, toolless, no
+  sinks); no-mid-turn-kill (compose never shares the `cc-agent-*` key); #377
+  (openings vary per project + no hardcoded lead). `bun test onboarding/` 940/0;
+  touched gateway/open wiring suites green.
+- **Scope** — ZERO changes to the live-chat `cc-agent-*` turn logic, the phase-spec
+  resolver/suggester session, or unrelated onboarding phases.
+
 ## 2026-07-20 — #371 (part b): tenant-side auth screen is managed-unreachable
 
 The OSS install-token / Claude-auth surface in `landing/server.ts` is now gated
