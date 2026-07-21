@@ -10,6 +10,56 @@ Running log of what shipped, newest first. One entry per merged change.
 > `docs/research/AS-BUILT-docs-archive-2026-07.md`. This file is the ONE live
 > changelog going forward.
 
+## 2026-07-20 — Per-project session openings (ISSUES #378 cross-project bleed + #377 hardcoded lead)
+
+Fixed BOTH the live cross-project content bleed and the hardcoded opening lead the
+owner hit while dogfooding M1. Each project's opening MESSAGE and 'starting plan'
+DOC now compose in THAT project's OWN long-lived `cc-agent-*` session (the same
+warm session the project's live chat later resumes), not the shared owner-wide
+`cc-llm` phase-spec session.
+
+- **#378 root** — the opening-message + kickoff-doc composers both dispatched
+  through ONE shared, accumulating `cc-llm` client (`open/composer.ts`
+  `onboardingAnthropicClient` → `buildGatewayAnthropicMessagesClient({ substrate:
+  llmCallSubstrate })`). `buildGatewayAnthropicMessagesClient` built the spec with
+  no `metering_context`, so `build-llm-call-substrate.ts` keyed every project onto
+  the substrate's single `'default'` warm REPL. Under `emitProjectOpenings`'
+  concurrency-3 worker pool, each per-project compose injected another turn into
+  the ONE growing transcript, so project N was conditioned on 1..N-1 and emitted
+  their content.
+
+- **FIX (session routing)** — a new `perProjectOpeningsClient`
+  (`buildGatewayAnthropicMessagesClient` over the `cc-agent-*` `liveAgentSubstrate`)
+  feeds BOTH `buildProjectOpeningMessageComposer` and `buildProjectKickoffComposer`.
+  Each compose stamps `metering_context.project_id` per dispatch (threaded through
+  the `AnthropicMessagesClient` seam), which `build-llm-call-substrate.ts` folds
+  into the warm-pool key — so each project lands on its OWN warm REPL. This is the
+  SAME race-free per-dispatch keying `build-live-agent-turn.ts` uses for concurrent
+  chat topics; the shared `cc-llm` session is unchanged (resolver/suggesters). The
+  `cc-agent-*` tool bridge is correct here (it is the session the owner's chat will
+  use; the compose dispatch carries `tools: []`); an ephemeral throwaway was
+  explicitly rejected (it would neither pre-warm nor ground the live session).
+
+- **#377 fix** — removed the hardcoded lead scaffolds in `onboarding/openings/
+  kickoff.ts` ("I took a first pass at X and drafted a starting plan" / "I did a
+  little digging on X…"). The opening MESSAGE now LEADS with the model's own
+  project-grounded framing (the drafted doc's first prose paragraph) + the tappable
+  doc link — fully LLM-composed and unique per project.
+
+- **Tests** — `gateway/wiring/__tests__/per-project-session-openings.test.ts`
+  reproduces the bleed over a fake Substrate that models a per-session-key
+  accumulating transcript (shared key → bleed; per-project key → isolation),
+  white-boxes both composers' `metering_context.project_id` keying, and asserts
+  #377. All four provably FAIL on the pre-fix client. Suites: `onboarding/` 940
+  pass, `gateway/wiring/` 598 pass.
+
+Files: `open/composer.ts` (perProjectOpeningsClient + both composer wirings),
+`gateway/wiring/build-anthropic-messages-client.ts` (per-dispatch project_id →
+metering_context), `onboarding/interview/anthropic-client.ts` (interface),
+`gateway/wiring/build-project-kickoff-composer.ts`, `onboarding/openings/kickoff.ts`
+(project_id thread + lead removal), `gateway/wiring/build-project-opening-message.ts`,
+`onboarding/openings/project-opening.ts`, `onboarding/openings/finalize.ts` (comment).
+
 ## 2026-07-20 — M2-3: memory-consolidation correctness — 3 dedup/supersede corruption blockers
 
 Closed the three data-integrity blockers that gate the memory build

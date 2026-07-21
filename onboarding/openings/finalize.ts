@@ -604,6 +604,13 @@ function countMaterializableProjects(
  * mutually independent — each targets its OWN project topic (`project_id`), reads
  * only its own on-disk docs, and shares no mutable state — so ordering across
  * projects carries no meaning and interleaving changes no observable outcome.
+ * Per-project LLM COMPOSE ISOLATION (ISSUES #378, 2026-07-20): the kickoff-doc
+ * (and opening-message) composers now dispatch over each project's OWN warm
+ * `cc-agent-*` session, keyed by `metering_context.project_id` per dispatch, so
+ * two concurrent composes in this pool land on DISTINCT warm REPLs and one
+ * project's LLM transcript can never condition another's. The prior shared
+ * `cc-llm` REPL accumulated ONE transcript across every project, so project N was
+ * conditioned on 1..N-1 and emitted their content (the live cross-project bleed).
  * Error isolation is UNCHANGED: the per-project try/catch still wraps one project's
  * whole compose+emit, so a failure is logged and never blocks its siblings or the
  * closing. The pool is BOUNDED (not an unbounded Promise.all) so a large import

@@ -172,7 +172,6 @@ export function buildProjectKickoff(deps: ProjectKickoffDeps): ProjectKickoff {
               relpath: 'starting-notes.md',
               title: `${input.name} - starting notes`,
               label: 'Starting notes',
-              lead: `I did a little digging on ${input.name} and jotted some starting notes to explore`,
             })
             if (doc !== null) return doc
             // Compose failed → fall through to engaging questions (not null):
@@ -196,7 +195,6 @@ export function buildProjectKickoff(deps: ProjectKickoffDeps): ProjectKickoff {
             relpath: 'starting-plan.md',
             title: `${input.name} - starting plan`,
             label: 'Starting plan',
-            lead: `I took a first pass at ${input.name} and drafted a starting plan`,
           })
           if (doc !== null) return doc
         }
@@ -301,8 +299,6 @@ interface DraftDocPlan {
   title: string
   /** Human label for the tappable link. */
   label: string
-  /** Opening-bubble lead-in ("I drafted X ..."). */
-  lead: string
 }
 
 /**
@@ -331,6 +327,9 @@ async function tryDraftDoc(
     body = (
       await deps.composer({
         kind,
+        // ISSUES #378 — compose THIS project's doc in its OWN per-project
+        // `cc-agent-*` warm session (keyed by project_id), never the shared one.
+        project_id: input.project_id,
         project_name: input.name,
         doc_title: plan.title,
         context_lines: contextLines(signal),
@@ -382,11 +381,24 @@ async function tryDraftDoc(
     }
   }
 
+  // ISSUES #377 — the opening MESSAGE is FULLY LLM-composed + unique per project:
+  // it LEADS with the model's own framing of THIS project (the drafted doc's first
+  // prose paragraph — the `# heading` is skipped by `firstProseParagraph`), NOT a
+  // shared hardcoded lead template ("I took a first pass at X and drafted a
+  // starting plan"). Because the doc itself is composed in the project's OWN warm
+  // session (ISSUES #378), that framing is grounded in the project's real
+  // docs/STATUS and never bleeds another project's content. The trailing line is a
+  // functional invitation to open the tappable doc-link (an affordance, not a
+  // content claim). The empty-gist branch is a degenerate-output safety net (an
+  // LLM doc that produced only headings) — still project-named, never a shared
+  // lead.
   const gist = firstProseParagraph(body)
-  const gistClause = gist.length > 0 ? `: ${stripTrailingPunctuation(gist)}` : ''
   const marker = `[${plan.label}](docs:/${input.project_id}/${plan.relpath})`
-  const body_out =
-    `${plan.lead}${gistClause}. Have a look and tell me what to change - ${marker}.`
+  const opening =
+    gist.length > 0
+      ? `${stripTrailingPunctuation(gist)}.`
+      : `I put together a ${plan.label.toLowerCase()} for ${input.name}.`
+  const body_out = `${opening} Have a look and tell me what to change: ${marker}.`
   return { body: body_out, action: kind === 'draft_doc' ? 'draft-doc' : 'interest-research', doc_relpath: plan.relpath, indexed }
 }
 

@@ -38,6 +38,14 @@ export interface KickoffComposeInput {
   /** `draft_doc` = a work project's starting plan; `interest_brief` = a hobby's
    *  light-research / starting notes. */
   kind: 'draft_doc' | 'interest_brief'
+  /**
+   * The materialized project's id. Threaded onto the substrate dispatch as
+   * `metering_context.project_id` (ISSUES #378) so THIS project's kickoff-doc
+   * synthesis lands on its OWN warm `cc-agent-*` REPL — never the shared session
+   * that let one project's draft leak into the next. Concurrency-safe (per
+   * dispatch). Empty/absent falls back to the substrate's shared namespace.
+   */
+  project_id?: string
   project_name: string
   /** The doc's working title (drives the `# <title>` heading). */
   doc_title: string
@@ -78,6 +86,11 @@ export function buildProjectKickoffComposer(
         messages: [{ role: 'user', content: userPrompt(doc) }],
         max_tokens,
         signal: controller.signal,
+        // Route THIS project's doc synthesis to its OWN per-project warm session
+        // (ISSUES #378) — folded into `spec.metering_context.project_id`.
+        ...(doc.project_id !== undefined && doc.project_id.length > 0
+          ? { project_id: doc.project_id }
+          : {}),
       })
       const text = (response.content[0]?.text ?? '').trim()
       if (text.length === 0) {

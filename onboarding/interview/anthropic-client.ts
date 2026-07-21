@@ -30,6 +30,21 @@ export interface AnthropicMessagesClient {
       messages: ReadonlyArray<{ role: 'user' | 'assistant'; content: string }>
       max_tokens: number
       signal?: AbortSignal
+      /**
+       * OPTIONAL live per-dispatch project identity. When set (and non-empty),
+       * the CC-substrate adapter folds it into `spec.metering_context.project_id`,
+       * which `build-llm-call-substrate.ts` folds into the warm-pool key — so a
+       * per-project dispatch lands on THAT project's OWN warm REPL instead of the
+       * substrate's shared `'default'` namespace. This is the SAME per-dispatch
+       * key dimension the live-chat agent uses (`build-live-agent-turn.ts`), and
+       * it is race-free across concurrent dispatches precisely because it rides
+       * the spec (never a shared mutable closure). The per-project OPENING +
+       * KICKOFF composers set this so their composes ISOLATE by construction (no
+       * shared transcript ⇒ no cross-project content bleed — ISSUES #378) and
+       * warm the SAME session the project's live chat later resumes. Absent for
+       * every caller that has no conversational project (router, suggesters).
+       */
+      project_id?: string
     }): Promise<AnthropicMessageResponse>
   }
 }

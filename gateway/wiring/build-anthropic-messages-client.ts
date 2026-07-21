@@ -100,6 +100,19 @@ export function buildGatewayAnthropicMessagesClient(
           model_preference: [args.model ?? input.default_model ?? getBestModel()],
           max_tokens: args.max_tokens,
         }
+        // LIVE per-dispatch project identity (ISSUES #378). When the caller
+        // stamps a project_id, fold it into `spec.metering_context.project_id` —
+        // the ONE dimension `build-llm-call-substrate.ts` folds into the warm-pool
+        // key when the substrate carries no `projectIdResolver` (the openings +
+        // kickoff composers run over the `cc-agent-*` substrate, wired that way).
+        // Per-dispatch ⇒ race-free across the finalize worker pool's concurrent
+        // composes: each project's dispatch keys its OWN warm REPL, so their
+        // transcripts never share and one project can never be conditioned on
+        // another's (the cross-project content bleed root). Absent project_id
+        // leaves the spec byte-identical to before (router / suggester callers).
+        if (args.project_id !== undefined && args.project_id.length > 0) {
+          spec.metering_context = { project_id: args.project_id }
+        }
         const handle = input.substrate.start(spec)
         let text: string
         try {
