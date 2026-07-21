@@ -2,6 +2,34 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+## 2026-07-21 — Executor-mode reminders task 5 (Argus r2 fixes): escalation fires after a cancel-broken streak + insertRunning-failure no longer wedges a ritual
+
+Round-3 corrections on PR #426 (branch `trident/executor-mode-reminders`).
+
+- **`shouldEscalate` now re-arms after ANY streak-breaker, not only a success
+  (BLOCKER).** `reminders/ritual-delivery.ts` gated re-arm on the 4th (older) row
+  being `=== 'finished'`, but `cancelled` also breaks a streak (it is outside
+  `FAIL`) — so a fresh 3-failure streak preceded by an operator cancel
+  (`[failed,failed,failed,cancelled]`) NEVER escalated, for the streak's entire
+  life. Fixed to gate on `!FAIL.has(4th.status)`: any non-failure streak-breaker
+  (`finished` OR `cancelled`) re-arms the once-per-streak notice. `FAIL` is now
+  typed over the full `RitualRunStatus` union so the un-narrowed 4th-row status
+  typechecks. The wrong assertion in `reminders/ritual-delivery.test.ts` was
+  corrected to expect `true`.
+- **A run-history write that fails AFTER the subagent spawned no longer wedges
+  the ritual (minor).** `reminders/ritual-executor.ts`: if `insertRunning` throws
+  after `spawnSubagent` persisted its `pending` `ritual:<id>` registry record,
+  the catch now marks that record terminal via `updateTerminal` (which never
+  rejects) so the `on_duplicate:'refuse'` guard's `liveByKey` no longer sees it —
+  every future fire would otherwise be refused as a duplicate with no durable row
+  explaining why. Then a durable `failed` run row + failure notice are landed
+  best-effort. New test in `reminders/ritual-executor.test.ts` proves the key is
+  freed (`liveByKey` undefined, record `crashed`), the failed row exists, the
+  notice posts, and the turn never launches.
+- **`listRecentTerminal` doc now lists `cancelled` (nit).** The interface comment
+  in `reminders/ritual-runs.ts` omitted `cancelled` though the SQL `IN`-clause
+  includes it; corrected to match.
+
 ## 2026-07-21 — Executor-mode reminders task 5 (Argus r1 fixes): ritual prompt wiring + scope fail-close + cancel/escalation semantics
 
 Round-2 corrections on PR #426 (branch `trident/executor-mode-reminders`).

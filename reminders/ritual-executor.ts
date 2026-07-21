@@ -416,15 +416,50 @@ export function createRitualExecutor(deps: RitualExecutorDeps): RitualExecutor {
         // (e) the live 'running' history row (subagent_run_id + content_hash) is
         // the durable record of the attempt; the run_id IS the subagent run id so
         // the two surfaces cross-reference.
-        await deps.runs.insertRunning({
-          run_id: rec.run_id,
-          ritual_id,
-          reminder_id: reminder.id,
-          project_slug: deps.project_slug,
-          subagent_run_id: rec.run_id,
-          content_hash,
-          now_ms: now(),
-        })
+        try {
+          await deps.runs.insertRunning({
+            run_id: rec.run_id,
+            ritual_id,
+            reminder_id: reminder.id,
+            project_slug: deps.project_slug,
+            subagent_run_id: rec.run_id,
+            content_hash,
+            now_ms: now(),
+          })
+        } catch (insertErr) {
+          // spawnSubagent already persisted a LIVE (`pending`) `ritual:<id>`
+          // registry record; if we bail here without freeing it, the
+          // `on_duplicate:'refuse'` guard wedges EVERY future fire of this ritual
+          // as a duplicate with NO durable run row explaining why (Argus r2).
+          // `updateTerminal` NEVER rejects and a terminal record frees the
+          // spawn_key (liveByKey counts only pending|running) — so the key-free is
+          // the load-bearing, guaranteed step. The durable failed row + notice are
+          // best-effort (the run store JUST failed, so they may fail too).
+          const message = insertErr instanceof Error ? insertErr.message : String(insertErr)
+          const reason = `run-history insert failed after spawn: ${message}`
+          await deps.subagents.updateTerminal(rec.run_id, { status: 'crashed', ended_at: now() })
+          try {
+            const failedRunId = mintId(deps.mint_run_id)
+            await deps.runs.insertFailed({
+              run_id: failedRunId,
+              ritual_id,
+              reminder_id: reminder.id,
+              project_slug: deps.project_slug,
+              failure_reason: reason,
+              now_ms: now(),
+            })
+            await surfaceFailure(reminder, ritual_id, failedRunId, 'failed', reason)
+          } catch (surfaceErr) {
+            log.error('ritual_insert_running_failed', {
+              reminder: reminder.id,
+              ritual_id,
+              subagent_run_id: rec.run_id,
+              error: message,
+              surface_error: surfaceErr instanceof Error ? surfaceErr.message : String(surfaceErr),
+            })
+          }
+          return
+        }
         // Best-effort registry running-flip (service.ts:361-380 precedent — a
         // persist hiccup must not abort the launch; the record is already durable
         // at 'pending' from create).

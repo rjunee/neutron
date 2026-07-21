@@ -440,6 +440,57 @@ describe('createRitualExecutor.fire — spawn refusal + robustness', () => {
     expect(turn).not.toHaveBeenCalled()
   })
 
+  test('insertRunning throws AFTER spawn → registry key freed (no wedge), durable failed row + notice (Argus r2)', async () => {
+    // The subagent record is persisted by spawnSubagent BEFORE the 'running'
+    // history row is written. If insertRunning throws, a live `ritual:<id>`
+    // registry record must NOT be left behind — `on_duplicate:'refuse'` would
+    // then wedge EVERY future fire of this ritual as a duplicate with no durable
+    // row explaining why. The catch marks the record terminal (freeing the key)
+    // and lands a durable failed row + failure notice.
+    const registry = registryWith(def())
+    const brokenRuns: RitualRunStore = {
+      ...runs,
+      insertRunning: async () => {
+        throw new Error('running-row write blew up')
+      },
+    }
+    const rec = recordingOutbound()
+    let n = 0
+    const turn = mock(async (): Promise<RitualTurnResult> => ({ result: 'never runs', status: 'completed' }))
+    const exec = createRitualExecutor({
+      registry,
+      approvals: new ApprovalManager(db, noopNotifier),
+      project_slug: 'owner',
+      instance_key: 'owner',
+      subagents,
+      outbound: rec.outbound,
+      resolve_topic: resolveTopic,
+      turn,
+      runs: brokenRuns,
+      resolve_model: () => 'm',
+      scope_cwd: () => '/s',
+      build_approval_check: () => approver(true),
+      mint_run_id: () => `sub-${n++}`,
+    })
+
+    await expect(exec.fire(await ritualRow('morning-brief'))).resolves.toBeUndefined()
+
+    // The registry record spawned as 'sub-0' is now TERMINAL, so the spawn_key is
+    // freed — a future fire is NOT refused as a duplicate.
+    expect(subagents.liveByKey('ritual:morning-brief', 'owner')).toBeUndefined()
+    expect(subagents.byRunId('sub-0')!.status).toBe('crashed')
+
+    // A durable failed run row records the attempt (minted after the spawn id).
+    const failed = runs.get('sub-1')!
+    expect(failed.status).toBe('failed')
+    expect(failed.failure_reason).toContain('run-history insert failed after spawn')
+
+    // A failure notice was surfaced, and the substrate turn never launched.
+    await waitFor(() => rec.posts.length >= 1)
+    expect(rec.posts[0]!.body).toMatch(/Ritual 'morning-brief' failed \(run sub-1\)/)
+    expect(turn).not.toHaveBeenCalled()
+  })
+
   test('fire() NEVER rejects even when the run store write throws', async () => {
     const registry = registryWith(def())
     const brokenRuns: RitualRunStore = {

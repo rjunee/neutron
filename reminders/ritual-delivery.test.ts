@@ -102,8 +102,10 @@ describe('shouldEscalate truth table (rows newest-first)', () => {
     // exactly like a success, never count as one of the 3.
     expect(shouldEscalate([row('cancelled'), row('failed'), row('failed')])).toBe(false)
     expect(shouldEscalate([row('failed'), row('cancelled'), row('failed')])).toBe(false)
-    // 3 real failures then a cancel as the 4th (older) row → NOT a fresh streak-
-    // crossing (only 'finished' re-arms), so no double escalation.
-    expect(shouldEscalate([row('failed'), row('failed'), row('failed'), row('cancelled')])).toBe(false)
+    // 3 real failures then a cancel as the 4th (older) row → a FRESH streak of
+    // exactly 3 (the cancel broke the prior streak just like a success would), so
+    // it escalates. Gating on `=== 'finished'` would wrongly suppress this and
+    // never fire for the streak's entire life (Argus r2 blocker).
+    expect(shouldEscalate([row('failed'), row('failed'), row('failed'), row('cancelled')])).toBe(true)
   })
 })

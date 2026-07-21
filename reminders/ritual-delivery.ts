@@ -18,19 +18,25 @@
 
 import { createLogger } from '@neutronai/logger'
 import type { ReminderOutbound } from './dispatcher.ts'
-import type { RitualRunRow, RitualRunStore, RitualRunTerminalStatus } from './ritual-runs.ts'
+import type {
+  RitualRunRow,
+  RitualRunStatus,
+  RitualRunStore,
+  RitualRunTerminalStatus,
+} from './ritual-runs.ts'
 
 const log = createLogger('ritual-delivery')
 
 /** Consecutive failures that trigger the once-per-streak escalation notice. */
 export const RITUAL_ESCALATION_CONSECUTIVE_FAILURES = 3
 
-/** The terminal statuses that count as a FAILURE (finished is a success). */
-const FAIL: ReadonlySet<RitualRunTerminalStatus> = new Set<RitualRunTerminalStatus>([
-  'failed',
-  'timed_out',
-  'crashed',
-])
+/**
+ * The statuses that count as a FAILURE (finished/cancelled/skipped/running are
+ * NOT). Typed over the FULL `RitualRunStatus` union so it can be queried against
+ * any status without narrowing (the streak re-arm gate checks the 4th row, which
+ * is not pre-narrowed to a terminal status).
+ */
+const FAIL: ReadonlySet<RitualRunStatus> = new Set<RitualRunStatus>(['failed', 'timed_out', 'crashed'])
 
 /** Max chars of a failure reason appended to a one-line notice. */
 const MAX_REASON_CHARS = 160
@@ -78,10 +84,14 @@ export function formatRitualBootReapNotice(i: { ritual_id: string; run_id: strin
  * AFTER the newest failure row is written).
  *
  * True iff the 3 newest rows are all failures AND either there is no 4th row or
- * the 4th (older) row is a SUCCESS (`finished`). This fires EXACTLY ONCE at the
- * moment a streak crosses 3: the 4th consecutive failure has a failing 4th row
- * so it returns false, and a success then 3 more failures re-arms it — all with
- * zero new state.
+ * the 4th (older) row is NOT a failure — i.e. any streak-breaker (`finished`
+ * success OR an operator `cancelled`) re-arms the notice. This fires EXACTLY
+ * ONCE at the moment a streak crosses 3: the 4th CONSECUTIVE failure has a
+ * failing 4th row so it returns false, and a streak-breaker then 3 more failures
+ * re-arms it — all with zero new state. Gating on `=== 'finished'` (instead of
+ * `!FAIL.has()`) would permanently suppress escalation for any streak preceded
+ * by a cancel, since `cancelled` breaks the streak but is not a success (Argus
+ * r2 blocker).
  */
 export function shouldEscalate(rowsNewestFirst: ReadonlyArray<Pick<RitualRunRow, 'status'>>): boolean {
   if (rowsNewestFirst.length < RITUAL_ESCALATION_CONSECUTIVE_FAILURES) return false
@@ -90,7 +100,10 @@ export function shouldEscalate(rowsNewestFirst: ReadonlyArray<Pick<RitualRunRow,
     if (s === 'running' || s === 'skipped' || !FAIL.has(s)) return false
   }
   if (rowsNewestFirst.length < RITUAL_ESCALATION_CONSECUTIVE_FAILURES + 1) return true
-  return rowsNewestFirst[RITUAL_ESCALATION_CONSECUTIVE_FAILURES]!.status === 'finished'
+  // The 4th (older) row re-arms the notice unless it is itself a failure (which
+  // means this is the 4th+ consecutive failure and we already escalated). Any
+  // non-failure streak-breaker — `finished` OR `cancelled` — re-arms.
+  return !FAIL.has(rowsNewestFirst[RITUAL_ESCALATION_CONSECUTIVE_FAILURES]!.status)
 }
 
 /**

@@ -126,9 +126,11 @@ export interface RitualRunStore {
   /** Every row for a ritual, newest first (tests + observability). */
   listByRitual(ritual_id: string): RitualRunRow[]
   /**
-   * The most recent TERMINAL rows (finished/failed/timed_out/crashed — excludes
-   * 'skipped' and 'running') for a ritual, newest first, capped at `limit`. The
-   * once-per-streak escalation rule reads the last 4 with this.
+   * The most recent TERMINAL rows (finished/failed/timed_out/crashed/cancelled —
+   * excludes 'skipped' and 'running') for a ritual, newest first, capped at
+   * `limit`. `cancelled` is included so it can act as a streak-breaker in the
+   * escalation rule. The once-per-streak escalation rule reads the last 4 with
+   * this.
    */
   listRecentTerminal(input: { ritual_id: string; limit: number }): RitualRunRow[]
   /**
