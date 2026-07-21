@@ -50,6 +50,7 @@ import { getBestModel } from '@neutronai/runtime/models.ts'
 import { drainToText } from '@neutronai/runtime/substrate-text.ts'
 import { createLogger } from '@neutronai/logger'
 import { slugify } from '../write-to-gbrain.ts'
+import { extractTypedLinks } from '@neutronai/runtime/auto-link.ts'
 import { deleteEntity as realDeleteEntity, type SyncHook } from '@neutronai/runtime/entity-writer.ts'
 
 /**
@@ -196,25 +197,33 @@ interface LoadedPage {
   raw: string
 }
 
-/** Extract the set of `[[slug]]` (or `[[slug|alias]]`) wikilink targets in text —
- *  the graph-edge surface that re-synthesis must never shrink. */
-function wikilinkTargets(text: string): Set<string> {
+/**
+ * The graph EDGES a body would contribute, as a set of `${predicate}\x1f${object}`
+ * keys — computed with the SAME `extractTypedLinks` the writer's edge layer uses
+ * (so predicate inference + the one-edge-per-(subject,object) collapse match the
+ * graph exactly). Keyed on the (predicate, object) PAIR, not just the object, so
+ * a MUTATED predicate to a preserved target is a distinct key.
+ */
+function relationKeys(body: string, slug: string, kind: EntityKind): Set<string> {
   const out = new Set<string>()
-  const re = /\[\[([^\]|]+)(?:\|[^\]]*)?\]\]/g
-  let m: RegExpExecArray | null
-  while ((m = re.exec(text)) !== null) {
-    const target = m[1]?.trim().toLowerCase()
-    if (target !== undefined && target.length > 0) out.add(target)
+  for (const t of extractTypedLinks(`${body}\n`, slug, { sourceKind: kind })) {
+    out.add(`${t.predicate}\x1f${t.object}`)
   }
   return out
 }
 
-/** True iff `next` preserves every wikilink target present in `prev` (no edge
- *  loss). A re-synthesis that drops even one prior link is rejected. */
-function preservesEdges(prev: string, next: string): boolean {
-  const before = wikilinkTargets(prev)
-  const after = wikilinkTargets(next)
-  for (const t of before) if (!after.has(t)) return false
+/**
+ * True iff `next` preserves every (predicate, object) EDGE present in `prev` — no
+ * edge loss AND no predicate mutation. A re-synthesis that drops a prior link OR
+ * changes its predicate on a preserved target (`Works at [[acme]].` →
+ * `Mentions [[acme]].`) is rejected (blocker 2b: the old target-only gate let a
+ * predicate swap through, and because supersede is predicate-scoped, the mutated
+ * edge could then never be retired — frozen forever).
+ */
+function preservesEdges(prev: string, next: string, slug: string, kind: EntityKind): boolean {
+  const before = relationKeys(prev, slug, kind)
+  const after = relationKeys(next, slug, kind)
+  for (const k of before) if (!after.has(k)) return false
   return true
 }
 
@@ -426,7 +435,13 @@ async function dedupPages(
     const bySlug = new Map(kindPages.map((p) => [p.slug, p]))
     const candidates: DedupCandidate[] = kindPages.map((p) => ({
       slug: p.slug,
-      text: `${p.title}\n${p.compiledTruth}`,
+      title: p.title,
+      // Compiled-truth ONLY — `clusterNearDuplicates` scores title tokens
+      // separately and strips generated boilerplate from this before scoring
+      // (blocker 1a). Passing `${title}\n${compiledTruth}` here would double-count
+      // the title and defeat the boilerplate strip (which keys the title H1 off
+      // the title).
+      text: p.compiledTruth,
     }))
     const clusters = clusterNearDuplicates(candidates, threshold)
     for (const cluster of clusters) {
@@ -666,7 +681,8 @@ async function resynthesizePages(
       const raw = await dispatch(deps, report, `${RESYNTH_PROMPT}\n${digest}\n`)
       const next = raw.trim()
       if (next.length === 0) continue
-      if (!preservesEdges(page.compiledTruth, next)) continue // would drop an edge → reject
+      // would drop an edge OR mutate a predicate on a preserved target → reject
+      if (!preservesEdges(page.compiledTruth, next, page.slug, page.kind)) continue
       // IDEMPOTENCE: if the LLM returned the already-consolidated truth (no real
       // change), do NOT write — appending a marker row would rewrite the page,
       // report a phantom consolidation, grow the timeline every pass, and keep the

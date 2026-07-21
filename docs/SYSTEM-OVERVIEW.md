@@ -2365,6 +2365,44 @@ optional operator `GBRAIN_SOURCE` / `GBRAIN_BRAIN_ID`.
     `gbrain-memory/__tests__/gbrain-doctor.test.ts` (working-vs-broken
     detection + idempotent upgrade + rollback, against injected probes).
 
+- **Consolidation correctness — dedup / supersede / resynth invariants
+  (`scribe/reflect/`, `scribe/write-to-gbrain.ts`).** The reflect batch pass
+  (`scribe/reflect/reflect-pass.ts`, still flag-gated behind
+  `NEUTRON_PERFECT_RECALL`, NOT armed) mutates the owner's canonical corpus, so
+  its correctness is load-bearing before consolidation ever arms. Three
+  data-integrity guards (memory-system-design-2026-07-20 blockers 1–3) constrain
+  what it may do:
+  - **Near-duplicate DEDUP never fuses unrelated entities** (`scribe/reflect/jaccard.ts`).
+    Similarity scoring (a) strips ONLY *generated* boilerplate before scoring —
+    the generated title H1 (`# <Name>` where the label equals the page title),
+    the generated section headings (`## Relationships`, `## Merged`), and the
+    fact-less `Mentioned in chat (kind: X).` line — and NEVER a hand-authored
+    factual heading (`stripBoilerplate`); (b) KEEPS numeric/alphanumeric tokens
+    (`2024`, `q1`, `v2`) that `Intl.Segmenter` marks non-word-like, so fiscal-year
+    / versioned / quarterly pages keep their only discriminator (`tokenize`,
+    ISSUES #373); (c) clusters as CLIQUES (every pair ≥ threshold, no transitive
+    closure) and requires a page to carry ≥ `MIN_DISTINGUISHING_TOKENS` (= 2)
+    non-boilerplate tokens to be a merge candidate at all — so fact-less
+    boilerplate pages (which strip to ~0 tokens) never merge. The Jaccard
+    threshold (`DEFAULT_JACCARD_THRESHOLD` = 0.7) is `deps.jaccardThreshold`-
+    configurable and flagged UNVALIDATED — it MUST be re-measured on a real corpus
+    before arming. Known accepted residual: two DISTINCT fact-less entities sharing
+    an identical ≥ 2-word name still merge, gated behind the merge name-tripwire.
+  - **Supersede is keyed on the graph TRIPLE, not sentence shape**
+    (`stripSupersededSentences`, `scribe/write-to-gbrain.ts`). A superseded
+    relation's sentence is retired whenever it asserts exactly one graph relation
+    that is a superseded target — REGARDLESS of prose form — so a supersede still
+    works after a resynth rewrites compiled-truth into natural prose (previously a
+    permanent no-op). Compound sentences (more than one relation) are still spared
+    entirely; a single-relation sentence's non-edge descriptive prose is retired
+    to the append-only timeline (history preserved).
+  - **Resynth may not drop OR mutate a predicate** (`preservesEdges`,
+    `scribe/reflect/reflect-pass.ts`). The accept-gate compares extracted
+    (predicate, object) PAIRS, not just wikilink targets, so a rewrite that keeps a
+    target but changes its verb (`Works at [[acme]].` → `Mentions [[acme]].`) is
+    REJECTED — the edge can never silently degrade, and a predicate-scoped supersede
+    can always still retire it.
+
 ## Credential management — onboarding OPTIONAL keys (WAVE 1) — `onboarding/optional-keys.ts`
 
 The admin add/rotate path (`app/app/admin.tsx` → the gateway admin surface)

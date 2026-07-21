@@ -1,30 +1,90 @@
 /**
  * RB3 reflect — Jaccard near-duplicate clustering (pure, deterministic).
- *   - tokenisation is a set (case-folded, short tokens dropped)
- *   - Jaccard value is |∩|/|∪|; empty sets never "match"
- *   - clustering groups near-duplicates, keeps distinct pages apart, and is
- *     transitive (A~B, B~C ⇒ {A,B,C}) via connected components
+ *
+ * Data-integrity contract (memory-system-design-2026-07-20 blockers 1 & 3 —
+ * dedup must never fuse UNRELATED entities):
+ *   - tokenise is a set (case-folded); it KEEPS numeric/alphanumeric tokens
+ *     (`2024`,`q1`,`v2`) and drops only single ASCII letters + pure punctuation.
+ *   - `stripBoilerplate` removes ONLY generated boilerplate (title H1 == title,
+ *     `## Relationships`/`## Merged`, `Mentioned in chat (kind: X).`) and NEVER a
+ *     hand-authored factual heading.
+ *   - clustering groups CLIQUES (every pair ≥ threshold), NOT connected
+ *     components — a chain `A~B~C` with `A~C` below the bar does not fuse.
+ *   - a page with fewer than `MIN_DISTINGUISHING_TOKENS` non-boilerplate tokens is
+ *     never a merge candidate (fact-less boilerplate pages stay apart).
+ *   - genuine near-duplicates (same entity, overlapping real facts) still merge.
  */
 
 import { describe, test, expect } from 'bun:test'
 import {
   tokenize,
+  stripBoilerplate,
   jaccard,
   clusterNearDuplicates,
   DEFAULT_JACCARD_THRESHOLD,
+  MIN_DISTINGUISHING_TOKENS,
   type DedupCandidate,
 } from '../reflect/jaccard.ts'
 
 describe('tokenize', () => {
-  test('lowercases, splits on non-alphanumerics, drops <2-char tokens, dedups', () => {
+  test('lowercases, drops single ASCII letters + punctuation, dedups', () => {
     const t = tokenize('Acme Inc. — a B2B SaaS! (acme)')
     expect(t.has('acme')).toBe(true)
     expect(t.has('inc')).toBe(true)
     expect(t.has('b2b')).toBe(true)
     expect(t.has('saas')).toBe(true)
-    expect(t.has('a')).toBe(false) // single char dropped
-    // 'acme' appears twice but the set carries it once.
-    expect([...t].filter((x) => x === 'acme').length).toBe(1)
+    expect(t.has('a')).toBe(false) // single ASCII letter dropped
+    expect([...t].filter((x) => x === 'acme').length).toBe(1) // set, not bag
+  })
+
+  // Blocker 3 (ISSUES #373): Intl.Segmenter marks bare numeric/alphanumeric
+  // tokens isWordLike=false; the old `continue` DROPPED them, so year/version/
+  // quarter discriminators vanished and distinct pages collapsed.
+  test('KEEPS numeric + alphanumeric discriminator tokens', () => {
+    expect([...tokenize('2024')]).toEqual(['2024'])
+    expect([...tokenize('q1')]).toEqual(['q1'])
+    expect([...tokenize('v2')]).toEqual(['v2'])
+    // A year inside prose survives as its own token.
+    expect(tokenize('Fiscal Year 2024 Budget').has('2024')).toBe(true)
+    // Single digits are kept (a real discriminator, unlike filler letter `a`).
+    expect(tokenize('version 5').has('5')).toBe(true)
+  })
+
+  test('non-ASCII (CJK) content tokenizes and matches when identical', () => {
+    const jp = '株式会社アクメは開発者ツールを構築する会社です'
+    const toks = tokenize(jp)
+    expect(toks.size).toBeGreaterThan(1)
+    expect(jaccard(toks, tokenize(jp))).toBe(1)
+  })
+})
+
+describe('stripBoilerplate (generated-only)', () => {
+  test('strips the generated title H1 (label == title) but KEEPS a factual heading', () => {
+    const stripped = stripBoilerplate('# Acme\n\n## Acquired by Globex', 'Acme')
+    const toks = tokenize(stripped)
+    // The title H1 `# Acme` is gone (the name token is the title, kept separately).
+    expect(stripped).not.toContain('# Acme')
+    // The hand-authored factual heading survives → its distinguishing tokens stay.
+    expect(toks.has('globex')).toBe(true)
+    expect(toks.has('acquired')).toBe(true)
+  })
+
+  test('a factual H1 whose label != title is KEPT (never over-stripped)', () => {
+    // #415 over-reach stripped ALL H1s. Here a factual `# Acquired by Globex` on an
+    // Acme page keeps its tokens because its label is not the title.
+    const stripped = stripBoilerplate('# Acquired by Globex\n\nSome prose.', 'Acme')
+    expect(stripped).toContain('# Acquired by Globex')
+    expect(tokenize(stripped).has('globex')).toBe(true)
+  })
+
+  test('strips generated section headings + the fact-less mentioned-line', () => {
+    const body = '# Acme\n\nMentioned in chat (kind: company).\n\n## Relationships\n\n- Works at [[globex]].'
+    const stripped = stripBoilerplate(body, 'Acme')
+    expect(stripped).not.toContain('# Acme')
+    expect(stripped).not.toContain('Mentioned in chat')
+    expect(stripped).not.toContain('## Relationships')
+    // A real relation line survives.
+    expect(stripped).toContain('[[globex]]')
   })
 })
 
@@ -34,59 +94,111 @@ describe('jaccard', () => {
     expect(jaccard(tokenize('alpha beta'), tokenize('delta epsilon'))).toBe(0)
   })
   test('partial overlap is the exact ratio', () => {
-    // {a,b,c} vs {b,c,d}: ∩={b,c}=2, ∪={a,b,c,d}=4 → 0.5
     expect(jaccard(tokenize('aa bb cc'), tokenize('bb cc dd'))).toBeCloseTo(0.5, 6)
   })
   test('two empty sets never match', () => {
     expect(jaccard(tokenize(''), tokenize(''))).toBe(0)
-    expect(jaccard(tokenize('a'), tokenize(''))).toBe(0) // 'a' dropped → empty
-  })
-
-  test('non-ASCII (CJK) content tokenizes and matches when identical', () => {
-    // A plain [^a-z0-9] split would drop every CJK char → empty set → never match.
-    const jp = '株式会社アクメは開発者ツールを構築する会社です'
-    const toks = tokenize(jp)
-    expect(toks.size).toBeGreaterThan(1) // segmented into real word tokens
-    expect(jaccard(toks, tokenize(jp))).toBe(1) // identical CJK strings match
+    expect(jaccard(tokenize('a'), tokenize(''))).toBe(0)
   })
 })
 
-describe('clusterNearDuplicates', () => {
-  const cand = (slug: string, text: string): DedupCandidate => ({ slug, text })
+describe('clusterNearDuplicates — no fusion of unrelated entities', () => {
+  const boiler = (kind = 'company'): string => `Mentioned in chat (kind: ${kind}).`
+  const factless = (name: string): DedupCandidate => ({
+    slug: name.toLowerCase(),
+    title: name,
+    text: `# ${name}\n\n${boiler()}`,
+  })
 
-  test('groups near-duplicates and keeps distinct pages as singletons', () => {
-    const items = [
-      cand('acme', 'Acme is an enterprise SaaS company building developer tools'),
-      cand('acme-inc', 'Acme Inc is an enterprise SaaS company building developer tools'),
-      cand('globex', 'Globex is a logistics and freight-forwarding conglomerate'),
-    ]
-    const clusters = clusterNearDuplicates(items, DEFAULT_JACCARD_THRESHOLD)
-    // acme + acme-inc collapse; globex stands alone.
-    const bySize = clusters.map((c) => c.map((x) => x.slug).sort())
-    expect(bySize).toContainEqual(['acme', 'acme-inc'])
-    expect(bySize).toContainEqual(['globex'])
+  // Blocker 1 headline: five fact-less boilerplate company pages fused into ONE
+  // entity transitively on main. They must NOT cluster now.
+  test('five fact-less boilerplate pages do NOT cluster (blocker 1 headline)', () => {
+    const pages = ['Acme', 'Globex', 'Initech', 'Umbrella', 'Soylent'].map(factless)
+    const clusters = clusterNearDuplicates(pages)
+    expect(clusters.length).toBe(5) // all singletons
+    for (const c of clusters) expect(c.length).toBe(1)
+  })
+
+  // Blocker 3: two fiscal-year pages whose only discriminator is the year.
+  test('fiscal-year pages stay distinct (numeric discriminator survives)', () => {
+    const fy = (y: string): DedupCandidate => ({
+      slug: `fy${y}`,
+      title: `Fiscal Year ${y} Budget`,
+      text: `# Fiscal Year ${y} Budget\n\nMentioned in chat (kind: concept).`,
+    })
+    const clusters = clusterNearDuplicates([fy('2023'), fy('2024')])
     expect(clusters.length).toBe(2)
   })
 
-  test('clustering is transitive via connected components', () => {
-    // Chain: A~B (share most tokens), B~C, but A and C alone are below the bar.
-    const items = [
-      cand('a', 'one two three four five common'),
-      cand('b', 'two three four five six common'),
-      cand('c', 'three four five six seven common'),
-    ]
-    const clusters = clusterNearDuplicates(items, 0.5)
-    // If A~B and B~C at 0.5, all three land in ONE component.
-    const withAB = clusters.find((c) => c.some((x) => x.slug === 'a'))
-    expect(withAB?.map((x) => x.slug).sort()).toEqual(['a', 'b', 'c'])
+  test('v1/v2 and Q1/Q2 variants stay distinct', () => {
+    const p = (slug: string, title: string): DedupCandidate => ({
+      slug,
+      title,
+      text: `# ${title}\n\nMentioned in chat (kind: project).`,
+    })
+    expect(clusterNearDuplicates([p('proj-v1', 'Project V1'), p('proj-v2', 'Project V2')]).length).toBe(2)
+    expect(clusterNearDuplicates([p('rep-q1', 'Report Q1'), p('rep-q2', 'Report Q2')]).length).toBe(2)
   })
 
-  test('a high threshold keeps merely-similar pages apart', () => {
-    const items = [
-      cand('x', 'alpha beta gamma delta'),
-      cand('y', 'alpha beta gamma zeta'), // 3/5 = 0.6 overlap
+  test('two pages distinguished ONLY by a factual heading do not fuse (heading kept)', () => {
+    // Both share the same generated boilerplate; the ONLY distinguishing content is
+    // a hand-authored factual heading. Stripping the boilerplate keeps the heading.
+    const a: DedupCandidate = { slug: 'a', title: 'Deal', text: '# Deal\n\nMentioned in chat (kind: concept).\n\n## Acquired by Globex' }
+    const b: DedupCandidate = { slug: 'b', title: 'Deal', text: '# Deal\n\nMentioned in chat (kind: concept).\n\n## Acquired by Umbrella' }
+    expect(clusterNearDuplicates([a, b]).length).toBe(2)
+  })
+})
+
+describe('clusterNearDuplicates — clique, min-token, and real dedup', () => {
+  test('genuine near-duplicates (same entity, real overlapping facts) STILL cluster', () => {
+    const items: DedupCandidate[] = [
+      { slug: 'acme', title: 'Acme', text: '# Acme\n\nAcme is an enterprise SaaS company building developer tools for teams.' },
+      { slug: 'acme-inc', title: 'Acme Inc', text: '# Acme Inc\n\nAcme is an enterprise SaaS company building developer tools for teams.' },
+      { slug: 'globex', title: 'Globex', text: '# Globex\n\nGlobex is a logistics and freight-forwarding conglomerate operating worldwide.' },
     ]
-    expect(clusterNearDuplicates(items, 0.9).length).toBe(2) // below 0.9 → not merged
-    expect(clusterNearDuplicates(items, 0.5).length).toBe(1) // above 0.5 → merged
+    const clusters = clusterNearDuplicates(items)
+    const bySlug = clusters.map((c) => c.map((x) => x.slug).sort())
+    expect(bySlug).toContainEqual(['acme', 'acme-inc'])
+    expect(bySlug).toContainEqual(['globex'])
+    expect(clusters.length).toBe(2)
+  })
+
+  // Blocker 1c-i: NO transitive closure. A~B and B~C but A~C below the bar → the
+  // whole {A,B,C} must NOT fuse (only the clique {A,B} may).
+  test('clustering requires a CLIQUE — a chain does NOT fuse transitively', () => {
+    // Shared title token ('doc') + text engineered so a~b and b~c clear 0.5 while
+    // a~c falls below it — the classic chain a connected-components pass would fuse.
+    const items: DedupCandidate[] = [
+      { slug: 'a', title: 'Doc', text: 'pp qq rr ss mm nn' },
+      { slug: 'b', title: 'Doc', text: 'pp qq rr ss xx yy' },
+      { slug: 'c', title: 'Doc', text: 'pp qq xx yy kk ll' },
+    ]
+    const clusters = clusterNearDuplicates(items, 0.5)
+    // Connected-components would give {a,b,c}; clique gives {a,b} + {c}.
+    const withA = clusters.find((c) => c.some((x) => x.slug === 'a'))!.map((x) => x.slug).sort()
+    expect(withA).toEqual(['a', 'b']) // c is NOT dragged in
+    expect(clusters.some((c) => c.length === 1 && c[0]!.slug === 'c')).toBe(true)
+  })
+
+  // Blocker 1c-ii: a page below the min-token gate is never a merge candidate.
+  test('a page with < MIN_DISTINGUISHING_TOKENS is never merged (own singleton)', () => {
+    expect(MIN_DISTINGUISHING_TOKENS).toBe(2)
+    // Two pages whose ONLY non-boilerplate token is an identical single word — each
+    // has 1 distinguishing token (< 2) so neither is a merge candidate.
+    const a: DedupCandidate = { slug: 'a', title: 'Zeta', text: '# Zeta\n\nMentioned in chat (kind: company).' }
+    const b: DedupCandidate = { slug: 'b', title: 'Zeta', text: '# Zeta\n\nMentioned in chat (kind: company).' }
+    const clusters = clusterNearDuplicates([a, b])
+    expect(clusters.length).toBe(2) // NOT fused despite identical single token
+  })
+
+  test('threshold is configurable', () => {
+    const items: DedupCandidate[] = [
+      { slug: 'x', title: 'X', text: 'alpha beta gamma delta' },
+      { slug: 'y', title: 'Y', text: 'alpha beta gamma zeta' }, // 3/5 tokens shared incl. titles
+    ]
+    // High bar keeps them apart; low bar merges — same corpus, threshold-driven.
+    expect(clusterNearDuplicates(items, 0.95).length).toBe(2)
+    expect(clusterNearDuplicates(items, 0.4).length).toBe(1)
+    expect(DEFAULT_JACCARD_THRESHOLD).toBe(0.7)
   })
 })

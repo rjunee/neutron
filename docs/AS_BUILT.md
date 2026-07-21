@@ -10,6 +10,56 @@ Running log of what shipped, newest first. One entry per merged change.
 > `docs/research/AS-BUILT-docs-archive-2026-07.md`. This file is the ONE live
 > changelog going forward.
 
+## 2026-07-20 — M2-3: memory-consolidation correctness — 3 dedup/supersede corruption blockers
+
+Closed the three data-integrity blockers that gate the memory build
+(memory-system-design-2026-07-20 blockers 1–3). All are correctness fixes to
+flag-gated (`NEUTRON_PERFECT_RECALL`) consolidation code — nothing is armed; the
+flag stays off. These protect the owner's canonical corpus from silent permanent
+corruption once consolidation runs. Each fix ships with a reproduce-then-fix test
+that provably FAILS on the prior main.
+
+- **BLOCKER 1 — dedup no longer fuses UNRELATED entities** (`scribe/reflect/jaccard.ts`).
+  On main, five fact-less company pages (`# <Name>` + `Mentioned in chat (kind: X).`)
+  collapsed into ONE entity in a single transitive pass — the exact corpus shape
+  every real install accumulates. Three vectors fixed:
+  - (1a) `stripBoilerplate` strips ONLY generated boilerplate before scoring — the
+    generated title H1 (label == page title), the generated section headings
+    (`## Relationships`/`## Merged`), and the fact-less `Mentioned in chat` line —
+    and NEVER a hand-authored factual heading at any level (the #415 over-reach
+    stripped ALL H1s and destroyed distinguishing factual tokens → false merges).
+  - (1b) `tokenize` KEEPS numeric/alphanumeric tokens (`2024`, `q1`, `v2`) that
+    `Intl.Segmenter` marks non-word-like and the old `continue` DROPPED, so
+    fiscal-year / versioned / quarterly pages keep their only discriminator
+    (ISSUES #373, resolved).
+  - (1c) clustering now forms CLIQUES (every pair ≥ threshold — no transitive
+    closure; a greedy clique that never over-merges) and requires
+    `MIN_DISTINGUISHING_TOKENS` (= 2) non-boilerplate tokens for a page to be a
+    merge candidate. The Jaccard threshold stays 0.7, configurable, flagged
+    UNVALIDATED (must be re-measured on a real corpus before arming).
+- **BLOCKER 2a — supersede survives resynth** (`stripSupersededSentences`,
+  `scribe/write-to-gbrain.ts`). The strip is now keyed on the graph TRIPLE
+  (predicate, object), not on matching the generated `RELATION_SENTENCE` template.
+  On main, once a page was resynthesized into natural prose, every future supersede
+  on it was a silent permanent no-op (`works_at NewCo` AND `works_at OldCo`
+  asserted forever). Compound sentences are still spared entirely; a single-relation
+  sentence's descriptive prose is retired to the append-only timeline.
+- **BLOCKER 2b — resynth may not mutate a predicate** (`preservesEdges`,
+  `scribe/reflect/reflect-pass.ts`). The accept-gate now compares extracted
+  (predicate, object) PAIRS, not just wikilink TARGETS. On main a rewrite that kept
+  the target but changed the verb (`Works at [[acme]].` → `Mentions [[acme]].`)
+  passed the gate and committed, degrading a `works_at` edge to `mentions` — and
+  because supersede is predicate-scoped, that mutated edge could then never be
+  retired. Such a rewrite is now REJECTED.
+
+Tests: `scribe/__tests__/reflect-jaccard.test.ts` (dedup vectors, clique,
+min-token, numeric tokens, boilerplate strip), `scribe/__tests__/reflect-pass.test.ts`
+("a re-synthesis that MUTATES a predicate on a preserved target is rejected"),
+`scribe/__tests__/scribe-temporal-invalidation.test.ts` ("a SINGLE-relation PROSE
+sentence for a superseded target IS retired"). Full `bun test scribe/` green (119).
+Explicitly OUT of scope: blocker 4 (token-budget), doctor sequencing, the
+timestamp-ordering guard, the watermark.
+
 ## 2026-07-20 — M2-1: the Cores→scribe fan-out now receives the LIVE Google clients
 
 Closed a "wired but does nothing" partial-port. The Cores→scribe phase-2 fan-out

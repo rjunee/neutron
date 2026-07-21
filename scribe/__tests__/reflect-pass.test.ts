@@ -712,6 +712,31 @@ describe('reflect cost confinement (tiered-write discipline)', () => {
     expect(extractCompiledTruth(page!)).toContain('[[initech]]') // edge kept
   })
 
+  // Blocker 2b (memory-system-design-2026-07-20): the resynth accept-gate compares
+  // (predicate, object) PAIRS, not just wikilink TARGETS. A rewrite that KEEPS the
+  // target but MUTATES the predicate (works_at → mentions) must be REJECTED —
+  // otherwise the edge silently degrades AND, because supersede is predicate-scoped,
+  // a later works_at supersede could never retire the mutated `mentions` edge
+  // (frozen forever). On main the target-only gate ACCEPTS this rewrite.
+  test('a re-synthesis that MUTATES a predicate on a preserved target is rejected', async () => {
+    const owner = tmpOwner()
+    await seed(owner, 'person', 'dana', 'Dana', 'Works at [[acme]].', [
+      { ts: '2026-07-01T00:00:00.000Z', source: 'chat:owner', body: 'r1' },
+      { ts: '2026-07-02T00:00:00.000Z', source: 'chat:owner', body: 'r2' },
+      { ts: '2026-07-03T00:00:00.000Z', source: 'chat:owner', body: 'r3' },
+    ])
+    // Rewrite keeps target [[acme]] but changes the VERB works_at → mentions.
+    const { substrate } = scriptedSubstrate((prompt) =>
+      prompt.includes('DIGEST:') ? '{"entities":[]}' : 'Dana mentions [[acme]] occasionally.',
+    )
+    const report = await runReflectPass({ ...baseDeps(owner), substrate })
+    expect(report.resynthesized).toBe(0) // rejected — predicate would mutate
+    // The page's compiled-truth is byte-unchanged: the works_at edge is intact.
+    const compiled = extractCompiledTruth((await readPage(owner, 'people', 'dana'))!)
+    expect(compiled).toContain('Works at [[acme]].')
+    expect(compiled).not.toContain('mentions [[acme]]')
+  })
+
   test('an UNCHANGED re-synthesis is a true no-op (no write, no marker, no count)', async () => {
     const owner = tmpOwner()
     const truth = 'Works at [[initech]].'
