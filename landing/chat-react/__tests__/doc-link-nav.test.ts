@@ -9,7 +9,11 @@
 
 import { describe, expect, it } from 'bun:test'
 
-import { initialDocLinkFromLocation, parseWebDocLinkHref } from '../doc-link-nav.ts'
+import {
+  initialDocLinkFromLocation,
+  parseWebDocLinkHref,
+  webifyDocLinkHref,
+} from '../doc-link-nav.ts'
 
 const ORIGIN = 'https://app.example.test'
 
@@ -117,5 +121,63 @@ describe('initialDocLinkFromLocation', () => {
   it('returns null for a /projects page that is not a docs deep link', () => {
     expect(initialDocLinkFromLocation('/projects/acme', '', ORIGIN)).toBeNull()
     expect(initialDocLinkFromLocation('/projects/acme/docs', '', ORIGIN)).toBeNull()
+  })
+})
+
+describe('webifyDocLinkHref (FIX #376)', () => {
+  it('normalizes the canonical docs:/ marker to the web doc-link URL', () => {
+    expect(webifyDocLinkHref('docs:/acme/brief.md')).toBe('/projects/acme/docs?path=brief.md')
+  })
+
+  it('normalizes a nested marker path', () => {
+    expect(webifyDocLinkHref('docs:/acme/research/notes.md')).toBe(
+      '/projects/acme/docs?path=research%2Fnotes.md',
+    )
+  })
+
+  it('normalizes the native neutron:// scheme (per-segment percent-encoded)', () => {
+    expect(webifyDocLinkHref('neutron://docs/acme/research%2Fnotes.md')).toBe(
+      '/projects/acme/docs?path=research%2Fnotes.md',
+    )
+    expect(webifyDocLinkHref('neutron://docs/acme/brief.md')).toBe(
+      '/projects/acme/docs?path=brief.md',
+    )
+  })
+
+  it('drops a line/range anchor tail (the viewer opens the whole doc)', () => {
+    expect(webifyDocLinkHref('docs:/acme/brief.md#L42')).toBe('/projects/acme/docs?path=brief.md')
+    expect(webifyDocLinkHref('neutron://docs/acme/brief.md?line=42')).toBe(
+      '/projects/acme/docs?path=brief.md',
+    )
+  })
+
+  it('leaves a web-shape href untouched (already interceptable)', () => {
+    expect(webifyDocLinkHref('/projects/acme/docs?path=brief.md')).toBeNull()
+  })
+
+  it('leaves an external URL untouched', () => {
+    expect(webifyDocLinkHref('https://example.com/x')).toBeNull()
+    expect(webifyDocLinkHref('mailto:a@b.co')).toBeNull()
+  })
+
+  it('rejects a traversal / absolute path', () => {
+    expect(webifyDocLinkHref('docs:/acme/../secret.md')).toBeNull()
+    expect(webifyDocLinkHref('neutron://docs/acme/%2e%2e%2fsecret.md')).toBeNull()
+  })
+
+  it('rejects a `.`/`..` projectId (would traverse /projects/../docs)', () => {
+    expect(webifyDocLinkHref('docs:/../brief.md')).toBeNull()
+    expect(webifyDocLinkHref('docs:/./brief.md')).toBeNull()
+    expect(webifyDocLinkHref('neutron://docs/../brief.md')).toBeNull()
+    expect(parseWebDocLinkHref('/projects/../docs?path=brief.md', ORIGIN)).toBeNull()
+  })
+
+  it('rejects a marker with no path segment', () => {
+    expect(webifyDocLinkHref('docs:/acme')).toBeNull()
+  })
+
+  it('returns null for empty / non-string input', () => {
+    expect(webifyDocLinkHref('')).toBeNull()
+    expect(webifyDocLinkHref(undefined as unknown as string)).toBeNull()
   })
 })
