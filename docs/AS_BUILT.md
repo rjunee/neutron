@@ -2,6 +2,30 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+## 2026-07-20 — #375: post-onboarding workspace opens on General, not a random project
+
+The workspace `/chat` load (notably the post-onboarding Managed claim redirect to
+`https://<slug>/chat`, which carries NO topic) used to land on an arbitrary PROJECT
+topic — a confusing "where am I?" landing. Root: `landing/chat-react/config.ts`
+`resolveBootstrapConfig` read the server-injected `window.__neutron_active_project_id`
+(set to the FIRST project row by `open/wiring/owner-gate.ts:216`) as the initial
+scope, so a bare load opened whatever project happened to be first.
+
+- **Client default is now General** (`landing/chat-react/config.ts`). New pure helper
+  `initialProjectIdFromLocation(search, projects)` decides the initial scope: it
+  returns a project id ONLY for an explicit deep-link on the page URL —
+  `?project=<id>` (canonical) or `?topic=<id>` (alias) — validated against the
+  project-id char class AND the injected project list (unknown/malformed → General).
+  Everything else → `null` (General). `__neutron_active_project_id` is no longer read
+  for the initial scope (kept on the `WindowLike` type + still server-injected for
+  back-compat, marked deprecated). Deep-links to a specific project topic still open
+  that project.
+- **Tests** (`landing/chat-react/__tests__/config.test.ts`): reproduce-then-fix —
+  a bare `/chat` load with `__neutron_active_project_id: 'p1'` injected now resolves
+  `projectId: null` (FAILED on prior main, which returned `'p1'`); `?project=`/`?topic=`
+  deep-links open the named project; unknown ids fall back to General. Full
+  `landing/chat-react` suite green (371 pass, 0 fail).
+
 ## 2026-07-20 — Work Board #379: trackable work ≠ a Trident build run
 
 Closed the three #379 dogfood defects rooted in "a Work Board card == a Trident
