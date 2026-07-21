@@ -253,3 +253,24 @@ test('no skip_permissions anywhere ⇒ option is left unset (unchanged default)'
   const opts = await resolveOpts({ substrate_instance_id: 'none', cwd: '/w' })
   expect('skip_permissions' in opts).toBe(false)
 })
+
+// ---------------------------------------------------------------------------
+// 4. Executor-mode reminders (plan task 4) — append_system_prompt_file threading.
+//    The ritual substrate threads its unattended-executor system prompt file
+//    onto ClaudeCodeSubstrateOptions.appendSystemPromptFile; absence keeps the
+//    substrate's default (repl-agent-base.md, the chat persona).
+// ---------------------------------------------------------------------------
+
+test('append_system_prompt_file threads onto ClaudeCodeSubstrateOptions.appendSystemPromptFile', async () => {
+  const opts = await resolveOpts({
+    substrate_instance_id: 'cc-ritual',
+    cwd: '/w',
+    append_system_prompt_file: '/abs/ritual-agent-base.md',
+  })
+  expect(opts.appendSystemPromptFile).toBe('/abs/ritual-agent-base.md')
+})
+
+test('absent append_system_prompt_file leaves appendSystemPromptFile unset (default persona)', async () => {
+  const opts = await resolveOpts({ substrate_instance_id: 'no-append', cwd: '/w' })
+  expect('appendSystemPromptFile' in opts).toBe(false)
+})
