@@ -193,6 +193,51 @@ NOT fixed here, tracked for the redesign: the MCP bridge's per-PROCESS sink toke
 and the missing session check before `/tool-call` dispatch, and the
 `ensure-claude-trust.ts` lost-update race.
 
+## 2026-07-20 — black screen STILL reachable after #408: guard the doc-fetch unmount race (#380)
+
+**Bug (live, Ryan, same day as #408).** A single doc/history pane fetch 503 still
+blanked the ENTIRE app. Console: `503` on `…/docs/file?path=…starting-plan.md`
+and `?path=history.md`, then `Uncaught Error: Tried to unmount a fiber that is
+already unmounted` (chat-react.js), then "An error occurred in one of your React
+components" → the top-level boundary caught it and the whole screen went blank.
+
+**Why #408 did NOT catch it.** #408 added `PaneErrorBoundary` around `DocumentsTab`
+and `WorkBoardTab` (necessary, and kept). But the "unmount a fiber that is already
+unmounted" invariant is thrown from React's OWN commit/teardown, NOT from a child
+render — so a per-pane error boundary structurally cannot catch it; it escapes to
+the app-level boundary regardless of how many pane boundaries wrap the subtree.
+#408 fixed the render-throw half and its test proved only that half (it neutered
+`getDerivedStateFromError` to force a render throw — it never reproduced the
+actual unmount race). The missing half: `DocumentsTab`'s async doc-fetch
+continuations (`readFile`, `tree`, `listComments`, save, and the comment/thread
+mutations) called `setState` even after the pane unmounted. On a project switch
+mid-fetch, the 503 landed on a gone component → setState-after-unmount → the
+invariant → blank app.
+
+**Fix (`DocumentsTab.tsx`).** Two guards, both halves of the real defense:
+- **`mountedRef`** — every async continuation bails (`if (!mountedRef.current) return`)
+  once the pane unmounts, so no setState-after-unmount can fire the invariant.
+- **`abortRef` (AbortController)** — threaded into every docs request via a
+  `fetchImpl` wrapper and `abort()`-ed on unmount, so the in-flight 503 is actually
+  CANCELLED rather than merely ignored. The lifecycle effect is declared BEFORE the
+  fetching effects so the controller is fresh before any request fires, incl.
+  StrictMode's mount→unmount→remount.
+- The 503 file-open view now shows an inline error + a **"Try again"** retry button
+  (`.cdoc-file-retry`) instead of a bare message.
+
+**Test** (`__tests__/doc-pane-unmount-503.test.tsx`): (a) a 503 doc fetch degrades
+to a per-pane error+retry while sibling chat + rail keep rendering and the pane
+boundary does NOT trip; (b) the pane shows the inline error + retry; (c) unmounting
+mid-flight ABORTS the in-flight fetch (`init.signal.aborted === true`) and nothing
+throws past the pane. **Verified RED on pre-fix code** (no AbortController threaded
+→ `init.signal` undefined; no retry affordance). Verification depth: jsdom/happy-dom
+only — React 19 silently no-ops setState-after-unmount in the `act()` harness
+(verified: 0 throws / 0 console errors across reject/settle/StrictMode probes), so
+the exact fiber invariant needs a real concurrent-browser commit to fire; the test
+pins the DEFENSIVE CONTRACT (fetch aborted on unmount, siblings survive) that
+removes the trigger. NOT exercised in a headless browser. chat-react suite: 359
+pass / 0 fail; landing root suite: 539 pass / 0 fail.
+
 ## 2026-07-20 — black screen on project switch: per-pane error isolation
 
 **Bug (live, Ryan).** Clicking to a different project sometimes blanked the
