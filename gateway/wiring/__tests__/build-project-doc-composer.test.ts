@@ -49,7 +49,7 @@ const docInput: Omit<
 describe('build-project-doc-composer', () => {
   test('dispatches BEST_MODEL with kind-specific prompts + the excerpt', async () => {
     const { client, calls } = stubClient('# Topline\n\nSynthesized overview.\n')
-    const compose = buildProjectDocComposer({ client })
+    const compose = buildProjectDocComposer({ clientForProject: () => client })
 
     const readme = await compose({ ...docInput, kind: 'readme' })
     expect(readme).toContain('Synthesized overview')
@@ -72,9 +72,26 @@ describe('build-project-doc-composer', () => {
 
   test('throws on an empty synthesis (materializer falls back on this)', async () => {
     const { client } = stubClient('   ')
-    const compose = buildProjectDocComposer({ client })
+    const compose = buildProjectDocComposer({ clientForProject: () => client })
     await expect(compose({ ...docInput, kind: 'readme' })).rejects.toThrow(
       /empty readme synthesis/,
     )
+  })
+
+  // WHITE-BOX (#378, Approach A): the doc composer resolves the PER-PROJECT
+  // isolated compose session by the project's slug on every call — so project 2/3
+  // never compose their README/summary over a session shared with project 1.
+  test('resolves the compose client PER PROJECT — keyed by slug', async () => {
+    const askedFor: string[] = []
+    const { client } = stubClient('# doc\n\nbody\n')
+    const compose = buildProjectDocComposer({
+      clientForProject: (project_id) => {
+        askedFor.push(project_id)
+        return client
+      },
+    })
+    await compose({ ...docInput, slug: 'amascence', kind: 'readme' })
+    await compose({ ...docInput, slug: 'dtc-ops', kind: 'transcript_summary' })
+    expect(askedFor).toEqual(['amascence', 'dtc-ops'])
   })
 })

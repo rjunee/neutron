@@ -104,6 +104,7 @@ import {
   buildPhaseSpecResolver,
 } from '@neutronai/gateway/wiring/build-phase-spec-resolver.ts'
 import { buildGatewayAnthropicMessagesClient } from '@neutronai/gateway/wiring/build-anthropic-messages-client.ts'
+import type { AnthropicMessagesClient } from '@neutronai/onboarding/interview/anthropic-client.ts'
 import { buildProjectOpeningMessageComposer } from '@neutronai/gateway/wiring/build-project-opening-message.ts'
 import { mkdirSync } from 'node:fs'
 import { join as joinPath } from 'node:path'
@@ -765,6 +766,7 @@ export function buildOpenGraphComposer(
     const {
       llmCallSubstrate,
       liveAgentSubstrate,
+      makeComposeSubstrate,
       makeEphemeralSubstrate,
       makeWarmFireSubstrate,
       prewarmReady,
@@ -1232,6 +1234,30 @@ export function buildOpenGraphComposer(
       llmCallSubstrate !== null
         ? buildGatewayAnthropicMessagesClient({ substrate: llmCallSubstrate })
         : null
+
+    // PER-PROJECT ISOLATED COMPOSE client factory (#377/#378, Approach A —
+    // Ryan-approved 2026-07-20). Returns an `AnthropicMessagesClient` bound to
+    // ONE project's isolated `cc-compose-*` session (see wireSubstrates
+    // `makeComposeSubstrate`): keyed by project_id, a DISTINCT pool key from the
+    // live-chat `cc-agent-*` session, and TOOLLESS. The onboarding-DOC composer
+    // (the docs the openings later READ) and the agentic-KICKOFF composer both
+    // route through THIS — so each project's docs + opening are composed in that
+    // project's OWN transcript, never the shared accumulating `cc-llm-*` session
+    // that caused the cross-project bleed (#378). Null (LLM-less) → the composers
+    // stay unset exactly as before.
+    const composeClientForProject =
+      onboardingAnthropicClient === null
+        ? null
+        : (project_id: string): AnthropicMessagesClient => {
+            const substrate = makeComposeSubstrate(project_id)
+            // makeComposeSubstrate returns non-null on the same condition
+            // onboardingAnthropicClient is non-null (a conversational provider is
+            // available); fall back to the shared client only in the impossible
+            // race where it is null, so a compose is never wholly unavailable.
+            return substrate !== null
+              ? buildGatewayAnthropicMessagesClient({ substrate })
+              : onboardingAnthropicClient
+          }
 
     const personalityCharacterSuggester =
       onboardingAnthropicClient !== null
@@ -2394,8 +2420,8 @@ export function buildOpenGraphComposer(
     // Project-doc LLM synth for materialized onboarding/import projects (same
     // warm cc-llm path; null → deterministic template docs).
     const projectDocComposer =
-      onboardingAnthropicClient !== null
-        ? buildProjectDocComposer({ client: onboardingAnthropicClient })
+      composeClientForProject !== null
+        ? buildProjectDocComposer({ clientForProject: composeClientForProject })
         : null
     // AGENTIC KICKOFF (2026-07-01) — the one-time per-project kickoff finalize
     // runs at onboarding completion. It drafts a real starting doc (via the
@@ -2406,11 +2432,11 @@ export function buildOpenGraphComposer(
     // project-page indexer the materializer uses. Null LLM path → no kickoff
     // (onboarding can't run LLM-less anyway).
     const projectKickoff =
-      onboardingAnthropicClient !== null
+      composeClientForProject !== null
         ? buildProjectKickoff({
             owner_home,
             owner_slug: project_slug,
-            composer: buildProjectKickoffComposer({ client: onboardingAnthropicClient }),
+            composer: buildProjectKickoffComposer({ clientForProject: composeClientForProject }),
             indexer: buildProjectPageIndexer({
               ownerDataDir: owner_home,
               project_slug,
