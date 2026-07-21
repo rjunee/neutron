@@ -869,6 +869,11 @@ export function buildLandingStack(input: BuildLandingStackInput): LandingStackWi
   // wiring that only fed the bridge is gone with it.
   const landingOpts: Parameters<typeof createLandingServer>[0] = {
     static_dir: input.static_dir,
+    // #371 — thread the resolved deployment role so the landing server gates
+    // the tenant-side OSS install-token / Claude-auth surface OFF on a managed
+    // tenant (the control plane owns managed auth). `resolveDeploymentMode()`
+    // reads `NEUTRON_ROLE` — the same signal onboarding sequencing uses above.
+    deploymentMode: resolveDeploymentMode(),
   }
   if (input.recoverHandler !== undefined) {
     landingOpts.recoverHandler = input.recoverHandler

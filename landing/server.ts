@@ -62,6 +62,43 @@ export {
 const HERE = dirname(fileURLToPath(import.meta.url))
 
 /**
+ * #371 — deployment-role discriminator for the landing surface. NOT a feature
+ * flag: this is the managed-vs-open deployment mode that already governs
+ * onboarding phase sequencing (`gateway/wiring/build-landing-stack.ts`) and
+ * managed-only credential isolation. The canonical union + resolver live in
+ * `gateway/deployment-mode.ts`; it is mirrored here (same rule config/index.ts
+ * mirrors) so `@neutronai/landing` takes NO dependency on `@neutronai/gateway`
+ * — the OSS-split boundary is one-directional (gateway consumes landing, never
+ * the reverse).
+ */
+export type LandingDeploymentMode = 'open' | 'managed' | 'connect'
+
+const KNOWN_LANDING_ROLES: ReadonlySet<LandingDeploymentMode> = new Set<LandingDeploymentMode>([
+  'open',
+  'managed',
+  'connect',
+])
+
+/**
+ * Resolve the deployment role for the landing gate from `NEUTRON_ROLE`. Mirrors
+ * `gateway/deployment-mode.ts` normalizeMode verbatim (trim + lowercase; unknown
+ * / unset → `open`). This is the BACKSTOP default for {@link
+ * LandingServerOptions.deploymentMode}: a managed tenant's systemd unit sets
+ * `NEUTRON_ROLE=managed`, so the tenant-side OSS install-token / Claude-auth
+ * surface is gated OFF even if a composer forgets to thread the explicit option
+ * (belt-and-suspenders — #371). A self-hoster never sets it, so the default
+ * `open` keeps their only auth path fully live.
+ */
+export function resolveLandingDeploymentMode(
+  env: Record<string, string | undefined> = process.env,
+): LandingDeploymentMode {
+  const v = (env['NEUTRON_ROLE'] ?? '').trim().toLowerCase()
+  return KNOWN_LANDING_ROLES.has(v as LandingDeploymentMode)
+    ? (v as LandingDeploymentMode)
+    : 'open'
+}
+
+/**
  * Sprint 26 r2 (Argus MINOR fix) — build the CSP header for the
  * Telegram onboarding landing page from SHA-256 hashes of every inline
  * `<script>` and `<style>` block in the HTML payload. Hashes let us
@@ -186,6 +223,23 @@ export interface LandingServerOptions {
    * shared secret are both configured.
    */
   installTokenHandler?: (req: Request) => Promise<Response | null>
+  /**
+   * #371 — deployment-role discriminator (`open` | `managed` | `connect`).
+   * When `managed`, the tenant-side OSS install-token / Claude-auth surface is
+   * gated OFF: a managed tenant's Claude credential is seeded by the
+   * control-plane handoff, so it must NEVER self-serve the OSS one-liner auth
+   * screen. That surface LEAKED a DUPLICATE auth prompt into the managed flow
+   * (#371 — Ryan saw two auth screens). On `managed`:
+   *   - `/oauth/max/install-token/*` (the four install-token routes) →
+   *     unreachable; served the neutral "workspace is being provisioned" page.
+   *   - `GET /chat` when `chatAuthGate.isUnauthenticated()` → the neutral
+   *     provisioning page instead of the OSS auth screen.
+   * When unset, defaults to the env-derived role
+   * ({@link resolveLandingDeploymentMode}, `NEUTRON_ROLE`, default `open`) so a
+   * self-hoster's ONLY auth path is never broken. NOT a feature flag — the same
+   * managed-vs-open discriminator that governs onboarding sequencing.
+   */
+  deploymentMode?: LandingDeploymentMode
   /**
    * S17 (2026-05-17) — `GET /recover` handler. Mounted on the per-
    * instance gateway so a same-origin /recover fetch from chat.ts after
@@ -479,6 +533,52 @@ export function chatAuthGateCsp(): string {
 }
 
 /**
+ * #371 — neutral "your workspace is being provisioned" page served on a MANAGED
+ * tenant in place of the tenant-side OSS install-token / Claude-auth screen. A
+ * managed tenant's Claude credential is seeded by the control-plane handoff; if
+ * it hasn't landed yet the tenant sees THIS neutral holding page, NEVER the OSS
+ * self-serve auth prompt (which leaked a duplicate auth screen into the managed
+ * flow — #371). Self-contained + fully static (no inline script → no CSP hash
+ * needed; `default-src 'self'` is sufficient).
+ */
+export function renderManagedProvisioningHtml(): string {
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="robots" content="noindex" />
+<title>Setting up your workspace — Neutron</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; min-height: 100vh; display: flex; align-items: center;
+    justify-content: center; padding: 24px;
+    font: 15px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    color: #e6e6f0; background: #0e0e16;
+  }
+  .card {
+    max-width: 480px; width: 100%; background: #16161f;
+    border: 1px solid #2a2a3a; border-radius: 14px; padding: 32px; text-align: center;
+  }
+  h1 { margin: 0 0 8px; font-size: 20px; color: #fff; }
+  p { margin: 0; color: #a6a6c0; }
+  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+         background: #6ad; margin-right: 8px; vertical-align: middle; }
+</style>
+</head>
+<body>
+  <main class="card">
+    <h1><span class="dot"></span>Setting up your workspace</h1>
+    <p>Your Neutron workspace is being provisioned. This page will be ready in a
+       moment — no action is needed on your part.</p>
+  </main>
+</body>
+</html>`
+}
+
+/**
  * ISSUES #353 — strong content ETag for a served asset's bytes. Pure + total;
  * used to cache-bust `/chat-react.js` (see `resolveChatReactJs`'s caller in
  * `createLandingServer`): the response carries `cache-control: no-cache`
@@ -525,6 +625,25 @@ export function ifNoneMatchSatisfied(header: string | null, etag: string): boole
  */
 export function createLandingServer(options: LandingServerOptions): LandingServer {
   const static_dir = options.static_dir ?? HERE
+  // #371 — resolve the managed-vs-open deployment role ONCE at construction.
+  // On a MANAGED tenant the tenant-side OSS install-token / Claude-auth surface
+  // is UNREACHABLE (the control plane owns managed auth); an OSS/open self-host
+  // (the default) serves it normally. Explicit option wins; the env-derived
+  // default (`NEUTRON_ROLE`) is the backstop so the gate holds even if a
+  // composer forgets to thread it.
+  const isManagedTenant =
+    (options.deploymentMode ?? resolveLandingDeploymentMode()) === 'managed'
+  // #371 — the neutral holding page both managed gates serve (install-token
+  // surface + the `/chat` auth gate) instead of the OSS self-serve auth screen.
+  const managedProvisioningResponse = (): Response =>
+    new Response(renderManagedProvisioningHtml(), {
+      status: 503,
+      headers: {
+        'content-type': 'text/html; charset=utf-8',
+        'cache-control': 'no-store',
+        'retry-after': '30',
+      },
+    })
   // P0b (2026-06-26) — React/assistant-ui is the ONLY web chat client. The
   // vanilla `chat.html`/`chat.ts` surface and the `NEUTRON_WEB_CHAT_CLIENT`
   // flag were DELETED (Ryan-locked: no feature flags, no dual code paths), so a
@@ -771,6 +890,17 @@ export function createLandingServer(options: LandingServerOptions): LandingServe
   return {
     async fetch(req, server): Promise<Response> {
       const url = new URL(req.url)
+      // #371 — MANAGED backstop. The tenant-side OSS install-token surface
+      // (`/oauth/max/install-token/*` — initiate / <id>.sh / complete / state)
+      // must be UNREACHABLE on a managed tenant: the control-plane handoff
+      // seeds the Claude credential, so a managed tenant must NEVER self-serve
+      // the OSS one-liner auth flow (it leaked a duplicate auth screen — #371).
+      // Serve the neutral provisioning page instead of delegating to the
+      // install-token handler. Belt-and-suspenders: this holds even if a
+      // composer wrongly wires `installTokenHandler` on a managed box.
+      if (isManagedTenant && url.pathname.startsWith('/oauth/max/install-token')) {
+        return managedProvisioningResponse()
+      }
       // Anthropic Max one-liner installer surface (install-token).
       // The handler returns null on miss so the rest of this fetch
       // chain runs unaffected; matched routes return their Response.
@@ -831,6 +961,11 @@ export function createLandingServer(options: LandingServerOptions): LandingServe
         // silently produces nothing; show a clear "authenticate Claude" page
         // instead. Evaluated per request so a restart-with-token clears it.
         if (options.chatAuthGate?.isUnauthenticated() === true) {
+          // #371 — MANAGED backstop: never render the OSS Claude-auth screen on
+          // a managed tenant. If the control-plane credential handoff hasn't
+          // landed yet, show the neutral "provisioning" page — NOT a duplicate
+          // manual auth prompt (the OSS self-serve auth path is open-only).
+          if (isManagedTenant) return managedProvisioningResponse()
           return new Response(renderChatAuthGateHtml(), {
             // 503: the chat surface is intentionally unavailable until a
             // credential is present (not a 200 "here's your chat" lie, not a

@@ -2529,6 +2529,23 @@ ADDITIVELY activates a capability.
   tests). Open persists to `.env`; a hosted/multi-instance deployment's own
   handoff (tracked in that deployment's repo) persists into an encrypted
   per-instance secrets store with an HMAC-gated `/complete`.
+- **The tenant-side auth screen is MANAGED-UNREACHABLE (#371 backstop).** The
+  install-token / Claude-auth surface above is an OSS **self-hoster** affordance
+  — a self-host box has no control plane and must auth on its own machine. On a
+  **managed** tenant the control plane owns auth (the tenant is seeded with the
+  Max token by the control-plane handoff), so the tenant-side screen must NEVER
+  render — it once LEAKED a DUPLICATE auth prompt into the managed flow (#371).
+  `createLandingServer` resolves the deployment role (`LandingServerOptions.
+  deploymentMode`, threaded from `resolveDeploymentMode()` in
+  `gateway/wiring/build-landing-stack.ts`; env-derived `NEUTRON_ROLE` backstop
+  via `resolveLandingDeploymentMode` when the option is unwired). When the role
+  is `managed`, `landing/server.ts` gates the surface OFF: the four
+  `/oauth/max/install-token/*` routes and the `GET /chat` auth gate both serve a
+  neutral `renderManagedProvisioningHtml` "your workspace is being provisioned"
+  page (HTTP 503) instead of the OSS one-liner auth screen. Open/self-host (the
+  default) is unaffected — its only auth path serves normally. This is
+  belt-and-suspenders: it holds even if a composer wrongly wires
+  `installTokenHandler` on a managed box.
 
 ## Message search (chat-history FTS) — `@neutronai/chat-core` + `@neutronai/message-search`
 

@@ -2,6 +2,36 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+## 2026-07-20 — #371 (part b): tenant-side auth screen is managed-unreachable
+
+The OSS install-token / Claude-auth surface in `landing/server.ts` is now gated
+OFF on a **managed** tenant — the Open-side backstop for #371 (Ryan saw a
+DUPLICATE auth screen on a managed box). The install-token surface exists for an
+OSS self-hoster with no control plane; on managed the control plane owns auth
+(the tenant is seeded with the Max token by the control-plane handoff — the #371
+control-plane RACE half is already fixed + deployed in the Managed repo), so the
+tenant-side screen must be UNREACHABLE.
+
+- **Deployment-role signal reaches the landing server.** `LandingServerOptions`
+  gains `deploymentMode?: 'open' | 'managed' | 'connect'`, threaded from the
+  canonical `resolveDeploymentMode()` (`NEUTRON_ROLE`) in
+  `gateway/wiring/build-landing-stack.ts`. When the option is unwired,
+  `createLandingServer` falls back to `resolveLandingDeploymentMode(process.env)`
+  (a local mirror of `gateway/deployment-mode.ts` — landing takes no dependency
+  on gateway) so the gate holds env-derived even if a composer forgets it. NOT a
+  feature flag: the same managed-vs-open discriminator onboarding sequencing uses.
+- **Two gates, when role === managed** (`landing/server.ts`):
+  the four `/oauth/max/install-token/*` routes are intercepted BEFORE
+  `installTokenHandler` (`landing/server.ts:901`), and `GET /chat`'s
+  `chatAuthGate` unauthenticated branch (`landing/server.ts:968`) — both serve
+  the neutral `renderManagedProvisioningHtml` "workspace is being provisioned"
+  page (HTTP 503) instead of the OSS auth screen. Open/self-host default: both
+  surfaces serve normally.
+- **Reproduce-then-fix test** (`landing/__tests__/managed-install-token-gate.test.ts`,
+  8 tests): managed → install-token route + `/chat` gate → 503 provisioning page
+  (NOT the OSS screen); open → both serve; `NEUTRON_ROLE=managed` env backstop
+  with the option unset. Verified FAILING on prior main (managed install-token
+  route returned the OSS handler's 200, not 503).
 ## 2026-07-20 — #375: post-onboarding workspace opens on General, not a random project
 
 The workspace `/chat` load (notably the post-onboarding Managed claim redirect to
