@@ -817,6 +817,19 @@ rather than waiting on the global diff-gate. Subscriber:
 > links `controller.setProject(...)` first. Mobile native resolves `neutron://`
 > doc links via `app/lib/doc-links.ts`.
 >
+> **A RAW doc-link href still opens in-app (#376).** `rehype-sanitize` strips a
+> `docs:`/`neutron:` scheme href BEFORE any click handler can read it, so a chat
+> bubble that carries the un-rewritten canonical marker `docs:/<id>/<path>` or the
+> native `neutron://docs/<id>/<path>` shape used to render a DEAD link (no `href`
+> → a tap did nothing). The app-ws adapter rewrites LIVE web pushes to the web
+> shape, but the RESUME replay (`appChatRowToEnvelope`) re-emits the persisted
+> body verbatim, and that body is channel-baked at send time — so a non-web-baked
+> doc-link reaches the web client raw. `Markdown.tsx` now runs a rehype plugin
+> (`rehypeWebifyDocLinks`, `doc-link-nav.ts` `webifyDocLinkHref`) BEFORE sanitize
+> that normalizes both raw shapes to the same-origin `/projects/<id>/docs?path=…`
+> URL, so the href survives sanitize and the existing tap-interception (and the
+> SPA-boot handler) open it in the Documents tab. External URLs are untouched.
+>
 > **Doc links are also REAL navigable URLs (deep-link 404 fix).** A HARD load /
 > new-tab / shared `/projects/<id>/docs?path=…` URL used to 404 — nothing served
 > the SPA shell for any path but the exact `/chat`. Now a `GET /projects[/…]`

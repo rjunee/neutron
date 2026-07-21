@@ -56,6 +56,35 @@ scope, so a bare load opened whatever project happened to be first.
   deep-links open the named project; unknown ids fall back to General. Full
   `landing/chat-react` suite green (371 pass, 0 fail).
 
+## 2026-07-20 — Chat #376: a RAW doc-link in a chat message opens the Docs tab
+
+Fixed the live #376 defect (hit 2026-07-20 on the onboarding "first pass" message):
+a file/doc link in a chat bubble did NOTHING when clicked. Root cause, verified
+against real rendering: `rehype-sanitize` strips a `docs:`/`neutron:` scheme href
+BEFORE any click handler can read it, so a bubble carrying the canonical marker
+`docs:/<id>/<path>` or the native `neutron://docs/<id>/<path>` shape rendered a
+DEAD link (an `<a>` with no `href`). The `app-ws` adapter rewrites LIVE web pushes
+to the web `/projects/<id>/docs?path=…` shape (which the client already
+intercepts), but the RESUME replay (`appChatRowToEnvelope`) re-emits the persisted
+body verbatim, and that body is channel-baked at send time — so a non-web-baked
+doc-link reaches the web client raw.
+
+- **FIX (client, in Neutron Open)** — `landing/chat-react/doc-link-nav.ts` adds
+  `webifyDocLinkHref`, which normalizes the two RAW project-doc shapes
+  (`docs:/<id>/<path>` marker + `neutron://docs/<id>/<encoded path>` native scheme)
+  to the same-origin `/projects/<id>/docs?path=<enc>` URL (traversal-guarded,
+  anchor-tail-stripped). `landing/chat-react/Markdown.tsx` runs it as a rehype
+  plugin (`rehypeWebifyDocLinks`) BEFORE `rehype-sanitize`, so the href survives
+  sanitize and the existing `onDocLink` tap-interception (+ SPA-boot handler) open
+  it in the Documents tab. External URLs and the already-web shape are untouched.
+- **Tests (reproduce-then-fix)** — `__tests__/doc-link-raw-marker-open.test.tsx`
+  delivers a RAW `docs:/acme/brief.md` marker, clicks it, and asserts the Documents
+  tab activates + the doc opens (FAILS on prior main: the link had no href → the
+  click was inert). `__tests__/doc-link-nav.test.ts` adds `webifyDocLinkHref` unit
+  coverage (marker, native, nested, anchor-strip, traversal-reject, external
+  untouched, `.`/`..` projectId rejected). `landing/chat-react` suite green
+  (382 pass, 0 fail on current main post-rebase).
+
 ## 2026-07-20 — Work Board #379: trackable work ≠ a Trident build run
 
 Closed the three #379 dogfood defects rooted in "a Work Board card == a Trident

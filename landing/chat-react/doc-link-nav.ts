@@ -32,6 +32,17 @@ export interface DocLinkTarget {
 const PROJECT_ID_RE = /^[A-Za-z0-9_.-]+$/
 
 /**
+ * A project_id is safe to interpolate into a `/projects/<id>/docs` URL iff it
+ * matches the char class AND is not a path-traversal segment. The char class
+ * ([A-Za-z0-9_.-]) also matches `.` and `..`, which would yield a traversing
+ * `/projects/../docs` URL — reject those explicitly (the path segment gets the
+ * same `.`/`..` guard below).
+ */
+function isSafeProjectId(id: string): boolean {
+  return PROJECT_ID_RE.test(id) && id !== '.' && id !== '..'
+}
+
+/**
  * Parse a chat-message anchor href into a doc-link target, or `null` when it
  * isn't an in-app project doc link.
  *
@@ -65,7 +76,7 @@ export function parseWebDocLinkHref(href: string, origin: string): DocLinkTarget
   const m = rest.match(/\/projects\/([A-Za-z0-9_.-]+)\/docs\?(.*)$/)
   if (m === null) return null
   const projectId = m[1] as string
-  if (!PROJECT_ID_RE.test(projectId)) return null
+  if (!isSafeProjectId(projectId)) return null
   const query = m[2] as string
   // The path is the FIRST query key (`path=…`); an optional `&line=`/`&range=`
   // anchor may follow and is ignored (the viewer opens the whole doc).
@@ -85,6 +96,64 @@ export function parseWebDocLinkHref(href: string, origin: string): DocLinkTarget
     if (seg === '.' || seg === '..') return null
   }
   return { projectId, path }
+}
+
+/**
+ * Normalize a RAW agent doc-link href into the web root-relative doc-link URL
+ * (`/projects/<id>/docs?path=<enc>`) the app can intercept — or `null` when the
+ * href isn't a doc link (leave it untouched).
+ *
+ * WHY this exists: `rehype-sanitize` strips a `docs:`/`neutron:` scheme href
+ * BEFORE any click handler can read it, so a chat bubble carrying either of the
+ * two NON-web doc-link shapes renders as a DEAD link (`<a>` with no href) — a
+ * click does nothing (issue #376). The `app-ws` adapter rewrites live web-client
+ * pushes to the web shape, but the RESUME replay (`appChatRowToEnvelope`) emits
+ * the persisted body verbatim, and that body is channel-baked at send time — so
+ * a non-web-baked doc-link reaches the web client raw. This normalizer runs in a
+ * rehype plugin BEFORE sanitize (see `Markdown.tsx`), converting the raw shape
+ * to the same-origin web URL the existing tap-interception + SPA-boot handler
+ * already open in the Documents tab.
+ *
+ * Recognizes the two project-doc shapes (`wire-types/doc-links.ts:buildDocLink`):
+ *   - canonical agent marker  `docs:/<project_id>/<path>`
+ *   - native deep-link scheme `neutron://docs/<project_id>/<encoded path>`
+ * A web-shape href, a vault-legacy `http(s)` redirector URL, or any external URL
+ * returns `null` (untouched — sanitize keeps those, and they open normally).
+ *
+ * KNOWN LIMITATION: the legacy NON-project-scoped marker form (`docs:/<path>`
+ * with no `<project_id>` segment — `wire-types/doc-links.ts`) is intentionally
+ * NOT webified: without a project id there is no `/projects/<id>/docs` URL to
+ * build. In practice that form is baked to an absolute VAULT_REDIRECTOR `http(s)`
+ * URL at send time (which passes through as an external link), so it does not
+ * reach the client as a raw `docs:` scheme; it was not part of the #376 incident.
+ */
+export function webifyDocLinkHref(href: string): string | null {
+  if (typeof href !== 'string' || href.length === 0) return null
+  // `docs:/<project_id>/<path>` (canonical marker) or
+  // `neutron://docs/<project_id>/<encoded path>` (native scheme).
+  const m =
+    href.match(/^docs:\/([A-Za-z0-9_.-]+)\/(.+)$/) ??
+    href.match(/^neutron:\/\/docs\/([A-Za-z0-9_.-]+)\/(.+)$/)
+  if (m === null) return null
+  const projectId = m[1] as string
+  if (!isSafeProjectId(projectId)) return null
+  // Drop any `#fragment` / `?query` anchor tail — the viewer opens the whole doc
+  // (parity with `parseWebDocLinkHref`, which ignores `&line=`/`&range=`).
+  const raw = (m[2] as string).replace(/[?#].*$/, '')
+  // The native shape percent-encodes each path SEGMENT (slashes stay literal);
+  // the marker shape is raw. Decode to a plain path, then re-encode as one
+  // `path=` value the web parser (`parseWebDocLinkHref`) decodes back.
+  let path: string
+  try {
+    path = decodeURIComponent(raw)
+  } catch {
+    path = raw
+  }
+  if (path.length === 0 || path.startsWith('/')) return null
+  for (const seg of path.split('/')) {
+    if (seg === '.' || seg === '..') return null
+  }
+  return `/projects/${projectId}/docs?path=${encodeURIComponent(path)}`
 }
 
 /**

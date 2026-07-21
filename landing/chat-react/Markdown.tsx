@@ -41,10 +41,49 @@ import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import rehypeSanitize from 'rehype-sanitize'
 
-import { parseWebDocLinkHref } from './doc-link-nav.ts'
+import { parseWebDocLinkHref, webifyDocLinkHref } from './doc-link-nav.ts'
+
+/**
+ * FIX #376 — rehype transform that rewrites a RAW agent doc-link href
+ * (`docs:/<id>/<path>` marker or `neutron://docs/<id>/<path>` native scheme)
+ * into the same-origin web doc-link URL (`/projects/<id>/docs?path=…`) the app
+ * intercepts. It MUST run BEFORE {@link rehypeSanitize}: sanitize strips a
+ * `docs:`/`neutron:` scheme href, so a chat bubble carrying either shape would
+ * otherwise render a DEAD link (no `href` → a click does nothing). After the
+ * rewrite the href is same-origin + root-relative, sanitize keeps it, and the
+ * anchor `onClick` below (or the SPA boot handler) opens it in the Documents
+ * tab. Non-doc-link hrefs (web shape, external URLs) are left untouched.
+ *
+ * Hand-walks the HAST (no `unist-util-visit` dep) — the chat markdown tree is
+ * tiny and this keeps the browser bundle lean, matching the module's no-extra-
+ * deps convention.
+ */
+function rehypeWebifyDocLinks() {
+  interface HNode {
+    type?: string
+    tagName?: string
+    properties?: { href?: unknown }
+    children?: HNode[]
+  }
+  const walk = (node: HNode): void => {
+    if (
+      node.type === 'element' &&
+      node.tagName === 'a' &&
+      node.properties !== undefined &&
+      typeof node.properties.href === 'string'
+    ) {
+      const web = webifyDocLinkHref(node.properties.href)
+      if (web !== null) node.properties.href = web
+    }
+    if (Array.isArray(node.children)) for (const child of node.children) walk(child)
+  }
+  return (tree: HNode): void => {
+    walk(tree)
+  }
+}
 
 const REMARK_PLUGINS = [remarkGfm]
-const REHYPE_PLUGINS = [rehypeSanitize]
+const REHYPE_PLUGINS = [rehypeWebifyDocLinks, rehypeSanitize]
 
 /** Copy `text` to the clipboard, degrading gracefully to `false` (never a throw)
  *  when the Clipboard API is unavailable or denied. FIX #359 (Codex r1 P1):
