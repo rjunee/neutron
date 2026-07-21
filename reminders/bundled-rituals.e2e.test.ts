@@ -77,12 +77,39 @@ function writeFixtureHome(): string {
   return home
 }
 
+/** Write a planted-fixture memory layer (entities index + corrections + diary)
+ *  that the daily-delta ritual reads. Markers `LEDGER-7431` / `PRISM-88` are not
+ *  composable without actually reading the files. */
+function writeMemoryFixtureHome(): string {
+  const home = mkdtempSync(join(tmpdir(), 'neutron-ritual-mem-fixture-'))
+  mkdirSync(join(home, 'entities'), { recursive: true })
+  mkdirSync(join(home, 'corrections'), { recursive: true })
+  mkdirSync(join(home, 'diary'), { recursive: true })
+  const today = new Date().toISOString()
+  writeFileSync(
+    join(home, 'entities', 'INDEX.md'),
+    '# Memory Index\n\n- [[ledger-migration]] — the LEDGER-7431 billing migration\n',
+    'utf8',
+  )
+  writeFileSync(
+    join(home, 'corrections', 'corrections-log.md'),
+    `---\nkind: corrections-log\n---\n\n# Corrections Log\n\n## ${today} · c-e2e1\n\n- **wrong:** used the old ledger flow\n- **right:** route billing through LEDGER-7431\n- **why:** the migration is live\n- **scope:** general\n- **source:** owner\n`,
+    'utf8',
+  )
+  writeFileSync(
+    join(home, 'diary', `${today.slice(0, 10)}.md`),
+    `# Diary ${today.slice(0, 10)}\n\n- Shipped the PRISM-88 refactor and noted the follow-ups.\n`,
+    'utf8',
+  )
+  return home
+}
+
 /**
  * Spawn a real ritual REPL against `fixtureHome`, inject the LIVE shipped template
  * bytes for `id` as the user message, and return the ritual's final reply text.
  */
-async function runRitual(id: string): Promise<string | undefined> {
-  const fixtureHome = writeFixtureHome()
+async function runRitual(id: string, fixture: () => string = writeFixtureHome): Promise<string | undefined> {
+  const fixtureHome = fixture()
   const channelName = `neutron-${randomBytes(4).toString('hex')}`
   const sessionId = crypto.randomUUID()
   const cfgDir = mkdtempSync(join(tmpdir(), 'neutron-ritual-e2e-'))
@@ -210,6 +237,17 @@ describe.skipIf(!OPT_IN)('bundled rituals cite planted fixture state (T7 accepta
       const reply = await runRitual('evening-wrap')
       expect(reply).toBeDefined()
       expect(reply).toMatch(/RELAY-4471|CERT-ROTATE-9|HARBOR-812/)
+    },
+    180_000,
+  )
+
+  it(
+    'daily-delta output references a planted memory-layer marker',
+    async () => {
+      const reply = await runRitual('daily-delta', writeMemoryFixtureHome)
+      expect(reply).toBeDefined()
+      // A marker impossible to compose without reading the corrections log / diary.
+      expect(reply).toMatch(/LEDGER-7431|PRISM-88/)
     },
     180_000,
   )

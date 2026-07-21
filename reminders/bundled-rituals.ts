@@ -4,8 +4,12 @@
  * Spec of record: `docs/plans/executor-mode-reminders-2026-07-20.md` — plan task 7
  * + the deepened build order (lines 42-52: read-only rituals ship first, Layer 1
  * `--tools` default-deny alone contains them) + design §2a/B2. This module ships
- * two GENERIC read-only example rituals (`morning-brief`, `evening-wrap`) as ENGINE
- * seeds so a fresh Neutron install has working ritual examples out of the box.
+ * three GENERIC read-only example rituals (`morning-brief`, `evening-wrap`,
+ * `daily-delta`) as ENGINE seeds so a fresh Neutron install has working ritual
+ * examples out of the box. `daily-delta` is the time-anchored survivor of Q2's
+ * split-by-tier (overturn 2): backlink repair + correction-promotion moved into
+ * CORE MEMORY, but a daily memory delta has no in-memory trigger, so it stays a
+ * scheduled read-only ritual (design deepened header, "Ryan's Q2, split by tier").
  *
  * USER-DATA principle (CLAUDE.md — "Ryan's ritual CONTENT is user data via import,
  * never hardcoded"): what ships here is a GENERIC, instance-agnostic template that
@@ -44,12 +48,12 @@ const HERE = dirname(fileURLToPath(import.meta.url))
 export const BUNDLED_RITUAL_TEMPLATES_DIR: string = join(HERE, 'rituals')
 
 /**
- * The two ENGINE-shipped read-only ritual defs. Surface is EXACTLY
+ * The three ENGINE-shipped read-only ritual defs. Surface is EXACTLY
  * `['Read','Glob','Grep']` (no Bash/Write — Layer 1 `--tools` default-deny contains
  * these; the `GATED_WRITE_TOOLS` fire-time gate never trips), egress 'none' (no web
  * tools), scope 'instance' (rooted at owner_home — morning-brief legitimately reads
  * across every project, and the read-only surface grants no write authority at the
- * wider root). `silent: false` — both post their digest.
+ * wider root). `silent: false` — all post their digest.
  *
  * Frozen so a caller cannot mutate a def before/after registration.
  */
@@ -67,6 +71,15 @@ export const BUNDLED_RITUAL_DEFS: readonly RitualDef[] = Object.freeze([
     id: 'evening-wrap',
     description:
       "Reads every project's STATUS.md and docs and posts a short end-of-day wrap: state, in-flight work, tomorrow's first move. Read-only: no shell, no writes, no network.",
+    scope: 'instance',
+    tool_surface: Object.freeze(['Read', 'Glob', 'Grep']),
+    egress: 'none',
+    silent: false,
+  }),
+  Object.freeze({
+    id: 'daily-delta',
+    description:
+      'Reads the memory layer (entities index, corrections log, diary) and posts a short daily delta of what changed in the last day. Read-only: no shell, no writes, no network.',
     scope: 'instance',
     tool_surface: Object.freeze(['Read', 'Glob', 'Grep']),
     egress: 'none',

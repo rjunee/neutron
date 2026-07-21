@@ -99,7 +99,7 @@ describe('backlink-repair — unique hyphen-position candidate → repaired', ()
     await hook.idle()
 
     expect(spy).toHaveBeenCalledTimes(1)
-    const [input] = spy.mock.calls[0] as [Parameters<BacklinkWriteEntity>[0]]
+    const [input] = spy.mock.calls[0] as unknown as [Parameters<BacklinkWriteEntity>[0]]
     expect(input.slug).toBe('ada-lovelace')
     expect(input.body.compiledTruth).toContain('[[whiteboard|white-board]]')
     expect(input.body.compiledTruth).not.toContain('[[white-board]]')
@@ -145,7 +145,7 @@ describe('backlink-repair — unique hyphen-position candidate → repaired', ()
     })
     await hook.onEntityWrite({ path: src.path, body: src.body, newLinks: src.newLinks, removedLinks: [] })
     await hook.idle()
-    const [input] = spy.mock.calls[0] as [Parameters<BacklinkWriteEntity>[0]]
+    const [input] = spy.mock.calls[0] as unknown as [Parameters<BacklinkWriteEntity>[0]]
     expect(input.body.compiledTruth).toContain('[[whiteboard|big board]]')
   })
 })

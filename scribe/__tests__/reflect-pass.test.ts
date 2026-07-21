@@ -1022,7 +1022,7 @@ describe('reflect step 4 — correction-pattern promotion (deterministic, no LLM
       readCorrections: () => [TAB_1, TAB_2, TAB_3, OTHER_1, OTHER_2],
     })
     expect(spy).toHaveBeenCalledTimes(1)
-    const [input] = spy.mock.calls[0] as [Parameters<ReflectWriteEntity>[0]]
+    const [input] = spy.mock.calls[0] as unknown as [Parameters<ReflectWriteEntity>[0]]
     expect(input.kind).toBe('concept')
     expect(input.slug).toBe('correction-pattern-c-aaa')
     expect(Array.isArray(input.body.timelineAppend)).toBe(true)

@@ -80,12 +80,16 @@ async function ritualRow(ritual_id: string): Promise<Reminder> {
 
 // ── T7a — def shape ──────────────────────────────────────────────────────────
 describe('BUNDLED_RITUAL_DEFS — shape', () => {
-  test('exactly two defs with the expected ids', () => {
-    expect(BUNDLED_RITUAL_DEFS).toHaveLength(2)
-    expect(BUNDLED_RITUAL_DEFS.map((d) => d.id)).toEqual(['morning-brief', 'evening-wrap'])
+  test('exactly three defs with the expected ids', () => {
+    expect(BUNDLED_RITUAL_DEFS).toHaveLength(3)
+    expect(BUNDLED_RITUAL_DEFS.map((d) => d.id)).toEqual([
+      'morning-brief',
+      'evening-wrap',
+      'daily-delta',
+    ])
   })
 
-  test.each(['morning-brief', 'evening-wrap'])(
+  test.each(BUNDLED_RITUAL_DEFS.map((d) => d.id))(
     '%s is a read-only instance ritual with no gated tools',
     (id) => {
       const def = BUNDLED_RITUAL_DEFS.find((d) => d.id === id)!
@@ -104,44 +108,64 @@ describe('BUNDLED_RITUAL_DEFS — shape', () => {
 
 // ── T7b — template assets ────────────────────────────────────────────────────
 describe('bundled template assets', () => {
-  test.each(['morning-brief', 'evening-wrap'])(
-    '%s template exists, grounds on the Neutron layout, carries no Vajra-isms',
+  // Every def's template must exist + carry NO Vajra-isms (iterate the DEFS so a
+  // new bundled ritual is covered automatically). NOTE: `entities/` is NOT a
+  // Vajra-ism — it is the canonical Neutron memory path (`entities/INDEX.md`,
+  // written by the memory-index), which daily-delta legitimately reads.
+  test.each(BUNDLED_RITUAL_DEFS.map((d) => d.id))(
+    '%s template exists and carries no Vajra-isms',
     (id) => {
       const path = bundledTemplatePathFor(id)
       expect(existsSync(path)).toBe(true)
       const content = readFileSync(path, 'utf8')
       expect(content.trim().length).toBeGreaterThan(0)
-      // Real Neutron layout grounding (verified at reminders/context.ts:30,39).
-      expect(content).toMatch(/Projects\//)
-      expect(content).toMatch(/STATUS\.md/)
       // Static half of the ported-prompt silent-no-op guard: a GENERIC engine
       // template must not carry Ryan's Vajra-specific tooling/paths — those are
       // OWNER data that arrive via import, never the bundled engine default.
-      expect(content).not.toMatch(
-        /~\/vajra|\bgog\b|\bgh\b|tg-post|entities\/|MemPalace|Telegram|\bBash\b/i,
-      )
+      expect(content).not.toMatch(/~\/vajra|\bgog\b|\bgh\b|tg-post|MemPalace|Telegram|\bBash\b/i)
     },
   )
+
+  // The two project-reading rituals additionally ground on the real Neutron
+  // Projects/STATUS.md layout (daily-delta reads the memory layer instead).
+  test.each(['morning-brief', 'evening-wrap'])(
+    '%s grounds on the Projects/STATUS.md layout',
+    (id) => {
+      const content = readFileSync(bundledTemplatePathFor(id), 'utf8')
+      // Real Neutron layout grounding (verified at reminders/context.ts:30,39).
+      expect(content).toMatch(/Projects\//)
+      expect(content).toMatch(/STATUS\.md/)
+    },
+  )
+
+  test('daily-delta grounds on the memory layer (entities index / corrections / diary)', () => {
+    const content = readFileSync(bundledTemplatePathFor('daily-delta'), 'utf8')
+    expect(content).toMatch(/entities\/INDEX\.md/)
+    expect(content).toMatch(/corrections\/corrections-log\.md/)
+    expect(content).toMatch(/diary\//)
+  })
 })
 
 // ── T7c — seeding ────────────────────────────────────────────────────────────
 describe('seedBundledRituals — copy-if-absent + idempotent + never-clobber', () => {
-  test('fresh dir seeds both, bytes match repo templates', () => {
+  const ALL_IDS = BUNDLED_RITUAL_DEFS.map((d) => d.id)
+
+  test('fresh dir seeds all, bytes match repo templates', () => {
     const { seeded, kept } = seedBundledRituals({ rituals_dir: ritualsDir })
-    expect(seeded).toEqual(['morning-brief', 'evening-wrap'])
+    expect(seeded).toEqual(ALL_IDS)
     expect(kept).toEqual([])
-    for (const id of ['morning-brief', 'evening-wrap']) {
+    for (const id of ALL_IDS) {
       const dest = readFileSync(join(ritualsDir, `${id}.md`), 'utf8')
       const src = readFileSync(bundledTemplatePathFor(id), 'utf8')
       expect(dest).toBe(src)
     }
   })
 
-  test('second call is idempotent — seeds nothing, keeps both', () => {
+  test('second call is idempotent — seeds nothing, keeps all', () => {
     seedBundledRituals({ rituals_dir: ritualsDir })
     const { seeded, kept } = seedBundledRituals({ rituals_dir: ritualsDir })
     expect(seeded).toEqual([])
-    expect(kept).toEqual(['morning-brief', 'evening-wrap'])
+    expect(kept).toEqual(ALL_IDS)
   })
 
   test('never clobbers an owner-edited file', () => {
@@ -156,16 +180,16 @@ describe('seedBundledRituals — copy-if-absent + idempotent + never-clobber', (
 
 // ── T7d — registration ───────────────────────────────────────────────────────
 describe('registerBundledRituals', () => {
-  test('registers both defs frozen', () => {
+  test('registers all defs frozen', () => {
     const registry = createRitualRegistry({ rituals_dir: ritualsDir })
     registerBundledRituals(registry)
-    expect(registry.list()).toHaveLength(2)
-    const mb = registry.get('morning-brief')
-    const ew = registry.get('evening-wrap')
-    expect(mb).toBeDefined()
-    expect(ew).toBeDefined()
-    expect(Object.isFrozen(mb)).toBe(true)
-    expect(Object.isFrozen(ew)).toBe(true)
+    expect(registry.list()).toHaveLength(3)
+    for (const id of BUNDLED_RITUAL_DEFS.map((d) => d.id)) {
+      const def = registry.get(id)
+      expect(def).toBeDefined()
+      expect(Object.isFrozen(def)).toBe(true)
+    }
+    expect(registry.get('daily-delta')).toBeDefined()
   })
 })
 
@@ -205,6 +229,40 @@ describe('bundled ritual fires UNAPPROVED by default (REAL ApprovalManager path)
     expect(row.subagent_run_id).toBeNull()
     expect(turn).toHaveBeenCalledTimes(0)
     // Spawned NOTHING.
+    expect(subagents.snapshot()).toHaveLength(0)
+  })
+
+  test('daily-delta with zero approval rows → durable skipped/unapproved, no turn, no spawn', async () => {
+    seedBundledRituals({ rituals_dir: ritualsDir })
+    const registry = createRitualRegistry({ rituals_dir: ritualsDir })
+    registerBundledRituals(registry)
+
+    const turn = mock(async (): Promise<RitualTurnResult> => ({ result: '', status: 'completed' }))
+    const exec = createRitualExecutor({
+      registry,
+      approvals: new ApprovalManager(db, noopNotifier),
+      project_slug: 'owner',
+      instance_key: 'owner',
+      subagents,
+      outbound: passThroughOutbound,
+      resolve_topic: resolveTopic,
+      turn,
+      runs,
+      resolve_model: () => 'model-best',
+      scope_cwd: (s) => {
+        if (s !== 'instance') throw new Error('unsupported')
+        return tmp
+      },
+      mint_run_id: () => 'run-dd',
+    })
+
+    await exec.fire(await ritualRow('daily-delta'))
+
+    const row = runs.get('run-dd')!
+    expect(row.status).toBe('skipped')
+    expect(row.skip_reason).toBe('unapproved')
+    expect(row.subagent_run_id).toBeNull()
+    expect(turn).toHaveBeenCalledTimes(0)
     expect(subagents.snapshot()).toHaveLength(0)
   })
 })
