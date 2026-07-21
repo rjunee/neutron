@@ -2,6 +2,59 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+## 2026-07-20 — Executor-mode reminders task 2: ritual schema + registry module (migration 0106)
+
+The persistent + pure-logic foundation of the ritual layer (executor-mode
+reminders — a reminder that spawns a scoped sub-agent REPL at fire time instead of
+composing a nudge). Schema + registry only; the tick dispatch branch, approval
+gate, and completion delivery are plan tasks 3-5. Spec of record:
+`docs/plans/executor-mode-reminders-2026-07-20.md`.
+
+- **Migration `0106_ritual_schema.sql`** — three forward-only DDL units:
+  (1a) nullable opaque-TEXT `reminders.ritual_id` (0095 `recurrence_spec`
+  precedent — the in-process registry is the authoritative validator, a CHECK
+  would force a table rebuild per ritual); (1b) new durable `code_ritual_runs`
+  run-history table (own 30-day retention, NOT pruned on liveness — the durable
+  answer to "why didn't my morning brief run"; richer status vocabulary than the
+  subagent registry: `spawned`/`finished`/`failed`/`timed_out`/`crashed`/`skipped`
+  with an invariant CHECK binding every `skipped` row to exactly one
+  `skip_reason`); (1c) widened `code_subagent_registry.agent_kind` to admit
+  `'ritual'` via create-copy-drop-rename (SQLite cannot ALTER a CHECK), preserving
+  STRICT + all CHECKs + both 0100 indexes byte-for-byte. `expected-schema.txt`
+  regenerated; `table-ownership.json` gains a `code_ritual_runs` entry
+  (`reminders/ritual-runs.ts` sole writer); `runner.test.ts` version list + 106.
+- **`AgentKind` widened** (`runtime/subagent/registry.ts`) to include `'ritual'` —
+  compile-safe (only `Partial<Record<AgentKind,…>>` consumers).
+- **`reminders/rituals.ts`** — the pure registry + fail-CLOSED fire-time verdict.
+  `RitualDef` (charset-guarded id `^[a-z0-9][a-z0-9-]{0,63}$` — traversal
+  impossible by construction; `tool_surface` NEVER empty [#361 toolless-class
+  pin]; `egress`/`bridge` as separately-approved capability CLASSES never smuggled
+  as tool names; `silent`; NO `requires_approval` — approval is a separate
+  content-hash record [task 3]; model TIER + 45-min timeout as constants, Vajra
+  parity). `validateRitualDef` / `createRitualRegistry` (frozen, throws on
+  invalid/dup) / `resolveRitualPromptPath` (defense-in-depth re-guard) /
+  `validateRitualFire` -> unknown_ritual | missing_prompt | unapproved | ok, with a
+  REQUIRED (no-default) `isApproved` seam so composition can never fail open. A
+  fail verdict means log + SKIP — never degrade-to-nudge, never `tools:[]`.
+- **`reminders/ritual-runs.ts`** — `RitualRunStore` over `ProjectDb`, mirroring the
+  subagent-store conventions (ALL writes via the async mutex-serialized `db.run`,
+  never `runSync` — the runSync-bypass hazard). `insertSpawned` / `insertSkipped`
+  / `markTerminal` (guarded on live) / `get` / `listByRitual` (newest-first, rides
+  the index) / `pruneTerminalOlderThan` (never a live row).
+- **`reminders/store.ts`** — `ritual_id` plumbed through `Reminder`,
+  `CreateReminderInput`, `CreateRecurringReminderInput`, `COLS`, both INSERTs, and
+  `rowToReminder` (defaults null; existing create paths still write NULL). Public
+  surface exported from `reminders/index.ts`.
+- **Tests** — `reminders/rituals.test.ts` (validation slice + registry + path
+  resolution + all four fire verdicts, artifact-grounded prompt marker,
+  `toHaveBeenCalledWith` on the approval seam + not-called on early verdicts);
+  `reminders/ritual-runs.test.ts` (every status round-trips, skip-reason
+  surfacing, SQL-layer CHECK-violation assertions, ordering/limit, prune
+  semantics, migration table_info + agent_kind CHECK + index-presence assertions);
+  `reminders/store.test.ts` extended for `ritual_id` round-trip. Green in
+  `reminders/` (113), `migrations/` (40), `runtime/` (1318); all three packages
+  typecheck.
+
 ## 2026-07-20 — M2-3 round 2: §7.2 merge-safety gate closes the memory-consolidation arming precondition (Argus r1 BLOCKER)
 
 Task 1 of the executor-mode-reminders branch armed the 6h memory consolidation ON

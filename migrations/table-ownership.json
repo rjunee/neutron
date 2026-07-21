@@ -54,6 +54,18 @@
         "shallow-merge is now the only phase_state write dialect."
       ]
     },
+    "code_ritual_runs": {
+      "owner": "reminders/ritual-runs.ts",
+      "writers": [
+        "reminders/ritual-runs.ts"
+      ],
+      "notes": [
+        "Ritual run history (migration 0106). Sole writer is the owning store;",
+        "the tick/delivery wiring (plan tasks 4-5) calls through it, never raw",
+        "SQL. Durable — retained on its own 30-day window, not pruned on the",
+        "subagent-registry liveness prune."
+      ]
+    },
     "gbrain_sync_state": {
       "owner": "gateway/wiring/gbrain-sync-state-store.ts",
       "writers": [

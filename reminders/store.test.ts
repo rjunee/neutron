@@ -172,4 +172,44 @@ describe('ReminderStore', () => {
     ).rejects.toThrow()
     await expect(store.createRecurring({ ...base })).rejects.toThrow()
   })
+
+  test('one-shot create round-trips ritual_id; default is null (migration 0106)', async () => {
+    const store = new ReminderStore(db)
+    const ritual = await store.create({
+      owner_slug: 't1',
+      topic_id: null,
+      fire_at: 1700000000,
+      message: 'run brief',
+      ritual_id: 'morning-brief',
+    })
+    expect(store.get(ritual.id)?.ritual_id).toBe('morning-brief')
+    const plain = await store.create({
+      owner_slug: 't1',
+      topic_id: null,
+      fire_at: 1700000000,
+      message: 'plain nudge',
+    })
+    expect(store.get(plain.id)?.ritual_id).toBeNull()
+  })
+
+  test('recurring create round-trips ritual_id; default is null (migration 0106)', async () => {
+    const store = new ReminderStore(db)
+    const ritual = await store.createRecurring({
+      owner_slug: 't1',
+      topic_id: null,
+      fire_at: 1700000000,
+      message: 'daily brief',
+      recurrence_spec: '0 9 * * *',
+      ritual_id: 'morning-brief',
+    })
+    expect(store.get(ritual.id)?.ritual_id).toBe('morning-brief')
+    const plain = await store.createRecurring({
+      owner_slug: 't1',
+      topic_id: null,
+      fire_at: 1700000000,
+      message: 'weekly nudge',
+      recurrence: 'weekly',
+    })
+    expect(store.get(plain.id)?.ritual_id).toBeNull()
+  })
 })

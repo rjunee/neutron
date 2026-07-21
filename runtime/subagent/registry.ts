@@ -17,7 +17,12 @@ export const MAX_CONCURRENT_SUBAGENTS = 8
 
 export type SubagentStatus = 'pending' | 'running' | 'finished' | 'crashed' | 'cancelled'
 
-export type AgentKind = 'forge' | 'atlas' | 'sentinel' | 'argus' | 'core'
+// 'ritual' (migration 0106) is the executor-mode reminder dispatch kind — a
+// scoped sub-agent REPL spawned by the reminders tick at fire time
+// (`reminders/rituals.ts`). Widening this union is compile-safe: the only
+// non-test consumers are `Partial<Record<AgentKind, …>>` (watchdog, dispatch
+// prompts), never an exhaustive switch.
+export type AgentKind = 'forge' | 'atlas' | 'sentinel' | 'argus' | 'core' | 'ritual'
 
 export interface SubagentRecord {
   run_id: string
