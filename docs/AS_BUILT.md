@@ -193,6 +193,69 @@ NOT fixed here, tracked for the redesign: the MCP bridge's per-PROCESS sink toke
 and the missing session check before `/tool-call` dispatch, and the
 `ensure-claude-trust.ts` lost-update race.
 
+## 2026-07-20 — black screen STILL reachable after #408: guard the doc-fetch unmount race (#380)
+
+**Bug (live, Ryan, same day as #408).** A single doc/history pane fetch 503 still
+blanked the ENTIRE app. Console: `503` on `…/docs/file?path=…starting-plan.md`
+and `?path=history.md`, then `Uncaught Error: Tried to unmount a fiber that is
+already unmounted` (chat-react.js), then "An error occurred in one of your React
+components" → the top-level boundary caught it and the whole screen went blank.
+
+**Why #408 did NOT catch it.** #408 added `PaneErrorBoundary` around `DocumentsTab`
+and `WorkBoardTab` in `ProjectShell` (necessary, and kept — it DOES wrap the tab).
+But the "unmount a fiber that is already unmounted" invariant is thrown from React's
+OWN commit/teardown phase, NOT from a child render — and an error boundary only
+catches errors thrown during a child RENDER. So the pane boundary structurally
+cannot catch this class. And there is no boundary above `ProjectShell` at the root
+(`main.tsx` renders it bare), so nothing catches it: React does what it does for any
+uncaught error and unmounts the WHOLE root → blank screen. (The owner console line
+"the top-level boundary caught it" was React's default whole-tree teardown, not a
+real app boundary.) #408 fixed the render-throw half and its test proved only that
+half (it forced a render throw — it never reproduced the unmount race). The missing
+half: `DocumentsTab`'s async doc-fetch continuations (`readFile`, `tree`,
+`listComments`, save, and the comment/thread mutations) called `setState` even after
+the pane unmounted. On a project switch mid-fetch, the 503 landed on a gone
+component → setState-after-unmount → the invariant → blank app.
+
+**Fix (`DocumentsTab.tsx`).** The only real fix is to stop the setState-at-the-
+source (a boundary provably can't help here). Two guards:
+- **`mountedRef`** — every async continuation bails (`if (!mountedRef.current) return`)
+  once the pane unmounts, so no setState-after-unmount can fire the invariant.
+- **`abortRef` (AbortController) — READS ONLY** — threaded into every docs READ (GET)
+  via a `fetchImpl` wrapper and `abort()`-ed on unmount, so the in-flight 503 is
+  actually CANCELLED rather than merely ignored. WRITES (PUT/POST — save, post/reply/
+  resolve/escalate comment) are NEVER aborted: a mutation the user just fired must
+  still reach the server even if they navigate away within the RTT (aborting it
+  would silently drop the write). Writes rely on the `mountedRef` guard alone to
+  skip setState-after-unmount. The lifecycle effect is declared BEFORE the fetching
+  effects so the controller is fresh before any request fires, incl. StrictMode's
+  mount→unmount→remount.
+- The nested "refresh the open thread tree" `getThread` in the reply flow got a
+  `.catch` — without it, the shared read-abort turned that re-fetch into an
+  unhandled promise rejection in exactly the unmount path this change targets.
+- The 503 file-open view now shows an inline error + a **"Try again"** retry button
+  (`.cdoc-file-retry`) instead of a bare message.
+
+**Test** (`__tests__/doc-pane-unmount-503.test.tsx`): (a)+(b) a 503 doc fetch
+degrades to a per-pane error+retry while sibling chat + rail keep rendering and the
+pane boundary does NOT trip; (c) unmounting mid-flight ABORTS the in-flight READ
+(`init.signal.aborted === true`) and nothing throws past the pane; (d) DISCRIMINATING
+mountedRef test — a comment-resolve WRITE held in flight past unmount does zero
+post-unmount work (its `mountedRef`-guarded `.then` never fires the observable
+`loadComments` refetch), and the write carried no abort signal (proving reads-only).
+**Each test is mutation-verified RED**, not just green on the fix: (c) → RED when
+the abort threading is removed; (d) → RED when the unmount cleanup that arms
+`mountedRef` is removed (Argus round-1's exact mutation — previously left the suite
+green); (d)'s reads-only assertion → RED when writes are also aborted.
+**Verification depth (honest):** jsdom/happy-dom only, NO headless browser. React 19
+silently no-ops setState-after-unmount in the `act()` harness (verified empirically:
+0 throws / 0 console errors), so the exact fiber invariant is unreproducible here and
+needs a real concurrent-browser commit — same limitation `pane-switch-no-crash.test.tsx`
+documents. Because a bare setState-after-unmount is invisible in jsdom, test (d) pins
+the guard through the one OBSERVABLE consequence (a suppressed downstream fetch), which
+is what makes the `mountedRef` half mutation-detectable at all. chat-react suite: 540
+pass / 0 fail.
+
 ## 2026-07-20 — black screen on project switch: per-pane error isolation
 
 **Bug (live, Ryan).** Clicking to a different project sometimes blanked the

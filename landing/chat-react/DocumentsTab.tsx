@@ -102,15 +102,47 @@ export function DocumentsTab({
   /** P-A — when this changes, open the requested doc (a tapped chat doc link). */
   openRequest?: DocOpenRequest
 }): React.JSX.Element {
-  const client = useMemo(
-    () =>
-      new WebDocsClient(
-        fetchImpl !== undefined
-          ? { base_url: config.origin, token: config.token, fetchImpl }
-          : { base_url: config.origin, token: config.token },
-      ),
-    [config.origin, config.token, fetchImpl],
-  )
+  // ── Unmount safety (live crash, Ryan 2026-07-20) ────────────────────────────
+  // A doc/history fetch (`docs/file?path=…`) that SETTLES after this pane
+  // unmounts — the reported path was a 503 on `starting-plan.md` / `history.md`
+  // during a project switch — used to run its `.then`/`.catch` continuation and
+  // call setState on a component that was already gone. In a real (concurrent)
+  // browser commit React surfaces that setState-after-unmount as the invariant
+  // "Tried to unmount a fiber that is already unmounted", thrown from React's own
+  // commit/teardown phase — NOT from a child render.
+  //
+  // That distinction is why the pane could not self-heal: `ProjectShell` already
+  // wraps this tab in a `PaneErrorBoundary` (added #408 — it EXISTS, see
+  // ProjectShell.tsx). But an error boundary only catches errors thrown during a
+  // child's RENDER; a teardown-phase invariant bypasses it entirely. With no
+  // boundary able to catch it — and none sits above `ProjectShell` at the root
+  // (main.tsx) either — React does what it does for any uncaught error: it
+  // unmounts the WHOLE root. That is the blank screen.
+  //
+  // So #408's isolation was necessary but structurally COULD NOT catch this
+  // class; the only real fix is to stop the setState-after-unmount at the source.
+  // Two guards do that: `mountedRef` bails every continuation once unmounted (no
+  // setState-after-unmount → no invariant), and `abortRef` cancels in-flight
+  // READS on unmount so a 503 never even lands.
+  const mountedRef = useRef(true)
+  const abortRef = useRef<AbortController | null>(null)
+
+  const client = useMemo(() => {
+    const base: FetchImpl = fetchImpl ?? ((input, init) => fetch(input, init))
+    // Thread the pane's abort signal into READS only; unmount aborts them.
+    // A write (PUT/POST — writeFile / postComment / resolveComment / reply /
+    // escalate) that the user just fired must still reach the server even if
+    // they navigate away within the RTT, so it is NEVER aborted — its
+    // continuation relies on the `mountedRef` guard to skip setState-after-
+    // unmount instead. Aborting writes here would silently drop the user's
+    // Save/Resolve/Post on a fast project switch.
+    const withSignal: FetchImpl = (input, init) => {
+      const ctrl = abortRef.current
+      const isRead = (init?.method ?? 'GET') === 'GET'
+      return base(input, ctrl !== null && isRead ? { ...init, signal: ctrl.signal } : init)
+    }
+    return new WebDocsClient({ base_url: config.origin, token: config.token, fetchImpl: withSignal })
+  }, [config.origin, config.token, fetchImpl])
 
   const [tree, setTree] = useState<DocTreeNode[]>([])
   const [treeError, setTreeError] = useState<string | null>(null)
@@ -156,6 +188,18 @@ export function DocumentsTab({
   const commentsSeq = useRef(0)
   const saveSeq = useRef(0)
 
+  // Mount lifecycle — declared BEFORE the fetching effects so the controller is
+  // fresh before any request fires (incl. StrictMode's mount→unmount→remount,
+  // where the first controller is aborted and a new one takes over cleanly).
+  useEffect(() => {
+    mountedRef.current = true
+    abortRef.current = new AbortController()
+    return () => {
+      mountedRef.current = false
+      abortRef.current?.abort()
+    }
+  }, [])
+
   // Reset everything when the project changes — a stale open doc from project A
   // must never linger under project B's id.
   useEffect(() => {
@@ -183,11 +227,11 @@ export function DocumentsTab({
     void client
       .tree(projectId)
       .then((res) => {
-        if (cancelled) return
+        if (cancelled || !mountedRef.current) return
         setTree(res.tree)
       })
       .catch((err: unknown) => {
-        if (cancelled) return
+        if (cancelled || !mountedRef.current) return
         setTreeError(err instanceof Error ? err.message : 'failed to load documents')
       })
     return () => {
@@ -202,12 +246,12 @@ export function DocumentsTab({
       void client
         .listComments(projectId, docPath)
         .then((res) => {
-          if (seq !== commentsSeq.current) return
+          if (!mountedRef.current || seq !== commentsSeq.current) return
           setThreads(res.threads)
           setCommentsUnavailable(res.unavailable)
         })
         .catch((err: unknown) => {
-          if (seq !== commentsSeq.current) return
+          if (!mountedRef.current || seq !== commentsSeq.current) return
           setThreads([])
           setCommentsError(err instanceof Error ? err.message : 'failed to load comments')
         })
@@ -236,12 +280,15 @@ export function DocumentsTab({
       void client
         .readFile(projectId, docPath)
         .then((f) => {
-          if (seq !== fileSeq.current) return
+          if (!mountedRef.current || seq !== fileSeq.current) return
           setFile(f)
           setLoadingFile(false)
         })
         .catch((err: unknown) => {
-          if (seq !== fileSeq.current) return
+          // Post-unmount guard FIRST: a 503/abort landing after the pane is gone
+          // must not setState (the whole-screen-blank crash). Then the staleness
+          // guard for a superseded open.
+          if (!mountedRef.current || seq !== fileSeq.current) return
           setFile(null)
           setLoadingFile(false)
           setFileError(err instanceof Error ? err.message : 'failed to open document')
@@ -288,6 +335,7 @@ export function DocumentsTab({
     void client
       .postComment(projectId, file.path, composerBody.trim(), anchor)
       .then(() => {
+        if (!mountedRef.current) return
         setPosting(false)
         setComposerOpen(false)
         setComposerBody('')
@@ -295,6 +343,7 @@ export function DocumentsTab({
         loadComments(file.path)
       })
       .catch((err: unknown) => {
+        if (!mountedRef.current) return
         setPosting(false)
         const msg =
           err instanceof DocsClientError && err.code === 'doc_changed_underfoot'
@@ -338,7 +387,7 @@ export function DocumentsTab({
         expected_modified_at: file.modified_at,
       })
       .then((res) => {
-        if (seq !== saveSeq.current) return
+        if (!mountedRef.current || seq !== saveSeq.current) return
         setSaving(false)
         setEditing(false)
         // Adopt the server-authoritative stat as the next OCC baseline so an
@@ -349,7 +398,7 @@ export function DocumentsTab({
         loadComments(docPath)
       })
       .catch((err: unknown) => {
-        if (seq !== saveSeq.current) return
+        if (!mountedRef.current || seq !== saveSeq.current) return
         setSaving(false)
         // PUT /docs/file surfaces a stale `expected_modified_at` as a 409
         // `doc_modified_conflict` (DocConflictError); accept the comment-flow's
@@ -379,8 +428,14 @@ export function DocumentsTab({
       setReplyBody('')
       void client
         .getThread(projectId, threadRootId)
-        .then((tree) => setOpenThread(tree))
-        .catch(() => setOpenThread(null))
+        .then((tree) => {
+          if (!mountedRef.current) return
+          setOpenThread(tree)
+        })
+        .catch(() => {
+          if (!mountedRef.current) return
+          setOpenThread(null)
+        })
     },
     [client, projectId, openThreadId],
   )
@@ -391,12 +446,25 @@ export function DocumentsTab({
       void client
         .replyToComment(projectId, threadRootId, replyBody.trim())
         .then(() => {
+          if (!mountedRef.current) return
           setReplyBody('')
           loadComments(file.path)
-          // refresh the open thread tree
-          void client.getThread(projectId, threadRootId).then((t) => setOpenThread(t))
+          // refresh the open thread tree — a best-effort re-fetch, so swallow
+          // its rejection (incl. the AbortError from an unmount mid-refresh);
+          // without a `.catch` the shared read-abort turns this into an
+          // unhandled promise rejection in exactly the unmount path we target.
+          void client
+            .getThread(projectId, threadRootId)
+            .then((t) => {
+              if (!mountedRef.current) return
+              setOpenThread(t)
+            })
+            .catch(() => {
+              /* refresh-only; a failed thread re-fetch is non-fatal */
+            })
         })
         .catch((err: unknown) => {
+          if (!mountedRef.current) return
           setCommentsError(err instanceof Error ? err.message : 'failed to reply')
         })
     },
@@ -408,8 +476,12 @@ export function DocumentsTab({
       if (file === null) return
       void client
         .resolveComment(projectId, threadRootId)
-        .then(() => loadComments(file.path))
+        .then(() => {
+          if (!mountedRef.current) return
+          loadComments(file.path)
+        })
         .catch((err: unknown) => {
+          if (!mountedRef.current) return
           if (err instanceof DocsClientError && err.code === 'nothing_to_resolve') {
             loadComments(file.path)
             return
@@ -425,8 +497,12 @@ export function DocumentsTab({
       if (file === null) return
       void client
         .escalateToChat(projectId, threadRootId)
-        .then(() => setCommentsError(null))
+        .then(() => {
+          if (!mountedRef.current) return
+          setCommentsError(null)
+        })
         .catch((err: unknown) => {
+          if (!mountedRef.current) return
           setCommentsError(err instanceof Error ? err.message : 'failed to escalate')
         })
     },
@@ -448,7 +524,18 @@ export function DocumentsTab({
         ) : loadingFile ? (
           <div className="cdoc-empty cdoc-view-empty">Loading…</div>
         ) : fileError !== null ? (
-          <div className="cdoc-empty cdoc-view-empty">{fileError}</div>
+          <div className="cdoc-empty cdoc-view-empty" role="alert">
+            <div className="cdoc-file-error">{fileError}</div>
+            {selectedPath !== null ? (
+              <button
+                type="button"
+                className="cdoc-file-retry"
+                onClick={() => openDoc(selectedPath)}
+              >
+                Try again
+              </button>
+            ) : null}
+          </div>
         ) : file !== null ? (
           <>
             <header className="cdoc-view-head">
