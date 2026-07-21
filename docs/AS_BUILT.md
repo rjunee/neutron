@@ -11,49 +11,63 @@ gate, and completion delivery are plan tasks 3-5. Spec of record:
 `docs/plans/executor-mode-reminders-2026-07-20.md`.
 
 - **Migration `0106_ritual_schema.sql`** — three forward-only DDL units:
-  (1a) nullable opaque-TEXT `reminders.ritual_id` (0095 `recurrence_spec`
+  (A) nullable opaque-TEXT `reminders.ritual_id` (0095 `recurrence_spec`
   precedent — the in-process registry is the authoritative validator, a CHECK
-  would force a table rebuild per ritual); (1b) new durable `code_ritual_runs`
-  run-history table (own 30-day retention, NOT pruned on liveness — the durable
-  answer to "why didn't my morning brief run"; richer status vocabulary than the
-  subagent registry: `spawned`/`finished`/`failed`/`timed_out`/`crashed`/`skipped`
-  with an invariant CHECK binding every `skipped` row to exactly one
-  `skip_reason`); (1c) widened `code_subagent_registry.agent_kind` to admit
-  `'ritual'` via create-copy-drop-rename (SQLite cannot ALTER a CHECK), preserving
-  STRICT + all CHECKs + both 0100 indexes byte-for-byte. `expected-schema.txt`
-  regenerated; `table-ownership.json` gains a `code_ritual_runs` entry
-  (`reminders/ritual-runs.ts` sole writer); `runner.test.ts` version list + 106.
-- **`AgentKind` widened** (`runtime/subagent/registry.ts`) to include `'ritual'` —
-  compile-safe (only `Partial<Record<AgentKind,…>>` consumers).
+  would force a table rebuild per ritual; NULL = nudge row, no backfill); (B) new
+  durable `code_ritual_runs` run-history table (own retention, NOT pruned on the
+  subagent-registry liveness prune, `runtime/subagent/store.ts:171` — the durable
+  answer to "why didn't my morning brief run"; richer status vocab than the
+  registry: `skipped`/`running`/`finished`/`failed`/`timed_out`/`crashed` +
+  `skip_reason` CHECK-coupled to `skipped` via `CHECK ((status='skipped') =
+  (skip_reason IS NOT NULL))`; carries `subagent_run_id`/`content_hash`/
+  `failure_reason`/`output_summary`; a `ritual`+`started_at` index and a partial
+  `live` index); (C) widened `code_subagent_registry.agent_kind` to admit
+  `'ritual'` via create-copy-drop-rename (SQLite cannot ALTER a CHECK), the 0100
+  DDL reproduced verbatim with only the enum widened, STRICT + all CHECKs + both
+  0100 indexes preserved, rows copied by explicit column list. `expected-schema.txt`
+  regenerated (only the three expected shapes — reminders col, new table+indexes,
+  agent_kind enum + the RENAME name-quote); `runner.test.ts` version list + 106.
+  NO `table-ownership.json` entry — coverage is opt-in and this table has no
+  writers yet (the first runtime-writer task adds it).
+- **`AgentKind` widened** (`runtime/subagent/registry.ts:20`) to include `'ritual'`
+  — compile-safe (only `Partial<Record<AgentKind,…>>` consumers).
 - **`reminders/rituals.ts`** — the pure registry + fail-CLOSED fire-time verdict.
   `RitualDef` (charset-guarded id `^[a-z0-9][a-z0-9-]{0,63}$` — traversal
-  impossible by construction; `tool_surface` NEVER empty [#361 toolless-class
-  pin]; `egress`/`bridge` as separately-approved capability CLASSES never smuggled
-  as tool names; `silent`; NO `requires_approval` — approval is a separate
-  content-hash record [task 3]; model TIER + 45-min timeout as constants, Vajra
-  parity). `validateRitualDef` / `createRitualRegistry` (frozen, throws on
-  invalid/dup) / `resolveRitualPromptPath` (defense-in-depth re-guard) /
-  `validateRitualFire` -> unknown_ritual | missing_prompt | unapproved | ok, with a
-  REQUIRED (no-default) `isApproved` seam so composition can never fail open. A
-  fail verdict means log + SKIP — never degrade-to-nudge, never `tools:[]`.
-- **`reminders/ritual-runs.ts`** — `RitualRunStore` over `ProjectDb`, mirroring the
-  subagent-store conventions (ALL writes via the async mutex-serialized `db.run`,
-  never `runSync` — the runSync-bypass hazard). `insertSpawned` / `insertSkipped`
-  / `markTerminal` (guarded on live) / `get` / `listByRitual` (newest-first, rides
-  the index) / `pruneTerminalOlderThan` (never a live row).
-- **`reminders/store.ts`** — `ritual_id` plumbed through `Reminder`,
-  `CreateReminderInput`, `CreateRecurringReminderInput`, `COLS`, both INSERTs, and
-  `rowToReminder` (defaults null; existing create paths still write NULL). Public
-  surface exported from `reminders/index.ts`.
-- **Tests** — `reminders/rituals.test.ts` (validation slice + registry + path
-  resolution + all four fire verdicts, artifact-grounded prompt marker,
-  `toHaveBeenCalledWith` on the approval seam + not-called on early verdicts);
-  `reminders/ritual-runs.test.ts` (every status round-trips, skip-reason
-  surfacing, SQL-layer CHECK-violation assertions, ordering/limit, prune
-  semantics, migration table_info + agent_kind CHECK + index-presence assertions);
-  `reminders/store.test.ts` extended for `ritual_id` round-trip. Green in
-  `reminders/` (113), `migrations/` (40), `runtime/` (1318); all three packages
-  typecheck.
+  impossible by construction; `description` non-empty ≤200 chars = the approval
+  capability line [task 8]; `scope` project|instance; `tool_surface` NEVER empty
+  [#361 toolless-class pin], each entry a tool token [`Bash` allowed — overturn 1,
+  security rides the approval gate not exclusion]; `egress` `'none'|'web'`
+  register-time-consistent with the surface; `silent`; NO `requires_approval`,
+  NO `prompt_path`/`model`/`timeout` fields — approval is a separate content-hash
+  record [task 3], prompt derived `rituals/<id>.md`, tier `'best'` + 45-min
+  timeout are module constants). `createRitualRegistry({rituals_dir})` →
+  `register()` (throws on bad id/dup/empty-or-long description/empty surface/bad
+  token/egress-inconsistency; stores a frozen copy) / `get` / `list` /
+  `promptPathFor`. `validateRitualFire(registry, approvals, id, log)` async →
+  `unknown_ritual` | `missing_prompt` (missing/unreadable/empty/over-256KB) |
+  `unapproved` (false OR THROW — fail CLOSED) | ok. The `RitualApprovalCheck` seam
+  is REQUIRED (no permissive default anywhere), consulted only after the prompt is
+  read. A fail verdict logs once and SKIPs — never degrade-to-nudge, never
+  `tools:[]`.
+- **`reminders/store.ts`** — `ritual_id` is READ-THROUGH only: plumbed through
+  `Reminder`, `ReminderDbRow`, `COLS`, `rowToReminder`, and the two return
+  literals (`ritual_id: null`). Deliberately NOT added to `CreateReminderInput` /
+  `CreateRecurringReminderInput` and NOT written in either INSERT — the only writer
+  lands with its validation (registration = task 8, tick wiring = task 4), so the
+  column defaults NULL untouched. Public surface exported from `reminders/index.ts`.
+- **Tests** — `reminders/rituals.test.ts`: registry round-trip + frozen-copy
+  independence; every `register()` invariant is a throw (bad ids, dup, empty
+  surface, bad token, both egress inconsistencies, empty/over-long description,
+  Bash-surface accepted); all four fire verdicts with `not.toHaveBeenCalled` on
+  early skips and `toHaveBeenCalledWith(def, exact-bytes)` on the approval seam,
+  approval-THROW → unapproved with a single log line, artifact-grounded happy-path
+  marker + no-fallback-shape assertion; constants; 0106 CHECK tests
+  (`agent_kind` ritual ok / bogus rejected, `code_ritual_runs` status +
+  skip_reason invariant) + a rebuild-preserves-data test (apply 0000-0105, insert
+  a legacy `forge` row, apply 0106, assert the row survives field-for-field and
+  `ritual` now inserts). `reminders/store.test.ts`: create() defaults `ritual_id`
+  null + a raw-`UPDATE` read-through round-trip (the write path deliberately
+  doesn't exist yet).
 
 ## 2026-07-20 — M2-3 round 2: §7.2 merge-safety gate closes the memory-consolidation arming precondition (Argus r1 BLOCKER)
 

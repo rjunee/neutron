@@ -142,6 +142,9 @@ CREATE TABLE code_subagent_registry_new (
                             CHECK (failure_reason IS NULL OR failure_reason IN (
                                 'process_dead', 'stuck'
                             )),
+    -- Per-process-boot ownership token (see header). NOT NULL: every row is
+    -- stamped with the creating process's boot id so the reap can tell prior-boot
+    -- orphans from current-boot live rows.
     boot_id             TEXT NOT NULL
 ) STRICT;
 
