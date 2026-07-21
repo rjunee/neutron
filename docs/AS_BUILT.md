@@ -2,6 +2,54 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+## 2026-07-20 — #374 Defect 2a: the LIVE onboarding-complete emit stamps the durable handoff marker ONLY on real delivery (kills the residual post-claim bounce)
+
+Closed the OPEN half of the #374 claim-jank fix. The reconnect-recovery replay in
+`open/wiring/app-ws.ts` re-fires `onboarding_completed` while
+`onboarding_handoff_emitted_at` is still NULL and phase === `completed`. Migration
+0054 (`0054_onboarding_state_handoff_emitted_at.sql`) + #404 made the REPLAY path
+stamp after its own send (stopping the INFINITE loop), but the LIVE emit at
+finalize never wrote the stamp — so on a Managed box the FIRST reconnect after
+finalize still saw a null stamp and re-fired the frame ONCE, bouncing the
+just-completed owner to the claim / manual-link screen (#374 Defect 2). The signal
+was at-most-once per page load on the replay side but NOT at-most-once across the
+live + replay paths.
+
+- **Delivery-aware stamp on the live emit** (`onboarding/openings/finalize.ts`,
+  step (5c), right after `deps.emitOnboardingCompleted?.(...)`). The emit seam now
+  RETURNS whether the frame reached at least one live socket:
+  `fanOnboardingCompleted` (`open/composer.ts`) accumulates the registry
+  `send()` boolean (`channels/adapters/app-ws/session-registry.ts` returns true iff
+  a device received it) and returns it; `emitOnboardingCompleted` propagates it.
+  finalize stamps `onboarding_handoff_emitted_at` (via the SAME
+  `OnboardingStateStore.upsert` the replay path uses) ONLY when that delivery is
+  true. Gating on delivery — not on the seam being wired (the seam is
+  UNCONDITIONALLY wired in production) — is the round-2 correction: a finalize that
+  reaches ZERO sockets (a background import-completion watcher fires with the tab
+  closed) leaves the stamp null so the reconnect replay still recovers the claim
+  redirect exactly once. Guarded + idempotent (only stamp while still null, so a
+  coalesced/duplicate finalize never double-stamps) and best-effort + non-throwing
+  (a failed stamp never rolls back the completed owner; worst case is one extra
+  replay, the pre-fix behaviour).
+- **Result**: when the live frame was delivered, the post-finalize reconnect reads
+  a non-null stamp and does NOT re-emit → no residual bounce; when it was dropped,
+  the null stamp keeps the reconnect replay armed for exactly-once recovery.
+  `onboarding_completed` is now genuinely at-most-once across the live + replay
+  paths without stranding the offline-finalize owner.
+- **Tests** (reproduce-then-fix):
+  `gateway/wiring/__tests__/build-onboarding-finalize.test.ts` — a LIVE, DELIVERED
+  emit finalize now stamps `onboarding_handoff_emitted_at` (failed on prior main:
+  stayed null) + a guard-negative that the app-ws replay predicate
+  (`completed && stamp === null`) is false afterwards; a seam-WIRED-but-ZERO-SOCKETS
+  finalize (frame dropped) leaves the stamp null so the replay predicate stays true
+  (fails under the round-1 seam-gated fix, which stamped and stranded the offline
+  owner); and an LLM-less-path (no seam) test that the stamp stays null.
+  `tests/integration/claim-redirect-once.open.test.ts` — after a real live+delivered
+  finalize, the FIRST reconnect against the real app WebSocket emits ZERO
+  `onboarding_completed` frames (failed on prior main: the null stamp let the replay
+  re-fire once). Scope: the live-emit stamp only; the Managed claim flow (Defect 1
+  start-token + 2b auto-redirect) is a separate PR.
+
 ## 2026-07-20 — #371 (part b): tenant-side auth screen is managed-unreachable
 
 The OSS install-token / Claude-auth surface in `landing/server.ts` is now gated
@@ -32,6 +80,7 @@ tenant-side screen must be UNREACHABLE.
   (NOT the OSS screen); open → both serve; `NEUTRON_ROLE=managed` env backstop
   with the option unset. Verified FAILING on prior main (managed install-token
   route returned the OSS handler's 200, not 503).
+
 ## 2026-07-20 — #375: post-onboarding workspace opens on General, not a random project
 
 The workspace `/chat` load (notably the post-onboarding Managed claim redirect to
