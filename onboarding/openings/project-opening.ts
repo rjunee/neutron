@@ -524,6 +524,25 @@ export function firstProseParagraph(markdown: string): string {
 }
 
 /**
+ * Text of the first markdown heading (`#`…`######`) in a doc, stripped of its
+ * leading `#`s and trailing `#`s/whitespace. Used as a last-resort lead source
+ * for a heading-only generated document (no prose paragraph) so even that edge
+ * stays grounded in the document's OWN content — project-unique — rather than a
+ * generic boilerplate template (#377). Returns '' when the doc has no heading.
+ *
+ * Exported for unit testing.
+ */
+export function firstHeadingText(markdown: string): string {
+  for (const raw of markdown.split('\n')) {
+    const line = raw.trim()
+    if (!line.startsWith('#')) continue
+    const text = line.replace(/^#+\s*/, '').replace(/\s*#+\s*$/, '').trim()
+    if (text.length > 0) return text
+  }
+  return ''
+}
+
+/**
  * BUG #308 fix (2026-06-19) — parsed STATUS.md projection used by the
  * opening composer (deterministic + LLM paths).
  */

@@ -37,7 +37,18 @@ export const DOC_MAX_TOKENS = 2_000
 export const DOC_COMPOSE_TIMEOUT_MS = 90_000
 
 export interface BuildProjectDocComposerInput {
-  client: AnthropicMessagesClient
+  /**
+   * PER-PROJECT compose-client factory (#378, Approach A). Resolves the
+   * `AnthropicMessagesClient` bound to ONE project's ISOLATED compose session,
+   * keyed off the project's `slug`. Routing each project's doc synthesis through
+   * its own per-project-keyed session (a DISTINCT pool key from the live-chat
+   * `cc-agent-*` session, TOOLLESS) is what stops project 2/3's README /
+   * transcript-summary from echoing project 1 — the docs the per-project openings
+   * later READ, so isolating the composer here closes #378 at the SOURCE (B3).
+   * Production wires `composeClientForProject` (open/composer.ts); tests inject a
+   * factory over a recording stub. Called once per compose call with `doc.slug`.
+   */
+  clientForProject: (project_id: string) => AnthropicMessagesClient
   /** Override the client's factory default model. Omit in production. */
   model?: string
   max_tokens?: number
@@ -50,10 +61,13 @@ export function buildProjectDocComposer(
   const max_tokens = input.max_tokens ?? DOC_MAX_TOKENS
   const timeout_ms = input.timeout_ms ?? DOC_COMPOSE_TIMEOUT_MS
   return async (doc: ComposeProjectDocInput): Promise<string> => {
+    // Resolve THIS project's isolated compose session (keyed by slug) — never a
+    // session shared across projects (that was the #378 cross-project bleed root).
+    const client = input.clientForProject(doc.slug)
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(), timeout_ms)
     try {
-      const response = await input.client.messages.create({
+      const response = await client.messages.create({
         model: input.model ?? getBestModel(),
         system: systemPrompt(doc.kind),
         messages: [{ role: 'user', content: userPrompt(doc) }],

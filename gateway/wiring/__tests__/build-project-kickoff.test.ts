@@ -27,7 +27,11 @@ import {
   type KickoffInput,
   type ProjectKickoffDeps,
 } from '../build-project-kickoff.ts'
-import type { ProjectKickoffComposer } from '../build-project-kickoff-composer.ts'
+import {
+  buildProjectKickoffComposer,
+  type ProjectKickoffComposer,
+} from '../build-project-kickoff-composer.ts'
+import type { AnthropicMessagesClient } from '@neutronai/onboarding/interview/anthropic-client.ts'
 
 const NOW = 1_700_000_000_000
 
@@ -35,14 +39,23 @@ function ownerHome(): string {
   return mkdtempSync(join(tmpdir(), 'kickoff-home-'))
 }
 
-/** A composer that returns fixed markdown and records its calls. */
-function stubComposer(body: string): ProjectKickoffComposer & { calls: number } {
+/**
+ * A composer that returns fixed markdown for the DOC kinds and a distinct
+ * fully-composed bubble for the `opening_message` kind (#377), and records its
+ * calls. `project_id` is recorded so isolation tests can assert per-project keying.
+ */
+function stubComposer(
+  body: string,
+  message = 'Here is where this project stands and I drafted a first pass for you to review.',
+): ProjectKickoffComposer & { calls: number; kinds: string[]; projectIds: string[] } {
   const fn = Object.assign(
-    async (): Promise<string> => {
+    async (input: { kind: string; project_id: string }): Promise<string> => {
       fn.calls += 1
-      return body
+      fn.kinds.push(input.kind)
+      fn.projectIds.push(input.project_id)
+      return input.kind === 'opening_message' ? message : body
     },
-    { calls: 0 },
+    { calls: 0, kinds: [] as string[], projectIds: [] as string[] },
   )
   return fn
 }
@@ -124,7 +137,14 @@ test('rich work project → draft-doc: writes doc, presents tappable marker, ind
   const res = await kickoff.composeKickoff(input)
   expect(res).not.toBeNull()
   expect(res!.action).toBe('draft-doc')
-  expect(composer.calls).toBe(1)
+  // Two composes now: the starting-plan DOC + the fully-LLM opening MESSAGE (#377).
+  expect(composer.calls).toBe(2)
+  expect(composer.kinds).toEqual(['draft_doc', 'opening_message'])
+  // Both composes key THIS project's isolated session (#378): same project_id.
+  expect(composer.projectIds).toEqual(['topline', 'topline'])
+  // #377 — the retired hardcoded lead scaffold is GONE; the bubble is the LLM message.
+  expect(res!.body).not.toContain('I took a first pass')
+  expect(res!.body).toContain('I drafted a first pass for you to review')
 
   // Doc written on disk under the project's docs/ root.
   const abs = join(home, 'Projects', 'topline', 'docs', 'starting-plan.md')
@@ -143,6 +163,43 @@ test('rich work project → draft-doc: writes doc, presents tappable marker, ind
   expect(idx.calls.length).toBe(1)
   expect(idx.calls[0]!.project_slug).toBe('topline')
   expect(idx.calls[0]!.body).toContain('Get revenue reporting live')
+})
+
+test('#377 heading-only doc + opening-message compose failure → lead derives from the doc heading, NOT a generic boilerplate', async () => {
+  const home = ownerHome()
+  // DOC compose returns a heading-ONLY body (no prose paragraph); the
+  // opening_message compose THROWS. The fallback must stay project-unique by
+  // lifting the doc's OWN heading — never the retired generic scaffold.
+  const composer = Object.assign(
+    async (input: { kind: string }): Promise<string> => {
+      if (input.kind === 'opening_message') throw new Error('compose failed')
+      return '# Topline revenue reporting rollout\n\n## Next steps\n\n## Risks'
+    },
+    { calls: 0, kinds: [] as string[], projectIds: [] as string[] },
+  )
+  const kickoff = buildProjectKickoff({
+    owner_home: home,
+    owner_slug: 'acme',
+    composer,
+    now: () => NOW,
+    log: () => {},
+  })
+  const input = baseInput({
+    docs: {
+      readme: null,
+      transcript_summary: null,
+      status_md: '---\none_liner: "Ship revenue reporting"\nstatus: active\npriority: P1\n---\n\n# Status\n\nBuilding the dashboard.\n\n## Open threads\n\n- Wire the warehouse\n',
+    },
+  })
+  const res = await kickoff.composeKickoff(input)
+  expect(res).not.toBeNull()
+  expect(res!.action).toBe('draft-doc')
+  // Lead is the doc's own heading text — project-unique, document-derived.
+  expect(res!.body).toContain('Topline revenue reporting rollout')
+  // NOT the retired generic boilerplate lead.
+  expect(res!.body).not.toContain('I drafted a starting')
+  // Still carries the tappable doc marker.
+  expect(res!.body).toContain('docs:/topline/starting-plan.md')
 })
 
 test('draft-doc create-if-missing: an existing doc is never clobbered → null', async () => {
@@ -303,4 +360,101 @@ test('rich work with a failing composer → null (better nothing than a bad job)
     baseInput({ outcome: outcome({ summary_written: true, slice_chunk_count: 3 }) }),
   )
   expect(res).toBeNull() // fall back to the deterministic opening
+})
+
+// ---------------------------------------------------------------------------
+// #378 CROSS-PROJECT BLEED — the whole point. Drives the REAL kickoff composer
+// (`buildProjectKickoffComposer`) across 3 distinct projects through a fake that
+// models per-session accumulating transcripts: a session "remembers" every
+// project it has composed for and its replies leak every remembered name (the
+// bleed). ISOLATED (one session per project_id) → each project's DOC + opening
+// MESSAGE reference ONLY their own project. SHARED (one session for all — the
+// pre-fix `cc-llm-*` wiring) → project 2/3 echo project 1. The second half is the
+// "fails on main" demonstration; the first is the fix.
+// ---------------------------------------------------------------------------
+
+/**
+ * A fake compose backend keyed by session. Each session accumulates the project
+ * names it has been asked to compose for; every reply leaks the full accumulated
+ * set — so a session SHARED across projects bleeds earlier projects into later
+ * ones. `makeClient(sessionKey)` returns the client for that session.
+ */
+function transcriptModel(): {
+  makeClient: (sessionKey: string) => AnthropicMessagesClient
+} {
+  const remembered = new Map<string, string[]>()
+  const makeClient = (sessionKey: string): AnthropicMessagesClient => ({
+    messages: {
+      async create(args) {
+        const seen = remembered.get(sessionKey) ?? []
+        const content = args.messages[0]?.content ?? ''
+        const name = content.match(/Project name:\s*(.+)/)?.[1]?.trim() ?? ''
+        if (name.length > 0 && !seen.includes(name)) seen.push(name)
+        remembered.set(sessionKey, seen)
+        // Leak every project this SESSION has accumulated — the #378 bleed.
+        return { content: [{ text: `# ${name} plan\n\nCovers: ${seen.join(', ')}.` }] }
+      },
+    },
+  })
+  return { makeClient }
+}
+
+const BLEED_PROJECTS = [
+  { project_id: 'amascence', name: 'Amascence' },
+  { project_id: 'dtc-ops', name: 'DTC ops' },
+  { project_id: 'contemplative-practice', name: 'contemplative practice' },
+]
+
+async function runKickoffAcrossProjects(
+  clientForProject: (project_id: string) => AnthropicMessagesClient,
+): Promise<Array<{ name: string; openingBody: string; doc: string }>> {
+  const home = ownerHome()
+  const kickoff = buildProjectKickoff({
+    owner_home: home,
+    owner_slug: 'acme',
+    composer: buildProjectKickoffComposer({ clientForProject }),
+    now: () => NOW,
+    log: () => {},
+  })
+  const out: Array<{ name: string; openingBody: string; doc: string }> = []
+  for (const p of BLEED_PROJECTS) {
+    const res = await kickoff.composeKickoff(
+      baseInput({
+        project_id: p.project_id,
+        name: p.name,
+        outcome: outcome({ summary_written: true }),
+      }),
+    )
+    expect(res).not.toBeNull()
+    const doc = readFileSync(join(home, 'Projects', p.project_id, 'docs', 'starting-plan.md'), 'utf8')
+    out.push({ name: p.name, openingBody: res!.body, doc })
+  }
+  return out
+}
+
+test('#378 ISOLATED per-project sessions → each project DOC + opening references ONLY its own project (no bleed)', async () => {
+  const { makeClient } = transcriptModel()
+  // Isolation = a DISTINCT session per project_id (the fix).
+  const results = await runKickoffAcrossProjects((project_id) => makeClient(project_id))
+  // Project 2 (DTC ops) and 3 (contemplative practice) must NOT echo project 1.
+  const dtc = results[1]!
+  const contemplative = results[2]!
+  expect(dtc.doc).toContain('DTC ops')
+  expect(dtc.doc).not.toContain('Amascence')
+  expect(dtc.openingBody).not.toContain('Amascence')
+  expect(contemplative.doc).toContain('contemplative practice')
+  expect(contemplative.doc).not.toContain('Amascence')
+  expect(contemplative.doc).not.toContain('DTC ops')
+  expect(contemplative.openingBody).not.toContain('Amascence')
+})
+
+test('#378 SHARED session (pre-fix behaviour) BLEEDS — project 2/3 echo project 1 (this is what fails on main)', async () => {
+  const { makeClient } = transcriptModel()
+  // The pre-fix wiring routed every project through ONE shared `cc-llm-*` session.
+  const shared = makeClient('cc-llm-shared')
+  const results = await runKickoffAcrossProjects(() => shared)
+  // Demonstrates the bleed the fix removes: project 2's doc echoes project 1.
+  expect(results[1]!.doc).toContain('Amascence')
+  expect(results[2]!.doc).toContain('Amascence')
+  expect(results[2]!.doc).toContain('DTC ops')
 })

@@ -29,15 +29,29 @@ import { getBestModel } from '@neutronai/runtime/models.ts'
  *  screens, not a book (mirrors build-project-doc-composer's DOC_MAX_TOKENS). */
 export const KICKOFF_DOC_MAX_TOKENS = 2_000
 
+/** Output budget for the opening MESSAGE — a 2-3 sentence chat bubble (#377). */
+export const OPENING_MESSAGE_MAX_TOKENS = 350
+
 /** Per-call wall-clock budget. The kickoff rides the fire-and-forget finalize
  *  (latency-tolerant) but must not hold a project's opening hostage. */
 export const KICKOFF_COMPOSE_TIMEOUT_MS = 90_000
 
 /** What the kickoff composer is asked to draft. */
 export interface KickoffComposeInput {
-  /** `draft_doc` = a work project's starting plan; `interest_brief` = a hobby's
-   *  light-research / starting notes. */
-  kind: 'draft_doc' | 'interest_brief'
+  /**
+   * `draft_doc` = a work project's starting plan; `interest_brief` = a hobby's
+   * light-research / starting notes; `opening_message` = the short, fully
+   * LLM-composed opening CHAT BUBBLE that presents the drafted doc to the owner
+   * (replaces the retired hardcoded lead scaffolds — #377).
+   */
+  kind: 'draft_doc' | 'interest_brief' | 'opening_message'
+  /**
+   * The project's canonical bind id — used ONLY to resolve this project's
+   * ISOLATED compose session (`clientForProject(project_id)`). Every compose call
+   * for one project keys the SAME per-project session → its docs + opening are
+   * grounded in that project alone, never a session shared across projects (#378).
+   */
+  project_id: string
   project_name: string
   /** The doc's working title (drives the `# <title>` heading). */
   doc_title: string
@@ -56,7 +70,17 @@ export interface KickoffComposeInput {
 export type ProjectKickoffComposer = (input: KickoffComposeInput) => Promise<string>
 
 export interface BuildProjectKickoffComposerInput {
-  client: AnthropicMessagesClient
+  /**
+   * PER-PROJECT compose-client factory (#377/#378, Approach A). Resolves the
+   * `AnthropicMessagesClient` bound to ONE project's ISOLATED compose session
+   * (keyed by `project_id`, a DISTINCT pool key from the live-chat `cc-agent-*`
+   * session, TOOLLESS). Routing the kickoff DOC + opening MESSAGE synthesis
+   * through each project's own session is what stops project 2/3's starting plan
+   * / opener from echoing project 1 (#378), and never touches the owner's live
+   * chat REPL (B1). Production wires `composeClientForProject` (open/composer.ts);
+   * tests inject a factory over a recording stub. Called with `doc.project_id`.
+   */
+  clientForProject: (project_id: string) => AnthropicMessagesClient
   /** Override the client's factory default model. Omit in production. */
   model?: string
   max_tokens?: number
@@ -69,14 +93,19 @@ export function buildProjectKickoffComposer(
   const max_tokens = input.max_tokens ?? KICKOFF_DOC_MAX_TOKENS
   const timeout_ms = input.timeout_ms ?? KICKOFF_COMPOSE_TIMEOUT_MS
   return async (doc: KickoffComposeInput): Promise<string> => {
+    // Resolve THIS project's isolated compose session — every kickoff compose for
+    // one project keys the same per-project session; never shared across projects.
+    const client = input.clientForProject(doc.project_id)
+    // The opening MESSAGE is a short chat bubble, not a 1-2 screen doc.
+    const call_max_tokens = doc.kind === 'opening_message' ? OPENING_MESSAGE_MAX_TOKENS : max_tokens
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(), timeout_ms)
     try {
-      const response = await input.client.messages.create({
+      const response = await client.messages.create({
         model: input.model ?? getBestModel(),
         system: systemPrompt(doc.kind),
         messages: [{ role: 'user', content: userPrompt(doc) }],
-        max_tokens,
+        max_tokens: call_max_tokens,
         signal: controller.signal,
       })
       const text = (response.content[0]?.text ?? '').trim()
@@ -91,6 +120,24 @@ export function buildProjectKickoffComposer(
 }
 
 function systemPrompt(kind: KickoffComposeInput['kind']): string {
+  if (kind === 'opening_message') {
+    // #377 — the WHOLE opening bubble is LLM-composed + unique per project (no
+    // hardcoded lead). This composes the short chat message that presents the
+    // starting doc the kickoff just drafted; the caller appends the tappable
+    // doc link, so DO NOT emit a link/URL/markdown-link yourself.
+    return (
+      'You are Neutron, a calm, grounded personal-AI workspace agent. You are writing the ' +
+      'OPENING chat message the workspace owner sees the first time they open this freshly ' +
+      'created project, right after you drafted a starting document for it. Output ONLY the ' +
+      'message text (plain text, no markdown headings, no bullet lists, no code fences, no ' +
+      'preamble, no links or URLs). Write in second person ("you"), warm and terse, 2-3 ' +
+      'sentences: say in your own words what this project is (grounded ONLY in the provided ' +
+      'context — never invent facts, names, numbers, or deadlines), that you took a first pass ' +
+      'and drafted a starting document, and invite the owner to review it and tell you what to ' +
+      'change. Never use em dashes; use hyphens. No greetings, no "Hi", no meta narration. Do ' +
+      'NOT include a link or the document filename — a tappable link is appended after your text.'
+    )
+  }
   const shared =
     'You draft a starting document for a personal AI workspace, on behalf of the ' +
     'assistant, for the workspace owner to read the moment they open a freshly ' +
