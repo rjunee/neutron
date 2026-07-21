@@ -244,8 +244,18 @@ export function createRitualRegistry(opts: { rituals_dir: string }): RitualRegis
   }
 }
 
-/** The fail-CLOSED fire-time skip reasons. */
-export type RitualFireSkipReason = 'unknown_ritual' | 'missing_prompt' | 'unapproved'
+/**
+ * The fail-CLOSED fire-time skip reasons.
+ * - `unsupported_scope`: the ritual's scope has no wired cwd/write-containment
+ *   root yet (v1 wires only 'instance'; per-project rooting is task 6). The
+ *   executor lands this as a durable skip rather than over-granting the
+ *   owner-wide dir (Argus r1 MAJOR).
+ */
+export type RitualFireSkipReason =
+  | 'unknown_ritual'
+  | 'missing_prompt'
+  | 'unapproved'
+  | 'unsupported_scope'
 
 /**
  * The approval seam. Task 3 supplies the real content-hash-bound checker (hash of

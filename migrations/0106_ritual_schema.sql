@@ -79,11 +79,11 @@ CREATE TABLE IF NOT EXISTS code_ritual_runs (
     subagent_run_id  TEXT,
     status           TEXT NOT NULL
                          CHECK (status IN (
-                             'skipped', 'running', 'finished', 'failed', 'timed_out', 'crashed'
+                             'skipped', 'running', 'finished', 'failed', 'timed_out', 'crashed', 'cancelled'
                          )),
     skip_reason      TEXT
                          CHECK (skip_reason IS NULL OR skip_reason IN (
-                             'unknown_ritual', 'missing_prompt', 'unapproved'
+                             'unknown_ritual', 'missing_prompt', 'unapproved', 'unsupported_scope'
                          )),
     -- The approved content hash the run fired under (nullable; populated once the
     -- approval gate lands — plan task 3).

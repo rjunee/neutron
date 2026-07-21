@@ -232,7 +232,7 @@ export function createRitualExecutor(deps: RitualExecutorDeps): RitualExecutor {
         : r.status === 'timed_out'
           ? 'timed_out'
           : r.status === 'cancelled'
-            ? 'failed'
+            ? 'cancelled'
             : 'failed'
     const registryStatus =
       r.status === 'completed' ? 'finished' : r.status === 'cancelled' ? 'cancelled' : 'crashed'
@@ -262,6 +262,10 @@ export function createRitualExecutor(deps: RitualExecutorDeps): RitualExecutor {
         await postNotice(deps.resolve_topic(reminder), reminder.owner_slug, reminder.id, body)
       }
       // silent → no success post.
+    } else if (runStatus === 'cancelled') {
+      // Operator/shutdown abort — a durable 'cancelled' row is the record. NOT a
+      // merit failure: no scary failure notice, and it never feeds the
+      // consecutive-failure escalation (Argus r1 minor).
     } else {
       // failed / timed_out. A turn-settled failure carries the turn's own text as
       // the reason only when non-empty; otherwise no reason.
@@ -331,6 +335,30 @@ export function createRitualExecutor(deps: RitualExecutorDeps): RitualExecutor {
         }
 
         const def = verdict.def
+        // (b2) Resolve the scope cwd + write-containment root NOW — BEFORE any
+        // durable 'running' row. An unsupported scope fails CLOSED as a durable
+        // 'skipped' row rather than a silent owner-wide over-grant (Argus r1
+        // MAJOR) or an orphaned 'running' row. v1 (task 5) wires ONLY the
+        // 'instance' root; per-project rooting + write-containment is task 6
+        // (design doc §Layer 4 / T4, the containment HARD GATE). A skip does NOT
+        // count toward the consecutive-failure escalation — an unwired scope is
+        // not a merit failure.
+        let scope_cwd: string
+        try {
+          scope_cwd = deps.scope_cwd(def.scope)
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err)
+          log.info('ritual_fire_skip', { reminder: reminder.id, ritual_id, reason: 'unsupported_scope', detail: message })
+          await deps.runs.insertSkipped({
+            run_id: mintId(deps.mint_run_id),
+            ritual_id,
+            reminder_id: reminder.id,
+            project_slug: deps.project_slug,
+            skip_reason: 'unsupported_scope',
+            now_ms: now(),
+          })
+          return
+        }
         // (c) the content hash the fire is bound to (recorded on the 'running' row).
         const content_hash = computeRitualContentHash({
           prompt: verdict.prompt,
@@ -416,7 +444,7 @@ export function createRitualExecutor(deps: RitualExecutorDeps): RitualExecutor {
               kind: 'ritual',
               system: 'ritual',
               user_message: verdict.prompt,
-              repo_path: deps.scope_cwd(def.scope),
+              repo_path: scope_cwd,
               trident_run_id: subagentRunId,
               model: deps.resolve_model(),
               timeout_ms: RITUAL_TIMEOUT_MS,

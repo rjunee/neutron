@@ -216,6 +216,41 @@ describe('createRitualExecutor.fire — skip verdicts', () => {
     expect(row.status).toBe('skipped')
     expect(row.skip_reason).toBe('unapproved')
   })
+
+  test('unsupported scope (scope_cwd THROWS → fail-closed) → skipped row, NO running row, nothing spawned', async () => {
+    // Mirrors the composer wiring (Argus r1 MAJOR): v1 wires only the 'instance'
+    // root; a 'project'-scoped ritual's scope_cwd throws → the executor lands a
+    // durable 'skipped' row BEFORE any running row / spawn, rather than silently
+    // over-granting the owner-wide dir.
+    const registry = registryWith(def({ scope: 'project' }))
+    const turn = mock(async (): Promise<RitualTurnResult> => ({ result: '', status: 'completed' }))
+    const exec = createRitualExecutor({
+      registry,
+      approvals: new ApprovalManager(db, noopNotifier),
+      project_slug: 'owner',
+      instance_key: 'owner',
+      subagents,
+      outbound: passThroughOutbound,
+      resolve_topic: resolveTopic,
+      turn,
+      runs,
+      resolve_model: () => 'm',
+      scope_cwd: (scope) => {
+        if (scope !== 'instance') throw new Error(`ritual scope '${scope}' not yet supported: task 6`)
+        return '/scope'
+      },
+      build_approval_check: () => approver(true),
+      mint_run_id: () => 'attempt-scope',
+    })
+    await exec.fire(await ritualRow('morning-brief'))
+    const row = runs.get('attempt-scope')!
+    expect(row.status).toBe('skipped')
+    expect(row.skip_reason).toBe('unsupported_scope')
+    expect(row.subagent_run_id).toBeNull()
+    // No running row leaked, nothing spawned, the turn never fired.
+    expect(subagents.snapshot()).toHaveLength(0)
+    expect(turn).not.toHaveBeenCalled()
+  })
 })
 
 describe('createRitualExecutor.fire — approved spawn + turn wiring', () => {
@@ -302,7 +337,10 @@ describe('createRitualExecutor.fire — approved spawn + turn wiring', () => {
   test.each([
     ['timed_out', 'timed_out', 'crashed'],
     ['failed', 'failed', 'crashed'],
-    ['cancelled', 'failed', 'cancelled'],
+    // Operator/shutdown cancel is its OWN terminal — NOT a merit 'failed' (Argus
+    // r1 minor): distinct run-row status, registry 'cancelled', no failure notice,
+    // does not feed the consecutive-failure escalation.
+    ['cancelled', 'cancelled', 'cancelled'],
   ] as const)(
     'turn status %s → run row %s + registry %s',
     async (turnStatus, expectedRun, expectedReg) => {
@@ -525,6 +563,19 @@ describe('createRitualExecutor.fire — completion delivery (task 5)', () => {
     await new Promise((r) => setTimeout(r, 10))
     expect(posts).toHaveLength(1)
     expect(posts[0]!.body).toMatch(re)
+  })
+
+  test('(c) turn CANCELLED → durable cancelled row, NO failure notice', async () => {
+    // Operator/shutdown abort is not a merit failure (Argus r1 minor): the row is
+    // 'cancelled' and NO scary failure notice is posted.
+    const turn: RitualTurn = async () => ({ result: 'partial before abort', status: 'cancelled' })
+    const { exec, posts } = execWith(turn, { mint: () => 'sub-cancel' })
+    await exec.fire(await ritualRow('morning-brief'))
+    await waitTerminal('sub-cancel')
+    // give any (erroneous) late post a chance to land, then assert none.
+    await new Promise((r) => setTimeout(r, 20))
+    expect(runs.get('sub-cancel')!.status).toBe('cancelled')
+    expect(posts).toHaveLength(0)
   })
 
   test('(c) turn REJECTS → crashed failure notice carrying the run id', async () => {

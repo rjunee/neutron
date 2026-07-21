@@ -90,7 +90,9 @@ test('remindersModule invokes the ritual_executor_factory with the graph Approva
     config: {},
   }
 
-  const { loop, store } = mods.remindersModule.init(ctx)
+  // `init` is typed `X | Promise<X>`; await handles both arms (a non-Promise
+  // passes through) — fixes a pre-existing gateway-tsconfig TS2339.
+  const { loop, store } = await mods.remindersModule.init(ctx)
   cleanups.push(() => { void loop.stop() })
 
   // The factory was invoked with the EXACT graph ApprovalManager.

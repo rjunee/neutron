@@ -35,8 +35,15 @@
 import type { ProjectDb } from '@neutronai/persistence/index.ts'
 import type { RitualFireSkipReason } from './rituals.ts'
 
-/** A non-skip run outcome the executor drives via `markTerminal`. */
-export type RitualRunTerminalStatus = 'finished' | 'failed' | 'timed_out' | 'crashed'
+/**
+ * A non-skip run outcome the executor drives via `markTerminal`.
+ * - `cancelled`: an operator (`/dispatch stop`) or shutdown aborted the turn. It
+ *   is a terminal outcome but NOT a merit failure (not in `FAIL`), so it breaks a
+ *   consecutive-failure streak rather than feeding the escalation, and surfaces no
+ *   failure notice (Argus r1 minor — operator cancel must not read as a 3am
+ *   failure).
+ */
+export type RitualRunTerminalStatus = 'finished' | 'failed' | 'timed_out' | 'crashed' | 'cancelled'
 
 /** Every `code_ritual_runs.status` value. */
 export type RitualRunStatus =
@@ -233,10 +240,15 @@ export function createRitualRunStore(db: ProjectDb): RitualRunStore {
     },
 
     listRecentTerminal(input): RitualRunRow[] {
+      // Ordered by COMPLETION (ended_at), not start — 'consecutive' failures are
+      // consecutive by when they FINISHED (Argus r1 minor). Every row matched here
+      // is terminal, so ended_at is always set (no NULL ordering surprise); a
+      // same-instant refusal (started_at = ended_at) still orders deterministically
+      // via the started_at + run_id tie-breaks.
       return db.all<RitualRunRow>(
         `SELECT ${COLS} FROM code_ritual_runs
-          WHERE ritual_id = ? AND status IN ('finished','failed','timed_out','crashed')
-          ORDER BY started_at DESC, ended_at DESC
+          WHERE ritual_id = ? AND status IN ('finished','failed','timed_out','crashed','cancelled')
+          ORDER BY ended_at DESC, started_at DESC, run_id DESC
           LIMIT ?`,
         [input.ritual_id, input.limit],
       )

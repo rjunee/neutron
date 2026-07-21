@@ -97,4 +97,13 @@ describe('shouldEscalate truth table (rows newest-first)', () => {
     expect(shouldEscalate([row('failed'), row('finished'), row('failed')])).toBe(false)
     expect(shouldEscalate([row('finished'), row('failed'), row('failed')])).toBe(false)
   })
+  test('an operator cancel in the window breaks the streak → false (Argus r1 minor)', () => {
+    // 'cancelled' is terminal but not a merit failure — it must break a streak
+    // exactly like a success, never count as one of the 3.
+    expect(shouldEscalate([row('cancelled'), row('failed'), row('failed')])).toBe(false)
+    expect(shouldEscalate([row('failed'), row('cancelled'), row('failed')])).toBe(false)
+    // 3 real failures then a cancel as the 4th (older) row → NOT a fresh streak-
+    // crossing (only 'finished' re-arms), so no double escalation.
+    expect(shouldEscalate([row('failed'), row('failed'), row('failed'), row('cancelled')])).toBe(false)
+  })
 })

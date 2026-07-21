@@ -105,6 +105,48 @@ describe('listRecentTerminal', () => {
     await terminalRow('x', 'wrap', 200, 'failed')
     expect(runs.listRecentTerminal({ ritual_id: 'brief', limit: 4 }).map((r) => r.run_id)).toEqual(['a'])
   })
+
+  test('ordered by COMPLETION (ended_at), not start — Argus r1 minor', async () => {
+    // Long run A starts FIRST (100) but ends LAST (500). Instant refusal B
+    // starts later (200) and ends immediately (200). By start order the newest
+    // is B; by completion order the newest is A. The escalation window must see
+    // A as most-recent (it finished last).
+    await runs.insertRunning({
+      run_id: 'A',
+      ritual_id: 'brief',
+      reminder_id: null,
+      project_slug: 'owner',
+      subagent_run_id: 'A',
+      content_hash: 'h',
+      now_ms: 100,
+    })
+    await runs.insertFailed({
+      run_id: 'B',
+      ritual_id: 'brief',
+      reminder_id: null,
+      project_slug: 'owner',
+      failure_reason: 'lane cap',
+      now_ms: 200,
+    })
+    await runs.markTerminal({ run_id: 'A', status: 'failed', ended_at_ms: 500 })
+    expect(runs.listRecentTerminal({ ritual_id: 'brief', limit: 4 }).map((r) => r.run_id)).toEqual(['A', 'B'])
+  })
+
+  test('includes cancelled terminals in the window — Argus r1 minor', async () => {
+    await runs.insertRunning({
+      run_id: 'c1',
+      ritual_id: 'brief',
+      reminder_id: null,
+      project_slug: 'owner',
+      subagent_run_id: 'c1',
+      content_hash: 'h',
+      now_ms: 100,
+    })
+    await runs.markTerminal({ run_id: 'c1', status: 'cancelled', ended_at_ms: 101 })
+    const recent = runs.listRecentTerminal({ ritual_id: 'brief', limit: 4 })
+    expect(recent.map((r) => r.run_id)).toEqual(['c1'])
+    expect(recent[0]!.status).toBe('cancelled')
+  })
 })
 
 describe('listOrphanRunning', () => {

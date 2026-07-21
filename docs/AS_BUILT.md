@@ -2,6 +2,42 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+## 2026-07-21 — Executor-mode reminders task 5 (Argus r1 fixes): ritual prompt wiring + scope fail-close + cancel/escalation semantics
+
+Round-2 corrections on PR #426 (branch `trident/executor-mode-reminders`).
+
+- **Ritual REPL prompt now actually reaches the spawned agent (BLOCKER).**
+  `ClaudeCodeSubstrateOptions` gains `appendSystemPromptFile`, and the DEFAULT
+  anthropic factory `createClaudeCodeSubstrateAuto` now FORWARDS it onto
+  `PersistentReplSubstrateOptions` (`runtime/adapters/claude-code/index.ts`). It
+  was dropped there, so a ritual REPL spawned with the CHAT persona
+  (`repl-agent-base.md`) instead of the executor prompt, and the open typecheck
+  failed (TS2339 at `gateway/wiring/build-llm-call-substrate.ts:693`). New
+  end-to-end test `runtime/adapters/claude-code/persistent/__tests__/append-system-prompt-wiring.test.ts`
+  proves the whole chain: the real factory forwards the field AND the spawned
+  argv carries `--append-system-prompt-file` (custom when set, `repl-agent-base.md`
+  default when unset) — replacing the fake-factory coverage that masked it.
+- **Project-scoped rituals fail CLOSED instead of over-granting owner_home
+  (MAJOR).** Design doc §Layer 4: 'instance' rituals root at `owner_home`,
+  'project' rituals at their project dir. v1 wires ONLY the 'instance' root
+  (per-project rooting + write-containment is task 6). The composer's `scope_cwd`
+  (`open/composer.ts`) now THROWS for a non-'instance' scope, and the executor
+  (`reminders/ritual-executor.ts`) resolves the scope cwd BEFORE any 'running'
+  row, landing a durable `skipped` row (new skip reason `unsupported_scope`)
+  rather than silently running a project ritual from the owner-wide dir. No
+  running-row orphan, no escalation.
+- **Operator/shutdown cancel is no longer a scary failure (minor).** New
+  terminal run status `cancelled` (migration `0106`, `RitualRunTerminalStatus`).
+  `settleTerminal` records `cancelled` (not `failed`), posts NO failure notice,
+  and — being outside the `FAIL` set — breaks a consecutive-failure streak rather
+  than feeding the escalation.
+- **Escalation window ordered by COMPLETION (minor).**
+  `RitualRunStore.listRecentTerminal` now orders `ended_at DESC, started_at DESC,
+  run_id DESC` (was `started_at DESC`) so 'consecutive' failures are consecutive
+  by when they finished; `cancelled` rows are included in the terminal window.
+- Migration `0106_ritual_schema.sql` `status`/`skip_reason` CHECK enums extended
+  (`cancelled`, `unsupported_scope`); `migrations/expected-schema.txt` regenerated.
+
 ## 2026-07-21 — Executor-mode reminders task 5: completion delivery + failure surfacing + boot reap + 30d retention
 
 A ritual's terminal event now reaches the owner. The detached settle chain writes

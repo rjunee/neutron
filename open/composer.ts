@@ -1900,9 +1900,24 @@ export function buildOpenGraphComposer(
               // to the owner's bare `app:<user>` topic.
               outbound: reminderOutbound,
               resolve_topic: (reminder) => resolveAppWsReminderTopic(reminder.topic_id),
-              // Both scopes → owner_home in v1; per-project rooting refines when
-              // project-scoped rituals land (task 7+).
-              scope_cwd: () => owner_home,
+              // Design doc §Layer 4: 'instance' rituals root at owner_home (the
+              // read-only cross-project surface, e.g. morning-brief); 'project'
+              // rituals root at their project dir. v1 (task 5) wires ONLY the
+              // 'instance' root — per-project rooting + write-containment is
+              // task 6 (the containment HARD GATE, design doc T4). Until it
+              // lands a 'project'-scoped ritual FAILS CLOSED (the executor lands
+              // a durable 'skipped' row) rather than silently over-granting the
+              // owner-wide dir (Argus r1 MAJOR — permission over-grant). No
+              // project-scoped ritual can register/fire yet (zero defs until
+              // task 7), so this is defensive.
+              scope_cwd: (scope) => {
+                if (scope !== 'instance') {
+                  throw new Error(
+                    `ritual scope '${scope}' not yet supported: per-project rooting + write-containment lands in task 6`,
+                  )
+                }
+                return owner_home
+              },
             })
         : undefined
 
