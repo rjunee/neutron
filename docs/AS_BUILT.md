@@ -38,8 +38,11 @@ reproduce-then-fix test that FAILS on prior main.
   an `opening_message` kind that composes the presenting chat bubble in the SAME
   per-project isolated session (grounded in the project's signal + the drafted doc
   gist); the kickoff appends the tappable `docs:/` link. On any message-compose
-  failure it degrades to the doc's own first paragraph (still LLM-derived +
-  project-unique), never the retired boilerplate.
+  failure it degrades to the doc's own first prose paragraph — and, for a
+  heading-only generated doc, to the doc's OWN first heading text
+  (`firstHeadingText`) — always project-unique + document-derived, never the
+  retired generic boilerplate (round-2: Argus flagged the last-resort rung as a
+  reusable-across-projects hardcoded lead; the heading-derived rung closes it).
 - **Tests** — `#378` cross-bleed (real composer, 3 projects, isolated vs shared
   session model — the shared path demonstrates the on-main bleed); white-box
   isolation (`cc-compose-*` keyed by project_id, distinct pool key, toolless, no

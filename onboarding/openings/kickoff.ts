@@ -59,6 +59,7 @@ import { namesRelate } from '@neutronai/onboarding/wow-moment/project-identity.t
 import {
   parseStatusMd,
   firstProseParagraph,
+  firstHeadingText,
   type ProjectOpeningDocs,
 } from './project-opening.ts'
 // C8: the kickoff DOC composer implementation is a composition-layer construction
@@ -406,11 +407,17 @@ async function tryDraftDoc(
       err: err instanceof Error ? err.message : String(err),
     })
   }
+  // Last-resort ladder — every rung stays grounded in project-unique content
+  // (#377: no generic boilerplate lead). (1) the LLM-composed opening; (2) the
+  // doc's first prose paragraph; (3) for a heading-only doc, the doc's OWN first
+  // heading text — still document-derived + project-unique, so two heading-only
+  // projects can't collide on identical boilerplate.
+  const docLead = gist.length > 0 ? gist : firstHeadingText(body)
   const lead =
     message.length > 0
       ? stripTrailingPunctuation(message)
-      : gist.length > 0
-        ? `${stripTrailingPunctuation(gist)}. Have a look and tell me what to change`
+      : docLead.length > 0
+        ? `${stripTrailingPunctuation(docLead)}. Have a look and tell me what to change`
         : `I drafted a starting ${plan.label.toLowerCase()} for ${input.name}. Have a look and tell me what to change`
   const body_out = `${lead} - ${marker}.`
   return { body: body_out, action: kind === 'draft_doc' ? 'draft-doc' : 'interest-research', doc_relpath: plan.relpath, indexed }

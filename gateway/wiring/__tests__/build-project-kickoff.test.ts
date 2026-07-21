@@ -165,6 +165,43 @@ test('rich work project → draft-doc: writes doc, presents tappable marker, ind
   expect(idx.calls[0]!.body).toContain('Get revenue reporting live')
 })
 
+test('#377 heading-only doc + opening-message compose failure → lead derives from the doc heading, NOT a generic boilerplate', async () => {
+  const home = ownerHome()
+  // DOC compose returns a heading-ONLY body (no prose paragraph); the
+  // opening_message compose THROWS. The fallback must stay project-unique by
+  // lifting the doc's OWN heading — never the retired generic scaffold.
+  const composer = Object.assign(
+    async (input: { kind: string }): Promise<string> => {
+      if (input.kind === 'opening_message') throw new Error('compose failed')
+      return '# Topline revenue reporting rollout\n\n## Next steps\n\n## Risks'
+    },
+    { calls: 0, kinds: [] as string[], projectIds: [] as string[] },
+  )
+  const kickoff = buildProjectKickoff({
+    owner_home: home,
+    owner_slug: 'acme',
+    composer,
+    now: () => NOW,
+    log: () => {},
+  })
+  const input = baseInput({
+    docs: {
+      readme: null,
+      transcript_summary: null,
+      status_md: '---\none_liner: "Ship revenue reporting"\nstatus: active\npriority: P1\n---\n\n# Status\n\nBuilding the dashboard.\n\n## Open threads\n\n- Wire the warehouse\n',
+    },
+  })
+  const res = await kickoff.composeKickoff(input)
+  expect(res).not.toBeNull()
+  expect(res!.action).toBe('draft-doc')
+  // Lead is the doc's own heading text — project-unique, document-derived.
+  expect(res!.body).toContain('Topline revenue reporting rollout')
+  // NOT the retired generic boilerplate lead.
+  expect(res!.body).not.toContain('I drafted a starting')
+  // Still carries the tappable doc marker.
+  expect(res!.body).toContain('docs:/topline/starting-plan.md')
+})
+
 test('draft-doc create-if-missing: an existing doc is never clobbered → null', async () => {
   const home = ownerHome()
   const docsDir = join(home, 'Projects', 'topline', 'docs')
