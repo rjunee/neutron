@@ -1188,9 +1188,14 @@ rather than waiting on the global diff-gate. Subscriber:
 >   That per-dispatch project_id folds into the warm-pool key, so each project's whole
 >   doc + opening synthesis isolates onto its OWN warm REPL — the SAME race-free
 >   keying `build-live-agent-turn.ts` uses for concurrent chat topics. Composing here
->   also PRE-LOADS the project's docs and leaves the session WARM + grounded for the
->   owner's first chat turn. An ephemeral throwaway was explicitly rejected. The
->   shared `cc-llm` session is unchanged (phase-spec resolver + suggesters).
+>   also PRE-LOADS the project's docs and GROUNDS the session the owner's first chat
+>   turn resumes. Precise warmth (round-3 correction): the compose runs bridge-OFF, so
+>   the owner's first live-chat turn (bridge-ON) hits the reuse-guard bridge mismatch
+>   and evicts + respawns with `--resume` — the composed TRANSCRIPT/grounding survives,
+>   but the WARM PROCESS does not (the first chat turn pays a cold respawn). The
+>   delivered benefit is grounding continuity via the shared session id, not a saved
+>   spawn. An ephemeral throwaway was explicitly rejected. The shared `cc-llm` session
+>   is unchanged (phase-spec resolver + suggesters).
 > - **Tool-bridge suppression (Argus round-2 MAJOR).** `cc-agent-*` is the ONLY
 >   substrate with `enableToolBridge: true`, and the bridge is a SPAWN-time property:
 >   `spec.tools: []` denies the built-in Claude tools but NOT the MCP bridge. A
@@ -1200,9 +1205,30 @@ rather than waiting on the global diff-gate. Subscriber:
 >   `buildGatewayAnthropicMessagesClient` sets on EVERY dispatch (it always sends
 >   `tools: []`; synthesis never drives tools). `spawn.ts` gates both the bridge
 >   attachment and the reuse-guard `requestedToolBridge` on it, so the per-project
->   composes keep the SESSION KEY (isolation + grounding + warmth) WITHOUT the live
+>   composes keep the SESSION KEY (isolation + grounding) WITHOUT the live
 >   `mcp__neutron` tool surface. The live-chat turn dispatches raw specs (not via this
 >   client) and never sets it, so its tool bridge is unchanged.
+> - **Turn-safe eviction (Argus round-2 BLOCKER).** That bridge mismatch is what makes
+>   the first chat turn evict + respawn — and the eviction runs in `getOrSpawnSession`
+>   BEFORE the caller's `acquireTurn()`. On the shared per-project key a prose compose
+>   (bridge-OFF) racing a live chat turn (bridge-ON) would `terminateChild` the active
+>   child MID-TURN. Fix: on the non-poison freshness/bridge/surface mismatch, `spawn.ts`
+>   drains the session turn slot (`await session.acquireTurn()`) before terminating —
+>   instant when idle, serialized behind any in-flight turn — so a warm child always
+>   finishes its current turn cleanly before respawn. The poison path (abandoned/runaway
+>   turn) still force-terminates.
+> - **Owner-delivery suppression (Argus round-2 MAJOR).** `cc-agent-*` is the ONE
+>   substrate wired with the owner-facing delivery/notice sinks (`onDeadTurnNotice` /
+>   `onSizeAlert` / `onRateLimitBanner` / `onRecoveredReply` / `delivery_topic_id`). A
+>   prose compose rides it but is NOT an owner chat turn, so `buildGatewayAnthropicMessagesClient`
+>   sets a per-dispatch `spec.suppress_owner_delivery` (exactly as it sets
+>   `suppress_tool_bridge`) and `build-llm-call-substrate.ts` drops all five sink-forwards
+>   for it — a 429 in the finalize burst can't post a rate-limit banner for a turn the
+>   owner never sent, and a recovered dropped compose can't deliver raw README/plan text
+>   as an owner chat bubble. The live chat turn never sets it, so owner delivery is
+>   unchanged. ISOLATION INVARIANT: the live-agent substrate wires NO `projectIdResolver`
+>   (it would override the per-dispatch `metering_context.project_id` and re-collapse the
+>   isolation) — noted at the wiring site + guarded by precedence tests.
 > - **#377 (hardcoded lead).** The kickoff opening body dropped its hardcoded lead
 >   scaffolds ("I took a first pass at X and drafted a starting plan" / "I did a
 >   little digging on X…"). The LIVE opening MESSAGE is `composeKickoff`'s body: it

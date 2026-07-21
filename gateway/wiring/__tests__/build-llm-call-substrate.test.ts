@@ -1043,3 +1043,130 @@ test('collectTokensToString throws aborted-before-dispatch when signal pre-fired
   )
   expect(cancelCalled).toBe(true)
 })
+
+// ---------------------------------------------------------------------------
+// DELIVERY ISOLATION (ISSUES #378 round 3, Argus r2 MAJOR) — a prose-only
+// dispatch that sets `spec.suppress_owner_delivery` must NOT wire the owner-
+// facing delivery/notice sinks the `cc-agent-*` substrate was built with, so a
+// 429 in the finalize compose burst can't post a rate-limit banner for a turn
+// the owner never sent, and a recovered dropped compose can't deliver raw
+// README / plan text as an owner chat bubble.
+// ---------------------------------------------------------------------------
+
+function sinkWiredArgs(substrateFactory: (opts: ClaudeCodeSubstrateOptions) => Substrate) {
+  return {
+    pool: newCredentialPool({
+      strategy: 'fill_first',
+      credentials: [{ id: 'anthropic:ambient_keychain', kind: 'ambient' as const, secret: '' }],
+    }),
+    substrate_instance_id: 'cc-agent-acme',
+    cwd: workdir,
+    substrateFactory,
+    // The O6 owner-facing sinks — wired ONLY on the live-agent substrate.
+    delivery_topic_id: 'topic-owner',
+    onRecoveredReply: () => {},
+    onDeadTurnNotice: () => {},
+    onSizeAlert: () => {},
+    onRateLimitBanner: () => {},
+  }
+}
+
+test('suppress_owner_delivery drops ALL owner-facing sinks for the prose-only dispatch', async () => {
+  const { substrateFactory, seen } = captureFactory()
+  const sub = buildLlmCallSubstrate(sinkWiredArgs(substrateFactory))
+  expect(sub).not.toBeNull()
+  const handle = sub!.start({
+    prompt: 'compose a README',
+    tools: [],
+    model_preference: ['claude-opus-4-7'],
+    suppress_owner_delivery: true,
+  })
+  for await (const _ev of handle.events) {
+    /* drain */
+  }
+  expect(seen.length).toBe(1)
+  const opts = seen[0]!.opts
+  // NONE of the owner-facing delivery/notice sinks are forwarded to the child.
+  expect(opts.delivery_topic_id).toBeUndefined()
+  expect(opts.onRecoveredReply).toBeUndefined()
+  expect(opts.onDeadTurnNotice).toBeUndefined()
+  expect(opts.onSizeAlert).toBeUndefined()
+  expect(opts.onRateLimitBanner).toBeUndefined()
+})
+
+test('CONTROL: without suppress_owner_delivery the live-agent sinks ARE wired (owner chat turn)', async () => {
+  const { substrateFactory, seen } = captureFactory()
+  const sub = buildLlmCallSubstrate(sinkWiredArgs(substrateFactory))
+  const handle = sub!.start({
+    prompt: 'live owner chat turn',
+    tools: [],
+    model_preference: ['claude-opus-4-7'],
+    // no suppress_owner_delivery — this is a real owner chat dispatch.
+  })
+  for await (const _ev of handle.events) {
+    /* drain */
+  }
+  const opts = seen[0]!.opts
+  // The sinks flow through for a genuine owner chat turn.
+  expect(opts.delivery_topic_id).toBe('topic-owner')
+  expect(opts.onRecoveredReply).toBeDefined()
+  expect(opts.onDeadTurnNotice).toBeDefined()
+  expect(opts.onSizeAlert).toBeDefined()
+  expect(opts.onRateLimitBanner).toBeDefined()
+})
+
+// ---------------------------------------------------------------------------
+// ISOLATION INVARIANT (ISSUES #378, Argus r2 finding #5) — the per-project
+// openings isolation rests on the live-agent substrate wiring NO
+// `projectIdResolver`, so the PER-DISPATCH `metering_context.project_id`
+// governs the warm-pool key. This guards the precedence at
+// build-llm-call-substrate.ts:696 so a future resolver wiring that would
+// re-collapse isolation is caught here.
+// ---------------------------------------------------------------------------
+
+test('no projectIdResolver → per-dispatch metering_context.project_id governs the pool key (openings isolation)', async () => {
+  const { substrateFactory, seen } = captureFactory()
+  const sub = buildLlmCallSubstrate({
+    pool: newCredentialPool({
+      strategy: 'fill_first',
+      credentials: [{ id: 'anthropic:ambient_keychain', kind: 'ambient', secret: '' }],
+    }),
+    substrate_instance_id: 'cc-agent-acme',
+    cwd: workdir,
+    substrateFactory,
+    // NO projectIdResolver — exactly how open/wiring/substrates.ts wires the
+    // live-agent substrate the openings composers ride.
+  })
+  // Two distinct projects, each stamping its OWN metering_context.project_id.
+  for (const pid of ['amascence', 'dtc-ops']) {
+    const h = sub!.start({ prompt: pid, tools: [], model_preference: ['m'], metering_context: { project_id: pid } })
+    for await (const _ev of h.events) {
+      /* drain so the factory start() runs */
+    }
+  }
+  expect(seen.map((s) => s.opts.project_id)).toEqual(['amascence', 'dtc-ops'])
+})
+
+test('a wired projectIdResolver OVERRIDES per-dispatch project_id (why the live-agent substrate must wire none)', async () => {
+  const { substrateFactory, seen } = captureFactory()
+  const sub = buildLlmCallSubstrate({
+    pool: newCredentialPool({
+      strategy: 'fill_first',
+      credentials: [{ id: 'anthropic:ambient_keychain', kind: 'ambient', secret: '' }],
+    }),
+    substrate_instance_id: 'cc-agent-acme',
+    cwd: workdir,
+    substrateFactory,
+    // A resolver takes PRECEDENCE — this is the regression the invariant forbids:
+    // both project composes would collapse onto ONE key = the #378 bleed.
+    projectIdResolver: () => 'live-active-project',
+  })
+  for (const pid of ['amascence', 'dtc-ops']) {
+    const h = sub!.start({ prompt: pid, tools: [], model_preference: ['m'], metering_context: { project_id: pid } })
+    for await (const _ev of h.events) {
+      /* drain so the factory start() runs */
+    }
+  }
+  // Both collapse to the resolver's value — proving why substrates.ts wires none.
+  expect(seen.map((s) => s.opts.project_id)).toEqual(['live-active-project', 'live-active-project'])
+})

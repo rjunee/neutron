@@ -10,7 +10,7 @@ Running log of what shipped, newest first. One entry per merged change.
 > `docs/research/AS-BUILT-docs-archive-2026-07.md`. This file is the ONE live
 > changelog going forward.
 
-## 2026-07-20 — Per-project session openings (ISSUES #378 cross-project bleed + #377 hardcoded lead) [round 2: Argus blockers closed]
+## 2026-07-20 — Per-project session openings (ISSUES #378 cross-project bleed + #377 hardcoded lead) [round 3: Argus blockers closed]
 
 Fixed the live cross-project content bleed and the hardcoded opening lead the owner
 hit while dogfooding M1. Each project's opening MESSAGE, kickoff 'starting plan'
@@ -51,9 +51,61 @@ prose-synthesis compose runs with the native-MCP tool bridge SUPPRESSED.
   `buildGatewayAnthropicMessagesClient` sets on EVERY dispatch (it always sends
   `tools: []`; synthesis never drives tools). `spawn.ts` gates BOTH the bridge
   attachment and the reuse-guard's `requestedToolBridge` on it, so the per-project
-  composes keep the SESSION KEY (isolation + grounding + warmth) WITHOUT the live
+  composes keep the SESSION KEY (isolation + grounding) WITHOUT the live
   `mcp__neutron` tool surface. The live-chat turn dispatches raw specs (not via this
   client) and never sets it, so its tool bridge is unchanged.
+
+  Precise warmth semantics (round-3 doc correction): the compose runs bridge-OFF, so
+  the owner's FIRST live-chat turn on that project (bridge-ON) hits the reuse-guard
+  bridge mismatch and evicts + respawns the REPL with `--resume`. The composed
+  TRANSCRIPT/grounding survives (the resume carries it); the WARM PROCESS does not —
+  the first chat turn pays a cold respawn. So the delivered benefit is grounding
+  continuity via the shared session id, not a saved process spawn.
+
+**Round 3 (Argus round-2 blockers/majors closed):**
+
+- **BLOCKER — turn-safe eviction (`runtime/adapters/claude-code/persistent/spawn.ts`).**
+  The bridge-mismatch eviction runs in `getOrSpawnSession` BEFORE the caller's
+  `acquireTurn()`, so on the shared per-project key a prose compose (bridge-OFF)
+  racing a live chat turn (bridge-ON) — or vice-versa — would `terminateChild` the
+  active child MID-TURN, killing a live reply. Fix: on the freshness/bridge/surface
+  mismatch (non-poison) path, drain the session's turn slot (`await
+  session.acquireTurn()`) BEFORE terminating. It resolves immediately when the
+  session is idle and serializes behind any in-flight turn (every settle path
+  releases the slot), so the warm child always finishes its current turn cleanly
+  before respawn. The POISON path is excluded — its abandoned/runaway turn is
+  force-terminated as before. Test:
+  `runtime/adapters/claude-code/persistent/__tests__/eviction-turn-safety.test.ts`
+  holds a real turn in-flight and proves the mismatch evict waits for it (the
+  in-flight turn completes cleanly, the child is not reaped until it drains).
+
+- **MAJOR — owner-delivery suppression (`AgentSpec.suppress_owner_delivery`).** The
+  `cc-agent-*` substrate is the ONE wired with the owner-facing delivery/notice sinks
+  (`onDeadTurnNotice` / `onSizeAlert` / `onRateLimitBanner` / `onRecoveredReply` /
+  `delivery_topic_id`, `substrates.ts` O6). A prose compose rides that substrate but
+  is NOT an owner chat turn, so a 429 in the finalize concurrency-3 burst could post
+  a rate-limit banner for a turn the owner never sent, and a recovered dropped
+  compose could deliver raw README/plan text as an owner chat bubble. Fix: the
+  prose-only `buildGatewayAnthropicMessagesClient` sets `suppress_owner_delivery` on
+  every dispatch (exactly as it sets `suppress_tool_bridge`);
+  `build-llm-call-substrate.ts` gates all five sink-forwards on it. Router/suggester
+  callers run on `cc-llm-*` (no sinks) → no-op; the live chat turn never sets it →
+  owner delivery unchanged.
+
+- **MAJOR — delayed-injection disposition (documented, `open/composer.ts`).** The
+  composed transcript persists and the first live-chat turn resumes it into a
+  bridge-ON REPL (the intended grounding). Addressed explicitly: in this single-owner
+  harness the material is the OWNER'S OWN (onboarding-derived docs + their own
+  imported history, not third-party), and the resume lands in the OWNER'S supervised
+  interactive chat — so the only tool-reachable content is the owner's own docs in
+  the owner's own session. Unattended synthesis turns stay `suppress_tool_bridge`.
+  Genuinely third-party project material would need pre-resume quarantine (ISSUES
+  note).
+
+- **Isolation invariant (finding #5).** `substrates.ts` now carries an explicit note
+  that the live-agent substrate must wire NO `projectIdResolver` (a resolver takes
+  precedence over the per-dispatch `metering_context.project_id` and would re-collapse
+  isolation), guarded by two precedence tests in `build-llm-call-substrate.test.ts`.
 
 - **#377 fix** — removed the hardcoded lead scaffolds in `onboarding/openings/
   kickoff.ts` ("I took a first pass at X and drafted a starting plan" / "I did a
@@ -70,22 +122,32 @@ prose-synthesis compose runs with the native-MCP tool bridge SUPPRESSED.
   a load-bearing CONTROL (shared key bleeds), a concurrent 3-project ISOLATION test
   (fails on pre-fix code), a kickoff white-box (per-dispatch `project_id` key), a
   round-2 doc-composer BLOCKER test (README composer isolates per slug; fails when
-  the `project_id` thread is stripped), a round-2 MAJOR test (every prose dispatch
-  sets `suppress_tool_bridge` + `tools: []`), and #377. Plus
+  the `project_id` thread is stripped), a round-2/3 MAJOR test (every prose dispatch
+  sets `suppress_tool_bridge` + `suppress_owner_delivery` + `tools: []`), and #377.
+  Round 3 adds `eviction-turn-safety.test.ts` (the mismatch evict waits for an
+  in-flight turn), two `suppress_owner_delivery` sink-suppression tests + two
+  isolation-invariant precedence tests in `build-llm-call-substrate.test.ts`. Plus
   `runtime/adapters/claude-code/persistent/__tests__/tool-bridge.test.ts`: a spawn
   test proving `suppress_tool_bridge` denies the bridge on an `enableToolBridge`
-  substrate. Suites: `onboarding/` 940 pass, `gateway/wiring/` 599 pass,
-  `runtime/adapters/claude-code/` 602 pass.
+  substrate. Suites green (round-3, measured): `onboarding/` 940 pass;
+  `gateway/wiring/` 603 pass + 2 skip; `runtime/adapters/claude-code/` 601 pass + 1 skip.
 
-Files: `open/composer.ts` (perProjectOpeningsClient feeds kickoff + doc composers),
-`gateway/wiring/build-project-doc-composer.ts` (slug → project_id),
-`gateway/wiring/build-anthropic-messages-client.ts` (per-dispatch project_id +
-`suppress_tool_bridge`), `runtime/substrate.ts` (`AgentSpec.suppress_tool_bridge`),
-`runtime/adapters/claude-code/persistent/spawn.ts` (bridge + reuse-guard gates),
+Files: `open/composer.ts` (perProjectOpeningsClient feeds kickoff + doc composers +
+delayed-injection disposition), `gateway/wiring/build-project-doc-composer.ts` (slug
+→ project_id), `gateway/wiring/build-anthropic-messages-client.ts` (per-dispatch
+project_id + `suppress_tool_bridge` + `suppress_owner_delivery`), `runtime/substrate.ts`
+(`AgentSpec.suppress_tool_bridge` + `AgentSpec.suppress_owner_delivery`),
+`gateway/wiring/build-llm-call-substrate.ts` (round-3: gate the owner-delivery sinks
+on `suppress_owner_delivery`), `runtime/adapters/claude-code/persistent/spawn.ts`
+(bridge + reuse-guard gates + round-3 turn-safe eviction drain),
+`open/wiring/substrates.ts` (round-3: isolation invariant note — no projectIdResolver),
 `onboarding/interview/anthropic-client.ts` (interface),
 `gateway/wiring/build-project-kickoff-composer.ts`, `onboarding/openings/kickoff.ts`
 (project_id thread + lead removal + grammatical fallback),
-`onboarding/openings/finalize.ts` (comment).
+`onboarding/openings/finalize.ts` (comment). Round-3 tests:
+`runtime/adapters/claude-code/persistent/__tests__/eviction-turn-safety.test.ts`,
+`gateway/wiring/__tests__/build-llm-call-substrate.test.ts` (sink suppression +
+isolation-invariant precedence).
 
 ## 2026-07-20 — M2-3: memory-consolidation correctness — 3 dedup/supersede corruption blockers
 

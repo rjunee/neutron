@@ -808,6 +808,27 @@ export async function getOrSpawnSession(
       // the rarely-firing tool-surface mismatch, so honoring the await here matters.
       pool.delete(sessionKey)
       if (childByKey.get(sessionKey) === session.child) childByKey.delete(sessionKey)
+      // TURN-SAFETY (Argus r2 BLOCKER — bridge/freshness mismatch mid-turn kill):
+      // this eviction runs in `getOrSpawnSession`, BEFORE the caller's
+      // `acquireTurn()`, so terminating the child here can kill a turn that ANOTHER
+      // driver already has IN FLIGHT on the same key. That is a live risk on the
+      // shared per-project pool key the openings fix introduces: a prose-only
+      // compose dispatches `suppress_tool_bridge` (bridge-OFF) while live chat runs
+      // bridge-ON on the SAME `cc-agent-*` project key, so `freshBridge` is false and
+      // a compose racing a live chat turn (or vice-versa) would `terminateChild` the
+      // active child MID-TURN. Serialize the terminate behind the session's turn slot:
+      // `acquireTurn()` chains after any in-flight turn (FIFO `turnTail`) and resolves
+      // IMMEDIATELY when the session is idle (`turnTail` starts/returns to a resolved
+      // promise), so the warm child always finishes its current turn cleanly before we
+      // respawn. Every turn-settle path (completion, mid-turn error, inject failure,
+      // cancel, timeout) releases the slot, so this cannot latch. The POISON path is
+      // EXCLUDED — its prior turn was abandoned (caller gave up; the child is a
+      // runaway that must be reaped now, not drained), so it force-terminates exactly
+      // as before, and must never wait on the runaway it can't cleanly settle.
+      if (!session.poisoned) {
+        const releaseEvictDrain = await session.acquireTurn()
+        releaseEvictDrain()
+      }
       await terminateChild(session.child)
     } else {
       pool.delete(sessionKey)

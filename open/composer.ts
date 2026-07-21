@@ -1266,6 +1266,23 @@ export function buildOpenGraphComposer(
     // SESSION KEY (isolation + grounding + warmth) WITHOUT the live tool surface.
     // An ephemeral throwaway was explicitly REJECTED (it would neither pre-warm nor
     // ground the live session). Null (LLM-less) ⇒ the composers stay null as before.
+    //
+    // DELAYED-INJECTION residual (Argus r2 MAJOR, addressed explicitly): the
+    // composed transcript PERSISTS in the per-project session and the owner's first
+    // live-chat turn `--resume`s it into a bridge-ON REPL — that grounding-survives
+    // property is the PR's whole intent, so the synthesized doc content does reach a
+    // later tool-enabled turn. Two facts bound the exposure to acceptable in this
+    // single-owner harness: (1) the material is the OWNER'S OWN — README / STATUS /
+    // kickoff synthesized from the owner's onboarding answers + their own imported
+    // history, not third-party content, so an "injection" here is self-directed;
+    // and (2) the resume lands in the OWNER'S interactive chat — the human-in-the-
+    // loop the tool bridge is designed around — never an unattended synthesis turn
+    // (those stay `suppress_tool_bridge`). So the only new tool-reachable content is
+    // the owner's own project docs, surfaced to the owner's own supervised session.
+    // Neutron is single-owner (no multi-tenant in Open), so there is no cross-tenant
+    // author whose text could ride this path. If Open ever ingests genuinely
+    // third-party project material, that content must be quarantined BEFORE it lands
+    // in a per-project session a bridge-ON turn resumes (tracked: ISSUES #378 note).
     const perProjectOpeningsClient =
       liveAgentSubstrate !== null
         ? buildGatewayAnthropicMessagesClient({ substrate: liveAgentSubstrate })

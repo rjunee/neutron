@@ -242,6 +242,19 @@ export function wireSubstrates(ctx: OpenWiringContext): WiredSubstrates {
           // `tools-bridge.ts`). The untrusted import (`cc-import-*`) and
           // disposable Trident (`cc-trident-*`) substrates deliberately omit it.
           enableToolBridge: true,
+          // ISOLATION INVARIANT (ISSUES #378, Argus r2): DO NOT wire a
+          // `projectIdResolver` here. The per-project opening / kickoff / doc
+          // composers ride THIS substrate and isolate each project's transcript
+          // by stamping `spec.metering_context.project_id` PER DISPATCH, which
+          // `build-llm-call-substrate.ts` folds into the warm-pool key ONLY when
+          // no resolver is present (`input.projectIdResolver?.() ??
+          // spec.metering_context?.project_id`, :696). A resolver would take
+          // PRECEDENCE over the per-dispatch project_id and re-collapse every
+          // project's compose onto one shared REPL — the exact #378 cross-project
+          // bleed. The LIVE chat turn does not need one either: it dispatches raw
+          // specs whose `metering_context.project_id` is the active project, and
+          // the pool key already keys on that. Wiring a resolver here is a
+          // regression; guarded by per-project-session-openings.test.ts.
           // O6 — the notice-family sinks + recovered-reply sink are wired ONLY
           // here (the owner's conversational REPL). So a rising-edge dead-turn /
           // size-alert / rate-limit-banner state surfaces as an owner chat bubble

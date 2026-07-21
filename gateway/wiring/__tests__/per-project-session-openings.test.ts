@@ -30,9 +30,10 @@
  *      (undefined) key.
  *   4. BLOCKER (Argus r1) — the project-DOC composer that FEEDS the openings
  *      isolates per project too (slug → metering_context.project_id).
- *   4b. MAJOR (Argus r1) — every prose-synthesis dispatch sets
- *      `spec.suppress_tool_bridge` + `tools: []`, so a document-derived compose
- *      over the tool-bridged `cc-agent-*` substrate cannot reach native tools.
+ *   4b. MAJOR (Argus r1/r2) — every prose-synthesis dispatch sets
+ *      `spec.suppress_tool_bridge` + `spec.suppress_owner_delivery` + `tools: []`,
+ *      so a document-derived compose over the tool-bridged `cc-agent-*` substrate
+ *      cannot reach native tools AND cannot post owner-facing notices/banners.
  *   5. #377 — the opening bodies are FULLY LLM-composed + unique: no retired
  *      hardcoded lead ("I took a first pass…", "I did a little digging…"), and two
  *      projects' bodies differ (each leads with its own LLM gist).
@@ -334,8 +335,12 @@ test('MAJOR: prose-synthesis composes suppress the native-MCP tool bridge (spec.
   expect(fake.seen).toHaveLength(2)
   // The bridge is suppressed on EVERY prose dispatch — AND the spec still carries
   // no built-in tool surface, so neither vector (built-ins nor bridge) is open.
+  // The prose dispatch ALSO sets `suppress_owner_delivery` (Argus r2 MAJOR): riding
+  // the owner's `cc-agent-*` substrate for isolation must NOT let a compose post
+  // rate-limit banners / dead-turn notices / recovered raw prose to the owner chat.
   for (const spec of fake.seen) {
     expect(spec.suppress_tool_bridge).toBe(true)
+    expect(spec.suppress_owner_delivery).toBe(true)
     expect(spec.tools).toHaveLength(0)
   }
 })

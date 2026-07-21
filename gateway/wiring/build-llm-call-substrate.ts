@@ -711,15 +711,33 @@ export function buildLlmCallSubstrate(
           ),
         )
         if (input.project_slug !== undefined) opts.instance_slug = input.project_slug
-        if (input.delivery_topic_id !== undefined) opts.delivery_topic_id = input.delivery_topic_id
-        if (input.onRecoveredReply !== undefined) opts.onRecoveredReply = input.onRecoveredReply
+        // DELIVERY ISOLATION (ISSUES #378 round 3, Argus r2 MAJOR) — the owner-facing
+        // delivery/notice sinks below (`delivery_topic_id` + the recovered-reply +
+        // notice-family sinks) are wired ONLY on the owner's warm `cc-agent-*`
+        // conversational substrate (`substrates.ts` O6). A prose-only synthesis
+        // dispatch (per-project opening / kickoff / doc composer) rides that SAME
+        // substrate for isolation + grounding but is NOT an owner chat turn, so it
+        // sets `spec.suppress_owner_delivery` to keep these sinks OFF: a 429 in the
+        // finalize concurrency-3 compose burst must not post a rate-limit banner for
+        // a turn the owner never sent, and a recovered dropped compose must not
+        // deliver raw README / plan text as an owner chat bubble. The live-chat turn
+        // never sets the flag, so its owner delivery is unchanged.
+        const suppressOwnerDelivery = spec.suppress_owner_delivery === true
+        if (!suppressOwnerDelivery && input.delivery_topic_id !== undefined)
+          opts.delivery_topic_id = input.delivery_topic_id
+        if (!suppressOwnerDelivery && input.onRecoveredReply !== undefined)
+          opts.onRecoveredReply = input.onRecoveredReply
         // O6 — forward the notice-family sinks so the substrate delivers a
         // rising-edge dead-turn / size-alert / rate-limit-banner notice to the
         // gateway's chat surface instead of only stderr. Unset on every non-
-        // conversational substrate (they keep the stderr-only default).
-        if (input.onDeadTurnNotice !== undefined) opts.onDeadTurnNotice = input.onDeadTurnNotice
-        if (input.onSizeAlert !== undefined) opts.onSizeAlert = input.onSizeAlert
-        if (input.onRateLimitBanner !== undefined) opts.onRateLimitBanner = input.onRateLimitBanner
+        // conversational substrate (they keep the stderr-only default), and
+        // suppressed per-dispatch for prose-only composes (above).
+        if (!suppressOwnerDelivery && input.onDeadTurnNotice !== undefined)
+          opts.onDeadTurnNotice = input.onDeadTurnNotice
+        if (!suppressOwnerDelivery && input.onSizeAlert !== undefined)
+          opts.onSizeAlert = input.onSizeAlert
+        if (!suppressOwnerDelivery && input.onRateLimitBanner !== undefined)
+          opts.onRateLimitBanner = input.onRateLimitBanner
         // Argus r4 BLOCKER — stateless one-shot disposable-REPL mode: a session-
         // less dispatch on this substrate gets a fresh REPL terminated after the
         // turn, so distinct one-shot purposes never share a `--resume` transcript.

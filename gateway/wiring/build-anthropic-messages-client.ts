@@ -103,6 +103,16 @@ export function buildGatewayAnthropicMessagesClient(
           // per-project SESSION KEY (isolation + grounding) is untouched. On
           // substrates that never enable the bridge this is a harmless no-op.
           suppress_tool_bridge: true,
+          // DELIVERY ISOLATION (ISSUES #378 round 3) — this prose-only client is
+          // never an owner CHAT turn, yet the per-project opening / kickoff / doc
+          // composers ride the owner's warm `cc-agent-*` substrate (for session
+          // isolation + grounding), which is the ONE substrate wired with the
+          // owner-facing delivery/notice sinks (`substrates.ts` O6). Suppress them
+          // per-dispatch so a 429 in the finalize concurrency-3 compose burst can't
+          // post a rate-limit banner for a turn the owner never sent, and a recovered
+          // dropped compose can't deliver raw README / plan text as an owner chat
+          // bubble. On the `cc-llm-*` router/suggester path (no sinks) it is a no-op.
+          suppress_owner_delivery: true,
           // Caller-supplied `args.model` wins; factory default is the
           // fallback for callers that omit the field. Pinned by
           // `build-anthropic-messages-client.test.ts` (Argus r1 BLOCKING #1).
