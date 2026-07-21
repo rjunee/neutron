@@ -2,6 +2,83 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+## 2026-07-21 — Executor-mode reminders task 4: executor dispatch branch in the TICK + ritual executor + cc-ritual substrate + ritual lane + code_ritual_runs writer
+
+The live wiring that turns a `ritual_id` reminder row into a scheduled, scoped
+sub-agent REPL. The tick's #319 claim is reused verbatim for ritual rows, but
+they NEVER reach the nudge dispatcher / `on_fired` and NEVER revert their claim —
+every attempt is recorded durably in `code_ritual_runs` instead. Spec of record:
+`docs/plans/executor-mode-reminders-2026-07-20.md`. NO feature flags. Generic
+read-only surface only for now (zero defs registered until task 7).
+
+- **Ritual concurrency lane** (`runtime/subagent/registry.ts` `MAX_CONCURRENT_RITUALS=2`;
+  `runtime/subagent/spawn.ts` cap check): a `ritual` spawn counts ONLY live ritual
+  rows against the 2-cap; every other kind counts ONLY live non-ritual rows against
+  `MAX_CONCURRENT_SUBAGENTS=8`. Bidirectional isolation — a ritual pileup can't
+  starve interactive `/dispatch` + Trident, and 8 live builds never block a ritual.
+- **Tools threading** (`agent-dispatch/service.ts` `DispatchTurnInput.tools?`;
+  `agent-dispatch/substrate-turn.ts`): the runner maps `input.tools` onto stub
+  `AgentSpec` ToolDefs (the `trident/conflict-resolver.ts:80-87` precedent) so a
+  ritual's `tool_surface` reaches the spawned REPL's `--tools` argv. Omitted →
+  the historical toolless `tools:[]` (dispatch family unchanged).
+- **`PROFILE_RITUAL`** (`gateway/wiring/substrate-profiles.ts`) — the scheduled
+  ritual REPL trust class; byte-identical `{skip_permissions:true}` today, kept
+  DISTINCT so the T5 write-containment spike (task 6) tightens THIS grant first.
+  Frozen in the byte-identity equivalence test.
+- **`append_system_prompt_file` threading** (`gateway/wiring/build-llm-call-substrate.ts`
+  `BuildLlmCallSubstrateInput.append_system_prompt_file?` → `ClaudeCodeSubstrateOptions.
+  appendSystemPromptFile`, emitted `build-repl-argv.ts:109`). Absent → the
+  substrate's `repl-agent-base.md` default (chat persona) — unchanged for every caller.
+- **`reminders/ritual-agent-base.md`** (NEW, shipped in the package) — the
+  UNATTENDED-executor system prompt (no user present, never ask, use only granted
+  tools, one final reply). `RITUAL_AGENT_BASE_PROMPT` absolute path exported from
+  `reminders/prompt-path.ts` (module-dir pattern).
+- **`makeRitualSubstrate`** (`open/wiring/substrates.ts`) — a FRESH ephemeral
+  `cc-ritual-*` REPL per fire, `PROFILE_RITUAL`, `append_system_prompt_file:
+  RITUAL_AGENT_BASE_PROMPT`, NO `enableToolBridge`, NO owner-chat sinks; throws on
+  empty pool. Single-arg `(cwd)=>Substrate` so it drops into `buildCancellableDispatchTurn`.
+- **`reminders/ritual-runs.ts`** (NEW) — the SOLE `code_ritual_runs` writer
+  (`migrations/table-ownership.json` entry added). `createRitualRunStore(db)`:
+  `insertSkipped` (started=ended=now, skip_reason) / `insertRunning`
+  (subagent_run_id + content_hash) / `insertFailed` (spawn-refusal; no subagent
+  row) / `markTerminal` (finished|failed|timed_out|crashed + ended_at + output
+  truncated to 4000 chars, guarded `WHERE status='running'`). Async `db.run` only.
+- **`reminders/ritual-executor.ts`** (NEW) — `createRitualExecutor(deps).fire(reminder)`:
+  NEVER throws, NEVER awaits the turn. Validates via `validateRitualFire` + the
+  content-hash checker built from the row's LIVE cadence (skip → durable 'skipped'
+  row, spawns nothing); `spawnSubagent` kind `'ritual'` on the lane (spawn_key
+  `ritual:<id>`, on_duplicate 'refuse'; refusal → 'failed' row, no registry leak);
+  'running' row + best-effort registry running-flip; launches ONE substrate turn
+  detached via `fireAndForget`. Settlement maps completed→finished, timed_out→
+  timed_out, failed/cancelled→failed, rejection→crashed on the run row + drives the
+  registry record terminal. STRUCTURAL `RitualTurn` type (no agent-dispatch import)
+  so the composer passes the SAME `buildCancellableDispatchTurn` closure. NO
+  delivery/notices (task 5).
+- **Tick executor branch** (`reminders/tick.ts`) — `ReminderTickOptions.ritual_executor?`;
+  after the #319 claim a `ritual_id` row routes to `ritual_executor.fire` via
+  `fireAndForget('ritual-fire', …)`, SKIPS the dispatcher + `on_fired`, `fired++`,
+  and is NEVER reverted; `runOnce` resolves while the turn is pending. No executor
+  wired → the (already-claimed) row is consumed + logged, never a nudge fallback.
+  Nudge path byte-identical.
+- **Composition wiring** — `CompositionInput.ritual_executor_factory?` (`gateway/
+  composition/input/notifier-input.ts`); `remindersModule deps:['approval']` builds
+  the executor with the graph's `ApprovalManager` (`gateway/composition/build-core-modules.ts`);
+  the Open composer builds the factory (llmPool-gated) reusing the hoisted
+  `subagentRegistry` + `makeRitualSubstrate` + `getBestModel`, registry rooted
+  `<owner_home>/rituals` (ZERO defs until task 7), scope→owner_home v1 (`open/composer.ts`).
+- **Tests** — `runtime/subagent/spawn-lane.test.ts` (lane isolation both directions);
+  `agent-dispatch/substrate-turn.test.ts` (tools→spec.tools names / omitted→[]);
+  `reminders/tick.test.ts` (ritual→executor not dispatcher/on_fired; nudge contract
+  untouched; recurring ritual advances with NO revert on fire() reject; unwired→
+  consumed+logged; fire-and-forget proof); `reminders/ritual-executor.test.ts`
+  (skip verdicts durable + no spawn; approved → registry 'ritual' + 'running' row
+  content_hash + turn input; each terminal mapping; crash; spawn-cap 'failed' no
+  leak; fire() never rejects); `gateway/wiring/__tests__/substrate-profiles.test.ts`
+  (PROFILE_RITUAL byte-identity + append_system_prompt_file threading);
+  `gateway/composition/build-core-modules-ritual-executor.test.ts` (factory invoked
+  with the graph ApprovalManager + wired as the tick branch, mutation-kill).
+  `bash scripts/ci/depcruise.sh`: NO new cross-band edge.
+
 ## 2026-07-21 — Executor-mode reminders task 3: content-hash ritual approval gate + real approval notifier
 
 The approval infrastructure that gates every ritual fire, plus the composer's
