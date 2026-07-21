@@ -2,6 +2,70 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+## 2026-07-21 — Executor-mode reminders task 3: content-hash ritual approval gate + real approval notifier
+
+The approval infrastructure that gates every ritual fire, plus the composer's
+FIRST real `approval_notifier` (was a no-op stub). No new table, no migration —
+durable grants are ordinary `tool_approvals` rows (migration-0004 DDL,
+`migrations/0004_gateway_core.sql:66-79`). Spec of record:
+`docs/plans/executor-mode-reminders-2026-07-20.md`.
+
+- **`ApprovalManager.findApproved(project_slug, tool_name)`** (`tools/approval.ts`)
+  — a generic synchronous query returning every `status='approved'` row for the
+  pair, `ORDER BY decided_at ASC` (mirrors `get`/`listPending`). This is the ONLY
+  ritual-agnostic addition to the platform layer; ALL ritual logic lives in
+  `reminders/` (a legal services→platform edge — `.dependency-cruiser.cjs`
+  `platform-stays-low` forbids the reverse).
+- **`reminders/ritual-approval.ts`** (new; `reminders/package.json` gains
+  `@neutronai/tools`):
+  - `computeRitualContentHash` — SHA-256 hex over a canonical JSON ARRAY of
+    (prompt bytes ‖ SORTED tool surface ‖ scope ‖ cadence ‖ model tier ‖
+    timeout). JSON-array canonicalization is delimiter-injection-proof; sorting
+    the surface makes grant order irrelevant.
+  - `ritualCadenceString` — `spec:<cron>` | `legacy:<coarse>` | `once` from the
+    row's mutually-exclusive `recurrence_spec`/`recurrence` (`reminders/store.ts:41-49`).
+  - `ritualApprovalToolName`/`ritualEgressApprovalToolName` — the namespaced
+    `tool_name` (`ritual:<id>` / `ritual-egress:<id>`); `:` is forbidden in both
+    the ritual id charset and tool tokens, so these never collide with a real tool grant.
+  - `requestRitualApproval` — submits a `prompt-user` request (the FIRST real
+    production caller of `ApprovalManager.requestApproval`) carrying the content
+    hash in `args_json`; an `egress:'web'` def mints a SECOND, separately-approved
+    `ritual-egress:<id>` request bound to the SAME hash (approving content never
+    implicitly approves egress). Returns both decision promises without awaiting.
+  - `createRitualApprovalCheck({manager, project_slug, cadence})` — implements
+    task 2's `RitualApprovalCheck` seam. RECOMPUTES the hash from the LIVE prompt
+    bytes on EVERY `isApproved` call (ported Vajra prompts are mutable files);
+    requires a content grant, and for web defs an egress grant, whose
+    `args_json.content_hash` matches. A malformed `args_json` row is skipped
+    (never a match, never a throw); DB/manager errors PROPAGATE so
+    `validateRitualFire` fail-closes to 'unapproved'. **Design consequence:**
+    a cadence change or a `reminders_update` (atomic cancel+create → new id,
+    `cores/free/reminders/src/mcp-tools-extra.ts:64`) DROPS approval.
+- **`open/wiring/approval-notifier.ts`** (new) — `buildAppWsApprovalNotifier`
+  replaces the composer's `approval_notifier: { notify: async () => undefined }`
+  no-op (`open/composer.ts`, base composition). Broadcasts a PLAIN-TEXT
+  `agent_message` (`Approval requested [<id>]: <tool_name>[ — <description>]`) to
+  every live app-ws topic per the `watchdogNotifier` precedent (composer
+  ~3338-3364); fail-soft throughout (never throws into `ApprovalManager`; one dead
+  socket never stops the rest). NEVER includes prompt bytes / tool surface / args
+  beyond `description`, never Markdown — the rich itemized rendering with the
+  affirmative-act binding is task 8. `appWsRegistry` (composer :2051) satisfies
+  the structural `ApprovalNotifierRegistry` by construction.
+- **NO auto-approval anywhere** — every request is `policy:'prompt-user'`; a
+  bundled ritual stays unapproved (→ fire-time SKIP) until the owner's explicit
+  `respondApproval`. No-self-approval enforcement (`resolution_speaker_user_id`)
+  arrives with task 8's ButtonStore surface.
+- **Tests** — `reminders/ritual-approval.test.ts` (11 cases: hash determinism +
+  per-field sensitivity + order-insensitive surface; cadence-string; single- and
+  dual-grant request with durable-record assertions; end-to-end seam bind over the
+  real registry with an on-disk prompt; RE-VERIFY-EVERY-FIRE prompt-tamper drop;
+  cadence-change drop; egress-separately-approved; denied/pending/malformed
+  non-match; throwing-store fail-closed through `validateRitualFire`; no-auto-approve
+  pending-decision). `tools/approval.test.ts` +1 (`findApproved` slug/tool/status
+  filtering). `open/__tests__/approval-notifier.test.ts` (3: per-topic broadcast +
+  body content, malformed-args fallback, dead-socket resilience). All green;
+  `reminders/` + `tools/` suites 275 pass; dep-cruiser + tsc (reminders/tools/open) clean.
+
 ## 2026-07-20 — Executor-mode reminders task 2: ritual schema + registry module (migration 0106)
 
 The persistent + pure-logic foundation of the ritual layer (executor-mode

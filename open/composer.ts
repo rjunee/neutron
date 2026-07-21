@@ -121,6 +121,7 @@ import { wireMemory } from './wiring/memory.ts'
 import { wireLandingStack } from './wiring/landing.ts'
 import { wireUploads } from './wiring/uploads.ts'
 import { buildOpenOwnerGate } from './wiring/owner-gate.ts'
+import { buildAppWsApprovalNotifier } from './wiring/approval-notifier.ts'
 import { wireAppWs, type OnboardingMsgEmit } from './wiring/app-ws.ts'
 import { MIN_COOKIE_SECRET_LEN } from './session-cookie-secret.ts'
 import { selectAppWsToken, isValidThreadedBearer } from './owner-bearer.ts'
@@ -3537,7 +3538,13 @@ export function buildOpenGraphComposer(
       // This is what activates the real delivery seam on Open (the bare router
       // the module would otherwise construct has no adapter and throws on send).
       channel_router: channelRouter,
-      approval_notifier: { notify: async () => undefined },
+      // Task 3 — the FIRST real approval surface, replacing the no-op stub.
+      // Consumed by `ApprovalManager` at `build-core-modules.ts:275-278`; the
+      // ritual approval path (`reminders/ritual-approval.ts`) is its first
+      // production caller. App-ws broadcast per the `watchdogNotifier`
+      // precedent above (`appWsRegistry` :2051 satisfies the structural
+      // `ApprovalNotifierRegistry`); plain-text, fail-soft, never prompt bytes.
+      approval_notifier: buildAppWsApprovalNotifier({ registry: appWsRegistry }),
       // F4 — real supervision-watchdog notifier (app-ws + O4 system_events),
       // replacing the no-op. Fully guarded; never throws into the tick.
       watchdog_notifier: watchdogNotifier,

@@ -498,6 +498,7 @@
         "@neutronai/migrations": "workspace:*",
         "@neutronai/persistence": "workspace:*",
         "@neutronai/runtime": "workspace:*",
+        "@neutronai/tools": "workspace:*",
       },
     },
     "runtime": {

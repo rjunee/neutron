@@ -63,6 +63,21 @@ export type {
   RitualFireSkipReason,
 } from './rituals.ts'
 
+// Content-hash-bound ritual approval gate (migration-0004 tool_approvals rows;
+// plan task 3). The request path + the RitualApprovalCheck implementation.
+export {
+  computeRitualContentHash,
+  ritualCadenceString,
+  ritualApprovalToolName,
+  ritualEgressApprovalToolName,
+  requestRitualApproval,
+  createRitualApprovalCheck,
+} from './ritual-approval.ts'
+export type {
+  RitualContentHashInput,
+  RitualApprovalRequestResult,
+} from './ritual-approval.ts'
+
 export { buildStatusMdContextSource } from './context.ts'
 export {
   classifyReminderMessage,

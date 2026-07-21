@@ -144,4 +144,39 @@ describe('ApprovalManager', () => {
     await mgr.respondApproval('id-x', 'approved', 'user')
     expect(await promise).toBe('approved')
   })
+
+  test('findApproved returns only approved rows matching (slug, tool_name)', async () => {
+    const mgr = new ApprovalManager(db, recordingNotifier())
+    // approved + matching (the one we want) — approve two so ORDER BY decided_at is exercised
+    const p1 = mgr.requestApproval({ id: 'ok-1', project_slug: 't1', topic_id: null, tool_name: 'ritual:x', args: { n: 1 }, policy: 'prompt-user' })
+    const p2 = mgr.requestApproval({ id: 'ok-2', project_slug: 't1', topic_id: null, tool_name: 'ritual:x', args: { n: 2 }, policy: 'prompt-user' })
+    // pending (excluded), denied (excluded), other-slug (excluded), other-tool (excluded)
+    const pPending = mgr.requestApproval({ id: 'pending-1', project_slug: 't1', topic_id: null, tool_name: 'ritual:x', args: {}, policy: 'prompt-user' })
+    const pDenied = mgr.requestApproval({ id: 'denied-1', project_slug: 't1', topic_id: null, tool_name: 'ritual:x', args: {}, policy: 'prompt-user' })
+    const pSlug = mgr.requestApproval({ id: 'slug-1', project_slug: 't2', topic_id: null, tool_name: 'ritual:x', args: {}, policy: 'prompt-user' })
+    const pTool = mgr.requestApproval({ id: 'tool-1', project_slug: 't1', topic_id: null, tool_name: 'ritual:y', args: {}, policy: 'prompt-user' })
+    await new Promise((r) => setTimeout(r, 5))
+
+    await mgr.respondApproval('ok-1', 'approved', 'owner')
+    await mgr.respondApproval('ok-2', 'approved', 'owner')
+    await mgr.respondApproval('denied-1', 'denied', 'owner')
+    await mgr.respondApproval('slug-1', 'approved', 'owner')
+    await mgr.respondApproval('tool-1', 'approved', 'owner')
+
+    const rows = mgr.findApproved('t1', 'ritual:x')
+    expect(rows.map((r) => r.id).sort()).toEqual(['ok-1', 'ok-2'])
+    for (const r of rows) {
+      expect(r.status).toBe('approved')
+      expect(r.project_slug).toBe('t1')
+      expect(r.tool_name).toBe('ritual:x')
+    }
+
+    // drain the promises we deliberately never decided so bun doesn't warn
+    void p1
+    void p2
+    void pPending
+    void pDenied
+    void pSlug
+    void pTool
+  })
 })

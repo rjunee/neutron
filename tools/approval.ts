@@ -224,4 +224,24 @@ export class ApprovalManager {
       )
       .all(project_slug)
   }
+
+  /**
+   * Every APPROVED durable grant for `(project_slug, tool_name)`, oldest
+   * decision first. Generic query — this platform module knows nothing about
+   * rituals; the ritual layer (`reminders/ritual-approval.ts`, a legal
+   * services→platform edge) namespaces `tool_name` (`ritual:<id>` /
+   * `ritual-egress:<id>`) and content-hash-matches on `args_json`. Synchronous
+   * prepare/all like `get`/`listPending`.
+   */
+  findApproved(project_slug: string, tool_name: string): ApprovalRow[] {
+    return this.db
+      .prepare<ApprovalRow, [string, string]>(
+        `SELECT id, project_slug, topic_id, tool_name, args_json, status,
+                requested_at, decided_at, decided_by
+           FROM tool_approvals
+          WHERE project_slug = ? AND tool_name = ? AND status = 'approved'
+          ORDER BY decided_at ASC`,
+      )
+      .all(project_slug, tool_name)
+  }
 }
