@@ -68,6 +68,39 @@ auto-closes on terminal), `gateway/wiring/__tests__/operating-doctrine.test.ts`
 regenerated (`migrations/expected-schema.txt`); `migrations/runner.test.ts` version
 list extended to 105.
 
+**Round-2 hardening (Argus review of the above):**
+
+- **BLOCKER — a crashed/cancelled/timed-out ▶-research run stranded its card
+  `in_progress` forever.** The ▶-research completion handler only handled
+  `finished` (→ complete). On any OTHER terminal an agent-dispatch run has NO
+  `run_progress` to derive a failed dot from, and the still-set link kept the
+  client's `isLinkedRunning` true — so the card sat `in_progress` permanently:
+  pane never auto-closed, no failure surfaced, ▶ retry hidden. Fix: the terminal
+  decision moved into `work-board/start-routing.ts` `applyResearchOutcome` (ONE
+  tested point) — `finished` → `complete`, anything else → the store's new
+  **`failUnlinkedRun`** (`work-board/store.ts`), which in one push NULLs the
+  agent-dispatch link + sets `status='failed'` (race-guarded on
+  `linked_run_id = run_id`, mirroring `clearRun`). The web layer surfaces it:
+  `dotState` shows a solid failed dot for a `status='failed'` card, and
+  `summarize`'s `failed` roll-up now counts `status='failed'` cards (via
+  `isFailedTerminal`, not just `run_progress`-failed) so the pane HOLDS OPEN for
+  attention + ▶ becomes a retry (`landing/chat-react/WorkBoardTab.tsx`).
+- **MAJOR — concurrent ▶ on a research card spawned duplicate ATLAS runs.** The
+  HTTP 409 guard (`gateway/http/work-board-surface.ts`) only consults the Trident
+  run store, where an agent-dispatch run id never exists, so a raced/double-clicked
+  ▶ re-dispatched. Fix: the ▶-research dispatch (`open/composer.ts`) now passes a
+  stable per-card `spawn_key` (`work-board:<slug>:<item_id>`) +
+  `on_duplicate:'coalesce'`, so the service's double-spawn guard coalesces the
+  second dispatch onto the in-flight run instead of spawning a twin.
+- **Tests (reproduce-then-fix, verified red on pre-round-2 code):**
+  `work-board/start-routing.test.ts` — `applyResearchOutcome` finished→complete,
+  crashed/cancelled/timed_out→failUnlinkedRun; `work-board/store.test.ts` —
+  `failUnlinkedRun` nulls link + status=failed, is a concurrent-safe no-op when
+  superseded, and retries cleanly via a fresh `attachRun`;
+  `landing/chat-react/__tests__/plans-pane.test.tsx` — `summarize` counts a
+  `status='failed'` research card as failed, and an active→failed crash keeps the
+  pane open (does NOT auto-close).
+
 
 ## 2026-07-20 — M2-3: memory-consolidation correctness — 3 dedup/supersede corruption blockers
 

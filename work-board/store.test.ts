@@ -347,6 +347,57 @@ describe('WorkBoardStore — Phase 2b run binding + reconcile', () => {
     expect(store.get(SLUG, a.id)?.linked_run_id).toBeNull()
   })
 
+  test('failUnlinkedRun(#379) terminal-fails a research card: NULLs the link + status=failed', async () => {
+    let pushes = 0
+    const store = new WorkBoardStore(db, { onChange: () => (pushes += 1) })
+    const a = await store.create(SLUG, { title: 'research me', task_type: 'research' })
+    // A ▶-dispatched ATLAS run binds the card (agent-dispatch run id, NO run_progress).
+    await store.attachRun(SLUG, a.id, 'atlas-run-1')
+    expect(store.get(SLUG, a.id)?.status).toBe('in_progress')
+    expect(store.get(SLUG, a.id)?.linked_run_id).toBe('atlas-run-1')
+    pushes = 0
+    // The ATLAS run crashes/cancels/times out. Unlike detachRun('failed') — which
+    // KEEPS the link for a Trident run's run_progress — a research card has none,
+    // so the link MUST be nulled or isLinkedRunning stays true forever.
+    await store.failUnlinkedRun(SLUG, a.id, 'atlas-run-1')
+    const failed = store.get(SLUG, a.id)
+    expect(failed?.status).toBe('failed') // surfaced, not stranded in_progress
+    expect(failed?.linked_run_id).toBeNull() // link cleared → retryable, not "running"
+    expect(failed?.completed_at).toBeNull()
+    expect(pushes).toBe(1) // a live snapshot push so the pane re-derives + auto-closes
+  })
+
+  test('failUnlinkedRun is a concurrent-safe no-op when a later dispatch superseded the link', async () => {
+    const store = new WorkBoardStore(db)
+    const a = await store.create(SLUG, { title: 'raced research', task_type: 'research' })
+    await store.attachRun(SLUG, a.id, 'atlas-run-1')
+    await store.attachRun(SLUG, a.id, 'atlas-run-2') // run-2 supersedes run-1
+    // run-1 terminating late must NOT fail the card the still-live run-2 owns.
+    await store.failUnlinkedRun(SLUG, a.id, 'atlas-run-1')
+    const stillLive = store.get(SLUG, a.id)
+    expect(stillLive?.status).toBe('in_progress')
+    expect(stillLive?.linked_run_id).toBe('atlas-run-2')
+    // run-2 terminating DOES fail it (it is the bound run).
+    await store.failUnlinkedRun(SLUG, a.id, 'atlas-run-2')
+    expect(store.get(SLUG, a.id)?.status).toBe('failed')
+    expect(store.get(SLUG, a.id)?.linked_run_id).toBeNull()
+  })
+
+  test('a failUnlinkedRun-failed research card RETRIES via a fresh attachRun', async () => {
+    const store = new WorkBoardStore(db)
+    const a = await store.create(SLUG, { title: 'retry research', task_type: 'research' })
+    await store.attachRun(SLUG, a.id, 'atlas-run-1')
+    await store.failUnlinkedRun(SLUG, a.id, 'atlas-run-1')
+    expect(store.get(SLUG, a.id)?.status).toBe('failed')
+    // ▶ retry re-dispatches ATLAS → a fresh run binds + flips back to in_progress.
+    const retried = await store.attachRun(SLUG, a.id, 'atlas-run-2')
+    expect(retried?.status).toBe('in_progress')
+    expect(retried?.linked_run_id).toBe('atlas-run-2')
+    // ...and a subsequent success completes it cleanly.
+    await store.complete(SLUG, a.id)
+    expect(store.get(SLUG, a.id)?.status).toBe('done')
+  })
+
   test('attachRun re-opening a done item clears completed_at + re-appends to the active lane', async () => {
     const store = new WorkBoardStore(db)
     const a = await store.create(SLUG, { title: 'reopen me' })

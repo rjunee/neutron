@@ -700,9 +700,20 @@ rather than waiting on the global diff-gate. Subscriber:
 >    required-item + ask-before-acting gate; the pre-#379 code stamped Trident on
 >    everything. The ▶-research route has no foreground orchestrator (unlike a
 >    `dispatch_agent` sub-task), so its ▶ closure wires the dispatch `completion`
->    terminal itself — delivering ATLAS's rendered report to the originating chat
->    topic and marking the card done on success (pane auto-closes) — since the shared
->    dispatch report sink only logs.
+>    terminal itself via `start-routing.ts` `applyResearchOutcome` (the ONE tested
+>    decision point) — delivering ATLAS's rendered report to the originating chat
+>    topic, and on **`finished`** marking the card done (pane auto-closes), on ANY
+>    OTHER terminal (`crashed` / `cancelled` / timed-out) calling the store's new
+>    **`failUnlinkedRun`** to CLEAR the agent-dispatch link + set `status='failed'`.
+>    That last branch is the #379 blocker fix: an agent-dispatch run has no
+>    `run_progress` to derive a failed dot from, so a kept link would strand the card
+>    `in_progress` forever (pane never closes, ▶ retry hidden). Failing it surfaces
+>    the failure (a solid failed dot + a `failed` roll-up that holds the pane open
+>    for attention) and re-enables ▶ as a retry. Concurrency: the HTTP 409 guard
+>    only knows Trident runs, so the ▶-research dispatch passes a stable per-card
+>    `spawn_key` (`work-board:<slug>:<item_id>`, `on_duplicate:'coalesce'`) so a
+>    double-clicked / raced ▶ COALESCES onto the in-flight ATLAS run instead of
+>    spawning a twin.
 
 > <!-- SYNC-ON-DEPLOY (trident build reliability #351/#352, 2026-07-03) — flagged
 > for the Managed orchestrator's SYSTEM-OVERVIEW sync. -->

@@ -14,7 +14,7 @@ import { GlobalRegistrator } from '@happy-dom/global-registrator'
 
 import type { NeutronChatController } from '../controller.ts'
 import type { RunProgress, WorkBoardItem } from '../work-board-client.ts'
-import type { WorkBoardSummary } from '../WorkBoardTab.tsx'
+import { summarize, type WorkBoardSummary } from '../WorkBoardTab.tsx'
 
 beforeAll(() => {
   GlobalRegistrator.register({ url: 'https://sam.neutron.test/chat?client=react' })
@@ -99,6 +99,28 @@ function fakeLive(): {
     },
   }
 }
+
+describe('summarize (#379 roll-up — a crashed research card counts + surfaces)', () => {
+  it('a status=failed research card (no run_progress, no link) counts as FAILED, not stranded', () => {
+    // The blocker shape: a ▶-dispatched ATLAS run crashed; the store marked the
+    // card status=failed + NULLed the (agent-dispatch) link (failUnlinkedRun).
+    // It has NO run_progress. Pre-#379 summarize counted only run_progress-failed
+    // items → {running:0,failed:0,active:0} → the card vanished from the roll-up
+    // with the failure NEVER surfaced. It must now count as `failed`.
+    const failedResearch = item({ status: 'failed', linked_run_id: null })
+    expect(summarize([failedResearch])).toEqual({ running: 0, failed: 1, active: 0 })
+  })
+
+  it('a plain in_progress card (no run) counts as ACTIVE so the pane opens for it', () => {
+    const activeResearch = item({ status: 'in_progress', linked_run_id: null })
+    expect(summarize([activeResearch])).toEqual({ running: 0, failed: 0, active: 1 })
+  })
+
+  it('a done card is terminal — contributes nothing (pane auto-closes)', () => {
+    const done = item({ status: 'done', completed_at: '2026-07-20T00:00:00Z' })
+    expect(summarize([done])).toEqual({ running: 0, failed: 0, active: 0 })
+  })
+})
 
 describe('usePlansPaneController (auto-open/close state machine)', () => {
   async function mountController(): Promise<{
@@ -344,6 +366,30 @@ describe('PlansPane (edge-handle + live wiring)', () => {
     })
     expect(col().className).not.toContain('car-plans-open')
     expect(p.openChanges.at(-1)).toBe(false)
+    p.unmount()
+  })
+
+  it('#379 — a research card that CRASHES (active→failed) keeps the pane open, does NOT auto-close', async () => {
+    const p = await mountPane()
+    const col = () => p.container.querySelector('.car-plans-col') as HTMLElement
+    // ▶-dispatched ATLAS research is live: in_progress, no run_progress.
+    await p.act(async () => {
+      p.emit([item({ status: 'in_progress', linked_run_id: null })], PROJECT)
+      await tick()
+    })
+    expect(col().className).toContain('car-plans-open')
+    // The ATLAS run crashes → failUnlinkedRun stamps status='failed', link nulled,
+    // NO run_progress. It must NOT silently vanish (pre-#379 → all-zero → close);
+    // it counts as failed → pane STAYS open so the owner sees the failure + retry.
+    await p.act(async () => {
+      p.emit([item({ status: 'failed', linked_run_id: null })], PROJECT)
+      await tick()
+    })
+    await p.act(async () => {
+      await wait(40) // past the auto-close settle window
+    })
+    expect(col().className).toContain('car-plans-open')
+    expect(p.container.querySelector('.car-plans-cnt')?.textContent).toContain('1 failed')
     p.unmount()
   })
 })

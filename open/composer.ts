@@ -285,7 +285,7 @@ import {
   type PreviewFrom,
 } from './project-rail.ts'
 import { WorkBoardSpecDocService } from '@neutronai/work-board/spec-doc-service.ts'
-import { routeBoardStart } from '@neutronai/work-board/start-routing.ts'
+import { applyResearchOutcome, routeBoardStart } from '@neutronai/work-board/start-routing.ts'
 import { dispatchBoardBoundBuild } from '@neutronai/trident/board-dispatch.ts'
 import { buildForgeConflictResolver } from '@neutronai/trident/conflict-resolver.ts'
 import { buildTridentDelivery } from '@neutronai/trident/delivery.ts'
@@ -2286,6 +2286,14 @@ export function buildOpenGraphComposer(
                     task,
                     board_item_id: item.id,
                     board_scope: slug,
+                    // #379 major — a stable per-card spawn_key so a concurrent /
+                    // double-clicked ▶ COALESCES onto the in-flight ATLAS run
+                    // instead of spawning a twin. The HTTP 409 guard only knows
+                    // Trident runs (a research card's linked_run_id is an
+                    // agent-dispatch id it never finds), so the de-dup MUST live
+                    // at the dispatch layer.
+                    spawn_key: `work-board:${slug}:${item.id}`,
+                    on_duplicate: 'coalesce',
                     delivery_target: { channel: 'app_socket', binding_id: deliveryTopic },
                   })
                   // #379 blocker-C + major-C — the ▶-research route has NO foreground
@@ -2311,9 +2319,21 @@ export function buildOpenGraphComposer(
                       // app-ws delivery is best-effort — a lost push is not a lost run.
                     }
                     try {
-                      if (outcome.status === 'finished') {
-                        await workBoardStore.complete(slug, item.id)
-                      }
+                      // #379 blocker — apply the terminal outcome via the ONE
+                      // tested decision point: `finished` → complete (pane
+                      // auto-closes); crashed/cancelled/timed-out →
+                      // failUnlinkedRun so the failure surfaces + ▶ retries
+                      // instead of stranding the card in_progress forever (an
+                      // agent-dispatch run has no run_progress to derive from).
+                      await applyResearchOutcome(
+                        {
+                          complete: (s, i) => workBoardStore.complete(s, i),
+                          failUnlinkedRun: (s, i, r) => workBoardStore.failUnlinkedRun(s, i, r),
+                        },
+                        slug,
+                        item.id,
+                        outcome,
+                      )
                     } catch {
                       // board write is best-effort — never break the terminal path.
                     }

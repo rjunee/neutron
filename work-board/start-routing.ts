@@ -49,3 +49,46 @@ export function routeBoardStart<T>(
     ? dispatchers.research()
     : dispatchers.build()
 }
+
+/** The terminal outcome of a ▶-dispatched research (ATLAS) run — just the fields
+ *  the board reconcile needs. Structural so it accepts an agent-dispatch
+ *  `DispatchOutcome` without coupling this module to that package. */
+export interface ResearchRunOutcome {
+  status: string
+  run_id: string
+}
+
+/** The board writes the research-terminal reconcile needs. Injected so the
+ *  decision is unit-testable without a real store. */
+export interface ResearchTerminalBoard {
+  /** Success — datestamped done (pane auto-closes off `active`). */
+  complete: (slug: string, item_id: string) => Promise<unknown>
+  /** Non-success — clear the (agent-dispatch) link + mark failed so the failure
+   *  surfaces and ▶ retries, instead of stranding the card in_progress. */
+  failUnlinkedRun: (slug: string, item_id: string, run_id: string) => Promise<void>
+}
+
+/**
+ * #379 BLOCKER — apply a ▶-research run's TERMINAL outcome to its Work Board
+ * card. The ONE decision point (mirrors {@link routeBoardStart}) so both the
+ * success AND the crashed/cancelled/timed-out paths are unit-tested, not just
+ * proven by inspection in the composer closure:
+ *
+ *   - `finished` → `complete` (done; the pane auto-closes once no work is active);
+ *   - ANYTHING else (`crashed` / `cancelled` / timed-out) → `failUnlinkedRun`,
+ *     because an agent-dispatch run has NO `run_progress` to derive a failed dot
+ *     from and the still-set link would keep the card "running" forever. This is
+ *     the exact asymmetry that stranded the card before #379.
+ */
+export async function applyResearchOutcome(
+  board: ResearchTerminalBoard,
+  slug: string,
+  item_id: string,
+  outcome: ResearchRunOutcome,
+): Promise<void> {
+  if (outcome.status === 'finished') {
+    await board.complete(slug, item_id)
+  } else {
+    await board.failUnlinkedRun(slug, item_id, outcome.run_id)
+  }
+}

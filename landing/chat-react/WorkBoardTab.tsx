@@ -188,6 +188,9 @@ function dotState(item: WorkBoardItem): DotState {
     }
   }
   if (item.status === 'done') return { cls: 'cwb-dot-done', pulse: false }
+  // #379 — a plain card the store marked failed (a crashed ATLAS run has no
+  // `run_progress`) still shows the solid failed dot, not a gray upcoming one.
+  if (item.status === 'failed') return { cls: 'cwb-dot-failed', pulse: false }
   if (item.status === 'in_progress') return { cls: 'cwb-dot-build', pulse: true }
   return { cls: 'cwb-dot-upcoming', pulse: false }
 }
@@ -224,6 +227,16 @@ function formatCompletedShort(completed_at: string | null): string {
   return `${month} ${Number(m[3])}`
 }
 
+/** True when the item is in a FAILED terminal state (#379) — either a bound
+ *  Trident run whose `run_progress` reached the `failed` step, OR a plain card
+ *  the store marked `status='failed'` (a crashed/cancelled ATLAS/agent-dispatch
+ *  run, which has NO `run_progress` to derive from — see `failUnlinkedRun`).
+ *  Both keep the pane open (attention) + surface a ▶ retry. */
+function isFailedTerminal(item: WorkBoardItem): boolean {
+  if (item.status === 'failed') return true
+  return item.run_progress !== undefined && resolveStepLabel(item.run_progress) === 'failed'
+}
+
 /** True when the item is ACTIVE work in NO terminal state (#379) — an
  *  `in_progress` card OR one the agent flagged `inline_active`, run-bound or
  *  not, that is neither `done` nor a failed run. This is what makes a PLAIN
@@ -231,10 +244,9 @@ function formatCompletedShort(completed_at: string | null): string {
  *  opens for it — not just a live Trident run. */
 function isActiveWork(item: WorkBoardItem): boolean {
   if (item.status === 'done') return false
-  // A failed run is a terminal state; it is surfaced via `failed`, not `active`.
-  if (item.run_progress !== undefined && resolveStepLabel(item.run_progress) === 'failed') {
-    return false
-  }
+  // A failed terminal (Trident-run failed OR store status='failed') is surfaced
+  // via `failed`, not `active`.
+  if (isFailedTerminal(item)) return false
   return item.status === 'in_progress' || item.inline_active
 }
 
@@ -262,7 +274,7 @@ export function summarize(items: readonly WorkBoardItem[]): WorkBoardSummary {
   for (const it of items) {
     if (isLinkedRunning(it)) {
       running += 1
-    } else if (it.run_progress !== undefined && resolveStepLabel(it.run_progress) === 'failed') {
+    } else if (isFailedTerminal(it)) {
       failed += 1
     }
     if (isActiveWork(it)) active += 1

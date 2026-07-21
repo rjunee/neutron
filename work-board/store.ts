@@ -603,6 +603,32 @@ export class WorkBoardStore {
     this.emitChange(project_slug)
   }
 
+  /**
+   * #379 — Terminal-FAIL a card bound to a NON-Trident (agent-dispatch/ATLAS)
+   * run. Unlike {@link detachRun}('failed') — which KEEPS the link so a Trident
+   * run's `run_progress.step_label='failed'` drives the red dot + reason — an
+   * agent-dispatch run has NO `run_progress`, so a kept link would leave the
+   * client's `isLinkedRunning` true FOREVER (pane never auto-closes off active,
+   * ▶ retry stays hidden). So this NULLs the link AND sets status='failed' in
+   * ONE push: the card drops out of `active`, the failure surfaces (status →
+   * "Failed" + failed dot), and ▶ becomes a retry. Race-guarded on
+   * `linked_run_id = run_id` so a superseding dispatch's card is left untouched
+   * (mirrors {@link clearRun}); a no-op (no push) when the guard misses.
+   */
+  async failUnlinkedRun(project_slug: string, id: string, run_id: string): Promise<void> {
+    await this.db.run(
+      `UPDATE work_board_items
+          SET linked_run_id = NULL, inline_active = 0, status = 'failed',
+              completed_at = NULL, updated_at = ?
+        WHERE project_slug = ? AND id = ? AND linked_run_id = ?`,
+      [this.now(), project_slug, id, run_id],
+    )
+    // Mirror clearRun: emit unconditionally. When the race guard misses (a later
+    // dispatch superseded the link) the UPDATE is a no-op, so the re-derived
+    // snapshot is unchanged — a harmless idempotent push, never a false failure.
+    this.emitChange(project_slug)
+  }
+
   /** Look up the item a run is bound to (the partial `linked_run_id` index).
    *  Used by the terminal-reconcile path to find the item from a finished run.
    *  Scoped by `project_slug` so a run id can never cross instances. */
