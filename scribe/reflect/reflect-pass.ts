@@ -96,6 +96,13 @@ import {
   type DedupCandidate,
 } from './jaccard.ts'
 import { composeReservedPrompt, parseReservedExtraction } from './reserved-kinds.ts'
+import {
+  clusterCorrections,
+  composePatternPage,
+  DEFAULT_CORRECTION_PATTERN_JACCARD,
+  DEFAULT_CORRECTION_PATTERN_MIN_OCCURRENCES,
+  type CorrectionEntry,
+} from './correction-patterns.ts'
 
 const log = createLogger('scribe')
 
@@ -174,6 +181,18 @@ export interface ReflectPassDeps {
    * compare-and-swap guards back off instead of clobbering it. Unused in production.
    */
   onAfterSnapshot?: () => void | Promise<void>
+  /**
+   * Q2 (overturn 2, core-memory tier) — reader of recent owner corrections. When
+   * PRESENT, STEP 4 clusters recurring corrections and promotes each ≥N-occurrence
+   * cluster as a kind-`concept` entity page (deterministic, NO LLM — runs on
+   * LLM-less boxes too). ABSENT → step 4 is skipped entirely (no scribe→reflection
+   * package edge; the wiring layer injects the real `readRecentCorrections`).
+   */
+  readCorrections?: () => CorrectionEntry[]
+  /** Jaccard bar for "same lesson". Default `DEFAULT_CORRECTION_PATTERN_JACCARD`. */
+  correctionPatternThreshold?: number
+  /** Min occurrences to promote a pattern. Default `DEFAULT_CORRECTION_PATTERN_MIN_OCCURRENCES`. */
+  correctionPatternMinOccurrences?: number
 }
 
 export interface ReflectReport {
@@ -196,6 +215,10 @@ export interface ReflectReport {
   reservedWritten: number
   /** Total LLM dispatches — the cost-confinement proof (0 on a no-substrate pass). */
   llmCalls: number
+  /** Q2 tier-2 — corrections read by step 4 (0 when `readCorrections` is absent). */
+  correctionsScanned: number
+  /** Q2 tier-2 — recurring-correction clusters promoted to concept pages this pass. */
+  patternsPromoted: number
 }
 
 /** One enumerated + read entity page. `raw` is the EXACT on-disk body at snapshot
@@ -260,6 +283,8 @@ export async function runReflectPass(deps: ReflectPassDeps): Promise<ReflectRepo
     resynthesized: 0,
     reservedWritten: 0,
     llmCalls: 0,
+    correctionsScanned: 0,
+    patternsPromoted: 0,
   }
 
   // ── Enumerate + read every page (all kinds), via the hardened backend-neutral
@@ -297,7 +322,93 @@ export async function runReflectPass(deps: ReflectPassDeps): Promise<ReflectRepo
     await extractReservedKinds(survivors, deps, report, now, logFailure)
   }
 
+  // ── Step 4 — PROMOTE recurring corrections to concept pages (DETERMINISTIC, no
+  //    LLM — runs UNCONDITIONALLY of substrate; guarded only on the reader seam).
+  if (deps.readCorrections !== undefined) {
+    await promoteCorrectionPatterns(survivors, deps, report, logFailure)
+  }
+
   return report
+}
+
+/**
+ * Q2 (overturn 2, core-memory tier) — cluster recurring owner corrections and
+ * promote each ≥N-occurrence cluster to a kind-`concept` entity page through the
+ * pass's own `writeEntity` + `syncHook` (→ GBrain + `entities/INDEX.md`). No LLM.
+ * Idempotent by construction: the promoted page's slug is derived from the cluster's
+ * OLDEST correction id, timeline rows dedupe on `(ts,source,body)`, and a
+ * byte-identical re-render is `changed:false` (no hook fire) — so re-promoting the
+ * same cluster across passes is a structural no-op. Best-effort per cluster; the
+ * step NEVER throws out of the pass.
+ */
+async function promoteCorrectionPatterns(
+  pages: LoadedPage[],
+  deps: ReflectPassDeps,
+  report: ReflectReport,
+  logFailure: (msg: string, err: unknown) => void,
+): Promise<void> {
+  const readCorrections = deps.readCorrections
+  if (readCorrections === undefined) return
+  let entries: CorrectionEntry[]
+  try {
+    entries = readCorrections()
+  } catch (err) {
+    logFailure('reflect: readCorrections threw', err)
+    return
+  }
+  report.correctionsScanned = entries.length
+  if (entries.length === 0) return
+
+  const threshold = deps.correctionPatternThreshold ?? DEFAULT_CORRECTION_PATTERN_JACCARD
+  const minOcc = deps.correctionPatternMinOccurrences ?? DEFAULT_CORRECTION_PATTERN_MIN_OCCURRENCES
+  const clusters = clusterCorrections(entries, threshold)
+
+  for (const cluster of clusters) {
+    if (cluster.length < minOcc) continue
+    try {
+      const page = composePatternPage(cluster)
+      // ids are `c-<base36>`, so the derived slug is SLUG_REGEX-safe — but a
+      // corrupt/imported correction id could break that. Fail closed (skip+log).
+      if (!SLUG_REGEX.test(page.slug)) {
+        logFailure(`reflect: correction-pattern slug ${page.slug} fails SLUG_REGEX — skipped`, undefined)
+        continue
+      }
+      const existing = pages.find((p) => p.kind === 'concept' && p.slug === page.slug)
+      const frontmatter: Record<string, unknown> = {
+        slug: page.slug,
+        type: 'concept',
+        name: page.title,
+        source: `reflect:${deps.ownSlug}`,
+      }
+      const out = await deps.writeEntity(
+        {
+          ownerDataDir: deps.ownerDataDir,
+          kind: 'concept',
+          slug: page.slug,
+          body: {
+            frontmatter,
+            compiledTruth: page.compiledTruth,
+            // Multi-row form (entity-writer.ts:100-107): one timeline row per
+            // occurrence, deduped on (ts,source,body) by the writer.
+            timelineAppend: page.timelineRows,
+          },
+          originInstance: deps.ownSlug,
+          receivingInstanceSlug: deps.ownSlug,
+          // `null` asserts a fresh compose; an existing snapshot asserts the page
+          // is unchanged since we read it (a concurrent write flips to no-op).
+          precondition: { ifBodyEquals: existing?.raw ?? null },
+        },
+        deps.syncHook !== undefined ? { syncHook: deps.syncHook } : {},
+      )
+      if (out.conflict === true) {
+        logFailure(`reflect: correction-pattern ${page.slug} write conflicted — skipped`, undefined)
+        continue
+      }
+      if (out.changed === true) report.patternsPromoted += 1
+    } catch (err) {
+      logFailure('reflect: promote correction pattern failed', err)
+    }
+  }
 }
 
 /**

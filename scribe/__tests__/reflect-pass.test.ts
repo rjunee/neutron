@@ -13,7 +13,7 @@
  *      calls yet still dedups. Re-synthesis can never drop a graph edge.
  */
 
-import { describe, test, expect } from 'bun:test'
+import { describe, test, expect, mock } from 'bun:test'
 import { mkdtempSync, mkdirSync, writeFileSync, existsSync, symlinkSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -33,6 +33,8 @@ import {
   type ReflectWriteEntity,
   type ReflectDeleteEntity,
 } from '../reflect/reflect-pass.ts'
+import type { CorrectionEntry } from '../reflect/correction-patterns.ts'
+import type { SyncHook } from '@neutronai/runtime/entity-writer.ts'
 
 const realWrite = writeEntity as unknown as ReflectWriteEntity
 
@@ -962,5 +964,135 @@ describe('reflect cost confinement (tiered-write discipline)', () => {
     const ct = extractCompiledTruth((await readPage(owner, 'people', 'rob'))!)
     expect(ct).toContain('mentors the platform team') // resynth applied
     expect(ct).toContain('[[globex]]') // edge preserved
+  })
+})
+
+// ── Step 4 — Q2 (overturn 2, core-memory tier): correction-pattern promotion ──
+describe('reflect step 4 — correction-pattern promotion (deterministic, no LLM)', () => {
+  const TAB_1: CorrectionEntry = {
+    id: 'c-aaa',
+    ts: '2026-07-01T00:00:00.000Z',
+    wrong: 'used spaces for indentation',
+    right: 'use tabs for indentation',
+    why: 'the repo convention is tabs',
+  }
+  const TAB_2: CorrectionEntry = {
+    id: 'c-bbb',
+    ts: '2026-07-02T00:00:00.000Z',
+    wrong: 'used spaces for indentation again',
+    right: 'use tabs for indentation',
+    why: 'the repo convention is tabs',
+  }
+  const TAB_3: CorrectionEntry = {
+    id: 'c-ccc',
+    ts: '2026-07-03T00:00:00.000Z',
+    wrong: 'indentation with spaces',
+    right: 'use tabs for indentation',
+    why: 'convention is tabs',
+  }
+  const OTHER_1: CorrectionEntry = {
+    id: 'c-ddd',
+    ts: '2026-07-04T00:00:00.000Z',
+    wrong: 'called the endpoint synchronously',
+    right: 'await the endpoint asynchronously',
+    why: 'avoid blocking the event loop',
+  }
+  const OTHER_2: CorrectionEntry = {
+    id: 'c-eee',
+    ts: '2026-07-05T00:00:00.000Z',
+    wrong: 'used the wrong contact',
+    right: 'the primary email is on file',
+    why: 'stated preference',
+  }
+
+  test('toHaveBeenCalled: a ≥3 cluster promotes ONE concept page (spy), no substrate → llmCalls 0', async () => {
+    const owner = tmpOwner()
+    const spy = mock(
+      async (): Promise<{ path: string; changed: boolean; newLinks: unknown[] }> => ({
+        path: 'x',
+        changed: true,
+        newLinks: [],
+      }),
+    )
+    const report = await runReflectPass({
+      ownerDataDir: owner,
+      ownSlug: OWN,
+      writeEntity: spy as unknown as ReflectPassDeps['writeEntity'],
+      now: () => t0,
+      readCorrections: () => [TAB_1, TAB_2, TAB_3, OTHER_1, OTHER_2],
+    })
+    expect(spy).toHaveBeenCalledTimes(1)
+    const [input] = spy.mock.calls[0] as [Parameters<ReflectWriteEntity>[0]]
+    expect(input.kind).toBe('concept')
+    expect(input.slug).toBe('correction-pattern-c-aaa')
+    expect(Array.isArray(input.body.timelineAppend)).toBe(true)
+    expect((input.body.timelineAppend as unknown[]).length).toBe(3)
+    expect(input.precondition?.ifBodyEquals).toBeNull()
+    expect(report.patternsPromoted).toBe(1)
+    expect(report.correctionsScanned).toBe(5)
+    expect(report.llmCalls).toBe(0)
+  })
+
+  test('artifact-on-disk: the concept page lands + the syncHook fan-out fires', async () => {
+    const owner = tmpOwner()
+    const calls: string[] = []
+    const syncHook: SyncHook = {
+      onEntityWrite: async (p): Promise<void> => {
+        calls.push(p.path)
+      },
+    }
+    const report = await runReflectPass({
+      ...baseDeps(owner),
+      syncHook,
+      readCorrections: () => [TAB_1, TAB_2, TAB_3],
+    })
+    expect(report.patternsPromoted).toBe(1)
+    const page = await readPage(owner, 'concepts', 'correction-pattern-c-aaa')
+    expect(page).not.toBeNull()
+    expect(page!).toContain('use tabs for indentation') // the learning line
+    expect(extractTimeline(page!)).toHaveLength(3) // one row per occurrence
+    // The GBrain/INDEX fan-out was invoked for the promoted page.
+    expect(calls.some((p) => p.endsWith('correction-pattern-c-aaa.md'))).toBe(true)
+  })
+
+  test('idempotency: a second identical pass writes nothing new (changed:false, no hook)', async () => {
+    const owner = tmpOwner()
+    const hook = mock(async (): Promise<void> => {})
+    const syncHook: SyncHook = { onEntityWrite: hook }
+    const deps: ReflectPassDeps = {
+      ...baseDeps(owner),
+      syncHook,
+      readCorrections: () => [TAB_1, TAB_2, TAB_3],
+    }
+    const first = await runReflectPass(deps)
+    expect(first.patternsPromoted).toBe(1)
+    const afterFirst = hook.mock.calls.length
+    expect(afterFirst).toBe(1) // promoted page fanned once
+
+    const second = await runReflectPass(deps)
+    expect(second.patternsPromoted).toBe(0) // byte-identical re-render → no write
+    expect(hook.mock.calls.length).toBe(afterFirst) // writer short-circuited → no hook
+  })
+
+  test('below threshold (2 occurrences) → no promotion; scanned still counts', async () => {
+    const owner = tmpOwner()
+    const spy = mock(async () => ({ path: 'x', changed: true, newLinks: [] as unknown[] }))
+    const report = await runReflectPass({
+      ownerDataDir: owner,
+      ownSlug: OWN,
+      writeEntity: spy as unknown as ReflectPassDeps['writeEntity'],
+      now: () => t0,
+      readCorrections: () => [TAB_1, TAB_2],
+    })
+    expect(spy).toHaveBeenCalledTimes(0)
+    expect(report.patternsPromoted).toBe(0)
+    expect(report.correctionsScanned).toBe(2)
+  })
+
+  test('readCorrections absent → step 4 skipped, report fields 0', async () => {
+    const owner = tmpOwner()
+    const report = await runReflectPass(baseDeps(owner))
+    expect(report.correctionsScanned).toBe(0)
+    expect(report.patternsPromoted).toBe(0)
   })
 })

@@ -27,6 +27,7 @@ import { createState, defaultStatePath } from '@neutronai/scribe/scribe-budget.t
 import {
   runReflectPass,
   DEFAULT_REFLECT_INTERVAL_MS,
+  DEFAULT_CORRECTION_SCAN_LIMIT,
   type ReflectPassDeps,
 } from '@neutronai/scribe/index.ts'
 import { writeEntity as defaultWriteEntity } from '@neutronai/runtime/entity-writer.ts'
@@ -35,7 +36,11 @@ import {
   mountCoresScribeFanOut,
   type MountedCoresScribeFanOut,
 } from '@neutronai/gateway/cores/mount-cores-scribe-fan-out.ts'
-import { createReflection, type Reflection } from '@neutronai/reflection/index.ts'
+import {
+  createReflection,
+  readRecentCorrections,
+  type Reflection,
+} from '@neutronai/reflection/index.ts'
 import { NexusStore } from '@neutronai/gateway/nexus/nexus-store.ts'
 import {
   emitNexusEvent,
@@ -387,6 +392,14 @@ export function wireMemory(ctx: OpenWiringContext): WiredMemory {
     // backend-neutral `MemoryStore.delete` seam (no gbrain internals leak here).
     deletePage: (slug: string): Promise<void> =>
       gbrainMemory.memoryStore.delete({ id: slug }).then(() => undefined),
+    // Q2 (overturn 2, core-memory tier) — the reflect pass's STEP 4 promotes
+    // recurring owner corrections to concept pages. Inject the REAL corrections
+    // reader (this file already imports @neutronai/reflection, so no new edge); the
+    // pass takes a seam to avoid a scribe→reflection package edge. `Correction` is
+    // structurally assignable to the pass's `CorrectionEntry`. Pass an explicit
+    // larger limit than the reader's default 25 so a long history is fully scanned.
+    readCorrections: () =>
+      readRecentCorrections({ ownerDataDir: owner_home, limit: DEFAULT_CORRECTION_SCAN_LIMIT }),
     ...(reflectSubstrate !== null ? { substrate: reflectSubstrate } : {}),
   }
   const reflectLoop: SupervisedLoop = new SupervisedLoop({
