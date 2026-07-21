@@ -42,29 +42,26 @@ export type {
 // belongs at the composition root. `reminders` keeps only the `ReminderOutbound`
 // SEAM (exported above from ./dispatcher.ts). An upward move gets no re-export
 // shim here — that would recreate the reminders→gateway edge this cut removes.
-// Executor-mode reminders — the ritual layer (migration 0106).
+// Executor-mode reminders — the ritual layer (migration 0106). Schema + pure
+// registry/validation only; the tick dispatch branch + approval gate + run-history
+// writer land in plan tasks 3-5.
 export {
-  validateRitualDef,
   createRitualRegistry,
-  resolveRitualPromptPath,
   validateRitualFire,
   RITUAL_ID_RE,
   RITUAL_MODEL_TIER,
   RITUAL_TIMEOUT_MS,
+  MAX_RITUAL_PROMPT_BYTES,
 } from './rituals.ts'
 export type {
   RitualDef,
   RitualRegistry,
-  RitualFireVerdict,
-  RitualFireDeps,
+  RitualScope,
+  RitualEgress,
+  RitualApprovalCheck,
+  RitualFireValidation,
+  RitualFireSkipReason,
 } from './rituals.ts'
-export { RitualRunStore, RITUAL_RUN_RETENTION_MS } from './ritual-runs.ts'
-export type {
-  RitualRunRow,
-  RitualRunStatus,
-  RitualRunTerminalStatus,
-  RitualSkipReason,
-} from './ritual-runs.ts'
 
 export { buildStatusMdContextSource } from './context.ts'
 export {

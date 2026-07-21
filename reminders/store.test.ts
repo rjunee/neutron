@@ -173,43 +173,32 @@ describe('ReminderStore', () => {
     await expect(store.createRecurring({ ...base })).rejects.toThrow()
   })
 
-  test('one-shot create round-trips ritual_id; default is null (migration 0106)', async () => {
+  test('ritual_id is read-through: create() defaults null; a raw UPDATE round-trips (migration 0106)', async () => {
+    // The write path deliberately does NOT exist yet (registration lands with its
+    // validation — plan task 8 / task 4). So create() always writes NULL, and the
+    // read-through is exercised via a direct SQL UPDATE — the only writer today.
     const store = new ReminderStore(db)
-    const ritual = await store.create({
-      owner_slug: 't1',
-      topic_id: null,
-      fire_at: 1700000000,
-      message: 'run brief',
-      ritual_id: 'morning-brief',
-    })
-    expect(store.get(ritual.id)?.ritual_id).toBe('morning-brief')
-    const plain = await store.create({
+    const r = await store.create({
       owner_slug: 't1',
       topic_id: null,
       fire_at: 1700000000,
       message: 'plain nudge',
     })
-    expect(store.get(plain.id)?.ritual_id).toBeNull()
+    expect(store.get(r.id)?.ritual_id).toBeNull()
+
+    await db.run(`UPDATE reminders SET ritual_id = 'morning-brief' WHERE id = ?`, [r.id])
+    expect(store.get(r.id)?.ritual_id).toBe('morning-brief')
   })
 
-  test('recurring create round-trips ritual_id; default is null (migration 0106)', async () => {
+  test('recurring create defaults ritual_id null (no write path yet)', async () => {
     const store = new ReminderStore(db)
-    const ritual = await store.createRecurring({
-      owner_slug: 't1',
-      topic_id: null,
-      fire_at: 1700000000,
-      message: 'daily brief',
-      recurrence_spec: '0 9 * * *',
-      ritual_id: 'morning-brief',
-    })
-    expect(store.get(ritual.id)?.ritual_id).toBe('morning-brief')
-    const plain = await store.createRecurring({
+    const r = await store.createRecurring({
       owner_slug: 't1',
       topic_id: null,
       fire_at: 1700000000,
       message: 'weekly nudge',
       recurrence: 'weekly',
     })
-    expect(store.get(plain.id)?.ritual_id).toBeNull()
+    expect(store.get(r.id)?.ritual_id).toBeNull()
   })
 })

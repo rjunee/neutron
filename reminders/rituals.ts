@@ -1,54 +1,43 @@
 /**
- * @neutronai/reminders — the ritual REGISTRY + fire-time validation.
+ * @neutronai/reminders — the ritual REGISTRY + fail-CLOSED fire-time validation.
  *
- * Spec of record: `docs/plans/executor-mode-reminders-2026-07-20.md` (plan task
- * 2). A ritual is an executor-mode reminder: at fire time the tick loop (plan
- * task 4) spawns a scoped sub-agent REPL instead of composing a one-shot nudge.
- * This module is the PURE, side-effect-free half — the registry of known ritual
- * definitions and the fail-CLOSED fire-time verdict. It performs NO logging and
- * NO spawn; the tick branch that consumes `validateRitualFire` logs the verdict
- * and decides to spawn or skip.
+ * Spec of record: `docs/plans/executor-mode-reminders-2026-07-20.md` — design
+ * doc §2a + the deepened header block (plan task 2). A ritual is an
+ * executor-mode reminder: at fire time the tick loop (plan task 4) spawns a
+ * scoped sub-agent REPL instead of composing a one-shot nudge. This module is the
+ * PURE, storage-free half — the registry of known ritual definitions and the
+ * fail-CLOSED fire-time verdict.
  *
- * The security model is charset-by-construction + fail-closed:
+ * Ryan overturns folded in (SPEC Decisions Log 2026-07-20, neutron-managed):
+ *  - Overturn 1 — Bash is a PORTABLE surface: security rides the APPROVAL gate
+ *    (task 3), NOT tool exclusion, so `tool_surface` may legitimately contain
+ *    `Bash`. The gate, not this registry, decides whether a Bash ritual fires.
+ *  - Overturn 3 — registration will be AGENT-callable with in-chat approval
+ *    (task 8); the approval RENDERING carries the security, which is why the def
+ *    has NO `requires_approval` bit (anything that can write the def must not be
+ *    able to clear its own approval) — approval lives in a SEPARATE record keyed
+ *    (ritual_id, content_hash, approved_by, approved_at), reached only through the
+ *    injected {@link RitualApprovalCheck} seam.
+ *
+ * Security model — charset-by-construction + fail-closed:
  *  - A ritual `id` is guarded by {@link RITUAL_ID_RE}: lowercase alnum + hyphen,
- *    1-64 chars, must start alnum. This makes path traversal IMPOSSIBLE by
- *    construction — the prompt path is `<root>/rituals/<id>.md` and no `id` that
- *    passes the guard can contain `/`, `.`, `..`, or a leading dash.
+ *    1-64 chars, must start alnum. Path traversal is IMPOSSIBLE by construction —
+ *    no conforming id contains `.`, `/`, `\`, or a leading dash, which is
+ *    stronger than Vajra's `resolveExecutorPromptFile` runtime containment check.
  *  - `tool_surface` is NEVER empty (the #361 "toolless class" pin: a ritual with
- *    no tools is a silent no-op that looks like it ran). Egress (WebSearch /
- *    WebFetch) and the mcp bridge are SEPARATELY-approved capability CLASSES
- *    carried by the `egress` / `bridge` booleans — never smuggled in as tool
- *    names — so the approval surface (task 3) can render them distinctly.
- *  - `validateRitualFire` returns a SKIP verdict for unknown id / missing prompt
- *    / unapproved. A failed verdict means log + SKIP the spawn — NEVER degrade to
- *    the nudge composer (Vajra's rationale holds verbatim: a ritual that can't
- *    run must not silently become a chat message), and NEVER spawn with an empty
- *    tool set.
+ *    no tools is a silent no-op that looks like it ran).
+ *  - {@link validateRitualFire} returns a SKIP verdict for unknown id / missing
+ *    prompt / unapproved (including an approval store that THROWS — fail CLOSED).
+ *    A failed verdict means log + SKIP the spawn — NEVER degrade to the nudge
+ *    composer, and NEVER spawn with `tools: []`.
  *
- * There is DELIBERATELY no `requires_approval` field on the def: anything that
- * can write the def could clear its own approval bit, so approval lives in a
- * SEPARATE content-hash-keyed record (task 3), reached through the injected
- * {@link RitualFireDeps.isApproved} seam. There is also no `prompt_path` (it is
- * derived) and no `model`/`timeout` field (they are the constants below — a
- * TIER, not a raw model id).
+ * There is DELIBERATELY (deepened header §142-150) no `requires_approval`, no
+ * `prompt_path` (derived from `rituals/<id>.md`), and no `model`/`timeout` field
+ * on the def — the model TIER and timeout are the module CONSTANTS below.
  */
 
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
-
-/**
- * Ritual id charset guard: lowercase alphanumeric + hyphen, 1-64 chars, must
- * start with an alphanumeric. Path traversal is impossible by construction — no
- * conforming id contains `/`, `.`, or a leading `-`.
- */
-export const RITUAL_ID_RE = /^[a-z0-9][a-z0-9-]{0,63}$/
-
-/**
- * Model TIER (not a raw model id) — resolved via `getBestModel()` at spawn time
- * (task 4). Rituals run on the best available tier; the spec anchors this so the
- * ritual model choice tracks the chat agent's rather than pinning a stale id.
- */
-export const RITUAL_MODEL_TIER = 'best' as const
 
 /**
  * Ritual spawn timeout — 45 min, parity with Vajra's
@@ -58,6 +47,46 @@ export const RITUAL_MODEL_TIER = 'best' as const
 export const RITUAL_TIMEOUT_MS = 45 * 60_000
 
 /**
+ * Model TIER (not a raw model id) — the executor default is the smart tier
+ * (design §2c); plain nudges stay on FAST_MODEL. Resolved to a concrete id at
+ * spawn time (task 4) so the ritual model tracks the chat agent's rather than
+ * pinning a stale id.
+ */
+export const RITUAL_MODEL_TIER = 'best' as const
+
+/**
+ * Hard cap on a ritual prompt file. A prompt larger than this is treated as a
+ * missing/corrupt prompt (fire-time SKIP), never read into a spawn.
+ */
+export const MAX_RITUAL_PROMPT_BYTES = 256 * 1024
+
+/**
+ * Ritual id charset guard: lowercase alphanumeric + hyphen, 1-64 chars, must
+ * start with an alphanumeric. Path-safe by construction — no conforming id
+ * contains `.`, `/`, or `\`, and none begins with `-`.
+ */
+export const RITUAL_ID_RE = /^[a-z0-9][a-z0-9-]{0,63}$/
+
+/** A tool token in a ritual `tool_surface` — a bare built-in / mcp bridge name. */
+const TOOL_TOKEN_RE = /^[A-Za-z][A-Za-z0-9_]*$/
+
+/** Web-egress built-in tools — used to enforce egress/surface consistency. */
+const WEB_TOOLS = new Set(['WebSearch', 'WebFetch'])
+
+/**
+ * cwd + write-containment root CLASS at spawn (task 4): 'project' runs rooted at
+ * the project folder, 'instance' at the instance root.
+ */
+export type RitualScope = 'project' | 'instance'
+
+/**
+ * Declared network-egress capability CLASS. 'none' = no web tools; 'web' = the
+ * WebSearch/WebFetch egress capability, a separately-approved class (task 3).
+ * {@link RitualRegistry.register} enforces consistency with `tool_surface`.
+ */
+export type RitualEgress = 'none' | 'web'
+
+/**
  * A ritual definition — the ENGINE-side contract for an executor-mode reminder.
  * See the module header for the security rationale behind each field.
  */
@@ -65,171 +94,208 @@ export interface RitualDef {
   /** Charset-guarded id ({@link RITUAL_ID_RE}); also the prompt file basename. */
   id: string
   /**
-   * cwd + write-containment root CLASS: 'project' runs rooted at the project
-   * folder, 'instance' at the instance root. Resolution is task 4; this only
-   * declares the class.
+   * Human capability line rendered in the approval prompt (task 8). Non-empty,
+   * <= 200 chars.
    */
-  scope: 'project' | 'instance'
+  description: string
+  /** cwd + write-containment root class at spawn (task 4). */
+  scope: RitualScope
   /**
-   * Built-in tool names granted at spawn. NEVER empty (the #361 toolless-class
-   * pin). MUST NOT contain egress tools ('WebSearch'/'WebFetch' — ride `egress`)
-   * or bridge tools (`mcp__*` — ride `bridge`); those are capability classes,
-   * not surface entries.
+   * Built-in / bridge tool names granted at spawn. NEVER empty (the #361
+   * toolless-class pin). Each entry matches {@link TOOL_TOKEN_RE} (covers
+   * 'Read', 'Bash', 'mcp__neutron'). Bash is a legitimate entry (overturn 1) —
+   * the approval gate, not this list, carries the security.
    */
   tool_surface: readonly string[]
   /**
-   * Grants the WebSearch/WebFetch egress capability — a SEPARATELY-approved
-   * class. Never appears in `tool_surface`.
+   * Declared egress class; {@link RitualRegistry.register} enforces it is
+   * consistent with `tool_surface` (web tools ⇔ egress 'web').
    */
-  egress: boolean
-  /**
-   * Grants the `mcp__neutron` ToolRegistry bridge at spawn (task 4 maps it to the
-   * substrate). Never appears in `tool_surface`.
-   */
-  bridge: boolean
+  egress: RitualEgress
   /** No completion post when true (task 5 consumes this). */
   silent: boolean
 }
 
-/** Frozen registry of ritual defs. */
+/** A frozen, register-time-validated registry of ritual defs. */
 export interface RitualRegistry {
+  /**
+   * Register a def. THROWS (plain Error, precise message) on any invalid def or
+   * a duplicate id — a bad registration is a programming error, not a runtime
+   * skip. The stored def is a FROZEN copy (with a frozen tool_surface) so a
+   * caller cannot mutate it after registration.
+   */
+  register(def: RitualDef): void
   /** The def for `id`, or undefined if unknown. */
   get(id: string): RitualDef | undefined
   /** Every registered def. */
-  list(): readonly RitualDef[]
+  list(): RitualDef[]
+  /**
+   * The prompt file path `<rituals_dir>/<id>.md` — only after `id` passes
+   * {@link RITUAL_ID_RE} (THROWS otherwise; defense-in-depth even though the
+   * registry already guards every stored id).
+   */
+  promptPathFor(id: string): string
 }
 
 /**
- * Egress tools that must ride the `egress` capability flag, never `tool_surface`.
+ * Build a ritual registry rooted at `opts.rituals_dir` (where `<id>.md` prompt
+ * files live). Empty on creation; callers `register()` each def.
  */
-const EGRESS_TOOLS = new Set(['WebSearch', 'WebFetch'])
-
-/**
- * Validate a ritual definition. Returns `[]` when valid; otherwise a list of
- * human-readable reasons (all failures reported, not just the first). Rules:
- *  - `id` must match {@link RITUAL_ID_RE};
- *  - `tool_surface` must be non-empty (the #361 pin), have no duplicates, and
- *    every entry must be an alpha-only built-in name (`/^[A-Za-z]+$/`) that is
- *    NOT an egress tool (must ride `egress`) and does NOT start with `mcp__`
- *    (must ride `bridge`).
- */
-export function validateRitualDef(def: RitualDef): string[] {
-  const reasons: string[] = []
-  if (!RITUAL_ID_RE.test(def.id)) {
-    reasons.push(`id ${JSON.stringify(def.id)} fails RITUAL_ID_RE (^[a-z0-9][a-z0-9-]{0,63}$)`)
-  }
-  if (def.tool_surface.length === 0) {
-    // #361 toolless-class pin: a ritual with no tools is a silent no-op that
-    // looks like it ran. A ritual MUST declare at least one built-in tool.
-    reasons.push('tool_surface is empty (#361 toolless class — a ritual must grant at least one tool)')
-  }
-  const seen = new Set<string>()
-  for (const t of def.tool_surface) {
-    if (seen.has(t)) {
-      reasons.push(`tool_surface has duplicate entry ${JSON.stringify(t)}`)
-    }
-    seen.add(t)
-    if (t.startsWith('mcp__')) {
-      reasons.push(`tool_surface entry ${JSON.stringify(t)} is an mcp bridge tool — set bridge:true instead`)
-    } else if (EGRESS_TOOLS.has(t)) {
-      reasons.push(`tool_surface entry ${JSON.stringify(t)} is an egress tool — set egress:true instead`)
-    } else if (!/^[A-Za-z]+$/.test(t)) {
-      reasons.push(`tool_surface entry ${JSON.stringify(t)} is not a plain built-in name (/^[A-Za-z]+$/)`)
-    }
-  }
-  return reasons
-}
-
-/**
- * Build a frozen ritual registry from a list of defs. THROWS on any invalid def
- * (see {@link validateRitualDef}) or duplicate id — a bad registry is a
- * programming error caught at composition time, not a runtime skip.
- */
-export function createRitualRegistry(defs: readonly RitualDef[]): RitualRegistry {
+export function createRitualRegistry(opts: { rituals_dir: string }): RitualRegistry {
+  const { rituals_dir } = opts
   const byId = new Map<string, RitualDef>()
-  for (const def of defs) {
-    const reasons = validateRitualDef(def)
-    if (reasons.length > 0) {
-      throw new Error(`invalid ritual def ${JSON.stringify(def.id)}: ${reasons.join('; ')}`)
+
+  function assertValid(def: RitualDef): void {
+    if (!RITUAL_ID_RE.test(def.id)) {
+      throw new Error(
+        `ritual id ${JSON.stringify(def.id)} fails RITUAL_ID_RE (^[a-z0-9][a-z0-9-]{0,63}$)`,
+      )
     }
     if (byId.has(def.id)) {
       throw new Error(`duplicate ritual id ${JSON.stringify(def.id)}`)
     }
-    byId.set(def.id, Object.freeze({ ...def, tool_surface: Object.freeze([...def.tool_surface]) }))
+    const desc = def.description
+    if (typeof desc !== 'string' || desc.trim().length === 0) {
+      throw new Error(`ritual ${JSON.stringify(def.id)}: description must be non-empty`)
+    }
+    if (desc.length > 200) {
+      throw new Error(
+        `ritual ${JSON.stringify(def.id)}: description exceeds 200 chars (${desc.length})`,
+      )
+    }
+    if (def.tool_surface.length === 0) {
+      // #361 toolless-class pin: a ritual with no tools is a silent no-op.
+      throw new Error(
+        `ritual ${JSON.stringify(def.id)}: tool_surface is empty (#361 toolless class — grant at least one tool)`,
+      )
+    }
+    let hasWebTool = false
+    for (const t of def.tool_surface) {
+      if (!TOOL_TOKEN_RE.test(t)) {
+        throw new Error(
+          `ritual ${JSON.stringify(def.id)}: tool_surface entry ${JSON.stringify(t)} is not a valid tool token (${TOOL_TOKEN_RE})`,
+        )
+      }
+      if (WEB_TOOLS.has(t)) hasWebTool = true
+    }
+    if (hasWebTool && def.egress === 'none') {
+      throw new Error(
+        `ritual ${JSON.stringify(def.id)}: tool_surface grants a web tool but egress is 'none' — set egress:'web'`,
+      )
+    }
+    if (!hasWebTool && def.egress === 'web') {
+      throw new Error(
+        `ritual ${JSON.stringify(def.id)}: egress is 'web' but tool_surface grants no web tool (WebSearch/WebFetch)`,
+      )
+    }
   }
-  const frozen = Object.freeze([...byId.values()])
-  return Object.freeze({
-    get: (id: string) => byId.get(id),
-    list: () => frozen,
-  })
+
+  return {
+    register(def: RitualDef): void {
+      assertValid(def)
+      byId.set(
+        def.id,
+        Object.freeze({ ...def, tool_surface: Object.freeze([...def.tool_surface]) }),
+      )
+    },
+    get(id: string): RitualDef | undefined {
+      return byId.get(id)
+    },
+    list(): RitualDef[] {
+      return [...byId.values()]
+    },
+    promptPathFor(id: string): string {
+      if (!RITUAL_ID_RE.test(id)) {
+        throw new Error(`promptPathFor: id ${JSON.stringify(id)} fails RITUAL_ID_RE`)
+      }
+      return join(rituals_dir, `${id}.md`)
+    },
+  }
 }
 
+/** The fail-CLOSED fire-time skip reasons. */
+export type RitualFireSkipReason = 'unknown_ritual' | 'missing_prompt' | 'unapproved'
+
 /**
- * Resolve the prompt file path for a ritual: `<promptRoot>/rituals/<id>.md`.
- * Defense-in-depth: THROWS if `id` fails {@link RITUAL_ID_RE} even though the
- * registry already guards it — no caller can reach the filesystem with an
- * unguarded id.
+ * The approval seam. Task 3 supplies the real content-hash-bound checker (hash of
+ * prompt bytes ‖ tool surface ‖ scope ‖ cadence ‖ tier ‖ timeout, re-verified at
+ * EVERY fire because ported prompts are mutable files). Task 2 defines ONLY the
+ * seam — there is no permissive default anywhere in the module, so composition
+ * can never accidentally fail OPEN.
  */
-export function resolveRitualPromptPath(promptRoot: string, id: string): string {
-  if (!RITUAL_ID_RE.test(id)) {
-    throw new Error(`resolveRitualPromptPath: id ${JSON.stringify(id)} fails RITUAL_ID_RE`)
-  }
-  return join(promptRoot, 'rituals', `${id}.md`)
+export interface RitualApprovalCheck {
+  isApproved(def: RitualDef, promptBytes: string): boolean | Promise<boolean>
 }
 
 /**
  * The fire-time verdict. `ok: true` carries the resolved def + the prompt bytes;
- * `ok: false` carries the single SKIP reason. A failed verdict means the tick
- * branch logs it and SKIPS the spawn — it NEVER degrades to the nudge composer
- * and NEVER spawns with an empty tool set.
+ * `ok: false` carries a single SKIP reason + a human detail. A failed verdict
+ * means the tick branch (task 4) logs it and SKIPS the spawn — it NEVER degrades
+ * to the nudge composer and NEVER spawns with an empty tool set, and the ok
+ * branch's `def.tool_surface` is non-empty by the register() invariant.
  */
-export type RitualFireVerdict =
-  | { ok: true; ritual: RitualDef; promptText: string }
-  | { ok: false; reason: 'unknown_ritual' | 'missing_prompt' | 'unapproved' }
-
-/** Injected dependencies for {@link validateRitualFire}. */
-export interface RitualFireDeps {
-  registry: RitualRegistry
-  /** Root under which `rituals/<id>.md` prompt files live. */
-  promptRoot: string
-  /**
-   * Approval seam — task 3 implements content-hash checking. REQUIRED (no
-   * default): composition can never accidentally fail OPEN. Called ONLY after
-   * the prompt is read (the hash needs the bytes). Semantics: fail CLOSED —
-   * return false ⇒ 'unapproved' ⇒ skip.
-   */
-  isApproved: (ritual: RitualDef, promptText: string) => boolean
-}
+export type RitualFireValidation =
+  | { ok: true; def: RitualDef; prompt: string }
+  | { ok: false; reason: RitualFireSkipReason; detail: string }
 
 /**
  * Fail-CLOSED fire-time validation. Order:
- *   1. registry.get(ritualId) miss ⇒ { ok:false, reason:'unknown_ritual' }.
- *   2. read `<promptRoot>/rituals/<id>.md`; a missing / unreadable / whitespace-
- *      only file ⇒ { ok:false, reason:'missing_prompt' } (a 0-byte prompt is a
- *      silent no-op ritual — skip it, never spawn an empty run).
- *   3. isApproved(ritual, promptText) === false ⇒ { ok:false, reason:'unapproved' }.
- *   4. else ⇒ { ok:true, ritual, promptText }.
+ *   1. `ritual_id` malformed or not registered ⇒ { ok:false, 'unknown_ritual' }.
+ *   2. read `promptPathFor(id)` — a missing / unreadable / empty-or-whitespace /
+ *      over-{@link MAX_RITUAL_PROMPT_BYTES} file ⇒ { ok:false, 'missing_prompt' }
+ *      (the detail says which).
+ *   3. `await approvals.isApproved(def, prompt)` — false OR THROWS ⇒
+ *      { ok:false, 'unapproved' } (fail CLOSED — a broken approval store must
+ *      never fire a ritual).
+ *   4. all pass ⇒ { ok:true, def, prompt }.
  *
- * Pure: no logger side effects (the tick branch, task 4, logs the verdict). A
- * failed verdict is ALWAYS a skip — never a degrade-to-nudge, never a tools:[]
- * spawn.
+ * Every skip calls `log()` exactly once with the ritual id + reason + detail.
+ * The `approvals` parameter is REQUIRED. There is NO fallback value and NO
+ * degrade-to-nudge shape.
  */
-export function validateRitualFire(ritualId: string, deps: RitualFireDeps): RitualFireVerdict {
-  const ritual = deps.registry.get(ritualId)
-  if (ritual === undefined) {
-    return { ok: false, reason: 'unknown_ritual' }
+export async function validateRitualFire(
+  registry: RitualRegistry,
+  approvals: RitualApprovalCheck,
+  ritual_id: string,
+  log: (msg: string) => void = console.error,
+): Promise<RitualFireValidation> {
+  const skip = (reason: RitualFireSkipReason, detail: string): RitualFireValidation => {
+    log(`ritual fire SKIP id=${ritual_id} reason=${reason} detail=${detail}`)
+    return { ok: false, reason, detail }
   }
-  let promptText: string
+
+  const def = registry.get(ritual_id)
+  if (def === undefined) {
+    return skip('unknown_ritual', `no registered ritual with id ${JSON.stringify(ritual_id)}`)
+  }
+
+  let prompt: string
   try {
-    promptText = readFileSync(resolveRitualPromptPath(deps.promptRoot, ritual.id), 'utf8')
-  } catch {
-    return { ok: false, reason: 'missing_prompt' }
+    const path = registry.promptPathFor(def.id)
+    const buf = readFileSync(path)
+    if (buf.byteLength > MAX_RITUAL_PROMPT_BYTES) {
+      return skip(
+        'missing_prompt',
+        `prompt ${path} is ${buf.byteLength} bytes (> MAX_RITUAL_PROMPT_BYTES ${MAX_RITUAL_PROMPT_BYTES})`,
+      )
+    }
+    prompt = buf.toString('utf8')
+  } catch (err) {
+    return skip('missing_prompt', `prompt file unreadable: ${(err as Error).message}`)
   }
-  if (promptText.trim().length === 0) {
-    return { ok: false, reason: 'missing_prompt' }
+  if (prompt.trim().length === 0) {
+    return skip('missing_prompt', 'prompt file is empty or whitespace-only')
   }
-  if (!deps.isApproved(ritual, promptText)) {
-    return { ok: false, reason: 'unapproved' }
+
+  let approved: boolean
+  try {
+    approved = await approvals.isApproved(def, prompt)
+  } catch (err) {
+    return skip('unapproved', `approval check threw (fail-closed): ${(err as Error).message}`)
   }
-  return { ok: true, ritual, promptText }
+  if (!approved) {
+    return skip('unapproved', 'approval store returned false')
+  }
+
+  return { ok: true, def, prompt }
 }
