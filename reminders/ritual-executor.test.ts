@@ -33,6 +33,7 @@ import {
 } from './rituals.ts'
 import { computeRitualContentHash } from './ritual-approval.ts'
 import { createRitualRunStore, type RitualRunStore } from './ritual-runs.ts'
+import type { ReminderOutbound, ReminderOutboundInput } from './dispatcher.ts'
 import {
   createRitualExecutor,
   type RitualTurn,
@@ -107,6 +108,24 @@ async function waitTerminal(run_id: string): Promise<ReturnType<RitualRunStore['
 
 const approver = (value: boolean): RitualApprovalCheck => ({ isApproved: () => value })
 
+/** A no-op delivery seam for the pre-task-5 assertions that don't inspect posts. */
+const passThroughOutbound: ReminderOutbound = { post: async () => true }
+const resolveTopic = (): string => 'app:owner-topic'
+
+/** A recording delivery seam — captures every post for task-5 delivery assertions. */
+function recordingOutbound(): { posts: ReminderOutboundInput[]; outbound: ReminderOutbound } {
+  const posts: ReminderOutboundInput[] = []
+  return {
+    posts,
+    outbound: {
+      post: mock(async (i: ReminderOutboundInput): Promise<boolean> => {
+        posts.push(i)
+        return true
+      }),
+    },
+  }
+}
+
 describe('createRitualExecutor.fire — skip verdicts', () => {
   test('unknown ritual → durable skipped row, spawnSubagent NOT invoked', async () => {
     const registry = createRitualRegistry({ rituals_dir: ritualsDir }) // empty
@@ -117,6 +136,8 @@ describe('createRitualExecutor.fire — skip verdicts', () => {
       project_slug: 'owner',
       instance_key: 'owner',
       subagents,
+      outbound: passThroughOutbound,
+      resolve_topic: resolveTopic,
       turn,
       runs,
       resolve_model: () => 'm',
@@ -142,6 +163,8 @@ describe('createRitualExecutor.fire — skip verdicts', () => {
       project_slug: 'owner',
       instance_key: 'owner',
       subagents,
+      outbound: passThroughOutbound,
+      resolve_topic: resolveTopic,
       turn: mock(async (): Promise<RitualTurnResult> => ({ result: '', status: 'completed' })),
       runs,
       resolve_model: () => 'm',
@@ -164,6 +187,8 @@ describe('createRitualExecutor.fire — skip verdicts', () => {
       project_slug: 'owner',
       instance_key: 'owner',
       subagents,
+      outbound: passThroughOutbound,
+      resolve_topic: resolveTopic,
       turn: mock(async (): Promise<RitualTurnResult> => ({ result: '', status: 'completed' })),
       runs,
       resolve_model: () => 'm',
@@ -199,6 +224,8 @@ describe('createRitualExecutor.fire — approved spawn + turn wiring', () => {
       project_slug: 'owner',
       instance_key: 'owner',
       subagents,
+      outbound: passThroughOutbound,
+      resolve_topic: resolveTopic,
       turn,
       runs,
       resolve_model: () => 'model-x',
@@ -276,6 +303,8 @@ describe('createRitualExecutor.fire — approved spawn + turn wiring', () => {
         project_slug: 'owner',
         instance_key: 'owner',
         subagents,
+        outbound: passThroughOutbound,
+        resolve_topic: resolveTopic,
         turn,
         runs,
         resolve_model: () => 'm',
@@ -301,6 +330,8 @@ describe('createRitualExecutor.fire — approved spawn + turn wiring', () => {
       project_slug: 'owner',
       instance_key: 'owner',
       subagents,
+      outbound: passThroughOutbound,
+      resolve_topic: resolveTopic,
       turn,
       runs,
       resolve_model: () => 'm',
@@ -340,6 +371,8 @@ describe('createRitualExecutor.fire — spawn refusal + robustness', () => {
       project_slug: 'owner',
       instance_key: 'owner',
       subagents,
+      outbound: passThroughOutbound,
+      resolve_topic: resolveTopic,
       turn,
       runs,
       resolve_model: () => 'm',
@@ -372,6 +405,8 @@ describe('createRitualExecutor.fire — spawn refusal + robustness', () => {
       project_slug: 'owner',
       instance_key: 'owner',
       subagents,
+      outbound: passThroughOutbound,
+      resolve_topic: resolveTopic,
       turn: mock(async (): Promise<RitualTurnResult> => ({ result: '', status: 'completed' })),
       runs: brokenRuns,
       resolve_model: () => 'm',

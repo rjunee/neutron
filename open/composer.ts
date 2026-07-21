@@ -213,6 +213,8 @@ import {
   createRitualRegistry,
   createRitualExecutor,
   createRitualRunStore,
+  reapOrphanRitualRuns,
+  RITUAL_RUN_RETENTION_MS,
 } from '@neutronai/reminders/index.ts'
 // L3 (2026-07) — the reminder delivery impl moved UP into the gateway
 // composition band (it reaches the WebChatSenderRegistry + landing protocol).
@@ -1854,8 +1856,13 @@ export function buildOpenGraphComposer(
     const reminderGeneralTopic = appWsTopicId(OWNER_USER_ID)
     const resolveAppWsReminderTopic = (_explicit_topic: string | null): string =>
       reminderGeneralTopic
+    // ONE outbound + ONE runs store hoisted so the nudge dispatcher, the ritual
+    // executor, and the boot reap all post through / write to the SAME instances
+    // (one deliver seam, one `code_ritual_runs` writer).
+    const reminderOutbound = buildButtonStoreReminderOutbound({ deliver })
+    const ritualRuns = createRitualRunStore(db)
     const reminder_dispatcher = buildReminderDispatcher({
-      outbound: buildButtonStoreReminderOutbound({ deliver }),
+      outbound: reminderOutbound,
       ...(liveAgentSubstrate !== null
         ? { llm: buildSubstrateReminderLlm(liveAgentSubstrate) }
         : {}),
@@ -1885,13 +1892,43 @@ export function buildOpenGraphComposer(
               instance_key: owner_handle,
               subagents: subagentRegistry,
               turn: buildCancellableDispatchTurn({ build_substrate: makeRitualSubstrate }),
-              runs: createRitualRunStore(db),
+              // SAME shared runs store the boot reap writes to (task 5).
+              runs: ritualRuns,
               resolve_model: getBestModel,
+              // Task 5 delivery deps: post ritual terminal events through the SAME
+              // `deliver` seam (via `reminderOutbound`) the nudge dispatcher uses,
+              // to the owner's bare `app:<user>` topic.
+              outbound: reminderOutbound,
+              resolve_topic: (reminder) => resolveAppWsReminderTopic(reminder.topic_id),
               // Both scopes → owner_home in v1; per-project rooting refines when
               // project-scoped rituals land (task 7+).
               scope_cwd: () => owner_home,
             })
         : undefined
+
+    // Boot reap + retention prune of `code_ritual_runs` (plan task 5). NOT
+    // llmPool-gated: a 'running' row orphaned by a PRIOR (LLM-enabled) boot must
+    // be reaped + surfaced even on a credential-less boot. `reapOrphanRitualRuns`
+    // is called DIRECTLY (not wrapped in a deferred thunk): its FIRST statement is
+    // a SYNCHRONOUS `listOrphanRunning()` snapshot, and this compose runs BEFORE
+    // `build-core-modules` starts the ritual tick loop — so the snapshot cannot
+    // contain a current-boot 'running' row (`code_ritual_runs` has no boot_id;
+    // ordering IS the current-boot safety). The prune chains after the reap.
+    // fireAndForget precedent: the boot dispatch sweep just above (composer:888).
+    fireAndForget(
+      'composer.reapOrphanRitualRuns',
+      reapOrphanRitualRuns({
+        runs: ritualRuns,
+        outbound: reminderOutbound,
+        topic_id: resolveAppWsReminderTopic(null),
+        owner_slug: project_slug,
+      }).then(() => ritualRuns.pruneOlderThan({ cutoff_ms: Date.now() - RITUAL_RUN_RETENTION_MS })),
+      (err: unknown) => {
+        log.warn('ritual_boot_reap_failed', {
+          error: err instanceof Error ? err.message : String(err),
+        })
+      },
+    )
 
     // ── P1-4 — proactive messaging ACTIVATION (morning brief + idle nudge) ──
     // The proactive modules (`gateway/proactive/*`) were built + tested but

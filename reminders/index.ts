@@ -37,13 +37,29 @@ export type {
   RitualTurnResult,
 } from './ritual-executor.ts'
 export { RITUAL_AGENT_BASE_PROMPT } from './prompt-path.ts'
-export { createRitualRunStore, MAX_RITUAL_OUTPUT_SUMMARY_CHARS } from './ritual-runs.ts'
+export {
+  createRitualRunStore,
+  MAX_RITUAL_OUTPUT_SUMMARY_CHARS,
+  RITUAL_RUN_RETENTION_MS,
+} from './ritual-runs.ts'
 export type {
   RitualRunStore,
   RitualRunRow,
   RitualRunStatus,
   RitualRunTerminalStatus,
 } from './ritual-runs.ts'
+
+// Completion delivery + failure surfacing (plan task 5): terminal-event notice
+// formatters, the once-per-streak escalation rule, and the boot-reap driver.
+export {
+  reapOrphanRitualRuns,
+  shouldEscalate,
+  formatRitualFailureNotice,
+  formatRitualCompletionFallback,
+  formatRitualEscalationNotice,
+  formatRitualBootReapNotice,
+  RITUAL_ESCALATION_CONSECUTIVE_FAILURES,
+} from './ritual-delivery.ts'
 
 export {
   buildReminderDispatcher,

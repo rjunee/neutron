@@ -19,8 +19,24 @@
  *      terminal.
  *
  * `fire()` NEVER throws (a fire-time error must not wedge the tick loop) and NEVER
- * awaits the launched turn. There is NO delivery / completion-notice here — that
- * is plan task 5.
+ * awaits the launched turn.
+ *
+ * COMPLETION DELIVERY + FAILURE SURFACING (plan task 5): after the durable
+ * `code_ritual_runs` row is written FIRST, the settle chain posts through the ONE
+ * out-of-turn delivery seam (`deps.outbound`, production
+ * `buildButtonStoreReminderOutbound({ deliver })`) to `deps.resolve_topic(reminder)`:
+ *   - a `finished` non-silent ritual posts its final text (or a completion
+ *     fallback when the output is empty);
+ *   - a `silent` ritual posts NOTHING on success (silent suppresses SUCCESS
+ *     output only — failure notices below still post);
+ *   - every failure terminal (failed / timed_out / crashed, incl. spawn-refusal
+ *     'failed' rows) posts exactly one one-line notice carrying ritual id +
+ *     status + run id;
+ *   - the 3rd consecutive failure additionally posts one escalation notice, once
+ *     per streak (a deterministic rule over the last 4 terminal rows — no new
+ *     state).
+ * All posts are BEST-EFFORT (try/catch + log): the durable row is the record and
+ * the detached settle chain must NEVER reject.
  *
  * DECOUPLED FROM agent-dispatch (the DispatchService↔TridentDispatch structural-
  * match precedent, `agent-dispatch/service.ts:104-108`): this module declares a
@@ -41,6 +57,7 @@ import {
   RITUAL_TIMEOUT_MS,
   validateRitualFire,
   type RitualApprovalCheck,
+  type RitualDef,
   type RitualRegistry,
   type RitualScope,
 } from './rituals.ts'
@@ -50,6 +67,13 @@ import {
   ritualCadenceString,
 } from './ritual-approval.ts'
 import type { RitualRunStore, RitualRunTerminalStatus } from './ritual-runs.ts'
+import type { ReminderOutbound } from './dispatcher.ts'
+import {
+  formatRitualCompletionFallback,
+  formatRitualEscalationNotice,
+  formatRitualFailureNotice,
+  shouldEscalate,
+} from './ritual-delivery.ts'
 
 const log = createLogger('ritual-executor')
 
@@ -98,6 +122,17 @@ export interface RitualExecutorDeps {
   turn: RitualTurn
   /** The sole `code_ritual_runs` writer. */
   runs: RitualRunStore
+  /**
+   * The ONE out-of-turn delivery seam (durable-row-first + best-effort push).
+   * Production: `buildButtonStoreReminderOutbound({ deliver })` — the SAME
+   * instance the nudge dispatcher posts through.
+   */
+  outbound: ReminderOutbound
+  /**
+   * Resolve the delivery topic for a fired ritual reminder. Production: the
+   * composer's app-ws General resolver (`resolveAppWsReminderTopic`).
+   */
+  resolve_topic: (reminder: Reminder) => string
   /** Resolve the concrete model id for `RITUAL_MODEL_TIER` (thunk — live best model). */
   resolve_model: () => string
   /** Resolve the cwd + write-containment root for a ritual scope. */
@@ -129,8 +164,68 @@ function mintId(mint: (() => string) | undefined): string {
 export function createRitualExecutor(deps: RitualExecutorDeps): RitualExecutor {
   const now = deps.now ?? Date.now
 
-  /** Map a settled turn onto the run-row + registry terminal states. */
-  async function settleTerminal(runRunId: string, subagentRunId: string, r: RitualTurnResult): Promise<void> {
+  /** Best-effort post of one notice body. NEVER throws (the record is the row). */
+  async function postNotice(
+    topic_id: string,
+    owner_slug: string,
+    reminder_id: string,
+    body: string,
+  ): Promise<void> {
+    try {
+      await deps.outbound.post({ topic_id, owner_slug, body, reminder_id })
+    } catch (err) {
+      log.error('ritual_notice_post_failed', {
+        reminder_id,
+        error: err instanceof Error ? (err.stack ?? err.message) : String(err),
+      })
+    }
+  }
+
+  /**
+   * Surface a failure terminal: post the one-line failure notice, THEN — when
+   * the last-4-terminal-rows rule crosses 3 consecutive failures — one escalation
+   * notice (once per streak). Wrapped so it can NEVER reject the settle chain.
+   */
+  async function surfaceFailure(
+    reminder: Reminder,
+    ritual_id: string,
+    run_id: string,
+    status: RitualRunTerminalStatus,
+    failure_reason?: string | null,
+  ): Promise<void> {
+    try {
+      const topic = deps.resolve_topic(reminder)
+      const owner = reminder.owner_slug
+      await postNotice(
+        topic,
+        owner,
+        reminder.id,
+        formatRitualFailureNotice({ ritual_id, status, run_id, failure_reason }),
+      )
+      // Read the last 4 terminal rows AFTER this failure's row is written — the
+      // escalation rule is pure over that snapshot (no new state).
+      const recent = deps.runs.listRecentTerminal({ ritual_id, limit: 4 })
+      if (shouldEscalate(recent)) {
+        await postNotice(topic, owner, reminder.id, formatRitualEscalationNotice({ ritual_id, run_id }))
+      }
+    } catch (err) {
+      log.error('ritual_surface_failure_failed', {
+        reminder_id: reminder.id,
+        ritual_id,
+        error: err instanceof Error ? (err.stack ?? err.message) : String(err),
+      })
+    }
+  }
+
+  /** Map a settled turn onto the run-row + registry terminal states, then deliver. */
+  async function settleTerminal(
+    reminder: Reminder,
+    def: RitualDef,
+    ritual_id: string,
+    runRunId: string,
+    subagentRunId: string,
+    r: RitualTurnResult,
+  ): Promise<void> {
     const runStatus: RitualRunTerminalStatus =
       r.status === 'completed'
         ? 'finished'
@@ -141,6 +236,7 @@ export function createRitualExecutor(deps: RitualExecutorDeps): RitualExecutor {
             : 'failed'
     const registryStatus =
       r.status === 'completed' ? 'finished' : r.status === 'cancelled' ? 'cancelled' : 'crashed'
+    // Durable row FIRST — the record of the run, before any post.
     await deps.runs.markTerminal({
       run_id: runRunId,
       status: runStatus,
@@ -158,10 +254,30 @@ export function createRitualExecutor(deps: RitualExecutorDeps): RitualExecutor {
         error: err instanceof Error ? (err.stack ?? err.message) : String(err),
       })
     }
+    // DELIVERY — after the durable row is written.
+    if (runStatus === 'finished') {
+      if (!def.silent) {
+        const text = r.result.trim()
+        const body = text.length > 0 ? text : formatRitualCompletionFallback({ ritual_id, run_id: runRunId })
+        await postNotice(deps.resolve_topic(reminder), reminder.owner_slug, reminder.id, body)
+      }
+      // silent → no success post.
+    } else {
+      // failed / timed_out. A turn-settled failure carries the turn's own text as
+      // the reason only when non-empty; otherwise no reason.
+      const settledReason = r.result.trim().length > 0 ? r.result.trim().slice(0, 160) : null
+      await surfaceFailure(reminder, ritual_id, runRunId, runStatus, settledReason)
+    }
   }
 
-  /** The turn rejected outright — record a crash on both surfaces. */
-  async function settleCrashed(runRunId: string, subagentRunId: string, err: unknown): Promise<void> {
+  /** The turn rejected outright — record a crash on both surfaces, then notice. */
+  async function settleCrashed(
+    reminder: Reminder,
+    ritual_id: string,
+    runRunId: string,
+    subagentRunId: string,
+    err: unknown,
+  ): Promise<void> {
     const message = err instanceof Error ? (err.stack ?? err.message) : String(err)
     log.error('ritual_turn_crashed', { subagent_run_id: subagentRunId, error: message })
     await deps.runs.markTerminal({
@@ -178,6 +294,7 @@ export function createRitualExecutor(deps: RitualExecutorDeps): RitualExecutor {
         error: rerr instanceof Error ? (rerr.stack ?? rerr.message) : String(rerr),
       })
     }
+    await surfaceFailure(reminder, ritual_id, runRunId, 'crashed', message)
   }
 
   return {
@@ -247,14 +364,18 @@ export function createRitualExecutor(deps: RitualExecutorDeps): RitualExecutor {
           )
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err)
+          const refusedRunId = mintId(deps.mint_run_id)
           await deps.runs.insertFailed({
-            run_id: mintId(deps.mint_run_id),
+            run_id: refusedRunId,
             ritual_id,
             reminder_id: reminder.id,
             project_slug: deps.project_slug,
             failure_reason: message,
             now_ms: now(),
           })
+          // A spawn refusal is a durable 'failed' row → surface it like any other
+          // failure terminal (counts toward the consecutive-failure escalation).
+          await surfaceFailure(reminder, ritual_id, refusedRunId, 'failed', message)
           return
         }
 
@@ -301,8 +422,8 @@ export function createRitualExecutor(deps: RitualExecutorDeps): RitualExecutor {
               timeout_ms: RITUAL_TIMEOUT_MS,
               tools: def.tool_surface,
             })
-            .then((r) => settleTerminal(runRunId, subagentRunId, r))
-            .catch((err) => settleCrashed(runRunId, subagentRunId, err)),
+            .then((r) => settleTerminal(reminder, def, ritual_id, runRunId, subagentRunId, r))
+            .catch((err) => settleCrashed(reminder, ritual_id, runRunId, subagentRunId, err)),
         )
       } catch (err) {
         log.error('ritual_fire_unexpected', {

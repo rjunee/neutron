@@ -63,6 +63,16 @@ export interface RitualRunRow {
 /** Max stored bytes (chars) of a run's final text. */
 export const MAX_RITUAL_OUTPUT_SUMMARY_CHARS = 4000
 
+/**
+ * `code_ritual_runs` retention window (30 days). This is the run-history table's
+ * OWN retention — it is NEVER pruned by the subagent liveness prune (which reaps
+ * the live `code_subagent_registry`), because the whole point of the history row
+ * is to answer "why did my morning brief not run last week?" long after the live
+ * registry row is gone. `pruneOlderThan` is driven at boot with
+ * `Date.now() - RITUAL_RUN_RETENTION_MS`.
+ */
+export const RITUAL_RUN_RETENTION_MS = 30 * 24 * 60 * 60 * 1000
+
 const COLS =
   'run_id, ritual_id, reminder_id, project_slug, subagent_run_id, status, ' +
   'skip_reason, content_hash, started_at, ended_at, output_summary, failure_reason'
@@ -108,6 +118,27 @@ export interface RitualRunStore {
   get(run_id: string): RitualRunRow | null
   /** Every row for a ritual, newest first (tests + observability). */
   listByRitual(ritual_id: string): RitualRunRow[]
+  /**
+   * The most recent TERMINAL rows (finished/failed/timed_out/crashed — excludes
+   * 'skipped' and 'running') for a ritual, newest first, capped at `limit`. The
+   * once-per-streak escalation rule reads the last 4 with this.
+   */
+  listRecentTerminal(input: { ritual_id: string; limit: number }): RitualRunRow[]
+  /**
+   * Every 'running' row across ALL rituals, oldest first. LOAD-BEARING for the
+   * boot-reap ordering guarantee: `reapOrphanRitualRuns` calls this as its FIRST,
+   * SYNCHRONOUS statement during compose — before the tick loop that could spawn
+   * a fresh 'running' row exists — so the snapshot can only contain orphans left
+   * by a prior boot (`code_ritual_runs` has no boot_id column; ordering IS the
+   * current-boot safety).
+   */
+  listOrphanRunning(): RitualRunRow[]
+  /**
+   * Delete terminal/skipped rows whose `started_at` is STRICTLY older than
+   * `cutoff_ms`. NEVER deletes 'running' rows (any age) — those are either live
+   * or pending a reap. Returns the number of rows deleted.
+   */
+  pruneOlderThan(input: { cutoff_ms: number }): Promise<number>
 }
 
 /** Build the sole `code_ritual_runs` writer over `db`. */
@@ -199,6 +230,43 @@ export function createRitualRunStore(db: ProjectDb): RitualRunStore {
         `SELECT ${COLS} FROM code_ritual_runs WHERE ritual_id = ? ORDER BY started_at DESC`,
         [ritual_id],
       )
+    },
+
+    listRecentTerminal(input): RitualRunRow[] {
+      return db.all<RitualRunRow>(
+        `SELECT ${COLS} FROM code_ritual_runs
+          WHERE ritual_id = ? AND status IN ('finished','failed','timed_out','crashed')
+          ORDER BY started_at DESC, ended_at DESC
+          LIMIT ?`,
+        [input.ritual_id, input.limit],
+      )
+    },
+
+    listOrphanRunning(): RitualRunRow[] {
+      // Sync read — the reap driver's FIRST statement. See interface doc: this
+      // ordering (snapshot before the tick loop exists) is the current-boot safety.
+      return db.all<RitualRunRow>(
+        `SELECT ${COLS} FROM code_ritual_runs WHERE status = 'running' ORDER BY started_at ASC`,
+      )
+    },
+
+    async pruneOlderThan(input): Promise<number> {
+      // `ProjectDb.run` returns void (no driver changes count), so COUNT first,
+      // then DELETE with the identical predicate. Strict `<` keeps rows AT the
+      // cutoff; `status <> 'running'` keeps every live/pending-reap row of any age.
+      const countRow = db.get<{ n: number }>(
+        `SELECT COUNT(*) AS n FROM code_ritual_runs
+          WHERE status <> 'running' AND started_at < ?`,
+        [input.cutoff_ms],
+      )
+      const deleted = countRow?.n ?? 0
+      if (deleted > 0) {
+        await db.run(
+          `DELETE FROM code_ritual_runs WHERE status <> 'running' AND started_at < ?`,
+          [input.cutoff_ms],
+        )
+      }
+      return deleted
     },
   }
 }
