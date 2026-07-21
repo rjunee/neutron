@@ -2109,6 +2109,89 @@ this store: its `reminders_create` tool accepts an optional `recurrence` label
 OR `recurrence_spec` cron (validated via `isValidCron`), and `snooze` / `update`
 preserve a reminder's cadence across the atomic cancel+create.
 
+## Ritual executor — approval-gated code rituals (`reminders/`)
+
+A ritual is a scheduled reminder whose fire runs a CODE turn (a Claude Code
+substrate) instead of composing a text nudge — Vajra's "scheduled agent" parity.
+It reuses the reminder table + tick loop for scheduling; a due row with a
+non-null `ritual_id` routes to the executor branch. The whole surface is
+approval-gated: nothing fires unless the OWNER has explicitly approved that exact
+ritual content in chat.
+
+- **Ritual defs + registry** (`reminders/rituals.ts`). A `RitualDef` (interface
+  at `reminders/rituals.ts:131`) declares `id`, the self-contained `prompt`
+  bytes, a `tool_surface`, an `egress` class (`'none' | 'web'`), a `scope`
+  (`'instance' | 'project'`), a cadence, a tier, and a timeout.
+  `createRitualRegistry` (`reminders/rituals.ts:278`) roots defs at
+  `<owner_home>/rituals/`. The fire-time gate is the async `validateRitualFire`
+  (`reminders/rituals.ts:374`), which takes a REQUIRED `RitualApprovalCheck` seam
+  (`reminders/rituals.ts:341`) and FAILS CLOSED — an unknown id, a missing def, a
+  DB error, or an unapproved def all return a durable SKIP verdict, never a fire.
+- **Content-hash approval binding** (`reminders/ritual-approval.ts`).
+  `computeRitualContentHash` (`reminders/ritual-approval.ts:89`) is a sha256 over
+  prompt‖surface‖scope‖cadence‖tier‖timeout; `createRitualApprovalCheck`
+  (`reminders/ritual-approval.ts:240`) recomputes that hash from the LIVE file
+  bytes on EVERY fire and matches it against the approved-grant hash. An owner
+  editing the ritual file, or an agent widening its surface/cadence, changes the
+  hash and silently DROPS approval by design — a widened ritual must be
+  re-approved.
+- **Fire path — inside the tick quiescence boundary.** The tick AWAITS
+  `ritual_executor.fire(reminder)` (`reminders/tick.ts:250`) so the
+  claim→validate→durable-insert sequence completes before the tick advances;
+  only the long-running substrate TURN is detached (fire-and-forget) inside the
+  executor. `reminders/ritual-executor.ts` runs the fail-closed validate → on a
+  SKIP writes a durable `code_ritual_runs` row and returns; on a fire spawns into
+  the dedicated ritual lane, inserts a `'running'` row, launches the detached
+  turn, and does terminal bookkeeping — it NEVER throws once a durable row
+  exists. `makeRitualSubstrate` (`open/wiring/substrates.ts:411`) builds an
+  ephemeral `cc-ritual-*` session under `PROFILE_RITUAL` (its own trust class)
+  with the shipped `ritual-agent-base.md`. `reminders/ritual-delivery.ts` posts
+  the completion text through the one `deliver()` seam (a `silent` ritual skips
+  the success post), surfaces a one-line failure notice on failed/timed-out/
+  crashed, escalates once per 3-consecutive-failure streak, reaps prior-boot
+  orphaned `'running'` rows to `'crashed'` at boot (`reapOrphanRitualRuns`), and
+  prunes runs after 30 days.
+- **Write-containment gate — STAY GATED (overturn 1).** The T5 spike that tried
+  to prove per-session `settings.json` deny fails CLOSED with the substrate
+  auto-approver disabled returned an UNPROVABLE verdict (2026-07-21: with
+  `skip_permissions:false` + a `permissions` block, the dev-channel MCP bound in
+  only 1/6 real-PTY runs and the bound run WEDGED on an interactive prompt — no
+  clean fail-closed; recorded at
+  `docs/plans/executor-mode-reminders-2026-07-20.md:254-278`). Consequence: any
+  ritual whose `tool_surface` grants a `GATED_WRITE_TOOLS` member (`Bash`,
+  `Write`, `Edit`, `MultiEdit`, `NotebookEdit` — `reminders/rituals.ts:106`)
+  STAYS GATED at fire time via a `gated_tool_surface` SKIP in `validateRitualFire`
+  until the OS-level sandbox sprint ships. Read-only rituals (surface within
+  `Read`/`Glob`/`Grep`, egress `'none'`) ship now under Layer 1 (the `--tools`
+  default-deny). Per overturn 1, this is APPROVAL-not-exclusion: a Bash-based
+  Vajra ritual still ports AS-IS with `requires_approval` — the Bash surface is
+  not excluded from the format, it is held at the fire-time gate until sandboxing
+  makes the run containable.
+- **Agent-callable registration + in-chat approval (overturn 3)**
+  (`reminders/ritual-registration.ts`). An agent proposes a ritual through the
+  reminders-Core `rituals_propose` / `rituals_status` MCP tools; the security
+  property is carried by the approval GATE, and the approval RENDERING IS the
+  mitigation. `renderRitualApprovalBody` (`reminders/ritual-registration.ts:301`)
+  emits a code-rendered, run-length-hardened fenced block that shows the FULL
+  prompt text, CAPABILITY bullets (not bare tool names — a Bash/write capability
+  is labelled "CURRENTLY BLOCKED at fire time"), the scope root, the cadence, and
+  an unattended-runtime line. Approval requires an explicit affirmative act: the
+  exact opaque `rap:` token from the persisted option set, OWNER-only, no
+  self-approval; anything else the owner types is inert.
+  `handleOwnerButtonAnswer` (`reminders/ritual-registration.ts:611`) captures at
+  turn-start against the persisted options and schedules the reminder row ONLY on
+  an approved grant whose content hash still matches the live bytes. There is no
+  register-and-fire in one turn, and surface/cadence widening drops approval via
+  the content hash.
+- **Bundled defs** (`reminders/bundled-rituals.ts`). `morning-brief`,
+  `evening-wrap`, and `daily-delta` templates ship in-repo, are seeded
+  copy-if-absent into `<owner_home>/rituals/` (`seedBundledRituals`,
+  `reminders/bundled-rituals.ts:108` — an owner-edited file is never clobbered),
+  and register UNAPPROVED on boot (`registerBundledRituals`,
+  `reminders/bundled-rituals.ts:149`) inside the composer's
+  `ritual_executor_factory` (`open/composer.ts:1911`). They do nothing until the
+  owner approves them.
+
 ## Proactive messaging — daily brief + idle-nudge sweep (`gateway/proactive/`)
 
 The owner-facing proactive layer (Vajra parity). Both halves were built + tested
@@ -2497,6 +2580,35 @@ optional operator `GBRAIN_SOURCE` / `GBRAIN_BRAIN_ID`.
     target but changes its verb (`Works at [[acme]].` → `Mentions [[acme]].`) is
     REJECTED — the edge can never silently degrade, and a predicate-scoped supersede
     can always still retire it.
+  - **Correction-pattern promotion — reflect-pass STEP 4** (`scribe/reflect/
+    reflect-pass.ts`, `scribe/reflect/correction-patterns.ts`). The 6h reflect
+    loop, after dedup/supersede/resynth, ALSO clusters recurring owner corrections
+    (`clusterCorrections`) and promotes each ≥3-occurrence cluster to a
+    kind-`concept` entity page with the stable slug `correction-pattern-<oldest-id>`
+    (`composePatternPage`, `scribe/reflect/correction-patterns.ts:115`). It is
+    deterministic and substrate-independent (runs on LLM-less boxes) and gated only
+    on an injected `readCorrections` seam — absent ⇒ step 4 skipped, no
+    scribe→reflection package edge. The report gains `correctionsScanned` /
+    `patternsPromoted`.
+
+- **Q2 — dreaming's uncovered half lives IN core memory, split by tier
+  (overturn 2).** The pieces of Vajra "dreaming" that scribe/reflect did not
+  already cover were folded into the core memory subsystem BY TIER — deliberately
+  NOT as one monolithic "dreaming ritual", and NOT all inside the 6h loop:
+  - **Entity backlink repair is EVENT-DRIVEN on the entity-writer sync hook**, not
+    part of the 6h reflect loop. `wrapSyncHookWithBacklinkRepair`
+    (`runtime/backlink-repair.ts`) wraps the sync hook OUTERMOST at
+    `open/wiring/memory.ts:231` (`gbrainSyncHook = backlinkRepairHook`), so every
+    entity write inspects new links, and a UNIQUE strip-hyphen-key match rewrites
+    the source page's wikilinks via a CAS `writeEntity` + a `backlink-repair:<slug>`
+    provenance row; orphan/ambiguous targets are logged and left untouched. A
+    coalesced single-flight drain enumerates the existing-slug corpus once per
+    cycle.
+  - **Correction-pattern promotion runs INSIDE the 6h loop** (reflect-pass step 4,
+    above).
+  - **Daily-delta notes stay a RITUAL** — the time-anchored survivor of the split,
+    the third bundled read-only ritual (`reminders/rituals/daily-delta.md`), since
+    nothing in memory triggers a daily delta. See the Ritual executor section.
 
 ## Credential management — onboarding OPTIONAL keys (WAVE 1) — `onboarding/optional-keys.ts`
 
