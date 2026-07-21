@@ -36,6 +36,7 @@ export {
 export {
   CORE_SOURCE_TAG,
   ReminderConvertUnsupportedError,
+  RitualsUnavailableError,
   buildReminderStoreBackend,
   cancelOwnedReminders,
   type CancelOwnedRemindersInput,
@@ -43,6 +44,10 @@ export {
   type ReminderRow,
   type ReminderStoreBackendOptions,
   type RemindersBackend,
+  type RemindersRitualService,
+  type RitualProposeInput,
+  type RitualProposeResult,
+  type RitualStatusRowResult,
   type RemindersCancelInput,
   type RemindersCancelResult,
   type RemindersConvertToTaskInput,
@@ -89,6 +94,7 @@ export {
   buildExtraTools,
   type BuiltExtraTools,
   type ExtraToolDeps,
+  type RitualsStatusOutput,
 } from './src/mcp-tools-extra.ts'
 
 export { LAUNCHER_ICON, type LauncherIconMeta } from './src/ui/launcher-icon.ts'

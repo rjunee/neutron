@@ -213,11 +213,15 @@ import {
   createRitualRegistry,
   createRitualExecutor,
   createRitualRunStore,
+  createRitualRegistrationService,
+  loadPersistedRitualDefs,
   reapOrphanRitualRuns,
   seedBundledRituals,
   registerBundledRituals,
+  ReminderStore,
   RITUAL_RUN_RETENTION_MS,
 } from '@neutronai/reminders/index.ts'
+import type { RitualRegistrationService } from '@neutronai/reminders/index.ts'
 // L3 (2026-07) — the reminder delivery impl moved UP into the gateway
 // composition band (it reaches the WebChatSenderRegistry + landing protocol).
 import { buildButtonStoreReminderOutbound } from '@neutronai/gateway/proactive/reminder-outbound.ts'
@@ -1158,6 +1162,14 @@ export function buildOpenGraphComposer(
     }
     const coresSubstrate =
       llmPool !== null ? makeEphemeralSubstrate('cc-cores')(owner_home) : null
+    // Plan task 8 — the agent-callable ritual registration service. Assigned LATE
+    // inside `ritual_executor_factory` (the one closure holding the graph's
+    // ApprovalManager), so every reader — the reminders-Core `rituals_*` tools
+    // (via mountOpenCores) and the live-agent approval capture — derefs this
+    // mutable binding through a late-bound getter. `null` until the factory runs
+    // (LLM-less box ⇒ never runs ⇒ tools throw unavailable / capture no-ops —
+    // fail closed, no flags).
+    let ritualRegistration: RitualRegistrationService | null = null
     const coresWiring = await mountOpenCores({
       projectDb: db,
       owner_home,
@@ -1166,6 +1178,9 @@ export function buildOpenGraphComposer(
       projectCredentialStore,
       env,
       substrate: coresSubstrate,
+      // Plan task 8 — late-bound getter so the reminders-Core `rituals_propose` /
+      // `rituals_status` backend methods deref the service constructed later.
+      ritualRegistration: () => ritualRegistration,
       // Settings Core (M1) — build the Open agent-profile backend at the
       // composition root and inject it (L3 DAG cut: the gateway core no longer
       // imports `open/`). When `update_agent_name` / `update_personality`
@@ -1903,6 +1918,39 @@ export function buildOpenGraphComposer(
               log: (m) => log.warn('ritual_seed_failed', { detail: m }),
             })
             registerBundledRituals(registry)
+            // Task 8 — re-register agent-persisted defs (<id>.def.json) so an
+            // agent-registered ritual survives reboot. AFTER registerBundledRituals
+            // so a def.json colliding with a bundled id is skipped (never clobbers).
+            loadPersistedRitualDefs({
+              registry,
+              rituals_dir,
+              log: (m) => log.warn('ritual_persisted_load', { detail: m }),
+            })
+            // Task 8 — construct the agent-callable registration service against the
+            // graph's ApprovalManager. Its CODE-rendered approval prompts ride the
+            // SAME `deliver` seam (durability 'reply' + options) fired reminders use;
+            // the owner's tap resolves it through `handleOwnerButtonAnswer`. Assigned
+            // to the outer `ritualRegistration` binding so the reminders-Core tools +
+            // the live-agent capture deref it.
+            ritualRegistration = createRitualRegistrationService({
+              registry,
+              rituals_dir,
+              approvals,
+              store: new ReminderStore(db),
+              project_slug,
+              owner_user_id: OWNER_USER_ID,
+              approval_topic_id: resolveAppWsReminderTopic(null),
+              emit: async (p) => {
+                await deliver(resolveAppWsReminderTopic(null), {
+                  body: p.body,
+                  durability: 'reply',
+                  options: p.options,
+                  idempotency_key: p.idempotency_key,
+                  metadata: p.metadata,
+                })
+              },
+              log: (m) => log.info('ritual_registration', { detail: m }),
+            })
             return createRitualExecutor({
               registry,
               approvals,
@@ -3124,6 +3172,14 @@ export function buildOpenGraphComposer(
             projectPersonaResolver,
             reflection,
             ...(onboardingSeam !== undefined ? { onboarding: onboardingSeam } : {}),
+            // Plan task 8 — deterministic ritual-approval capture. Late-bound deref
+            // of `ritualRegistration` (assigned in `ritual_executor_factory`, which
+            // runs after this construction): the owner's tap of an `rap:` approval
+            // token resolves the approval + schedules on approve, and the LLM turn is
+            // NEVER dispatched for that act. `null` ⇒ no-op (LLM-less box), returning
+            // null so the normal turn runs.
+            ritualApprovalCapture: async (i) =>
+              ritualRegistration === null ? null : ritualRegistration.handleOwnerButtonAnswer(i),
             // Work Board (Phase 1a) — re-ground EVERY turn on the board (the
             // orchestrator's external memory). Returns the already-formatted,
             // escaped `<work_board>` DATA block for the active+next items, scoped

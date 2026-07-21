@@ -39,6 +39,7 @@
 import { randomUUID } from 'node:crypto'
 
 import { buildButtonPrompt } from '@neutronai/channels/button-primitive.ts'
+import type { ButtonOption } from '@neutronai/channels/button-primitive.ts'
 import type { ButtonStore } from '@neutronai/channels/button-store.ts'
 import { parseAnyTopicId } from '@neutronai/channels/topic-id.ts'
 import type { ChatOutbound } from '@neutronai/landing/chat-protocol.ts'
@@ -70,6 +71,18 @@ export type DeliveryDurability = 'reply' | 'inert' | 'none'
 export interface DeliveryEnvelope {
   body: string
   durability: DeliveryDurability
+  /**
+   * Plan task 8 — optional tappable options carried on a `durability: 'reply'`
+   * post (the ritual-approval prompt: an out-of-turn, ButtonStore-persisted
+   * choice the owner taps to approve/deny). Honored ONLY on `'reply'` (the sole
+   * durability that builds a resolvable ButtonPrompt); ignored on `'inert'` /
+   * `'none'`. Absent ⇒ byte-identical to the pre-task-8 zero-option reply.
+   */
+  options?: ButtonOption[]
+  /** Idempotency key threaded onto the reply prompt (collapses re-emits). */
+  idempotency_key?: string
+  /** Open-shape prompt-level metadata bag threaded onto the reply prompt. */
+  metadata?: Record<string, unknown>
 }
 
 export interface DeliveryResult {
@@ -144,6 +157,10 @@ export function createDeliver(input: CreateDeliverInput): Deliver {
 
   return async (topic_id, envelope): Promise<DeliveryResult> => {
     const { body, durability } = envelope
+    // Plan task 8 — options/idempotency/metadata ride ONLY on a 'reply' post; on
+    // every other durability they are ignored (byte-identical legacy behavior).
+    const replyOptions: ButtonOption[] =
+      durability === 'reply' && envelope.options !== undefined ? envelope.options : []
 
     // durability 'none' — a TRANSIENT live-only system_notice pill: no durable
     // row; AWAIT the routed push so delivered_live is the real fan-out result, and
@@ -166,10 +183,14 @@ export function createDeliver(input: CreateDeliverInput): Deliver {
       if (durability === 'reply') {
         const prompt = buildButtonPrompt({
           body,
-          options: [],
+          options: replyOptions,
           allow_freeform: true,
           expires_in_ms: REPLY_ROW_TTL_MS,
           uuid: randomUUID,
+          ...(envelope.idempotency_key !== undefined
+            ? { idempotency_key: envelope.idempotency_key }
+            : {}),
+          ...(envelope.metadata !== undefined ? { metadata: envelope.metadata } : {}),
         })
         const emitted = await buttonStore.emit(prompt, { topic_id })
         prompt_id = emitted.prompt_id
@@ -192,7 +213,10 @@ export function createDeliver(input: CreateDeliverInput): Deliver {
       type: 'agent_message',
       body,
       topic_id,
-      options: [],
+      // Plan task 8 — the SAME options the durable reply row carries, so a live
+      // client renders the ritual-approval buttons immediately (empty ⇒ the
+      // legacy zero-option push, byte-identical).
+      options: replyOptions,
       allow_freeform: true,
       prompt_id,
     })

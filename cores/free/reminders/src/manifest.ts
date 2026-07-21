@@ -46,6 +46,12 @@ export const TOOL_NAMES = [
   'reminders_cancel',
   'reminders_convert_to_task',
   'reminders_update',
+  // Plan task 8 — agent-callable ritual registration (fires only after the
+  // owner's in-chat approval). Manifest `tools[]` + these names + the
+  // `buildExtraTools` handlers MUST stay in lockstep or install hard-fails
+  // `manifest_incomplete` (X2, gateway/cores/install-bundled.ts).
+  'rituals_propose',
+  'rituals_status',
 ] as const
 export type RemindersToolName = typeof TOOL_NAMES[number]
 

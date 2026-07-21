@@ -317,6 +317,127 @@
           ]
         },
         "capability_required": "write:reminders_core.db"
+      },
+      {
+        "name": "rituals_propose",
+        "description": "PROPOSE a ritual: a recurring, UNATTENDED sub-agent that runs a fixed prompt on a schedule (e.g. a morning brief that reads your STATUS.md + calendar). IMPORTANT: proposing does NOT schedule or run anything — the ritual only ever fires after the OWNER explicitly APPROVES it in chat (a code-rendered approval message with Approve/Deny buttons is shown; approval is content-hash-bound, so any later edit to the prompt/surface/cadence requires re-approval). Returns an opaque proposal_id and status 'pending_approval'. Read-only tool surfaces (Read/Glob/Grep) and web (WebSearch/WebFetch, which also needs a separate egress approval) are supported; write/exec tools (Bash/Write/Edit) are currently blocked at fire time.",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "description": "Charset-guarded ritual id (lowercase alphanumeric + hyphen, 1-64 chars, starts alnum). Also the prompt file basename. Must not already exist."
+            },
+            "description": {
+              "type": "string",
+              "description": "One-line human capability summary rendered in the approval prompt (non-empty, <= 200 chars)."
+            },
+            "tool_surface": {
+              "type": "array",
+              "items": { "type": "string" },
+              "description": "Built-in tool names the ritual may use at fire time (e.g. ['Read','Glob','Grep'] or ['Read','WebSearch']). Never empty. Web tools require egress:'web'. Write/exec tools are refused at fire time until OS sandboxing ships."
+            },
+            "egress": {
+              "type": "string",
+              "enum": ["none", "web"],
+              "description": "'none' = no internet; 'web' = the ritual may reach the public internet (WebSearch/WebFetch) — a SEPARATE owner approval is required for this."
+            },
+            "silent": {
+              "type": "boolean",
+              "description": "When true, no completion message is posted after a successful run. Defaults false.",
+              "default": false
+            },
+            "prompt": {
+              "type": "string",
+              "description": "The FULL prompt the ritual runs verbatim each fire. NFC-normalized; control/bidi/zero-width characters are rejected; capped at 16 KiB (refused, never truncated). Shown in full inside the approval message."
+            },
+            "schedule": {
+              "type": "object",
+              "description": "When the ritual runs. fire_at is the first occurrence (unix seconds). Pass at most one cadence; omit both for a one-shot.",
+              "properties": {
+                "fire_at": {
+                  "type": "number",
+                  "description": "Unix seconds (UTC) of the FIRST occurrence."
+                },
+                "recurrence": {
+                  "type": "string",
+                  "enum": ["weekly", "monthly", "occasional"],
+                  "description": "Optional coarse cadence. Mutually exclusive with recurrence_spec."
+                },
+                "recurrence_spec": {
+                  "type": "string",
+                  "description": "Optional 5-field cron cadence (e.g. '0 9 * * *'). Mutually exclusive with recurrence."
+                }
+              },
+              "required": ["fire_at"]
+            }
+          },
+          "required": ["id", "description", "tool_surface", "egress", "prompt", "schedule"]
+        },
+        "output_schema": {
+          "type": "object",
+          "properties": {
+            "proposal_id": {
+              "type": "string",
+              "description": "Opaque handle for the pending proposal."
+            },
+            "ritual_id": {
+              "type": "string"
+            },
+            "status": {
+              "type": "string",
+              "description": "Always 'pending_approval' — the ritual will not fire until the owner approves it."
+            },
+            "requires_egress_approval": {
+              "type": "boolean",
+              "description": "True for egress:'web' defs — a SECOND owner approval (network egress) is required before scheduling."
+            }
+          },
+          "required": ["proposal_id", "ritual_id", "status", "requires_egress_approval"]
+        },
+        "capability_required": "write:reminders_core.db"
+      },
+      {
+        "name": "rituals_status",
+        "description": "List every registered ritual with its approval state ('approved' | 'pending' | 'denied' | 'none') and whether it is currently scheduled. Read-only. Use this to see which proposed rituals the owner has approved.",
+        "input_schema": {
+          "type": "object",
+          "properties": {}
+        },
+        "output_schema": {
+          "type": "object",
+          "properties": {
+            "results": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "ritual_id": { "type": "string" },
+                  "description": { "type": "string" },
+                  "scope": { "type": "string" },
+                  "tool_surface": {
+                    "type": "array",
+                    "items": { "type": "string" }
+                  },
+                  "egress": { "type": "string" },
+                  "approval": { "type": "string" },
+                  "scheduled": { "type": "boolean" }
+                },
+                "required": [
+                  "ritual_id",
+                  "description",
+                  "scope",
+                  "tool_surface",
+                  "egress",
+                  "approval",
+                  "scheduled"
+                ]
+              }
+            }
+          },
+          "required": ["results"]
+        },
+        "capability_required": "read:reminders_core.db"
       }
     ],
     "ui_components": [

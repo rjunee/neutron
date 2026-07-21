@@ -208,11 +208,76 @@ export interface RemindersUpdateResult {
   message: string
 }
 
+/**
+ * Plan task 8 — the NARROW STRUCTURAL slice of the engine's ritual registration
+ * service the Core derefs. Declared HERE (not imported from the engine's
+ * `ritual-registration.ts`) so the Core never pulls the engine service module
+ * (which reaches `@neutronai/tools` + `@neutronai/channels`) into its dependency
+ * graph. The concrete `RitualRegistrationService` (from `@neutronai/reminders`)
+ * is structurally assignable to this; the composer threads a late-bound getter.
+ */
+export interface RitualProposeInput {
+  id: string
+  description: string
+  scope: string
+  tool_surface: readonly string[]
+  egress: string
+  silent: boolean
+  prompt: string
+  schedule: {
+    fire_at: number
+    recurrence?: 'weekly' | 'monthly' | 'occasional'
+    recurrence_spec?: string
+  }
+}
+
+export interface RitualProposeResult {
+  proposal_id: string
+  ritual_id: string
+  status: string
+  requires_egress_approval: boolean
+}
+
+export interface RitualStatusRowResult {
+  ritual_id: string
+  description: string
+  scope: string
+  tool_surface: readonly string[]
+  egress: string
+  approval: string
+  scheduled: boolean
+}
+
+/** The structural service the Core derefs (propose + status only — the owner
+ *  answer capture path lives in the live-agent runner, not the Core). */
+export interface RemindersRitualService {
+  propose(input: RitualProposeInput): Promise<RitualProposeResult>
+  status(): RitualStatusRowResult[]
+}
+
+/**
+ * Thrown by `proposeRitual` / `ritualsStatus` when no ritual registration
+ * service is wired (LLM-less box / no credential ⇒ the factory never ran). The
+ * CapabilityGuard's `outcome='error'` path surfaces it — fail closed, no flags.
+ */
+export class RitualsUnavailableError extends Error {
+  override readonly name = 'RitualsUnavailableError'
+  readonly code = 'rituals_unavailable' as const
+}
+
 export interface RemindersBackend {
   create(input: RemindersCreateInput): Promise<RemindersCreateResult>
   list(input: RemindersListInput): Promise<ReminderRow[]>
   snooze(input: RemindersSnoozeInput): Promise<RemindersSnoozeResult>
   cancel(input: RemindersCancelInput): Promise<RemindersCancelResult>
+  /**
+   * Plan task 8 — PROPOSE a ritual (agent-callable registration). OPTIONAL (the
+   * `convertToTask?` precedent): a backend without a wired ritual service omits
+   * it, and the `rituals_propose` tool throws {@link RitualsUnavailableError}.
+   */
+  proposeRitual?(input: RitualProposeInput): Promise<RitualProposeResult>
+  /** Plan task 8 — the ritual approval/schedule status snapshot. OPTIONAL. */
+  ritualsStatus?(): Promise<RitualStatusRowResult[]>
   /**
    * P6 — convert a pending reminder into a canonical task. The
    * implementation requires a TaskStore to be wired; backends without
@@ -276,6 +341,14 @@ export interface ReminderStoreBackendOptions {
    * Production composition wires the shared TaskStore here.
    */
   taskStore?: TaskStore
+  /**
+   * Plan task 8 — LATE-BOUND getter for the engine's ritual registration
+   * service. Deref'd PER-CALL (not captured) so the adapter picks up the service
+   * the composer assigns AFTER cores mount (inside `ritual_executor_factory`). A
+   * getter returning `null`/absent ⇒ `proposeRitual`/`ritualsStatus` throw
+   * {@link RitualsUnavailableError} (fail closed, no flags).
+   */
+  rituals?: () => RemindersRitualService | null
 }
 
 /**
@@ -543,6 +616,26 @@ export function buildReminderStoreBackend(
           message: replacement.message,
         }
       })
+    },
+
+    async proposeRitual(input: RitualProposeInput): Promise<RitualProposeResult> {
+      const svc = opts.rituals?.()
+      if (svc === undefined || svc === null) {
+        throw new RitualsUnavailableError(
+          'rituals_propose: no ritual registration service wired (LLM-less box / no credential)',
+        )
+      }
+      return svc.propose(input)
+    },
+
+    async ritualsStatus(): Promise<RitualStatusRowResult[]> {
+      const svc = opts.rituals?.()
+      if (svc === undefined || svc === null) {
+        throw new RitualsUnavailableError(
+          'rituals_status: no ritual registration service wired (LLM-less box / no credential)',
+        )
+      }
+      return svc.status()
     },
 
     async cancel(input: RemindersCancelInput): Promise<RemindersCancelResult> {

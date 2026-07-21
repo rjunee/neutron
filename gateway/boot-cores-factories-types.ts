@@ -183,4 +183,15 @@ export interface CoresBackendFactoriesOptions {
    * tool reports the honest CONNECT_TELEGRAM_UNAVAILABLE_ERROR.
    */
   agentSettingsBindLink?: import('@neutronai/agent-settings').TelegramBindLinkMinter
+  /**
+   * Plan task 8 — LATE-BOUND getter for the engine's ritual registration
+   * service. The `reminders_core` factory threads it into
+   * `buildReminderStoreBackend({ rituals })` so the `rituals_propose` /
+   * `rituals_status` tools deref the service the composer assigns AFTER cores
+   * mount (inside `ritual_executor_factory`). Returns `null` on an LLM-less box
+   * ⇒ the tools throw `RitualsUnavailableError` (fail closed, no flags).
+   */
+  ritualRegistration?: () =>
+    | import('@neutronai/reminders-core').RemindersRitualService
+    | null
 }
