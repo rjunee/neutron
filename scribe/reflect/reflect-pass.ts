@@ -91,6 +91,7 @@ export type ReflectWriteEntity = (
 ) => Promise<{ path: string; changed: boolean; newLinks: unknown[]; conflict?: boolean }>
 import {
   clusterNearDuplicates,
+  isMergeSafeCluster,
   DEFAULT_JACCARD_THRESHOLD,
   type DedupCandidate,
 } from './jaccard.ts'
@@ -180,6 +181,15 @@ export interface ReflectReport {
   scanned: number
   /** Near-duplicate pages merged AWAY (losers deleted). */
   merged: number
+  /**
+   * Candidate clusters HELD by the §7.2 merge-safety gate (`isMergeSafeCluster`)
+   * — reached the Jaccard bar but were NOT fused because the similarity was
+   * name-only (residual A) or relation/body-only across different names (residual
+   * B). A held cluster is a deliberate MISSED merge (the always-safe direction);
+   * every hold is also logged loudly. Observable so an armed box can see the gate
+   * working (a false-fusion that was prevented, not silently merged).
+   */
+  held: number
   /** Pages whose compiled-truth was re-synthesized (a real, accepted rewrite). */
   resynthesized: number
   /** Reserved-kind (meeting/project/original) pages written. */
@@ -246,6 +256,7 @@ export async function runReflectPass(deps: ReflectPassDeps): Promise<ReflectRepo
   const report: ReflectReport = {
     scanned: 0,
     merged: 0,
+    held: 0,
     resynthesized: 0,
     reservedWritten: 0,
     llmCalls: 0,
@@ -452,6 +463,25 @@ async function dedupPages(
       const members = cluster.map((c) => bySlug.get(c.slug)!).filter((p) => p !== undefined)
       if (members.length <= 1) {
         if (members[0] !== undefined) survivors.push(members[0])
+        continue
+      }
+      // §7.2 MERGE SAFETY GATE — before the IRREVERSIBLE fuse, hold a cluster whose
+      // similarity is name-only (two distinct "John Smith" pages, residual A) or
+      // relation/body-only across different names (`Bob`/`Carol`, residual B). A
+      // held cluster keeps every member as its own survivor (the always-safe missed
+      // -merge direction) and is logged LOUDLY so the owner can hand-merge a genuine
+      // duplicate the gate was conservative on. This is the pre-arming precondition
+      // the memory-system design names for the now-armed 6h consolidation.
+      const gate = isMergeSafeCluster(cluster, threshold)
+      if (!gate.safe) {
+        logFailure(
+          `reflect: merge HELD (${gate.reason}) — kept ${members.length} pages [${members
+            .map((m) => `${m.kind}/${m.slug}`)
+            .join(', ')}] as distinct survivors`,
+          null,
+        )
+        report.held += 1
+        for (const m of members) survivors.push(m)
         continue
       }
       try {

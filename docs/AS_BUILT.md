@@ -2,6 +2,57 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+## 2026-07-20 — M2-3 round 2: §7.2 merge-safety gate closes the memory-consolidation arming precondition (Argus r1 BLOCKER)
+
+Task 1 of the executor-mode-reminders branch armed the 6h memory consolidation ON
+by default (P0-4), but the memory-system design named two mitigations as "STILL
+PENDING before arming" (the §7.2 name-tripwire and merge-loser quarantine) and the
+dedup code comments lied about them — `jaccard.ts` claimed "consolidation is not
+armed" (now false) and cited a "§7.2 merge name-tripwire" that had no
+implementation. Argus flagged the armed-without-mitigation state as a corruption
+BLOCKER. This round implements the actual safety gate that prevents the
+irreversible false-fusion and makes the comments true.
+
+- **`isMergeSafeCluster` merge-safety gate** (`scribe/reflect/jaccard.ts`), applied
+  by `dedupPages` to every candidate cluster BEFORE the irreversible fuse
+  (`scribe/reflect/reflect-pass.ts`). Two gates block the two false-positive
+  signatures the 0.7 Jaccard cut alone would let through:
+  - Gate A (**shared name token**) — HOLDS two DIFFERENT-named entities that reach
+    the bar only via shared relation targets (`Bob`/`Carol` each `Works at
+    [[org0]]/[[org1]]/[[org2]]` = 0.714 but share no name token). §7.2 residual B.
+  - Gate B (**corroboration beyond the name**) — excluding the name, members must
+    still be pairwise ≥ threshold similar on BODY-ONLY tokens; HOLDS two DISTINCT
+    fact-less entities sharing an identical name (two "John Smith" pages score 1.0
+    on name tokens but collapse to empty body sets once the name is excluded).
+    §7.2 residual A.
+- **HELD ≠ merged.** A held cluster keeps every member as its own survivor (the
+  pass's always-safe missed-merge direction), increments the new
+  `ReflectReport.held` counter, and is logged LOUDLY so the owner can hand-merge a
+  genuine duplicate the gate was conservative on. Merge-loser quarantine is NO
+  LONGER an arming blocker — the gate prevents the false identity-fusion outright,
+  and genuine near-duplicate losers are already absorbed into the survivor before
+  deletion (no content loss).
+- **Comments/docs corrected** to match the armed reality: `jaccard.ts`
+  (`DEFAULT_JACCARD_THRESHOLD` + `MIN_DISTINGUISHING_TOKENS` doc), the memory-system
+  design doc's "STILL PENDING before arming" block, and SYSTEM-OVERVIEW's dedup
+  section (which had downgraded "close before arming" to "corpus-tuning follow-up").
+- **Tests** (reproduce-then-fix): `scribe/__tests__/reflect-jaccard.test.ts`
+  (`isMergeSafeCluster` holds residuals A + B, passes genuine near-duplicates,
+  singleton trivially safe) and `scribe/__tests__/reflect-pass.test.ts`
+  (behavioural, real on-disk: two "John Smith" pages HELD with both surviving +
+  nothing deleted + `report.held == 1`; `Bob`/`Carol` HELD; genuine near-duplicates
+  still merge with `report.held == 0`). Suite: 122 scribe tests green.
+- **Argus r1 minors** also addressed: `open/__tests__/reflect-loop-arming.test.ts`
+  leak-guard now spies on `SupervisedLoop.start` keyed on the loop's IDENTITY
+  (`name`), not the no-longer-unique 6h cadence; `open/__tests__/loop-inventory-boot-shell.test.ts`
+  real-boot test timeouts raised 30s→60s to absorb full-suite-parallelism
+  contention (a genuinely-hung boot is still a distinct, louder signal).
+
+NOTE: the executor-mode reminders deliverable (ritual schema, executor dispatch
+branch, approval gate, T5 write-containment) is NOT built by this PR — it is the
+remaining RALPH iterations 2–10 on `IMPLEMENTATION_PLAN.md`. This branch is Task 1
+(consolidation flag-collapse) + its arming precondition. P0-1 M2 is NOT done.
+
 ## 2026-07-20 — #374 Defect 2a: the LIVE onboarding-complete emit stamps the durable handoff marker ONLY on real delivery (kills the residual post-claim bounce)
 
 Closed the OPEN half of the #374 claim-jank fix. The reconnect-recovery replay in

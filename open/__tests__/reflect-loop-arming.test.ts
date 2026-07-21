@@ -178,15 +178,18 @@ test('a composer failure after the memory wiring does NOT leak the reflect inter
   // The reflect loop is armed LAST (after every failure-prone validation), so a
   // composer throw can't leave a running interval that boot() never gets a cleanup
   // for. Force a failure (remove the cookie secret → the composer rejects during a
-  // later validation) and prove — via a setInterval spy keyed on the reflect
-  // loop's unique 6h cadence — that the loop never armed.
+  // later validation) and prove — by spying on `SupervisedLoop.start` keyed on the
+  // loop's IDENTITY (its `name`, not its cadence) — that the reflect loop never
+  // armed. Keying on identity is deliberate: the 6h cadence is no longer unique
+  // (other schedulers share it), so a raw `ms === DEFAULT_REFLECT_INTERVAL_MS`
+  // spy would be fragile against an unrelated 6h loop arming in the same boot.
   delete process.env['NEUTRON_ONBOARDING_CHAT_COOKIE_SECRET']
-  const realSetInterval = globalThis.setInterval
-  let reflectIntervalArmed = 0
-  globalThis.setInterval = ((fn: () => void, ms?: number, ...rest: unknown[]) => {
-    if (ms === DEFAULT_REFLECT_INTERVAL_MS) reflectIntervalArmed += 1
-    return (realSetInterval as (...a: unknown[]) => unknown)(fn, ms, ...rest)
-  }) as unknown as typeof globalThis.setInterval
+  const realStart = SupervisedLoop.prototype.start
+  const startedLoopNames: string[] = []
+  SupervisedLoop.prototype.start = function patchedStart(this: SupervisedLoop): void {
+    startedLoopNames.push((this as unknown as { name: string }).name)
+    return realStart.call(this)
+  }
   const substrateFactory = (opts: ClaudeCodeSubstrateOptions): Substrate => ({
     start: () => cannedHandle(opts.substrate_instance_id),
   })
@@ -195,9 +198,10 @@ test('a composer failure after the memory wiring does NOT leak the reflect inter
   try {
     const composer = buildOpenGraphComposer({ env: process.env, substrateFactory })
     await expect(composer({ db, project_slug: 'owner' })).rejects.toThrow()
-    expect(reflectIntervalArmed).toBe(0) // the loop never armed → no leaked timer
+    // The reflect loop (identity `reflect-consolidation`) never started → no leaked timer.
+    expect(startedLoopNames).not.toContain(REFLECT_LOOP)
   } finally {
-    globalThis.setInterval = realSetInterval
+    SupervisedLoop.prototype.start = realStart
     db.close()
   }
 })

@@ -17,6 +17,12 @@
  *
  * MUTATION-VERIFIED: deleting the gateway-liveness registration in
  * `gateway/index.ts` drops it from the set and this test goes red.
+ *
+ * TIMEOUT budget is 60s (not the usual tight bound): each test boots a REAL
+ * in-process server, and under full-suite parallelism ~55 concurrent composer
+ * boots contend for CPU, so a 30s ceiling flaked (Argus r1 minor). 60s only raises
+ * the ceiling for a genuinely-hung boot (a distinct, louder signal); in isolation
+ * a boot completes in ~1.3s.
  */
 
 import { afterEach, beforeEach, expect, test } from 'bun:test'
@@ -82,7 +88,7 @@ afterEach(async () => {
     handle = null
   }
   home.restore()
-}, 30_000)
+}, 60_000)
 
 function cannedHandle(instanceId: string): SessionHandle {
   const events = (async function* (): AsyncGenerator<Event, void, void> {
@@ -121,7 +127,7 @@ function registry(h: BootHandle): ComposedProductionGraph['loopRegistry'] {
 test('the real boot shell starts EXACTLY the complete set incl gateway-liveness', async () => {
   const h = await bootOpen()
   expect(registry(h).names()).toEqual([...EXPECTED_RUNNING_LOOPS])
-}, 30_000)
+}, 60_000)
 
 test('gateway-liveness is a live descriptor with the watchdog cadence', async () => {
   const h = await bootOpen()
@@ -133,7 +139,7 @@ test('gateway-liveness is a live descriptor with the watchdog cadence', async ()
   const health = desc.health()
   expect('lastTickAt' in health).toBe(true)
   expect('lastError' in health).toBe(true)
-}, 30_000)
+}, 60_000)
 
 test('the real boot EMITS exactly ONE complete boot-inventory line (captured from console.log)', async () => {
   // Capture the PRODUCTION console.log emission during the real boot — NOT a
@@ -154,4 +160,4 @@ test('the real boot EMITS exactly ONE complete boot-inventory line (captured fro
   expect(line).toContain('8 loop(s) running')
   for (const name of EXPECTED_RUNNING_LOOPS) expect(line).toContain(name)
   expect(line).toContain('2 dormant (deferred): [agent-watcher, project-backup-scheduler]')
-}, 30_000)
+}, 60_000)

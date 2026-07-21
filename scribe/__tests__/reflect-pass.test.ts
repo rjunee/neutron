@@ -448,6 +448,71 @@ describe('reflect dedup (deterministic, no LLM)', () => {
     expect(await readPage(owner, 'companies', 'acme')).not.toBeNull()
     expect(await readPage(owner, 'companies', 'globex')).not.toBeNull()
   })
+
+  // §7.2 MERGE SAFETY GATE — arming precondition (memory-system-design blocker 1).
+  // Consolidation is armed by default; these prove the gate HOLDS the two
+  // false-fusion signatures on REAL on-disk pages (both members survive, nothing
+  // deleted, report.held counts the prevented fusion).
+  test('residual A: two DISTINCT fact-less same-name pages are HELD, not fused', async () => {
+    const owner = tmpOwner()
+    // Two different people who happen to share the name "John Smith", each fact-less
+    // (boilerplate body only). At the token layer they are identical → they cluster.
+    const boiler = 'Mentioned in chat (kind: person).'
+    await seed(owner, 'person', 'john-smith', 'John Smith', boiler, [
+      { ts: '2026-07-01T00:00:00.000Z', source: 'chat:owner', body: 'first John Smith' },
+    ])
+    await seed(owner, 'person', 'john-smith-2', 'John Smith', boiler, [
+      { ts: '2026-07-02T00:00:00.000Z', source: 'chat:owner', body: 'second John Smith' },
+    ])
+    const deletedSlugs: string[] = []
+    const report = await runReflectPass({
+      ...baseDeps(owner),
+      deletePage: async (slug: string): Promise<void> => {
+        deletedSlugs.push(slug)
+      },
+    })
+    // NO fusion — the gate held the cluster.
+    expect(report.merged).toBe(0)
+    expect(report.held).toBe(1)
+    // BOTH pages survive on disk; neither brain page evicted.
+    expect(await readPage(owner, 'people', 'john-smith')).not.toBeNull()
+    expect(await readPage(owner, 'people', 'john-smith-2')).not.toBeNull()
+    expect(deletedSlugs).toHaveLength(0)
+  })
+
+  test('residual B: different-named entities sharing relation targets are HELD, not fused', async () => {
+    const owner = tmpOwner()
+    const rels = ['org0', 'org1', 'org2'].map((o) => `Works at [[${o}]].`).join(' ')
+    await seed(owner, 'person', 'bob', 'Bob', rels, [
+      { ts: '2026-07-01T00:00:00.000Z', source: 'chat:owner', body: 'Bob note' },
+    ])
+    await seed(owner, 'person', 'carol', 'Carol', rels, [
+      { ts: '2026-07-02T00:00:00.000Z', source: 'chat:owner', body: 'Carol note' },
+    ])
+    const report = await runReflectPass(baseDeps(owner))
+    expect(report.merged).toBe(0)
+    expect(report.held).toBe(1)
+    expect(await readPage(owner, 'people', 'bob')).not.toBeNull()
+    expect(await readPage(owner, 'people', 'carol')).not.toBeNull()
+  })
+
+  // Guard against the gate over-holding: genuine near-duplicates (shared name +
+  // shared factual body beyond the name) STILL merge, and are NOT counted as held.
+  test('genuine near-duplicates still merge under the gate (no over-hold)', async () => {
+    const owner = tmpOwner()
+    const body = 'Acme is an enterprise SaaS company building developer tooling for platform teams.'
+    await seed(owner, 'company', 'acme', 'Acme', body, [
+      { ts: '2026-07-01T00:00:00.000Z', source: 'chat:owner', body: 'a' },
+      { ts: '2026-07-02T00:00:00.000Z', source: 'chat:owner', body: 'b' },
+    ])
+    await seed(owner, 'company', 'acme-inc', 'Acme Inc', body, [
+      { ts: '2026-07-03T00:00:00.000Z', source: 'chat:owner', body: 'c' },
+    ])
+    const report = await runReflectPass(baseDeps(owner))
+    expect(report.merged).toBe(1)
+    expect(report.held).toBe(0)
+    expect(await readPage(owner, 'companies', 'acme-inc')).toBeNull()
+  })
 })
 
 describe('reflect path containment (untrusted frontmatter slug)', () => {

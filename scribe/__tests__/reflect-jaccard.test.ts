@@ -21,6 +21,7 @@ import {
   stripBoilerplate,
   jaccard,
   clusterNearDuplicates,
+  isMergeSafeCluster,
   DEFAULT_JACCARD_THRESHOLD,
   MIN_DISTINGUISHING_TOKENS,
   type DedupCandidate,
@@ -202,15 +203,14 @@ describe('clusterNearDuplicates — clique, min-token, and real dedup', () => {
     expect(DEFAULT_JACCARD_THRESHOLD).toBe(0.7)
   })
 
-  // KNOWN RESIDUAL (Argus r1, verified by running this code): two DIFFERENT-named
-  // entities that each assert the SAME ≥ 3 relation targets reach the 0.7 bar,
-  // because relation-VERB tokens (`works`,`at`) are not stripped and the shared
-  // targets inflate overlap. This is NOT a regression (consolidation is not armed,
-  // threshold flagged UNVALIDATED) and is documented in jaccard.ts + the design
-  // doc as a must-fix-before-arming residual. This test PINS the current behaviour
-  // so a future relation-verb-strip / shared-name-gate fix is a deliberate, visible
-  // change — it is a characterization test of a known gap, not an endorsement.
-  test('KNOWN RESIDUAL: different-named entities sharing ≥3 relation targets score 0.714 and fuse', () => {
+  // Residual B (Argus r1, verified by running this code): two DIFFERENT-named
+  // entities that each assert the SAME ≥ 3 relation targets reach the 0.7 bar at
+  // the CLUSTERING layer, because relation-VERB tokens (`works`,`at`) are not
+  // stripped and the shared targets inflate overlap. Clustering still groups them
+  // (characterization — the clustering layer is intentionally unchanged); the
+  // FUSION is now blocked one layer up by `isMergeSafeCluster` (Gate A: no shared
+  // name token). See the `isMergeSafeCluster` block below for the gate assertion.
+  test('residual B: different-named entities sharing ≥3 relation targets score 0.714 and still CLUSTER', () => {
     const orgs = ['org0', 'org1', 'org2']
     const rels = orgs.map((o) => `Works at [[${o}]].`).join('\n')
     const bob: DedupCandidate = { slug: 'bob', title: 'Bob', text: `# Bob\n\n${rels}` }
@@ -222,7 +222,58 @@ describe('clusterNearDuplicates — clique, min-token, and real dedup', () => {
     }
     // Verb tokens + shared targets survive the boilerplate strip → 5/7 overlap.
     expect(jaccard(st(bob), st(carol))).toBeCloseTo(0.7142857, 5)
-    // ...which is ≥ DEFAULT_JACCARD_THRESHOLD, so they currently fuse (the residual).
+    // ...which is ≥ DEFAULT_JACCARD_THRESHOLD, so they still CLUSTER (candidacy)...
     expect(clusterNearDuplicates([bob, carol]).length).toBe(1)
+    // ...but the merge gate HOLDS them (different names → Gate A) so no fusion.
+    expect(isMergeSafeCluster([bob, carol]).safe).toBe(false)
+  })
+})
+
+describe('isMergeSafeCluster (§7.2 merge safety gate — arming precondition)', () => {
+  // Residual A — two DISTINCT fact-less entities sharing an identical name score
+  // 1.0 (identical name tokens, empty body) and cluster, but must NOT fuse: there
+  // is nothing beyond the name to prove they are the same entity, and a false
+  // fusion is irreversible.
+  test('residual A: two distinct fact-less same-name pages are HELD (name-only similarity)', () => {
+    const boiler = (name: string): string => `# ${name}\n\nMentioned in chat (kind: person).`
+    const a: DedupCandidate = { slug: 'john-smith', title: 'John Smith', text: boiler('John Smith') }
+    const b: DedupCandidate = { slug: 'john-smith-2', title: 'John Smith', text: boiler('John Smith') }
+    // They DO cluster (identical name tokens → similarity 1.0)...
+    expect(clusterNearDuplicates([a, b]).length).toBe(1)
+    // ...but the gate holds them: body-only similarity is 0 once the name is excluded.
+    const gate = isMergeSafeCluster([a, b])
+    expect(gate.safe).toBe(false)
+    if (!gate.safe) expect(gate.reason).toContain('residual A')
+  })
+
+  // Residual B — different names, shared relation targets → held by Gate A.
+  test('residual B: different-named entities sharing relation targets are HELD (no shared name token)', () => {
+    const rels = ['org0', 'org1', 'org2'].map((o) => `Works at [[${o}]].`).join('\n')
+    const bob: DedupCandidate = { slug: 'bob', title: 'Bob', text: `# Bob\n\n${rels}` }
+    const carol: DedupCandidate = { slug: 'carol', title: 'Carol', text: `# Carol\n\n${rels}` }
+    const gate = isMergeSafeCluster([bob, carol])
+    expect(gate.safe).toBe(false)
+    if (!gate.safe) expect(gate.reason).toContain('residual B')
+  })
+
+  // The gate must NOT over-hold genuine near-duplicates: shared name token AND
+  // substantial shared factual body beyond the name → SAFE to merge.
+  test('genuine near-duplicates (shared name + shared body facts) are SAFE to merge', () => {
+    const body =
+      'is an enterprise SaaS company building developer tooling for platform teams. Advises [[globex]].'
+    const acme: DedupCandidate = { slug: 'acme', title: 'Acme', text: `# Acme\n\nAcme ${body}` }
+    const acmeInc: DedupCandidate = {
+      slug: 'acme-inc',
+      title: 'Acme Inc',
+      text: `# Acme Inc\n\nAcme Inc ${body}`,
+    }
+    expect(isMergeSafeCluster([acme, acmeInc]).safe).toBe(true)
+  })
+
+  // A singleton or empty cluster is trivially safe (never a fuse).
+  test('a singleton cluster is trivially safe', () => {
+    const solo: DedupCandidate = { slug: 'solo', title: 'Solo', text: '# Solo\n\nA fact.' }
+    expect(isMergeSafeCluster([solo]).safe).toBe(true)
+    expect(isMergeSafeCluster([]).safe).toBe(true)
   })
 })

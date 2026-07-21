@@ -28,20 +28,23 @@
  * Default similarity bar for "near-duplicate". A high-but-not-identical cut so
  * cosmetic variants collapse while genuinely distinct pages stay apart.
  *
- * UNVALIDATED — this constant has NOT been measured against a real corpus. It
- * MUST be re-measured (false-merge rate on Ryan's actual `entities/`) before
- * consolidation is armed. The threshold is `deps.jaccardThreshold`-configurable
- * precisely so that measurement can tune it without a code change.
- *
- * KNOWN RESIDUAL at 0.7 (surfaced in review, to close before arming): two
- * DIFFERENT-named entities that each assert the SAME set of ≥ 3 relation TARGETS
- * can reach the bar, because `stripBoilerplate` does NOT strip relation-VERB
- * tokens (`works`, `at`) and the shared targets inflate overlap. Concretely, `Bob`
- * and `Carol` pages each carrying `Works at [[org0]]/[[org1]]/[[org2]]` score
- * `{works,at,org0,org1,org2}` ∩ / ∪ = 5/7 = 0.714 ≥ 0.7 and would cluster. This is
- * NOT a regression (consolidation is not armed and the threshold is flagged
- * UNVALIDATED above), but the pre-arming fix is to strip relation-verb tokens
- * and/or gate a merge on a shared name token — not the raw 0.7 cut alone.
+ * UNVALIDATED as a TUNING constant — the exact 0.7 cut has NOT been measured
+ * against a real corpus, and it SHOULD be re-measured (false-merge rate on Ryan's
+ * actual `entities/`) and tuned. It is `deps.jaccardThreshold`-configurable so
+ * measurement can move it without a code change. Consolidation is now ARMED by
+ * default (6h reflect loop, M2-3/P0-4) — the two false-positive signatures the 0.7
+ * cut alone would let through are NOT left to threshold-tuning; they are blocked
+ * outright by the `isMergeSafeCluster` gate applied to every candidate cluster
+ * before it is merged (both signatures HELD, never fused — see that function):
+ *   (A) two DISTINCT fact-less entities sharing an identical ≥ 2-word NAME (two
+ *       "John Smith" pages) — similar ONLY via the name; and
+ *   (B) two DIFFERENT-named entities (`Bob`/`Carol`) that each assert the SAME set
+ *       of ≥ 3 relation TARGETS (score 5/7 = 0.714 ≥ 0.7 because `stripBoilerplate`
+ *       does NOT strip relation-VERB tokens and shared targets inflate overlap).
+ * Tuning the threshold down would still be worthwhile (fewer clusters reach the
+ * gate at all), but a mis-tuned threshold can no longer cause an IRREVERSIBLE false
+ * fusion of either signature — the gate is the safety property, the threshold is an
+ * efficiency knob.
  */
 export const DEFAULT_JACCARD_THRESHOLD = 0.7
 
@@ -54,10 +57,13 @@ export const DEFAULT_JACCARD_THRESHOLD = 0.7
  * entity, and a false merge is irreversible. Genuine near-duplicates of a real
  * entity always share several factual tokens, so requiring ≥ 2 costs no real
  * merges while it removes every fact-less page (which strips to ~0 tokens) from
- * the candidate set. KNOWN ACCEPTED RESIDUAL: two DISTINCT fact-less entities
- * that share an identical ≥ N-word NAME (e.g. two different "John Smith" pages
- * with no facts) still cluster — this residual is gated behind the §7.2 merge
- * name-tripwire, NOT silently ignored.
+ * the candidate set. RESIDUAL, now GATED: two DISTINCT fact-less entities that
+ * share an identical ≥ N-word NAME (e.g. two different "John Smith" pages with no
+ * facts) still CLUSTER here (identical name tokens → similarity 1.0) — but the
+ * cluster is HELD, never merged, by `isMergeSafeCluster` (§7.2 merge safety gate:
+ * pages similar ONLY via a shared name, with no corroborating body content, are
+ * not fused). Clustering flags the candidacy; the merge gate makes the fusion
+ * decision.
  */
 export const MIN_DISTINGUISHING_TOKENS = 2
 
@@ -235,4 +241,80 @@ export function clusterNearDuplicates(
     if (!placed) clusters.push([i])
   }
   return clusters.map((cluster) => cluster.map((idx) => candidates[idx]!))
+}
+
+/**
+ * §7.2 MERGE SAFETY GATE — the last check before a near-duplicate cluster is
+ * actually FUSED. Jaccard clustering reaches the bar on similar TOKEN SETS, but
+ * high token similarity is NOT proof two pages are the SAME entity. Consolidation
+ * is armed by default (6h, M2-3/P0-4) and a merge is IRREVERSIBLE (the loser's
+ * content is folded into the survivor and the loser page is deleted), so the two
+ * false-positive signatures documented on `DEFAULT_JACCARD_THRESHOLD` must be
+ * blocked BEFORE the fuse, not merely tuned against:
+ *
+ *   Gate A — SHARED NAME TOKEN. The cluster's members must share at least one
+ *     common name token (intersection of each title's tokens is non-empty). Two
+ *     DIFFERENT-named entities that merely assert the SAME relation TARGETS
+ *     (`Bob` / `Carol` each `Works at [[org0]]/[[org1]]/[[org2]]`) reach 0.714 on
+ *     the shared targets but share NO name token → HELD (residual B). Genuine
+ *     near-duplicates of one entity always share a name token (`Acme` / `Acme
+ *     Inc` share `acme`), so this costs no real merge.
+ *
+ *   Gate B — CORROBORATION BEYOND THE NAME. Excluding the name, the members must
+ *     still be pairwise `>= threshold` similar on their BODY-ONLY token sets
+ *     (`tokenize(stripBoilerplate(text, title))` — title tokens removed, generated
+ *     boilerplate stripped). Two fact-less pages sharing an identical name (two
+ *     "John Smith" pages) collapse to EMPTY body sets once the name is excluded →
+ *     body similarity 0 < threshold → HELD (residual A). Real near-duplicates carry
+ *     substantial shared factual body text beyond the name, so they clear the bar.
+ *
+ * HELD == NOT MERGED: the caller keeps every member as its own survivor. A held
+ * cluster is a MISSED merge — the pass's own always-safe direction (a later pass
+ * or a no-op, never an irreversible false fusion). Callers log every hold LOUDLY
+ * so the owner can hand-merge a genuine duplicate the gate was conservative on.
+ *
+ * Pure (no I/O). Operates on the SAME `DedupCandidate` surface as clustering, so a
+ * cluster returned by `clusterNearDuplicates` is checked as-is.
+ */
+export function isMergeSafeCluster(
+  cluster: ReadonlyArray<DedupCandidate>,
+  threshold: number = DEFAULT_JACCARD_THRESHOLD,
+): { safe: true } | { safe: false; reason: string } {
+  // A singleton (or empty) is never a fuse — trivially safe.
+  if (cluster.length <= 1) return { safe: true }
+
+  // Gate A — the members must share at least one common NAME token.
+  let commonName: Set<string> | null = null
+  for (const c of cluster) {
+    const nameTokens = tokenize(c.title)
+    if (commonName === null) {
+      commonName = new Set(nameTokens)
+    } else {
+      for (const t of [...commonName]) if (!nameTokens.has(t)) commonName.delete(t)
+    }
+    if (commonName.size === 0) break
+  }
+  if (commonName === null || commonName.size === 0) {
+    return {
+      safe: false,
+      reason: 'members share no common name token — similarity is relation/body-only (different-name signature, §7.2 residual B)',
+    }
+  }
+
+  // Gate B — excluding the name, the members must still corroborate each other on
+  // body content (pairwise body-only Jaccard >= threshold). `jaccard` defines two
+  // empty sets as similarity 0, so two fact-less same-name pages fall out here.
+  const bodyTokens = cluster.map((c) => tokenize(stripBoilerplate(c.text, c.title)))
+  for (let i = 0; i < bodyTokens.length; i += 1) {
+    for (let j = i + 1; j < bodyTokens.length; j += 1) {
+      if (jaccard(bodyTokens[i]!, bodyTokens[j]!) < threshold) {
+        return {
+          safe: false,
+          reason: 'members are near-duplicate only via a shared name — body content does not corroborate the same entity (same-name-different-entity signature, §7.2 residual A)',
+        }
+      }
+    }
+  }
+
+  return { safe: true }
 }

@@ -2454,18 +2454,29 @@ optional operator `GBRAIN_SOURCE` / `GBRAIN_BRAIN_ID`.
     non-boilerplate tokens to be a merge candidate at all — so fact-less
     boilerplate pages (which strip to ~0 tokens) never merge. The Jaccard
     threshold (`DEFAULT_JACCARD_THRESHOLD` = 0.7) is `deps.jaccardThreshold`-
-    configurable and flagged UNVALIDATED — it MUST be re-measured and tuned on a
-    real corpus (consolidation is now armed by default, so these are live
-    corpus-tuning follow-ups, tracked — not silently ignored): (i) two DISTINCT
-    fact-less entities sharing an identical
-    ≥ 2-word name still merge, gated behind the merge name-tripwire; (ii) two
-    DIFFERENT-named entities that each assert the SAME ≥ 3 relation targets can
-    reach the threshold — relation-verb tokens (`works`, `at`) are not stripped and
-    shared targets inflate overlap (e.g. `Bob` / `Carol` pages each with
-    `Works at [[org0]]/[[org1]]/[[org2]]` score 5/7 = 0.714 ≥ 0.7). The threshold
-    is flagged UNVALIDATED and must be tuned on a real corpus now that
-    consolidation is armed by default; the follow-up fix is to strip relation-verb
-    tokens and/or gate a merge on a shared name token.
+    configurable and flagged UNVALIDATED as a TUNING knob (re-measure the
+    false-merge rate on a real corpus and tune down). Consolidation is armed by
+    default (6h, P0-4), so the two false-fusion signatures the raw 0.7 cut alone
+    would let through are NOT left to threshold-tuning — they are blocked OUTRIGHT
+    by the **`isMergeSafeCluster` merge-safety gate** (`scribe/reflect/jaccard.ts`),
+    which `dedupPages` applies to every candidate cluster BEFORE the irreversible
+    fuse (a held cluster increments `report.held` and is logged loudly):
+    - Gate A (**shared name token**) HOLDS two DIFFERENT-named entities that reach
+      the bar only via shared relation targets — e.g. `Bob` / `Carol` each
+      `Works at [[org0]]/[[org1]]/[[org2]]` score 5/7 = 0.714 ≥ 0.7 but share no
+      name token, so they are never fused.
+    - Gate B (**corroboration beyond the name** — excluding the name, members must
+      still be pairwise ≥ threshold similar on BODY-ONLY tokens) HOLDS two DISTINCT
+      fact-less entities sharing an identical ≥ 2-word name (two "John Smith" pages
+      score 1.0 on name tokens alone but collapse to empty body sets once the name
+      is excluded), so they are never fused.
+
+    A held cluster is a deliberate MISSED merge (the always-safe direction — never
+    an irreversible false fusion); the loud log lets the owner hand-merge a genuine
+    duplicate the gate was conservative on. Merge-loser quarantine under
+    `entities/.quarantine/` is not implemented and is no longer an arming blocker —
+    the gate prevents the false identity-fusion outright, and genuine near-duplicate
+    losers are absorbed into the survivor before deletion (no content loss).
   - **Supersede is keyed on the graph TRIPLE, not sentence shape**
     (`stripSupersededSentences`, `scribe/write-to-gbrain.ts`). A superseded
     relation's sentence is retired whenever it asserts exactly one graph relation
