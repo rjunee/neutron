@@ -76,12 +76,16 @@ export interface ReminderTickOptions {
   on_fired?: ReminderFiredHook
   /**
    * Executor-mode reminders (plan task 4) — the RITUAL executor. A due row with a
-   * non-null `ritual_id` routes to `ritual_executor.fire(reminder)` (fire-and-
-   * forget) INSTEAD of the nudge `dispatcher` + `on_fired` push. Omitted in tests
-   * / on an LLM-less box that has no ritual surface; a ritual row that fires with
-   * NO executor wired is consumed (claimed) and logged (never falls back to the
-   * nudge dispatcher — a ritual is not a nudge). Structural so the composition can
-   * pass any `{ fire }` — see `reminders/ritual-executor.ts`.
+   * non-null `ritual_id` routes to `ritual_executor.fire(reminder)` INSTEAD of the
+   * nudge `dispatcher` + `on_fired` push. fire()'s STARTUP (validate → ritual-lane
+   * spawn → durable `code_ritual_runs` row) is AWAITED inside the tick so it lands
+   * within stop()'s quiescence boundary — a claimed occurrence can never be
+   * consumed without its durable run row (the Argus task-5 data-loss blocker); only
+   * the long-running substrate TURN is fire-and-forget, detached INSIDE the executor
+   * (see `reminders/ritual-executor.ts` step (f)). Omitted in tests / on an LLM-less
+   * box that has no ritual surface; a ritual row that fires with NO executor wired is
+   * consumed (claimed) and logged (never falls back to the nudge dispatcher — a
+   * ritual is not a nudge). Structural so the composition can pass any `{ fire }`.
    */
   ritual_executor?: RitualExecutor
 }

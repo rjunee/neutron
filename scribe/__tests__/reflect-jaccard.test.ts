@@ -246,6 +246,31 @@ describe('isMergeSafeCluster (§7.2 merge safety gate — arming precondition)',
     if (!gate.safe) expect(gate.reason).toContain('residual A')
   })
 
+  // BLOCKER regression (Argus r1): two DISTINCT same-name people whose prose bodies
+  // share the NAME tokens must be HELD. `stripBoilerplate` only removes the generated
+  // `# <Name>` H1, so name tokens in prose survive; without subtracting the title
+  // tokens from each body set, the shared name inflates body-only Jaccard over the
+  // bar and IRREVERSIBLY merges two different people. Repro: `John Smith is an
+  // engineer at Google` vs `… at Facebook` → raw body Jaccard 6/8 = 0.75 ≥ 0.7 (WOULD
+  // merge); with name tokens excluded 4/6 = 0.667 < 0.7 → correctly HELD.
+  test('blocker: same-name people with name tokens in prose are HELD (name excluded from body)', () => {
+    const google: DedupCandidate = {
+      slug: 'john-smith',
+      title: 'John Smith',
+      text: '# John Smith\n\nJohn Smith is an engineer at Google.',
+    }
+    const facebook: DedupCandidate = {
+      slug: 'john-smith-2',
+      title: 'John Smith',
+      text: '# John Smith\n\nJohn Smith is an engineer at Facebook.',
+    }
+    // Gate A passes (shared name token), so the fix must be Gate B: the shared NAME
+    // tokens in prose must NOT count as corroborating body content.
+    const gate = isMergeSafeCluster([google, facebook])
+    expect(gate.safe).toBe(false)
+    if (!gate.safe) expect(gate.reason).toContain('residual A')
+  })
+
   // Residual B — different names, shared relation targets → held by Gate A.
   test('residual B: different-named entities sharing relation targets are HELD (no shared name token)', () => {
     const rels = ['org0', 'org1', 'org2'].map((o) => `Works at [[${o}]].`).join('\n')

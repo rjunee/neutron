@@ -304,7 +304,19 @@ export function isMergeSafeCluster(
   // Gate B — excluding the name, the members must still corroborate each other on
   // body content (pairwise body-only Jaccard >= threshold). `jaccard` defines two
   // empty sets as similarity 0, so two fact-less same-name pages fall out here.
-  const bodyTokens = cluster.map((c) => tokenize(stripBoilerplate(c.text, c.title)))
+  //
+  // NAME EXCLUSION IS EXPLICIT (blocker): `stripBoilerplate` only removes the
+  // GENERATED title H1 (`# <Name>`), not name tokens that appear in prose (`John
+  // Smith is an engineer …`). Leaving those in lets two DISTINCT same-name entities
+  // (`John Smith … at Google` vs `John Smith … at Facebook`) corroborate each other
+  // on the shared NAME tokens and clear the bar → irreversible false merge. So we
+  // subtract each candidate's own title tokens from its body set here; only genuine
+  // shared FACTUAL body tokens can then satisfy the corroboration requirement.
+  const bodyTokens = cluster.map((c) => {
+    const body = tokenize(stripBoilerplate(c.text, c.title))
+    for (const nameTok of tokenize(c.title)) body.delete(nameTok)
+    return body
+  })
   for (let i = 0; i < bodyTokens.length; i += 1) {
     for (let j = i + 1; j < bodyTokens.length; j += 1) {
       if (jaccard(bodyTokens[i]!, bodyTokens[j]!) < threshold) {

@@ -405,7 +405,13 @@ irreversible false-fusion and makes the comments true.
     still be pairwise ≥ threshold similar on BODY-ONLY tokens; HOLDS two DISTINCT
     fact-less entities sharing an identical name (two "John Smith" pages score 1.0
     on name tokens but collapse to empty body sets once the name is excluded).
-    §7.2 residual A.
+    §7.2 residual A. Name exclusion is EXPLICIT: each candidate's title tokens are
+    subtracted from its body token set before the pairwise score, because
+    `stripBoilerplate` only removes the generated `# <Name>` H1 — name tokens that
+    appear in PROSE (`John Smith is an engineer at Google` vs `… at Facebook`) would
+    otherwise inflate body Jaccard to 0.75 ≥ 0.7 and irreversibly merge two distinct
+    people; with title tokens subtracted the score drops to 0.667 < 0.7 → correctly
+    HELD (Argus r1 blocker fix).
 - **HELD ≠ merged.** A held cluster keeps every member as its own survivor (the
   pass's always-safe missed-merge direction), increments the new
   `ReflectReport.held` counter, and is logged LOUDLY so the owner can hand-merge a
