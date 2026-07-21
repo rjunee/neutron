@@ -142,6 +142,13 @@ export interface WindowLike {
   __neutron_app_ws_url?: string
   __neutron_user_id?: string
   __neutron_projects?: ProjectTab[]
+  /**
+   * #375 — DEPRECATED as the initial-scope source. The server still injects this
+   * (the first project row) for back-compat, but the client now defaults a bare
+   * `/chat` load to General and only pins a project from an explicit
+   * `?project=`/`?topic=` deep-link. Kept on the type so the injected global stays
+   * declared; no longer read for the initial scope.
+   */
   __neutron_active_project_id?: string
   __neutron_onboarding_active?: boolean
   __neutron_post_onboarding_claim_url?: string
@@ -205,6 +212,43 @@ export function detectClientTimezone(
   } catch {
     return null
   }
+}
+
+/** Project-id character class — mirrors the gateway/runtime doc-link guard so a
+ *  deep-link param can never carry a malformed id into the topic derivation. */
+const PROJECT_ID_RE = /^[A-Za-z0-9_.-]+$/
+
+/**
+ * #375 — the INITIAL active project for a bare `/chat` load.
+ *
+ * A fresh workspace (post-onboarding claim redirect lands on `https://<slug>/chat`
+ * with NO topic) must open on **General**, not an arbitrary project. The server
+ * still injects `window.__neutron_active_project_id` (the first project row) for
+ * back-compat, but that arbitrary default is exactly the confusing landing #375
+ * reports, so the client no longer honors it as the initial scope.
+ *
+ * The ONLY thing that pins the initial scope to a specific project is an explicit
+ * deep-link on the page URL: `?project=<id>` (canonical) or `?topic=<id>` (alias).
+ * The id is validated against the char class AND the known project list, so a
+ * stale/foreign/garbage param falls back to General rather than opening a topic
+ * the rail can't represent. Everything else → `null` (General).
+ */
+export function initialProjectIdFromLocation(
+  search: string,
+  projects: readonly ProjectTab[],
+): string | null {
+  let params: URLSearchParams
+  try {
+    params = new URLSearchParams(search)
+  } catch {
+    return null
+  }
+  const raw = params.get('project') ?? params.get('topic')
+  if (raw === null || raw.length === 0) return null
+  if (!PROJECT_ID_RE.test(raw)) return null
+  // Only open a project the client actually knows about (the server injects the
+  // full list at boot), so a bad deep-link degrades to General, never a dead scope.
+  return projects.some((p) => p.id === raw) ? raw : null
 }
 
 /** Build the app-ws WebSocket URL for a host + token (+ optional project +
@@ -281,10 +325,12 @@ export function resolveBootstrapConfig(win: WindowLike): BootstrapConfig {
   }
   const appWsToken = win.__neutron_app_ws_token ?? `dev:${userId}`
   const projects = Array.isArray(win.__neutron_projects) ? win.__neutron_projects : []
-  const projectId =
-    typeof win.__neutron_active_project_id === 'string' && win.__neutron_active_project_id.length > 0
-      ? win.__neutron_active_project_id
-      : null
+  // #375 — default the initial scope to General; only an explicit `?project=`/
+  // `?topic=` deep-link pins a specific project. The server-injected
+  // `__neutron_active_project_id` (an arbitrary first-project default) is
+  // deliberately NOT used here — landing on it is the confusing post-onboarding
+  // workspace open #375 fixes.
+  const projectId = initialProjectIdFromLocation(win.location.search, projects)
   const deviceId = makeDeviceId()
   // ISSUES #40 — detect the owner's IANA zone ONCE and reuse it for every
   // per-scope socket URL the controller later rebuilds (`main.tsx` `wsUrlFor`),

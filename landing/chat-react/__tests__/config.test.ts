@@ -6,6 +6,7 @@ import {
   buildWsUrl,
   decodeJwtSub,
   detectClientTimezone,
+  initialProjectIdFromLocation,
   resolveBootstrapConfig,
   wsUrlForScope,
   type BootstrapConfig,
@@ -35,6 +36,29 @@ describe('decodeJwtSub', () => {
     expect(decodeJwtSub('not-a-jwt')).toBeNull()
     expect(decodeJwtSub(jwt({ aud: 'x' }))).toBeNull()
     expect(decodeJwtSub(undefined)).toBeNull()
+  })
+})
+
+describe('initialProjectIdFromLocation (#375)', () => {
+  const projects = [
+    { id: 'p1', label: 'Work' },
+    { id: 'p2', label: 'Home' },
+  ]
+  it('returns null (General) for a bare load with no deep-link', () => {
+    expect(initialProjectIdFromLocation('', projects)).toBeNull()
+    expect(initialProjectIdFromLocation('?foo=bar', projects)).toBeNull()
+  })
+  it('reads a known ?project=<id>', () => {
+    expect(initialProjectIdFromLocation('?project=p1', projects)).toBe('p1')
+  })
+  it('reads a known ?topic=<id> alias, and prefers ?project= when both present', () => {
+    expect(initialProjectIdFromLocation('?topic=p2', projects)).toBe('p2')
+    expect(initialProjectIdFromLocation('?project=p1&topic=p2', projects)).toBe('p1')
+  })
+  it('falls back to General for an unknown or malformed id', () => {
+    expect(initialProjectIdFromLocation('?project=ghost', projects)).toBeNull()
+    expect(initialProjectIdFromLocation('?project=', projects)).toBeNull()
+    expect(initialProjectIdFromLocation('?project=bad%2Fslash', projects)).toBeNull()
   })
 })
 
@@ -185,17 +209,81 @@ describe('resolveBootstrapConfig', () => {
     expect(cfg.wsUrl).toBe('wss://edge.test/ws/app/chat?token=real.jwt.token')
   })
 
-  it('carries projects + the active project id', () => {
+  it('carries the injected project list', () => {
+    const cfg = resolveBootstrapConfig(
+      win({ __neutron_user_id: 'sam', __neutron_projects: [{ id: 'p1', label: 'Work' }] }),
+    )
+    expect(cfg.projects).toEqual([{ id: 'p1', label: 'Work' }])
+  })
+
+  // #375 — a bare `/chat` load (no topic/project deep-link) must open on GENERAL,
+  // NOT the arbitrary first project the server injects. This FAILS on the old code
+  // (which read `__neutron_active_project_id` and returned 'p1').
+  it('#375 — defaults a bare /chat load to General even when a project is injected', () => {
     const cfg = resolveBootstrapConfig(
       win({
         __neutron_user_id: 'sam',
         __neutron_projects: [{ id: 'p1', label: 'Work' }],
         __neutron_active_project_id: 'p1',
+        location: { protocol: 'https:', host: 'sam.neutron.test', search: '', pathname: '/chat' },
       }),
     )
-    expect(cfg.projects).toEqual([{ id: 'p1', label: 'Work' }])
+    expect(cfg.projectId).toBeNull()
+    expect(cfg.wsUrl).not.toContain('project_id=')
+  })
+
+  // #375 — a `?project=<id>` deep-link still opens that project (regression guard
+  // for the deep-link path the fix must preserve).
+  it('#375 — a ?project=<id> deep-link opens that project when it is known', () => {
+    const cfg = resolveBootstrapConfig(
+      win({
+        __neutron_user_id: 'sam',
+        __neutron_projects: [{ id: 'p1', label: 'Work' }],
+        location: {
+          protocol: 'https:',
+          host: 'sam.neutron.test',
+          search: '?project=p1',
+          pathname: '/chat',
+        },
+      }),
+    )
     expect(cfg.projectId).toBe('p1')
     expect(cfg.wsUrl).toContain('project_id=p1')
+  })
+
+  // #375 — the `?topic=<id>` alias works the same way.
+  it('#375 — a ?topic=<id> deep-link alias also opens that project', () => {
+    const cfg = resolveBootstrapConfig(
+      win({
+        __neutron_user_id: 'sam',
+        __neutron_projects: [{ id: 'p2', label: 'Home' }],
+        location: {
+          protocol: 'https:',
+          host: 'sam.neutron.test',
+          search: '?topic=p2',
+          pathname: '/chat',
+        },
+      }),
+    )
+    expect(cfg.projectId).toBe('p2')
+  })
+
+  // #375 — an unknown / stale / garbage deep-link falls back to General, never a
+  // dead scope the rail can't represent.
+  it('#375 — an unknown deep-link project falls back to General', () => {
+    const cfg = resolveBootstrapConfig(
+      win({
+        __neutron_user_id: 'sam',
+        __neutron_projects: [{ id: 'p1', label: 'Work' }],
+        location: {
+          protocol: 'https:',
+          host: 'sam.neutron.test',
+          search: '?project=ghost',
+          pathname: '/chat',
+        },
+      }),
+    )
+    expect(cfg.projectId).toBeNull()
   })
 
   it('throws ChatBootstrapError when no identity can be derived', () => {
