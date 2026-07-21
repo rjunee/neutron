@@ -90,6 +90,7 @@ import {
   buildBootSweepReport,
   buildCancellableDispatchTurn,
   buildDispatchStuckAlertSink,
+  createBoardResearchStarter,
   selectDispatchAlertTopics,
   scheduleDispatchLifecycleWatchdog,
   defaultPersonaLoader,
@@ -2290,6 +2291,48 @@ export function buildOpenGraphComposer(
             return { ok: false, code: result.code, message: result.message }
           }
         : undefined
+    // #379 — the ▶ RESEARCH closure. A 'research' card routes to the general
+    // agent-dispatch service (Atlas), NOT the Trident build loop. It resolves the
+    // card's saved spec (its plans/ doc, else its title), dispatches a board-bound
+    // research run (the SAME chokepoint enforces required-item + ask-before-acting
+    // + attachRun binding), and on terminal (success OR crash/cancel/timeout):
+    //   (1) marks the card terminal (done | failed) so the desktop pane
+    //       auto-closes — never stranding it in_progress; and
+    //   (2) delivers the Atlas result back to the originating chat via the durable
+    //       app-ws poster (persisted → renders in React), NOT a raw registry send.
+    // Double-▶ is guarded two ways: the surface 409s a card whose linked run is
+    // still live, AND a per-card `spawn_key` coalesces a concurrent dispatch onto
+    // the in-flight run (no duplicate Atlas run). Gated on `dispatchService` (an
+    // LLM-less box has no dispatcher → a research ▶ degrades to 501, like a build).
+    const boardStartResearch =
+      dispatchService !== null
+        ? createBoardResearchStarter({
+            dispatch: (dispReq) => dispatchService.dispatch(dispReq),
+            resolveTask: (slug, item) =>
+              workBoardSpecDoc.resolveTaskForItem(slug, {
+                title: item.title,
+                design_doc_ref: item.design_doc_ref,
+              }),
+            // Mark the card terminal (done | failed) + clear the inline marker so
+            // the pane auto-closes — never stranding a finished research card
+            // in_progress. The dispatch's own reconcile already cleared linked_run_id.
+            markCardTerminal: async (slug, id, status) => {
+              await workBoardStore.update(slug, id, { status, inline_active: false })
+            },
+            // Deliver the Atlas result to the originating chat via the DURABLE
+            // app-ws poster (persisted → renders in React), not a raw registry send.
+            deliver: (chatId, text) => buildClarifyPoster.post?.(chatId, text),
+            chatIdForScope: (slug) =>
+              tridentDeliveryChatId(workBoardProjectIdForKey(project_slug, slug) ?? null),
+            // Route the fire-and-forget terminal work through the composer's sink so
+            // an unhandled rejection can't escape (parity with the build path).
+            schedule: (work) => fireAndForget('work-board.research-terminal', work, () => {}),
+            onError: (err) =>
+              log.warn('work_board_research_terminal_failed', {
+                error: err instanceof Error ? err.message : String(err),
+              }),
+          })
+        : undefined
     const workBoardSurface = createWorkBoardSurface({
       store: workBoardStore,
       auth: appOwnerAuth,
@@ -2300,6 +2343,13 @@ export function buildOpenGraphComposer(
       create_card: (slug, input) => workBoardSpecDoc.createCardWithOptionalSpec(slug, input),
       // M1 — ▶ start/retry a build from the card's saved spec (undefined = 501).
       ...(boardStartBuild !== undefined ? { start_build: boardStartBuild } : {}),
+      // #379 — ▶ start/retry a RESEARCH card via Atlas (undefined = 501).
+      ...(boardStartResearch !== undefined ? { start_research: boardStartResearch } : {}),
+      // #379 — cancel a research (agent-dispatch) run when its card is deleted so
+      // the Atlas subprocess is not orphaned (no-op for an unknown/terminal id).
+      ...(dispatchService !== null
+        ? { cancel_dispatch: async (run_id: string) => void (await dispatchService.stop(run_id)) }
+        : {}),
     })
     // Phase 2b — late-bind the dispatch board binder (declared above, before the
     // store could exist) to the canonical store now that it's constructed.

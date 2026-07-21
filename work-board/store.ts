@@ -34,6 +34,16 @@ import type { ProjectDb } from '@neutronai/persistence/index.ts'
  *  client-writable status — only the terminal reconcile sets it. */
 export type WorkBoardStatus = 'upcoming' | 'in_progress' | 'done' | 'failed'
 
+/**
+ * The kind of work a card represents — the ▶/play routing discriminator (#379,
+ * migration 0105). `build` → the ▶ dispatches an autonomous Forge→Argus→merge
+ * Trident run (the DEFAULT; every legacy row + un-annotated create is 'build').
+ * `research` → the ▶ dispatches an Atlas research/analysis agent (agent-dispatch),
+ * whose result is delivered back to the chat and which marks the card terminal on
+ * completion. Ryan-locked: "trackable work ≠ a Trident build run."
+ */
+export type WorkBoardTaskType = 'build' | 'research'
+
 /** Public, fully-typed board item. */
 export interface WorkBoardItem {
   id: string
@@ -42,6 +52,8 @@ export interface WorkBoardItem {
   status: WorkBoardStatus
   sort_order: number
   design_doc_ref: string | null
+  /** #379 — the ▶ routing discriminator ('build' → Trident, 'research' → Atlas). */
+  task_type: WorkBoardTaskType
   /** Lightweight inline (in-topic) work marker. Sub-agent activity is
    *  DERIVED via `linked_run_id` (Phase 2), not stored here. */
   inline_active: boolean
@@ -57,6 +69,8 @@ export interface CreateWorkBoardItemInput {
   title: string
   status?: WorkBoardStatus
   design_doc_ref?: string | null
+  /** #379 — the ▶ routing kind; defaults to 'build' when absent. */
+  task_type?: WorkBoardTaskType
   /** Test-injectable id; defaults to a fresh ULID. */
   id?: string
 }
@@ -175,7 +189,7 @@ export function workBoardProjectIdForKey(
 
 const COLS =
   'id, project_slug, title, status, sort_order, design_doc_ref, ' +
-  'inline_active, linked_run_id, created_at, updated_at, completed_at'
+  'inline_active, linked_run_id, created_at, updated_at, completed_at, task_type'
 
 interface WorkBoardItemDbRow {
   id: string
@@ -189,6 +203,7 @@ interface WorkBoardItemDbRow {
   created_at: string
   updated_at: string
   completed_at: string | null
+  task_type: WorkBoardTaskType
 }
 
 /**
@@ -271,6 +286,7 @@ function rowToItem(row: WorkBoardItemDbRow): WorkBoardItem {
     created_at: row.created_at,
     updated_at: row.updated_at,
     completed_at: row.completed_at,
+    task_type: row.task_type,
   }
 }
 
@@ -313,6 +329,7 @@ export class WorkBoardStore {
     const status: WorkBoardStatus = input.status ?? 'upcoming'
     const design_doc_ref = validateDesignDocRef(input.design_doc_ref)
     const completed_at = status === 'done' ? ts : null
+    const task_type: WorkBoardTaskType = input.task_type ?? 'build'
 
     const item: WorkBoardItem = {
       id,
@@ -326,6 +343,7 @@ export class WorkBoardStore {
       created_at: ts,
       updated_at: ts,
       completed_at,
+      task_type,
     }
 
     await this.db.transaction(async (tx) => {
@@ -338,7 +356,7 @@ export class WorkBoardStore {
       item.sort_order = max?.next ?? 1
       await tx.run(
         `INSERT INTO work_board_items (${COLS})
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           item.id,
           item.project_slug,
@@ -351,6 +369,7 @@ export class WorkBoardStore {
           item.created_at,
           item.updated_at,
           item.completed_at,
+          item.task_type,
         ],
       )
     })

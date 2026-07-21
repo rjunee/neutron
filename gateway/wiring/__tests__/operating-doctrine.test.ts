@@ -58,6 +58,32 @@ describe('operating-doctrine — principle set', () => {
     }
   })
 
+  test('#379 — "leave a trackable card for ANY substantial work" is an UNCONDITIONAL principle, not gated on the build-dispatch tool', () => {
+    // The card directive must live in the always-rendered DOCTRINE_PRINCIPLES set
+    // (ships EVERY turn), NOT only inside BUILD_ROUTING_DOCTRINE (which is scoped
+    // to explicit BUILDS + phrased "if you have the work_board_dispatch_build
+    // tool"). Root of defect (1): a research/analysis job left no card because the
+    // only card directive was build-scoped + credential-gated.
+    const cardPrinciple = DOCTRINE_PRINCIPLES.find((p) => p.includes('work_board_add'))
+    expect(cardPrinciple).toBeDefined()
+    expect(cardPrinciple!.toLowerCase()).toContain('research')
+    expect(cardPrinciple!.toLowerCase()).toContain('analysis')
+    expect(cardPrinciple!.toLowerCase()).toContain('substantial')
+
+    // It renders on EVERY surface even when the build-routing tool is not the
+    // subject — the principle is present in the fragment for both scopes.
+    for (const scope of ['general', 'project'] as const) {
+      const frag = buildOperatingDoctrineFragment(
+        scope === 'project' ? { scope, project_id: 'gondor' } : { scope },
+      )
+      expect(frag).toContain(cardPrinciple!)
+      expect(frag).toContain('work_board_add')
+      // The unconditional card rule does NOT depend on the credential-gated
+      // dispatch tool name — it names the general add-a-card verb.
+      expect(frag.toLowerCase()).toContain('trackable work is not only a build')
+    }
+  })
+
   test('the principle body is byte-identical across surfaces (consistency)', () => {
     const general = buildOperatingDoctrineFragment({ scope: 'general' })
     const project = buildOperatingDoctrineFragment({ scope: 'project', project_id: 'gondor' })

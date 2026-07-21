@@ -1749,6 +1749,36 @@ separate change).
   `📄 <name>` label that opens the Documents tab (reusing the `#148` doc-link
   nav). ▶ START has no confirm (cheap + intended); the `#174` X-cancel confirm is
   unchanged.
+- **▶ routes BY TASK TYPE (#379) — research → Atlas, build → Trident.** A card
+  carries a `task_type` ('build' | 'research', migration `0105`, DEFAULT 'build'
+  so every legacy row + un-annotated create is a build). The web add-composer has
+  a minimal Build/Research picker so a web-added research card does NOT default to
+  a Trident build. The ▶ start route (`gateway/http/work-board-surface.ts`
+  `handleStart`) branches on `item.task_type`: a 'build' card goes to `start_build`
+  (the `dispatchBoardBoundBuild` Trident chokepoint above); a 'research' card goes
+  to `start_research` — the general **agent-dispatch** service (`kind: 'research'`
+  = Atlas). The research ▶ wiring is `agent-dispatch/board-research-start.ts`
+  `createBoardResearchStarter` (extracted from the composer for testability): it
+  binds the run to the card (same required-item + ask-before-acting chokepoint),
+  and on the run's TERMINAL (success OR crash/cancel/timeout) it (a) marks the
+  card terminal — `done` on `finished`, else `failed` — so the desktop pane
+  auto-closes and the card is NEVER stranded in_progress, and (b) delivers the
+  Atlas result back to the originating chat through the durable app-ws poster
+  (persisted → renders in React), not a raw ephemeral registry send. Double-▶ is
+  guarded two ways: the surface `409 already_running` on a card whose linked run
+  is still live, plus a per-card `spawn_key` (+ `on_duplicate: 'coalesce'`) so a
+  concurrent dispatch coalesces onto the in-flight run (no duplicate Atlas run).
+  Deleting a research card cancels its agent-dispatch run (`cancel_dispatch` →
+  `DispatchService.stop`) so the Atlas subprocess is not orphaned. LLM-less box: a
+  research ▶ degrades to `501` exactly as a build ▶ does (no dispatcher wired).
+- **Display roll-up counts plain active cards (#379).** `WorkBoardSummary` (web
+  `WorkBoardTab.tsx` `summarize`) now carries `active` alongside `running`/`failed`:
+  a non-terminal in_progress/inline_active card with NO live run
+  (`linked_run_id: null`). The desktop pane (`PlansPane` controller) KICKS OPEN on
+  `running` OR `active` rising, stays open while any of running/failed/active > 0,
+  and auto-CLOSES only once ALL THREE are zero — so a plain in_progress/inline card
+  (e.g. the agent working inline, or a research run in flight) opens the pane, and
+  it closes when every card is terminal. Sticky + manual-toggle unchanged.
 - **Per-turn injection** — `work-board/fragment.ts` `formatWorkBoardFragment`
   builds a compact `<work_board>` DATA block (active+next items, escaped +
   length-capped, + an advisory drift-guard line). `build-live-agent-turn.ts`

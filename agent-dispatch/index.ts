@@ -68,6 +68,13 @@ export {
 } from './tool.ts'
 
 export {
+  createBoardResearchStarter,
+  type BoardResearchStarterDeps,
+  type BoardResearchStartResult,
+  type BoardResearchItem,
+} from './board-research-start.ts'
+
+export {
   parseDispatchCommand,
   executeDispatchCommand,
   parseAndExecuteDispatchCommand,

@@ -36,6 +36,7 @@ import {
   type WorkBoardItem,
   type WorkBoardStatus,
   type WorkBoardStore,
+  type WorkBoardTaskType,
 } from '@neutronai/work-board/store.ts'
 import { isTerminalPhase } from '@neutronai/trident/state-machine.ts'
 import { runProgressForItem } from '@neutronai/trident/run-progress.ts'
@@ -87,7 +88,13 @@ export type WorkBoardStartResult =
  */
 export type WorkBoardCreateCardFn = (
   project_slug: string,
-  input: { title: string; status?: WorkBoardStatus; design_doc_ref?: string | null; spec?: string },
+  input: {
+    title: string
+    status?: WorkBoardStatus
+    task_type?: WorkBoardTaskType
+    design_doc_ref?: string | null
+    spec?: string
+  },
 ) => Promise<WorkBoardItem>
 
 /**
@@ -101,6 +108,17 @@ export type WorkBoardStartBuildFn = (
   item: WorkBoardItem,
 ) => Promise<WorkBoardStartResult>
 
+/**
+ * #379 — ▶ start/retry a RESEARCH card bound to `item`. The composer wires this
+ * to the general agent-dispatch service (Atlas), which delivers the result back
+ * to the chat and marks the card terminal on completion. When absent (LLM-less
+ * box), a research ▶ returns 501, exactly as `start_build` does for a build card.
+ */
+export type WorkBoardStartResearchFn = (
+  project_slug: string,
+  item: WorkBoardItem,
+) => Promise<WorkBoardStartResult>
+
 export interface WorkBoardSurfaceOptions {
   store: WorkBoardStore
   auth: AppWsAuthResolver
@@ -110,8 +128,14 @@ export interface WorkBoardSurfaceOptions {
   now?: () => number
   /** M1 on-disk spec — persist a non-trivial create `spec` to a plans/ doc. */
   create_card?: WorkBoardCreateCardFn
-  /** M1 ▶ play button — start/retry a build from the card's saved spec. */
+  /** M1 ▶ play button — start/retry a BUILD ('build' task_type) from the card's saved spec. */
   start_build?: WorkBoardStartBuildFn
+  /** #379 ▶ play button — start/retry a RESEARCH ('research' task_type) Atlas dispatch. */
+  start_research?: WorkBoardStartResearchFn
+  /** #379 — cancel a NON-trident (agent-dispatch) run bound to a card being
+   *  deleted, so a research subprocess is not orphaned. Best-effort; a no-op for
+   *  an unknown run id. Wired to `DispatchService.stop`. */
+  cancel_dispatch?: (run_id: string) => Promise<void>
 }
 
 export interface WorkBoardSurface {
@@ -128,12 +152,15 @@ const WORK_BOARD_PATH_RE =
 
 const MAX_ITEM_ID_LEN = 128
 const VALID_STATUSES: WorkBoardStatus[] = ['upcoming', 'in_progress', 'done']
+const VALID_TASK_TYPES: WorkBoardTaskType[] = ['build', 'research']
 
 export function createWorkBoardSurface(opts: WorkBoardSurfaceOptions): WorkBoardSurface {
   const { store, auth, trident_runs } = opts
   const nowMs = opts.now ?? (() => Date.now())
   const createCard = opts.create_card
   const startBuild = opts.start_build
+  const startResearch = opts.start_research
+  const cancelDispatch = opts.cancel_dispatch
 
   /**
    * Attach each bound item's live run progress (item 1) so the HTTP GET carries
@@ -203,7 +230,7 @@ export function createWorkBoardSurface(opts: WorkBoardSurfaceOptions): WorkBoard
           return handleUpdate(req, store, scope, project_id, item_id)
         }
         if (method === 'DELETE') {
-          return handleDelete(store, scope, project_id, item_id, trident_runs)
+          return handleDelete(store, scope, project_id, item_id, trident_runs, cancelDispatch)
         }
         return jsonError(
           405,
@@ -212,7 +239,7 @@ export function createWorkBoardSurface(opts: WorkBoardSurfaceOptions): WorkBoard
         )
       }
       if (action === 'start' && method === 'POST') {
-        return handleStart(store, scope, project_id, item_id, trident_runs, startBuild)
+        return handleStart(store, scope, project_id, item_id, trident_runs, startBuild, startResearch)
       }
       if (action === 'complete' && method === 'POST') {
         return handleComplete(store, scope, project_id, item_id)
@@ -247,6 +274,10 @@ async function handleCreate(
   if (status === false) {
     return jsonError(400, 'invalid_status', `status must be one of ${VALID_STATUSES.join('/')}`)
   }
+  const task_type = readTaskType(fields['task_type'])
+  if (task_type === false) {
+    return jsonError(400, 'invalid_task_type', `task_type must be one of ${VALID_TASK_TYPES.join('/')}`)
+  }
   const design_doc_ref = readOptionalString(fields['design_doc_ref'])
   if (design_doc_ref === false) {
     return jsonError(400, 'invalid_design_doc_ref', 'design_doc_ref must be a string')
@@ -264,12 +295,14 @@ async function handleCreate(
         ? await createCard(project_slug, {
             title,
             ...(status !== null ? { status } : {}),
+            ...(task_type !== null ? { task_type } : {}),
             ...(design_doc_ref !== null ? { design_doc_ref } : {}),
             ...(spec !== null ? { spec } : {}),
           })
         : await store.create(project_slug, {
             title,
             ...(status !== null ? { status } : {}),
+            ...(task_type !== null ? { task_type } : {}),
             ...(design_doc_ref !== null ? { design_doc_ref } : {}),
           })
     return jsonOk({ item, project_id }, 201)
@@ -295,22 +328,41 @@ async function handleStart(
   item_id: string,
   trident_runs: TridentRunAccess | undefined,
   startBuild: WorkBoardStartBuildFn | undefined,
+  startResearch: WorkBoardStartResearchFn | undefined,
 ): Promise<Response> {
   const item = store.get(project_slug, item_id)
   if (item === null) return jsonError(404, 'item_not_found', `item_id=${item_id}`)
-  if (startBuild === undefined) {
-    return jsonError(501, 'build_dispatch_unavailable', 'trident build dispatch is not enabled on this instance')
+  // #379 — ROUTE BY TASK TYPE. A 'research' card dispatches an Atlas
+  // research/analysis agent (agent-dispatch); a 'build' card (the default)
+  // dispatches an autonomous Trident run. The play button no longer stamps a
+  // Trident build on everything.
+  const isResearch = item.task_type === 'research'
+  const dispatch = isResearch ? startResearch : startBuild
+  if (dispatch === undefined) {
+    const what = isResearch ? 'research (agent-dispatch)' : 'trident build'
+    return jsonError(501, 'dispatch_unavailable', `${what} dispatch is not enabled on this instance`)
   }
-  // Don't start a card that already has a live build (the ▶ is hidden for these,
-  // but a stale client / concurrent request could still hit this).
+  // Don't start a card that already has a live run (the ▶ is hidden for these,
+  // but a stale client / concurrent request could still hit this). A BUILD card's
+  // liveness is derived from the trident run store; a RESEARCH card's linked run
+  // is an agent-dispatch run (not a trident row), so a still-set linked_run_id
+  // whose trident lookup is null means "a live research run" → also guard it
+  // (the composer's dispatch additionally coalesces a double-▶ via spawn_key).
   const runId = item.linked_run_id
-  if (trident_runs !== undefined && runId !== null && runId.length > 0) {
-    const run = trident_runs.get(runId)
-    if (run !== null && !isTerminalPhase(run.phase)) {
-      return jsonError(409, 'already_running', `item_id=${item_id} already has a live build (${runId})`)
+  if (runId !== null && runId.length > 0) {
+    if (isResearch) {
+      // A research card keeps its linked_run_id ONLY while the dispatch is live
+      // (the terminal reconcile clears it); a still-set id ⇒ a live research run.
+      return jsonError(409, 'already_running', `item_id=${item_id} already has a live research run (${runId})`)
+    }
+    if (trident_runs !== undefined) {
+      const run = trident_runs.get(runId)
+      if (run !== null && !isTerminalPhase(run.phase)) {
+        return jsonError(409, 'already_running', `item_id=${item_id} already has a live build (${runId})`)
+      }
     }
   }
-  const result = await startBuild(project_slug, item)
+  const result = await dispatch(project_slug, item)
   if (!result.ok) {
     // #337 — an underspecified card is NOT an error to paint in the work pane:
     // `startBuild` has already posted a clarifying question to the chat and left
@@ -407,6 +459,7 @@ async function handleDelete(
   project_id: string,
   item_id: string,
   trident_runs: TridentRunAccess | undefined,
+  cancelDispatch: ((run_id: string) => Promise<void>) | undefined,
 ): Promise<Response> {
   const owned = store.get(project_slug, item_id)
   if (owned === null) return jsonError(404, 'item_not_found', `item_id=${item_id}`)
@@ -419,7 +472,21 @@ async function handleDelete(
   // THEN remove the board item.
   let cancelled_run: string | undefined
   const runId = owned.linked_run_id
-  if (trident_runs !== undefined && runId !== null && runId.length > 0) {
+  // #379 — a RESEARCH card's linked run is an agent-dispatch run (not a trident
+  // row), so the trident cancel below no-ops for it. Cancel it via the dispatch
+  // stop hook so the Atlas subprocess isn't orphaned. Best-effort + a no-op for
+  // an unknown/terminal run id (DispatchService.stop returns false). Fire this
+  // for every bound run — a build run id is unknown to the dispatcher and vice
+  // versa, so exactly one hook actually cancels.
+  if (owned.task_type === 'research' && cancelDispatch !== undefined && runId !== null && runId.length > 0) {
+    try {
+      await cancelDispatch(runId)
+      cancelled_run = runId
+    } catch {
+      // dispatch cancel is best-effort — proceed with the delete
+    }
+  }
+  if (owned.task_type !== 'research' && trident_runs !== undefined && runId !== null && runId.length > 0) {
     try {
       const run = trident_runs.get(runId)
       if (run !== null && !isTerminalPhase(run.phase)) {
@@ -465,6 +532,14 @@ function readStatus(raw: unknown): WorkBoardStatus | null | false {
   if (typeof raw !== 'string') return false
   if (!VALID_STATUSES.includes(raw as WorkBoardStatus)) return false
   return raw as WorkBoardStatus
+}
+
+/** task_type enum: a valid kind, `null` when absent, or `false` when malformed. */
+function readTaskType(raw: unknown): WorkBoardTaskType | null | false {
+  if (raw === undefined || raw === null) return null
+  if (typeof raw !== 'string') return false
+  if (!VALID_TASK_TYPES.includes(raw as WorkBoardTaskType)) return false
+  return raw as WorkBoardTaskType
 }
 
 /** Optional string: the string, `null` when absent/empty, or `false` when malformed. */

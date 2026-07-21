@@ -193,6 +193,7 @@ describe('parseWorkBoardItems', () => {
       id: 'a',
       title: 'T',
       status: 'in_progress',
+      task_type: 'build',
       sort_order: 0,
       design_doc_ref: null,
       inline_active: false,
@@ -201,6 +202,15 @@ describe('parseWorkBoardItems', () => {
       updated_at: '',
       completed_at: null,
     })
+  })
+
+  it('#379 — parses task_type (research kept; anything else → build)', () => {
+    const out = parseWorkBoardItems([
+      { id: 'a', title: 'r', status: 'upcoming', task_type: 'research' },
+      { id: 'b', title: 'b', status: 'upcoming', task_type: 'bogus' },
+      { id: 'c', title: 'c', status: 'upcoming' },
+    ])
+    expect(out.map((i) => i.task_type)).toEqual(['research', 'build', 'build'])
   })
 
   it('parses a valid run_progress and drops a malformed one (item 1)', () => {
