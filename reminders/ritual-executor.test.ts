@@ -11,7 +11,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -104,6 +104,17 @@ async function waitTerminal(run_id: string): Promise<ReturnType<RitualRunStore['
     await new Promise((r) => setTimeout(r, 2))
   }
   throw new Error(`run ${run_id} never reached terminal`)
+}
+
+/** Poll until `pred` holds (or throw). Used to await detached settle+post chains. */
+async function waitFor(pred: () => boolean, ms = 2000): Promise<void> {
+  const start = Date.now()
+  while (Date.now() - start < ms) {
+    if (pred()) return
+    // eslint-disable-next-line no-await-in-loop
+    await new Promise((r) => setTimeout(r, 2))
+  }
+  throw new Error('condition not met within timeout')
 }
 
 const approver = (value: boolean): RitualApprovalCheck => ({ isApproved: () => value })
@@ -416,5 +427,222 @@ describe('createRitualExecutor.fire — spawn refusal + robustness', () => {
     })
     // Must resolve, not reject.
     await expect(exec.fire(await ritualRow('morning-brief'))).resolves.toBeUndefined()
+  })
+})
+
+// ── T3 — completion delivery + failure surfacing (plan task 5) ──────────────
+describe('createRitualExecutor.fire — completion delivery (task 5)', () => {
+  /** Build an executor whose turn is `turn`, with a recording outbound. */
+  function execWith(
+    turn: RitualTurn,
+    opts: {
+      registry?: RitualRegistry
+      scope_cwd?: () => string
+      mint?: () => string
+    } = {},
+  ): { exec: ReturnType<typeof createRitualExecutor>; posts: ReminderOutboundInput[] } {
+    const rec = recordingOutbound()
+    let n = 0
+    const exec = createRitualExecutor({
+      registry: opts.registry ?? registryWith(def()),
+      approvals: new ApprovalManager(db, noopNotifier),
+      project_slug: 'owner',
+      instance_key: 'owner',
+      subagents,
+      outbound: rec.outbound,
+      resolve_topic: resolveTopic,
+      turn,
+      runs,
+      resolve_model: () => 'm',
+      scope_cwd: opts.scope_cwd ?? ((): string => '/s'),
+      build_approval_check: () => approver(true),
+      mint_run_id: opts.mint ?? ((): string => `sub-${n++}`),
+    })
+    return { exec, posts: rec.posts }
+  }
+
+  test('(a) finished non-silent → artifact on disk + durable history row + one post', async () => {
+    const repo = mkdtempSync(join(tmpdir(), 'neutron-ritual-repo-'))
+    const marker = join(repo, 'BRIEF.md')
+    const turn: RitualTurn = async (input) => {
+      writeFileSync(join(input.repo_path, 'BRIEF.md'), 'ran', 'utf8')
+      return { result: 'Brief: 3 things today', status: 'completed' }
+    }
+    const { exec, posts } = execWith(turn, { scope_cwd: () => repo, mint: () => 'sub-a' })
+    await exec.fire(await ritualRow('morning-brief'))
+    await waitFor(() => posts.length >= 1)
+
+    // artifact-on-disk: the turn actually ran and wrote the file.
+    expect(existsSync(marker)).toBe(true)
+    // exactly one post, to the resolved topic, carrying the final text.
+    expect(posts).toHaveLength(1)
+    expect(posts[0]!.topic_id).toBe('app:owner-topic')
+    expect(posts[0]!.body).toContain('Brief: 3 things today')
+    // durable history row: finished, output_summary carries the text.
+    const row = runs.get('sub-a')!
+    expect(row.status).toBe('finished')
+    expect(row.output_summary).toContain('Brief: 3 things today')
+    rmSync(repo, { recursive: true, force: true })
+  })
+
+  test('(b) silent finished → row finished, NO post', async () => {
+    const repo = mkdtempSync(join(tmpdir(), 'neutron-ritual-repo-'))
+    const turn: RitualTurn = async (input) => {
+      writeFileSync(join(input.repo_path, 'BRIEF.md'), 'ran', 'utf8')
+      return { result: 'quiet output', status: 'completed' }
+    }
+    const { exec, posts } = execWith(turn, {
+      registry: registryWith(def({ silent: true })),
+      scope_cwd: () => repo,
+      mint: () => 'sub-silent',
+    })
+    await exec.fire(await ritualRow('morning-brief'))
+    await waitTerminal('sub-silent')
+    // give any (erroneous) late post a chance to land, then assert none.
+    await new Promise((r) => setTimeout(r, 20))
+    expect(existsSync(join(repo, 'BRIEF.md'))).toBe(true)
+    expect(runs.get('sub-silent')!.status).toBe('finished')
+    expect(posts).toHaveLength(0)
+    rmSync(repo, { recursive: true, force: true })
+  })
+
+  test('(d) finished non-silent with EMPTY output → completion fallback line', async () => {
+    const turn: RitualTurn = async () => ({ result: '   ', status: 'completed' })
+    const { exec, posts } = execWith(turn, { mint: () => 'sub-empty' })
+    await exec.fire(await ritualRow('morning-brief'))
+    await waitFor(() => posts.length >= 1)
+    expect(posts[0]!.body).toBe("Ritual 'morning-brief' finished (run sub-empty): no output.")
+  })
+
+  test.each([
+    ['failed', /Ritual 'morning-brief' failed \(run .+\)/],
+    ['timed_out', /Ritual 'morning-brief' timed_out \(run .+\)/],
+  ] as const)('(c) turn status %s → exactly one failure notice', async (status, re) => {
+    const turn: RitualTurn = async () => ({ result: '', status })
+    const { exec, posts } = execWith(turn, { mint: () => `sub-${status}` })
+    await exec.fire(await ritualRow('morning-brief'))
+    await waitFor(() => posts.length >= 1)
+    await new Promise((r) => setTimeout(r, 10))
+    expect(posts).toHaveLength(1)
+    expect(posts[0]!.body).toMatch(re)
+  })
+
+  test('(c) turn REJECTS → crashed failure notice carrying the run id', async () => {
+    const turn: RitualTurn = async () => {
+      throw new Error('substrate exploded')
+    }
+    const { exec, posts } = execWith(turn, { mint: () => 'sub-crash' })
+    await exec.fire(await ritualRow('morning-brief'))
+    await waitFor(() => posts.length >= 1)
+    expect(posts[0]!.body).toMatch(/Ritual 'morning-brief' crashed \(run sub-crash\)/)
+  })
+
+  test('(c) spawn refusal → failure notice posted for the refused attempt', async () => {
+    // saturate the ritual lane so the executor spawn is refused.
+    for (let i = 0; i < 2; i++) {
+      // eslint-disable-next-line no-await-in-loop
+      await spawnSubagent(
+        { instance_key: 'owner', agent_kind: 'ritual' },
+        {
+          registry: subagents,
+          verify_delegation: async () => {
+            throw new Error('no nest')
+          },
+          mint_run_id: () => `live-${i}`,
+        },
+      )
+    }
+    const turn = mock(async (): Promise<RitualTurnResult> => ({ result: '', status: 'completed' }))
+    const { exec, posts } = execWith(turn, { mint: () => 'refused-1' })
+    await exec.fire(await ritualRow('morning-brief'))
+    await waitFor(() => posts.length >= 1)
+    expect(posts[0]!.body).toMatch(/Ritual 'morning-brief' failed \(run .+\)/)
+    expect(turn).not.toHaveBeenCalled()
+  })
+})
+
+describe('createRitualExecutor.fire — escalation (task 5)', () => {
+  const escalations = (posts: ReminderOutboundInput[]): number =>
+    posts.filter((p) => /failed 3 consecutive runs/.test(p.body)).length
+
+  test('3 consecutive failures → exactly one escalation; 4th → still one; success then 3 → a second', async () => {
+    const rec = recordingOutbound()
+    let n = 0
+    const turnResult: { status: RitualTurnResult['status'] } = { status: 'failed' }
+    const turn: RitualTurn = async () => ({ result: '', status: turnResult.status })
+    const exec = createRitualExecutor({
+      registry: registryWith(def()),
+      approvals: new ApprovalManager(db, noopNotifier),
+      project_slug: 'owner',
+      instance_key: 'owner',
+      subagents,
+      outbound: rec.outbound,
+      resolve_topic: resolveTopic,
+      turn,
+      runs,
+      resolve_model: () => 'm',
+      scope_cwd: () => '/s',
+      build_approval_check: () => approver(true),
+      mint_run_id: () => `run-${n++}`,
+    })
+
+    // Fire one ritual run and wait for its full settle+surface chain to drain.
+    async function fireOne(id: string): Promise<void> {
+      const before = rec.posts.length
+      await exec.fire(await ritualRow('morning-brief'))
+      await waitTerminal(id)
+      // the failure/success notice for THIS run marks the settle chain done.
+      await waitFor(() => rec.posts.length > before)
+      // small drain so the escalation post (which follows the failure post) lands.
+      await new Promise((r) => setTimeout(r, 15))
+    }
+
+    // 3 consecutive failures → one escalation.
+    await fireOne('run-0')
+    await fireOne('run-1')
+    await fireOne('run-2')
+    expect(escalations(rec.posts)).toBe(1)
+
+    // 4th failure → still exactly one (the streak already escalated).
+    await fireOne('run-3')
+    expect(escalations(rec.posts)).toBe(1)
+
+    // a success (resets the streak; non-silent → posts final text), then 3 more failures.
+    turnResult.status = 'completed'
+    await fireOne('run-4')
+    turnResult.status = 'failed'
+    await fireOne('run-5')
+    await fireOne('run-6')
+    await fireOne('run-7')
+    expect(escalations(rec.posts)).toBe(2)
+  })
+})
+
+describe('createRitualExecutor.fire — delivery resilience (task 5)', () => {
+  test('(f) outbound.post rejects → run row still terminal, fire settles, no throw', async () => {
+    const throwing: ReminderOutbound = {
+      post: async () => {
+        throw new Error('deliver down')
+      },
+    }
+    const turn: RitualTurn = async () => ({ result: 'done', status: 'completed' })
+    const exec = createRitualExecutor({
+      registry: registryWith(def()),
+      approvals: new ApprovalManager(db, noopNotifier),
+      project_slug: 'owner',
+      instance_key: 'owner',
+      subagents,
+      outbound: throwing,
+      resolve_topic: resolveTopic,
+      turn,
+      runs,
+      resolve_model: () => 'm',
+      scope_cwd: () => '/s',
+      build_approval_check: () => approver(true),
+      mint_run_id: () => 'sub-resil',
+    })
+    await expect(exec.fire(await ritualRow('morning-brief'))).resolves.toBeUndefined()
+    const settled = await waitTerminal('sub-resil')
+    expect(settled!.status).toBe('finished')
   })
 })

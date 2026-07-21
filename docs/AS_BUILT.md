@@ -2,6 +2,57 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+## 2026-07-21 — Executor-mode reminders task 5: completion delivery + failure surfacing + boot reap + 30d retention
+
+A ritual's terminal event now reaches the owner. The detached settle chain writes
+the durable `code_ritual_runs` row FIRST, then posts through the ONE out-of-turn
+delivery seam (`Deliver` → the existing `ReminderOutbound`, concrete impl
+`buildButtonStoreReminderOutbound({ deliver })`) — the SAME instance the nudge
+dispatcher uses — to the owner's bare `app:<user>` topic. Spec of record:
+`docs/plans/executor-mode-reminders-2026-07-20.md`. NO feature flags.
+
+- **Completion delivery** (`reminders/ritual-executor.ts` `settleTerminal`,
+  ~ln 209-267): after `runs.markTerminal(...)`, a `finished` non-silent ritual
+  posts its final text (`r.result.trim()`), or `formatRitualCompletionFallback`
+  when the output is empty; a `silent` ritual posts NOTHING on success. Delivery
+  deps `outbound` + `resolve_topic` are REQUIRED on `RitualExecutorDeps`, so the
+  composer wiring is TypeScript-enforced.
+- **Failure surfacing** (`reminders/ritual-executor.ts` `surfaceFailure`,
+  ~ln 189-215): every failure terminal (failed / timed_out / crashed, plus the
+  spawn-refusal `insertFailed` path ~ln 262-273) posts exactly one one-line
+  notice `Ritual '<id>' <status> (run <run_id>)` (`formatRitualFailureNotice`).
+  Silent suppresses SUCCESS output only — failure notices always post. 'skipped'
+  rows get no notice.
+- **Consecutive-failure escalation** (`shouldEscalate`,
+  `reminders/ritual-delivery.ts`): a deterministic once-per-streak rule over the
+  last 4 terminal rows (`listRecentTerminal({ritual_id, limit:4})`) — fires one
+  `formatRitualEscalationNotice` the moment a streak crosses 3, with zero new
+  state. Checked in `surfaceFailure` after the failure row is written.
+- **Boot reap of orphaned 'running' rows** (`reapOrphanRitualRuns`,
+  `reminders/ritual-delivery.ts`; wired `open/composer.ts` after the ritual
+  factory): a `code_ritual_runs` row a PRIOR boot left 'running' is marked
+  'crashed' (`markTerminal`'s `WHERE status='running'` guard = idempotency) and
+  gets one boot-reap notice. `code_ritual_runs` has NO boot_id — current-boot
+  safety is ORDERING: the driver's FIRST statement is a SYNCHRONOUS
+  `listOrphanRunning()` snapshot taken during compose, before build-core-modules
+  starts the tick loop, so no current-boot 'running' row can exist in it. NOT
+  llmPool-gated (orphans from a prior LLM-enabled boot surface even credential-less).
+- **30-day retention prune** (`RitualRunStore.pruneOlderThan`,
+  `RITUAL_RUN_RETENTION_MS`, `reminders/ritual-runs.ts`): chained after the reap
+  at boot; deletes terminal/skipped rows with `started_at` STRICTLY older than
+  `Date.now() - 30d`, never 'running' rows.
+- **Composer wiring** (`open/composer.ts`): hoisted ONE `reminderOutbound` +
+  ONE `ritualRuns` store shared by the nudge dispatcher, the ritual executor, and
+  the boot reap; executor factory gains `outbound` + `resolve_topic`; the reap +
+  prune fire-and-forget runs unconditionally at compose (fireAndForget precedent
+  `composer:888`).
+- Tests: `reminders/ritual-delivery.test.ts` (formatters + `shouldEscalate` truth
+  table), `reminders/ritual-runs.test.ts` (listRecentTerminal / listOrphanRunning
+  / pruneOlderThan + T6 seeded-orphan reap + idempotence), and T3 behavioural
+  completion added to `reminders/ritual-executor.test.ts` (artifact-on-disk +
+  durable history row + silent + failure-notice variants + escalation streak +
+  post-failure resilience). `bun test reminders/` = 290 pass.
+
 ## 2026-07-21 — Executor-mode reminders task 4: executor dispatch branch in the TICK + ritual executor + cc-ritual substrate + ritual lane + code_ritual_runs writer
 
 The live wiring that turns a `ritual_id` reminder row into a scheduled, scoped

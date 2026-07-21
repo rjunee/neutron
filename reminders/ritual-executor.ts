@@ -200,7 +200,7 @@ export function createRitualExecutor(deps: RitualExecutorDeps): RitualExecutor {
         topic,
         owner,
         reminder.id,
-        formatRitualFailureNotice({ ritual_id, status, run_id, failure_reason }),
+        formatRitualFailureNotice({ ritual_id, status, run_id, failure_reason: failure_reason ?? null }),
       )
       // Read the last 4 terminal rows AFTER this failure's row is written — the
       // escalation rule is pure over that snapshot (no new state).
