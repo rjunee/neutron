@@ -1,16 +1,17 @@
 /**
- * RB3 ([BEHAVIOR]) — the scheduled reflect-consolidation loop arms ONLY behind
- * the shared `NEUTRON_PERFECT_RECALL` flag.
+ * RB3 ([BEHAVIOR]) — the scheduled reflect-consolidation loop arms
+ * UNCONDITIONALLY. Memory consolidation is ON by default (managed SPEC Decisions
+ * Log 2026-07-20, P0-4 — the perfect-recall lane is BASE, not a flag).
  *
  * Driven through the REAL Open composer boundary (the same harness the
  * loop-inventory guard uses): booting the composer registers every composer-side
- * loop into `composition.loop_registry`. This test pins the flag semantics:
- *   - flag OFF (default) → `reflect-consolidation` is NOT registered (the loop
- *     never arms, zero LLM cost);
- *   - flag ON → `reflect-consolidation` IS registered + started, with a live
- *     descriptor and a daily cadence.
+ * loop into `composition.loop_registry`. This test pins the arming semantics with
+ * NO env var set:
+ *   - `reflect-consolidation` IS registered + started, with a live descriptor and
+ *     the 6h cadence (`DEFAULT_REFLECT_INTERVAL_MS === 6 * 60 * 60 * 1000`);
+ *   - its quiescing stop() is wired into `realmode_cleanups`.
  *
- * `immediate` is false, so an armed loop fires NO tick (hence NO LLM call, NO
+ * `immediate` is false, so the armed loop fires NO tick (hence NO LLM call, NO
  * memory access) during boot — the arming is observable purely via the registry.
  */
 
@@ -44,7 +45,6 @@ const SAVED_ENV_KEYS = [
   'ANTHROPIC_API_KEY',
   'CLAUDE_CODE_OAUTH_TOKEN',
   'NOTIFY_SOCKET',
-  'NEUTRON_PERFECT_RECALL',
 ] as const
 
 let savedEnv: Record<string, string | undefined> = {}
@@ -63,7 +63,6 @@ beforeEach(() => {
   process.env['ANTHROPIC_API_KEY'] = 'sk-ant-test-reflect-arming'
   delete process.env['CLAUDE_CODE_OAUTH_TOKEN']
   delete process.env['NOTIFY_SOCKET']
-  delete process.env['NEUTRON_PERFECT_RECALL']
 })
 
 afterEach(() => {
@@ -119,12 +118,11 @@ async function bootComposer(): Promise<{
 }
 
 test('the REAL composer wires the reflect-stop cleanup into realmode_cleanups', async () => {
-  // Composer-boundary proof (not a fabricated loop): boot the real flagged Open
+  // Composer-boundary proof (not a fabricated loop): boot the real Open
   // composer, then drain the ACTUAL `composition.realmode_cleanups`. The reflect
   // loop must go active → inactive as a result — i.e. the composer genuinely
   // registered the loop's quiescing stop() into the cleanup set. Fails if that
   // cleanup is ever dropped (the loop would stay active after the drain).
-  process.env['NEUTRON_PERFECT_RECALL'] = '1'
   const { composition, close } = await bootComposer()
   try {
     const reg = composition.loop_registry
@@ -180,9 +178,8 @@ test('a composer failure after the memory wiring does NOT leak the reflect inter
   // The reflect loop is armed LAST (after every failure-prone validation), so a
   // composer throw can't leave a running interval that boot() never gets a cleanup
   // for. Force a failure (remove the cookie secret → the composer rejects during a
-  // later validation) with the flag ON, and prove — via a setInterval spy keyed on
-  // the reflect loop's unique 24h cadence — that the loop never armed.
-  process.env['NEUTRON_PERFECT_RECALL'] = '1'
+  // later validation) and prove — via a setInterval spy keyed on the reflect
+  // loop's unique 6h cadence — that the loop never armed.
   delete process.env['NEUTRON_ONBOARDING_CHAT_COOKIE_SECRET']
   const realSetInterval = globalThis.setInterval
   let reflectIntervalArmed = 0
@@ -230,17 +227,9 @@ test('arming rollback: a throwing timer leaves the loop stopped (composer failur
   expect(loop.describe().isActive?.()).toBe(false) // no live/dangling timer
 })
 
-test('flag OFF (default) → reflect-consolidation is NOT armed', async () => {
-  const { composition, close } = await bootComposer()
-  try {
-    expect(composition.loop_registry?.has(REFLECT_LOOP)).toBe(false)
-  } finally {
-    await close()
-  }
-})
-
-test('flag ON → reflect-consolidation is armed with a live daily-cadence descriptor', async () => {
-  process.env['NEUTRON_PERFECT_RECALL'] = '1'
+test('reflect-consolidation is armed UNCONDITIONALLY (no env var) with a live 6h-cadence descriptor', async () => {
+  // No perfect-recall env var exists anymore (the flag was deleted). The loop must
+  // still register + start (memory consolidation is ON by default).
   const { composition, close } = await bootComposer()
   try {
     const reg = composition.loop_registry
@@ -248,6 +237,9 @@ test('flag ON → reflect-consolidation is armed with a live daily-cadence descr
     const desc = reg?.get(REFLECT_LOOP)
     expect(desc).toBeDefined()
     if (desc !== undefined) {
+      // The cadence is the 6h default, pinned to the literal so a regression to
+      // the old 24h value fails HERE.
+      expect(DEFAULT_REFLECT_INTERVAL_MS).toBe(6 * 60 * 60 * 1000)
       expect(desc.cadenceMs).toBe(DEFAULT_REFLECT_INTERVAL_MS)
       expect(desc.startedAt).toBeGreaterThan(0) // start() was called
       const health = desc.health()

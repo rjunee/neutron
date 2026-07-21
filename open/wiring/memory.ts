@@ -66,7 +66,7 @@ export interface WiredMemory {
    * behavior. The composer wraps the returned body as the `<memory_index>`
    * injection fragment.
    */
-  memoryIndexRead: (() => Promise<string | null>) | undefined
+  memoryIndexRead: () => Promise<string | null>
   /**
    * RB1 (perfect-recall, always on) — LATE-BIND the active work-board handles
    * provider. The work-board store is constructed AFTER `wireMemory` in the
@@ -83,7 +83,7 @@ export interface WiredMemory {
    * onto it here; the composer reuses THIS instance to build the trident harvest
    * emitter so both producers write through one store. Torn down via `cleanups`.
    */
-  nexus: NexusStore | null
+  nexus: NexusStore
   /**
    * RB3 ([BEHAVIOR]) — the scheduled "reflect" consolidation loop, always armed
    * now that memory consolidation is ON by default (managed SPEC Decisions Log
@@ -93,7 +93,7 @@ export interface WiredMemory {
    * re-synthesis + reserved-kind extraction) once per `DEFAULT_REFLECT_INTERVAL_MS`
    * (every 6h). On an LLM-less box it degrades to a dedup-only pass.
    */
-  reflectLoop: SupervisedLoop | null
+  reflectLoop: SupervisedLoop
   /**
    * The Cores→scribe phase-2 fan-out, CONSTRUCTED but NOT armed (its `stop()`
    * cleanup is already registered into `cleanups`). `null` when LLM-less (no
@@ -217,8 +217,7 @@ export function wireMemory(ctx: OpenWiringContext): WiredMemory {
   // WITHOUT waiting for a new entity write. Coalesced + best-effort — a no-op
   // when there are no entities.
   memoryIndexHook.regenerate()
-  const memoryIndexRead: (() => Promise<string | null>) | undefined = () =>
-    memoryIndexHook.read()
+  const memoryIndexRead: () => Promise<string | null> = () => memoryIndexHook.read()
   const setMemoryIndexWorkHandles = (
     provider: () => ReadonlyArray<MemoryIndexWorkHandle>,
   ): void => {

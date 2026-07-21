@@ -1063,15 +1063,13 @@ export function buildOpenGraphComposer(
     // composition failure (e.g. a validation throw) can't leave a running interval
     // that boot() never receives a cleanup for. `stop()` on a not-yet-started loop
     // is a safe no-op, so registering the cleanup early is harmless.
-    if (reflectLoop !== null) {
-      realmodeCleanups.push(async () => {
-        try {
-          await reflectLoop.stop()
-        } catch {
-          // best-effort shutdown cleanup — stop() never rejects
-        }
-      })
-    }
+    realmodeCleanups.push(async () => {
+      try {
+        await reflectLoop.stop()
+      } catch {
+        // best-effort shutdown cleanup — stop() never rejects
+      }
+    })
     for (const cleanup of memoryCleanups) realmodeCleanups.push(cleanup)
 
     // RC2 ([BEHAVIOR]) — the tick loop's `on_run_terminal` = the skill-forge audit
@@ -2239,13 +2237,11 @@ export function buildOpenGraphComposer(
     // active work across ALL scopes — General AND every project — not just
     // General. Resolved FRESH on each manifest generation. The memory-index is
     // always wired now (`memoryIndexRead` is always defined).
-    if (memoryIndexRead !== undefined) {
-      setMemoryIndexWorkHandles(() =>
-        workBoardStore
-          .listAllActive()
-          .map((item) => ({ id: item.id, title: item.title, status: item.status })),
-      )
-    }
+    setMemoryIndexWorkHandles(() =>
+      workBoardStore
+        .listAllActive()
+        .map((item) => ({ id: item.id, title: item.title, status: item.status })),
+    )
     // M1 on-disk spec + ▶ play button — the ONE service that persists a card's
     // full ask to a user-visible `Projects/<id>/docs/plans/<slug>.md` doc (setting
     // the card's `design_doc_ref`) and resolves that doc back as the build's spec
@@ -3055,14 +3051,10 @@ export function buildOpenGraphComposer(
             // fallback (coalesced with the write path) so a just-written entity is
             // never raced away; here we only wrap it as escaped `<memory_index>`
             // DATA. Best-effort (a null read → no block).
-            ...(memoryIndexRead !== undefined
-              ? {
-                  memoryIndexSnapshot: async (): Promise<string | null> => {
-                    const body = await memoryIndexRead()
-                    return body !== null ? formatMemoryIndexFragment(body) : null
-                  },
-                }
-              : {}),
+            memoryIndexSnapshot: async (): Promise<string | null> => {
+              const body = await memoryIndexRead()
+              return body !== null ? formatMemoryIndexFragment(body) : null
+            },
             buttonStore: landing.buttonStore,
             project_slug,
             owner_home,
@@ -3503,17 +3495,15 @@ export function buildOpenGraphComposer(
     // registered before the memory cleanups, for shutdown ordering). Register-
     // before-start (dup-name → throw at boot, before the timer arms). The loop is
     // always live now (memory consolidation ON by default).
-    if (reflectLoop !== null) {
-      loopRegistry.register(reflectLoop.describe())
-      // Failure-atomic: if arming the timer throws, STOP the (partially-started)
-      // loop before re-throwing so composition never rejects with a live/dangling
-      // reflect timer — same discipline as the dispatch lifecycle watchdog above.
-      try {
-        reflectLoop.start()
-      } catch (err) {
-        await reflectLoop.stop()
-        throw err
-      }
+    loopRegistry.register(reflectLoop.describe())
+    // Failure-atomic: if arming the timer throws, STOP the (partially-started)
+    // loop before re-throwing so composition never rejects with a live/dangling
+    // reflect timer — same discipline as the dispatch lifecycle watchdog above.
+    try {
+      reflectLoop.start()
+    } catch (err) {
+      await reflectLoop.stop()
+      throw err
     }
 
     return {

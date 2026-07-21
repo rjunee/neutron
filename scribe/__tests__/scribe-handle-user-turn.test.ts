@@ -144,7 +144,11 @@ describe('scribe.handleUserTurn — direct extract→substrate→write wiring', 
     const spec = specs[0]!
     // Prompt shape: the scribe extraction persona + the EXACT turn text
     // (composeExtractionPrompt embeds it). Breaking text propagation fails here.
-    expect(spec.prompt).toContain(SCRIBE_EXTRACTION_PROMPT)
+    // The persona head (everything before `MESSAGE:`) is contiguous; belief-
+    // evolution guidance is always spliced between it and the message now, so we
+    // assert the head rather than the whole legacy prompt string.
+    const personaHead = SCRIBE_EXTRACTION_PROMPT.slice(0, SCRIBE_EXTRACTION_PROMPT.indexOf('MESSAGE:'))
+    expect(spec.prompt).toContain(personaHead)
     expect(spec.prompt).toContain(LONG_TURN)
     // Extraction is a tool-less single call with a model preference set.
     expect(spec.tools).toEqual([])

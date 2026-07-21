@@ -8,14 +8,14 @@
  *   fact A (works_at OldCo)  → compiled-truth + edge + timeline
  *   superseding fact         → works_at NewCo, `supersedes: "OldCo"`
  *
- * ACCEPTANCE (flag ON): superseding a fact updates compiled-truth + the graph
- * edge to CURRENT truth but leaves the dated history intact —
+ * Belief evolution (supersede) is the BASE behavior now (managed SPEC Decisions
+ * Log 2026-07-20, P0-4 — no flag): the supersede path is unconditional.
+ *
+ * ACCEPTANCE: superseding a fact updates compiled-truth + the graph edge to
+ * CURRENT truth but leaves the dated history intact —
  *   (1) compiled-truth shows ONLY NewCo,
  *   (2) the gbrain edge reflects NewCo, not OldCo,
  *   (3) the timeline STILL contains the OldCo dated entry (history preserved).
- *
- * PLUS a flag-OFF test proving pure-accretion behaviour is unchanged (both the
- * OldCo and NewCo facts + edges coexist — exactly as today).
  */
 
 import { describe, test, expect, beforeAll, afterAll } from 'bun:test'
@@ -38,9 +38,9 @@ import { bootPgliteBrain } from '@neutronai/gbrain-memory/__tests__/boot-pglite-
 const t0 = Date.now()
 
 /** Fake substrate that emits a canned extraction document then completes. The
- *  supersede FLAG affects only the prompt (which this fake ignores); the write-
- *  path behaviour under test is exercised by the injected `supersedes` marker +
- *  the scribe-level `supersede` gate. */
+ *  supersede path affects only the prompt (which this fake ignores); the write-
+ *  path behaviour under test is exercised by the injected `supersedes` marker
+ *  (belief evolution is always on). */
 function cannedSubstrate(json: string): Substrate {
   return {
     start(): SessionHandle {
@@ -123,7 +123,7 @@ describe('RB4 temporal invalidation (belief evolution) — real PGLite round-tri
     if (engine !== undefined) await engine.disconnect()
   }, 30_000)
 
-  test('flag ON: superseding a fact updates compiled-truth + the graph edge to current truth, timeline keeps history', async () => {
+  test('superseding a fact updates compiled-truth + the graph edge to current truth, timeline keeps history', async () => {
     const ownerDataDir = mkdtempSync(join(tmpdir(), 'scribe-rb4-on-'))
     const syncHook = new GBrainSyncHook({
       memoryStore: new GBrainMemoryStore(client),
@@ -139,7 +139,6 @@ describe('RB4 temporal invalidation (belief evolution) — real PGLite round-tri
         budget: createState(join(ownerDataDir, '.scribe-budget.json'), t0),
         writeEntity,
         now: () => ts,
-        supersede: true, // ← the shared NEUTRON_PERFECT_RECALL gate, ON
       })
 
     // 1) Write the ORIGINAL fact: Alice works_at OldCo.
@@ -194,124 +193,7 @@ describe('RB4 temporal invalidation (belief evolution) — real PGLite round-tri
     expect(oldCoPage).toContain('slug: oldco')
   }, 60_000)
 
-  test('flag OFF: the SAME superseding input is pure accretion — both OldCo and NewCo facts + edges coexist (unchanged)', async () => {
-    const ownerDataDir = mkdtempSync(join(tmpdir(), 'scribe-rb4-off-'))
-    const syncHook = new GBrainSyncHook({
-      memoryStore: new GBrainMemoryStore(client),
-      gbrainMcp: client,
-    })
-
-    const mk = (json: string, ts: number): ReturnType<typeof createScribe> =>
-      createScribe({
-        substrate: cannedSubstrate(json),
-        syncHook,
-        ownerDataDir,
-        owner_slug: 'rb4-off',
-        budget: createState(join(ownerDataDir, '.scribe-budget.json'), t0),
-        writeEntity,
-        now: () => ts,
-        // supersede omitted → default OFF (flag not opted in)
-      })
-
-    const first = await mk(factA('Fay Ober', 'Oldstead'), t0).extractAndWrite({
-      text: 'Fay Ober is a staff engineer at Oldstead, her longtime employer, where she leads the platform team and mentors the juniors.',
-      observed_at: t0,
-    })
-    expect(first.ran).toBe(true)
-
-    // The SAME superseding extraction (the `supersedes` marker IS present) —
-    // but with the flag off it must be inert.
-    const second = await mk(factSupersede('Fay Ober', 'Oldstead', 'Newland'), t0 + 1000).extractAndWrite({
-      text: 'Fay Ober just moved on from Oldstead — she now works at Newland, leading their infrastructure group, and is no longer at Oldstead.',
-      observed_at: t0 + 1000,
-    })
-    expect(second.ran).toBe(true)
-
-    const onDisk = readFileSync(join(ownerDataDir, 'entities', 'people', 'fay-ober.md'), 'utf8')
-    const compiled = extractCompiledTruth(onDisk)
-
-    // Pure accretion: BOTH facts remain in compiled-truth (nothing superseded).
-    expect(compiled).toContain('Works at [[oldstead]].')
-    expect(compiled).toContain('Works at [[newland]].')
-
-    // BOTH edges coexist in the graph — no invalidation applied.
-    const links = await client.call('get_links', { slug: 'fay-ober' })
-    expect(edgesTo(links, 'oldstead', 'works_at').length).toBe(1)
-    expect(edgesTo(links, 'newland', 'works_at').length).toBe(1)
-
-    // The timeline carries no supersession note (the marker was ignored).
-    const timeline = extractTimeline(onDisk)
-    expect(timeline.some((e) => e.body.includes('superseded'))).toBe(false)
-  }, 60_000)
-
-  test('flag OFF→ON transition: a fact written flag-off, then superseded flag-on — current truth updates, append-only timeline intact', async () => {
-    const ownerDataDir = mkdtempSync(join(tmpdir(), 'scribe-rb4-off2on-'))
-    const syncHook = new GBrainSyncHook({
-      memoryStore: new GBrainMemoryStore(client),
-      gbrainMcp: client,
-    })
-
-    // 1) Original works_at OldCo written with the flag OFF — so it carries NO
-    //    relation note of its own (fact-only timeline body), the pre-RB4 shape.
-    const off = await createScribe({
-      substrate: cannedSubstrate(factA('Gil Pace', 'Oldford')),
-      syncHook,
-      ownerDataDir,
-      owner_slug: 'rb4-off2on',
-      budget: createState(join(ownerDataDir, '.scribe-budget.json'), t0),
-      writeEntity,
-      now: () => t0,
-      // supersede omitted → OFF
-    }).extractAndWrite({
-      text: 'Gil Pace is a staff engineer at Oldford, his longtime employer, where he leads the platform team and mentors the juniors.',
-      observed_at: t0,
-    })
-    expect(off.ran).toBe(true)
-
-    // 2) The flag is later ENABLED; a superseding turn arrives.
-    const on = await createScribe({
-      substrate: cannedSubstrate(factSupersede('Gil Pace', 'Oldford', 'Newforge')),
-      syncHook,
-      ownerDataDir,
-      owner_slug: 'rb4-off2on',
-      budget: createState(join(ownerDataDir, '.scribe-budget.json'), t0),
-      writeEntity,
-      now: () => t0 + 1000,
-      supersede: true, // flag now ON
-    }).extractAndWrite({
-      text: 'Gil Pace just moved on from Oldford — he now works at Newforge, leading their infrastructure group, and is no longer at Oldford.',
-      observed_at: t0 + 1000,
-    })
-    expect(on.ran).toBe(true)
-
-    const onDisk = readFileSync(join(ownerDataDir, 'entities', 'people', 'gil-pace.md'), 'utf8')
-    const compiled = extractCompiledTruth(onDisk)
-    // Current truth: Oldford retired, Newforge present.
-    expect(compiled).not.toContain('[[oldford]]')
-    expect(compiled).toContain('Works at [[newforge]].')
-
-    // Graph reflects current truth.
-    const links = await client.call('get_links', { slug: 'gil-pace' })
-    expect(edgesTo(links, 'oldford', 'works_at').length).toBe(0)
-    expect(edgesTo(links, 'newforge', 'works_at').length).toBe(1)
-
-    // The append-only timeline is intact (never rewritten): the original flag-off
-    // t0 entry survives, and the superseding turn lands its own dated works_at
-    // Newforge row at t0 + 1000. (The flag-off original recorded no relation note,
-    // so Oldford isn't NAMED in a note here — the documented off→on limitation; the
-    // current-truth removal + edge invalidation above carry the change, and no
-    // supersession is fabricated.)
-    const timeline = extractTimeline(onDisk)
-    expect(timeline.some((e) => e.ts === new Date(t0).toISOString())).toBe(true) // original preserved
-    expect(
-      timeline.some(
-        (e) => e.ts === new Date(t0 + 1000).toISOString() && e.body.includes('works_at newforge'),
-      ),
-    ).toBe(true)
-    expect(timeline.some((e) => e.body.includes('superseded'))).toBe(false)
-  }, 60_000)
-
-  test('flag ON: an ALIASED wikilink is invalidated (removal matches [[alphaco|Alphaco]], not just [[alphaco]])', async () => {
+  test('an ALIASED wikilink is invalidated (removal matches [[alphaco|Alphaco]], not just [[alphaco]])', async () => {
     const ownerDataDir = mkdtempSync(join(tmpdir(), 'scribe-rb4-alias-'))
     const syncHook = new GBrainSyncHook({
       memoryStore: new GBrainMemoryStore(client),
@@ -343,7 +225,7 @@ describe('RB4 temporal invalidation (belief evolution) — real PGLite round-tri
     let links = await client.call('get_links', { slug: 'cara-lee' })
     expect(edgesTo(links, 'alphaco', 'works_at').length).toBe(1)
 
-    // Supersede it via scribe (flag ON).
+    // Supersede it via scribe (belief evolution, always on).
     const scribe = createScribe({
       substrate: cannedSubstrate(
         JSON.stringify({
@@ -362,7 +244,6 @@ describe('RB4 temporal invalidation (belief evolution) — real PGLite round-tri
       budget: createState(join(ownerDataDir, '.scribe-budget.json'), t0),
       writeEntity,
       now: () => t0 + 1000,
-      supersede: true,
     })
     const out = await scribe.extractAndWrite({
       text: 'Cara Lee has moved on from Alphaco and now works at Betaco, leading their platform engineering team full time.',
@@ -382,7 +263,7 @@ describe('RB4 temporal invalidation (belief evolution) — real PGLite round-tri
     expect(edgesTo(links, 'betaco', 'works_at').length).toBe(1) // CURRENT
   }, 60_000)
 
-  test('flag ON: supersede is PREDICATE-SCOPED — an unrelated current fact about the SAME object survives', async () => {
+  test('supersede is PREDICATE-SCOPED — an unrelated current fact about the SAME object survives', async () => {
     const ownerDataDir = mkdtempSync(join(tmpdir(), 'scribe-rb4-scope-'))
     const syncHook = new GBrainSyncHook({
       memoryStore: new GBrainMemoryStore(client),
@@ -433,7 +314,6 @@ describe('RB4 temporal invalidation (belief evolution) — real PGLite round-tri
       budget: createState(join(ownerDataDir, '.scribe-budget.json'), t0),
       writeEntity,
       now: () => t0 + 1000,
-      supersede: true,
     })
     const out = await scribe.extractAndWrite({
       text: 'Bob Tan left his day job at Gammaco and now works at Deltaco, though he still advises the Gammaco board on strategy.',
@@ -454,7 +334,7 @@ describe('RB4 temporal invalidation (belief evolution) — real PGLite round-tri
     expect(edgesTo(links, 'deltaco', 'works_at').length).toBe(1) // CURRENT
   }, 60_000)
 
-  test('flag ON: removal is SENTENCE-granular — same-line sibling sentence (same object) survives', async () => {
+  test('removal is SENTENCE-granular — same-line sibling sentence (same object) survives', async () => {
     const ownerDataDir = mkdtempSync(join(tmpdir(), 'scribe-rb4-sent1-'))
     const syncHook = new GBrainSyncHook({
       memoryStore: new GBrainMemoryStore(client),
@@ -502,7 +382,6 @@ describe('RB4 temporal invalidation (belief evolution) — real PGLite round-tri
       budget: createState(join(ownerDataDir, '.scribe-budget.json'), t0),
       writeEntity,
       now: () => t0 + 1000,
-      supersede: true,
     })
     const out = await scribe.extractAndWrite({
       text: 'Dave Roe stepped down from Epsico and now works at Zetaco, but he still advises the Epsico leadership team.',
@@ -519,7 +398,7 @@ describe('RB4 temporal invalidation (belief evolution) — real PGLite round-tri
     expect(compiled).toContain('Works at [[zetaco]].') // CURRENT
   }, 60_000)
 
-  test('flag ON: removal is SENTENCE-granular — same-line UNRELATED-object sentence is not deleted', async () => {
+  test('removal is SENTENCE-granular — same-line UNRELATED-object sentence is not deleted', async () => {
     const ownerDataDir = mkdtempSync(join(tmpdir(), 'scribe-rb4-sent2-'))
     const syncHook = new GBrainSyncHook({
       memoryStore: new GBrainMemoryStore(client),
@@ -574,7 +453,6 @@ describe('RB4 temporal invalidation (belief evolution) — real PGLite round-tri
       budget: createState(join(ownerDataDir, '.scribe-budget.json'), t0),
       writeEntity,
       now: () => t0 + 1000,
-      supersede: true,
     })
     const out = await scribe.extractAndWrite({
       text: 'Erin Vale left Etaco to work at Thetaco full-time, though she continues to advise the Boardeta directors.',
@@ -597,7 +475,7 @@ describe('RB4 temporal invalidation (belief evolution) — real PGLite round-tri
     expect(edgesTo(links, 'thetaco', 'works_at').length).toBe(1) // CURRENT
   }, 60_000)
 
-  test('flag ON: a LOWERCASE generated sentence is invalidated (removal is case-insensitive, matching the extractor)', async () => {
+  test('a LOWERCASE generated sentence is invalidated (removal is case-insensitive, matching the extractor)', async () => {
     const ownerDataDir = mkdtempSync(join(tmpdir(), 'scribe-rb4-lower-'))
     const syncHook = new GBrainSyncHook({
       memoryStore: new GBrainMemoryStore(client),
@@ -635,7 +513,6 @@ describe('RB4 temporal invalidation (belief evolution) — real PGLite round-tri
       budget: createState(join(ownerDataDir, '.scribe-budget.json'), t0),
       writeEntity,
       now: () => t0 + 1000,
-      supersede: true,
     })
     const out = await scribe.extractAndWrite({
       text: 'Lena Oz has moved on from Lwold and now works at Lwnew, leading their platform engineering team full time.',
@@ -654,7 +531,7 @@ describe('RB4 temporal invalidation (belief evolution) — real PGLite round-tri
     expect(edgesTo(links, 'lwnew', 'works_at').length).toBe(1) // CURRENT
   }, 60_000)
 
-  test('flag ON: a MARKDOWN-link assertion is invalidated (removal matches [Oldmark](oldmark), not only wikilinks)', async () => {
+  test('a MARKDOWN-link assertion is invalidated (removal matches [Oldmark](oldmark), not only wikilinks)', async () => {
     const ownerDataDir = mkdtempSync(join(tmpdir(), 'scribe-rb4-mdlink-'))
     const syncHook = new GBrainSyncHook({
       memoryStore: new GBrainMemoryStore(client),
@@ -694,7 +571,6 @@ describe('RB4 temporal invalidation (belief evolution) — real PGLite round-tri
       budget: createState(join(ownerDataDir, '.scribe-budget.json'), t0),
       writeEntity,
       now: () => t0 + 1000,
-      supersede: true,
     })
     const out = await scribe.extractAndWrite({
       text: 'Ivy Onn has moved on from Oldmark and now works at Newmark, leading their platform engineering team full time.',
@@ -720,9 +596,9 @@ describe('RB4 temporal invalidation (belief evolution) — real PGLite round-tri
   //    restricted prompt no longer asks for a `supersedes` marker on them, so
   //    such a turn just accretes normally. These pin the graceful outcome (no
   //    misleading invalidation, no bogus supersession note) + keep it mutation-
-  //    stable (flag ON throughout). ──────────────────────────────────────────
+  //    stable. ──────────────────────────────────────────
 
-  test('flag ON: an entity RENAME ("Renco is now Zephyr") does NOT invalidate the subject\'s existing relation', async () => {
+  test('an entity RENAME ("Renco is now Zephyr") does NOT invalidate the subject\'s existing relation', async () => {
     const ownerDataDir = mkdtempSync(join(tmpdir(), 'scribe-rb4-rename-'))
     const syncHook = new GBrainSyncHook({
       memoryStore: new GBrainMemoryStore(client),
@@ -773,7 +649,6 @@ describe('RB4 temporal invalidation (belief evolution) — real PGLite round-tri
       budget: createState(join(ownerDataDir, '.scribe-budget.json'), t0),
       writeEntity,
       now: () => t0 + 1000,
-      supersede: true, // flag ON — yet a rename must NOT trigger invalidation
     })
     const out = await scribe.extractAndWrite({
       text: 'Renco has rebranded and is now called Zephyr; Rae Kade still remembers the old name from her early days there.',
@@ -795,7 +670,7 @@ describe('RB4 temporal invalidation (belief evolution) — real PGLite round-tri
     expect(edgesTo(links, 'renco', 'works_at').length).toBe(1) // PRESERVED
   }, 60_000)
 
-  test('flag ON: an ENDED affiliation with NO replacement ("Jane left Endco") does NOT retract or fabricate a supersession', async () => {
+  test('an ENDED affiliation with NO replacement ("Jane left Endco") does NOT retract or fabricate a supersession', async () => {
     const ownerDataDir = mkdtempSync(join(tmpdir(), 'scribe-rb4-ended-'))
     const syncHook = new GBrainSyncHook({
       memoryStore: new GBrainMemoryStore(client),
@@ -844,7 +719,6 @@ describe('RB4 temporal invalidation (belief evolution) — real PGLite round-tri
       budget: createState(join(ownerDataDir, '.scribe-budget.json'), t0),
       writeEntity,
       now: () => t0 + 1000,
-      supersede: true, // flag ON — yet an ended affiliation must NOT trigger invalidation
     })
     const out = await scribe.extractAndWrite({
       text: 'Jane Poll has left her role at Endco and is taking some time off before deciding what she wants to do next.',
@@ -870,7 +744,7 @@ describe('RB4 temporal invalidation (belief evolution) — real PGLite round-tri
   //    asserted, the timeline must NOT record a `superseded …` note (that would be
   //    fabricated history). The new object is still asserted additively. ────────
 
-  test('flag ON: a supersedes marker on a BRAND-NEW subject records NO fabricated supersession (additive only)', async () => {
+  test('a supersedes marker on a BRAND-NEW subject records NO fabricated supersession (additive only)', async () => {
     const ownerDataDir = mkdtempSync(join(tmpdir(), 'scribe-rb4-newsubj-'))
     const syncHook = new GBrainSyncHook({
       memoryStore: new GBrainMemoryStore(client),
@@ -897,7 +771,6 @@ describe('RB4 temporal invalidation (belief evolution) — real PGLite round-tri
       budget: createState(join(ownerDataDir, '.scribe-budget.json'), t0),
       writeEntity,
       now: () => t0,
-      supersede: true,
     })
     const out = await scribe.extractAndWrite({
       text: 'Nova Byrd is an engineer who now works at Nbnew, leading the reliability team on the platform side.',
@@ -921,7 +794,7 @@ describe('RB4 temporal invalidation (belief evolution) — real PGLite round-tri
     expect(edgesTo(links, 'nbold', 'works_at').length).toBe(0) // never existed
   }, 60_000)
 
-  test('flag ON: a supersedes marker whose claimed prior the subject NEVER asserted removes nothing + fabricates no note', async () => {
+  test('a supersedes marker whose claimed prior the subject NEVER asserted removes nothing + fabricates no note', async () => {
     const ownerDataDir = mkdtempSync(join(tmpdir(), 'scribe-rb4-stale-'))
     const syncHook = new GBrainSyncHook({
       memoryStore: new GBrainMemoryStore(client),
@@ -968,7 +841,6 @@ describe('RB4 temporal invalidation (belief evolution) — real PGLite round-tri
       budget: createState(join(ownerDataDir, '.scribe-budget.json'), t0),
       writeEntity,
       now: () => t0 + 1000,
-      supersede: true,
     })
     const out = await scribe.extractAndWrite({
       text: 'Uma Frost has picked up a new engagement at Ufnew this quarter, on top of everything else she is juggling right now.',
@@ -993,7 +865,7 @@ describe('RB4 temporal invalidation (belief evolution) — real PGLite round-tri
     expect(edgesTo(links, 'ufnew', 'works_at').length).toBe(1) // ADDED
   }, 60_000)
 
-  test('flag ON: REPLAYING the identical superseding turn is a byte-identical no-op (idempotent)', async () => {
+  test('REPLAYING the identical superseding turn is a byte-identical no-op (idempotent)', async () => {
     const ownerDataDir = mkdtempSync(join(tmpdir(), 'scribe-rb4-replay-'))
     const syncHook = new GBrainSyncHook({
       memoryStore: new GBrainMemoryStore(client),
@@ -1008,7 +880,6 @@ describe('RB4 temporal invalidation (belief evolution) — real PGLite round-tri
         budget: createState(join(ownerDataDir, '.scribe-budget.json'), t0),
         writeEntity,
         now: () => ts,
-        supersede: true,
       })
     const pagePath = join(ownerDataDir, 'entities', 'people', 'iris-vale.md')
 
@@ -1044,7 +915,7 @@ describe('RB4 temporal invalidation (belief evolution) — real PGLite round-tri
     expect(afterReplay.includes('superseded')).toBe(false) // never any state-dependent note
   }, 60_000)
 
-  test('flag ON: a stale supersedes marker on a NEW subject just accretes (no fabricated history) even on replay', async () => {
+  test('a stale supersedes marker on a NEW subject just accretes (no fabricated history) even on replay', async () => {
     const ownerDataDir = mkdtempSync(join(tmpdir(), 'scribe-rb4-inject-'))
     const syncHook = new GBrainSyncHook({
       memoryStore: new GBrainMemoryStore(client),
@@ -1070,7 +941,6 @@ describe('RB4 temporal invalidation (belief evolution) — real PGLite round-tri
         budget: createState(join(ownerDataDir, '.scribe-budget.json'), t0),
         writeEntity,
         now: () => t0,
-        supersede: true,
       })
 
     await mk().extractAndWrite({
@@ -1099,7 +969,7 @@ describe('RB4 temporal invalidation (belief evolution) — real PGLite round-tri
     expect(notesSeg).toBe('works_at injn') // ONLY the additive assertion
   }, 60_000)
 
-  test('flag ON: a LEGACY timeline entry that reads like a note is inert (additive-only history model)', async () => {
+  test('a LEGACY timeline entry that reads like a note is inert (additive-only history model)', async () => {
     const ownerDataDir = mkdtempSync(join(tmpdir(), 'scribe-rb4-legacy-'))
     const syncHook = new GBrainSyncHook({
       memoryStore: new GBrainMemoryStore(client),
@@ -1151,7 +1021,6 @@ describe('RB4 temporal invalidation (belief evolution) — real PGLite round-tri
       budget: createState(join(ownerDataDir, '.scribe-budget.json'), t0),
       writeEntity,
       now: () => t0,
-      supersede: true,
     })
     const out = await scribe.extractAndWrite({
       text: 'Leo Marsh is now at Lgnew per the latest note; the older import text was always a bit garbled honestly.',
@@ -1176,7 +1045,7 @@ describe('RB4 temporal invalidation (belief evolution) — real PGLite round-tri
     expect(edgesTo(links, 'lgold', 'works_at').length).toBe(0)
   }, 60_000)
 
-  test('flag ON: replaying a turn whose supersession note is FOLLOWED by another note stays byte-identical', async () => {
+  test('replaying a turn whose supersession note is FOLLOWED by another note stays byte-identical', async () => {
     const ownerDataDir = mkdtempSync(join(tmpdir(), 'scribe-rb4-multireplay-'))
     const syncHook = new GBrainSyncHook({
       memoryStore: new GBrainMemoryStore(client),
@@ -1227,7 +1096,6 @@ describe('RB4 temporal invalidation (belief evolution) — real PGLite round-tri
         budget: createState(join(ownerDataDir, '.scribe-budget.json'), t0),
         writeEntity,
         now: () => t0 + 1000,
-        supersede: true,
       })
     const TURN = 'Rhea Voss moved from Rold to Rnew and keeps advising Rboard on the side this year.'
     await mk().extractAndWrite({ text: TURN, observed_at: t0 + 1000 })
@@ -1252,7 +1120,7 @@ describe('RB4 temporal invalidation (belief evolution) — real PGLite round-tri
   //    dropped (no data loss). Bounded trade-off: a superseded relation embedded
   //    in a compound sentence is left in place rather than destroying a sibling.
 
-  test('flag ON: a compound sentence with descriptive prose is kept BYTE-FOR-BYTE (no prose destroyed)', async () => {
+  test('a compound sentence with descriptive prose is kept BYTE-FOR-BYTE (no prose destroyed)', async () => {
     const ownerDataDir = mkdtempSync(join(tmpdir(), 'scribe-rb4-compound-'))
     const syncHook = new GBrainSyncHook({
       memoryStore: new GBrainMemoryStore(client),
@@ -1296,7 +1164,6 @@ describe('RB4 temporal invalidation (belief evolution) — real PGLite round-tri
       budget: createState(join(ownerDataDir, '.scribe-budget.json'), t0),
       writeEntity,
       now: () => t0 + 1000,
-      supersede: true,
     })
     const out = await scribe.extractAndWrite({
       text: 'Cwen Ash has moved on from Cwoold and now works at Cwnew, running their reliability org day to day.',
@@ -1331,7 +1198,7 @@ describe('RB4 temporal invalidation (belief evolution) — real PGLite round-tri
   // supersede on a resynthesized page was a permanent no-op (works_at NewCo AND
   // works_at OldCo asserted forever). The descriptive detail leaves CURRENT
   // compiled-truth but its history lives on in the append-only timeline.
-  test('flag ON: a SINGLE-relation PROSE sentence for a superseded target IS retired (triple-keyed, not template-shaped)', async () => {
+  test('a SINGLE-relation PROSE sentence for a superseded target IS retired (triple-keyed, not template-shaped)', async () => {
     const ownerDataDir = mkdtempSync(join(tmpdir(), 'scribe-rb4-prose-'))
     const syncHook = new GBrainSyncHook({
       memoryStore: new GBrainMemoryStore(client),
@@ -1373,7 +1240,6 @@ describe('RB4 temporal invalidation (belief evolution) — real PGLite round-tri
       budget: createState(join(ownerDataDir, '.scribe-budget.json'), t0),
       writeEntity,
       now: () => t0 + 1000,
-      supersede: true,
     })
     const out = await scribe.extractAndWrite({
       text: 'Priya Rao has moved on from Prold and now works at Prnew, leading their platform group at present.',
@@ -1398,7 +1264,7 @@ describe('RB4 temporal invalidation (belief evolution) — real PGLite round-tri
     expect(timeline.some((e) => e.body.includes('superseded'))).toBe(false)
   }, 60_000)
 
-  test('flag ON: dropping one sentence on a MIXED line preserves the survivors byte-for-byte (whitespace intact)', async () => {
+  test('dropping one sentence on a MIXED line preserves the survivors byte-for-byte (whitespace intact)', async () => {
     const ownerDataDir = mkdtempSync(join(tmpdir(), 'scribe-rb4-mixed-'))
     const syncHook = new GBrainSyncHook({
       memoryStore: new GBrainMemoryStore(client),
@@ -1437,7 +1303,6 @@ describe('RB4 temporal invalidation (belief evolution) — real PGLite round-tri
       budget: createState(join(ownerDataDir, '.scribe-budget.json'), t0),
       writeEntity,
       now: () => t0 + 1000,
-      supersede: true,
     })
     const out = await scribe.extractAndWrite({
       text: 'Max Ito has moved on from Mxold and now works at Mxnew, running their platform group these days full time.',
@@ -1461,7 +1326,7 @@ describe('RB4 temporal invalidation (belief evolution) — real PGLite round-tri
     expect(edgesTo(links, 'mxnew', 'works_at').length).toBe(1) // added
   }, 60_000)
 
-  test('flag ON: a same-object multi-predicate sentence is not destroyed; the collapsed edge survives', async () => {
+  test('a same-object multi-predicate sentence is not destroyed; the collapsed edge survives', async () => {
     const ownerDataDir = mkdtempSync(join(tmpdir(), 'scribe-rb4-multipred-'))
     const syncHook = new GBrainSyncHook({
       memoryStore: new GBrainMemoryStore(client),
@@ -1503,7 +1368,6 @@ describe('RB4 temporal invalidation (belief evolution) — real PGLite round-tri
       budget: createState(join(ownerDataDir, '.scribe-budget.json'), t0),
       writeEntity,
       now: () => t0 + 1000,
-      supersede: true,
     })
     const out = await scribe.extractAndWrite({
       text: 'Sam Orr has picked up a new role at Smnew this quarter and is ramping up on their platform team.',
@@ -1525,7 +1389,7 @@ describe('RB4 temporal invalidation (belief evolution) — real PGLite round-tri
     expect(edgesTo(links, 'smnew', 'works_at').length).toBe(1) // ADDED
   }, 60_000)
 
-  test('flag ON: a later DISTINCT update reusing the same prior does NOT inherit a stale supersession note', async () => {
+  test('a later DISTINCT update reusing the same prior does NOT inherit a stale supersession note', async () => {
     const ownerDataDir = mkdtempSync(join(tmpdir(), 'scribe-rb4-reuseprior-'))
     const syncHook = new GBrainSyncHook({
       memoryStore: new GBrainMemoryStore(client),
@@ -1540,7 +1404,6 @@ describe('RB4 temporal invalidation (belief evolution) — real PGLite round-tri
         budget: createState(join(ownerDataDir, '.scribe-budget.json'), t0),
         writeEntity,
         now: () => ts,
-        supersede: true,
       })
 
     // 1) works_at Oldrx, then 2) genuine supersession Oldrx → Newrx.
@@ -1574,7 +1437,7 @@ describe('RB4 temporal invalidation (belief evolution) — real PGLite round-tri
     expect(edgesTo(links, 'otherrx', 'works_at').length).toBe(1)
   }, 60_000)
 
-  test('flag ON: re-delivering the SAME transition at a LATER ts is additive, not a second supersession', async () => {
+  test('re-delivering the SAME transition at a LATER ts is additive, not a second supersession', async () => {
     const ownerDataDir = mkdtempSync(join(tmpdir(), 'scribe-rb4-later-'))
     const syncHook = new GBrainSyncHook({
       memoryStore: new GBrainMemoryStore(client),
@@ -1589,7 +1452,6 @@ describe('RB4 temporal invalidation (belief evolution) — real PGLite round-tri
         budget: createState(join(ownerDataDir, '.scribe-budget.json'), t0),
         writeEntity,
         now: () => ts,
-        supersede: true,
       })
 
     await mk(factA('Tia Vex', 'Toldv'), t0).extractAndWrite({
@@ -1623,7 +1485,7 @@ describe('RB4 temporal invalidation (belief evolution) — real PGLite round-tri
     expect(edgesTo(links, 'tnewv', 'works_at').length).toBe(1)
   }, 60_000)
 
-  test('flag ON: CONFLICTING supersedes for one prior (untrusted LLM) — prior retired once, both accrete', async () => {
+  test('CONFLICTING supersedes for one prior (untrusted LLM) — prior retired once, both accrete', async () => {
     const ownerDataDir = mkdtempSync(join(tmpdir(), 'scribe-rb4-conflict-'))
     const syncHook = new GBrainSyncHook({
       memoryStore: new GBrainMemoryStore(client),
@@ -1671,7 +1533,6 @@ describe('RB4 temporal invalidation (belief evolution) — real PGLite round-tri
       budget: createState(join(ownerDataDir, '.scribe-budget.json'), t0),
       writeEntity,
       now: () => t0 + 1000,
-      supersede: true,
     })
     const out = await scribe.extractAndWrite({
       text: 'Zoe Park has left Zold; the notes are muddled on whether she landed at Cona or Conb, but it is one of them now.',
@@ -1699,7 +1560,7 @@ describe('RB4 temporal invalidation (belief evolution) — real PGLite round-tri
     expect(edgesTo(links, 'conb', 'works_at').length).toBe(1)
   }, 60_000)
 
-  test('flag ON: superseding into an object already carrying a stronger predicate — prior retired, KG keeps the strongest edge', async () => {
+  test('superseding into an object already carrying a stronger predicate — prior retired, KG keeps the strongest edge', async () => {
     const ownerDataDir = mkdtempSync(join(tmpdir(), 'scribe-rb4-stronger-'))
     const syncHook = new GBrainSyncHook({
       memoryStore: new GBrainMemoryStore(client),
@@ -1743,7 +1604,6 @@ describe('RB4 temporal invalidation (belief evolution) — real PGLite round-tri
       budget: createState(join(ownerDataDir, '.scribe-budget.json'), t0),
       writeEntity,
       now: () => t0 + 1000,
-      supersede: true,
     })
     const out = await scribe.extractAndWrite({
       text: 'Uwe Lang has moved on from Ulold and now works at Ulnew, the firm he had already been advising for a while.',
@@ -1813,7 +1673,7 @@ describe('RB4 concurrent same-subject writes are atomic (no lost update)', () =>
           ts: new Date(t0 + 1000).toISOString(),
           ownSlug: 'x',
         },
-        { writeEntity, supersede: true },
+        { writeEntity },
       )
     const B = (): Promise<unknown> =>
       writeExtractionToGBrain(
@@ -1830,7 +1690,7 @@ describe('RB4 concurrent same-subject writes are atomic (no lost update)', () =>
           ts: new Date(t0 + 2000).toISOString(),
           ownSlug: 'x',
         },
-        { writeEntity, supersede: true },
+        { writeEntity },
       )
     if (order === 'A-then-B') {
       await A()
