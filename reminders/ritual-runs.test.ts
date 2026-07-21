@@ -22,6 +22,20 @@ import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { createRitualRunStore, type RitualRunStore } from './ritual-runs.ts'
 import { reapOrphanRitualRuns } from './ritual-delivery.ts'
 import type { ReminderOutbound, ReminderOutboundInput } from './dispatcher.ts'
+import type { RitualFireSkipReason } from './rituals.ts'
+
+// DDL↔TS lockstep freeze: EVERY member of the RitualFireSkipReason union must be
+// admissible by the real 0106 skip_reason CHECK. If a new member is added to the
+// type without the migration + this list, the corresponding case throws
+// 'CHECK constraint failed' here. (Blocker A — before the fix, 'gated_tool_surface'
+// threw because the CHECK omitted it, wedging the executor into a 30s hot loop.)
+const ALL_SKIP_REASONS: RitualFireSkipReason[] = [
+  'unknown_ritual',
+  'missing_prompt',
+  'unapproved',
+  'unsupported_scope',
+  'gated_tool_surface',
+]
 
 let tmp: string
 let db: ProjectDb
@@ -300,4 +314,23 @@ describe('reapOrphanRitualRuns — T6 crash surfacing', () => {
     expect(reaped).toHaveLength(1)
     expect(runs.get('orphan-2')!.status).toBe('crashed')
   })
+})
+
+describe('insertSkipped — DDL↔TS skip_reason lockstep (real 0106 CHECK)', () => {
+  test.each(ALL_SKIP_REASONS)(
+    'insertSkipped accepts every RitualFireSkipReason member against the real 0106 DDL (CHECK lockstep): %s',
+    async (reason) => {
+      await runs.insertSkipped({
+        run_id: `skip-${reason}`,
+        ritual_id: 'r1',
+        reminder_id: 'rem-1',
+        project_slug: 'owner',
+        skip_reason: reason,
+        now_ms: 1000,
+      })
+      const row = runs.get(`skip-${reason}`)!
+      expect(row.status).toBe('skipped')
+      expect(row.skip_reason).toBe(reason)
+    },
+  )
 })

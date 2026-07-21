@@ -12,7 +12,7 @@
  * Row shape (DDL: `migrations/0106_ritual_schema.sql`):
  *   run_id PK, ritual_id (NOT NULL), reminder_id, project_slug, subagent_run_id,
  *   status CHECK(skipped|running|finished|failed|timed_out|crashed),
- *   skip_reason CHECK(unknown_ritual|missing_prompt|unapproved) coupled to status
+ *   skip_reason CHECK(unknown_ritual|missing_prompt|unapproved|unsupported_scope|gated_tool_surface) coupled to status
  *   by `((status='skipped') = (skip_reason IS NOT NULL))`, content_hash,
  *   started_at/ended_at (epoch ms), output_summary, failure_reason.
  *
