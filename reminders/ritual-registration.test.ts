@@ -449,7 +449,7 @@ describe('egress:web — two separate grants', () => {
       prior_option_values: h.emitted[0]!.options.map((o) => o.value),
     })
     expect(r1!.body.toLowerCase()).toContain('egress')
-    expect(h.store.hasPendingRitualRow('web-scan')).toBe(false)
+    expect(h.store.hasScheduledRitualRow('web-scan')).toBe(false)
     expect(countReminderRows()).toBe(0)
 
     // egress-approve → now fully approved → scheduled
@@ -460,7 +460,7 @@ describe('egress:web — two separate grants', () => {
       prior_option_values: h.emitted[1]!.options.map((o) => o.value),
     })
     expect(r2!.body.toLowerCase()).toContain('scheduled')
-    expect(h.store.hasPendingRitualRow('web-scan')).toBe(true)
+    expect(h.store.hasScheduledRitualRow('web-scan')).toBe(true)
     expect(countReminderRows()).toBe(1)
 
     // isApproved requires BOTH the content and egress grants
@@ -703,6 +703,32 @@ describe('Argus r1 BLOCKER — reconciliation of a stranded approval', () => {
     expect(r2!.body.toLowerCase()).toContain('scheduled')
     expect(countReminderRows()).toBe(1)
     expect(h.respondSpy).toHaveBeenCalledTimes(1) // still just the one decision
+  })
+})
+
+// ── Argus r2 BLOCKER 2 — double-schedule race is reported as "already scheduled"
+describe('Argus r2 BLOCKER 2 — concurrent approval INSERT conflict', () => {
+  test('a UNIQUE-constraint conflict from a concurrent answer reports "already scheduled", not an error', async () => {
+    const h = makeHarness()
+    await h.service.propose(proposal({ id: 'race', schedule: { fire_at: 1_900_000_600 } }))
+    await settle()
+    const approveValue = h.emitted[0]!.options.find((o) => o.value.endsWith(':a'))!.value
+    const priorOptions = h.emitted[0]!.options.map((o) => o.value)
+
+    // Simulate the racing approval answer having already inserted the row: our
+    // INSERT trips idx_reminders_ritual_scheduled (migration 0107).
+    h.createSpy.mockImplementationOnce(() => {
+      throw new Error('UNIQUE constraint failed: reminders.ritual_id')
+    })
+    const r1 = await h.service.handleOwnerButtonAnswer({
+      user_id: OWNER,
+      user_text: approveValue,
+      topic_id: TOPIC,
+      prior_option_values: priorOptions,
+    })
+    // Conflict = success: the ritual IS scheduled; never a retry-able error.
+    expect(r1!.body.toLowerCase()).toContain('already scheduled')
+    expect(r1!.body.toLowerCase()).not.toContain('again')
   })
 })
 

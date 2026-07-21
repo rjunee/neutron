@@ -33,7 +33,7 @@ import {
   type ReflectWriteEntity,
   type ReflectDeleteEntity,
 } from '../reflect/reflect-pass.ts'
-import type { CorrectionEntry } from '../reflect/correction-patterns.ts'
+import { stablePatternSlug, type CorrectionEntry } from '../reflect/correction-patterns.ts'
 import type { SyncHook } from '@neutronai/runtime/entity-writer.ts'
 
 const realWrite = writeEntity as unknown as ReflectWriteEntity
@@ -1004,6 +1004,9 @@ describe('reflect step 4 — correction-pattern promotion (deterministic, no LLM
     right: 'the primary email is on file',
     why: 'stated preference',
   }
+  // Window-invariant slug (Argus r2 minor) — derived from the cluster's shared
+  // `right` vocabulary, NOT the oldest member id.
+  const TAB_SLUG = stablePatternSlug([TAB_1, TAB_2, TAB_3])
 
   test('toHaveBeenCalled: a ≥3 cluster promotes ONE concept page (spy), no substrate → llmCalls 0', async () => {
     const owner = tmpOwner()
@@ -1024,7 +1027,7 @@ describe('reflect step 4 — correction-pattern promotion (deterministic, no LLM
     expect(spy).toHaveBeenCalledTimes(1)
     const [input] = spy.mock.calls[0] as unknown as [Parameters<ReflectWriteEntity>[0]]
     expect(input.kind).toBe('concept')
-    expect(input.slug).toBe('correction-pattern-c-aaa')
+    expect(input.slug).toBe(TAB_SLUG)
     expect(Array.isArray(input.body.timelineAppend)).toBe(true)
     expect((input.body.timelineAppend as unknown[]).length).toBe(3)
     expect(input.precondition?.ifBodyEquals).toBeNull()
@@ -1047,12 +1050,12 @@ describe('reflect step 4 — correction-pattern promotion (deterministic, no LLM
       readCorrections: () => [TAB_1, TAB_2, TAB_3],
     })
     expect(report.patternsPromoted).toBe(1)
-    const page = await readPage(owner, 'concepts', 'correction-pattern-c-aaa')
+    const page = await readPage(owner, 'concepts', TAB_SLUG)
     expect(page).not.toBeNull()
     expect(page!).toContain('use tabs for indentation') // the learning line
     expect(extractTimeline(page!)).toHaveLength(3) // one row per occurrence
     // The GBrain/INDEX fan-out was invoked for the promoted page.
-    expect(calls.some((p) => p.endsWith('correction-pattern-c-aaa.md'))).toBe(true)
+    expect(calls.some((p) => p.endsWith(`${TAB_SLUG}.md`))).toBe(true)
   })
 
   test('idempotency: a second identical pass writes nothing new (changed:false, no hook)', async () => {

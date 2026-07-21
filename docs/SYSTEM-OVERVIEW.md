@@ -2584,8 +2584,11 @@ optional operator `GBRAIN_SOURCE` / `GBRAIN_BRAIN_ID`.
     reflect-pass.ts`, `scribe/reflect/correction-patterns.ts`). The 6h reflect
     loop, after dedup/supersede/resynth, ALSO clusters recurring owner corrections
     (`clusterCorrections`) and promotes each ≥3-occurrence cluster to a
-    kind-`concept` entity page with the stable slug `correction-pattern-<oldest-id>`
-    (`composePatternPage`, `scribe/reflect/correction-patterns.ts:115`). It is
+    kind-`concept` entity page with a WINDOW-INVARIANT slug `correction-pattern-<digest
+    of the cluster's majority `right`-field vocabulary>` (`stablePatternSlug` /
+    `composePatternPage`, `scribe/reflect/correction-patterns.ts`) — invariant so
+    the page is UPDATED, not duplicated, as occurrences age out of the 200-scan
+    window. It is
     deterministic and substrate-independent (runs on LLM-less boxes) and gated only
     on an injected `readCorrections` seam — absent ⇒ step 4 skipped, no
     scribe→reflection package edge. The report gains `correctionsScanned` /

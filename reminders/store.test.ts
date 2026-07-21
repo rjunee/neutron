@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
-import { ReminderStore } from './store.ts'
+import { isRitualScheduleConflict, ReminderStore } from './store.ts'
 
 let tmp: string
 let db: ProjectDb
@@ -246,9 +246,9 @@ describe('ReminderStore', () => {
     expect(n?.n).toBe(0)
   })
 
-  test('hasPendingRitualRow true/false lifecycle', async () => {
+  test('hasScheduledRitualRow true/false lifecycle', async () => {
     const store = new ReminderStore(db)
-    expect(store.hasPendingRitualRow('daily-digest')).toBe(false)
+    expect(store.hasScheduledRitualRow('daily-digest')).toBe(false)
     const r = await store.create({
       owner_slug: 't1',
       topic_id: null,
@@ -256,13 +256,64 @@ describe('ReminderStore', () => {
       message: 'ritual:daily-digest',
       ritual_id: 'daily-digest',
     })
-    expect(store.hasPendingRitualRow('daily-digest')).toBe(true)
+    expect(store.hasScheduledRitualRow('daily-digest')).toBe(true)
     await store.cancel(r.id)
-    expect(store.hasPendingRitualRow('daily-digest')).toBe(false)
+    // A cancelled ritual frees the slot — the owner can re-propose it.
+    expect(store.hasScheduledRitualRow('daily-digest')).toBe(false)
   })
 
-  test('hasPendingRitualRow throws on a malformed id', () => {
+  test('hasScheduledRitualRow stays true after a one-shot FIRES (Argus r2 blocker 1 — no replay)', async () => {
     const store = new ReminderStore(db)
-    expect(() => store.hasPendingRitualRow('../nope')).toThrow(/RITUAL_ID_RE/)
+    const r = await store.create({
+      owner_slug: 't1',
+      topic_id: null,
+      fire_at: 1700000000,
+      message: 'ritual:morning-brief',
+      ritual_id: 'morning-brief',
+    })
+    await store.markFired(r.id)
+    // The row is now 'fired' (not 'pending'); it MUST still count as scheduled
+    // so re-tapping Approve cannot mint a fresh reminder for a completed ritual.
+    expect(store.hasScheduledRitualRow('morning-brief')).toBe(true)
+  })
+
+  test('partial UNIQUE index blocks a second non-cancelled ritual row (Argus r2 blocker 2)', async () => {
+    const store = new ReminderStore(db)
+    await store.create({
+      owner_slug: 't1',
+      topic_id: null,
+      fire_at: 1700000000,
+      message: 'ritual:web-scan',
+      ritual_id: 'web-scan',
+    })
+    // A concurrent approval answer's INSERT trips idx_reminders_ritual_scheduled.
+    let caught: unknown
+    try {
+      await store.create({
+        owner_slug: 't1',
+        topic_id: null,
+        fire_at: 1700000001,
+        message: 'ritual:web-scan',
+        ritual_id: 'web-scan',
+      })
+    } catch (err) {
+      caught = err
+    }
+    expect(caught).toBeDefined()
+    expect(isRitualScheduleConflict(caught)).toBe(true)
+  })
+
+  test('isRitualScheduleConflict is scoped to the ritual index', () => {
+    expect(isRitualScheduleConflict(new Error('UNIQUE constraint failed: reminders.ritual_id'))).toBe(
+      true,
+    )
+    // An unrelated uniqueness error is NOT swallowed.
+    expect(isRitualScheduleConflict(new Error('UNIQUE constraint failed: reminders.id'))).toBe(false)
+    expect(isRitualScheduleConflict(new Error('database is locked'))).toBe(false)
+  })
+
+  test('hasScheduledRitualRow throws on a malformed id', () => {
+    const store = new ReminderStore(db)
+    expect(() => store.hasScheduledRitualRow('../nope')).toThrow(/RITUAL_ID_RE/)
   })
 })

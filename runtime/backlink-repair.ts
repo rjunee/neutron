@@ -45,7 +45,7 @@ import {
   parseFrontmatter,
 } from './entity-format.ts'
 import { SLUG_REGEX } from './entity-slug.ts'
-import { normaliseSlug } from './auto-link.ts'
+import { normaliseSlug, stripCode } from './auto-link.ts'
 import { writeEntity as defaultWriteEntity, type SyncHook } from './entity-writer.ts'
 import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
 import { createLogger } from '@neutronai/logger'
@@ -153,13 +153,29 @@ function stripKey(slug: string): string {
  *   - wikilink WITH alias   `[[white-board|the board]]` → `[[whiteboard|the board]]`
  *   - wikilink WITHOUT alias `[[white-board]]`          → `[[whiteboard|white-board]]`
  *   - relative mdlink        `[the board](white-board)` → `[the board](whiteboard)`
+ *   - mdlink WITH title      `[b](white-board "Hover")` → `[b](whiteboard "Hover")`
  * `normaliseSlug` is the SINGLE grammar (exported from `auto-link.ts`) — never
  * reimplemented here.
+ *
+ * Argus r2 minor: link occurrences INSIDE fenced/inline code are NOT rewritten
+ * (they are literal example text, not graph edges — the extractor already skips
+ * them via `stripCode`). `stripCode` blanks code to spaces while PRESERVING every
+ * character offset, so a match found at offset `o` in the masked text is a real
+ * link IFF the masked slice there is byte-identical to the raw match; a code
+ * occurrence reads as spaces and is left untouched. And the optional mdlink title
+ * (`"Hover"`) is now CAPTURED and re-emitted rather than silently dropped.
  */
-function rewriteLinks(compiledTruth: string, repairs: ReadonlyMap<string, string>): string {
+export function rewriteLinks(compiledTruth: string, repairs: ReadonlyMap<string, string>): string {
+  const masked = stripCode(compiledTruth)
+  // True when the raw match at [offset, offset+len) survives stripCode intact —
+  // i.e. it is NOT inside a code fence/span (which would blank it to spaces).
+  const isLiveLink = (full: string, offset: number): boolean =>
+    masked.slice(offset, offset + full.length) === full
+
   let out = compiledTruth.replace(
     /\[\[([^\]|]+?)(?:\|([^\]]*))?\]\]/g,
-    (full, rawTarget: string, alias: string | undefined): string => {
+    (full, rawTarget: string, alias: string | undefined, offset: number): string => {
+      if (!isLiveLink(full, offset)) return full
       const slug = normaliseSlug(rawTarget)
       if (slug === null) return full
       const fixed = repairs.get(slug)
@@ -170,15 +186,17 @@ function rewriteLinks(compiledTruth: string, repairs: ReadonlyMap<string, string
     },
   )
   out = out.replace(
-    /\[([^\]\n]+)\]\(([^)\s]+)(?:\s+"[^"]*")?\)/g,
-    (full, text: string, target: string): string => {
+    /\[([^\]\n]+)\]\(([^)\s]+)(\s+"[^"]*")?\)/g,
+    (full, text: string, target: string, title: string | undefined, offset: number): string => {
+      if (!isLiveLink(full, offset)) return full
       if (/^[a-z]+:/i.test(target)) return full
       if (target.startsWith('#') || target.startsWith('/') || target.includes('..')) return full
       const slug = normaliseSlug(target)
       if (slug === null) return full
       const fixed = repairs.get(slug)
       if (fixed === undefined) return full
-      return `[${text}](${fixed})`
+      // Preserve the optional link title (`\s+"..."`) verbatim if present.
+      return `[${text}](${fixed}${title ?? ''})`
     },
   )
   return out

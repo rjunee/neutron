@@ -397,11 +397,15 @@ describe('migration 0106 — the agent_kind rebuild preserves prior rows', () =>
     const tmp = mkdtempSync(join(tmpdir(), 'neutron-ritual-rebuild-'))
     const migTmp = mkdtempSync(join(tmpdir(), 'neutron-migs-pre0106-'))
     try {
-      // Stage every migration EXCEPT 0106 into a scratch dir, apply them, then
-      // insert a legacy registry row, then apply the real dir (0106 rebuilds).
+      // Stage every migration BEFORE 0106 (versions < 106) into a scratch dir,
+      // apply them, then insert a legacy registry row, then apply the real dir
+      // (0106 rebuilds). NB: exclude 0106 AND everything after it — 0107 adds a
+      // UNIQUE INDEX on `reminders.ritual_id`, the column 0106 introduces, so
+      // staging it without 0106 would fail on a missing column.
       for (const f of readdirSync(MIGRATIONS_DIR)) {
-        if (f === '0106_ritual_schema.sql') continue
-        if (!/^\d{4}_.+\.sql$/.test(f)) continue
+        const m = /^(\d{4})_.+\.sql$/.exec(f)
+        if (m === null) continue
+        if (Number.parseInt(m[1]!, 10) >= 106) continue
         cpSync(join(MIGRATIONS_DIR, f), join(migTmp, f))
       }
       const db = ProjectDb.open(join(tmp, 'project.db'))

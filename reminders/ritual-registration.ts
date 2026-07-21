@@ -56,7 +56,7 @@ import {
   ritualCadenceString,
   ritualEgressApprovalToolName,
 } from './ritual-approval.ts'
-import type { ReminderStore } from './store.ts'
+import { isRitualScheduleConflict, type ReminderStore } from './store.ts'
 import {
   GATED_WRITE_TOOLS,
   validateRitualDef,
@@ -723,13 +723,17 @@ export function createRitualRegistrationService(
       }
     }
 
-    // Never schedule the same ritual twice.
+    // Never schedule the same ritual twice. `hasScheduledRitualRow` counts any
+    // NON-cancelled row (Argus r2 BLOCKER 1: a 'fired' one-shot row still holds
+    // the slot, so a re-tapped Approve can't replay a completed ritual). This is
+    // the friendly fast path; the partial UNIQUE index (0107) is the atomic
+    // guarantee that also closes the concurrent-approval race below.
     try {
-      if (store.hasPendingRitualRow(ritual_id)) {
+      if (store.hasScheduledRitualRow(ritual_id)) {
         return { body: `Approved — "${ritual_id}" is already scheduled.` }
       }
     } catch (err) {
-      log(`ritual schedule id=${ritual_id} hasPendingRitualRow threw: ${(err as Error).message}`)
+      log(`ritual schedule id=${ritual_id} hasScheduledRitualRow threw: ${(err as Error).message}`)
       return { body: `Recorded, but "${ritual_id}" could not be scheduled right now — tap Approve again to retry.` }
     }
 
@@ -753,8 +757,16 @@ export function createRitualRegistrationService(
         await store.create(base)
       }
     } catch (err) {
-      // The decision is durably recorded; only the reminder-row write failed. Tell
-      // the owner to re-tap Approve — the reconciliation branch re-drives this.
+      // Argus r2 BLOCKER 2 (double-schedule race): a concurrent approval answer
+      // (e.g. the egress grant firing alongside the content grant for a web
+      // ritual) already inserted the row between our pre-check and this INSERT,
+      // tripping the partial UNIQUE index (0107). That is success, not failure —
+      // the ritual IS scheduled; report it as such, never as a retry-able error.
+      if (isRitualScheduleConflict(err)) {
+        return { body: `Approved — "${ritual_id}" is already scheduled.` }
+      }
+      // Otherwise the decision is durably recorded; only the reminder-row write
+      // failed. Tell the owner to re-tap Approve — reconciliation re-drives this.
       log(`ritual schedule id=${ritual_id} create failed: ${(err as Error).message}`)
       return { body: `Approved, but scheduling "${ritual_id}" hit a transient error — tap Approve again to finish scheduling it.` }
     }
@@ -810,7 +822,7 @@ export function createRitualRegistrationService(
       }
       let scheduled = false
       try {
-        scheduled = store.hasPendingRitualRow(def.id)
+        scheduled = store.hasScheduledRitualRow(def.id)
       } catch {
         scheduled = false
       }

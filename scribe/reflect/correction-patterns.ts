@@ -59,6 +59,55 @@ function truncate(s: string, max: number): string {
   return s.length <= max ? s : s.slice(0, max)
 }
 
+/** Small deterministic FNV-1a-32 → base36 digest. Pure; SLUG_REGEX-safe. */
+function stableDigest(s: string): string {
+  let h = 0x811c9dc5
+  for (let i = 0; i < s.length; i += 1) {
+    h ^= s.charCodeAt(i)
+    h = Math.imul(h, 0x01000193)
+  }
+  return (h >>> 0).toString(36)
+}
+
+/**
+ * A WINDOW-INVARIANT slug for a recurring correction cluster (Argus r2 minor:
+ * the old `correction-pattern-<oldest-member-id>` drifted every time the 200-scan
+ * window slid past the cluster's oldest member — a NEW slug → a DUPLICATE stale
+ * page while the prior page orphaned). The stable identity of a recurring lesson
+ * is the CORRECT BEHAVIOUR being taught — the `right` field, which the owner
+ * repeats near-verbatim every time the same lesson recurs (`wrong`/`why` phrasing
+ * drifts occurrence-to-occurrence; `right` does not). Take the `right` tokens
+ * present in a MAJORITY of members, sort them, and digest. Occurrence-specific
+ * phrasing and filler are excluded, so a pass that sees occurrences 1-3 and a
+ * later pass that sees 2-4 of the SAME lesson land on the SAME slug — no
+ * duplicate/orphan page as the window slides.
+ */
+export function stablePatternSlug(cluster: ReadonlyArray<CorrectionEntry>): string {
+  const freq = new Map<string, number>()
+  for (const m of cluster) {
+    for (const tok of tokenize(m.right)) {
+      freq.set(tok, (freq.get(tok) ?? 0) + 1)
+    }
+  }
+  const majority = Math.ceil(cluster.length / 2)
+  const core = [...freq.entries()]
+    .filter(([, n]) => n >= majority)
+    .map(([t]) => t)
+    .sort()
+  // Degenerate guard: a cluster whose members share NO majority `right` token
+  // falls back to the sorted full `right` vocabulary, then (if even that is empty)
+  // the whole-correction vocabulary — so the slug is always deterministic and
+  // content-derived, never empty.
+  let signature = core.join(' ')
+  if (signature.length === 0) signature = [...freq.keys()].sort().join(' ')
+  if (signature.length === 0) {
+    const all = new Set<string>()
+    for (const m of cluster) for (const tok of tokenize(correctionText(m))) all.add(tok)
+    signature = [...all].sort().join(' ')
+  }
+  return `correction-pattern-${stableDigest(signature)}`
+}
+
 /**
  * Cluster corrections that express the SAME lesson. Sort by `ts` ASCENDING (oldest
  * first) so cluster SEEDS are stable as the log grows — a later-arriving correction
@@ -94,7 +143,8 @@ export function clusterCorrections(
 
 /**
  * Shape a cluster into a promotable concept page. Deterministic template:
- *   - slug   `correction-pattern-<oldest-member-id>` (stable as the cluster grows)
+ *   - slug   `correction-pattern-<majority-vocabulary-digest>` (WINDOW-INVARIANT —
+ *            `stablePatternSlug`; survives occurrences ageing out of the scan window)
  *   - title  `Correction pattern: <right of NEWEST member, truncated 60>`
  *   - compiledTruth: occurrence count + the newest `right` as the durable learning
  *     line + the newest `why` + a bullet list of occurrence timestamps
@@ -108,11 +158,12 @@ export function composePatternPage(cluster: ReadonlyArray<CorrectionEntry>): {
   compiledTruth: string
   timelineRows: Array<{ ts: string; source: string; body: string }>
 } {
-  // Sort ASC so [0] is the oldest (stable seed id) and [last] is the newest.
+  // Sort ASC so [last] is the newest (the durable-learning line uses it).
   const sorted = [...cluster].sort((a, b) => (a.ts < b.ts ? -1 : a.ts > b.ts ? 1 : 0))
-  const oldest = sorted[0]!
   const newest = sorted[sorted.length - 1]!
-  const slug = `correction-pattern-${oldest.id}`
+  // Window-invariant identity — NOT the oldest member id, which drifts as the
+  // 200-scan window slides past it (Argus r2 minor). See `stablePatternSlug`.
+  const slug = stablePatternSlug(sorted)
   const learning = oneLine(newest.right)
   const title = `Correction pattern: ${truncate(learning, SLUG_TRUNCATE_TITLE)}`
   const why = oneLine(newest.why)

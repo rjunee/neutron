@@ -372,22 +372,33 @@ export class ReminderStore {
   }
 
   /**
-   * Plan task 8 — is there ALREADY a pending reminder row for this ritual id?
-   * The schedule-on-approve path (`reminders/ritual-registration.ts`) calls this
-   * before creating the ritual's reminder row so a repeated approval tap (or an
-   * approval landing after a row already exists) can never schedule the same
-   * ritual twice. Charset-guarded query — a malformed id throws (fail closed)
-   * rather than scanning with an unroutable value.
+   * Plan task 8 — is this ritual ALREADY scheduled? The schedule-on-approve path
+   * (`reminders/ritual-registration.ts`) calls this before creating the ritual's
+   * reminder row so a repeated approval tap (or an approval landing after a row
+   * already exists) can never schedule the same ritual twice.
+   *
+   * Argus r2 BLOCKER 1 (replay): the predicate is `status <> 'cancelled'`, NOT
+   * `status = 'pending'`. A one-shot ritual's row is 'fired' once it runs, so a
+   * pending-only check let a re-tapped Approve mint a FRESH reminder for an
+   * already-completed ritual. Any non-cancelled row (pending live/recurring OR
+   * fired one-shot) counts as "already scheduled"; a 'cancelled' row does NOT, so
+   * an owner who cancels a ritual can re-propose and reschedule it. This mirrors
+   * the partial UNIQUE index `idx_reminders_ritual_scheduled` (migration 0107)
+   * that makes the invariant atomic — this read is the friendly-message fast
+   * path; the index is the race-proof guarantee.
+   *
+   * Charset-guarded query — a malformed id throws (fail closed) rather than
+   * scanning with an unroutable value.
    */
-  hasPendingRitualRow(ritual_id: string): boolean {
+  hasScheduledRitualRow(ritual_id: string): boolean {
     if (typeof ritual_id !== 'string' || !RITUAL_ID_RE.test(ritual_id)) {
       throw new Error(
-        `hasPendingRitualRow: ritual_id ${JSON.stringify(ritual_id)} fails RITUAL_ID_RE`,
+        `hasScheduledRitualRow: ritual_id ${JSON.stringify(ritual_id)} fails RITUAL_ID_RE`,
       )
     }
     const row = this.db
       .prepare<{ one: number }, [string]>(
-        `SELECT 1 AS one FROM reminders WHERE ritual_id = ? AND status = 'pending' LIMIT 1`,
+        `SELECT 1 AS one FROM reminders WHERE ritual_id = ? AND status <> 'cancelled' LIMIT 1`,
       )
       .get(ritual_id)
     return row !== null
@@ -524,6 +535,26 @@ function rowToReminder(row: ReminderDbRow): Reminder {
  */
 export function isRecurring(r: Pick<Reminder, 'recurrence' | 'recurrence_spec'>): boolean {
   return r.recurrence !== null || r.recurrence_spec !== null
+}
+
+/**
+ * True when `err` is the SQLite UNIQUE-constraint violation from the partial
+ * index `idx_reminders_ritual_scheduled` (migration 0107) — i.e. a concurrent
+ * approval answer already inserted the ritual's reminder row between this
+ * caller's dedup pre-check and its own INSERT (Argus r2 BLOCKER 2, the
+ * double-schedule race). The schedule-on-approve path catches this and reports
+ * "already scheduled" rather than a transient error. Matched on the stable
+ * SQLite message text — `bun:sqlite` surfaces a partial-unique-index violation
+ * as `UNIQUE constraint failed: reminders.ritual_id` (the indexed COLUMN, not
+ * the index name; verified against bun:sqlite). `reminders.ritual_id` is unique
+ * ONLY via `idx_reminders_ritual_scheduled` (migration 0107), so this is scoped
+ * — an unrelated uniqueness error is NOT swallowed.
+ */
+export function isRitualScheduleConflict(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err)
+  return (
+    /UNIQUE constraint failed/i.test(msg) && msg.includes('reminders.ritual_id')
+  )
 }
 
 /**

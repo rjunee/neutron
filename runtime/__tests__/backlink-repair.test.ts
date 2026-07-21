@@ -17,6 +17,7 @@ import { writeEntity as realWriteEntity } from '../entity-writer.ts'
 import type { EntityWriteInput, EntityWriteOutput } from '../entity-writer.ts'
 import {
   wrapSyncHookWithBacklinkRepair,
+  rewriteLinks,
   type BacklinkWriteEntity,
 } from '../backlink-repair.ts'
 
@@ -329,5 +330,43 @@ describe('backlink-repair — inner-hook isolation + re-entrancy + conflict', ()
     expect(spy).toHaveBeenCalledTimes(0)
     expect(logs.some((m) => m.includes('unrecognised entity path'))).toBe(true)
     expect(existsSync(ownerDir)).toBe(true)
+  })
+})
+
+describe('rewriteLinks — Argus r2 minors: code-fence skip + mdlink title preserved', () => {
+  // repairs is keyed by the normalised BROKEN target slug → the fixed slug.
+  const repairs = new Map<string, string>([['white-board', 'whiteboard']])
+
+  test('minor 1: a wikilink INSIDE a fenced code block is NOT rewritten', () => {
+    const body = [
+      'See the [[white-board]] page.',
+      '',
+      '```md',
+      'literal example: [[white-board]]',
+      '```',
+    ].join('\n')
+    const out = rewriteLinks(body, repairs)
+    // Prose occurrence rewritten (display text preserved)...
+    expect(out).toContain('[[whiteboard|white-board]]')
+    // ...but the literal code-fence example is untouched.
+    expect(out).toContain('literal example: [[white-board]]')
+  })
+
+  test('minor 1: a wikilink INSIDE an inline code span is NOT rewritten', () => {
+    const body = 'Prose [[white-board]] and code `[[white-board]]` span.'
+    const out = rewriteLinks(body, repairs)
+    expect(out).toContain('Prose [[whiteboard|white-board]] and')
+    expect(out).toContain('`[[white-board]]`') // inline code literal preserved
+  })
+
+  test('minor 2: the optional mdlink title is preserved, not dropped', () => {
+    const body = '[the board](white-board "Hover Title")'
+    const out = rewriteLinks(body, repairs)
+    expect(out).toBe('[the board](whiteboard "Hover Title")')
+  })
+
+  test('minor 2: an mdlink WITHOUT a title still rewrites cleanly', () => {
+    const body = '[the board](white-board)'
+    expect(rewriteLinks(body, repairs)).toBe('[the board](whiteboard)')
   })
 })
