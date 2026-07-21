@@ -253,6 +253,43 @@ describe('createRitualExecutor.fire — skip verdicts', () => {
     expect(subagents.snapshot()).toHaveLength(0)
     expect(turn).not.toHaveBeenCalled()
   })
+
+  test('gated tool surface (Bash) → durable skipped/gated_tool_surface row, fire() RESOLVES, nothing spawned', async () => {
+    // Blocker A end-to-end: a Bash-surface ritual is refused fail-CLOSED with
+    // reason 'gated_tool_surface'; the executor persists that verbatim via
+    // insertSkipped against the STRICT 0106 DDL. Before the CHECK admitted the
+    // value, this INSERT threw 'CHECK constraint failed' → outer catch re-throw →
+    // fire() REJECTED → tick claimRevert → 30s hot loop, no durable row. The
+    // resolve assertion is the no-hot-loop proof (the tick will NOT revert).
+    const registry = registryWith(def({ tool_surface: ['Read', 'Bash'] }))
+    const turn = mock(async (): Promise<RitualTurnResult> => ({ result: '', status: 'completed' }))
+    const exec = createRitualExecutor({
+      registry,
+      approvals: new ApprovalManager(db, noopNotifier),
+      project_slug: 'owner',
+      instance_key: 'owner',
+      subagents,
+      outbound: passThroughOutbound,
+      resolve_topic: resolveTopic,
+      turn,
+      runs,
+      resolve_model: () => 'm',
+      scope_cwd: () => '/scope',
+      build_approval_check: () => approver(true),
+      mint_run_id: () => 'attempt-gated',
+    })
+
+    // fire() RESOLVES — a durable skip landed, so the tick does not claimRevert.
+    await expect(exec.fire(await ritualRow('morning-brief'))).resolves.toBeUndefined()
+
+    const row = runs.get('attempt-gated')!
+    expect(row.status).toBe('skipped')
+    expect(row.skip_reason).toBe('gated_tool_surface')
+    expect(row.subagent_run_id).toBeNull()
+    // NOTHING spawned + the turn never fired.
+    expect(subagents.snapshot()).toHaveLength(0)
+    expect(turn).not.toHaveBeenCalled()
+  })
 })
 
 describe('createRitualExecutor.fire — approved spawn + turn wiring', () => {
@@ -559,6 +596,109 @@ describe('createRitualExecutor.fire — spawn refusal + robustness', () => {
     expect(subagents.liveByKey('ritual:morning-brief', 'owner')).toBeUndefined()
     // The substrate turn never launched (startup failed).
     expect(turn).not.toHaveBeenCalled()
+  })
+})
+
+describe('createRitualExecutor.fire — sync launch-construction failure (task 6R Blocker B)', () => {
+  test('resolve_model throws synchronously → run settles crashed, spawn key freed, fire() resolves; a re-fire is admitted', async () => {
+    // Blocker B: step (f) evaluates `deps.resolve_model()` SYNCHRONOUSLY during the
+    // turn() argument construction — AFTER the durable 'running' row + the live
+    // `ritual:<id>` registry record exist. A sync throw must route through the SAME
+    // settleCrashed path as a promise rejection (run 'crashed', spawn key freed) and
+    // fire() must RESOLVE (occurrence legitimately consumed — no claim revert, no
+    // stuck 'running', no live-key wedge).
+    const registry = registryWith(def())
+    const rec = recordingOutbound()
+    let modelCalls = 0
+    let n = 0
+    const turn = mock(async (): Promise<RitualTurnResult> => ({ result: 'ok', status: 'completed' }))
+    const exec = createRitualExecutor({
+      registry,
+      approvals: new ApprovalManager(db, noopNotifier),
+      project_slug: 'owner',
+      instance_key: 'owner',
+      subagents,
+      outbound: rec.outbound,
+      resolve_topic: resolveTopic,
+      turn,
+      runs,
+      resolve_model: () => {
+        modelCalls += 1
+        if (modelCalls === 1) throw new Error('model boom')
+        return 'm'
+      },
+      scope_cwd: () => '/s',
+      build_approval_check: () => approver(true),
+      mint_run_id: () => `sub-${n++}`,
+    })
+
+    // The sync throw during launch construction is caught → settleCrashed → resolve.
+    await expect(exec.fire(await ritualRow('morning-brief'))).resolves.toBeUndefined()
+
+    // Exactly one registry record, terminal 'crashed' → the spawn key is freed.
+    expect(subagents.snapshot()).toHaveLength(1)
+    const crashedRunId = subagents.snapshot()[0]!.run_id
+    expect(subagents.byRunId(crashedRunId)!.status).toBe('crashed')
+    expect(subagents.liveByKey('ritual:morning-brief', 'owner')).toBeUndefined()
+
+    // The run-history row (shares the subagent run_id) settled 'crashed' + reason.
+    const crashed = runs.get(crashedRunId)!
+    expect(crashed.status).toBe('crashed')
+    expect(crashed.failure_reason).toContain('model boom')
+
+    // The turn NEVER launched (resolve_model threw before turn was invoked), and a
+    // failure notice WAS posted (settleCrashed awaited before fire() resolved).
+    expect(turn).not.toHaveBeenCalled()
+    expect(rec.posts.length).toBeGreaterThanOrEqual(1)
+    expect(rec.posts[0]!.body).toContain('morning-brief')
+
+    // REGRESSION — the freed key admits a re-fire (before the fix the still-live
+    // `ritual:<id>` key refused the next occurrence as a duplicate). The second fire
+    // launches normally and settles.
+    const row2 = await ritualRow('morning-brief')
+    await exec.fire(row2)
+    expect(subagents.snapshot()).toHaveLength(2)
+    const live = subagents.snapshot().find((s) => s.run_id !== crashedRunId)!
+    await waitTerminal(live.run_id)
+    expect(turn).toHaveBeenCalledTimes(1)
+  })
+
+  test('turn() throwing synchronously (non-promise) settles crashed identically', async () => {
+    // Same hazard via the turn() invocation itself throwing synchronously (rather
+    // than returning a rejected promise) — must land the identical crashed settle.
+    const registry = registryWith(def())
+    const rec = recordingOutbound()
+    let n = 0
+    const turn = mock((): Promise<RitualTurnResult> => {
+      throw new Error('sync turn boom')
+    })
+    const exec = createRitualExecutor({
+      registry,
+      approvals: new ApprovalManager(db, noopNotifier),
+      project_slug: 'owner',
+      instance_key: 'owner',
+      subagents,
+      outbound: rec.outbound,
+      resolve_topic: resolveTopic,
+      turn,
+      runs,
+      resolve_model: () => 'm',
+      scope_cwd: () => '/s',
+      build_approval_check: () => approver(true),
+      mint_run_id: () => `sub-${n++}`,
+    })
+
+    await expect(exec.fire(await ritualRow('morning-brief'))).resolves.toBeUndefined()
+
+    expect(subagents.snapshot()).toHaveLength(1)
+    const crashedRunId = subagents.snapshot()[0]!.run_id
+    expect(subagents.byRunId(crashedRunId)!.status).toBe('crashed')
+    expect(subagents.liveByKey('ritual:morning-brief', 'owner')).toBeUndefined()
+
+    const crashed = runs.get(crashedRunId)!
+    expect(crashed.status).toBe('crashed')
+    expect(crashed.failure_reason).toContain('sync turn boom')
+    expect(rec.posts.length).toBeGreaterThanOrEqual(1)
   })
 })
 

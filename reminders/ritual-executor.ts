@@ -540,24 +540,43 @@ export function createRitualExecutor(deps: RitualExecutorDeps): RitualExecutor {
         // the detached run promise drives the terminal bookkeeping. Detached via
         // fireAndForget so a rejection anywhere in the settle chain is logged, not
         // fatal, and never surfaces as an unhandled rejection.
+        //
+        // The launch CONSTRUCTION — `deps.resolve_model()` and the `deps.turn(...)`
+        // call itself — runs SYNCHRONOUSLY during argument evaluation, BEFORE the
+        // returned promise (and its `.catch`) exists. A synchronous throw here would
+        // otherwise escape to the outer startup catch and re-throw AFTER the durable
+        // 'running' row + the LIVE `ritual:<id>` spawn key already exist — reverting
+        // the occurrence claim while the key stays live (every re-fire refused as a
+        // duplicate; the run stuck 'running' until boot reap). Route such a sync
+        // failure through the SAME settleCrashed path as a promise rejection: the run
+        // row settles 'crashed', the registry terminal frees the spawn key, and the
+        // occurrence is legitimately consumed (`return`, NOT re-throw — re-throwing
+        // would claimRevert and re-fire against a just-freed key). settleCrashed is
+        // fully guarded and NEVER rejects, so the bare `await` is safe and keeps the
+        // settle inside the tick quiescence boundary.
         const runRunId = rec.run_id
         const subagentRunId = rec.run_id
-        fireAndForget(
-          'ritual-run',
-          deps
-            .turn({
-              kind: 'ritual',
-              system: 'ritual',
-              user_message: verdict.prompt,
-              repo_path: scope_cwd,
-              trident_run_id: subagentRunId,
-              model: deps.resolve_model(),
-              timeout_ms: RITUAL_TIMEOUT_MS,
-              tools: def.tool_surface,
-            })
-            .then((r) => settleTerminal(reminder, def, ritual_id, runRunId, subagentRunId, r))
-            .catch((err) => settleCrashed(reminder, ritual_id, runRunId, subagentRunId, err)),
-        )
+        try {
+          fireAndForget(
+            'ritual-run',
+            deps
+              .turn({
+                kind: 'ritual',
+                system: 'ritual',
+                user_message: verdict.prompt,
+                repo_path: scope_cwd,
+                trident_run_id: subagentRunId,
+                model: deps.resolve_model(),
+                timeout_ms: RITUAL_TIMEOUT_MS,
+                tools: def.tool_surface,
+              })
+              .then((r) => settleTerminal(reminder, def, ritual_id, runRunId, subagentRunId, r))
+              .catch((err) => settleCrashed(reminder, ritual_id, runRunId, subagentRunId, err)),
+          )
+        } catch (launchErr) {
+          await settleCrashed(reminder, ritual_id, runRunId, subagentRunId, launchErr)
+          return
+        }
       } catch (err) {
         // STARTUP failure — validate / spawn / durable-row-write threw so NO
         // `code_ritual_runs` row landed for this occurrence. RE-THROW so the tick
@@ -565,9 +584,12 @@ export function createRitualExecutor(deps: RitualExecutorDeps): RitualExecutor {
         // being silently consumed with no run + no history (the Argus data-loss
         // blocker: the outer catch used to log-and-resolve, dropping the run). The
         // paths that DID land a durable row (insertSkipped/insertFailed success,
-        // insertRunning-then-durable-failed) `return` above and never reach here;
-        // the detached turn (step (f)) is fire-and-forget and cannot reject through
-        // this catch — so reaching here is unambiguously a startup loss.
+        // insertRunning-then-durable-failed, AND a sync launch-construction failure
+        // in step (f) — resolve_model()/turn() throwing after the 'running' row +
+        // live spawn key exist, which settleCrashed-settles then `return`s) never
+        // reach here; the detached turn (step (f)) is fire-and-forget and cannot
+        // reject through this catch — so reaching here is unambiguously a startup
+        // loss.
         log.error('ritual_fire_unexpected', {
           reminder: reminder.id,
           ritual_id: reminder.ritual_id,
