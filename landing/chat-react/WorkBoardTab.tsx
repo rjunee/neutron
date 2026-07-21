@@ -60,6 +60,7 @@ import {
   type RunProgress,
   type WorkBoardItem,
   type WorkBoardStatus,
+  type WorkBoardTaskType,
 } from './work-board-client.ts'
 
 type FetchImpl = (input: string, init?: RequestInit) => Promise<Response>
@@ -226,28 +227,40 @@ function formatCompletedShort(completed_at: string | null): string {
 
 /**
  * A live-activity roll-up of the board, consumed by the desktop slide-out pane
- * (PR-4) to drive its header count + auto-open/close: `running` = items bound to
- * a live (non-terminal) run; `failed` = items whose last run didn't finish. The
- * pane opens when `running` rises, stays open while `running > 0` or `failed >
- * 0`, and auto-closes only once BOTH are zero (all merged/cancelled). Pure so it
- * unit-tests directly.
+ * (PR-4) to drive its header count + auto-open/close:
+ *   - `running` = items bound to a live (non-terminal) trident run.
+ *   - `failed`  = items whose last run didn't finish.
+ *   - `active`  = PLAIN in-flight cards NOT bound to a live run — a card the
+ *     agent (or a research ▶) flipped to `in_progress` or lit `inline_active`,
+ *     with `linked_run_id: null`. #379 defect (3): a plain active card never
+ *     opened the pane because only a live trident RUN counted as "work".
+ * The pane opens when work KICKS OFF (running OR active rises), stays open while
+ * ANY of running/failed/active is non-zero, and auto-closes only once ALL THREE
+ * are zero (every card terminal — merged/cancelled/done). Pure so it unit-tests
+ * directly.
  */
 export interface WorkBoardSummary {
   running: number
   failed: number
+  active: number
 }
 
 export function summarize(items: readonly WorkBoardItem[]): WorkBoardSummary {
   let running = 0
   let failed = 0
+  let active = 0
   for (const it of items) {
     if (isLinkedRunning(it)) {
       running += 1
     } else if (it.run_progress !== undefined && resolveStepLabel(it.run_progress) === 'failed') {
       failed += 1
+    } else if (it.status !== 'done' && (it.status === 'in_progress' || it.inline_active)) {
+      // A plain in-flight card (no live run, not terminal) — in_progress OR
+      // inline_active. This is the bucket the pane used to miss entirely.
+      active += 1
     }
   }
-  return { running, failed }
+  return { running, failed, active }
 }
 
 export function WorkBoardTab({
@@ -291,6 +304,9 @@ export function WorkBoardTab({
   // Add composer (bottom of the active items, above Done — #344).
   const [newTitle, setNewTitle] = useState('')
   const [adding, setAdding] = useState(false)
+  // #379 — the ▶ routing kind for a NEW card. A web-added research/analysis card
+  // must NOT default to a Trident build, so the owner picks Build vs Research here.
+  const [newTaskType, setNewTaskType] = useState<WorkBoardTaskType>('build')
 
   // Inline edit.
   const [editingId, setEditingId] = useState<string | null>(null)
@@ -413,11 +429,12 @@ export function WorkBoardTab({
     setAdding(true)
     setActionError(null)
     void client
-      .create(projectId, { title })
+      .create(projectId, { title, task_type: newTaskType })
       .then(() => {
         if (!aliveRef.current) return
         setAdding(false)
         setNewTitle('')
+        setNewTaskType('build')
         refresh()
       })
       .catch((err: unknown) => {
@@ -425,7 +442,7 @@ export function WorkBoardTab({
         setAdding(false)
         setActionError(err instanceof Error ? err.message : 'failed to add item')
       })
-  }, [client, projectId, newTitle, adding, refresh])
+  }, [client, projectId, newTitle, newTaskType, adding, refresh])
 
   const advanceStatus = useCallback(
     (item: WorkBoardItem): void => {
@@ -623,6 +640,18 @@ export function WorkBoardTab({
         onChange={(e) => setNewTitle(e.target.value)}
         aria-label="New work item"
       />
+      {/* #379 — pick the ▶ routing kind so a web-added research card doesn't
+          default to a Trident build. */}
+      <select
+        className="cwb-add-kind"
+        value={newTaskType}
+        onChange={(e) => setNewTaskType(e.target.value === 'research' ? 'research' : 'build')}
+        aria-label="Work kind"
+        title="What kind of work is this? Build → Trident; Research → Atlas."
+      >
+        <option value="build">Build</option>
+        <option value="research">Research</option>
+      </select>
       <button
         type="submit"
         className="cwb-btn cwb-btn-primary"

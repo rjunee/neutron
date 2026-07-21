@@ -15,12 +15,14 @@
  * surface.
  *
  * ── Auto-open / auto-close is the PRIMARY behavior ──────────────────────────
- * The pane slides open by itself when a plan is kicked off (a board item gains a
- * live non-terminal run → {@link WorkBoardSummary.running} rises) and slides
- * closed by itself once ALL active plans finish (running + failed both zero),
- * after a short 5s settle. A FAILED run keeps it open (attention). A manual
- * handle toggle overrides + persists per-project (localStorage) until the next
- * auto-kickoff. See {@link usePlansPaneController}.
+ * The pane slides open by itself when work is kicked off — a board item gains a
+ * live non-terminal run ({@link WorkBoardSummary.running} rises) OR a plain card
+ * goes in-flight ({@link WorkBoardSummary.active} rises, i.e. an in_progress /
+ * inline_active card with no bound run, #379 defect 3) — and slides closed by
+ * itself once ALL work finishes (running + failed + active all zero), after a
+ * short 5s settle. A FAILED run keeps it open (attention). A manual handle toggle
+ * overrides + persists per-project (localStorage) until the next auto-kickoff.
+ * See {@link usePlansPaneController}.
  *
  * ── Geometry (see chat-react.html `.car-plans*`) ────────────────────────────
  * The shell (`.car-app`) is a CSS grid whose 3rd column animates 0 → --pane-width
@@ -71,15 +73,23 @@ export interface PaneController {
   toggle: () => void
 }
 
+/** The count of live-or-in-flight work that KICKS the pane open — a live trident
+ *  run (`running`) OR a plain in-flight card (`active`). A rise in this drives the
+ *  auto-open; `failed` keeps it open but does not, on its own, kick it open. */
+function engagedCount(summary: WorkBoardSummary): number {
+  return summary.running + summary.active
+}
+
 /**
  * The open/close state machine for the pane, driven by the live board summary.
  *
- *   - KICKOFF (running rose) → auto-open, drop any manual pin.
- *   - still running          → stay open (cancel a pending close).
- *   - failed remains         → stay open (attention).
- *   - all clear (0 running, 0 failed) → settle `autoCloseMs` then close, UNLESS
- *     the user has manually pinned it open.
- *   - manual toggle          → flip + pin (persisted) until the next kickoff.
+ *   - KICKOFF (running OR active rose) → auto-open, drop any manual pin. A plain
+ *     in_progress/inline_active card (no bound run) kicks it open too (#379).
+ *   - still working (running/active > 0) → stay open (cancel a pending close).
+ *   - failed remains                     → stay open (attention).
+ *   - all clear (0 running, 0 failed, 0 active) → settle `autoCloseMs` then close,
+ *     UNLESS the user has manually pinned it open.
+ *   - manual toggle                      → flip + pin (persisted) until next kickoff.
  *
  * `autoCloseMs` is injectable so tests can drive the settle without real time.
  */
@@ -89,13 +99,13 @@ export function usePlansPaneController(
   autoCloseMs: number = AUTO_CLOSE_MS,
 ): PaneController {
   const initialSticky = readSticky(projectId)
-  const hasWork = summary.running > 0 || summary.failed > 0
+  const hasWork = summary.running > 0 || summary.failed > 0 || summary.active > 0
   const [open, setOpen] = useState<boolean>(hasWork || initialSticky === true)
   // A manual choice pins the pane against auto-close until the next kickoff. On
-  // mount we're pinned only if the open state came from the sticky (not a live
-  // run — a live run stays under auto control so it can auto-close when done).
+  // mount we're pinned only if the open state came from the sticky (not live
+  // work — live work stays under auto control so it can auto-close when done).
   const pinnedRef = useRef<boolean>(!hasWork && initialSticky !== null)
-  const prevRunningRef = useRef<number>(summary.running)
+  const prevEngagedRef = useRef<number>(engagedCount(summary))
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const clearTimer = useCallback(() => {
@@ -106,18 +116,19 @@ export function usePlansPaneController(
   }, [])
 
   useEffect(() => {
-    const prev = prevRunningRef.current
-    const now = summary.running
-    prevRunningRef.current = now
-    // KICKOFF — the live-run count rose (a NEW plan started, incl. 0→1 and 1→2).
-    // A fresh build takes control back from any manual pin and reveals itself.
+    const prev = prevEngagedRef.current
+    const now = engagedCount(summary)
+    prevEngagedRef.current = now
+    // KICKOFF — the live-or-in-flight count rose (a NEW plan/run/plain-card
+    // started, incl. 0→1 and 1→2). Fresh work takes control back from any manual
+    // pin and reveals itself.
     if (now > prev) {
       clearTimer()
       pinnedRef.current = false
       setOpen(true)
       return
     }
-    // Still running, or a failure demanding attention → keep it open.
+    // Still working, or a failure demanding attention → keep it open.
     if (now > 0 || summary.failed > 0) {
       clearTimer()
       return
@@ -129,7 +140,7 @@ export function usePlansPaneController(
         setOpen(false)
       }, autoCloseMs)
     }
-  }, [summary.running, summary.failed, open, autoCloseMs, clearTimer])
+  }, [summary.running, summary.failed, summary.active, open, autoCloseMs, clearTimer])
 
   useEffect(() => clearTimer, [clearTimer])
 
@@ -146,13 +157,17 @@ export function usePlansPaneController(
   return { open, toggle }
 }
 
-/** The count chip in the pane header: "2 running" / "1 failed" / nothing. */
+/** The count chip in the pane header: "2 running" / "1 failed" / "1 active" / nothing. */
 function headerCount(summary: WorkBoardSummary): { text: string; dot: string } | null {
   if (summary.running > 0) {
     return { text: `${summary.running} running`, dot: 'cwb-dot-build' }
   }
   if (summary.failed > 0) {
     return { text: `${summary.failed} failed`, dot: 'cwb-dot-failed' }
+  }
+  if (summary.active > 0) {
+    // #379 — a plain in-flight card (in_progress / inline_active, no bound run).
+    return { text: `${summary.active} active`, dot: 'cwb-dot-build' }
   }
   return null
 }
@@ -177,7 +192,7 @@ export function PlansPane({
   /** Test seam — override the auto-close settle. */
   autoCloseMs?: number
 }): React.JSX.Element {
-  const [summary, setSummary] = useState<WorkBoardSummary>({ running: 0, failed: 0 })
+  const [summary, setSummary] = useState<WorkBoardSummary>({ running: 0, failed: 0, active: 0 })
   const onSummary = useCallback((s: WorkBoardSummary) => setSummary(s), [])
   const { open, toggle } = usePlansPaneController(
     projectId,

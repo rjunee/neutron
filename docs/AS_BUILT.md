@@ -2,6 +2,40 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+## 2026-07-20 — Work Board #379: trackable work ≠ a Trident build run
+
+Closed the three #379 dogfood defects rooted in "a Work Board card == a Trident
+BUILD run" (SPEC Decisions Log 2026-07-20 "Work Board: 'trackable work' ≠ 'a
+Trident build run'"). Each ships a reproduce-then-fix test that FAILS on prior main.
+
+- **WRITE — leave a card for ANY substantial work** (`gateway/wiring/operating-doctrine.ts`).
+  Lifted "leave a trackable Work Board card for ANY substantial/multi-step work —
+  research, analysis, deep work, OR a build: `work_board_add` FIRST, set
+  `inline_active` while working, mark done when finished" into an UNCONDITIONAL
+  `DOCTRINE_PRINCIPLES` entry (ships every turn). Previously the ONLY card
+  directive lived in `BUILD_ROUTING_DOCTRINE` — scoped to explicit builds AND
+  phrased "if you have the `work_board_dispatch_build` tool", so a research job
+  left no card. Trident-routing specifics stay build-scoped.
+- **DISPLAY — a plain active card opens the pane** (`landing/chat-react/WorkBoardTab.tsx`
+  `summarize`, `landing/chat-react/PlansPane.tsx` controller). `WorkBoardSummary`
+  gains `active` = a non-terminal in_progress/inline_active card with NO live run
+  (`linked_run_id: null`). The desktop pane now KICKS OPEN on `running` OR `active`
+  rising, stays open while any of running/failed/active > 0, and auto-CLOSES only
+  once ALL THREE are zero. Sticky + manual-toggle preserved. Fixes the plain
+  in_progress card that never opened the pane.
+- **ROUTING + LIFECYCLE — the ▶ routes BY TASK TYPE** (migration `0105`, `work-board/store.ts`,
+  `gateway/http/work-board-surface.ts`, `agent-dispatch/board-research-start.ts`,
+  `open/composer.ts`, `landing/chat-react/*`). New `task_type` column ('build' |
+  'research', DEFAULT 'build') + a minimal web Build/Research picker. The ▶/play
+  route now branches: a 'research' card dispatches an **Atlas** research run
+  (agent-dispatch), a 'build' card dispatches **Trident**. Research LIFECYCLE
+  (`createBoardResearchStarter`): delivers the Atlas result back to the originating
+  chat via the durable app-ws poster (persisted → renders in React), and on
+  terminal (success OR crash/cancel/timeout) marks the card terminal (done |
+  failed) so the pane auto-closes — never stranding it in_progress. Guards:
+  surface `409 already_running` on a live linked run + a per-card `spawn_key`
+  coalesce (no duplicate Atlas run) + delete-cancels the dispatch run.
+
 > Pre-consolidation history (unit K6, 2026-07-05): the former root `AS-BUILT.md`
 > (7,647 lines — the anchored record of behavioral invariants through 2026-07-04)
 > is archived VERBATIM at `docs/research/AS-BUILT-archive-2026-07.md`, and the

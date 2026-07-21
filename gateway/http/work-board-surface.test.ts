@@ -391,6 +391,126 @@ describe('work-board HTTP surface — ▶ start + spec create (M1)', () => {
     expect(res?.status).toBe(404)
   })
 
+  // ── #379 — the ▶ routes BY TASK TYPE (research → Atlas, build → Trident) ──
+
+  test('#379 create persists task_type (default build; explicit research)', async () => {
+    const b = await surface.handler(
+      req('POST', '/api/app/projects/proj1/work-board', { title: 'a build' }),
+    )
+    const bItem = ((await b!.json()) as { item: { id: string; task_type: string } }).item
+    expect(bItem.task_type).toBe('build') // default
+    expect(store.get(SCOPE, bItem.id)?.task_type).toBe('build')
+
+    const r = await surface.handler(
+      req('POST', '/api/app/projects/proj1/work-board', {
+        title: 'a research task',
+        task_type: 'research',
+      }),
+    )
+    const rItem = ((await r!.json()) as { item: { id: string; task_type: string } }).item
+    expect(rItem.task_type).toBe('research')
+    expect(store.get(SCOPE, rItem.id)?.task_type).toBe('research')
+  })
+
+  test('#379 create rejects an unknown task_type with 400', async () => {
+    const res = await surface.handler(
+      req('POST', '/api/app/projects/proj1/work-board', { title: 'x', task_type: 'wat' }),
+    )
+    expect(res?.status).toBe(400)
+    expect(((await res!.json()) as { code: string }).code).toBe('invalid_task_type')
+  })
+
+  test('#379 ▶ a RESEARCH card routes to start_research (NOT start_build)', async () => {
+    const item = await store.create(SCOPE, { title: 'research this', task_type: 'research' })
+    let buildCalled = false
+    let researchCalled = false
+    const s = createWorkBoardSurface({
+      store,
+      auth,
+      start_build: async () => {
+        buildCalled = true
+        return { ok: true, run_id: 'build-run' }
+      },
+      start_research: async () => {
+        researchCalled = true
+        return { ok: true, run_id: 'atlas-run' }
+      },
+    })
+    const res = await s.handler(req('POST', `/api/app/projects/proj1/work-board/${item.id}/start`))
+    expect(res?.status).toBe(200)
+    expect(((await res!.json()) as { run_id: string }).run_id).toBe('atlas-run')
+    expect(researchCalled).toBe(true)
+    expect(buildCalled).toBe(false) // the play button did NOT stamp a Trident build
+  })
+
+  test('#379 ▶ a BUILD card routes to start_build (NOT start_research)', async () => {
+    const item = await store.create(SCOPE, { title: 'build this' }) // default build
+    let buildCalled = false
+    let researchCalled = false
+    const s = createWorkBoardSurface({
+      store,
+      auth,
+      start_build: async () => {
+        buildCalled = true
+        return { ok: true, run_id: 'build-run' }
+      },
+      start_research: async () => {
+        researchCalled = true
+        return { ok: true, run_id: 'atlas-run' }
+      },
+    })
+    const res = await s.handler(req('POST', `/api/app/projects/proj1/work-board/${item.id}/start`))
+    expect(res?.status).toBe(200)
+    expect(((await res!.json()) as { run_id: string }).run_id).toBe('build-run')
+    expect(buildCalled).toBe(true)
+    expect(researchCalled).toBe(false)
+  })
+
+  test('#379 ▶ a research card with no start_research wired → 501', async () => {
+    const item = await store.create(SCOPE, { title: 'research', task_type: 'research' })
+    // Only a build dispatcher is wired; a research ▶ must not silently build.
+    const s = createWorkBoardSurface({ store, auth, start_build: async () => ({ ok: true, run_id: 'r' }) })
+    const res = await s.handler(req('POST', `/api/app/projects/proj1/work-board/${item.id}/start`))
+    expect(res?.status).toBe(501)
+  })
+
+  test('#379 ▶ a research card with a live bound run → 409 already_running (double-▶ guard)', async () => {
+    const item = await store.create(SCOPE, { title: 'research', task_type: 'research' })
+    await store.attachRun(SCOPE, item.id, 'atlas-live') // a live agent-dispatch run
+    let researchCalled = false
+    const s = createWorkBoardSurface({
+      store,
+      auth,
+      start_research: async () => {
+        researchCalled = true
+        return { ok: true, run_id: 'twin' }
+      },
+    })
+    const res = await s.handler(req('POST', `/api/app/projects/proj1/work-board/${item.id}/start`))
+    expect(res?.status).toBe(409)
+    expect(researchCalled).toBe(false)
+  })
+
+  test('#379 deleting a research card cancels its dispatch run', async () => {
+    const item = await store.create(SCOPE, { title: 'research', task_type: 'research' })
+    await store.attachRun(SCOPE, item.id, 'atlas-run')
+    const cancelled: string[] = []
+    const s = createWorkBoardSurface({
+      store,
+      auth,
+      cancel_dispatch: async (run_id) => {
+        cancelled.push(run_id)
+      },
+    })
+    const res = await s.handler(req('DELETE', `/api/app/projects/proj1/work-board/${item.id}`))
+    expect(res?.status).toBe(200)
+    const body = (await res!.json()) as { deleted: string; cancelled_run?: string }
+    expect(body.deleted).toBe(item.id)
+    expect(body.cancelled_run).toBe('atlas-run')
+    expect(cancelled).toEqual(['atlas-run'])
+    expect(store.get(SCOPE, item.id)).toBeNull()
+  })
+
   test('POST start with no start_build wired → 501', async () => {
     const item = await store.create(SCOPE, { title: 'Ready item' })
     const s = createWorkBoardSurface({ store, auth })

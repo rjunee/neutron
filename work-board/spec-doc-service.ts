@@ -52,6 +52,9 @@ export interface SpecDocBoardStore {
 export interface CreateCardWithSpecInput {
   title: string
   status?: WorkBoardItem['status']
+  /** #379 — the ▶ routing kind ('build' → Trident, 'research' → Atlas). Forwarded
+   *  to the store; defaults to 'build' there when absent. */
+  task_type?: WorkBoardItem['task_type']
   /** An explicit design-doc pointer the caller already has (agent-supplied
    *  link). When present it WINS — we never overwrite it with a generated doc. */
   design_doc_ref?: string | null
@@ -113,6 +116,7 @@ export class WorkBoardSpecDocService {
     const item = await this.board.create(project_slug, {
       title: input.title,
       ...(input.status !== undefined ? { status: input.status } : {}),
+      ...(input.task_type !== undefined ? { task_type: input.task_type } : {}),
       ...(explicit !== null ? { design_doc_ref: explicit } : {}),
     })
 

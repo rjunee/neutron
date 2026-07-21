@@ -113,7 +113,7 @@ describe('usePlansPaneController (auto-open/close state machine)', () => {
     const { usePlansPaneController } = await import('../PlansPane.tsx')
     const React = await import('react')
 
-    let summary: WorkBoardSummary = { running: 0, failed: 0 }
+    let summary: WorkBoardSummary = { running: 0, failed: 0, active: 0 }
     let rerender: () => void = () => {}
 
     function Harness(): React.JSX.Element {
@@ -166,18 +166,18 @@ describe('usePlansPaneController (auto-open/close state machine)', () => {
   it('starts closed, opens on a kickoff, stays open while running', async () => {
     const c = await mountController()
     expect(c.isOpen()).toBe(false)
-    await c.setSummary({ running: 1, failed: 0 }) // kickoff
+    await c.setSummary({ running: 1, failed: 0, active: 0 }) // kickoff
     expect(c.isOpen()).toBe(true)
-    await c.setSummary({ running: 2, failed: 0 }) // another kickoff — still open
+    await c.setSummary({ running: 2, failed: 0, active: 0 }) // another kickoff — still open
     expect(c.isOpen()).toBe(true)
     await c.unmount()
   })
 
   it('auto-closes after the settle once ALL runs are clear', async () => {
     const c = await mountController()
-    await c.setSummary({ running: 1, failed: 0 })
+    await c.setSummary({ running: 1, failed: 0, active: 0 })
     expect(c.isOpen()).toBe(true)
-    await c.setSummary({ running: 0, failed: 0 }) // all clear → settle timer armed
+    await c.setSummary({ running: 0, failed: 0, active: 0 }) // all clear → settle timer armed
     expect(c.isOpen()).toBe(true) // still open during the settle
     await c.advance(40)
     expect(c.isOpen()).toBe(false) // auto-closed
@@ -186,16 +186,32 @@ describe('usePlansPaneController (auto-open/close state machine)', () => {
 
   it('a FAILED run keeps the pane open (attention, no auto-close)', async () => {
     const c = await mountController()
-    await c.setSummary({ running: 1, failed: 0 })
-    await c.setSummary({ running: 0, failed: 1 }) // last run failed
+    await c.setSummary({ running: 1, failed: 0, active: 0 })
+    await c.setSummary({ running: 0, failed: 1, active: 0 }) // last run failed
     await c.advance(40)
     expect(c.isOpen()).toBe(true)
     await c.unmount()
   })
 
+  // #379 defect (3): a plain in-flight card (in_progress / inline_active, NO bound
+  // run → active rises, running stays 0) must OPEN the pane, and auto-CLOSE once
+  // the card goes terminal (done). Fails on the pre-fix 2-field summary, which
+  // never counted a plain active card.
+  it('opens on a plain ACTIVE card (no run) and auto-closes when it goes terminal', async () => {
+    const c = await mountController()
+    expect(c.isOpen()).toBe(false)
+    await c.setSummary({ running: 0, failed: 0, active: 1 }) // a plain in_progress card
+    expect(c.isOpen()).toBe(true) // #379 — a plain active card kicks the pane open
+    await c.setSummary({ running: 0, failed: 0, active: 0 }) // card done → all clear
+    expect(c.isOpen()).toBe(true) // still open during the settle
+    await c.advance(40)
+    expect(c.isOpen()).toBe(false) // auto-closed once every card terminal
+    await c.unmount()
+  })
+
   it('a manual toggle pins the pane (persists, no auto-close on an idle board)', async () => {
     const c = await mountController()
-    await c.click() // manual open on an idle (0,0) board
+    await c.click() // manual open on an idle (0,0,0) board
     expect(c.isOpen()).toBe(true)
     expect(window.localStorage.getItem(`neutron.plansPane.${PROJECT}`)).toBe('1')
     await c.advance(40) // idle board would auto-close if unpinned — pinned stays open
@@ -301,6 +317,27 @@ describe('PlansPane (edge-handle + live wiring)', () => {
     expect(p.openChanges.at(-1)).toBe(true)
     // The header count reflects the running roll-up.
     expect(p.container.querySelector('.car-plans-cnt')?.textContent).toContain('1 running')
+    p.unmount()
+  })
+
+  // #379 defect (3) end-to-end: a live board reports a PLAIN in_progress card
+  // (linked_run_id:null, no run_progress) → the pane must auto-open and the header
+  // must read "1 active". On pre-fix code the pane stayed shut (summarize only
+  // counted a bound run).
+  it('auto-opens on a plain in_progress card with no bound run (#379)', async () => {
+    const p = await mountPane()
+    expect((p.container.querySelector('.car-plans-col') as HTMLElement).className).not.toContain(
+      'car-plans-open',
+    )
+    await p.act(async () => {
+      p.emit([item({ status: 'in_progress', linked_run_id: null })], PROJECT)
+      await tick()
+    })
+    expect((p.container.querySelector('.car-plans-col') as HTMLElement).className).toContain(
+      'car-plans-open',
+    )
+    expect(p.openChanges.at(-1)).toBe(true)
+    expect(p.container.querySelector('.car-plans-cnt')?.textContent).toContain('1 active')
     p.unmount()
   })
 })

@@ -43,6 +43,9 @@ import {
 
 export type WorkBoardStatus = 'upcoming' | 'in_progress' | 'done' | 'failed'
 
+/** #379 — the ▶ routing kind ('build' → Trident, 'research' → Atlas). */
+export type WorkBoardTaskType = 'build' | 'research'
+
 /**
  * One board item, in the shape the tab renders. `project_slug` is server-only
  * (present on the HTTP GET row, absent on the live `work_board_changed` frame),
@@ -56,6 +59,9 @@ export interface WorkBoardItem {
   status: WorkBoardStatus
   sort_order: number
   design_doc_ref: string | null
+  /** #379 — the ▶ routing kind. Optional on the wire (a legacy live frame may
+   *  omit it); treated as 'build' when absent. */
+  task_type?: WorkBoardTaskType
   /** Lightweight in-topic ("inline") work marker. */
   inline_active: boolean
   /** Bound `code_trident_runs.id` when a sub-agent run works this item. */
@@ -108,6 +114,8 @@ export interface RunProgress {
 export interface CreateWorkBoardItemInput {
   title: string
   status?: WorkBoardStatus
+  /** #379 — the ▶ routing kind; server defaults to 'build' when absent. */
+  task_type?: WorkBoardTaskType
   design_doc_ref?: string | null
   /** M1 — full context/ask; a substantial spec is persisted to a plans/ doc. */
   spec?: string
@@ -297,10 +305,12 @@ export function parseWorkBoardItems(raw: unknown): WorkBoardItem[] {
     )
       continue
     const run_progress = parseRunProgress(r['run_progress'])
+    const task_type = r['task_type'] === 'research' ? 'research' : 'build'
     out.push({
       id,
       title,
       status,
+      task_type,
       sort_order: typeof r['sort_order'] === 'number' ? (r['sort_order'] as number) : 0,
       design_doc_ref: typeof r['design_doc_ref'] === 'string' ? (r['design_doc_ref'] as string) : null,
       inline_active: r['inline_active'] === true,
