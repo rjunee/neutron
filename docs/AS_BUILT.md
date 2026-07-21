@@ -225,14 +225,48 @@ Trident build run'"). Each ships a reproduce-then-fix test that FAILS on prior m
 > `docs/research/AS-BUILT-docs-archive-2026-07.md`. This file is the ONE live
 > changelog going forward.
 
+## 2026-07-20 — M2-3 / P0-4: `NEUTRON_PERFECT_RECALL` collapsed — perfect-recall lane default-ON, 6h consolidation
+
+Deleted the `NEUTRON_PERFECT_RECALL` feature flag (`runtime/perfect-recall-flag.ts`
++ its test + the sole-consumer `runtime/env-flag-tokens.ts`). The whole
+perfect-recall lane — RB1 memory-index manifest, RB3 reflect-consolidation loop,
+RB4 supersede, RC2 agent-nexus — is now the UNCONDITIONAL default, and the reflect
+consolidation cadence flips 24h→6h ON by default (`DEFAULT_REFLECT_INTERVAL_MS =
+6 * 60 * 60 * 1000`, `scribe/reflect/reflect-pass.ts`). This clears the standing
+no-feature-flags violation (Ryan-locked, no dual code paths) and creates the
+always-running attachment point the dreaming-half-into-core-memory work needs.
+Ryan-locked: consolidation every 6h, ON by default (neutron-managed SPEC Decisions
+Log 2026-07-20; managed SPEC §374-376; deepened plan build-order #1).
+
+- **Four un-gated sites in `open/wiring/memory.ts`** — `memoryIndexHook`
+  (wrap-sync-hook-with-memory-index, RB1), scribe `supersede` (RB4), `nexus =
+  new NexusStore(...)` (RC2), and the `reflectLoop` `SupervisedLoop` (RB3) are all
+  constructed unconditionally. The `WiredMemory` type tightens to non-optional
+  (`memoryIndexRead: () => Promise<string | null>`, `nexus: NexusStore`,
+  `reflectLoop: SupervisedLoop`), so the composer's `reflectLoop !== null` /
+  `memoryIndexRead !== undefined` null-guards are removed (register-before-start +
+  quiescing-stop ordering preserved verbatim).
+- **LLM-less degrade path survives** — the substrate is still `llmPool`-gated
+  (a real runtime condition, not a flag): an LLM-less box gets scribe=null and a
+  dedup-only reflect pass, and `immediate:false` means no boot-time LLM call.
+- **`supersede` option removed from the public scribe surface** (`scribe/extract.ts`,
+  `scribe/index.ts`, `scribe/write-to-gbrain.ts`) — belief-evolution supersede is
+  always on; the RB4 `relations[].supersedes` data marker is unchanged.
+- **`gateway/nexus/nexus-emit.ts`** drops the dead `isPerfectRecallEnabled`
+  re-export (grep-zero importers) and its flag-era doc block.
+- Acceptance: `grep -rn "NEUTRON_PERFECT_RECALL|isPerfectRecallEnabled|perfect-recall-flag"
+  --include='*.ts'` (excl. node_modules) → ZERO hits; a default-env boot constructs +
+  registers + starts the reflect loop at 6h (`reflect-loop-arming.test.ts` asserts
+  `describe().intervalMs === 21_600_000` with NO env var set); `bun test` green.
+
 ## 2026-07-20 — M2-3: memory-consolidation correctness — 3 dedup/supersede corruption blockers
 
 Closed the three data-integrity blockers that gate the memory build
-(memory-system-design-2026-07-20 blockers 1–3). All are correctness fixes to
-flag-gated (`NEUTRON_PERFECT_RECALL`) consolidation code — nothing is armed; the
-flag stays off. These protect the owner's canonical corpus from silent permanent
-corruption once consolidation runs. Each fix ships with a reproduce-then-fix test
-that provably FAILS on the prior main.
+(memory-system-design-2026-07-20 blockers 1–3). All are correctness fixes to the
+consolidation code — now the always-on default (the `NEUTRON_PERFECT_RECALL` flag
+that gated it was collapsed the same day; see the entry above). These protect the
+owner's canonical corpus from silent permanent corruption when consolidation runs.
+Each fix ships with a reproduce-then-fix test that provably FAILS on the prior main.
 
 - **BLOCKER 1 — dedup no longer fuses UNRELATED entities** (`scribe/reflect/jaccard.ts`).
   On main, five fact-less company pages (`# <Name>` + `Mentioned in chat (kind: X).`)
@@ -268,7 +302,8 @@ that provably FAILS on the prior main.
   relation persists as an additive dated timeline row (`works_at oldco`), but
   `stripSupersededSentences` writes NOTHING to the timeline, so the sentence's
   descriptive detail and any co-located still-current non-edge fact (`earns $400k`)
-  leave current truth and are not re-recorded. Flag-gated (`NEUTRON_PERFECT_RECALL`).
+  leave current truth and are not re-recorded. (Runs under the always-on
+  consolidation default — see the flag-collapse entry above.)
 - **BLOCKER 2b — resynth may not mutate a predicate** (`preservesEdges`,
   `scribe/reflect/reflect-pass.ts`). The accept-gate now compares extracted
   (predicate, object) PAIRS, not just wikilink TARGETS. On main a rewrite that kept
