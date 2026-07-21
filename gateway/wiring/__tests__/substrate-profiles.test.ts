@@ -259,6 +259,13 @@ test('no skip_permissions anywhere ⇒ option is left unset (unchanged default)'
 //    The ritual substrate threads its unattended-executor system prompt file
 //    onto ClaudeCodeSubstrateOptions.appendSystemPromptFile; absence keeps the
 //    substrate's default (repl-agent-base.md, the chat persona).
+//
+//    SCOPE (Argus r1): these two tests cover ONLY the build-llm-call-substrate
+//    layer against the FAKE capture factory — they prove the value lands on the
+//    intermediate ClaudeCodeSubstrateOptions bag, NOT that the REAL default
+//    factory forwards it to the spawned argv. That end-to-end wiring (the seam
+//    that actually dropped the prompt) is proven in
+//    `runtime/adapters/claude-code/persistent/__tests__/append-system-prompt-wiring.test.ts`.
 // ---------------------------------------------------------------------------
 
 test('append_system_prompt_file threads onto ClaudeCodeSubstrateOptions.appendSystemPromptFile', async () => {

@@ -169,6 +169,20 @@ export interface ClaudeCodeSubstrateOptions {
    * See `PersistentReplSubstrateOptions.enableToolBridge`.
    */
   enableToolBridge?: boolean
+  /**
+   * Executor-mode reminders (plan task 4/5) — override the spawned REPL's
+   * `--append-system-prompt-file`, forwarded verbatim onto
+   * `PersistentReplSubstrateOptions.appendSystemPromptFile`
+   * (`persistent/types.ts:216` → emitted `build-repl-argv.ts:109`). ABSENT ⇒
+   * the substrate's default (`repl-agent-base.md`, the interactive CHAT persona;
+   * see `spawn.ts` DEFAULT_AGENT_BASE_PROMPT). The ritual executor sets this to
+   * `reminders/ritual-agent-base.md` so a scheduled ritual REPL runs as an
+   * UNATTENDED executor rather than the chat agent. Without forwarding it here a
+   * caller built through `createClaudeCodeSubstrateAuto` (the DEFAULT anthropic
+   * factory — see `select-substrate.ts`) would silently drop the prompt and the
+   * ritual would run as the chat persona.
+   */
+  appendSystemPromptFile?: string
 }
 
 /**
@@ -244,6 +258,12 @@ export function createClaudeCodeSubstrateAuto(options: ClaudeCodeSubstrateOption
   }
   // P0-1 — native-MCP tool bridge opt-in (owner's warm conversational REPL only).
   if (options.enableToolBridge !== undefined) p.enableToolBridge = options.enableToolBridge
+  // Executor-mode reminders (task 4/5) — forward the non-default agent-base prompt
+  // so a scheduled ritual REPL spawns as the UNATTENDED executor persona rather
+  // than the chat agent. Dropping it here (the DEFAULT factory) is exactly what
+  // Argus r1 caught: `spawn.ts` falls back to DEFAULT_AGENT_BASE_PROMPT
+  // (`repl-agent-base.md`) and the ritual runs as the chat persona.
+  if (options.appendSystemPromptFile !== undefined) p.appendSystemPromptFile = options.appendSystemPromptFile
 
   // Sprint-2 supervision: derive a per-instance persisted REPL registry + state dir
   // under the instance home and ensure the live watchdog (wedge/crash detect →
