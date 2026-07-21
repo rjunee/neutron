@@ -106,25 +106,40 @@ export function DocumentsTab({
   // A doc/history fetch (`docs/file?path=…`) that SETTLES after this pane
   // unmounts — the reported path was a 503 on `starting-plan.md` / `history.md`
   // during a project switch — used to run its `.then`/`.catch` continuation and
-  // call setState on a component that was already gone. React surfaces that as
-  // "Tried to unmount a fiber that is already unmounted"; that invariant is
-  // thrown from React's own commit/teardown (NOT a child render), so the
-  // per-pane PaneErrorBoundary added in #408 could not catch it — it escaped to
-  // the single app-level boundary in ChatApp, which blanked the WHOLE screen.
+  // call setState on a component that was already gone. In a real (concurrent)
+  // browser commit React surfaces that setState-after-unmount as the invariant
+  // "Tried to unmount a fiber that is already unmounted", thrown from React's own
+  // commit/teardown phase — NOT from a child render.
   //
-  // #408 added the boundary (necessary) but never guarded the async continuations
-  // (the missing half). Two guards close it: `mountedRef` bails every
-  // continuation once unmounted (no setState-after-unmount → no invariant), and
-  // `abortRef` cancels the in-flight request on unmount so the 503 never lands.
+  // That distinction is why the pane could not self-heal: `ProjectShell` already
+  // wraps this tab in a `PaneErrorBoundary` (added #408 — it EXISTS, see
+  // ProjectShell.tsx). But an error boundary only catches errors thrown during a
+  // child's RENDER; a teardown-phase invariant bypasses it entirely. With no
+  // boundary able to catch it — and none sits above `ProjectShell` at the root
+  // (main.tsx) either — React does what it does for any uncaught error: it
+  // unmounts the WHOLE root. That is the blank screen.
+  //
+  // So #408's isolation was necessary but structurally COULD NOT catch this
+  // class; the only real fix is to stop the setState-after-unmount at the source.
+  // Two guards do that: `mountedRef` bails every continuation once unmounted (no
+  // setState-after-unmount → no invariant), and `abortRef` cancels in-flight
+  // READS on unmount so a 503 never even lands.
   const mountedRef = useRef(true)
   const abortRef = useRef<AbortController | null>(null)
 
   const client = useMemo(() => {
     const base: FetchImpl = fetchImpl ?? ((input, init) => fetch(input, init))
-    // Thread the pane's abort signal into every docs request; unmount aborts it.
+    // Thread the pane's abort signal into READS only; unmount aborts them.
+    // A write (PUT/POST — writeFile / postComment / resolveComment / reply /
+    // escalate) that the user just fired must still reach the server even if
+    // they navigate away within the RTT, so it is NEVER aborted — its
+    // continuation relies on the `mountedRef` guard to skip setState-after-
+    // unmount instead. Aborting writes here would silently drop the user's
+    // Save/Resolve/Post on a fast project switch.
     const withSignal: FetchImpl = (input, init) => {
       const ctrl = abortRef.current
-      return base(input, ctrl !== null ? { ...init, signal: ctrl.signal } : init)
+      const isRead = (init?.method ?? 'GET') === 'GET'
+      return base(input, ctrl !== null && isRead ? { ...init, signal: ctrl.signal } : init)
     }
     return new WebDocsClient({ base_url: config.origin, token: config.token, fetchImpl: withSignal })
   }, [config.origin, config.token, fetchImpl])
@@ -434,11 +449,19 @@ export function DocumentsTab({
           if (!mountedRef.current) return
           setReplyBody('')
           loadComments(file.path)
-          // refresh the open thread tree
-          void client.getThread(projectId, threadRootId).then((t) => {
-            if (!mountedRef.current) return
-            setOpenThread(t)
-          })
+          // refresh the open thread tree — a best-effort re-fetch, so swallow
+          // its rejection (incl. the AbortError from an unmount mid-refresh);
+          // without a `.catch` the shared read-abort turns this into an
+          // unhandled promise rejection in exactly the unmount path we target.
+          void client
+            .getThread(projectId, threadRootId)
+            .then((t) => {
+              if (!mountedRef.current) return
+              setOpenThread(t)
+            })
+            .catch(() => {
+              /* refresh-only; a failed thread re-fetch is non-fatal */
+            })
         })
         .catch((err: unknown) => {
           if (!mountedRef.current) return
