@@ -42,10 +42,6 @@ import {
   reflectionLearningEvent,
 } from '@neutronai/gateway/nexus/nexus-emit.ts'
 import { workBoardScopeKey } from '@neutronai/work-board/store.ts'
-// The ONE canonical perfect-recall flag (RB lane). `gateway/nexus/nexus-emit.ts`
-// re-exports THIS same predicate, so RC2 and RB1 read identical opt-in semantics
-// off the same NEUTRON_PERFECT_RECALL var.
-import { isPerfectRecallEnabled } from '@neutronai/runtime/perfect-recall-flag.ts'
 import {
   wrapSyncHookWithMemoryIndex,
   type MemoryIndexWorkHandle,
@@ -64,37 +60,38 @@ export interface WiredMemory {
   /** Diary + corrections-log self-improvement loop (always built). */
   reflection: Reflection
   /**
-   * RB1 (perfect-recall) — cold-turn read of the breadth memory-index manifest,
-   * with a synchronous regenerate-on-absent fallback (coalesced with the write
-   * path). `undefined` when the perfect-recall flag is off. The composer wraps
-   * the returned body as the `<memory_index>` injection fragment.
+   * RB1 (perfect-recall, always on) — cold-turn read of the breadth memory-index
+   * manifest, with a synchronous regenerate-on-absent fallback (coalesced with
+   * the write path). Always present now that the perfect-recall lane is the base
+   * behavior. The composer wraps the returned body as the `<memory_index>`
+   * injection fragment.
    */
   memoryIndexRead: (() => Promise<string | null>) | undefined
   /**
-   * RB1 (perfect-recall) — LATE-BIND the active work-board handles provider. The
-   * work-board store is constructed AFTER `wireMemory` in the composer, so the
-   * regenerator holds a stable thunk that this setter fills in once the store
-   * exists. Resolved fresh at each manifest generation (never a boot-time
-   * snapshot). No-op when the flag is off.
+   * RB1 (perfect-recall, always on) — LATE-BIND the active work-board handles
+   * provider. The work-board store is constructed AFTER `wireMemory` in the
+   * composer, so the regenerator holds a stable thunk that this setter fills in
+   * once the store exists. Resolved fresh at each manifest generation (never a
+   * boot-time snapshot).
    */
   setMemoryIndexWorkHandles: (provider: () => ReadonlyArray<MemoryIndexWorkHandle>) => void
   /** Fire-and-forget per-turn hook threaded into the chat-bridge; undefined LLM-less. */
   scribeOnUserTurn: ((input: UserTurnInput) => void) | undefined
   /**
-   * RC2 — the shared agent-nexus store when the perfect-recall flag is on, else
-   * null. Reflection's `learning` emitter is already wired onto it here; the
-   * composer reuses THIS instance to build the trident harvest emitter so both
-   * producers write through one store. Torn down via `cleanups`.
+   * RC2 — the shared agent-nexus store, always built now that the perfect-recall
+   * lane is the base behavior. Reflection's `learning` emitter is already wired
+   * onto it here; the composer reuses THIS instance to build the trident harvest
+   * emitter so both producers write through one store. Torn down via `cleanups`.
    */
   nexus: NexusStore | null
   /**
-   * RB3 ([BEHAVIOR]) — the scheduled "reflect" consolidation loop, behind the
-   * shared `NEUTRON_PERFECT_RECALL` flag. `null` when the flag is off (the
-   * default) → the loop NEVER arms and NO LLM cost is ever incurred. When on, the
-   * composer registers `describe()` into the LoopRegistry, `start()`s it, and
-   * `stop()`s it on shutdown (register-before-start, quiescing stop). A
-   * `SupervisedLoop` whose tick runs `runReflectPass` (dedup + re-synthesis +
-   * reserved-kind extraction) once per `DEFAULT_REFLECT_INTERVAL_MS`.
+   * RB3 ([BEHAVIOR]) — the scheduled "reflect" consolidation loop, always armed
+   * now that memory consolidation is ON by default (managed SPEC Decisions Log
+   * 2026-07-20, P0-4). The composer registers `describe()` into the LoopRegistry,
+   * `start()`s it, and `stop()`s it on shutdown (register-before-start, quiescing
+   * stop). A `SupervisedLoop` whose tick runs `runReflectPass` (dedup +
+   * re-synthesis + reserved-kind extraction) once per `DEFAULT_REFLECT_INTERVAL_MS`
+   * (every 6h). On an LLM-less box it degrades to a dedup-only pass.
    */
   reflectLoop: SupervisedLoop | null
   /**
@@ -197,34 +194,31 @@ export function wireMemory(ctx: OpenWiringContext): WiredMemory {
   cleanups.push(() => {
     fireAndForget('memory.close', gbrainMemory.close())
   })
-  // RB1 (perfect-recall lane, default-off flag) — when the flag is on, wrap the
-  // gbrain syncHook so EVERY entity write (chat scribe, onboarding materializer,
-  // Path-1 finalize — they all share this one hook) also regenerates the durable
-  // breadth manifest at `entities/INDEX.md`. Backend-neutral: the wrapper reads
-  // the portable entity pages, never gbrain, so it survives a memory-backend
-  // swap. Coalesced + best-effort — a manifest failure is logged and never
-  // disturbs the entity-write path. Off by default → the raw hook is threaded
-  // unchanged (zero behavior change).
+  // RB1 (perfect-recall lane, always on) — wrap the gbrain syncHook so EVERY
+  // entity write (chat scribe, onboarding materializer, Path-1 finalize — they
+  // all share this one hook) also regenerates the durable breadth manifest at
+  // `entities/INDEX.md`. Backend-neutral: the wrapper reads the portable entity
+  // pages, never gbrain, so it survives a memory-backend swap. Coalesced +
+  // best-effort — a manifest failure is logged and never disturbs the
+  // entity-write path.
   // Late-bound active work-board handles provider (see WiredMemory.setMemory…).
   let workHandlesProvider: (() => ReadonlyArray<MemoryIndexWorkHandle>) | null = null
-  const memoryIndexHook = isPerfectRecallEnabled(env)
-    ? wrapSyncHookWithMemoryIndex(gbrainMemory.syncHook, owner_home, {
-        logFailure: (err) =>
-          fireAndForget(
-            'memory.index',
-            Promise.reject(err instanceof Error ? err : new Error(String(err))),
-          ),
-        workHandlesProvider: () => workHandlesProvider?.() ?? [],
-      })
-    : null
-  const gbrainSyncHook = memoryIndexHook ?? gbrainMemory.syncHook
-  // Bootstrap the manifest at boot when the flag is on, so a corpus that ALREADY
-  // exists (entities written while the flag was off, then flipped on across a
-  // restart) is advertised on the very next cold turn WITHOUT waiting for a new
-  // entity write. Coalesced + best-effort — a no-op when there are no entities.
-  if (memoryIndexHook !== null) memoryIndexHook.regenerate()
-  const memoryIndexRead: (() => Promise<string | null>) | undefined =
-    memoryIndexHook !== null ? () => memoryIndexHook.read() : undefined
+  const memoryIndexHook = wrapSyncHookWithMemoryIndex(gbrainMemory.syncHook, owner_home, {
+    logFailure: (err) =>
+      fireAndForget(
+        'memory.index',
+        Promise.reject(err instanceof Error ? err : new Error(String(err))),
+      ),
+    workHandlesProvider: () => workHandlesProvider?.() ?? [],
+  })
+  const gbrainSyncHook = memoryIndexHook
+  // Bootstrap the manifest at boot so a corpus that ALREADY exists (entities
+  // written before this build shipped) is advertised on the very next cold turn
+  // WITHOUT waiting for a new entity write. Coalesced + best-effort — a no-op
+  // when there are no entities.
+  memoryIndexHook.regenerate()
+  const memoryIndexRead: (() => Promise<string | null>) | undefined = () =>
+    memoryIndexHook.read()
   const setMemoryIndexWorkHandles = (
     provider: () => ReadonlyArray<MemoryIndexWorkHandle>,
   ): void => {
@@ -238,11 +232,6 @@ export function wireMemory(ctx: OpenWiringContext): WiredMemory {
           ownerDataDir: owner_home,
           owner_slug: project_slug,
           budget: createState(defaultStatePath(owner_home)),
-          // RB4 temporal invalidation (belief evolution) — dark behind the shared
-          // perfect-recall flag. OFF → scribe stays pure-accretion (today's
-          // behaviour); ON → a `supersedes` marker retires the stale
-          // compiled-truth sentence + gbrain edge while the timeline keeps history.
-          supersede: isPerfectRecallEnabled(env),
         })
       : null
 
@@ -274,37 +263,31 @@ export function wireMemory(ctx: OpenWiringContext): WiredMemory {
           ...(substrateFactory !== undefined ? { substrateFactory } : {}),
         })
       : null
-  // RC2 ([BEHAVIOR]) — the agent-nexus emitter, behind the shared perfect-recall
-  // flag (plan §14.6). When ON, a per-project append-only nexus sidecar receives
-  // the owner's corrections as `learning` events (below) + the trident harvest's
-  // handoff/decision events (wired on the trident input in the composer, over the
-  // SAME store). When OFF, `nexus` is null → `createReflection` gets no emitter →
-  // the `.nexus/` sidecar is never touched (unchanged behaviour). RC1's store is
-  // cross-connection safe by design, so the composer reusing this one instance
-  // for trident is a non-issue.
-  const nexus = isPerfectRecallEnabled(env) ? new NexusStore({ owner_home }) : null
-  if (nexus !== null) cleanups.push(() => nexus.closeAll())
+  // RC2 ([BEHAVIOR]) — the agent-nexus emitter, always built now that the
+  // perfect-recall lane is the base behavior. A per-project append-only nexus
+  // sidecar receives the owner's corrections as `learning` events (below) + the
+  // trident harvest's handoff/decision events (wired on the trident input in the
+  // composer, over the SAME store). RC1's store is cross-connection safe by
+  // design, so the composer reusing this one instance for trident is a non-issue.
+  const nexus = new NexusStore({ owner_home })
+  cleanups.push(() => nexus.closeAll())
   const reflection: Reflection = createReflection({
     ownerDataDir: owner_home,
     ...(reflectionSubstrate !== null ? { substrate: reflectionSubstrate } : {}),
-    ...(nexus !== null
-      ? {
-          // Fire-and-forget: file the correction under the CANONICAL project
-          // nexus scope. `scope` is `turn.project_id ?? 'general'`; run it
-          // through `workBoardScopeKey` (owner boundary = `project_slug`) so it
-          // matches the key trident stamps on a run's `project_slug`
-          // (`workBoardScopeKey(project_slug, project_id)`) — General collapses
-          // to the owner slug on BOTH sides, so a General correction and a
-          // General trident decision land in the SAME `.nexus` a reader (RC3)
-          // scopes to. A named project maps to its own id on both sides.
-          emitLearning: ({ scope, correction }): void =>
-            emitNexusEvent(
-              nexus,
-              workBoardScopeKey(project_slug, scope),
-              reflectionLearningEvent(correction),
-            ),
-        }
-      : {}),
+    // Fire-and-forget: file the correction under the CANONICAL project nexus
+    // scope. `scope` is `turn.project_id ?? 'general'`; run it through
+    // `workBoardScopeKey` (owner boundary = `project_slug`) so it matches the key
+    // trident stamps on a run's `project_slug`
+    // (`workBoardScopeKey(project_slug, project_id)`) — General collapses to the
+    // owner slug on BOTH sides, so a General correction and a General trident
+    // decision land in the SAME `.nexus` a reader (RC3) scopes to. A named project
+    // maps to its own id on both sides.
+    emitLearning: ({ scope, correction }): void =>
+      emitNexusEvent(
+        nexus,
+        workBoardScopeKey(project_slug, scope),
+        reflectionLearningEvent(correction),
+      ),
   })
 
   // Production-shape hook threaded into `buildLandingStack` → the chat-bridge.
@@ -349,60 +332,57 @@ export function wireMemory(ctx: OpenWiringContext): WiredMemory {
   // ── RB3 ([BEHAVIOR]) — the scheduled "reflect" consolidation loop ──────────
   // The tiered-write autonomy uplift: deterministic work runs on every save
   // (Scribe/entity-writer, above — untouched), and the LLM-heavy consolidation
-  // is confined to THIS scheduled batch. Behind the shared perfect-recall flag
-  // so it NEVER arms — and spends ZERO tokens — by default. When on, a
-  // `SupervisedLoop` runs `runReflectPass` (Jaccard dedup + timeline
+  // is confined to THIS scheduled batch. ALWAYS armed now that memory
+  // consolidation is ON by default (managed SPEC Decisions Log 2026-07-20, P0-4):
+  // a `SupervisedLoop` runs `runReflectPass` (Jaccard dedup + timeline
   // re-synthesis + reserved meeting/project/original extraction) once per
-  // `DEFAULT_REFLECT_INTERVAL_MS`. The composer registers/starts/stops it
-  // (register-before-start; quiescing stop) exactly like the other loops.
+  // `DEFAULT_REFLECT_INTERVAL_MS` (every 6h). The composer registers/starts/stops
+  // it (register-before-start; quiescing stop) exactly like the other loops.
   //
   // A DEDICATED ephemeral `cc-reflect-*` substrate isolates the batch LLM cost
   // from the chat REPL (same shape as `cc-scribe-*` / `cc-reflection-*`). Gated
   // on `llmPool`: an LLM-less box gets a dedup-only pass (no substrate → steps 2
-  // and 3 are skipped), so the flag still degrades gracefully. `immediate:false`
-  // means the first tick is one interval away — a flagged boot never fires an
-  // LLM call synchronously at startup.
-  let reflectLoop: SupervisedLoop | null = null
-  if (isPerfectRecallEnabled(env)) {
-    const reflectSubstrate =
-      llmPool !== null
-        ? buildLlmCallSubstrate({
-            pool: llmPool,
-            substrate_instance_id: `cc-reflect-${owner_handle}`,
-            cwd: owner_home,
-            owner_handle,
-            user_id: OWNER_USER_ID,
-            project_slug,
-            // Memory lane: toolless one-shot (tools:[] + in-process persistence).
-            // Security knobs live on the profile — see substrate-profiles.ts.
-            profile: PROFILE_TOOLLESS_UTILITY,
-            ephemeral: true,
-            ...(substrateFactory !== undefined ? { substrateFactory } : {}),
-          })
-        : null
-    const reflectDeps: ReflectPassDeps = {
-      ownerDataDir: owner_home,
-      ownSlug: project_slug,
-      // Same cast the scribe path uses: the real writer satisfies the minimal
-      // `WriteEntityFn` surface (an extra optional field on the input is fine).
-      writeEntity: defaultWriteEntity as unknown as ReflectPassDeps['writeEntity'],
-      syncHook: gbrainSyncHook,
-      // Best-effort brain-side removal of a merged-away loser page, through the
-      // backend-neutral `MemoryStore.delete` seam (no gbrain internals leak here).
-      deletePage: (slug: string): Promise<void> =>
-        gbrainMemory.memoryStore.delete({ id: slug }).then(() => undefined),
-      ...(reflectSubstrate !== null ? { substrate: reflectSubstrate } : {}),
-    }
-    reflectLoop = new SupervisedLoop({
-      name: 'reflect-consolidation',
-      intervalMs: DEFAULT_REFLECT_INTERVAL_MS,
-      tick: async (): Promise<void> => {
-        await runReflectPass(reflectDeps)
-      },
-    })
-    // NOTE: register/start/stop is owned by the composer (it holds the
-    // LoopRegistry + realmode cleanups), matching the lifecycle-watchdog pattern.
+  // and 3 are skipped), so the loop degrades gracefully — this is a REAL runtime
+  // condition, not a flag. `immediate:false` means the first tick is one interval
+  // away — the loop never fires an LLM call synchronously at startup.
+  const reflectSubstrate =
+    llmPool !== null
+      ? buildLlmCallSubstrate({
+          pool: llmPool,
+          substrate_instance_id: `cc-reflect-${owner_handle}`,
+          cwd: owner_home,
+          owner_handle,
+          user_id: OWNER_USER_ID,
+          project_slug,
+          // Memory lane: toolless one-shot (tools:[] + in-process persistence).
+          // Security knobs live on the profile — see substrate-profiles.ts.
+          profile: PROFILE_TOOLLESS_UTILITY,
+          ephemeral: true,
+          ...(substrateFactory !== undefined ? { substrateFactory } : {}),
+        })
+      : null
+  const reflectDeps: ReflectPassDeps = {
+    ownerDataDir: owner_home,
+    ownSlug: project_slug,
+    // Same cast the scribe path uses: the real writer satisfies the minimal
+    // `WriteEntityFn` surface (an extra optional field on the input is fine).
+    writeEntity: defaultWriteEntity as unknown as ReflectPassDeps['writeEntity'],
+    syncHook: gbrainSyncHook,
+    // Best-effort brain-side removal of a merged-away loser page, through the
+    // backend-neutral `MemoryStore.delete` seam (no gbrain internals leak here).
+    deletePage: (slug: string): Promise<void> =>
+      gbrainMemory.memoryStore.delete({ id: slug }).then(() => undefined),
+    ...(reflectSubstrate !== null ? { substrate: reflectSubstrate } : {}),
   }
+  const reflectLoop: SupervisedLoop = new SupervisedLoop({
+    name: 'reflect-consolidation',
+    intervalMs: DEFAULT_REFLECT_INTERVAL_MS,
+    tick: async (): Promise<void> => {
+      await runReflectPass(reflectDeps)
+    },
+  })
+  // NOTE: register/start/stop is owned by the composer (it holds the
+  // LoopRegistry + realmode cleanups), matching the lifecycle-watchdog pattern.
 
   return {
     gbrainMemory,

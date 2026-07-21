@@ -1050,9 +1050,9 @@ export function buildOpenGraphComposer(
       cleanups: memoryCleanups,
     } = wireMemory(wiringCtx)
 
-    // RB3 ([BEHAVIOR]) — the scheduled reflect-consolidation loop, when the
-    // perfect-recall flag is on (`wireMemory` returns null otherwise, so this is
-    // a no-op by default and the loop NEVER arms).
+    // RB3 ([BEHAVIOR]) — the scheduled reflect-consolidation loop, always armed
+    // now that memory consolidation is ON by default (managed SPEC Decisions Log
+    // 2026-07-20, P0-4). `wireMemory` always returns a live loop.
     //
     // Its quiescing `stop()` cleanup is registered HERE, BEFORE the memory
     // cleanups, so shutdown (forward-order drain) QUIESCES an in-flight reflect
@@ -1075,7 +1075,7 @@ export function buildOpenGraphComposer(
     for (const cleanup of memoryCleanups) realmodeCleanups.push(cleanup)
 
     // RC2 ([BEHAVIOR]) — the tick loop's `on_run_terminal` = the skill-forge audit
-    // + (flag-gated) the RC2 nexus producer, each ISOLATED (see
+    // + the RC2 nexus producer (always live), each ISOLATED (see
     // `buildTridentTerminalObserver`). The nexus producer fires from the tick's
     // POST-COMMIT `on_terminal` seam (AFTER `saveIfActive` commits) rather than
     // inside the harvest, so a discarded (concurrent-terminate) or retried
@@ -1083,18 +1083,18 @@ export function buildOpenGraphComposer(
     // the inner→outer `handoff` + the SERVER-GATED Argus `decision` from the
     // committed row, gated on a GENUINE outer harvest (`isTridentHarvestTerminal`),
     // so a stopped/garbled/reaped row or a pre-verdict Forge failure never
-    // fabricates an authenticated verdict. Reuses the SAME perfect-recall-flagged
-    // `NexusStore` `wireMemory` built (reflection's `learning` emitter rides it);
-    // null store (flag off) → the producer is simply absent (unchanged behaviour).
+    // fabricates an authenticated verdict. Reuses the SAME `NexusStore`
+    // `wireMemory` built (reflection's `learning` emitter rides it), always live
+    // now that the agent-nexus is the base behavior.
     const tridentOnRunTerminal = buildTridentTerminalObserver({
       nexus: nexusStore,
       observers: [skillForgeOnRunTerminal],
     })
 
-    // RC3 ([BEHAVIOR]) — the live-agent turn's agent-nexus READER seam. Flag-gated
-    // + scope-composed in `buildNexusReaderSeam`: `undefined` when perfect-recall
-    // is off (`nexusStore` null) so no seam is wired (RC3 ships DARK). Reuses the
-    // SAME `NexusStore` `wireMemory` built, so the reader reads what RC2 wrote.
+    // RC3 ([BEHAVIOR]) — the live-agent turn's agent-nexus READER seam, always
+    // wired + scope-composed in `buildNexusReaderSeam`. Reuses the SAME
+    // `NexusStore` `wireMemory` built, so the reader reads what RC2 wrote (a
+    // reader over an empty log returns null → no block injected).
     const nexusReaderSeam = buildNexusReaderSeam(nexusStore)
 
     // ── Free Cores → Open boot (Vajra parity gap #2) ───────────────────────
@@ -2237,8 +2237,8 @@ export function buildOpenGraphComposer(
     // advertises active work handles (§RB1). The manifest is OWNER-WIDE (built at
     // entity-write time, when there is no "current project"), so it aggregates
     // active work across ALL scopes — General AND every project — not just
-    // General. Resolved FRESH on each manifest generation. No-op when the flag is
-    // off (`memoryIndexRead === undefined`).
+    // General. Resolved FRESH on each manifest generation. The memory-index is
+    // always wired now (`memoryIndexRead` is always defined).
     if (memoryIndexRead !== undefined) {
       setMemoryIndexWorkHandles(() =>
         workBoardStore
@@ -3032,10 +3032,10 @@ export function buildOpenGraphComposer(
             // decision/handoff/learning events OTHER agents recorded on THIS
             // project (an overnight trident Argus verdict, an owner correction)
             // and inject the escaped `<agent_nexus>` DATA block so the chat turn
-            // re-grounds on cross-agent state. The flag gate + `workBoardScopeKey`
-            // scope composition live in `buildNexusReaderSeam` (a tested wiring
-            // unit): `undefined` when perfect-recall is off (`nexusStore` null) →
-            // RC3 ships DARK, the seam is simply absent (unchanged behaviour).
+            // re-grounds on cross-agent state. The `workBoardScopeKey` scope
+            // composition lives in `buildNexusReaderSeam` (a tested wiring unit);
+            // the seam is always wired now (a reader over an empty log returns
+            // null → no block injected).
             ...(nexusReaderSeam !== undefined ? { nexusSnapshot: nexusReaderSeam } : {}),
             // Available-services awareness — the project-scoped credential
             // picture (per-project ∪ global default), so the agent knows which
@@ -3047,10 +3047,10 @@ export function buildOpenGraphComposer(
                 // `slug` is the owner boundary (frozen handle) — brand at the call.
                 projectCredentialStore.listAvailableServices(asOwnerHandle(slug), project_id),
               ),
-            // RB1 (perfect-recall lane, default-off flag) — inject the breadth
+            // RB1 (perfect-recall lane, always on) — inject the breadth
             // memory-index manifest on the cold turn so the agent knows what
-            // entities exist to `memory_search`. `memoryIndexRead` (present only
-            // when the shared flag is on) does a cold-turn read of the durable,
+            // entities exist to `memory_search`. `memoryIndexRead` (always wired)
+            // does a cold-turn read of the durable,
             // portable `entities/INDEX.md` WITH a synchronous regenerate-on-absent
             // fallback (coalesced with the write path) so a just-written entity is
             // never raced away; here we only wrap it as escaped `<memory_index>`
@@ -3501,8 +3501,8 @@ export function buildOpenGraphComposer(
     // failure-prone composition step above has succeeded, so a composer throw can
     // never leak a running interval (its quiescing stop() cleanup was already
     // registered before the memory cleanups, for shutdown ordering). Register-
-    // before-start (dup-name → throw at boot, before the timer arms). Null (flag
-    // off) → no-op.
+    // before-start (dup-name → throw at boot, before the timer arms). The loop is
+    // always live now (memory consolidation ON by default).
     if (reflectLoop !== null) {
       loopRegistry.register(reflectLoop.describe())
       // Failure-atomic: if arming the timer throws, STOP the (partially-started)

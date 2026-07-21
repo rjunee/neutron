@@ -98,10 +98,14 @@ import { composeReservedPrompt, parseReservedExtraction } from './reserved-kinds
 
 const log = createLogger('scribe')
 
-/** Default cadence for the scheduled reflect loop — once per day. The batch is
- *  heavy (LLM per drifted page + one corpus extraction); a daily consolidation
- *  keeps memory tidy without churning tokens. */
-export const DEFAULT_REFLECT_INTERVAL_MS = 24 * 60 * 60 * 1000
+/** Default cadence for the scheduled reflect loop — every 6 hours. Memory
+ *  consolidation is ON by default (managed SPEC Decisions Log 2026-07-20, P0-4:
+ *  the perfect-recall lane is BASE, not a flag), so the cadence trades the old
+ *  once-per-day batch for a tighter 6h refresh that keeps memory current on a
+ *  daily-driver box. The batch is still bounded (LLM per drifted page + one
+ *  corpus extraction, both hard-capped), so four passes a day stay well within
+ *  the token budget while surfacing new knowledge sooner. */
+export const DEFAULT_REFLECT_INTERVAL_MS = 6 * 60 * 60 * 1000
 
 /** Default watchdog per LLM dispatch inside the pass. */
 export const DEFAULT_REFLECT_WATCHDOG_MS = 120_000

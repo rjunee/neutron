@@ -75,10 +75,10 @@ export {
   type CalendarPayloadSource,
   type EmailPayloadSource,
 } from './compose-payload.ts'
-// RB3 — the consolidation / reflect batch pass (perfect-recall lane). The pass
-// logic + its Jaccard dedup + reserved-kind extraction live here; the composer
-// (open/wiring/memory.ts) drives it on a `SupervisedLoop`, gated on the shared
-// `NEUTRON_PERFECT_RECALL` flag so it NEVER arms — and costs zero tokens — by default.
+// RB3 — the consolidation / reflect batch pass. The pass logic + its Jaccard
+// dedup + reserved-kind extraction live here; the composer (open/wiring/memory.ts)
+// drives it on a `SupervisedLoop`, always armed (memory consolidation is ON by
+// default — managed SPEC Decisions Log 2026-07-20, P0-4), every 6h.
 export {
   runReflectPass,
   DEFAULT_REFLECT_INTERVAL_MS,
@@ -151,15 +151,6 @@ export interface CreateScribeDeps {
   budget: BudgetState
   /** Model preference. Defaults to Opus (`[BEST_MODEL]`) inside runExtraction. */
   model_preference?: ReadonlyArray<string>
-  /**
-   * RB4 temporal invalidation (belief evolution) — the shared
-   * `NEUTRON_PERFECT_RECALL` gate, resolved by the wiring layer
-   * (`open/wiring/memory.ts`). When true, the extraction prompt invites the
-   * `supersedes` marker and a superseding fact retires the stale compiled-truth
-   * sentence + gbrain edge while the timeline keeps the dated history. Default
-   * false → pure accretion, exactly as today.
-   */
-  supersede?: boolean
   /** Watchdog timeout (ms). Defaults to SCRIBE_WATCHDOG_MS. */
   watchdog_ms?: number
   /** Min chars before extracting. Defaults to SCRIBE_MIN_CHARS. */
@@ -250,8 +241,6 @@ export function createScribe(deps: CreateScribeDeps): Scribe {
     try {
       const runDeps: Parameters<typeof runExtraction>[0] = { substrate: deps.substrate }
       if (deps.model_preference !== undefined) runDeps.model_preference = deps.model_preference
-      // RB4 — invite the supersede marker into the extraction only under the flag.
-      if (deps.supersede === true) runDeps.supersede = true
       const extraction = await runExtraction(runDeps, input.text, controller.signal)
       const report = await writeExtractionToGBrain(
         {
@@ -270,8 +259,6 @@ export function createScribe(deps: CreateScribeDeps): Scribe {
         {
           writeEntity: writeEntityFn,
           syncHook: deps.syncHook,
-          // RB4 — the perfect-recall supersede gate (default off → pure accretion).
-          supersede: deps.supersede === true,
         },
       )
       ok = true
