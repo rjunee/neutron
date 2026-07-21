@@ -330,7 +330,11 @@ export function buildCoreModules(
 
   const remindersModule: GatewayModule<{ store: ReminderStore; loop: ReminderTickLoop }> = {
     name: 'reminders',
-    init: () => {
+    // Executor-mode reminders (plan task 4) — the tick loop's ritual executor is
+    // built from the graph's `ApprovalManager` (the approval checker source), so
+    // the module depends on `approval` being composed first.
+    deps: ['approval'],
+    init: (ctx) => {
       const store = new ReminderStore(input.db)
       // P5.6 — when a push dispatcher is wired, attach it as the
       // tick loop's `on_fired` hook so every fired reminder also
@@ -343,6 +347,15 @@ export function buildCoreModules(
       }
       if (input.push_dispatcher !== undefined) {
         loopOpts.on_fired = input.push_dispatcher
+      }
+      // Executor-mode reminders (plan task 4) — when the composer supplies a
+      // ritual-executor factory, build the executor with the graph's
+      // ApprovalManager and wire it as the tick's ritual dispatch branch. Absent
+      // → ritual rows are consumed + logged (never dispatched as nudges).
+      if (input.ritual_executor_factory !== undefined) {
+        loopOpts.ritual_executor = input.ritual_executor_factory({
+          approvals: ctx.graph.get<ApprovalManager>('approval'),
+        })
       }
       const loop = new ReminderTickLoop(loopOpts)
       // §F2 — REGISTER BEFORE START (failure-atomic): a duplicate-name throw

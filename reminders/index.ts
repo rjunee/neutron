@@ -24,6 +24,27 @@ export type {
   ReminderTickOptions,
 } from './tick.ts'
 
+// Executor-mode reminders — the ritual EXECUTOR + its durable run-history writer
+// (plan task 4). The tick dispatch branch routes ritual rows to `fire()`; the
+// composer builds the executor + passes the shared subagent registry / substrate
+// turn / approval manager.
+export { createRitualExecutor } from './ritual-executor.ts'
+export type {
+  RitualExecutor,
+  RitualExecutorDeps,
+  RitualTurn,
+  RitualTurnInput,
+  RitualTurnResult,
+} from './ritual-executor.ts'
+export { RITUAL_AGENT_BASE_PROMPT } from './prompt-path.ts'
+export { createRitualRunStore, MAX_RITUAL_OUTPUT_SUMMARY_CHARS } from './ritual-runs.ts'
+export type {
+  RitualRunStore,
+  RitualRunRow,
+  RitualRunStatus,
+  RitualRunTerminalStatus,
+} from './ritual-runs.ts'
+
 export {
   buildReminderDispatcher,
   buildSubstrateReminderLlm,

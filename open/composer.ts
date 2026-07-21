@@ -210,6 +210,9 @@ import {
   buildReminderDispatcher,
   buildSubstrateReminderLlm,
   buildStatusMdContextSource,
+  createRitualRegistry,
+  createRitualExecutor,
+  createRitualRunStore,
 } from '@neutronai/reminders/index.ts'
 // L3 (2026-07) — the reminder delivery impl moved UP into the gateway
 // composition band (it reaches the WebChatSenderRegistry + landing protocol).
@@ -769,6 +772,7 @@ export function buildOpenGraphComposer(
       liveAgentSubstrate,
       makeComposeSubstrate,
       makeEphemeralSubstrate,
+      makeRitualSubstrate,
       makeWarmFireSubstrate,
       prewarmReady,
       prewarmSettledRef,
@@ -1858,6 +1862,36 @@ export function buildOpenGraphComposer(
       context: buildStatusMdContextSource({ owner_home }),
       resolveTopicId: ({ explicit_topic }): string => resolveAppWsReminderTopic(explicit_topic),
     })
+
+    // Executor-mode reminders (plan task 4) — the ritual executor FACTORY. Gated
+    // on `llmPool` exactly like `DispatchService` (no credential → no ritual
+    // surface). Passed into the composition input; `build-core-modules`'
+    // `remindersModule` invokes it with the graph's `ApprovalManager` and wires
+    // the result as the tick loop's ritual dispatch branch. It reuses the SAME
+    // hoisted `subagentRegistry` the dispatch service + Trident loop use (ONE
+    // registry, ONE concurrency model — the ritual lane is isolated INSIDE it),
+    // spawns each ritual turn on the `cc-ritual-*` ephemeral substrate, and
+    // writes durable history to `code_ritual_runs`. The registry is rooted at
+    // `<owner_home>/rituals` with ZERO defs registered until task 7 (bundled
+    // example rituals) / task 8 (agent-callable registration), so no ritual
+    // fires yet — the plumbing is live, the ritual CONTENT is user data.
+    const ritual_executor_factory: CompositionInput['ritual_executor_factory'] =
+      llmPool !== null
+        ? ({ approvals }) =>
+            createRitualExecutor({
+              registry: createRitualRegistry({ rituals_dir: joinPath(owner_home, 'rituals') }),
+              approvals,
+              project_slug,
+              instance_key: owner_handle,
+              subagents: subagentRegistry,
+              turn: buildCancellableDispatchTurn({ build_substrate: makeRitualSubstrate }),
+              runs: createRitualRunStore(db),
+              resolve_model: getBestModel,
+              // Both scopes → owner_home in v1; per-project rooting refines when
+              // project-scoped rituals land (task 7+).
+              scope_cwd: () => owner_home,
+            })
+        : undefined
 
     // ── P1-4 — proactive messaging ACTIVATION (morning brief + idle nudge) ──
     // The proactive modules (`gateway/proactive/*`) were built + tested but
@@ -3549,6 +3583,10 @@ export function buildOpenGraphComposer(
       // replacing the no-op. Fully guarded; never throws into the tick.
       watchdog_notifier: watchdogNotifier,
       reminder_dispatcher,
+      // Executor-mode reminders (plan task 4) — the ritual executor factory
+      // (llmPool-gated). `remindersModule` invokes it with the graph's
+      // ApprovalManager and wires the tick's ritual dispatch branch.
+      ...(ritual_executor_factory !== undefined ? { ritual_executor_factory } : {}),
       // P1-4 — proactive brief + idle-nudge sweep go live (see `tasksConfig`).
       tasks: tasksConfig,
       // F4 — real heartbeat source (pulsed by the gateway tick via
