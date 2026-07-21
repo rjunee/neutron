@@ -69,6 +69,7 @@ import {
 import type { RitualRunStore, RitualRunTerminalStatus } from './ritual-runs.ts'
 import type { ReminderOutbound } from './dispatcher.ts'
 import {
+  RITUAL_ESCALATION_CONSECUTIVE_FAILURES,
   formatRitualCompletionFallback,
   formatRitualEscalationNotice,
   formatRitualFailureNotice,
@@ -202,9 +203,14 @@ export function createRitualExecutor(deps: RitualExecutorDeps): RitualExecutor {
         reminder.id,
         formatRitualFailureNotice({ ritual_id, status, run_id, failure_reason: failure_reason ?? null }),
       )
-      // Read the last 4 terminal rows AFTER this failure's row is written — the
-      // escalation rule is pure over that snapshot (no new state).
-      const recent = deps.runs.listRecentTerminal({ ritual_id, limit: 4 })
+      // Read the last N+1 terminal rows AFTER this failure's row is written — the
+      // escalation rule is pure over that snapshot (no new state). The window is
+      // derived from the streak constant (the 3 newest to check + 1 older to gate
+      // re-arm), not a hardcoded literal (Argus r1 nit).
+      const recent = deps.runs.listRecentTerminal({
+        ritual_id,
+        limit: RITUAL_ESCALATION_CONSECUTIVE_FAILURES + 1,
+      })
       if (shouldEscalate(recent)) {
         await postNotice(topic, owner, reminder.id, formatRitualEscalationNotice({ ritual_id, run_id }))
       }
