@@ -46,6 +46,7 @@ import {
   wrapSyncHookWithMemoryIndex,
   type MemoryIndexWorkHandle,
 } from '@neutronai/runtime/memory-index.ts'
+import { wrapSyncHookWithBacklinkRepair } from '@neutronai/runtime/backlink-repair.ts'
 import { OWNER_USER_ID } from '../owner-identity.ts'
 import type { OpenWiringContext } from './context.ts'
 import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
@@ -211,7 +212,22 @@ export function wireMemory(ctx: OpenWiringContext): WiredMemory {
       ),
     workHandlesProvider: () => workHandlesProvider?.() ?? [],
   })
-  const gbrainSyncHook = memoryIndexHook
+  // Q2 (overturn 2, core-memory tier) — wrap the memory-index hook with the
+  // deterministic BACKLINK-REPAIR layer (OUTERMOST). Every entity write that
+  // introduces a wikilink/mdlink to a page that does not exist but differs only by
+  // hyphen POSITION from a UNIQUE existing page (`[[white-board]]` vs
+  // `entities/concepts/whiteboard.md`) is repaired ON DISK event-driven; its
+  // corrected write re-enters THIS full chain (GBrain retracts the broken edge +
+  // re-adds the fixed one, memory-index re-scans). Orphan / ambiguous links are
+  // logged and LEFT UNTOUCHED (the always-safe direction). Every downstream
+  // consumer (scribe, reflectDeps.syncHook, the returned WiredMemory.gbrainSyncHook)
+  // now flows through repair automatically. `memoryIndexHook` stays the handle for
+  // its own `regenerate()`/`read()` seams (below).
+  const backlinkRepairHook = wrapSyncHookWithBacklinkRepair(memoryIndexHook, {
+    ownerDataDir: owner_home,
+    ownSlug: project_slug,
+  })
+  const gbrainSyncHook = backlinkRepairHook
   // Bootstrap the manifest at boot so a corpus that ALREADY exists (entities
   // written before this build shipped) is advertised on the very next cold turn
   // WITHOUT waiting for a new entity write. Coalesced + best-effort — a no-op
