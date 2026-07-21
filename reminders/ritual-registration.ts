@@ -1,0 +1,829 @@
+/**
+ * @neutronai/reminders — agent-callable ritual REGISTRATION service (plan task 8;
+ * Ryan overturn 3, "ritual registration is AGENT-CALLABLE with in-chat approval —
+ * the approval RENDERING carries the security").
+ *
+ * This is the HIGHEST-RISK surface in the executor-mode sprint: an agent can
+ * PROPOSE a scheduled, unattended sub-agent that reads the owner's files and (for
+ * `egress:'web'` defs) reaches the internet. The security therefore does NOT live
+ * in who-can-call — the agent can call freely — it lives in the APPROVAL GATE:
+ *
+ *   1. `propose(input)` sanitizes + validates + never-clobber-writes the def to
+ *      disk, registers it, requests a content-hash-bound `tool_approvals` grant,
+ *      and emits a CODE-rendered, PREFORMATTED, fence-hardened approval prompt
+ *      with Approve/Deny buttons. It creates NO reminder row and fires NOTHING
+ *      (no register-and-fire).
+ *   2. The ritual can only FIRE after the OWNER's explicit affirmative act —
+ *      tapping Approve (or typing the exact opaque token). `handleOwnerButtonAnswer`
+ *      is the deterministic turn-start capture: it resolves the approval ONLY on
+ *      an exact match of the owner's `user_text` against the PERSISTED option set
+ *      of the prior prompt (the `captureButtonBackedRequiredField` eligibility
+ *      discipline, onboarding/interview/button-backed-answer.ts:207-209). An
+ *      unrelated reply, a paraphrase, "yes", silence, a non-owner speaker, or
+ *      agent traffic can NEVER flip the row (T8).
+ *   3. Approval is bound to a CONTENT HASH (prompt bytes ‖ surface ‖ scope ‖
+ *      cadence ‖ tier ‖ timeout — `reminders/ritual-approval.ts`), re-verified from
+ *      the LIVE prompt bytes on approve AND every fire. Any byte/surface/cadence
+ *      change drops the grant → re-approval. Egress is a SEPARATE grant.
+ *   4. Agent-registered defs survive reboot via `<id>.def.json` (re-registered by
+ *      `loadPersistedRitualDefs` at boot). Ritual CONTENT stays user data.
+ *
+ * RENDERING carries the security (deepened header §APPROVAL GATE): the approval
+ * body is built by CODE (never agent text), speaks CAPABILITIES not tool names,
+ * itemizes every URL/path/`mcp__*` reference, wraps the full prompt in a backtick
+ * fence LONGER than any internal run (the button body IS Markdown-rendered today —
+ * channels/button-primitive.ts:194 — so a preformatted fence is the injection
+ * defense), NFC-normalizes then rejects bidi/zero-width/C0 controls, and REFUSES
+ * an over-cap prompt (never truncates).
+ *
+ * Layering: `reminders` (services) importing `@neutronai/tools` (platform) and
+ * `@neutronai/channels` (the ButtonOption shape) is a legal services→platform
+ * edge; the reminders-CORE never imports this module (it derefs a narrow
+ * structural interface via a late-bound getter — see cores/free/reminders).
+ */
+
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
+
+import type { ButtonOption } from '@neutronai/channels/button-primitive.ts'
+import { VALUE_BYTE_CAP } from '@neutronai/channels/button-primitive.ts'
+import type { ApprovalManager } from '@neutronai/tools/approval.ts'
+
+import {
+  createRitualApprovalCheck,
+  requestRitualApproval,
+  ritualApprovalToolName,
+  ritualCadenceString,
+  ritualEgressApprovalToolName,
+} from './ritual-approval.ts'
+import type { ReminderStore } from './store.ts'
+import {
+  GATED_WRITE_TOOLS,
+  validateRitualDef,
+  type RitualEgress,
+  type RitualDef,
+  type RitualRegistry,
+  type RitualScope,
+} from './rituals.ts'
+
+// ── Constants ────────────────────────────────────────────────────────────────
+
+/** Hard cap on a proposed ritual prompt. Over-cap = REFUSE (never truncate). */
+export const RITUAL_PROPOSAL_MAX_PROMPT_BYTES = 16 * 1024
+
+/** The opaque approval-token option-value prefix. */
+export const RITUAL_APPROVAL_VALUE_PREFIX = 'rap:'
+
+/**
+ * The full opaque option value shape: `rap:<22-char base64url of the row UUID>:a|d`
+ * (28 bytes ≤ {@link VALUE_BYTE_CAP} 37). `:a` = approve, `:d` = deny. The token
+ * IS the routing — no side-table lookup. An eligibility match is BOTH this regex
+ * AND membership in the prior prompt's persisted option set (T8).
+ */
+export const RITUAL_APPROVAL_VALUE_RE = /^rap:[A-Za-z0-9_-]{22}:(a|d)$/
+
+/**
+ * Characters a proposed prompt may NOT contain — rejected (never sanitized
+ * silently) so a homograph/RTL-override/zero-width payload can't hide capability
+ * text from the owner reading the approval prompt:
+ *   - bidi controls           U+202A–U+202E (LRE/RLE/PDF/LRO/RLO), U+2066–U+2069
+ *   - zero-width / format      U+200B–U+200F (ZWSP/ZWNJ/ZWJ/LRM/RLM), U+FEFF (BOM)
+ *   - C0 controls             U+0000–U+001F EXCEPT \t (09) \n (0A) \r (0D)
+ */
+export const RITUAL_PROPOSAL_BANNED_CHARS_RE =
+  // eslint-disable-next-line no-control-regex
+  /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u200B-\u200F\u202A-\u202E\u2066-\u2069\uFEFF]/
+
+/** Read-only built-ins → plain-words capability line. */
+const READ_TOOLS: ReadonlySet<string> = new Set(['Read', 'Glob', 'Grep'])
+/** Web-egress built-ins → the exfiltration-channel capability line. */
+const WEB_TOOLS: ReadonlySet<string> = new Set(['WebSearch', 'WebFetch'])
+
+// ── Token codec ──────────────────────────────────────────────────────────────
+
+/**
+ * Encode a canonical 36-char UUID as 22-char base64url (no padding). Mirrors
+ * `channels/button-primitive.ts:encodePromptIdWire` but kept local so this
+ * module owns the ritual approval token format end-to-end.
+ */
+export function uuidToToken(uuid: string): string {
+  return Buffer.from(uuid.replaceAll('-', ''), 'hex').toString('base64url')
+}
+
+/**
+ * Strict inverse of {@link uuidToToken}. Returns the canonical UUID, or `null`
+ * when `token` is not exactly 22 base64url chars decoding to 16 bytes — so a
+ * malformed/forged token can never resolve to a live approval row.
+ */
+export function tokenToUuid(token: string): string | null {
+  if (typeof token !== 'string' || !/^[A-Za-z0-9_-]{22}$/.test(token)) return null
+  let bytes: Buffer
+  try {
+    bytes = Buffer.from(token, 'base64url')
+  } catch {
+    return null
+  }
+  if (bytes.length !== 16) return null
+  const hex = bytes.toString('hex')
+  return (
+    hex.slice(0, 8) +
+    '-' +
+    hex.slice(8, 12) +
+    '-' +
+    hex.slice(12, 16) +
+    '-' +
+    hex.slice(16, 20) +
+    '-' +
+    hex.slice(20)
+  )
+}
+
+// ── Typed proposal errors ────────────────────────────────────────────────────
+
+export type RitualProposalErrorCode =
+  | 'banned_characters'
+  | 'empty_prompt'
+  | 'prompt_too_large'
+  | 'invalid_def'
+  | 'unsupported_scope'
+  | 'invalid_schedule'
+  | 'duplicate_id'
+  | 'exists_on_disk'
+  | 'write_failed'
+
+export class RitualProposalError extends Error {
+  override readonly name = 'RitualProposalError'
+  constructor(
+    readonly code: RitualProposalErrorCode,
+    message: string,
+  ) {
+    super(message)
+  }
+}
+
+// ── Input / output shapes ────────────────────────────────────────────────────
+
+/** The schedule half of a proposal — first occurrence + optional cadence. */
+export interface RitualProposalSchedule {
+  /** Unix SECONDS of the first occurrence. Finite; the row's `fire_at`. */
+  fire_at: number
+  /** Coarse cadence label — mutually exclusive with `recurrence_spec`. */
+  recurrence?: 'weekly' | 'monthly' | 'occasional'
+  /** 5-field cron — mutually exclusive with `recurrence`. Non-empty. */
+  recurrence_spec?: string
+}
+
+export interface RitualProposalInput {
+  id: string
+  description: string
+  scope: RitualScope
+  tool_surface: readonly string[]
+  egress: RitualEgress
+  silent: boolean
+  prompt: string
+  schedule: RitualProposalSchedule
+}
+
+export interface RitualProposalResult {
+  /** Opaque handle for the agent — the base64url of the content grant row id. */
+  proposal_id: string
+  ritual_id: string
+  status: 'pending_approval'
+  requires_egress_approval: boolean
+}
+
+/** One row of `service.status()`. */
+export interface RitualStatusRow {
+  ritual_id: string
+  description: string
+  scope: RitualScope
+  tool_surface: readonly string[]
+  egress: RitualEgress
+  approval: 'approved' | 'pending' | 'denied' | 'none'
+  scheduled: boolean
+}
+
+export interface RitualOwnerAnswerInput {
+  user_id: string
+  user_text: string
+  topic_id: string
+  prior_option_values: readonly string[]
+}
+
+/** The persisted `<id>.def.json` shape. */
+interface PersistedRitualRecord {
+  def: RitualDef
+  schedule: RitualProposalSchedule
+  proposed_at: number
+}
+
+// ── Rendering (PURE, code-built) ─────────────────────────────────────────────
+
+/** Human capability lines for a tool surface — never bare tool names. */
+function capabilityLines(def: RitualDef): string[] {
+  const lines: string[] = []
+  let saidRead = false
+  let saidWeb = false
+  const gated: string[] = []
+  for (const t of def.tool_surface) {
+    if (READ_TOOLS.has(t)) {
+      if (!saidRead) {
+        lines.push('• Read any file in your Neutron home (all projects, docs, memory)')
+        saidRead = true
+      }
+      continue
+    }
+    if (WEB_TOOLS.has(t)) {
+      if (!saidWeb) {
+        lines.push('• Reach the public internet — content from this instance could be sent out')
+        saidWeb = true
+      }
+      continue
+    }
+    if (GATED_WRITE_TOOLS.has(t)) {
+      gated.push(t)
+      continue
+    }
+    // Unknown / bridge token — surface the raw token, labelled.
+    lines.push(`• ${t} (bridge tool)`)
+  }
+  for (const g of gated) {
+    lines.push(`• ${g} (CURRENTLY BLOCKED at fire time until sandboxing ships)`)
+  }
+  return lines
+}
+
+/** A plain-words cadence description for the runs-unattended line + footer. */
+function cadenceWords(schedule: RitualProposalSchedule): string {
+  if (typeof schedule.recurrence_spec === 'string' && schedule.recurrence_spec.length > 0) {
+    return `on the schedule \`${schedule.recurrence_spec}\` (cron)`
+  }
+  if (schedule.recurrence === 'weekly') return 'about once a week'
+  if (schedule.recurrence === 'monthly') return 'about once a month'
+  if (schedule.recurrence === 'occasional') return 'occasionally'
+  return 'once'
+}
+
+const URL_RE = /https?:\/\/[^\s)>\]]+/g
+const PATH_RE = /(?:(?<![\w./~-])(?:~\/|\.\/|\/)[A-Za-z0-9._~/-]+)/g
+const MCP_RE = /mcp__[A-Za-z0-9_]+/g
+
+/** Deduped, itemized URLs / filesystem paths / mcp tokens found in the prompt. */
+function itemizedReferences(prompt: string): string {
+  const found = new Set<string>()
+  for (const m of prompt.matchAll(URL_RE)) found.add(m[0])
+  for (const m of prompt.matchAll(PATH_RE)) found.add(m[0])
+  for (const m of prompt.matchAll(MCP_RE)) found.add(m[0])
+  if (found.size === 0) return '(none)'
+  return [...found].join('\n')
+}
+
+/**
+ * The length of the backtick fence that safely wraps `body`: one longer than the
+ * longest run of backticks INSIDE it, floored at 3. No prompt content can then
+ * close the fence — the preformatted-injection defense (button-primitive.ts:194
+ * renders the body as Markdown today).
+ */
+function safeFence(body: string): string {
+  let longest = 0
+  for (const m of body.matchAll(/`+/g)) longest = Math.max(longest, m[0].length)
+  return '`'.repeat(Math.max(3, longest + 1))
+}
+
+/**
+ * Build the CODE-rendered ritual-approval prompt body. PURE + fixed structure:
+ *   (1) title, (2) capability bullets (never bare tool names) + the
+ *   runs-unattended line, (3) itemized references (own fenced block), (4) the
+ *   FULL prompt inside a fence longer than any internal backtick run, (5) footer.
+ * Never truncates — the byte cap is enforced upstream in {@link propose}.
+ */
+export function renderRitualApprovalBody(input: {
+  def: RitualDef
+  prompt: string
+  cadence: string
+  schedule: RitualProposalSchedule
+}): string {
+  const { def, prompt, schedule } = input
+  const caps = capabilityLines(def)
+  const refsFence = safeFence(itemizedReferences(prompt))
+  const promptFence = safeFence(prompt)
+  const parts: string[] = []
+  parts.push(`Ritual approval needed: ${def.id}`)
+  parts.push('')
+  parts.push(`What "${def.id}" would be allowed to do:`)
+  parts.push(...caps)
+  parts.push(
+    `• Runs UNATTENDED ${cadenceWords(schedule)}, up to 45 minutes per run, on the smart model tier, rooted at your Neutron home.`,
+  )
+  parts.push('')
+  parts.push('References found in the prompt (URLs, file paths, bridge tools):')
+  parts.push(`${refsFence}\n${itemizedReferences(prompt)}\n${refsFence}`)
+  parts.push('')
+  parts.push('The FULL prompt it will run, verbatim:')
+  parts.push(`${promptFence}\n${prompt}\n${promptFence}`)
+  parts.push('')
+  parts.push(
+    'Tap Approve or Deny. Typing anything else will NOT approve or deny this ritual.',
+  )
+  return parts.join('\n')
+}
+
+/** The SEPARATE network-egress grant prompt body (web defs only). */
+function renderEgressGrantBody(def: RitualDef): string {
+  return [
+    `Network egress for ritual: ${def.id}`,
+    '',
+    'This is a SEPARATE grant from the content approval above. Approving the ' +
+      'content does NOT approve network access.',
+    '',
+    'If you approve this, the ritual may reach the public internet — content from ' +
+      'this instance (your files, memory) could be sent out. Deny to keep it ' +
+      'offline.',
+    '',
+    'Tap Approve or Deny. Typing anything else will NOT approve or deny egress.',
+  ].join('\n')
+}
+
+// ── Service factory ──────────────────────────────────────────────────────────
+
+export interface RitualRegistrationEmit {
+  body: string
+  options: ButtonOption[]
+  idempotency_key: string
+  metadata: Record<string, unknown>
+}
+
+export interface RitualRegistrationServiceOptions {
+  registry: RitualRegistry
+  rituals_dir: string
+  approvals: ApprovalManager
+  store: ReminderStore
+  project_slug: string
+  owner_user_id: string
+  approval_topic_id: string
+  emit: (p: RitualRegistrationEmit) => Promise<void>
+  log?: (msg: string) => void
+}
+
+export interface RitualRegistrationService {
+  propose(input: RitualProposalInput): Promise<RitualProposalResult>
+  handleOwnerButtonAnswer(input: RitualOwnerAnswerInput): Promise<{ body: string } | null>
+  status(): RitualStatusRow[]
+}
+
+export function createRitualRegistrationService(
+  opts: RitualRegistrationServiceOptions,
+): RitualRegistrationService {
+  const {
+    registry,
+    rituals_dir,
+    approvals,
+    store,
+    project_slug,
+    owner_user_id,
+    approval_topic_id,
+    emit,
+  } = opts
+  const log = opts.log ?? ((): void => undefined)
+
+  const defJsonPath = (id: string): string => join(rituals_dir, `${id}.def.json`)
+
+  function readSchedule(id: string): RitualProposalSchedule | null {
+    try {
+      const raw = readFileSync(defJsonPath(id), 'utf8')
+      const parsed = JSON.parse(raw) as PersistedRitualRecord
+      if (parsed && typeof parsed.schedule === 'object' && parsed.schedule !== null) {
+        return parsed.schedule
+      }
+      return null
+    } catch {
+      return null
+    }
+  }
+
+  function cadenceFor(schedule: RitualProposalSchedule): string {
+    return ritualCadenceString({
+      recurrence: schedule.recurrence ?? null,
+      recurrence_spec: schedule.recurrence_spec ?? null,
+    })
+  }
+
+  async function propose(input: RitualProposalInput): Promise<RitualProposalResult> {
+    // ── (a) NFC-normalize — the NORMALIZED bytes are what gets hashed, rendered,
+    // and written, so a fire-time recompute over the on-disk file matches.
+    const normalized = input.prompt.normalize('NFC')
+
+    // ── (b) reject banned characters (never sanitize silently).
+    if (RITUAL_PROPOSAL_BANNED_CHARS_RE.test(normalized)) {
+      throw new RitualProposalError(
+        'banned_characters',
+        'prompt contains disallowed control characters (bidi override / zero-width / C0 control) — remove them and re-propose',
+      )
+    }
+
+    // ── (c) empty / over-cap — REFUSE, never truncate.
+    if (normalized.trim().length === 0) {
+      throw new RitualProposalError('empty_prompt', 'prompt is empty or whitespace-only')
+    }
+    const promptBytes = Buffer.byteLength(normalized, 'utf8')
+    if (promptBytes > RITUAL_PROPOSAL_MAX_PROMPT_BYTES) {
+      throw new RitualProposalError(
+        'prompt_too_large',
+        `prompt is ${promptBytes} bytes (> RITUAL_PROPOSAL_MAX_PROMPT_BYTES ${RITUAL_PROPOSAL_MAX_PROMPT_BYTES}) — it is REFUSED, never truncated; shorten it and re-propose`,
+      )
+    }
+
+    // ── (d) validate the def (shared rule set with the registry).
+    const def: RitualDef = {
+      id: input.id,
+      description: input.description,
+      scope: input.scope,
+      tool_surface: input.tool_surface,
+      egress: input.egress,
+      silent: input.silent,
+    }
+    try {
+      validateRitualDef(def)
+    } catch (err) {
+      throw new RitualProposalError('invalid_def', (err as Error).message)
+    }
+
+    // ── (e) v1: only 'instance' scope can fire (scope 'project' throws in the
+    // composer's scope_cwd until the OS-sandbox sprint lands per-project rooting).
+    if (def.scope !== 'instance') {
+      throw new RitualProposalError(
+        'unsupported_scope',
+        `scope '${def.scope}' cannot fire yet — v1 supports only scope 'instance' (per-project rooting is coupled to write-containment, deferred to the OS-sandbox sprint)`,
+      )
+    }
+
+    // ── (f) validate the schedule.
+    validateSchedule(input.schedule)
+
+    // ── (g) never-clobber: registry OR either on-disk file already exists.
+    if (registry.get(def.id) !== undefined) {
+      throw new RitualProposalError(
+        'duplicate_id',
+        `ritual id ${JSON.stringify(def.id)} is already registered`,
+      )
+    }
+    const mdPath = registry.promptPathFor(def.id)
+    const defPath = defJsonPath(def.id)
+    if (existsSync(mdPath) || existsSync(defPath)) {
+      throw new RitualProposalError(
+        'exists_on_disk',
+        `ritual ${JSON.stringify(def.id)} already has files on disk — refusing to overwrite (${existsSync(mdPath) ? mdPath : defPath})`,
+      )
+    }
+
+    // ── (h) write both files with 'wx' (fail if exists — never clobber). Roll
+    // back the .md if the .def.json write fails so a half-written pair never
+    // leaks a registerable-but-unscheduled artifact.
+    try {
+      mkdirSync(rituals_dir, { recursive: true })
+      writeFileSync(mdPath, normalized, { encoding: 'utf8', flag: 'wx' })
+    } catch (err) {
+      throw new RitualProposalError('write_failed', `writing ${mdPath} failed: ${(err as Error).message}`)
+    }
+    const record: PersistedRitualRecord = {
+      def,
+      schedule: input.schedule,
+      proposed_at: Date.now(),
+    }
+    try {
+      writeFileSync(defPath, JSON.stringify(record, null, 2), { encoding: 'utf8', flag: 'wx' })
+    } catch (err) {
+      try {
+        rmSync(mdPath, { force: true })
+      } catch {
+        /* best-effort rollback */
+      }
+      throw new RitualProposalError('write_failed', `writing ${defPath} failed: ${(err as Error).message}`)
+    }
+
+    // ── (i) register (throws on duplicate — already guarded above).
+    registry.register(def)
+
+    // ── (j) request the content-hash-bound approval grant(s). The ids are minted
+    // inside requestRitualApproval and returned so we can encode them into the
+    // button tokens WITHOUT a side-table.
+    const cadence = cadenceFor(input.schedule)
+    const approval = requestRitualApproval(approvals, {
+      project_slug,
+      topic_id: approval_topic_id,
+      def,
+      prompt: normalized,
+      cadence,
+    })
+
+    // ── (k) emit the CODE-rendered CONTENT approval prompt.
+    const contentBody = renderRitualApprovalBody({
+      def,
+      prompt: normalized,
+      cadence,
+      schedule: input.schedule,
+    })
+    const contentOptions: ButtonOption[] = [
+      { label: 'Approve', body: 'Approve this ritual', value: `rap:${uuidToToken(approval.content_id)}:a` },
+      { label: 'Deny', body: 'Deny this ritual', value: `rap:${uuidToToken(approval.content_id)}:d` },
+    ]
+    await emit({
+      body: contentBody,
+      options: contentOptions,
+      idempotency_key: `ritual-approval:${approval.content_id}`,
+      metadata: { kind: 'ritual-approval', ritual_id: def.id },
+    })
+
+    // For a web def, emit a SEPARATE egress grant prompt (approving content never
+    // implies egress — ritual-approval.ts contract).
+    if (def.egress === 'web' && approval.egress_id !== undefined) {
+      const egressOptions: ButtonOption[] = [
+        { label: 'Approve', body: 'Approve network egress', value: `rap:${uuidToToken(approval.egress_id)}:a` },
+        { label: 'Deny', body: 'Deny network egress', value: `rap:${uuidToToken(approval.egress_id)}:d` },
+      ]
+      await emit({
+        body: renderEgressGrantBody(def),
+        options: egressOptions,
+        idempotency_key: `ritual-egress-approval:${approval.egress_id}`,
+        metadata: { kind: 'ritual-egress-approval', ritual_id: def.id },
+      })
+    }
+
+    log(`ritual propose id=${def.id} pending_approval (egress=${def.egress})`)
+    return {
+      proposal_id: uuidToToken(approval.content_id),
+      ritual_id: def.id,
+      status: 'pending_approval',
+      requires_egress_approval: def.egress === 'web',
+    }
+  }
+
+  async function handleOwnerButtonAnswer(
+    input: RitualOwnerAnswerInput,
+  ): Promise<{ body: string } | null> {
+    const value = input.user_text.trim()
+
+    // ── (a) eligibility: EXACT opaque-token shape AND membership in the prior
+    // prompt's persisted option set. An unrelated reply, a paraphrase, "yes", or
+    // silence is never eligible — T8 (button-backed-answer.ts:207-209 discipline).
+    if (!RITUAL_APPROVAL_VALUE_RE.test(value)) return null
+    if (!input.prior_option_values.includes(value)) return null
+
+    // ── (b) owner-only: never self-approval / guest approval. No row is touched.
+    if (input.user_id !== owner_user_id) {
+      return { body: 'Only the owner can decide ritual approvals.' }
+    }
+
+    const token = value.slice(RITUAL_APPROVAL_VALUE_PREFIX.length, RITUAL_APPROVAL_VALUE_PREFIX.length + 22)
+    const id = tokenToUuid(token)
+    if (id === null) {
+      return { body: 'That approval token is not recognized (stale or malformed) — nothing changed.' }
+    }
+
+    // ── (c) resolve the row + guard namespace / ownership / status.
+    const row = approvals.get(id)
+    if (
+      row === null ||
+      row.project_slug !== project_slug ||
+      !(row.tool_name.startsWith('ritual:') || row.tool_name.startsWith('ritual-egress:'))
+    ) {
+      return { body: 'That ritual approval is unknown or no longer valid — nothing changed.' }
+    }
+    if (row.status !== 'pending') {
+      return { body: `That ritual approval was already ${row.status} — nothing changed.` }
+    }
+
+    const decision: 'approved' | 'denied' = value.endsWith(':a') ? 'approved' : 'denied'
+
+    try {
+      // ── (d) record the decision (idempotent; owner-attributed).
+      await approvals.respondApproval(id, decision, input.user_id)
+
+      // Resolve the ritual id from the row args (present on both grants).
+      const ritual_id = parseRitualId(row.args_json)
+      if (ritual_id === null) {
+        return { body: `Recorded (${decision}), but the ritual reference could not be read — nothing scheduled.` }
+      }
+
+      if (decision === 'denied') {
+        return {
+          body: `Denied. "${ritual_id}" stays registered but will never fire until you approve it.`,
+        }
+      }
+
+      // ── (e) approved → schedule-on-approve IFF the content hash verifies over
+      // the LIVE bytes (this also requires the egress grant for web defs).
+      const def = registry.get(ritual_id)
+      const schedule = readSchedule(ritual_id)
+      if (def === undefined || schedule === null) {
+        return {
+          body: `Approved, but "${ritual_id}" is no longer registered on disk — nothing scheduled.`,
+        }
+      }
+      const cadence = cadenceFor(schedule)
+      const checker = createRitualApprovalCheck({ manager: approvals, project_slug, cadence })
+      let liveBytes: string
+      try {
+        liveBytes = readFileSync(registry.promptPathFor(ritual_id), 'utf8')
+      } catch (err) {
+        log(`ritual approve id=${ritual_id} prompt unreadable: ${(err as Error).message}`)
+        return { body: 'Approval could not be recorded — nothing was changed.' }
+      }
+      const approved = await checker.isApproved(def, liveBytes)
+      if (!approved) {
+        // Content grant alone is not enough for a web def — the separate egress
+        // grant is still pending (or a byte/cadence change dropped the hash).
+        return {
+          body:
+            def.egress === 'web'
+              ? `Recorded. "${ritual_id}" also needs the separate network-egress grant approved before it can be scheduled — that decision is still pending.`
+              : `Recorded, but "${ritual_id}" is not fully approved yet (its content changed since this request) — re-propose to schedule it.`,
+        }
+      }
+
+      // Never schedule the same ritual twice.
+      if (store.hasPendingRitualRow(ritual_id)) {
+        return { body: `Approved — "${ritual_id}" is already scheduled.` }
+      }
+
+      // ── schedule-on-approve — the OWNER's act creates the reminder row.
+      const base = {
+        owner_slug: project_slug,
+        topic_id: approval_topic_id,
+        fire_at: schedule.fire_at,
+        message: `ritual:${ritual_id}`,
+        ritual_id,
+      }
+      if (schedule.recurrence !== undefined) {
+        await store.createRecurring({ ...base, recurrence: schedule.recurrence })
+      } else if (
+        typeof schedule.recurrence_spec === 'string' &&
+        schedule.recurrence_spec.length > 0
+      ) {
+        await store.createRecurring({ ...base, recurrence_spec: schedule.recurrence_spec })
+      } else {
+        await store.create(base)
+      }
+      log(`ritual approve id=${ritual_id} scheduled cadence=${cadence}`)
+      return {
+        body: `Approved and scheduled: "${ritual_id}" will run ${cadenceWords(schedule)}.`,
+      }
+    } catch (err) {
+      // Fail closed on ANY db/fs error — DO NOT schedule.
+      log(`ritual approval error id=${id}: ${(err as Error).message}`)
+      return { body: 'Approval could not be recorded — nothing was changed.' }
+    }
+  }
+
+  function status(): RitualStatusRow[] {
+    const rows: RitualStatusRow[] = []
+    for (const def of registry.list()) {
+      let approval: RitualStatusRow['approval'] = 'none'
+      const schedule = readSchedule(def.id)
+      if (schedule !== null) {
+        try {
+          const checker = createRitualApprovalCheck({
+            manager: approvals,
+            project_slug,
+            cadence: cadenceFor(schedule),
+          })
+          const liveBytes = readFileSync(registry.promptPathFor(def.id), 'utf8')
+          if (checker.isApproved(def, liveBytes)) approval = 'approved'
+        } catch {
+          approval = 'none'
+        }
+      }
+      if (approval === 'none') {
+        const pending = approvals
+          .listPending(project_slug)
+          .some(
+            (r) =>
+              r.tool_name === ritualApprovalToolName(def.id) ||
+              r.tool_name === ritualEgressApprovalToolName(def.id),
+          )
+        if (pending) approval = 'pending'
+      }
+      let scheduled = false
+      try {
+        scheduled = store.hasPendingRitualRow(def.id)
+      } catch {
+        scheduled = false
+      }
+      rows.push({
+        ritual_id: def.id,
+        description: def.description,
+        scope: def.scope,
+        tool_surface: [...def.tool_surface],
+        egress: def.egress,
+        approval,
+        scheduled,
+      })
+    }
+    return rows
+  }
+
+  return { propose, handleOwnerButtonAnswer, status }
+}
+
+// ── Schedule validation ──────────────────────────────────────────────────────
+
+function validateSchedule(schedule: RitualProposalSchedule): void {
+  if (schedule === null || typeof schedule !== 'object') {
+    throw new RitualProposalError('invalid_schedule', 'schedule is required')
+  }
+  if (typeof schedule.fire_at !== 'number' || !Number.isFinite(schedule.fire_at)) {
+    throw new RitualProposalError(
+      'invalid_schedule',
+      `schedule.fire_at must be a finite unix-seconds number (got ${JSON.stringify(schedule.fire_at)})`,
+    )
+  }
+  const hasCoarse = schedule.recurrence !== undefined
+  const hasSpec = typeof schedule.recurrence_spec === 'string' && schedule.recurrence_spec.length > 0
+  if (schedule.recurrence_spec !== undefined && !hasSpec) {
+    throw new RitualProposalError(
+      'invalid_schedule',
+      'schedule.recurrence_spec must be a non-empty cron string when provided',
+    )
+  }
+  if (hasCoarse && hasSpec) {
+    throw new RitualProposalError(
+      'invalid_schedule',
+      'schedule: pass at most one of recurrence (coarse) or recurrence_spec (cron), not both',
+    )
+  }
+  if (
+    hasCoarse &&
+    schedule.recurrence !== 'weekly' &&
+    schedule.recurrence !== 'monthly' &&
+    schedule.recurrence !== 'occasional'
+  ) {
+    throw new RitualProposalError(
+      'invalid_schedule',
+      `schedule.recurrence ${JSON.stringify(schedule.recurrence)} is not 'weekly' | 'monthly' | 'occasional'`,
+    )
+  }
+}
+
+function parseRitualId(args_json: string): string | null {
+  try {
+    const parsed = JSON.parse(args_json) as { ritual_id?: unknown }
+    if (typeof parsed.ritual_id === 'string' && parsed.ritual_id.length > 0) {
+      return parsed.ritual_id
+    }
+    return null
+  } catch {
+    return null
+  }
+}
+
+// ── Boot re-registration of agent-persisted defs ─────────────────────────────
+
+/**
+ * Scan `<rituals_dir>/*.def.json` and re-register each persisted def so an
+ * agent-registered ritual survives reboot. NEVER throws (boot safety — mirrors
+ * the `seedBundledRituals` contract): a corrupt/invalid/duplicate record is
+ * skipped + logged, never fatal. Returns the ids registered vs skipped.
+ *
+ * Called AFTER `registerBundledRituals` so a def.json colliding with a bundled
+ * id is skipped as a duplicate (the bundled def wins) rather than clobbering it.
+ */
+export function loadPersistedRitualDefs(opts: {
+  registry: RitualRegistry
+  rituals_dir: string
+  log?: (msg: string) => void
+}): { registered: string[]; skipped: string[] } {
+  const log = opts.log ?? ((): void => undefined)
+  const registered: string[] = []
+  const skipped: string[] = []
+  let entries: string[]
+  try {
+    // Lazy import of readdirSync-equivalent via node:fs — read the dir listing.
+    entries = readDefJsonFiles(opts.rituals_dir)
+  } catch (err) {
+    log(`loadPersistedRitualDefs: cannot list ${opts.rituals_dir}: ${(err as Error).message}`)
+    return { registered, skipped }
+  }
+  for (const file of entries) {
+    const path = join(opts.rituals_dir, file)
+    try {
+      const raw = readFileSync(path, 'utf8')
+      const parsed = JSON.parse(raw) as PersistedRitualRecord
+      if (parsed === null || typeof parsed !== 'object' || parsed.def === undefined) {
+        skipped.push(file)
+        log(`loadPersistedRitualDefs: ${file} has no def — skipped`)
+        continue
+      }
+      opts.registry.register(parsed.def)
+      registered.push(parsed.def.id)
+    } catch (err) {
+      skipped.push(file)
+      log(`loadPersistedRitualDefs: ${file} skipped: ${(err as Error).message}`)
+    }
+  }
+  return { registered, skipped }
+}
+
+function readDefJsonFiles(dir: string): string[] {
+  if (!existsSync(dir)) return []
+  return readdirSync(dir).filter((f) => f.endsWith('.def.json'))
+}

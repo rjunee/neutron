@@ -126,6 +126,38 @@ export {
   registerBundledRituals,
 } from './bundled-rituals.ts'
 
+// Extracted register-time def validation (plan task 8) — shared by the registry
+// and the agent-callable registration service.
+export { validateRitualDef } from './rituals.ts'
+
+// Agent-callable ritual registration + in-chat approval (plan task 8, overturn 3).
+// The engine service the reminders-Core's `rituals_propose` / `rituals_status`
+// tools deref via a late-bound getter, plus the boot re-registration of
+// agent-persisted `<id>.def.json` defs.
+export {
+  createRitualRegistrationService,
+  loadPersistedRitualDefs,
+  renderRitualApprovalBody,
+  uuidToToken,
+  tokenToUuid,
+  RitualProposalError,
+  RITUAL_PROPOSAL_MAX_PROMPT_BYTES,
+  RITUAL_APPROVAL_VALUE_PREFIX,
+  RITUAL_APPROVAL_VALUE_RE,
+  RITUAL_PROPOSAL_BANNED_CHARS_RE,
+} from './ritual-registration.ts'
+export type {
+  RitualRegistrationService,
+  RitualRegistrationServiceOptions,
+  RitualRegistrationEmit,
+  RitualProposalInput,
+  RitualProposalSchedule,
+  RitualProposalResult,
+  RitualStatusRow,
+  RitualOwnerAnswerInput,
+  RitualProposalErrorCode,
+} from './ritual-registration.ts'
+
 export { buildStatusMdContextSource } from './context.ts'
 export {
   classifyReminderMessage,
