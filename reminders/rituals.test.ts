@@ -149,6 +149,34 @@ describe('register() invariants — every rejection is a throw', () => {
       reg.register(def({ tool_surface: 'Read' as unknown as RitualDef['tool_surface'] })),
     ).toThrow(/tool_surface/)
   })
+
+  // Coercion guards — RegExp.test stringifies its argument, so a non-string id
+  // or tool token would MATCH the charset regex (42 → "42", null → "null") and
+  // register under a non-string Map key / freeze a non-string tool grant into
+  // the surface that flows to approval hashing + spawn. Both must throw.
+  test.each([42, null, undefined, true, {}])(
+    'non-string id %p throws (RegExp coercion guard)',
+    (badId) => {
+      const reg = createRitualRegistry({ rituals_dir: '/p' })
+      expect(() =>
+        reg.register(def({ id: badId as unknown as RitualDef['id'] })),
+      ).toThrow(/RITUAL_ID_RE/)
+    },
+  )
+
+  test.each([null, undefined, true, 42, {}])(
+    'non-string tool_surface entry %p throws (RegExp coercion guard)',
+    (badTool) => {
+      const reg = createRitualRegistry({ rituals_dir: '/p' })
+      expect(() =>
+        reg.register(
+          def({
+            tool_surface: ['Read', badTool] as unknown as RitualDef['tool_surface'],
+          }),
+        ),
+      ).toThrow(/tool token/)
+    },
+  )
 })
 
 describe('validateRitualFire — fail-CLOSED verdicts', () => {

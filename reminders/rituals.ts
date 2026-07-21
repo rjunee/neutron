@@ -146,7 +146,9 @@ export function createRitualRegistry(opts: { rituals_dir: string }): RitualRegis
   const byId = new Map<string, RitualDef>()
 
   function assertValid(def: RitualDef): void {
-    if (!RITUAL_ID_RE.test(def.id)) {
+    if (typeof def.id !== 'string' || !RITUAL_ID_RE.test(def.id)) {
+      // typeof guard first: RegExp.test coerces (id=42 → "42" matches), which
+      // would register the def under a non-string Map key. Fail closed instead.
       throw new Error(
         `ritual id ${JSON.stringify(def.id)} fails RITUAL_ID_RE (^[a-z0-9][a-z0-9-]{0,63}$)`,
       )
@@ -196,7 +198,11 @@ export function createRitualRegistry(opts: { rituals_dir: string }): RitualRegis
     }
     let hasWebTool = false
     for (const t of def.tool_surface) {
-      if (!TOOL_TOKEN_RE.test(t)) {
+      if (typeof t !== 'string' || !TOOL_TOKEN_RE.test(t)) {
+        // typeof guard first: RegExp.test coerces (null → "null" matches
+        // TOOL_TOKEN_RE), which would freeze a non-string tool grant into the
+        // registry and flow through approval hashing + spawn. Fail closed —
+        // matches the imported-JSON fail-closed contract documented above.
         throw new Error(
           `ritual ${JSON.stringify(def.id)}: tool_surface entry ${JSON.stringify(t)} is not a valid tool token (${TOOL_TOKEN_RE})`,
         )

@@ -54,7 +54,12 @@ gate, and completion delivery are plan tasks 3-5. Spec of record:
   `scope`/`egress`/`silent`/`tool_surface` field TYPES (a def can arrive from
   imported user-data JSON the compiler never saw — a bogus `scope:'arbitrary'`
   or `egress:'bogus'` now FAILS CLOSED at register time instead of slipping past
-  the consistency checks). `validateRitualFire(registry, approvals, id, log)`
+  the consistency checks). Argus round-3 extends this to the two regex-validated
+  fields: `def.id` and each `tool_surface` entry now get a `typeof … !== 'string'`
+  guard BEFORE `RegExp.test` (which stringifies its argument, so `42`→`"42"` and
+  `null`→`"null"` would MATCH the charset and register under a non-string Map key
+  / freeze a non-string tool grant into the surface that flows to approval hashing
+  + spawn — now both throw). `validateRitualFire(registry, approvals, id, log)`
   async → `unknown_ritual` | `missing_prompt` (missing/unreadable/empty/over-256KB;
   the 256 KiB cap is now enforced from `statSync().size` BEFORE the file is read
   into memory — Argus round-2 minor) |
