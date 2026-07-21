@@ -2121,7 +2121,13 @@ export function buildOpenGraphComposer(
     // client regardless of which project socket is active. The frame carries no
     // redirect target; the client reads the claim URL (if any) from its page
     // bootstrap, so on Open self-host it simply no-ops.
-    const fanOnboardingCompleted = (user_id: string): void => {
+    // Returns whether the frame was DELIVERED to at least one live socket (the
+    // registry `send` returns true iff a device received it). The finalizer uses
+    // this to stamp the durable at-most-once handoff marker ONLY on a real live
+    // delivery — a fan that reaches zero sockets (finalize with the tab closed)
+    // returns false so the marker stays null and the reconnect-recovery replay
+    // can still recover the signal exactly once.
+    const fanOnboardingCompleted = (user_id: string): boolean => {
       const frame: AppWsOutboundOnboardingCompleted = {
         v: 1,
         type: 'onboarding_completed',
@@ -2129,10 +2135,13 @@ export function buildOpenGraphComposer(
       }
       const base = appWsTopicId(user_id)
       const scopedPrefix = `${base}:`
-      appWsRegistry.send(base, frame)
+      let delivered = appWsRegistry.send(base, frame)
       for (const topic of appWsRegistry.topics()) {
-        if (topic.startsWith(scopedPrefix)) appWsRegistry.send(topic, frame)
+        if (topic.startsWith(scopedPrefix) && appWsRegistry.send(topic, frame)) {
+          delivered = true
+        }
       }
+      return delivered
     }
 
     // Work Board (Phase 1a) — the per-project live work-tracking board that
@@ -2550,7 +2559,7 @@ export function buildOpenGraphComposer(
             ensureProjectRow,
             materializer: buildScaffoldMaterializer(scaffoldDeps),
             emitProjectsChanged: (user_id: string): void => emitProjectsChangedIfChanged(user_id),
-            emitOnboardingCompleted: (user_id: string): void => fanOnboardingCompleted(user_id),
+            emitOnboardingCompleted: (user_id: string): boolean => fanOnboardingCompleted(user_id),
             emitChatMessage: (input): Promise<void> =>
               onboardingMsg.deref((emit) => emit(input)) ?? Promise.resolve(),
           })

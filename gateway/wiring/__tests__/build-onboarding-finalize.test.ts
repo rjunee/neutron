@@ -68,7 +68,14 @@ interface Harness {
   deps: OnboardingFinalizeDeps
 }
 
-function makeHarness(): Harness {
+// `liveDelivered` models what the composer's `fanOnboardingCompleted` returns:
+// true iff the live `onboarding_completed` frame reached at least one socket.
+// Default true (a live tab was connected at finalize). Pass false to model the
+// production case the reconnect-recovery replay exists for: the seam is WIRED
+// but ZERO sockets are registered (finalize fired by a background import-
+// completion watcher with the tab closed), so the frame is dropped.
+function makeHarness(opts?: { liveDelivered?: boolean }): Harness {
+  const liveDelivered = opts?.liveDelivered ?? true
   const db = makeDb()
   const ownerHome = mkdtempSync(join(tmpdir(), 'finalize-home-'))
   const stateStore = new SqliteOnboardingStateStore({ db, now: () => 1_700_000_000_000 })
@@ -93,7 +100,10 @@ function makeHarness(): Harness {
       now: () => 1_700_000_000_000,
     }),
     emitProjectsChanged: (uid: string): void => void projectsChanged.push(uid),
-    emitOnboardingCompleted: (uid: string): void => void onboardingCompleted.push(uid),
+    emitOnboardingCompleted: (uid: string): boolean => {
+      onboardingCompleted.push(uid)
+      return liveDelivered
+    },
     now: () => 1_700_000_000_000,
     log: (): void => {},
     personaComposer: persona,
@@ -696,6 +706,106 @@ test('finalize completes onboarding: persona, projects row, rail refresh', async
   // (4) One-shot onboarding-complete signal fired at the terminal transition
   // (Managed post-onboarding claim redirect). Exactly once, for the owner.
   expect(h.onboardingCompleted).toEqual([USER_ID])
+
+  h.db.close()
+})
+
+test('#374 Defect 2a: the LIVE emit stamps onboarding_handoff_emitted_at (so the reconnect replay is at-most-once)', async () => {
+  const h = makeHarness()
+  const seeded = await h.stateStore.upsert({
+    owner_slug: PROJECT_SLUG,
+    user_id: USER_ID,
+    phase: 'persona_reviewed',
+    phase_state_patch: {
+      user_first_name: 'Sam',
+      agent_name: 'Atlas',
+      primary_projects: ['Topline Revenue'],
+    },
+  })
+  // Pre-finalize the durable handoff stamp is null (migration 0054 default).
+  expect(seeded.onboarding_handoff_emitted_at).toBeNull()
+
+  const finalizer = buildOnboardingFinalize(h.deps)
+  await finalizer.finalize({ user_id: USER_ID, topic_id: TOPIC_ID, state: seeded })
+
+  const after = await h.stateStore.get(PROJECT_SLUG, USER_ID)
+  expect(after?.phase).toBe('completed')
+  // The live emit fired once…
+  expect(h.onboardingCompleted).toEqual([USER_ID])
+  // …AND it stamped the durable marker. FAILS on pre-fix code (the live emit
+  // never wrote the stamp, so this stayed null and the FIRST reconnect on the
+  // renamed host re-fired the frame once — the residual post-claim bounce).
+  expect(after?.onboarding_handoff_emitted_at).not.toBeNull()
+
+  // The exact guard the reconnect-recovery replay evaluates
+  // (open/wiring/app-ws.ts: `st.phase === 'completed' && st.onboarding_handoff_emitted_at === null`).
+  // With the stamp set this predicate is false → the reconnect does NOT re-emit
+  // `onboarding_completed`. Pre-fix the predicate was true → a second frame fired.
+  const replayWouldReFire =
+    after?.phase === 'completed' && after?.onboarding_handoff_emitted_at === null
+  expect(replayWouldReFire).toBe(false)
+
+  h.db.close()
+})
+
+test('#374 Defect 2a: seam WIRED but ZERO sockets (frame dropped) leaves the stamp NULL so the reconnect replay still recovers exactly once', async () => {
+  // The production case the reconnect-recovery replay EXISTS for, and the Argus
+  // round-1 blocker: a background import-completion watcher finalizes while the
+  // owner's tab is closed. The emit seam is UNCONDITIONALLY wired
+  // (open/composer.ts), but the live frame reaches ZERO sockets, so
+  // `fanOnboardingCompleted` returns false. Finalize must then NOT stamp — a null
+  // marker means "never delivered", keeping the reconnect replay armed to deliver
+  // the claim redirect exactly once. The pre-round-2 fix gated the stamp on the
+  // seam being wired (always true), so it stamped here and PERMANENTLY stranded
+  // the offline owner with no claim redirect — this test fails under that code.
+  const h = makeHarness({ liveDelivered: false })
+  const seeded = await h.stateStore.upsert({
+    owner_slug: PROJECT_SLUG,
+    user_id: USER_ID,
+    phase: 'persona_reviewed',
+    phase_state_patch: { primary_projects: ['Topline Revenue'] },
+  })
+
+  const finalizer = buildOnboardingFinalize(h.deps)
+  await finalizer.finalize({ user_id: USER_ID, topic_id: TOPIC_ID, state: seeded })
+
+  const after = await h.stateStore.get(PROJECT_SLUG, USER_ID)
+  expect(after?.phase).toBe('completed')
+  expect(h.onboardingCompleted).toEqual([USER_ID]) // the emit was attempted…
+  // …but delivered to nobody, so the stamp stays null and the reconnect replay
+  // predicate (phase === 'completed' && stamp === null) is TRUE → recovery fires.
+  expect(after?.onboarding_handoff_emitted_at).toBeNull()
+  const replayWouldRecover =
+    after?.phase === 'completed' && after?.onboarding_handoff_emitted_at === null
+  expect(replayWouldRecover).toBe(true)
+
+  h.db.close()
+})
+
+test('#374 Defect 2a: the LLM-less path (no emit seam) leaves the stamp NULL so a genuinely-dropped frame is still recoverable', async () => {
+  // The stamp is tied to an ACTUAL live delivery. When the emit seam is omitted
+  // (the LLM-less / test path that never fans a live frame), finalize must NOT
+  // stamp — a null stamp means "never sent", so the reconnect-recovery replay can
+  // still deliver the signal exactly once for a frame that never left.
+  const h = makeHarness()
+  // Omit the seam entirely (exactOptionalPropertyTypes: `undefined` is not an
+  // assignable value for an optional prop — the LLM-less path simply doesn't wire it).
+  const { emitOnboardingCompleted: _omit, ...rest } = h.deps
+  const depsNoEmit: OnboardingFinalizeDeps = rest
+  const seeded = await h.stateStore.upsert({
+    owner_slug: PROJECT_SLUG,
+    user_id: USER_ID,
+    phase: 'persona_reviewed',
+    phase_state_patch: { primary_projects: ['Topline Revenue'] },
+  })
+
+  const finalizer = buildOnboardingFinalize(depsNoEmit)
+  await finalizer.finalize({ user_id: USER_ID, topic_id: TOPIC_ID, state: seeded })
+
+  const after = await h.stateStore.get(PROJECT_SLUG, USER_ID)
+  expect(after?.phase).toBe('completed')
+  expect(h.onboardingCompleted).toEqual([]) // no live frame went out
+  expect(after?.onboarding_handoff_emitted_at).toBeNull() // …so recovery stays armed
 
   h.db.close()
 })

@@ -181,8 +181,14 @@ export interface OnboardingFinalizeDeps {
    * wires it (the frame is harmless; the client no-ops when no claim URL is
    * configured), but tests / LLM-less paths may omit it. Best-effort + non-
    * throwing by contract; NEVER blocks finalize.
+   *
+   * Returns whether the live frame was actually DELIVERED to at least one live
+   * socket (true) or dropped because no socket was registered (false). The
+   * caller stamps the durable at-most-once handoff marker ONLY on a true
+   * delivery, so a finalize with no live socket leaves the marker null and the
+   * reconnect-recovery replay can still recover the signal exactly once.
    */
-  emitOnboardingCompleted?: (user_id: string) => void
+  emitOnboardingCompleted?: (user_id: string) => boolean
   /**
    * Item 6/7 (Path-1 closing + per-project opening, 2026-06-30) — deliver a
    * deterministic agent message into a chat topic. `project_id === null` targets
@@ -503,10 +509,58 @@ export function buildOnboardingFinalize(deps: OnboardingFinalizeDeps): Onboardin
       // succeeded (a failed write rejects above), so the owner really is completed
       // and the reconnect-recovery replay — which checks `phase === 'completed'` —
       // fires consistently. Best-effort.
+      let liveFrameDelivered = false
       try {
-        deps.emitOnboardingCompleted?.(input.user_id)
+        liveFrameDelivered = deps.emitOnboardingCompleted?.(input.user_id) ?? false
       } catch (err) {
         log('warn', 'finalize: emitOnboardingCompleted failed', { err: errStr(err) })
+      }
+
+      // (5c) DURABLE at-most-once handoff stamp on the LIVE emit (#374 Defect 2a,
+      // 2026-07-20). The reconnect-recovery replay in `open/wiring/app-ws.ts`
+      // re-fires `onboarding_completed` while `onboarding_handoff_emitted_at` is
+      // still NULL and phase === 'completed'. Migration 0054 + #404 made the
+      // REPLAY path stamp after its own send, which stopped the INFINITE loop —
+      // but the LIVE emit above never wrote the stamp, so on a Managed box the
+      // FIRST reconnect after finalize still sees a null stamp and re-fires the
+      // frame ONCE, bouncing the just-completed owner to the claim / manual-link
+      // screen. Stamp it here so the signal is genuinely at-most-once across the
+      // live + replay paths: the post-finalize reconnect reads a non-null stamp
+      // and does NOT re-emit.
+      //
+      // GATED ON ACTUAL DELIVERY, NOT ON THE SEAM BEING WIRED (Argus round-1
+      // blocker). The seam is UNCONDITIONALLY wired in production
+      // (open/composer.ts), so gating on `emitOnboardingCompleted !== undefined`
+      // stamped even when the live frame reached ZERO sockets — the exact case
+      // the replay path exists to recover (a background import-completion watcher
+      // finalizes while the tab is closed/reloading). That falsely marked the
+      // handoff "sent", so the next reconnect saw a non-null stamp and never
+      // re-fired — the owner was stranded with no claim redirect. We now stamp
+      // ONLY when `emitOnboardingCompleted` reported the frame was delivered to
+      // at least one live socket: a live-delivered frame is genuinely at-most-once
+      // and must not replay; a dropped frame (no socket) leaves the stamp null so
+      // the reconnect replay recovers it exactly once. Idempotent guarded write:
+      // only stamp while still null, so a coalesced/duplicate finalize never
+      // double-stamps. Best-effort + non-throwing — a failed stamp must never roll
+      // back the completed owner; worst case is one extra replay (the pre-fix
+      // behaviour), not a regression.
+      if (liveFrameDelivered) {
+        try {
+          const cur = await deps.stateStore.get(deps.owner_slug, input.user_id)
+          if (cur !== null && cur.onboarding_handoff_emitted_at === null) {
+            await deps.stateStore.upsert({
+              owner_slug: deps.owner_slug,
+              user_id: input.user_id,
+              phase: cur.phase,
+              // No phase_state change; keep the advance clock where completion left it.
+              phase_state_patch: {},
+              advanced_at: cur.last_advanced_at,
+              onboarding_handoff_emitted_at: now(),
+            })
+          }
+        } catch (err) {
+          log('warn', 'finalize: onboarding_handoff stamp failed', { err: errStr(err) })
+        }
       }
 
       // (6) Per-project opening messages (item 7) — seed each newly-materialized

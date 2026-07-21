@@ -40,6 +40,16 @@ import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { composeProductionGraph } from '@neutronai/gateway/composition.ts'
 import { buildOpenGraphComposer } from '@neutronai/open/composer.ts'
 import type { AgentSpec } from '@neutronai/runtime/substrate.ts'
+import { SqliteOnboardingStateStore } from '@neutronai/onboarding/interview/sqlite-state-store.ts'
+import {
+  buildOnboardingFinalize,
+  type OnboardingFinalizeDeps,
+  type PersonaComposerLike,
+} from '@neutronai/gateway/wiring/build-onboarding-finalize.ts'
+import {
+  buildScaffoldMaterializer,
+  ensureProjectRow,
+} from '@neutronai/gateway/wiring/project-create.ts'
 
 const GENERAL_TOPIC = 'app:owner'
 const CLAIM_URL = 'https://auth.neutron.computer/claim'
@@ -47,6 +57,7 @@ const CLAIM_URL = 'https://auth.neutron.computer/claim'
 let home: IsolatedHome
 let db: ProjectDb
 let servers: Array<{ close: () => Promise<void> }> = []
+let priorCookieSecret: string | undefined
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 
@@ -124,6 +135,11 @@ async function connectAndCountCompleted(base: string): Promise<number> {
 }
 
 beforeEach(async () => {
+  // Boot needs a signed-owner-session secret (open/composer.ts refuses a
+  // predictable fallback). Set it here so this file is runnable in ISOLATION
+  // rather than depending on env leakage from a sibling .open.test.ts.
+  priorCookieSecret = process.env['NEUTRON_ONBOARDING_CHAT_COOKIE_SECRET']
+  process.env['NEUTRON_ONBOARDING_CHAT_COOKIE_SECRET'] = 'open-test-secret-0123456789'
   home = createIsolatedHome({ slug: 'owner' })
   db = ProjectDb.open(process.env['NEUTRON_DB_PATH']!)
   applyMigrations(db.raw())
@@ -141,6 +157,8 @@ afterEach(async () => {
   servers = []
   db.close()
   home.restore()
+  if (priorCookieSecret === undefined) delete process.env['NEUTRON_ONBOARDING_CHAT_COOKIE_SECRET']
+  else process.env['NEUTRON_ONBOARDING_CHAT_COOKIE_SECRET'] = priorCookieSecret
 })
 
 describe('Managed claim redirect — at most once per OWNER, not per page load', () => {
@@ -165,5 +183,105 @@ describe('Managed claim redirect — at most once per OWNER, not per page load',
     // A genuinely new process — the in-memory latch cannot help here at all.
     const second = await boot()
     expect(await connectAndCountCompleted(second.base)).toBe(0)
+  }, 45_000)
+})
+
+/** A persona composer that records calls but does no real synthesis. */
+function fakePersonaComposer(): PersonaComposerLike {
+  return {
+    async compose(): Promise<unknown> {
+      return { draft_id: 'fake', status: 'committed' }
+    },
+    async commit(): Promise<unknown> {
+      return { committed_at: 0, git_sha: null, paths: [] }
+    },
+  }
+}
+
+/**
+ * Run a REAL onboarding finalize (the LIVE `onboarding_completed` emit path) over
+ * the shared db, exactly as production does at the terminal transition. Returns
+ * how many live frames the emit seam fired.
+ */
+async function runLiveFinalize(): Promise<number> {
+  const nowMs = () => Date.now()
+  const stateStore = new SqliteOnboardingStateStore({ db, now: nowMs })
+  // Replace the file-level completed seed with a PRE-terminal row so finalize
+  // actually runs its terminal transition (and therefore the live emit).
+  db.raw().run(`DELETE FROM onboarding_state WHERE project_slug = 'owner' AND user_id = 'owner'`)
+  const seeded = await stateStore.upsert({
+    owner_slug: 'owner',
+    user_id: 'owner',
+    phase: 'persona_reviewed',
+    phase_state_patch: {
+      user_first_name: 'Sam',
+      agent_name: 'Atlas',
+      primary_projects: ['Topline Revenue'],
+    },
+  })
+
+  let liveFrames = 0
+  const deps: OnboardingFinalizeDeps = {
+    owner_home: home.dir,
+    owner_slug: 'owner',
+    db,
+    stateStore,
+    personaLoader: { invalidate: (): void => {} },
+    ensureProjectRow,
+    materializer: buildScaffoldMaterializer({
+      owner_home: home.dir,
+      project_slug: 'owner',
+      db,
+      now: nowMs,
+    }),
+    emitProjectsChanged: (): void => {},
+    // The LIVE emit seam — the frame the browser catches at finalize time. This
+    // scenario models the browser CONNECTED at finalize, so the frame is
+    // DELIVERED (returns true) and finalize writes the durable
+    // `onboarding_handoff_emitted_at` stamp alongside it — the behaviour under
+    // test. (The zero-socket / not-delivered case is covered in the finalize unit
+    // suite, gateway/wiring/__tests__/build-onboarding-finalize.test.ts.)
+    emitOnboardingCompleted: (): boolean => {
+      liveFrames += 1
+      return true
+    },
+    now: nowMs,
+    log: (): void => {},
+    personaComposer: fakePersonaComposer(),
+  }
+  const finalizer = buildOnboardingFinalize(deps)
+  const ok = await finalizer.finalize({ user_id: 'owner', topic_id: GENERAL_TOPIC, state: seeded })
+  expect(ok).toBe(true)
+  return liveFrames
+}
+
+describe('#374 Defect 2a — the LIVE-emit finalize is at-most-once with the reconnect replay', () => {
+  test('REGRESSION: after a LIVE finalize, the FIRST reconnect does NOT re-fire onboarding_completed', async () => {
+    // The scenario the durable-stamp fix (#404) left behind: onboarding finalizes
+    // via the LIVE emit (browser connected), then the owner reconnects on the
+    // renamed host. Pre-fix the live emit never stamped
+    // `onboarding_handoff_emitted_at`, so the reconnect-recovery replay in
+    // `open/wiring/app-ws.ts` saw a null stamp + phase='completed' and re-fired
+    // the frame ONCE — bouncing the just-completed owner to the claim / manual-
+    // link screen. With the live-emit stamp, the reconnect reads a non-null stamp
+    // and emits ZERO.
+    const liveFrames = await runLiveFinalize()
+    expect(liveFrames).toBe(1) // the live emit fired exactly once
+
+    // The durable stamp finalize wrote is what suppresses the replay.
+    const stampRow = db
+      .raw()
+      .query(
+        `SELECT onboarding_handoff_emitted_at AS stamp FROM onboarding_state
+           WHERE project_slug = 'owner' AND user_id = 'owner'`,
+      )
+      .get() as { stamp: number | null } | null
+    expect(stampRow?.stamp).not.toBeNull()
+
+    // Now the owner reconnects (fresh socket) against the completed+stamped row.
+    // Pre-fix (no live-emit stamp) this re-fired once → expect(0) FAILS.
+    const boot1 = await boot()
+    const reconnectCount = await connectAndCountCompleted(boot1.base)
+    expect(reconnectCount).toBe(0)
   }, 45_000)
 })
