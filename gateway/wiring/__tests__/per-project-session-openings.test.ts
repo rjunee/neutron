@@ -2,12 +2,13 @@
  * Per-project session openings (ISSUES #378 + #377, Ryan-locked 2026-07-20).
  *
  * Proves the fix for the live cross-project content bleed the owner hit while
- * dogfooding M1: the per-project OPENING-message + KICKOFF-doc composers now
- * dispatch through EACH project's OWN warm `cc-agent-*` session, keyed by
- * `metering_context.project_id` per dispatch, instead of ONE shared, accumulating
- * `cc-llm` session. The tests exercise the REAL composer chain
- * (`buildProjectKickoff` → `buildProjectKickoffComposer` /
- * `buildProjectOpeningMessageComposer` → `buildGatewayAnthropicMessagesClient` →
+ * dogfooding M1: the per-project KICKOFF-doc composer (the LIVE opening MESSAGE
+ * is `composeKickoff`'s body) AND the project-materializer's README /
+ * transcript-summary composer now dispatch through EACH project's OWN warm
+ * `cc-agent-*` session, keyed by `metering_context.project_id` per dispatch,
+ * instead of ONE shared, accumulating `cc-llm` session. The tests exercise the
+ * REAL composer chain (`buildProjectKickoff` → `buildProjectKickoffComposer` /
+ * `buildProjectDocComposer` → `buildGatewayAnthropicMessagesClient` →
  * `substrate.start`) over a fake Substrate that MODELS a per-session-key
  * accumulating transcript, so a wrong session key reproduces the bleed exactly.
  *
@@ -17,18 +18,21 @@
  * behaviour for both the opening MESSAGE and the 'starting plan' DOC.
  *
  * Coverage:
- *   1. REPRODUCTION CONTROL — with NO project_id (the pre-fix shared-session
+ *   1. LOAD-BEARING CONTROL — with NO project_id (the pre-fix shared-session
  *      routing) the fake's shared transcript BLEEDS: project 2's doc references
  *      project 1. Proves the fake models the real bug + that the project_id key
- *      is load-bearing.
+ *      is load-bearing. (Passes on both pre- and post-fix code by design.)
  *   2. ISOLATION (the fix) — driven concurrently like the worker pool, each
  *      project's opening MESSAGE and starting-plan DOC reference ONLY their own
- *      project. No bleed.
+ *      project. No bleed. (Fails on pre-fix code.)
  *   3. WHITE-BOX — every kickoff-doc dispatch carries
  *      `spec.metering_context.project_id === <project_id>`; none uses the shared
  *      (undefined) key.
- *   4. WHITE-BOX (opening composer) — `buildProjectOpeningMessageComposer` threads
- *      project_id → `metering_context.project_id` too.
+ *   4. BLOCKER (Argus r1) — the project-DOC composer that FEEDS the openings
+ *      isolates per project too (slug → metering_context.project_id).
+ *   4b. MAJOR (Argus r1) — every prose-synthesis dispatch sets
+ *      `spec.suppress_tool_bridge` + `tools: []`, so a document-derived compose
+ *      over the tool-bridged `cc-agent-*` substrate cannot reach native tools.
  *   5. #377 — the opening bodies are FULLY LLM-composed + unique: no retired
  *      hardcoded lead ("I took a first pass…", "I did a little digging…"), and two
  *      projects' bodies differ (each leads with its own LLM gist).
@@ -43,10 +47,10 @@ import type { AgentSpec, Substrate } from '@neutronai/runtime/substrate.ts'
 import type { Event } from '@neutronai/runtime/events.ts'
 import type { SessionHandle } from '@neutronai/runtime/session-handle.ts'
 import type { ProjectOpeningDocs } from '../build-onboarding-handoff.ts'
-import type { ComposeProjectOpeningInput } from '../build-onboarding-handoff.ts'
+import type { ComposeProjectDocInput } from '@neutronai/onboarding/wow-moment/project-materializer.ts'
 import { buildGatewayAnthropicMessagesClient } from '../build-anthropic-messages-client.ts'
 import { buildProjectKickoffComposer } from '../build-project-kickoff-composer.ts'
-import { buildProjectOpeningMessageComposer } from '../build-project-opening-message.ts'
+import { buildProjectDocComposer } from '../build-project-doc-composer.ts'
 import {
   buildProjectKickoff,
   type KickoffInput,
@@ -179,10 +183,14 @@ function kickoffInput(p: ProjectFixture): KickoffInput {
 }
 
 // ---------------------------------------------------------------------------
-// 1. REPRODUCTION CONTROL — the shared-session route (no project_id) BLEEDS.
+// 1. LOAD-BEARING CONTROL — the shared-session route (no project_id) BLEEDS.
+//    (This is a CONTROL that passes on both pre- and post-fix code by design —
+//    it proves the fake models the real bug + that the project_id key is
+//    load-bearing. The genuine fails-on-pre-fix coverage is the concurrent
+//    3-project ISOLATION test below.)
 // ---------------------------------------------------------------------------
 
-test('REPRO: routing kickoff-doc composes through ONE shared session bleeds across projects', async () => {
+test('CONTROL: routing kickoff-doc through ONE shared session (no project_id) bleeds across projects', async () => {
   const fake = isolationSubstrate()
   const client = buildGatewayAnthropicMessagesClient({ substrate: fake.substrate })
   const composer = buildProjectKickoffComposer({ client })
@@ -256,30 +264,80 @@ test('FIX: each project composes in its OWN per-project session — opening + do
 })
 
 // ---------------------------------------------------------------------------
-// 4. WHITE-BOX — the OPENING-message composer threads project_id too.
+// 4. BLOCKER (Argus round 1) — the project-DOC composer (README /
+//    transcript-summary) that FEEDS the openings ALSO isolates per project.
+//    Reverting `open/composer.ts` to route it through the shared `cc-llm`
+//    session (no project_id) reproduces the residual bleed: project N's doc
+//    references 1..N-1. Driven concurrently like the materializer.
 // ---------------------------------------------------------------------------
 
-test('WHITE-BOX: buildProjectOpeningMessageComposer keys each compose by project_id', async () => {
+function docInput(p: ProjectFixture): ComposeProjectDocInput {
+  return {
+    kind: 'readme',
+    project_name: p.name,
+    slug: p.id,
+    context: `${p.name} work`,
+    related: { topics: [], entities: [], interests: [] },
+    transcript_excerpt: '',
+  }
+}
+
+test('BLOCKER: the project-DOC composer isolates per project (slug → metering_context.project_id)', async () => {
   const fake = isolationSubstrate()
-  const compose = buildProjectOpeningMessageComposer({
-    anthropicClient: buildGatewayAnthropicMessagesClient({ substrate: fake.substrate }),
+  const composer = buildProjectDocComposer({
+    client: buildGatewayAnthropicMessagesClient({ substrate: fake.substrate }),
   })
 
-  const mkInput = (p: ProjectFixture): ComposeProjectOpeningInput => ({
-    name: p.name,
-    imported_project: null,
-    import_result: null,
-    project_docs: { readme: null, transcript_summary: null, status_md: p.status },
-    owner_slug: 'acme',
-    user_id: 'owner',
-    project_id: p.id,
-  })
+  // Concurrent, like the materializer's per-project doc synthesis.
+  const bodies = await Promise.all(PROJECTS.map((p) => composer(docInput(p))))
 
-  await Promise.all([compose(mkInput(PROJECTS[0]!)), compose(mkInput(PROJECTS[1]!))])
+  for (let i = 0; i < PROJECTS.length; i += 1) {
+    const self = PROJECTS[i]!
+    expect(bodies[i]).toContain(self.name)
+    for (const other of PROJECTS) {
+      if (other.id === self.id) continue
+      expect(bodies[i]).not.toContain(other.name)
+    }
+  }
+
+  // WHITE-BOX — every doc dispatch keyed by ITS OWN project slug; none shared.
+  expect(fake.seen).toHaveLength(PROJECTS.length)
+  const keys = fake.seen.map((s) => s.metering_context?.project_id).sort()
+  expect(keys).toEqual([...PROJECTS.map((p) => p.id)].sort())
+  expect(fake.seen.every((s) => s.metering_context?.project_id !== undefined)).toBe(true)
+})
+
+// ---------------------------------------------------------------------------
+// 4b. MAJOR (Argus round 1) — every prose-synthesis dispatch SUPPRESSES the
+//     native-MCP tool bridge. This is the ONLY thing that sets
+//     `spec.suppress_tool_bridge`, so it also proves the compose went through
+//     the hardened prose client (not a raw tool-bridged chat dispatch): a
+//     malicious README/STATUS composed over the `cc-agent-*` substrate cannot
+//     reach the live `mcp__neutron` tool surface.
+// ---------------------------------------------------------------------------
+
+test('MAJOR: prose-synthesis composes suppress the native-MCP tool bridge (spec.suppress_tool_bridge)', async () => {
+  const fake = isolationSubstrate()
+  const client = buildGatewayAnthropicMessagesClient({ substrate: fake.substrate })
+  const kickoffComposer = buildProjectKickoffComposer({ client })
+  const docComposer = buildProjectDocComposer({ client })
+
+  await kickoffComposer({
+    kind: 'draft_doc',
+    project_id: PROJECTS[0]!.id,
+    project_name: PROJECTS[0]!.name,
+    doc_title: `${PROJECTS[0]!.name} - starting plan`,
+    context_lines: ['Summary: work'],
+  })
+  await docComposer(docInput(PROJECTS[1]!))
 
   expect(fake.seen).toHaveLength(2)
-  const keys = fake.seen.map((s) => s.metering_context?.project_id).sort()
-  expect(keys).toEqual([PROJECTS[0]!.id, PROJECTS[1]!.id].sort())
+  // The bridge is suppressed on EVERY prose dispatch — AND the spec still carries
+  // no built-in tool surface, so neither vector (built-ins nor bridge) is open.
+  for (const spec of fake.seen) {
+    expect(spec.suppress_tool_bridge).toBe(true)
+    expect(spec.tools).toHaveLength(0)
+  }
 })
 
 // ---------------------------------------------------------------------------

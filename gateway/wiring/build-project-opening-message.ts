@@ -137,11 +137,6 @@ export function buildProjectOpeningMessageComposer(
         messages: [{ role: 'user', content: userContent }],
         max_tokens,
         signal: controller.signal,
-        // ISSUES #378 — compose THIS project's opening in its OWN per-project
-        // `cc-agent-*` warm session (folded into `spec.metering_context.project_id`).
-        ...(input.project_id !== undefined && input.project_id.length > 0
-          ? { project_id: input.project_id }
-          : {}),
       })
       text = response.content.map((b) => b.text).join('').trim()
     } catch (err) {

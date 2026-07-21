@@ -124,6 +124,25 @@ export interface AgentSpec {
    *  CC REPL adapter only. See the doc-comment above. */
   turn_absolute_ceiling_ms?: number
   metering_context?: { project_id: string }
+  /**
+   * SECURITY (ISSUES #378 round 2). When `true`, this dispatch attaches NO
+   * native-MCP tool bridge EVEN on a substrate constructed with
+   * `enableToolBridge: true`. `spec.tools: []` already denies the built-in
+   * Claude tools (`--tools ""`) but does NOT govern the MCP bridge — that is a
+   * substrate-construction property, so a prose-synthesis dispatch over the
+   * owner's warm `cc-agent-*` chat substrate would otherwise inherit the live
+   * `mcp__neutron` tool surface (Cores / memory / reminders / dispatch), letting
+   * a malicious user-editable document (README / STATUS / imported transcript)
+   * drive tool calls with no interactive owner in the loop. The prose-only
+   * `buildGatewayAnthropicMessagesClient` sets this on EVERY dispatch (it always
+   * sends `tools: []`; synthesis never drives tools), so the per-project opening
+   * / kickoff / doc composers get the per-project SESSION KEY (isolation +
+   * grounding + warmth) WITHOUT the tool surface. The live-chat turn dispatches
+   * raw specs (not via this client) and never sets it, so its tool bridge is
+   * unchanged. Read by the persistent CC REPL adapter (`spawn.ts`); a no-op on
+   * substrates that never enable the bridge (`cc-llm-*`, ephemeral, fire).
+   */
+  suppress_tool_bridge?: boolean
 }
 
 /**

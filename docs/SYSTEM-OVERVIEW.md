@@ -1166,34 +1166,51 @@ rather than waiting on the global diff-gate. Subscriber:
 >   trigger/gate CONTRACT plus `ProjectDocComposer`, `runtime/doc-links.ts`, and the
 >   project-page indexer.
 
-> **Per-project openings compose in the project's OWN warm session + are fully
-> LLM-composed (ISSUES #378 + #377, Ryan-locked 2026-07-20).** Both the opening
-> MESSAGE and the kickoff 'starting plan' DOC now compose through THAT project's
-> own long-lived `cc-agent-*` session — the SAME warm session the project's live
-> chat later resumes — not the shared owner-wide `cc-llm` phase-spec session.
-> - **#378 (cross-project bleed).** The composers dispatched through ONE shared
->   `cc-llm` client (`open/composer.ts` `onboardingAnthropicClient`). Because
+> **Per-project openings compose in the project's OWN warm session, are fully
+> LLM-composed, and carry NO tool bridge (ISSUES #378 + #377, Ryan-locked
+> 2026-07-20; Argus round-2 blockers closed).** The LIVE opening MESSAGE
+> (`composeKickoff`'s body), the kickoff 'starting plan' DOC, AND the project
+> materializer's README / transcript-summary now compose through THAT project's own
+> long-lived `cc-agent-*` session — the SAME warm session the project's live chat
+> later resumes — not the shared owner-wide `cc-llm` phase-spec session.
+> - **#378 (cross-project bleed).** The per-project composers dispatched through ONE
+>   shared `cc-llm` client (`open/composer.ts` `onboardingAnthropicClient`). Because
 >   `buildGatewayAnthropicMessagesClient` built the spec with no `metering_context`,
 >   `build-llm-call-substrate.ts` keyed every project onto the substrate's single
 >   `'default'` warm REPL, and `emitProjectOpenings`' concurrency-3 worker pool fed
 >   all projects into ONE accumulating transcript — so project N was conditioned on
->   1..N-1 and emitted their content. FIX: a `perProjectOpeningsClient`
->   (`buildGatewayAnthropicMessagesClient` over the `cc-agent-*` `liveAgentSubstrate`)
->   feeds BOTH composers, and each compose stamps `metering_context.project_id` per
->   dispatch (threaded through the `AnthropicMessagesClient` seam →
->   `build-anthropic-messages-client.ts`). That per-dispatch project_id folds into
->   the warm-pool key, so each project isolates onto its OWN warm REPL — the SAME
->   race-free keying `build-live-agent-turn.ts` uses for concurrent chat topics.
->   Composing here also PRE-LOADS the project's docs and leaves the session WARM +
->   grounded for the owner's first chat turn. The `cc-agent-*` tool bridge is correct
->   (it is the session the chat will use; the compose dispatch carries `tools: []`);
->   an ephemeral throwaway was explicitly rejected. The shared `cc-llm` session is
->   unchanged (phase-spec resolver + suggesters).
+>   1..N-1 and emitted their content. The project MATERIALIZER's doc composer had the
+>   SAME defect and its docs FEED the openings (Argus round-1 blocker). FIX: a
+>   `perProjectOpeningsClient` (`buildGatewayAnthropicMessagesClient` over the
+>   `cc-agent-*` `liveAgentSubstrate`) feeds `buildProjectKickoffComposer` AND
+>   `buildProjectDocComposer`; each compose stamps `metering_context.project_id` per
+>   dispatch (kickoff: the `project_id`; doc: `doc.slug`, the same canonical bind id).
+>   That per-dispatch project_id folds into the warm-pool key, so each project's whole
+>   doc + opening synthesis isolates onto its OWN warm REPL — the SAME race-free
+>   keying `build-live-agent-turn.ts` uses for concurrent chat topics. Composing here
+>   also PRE-LOADS the project's docs and leaves the session WARM + grounded for the
+>   owner's first chat turn. An ephemeral throwaway was explicitly rejected. The
+>   shared `cc-llm` session is unchanged (phase-spec resolver + suggesters).
+> - **Tool-bridge suppression (Argus round-2 MAJOR).** `cc-agent-*` is the ONLY
+>   substrate with `enableToolBridge: true`, and the bridge is a SPAWN-time property:
+>   `spec.tools: []` denies the built-in Claude tools but NOT the MCP bridge. A
+>   document-derived compose (README / STATUS / imported transcript is user-editable)
+>   over a bridged REPL with no interactive owner is a prompt-injection surface. Fix:
+>   a per-dispatch `spec.suppress_tool_bridge` that the prose-only
+>   `buildGatewayAnthropicMessagesClient` sets on EVERY dispatch (it always sends
+>   `tools: []`; synthesis never drives tools). `spawn.ts` gates both the bridge
+>   attachment and the reuse-guard `requestedToolBridge` on it, so the per-project
+>   composes keep the SESSION KEY (isolation + grounding + warmth) WITHOUT the live
+>   `mcp__neutron` tool surface. The live-chat turn dispatches raw specs (not via this
+>   client) and never sets it, so its tool bridge is unchanged.
 > - **#377 (hardcoded lead).** The kickoff opening body dropped its hardcoded lead
 >   scaffolds ("I took a first pass at X and drafted a starting plan" / "I did a
->   little digging on X…"). The opening MESSAGE now LEADS with the model's own
->   project-grounded framing (the drafted doc's first prose paragraph) + the tappable
->   doc link — fully LLM-composed and unique per project.
+>   little digging on X…"). The LIVE opening MESSAGE is `composeKickoff`'s body: it
+>   LEADS with the model's own project-grounded framing (the drafted doc's first
+>   prose paragraph) + the tappable doc link — fully LLM-composed and unique per
+>   project. (The separate `buildProjectOpeningMessageComposer` — the legacy "Item 5"
+>   opening composer — is ORPHANED dead code superseded by the 2026-07-01 agentic
+>   kickoff, NOT the live path; tracked for deletion.)
 
 > **Onboarding is a GENERAL-topic-only mode + cold-turn timeout self-heals
 > (#136 verify gaps, 2026-06-30).** Two robustness fixes for gaps the #136

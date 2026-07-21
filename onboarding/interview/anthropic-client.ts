@@ -38,11 +38,13 @@ export interface AnthropicMessagesClient {
        * substrate's shared `'default'` namespace. This is the SAME per-dispatch
        * key dimension the live-chat agent uses (`build-live-agent-turn.ts`), and
        * it is race-free across concurrent dispatches precisely because it rides
-       * the spec (never a shared mutable closure). The per-project OPENING +
-       * KICKOFF composers set this so their composes ISOLATE by construction (no
-       * shared transcript ⇒ no cross-project content bleed — ISSUES #378) and
-       * warm the SAME session the project's live chat later resumes. Absent for
-       * every caller that has no conversational project (router, suggesters).
+       * the spec (never a shared mutable closure). The per-project KICKOFF-doc
+       * composer (whose body is the live opening MESSAGE) and the project
+       * materializer's README / transcript-summary composer set this so their
+       * composes ISOLATE by construction (no shared transcript ⇒ no cross-project
+       * content bleed — ISSUES #378) and warm the SAME session the project's live
+       * chat later resumes. Absent for every caller that has no conversational
+       * project (router, suggesters).
        */
       project_id?: string
     }): Promise<AnthropicMessageResponse>

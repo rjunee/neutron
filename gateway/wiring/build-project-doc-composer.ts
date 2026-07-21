@@ -59,6 +59,14 @@ export function buildProjectDocComposer(
         messages: [{ role: 'user', content: userPrompt(doc) }],
         max_tokens,
         signal: controller.signal,
+        // ISSUES #378 — route THIS project's README / transcript-summary synthesis
+        // to its OWN per-project warm session (folded into
+        // `spec.metering_context.project_id`). `doc.slug` is the project's
+        // canonical bind id (materializer: `slug: bind_id` = the openings'
+        // `project_id`), so the doc + opening + kickoff for one project all land on
+        // the SAME isolated session — never the shared one that let one project's
+        // draft leak into the next.
+        ...(doc.slug.length > 0 ? { project_id: doc.slug } : {}),
       })
       const text = (response.content[0]?.text ?? '').trim()
       if (text.length === 0) {

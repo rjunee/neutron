@@ -100,7 +100,19 @@ async function spawnSession(
   }
   let toolBridgeActive = false
   const toolBridge = replToolBridgeRef.current
-  if (options.enableToolBridge === true && toolBridge !== undefined) {
+  // SECURITY (ISSUES #378 round 2) — a PER-DISPATCH opt-out of the native-MCP
+  // tool bridge, even on an `enableToolBridge: true` substrate. The prose-only
+  // synthesis client (`build-anthropic-messages-client.ts`) sets
+  // `spec.suppress_tool_bridge` so its per-project opening / kickoff / doc
+  // composes run over the owner's warm `cc-agent-*` session (per-project session
+  // key = isolation + grounding + warmth) WITHOUT the live `mcp__neutron` tool
+  // surface — closing the prompt-injection vector on user-editable documents.
+  // `spec.tools: []` already denies the built-in tools; this denies the bridge.
+  if (
+    options.enableToolBridge === true &&
+    spec.suppress_tool_bridge !== true &&
+    toolBridge !== undefined
+  ) {
     const schemas = toolBridge.listToolSchemas()
     if (schemas.length > 0) {
       writeFileSync(toolsManifestPath, JSON.stringify(schemas, null, 2))
@@ -696,10 +708,14 @@ export async function getOrSpawnSession(
   // SPAWN-time property of the REPL, exactly like the tool surface. Compute what
   // THIS request would attach so the reuse guard can refuse to serve a
   // bridge-mismatched warm child — making the bridge restriction LOCAL, not
-  // dependent on `substrate_instance_id` keying (today they align, so this never
-  // fires; it survives a future edit that varies the bridge at a finer grain).
+  // dependent on `substrate_instance_id` keying. Mirrors the spawn gate above:
+  // a `spec.suppress_tool_bridge` dispatch (prose synthesis, ISSUES #378 r2)
+  // requests NO bridge, so it must not reuse — and can never inherit — a warm
+  // bridge-active chat REPL (and vice-versa).
   const requestedToolBridge =
-    options.enableToolBridge === true && replToolBridgeRef.current !== undefined
+    options.enableToolBridge === true &&
+    spec.suppress_tool_bridge !== true &&
+    replToolBridgeRef.current !== undefined
   // A resume-session-picker recovery (row #7) poisons the warm session AND records
   // the disk-recovered session id on it; captured below (for BOTH the alive-evict
   // and already-exited paths) so the clean respawn resumes THAT transcript (Codex

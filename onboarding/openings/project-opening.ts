@@ -185,15 +185,6 @@ export interface ComposeProjectOpeningInput {
   project_docs: ProjectOpeningDocs
   owner_slug: string
   user_id: string
-  /**
-   * The materialized project's id. When present, the LLM opening-message
-   * composer threads it onto the substrate dispatch as
-   * `metering_context.project_id` (ISSUES #378) so the opening composes in THIS
-   * project's OWN per-project `cc-agent-*` warm session — isolated from every
-   * other project's transcript by construction. Optional so the deterministic
-   * path + older callers/tests remain unchanged.
-   */
-  project_id?: string
 }
 
 export type ComposeProjectOpeningFn = (

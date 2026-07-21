@@ -1232,38 +1232,40 @@ export function buildOpenGraphComposer(
         ? buildGatewayAnthropicMessagesClient({ substrate: llmCallSubstrate })
         : null
 
-    // PER-PROJECT OPENINGS CLIENT (ISSUES #378, Ryan-locked 2026-07-20) — the
-    // per-project OPENING-message + KICKOFF-doc composers do NOT run over the
-    // shared `cc-llm` phase-spec session (`onboardingAnthropicClient`). That one
-    // warm session is single-purpose for the resolver/suggesters and ACCUMULATES
-    // one owner-wide transcript, so routing every project's opening/doc compose
-    // through it conditioned project N on projects 1..N-1 and made them emit each
-    // other's content (the live cross-project bleed the owner hit).
+    // PER-PROJECT OPENINGS CLIENT (ISSUES #378, Ryan-locked 2026-07-20; Argus
+    // round-2 blockers closed) — the per-project KICKOFF-doc composer (whose body
+    // IS the live opening MESSAGE — `composeKickoff`) AND the project materializer's
+    // README / transcript-summary composer do NOT run over the shared `cc-llm`
+    // phase-spec session (`onboardingAnthropicClient`). That one warm session is
+    // single-purpose for the resolver/suggesters and ACCUMULATES one owner-wide
+    // transcript, so routing every project's opening/doc compose through it
+    // conditioned project N on projects 1..N-1 and made them emit each other's
+    // content (the live cross-project bleed the owner hit — and the round-1 blocker
+    // was that the MATERIALIZER's doc composer, which FEEDS the openings, still bled).
     //
-    // Instead these two composers dispatch over the owner's `cc-agent-*` live-chat
+    // Instead these composers dispatch over the owner's `cc-agent-*` live-chat
     // substrate, stamping each compose with `metering_context.project_id` (the
-    // composer inputs carry the project_id, threaded through
+    // composer inputs carry the project_id / slug, threaded through
     // `build-anthropic-messages-client.ts`). `build-llm-call-substrate.ts` folds
-    // that per-dispatch project_id into the warm-pool key, so each project's
-    // compose lands on ITS OWN warm REPL — isolation by construction (no shared
-    // transcript ⇒ no bleed), even under finalize's concurrency-3 worker pool
-    // (the key rides the spec, never a shared mutable closure — the same race-free
-    // mechanism `build-live-agent-turn.ts` uses for concurrent chat topics). It is
-    // the SAME session the project's live chat later resumes, so composing here
-    // PRE-LOADS the project's docs and leaves the session WARM + grounded for the
-    // owner's first turn.
+    // that per-dispatch project_id into the warm-pool key, so each project's whole
+    // doc + opening synthesis lands on ITS OWN warm REPL — isolation by construction
+    // (no shared transcript ⇒ no bleed), even under finalize's concurrency-3 worker
+    // pool (the key rides the spec, never a shared mutable closure — the same
+    // race-free mechanism `build-live-agent-turn.ts` uses for concurrent chat
+    // topics). It is the SAME session the project's live chat later resumes, so
+    // composing here PRE-LOADS the project's docs and leaves the session WARM +
+    // grounded for the owner's first turn.
     //
-    // NUANCE (`enableToolBridge: true` on `cc-agent-*`, substrates.ts): unlike the
-    // phase-spec session, this substrate carries the native-MCP tool bridge. That
-    // is CORRECT here, not a reason to fall back to a throwaway: (a) the compose
-    // dispatch is a plain text/markdown instruction (`spec.tools: []`,
-    // build-anthropic-messages-client.ts), so the model composes prose rather than
-    // driving tools; (b) any tool the model DID reach for (e.g. reading the
-    // project's own docs) is scoped to THIS project's session and only improves
-    // grounding; and (c) it is exactly the session the owner's chat will use, so
-    // there is no capability the opening sees that the chat wouldn't. An ephemeral
-    // throwaway was explicitly REJECTED (it would neither pre-warm nor ground the
-    // live session). Null (LLM-less) ⇒ both composers stay undefined as before.
+    // TOOL BRIDGE (`enableToolBridge: true` on `cc-agent-*`, substrates.ts): this
+    // substrate carries the native-MCP tool bridge, a SPAWN-time property that
+    // `spec.tools: []` does NOT govern. Composing user-editable documents (README /
+    // STATUS / imported transcript) over a bridged REPL with no interactive owner
+    // is a prompt-injection surface, so the prose-only client sets a per-dispatch
+    // `spec.suppress_tool_bridge` (`build-anthropic-messages-client.ts`) and
+    // `spawn.ts` denies the bridge for these composes — they keep the per-project
+    // SESSION KEY (isolation + grounding + warmth) WITHOUT the live tool surface.
+    // An ephemeral throwaway was explicitly REJECTED (it would neither pre-warm nor
+    // ground the live session). Null (LLM-less) ⇒ the composers stay null as before.
     const perProjectOpeningsClient =
       liveAgentSubstrate !== null
         ? buildGatewayAnthropicMessagesClient({ substrate: liveAgentSubstrate })
@@ -1282,12 +1284,20 @@ export function buildOpenGraphComposer(
       onboardingAnthropicClient !== null
         ? buildPersonaSummarizer({ anthropicClient: onboardingAnthropicClient })
         : undefined
-    // Per-project opening message (Item 11) — composed in EACH project's OWN
-    // per-project `cc-agent-*` session (ISSUES #378) via `perProjectOpeningsClient`,
-    // NOT the shared `cc-llm` session.
+    // Per-project opening message (Item 11) — legacy "Item 5 LLM opening
+    // composer". NOTE (ISSUES #378 round 2, Argus-confirmed): this composer is
+    // ORPHANED — the LIVE per-project opening MESSAGE is `composeKickoff`'s body
+    // (`onboarding/openings/kickoff.ts` → `finalize.ts` `finalizeOpeningBody(
+    // kickoff.body)`), which composes in the project's OWN per-project session via
+    // `perProjectOpeningsClient`. `buildProjectOpeningMessageComposer` is never
+    // invoked to produce a live message (superseded by the 2026-07-01 agentic
+    // kickoff), so it is deliberately NOT routed through the per-project client —
+    // decorating dead code would misrepresent it as the live path. Left byte-for-
+    // byte as-is pending its full deletion (tracked ISSUES: remove the orphaned
+    // Item-5 opening-composer subsystem).
     const projectOpeningComposer =
-      perProjectOpeningsClient !== null
-        ? buildProjectOpeningMessageComposer({ anthropicClient: perProjectOpeningsClient })
+      onboardingAnthropicClient !== null
+        ? buildProjectOpeningMessageComposer({ anthropicClient: onboardingAnthropicClient })
         : undefined
 
     // WAVE 2 Track A — per-project persona resolver. Reads the canonical
@@ -2380,9 +2390,22 @@ export function buildOpenGraphComposer(
     }
     // Project-doc LLM synth for materialized onboarding/import projects (same
     // warm cc-llm path; null → deterministic template docs).
+    // ISSUES #378 (round 2) — the project MATERIALIZER's README / transcript-
+    // summary composer ALSO runs per-project and its output feeds the openings,
+    // so it must NOT route through the shared `cc-llm` session either. Routing it
+    // through `perProjectOpeningsClient` (the `cc-agent-*` substrate, keyed by
+    // `metering_context.project_id` = the project's slug per dispatch — see
+    // `build-project-doc-composer.ts`) lands each project's doc synthesis on ITS
+    // OWN warm REPL, so one project's README can never be conditioned on another's
+    // (the residual bleed Argus round-1 caught: the openings faithfully echo a
+    // doc that was itself contaminated). Same per-project session the opening +
+    // kickoff composers use, so the whole per-project doc set + opening synthesis
+    // shares ONE isolated, grounded, warm session. `perProjectOpeningsClient` is
+    // non-null exactly when `onboardingAnthropicClient` is (both gate on the same
+    // conversational-substrate availability).
     const projectDocComposer =
-      onboardingAnthropicClient !== null
-        ? buildProjectDocComposer({ client: onboardingAnthropicClient })
+      perProjectOpeningsClient !== null
+        ? buildProjectDocComposer({ client: perProjectOpeningsClient })
         : null
     // AGENTIC KICKOFF (2026-07-01) — the one-time per-project kickoff finalize
     // runs at onboarding completion. It drafts a real starting doc (via the

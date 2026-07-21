@@ -188,6 +188,29 @@ describe('P0-1 native-MCP tool bridge — spawn wiring', () => {
     expect(readMcpConfig(argv).mcpServers['neutron']).toBeUndefined()
   })
 
+  it('SECURITY (ISSUES #378 r2): spec.suppress_tool_bridge denies the bridge on an enabled substrate', async () => {
+    // A prose-synthesis dispatch (`buildGatewayAnthropicMessagesClient` sets
+    // `suppress_tool_bridge` + `tools: []`) over the owner's warm `cc-agent-*`
+    // chat substrate must NOT inherit the live `mcp__neutron` tool surface, so a
+    // malicious user-editable document composed there can never drive tools.
+    setReplToolBridge(fakeBridge([]))
+    const { host, argvs } = makeCapturingHost()
+    const sub = createPersistentReplSubstrate(
+      opts(host, { enableToolBridge: true, user_id: 'u-3', project_id: 'amascence', credential_identity: 'cred-3' }),
+    )
+    const proseSpec: AgentSpec = {
+      prompt: 'compose a README',
+      tools: [],
+      model_preference: ['claude-opus-4-7'],
+      suppress_tool_bridge: true,
+    }
+    await drain(sub.start(proseSpec))
+    const argv = argvs[0]!
+    // No MCP namespace permitted, and no `neutron` bridge server in the config.
+    expect(argv).not.toContain('--allowedTools')
+    expect(readMcpConfig(argv).mcpServers['neutron']).toBeUndefined()
+  })
+
   it('no-op when enabled but no bridge is wired (LLM-less / pre-compose)', async () => {
     setReplToolBridge(undefined)
     const { host, argvs } = makeCapturingHost()

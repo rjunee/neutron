@@ -394,10 +394,14 @@ async function tryDraftDoc(
   // lead.
   const gist = firstProseParagraph(body)
   const marker = `[${plan.label}](docs:/${input.project_id}/${plan.relpath})`
+  // Empty-gist safety net (degenerate LLM output — a doc that produced ONLY
+  // headings, no prose paragraph). Kept grammatical for BOTH doc kinds (the prior
+  // `I put together a ${label}` rendered "a starting notes" for interest briefs)
+  // and still project-named, never the retired shared lead.
   const opening =
     gist.length > 0
       ? `${stripTrailingPunctuation(gist)}.`
-      : `I put together a ${plan.label.toLowerCase()} for ${input.name}.`
+      : `I've started ${kind === 'interest_brief' ? 'a notes doc' : 'a plan'} for ${input.name}.`
   const body_out = `${opening} Have a look and tell me what to change: ${marker}.`
   return { body: body_out, action: kind === 'draft_doc' ? 'draft-doc' : 'interest-research', doc_relpath: plan.relpath, indexed }
 }

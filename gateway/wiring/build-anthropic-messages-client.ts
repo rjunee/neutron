@@ -91,6 +91,18 @@ export function buildGatewayAnthropicMessagesClient(
         const spec: AgentSpec = {
           prompt,
           tools: [],
+          // SECURITY (ISSUES #378 round 2) — this is the PROSE-ONLY synthesis
+          // client: it always dispatches `tools: []` and its callers (router,
+          // suggesters, per-project opening / kickoff / doc composers) never
+          // drive tools. Suppress the native-MCP tool bridge UNCONDITIONALLY so a
+          // dispatch over the owner's warm `cc-agent-*` chat substrate (the ONLY
+          // one with `enableToolBridge: true`) composes prose WITHOUT inheriting
+          // the live `mcp__neutron` tool surface — closing the prompt-injection
+          // vector where a user-editable document (README / STATUS / imported
+          // transcript) could trigger tool calls with no interactive owner. The
+          // per-project SESSION KEY (isolation + grounding) is untouched. On
+          // substrates that never enable the bridge this is a harmless no-op.
+          suppress_tool_bridge: true,
           // Caller-supplied `args.model` wins; factory default is the
           // fallback for callers that omit the field. Pinned by
           // `build-anthropic-messages-client.test.ts` (Argus r1 BLOCKING #1).
