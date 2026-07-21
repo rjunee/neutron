@@ -375,7 +375,7 @@ describe('loadManifest pulls the package.json shipped on disk', () => {
     expect(() => loadManifest()).not.toThrow()
   })
 
-  test('S1 — declares 6 tools (5 legacy + reminders_update) and 2 ui_components (launcher_icon + app_tab)', () => {
+  test('declares 8 tools (5 legacy + reminders_update + rituals_propose/rituals_status) and 2 ui_components (launcher_icon + app_tab)', () => {
     const m = loadManifest()
     const toolNames = m.tools.map((t) => t.name).sort()
     expect(toolNames).toEqual(
@@ -386,6 +386,9 @@ describe('loadManifest pulls the package.json shipped on disk', () => {
         'reminders_list',
         'reminders_snooze',
         'reminders_update',
+        // Plan task 8 — agent-callable ritual registration.
+        'rituals_propose',
+        'rituals_status',
       ].sort(),
     )
     const surfaces = m.ui_components.map((u) => u.surface).sort()

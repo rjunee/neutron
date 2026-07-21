@@ -194,6 +194,45 @@ describe('requestRitualApproval (egress:web)', () => {
   })
 })
 
+// ── plan task 8 — content_id / egress_id passthrough ─────────────────────────
+
+describe('requestRitualApproval — id passthrough (task 8)', () => {
+  test('the content row persists under the returned content_id', async () => {
+    const mgr = new ApprovalManager(db, recordingNotifier())
+    const res = requestRitualApproval(mgr, {
+      project_slug: 't1',
+      topic_id: null,
+      def: def(),
+      prompt: 'do the thing',
+      cadence: 'spec:0 9 * * *',
+    })
+    await settle()
+    expect(typeof res.content_id).toBe('string')
+    expect(res.egress_id).toBeUndefined()
+    const row = mgr.get(res.content_id)
+    expect(row).not.toBeNull()
+    expect(row!.tool_name).toBe(ritualApprovalToolName('morning-brief'))
+    expect(row!.status).toBe('pending')
+  })
+
+  test('a web def persists BOTH grants under content_id AND egress_id', async () => {
+    const mgr = new ApprovalManager(db, recordingNotifier())
+    const res = requestRitualApproval(mgr, {
+      project_slug: 't1',
+      topic_id: null,
+      def: def({ id: 'web-def', tool_surface: ['Read', 'WebSearch'], egress: 'web' }),
+      prompt: 'search + summarise',
+      cadence: 'spec:0 9 * * *',
+    })
+    await settle()
+    expect(typeof res.content_id).toBe('string')
+    expect(typeof res.egress_id).toBe('string')
+    expect(res.content_id).not.toBe(res.egress_id)
+    expect(mgr.get(res.content_id)!.tool_name).toBe(ritualApprovalToolName('web-def'))
+    expect(mgr.get(res.egress_id!)!.tool_name).toBe(ritualEgressApprovalToolName('web-def'))
+  })
+})
+
 // ── 5-11. seam-bound checker over the real registry + validateRitualFire ─────
 
 describe('createRitualApprovalCheck ⨯ validateRitualFire', () => {

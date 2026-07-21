@@ -190,7 +190,7 @@ describe('ReminderStore', () => {
     expect(store.get(r.id)?.ritual_id).toBe('morning-brief')
   })
 
-  test('recurring create defaults ritual_id null (no write path yet)', async () => {
+  test('recurring create defaults ritual_id null when omitted', async () => {
     const store = new ReminderStore(db)
     const r = await store.createRecurring({
       owner_slug: 't1',
@@ -200,5 +200,69 @@ describe('ReminderStore', () => {
       recurrence: 'weekly',
     })
     expect(store.get(r.id)?.ritual_id).toBeNull()
+  })
+
+  // ── plan task 8 — ritual_id WRITE path ──────────────────────────────────────
+
+  test('create() persists a valid ritual_id (read back from the row)', async () => {
+    const store = new ReminderStore(db)
+    const r = await store.create({
+      owner_slug: 't1',
+      topic_id: 'app:t1',
+      fire_at: 1700000000,
+      message: 'ritual:daily-digest',
+      ritual_id: 'daily-digest',
+    })
+    expect(r.ritual_id).toBe('daily-digest')
+    expect(store.get(r.id)?.ritual_id).toBe('daily-digest')
+  })
+
+  test('createRecurring() persists a valid ritual_id', async () => {
+    const store = new ReminderStore(db)
+    const r = await store.createRecurring({
+      owner_slug: 't1',
+      topic_id: 'app:t1',
+      fire_at: 1700000000,
+      message: 'ritual:weekly-wrap',
+      recurrence: 'weekly',
+      ritual_id: 'weekly-wrap',
+    })
+    expect(store.get(r.id)?.ritual_id).toBe('weekly-wrap')
+  })
+
+  test('a malformed ritual_id throws (fail closed) — never writes an unroutable row', async () => {
+    const store = new ReminderStore(db)
+    await expect(
+      store.create({
+        owner_slug: 't1',
+        topic_id: null,
+        fire_at: 1700000000,
+        message: 'x',
+        ritual_id: '../escape',
+      }),
+    ).rejects.toThrow(/RITUAL_ID_RE/)
+    // nothing was written
+    const n = db.prepare<{ n: number }, []>(`SELECT COUNT(*) AS n FROM reminders`).get()
+    expect(n?.n).toBe(0)
+  })
+
+  test('hasPendingRitualRow true/false lifecycle', async () => {
+    const store = new ReminderStore(db)
+    expect(store.hasPendingRitualRow('daily-digest')).toBe(false)
+    const r = await store.create({
+      owner_slug: 't1',
+      topic_id: null,
+      fire_at: 1700000000,
+      message: 'ritual:daily-digest',
+      ritual_id: 'daily-digest',
+    })
+    expect(store.hasPendingRitualRow('daily-digest')).toBe(true)
+    await store.cancel(r.id)
+    expect(store.hasPendingRitualRow('daily-digest')).toBe(false)
+  })
+
+  test('hasPendingRitualRow throws on a malformed id', () => {
+    const store = new ReminderStore(db)
+    expect(() => store.hasPendingRitualRow('../nope')).toThrow(/RITUAL_ID_RE/)
   })
 })
