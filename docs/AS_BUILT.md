@@ -4506,3 +4506,50 @@ landmine — `max-oauth-multi-sub` is Managed-consumed, the wow-moment cluster i
 for a queued plan — so an aggressive sweep is contraindicated here) + the known
 engineering follow-ups (RA2/F8/P6/O5/F6/Core-scheduler) + W3 transcript unification. A
 second fresh-eyes certification audit followed this closeout.
+
+## 2026-07-21 — Executor-mode reminders Task 7: bundled generic read-only example rituals (WIRED + SERVED)
+
+Shipped the first two ENGINE ritual defs so a fresh Neutron install has working
+read-only ritual examples out of the box — the ritual plumbing (tasks 2-6, merged
+`63fe4119`) went live with ZERO registered defs; this closes that gap while staying
+UNAPPROVED (task 8 owns the owner's approval act).
+
+- **Templates** — `reminders/rituals/morning-brief.md` + `reminders/rituals/evening-wrap.md`:
+  GENERIC, instance-agnostic read-only prompts that Glob `Projects/*/STATUS.md` from
+  the instance root, read them (+ any docs they point at), and post a short digest.
+  They are the ENGINE default — NOT Ryan's Vajra ritual content (that is OWNER data
+  via import). No `~/vajra`/`gog`/`gh`/`entities`/Telegram/Bash references (static
+  half of the ported-prompt silent-no-op guard).
+- **`reminders/bundled-rituals.ts`** — `BUNDLED_RITUAL_DEFS` (frozen; exactly
+  `morning-brief` + `evening-wrap`, each `scope:'instance'`, `tool_surface:['Read',
+  'Glob','Grep']`, `egress:'none'`, `silent:false` — zero intersection with
+  `GATED_WRITE_TOOLS`, so the fire-time gate never trips); `BUNDLED_RITUAL_TEMPLATES_DIR`
+  + `bundledTemplatePathFor(id)` (module-dir resolved, the `prompt-path.ts` pattern);
+  `seedBundledRituals({rituals_dir,log?})` — COPY-IF-ABSENT into `<owner_home>/rituals/`
+  (an owner-edited / imported file is NEVER clobbered — from first seed on it is owner
+  data), NEVER throws (mkdir + each copy try/catch → log + continue; a failed seed
+  surfaces later as a durable `missing_prompt` fire-time skip); `registerBundledRituals(
+  registry)` (makes defs KNOWN — does NOT approve them).
+- **`open/composer.ts` `ritual_executor_factory`** (was ~:1885) — the closure now
+  builds the registry rooted at `<owner_home>/rituals`, `seedBundledRituals(...)`,
+  `registerBundledRituals(registry)`, and passes that registry to
+  `createRitualExecutor`. So a fresh boot SEEDS + REGISTERS both rituals — WIRED. They
+  fire only after the owner's task-8 approval; an unapproved fire lands a durable
+  `code_ritual_runs` 'skipped'/'unapproved' row (proven below).
+- **Tests** — `reminders/bundled-rituals.test.ts` (11 fast units): def shape incl. the
+  no-Bash `GATED_WRITE_TOOLS` pin; template grounding + no-Vajra-isms; seed
+  copy-if-absent / idempotency / never-clobber; register→2 frozen defs; the
+  UNAPPROVED-by-default fire through the REAL `ApprovalManager` (zero approval rows →
+  'skipped'/'unapproved', turn called 0×, nothing spawned); the approved spec-shape pin
+  (turn once, tools/prompt-bytes/cwd/timeout/model exact). `reminders/bundled-rituals.e2e.test.ts`
+  (`NEUTRON_PTY_E2E=1`-gated, mirrors `dev-channel-pty-bind.e2e.test.ts`): each SHIPPED
+  template, run with the real ritual base prompt + read-only surface against a planted
+  fixture instance, produces output citing fixture markers (RELAY-4471 / CERT-ROTATE-9 /
+  HARBOR-812) — the LLM-behaviour half of the silent-no-op guard. Ran green on this box
+  (`claude` 2.1.215, both rituals, ~46s).
+- Suites: `bun test reminders/` 327 pass / 2 skip (the gated e2e); wiring guards
+  (`build-core-modules-ritual-executor.test.ts`, `open-composition-fields-characterization.test.ts`)
+  green; `tsc -p reminders` + `tsc -p open` clean; eslint + dependency-cruiser clean.
+- OUT OF SCOPE (later RALPH tasks): scheduling/approval UX (task 8), memory-tier work
+  (task 9), SYSTEM-OVERVIEW ritual-executor section (task 10), any writing/Bash ritual
+  (stays gated on the OS-sandbox sprint).

@@ -115,6 +115,17 @@ export type {
   RitualApprovalRequestResult,
 } from './ritual-approval.ts'
 
+// Bundled generic read-only example rituals (plan task 7) — ENGINE seeds. The
+// composer factory seeds these copy-if-absent into `<owner_home>/rituals/` and
+// registers them, UNAPPROVED, at boot.
+export {
+  BUNDLED_RITUAL_DEFS,
+  BUNDLED_RITUAL_TEMPLATES_DIR,
+  bundledTemplatePathFor,
+  seedBundledRituals,
+  registerBundledRituals,
+} from './bundled-rituals.ts'
+
 export { buildStatusMdContextSource } from './context.ts'
 export {
   classifyReminderMessage,

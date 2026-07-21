@@ -214,6 +214,8 @@ import {
   createRitualExecutor,
   createRitualRunStore,
   reapOrphanRitualRuns,
+  seedBundledRituals,
+  registerBundledRituals,
   RITUAL_RUN_RETENTION_MS,
 } from '@neutronai/reminders/index.ts'
 // L3 (2026-07) — the reminder delivery impl moved UP into the gateway
@@ -1878,15 +1880,31 @@ export function buildOpenGraphComposer(
     // hoisted `subagentRegistry` the dispatch service + Trident loop use (ONE
     // registry, ONE concurrency model — the ritual lane is isolated INSIDE it),
     // spawns each ritual turn on the `cc-ritual-*` ephemeral substrate, and
-    // writes durable history to `code_ritual_runs`. The registry is rooted at
-    // `<owner_home>/rituals` with ZERO defs registered until task 7 (bundled
-    // example rituals) / task 8 (agent-callable registration), so no ritual
-    // fires yet — the plumbing is live, the ritual CONTENT is user data.
+    // writes durable history to `code_ritual_runs`.
+    //
+    // Task 7 — the registry is rooted at `<owner_home>/rituals` and the two
+    // bundled GENERIC read-only defs (morning-brief, evening-wrap) are seeded
+    // COPY-IF-ABSENT into that dir + registered here at boot. They surface only
+    // ['Read','Glob','Grep'] (Layer 1 `--tools` default-deny contains them). They
+    // register but stay UNAPPROVED until the owner's task-8 approval act, so no
+    // ritual can FIRE yet — an unapproved fire lands a durable 'skipped'/'unapproved'
+    // row (the plumbing is live; approval is the gate). Seeding is copy-if-absent:
+    // an owner-edited or imported `<owner_home>/rituals/<id>.md` is NEVER clobbered —
+    // from the first seed on it is OWNER data (the ritual CONTENT stays user data),
+    // and the content-hash approval check re-verifies the LIVE bytes every fire, so
+    // a later owner edit drops approval by design.
     const ritual_executor_factory: CompositionInput['ritual_executor_factory'] =
       llmPool !== null
-        ? ({ approvals }) =>
-            createRitualExecutor({
-              registry: createRitualRegistry({ rituals_dir: joinPath(owner_home, 'rituals') }),
+        ? ({ approvals }) => {
+            const rituals_dir = joinPath(owner_home, 'rituals')
+            const registry = createRitualRegistry({ rituals_dir })
+            seedBundledRituals({
+              rituals_dir,
+              log: (m) => log.warn('ritual_seed_failed', { detail: m }),
+            })
+            registerBundledRituals(registry)
+            return createRitualExecutor({
+              registry,
               approvals,
               project_slug,
               instance_key: owner_handle,
@@ -1911,8 +1929,9 @@ export function buildOpenGraphComposer(
               // prerequisite sprint; until it lands a 'project'-scoped ritual
               // FAILS CLOSED (the executor lands a durable 'skipped' row) rather
               // than silently over-granting the owner-wide dir (Argus r1 MAJOR —
-              // permission over-grant). No project-scoped ritual can register/fire
-              // yet (zero defs until task 7), so this is defensive.
+              // permission over-grant). The task-7 bundled defs are both
+              // scope:'instance', so no project-scoped ritual can fire yet — this
+              // is defensive against a future project-scoped registration.
               scope_cwd: (scope) => {
                 if (scope !== 'instance') {
                   throw new Error(
@@ -1922,6 +1941,7 @@ export function buildOpenGraphComposer(
                 return owner_home
               },
             })
+          }
         : undefined
 
     // Boot reap + retention prune of `code_ritual_runs` (plan task 5). NOT
