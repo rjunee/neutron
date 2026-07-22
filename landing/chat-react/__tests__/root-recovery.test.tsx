@@ -283,11 +283,16 @@ describe('mount() — renders through the onUncaughtError-configured root (#380)
       }) as unknown as { unmount: () => void }
     })
     expect(container.querySelector('[data-testid="ok"]')).not.toBeNull()
-    expect(root).not.toBeNull()
-    expect(typeof root?.unmount).toBe('function')
+    // `root` is assigned inside the act(async …) closure, which TS's outer
+    // control-flow does not track — so it stays pinned to the `null` initializer
+    // type. Re-annotate through a typed local so `.not.toBeNull()` narrows to the
+    // Root shape (not `never`) and `.unmount` is visible.
+    const liveRoot = root as { unmount: () => void } | null
+    expect(liveRoot).not.toBeNull()
+    expect(typeof liveRoot?.unmount).toBe('function')
 
     await act(async () => {
-      root?.unmount()
+      liveRoot?.unmount()
     })
     container.remove()
   })

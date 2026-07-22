@@ -186,9 +186,9 @@ export function buildUncaughtErrorHandler(
   policy: RecoveryPolicy,
   schedule: (fn: () => void) => void,
   ctx: UncaughtErrorHandlerCtx,
-): (error: unknown, errorInfo: { componentStack?: string }) => void {
+): (error: unknown, errorInfo: { componentStack?: string | undefined }) => void {
   let recovering = false
-  return (error: unknown, errorInfo: { componentStack?: string }): void => {
+  return (error: unknown, errorInfo: { componentStack?: string | undefined }): void => {
     console.error('[chat-react] uncaught root error — auto-recovering', error, errorInfo?.componentStack)
     // One recovery per root. Suppress the concurrent-error race described above.
     if (recovering) return
