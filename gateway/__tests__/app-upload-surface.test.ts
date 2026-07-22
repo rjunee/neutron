@@ -367,6 +367,10 @@ describe('app-upload gateway surface — POST /api/app/upload', () => {
     })
     expect(get.status).toBe(200)
     expect(get.headers.get('content-type')).toBe('application/pdf')
+    // Argus r2 #2 — a served document must pin its declared type (no MIME
+    // sniffing into an executable content-type) and serve inline for preview.
+    expect(get.headers.get('x-content-type-options')).toBe('nosniff')
+    expect(get.headers.get('content-disposition')).toBe('inline')
     const round = new Uint8Array(await get.arrayBuffer())
     expect(round.length).toBe(bytes.length)
     // ETag → content hash; a matching If-None-Match yields 304.

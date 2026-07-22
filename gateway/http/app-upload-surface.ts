@@ -342,6 +342,12 @@ async function handleGet(req: Request, ctx: GetContext): Promise<Response> {
       'Content-Length': String(bytes.length),
       'Cache-Control': 'private, max-age=31536000, immutable',
       ETag: `"${ctx.hash}"`,
+      // Argus r2 #2 — pin the declared type so a browser never MIME-sniffs a
+      // served blob into an executable content-type (defense-in-depth atop the
+      // bearer + user-id match above; matters now that non-image documents
+      // (PDF) are served inline). `inline` so images/PDFs still preview in-app.
+      'X-Content-Type-Options': 'nosniff',
+      'Content-Disposition': 'inline',
     },
   })
 }

@@ -20,7 +20,9 @@
 import { describe, expect, it } from 'bun:test';
 
 import {
+  attachmentBasename,
   isAuthedAttachmentUrl,
+  isImageAttachmentUrl,
   resolveAttachmentSource,
 } from '../lib/attachment-url';
 
@@ -104,5 +106,54 @@ describe('resolveAttachmentSource', () => {
     expect(resolveAttachmentSource('/api/app/upload/sam/abc.png', null)).toEqual({
       uri: '/api/app/upload/sam/abc.png',
     });
+  });
+});
+
+// Argus r2 BLOCKER #1 — the mobile bubble must branch image-vs-document so a
+// PDF renders as a file chip, not a broken <Image>. These predicates drive that
+// branch (`app/components/AuthedAttachmentImage.tsx`).
+describe('isImageAttachmentUrl', () => {
+  it('is true for image extensions (authed upload URLs)', () => {
+    for (const u of [
+      '/api/app/upload/sam/abc.png',
+      '/api/app/upload/sam/abc.jpg',
+      '/api/app/upload/sam/abc.jpeg',
+      '/api/app/upload/sam/abc.gif',
+      '/api/app/upload/sam/abc.webp',
+      'http://127.0.0.1:8080/api/app/upload/sam/abc.png?v=1',
+    ]) {
+      expect(isImageAttachmentUrl(u)).toBe(true);
+    }
+  });
+
+  it('is true for a data:image/ URL', () => {
+    expect(isImageAttachmentUrl('data:image/png;base64,AAAA')).toBe(true);
+  });
+
+  it('is FALSE for a PDF (routes to the file chip, not <Image>)', () => {
+    expect(isImageAttachmentUrl('/api/app/upload/sam/abc.pdf')).toBe(false);
+    expect(isImageAttachmentUrl('http://127.0.0.1:8080/api/app/upload/sam/abc.pdf')).toBe(false);
+  });
+
+  it('is FALSE for a non-image data URL', () => {
+    expect(isImageAttachmentUrl('data:application/pdf;base64,AAAA')).toBe(false);
+  });
+});
+
+describe('attachmentBasename', () => {
+  it('strips the path and any query/hash', () => {
+    expect(attachmentBasename('/api/app/upload/sam/deadbeef.pdf')).toBe('deadbeef.pdf');
+    expect(attachmentBasename('http://127.0.0.1:8080/api/app/upload/sam/x.pdf?v=2#p')).toBe('x.pdf');
+  });
+
+  it('decodes percent-escapes but never throws on a malformed one', () => {
+    expect(attachmentBasename('/x/report%20final.pdf')).toBe('report final.pdf');
+    // Malformed escape → decodeURIComponent throws; we fall back to the raw
+    // segment rather than crashing the chat view.
+    expect(attachmentBasename('/x/report%ZZ.pdf')).toBe('report%ZZ.pdf');
+  });
+
+  it('falls back to "attachment" for an empty basename', () => {
+    expect(attachmentBasename('/api/app/upload/sam/')).toBe('attachment');
   });
 });

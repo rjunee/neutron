@@ -4687,3 +4687,46 @@ now reach the agent for the first time.
   alongside `lastUserText`; the recovered turn re-binds `attachments` too. Tests (f)/(g)
   in `build-live-agent-turn-attachments.test.ts` prove the retried prompt re-embeds the
   path (and injects no block when the original had none).
+
+### Round-3 hardening (Argus review round-2, 2026-07-21)
+
+- **BLOCKER — mobile PDFs no longer paint as broken images.** The Expo bubble
+  routed EVERY attachment URL through `AuthedAttachmentImage` (a pure RN `<Image>`),
+  so a PDF (newly uploadable on mobile in M2) rendered as a broken thumbnail with no
+  open affordance — unlike the web file chip. Now `AuthedAttachmentImage` branches on
+  `isImageAttachmentUrl(url)`: a non-image renders as `AuthedAttachmentFile`, a
+  tappable `📎 <basename>` chip that opens the document (non-authed URLs open
+  directly; our bearer-authed `/api/app/upload/…` URLs are fetched WITH the bearer
+  then opened — RN-web via an object URL in a new tab, native via a base64 data URL
+  handed to `WebBrowser`). Two new plain-TS helpers in `app/lib/attachment-url.ts`
+  (`isImageAttachmentUrl`, `attachmentBasename`, both unit-tested, mirroring the web
+  client's) drive the branch. This is the mobile analogue of the web file chip; it
+  also settles the app side of the "non-image routed as image content-part" semantic
+  (the web `message-adapter` note) — the renderer, not the content-part type, decides.
+- **`gateway/http/app-upload-surface.ts` — served blobs pin their type.** The GET 200
+  now sets `X-Content-Type-Options: nosniff` + `Content-Disposition: inline` so a
+  browser never MIME-sniffs a served document into an executable content-type
+  (defense-in-depth atop the existing bearer + user-id match; matters now that PDFs
+  are served inline). Asserted in the PDF-serve test.
+- **`open/wiring/app-ws.ts` — inbound attachment list is deduped + bounded.** New
+  exported `sanitizeInboundAttachments(raw)` keeps only non-empty strings, DEDUPS, and
+  CAPS at `MAX_INBOUND_ATTACHMENTS` (16) — each survivor drives a downstream
+  `existsSync` + `<user_attachments>` prompt line, so a buggy/hostile client can't
+  fan out unboundedly. Replaces the inline filter at the receiver; unit-tested.
+- **`app/components/ChatSyncSurface.tsx` — native picker mirrors the server whitelist.**
+  `DocumentPicker.getDocumentAsync` moved from `type: '*/*'` to the images+PDF+ZIP
+  whitelist so the OS picker greys out unsupported files up front instead of letting a
+  pick sail through to a raw 415.
+- **Real-resolver integration test** (`build-live-agent-turn-attachments-real-resolver.test.ts`):
+  seeds a real blob on disk, resolves its URL with the SHIPPED
+  `resolveChatAttachmentLocalPath`, and asserts `buildAttachmentsFragment` embeds the
+  on-disk path + MIME (and drops a missing blob) — closing the "stub-only resolver"
+  coverage gap through the production seam.
+- Suites: `app/__tests__/attachment-authed-source.test.ts`, `gateway/__tests__/app-upload-surface.test.ts`,
+  `gateway/wiring/__tests__/build-live-agent-turn-attachments-real-resolver.test.ts`,
+  `open/__tests__/open-wiring-app-ws.test.ts` green; `tsc` clean (root + `app/`).
+- NOT changed (documented-acceptable, single-owner posture): `resolveChatAttachmentLocalPath`
+  cross-`user_id` read (one owner; contained by `existsSync` + per-tenant process
+  isolation) and the web `message-adapter` routing non-images as `type:'image'` content
+  parts (assistant-ui exposes only text|image parts here; the renderer branches on the
+  URL, so it is correct in practice).

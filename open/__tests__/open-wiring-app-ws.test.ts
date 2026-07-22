@@ -32,7 +32,12 @@ import type { AppSocketButtonPromptRouter, AppSocketImportProgressRouter } from 
 import type { OutgoingMessage } from '@neutronai/channels/types.ts'
 import type { OpenWiringContext } from '../wiring/context.ts'
 import { late } from '../wiring/late.ts'
-import { wireAppWs, type OnboardingMsgEmit } from '../wiring/app-ws.ts'
+import {
+  MAX_INBOUND_ATTACHMENTS,
+  sanitizeInboundAttachments,
+  wireAppWs,
+  type OnboardingMsgEmit,
+} from '../wiring/app-ws.ts'
 import type { OpenComposition } from '../composer.ts'
 
 // ── C3d compile-level assertion: `OpenComposition`'s required-pick makes every
@@ -145,6 +150,47 @@ function fakeOpenWs(channel_topic_id: string): Parameters<
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
   } as any
 }
+
+// Argus r2 #4 — the inbound attachment list is client-supplied; each survivor
+// drives a downstream existsSync + <user_attachments> prompt line, so it must be
+// deduped and bounded.
+describe('sanitizeInboundAttachments', () => {
+  test('keeps only non-empty strings', () => {
+    expect(
+      sanitizeInboundAttachments([
+        '/api/app/upload/sam/a.png',
+        '',
+        42,
+        null,
+        undefined,
+        { url: 'x' },
+      ]),
+    ).toEqual(['/api/app/upload/sam/a.png'])
+  })
+
+  test('is empty for a non-array', () => {
+    expect(sanitizeInboundAttachments(undefined)).toEqual([])
+    expect(sanitizeInboundAttachments('nope')).toEqual([])
+    expect(sanitizeInboundAttachments(null)).toEqual([])
+  })
+
+  test('dedups repeated URLs (same blob injected once)', () => {
+    expect(
+      sanitizeInboundAttachments([
+        '/api/app/upload/sam/a.png',
+        '/api/app/upload/sam/a.png',
+        '/api/app/upload/sam/b.pdf',
+      ]),
+    ).toEqual(['/api/app/upload/sam/a.png', '/api/app/upload/sam/b.pdf'])
+  })
+
+  test(`caps at MAX_INBOUND_ATTACHMENTS (${MAX_INBOUND_ATTACHMENTS})`, () => {
+    const many = Array.from({ length: MAX_INBOUND_ATTACHMENTS + 20 }, (_, i) => `/api/app/upload/sam/${i}.png`)
+    const out = sanitizeInboundAttachments(many)
+    expect(out.length).toBe(MAX_INBOUND_ATTACHMENTS)
+    expect(out[0]).toBe('/api/app/upload/sam/0.png')
+  })
+})
 
 describe('wireAppWs (C3d carve #6)', () => {
   test('constructs the adapter, binds the appWs seam, and returns the surface', () => {

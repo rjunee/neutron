@@ -220,7 +220,18 @@ export function ChatSyncSurface({
   const handleNativePickAttachments = useCallback(async (): Promise<ComposerAttachment[]> => {
     try {
       const res = await DocumentPicker.getDocumentAsync({
-        type: '*/*',
+        // Argus r2 #7 — mirror the server whitelist (images + PDF + history-
+        // import ZIP) so the OS picker greys out unsupported files up front,
+        // instead of letting a pick sail through to a raw 415 from the upload
+        // surface. Kept in sync with `mimeToExt` (`app/lib/upload-client.ts`).
+        type: [
+          'image/png',
+          'image/jpeg',
+          'image/gif',
+          'image/webp',
+          'application/pdf',
+          'application/zip',
+        ],
         multiple: false,
         copyToCacheDirectory: true,
       });

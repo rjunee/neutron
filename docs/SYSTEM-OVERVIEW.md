@@ -4495,12 +4495,19 @@ now-nonexistent vanilla client.
   excluded (inline-script XSS). Magic-byte sniffing (`gateway/storage/binary-types.ts`)
   is authoritative — a declared type that disagrees with the sniff is a 400
   `content_type_spoof`. A NON-image attachment renders in the bubble as a
-  downloadable file chip (not a broken `<img>`) via the SAME authed fetch;
-  `message-adapter.ts` routes every attachment through the authed renderer, which
-  branches on `isImageAttachmentUrl`.
+  downloadable file chip (not a broken image) via the SAME authed fetch — on BOTH
+  surfaces: web (`message-adapter.ts` routes every attachment through the authed
+  renderer, which branches on `isImageAttachmentUrl`) AND mobile
+  (`app/components/AuthedAttachmentImage.tsx` delegates non-images to
+  `AuthedAttachmentFile`, a tappable `📎` chip; `app/lib/attachment-url.ts` holds the
+  shared `isImageAttachmentUrl` / `attachmentBasename` predicates). Served blobs pin
+  `X-Content-Type-Options: nosniff` + `Content-Disposition: inline` so a browser never
+  MIME-sniffs a document into an executable type. The native picker's accept list
+  mirrors the server whitelist.
 - **Attachment → agent threading (M2, 2026-07-21):** the upload URLs are no longer
   dropped at the WS receiver. `open/wiring/app-ws.ts` sanitizes
-  `adapter_metadata.attachments` to strings and passes them on the
+  `adapter_metadata.attachments` (via `sanitizeInboundAttachments` — non-empty strings,
+  deduped, capped at `MAX_INBOUND_ATTACHMENTS`=16) and passes them on the
   `LiveAgentTurnRequest`; `gateway/wiring/build-live-agent-turn.ts` resolves each
   URL to its local blob path (`resolveChatAttachmentLocalPath`, supplied by the
   composer over `owner_home`) and splices a `<user_attachments>` fragment of the

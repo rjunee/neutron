@@ -133,6 +133,34 @@ const OPEN_RUN_CHANNEL_KIND: ChannelKind = 'app_socket'
  */
 const log = createLogger('open-app-ws')
 
+/** Upper bound on attachments threaded from one inbound send. A well-behaved
+ *  client sends one file per turn (single-file picker, web + native); the cap
+ *  bounds a malicious/buggy client from driving an unbounded `existsSync` +
+ *  prompt-line fan-out per turn (Argus r2 #4). */
+export const MAX_INBOUND_ATTACHMENTS = 16
+
+/**
+ * Sanitize the client-supplied `adapter_metadata.attachments` list before it is
+ * threaded onto a live-agent turn: keep only non-empty strings, DEDUP (a client
+ * that echoes the same URL twice shouldn't inject the same blob twice), and CAP
+ * at {@link MAX_INBOUND_ATTACHMENTS} (each survivor drives a downstream
+ * `existsSync` + `<user_attachments>` prompt line). Pure + exported for unit
+ * coverage; the receiver in {@link wireAppWs} calls it on every inbound.
+ */
+export function sanitizeInboundAttachments(raw: unknown): string[] {
+  const list = Array.isArray(raw) ? raw : []
+  const out: string[] = []
+  const seen = new Set<string>()
+  for (const a of list) {
+    if (typeof a !== 'string' || a.length === 0) continue
+    if (seen.has(a)) continue
+    seen.add(a)
+    out.push(a)
+    if (out.length >= MAX_INBOUND_ATTACHMENTS) break
+  }
+  return out
+}
+
 export function resolveOpenImportPromptEmission(
   prompt: ButtonPrompt,
   phase: string | null,
@@ -761,11 +789,8 @@ export function wireAppWs(ctx: OpenWiringContext, deps: WireAppWsDeps): WiredApp
       // non-empty strings and passed on the turn request — the live-agent turn
       // resolves each to a local blob path and injects it into the dispatched
       // prompt so the agent can `Read` it (images AND PDFs).
-      const rawAttachments = Array.isArray(event.adapter_metadata?.['attachments'])
-        ? (event.adapter_metadata!['attachments'] as unknown[])
-        : []
-      const attachments = rawAttachments.filter(
-        (a): a is string => typeof a === 'string' && a.length > 0,
+      const attachments = sanitizeInboundAttachments(
+        event.adapter_metadata?.['attachments'],
       )
       if (text.length === 0 && attachments.length === 0) return
       const userText = text.length > 0 ? text : 'Sent an attachment.'
