@@ -22,6 +22,7 @@ import {
   PERSONALITY_SUGGESTIONS_KEY,
   PERSONALITY_SUGGESTIONS_SOURCE_KEY,
   PERSONALITY_SUGGESTIONS_FINGERPRINT_KEY,
+  PERSONALITY_SUGGESTIONS_ANCHOR_HISTORY_KEY,
   type LivePersonalityStateStore,
 } from '../live-personality-suggestions.ts'
 import type {
@@ -192,6 +193,53 @@ describe('maybeKickoff — llm result persistence', () => {
       'Moana',
       'Bilbo Baggins',
     ])
+  })
+
+  it('writes the anchor history and ACCUMULATES it across a regeneration', async () => {
+    const first: PersonalityCharacterSuggestions = {
+      personalized: [{ name: 'Old One', why: 'a' }],
+      wild: [{ name: 'Old Wild', why: 'b' }],
+    }
+    const second: PersonalityCharacterSuggestions = {
+      personalized: [{ name: 'New One', why: 'c' }],
+      wild: [{ name: 'Old Wild', why: 'b' }], // repeat — must not duplicate in history
+    }
+    let which: PersonalityCharacterSuggestions = first
+    const { suggester } = fakeSuggester(async () => ({ suggestions: which, source: 'llm' }))
+    const { store, current, setOnGet } = fakeStore({
+      phase: 'work_interview',
+      phase_state: { ...SIGNAL_STATE },
+      last_advanced_at: 1,
+    })
+    const { fire, settle } = capturingFire()
+    const coord = buildLivePersonalitySuggestionCoordinator({
+      suggester,
+      stateStore: store,
+      owner_slug: 'acme',
+      seed: 'acme',
+      fireAndForget: fire,
+    })
+    // First generation (turn state == stored signals → re-read fingerprint matches).
+    coord.maybeKickoff('u1', { phase: 'work_interview' as never, phase_state: { ...SIGNAL_STATE } })
+    await settle()
+    let hist = current()!.phase_state[PERSONALITY_SUGGESTIONS_ANCHOR_HISTORY_KEY]
+    expect(hist).toEqual(['Old One', 'Old Wild'])
+
+    // A signal change forces a regeneration to a different personalized set. The
+    // re-read row must carry the drifted signals (so the fingerprint matches and the
+    // picks are NOT discarded) AND the accumulated history from the first pass.
+    which = second
+    const drifted = { ...SIGNAL_STATE, primary_projects: ['brand new project'] }
+    setOnGet({
+      phase: 'work_interview',
+      phase_state: { ...current()!.phase_state, primary_projects: ['brand new project'] },
+      last_advanced_at: 1,
+    })
+    coord.maybeKickoff('u1', { phase: 'work_interview' as never, phase_state: { ...drifted } })
+    await settle()
+    hist = current()!.phase_state[PERSONALITY_SUGGESTIONS_ANCHOR_HISTORY_KEY]
+    // History accumulates the new name, keeps the old ones, and de-dupes 'Old Wild'.
+    expect(hist).toEqual(['Old One', 'Old Wild', 'New One'])
   })
 
   it('fallback result → NO upsert; a later kickoff retries', async () => {
@@ -374,6 +422,40 @@ describe('candidatePersonalityAnchorNames', () => {
     expect(names).toContain('Sherlock Holmes')
     expect(names).toContain('Ada Lovelace') // pool-only
   })
+
+  // Argus r2 minor: a pick RENDERED on turn N must still settle personality when
+  // tapped on turn N+1, even after a mid-turn signal change regenerated the memo to a
+  // different personalized set. The anchor history preserves every previously-shown
+  // custom name.
+  it('unions the anchor history — a previously-rendered name no longer in the current memo still anchors', () => {
+    const state = {
+      // Current memo has DIFFERENT personalized names (regenerated); valid shape
+      // (the parser requires 3 personalized + 2 wild).
+      [PERSONALITY_SUGGESTIONS_KEY]: {
+        personalized: [
+          { name: 'Fresh Persona', why: 'new' },
+          { name: 'Fresh Two', why: 'new' },
+          { name: 'Fresh Three', why: 'new' },
+        ],
+        wild: [
+          { name: 'Fresh Wild', why: 'new' },
+          { name: 'Fresh Wild Two', why: 'new' },
+        ],
+      } satisfies PersonalityCharacterSuggestions,
+      // History carries an earlier custom pick that is NOT in the current memo.
+      [PERSONALITY_SUGGESTIONS_ANCHOR_HISTORY_KEY]: ['Stale Persona'],
+    }
+    const names = candidatePersonalityAnchorNames(state)
+    expect(names).toContain('Fresh Persona') // current memo
+    expect(names).toContain('Stale Persona') // history-only, still anchors
+  })
+
+  it('ignores a malformed anchor-history value (non-array / non-string entries)', () => {
+    const a = candidatePersonalityAnchorNames({ [PERSONALITY_SUGGESTIONS_ANCHOR_HISTORY_KEY]: 'nope' })
+    expect(a).toContain('Sherlock Holmes')
+    const b = candidatePersonalityAnchorNames({ [PERSONALITY_SUGGESTIONS_ANCHOR_HISTORY_KEY]: [42, '', 'Kept Name'] })
+    expect(b).toContain('Kept Name')
+  })
 })
 
 describe('signal helpers', () => {
@@ -393,5 +475,22 @@ describe('signal helpers', () => {
     expect(hasAnySignal(computeSuggesterSignals({}))).toBe(false)
     expect(hasAnySignal(computeSuggesterSignals({ user_first_name: 'Sam' }))).toBe(true)
     expect(hasAnySignal(computeSuggesterSignals({ primary_projects: ['x'] }))).toBe(true)
+  })
+
+  // Argus r2 nit: the fingerprint tracks WHICH projects/interests are known, not the
+  // order they are stored in — a bare order flip must not force a ~45s regeneration.
+  it('signalsFingerprint is invariant to project/interest array order', () => {
+    const a = signalsFingerprint(
+      computeSuggesterSignals({ user_first_name: 'Sam', primary_projects: ['a', 'b'], non_work_interests: ['x', 'y'] }),
+    )
+    const b = signalsFingerprint(
+      computeSuggesterSignals({ user_first_name: 'Sam', primary_projects: ['b', 'a'], non_work_interests: ['y', 'x'] }),
+    )
+    expect(b).toBe(a)
+    // A genuinely new project still changes the fingerprint.
+    const c = signalsFingerprint(
+      computeSuggesterSignals({ user_first_name: 'Sam', primary_projects: ['a', 'b', 'c'], non_work_interests: ['x', 'y'] }),
+    )
+    expect(c).not.toBe(a)
   })
 })

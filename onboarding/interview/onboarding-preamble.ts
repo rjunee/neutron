@@ -482,8 +482,8 @@ const STEP_GUARD_COPY: Record<RequiredField, StepGuardCopy> = {
         'a tappable [[OPTIONS]] block (plus a "Something else (I\'ll describe it)" option).',
         'Do not invent a different list, and do not skip the buttons:',
       ]
-      // The `why` gloss helps you PRESENT each option well; render the option text
-      // itself as just the name. Parentheses, never em dashes (owner-facing copy).
+      // Render each option as `name (why)` — the parenthetical `why` gloss helps the
+      // owner pick. Parentheses, never em dashes (owner-facing copy).
       for (const c of ctx.personality_characters) {
         lines.push(`  - ${c.name} (${c.why})`)
       }

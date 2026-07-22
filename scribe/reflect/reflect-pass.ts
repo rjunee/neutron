@@ -99,6 +99,7 @@ import { composeReservedPrompt, parseReservedExtraction } from './reserved-kinds
 import {
   clusterCorrections,
   composePatternPage,
+  stablePatternSlug,
   DEFAULT_CORRECTION_PATTERN_JACCARD,
   DEFAULT_CORRECTION_PATTERN_MIN_OCCURRENCES,
   type CorrectionEntry,
@@ -336,9 +337,11 @@ export async function runReflectPass(deps: ReflectPassDeps): Promise<ReflectRepo
  * promote each ≥N-occurrence cluster to a kind-`concept` entity page through the
  * pass's own `writeEntity` + `syncHook` (→ GBrain + `entities/INDEX.md`). No LLM.
  * Idempotent by construction: the promoted page's slug is derived by
- * `stablePatternSlug` from the cluster's majority-`right` vocabulary digest
- * (window-invariant — survives occurrences ageing out of the scan window), timeline
- * rows dedupe on `(ts,source,body)`, and a
+ * `stablePatternSlug` from the cluster SEED's `right` vocabulary (membership-
+ * independent — does not move as non-seed members age in/out of the scan window),
+ * qualifying clusters that derive the SAME slug are MERGED before writing (so a
+ * same-pass slug collision appends occurrences instead of losing the second cluster
+ * to a CAS conflict), timeline rows dedupe on `(ts,source,body)`, and a
  * byte-identical re-render is `changed:false` (no hook fire) — so re-promoting the
  * same cluster across passes is a structural no-op. Best-effort per cluster; the
  * step NEVER throws out of the pass.
@@ -365,8 +368,23 @@ async function promoteCorrectionPatterns(
   const minOcc = deps.correctionPatternMinOccurrences ?? DEFAULT_CORRECTION_PATTERN_MIN_OCCURRENCES
   const clusters = clusterCorrections(entries, threshold)
 
+  // Merge any qualifying clusters that derive the SAME stable slug into one page
+  // BEFORE writing. Two distinct clusters can collide on identity (genuinely-
+  // identical seed `right` vocabulary); without merging, the first cluster's write
+  // creates the page and the second's write — using `ifBodyEquals: null` because the
+  // page wasn't in the pass-start snapshot — hits a CAS conflict and its occurrences
+  // are silently dropped forever, never self-healing (Argus r2). Merging appends both
+  // clusters' timeline rows to one page (rows dedupe on `(ts,source,body)`).
+  const bySlug = new Map<string, CorrectionEntry[]>()
   for (const cluster of clusters) {
     if (cluster.length < minOcc) continue
+    const slug = stablePatternSlug(cluster)
+    const merged = bySlug.get(slug)
+    if (merged !== undefined) merged.push(...cluster)
+    else bySlug.set(slug, [...cluster])
+  }
+
+  for (const cluster of bySlug.values()) {
     try {
       const page = composePatternPage(cluster)
       // ids are `c-<base36>`, so the derived slug is SLUG_REGEX-safe — but a

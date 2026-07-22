@@ -102,6 +102,29 @@ describe('stablePatternSlug — window invariance (Argus r2 minor)', () => {
     expect(other).not.toBe(tabs)
     expect(SLUG_REGEX.test(other)).toBe(true)
   })
+
+  // Argus r2 BLOCKER (2 reviewers): the interim majority-`right`-vocabulary digest
+  // was NOT membership-independent — the "tokens present in a majority of the CURRENT
+  // members" set shifts as members age in/out of the window, even when the SEED is
+  // unchanged. Seed-derived identity fixes it: the reviewer's exact counterexample.
+  test('slug is stable when the majority token set shifts but the seed is unchanged', () => {
+    // Seed (oldest) is constant across both windows; only non-seed members change.
+    const SEED: CorrectionEntry = { id: 'c-s', ts: '2026-09-01T00:00:00.000Z', wrong: 'w', right: 'alpha beta', why: 'y' }
+    const M1: CorrectionEntry = { id: 'c-m1', ts: '2026-09-02T00:00:00.000Z', wrong: 'w', right: 'alpha gamma', why: 'y' }
+    const M2: CorrectionEntry = { id: 'c-m2', ts: '2026-09-03T00:00:00.000Z', wrong: 'w', right: 'beta gamma', why: 'y' }
+    const M3: CorrectionEntry = { id: 'c-m3', ts: '2026-09-04T00:00:00.000Z', wrong: 'w', right: 'gamma delta', why: 'y' }
+    // Window A majority = {alpha,beta,gamma}; window B majority = {beta,gamma} — the
+    // old scheme would have minted two slugs. Seed 'alpha beta' is constant → one slug.
+    const windowA = stablePatternSlug([SEED, M1, M2])
+    const windowB = stablePatternSlug([SEED, M2, M3])
+    expect(windowB).toBe(windowA)
+  })
+
+  test('slug ignores caller ordering — derives from the oldest member regardless', () => {
+    const a = stablePatternSlug([TAB_3, TAB_1, TAB_2])
+    const b = stablePatternSlug([TAB_2, TAB_3, TAB_1])
+    expect(b).toBe(a)
+  })
 })
 
 describe('composePatternPage', () => {

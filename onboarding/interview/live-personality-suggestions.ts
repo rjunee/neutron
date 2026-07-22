@@ -67,6 +67,16 @@ export const PERSONALITY_SUGGESTIONS_SOURCE_KEY =
  */
 export const PERSONALITY_SUGGESTIONS_FINGERPRINT_KEY =
   'personality_character_suggestions_fingerprint'
+/**
+ * NEW (2026-07-22, Argus r2 minor) — the accumulating set of every character NAME
+ * ever persisted as an `'llm'` memo for this owner. `candidatePersonalityAnchorNames`
+ * unions it so a pick that was RENDERED on turn N still settles `agent_personality`
+ * when tapped on turn N+1, even if a mid-turn signal change regenerated the memo to a
+ * different personalized set in between (the current memo alone would no longer
+ * contain the tapped name). Append-only; never shrinks.
+ */
+export const PERSONALITY_SUGGESTIONS_ANCHOR_HISTORY_KEY =
+  'personality_character_anchor_history'
 
 /** The subset of signals the suggester conditions on. */
 export interface LivePersonalitySignals {
@@ -115,12 +125,18 @@ export function computeSuggesterSignals(
  * the owner told us something new (their name, another project, an interest), so
  * the memoized picks are stale and must regenerate. `user_supplied_corrections`
  * is intentionally excluded (always empty on the live path).
+ *
+ * The arrays are SORTED before stringify: the fingerprint tracks WHICH projects/
+ * interests are known, not the order they happen to be stored in. A bare order flip
+ * (`['a','b']` vs `['b','a']`) is not new information and must not invalidate a
+ * frozen `'llm'` memo — that would force an avoidable ~45s Opus regeneration (Argus
+ * r2 nit). Copies are sorted so the caller's arrays are untouched.
  */
 export function signalsFingerprint(signals: LivePersonalitySignals): string {
   return JSON.stringify([
     signals.user_first_name,
-    signals.primary_projects,
-    signals.non_work_interests,
+    [...signals.primary_projects].sort(),
+    [...signals.non_work_interests].sort(),
   ])
 }
 
@@ -162,10 +178,12 @@ export function readLiveCharacterMemo(
 
 /**
  * Every character NAME the personality step could render this owner — static
- * defaults ∪ diverse-fallback pool ∪ the memoized picks. The capture anchor
+ * defaults ∪ diverse-fallback pool ∪ the current memoized picks ∪ the anchor history
+ * (every name EVER persisted as an `'llm'` memo). The capture anchor
  * (`button-backed-answer.ts`) matches a tap/typed answer against this set
- * (lowercased by the consumer), so a pick from ANY rendered list settles
- * `agent_personality`. Case-preserving, de-duplicated.
+ * (lowercased by the consumer), so a pick from ANY previously-rendered list settles
+ * `agent_personality` — even after a mid-turn signal change regenerated the current
+ * memo to a different personalized set (Argus r2 minor). Case-preserving, de-duplicated.
  */
 export function candidatePersonalityAnchorNames(
   phase_state: Readonly<Record<string, unknown>>,
@@ -185,7 +203,17 @@ export function candidatePersonalityAnchorNames(
     for (const c of memo.suggestions.personalized) push(c.name)
     for (const c of memo.suggestions.wild) push(c.name)
   }
+  for (const n of readAnchorHistory(phase_state)) push(n)
   return out
+}
+
+/** Defensive read of the append-only anchor-history array off phase_state. */
+export function readAnchorHistory(
+  phase_state: Readonly<Record<string, unknown>>,
+): string[] {
+  const raw = phase_state[PERSONALITY_SUGGESTIONS_ANCHOR_HISTORY_KEY]
+  if (!Array.isArray(raw)) return []
+  return raw.filter((v): v is string => typeof v === 'string' && v.length > 0)
 }
 
 /** Structural subset of `OnboardingStateStore` the coordinator needs. */
@@ -302,6 +330,19 @@ export function buildLivePersonalitySuggestionCoordinator(
           })
           return
         }
+        // Accumulate every persisted name into the append-only anchor history so a
+        // pick rendered from THIS memo still settles `agent_personality` if it is
+        // tapped after a later regeneration replaced the memo (Argus r2 minor).
+        const priorHistory = readAnchorHistory(fresh.phase_state)
+        const historySeen = new Set(priorHistory.map((n) => n.toLowerCase()))
+        const anchorHistory = [...priorHistory]
+        for (const c of [...result.suggestions.personalized, ...result.suggestions.wild]) {
+          const key = c.name.toLowerCase()
+          if (c.name.length > 0 && !historySeen.has(key)) {
+            historySeen.add(key)
+            anchorHistory.push(c.name)
+          }
+        }
         await stateStore.upsert({
           owner_slug,
           user_id,
@@ -310,6 +351,7 @@ export function buildLivePersonalitySuggestionCoordinator(
             [PERSONALITY_SUGGESTIONS_KEY]: result.suggestions,
             [PERSONALITY_SUGGESTIONS_SOURCE_KEY]: 'llm',
             [PERSONALITY_SUGGESTIONS_FINGERPRINT_KEY]: fp,
+            [PERSONALITY_SUGGESTIONS_ANCHOR_HISTORY_KEY]: anchorHistory,
           },
           // Preserve the resume-window timer — a background memo write must not
           // reset `last_advanced_at` (mirrors engine-spec-resolution.ts).

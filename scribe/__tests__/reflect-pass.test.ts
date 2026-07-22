@@ -33,7 +33,12 @@ import {
   type ReflectWriteEntity,
   type ReflectDeleteEntity,
 } from '../reflect/reflect-pass.ts'
-import { stablePatternSlug, type CorrectionEntry } from '../reflect/correction-patterns.ts'
+import {
+  clusterCorrections,
+  stablePatternSlug,
+  DEFAULT_CORRECTION_PATTERN_JACCARD,
+  type CorrectionEntry,
+} from '../reflect/correction-patterns.ts'
 import type { SyncHook } from '@neutronai/runtime/entity-writer.ts'
 
 const realWrite = writeEntity as unknown as ReflectWriteEntity
@@ -1075,6 +1080,54 @@ describe('reflect step 4 — correction-pattern promotion (deterministic, no LLM
     const second = await runReflectPass(deps)
     expect(second.patternsPromoted).toBe(0) // byte-identical re-render → no write
     expect(hook.mock.calls.length).toBe(afterFirst) // writer short-circuited → no hook
+  })
+
+  // Argus r2: two DISTINCT clusters (low full-text Jaccard, so they never cluster
+  // together) can derive the SAME slug when their seeds share `right` vocabulary.
+  // Before the merge fix, the first cluster's write created the page and the second
+  // hit a CAS conflict (ifBodyEquals:null vs an existing page) — its occurrences were
+  // silently dropped forever. The fix MERGES same-slug clusters into one page so every
+  // occurrence is preserved.
+  test('same-slug distinct clusters MERGE into one page — no occurrences dropped', async () => {
+    const owner = tmpOwner()
+    // Cluster A — three "shared right vocabulary tokens" corrections with an AAAA-family
+    // wrong/why surface.
+    const A0: CorrectionEntry = { id: 'c-a0', ts: '2026-10-01T00:00:00.000Z', wrong: 'aaaa bbbb cccc dddd', right: 'shared right vocabulary tokens', why: 'eeee ffff gggg hhhh' }
+    const A1: CorrectionEntry = { id: 'c-a1', ts: '2026-10-02T00:00:00.000Z', wrong: 'aaaa bbbb cccc dddd iiii', right: 'shared right vocabulary tokens', why: 'eeee ffff gggg hhhh' }
+    const A2: CorrectionEntry = { id: 'c-a2', ts: '2026-10-03T00:00:00.000Z', wrong: 'aaaa bbbb cccc dddd jjjj', right: 'shared right vocabulary tokens', why: 'eeee ffff gggg hhhh' }
+    // Cluster B — the SAME `right`, but an MMMM-family wrong/why surface. Full-text
+    // Jaccard vs A's seed is 4/20 = 0.2 (< 0.5) so B never joins A's cluster; yet the
+    // seed `right` vocabulary is identical, so both derive the same slug.
+    const B0: CorrectionEntry = { id: 'c-b0', ts: '2026-10-04T00:00:00.000Z', wrong: 'mmmm nnnn oooo pppp', right: 'shared right vocabulary tokens', why: 'qqqq rrrr ssss tttt' }
+    const B1: CorrectionEntry = { id: 'c-b1', ts: '2026-10-05T00:00:00.000Z', wrong: 'mmmm nnnn oooo pppp uuuu', right: 'shared right vocabulary tokens', why: 'qqqq rrrr ssss tttt' }
+    const B2: CorrectionEntry = { id: 'c-b2', ts: '2026-10-06T00:00:00.000Z', wrong: 'mmmm nnnn oooo pppp vvvv', right: 'shared right vocabulary tokens', why: 'qqqq rrrr ssss tttt' }
+
+    // Sanity: they cluster into TWO groups but derive ONE slug.
+    const clusters = clusterCorrections([A0, A1, A2, B0, B1, B2], DEFAULT_CORRECTION_PATTERN_JACCARD)
+    const big = clusters.filter((c) => c.length >= 3)
+    expect(big).toHaveLength(2)
+    expect(stablePatternSlug(big[0]!)).toBe(stablePatternSlug(big[1]!))
+
+    const spy = mock(
+      async (): Promise<{ path: string; changed: boolean; newLinks: unknown[] }> => ({
+        path: 'x',
+        changed: true,
+        newLinks: [],
+      }),
+    )
+    const report = await runReflectPass({
+      ownerDataDir: owner,
+      ownSlug: OWN,
+      writeEntity: spy as unknown as ReflectPassDeps['writeEntity'],
+      now: () => t0,
+      readCorrections: () => [A0, A1, A2, B0, B1, B2],
+    })
+    // ONE write (merged), carrying ALL SIX occurrences — not two writes where the
+    // second is lost to a CAS conflict.
+    expect(spy).toHaveBeenCalledTimes(1)
+    const [input] = spy.mock.calls[0] as unknown as [Parameters<ReflectWriteEntity>[0]]
+    expect((input.body.timelineAppend as unknown[]).length).toBe(6)
+    expect(report.patternsPromoted).toBe(1)
   })
 
   test('below threshold (2 occurrences) → no promotion; scanned still counts', async () => {
