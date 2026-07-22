@@ -258,7 +258,10 @@ import {
 } from '@neutronai/gateway/wiring/project-create.ts'
 import type { CreateProjectToolService } from '@neutronai/gateway/wiring/create-project-tool.ts'
 import { createAppTasksSurface } from '@neutronai/gateway/http/app-tasks-surface.ts'
-import { createAppUploadSurface } from '@neutronai/gateway/http/app-upload-surface.ts'
+import {
+  createAppUploadSurface,
+  resolveChatAttachmentLocalPath,
+} from '@neutronai/gateway/http/app-upload-surface.ts'
 import { createAppDiagnosticsSurface } from '@neutronai/gateway/http/app-diagnostics-surface.ts'
 import { composeDiagnostics } from '@neutronai/gateway/diagnostics/diagnostics-report.ts'
 import { buildInstanceDiagnosticsSources } from '@neutronai/gateway/diagnostics/instance-sources.ts'
@@ -3233,6 +3236,13 @@ export function buildOpenGraphComposer(
               const body = await memoryIndexRead()
               return body !== null ? formatMemoryIndexFragment(body) : null
             },
+            // M2 modality threading — resolve a chat-attachment upload URL to
+            // its local blob path under `<owner_home>/chat-attachments/` so the
+            // live-agent turn can inject the path into the dispatched prompt and
+            // the agent `Read`s the image/PDF natively. Single-owner box, so a
+            // pure syscall-free URL→path map (no per-user auth) is acceptable.
+            resolveAttachment: (url: string) =>
+              resolveChatAttachmentLocalPath(owner_home, url),
             buttonStore: landing.buttonStore,
             project_slug,
             owner_home,

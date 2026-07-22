@@ -35,6 +35,7 @@ import type { NeutronChatController } from './controller.ts'
 import type { BootstrapConfig, ProjectTab } from './config.ts'
 import type { AttachmentDraft } from './useAttachmentDraft.ts'
 import { fetchAttachmentObjectUrl, isAuthedAttachmentUrl, importHistoryZip, isExportZip } from './uploads.ts'
+import { isImageAttachmentUrl } from './message-adapter.ts'
 
 type FetchImpl = (input: string, init?: RequestInit) => Promise<Response>
 
@@ -54,15 +55,28 @@ interface UploadsCtx {
 }
 const UploadsContext = createContext<UploadsCtx | null>(null)
 
+/** Basename of an attachment URL (strips the path + any query/hash), for the
+ *  non-image file chip's display + download name. Falls back to 'attachment'. */
+function attachmentBasename(url: string): string {
+  const withoutQuery = url.split(/[?#]/, 1)[0] ?? url
+  const last = withoutQuery.split('/').pop() ?? ''
+  return last.length > 0 ? decodeURIComponent(last) : 'attachment'
+}
+
 /**
- * Render one image attachment. A same-origin `/api/app/upload/…` URL is
- * bearer-authed, so we fetch it with the token and show the resulting `blob:`
- * object URL (revoked on unmount / src change). `data:` / `blob:` / external
- * `https:` URLs render directly — no auth, no fetch.
+ * Render one attachment. A same-origin `/api/app/upload/…` URL is bearer-authed,
+ * so we fetch it with the token and show the resulting `blob:` object URL
+ * (revoked on unmount / src change). `data:` / `blob:` / external `https:` URLs
+ * render directly — no auth, no fetch.
+ *
+ * An IMAGE renders as an `<img>`; a NON-image (e.g. a PDF) renders as a
+ * downloadable file chip (basename + open/download link) using the SAME authed
+ * fetch — so a document never paints as a broken `<img>`.
  */
 function AttachmentImage({ src }: { src: string }): React.JSX.Element {
   const uploads = useContext(UploadsContext)
   const needsAuth = uploads !== null && isAuthedAttachmentUrl(src, uploads.origin)
+  const isImage = isImageAttachmentUrl(src)
   const [objUrl, setObjUrl] = useState<string | null>(null)
   const [failed, setFailed] = useState(false)
 
@@ -94,6 +108,27 @@ function AttachmentImage({ src }: { src: string }): React.JSX.Element {
       if (created !== null) revokeObjectUrl(created)
     }
   }, [src, needsAuth, uploads])
+
+  // Non-image attachment (PDF, …) → a downloadable file chip, never an <img>.
+  if (!isImage) {
+    const name = attachmentBasename(src)
+    const href = needsAuth ? objUrl : src
+    if (needsAuth && failed) return <span className="car-attach-error">📎 {name} unavailable</span>
+    if (needsAuth && href === null) {
+      return <span className="car-attach-loading">📎 {name}…</span>
+    }
+    return (
+      <a
+        className="car-attach-file"
+        href={href ?? src}
+        download={name}
+        target="_blank"
+        rel="noreferrer"
+      >
+        📎 {name}
+      </a>
+    )
+  }
 
   if (!needsAuth) return <img src={src} alt="attachment" className="car-attach-img" />
   if (failed) return <span className="car-attach-error">📎 image unavailable</span>
@@ -1353,7 +1388,7 @@ function Composer({
         <button
           type="button"
           className="car-attach-btn"
-          aria-label={importActive ? 'Attach image or export ZIP' : 'Attach image'}
+          aria-label={importActive ? 'Attach file or export ZIP' : 'Attach file…'}
           onClick={() => fileInputRef.current?.click()}
         >
           📎
@@ -1363,8 +1398,8 @@ function Composer({
           type="file"
           accept={
             importActive
-              ? 'image/png,image/jpeg,image/gif,image/webp,application/zip,.zip'
-              : 'image/png,image/jpeg,image/gif,image/webp'
+              ? 'image/png,image/jpeg,image/gif,image/webp,application/pdf,.pdf,application/zip,.zip'
+              : 'image/png,image/jpeg,image/gif,image/webp,application/pdf,.pdf'
           }
           multiple
           hidden

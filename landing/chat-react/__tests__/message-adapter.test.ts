@@ -67,11 +67,15 @@ describe('toThreadMessage', () => {
     expect(t.content).toEqual([{ type: 'image', image: 'https://o.test/api/app/upload/1.png' }])
   })
 
-  it('renders non-image attachments as a text link', () => {
+  it('routes non-image attachments through the authed attachment renderer (file chip)', () => {
+    // M2: every attachment becomes an `image` content part; the bubble renderer
+    // (AttachmentImage) branches on the URL to paint an <img> vs a file chip, so
+    // a PDF renders as a downloadable chip rather than a broken image or a raw
+    // text link.
     const t = toThreadMessage(msg({ role: 'user', text: 'see', attachments: ['https://x/doc.pdf'] }))
     expect(t.content).toEqual([
       { type: 'text', text: 'see' },
-      { type: 'text', text: '📎 https://x/doc.pdf' },
+      { type: 'image', image: 'https://x/doc.pdf' },
     ])
   })
 

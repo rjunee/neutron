@@ -32,13 +32,15 @@ import {
  *  rejection — the server remains the source of truth. */
 export const MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024
 
-/** Mirrors the server's image allow-list (`IMAGE_MIME_WHITELIST`). The server
+/** Mirrors the server's chat-upload allow-list
+ *  (`CHAT_UPLOAD_MIME_WHITELIST`): raster images + PDF documents. The server
  *  re-sniffs magic bytes regardless; this only avoids a doomed round-trip. */
-export const ACCEPTED_IMAGE_TYPES: readonly string[] = [
+export const ACCEPTED_ATTACHMENT_TYPES: readonly string[] = [
   'image/png',
   'image/jpeg',
   'image/gif',
   'image/webp',
+  'application/pdf',
 ]
 
 /** The shipped attachment upload/serve endpoint prefix. */
@@ -236,10 +238,10 @@ export async function uploadAttachment(file: File, opts: UploadOptions): Promise
   }
   // Only pre-reject when the browser actually gave us a type; an empty type
   // (some drag sources) falls through to the server's authoritative sniff.
-  if (file.type.length > 0 && !ACCEPTED_IMAGE_TYPES.includes(file.type)) {
+  if (file.type.length > 0 && !ACCEPTED_ATTACHMENT_TYPES.includes(file.type)) {
     throw new AttachmentUploadError(
       'unsupported_type',
-      `${file.name} is ${file.type} — only PNG, JPEG, GIF and WEBP images are supported.`,
+      `${file.name} is ${file.type} — only PNG, JPEG, GIF, WEBP images and PDF documents are supported.`,
     )
   }
   const endpoint = opts.endpoint ?? UPLOAD_ENDPOINT

@@ -232,6 +232,42 @@ describe('M2 chat-upload UX — production composer reachability', () => {
     expect(last?.adapter_metadata?.['attachments']).toEqual([uploadJson.url])
   })
 
+  it('uploads a chat-attached PDF (M2 documents) and threads the URL into the envelope', async () => {
+    // Real `%PDF-` magic bytes → the surface accepts + content-addresses it.
+    const bytes = new TextEncoder().encode('%PDF-1.4\n1 0 obj\n<< >>\nendobj\n%%EOF\n')
+    const form = makeMultipart(bytes, 'brief.pdf', 'application/pdf')
+    const uploadRes = await fetch(`${harness.base}/api/app/upload`, {
+      method: 'POST',
+      headers: { authorization: 'Bearer dev:sam' },
+      body: form,
+    })
+    expect(uploadRes.status).toBe(200)
+    const uploadJson = (await uploadRes.json()) as {
+      ok: boolean
+      url: string
+      content_type: string
+    }
+    expect(uploadJson.ok).toBe(true)
+    expect(uploadJson.content_type).toBe('application/pdf')
+    expect(uploadJson.url.endsWith('.pdf')).toBe(true)
+
+    const sendRes = await fetch(`${harness.base}/api/app/chat/send`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: 'Bearer dev:sam' },
+      body: JSON.stringify({
+        body: 'summarize this pdf',
+        attachments: [uploadJson.url],
+        client_msg_id: 'cmid-m2-pdf-1',
+      }),
+    })
+    expect(sendRes.status).toBe(200)
+    // The URL reaches the receiver on adapter_metadata.attachments — the field
+    // app-ws.ts sanitizes + threads onto the live-agent turn request.
+    expect(harness.receivedEvents.length).toBeGreaterThan(0)
+    const last = harness.receivedEvents[harness.receivedEvents.length - 1]
+    expect(last?.adapter_metadata?.['attachments']).toEqual([uploadJson.url])
+  })
+
   it('still works when the body is non-empty alongside the attachment', async () => {
     const bytes = fromHex(TINY_PNG_HEX)
     const form = makeMultipart(bytes, 'attach.png', 'image/png')

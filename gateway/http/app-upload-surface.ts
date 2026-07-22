@@ -19,9 +19,13 @@
  *       enforced first via the request's `Content-Length` header so a
  *       hostile client cannot drive the gateway to buffer huge bodies
  *       before the size check fires.
- *       Whitelist: PNG / JPEG / GIF / WEBP only — P5.1 ships image
- *       attachments only per the brief; non-image MIMEs are a P7 docs
- *       routing concern.
+ *       Whitelist (M2 modality scope): PNG / JPEG / GIF / WEBP raster
+ *       images + PDF documents. SVG stays excluded (inline-script XSS
+ *       stance). Magic-byte sniffing (`gateway/storage/binary-types.ts`)
+ *       is authoritative — the declared Content-Type is only cross-
+ *       checked against it. Accepted attachments are threaded into the
+ *       live-agent turn as resolved local blob paths (the CC REPL Reads
+ *       images AND PDFs natively) via `resolveChatAttachmentLocalPath`.
  *       Storage: content-addressed under
  *         `<owner_home>/chat-attachments/<user_id>/<hash>.<ext>`
  *       Per-user namespace prevents a cross-user enumeration via the
@@ -62,29 +66,32 @@ export const MAX_CHAT_UPLOAD_BYTES = 10 * 1024 * 1024
 /** Hard ceiling on multipart wire size — small slack for envelope overhead. */
 const MULTIPART_WIRE_SLACK = 64 * 1024
 
-/** Images only at P5.1 (brief — non-image MIMEs are a P7 docs concern). */
-const IMAGE_MIME_WHITELIST: ReadonlyArray<string> = Object.freeze([
+/** M2 modality scope — raster images + PDF documents. SVG stays excluded
+ *  (it carries XSS risk via inline script; the binary store accepts it but
+ *  the chat surface does not). */
+const CHAT_UPLOAD_MIME_WHITELIST: ReadonlyArray<string> = Object.freeze([
   'image/png',
   'image/jpeg',
   'image/gif',
   'image/webp',
+  'application/pdf',
 ])
 
-/** Canonical MIME → on-disk extension. SVG omitted at P5.1 (the binary
- *  store does accept it but it carries XSS risk via inline script; the
- *  chat surface restricts to raster image MIMEs for the v1 cut). */
+/** Canonical MIME → on-disk extension. SVG omitted (see the whitelist note
+ *  above — inline-script XSS risk). */
 const EXT_FROM_MIME: Readonly<Record<string, string>> = Object.freeze({
   'image/png': 'png',
   'image/jpeg': 'jpg',
   'image/gif': 'gif',
   'image/webp': 'webp',
+  'application/pdf': 'pdf',
 })
 
 const URL_PREFIX = '/api/app/upload'
 /** `<user_id>/<hex64>.<ext>` — user_id must match the auth bearer; hash
  *  is a 64-char hex SHA-256; ext is one of the whitelist below.  */
 const URL_PATH_RE =
-  /^\/api\/app\/upload\/([A-Za-z0-9._:-]+)\/([0-9a-f]{64})\.(png|jpg|gif|webp)$/
+  /^\/api\/app\/upload\/([A-Za-z0-9._:-]+)\/([0-9a-f]{64})\.(png|jpg|gif|webp|pdf)$/
 
 export interface AppUploadSurfaceOptions {
   auth: AppWsAuthResolver
@@ -238,11 +245,11 @@ async function handleUpload(req: Request, ctx: UploadContext): Promise<Response>
     )
   }
   const sniffed = magicByteSniff(buffer)
-  if (sniffed === null || !IMAGE_MIME_WHITELIST.includes(sniffed)) {
+  if (sniffed === null || !CHAT_UPLOAD_MIME_WHITELIST.includes(sniffed)) {
     return jsonError(
       415,
       'unsupported_type',
-      `sniffed type ${sniffed ?? '<unknown>'} not in the image allow-list (${IMAGE_MIME_WHITELIST.join(', ')})`,
+      `sniffed type ${sniffed ?? '<unknown>'} not in the chat-upload allow-list (${CHAT_UPLOAD_MIME_WHITELIST.join(', ')})`,
     )
   }
   const declared =
@@ -258,7 +265,7 @@ async function handleUpload(req: Request, ctx: UploadContext): Promise<Response>
   }
   const ext = EXT_FROM_MIME[sniffed]
   if (ext === undefined) {
-    // Should be unreachable — IMAGE_MIME_WHITELIST keys EXT_FROM_MIME.
+    // Should be unreachable — CHAT_UPLOAD_MIME_WHITELIST keys EXT_FROM_MIME.
     return jsonError(500, 'internal_extension_lookup', `no extension for ${sniffed}`)
   }
   const hash = sha256Hex(buffer)
@@ -349,9 +356,49 @@ function mimeFromExt(ext: string): string | null {
       return 'image/gif'
     case 'webp':
       return 'image/webp'
+    case 'pdf':
+      return 'application/pdf'
     default:
       return null
   }
+}
+
+/**
+ * Resolve a chat-attachment upload URL to its absolute on-disk blob path +
+ * canonical MIME, or `null` for anything that does not match the strict
+ * `/api/app/upload/<user_id>/<hex64>.<ext>` shape.
+ *
+ * The URL may be relative (as the upload response returns it) or absolute (as a
+ * client may absolutize it for rendering); either way ONLY the pathname is
+ * matched, against the SAME `URL_PATH_RE` the GET route uses — so an unvalidated
+ * or malformed URL never reaches an `fs` syscall. Single-owner box: the owner
+ * agent reading across `<user_id>` namespaces is acceptable (there is one
+ * owner), so this does no per-user auth — it is a pure, syscall-free URL→path
+ * mapping consumed by `build-live-agent-turn.ts` to inject local blob paths the
+ * CC REPL can `Read` (it renders images AND PDFs natively).
+ */
+export function resolveChatAttachmentLocalPath(
+  owner_home: string,
+  url: string,
+): { path: string; content_type: string } | null {
+  if (typeof url !== 'string' || url.length === 0) return null
+  // Absolute URL → take its pathname; relative `/api/app/upload/...` stays as-is
+  // (the `new URL(url)` with no base throws for a relative input).
+  let pathname = url
+  try {
+    pathname = new URL(url).pathname
+  } catch {
+    /* relative path — matched directly below */
+  }
+  const match = URL_PATH_RE.exec(pathname)
+  if (match === null) return null
+  const user_id = match[1] ?? ''
+  const hash = match[2] ?? ''
+  const ext = match[3] ?? ''
+  const content_type = mimeFromExt(ext)
+  if (content_type === null || user_id.length === 0 || hash.length === 0) return null
+  const path = join(owner_home, 'chat-attachments', user_id, `${hash}.${ext}`)
+  return { path, content_type }
 }
 
 function sha256Hex(bytes: Uint8Array): string {

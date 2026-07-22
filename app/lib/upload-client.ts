@@ -495,11 +495,14 @@ function fileNameFromUri(uri: string, mime_type?: string): string {
   return `${last}.${ext}`;
 }
 
-function mimeToExt(mime: string): string {
+/** Canonical MIME → on-disk extension for the multipart filename. Exported for
+ *  unit testing the accepted-type parity (M2 adds PDF). */
+export function mimeToExt(mime: string): string {
   if (mime.startsWith('image/png')) return 'png';
   if (mime.startsWith('image/jpeg') || mime.startsWith('image/jpg')) return 'jpg';
   if (mime.startsWith('image/gif')) return 'gif';
   if (mime.startsWith('image/webp')) return 'webp';
+  if (mime.startsWith('application/pdf')) return 'pdf';
   if (mime.startsWith('application/zip') || mime === 'application/x-zip') return 'zip';
   return 'bin';
 }

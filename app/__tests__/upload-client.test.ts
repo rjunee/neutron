@@ -7,7 +7,7 @@
 
 import { describe, expect, it } from 'bun:test';
 
-import { uploadAttachment } from '../lib/upload-client';
+import { mimeToExt, uploadAttachment } from '../lib/upload-client';
 
 /**
  * `typeof fetch` requires `preconnect` in newer @types/bun, but our
@@ -86,5 +86,18 @@ describe('uploadAttachment', () => {
     });
     expect(result).toBeNull();
     expect(events.find((e) => e.phase === 'error')?.code).toBe('network');
+  });
+});
+
+describe('mimeToExt — M2 modality parity', () => {
+  it('maps images + PDF to their extensions, else bin', () => {
+    expect(mimeToExt('image/png')).toBe('png');
+    expect(mimeToExt('image/jpeg')).toBe('jpg');
+    expect(mimeToExt('image/gif')).toBe('gif');
+    expect(mimeToExt('image/webp')).toBe('webp');
+    // M2 documents — PDF now maps (previously fell through to 'bin').
+    expect(mimeToExt('application/pdf')).toBe('pdf');
+    expect(mimeToExt('application/zip')).toBe('zip');
+    expect(mimeToExt('audio/mpeg')).toBe('bin');
   });
 });

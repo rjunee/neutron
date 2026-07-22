@@ -23,7 +23,13 @@ export function absolutize(url: string, origin: string): string {
   return url
 }
 
-function looksLikeImage(url: string): boolean {
+/**
+ * True when an attachment URL points at a raster image (by `data:image/` prefix
+ * or an image file extension). The bubble renderer ({@link AttachmentImage})
+ * uses the SAME predicate to decide between an `<img>` and a downloadable file
+ * chip, so a non-image attachment (e.g. a PDF) never renders as a broken image.
+ */
+export function isImageAttachmentUrl(url: string): boolean {
   if (/^data:image\//i.test(url)) return true
   return IMAGE_EXT.test(url)
 }
@@ -66,10 +72,12 @@ export function toThreadMessage(m: RenderMessage, origin = ''): ThreadMessageLik
   const body = normalizeBody(m.text)
   if (body.length > 0) parts.push({ type: 'text', text: body })
   if (m.attachments !== null) {
+    // Route EVERY attachment through the `image` content part — the bubble's
+    // authed renderer ({@link AttachmentImage}) branches on {@link
+    // isImageAttachmentUrl}: an image renders as `<img>`, a non-image (PDF)
+    // renders as a downloadable file chip using the SAME bearer-authed fetch.
     for (const raw of m.attachments) {
-      const url = absolutize(raw, origin)
-      if (looksLikeImage(url)) parts.push({ type: 'image', image: url })
-      else parts.push({ type: 'text', text: `📎 ${url}` })
+      parts.push({ type: 'image', image: absolutize(raw, origin) })
     }
   }
   // An empty content array is valid (assistant-ui filters empty parts); but for

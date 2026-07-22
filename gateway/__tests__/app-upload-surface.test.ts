@@ -18,7 +18,10 @@ import { join } from 'node:path'
 
 import { createAppWsAuthResolver } from '@neutronai/channels/index.ts'
 import { composeHttpHandler } from '../http/compose.ts'
-import { createAppUploadSurface } from '../http/app-upload-surface.ts'
+import {
+  createAppUploadSurface,
+  resolveChatAttachmentLocalPath,
+} from '../http/app-upload-surface.ts'
 
 interface Harness {
   server: import('bun').Server<unknown>
@@ -38,6 +41,11 @@ const TINY_PNG_HEX =
   '0d0a2db40000000049454e44ae426082'
 
 const TINY_JPEG_HEX = 'ffd8ffe000104a46494600010100000100010000ffd9'
+
+/** A minimal but magic-byte-valid PDF (`%PDF-` prefix → 'application/pdf'). */
+function pdfBytes(): Uint8Array {
+  return new TextEncoder().encode('%PDF-1.4\n1 0 obj\n<< /Type /Catalog >>\nendobj\n%%EOF\n')
+}
 
 /** Decode a hex string into a Uint8Array. */
 function fromHex(hex: string): Uint8Array {
@@ -308,5 +316,101 @@ describe('app-upload gateway surface — POST /api/app/upload', () => {
     const j1 = (await u1.json()) as { url: string }
     const j2 = (await u2.json()) as { url: string }
     expect(j1.url).toBe(j2.url)
+  })
+
+  // ── M2 modality scope — PDF documents ────────────────────────────────────
+  it('uploads a PDF and returns the canonical .pdf URL', async () => {
+    const bytes = pdfBytes()
+    const form = makeMultipart(bytes, 'doc.pdf', 'application/pdf')
+    const res = await fetch(`${harness.base}/api/app/upload`, {
+      method: 'POST',
+      headers: { authorization: 'Bearer dev:sam' },
+      body: form,
+    })
+    expect(res.status).toBe(200)
+    const json = (await res.json()) as {
+      ok: boolean
+      url: string
+      content_type: string
+      size_bytes: number
+    }
+    expect(json.ok).toBe(true)
+    expect(json.content_type).toBe('application/pdf')
+    expect(json.size_bytes).toBe(bytes.length)
+    expect(json.url.startsWith('/api/app/upload/sam/')).toBe(true)
+    expect(json.url.endsWith('.pdf')).toBe(true)
+  })
+
+  it('rejects PNG bytes declared application/pdf (content_type_spoof, 400)', async () => {
+    const png = fromHex(TINY_PNG_HEX)
+    const form = makeMultipart(png, 'doc.pdf', 'application/pdf')
+    const res = await fetch(`${harness.base}/api/app/upload`, {
+      method: 'POST',
+      headers: { authorization: 'Bearer dev:sam' },
+      body: form,
+    })
+    expect(res.status).toBe(400)
+    const json = (await res.json()) as { code: string }
+    expect(json.code).toBe('content_type_spoof')
+  })
+
+  it('serves an uploaded PDF back with the canonical content-type + ETag', async () => {
+    const bytes = pdfBytes()
+    const up = await fetch(`${harness.base}/api/app/upload`, {
+      method: 'POST',
+      headers: { authorization: 'Bearer dev:sam' },
+      body: makeMultipart(bytes, 'doc.pdf', 'application/pdf'),
+    })
+    const { url } = (await up.json()) as { url: string }
+    const get = await fetch(`${harness.base}${url}`, {
+      headers: { authorization: 'Bearer dev:sam' },
+    })
+    expect(get.status).toBe(200)
+    expect(get.headers.get('content-type')).toBe('application/pdf')
+    const round = new Uint8Array(await get.arrayBuffer())
+    expect(round.length).toBe(bytes.length)
+    // ETag → content hash; a matching If-None-Match yields 304.
+    const hash = url.split('/').pop()?.replace(/\.pdf$/, '') ?? ''
+    expect(hash.length).toBe(64)
+    const cached = await fetch(`${harness.base}${url}`, {
+      headers: { authorization: 'Bearer dev:sam', 'if-none-match': `"${hash}"` },
+    })
+    expect(cached.status).toBe(304)
+  })
+})
+
+describe('resolveChatAttachmentLocalPath', () => {
+  const HASH = 'a'.repeat(64)
+
+  it('maps a relative .pdf upload URL to the local blob path + MIME', () => {
+    const out = resolveChatAttachmentLocalPath('/home/o', `/api/app/upload/sam/${HASH}.pdf`)
+    expect(out).toEqual({
+      path: `/home/o/chat-attachments/sam/${HASH}.pdf`,
+      content_type: 'application/pdf',
+    })
+  })
+
+  it('maps an image URL to image/png', () => {
+    const out = resolveChatAttachmentLocalPath('/home/o', `/api/app/upload/sam/${HASH}.png`)
+    expect(out).toEqual({
+      path: `/home/o/chat-attachments/sam/${HASH}.png`,
+      content_type: 'image/png',
+    })
+  })
+
+  it('accepts an absolute URL (matches on the pathname only)', () => {
+    const out = resolveChatAttachmentLocalPath(
+      '/home/o',
+      `https://box.example/api/app/upload/sam/${HASH}.pdf`,
+    )
+    expect(out?.content_type).toBe('application/pdf')
+    expect(out?.path).toBe(`/home/o/chat-attachments/sam/${HASH}.pdf`)
+  })
+
+  it('returns null for a malformed / non-matching URL (no fs syscall)', () => {
+    expect(resolveChatAttachmentLocalPath('/home/o', '/api/app/upload/sam/short.pdf')).toBeNull()
+    expect(resolveChatAttachmentLocalPath('/home/o', `/api/app/upload/sam/${HASH}.exe`)).toBeNull()
+    expect(resolveChatAttachmentLocalPath('/home/o', '/etc/passwd')).toBeNull()
+    expect(resolveChatAttachmentLocalPath('/home/o', '')).toBeNull()
   })
 })

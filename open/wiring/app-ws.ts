@@ -757,12 +757,16 @@ export function wireAppWs(ctx: OpenWiringContext, deps: WireAppWsDeps): WiredApp
       // would swallow the turn after the echo/read-receipt (user sees no
       // reply). Only drop a TRULY empty inbound (no text AND no attachments);
       // for attachment-only, run the turn with a minimal placeholder so the
-      // agent responds. (Full attachment content isn't yet threaded into
-      // `LiveAgentTurnRequest` — its interface carries only `user_text`; that
-      // deeper wiring is a separate follow-up, but we no longer silently drop.)
-      const attachments = Array.isArray(event.adapter_metadata?.['attachments'])
+      // agent responds. M2 modality threading: the upload URLs are sanitized to
+      // non-empty strings and passed on the turn request — the live-agent turn
+      // resolves each to a local blob path and injects it into the dispatched
+      // prompt so the agent can `Read` it (images AND PDFs).
+      const rawAttachments = Array.isArray(event.adapter_metadata?.['attachments'])
         ? (event.adapter_metadata!['attachments'] as unknown[])
         : []
+      const attachments = rawAttachments.filter(
+        (a): a is string => typeof a === 'string' && a.length > 0,
+      )
       if (text.length === 0 && attachments.length === 0) return
       const userText = text.length > 0 ? text : 'Sent an attachment.'
       // Path 1: ONE path. Every typed turn — onboarding OR steady-state — runs
@@ -816,6 +820,7 @@ export function wireAppWs(ctx: OpenWiringContext, deps: WireAppWsDeps): WiredApp
           topic_id: turnTopicId,
           ...(project_id !== undefined ? { project_id } : {}),
           user_text: userText,
+          ...(attachments.length > 0 ? { attachments } : {}),
           send: sendReply,
           observed_at: event.received_at,
         })

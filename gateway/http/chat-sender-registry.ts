@@ -98,6 +98,15 @@ export interface LiveAgentTurnRequest {
   /** Set for project topics — parsed from the `web:<uid>:<project>` id. */
   project_id?: string
   user_text: string
+  /**
+   * M2 modality threading — the attachment upload URLs the client sent with
+   * this turn (`/api/app/upload/<user>/<hash>.<ext>`), as read from the inbound
+   * `adapter_metadata.attachments`. The turn runner resolves each to its local
+   * blob path and injects a `<user_attachments>` prompt fragment so the agent
+   * can `Read` them (the CC REPL renders images AND PDFs natively). Omitted /
+   * empty on a text-only turn. Prompt-only — never mutates `user_text`.
+   */
+  attachments?: ReadonlyArray<string>
   send: (event: ChatOutbound) => void
   observed_at: number
   /**
