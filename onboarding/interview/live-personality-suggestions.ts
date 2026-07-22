@@ -41,6 +41,7 @@
 import type { OnboardingStateStore } from './state-store.ts'
 import type { OnboardingPhase } from './phase.ts'
 import { DEFINED_PERSONALITY_CHARACTER_NAMES } from './onboarding-preamble.ts'
+import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
 import type {
   CharacterSuggestion,
   PersonalityCharacterSuggestions,
@@ -265,11 +266,7 @@ export function buildLivePersonalitySuggestionCoordinator(
   deps: BuildLivePersonalityCoordinatorDeps,
 ): LivePersonalitySuggestionCoordinator {
   const { suggester, stateStore, owner_slug, seed } = deps
-  const fire =
-    deps.fireAndForget ??
-    ((_label: string, promise: Promise<unknown>): void => {
-      void promise.catch(() => undefined)
-    })
+  const fire = deps.fireAndForget ?? fireAndForget
   const log = deps.log ?? ((): void => {})
   // Per-user dedup: at most one in-flight generation per owner user_id.
   const pending = new Map<string, Promise<unknown>>()
