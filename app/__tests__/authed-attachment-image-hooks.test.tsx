@@ -32,28 +32,44 @@
  * guard, not just a render smoke test.
  */
 
-import { beforeEach, describe, expect, it, mock } from 'bun:test';
+import { afterAll, beforeEach, describe, expect, it, mock } from 'bun:test';
+import * as RealReact from 'react';
+import * as RealJsxRuntime from 'react/jsx-runtime';
+import * as RealJsxDevRuntime from 'react/jsx-dev-runtime';
 
 /* ── hook spies: count every hook the imported module actually calls ── */
 let useStateCalls = 0;
 let useEffectCalls = 0;
 
-mock.module('react', () => {
-  const useState = (initial: unknown) => {
-    useStateCalls += 1;
-    return [typeof initial === 'function' ? (initial as () => unknown)() : initial, () => {}];
-  };
-  const useEffect = () => {
-    useEffectCalls += 1;
-  };
-  return { useState, useEffect, default: { useState, useEffect } };
-});
+// process-global bun mock — must stay a SUPERSET and delegate-to-real outside this suite;
+// see docs-mutations-race.test.ts:52 + diagnostics-pane-render superset note; CI incident PR #428 (a235eea3..141d2c1c).
+let useStateImpl: (initial: unknown) => unknown = RealReact.useState as never;
+let useEffectImpl: (...a: never[]) => unknown = RealReact.useEffect as never;
+const useState = (initial: unknown) => useStateImpl(initial);
+const useEffect = (...a: never[]) => useEffectImpl(...a);
+mock.module('react', () => ({
+  ...RealReact,
+  useState,
+  useEffect,
+  default: { ...RealReact, useState, useEffect },
+}));
 
-const jsx = (type: unknown, props: unknown) => ({ type, props });
-mock.module('react/jsx-runtime', () => ({ jsx, jsxs: jsx, Fragment: Symbol('Fragment') }));
+// process-global bun mock — must stay a SUPERSET and delegate-to-real outside this suite;
+// see docs-mutations-race.test.ts:52 + diagnostics-pane-render superset note; CI incident PR #428 (a235eea3..141d2c1c).
+let jsxImpl: (type: unknown, props: unknown) => unknown = RealJsxRuntime.jsx as never;
+mock.module('react/jsx-runtime', () => ({
+  ...RealJsxRuntime,
+  jsx: (t: unknown, p: unknown) => jsxImpl(t, p),
+  jsxs: (t: unknown, p: unknown) => jsxImpl(t, p),
+}));
 // Bun's test transpiler emits the DEV automatic runtime (`jsxDEV`).
-mock.module('react/jsx-dev-runtime', () => ({ jsxDEV: jsx, Fragment: Symbol('Fragment') }));
+mock.module('react/jsx-dev-runtime', () => ({
+  ...RealJsxDevRuntime,
+  jsxDEV: (t: unknown, p: unknown, ..._rest: unknown[]) => jsxImpl(t, p),
+}));
 
+// process-global bun mock — must stay a SUPERSET and delegate-to-real outside this suite;
+// see docs-mutations-race.test.ts:52 + diagnostics-pane-render superset note; CI incident PR #428 (a235eea3..141d2c1c).
 mock.module('react-native', () => ({
   Image: 'Image',
   Platform: { OS: 'web' },
@@ -61,6 +77,12 @@ mock.module('react-native', () => ({
   StyleSheet: { create: (styles: unknown) => styles },
   Text: 'Text',
   View: 'View',
+  ScrollView: 'ScrollView',
+  TextInput: 'TextInput',
+  ActivityIndicator: 'ActivityIndicator',
+  Modal: 'Modal',
+  Linking: { openURL: () => Promise.resolve() },
+  useWindowDimensions: () => ({ width: 1200, height: 800 }),
 }));
 
 mock.module('expo-web-browser', () => ({
@@ -74,6 +96,24 @@ describe('AuthedAttachmentImage — rules-of-hooks (Argus r3 MAJOR)', () => {
   beforeEach(() => {
     useStateCalls = 0;
     useEffectCalls = 0;
+    // Point the delegating hooks at this suite's counting stubs.
+    useStateImpl = (initial: unknown) => {
+      useStateCalls += 1;
+      return [typeof initial === 'function' ? (initial as () => unknown)() : initial, () => {}];
+    };
+    useEffectImpl = () => {
+      useEffectCalls += 1;
+    };
+    jsxImpl = (type: unknown, props: unknown) => ({ type, props });
+  });
+
+  // After this suite, the process-global react/jsx mocks must behave exactly
+  // like real react for EVERY export — so nothing leaks into later files in
+  // the same bun process (the CI-red incident, PR #428 a235eea3..141d2c1c).
+  afterAll(() => {
+    useStateImpl = RealReact.useState as never;
+    useEffectImpl = RealReact.useEffect as never;
+    jsxImpl = RealJsxRuntime.jsx as never;
   });
 
   it('dispatches an IMAGE url to the hook-owning leaf without calling any hook itself', async () => {

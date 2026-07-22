@@ -4730,3 +4730,28 @@ now reach the agent for the first time.
   isolation) and the web `message-adapter` routing non-images as `type:'image'` content
   parts (assistant-ui exposes only text|image parts here; the renderer branches on the
   URL, so it is correct in practice).
+
+### CI-green hotfix (PR #428, task 2) — de-pollute process-global react/react-native test mocks
+
+- The canonical `test` job went RED across `a235eea3..141d2c1c` (3 consecutive runs). The
+  two new app test files (`app/__tests__/authed-attachment-image-hooks.test.tsx`,
+  `app/__tests__/authed-attachment-file-open.test.tsx`) registered process-global NARROW
+  `mock.module` payloads for `react` / `react/jsx-runtime` / `react/jsx-dev-runtime` /
+  `react-native`. Bun module mocks are process-global and survive across files, so in the
+  shared-process CI chunk (`scripts/run-tests.sh`, 75-file chunks) they poisoned later
+  files — `SyntaxError: Export named 'useReducer' not found` (docs-mutations-race) and
+  `Export named 'Linking' not found` (docs-panes-render), plus `forwardRef is not a
+  function` from react-textarea-autosize in the landing suites.
+- FIX (test hygiene only — zero production or assertion changes): rewrote both files'
+  mock scaffolding to the repo's established SUPERSET + delegate-to-real convention (see
+  `docs-mutations-race.test.ts:52` and the `diagnostics-pane-render.test.ts` react-native
+  superset note). Each `mock.module` now spreads the real module (`react` + jsx runtimes)
+  or the diagnostics-pane superset key-set (`react-native` incl. `Linking` /
+  `useWindowDimensions` / `ScrollView` / `TextInput` / `ActivityIndicator` / `Modal`), and
+  each overridden export delegates through a mutable impl pointer that the suite sets in
+  `beforeEach` and RESETS to the real implementation in `afterAll` — so once a suite
+  finishes, the still-registered module behaves exactly like real react for every export
+  and nothing leaks to later files.
+- Verified: both target suites green; the 12 branch-changed files in ONE bun process 0-fail
+  (was 120/1/1); canonical gate `NEUTRON_TEST_CONCURRENCY=2 NEUTRON_TEST_CHUNK_SIZE=75 bash
+  scripts/run-tests.sh` PASS (997/997); `bash scripts/ci/typecheck-all.sh` exit 0.

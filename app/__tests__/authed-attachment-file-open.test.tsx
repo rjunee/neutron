@@ -23,25 +23,43 @@
  * against mocked web globals (`globalThis.open`, `fetch`, `URL`).
  */
 
-import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
+import { afterAll, afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
+import * as RealReact from 'react';
+import * as RealJsxRuntime from 'react/jsx-runtime';
+import * as RealJsxDevRuntime from 'react/jsx-dev-runtime';
 
 /* ── react: no-op hooks (state is unobservable here; we assert side effects) ── */
-mock.module('react', () => {
-  const useState = (initial: unknown) => [
-    typeof initial === 'function' ? (initial as () => unknown)() : initial,
-    () => {},
-  ];
-  const useEffect = () => {};
-  return { useState, useEffect, default: { useState, useEffect } };
-});
+// process-global bun mock — must stay a SUPERSET and delegate-to-real outside this suite;
+// see docs-mutations-race.test.ts:52 + diagnostics-pane-render superset note; CI incident PR #428 (a235eea3..141d2c1c).
+let useStateImpl: (initial: unknown) => unknown = RealReact.useState as never;
+let useEffectImpl: (...a: never[]) => unknown = RealReact.useEffect as never;
+const useState = (initial: unknown) => useStateImpl(initial);
+const useEffect = (...a: never[]) => useEffectImpl(...a);
+mock.module('react', () => ({
+  ...RealReact,
+  useState,
+  useEffect,
+  default: { ...RealReact, useState, useEffect },
+}));
 
-const jsx = (type: unknown, props: unknown) => ({ type, props });
-mock.module('react/jsx-runtime', () => ({ jsx, jsxs: jsx, Fragment: Symbol('Fragment') }));
-mock.module('react/jsx-dev-runtime', () => ({ jsxDEV: jsx, Fragment: Symbol('Fragment') }));
+// process-global bun mock — must stay a SUPERSET and delegate-to-real outside this suite;
+// see docs-mutations-race.test.ts:52 + diagnostics-pane-render superset note; CI incident PR #428 (a235eea3..141d2c1c).
+let jsxImpl: (type: unknown, props: unknown) => unknown = RealJsxRuntime.jsx as never;
+mock.module('react/jsx-runtime', () => ({
+  ...RealJsxRuntime,
+  jsx: (t: unknown, p: unknown) => jsxImpl(t, p),
+  jsxs: (t: unknown, p: unknown) => jsxImpl(t, p),
+}));
+mock.module('react/jsx-dev-runtime', () => ({
+  ...RealJsxDevRuntime,
+  jsxDEV: (t: unknown, p: unknown, ..._rest: unknown[]) => jsxImpl(t, p),
+}));
 
 // Shared, MUTABLE Platform so individual tests can flip web ↔ native. The
 // component reads `Platform.OS` at call time inside its handler.
 const platform = { OS: 'web' as 'web' | 'ios' };
+// process-global bun mock — must stay a SUPERSET and delegate-to-real outside this suite;
+// see docs-mutations-race.test.ts:52 + diagnostics-pane-render superset note; CI incident PR #428 (a235eea3..141d2c1c).
 mock.module('react-native', () => ({
   Image: 'Image',
   Platform: platform,
@@ -49,6 +67,12 @@ mock.module('react-native', () => ({
   StyleSheet: { create: (styles: unknown) => styles },
   Text: 'Text',
   View: 'View',
+  ScrollView: 'ScrollView',
+  TextInput: 'TextInput',
+  ActivityIndicator: 'ActivityIndicator',
+  Modal: 'Modal',
+  Linking: { openURL: () => Promise.resolve() },
+  useWindowDimensions: () => ({ width: 1200, height: 800 }),
 }));
 
 let openBrowserCalls: string[] = [];
@@ -112,6 +136,16 @@ class FakeFileReader {
 }
 
 beforeEach(() => {
+  // Point the delegating react hooks at this suite's no-op stubs (state is
+  // unobservable here; we assert side effects), and the jsx runtimes at the
+  // plain-object recorder so `AuthedAttachmentFile(...)` yields `{ type, props }`.
+  useStateImpl = (initial: unknown) => [
+    typeof initial === 'function' ? (initial as () => unknown)() : initial,
+    () => {},
+  ];
+  useEffectImpl = () => {};
+  jsxImpl = (type: unknown, props: unknown) => ({ type, props });
+
   platform.OS = 'web';
   openArgs = [];
   fakeWin = null;
@@ -157,6 +191,15 @@ afterEach(() => {
   URL.createObjectURL = origCreate;
   URL.revokeObjectURL = origRevoke;
   (globalThis as { FileReader?: unknown }).FileReader = origFileReader;
+});
+
+// After this suite, the process-global react/jsx mocks must behave exactly
+// like real react for EVERY export — so nothing leaks into later files in the
+// same bun process (the CI-red incident, PR #428 a235eea3..141d2c1c).
+afterAll(() => {
+  useStateImpl = RealReact.useState as never;
+  useEffectImpl = RealReact.useEffect as never;
+  jsxImpl = RealJsxRuntime.jsx as never;
 });
 
 async function pressChip(url: string, auth: typeof AUTH | null) {
