@@ -52,12 +52,34 @@ export interface AuthedAttachmentImageProps {
   style?: StyleProp<ImageStyle>;
 }
 
+/**
+ * Pure dispatcher — deliberately calls NO hooks. It branches on the attachment
+ * type and delegates to a hook-owning leaf, rather than early-returning ABOVE a
+ * hook block in a single component. That structure matters: if this one
+ * component owned the hooks AND early-returned for non-image URLs, a same-
+ * instance re-render whose `url` flips image↔non-image (user sends an image then
+ * a PDF and React/list-virtualization recycles the instance) would change the
+ * hook count between renders — a rules-of-hooks violation that crashes at
+ * runtime with "Rendered more/fewer hooks than expected". By branching to
+ * DIFFERENT component types here, a url flip swaps the rendered type, so React
+ * unmounts the old leaf and mounts a fresh one instead of reusing an instance
+ * whose hook count changed. (Argus r3 MAJOR.)
+ */
 export function AuthedAttachmentImage({ url, auth, style }: AuthedAttachmentImageProps) {
   // A non-image attachment (PDF, …) renders as a downloadable file chip, never
   // an <Image> — otherwise the document paints as a broken thumbnail.
   if (!isImageAttachmentUrl(url)) {
     return <AuthedAttachmentFile url={url} auth={auth} />;
   }
+  return <AuthedAttachmentImageView url={url} auth={auth} style={style} />;
+}
+
+/**
+ * Hook-owning leaf for the image path. Only ever mounted with an image URL (the
+ * dispatcher guarantees it), so its hook count is stable across every render of
+ * a given instance — the invariant the rules of hooks require.
+ */
+export function AuthedAttachmentImageView({ url, auth, style }: AuthedAttachmentImageProps) {
   const source = resolveAttachmentSource(url, auth);
   // RN-web's <img> drops source.headers — fetch the blob with the bearer
   // instead. Native honors headers, so it renders the source directly.
