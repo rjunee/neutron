@@ -40,7 +40,7 @@
  * (`tools_available: false`) — back-compat degradation, not a flag.
  */
 
-import { SONNET_MODEL, FAST_MODEL } from '@neutronai/runtime/models.ts'
+import { SONNET_MODEL } from '@neutronai/runtime/models.ts'
 
 import { extractJson } from './backend.ts'
 import type {
@@ -63,7 +63,8 @@ import type {
  *
  * `max_tokens` is provided by the substrate adapter (4096 default for
  * synthesis; 8192 default for sub-agent). `model` is the resolved
- * model id (SONNET_MODEL for synthesis; FAST_MODEL for the sub-agent).
+ * model id (SONNET_MODEL for both synthesis and the sub-agent — deep
+ * research needs real reasoning + sustained tool-use discipline).
  */
 export interface ResearchLlmCall {
   (input: {
@@ -239,7 +240,14 @@ function safeStringify(value: unknown): string {
 
 export interface BuildRuntimeResearchSubAgentDispatcherOptions {
   llm_call: ResearchLlmCall
-  /** Override the model id reported back. Defaults to FAST_MODEL (Haiku 4.5). */
+  /**
+   * Override the model id reported back when the dispatch input carries no
+   * model. Defaults to SONNET_MODEL to match the sub-agent's live default
+   * (`DEFAULT_SUB_AGENT_MODEL`, task 7) — deep research needs real reasoning +
+   * sustained tool-use discipline; Haiku produced ungrounded briefs. This
+   * default is dead on the production path (`sub-agent.ts` always threads an
+   * explicit model), but a FAST_MODEL fallback here contradicted that intent.
+   */
   default_model?: string
   /** Max tokens per dispatch. Defaults to 8192. */
   max_tokens?: number
@@ -286,7 +294,7 @@ export interface BuildRuntimeResearchSubAgentDispatcherOptions {
 export function buildRuntimeResearchSubAgentDispatcher(
   opts: BuildRuntimeResearchSubAgentDispatcherOptions,
 ): RuntimeSubAgentDispatcher {
-  const default_model = opts.default_model ?? FAST_MODEL
+  const default_model = opts.default_model ?? SONNET_MODEL
   const max_tokens = opts.max_tokens ?? DEFAULT_SUB_AGENT_MAX_TOKENS
   const max_tool_rounds = opts.max_tool_rounds ?? DEFAULT_MAX_TOOL_ROUNDS
   const now = opts.now ?? ((): number => Date.now())

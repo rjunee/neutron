@@ -82,6 +82,23 @@ export const PROJECT_ID_EXTENDED_PROPERTY = 'neutron_project_id' as const
  *  run. 5 minutes — matches Atlas-side spawn-agent.sh budgets. */
 export const SUB_AGENT_DEFAULT_BUDGET_MS = 5 * 60 * 1000
 
+/**
+ * Hard FLOOR for a sub-agent run's wall-clock budget. `dispatchResearchSubAgent`
+ * clamps any smaller (but positive) `budget_ms` up to this value.
+ *
+ * WHY THIS EXISTS: the agentic tool loop (`substrate-runtime.ts`) reserves
+ * `FINALIZE_MARGIN_MS` (20s) of every budget for the forced final-answer turn —
+ * the per-round guard `deadline - now() < FINALIZE_MARGIN_MS` forces finalize
+ * with ZERO tool calls the instant fewer than 20s remain. So ANY budget below
+ * ~20s makes the sub-agent finalize on iteration 1 having called no tools, which
+ * (with `tools_available: true`) trips the orchestrator's zero-tool grounding
+ * gate and fails the whole deep run with a MISLEADING "made zero tool calls"
+ * error whose real cause is an unrunnable budget (Argus r2 major finding). This
+ * floor guarantees room for at least one real tool round PLUS the finalize turn.
+ * Must stay comfortably above `FINALIZE_MARGIN_MS`.
+ */
+export const SUB_AGENT_MIN_BUDGET_MS = 60 * 1000
+
 /** Default per-instance concurrency cap for sub-agent runs. Two in-flight
  *  research tasks per instance — the owner's Nova cadence today on the
  *  three-tridents-in-flight rule. */

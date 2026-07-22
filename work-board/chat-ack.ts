@@ -27,10 +27,13 @@
  *   - NEVER throws. The ack is a courtesy on top of a tool result; a resolver
  *     or transport failure must never perturb the tool's return value. The whole
  *     body is try/catch-swallowed.
- *   - Per-(item_id, kind) dedup within a short window (default 30s): a store
- *     reconciliation or a double-fire cannot double-post the SAME event. But
- *     DIFFERENT kinds for the same item do NOT suppress each other — an add then
- *     a dispatch in one turn is a real two-step progression and posts both.
+ *   - Per-(project_id, item_id, kind, title) dedup within a short window
+ *     (default 30s): a store reconciliation or a double-fire cannot double-post
+ *     the SAME event. But DIFFERENT kinds for the same item do NOT suppress each
+ *     other — an add then a dispatch in one turn is a real two-step progression
+ *     and posts both. project_id + title are in the key so UNBOUND dispatches
+ *     (item_id='') don't collapse to one identity and silently swallow a second
+ *     distinct build's ack.
  *   - It only speaks for events the agent-tool layer hands it (agent adds,
  *     inline_active false→true flips, successful build dispatch/start). Human
  *     HTTP mutations and rejected dispatches post nothing — those callers simply
@@ -86,7 +89,7 @@ function textFor(kind: WorkBoardChatAckKind, title: string): string {
  *   poster (`buildClarifyPoster.post`), so the ack persists AND fans live
  *   exactly like a normal agent reply. Late-binding safe: a no-op if unbound.
  * @param deps.now              injectable clock (tests); defaults to `Date.now`.
- * @param deps.dedup_window_ms  per-(item,kind) suppression window (default 30s).
+ * @param deps.dedup_window_ms  per-(project,item,kind,title) suppression window (default 30s).
  */
 export function buildWorkBoardChatAck(deps: {
   resolve_chat_id: (project_id: string | null) => string
@@ -99,8 +102,15 @@ export function buildWorkBoardChatAck(deps: {
     typeof deps.dedup_window_ms === 'number' && deps.dedup_window_ms >= 0
       ? deps.dedup_window_ms
       : DEFAULT_DEDUP_WINDOW_MS
-  // key = `${item_id}\0${kind}` → last-post epoch ms. A NUL join keeps the
-  // two fields unambiguous regardless of item-id content.
+  // key = `${project_id}\0${item_id}\0${kind}\0${title}` → last-post epoch ms.
+  // NUL joins keep the fields unambiguous regardless of their content. project_id
+  // and title are BOTH in the key because an UNBOUND dispatch (no board item) has
+  // item_id='' — keying on `${item_id}\0${kind}` alone collapsed EVERY unbound
+  // build within a window to the single key `\0build_dispatched`, silently
+  // suppressing the 2nd distinct unbound dispatch's ack (Argus r2 finding).
+  // Adding project_id + title distinguishes different unbound builds (different
+  // titles → different keys → both ack) while still deduping a genuine
+  // double-fire of the SAME event (same project+item+kind+title within window).
   const lastPostedAt = new Map<string, number>()
 
   return {
@@ -112,7 +122,7 @@ export function buildWorkBoardChatAck(deps: {
         for (const [k, ts] of lastPostedAt) {
           if (t - ts >= windowMs) lastPostedAt.delete(k)
         }
-        const key = `${input.item_id}\0${input.kind}`
+        const key = `${input.project_id ?? ''}\0${input.item_id}\0${input.kind}\0${input.title}`
         const prev = lastPostedAt.get(key)
         if (prev !== undefined && t - prev < windowMs) return
         // Deliver FIRST, then record the dedup stamp — only a delivery that

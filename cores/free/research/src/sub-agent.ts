@@ -13,6 +13,7 @@
 import {
   SUB_AGENT_DEFAULT_BUDGET_MS,
   SUB_AGENT_DEFAULT_CONCURRENCY_CAP,
+  SUB_AGENT_MIN_BUDGET_MS,
 } from './manifest.ts'
 import {
   RESEARCH_SUB_AGENT_TOOL_WHITELIST,
@@ -163,13 +164,39 @@ export interface DispatchResearchSubAgentDeps {
   concurrency_gate: PerOwnerConcurrencyGate
   /** Override clock (testing seam). */
   now?: () => number
+  /**
+   * Override the minimum-budget floor (testing seam; defaults to
+   * `SUB_AGENT_MIN_BUDGET_MS`). Production never sets this — it exists only so
+   * timeout-path tests can drive the outer `runWithTimeout` race with a tiny
+   * budget instead of waiting the full 60s floor. Like `now`, it is a
+   * dependency-injection default, NOT a feature flag.
+   */
+  min_budget_ms?: number
 }
 
 export async function dispatchResearchSubAgent(
   input: ResearchSubAgentInput,
   deps: DispatchResearchSubAgentDeps,
 ): Promise<ResearchSubAgentResult> {
-  const budget_ms = input.budget_ms ?? SUB_AGENT_DEFAULT_BUDGET_MS
+  // Resolve + clamp the budget. A budget below `FINALIZE_MARGIN_MS`+one tool
+  // round makes the agentic loop finalize on iteration 1 with zero tool calls,
+  // tripping the orchestrator's grounding gate and failing the deep run with a
+  // misleading "made zero tool calls" error (Argus r2 major finding). The
+  // `budget_ms` field is exposed unvalidated on the MCP `research_deep` surface,
+  // so a non-finite / non-positive value (NaN, Infinity, 0, negative) must NOT
+  // poison the `Math.max` / `setTimeout` math — fall back to the default for any
+  // such value, THEN floor. The floor applies to BOTH the outer `runWithTimeout`
+  // race and the inner dispatch (they share this one `budget_ms`), so the loop
+  // is always handed enough time to run at least one real tool round before the
+  // outer race trips.
+  const requestedBudgetMs =
+    typeof input.budget_ms === 'number' &&
+    Number.isFinite(input.budget_ms) &&
+    input.budget_ms > 0
+      ? input.budget_ms
+      : SUB_AGENT_DEFAULT_BUDGET_MS
+  const minBudgetMs = deps.min_budget_ms ?? SUB_AGENT_MIN_BUDGET_MS
+  const budget_ms = Math.max(requestedBudgetMs, minBudgetMs)
   const model = input.model ?? DEFAULT_SUB_AGENT_MODEL
   const tools = input.tools ?? RESEARCH_SUB_AGENT_TOOL_WHITELIST
   const now = deps.now ?? ((): number => Date.now())

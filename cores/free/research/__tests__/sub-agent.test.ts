@@ -18,6 +18,10 @@ import {
 } from '../src/sub-agent.ts'
 import { SONNET_MODEL } from '@neutronai/runtime/models.ts'
 import {
+  SUB_AGENT_DEFAULT_BUDGET_MS,
+  SUB_AGENT_MIN_BUDGET_MS,
+} from '../src/manifest.ts'
+import {
   RESEARCH_SUB_AGENT_TOOL_WHITELIST,
   buildSubAgentSystemPrompt,
   isEngineeringShapeQuery,
@@ -120,7 +124,7 @@ describe('dispatchResearchSubAgent', () => {
     await expect(
       dispatchResearchSubAgent(
         { query: 'a', project_slug: 't', project_id: 'p', budget_ms: 60 },
-        { runtime_sub_agent: slow, concurrency_gate: gate },
+        { runtime_sub_agent: slow, concurrency_gate: gate, min_budget_ms: 0 },
       ),
     ).rejects.toThrow(SubAgentTimeoutError)
     expect(gate.inFlightFor('t')).toBe(0)
@@ -143,7 +147,7 @@ describe('dispatchResearchSubAgent', () => {
     await expect(
       dispatchResearchSubAgent(
         { query: 'a', project_slug: 't', project_id: 'p', budget_ms: 40 },
-        { runtime_sub_agent: slow, concurrency_gate: gate },
+        { runtime_sub_agent: slow, concurrency_gate: gate, min_budget_ms: 0 },
       ),
     ).rejects.toThrow(SubAgentTimeoutError)
     expect(gate.inFlightFor('t')).toBe(0)
@@ -181,17 +185,17 @@ describe('dispatchResearchSubAgent', () => {
     // Kick off two concurrent dispatches (no await yet).
     const p1 = dispatchResearchSubAgent(
       { query: 'q1', project_slug: 't', project_id: 'p', budget_ms: 50 },
-      { runtime_sub_agent: hangs, concurrency_gate: gate },
+      { runtime_sub_agent: hangs, concurrency_gate: gate, min_budget_ms: 0 },
     ).catch(() => null)
     const p2 = dispatchResearchSubAgent(
       { query: 'q2', project_slug: 't', project_id: 'p', budget_ms: 50 },
-      { runtime_sub_agent: hangs, concurrency_gate: gate },
+      { runtime_sub_agent: hangs, concurrency_gate: gate, min_budget_ms: 0 },
     ).catch(() => null)
     // Third call hits the cap synchronously inside acquire().
     expect(() =>
       dispatchResearchSubAgent(
         { query: 'q3', project_slug: 't', project_id: 'p', budget_ms: 50 },
-        { runtime_sub_agent: hangs, concurrency_gate: gate },
+        { runtime_sub_agent: hangs, concurrency_gate: gate, min_budget_ms: 0 },
       ),
     ).toThrow(SubAgentConcurrencyExceededError)
     await Promise.all([p1, p2])
@@ -253,6 +257,75 @@ describe('task 7 — Sonnet default + retry feedback + tools_available', () => {
       { runtime_sub_agent: dispatcher, concurrency_gate: gate },
     )
     expect(withoutTools.tools_available).toBe(false)
+  })
+})
+
+describe('Argus r2 major — budget floor clamp (unrunnable sub-floor budget)', () => {
+  // A budget below the agentic loop's `FINALIZE_MARGIN_MS` (20s) forces the
+  // sub-agent to finalize on iteration 1 with ZERO tool calls, which trips the
+  // orchestrator's grounding gate and fails the whole deep run with a misleading
+  // "made zero tool calls" error. The floor guarantees a runnable budget.
+  test('a below-floor budget_ms is clamped UP to SUB_AGENT_MIN_BUDGET_MS before dispatch', async () => {
+    const dispatcher = buildCannedSubAgentDispatcher({
+      responses: [{ query_match: /./, text: 'x' }],
+    })
+    const gate = new PerOwnerConcurrencyGate({ cap: 2 })
+    await dispatchResearchSubAgent(
+      { query: 'q', project_slug: 't', project_id: 'p', budget_ms: 5_000 },
+      { runtime_sub_agent: dispatcher, concurrency_gate: gate },
+    )
+    expect(dispatcher.calls[0]!.budget_ms).toBe(SUB_AGENT_MIN_BUDGET_MS)
+  })
+
+  test('an at-or-above-floor budget_ms passes through unclamped', async () => {
+    const dispatcher = buildCannedSubAgentDispatcher({
+      responses: [{ query_match: /./, text: 'x' }],
+    })
+    const gate = new PerOwnerConcurrencyGate({ cap: 2 })
+    const big = 10 * 60 * 1000
+    await dispatchResearchSubAgent(
+      { query: 'q', project_slug: 't', project_id: 'p', budget_ms: big },
+      { runtime_sub_agent: dispatcher, concurrency_gate: gate },
+    )
+    expect(dispatcher.calls[0]!.budget_ms).toBe(big)
+  })
+
+  test('an omitted budget_ms resolves to the default (which is above the floor)', async () => {
+    const dispatcher = buildCannedSubAgentDispatcher({
+      responses: [{ query_match: /./, text: 'x' }],
+    })
+    const gate = new PerOwnerConcurrencyGate({ cap: 2 })
+    await dispatchResearchSubAgent(
+      { query: 'q', project_slug: 't', project_id: 'p' },
+      { runtime_sub_agent: dispatcher, concurrency_gate: gate },
+    )
+    expect(dispatcher.calls[0]!.budget_ms).toBe(SUB_AGENT_DEFAULT_BUDGET_MS)
+  })
+
+  test('a non-finite / non-positive budget_ms (NaN, Infinity, 0, negative) falls back to the default, never poisoning Math.max', async () => {
+    for (const bad of [Number.NaN, Number.POSITIVE_INFINITY, 0, -5]) {
+      const dispatcher = buildCannedSubAgentDispatcher({
+        responses: [{ query_match: /./, text: 'x' }],
+      })
+      const gate = new PerOwnerConcurrencyGate({ cap: 2 })
+      await dispatchResearchSubAgent(
+        { query: 'q', project_slug: 't', project_id: 'p', budget_ms: bad },
+        { runtime_sub_agent: dispatcher, concurrency_gate: gate },
+      )
+      expect(dispatcher.calls[0]!.budget_ms).toBe(SUB_AGENT_DEFAULT_BUDGET_MS)
+    }
+  })
+
+  test('min_budget_ms:0 seam disables the floor (testing seam, not a flag)', async () => {
+    const dispatcher = buildCannedSubAgentDispatcher({
+      responses: [{ query_match: /./, text: 'x' }],
+    })
+    const gate = new PerOwnerConcurrencyGate({ cap: 2 })
+    await dispatchResearchSubAgent(
+      { query: 'q', project_slug: 't', project_id: 'p', budget_ms: 5_000 },
+      { runtime_sub_agent: dispatcher, concurrency_gate: gate, min_budget_ms: 0 },
+    )
+    expect(dispatcher.calls[0]!.budget_ms).toBe(5_000)
   })
 })
 

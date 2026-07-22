@@ -142,6 +142,37 @@ describe('buildWorkBoardChatAck — dedup', () => {
     ack.post({ project_id: 'p1', item_id: 'i1', title: 't', kind: 'card_added' })
     expect(posts.length).toBe(2)
   })
+
+  // Argus r2 finding — UNBOUND dispatches (no board item → item_id='') must not
+  // collapse to one dedup identity. Before the fix, key = `${item_id}\0${kind}`
+  // meant every unbound build within the window shared `\0build_dispatched`, so
+  // the second distinct build's ack was silently swallowed.
+  test('two UNBOUND dispatches (item_id="") with DIFFERENT titles both post', () => {
+    let t = 1_000
+    const { ack, posts } = harness({ now: () => t })
+    ack.post({ project_id: 'p1', item_id: '', title: 'Build auth service', kind: 'build_dispatched' })
+    t += 5_000 // still well within the 30s window
+    ack.post({ project_id: 'p1', item_id: '', title: 'Build billing worker', kind: 'build_dispatched' })
+    expect(posts.length).toBe(2)
+  })
+
+  test('same UNBOUND dispatch (item_id="", same title) within window is still deduped', () => {
+    let t = 1_000
+    const { ack, posts } = harness({ now: () => t })
+    ack.post({ project_id: 'p1', item_id: '', title: 'Build auth service', kind: 'build_dispatched' })
+    t += 5_000
+    ack.post({ project_id: 'p1', item_id: '', title: 'Build auth service', kind: 'build_dispatched' })
+    expect(posts.length).toBe(1)
+  })
+
+  test('same empty-item event in DIFFERENT projects is NOT suppressed (project_id in key)', () => {
+    let t = 1_000
+    const { ack, posts } = harness({ now: () => t })
+    ack.post({ project_id: 'p1', item_id: '', title: 'Build X', kind: 'build_dispatched' })
+    t += 100
+    ack.post({ project_id: 'p2', item_id: '', title: 'Build X', kind: 'build_dispatched' })
+    expect(posts.length).toBe(2)
+  })
 })
 
 describe('buildWorkBoardChatAck — never throws', () => {
