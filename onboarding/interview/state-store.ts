@@ -93,6 +93,20 @@ export interface UpsertOnboardingStateInput {
   phase_state_patch?: Record<string, unknown>
   /** Wall-clock ms; defaults to `now()` of the implementation. */
   advanced_at?: number
+  /**
+   * Background / patch-only write guard (Argus r2 blocker, 2026-07-22). When true
+   * AND the row already exists, `upsert` PRESERVES the row's CURRENT `phase` and
+   * `last_advanced_at` — read inside the same write — instead of stamping the
+   * caller-supplied `phase` / `advanced_at`. A fire-and-forget writer that read
+   * state seconds ago (the live personality suggester's up-to-45 s LLM call) can
+   * then persist a `phase_state_patch` WITHOUT regressing a phase transition or
+   * resetting the resume-window timer that a concurrent turn committed while the
+   * call was in flight — the lost-update the plain unconditional UPDATE caused.
+   * `phase` / `advanced_at` are still used when the row must be INSERTed (no current
+   * value to preserve). Omit / false on every foreground write (which owns the phase
+   * transition and intends to advance the timer).
+   */
+  preservePhaseAndTimer?: boolean
   /** Set when the engine reaches a terminal phase. */
   completed_at?: number
   import_job_id?: string | null
@@ -238,12 +252,16 @@ export class InMemoryOnboardingStateStore implements OnboardingStateStore {
       ? { ...existing.phase_state, ...(input.phase_state_patch ?? {}) }
       : { ...(input.phase_state_patch ?? {}) }
 
+    // Preserve the CURRENT phase + resume-window timer on a background patch-only
+    // write, so a stale-read fire-and-forget upsert can't regress a phase transition
+    // (Argus r2 blocker). Only meaningful when the row exists.
+    const preserve = input.preservePhaseAndTimer === true && existing !== undefined
     const next: OnboardingState = existing
       ? {
           ...existing,
-          phase: input.phase,
+          phase: preserve ? existing.phase : input.phase,
           phase_state: merged_phase_state,
-          last_advanced_at: advanced_at,
+          last_advanced_at: preserve ? existing.last_advanced_at : advanced_at,
           completed_at: input.completed_at !== undefined ? input.completed_at : existing.completed_at,
           import_job_id:
             input.import_job_id !== undefined ? input.import_job_id : existing.import_job_id,

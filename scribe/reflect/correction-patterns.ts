@@ -74,9 +74,20 @@ function byTsThenId(a: CorrectionEntry, b: CorrectionEntry): number {
  * The one-lined, truncated `<wrong> → <right>` body a promoted page records for an
  * occurrence — computed IDENTICALLY here and in `composePatternPage` so a cluster's
  * live occurrence key byte-matches the on-disk row it produced.
+ *
+ * TRIM AFTER TRUNCATE (Argus r2 blocker, 2026-07-22): `oneLine` trims the ends, but
+ * the 500-char `truncate` cut can land right AFTER a space, stranding a trailing
+ * space in the live body. Every disk path `.trim()`s a timeline-row body — the
+ * writer's render (`entity-format.ts` render), `extractTimeline`, and
+ * `mergeTimeline` all trim — so an UNtrimmed live body would never byte-match the
+ * row reconstructed from disk, `resolveClusterSlug`'s occurrence overlap would
+ * silently drop to 0, and the seed-eviction identity drift the persisted-identity
+ * fix closes would reappear for any correction whose one-lined `<wrong> → <right>`
+ * exceeds 500 chars. Trimming here keeps the live key symmetric with the persisted
+ * row on BOTH sides.
  */
 function occurrenceBody(c: CorrectionEntry): string {
-  return truncate(oneLine(`${c.wrong} → ${c.right}`), TIMELINE_BODY_TRUNCATE)
+  return truncate(oneLine(`${c.wrong} → ${c.right}`), TIMELINE_BODY_TRUNCATE).trim()
 }
 
 /**

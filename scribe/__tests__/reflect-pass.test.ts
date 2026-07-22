@@ -1165,6 +1165,44 @@ describe('reflect step 4 — correction-pattern promotion (deterministic, no LLM
     expect(await readPage(owner, 'concepts', slugB)).toBeNull()
   })
 
+  // Argus r2 blocker: the SAME seed-eviction path, but with a >500-char body so the
+  // occurrence key crosses the truncation boundary. Pre-fix, `occurrenceBody` left a
+  // trailing space on the live key while the writer/extract trimmed the persisted row
+  // — so pass 2's overlap fell to 0, the fallback slug drifted, and a DUPLICATE page
+  // was minted. This exercises the real on-disk render→parse round-trip at the boundary.
+  test('seed eviction at the 500-char truncation boundary: still ONE page (round-trip)', async () => {
+    const owner = tmpOwner()
+    // A shared 499-char `wrong` token forces clustering AND pushes `<wrong> → <right>`
+    // past 500 chars so the `slice(0, 500)` cut lands on the space before the arrow.
+    const LONGW = 'q'.repeat(499)
+    const S0: CorrectionEntry = { id: 'c-b0', ts: '2027-04-01T00:00:00.000Z', wrong: LONGW, right: 'correct alpha behavior', why: 'reason common shared' }
+    const M1: CorrectionEntry = { id: 'c-b1', ts: '2027-04-02T00:00:00.000Z', wrong: LONGW, right: 'correct beta behavior', why: 'reason common shared' }
+    const M2: CorrectionEntry = { id: 'c-b2', ts: '2027-04-03T00:00:00.000Z', wrong: LONGW, right: 'correct gamma behavior', why: 'reason common shared' }
+    const M3: CorrectionEntry = { id: 'c-b3', ts: '2027-04-04T00:00:00.000Z', wrong: LONGW, right: 'correct delta behavior', why: 'reason common shared' }
+
+    // The two fallback slugs genuinely differ — a duplicate would land at slugB.
+    const slugA = stablePatternSlug([S0, M1, M2])
+    const slugB = stablePatternSlug([M1, M2, M3])
+    expect(slugB).not.toBe(slugA)
+
+    // Pass 1 — [S0,M1,M2] promotes ONE page at slugA (real on-disk writer trims the
+    // >500-char row body on render).
+    const first = await runReflectPass({ ...baseDeps(owner), readCorrections: () => [S0, M1, M2] })
+    expect(first.patternsPromoted).toBe(1)
+    expect(await readPage(owner, 'concepts', slugA)).not.toBeNull()
+
+    // Pass 2 — S0 evicted, M3 arrives. The reconstructed occurrence keys (trimmed) must
+    // still overlap the live cluster's keys (also trimmed post-fix) → reuse slugA.
+    const second = await runReflectPass({ ...baseDeps(owner), readCorrections: () => [M1, M2, M3] })
+    expect(second.patternsPromoted).toBe(1) // updated the SAME page
+
+    const pageA = await readPage(owner, 'concepts', slugA)
+    expect(pageA).not.toBeNull()
+    expect(extractTimeline(pageA!)).toHaveLength(4) // S0,M1,M2 + M3, deduped
+    // NO duplicate at the drifted fallback slug (the pre-fix trailing-space bug).
+    expect(await readPage(owner, 'concepts', slugB)).toBeNull()
+  })
+
   test('below threshold (2 occurrences) → no promotion; scanned still counts', async () => {
     const owner = tmpOwner()
     const spy = mock(async () => ({ path: 'x', changed: true, newLinks: [] as unknown[] }))

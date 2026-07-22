@@ -230,3 +230,41 @@ describe('stablePatternSlug — deterministic ts-tie break by id', () => {
     expect(stablePatternSlug([P_HI, P_LO, P_NEW])).not.toBe(stablePatternSlug([P_HI]))
   })
 })
+
+// Argus r2 blocker: the occurrence key is truncated to 500 chars WITHOUT a trailing
+// trim; a cut landing right after a space stranded a trailing space in the LIVE key,
+// while every disk path (writer render + extractTimeline + mergeTimeline) `.trim()`s
+// the row body — so the live key never byte-matched the row reconstructed from disk,
+// `resolveClusterSlug`'s overlap silently fell to 0, and the seed-eviction identity
+// drift reappeared for any correction whose one-lined `<wrong> → <right>` exceeds 500
+// chars. These pin the two sides symmetric at the boundary.
+describe('correctionOccurrenceKey — 500-char truncation boundary (Argus r2 blocker)', () => {
+  // `<wrong>`(499, no spaces) + ` → ` + `<right>` → the `slice(0, 500)` cut lands on
+  // the space BEFORE the arrow, so the untrimmed body ends in a space (`right` is cut
+  // off entirely). The trimmed body is exactly the 499-char `wrong` token.
+  const WRONG = 'q'.repeat(499)
+  const BOUNDARY: CorrectionEntry = {
+    id: 'c-boundary',
+    ts: '2027-03-01T00:00:00.000Z',
+    wrong: WRONG,
+    right: 'correct alpha behavior',
+    why: 'reason',
+  }
+
+  test('the live occurrence key has NO trailing space (matches the trimmed on-disk row)', () => {
+    const key = correctionOccurrenceKey(BOUNDARY)
+    expect(key.endsWith(' ')).toBe(false)
+    // Body half is the trimmed 499-char token — the arrow + `right` fell past the cut.
+    expect(key).toBe(`${BOUNDARY.ts}\x1f${WRONG}`)
+  })
+
+  test('the live key equals the key rebuilt from the persisted timeline-row body', () => {
+    // The row `composePatternPage` writes carries the SAME (now-trimmed) body, and the
+    // pass reconstructs a prior key as `${row.ts}\x1f${row.body}` (entity-format trims
+    // the body on both render and parse). So live key === reconstructed key — no drift.
+    const { timelineRows } = composePatternPage([BOUNDARY])
+    const row = timelineRows[0]!
+    expect(row.body.endsWith(' ')).toBe(false)
+    expect(correctionOccurrenceKey(BOUNDARY)).toBe(`${row.ts}\x1f${row.body}`)
+  })
+})

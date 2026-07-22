@@ -346,6 +346,15 @@ export function buildLivePersonalitySuggestionCoordinator(
         await stateStore.upsert({
           owner_slug,
           user_id,
+          // `phase` / `advanced_at` are a FALLBACK only for the vanishingly-rare case
+          // where the row was deleted (admin reset) between the re-read and this write
+          // and must be re-INSERTed. On the normal existing-row path they are IGNORED:
+          // `preservePhaseAndTimer` keeps the row's CURRENT phase + `last_advanced_at`
+          // (read inside the write), so this background memo persist can never regress
+          // a phase transition or reset the resume-window timer that a concurrent turn
+          // committed during the up-to-45 s generation (Argus r2 blocker — the stale
+          // `fresh.*` values previously clobbered a live advance via the unconditional
+          // UPDATE).
           phase: fresh.phase,
           phase_state_patch: {
             [PERSONALITY_SUGGESTIONS_KEY]: result.suggestions,
@@ -353,9 +362,8 @@ export function buildLivePersonalitySuggestionCoordinator(
             [PERSONALITY_SUGGESTIONS_FINGERPRINT_KEY]: fp,
             [PERSONALITY_SUGGESTIONS_ANCHOR_HISTORY_KEY]: anchorHistory,
           },
-          // Preserve the resume-window timer — a background memo write must not
-          // reset `last_advanced_at` (mirrors engine-spec-resolution.ts).
           advanced_at: fresh.last_advanced_at,
+          preservePhaseAndTimer: true,
         })
       })().finally(() => {
         pending.delete(user_id)

@@ -171,6 +171,19 @@ export class SqliteOnboardingStateStore implements OnboardingStateStore {
           ? input.onboarding_handoff_emitted_at
           : existing.onboarding_handoff_emitted_at
 
+      // Background patch-only write (Argus r2 blocker): PRESERVE the row's CURRENT
+      // phase + resume-window timer, read here inside the transaction, instead of
+      // stamping the caller's stale `input.phase` / `advanced_at`. A fire-and-forget
+      // writer (the live personality suggester) reads state, then upserts up to 45 s
+      // later; without this, its unconditional `SET phase=?, last_advanced_at=?`
+      // would clobber a phase transition a concurrent turn committed in between (a
+      // lost update). The phase_state MERGE is already safe — it folds the patch over
+      // the freshly-read `existing.phase_state_json` above — so only phase + timer
+      // need preserving.
+      const next_phase = input.preservePhaseAndTimer === true ? existing.phase : input.phase
+      const next_last_advanced_at =
+        input.preservePhaseAndTimer === true ? existing.last_advanced_at : advanced_at
+
       await tx.run(
         `UPDATE onboarding_state
             SET phase = ?, phase_state_json = ?, last_advanced_at = ?,
@@ -179,9 +192,9 @@ export class SqliteOnboardingStateStore implements OnboardingStateStore {
                 wow_pushed_at = ?, onboarding_handoff_emitted_at = ?
           WHERE project_slug = ? AND user_id = ?`,
         [
-          input.phase,
+          next_phase,
           phase_state_json,
-          advanced_at,
+          next_last_advanced_at,
           completed_at,
           import_job_id,
           persona_files_committed_int,
@@ -195,10 +208,10 @@ export class SqliteOnboardingStateStore implements OnboardingStateStore {
       return {
         owner_slug: existing.project_slug,
         user_id: existing.user_id,
-        phase: input.phase,
+        phase: next_phase as OnboardingPhase,
         phase_state: merged_phase_state,
         started_at: existing.started_at,
-        last_advanced_at: advanced_at,
+        last_advanced_at: next_last_advanced_at,
         completed_at,
         import_job_id,
         persona_files_committed: persona_files_committed_int === 1,
