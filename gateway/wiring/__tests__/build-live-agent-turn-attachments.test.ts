@@ -142,7 +142,7 @@ describe('build-live-agent-turn — attachment threading', () => {
   test('(c) turn.user_text handed to the reflection seam is UNPOLLUTED by the path', async () => {
     const specs: AgentSpec[] = []
     const sent: ChatOutbound[] = []
-    let seenUserText: string | null = null
+    const captured: { userText: string | null } = { userText: null }
     const run = buildLiveAgentTurn({
       substrate: makeStubSubstrate(specs),
       personaLoader: { async load() { return '' } },
@@ -150,7 +150,7 @@ describe('build-live-agent-turn — attachment threading', () => {
       reflection: {
         loadContext: () => null,
         onTurnComplete: (t) => {
-          seenUserText = t.user_text
+          captured.userText = t.user_text
         },
       },
       buttonStore: store,
@@ -163,8 +163,8 @@ describe('build-live-agent-turn — attachment threading', () => {
     // The prompt carries the path…
     expect(specs[0]!.prompt).toContain(PDF_PATH)
     // …but the user_text the seam judges is exactly what the user typed.
-    expect(seenUserText).toBe('read my doc')
-    expect(seenUserText as unknown as string).not.toContain(PDF_PATH)
+    expect(captured.userText).toBe('read my doc')
+    expect(captured.userText ?? '').not.toContain(PDF_PATH)
     // The persisted user-turn history bubble is likewise unpolluted.
     const persisted = await store.latestTurnByTopic({ topic_id: 'web:u-1', before: now, now })
     expect(persisted?.body ?? '').not.toContain(PDF_PATH)

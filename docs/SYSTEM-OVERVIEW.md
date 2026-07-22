@@ -4490,6 +4490,25 @@ now-nonexistent vanilla client.
   reveals only one user's blobs), a plain `<img src>` would 401 — so a custom
   assistant-ui `Image` content-part fetches the blob WITH the app-ws token and
   renders an object URL. The bare token is surfaced on `BootstrapConfig.token`.
+- **Accepted types (M2 modality scope, 2026-07-21):** PNG / JPEG / GIF / WEBP
+  raster images + **PDF documents** (`CHAT_UPLOAD_MIME_WHITELIST`). SVG stays
+  excluded (inline-script XSS). Magic-byte sniffing (`gateway/storage/binary-types.ts`)
+  is authoritative — a declared type that disagrees with the sniff is a 400
+  `content_type_spoof`. A NON-image attachment renders in the bubble as a
+  downloadable file chip (not a broken `<img>`) via the SAME authed fetch;
+  `message-adapter.ts` routes every attachment through the authed renderer, which
+  branches on `isImageAttachmentUrl`.
+- **Attachment → agent threading (M2, 2026-07-21):** the upload URLs are no longer
+  dropped at the WS receiver. `open/wiring/app-ws.ts` sanitizes
+  `adapter_metadata.attachments` to strings and passes them on the
+  `LiveAgentTurnRequest`; `gateway/wiring/build-live-agent-turn.ts` resolves each
+  URL to its local blob path (`resolveChatAttachmentLocalPath`, supplied by the
+  composer over `owner_home`) and splices a `<user_attachments>` fragment of the
+  resolved absolute paths into the DISPATCHED prompt (warm splice + cold
+  `composeFirstTurnPrompt`) — the CC REPL `Read`s images AND PDFs natively. The
+  fragment is prompt-only; `turn.user_text` (which feeds capture/reflection/
+  scribe/persistence) is never mutated. An attachment-only send still dispatches a
+  turn; an unresolvable URL is skipped with a warn.
 
 **Parity reached:** optimistic send, token streaming, typing indicator,
 reconnect+backoff (all via chat-core), durable cold-open + gap-free reconnect

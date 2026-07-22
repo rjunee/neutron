@@ -4624,3 +4624,46 @@ UNAPPROVED (task 8 owns the owner's approval act).
 - OUT OF SCOPE (later RALPH tasks): scheduling/approval UX (task 8), memory-tier work
   (task 9), SYSTEM-OVERVIEW ritual-executor section (task 10), any writing/Bash ritual
   (stays gated on the OS-sandbox sprint).
+
+## M2 P0 parity — input modalities task 1: attachment→agent threading + PDF documents (2026-07-21)
+
+Scope: `IMPLEMENTATION_PLAN.md` task 1. Attachments (including images) never reached
+the agent — `open/wiring/app-ws.ts` read `adapter_metadata.attachments` and dropped
+them (its own comment admitted the deeper wiring was a follow-up); `gateway/wiring/
+build-live-agent-turn.ts` had zero attachment handling. This builds the threading AND
+adds PDF as an accepted chat-upload type. **Images are fixed as a side effect** — they
+now reach the agent for the first time.
+
+- **`gateway/http/app-upload-surface.ts`** — `IMAGE_MIME_WHITELIST` → `CHAT_UPLOAD_MIME_WHITELIST`
+  (+`application/pdf`; SVG still excluded); `EXT_FROM_MIME` (+`pdf`), `URL_PATH_RE`
+  (`…(png|jpg|gif|webp|pdf)`), `mimeFromExt` (+`pdf`). All existing hardening
+  (Content-Length pre-check, 10 MiB cap, declared-vs-sniffed cross-check,
+  content-addressed storage, per-user GET auth) untouched. NEW exported
+  `resolveChatAttachmentLocalPath(owner_home, url)` — pure, syscall-free URL→local-path
+  map using the SAME `URL_PATH_RE` (relative OR absolute URL; null for non-matching).
+- **`gateway/http/chat-sender-registry.ts`** — `LiveAgentTurnRequest` gains
+  `attachments?: ReadonlyArray<string>` (prompt-only; never mutates `user_text`).
+- **`gateway/wiring/build-live-agent-turn.ts`** — `BuildLiveAgentTurnInput` gains
+  `resolveAttachment?`; new exported `buildAttachmentsFragment(...)` formats a
+  `<user_attachments>` block of resolved absolute paths + MIME + a "Read them" line;
+  injected on the WARM splice (before the user message) AND the COLD
+  `composeFirstTurnPrompt` (before the user message). Unresolvable URL → skipped + warn.
+- **`open/wiring/app-ws.ts`** — sanitizes `adapter_metadata.attachments` to non-empty
+  strings and passes `attachments` into the `appWsChatTurn({...})` call.
+- **`open/composer.ts`** — threads `resolveAttachment: (url) => resolveChatAttachmentLocalPath(owner_home, url)`
+  into `buildLiveAgentTurn`.
+- **Clients** — web: `uploads.ts` `ACCEPTED_IMAGE_TYPES` → `ACCEPTED_ATTACHMENT_TYPES`
+  (+pdf); `ChatApp.tsx` file-input `accept` (+`application/pdf,.pdf`), aria-label
+  "Attach file…", `AttachmentImage` non-image → downloadable file chip;
+  `message-adapter.ts` routes every attachment through the authed renderer
+  (`isImageAttachmentUrl` decides img vs chip). Expo: `app/lib/upload-client.ts`
+  `mimeToExt` (+pdf, exported for test).
+- **Tests** — `gateway/__tests__/app-upload-surface.test.ts` (PDF accept/spoof/serve+ETag
+  + `resolveChatAttachmentLocalPath` units); `gateway/wiring/__tests__/build-live-agent-turn-attachments.test.ts`
+  (NEW: cold+warm embed the resolved path, `user_text` unpolluted, unresolvable skipped,
+  no-attachments/no-resolver → no block); `gateway/__tests__/m2-chat-upload-attach-production-composer.test.ts`
+  (PDF variant threads onto `adapter_metadata.attachments`); web `uploads.test.ts` /
+  `message-adapter.test.ts` updated; `app/__tests__/upload-client.test.ts` `mimeToExt` unit.
+- Suites: scoped gateway + wiring + open + client tests green; `tsc -p tsconfig.json` clean.
+- OUT OF SCOPE (later tasks): voice-note transcription (task 2), `/status` + `/reset`
+  chat commands (task 3), office formats beyond PDF, SVG, the import-ZIP path.
