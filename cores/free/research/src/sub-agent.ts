@@ -65,6 +65,14 @@ export interface RuntimeSubAgentDispatchInput {
    *  this project's sidecar). Additive/optional — a canned dispatcher
    *  that ignores it stays byte-identical. */
   project_id?: string
+  /** Cooperative-cancellation signal. `dispatchResearchSubAgent` aborts
+   *  this the instant the outer `budget_ms` race trips (SubAgentTimeoutError)
+   *  OR the dispatch otherwise settles. A long-running agentic dispatcher
+   *  MUST stop issuing further `llm_call` / tool rounds once it fires — a
+   *  timed-out run whose concurrency slot has already been released must not
+   *  keep burning LLM/tool resources under the freed slot (Argus r2 BLOCKER).
+   *  A canned dispatcher that ignores it stays byte-identical. */
+  signal?: AbortSignal
 }
 
 export interface RuntimeSubAgentDispatchResult {
@@ -175,6 +183,11 @@ export async function dispatchResearchSubAgent(
     input.retry_feedback === undefined
       ? input.query
       : input.query + '\n\n' + RETRY_FEEDBACK_MARKER + '\n' + input.retry_feedback
+  // Cooperative-cancellation controller: aborted the instant the outer
+  // budget race trips (or the dispatch otherwise settles), so a timed-out
+  // agentic dispatch stops burning LLM/tool resources after its concurrency
+  // slot is released (Argus r2 BLOCKER).
+  const controller = new AbortController()
   try {
     const result = await runWithTimeout(
       deps.runtime_sub_agent.dispatch({
@@ -184,6 +197,7 @@ export async function dispatchResearchSubAgent(
         tools,
         budget_ms,
         project_id: input.project_id,
+        signal: controller.signal,
       }),
       budget_ms,
     )
@@ -197,6 +211,10 @@ export async function dispatchResearchSubAgent(
       tools_available: result.tools_available === true,
     }
   } finally {
+    // Fires on timeout, error, AND success. On timeout this is what tells the
+    // orphaned dispatch loop to stop; on success/error the dispatch has
+    // already settled so the abort is a harmless no-op.
+    controller.abort()
     release()
   }
 }

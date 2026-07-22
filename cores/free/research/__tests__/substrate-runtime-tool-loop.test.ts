@@ -18,6 +18,7 @@ import { expect, test } from 'bun:test'
 import {
   buildRuntimeResearchSubAgentDispatcher,
   FINALIZE_MARKER,
+  SubAgentDispatchAbortedError,
   TOOL_RESULT_BLOCK_MARKER,
   type ResearchSubAgentToolExecutors,
 } from '../src/substrate-runtime.ts'
@@ -235,6 +236,59 @@ test('T7 offered-intersection empty → v1 path (tools requested have no executo
   expect(calls.length).toBe(1)
   expect(result.tools_available).toBe(false)
   expect(calls[0]!.user).toBe('research neutron agents')
+})
+
+test('T9 abort mid-flight: signal aborted while an llm_call is in-flight halts the loop before tool-exec / next round (Argus r2 BLOCKER)', async () => {
+  // Simulates the outer budget race tripping (and releasing the concurrency
+  // slot) while the FIRST llm_call is still pending: the call resolves with a
+  // tool_call envelope AFTER the signal is aborted. The loop must NOT execute
+  // the tool and must NOT issue a second llm_call — it must throw instead.
+  const controller = new AbortController()
+  const envelope =
+    '{"tool_call":{"tool":"research_web_search","input":{"query":"q"}}}'
+  let llmCalls = 0
+  const llm_call = async (): Promise<string> => {
+    llmCalls++
+    controller.abort() // outer race trips while this call is "in flight"
+    return envelope
+  }
+  let toolRan = false
+  const tool_executors: ResearchSubAgentToolExecutors = {
+    research_web_search: async () => {
+      toolRan = true
+      return { hits: [] }
+    },
+  }
+  const dispatcher = buildRuntimeResearchSubAgentDispatcher({
+    llm_call,
+    tool_executors,
+  })
+  await expect(
+    dispatcher.dispatch(baseInput({ signal: controller.signal })),
+  ).rejects.toThrow(SubAgentDispatchAbortedError)
+  expect(llmCalls).toBe(1) // no second (forced-finalize) round issued
+  expect(toolRan).toBe(false) // orphaned run did NOT execute the tool
+})
+
+test('T10 already-aborted signal → zero llm calls, throws immediately', async () => {
+  const controller = new AbortController()
+  controller.abort()
+  let llmCalls = 0
+  const llm_call = async (): Promise<string> => {
+    llmCalls++
+    return FINAL_BRIEF
+  }
+  const tool_executors: ResearchSubAgentToolExecutors = {
+    research_web_search: async () => ({ hits: [] }),
+  }
+  const dispatcher = buildRuntimeResearchSubAgentDispatcher({
+    llm_call,
+    tool_executors,
+  })
+  await expect(
+    dispatcher.dispatch(baseInput({ signal: controller.signal })),
+  ).rejects.toThrow(SubAgentDispatchAbortedError)
+  expect(llmCalls).toBe(0)
 })
 
 test('T8 truncation: oversized tool result is capped at TOOL_RESULT_MAX_CHARS + suffix', async () => {

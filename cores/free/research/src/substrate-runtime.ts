@@ -177,6 +177,23 @@ export function TOOL_RESULT_BLOCK_MARKER(name: string): string {
 /** Appended to the transcript on the forced finalize turn. */
 export const FINALIZE_MARKER = '[FINAL ANSWER REQUIRED]'
 
+/**
+ * Thrown by the agentic tool loop when its `input.signal` is aborted —
+ * i.e. the outer `dispatchResearchSubAgent` budget race already tripped
+ * and released the concurrency slot. Stopping here is what prevents an
+ * orphaned dispatch from continuing to parse, execute tools, and issue
+ * further `llm_call` rounds under a freed slot (Argus r2 BLOCKER). The
+ * outer `Promise.race` has already rejected with `SubAgentTimeoutError`,
+ * so this rejection is discarded — its only job is to halt the loop.
+ */
+export class SubAgentDispatchAbortedError extends Error {
+  readonly code = 'sub_agent_dispatch_aborted' as const
+  constructor() {
+    super('research sub-agent dispatch aborted (outer budget/timeout tripped)')
+    this.name = 'SubAgentDispatchAbortedError'
+  }
+}
+
 /** Per-tool input-shape hints rendered into the protocol rider. */
 const TOOL_INPUT_SCHEMAS: Readonly<Record<string, string>> = {
   research_vault_search: '{"query": string, "limit"?: number}',
@@ -322,7 +339,20 @@ export function buildRuntimeResearchSubAgentDispatcher(
         tools_available: true,
       })
 
+      // Cooperative cancellation: the outer budget race (sub-agent.ts
+      // `runWithTimeout`) can trip and release the concurrency slot while a
+      // hung `llm_call` is still pending. When that call finally resolves the
+      // signal is already aborted; bailing here stops the orphaned run from
+      // parsing, executing a tool, and issuing further `llm_call` rounds under
+      // the freed slot (Argus r2 BLOCKER).
+      const throwIfAborted = (): void => {
+        if (input.signal?.aborted === true) {
+          throw new SubAgentDispatchAbortedError()
+        }
+      }
+
       for (;;) {
+        throwIfAborted()
         // Round / budget guard — force the final-answer turn.
         if (
           toolRounds >= max_tool_rounds ||
@@ -339,6 +369,7 @@ export function buildRuntimeResearchSubAgentDispatcher(
             max_tokens,
             model,
           })
+          throwIfAborted()
           return finalize(text)
         }
 
@@ -348,6 +379,9 @@ export function buildRuntimeResearchSubAgentDispatcher(
           max_tokens,
           model,
         })
+        // If the outer race tripped while this call was in flight, stop before
+        // spending any more work (parse / tool-exec / next round) on it.
+        throwIfAborted()
 
         let parsed: unknown
         try {

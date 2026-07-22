@@ -126,6 +126,50 @@ describe('dispatchResearchSubAgent', () => {
     expect(gate.inFlightFor('t')).toBe(0)
   })
 
+  test('outer budget timeout aborts the dispatch signal + releases the slot (Argus r2 BLOCKER orphan-halt)', async () => {
+    // The dispatcher hangs past budget_ms; the outer race trips. We assert the
+    // slot is released AND the signal handed to the dispatcher is aborted — the
+    // hook a long-running agentic dispatch honors to stop burning resources
+    // after its concurrency slot is freed.
+    let sawSignal: AbortSignal | undefined
+    const slow: RuntimeSubAgentDispatcher = {
+      async dispatch(input) {
+        sawSignal = input.signal
+        await new Promise((r) => setTimeout(r, 200))
+        return { text: '', model: 'x', tool_calls: [] }
+      },
+    }
+    const gate = new PerOwnerConcurrencyGate({ cap: 1 })
+    await expect(
+      dispatchResearchSubAgent(
+        { query: 'a', project_slug: 't', project_id: 'p', budget_ms: 40 },
+        { runtime_sub_agent: slow, concurrency_gate: gate },
+      ),
+    ).rejects.toThrow(SubAgentTimeoutError)
+    expect(gate.inFlightFor('t')).toBe(0)
+    expect(sawSignal).toBeDefined()
+    expect(sawSignal!.aborted).toBe(true)
+  })
+
+  test('successful dispatch also aborts the signal on completion (idempotent cleanup)', async () => {
+    let sawSignal: AbortSignal | undefined
+    const ok: RuntimeSubAgentDispatcher = {
+      async dispatch(input) {
+        sawSignal = input.signal
+        return { text: 'x', model: 'm', tool_calls: [] }
+      },
+    }
+    const gate = new PerOwnerConcurrencyGate({ cap: 1 })
+    await dispatchResearchSubAgent(
+      { query: 'a', project_slug: 't', project_id: 'p' },
+      { runtime_sub_agent: ok, concurrency_gate: gate },
+    )
+    expect(gate.inFlightFor('t')).toBe(0)
+    // Signal was aborted by the finally after the dispatch already resolved —
+    // a harmless no-op for the settled call, proving cleanup always fires.
+    expect(sawSignal!.aborted).toBe(true)
+  })
+
   test('concurrency cap rejects the (cap+1)-th in-flight task', async () => {
     const hangs: RuntimeSubAgentDispatcher = {
       async dispatch() {
