@@ -17,7 +17,7 @@
  * flag — the tab is always live when present in the resolved tab set.
  */
 
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 import type { BootstrapConfig } from './config.ts'
 import {
@@ -56,14 +56,41 @@ export function IntegrationsTab({
   /** Injected in tests; defaults to the global fetch inside IntegrationsClient. */
   fetchImpl?: FetchImpl
 }): React.JSX.Element {
+  // ── Unmount safety (#380 sweep) ─────────────────────────────────────────────
+  // Mirrors the DocumentsTab fix: a fetch that SETTLES after this tab unmounts
+  // (project switch / tab close) must not run its `.then`/`.catch` and setState
+  // on a gone component. In a real concurrent-browser commit that
+  // setState-after-unmount surfaces as React's teardown-phase invariant, which
+  // bypasses every error boundary and blanks the WHOLE root (main.tsx now adds a
+  // root-recovery net, but stopping the setState at the source is the real fix).
+  // `mountedRef` bails every continuation once unmounted; `abortRef` cancels
+  // in-flight READS (GET) on unmount — a write (POST/DELETE the user just fired)
+  // is NEVER aborted so it still reaches the server, its continuation relying on
+  // the `mountedRef` guard to skip setState-after-unmount.
+  const mountedRef = useRef(true)
+  const abortRef = useRef<AbortController | null>(null)
+  useEffect(() => {
+    mountedRef.current = true
+    abortRef.current = new AbortController()
+    return () => {
+      mountedRef.current = false
+      abortRef.current?.abort()
+    }
+  }, [])
+
+  // Thread the pane's abort signal into READS only (GET); unmount aborts them.
+  const withSignal: FetchImpl = useMemo(() => {
+    const base: FetchImpl = fetchImpl ?? ((input, init) => fetch(input, init))
+    return (input, init) => {
+      const ctrl = abortRef.current
+      const isRead = (init?.method ?? 'GET') === 'GET'
+      return base(input, ctrl !== null && isRead ? { ...init, signal: ctrl.signal } : init)
+    }
+  }, [fetchImpl])
+
   const client = useMemo(
-    () =>
-      new IntegrationsClient(
-        fetchImpl !== undefined
-          ? { base_url: config.origin, token: config.token, fetchImpl }
-          : { base_url: config.origin, token: config.token },
-      ),
-    [config.origin, config.token, fetchImpl],
+    () => new IntegrationsClient({ base_url: config.origin, token: config.token, fetchImpl: withSignal }),
+    [config.origin, config.token, withSignal],
   )
 
   const [oauth, setOauth] = useState<OAuthAccountIntegration[]>([])
@@ -76,13 +103,8 @@ export function IntegrationsTab({
   // trident reviewer uses across ANY project (not a per-project setting). A
   // per-project override lives in that project's Settings tab.
   const codexClient = useMemo(
-    () =>
-      new WebCodexCredentialClient(
-        fetchImpl !== undefined
-          ? { base_url: config.origin, token: config.token, fetchImpl }
-          : { base_url: config.origin, token: config.token },
-      ),
-    [config.origin, config.token, fetchImpl],
+    () => new WebCodexCredentialClient({ base_url: config.origin, token: config.token, fetchImpl: withSignal }),
+    [config.origin, config.token, withSignal],
   )
   const [codexStatus, setCodexStatus] = useState<CodexStatus | null>(null)
   const [codexAuth, setCodexAuth] = useState('')
@@ -92,8 +114,14 @@ export function IntegrationsTab({
   const loadCodex = useCallback((): void => {
     void codexClient
       .statusGlobal()
-      .then((s) => setCodexStatus(s))
-      .catch(() => setCodexStatus({ status: 'not_connected' }))
+      .then((s) => {
+        if (!mountedRef.current) return
+        setCodexStatus(s)
+      })
+      .catch(() => {
+        if (!mountedRef.current) return
+        setCodexStatus({ status: 'not_connected' })
+      })
   }, [codexClient])
 
   useEffect(() => loadCodex(), [loadCodex])
@@ -105,11 +133,13 @@ export function IntegrationsTab({
     void codexClient
       .connectGlobal(codexAuth.trim())
       .then((s) => {
+        if (!mountedRef.current) return
         setCodexStatus(s)
         setCodexAuth('')
         setCodexBusy(false)
       })
       .catch((err: unknown) => {
+        if (!mountedRef.current) return
         setCodexBusy(false)
         setCodexError(err instanceof Error ? err.message : 'failed to connect Codex')
       })
@@ -121,10 +151,12 @@ export function IntegrationsTab({
     void codexClient
       .disconnectGlobal()
       .then(() => {
+        if (!mountedRef.current) return
         setCodexStatus({ status: 'not_connected' })
         setCodexBusy(false)
       })
       .catch((err: unknown) => {
+        if (!mountedRef.current) return
         setCodexBusy(false)
         setCodexError(err instanceof Error ? err.message : 'failed to disconnect Codex')
       })
@@ -140,10 +172,9 @@ export function IntegrationsTab({
   const [archivedLoading, setArchivedLoading] = useState(true)
   const [archivedError, setArchivedError] = useState<string | null>(null)
   const [restoringId, setRestoringId] = useState<string | null>(null)
-  const doFetch: FetchImpl = useMemo(
-    () => fetchImpl ?? ((input, init) => fetch(input, init)),
-    [fetchImpl],
-  )
+  // The archived list GET / restore POST go through the same abort-threading
+  // wrapper so the GET is cancelled on unmount (restore is a POST — never aborted).
+  const doFetch: FetchImpl = withSignal
 
   const loadArchived = useCallback((): void => {
     setArchivedLoading(true)
@@ -153,6 +184,7 @@ export function IntegrationsTab({
       headers: { authorization: `Bearer ${config.token}` },
     })
       .then(async (res) => {
+        if (!mountedRef.current) return
         if (!res.ok) throw new Error(`HTTP ${res.status}`)
         const data = (await res.json().catch(() => null)) as { archived?: unknown } | null
         const list = Array.isArray(data?.archived) ? data.archived : []
@@ -168,6 +200,7 @@ export function IntegrationsTab({
         setArchivedLoading(false)
       })
       .catch((err: unknown) => {
+        if (!mountedRef.current) return
         setArchived([])
         setArchivedLoading(false)
         setArchivedError(err instanceof Error ? err.message : 'failed to load archived projects')
@@ -190,12 +223,14 @@ export function IntegrationsTab({
             const body = (await res.json().catch(() => null)) as { message?: string } | null
             throw new Error(body?.message ?? `HTTP ${res.status}`)
           }
+          if (!mountedRef.current) return
           // Drop it from the archived list; the rail picks it back up live off
           // the `projects_changed` frame the restore endpoint fans.
           setArchived((prev) => prev.filter((p) => p.id !== id))
           setRestoringId(null)
         })
         .catch((err: unknown) => {
+          if (!mountedRef.current) return
           setRestoringId(null)
           setArchivedError(err instanceof Error ? err.message : 'failed to restore project')
         })
@@ -210,13 +245,13 @@ export function IntegrationsTab({
     void client
       .getStatus()
       .then((res) => {
-        if (cancelled) return
+        if (cancelled || !mountedRef.current) return
         setOauth(res.oauth)
         setApiKeys(res.api_keys)
         setLoading(false)
       })
       .catch((err: unknown) => {
-        if (cancelled) return
+        if (cancelled || !mountedRef.current) return
         setOauth([])
         setApiKeys([])
         setLoading(false)
@@ -241,6 +276,7 @@ export function IntegrationsTab({
       void client
         .setApiKey(label, value)
         .then(() => {
+          if (!mountedRef.current) return
           setBusy((m) => ({ ...m, [label]: false }))
           setDrafts((m) => ({ ...m, [label]: '' }))
           setApiKeys((keys) =>
@@ -248,6 +284,7 @@ export function IntegrationsTab({
           )
         })
         .catch((err: unknown) => {
+          if (!mountedRef.current) return
           setBusy((m) => ({ ...m, [label]: false }))
           setRowError((m) => ({
             ...m,
@@ -265,6 +302,7 @@ export function IntegrationsTab({
       void client
         .deleteApiKey(label)
         .then(() => {
+          if (!mountedRef.current) return
           setBusy((m) => ({ ...m, [label]: false }))
           setDrafts((m) => ({ ...m, [label]: '' }))
           setApiKeys((keys) =>
@@ -272,6 +310,7 @@ export function IntegrationsTab({
           )
         })
         .catch((err: unknown) => {
+          if (!mountedRef.current) return
           setBusy((m) => ({ ...m, [label]: false }))
           setRowError((m) => ({
             ...m,

@@ -24,7 +24,7 @@
  * PATCH directly (a single field, no dedicated client).
  */
 
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 import type { BootstrapConfig } from './config.ts'
 import {
@@ -53,32 +53,50 @@ export function SettingsTab({
   /** Injected in tests; defaults to the global fetch inside the clients. */
   fetchImpl?: FetchImpl
 }): React.JSX.Element {
+  // ── Unmount safety (#380 sweep) ─────────────────────────────────────────────
+  // A credential/settings/codex fetch that SETTLES after this tab unmounts
+  // (project switch / tab close) must not run its continuation + setState on a
+  // gone component — in a real browser commit that setState-after-unmount is the
+  // teardown-phase fiber invariant that bypasses every error boundary and blanks
+  // the whole root (main.tsx now adds a root-recovery net; this stops it at the
+  // source). `mountedRef` bails every continuation once unmounted; `abortRef`
+  // cancels in-flight READS (GET) on unmount — a write (PATCH/POST/DELETE the
+  // user just fired) is NEVER aborted so it still reaches the server.
+  const mountedRef = useRef(true)
+  const abortRef = useRef<AbortController | null>(null)
+  useEffect(() => {
+    mountedRef.current = true
+    abortRef.current = new AbortController()
+    return () => {
+      mountedRef.current = false
+      abortRef.current?.abort()
+    }
+  }, [])
+
+  // Thread the pane's abort signal into READS only (GET); unmount aborts them.
+  const withSignal: FetchImpl = useMemo(() => {
+    const base: FetchImpl = fetchImpl ?? ((input, init) => fetch(input, init))
+    return (input, init) => {
+      const ctrl = abortRef.current
+      const isRead = (init?.method ?? 'GET') === 'GET'
+      return base(input, ctrl !== null && isRead ? { ...init, signal: ctrl.signal } : init)
+    }
+  }, [fetchImpl])
+
   const client = useMemo(
-    () =>
-      new WebProjectCredentialsClient(
-        fetchImpl !== undefined
-          ? { base_url: config.origin, token: config.token, fetchImpl }
-          : { base_url: config.origin, token: config.token },
-      ),
-    [config.origin, config.token, fetchImpl],
+    () => new WebProjectCredentialsClient({ base_url: config.origin, token: config.token, fetchImpl: withSignal }),
+    [config.origin, config.token, withSignal],
   )
 
   // Raw fetch for the project-settings GET/PATCH (a single `name` field — no
-  // dedicated client). Mirrors `ProjectShell`'s `onCreateProject` bearer fetch.
-  const doFetch: FetchImpl = useMemo(
-    () => fetchImpl ?? ((input, init) => fetch(input, init)),
-    [fetchImpl],
-  )
+  // dedicated client). Shares the abort-threading wrapper (GET aborted on
+  // unmount; the PATCH is a write — never aborted).
+  const doFetch: FetchImpl = withSignal
 
   // Codex connect client (Part B — trident cross-model reviewer credential).
   const codexClient = useMemo(
-    () =>
-      new WebCodexCredentialClient(
-        fetchImpl !== undefined
-          ? { base_url: config.origin, token: config.token, fetchImpl }
-          : { base_url: config.origin, token: config.token },
-      ),
-    [config.origin, config.token, fetchImpl],
+    () => new WebCodexCredentialClient({ base_url: config.origin, token: config.token, fetchImpl: withSignal }),
+    [config.origin, config.token, withSignal],
   )
 
   // ── credentials ──
@@ -106,8 +124,14 @@ export function SettingsTab({
   const loadCodex = useCallback((): void => {
     void codexClient
       .status(projectId)
-      .then((s) => setCodexStatus(s))
-      .catch(() => setCodexStatus({ status: 'not_connected' }))
+      .then((s) => {
+        if (!mountedRef.current) return
+        setCodexStatus(s)
+      })
+      .catch(() => {
+        if (!mountedRef.current) return
+        setCodexStatus({ status: 'not_connected' })
+      })
   }, [codexClient, projectId])
 
   const connectCodex = useCallback((): void => {
@@ -121,11 +145,13 @@ export function SettingsTab({
       // saving so the remove affordance appears immediately, no reload needed.
       .then(() => codexClient.status(projectId))
       .then((s) => {
+        if (!mountedRef.current) return
         setCodexStatus(s)
         setCodexAuth('')
         setCodexBusy(false)
       })
       .catch((err: unknown) => {
+        if (!mountedRef.current) return
         setCodexBusy(false)
         setCodexError(err instanceof Error ? err.message : 'failed to connect Codex')
       })
@@ -141,10 +167,12 @@ export function SettingsTab({
       // (connected, scope=global). Re-fetch rather than assume.
       .then(() => codexClient.status(projectId))
       .then((s) => {
+        if (!mountedRef.current) return
         setCodexStatus(s)
         setCodexBusy(false)
       })
       .catch((err: unknown) => {
+        if (!mountedRef.current) return
         setCodexBusy(false)
         setCodexError(err instanceof Error ? err.message : 'failed to disconnect Codex')
       })
@@ -178,11 +206,13 @@ export function SettingsTab({
     void client
       .list(projectId)
       .then((list) => {
+        if (!mountedRef.current) return
         setProjectCreds(list.project)
         setGlobalCreds(list.global)
         setCredsLoading(false)
       })
       .catch((err: unknown) => {
+        if (!mountedRef.current) return
         setProjectCreds([])
         setGlobalCreds([])
         setCredsLoading(false)
@@ -198,6 +228,7 @@ export function SettingsTab({
     })
       .then((res) => (res.ok ? res.json() : null))
       .then((data: unknown) => {
+        if (!mountedRef.current) return
         const project = (data as { project?: { name?: unknown; emoji?: unknown; members?: unknown } } | null)
           ?.project
         const pName = typeof project?.name === 'string' ? project.name : ''
@@ -219,6 +250,7 @@ export function SettingsTab({
         setNameLoaded(true)
       })
       .catch(() => {
+        if (!mountedRef.current) return
         // Leave the name blank + fall back to the owner placeholder; the rename
         // input still works (the PATCH is the source of truth).
         setNameLoaded(true)
@@ -257,6 +289,7 @@ export function SettingsTab({
     void client
       .set(projectId, { service: svc, token: tok, scope, ...(lbl.length > 0 ? { label: lbl } : {}) })
       .then(() => {
+        if (!mountedRef.current) return
         setSaving(false)
         setService('')
         setToken('')
@@ -264,6 +297,7 @@ export function SettingsTab({
         loadCreds()
       })
       .catch((err: unknown) => {
+        if (!mountedRef.current) return
         setSaving(false)
         setCredsError(err instanceof Error ? err.message : 'failed to save credential')
       })
@@ -278,10 +312,12 @@ export function SettingsTab({
       void client
         .remove(projectId, rec.service, rec.scope)
         .then(() => {
+          if (!mountedRef.current) return
           setBusyKey(null)
           loadCreds()
         })
         .catch((err: unknown) => {
+          if (!mountedRef.current) return
           setBusyKey(null)
           setCredsError(err instanceof Error ? err.message : 'failed to delete credential')
         })
@@ -304,11 +340,13 @@ export function SettingsTab({
           const body = (await res.json().catch(() => null)) as { message?: string } | null
           throw new Error(body?.message ?? `HTTP ${res.status}`)
         }
+        if (!mountedRef.current) return
         setName(next)
         setNameDraft(next)
         setRenaming(false)
       })
       .catch((err: unknown) => {
+        if (!mountedRef.current) return
         setRenaming(false)
         setNameError(err instanceof Error ? err.message : 'failed to rename project')
       })
@@ -332,6 +370,7 @@ export function SettingsTab({
         // Read back the server-normalised emoji so the field reflects what was
         // actually stored. The live rail refreshes off the `projects_changed`
         // frame the surface fans on this rail-visible PATCH (onRailFieldChanged).
+        if (!mountedRef.current) return
         const data = (await res.json().catch(() => null)) as { project?: { emoji?: unknown } } | null
         const saved = typeof data?.project?.emoji === 'string' ? data.project.emoji : next
         setEmoji(saved)
@@ -339,6 +378,7 @@ export function SettingsTab({
         setSavingEmoji(false)
       })
       .catch((err: unknown) => {
+        if (!mountedRef.current) return
         setSavingEmoji(false)
         setEmojiError(err instanceof Error ? err.message : 'failed to set emoji')
       })
@@ -357,6 +397,7 @@ export function SettingsTab({
           const body = (await res.json().catch(() => null)) as { message?: string } | null
           throw new Error(body?.message ?? `HTTP ${res.status}`)
         }
+        if (!mountedRef.current) return
         // The project now drops out of the rail live (the server fans a
         // `projects_changed`). We flip to an "archived" notice; navigation away
         // is driven by the rail refresh + the shell's project selection.
@@ -365,6 +406,7 @@ export function SettingsTab({
         setConfirmingArchive(false)
       })
       .catch((err: unknown) => {
+        if (!mountedRef.current) return
         setArchiving(false)
         setArchiveError(err instanceof Error ? err.message : 'failed to archive project')
       })

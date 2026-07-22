@@ -1119,6 +1119,15 @@ export function TopicRail({
   const [createOpen, setCreateOpen] = useState(false)
   const [newName, setNewName] = useState('')
   const [createError, setCreateError] = useState<string | null>(null)
+  // Unmount guard (#380 sweep): `onCreate` is async, so a create that resolves
+  // after this rail unmounts must not setState on a gone component.
+  const aliveRef = useRef(true)
+  useEffect(() => {
+    aliveRef.current = true
+    return () => {
+      aliveRef.current = false
+    }
+  }, [])
   // The 68px icon rail can't fit the inline create form's name field, so while
   // that form is open we temporarily expand the rail back to full width (and the
   // rows render 2-line). Collapses back to icons on cancel/submit. (Codex P2.)
@@ -1139,6 +1148,7 @@ export function TopicRail({
     setCreateError(null)
     void (async () => {
       const err = await onCreate(name)
+      if (!aliveRef.current) return
       if (err !== null) {
         setCreateError(err)
         return
@@ -1428,6 +1438,15 @@ function ChatSurface({
   const [dragOver, setDragOver] = useState(false)
   const [importState, setImportState] = useState<ImportState>({ status: 'idle' })
   const importActive = uploadAffordance !== null
+  // Unmount guard (#380 sweep): the history-import upload is async, so a result
+  // (or progress tick) that lands after this surface unmounts must not setState.
+  const aliveRef = useRef(true)
+  useEffect(() => {
+    aliveRef.current = true
+    return () => {
+      aliveRef.current = false
+    }
+  }, [])
 
   // BUG 3 — once the live `import_progress` stream begins, the one-shot upload
   // banner has done its job; drop it so the live progress is the sole indicator
@@ -1464,10 +1483,13 @@ function ChatSurface({
       // Live UPLOAD progress — each landed 4 MiB chunk advances the bar. This
       // is the bytes-over-the-wire indicator, distinct from the post-upload
       // analysis progress the engine streams once the zip lands.
-      onProgress: (loaded, total) =>
-        setImportState({ status: 'uploading', message: uploadingMsg, loaded, total }),
+      onProgress: (loaded, total) => {
+        if (!aliveRef.current) return
+        setImportState({ status: 'uploading', message: uploadingMsg, loaded, total })
+      },
     })
       .then((result) => {
+        if (!aliveRef.current) return
         // ND2 (dogfood 2026-06-27) — only claim "reading your history now" when
         // the engine actually STARTED an import job (`job_id` present). A 200
         // with `job_id: null` is a no-op (engine declined to route the upload);
@@ -1485,6 +1507,7 @@ function ChatSurface({
         }
       })
       .catch((err: unknown) => {
+        if (!aliveRef.current) return
         setImportState({
           status: 'error',
           message: err instanceof Error ? err.message : 'import failed',
