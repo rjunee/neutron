@@ -74,6 +74,7 @@ import {
 import { PROFILE_UNTRUSTED_IMPORT } from '@neutronai/gateway/wiring/substrate-profiles.ts'
 import { buildSubstrateWorkflowFire } from '@neutronai/trident/inner-loop.ts'
 import { getBestModel } from '@neutronai/runtime/models.ts'
+import { FAST_MODEL } from '@neutronai/runtime/models.ts'
 import {
   FIRST_CONVERSATIONAL_TIMEOUT_MS_DEFAULT,
   PREWARM_AWAIT_CAP_MS_DEFAULT,
@@ -277,6 +278,7 @@ import {
   type AppWsOutboundWorkBoardChanged,
 } from '@neutronai/channels/adapters/app-ws/envelope.ts'
 import { createWorkBoardSurface } from '@neutronai/gateway/http/work-board-surface.ts'
+import { classifyWorkBoardTaskType } from '@neutronai/work-board/task-type-classifier.ts'
 import { createProjectCredentialsSurface } from '@neutronai/gateway/http/project-credentials-surface.ts'
 import { createCodexCredentialSurface } from '@neutronai/gateway/http/codex-credential-surface.ts'
 import { ProjectCredentialStore } from '@neutronai/project-credentials/store.ts'
@@ -2535,9 +2537,21 @@ export function buildOpenGraphComposer(
               }),
           })
         : undefined
+    // #429 task 3 — the classify LLM for the auto-classifier, built like the
+    // proactiveLlm above: the warm `cc-llm` substrate + FAST_MODEL (no model
+    // literal in the classifier itself). null on an LLM-less box → the
+    // classifier degrades to keyword-only.
+    const workBoardClassifyLlm =
+      llmCallSubstrate !== null
+        ? buildAnthropicLlmCall({ substrate: llmCallSubstrate, model: FAST_MODEL })
+        : null
     const workBoardSurface = createWorkBoardSurface({
       store: workBoardStore,
       auth: appOwnerAuth,
+      // #429 task 3 — no manual Build/Research picker; an omitted task_type is
+      // FAST_MODEL-classified with keyword fallback (LLM-less boots classify by
+      // keyword only). Explicit task_type from any caller always wins.
+      classify_task_type: (title) => classifyWorkBoardTaskType({ title, llm: workBoardClassifyLlm }),
       // Item 1 (live progress on GET) + item 3 (delete cancels the linked run,
       // now via the §F6a `terminate()` chokepoint so the observers fire).
       trident_runs: boardRunAccess,

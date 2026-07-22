@@ -610,6 +610,7 @@
     "work-board": {
       "name": "@neutronai/work-board",
       "dependencies": {
+        "@neutronai/contracts": "workspace:*",
         "@neutronai/cores-sdk": "workspace:*",
         "@neutronai/logger": "workspace:*",
         "@neutronai/migrations": "workspace:*",

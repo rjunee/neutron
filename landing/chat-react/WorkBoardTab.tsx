@@ -60,7 +60,6 @@ import {
   type RunProgress,
   type WorkBoardItem,
   type WorkBoardStatus,
-  type WorkBoardTaskType,
 } from './work-board-client.ts'
 
 type FetchImpl = (input: string, init?: RequestInit) => Promise<Response>
@@ -304,9 +303,6 @@ export function WorkBoardTab({
   // Add composer (bottom of the active items, above Done — #344).
   const [newTitle, setNewTitle] = useState('')
   const [adding, setAdding] = useState(false)
-  // #379 — the ▶ routing kind for a NEW card. A web-added research/analysis card
-  // must NOT default to a Trident build, so the owner picks Build vs Research here.
-  const [newTaskType, setNewTaskType] = useState<WorkBoardTaskType>('build')
 
   // Inline edit.
   const [editingId, setEditingId] = useState<string | null>(null)
@@ -429,12 +425,13 @@ export function WorkBoardTab({
     setAdding(true)
     setActionError(null)
     void client
-      .create(projectId, { title, task_type: newTaskType })
+      // #429 task 3 — the add-form no longer carries a Build/Research picker;
+      // task_type is OMITTED so the server auto-classifies it from the title.
+      .create(projectId, { title })
       .then(() => {
         if (!aliveRef.current) return
         setAdding(false)
         setNewTitle('')
-        setNewTaskType('build')
         refresh()
       })
       .catch((err: unknown) => {
@@ -442,7 +439,7 @@ export function WorkBoardTab({
         setAdding(false)
         setActionError(err instanceof Error ? err.message : 'failed to add item')
       })
-  }, [client, projectId, newTitle, newTaskType, adding, refresh])
+  }, [client, projectId, newTitle, adding, refresh])
 
   const advanceStatus = useCallback(
     (item: WorkBoardItem): void => {
@@ -640,18 +637,6 @@ export function WorkBoardTab({
         onChange={(e) => setNewTitle(e.target.value)}
         aria-label="New work item"
       />
-      {/* #379 — pick the ▶ routing kind so a web-added research card doesn't
-          default to a Trident build. */}
-      <select
-        className="cwb-add-kind"
-        value={newTaskType}
-        onChange={(e) => setNewTaskType(e.target.value === 'research' ? 'research' : 'build')}
-        aria-label="Work kind"
-        title="What kind of work is this? Build → Trident; Research → Atlas."
-      >
-        <option value="build">Build</option>
-        <option value="research">Research</option>
-      </select>
       <button
         type="submit"
         className="cwb-btn cwb-btn-primary"

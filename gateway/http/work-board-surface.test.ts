@@ -564,6 +564,86 @@ describe('work-board HTTP surface — ▶ start + spec create (M1)', () => {
   })
 })
 
+describe('work-board HTTP surface — #429 task 3 auto-classify task_type', () => {
+  const auth = createAppWsAuthResolver({ project_slug: SLUG, bypass: true })
+
+  test('create WITHOUT task_type classifies the title (store.create path)', async () => {
+    const captured: string[] = []
+    const s = createWorkBoardSurface({
+      store,
+      auth,
+      classify_task_type: async (t) => {
+        captured.push(t)
+        return 'research'
+      },
+    })
+    const res = await s.handler(
+      req('POST', '/api/app/projects/proj1/work-board', { title: 'dig into the outage' }),
+    )
+    expect(res?.status).toBe(201)
+    const item = ((await res!.json()) as { item: { id: string; task_type: string } }).item
+    expect(item.task_type).toBe('research')
+    expect(store.get(SCOPE, item.id)?.task_type).toBe('research')
+    expect(captured).toEqual(['dig into the outage'])
+  })
+
+  test('explicit task_type WINS — the classifier is never called', async () => {
+    const s = createWorkBoardSurface({
+      store,
+      auth,
+      classify_task_type: async () => {
+        throw new Error('classifier must not be called when task_type is explicit')
+      },
+    })
+    const res = await s.handler(
+      req('POST', '/api/app/projects/proj1/work-board', { title: 'anything', task_type: 'build' }),
+    )
+    expect(res?.status).toBe(201)
+    const item = ((await res!.json()) as { item: { task_type: string } }).item
+    expect(item.task_type).toBe('build')
+  })
+
+  test('a REJECTING classifier → 201 with the store default (build)', async () => {
+    const s = createWorkBoardSurface({
+      store,
+      auth,
+      classify_task_type: async () => {
+        throw new Error('boom')
+      },
+    })
+    const res = await s.handler(
+      req('POST', '/api/app/projects/proj1/work-board', { title: 'some card' }),
+    )
+    expect(res?.status).toBe(201)
+    const item = ((await res!.json()) as { item: { task_type: string } }).item
+    expect(item.task_type).toBe('build')
+  })
+
+  test('create_card path receives the classified task_type', async () => {
+    const captured: Array<{ title: string; task_type?: string }> = []
+    const s = createWorkBoardSurface({
+      store,
+      auth,
+      create_card: async (slug, input) => {
+        captured.push({
+          title: input.title,
+          ...(input.task_type !== undefined ? { task_type: input.task_type } : {}),
+        })
+        return store.create(slug, {
+          title: input.title,
+          ...(input.task_type !== undefined ? { task_type: input.task_type } : {}),
+        })
+      },
+      classify_task_type: async () => 'research',
+    })
+    const res = await s.handler(
+      req('POST', '/api/app/projects/proj1/work-board', { title: 'look into the metrics' }),
+    )
+    expect(res?.status).toBe(201)
+    expect(captured).toEqual([{ title: 'look into the metrics', task_type: 'research' }])
+  })
+})
+
 describe('work-board HTTP surface — per-project scoping (Bug 3)', () => {
   test('two projects keep DISTINCT boards; an item created in A is absent from B', async () => {
     // Create in project A THROUGH the surface (the real write path).

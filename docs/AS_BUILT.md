@@ -4662,3 +4662,41 @@ UNAPPROVED (task 8 owns the owner's approval act).
 - OUT OF SCOPE (later RALPH tasks): scheduling/approval UX (task 8), memory-tier work
   (task 9), SYSTEM-OVERVIEW ritual-executor section (task 10), any writing/Bash ritual
   (stays gated on the OS-sandbox sprint).
+
+## 2026-07-22 — Dogfood fix #429 task 3: drop the manual Build/Research picker; server auto-classifies task_type
+
+Removed the web Work Board add-item Build/Research dropdown and moved the build-vs-research
+decision to a single server-side auto-classifier applied on create when the caller omits
+`task_type`. Web-only UI change — mobile (`app/app/projects/[id]/workboard.tsx`) already sent
+`{ title }` only and carries no dropdown, so it needed no change.
+
+- **New `work-board/task-type-classifier.ts`** — the ONE server-side classification module.
+  Exports `classifyWorkBoardTaskType({ title, llm: LlmCallFn | null, timeout_ms? })
+  → Promise<WorkBoardTaskType>` (TOTAL — never rejects), `keywordTaskTypeFallback(title)`
+  (deterministic: research verbs / interrogative openers → `research`, else `build`),
+  `CLASSIFY_SYSTEM_PROMPT`, and `DEFAULT_TASK_TYPE_CLASSIFY_TIMEOUT_MS` (2.5s). LLM-primary:
+  a one-word FAST_MODEL classify races a timeout; a `null` llm / timeout / junk / both-or-
+  neither / reject all degrade to the keyword fallback. No hardcoded model id — `LlmCallFn`
+  carries no model, so the composer injects FAST_MODEL. `work-board/package.json` gains
+  `@neutronai/contracts` (bottom dep-cruiser band — legal from work-board's services band).
+- **`gateway/http/work-board-surface.ts`** — `WorkBoardSurfaceOptions` gains an optional
+  `classify_task_type(title) => Promise<WorkBoardTaskType>`. `handleCreate` classifies ONLY
+  when the request omits `task_type`, BEFORE the create_card / store.create branch, so both
+  the on-disk-spec path and the plain create persist the classified value. An explicit
+  `task_type` from any caller short-circuits (never re-classified); a defensive catch falls to
+  the store default ('build') if a wired classifier ever throws. Absent seam → today's
+  store-default behavior (the #379 back-compat test is unchanged).
+- **`open/composer.ts`** — builds `workBoardClassifyLlm` via
+  `buildAnthropicLlmCall({ substrate: llmCallSubstrate, model: FAST_MODEL })` (null on an
+  LLM-less box → keyword-only) and wires `classify_task_type` into `createWorkBoardSurface`
+  unconditionally (it degrades internally).
+- **`landing/chat-react/WorkBoardTab.tsx`** — deleted the `<select className="cwb-add-kind">`,
+  the `newTaskType` state + reset, the `WorkBoardTaskType` import, and the create's `task_type`
+  arg + deps entry. The add-form is now a plain input + Add; a create omits `task_type`. ▶
+  startBuild/startResearch routing (reads the item's stored `task_type`) is untouched.
+- **Tests** — new `work-board/task-type-classifier.test.ts`; extended
+  `gateway/http/work-board-surface.test.ts` (classify-on-omit across both branches, explicit-
+  wins, reject→default, create_card path) and `landing/chat-react/__tests__/work-board-tab.test.tsx`
+  (no picker in the add-form; create body omits `task_type`). `bun test work-board` 230 pass,
+  `bun test gateway/http/work-board-surface` 38 pass, landing tab+client 37 pass; `tsc` clean
+  for work-board / open / gateway / landing; eslint + the new depcruise edge clean. NO FEATURE FLAGS.

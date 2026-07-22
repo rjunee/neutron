@@ -478,8 +478,22 @@ describe('WorkBoardTab (happy-dom)', () => {
     })
     expect(posted).not.toBeNull()
     expect(posted!.title).toBe('Brand new')
+    // #429 task 3 — the add-form no longer sends task_type; the server classifies it.
+    expect('task_type' in posted!).toBe(false)
     expect(listCount).toBeGreaterThanOrEqual(2)
 
+    await act(async () => root.unmount())
+  })
+
+  it('#429 task 3 — the add form has NO Build/Research picker', async () => {
+    const { container, root, act } = await mount(listOf([]))
+    // The manual dropdown is gone: no select, no "Work kind" control.
+    expect(container.querySelector('.cwb-add-kind')).toBeNull()
+    expect(container.querySelector('[aria-label="Work kind"]')).toBeNull()
+    expect(container.querySelector('.cwb-add select')).toBeNull()
+    // The plain title input + Add button remain.
+    expect(container.querySelector('.cwb-add-input')).not.toBeNull()
+    expect(container.querySelector('.cwb-btn-primary')).not.toBeNull()
     await act(async () => root.unmount())
   })
 
