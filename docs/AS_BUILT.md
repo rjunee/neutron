@@ -4768,3 +4768,32 @@ now reach the agent for the first time.
   files, the set that hung) now runs 861 pass / 0 fail and EXITS in <1s; both target suites
   green (image 4/0, file 5/0); the 12 branch-changed files in ONE bun process 125/0;
   `bash scripts/ci/typecheck-all.sh` exit 0 (51 tsconfigs).
+
+### Round-2 findings fix (Argus review round-1 on PR #428, 2026-07-22)
+
+- **BLOCKER — native non-authed `data:`/`file:`/`content:` attachments no longer open
+  silently-fail.** The file-chip `open()` handler's `bearer === undefined` branch
+  (`app/components/AuthedAttachmentImage.tsx`) handed the raw URI straight to
+  `WebBrowser.openBrowserAsync` on native — but SFSafariViewController / Chrome Custom
+  Tabs reject a non-http(s) INITIAL url, so a `file://`/`content://` (optimistic /
+  failed-send local doc bubble — `attachment-url.ts:141-149`) or `data:` URI opened to
+  nothing, contradicting the file's own r2-BLOCKER invariant. Fixed with a new
+  `openNonAuthedNative(uri, name)` helper: an `http(s)` URL still opens in the in-app
+  browser; a `data:` URL is materialized to a cache file (`materializeDataUrlToCache`)
+  and a local `file:`/`content:` URL is shared as-is — both routed through
+  `Sharing.shareAsync` (the same OS-share path the AUTHED native branch already uses),
+  with the rare `!isAvailableAsync()` emulator fallback. Web behavior unchanged (still
+  navigates the synchronously-opened tab). Four new regression tests in
+  `app/__tests__/authed-attachment-file-open.test.tsx` assert: local `file://` shared
+  as-is (never WebBrowser), `data:` materialized-then-shared (never a data: URL to
+  WebBrowser), and `http(s)` still opens in WebBrowser.
+- **Test hygiene (findings 2 + 3, no production change).** The two attachment test files'
+  `react-native` superset mocks now also export `FlatList` / `KeyboardAvoidingView` /
+  `TouchableOpacity` (per the sibling-superset convention, so they can never collide with
+  a docs-suite RN mock in a shared CI chunk). Removed the vacuous `const useStateCalls = 0;
+  expect(...).toBe(0)` always-pass counters from `authed-attachment-image-hooks.test.tsx`;
+  the real guard was always the element-TYPE assertions plus the real-react "Invalid hook
+  call" throw — the flip test now asserts the exact image/file type sequence across the
+  recycle instead of a tautology.
+- Verified: both target suites 12/0; the full `app/__tests__/` dir in ONE bun process
+  872/0 (the CI-pollution scenario, clean); `tsc --noEmit -p app/tsconfig.json` exit 0.

@@ -203,9 +203,18 @@ export function AuthedAttachmentFile({
       const source = resolveAttachmentSource(url, auth);
       const bearer = source.headers?.Authorization;
       if (bearer === undefined) {
-        // Non-authed (data:/external https:) — open the URL directly.
-        if (webWin !== null) webWin.location.href = source.uri;
-        else await WebBrowser.openBrowserAsync(source.uri);
+        // Non-authed source (data:/file:/content:/external https:) — no bearer
+        // to attach.
+        if (webWin !== null) {
+          // Web: navigate the tab we opened synchronously inside the gesture.
+          webWin.location.href = source.uri;
+        } else {
+          // Native: an http(s) URL opens in the in-app browser, but a
+          // data:/file:/content: URL must NOT — SFSafariViewController / Chrome
+          // Custom Tabs reject a non-http(s) INITIAL url and the open fails
+          // silently (Argus r2 BLOCKER). Route those through the OS share sheet.
+          await openNonAuthedNative(source.uri, name);
+        }
         return;
       }
       const res = await fetch(source.uri, {
@@ -259,6 +268,40 @@ export function AuthedAttachmentFile({
       </Text>
     </Pressable>
   );
+}
+
+/**
+ * Open a NON-authed attachment on native. An `http(s)` URL opens in the in-app
+ * browser directly; a `data:`/`file:`/`content:` URL must never be handed to
+ * `WebBrowser` (SFSafariViewController / Chrome Custom Tabs reject a non-http(s)
+ * initial URL and the open fails silently — Argus r2 BLOCKER), so it is routed
+ * through the OS share/preview sheet instead — a `data:` URL is first
+ * materialized to a cache file (it has no on-disk path), while a local
+ * `file:`/`content:` URL is already shareable as-is.
+ */
+async function openNonAuthedNative(uri: string, name: string): Promise<void> {
+  if (/^https?:/i.test(uri)) {
+    await WebBrowser.openBrowserAsync(uri);
+    return;
+  }
+  const shareable = uri.startsWith('data:')
+    ? await materializeDataUrlToCache(uri, name)
+    : uri;
+  if (await Sharing.isAvailableAsync()) {
+    await Sharing.shareAsync(shareable);
+  } else {
+    // Sharing unavailable (rare — some emulators): a file:// URL at least
+    // reaches the system handler.
+    await WebBrowser.openBrowserAsync(shareable);
+  }
+}
+
+/** Write a `data:` URL's bytes to a cache file and return its `file://` URI. */
+async function materializeDataUrlToCache(dataUrl: string, name: string): Promise<string> {
+  const base64 = dataUrlToBase64(dataUrl);
+  const fileUri = `${FileSystem.cacheDirectory ?? ''}${cacheFilename(name)}`;
+  await FileSystem.writeAsStringAsync(fileUri, base64, { encoding: 'base64' });
+  return fileUri;
 }
 
 /** Strip the `data:<mime>;base64,` prefix, leaving the bare base64 payload. */

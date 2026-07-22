@@ -34,22 +34,23 @@
 
 import { describe, expect, it, mock } from 'bun:test';
 
-/* ── hook spies: count every hook the dispatcher would call (must be 0) ── */
-// NOTE: we do NOT `mock.module('react', ...)` here. Bun module mocks are
-// process-global and survive across files; a react mock silently replaces
-// `import * as RealReact from 'react'` in EVERY later file in the same test
-// process — including docs-mutations-race / diagnostics-pane-render, which
-// deliberately use REAL react (via injected HookRuntime) and DID break/hang
-// when this file mocked react (CI incident PR #428, a235eea3..141d2c1c; see
-// the "process-global" warnings in docs-mutations-race.test.ts:52 +
-// diagnostics-pane-render.test.ts). The dispatcher under test
-// (`AuthedAttachmentImage`) calls NO hooks, so it runs fine against REAL react
-// — if a regression re-adds a hook at the dispatcher level, real react throws
-// "Invalid hook call" outside a render and this test fails loudly. These
-// counters therefore stay 0 by construction (kept so the assertions below are
-// unchanged); the guard is the real-react throw + the element-type checks.
-const useStateCalls = 0;
-const useEffectCalls = 0;
+/* ── real-react hook guard (no counters, no react module mock) ─────────────
+ * We do NOT `mock.module('react', ...)` here. Bun module mocks are
+ * process-global and survive across files; a react mock silently replaces
+ * `import * as RealReact from 'react'` in EVERY later file in the same test
+ * process — including docs-mutations-race / diagnostics-pane-render, which
+ * deliberately use REAL react (via injected HookRuntime) and DID break/hang
+ * when this file mocked react (CI incident PR #428, a235eea3..141d2c1c; see
+ * the "process-global" warnings in docs-mutations-race.test.ts:52 +
+ * diagnostics-pane-render.test.ts).
+ *
+ * The dispatcher under test (`AuthedAttachmentImage`) calls NO hooks, so it
+ * runs fine when invoked as a plain function against REAL react. If a
+ * regression re-adds a hook at the dispatcher level, real react throws
+ * "Invalid hook call" (no active dispatcher outside a render) and these tests
+ * fail loudly — that throw, plus the element-TYPE assertions below, is the
+ * regression guard. (There is no counter to assert against; a `const x = 0;
+ * expect(x).toBe(0)` would be a vacuous always-pass — Argus r1 finding.) */
 
 // react-native genuinely can't be parsed by bun (Flow types), so it MUST be a
 // module mock — but it is NOT react, so it never pollutes `import … from 'react'`.
@@ -67,6 +68,9 @@ mock.module('react-native', () => ({
   TextInput: 'TextInput',
   ActivityIndicator: 'ActivityIndicator',
   Modal: 'Modal',
+  FlatList: 'FlatList',
+  KeyboardAvoidingView: 'KeyboardAvoidingView',
+  TouchableOpacity: 'TouchableOpacity',
   Linking: { openURL: () => Promise.resolve() },
   useWindowDimensions: () => ({ width: 1200, height: 800 }),
 }));
@@ -96,10 +100,9 @@ describe('AuthedAttachmentImage — rules-of-hooks (Argus r3 MAJOR)', () => {
       type: unknown;
     };
     // The dispatcher returns the LEAF component element — it must NOT invoke it,
-    // so no hook runs at the dispatcher level.
+    // so no hook runs at the dispatcher level. Reaching this assertion without a
+    // real-react "Invalid hook call" throw IS the proof it stayed hook-free.
     expect(el.type).toBe(mod.AuthedAttachmentImageView);
-    expect(useStateCalls).toBe(0);
-    expect(useEffectCalls).toBe(0);
   });
 
   it('dispatches a NON-image url to the file chip without calling any hook itself', async () => {
@@ -108,8 +111,6 @@ describe('AuthedAttachmentImage — rules-of-hooks (Argus r3 MAJOR)', () => {
       type: unknown;
     };
     expect(el.type).toBe(mod.AuthedAttachmentFile);
-    expect(useStateCalls).toBe(0);
-    expect(useEffectCalls).toBe(0);
   });
 
   it('image and non-image URLs resolve to DIFFERENT component types (url flip → React remounts, no hook-count mismatch)', async () => {
@@ -130,10 +131,17 @@ describe('AuthedAttachmentImage — rules-of-hooks (Argus r3 MAJOR)', () => {
     // Simulate a recycled instance re-rendering with a flipping url. Because the
     // dispatcher is hook-free, no sequence of url values can change its hook
     // count (the pre-fix crash). The leaf it returns owns the hooks per-type.
-    for (const url of [IMAGE_URL, PDF_URL, IMAGE_URL, PDF_URL]) {
-      mod.AuthedAttachmentImage({ url, auth: null });
-    }
-    expect(useStateCalls).toBe(0);
-    expect(useEffectCalls).toBe(0);
+    // Each call runs against REAL react with no active dispatcher — a hook at
+    // the dispatcher level would throw "Invalid hook call" and fail this test;
+    // reaching the type assertions proves it stayed hook-free across the flip.
+    const types = [IMAGE_URL, PDF_URL, IMAGE_URL, PDF_URL].map(
+      (url) => (mod.AuthedAttachmentImage({ url, auth: null }) as { type: unknown }).type,
+    );
+    expect(types).toEqual([
+      mod.AuthedAttachmentImageView,
+      mod.AuthedAttachmentFile,
+      mod.AuthedAttachmentImageView,
+      mod.AuthedAttachmentFile,
+    ]);
   });
 });

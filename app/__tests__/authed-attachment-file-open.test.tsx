@@ -76,6 +76,9 @@ mock.module('react-native', () => ({
   TextInput: 'TextInput',
   ActivityIndicator: 'ActivityIndicator',
   Modal: 'Modal',
+  FlatList: 'FlatList',
+  KeyboardAvoidingView: 'KeyboardAvoidingView',
+  TouchableOpacity: 'TouchableOpacity',
   Linking: { openURL: () => Promise.resolve() },
   useWindowDimensions: () => ({ width: 1200, height: 800 }),
 }));
@@ -273,5 +276,45 @@ describe('AuthedAttachmentFile — native open (Argus r2 BLOCKER)', () => {
     expect(shareCalls).toEqual([]);
     // Fallback opens the file:// URL — still never a data: URL.
     expect(openBrowserCalls).toEqual(['file:///cache/report.pdf']);
+  });
+
+  it('non-authed LOCAL file:// url is shared as-is — never handed to WebBrowser (r2 BLOCKER)', async () => {
+    platform.OS = 'ios';
+    // auth=null → resolveAttachmentSource passes the file:// URI through with no
+    // bearer. Pre-fix this hit `WebBrowser.openBrowserAsync('file://…')`, which
+    // SFSafariViewController / Chrome Custom Tabs reject → silent open failure.
+    const onPress = await pressChip('file:///var/mobile/report.pdf', null);
+    await onPress();
+    expect(fetchCalls).toEqual([]);
+    expect(fsWrites).toEqual([]);
+    expect(shareCalls).toEqual([{ url: 'file:///var/mobile/report.pdf', options: undefined }]);
+    expect(openBrowserCalls).toEqual([]);
+  });
+
+  it('non-authed data: url is materialized to cache then shared — never a data: URL to WebBrowser (r2 BLOCKER)', async () => {
+    platform.OS = 'ios';
+    const onPress = await pressChip('data:application/pdf;base64,UERGQllURVM=', null);
+    await onPress();
+    expect(fetchCalls).toEqual([]);
+    // The data: bytes are written to a cache file…
+    expect(fsWrites).toHaveLength(1);
+    expect(fsWrites[0]?.base64).toBe('UERGQllURVM=');
+    expect(fsWrites[0]?.encoding).toBe('base64');
+    expect(fsWrites[0]?.uri.startsWith('file:///cache/')).toBe(true);
+    // …and that cache file — not the data: URL — is handed to the share sheet.
+    expect(shareCalls).toHaveLength(1);
+    expect(String(shareCalls[0]?.url).startsWith('file:///cache/')).toBe(true);
+    expect(openBrowserCalls).toEqual([]);
+  });
+
+  it('non-authed http(s) url still opens directly in the in-app browser on native', async () => {
+    platform.OS = 'ios';
+    const onPress = await pressChip('https://cdn.example/report.pdf', null);
+    await onPress();
+    // A real http(s) URL is a valid WebBrowser initial URL — keep opening it there.
+    expect(openBrowserCalls).toEqual(['https://cdn.example/report.pdf']);
+    expect(fsWrites).toEqual([]);
+    expect(shareCalls).toEqual([]);
+    expect(fetchCalls).toEqual([]);
   });
 });
