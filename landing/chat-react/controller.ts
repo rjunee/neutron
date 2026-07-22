@@ -301,6 +301,88 @@ interface StreamEntry {
   createdAt: number
 }
 
+/**
+ * Task 6 (chat render fan-out) — a TOTAL, flat structural comparator over two
+ * {@link RenderMessage}s. Used by {@link NeutronChatController.computeVm} to
+ * REUSE the prior render object (preserving object identity) when a fresh
+ * candidate is byte-identical, so assistant-ui's per-message-identity converter
+ * cache + row memos survive an unrelated `publish()` instead of re-converting +
+ * re-rendering the whole transcript per frame / streaming token.
+ *
+ * Contract: identical output ⇒ identity reuse; ANY content change ⇒ a new
+ * identity (a false "equal" would freeze a real update, so the comparator must
+ * cover every field the VM emits). No JSON.stringify, no deep recursion — flat
+ * `===` on scalars, length + element compare on the array/object fields.
+ */
+function sameRenderMessage(a: RenderMessage, b: RenderMessage): boolean {
+  if (
+    a.id !== b.id ||
+    a.messageId !== b.messageId ||
+    a.role !== b.role ||
+    a.text !== b.text ||
+    a.status !== b.status ||
+    a.streaming !== b.streaming ||
+    a.createdAt !== b.createdAt ||
+    a.timestampMs !== b.timestampMs ||
+    a.delivery !== b.delivery ||
+    a.edited !== b.edited ||
+    a.deleted !== b.deleted ||
+    a.promptId !== b.promptId ||
+    a.allowFreeform !== b.allowFreeform ||
+    a.kind !== b.kind ||
+    a.chosenValue !== b.chosenValue
+  ) {
+    return false
+  }
+  if (!sameStringList(a.attachments, b.attachments)) return false
+  if (!sameReactions(a.reactions, b.reactions)) return false
+  if (!sameOptions(a.options, b.options)) return false
+  if (!sameUploadAffordance(a.uploadAffordance, b.uploadAffordance)) return false
+  return true
+}
+
+function sameStringList(a: readonly string[] | null, b: readonly string[] | null): boolean {
+  if (a === b) return true
+  if (a === null || b === null) return false
+  if (a.length !== b.length) return false
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false
+  return true
+}
+
+function sameReactions(a: readonly ReactionChip[], b: readonly ReactionChip[]): boolean {
+  if (a === b) return true
+  if (a.length !== b.length) return false
+  for (let i = 0; i < a.length; i++) {
+    const x = a[i]
+    const y = b[i]
+    if (x === undefined || y === undefined) return false
+    if (x.emoji !== y.emoji || x.count !== y.count || x.reactedBySelf !== y.reactedBySelf) return false
+  }
+  return true
+}
+
+function sameOptions(
+  a: readonly ChatMessageOption[] | null,
+  b: readonly ChatMessageOption[] | null,
+): boolean {
+  if (a === b) return true
+  if (a === null || b === null) return false
+  if (a.length !== b.length) return false
+  // Options are immutable wire objects held by reference on the ChatMessage;
+  // element reference-equality settles the common (unchanged row) case.
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false
+  return true
+}
+
+function sameUploadAffordance(
+  a: ChatMessageUploadAffordance | null,
+  b: ChatMessageUploadAffordance | null,
+): boolean {
+  if (a === b) return true
+  if (a === null || b === null) return false
+  return a.source === b.source
+}
+
 export class NeutronChatController {
   /** The live session — REPLACED on every project switch (not readonly). */
   private session: ControllerSession
@@ -329,6 +411,17 @@ export class NeutronChatController {
    * on reload — matching the server's own non-persistence.
    */
   private readonly notices: RenderMessage[] = []
+  /**
+   * Task 6 (chat render fan-out) — per-render-id cache of the LAST emitted
+   * {@link RenderMessage} object. `computeVm` reuses the prior object (identity
+   * preserved) when a freshly-built candidate is structurally identical
+   * ({@link sameRenderMessage}), so assistant-ui's per-message-identity
+   * converter cache + row memos survive an unrelated `publish()`. Rebuilt fresh
+   * each `computeVm` (keyed by the current render id set) so vanished ids
+   * auto-prune. Covers durable rows (keyed by render `id`) and live streaming
+   * bubbles (keyed `stream:<messageId>`).
+   */
+  private renderCache = new Map<string, RenderMessage>()
   private connStatus: ConnStatus = 'idle'
   /**
    * Chat-rail stability — true while a project switch's fresh socket is doing its
@@ -1102,10 +1195,14 @@ export class NeutronChatController {
     // row, or any path that dropped the `system_notice` flag) it would otherwise
     // hydrate as a timestamped/avatar agent bubble below the answer. Filter it
     // out of the bubble list unconditionally so the pill is the only surface.
+    // Task 6 — build into a NEW cache keyed by the current render-id set, reusing
+    // the prior object (identity preserved) whenever a candidate is byte-identical
+    // so assistant-ui's converter cache + row memos survive unrelated publishes.
+    const nextCache = new Map<string, RenderMessage>()
     const durable = this.msgs.filter((m) => !(m.role === 'agent' && isColdStartAck(m.body)))
     const rendered: RenderMessage[] = durable.map((m) => {
       const id = m.client_msg_id.length > 0 ? m.client_msg_id : (m.message_id ?? `seq:${m.seq ?? 0}`)
-      return {
+      const next: RenderMessage = {
         id,
         messageId: m.message_id,
         role: m.role,
@@ -1130,6 +1227,10 @@ export class NeutronChatController {
         uploadAffordance: m.upload_affordance ?? null,
         chosenValue: this.chosen.get(id) ?? null,
       }
+      const prev = this.renderCache.get(id)
+      const chosen = prev !== undefined && sameRenderMessage(prev, next) ? prev : next
+      nextCache.set(id, chosen)
+      return chosen
     })
     // Append live streaming bubbles whose final message hasn't persisted yet.
     const persistedIds = new Set<string>()
@@ -1141,8 +1242,9 @@ export class NeutronChatController {
       // already drops the leading empty-delta opener). An empty bubble would
       // stack above the typing indicator.
       if (entry.text.length === 0) continue
-      liveStreams.push({
-        id: `stream:${messageId}`,
+      const streamId = `stream:${messageId}`
+      const next: RenderMessage = {
+        id: streamId,
         messageId,
         role: 'agent',
         text: entry.text,
@@ -1163,13 +1265,41 @@ export class NeutronChatController {
         kind: null,
         uploadAffordance: null,
         chosenValue: null,
-      })
+      }
+      // Task 6 — a token append changes `text` → new identity (correct: the
+      // bubble re-renders); an UNRELATED publish mid-stream reuses the prior
+      // bubble object so only the streaming row (not the transcript) churns.
+      const prev = this.renderCache.get(streamId)
+      const chosen = prev !== undefined && sameRenderMessage(prev, next) ? prev : next
+      nextCache.set(streamId, chosen)
+      liveStreams.push(chosen)
     }
     // Tail = live streaming bubbles + ephemeral notices (command results /
     // errors), ordered together by arrival (`seq`) so a streamed reply and a
     // notice interleave correctly. Both sort AFTER the durable transcript.
     const tail = [...liveStreams, ...this.notices].sort((a, b) => a.createdAt - b.createdAt)
-    const messages = [...rendered, ...tail]
+    // Task 6 — swap in the freshly-built cache (auto-prunes ids that vanished
+    // this frame). Notices are already stable object refs (built once, held on
+    // `this.notices`), so they need no cache entry.
+    this.renderCache = nextCache
+    const built = [...rendered, ...tail]
+    // Task 6 — ARRAY identity reuse: if the previous vm's messages array is the
+    // same length with every element reference-equal (an unrelated publish that
+    // touched no row), reuse the PRIOR array so assistant-ui's thread-level memo
+    // sees an unchanged reference and skips the whole list. Read `this.vm`
+    // defensively — computeVm first runs from the constructor before it's set.
+    const prevMessages = (this.vm as ChatViewModel | undefined)?.messages
+    let messages = built
+    if (prevMessages !== undefined && prevMessages.length === built.length) {
+      let allSame = true
+      for (let i = 0; i < built.length; i++) {
+        if (prevMessages[i] !== built[i]) {
+          allSame = false
+          break
+        }
+      }
+      if (allSame) messages = prevMessages
+    }
     // Latest user message's delivery — for a Telegram-style status line.
     let latestUserDelivery: DeliveryState | null = null
     for (let i = rendered.length - 1; i >= 0; i--) {
