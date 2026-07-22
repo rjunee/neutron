@@ -1941,13 +1941,25 @@ export function buildOpenGraphComposer(
               owner_user_id: OWNER_USER_ID,
               approval_topic_id: resolveAppWsReminderTopic(null),
               emit: async (p) => {
-                await deliver(resolveAppWsReminderTopic(null), {
+                const result = await deliver(resolveAppWsReminderTopic(null), {
                   body: p.body,
                   durability: 'reply',
                   options: p.options,
                   idempotency_key: p.idempotency_key,
                   metadata: p.metadata,
                 })
+                // A 'reply' deliver SWALLOWS a durable-persist failure and
+                // resolves { persisted:false } (deliver.ts) — but the ritual
+                // approval prompt is USELESS without its durable row: the def
+                // is registered + grants are pending with no owner-tappable
+                // prompt, and re-propose deadlocks as a duplicate. Surface it
+                // so requestApprovalAndEmit's rollback cancels the grants +
+                // unregisters (Argus r2 BLOCKER).
+                if (!result.persisted) {
+                  throw new Error(
+                    `ritual approval prompt failed to persist a durable row (ritual_id=${String(p.metadata.ritual_id ?? 'unknown')})`,
+                  )
+                }
               },
               log: (m) => log.info('ritual_registration', { detail: m }),
             })
