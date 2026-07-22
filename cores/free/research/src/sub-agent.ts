@@ -61,6 +61,10 @@ export interface RuntimeSubAgentDispatchInput {
   model: string
   tools: readonly string[]
   budget_ms: number
+  /** Per-project scoping for tool executors (e.g. vault search resolves
+   *  this project's sidecar). Additive/optional — a canned dispatcher
+   *  that ignores it stays byte-identical. */
+  project_id?: string
 }
 
 export interface RuntimeSubAgentDispatchResult {
@@ -179,6 +183,7 @@ export async function dispatchResearchSubAgent(
         model,
         tools,
         budget_ms,
+        project_id: input.project_id,
       }),
       budget_ms,
     )

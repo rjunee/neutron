@@ -230,9 +230,15 @@ export {
 export {
   buildRuntimeResearchSubAgentDispatcher,
   buildRuntimeResearchSubstrate,
+  DEFAULT_MAX_TOOL_ROUNDS,
+  FINALIZE_MARKER,
+  TOOL_CALL_BLOCK_MARKER,
+  TOOL_RESULT_BLOCK_MARKER,
   type BuildRuntimeResearchSubAgentDispatcherOptions,
   type BuildRuntimeResearchSubstrateOptions,
   type ResearchLlmCall,
+  type ResearchSubAgentToolExecutor,
+  type ResearchSubAgentToolExecutors,
 } from './src/substrate-runtime.ts'
 
 // S1 — production wiring helper.
