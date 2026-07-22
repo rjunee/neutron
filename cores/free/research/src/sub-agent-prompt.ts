@@ -1,6 +1,6 @@
 /**
  * @neutronai/research-core — Atlas-shape system prompt for the in-process
- * Haiku-4.5 sub-agent that powers `/research deep <topic>`.
+ * research sub-agent that powers `/research deep <topic>`.
  *
  * Re-implemented IN-TREE from the design of internal design notes.
  * ZERO Nova imports per § 8 of docs/plans/research-core-tier1-brief.md.

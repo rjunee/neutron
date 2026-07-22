@@ -4737,3 +4737,59 @@ decision to a single server-side auto-classifier applied on create when the call
   (no picker in the add-form; create body omits `task_type`). `bun test work-board` 230 pass,
   `bun test gateway/http/work-board-surface` 38 pass, landing tab+client 37 pass; `tsc` clean
   for work-board / open / gateway / landing; eslint + the new depcruise edge clean. NO FEATURE FLAGS.
+
+## 2026-07-22 — Dogfood fix #429 task 7: research_deep now actually researches — SONNET_MODEL default + parse-failure retry + tools_available grounding gate
+
+**Symptom (verified live).** A `research_deep` task died with an empty brief: the dispatched
+sub-agent ran ~31s, made ZERO tool calls, and returned non-JSON prose, so `extractJson` threw
+'no JSON object found' and the task failed with no recovery. Two root causes: (1) the sub-agent
+defaulted to a hardcoded Haiku literal (`sub-agent.ts` `DEFAULT_SUB_AGENT_MODEL`) and `deep()`
+passed no `model`, so Haiku was live in production despite a comment claiming FAST_MODEL was
+passed explicitly (false); (2) `deep()` was single-attempt — unlike `start()`'s 2-attempt
+parse-error-fed-back loop — so one malformed response discarded the whole research budget.
+
+**Three-part fix (NO FEATURE FLAGS).**
+- **Model.** `DEFAULT_SUB_AGENT_MODEL` is now `SONNET_MODEL` (env-overridable via
+  `NEUTRON_SONNET_MODEL`), imported from `@neutronai/runtime/models.ts`. Deep research needs
+  real reasoning + sustained tool-use discipline. The second hardcoded Haiku literal in
+  `research-orchestrator.ts`'s error-path run metadata (was `input.tools !== undefined ?
+  'unknown' : 'claude-haiku-...'`) now records `DEFAULT_SUB_AGENT_MODEL` — recording Haiku after
+  the switch would be a lie. No `claude-*` literal remains anywhere in `cores/free/research/src`.
+- **Retry.** `deep()` is now a 2-attempt loop mirroring `start()`. `bumpAttempt` moved inside
+  the loop. A parse / schema / zero-tool failure on attempt 0 feeds specific feedback
+  (`buildParseRetryFeedback` / `buildSchemaRetryFeedback` / `ZERO_TOOL_FEEDBACK`) into the
+  sub-agent's user prompt behind a new `RETRY_FEEDBACK_MARKER` (`[RETRY - PREVIOUS ATTEMPT
+  REJECTED]`, appended AFTER the query so canned-dispatcher `includes(query)` matching keeps
+  working; system prompt stays keyed on the original query so the engineering-rider heuristic
+  is stable) and retries once. The same failure on attempt 1 is terminal ('parse error on
+  retry: …' / 'schema error on retry: …' / 'sub-agent made zero tool calls on retry - ungrounded
+  brief rejected'). Dispatch-level errors (concurrency / timeout / transport) still fail
+  immediately, NOT retried. Claims-insert + sources-cited assertion stay single-shot (explicit
+  non-goal). One `research_sub_agent_runs` row is recorded per attempt.
+- **Grounding gate + production-safety seam.** New dispatcher-reported `tools_available` flag
+  (`RuntimeSubAgentDispatchResult.tools_available?`, surfaced on `ResearchSubAgentResult`). The
+  zero-tool grounding gate rejects a brief made with zero tool calls ONLY when the dispatcher
+  reported `tools_available === true`. The v1 production dispatcher
+  (`buildRuntimeResearchSubAgentDispatcher`) makes a single tool-less Messages-API call and now
+  explicitly reports `tools_available: false`, so the gate is INERT in production and cannot
+  brick a real deep run. It arms automatically when the real agentic tool loop ships —
+  **plan task 10** (tool-call passthrough) is the follow-up that flips it to `true`.
+
+**De-Haiku.** User-visible strings no longer claim Haiku: `chat-commands.ts` (deep-complete +
+kickoff messages), `package.json` `research_deep` tool description ('research sub-agent harness
+(SONNET_MODEL default)'), and doc headers across `sub-agent-prompt.ts` / `index.ts` /
+`manifest.ts` / `substrate-runtime.ts` / `README.md` / `AGENTS.md`. The two remaining Haiku
+mentions (`substrate-runtime.ts` `default_model` doc + `backend.ts` synthesis-fallback doc)
+describe FAST_MODEL fallbacks that stay true.
+
+**Files.** `cores/free/research/src/sub-agent.ts`, `.../research-orchestrator.ts`,
+`.../substrate-runtime.ts`, `.../chat-commands.ts`, `.../sub-agent-prompt.ts`, `.../manifest.ts`,
+`cores/free/research/index.ts`, `cores/free/research/package.json`, `README.md`, `AGENTS.md`.
+**Tests.** `__tests__/orchestrator.test.ts` gains a deep-path retry+grounding suite (T1
+reproduce-then-fix the live incident; T2 both-non-JSON fail; T3 schema-retry; T4 zero-tool retry;
+T5 zero-tool both fail; T6 production-shape do-not-brick guard; T7 concurrency metadata records
+`DEFAULT_SUB_AGENT_MODEL`; T8 grounded happy-path single dispatch); `__tests__/sub-agent.test.ts`
+gains T9 (default === SONNET_MODEL), T10 (retry_feedback threading), T11 (tools_available
+passthrough). `bun test cores/free/research` 193 pass / 2 skip; `tsc -p
+cores/free/research/tsconfig.json` clean; `gateway` research-core production-composer +
+cores-tool-dispatch guards 23 pass; eslint clean.

@@ -69,8 +69,8 @@ export const WRITE_CAPABILITY = 'write:research_core.db' as const
 export const BROWSE_CAPABILITY = 'network:browse' as const
 
 /** S1 — sub-agent dispatch capability (already in the cores-sdk closed enum).
- *  Declared so `/research deep` can spawn the in-process Haiku-4.5
- *  harness via the runtime sub-agent dispatcher. */
+ *  Declared so `/research deep` can spawn the in-process research
+ *  sub-agent harness via the runtime sub-agent dispatcher. */
 export const SUBAGENT_CAPABILITY = 'agent:dispatch_subagent' as const
 
 /** Mirrors Calendar Core's per-tool meta key — same `'neutron_project_id'`

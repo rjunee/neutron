@@ -5,7 +5,7 @@
  * per-project structured-brief storage at
  * `<OWNER_HOME>/Projects/<project_id>/research/research.db`, with the
  * claim-evidence-citation triple data model + the sources-cited
- * invariant + Haiku-4.5 sub-agent for `/research deep` (web browse +
+ * invariant + research sub-agent for `/research deep` (web browse +
  * lex/vec hybrid search over prior briefs).
  *
  * Surfaces:
@@ -132,6 +132,7 @@ export {
 // S1 — sub-agent harness + Atlas-shape prompt.
 export {
   DEFAULT_SUB_AGENT_MODEL,
+  RETRY_FEEDBACK_MARKER,
   PerOwnerConcurrencyGate,
   SubAgentConcurrencyExceededError,
   SubAgentTimeoutError,

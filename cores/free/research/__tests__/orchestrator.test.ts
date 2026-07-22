@@ -15,6 +15,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import {
+  DEFAULT_SUB_AGENT_MODEL,
   PerOwnerConcurrencyGate,
   ResearchStoreResolver,
   buildCannedResearchSubstrate,
@@ -22,6 +23,10 @@ import {
   buildProjectResearchOrchestrator,
   loadManifest,
 } from '../index.ts'
+
+const ONE_TOOL_CALL = [
+  { tool: 'research_web_search', success: true, elapsed_ms: 10 },
+] as const
 
 let tmp: string
 let resolver: ResearchStoreResolver
@@ -252,6 +257,169 @@ describe('buildProjectResearchOrchestrator — deep path', () => {
     await expect(
       orc.deep({ query: 'x', project_id: 'proj-1' }),
     ).rejects.toThrow(/sub_agent_dispatcher/)
+  })
+})
+
+describe('buildProjectResearchOrchestrator — deep path retry + grounding (task 7)', () => {
+  function deepOrc(subAgent: ReturnType<typeof buildCannedSubAgentDispatcher>, gate?: PerOwnerConcurrencyGate) {
+    return buildProjectResearchOrchestrator({
+      resolver,
+      substrate: buildCannedResearchSubstrate({ responses: [] }),
+      sub_agent_dispatcher: subAgent,
+      concurrency_gate: gate ?? new PerOwnerConcurrencyGate({ cap: 2 }),
+      manifest: loadManifest(),
+      project_slug: 'project-a',
+      writeFile: () => {},
+    })
+  }
+
+  // T1 — REPRODUCE-THEN-FIX (the live incident): non-JSON + zero tool calls
+  // on attempt 1, then a valid grounded brief on the marker-matched retry.
+  test('T1 non-JSON first response then valid retry → completed with parse feedback', async () => {
+    const subAgent = buildCannedSubAgentDispatcher({
+      responses: [
+        // retry-specific FIRST (only retry prompts carry the marker)
+        {
+          query_match: '[RETRY - PREVIOUS ATTEMPT REJECTED]',
+          text: happyBrief(),
+          tool_calls: ONE_TOOL_CALL,
+          tools_available: true,
+        },
+        // catch-all LAST — reproduces the live incident exactly: the v1
+        // production dispatcher makes zero tool calls and reports
+        // tools_available:false, so the zero-tool gate stays inert and the
+        // non-JSON output is caught by the parse-retry path (which did not
+        // exist before this fix).
+        {
+          query_match: /./,
+          text: 'I would need to search the web for this topic first.',
+          tool_calls: [],
+          tools_available: false,
+        },
+      ],
+    })
+    const orc = deepOrc(subAgent)
+    const result = await orc.deep({
+      query: 'how does the water cycle work',
+      project_id: 'proj-1',
+    })
+    expect(result.status).toBe('completed')
+    expect(subAgent.calls).toHaveLength(2)
+    const retryPrompt = subAgent.calls[1]!.user_prompt
+    expect(retryPrompt).toContain('how does the water cycle work')
+    expect(retryPrompt).toContain('[RETRY - PREVIOUS ATTEMPT REJECTED]')
+    expect(retryPrompt).toContain('could not be parsed as JSON')
+  })
+
+  // T2 — both attempts non-JSON → terminal failure.
+  test('T2 both attempts non-JSON → failed with parse-on-retry error', async () => {
+    const subAgent = buildCannedSubAgentDispatcher({
+      responses: [{ query_match: /./, text: 'not json at all', tool_calls: ONE_TOOL_CALL, tools_available: true }],
+    })
+    const orc = deepOrc(subAgent)
+    const result = await orc.deep({ query: 'topic q', project_id: 'proj-1' })
+    expect(result.status).toBe('failed')
+    const status = await orc.status({ task_id: result.task_id, project_id: 'proj-1' })
+    expect(status.error).toContain('parse error on retry')
+    expect(subAgent.calls).toHaveLength(2)
+  })
+
+  // T3 — schema-invalid then valid.
+  test('T3 schema-invalid then valid → completed with schema feedback', async () => {
+    const subAgent = buildCannedSubAgentDispatcher({
+      responses: [
+        {
+          query_match: '[RETRY - PREVIOUS ATTEMPT REJECTED]',
+          text: happyBrief(),
+          tool_calls: ONE_TOOL_CALL,
+          tools_available: true,
+        },
+        { query_match: /./, text: '{"topic":"x"}', tool_calls: ONE_TOOL_CALL, tools_available: true },
+      ],
+    })
+    const orc = deepOrc(subAgent)
+    const result = await orc.deep({ query: 'topic q', project_id: 'proj-1' })
+    expect(result.status).toBe('completed')
+    expect(subAgent.calls).toHaveLength(2)
+    expect(subAgent.calls[1]!.user_prompt).toContain('failed schema validation')
+  })
+
+  // T4 — zero-tool retry: valid brief but zero tool calls (tools available)
+  // → rejected and retried; grounded retry completes.
+  test('T4 zero-tool then grounded retry → completed with zero-tool feedback', async () => {
+    const subAgent = buildCannedSubAgentDispatcher({
+      responses: [
+        {
+          query_match: '[RETRY - PREVIOUS ATTEMPT REJECTED]',
+          text: happyBrief(),
+          tool_calls: ONE_TOOL_CALL,
+          tools_available: true,
+        },
+        { query_match: /./, text: happyBrief(), tool_calls: [], tools_available: true },
+      ],
+    })
+    const orc = deepOrc(subAgent)
+    const result = await orc.deep({ query: 'topic q', project_id: 'proj-1' })
+    expect(result.status).toBe('completed')
+    expect(subAgent.calls).toHaveLength(2)
+    expect(subAgent.calls[1]!.user_prompt).toContain('ZERO tool calls')
+  })
+
+  // T5 — zero tool calls on both attempts → terminal failure.
+  test('T5 zero-tool both attempts → failed', async () => {
+    const subAgent = buildCannedSubAgentDispatcher({
+      responses: [{ query_match: /./, text: happyBrief(), tool_calls: [], tools_available: true }],
+    })
+    const orc = deepOrc(subAgent)
+    const result = await orc.deep({ query: 'topic q', project_id: 'proj-1' })
+    expect(result.status).toBe('failed')
+    const status = await orc.status({ task_id: result.task_id, project_id: 'proj-1' })
+    expect(status.error).toContain('zero tool calls on retry')
+    expect(subAgent.calls).toHaveLength(2)
+  })
+
+  // T6 — PRODUCTION-SHAPE GUARD: valid brief, zero tool calls,
+  // tools_available ABSENT (the v1 dispatcher shape) → completes on
+  // attempt 1, no retry, no rejection. Do-not-brick invariant.
+  test('T6 production shape (tools_available absent) + zero tools + valid brief → completed, no retry', async () => {
+    const subAgent = buildCannedSubAgentDispatcher({
+      responses: [{ query_match: /./, text: happyBrief(), tool_calls: [] }],
+    })
+    const orc = deepOrc(subAgent)
+    const result = await orc.deep({ query: 'topic q', project_id: 'proj-1' })
+    expect(result.status).toBe('completed')
+    expect(subAgent.calls).toHaveLength(1)
+  })
+
+  // T7 — concurrency-error metadata records DEFAULT_SUB_AGENT_MODEL
+  // (proves the old hardcoded literal at :353 is gone).
+  test('T7 concurrency-rejected records DEFAULT_SUB_AGENT_MODEL', async () => {
+    const subAgent = buildCannedSubAgentDispatcher({
+      responses: [{ query_match: /./, text: happyBrief(), tool_calls: ONE_TOOL_CALL, tools_available: true }],
+    })
+    const gate = new PerOwnerConcurrencyGate({ cap: 0 })
+    const orc = deepOrc(subAgent, gate)
+    const result = await orc.deep({ query: 'topic q', project_id: 'proj-1' })
+    expect(result.status).toBe('failed')
+    const status = await orc.status({ task_id: result.task_id, project_id: 'proj-1' })
+    expect(status.error).toContain('concurrency_rejected')
+    const handle = await resolver.resolve('proj-1')
+    const runRow = handle.store
+      .database()
+      .query('SELECT model FROM research_sub_agent_runs WHERE task_id = ?')
+      .get(result.task_id) as { model: string } | null
+    expect(runRow?.model).toBe(DEFAULT_SUB_AGENT_MODEL)
+  })
+
+  // T8 — happy path: valid grounded brief on attempt 1 → single dispatch.
+  test('T8 grounded valid brief first attempt → completed with one dispatch', async () => {
+    const subAgent = buildCannedSubAgentDispatcher({
+      responses: [{ query_match: /./, text: happyBrief(), tool_calls: ONE_TOOL_CALL, tools_available: true }],
+    })
+    const orc = deepOrc(subAgent)
+    const result = await orc.deep({ query: 'topic q', project_id: 'proj-1' })
+    expect(result.status).toBe('completed')
+    expect(subAgent.calls).toHaveLength(1)
   })
 })
 

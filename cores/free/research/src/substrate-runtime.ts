@@ -8,7 +8,7 @@
  *     by `/research <topic>` (standard depth)
  *   - `RuntimeSubAgentDispatcher.dispatch({system_prompt, user_prompt,
  *     model, tools, budget_ms}) → {text, model, tool_calls}` — used by
- *     `/research deep <topic>` (Haiku-4.5 sub-agent harness)
+ *     `/research deep <topic>` (research sub-agent harness)
  *
  * Both ports stay substrate-agnostic so tests can pass canned
  * fixtures. THIS module wraps an opaque `ResearchLlmCall` function
@@ -164,6 +164,11 @@ export function buildRuntimeResearchSubAgentDispatcher(
         text,
         model,
         tool_calls: [],
+        // v1 makes a single tool-less API call (tool passthrough deferred —
+        // plan task 10). Reporting false keeps the orchestrator's zero-tool
+        // grounding gate INERT so production deep runs cannot be bricked by
+        // it; flips to true when the real tool loop ships.
+        tools_available: false,
       }
     },
   }

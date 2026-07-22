@@ -7,13 +7,16 @@
 import { describe, expect, test } from 'bun:test'
 
 import {
+  DEFAULT_SUB_AGENT_MODEL,
   PerOwnerConcurrencyGate,
+  RETRY_FEEDBACK_MARKER,
   SubAgentConcurrencyExceededError,
   SubAgentTimeoutError,
   buildCannedSubAgentDispatcher,
   dispatchResearchSubAgent,
   type RuntimeSubAgentDispatcher,
 } from '../src/sub-agent.ts'
+import { SONNET_MODEL } from '@neutronai/runtime/models.ts'
 import {
   RESEARCH_SUB_AGENT_TOOL_WHITELIST,
   buildSubAgentSystemPrompt,
@@ -148,6 +151,64 @@ describe('dispatchResearchSubAgent', () => {
       ),
     ).toThrow(SubAgentConcurrencyExceededError)
     await Promise.all([p1, p2])
+  })
+})
+
+describe('task 7 — Sonnet default + retry feedback + tools_available', () => {
+  // T9 — default sub-agent model is SONNET_MODEL, not a hardcoded Haiku.
+  test('T9 DEFAULT_SUB_AGENT_MODEL === SONNET_MODEL', () => {
+    expect(DEFAULT_SUB_AGENT_MODEL).toBe(SONNET_MODEL)
+  })
+
+  // T10 — retry_feedback threading: absent → user_prompt is the raw query;
+  // present → query + marker + feedback appended, system prompt unchanged.
+  test('T10 retry_feedback appends after the query behind the marker; system prompt stable', async () => {
+    const dispatcher = buildCannedSubAgentDispatcher({
+      responses: [{ query_match: /./, text: 'x' }],
+    })
+    const gate = new PerOwnerConcurrencyGate({ cap: 2 })
+    await dispatchResearchSubAgent(
+      { query: 'how does X work', project_slug: 't', project_id: 'p' },
+      { runtime_sub_agent: dispatcher, concurrency_gate: gate },
+    )
+    expect(dispatcher.calls[0]!.user_prompt).toBe('how does X work')
+    expect(dispatcher.calls[0]!.system_prompt).toContain('Atlas')
+
+    await dispatchResearchSubAgent(
+      {
+        query: 'how does X work',
+        project_slug: 't',
+        project_id: 'p',
+        retry_feedback: 'your JSON was malformed',
+      },
+      { runtime_sub_agent: dispatcher, concurrency_gate: gate },
+    )
+    const retryCall = dispatcher.calls[1]!
+    expect(retryCall.user_prompt.startsWith('how does X work')).toBe(true)
+    expect(retryCall.user_prompt).toContain(RETRY_FEEDBACK_MARKER)
+    expect(retryCall.user_prompt).toContain('your JSON was malformed')
+    expect(retryCall.system_prompt).toContain('Atlas')
+  })
+
+  // T11 — tools_available passthrough from the dispatcher response.
+  test('T11 tools_available: true passes through; absent → false', async () => {
+    const dispatcher = buildCannedSubAgentDispatcher({
+      responses: [
+        { query_match: 'with-tools', text: 'x', tools_available: true },
+        { query_match: /./, text: 'x' },
+      ],
+    })
+    const gate = new PerOwnerConcurrencyGate({ cap: 2 })
+    const withTools = await dispatchResearchSubAgent(
+      { query: 'with-tools please', project_slug: 't', project_id: 'p' },
+      { runtime_sub_agent: dispatcher, concurrency_gate: gate },
+    )
+    expect(withTools.tools_available).toBe(true)
+    const withoutTools = await dispatchResearchSubAgent(
+      { query: 'no marker here', project_slug: 't', project_id: 'p' },
+      { runtime_sub_agent: dispatcher, concurrency_gate: gate },
+    )
+    expect(withoutTools.tools_available).toBe(false)
   })
 })
 

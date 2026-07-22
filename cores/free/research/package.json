@@ -272,7 +272,7 @@
       },
       {
         "name": "research_deep",
-        "description": "Kick off a deep research task via the in-process Haiku-4.5 sub-agent harness (web browse + vault search). Bounded by `budget_ms` (default 5 min) + per-instance concurrency cap (default 2). Returns task_id on completion / failure.",
+        "description": "Kick off a deep research task via the in-process research sub-agent harness (SONNET_MODEL default) (web browse + vault search). Bounded by `budget_ms` (default 5 min) + per-instance concurrency cap (default 2). Returns task_id on completion / failure.",
         "input_schema": {
           "type": "object",
           "properties": {

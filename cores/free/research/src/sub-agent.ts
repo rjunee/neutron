@@ -18,6 +18,7 @@ import {
   RESEARCH_SUB_AGENT_TOOL_WHITELIST,
   buildSubAgentSystemPrompt,
 } from './sub-agent-prompt.ts'
+import { SONNET_MODEL } from '@neutronai/runtime/models.ts'
 
 export interface ResearchSubAgentInput {
   query: string
@@ -25,10 +26,15 @@ export interface ResearchSubAgentInput {
   project_slug: string
   /** Default `SUB_AGENT_DEFAULT_BUDGET_MS` (5 min). */
   budget_ms?: number
-  /** Default Haiku 4.5 (FAST_MODEL from runtime/models.ts). */
+  /** Default SONNET_MODEL (runtime/models.ts). */
   model?: string
   /** Subset of the Core's tool whitelist. Defaults to all three. */
   tools?: readonly string[]
+  /** Set on retry attempts; appended to the user prompt after the query
+   *  (behind `RETRY_FEEDBACK_MARKER`) so the sub-agent sees WHY the prior
+   *  attempt was rejected. The system prompt stays keyed on the original
+   *  query so the engineering-rider heuristic is stable across retries. */
+  retry_feedback?: string
 }
 
 export interface ResearchSubAgentToolCall {
@@ -43,6 +49,10 @@ export interface ResearchSubAgentResult {
   elapsed_ms: number
   tool_calls: readonly ResearchSubAgentToolCall[]
   outcome: 'ok' | 'timeout' | 'error'
+  /** Whether the dispatcher actually offered the whitelisted tools to
+   *  the model. `false` when the dispatcher omits it / reports false —
+   *  the orchestrator only enforces zero-tool grounding when this is true. */
+  tools_available: boolean
 }
 
 export interface RuntimeSubAgentDispatchInput {
@@ -57,6 +67,10 @@ export interface RuntimeSubAgentDispatchResult {
   text: string
   model: string
   tool_calls: readonly ResearchSubAgentToolCall[]
+  /** Whether the dispatcher actually offered the whitelisted tools to the
+   *  model. Absent/undefined = unknown → the orchestrator must NOT enforce
+   *  tool grounding. The v1 tool-less production dispatcher reports `false`. */
+  tools_available?: boolean
 }
 
 export interface RuntimeSubAgentDispatcher {
@@ -149,11 +163,19 @@ export async function dispatchResearchSubAgent(
   const now = deps.now ?? ((): number => Date.now())
   const release = deps.concurrency_gate.acquire(input.project_slug)
   const start = now()
+  // System prompt stays keyed on the ORIGINAL query so the engineering-rider
+  // heuristic is stable across retries. Retry feedback is appended to the
+  // user prompt AFTER the query so existing canned-dispatcher `includes(query)`
+  // matching keeps working.
+  const user_prompt =
+    input.retry_feedback === undefined
+      ? input.query
+      : input.query + '\n\n' + RETRY_FEEDBACK_MARKER + '\n' + input.retry_feedback
   try {
     const result = await runWithTimeout(
       deps.runtime_sub_agent.dispatch({
         system_prompt: buildSubAgentSystemPrompt(input.query),
-        user_prompt: input.query,
+        user_prompt,
         model,
         tools,
         budget_ms,
@@ -167,11 +189,16 @@ export async function dispatchResearchSubAgent(
       elapsed_ms,
       tool_calls: result.tool_calls,
       outcome: 'ok',
+      tools_available: result.tools_available === true,
     }
   } finally {
     release()
   }
 }
+
+/** Marker prefixing the retry feedback appended to a sub-agent's user
+ *  prompt on the 2nd attempt. Plain hyphen (no em dash). */
+export const RETRY_FEEDBACK_MARKER = '[RETRY - PREVIOUS ATTEMPT REJECTED]'
 
 async function runWithTimeout<T>(p: Promise<T>, budget_ms: number): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | null = null
@@ -187,11 +214,12 @@ async function runWithTimeout<T>(p: Promise<T>, budget_ms: number): Promise<T> {
   }
 }
 
-/** Default Haiku 4.5 model id. Re-export of the runtime constant kept
- *  inside the Core so the harness has no direct dependency on
- *  `runtime/models.ts` — the production wireup passes the FAST_MODEL
- *  string in explicitly. */
-export const DEFAULT_SUB_AGENT_MODEL = 'claude-haiku-4-5-20251001'
+/** Default sub-agent model = SONNET_MODEL (env-overridable via
+ *  `NEUTRON_SONNET_MODEL`). Deep research needs real reasoning and
+ *  sustained tool-use discipline; Haiku produced ungrounded,
+ *  unparseable briefs (2026-07 dogfood incident). Production uses this
+ *  default because `deep()` does NOT pass `model` to the dispatcher. */
+export const DEFAULT_SUB_AGENT_MODEL: string = SONNET_MODEL
 
 /**
  * Build a canned `RuntimeSubAgentDispatcher` for tests. Returns
@@ -204,6 +232,9 @@ export interface CannedSubAgentDispatcherInput {
     text: string
     model?: string
     tool_calls?: readonly ResearchSubAgentToolCall[]
+    /** Whether this response reports the tools as available (arms the
+     *  orchestrator's zero-tool grounding gate). Omit = unknown. */
+    tools_available?: boolean
     /** If set, the dispatcher will hang for at least this many ms before
      *  returning — used to exercise the budget-timeout path. */
     delay_ms?: number
@@ -244,6 +275,9 @@ export function buildCannedSubAgentDispatcher(
           text: r.text,
           model: r.model ?? default_model,
           tool_calls: r.tool_calls ?? [],
+          ...(r.tools_available !== undefined
+            ? { tools_available: r.tools_available }
+            : {}),
         }
       }
       throw new Error(
