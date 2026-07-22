@@ -1130,6 +1130,41 @@ describe('reflect step 4 — correction-pattern promotion (deterministic, no LLM
     expect(report.patternsPromoted).toBe(1)
   })
 
+  // Argus r3 VETO (both reviewers): when the scan window ages the cluster's ORIGINAL
+  // seed out, the next seed's `right` differs → `stablePatternSlug` alone mints a NEW
+  // slug for the SAME recurring lesson → a duplicate/orphan page. The fix reuses the
+  // already-promoted page's persisted identity via shared-occurrence overlap.
+  test('seed eviction: the recurring lesson keeps ONE page (no duplicate) across a slid window', async () => {
+    const owner = tmpOwner()
+    // A lesson whose members cluster (shared whole-text) but whose `right` differs,
+    // so the seed-derived fallback slug DRIFTS once the oldest member ages out.
+    const S0: CorrectionEntry = { id: 'c-s0', ts: '2026-12-01T00:00:00.000Z', wrong: 'w1 w2 w3 w4', right: 'correct alpha behavior', why: 'reason common shared' }
+    const M1: CorrectionEntry = { id: 'c-m1', ts: '2026-12-02T00:00:00.000Z', wrong: 'w1 w2 w3 w4', right: 'correct beta behavior', why: 'reason common shared' }
+    const M2: CorrectionEntry = { id: 'c-m2', ts: '2026-12-03T00:00:00.000Z', wrong: 'w1 w2 w3 w4', right: 'correct gamma behavior', why: 'reason common shared' }
+    const M3: CorrectionEntry = { id: 'c-m3', ts: '2026-12-04T00:00:00.000Z', wrong: 'w1 w2 w3 w4', right: 'correct delta behavior', why: 'reason common shared' }
+
+    // The two fallback slugs are genuinely DIFFERENT — a duplicate would land here.
+    const slugA = stablePatternSlug([S0, M1, M2])
+    const slugB = stablePatternSlug([M1, M2, M3])
+    expect(slugB).not.toBe(slugA)
+
+    // Pass 1 — window [S0,M1,M2] promotes ONE page at slugA (real on-disk writer).
+    const first = await runReflectPass({ ...baseDeps(owner), readCorrections: () => [S0, M1, M2] })
+    expect(first.patternsPromoted).toBe(1)
+    expect(await readPage(owner, 'concepts', slugA)).not.toBeNull()
+
+    // Pass 2 — window slides: S0 evicted, M3 arrives. Fallback slug would be slugB.
+    const second = await runReflectPass({ ...baseDeps(owner), readCorrections: () => [M1, M2, M3] })
+    expect(second.patternsPromoted).toBe(1) // updated the SAME page (M3 appended)
+
+    // The ORIGINAL page still holds identity and now carries the new occurrence…
+    const pageA = await readPage(owner, 'concepts', slugA)
+    expect(pageA).not.toBeNull()
+    expect(extractTimeline(pageA!)).toHaveLength(4) // S0,M1,M2 + M3, deduped
+    // …and NO duplicate page was minted at the drifted fallback slug (pre-fix bug).
+    expect(await readPage(owner, 'concepts', slugB)).toBeNull()
+  })
+
   test('below threshold (2 occurrences) → no promotion; scanned still counts', async () => {
     const owner = tmpOwner()
     const spy = mock(async () => ({ path: 'x', changed: true, newLinks: [] as unknown[] }))

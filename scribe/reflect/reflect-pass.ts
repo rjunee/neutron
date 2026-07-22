@@ -99,10 +99,12 @@ import { composeReservedPrompt, parseReservedExtraction } from './reserved-kinds
 import {
   clusterCorrections,
   composePatternPage,
-  stablePatternSlug,
+  resolveClusterSlug,
+  CORRECTION_PATTERN_TIMELINE_SOURCE,
   DEFAULT_CORRECTION_PATTERN_JACCARD,
   DEFAULT_CORRECTION_PATTERN_MIN_OCCURRENCES,
   type CorrectionEntry,
+  type PriorPatternIdentity,
 } from './correction-patterns.ts'
 
 const log = createLogger('scribe')
@@ -336,15 +338,17 @@ export async function runReflectPass(deps: ReflectPassDeps): Promise<ReflectRepo
  * Q2 (overturn 2, core-memory tier) — cluster recurring owner corrections and
  * promote each ≥N-occurrence cluster to a kind-`concept` entity page through the
  * pass's own `writeEntity` + `syncHook` (→ GBrain + `entities/INDEX.md`). No LLM.
- * Idempotent by construction: the promoted page's slug is derived by
- * `stablePatternSlug` from the cluster SEED's `right` vocabulary (membership-
- * independent — does not move as non-seed members age in/out of the scan window),
- * qualifying clusters that derive the SAME slug are MERGED before writing (so a
- * same-pass slug collision appends occurrences instead of losing the second cluster
- * to a CAS conflict), timeline rows dedupe on `(ts,source,body)`, and a
- * byte-identical re-render is `changed:false` (no hook fire) — so re-promoting the
- * same cluster across passes is a structural no-op. Best-effort per cluster; the
- * step NEVER throws out of the pass.
+ * Idempotent by construction: the promoted page's slug is resolved by
+ * `resolveClusterSlug`, which REUSES an already-promoted page's persisted identity
+ * whenever the cluster still shares an occurrence with it — so the slug does not
+ * move even after the scan window ages the cluster's original seed (its fallback
+ * slug anchor) out (Argus r3 VETO); a genuinely new cluster falls back to the
+ * seed-`right`-vocabulary `stablePatternSlug`. Qualifying clusters that resolve to
+ * the SAME slug are MERGED before writing (so a same-pass slug collision appends
+ * occurrences instead of losing the second cluster to a CAS conflict), timeline rows
+ * dedupe on `(ts,source,body)`, and a byte-identical re-render is `changed:false`
+ * (no hook fire) — so re-promoting the same cluster across passes is a structural
+ * no-op. Best-effort per cluster; the step NEVER throws out of the pass.
  */
 async function promoteCorrectionPatterns(
   pages: LoadedPage[],
@@ -368,25 +372,33 @@ async function promoteCorrectionPatterns(
   const minOcc = deps.correctionPatternMinOccurrences ?? DEFAULT_CORRECTION_PATTERN_MIN_OCCURRENCES
   const clusters = clusterCorrections(entries, threshold)
 
-  // Merge any qualifying clusters that derive the SAME stable slug into one page
-  // BEFORE writing. Two distinct clusters can collide on identity (genuinely-
-  // identical seed `right` vocabulary); without merging, the first cluster's write
-  // creates the page and the second's write — using `ifBodyEquals: null` because the
-  // page wasn't in the pass-start snapshot — hits a CAS conflict and its occurrences
-  // are silently dropped forever, never self-healing (Argus r2). Merging appends both
-  // clusters' timeline rows to one page (rows dedupe on `(ts,source,body)`).
+  // The PERSISTED identity of every correction-pattern page already on disk: its
+  // slug + the occurrence keys it currently records. This is the durable identity
+  // store (Argus r3 VETO fix) — no new I/O path, it is reconstructed from the pages
+  // the pass already enumerated. `resolveClusterSlug` reuses one of these slugs when
+  // a cluster still shares an occurrence with it, so a recurring lesson keeps ONE
+  // page even after the scan window has aged its original seed (and slug anchor) out.
+  const priorIdentities = collectPriorPatternIdentities(pages)
+
+  // Merge any qualifying clusters that resolve to the SAME slug into one page BEFORE
+  // writing. Two distinct clusters can collide on identity (a genuinely-identical
+  // fresh slug, OR both overlapping the same promoted page); without merging, the
+  // first cluster's write creates/updates the page and the second's write — using a
+  // stale `ifBodyEquals` — hits a CAS conflict and its occurrences are silently
+  // dropped forever, never self-healing (Argus r2). Merging appends both clusters'
+  // timeline rows to one page (rows dedupe on `(ts,source,body)`).
   const bySlug = new Map<string, CorrectionEntry[]>()
   for (const cluster of clusters) {
     if (cluster.length < minOcc) continue
-    const slug = stablePatternSlug(cluster)
+    const slug = resolveClusterSlug(cluster, priorIdentities)
     const merged = bySlug.get(slug)
     if (merged !== undefined) merged.push(...cluster)
     else bySlug.set(slug, [...cluster])
   }
 
-  for (const cluster of bySlug.values()) {
+  for (const [slug, cluster] of bySlug) {
     try {
-      const page = composePatternPage(cluster)
+      const page = composePatternPage(cluster, slug)
       // ids are `c-<base36>`, so the derived slug is SLUG_REGEX-safe — but a
       // corrupt/imported correction id could break that. Fail closed (skip+log).
       if (!SLUG_REGEX.test(page.slug)) {
@@ -429,6 +441,30 @@ async function promoteCorrectionPatterns(
       logFailure('reflect: promote correction pattern failed', err)
     }
   }
+}
+
+/**
+ * Reconstruct the PERSISTED identity of every already-promoted correction-pattern
+ * page from the enumerated corpus: its slug + the set of occurrence keys it records
+ * (`<ts>\x1f<body>` over rows stamped `CORRECTION_PATTERN_TIMELINE_SOURCE` —
+ * byte-identical to `correctionOccurrenceKey`). A page qualifies iff it is a
+ * `concept` whose slug carries the `correction-pattern-` prefix AND it holds ≥1 such
+ * row. This is the durable identity table `resolveClusterSlug` matches new clusters
+ * against so a recurring lesson keeps ONE page across seed eviction — sourced purely
+ * from pages the pass already loaded (no extra read).
+ */
+function collectPriorPatternIdentities(pages: LoadedPage[]): PriorPatternIdentity[] {
+  const out: PriorPatternIdentity[] = []
+  for (const p of pages) {
+    if (p.kind !== 'concept' || !p.slug.startsWith('correction-pattern-')) continue
+    const occurrenceKeys = new Set<string>()
+    for (const row of p.timeline) {
+      if (row.source !== CORRECTION_PATTERN_TIMELINE_SOURCE) continue
+      occurrenceKeys.add(`${row.ts}\x1f${row.body}`)
+    }
+    if (occurrenceKeys.size > 0) out.push({ slug: p.slug, occurrenceKeys })
+  }
+  return out
 }
 
 /**
