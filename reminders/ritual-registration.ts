@@ -646,11 +646,22 @@ export function createRitualRegistrationService(
       // ── RECONCILIATION (Argus r1 BLOCKER) — an already-APPROVED grant whose
       // scheduling never completed (a transient db/fs failure AFTER respondApproval
       // stranded it: the decision was durably recorded, but no reminder row exists,
-      // and a re-tap previously dead-ended here). Re-tapping Approve now RE-DRIVES
-      // scheduling, so the owner can self-heal a stranded ritual. A denied/expired
-      // grant is terminal — nothing to reconcile.
-      if (row.status === 'approved' && ritual_id !== null) {
+      // and a re-tap previously dead-ended here). Re-tapping APPROVE now RE-DRIVES
+      // scheduling, so the owner can self-heal a stranded ritual. Only the APPROVE
+      // token reconciles: a DENY re-tap on an already-approved grant must NOT be
+      // read as reconcile-and-schedule (Argus r2 minor — the :a/:d suffix was being
+      // dropped once status left 'pending', so a Deny tap silently re-scheduled).
+      // Deny/revoke of an already-approved ritual is not a button path in v1 — say
+      // so plainly rather than acting on the wrong intent. A denied/expired grant is
+      // terminal — nothing to reconcile.
+      const retapped: 'approved' | 'denied' = value.endsWith(':a') ? 'approved' : 'denied'
+      if (row.status === 'approved' && retapped === 'approved' && ritual_id !== null) {
         return await ensureScheduled(ritual_id)
+      }
+      if (row.status === 'approved' && retapped === 'denied') {
+        return {
+          body: `"${ritual_id ?? 'that ritual'}" is already approved — this Deny did nothing. To stop it, re-propose it (approval is bound to the exact content, so any edit drops the grant).`,
+        }
       }
       return { body: `That ritual approval was already ${row.status} — nothing changed.` }
     }

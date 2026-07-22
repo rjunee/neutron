@@ -706,6 +706,45 @@ describe('Argus r1 BLOCKER — reconciliation of a stranded approval', () => {
   })
 })
 
+// ── Argus r2 minor — a DENY re-tap on an already-approved grant must NOT schedule
+describe('Argus r2 minor — deny re-tap on an approved grant', () => {
+  test('tapping Deny after approval does NOT re-schedule and does NOT alter state', async () => {
+    const h = makeHarness()
+    await h.service.propose(proposal({ id: 'deny-after-approve', schedule: { fire_at: 1_900_000_700 } }))
+    await settle()
+    const approveValue = h.emitted[0]!.options.find((o) => o.value.endsWith(':a'))!.value
+    const denyValue = h.emitted[0]!.options.find((o) => o.value.endsWith(':d'))!.value
+    const priorOptions = h.emitted[0]!.options.map((o) => o.value)
+    const grant = h.approvals.listPending(SLUG)[0]!
+
+    // Approve → scheduled.
+    const rApprove = await h.service.handleOwnerButtonAnswer({
+      user_id: OWNER,
+      user_text: approveValue,
+      topic_id: TOPIC,
+      prior_option_values: priorOptions,
+    })
+    expect(rApprove!.body.toLowerCase()).toContain('scheduled')
+    expect(countReminderRows()).toBe(1)
+    expect(h.respondSpy).toHaveBeenCalledTimes(1)
+
+    // Deny re-tap on the now-APPROVED grant: the :d suffix must be honored, NOT
+    // dropped into the reconcile-and-schedule branch. No new reminder row, no
+    // extra respondApproval, grant stays approved.
+    const rDeny = await h.service.handleOwnerButtonAnswer({
+      user_id: OWNER,
+      user_text: denyValue,
+      topic_id: TOPIC,
+      prior_option_values: priorOptions,
+    })
+    expect(rDeny!.body.toLowerCase()).toContain('already approved')
+    expect(rDeny!.body.toLowerCase()).not.toContain('scheduled: ')
+    expect(countReminderRows()).toBe(1) // unchanged — no double-schedule
+    expect(h.approvals.get(grant.id)!.status).toBe('approved') // grant unchanged
+    expect(h.respondSpy).toHaveBeenCalledTimes(1) // no second decision recorded
+  })
+})
+
 // ── Argus r2 BLOCKER 2 — double-schedule race is reported as "already scheduled"
 describe('Argus r2 BLOCKER 2 — concurrent approval INSERT conflict', () => {
   test('a UNIQUE-constraint conflict from a concurrent answer reports "already scheduled", not an error', async () => {

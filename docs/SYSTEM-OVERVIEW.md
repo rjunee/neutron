@@ -2119,9 +2119,20 @@ approval-gated: nothing fires unless the OWNER has explicitly approved that exac
 ritual content in chat.
 
 - **Ritual defs + registry** (`reminders/rituals.ts`). A `RitualDef` (interface
-  at `reminders/rituals.ts:131`) declares `id`, the self-contained `prompt`
-  bytes, a `tool_surface`, an `egress` class (`'none' | 'web'`), a `scope`
-  (`'instance' | 'project'`), a cadence, a tier, and a timeout.
+  at `reminders/rituals.ts:131`) declares exactly SIX fields — `id`, a
+  `description` (the human capability line rendered in the approval prompt), a
+  `scope` (`'instance' | 'project'`), a `tool_surface`, an `egress` class
+  (`'none' | 'web'`), and a `silent` flag. It DELIBERATELY carries no prompt,
+  cadence, tier, or timeout field (module header §34-36): the self-contained
+  prompt bytes live in the SEPARATE `rituals/<id>.md` file (derived from the
+  charset-guarded `id`, never a def field); the cadence lives on the scheduled
+  reminder row (`ritualCadenceString`, `reminders/ritual-approval.ts:109`); and
+  the model TIER (`RITUAL_MODEL_TIER = 'best'`, `reminders/rituals.ts:55`) and
+  spawn TIMEOUT (`RITUAL_TIMEOUT_MS = 45m`, `reminders/rituals.ts:47`) are module
+  CONSTANTS shared by every ritual, not per-def fields. (The content-hash below
+  binds all six of prompt‖surface‖scope‖cadence‖tier‖timeout at approval time by
+  drawing prompt from the file, cadence from the row, and tier/timeout from the
+  constants — so the HASH covers more than the def does.)
   `createRitualRegistry` (`reminders/rituals.ts:278`) roots defs at
   `<owner_home>/rituals/`. The fire-time gate is the async `validateRitualFire`
   (`reminders/rituals.ts:374`), which takes a REQUIRED `RitualApprovalCheck` seam
