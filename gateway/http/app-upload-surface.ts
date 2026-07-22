@@ -51,7 +51,7 @@
  * sniffed MIME and SHA-256.
  */
 
-import { existsSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises'
 import { createHash } from 'node:crypto'
 import { join } from 'node:path'
@@ -66,15 +66,18 @@ export const MAX_CHAT_UPLOAD_BYTES = 10 * 1024 * 1024
 /** Hard ceiling on multipart wire size — small slack for envelope overhead. */
 const MULTIPART_WIRE_SLACK = 64 * 1024
 
-/** M2 modality scope — raster images + PDF documents. SVG stays excluded
- *  (it carries XSS risk via inline script; the binary store accepts it but
- *  the chat surface does not). */
+/** M2 modality scope — raster images + PDF documents + audio voice notes
+ *  (MP3/M4A/WAV, task 5). SVG stays excluded (it carries XSS risk via inline
+ *  script; the binary store accepts it but the chat surface does not). */
 const CHAT_UPLOAD_MIME_WHITELIST: ReadonlyArray<string> = Object.freeze([
   'image/png',
   'image/jpeg',
   'image/gif',
   'image/webp',
   'application/pdf',
+  'audio/mpeg',
+  'audio/mp4',
+  'audio/wav',
 ])
 
 /** Canonical MIME → on-disk extension. SVG omitted (see the whitelist note
@@ -85,13 +88,20 @@ const EXT_FROM_MIME: Readonly<Record<string, string>> = Object.freeze({
   'image/gif': 'gif',
   'image/webp': 'webp',
   'application/pdf': 'pdf',
+  'audio/mpeg': 'mp3',
+  'audio/mp4': 'm4a',
+  'audio/wav': 'wav',
 })
 
 const URL_PREFIX = '/api/app/upload'
 /** `<user_id>/<hex64>.<ext>` — user_id must match the auth bearer; hash
- *  is a 64-char hex SHA-256; ext is one of the whitelist below.  */
+ *  is a 64-char hex SHA-256; ext is one of the whitelist below.
+ *  DELIBERATE: `txt` is NOT in this ext group — the voice-note transcript
+ *  sidecar (`<hash>.txt`) must never be servable via the GET route (it would
+ *  leak the raw transcript to anyone holding the bearer). It is read only
+ *  server-side by `resolveChatAttachmentLocalPath`. */
 const URL_PATH_RE =
-  /^\/api\/app\/upload\/([A-Za-z0-9._:-]+)\/([0-9a-f]{64})\.(png|jpg|gif|webp|pdf)$/
+  /^\/api\/app\/upload\/([A-Za-z0-9._:-]+)\/([0-9a-f]{64})\.(png|jpg|gif|webp|pdf|mp3|m4a|wav)$/
 
 export interface AppUploadSurfaceOptions {
   auth: AppWsAuthResolver
@@ -102,6 +112,21 @@ export interface AppUploadSurfaceOptions {
   owner_home: string
   /** Override the size cap for tests. */
   max_bytes?: number
+  /**
+   * M2 task 5 — voice-note ASR seam. When wired, an uploaded AUDIO blob is
+   * transcribed at upload-complete and the transcript is persisted as a
+   * content-addressed `<hash>.txt` sidecar beside the blob (atomic + idempotent
+   * — the surface owns the sidecar layout; a re-upload of the same bytes whose
+   * sidecar already exists never re-invokes the seam). Returns the transcript
+   * text, or `null` on failure / keyless (in which case no sidecar is written
+   * and the turn-fragment falls back to a graceful "set OPENAI_API_KEY" note).
+   * Omitted (no key) ⇒ audio still uploads; it just carries no transcript.
+   */
+  transcribeAudio?: (input: {
+    bytes: Uint8Array
+    content_type: string
+    hash: string
+  }) => Promise<string | null>
 }
 
 export interface AppUploadSurface {
@@ -119,6 +144,7 @@ export function createAppUploadSurface(
   const { auth, project_slug: gateway_project_slug, owner_home } = opts
   const max_bytes = opts.max_bytes ?? MAX_CHAT_UPLOAD_BYTES
   const blobs_root = join(owner_home, 'chat-attachments')
+  const transcribeAudio = opts.transcribeAudio
 
   return {
     handler: async (req) => {
@@ -139,6 +165,7 @@ export function createAppUploadSurface(
           gateway_project_slug,
           blobs_root,
           max_bytes,
+          ...(transcribeAudio !== undefined ? { transcribeAudio } : {}),
         })
       }
       const match = URL_PATH_RE.exec(pathname)
@@ -169,6 +196,11 @@ interface UploadContext {
   gateway_project_slug: string
   blobs_root: string
   max_bytes: number
+  transcribeAudio?: (input: {
+    bytes: Uint8Array
+    content_type: string
+    hash: string
+  }) => Promise<string | null>
 }
 
 async function handleUpload(req: Request, ctx: UploadContext): Promise<Response> {
@@ -287,6 +319,36 @@ async function handleUpload(req: Request, ctx: UploadContext): Promise<Response>
       return jsonError(500, 'write_failed', `failed to persist attachment: ${message}`)
     }
   }
+  // M2 task 5 — voice-note ASR. For an AUDIO upload with a wired transcriber,
+  // transcribe the bytes and persist a content-addressed `<hash>.txt` sidecar
+  // beside the blob (atomic tmp+rename, mirroring the blob write above). This is
+  // IDEMPOTENT: a sidecar already on disk (a re-upload of the same bytes) is
+  // never re-transcribed, so the ASR API is called at most once per distinct
+  // audio. ASR must NEVER fail the upload — every path is swallowed.
+  if (sniffed.startsWith('audio/') && ctx.transcribeAudio !== undefined) {
+    const sidecar = join(user_dir, `${hash}.txt`)
+    if (!existsSync(sidecar)) {
+      try {
+        const text = await ctx.transcribeAudio({ bytes: buffer, content_type: sniffed, hash })
+        if (text !== null && text.trim().length > 0) {
+          await mkdir(user_dir, { recursive: true })
+          const tmp = `${sidecar}.tmp-${process.pid}-${Math.random().toString(36).slice(2)}`
+          try {
+            await writeFile(tmp, text)
+            await rename(tmp, sidecar)
+          } catch {
+            try {
+              await unlink(tmp)
+            } catch {
+              /* ignore */
+            }
+          }
+        }
+      } catch {
+        /* ASR failure must never fail the upload — the blob is already saved. */
+      }
+    }
+  }
   const url = `${URL_PREFIX}/${resolved.user_id}/${hash}.${ext}`
   return jsonOk({ url, content_type: sniffed, size_bytes: buffer.length })
 }
@@ -364,6 +426,12 @@ function mimeFromExt(ext: string): string | null {
       return 'image/webp'
     case 'pdf':
       return 'application/pdf'
+    case 'mp3':
+      return 'audio/mpeg'
+    case 'm4a':
+      return 'audio/mp4'
+    case 'wav':
+      return 'audio/wav'
     default:
       return null
   }
@@ -386,7 +454,7 @@ function mimeFromExt(ext: string): string | null {
 export function resolveChatAttachmentLocalPath(
   owner_home: string,
   url: string,
-): { path: string; content_type: string } | null {
+): { path: string; content_type: string; transcript?: string | null } | null {
   if (typeof url !== 'string' || url.length === 0) return null
   // Absolute URL → take its pathname; relative `/api/app/upload/...` stays as-is
   // (the `new URL(url)` with no base throws for a relative input).
@@ -413,6 +481,23 @@ export function resolveChatAttachmentLocalPath(
   // Only hand a path to the agent prompt if the blob actually exists on disk;
   // a resolvable-but-missing path would inject a dead file reference.
   if (!existsSync(path)) return null
+  // M2 task 5 — for an AUDIO attachment, surface the voice-note transcript from
+  // the content-addressed `<hash>.txt` sidecar (written at upload time when a
+  // transcriber is wired). `transcript` is the text when present, `null` when
+  // absent (keyless / failed ASR). Non-audio attachments omit the field
+  // entirely (image/PDF have no transcript concept).
+  if (content_type.startsWith('audio/')) {
+    const sidecar = join(owner_home, 'chat-attachments', user_id, `${hash}.txt`)
+    let transcript: string | null = null
+    if (existsSync(sidecar)) {
+      try {
+        transcript = readFileSync(sidecar, 'utf8')
+      } catch {
+        transcript = null
+      }
+    }
+    return { path, content_type, transcript }
+  }
   return { path, content_type }
 }
 

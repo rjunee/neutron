@@ -231,7 +231,9 @@ export function extractAgentOptions(text: string): ParsedAgentOptions {
  */
 export function buildAttachmentsFragment(
   attachments: ReadonlyArray<string> | undefined,
-  resolve: ((url: string) => { path: string; content_type: string } | null) | undefined,
+  resolve:
+    | ((url: string) => { path: string; content_type: string; transcript?: string | null } | null)
+    | undefined,
   warn: (event: string, meta: Record<string, unknown>) => void = () => undefined,
 ): string | null {
   if (resolve === undefined) return null
@@ -239,7 +241,7 @@ export function buildAttachmentsFragment(
   const lines: string[] = []
   for (const url of attachments) {
     if (typeof url !== 'string' || url.length === 0) continue
-    let resolved: { path: string; content_type: string } | null = null
+    let resolved: { path: string; content_type: string; transcript?: string | null } | null = null
     try {
       resolved = resolve(url)
     } catch (err) {
@@ -253,18 +255,45 @@ export function buildAttachmentsFragment(
       warn('attachment_unresolved', { url })
       continue
     }
+    // M2 task 5 — AUDIO voice notes carry an auto-transcript inline (the agent
+    // cannot `Read` raw audio bytes). A non-empty transcript is embedded (capped
+    // so a long note doesn't blow the prompt budget); a null/absent transcript
+    // (keyless box or failed ASR) degrades to a graceful note telling the owner
+    // how to enable it.
+    if (resolved.content_type.startsWith('audio/')) {
+      const transcript = resolved.transcript
+      if (typeof transcript === 'string' && transcript.trim().length > 0) {
+        const trimmed = transcript.trim()
+        const capped =
+          trimmed.length > ATTACHMENT_TRANSCRIPT_MAX_CHARS
+            ? `${trimmed.slice(0, ATTACHMENT_TRANSCRIPT_MAX_CHARS)}… [transcript truncated]`
+            : trimmed
+        lines.push(`- ${resolved.path} (${resolved.content_type}) — voice note; auto-transcript:`)
+        for (const l of capped.split('\n')) lines.push(`  ${l}`)
+      } else {
+        lines.push(
+          `- ${resolved.path} (${resolved.content_type}) — voice note; transcription unavailable — set OPENAI_API_KEY to enable voice transcription`,
+        )
+      }
+      continue
+    }
     lines.push(`- ${resolved.path} (${resolved.content_type})`)
   }
   if (lines.length === 0) return null
   return [
     '<user_attachments>',
-    'The user attached these local files with their message. Open them with the',
-    'Read tool to view their contents (it renders images AND PDFs natively from',
-    'local paths):',
+    'The user attached these local files with their message. Open images and PDFs',
+    'with the Read tool to view their contents (it renders them natively from local',
+    'paths). AUDIO voice notes include an auto-generated transcript inline below —',
+    'do NOT attempt to Read the raw audio bytes; use the transcript text:',
     ...lines,
     '</user_attachments>',
   ].join('\n')
 }
+
+/** Cap on an inlined voice-note transcript (chars) so one long note can't blow
+ *  the prompt budget. Task 5. */
+const ATTACHMENT_TRANSCRIPT_MAX_CHARS = 4000
 
 /**
  * Built-in CC tool surface for the live agent. Read access over the REPL's cwd /
@@ -592,7 +621,9 @@ export interface BuildLiveAgentTurnInput {
    * renders images AND PDFs natively). An unresolvable URL is skipped with a
    * warn (never throws). Omitted (LLM-less box) ⇒ no attachment fragment.
    */
-  resolveAttachment?: (url: string) => { path: string; content_type: string } | null
+  resolveAttachment?: (
+    url: string,
+  ) => { path: string; content_type: string; transcript?: string | null } | null
   /** The SAME ButtonStore the engine emits through (persistence + history). */
   buttonStore: ButtonStore
   /** Operator audit trail — same TranscriptWriter the engine appends to. */

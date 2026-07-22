@@ -503,6 +503,11 @@ export function mimeToExt(mime: string): string {
   if (mime.startsWith('image/gif')) return 'gif';
   if (mime.startsWith('image/webp')) return 'webp';
   if (mime.startsWith('application/pdf')) return 'pdf';
+  // M2 task 5 — audio voice notes (canonical + iOS `x-`/legacy aliases).
+  if (mime.startsWith('audio/mpeg') || mime.startsWith('audio/mp3')) return 'mp3';
+  if (mime.startsWith('audio/mp4') || mime.startsWith('audio/m4a') || mime.startsWith('audio/x-m4a') || mime.startsWith('audio/aac'))
+    return 'm4a';
+  if (mime.startsWith('audio/wav') || mime.startsWith('audio/x-wav') || mime.startsWith('audio/wave')) return 'wav';
   if (mime.startsWith('application/zip') || mime === 'application/x-zip') return 'zip';
   return 'bin';
 }

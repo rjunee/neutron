@@ -98,6 +98,18 @@ describe('mimeToExt — M2 modality parity', () => {
     // M2 documents — PDF now maps (previously fell through to 'bin').
     expect(mimeToExt('application/pdf')).toBe('pdf');
     expect(mimeToExt('application/zip')).toBe('zip');
-    expect(mimeToExt('audio/mpeg')).toBe('bin');
+  });
+
+  it('maps M2 task-5 audio voice notes (canonical + iOS/legacy aliases)', () => {
+    expect(mimeToExt('audio/mpeg')).toBe('mp3');
+    expect(mimeToExt('audio/mp3')).toBe('mp3');
+    expect(mimeToExt('audio/mp4')).toBe('m4a');
+    expect(mimeToExt('audio/m4a')).toBe('m4a');
+    expect(mimeToExt('audio/x-m4a')).toBe('m4a');
+    expect(mimeToExt('audio/wav')).toBe('wav');
+    expect(mimeToExt('audio/x-wav')).toBe('wav');
+    expect(mimeToExt('audio/wave')).toBe('wav');
+    // An unknown audio subtype still falls through to bin.
+    expect(mimeToExt('audio/ogg')).toBe('bin');
   });
 });

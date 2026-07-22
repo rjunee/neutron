@@ -4535,11 +4535,32 @@ now-nonexistent vanilla client.
   fragment is prompt-only; `turn.user_text` (which feeds capture/reflection/
   scribe/persistence) is never mutated. An attachment-only send still dispatches a
   turn; an unresolvable URL is skipped with a warn.
+- **Voice notes (M2 task 5, 2026-07-22):** audio (MP3 / M4A / WAV) is accepted on
+  the SAME chat-upload surface as images + PDF (`CHAT_UPLOAD_MIME_WHITELIST` +
+  `EXT_FROM_MIME` + `URL_PATH_RE` + `mimeFromExt` all widened; the sniffers already
+  existed in `binary-types.ts`). At upload-complete an audio blob is transcribed by
+  `gateway/transcription/openai-transcription.ts` — an OpenAI-compatible `POST
+  {base}/v1/audio/transcriptions` Whisper client (`whisper-1`, injectable base_url +
+  fetch; typed error taxonomy; never throws). Transcription is gated ONLY by
+  `OPENAI_API_KEY` presence (credential config, the SAME single var the conversational
+  OpenAI provider pool uses via `resolveOpenOpenAiPool` — NOT a feature flag; it works
+  regardless of which provider drives the conversation). The transcript is persisted as
+  a **content-addressed `<hash>.txt` sidecar** beside the blob (atomic tmp+rename,
+  idempotent — a re-upload of the same bytes never re-calls the API; `.txt` is
+  deliberately NOT in the GET ext-group, so the sidecar is never servable). It is
+  injected into the `<user_attachments>` prompt fragment as the voice note's inline
+  transcript (capped at 4000 chars; keyless/failed ASR → a graceful "transcription
+  unavailable — set OPENAI_API_KEY" note), and appended to the SCRIBE text via a new
+  `attachmentTranscript` app-ws seam so voice → text → gbrain memory reaches parity —
+  the turn's `user_text` is never mutated. Both clients render a 🎵 chip for a voice
+  note (web `message-adapter.ts` `isAudioAttachmentUrl`; native `attachment-url.ts`
+  predicate; icon precedent `docs-shared.ts` `treeIconFor`).
 
 **Parity reached:** optimistic send, token streaming, typing indicator,
 reconnect+backoff (all via chat-core), durable cold-open + gap-free reconnect
 (seq/resume), multi-device (falls out of seq/resume + the Phase-1 `Set<sender>`
-registry), project topics, and attachments (compose **and** authed render).
+registry), project topics, attachments (compose **and** authed render), and voice
+notes (audio upload + Whisper transcription → prompt + scribe).
 **Not yet at parity (documented gaps):** "load earlier" history paging beyond the
 resume replay window — this is the one remaining named-scope gap, and it is NOT
 client-only: chat-core + the app-ws surface are forward-only (a single

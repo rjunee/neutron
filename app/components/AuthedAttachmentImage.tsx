@@ -42,6 +42,7 @@ import * as Sharing from 'expo-sharing';
 
 import {
   attachmentBasename,
+  isAudioAttachmentUrl,
   isImageAttachmentUrl,
   resolveAttachmentSource,
   type AttachmentAuthCtx,
@@ -179,6 +180,9 @@ export function AuthedAttachmentFile({
   auth: AttachmentAuthCtx | null;
 }) {
   const name = attachmentBasename(url);
+  // M2 task 5 — a voice note gets a 🎵 icon; every other non-image stays 📎
+  // (matches `docs-shared.ts` treeIconFor precedent).
+  const icon = isAudioAttachmentUrl(url) ? '🎵' : '📎';
   const [busy, setBusy] = useState(false);
   const [failed, setFailed] = useState(false);
 
@@ -264,7 +268,7 @@ export function AuthedAttachmentFile({
       style={({ pressed }) => [styles.fileChip, pressed && styles.fileChipPressed]}
     >
       <Text style={styles.fileChipText} numberOfLines={1}>
-        📎 {failed ? `${name} — couldn't open` : busy ? `${name}…` : name}
+        {icon} {failed ? `${name} — couldn't open` : busy ? `${name}…` : name}
       </Text>
     </Pressable>
   );

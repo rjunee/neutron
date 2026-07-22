@@ -251,6 +251,78 @@ describe('build-live-agent-turn — attachment threading', () => {
     expect(retryPrompt).not.toContain(RETRY_TURN_VALUE)
   })
 
+  // ── M2 task 5 — audio voice-note transcript injection ──────────────────────
+  const AUDIO_URL = '/api/app/upload/u-1/beefbeefbeefbeef.wav'
+  const AUDIO_PATH = '/home/owner/chat-attachments/u-1/beefbeefbeefbeef.wav'
+
+  test('(h) an audio attachment with a transcript embeds the transcript text in the prompt', async () => {
+    const specs: AgentSpec[] = []
+    const sent: ChatOutbound[] = []
+    const run = buildLiveAgentTurn({
+      substrate: makeStubSubstrate(specs),
+      personaLoader: { async load() { return '' } },
+      resolveAttachment: (url) =>
+        url === AUDIO_URL
+          ? { path: AUDIO_PATH, content_type: 'audio/mp4', transcript: 'buy milk tomorrow' }
+          : null,
+      buttonStore: store,
+      project_slug: 'alice',
+      owner_home: tmp,
+      model: 'test-model',
+      now: () => now,
+    })
+    await run(makeTurn(sent, 'what did I say?', [AUDIO_URL]))
+    const prompt = specs[0]!.prompt
+    expect(prompt).toContain('<user_attachments>')
+    expect(prompt).toContain(AUDIO_PATH)
+    expect(prompt).toContain('voice note')
+    expect(prompt).toContain('buy milk tomorrow')
+  })
+
+  test('(i) a keyless audio attachment (transcript null) emits the set-OPENAI_API_KEY note', async () => {
+    const specs: AgentSpec[] = []
+    const sent: ChatOutbound[] = []
+    const run = buildLiveAgentTurn({
+      substrate: makeStubSubstrate(specs),
+      personaLoader: { async load() { return '' } },
+      resolveAttachment: (url) =>
+        url === AUDIO_URL ? { path: AUDIO_PATH, content_type: 'audio/mp4', transcript: null } : null,
+      buttonStore: store,
+      project_slug: 'alice',
+      owner_home: tmp,
+      model: 'test-model',
+      now: () => now,
+    })
+    await run(makeTurn(sent, 'listen to this', [AUDIO_URL]))
+    const prompt = specs[0]!.prompt
+    expect(prompt).toContain(AUDIO_PATH)
+    expect(prompt).toContain('transcription unavailable — set OPENAI_API_KEY')
+  })
+
+  test('(j) a very long transcript is truncated with a marker', async () => {
+    const specs: AgentSpec[] = []
+    const sent: ChatOutbound[] = []
+    const longText = 'x'.repeat(5000)
+    const run = buildLiveAgentTurn({
+      substrate: makeStubSubstrate(specs),
+      personaLoader: { async load() { return '' } },
+      resolveAttachment: (url) =>
+        url === AUDIO_URL
+          ? { path: AUDIO_PATH, content_type: 'audio/mp4', transcript: longText }
+          : null,
+      buttonStore: store,
+      project_slug: 'alice',
+      owner_home: tmp,
+      model: 'test-model',
+      now: () => now,
+    })
+    await run(makeTurn(sent, 'summarize', [AUDIO_URL]))
+    const prompt = specs[0]!.prompt
+    expect(prompt).toContain('[transcript truncated]')
+    // The full 5000-char run is NOT present verbatim (it was capped at 4000).
+    expect(prompt).not.toContain(longText)
+  })
+
   test('(g) a Retry on a turn that had NO attachments injects no attachment block', async () => {
     const specs: AgentSpec[] = []
     const sent: ChatOutbound[] = []

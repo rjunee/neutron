@@ -34,6 +34,19 @@ export function isImageAttachmentUrl(url: string): boolean {
   return IMAGE_EXT.test(url)
 }
 
+const AUDIO_EXT = /\.(mp3|m4a|wav)(\?|#|$)/i
+
+/**
+ * True when an attachment URL points at an AUDIO voice note (by `data:audio/`
+ * prefix or an audio file extension). The non-image chip renderer uses this to
+ * show a 🎵 icon instead of the generic 📎, so a voice note reads as one at a
+ * glance (M2 task 5).
+ */
+export function isAudioAttachmentUrl(url: string): boolean {
+  if (/^data:audio\//i.test(url)) return true
+  return AUDIO_EXT.test(url)
+}
+
 /**
  * Strip the stray leading/trailing NEWLINES that make a one-line bubble render
  * ~2x tall. Both bubble paths preserve newlines — the user `<p class="car-text">`

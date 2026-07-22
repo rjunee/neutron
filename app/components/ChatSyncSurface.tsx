@@ -230,6 +230,15 @@ export function ChatSyncSurface({
           'image/gif',
           'image/webp',
           'application/pdf',
+          // M2 task 5 — audio voice notes. iOS reports the `x-` forms, so list
+          // both canonical + alias MIMEs (the server canonicalizes on sniff).
+          'audio/mpeg',
+          'audio/mp3',
+          'audio/mp4',
+          'audio/m4a',
+          'audio/x-m4a',
+          'audio/wav',
+          'audio/x-wav',
           'application/zip',
         ],
         multiple: false,

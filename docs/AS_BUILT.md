@@ -4840,3 +4840,48 @@ below.
   follow-up iteration on the corrected mechanism.
 - Verified: `bunx tsc --noEmit` exit 0; `gateway/__tests__/status-command-wiring.test.ts`
   9/0.
+
+## M2 P0 parity — input modalities task 5: voice notes (audio upload + Whisper ASR) (2026-07-22)
+
+Scope: `IMPLEMENTATION_PLAN.md` task 5. Audio voice notes (MP3/M4A/WAV) upload on
+the SAME chat surface as images + PDF, transcribed at upload-complete by a new
+OpenAI-compatible Whisper client, with the transcript injected into the dispatched
+prompt AND appended to the scribe text (voice → text → gbrain parity). NO FEATURE
+FLAGS — transcription is gated only by `OPENAI_API_KEY` presence (credential config).
+
+- **Whisper client.** New `gateway/transcription/openai-transcription.ts` —
+  `createOpenAiTranscriptionClient` POSTs multipart `{base}/v1/audio/transcriptions`
+  (default base `https://api.openai.com`, model `whisper-1`, injectable `fetch_impl` +
+  `timeout_ms`). Typed `TranscribeResult` with an error taxonomy
+  (`http_error`/`network_error`/`timeout`/`bad_response`); NEVER throws, no logging
+  inside the client, no retries (v1). `audioFilenameFor` maps the canonical MIME to a
+  Whisper-recognized filename extension (`voice.mp3`/`voice.m4a`/`voice.wav`).
+- **Upload surface.** `gateway/http/app-upload-surface.ts` — widened
+  `CHAT_UPLOAD_MIME_WHITELIST` / `EXT_FROM_MIME` / `URL_PATH_RE` ext-group /
+  `mimeFromExt` to audio (`.txt` DELIBERATELY excluded from the GET ext-group so the
+  transcript sidecar is never servable). New optional `transcribeAudio` seam;
+  handleUpload transcribes an audio blob and writes a content-addressed `<hash>.txt`
+  sidecar (atomic tmp+rename, idempotent — sidecar-exists ⇒ the API is NOT re-called;
+  ASR failure NEVER fails the upload). `resolveChatAttachmentLocalPath` widened to
+  return `transcript` for audio (sidecar read; null when absent), field omitted for
+  non-audio.
+- **Turn injection.** `gateway/wiring/build-live-agent-turn.ts` `buildAttachmentsFragment`
+  embeds an audio attachment's transcript inline (capped 4000 chars with a truncation
+  marker); keyless/failed ASR → the graceful "transcription unavailable — set
+  OPENAI_API_KEY" note. Splice sites + `turn.user_text` untouched.
+- **Scribe threading.** `open/wiring/app-ws.ts` — new `attachmentTranscript` deps seam;
+  the receiver appends resolved transcripts to the `scribeOnUserTurn` text only
+  (`user_text` stays unmutated). Composer wires it over `resolveChatAttachmentLocalPath`;
+  `open/composer.ts` builds the `transcribeAudio` seam from `OPENAI_API_KEY` (keyless ⇒
+  no seam, audio still uploads without a transcript).
+- **Clients.** Web accept attr + `ACCEPTED_ATTACHMENT_TYPES` (+ alias forms) + 🎵 chip
+  (`message-adapter.ts` `isAudioAttachmentUrl`); native Expo picker mime array +
+  `mimeToExt` audio cases + 🎵 chip (`attachment-url.ts` predicate).
+- Verified: `bunx tsc --noEmit` exit 0. Tests:
+  `gateway/transcription/__tests__/openai-transcription.test.ts` 7/0;
+  `gateway/__tests__/app-upload-surface.test.ts` 30/0 (incl. artifact-on-disk sidecar +
+  idempotency call-count + keyless-no-sidecar + `.txt`-unreachable);
+  `gateway/wiring/__tests__/build-live-agent-turn-attachments.test.ts` 11/0;
+  `open/__tests__/open-wiring-app-ws.test.ts` 20/0 (scribe transcript threading);
+  `app/__tests__/upload-client.test.ts` 12/0;
+  `landing/chat-react/__tests__/message-adapter.test.ts` 12/0.

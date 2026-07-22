@@ -266,6 +266,7 @@ import {
   createAppUploadSurface,
   resolveChatAttachmentLocalPath,
 } from '@neutronai/gateway/http/app-upload-surface.ts'
+import { createOpenAiTranscriptionClient } from '@neutronai/gateway/transcription/openai-transcription.ts'
 import { createAppDiagnosticsSurface } from '@neutronai/gateway/http/app-diagnostics-surface.ts'
 import { composeDiagnostics } from '@neutronai/gateway/diagnostics/diagnostics-report.ts'
 import { buildInstanceDiagnosticsSources } from '@neutronai/gateway/diagnostics/instance-sources.ts'
@@ -2208,10 +2209,42 @@ export function buildOpenGraphComposer(
     // controls 404. `new TaskStore(db)` reads the SAME canonical project task
     // data the agent's `cores/free/tasks` backend writes. Same owner auth.
     const appTasksSurface = createAppTasksSurface({ store: new TaskStore(db), auth: appOwnerAuth })
+    // M2 task 5 — voice-note ASR. BYO `OPENAI_API_KEY` — the SAME single env
+    // var `resolveOpenOpenAiPool` (:474) reads; its presence turns transcription
+    // ON (credential config, NOT a feature flag) and works regardless of which
+    // provider drives the conversation. Keyless ⇒ no seam is passed and audio
+    // still uploads, just without a transcript.
+    const openaiKey = (env['OPENAI_API_KEY'] ?? '').trim()
+    const transcriptionClient =
+      openaiKey.length > 0 ? createOpenAiTranscriptionClient({ api_key: openaiKey }) : null
     const appUploadSurface = createAppUploadSurface({
       auth: appOwnerAuth,
       project_slug,
       owner_home,
+      ...(transcriptionClient !== null
+        ? {
+            transcribeAudio: async (i: {
+              bytes: Uint8Array
+              content_type: string
+              hash: string
+            }): Promise<string | null> => {
+              const r = await transcriptionClient.transcribe({
+                bytes: i.bytes,
+                content_type: i.content_type,
+              })
+              if (!r.ok) {
+                log.warn('voice_transcription_failed', {
+                  code: r.code,
+                  ...(r.status !== undefined ? { status: r.status } : {}),
+                  hash: i.hash,
+                })
+                return null
+              }
+              const t = r.text.trim()
+              return t.length > 0 ? t : null
+            },
+          }
+        : {}),
     })
 
     // O5 (world-class-refactor) — read-only diagnostics surface. Composes
@@ -3458,6 +3491,13 @@ export function buildOpenGraphComposer(
       appWsRegistry,
       appWsChatTurn,
       scribeOnUserTurn,
+      // M2 task 5 — resolve a voice note's transcript for the SCRIBE text (voice
+      // → text → gbrain parity). The resolver sets `transcript` only for audio,
+      // so no extra type check is needed here.
+      attachmentTranscript: (url: string): string | null => {
+        const r = resolveChatAttachmentLocalPath(owner_home, url)
+        return r === null ? null : (r.transcript ?? null)
+      },
       chatCommandFilter,
       appOwnerAuth,
       appWsToken,

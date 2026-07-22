@@ -35,7 +35,7 @@ import type { NeutronChatController } from './controller.ts'
 import type { BootstrapConfig, ProjectTab } from './config.ts'
 import type { AttachmentDraft } from './useAttachmentDraft.ts'
 import { fetchAttachmentObjectUrl, isAuthedAttachmentUrl, importHistoryZip, isExportZip } from './uploads.ts'
-import { isImageAttachmentUrl } from './message-adapter.ts'
+import { isAudioAttachmentUrl, isImageAttachmentUrl } from './message-adapter.ts'
 
 type FetchImpl = (input: string, init?: RequestInit) => Promise<Response>
 
@@ -120,13 +120,15 @@ function AttachmentImage({ src }: { src: string }): React.JSX.Element {
     }
   }, [src, needsAuth, uploads])
 
-  // Non-image attachment (PDF, …) → a downloadable file chip, never an <img>.
+  // Non-image attachment (PDF, voice note, …) → a downloadable file chip, never
+  // an <img>. A voice note gets a 🎵 icon (task 5); everything else stays 📎.
   if (!isImage) {
     const name = attachmentBasename(src)
+    const icon = isAudioAttachmentUrl(src) ? '🎵' : '📎'
     const href = needsAuth ? objUrl : src
-    if (needsAuth && failed) return <span className="car-attach-error">📎 {name} unavailable</span>
+    if (needsAuth && failed) return <span className="car-attach-error">{icon} {name} unavailable</span>
     if (needsAuth && href === null) {
-      return <span className="car-attach-loading">📎 {name}…</span>
+      return <span className="car-attach-loading">{icon} {name}…</span>
     }
     return (
       <a
@@ -136,7 +138,7 @@ function AttachmentImage({ src }: { src: string }): React.JSX.Element {
         target="_blank"
         rel="noreferrer"
       >
-        📎 {name}
+        {icon} {name}
       </a>
     )
   }
@@ -1409,8 +1411,8 @@ function Composer({
           type="file"
           accept={
             importActive
-              ? 'image/png,image/jpeg,image/gif,image/webp,application/pdf,.pdf,application/zip,.zip'
-              : 'image/png,image/jpeg,image/gif,image/webp,application/pdf,.pdf'
+              ? 'image/png,image/jpeg,image/gif,image/webp,application/pdf,.pdf,audio/mpeg,audio/mp4,audio/wav,.mp3,.m4a,.wav,application/zip,.zip'
+              : 'image/png,image/jpeg,image/gif,image/webp,application/pdf,.pdf,audio/mpeg,audio/mp4,audio/wav,.mp3,.m4a,.wav'
           }
           multiple
           hidden

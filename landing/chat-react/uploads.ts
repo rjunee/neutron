@@ -33,14 +33,27 @@ import {
 export const MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024
 
 /** Mirrors the server's chat-upload allow-list
- *  (`CHAT_UPLOAD_MIME_WHITELIST`): raster images + PDF documents. The server
- *  re-sniffs magic bytes regardless; this only avoids a doomed round-trip. */
+ *  (`CHAT_UPLOAD_MIME_WHITELIST`): raster images + PDF documents + audio voice
+ *  notes (MP3/M4A/WAV, task 5). The server re-sniffs magic bytes and
+ *  canonicalizes declared MIMEs via `MIME_ALIASES` (`binary-types.ts`), so we
+ *  ALSO list the browser-reported alias forms (`audio/mp3`, `audio/x-m4a`,
+ *  `audio/m4a`, `audio/x-wav`, `audio/wave`) here — the pre-flight must not
+ *  reject a type the server would happily canonicalize + accept. This only
+ *  avoids a doomed round-trip; the server remains authoritative. */
 export const ACCEPTED_ATTACHMENT_TYPES: readonly string[] = [
   'image/png',
   'image/jpeg',
   'image/gif',
   'image/webp',
   'application/pdf',
+  'audio/mpeg',
+  'audio/mp4',
+  'audio/wav',
+  'audio/mp3',
+  'audio/x-m4a',
+  'audio/m4a',
+  'audio/x-wav',
+  'audio/wave',
 ]
 
 /** The shipped attachment upload/serve endpoint prefix. */
@@ -241,7 +254,7 @@ export async function uploadAttachment(file: File, opts: UploadOptions): Promise
   if (file.type.length > 0 && !ACCEPTED_ATTACHMENT_TYPES.includes(file.type)) {
     throw new AttachmentUploadError(
       'unsupported_type',
-      `${file.name} is ${file.type} — only PNG, JPEG, GIF, WEBP images and PDF documents are supported.`,
+      `${file.name} is ${file.type} — only PNG, JPEG, GIF, WEBP images, PDF documents, and MP3/M4A/WAV voice notes are supported.`,
     )
   }
   const endpoint = opts.endpoint ?? UPLOAD_ENDPOINT

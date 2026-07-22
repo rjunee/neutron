@@ -270,6 +270,15 @@ export interface WireAppWsDeps {
   appWsChatTurn: ((turn: LiveAgentTurnRequest) => Promise<LiveAgentTurnResult>) | null
   /** The entity-scribe user-turn hook (undefined on an LLM-less box). */
   scribeOnUserTurn: ((input: UserTurnInput) => void) | undefined
+  /**
+   * M2 task 5 — resolve an attachment upload URL to its voice-note transcript
+   * via the audio `<hash>.txt` sidecar. Returns the transcript text, `null` when
+   * there is none (non-audio, keyless, or failed ASR), and the seam is
+   * `undefined` on a box with no resolver (LLM-less). Used ONLY to enrich the
+   * SCRIBE text (voice → text → gbrain parity) — the turn's `user_text` stays
+   * unmutated (the prompt fragment already injects the transcript separately).
+   */
+  attachmentTranscript?: (url: string) => string | null
   /** The chained chat-command filter (/note, /remind, /skills, …). */
   chatCommandFilter: ChatCommandFilter
   /** The single-owner localhost-trust app-ws auth resolver (Path A). */
@@ -361,6 +370,7 @@ export function wireAppWs(ctx: OpenWiringContext, deps: WireAppWsDeps): WiredApp
     appWsRegistry,
     appWsChatTurn,
     scribeOnUserTurn,
+    attachmentTranscript,
     chatCommandFilter,
     appOwnerAuth,
     appWsToken,
@@ -867,11 +877,33 @@ export function wireAppWs(ctx: OpenWiringContext, deps: WireAppWsDeps): WiredApp
       // LLM-less boxes (no extractor) → this no-ops, chat path unaffected.
       if (scribeOnUserTurn !== undefined) {
         try {
+          // M2 task 5 — voice → text → gbrain parity. The prompt fragment
+          // injects a voice-note transcript into the DISPATCH, but the scribe
+          // path only sees `text` (the typed text or the attachment placeholder)
+          // — so a voice note would never reach entity/memory extraction. Resolve
+          // each attachment's transcript via the sidecar seam and append it to
+          // the SCRIBE text only; the turn's `user_text` (above) stays unmutated.
+          let scribeText = userText
+          if (attachments.length > 0 && attachmentTranscript !== undefined) {
+            const transcripts: string[] = []
+            for (const url of attachments) {
+              let t: string | null = null
+              try {
+                t = attachmentTranscript(url)
+              } catch {
+                t = null
+              }
+              if (typeof t === 'string' && t.trim().length > 0) transcripts.push(t.trim())
+            }
+            if (transcripts.length > 0) {
+              scribeText = `${userText}\n\n[voice note transcript]\n${transcripts.join('\n---\n')}`
+            }
+          }
           scribeOnUserTurn({
             owner_slug: project_slug,
             user_id: event.user.channel_user_id,
             topic_id: turnTopicId,
-            text: userText,
+            text: scribeText,
             observed_at: event.received_at,
             // Owner-native web-chat turn → author #0 (connect-spec §4.1).
             author: { id: 'owner', display: 'owner' },

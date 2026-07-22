@@ -78,6 +78,21 @@ export function isImageAttachmentUrl(uri: string): boolean {
   return IMAGE_EXT.test(uri);
 }
 
+const AUDIO_EXT = /\.(mp3|m4a|wav)(\?|#|$)/i;
+
+/**
+ * True when an attachment URL points at an AUDIO voice note (by `data:audio/`
+ * prefix or an audio file extension). Mirrors the web client's
+ * `isAudioAttachmentUrl` (`landing/chat-react/message-adapter.ts`) — kept
+ * per-client because `landing` and `app` are separate packages. The mobile
+ * file-chip renderer ({@link AuthedAttachmentFile}) uses this to show a 🎵 icon
+ * instead of the generic 📎 for a voice note (M2 task 5).
+ */
+export function isAudioAttachmentUrl(uri: string): boolean {
+  if (/^data:audio\//i.test(uri)) return true;
+  return AUDIO_EXT.test(uri);
+}
+
 /**
  * Basename of an attachment URL (strips the path + any query/hash), for the
  * non-image file chip's display + open affordance. Falls back to 'attachment'.

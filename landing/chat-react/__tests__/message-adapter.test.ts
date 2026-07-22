@@ -1,7 +1,12 @@
 import { describe, expect, it } from 'bun:test'
 
 import type { RenderMessage } from '../controller.ts'
-import { absolutize, normalizeBody, toThreadMessage } from '../message-adapter.ts'
+import {
+  absolutize,
+  isAudioAttachmentUrl,
+  normalizeBody,
+  toThreadMessage,
+} from '../message-adapter.ts'
 
 function msg(over: Partial<RenderMessage> = {}): RenderMessage {
   return {
@@ -108,6 +113,23 @@ describe('toThreadMessage', () => {
     const t = toThreadMessage(msg({ role: 'user', text: '\n \n' }))
     // whitespace-only trims to '' → no text part is pushed (empty content fallback)
     expect(t.content).toEqual([{ type: 'text', text: '' }])
+  })
+})
+
+describe('isAudioAttachmentUrl (M2 task 5)', () => {
+  const HEX = 'a'.repeat(64)
+  it('is true for audio upload URLs (mp3/m4a/wav) + data:audio', () => {
+    expect(isAudioAttachmentUrl(`/api/app/upload/u/${HEX}.m4a`)).toBe(true)
+    expect(isAudioAttachmentUrl(`/api/app/upload/u/${HEX}.mp3`)).toBe(true)
+    expect(isAudioAttachmentUrl(`/api/app/upload/u/${HEX}.wav`)).toBe(true)
+    expect(isAudioAttachmentUrl('data:audio/mp4;base64,AAAA')).toBe(true)
+    // Query/hash suffix still matches.
+    expect(isAudioAttachmentUrl(`/api/app/upload/u/${HEX}.wav?x=1`)).toBe(true)
+  })
+  it('is false for non-audio URLs', () => {
+    expect(isAudioAttachmentUrl(`/api/app/upload/u/${HEX}.pdf`)).toBe(false)
+    expect(isAudioAttachmentUrl(`/api/app/upload/u/${HEX}.png`)).toBe(false)
+    expect(isAudioAttachmentUrl('data:image/png;base64,AAAA')).toBe(false)
   })
 })
 
