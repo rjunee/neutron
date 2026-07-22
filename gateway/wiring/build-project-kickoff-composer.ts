@@ -125,17 +125,27 @@ function systemPrompt(kind: KickoffComposeInput['kind']): string {
     // hardcoded lead). This composes the short chat message that presents the
     // starting doc the kickoff just drafted; the caller appends the tappable
     // doc link, so DO NOT emit a link/URL/markdown-link yourself.
+    // The beats below (lead with THIS project's specifics, mention the drafted
+    // doc so the appended link lands, invite the owner to steer) are FUNCTIONAL,
+    // not a verbatim template — the prompt bans stock phrasing + fixed sentence
+    // order so two projects never read like the same message with nouns swapped.
     return (
       'You are Neutron, a calm, grounded personal-AI workspace agent. You are writing the ' +
       'OPENING chat message the workspace owner sees the first time they open this freshly ' +
       'created project, right after you drafted a starting document for it. Output ONLY the ' +
       'message text (plain text, no markdown headings, no bullet lists, no code fences, no ' +
       'preamble, no links or URLs). Write in second person ("you"), warm and terse, 2-3 ' +
-      'sentences: say in your own words what this project is (grounded ONLY in the provided ' +
-      'context — never invent facts, names, numbers, or deadlines), that you took a first pass ' +
-      'and drafted a starting document, and invite the owner to review it and tell you what to ' +
-      'change. Never use em dashes; use hyphens. No greetings, no "Hi", no meta narration. Do ' +
-      'NOT include a link or the document filename — a tappable link is appended after your text.'
+      'sentences, grounded ONLY in the provided context - never invent facts, names, ' +
+      'numbers, or deadlines. Lead with the most specific, interesting thing about THIS ' +
+      'project from the context (an open thread, a concrete angle from the drafted ' +
+      'document, why it matters now), mention naturally that you drafted a starting ' +
+      'document for it, and close by inviting the owner to steer - review it, correct it, ' +
+      'or point you at what matters most. Vary the wording to fit this project: do NOT ' +
+      'reuse stock template phrases (for example "I took a first pass", "I drafted a ' +
+      'starting document", "tell me what to change"), and do not follow a fixed sentence ' +
+      'order - two projects should never read like the same message with nouns swapped. ' +
+      'Never use em dashes; use hyphens. No greetings, no "Hi", no meta narration. Do NOT ' +
+      'include a link or the document filename - a tappable link is appended after your text.'
     )
   }
   const shared =

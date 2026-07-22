@@ -29,6 +29,7 @@ import {
 } from '../build-project-kickoff.ts'
 import {
   buildProjectKickoffComposer,
+  OPENING_MESSAGE_MAX_TOKENS,
   type ProjectKickoffComposer,
 } from '../build-project-kickoff-composer.ts'
 import type { AnthropicMessagesClient } from '@neutronai/onboarding/interview/anthropic-client.ts'
@@ -457,4 +458,88 @@ test('#378 SHARED session (pre-fix behaviour) BLEEDS — project 2/3 echo projec
   expect(results[1]!.doc).toContain('Amascence')
   expect(results[2]!.doc).toContain('Amascence')
   expect(results[2]!.doc).toContain('DTC ops')
+})
+
+// ---------------------------------------------------------------------------
+// Task 5 — has_context-first work-signal gate + de-templated opening prompt.
+// The gate previously required import-derived signal (open threads / slices /
+// rationale AND topics); an owner-DESCRIBED work project whose rationale never
+// reaches `matched` had the materializer's own has_context=true yet failed the
+// gate and got a generic deterministic opening (2026-07-21 dogfood variance).
+// ---------------------------------------------------------------------------
+
+test('work project with has_context alone (owner-described, no import match) → draft-doc', async () => {
+  const home = ownerHome()
+  const composer = stubComposer('# Topline plan\n\nFirst concrete step.')
+  const kickoff = buildProjectKickoff({
+    owner_home: home,
+    owner_slug: 'acme',
+    composer,
+    now: () => NOW,
+    log: () => {},
+  })
+  // matched:null, zero slices, no summary, no open threads — ONLY has_context.
+  const res = await kickoff.composeKickoff(baseInput({ outcome: outcome({ has_context: true }) }))
+  expect(res).not.toBeNull()
+  expect(res!.action).toBe('draft-doc')
+  expect(existsSync(join(home, 'Projects', 'topline', 'docs', 'starting-plan.md'))).toBe(true)
+  expect(composer.kinds).toContain('draft_doc')
+  expect(composer.kinds).toContain('opening_message')
+})
+
+test('work project with rationale-only match and NO materializer outcome → draft-doc (OR loosening)', async () => {
+  const home = ownerHome()
+  const composer = stubComposer('# Topline plan\n\nFirst concrete step.')
+  const kickoff = buildProjectKickoff({
+    owner_home: home,
+    owner_slug: 'acme',
+    composer,
+    now: () => NOW,
+    log: () => {},
+  })
+  // outcome:null → has_context defaults false; rationale alone (no topics) now
+  // qualifies via the AND→OR fallback aligned with hasInterestSignal.
+  const res = await kickoff.composeKickoff(
+    baseInput({
+      outcome: null,
+      matched: {
+        name: 'Topline',
+        rationale: 'You discussed Topline at length in your imported history.',
+        suggested_topics: [],
+      },
+    }),
+  )
+  expect(res).not.toBeNull()
+  expect(res!.action).toBe('draft-doc')
+})
+
+test('opening_message prompt contract: no forced took-a-first-pass beat; demands per-project varied phrasing', async () => {
+  const captured: Array<{ system: string; max_tokens: number }> = []
+  const capturingClient: AnthropicMessagesClient = {
+    messages: {
+      async create(args) {
+        captured.push({ system: args.system ?? '', max_tokens: args.max_tokens })
+        return { content: [{ text: 'A grounded opener.' }] }
+      },
+    },
+  }
+  const composer = buildProjectKickoffComposer({ clientForProject: () => capturingClient })
+  const text = await composer({
+    kind: 'opening_message',
+    project_id: 'p1',
+    project_name: 'Topline',
+    doc_title: 'Topline - starting plan',
+    context_lines: ['Summary: pilot in flight'],
+  })
+  expect(text).toBe('A grounded opener.')
+  expect(captured.length).toBe(1)
+  const sys = captured[0]!.system
+  // The OLD mandatory beat is gone (assert the exact long phrase, NOT the bare
+  // substring 'took a first pass' which appears in the new banned-examples list).
+  expect(sys).not.toContain('that you took a first pass and drafted a starting document')
+  // Retained invariants + the vary-phrasing instruction + the appended-link note.
+  expect(sys).toContain('do NOT reuse stock template phrases')
+  expect(sys).toContain('a tappable link is appended')
+  // The opening message rides the short-bubble budget, not the doc budget.
+  expect(captured[0]!.max_tokens).toBe(OPENING_MESSAGE_MAX_TOKENS)
 })
