@@ -2592,8 +2592,9 @@ export function buildOpenGraphComposer(
     // the static five. Never blocks a turn: generation is background fire-and-
     // forget, memoized in `phase_state`, fingerprint-gated for regeneration; the
     // guard renders the static default until the picks land / on LLM failure.
-    // `undefined` on an LLM-less box (suggester unwired) — the guard then keeps
-    // the byte-identical static behavior.
+    // `undefined` on an LLM-less box (suggester unwired) — the guard then renders
+    // the static `DEFINED_PERSONALITY_CHARACTERS` set (in the current `- name (why)`
+    // format; same NAME SET as before the suggester, not the bare pre-suggester list).
     const livePersonalityCoordinator =
       personalityCharacterSuggester !== undefined
         ? buildLivePersonalitySuggestionCoordinator({
@@ -3105,7 +3106,7 @@ export function buildOpenGraphComposer(
                 // fingerprint-gated Opus generation (never awaited here) and read
                 // back the memoized picks to render in THIS turn's step guard. Null
                 // until the picks land / on LLM failure → the guard keeps the static
-                // default (byte-identical pre-suggester behavior).
+                // default NAME SET (rendered in the current `- name (why)` format).
                 livePersonalityCoordinator?.maybeKickoff(user_id, st)
                 const guardCharacters =
                   livePersonalityCoordinator?.guardCharacters(st.phase_state) ?? null

@@ -375,8 +375,11 @@ export interface StepGuardOptions extends RequiredFieldsAuditOptions {
    * the guard should render at the PERSONALITY step. The composer passes the
    * MEMOIZED Opus-personalized picks (via the live-suggestion coordinator) once
    * the background suggester has landed; when absent the guard falls back to the
-   * STATIC `DEFINED_PERSONALITY_CHARACTERS`, so a turn is never blocked and the
-   * pre-suggester behavior is byte-identical. Kept in lock-step with
+   * STATIC `DEFINED_PERSONALITY_CHARACTERS`, so a turn is never blocked. (The
+   * fallback renders the SAME `- name (why)` shape the live picks use — the guard's
+   * render format changed in this sprint for every caller, so this is NOT the bare
+   * `- name` pre-suggester output; only the NAME SET is unchanged when picks are
+   * absent.) Kept in lock-step with
    * `candidatePersonalityAnchorNames` so the deterministic capture recognises a
    * tap against whatever list was actually rendered.
    */

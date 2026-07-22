@@ -287,6 +287,50 @@ describe('maybeKickoff — settled personality + re-read guard', () => {
     await settle()
     expect(back.upserts.length).toBe(0)
   })
+
+  it('signals change DURING the in-flight call → stale picks discarded, NOT persisted under the old fingerprint (Argus r2 veto)', async () => {
+    const { suggester } = fakeSuggester({ suggestions: LLM_SUGGESTIONS, source: 'llm' })
+    // Kickoff conditions on SIGNAL_STATE. While the (slow) generate is in flight the
+    // owner adds a new interest, so the re-read row has DIFFERENT signals → a mismatched
+    // fingerprint. Personality is still unsettled, so ONLY the drift guard can stop the write.
+    const back = fakeStore({ phase: 'work_interview', phase_state: { ...SIGNAL_STATE }, last_advanced_at: 1 })
+    back.setOnGet({
+      phase: 'work_interview',
+      phase_state: { ...SIGNAL_STATE, non_work_interests: ['sailing'] },
+      last_advanced_at: 1,
+    })
+    const { fire, settle } = capturingFire()
+    const coord = buildLivePersonalitySuggestionCoordinator({
+      suggester,
+      stateStore: back.store,
+      owner_slug: 'acme',
+      seed: 'acme',
+      fireAndForget: fire,
+    })
+    coord.maybeKickoff('u1', { phase: 'work_interview' as never, phase_state: { ...SIGNAL_STATE } })
+    await settle()
+    // Discarded: no upsert means guardCharacters never serves picks under the stale fp,
+    // and the next turn regenerates against the current signals.
+    expect(back.upserts.length).toBe(0)
+  })
+
+  it('signals UNCHANGED during the in-flight call → picks ARE persisted (drift guard does not over-reject)', async () => {
+    const { suggester } = fakeSuggester({ suggestions: LLM_SUGGESTIONS, source: 'llm' })
+    // Re-read returns the SAME signals (fingerprint matches) → the drift guard must NOT
+    // block a legitimate write.
+    const back = fakeStore({ phase: 'work_interview', phase_state: { ...SIGNAL_STATE }, last_advanced_at: 1 })
+    const { fire, settle } = capturingFire()
+    const coord = buildLivePersonalitySuggestionCoordinator({
+      suggester,
+      stateStore: back.store,
+      owner_slug: 'acme',
+      seed: 'acme',
+      fireAndForget: fire,
+    })
+    coord.maybeKickoff('u1', { phase: 'work_interview' as never, phase_state: { ...SIGNAL_STATE } })
+    await settle()
+    expect(back.upserts.length).toBe(1)
+  })
 })
 
 describe('maybeKickoff — never throws', () => {

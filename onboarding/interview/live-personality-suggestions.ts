@@ -287,6 +287,21 @@ export function buildLivePersonalitySuggestionCoordinator(
         const fresh = await stateStore.get(owner_slug, user_id)
         if (fresh === null) return
         if (isSettledString(fresh.phase_state['agent_personality'])) return
+        // FINGERPRINT-DRIFT guard (Argus r2 veto): the owner may have supplied a new
+        // project/interest (or their name) while the up-to-45 s call was in flight, so
+        // these picks were conditioned on now-stale signals. Persisting them under the
+        // OLD `fp` would freeze a stale list AND `guardCharacters` would serve it until
+        // the next turn's regen. Recompute the fingerprint from the FRESH state and
+        // discard on mismatch — the `.finally` clears `pending`, so the next turn
+        // regenerates against the current signals.
+        const freshFp = signalsFingerprint(computeSuggesterSignals(fresh.phase_state))
+        if (freshFp !== fp) {
+          log('info', 'live-personality: signals changed mid-generation, discarding stale picks', {
+            owner_slug,
+            user_id,
+          })
+          return
+        }
         await stateStore.upsert({
           owner_slug,
           user_id,

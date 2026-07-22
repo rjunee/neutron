@@ -111,8 +111,11 @@ export function stablePatternSlug(cluster: ReadonlyArray<CorrectionEntry>): stri
 /**
  * Cluster corrections that express the SAME lesson. Sort by `ts` ASCENDING (oldest
  * first) so cluster SEEDS are stable as the log grows — a later-arriving correction
- * joins an existing cluster rather than reseeding it, which keeps the promoted
- * page's slug (derived from the seed's id) stable across passes. Greedy: each entry
+ * joins an existing cluster rather than reseeding it, which keeps a cluster's
+ * membership stable across passes. (The promoted page's SLUG is derived by
+ * `stablePatternSlug` from the cluster's majority-`right` vocabulary digest, NOT
+ * from any member's id — see that function; stable seeding still matters so the
+ * same members cluster together pass-to-pass.) Greedy: each entry
  * joins the FIRST cluster whose SEED (oldest member) is `>= threshold` similar,
  * else it seeds a new cluster.
  */

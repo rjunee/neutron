@@ -335,8 +335,10 @@ export async function runReflectPass(deps: ReflectPassDeps): Promise<ReflectRepo
  * Q2 (overturn 2, core-memory tier) — cluster recurring owner corrections and
  * promote each ≥N-occurrence cluster to a kind-`concept` entity page through the
  * pass's own `writeEntity` + `syncHook` (→ GBrain + `entities/INDEX.md`). No LLM.
- * Idempotent by construction: the promoted page's slug is derived from the cluster's
- * OLDEST correction id, timeline rows dedupe on `(ts,source,body)`, and a
+ * Idempotent by construction: the promoted page's slug is derived by
+ * `stablePatternSlug` from the cluster's majority-`right` vocabulary digest
+ * (window-invariant — survives occurrences ageing out of the scan window), timeline
+ * rows dedupe on `(ts,source,body)`, and a
  * byte-identical re-render is `changed:false` (no hook fire) — so re-promoting the
  * same cluster across passes is a structural no-op. Best-effort per cluster; the
  * step NEVER throws out of the pass.
