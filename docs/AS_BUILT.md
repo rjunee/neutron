@@ -4667,3 +4667,23 @@ now reach the agent for the first time.
 - Suites: scoped gateway + wiring + open + client tests green; `tsc -p tsconfig.json` clean.
 - OUT OF SCOPE (later tasks): voice-note transcription (task 2), `/status` + `/reset`
   chat commands (task 3), office formats beyond PDF, SVG, the import-ZIP path.
+
+### Round-2 hardening (Argus review, 2026-07-21)
+
+- **`landing/chat-react/ChatApp.tsx` — `attachmentBasename` no longer throws on a
+  poisoned URL.** It runs during render for every non-image chip; a malformed
+  percent-escape (`report%ZZ.pdf`) made `decodeURIComponent` throw `URIError`,
+  tripping `ChatErrorBoundary` and blanking the whole chat view — and, since the
+  URL persists in history, it recurred on every reload. Now `try/catch` falls back
+  to the raw segment. Exported + unit-tested (`__tests__/attachment-basename.test.ts`).
+- **`gateway/http/app-upload-surface.ts` — `resolveChatAttachmentLocalPath` hardened.**
+  `URL_PATH_RE`'s user_id class matched a dot-only segment (`.` / `..`); now rejected
+  outright (`/^\.+$/`) rather than relying on the hex64-filename bound. Added an
+  `existsSync` gate so a resolvable-but-missing blob path is never injected into the
+  agent prompt. New units cover both.
+- **`gateway/wiring/build-live-agent-turn.ts` — Retry re-injects the ORIGINAL
+  attachments.** A freeze-timeout Retry (`RETRY_TURN_VALUE`) recovered only
+  `lastUserText`, silently dropping the doc/image. New `lastAttachments` map recorded
+  alongside `lastUserText`; the recovered turn re-binds `attachments` too. Tests (f)/(g)
+  in `build-live-agent-turn-attachments.test.ts` prove the retried prompt re-embeds the
+  path (and injects no block when the original had none).

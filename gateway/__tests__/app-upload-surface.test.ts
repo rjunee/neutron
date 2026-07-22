@@ -12,7 +12,7 @@
  * BEFORE the client lands on a busted production deploy.
  */
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -381,36 +381,67 @@ describe('app-upload gateway surface — POST /api/app/upload', () => {
 
 describe('resolveChatAttachmentLocalPath', () => {
   const HASH = 'a'.repeat(64)
+  let home: string
+
+  // The resolver now does an on-disk existence check before returning a path
+  // (so a resolvable-but-missing blob never gets injected into the agent
+  // prompt), so each positive case seeds a real blob under owner_home.
+  const seedBlob = (user_id: string, hash: string, ext: string): string => {
+    const dir = join(home, 'chat-attachments', user_id)
+    mkdirSync(dir, { recursive: true })
+    const path = join(dir, `${hash}.${ext}`)
+    writeFileSync(path, 'blob')
+    return path
+  }
+
+  beforeEach(() => {
+    home = mkdtempSync(join(tmpdir(), 'neutron-resolve-'))
+  })
+  afterEach(() => {
+    rmSync(home, { recursive: true, force: true })
+  })
 
   it('maps a relative .pdf upload URL to the local blob path + MIME', () => {
-    const out = resolveChatAttachmentLocalPath('/home/o', `/api/app/upload/sam/${HASH}.pdf`)
-    expect(out).toEqual({
-      path: `/home/o/chat-attachments/sam/${HASH}.pdf`,
-      content_type: 'application/pdf',
-    })
+    const path = seedBlob('sam', HASH, 'pdf')
+    const out = resolveChatAttachmentLocalPath(home, `/api/app/upload/sam/${HASH}.pdf`)
+    expect(out).toEqual({ path, content_type: 'application/pdf' })
   })
 
   it('maps an image URL to image/png', () => {
-    const out = resolveChatAttachmentLocalPath('/home/o', `/api/app/upload/sam/${HASH}.png`)
-    expect(out).toEqual({
-      path: `/home/o/chat-attachments/sam/${HASH}.png`,
-      content_type: 'image/png',
-    })
+    const path = seedBlob('sam', HASH, 'png')
+    const out = resolveChatAttachmentLocalPath(home, `/api/app/upload/sam/${HASH}.png`)
+    expect(out).toEqual({ path, content_type: 'image/png' })
   })
 
   it('accepts an absolute URL (matches on the pathname only)', () => {
+    const path = seedBlob('sam', HASH, 'pdf')
     const out = resolveChatAttachmentLocalPath(
-      '/home/o',
+      home,
       `https://box.example/api/app/upload/sam/${HASH}.pdf`,
     )
     expect(out?.content_type).toBe('application/pdf')
-    expect(out?.path).toBe(`/home/o/chat-attachments/sam/${HASH}.pdf`)
+    expect(out?.path).toBe(path)
   })
 
   it('returns null for a malformed / non-matching URL (no fs syscall)', () => {
-    expect(resolveChatAttachmentLocalPath('/home/o', '/api/app/upload/sam/short.pdf')).toBeNull()
-    expect(resolveChatAttachmentLocalPath('/home/o', `/api/app/upload/sam/${HASH}.exe`)).toBeNull()
-    expect(resolveChatAttachmentLocalPath('/home/o', '/etc/passwd')).toBeNull()
-    expect(resolveChatAttachmentLocalPath('/home/o', '')).toBeNull()
+    expect(resolveChatAttachmentLocalPath(home, '/api/app/upload/sam/short.pdf')).toBeNull()
+    expect(resolveChatAttachmentLocalPath(home, `/api/app/upload/sam/${HASH}.exe`)).toBeNull()
+    expect(resolveChatAttachmentLocalPath(home, '/etc/passwd')).toBeNull()
+    expect(resolveChatAttachmentLocalPath(home, '')).toBeNull()
+  })
+
+  it('returns null for a resolvable URL whose blob is absent on disk (no dead path injected)', () => {
+    // Shape is valid + user_id is fine, but nothing was seeded → existsSync fails.
+    expect(resolveChatAttachmentLocalPath(home, `/api/app/upload/sam/${HASH}.pdf`)).toBeNull()
+  })
+
+  it('rejects a dot-only user_id segment (`.` / `..`) even when a blob exists there', () => {
+    // Prove the traversal is refused: seed a blob one level ABOVE chat-attachments/
+    // (where `..` would resolve) and confirm the resolver still returns null.
+    const traversalDir = join(home, 'chat-attachments')
+    mkdirSync(traversalDir, { recursive: true })
+    writeFileSync(join(home, `${HASH}.pdf`), 'blob') // sibling of chat-attachments/
+    expect(resolveChatAttachmentLocalPath(home, `/api/app/upload/../${HASH}.pdf`)).toBeNull()
+    expect(resolveChatAttachmentLocalPath(home, `/api/app/upload/./${HASH}.pdf`)).toBeNull()
   })
 })

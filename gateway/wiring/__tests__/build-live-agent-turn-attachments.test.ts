@@ -24,7 +24,7 @@ import type { ChatOutbound } from '@neutronai/landing/server.ts'
 import type { Event } from '@neutronai/runtime/events.ts'
 import type { AgentSpec, Substrate } from '@neutronai/runtime/substrate.ts'
 import type { SessionHandle } from '@neutronai/runtime/session-handle.ts'
-import { buildLiveAgentTurn } from '../build-live-agent-turn.ts'
+import { buildLiveAgentTurn, RETRY_TURN_VALUE } from '../build-live-agent-turn.ts'
 import type { LiveAgentTurnRequest } from '../../http/chat-bridge.ts'
 
 let tmp: string
@@ -222,5 +222,52 @@ describe('build-live-agent-turn — attachment threading', () => {
     await run(makeTurn(sent, 'here', [PDF_URL]))
     expect(specs.length).toBe(1)
     expect(specs[0]!.prompt).not.toContain('<user_attachments>')
+  })
+
+  test('(f) a freeze-timeout Retry re-injects the ORIGINAL attachments, not just the text', async () => {
+    const specs: AgentSpec[] = []
+    const sent: ChatOutbound[] = []
+    const run = buildLiveAgentTurn({
+      substrate: makeStubSubstrate(specs),
+      personaLoader: { async load() { return '' } },
+      resolveAttachment,
+      buttonStore: store,
+      project_slug: 'alice',
+      owner_home: tmp,
+      model: 'test-model',
+      now: () => now,
+    })
+    // Turn 1 — the real user turn carried a PDF; records lastUserText + lastAttachments.
+    await run(makeTurn(sent, 'summarize this doc', [PDF_URL]))
+    // Turn 2 — a Retry tap (RETRY_TURN_VALUE, no attachments of its own). The
+    // recovered turn must re-inject the ORIGINAL doc so the agent can still see it.
+    await run(makeTurn(sent, RETRY_TURN_VALUE))
+    expect(specs.length).toBe(2)
+    const retryPrompt = specs[1]!.prompt
+    expect(retryPrompt).toContain('<user_attachments>')
+    expect(retryPrompt).toContain(PDF_PATH)
+    // …and the recovered text is the real question, never the sentinel.
+    expect(retryPrompt).toContain('summarize this doc')
+    expect(retryPrompt).not.toContain(RETRY_TURN_VALUE)
+  })
+
+  test('(g) a Retry on a turn that had NO attachments injects no attachment block', async () => {
+    const specs: AgentSpec[] = []
+    const sent: ChatOutbound[] = []
+    const run = buildLiveAgentTurn({
+      substrate: makeStubSubstrate(specs),
+      personaLoader: { async load() { return '' } },
+      resolveAttachment,
+      buttonStore: store,
+      project_slug: 'alice',
+      owner_home: tmp,
+      model: 'test-model',
+      now: () => now,
+    })
+    await run(makeTurn(sent, 'plain question, no files'))
+    await run(makeTurn(sent, RETRY_TURN_VALUE))
+    expect(specs.length).toBe(2)
+    expect(specs[1]!.prompt).not.toContain('<user_attachments>')
+    expect(specs[1]!.prompt).toContain('plain question, no files')
   })
 })

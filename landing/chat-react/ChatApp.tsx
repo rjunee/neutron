@@ -56,11 +56,22 @@ interface UploadsCtx {
 const UploadsContext = createContext<UploadsCtx | null>(null)
 
 /** Basename of an attachment URL (strips the path + any query/hash), for the
- *  non-image file chip's display + download name. Falls back to 'attachment'. */
-function attachmentBasename(url: string): string {
+ *  non-image file chip's display + download name. Falls back to 'attachment'.
+ *  Exported for unit test of the malformed-percent-escape guard. */
+export function attachmentBasename(url: string): string {
   const withoutQuery = url.split(/[?#]/, 1)[0] ?? url
   const last = withoutQuery.split('/').pop() ?? ''
-  return last.length > 0 ? decodeURIComponent(last) : 'attachment'
+  if (last.length === 0) return 'attachment'
+  // A poisoned URL with a malformed percent-escape (e.g. `report%ZZ.pdf`)
+  // makes decodeURIComponent throw URIError. This runs during render, so an
+  // unguarded throw would trip the ChatErrorBoundary and blank the whole chat
+  // view — and, since the URL persists in history, it would recur on reload.
+  // Fall back to the raw (still-encoded) segment instead of crashing.
+  try {
+    return decodeURIComponent(last)
+  } catch {
+    return last
+  }
 }
 
 /**

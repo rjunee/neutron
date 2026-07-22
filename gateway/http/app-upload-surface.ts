@@ -397,7 +397,16 @@ export function resolveChatAttachmentLocalPath(
   const ext = match[3] ?? ''
   const content_type = mimeFromExt(ext)
   if (content_type === null || user_id.length === 0 || hash.length === 0) return null
+  // URL_PATH_RE's user_id class `[A-Za-z0-9._:-]+` matches a dot-only segment
+  // (`.` / `..`), which `join` would collapse into a parent-dir traversal. The
+  // filename is locked to `<hex64>.<ext>` so it stays inside owner_home (not
+  // exploitable today), but reject dot-only segments outright rather than rely
+  // on that bound.
+  if (/^\.+$/.test(user_id)) return null
   const path = join(owner_home, 'chat-attachments', user_id, `${hash}.${ext}`)
+  // Only hand a path to the agent prompt if the blob actually exists on disk;
+  // a resolvable-but-missing path would inject a dead file reference.
+  if (!existsSync(path)) return null
   return { path, content_type }
 }
 

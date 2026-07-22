@@ -659,6 +659,16 @@ export function buildLiveAgentTurn(
   const lastUserText = new Map<string, string>()
 
   /**
+   * Retry affordance, attachments companion — the last REAL turn's attachment
+   * upload URLs per (instance, topic) THIS process. Recorded alongside
+   * `lastUserText` on every real user turn; consulted on a `RETRY_TURN_VALUE`
+   * recovery so the retried turn re-injects the ORIGINAL attachments (the doc /
+   * image the user sent). Without this, a Retry after a freeze recovers only the
+   * text and silently drops the attachment, so the agent can no longer see it.
+   */
+  const lastAttachments = new Map<string, ReadonlyArray<string>>()
+
+  /**
    * Go-live race fix (2026-06-20) — per-(instance, topic) turn serialization.
    *
    * `contextSent.add(topicKey)` only runs AFTER a turn's dispatch settles, and
@@ -734,17 +744,31 @@ export function buildLiveAgentTurn(
     // gentle re-prompt if nothing was recorded (e.g. a restart cleared the map).
     if (turn.user_text === RETRY_TURN_VALUE) {
       const recovered = lastUserText.get(topicKey) ?? RETRY_FALLBACK_TEXT
+      const recoveredAttachments = lastAttachments.get(topicKey)
       moduleLog.info('retry_tap', {
         project: turn.project_slug,
         topic: turn.topic_id,
         recovered: recovered !== RETRY_FALLBACK_TEXT,
+        attachments: recoveredAttachments?.length ?? 0,
       })
-      turn = { ...turn, user_text: recovered }
+      // Re-inject the ORIGINAL attachments too, not just the text — a freeze +
+      // Retry on a turn that carried a doc/image must re-run WITH that doc/image.
+      // Only set the optional field when there ARE attachments (exactOptional).
+      turn =
+        recoveredAttachments !== undefined
+          ? { ...turn, user_text: recovered, attachments: recoveredAttachments }
+          : { ...turn, user_text: recovered }
     }
-    // Record the last real user message so a later Retry tap can recover it. Skip
-    // the synthetic seed turn (no real message) and an empty body.
+    // Record the last real user message + its attachments so a later Retry tap
+    // can recover both. Skip the synthetic seed turn (no real message) and an
+    // empty body.
     if (turn.seed_turn !== true && turn.user_text.length > 0) {
       lastUserText.set(topicKey, turn.user_text)
+      if (turn.attachments !== undefined && turn.attachments.length > 0) {
+        lastAttachments.set(topicKey, turn.attachments)
+      } else {
+        lastAttachments.delete(topicKey)
+      }
     }
     // Path 1 — is the owner still onboarding? Consulted once per turn so the
     // first-turn preamble, the upload affordance, and the post-turn scribe all
@@ -1040,8 +1064,9 @@ export function buildLiveAgentTurn(
     if (!isColdFirstTurn) {
       // Warm turn: the system prefix is already cached in the REPL's transcript;
       // re-ground by splicing the FRESH board + onboarding-context blocks before
-      // the user's message (onboarding context LAST so it's most salient; the
-      // attachment paths sit right before the user message they belong to).
+      // the user's message. The attachment fragment goes LAST — immediately
+      // before the user's message — so the resolved doc/image paths sit adjacent
+      // to the message they belong to (onboarding context precedes it).
       const warmPrefix = [
         workBoardFragment,
         nexusFragment,
