@@ -1192,7 +1192,10 @@
     padding: 8px 10px; line-height: 1;
   }
   .car-attach-btn:hover { border-color: var(--accent); }
-  .car-fatal { margin: 40px auto; max-width: 480px; text-align: center; color: var(--error-fg); padding: 20px; }
+  .car-fatal { margin: 40px auto; max-width: 480px; text-align: center; color: var(--error-fg); padding: 20px; display: flex; flex-direction: column; align-items: center; gap: 16px; }
+  .car-fatal-msg { color: var(--error-fg); }
+  .car-fatal-reload { padding: 8px 18px; border-radius: 8px; border: 1px solid var(--accent); background: var(--accent); color: #fff; font: inherit; cursor: pointer; }
+  .car-fatal-reload:hover { filter: brightness(1.05); }
   /* SEV1 chat-rail stability — recoverable fallback when the chat thread throws
      during render (assistant-ui index lookup on a project switch). Replaces the
      dead black screen with a centered card + Retry / Back to General / Reload. */

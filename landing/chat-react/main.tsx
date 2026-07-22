@@ -13,7 +13,7 @@
  */
 
 import { StrictMode } from 'react'
-import { createRoot } from 'react-dom/client'
+import { createRoot, type Root } from 'react-dom/client'
 import { WebChatSession, createWebStore } from '@neutronai/chat-core'
 
 import { ProjectShell } from './ProjectShell.tsx'
@@ -52,6 +52,146 @@ function renderError(rootEl: HTMLElement, message: string): void {
   wrap.className = 'car-fatal'
   wrap.textContent = message
   rootEl.appendChild(wrap)
+}
+
+// ── Root-level auto-recovery (#380) ─────────────────────────────────────────
+// A setState-after-unmount (a doc/history pane fetch that 503s and settles after
+// the pane is gone — DocumentsTab.tsx guards its own, but the class can arise
+// anywhere) surfaces in a real browser commit as React's teardown-phase
+// invariant "Tried to unmount a fiber that is already unmounted". That is thrown
+// from React's OWN commit/teardown phase, so it BYPASSES every error boundary
+// (the per-pane `PaneErrorBoundary` and the `ChatErrorBoundary` only catch
+// errors thrown during a child RENDER) and React unmounts the WHOLE root → the
+// blank screen Ryan keeps hitting. Per-continuation guards are whack-a-mole; the
+// CLASS fix is a root-level net: React 19.1 calls `onUncaughtError` for any error
+// no boundary caught, and from there we AUTO-REMOUNT the app. The controller +
+// OPFS store live OUTSIDE React, so a remount restores the transcript and session
+// with no data loss. A bounded policy caps recoveries so a genuinely fatal render
+// loop can't spin forever — beyond the cap we paint a visible error card with a
+// Reload button. A silent blank screen is impossible either way.
+
+const FATAL_MESSAGE =
+  'Neutron hit a problem it could not recover from. Reload to continue — your conversation is saved.'
+
+export interface RecoveryPolicy {
+  /** Record a crash NOW; 'remount' while under the cap in the rolling window,
+   *  'fatal' once the window is saturated. */
+  record(): 'remount' | 'fatal'
+}
+
+/**
+ * Bounded crash policy: allow up to `maxRecoveries` auto-remounts inside a
+ * rolling `windowMs` window, then give up (→ 'fatal'). Timestamps outside the
+ * window are pruned, so once the storm passes the budget refills. Pure + an
+ * injectable clock so it is fully unit-testable.
+ */
+export function createRecoveryPolicy(opts?: {
+  maxRecoveries?: number
+  windowMs?: number
+  now?: () => number
+}): RecoveryPolicy {
+  const maxRecoveries = opts?.maxRecoveries ?? 3
+  const windowMs = opts?.windowMs ?? 60_000
+  const now = opts?.now ?? ((): number => Date.now())
+  const stamps: number[] = []
+  return {
+    record(): 'remount' | 'fatal' {
+      const t = now()
+      while (stamps.length > 0 && t - (stamps[0] ?? 0) > windowMs) stamps.shift()
+      stamps.push(t)
+      return stamps.length <= maxRecoveries ? 'remount' : 'fatal'
+    },
+  }
+}
+
+/** The visible fatal card — a message + a Reload button. NEVER a silent blank. */
+function renderFatal(rootEl: HTMLElement, message: string): void {
+  rootEl.innerHTML = ''
+  const wrap = document.createElement('div')
+  wrap.className = 'car-fatal'
+  const msg = document.createElement('div')
+  msg.className = 'car-fatal-msg'
+  msg.textContent = message
+  const btn = document.createElement('button')
+  btn.type = 'button'
+  btn.className = 'car-fatal-reload'
+  btn.textContent = 'Reload'
+  btn.addEventListener('click', () => window.location.reload())
+  wrap.appendChild(msg)
+  wrap.appendChild(btn)
+  rootEl.appendChild(wrap)
+}
+
+/**
+ * Execute a recovery decision. Tears down the dead root (idempotent — React may
+ * already have unmounted it after the uncaught error), clears the container, then
+ * either remounts the app fresh ('remount') or paints the fatal card ('fatal').
+ * Always paints SOMETHING, so a blank screen can't survive this call. Exported so
+ * the recovery mechanics are unit-testable without provoking React's (jsdom-
+ * unobservable) teardown invariant.
+ */
+export function performRecovery(
+  decision: 'remount' | 'fatal',
+  ctx: { root: Root; rootEl: HTMLElement; remount: () => void; fatalMessage?: string },
+): void {
+  try {
+    ctx.root.unmount()
+  } catch {
+    /* the root may already be torn down by React's uncaught-error handling */
+  }
+  ctx.rootEl.innerHTML = ''
+  if (decision === 'fatal') {
+    renderFatal(ctx.rootEl, ctx.fatalMessage ?? FATAL_MESSAGE)
+    return
+  }
+  ctx.remount()
+}
+
+export interface MountConfig {
+  controller: NeutronChatController
+  config: BootstrapConfig
+}
+
+/**
+ * Mount the app onto `rootEl` with root-level auto-recovery wired through
+ * `createRoot`'s `onUncaughtError`. On an uncaught (boundary-bypassing) error we
+ * consult the policy and SCHEDULE the recovery on a macrotask — NEVER
+ * synchronously from React's error path — so React finishes tearing down before
+ * we remount with the SAME controller + store.
+ *
+ * `opts.renderTree` and `opts.scheduleRemount` are test seams (a throwing stub
+ * tree; a synchronous scheduler); production uses the real `<Root/>` and
+ * `setTimeout`.
+ */
+export function mount(
+  rootEl: HTMLElement,
+  mountConfig: MountConfig,
+  policy: RecoveryPolicy,
+  opts?: {
+    renderTree?: () => React.ReactNode
+    scheduleRemount?: (fn: () => void) => void
+  },
+): Root {
+  const schedule = opts?.scheduleRemount ?? ((fn: () => void): void => void setTimeout(fn, 50))
+  const tree = opts?.renderTree ?? ((): React.ReactNode => (
+    <Root controller={mountConfig.controller} config={mountConfig.config} />
+  ))
+  const root = createRoot(rootEl, {
+    onUncaughtError: (error: unknown, errorInfo: { componentStack?: string }): void => {
+      console.error('[chat-react] uncaught root error — auto-recovering', error, errorInfo?.componentStack)
+      const decision = policy.record()
+      schedule(() => {
+        performRecovery(decision, {
+          root,
+          rootEl,
+          remount: () => mount(rootEl, mountConfig, policy, opts),
+          fatalMessage: FATAL_MESSAGE,
+        })
+      })
+    },
+  })
+  root.render(<StrictMode>{tree()}</StrictMode>)
+  return root
 }
 
 async function boot(): Promise<void> {
@@ -99,11 +239,10 @@ async function boot(): Promise<void> {
         onFrame: sinks.onFrame,
       }),
   })
-  createRoot(rootEl).render(
-    <StrictMode>
-      <Root controller={controller} config={config} />
-    </StrictMode>,
-  )
+  // Mount with root-level auto-recovery (#380). The controller + store were just
+  // built above and live OUTSIDE React, so an auto-remount after an uncaught
+  // teardown error restores the transcript + session with no data loss.
+  mount(rootEl, { controller, config }, createRecoveryPolicy())
 }
 
 void boot()
