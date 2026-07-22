@@ -19,9 +19,13 @@
  *       enforced first via the request's `Content-Length` header so a
  *       hostile client cannot drive the gateway to buffer huge bodies
  *       before the size check fires.
- *       Whitelist: PNG / JPEG / GIF / WEBP only — P5.1 ships image
- *       attachments only per the brief; non-image MIMEs are a P7 docs
- *       routing concern.
+ *       Whitelist (M2 modality scope): PNG / JPEG / GIF / WEBP raster
+ *       images + PDF documents. SVG stays excluded (inline-script XSS
+ *       stance). Magic-byte sniffing (`gateway/storage/binary-types.ts`)
+ *       is authoritative — the declared Content-Type is only cross-
+ *       checked against it. Accepted attachments are threaded into the
+ *       live-agent turn as resolved local blob paths (the CC REPL Reads
+ *       images AND PDFs natively) via `resolveChatAttachmentLocalPath`.
  *       Storage: content-addressed under
  *         `<owner_home>/chat-attachments/<user_id>/<hash>.<ext>`
  *       Per-user namespace prevents a cross-user enumeration via the
@@ -47,7 +51,7 @@
  * sniffed MIME and SHA-256.
  */
 
-import { existsSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises'
 import { createHash } from 'node:crypto'
 import { join } from 'node:path'
@@ -62,29 +66,42 @@ export const MAX_CHAT_UPLOAD_BYTES = 10 * 1024 * 1024
 /** Hard ceiling on multipart wire size — small slack for envelope overhead. */
 const MULTIPART_WIRE_SLACK = 64 * 1024
 
-/** Images only at P5.1 (brief — non-image MIMEs are a P7 docs concern). */
-const IMAGE_MIME_WHITELIST: ReadonlyArray<string> = Object.freeze([
+/** M2 modality scope — raster images + PDF documents + audio voice notes
+ *  (MP3/M4A/WAV, task 5). SVG stays excluded (it carries XSS risk via inline
+ *  script; the binary store accepts it but the chat surface does not). */
+const CHAT_UPLOAD_MIME_WHITELIST: ReadonlyArray<string> = Object.freeze([
   'image/png',
   'image/jpeg',
   'image/gif',
   'image/webp',
+  'application/pdf',
+  'audio/mpeg',
+  'audio/mp4',
+  'audio/wav',
 ])
 
-/** Canonical MIME → on-disk extension. SVG omitted at P5.1 (the binary
- *  store does accept it but it carries XSS risk via inline script; the
- *  chat surface restricts to raster image MIMEs for the v1 cut). */
+/** Canonical MIME → on-disk extension. SVG omitted (see the whitelist note
+ *  above — inline-script XSS risk). */
 const EXT_FROM_MIME: Readonly<Record<string, string>> = Object.freeze({
   'image/png': 'png',
   'image/jpeg': 'jpg',
   'image/gif': 'gif',
   'image/webp': 'webp',
+  'application/pdf': 'pdf',
+  'audio/mpeg': 'mp3',
+  'audio/mp4': 'm4a',
+  'audio/wav': 'wav',
 })
 
 const URL_PREFIX = '/api/app/upload'
 /** `<user_id>/<hex64>.<ext>` — user_id must match the auth bearer; hash
- *  is a 64-char hex SHA-256; ext is one of the whitelist below.  */
+ *  is a 64-char hex SHA-256; ext is one of the whitelist below.
+ *  DELIBERATE: `txt` is NOT in this ext group — the voice-note transcript
+ *  sidecar (`<hash>.txt`) must never be servable via the GET route (it would
+ *  leak the raw transcript to anyone holding the bearer). It is read only
+ *  server-side by `resolveChatAttachmentLocalPath`. */
 const URL_PATH_RE =
-  /^\/api\/app\/upload\/([A-Za-z0-9._:-]+)\/([0-9a-f]{64})\.(png|jpg|gif|webp)$/
+  /^\/api\/app\/upload\/([A-Za-z0-9._:-]+)\/([0-9a-f]{64})\.(png|jpg|gif|webp|pdf|mp3|m4a|wav)$/
 
 export interface AppUploadSurfaceOptions {
   auth: AppWsAuthResolver
@@ -95,6 +112,21 @@ export interface AppUploadSurfaceOptions {
   owner_home: string
   /** Override the size cap for tests. */
   max_bytes?: number
+  /**
+   * M2 task 5 — voice-note ASR seam. When wired, an uploaded AUDIO blob is
+   * transcribed at upload-complete and the transcript is persisted as a
+   * content-addressed `<hash>.txt` sidecar beside the blob (atomic + idempotent
+   * — the surface owns the sidecar layout; a re-upload of the same bytes whose
+   * sidecar already exists never re-invokes the seam). Returns the transcript
+   * text, or `null` on failure / keyless (in which case no sidecar is written
+   * and the turn-fragment falls back to a graceful "set OPENAI_API_KEY" note).
+   * Omitted (no key) ⇒ audio still uploads; it just carries no transcript.
+   */
+  transcribeAudio?: (input: {
+    bytes: Uint8Array
+    content_type: string
+    hash: string
+  }) => Promise<string | null>
 }
 
 export interface AppUploadSurface {
@@ -112,6 +144,7 @@ export function createAppUploadSurface(
   const { auth, project_slug: gateway_project_slug, owner_home } = opts
   const max_bytes = opts.max_bytes ?? MAX_CHAT_UPLOAD_BYTES
   const blobs_root = join(owner_home, 'chat-attachments')
+  const transcribeAudio = opts.transcribeAudio
 
   return {
     handler: async (req) => {
@@ -132,6 +165,7 @@ export function createAppUploadSurface(
           gateway_project_slug,
           blobs_root,
           max_bytes,
+          ...(transcribeAudio !== undefined ? { transcribeAudio } : {}),
         })
       }
       const match = URL_PATH_RE.exec(pathname)
@@ -162,6 +196,11 @@ interface UploadContext {
   gateway_project_slug: string
   blobs_root: string
   max_bytes: number
+  transcribeAudio?: (input: {
+    bytes: Uint8Array
+    content_type: string
+    hash: string
+  }) => Promise<string | null>
 }
 
 async function handleUpload(req: Request, ctx: UploadContext): Promise<Response> {
@@ -238,11 +277,11 @@ async function handleUpload(req: Request, ctx: UploadContext): Promise<Response>
     )
   }
   const sniffed = magicByteSniff(buffer)
-  if (sniffed === null || !IMAGE_MIME_WHITELIST.includes(sniffed)) {
+  if (sniffed === null || !CHAT_UPLOAD_MIME_WHITELIST.includes(sniffed)) {
     return jsonError(
       415,
       'unsupported_type',
-      `sniffed type ${sniffed ?? '<unknown>'} not in the image allow-list (${IMAGE_MIME_WHITELIST.join(', ')})`,
+      `sniffed type ${sniffed ?? '<unknown>'} not in the chat-upload allow-list (${CHAT_UPLOAD_MIME_WHITELIST.join(', ')})`,
     )
   }
   const declared =
@@ -258,7 +297,7 @@ async function handleUpload(req: Request, ctx: UploadContext): Promise<Response>
   }
   const ext = EXT_FROM_MIME[sniffed]
   if (ext === undefined) {
-    // Should be unreachable — IMAGE_MIME_WHITELIST keys EXT_FROM_MIME.
+    // Should be unreachable — CHAT_UPLOAD_MIME_WHITELIST keys EXT_FROM_MIME.
     return jsonError(500, 'internal_extension_lookup', `no extension for ${sniffed}`)
   }
   const hash = sha256Hex(buffer)
@@ -278,6 +317,36 @@ async function handleUpload(req: Request, ctx: UploadContext): Promise<Response>
       }
       const message = err instanceof Error ? err.message : String(err)
       return jsonError(500, 'write_failed', `failed to persist attachment: ${message}`)
+    }
+  }
+  // M2 task 5 — voice-note ASR. For an AUDIO upload with a wired transcriber,
+  // transcribe the bytes and persist a content-addressed `<hash>.txt` sidecar
+  // beside the blob (atomic tmp+rename, mirroring the blob write above). This is
+  // IDEMPOTENT: a sidecar already on disk (a re-upload of the same bytes) is
+  // never re-transcribed, so the ASR API is called at most once per distinct
+  // audio. ASR must NEVER fail the upload — every path is swallowed.
+  if (sniffed.startsWith('audio/') && ctx.transcribeAudio !== undefined) {
+    const sidecar = join(user_dir, `${hash}.txt`)
+    if (!existsSync(sidecar)) {
+      try {
+        const text = await ctx.transcribeAudio({ bytes: buffer, content_type: sniffed, hash })
+        if (text !== null && text.trim().length > 0) {
+          await mkdir(user_dir, { recursive: true })
+          const tmp = `${sidecar}.tmp-${process.pid}-${Math.random().toString(36).slice(2)}`
+          try {
+            await writeFile(tmp, text)
+            await rename(tmp, sidecar)
+          } catch {
+            try {
+              await unlink(tmp)
+            } catch {
+              /* ignore */
+            }
+          }
+        }
+      } catch {
+        /* ASR failure must never fail the upload — the blob is already saved. */
+      }
     }
   }
   const url = `${URL_PREFIX}/${resolved.user_id}/${hash}.${ext}`
@@ -335,6 +404,12 @@ async function handleGet(req: Request, ctx: GetContext): Promise<Response> {
       'Content-Length': String(bytes.length),
       'Cache-Control': 'private, max-age=31536000, immutable',
       ETag: `"${ctx.hash}"`,
+      // Argus r2 #2 — pin the declared type so a browser never MIME-sniffs a
+      // served blob into an executable content-type (defense-in-depth atop the
+      // bearer + user-id match above; matters now that non-image documents
+      // (PDF) are served inline). `inline` so images/PDFs still preview in-app.
+      'X-Content-Type-Options': 'nosniff',
+      'Content-Disposition': 'inline',
     },
   })
 }
@@ -349,9 +424,81 @@ function mimeFromExt(ext: string): string | null {
       return 'image/gif'
     case 'webp':
       return 'image/webp'
+    case 'pdf':
+      return 'application/pdf'
+    case 'mp3':
+      return 'audio/mpeg'
+    case 'm4a':
+      return 'audio/mp4'
+    case 'wav':
+      return 'audio/wav'
     default:
       return null
   }
+}
+
+/**
+ * Resolve a chat-attachment upload URL to its absolute on-disk blob path +
+ * canonical MIME, or `null` for anything that does not match the strict
+ * `/api/app/upload/<user_id>/<hex64>.<ext>` shape.
+ *
+ * The URL may be relative (as the upload response returns it) or absolute (as a
+ * client may absolutize it for rendering); either way ONLY the pathname is
+ * matched, against the SAME `URL_PATH_RE` the GET route uses — so an unvalidated
+ * or malformed URL never reaches an `fs` syscall. Single-owner box: the owner
+ * agent reading across `<user_id>` namespaces is acceptable (there is one
+ * owner), so this does no per-user auth — it is a pure, syscall-free URL→path
+ * mapping consumed by `build-live-agent-turn.ts` to inject local blob paths the
+ * CC REPL can `Read` (it renders images AND PDFs natively).
+ */
+export function resolveChatAttachmentLocalPath(
+  owner_home: string,
+  url: string,
+): { path: string; content_type: string; transcript?: string | null } | null {
+  if (typeof url !== 'string' || url.length === 0) return null
+  // Absolute URL → take its pathname; relative `/api/app/upload/...` stays as-is
+  // (the `new URL(url)` with no base throws for a relative input).
+  let pathname = url
+  try {
+    pathname = new URL(url).pathname
+  } catch {
+    /* relative path — matched directly below */
+  }
+  const match = URL_PATH_RE.exec(pathname)
+  if (match === null) return null
+  const user_id = match[1] ?? ''
+  const hash = match[2] ?? ''
+  const ext = match[3] ?? ''
+  const content_type = mimeFromExt(ext)
+  if (content_type === null || user_id.length === 0 || hash.length === 0) return null
+  // URL_PATH_RE's user_id class `[A-Za-z0-9._:-]+` matches a dot-only segment
+  // (`.` / `..`), which `join` would collapse into a parent-dir traversal. The
+  // filename is locked to `<hex64>.<ext>` so it stays inside owner_home (not
+  // exploitable today), but reject dot-only segments outright rather than rely
+  // on that bound.
+  if (/^\.+$/.test(user_id)) return null
+  const path = join(owner_home, 'chat-attachments', user_id, `${hash}.${ext}`)
+  // Only hand a path to the agent prompt if the blob actually exists on disk;
+  // a resolvable-but-missing path would inject a dead file reference.
+  if (!existsSync(path)) return null
+  // M2 task 5 — for an AUDIO attachment, surface the voice-note transcript from
+  // the content-addressed `<hash>.txt` sidecar (written at upload time when a
+  // transcriber is wired). `transcript` is the text when present, `null` when
+  // absent (keyless / failed ASR). Non-audio attachments omit the field
+  // entirely (image/PDF have no transcript concept).
+  if (content_type.startsWith('audio/')) {
+    const sidecar = join(owner_home, 'chat-attachments', user_id, `${hash}.txt`)
+    let transcript: string | null = null
+    if (existsSync(sidecar)) {
+      try {
+        transcript = readFileSync(sidecar, 'utf8')
+      } catch {
+        transcript = null
+      }
+    }
+    return { path, content_type, transcript }
+  }
+  return { path, content_type }
 }
 
 function sha256Hex(bytes: Uint8Array): string {

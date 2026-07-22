@@ -218,6 +218,84 @@ export function extractAgentOptions(text: string): ParsedAgentOptions {
 }
 
 /**
+ * M2 modality threading — build the `<user_attachments>` PROMPT fragment for a
+ * turn's attachment upload URLs. Each URL is resolved to its local blob path via
+ * the injected `resolve` seam; unresolvable/malformed URLs are skipped (a `warn`
+ * is logged, never a throw). Returns null when there are no attachments, no
+ * resolver, or nothing resolved — so the caller splices a clean no-op (no bare
+ * `<user_attachments>` tag). The fragment lists each resolved ABSOLUTE path +
+ * canonical MIME and instructs the agent to open them with the `Read` tool (the
+ * CC REPL renders images AND PDFs natively from local paths).
+ *
+ * Exported for unit testing.
+ */
+export function buildAttachmentsFragment(
+  attachments: ReadonlyArray<string> | undefined,
+  resolve:
+    | ((url: string) => { path: string; content_type: string; transcript?: string | null } | null)
+    | undefined,
+  warn: (event: string, meta: Record<string, unknown>) => void = () => undefined,
+): string | null {
+  if (resolve === undefined) return null
+  if (attachments === undefined || attachments.length === 0) return null
+  const lines: string[] = []
+  for (const url of attachments) {
+    if (typeof url !== 'string' || url.length === 0) continue
+    let resolved: { path: string; content_type: string; transcript?: string | null } | null = null
+    try {
+      resolved = resolve(url)
+    } catch (err) {
+      warn('attachment_resolve_failed', {
+        url,
+        error: err instanceof Error ? err.message : String(err),
+      })
+      resolved = null
+    }
+    if (resolved === null) {
+      warn('attachment_unresolved', { url })
+      continue
+    }
+    // M2 task 5 — AUDIO voice notes carry an auto-transcript inline (the agent
+    // cannot `Read` raw audio bytes). A non-empty transcript is embedded (capped
+    // so a long note doesn't blow the prompt budget); a null/absent transcript
+    // (keyless box or failed ASR) degrades to a graceful note telling the owner
+    // how to enable it.
+    if (resolved.content_type.startsWith('audio/')) {
+      const transcript = resolved.transcript
+      if (typeof transcript === 'string' && transcript.trim().length > 0) {
+        const trimmed = transcript.trim()
+        const capped =
+          trimmed.length > ATTACHMENT_TRANSCRIPT_MAX_CHARS
+            ? `${trimmed.slice(0, ATTACHMENT_TRANSCRIPT_MAX_CHARS)}… [transcript truncated]`
+            : trimmed
+        lines.push(`- ${resolved.path} (${resolved.content_type}) — voice note; auto-transcript:`)
+        for (const l of capped.split('\n')) lines.push(`  ${l}`)
+      } else {
+        lines.push(
+          `- ${resolved.path} (${resolved.content_type}) — voice note; transcription unavailable — set OPENAI_API_KEY to enable voice transcription`,
+        )
+      }
+      continue
+    }
+    lines.push(`- ${resolved.path} (${resolved.content_type})`)
+  }
+  if (lines.length === 0) return null
+  return [
+    '<user_attachments>',
+    'The user attached these local files with their message. Open images and PDFs',
+    'with the Read tool to view their contents (it renders them natively from local',
+    'paths). AUDIO voice notes include an auto-generated transcript inline below —',
+    'do NOT attempt to Read the raw audio bytes; use the transcript text:',
+    ...lines,
+    '</user_attachments>',
+  ].join('\n')
+}
+
+/** Cap on an inlined voice-note transcript (chars) so one long note can't blow
+ *  the prompt budget. Task 5. */
+const ATTACHMENT_TRANSCRIPT_MAX_CHARS = 4000
+
+/**
  * Built-in CC tool surface for the live agent. Read access over the REPL's cwd /
  * `--add-dir` (the owner home: persona/, entities/, Projects/) — the agent can
  * RECALL and SUMMARIZE everything onboarding materialized — PLUS the native
@@ -534,6 +612,18 @@ export interface BuildLiveAgentTurnInput {
     topic_id: string
     prior_option_values: readonly string[]
   }) => Promise<{ body: string } | null>
+  /**
+   * M2 modality threading — resolve a chat-attachment upload URL to its local
+   * blob path + canonical MIME (`resolveChatAttachmentLocalPath`, supplied by
+   * the composer over `owner_home`). When wired AND a turn carries
+   * `attachments`, the runner builds a `<user_attachments>` prompt fragment of
+   * the resolved absolute paths so the agent can `Read` them (the CC REPL
+   * renders images AND PDFs natively). An unresolvable URL is skipped with a
+   * warn (never throws). Omitted (LLM-less box) ⇒ no attachment fragment.
+   */
+  resolveAttachment?: (
+    url: string,
+  ) => { path: string; content_type: string; transcript?: string | null } | null
   /** The SAME ButtonStore the engine emits through (persistence + history). */
   buttonStore: ButtonStore
   /** Operator audit trail — same TranscriptWriter the engine appends to. */
@@ -598,6 +688,16 @@ export function buildLiveAgentTurn(
    * seconds-to-minutes flow.
    */
   const lastUserText = new Map<string, string>()
+
+  /**
+   * Retry affordance, attachments companion — the last REAL turn's attachment
+   * upload URLs per (instance, topic) THIS process. Recorded alongside
+   * `lastUserText` on every real user turn; consulted on a `RETRY_TURN_VALUE`
+   * recovery so the retried turn re-injects the ORIGINAL attachments (the doc /
+   * image the user sent). Without this, a Retry after a freeze recovers only the
+   * text and silently drops the attachment, so the agent can no longer see it.
+   */
+  const lastAttachments = new Map<string, ReadonlyArray<string>>()
 
   /**
    * Go-live race fix (2026-06-20) — per-(instance, topic) turn serialization.
@@ -675,17 +775,31 @@ export function buildLiveAgentTurn(
     // gentle re-prompt if nothing was recorded (e.g. a restart cleared the map).
     if (turn.user_text === RETRY_TURN_VALUE) {
       const recovered = lastUserText.get(topicKey) ?? RETRY_FALLBACK_TEXT
+      const recoveredAttachments = lastAttachments.get(topicKey)
       moduleLog.info('retry_tap', {
         project: turn.project_slug,
         topic: turn.topic_id,
         recovered: recovered !== RETRY_FALLBACK_TEXT,
+        attachments: recoveredAttachments?.length ?? 0,
       })
-      turn = { ...turn, user_text: recovered }
+      // Re-inject the ORIGINAL attachments too, not just the text — a freeze +
+      // Retry on a turn that carried a doc/image must re-run WITH that doc/image.
+      // Only set the optional field when there ARE attachments (exactOptional).
+      turn =
+        recoveredAttachments !== undefined
+          ? { ...turn, user_text: recovered, attachments: recoveredAttachments }
+          : { ...turn, user_text: recovered }
     }
-    // Record the last real user message so a later Retry tap can recover it. Skip
-    // the synthetic seed turn (no real message) and an empty body.
+    // Record the last real user message + its attachments so a later Retry tap
+    // can recover both. Skip the synthetic seed turn (no real message) and an
+    // empty body.
     if (turn.seed_turn !== true && turn.user_text.length > 0) {
       lastUserText.set(topicKey, turn.user_text)
+      if (turn.attachments !== undefined && turn.attachments.length > 0) {
+        lastAttachments.set(topicKey, turn.attachments)
+      } else {
+        lastAttachments.delete(topicKey)
+      }
     }
     // Path 1 — is the owner still onboarding? Consulted once per turn so the
     // first-turn preamble, the upload affordance, and the post-turn scribe all
@@ -965,18 +1079,32 @@ export function buildLiveAgentTurn(
         })
       }
     }
+    // M2 modality threading — resolve this turn's attachment upload URLs to a
+    // `<user_attachments>` prompt fragment of local blob paths the agent can
+    // `Read`. Built once for the turn; injected on BOTH the warm splice (right
+    // before the user's message, so it's adjacent to what it describes) and the
+    // cold first-turn prompt. NEVER mutates `turn.user_text` (that feeds
+    // capture/reflection/scribe/persistence) — the paths live in the prompt only.
+    const attachmentsFragment = buildAttachmentsFragment(
+      turn.attachments,
+      input.resolveAttachment,
+      (event, meta) => moduleLog.warn(event, { project: turn.project_slug, topic: turn.topic_id, ...meta }),
+    )
     let prompt: string
     const isColdFirstTurn = !contextSent.has(topicKey)
     if (!isColdFirstTurn) {
       // Warm turn: the system prefix is already cached in the REPL's transcript;
       // re-ground by splicing the FRESH board + onboarding-context blocks before
-      // the user's message (onboarding context LAST so it's most salient).
+      // the user's message. The attachment fragment goes LAST — immediately
+      // before the user's message — so the resolved doc/image paths sit adjacent
+      // to the message they belong to (onboarding context precedes it).
       const warmPrefix = [
         workBoardFragment,
         nexusFragment,
         reflectionFragment,
         availableServicesFragment,
         onboardingContextFragment,
+        attachmentsFragment,
       ].filter((s): s is string => s !== null && s.trim().length > 0)
       prompt =
         warmPrefix.length > 0 ? `${warmPrefix.join('\n\n')}\n\n${turn.user_text}` : turn.user_text
@@ -995,6 +1123,7 @@ export function buildLiveAgentTurn(
         availableServicesFragment,
         nexusFragment,
         reflectionFragment,
+        attachmentsFragment,
       )
     }
 
@@ -1376,6 +1505,7 @@ async function composeFirstTurnPrompt(
   availableServicesFragmentRaw?: string | null,
   nexusFragmentRaw?: string | null,
   reflectionBlockRaw?: string | null,
+  attachmentsFragmentRaw?: string | null,
 ): Promise<string> {
   let persona = ''
   try {
@@ -1519,9 +1649,17 @@ async function composeFirstTurnPrompt(
     typeof reflectionBlockRaw === 'string' && reflectionBlockRaw.trim().length > 0
       ? reflectionBlockRaw
       : null
+  // M2 modality threading — the `<user_attachments>` block of resolved local
+  // blob paths. Placed LAST before the user's message so it's adjacent to the
+  // message it belongs to (the agent `Read`s these paths). Null/empty → no block.
+  const attachmentsBlock =
+    typeof attachmentsFragmentRaw === 'string' && attachmentsFragmentRaw.trim().length > 0
+      ? attachmentsFragmentRaw
+      : null
   const parts = [system]
   if (reflectionBlock !== null && reflectionBlock.trim().length > 0) parts.push(reflectionBlock)
   if (history !== null) parts.push(history)
+  if (attachmentsBlock !== null) parts.push(attachmentsBlock)
   parts.push(
     `The user's message follows. Reply to it directly.\n\n${turn.user_text}`,
   )

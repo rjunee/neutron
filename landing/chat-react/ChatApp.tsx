@@ -35,6 +35,7 @@ import type { NeutronChatController } from './controller.ts'
 import type { BootstrapConfig, ProjectTab } from './config.ts'
 import type { AttachmentDraft } from './useAttachmentDraft.ts'
 import { fetchAttachmentObjectUrl, isAuthedAttachmentUrl, importHistoryZip, isExportZip } from './uploads.ts'
+import { isAudioAttachmentUrl, isImageAttachmentUrl } from './message-adapter.ts'
 
 type FetchImpl = (input: string, init?: RequestInit) => Promise<Response>
 
@@ -53,6 +54,25 @@ interface UploadsCtx {
   fetchImpl?: FetchImpl
 }
 const UploadsContext = createContext<UploadsCtx | null>(null)
+
+/** Basename of an attachment URL (strips the path + any query/hash), for the
+ *  non-image file chip's display + download name. Falls back to 'attachment'.
+ *  Exported for unit test of the malformed-percent-escape guard. */
+export function attachmentBasename(url: string): string {
+  const withoutQuery = url.split(/[?#]/, 1)[0] ?? url
+  const last = withoutQuery.split('/').pop() ?? ''
+  if (last.length === 0) return 'attachment'
+  // A poisoned URL with a malformed percent-escape (e.g. `report%ZZ.pdf`)
+  // makes decodeURIComponent throw URIError. This runs during render, so an
+  // unguarded throw would trip the ChatErrorBoundary and blank the whole chat
+  // view — and, since the URL persists in history, it would recur on reload.
+  // Fall back to the raw (still-encoded) segment instead of crashing.
+  try {
+    return decodeURIComponent(last)
+  } catch {
+    return last
+  }
+}
 
 /**
  * Task 6 (chat render fan-out) — a render-stable {@link UploadsCtx}. Built as a
@@ -78,14 +98,19 @@ export function useUploadsCtx(
 }
 
 /**
- * Render one image attachment. A same-origin `/api/app/upload/…` URL is
- * bearer-authed, so we fetch it with the token and show the resulting `blob:`
- * object URL (revoked on unmount / src change). `data:` / `blob:` / external
- * `https:` URLs render directly — no auth, no fetch.
+ * Render one attachment. A same-origin `/api/app/upload/…` URL is bearer-authed,
+ * so we fetch it with the token and show the resulting `blob:` object URL
+ * (revoked on unmount / src change). `data:` / `blob:` / external `https:` URLs
+ * render directly — no auth, no fetch.
+ *
+ * An IMAGE renders as an `<img>`; a NON-image (e.g. a PDF) renders as a
+ * downloadable file chip (basename + open/download link) using the SAME authed
+ * fetch — so a document never paints as a broken `<img>`.
  */
 function AttachmentImage({ src }: { src: string }): React.JSX.Element {
   const uploads = useContext(UploadsContext)
   const needsAuth = uploads !== null && isAuthedAttachmentUrl(src, uploads.origin)
+  const isImage = isImageAttachmentUrl(src)
   const [objUrl, setObjUrl] = useState<string | null>(null)
   const [failed, setFailed] = useState(false)
 
@@ -117,6 +142,29 @@ function AttachmentImage({ src }: { src: string }): React.JSX.Element {
       if (created !== null) revokeObjectUrl(created)
     }
   }, [src, needsAuth, uploads])
+
+  // Non-image attachment (PDF, voice note, …) → a downloadable file chip, never
+  // an <img>. A voice note gets a 🎵 icon (task 5); everything else stays 📎.
+  if (!isImage) {
+    const name = attachmentBasename(src)
+    const icon = isAudioAttachmentUrl(src) ? '🎵' : '📎'
+    const href = needsAuth ? objUrl : src
+    if (needsAuth && failed) return <span className="car-attach-error">{icon} {name} unavailable</span>
+    if (needsAuth && href === null) {
+      return <span className="car-attach-loading">{icon} {name}…</span>
+    }
+    return (
+      <a
+        className="car-attach-file"
+        href={href ?? src}
+        download={name}
+        target="_blank"
+        rel="noreferrer"
+      >
+        {icon} {name}
+      </a>
+    )
+  }
 
   if (!needsAuth) return <img src={src} alt="attachment" className="car-attach-img" />
   if (failed) return <span className="car-attach-error">📎 image unavailable</span>
@@ -1411,7 +1459,7 @@ function Composer({
         <button
           type="button"
           className="car-attach-btn"
-          aria-label={importActive ? 'Attach image or export ZIP' : 'Attach image'}
+          aria-label={importActive ? 'Attach file or export ZIP' : 'Attach file…'}
           onClick={() => fileInputRef.current?.click()}
         >
           📎
@@ -1421,8 +1469,8 @@ function Composer({
           type="file"
           accept={
             importActive
-              ? 'image/png,image/jpeg,image/gif,image/webp,application/zip,.zip'
-              : 'image/png,image/jpeg,image/gif,image/webp'
+              ? 'image/png,image/jpeg,image/gif,image/webp,application/pdf,.pdf,audio/mpeg,audio/mp4,audio/wav,.mp3,.m4a,.wav,application/zip,.zip'
+              : 'image/png,image/jpeg,image/gif,image/webp,application/pdf,.pdf,audio/mpeg,audio/mp4,audio/wav,.mp3,.m4a,.wav'
           }
           multiple
           hidden

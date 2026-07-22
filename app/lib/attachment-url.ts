@@ -63,6 +63,55 @@ export function isAuthedAttachmentUrl(uri: string, origin?: string): boolean {
   return origin !== undefined && parsed.origin === origin;
 }
 
+const IMAGE_EXT = /\.(png|jpe?g|gif|webp|svg)(\?|#|$)/i;
+
+/**
+ * True when an attachment URL points at a raster image (by `data:image/` prefix
+ * or an image file extension). Mirrors the web client's `isImageAttachmentUrl`
+ * (`landing/chat-react/message-adapter.ts`). The mobile bubble renderer
+ * ({@link AuthedAttachmentImage}) uses this to branch between an `<Image>` and
+ * a downloadable file chip — so a NON-image attachment (e.g. a PDF, newly
+ * uploadable in M2) never renders as a broken image (Argus r2 BLOCKER #1).
+ */
+export function isImageAttachmentUrl(uri: string): boolean {
+  if (/^data:image\//i.test(uri)) return true;
+  return IMAGE_EXT.test(uri);
+}
+
+const AUDIO_EXT = /\.(mp3|m4a|wav)(\?|#|$)/i;
+
+/**
+ * True when an attachment URL points at an AUDIO voice note (by `data:audio/`
+ * prefix or an audio file extension). Mirrors the web client's
+ * `isAudioAttachmentUrl` (`landing/chat-react/message-adapter.ts`) — kept
+ * per-client because `landing` and `app` are separate packages. The mobile
+ * file-chip renderer ({@link AuthedAttachmentFile}) uses this to show a 🎵 icon
+ * instead of the generic 📎 for a voice note (M2 task 5).
+ */
+export function isAudioAttachmentUrl(uri: string): boolean {
+  if (/^data:audio\//i.test(uri)) return true;
+  return AUDIO_EXT.test(uri);
+}
+
+/**
+ * Basename of an attachment URL (strips the path + any query/hash), for the
+ * non-image file chip's display + open affordance. Falls back to 'attachment'.
+ * Mirrors the web client's `attachmentBasename` (`landing/chat-react/ChatApp.tsx`)
+ * including the malformed-percent-escape guard: a poisoned URL like
+ * `report%ZZ.pdf` makes `decodeURIComponent` throw during render, so we fall
+ * back to the raw (still-encoded) segment rather than crashing the chat view.
+ */
+export function attachmentBasename(uri: string): string {
+  const withoutQuery = uri.split(/[?#]/, 1)[0] ?? uri;
+  const last = withoutQuery.split('/').pop() ?? '';
+  if (last.length === 0) return 'attachment';
+  try {
+    return decodeURIComponent(last);
+  } catch {
+    return last;
+  }
+}
+
 export interface AttachmentImageSource {
   uri: string;
   headers?: Record<string, string>;

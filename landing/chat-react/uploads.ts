@@ -32,13 +32,28 @@ import {
  *  rejection — the server remains the source of truth. */
 export const MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024
 
-/** Mirrors the server's image allow-list (`IMAGE_MIME_WHITELIST`). The server
- *  re-sniffs magic bytes regardless; this only avoids a doomed round-trip. */
-export const ACCEPTED_IMAGE_TYPES: readonly string[] = [
+/** Mirrors the server's chat-upload allow-list
+ *  (`CHAT_UPLOAD_MIME_WHITELIST`): raster images + PDF documents + audio voice
+ *  notes (MP3/M4A/WAV, task 5). The server re-sniffs magic bytes and
+ *  canonicalizes declared MIMEs via `MIME_ALIASES` (`binary-types.ts`), so we
+ *  ALSO list the browser-reported alias forms (`audio/mp3`, `audio/x-m4a`,
+ *  `audio/m4a`, `audio/x-wav`, `audio/wave`) here — the pre-flight must not
+ *  reject a type the server would happily canonicalize + accept. This only
+ *  avoids a doomed round-trip; the server remains authoritative. */
+export const ACCEPTED_ATTACHMENT_TYPES: readonly string[] = [
   'image/png',
   'image/jpeg',
   'image/gif',
   'image/webp',
+  'application/pdf',
+  'audio/mpeg',
+  'audio/mp4',
+  'audio/wav',
+  'audio/mp3',
+  'audio/x-m4a',
+  'audio/m4a',
+  'audio/x-wav',
+  'audio/wave',
 ]
 
 /** The shipped attachment upload/serve endpoint prefix. */
@@ -236,10 +251,10 @@ export async function uploadAttachment(file: File, opts: UploadOptions): Promise
   }
   // Only pre-reject when the browser actually gave us a type; an empty type
   // (some drag sources) falls through to the server's authoritative sniff.
-  if (file.type.length > 0 && !ACCEPTED_IMAGE_TYPES.includes(file.type)) {
+  if (file.type.length > 0 && !ACCEPTED_ATTACHMENT_TYPES.includes(file.type)) {
     throw new AttachmentUploadError(
       'unsupported_type',
-      `${file.name} is ${file.type} — only PNG, JPEG, GIF and WEBP images are supported.`,
+      `${file.name} is ${file.type} — only PNG, JPEG, GIF, WEBP images, PDF documents, and MP3/M4A/WAV voice notes are supported.`,
     )
   }
   const endpoint = opts.endpoint ?? UPLOAD_ENDPOINT

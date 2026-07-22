@@ -128,7 +128,11 @@ import { MIN_COOKIE_SECRET_LEN } from './session-cookie-secret.ts'
 import { selectAppWsToken, isValidThreadedBearer } from './owner-bearer.ts'
 import { late } from './wiring/late.ts'
 import type { OpenWiringContext } from './wiring/context.ts'
-import { buildChainedChatCommandFilter } from '@neutronai/gateway/boot-helpers.ts'
+import {
+  buildChainedChatCommandFilter,
+  buildStatusChatCommandFilter,
+  type StatusSnapshot,
+} from '@neutronai/gateway/boot-helpers.ts'
 import {
   SkillForge,
   SkillForgeProposalsStore,
@@ -260,7 +264,11 @@ import {
 } from '@neutronai/gateway/wiring/project-create.ts'
 import type { CreateProjectToolService } from '@neutronai/gateway/wiring/create-project-tool.ts'
 import { createAppTasksSurface } from '@neutronai/gateway/http/app-tasks-surface.ts'
-import { createAppUploadSurface } from '@neutronai/gateway/http/app-upload-surface.ts'
+import {
+  createAppUploadSurface,
+  resolveChatAttachmentLocalPath,
+} from '@neutronai/gateway/http/app-upload-surface.ts'
+import { createOpenAiTranscriptionClient } from '@neutronai/gateway/transcription/openai-transcription.ts'
 import { createAppDiagnosticsSurface } from '@neutronai/gateway/http/app-diagnostics-surface.ts'
 import { composeDiagnostics } from '@neutronai/gateway/diagnostics/diagnostics-report.ts'
 import { buildInstanceDiagnosticsSources } from '@neutronai/gateway/diagnostics/instance-sources.ts'
@@ -1416,14 +1424,36 @@ export function buildOpenGraphComposer(
       return { project_slug, user_id: OWNER_USER_ID }
     }
 
+    // M2 task 3 — the narrow Neutron `/status` command. Its snapshot reads stores
+    // constructed LATER in this closure (projects reader / work-board / Trident run
+    // store), so the reader is threaded through a `late<T>` two-phase holder (same
+    // seam as `dispatchBoardHolder`) and BOUND once those stores exist. The filter
+    // itself is built now so it can join the chain here — its `match()` only fires
+    // at chat-turn time, long after the bind, so the deref is always populated.
+    const statusSnapshotHolder =
+      late<
+        (input: { user_id: string; project_slug: string; project_id?: string }) => StatusSnapshot
+      >('status_snapshot')
+    const statusChatCommandFilter = buildStatusChatCommandFilter({
+      snapshot: async (input) =>
+        statusSnapshotHolder.deref((fn) => fn(input)) ?? {
+          active_project: 'General',
+          model: getBestModel(),
+          pending_reminders: 0,
+          active_work_items: 0,
+          active_trident_runs: 0,
+        },
+    })
+
     // Chat-command filter (Free Cores `/cal`/`/email`/`/note`/`/remind`/
-    // `/research` + skill-forge `/skills`), chained. Defined ONCE here so BOTH
-    // the web onboarding chat AND the app-ws chat (`/ws/app/chat`) route slash
-    // commands through the IDENTICAL handlers (Codex r1 [P2] — without this the
-    // React app-ws path lost slash commands, sending `/note` etc. to the LLM).
+    // `/research` + skill-forge `/skills` + `/status`), chained. Defined ONCE here
+    // so BOTH the web onboarding chat AND the app-ws chat (`/ws/app/chat`) route
+    // slash commands through the IDENTICAL handlers (Codex r1 [P2] — without this
+    // the React app-ws path lost slash commands, sending `/note` etc. to the LLM).
     const chatCommandFilter = buildChainedChatCommandFilter([
       coresWiring.chatCommandFilter,
       buildSkillForgeChatCommandFilter(skillForgeBackend),
+      statusChatCommandFilter,
     ])
 
     // ── The landing stack (onboarding engine + chat UI + WS) ───────────────
@@ -2183,10 +2213,42 @@ export function buildOpenGraphComposer(
     // controls 404. `new TaskStore(db)` reads the SAME canonical project task
     // data the agent's `cores/free/tasks` backend writes. Same owner auth.
     const appTasksSurface = createAppTasksSurface({ store: new TaskStore(db), auth: appOwnerAuth })
+    // M2 task 5 — voice-note ASR. BYO `OPENAI_API_KEY` — the SAME single env
+    // var `resolveOpenOpenAiPool` (:474) reads; its presence turns transcription
+    // ON (credential config, NOT a feature flag) and works regardless of which
+    // provider drives the conversation. Keyless ⇒ no seam is passed and audio
+    // still uploads, just without a transcript.
+    const openaiKey = (env['OPENAI_API_KEY'] ?? '').trim()
+    const transcriptionClient =
+      openaiKey.length > 0 ? createOpenAiTranscriptionClient({ api_key: openaiKey }) : null
     const appUploadSurface = createAppUploadSurface({
       auth: appOwnerAuth,
       project_slug,
       owner_home,
+      ...(transcriptionClient !== null
+        ? {
+            transcribeAudio: async (i: {
+              bytes: Uint8Array
+              content_type: string
+              hash: string
+            }): Promise<string | null> => {
+              const r = await transcriptionClient.transcribe({
+                bytes: i.bytes,
+                content_type: i.content_type,
+              })
+              if (!r.ok) {
+                log.warn('voice_transcription_failed', {
+                  code: r.code,
+                  ...(r.status !== undefined ? { status: r.status } : {}),
+                  hash: i.hash,
+                })
+                return null
+              }
+              const t = r.text.trim()
+              return t.length > 0 ? t : null
+            },
+          }
+        : {}),
     })
 
     // O5 (world-class-refactor) — read-only diagnostics surface. Composes
@@ -2403,6 +2465,42 @@ export function buildOpenGraphComposer(
     }
     const workBoardStore = new WorkBoardStore(db, {
       onChange: (changedKey: string): void => fanWorkBoardChanged(changedKey),
+    })
+    // M2 task 3 — bind the `/status` snapshot reader now that every source store
+    // exists (projects reader / reminder store / work-board / Trident run store).
+    // Deterministic READ-only aggregation, scoped to the turn's active project.
+    statusSnapshotHolder.bind((input): StatusSnapshot => {
+      const activeProject =
+        input.project_id !== undefined
+          ? readProjectRows().find((p) => p.id === input.project_id)?.label ?? 'General'
+          : 'General'
+      let pendingReminders = 0
+      try {
+        pendingReminders = new ReminderStore(db).listPending(input.project_slug).length
+      } catch {
+        /* best-effort — a store read failure degrades to 0, never bricks /status */
+      }
+      let activeWorkItems = 0
+      try {
+        activeWorkItems = workBoardStore.listActive(
+          workBoardScopeKey(input.project_slug, input.project_id),
+        ).length
+      } catch {
+        /* best-effort */
+      }
+      let activeTridentRuns = 0
+      try {
+        activeTridentRuns = boardRunStore.listNonTerminal().length
+      } catch {
+        /* best-effort */
+      }
+      return {
+        active_project: activeProject,
+        model: getBestModel(),
+        pending_reminders: pendingReminders,
+        active_work_items: activeWorkItems,
+        active_trident_runs: activeTridentRuns,
+      }
     })
     // RB1 (perfect-recall) — now that the work-board store exists, bind the
     // memory-index's active-work provider so the durable breadth manifest also
@@ -3292,6 +3390,13 @@ export function buildOpenGraphComposer(
               const body = await memoryIndexRead()
               return body !== null ? formatMemoryIndexFragment(body) : null
             },
+            // M2 modality threading — resolve a chat-attachment upload URL to
+            // its local blob path under `<owner_home>/chat-attachments/` so the
+            // live-agent turn can inject the path into the dispatched prompt and
+            // the agent `Read`s the image/PDF natively. Single-owner box, so a
+            // pure syscall-free URL→path map (no per-user auth) is acceptable.
+            resolveAttachment: (url: string) =>
+              resolveChatAttachmentLocalPath(owner_home, url),
             buttonStore: landing.buttonStore,
             project_slug,
             owner_home,
@@ -3445,6 +3550,13 @@ export function buildOpenGraphComposer(
       appWsRegistry,
       appWsChatTurn,
       scribeOnUserTurn,
+      // M2 task 5 — resolve a voice note's transcript for the SCRIBE text (voice
+      // → text → gbrain parity). The resolver sets `transcript` only for audio,
+      // so no extra type check is needed here.
+      attachmentTranscript: (url: string): string | null => {
+        const r = resolveChatAttachmentLocalPath(owner_home, url)
+        return r === null ? null : (r.transcript ?? null)
+      },
       chatCommandFilter,
       appOwnerAuth,
       appWsToken,
