@@ -84,6 +84,22 @@ describe('operating-doctrine — principle set', () => {
     }
   })
 
+  test('#429 task 4 — the board principle requires a SPOKEN ack even though an automatic one is posted', () => {
+    // The deterministic chat ack is mechanical; the agent's own reply must still
+    // acknowledge the work in its voice. Pin that sentence to the always-rendered
+    // board principle so it ships every turn on every surface.
+    const cardPrinciple = DOCTRINE_PRINCIPLES.find((p) => p.includes('work_board_add'))
+    expect(cardPrinciple).toBeDefined()
+    expect(cardPrinciple!).toContain('a short automatic confirmation is posted to the chat for you')
+    expect(cardPrinciple!.toLowerCase()).toContain('your reply must still acknowledge the work in your own voice')
+    for (const scope of ['general', 'project'] as const) {
+      const frag = buildOperatingDoctrineFragment(
+        scope === 'project' ? { scope, project_id: 'gondor' } : { scope },
+      )
+      expect(frag).toContain('a short automatic confirmation is posted to the chat for you')
+    }
+  })
+
   test('the principle body is byte-identical across surfaces (consistency)', () => {
     const general = buildOperatingDoctrineFragment({ scope: 'general' })
     const project = buildOperatingDoctrineFragment({ scope: 'project', project_id: 'gondor' })

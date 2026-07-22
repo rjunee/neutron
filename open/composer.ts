@@ -279,6 +279,7 @@ import {
 } from '@neutronai/channels/adapters/app-ws/envelope.ts'
 import { createWorkBoardSurface } from '@neutronai/gateway/http/work-board-surface.ts'
 import { classifyWorkBoardTaskType } from '@neutronai/work-board/task-type-classifier.ts'
+import { buildWorkBoardChatAck } from '@neutronai/work-board/chat-ack.ts'
 import { createProjectCredentialsSurface } from '@neutronai/gateway/http/project-credentials-surface.ts'
 import { createCodexCredentialSurface } from '@neutronai/gateway/http/codex-credential-surface.ts'
 import { ProjectCredentialStore } from '@neutronai/project-credentials/store.ts'
@@ -2448,6 +2449,19 @@ export function buildOpenGraphComposer(
     // (not the raw internal guard text into the work pane) and leave the item
     // quietly pending. Mirrors the `appWsHolder` late-binding pattern.
     const buildClarifyPoster: { post?: (chatId: string, text: string) => void } = {}
+    // #429 task 4 — ONE shared deterministic chat-ack poster. A chat-dispatched
+    // board mutation (agent `work_board_add`, an inline_active false→true flip,
+    // or a successful board-bound build dispatch/start) posts a short agent-style
+    // confirmation to the originating chat IMMEDIATELY — independent of the warm
+    // REPL's single terminal reply() (which lands only at turn end, up to 45 min
+    // for a long inline job). Delivery rides the SAME #337 durable+live app-ws
+    // seam a normal reply uses; `.post?.` is dereffed at FIRE time, so late
+    // binding is safe (a no-op if the adapter is not yet bound). DI presence, NOT
+    // a feature flag — Open always wires it; there is no env gate.
+    const workBoardChatAck = buildWorkBoardChatAck({
+      resolve_chat_id: (projectId) => tridentDeliveryChatId(projectId),
+      post: (chatId, text) => buildClarifyPoster.post?.(chatId, text),
+    })
     // ▶ start/retry closure — resolves the card's saved spec (its plans/ doc, else
     // its title) and dispatches a board-bound build through the SAME chokepoint
     // (`dispatchBoardBoundBuild`: required-item + ask-before-acting gate +
@@ -3829,7 +3843,7 @@ export function buildOpenGraphComposer(
       // by the SAME canonical store the HTTP surface + per-turn injection use,
       // so an agent mutation and a human HTTP write share one code path + one
       // live `work_board_changed` push.
-      work_board: { store: workBoardStore, spec_doc: workBoardSpecDoc },
+      work_board: { store: workBoardStore, spec_doc: workBoardSpecDoc, chat_ack: workBoardChatAck },
       // Create-project agent tool (create_project) — agent-native parity with
       // the project-rail Create Project button; same owner-scoped create path
       // the HTTP surface uses (one code path).
@@ -3959,6 +3973,10 @@ export function buildOpenGraphComposer(
                 chat_id: tridentDeliveryChatId(projectId),
                 thread_id: null,
               }),
+              // #429 task 4 — the same shared ack: a successful agent-native
+              // build dispatch/start confirms in the chat immediately (the
+              // terminal result still announces later via resolve_delivery/#339).
+              chat_ack: workBoardChatAck,
             },
           }
         : {}),

@@ -32,6 +32,7 @@ import {
 } from './board-dispatch.ts'
 import { isTerminalPhase } from './state-machine.ts'
 import { workBoardScopeKey } from '@neutronai/work-board/store.ts'
+import type { WorkBoardChatAck } from '@neutronai/work-board/chat-ack.ts'
 import type { MergeMode, TridentRunStore } from './store.ts'
 
 export const WORK_BOARD_DISPATCH_BUILD_TOOL = 'work_board_dispatch_build'
@@ -118,6 +119,22 @@ export interface TridentBuildToolDeps {
   resolve_delivery?: (
     project_id: string | null,
   ) => { chat_id: string | null; thread_id: string | null }
+  /**
+   * #429 task 4 — deterministic chat ack. When wired, a SUCCESSFUL board-bound
+   * dispatch/start posts a short `build_dispatched` confirmation to the chat
+   * RIGHT AWAY (independent of the turn's single terminal reply()), delivered
+   * durable+live via the composer's app-ws seam. A REJECTED dispatch posts
+   * NOTHING — the agent must ask the clarifying question (#337 covers the ▶
+   * path). Absent → unchanged pre-task-4 behaviour (no post).
+   */
+  chat_ack?: WorkBoardChatAck
+}
+
+/** First non-empty line of a task, truncated — the ack title when a board item
+ *  lookup returns null (defensive; a dispatched item normally exists). */
+function taskFallbackTitle(task: string): string {
+  const firstLine = task.split('\n').find((l) => l.trim().length > 0)?.trim() ?? task.trim()
+  return firstLine.length > 80 ? `${firstLine.slice(0, 79)}…` : firstLine
 }
 
 interface StartArgs {
@@ -188,6 +205,19 @@ export function registerTridentBuildToolSurface(
       const result = await dispatchBoardBoundBuild({ board_item_id, task }, buildDeps)
       if (!result.ok) {
         return { ok: false, error: result.message }
+      }
+      // #429 task 4 — a chat-dispatched build acks the chat immediately (the
+      // terminal result still announces later via #339). Rejected dispatches
+      // above post NOTHING. Title from the bound item; task-fallback if absent.
+      if (deps.chat_ack !== undefined) {
+        const boundItem =
+          board_item_id !== undefined ? deps.work_board.get(scope, board_item_id) : null
+        deps.chat_ack.post({
+          project_id: ctx.project_id,
+          item_id: board_item_id ?? '',
+          title: boundItem?.title ?? taskFallbackTitle(task),
+          kind: 'build_dispatched',
+        })
       }
       return {
         ok: true,
@@ -286,6 +316,13 @@ export function registerTridentBuildToolSurface(
       if (!result.ok) {
         return { ok: false, error: result.message }
       }
+      // #429 task 4 — ack the chat immediately for an agent-native ▶ start.
+      deps.chat_ack?.post({
+        project_id: ctx.project_id,
+        item_id: board_item_id,
+        title: item.title,
+        kind: 'build_dispatched',
+      })
       return {
         ok: true,
         run_id: result.run.id,

@@ -37,6 +37,7 @@ import {
   type WorkBoardStore,
 } from './store.ts'
 import type { WorkBoardSpecDocService } from './spec-doc-service.ts'
+import type { WorkBoardChatAck } from './chat-ack.ts'
 
 export const WORK_BOARD_LIST_TOOL = 'work_board_list'
 export const WORK_BOARD_ADD_TOOL = 'work_board_add'
@@ -150,9 +151,19 @@ export function registerWorkBoardToolSurface(
      * supplied `spec` is ignored.
      */
     specDoc?: WorkBoardSpecDocService
+    /**
+     * #429 task 4 — deterministic chat ack. When wired, a SUCCESSFUL agent
+     * `work_board_add` posts a short `card_added` confirmation to the chat, and
+     * a `work_board_update` that flips `inline_active` false→true posts an
+     * `inline_started` confirmation — RIGHT AWAY, independent of the turn's own
+     * single terminal reply(). Delivered durable+live via the composer's app-ws
+     * seam. Absent → byte-identical to the pre-task-4 behaviour (no post).
+     */
+    chatAck?: WorkBoardChatAck
   },
 ): string[] {
   const specDoc = opts?.specDoc
+  const chatAck = opts?.chatAck
   registry.register({
     name: WORK_BOARD_LIST_TOOL,
     description:
@@ -205,20 +216,30 @@ export function registerWorkBoardToolSurface(
       const spec = asString(a.spec)
       const scope = workBoardScopeKey(ctx.project_slug, ctx.project_id)
       try {
+        let item: WorkBoardItem
         if (specDoc !== undefined) {
-          return ok(
-            await specDoc.createCardWithOptionalSpec(scope, {
-              title,
-              ...(status !== undefined ? { status } : {}),
-              ...(ref !== undefined ? { design_doc_ref: ref } : {}),
-              ...(spec !== undefined ? { spec } : {}),
-            }),
-          )
+          item = await specDoc.createCardWithOptionalSpec(scope, {
+            title,
+            ...(status !== undefined ? { status } : {}),
+            ...(ref !== undefined ? { design_doc_ref: ref } : {}),
+            ...(spec !== undefined ? { spec } : {}),
+          })
+        } else {
+          const createInput: CreateWorkBoardItemInput = { title }
+          if (status !== undefined) createInput.status = status
+          if (ref !== undefined) createInput.design_doc_ref = ref
+          item = await store.create(scope, createInput)
         }
-        const createInput: CreateWorkBoardItemInput = { title }
-        if (status !== undefined) createInput.status = status
-        if (ref !== undefined) createInput.design_doc_ref = ref
-        return ok(await store.create(scope, createInput))
+        // #429 task 4 — a chat-dispatched add posts a deterministic ack now, so
+        // the chat is not silent until the turn's single reply() lands at turn
+        // end. Never perturbs the tool result (the ack self-swallows).
+        chatAck?.post({
+          project_id: ctx.project_id,
+          item_id: item.id,
+          title: item.title,
+          kind: 'card_added',
+        })
+        return ok(item)
       } catch (err) {
         return asErrorResult(err)
       }
@@ -265,8 +286,28 @@ export function registerWorkBoardToolSurface(
       if (status !== undefined) patch.status = status
       if (ref !== undefined) patch.design_doc_ref = ref
       if (typeof a.inline_active === 'boolean') patch.inline_active = a.inline_active
+      const scope = workBoardScopeKey(ctx.project_slug, ctx.project_id)
+      // #429 task 4 — snapshot BEFORE the update so we can detect an
+      // inline_active false→true flip (the "I'm working this inline now" signal)
+      // and ack it exactly once. Read is cheap (single-row PK lookup).
+      const prev = chatAck !== undefined ? store.get(scope, id) : null
       try {
-        return ok(await store.update(workBoardScopeKey(ctx.project_slug, ctx.project_id), id, patch))
+        const item = await store.update(scope, id, patch)
+        if (
+          chatAck !== undefined &&
+          item !== null &&
+          patch.inline_active === true &&
+          prev !== null &&
+          prev.inline_active === false
+        ) {
+          chatAck.post({
+            project_id: ctx.project_id,
+            item_id: item.id,
+            title: item.title,
+            kind: 'inline_started',
+          })
+        }
+        return ok(item)
       } catch (err) {
         return asErrorResult(err)
       }

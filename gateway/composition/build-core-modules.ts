@@ -220,6 +220,9 @@ export function buildCoreModules(
       if (input.work_board !== undefined) {
         registerWorkBoardToolSurface(reg, input.work_board.store, {
           ...(input.work_board.spec_doc !== undefined ? { specDoc: input.work_board.spec_doc } : {}),
+          // #429 task 4 — thread the deterministic chat ack (composer-built,
+          // durable+live app-ws seam). Absent → no post (unchanged behaviour).
+          ...(input.work_board.chat_ack !== undefined ? { chatAck: input.work_board.chat_ack } : {}),
         })
       }
       // Work Board Phase 2b — register the agent-native board-bound build

@@ -217,3 +217,122 @@ describe('work_board_add spec-doc routing (M1)', () => {
     expect(out.item?.design_doc_ref).toBe('neutron-docs:plans/x.md')
   })
 })
+
+describe('work_board chat-ack seam (#429 task 4)', () => {
+  interface AckPost {
+    project_id: string | null
+    item_id: string
+    title: string
+    kind: string
+  }
+  function spyAck() {
+    const posts: AckPost[] = []
+    const ack = { post: (p: AckPost) => posts.push(p) }
+    return { posts, ack: ack as unknown as import('./chat-ack.ts').WorkBoardChatAck }
+  }
+
+  test('a successful plain-store add posts card_added with the created item', async () => {
+    const reg = new ToolRegistry()
+    const { posts, ack } = spyAck()
+    registerWorkBoardToolSurface(reg, store, { chatAck: ack })
+    const out = (await reg.get(WORK_BOARD_ADD_TOOL)!.handler(
+      { title: 'Ship it' },
+      ctx('owner', 'acme'),
+    )) as { ok: boolean; item: { id: string } }
+    expect(out.ok).toBe(true)
+    expect(posts).toEqual([
+      { project_id: 'acme', item_id: out.item.id, title: 'Ship it', kind: 'card_added' },
+    ])
+  })
+
+  test('a successful specDoc-branch add posts card_added', async () => {
+    const reg = new ToolRegistry()
+    const { posts, ack } = spyAck()
+    const specDoc = {
+      createCardWithOptionalSpec: async (slug: string, input: { title: string }) =>
+        store.create(slug, { title: input.title }),
+      resolveTaskForItem: async () => 'unused',
+    }
+    registerWorkBoardToolSurface(reg, store, {
+      chatAck: ack,
+      specDoc: specDoc as unknown as import('./spec-doc-service.ts').WorkBoardSpecDocService,
+    })
+    const out = (await reg.get(WORK_BOARD_ADD_TOOL)!.handler(
+      { title: 'Docd item', spec: 'x\ny\nz' },
+      ctx('owner', null),
+    )) as { ok: boolean; item: { id: string } }
+    expect(out.ok).toBe(true)
+    expect(posts).toEqual([
+      { project_id: null, item_id: out.item.id, title: 'Docd item', kind: 'card_added' },
+    ])
+  })
+
+  test('a validation-failed add posts NOTHING', async () => {
+    const reg = new ToolRegistry()
+    const { posts, ack } = spyAck()
+    registerWorkBoardToolSurface(reg, store, { chatAck: ack })
+    const out = (await reg.get(WORK_BOARD_ADD_TOOL)!.handler(
+      { title: 'x', design_doc_ref: 'javascript:alert(1)' },
+      ctx('owner'),
+    )) as { ok: boolean }
+    expect(out.ok).toBe(false)
+    expect(posts).toEqual([])
+  })
+
+  test('an update flipping inline_active false→true posts inline_started', async () => {
+    const reg = new ToolRegistry()
+    const { posts, ack } = spyAck()
+    registerWorkBoardToolSurface(reg, store, { chatAck: ack })
+    const created = (await reg.get(WORK_BOARD_ADD_TOOL)!.handler(
+      { title: 'Inline work' },
+      ctx('owner', 'acme'),
+    )) as { item: { id: string } }
+    const id = created.item.id
+    posts.length = 0 // drop the card_added post
+    await reg.get(WORK_BOARD_UPDATE_TOOL)!.handler({ id, inline_active: true }, ctx('owner', 'acme'))
+    expect(posts).toEqual([
+      { project_id: 'acme', item_id: id, title: 'Inline work', kind: 'inline_started' },
+    ])
+  })
+
+  test('an update setting inline_active true→true posts NOTHING (no transition)', async () => {
+    const reg = new ToolRegistry()
+    const { posts, ack } = spyAck()
+    registerWorkBoardToolSurface(reg, store, { chatAck: ack })
+    const created = (await reg.get(WORK_BOARD_ADD_TOOL)!.handler(
+      { title: 'Inline work' },
+      ctx('owner', 'acme'),
+    )) as { item: { id: string } }
+    const id = created.item.id
+    await reg.get(WORK_BOARD_UPDATE_TOOL)!.handler({ id, inline_active: true }, ctx('owner', 'acme'))
+    posts.length = 0
+    // Already true → true: no flip, no post.
+    await reg.get(WORK_BOARD_UPDATE_TOOL)!.handler({ id, inline_active: true }, ctx('owner', 'acme'))
+    expect(posts).toEqual([])
+  })
+
+  test('an update WITHOUT inline_active in the patch posts NOTHING', async () => {
+    const reg = new ToolRegistry()
+    const { posts, ack } = spyAck()
+    registerWorkBoardToolSurface(reg, store, { chatAck: ack })
+    const created = (await reg.get(WORK_BOARD_ADD_TOOL)!.handler(
+      { title: 'Some item' },
+      ctx('owner', 'acme'),
+    )) as { item: { id: string } }
+    const id = created.item.id
+    posts.length = 0
+    await reg.get(WORK_BOARD_UPDATE_TOOL)!.handler({ id, status: 'in_progress' }, ctx('owner', 'acme'))
+    expect(posts).toEqual([])
+  })
+
+  test('omitted chatAck opt → no throw, byte-identical behaviour', async () => {
+    const reg = new ToolRegistry()
+    registerWorkBoardToolSurface(reg, store)
+    const out = (await reg.get(WORK_BOARD_ADD_TOOL)!.handler(
+      { title: 'No ack' },
+      ctx('owner', 'acme'),
+    )) as { ok: boolean; item?: { id: string } }
+    expect(out.ok).toBe(true)
+    expect(out.item?.id).toBeDefined()
+  })
+})
