@@ -75,6 +75,29 @@ export function attachmentBasename(url: string): string {
 }
 
 /**
+ * Task 6 (chat render fan-out) — a render-stable {@link UploadsCtx}. Built as a
+ * fresh object literal inline, this context value changed identity on EVERY
+ * host re-render (the active conversation streams, re-rendering ChatApp per
+ * token) — and a context value change BYPASSES `React.memo`, forcing every
+ * `AttachmentImage` consumer to re-render each frame. Memoized on the primitive
+ * inputs so it only changes when the token / origin / fetch actually change.
+ * Exported so it can be unit-tested in isolation (repo precedent: buildMetaIndex
+ * / useMediaQuery are exported for tests).
+ */
+export function useUploadsCtx(
+  config: { token: string; origin: string },
+  fetchImpl?: FetchImpl,
+): UploadsCtx {
+  return useMemo<UploadsCtx>(
+    () =>
+      fetchImpl !== undefined
+        ? { token: config.token, origin: config.origin, fetchImpl }
+        : { token: config.token, origin: config.origin },
+    [config.token, config.origin, fetchImpl],
+  )
+}
+
+/**
  * Render one attachment. A same-origin `/api/app/upload/…` URL is bearer-authed,
  * so we fetch it with the token and show the resulting `blob:` object URL
  * (revoked on unmount / src change). `data:` / `blob:` / external `https:` URLs
@@ -191,6 +214,24 @@ interface DocLinkCtx {
   onOpenDoc: (projectId: string, path: string) => void
 }
 const DocLinkContext = createContext<DocLinkCtx | null>(null)
+
+/**
+ * Task 6 (chat render fan-out) — a render-stable {@link DocLinkCtx}. Same fix
+ * as {@link useUploadsCtx}: an inline literal changed identity per host render,
+ * pushing a context update (which bypasses memo) into every `TextPart`.
+ * `onOpenDocLink` is verified stable (a `useCallback` at ProjectShell.tsx), so
+ * memoizing on [origin, onOpenDocLink] holds the value stable across the
+ * streaming re-render storm. Exported for unit testing.
+ */
+export function useDocLinkCtx(
+  origin: string,
+  onOpenDocLink?: (projectId: string, path: string) => void,
+): DocLinkCtx | null {
+  return useMemo<DocLinkCtx | null>(
+    () => (onOpenDocLink !== undefined ? { origin, onOpenDoc: onOpenDocLink } : null),
+    [origin, onOpenDocLink],
+  )
+}
 
 function TextPart(): React.JSX.Element {
   const message = useMessage()
@@ -1167,6 +1208,15 @@ export function TopicRail({
   const [createOpen, setCreateOpen] = useState(false)
   const [newName, setNewName] = useState('')
   const [createError, setCreateError] = useState<string | null>(null)
+  // Unmount guard (#380 sweep): `onCreate` is async, so a create that resolves
+  // after this rail unmounts must not setState on a gone component.
+  const aliveRef = useRef(true)
+  useEffect(() => {
+    aliveRef.current = true
+    return () => {
+      aliveRef.current = false
+    }
+  }, [])
   // The 68px icon rail can't fit the inline create form's name field, so while
   // that form is open we temporarily expand the rail back to full width (and the
   // rows render 2-line). Collapses back to icons on cancel/submit. (Codex P2.)
@@ -1187,6 +1237,7 @@ export function TopicRail({
     setCreateError(null)
     void (async () => {
       const err = await onCreate(name)
+      if (!aliveRef.current) return
       if (err !== null) {
         setCreateError(err)
         return
@@ -1359,12 +1410,17 @@ function Composer({
    *  draft) — same path the surface-level drag-and-drop drop uses. */
   onFiles: (files: FileList | readonly File[]) => void
 }): React.JSX.Element {
-  const composer = useComposer()
+  // Task 6 (chat render fan-out) — subscribe to a BOOLEAN selector, not the whole
+  // composer state. The unselected `useComposer()` re-rendered this entire
+  // composer subtree on EVERY keystroke (each `setText` bumps `state.text`);
+  // selecting only "is there text?" re-renders it just when the Send button's
+  // enabled state flips (empty ↔ non-empty). The live text is read imperatively
+  // in `send()` via the runtime, so no per-keystroke subscription is needed.
+  const hasText = useComposer((s) => s.text.trim().length > 0)
   const composerRuntime = useComposerRuntime()
   const fileInputRef = useRef<HTMLInputElement | null>(null)
 
-  const text = composer.text
-  const canSend = text.trim().length > 0 || draft.hasReady
+  const canSend = hasText || draft.hasReady
 
   const onPick = (e: React.ChangeEvent<HTMLInputElement>): void => {
     const files = e.target.files
@@ -1373,7 +1429,9 @@ function Composer({
   }
 
   const send = (): void => {
-    const body = text.trim()
+    // Task 6 — read the live composer text imperatively (not from a subscribed
+    // value) so this component needn't re-render per keystroke.
+    const body = composerRuntime.getState().text.trim()
     const urls = draft.readUrls()
     if (body.length === 0 && urls.length === 0) return
     if (body.length > 0) {
@@ -1476,6 +1534,15 @@ function ChatSurface({
   const [dragOver, setDragOver] = useState(false)
   const [importState, setImportState] = useState<ImportState>({ status: 'idle' })
   const importActive = uploadAffordance !== null
+  // Unmount guard (#380 sweep): the history-import upload is async, so a result
+  // (or progress tick) that lands after this surface unmounts must not setState.
+  const aliveRef = useRef(true)
+  useEffect(() => {
+    aliveRef.current = true
+    return () => {
+      aliveRef.current = false
+    }
+  }, [])
 
   // BUG 3 — once the live `import_progress` stream begins, the one-shot upload
   // banner has done its job; drop it so the live progress is the sole indicator
@@ -1512,10 +1579,13 @@ function ChatSurface({
       // Live UPLOAD progress — each landed 4 MiB chunk advances the bar. This
       // is the bytes-over-the-wire indicator, distinct from the post-upload
       // analysis progress the engine streams once the zip lands.
-      onProgress: (loaded, total) =>
-        setImportState({ status: 'uploading', message: uploadingMsg, loaded, total }),
+      onProgress: (loaded, total) => {
+        if (!aliveRef.current) return
+        setImportState({ status: 'uploading', message: uploadingMsg, loaded, total })
+      },
     })
       .then((result) => {
+        if (!aliveRef.current) return
         // ND2 (dogfood 2026-06-27) — only claim "reading your history now" when
         // the engine actually STARTED an import job (`job_id` present). A 200
         // with `job_id: null` is a no-op (engine declined to route the upload);
@@ -1533,6 +1603,7 @@ function ChatSurface({
         }
       })
       .catch((err: unknown) => {
+        if (!aliveRef.current) return
         setImportState({
           status: 'error',
           message: err instanceof Error ? err.message : 'import failed',
@@ -1814,13 +1885,9 @@ function MountedConversation({
     [messages],
   )
   const uploadAffordance = useMemo(() => latestUploadAffordance(messages), [messages])
-  const uploadsCtx: UploadsCtx = fetchImpl !== undefined
-    ? { token: config.token, origin: config.origin, fetchImpl }
-    : { token: config.token, origin: config.origin }
-  const docLinkCtx: DocLinkCtx | null =
-    onOpenDocLink !== undefined
-      ? { origin: config.origin, onOpenDoc: onOpenDocLink }
-      : null
+  // Task 6 — render-stable context values (see useUploadsCtx / useDocLinkCtx).
+  const uploadsCtx = useUploadsCtx(config, fetchImpl)
+  const docLinkCtx = useDocLinkCtx(config.origin, onOpenDocLink)
 
   return (
     <div className="car-conv" hidden={!active} aria-hidden={!active}>

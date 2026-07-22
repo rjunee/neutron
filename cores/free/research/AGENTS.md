@@ -6,7 +6,7 @@ This directory is the Tier 1 free Research Core (`@neutron/research-core`).
 
 Surfaces eight MCP tools (3 legacy + 5 new), a chat-command surface
 (`/research <topic>` / `/research deep <topic>` / `/research list` /
-`/research find <q>`), an in-process Haiku-4.5 sub-agent harness for
+`/research find <q>`), an in-process research sub-agent harness for
 `/research deep`, web-search + web-fetch capability with a per-Core
 allow-list, lex/vec hybrid search over prior briefs, claim-evidence-
 citation triple data model, and the sources-cited invariant.

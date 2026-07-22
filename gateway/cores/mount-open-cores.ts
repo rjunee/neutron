@@ -307,6 +307,15 @@ export async function mountOpenCores(
       substrate,
     }),
     default_project_id,
+    // Sub-agent web-search key — re-read PER DISPATCH so a key pasted into
+    // Settings lands without a restart. Null when unset → graceful no-key
+    // degradation inside the research_web_search executor.
+    tavily_api_key: () =>
+      input.secretsStore.get({
+        owner_handle: ownerHandle,
+        kind: 'byo_api_key',
+        label: 'tavily',
+      }),
   })
 
   // Email triage/summarize LLM — substrate-backed when available, else a stub that

@@ -145,6 +145,19 @@ async function startHarness(): Promise<Harness> {
   }> = []
   const llm_call: ResearchLlmCall = async (input) => {
     llmCalls.push(input)
+    // Task 10: the production dispatcher now runs a real agentic tool loop
+    // and reports tools_available:true, which ARMS the orchestrator's
+    // zero-tool grounding gate. A deep run that goes straight to the brief
+    // (zero tool calls) is now rejected + retried, then fails. So for the
+    // Atlas sub-agent's FIRST turn (system carries the Atlas prompt, and
+    // no tool result has been threaded yet) we script ONE vault tool round;
+    // the threaded [TOOL_RESULT] turn (and the standard-synthesis path,
+    // whose system prompt is not Atlas-shaped) get the happy brief.
+    if (input.system.includes('Atlas') && !input.user.includes('[TOOL_RESULT')) {
+      return JSON.stringify({
+        tool_call: { tool: 'research_vault_search', input: { query: 'prior briefs' } },
+      })
+    }
     return HAPPY_BRIEF
   }
   const wiring = buildProductionResearchCoreWiring({

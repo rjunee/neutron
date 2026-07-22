@@ -4,7 +4,7 @@ Tier 1 free Research Core — the Atlas-shape research workflow productized for 
 
 ## Status
 
-**v0.2.0 (Research Core S1, 2026-05-21)** — chat-command surface, per-project storage, claim-evidence-citation triples, sources-cited invariant, in-process Haiku-4.5 sub-agent for `/research deep`, web-browse with allow-list, lex/vec hybrid search over prior briefs, P5.3 launcher tile + `app_tab` UI component, production-composer reachability guard.
+**v0.2.0 (Research Core S1, 2026-05-21)** — chat-command surface, per-project storage, claim-evidence-citation triples, sources-cited invariant, in-process research sub-agent for `/research deep`, web-browse with allow-list, lex/vec hybrid search over prior briefs, P5.3 launcher tile + `app_tab` UI component, production-composer reachability guard.
 
 ## Architecture
 
@@ -16,7 +16,7 @@ Tier 1 free Research Core — the Atlas-shape research workflow productized for 
 | Migrations | `migrations/0001_research_claims.sql` | Forward-only schema (research_tasks + research_claims + research_sub_agent_runs + research_briefs_fts + research_meta sentinel) |
 | Orchestrator | `src/research-orchestrator.ts` | Parse-once-retry-once + sources-cited assertion + claim insertion |
 | Substrate port | `src/backend.ts:ResearchSubstrate` | Production wires runtime.Substrate; tests use `buildCannedResearchSubstrate` |
-| Sub-agent | `src/sub-agent.ts` + `src/sub-agent-prompt.ts` | Atlas-shape Haiku-4.5 harness for `/research deep` |
+| Sub-agent | `src/sub-agent.ts` + `src/sub-agent-prompt.ts` | Atlas-shape research sub-agent harness for `/research deep` |
 | Web search | `src/web-search.ts` | Tavily provider (paid, optional); pluggable interface |
 | Web fetch | `src/web-fetch.ts` + `src/web-fetch-allowlist.ts` | RFC-1918 / loopback / link-local / file:// / non-allowlisted public domain rejected |
 | Vault search | `src/vault-search.ts` | Lex+vec hybrid over `research_briefs_fts` |
@@ -68,7 +68,7 @@ Semantics: declaring `network:browse` implies `network:external` and promises th
 | `research_start` | write | Synchronous standard-depth synthesis pass |
 | `research_status` | read | Look up task lifecycle state |
 | `research_fetch` | read | Fetch the completed brief |
-| `research_deep` | write + network:browse + agent:dispatch_subagent | Haiku-4.5 sub-agent run |
+| `research_deep` | write + network:browse + agent:dispatch_subagent | research sub-agent run |
 | `research_list` | read | Recent briefs for a project |
 | `research_find` | read | Lex+vec hybrid search |
 | `research_cite` | write | Add or update a claim's citation |
@@ -78,7 +78,7 @@ Semantics: declaring `network:browse` implies `network:external` and promises th
 
 ```
 /research <topic>            — synchronous standard-depth brief
-/research deep <topic>       — Haiku-4.5 sub-agent (web browse + vault search), ~5min budget
+/research deep <topic>       — research sub-agent (web browse + vault search), ~5min budget
 /research list               — recent briefs for this project
 /research find <query>       — lex+vec hybrid search over prior briefs
 /research help               — surface cheatsheet

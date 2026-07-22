@@ -74,6 +74,7 @@ import {
 import { PROFILE_UNTRUSTED_IMPORT } from '@neutronai/gateway/wiring/substrate-profiles.ts'
 import { buildSubstrateWorkflowFire } from '@neutronai/trident/inner-loop.ts'
 import { getBestModel } from '@neutronai/runtime/models.ts'
+import { FAST_MODEL } from '@neutronai/runtime/models.ts'
 import {
   FIRST_CONVERSATIONAL_TIMEOUT_MS_DEFAULT,
   PREWARM_AWAIT_CAP_MS_DEFAULT,
@@ -147,6 +148,7 @@ import { TridentRunStore, type TridentRun } from '@neutronai/trident/store.ts'
 import { runProgressForItem } from '@neutronai/trident/run-progress.ts'
 import { SecretsStore } from '@neutronai/auth/secrets-store.ts'
 import { buildPersonalityCharacterSuggester } from '@neutronai/onboarding/interview/personality-character-suggester.ts'
+import { buildLivePersonalitySuggestionCoordinator } from '@neutronai/onboarding/interview/live-personality-suggestions.ts'
 import { buildPersonaSummarizer } from '@neutronai/onboarding/persona-gen/summarize.ts'
 import { PersonaPromptLoader } from '@neutronai/gateway/wiring/persona-loader.ts'
 import type { GraphComposer } from '@neutronai/gateway/boot-helpers.ts'
@@ -284,6 +286,8 @@ import {
   type AppWsOutboundWorkBoardChanged,
 } from '@neutronai/channels/adapters/app-ws/envelope.ts'
 import { createWorkBoardSurface } from '@neutronai/gateway/http/work-board-surface.ts'
+import { classifyWorkBoardTaskType } from '@neutronai/work-board/task-type-classifier.ts'
+import { buildWorkBoardChatAck } from '@neutronai/work-board/chat-ack.ts'
 import { createProjectCredentialsSurface } from '@neutronai/gateway/http/project-credentials-surface.ts'
 import { createCodexCredentialSurface } from '@neutronai/gateway/http/codex-credential-surface.ts'
 import { ProjectCredentialStore } from '@neutronai/project-credentials/store.ts'
@@ -2543,6 +2547,19 @@ export function buildOpenGraphComposer(
     // (not the raw internal guard text into the work pane) and leave the item
     // quietly pending. Mirrors the `appWsHolder` late-binding pattern.
     const buildClarifyPoster: { post?: (chatId: string, text: string) => void } = {}
+    // #429 task 4 — ONE shared deterministic chat-ack poster. A chat-dispatched
+    // board mutation (agent `work_board_add`, an inline_active false→true flip,
+    // or a successful board-bound build dispatch/start) posts a short agent-style
+    // confirmation to the originating chat IMMEDIATELY — independent of the warm
+    // REPL's single terminal reply() (which lands only at turn end, up to 45 min
+    // for a long inline job). Delivery rides the SAME #337 durable+live app-ws
+    // seam a normal reply uses; `.post?.` is dereffed at FIRE time, so late
+    // binding is safe (a no-op if the adapter is not yet bound). DI presence, NOT
+    // a feature flag — Open always wires it; there is no env gate.
+    const workBoardChatAck = buildWorkBoardChatAck({
+      resolve_chat_id: (projectId) => tridentDeliveryChatId(projectId),
+      post: (chatId, text) => buildClarifyPoster.post?.(chatId, text),
+    })
     // ▶ start/retry closure — resolves the card's saved spec (its plans/ doc, else
     // its title) and dispatches a board-bound build through the SAME chokepoint
     // (`dispatchBoardBoundBuild`: required-item + ask-before-acting gate +
@@ -2632,9 +2649,21 @@ export function buildOpenGraphComposer(
               }),
           })
         : undefined
+    // #429 task 3 — the classify LLM for the auto-classifier, built like the
+    // proactiveLlm above: the warm `cc-llm` substrate + FAST_MODEL (no model
+    // literal in the classifier itself). null on an LLM-less box → the
+    // classifier degrades to keyword-only.
+    const workBoardClassifyLlm =
+      llmCallSubstrate !== null
+        ? buildAnthropicLlmCall({ substrate: llmCallSubstrate, model: FAST_MODEL })
+        : null
     const workBoardSurface = createWorkBoardSurface({
       store: workBoardStore,
       auth: appOwnerAuth,
+      // #429 task 3 — no manual Build/Research picker; an omitted task_type is
+      // FAST_MODEL-classified with keyword fallback (LLM-less boots classify by
+      // keyword only). Explicit task_type from any caller always wins.
+      classify_task_type: (title) => classifyWorkBoardTaskType({ title, llm: workBoardClassifyLlm }),
       // Item 1 (live progress on GET) + item 3 (delete cancels the linked run,
       // now via the §F6a `terminate()` chokepoint so the observers fire).
       trident_runs: boardRunAccess,
@@ -2683,6 +2712,25 @@ export function buildOpenGraphComposer(
     // onboarding preamble/affordance or is plain steady-state chat.
     const engine = landing.engine
     const onboardingStateStore = landing.stateStore
+    // LIVE-path personality suggester (2026-07-21). Feeds the SAME Opus-backed
+    // `personalityCharacterSuggester` into the live CC-session onboarding so the
+    // per-turn step guard renders MEMOIZED, owner-personalized picks instead of
+    // the static five. Never blocks a turn: generation is background fire-and-
+    // forget, memoized in `phase_state`, fingerprint-gated for regeneration; the
+    // guard renders the static default until the picks land / on LLM failure.
+    // `undefined` on an LLM-less box (suggester unwired) — the guard then renders
+    // the static `DEFINED_PERSONALITY_CHARACTERS` set (in the current `- name (why)`
+    // format; same NAME SET as before the suggester, not the bare pre-suggester list).
+    const livePersonalityCoordinator =
+      personalityCharacterSuggester !== undefined
+        ? buildLivePersonalitySuggestionCoordinator({
+            suggester: personalityCharacterSuggester,
+            stateStore: onboardingStateStore,
+            owner_slug: project_slug,
+            seed: project_slug,
+            fireAndForget,
+          })
+        : undefined
     // No state row = fresh install → onboarding. A row in a non-terminal phase =
     // mid-onboarding. 'completed'/'failed' = steady-state chat.
     const isOnboardingActive = async (user_id: string): Promise<boolean> => {
@@ -3180,9 +3228,20 @@ export function buildOpenGraphComposer(
                   st.phase === 'import_running' ||
                   st.phase === 'import_analysis_presented' ||
                   (await probeInFlightImport())
+                // LIVE personality suggester (2026-07-21): kick off a background,
+                // fingerprint-gated Opus generation (never awaited here) and read
+                // back the memoized picks to render in THIS turn's step guard. Null
+                // until the picks land / on LLM failure → the guard keeps the static
+                // default NAME SET (rendered in the current `- name (why)` format).
+                livePersonalityCoordinator?.maybeKickoff(user_id, st)
+                const guardCharacters =
+                  livePersonalityCoordinator?.guardCharacters(st.phase_state) ?? null
                 const stepGuard = buildOnboardingStepGuardFragment(st.phase_state, {
                   ...requiredFieldsOptions,
                   import_in_flight: importInFlight,
+                  ...(guardCharacters !== null
+                    ? { personality_characters: guardCharacters }
+                    : {}),
                 })
                 const importSteer = buildImportInFlightSteerFragment(importInFlight)
                 const ir = st.phase_state['import_result']
@@ -3896,7 +3955,7 @@ export function buildOpenGraphComposer(
       // by the SAME canonical store the HTTP surface + per-turn injection use,
       // so an agent mutation and a human HTTP write share one code path + one
       // live `work_board_changed` push.
-      work_board: { store: workBoardStore, spec_doc: workBoardSpecDoc },
+      work_board: { store: workBoardStore, spec_doc: workBoardSpecDoc, chat_ack: workBoardChatAck },
       // Create-project agent tool (create_project) — agent-native parity with
       // the project-rail Create Project button; same owner-scoped create path
       // the HTTP surface uses (one code path).
@@ -4026,6 +4085,10 @@ export function buildOpenGraphComposer(
                 chat_id: tridentDeliveryChatId(projectId),
                 thread_id: null,
               }),
+              // #429 task 4 — the same shared ack: a successful agent-native
+              // build dispatch/start confirms in the chat immediately (the
+              // terminal result still announces later via resolve_delivery/#339).
+              chat_ack: workBoardChatAck,
             },
           }
         : {}),

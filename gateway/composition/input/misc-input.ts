@@ -267,6 +267,14 @@ export interface MiscCompositionInput {
      * at it. Omitted → title-only adds (unchanged behaviour).
      */
     spec_doc?: import('@neutronai/work-board/spec-doc-service.ts').WorkBoardSpecDocService
+    /**
+     * #429 task 4 — deterministic chat ack. When supplied, an agent
+     * `work_board_add` success + an inline_active false→true `work_board_update`
+     * post a short confirmation to the originating chat immediately (durable+live
+     * via the composer's app-ws seam), so a chat-dispatched board mutation is not
+     * silent until the turn's single reply() lands. Omitted → no post.
+     */
+    chat_ack?: import('@neutronai/work-board/chat-ack.ts').WorkBoardChatAck
   }
   /**
    * Work Board Phase 2b — when supplied, the `tools` module registers the
@@ -307,6 +315,13 @@ export interface MiscCompositionInput {
     resolve_delivery?: (
       project_id: string | null,
     ) => { chat_id: string | null; thread_id: string | null }
+    /**
+     * #429 task 4 — deterministic chat ack. When supplied, a SUCCESSFUL
+     * board-bound dispatch/start (`work_board_dispatch_build` / `work_board_start`)
+     * posts a short `build_dispatched` confirmation to the chat immediately.
+     * Rejected dispatches post nothing. Omitted → no post.
+     */
+    chat_ack?: import('@neutronai/work-board/chat-ack.ts').WorkBoardChatAck
   }
   /**
    * Codex connect/status agent tools (Part B) — when supplied, the `tools`

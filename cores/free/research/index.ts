@@ -5,7 +5,7 @@
  * per-project structured-brief storage at
  * `<OWNER_HOME>/Projects/<project_id>/research/research.db`, with the
  * claim-evidence-citation triple data model + the sources-cited
- * invariant + Haiku-4.5 sub-agent for `/research deep` (web browse +
+ * invariant + research sub-agent for `/research deep` (web browse +
  * lex/vec hybrid search over prior briefs).
  *
  * Surfaces:
@@ -132,6 +132,7 @@ export {
 // S1 — sub-agent harness + Atlas-shape prompt.
 export {
   DEFAULT_SUB_AGENT_MODEL,
+  RETRY_FEEDBACK_MARKER,
   PerOwnerConcurrencyGate,
   SubAgentConcurrencyExceededError,
   SubAgentTimeoutError,
@@ -229,9 +230,15 @@ export {
 export {
   buildRuntimeResearchSubAgentDispatcher,
   buildRuntimeResearchSubstrate,
+  DEFAULT_MAX_TOOL_ROUNDS,
+  FINALIZE_MARKER,
+  TOOL_CALL_BLOCK_MARKER,
+  TOOL_RESULT_BLOCK_MARKER,
   type BuildRuntimeResearchSubAgentDispatcherOptions,
   type BuildRuntimeResearchSubstrateOptions,
   type ResearchLlmCall,
+  type ResearchSubAgentToolExecutor,
+  type ResearchSubAgentToolExecutors,
 } from './src/substrate-runtime.ts'
 
 // S1 — production wiring helper.

@@ -172,6 +172,7 @@ test('CONCURRENT finalize whose TERMINAL write FAILS — both callers observe th
   const togglingStore: OnboardingStateStore = {
     async get(slug, uid) { return real.get(slug, uid) },
     async upsert(inp) { return real.upsert(inp) },
+    async patchPhaseState(o, u, p) { return real.patchPhaseState(o, u, p) },
     async rekey(a, b, c) { return real.rekey(a, b, c) },
     async delete(slug, uid) { return real.delete(slug, uid) },
     async deleteByOwner(slug) { return real.deleteByOwner(slug) },
@@ -246,6 +247,7 @@ test('finalize materializes the FRESHEST state when phase_state changes during s
       return state
     },
     async upsert(inp) { return real.upsert(inp) },
+    async patchPhaseState(o, u, p) { return real.patchPhaseState(o, u, p) },
     async rekey(a, b, c) { return real.rekey(a, b, c) },
     async delete(slug, uid) { return real.delete(slug, uid) },
     async deleteByOwner(slug) { return real.deleteByOwner(slug) },
@@ -300,6 +302,7 @@ test('finalize picks up a NON-primary-projects field changed during stabilize (w
       return state
     },
     async upsert(inp) { return real.upsert(inp) },
+    async patchPhaseState(o, u, p) { return real.patchPhaseState(o, u, p) },
     async rekey(a, b, c) { return real.rekey(a, b, c) },
     async delete(slug, uid) { return real.delete(slug, uid) },
     async deleteByOwner(slug) { return real.deleteByOwner(slug) },
@@ -350,6 +353,7 @@ test('finalize DEFERS with ZERO side effects under continuous churn — never st
       return state
     },
     async upsert(inp) { return real.upsert(inp) },
+    async patchPhaseState(o, u, p) { return real.patchPhaseState(o, u, p) },
     async rekey(a, b, c) { return real.rekey(a, b, c) },
     async delete(slug, uid) { return real.delete(slug, uid) },
     async deleteByOwner(slug) { return real.deleteByOwner(slug) },
@@ -498,6 +502,7 @@ test('finalize refuses a non-finalizable phase even when the live read THROWS �
   const throwingGetStore: OnboardingStateStore = {
     async get() { throw new Error('read boom') },
     async upsert(inp) { return real.upsert(inp) },
+    async patchPhaseState(o, u, p) { return real.patchPhaseState(o, u, p) },
     async rekey(a, b, c) { return real.rekey(a, b, c) },
     async delete(slug, uid) { return real.delete(slug, uid) },
     async deleteByOwner(slug) { return real.deleteByOwner(slug) },
@@ -536,6 +541,7 @@ test('finalize DEFERS on a mutation in the materialize→CAS window WITHOUT unsa
   const casWrapper: OnboardingStateStore = {
     async get(slug, uid) { return real.get(slug, uid) },
     async upsert(inp) { return real.upsert(inp) },
+    async patchPhaseState(o, u, p) { return real.patchPhaseState(o, u, p) },
     async rekey(a, b, c) { return real.rekey(a, b, c) },
     async delete(slug, uid) { return real.delete(slug, uid) },
     async deleteByOwner(slug) { return real.deleteByOwner(slug) },
@@ -597,6 +603,7 @@ test('finalize ABORTS (never completes) if the phase transitions to a live impor
       return state
     },
     async upsert(inp) { return real.upsert(inp) },
+    async patchPhaseState(o, u, p) { return real.patchPhaseState(o, u, p) },
     async rekey(a, b, c) { return real.rekey(a, b, c) },
     async delete(slug, uid) { return real.delete(slug, uid) },
     async deleteByOwner(slug) { return real.deleteByOwner(slug) },

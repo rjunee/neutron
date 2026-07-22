@@ -93,6 +93,20 @@ export interface UpsertOnboardingStateInput {
   phase_state_patch?: Record<string, unknown>
   /** Wall-clock ms; defaults to `now()` of the implementation. */
   advanced_at?: number
+  /**
+   * Background / patch-only write guard (Argus r2 blocker, 2026-07-22). When true
+   * AND the row already exists, `upsert` PRESERVES the row's CURRENT `phase` and
+   * `last_advanced_at` — read inside the same write — instead of stamping the
+   * caller-supplied `phase` / `advanced_at`. A fire-and-forget writer that read
+   * state seconds ago (the live personality suggester's up-to-45 s LLM call) can
+   * then persist a `phase_state_patch` WITHOUT regressing a phase transition or
+   * resetting the resume-window timer that a concurrent turn committed while the
+   * call was in flight — the lost-update the plain unconditional UPDATE caused.
+   * `phase` / `advanced_at` are still used when the row must be INSERTed (no current
+   * value to preserve). Omit / false on every foreground write (which owns the phase
+   * transition and intends to advance the timer).
+   */
+  preservePhaseAndTimer?: boolean
   /** Set when the engine reaches a terminal phase. */
   completed_at?: number
   import_job_id?: string | null
@@ -152,6 +166,21 @@ export interface OnboardingStateStore {
     old_owner_slug: string,
     new_owner_slug: string,
     user_id: string,
+  ): Promise<OnboardingState | null>
+
+  /**
+   * Patch the `phase_state` of an EXISTING row, preserving the current `phase`
+   * and `last_advanced_at` (update-if-present / CAS semantics). If the row does
+   * not exist — e.g. an admin reset deleted it between the caller's re-read and
+   * this write — returns **null** and skips the write entirely, never inserting.
+   *
+   * Use this instead of `upsert({preservePhaseAndTimer:true})` when the caller
+   * must NOT resurrect a deleted row (Argus r2 blocker, 2026-07-22).
+   */
+  patchPhaseState(
+    owner_slug: string,
+    user_id: string,
+    patch: Record<string, unknown>,
   ): Promise<OnboardingState | null>
 
   /** Drop a single (instance, user) row. Used in tests + by `/admin/.../onboarding/reset`. */
@@ -238,12 +267,16 @@ export class InMemoryOnboardingStateStore implements OnboardingStateStore {
       ? { ...existing.phase_state, ...(input.phase_state_patch ?? {}) }
       : { ...(input.phase_state_patch ?? {}) }
 
+    // Preserve the CURRENT phase + resume-window timer on a background patch-only
+    // write, so a stale-read fire-and-forget upsert can't regress a phase transition
+    // (Argus r2 blocker). Only meaningful when the row exists.
+    const preserve = input.preservePhaseAndTimer === true && existing !== undefined
     const next: OnboardingState = existing
       ? {
           ...existing,
-          phase: input.phase,
+          phase: preserve ? existing.phase : input.phase,
           phase_state: merged_phase_state,
-          last_advanced_at: advanced_at,
+          last_advanced_at: preserve ? existing.last_advanced_at : advanced_at,
           completed_at: input.completed_at !== undefined ? input.completed_at : existing.completed_at,
           import_job_id:
             input.import_job_id !== undefined ? input.import_job_id : existing.import_job_id,
@@ -274,6 +307,22 @@ export class InMemoryOnboardingStateStore implements OnboardingStateStore {
           onboarding_handoff_emitted_at: input.onboarding_handoff_emitted_at ?? null,
           attempt_id: this.newAttemptId(),
         }
+    this.rows.set(key, next)
+    return cloneState(next)
+  }
+
+  async patchPhaseState(
+    owner_slug: string,
+    user_id: string,
+    patch: Record<string, unknown>,
+  ): Promise<OnboardingState | null> {
+    const key = compositeKey(owner_slug, user_id)
+    const existing = this.rows.get(key)
+    if (existing === undefined) return null
+    const next: OnboardingState = {
+      ...existing,
+      phase_state: { ...existing.phase_state, ...patch },
+    }
     this.rows.set(key, next)
     return cloneState(next)
   }

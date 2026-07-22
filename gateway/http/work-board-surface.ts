@@ -5,6 +5,8 @@
  *
  *   - `GET    /api/app/projects/<project_id>/work-board`                 list
  *   - `POST   /api/app/projects/<project_id>/work-board`                 create
+ *     (a create that omits `task_type` is auto-classified build|research from
+ *      the title — #429 task 3; an explicit task_type always wins)
  *   - `PATCH  /api/app/projects/<project_id>/work-board/<item_id>`       update
  *   - `POST   /api/app/projects/<project_id>/work-board/<item_id>/complete`
  *   - `POST   /api/app/projects/<project_id>/work-board/<item_id>/reorder`
@@ -136,6 +138,11 @@ export interface WorkBoardSurfaceOptions {
    *  deleted, so a research subprocess is not orphaned. Best-effort; a no-op for
    *  an unknown run id. Wired to `DispatchService.stop`. */
   cancel_dispatch?: (run_id: string) => Promise<void>
+  /** #429 task 3 — auto-classify build|research from the title when a create
+   *  omits task_type. Absent → store default ('build'), the pre-existing
+   *  behavior. Total (never rejects); an explicit task_type always short-circuits
+   *  it. */
+  classify_task_type?: (title: string) => Promise<WorkBoardTaskType>
 }
 
 export interface WorkBoardSurface {
@@ -161,6 +168,7 @@ export function createWorkBoardSurface(opts: WorkBoardSurfaceOptions): WorkBoard
   const startBuild = opts.start_build
   const startResearch = opts.start_research
   const cancelDispatch = opts.cancel_dispatch
+  const classifyTaskType = opts.classify_task_type
 
   /**
    * Attach each bound item's live run progress (item 1) so the HTTP GET carries
@@ -214,7 +222,7 @@ export function createWorkBoardSurface(opts: WorkBoardSurfaceOptions): WorkBoard
           return jsonOk({ items: withRunProgress(store.list(scope)), project_id })
         }
         if (method === 'POST') {
-          return handleCreate(req, store, scope, project_id, createCard)
+          return handleCreate(req, store, scope, project_id, createCard, classifyTaskType)
         }
         return jsonError(405, 'method_not_allowed', `method '${method}' not allowed on /work-board`)
       }
@@ -262,6 +270,7 @@ async function handleCreate(
   project_slug: string,
   project_id: string,
   createCard: WorkBoardCreateCardFn | undefined,
+  classifyTaskType: ((title: string) => Promise<WorkBoardTaskType>) | undefined,
 ): Promise<Response> {
   const body = await readJsonBody(req)
   if (body === null) return jsonError(400, 'malformed_json', 'expected JSON body')
@@ -274,7 +283,7 @@ async function handleCreate(
   if (status === false) {
     return jsonError(400, 'invalid_status', `status must be one of ${VALID_STATUSES.join('/')}`)
   }
-  const task_type = readTaskType(fields['task_type'])
+  let task_type = readTaskType(fields['task_type'])
   if (task_type === false) {
     return jsonError(400, 'invalid_task_type', `task_type must be one of ${VALID_TASK_TYPES.join('/')}`)
   }
@@ -285,6 +294,20 @@ async function handleCreate(
   const spec = readOptionalString(fields['spec'])
   if (spec === false) {
     return jsonError(400, 'invalid_spec', 'spec must be a string')
+  }
+  // #429 task 3 — the web add-form no longer carries a Build/Research picker, so
+  // a create that OMITS task_type is auto-classified from the title here (before
+  // BOTH the create_card and the store.create branches, so either path persists
+  // the resolved type). An explicit task_type from ANY caller (mobile, agent
+  // tools, ▶ retry) short-circuits this — it's never re-classified. The
+  // classifier contract never rejects, but a defensive catch keeps a create from
+  // failing on a classifier bug: it falls through to the store default ('build').
+  if (task_type === null && classifyTaskType !== undefined) {
+    try {
+      task_type = await classifyTaskType(title)
+    } catch {
+      task_type = null
+    }
   }
   try {
     // M1 on-disk spec: when the spec-doc path is wired, route through it so a

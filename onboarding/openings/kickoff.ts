@@ -145,6 +145,10 @@ interface KickoffSignal {
   suggested_topics: string[]
   slice_chunks: number
   summary_written: boolean
+  /** The materializer's own data-sufficiency verdict (MaterializeOutcome.has_context):
+   *  owner-stated rationale, imported rationale, related import signal, or matched
+   *  transcript slices. False when the outcome is missing. */
+  has_context: boolean
   /** Upcoming deadlines from the import related to this project (title + due_at). */
   deadlines: Array<{ title: string; due_at: number }>
 }
@@ -234,22 +238,32 @@ function assessSignal(input: KickoffInput, nowMs: number): KickoffSignal {
     suggested_topics,
     slice_chunks: input.outcome?.slice_chunk_count ?? 0,
     summary_written: input.outcome?.summary_written ?? false,
+    has_context: input.outcome?.has_context ?? false,
     deadlines: relatedDeadlines(input, nowMs),
   }
 }
 
 /**
- * HARD data-sufficiency gate for a WORK project. Enough to draft a genuinely
- * useful starting plan when there is real substance to ground on: STATUS open
- * threads, a real transcript summary / matched transcript slices (import-derived
- * history), OR an import rationale paired with at least one suggested topic. A
- * bare deterministic-template README (no import signal) does NOT qualify on its
- * own — that is the "better nothing than a bad job" line.
+ * HARD data-sufficiency gate for a WORK project. PRIMARY check is the
+ * materializer's own `has_context` verdict — the single source of truth for
+ * "real grounding exists" (it already counts owner-stated project rationale,
+ * imported rationale, related import signal, and matched slices;
+ * project-identity.ts hasRealProjectContext + project-materializer.ts OR-ing).
+ * Previously this gate silently starved owner-described projects whose rationale
+ * never reaches `matched` (2026-07-21 dogfood: generic openings on legitimate
+ * projects). The remaining checks cover the outcome-null case (materialize
+ * threw): STATUS open threads, summary/slices, or import rationale OR suggested
+ * topics (OR, aligned with hasInterestSignal). A bare deterministic-template
+ * README with no outcome and no import signal STILL does not qualify — the
+ * "better nothing than a bad job" line holds, and has_context:false projects
+ * keep the honest no-context prompt (finalize.ts routes those to
+ * buildNoContextProjectOpening).
  */
 function hasWorkSignal(s: KickoffSignal): boolean {
+  if (s.has_context) return true
   if (s.open_threads.length > 0) return true
   if (s.summary_written || s.slice_chunks > 0) return true
-  if (s.rationale.length > 0 && s.suggested_topics.length > 0) return true
+  if (s.rationale.length > 0 || s.suggested_topics.length > 0) return true
   return false
 }
 

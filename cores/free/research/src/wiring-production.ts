@@ -34,6 +34,7 @@ import {
   buildRuntimeResearchSubAgentDispatcher,
   buildRuntimeResearchSubstrate,
   type ResearchLlmCall,
+  type ResearchSubAgentToolExecutors,
 } from './substrate-runtime.ts'
 import {
   createResearchChatCommandFilter,
@@ -41,6 +42,9 @@ import {
 } from './chat-bridge.ts'
 import { SUB_AGENT_DEFAULT_CONCURRENCY_CAP } from './manifest.ts'
 import type { ResearchSubstrate } from './backend.ts'
+import { searchPriorBriefs } from './vault-search.ts'
+import { buildTavilyProvider, webSearch } from './web-search.ts'
+import { webFetch, type DnsLookupFn } from './web-fetch.ts'
 
 export interface BuildProductionResearchCoreWiringOptions {
   project_slug: string
@@ -55,6 +59,21 @@ export interface BuildProductionResearchCoreWiringOptions {
   concurrency_cap?: number
   /** Override the manifest (tests rarely need this). */
   manifest?: NeutronManifest
+  /**
+   * Tavily API key getter for the sub-agent's `research_web_search`
+   * tool. Re-read PER DISPATCH so a key pasted into Settings lands
+   * without a restart (mirrors the credential-freshness doctrine).
+   * Returns `null` when no key is configured → the tool degrades
+   * gracefully (threads a "web search unavailable" error). Absent
+   * entirely = the same no-key degradation.
+   */
+  tavily_api_key?: () => Promise<string | null>
+  /** Override `fetch` for the Tavily search request (test seam). */
+  web_search_fetcher?: typeof fetch
+  /** Override `fetch` for `research_web_fetch` (test seam). */
+  web_fetch_fetcher?: typeof fetch
+  /** Override DNS resolution for `research_web_fetch` (test seam). */
+  web_fetch_lookup?: DnsLookupFn
 }
 
 export interface ProductionResearchCoreWiring {
@@ -87,10 +106,103 @@ export function buildProductionResearchCoreWiring(
     cap: opts.concurrency_cap ?? SUB_AGENT_DEFAULT_CONCURRENCY_CAP,
   })
   const substrate = buildRuntimeResearchSubstrate({ llm_call: opts.llm_call })
+  const manifest = opts.manifest ?? loadManifest()
+
+  // The three REAL sub-agent tool executors. Each is TOTAL: an outer
+  // try/catch converts any thrown error into a threaded `{error}` result
+  // (recorded success:false) so a single tool failure never aborts the
+  // whole dispatch. Bad-shape inputs return `{error: 'invalid input: ...'}`.
+  const default_project_id = opts.default_project_id ?? 'default'
+  const tool_executors: ResearchSubAgentToolExecutors = {
+    async research_vault_search(args, ctx) {
+      try {
+        const a = (args ?? {}) as { query?: unknown; limit?: unknown }
+        if (typeof a.query !== 'string' || a.query.trim().length === 0) {
+          return { error: 'invalid input: `query` must be a non-empty string' }
+        }
+        const limit =
+          typeof a.limit === 'number' && Number.isFinite(a.limit)
+            ? a.limit
+            : undefined
+        const handle = await resolver.resolve(
+          ctx.project_id ?? default_project_id,
+        )
+        return {
+          hits: searchPriorBriefs(
+            { query: a.query, ...(limit !== undefined ? { limit } : {}) },
+            { store: handle.store },
+          ),
+        }
+      } catch (err) {
+        return { error: String((err as { message?: unknown })?.message ?? err) }
+      }
+    },
+    async research_web_search(args) {
+      try {
+        const a = (args ?? {}) as { query?: unknown; max_results?: unknown }
+        if (typeof a.query !== 'string' || a.query.trim().length === 0) {
+          return { error: 'invalid input: `query` must be a non-empty string' }
+        }
+        const max_results =
+          typeof a.max_results === 'number' && Number.isFinite(a.max_results)
+            ? a.max_results
+            : undefined
+        const key = opts.tavily_api_key ? await opts.tavily_api_key() : null
+        const provider = buildTavilyProvider({
+          api_key: key,
+          ...(opts.web_search_fetcher !== undefined
+            ? { fetcher: opts.web_search_fetcher }
+            : {}),
+        })
+        if (!provider.isAvailable()) {
+          return {
+            error:
+              'web search unavailable: no Tavily API key configured. Rely on ' +
+              'research_vault_search results and tag externally-sourced claims ' +
+              'confidence:"unverified".',
+          }
+        }
+        return {
+          hits: await webSearch(
+            {
+              query: a.query,
+              ...(max_results !== undefined ? { max_results } : {}),
+            },
+            { manifest, provider },
+          ),
+        }
+      } catch (err) {
+        return { error: String((err as { message?: unknown })?.message ?? err) }
+      }
+    },
+    async research_web_fetch(args) {
+      try {
+        const a = (args ?? {}) as { url?: unknown }
+        if (typeof a.url !== 'string' || a.url.trim().length === 0) {
+          return { error: 'invalid input: `url` must be a non-empty string' }
+        }
+        return await webFetch(
+          { url: a.url },
+          {
+            manifest,
+            ...(opts.web_fetch_fetcher !== undefined
+              ? { fetcher: opts.web_fetch_fetcher }
+              : {}),
+            ...(opts.web_fetch_lookup !== undefined
+              ? { lookup: opts.web_fetch_lookup }
+              : {}),
+          },
+        )
+      } catch (err) {
+        return { error: String((err as { message?: unknown })?.message ?? err) }
+      }
+    },
+  }
+
   const sub_agent_dispatcher = buildRuntimeResearchSubAgentDispatcher({
     llm_call: opts.llm_call,
+    tool_executors,
   })
-  const manifest = opts.manifest ?? loadManifest()
   const project_backend = buildProjectResearchOrchestrator({
     resolver,
     substrate,
@@ -101,7 +213,7 @@ export function buildProductionResearchCoreWiring(
   })
   const chat_command_filter = createResearchChatCommandFilter({
     backend: project_backend,
-    default_project_id: opts.default_project_id ?? 'default',
+    default_project_id,
   })
   return {
     resolver,

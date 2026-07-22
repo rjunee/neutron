@@ -44,10 +44,8 @@
  * never fire in production.
  */
 
-import {
-  DEFINED_PERSONALITY_CHARACTER_NAMES,
-  IMPORT_DECISION_OPTIONS,
-} from './onboarding-preamble.ts'
+import { IMPORT_DECISION_OPTIONS } from './onboarding-preamble.ts'
+import { candidatePersonalityAnchorNames } from './live-personality-suggestions.ts'
 import type { ImportDecision } from './required-fields-audit.ts'
 
 /**
@@ -208,11 +206,14 @@ export function captureButtonBackedRequiredField(
   if (optionLines.length === 0) return null
   const optionBody = optionLines.join('\n').toLowerCase()
 
-  // Did the prior message present the personality archetype menu? Anchor on the
-  // DEFINED archetype names actually rendered (substring — the agent may append
-  // a "— why" gloss to each). This distinguishes the personality step from an
-  // early yes/no (e.g. the import offer) that must NEVER settle personality.
-  const presentedPersonality = DEFINED_PERSONALITY_CHARACTER_NAMES.some((n) =>
+  // Did the prior message present the personality archetype menu? Anchor on EVERY
+  // name the personality step could have rendered this owner — static defaults ∪
+  // diverse-fallback pool ∪ the memoized Opus picks (`candidatePersonalityAnchor-
+  // Names`, substring — the agent may append a "(why)" gloss to each). This
+  // distinguishes the personality step from an early yes/no (e.g. the import
+  // offer) that must NEVER settle personality, AND recognises a tap against the
+  // LIVE Opus-personalized list, not just the five static names (2026-07-21).
+  const presentedPersonality = candidatePersonalityAnchorNames(input.phase_state).some((n) =>
     optionBody.includes(n.toLowerCase()),
   )
 

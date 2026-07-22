@@ -36,7 +36,8 @@
  * chat surface leaves this off (default) and is unaffected.
  */
 
-import { useRef, useState } from 'react'
+import { memo, useMemo, useRef, useState } from 'react'
+import type { Components } from 'react-markdown'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import rehypeSanitize from 'rehype-sanitize'
@@ -167,7 +168,17 @@ export function stripLeadingFrontmatter(text: string): string {
  *  is intercepted: instead of opening a dead new tab, the click switches to the
  *  Documents tab and opens that doc. All other links open normally in a new
  *  tab. */
-export function Markdown({
+/**
+ * Task 6 (chat render fan-out) — `React.memo`. Chat bubbles re-render the whole
+ * transcript on every controller `publish()` (streaming token, ack, unrelated
+ * frame); without memo each re-render re-parsed EVERY message's markdown via
+ * react-markdown (a full remark/rehype pass), the dominant main-thread cost
+ * behind the typing lag. Memoized, an agent bubble whose `text` is unchanged
+ * skips the re-parse entirely (`onDocLink` + `origin` are render-stable — see
+ * useDocLinkCtx). The `components` object is likewise `useMemo`'d so the closures
+ * don't force react-markdown to re-render on an unchanged parse.
+ */
+function MarkdownImpl({
   text,
   className,
   onDocLink,
@@ -186,34 +197,36 @@ export function Markdown({
   stripFrontmatter?: boolean
 }): React.JSX.Element {
   const body = stripFrontmatter === true ? stripLeadingFrontmatter(text) : text
+  const components = useMemo<Components>(
+    () => ({
+      pre: ({ node: _node, ...props }) => <CodeBlock {...props} />,
+      a: ({ node: _node, href, ...props }) => (
+        <a
+          {...props}
+          href={href}
+          target="_blank"
+          rel="noopener noreferrer"
+          onClick={(e) => {
+            if (onDocLink === undefined || typeof href !== 'string') return
+            const target = parseWebDocLinkHref(href, origin ?? '')
+            if (target === null) return
+            // In-app doc link — open it in the Documents tab instead of a
+            // new browser tab.
+            e.preventDefault()
+            onDocLink(target.projectId, target.path)
+          }}
+        />
+      ),
+    }),
+    [onDocLink, origin],
+  )
   return (
     <div className={className !== undefined ? `car-md ${className}` : 'car-md'}>
-      <ReactMarkdown
-        remarkPlugins={REMARK_PLUGINS}
-        rehypePlugins={REHYPE_PLUGINS}
-        components={{
-          pre: ({ node: _node, ...props }) => <CodeBlock {...props} />,
-          a: ({ node: _node, href, ...props }) => (
-            <a
-              {...props}
-              href={href}
-              target="_blank"
-              rel="noopener noreferrer"
-              onClick={(e) => {
-                if (onDocLink === undefined || typeof href !== 'string') return
-                const target = parseWebDocLinkHref(href, origin ?? '')
-                if (target === null) return
-                // In-app doc link — open it in the Documents tab instead of a
-                // new browser tab.
-                e.preventDefault()
-                onDocLink(target.projectId, target.path)
-              }}
-            />
-          ),
-        }}
-      >
+      <ReactMarkdown remarkPlugins={REMARK_PLUGINS} rehypePlugins={REHYPE_PLUGINS} components={components}>
         {body}
       </ReactMarkdown>
     </div>
   )
 }
+
+export const Markdown = memo(MarkdownImpl)

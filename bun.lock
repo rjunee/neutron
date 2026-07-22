@@ -181,6 +181,7 @@
         "@neutronai/migrations": "workspace:*",
         "@neutronai/persistence": "workspace:*",
         "@neutronai/prompts": "workspace:*",
+        "@neutronai/runtime": "workspace:*",
       },
     },
     "cores/free/email": {
@@ -612,6 +613,7 @@
     "work-board": {
       "name": "@neutronai/work-board",
       "dependencies": {
+        "@neutronai/contracts": "workspace:*",
         "@neutronai/cores-sdk": "workspace:*",
         "@neutronai/logger": "workspace:*",
         "@neutronai/migrations": "workspace:*",

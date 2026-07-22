@@ -56,6 +56,7 @@ import {
   DEFAULT_SKIP_OR_KILL_THRESHOLD,
   runStalenessPass,
 } from './staleness-engine.ts'
+import { FAST_MODEL } from '@neutronai/runtime/models.ts'
 import { createLogger } from '@neutronai/logger'
 
 const moduleLog = createLogger('nudge-engine')
@@ -90,7 +91,7 @@ export const DEFAULT_NUDGE_TIMEOUT_MS = 5_000
 export const NUDGE_ENGINE_HANDLER_NAME = 'tasks.nudge_engine'
 
 /** Default model id (overridable via the handler dep). */
-export const DEFAULT_NUDGE_MODEL = 'claude-haiku-4-5'
+export const DEFAULT_NUDGE_MODEL = FAST_MODEL
 
 /**
  * Default owner timezone when `instance_metadata.timezone` is not set.

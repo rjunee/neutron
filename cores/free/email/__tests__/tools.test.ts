@@ -13,6 +13,7 @@ import type { NeutronManifest } from '@neutronai/cores-sdk'
 
 import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
+import { FAST_MODEL } from '@neutronai/runtime/models.ts'
 
 import {
   MessageNotFoundError,
@@ -470,5 +471,33 @@ describe('buildTools — capability-gated dispatch', () => {
     if (!result.ok) {
       expect(result.code).toBe('tool_not_declared')
     }
+  })
+})
+
+describe('buildTools — resolveModel default (task-8)', () => {
+  test('when deps.model is undefined, the stamped model on an LLM-dispatching path equals FAST_MODEL', async () => {
+    // email_triage calls composeTriage with model: resolveModel().
+    // With deps.model undefined, resolveModel() must return FAST_MODEL.
+    // The NULL_LLM default throws, so outcome is 'llm_error', but
+    // triage.model is still stamped from resolveModel() — we verify it.
+    const { client, summarizer } = buildFixtures()
+    client.seed({
+      id: 'msg-triage',
+      subject: 'test',
+      from: 'sender@example.com',
+      internal_date: '2026-05-10T09:00:00Z',
+    })
+    const manifest = loadManifest()
+    // deps.model intentionally omitted → undefined → resolveModel() → FAST_MODEL
+    const tools = buildTools({
+      manifest,
+      project_slug: OWNER,
+      audit,
+      client,
+      summarizer,
+      // model: intentionally absent
+    })
+    const { triage } = await tools.email_triage({ dry_run: true })
+    expect(triage.model).toBe(FAST_MODEL)
   })
 })

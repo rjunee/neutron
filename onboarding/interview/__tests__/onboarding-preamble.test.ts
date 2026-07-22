@@ -156,6 +156,38 @@ describe('buildOnboardingStepGuardFragment — deterministic IMPORT guard (2026-
   })
 })
 
+describe('buildOnboardingStepGuardFragment — personality_characters option (2026-07-21 live suggester)', () => {
+  it('renders EXACTLY the supplied characters (the memoized Opus picks), not the static default', () => {
+    const out = buildOnboardingStepGuardFragment(
+      { ...NON_BUTTON_FIELDS_FILLED },
+      {
+        personality_characters: [
+          { name: 'Hermione Granger', why: 'Rigorous and prepared.' },
+          { name: 'Ada Lovelace', why: 'Imaginative and precise.' },
+          { name: 'Naval Ravikant', why: 'Calm, first-principles.' },
+          { name: 'Moana', why: 'Bold and curious.' },
+          { name: 'Bilbo Baggins', why: 'Rises when it counts.' },
+        ],
+      },
+    ) as string
+    expect(out).toContain('STILL OPEN - PERSONALITY')
+    // The supplied names render, WITH their why gloss in parens (not em dashes).
+    expect(out).toContain('Hermione Granger (Rigorous and prepared.)')
+    expect(out).toContain('Ada Lovelace (Imaginative and precise.)')
+    expect(out).toContain('Naval Ravikant')
+    // And the static default names that were NOT supplied are absent.
+    expect(out).not.toContain('Sherlock')
+    expect(out).not.toContain('Marcus Aurelius')
+  })
+
+  it('falls back to the static DEFINED default when no option is supplied (byte-identical pre-suggester behavior)', () => {
+    const out = buildOnboardingStepGuardFragment({ ...NON_BUTTON_FIELDS_FILLED }) as string
+    expect(out).toContain('STILL OPEN - PERSONALITY')
+    // Static default set includes Sherlock; it renders as `name (why)` now.
+    expect(out).toContain('Sherlock Holmes')
+  })
+})
+
 describe('buildOnboardingStepGuardFragment — AUDIT-DRIVEN total coverage (2026-07-18)', () => {
   /**
    * REGRESSION — Ryan's EXACT live deadlock. Read from the real row in
@@ -450,13 +482,19 @@ describe('buildOnboardingPreamble — import offer ordering', () => {
 })
 
 describe('buildOnboardingPreamble — defined archetypes + options + closing (2026-06-30)', () => {
-  it('injects the DEFINED named-character set at the personality step (not "improvise flavors")', () => {
+  it('references the per-turn REQUIRED-STEP GUARD list at the personality step (2026-07-21: no static enumeration)', () => {
     const out = buildOnboardingPreamble({ import_offered: false })
-    // The stable curated figures from the personality-character suggester.
-    expect(out).toContain('Sherlock Holmes')
-    expect(out).toContain('Marcus Aurelius')
-    expect(out).toContain('Yoda')
-    // It must tell the agent to offer THESE, not invent a different list.
+    // 2026-07-21 — the preamble no longer HARDCODES the five static names (they
+    // are now the personalized Opus picks rendered by the per-turn step guard).
+    // It must NOT enumerate a fixed list here, or it would contradict the
+    // personalized guard list.
+    expect(out).not.toContain('Sherlock Holmes')
+    expect(out).not.toContain('Marcus Aurelius')
+    // Instead it points the agent at the guard block's PERSONALITY list and marks
+    // it personalized to this owner.
+    expect(out).toContain('<onboarding_required_steps>')
+    expect(out).toContain('personalized to this owner')
+    // It must still tell the agent to offer THAT list, not invent a different one.
     expect(out).toContain('do not invent a different list')
     // The old improvise instruction is gone.
     expect(out).not.toContain('Offer a couple of')

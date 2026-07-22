@@ -9,8 +9,11 @@ import {
   clusterCorrections,
   composePatternPage,
   stablePatternSlug,
+  resolveClusterSlug,
+  correctionOccurrenceKey,
   DEFAULT_CORRECTION_PATTERN_JACCARD,
   type CorrectionEntry,
+  type PriorPatternIdentity,
 } from '../reflect/correction-patterns.ts'
 
 /** Three near-identical "use tabs" corrections (share heavy token overlap). */
@@ -102,6 +105,29 @@ describe('stablePatternSlug — window invariance (Argus r2 minor)', () => {
     expect(other).not.toBe(tabs)
     expect(SLUG_REGEX.test(other)).toBe(true)
   })
+
+  // Argus r2 BLOCKER (2 reviewers): the interim majority-`right`-vocabulary digest
+  // was NOT membership-independent — the "tokens present in a majority of the CURRENT
+  // members" set shifts as members age in/out of the window, even when the SEED is
+  // unchanged. Seed-derived identity fixes it: the reviewer's exact counterexample.
+  test('slug is stable when the majority token set shifts but the seed is unchanged', () => {
+    // Seed (oldest) is constant across both windows; only non-seed members change.
+    const SEED: CorrectionEntry = { id: 'c-s', ts: '2026-09-01T00:00:00.000Z', wrong: 'w', right: 'alpha beta', why: 'y' }
+    const M1: CorrectionEntry = { id: 'c-m1', ts: '2026-09-02T00:00:00.000Z', wrong: 'w', right: 'alpha gamma', why: 'y' }
+    const M2: CorrectionEntry = { id: 'c-m2', ts: '2026-09-03T00:00:00.000Z', wrong: 'w', right: 'beta gamma', why: 'y' }
+    const M3: CorrectionEntry = { id: 'c-m3', ts: '2026-09-04T00:00:00.000Z', wrong: 'w', right: 'gamma delta', why: 'y' }
+    // Window A majority = {alpha,beta,gamma}; window B majority = {beta,gamma} — the
+    // old scheme would have minted two slugs. Seed 'alpha beta' is constant → one slug.
+    const windowA = stablePatternSlug([SEED, M1, M2])
+    const windowB = stablePatternSlug([SEED, M2, M3])
+    expect(windowB).toBe(windowA)
+  })
+
+  test('slug ignores caller ordering — derives from the oldest member regardless', () => {
+    const a = stablePatternSlug([TAB_3, TAB_1, TAB_2])
+    const b = stablePatternSlug([TAB_2, TAB_3, TAB_1])
+    expect(b).toBe(a)
+  })
 })
 
 describe('composePatternPage', () => {
@@ -117,5 +143,163 @@ describe('composePatternPage', () => {
     expect(page.timelineRows).toHaveLength(3)
     expect(page.timelineRows.every((r) => r.source === 'reflect:correction-pattern')).toBe(true)
     expect(page.timelineRows[0]!.body).toContain('→')
+  })
+
+  test('a slug override is honoured verbatim (pass-resolved identity)', () => {
+    const page = composePatternPage([TAB_1, TAB_2, TAB_3], 'correction-pattern-forced')
+    expect(page.slug).toBe('correction-pattern-forced')
+    // Body/title still derive from the cluster; only identity is overridden.
+    expect(page.compiledTruth).toContain('use tabs for indentation')
+  })
+
+  test('a timeline row body byte-matches the occurrence key body half', () => {
+    const page = composePatternPage([TAB_1])
+    const parts = correctionOccurrenceKey(TAB_1).split('\x1f')
+    expect(page.timelineRows[0]!.ts).toBe(parts[0]!)
+    expect(page.timelineRows[0]!.body).toBe(parts[1]!)
+  })
+
+  // Argus r2: `compiledTruth` is a FULL REPLACEMENT — recomposing from the current
+  // scan window alone shrinks a promoted page's count + Occurrences list every time
+  // an older occurrence ages out. The prior-occurrences union keeps it cumulative.
+  test('cumulative occurrences: prior persisted rows are unioned into the count + list', () => {
+    // Only TAB_3 is still in the current scan window; TAB_1 + TAB_2 aged out but
+    // remain persisted on the promoted page as occurrence rows.
+    const priorOccurrences = [TAB_1, TAB_2].map((c) => {
+      const [ts, body] = correctionOccurrenceKey(c).split('\x1f') as [string, string]
+      return { ts, body }
+    })
+    const page = composePatternPage([TAB_3], 'correction-pattern-tabs', priorOccurrences)
+    // Count reflects the UNION (3), not just the 1 current-window member.
+    expect(page.compiledTruth).toContain('Observed 3 times')
+    expect(page.compiledTruth).toContain(`- ${TAB_1.ts}`)
+    expect(page.compiledTruth).toContain(`- ${TAB_2.ts}`)
+    expect(page.compiledTruth).toContain(`- ${TAB_3.ts}`)
+    // Learning/title still come from the newest CURRENT member.
+    expect(page.title).toContain('use tabs for indentation')
+    // Only the current cluster contributes timeline rows (the writer appends+dedupes
+    // against already-persisted rows) — no double-write of the prior occurrences.
+    expect(page.timelineRows).toHaveLength(1)
+  })
+
+  test('cumulative occurrences: a prior row already in the current window is not double-counted', () => {
+    // TAB_1 is BOTH in the current cluster and in the persisted prior rows.
+    const [ts1, body1] = correctionOccurrenceKey(TAB_1).split('\x1f') as [string, string]
+    const page = composePatternPage([TAB_1, TAB_2], 'correction-pattern-tabs', [{ ts: ts1, body: body1 }])
+    expect(page.compiledTruth).toContain('Observed 2 times')
+  })
+
+  test('no prior occurrences → count matches the current cluster (byte-identical old behavior)', () => {
+    const page = composePatternPage([TAB_1, TAB_2, TAB_3])
+    expect(page.compiledTruth).toContain('Observed 3 times')
+  })
+})
+
+// Argus r3 (both reviewers VETO): `stablePatternSlug` alone still drifts when the
+// scan window ages the ORIGINAL seed out — the next seed's `right` can differ and
+// mint a new slug. `resolveClusterSlug` closes it: a cluster reuses an already-
+// promoted page's slug whenever it still shares an occurrence with it.
+describe('resolveClusterSlug — identity survives seed eviction', () => {
+  // A recurring lesson whose members share enough whole-text to cluster, but whose
+  // per-member `right` differs — so the seed-derived fallback slug MOVES when the
+  // oldest member ages out.
+  const S0: CorrectionEntry = { id: 'c-s0', ts: '2026-12-01T00:00:00.000Z', wrong: 'w1 w2 w3 w4', right: 'correct alpha behavior', why: 'reason common shared' }
+  const M1: CorrectionEntry = { id: 'c-m1', ts: '2026-12-02T00:00:00.000Z', wrong: 'w1 w2 w3 w4', right: 'correct beta behavior', why: 'reason common shared' }
+  const M2: CorrectionEntry = { id: 'c-m2', ts: '2026-12-03T00:00:00.000Z', wrong: 'w1 w2 w3 w4', right: 'correct gamma behavior', why: 'reason common shared' }
+  const M3: CorrectionEntry = { id: 'c-m3', ts: '2026-12-04T00:00:00.000Z', wrong: 'w1 w2 w3 w4', right: 'correct delta behavior', why: 'reason common shared' }
+
+  test('the fallback slug genuinely DRIFTS once the seed is evicted (proves the bug exists)', () => {
+    const windowA = stablePatternSlug([S0, M1, M2]) // seed S0 → right "correct alpha behavior"
+    const windowB = stablePatternSlug([M1, M2, M3]) // seed now M1 → right "correct beta behavior"
+    expect(windowB).not.toBe(windowA) // identity drift — the defect
+  })
+
+  test('reuses the promoted page identity when the cluster still overlaps it', () => {
+    const promotedSlug = stablePatternSlug([S0, M1, M2])
+    // The page recorded occurrences for S0, M1, M2 (keys byte-match the live cluster).
+    const prior: PriorPatternIdentity = {
+      slug: promotedSlug,
+      occurrenceKeys: new Set([S0, M1, M2].map(correctionOccurrenceKey)),
+    }
+    // Later pass: seed S0 aged out, M3 arrived. Fallback would drift; resolve reuses.
+    const resolved = resolveClusterSlug([M1, M2, M3], [prior])
+    expect(resolved).toBe(promotedSlug)
+    expect(resolved).not.toBe(stablePatternSlug([M1, M2, M3]))
+  })
+
+  test('a genuinely new cluster (no overlap) falls back to the seed slug', () => {
+    const prior: PriorPatternIdentity = {
+      slug: stablePatternSlug([S0, M1, M2]),
+      occurrenceKeys: new Set([S0, M1, M2].map(correctionOccurrenceKey)),
+    }
+    const fresh = resolveClusterSlug([OTHER_1, OTHER_2, { id: 'c-o3', ts: '2027-01-01T00:00:00.000Z', wrong: 'sync again', right: 'await the endpoint asynchronously', why: 'non-blocking' }], [prior])
+    expect(fresh).toBe(stablePatternSlug([OTHER_1, OTHER_2, { id: 'c-o3', ts: '2027-01-01T00:00:00.000Z', wrong: 'sync again', right: 'await the endpoint asynchronously', why: 'non-blocking' }]))
+  })
+
+  test('greatest-overlap wins; equal overlap breaks to the lexicographically-smaller slug', () => {
+    const zzz: PriorPatternIdentity = { slug: 'correction-pattern-zzz', occurrenceKeys: new Set([correctionOccurrenceKey(M1)]) }
+    const aaa: PriorPatternIdentity = { slug: 'correction-pattern-aaa', occurrenceKeys: new Set([correctionOccurrenceKey(M1)]) }
+    // Both overlap on M1 only (equal) → smaller slug wins deterministically.
+    expect(resolveClusterSlug([M1, M2, M3], [zzz, aaa])).toBe('correction-pattern-aaa')
+    // A prior with STRICTLY more overlap beats the lexicographic tie-break.
+    const two: PriorPatternIdentity = { slug: 'correction-pattern-zzz', occurrenceKeys: new Set([M1, M2].map(correctionOccurrenceKey)) }
+    expect(resolveClusterSlug([M1, M2, M3], [two, aaa])).toBe('correction-pattern-zzz')
+  })
+})
+
+// Argus r3 nit: a ts-tie must NOT let seed selection depend on input/scan order.
+describe('stablePatternSlug — deterministic ts-tie break by id', () => {
+  const P_HI: CorrectionEntry = { id: 'c-bbb', ts: '2027-02-01T00:00:00.000Z', wrong: 'w', right: 'foo bar', why: 'y' }
+  const P_LO: CorrectionEntry = { id: 'c-aaa', ts: '2027-02-01T00:00:00.000Z', wrong: 'w', right: 'baz qux', why: 'y' } // SAME ts, smaller id
+  const P_NEW: CorrectionEntry = { id: 'c-ccc', ts: '2027-02-02T00:00:00.000Z', wrong: 'w', right: 'later thing', why: 'y' }
+
+  test('equal-ts members in either input order yield the SAME slug (id tie-break)', () => {
+    const a = stablePatternSlug([P_HI, P_LO, P_NEW])
+    const b = stablePatternSlug([P_LO, P_HI, P_NEW])
+    expect(b).toBe(a)
+  })
+
+  test("the seed is the smaller-id member (its `right` drives the slug)", () => {
+    // P_LO (id c-aaa) is the seed → slug derives from "baz qux", not "foo bar".
+    expect(stablePatternSlug([P_HI, P_LO, P_NEW])).toBe(stablePatternSlug([P_LO]))
+    expect(stablePatternSlug([P_HI, P_LO, P_NEW])).not.toBe(stablePatternSlug([P_HI]))
+  })
+})
+
+// Argus r2 blocker: the occurrence key is truncated to 500 chars WITHOUT a trailing
+// trim; a cut landing right after a space stranded a trailing space in the LIVE key,
+// while every disk path (writer render + extractTimeline + mergeTimeline) `.trim()`s
+// the row body — so the live key never byte-matched the row reconstructed from disk,
+// `resolveClusterSlug`'s overlap silently fell to 0, and the seed-eviction identity
+// drift reappeared for any correction whose one-lined `<wrong> → <right>` exceeds 500
+// chars. These pin the two sides symmetric at the boundary.
+describe('correctionOccurrenceKey — 500-char truncation boundary (Argus r2 blocker)', () => {
+  // `<wrong>`(499, no spaces) + ` → ` + `<right>` → the `slice(0, 500)` cut lands on
+  // the space BEFORE the arrow, so the untrimmed body ends in a space (`right` is cut
+  // off entirely). The trimmed body is exactly the 499-char `wrong` token.
+  const WRONG = 'q'.repeat(499)
+  const BOUNDARY: CorrectionEntry = {
+    id: 'c-boundary',
+    ts: '2027-03-01T00:00:00.000Z',
+    wrong: WRONG,
+    right: 'correct alpha behavior',
+    why: 'reason',
+  }
+
+  test('the live occurrence key has NO trailing space (matches the trimmed on-disk row)', () => {
+    const key = correctionOccurrenceKey(BOUNDARY)
+    expect(key.endsWith(' ')).toBe(false)
+    // Body half is the trimmed 499-char token — the arrow + `right` fell past the cut.
+    expect(key).toBe(`${BOUNDARY.ts}\x1f${WRONG}`)
+  })
+
+  test('the live key equals the key rebuilt from the persisted timeline-row body', () => {
+    // The row `composePatternPage` writes carries the SAME (now-trimmed) body, and the
+    // pass reconstructs a prior key as `${row.ts}\x1f${row.body}` (entity-format trims
+    // the body on both render and parse). So live key === reconstructed key — no drift.
+    const { timelineRows } = composePatternPage([BOUNDARY])
+    const row = timelineRows[0]!
+    expect(row.body.endsWith(' ')).toBe(false)
+    expect(correctionOccurrenceKey(BOUNDARY)).toBe(`${row.ts}\x1f${row.body}`)
   })
 })

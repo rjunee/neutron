@@ -318,95 +318,146 @@ export function buildProjectResearchOrchestrator(
         throw new ResearchInputError('project_id', 'must be a non-empty string', 'research_deep')
       }
       const handle = await opts.resolver.resolve(input.project_id)
+      const query = input.query.trim()
       const row = handle.store.insertPending({
-        query: input.query.trim(),
+        query,
         depth: 'deep',
         sources: [],
       })
       handle.store.setRunning(row.id)
-      handle.store.bumpAttempt(row.id)
-      let subResult
-      try {
-        subResult = await dispatchResearchSubAgent(
-          {
-            query: input.query.trim(),
-            project_id: input.project_id,
-            project_slug: opts.project_slug,
-            ...(input.budget_ms !== undefined ? { budget_ms: input.budget_ms } : {}),
-            ...(input.tools !== undefined ? { tools: input.tools } : {}),
-          },
-          {
-            runtime_sub_agent: opts.sub_agent_dispatcher,
-            concurrency_gate: opts.concurrency_gate,
-          },
-        )
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err)
-        const code =
-          (err as { code?: string }).code === 'sub_agent_concurrency_exceeded'
-            ? 'concurrency_rejected'
-            : (err as { code?: string }).code === 'sub_agent_timeout'
-              ? 'timeout'
-              : 'error'
+
+      // 2-attempt retry loop mirroring start()'s parse-error-fed-back
+      // pattern. Attempt 0 failures (parse / schema / zero-tool grounding)
+      // feed specific feedback into the sub-agent's user prompt and retry
+      // once; the same failure on attempt 1 is terminal. Dispatch-level
+      // errors (concurrency / timeout / transport) are NOT retried.
+      let retryFeedback: string | undefined
+      for (let attempt = 0; attempt < 2; attempt++) {
+        handle.store.bumpAttempt(row.id)
+        let subResult
+        try {
+          subResult = await dispatchResearchSubAgent(
+            {
+              query,
+              project_id: input.project_id,
+              project_slug: opts.project_slug,
+              // Supply the model EXPLICITLY from this module's legitimate
+              // `SONNET_MODEL` import (env-overridable via NEUTRON_SONNET_MODEL)
+              // so the live dispatch tracks the override. sub-agent.ts (a bundled
+              // Core) may not import runtime/models.ts, so its own
+              // DEFAULT_SUB_AGENT_MODEL is a last-resort literal only; the real
+              // production dispatch resolves its model here, at the host-legit
+              // caller layer.
+              model: SONNET_MODEL,
+              ...(input.budget_ms !== undefined ? { budget_ms: input.budget_ms } : {}),
+              ...(input.tools !== undefined ? { tools: input.tools } : {}),
+              ...(retryFeedback !== undefined ? { retry_feedback: retryFeedback } : {}),
+            },
+            {
+              runtime_sub_agent: opts.sub_agent_dispatcher,
+              concurrency_gate: opts.concurrency_gate,
+            },
+          )
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err)
+          const code =
+            (err as { code?: string }).code === 'sub_agent_concurrency_exceeded'
+              ? 'concurrency_rejected'
+              : (err as { code?: string }).code === 'sub_agent_timeout'
+                ? 'timeout'
+                : 'error'
+          handle.store.recordSubAgentRun({
+            task_id: row.id,
+            model: SONNET_MODEL,
+            budget_ms: input.budget_ms ?? 5 * 60 * 1000,
+            elapsed_ms: 0,
+            tool_call_count: 0,
+            outcome: code,
+            error: msg,
+          })
+          handle.store.setFailed(row.id, `sub-agent ${code}: ${msg}`)
+          return { task_id: row.id, status: 'failed' }
+        }
+
+        // One run row per attempt (research-store INSERT is multi-row-safe).
         handle.store.recordSubAgentRun({
           task_id: row.id,
-          model: input.tools !== undefined ? 'unknown' : 'claude-haiku-4-5-20251001',
+          model: subResult.model,
           budget_ms: input.budget_ms ?? 5 * 60 * 1000,
-          elapsed_ms: 0,
-          tool_call_count: 0,
-          outcome: code,
-          error: msg,
+          elapsed_ms: subResult.elapsed_ms,
+          tool_call_count: subResult.tool_calls.length,
+          outcome: 'ok',
         })
-        handle.store.setFailed(row.id, `sub-agent ${code}: ${msg}`)
-        return { task_id: row.id, status: 'failed' }
-      }
-      handle.store.recordSubAgentRun({
-        task_id: row.id,
-        model: subResult.model,
-        budget_ms: input.budget_ms ?? 5 * 60 * 1000,
-        elapsed_ms: subResult.elapsed_ms,
-        tool_call_count: subResult.tool_calls.length,
-        outcome: 'ok',
-      })
 
-      // Parse + validate + claim-insert + sources-cited assertion —
-      // same shape as the substrate path, single attempt (the sub-agent
-      // does its own internal retry via the runtime harness).
-      let parsed: unknown
-      try {
-        parsed = extractJson(subResult.raw_brief_text)
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err)
-        handle.store.setFailed(row.id, `parse error: ${msg}`)
-        return { task_id: row.id, status: 'failed' }
-      }
-      const validated = validateResearchBrief(parsed)
-      if (!validated.ok) {
-        handle.store.setFailed(row.id, `schema error: ${validated.error}`)
-        return { task_id: row.id, status: 'failed' }
-      }
-      const claims = (validated.brief.claims ?? []).map(toClaimRowInput)
-      const claimRows: ResearchClaim[] = []
-      try {
-        for (const c of claims) {
-          claimRows.push(handle.claimStore.insertClaim({ task_id: row.id, ...c }))
+        // Zero-tool grounding gate — BEFORE parse. Fires ONLY when tools
+        // were requested AND the dispatcher reported them available AND the
+        // sub-agent made zero tool calls. Inert when tools_available is
+        // false/undefined (the v1 production dispatcher shape) so production
+        // deep runs are not bricked.
+        const toolsRequested = input.tools === undefined || input.tools.length > 0
+        if (toolsRequested && subResult.tools_available && subResult.tool_calls.length === 0) {
+          if (attempt === 0) {
+            retryFeedback = ZERO_TOOL_FEEDBACK
+            continue
+          }
+          handle.store.setFailed(
+            row.id,
+            'sub-agent made zero tool calls on retry - ungrounded brief rejected',
+          )
+          return { task_id: row.id, status: 'failed' }
         }
-        assertSourcesCited(row.id, claimRows)
-      } catch (err) {
-        // Drop the just-inserted claims on failure to match the "failed
-        // task has no claims" persisted-row invariant.
-        handle.store.database().run(`DELETE FROM research_claims WHERE task_id = ?`, [row.id])
-        if (err instanceof SourcesCitedViolationError) {
-          handle.store.setFailed(row.id, `sources-cited violation: ${err.message}`)
-        } else {
+
+        // Parse with retry.
+        let parsed: unknown
+        try {
+          parsed = extractJson(subResult.raw_brief_text)
+        } catch (err) {
           const msg = err instanceof Error ? err.message : String(err)
-          handle.store.setFailed(row.id, `claim insert error: ${msg}`)
+          if (attempt === 0) {
+            retryFeedback = buildParseRetryFeedback(msg, subResult.raw_brief_text)
+            continue
+          }
+          handle.store.setFailed(row.id, `parse error on retry: ${msg}`)
+          return { task_id: row.id, status: 'failed' }
         }
-        return { task_id: row.id, status: 'failed' }
+        const validated = validateResearchBrief(parsed)
+        if (!validated.ok) {
+          if (attempt === 0) {
+            retryFeedback = buildSchemaRetryFeedback(validated.error, subResult.raw_brief_text)
+            continue
+          }
+          handle.store.setFailed(row.id, `schema error on retry: ${validated.error}`)
+          return { task_id: row.id, status: 'failed' }
+        }
+
+        // Claim-insert + sources-cited assertion — UNCHANGED single-shot
+        // (sources-cited retry is an explicit non-goal for this task).
+        const claims = (validated.brief.claims ?? []).map(toClaimRowInput)
+        const claimRows: ResearchClaim[] = []
+        try {
+          for (const c of claims) {
+            claimRows.push(handle.claimStore.insertClaim({ task_id: row.id, ...c }))
+          }
+          assertSourcesCited(row.id, claimRows)
+        } catch (err) {
+          // Drop the just-inserted claims on failure to match the "failed
+          // task has no claims" persisted-row invariant.
+          handle.store.database().run(`DELETE FROM research_claims WHERE task_id = ?`, [row.id])
+          if (err instanceof SourcesCitedViolationError) {
+            handle.store.setFailed(row.id, `sources-cited violation: ${err.message}`)
+          } else {
+            const msg = err instanceof Error ? err.message : String(err)
+            handle.store.setFailed(row.id, `claim insert error: ${msg}`)
+          }
+          return { task_id: row.id, status: 'failed' }
+        }
+        handle.store.setCompleted(row.id, validated.brief, claimRows.length)
+        writeBriefMarkdown(opts.resolver, input.project_id, row.id, validated.brief, writeFile)
+        return { task_id: row.id, status: 'completed' }
       }
-      handle.store.setCompleted(row.id, validated.brief, claimRows.length)
-      writeBriefMarkdown(opts.resolver, input.project_id, row.id, validated.brief, writeFile)
-      return { task_id: row.id, status: 'completed' }
+      // Unreachable guard, mirrors start()'s exited-without-terminal path.
+      handle.store.setFailed(row.id, 'deep orchestrator exited without terminal state')
+      return { task_id: row.id, status: 'failed' }
     },
 
     async list(input: ResearchListInput): Promise<ResearchListResult> {
@@ -619,3 +670,31 @@ function slugify(s: string): string {
     .replace(/^-+|-+$/g, '')
     .slice(0, 80)
 }
+
+// Retry feedback strings fed back into the sub-agent's user prompt on the
+// 2nd attempt (behind `RETRY_FEEDBACK_MARKER`). No em dashes.
+const RETRY_JSON_CONTRACT =
+  'Return EXACTLY one JSON object matching the ResearchBrief shape from your ' +
+  'system prompt. No prose, no markdown fences, no commentary.'
+
+function buildParseRetryFeedback(msg: string, raw: string): string {
+  return (
+    `Your previous response could not be parsed as JSON (${msg}). ` +
+    `It began: ${raw.slice(0, 2000)}\n` +
+    RETRY_JSON_CONTRACT
+  )
+}
+
+function buildSchemaRetryFeedback(msg: string, raw: string): string {
+  return (
+    `Your previous response parsed as JSON but failed schema validation: ${msg}. ` +
+    `It began: ${raw.slice(0, 2000)}\n` +
+    RETRY_JSON_CONTRACT
+  )
+}
+
+const ZERO_TOOL_FEEDBACK =
+  'Your previous attempt made ZERO tool calls, so the brief was rejected as ' +
+  'ungrounded. You MUST ground the brief in real tool results: call ' +
+  'research_vault_search first, then research_web_search and research_web_fetch ' +
+  'as needed, BEFORE emitting the final JSON.'

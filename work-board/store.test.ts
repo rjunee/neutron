@@ -259,6 +259,43 @@ describe('WorkBoardStore — Phase 2b run binding + reconcile', () => {
     expect((await store.update(SLUG, a.id, { inline_active: false }))?.inline_active).toBe(false)
   })
 
+  test('generic complete() clears inline_active (terminal transition)', async () => {
+    const store = new WorkBoardStore(db)
+    const a = await store.create(SLUG, { title: 'complete me inline' })
+    await store.update(SLUG, a.id, { inline_active: true })
+    const done = await store.complete(SLUG, a.id)
+    expect(done?.status).toBe('done')
+    expect(done?.completed_at).not.toBeNull()
+    expect(done?.inline_active).toBe(false)
+    // also persisted, not just returned
+    expect(store.get(SLUG, a.id)?.inline_active).toBe(false)
+  })
+
+  test('generic update to failed clears inline_active', async () => {
+    const store = new WorkBoardStore(db)
+    const a = await store.create(SLUG, { title: 'fail me inline' })
+    await store.update(SLUG, a.id, { inline_active: true, status: 'in_progress' })
+    const failed = await store.update(SLUG, a.id, { status: 'failed' })
+    expect(failed?.status).toBe('failed')
+    expect(failed?.inline_active).toBe(false)
+  })
+
+  test('terminal clear wins over explicit inline_active:true in the same patch', async () => {
+    const store = new WorkBoardStore(db)
+    const a = await store.create(SLUG, { title: 'done but trying to stay active' })
+    const result = await store.update(SLUG, a.id, { status: 'done', inline_active: true })
+    expect(result?.status).toBe('done')
+    expect(result?.inline_active).toBe(false)
+  })
+
+  test('non-terminal status transition preserves inline_active', async () => {
+    const store = new WorkBoardStore(db)
+    const a = await store.create(SLUG, { title: 'go in progress while inline' })
+    await store.update(SLUG, a.id, { inline_active: true })
+    const inProgress = await store.update(SLUG, a.id, { status: 'in_progress' })
+    expect(inProgress?.inline_active).toBe(true)
+  })
+
   test('attachRun binds linked_run_id, moves to in_progress, clears inline, fires onChange', async () => {
     let pushes = 0
     const store = new WorkBoardStore(db, { onChange: () => (pushes += 1) })

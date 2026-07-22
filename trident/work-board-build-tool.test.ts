@@ -402,3 +402,96 @@ function isTerminalPhaseCheck(id: string): boolean {
   const run = store.get(id)
   return run !== null && ['done', 'failed', 'stopped'].includes(run.phase)
 }
+
+describe('chat-ack seam (#429 task 4)', () => {
+  interface AckPost {
+    project_id: string | null
+    item_id: string
+    title: string
+    kind: string
+  }
+  function spyAck() {
+    const posts: AckPost[] = []
+    const ack = { post: (p: AckPost) => posts.push(p) }
+    return { posts, ack: ack as unknown as import('@neutronai/work-board/chat-ack.ts').WorkBoardChatAck }
+  }
+  function surface(chat_ack: import('@neutronai/work-board/chat-ack.ts').WorkBoardChatAck) {
+    const reg = new ToolRegistry()
+    registerTridentBuildToolSurface(reg, {
+      store,
+      work_board: board(),
+      repo_path: '/repo',
+      resolveBuildRepo: async (home) => home,
+      resolveMergeMode: async () => 'local',
+      resolveRalph: async () => false,
+      chat_ack,
+    })
+    return reg
+  }
+
+  test('a successful dispatch_build posts build_dispatched with the bound item title', async () => {
+    const { posts, ack } = spyAck()
+    const reg = surface(ack)
+    const out = (await reg.get(WORK_BOARD_DISPATCH_BUILD_TOOL)!.handler(
+      { board_item_id: 'ready', task: 'build the export' },
+      { ...ctx, project_id: 'acme' },
+    )) as Record<string, unknown>
+    expect(out.ok).toBe(true)
+    expect(posts).toEqual([
+      {
+        project_id: 'acme',
+        item_id: 'ready',
+        title: 'wire the CSV export button to the new endpoint with tests',
+        kind: 'build_dispatched',
+      },
+    ])
+  })
+
+  test('a REJECTED (underspecified) dispatch posts NOTHING', async () => {
+    const { posts, ack } = spyAck()
+    const reg = surface(ack)
+    const out = (await reg.get(WORK_BOARD_DISPATCH_BUILD_TOOL)!.handler(
+      { board_item_id: 'terse', task: 'do auth' },
+      ctx,
+    )) as Record<string, unknown>
+    expect(out.ok).toBe(false)
+    expect(posts).toEqual([])
+  })
+
+  test('an unknown item posts NOTHING', async () => {
+    const { posts, ack } = spyAck()
+    const reg = surface(ack)
+    const out = (await reg.get(WORK_BOARD_DISPATCH_BUILD_TOOL)!.handler(
+      { board_item_id: 'nope', task: 'x' },
+      ctx,
+    )) as Record<string, unknown>
+    expect(out.ok).toBe(false)
+    expect(posts).toEqual([])
+  })
+
+  test('a successful work_board_start posts build_dispatched with the item title', async () => {
+    const { posts, ack } = spyAck()
+    const reg = surface(ack)
+    const out = (await reg.get(WORK_BOARD_START_TOOL)!.handler(
+      { board_item_id: 'ready' },
+      { ...ctx, project_id: 'acme' },
+    )) as Record<string, unknown>
+    expect(out.ok).toBe(true)
+    expect(posts).toEqual([
+      {
+        project_id: 'acme',
+        item_id: 'ready',
+        title: 'wire the CSV export button to the new endpoint with tests',
+        kind: 'build_dispatched',
+      },
+    ])
+  })
+
+  test('omitted chat_ack → unchanged behaviour, no throw', async () => {
+    const out = (await toolFor().handler(
+      { board_item_id: 'ready', task: 'build the export' },
+      ctx,
+    )) as Record<string, unknown>
+    expect(out.ok).toBe(true)
+  })
+})

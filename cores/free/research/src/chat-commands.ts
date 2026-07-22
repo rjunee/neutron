@@ -10,7 +10,7 @@
  *
  * Commands:
  *   /research <topic>            — synchronous standard-depth brief
- *   /research deep <topic>       — kick off Haiku-4.5 sub-agent harness
+ *   /research deep <topic>       — kick off research sub-agent harness
  *   /research list               — list recent briefs for this project
  *   /research find <query>       — lex+vec hybrid search over prior briefs
  *   /research help | (bare)      — surface cheatsheet
@@ -224,7 +224,7 @@ async function deepTopic(
     return {
       text:
         `Deep research complete (${result.task_id.slice(0, 8)}). ` +
-        `${claims} claim${claims === 1 ? '' : 's'} captured via Haiku 4.5 sub-agent. ` +
+        `${claims} claim${claims === 1 ? '' : 's'} captured via the deep-research sub-agent. ` +
         `Task: ${result.task_id}`,
       data: { task_id: result.task_id, brief: fetched.brief ?? null },
       card: {
@@ -251,7 +251,7 @@ async function deepTopic(
   return {
     text:
       `Deep research kicked off (${result.task_id.slice(0, 8)}); ` +
-      `Haiku 4.5 sub-agent running (~5min budget). Task: ${result.task_id}`,
+      `Deep-research sub-agent running (~5min budget). Task: ${result.task_id}`,
     data: { task_id: result.task_id, status: result.status },
   }
 }
