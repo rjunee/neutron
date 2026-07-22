@@ -207,7 +207,7 @@ One correction to §0.3's duplicate-scheduler warning after further verification
 
 ### T2 — GBrain: the recall index (derived)
 
-- **What:** the per-tenant brain — pages + typed edges (+ optional embeddings). Sole memory store per the MM decision (Appendix B.5).
+- **What:** the per-instance brain — pages + typed edges (+ optional embeddings). Sole memory store per the MM decision (Appendix B.5).
 - **Writers:** ONLY the `SyncHook` fired by `writeEntity` on real changes (`runtime/entity-writer.ts:217-224`): page add, `add_link` per new triple, `remove_link` per removed triple (`gbrain-memory/GBrainSyncHook.ts`, incl. the deferred-edge retry queue for not-yet-written targets), plus the reflect pass's kind-qualified `deletePage` for merged-away losers (`open/wiring/memory.ts:366-367`).
 - **Readers:** `gbrain_search` (agent recall during conversation — the Vajra "recall" verb, Appendix A.1).
 - **Retention/GC:** mirrors T1. Known drift class: post-commit hook failure (`entity-writer.ts:202-215`) — unrecoverable in-band BY DESIGN; recovered out-of-band by the repair pass (§7.4). `gbrain_sync_state` (`open/wiring/memory.ts:173`) is the observability sink that tells an operator drift is happening.
@@ -497,6 +497,6 @@ Verified in `~/repos/neutron-managed/SPEC.md` Decisions Log, 2026-07-20 entries 
 2. **Dreaming's uncovered half goes INTO the core memory system** (SPEC.md:360-364): backlink repair, daily-delta notes, correction-pattern promotion built alongside consolidation, not as an `entity-upkeep` ritual. (The brief asks this design to evaluate the tier-split counter-argument — see §2.)
 3. **3h idle TTL on per-project CC sessions** (SPEC.md:380-393): memory work must run off the warm chat session. The reflect loop already does (dedicated `cc-reflect-*` ephemeral substrate, `open/wiring/memory.ts:343-356`).
 4. **M2 parity items** (SPEC.md:427-439): M2-1 scribe email/calendar clients (smallest fix, largest effect), M2-3 consolidation-on-by-default + "verify the loop actually consolidates."
-5. **GBrain is the sole per-tenant memory store** (SPEC.md:74, MM decision 2026-06-06; notes-core removal 2026-07-01 at SPEC.md:531): no second memory backend may be introduced by this design.
+5. **GBrain is the sole per-instance memory store** (SPEC.md:74, MM decision 2026-06-06; notes-core removal 2026-07-01 at SPEC.md:531): no second memory backend may be introduced by this design.
 6. **No feature flags / no dual code paths** (restated throughout, e.g. SPEC.md:194, :401): the design must specify ONE live path.
 7. **Scheduled executors get restricted, per-project tool scope** (SPEC.md:395-398) — relevant boundary for any LLM-driven memory batch: the reflect pass's substrate has `tools: []` (`scribe/reflect/reflect-pass.ts:907-908`), which already satisfies this.

@@ -2,7 +2,7 @@
  * landing — brand-asset (favicon) serving, LIVE PATH.
  *
  * 2026-07-18 favicon sprint. Ryan saw NO favicon on his tenant chat tab at
- * `https://<slug>.neutron.computer/chat`, and a hard refresh did not help.
+ * `https://<slug>.<managed-host>/chat`, and a hard refresh did not help.
  * Four distinct defects were behind it; this file pins all four against the
  * REAL servers (`createLandingServer` for the per-instance tenant surface,
  * `bootLandingServer` for the apex/control-plane surface) by asserting actual

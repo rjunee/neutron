@@ -1127,7 +1127,7 @@ status codes are identical either way; it only exists across a reload.
 
 ## 2026-07-18 — Favicon: the tab icon renders again (root cause = an invisible SVG, not a serving gap)
 
-Ryan reported NO favicon on his tenant chat tab (`https://<slug>.neutron.computer/chat`),
+Ryan reported NO favicon on his tenant chat tab (`https://<slug>.<managed-host>/chat`),
 "used to work fine", hard refresh no help. Four defects, one of which is the actual cause.
 
 **ROOT CAUSE — the SVG was serving fine and rendering invisibly.** `GET /favicon.svg`
@@ -1163,15 +1163,15 @@ through to the 404 tail for an asset that demonstrably exists on GET. Both now s
 `GET || HEAD` with identical headers and an empty HEAD body (RFC 9110).
 
 **APEX — NOT FIXED HERE; it is an out-of-tree neutron-managed defect.** `GET
-https://neutron.computer/favicon.svg` 404s with `{"error":"not found"}`, which is
+https://<managed-host>/favicon.svg` 404s with `{"error":"not found"}`, which is
 `neutron-managed/src/index.ts:642` — the apex is served by the Managed control-plane
-process (`neutron.computer` → `127.0.0.1:7780`, per
+process (`<managed-host>` → `127.0.0.1:7780`, per
 `neutron-managed/scripts/provision-hetzner.sh:451-473`), which has NO static-asset
-allowlist at all. Open's `landing/boot-impl.ts` serves `signup.neutron.computer` (already
+allowlist at all. Open's `landing/boot-impl.ts` serves `signup.<managed-host>` (already
 200 on `/favicon.svg`), not the apex, so no change in this repo can fix it. Filed as a
 Managed follow-up: either give the control-plane router an asset allowlist, or repair the
 shadowed `apex-marketing` `file_server` route. The `.ico` + HEAD additions to
-`boot-impl.ts` do improve `signup.neutron.computer` and are kept.
+`boot-impl.ts` do improve `signup.<managed-host>` and are kept.
 
 Tests: `landing/__tests__/favicon-serving.test.ts` boots the REAL servers and asserts
 responses, not route-table bookkeeping — `GET /favicon.ico` 200 + a valid ICO container

@@ -183,3 +183,57 @@ docs/research/vajra-neutron-feature-parity-scan-2026-06-25.md:tenant-purged
 docs/research/vajra-neutron-feature-parity-scan-2026-06-25.md:tenant-word
 docs/research/vajra-neutron-parity-audit-2026-06-25.md:tenant-purged
 docs/research/vajra-neutron-parity-audit-2026-06-25.md:tenant-word
+
+# vajra-neutron-parity-audit-2026-07-19 is the next-day companion of the two
+# 2026-06-25 parity audits above — same Managed-vs-Open comparison shape. Its one
+# residual `tenant` mention is a Managed-side issue-tracker note (#365 tenant
+# orphan deploys / #367 tenant root 404) it explicitly scopes OUT of the Open
+# engine table. Retired-vocab rules only; PII / secret / hosted-domain stay ARMED.
+docs/research/vajra-neutron-parity-audit-2026-07-19.md:tenant-purged
+docs/research/vajra-neutron-parity-audit-2026-07-19.md:tenant-word
+
+# ── Open/Managed deployment-boundary description (prose only, no MT identifiers) ──
+# The files below are Open's OWN source + docs that legitimately DESCRIBE the
+# Open/Managed hosting boundary Open's code reacts to — they carry ZERO live
+# multi-tenant identifiers (the tenant-code/cross-tenant-code/provision-code rules
+# find NOTHING in them); every hit is prose in comments/docs explaining the #371
+# backstop, whereby Open's `resolveDeploymentMode()` / `NEUTRON_ROLE=managed`
+# logic gates the OSS install-token / Claude-auth surface OFF because a MANAGED
+# instance's credential is seeded by the control-plane handoff. That is Open's own
+# code behaving differently under hosted deployment, NOT multi-tenant functionality
+# Open owns. Exempt ONLY from the retired-vocab rules (tenant-word/tenant-purged);
+# the PII / hosted-domain / secret rules stay ARMED (the one hosted-domain
+# mention each in favicon-serving.test.ts + claim-redirect-once.open.test.ts was
+# REDACTED to a neutral placeholder, NOT allowlisted).
+
+# landing/server.ts implements the #371 backstop itself — its doc-comments explain
+# why the tenant-side OSS auth surface is UNREACHABLE under managed deployment.
+landing/server.ts:tenant-word
+landing/server.ts:tenant-purged
+
+# The two landing tests pin the #371 backstop against the REAL servers; their
+# describe() blocks + comments name the managed-instance surface they assert on.
+landing/__tests__/managed-install-token-gate.test.ts:tenant-word
+landing/__tests__/managed-install-token-gate.test.ts:tenant-purged
+landing/__tests__/favicon-serving.test.ts:tenant-word
+landing/__tests__/favicon-serving.test.ts:tenant-purged
+
+# gateway/wiring/build-landing-stack.ts wires the landing stack and comments why
+# `resolveDeploymentMode()` gates the OSS auth surface OFF on a managed instance.
+gateway/wiring/build-landing-stack.ts:tenant-word
+gateway/wiring/build-landing-stack.ts:tenant-purged
+
+# open/wiring/app-ws.ts + the claim-redirect regression test comment the same
+# hosting fact: claiming a personal URL renames url_slug but does NOT change the
+# host process/env — the SAME managed process keeps serving the claimed host.
+open/wiring/app-ws.ts:tenant-word
+open/wiring/app-ws.ts:tenant-purged
+tests/integration/claim-redirect-once.open.test.ts:tenant-word
+tests/integration/claim-redirect-once.open.test.ts:tenant-purged
+
+# docs/SYSTEM-OVERVIEW.md is the authoritative "how it works now" overview; its
+# #371-backstop section describes the Open/Managed auth boundary Open's own
+# deploymentMode logic implements — boundary description, not MT functionality
+# Open owns. Retired-vocab rules only; PII / hosted-domain / secret stay ARMED.
+docs/SYSTEM-OVERVIEW.md:tenant-word
+docs/SYSTEM-OVERVIEW.md:tenant-purged
