@@ -4480,6 +4480,21 @@ now-nonexistent vanilla client.
   mounts inside the runtime provider — it wraps `ChatApp` as the Chat tab and
   renders the registry-resolved tab bar (see "Web client consumption" above).
   `ChatApp` itself is unchanged.
+- **Root-level auto-recovery (#380).** `main.tsx` mounts via `mount()`, which
+  wires `createRoot(rootEl, { onUncaughtError })` (React 19.1). The per-pane
+  `PaneErrorBoundary` + `ChatErrorBoundary` only catch errors thrown during a
+  child RENDER; a setState-after-unmount surfaces in a real browser commit as
+  React's teardown-phase fiber invariant, thrown from React's own commit phase,
+  which bypasses every boundary and unmounts the whole root (the historical
+  blank screen). `onUncaughtError` is the one hook that fires for that class, so
+  it consults a bounded crash policy (`createRecoveryPolicy` — ≤3 remounts per
+  rolling 60s) and schedules recovery on a macrotask: an auto-remount reuses the
+  SAME controller + OPFS store (both live outside React, so the transcript +
+  session survive), and once the budget is exhausted it paints a visible error
+  card with a Reload button (`.car-fatal`) — never a silent blank. This is the
+  root net BEHIND the per-pane unmount guards (`mountedRef` + abort-reads across
+  DocumentsTab, IntegrationsTab, SettingsTab, WorkBoardTab, ChatApp), which stop
+  the setState-after-unmount at the source.
 - `chat-react/uploads.ts` + `chat-react/useAttachmentDraft.ts` are the
   attachment seam. Compose uploads go to the EXISTING bearer-authed
   `POST /api/app/upload` surface (`gateway/http/app-upload-surface.ts`, shared
