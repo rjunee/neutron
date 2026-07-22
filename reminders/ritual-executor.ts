@@ -570,8 +570,13 @@ export function createRitualExecutor(deps: RitualExecutorDeps): RitualExecutor {
                 timeout_ms: RITUAL_TIMEOUT_MS,
                 tools: def.tool_surface,
               })
-              .then((r) => settleTerminal(reminder, def, ritual_id, runRunId, subagentRunId, r))
-              .catch((err) => settleCrashed(reminder, ritual_id, runRunId, subagentRunId, err)),
+              .then((r) => settleTerminal(reminder, def, ritual_id, runRunId, subagentRunId, r)),
+            // A turn (or settleTerminal) rejection routes through the wrapper's
+            // onError — settling the run 'crashed' — so the rejection is logged +
+            // counted by fireAndForget instead of pre-swallowed by a `.catch`
+            // (the F3 pre-swallow gate). settleCrashed is fully guarded (never
+            // rejects), matching the prior `.catch` behavior.
+            (err) => settleCrashed(reminder, ritual_id, runRunId, subagentRunId, err),
           )
         } catch (launchErr) {
           await settleCrashed(reminder, ritual_id, runRunId, subagentRunId, launchErr)

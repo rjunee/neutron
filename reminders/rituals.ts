@@ -38,6 +38,7 @@
 
 import { readFileSync, statSync } from 'node:fs'
 import { join } from 'node:path'
+import { createLogger } from '@neutronai/logger'
 
 /**
  * Ritual spawn timeout — 45 min, parity with Vajra's
@@ -375,7 +376,7 @@ export async function validateRitualFire(
   registry: RitualRegistry,
   approvals: RitualApprovalCheck,
   ritual_id: string,
-  log: (msg: string) => void = console.error,
+  log: (msg: string) => void = createLogger('rituals').error,
 ): Promise<RitualFireValidation> {
   const skip = (reason: RitualFireSkipReason, detail: string): RitualFireValidation => {
     log(`ritual fire SKIP id=${ritual_id} reason=${reason} detail=${detail}`)

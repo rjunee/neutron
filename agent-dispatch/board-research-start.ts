@@ -28,6 +28,7 @@
  *     ephemeral registry send.
  */
 
+import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
 import { DispatchValidationError } from './service.ts'
 import type { DispatchHandle, DispatchRequest } from './service.ts'
 
@@ -77,7 +78,8 @@ export interface BoardResearchStarterDeps {
 export function createBoardResearchStarter(
   deps: BoardResearchStarterDeps,
 ): (scope: string, item: BoardResearchItem) => Promise<BoardResearchStartResult> {
-  const schedule = deps.schedule ?? ((work: Promise<unknown>) => void work.catch(() => {}))
+  const schedule =
+    deps.schedule ?? ((work: Promise<unknown>) => fireAndForget('board-research-start-work', work))
 
   return async (scope, item) => {
     const chatId = deps.chatIdForScope(scope)
