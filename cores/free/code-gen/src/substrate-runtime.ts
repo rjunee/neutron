@@ -43,6 +43,8 @@
  * § "Architecture (the layer cake)" and § Phase 1 for the contract.
  */
 
+import { SONNET_MODEL } from '@neutronai/runtime/models.ts'
+
 /**
  * Sub-agent dispatch contract. Relocated here (from the deleted
  * `runtime-runner.ts` — the retired v1 code-gen pipeline) because
@@ -516,7 +518,7 @@ export function buildCannedCodegenLlmCall(
       text: chosen.text,
       tool_calls: chosen.tool_calls ?? [],
       stop_reason: chosen.stop_reason ?? 'end_turn',
-      model: chosen.model ?? 'claude-sonnet-4-6',
+      model: chosen.model ?? SONNET_MODEL,
     }
   }
 

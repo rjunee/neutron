@@ -1,5 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 
+import { SONNET_MODEL } from '@neutronai/runtime/models.ts'
+
 import type {
   SubagentDispatchInput,
   SubagentDispatchResult,
@@ -594,6 +596,21 @@ describe('buildCannedCodegenLlmCall', () => {
         model: 'claude-sonnet-4-6',
       }),
     ).rejects.toThrow(/no response configured/)
+  })
+
+  test('when chosen.model is absent, returned model defaults to SONNET_MODEL (task-8)', async () => {
+    // A canned response with no `model` field — buildCannedCodegenLlmCall
+    // must fill in the default from SONNET_MODEL, not a bare literal.
+    const canned = buildCannedCodegenLlmCall({
+      responses: [{ text: 'done', tool_calls: [], stop_reason: 'end_turn' }],
+    })
+    const result = await canned({
+      system: 's',
+      messages: [{ role: 'user', content: 'go' }],
+      max_tokens: 1024,
+      model: 'claude-sonnet-4-6',
+    })
+    expect(result.model).toBe(SONNET_MODEL)
   })
 })
 

@@ -8,8 +8,10 @@ import { CronJobRegistry } from '@neutronai/cron/jobs.ts'
 import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import type { LlmCallFn } from '@neutronai/onboarding/interview/phase-spec-resolver.ts'
+import { FAST_MODEL } from '@neutronai/runtime/models.ts'
 import { TaskStore } from '../store.ts'
 import {
+  DEFAULT_TASK_PRIORITIZE_MODEL,
   TASK_PRIORITIZE_HANDLER_NAME,
   buildPrioritizeUserPrompt,
   buildTaskPrioritizeHandler,
@@ -373,5 +375,11 @@ describe('cron wiring', () => {
     })
     expect(ok.status).toBe('ok')
     expect(ok.detail).toContain('by=deterministic')
+  })
+})
+
+describe('DEFAULT_TASK_PRIORITIZE_MODEL — resolver reference', () => {
+  test('DEFAULT_TASK_PRIORITIZE_MODEL equals FAST_MODEL from runtime/models.ts', () => {
+    expect(DEFAULT_TASK_PRIORITIZE_MODEL).toBe(FAST_MODEL)
   })
 })

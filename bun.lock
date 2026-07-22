@@ -179,6 +179,7 @@
         "@neutronai/migrations": "workspace:*",
         "@neutronai/persistence": "workspace:*",
         "@neutronai/prompts": "workspace:*",
+        "@neutronai/runtime": "workspace:*",
       },
     },
     "cores/free/email": {

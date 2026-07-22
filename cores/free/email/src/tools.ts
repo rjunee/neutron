@@ -15,6 +15,7 @@ import {
   CapabilityGuard,
   type SecretAuditLog,
 } from '@neutronai/cores-runtime'
+import { FAST_MODEL } from '@neutronai/runtime/models.ts'
 import type { NeutronManifest } from '@neutronai/cores-sdk'
 
 import {
@@ -172,7 +173,7 @@ export function buildTools(deps: ToolDeps): BuiltTools {
   // watchdog flip; a plain string pins a fixed id. Default Haiku-fast.
   const resolveModel = (): string => {
     const m = typeof deps.model === 'function' ? deps.model() : deps.model
-    return m ?? 'claude-haiku-4-5-20251001'
+    return m ?? FAST_MODEL
   }
   const now = deps.now ?? ((): number => Date.now())
 

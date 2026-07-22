@@ -42,6 +42,7 @@ import type {
 import type { ProjectDb } from '@neutronai/persistence/index.ts'
 import { createLogger } from '@neutronai/logger'
 import type { LlmCallFn } from '@neutronai/contracts/llm-call.ts'
+import { FAST_MODEL } from '@neutronai/runtime/models.ts'
 import { computeFocusScore } from './focus-score.ts'
 
 /**
@@ -58,7 +59,7 @@ export const DEFAULT_TASK_PRIORITIZE_INTERVAL_MS = 6 * 60 * 60 * 1000
 export const TASK_PRIORITIZE_HANDLER_NAME = 'tasks.prioritize_llm'
 
 /** Default model id (overridable via the handler dep). Mirrors the nudge engine. */
-export const DEFAULT_TASK_PRIORITIZE_MODEL = 'claude-haiku-4-5'
+export const DEFAULT_TASK_PRIORITIZE_MODEL = FAST_MODEL
 
 /** Default LLM timeout — a stuck call must never block the cron tick. */
 export const DEFAULT_TASK_PRIORITIZE_TIMEOUT_MS = 8_000
