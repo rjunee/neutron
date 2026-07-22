@@ -287,11 +287,13 @@ export function registerWorkBoardToolSurface(
       if (ref !== undefined) patch.design_doc_ref = ref
       if (typeof a.inline_active === 'boolean') patch.inline_active = a.inline_active
       const scope = workBoardScopeKey(ctx.project_slug, ctx.project_id)
-      // #429 task 4 — snapshot BEFORE the update so we can detect an
-      // inline_active false→true flip (the "I'm working this inline now" signal)
-      // and ack it exactly once. Read is cheap (single-row PK lookup).
-      const prev = chatAck !== undefined ? store.get(scope, id) : null
       try {
+        // #429 task 4 — snapshot BEFORE the update so we can detect an
+        // inline_active false→true flip (the "I'm working this inline now" signal)
+        // and ack it exactly once. Read is cheap (single-row PK lookup). Kept
+        // INSIDE the try so a store read error degrades to a clean tool error
+        // (asErrorResult) instead of escaping as an unhandled rejection.
+        const prev = chatAck !== undefined ? store.get(scope, id) : null
         const item = await store.update(scope, id, patch)
         if (
           chatAck !== undefined &&

@@ -176,7 +176,11 @@ export function registerTridentBuildToolSurface(
     approval_policy: 'prompt-user',
     handler: async (args, ctx) => {
       const a = (args ?? {}) as DispatchBuildArgs
-      const board_item_id = typeof a.board_item_id === 'string' ? a.board_item_id : undefined
+      // Trim once here so the bound-item lookup + ack (below) and the dispatch
+      // (which trims internally) all key off the SAME normalized id — a
+      // whitespace-padded id no longer misses the ack's title lookup.
+      const board_item_id_raw = typeof a.board_item_id === 'string' ? a.board_item_id.trim() : ''
+      const board_item_id = board_item_id_raw.length > 0 ? board_item_id_raw : undefined
       const task = typeof a.task === 'string' ? a.task.trim() : ''
       if (task.length === 0) {
         return { ok: false, error: 'task is required and must be a non-empty string' }
