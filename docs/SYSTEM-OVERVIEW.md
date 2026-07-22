@@ -68,6 +68,25 @@ share one backend instance. Examples:
 > runtime reads the old notes tables; the historical per-Core migration is a
 > no-op orphan on any already-deployed DB.
 
+**Narrow Neutron chat commands (`/status`).** Beyond the Core `/`-commands
+(`/remind`, `/code`, `/cal`, `/email`, `/research`, `/skills`), Neutron ships a
+deliberately narrow set of instance commands — NOT the full Vajra topic-lifecycle
+vocabulary (Ryan 2026-07-21: "only the chat commands that make sense for
+Neutron"). `/status` (M2 task 3) is a pure READ that replies with a deterministic
+one-shot snapshot — active project, current model (`getBestModel()`), pending
+reminder count, active work-board items, and active Trident builds. It is built by
+`buildStatusChatCommandFilter` (`gateway/boot-chat-command-filters.ts`, re-exported
+from the `gateway/boot-helpers.ts` barrel) and chained in `open/composer.ts` into
+the SAME `buildChainedChatCommandFilter([...])` the web onboarding chat AND the
+app-ws chat share, so there is one command path. The snapshot itself is an injected
+thunk (the composer binds it — via a `late<T>` two-phase holder — to the live
+projects reader / reminder store / work-board / Trident run store once those stores
+exist), keeping the filter store-free and unit-testable. The command word is exact:
+`/statusfoo` falls through to the LLM (K8 grammar boundary). `/reset` is the
+sibling command still to land — see the M2 task list; its actuation was re-scoped
+after `respawnSupervisedSession` was verified to `--resume` (context-preserving),
+not reset context.
+
 **Two tool factories per Core.** The install pipeline
 (`gateway/cores/install-bundled.ts → registerCoreTools`) resolves `buildTools`
 from a Core's barrel and, if present, ALSO `buildExtraTools` — a second factory
@@ -4490,11 +4509,58 @@ now-nonexistent vanilla client.
   reveals only one user's blobs), a plain `<img src>` would 401 — so a custom
   assistant-ui `Image` content-part fetches the blob WITH the app-ws token and
   renders an object URL. The bare token is surfaced on `BootstrapConfig.token`.
+- **Accepted types (M2 modality scope, 2026-07-21):** PNG / JPEG / GIF / WEBP
+  raster images + **PDF documents** (`CHAT_UPLOAD_MIME_WHITELIST`). SVG stays
+  excluded (inline-script XSS). Magic-byte sniffing (`gateway/storage/binary-types.ts`)
+  is authoritative — a declared type that disagrees with the sniff is a 400
+  `content_type_spoof`. A NON-image attachment renders in the bubble as a
+  downloadable file chip (not a broken image) via the SAME authed fetch — on BOTH
+  surfaces: web (`message-adapter.ts` routes every attachment through the authed
+  renderer, which branches on `isImageAttachmentUrl`) AND mobile
+  (`app/components/AuthedAttachmentImage.tsx` delegates non-images to
+  `AuthedAttachmentFile`, a tappable `📎` chip; `app/lib/attachment-url.ts` holds the
+  shared `isImageAttachmentUrl` / `attachmentBasename` predicates). Served blobs pin
+  `X-Content-Type-Options: nosniff` + `Content-Disposition: inline` so a browser never
+  MIME-sniffs a document into an executable type. The native picker's accept list
+  mirrors the server whitelist.
+- **Attachment → agent threading (M2, 2026-07-21):** the upload URLs are no longer
+  dropped at the WS receiver. `open/wiring/app-ws.ts` sanitizes
+  `adapter_metadata.attachments` (via `sanitizeInboundAttachments` — non-empty strings,
+  deduped, capped at `MAX_INBOUND_ATTACHMENTS`=16) and passes them on the
+  `LiveAgentTurnRequest`; `gateway/wiring/build-live-agent-turn.ts` resolves each
+  URL to its local blob path (`resolveChatAttachmentLocalPath`, supplied by the
+  composer over `owner_home`) and splices a `<user_attachments>` fragment of the
+  resolved absolute paths into the DISPATCHED prompt (warm splice + cold
+  `composeFirstTurnPrompt`) — the CC REPL `Read`s images AND PDFs natively. The
+  fragment is prompt-only; `turn.user_text` (which feeds capture/reflection/
+  scribe/persistence) is never mutated. An attachment-only send still dispatches a
+  turn; an unresolvable URL is skipped with a warn.
+- **Voice notes (M2 task 5, 2026-07-22):** audio (MP3 / M4A / WAV) is accepted on
+  the SAME chat-upload surface as images + PDF (`CHAT_UPLOAD_MIME_WHITELIST` +
+  `EXT_FROM_MIME` + `URL_PATH_RE` + `mimeFromExt` all widened; the sniffers already
+  existed in `binary-types.ts`). At upload-complete an audio blob is transcribed by
+  `gateway/transcription/openai-transcription.ts` — an OpenAI-compatible `POST
+  {base}/v1/audio/transcriptions` Whisper client (`whisper-1`, injectable base_url +
+  fetch; typed error taxonomy; never throws). Transcription is gated ONLY by
+  `OPENAI_API_KEY` presence (credential config, the SAME single var the conversational
+  OpenAI provider pool uses via `resolveOpenOpenAiPool` — NOT a feature flag; it works
+  regardless of which provider drives the conversation). The transcript is persisted as
+  a **content-addressed `<hash>.txt` sidecar** beside the blob (atomic tmp+rename,
+  idempotent — a re-upload of the same bytes never re-calls the API; `.txt` is
+  deliberately NOT in the GET ext-group, so the sidecar is never servable). It is
+  injected into the `<user_attachments>` prompt fragment as the voice note's inline
+  transcript (capped at 4000 chars; keyless/failed ASR → a graceful "transcription
+  unavailable — set OPENAI_API_KEY" note), and appended to the SCRIBE text via a new
+  `attachmentTranscript` app-ws seam so voice → text → gbrain memory reaches parity —
+  the turn's `user_text` is never mutated. Both clients render a 🎵 chip for a voice
+  note (web `message-adapter.ts` `isAudioAttachmentUrl`; native `attachment-url.ts`
+  predicate; icon precedent `docs-shared.ts` `treeIconFor`).
 
 **Parity reached:** optimistic send, token streaming, typing indicator,
 reconnect+backoff (all via chat-core), durable cold-open + gap-free reconnect
 (seq/resume), multi-device (falls out of seq/resume + the Phase-1 `Set<sender>`
-registry), project topics, and attachments (compose **and** authed render).
+registry), project topics, attachments (compose **and** authed render), and voice
+notes (audio upload + Whisper transcription → prompt + scribe).
 **Not yet at parity (documented gaps):** "load earlier" history paging beyond the
 resume replay window — this is the one remaining named-scope gap, and it is NOT
 client-only: chat-core + the app-ws surface are forward-only (a single

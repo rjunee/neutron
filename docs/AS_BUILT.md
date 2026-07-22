@@ -4624,3 +4624,264 @@ UNAPPROVED (task 8 owns the owner's approval act).
 - OUT OF SCOPE (later RALPH tasks): scheduling/approval UX (task 8), memory-tier work
   (task 9), SYSTEM-OVERVIEW ritual-executor section (task 10), any writing/Bash ritual
   (stays gated on the OS-sandbox sprint).
+
+## M2 P0 parity — input modalities task 1: attachment→agent threading + PDF documents (2026-07-21)
+
+Scope: `IMPLEMENTATION_PLAN.md` task 1. Attachments (including images) never reached
+the agent — `open/wiring/app-ws.ts` read `adapter_metadata.attachments` and dropped
+them (its own comment admitted the deeper wiring was a follow-up); `gateway/wiring/
+build-live-agent-turn.ts` had zero attachment handling. This builds the threading AND
+adds PDF as an accepted chat-upload type. **Images are fixed as a side effect** — they
+now reach the agent for the first time.
+
+- **`gateway/http/app-upload-surface.ts`** — `IMAGE_MIME_WHITELIST` → `CHAT_UPLOAD_MIME_WHITELIST`
+  (+`application/pdf`; SVG still excluded); `EXT_FROM_MIME` (+`pdf`), `URL_PATH_RE`
+  (`…(png|jpg|gif|webp|pdf)`), `mimeFromExt` (+`pdf`). All existing hardening
+  (Content-Length pre-check, 10 MiB cap, declared-vs-sniffed cross-check,
+  content-addressed storage, per-user GET auth) untouched. NEW exported
+  `resolveChatAttachmentLocalPath(owner_home, url)` — pure, syscall-free URL→local-path
+  map using the SAME `URL_PATH_RE` (relative OR absolute URL; null for non-matching).
+- **`gateway/http/chat-sender-registry.ts`** — `LiveAgentTurnRequest` gains
+  `attachments?: ReadonlyArray<string>` (prompt-only; never mutates `user_text`).
+- **`gateway/wiring/build-live-agent-turn.ts`** — `BuildLiveAgentTurnInput` gains
+  `resolveAttachment?`; new exported `buildAttachmentsFragment(...)` formats a
+  `<user_attachments>` block of resolved absolute paths + MIME + a "Read them" line;
+  injected on the WARM splice (before the user message) AND the COLD
+  `composeFirstTurnPrompt` (before the user message). Unresolvable URL → skipped + warn.
+- **`open/wiring/app-ws.ts`** — sanitizes `adapter_metadata.attachments` to non-empty
+  strings and passes `attachments` into the `appWsChatTurn({...})` call.
+- **`open/composer.ts`** — threads `resolveAttachment: (url) => resolveChatAttachmentLocalPath(owner_home, url)`
+  into `buildLiveAgentTurn`.
+- **Clients** — web: `uploads.ts` `ACCEPTED_IMAGE_TYPES` → `ACCEPTED_ATTACHMENT_TYPES`
+  (+pdf); `ChatApp.tsx` file-input `accept` (+`application/pdf,.pdf`), aria-label
+  "Attach file…", `AttachmentImage` non-image → downloadable file chip;
+  `message-adapter.ts` routes every attachment through the authed renderer
+  (`isImageAttachmentUrl` decides img vs chip). Expo: `app/lib/upload-client.ts`
+  `mimeToExt` (+pdf, exported for test).
+- **Tests** — `gateway/__tests__/app-upload-surface.test.ts` (PDF accept/spoof/serve+ETag
+  + `resolveChatAttachmentLocalPath` units); `gateway/wiring/__tests__/build-live-agent-turn-attachments.test.ts`
+  (NEW: cold+warm embed the resolved path, `user_text` unpolluted, unresolvable skipped,
+  no-attachments/no-resolver → no block); `gateway/__tests__/m2-chat-upload-attach-production-composer.test.ts`
+  (PDF variant threads onto `adapter_metadata.attachments`); web `uploads.test.ts` /
+  `message-adapter.test.ts` updated; `app/__tests__/upload-client.test.ts` `mimeToExt` unit.
+- Suites: scoped gateway + wiring + open + client tests green; `tsc -p tsconfig.json` clean.
+- OUT OF SCOPE (later tasks): voice-note transcription (task 2), `/status` + `/reset`
+  chat commands (task 3), office formats beyond PDF, SVG, the import-ZIP path.
+
+### Round-2 hardening (Argus review, 2026-07-21)
+
+- **`landing/chat-react/ChatApp.tsx` — `attachmentBasename` no longer throws on a
+  poisoned URL.** It runs during render for every non-image chip; a malformed
+  percent-escape (`report%ZZ.pdf`) made `decodeURIComponent` throw `URIError`,
+  tripping `ChatErrorBoundary` and blanking the whole chat view — and, since the
+  URL persists in history, it recurred on every reload. Now `try/catch` falls back
+  to the raw segment. Exported + unit-tested (`__tests__/attachment-basename.test.ts`).
+- **`gateway/http/app-upload-surface.ts` — `resolveChatAttachmentLocalPath` hardened.**
+  `URL_PATH_RE`'s user_id class matched a dot-only segment (`.` / `..`); now rejected
+  outright (`/^\.+$/`) rather than relying on the hex64-filename bound. Added an
+  `existsSync` gate so a resolvable-but-missing blob path is never injected into the
+  agent prompt. New units cover both.
+- **`gateway/wiring/build-live-agent-turn.ts` — Retry re-injects the ORIGINAL
+  attachments.** A freeze-timeout Retry (`RETRY_TURN_VALUE`) recovered only
+  `lastUserText`, silently dropping the doc/image. New `lastAttachments` map recorded
+  alongside `lastUserText`; the recovered turn re-binds `attachments` too. Tests (f)/(g)
+  in `build-live-agent-turn-attachments.test.ts` prove the retried prompt re-embeds the
+  path (and injects no block when the original had none).
+
+### Round-3 hardening (Argus review round-2, 2026-07-21)
+
+- **BLOCKER — mobile PDFs no longer paint as broken images.** The Expo bubble
+  routed EVERY attachment URL through `AuthedAttachmentImage` (a pure RN `<Image>`),
+  so a PDF (newly uploadable on mobile in M2) rendered as a broken thumbnail with no
+  open affordance — unlike the web file chip. Now `AuthedAttachmentImage` branches on
+  `isImageAttachmentUrl(url)`: a non-image renders as `AuthedAttachmentFile`, a
+  tappable `📎 <basename>` chip that opens the document (non-authed URLs open
+  directly; our bearer-authed `/api/app/upload/…` URLs are fetched WITH the bearer
+  then opened — RN-web via an object URL in a new tab, native via a base64 data URL
+  handed to `WebBrowser`). Two new plain-TS helpers in `app/lib/attachment-url.ts`
+  (`isImageAttachmentUrl`, `attachmentBasename`, both unit-tested, mirroring the web
+  client's) drive the branch. This is the mobile analogue of the web file chip; it
+  also settles the app side of the "non-image routed as image content-part" semantic
+  (the web `message-adapter` note) — the renderer, not the content-part type, decides.
+- **`gateway/http/app-upload-surface.ts` — served blobs pin their type.** The GET 200
+  now sets `X-Content-Type-Options: nosniff` + `Content-Disposition: inline` so a
+  browser never MIME-sniffs a served document into an executable content-type
+  (defense-in-depth atop the existing bearer + user-id match; matters now that PDFs
+  are served inline). Asserted in the PDF-serve test.
+- **`open/wiring/app-ws.ts` — inbound attachment list is deduped + bounded.** New
+  exported `sanitizeInboundAttachments(raw)` keeps only non-empty strings, DEDUPS, and
+  CAPS at `MAX_INBOUND_ATTACHMENTS` (16) — each survivor drives a downstream
+  `existsSync` + `<user_attachments>` prompt line, so a buggy/hostile client can't
+  fan out unboundedly. Replaces the inline filter at the receiver; unit-tested.
+- **`app/components/ChatSyncSurface.tsx` — native picker mirrors the server whitelist.**
+  `DocumentPicker.getDocumentAsync` moved from `type: '*/*'` to the images+PDF+ZIP
+  whitelist so the OS picker greys out unsupported files up front instead of letting a
+  pick sail through to a raw 415.
+- **Real-resolver integration test** (`build-live-agent-turn-attachments-real-resolver.test.ts`):
+  seeds a real blob on disk, resolves its URL with the SHIPPED
+  `resolveChatAttachmentLocalPath`, and asserts `buildAttachmentsFragment` embeds the
+  on-disk path + MIME (and drops a missing blob) — closing the "stub-only resolver"
+  coverage gap through the production seam.
+- Suites: `app/__tests__/attachment-authed-source.test.ts`, `gateway/__tests__/app-upload-surface.test.ts`,
+  `gateway/wiring/__tests__/build-live-agent-turn-attachments-real-resolver.test.ts`,
+  `open/__tests__/open-wiring-app-ws.test.ts` green; `tsc` clean (root + `app/`).
+- NOT changed (documented-acceptable, single-owner posture): `resolveChatAttachmentLocalPath`
+  cross-`user_id` read (one owner; contained by `existsSync` + per-tenant process
+  isolation) and the web `message-adapter` routing non-images as `type:'image'` content
+  parts (assistant-ui exposes only text|image parts here; the renderer branches on the
+  URL, so it is correct in practice).
+
+### CI-green hotfix (PR #428, task 2) — de-pollute process-global react/react-native test mocks
+
+- The canonical `test` job went RED across `a235eea3..141d2c1c` (3 consecutive runs). The
+  two new app test files (`app/__tests__/authed-attachment-image-hooks.test.tsx`,
+  `app/__tests__/authed-attachment-file-open.test.tsx`) registered process-global NARROW
+  `mock.module` payloads for `react` / `react/jsx-runtime` / `react/jsx-dev-runtime` /
+  `react-native`. Bun module mocks are process-global and survive across files, so in the
+  shared-process CI chunk (`scripts/run-tests.sh`, 75-file chunks) they poisoned later
+  files — `SyntaxError: Export named 'useReducer' not found` (docs-mutations-race) and
+  `Export named 'Linking' not found` (docs-panes-render), plus `forwardRef is not a
+  function` from react-textarea-autosize in the landing suites.
+- FIRST ATTEMPT (superset + delegate-to-real react mock) fixed the SyntaxErrors but HUNG
+  the CI `test` job (>90 min, never completing). Root cause: a `mock.module('react', …)`
+  is process-global in bun and silently replaces `import * as RealReact from 'react'` in
+  EVERY later file of the same chunk — including `docs-mutations-race` /
+  `diagnostics-pane-render`, which deliberately use REAL react via an injected HookRuntime.
+  Even a faithful superset defeats their design and deadlocked chunk 0 (agent-dispatch +
+  app files together). Every other test file in the repo AVOIDS mocking react for exactly
+  this reason (the "process-global" warnings in `docs-mutations-race.test.ts:52` etc.).
+- FINAL FIX (test hygiene only — zero production or assertion changes): ELIMINATE the
+  `react` / `react/jsx-runtime` / `react/jsx-dev-runtime` module mocks entirely from both
+  files; use REAL react + real jsx. Only `react-native` stays a module mock (bun can't
+  parse its Flow source) — kept as a SUPERSET (`Linking` / `useWindowDimensions` /
+  `ScrollView` / `TextInput` / `ActivityIndicator` / `Modal`) so it never collides with the
+  sibling docs suites' react-native mocks — plus the `expo-*` stubs (so the real expo
+  modules never drag unparseable react-native internals into the process).
+  `AuthedAttachmentImage` is a hook-free dispatcher, so it runs directly against real react
+  (a regression re-adding a hook throws "Invalid hook call" and fails the test loudly).
+  `AuthedAttachmentFile` calls `useState`, so `pressChip` installs a minimal hook
+  dispatcher on react's current-dispatcher slot
+  (`__CLIENT_INTERNALS_DO_NOT_USE_OR_WARN_USERS_THEY_CANNOT_UPGRADE.H`) around the
+  SYNCHRONOUS component call only, then restores it — scoped to this file, no module mock,
+  no cross-file pollution.
+- Verified locally with gbrain on PATH: the exact CI chunk 0 (7 agent-dispatch + 68 app
+  files, the set that hung) now runs 861 pass / 0 fail and EXITS in <1s; both target suites
+  green (image 4/0, file 5/0); the 12 branch-changed files in ONE bun process 125/0;
+  `bash scripts/ci/typecheck-all.sh` exit 0 (51 tsconfigs).
+
+### Round-2 findings fix (Argus review round-1 on PR #428, 2026-07-22)
+
+- **BLOCKER — native non-authed `data:`/`file:`/`content:` attachments no longer open
+  silently-fail.** The file-chip `open()` handler's `bearer === undefined` branch
+  (`app/components/AuthedAttachmentImage.tsx`) handed the raw URI straight to
+  `WebBrowser.openBrowserAsync` on native — but SFSafariViewController / Chrome Custom
+  Tabs reject a non-http(s) INITIAL url, so a `file://`/`content://` (optimistic /
+  failed-send local doc bubble — `attachment-url.ts:141-149`) or `data:` URI opened to
+  nothing, contradicting the file's own r2-BLOCKER invariant. Fixed with a new
+  `openNonAuthedNative(uri, name)` helper: an `http(s)` URL still opens in the in-app
+  browser; a `data:` URL is materialized to a cache file (`materializeDataUrlToCache`)
+  and a local `file:`/`content:` URL is shared as-is — both routed through
+  `Sharing.shareAsync` (the same OS-share path the AUTHED native branch already uses),
+  with the rare `!isAvailableAsync()` emulator fallback. Web behavior unchanged (still
+  navigates the synchronously-opened tab). Four new regression tests in
+  `app/__tests__/authed-attachment-file-open.test.tsx` assert: local `file://` shared
+  as-is (never WebBrowser), `data:` materialized-then-shared (never a data: URL to
+  WebBrowser), and `http(s)` still opens in WebBrowser.
+- **Test hygiene (findings 2 + 3, no production change).** The two attachment test files'
+  `react-native` superset mocks now also export `FlatList` / `KeyboardAvoidingView` /
+  `TouchableOpacity` (per the sibling-superset convention, so they can never collide with
+  a docs-suite RN mock in a shared CI chunk). Removed the vacuous `const useStateCalls = 0;
+  expect(...).toBe(0)` always-pass counters from `authed-attachment-image-hooks.test.tsx`;
+  the real guard was always the element-TYPE assertions plus the real-react "Invalid hook
+  call" throw — the flip test now asserts the exact image/file type sequence across the
+  recycle instead of a tautology.
+- Verified: both target suites 12/0; the full `app/__tests__/` dir in ONE bun process
+  872/0 (the CI-pollution scenario, clean); `tsc --noEmit -p app/tsconfig.json` exit 0.
+
+## M2 P0 parity — input modalities task 3 (partial): `/status` chat command (2026-07-22)
+
+Scope: `IMPLEMENTATION_PLAN.md` task 3, the `/status` half of the narrow Neutron
+chat commands (`/status` + `/reset`; NOT the Vajra topic-lifecycle vocabulary).
+`/reset` is intentionally NOT shipped this iteration — see the mechanism finding
+below.
+
+- **`/status` — deterministic instance snapshot.** New `buildStatusChatCommandFilter`
+  (`gateway/boot-chat-command-filters.ts`, re-exported through the
+  `gateway/boot-helpers.ts` / `composer-contract.ts` barrel) implements the
+  `ChatCommandFilter` contract. `/status` (exact-command word boundary — `/statusfoo`
+  falls through to the LLM, K8 grammar precedent) replies with a formatted snapshot:
+  active project, current model (`getBestModel()`), pending-reminder count, active
+  work-board items, active Trident builds. Pure READ — no mutation, no LLM dispatch.
+- **Wiring — one command path, both surfaces.** Chained in `open/composer.ts` into the
+  SAME `buildChainedChatCommandFilter([...])` the web onboarding chat AND the app-ws
+  chat share (appended after the cores chain + skill-forge). The snapshot is an
+  injected thunk; because the source stores (projects reader / reminder store /
+  work-board / Trident run store) are constructed LATER in the composer closure, the
+  reader is threaded through a `late<T>` two-phase holder (`statusSnapshotHolder`) and
+  BOUND right after `workBoardStore` exists. Each source read is best-effort (degrades
+  to 0 rather than bricking the command). Filter stays store-free → unit-testable.
+- **Tests.** `gateway/__tests__/status-command-wiring.test.ts` (9/0): reply TEXT carries
+  every snapshot field value (behavior, not a `toHaveBeenCalled` gap-test); `project_id`
+  threaded / omitted correctly; leading-whitespace + trailing-arg tolerance; `/statusfoo`
+  + `/statuses` fall through and NEVER run the snapshot thunk; chain-composition proof
+  that `/status` is reached after earlier filters disclaim (the real composer shape).
+- **`/reset` DEFERRED — verified spec/mechanism mismatch.** The plan named
+  `respawnSupervisedSession` as the `/reset` actuation for "fresh agent context; durable
+  chat history stays". VERIFIED against the code this is WRONG:
+  `runtime/adapters/claude-code/persistent/session-respawn.ts:24` — "respawn ALWAYS
+  resumes — never a fresh spawn"; `respawnSupervisedSession` (`supervision.ts:59`) →
+  `respawnReplSession(..., true)` → `planRespawn` `--resume`s the SAME transcript,
+  PRESERVING context. It cannot deliver a context reset. Shipping `/reset` on that
+  primitive would be a no-op-that-looks-like-it-works (banned pattern). The correct
+  primitive is the `/clear` PTY reset (`CONTEXT_RESET_COMMAND`, `pool.ts:380`, already
+  used for the import warm-session per-turn reset) or a fresh (non-resume) respawn; plus
+  a credential-identity-agnostic way to target the live session key (the pool key folds
+  `cred.id`, unknown to the filter). Re-scoped in `IMPLEMENTATION_PLAN.md` for a
+  follow-up iteration on the corrected mechanism.
+- Verified: `bunx tsc --noEmit` exit 0; `gateway/__tests__/status-command-wiring.test.ts`
+  9/0.
+
+## M2 P0 parity — input modalities task 5: voice notes (audio upload + Whisper ASR) (2026-07-22)
+
+Scope: `IMPLEMENTATION_PLAN.md` task 5. Audio voice notes (MP3/M4A/WAV) upload on
+the SAME chat surface as images + PDF, transcribed at upload-complete by a new
+OpenAI-compatible Whisper client, with the transcript injected into the dispatched
+prompt AND appended to the scribe text (voice → text → gbrain parity). NO FEATURE
+FLAGS — transcription is gated only by `OPENAI_API_KEY` presence (credential config).
+
+- **Whisper client.** New `gateway/transcription/openai-transcription.ts` —
+  `createOpenAiTranscriptionClient` POSTs multipart `{base}/v1/audio/transcriptions`
+  (default base `https://api.openai.com`, model `whisper-1`, injectable `fetch_impl` +
+  `timeout_ms`). Typed `TranscribeResult` with an error taxonomy
+  (`http_error`/`network_error`/`timeout`/`bad_response`); NEVER throws, no logging
+  inside the client, no retries (v1). `audioFilenameFor` maps the canonical MIME to a
+  Whisper-recognized filename extension (`voice.mp3`/`voice.m4a`/`voice.wav`).
+- **Upload surface.** `gateway/http/app-upload-surface.ts` — widened
+  `CHAT_UPLOAD_MIME_WHITELIST` / `EXT_FROM_MIME` / `URL_PATH_RE` ext-group /
+  `mimeFromExt` to audio (`.txt` DELIBERATELY excluded from the GET ext-group so the
+  transcript sidecar is never servable). New optional `transcribeAudio` seam;
+  handleUpload transcribes an audio blob and writes a content-addressed `<hash>.txt`
+  sidecar (atomic tmp+rename, idempotent — sidecar-exists ⇒ the API is NOT re-called;
+  ASR failure NEVER fails the upload). `resolveChatAttachmentLocalPath` widened to
+  return `transcript` for audio (sidecar read; null when absent), field omitted for
+  non-audio.
+- **Turn injection.** `gateway/wiring/build-live-agent-turn.ts` `buildAttachmentsFragment`
+  embeds an audio attachment's transcript inline (capped 4000 chars with a truncation
+  marker); keyless/failed ASR → the graceful "transcription unavailable — set
+  OPENAI_API_KEY" note. Splice sites + `turn.user_text` untouched.
+- **Scribe threading.** `open/wiring/app-ws.ts` — new `attachmentTranscript` deps seam;
+  the receiver appends resolved transcripts to the `scribeOnUserTurn` text only
+  (`user_text` stays unmutated). Composer wires it over `resolveChatAttachmentLocalPath`;
+  `open/composer.ts` builds the `transcribeAudio` seam from `OPENAI_API_KEY` (keyless ⇒
+  no seam, audio still uploads without a transcript).
+- **Clients.** Web accept attr + `ACCEPTED_ATTACHMENT_TYPES` (+ alias forms) + 🎵 chip
+  (`message-adapter.ts` `isAudioAttachmentUrl`); native Expo picker mime array +
+  `mimeToExt` audio cases + 🎵 chip (`attachment-url.ts` predicate).
+- Verified: `bunx tsc --noEmit` exit 0. Tests:
+  `gateway/transcription/__tests__/openai-transcription.test.ts` 7/0;
+  `gateway/__tests__/app-upload-surface.test.ts` 30/0 (incl. artifact-on-disk sidecar +
+  idempotency call-count + keyless-no-sidecar + `.txt`-unreachable);
+  `gateway/wiring/__tests__/build-live-agent-turn-attachments.test.ts` 11/0;
+  `open/__tests__/open-wiring-app-ws.test.ts` 20/0 (scribe transcript threading);
+  `app/__tests__/upload-client.test.ts` 12/0;
+  `landing/chat-react/__tests__/message-adapter.test.ts` 12/0.

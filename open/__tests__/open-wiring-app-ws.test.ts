@@ -32,7 +32,12 @@ import type { AppSocketButtonPromptRouter, AppSocketImportProgressRouter } from 
 import type { OutgoingMessage } from '@neutronai/channels/types.ts'
 import type { OpenWiringContext } from '../wiring/context.ts'
 import { late } from '../wiring/late.ts'
-import { wireAppWs, type OnboardingMsgEmit } from '../wiring/app-ws.ts'
+import {
+  MAX_INBOUND_ATTACHMENTS,
+  sanitizeInboundAttachments,
+  wireAppWs,
+  type OnboardingMsgEmit,
+} from '../wiring/app-ws.ts'
 import type { OpenComposition } from '../composer.ts'
 
 // ── C3d compile-level assertion: `OpenComposition`'s required-pick makes every
@@ -145,6 +150,112 @@ function fakeOpenWs(channel_topic_id: string): Parameters<
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
   } as any
 }
+
+// Argus r2 #4 — the inbound attachment list is client-supplied; each survivor
+// drives a downstream existsSync + <user_attachments> prompt line, so it must be
+// deduped and bounded.
+describe('sanitizeInboundAttachments', () => {
+  test('keeps only non-empty strings', () => {
+    expect(
+      sanitizeInboundAttachments([
+        '/api/app/upload/sam/a.png',
+        '',
+        42,
+        null,
+        undefined,
+        { url: 'x' },
+      ]),
+    ).toEqual(['/api/app/upload/sam/a.png'])
+  })
+
+  test('is empty for a non-array', () => {
+    expect(sanitizeInboundAttachments(undefined)).toEqual([])
+    expect(sanitizeInboundAttachments('nope')).toEqual([])
+    expect(sanitizeInboundAttachments(null)).toEqual([])
+  })
+
+  test('dedups repeated URLs (same blob injected once)', () => {
+    expect(
+      sanitizeInboundAttachments([
+        '/api/app/upload/sam/a.png',
+        '/api/app/upload/sam/a.png',
+        '/api/app/upload/sam/b.pdf',
+      ]),
+    ).toEqual(['/api/app/upload/sam/a.png', '/api/app/upload/sam/b.pdf'])
+  })
+
+  test(`caps at MAX_INBOUND_ATTACHMENTS (${MAX_INBOUND_ATTACHMENTS})`, () => {
+    const many = Array.from({ length: MAX_INBOUND_ATTACHMENTS + 20 }, (_, i) => `/api/app/upload/sam/${i}.png`)
+    const out = sanitizeInboundAttachments(many)
+    expect(out.length).toBe(MAX_INBOUND_ATTACHMENTS)
+    expect(out[0]).toBe('/api/app/upload/sam/0.png')
+  })
+})
+
+// M2 task 5 — the voice-note transcript must reach the SCRIBE text (voice →
+// text → gbrain parity) via the `attachmentTranscript` seam, WITHOUT mutating
+// the turn's user_text. Driven through the real adapter `dispatchInbound` seam
+// so the production receiver path runs.
+describe('wireAppWs — voice-note transcript threads into scribe (task 5)', () => {
+  const AUDIO_URL = '/api/app/upload/owner/beefbeefbeefbeef.wav'
+
+  function buildScribeDeps(over: {
+    attachmentTranscript?: (url: string) => string | null
+  }) {
+    const { deps } = buildDeps()
+    const scribeCalls: Array<{ text: string }> = []
+    const turnCalls: Array<{ user_text: string }> = []
+    const merged = {
+      ...deps,
+      // A live (non-null) turn runner so the receiver reaches the scribe call.
+      appWsChatTurn: async (turn: { user_text: string }) => {
+        turnCalls.push({ user_text: turn.user_text })
+        return {} as unknown
+      },
+      scribeOnUserTurn: (input: { text: string }) => {
+        scribeCalls.push({ text: input.text })
+      },
+      ...(over.attachmentTranscript !== undefined
+        ? { attachmentTranscript: over.attachmentTranscript }
+        : {}),
+    } as unknown as Parameters<typeof wireAppWs>[1]
+    return { deps: merged, scribeCalls, turnCalls }
+  }
+
+  test('the transcript seam enriches the scribe text (placeholder + transcript), user_text unmutated', async () => {
+    const { deps, scribeCalls, turnCalls } = buildScribeDeps({
+      attachmentTranscript: (url) => (url === AUDIO_URL ? 'voice text' : null),
+    })
+    const wired = wireAppWs(buildCtx(), deps)
+    await wired.appWsSurface.adapter.dispatchInbound({
+      user_id: 'owner',
+      channel_topic_id: 'app:owner',
+      body: '', // attachment-only → placeholder 'Sent an attachment.'
+      attachments: [AUDIO_URL],
+    })
+    // Fire-and-forget scribe — give it a tick to settle.
+    await new Promise((r) => setTimeout(r, 5))
+    expect(scribeCalls.length).toBe(1)
+    expect(scribeCalls[0]!.text).toContain('Sent an attachment.')
+    expect(scribeCalls[0]!.text).toContain('voice text')
+    // The turn's user_text is NEVER mutated — it stays the placeholder.
+    expect(turnCalls[0]!.user_text).toBe('Sent an attachment.')
+  })
+
+  test('seam undefined → scribe text is exactly the user text (regression pin)', async () => {
+    const { deps, scribeCalls } = buildScribeDeps({}) // no attachmentTranscript
+    const wired = wireAppWs(buildCtx(), deps)
+    await wired.appWsSurface.adapter.dispatchInbound({
+      user_id: 'owner',
+      channel_topic_id: 'app:owner',
+      body: 'just typed text',
+      attachments: [AUDIO_URL],
+    })
+    await new Promise((r) => setTimeout(r, 5))
+    expect(scribeCalls.length).toBe(1)
+    expect(scribeCalls[0]!.text).toBe('just typed text')
+  })
+})
 
 describe('wireAppWs (C3d carve #6)', () => {
   test('constructs the adapter, binds the appWs seam, and returns the surface', () => {

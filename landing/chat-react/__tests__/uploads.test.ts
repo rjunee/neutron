@@ -7,7 +7,7 @@ import { describe, expect, it } from 'bun:test'
 
 import {
   AttachmentUploadError,
-  ACCEPTED_IMAGE_TYPES,
+  ACCEPTED_ATTACHMENT_TYPES,
   IMPORT_TOPIC_HEADER,
   MAX_ATTACHMENT_BYTES,
   fetchAttachmentObjectUrl,
@@ -243,10 +243,24 @@ describe('uploadAttachment', () => {
   })
 
   it('pre-rejects an unsupported declared type', async () => {
-    const pdf = { name: 'x.pdf', type: 'application/pdf', size: 10 } as unknown as File
+    const svg = { name: 'x.svg', type: 'image/svg+xml', size: 10 } as unknown as File
     await expect(
-      uploadAttachment(pdf, { token: 't', fetchImpl: async () => okUpload() }),
+      uploadAttachment(svg, { token: 't', fetchImpl: async () => okUpload() }),
     ).rejects.toMatchObject({ code: 'unsupported_type' })
+  })
+
+  it('accepts a PDF (M2 documents) through the client guard', async () => {
+    let called = false
+    const pdf = { name: 'x.pdf', type: 'application/pdf', size: 10 } as unknown as File
+    const res = await uploadAttachment(pdf, {
+      token: 't',
+      fetchImpl: async () => {
+        called = true
+        return okUpload()
+      },
+    })
+    expect(called).toBe(true)
+    expect(res.url.length).toBeGreaterThan(0)
   })
 
   it('surfaces the server error code + status on a non-ok response', async () => {
@@ -286,7 +300,8 @@ describe('uploadAttachment', () => {
 
   it('exposes the server-mirrored constants', () => {
     expect(MAX_ATTACHMENT_BYTES).toBe(10 * 1024 * 1024)
-    expect(ACCEPTED_IMAGE_TYPES).toContain('image/webp')
+    expect(ACCEPTED_ATTACHMENT_TYPES).toContain('image/webp')
+    expect(ACCEPTED_ATTACHMENT_TYPES).toContain('application/pdf')
   })
 })
 
