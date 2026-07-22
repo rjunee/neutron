@@ -223,6 +223,49 @@ export class SqliteOnboardingStateStore implements OnboardingStateStore {
     })
   }
 
+  async patchPhaseState(
+    owner_slug: string,
+    user_id: string,
+    patch: Record<string, unknown>,
+  ): Promise<OnboardingState | null> {
+    return await this.db.transaction(async (tx) => {
+      const row = tx
+        .prepare<OnboardingStateRow, [string, string]>(
+          `SELECT project_slug, user_id, phase, phase_state_json, started_at,
+                  last_advanced_at, completed_at, import_job_id,
+                  persona_files_committed, wow_fired, attempt_id,
+                  wow_pushed_at, onboarding_handoff_emitted_at
+             FROM onboarding_state WHERE project_slug = ? AND user_id = ?`,
+        )
+        .get(owner_slug, user_id)
+      if (row === null || row === undefined) return null
+
+      const existing_phase_state = parseJson(row.phase_state_json) ?? {}
+      const merged_phase_state = { ...existing_phase_state, ...patch }
+      const phase_state_json = JSON.stringify(merged_phase_state)
+
+      await tx.run(
+        `UPDATE onboarding_state SET phase_state_json = ? WHERE project_slug = ? AND user_id = ?`,
+        [phase_state_json, owner_slug, user_id],
+      )
+      return {
+        owner_slug: row.project_slug,
+        user_id: row.user_id,
+        phase: row.phase as OnboardingPhase,
+        phase_state: merged_phase_state,
+        started_at: row.started_at,
+        last_advanced_at: row.last_advanced_at,
+        completed_at: row.completed_at,
+        import_job_id: row.import_job_id,
+        persona_files_committed: row.persona_files_committed === 1,
+        wow_fired: row.wow_fired === 1,
+        wow_pushed_at: row.wow_pushed_at,
+        onboarding_handoff_emitted_at: row.onboarding_handoff_emitted_at,
+        attempt_id: row.attempt_id,
+      }
+    })
+  }
+
   async rekey(
     old_owner_slug: string,
     new_owner_slug: string,

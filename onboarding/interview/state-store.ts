@@ -168,6 +168,21 @@ export interface OnboardingStateStore {
     user_id: string,
   ): Promise<OnboardingState | null>
 
+  /**
+   * Patch the `phase_state` of an EXISTING row, preserving the current `phase`
+   * and `last_advanced_at` (update-if-present / CAS semantics). If the row does
+   * not exist — e.g. an admin reset deleted it between the caller's re-read and
+   * this write — returns **null** and skips the write entirely, never inserting.
+   *
+   * Use this instead of `upsert({preservePhaseAndTimer:true})` when the caller
+   * must NOT resurrect a deleted row (Argus r2 blocker, 2026-07-22).
+   */
+  patchPhaseState(
+    owner_slug: string,
+    user_id: string,
+    patch: Record<string, unknown>,
+  ): Promise<OnboardingState | null>
+
   /** Drop a single (instance, user) row. Used in tests + by `/admin/.../onboarding/reset`. */
   delete(owner_slug: string, user_id: string): Promise<void>
 
@@ -292,6 +307,22 @@ export class InMemoryOnboardingStateStore implements OnboardingStateStore {
           onboarding_handoff_emitted_at: input.onboarding_handoff_emitted_at ?? null,
           attempt_id: this.newAttemptId(),
         }
+    this.rows.set(key, next)
+    return cloneState(next)
+  }
+
+  async patchPhaseState(
+    owner_slug: string,
+    user_id: string,
+    patch: Record<string, unknown>,
+  ): Promise<OnboardingState | null> {
+    const key = compositeKey(owner_slug, user_id)
+    const existing = this.rows.get(key)
+    if (existing === undefined) return null
+    const next: OnboardingState = {
+      ...existing,
+      phase_state: { ...existing.phase_state, ...patch },
+    }
     this.rows.set(key, next)
     return cloneState(next)
   }

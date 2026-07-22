@@ -67,40 +67,44 @@ interface Row {
   last_advanced_at: number
 }
 
-/** In-memory single-row state-store stub recording upsert inputs. */
+/** In-memory single-row state-store stub recording patchPhaseState calls. */
 function fakeStore(initial: Row | null): {
   store: LivePersonalityStateStore
-  upserts: Array<Record<string, unknown>>
+  patches: Array<Record<string, unknown>>
   current(): Row | null
   setOnGet(row: Row | null): void
+  deleteRow(): void
 } {
   let row: Row | null = initial
   let onGet: Row | null | undefined
-  const upserts: Array<Record<string, unknown>> = []
+  const patches: Array<Record<string, unknown>> = []
   const store = {
     async get(_owner: string, _user: string) {
       const r = onGet !== undefined ? onGet : row
       return r === null ? null : ({ ...r, phase_state: { ...r.phase_state } } as never)
     },
-    async upsert(input: Record<string, unknown>) {
-      upserts.push(input)
-      const patch = (input['phase_state_patch'] as Record<string, unknown>) ?? {}
-      const base = row ?? { phase: input['phase'] as string, phase_state: {}, last_advanced_at: 0 }
+    async patchPhaseState(_owner: string, _user: string, patch: Record<string, unknown>) {
+      patches.push(patch)
+      // patchPhaseState is update-if-present: if the row was deleted (simulated via
+      // deleteRow()), return null without writing (Argus r2 blocker fix).
+      if (row === null) return null
       row = {
-        phase: input['phase'] as string,
-        phase_state: { ...base.phase_state, ...patch },
-        last_advanced_at:
-          typeof input['advanced_at'] === 'number' ? (input['advanced_at'] as number) : Date.now(),
+        phase: row.phase,
+        phase_state: { ...row.phase_state, ...patch },
+        last_advanced_at: row.last_advanced_at, // phase + timer always preserved
       }
       return { ...row } as never
     },
   } as unknown as LivePersonalityStateStore
   return {
     store,
-    upserts,
+    patches,
     current: () => row,
     setOnGet: (r) => {
       onGet = r
+    },
+    deleteRow: () => {
+      row = null
     },
   }
 }
@@ -153,9 +157,9 @@ describe('maybeKickoff — gating + dedup', () => {
 })
 
 describe('maybeKickoff — llm result persistence', () => {
-  it('persists the three keys, phase from the re-read row, and preserves last_advanced_at', async () => {
+  it('persists the four keys and preserves phase + last_advanced_at via patchPhaseState', async () => {
     const { suggester } = fakeSuggester({ suggestions: LLM_SUGGESTIONS, source: 'llm' })
-    const { store, upserts } = fakeStore({
+    const { store, patches, current } = fakeStore({
       phase: 'work_interview',
       phase_state: { ...SIGNAL_STATE },
       last_advanced_at: 987654,
@@ -171,16 +175,16 @@ describe('maybeKickoff — llm result persistence', () => {
     coord.maybeKickoff('u1', { phase: 'work_interview' as never, phase_state: { ...SIGNAL_STATE } })
     await settle()
 
-    expect(upserts.length).toBe(1)
-    const up = upserts[0]!
-    expect(up['phase']).toBe('work_interview')
-    expect(up['advanced_at']).toBe(987654) // resume-window timer preserved
-    const patch = up['phase_state_patch'] as Record<string, unknown>
+    expect(patches.length).toBe(1)
+    const patch = patches[0]!
     expect(patch[PERSONALITY_SUGGESTIONS_KEY]).toEqual(LLM_SUGGESTIONS)
     expect(patch[PERSONALITY_SUGGESTIONS_SOURCE_KEY]).toBe('llm')
     expect(patch[PERSONALITY_SUGGESTIONS_FINGERPRINT_KEY]).toBe(
       signalsFingerprint(computeSuggesterSignals(SIGNAL_STATE)),
     )
+    // patchPhaseState preserves phase + timer — the row's last_advanced_at must be untouched.
+    expect(current()!.phase).toBe('work_interview')
+    expect(current()!.last_advanced_at).toBe(987654)
 
     // guardCharacters over the persisted memo returns the 5 picks in order.
     const persisted = { [PERSONALITY_SUGGESTIONS_KEY]: LLM_SUGGESTIONS }
@@ -242,9 +246,9 @@ describe('maybeKickoff — llm result persistence', () => {
     expect(hist).toEqual(['Old One', 'Old Wild', 'New One'])
   })
 
-  it('fallback result → NO upsert; a later kickoff retries', async () => {
+  it('fallback result → NO patch; a later kickoff retries', async () => {
     const { suggester, calls } = fakeSuggester({ suggestions: LLM_SUGGESTIONS, source: 'fallback' })
-    const { store, upserts } = fakeStore({
+    const { store, patches } = fakeStore({
       phase: 'work_interview',
       phase_state: { ...SIGNAL_STATE },
       last_advanced_at: 5,
@@ -259,7 +263,7 @@ describe('maybeKickoff — llm result persistence', () => {
     })
     coord.maybeKickoff('u1', { phase: 'work_interview' as never, phase_state: { ...SIGNAL_STATE } })
     await settle()
-    expect(upserts.length).toBe(0) // fallback never persists
+    expect(patches.length).toBe(0) // fallback never persists
     // Pending cleared → a fresh kickoff retries (generation runs again).
     coord.maybeKickoff('u1', { phase: 'work_interview' as never, phase_state: { ...SIGNAL_STATE } })
     expect(calls.length).toBe(2)
@@ -333,7 +337,7 @@ describe('maybeKickoff — settled personality + re-read guard', () => {
     })
     coord.maybeKickoff('u1', { phase: 'work_interview' as never, phase_state: { ...SIGNAL_STATE } })
     await settle()
-    expect(back.upserts.length).toBe(0)
+    expect(back.patches.length).toBe(0)
   })
 
   it('signals change DURING the in-flight call → stale picks discarded, NOT persisted under the old fingerprint (Argus r2 veto)', async () => {
@@ -357,9 +361,9 @@ describe('maybeKickoff — settled personality + re-read guard', () => {
     })
     coord.maybeKickoff('u1', { phase: 'work_interview' as never, phase_state: { ...SIGNAL_STATE } })
     await settle()
-    // Discarded: no upsert means guardCharacters never serves picks under the stale fp,
+    // Discarded: no patch means guardCharacters never serves picks under the stale fp,
     // and the next turn regenerates against the current signals.
-    expect(back.upserts.length).toBe(0)
+    expect(back.patches.length).toBe(0)
   })
 
   it('signals UNCHANGED during the in-flight call → picks ARE persisted (drift guard does not over-reject)', async () => {
@@ -377,14 +381,14 @@ describe('maybeKickoff — settled personality + re-read guard', () => {
     })
     coord.maybeKickoff('u1', { phase: 'work_interview' as never, phase_state: { ...SIGNAL_STATE } })
     await settle()
-    expect(back.upserts.length).toBe(1)
+    expect(back.patches.length).toBe(1)
   })
 })
 
 describe('maybeKickoff — never throws', () => {
   it('suggester rejection is swallowed, nothing persisted', async () => {
     const { suggester } = fakeSuggester(() => Promise.reject(new Error('boom')))
-    const { store, upserts } = fakeStore({ phase: 'work_interview', phase_state: SIGNAL_STATE, last_advanced_at: 1 })
+    const { store, patches } = fakeStore({ phase: 'work_interview', phase_state: SIGNAL_STATE, last_advanced_at: 1 })
     const { fire, settle } = capturingFire()
     const coord = buildLivePersonalitySuggestionCoordinator({
       suggester,
@@ -397,7 +401,40 @@ describe('maybeKickoff — never throws', () => {
       coord.maybeKickoff('u1', { phase: 'work_interview' as never, phase_state: SIGNAL_STATE }),
     ).not.toThrow()
     await settle()
-    expect(upserts.length).toBe(0)
+    expect(patches.length).toBe(0)
+  })
+
+  // Argus r2 blocker: if the row is admin-reset (deleted) in the race window between
+  // the in-flight re-read and the background write, patchPhaseState must return null
+  // and NOT resurrect the deleted onboarding row. Previously upsert() fell into the
+  // INSERT branch and recreated the row with stale phase/state.
+  it('row deleted (admin reset) between re-read and write → no insert, no throw (CAS skip)', async () => {
+    const { suggester } = fakeSuggester({ suggestions: LLM_SUGGESTIONS, source: 'llm' })
+    // Start with a null row (row = null, so patchPhaseState will return null).
+    // Use setOnGet to make get() return a non-null row — simulating the background
+    // task's re-read seeing the row as it existed BEFORE the admin reset, while
+    // patchPhaseState (which uses `row`) sees the post-reset absent state.
+    const back = fakeStore(null) // row is already deleted
+    back.setOnGet({
+      phase: 'work_interview',
+      phase_state: { ...SIGNAL_STATE },
+      last_advanced_at: 1,
+    })
+    const { fire, settle } = capturingFire()
+    const coord = buildLivePersonalitySuggestionCoordinator({
+      suggester,
+      stateStore: back.store,
+      owner_slug: 'acme',
+      seed: 'acme',
+      fireAndForget: fire,
+    })
+    coord.maybeKickoff('u1', { phase: 'work_interview' as never, phase_state: { ...SIGNAL_STATE } })
+    await settle()
+    // patchPhaseState was called (re-read returned the row, fingerprint matched,
+    // personality unsettled — all guards passed) but the write was skipped
+    // because the store's row was absent (admin reset).
+    expect(back.patches.length).toBe(1) // patchPhaseState was called
+    expect(back.current()).toBeNull() // row NOT resurrected
   })
 })
 

@@ -217,7 +217,7 @@ export function readAnchorHistory(
 }
 
 /** Structural subset of `OnboardingStateStore` the coordinator needs. */
-export type LivePersonalityStateStore = Pick<OnboardingStateStore, 'get' | 'upsert'>
+export type LivePersonalityStateStore = Pick<OnboardingStateStore, 'get' | 'patchPhaseState'>
 
 /** The minimal per-turn state the coordinator reads at kickoff time. */
 export interface LivePersonalityTurnState {
@@ -343,27 +343,18 @@ export function buildLivePersonalitySuggestionCoordinator(
             anchorHistory.push(c.name)
           }
         }
-        await stateStore.upsert({
-          owner_slug,
-          user_id,
-          // `phase` / `advanced_at` are a FALLBACK only for the vanishingly-rare case
-          // where the row was deleted (admin reset) between the re-read and this write
-          // and must be re-INSERTed. On the normal existing-row path they are IGNORED:
-          // `preservePhaseAndTimer` keeps the row's CURRENT phase + `last_advanced_at`
-          // (read inside the write), so this background memo persist can never regress
-          // a phase transition or reset the resume-window timer that a concurrent turn
-          // committed during the up-to-45 s generation (Argus r2 blocker — the stale
-          // `fresh.*` values previously clobbered a live advance via the unconditional
-          // UPDATE).
-          phase: fresh.phase,
-          phase_state_patch: {
-            [PERSONALITY_SUGGESTIONS_KEY]: result.suggestions,
-            [PERSONALITY_SUGGESTIONS_SOURCE_KEY]: 'llm',
-            [PERSONALITY_SUGGESTIONS_FINGERPRINT_KEY]: fp,
-            [PERSONALITY_SUGGESTIONS_ANCHOR_HISTORY_KEY]: anchorHistory,
-          },
-          advanced_at: fresh.last_advanced_at,
-          preservePhaseAndTimer: true,
+        // CAS: patchPhaseState returns null when the row is absent (admin reset deleted
+        // it between the re-read above and this write) and skips the write entirely —
+        // never resurrects a deleted onboarding row (Argus r2 blocker, 2026-07-22).
+        // phase + last_advanced_at are ALWAYS preserved from the live row (reads them
+        // atomically inside the write), so this background memo persist can never
+        // regress a phase transition or reset the resume-window timer committed by a
+        // concurrent foreground turn during the up-to-45 s generation.
+        await stateStore.patchPhaseState(owner_slug, user_id, {
+          [PERSONALITY_SUGGESTIONS_KEY]: result.suggestions,
+          [PERSONALITY_SUGGESTIONS_SOURCE_KEY]: 'llm',
+          [PERSONALITY_SUGGESTIONS_FINGERPRINT_KEY]: fp,
+          [PERSONALITY_SUGGESTIONS_ANCHOR_HISTORY_KEY]: anchorHistory,
         })
       })().finally(() => {
         pending.delete(user_id)

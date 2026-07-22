@@ -4834,3 +4834,37 @@ status='done' + completed_at not null + inline_active=false both returned AND pe
 inline_active:true in the same patch`; T4 `non-terminal status transition preserves
 inline_active`. All 264 work-board tests pass; `tsc -p work-board` clean; consumer tests (38
 gateway/http/work-board-surface + 19 work-board/agent-tool) still pass.
+
+---
+
+## 2026-07-22 — Argus r2 BLOCKER fix — onboarding/interview: patchPhaseState (CAS update-if-present) replaces upsert in live personality suggester
+
+**Root cause (Argus r2 blocker).** `live-personality-suggestions.ts` used
+`stateStore.upsert({..., preservePhaseAndTimer:true})` to persist memo picks from the
+background personality suggester. While `preservePhaseAndTimer` correctly preserved the live
+row's phase and timer when the row existed, it did NOT protect against the race where the row
+was admin-reset (deleted) between the background task's re-read and the upsert write: the
+absent-row branch of `upsert()` fell into the INSERT path, recreating the row with stale
+`phase`/`last_advanced_at` from the stale pre-read snapshot — effectively undoing the admin
+reset.
+
+**Fix.** Added `patchPhaseState(owner_slug, user_id, patch)` to the `OnboardingStateStore`
+interface (`onboarding/interview/state-store.ts`) with update-if-present / CAS semantics:
+always preserves `phase` and `last_advanced_at`; returns **null** and skips the write entirely
+when the row is absent (never inserts). Implemented in both `InMemoryOnboardingStateStore`
+(atomic in-map update) and `SqliteOnboardingStateStore` (transactional SELECT then conditional
+UPDATE, returning null on miss). `live-personality-suggestions.ts` now calls `patchPhaseState`
+directly (with the four memo-patch keys), and `LivePersonalityStateStore` now uses
+`Pick<OnboardingStateStore, 'get' | 'patchPhaseState'>`. Stale comment about the re-INSERT
+fallback replaced with accurate CAS documentation.
+
+**Tests.** Updated `live-personality-suggestions.test.ts` fakeStore to implement
+`patchPhaseState` (update-if-present, null on absent row). Converted existing assertions from
+tracking `upserts[]` to `patches[]` (patch object now passed directly, no `phase`/`advanced_at`
+wrapper). Added new reproduce-then-fix test: "row deleted (admin reset) between re-read and
+write → no insert, no throw (CAS skip)" — simulates the race via `setOnGet` (get sees live row)
++ `row=null` (patchPhaseState sees absent row): asserts `patches.length===1` (write attempted)
+and `current()===null` (row NOT resurrected). Updated partial-store constructions in
+`path1-solicited-upload-starts-job.test.ts` and `build-onboarding-finalize.test.ts` (7 inline
+`OnboardingStateStore` objects) to wire `patchPhaseState` through to the real store. 968
+onboarding tests + 3761 gateway+onboarding tests pass; `tsc -p onboarding/gateway/open` clean.

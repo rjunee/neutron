@@ -406,6 +406,7 @@ describe('ND2 — solicited Path-1 upload at a conversational phase starts a job
         return stateStore.get(p, u)
       },
       upsert: (i) => stateStore.upsert(i),
+      patchPhaseState: (owner, user, patch) => stateStore.patchPhaseState(owner, user, patch),
       rekey: (a, b, c) => stateStore.rekey(a, b, c),
       delete: (p, u) => stateStore.delete(p, u),
       deleteByOwner: (p) => stateStore.deleteByOwner(p),
