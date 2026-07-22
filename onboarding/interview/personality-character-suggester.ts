@@ -142,6 +142,20 @@ const FALLBACK_WILD_POOL: ReadonlyArray<FallbackCharacter> = [
 ]
 
 /**
+ * Every character name the diverse seeded fallback (`buildDiverseCharacterFallback`)
+ * can ever render, across both pools. Exported so the live-onboarding capture
+ * anchor (`live-personality-suggestions.ts` → `button-backed-answer.ts`) can
+ * recognise a tap/typed answer against a fallback-pool name that the STATIC
+ * `DEFINED_PERSONALITY_CHARACTER_NAMES` set does not contain (e.g. 'Ada Lovelace',
+ * 'Moana'). The pools themselves stay module-private — only the flat name list
+ * escapes.
+ */
+export const FALLBACK_CHARACTER_NAMES: ReadonlyArray<string> = [
+  ...FALLBACK_PERSONALIZED_POOL.map((c) => c.name),
+  ...FALLBACK_WILD_POOL.map((c) => c.name),
+]
+
+/**
  * FNV-1a (32-bit) hash of the seed. Deterministic, dependency-free, and
  * `Math.random()`-free so the same instance always sees the same fallback.
  */

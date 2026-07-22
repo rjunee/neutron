@@ -143,6 +143,7 @@ import { TridentRunStore, type TridentRun } from '@neutronai/trident/store.ts'
 import { runProgressForItem } from '@neutronai/trident/run-progress.ts'
 import { SecretsStore } from '@neutronai/auth/secrets-store.ts'
 import { buildPersonalityCharacterSuggester } from '@neutronai/onboarding/interview/personality-character-suggester.ts'
+import { buildLivePersonalitySuggestionCoordinator } from '@neutronai/onboarding/interview/live-personality-suggestions.ts'
 import { buildPersonaSummarizer } from '@neutronai/onboarding/persona-gen/summarize.ts'
 import { PersonaPromptLoader } from '@neutronai/gateway/wiring/persona-loader.ts'
 import type { GraphComposer } from '@neutronai/gateway/boot-helpers.ts'
@@ -2585,6 +2586,24 @@ export function buildOpenGraphComposer(
     // onboarding preamble/affordance or is plain steady-state chat.
     const engine = landing.engine
     const onboardingStateStore = landing.stateStore
+    // LIVE-path personality suggester (2026-07-21). Feeds the SAME Opus-backed
+    // `personalityCharacterSuggester` into the live CC-session onboarding so the
+    // per-turn step guard renders MEMOIZED, owner-personalized picks instead of
+    // the static five. Never blocks a turn: generation is background fire-and-
+    // forget, memoized in `phase_state`, fingerprint-gated for regeneration; the
+    // guard renders the static default until the picks land / on LLM failure.
+    // `undefined` on an LLM-less box (suggester unwired) — the guard then keeps
+    // the byte-identical static behavior.
+    const livePersonalityCoordinator =
+      personalityCharacterSuggester !== undefined
+        ? buildLivePersonalitySuggestionCoordinator({
+            suggester: personalityCharacterSuggester,
+            stateStore: onboardingStateStore,
+            owner_slug: project_slug,
+            seed: project_slug,
+            fireAndForget,
+          })
+        : undefined
     // No state row = fresh install → onboarding. A row in a non-terminal phase =
     // mid-onboarding. 'completed'/'failed' = steady-state chat.
     const isOnboardingActive = async (user_id: string): Promise<boolean> => {
@@ -3082,9 +3101,20 @@ export function buildOpenGraphComposer(
                   st.phase === 'import_running' ||
                   st.phase === 'import_analysis_presented' ||
                   (await probeInFlightImport())
+                // LIVE personality suggester (2026-07-21): kick off a background,
+                // fingerprint-gated Opus generation (never awaited here) and read
+                // back the memoized picks to render in THIS turn's step guard. Null
+                // until the picks land / on LLM failure → the guard keeps the static
+                // default (byte-identical pre-suggester behavior).
+                livePersonalityCoordinator?.maybeKickoff(user_id, st)
+                const guardCharacters =
+                  livePersonalityCoordinator?.guardCharacters(st.phase_state) ?? null
                 const stepGuard = buildOnboardingStepGuardFragment(st.phase_state, {
                   ...requiredFieldsOptions,
                   import_in_flight: importInFlight,
+                  ...(guardCharacters !== null
+                    ? { personality_characters: guardCharacters }
+                    : {}),
                 })
                 const importSteer = buildImportInFlightSteerFragment(importInFlight)
                 const ir = st.phase_state['import_result']

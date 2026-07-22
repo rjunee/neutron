@@ -22,6 +22,10 @@ import {
   DEFINED_PERSONALITY_CHARACTER_NAMES,
   IMPORT_DECISION_OPTIONS,
 } from '../onboarding-preamble.ts'
+import {
+  PERSONALITY_SUGGESTIONS_KEY,
+  PERSONALITY_SUGGESTIONS_SOURCE_KEY,
+} from '../live-personality-suggestions.ts'
 
 /** The 3 non-button required fields already filled, so the only open step is the
  *  button-driven personality. */
@@ -267,6 +271,79 @@ describe('captureButtonBackedRequiredField — import decision (2026-07-18)', ()
         prior_agent_options: personalityOptions(),
       }),
     ).toEqual({ field: 'agent_personality', value: `${archetype} — some vibe` })
+  })
+})
+
+describe('captureButtonBackedRequiredField — DYNAMIC personality anchors (2026-07-21 live suggester)', () => {
+  /** A valid memoized suggestion set carrying a CUSTOM Opus name the static
+   *  default does NOT contain. */
+  const LLM_MEMO = {
+    personalized: [
+      { name: 'Naval Ravikant', why: 'Calm, first-principles.' },
+      { name: 'Hermione Granger', why: 'Rigorous and prepared.' },
+      { name: 'Don Draper', why: 'Persuasive and decisive.' },
+    ],
+    wild: [
+      { name: 'Moana', why: 'Bold and curious.' },
+      { name: 'Bilbo Baggins', why: 'Rises when it counts.' },
+    ],
+  }
+  const withMemo = {
+    ...BASE,
+    [PERSONALITY_SUGGESTIONS_KEY]: LLM_MEMO,
+    [PERSONALITY_SUGGESTIONS_SOURCE_KEY]: 'llm',
+  } as Record<string, unknown>
+
+  it('(a) TAP of a MEMOIZED Opus name (not in the static set) settles agent_personality', () => {
+    const line = 'Naval Ravikant (Calm, first-principles.)'
+    const out = captureButtonBackedRequiredField({
+      phase_state: withMemo,
+      user_text: line,
+      prior_agent_options: [
+        'Naval Ravikant (Calm, first-principles.)',
+        'Hermione Granger (Rigorous and prepared.)',
+        'Don Draper (Persuasive and decisive.)',
+        'Moana (Bold and curious.)',
+        'Bilbo Baggins (Rises when it counts.)',
+        "Something else (I'll describe it)",
+      ],
+    })
+    expect(out).toEqual({ field: 'agent_personality', value: line })
+  })
+
+  it('(b) TAP of a diverse-POOL name (Ada Lovelace) settles even with NO memo', () => {
+    // 'Ada Lovelace' is in the fallback pool but NOT in the static DEFINED set,
+    // so a fallback-rendered menu must still be recognised.
+    const line = 'Ada Lovelace (Imaginative and precise.)'
+    const out = captureButtonBackedRequiredField({
+      phase_state: { ...BASE },
+      user_text: line,
+      prior_agent_options: [line, 'Moana (Bold and curious.)', "Something else (I'll describe it)"],
+    })
+    expect(out).toEqual({ field: 'agent_personality', value: line })
+  })
+
+  it('(c) a typed free-text descriptor after a DYNAMIC-name menu settles', () => {
+    const out = captureButtonBackedRequiredField({
+      phase_state: withMemo,
+      user_text: 'sharp and analytical, but warm',
+      prior_agent_options: [
+        'Naval Ravikant (Calm, first-principles.)',
+        'Moana (Bold and curious.)',
+        "Something else (I'll describe it)",
+      ],
+    })
+    expect(out).toEqual({ field: 'agent_personality', value: 'sharp and analytical, but warm' })
+  })
+
+  it('(d) import-decision options NEVER anchor personality even with a memo present', () => {
+    const out = captureButtonBackedRequiredField({
+      phase_state: withMemo,
+      user_text: 'Import my ChatGPT history',
+      prior_agent_options: IMPORT_DECISION_OPTIONS.map((o) => o.label),
+    })
+    // Settles the import decision, not personality (disjoint anchors preserved).
+    expect(out).toEqual({ field: 'import_decision', value: 'chatgpt' })
   })
 })
 

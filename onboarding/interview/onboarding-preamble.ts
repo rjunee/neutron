@@ -22,7 +22,10 @@
  * are gone; personality alone drives SOUL.md.
  */
 
-import { STATIC_PERSONALITY_CHARACTER_FALLBACK } from './personality-characters.ts'
+import {
+  STATIC_PERSONALITY_CHARACTER_FALLBACK,
+  type CharacterSuggestion,
+} from './personality-characters.ts'
 import {
   auditRequiredFields,
   type ImportDecision,
@@ -127,16 +130,16 @@ export function buildOnboardingPreamble(input: OnboardingPreambleInput): string 
   )
   lines.push('  3. At least one thing they care about OUTSIDE work (a hobby / interest).')
   lines.push(
-    '  4. The personality they want from YOU — whose voice should you take on? Offer the',
-    '     DEFINED set of character archetypes below as tappable options (emit them with',
-    '     the [[OPTIONS]] block — see "Offering choices"). Each is a recognisable figure',
-    '     whose vibe anchors how you talk. Always include a "Something else (I\'ll describe',
-    '     it)" option so they can give their own flavor (warm, blunt, a sharp technical',
-    '     peer, …) in free text. Offer THESE — do not invent a different list:',
+    '  4. The personality they want from YOU — whose voice should you take on? Offer a set',
+    '     of recognisable character archetypes as tappable options (emit them with the',
+    '     [[OPTIONS]] block — see "Offering choices"). Offer EXACTLY the archetype list',
+    '     named in the per-turn REQUIRED-STEP GUARD block below (the PERSONALITY step in',
+    '     <onboarding_required_steps>, always present while personality is unsettled) — it',
+    '     is personalized to this owner, so do not invent a different list. Each is a',
+    '     recognisable figure whose vibe anchors how you talk. Always include a "Something',
+    '     else (I\'ll describe it)" option so they can give their own flavor (warm, blunt, a',
+    '     sharp technical peer, ...) in free text.',
   )
-  for (const c of DEFINED_PERSONALITY_CHARACTERS) {
-    lines.push(`       - ${c.name} — ${c.why}`)
-  }
   lines.push('')
   lines.push(
     'Do NOT ask them to name you. This is an agent ORCHESTRATOR, not a personal agent',
@@ -312,9 +315,12 @@ export function buildOnboardingStepGuardFragment(
       'answered. This list tells you what may not be SKIPPED, not what to repeat.',
     )
   }
+  const ctx: StepGuardCopyContext = {
+    personality_characters: options?.personality_characters ?? DEFINED_PERSONALITY_CHARACTERS,
+  }
   for (const block of blocks) {
     lines.push('')
-    lines.push(...block.lines())
+    lines.push(...block.lines(ctx))
   }
   lines.push('</onboarding_required_steps>')
   return lines.join('\n')
@@ -342,7 +348,18 @@ interface StepGuardCopy {
    * forced, so the interview keeps making progress during the upload.
    */
   readonly deferred_during_import: boolean
-  readonly lines: () => string[]
+  /**
+   * Render this step's forcing copy. `ctx.personality_characters` is the character
+   * set the personality step should present — the composer-supplied memoized Opus
+   * picks or the static default (only `agent_personality` reads it; every other
+   * block ignores `ctx`).
+   */
+  readonly lines: (ctx: StepGuardCopyContext) => string[]
+}
+
+/** Per-render context threaded into each step's `lines(...)`. */
+interface StepGuardCopyContext {
+  readonly personality_characters: ReadonlyArray<CharacterSuggestion>
 }
 
 /** Guard options: the audit's field-scope options plus the in-flight import state. */
@@ -353,6 +370,17 @@ export interface StepGuardOptions extends RequiredFieldsAuditOptions {
    * to false, which preserves the pre-2026-07-18 behavior for every other caller.
    */
   import_in_flight?: boolean
+  /**
+   * 2026-07-21 (LIVE Opus personality suggester) — the personality-character set
+   * the guard should render at the PERSONALITY step. The composer passes the
+   * MEMOIZED Opus-personalized picks (via the live-suggestion coordinator) once
+   * the background suggester has landed; when absent the guard falls back to the
+   * STATIC `DEFINED_PERSONALITY_CHARACTERS`, so a turn is never blocked and the
+   * pre-suggester behavior is byte-identical. Kept in lock-step with
+   * `candidatePersonalityAnchorNames` so the deterministic capture recognises a
+   * tap against whatever list was actually rendered.
+   */
+  personality_characters?: ReadonlyArray<CharacterSuggestion>
 }
 
 /**
@@ -442,17 +470,19 @@ const STEP_GUARD_COPY: Record<RequiredField, StepGuardCopy> = {
   agent_personality: {
     presentation: 'buttons',
     deferred_during_import: false,
-    lines: () => {
+    lines: (ctx) => {
       const lines = [
         'STILL OPEN - PERSONALITY (BUTTONS): you have NOT yet settled the personality/voice the owner',
         'wants from you. It is never settled by free text alone. The next time it is natural',
         'in the conversation (and BEFORE you wrap up), you MUST ask which voice they want',
-        'and present THESE named archetypes as',
+        'and present THESE named archetypes (personalized to this owner) as',
         'a tappable [[OPTIONS]] block (plus a "Something else (I\'ll describe it)" option).',
         'Do not invent a different list, and do not skip the buttons:',
       ]
-      for (const c of DEFINED_PERSONALITY_CHARACTERS) {
-        lines.push(`  - ${c.name}`)
+      // The `why` gloss helps you PRESENT each option well; render the option text
+      // itself as just the name. Parentheses, never em dashes (owner-facing copy).
+      for (const c of ctx.personality_characters) {
+        lines.push(`  - ${c.name} (${c.why})`)
       }
       return lines
     },
