@@ -19,7 +19,6 @@ import {
   RESEARCH_SUB_AGENT_TOOL_WHITELIST,
   buildSubAgentSystemPrompt,
 } from './sub-agent-prompt.ts'
-import { SONNET_MODEL } from '@neutronai/runtime/models.ts'
 
 export interface ResearchSubAgentInput {
   query: string
@@ -264,12 +263,22 @@ async function runWithTimeout<T>(p: Promise<T>, budget_ms: number): Promise<T> {
   }
 }
 
-/** Default sub-agent model = SONNET_MODEL (env-overridable via
- *  `NEUTRON_SONNET_MODEL`). Deep research needs real reasoning and
- *  sustained tool-use discipline; Haiku produced ungrounded,
- *  unparseable briefs (2026-07 dogfood incident). Production uses this
- *  default because `deep()` does NOT pass `model` to the dispatcher. */
-export const DEFAULT_SUB_AGENT_MODEL: string = SONNET_MODEL
+/** Default sub-agent model — the Sonnet-tier default literal, mirroring
+ *  `runtime/models.ts`'s `SONNET_MODEL` default. Deep research needs real
+ *  reasoning and sustained tool-use discipline; Haiku produced ungrounded,
+ *  unparseable briefs (2026-07 dogfood incident).
+ *
+ *  This is a LOCAL last-resort literal, NOT an import from `runtime/models.ts`:
+ *  a bundled Core (`cores/free/*`) must stay host-agnostic and may not reach
+ *  into the host `runtime/` layer (the `cores-use-sdk-only` layering boundary).
+ *  The REAL production path — `research-orchestrator.ts`'s `deep()` — ALWAYS
+ *  passes `model: SONNET_MODEL` explicitly (research-orchestrator.ts legitimately
+ *  imports it as grandfathered debt), so the env-override (`NEUTRON_SONNET_MODEL`)
+ *  still reaches the live dispatch. This literal is therefore unreachable on the
+ *  production path; it exists only as a safe non-crashing default for OTHER
+ *  callers (tests, other cores) that dispatch without supplying `model`. Keep it
+ *  in sync with `runtime/models.ts`'s `SONNET_MODEL` default. */
+export const DEFAULT_SUB_AGENT_MODEL: string = 'claude-sonnet-4-6'
 
 /**
  * Build a canned `RuntimeSubAgentDispatcher` for tests. Returns

@@ -43,7 +43,6 @@
  * § "Architecture (the layer cake)" and § Phase 1 for the contract.
  */
 
-import { SONNET_MODEL } from '@neutronai/runtime/models.ts'
 
 /**
  * Sub-agent dispatch contract. Relocated here (from the deleted
@@ -518,7 +517,13 @@ export function buildCannedCodegenLlmCall(
       text: chosen.text,
       tool_calls: chosen.tool_calls ?? [],
       stop_reason: chosen.stop_reason ?? 'end_turn',
-      model: chosen.model ?? SONNET_MODEL,
+      // Local last-resort literal for this test-helper's canned model stamp — a
+      // bundled Core (`cores/free/*`) may not import the host runtime/models.ts
+      // (`cores-use-sdk-only` layering boundary). Real production dispatch
+      // resolves the model via `input.model` from the host caller; this fallback
+      // only stamps canned test responses that omit an explicit model. Keep in
+      // sync with runtime/models.ts's `SONNET_MODEL` default.
+      model: chosen.model ?? 'claude-sonnet-4-6',
     }
   }
 

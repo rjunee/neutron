@@ -44,7 +44,6 @@ import type {
 } from './research-store.ts'
 import { searchPriorBriefs, type ResearchSearchHit } from './vault-search.ts'
 import {
-  DEFAULT_SUB_AGENT_MODEL,
   dispatchResearchSubAgent,
   type PerOwnerConcurrencyGate,
   type RuntimeSubAgentDispatcher,
@@ -342,6 +341,14 @@ export function buildProjectResearchOrchestrator(
               query,
               project_id: input.project_id,
               project_slug: opts.project_slug,
+              // Supply the model EXPLICITLY from this module's legitimate
+              // `SONNET_MODEL` import (env-overridable via NEUTRON_SONNET_MODEL)
+              // so the live dispatch tracks the override. sub-agent.ts (a bundled
+              // Core) may not import runtime/models.ts, so its own
+              // DEFAULT_SUB_AGENT_MODEL is a last-resort literal only; the real
+              // production dispatch resolves its model here, at the host-legit
+              // caller layer.
+              model: SONNET_MODEL,
               ...(input.budget_ms !== undefined ? { budget_ms: input.budget_ms } : {}),
               ...(input.tools !== undefined ? { tools: input.tools } : {}),
               ...(retryFeedback !== undefined ? { retry_feedback: retryFeedback } : {}),
@@ -361,7 +368,7 @@ export function buildProjectResearchOrchestrator(
                 : 'error'
           handle.store.recordSubAgentRun({
             task_id: row.id,
-            model: DEFAULT_SUB_AGENT_MODEL,
+            model: SONNET_MODEL,
             budget_ms: input.budget_ms ?? 5 * 60 * 1000,
             elapsed_ms: 0,
             tool_call_count: 0,

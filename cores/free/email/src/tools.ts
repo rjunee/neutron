@@ -15,7 +15,6 @@ import {
   CapabilityGuard,
   type SecretAuditLog,
 } from '@neutronai/cores-runtime'
-import { FAST_MODEL } from '@neutronai/runtime/models.ts'
 import type { NeutronManifest } from '@neutronai/cores-sdk'
 
 import {
@@ -170,10 +169,16 @@ export function buildTools(deps: ToolDeps): BuiltTools {
   })
   const llm = deps.llm ?? NULL_LLM
   // Resolve PER-CALL (thunk → live accessor) so the stamped model tracks a
-  // watchdog flip; a plain string pins a fixed id. Default Haiku-fast.
+  // watchdog flip; a plain string pins a fixed id. The production host wires
+  // `deps.model` explicitly (gateway/boot-cores-factories.ts → `getBestModel`,
+  // env-overridable via runtime/models.ts), so the fallback below is a
+  // last-resort LOCAL literal only — a bundled Core (`cores/free/*`) must stay
+  // host-agnostic and may not import the host `runtime/models.ts`
+  // (`cores-use-sdk-only` layering boundary). Keep the literal in sync with
+  // runtime/models.ts's `FAST_MODEL` default (Haiku-fast).
   const resolveModel = (): string => {
     const m = typeof deps.model === 'function' ? deps.model() : deps.model
-    return m ?? FAST_MODEL
+    return m ?? 'claude-haiku-4-5-20251001'
   }
   const now = deps.now ?? ((): number => Date.now())
 
