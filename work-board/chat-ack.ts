@@ -57,8 +57,12 @@ const DEFAULT_DEDUP_WINDOW_MS = 30_000
 const MAX_TITLE_LEN = 96
 
 function truncateTitle(title: string): string {
-  if (title.length <= MAX_TITLE_LEN) return title
-  return `${title.slice(0, MAX_TITLE_LEN - 1)}…`
+  // Measure + slice by CODE POINTS, not UTF-16 code units: a raw `.slice` on a
+  // string whose astral char (emoji, etc.) straddles the cut index yields a lone
+  // surrogate → mojibake before the ellipsis. `Array.from` iterates code points.
+  const chars = Array.from(title)
+  if (chars.length <= MAX_TITLE_LEN) return title
+  return `${chars.slice(0, MAX_TITLE_LEN - 1).join('')}…`
 }
 
 function textFor(kind: WorkBoardChatAckKind, title: string): string {
@@ -111,9 +115,14 @@ export function buildWorkBoardChatAck(deps: {
         const key = `${input.item_id}\0${input.kind}`
         const prev = lastPostedAt.get(key)
         if (prev !== undefined && t - prev < windowMs) return
-        lastPostedAt.set(key, t)
+        // Deliver FIRST, then record the dedup stamp — only a delivery that
+        // actually happened should suppress a retry. If `resolve_chat_id` or
+        // `post` throws, the catch swallows it and the stamp is NOT set, so the
+        // next fire for this (item,kind) can still land instead of being muted
+        // for the whole window with no ack ever delivered.
         const chatId = deps.resolve_chat_id(input.project_id)
         deps.post(chatId, textFor(input.kind, input.title))
+        lastPostedAt.set(key, t)
       } catch {
         // The ack must NEVER perturb the tool result — swallow everything.
       }

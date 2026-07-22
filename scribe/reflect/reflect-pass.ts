@@ -398,14 +398,25 @@ async function promoteCorrectionPatterns(
 
   for (const [slug, cluster] of bySlug) {
     try {
-      const page = composePatternPage(cluster, slug)
+      // Find the already-promoted page (if any) FIRST so its persisted occurrence
+      // rows can be unioned into the recomposed body — `compiledTruth` is a full
+      // replacement, so without this the count + Occurrences list shrink whenever
+      // an occurrence ages out of the scan window (Argus r2). The slug is known
+      // here (the bySlug key === composePatternPage's returned slug).
+      const existing = pages.find((p) => p.kind === 'concept' && p.slug === slug)
+      const priorOccurrences =
+        existing !== undefined
+          ? existing.timeline
+              .filter((r) => r.source === CORRECTION_PATTERN_TIMELINE_SOURCE)
+              .map((r) => ({ ts: r.ts, body: r.body }))
+          : []
+      const page = composePatternPage(cluster, slug, priorOccurrences)
       // ids are `c-<base36>`, so the derived slug is SLUG_REGEX-safe — but a
       // corrupt/imported correction id could break that. Fail closed (skip+log).
       if (!SLUG_REGEX.test(page.slug)) {
         logFailure(`reflect: correction-pattern slug ${page.slug} fails SLUG_REGEX — skipped`, undefined)
         continue
       }
-      const existing = pages.find((p) => p.kind === 'concept' && p.slug === page.slug)
       const frontmatter: Record<string, unknown> = {
         slug: page.slug,
         type: 'concept',

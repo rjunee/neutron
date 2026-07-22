@@ -277,6 +277,7 @@ export function clusterCorrections(
 export function composePatternPage(
   cluster: ReadonlyArray<CorrectionEntry>,
   slugOverride?: string,
+  priorOccurrences?: ReadonlyArray<{ ts: string; body: string }>,
 ): {
   slug: string
   title: string
@@ -295,10 +296,26 @@ export function composePatternPage(
   const title = `Correction pattern: ${truncate(learning, SLUG_TRUNCATE_TITLE)}`
   const why = oneLine(newest.why)
 
+  // CUMULATIVE occurrence set. `writeEntity` renders `compiledTruth` as a FULL
+  // REPLACEMENT, so composing the count + Occurrences list from the current scan
+  // window ALONE would shrink an already-promoted page every time an older
+  // occurrence ages out of the window (Argus r2). Union the current cluster with
+  // the page's already-persisted occurrence rows (keyed `<ts>\x1f<body>`, byte-
+  // identical to `correctionOccurrenceKey`) so the durable page never loses a
+  // count it once recorded. The timeline itself is preserved separately by the
+  // writer's append+dedupe — this restores the human-readable body to match.
+  const occTsByKey = new Map<string, string>()
+  for (const m of sorted) occTsByKey.set(correctionOccurrenceKey(m), m.ts)
+  for (const o of priorOccurrences ?? []) {
+    const key = `${o.ts}\x1f${o.body}`
+    if (!occTsByKey.has(key)) occTsByKey.set(key, o.ts)
+  }
+  const occurrenceTimestamps = [...occTsByKey.values()].sort()
+
   const lines: string[] = [
     `# ${title}`,
     '',
-    `Observed ${sorted.length} times — a recurring correction promoted to durable memory.`,
+    `Observed ${occurrenceTimestamps.length} times — a recurring correction promoted to durable memory.`,
     '',
     '## Learning',
     '',
@@ -309,7 +326,7 @@ export function composePatternPage(
     lines.push('## Why', '', why, '')
   }
   lines.push('## Occurrences', '')
-  for (const m of sorted) lines.push(`- ${m.ts}`)
+  for (const ts of occurrenceTimestamps) lines.push(`- ${ts}`)
   const compiledTruth = lines.join('\n')
 
   const timelineRows = sorted.map((m) => ({

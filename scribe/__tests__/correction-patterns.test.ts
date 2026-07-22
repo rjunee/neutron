@@ -158,6 +158,41 @@ describe('composePatternPage', () => {
     expect(page.timelineRows[0]!.ts).toBe(parts[0]!)
     expect(page.timelineRows[0]!.body).toBe(parts[1]!)
   })
+
+  // Argus r2: `compiledTruth` is a FULL REPLACEMENT — recomposing from the current
+  // scan window alone shrinks a promoted page's count + Occurrences list every time
+  // an older occurrence ages out. The prior-occurrences union keeps it cumulative.
+  test('cumulative occurrences: prior persisted rows are unioned into the count + list', () => {
+    // Only TAB_3 is still in the current scan window; TAB_1 + TAB_2 aged out but
+    // remain persisted on the promoted page as occurrence rows.
+    const priorOccurrences = [TAB_1, TAB_2].map((c) => {
+      const [ts, body] = correctionOccurrenceKey(c).split('\x1f') as [string, string]
+      return { ts, body }
+    })
+    const page = composePatternPage([TAB_3], 'correction-pattern-tabs', priorOccurrences)
+    // Count reflects the UNION (3), not just the 1 current-window member.
+    expect(page.compiledTruth).toContain('Observed 3 times')
+    expect(page.compiledTruth).toContain(`- ${TAB_1.ts}`)
+    expect(page.compiledTruth).toContain(`- ${TAB_2.ts}`)
+    expect(page.compiledTruth).toContain(`- ${TAB_3.ts}`)
+    // Learning/title still come from the newest CURRENT member.
+    expect(page.title).toContain('use tabs for indentation')
+    // Only the current cluster contributes timeline rows (the writer appends+dedupes
+    // against already-persisted rows) — no double-write of the prior occurrences.
+    expect(page.timelineRows).toHaveLength(1)
+  })
+
+  test('cumulative occurrences: a prior row already in the current window is not double-counted', () => {
+    // TAB_1 is BOTH in the current cluster and in the persisted prior rows.
+    const [ts1, body1] = correctionOccurrenceKey(TAB_1).split('\x1f') as [string, string]
+    const page = composePatternPage([TAB_1, TAB_2], 'correction-pattern-tabs', [{ ts: ts1, body: body1 }])
+    expect(page.compiledTruth).toContain('Observed 2 times')
+  })
+
+  test('no prior occurrences → count matches the current cluster (byte-identical old behavior)', () => {
+    const page = composePatternPage([TAB_1, TAB_2, TAB_3])
+    expect(page.compiledTruth).toContain('Observed 3 times')
+  })
 })
 
 // Argus r3 (both reviewers VETO): `stablePatternSlug` alone still drifts when the

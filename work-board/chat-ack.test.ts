@@ -59,6 +59,22 @@ describe('buildWorkBoardChatAck — exact texts', () => {
     ack.post({ project_id: 'p1', item_id: 'i1', title, kind: 'card_added' })
     expect(posts[0]?.text).toBe(`▸ On the Work Board: "${title}"`)
   })
+
+  // Argus r2 nit: truncation must land on a code-POINT boundary, never split an
+  // astral pair into a lone surrogate. An emoji straddling the 95/96 cut must be
+  // dropped whole, not halved into mojibake.
+  test('truncation of an astral-heavy title yields no lone surrogate', () => {
+    const { ack, posts } = harness()
+    // 100 astral chars (each is a surrogate pair) — over MAX_TITLE_LEN (96) by code
+    // points; a naive UTF-16 slice at unit index 95 would cut mid-pair.
+    const title = '😀'.repeat(100)
+    ack.post({ project_id: 'p1', item_id: 'i1', title, kind: 'card_added' })
+    const text = posts[0]!.text
+    // No unpaired surrogate survived (each code point round-trips).
+    expect(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(text)).toBe(false)
+    // 95 whole emoji + the ellipsis (MAX_TITLE_LEN - 1 code points, then '…').
+    expect(text).toBe(`▸ On the Work Board: "${'😀'.repeat(95)}…"`)
+  })
 })
 
 describe('buildWorkBoardChatAck — chat-id resolution', () => {
@@ -151,6 +167,57 @@ describe('buildWorkBoardChatAck — never throws', () => {
     expect(() =>
       ack.post({ project_id: 'p1', item_id: 'i1', title: 't', kind: 'card_added' }),
     ).not.toThrow()
+  })
+
+  // Argus r2 major: the dedup stamp must be recorded AFTER a successful post, not
+  // before. A failed delivery must NOT mute the (item, kind) for the whole window —
+  // a retry within the window must be allowed to land once transport recovers.
+  test('a failed post does not set the dedup stamp; a retry within the window re-delivers', () => {
+    let t = 1_000
+    const posts: string[] = []
+    let transportUp = false
+    const ack = buildWorkBoardChatAck({
+      now: () => t,
+      resolve_chat_id: () => 'chat:p1',
+      post: (_chat_id, text) => {
+        if (!transportUp) throw new Error('transport down')
+        posts.push(text)
+      },
+    })
+    // First fire: transport is down → throws, swallowed, nothing delivered.
+    ack.post({ project_id: 'p1', item_id: 'i1', title: 'Deploy', kind: 'build_dispatched' })
+    expect(posts.length).toBe(0)
+    // Retry 5s later (well within the 30s window) once transport recovers — it must
+    // NOT be suppressed, because the failed attempt left no dedup stamp.
+    t += 5_000
+    transportUp = true
+    ack.post({ project_id: 'p1', item_id: 'i1', title: 'Deploy', kind: 'build_dispatched' })
+    expect(posts.length).toBe(1)
+    // And NOW the successful delivery does dedup a further in-window fire.
+    t += 1_000
+    ack.post({ project_id: 'p1', item_id: 'i1', title: 'Deploy', kind: 'build_dispatched' })
+    expect(posts.length).toBe(1)
+  })
+
+  test('a failed resolve also leaves no dedup stamp (retry re-attempts)', () => {
+    let t = 0
+    let resolveUp = false
+    const resolvedCount: number[] = []
+    const ack = buildWorkBoardChatAck({
+      now: () => t,
+      resolve_chat_id: () => {
+        resolvedCount.push(1)
+        if (!resolveUp) throw new Error('resolver down')
+        return 'chat:p1'
+      },
+      post: () => {},
+    })
+    ack.post({ project_id: 'p1', item_id: 'i1', title: 't', kind: 'card_added' })
+    t += 2_000
+    resolveUp = true
+    ack.post({ project_id: 'p1', item_id: 'i1', title: 't', kind: 'card_added' })
+    // Resolver was invoked BOTH times — the first failure did not mute the second.
+    expect(resolvedCount.length).toBe(2)
   })
 
   test('all three kinds are exhaustively covered', () => {
