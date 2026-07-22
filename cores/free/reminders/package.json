@@ -398,6 +398,60 @@
         "capability_required": "write:reminders_core.db"
       },
       {
+        "name": "rituals_enable",
+        "description": "ENABLE an already-registered ritual by giving it a schedule. Use this for the BUNDLED example rituals (morning-brief, evening-wrap, daily-delta) and any previously-registered ritual — rituals_propose refuses their ids because their prompt already exists on disk. You supply ONLY the id + schedule; the prompt, tool surface and scope are owned by the registered def (see rituals_status for the ids). IMPORTANT: enabling does NOT run anything — like rituals_propose, the ritual only fires after the OWNER explicitly APPROVES it in chat (a code-rendered Approve/Deny prompt is shown; approval is content-hash-bound to the on-disk prompt bytes). Returns an opaque proposal_id and status 'pending_approval'.",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "description": "The id of an already-registered ritual (from rituals_status) — e.g. 'morning-brief'. Must NOT already be enabled."
+            },
+            "schedule": {
+              "type": "object",
+              "description": "When the ritual runs. fire_at is the first occurrence (unix seconds). Pass at most one cadence; omit both for a one-shot.",
+              "properties": {
+                "fire_at": {
+                  "type": "number",
+                  "description": "Unix seconds (UTC) of the FIRST occurrence."
+                },
+                "recurrence": {
+                  "type": "string",
+                  "enum": ["weekly", "monthly", "occasional"],
+                  "description": "Optional coarse cadence. Mutually exclusive with recurrence_spec."
+                },
+                "recurrence_spec": {
+                  "type": "string",
+                  "description": "Optional 5-field cron cadence (e.g. '0 9 * * *'). Mutually exclusive with recurrence."
+                }
+              },
+              "required": ["fire_at"]
+            }
+          },
+          "required": ["id", "schedule"]
+        },
+        "output_schema": {
+          "type": "object",
+          "properties": {
+            "proposal_id": {
+              "type": "string",
+              "description": "Opaque handle for the pending proposal."
+            },
+            "ritual_id": { "type": "string" },
+            "status": {
+              "type": "string",
+              "description": "Always 'pending_approval' — the ritual will not fire until the owner approves it."
+            },
+            "requires_egress_approval": {
+              "type": "boolean",
+              "description": "True for egress:'web' defs — a SECOND owner approval (network egress) is required before scheduling."
+            }
+          },
+          "required": ["proposal_id", "ritual_id", "status", "requires_egress_approval"]
+        },
+        "capability_required": "write:reminders_core.db"
+      },
+      {
         "name": "rituals_status",
         "description": "List every registered ritual with its approval state ('approved' | 'pending' | 'denied' | 'none') and whether it is currently scheduled. Read-only. Use this to see which proposed rituals the owner has approved.",
         "input_schema": {

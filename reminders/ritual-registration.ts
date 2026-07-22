@@ -151,6 +151,10 @@ export type RitualProposalErrorCode =
   | 'exists_on_disk'
   | 'write_failed'
   | 'emit_failed'
+  // enable() codes (bundled / already-registered defs):
+  | 'unknown_ritual'
+  | 'missing_prompt'
+  | 'already_enabled'
 
 export class RitualProposalError extends Error {
   override readonly name = 'RitualProposalError'
@@ -191,6 +195,19 @@ export interface RitualProposalResult {
   ritual_id: string
   status: 'pending_approval'
   requires_egress_approval: boolean
+}
+
+/**
+ * ENABLE an already-registered ritual (a bundled example seeded + registered at
+ * boot, or a previously-persisted def). The prompt + tool surface + scope are
+ * OWNED by the registered def — the caller supplies ONLY a schedule; enable reads
+ * the seeded/owner prompt from disk, writes the `<id>.def.json`, and requests the
+ * same owner approval a fresh {@link RitualProposalInput} does. A brand-new ritual
+ * still goes through `propose`.
+ */
+export interface RitualEnableInput {
+  id: string
+  schedule: RitualProposalSchedule
 }
 
 /** One row of `service.status()`. */
@@ -368,6 +385,13 @@ export interface RitualRegistrationServiceOptions {
 
 export interface RitualRegistrationService {
   propose(input: RitualProposalInput): Promise<RitualProposalResult>
+  /**
+   * Enable an already-registered ritual (bundled example or persisted def) by
+   * writing its `<id>.def.json` schedule and requesting the owner's approval.
+   * This is the ONLY path by which a bundled ritual becomes approvable +
+   * schedulable — `propose` refuses a bundled id as `exists_on_disk`/`duplicate_id`.
+   */
+  enable(input: RitualEnableInput): Promise<RitualProposalResult>
   handleOwnerButtonAnswer(input: RitualOwnerAnswerInput): Promise<{ body: string } | null>
   status(): RitualStatusRow[]
 }
@@ -509,20 +533,161 @@ export function createRitualRegistrationService(
     // reaches the channel adapter). Without this an emit rejection left a
     // registered-but-promptless ritual whose files + duplicate guard then blocked
     // every re-propose — an UNRECOVERABLE pending ritual.
-    const cadence = cadenceFor(input.schedule)
-    const rollback = async (approvalIds: readonly string[]): Promise<void> => {
-      try {
-        registry.unregister(def.id)
-      } catch {
-        /* best-effort */
-      }
-      for (const p of [mdPath, defPath]) {
+    return await requestApprovalAndEmit({
+      def,
+      normalized,
+      schedule: input.schedule,
+      register: true,
+      cleanup: () => {
         try {
-          rmSync(p, { force: true })
+          registry.unregister(def.id)
         } catch {
           /* best-effort */
         }
+        for (const p of [mdPath, defPath]) {
+          try {
+            rmSync(p, { force: true })
+          } catch {
+            /* best-effort */
+          }
+        }
+      },
+    })
+  }
+
+  /**
+   * ENABLE an already-registered ritual (bundled example or persisted def). The
+   * BLOCKER this closes (Argus r2): the three bundled rituals (morning-brief /
+   * evening-wrap / daily-delta) are seeded + registered at boot but have NO
+   * approval or scheduling path — `propose` refuses their id as
+   * `duplicate_id`/`exists_on_disk`, and they carry no `<id>.def.json` so
+   * `readSchedule` dead-ends. `enable` is that missing path: it takes ONLY a
+   * schedule (the prompt + surface + scope are owned by the registered def),
+   * reads the seeded/owner prompt from disk, writes the `<id>.def.json`, and
+   * requests the SAME content-hash-bound owner approval a fresh `propose` does.
+   */
+  async function enable(input: RitualEnableInput): Promise<RitualProposalResult> {
+    // ── (a) must reference an ALREADY-REGISTERED def. A brand-new ritual goes
+    // through propose(); enable never mints a def from caller input (the surface
+    // + scope + prompt are engine/owner data, not agent-supplied here).
+    const def = registry.get(input.id)
+    if (def === undefined) {
+      throw new RitualProposalError(
+        'unknown_ritual',
+        `ritual ${JSON.stringify(input.id)} is not registered — use rituals_propose to create a new ritual`,
+      )
+    }
+
+    // ── (b) v1 scope gate (same rule as propose (e)).
+    if (def.scope !== 'instance') {
+      throw new RitualProposalError(
+        'unsupported_scope',
+        `scope '${def.scope}' cannot fire yet — v1 supports only scope 'instance'`,
+      )
+    }
+
+    // ── (c) validate the schedule.
+    validateSchedule(input.schedule)
+
+    // ── (d) the seeded/owner prompt must be on disk — its LIVE bytes are what
+    // get hashed, rendered in the approval prompt, and re-verified at every fire.
+    const mdPath = registry.promptPathFor(def.id)
+    let normalized: string
+    try {
+      normalized = readFileSync(mdPath, 'utf8').normalize('NFC')
+    } catch (err) {
+      throw new RitualProposalError(
+        'missing_prompt',
+        `ritual ${JSON.stringify(def.id)} has no prompt file on disk (${mdPath}) — its bundled template failed to seed; reinstall or re-propose it: ${(err as Error).message}`,
+      )
+    }
+
+    // ── (e) a bundled template can be owner-edited after seeding, so re-run the
+    // SAME content guards propose() applies — never trust the on-disk bytes blindly.
+    if (RITUAL_PROPOSAL_BANNED_CHARS_RE.test(normalized)) {
+      throw new RitualProposalError(
+        'banned_characters',
+        `prompt file ${mdPath} contains disallowed control characters (bidi override / zero-width / C0 control) — fix it before enabling`,
+      )
+    }
+    if (normalized.trim().length === 0) {
+      throw new RitualProposalError('empty_prompt', `prompt file ${mdPath} is empty or whitespace-only`)
+    }
+    const promptBytes = Buffer.byteLength(normalized, 'utf8')
+    if (promptBytes > RITUAL_PROPOSAL_MAX_PROMPT_BYTES) {
+      throw new RitualProposalError(
+        'prompt_too_large',
+        `prompt file ${mdPath} is ${promptBytes} bytes (> RITUAL_PROPOSAL_MAX_PROMPT_BYTES ${RITUAL_PROPOSAL_MAX_PROMPT_BYTES}) — shorten it before enabling`,
+      )
+    }
+
+    // ── (f) never-clobber: a `<id>.def.json` means the ritual is already enabled
+    // (approval pending or scheduled). Enabling is idempotency-guarded by the
+    // file's existence, not silently re-run over a live grant.
+    const defPath = defJsonPath(def.id)
+    if (existsSync(defPath)) {
+      throw new RitualProposalError(
+        'already_enabled',
+        `ritual ${JSON.stringify(def.id)} is already enabled (${defPath}) — check rituals_status; approve the pending prompt if you have not yet`,
+      )
+    }
+
+    // ── (g) write ONLY the `<id>.def.json` (schedule + def). The `<id>.md` is the
+    // seeded/owner prompt — NEVER written or clobbered here. 'wx' fails if a
+    // concurrent enable already created it.
+    try {
+      mkdirSync(rituals_dir, { recursive: true })
+      const record: PersistedRitualRecord = {
+        def,
+        schedule: input.schedule,
+        proposed_at: Date.now(),
       }
+      writeFileSync(defPath, JSON.stringify(record, null, 2), { encoding: 'utf8', flag: 'wx' })
+    } catch (err) {
+      throw new RitualProposalError('write_failed', `writing ${defPath} failed: ${(err as Error).message}`)
+    }
+
+    // ── (h) request approval + emit. The def is ALREADY registered (bundled at
+    // boot), so `register:false` — the rollback removes ONLY the `<id>.def.json`
+    // it just wrote and NEVER unregisters the bundled def or deletes the seeded .md.
+    return await requestApprovalAndEmit({
+      def,
+      normalized,
+      schedule: input.schedule,
+      register: false,
+      cleanup: () => {
+        try {
+          rmSync(defPath, { force: true })
+        } catch {
+          /* best-effort */
+        }
+      },
+    })
+  }
+
+  /**
+   * Shared tail of propose()/enable(): (optionally) register the def, request the
+   * content-hash-bound approval grant(s), and emit the CODE-rendered approval
+   * prompt(s). On ANY failure it cancels the minted grants and runs the caller's
+   * `cleanup` (the caller-specific on-disk + registry teardown), then throws.
+   *
+   *   - propose(): `register:true` (def is new); `cleanup` unregisters + rm's BOTH
+   *     the `.md` and `.def.json` it wrote.
+   *   - enable():  `register:false` (a bundled/persisted def is ALREADY registered
+   *     — never unregister it); `cleanup` rm's ONLY the `.def.json`, never the .md.
+   */
+  async function requestApprovalAndEmit(args: {
+    def: RitualDef
+    normalized: string
+    schedule: RitualProposalSchedule
+    register: boolean
+    cleanup: () => void
+  }): Promise<RitualProposalResult> {
+    const { def, normalized, schedule, register, cleanup } = args
+    const cadence = cadenceFor(schedule)
+
+    const rollback = async (approvalIds: readonly string[]): Promise<void> => {
+      cleanup()
       for (const aid of approvalIds) {
         try {
           await approvals.cancelPending(aid)
@@ -532,13 +697,13 @@ export function createRitualRegistrationService(
       }
     }
 
-    // ── (i) register (throws on duplicate — already guarded above).
+    // ── register (throws on duplicate — guarded upstream) + request the
+    // content-hash-bound approval grant(s). The ids are minted inside
+    // requestRitualApproval and returned so we can encode them into the button
+    // tokens WITHOUT a side-table.
     let approval: ReturnType<typeof requestRitualApproval>
     try {
-      registry.register(def)
-      // ── (j) request the content-hash-bound approval grant(s). The ids are minted
-      // inside requestRitualApproval and returned so we can encode them into the
-      // button tokens WITHOUT a side-table.
+      if (register) registry.register(def)
       approval = requestRitualApproval(approvals, {
         project_slug,
         topic_id: approval_topic_id,
@@ -555,13 +720,8 @@ export function createRitualRegistrationService(
     }
 
     try {
-      // ── (k) emit the CODE-rendered CONTENT approval prompt.
-      const contentBody = renderRitualApprovalBody({
-        def,
-        prompt: normalized,
-        cadence,
-        schedule: input.schedule,
-      })
+      // ── emit the CODE-rendered CONTENT approval prompt.
+      const contentBody = renderRitualApprovalBody({ def, prompt: normalized, cadence, schedule })
       const contentOptions: ButtonOption[] = [
         { label: 'Approve', body: 'Approve this ritual', value: `rap:${uuidToToken(approval.content_id)}:a` },
         { label: 'Deny', body: 'Deny this ritual', value: `rap:${uuidToToken(approval.content_id)}:d` },
@@ -599,7 +759,7 @@ export function createRitualRegistrationService(
       )
     }
 
-    log(`ritual propose id=${def.id} pending_approval (egress=${def.egress})`)
+    log(`ritual pending_approval id=${def.id} (egress=${def.egress})`)
     return {
       proposal_id: uuidToToken(approval.content_id),
       ritual_id: def.id,
@@ -850,7 +1010,7 @@ export function createRitualRegistrationService(
     return rows
   }
 
-  return { propose, handleOwnerButtonAnswer, status }
+  return { propose, enable, handleOwnerButtonAnswer, status }
 }
 
 // ── Schedule validation ──────────────────────────────────────────────────────

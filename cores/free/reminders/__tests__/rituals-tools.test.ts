@@ -20,6 +20,7 @@ import {
   buildReminderStoreBackend,
   loadManifest,
   type RemindersRitualService,
+  type RitualEnableInput,
   type RitualProposeInput,
 } from '../index.ts'
 
@@ -46,12 +47,19 @@ afterEach(() => {
 
 function stubService(): RemindersRitualService & {
   propose: ReturnType<typeof spyOn>
+  enable: ReturnType<typeof spyOn>
   status: ReturnType<typeof spyOn>
 } {
   const obj = {
     propose: async (_input: RitualProposeInput) => ({
       proposal_id: 'p1',
       ritual_id: 'daily-digest',
+      status: 'pending_approval',
+      requires_egress_approval: false,
+    }),
+    enable: async (_input: RitualEnableInput) => ({
+      proposal_id: 'e1',
+      ritual_id: 'morning-brief',
       status: 'pending_approval',
       requires_egress_approval: false,
     }),
@@ -68,8 +76,18 @@ function stubService(): RemindersRitualService & {
     ],
   }
   const proposeSpy = spyOn(obj, 'propose')
+  const enableSpy = spyOn(obj, 'enable')
   const statusSpy = spyOn(obj, 'status')
-  return Object.assign(obj, { propose: proposeSpy, status: statusSpy }) as never
+  return Object.assign(obj, {
+    propose: proposeSpy,
+    enable: enableSpy,
+    status: statusSpy,
+  }) as never
+}
+
+const ENABLE: RitualEnableInput = {
+  id: 'morning-brief',
+  schedule: { fire_at: 1_900_000_000, recurrence_spec: '0 8 * * *' },
 }
 
 const PROPOSAL: RitualProposeInput = {
@@ -98,6 +116,19 @@ describe('rituals_propose / rituals_status — wired', () => {
     expect(denied.map((r) => r.label)).not.toContain('rituals_propose')
   })
 
+  test('rituals_enable dispatches backend.enableRitual with audit ok', async () => {
+    const svc = stubService()
+    const backend = buildReminderStoreBackend({ project_slug: OWNER, projectDb, rituals: () => svc })
+    const extras = buildExtraTools({ manifest: loadManifest(), project_slug: OWNER, audit, backend })
+
+    const res = await extras.rituals_enable(ENABLE)
+    expect(svc.enable).toHaveBeenCalledTimes(1)
+    expect(res.status).toBe('pending_approval')
+    expect(res.ritual_id).toBe('morning-brief')
+    const denied = await audit.listDenied({ owner_slug: OWNER, core_slug: 'reminders_core' })
+    expect(denied.map((r) => r.label)).not.toContain('rituals_enable')
+  })
+
   test('rituals_status dispatches backend.ritualsStatus', async () => {
     const svc = stubService()
     const backend = buildReminderStoreBackend({ project_slug: OWNER, projectDb, rituals: () => svc })
@@ -116,6 +147,7 @@ describe('rituals_propose / rituals_status — UNWIRED (fail closed)', () => {
     const backend = buildReminderStoreBackend({ project_slug: OWNER, projectDb })
     const extras = buildExtraTools({ manifest: loadManifest(), project_slug: OWNER, audit, backend })
     await expect(extras.rituals_propose(PROPOSAL)).rejects.toThrow(RitualsUnavailableError)
+    await expect(extras.rituals_enable(ENABLE)).rejects.toThrow(RitualsUnavailableError)
     await expect(extras.rituals_status({})).rejects.toThrow(RitualsUnavailableError)
   })
 

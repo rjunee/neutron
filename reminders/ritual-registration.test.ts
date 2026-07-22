@@ -24,6 +24,7 @@ import {
 import { ApprovalManager, type ApprovalNotifier } from '@neutronai/tools/approval.ts'
 
 import { ReminderStore } from './store.ts'
+import { registerBundledRituals, seedBundledRituals } from './bundled-rituals.ts'
 import { createRitualRegistry, validateRitualFire, RITUAL_MODEL_TIER, RITUAL_TIMEOUT_MS } from './rituals.ts'
 import {
   computeRitualContentHash,
@@ -848,6 +849,149 @@ describe('Argus r1 minor — status reports denied', () => {
     const row = h.service.status().find((r) => r.ritual_id === 'denyme')!
     expect(row.approval).toBe('denied')
     expect(row.scheduled).toBe(false)
+  })
+})
+
+// ── enable — bundled ritual approval + schedule path (Argus r2 BLOCKER) ────────
+// The three bundled rituals (morning-brief/evening-wrap/daily-delta) are seeded +
+// registered at boot but propose() refuses their ids (exists_on_disk); enable() is
+// the ONLY path that gives them an approval prompt + a def.json schedule.
+
+describe('enable — bundled ritual approval + schedule path', () => {
+  /** Seed + register the three bundled example defs into the harness registry, the
+   *  exact composition the composer does at boot (seed COPY-IF-ABSENT + register). */
+  function seedAndRegisterBundled(h: Harness): void {
+    seedBundledRituals({ rituals_dir })
+    registerBundledRituals(h.registry)
+  }
+
+  test('propose() REFUSES a bundled id (proves enable is the required path)', async () => {
+    const h = makeHarness()
+    seedAndRegisterBundled(h)
+    // morning-brief.md exists on disk (seeded) AND is registered → propose refuses.
+    await expect(
+      h.service.propose(proposal({ id: 'morning-brief', prompt: 'hijack the bundled ritual' })),
+    ).rejects.toMatchObject({ name: 'RitualProposalError' })
+    // no reminder row, no def.json written by the refused propose
+    expect(existsSync(join(rituals_dir, 'morning-brief.def.json'))).toBe(false)
+    expect(countReminderRows()).toBe(0)
+  })
+
+  test('enable writes ONLY the def.json (never the seeded .md), mints ONE pending grant, emits, creates NO reminder row', async () => {
+    const h = makeHarness()
+    seedAndRegisterBundled(h)
+    const mdBefore = readFileSync(join(rituals_dir, 'morning-brief.md'), 'utf8')
+
+    const res = await h.service.enable({
+      id: 'morning-brief',
+      schedule: { fire_at: 1_900_000_000, recurrence_spec: '0 8 * * *' },
+    })
+    await settle()
+
+    expect(res.status).toBe('pending_approval')
+    expect(res.ritual_id).toBe('morning-brief')
+    expect(res.requires_egress_approval).toBe(false)
+
+    // def.json now exists (was the missing piece); the seeded .md is UNCHANGED.
+    expect(existsSync(join(rituals_dir, 'morning-brief.def.json'))).toBe(true)
+    expect(readFileSync(join(rituals_dir, 'morning-brief.md'), 'utf8')).toBe(mdBefore)
+
+    // ONE pending grant, content_hash bound to the LIVE seeded bytes.
+    const pending = h.approvals.listPending(SLUG)
+    expect(pending).toHaveLength(1)
+    const args = JSON.parse(pending[0]!.args_json) as { content_hash: string }
+    expect(args.content_hash).toBe(
+      computeRitualContentHash({
+        prompt: mdBefore,
+        tool_surface: ['Read', 'Glob', 'Grep'],
+        scope: 'instance',
+        cadence: 'spec:0 8 * * *',
+        model_tier: RITUAL_MODEL_TIER,
+        timeout_ms: RITUAL_TIMEOUT_MS,
+      }),
+    )
+
+    // emit fired once; NO reminder row yet (approval still pending).
+    expect(h.emitted).toHaveLength(1)
+    expect(h.emitted[0]!.metadata).toEqual({ kind: 'ritual-approval', ritual_id: 'morning-brief' })
+    expect(countReminderRows()).toBe(0)
+
+    // status now shows the ritual pending (was 'none' before enable).
+    const row = h.service.status().find((r) => r.ritual_id === 'morning-brief')!
+    expect(row.approval).toBe('pending')
+    expect(row.scheduled).toBe(false)
+  })
+
+  test('owner Approve on an enabled bundled ritual SCHEDULES it (the full blocker close)', async () => {
+    const h = makeHarness()
+    seedAndRegisterBundled(h)
+    await h.service.enable({
+      id: 'evening-wrap',
+      schedule: { fire_at: 1_900_000_500, recurrence_spec: '0 18 * * *' },
+    })
+    await settle()
+
+    const approveValue = h.emitted[0]!.options.find((o) => o.value.endsWith(':a'))!.value
+    const out = await h.service.handleOwnerButtonAnswer({
+      user_id: OWNER,
+      user_text: approveValue,
+      topic_id: TOPIC,
+      prior_option_values: h.emitted[0]!.options.map((o) => o.value),
+    })
+    expect(out?.body).toMatch(/Approved and scheduled/)
+
+    // the reminder row now exists (the ritual will fire) — the blocker is closed.
+    expect(countReminderRows()).toBe(1)
+    const row = h.service.status().find((r) => r.ritual_id === 'evening-wrap')!
+    expect(row.approval).toBe('approved')
+    expect(row.scheduled).toBe(true)
+  })
+
+  test('enable is idempotency-guarded — a second enable REFUSES (already_enabled)', async () => {
+    const h = makeHarness()
+    seedAndRegisterBundled(h)
+    await h.service.enable({ id: 'daily-delta', schedule: { fire_at: 1_900_000_000 } })
+    await settle()
+    await expect(
+      h.service.enable({ id: 'daily-delta', schedule: { fire_at: 1_900_000_000 } }),
+    ).rejects.toMatchObject({ code: 'already_enabled' })
+  })
+
+  test('enable REFUSES an unregistered id (unknown_ritual)', async () => {
+    const h = makeHarness()
+    seedAndRegisterBundled(h)
+    await expect(
+      h.service.enable({ id: 'no-such-ritual', schedule: { fire_at: 1_900_000_000 } }),
+    ).rejects.toMatchObject({ code: 'unknown_ritual' })
+  })
+
+  test('enable REFUSES a bad schedule before writing anything', async () => {
+    const h = makeHarness()
+    seedAndRegisterBundled(h)
+    await expect(
+      // both cadences set → invalid_schedule
+      h.service.enable({
+        id: 'morning-brief',
+        schedule: { fire_at: 1_900_000_000, recurrence: 'weekly', recurrence_spec: '0 8 * * *' },
+      }),
+    ).rejects.toMatchObject({ code: 'invalid_schedule' })
+    expect(existsSync(join(rituals_dir, 'morning-brief.def.json'))).toBe(false)
+  })
+
+  test('an enabled bundled def.json survives reboot re-registration (no clobber)', async () => {
+    const h = makeHarness()
+    seedAndRegisterBundled(h)
+    await h.service.enable({
+      id: 'morning-brief',
+      schedule: { fire_at: 1_900_000_000, recurrence_spec: '0 8 * * *' },
+    })
+    await settle()
+    // Simulate the boot re-load: loadPersistedRitualDefs runs AFTER registerBundledRituals;
+    // the morning-brief.def.json must be SKIPPED as a duplicate (bundled def wins), never crash.
+    const fresh = createRitualRegistry({ rituals_dir })
+    registerBundledRituals(fresh)
+    const { skipped } = loadPersistedRitualDefs({ registry: fresh, rituals_dir })
+    expect(skipped).toContain('morning-brief.def.json')
   })
 })
 

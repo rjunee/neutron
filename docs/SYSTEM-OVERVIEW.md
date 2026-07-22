@@ -2180,9 +2180,16 @@ ritual content in chat.
   makes the run containable.
 - **Agent-callable registration + in-chat approval (overturn 3)**
   (`reminders/ritual-registration.ts`). An agent proposes a ritual through the
-  reminders-Core `rituals_propose` / `rituals_status` MCP tools; the security
-  property is carried by the approval GATE, and the approval RENDERING IS the
-  mitigation. `renderRitualApprovalBody` (`reminders/ritual-registration.ts:301`)
+  reminders-Core `rituals_propose` / `rituals_enable` / `rituals_status` MCP
+  tools; the security property is carried by the approval GATE, and the approval
+  RENDERING IS the mitigation. `rituals_propose` creates a BRAND-NEW ritual (write
+  the `<id>.md`+`<id>.def.json`, register, request approval); `rituals_enable`
+  (`RitualRegistrationService.enable`) gives an ALREADY-REGISTERED ritual — a
+  bundled example or a persisted def — a schedule + approval (it reads the
+  seeded/owner `<id>.md` on disk, writes ONLY the `<id>.def.json`, requests the
+  same approval). Both funnel through one shared `requestApprovalAndEmit` tail, so
+  the approval prompt, content-hash binding, and full rollback are identical.
+  `renderRitualApprovalBody` (`reminders/ritual-registration.ts:301`)
   emits a code-rendered, run-length-hardened fenced block that shows the FULL
   prompt text, CAPABILITY bullets (not bare tool names — a Bash/write capability
   is labelled "CURRENTLY BLOCKED at fire time"), the scope root, the cadence, and
@@ -2200,8 +2207,13 @@ ritual content in chat.
   `reminders/bundled-rituals.ts:108` — an owner-edited file is never clobbered),
   and register UNAPPROVED on boot (`registerBundledRituals`,
   `reminders/bundled-rituals.ts:149`) inside the composer's
-  `ritual_executor_factory` (`open/composer.ts:1911`). They do nothing until the
-  owner approves them.
+  `ritual_executor_factory` (`open/composer.ts:1911`). A bundled ritual has a
+  seeded `<id>.md` but NO `<id>.def.json`, so it starts with no schedule and no
+  approval — it does nothing until the owner ENABLES it. `rituals_propose` cannot
+  enable a bundled id (its `<id>.md` already exists → `exists_on_disk`); the owner
+  (via the agent) uses `rituals_enable(id, schedule)`, which writes the missing
+  `<id>.def.json` and requests the approval prompt. Approving that prompt schedules
+  the reminder row and the ritual begins firing on its cadence.
 
 ## Proactive messaging — daily brief + idle-nudge sweep (`gateway/proactive/`)
 

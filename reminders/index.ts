@@ -151,6 +151,7 @@ export type {
   RitualRegistrationServiceOptions,
   RitualRegistrationEmit,
   RitualProposalInput,
+  RitualEnableInput,
   RitualProposalSchedule,
   RitualProposalResult,
   RitualStatusRow,

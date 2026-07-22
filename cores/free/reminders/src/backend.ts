@@ -238,6 +238,19 @@ export interface RitualProposeResult {
   requires_egress_approval: boolean
 }
 
+/**
+ * ENABLE an already-registered ritual (a bundled example or persisted def). Only
+ * the id + schedule — the prompt/surface/scope are owned by the registered def.
+ */
+export interface RitualEnableInput {
+  id: string
+  schedule: {
+    fire_at: number
+    recurrence?: 'weekly' | 'monthly' | 'occasional'
+    recurrence_spec?: string
+  }
+}
+
 export interface RitualStatusRowResult {
   ritual_id: string
   description: string
@@ -248,10 +261,11 @@ export interface RitualStatusRowResult {
   scheduled: boolean
 }
 
-/** The structural service the Core derefs (propose + status only — the owner
+/** The structural service the Core derefs (propose + enable + status — the owner
  *  answer capture path lives in the live-agent runner, not the Core). */
 export interface RemindersRitualService {
   propose(input: RitualProposeInput): Promise<RitualProposeResult>
+  enable(input: RitualEnableInput): Promise<RitualProposeResult>
   status(): RitualStatusRowResult[]
 }
 
@@ -276,6 +290,13 @@ export interface RemindersBackend {
    * it, and the `rituals_propose` tool throws {@link RitualsUnavailableError}.
    */
   proposeRitual?(input: RitualProposeInput): Promise<RitualProposeResult>
+  /**
+   * Argus r2 BLOCKER fix — ENABLE an already-registered ritual (bundled example
+   * or persisted def) by writing its schedule + requesting the owner's approval.
+   * The ONLY path by which a bundled ritual (morning-brief/evening-wrap/
+   * daily-delta) becomes approvable + schedulable; `proposeRitual` refuses their
+   * ids. OPTIONAL, same gating as `proposeRitual`. */
+  enableRitual?(input: RitualEnableInput): Promise<RitualProposeResult>
   /** Plan task 8 — the ritual approval/schedule status snapshot. OPTIONAL. */
   ritualsStatus?(): Promise<RitualStatusRowResult[]>
   /**
@@ -626,6 +647,16 @@ export function buildReminderStoreBackend(
         )
       }
       return svc.propose(input)
+    },
+
+    async enableRitual(input: RitualEnableInput): Promise<RitualProposeResult> {
+      const svc = opts.rituals?.()
+      if (svc === undefined || svc === null) {
+        throw new RitualsUnavailableError(
+          'rituals_enable: no ritual registration service wired (LLM-less box / no credential)',
+        )
+      }
+      return svc.enable(input)
     },
 
     async ritualsStatus(): Promise<RitualStatusRowResult[]> {

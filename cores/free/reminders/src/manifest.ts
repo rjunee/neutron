@@ -51,6 +51,9 @@ export const TOOL_NAMES = [
   // `buildExtraTools` handlers MUST stay in lockstep or install hard-fails
   // `manifest_incomplete` (X2, gateway/cores/install-bundled.ts).
   'rituals_propose',
+  // Argus r2 BLOCKER fix — enable a bundled/registered ritual (fires only after
+  // the owner's in-chat approval). Bundled examples can be proposed only via this.
+  'rituals_enable',
   'rituals_status',
 ] as const
 export type RemindersToolName = typeof TOOL_NAMES[number]

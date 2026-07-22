@@ -28,6 +28,7 @@ import {
   type RemindersBackend,
   type RemindersUpdateInput,
   type RemindersUpdateResult,
+  type RitualEnableInput,
   type RitualProposeInput,
   type RitualProposeResult,
   type RitualStatusRowResult,
@@ -49,6 +50,8 @@ export interface BuiltExtraTools {
   reminders_update: (input: RemindersUpdateInput) => Promise<RemindersUpdateResult>
   /** Plan task 8 — PROPOSE a ritual (requires the owner's in-chat approval to fire). */
   rituals_propose: (input: RitualProposeInput) => Promise<RitualProposeResult>
+  /** Argus r2 BLOCKER fix — ENABLE a bundled/registered ritual (owner approval to fire). */
+  rituals_enable: (input: RitualEnableInput) => Promise<RitualProposeResult>
   /** Plan task 8 — the ritual approval/schedule status snapshot. */
   rituals_status: (input: Record<string, never>) => Promise<RitualsStatusOutput>
 }
@@ -98,6 +101,25 @@ export function buildExtraTools(deps: ExtraToolDeps): BuiltExtraTools {
     },
   })
 
+  // Argus r2 BLOCKER fix — ENABLE a bundled/already-registered ritual. The three
+  // bundled examples (morning-brief/evening-wrap/daily-delta) are seeded +
+  // registered at boot but `rituals_propose` refuses their ids as
+  // duplicate/exists-on-disk; this is the path that gives them an approval +
+  // schedule. Same owner-approval gate as propose (nothing fires until the owner
+  // taps Approve on the code-rendered prompt).
+  const rituals_enable = guard.wrapToolHandler<RitualEnableInput, RitualProposeResult>({
+    tool_name: 'rituals_enable',
+    capability_required: WRITE_CAPABILITY,
+    fn: async (input: RitualEnableInput): Promise<RitualProposeResult> => {
+      if (deps.backend.enableRitual === undefined) {
+        throw new RitualsUnavailableError(
+          'rituals_enable: backend has no enableRitual wired',
+        )
+      }
+      return deps.backend.enableRitual(input)
+    },
+  })
+
   const rituals_status = guard.wrapToolHandler<Record<string, never>, RitualsStatusOutput>({
     tool_name: 'rituals_status',
     capability_required: READ_CAPABILITY,
@@ -112,5 +134,5 @@ export function buildExtraTools(deps: ExtraToolDeps): BuiltExtraTools {
     },
   })
 
-  return { reminders_update, rituals_propose, rituals_status }
+  return { reminders_update, rituals_propose, rituals_enable, rituals_status }
 }

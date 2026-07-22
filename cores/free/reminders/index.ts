@@ -47,6 +47,7 @@ export {
   type RemindersRitualService,
   type RitualProposeInput,
   type RitualProposeResult,
+  type RitualEnableInput,
   type RitualStatusRowResult,
   type RemindersCancelInput,
   type RemindersCancelResult,

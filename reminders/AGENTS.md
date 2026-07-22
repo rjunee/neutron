@@ -37,12 +37,21 @@ fire-time text is composed at fire time, never pre-rendered.
   3-consecutive-failure escalation, boot-reap of orphaned `running` rows, 30d
   prune.
 - `ritual-runs.ts` — the `code_ritual_runs` writer.
-- `ritual-registration.ts` — the agent-callable propose/approve/capture service:
-  `renderRitualApprovalBody` (the security-carrying rendering), the turn-start
-  `handleOwnerButtonAnswer` capture, schedule-on-approve.
+- `ritual-registration.ts` — the agent-callable propose/enable/approve/capture
+  service. `propose` creates a BRAND-NEW ritual; `enable(id, schedule)` gives an
+  ALREADY-REGISTERED ritual (a bundled example or a persisted def) a schedule +
+  approval by reading its seeded/owner `<id>.md` and writing ONLY the
+  `<id>.def.json` (`propose` refuses a bundled id — its `.md` already exists). Both
+  share one `requestApprovalAndEmit` tail: `renderRitualApprovalBody` (the
+  security-carrying rendering), content-hash-bound grant, full rollback on any
+  emit failure. `handleOwnerButtonAnswer` is the turn-start capture +
+  schedule-on-approve. Surfaced as the reminders-Core `rituals_propose` /
+  `rituals_enable` / `rituals_status` MCP tools.
 - `bundled-rituals.ts` + `rituals/*.md` (`morning-brief`, `evening-wrap`,
   `daily-delta`) — seeded copy-if-absent into `<owner_home>/rituals/`, registered
-  UNAPPROVED on boot. `ritual-agent-base.md` — the ritual substrate base prompt.
+  UNAPPROVED on boot with NO `.def.json` (no schedule). They become usable ONLY
+  via `rituals_enable` (the sole approval + scheduling path for a bundled id).
+  `ritual-agent-base.md` — the ritual substrate base prompt.
 - `index.ts` — the barrel export.
 
 ## What this module must NOT do
