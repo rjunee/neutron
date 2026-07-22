@@ -4806,3 +4806,31 @@ gains T9 (default === SONNET_MODEL), T10 (retry_feedback threading), T11 (tools_
 passthrough). `bun test cores/free/research` 193 pass / 2 skip; `tsc -p
 cores/free/research/tsconfig.json` clean; `gateway` research-core production-composer +
 cores-tool-dispatch guards 23 pass; eslint clean.
+
+---
+
+## 2026-07-22 — task 9 — work-board: generic terminal status transitions clear inline_active
+
+**Root cause (verified live in tenant DB).** A work-board item reaching a terminal status
+(`done`/`failed`) via the GENERIC `update()`/`complete()` path left `inline_active=1` — the
+completion ack reached Telegram but the card stayed in "inline active" state. The specialized
+`attachRun()`/`detachRun()` methods already cleared `inline_active=0` as part of their
+run-binding transitions, but the generic path only wrote `inline_active` when the caller's patch
+explicitly included it; `complete()` is `update({ status:'done' })` with no `inline_active` key.
+
+**Fix (`work-board/store.ts` `update()`).** Added a `terminalTransition` boolean (computed
+inside the transaction callback, after the `current === null` guard, so it safely reads
+`current.status`). On any REAL status transition to `'done'` or `'failed'`: (a) suppress the
+caller's explicit `patch.inline_active` push (avoids a duplicate SET column) and (b) push
+`inline_active = 0` unconditionally. Non-terminal transitions and no-status patches preserve
+today's behavior byte-identical. No data backfill for already-corrupt rows (out of scope).
+`attachRun`/`detachRun` are NOT consolidated — they have legitimately different run-binding
+semantics (Ryan-pinned design).
+
+**Tests (`work-board/store.test.ts`, 4 new reproduce-then-fix tests).** T1 `generic complete()
+clears inline_active` (the live bug path — create, set inline_active=true, complete(), assert
+status='done' + completed_at not null + inline_active=false both returned AND persisted); T2
+`generic update to failed clears inline_active`; T3 `terminal clear wins over explicit
+inline_active:true in the same patch`; T4 `non-terminal status transition preserves
+inline_active`. All 264 work-board tests pass; `tsc -p work-board` clean; consumer tests (38
+gateway/http/work-board-surface + 19 work-board/agent-tool) still pass.

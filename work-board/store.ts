@@ -447,7 +447,9 @@ export class WorkBoardStore {
    * lane (a `sort_order` = MAX+1) so its stale completed-row position can't
    * collide with the renumbered active items. The status path runs in a
    * transaction because the reopen read-compute-write (MAX `sort_order`) must
-   * be atomic. Scoped by `project_slug`.
+   * be atomic. Scoped by `project_slug`. Any REAL transition into a terminal
+   * status ('done'/'failed') unconditionally clears `inline_active` — overriding
+   * an explicit patch value — for parity with attachRun/detachRun.
    */
   async update(
     project_slug: string,
@@ -478,9 +480,22 @@ export class WorkBoardStore {
       }
       if (title !== undefined) push('title', title)
       if (designDocRef !== undefined) push('design_doc_ref', designDocRef)
-      if (patch.inline_active !== undefined) push('inline_active', patch.inline_active ? 1 : 0)
+      // A REAL transition into a terminal lane ('done'/'failed') UNCONDITIONALLY
+      // clears the inline marker — a finished card can never still claim live
+      // inline work (generic-path parity with attachRun/detachRun, which already
+      // clear it). The clear WINS over any explicit patch.inline_active value,
+      // so the explicit write is suppressed for that case (this also avoids a
+      // duplicate SET column in the UPDATE statement).
+      const terminalTransition =
+        patch.status !== undefined &&
+        patch.status !== current.status &&
+        (patch.status === 'done' || patch.status === 'failed')
+      if (patch.inline_active !== undefined && !terminalTransition) {
+        push('inline_active', patch.inline_active ? 1 : 0)
+      }
       if (patch.status !== undefined && patch.status !== current.status) {
         push('status', patch.status)
+        if (terminalTransition) push('inline_active', 0)
         if (patch.status === 'done') {
           // Genuine completion — stamp the datestamp ONCE.
           push('completed_at', this.now())
