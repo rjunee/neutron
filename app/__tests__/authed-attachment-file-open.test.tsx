@@ -58,6 +58,28 @@ mock.module('expo-web-browser', () => ({
   },
 }));
 
+/* ── native file-persist + share (the r2 BLOCKER fix path) ── */
+let fsWrites: Array<{ uri: string; base64: string; encoding: string | undefined }> = [];
+mock.module('expo-file-system/legacy', () => ({
+  cacheDirectory: 'file:///cache/',
+  writeAsStringAsync: async (
+    uri: string,
+    contents: string,
+    opts?: { encoding?: string },
+  ) => {
+    fsWrites.push({ uri, base64: contents, encoding: opts?.encoding });
+  },
+}));
+
+let sharingAvailable = true;
+let shareCalls: Array<{ url: string; options: unknown }> = [];
+mock.module('expo-sharing', () => ({
+  isAvailableAsync: async () => sharingAvailable,
+  shareAsync: async (url: string, options?: unknown) => {
+    shareCalls.push({ url, options });
+  },
+}));
+
 const PDF_URL = '/api/app/upload/sam/report.pdf';
 const AUTH = { base_url: 'http://127.0.0.1:8080', token: 'tok' };
 const RESOLVED_PDF = 'http://127.0.0.1:8080/api/app/upload/sam/report.pdf';
@@ -74,6 +96,20 @@ const origFetch = globalThis.fetch;
 const origSetTimeout = globalThis.setTimeout;
 const origCreate = URL.createObjectURL;
 const origRevoke = URL.revokeObjectURL;
+const origFileReader = (globalThis as { FileReader?: unknown }).FileReader;
+
+// RN provides a `FileReader` global that `blobToDataUrl` uses on the native
+// path; bun does not, so stand one up that yields a deterministic data URL.
+class FakeFileReader {
+  result: string | null = null;
+  error: unknown = null;
+  onload: (() => void) | null = null;
+  onerror: (() => void) | null = null;
+  readAsDataURL(_blob: Blob) {
+    this.result = 'data:application/pdf;base64,UERGQllURVM=';
+    queueMicrotask(() => this.onload?.());
+  }
+}
 
 beforeEach(() => {
   platform.OS = 'web';
@@ -83,6 +119,11 @@ beforeEach(() => {
   fetchCalls = [];
   createdObjectUrls = 0;
   openBrowserCalls = [];
+  fsWrites = [];
+  shareCalls = [];
+  sharingAvailable = true;
+  (globalThis as { FileReader?: unknown }).FileReader =
+    FakeFileReader as unknown as typeof FileReader;
 
   globalThis.open = ((url?: string | URL, target?: string) => {
     openArgs.push([String(url ?? ''), String(target ?? '')]);
@@ -115,6 +156,7 @@ afterEach(() => {
   globalThis.setTimeout = origSetTimeout;
   URL.createObjectURL = origCreate;
   URL.revokeObjectURL = origRevoke;
+  (globalThis as { FileReader?: unknown }).FileReader = origFileReader;
 });
 
 async function pressChip(url: string, auth: typeof AUTH | null) {
@@ -154,5 +196,42 @@ describe('AuthedAttachmentFile — web open user-activation (Argus r1 MAJOR)', (
     expect(openArgs).toEqual([['', '_blank']]);
     expect(fakeWin?.location.href).toBe('https://cdn.example/report.pdf');
     expect(fetchCalls).toEqual([]);
+  });
+});
+
+describe('AuthedAttachmentFile — native open (Argus r2 BLOCKER)', () => {
+  it('persists the authed blob to a cache file and hands it to the OS share sheet — never a data: URL to WebBrowser', async () => {
+    platform.OS = 'ios';
+    const onPress = await pressChip(PDF_URL, AUTH);
+    await onPress();
+    // The bytes are fetched WITH the bearer (no web popup on native)…
+    expect(fetchCalls).toEqual([RESOLVED_PDF]);
+    expect(openArgs).toEqual([]);
+    // …written to a cache file as base64…
+    expect(fsWrites).toHaveLength(1);
+    expect(fsWrites[0]).toEqual({
+      uri: 'file:///cache/report.pdf',
+      base64: 'UERGQllURVM=',
+      encoding: 'base64',
+    });
+    // …and opened via the native share/preview sheet with the blob's mime type.
+    expect(shareCalls).toEqual([
+      { url: 'file:///cache/report.pdf', options: { mimeType: 'application/pdf' } },
+    ]);
+    // Crux of the BLOCKER: a data:/file: URL is NEVER handed to WebBrowser
+    // (SFSafariViewController / Chrome Custom Tabs reject it), so the open can't
+    // fail silently the way the pre-fix `openBrowserAsync(dataUrl)` did.
+    expect(openBrowserCalls).toEqual([]);
+  });
+
+  it('falls back to WebBrowser with the file:// URL when native sharing is unavailable', async () => {
+    platform.OS = 'ios';
+    sharingAvailable = false;
+    const onPress = await pressChip(PDF_URL, AUTH);
+    await onPress();
+    expect(fsWrites).toHaveLength(1);
+    expect(shareCalls).toEqual([]);
+    // Fallback opens the file:// URL — still never a data: URL.
+    expect(openBrowserCalls).toEqual(['file:///cache/report.pdf']);
   });
 });

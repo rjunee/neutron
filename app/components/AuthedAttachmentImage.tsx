@@ -37,6 +37,8 @@ import {
   type StyleProp,
 } from 'react-native';
 import * as WebBrowser from 'expo-web-browser';
+import * as FileSystem from 'expo-file-system/legacy';
+import * as Sharing from 'expo-sharing';
 
 import {
   attachmentBasename,
@@ -158,10 +160,16 @@ export function AuthedAttachmentImageView({ url, auth, style }: AuthedAttachment
  *   - our bearer-authed `/api/app/upload/…` URLs can't open by URL (the GET
  *     honors only `Authorization: Bearer`, no query/cookie token), so we fetch
  *     the blob WITH the bearer, then open it: on RN-web via an object URL in a
- *     new tab (exactly like the web client), on native via a base64 data URL
- *     handed to `WebBrowser`. Preview fidelity on native depends on the OS
- *     viewer, but the filename affordance + open attempt always render — a
- *     document never paints as a broken image.
+ *     new tab (exactly like the web client), on native by persisting the bytes
+ *     to a cache file and handing it to the OS share/preview sheet (Quick Look
+ *     on iOS, the share intent on Android). Preview fidelity on native depends
+ *     on the OS viewer, but the filename affordance + open attempt always
+ *     render — a document never paints as a broken image.
+ *
+ * NOTE — native must NOT hand a `data:`/`file:` URL to `WebBrowser`: iOS
+ * SFSafariViewController and Android Chrome Custom Tabs reject non-http(s)
+ * INITIAL urls, so the open fails silently (Argus r2 BLOCKER). The write-to-
+ * cache + `Sharing.shareAsync` path below is the correct native affordance.
  */
 export function AuthedAttachmentFile({
   url,
@@ -214,8 +222,21 @@ export function AuthedAttachmentFile({
         setTimeout(() => URL.revokeObjectURL(obj), 60_000);
         return;
       }
-      const dataUrl = await blobToDataUrl(blob);
-      await WebBrowser.openBrowserAsync(dataUrl);
+      // Native: SFSafariViewController (iOS) / Chrome Custom Tabs (Android)
+      // reject `data:` and `file:` as an initial URL, so the blob can't go to
+      // WebBrowser. Persist the authed bytes to a cache file and hand the file
+      // to the OS share/preview sheet, which every native document viewer
+      // understands.
+      const base64 = dataUrlToBase64(await blobToDataUrl(blob));
+      const fileUri = `${FileSystem.cacheDirectory ?? ''}${cacheFilename(name)}`;
+      await FileSystem.writeAsStringAsync(fileUri, base64, { encoding: 'base64' });
+      if (await Sharing.isAvailableAsync()) {
+        await Sharing.shareAsync(fileUri, blob.type ? { mimeType: blob.type } : undefined);
+      } else {
+        // Fallback for the rare platform where sharing is unavailable (some
+        // emulators): a file:// URL at least reaches the system handler.
+        await WebBrowser.openBrowserAsync(fileUri);
+      }
     } catch {
       // Close the blank tab we optimistically opened so a failure doesn't strand
       // an empty about:blank window.
@@ -238,6 +259,18 @@ export function AuthedAttachmentFile({
       </Text>
     </Pressable>
   );
+}
+
+/** Strip the `data:<mime>;base64,` prefix, leaving the bare base64 payload. */
+function dataUrlToBase64(dataUrl: string): string {
+  const comma = dataUrl.indexOf(',');
+  return comma >= 0 ? dataUrl.slice(comma + 1) : dataUrl;
+}
+
+/** A filesystem-safe cache filename derived from the attachment basename. */
+function cacheFilename(name: string): string {
+  const safe = name.replace(/[^A-Za-z0-9._-]+/g, '_').replace(/^_+/, '');
+  return safe.length > 0 ? safe : 'attachment';
 }
 
 /** Read a Blob as a base64 `data:` URL (RN provides a `FileReader` global). */
