@@ -178,12 +178,26 @@ export function AuthedAttachmentFile({
     if (busy) return;
     setBusy(true);
     setFailed(false);
+    // On web the browser only honors `window.open()` while the click's user
+    // activation is still live. The authed path below `await`s a fetch + blob
+    // first, and by then Safari (and Chrome) treat a fresh `window.open()` as an
+    // unrequested popup and BLOCK it — so we must open the tab SYNCHRONOUSLY here,
+    // inside the gesture, and navigate it once the blob is ready. The pre-fix code
+    // called `window.open` post-fetch AND ignored its null return, so a blocked
+    // popup failed silently (Argus r1 MAJOR). A null handle now surfaces failure.
+    const webWin: Window | null =
+      Platform.OS === 'web' ? (globalThis.open?.('', '_blank') ?? null) : null;
     try {
+      if (Platform.OS === 'web' && webWin === null) {
+        // Browser blocked the popup before we even fetched — don't fail silently.
+        throw new Error('attachment popup blocked');
+      }
       const source = resolveAttachmentSource(url, auth);
       const bearer = source.headers?.Authorization;
       if (bearer === undefined) {
         // Non-authed (data:/external https:) — open the URL directly.
-        await WebBrowser.openBrowserAsync(source.uri);
+        if (webWin !== null) webWin.location.href = source.uri;
+        else await WebBrowser.openBrowserAsync(source.uri);
         return;
       }
       const res = await fetch(source.uri, {
@@ -192,16 +206,20 @@ export function AuthedAttachmentFile({
       });
       if (!res.ok) throw new Error(`attachment fetch failed (status ${res.status})`);
       const blob = await res.blob();
-      if (Platform.OS === 'web') {
+      if (webWin !== null) {
         const obj = URL.createObjectURL(blob);
-        // A new tab keeps its src alive; revoke on a delay so the leak is bounded.
-        globalThis.open?.(obj, '_blank');
+        // The already-open tab keeps its src alive; revoke on a delay so the leak
+        // is bounded.
+        webWin.location.href = obj;
         setTimeout(() => URL.revokeObjectURL(obj), 60_000);
         return;
       }
       const dataUrl = await blobToDataUrl(blob);
       await WebBrowser.openBrowserAsync(dataUrl);
     } catch {
+      // Close the blank tab we optimistically opened so a failure doesn't strand
+      // an empty about:blank window.
+      webWin?.close();
       setFailed(true);
     } finally {
       setBusy(false);
