@@ -32,44 +32,30 @@
  * guard, not just a render smoke test.
  */
 
-import { afterAll, beforeEach, describe, expect, it, mock } from 'bun:test';
-import * as RealReact from 'react';
-import * as RealJsxRuntime from 'react/jsx-runtime';
-import * as RealJsxDevRuntime from 'react/jsx-dev-runtime';
+import { describe, expect, it, mock } from 'bun:test';
 
-/* ── hook spies: count every hook the imported module actually calls ── */
-let useStateCalls = 0;
-let useEffectCalls = 0;
+/* ── hook spies: count every hook the dispatcher would call (must be 0) ── */
+// NOTE: we do NOT `mock.module('react', ...)` here. Bun module mocks are
+// process-global and survive across files; a react mock silently replaces
+// `import * as RealReact from 'react'` in EVERY later file in the same test
+// process — including docs-mutations-race / diagnostics-pane-render, which
+// deliberately use REAL react (via injected HookRuntime) and DID break/hang
+// when this file mocked react (CI incident PR #428, a235eea3..141d2c1c; see
+// the "process-global" warnings in docs-mutations-race.test.ts:52 +
+// diagnostics-pane-render.test.ts). The dispatcher under test
+// (`AuthedAttachmentImage`) calls NO hooks, so it runs fine against REAL react
+// — if a regression re-adds a hook at the dispatcher level, real react throws
+// "Invalid hook call" outside a render and this test fails loudly. These
+// counters therefore stay 0 by construction (kept so the assertions below are
+// unchanged); the guard is the real-react throw + the element-type checks.
+const useStateCalls = 0;
+const useEffectCalls = 0;
 
-// process-global bun mock — must stay a SUPERSET and delegate-to-real outside this suite;
-// see docs-mutations-race.test.ts:52 + diagnostics-pane-render superset note; CI incident PR #428 (a235eea3..141d2c1c).
-let useStateImpl: (initial: unknown) => unknown = RealReact.useState as never;
-let useEffectImpl: (...a: never[]) => unknown = RealReact.useEffect as never;
-const useState = (initial: unknown) => useStateImpl(initial);
-const useEffect = (...a: never[]) => useEffectImpl(...a);
-mock.module('react', () => ({
-  ...RealReact,
-  useState,
-  useEffect,
-  default: { ...RealReact, useState, useEffect },
-}));
-
-// process-global bun mock — must stay a SUPERSET and delegate-to-real outside this suite;
-// see docs-mutations-race.test.ts:52 + diagnostics-pane-render superset note; CI incident PR #428 (a235eea3..141d2c1c).
-let jsxImpl: (type: unknown, props: unknown) => unknown = RealJsxRuntime.jsx as never;
-mock.module('react/jsx-runtime', () => ({
-  ...RealJsxRuntime,
-  jsx: (t: unknown, p: unknown) => jsxImpl(t, p),
-  jsxs: (t: unknown, p: unknown) => jsxImpl(t, p),
-}));
-// Bun's test transpiler emits the DEV automatic runtime (`jsxDEV`).
-mock.module('react/jsx-dev-runtime', () => ({
-  ...RealJsxDevRuntime,
-  jsxDEV: (t: unknown, p: unknown, ..._rest: unknown[]) => jsxImpl(t, p),
-}));
-
-// process-global bun mock — must stay a SUPERSET and delegate-to-real outside this suite;
-// see docs-mutations-race.test.ts:52 + diagnostics-pane-render superset note; CI incident PR #428 (a235eea3..141d2c1c).
+// react-native genuinely can't be parsed by bun (Flow types), so it MUST be a
+// module mock — but it is NOT react, so it never pollutes `import … from 'react'`.
+// Keep it a SUPERSET of every export the sibling app modules import so that,
+// whichever react-native mocker wins the process-global registration in a
+// shared CI chunk, every import is satisfied (docs-panes-render superset note).
 mock.module('react-native', () => ({
   Image: 'Image',
   Platform: { OS: 'web' },
@@ -88,34 +74,22 @@ mock.module('react-native', () => ({
 mock.module('expo-web-browser', () => ({
   openBrowserAsync: async () => {},
 }));
+// The component statically imports these expo modules; the REAL ones pull in
+// react-native internals that bun can't parse (Flow) — stub them so loading the
+// component never drags the real react-native module into this process.
+mock.module('expo-file-system/legacy', () => ({
+  cacheDirectory: 'file:///cache/',
+  writeAsStringAsync: async () => {},
+}));
+mock.module('expo-sharing', () => ({
+  isAvailableAsync: async () => true,
+  shareAsync: async () => {},
+}));
 
 const IMAGE_URL = '/api/app/upload/sam/photo.png';
 const PDF_URL = '/api/app/upload/sam/report.pdf';
 
 describe('AuthedAttachmentImage — rules-of-hooks (Argus r3 MAJOR)', () => {
-  beforeEach(() => {
-    useStateCalls = 0;
-    useEffectCalls = 0;
-    // Point the delegating hooks at this suite's counting stubs.
-    useStateImpl = (initial: unknown) => {
-      useStateCalls += 1;
-      return [typeof initial === 'function' ? (initial as () => unknown)() : initial, () => {}];
-    };
-    useEffectImpl = () => {
-      useEffectCalls += 1;
-    };
-    jsxImpl = (type: unknown, props: unknown) => ({ type, props });
-  });
-
-  // After this suite, the process-global react/jsx mocks must behave exactly
-  // like real react for EVERY export — so nothing leaks into later files in
-  // the same bun process (the CI-red incident, PR #428 a235eea3..141d2c1c).
-  afterAll(() => {
-    useStateImpl = RealReact.useState as never;
-    useEffectImpl = RealReact.useEffect as never;
-    jsxImpl = RealJsxRuntime.jsx as never;
-  });
-
   it('dispatches an IMAGE url to the hook-owning leaf without calling any hook itself', async () => {
     const mod = await import('../components/AuthedAttachmentImage');
     const el = mod.AuthedAttachmentImage({ url: IMAGE_URL, auth: null }) as {

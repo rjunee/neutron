@@ -4742,16 +4742,29 @@ now reach the agent for the first time.
   files — `SyntaxError: Export named 'useReducer' not found` (docs-mutations-race) and
   `Export named 'Linking' not found` (docs-panes-render), plus `forwardRef is not a
   function` from react-textarea-autosize in the landing suites.
-- FIX (test hygiene only — zero production or assertion changes): rewrote both files'
-  mock scaffolding to the repo's established SUPERSET + delegate-to-real convention (see
-  `docs-mutations-race.test.ts:52` and the `diagnostics-pane-render.test.ts` react-native
-  superset note). Each `mock.module` now spreads the real module (`react` + jsx runtimes)
-  or the diagnostics-pane superset key-set (`react-native` incl. `Linking` /
-  `useWindowDimensions` / `ScrollView` / `TextInput` / `ActivityIndicator` / `Modal`), and
-  each overridden export delegates through a mutable impl pointer that the suite sets in
-  `beforeEach` and RESETS to the real implementation in `afterAll` — so once a suite
-  finishes, the still-registered module behaves exactly like real react for every export
-  and nothing leaks to later files.
-- Verified: both target suites green; the 12 branch-changed files in ONE bun process 0-fail
-  (was 120/1/1); canonical gate `NEUTRON_TEST_CONCURRENCY=2 NEUTRON_TEST_CHUNK_SIZE=75 bash
-  scripts/run-tests.sh` PASS (997/997); `bash scripts/ci/typecheck-all.sh` exit 0.
+- FIRST ATTEMPT (superset + delegate-to-real react mock) fixed the SyntaxErrors but HUNG
+  the CI `test` job (>90 min, never completing). Root cause: a `mock.module('react', …)`
+  is process-global in bun and silently replaces `import * as RealReact from 'react'` in
+  EVERY later file of the same chunk — including `docs-mutations-race` /
+  `diagnostics-pane-render`, which deliberately use REAL react via an injected HookRuntime.
+  Even a faithful superset defeats their design and deadlocked chunk 0 (agent-dispatch +
+  app files together). Every other test file in the repo AVOIDS mocking react for exactly
+  this reason (the "process-global" warnings in `docs-mutations-race.test.ts:52` etc.).
+- FINAL FIX (test hygiene only — zero production or assertion changes): ELIMINATE the
+  `react` / `react/jsx-runtime` / `react/jsx-dev-runtime` module mocks entirely from both
+  files; use REAL react + real jsx. Only `react-native` stays a module mock (bun can't
+  parse its Flow source) — kept as a SUPERSET (`Linking` / `useWindowDimensions` /
+  `ScrollView` / `TextInput` / `ActivityIndicator` / `Modal`) so it never collides with the
+  sibling docs suites' react-native mocks — plus the `expo-*` stubs (so the real expo
+  modules never drag unparseable react-native internals into the process).
+  `AuthedAttachmentImage` is a hook-free dispatcher, so it runs directly against real react
+  (a regression re-adding a hook throws "Invalid hook call" and fails the test loudly).
+  `AuthedAttachmentFile` calls `useState`, so `pressChip` installs a minimal hook
+  dispatcher on react's current-dispatcher slot
+  (`__CLIENT_INTERNALS_DO_NOT_USE_OR_WARN_USERS_THEY_CANNOT_UPGRADE.H`) around the
+  SYNCHRONOUS component call only, then restores it — scoped to this file, no module mock,
+  no cross-file pollution.
+- Verified locally with gbrain on PATH: the exact CI chunk 0 (7 agent-dispatch + 68 app
+  files, the set that hung) now runs 861 pass / 0 fail and EXITS in <1s; both target suites
+  green (image 4/0, file 5/0); the 12 branch-changed files in ONE bun process 125/0;
+  `bash scripts/ci/typecheck-all.sh` exit 0 (51 tsconfigs).

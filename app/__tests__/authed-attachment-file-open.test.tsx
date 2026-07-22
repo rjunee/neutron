@@ -23,43 +23,48 @@
  * against mocked web globals (`globalThis.open`, `fetch`, `URL`).
  */
 
-import { afterAll, afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
-import * as RealReact from 'react';
-import * as RealJsxRuntime from 'react/jsx-runtime';
-import * as RealJsxDevRuntime from 'react/jsx-dev-runtime';
+import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
+import * as React from 'react';
 
-/* ── react: no-op hooks (state is unobservable here; we assert side effects) ── */
-// process-global bun mock — must stay a SUPERSET and delegate-to-real outside this suite;
-// see docs-mutations-race.test.ts:52 + diagnostics-pane-render superset note; CI incident PR #428 (a235eea3..141d2c1c).
-let useStateImpl: (initial: unknown) => unknown = RealReact.useState as never;
-let useEffectImpl: (...a: never[]) => unknown = RealReact.useEffect as never;
-const useState = (initial: unknown) => useStateImpl(initial);
-const useEffect = (...a: never[]) => useEffectImpl(...a);
-mock.module('react', () => ({
-  ...RealReact,
-  useState,
-  useEffect,
-  default: { ...RealReact, useState, useEffect },
-}));
-
-// process-global bun mock — must stay a SUPERSET and delegate-to-real outside this suite;
-// see docs-mutations-race.test.ts:52 + diagnostics-pane-render superset note; CI incident PR #428 (a235eea3..141d2c1c).
-let jsxImpl: (type: unknown, props: unknown) => unknown = RealJsxRuntime.jsx as never;
-mock.module('react/jsx-runtime', () => ({
-  ...RealJsxRuntime,
-  jsx: (t: unknown, p: unknown) => jsxImpl(t, p),
-  jsxs: (t: unknown, p: unknown) => jsxImpl(t, p),
-}));
-mock.module('react/jsx-dev-runtime', () => ({
-  ...RealJsxDevRuntime,
-  jsxDEV: (t: unknown, p: unknown, ..._rest: unknown[]) => jsxImpl(t, p),
-}));
+/* ── react hooks WITHOUT a process-global module mock ──────────────────────
+ * We do NOT `mock.module('react', ...)`. Bun module mocks are process-global
+ * and survive across files; a react mock silently replaces `import * as
+ * RealReact from 'react'` in EVERY later file in the same test process —
+ * including docs-mutations-race / diagnostics-pane-render, which deliberately
+ * use REAL react via an injected HookRuntime and DID break/hang when this file
+ * mocked react (CI incident PR #428, a235eea3..141d2c1c; see the "process-
+ * global" warnings in docs-mutations-race.test.ts:52 + diagnostics-pane-render).
+ *
+ * `AuthedAttachmentFile` calls `useState`, so calling it as a plain function
+ * would throw "Invalid hook call" under REAL react (no active dispatcher). We
+ * install a MINIMAL hook dispatcher on react's current-dispatcher slot for the
+ * synchronous duration of that call only (see `pressChip`), then restore it —
+ * scoped to this file, never leaking to other files' `import 'react'`. */
+const reactInternals = (
+  React as unknown as {
+    __CLIENT_INTERNALS_DO_NOT_USE_OR_WARN_USERS_THEY_CANNOT_UPGRADE: { H: unknown };
+  }
+).__CLIENT_INTERNALS_DO_NOT_USE_OR_WARN_USERS_THEY_CANNOT_UPGRADE;
+const noopHookDispatcher = {
+  useState: (initial: unknown) => [
+    typeof initial === 'function' ? (initial as () => unknown)() : initial,
+    () => {},
+  ],
+  useEffect: () => {},
+  useRef: (v: unknown) => ({ current: v }),
+  useMemo: (f: () => unknown) => f(),
+  useCallback: (f: unknown) => f,
+  useContext: () => undefined,
+};
 
 // Shared, MUTABLE Platform so individual tests can flip web ↔ native. The
 // component reads `Platform.OS` at call time inside its handler.
 const platform = { OS: 'web' as 'web' | 'ios' };
-// process-global bun mock — must stay a SUPERSET and delegate-to-real outside this suite;
-// see docs-mutations-race.test.ts:52 + diagnostics-pane-render superset note; CI incident PR #428 (a235eea3..141d2c1c).
+// react-native genuinely can't be parsed by bun (Flow types), so it MUST be a
+// module mock — but it is NOT react, so it never pollutes `import … from 'react'`.
+// Keep it a SUPERSET of every export the sibling app modules import so that,
+// whichever react-native mocker wins the process-global registration in a
+// shared CI chunk, every import is satisfied (docs-panes-render superset note).
 mock.module('react-native', () => ({
   Image: 'Image',
   Platform: platform,
@@ -136,16 +141,6 @@ class FakeFileReader {
 }
 
 beforeEach(() => {
-  // Point the delegating react hooks at this suite's no-op stubs (state is
-  // unobservable here; we assert side effects), and the jsx runtimes at the
-  // plain-object recorder so `AuthedAttachmentFile(...)` yields `{ type, props }`.
-  useStateImpl = (initial: unknown) => [
-    typeof initial === 'function' ? (initial as () => unknown)() : initial,
-    () => {},
-  ];
-  useEffectImpl = () => {};
-  jsxImpl = (type: unknown, props: unknown) => ({ type, props });
-
   platform.OS = 'web';
   openArgs = [];
   fakeWin = null;
@@ -193,19 +188,21 @@ afterEach(() => {
   (globalThis as { FileReader?: unknown }).FileReader = origFileReader;
 });
 
-// After this suite, the process-global react/jsx mocks must behave exactly
-// like real react for EVERY export — so nothing leaks into later files in the
-// same bun process (the CI-red incident, PR #428 a235eea3..141d2c1c).
-afterAll(() => {
-  useStateImpl = RealReact.useState as never;
-  useEffectImpl = RealReact.useEffect as never;
-  jsxImpl = RealJsxRuntime.jsx as never;
-});
-
 async function pressChip(url: string, auth: typeof AUTH | null) {
   const mod = await import('../components/AuthedAttachmentImage');
-  const el = mod.AuthedAttachmentFile({ url, auth }) as { props: { onPress: () => Promise<void> } };
-  return el.props.onPress;
+  // Install the minimal hook dispatcher ONLY around the synchronous component
+  // call (no `await` in between), then restore it — so a concurrent test's real
+  // render can never observe our stub, and we never module-mock react.
+  const prevH = reactInternals.H;
+  reactInternals.H = noopHookDispatcher;
+  try {
+    const el = mod.AuthedAttachmentFile({ url, auth }) as {
+      props: { onPress: () => Promise<void> };
+    };
+    return el.props.onPress;
+  } finally {
+    reactInternals.H = prevH;
+  }
 }
 
 describe('AuthedAttachmentFile — web open user-activation (Argus r1 MAJOR)', () => {
