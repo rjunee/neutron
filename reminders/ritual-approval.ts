@@ -136,6 +136,17 @@ export interface RitualApprovalRequestResult {
   content_hash: string
   content: Promise<ApprovalDecision>
   egress?: Promise<ApprovalDecision>
+  /**
+   * Plan task 8 — the caller-minted `tool_approvals` row id of the CONTENT
+   * grant. `requestRitualApproval` mints it (via `crypto.randomUUID()`) and
+   * threads it as `ApprovalRequest.id` so the durable row lands under an id the
+   * registration service (`reminders/ritual-registration.ts`) knows UP FRONT —
+   * the id becomes the opaque approval token (`rap:<base64url(id)>:a|d`) bound to
+   * the buttons, with no side-table lookup.
+   */
+  content_id: string
+  /** The minted row id of the EGRESS grant (present only for `egress:'web'` defs). */
+  egress_id?: string
 }
 
 /**
@@ -167,7 +178,14 @@ export function requestRitualApproval(
     timeout_ms: RITUAL_TIMEOUT_MS,
   })
 
+  // Plan task 8 — mint the row ids HERE and thread them as `ApprovalRequest.id`
+  // so the durable `tool_approvals` row lands under an id the caller returns +
+  // encodes into the opaque button token. Backward-compatible: pre-task-8 callers
+  // that ignore `content_id`/`egress_id` behave exactly as before.
+  const content_id: string = crypto.randomUUID()
+
   const content = manager.requestApproval({
+    id: content_id,
     project_slug,
     topic_id,
     tool_name: ritualApprovalToolName(def.id),
@@ -187,7 +205,9 @@ export function requestRitualApproval(
   })
 
   if (def.egress === 'web') {
+    const egress_id: string = crypto.randomUUID()
     const egress = manager.requestApproval({
+      id: egress_id,
       project_slug,
       topic_id,
       tool_name: ritualEgressApprovalToolName(def.id),
@@ -198,10 +218,10 @@ export function requestRitualApproval(
         capability: 'egress',
       },
     })
-    return { content_hash, content, egress }
+    return { content_hash, content, egress, content_id, egress_id }
   }
 
-  return { content_hash, content }
+  return { content_hash, content, content_id }
 }
 
 /**

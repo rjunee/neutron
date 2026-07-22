@@ -38,6 +38,7 @@
 
 import { readFileSync, statSync } from 'node:fs'
 import { join } from 'node:path'
+import { createLogger } from '@neutronai/logger'
 
 /**
  * Ritual spawn timeout — 45 min, parity with Vajra's
@@ -154,6 +155,95 @@ export interface RitualDef {
   silent: boolean
 }
 
+/**
+ * Register-time structural validation of a ritual def, EXTRACTED from the
+ * registry's internal `assertValid` (plan task 8) so the agent-callable
+ * registration path (`reminders/ritual-registration.ts`) can validate a
+ * proposed def BEFORE writing anything to disk — same rules, one source of
+ * truth. THROWS a plain Error with a precise message on any invalid field.
+ *
+ * This covers EVERYTHING `assertValid` did EXCEPT the duplicate-id check — a
+ * duplicate is a registry-STATE concern (is this id already registered?), not a
+ * property of the def in isolation, so it stays in {@link RitualRegistry.register}
+ * (and the registration service does its own never-clobber check against the
+ * registry + disk before calling this). The imported-JSON fail-closed contract
+ * (a def can arrive from user-data where the compiler never saw it) is preserved:
+ * every enum/type guard leads with a `typeof` check so `RegExp.test` coercion can
+ * never smuggle a non-string past the charset gates.
+ */
+export function validateRitualDef(def: RitualDef): void {
+  if (typeof def.id !== 'string' || !RITUAL_ID_RE.test(def.id)) {
+    // typeof guard first: RegExp.test coerces (id=42 → "42" matches), which
+    // would register the def under a non-string Map key. Fail closed instead.
+    throw new Error(
+      `ritual id ${JSON.stringify(def.id)} fails RITUAL_ID_RE (^[a-z0-9][a-z0-9-]{0,63}$)`,
+    )
+  }
+  const desc = def.description
+  if (typeof desc !== 'string' || desc.trim().length === 0) {
+    throw new Error(`ritual ${JSON.stringify(def.id)}: description must be non-empty`)
+  }
+  if (desc.length > 200) {
+    throw new Error(
+      `ritual ${JSON.stringify(def.id)}: description exceeds 200 chars (${desc.length})`,
+    )
+  }
+  // Runtime enum/type guards — the TS types constrain in-tree callers, but a
+  // ritual def can arrive from imported user-data (JSON) where the compiler
+  // never saw it. These fields drive containment (scope), egress
+  // classification, and delivery, so a bogus value must FAIL CLOSED at
+  // register time rather than silently pass the consistency checks below.
+  if (def.scope !== 'project' && def.scope !== 'instance') {
+    throw new Error(
+      `ritual ${JSON.stringify(def.id)}: scope ${JSON.stringify(def.scope)} is not 'project' | 'instance'`,
+    )
+  }
+  if (def.egress !== 'none' && def.egress !== 'web') {
+    throw new Error(
+      `ritual ${JSON.stringify(def.id)}: egress ${JSON.stringify(def.egress)} is not 'none' | 'web'`,
+    )
+  }
+  if (typeof def.silent !== 'boolean') {
+    throw new Error(
+      `ritual ${JSON.stringify(def.id)}: silent must be a boolean (got ${JSON.stringify(def.silent)})`,
+    )
+  }
+  if (!Array.isArray(def.tool_surface)) {
+    throw new Error(
+      `ritual ${JSON.stringify(def.id)}: tool_surface must be an array`,
+    )
+  }
+  if (def.tool_surface.length === 0) {
+    // #361 toolless-class pin: a ritual with no tools is a silent no-op.
+    throw new Error(
+      `ritual ${JSON.stringify(def.id)}: tool_surface is empty (#361 toolless class — grant at least one tool)`,
+    )
+  }
+  let hasWebTool = false
+  for (const t of def.tool_surface) {
+    if (typeof t !== 'string' || !TOOL_TOKEN_RE.test(t)) {
+      // typeof guard first: RegExp.test coerces (null → "null" matches
+      // TOOL_TOKEN_RE), which would freeze a non-string tool grant into the
+      // registry and flow through approval hashing + spawn. Fail closed —
+      // matches the imported-JSON fail-closed contract documented above.
+      throw new Error(
+        `ritual ${JSON.stringify(def.id)}: tool_surface entry ${JSON.stringify(t)} is not a valid tool token (${TOOL_TOKEN_RE})`,
+      )
+    }
+    if (WEB_TOOLS.has(t)) hasWebTool = true
+  }
+  if (hasWebTool && def.egress === 'none') {
+    throw new Error(
+      `ritual ${JSON.stringify(def.id)}: tool_surface grants a web tool but egress is 'none' — set egress:'web'`,
+    )
+  }
+  if (!hasWebTool && def.egress === 'web') {
+    throw new Error(
+      `ritual ${JSON.stringify(def.id)}: egress is 'web' but tool_surface grants no web tool (WebSearch/WebFetch)`,
+    )
+  }
+}
+
 /** A frozen, register-time-validated registry of ritual defs. */
 export interface RitualRegistry {
   /**
@@ -163,6 +253,13 @@ export interface RitualRegistry {
    * caller cannot mutate it after registration.
    */
   register(def: RitualDef): void
+  /**
+   * Remove `id` from the registry. Returns `true` if a def was removed, `false`
+   * if the id was not registered. Used by the registration service to ROLL BACK
+   * a registration whose approval-prompt emission failed (Argus r1 MAJOR) so a
+   * re-propose is not blocked by a stranded, promptless registration.
+   */
+  unregister(id: string): boolean
   /** The def for `id`, or undefined if unknown. */
   get(id: string): RitualDef | undefined
   /** Every registered def. */
@@ -183,89 +280,23 @@ export function createRitualRegistry(opts: { rituals_dir: string }): RitualRegis
   const { rituals_dir } = opts
   const byId = new Map<string, RitualDef>()
 
-  function assertValid(def: RitualDef): void {
-    if (typeof def.id !== 'string' || !RITUAL_ID_RE.test(def.id)) {
-      // typeof guard first: RegExp.test coerces (id=42 → "42" matches), which
-      // would register the def under a non-string Map key. Fail closed instead.
-      throw new Error(
-        `ritual id ${JSON.stringify(def.id)} fails RITUAL_ID_RE (^[a-z0-9][a-z0-9-]{0,63}$)`,
-      )
-    }
-    if (byId.has(def.id)) {
-      throw new Error(`duplicate ritual id ${JSON.stringify(def.id)}`)
-    }
-    const desc = def.description
-    if (typeof desc !== 'string' || desc.trim().length === 0) {
-      throw new Error(`ritual ${JSON.stringify(def.id)}: description must be non-empty`)
-    }
-    if (desc.length > 200) {
-      throw new Error(
-        `ritual ${JSON.stringify(def.id)}: description exceeds 200 chars (${desc.length})`,
-      )
-    }
-    // Runtime enum/type guards — the TS types constrain in-tree callers, but a
-    // ritual def can arrive from imported user-data (JSON) where the compiler
-    // never saw it. These fields drive containment (scope), egress
-    // classification, and delivery, so a bogus value must FAIL CLOSED at
-    // register time rather than silently pass the consistency checks below.
-    if (def.scope !== 'project' && def.scope !== 'instance') {
-      throw new Error(
-        `ritual ${JSON.stringify(def.id)}: scope ${JSON.stringify(def.scope)} is not 'project' | 'instance'`,
-      )
-    }
-    if (def.egress !== 'none' && def.egress !== 'web') {
-      throw new Error(
-        `ritual ${JSON.stringify(def.id)}: egress ${JSON.stringify(def.egress)} is not 'none' | 'web'`,
-      )
-    }
-    if (typeof def.silent !== 'boolean') {
-      throw new Error(
-        `ritual ${JSON.stringify(def.id)}: silent must be a boolean (got ${JSON.stringify(def.silent)})`,
-      )
-    }
-    if (!Array.isArray(def.tool_surface)) {
-      throw new Error(
-        `ritual ${JSON.stringify(def.id)}: tool_surface must be an array`,
-      )
-    }
-    if (def.tool_surface.length === 0) {
-      // #361 toolless-class pin: a ritual with no tools is a silent no-op.
-      throw new Error(
-        `ritual ${JSON.stringify(def.id)}: tool_surface is empty (#361 toolless class — grant at least one tool)`,
-      )
-    }
-    let hasWebTool = false
-    for (const t of def.tool_surface) {
-      if (typeof t !== 'string' || !TOOL_TOKEN_RE.test(t)) {
-        // typeof guard first: RegExp.test coerces (null → "null" matches
-        // TOOL_TOKEN_RE), which would freeze a non-string tool grant into the
-        // registry and flow through approval hashing + spawn. Fail closed —
-        // matches the imported-JSON fail-closed contract documented above.
-        throw new Error(
-          `ritual ${JSON.stringify(def.id)}: tool_surface entry ${JSON.stringify(t)} is not a valid tool token (${TOOL_TOKEN_RE})`,
-        )
-      }
-      if (WEB_TOOLS.has(t)) hasWebTool = true
-    }
-    if (hasWebTool && def.egress === 'none') {
-      throw new Error(
-        `ritual ${JSON.stringify(def.id)}: tool_surface grants a web tool but egress is 'none' — set egress:'web'`,
-      )
-    }
-    if (!hasWebTool && def.egress === 'web') {
-      throw new Error(
-        `ritual ${JSON.stringify(def.id)}: egress is 'web' but tool_surface grants no web tool (WebSearch/WebFetch)`,
-      )
-    }
-  }
-
   return {
     register(def: RitualDef): void {
-      assertValid(def)
+      // Structural validity (charset, enums, tool-surface/egress consistency)
+      // lives in the extracted, exported `validateRitualDef` so the
+      // registration service (task 8) shares one rule set. The duplicate-id
+      // check is registry STATE, not a def property, so it stays here.
+      validateRitualDef(def)
+      if (byId.has(def.id)) {
+        throw new Error(`duplicate ritual id ${JSON.stringify(def.id)}`)
+      }
       byId.set(
         def.id,
         Object.freeze({ ...def, tool_surface: Object.freeze([...def.tool_surface]) }),
       )
+    },
+    unregister(id: string): boolean {
+      return byId.delete(id)
     },
     get(id: string): RitualDef | undefined {
       return byId.get(id)
@@ -345,7 +376,7 @@ export async function validateRitualFire(
   registry: RitualRegistry,
   approvals: RitualApprovalCheck,
   ritual_id: string,
-  log: (msg: string) => void = console.error,
+  log: (msg: string) => void = createLogger('rituals').error,
 ): Promise<RitualFireValidation> {
   const skip = (reason: RitualFireSkipReason, detail: string): RitualFireValidation => {
     log(`ritual fire SKIP id=${ritual_id} reason=${reason} detail=${detail}`)

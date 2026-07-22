@@ -27,6 +27,7 @@ import { createState, defaultStatePath } from '@neutronai/scribe/scribe-budget.t
 import {
   runReflectPass,
   DEFAULT_REFLECT_INTERVAL_MS,
+  DEFAULT_CORRECTION_SCAN_LIMIT,
   type ReflectPassDeps,
 } from '@neutronai/scribe/index.ts'
 import { writeEntity as defaultWriteEntity } from '@neutronai/runtime/entity-writer.ts'
@@ -35,7 +36,11 @@ import {
   mountCoresScribeFanOut,
   type MountedCoresScribeFanOut,
 } from '@neutronai/gateway/cores/mount-cores-scribe-fan-out.ts'
-import { createReflection, type Reflection } from '@neutronai/reflection/index.ts'
+import {
+  createReflection,
+  readRecentCorrections,
+  type Reflection,
+} from '@neutronai/reflection/index.ts'
 import { NexusStore } from '@neutronai/gateway/nexus/nexus-store.ts'
 import {
   emitNexusEvent,
@@ -46,6 +51,7 @@ import {
   wrapSyncHookWithMemoryIndex,
   type MemoryIndexWorkHandle,
 } from '@neutronai/runtime/memory-index.ts'
+import { wrapSyncHookWithBacklinkRepair } from '@neutronai/runtime/backlink-repair.ts'
 import { OWNER_USER_ID } from '../owner-identity.ts'
 import type { OpenWiringContext } from './context.ts'
 import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
@@ -211,7 +217,22 @@ export function wireMemory(ctx: OpenWiringContext): WiredMemory {
       ),
     workHandlesProvider: () => workHandlesProvider?.() ?? [],
   })
-  const gbrainSyncHook = memoryIndexHook
+  // Q2 (overturn 2, core-memory tier) — wrap the memory-index hook with the
+  // deterministic BACKLINK-REPAIR layer (OUTERMOST). Every entity write that
+  // introduces a wikilink/mdlink to a page that does not exist but differs only by
+  // hyphen POSITION from a UNIQUE existing page (`[[white-board]]` vs
+  // `entities/concepts/whiteboard.md`) is repaired ON DISK event-driven; its
+  // corrected write re-enters THIS full chain (GBrain retracts the broken edge +
+  // re-adds the fixed one, memory-index re-scans). Orphan / ambiguous links are
+  // logged and LEFT UNTOUCHED (the always-safe direction). Every downstream
+  // consumer (scribe, reflectDeps.syncHook, the returned WiredMemory.gbrainSyncHook)
+  // now flows through repair automatically. `memoryIndexHook` stays the handle for
+  // its own `regenerate()`/`read()` seams (below).
+  const backlinkRepairHook = wrapSyncHookWithBacklinkRepair(memoryIndexHook, {
+    ownerDataDir: owner_home,
+    ownSlug: project_slug,
+  })
+  const gbrainSyncHook = backlinkRepairHook
   // Bootstrap the manifest at boot so a corpus that ALREADY exists (entities
   // written before this build shipped) is advertised on the very next cold turn
   // WITHOUT waiting for a new entity write. Coalesced + best-effort — a no-op
@@ -371,6 +392,14 @@ export function wireMemory(ctx: OpenWiringContext): WiredMemory {
     // backend-neutral `MemoryStore.delete` seam (no gbrain internals leak here).
     deletePage: (slug: string): Promise<void> =>
       gbrainMemory.memoryStore.delete({ id: slug }).then(() => undefined),
+    // Q2 (overturn 2, core-memory tier) — the reflect pass's STEP 4 promotes
+    // recurring owner corrections to concept pages. Inject the REAL corrections
+    // reader (this file already imports @neutronai/reflection, so no new edge); the
+    // pass takes a seam to avoid a scribe→reflection package edge. `Correction` is
+    // structurally assignable to the pass's `CorrectionEntry`. Pass an explicit
+    // larger limit than the reader's default 25 so a long history is fully scanned.
+    readCorrections: () =>
+      readRecentCorrections({ ownerDataDir: owner_home, limit: DEFAULT_CORRECTION_SCAN_LIMIT }),
     ...(reflectSubstrate !== null ? { substrate: reflectSubstrate } : {}),
   }
   const reflectLoop: SupervisedLoop = new SupervisedLoop({

@@ -1,0 +1,51 @@
+-- 0107_ritual_reminder_unique.sql
+--
+-- Executor-mode reminders — CLOSE the schedule-on-approve double-schedule /
+-- replay window (Argus r2 BLOCKERs on the task-8 ritual registration path;
+-- spec of record `docs/plans/executor-mode-reminders-2026-07-20.md`).
+--
+-- The schedule-on-approve path (`reminders/ritual-registration.ts ensureScheduled`)
+-- did a check-then-act: a SYNC `hasPendingRitualRow` read, then — across an
+-- `await` (the approval-hash verify) — an INSERT. Two failure modes fell through
+-- that gap, and BOTH are closed at the DB layer here rather than only in JS:
+--
+--   BLOCKER 1 — REPLAY of a completed one-shot. The pre-check keyed on
+--     status='pending' ONLY; once a one-shot ritual fired its row is 'fired',
+--     so re-tapping Approve (approval is content-hash based, no one-time
+--     consumption) sailed past the check and minted a FRESH reminder for an
+--     already-run ritual.
+--
+--   BLOCKER 2 — DOUBLE-SCHEDULE race. Two concurrent approval answers (e.g. the
+--     content grant and the separate egress grant for a web ritual) could both
+--     pass the sync pre-check before either INSERT landed, scheduling the ritual
+--     twice. `ProjectDb.run` serialises the two INSERTs on the per-instance
+--     mutex, but the check→insert sequence is not atomic, so both inserts ran.
+--
+-- FIX: a PARTIAL UNIQUE index that makes "at most one LIVE-or-COMPLETED reminder
+-- row per ritual_id" a DB invariant. 'cancelled' rows are EXCLUDED so an owner
+-- who cancels a ritual can re-propose and reschedule it; every other status
+-- ('pending' for a live/recurring row, 'fired' for a completed one-shot) counts,
+-- so:
+--   * replay is blocked — the fired row still occupies the ritual_id slot;
+--   * the race is atomic — the second concurrent INSERT hits the constraint and
+--     throws (caught in `ensureScheduled` → "already scheduled", not a fresh row).
+--
+-- Nudge rows (ritual_id IS NULL) are entirely outside the index — behaviour
+-- UNCHANGED for every existing reminder; no backfill. This is additive DDL
+-- (a bare CREATE UNIQUE INDEX), not a table rebuild.
+--
+-- SAFE ON EXISTING DATA: the ritual layer is brand-new (0106 added the column;
+-- schedule-on-approve is unshipped on this branch), so no live DB holds two
+-- non-cancelled rows sharing a ritual_id — index creation cannot fail on a
+-- pre-existing duplicate.
+--
+-- SNAPSHOT REGEN REQUIRED: adds an index to `reminders`, so
+-- `migrations/expected-schema.txt` MUST be regenerated
+-- (`bun run migrations/regen-snapshot.ts`) and committed alongside this file or
+-- `migrations/snapshot.test.ts` fails with schema drift.
+--
+-- Forward-only; no down-migration (Neutron OSS contract).
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_reminders_ritual_scheduled
+    ON reminders (ritual_id)
+    WHERE ritual_id IS NOT NULL AND status <> 'cancelled';

@@ -17,6 +17,7 @@
  */
 
 import type { ProjectDb } from '@neutronai/persistence/index.ts'
+import { RITUAL_ID_RE } from './rituals.ts'
 
 /**
  * Recurrence labels recognized by the store. `null` (the default for
@@ -84,6 +85,15 @@ export interface CreateReminderInput {
    * just the rows they own without touching organic engine writes.
    */
   source?: string | null
+  /**
+   * Executor-mode ritual tag (plan task 8 WRITE path). When set, this row is a
+   * RITUAL dispatch: the tick loop resolves + validates the ritual by this id
+   * (fail-closed against the in-process registry + approval gate) and spawns a
+   * scoped sub-agent REPL instead of composing a one-shot nudge. Must match
+   * `RITUAL_ID_RE` — a malformed value THROWS (fail closed) rather than writing
+   * an unroutable row. Omit for a plain nudge reminder (defaults NULL).
+   */
+  ritual_id?: string
 }
 
 export interface CreateRecurringReminderInput {
@@ -109,6 +119,13 @@ export interface CreateRecurringReminderInput {
   recurrence_spec?: string
   /** Same semantics as `CreateReminderInput.source`. */
   source?: string | null
+  /**
+   * Executor-mode ritual tag (plan task 8 WRITE path) — same contract as
+   * `CreateReminderInput.ritual_id`: when set the recurring row is a ritual
+   * dispatch; must match `RITUAL_ID_RE` (throws on malformed). Omit for a
+   * plain recurring nudge (defaults NULL).
+   */
+  ritual_id?: string
 }
 
 interface ReminderDbRow {
@@ -139,15 +156,16 @@ export class ReminderStore {
     const id = input.id ?? crypto.randomUUID()
     const created_at = Date.now() / 1000
     const source = input.source ?? null
-    // ritual_id is READ-THROUGH only (migration 0106): the write path lands with
-    // its validation (registration = plan task 8, tick wiring = task 4), so
-    // create() never sets it — the column is omitted from the INSERT and defaults
-    // NULL (a plain nudge row).
+    // ritual_id WRITE path (plan task 8, migration 0106 column): NULL for a plain
+    // nudge; a charset-guarded ritual id when this row is a ritual dispatch. A
+    // malformed id FAILS CLOSED (throws) rather than writing an unroutable row —
+    // the tick loop keys the ritual branch off this column.
+    const ritual_id = normalizeRitualId(input.ritual_id)
     await this.db.run(
       `INSERT INTO reminders
-         (id, project_slug, topic_id, fire_at, message, status, recurrence, recurrence_spec, source, created_at)
-       VALUES (?, ?, ?, ?, ?, 'pending', NULL, NULL, ?, ?)`,
-      [id, input.owner_slug, input.topic_id, input.fire_at, input.message, source, created_at],
+         (id, project_slug, topic_id, fire_at, message, status, recurrence, recurrence_spec, ritual_id, source, created_at)
+       VALUES (?, ?, ?, ?, ?, 'pending', NULL, NULL, ?, ?, ?)`,
+      [id, input.owner_slug, input.topic_id, input.fire_at, input.message, ritual_id, source, created_at],
     )
     return {
       id,
@@ -158,7 +176,7 @@ export class ReminderStore {
       status: 'pending',
       recurrence: null,
       recurrence_spec: null,
-      ritual_id: null,
+      ritual_id,
       source,
       created_at,
       fired_at: null,
@@ -194,11 +212,13 @@ export class ReminderStore {
     const id = input.id ?? crypto.randomUUID()
     const created_at = Date.now() / 1000
     const source = input.source ?? null
-    // ritual_id is READ-THROUGH only (see create()) — never written here.
+    // ritual_id WRITE path (plan task 8) — same contract as create(): a recurring
+    // ritual dispatch carries its charset-guarded id here; a malformed id throws.
+    const ritual_id = normalizeRitualId(input.ritual_id)
     await this.db.run(
       `INSERT INTO reminders
-         (id, project_slug, topic_id, fire_at, message, status, recurrence, recurrence_spec, source, created_at)
-       VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?)`,
+         (id, project_slug, topic_id, fire_at, message, status, recurrence, recurrence_spec, ritual_id, source, created_at)
+       VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?)`,
       [
         id,
         input.owner_slug,
@@ -207,6 +227,7 @@ export class ReminderStore {
         input.message,
         recurrence,
         recurrence_spec,
+        ritual_id,
         source,
         created_at,
       ],
@@ -220,7 +241,7 @@ export class ReminderStore {
       status: 'pending',
       recurrence,
       recurrence_spec,
-      ritual_id: null,
+      ritual_id,
       source,
       created_at,
       fired_at: null,
@@ -348,6 +369,39 @@ export class ReminderStore {
       )
       .get(id)
     return row === null ? null : rowToReminder(row)
+  }
+
+  /**
+   * Plan task 8 — is this ritual ALREADY scheduled? The schedule-on-approve path
+   * (`reminders/ritual-registration.ts`) calls this before creating the ritual's
+   * reminder row so a repeated approval tap (or an approval landing after a row
+   * already exists) can never schedule the same ritual twice.
+   *
+   * Argus r2 BLOCKER 1 (replay): the predicate is `status <> 'cancelled'`, NOT
+   * `status = 'pending'`. A one-shot ritual's row is 'fired' once it runs, so a
+   * pending-only check let a re-tapped Approve mint a FRESH reminder for an
+   * already-completed ritual. Any non-cancelled row (pending live/recurring OR
+   * fired one-shot) counts as "already scheduled"; a 'cancelled' row does NOT, so
+   * an owner who cancels a ritual can re-propose and reschedule it. This mirrors
+   * the partial UNIQUE index `idx_reminders_ritual_scheduled` (migration 0107)
+   * that makes the invariant atomic — this read is the friendly-message fast
+   * path; the index is the race-proof guarantee.
+   *
+   * Charset-guarded query — a malformed id throws (fail closed) rather than
+   * scanning with an unroutable value.
+   */
+  hasScheduledRitualRow(ritual_id: string): boolean {
+    if (typeof ritual_id !== 'string' || !RITUAL_ID_RE.test(ritual_id)) {
+      throw new Error(
+        `hasScheduledRitualRow: ritual_id ${JSON.stringify(ritual_id)} fails RITUAL_ID_RE`,
+      )
+    }
+    const row = this.db
+      .prepare<{ one: number }, [string]>(
+        `SELECT 1 AS one FROM reminders WHERE ritual_id = ? AND status <> 'cancelled' LIMIT 1`,
+      )
+      .get(ritual_id)
+    return row !== null
   }
 
   /** Snapshot of pending reminders for an instance (oldest-due first). */
@@ -481,4 +535,40 @@ function rowToReminder(row: ReminderDbRow): Reminder {
  */
 export function isRecurring(r: Pick<Reminder, 'recurrence' | 'recurrence_spec'>): boolean {
   return r.recurrence !== null || r.recurrence_spec !== null
+}
+
+/**
+ * True when `err` is the SQLite UNIQUE-constraint violation from the partial
+ * index `idx_reminders_ritual_scheduled` (migration 0107) — i.e. a concurrent
+ * approval answer already inserted the ritual's reminder row between this
+ * caller's dedup pre-check and its own INSERT (Argus r2 BLOCKER 2, the
+ * double-schedule race). The schedule-on-approve path catches this and reports
+ * "already scheduled" rather than a transient error. Matched on the stable
+ * SQLite message text — `bun:sqlite` surfaces a partial-unique-index violation
+ * as `UNIQUE constraint failed: reminders.ritual_id` (the indexed COLUMN, not
+ * the index name; verified against bun:sqlite). `reminders.ritual_id` is unique
+ * ONLY via `idx_reminders_ritual_scheduled` (migration 0107), so this is scoped
+ * — an unrelated uniqueness error is NOT swallowed.
+ */
+export function isRitualScheduleConflict(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err)
+  return (
+    /UNIQUE constraint failed/i.test(msg) && msg.includes('reminders.ritual_id')
+  )
+}
+
+/**
+ * Normalize the optional `ritual_id` on a create input: `undefined`/`null`
+ * → `null` (a plain nudge row); a present value is charset-validated against
+ * `RITUAL_ID_RE` and THROWS on a malformed value (fail closed — never write an
+ * unroutable ritual tag the tick loop can't resolve). Plan task 8 WRITE path.
+ */
+function normalizeRitualId(ritual_id: string | null | undefined): string | null {
+  if (ritual_id === undefined || ritual_id === null) return null
+  if (typeof ritual_id !== 'string' || !RITUAL_ID_RE.test(ritual_id)) {
+    throw new Error(
+      `create: ritual_id ${JSON.stringify(ritual_id)} fails RITUAL_ID_RE (^[a-z0-9][a-z0-9-]{0,63}$)`,
+    )
+  }
+  return ritual_id
 }

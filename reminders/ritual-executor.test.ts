@@ -89,8 +89,18 @@ function registryWith(d: RitualDef, promptBody = 'Do the morning brief.'): Ritua
   return reg
 }
 
-/** A due one-shot reminder tagged as a ritual. */
+/** A due one-shot reminder tagged as a ritual.
+ *
+ * Frees any prior non-cancelled row for this `ritual_id` FIRST, so a test that
+ * fires the same ritual repeatedly (escalation accumulation, re-fire admission)
+ * stays within the production invariant of ≤1 live reminder per ritual — now
+ * enforced by the partial UNIQUE index `idx_reminders_ritual_scheduled` (0107).
+ * Escalation/run state lives in the run store keyed by ritual_id, untouched by
+ * cancelling the spent reminder row. */
 async function ritualRow(ritual_id: string): Promise<Reminder> {
+  db.raw().run(`UPDATE reminders SET status = 'cancelled' WHERE ritual_id = ? AND status <> 'cancelled'`, [
+    ritual_id,
+  ])
   const r = await store.create({ owner_slug: 'owner', topic_id: null, fire_at: 1000, message: 'x' })
   db.raw().run('UPDATE reminders SET ritual_id = ? WHERE id = ?', [ritual_id, r.id])
   return { ...r, ritual_id }

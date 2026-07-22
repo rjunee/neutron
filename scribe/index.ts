@@ -105,6 +105,17 @@ export {
   type ReservedEntity,
   type ReservedKind,
 } from './reflect/reserved-kinds.ts'
+// Q2 (overturn 2, core-memory tier) — deterministic correction-pattern promotion.
+// The pass drives these off an injected `readCorrections` seam; the wiring layer
+// (open/wiring/memory.ts) supplies the real reader + scan limit.
+export {
+  clusterCorrections,
+  composePatternPage,
+  DEFAULT_CORRECTION_PATTERN_JACCARD,
+  DEFAULT_CORRECTION_PATTERN_MIN_OCCURRENCES,
+  DEFAULT_CORRECTION_SCAN_LIMIT,
+  type CorrectionEntry,
+} from './reflect/correction-patterns.ts'
 
 /** Input the chat-bridge hands scribe after a real user turn. */
 export interface UserTurnInput {

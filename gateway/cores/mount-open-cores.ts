@@ -127,6 +127,15 @@ export interface MountOpenCoresInput {
    * `onProfileChange` to the persona-loader cache invalidation.
    */
   agentSettingsProfile?: AgentProfileBackend
+  /**
+   * Plan task 8 — late-bound getter for the engine's ritual registration service.
+   * Threaded into `buildCoresBackendFactories` so the reminders-Core
+   * `rituals_propose` / `rituals_status` tools deref the service the composer
+   * assigns after cores mount. Absent ⇒ the tools throw RitualsUnavailableError.
+   */
+  ritualRegistration?: () =>
+    | import('@neutronai/reminders-core').RemindersRitualService
+    | null
 }
 
 export interface MountedOpenCores {
@@ -334,6 +343,11 @@ export async function mountOpenCores(
     // factory installs its own no-op fallback.
     ...(input.agentSettingsProfile !== undefined
       ? { agentSettingsProfile: input.agentSettingsProfile }
+      : {}),
+    // Plan task 8 — thread the late-bound ritual registration getter to the
+    // reminders-Core backend factory.
+    ...(input.ritualRegistration !== undefined
+      ? { ritualRegistration: input.ritualRegistration }
       : {}),
   })
 

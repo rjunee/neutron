@@ -516,6 +516,24 @@ export interface BuildLiveAgentTurnInput {
    * flag is off; best-effort (a throwing/absent seam degrades to no block).
    */
   memoryIndexSnapshot?: () => Promise<string | null> | string | null
+  /**
+   * Plan task 8 — the deterministic ritual-approval capture seam. When wired, at
+   * turn-START (after user-turn persistence, BEFORE the onboarding required-answer
+   * capture) the runner calls this with the owner's answer + the PERSISTED option
+   * values of the prior prompt. It resolves an in-chat ritual approval ONLY on an
+   * EXACT match of an `rap:` opaque token in that persisted set (owner-only). On a
+   * non-null result the runner ships that deterministic confirmation and NEVER
+   * dispatches the LLM turn (an opaque approval token must never fall through to
+   * the free-text personality capture or the substrate). Omitted (LLM-less box /
+   * no credential) ⇒ no-op, the turn runs normally. Best-effort: a throwing seam
+   * degrades to the normal turn.
+   */
+  ritualApprovalCapture?: (input: {
+    user_id: string
+    user_text: string
+    topic_id: string
+    prior_option_values: readonly string[]
+  }) => Promise<{ body: string } | null>
   /** The SAME ButtonStore the engine emits through (persistence + history). */
   buttonStore: ButtonStore
   /** Operator audit trail — same TranscriptWriter the engine appends to. */
@@ -700,9 +718,9 @@ export function buildLiveAgentTurn(
     // only + best-effort: a read failure degrades to no capture.
     let priorAgentOptions: string[] = []
     if (
-      onboardingActive &&
       turn.seed_turn !== true &&
-      input.onboarding?.captureRequiredAnswer !== undefined
+      ((onboardingActive && input.onboarding?.captureRequiredAnswer !== undefined) ||
+        input.ritualApprovalCapture !== undefined)
     ) {
       try {
         const priorPrompt = await input.buttonStore.latestPromptByTopic({
@@ -713,6 +731,26 @@ export function buildLiveAgentTurn(
         priorAgentOptions = priorPrompt?.options.map((o) => o.value) ?? []
       } catch {
         priorAgentOptions = []
+      }
+    }
+    // Argus r1 BLOCKER — a web ritual emits TWO prompts in one turn (content grant
+    // + separate egress grant), so the CONTENT Approve token stops being "the
+    // latest prompt" once the egress prompt lands, and keying the ritual capture
+    // off `latestPromptByTopic` alone makes the content token uncapturable (web
+    // rituals could never be scheduled). Union the recent option set instead —
+    // still T8-safe (a value is eligible only if it was a real offered button in a
+    // recent prompt), kept SEPARATE from onboarding's latest-only capture.
+    let priorRitualOptions: string[] = []
+    if (turn.seed_turn !== true && input.ritualApprovalCapture !== undefined) {
+      try {
+        priorRitualOptions = await input.buttonStore.recentPromptOptionsByTopic({
+          topic_id: turn.topic_id,
+          before: now(),
+          now: now(),
+          limit: 4,
+        })
+      } catch {
+        priorRitualOptions = []
       }
     }
     // ── 1. Persist the user turn onto the previous agent row (best-effort).
@@ -733,6 +771,63 @@ export function buildLiveAgentTurn(
         })
       } catch {
         /* audit-trail only — never blocks the turn */
+      }
+    }
+
+    // Plan task 8 — deterministic ritual-approval capture. Runs AFTER step-1
+    // user-turn persistence + transcript append and BEFORE the onboarding
+    // required-answer capture, so an opaque `rap:` approval token can NEVER fall
+    // through to the personality free-text capture or the substrate LLM turn. The
+    // seam resolves the approval ONLY on an exact match of a persisted option
+    // value (owner-only) — an unrelated reply returns null and the turn runs
+    // normally (T8). Best-effort: a throw warns + continues the normal turn.
+    if (
+      input.ritualApprovalCapture !== undefined &&
+      turn.seed_turn !== true &&
+      priorRitualOptions.length > 0
+    ) {
+      try {
+        const result = await input.ritualApprovalCapture({
+          user_id: turn.user_id,
+          user_text: turn.user_text,
+          topic_id: turn.topic_id,
+          prior_option_values: priorRitualOptions,
+        })
+        if (result !== null) {
+          // Persist the deterministic confirmation as an inert history turn +
+          // ship it live; the LLM turn is NEVER dispatched for an approval act.
+          try {
+            await input.buttonStore.persistInertAgentTurn({
+              topic_id: turn.topic_id,
+              body: result.body,
+            })
+          } catch (err) {
+            moduleLog.warn('ritual_capture_persist_failed', {
+              project: turn.project_slug,
+              topic: turn.topic_id,
+              error: err instanceof Error ? err.message : String(err),
+            })
+          }
+          sendSafe(turn.send, {
+            type: 'agent_message',
+            body: result.body,
+            topic_id: turn.topic_id,
+            options: [],
+            allow_freeform: true,
+          })
+          try {
+            input.transcript?.append({ role: 'agent', body: result.body, phase: 'completed' })
+          } catch {
+            /* audit-trail only */
+          }
+          return { outcome: 'replied', reply_prompt_id: null }
+        }
+      } catch (err) {
+        moduleLog.warn('ritual_capture_failed', {
+          project: turn.project_slug,
+          topic: turn.topic_id,
+          error: err instanceof Error ? err.message : String(err),
+        })
       }
     }
 

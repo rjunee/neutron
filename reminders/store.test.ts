@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
-import { ReminderStore } from './store.ts'
+import { isRitualScheduleConflict, ReminderStore } from './store.ts'
 
 let tmp: string
 let db: ProjectDb
@@ -190,7 +190,7 @@ describe('ReminderStore', () => {
     expect(store.get(r.id)?.ritual_id).toBe('morning-brief')
   })
 
-  test('recurring create defaults ritual_id null (no write path yet)', async () => {
+  test('recurring create defaults ritual_id null when omitted', async () => {
     const store = new ReminderStore(db)
     const r = await store.createRecurring({
       owner_slug: 't1',
@@ -200,5 +200,120 @@ describe('ReminderStore', () => {
       recurrence: 'weekly',
     })
     expect(store.get(r.id)?.ritual_id).toBeNull()
+  })
+
+  // ── plan task 8 — ritual_id WRITE path ──────────────────────────────────────
+
+  test('create() persists a valid ritual_id (read back from the row)', async () => {
+    const store = new ReminderStore(db)
+    const r = await store.create({
+      owner_slug: 't1',
+      topic_id: 'app:t1',
+      fire_at: 1700000000,
+      message: 'ritual:daily-digest',
+      ritual_id: 'daily-digest',
+    })
+    expect(r.ritual_id).toBe('daily-digest')
+    expect(store.get(r.id)?.ritual_id).toBe('daily-digest')
+  })
+
+  test('createRecurring() persists a valid ritual_id', async () => {
+    const store = new ReminderStore(db)
+    const r = await store.createRecurring({
+      owner_slug: 't1',
+      topic_id: 'app:t1',
+      fire_at: 1700000000,
+      message: 'ritual:weekly-wrap',
+      recurrence: 'weekly',
+      ritual_id: 'weekly-wrap',
+    })
+    expect(store.get(r.id)?.ritual_id).toBe('weekly-wrap')
+  })
+
+  test('a malformed ritual_id throws (fail closed) — never writes an unroutable row', async () => {
+    const store = new ReminderStore(db)
+    await expect(
+      store.create({
+        owner_slug: 't1',
+        topic_id: null,
+        fire_at: 1700000000,
+        message: 'x',
+        ritual_id: '../escape',
+      }),
+    ).rejects.toThrow(/RITUAL_ID_RE/)
+    // nothing was written
+    const n = db.prepare<{ n: number }, []>(`SELECT COUNT(*) AS n FROM reminders`).get()
+    expect(n?.n).toBe(0)
+  })
+
+  test('hasScheduledRitualRow true/false lifecycle', async () => {
+    const store = new ReminderStore(db)
+    expect(store.hasScheduledRitualRow('daily-digest')).toBe(false)
+    const r = await store.create({
+      owner_slug: 't1',
+      topic_id: null,
+      fire_at: 1700000000,
+      message: 'ritual:daily-digest',
+      ritual_id: 'daily-digest',
+    })
+    expect(store.hasScheduledRitualRow('daily-digest')).toBe(true)
+    await store.cancel(r.id)
+    // A cancelled ritual frees the slot — the owner can re-propose it.
+    expect(store.hasScheduledRitualRow('daily-digest')).toBe(false)
+  })
+
+  test('hasScheduledRitualRow stays true after a one-shot FIRES (Argus r2 blocker 1 — no replay)', async () => {
+    const store = new ReminderStore(db)
+    const r = await store.create({
+      owner_slug: 't1',
+      topic_id: null,
+      fire_at: 1700000000,
+      message: 'ritual:morning-brief',
+      ritual_id: 'morning-brief',
+    })
+    await store.markFired(r.id)
+    // The row is now 'fired' (not 'pending'); it MUST still count as scheduled
+    // so re-tapping Approve cannot mint a fresh reminder for a completed ritual.
+    expect(store.hasScheduledRitualRow('morning-brief')).toBe(true)
+  })
+
+  test('partial UNIQUE index blocks a second non-cancelled ritual row (Argus r2 blocker 2)', async () => {
+    const store = new ReminderStore(db)
+    await store.create({
+      owner_slug: 't1',
+      topic_id: null,
+      fire_at: 1700000000,
+      message: 'ritual:web-scan',
+      ritual_id: 'web-scan',
+    })
+    // A concurrent approval answer's INSERT trips idx_reminders_ritual_scheduled.
+    let caught: unknown
+    try {
+      await store.create({
+        owner_slug: 't1',
+        topic_id: null,
+        fire_at: 1700000001,
+        message: 'ritual:web-scan',
+        ritual_id: 'web-scan',
+      })
+    } catch (err) {
+      caught = err
+    }
+    expect(caught).toBeDefined()
+    expect(isRitualScheduleConflict(caught)).toBe(true)
+  })
+
+  test('isRitualScheduleConflict is scoped to the ritual index', () => {
+    expect(isRitualScheduleConflict(new Error('UNIQUE constraint failed: reminders.ritual_id'))).toBe(
+      true,
+    )
+    // An unrelated uniqueness error is NOT swallowed.
+    expect(isRitualScheduleConflict(new Error('UNIQUE constraint failed: reminders.id'))).toBe(false)
+    expect(isRitualScheduleConflict(new Error('database is locked'))).toBe(false)
+  })
+
+  test('hasScheduledRitualRow throws on a malformed id', () => {
+    const store = new ReminderStore(db)
+    expect(() => store.hasScheduledRitualRow('../nope')).toThrow(/RITUAL_ID_RE/)
   })
 })

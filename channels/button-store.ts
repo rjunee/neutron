@@ -867,6 +867,52 @@ export class ButtonStore {
   }
 
   /**
+   * The DEDUPED union of option values across the most recent `limit` prompts in
+   * a topic (same visibility window as {@link latestPromptByTopic}). Unlike
+   * `latestPromptByTopic`, this looks BEYOND the single newest prompt — the
+   * ritual-approval flow (`reminders/ritual-registration.ts`) emits TWO prompts
+   * in one turn for a web ritual (content grant + separate egress grant), so the
+   * CONTENT prompt's Approve token is no longer "the latest" once the egress
+   * prompt lands. Keying the deterministic capture off only the newest prompt
+   * makes the content token uncapturable (Argus r1 BLOCKER); unioning the recent
+   * option set restores it while preserving the T8 discipline — a value is
+   * eligible ONLY if it was an actual offered button in a real recent prompt.
+   */
+  async recentPromptOptionsByTopic(input: {
+    topic_id: string
+    /** Upper bound (inclusive) on `created_at` — the caller's wall clock. */
+    before: number
+    /** Wall clock used to drop expired unresolved "ghost" rows. */
+    now: number
+    /** How many recent prompts to union (default 4 — covers content+egress+slack). */
+    limit?: number
+  }): Promise<string[]> {
+    if (typeof input.topic_id !== 'string' || input.topic_id.length === 0) {
+      throw new ButtonStoreError(
+        'invalid_prompt',
+        `recentPromptOptionsByTopic requires a non-empty topic_id`,
+      )
+    }
+    const limit = typeof input.limit === 'number' && input.limit > 0 ? Math.floor(input.limit) : 4
+    const rows = this.db
+      .prepare<PromptRow, [string, number, number, number]>(
+        `SELECT ${SELECT_PROMPT_COLS}
+           FROM button_prompts
+          WHERE topic_id = ?
+            AND created_at <= ?
+            AND (resolved_at IS NOT NULL OR expires_at > ?)
+          ORDER BY created_at DESC, rowid DESC
+          LIMIT ?`,
+      )
+      .all(input.topic_id, input.before, input.now, limit)
+    const values = new Set<string>()
+    for (const row of rows) {
+      for (const opt of rowToPrompt(row).options) values.add(opt.value)
+    }
+    return [...values]
+  }
+
+  /**
    * Sidebar topic rail (2026-05-28 sprint) — enumerate the distinct
    * `topic_id`s for a user with per-topic metadata (latest body, latest
    * `created_at`, count of active unresolved prompts). Caller is the

@@ -266,7 +266,7 @@ export function extractTypedLinks(
  * Replaces stripped characters with spaces (newlines preserved) so all
  * character offsets in the result stay aligned with the input.
  */
-function stripCode(body: string): string {
+export function stripCode(body: string): string {
   let out = ''
   let i = 0
   while (i < body.length) {
@@ -387,7 +387,7 @@ function collectRefs(body: string): EntityRef[] {
   return refs
 }
 
-function normaliseSlug(raw: string): string | null {
+export function normaliseSlug(raw: string): string | null {
   let s = raw.trim()
   if (s.endsWith('.md')) s = s.slice(0, -3)
   const slashIdx = s.indexOf('/')

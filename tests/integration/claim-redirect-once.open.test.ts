@@ -52,7 +52,7 @@ import {
 } from '@neutronai/gateway/wiring/project-create.ts'
 
 const GENERAL_TOPIC = 'app:owner'
-const CLAIM_URL = 'https://auth.neutron.computer/claim'
+const CLAIM_URL = 'https://auth.managed.example/claim'
 
 let home: IsolatedHome
 let db: ProjectDb

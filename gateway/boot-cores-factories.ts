@@ -84,6 +84,11 @@ export async function buildCoresBackendFactories(
         backend: mod.buildReminderStoreBackend({
           project_slug,
           projectDb,
+          // Plan task 8 — late-bound ritual registration service getter (deref'd
+          // per-call). Absent ⇒ the `rituals_*` tools throw RitualsUnavailableError.
+          ...(opts.ritualRegistration !== undefined
+            ? { rituals: opts.ritualRegistration }
+            : {}),
         }),
         // S1 — Shape A / B / C composer threaded into the production
         // wiring so the chat-command dispatcher can compose the

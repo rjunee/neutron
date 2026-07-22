@@ -288,3 +288,89 @@ describe('createDeliver — durable-first + routed best-effort push', () => {
     expect(r).toEqual({ prompt_id: 'reply-1', persisted: true, delivered_live: false })
   })
 })
+
+// ── plan task 8 — options / idempotency / metadata threading on 'reply' ──────
+
+describe("createDeliver — envelope options (task 8, 'reply' only)", () => {
+  function optionCapturingButtonStore(): {
+    store: ButtonStore
+    prompts: Array<{ options: unknown; idempotency_key?: string; metadata?: unknown }>
+  } {
+    const prompts: Array<{ options: unknown; idempotency_key?: string; metadata?: unknown }> = []
+    const store = {
+      async emit(prompt: { options: unknown; idempotency_key?: string; metadata?: unknown }) {
+        const rec: { options: unknown; idempotency_key?: string; metadata?: unknown } = {
+          options: prompt.options,
+        }
+        if (prompt.idempotency_key !== undefined) rec.idempotency_key = prompt.idempotency_key
+        if (prompt.metadata !== undefined) rec.metadata = prompt.metadata
+        prompts.push(rec)
+        return { prompt_id: 'reply-1', was_new: true }
+      },
+      async persistInertAgentTurn() {
+        return { prompt_id: 'inert-1' }
+      },
+    } as unknown as ButtonStore
+    return { store, prompts }
+  }
+
+  const OPTS = [
+    { label: 'Approve', body: 'Approve this ritual', value: 'rap:AAAAAAAAAAAAAAAAAAAAAA:a' },
+    { label: 'Deny', body: 'Deny this ritual', value: 'rap:AAAAAAAAAAAAAAAAAAAAAA:d' },
+  ]
+
+  it('threads options into the emitted prompt AND the push event; carries idempotency_key + metadata', async () => {
+    const bs = optionCapturingButtonStore()
+    const app: AgentMessageOut[] = []
+    const deliver = createDeliver({
+      buttonStore: bs.store,
+      push: { app: (_t, e) => (app.push(e as AgentMessageOut), true) },
+    })
+    await deliver('app:owner', {
+      body: 'Ritual approval needed',
+      durability: 'reply',
+      options: OPTS,
+      idempotency_key: 'ritual-approval:abc',
+      metadata: { kind: 'ritual-approval', ritual_id: 'daily-digest' },
+    })
+    // emitted prompt carries the options + idempotency + metadata
+    expect(bs.prompts).toHaveLength(1)
+    expect(bs.prompts[0]!.options).toEqual(OPTS)
+    expect(bs.prompts[0]!.idempotency_key).toBe('ritual-approval:abc')
+    expect(bs.prompts[0]!.metadata).toEqual({ kind: 'ritual-approval', ritual_id: 'daily-digest' })
+    // the push event carries the SAME options
+    expect(app).toHaveLength(1)
+    expect(app[0]!.options).toEqual(OPTS)
+  })
+
+  it('omitting options is byte-identical to the legacy zero-option reply', async () => {
+    const bs = optionCapturingButtonStore()
+    const app: AgentMessageOut[] = []
+    const deliver = createDeliver({
+      buttonStore: bs.store,
+      push: { app: (_t, e) => (app.push(e as AgentMessageOut), true) },
+    })
+    await deliver('app:owner', { body: 'plain reminder', durability: 'reply' })
+    expect(bs.prompts[0]!.options).toEqual([])
+    expect(bs.prompts[0]!.idempotency_key).toBeUndefined()
+    expect(bs.prompts[0]!.metadata).toBeUndefined()
+    expect(app[0]!.options).toEqual([])
+  })
+
+  it("ignores options on durability 'inert' (options ride 'reply' only)", async () => {
+    const bs = optionCapturingButtonStore()
+    const app: AgentMessageOut[] = []
+    const deliver = createDeliver({
+      buttonStore: bs.store,
+      push: { app: (_t, e) => (app.push(e as AgentMessageOut), true) },
+    })
+    // inert path never builds a ButtonPrompt with options; assert no throw + no option leak
+    const r = await deliver('app:owner', {
+      body: 'brief',
+      durability: 'inert',
+      options: OPTS,
+    })
+    expect(r.persisted).toBe(true)
+    expect(bs.prompts).toHaveLength(0) // inert path does not call emit()
+  })
+})
