@@ -152,12 +152,71 @@ export interface MountConfig {
   config: BootstrapConfig
 }
 
+export interface UncaughtErrorHandlerCtx {
+  /** Late-bound: the root is created AFTER the handler (the handler is passed to
+   *  `createRoot`), and only ever read at recovery time, well after assignment. */
+  getRoot: () => Root
+  rootEl: HTMLElement
+  remount: () => void
+  fatalMessage?: string
+}
+
+/**
+ * Build the `onUncaughtError` handler for ONE mounted root. The returned handler
+ * is GUARDED: the first uncaught error records a crash, decides remount-vs-fatal,
+ * and schedules the recovery; every SUBSEQUENT error for the same root is ignored
+ * (the recovery for this root is already in flight — it will remount a brand-new
+ * root with its own fresh handler).
+ *
+ * Why the guard is load-bearing (the #380 round-2 race, all three reviewers):
+ * two pane fetches can 503 and settle within the SAME macrotask tick, before the
+ * scheduled recovery fires. Without the guard, each error closes over the same
+ * `root` and schedules its own recovery. Recovery #1 unmounts the dead root and
+ * remounts a fresh one (root A). Recovery #2 then unmounts the already-dead
+ * captured root (a caught no-op), wipes root A's freshly-rendered DOM with
+ * `rootEl.innerHTML = ''`, and remounts AGAIN (root B) — leaving root A a
+ * live-but-orphaned React root over an emptied container (leaked root + duplicate
+ * controller subscription). One error → one recovery closes that race.
+ *
+ * Extracted (rather than inlined in `mount`) so the decision→schedule→
+ * performRecovery seam is directly unit-testable without provoking React's
+ * jsdom-unobservable teardown invariant.
+ */
+export function buildUncaughtErrorHandler(
+  policy: RecoveryPolicy,
+  schedule: (fn: () => void) => void,
+  ctx: UncaughtErrorHandlerCtx,
+): (error: unknown, errorInfo: { componentStack?: string }) => void {
+  let recovering = false
+  return (error: unknown, errorInfo: { componentStack?: string }): void => {
+    console.error('[chat-react] uncaught root error — auto-recovering', error, errorInfo?.componentStack)
+    // One recovery per root. Suppress the concurrent-error race described above.
+    if (recovering) return
+    recovering = true
+    const decision = policy.record()
+    schedule(() => {
+      performRecovery(decision, {
+        root: ctx.getRoot(),
+        rootEl: ctx.rootEl,
+        remount: ctx.remount,
+        ...(ctx.fatalMessage !== undefined ? { fatalMessage: ctx.fatalMessage } : {}),
+      })
+    })
+  }
+}
+
 /**
  * Mount the app onto `rootEl` with root-level auto-recovery wired through
- * `createRoot`'s `onUncaughtError`. On an uncaught (boundary-bypassing) error we
- * consult the policy and SCHEDULE the recovery on a macrotask — NEVER
- * synchronously from React's error path — so React finishes tearing down before
- * we remount with the SAME controller + store.
+ * `createRoot`'s `onUncaughtError`. On an uncaught (boundary-bypassing) error the
+ * guarded handler consults the policy and SCHEDULES the recovery on a macrotask —
+ * NEVER synchronously from React's error path — so React finishes tearing down
+ * before we remount with the SAME controller + store.
+ *
+ * Note on subscriber leakage: the controller/OPFS store live outside React, so a
+ * remount reuses them; if React's teardown-invariant path skipped a component's
+ * effect cleanup, up to `maxRecoveries` stale VM subscribers can linger in the
+ * controller's Set. That is bounded (≤3) and harmless — React 19 no-ops setState
+ * on an unmounted component, so a dead closure can't loop or crash.
  *
  * `opts.renderTree` and `opts.scheduleRemount` are test seams (a throwing stub
  * tree; a synchronous scheduler); production uses the real `<Root/>` and
@@ -176,20 +235,17 @@ export function mount(
   const tree = opts?.renderTree ?? ((): React.ReactNode => (
     <Root controller={mountConfig.controller} config={mountConfig.config} />
   ))
-  const root = createRoot(rootEl, {
-    onUncaughtError: (error: unknown, errorInfo: { componentStack?: string }): void => {
-      console.error('[chat-react] uncaught root error — auto-recovering', error, errorInfo?.componentStack)
-      const decision = policy.record()
-      schedule(() => {
-        performRecovery(decision, {
-          root,
-          rootEl,
-          remount: () => mount(rootEl, mountConfig, policy, opts),
-          fatalMessage: FATAL_MESSAGE,
-        })
-      })
-    },
+  // `root` is created below but referenced (lazily, at recovery time) by the
+  // handler — a definite-assignment forward reference, safe because the handler
+  // only ever fires after `createRoot` has returned.
+  let root!: Root
+  const handler = buildUncaughtErrorHandler(policy, schedule, {
+    getRoot: () => root,
+    rootEl,
+    remount: () => mount(rootEl, mountConfig, policy, opts),
+    fatalMessage: FATAL_MESSAGE,
   })
+  root = createRoot(rootEl, { onUncaughtError: handler })
   root.render(<StrictMode>{tree()}</StrictMode>)
   return root
 }

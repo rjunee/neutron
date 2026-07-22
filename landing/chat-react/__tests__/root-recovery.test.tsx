@@ -157,6 +157,108 @@ describe('performRecovery — clears + remounts, or paints a visible fatal card 
   })
 })
 
+describe('buildUncaughtErrorHandler — one error → one recovery, race-guarded (#380 round-2)', () => {
+  // Drives the actual decision→schedule→performRecovery seam the real
+  // onUncaughtError uses (the CLAUDE.md bookkeeping-not-invocation anti-pattern:
+  // pin the handler behavior, not just that a clean mount schedules nothing).
+  type Root = import('react-dom/client').Root
+  const makeCtx = (
+    container: HTMLElement,
+    counters: { remounts: number },
+    fatalMessage?: string,
+  ): import('../main.tsx').UncaughtErrorHandlerCtx => ({
+    getRoot: () => ({ unmount: () => {} }) as unknown as Root,
+    rootEl: container,
+    remount: () => {
+      counters.remounts += 1
+    },
+    ...(fatalMessage !== undefined ? { fatalMessage } : {}),
+  })
+
+  it('records + schedules exactly once, and the scheduled tick clears + remounts', async () => {
+    const { buildUncaughtErrorHandler } = await import('../main.tsx')
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    container.innerHTML = '<span data-testid="stale">stale</span>'
+
+    const scheduled: Array<() => void> = []
+    let records = 0
+    const policy = {
+      record: (): 'remount' | 'fatal' => {
+        records += 1
+        return 'remount'
+      },
+    }
+    const counters = { remounts: 0 }
+    const handler = buildUncaughtErrorHandler(policy, (fn) => scheduled.push(fn), makeCtx(container, counters))
+
+    handler(new Error('boom'), {})
+    expect(records).toBe(1)
+    expect(scheduled.length).toBe(1)
+
+    scheduled[0]?.()
+    // Dead container cleared, remount fn ran, no fatal card.
+    expect(container.querySelector('[data-testid="stale"]')).toBeNull()
+    expect(counters.remounts).toBe(1)
+    expect(container.querySelector('.car-fatal')).toBeNull()
+    container.remove()
+  })
+
+  it('IGNORES further errors once a recovery is scheduled (DISCRIMINATING — RED without the guard)', async () => {
+    const { buildUncaughtErrorHandler } = await import('../main.tsx')
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+
+    const scheduled: Array<() => void> = []
+    let records = 0
+    const policy = {
+      record: (): 'remount' | 'fatal' => {
+        records += 1
+        return 'remount'
+      },
+    }
+    const counters = { remounts: 0 }
+    const handler = buildUncaughtErrorHandler(policy, (fn) => scheduled.push(fn), makeCtx(container, counters))
+
+    // TWO uncaught errors before the macrotask fires — the exact race that
+    // orphaned a freshly-remounted root. The guard must collapse them to ONE.
+    handler(new Error('boom-1'), {})
+    handler(new Error('boom-2'), {})
+    // Without the guard: records===2, scheduled.length===2, and draining both
+    // would remount TWICE — the 2nd wiping the 1st fresh root's DOM (leak).
+    expect(records).toBe(1)
+    expect(scheduled.length).toBe(1)
+
+    for (const fn of scheduled) fn()
+    expect(counters.remounts).toBe(1)
+    container.remove()
+  })
+
+  it("routes a 'fatal' decision to a visible card and does NOT remount", async () => {
+    const { buildUncaughtErrorHandler } = await import('../main.tsx')
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+
+    const scheduled: Array<() => void> = []
+    const policy = { record: (): 'remount' | 'fatal' => 'fatal' }
+    const counters = { remounts: 0 }
+    const handler = buildUncaughtErrorHandler(
+      policy,
+      (fn) => scheduled.push(fn),
+      makeCtx(container, counters, 'fatal — reload to continue'),
+    )
+
+    handler(new Error('boom'), {})
+    scheduled[0]?.()
+    const card = container.querySelector('.car-fatal')
+    expect(card).not.toBeNull()
+    expect(container.textContent).toContain('fatal — reload to continue')
+    expect(container.querySelector('.car-fatal-reload')).not.toBeNull()
+    expect(counters.remounts).toBe(0)
+    container.remove()
+  })
+})
+
 describe('mount() — renders through the onUncaughtError-configured root (#380)', () => {
   // NOTE (harness limitation, see header): happy-dom + act() does NOT surface
   // React's onUncaughtError for a synchronous render throw — worse, the throw
