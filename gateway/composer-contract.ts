@@ -63,8 +63,11 @@ export {
   buildRemindersChatCommandFilter,
   buildTridentCodeChatCommandFilter,
   buildCalendarChatCommandFilter,
+  buildStatusChatCommandFilter,
+  formatStatusSnapshot,
   readPatternFromPrompts,
 } from './boot-chat-command-filters.ts'
+export type { StatusSnapshot } from './boot-chat-command-filters.ts'
 
 export {
   buildCoresBackendFactories,

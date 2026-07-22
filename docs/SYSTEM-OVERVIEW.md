@@ -68,6 +68,25 @@ share one backend instance. Examples:
 > runtime reads the old notes tables; the historical per-Core migration is a
 > no-op orphan on any already-deployed DB.
 
+**Narrow Neutron chat commands (`/status`).** Beyond the Core `/`-commands
+(`/remind`, `/code`, `/cal`, `/email`, `/research`, `/skills`), Neutron ships a
+deliberately narrow set of instance commands — NOT the full Vajra topic-lifecycle
+vocabulary (Ryan 2026-07-21: "only the chat commands that make sense for
+Neutron"). `/status` (M2 task 3) is a pure READ that replies with a deterministic
+one-shot snapshot — active project, current model (`getBestModel()`), pending
+reminder count, active work-board items, and active Trident builds. It is built by
+`buildStatusChatCommandFilter` (`gateway/boot-chat-command-filters.ts`, re-exported
+from the `gateway/boot-helpers.ts` barrel) and chained in `open/composer.ts` into
+the SAME `buildChainedChatCommandFilter([...])` the web onboarding chat AND the
+app-ws chat share, so there is one command path. The snapshot itself is an injected
+thunk (the composer binds it — via a `late<T>` two-phase holder — to the live
+projects reader / reminder store / work-board / Trident run store once those stores
+exist), keeping the filter store-free and unit-testable. The command word is exact:
+`/statusfoo` falls through to the LLM (K8 grammar boundary). `/reset` is the
+sibling command still to land — see the M2 task list; its actuation was re-scoped
+after `respawnSupervisedSession` was verified to `--resume` (context-preserving),
+not reset context.
+
 **Two tool factories per Core.** The install pipeline
 (`gateway/cores/install-bundled.ts → registerCoreTools`) resolves `buildTools`
 from a Core's barrel and, if present, ALSO `buildExtraTools` — a second factory

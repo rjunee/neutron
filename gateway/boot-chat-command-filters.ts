@@ -241,6 +241,82 @@ export function buildCalendarChatCommandFilter(deps: {
 }
 
 /**
+ * M2 task 3 — the `/status` chat-command filter (narrow Neutron re-map — NOT the
+ * Vajra topic-lifecycle command set; Ryan 2026-07-21 "only the chat commands that
+ * make sense for Neutron"). `/status` returns a deterministic one-shot snapshot of
+ * the instance — active project, current model, pending-reminder count, active
+ * work-board items, and active Trident builds. It is a pure READ (no mutation, no
+ * LLM dispatch), so it composes into the SAME `buildChainedChatCommandFilter([...])`
+ * chain as `/remind` / `/code` / `/cal`, shared by BOTH the web onboarding chat AND
+ * the app-ws chat — ONE command path, no second parser.
+ *
+ * The snapshot is an INJECTED thunk: the composer wires it to the live projects
+ * store / `getBestModel` / reminder store / work-board / Trident run store, so this
+ * builder stays free of an eager store import and is unit-testable against a
+ * stubbed snapshot.
+ */
+export interface StatusSnapshot {
+  /** Human label of the active project for this turn (or `'General'`). */
+  active_project: string
+  /** The live best model id (`getBestModel()`) — tracks watchdog flips. */
+  model: string
+  /** Count of the owner's PENDING reminders. */
+  pending_reminders: number
+  /** Count of ACTIVE work-board items in the active project scope. */
+  active_work_items: number
+  /** Count of non-terminal (queued/running) Trident builds. */
+  active_trident_runs: number
+}
+
+export function buildStatusChatCommandFilter(deps: {
+  snapshot: (input: {
+    user_id: string
+    project_slug: string
+    project_id?: string
+  }) => Promise<StatusSnapshot>
+}): import('./http/app-ws-surface.ts').ChatCommandFilter {
+  return {
+    async match(input) {
+      // Exact-command boundary (K8 grammar precedent, `parseCodeCommand`): the
+      // command WORD must be `/status` followed by EOL/whitespace, so `/statusfoo`
+      // is NOT `/status` and falls through to the LLM instead of being pre-claimed.
+      if (!isExactSlashCommand(input.body, '/status')) return null
+      const snap = await deps.snapshot({
+        user_id: input.user_id,
+        project_slug: input.project_slug,
+        ...(input.project_id !== undefined ? { project_id: input.project_id } : {}),
+      })
+      return { text: formatStatusSnapshot(snap), data: snap }
+    },
+  }
+}
+
+/** Format a {@link StatusSnapshot} into the chat reply body. */
+export function formatStatusSnapshot(s: StatusSnapshot): string {
+  return [
+    '**Status**',
+    `• Project: ${s.active_project}`,
+    `• Model: ${s.model}`,
+    `• Pending reminders: ${s.pending_reminders}`,
+    `• Active work items: ${s.active_work_items}`,
+    `• Active builds: ${s.active_trident_runs}`,
+  ].join('\n')
+}
+
+/**
+ * Exact slash-command boundary shared by the narrow Neutron commands (K8 grammar
+ * precedent, `parseCodeCommand`): the command word must be followed by
+ * end-of-input OR whitespace, so `/status` and `/status now` match but `/statusfoo`
+ * does not (it falls through to the LLM). Leading whitespace is tolerated.
+ */
+function isExactSlashCommand(body: string, command: string): boolean {
+  const trimmed = body.trimStart()
+  if (!trimmed.startsWith(command)) return false
+  const rest = trimmed.slice(command.length)
+  return rest.length === 0 || /^\s/.test(rest)
+}
+
+/**
  * S1 — load a named Shape-C pattern body from `prompts/reminder-patterns.md`.
  * Threaded into the Reminders Core's smart-wrap composer via the
  * cores backend factory map. Tests inject stubs; production reads from disk.

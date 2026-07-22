@@ -127,7 +127,11 @@ import { MIN_COOKIE_SECRET_LEN } from './session-cookie-secret.ts'
 import { selectAppWsToken, isValidThreadedBearer } from './owner-bearer.ts'
 import { late } from './wiring/late.ts'
 import type { OpenWiringContext } from './wiring/context.ts'
-import { buildChainedChatCommandFilter } from '@neutronai/gateway/boot-helpers.ts'
+import {
+  buildChainedChatCommandFilter,
+  buildStatusChatCommandFilter,
+  type StatusSnapshot,
+} from '@neutronai/gateway/boot-helpers.ts'
 import {
   SkillForge,
   SkillForgeProposalsStore,
@@ -1415,14 +1419,36 @@ export function buildOpenGraphComposer(
       return { project_slug, user_id: OWNER_USER_ID }
     }
 
+    // M2 task 3 — the narrow Neutron `/status` command. Its snapshot reads stores
+    // constructed LATER in this closure (projects reader / work-board / Trident run
+    // store), so the reader is threaded through a `late<T>` two-phase holder (same
+    // seam as `dispatchBoardHolder`) and BOUND once those stores exist. The filter
+    // itself is built now so it can join the chain here — its `match()` only fires
+    // at chat-turn time, long after the bind, so the deref is always populated.
+    const statusSnapshotHolder =
+      late<
+        (input: { user_id: string; project_slug: string; project_id?: string }) => StatusSnapshot
+      >('status_snapshot')
+    const statusChatCommandFilter = buildStatusChatCommandFilter({
+      snapshot: async (input) =>
+        statusSnapshotHolder.deref((fn) => fn(input)) ?? {
+          active_project: 'General',
+          model: getBestModel(),
+          pending_reminders: 0,
+          active_work_items: 0,
+          active_trident_runs: 0,
+        },
+    })
+
     // Chat-command filter (Free Cores `/cal`/`/email`/`/note`/`/remind`/
-    // `/research` + skill-forge `/skills`), chained. Defined ONCE here so BOTH
-    // the web onboarding chat AND the app-ws chat (`/ws/app/chat`) route slash
-    // commands through the IDENTICAL handlers (Codex r1 [P2] — without this the
-    // React app-ws path lost slash commands, sending `/note` etc. to the LLM).
+    // `/research` + skill-forge `/skills` + `/status`), chained. Defined ONCE here
+    // so BOTH the web onboarding chat AND the app-ws chat (`/ws/app/chat`) route
+    // slash commands through the IDENTICAL handlers (Codex r1 [P2] — without this
+    // the React app-ws path lost slash commands, sending `/note` etc. to the LLM).
     const chatCommandFilter = buildChainedChatCommandFilter([
       coresWiring.chatCommandFilter,
       buildSkillForgeChatCommandFilter(skillForgeBackend),
+      statusChatCommandFilter,
     ])
 
     // ── The landing stack (onboarding engine + chat UI + WS) ───────────────
@@ -2402,6 +2428,42 @@ export function buildOpenGraphComposer(
     }
     const workBoardStore = new WorkBoardStore(db, {
       onChange: (changedKey: string): void => fanWorkBoardChanged(changedKey),
+    })
+    // M2 task 3 — bind the `/status` snapshot reader now that every source store
+    // exists (projects reader / reminder store / work-board / Trident run store).
+    // Deterministic READ-only aggregation, scoped to the turn's active project.
+    statusSnapshotHolder.bind((input): StatusSnapshot => {
+      const activeProject =
+        input.project_id !== undefined
+          ? readProjectRows().find((p) => p.id === input.project_id)?.label ?? 'General'
+          : 'General'
+      let pendingReminders = 0
+      try {
+        pendingReminders = new ReminderStore(db).listPending(input.project_slug).length
+      } catch {
+        /* best-effort — a store read failure degrades to 0, never bricks /status */
+      }
+      let activeWorkItems = 0
+      try {
+        activeWorkItems = workBoardStore.listActive(
+          workBoardScopeKey(input.project_slug, input.project_id),
+        ).length
+      } catch {
+        /* best-effort */
+      }
+      let activeTridentRuns = 0
+      try {
+        activeTridentRuns = boardRunStore.listNonTerminal().length
+      } catch {
+        /* best-effort */
+      }
+      return {
+        active_project: activeProject,
+        model: getBestModel(),
+        pending_reminders: pendingReminders,
+        active_work_items: activeWorkItems,
+        active_trident_runs: activeTridentRuns,
+      }
     })
     // RB1 (perfect-recall) — now that the work-board store exists, bind the
     // memory-index's active-work provider so the durable breadth manifest also

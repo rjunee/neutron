@@ -4797,3 +4797,46 @@ now reach the agent for the first time.
   recycle instead of a tautology.
 - Verified: both target suites 12/0; the full `app/__tests__/` dir in ONE bun process
   872/0 (the CI-pollution scenario, clean); `tsc --noEmit -p app/tsconfig.json` exit 0.
+
+## M2 P0 parity — input modalities task 3 (partial): `/status` chat command (2026-07-22)
+
+Scope: `IMPLEMENTATION_PLAN.md` task 3, the `/status` half of the narrow Neutron
+chat commands (`/status` + `/reset`; NOT the Vajra topic-lifecycle vocabulary).
+`/reset` is intentionally NOT shipped this iteration — see the mechanism finding
+below.
+
+- **`/status` — deterministic instance snapshot.** New `buildStatusChatCommandFilter`
+  (`gateway/boot-chat-command-filters.ts`, re-exported through the
+  `gateway/boot-helpers.ts` / `composer-contract.ts` barrel) implements the
+  `ChatCommandFilter` contract. `/status` (exact-command word boundary — `/statusfoo`
+  falls through to the LLM, K8 grammar precedent) replies with a formatted snapshot:
+  active project, current model (`getBestModel()`), pending-reminder count, active
+  work-board items, active Trident builds. Pure READ — no mutation, no LLM dispatch.
+- **Wiring — one command path, both surfaces.** Chained in `open/composer.ts` into the
+  SAME `buildChainedChatCommandFilter([...])` the web onboarding chat AND the app-ws
+  chat share (appended after the cores chain + skill-forge). The snapshot is an
+  injected thunk; because the source stores (projects reader / reminder store /
+  work-board / Trident run store) are constructed LATER in the composer closure, the
+  reader is threaded through a `late<T>` two-phase holder (`statusSnapshotHolder`) and
+  BOUND right after `workBoardStore` exists. Each source read is best-effort (degrades
+  to 0 rather than bricking the command). Filter stays store-free → unit-testable.
+- **Tests.** `gateway/__tests__/status-command-wiring.test.ts` (9/0): reply TEXT carries
+  every snapshot field value (behavior, not a `toHaveBeenCalled` gap-test); `project_id`
+  threaded / omitted correctly; leading-whitespace + trailing-arg tolerance; `/statusfoo`
+  + `/statuses` fall through and NEVER run the snapshot thunk; chain-composition proof
+  that `/status` is reached after earlier filters disclaim (the real composer shape).
+- **`/reset` DEFERRED — verified spec/mechanism mismatch.** The plan named
+  `respawnSupervisedSession` as the `/reset` actuation for "fresh agent context; durable
+  chat history stays". VERIFIED against the code this is WRONG:
+  `runtime/adapters/claude-code/persistent/session-respawn.ts:24` — "respawn ALWAYS
+  resumes — never a fresh spawn"; `respawnSupervisedSession` (`supervision.ts:59`) →
+  `respawnReplSession(..., true)` → `planRespawn` `--resume`s the SAME transcript,
+  PRESERVING context. It cannot deliver a context reset. Shipping `/reset` on that
+  primitive would be a no-op-that-looks-like-it-works (banned pattern). The correct
+  primitive is the `/clear` PTY reset (`CONTEXT_RESET_COMMAND`, `pool.ts:380`, already
+  used for the import warm-session per-turn reset) or a fresh (non-resume) respawn; plus
+  a credential-identity-agnostic way to target the live session key (the pool key folds
+  `cred.id`, unknown to the filter). Re-scoped in `IMPLEMENTATION_PLAN.md` for a
+  follow-up iteration on the corrected mechanism.
+- Verified: `bunx tsc --noEmit` exit 0; `gateway/__tests__/status-command-wiring.test.ts`
+  9/0.
