@@ -3464,10 +3464,12 @@ export function buildOpenGraphComposer(
     if (liveAgentSubstrate !== null) {
       // The rehydration un-mark is threaded INTO the sweep (not the policy) so it
       // fires under each session's turn mutex the instant `/clear` lands — a turn
-      // that acquires the just-cleared session next re-composes COLD before it can
+      // that ACQUIRES the just-cleared session next re-composes COLD before it can
       // run (Argus r1 blocker: the policy's post-sweep un-mark left a multi-session
-      // window of warm bare turns on already-cleared REPLs). Same bus the `/reset`
-      // command emits on.
+      // window of warm bare turns on already-cleared REPLs). The mutex does NOT
+      // cover a turn that read `isColdFirstTurn` (warm) BEFORE the reset and
+      // re-marks after — the runner's per-scope reset-epoch guard closes that
+      // residual race (Argus r2 blocker). Same bus the `/reset` command emits on.
       const contextResetSweep = createPooledContextResetSweep({
         onScopeReset: emitContextResetScope,
       })

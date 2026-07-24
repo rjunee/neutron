@@ -66,6 +66,40 @@ function makeStubSubstrate(specs: AgentSpec[]): Substrate {
   }
 }
 
+/**
+ * A substrate whose per-turn generator invokes `beforeCompletion(callIndex)` just
+ * BEFORE yielding completion — the seam a test uses to fire a context-reset signal
+ * WHILE a turn is in flight (simulating a sweep `/clear` landing mid-turn, after the
+ * runner already read `isColdFirstTurn` and built its prompt).
+ */
+function makeRacingSubstrate(
+  specs: AgentSpec[],
+  beforeCompletion: (callIndex: number) => void,
+): Substrate {
+  let calls = 0
+  return {
+    start(spec: AgentSpec): SessionHandle {
+      const callIndex = calls++
+      specs.push(spec)
+      const events = (async function* (): AsyncGenerator<Event, void, void> {
+        yield { kind: 'token', text: 'ok' }
+        beforeCompletion(callIndex)
+        yield {
+          kind: 'completion',
+          usage: { input_tokens: 1, output_tokens: 1 },
+          substrate_instance_id: 'stub',
+        }
+      })()
+      return {
+        events,
+        async respondToTool(): Promise<void> {},
+        async cancel(): Promise<void> {},
+        tool_resolution: 'internal',
+      }
+    },
+  }
+}
+
 function makeTurn(
   sent: ChatOutbound[],
   opts: { user_text: string; topic_id: string; project_id?: string },
@@ -168,6 +202,52 @@ describe('Layer B — context-reset rehydration seam', () => {
     const b3 = specs[5]!.prompt
     expect(a3).toContain('COLD-ONLY-MARKER') // A rehydrated
     expect(b3).not.toContain('<memory_index>') // B untouched — still warm
+  })
+
+  test('reset-epoch guard — a reset that fires MID-TURN does not let the in-flight warm turn re-mark itself warm; the next turn re-composes COLD', async () => {
+    const specs: AgentSpec[] = []
+    const sent: ChatOutbound[] = []
+    let indexCalls = 0
+    const bus = makeSignal()
+    // On the 2nd dispatch (the warm turn, callIndex 1), fire a reset for its scope
+    // WHILE it is streaming — the exact race: the runner already chose WARM and built
+    // its prompt at `isColdFirstTurn`, the sweep `/clear`s + un-marks mid-flight, and
+    // WITHOUT the epoch guard the turn's tail would unconditionally re-add contextSent
+    // and resurrect the warm mark on the emptied REPL.
+    const substrate = makeRacingSubstrate(specs, (callIndex) => {
+      if (callIndex === 1) bus.fire('proj-A')
+    })
+    const run = buildLiveAgentTurn({
+      substrate,
+      personaLoader: { async load() { return '' } },
+      memoryIndexSnapshot: async () => {
+        indexCalls += 1
+        return INDEX
+      },
+      contextResetSignal: bus.signal,
+      buttonStore: store,
+      project_slug: 'alice',
+      owner_home: tmp,
+      model: 'test-model',
+      now: () => now,
+    })
+
+    // Turn 1 (cold) warms scope proj-A.
+    await run(makeTurn(sent, { user_text: 'first', topic_id: 't1', project_id: 'proj-A' }))
+    expect(specs[0]!.prompt).toContain('COLD-ONLY-MARKER')
+    expect(indexCalls).toBe(1)
+
+    // Turn 2 (warm) — the reset fires mid-dispatch. The turn built a WARM prompt
+    // (no cold-only block), and the guard must NOT re-mark contextSent afterward.
+    await run(makeTurn(sent, { user_text: 'second', topic_id: 't1', project_id: 'proj-A' }))
+    expect(specs[1]!.prompt).not.toContain('<memory_index>')
+
+    // Turn 3 — because the mid-turn reset's un-mark was NOT resurrected, this turn
+    // re-composes COLD (full re-grounding). If the epoch guard were missing, turn 2's
+    // tail would have re-marked warm and this turn would stay warm (regression).
+    await run(makeTurn(sent, { user_text: 'third', topic_id: 't1', project_id: 'proj-A' }))
+    expect(specs[2]!.prompt).toContain('COLD-ONLY-MARKER')
+    expect(indexCalls).toBe(2) // the cold seam ran again — grounding was NOT lost
   })
 
   test('a signal for an unknown scope is a no-op (topic stays warm)', async () => {

@@ -16,7 +16,10 @@
  * write; (iv) activeTurn → 'busy', mutex never acquired; (v) should_reset false →
  * 'cooldown', not even measured; (vi) mid-file compact marker → only tail bytes
  * count; (vii) 2-dim prefix matches TWO scopes, a legacy 2-dim key does not;
- * (viii) exited child → skipped 'dead'.
+ * (viii) exited child → skipped 'dead'; (ix) onScopeReset under the mutex; (x)
+ * rotation-robust baseline; (xi) actuation throw → reset_failed detail; (xii)
+ * re-anchor baseline down after an external auto-compact; (xiii) absent transcript
+ * → 'no_transcript', not 'failed'.
  */
 
 import { describe, it, expect, afterEach } from 'bun:test'
@@ -355,5 +358,50 @@ describe('createPooledContextResetSweep — Layer B periodic sweep', () => {
       idle_max_ms: 50,
     })
     expect(out).toEqual({ ok: false, reason: 'reset_failed', detail: 'pty write EPIPE' })
+  })
+
+  it('(xii) re-anchor baseline DOWN after an external auto-compact — later growth past the compacted floor RE-FIRES (Argus r2 major)', async () => {
+    freshProjectsDir()
+    const s = makeFakeSession({ sessionId: 'sid-comp', project: 'proj-A', turnsServed: 1 })
+    insert(s)
+    writeJsonl('sid-comp', 2000) // over the 1000-byte threshold
+
+    const sweep = newSweep()
+    const r1 = await sweep.sweep({ substrate_instance_id: INSTANCE, user_id: USER })
+    expect(r1.reset).toEqual([{ project_scope: 'proj-A', bytes_live: 2000 }])
+    // File is un-rotated → the post-clear re-measure stamps baseline.bytes = 2000.
+
+    // An external CC AUTO-compact shrinks the live transcript well below the stored
+    // baseline. A real turn ran (so no_new_turns doesn't gate), but the file is now
+    // SMALLER than baseline — the sweep must re-anchor its baseline DOWN to 500.
+    s.session.nextTurnId()
+    writeJsonl('sid-comp', 500)
+    const r2 = await sweep.sweep({ substrate_instance_id: INSTANCE, user_id: USER })
+    // This tick itself doesn't reset (500 - 500 = 0) but it re-anchored the baseline.
+    expect(r2.reset).toEqual([])
+    expect(r2.skipped).toEqual([{ project_scope: 'proj-A', reason: 'under_threshold' }])
+    expect(CLEARS(s.writes)).toBe(1)
+
+    // Growth of 1100 SINCE the compacted floor (500 → 1600) must RE-FIRE. WITHOUT the
+    // re-anchor the baseline would still be 2000 and max(0, 1600-2000)=0 would leave
+    // Layer B silently disabled until the file re-grew past 3000 (into the 5 MB warn
+    // band in production).
+    s.session.nextTurnId()
+    writeJsonl('sid-comp', 1600)
+    const r3 = await sweep.sweep({ substrate_instance_id: INSTANCE, user_id: USER })
+    expect(r3.reset).toEqual([{ project_scope: 'proj-A', bytes_live: 1100 }])
+    expect(CLEARS(s.writes)).toBe(2)
+  })
+
+  it('(xiii) freshly-spawned warm session with NO transcript on disk → skipped no_transcript, not failed (Argus r2 minor)', async () => {
+    freshProjectsDir()
+    const s = makeFakeSession({ sessionId: 'sid-fresh', project: 'proj-A', turnsServed: 1 })
+    insert(s)
+    // Deliberately NO fixture: the session's `<sessionId>.jsonl` has not been written
+    // yet (a just-spawned warm session). This is a benign no-op skip, NOT a failure.
+    const r = await newSweep().sweep({ substrate_instance_id: INSTANCE, user_id: USER })
+    expect(CLEARS(s.writes)).toBe(0)
+    expect(r.reset).toEqual([])
+    expect(r.skipped).toEqual([{ project_scope: 'proj-A', reason: 'no_transcript' }])
   })
 })

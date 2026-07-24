@@ -699,9 +699,25 @@ export function buildLiveAgentTurn(
    */
   const topicScopes = new Map<string, string>()
 
+  /**
+   * Layer B reset-epoch, per scope — a monotonic counter bumped every time a
+   * context-reset signal fires for that scope. A turn captures the epoch at the
+   * moment it decides warm-vs-cold (`isColdFirstTurn`) and re-checks it before the
+   * post-dispatch `contextSent.add`. If the epoch advanced in between, a sweep
+   * `/clear` un-marked this scope WHILE our (already-built) prompt was in flight —
+   * so re-adding `contextSent` here would resurrect the warm mark on an emptied
+   * REPL and defeat the rehydration the reset exists to force (Argus r2 blocker).
+   * The guard leaves the mark OFF so the next turn re-composes cold. Keyed by
+   * scope (not topicKey) because the reset signal + un-mark operate per scope.
+   */
+  const contextResetEpoch = new Map<string, number>()
+
   // Layer B — on a context-reset signal for scope S, un-mark warm every topic
-  // whose turns run in S, so its NEXT turn re-composes cold (full re-grounding).
+  // whose turns run in S, so its NEXT turn re-composes cold (full re-grounding),
+  // and bump S's reset-epoch so any turn already mid-flight in S declines to
+  // re-mark itself warm on the way out (see contextResetEpoch).
   input.contextResetSignal?.subscribe((scope) => {
+    contextResetEpoch.set(scope, (contextResetEpoch.get(scope) ?? 0) + 1)
     for (const [key, s] of topicScopes) {
       if (s === scope) {
         contextSent.delete(key)
@@ -1124,6 +1140,14 @@ export function buildLiveAgentTurn(
     )
     let prompt: string
     const isColdFirstTurn = !contextSent.has(topicKey)
+    // Capture the scope's reset-epoch AT the warm/cold decision. If a sweep
+    // `/clear` fires for this scope after this point but before we re-mark
+    // `contextSent` below, the epoch will have advanced and we skip the re-mark —
+    // otherwise a warm prompt built here, dispatched into a just-emptied REPL,
+    // would resurrect the warm mark and silently lose the Layer B re-grounding
+    // (Argus r2 blocker). Scope MUST equal the dispatch scope (`scope`, below).
+    const turnScope = turn.project_id ?? 'general'
+    const resetEpochAtStart = contextResetEpoch.get(turnScope) ?? 0
     if (!isColdFirstTurn) {
       // Warm turn: the system prefix is already cached in the REPL's transcript;
       // re-ground by splicing the FRESH board + onboarding-context blocks before
@@ -1326,12 +1350,22 @@ export function buildLiveAgentTurn(
     }
     // Only mark the context as delivered once a turn actually completed on
     // the warm session — a failed first turn retries with full context.
-    contextSent.add(topicKey)
-    // Layer B — record the scope this warm topic's turns run in so a later
-    // context-reset signal for that scope can un-mark it (rehydrate). MUST be
-    // exactly `turn.project_id ?? 'general'` (mirrors the /reset thunk + the
-    // substrate project-scope key dimension).
-    topicScopes.set(topicKey, turn.project_id ?? 'general')
+    //
+    // Layer B race guard (Argus r2 blocker): if a context-reset for this scope
+    // fired WHILE this turn was in flight (epoch advanced since we read
+    // `isColdFirstTurn`), the sweep already `/clear`ed the REPL and un-marked the
+    // scope. Re-marking here would resurrect the warm mark on an emptied REPL and
+    // drop the rehydration the reset exists to force. Skip the re-mark so the NEXT
+    // turn re-composes cold. The reset's own un-mark already cleared any prior
+    // mark, so leaving it off is the correct end state.
+    if ((contextResetEpoch.get(turnScope) ?? 0) === resetEpochAtStart) {
+      contextSent.add(topicKey)
+      // Layer B — record the scope this warm topic's turns run in so a later
+      // context-reset signal for that scope can un-mark it (rehydrate). MUST be
+      // exactly `turn.project_id ?? 'general'` (mirrors the /reset thunk + the
+      // substrate project-scope key dimension).
+      topicScopes.set(topicKey, turnScope)
+    }
 
     // Path 1 — choice-step option buttons. While onboarding, parse a trailing
     // `[[OPTIONS]]` block out of the reply, strip it from the rendered body, and

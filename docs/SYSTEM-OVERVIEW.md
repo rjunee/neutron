@@ -112,9 +112,15 @@ for each idle session whose POST-COMPACT transcript has grown ≥ 2 MB
 mid-turn) and — SYNCHRONOUSLY, under that session's turn mutex, the instant `/clear`
 lands and before the mutex releases — emits the scope on the context-reset bus. (The
 un-mark rides the sweep's actuation, not a post-sweep loop, so a turn that acquires
-the just-cleared session next can never run warm/bare on an emptied REPL.) The runner
+the just-cleared session AFTER the reset lands re-composes cold.) One residual race
+survives the mutex alone: a turn that read `isColdFirstTurn` (chose WARM) BEFORE the
+sweep fired, but re-marks `contextSent` AFTER — its already-built warm prompt would
+resurrect the warm mark on the just-emptied REPL. The runner closes it with a
+per-scope RESET-EPOCH captured at the warm/cold decision and re-checked before the
+re-mark: if a reset for the scope fired in between, the re-mark is SKIPPED so the
+next turn still re-composes cold. The runner
 (`build-live-agent-turn.ts`) subscribes via `contextResetSignal`: on a scope-S
-signal it un-marks warm every topic in S, so the next turn re-runs
+signal it un-marks warm every topic in S (and bumps the scope's reset-epoch), so the next turn re-runs
 `composeFirstTurnPrompt` — the lossless external-state rehydration (work board +
 STATUS + docs + persona + reflection + memory index + nexus + services re-assembled
 from durable state). The trigger is a per-session BASELINE DELTA (a `WeakMap` keyed

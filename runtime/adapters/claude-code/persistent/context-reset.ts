@@ -18,6 +18,7 @@
 // and writes NOTHING — and it self-releases the abandoned mutex slot so a later
 // turn is never wedged.
 
+import { existsSync } from 'node:fs'
 import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
 import { pool } from './pool-state.ts'
 import type { ReplSession } from './repl-session.ts'
@@ -267,7 +268,14 @@ export interface SweepReport {
   /** Sessions left untouched, with the reason nothing was written to their PTY. */
   skipped: Array<{
     project_scope: string
-    reason: 'busy' | 'under_threshold' | 'no_new_turns' | 'cooldown' | 'dead' | 'failed'
+    reason:
+      | 'busy'
+      | 'under_threshold'
+      | 'no_new_turns'
+      | 'cooldown'
+      | 'dead'
+      | 'failed'
+      | 'no_transcript'
   }>
 }
 
@@ -302,8 +310,11 @@ export function createPooledContextResetSweep(opts?: {
   idle_max_ms?: number
   /** Fired SYNCHRONOUSLY under the per-session turn mutex the instant a session's
    *  `/clear` lands — the composer threads its rehydration un-mark
-   *  (`emitContextResetScope`) here so the just-cleared scope's next turn
-   *  re-composes COLD before any queued turn can resume (Argus r1 blocker). */
+   *  (`emitContextResetScope`) here so a turn that ACQUIRES the just-cleared scope
+   *  next re-composes COLD (Argus r1 blocker). NOTE: the mutex alone does NOT cover
+   *  a turn that already read `isColdFirstTurn` (chose warm) BEFORE this fired and
+   *  re-marks `contextSent` after — the runner closes that residual race with a
+   *  per-scope reset-epoch guard (Argus r2 blocker), not this callback. */
   onScopeReset?: (project_scope: string) => void
 }): {
   sweep(input: {
@@ -370,10 +381,32 @@ export function createPooledContextResetSweep(opts?: {
         // MEASUREMENT — baseline delta (the no-loop invariant).
         const measured = measure(session)
         if (measured === null) {
-          report.skipped.push({ project_scope, reason: 'failed' })
+          // Distinguish a BENIGN absent transcript (a freshly-spawned warm session
+          // whose `<sessionId>.jsonl` hasn't been written yet) from a genuine read
+          // error. The absent case is a normal no-op skip, not a failure — reporting
+          // it as 'failed' every sweep pollutes the honest-report contract (Argus r2
+          // minor). Only a present-but-unreadable file is a real 'failed'.
+          const jsonl = sessionJsonlPath(session.sessionId, session.cwd, projectsDir)
+          report.skipped.push({
+            project_scope,
+            reason: existsSync(jsonl) ? 'failed' : 'no_transcript',
+          })
           continue
         }
-        const baseline = baselines.get(session) ?? { bytes: 0, turns: 0 }
+        let baseline = baselines.get(session) ?? { bytes: 0, turns: 0 }
+        // Re-anchor DOWN after an external CC auto-compact (Argus r2). A compaction
+        // between sweeps drops the post-compact measurement BELOW our stored baseline
+        // (which was stamped at a larger pre-compact size), so `max(0, measured -
+        // baseline.bytes)` would clamp bytesLive to 0 and defer the next reset until
+        // growth re-crossed the STALE-high baseline + threshold — letting the live
+        // window drift toward the 5 MB watchdog warn band. If the transcript shrank
+        // below baseline, the baseline is stale: re-anchor its bytes to the compacted
+        // floor (KEEP `turns` so the no-loop gate below still holds) and persist it,
+        // so subsequent growth is measured from what is actually live now.
+        if (measured < baseline.bytes) {
+          baseline = { bytes: measured, turns: baseline.turns }
+          baselines.set(session, baseline)
+        }
         // An idle scope is never reset twice: no turn has run since the last reset,
         // so the transcript cannot have grown from live use.
         if (session.turnsServedThisIncarnation() <= baseline.turns) {
