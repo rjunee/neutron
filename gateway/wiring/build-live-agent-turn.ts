@@ -551,6 +551,19 @@ export interface BuildLiveAgentTurnInput {
    */
   workBoardSnapshot?: (project_slug: string, project_id: string | undefined) => string | null
   /**
+   * Layer B (SPEC WAVE 3.5) — the context-reset REHYDRATION seam. When the
+   * periodic policy `/clear`-s a warm orchestrator session for project scope S,
+   * it fires this signal with S; every topic whose turns run in scope S is then
+   * un-marked warm, so its NEXT turn re-runs `composeFirstTurnPrompt` — the
+   * lossless external-state rehydration (work board + STATUS + docs + persona +
+   * reflection + memory index + nexus + services re-assembled from durable state).
+   * Over-firing is safe: a re-sent system context is "merely redundant, never a
+   * correctness break" (see the `contextSent` header). Wired by the composer to
+   * BOTH the periodic policy loop AND the manual `/reset` command, so both
+   * rehydrate through this one path. Omitted (LLM-less box) ⇒ no rehydration.
+   */
+  contextResetSignal?: { subscribe(listener: (project_scope: string) => void): void }
+  /**
    * RC3 ([BEHAVIOR]) — the agent-nexus re-grounding seam. Returns the ALREADY-
    * FORMATTED, escaped `<agent_nexus>` DATA block of the recent decision/handoff/
    * learning events OTHER agents recorded on this project (an overnight trident
@@ -677,6 +690,25 @@ export function buildLiveAgentTurn(
    * context, never a correctness break.
    */
   const contextSent = new Set<string>()
+
+  /**
+   * Layer B rehydration bookkeeping — the project scope each warm topicKey's
+   * turns run in (`turn.project_id ?? 'general'`, the substrate project-scope
+   * dimension). Recorded alongside `contextSent.add(topicKey)`; consulted when a
+   * context-reset signal for scope S fires, to find + un-mark every topic in S.
+   */
+  const topicScopes = new Map<string, string>()
+
+  // Layer B — on a context-reset signal for scope S, un-mark warm every topic
+  // whose turns run in S, so its NEXT turn re-composes cold (full re-grounding).
+  input.contextResetSignal?.subscribe((scope) => {
+    for (const [key, s] of topicScopes) {
+      if (s === scope) {
+        contextSent.delete(key)
+        topicScopes.delete(key)
+      }
+    }
+  })
 
   /**
    * Retry affordance (2026-07-01) — the last REAL user message per (instance,
@@ -1295,6 +1327,11 @@ export function buildLiveAgentTurn(
     // Only mark the context as delivered once a turn actually completed on
     // the warm session — a failed first turn retries with full context.
     contextSent.add(topicKey)
+    // Layer B — record the scope this warm topic's turns run in so a later
+    // context-reset signal for that scope can un-mark it (rehydrate). MUST be
+    // exactly `turn.project_id ?? 'general'` (mirrors the /reset thunk + the
+    // substrate project-scope key dimension).
+    topicScopes.set(topicKey, turn.project_id ?? 'general')
 
     // Path 1 — choice-step option buttons. While onboarding, parse a trailing
     // `[[OPTIONS]]` block out of the reply, strip it from the rendered body, and

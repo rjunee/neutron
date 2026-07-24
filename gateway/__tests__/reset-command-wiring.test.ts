@@ -172,6 +172,59 @@ describe('/reset chained after other filters (the composer wiring shape)', () =>
   })
 })
 
+describe('Layer B — /reset rehydration emit (the composer thunk shape)', () => {
+  // Mirrors `open/composer.ts`'s `/reset` thunk verbatim: the composer wraps the
+  // injected `reset` so that ON A SUCCESSFUL clear it emits the turn's project
+  // scope onto the context-reset bus (the SAME bus the periodic policy uses),
+  // then returns the outcome unchanged. This closes the known /reset persona-loss
+  // gap — the next turn re-composes cold. A NON-ok outcome (busy / no_live_session
+  // / reset_failed) emits NOTHING (nothing was cleared → no rehydration).
+  const buildComposerResetThunk = (
+    reset: () => Promise<ResetChatOutcome>,
+    emit: (scope: string) => void,
+  ) => async (input: { user_id: string; project_slug: string; project_id?: string }) => {
+    const outcome = await reset()
+    if (outcome.ok) emit(input.project_id ?? 'general')
+    return outcome
+  }
+
+  test('emits the project scope on a successful reset', async () => {
+    const emitted: string[] = []
+    const filter = buildResetChatCommandFilter({
+      reset: buildComposerResetThunk(async () => ({ ok: true, sessions_reset: 1 }), (s) => emitted.push(s)),
+    })
+    await filter.match(matchInput('/reset', 'proj-A'))
+    expect(emitted).toEqual(['proj-A'])
+  })
+
+  test('emits "general" on success when the turn has no project_id', async () => {
+    const emitted: string[] = []
+    const filter = buildResetChatCommandFilter({
+      reset: buildComposerResetThunk(async () => ({ ok: true, sessions_reset: 1 }), (s) => emitted.push(s)),
+    })
+    await filter.match(matchInput('/reset'))
+    expect(emitted).toEqual(['general'])
+  })
+
+  test('does NOT emit on busy (nothing was cleared → no rehydration)', async () => {
+    const emitted: string[] = []
+    const filter = buildResetChatCommandFilter({
+      reset: buildComposerResetThunk(async () => ({ ok: false, reason: 'busy' }), (s) => emitted.push(s)),
+    })
+    await filter.match(matchInput('/reset', 'proj-A'))
+    expect(emitted).toEqual([])
+  })
+
+  test('does NOT emit on no_live_session', async () => {
+    const emitted: string[] = []
+    const filter = buildResetChatCommandFilter({
+      reset: buildComposerResetThunk(async () => ({ ok: false, reason: 'no_live_session' }), (s) => emitted.push(s)),
+    })
+    await filter.match(matchInput('/reset', 'proj-A'))
+    expect(emitted).toEqual([])
+  })
+})
+
 describe('formatResetOutcome', () => {
   const cases: Array<[ResetChatOutcome, string]> = [
     [{ ok: true, sessions_reset: 1 }, 'context cleared'],

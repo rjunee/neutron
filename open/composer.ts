@@ -134,7 +134,11 @@ import {
   buildResetChatCommandFilter,
   type StatusSnapshot,
 } from '@neutronai/gateway/boot-helpers.ts'
-import { resetPooledSessionContext } from '@neutronai/runtime/adapters/claude-code/persistent/context-reset.ts'
+import {
+  createPooledContextResetSweep,
+  resetPooledSessionContext,
+} from '@neutronai/runtime/adapters/claude-code/persistent/context-reset.ts'
+import { startContextResetPolicy } from '@neutronai/gateway/wiring/context-reset-policy.ts'
 import {
   SkillForge,
   SkillForgeProposalsStore,
@@ -1454,15 +1458,31 @@ export function buildOpenGraphComposer(
     // `OWNER_USER_ID`, the runtime primitive) exist at chain-build time, so no
     // `late<T>` holder is needed — unlike `/status`, whose snapshot reads stores
     // built later in this closure.
+    // Layer B (SPEC WAVE 3.5) — the context-reset REHYDRATION bus. A reset (the
+    // periodic policy OR a manual `/reset`) that clears a warm session's context
+    // emits its project scope here; the live-agent runner subscribes and un-marks
+    // every topic in that scope warm, so its next turn re-composes COLD (full
+    // grounding re-assembled from external state). One bus, both actuators.
+    const contextResetListeners = new Set<(scope: string) => void>()
+    const emitContextResetScope = (scope: string): void => {
+      for (const l of contextResetListeners) l(scope)
+    }
+
     const resetChatCommandFilter = buildResetChatCommandFilter({
-      reset: async (input) =>
-        resetPooledSessionContext({
+      reset: async (input) => {
+        const outcome = await resetPooledSessionContext({
           // MUST match the liveAgentSubstrate id in open/wiring/substrates.ts.
           substrate_instance_id: `cc-agent-${owner_handle}`,
           user_id: OWNER_USER_ID,
           // MUST mirror build-live-agent-turn.ts `turn.project_id ?? 'general'`.
           project_scope: input.project_id ?? 'general',
-        }),
+        })
+        // On a successful clear, rehydrate through the SAME path the periodic
+        // policy uses (closes the known /reset persona-loss gap: the next turn
+        // re-composes cold instead of the warm session losing its system prefix).
+        if (outcome.ok) emitContextResetScope(input.project_id ?? 'general')
+        return outcome
+      },
     })
 
     // Chat-command filter (Free Cores `/cal`/`/email`/`/note`/`/remind`/
@@ -3380,6 +3400,15 @@ export function buildOpenGraphComposer(
               formatWorkBoardFragment(
                 workBoardStore.listActive(workBoardScopeKey(slug, project_id)),
               ),
+            // Layer B (SPEC WAVE 3.5) — the rehydration seam. The context-reset bus
+            // (periodic policy + manual `/reset`) publishes a reset scope here; the
+            // runner un-marks every topic in that scope warm so its next turn
+            // re-composes COLD (full grounding re-assembled from external state).
+            contextResetSignal: {
+              subscribe: (l: (scope: string) => void): void => {
+                contextResetListeners.add(l)
+              },
+            },
             // RC3 ([BEHAVIOR]) — agent-nexus re-grounding. Read the recent
             // decision/handoff/learning events OTHER agents recorded on THIS
             // project (an overnight trident Argus verdict, an owner correction)
@@ -3423,6 +3452,31 @@ export function buildOpenGraphComposer(
             owner_home,
           })
         : null
+
+    // Layer B (SPEC WAVE 3.5) — the periodic orchestrator context-reset policy.
+    // Only wired when the live-agent substrate exists (an LLM-less boot has NO
+    // warm `cc-agent-*` sessions to sweep, so there is nothing to reset). Every
+    // tick sweeps the owner's warm orchestrator pool; a session whose post-compact
+    // transcript grew ≥ 2 MB since its last reset is idle-gated `/clear`-ed, and
+    // its scope is emitted on the SAME reset bus the `/reset` command uses so the
+    // next turn re-composes cold (lossless rehydrate). The `session-size-watchdog`
+    // stays the wedge backstop; this keeps the orchestrator in the good zone.
+    if (liveAgentSubstrate !== null) {
+      const contextResetSweep = createPooledContextResetSweep()
+      const contextResetPolicy = startContextResetPolicy({
+        sweep: (should_reset) =>
+          contextResetSweep.sweep({
+            // MUST match the /reset thunk + liveAgentSubstrate id (cc-agent-<handle>).
+            substrate_instance_id: `cc-agent-${owner_handle}`,
+            user_id: OWNER_USER_ID,
+            should_reset,
+          }),
+        onScopeReset: emitContextResetScope,
+      })
+      realmodeCleanups.push(() => {
+        contextResetPolicy.stop()
+      })
+    }
     // C3d — the app-ws adapter `late<T>` two-phase seam. adapter ↔ receiver are
     // mutually referential (the receiver replies via `adapter.send`); the seam
     // breaks the cycle without a `used-before-assigned` hazard. The socket cannot

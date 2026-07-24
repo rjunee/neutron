@@ -21,6 +21,7 @@
 import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
 import { pool } from './pool-state.ts'
 import type { ReplSession } from './repl-session.ts'
+import { measurePostCompactSize, sessionJsonlPath } from './session-size-watchdog.ts'
 import {
   CONTEXT_RESET_COMMAND,
   DEFAULT_IDLE_MAX_MS,
@@ -105,51 +106,252 @@ export async function resetPooledSessionContext(
 
   let resetCount = 0
   for (const session of live) {
-    // BOUNDED acquire: `acquireTurn()` enqueues the slot SYNCHRONOUSLY on call, so
-    // once we've called it the slot WILL eventually be granted. Race it against a
-    // timeout — if the timeout wins we must NOT drop the (still-queued) grant on
-    // the floor: self-release it when it lands, else the session's turn mutex
-    // wedges forever (every later `acquireTurn` awaits a `prev` that never
-    // resolves). Nothing is written on the busy path.
-    const acquireP = session.acquireTurn()
-    const granted = await Promise.race([
-      acquireP.then(() => true),
-      Bun.sleep(waitMs).then(() => false),
-    ])
-    if (!granted) {
-      fireAndForget(
-        'context-reset.selfReleaseAbandonedSlot',
-        acquireP.then((release) => release()),
-      )
-      return { ok: false, reason: 'busy' }
-    }
-
-    const release = await acquireP
-    try {
-      // Re-check liveness under the mutex — the child could have exited while we
-      // waited for the slot.
-      if (session.hasChildExited()) continue
-      // The pool.ts:378-385 sequence verbatim: settle idle, write `/clear`, force
-      // a beat so the idle wait can't short-circuit before the TUI reacts, settle
-      // idle again so the REPL is clean + at rest for the next turn.
-      await waitForReplIdle(session, quietMs, maxMs)
-      session.child.write(`${CONTEXT_RESET_COMMAND}\r`)
-      await Bun.sleep(quietMs)
-      await waitForReplIdle(session, quietMs, maxMs)
-      resetCount += 1
-    } catch (err) {
-      return {
-        ok: false,
-        reason: 'reset_failed',
-        detail: err instanceof Error ? err.message : String(err),
-      }
-    } finally {
-      release()
-    }
+    // Delegate the per-session actuation to the shared helper (below). External
+    // behavior + return shape are unchanged: a `busy`/`failed` outcome short-
+    // circuits with the corresponding reason; a `dead` session is skipped (the
+    // child exited between the resolve-loop liveness filter and the mutex); a
+    // `reset` counts toward `sessions_reset`.
+    const outcome = await actuateSessionContextReset(session, {
+      acquire_wait_ms: waitMs,
+      idle_quiet_ms: quietMs,
+      idle_max_ms: maxMs,
+    })
+    if (outcome === 'busy') return { ok: false, reason: 'busy' }
+    if (outcome === 'failed') return { ok: false, reason: 'reset_failed' }
+    if (outcome === 'dead') continue
+    resetCount += 1
   }
 
   // Every match was skipped as dead under the mutex ⇒ nothing was actually
   // cleared; report honestly rather than a hollow ok:0.
   if (resetCount === 0) return { ok: false, reason: 'no_live_session' }
   return { ok: true, sessions_reset: resetCount }
+}
+
+/**
+ * Per-session `/clear` actuation, extracted from {@link resetPooledSessionContext}
+ * so BOTH the user-facing `/reset` command and the periodic Layer-B sweep
+ * (`createPooledContextResetSweep`) actuate through the SAME mutex-safe path.
+ *
+ * Runs UNDER the session's `acquireTurn()` mutex so it can never race a live
+ * in-flight turn's inject. Return codes:
+ *  - `'reset'`  — `/clear\r` written; the model transcript is cleared, process alive.
+ *  - `'busy'`   — a turn is still in flight after `acquire_wait_ms`; NOTHING written
+ *                 (the still-queued mutex grant self-releases so no later turn wedges).
+ *  - `'dead'`   — the child exited before or under the mutex (nothing to clear).
+ *  - `'failed'` — the actuation threw. Carries NO detail — callers log the context.
+ */
+export async function actuateSessionContextReset(
+  session: ReplSession,
+  opts: { acquire_wait_ms: number; idle_quiet_ms: number; idle_max_ms: number },
+): Promise<'reset' | 'busy' | 'dead' | 'failed'> {
+  // Pre-mutex liveness: an already-exited child has nothing to clear.
+  if (session.hasChildExited()) return 'dead'
+
+  // BOUNDED acquire: `acquireTurn()` enqueues the slot SYNCHRONOUSLY on call, so
+  // once we've called it the slot WILL eventually be granted. Race it against a
+  // timeout — if the timeout wins we must NOT drop the (still-queued) grant on the
+  // floor: self-release it when it lands, else the session's turn mutex wedges
+  // forever (every later `acquireTurn` awaits a `prev` that never resolves).
+  // Nothing is written on the busy path.
+  const acquireP = session.acquireTurn()
+  const granted = await Promise.race([
+    acquireP.then(() => true),
+    Bun.sleep(opts.acquire_wait_ms).then(() => false),
+  ])
+  if (!granted) {
+    fireAndForget(
+      'context-reset.selfReleaseAbandonedSlot',
+      acquireP.then((release) => release()),
+    )
+    return 'busy'
+  }
+
+  const release = await acquireP
+  try {
+    // Re-check liveness under the mutex — the child could have exited while we
+    // waited for the slot.
+    if (session.hasChildExited()) return 'dead'
+    // The pool.ts:378-385 sequence verbatim: settle idle, write `/clear`, force a
+    // beat so the idle wait can't short-circuit before the TUI reacts, settle idle
+    // again so the REPL is clean + at rest for the next turn.
+    await waitForReplIdle(session, opts.idle_quiet_ms, opts.idle_max_ms)
+    session.child.write(`${CONTEXT_RESET_COMMAND}\r`)
+    await Bun.sleep(opts.idle_quiet_ms)
+    await waitForReplIdle(session, opts.idle_quiet_ms, opts.idle_max_ms)
+    return 'reset'
+  } catch {
+    return 'failed'
+  } finally {
+    release()
+  }
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// Layer B — periodic composer-side context reset + rehydrate (SPEC WAVE 3.5).
+//
+// The CLI persistent-REPL context-editing beta (`clear_tool_uses` tool-result
+// eviction) is NOT available for the interactive `claude` PTY REPL substrate —
+// no CLI flag, no codebase primitive (verified 2026-07-23). Layer B is therefore
+// the composer-side periodic reset: when a warm orchestrator session's LIVE
+// context grows past the good-zone band, actuate `/clear` (the SAME primitive as
+// `/reset`), then re-mark the topic cold so its next turn re-assembles the full
+// grounding (work board + STATUS + docs + persona) — lossless because every
+// durable piece of state is external. This is the aggressive-reset half; the
+// rehydration half lives in the gateway runner (`contextResetSignal`) + composer.
+// ───────────────────────────────────────────────────────────────────────────
+
+/**
+ * Default post-compact live-delta threshold at/above which the sweep resets a
+ * warm orchestrator session: 2 MB of growth SINCE the last reset.
+ *
+ * Well under the 5 MB warn / 10 MB critical wedge bands of `session-size-
+ * watchdog.ts`: Layer B keeps the orchestrator in the good zone with frequent
+ * small resets, and the size watchdog stays the wedge backstop for the rare
+ * session that outruns it (e.g. one enormous turn between ticks).
+ */
+export const DEFAULT_CONTEXT_RESET_THRESHOLD_BYTES = 2 * 1024 * 1024
+
+/** Background acquire policy: a busy session is skipped and retried next tick, so
+ *  the sweep waits only briefly for the mutex (NOT the interactive `/reset`'s 8 s
+ *  ride-out — a periodic sweep must never block on a live turn). */
+const SWEEP_ACQUIRE_WAIT_MS = 2_000
+
+export interface SweepReport {
+  /** Sessions whose live-delta crossed the threshold and were `/clear`-ed. */
+  reset: Array<{ project_scope: string; bytes_live: number }>
+  /** Sessions left untouched, with the reason nothing was written to their PTY. */
+  skipped: Array<{
+    project_scope: string
+    reason: 'busy' | 'under_threshold' | 'no_new_turns' | 'cooldown' | 'dead' | 'failed'
+  }>
+}
+
+/**
+ * Build a stateful sweep over the owner's warm `cc-agent-*` orchestrator pool.
+ *
+ * One call to `sweep()` walks every pooled session matching the (instance, user)
+ * prefix — wildcarding BOTH the project and credential key dimensions — and, for
+ * each idle session whose POST-COMPACT transcript has grown ≥ `threshold_bytes`
+ * SINCE its last reset, actuates `/clear` (mutex-safe, never mid-turn) and
+ * records a per-scope report.
+ *
+ * The no-loop invariant is a per-session-object BASELINE delta held in a
+ * `WeakMap` inside the returned closure: the trigger fires only on growth since
+ * the last reset, never on the stale absolute pre-clear size. See the inline
+ * comment at the actuation for WHY the delta (not the absolute) is correct
+ * regardless of whether CC rotates the transcript JSONL after `/clear`.
+ */
+export function createPooledContextResetSweep(opts?: {
+  threshold_bytes?: number
+  projects_dir?: string
+  acquire_wait_ms?: number
+  idle_quiet_ms?: number
+  idle_max_ms?: number
+}): {
+  sweep(input: {
+    substrate_instance_id: string
+    user_id: string
+    should_reset?: (project_scope: string) => boolean
+  }): Promise<SweepReport>
+} {
+  const thresholdBytes = opts?.threshold_bytes ?? DEFAULT_CONTEXT_RESET_THRESHOLD_BYTES
+  const acquireWaitMs = opts?.acquire_wait_ms ?? SWEEP_ACQUIRE_WAIT_MS
+  const idleQuietMs = opts?.idle_quiet_ms ?? DEFAULT_IDLE_QUIET_MS
+  const idleMaxMs = opts?.idle_max_ms ?? DEFAULT_IDLE_MAX_MS
+  const projectsDir = opts?.projects_dir // undefined → sessionJsonlPath default (homedir)
+
+  // The no-loop invariant: a per-session baseline of the last-observed
+  // post-compact bytes + turns-served. Keyed on the `ReplSession` OBJECT so a
+  // respawn (a NEW `ReplSession`) naturally restarts at baseline 0 — and the
+  // entry is GC'd with the session, so this never leaks across the pool's churn.
+  const baselines = new WeakMap<ReplSession, { bytes: number; turns: number }>()
+
+  const measure = (session: ReplSession): number | null =>
+    measurePostCompactSize(sessionJsonlPath(session.sessionId, session.cwd, projectsDir))
+
+  return {
+    async sweep(input): Promise<SweepReport> {
+      const report: SweepReport = { reset: [], skipped: [] }
+      // 2-dim pool prefix — wildcards BOTH the project AND credential dims (the
+      // full key is `[instance, user, project, credential]`). The TRAILING
+      // separator makes a legacy 2-dim key (one separator total) unmatchable, so a
+      // pre-4-dim session can never false-match.
+      const prefix = [input.substrate_instance_id, input.user_id].join(SESSION_KEY_SEP) + SESSION_KEY_SEP
+
+      const matched: Array<{ key: string; sessionP: Promise<ReplSession> }> = []
+      for (const [key, sessionP] of pool) {
+        if (key.startsWith(prefix)) matched.push({ key, sessionP })
+      }
+
+      for (const { key, sessionP } of matched) {
+        const project_scope = key.split(SESSION_KEY_SEP)[2] ?? 'general'
+        // Resolve; a still-spawning promise that REJECTED is silently dropped
+        // (no live session — same as `resetPooledSessionContext`), not reported.
+        let session: ReplSession
+        try {
+          session = await sessionP
+        } catch {
+          continue
+        }
+        // An already-exited child → skip 'dead'.
+        if (session.hasChildExited()) {
+          report.skipped.push({ project_scope, reason: 'dead' })
+          continue
+        }
+        // Caller's cooldown predicate vetoes this scope → measure NOTHING.
+        if (input.should_reset?.(project_scope) === false) {
+          report.skipped.push({ project_scope, reason: 'cooldown' })
+          continue
+        }
+        // Busy PRE-CHECK: never contend the mutex on a live turn.
+        if (session.activeTurn !== undefined) {
+          report.skipped.push({ project_scope, reason: 'busy' })
+          continue
+        }
+        // MEASUREMENT — baseline delta (the no-loop invariant).
+        const measured = measure(session)
+        if (measured === null) {
+          report.skipped.push({ project_scope, reason: 'failed' })
+          continue
+        }
+        const baseline = baselines.get(session) ?? { bytes: 0, turns: 0 }
+        // An idle scope is never reset twice: no turn has run since the last reset,
+        // so the transcript cannot have grown from live use.
+        if (session.turnsServedThisIncarnation() <= baseline.turns) {
+          report.skipped.push({ project_scope, reason: 'no_new_turns' })
+          continue
+        }
+        const bytesLive = Math.max(0, measured - baseline.bytes)
+        if (bytesLive < thresholdBytes) {
+          report.skipped.push({ project_scope, reason: 'under_threshold' })
+          continue
+        }
+        // Over threshold → actuate the SAME mutex-safe `/clear` the `/reset`
+        // command uses.
+        const outcome = await actuateSessionContextReset(session, {
+          acquire_wait_ms: acquireWaitMs,
+          idle_quiet_ms: idleQuietMs,
+          idle_max_ms: idleMaxMs,
+        })
+        if (outcome === 'reset') {
+          // WHY baseline-delta (not absolute size): whether CC keeps appending the
+          // same pinned-session JSONL after `/clear` or rotates to a NEW file, an
+          // absolute-size trigger would re-fire forever on the stale pre-clear
+          // bytes. The delta trigger fires only on growth SINCE this reset — so we
+          // RE-MEASURE immediately and stamp the new baseline (bytes + turns). A
+          // respawned session (new `ReplSession`) restarts at baseline 0 naturally.
+          baselines.set(session, {
+            bytes: measure(session) ?? measured,
+            turns: session.turnsServedThisIncarnation(),
+          })
+          report.reset.push({ project_scope, bytes_live: bytesLive })
+        } else {
+          // 'busy' | 'dead' | 'failed' — a raced turn/exit/throw under the mutex.
+          report.skipped.push({ project_scope, reason: outcome })
+        }
+      }
+      return report
+    },
+  }
 }
