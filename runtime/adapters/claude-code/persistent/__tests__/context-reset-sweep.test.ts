@@ -28,7 +28,7 @@ import { join } from 'node:path'
 
 import { pool } from '../pool-state.ts'
 import { ReplSession } from '../repl-session.ts'
-import { createPooledContextResetSweep } from '../context-reset.ts'
+import { createPooledContextResetSweep, resetPooledSessionContext } from '../context-reset.ts'
 import { sessionJsonlPath } from '../session-size-watchdog.ts'
 import { SESSION_KEY_SEP } from '../signatures.ts'
 import type { PtyChild } from '../pty-host.ts'
@@ -52,20 +52,33 @@ function freshProjectsDir(): string {
 }
 
 /** A fake warm session inserted directly into the pool. `writes` captures every
- *  raw PTY write; `acquireCount` proves whether the mutex was ever contended. */
+ *  raw PTY write; `acquireCount` proves whether the mutex was ever contended;
+ *  `releaseCount` proves whether the turn mutex has been released yet (used to
+ *  assert the rehydration un-mark fires BEFORE release). `onClear` fires when the
+ *  `/clear` command is written — used to simulate a transcript rotation (delete
+ *  the JSONL) or a PTY-write throw. */
 function makeFakeSession(opts: {
   sessionId: string
   project: string
   credential?: string
   turnsServed: number
   exited?: boolean
-}): { session: ReplSession; writes: string[]; acquireCount: () => number; key: string } {
+  onClear?: () => void
+}): {
+  session: ReplSession
+  writes: string[]
+  acquireCount: () => number
+  releaseCount: () => number
+  key: string
+} {
   const writes: string[] = []
   let exited = opts.exited ?? false
   const child: PtyChild = {
     pid: 4242,
     write(data: string | Uint8Array): void {
-      writes.push(typeof data === 'string' ? data : Buffer.from(data).toString('utf8'))
+      const s = typeof data === 'string' ? data : Buffer.from(data).toString('utf8')
+      writes.push(s)
+      if (s === '/clear\r') opts.onClear?.()
     },
     resize(): void {},
     kill(): void {
@@ -80,14 +93,20 @@ function makeFakeSession(opts: {
   // Ancient lastDataAt so `waitForReplIdle(quiet=0)` returns immediately.
   session.lastDataAt = 0
   for (let i = 0; i < opts.turnsServed; i++) session.nextTurnId()
-  // Count acquireTurn contention to prove the busy pre-check never hits the mutex.
+  // Count acquireTurn contention to prove the busy pre-check never hits the mutex,
+  // and wrap the release fn so a test can observe when the mutex is released.
   let acquires = 0
+  let releases = 0
   const realAcquire = session.acquireTurn.bind(session)
   session.acquireTurn = async (): Promise<() => void> => {
     acquires += 1
-    return realAcquire()
+    const rel = await realAcquire()
+    return () => {
+      releases += 1
+      rel()
+    }
   }
-  return { session, writes, acquireCount: () => acquires, key }
+  return { session, writes, acquireCount: () => acquires, releaseCount: () => releases, key }
 }
 
 function insert(entry: { session: ReplSession; key: string }): void {
@@ -117,8 +136,12 @@ const CLEARS = (writes: string[]): number => writes.filter((w) => w === '/clear\
 const THRESHOLD = 1000
 const SWEEP_ARGS = { threshold_bytes: THRESHOLD, idle_quiet_ms: 0, idle_max_ms: 50 } as const
 
-function newSweep() {
-  return createPooledContextResetSweep({ ...SWEEP_ARGS, projects_dir: tmpProjectsDir })
+function newSweep(onScopeReset?: (scope: string) => void) {
+  return createPooledContextResetSweep({
+    ...SWEEP_ARGS,
+    projects_dir: tmpProjectsDir,
+    ...(onScopeReset !== undefined ? { onScopeReset } : {}),
+  })
 }
 
 describe('createPooledContextResetSweep — Layer B periodic sweep', () => {
@@ -238,5 +261,99 @@ describe('createPooledContextResetSweep — Layer B periodic sweep', () => {
     expect(CLEARS(s.writes)).toBe(0)
     expect(r.reset).toEqual([])
     expect(r.skipped).toEqual([{ project_scope: 'proj-A', reason: 'dead' }])
+  })
+
+  it('(ix) onScopeReset fires per reset scope UNDER the mutex — after /clear, BEFORE release (Argus r1 blocker)', async () => {
+    freshProjectsDir()
+    const a = makeFakeSession({ sessionId: 'sid-ix-a', project: 'proj-A', turnsServed: 1 })
+    const b = makeFakeSession({ sessionId: 'sid-ix-b', project: 'proj-B', turnsServed: 1 })
+    const under = makeFakeSession({ sessionId: 'sid-ix-u', project: 'proj-U', turnsServed: 1 })
+    insert(a)
+    insert(b)
+    insert(under)
+    writeJsonl('sid-ix-a', 2000) // over threshold → reset
+    writeJsonl('sid-ix-b', 2000) // over threshold → reset
+    writeJsonl('sid-ix-u', 500) // under threshold → NO reset, NO un-mark
+
+    // Record, at each un-mark, whether that scope's session had already written
+    // `/clear` (proves the un-mark is AFTER the clear) and whether its turn mutex
+    // was still held (releaseCount 0 → BEFORE release — "before releasing control").
+    const sessByScope: Record<string, ReturnType<typeof makeFakeSession>> = {
+      'proj-A': a,
+      'proj-B': b,
+    }
+    const unmarks: Array<{ scope: string; clearsAtCall: number; releasesAtCall: number }> = []
+    const sweep = newSweep((scope) => {
+      const s = sessByScope[scope]!
+      unmarks.push({ scope, clearsAtCall: CLEARS(s.writes), releasesAtCall: s.releaseCount() })
+    })
+
+    const r = await sweep.sweep({ substrate_instance_id: INSTANCE, user_id: USER })
+
+    // Un-marked EXACTLY the two reset scopes (never the under-threshold one).
+    expect(unmarks.map((u) => u.scope).sort()).toEqual(['proj-A', 'proj-B'])
+    for (const u of unmarks) {
+      expect(u.clearsAtCall).toBe(1) // the `/clear` for this session already landed
+      expect(u.releasesAtCall).toBe(0) // the turn mutex is STILL held (before release)
+    }
+    // The under-threshold session was never cleared and never un-marked.
+    expect(CLEARS(under.writes)).toBe(0)
+    expect(unmarks.some((u) => u.scope === 'proj-U')).toBe(false)
+    expect(r.reset.map((x) => x.project_scope).sort()).toEqual(['proj-A', 'proj-B'])
+  })
+
+  it('(x) rotation-robust baseline — a null re-measure after /clear stamps baseline 0, not the stale pre-clear size (Argus r1 major)', async () => {
+    freshProjectsDir()
+    const path = sessionJsonlPath('sid-rot', CWD, tmpProjectsDir)
+    // `/clear` "rotates" the transcript away → the re-measure reads null.
+    const s = makeFakeSession({
+      sessionId: 'sid-rot',
+      project: 'proj-A',
+      turnsServed: 1,
+      onClear: () => rmSync(path, { force: true }),
+    })
+    insert(s)
+    writeJsonl('sid-rot', 2000) // over the 1000-byte threshold
+
+    const sweep = newSweep()
+    const r1 = await sweep.sweep({ substrate_instance_id: INSTANCE, user_id: USER })
+    expect(r1.reset).toEqual([{ project_scope: 'proj-A', bytes_live: 2000 }])
+    expect(CLEARS(s.writes)).toBe(1)
+
+    // A new turn runs; a NEW, SMALLER transcript (1500 B) appears — over the
+    // threshold but UNDER the pre-clear 2000. With the rotation-robust baseline 0
+    // this fires again (1500 ≥ 1000). With the buggy `?? measured` (2000) baseline
+    // it would be stuck under threshold (max(0, 1500 - 2000) = 0) and Layer B would
+    // be silently disabled until the new file re-grew past 3000.
+    s.session.nextTurnId() // a real turn ran since the reset
+    writeJsonl('sid-rot', 1500)
+    const r2 = await sweep.sweep({ substrate_instance_id: INSTANCE, user_id: USER })
+    expect(r2.reset).toEqual([{ project_scope: 'proj-A', bytes_live: 1500 }])
+    expect(r2.skipped).toEqual([])
+    expect(CLEARS(s.writes)).toBe(2)
+  })
+
+  it('(xi) actuation throw → resetPooledSessionContext reports reset_failed WITH the error detail (Argus r1 minor)', async () => {
+    freshProjectsDir()
+    // The PTY write throws when `/clear` is issued → the actuation catches it and
+    // surfaces the message so `/reset` renders the real cause, not "unknown error".
+    const s = makeFakeSession({
+      sessionId: 'sid-xi',
+      project: 'proj-A',
+      turnsServed: 1,
+      onClear: () => {
+        throw new Error('pty write EPIPE')
+      },
+    })
+    insert(s)
+
+    const out = await resetPooledSessionContext({
+      substrate_instance_id: INSTANCE,
+      user_id: USER,
+      project_scope: 'proj-A',
+      idle_quiet_ms: 0,
+      idle_max_ms: 50,
+    })
+    expect(out).toEqual({ ok: false, reason: 'reset_failed', detail: 'pty write EPIPE' })
   })
 })

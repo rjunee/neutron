@@ -109,7 +109,10 @@ its live window small, a periodic policy (`gateway/wiring/context-reset-policy.t
 for each idle session whose POST-COMPACT transcript has grown ≥ 2 MB
 (`DEFAULT_CONTEXT_RESET_THRESHOLD_BYTES`) SINCE its last reset, it actuates `/clear`
 (the SAME mutex-safe `actuateSessionContextReset` the `/reset` command uses, never
-mid-turn) and emits the scope on the context-reset bus. The runner
+mid-turn) and — SYNCHRONOUSLY, under that session's turn mutex, the instant `/clear`
+lands and before the mutex releases — emits the scope on the context-reset bus. (The
+un-mark rides the sweep's actuation, not a post-sweep loop, so a turn that acquires
+the just-cleared session next can never run warm/bare on an emptied REPL.) The runner
 (`build-live-agent-turn.ts`) subscribes via `contextResetSignal`: on a scope-S
 signal it un-marks warm every topic in S, so the next turn re-runs
 `composeFirstTurnPrompt` — the lossless external-state rehydration (work board +

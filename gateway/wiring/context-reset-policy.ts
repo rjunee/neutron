@@ -1,9 +1,15 @@
 /**
  * context-reset-policy.ts — Layer B periodic orchestrator context-reset policy
  * (SPEC WAVE 3.5). A pure DI tick loop that drives the runtime's context-reset
- * SWEEP on a cadence and, per scope that was reset, stamps a per-scope cooldown
- * and fires the rehydration signal so the next turn on that project scope
- * re-composes as a COLD first turn (full grounding re-assembled).
+ * SWEEP on a cadence and, per scope that was reset, stamps a per-scope cooldown.
+ *
+ * The rehydration UN-MARK does NOT live here — it fires INSIDE the sweep, under
+ * each session's turn mutex the instant its `/clear` lands (the sweep's
+ * `onScopeReset`), so a turn that acquires a just-cleared session next re-composes
+ * COLD before it can run. Firing it here, in a post-sweep loop, left a whole
+ * multi-session-sweep window in which a warm bare turn could run on an already-
+ * cleared REPL (Argus r1 blocker). This policy therefore owns only cadence +
+ * cooldown; the sweep owns the reset actuation AND its synchronous un-mark.
  *
  * Pure DI — this module imports NOTHING from the runtime adapter (the sweep + the
  * scope-reset signal arrive as injected functions), so the gateway→runtime
@@ -40,10 +46,6 @@ export interface ContextResetPolicyDeps {
   sweep: (
     should_reset: (project_scope: string) => boolean,
   ) => Promise<{ reset: Array<{ project_scope: string }> }>
-  /** Fire the rehydration signal for a scope that was reset (composer's
-   *  `emitContextResetScope`) — un-marks warm every topic in that scope so the
-   *  next turn re-composes cold. Called once per reset scope. */
-  onScopeReset: (project_scope: string) => void
   /** Cadence in ms. Default {@link DEFAULT_CONTEXT_RESET_TICK_MS} (5 min). */
   intervalMs?: number
   /** Per-scope cooldown in ms. Default {@link DEFAULT_CONTEXT_RESET_COOLDOWN_MS}
@@ -70,8 +72,9 @@ export interface ContextResetPolicy {
 /**
  * Start the periodic context-reset policy. Every `intervalMs` it sweeps the warm
  * orchestrator pool with a cooldown-derived predicate, then for each scope that
- * was reset stamps the cooldown clock and fires `onScopeReset` (the rehydration
- * signal). A throwing sweep is caught → `onError`, and the loop keeps ticking.
+ * was reset stamps the cooldown clock (the sweep already un-marked the scope for
+ * rehydration under the mutex). A throwing sweep is caught → `onError`, and the
+ * loop keeps ticking.
  * Overlapping ticks are guarded (a slow sweep that outruns the cadence skips the
  * next tick rather than running two sweeps concurrently).
  */
@@ -103,9 +106,11 @@ export function startContextResetPolicy(deps: ContextResetPolicyDeps): ContextRe
       const predicate = (scope: string): boolean =>
         now() - (lastResetAt.get(scope) ?? -Infinity) >= cooldownMs
       const report = await deps.sweep(predicate)
+      // Stamp the per-scope cooldown clock for every scope the sweep reset. The
+      // rehydration un-mark already fired inside the sweep, under the session
+      // mutex (see the module header) — the policy does NOT re-fire it here.
       for (const { project_scope } of report.reset) {
         lastResetAt.set(project_scope, now())
-        deps.onScopeReset(project_scope)
       }
     } catch (err) {
       onError(err)

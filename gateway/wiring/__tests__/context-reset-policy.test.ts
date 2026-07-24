@@ -4,8 +4,14 @@
  * DI timers + clock: `setIntervalFn` captures the cadence callback so the test
  * drives ticks manually, and `now()` is a mutable clock so the per-scope cooldown
  * is exercised deterministically. Real state assertions: the sweep predicate's
- * truth value per scope, `onScopeReset` firing once per reset scope, error
- * survival, the overlapping-tick guard, and `stop()` clearing the interval.
+ * truth value per scope (proving the cooldown clock is stamped for every reset
+ * scope), the sweep-call count, error survival, the overlapping-tick guard, and
+ * `stop()` clearing the interval.
+ *
+ * The rehydration UN-MARK is NOT the policy's job — it fires inside the sweep under
+ * the session mutex (Argus r1 blocker fix), so it is asserted in the runtime sweep
+ * suite (`context-reset-sweep.test.ts`), not here. This suite proves only the
+ * policy's two responsibilities: cadence and per-scope cooldown.
  */
 import { describe, expect, test } from 'bun:test'
 import { startContextResetPolicy } from '../context-reset-policy.ts'
@@ -19,11 +25,9 @@ function harness(overrides: {
 }) {
   let captured: (() => void) | undefined
   let cleared = false
-  const resetScopes: string[] = []
   const errors: unknown[] = []
   const policy = startContextResetPolicy({
     sweep: overrides.sweep,
-    onScopeReset: (scope) => resetScopes.push(scope),
     ...(overrides.cooldownMs !== undefined ? { cooldownMs: overrides.cooldownMs } : {}),
     now: overrides.now,
     setIntervalFn: (cb) => {
@@ -37,7 +41,6 @@ function harness(overrides: {
   })
   return {
     policy,
-    resetScopes,
     errors,
     isCleared: () => cleared,
     fireCadence: () => captured?.(),
@@ -57,17 +60,15 @@ describe('startContextResetPolicy', () => {
     }
     const h = harness({ sweep, cooldownMs, now: () => clock })
 
-    // Tick 1: proj-A never reset → predicate true → sweep resets it → onScopeReset.
+    // Tick 1: proj-A never reset → predicate true → sweep resets it → cooldown stamped.
     await h.policy.tick()
     expect(predicateResults[0]).toEqual({ scope: 'proj-A', allowed: true })
-    expect(h.resetScopes).toEqual(['proj-A'])
 
-    // Tick 2 within cooldown: predicate must now be FALSE for proj-A.
+    // Tick 2 within cooldown: predicate must now be FALSE for proj-A — proving the
+    // reset stamped the cooldown clock.
     clock += cooldownMs - 1
     await h.policy.tick()
     expect(predicateResults[1]).toEqual({ scope: 'proj-A', allowed: false })
-    // No new reset scope fired.
-    expect(h.resetScopes).toEqual(['proj-A'])
 
     // Tick 3 past cooldown: predicate true again.
     clock += 2
@@ -75,13 +76,28 @@ describe('startContextResetPolicy', () => {
     expect(predicateResults[2]).toEqual({ scope: 'proj-A', allowed: true })
   })
 
-  test('onScopeReset fires once per reset scope', async () => {
-    const sweep: SweepFn = async () => ({
-      reset: [{ project_scope: 'proj-A' }, { project_scope: 'proj-B' }],
-    })
-    const h = harness({ sweep, now: () => 0 })
+  test('cooldown is stamped for EVERY scope the sweep reset (multi-scope)', async () => {
+    let clock = 0
+    const cooldownMs = 1000
+    const predicateResults: Array<Record<string, boolean>> = []
+    const sweep: SweepFn = async (should_reset) => {
+      predicateResults.push({ A: should_reset('proj-A'), B: should_reset('proj-B') })
+      // Reset BOTH scopes on the first tick only.
+      return {
+        reset: predicateResults.length === 1
+          ? [{ project_scope: 'proj-A' }, { project_scope: 'proj-B' }]
+          : [],
+      }
+    }
+    const h = harness({ sweep, cooldownMs, now: () => clock })
+
+    await h.policy.tick() // both never reset → both allowed → both reset
+    expect(predicateResults[0]).toEqual({ A: true, B: true })
+
+    // Still inside cooldown for BOTH — each was stamped.
+    clock += cooldownMs - 1
     await h.policy.tick()
-    expect(h.resetScopes.sort()).toEqual(['proj-A', 'proj-B'])
+    expect(predicateResults[1]).toEqual({ A: false, B: false })
   })
 
   test('a throwing sweep goes to onError and the next tick still runs', async () => {
@@ -95,10 +111,10 @@ describe('startContextResetPolicy', () => {
 
     await h.policy.tick() // throws → caught
     expect(h.errors).toHaveLength(1)
-    expect(h.resetScopes).toEqual([])
+    expect(calls).toBe(1)
 
     await h.policy.tick() // loop survived → still runs
-    expect(h.resetScopes).toEqual(['proj-A'])
+    expect(calls).toBe(2)
   })
 
   test('overlapping ticks are guarded — a second tick while the first is in flight is a no-op', async () => {
@@ -137,11 +153,15 @@ describe('startContextResetPolicy', () => {
   })
 
   test('the cadence callback drives tick() (setIntervalFn wiring)', async () => {
-    const sweep: SweepFn = async () => ({ reset: [{ project_scope: 'proj-A' }] })
+    let sweeps = 0
+    const sweep: SweepFn = async () => {
+      sweeps += 1
+      return { reset: [{ project_scope: 'proj-A' }] }
+    }
     const h = harness({ sweep, now: () => 0 })
     h.fireCadence() // simulate the interval firing
     // The cadence schedules tick() as a floating promise; give it a microtask beat.
     await new Promise((r) => setTimeout(r, 5))
-    expect(h.resetScopes).toEqual(['proj-A'])
+    expect(sweeps).toBe(1)
   })
 })

@@ -3462,7 +3462,15 @@ export function buildOpenGraphComposer(
     // next turn re-composes cold (lossless rehydrate). The `session-size-watchdog`
     // stays the wedge backstop; this keeps the orchestrator in the good zone.
     if (liveAgentSubstrate !== null) {
-      const contextResetSweep = createPooledContextResetSweep()
+      // The rehydration un-mark is threaded INTO the sweep (not the policy) so it
+      // fires under each session's turn mutex the instant `/clear` lands — a turn
+      // that acquires the just-cleared session next re-composes COLD before it can
+      // run (Argus r1 blocker: the policy's post-sweep un-mark left a multi-session
+      // window of warm bare turns on already-cleared REPLs). Same bus the `/reset`
+      // command emits on.
+      const contextResetSweep = createPooledContextResetSweep({
+        onScopeReset: emitContextResetScope,
+      })
       const contextResetPolicy = startContextResetPolicy({
         sweep: (should_reset) =>
           contextResetSweep.sweep({
@@ -3471,10 +3479,14 @@ export function buildOpenGraphComposer(
             user_id: OWNER_USER_ID,
             should_reset,
           }),
-        onScopeReset: emitContextResetScope,
       })
       realmodeCleanups.push(() => {
         contextResetPolicy.stop()
+        // Drop every rehydration listener the live-agent runner registered on the
+        // reset bus, so a composer teardown leaves no dangling subscribers (Argus
+        // r1 nit — the runner's `contextResetSignal.subscribe` has no unsubscribe;
+        // clearing the set here is the single teardown seam).
+        contextResetListeners.clear()
       })
     }
     // C3d — the app-ws adapter `late<T>` two-phase seam. adapter ↔ receiver are
