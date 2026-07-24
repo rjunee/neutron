@@ -130,6 +130,18 @@ describe('loadPersistedInstallToken — boot-time restore from the persisted pat
     expect(process.env['CLAUDE_CODE_OAUTH_TOKEN']).toBe(TOKEN)
   })
 
+  test('strips a surrounding pair of quotes on restore (double + single)', () => {
+    writeFileSync(envPath, `CLAUDE_CODE_OAUTH_TOKEN="${TOKEN}"\n`)
+    process.env[OVERRIDE_VAR] = envPath
+    loadPersistedInstallToken()
+    expect(process.env['CLAUDE_CODE_OAUTH_TOKEN']).toBe(TOKEN)
+
+    delete process.env['CLAUDE_CODE_OAUTH_TOKEN']
+    writeFileSync(envPath, `export CLAUDE_CODE_OAUTH_TOKEN='${TOKEN}'\n`)
+    loadPersistedInstallToken()
+    expect(process.env['CLAUDE_CODE_OAUTH_TOKEN']).toBe(TOKEN)
+  })
+
   test('NEVER clobbers an already-set token (explicit credential wins)', () => {
     writeFileSync(envPath, `CLAUDE_CODE_OAUTH_TOKEN=${TOKEN}\n`)
     process.env[OVERRIDE_VAR] = envPath

@@ -30,23 +30,35 @@ const OVERRIDE_VAR = 'NEUTRON_INSTALL_TOKEN_ENV_PATH'
 const TOKEN = 'sk-ant-oat01-' + 'D'.repeat(40)
 const HERE = dirname(fileURLToPath(import.meta.url))
 
+// Every process-env var `resolveOpenLlmPool` consults, so the "before restore →
+// null" assertion is hermetic regardless of the ambient shell. The tier-2 OAuth
+// var AND the tier-4 API-billing key must BOTH be absent, else the pool resolves
+// non-null before the token is restored and the negative assertion goes red under
+// any shell (or Bun's auto-loaded repo `.env`) that exports one. Tier 5 (ambient
+// Keychain) is neutralized separately by the `probeAmbientAuth: () => false` seam.
+const SCRUBBED_VARS = ['CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY'] as const
+
 let dir: string
 let savedOverride: string | undefined
-let savedOAuth: string | undefined
+const savedScrubbed: Record<string, string | undefined> = {}
 
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), 'neutron-boot-restore-'))
   savedOverride = process.env[OVERRIDE_VAR]
-  savedOAuth = process.env['CLAUDE_CODE_OAUTH_TOKEN']
   delete process.env[OVERRIDE_VAR]
-  delete process.env['CLAUDE_CODE_OAUTH_TOKEN']
+  for (const name of SCRUBBED_VARS) {
+    savedScrubbed[name] = process.env[name]
+    delete process.env[name]
+  }
 })
 afterEach(() => {
   rmSync(dir, { recursive: true, force: true })
   if (savedOverride === undefined) delete process.env[OVERRIDE_VAR]
   else process.env[OVERRIDE_VAR] = savedOverride
-  if (savedOAuth === undefined) delete process.env['CLAUDE_CODE_OAUTH_TOKEN']
-  else process.env['CLAUDE_CODE_OAUTH_TOKEN'] = savedOAuth
+  for (const name of SCRUBBED_VARS) {
+    if (savedScrubbed[name] === undefined) delete process.env[name]
+    else process.env[name] = savedScrubbed[name]!
+  }
 })
 
 describe('boot restore → substrate resolution', () => {
