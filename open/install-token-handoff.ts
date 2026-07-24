@@ -222,7 +222,7 @@ if [ -z "$TOKEN" ]; then
 fi
 
 printf '\\n==> Activating your Neutron workspace…\\n'
-HTTP=$(curl -fsS -o /dev/null -w '%{http_code}' \\
+HTTP=$(curl -fsSL -o /dev/null -w '%{http_code}' \\
   -X POST "$CALLBACK_URL" \\
   -H 'Content-Type: application/json' \\
   --data "{\\"signup_id\\":\\"$SIGNUP_ID\\",\\"token\\":\\"$TOKEN\\"}" || echo '000')
@@ -234,6 +234,25 @@ case "$HTTP" in
   *) printf '\\nERROR: activation failed (HTTP %s). Try again.\\n' "$HTTP" >&2; exit 1 ;;
 esac
 `
+}
+
+/**
+ * Resolve the origin the client actually requested, honouring
+ * `X-Forwarded-Proto` / `X-Forwarded-Host` when a reverse proxy is in front
+ * (e.g. Managed's per-tenant Caddy chain, which terminates TLS and forwards
+ * to this loopback Bun process over plain HTTP). Without this, `url.origin`
+ * reflects the proxy→app hop's scheme (`http:`), not the public one
+ * (`https:`) — producing an `http://` callback URL that the installer script
+ * POSTs to, which Caddy then 308-redirects to `https://` and a bare
+ * `curl -X POST` (no `-L`) fails to follow. Mirrors the same pattern already
+ * used in `landing/auth-gate.ts` (`buildOriginalRequestUrl`).
+ */
+function resolveOrigin(req: Request, url: URL): string {
+  const xfp = req.headers.get('x-forwarded-proto')
+  const xfh = req.headers.get('x-forwarded-host')
+  const proto = (xfp ?? url.protocol.replace(/:$/, '')).split(',')[0]!.trim()
+  const host = (xfh ?? url.host).split(',')[0]!.trim()
+  return `${proto}://${host}`
 }
 
 /**
@@ -258,7 +277,7 @@ export function buildOpenInstallTokenHandler(deps: OpenInstallTokenDeps): OpenIn
     if (path === `${ROUTE_PREFIX}/initiate` && req.method === 'POST') {
       const signup_id = genSignupId()
       const row = store.create(signup_id)
-      const scriptUrl = `${url.origin}${ROUTE_PREFIX}/${signup_id}.sh`
+      const scriptUrl = `${resolveOrigin(req, url)}${ROUTE_PREFIX}/${signup_id}.sh`
       return json({
         signup_id,
         command: `curl -fsSL ${scriptUrl} | bash`,
@@ -274,15 +293,16 @@ export function buildOpenInstallTokenHandler(deps: OpenInstallTokenDeps): OpenIn
       const row = store.get(signup_id)
       if (row === null) return new Response('# install link not found\n', { status: 404 })
       if (row.status !== 'pending') return new Response('# install link expired\n', { status: 410 })
-      // callback_url is derived from the request origin (Host header). Safe for
-      // Open: the server binds 127.0.0.1 by default (`NEUTRON_HOST`), so the
-      // origin is loopback and a remote attacker can't reach it nor read the
-      // minted signup_id (no CORS). An operator who binds beyond loopback via
-      // NEUTRON_HOST owns that exposure (and would want the callback to match
-      // their chosen host anyway). Managed wires an HMAC-gated handler instead.
+      // callback_url is derived from the request origin (Host header, honouring
+      // X-Forwarded-Proto/Host — see resolveOrigin). Safe for Open: the server
+      // binds 127.0.0.1 by default (`NEUTRON_HOST`), so the origin is loopback
+      // and a remote attacker can't reach it nor read the minted signup_id (no
+      // CORS). An operator who binds beyond loopback via NEUTRON_HOST owns that
+      // exposure (and would want the callback to match their chosen host
+      // anyway). Managed wires an HMAC-gated handler instead.
       const script = renderInstallTokenScript({
         signup_id,
-        callback_url: `${url.origin}${ROUTE_PREFIX}/complete`,
+        callback_url: `${resolveOrigin(req, url)}${ROUTE_PREFIX}/complete`,
       })
       return new Response(script, {
         status: 200,
