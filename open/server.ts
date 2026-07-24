@@ -31,6 +31,7 @@ import { resolveBootConfig, envShimFromBootConfig } from '@neutronai/config/inde
 import { resolveNeutronHome } from '@neutronai/migrations/db-path.ts'
 
 import { buildOpenGraphComposer } from './composer.ts'
+import { loadPersistedInstallToken } from './install-token-env.ts'
 import { resolvePersistedCookieSecret } from './session-cookie-secret.ts'
 import { resolveOwnerBearer } from './owner-bearer.ts'
 import { installProcessSafetyNet } from '@neutronai/logger/fire-and-forget.ts'
@@ -51,6 +52,16 @@ import { installProcessSafetyNet } from '@neutronai/logger/fire-and-forget.ts'
  */
 export async function startOpenServer(): Promise<BootHandle> {
   const env = process.env
+  // Restore a previously-persisted install token BEFORE any composer resolves
+  // the LLM substrate (`resolveOpenLlmPool(env)` reads `CLAUDE_CODE_OAUTH_TOKEN`
+  // from this same `env`). Bun auto-loads `<cwd>/.env` at startup, so on a
+  // single-owner install the token is already present and this no-ops. But when
+  // an operator has pointed `NEUTRON_INSTALL_TOKEN_ENV_PATH` at a writable file
+  // OUTSIDE cwd (an isolated instance against a shared read-only checkout),
+  // Bun's cwd-relative auto-load never sees it — so seed it here. Runs ahead of
+  // BOTH the injected-composer branch and the Open composer, and never clobbers
+  // an already-set token.
+  loadPersistedInstallToken()
   // Managed deploy-config injection wins — defer to the injected composer.
   //
   // The S1 owner-bearer resolution + `assertOwnerCredentialPolicy` guard below
