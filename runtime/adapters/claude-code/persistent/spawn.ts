@@ -159,7 +159,7 @@ async function spawnSession(
 
   // Construct + register the session BEFORE spawning so a fast /channel-ready
   // POST from the dev-channel can never race ahead of the sink registration.
-  const session = new ReplSession(sessionKey, sessionId, channelName)
+  const session = new ReplSession(sessionKey, sessionId, channelName, cwd)
   session.toolSurface = toolSurface.join(',')
   // Stamp the active project scope this REPL serves (folded into the pool key, so
   // it is stable for the session's whole lifetime). The `/tool-call` sink reads

@@ -95,7 +95,48 @@ It is deliberately NOT a respawn: `respawnSupervisedSession` was verified to alw
 `--resume` (context-PRESERVING), the wrong primitive. A reset arriving mid-turn
 waits up to `acquire_wait_ms` (8 s) for the turn to settle; still busy → an honest
 deferral reply that clears nothing (and never wedges the mutex — the abandoned slot
-self-releases); no warm session → an honest `no_live_session` reply.
+self-releases); no warm session → an honest `no_live_session` reply. Rehydration is
+per-session UNDER the mutex: the composer threads an `on_reset_under_mutex` callback
+into `resetPooledSessionContext` that emits the turn's project scope on the context-
+reset bus (see **Layer B** below) the instant EACH session's `/clear` lands — so a
+multi-session reset that clears one session then hits `busy`/`reset_failed` on a
+later one STILL rehydrates the already-cleared session (round 4; the earlier
+aggregate-`ok` emit stranded it). The next turn on that scope re-composes COLD — the
+manual `/reset` rehydrates the full grounding on the following turn instead of
+leaving the warm session without its system prefix.
+
+**Layer B — orchestrator context reset + rehydrate (SPEC WAVE 3.5).** The warm
+orchestrator (`cc-agent-*`) REPL accumulates transcript across many turns. To keep
+its live window small, a periodic policy (`gateway/wiring/context-reset-policy.ts`,
+5-min tick, wired in the composer's realmode region) sweeps the owner's warm pool
+(`createPooledContextResetSweep`, `runtime/adapters/claude-code/persistent/context-reset.ts`):
+for each idle session whose POST-COMPACT transcript has grown ≥ 2 MB
+(`DEFAULT_CONTEXT_RESET_THRESHOLD_BYTES`) SINCE its last reset, it actuates `/clear`
+(the SAME mutex-safe `actuateSessionContextReset` the `/reset` command uses, never
+mid-turn) and — SYNCHRONOUSLY, under that session's turn mutex, the instant `/clear`
+lands and before the mutex releases — emits the scope on the context-reset bus. (The
+un-mark rides the sweep's actuation, not a post-sweep loop, so a turn that acquires
+the just-cleared session AFTER the reset lands re-composes cold.) One residual race
+survives the mutex alone: a turn that read `isColdFirstTurn` (chose WARM) BEFORE the
+sweep fired, but re-marks `contextSent` AFTER — its already-built warm prompt would
+resurrect the warm mark on the just-emptied REPL. The runner closes it with a
+per-scope RESET-EPOCH captured at the warm/cold decision and re-checked before the
+re-mark: if a reset for the scope fired in between, the re-mark is SKIPPED so the
+next turn still re-composes cold. The runner
+(`build-live-agent-turn.ts`) subscribes via `contextResetSignal`: on a scope-S
+signal it un-marks warm every topic in S (and bumps the scope's reset-epoch), so the next turn re-runs
+`composeFirstTurnPrompt` — the lossless external-state rehydration (work board +
+STATUS + docs + persona + reflection + memory index + nexus + services re-assembled
+from durable state). The trigger is a per-session BASELINE DELTA (a `WeakMap` keyed
+on the `ReplSession` object) so it fires only on growth since the last reset and can
+never re-fire-loop, regardless of whether CC keeps appending the same JSONL after
+`/clear` or rotates to a new file (a respawned session restarts at baseline 0). A
+per-scope 45-min cooldown gates re-resets. The `session-size-watchdog` (5 MB warn /
+10 MB critical) stays the wedge BACKSTOP; Layer B keeps the orchestrator in the good
+zone. The CLI persistent-REPL context-editing beta (`clear_tool_uses` tool-result
+eviction) is NOT available for the interactive `claude` PTY REPL substrate — no CLI
+flag, no codebase primitive — so this composer-side periodic-reset-and-rehydrate is
+the path SPEC WAVE 3.5 anticipated as the fallback.
 
 **Two tool factories per Core.** The install pipeline
 (`gateway/cores/install-bundled.ts → registerCoreTools`) resolves `buildTools`
