@@ -131,8 +131,10 @@ import type { OpenWiringContext } from './wiring/context.ts'
 import {
   buildChainedChatCommandFilter,
   buildStatusChatCommandFilter,
+  buildResetChatCommandFilter,
   type StatusSnapshot,
 } from '@neutronai/gateway/boot-helpers.ts'
+import { resetPooledSessionContext } from '@neutronai/runtime/adapters/claude-code/persistent/context-reset.ts'
 import {
   SkillForge,
   SkillForgeProposalsStore,
@@ -1445,6 +1447,24 @@ export function buildOpenGraphComposer(
         },
     })
 
+    // M2 task 4 — the narrow Neutron `/reset` command. Actuates
+    // CONTEXT_RESET_COMMAND (`/clear`) against the owner's LIVE warm `cc-agent-*`
+    // REPL for the turn's project scope under the `acquireTurn` mutex, clearing the
+    // model's transcript while the process stays alive. All deps (`owner_handle`,
+    // `OWNER_USER_ID`, the runtime primitive) exist at chain-build time, so no
+    // `late<T>` holder is needed — unlike `/status`, whose snapshot reads stores
+    // built later in this closure.
+    const resetChatCommandFilter = buildResetChatCommandFilter({
+      reset: async (input) =>
+        resetPooledSessionContext({
+          // MUST match the liveAgentSubstrate id in open/wiring/substrates.ts.
+          substrate_instance_id: `cc-agent-${owner_handle}`,
+          user_id: OWNER_USER_ID,
+          // MUST mirror build-live-agent-turn.ts `turn.project_id ?? 'general'`.
+          project_scope: input.project_id ?? 'general',
+        }),
+    })
+
     // Chat-command filter (Free Cores `/cal`/`/email`/`/note`/`/remind`/
     // `/research` + skill-forge `/skills` + `/status`), chained. Defined ONCE here
     // so BOTH the web onboarding chat AND the app-ws chat (`/ws/app/chat`) route
@@ -1454,6 +1474,7 @@ export function buildOpenGraphComposer(
       coresWiring.chatCommandFilter,
       buildSkillForgeChatCommandFilter(skillForgeBackend),
       statusChatCommandFilter,
+      resetChatCommandFilter,
     ])
 
     // ── The landing stack (onboarding engine + chat UI + WS) ───────────────
