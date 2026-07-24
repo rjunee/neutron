@@ -38,6 +38,16 @@
  * process — which re-reads `.env` and builds a LIVE substrate. The page detects
  * the restarted, now-authenticated process by polling `GET /chat` for the
  * 503 → (restart window) → 200 transition.
+ *
+ * WHERE `.env` is written: `persistOauthTokenToEnv` defaults to `<cwd>/.env`,
+ * which assumes the process runs out of a code dir the owner can WRITE. That
+ * holds for a single-owner install. An operator running MULTIPLE isolated
+ * instances against ONE shared, read-only code checkout (each instance a
+ * distinct OS user that does NOT own the checkout) must set
+ * `NEUTRON_INSTALL_TOKEN_ENV_PATH` per instance to a writable location, or the
+ * `/complete` write throws `EACCES` and activation fails. The next boot restores
+ * the token from that same path via `loadPersistedInstallToken()` (called early
+ * in `open/server.ts`, before the substrate resolves).
  */
 
 import { createHash, randomUUID } from 'node:crypto'
@@ -299,7 +309,12 @@ export function buildOpenInstallTokenHandler(deps: OpenInstallTokenDeps): OpenIn
       // and a remote attacker can't reach it nor read the minted signup_id (no
       // CORS). An operator who binds beyond loopback via NEUTRON_HOST owns that
       // exposure (and would want the callback to match their chosen host
-      // anyway). Managed wires an HMAC-gated handler instead.
+      // anyway). This loopback threat model assumes ONE process owning its own
+      // cwd; an operator running multiple isolated instances behind a reverse
+      // proxy against one shared code checkout should additionally set
+      // `NEUTRON_INSTALL_TOKEN_ENV_PATH` per instance so `/complete`'s persist
+      // writes to a per-instance writable path (see persistOauthTokenToEnv).
+      // A deployment needing a signed callback wires an HMAC-gated handler.
       const script = renderInstallTokenScript({
         signup_id,
         callback_url: `${resolveOrigin(req, url)}${ROUTE_PREFIX}/complete`,
