@@ -177,6 +177,14 @@ export class ReplSession {
     readonly sessionKey: string,
     readonly sessionId: string,
     readonly channelName: string,
+    /** The child's working directory (`options.cwd ?? process.cwd()` at spawn).
+     *  Load-bearing for resolving THIS session's transcript JSONL path
+     *  (`sessionJsonlPath(sessionId, cwd, projectsDir)` — CC lays it out under
+     *  `<projectsDir>/<cwd-dashed>/<sessionId>.jsonl`). The context-reset sweep
+     *  (`createPooledContextResetSweep`) measures post-compact JSONL bytes off a
+     *  live `ReplSession`, so the cwd must travel WITH the session object rather
+     *  than being re-derived from the pool key. */
+    readonly cwd: string,
   ) {
     this.ready = new Promise<void>((res) => {
       this.readyResolve = res
