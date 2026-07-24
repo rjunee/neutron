@@ -68,7 +68,7 @@ share one backend instance. Examples:
 > runtime reads the old notes tables; the historical per-Core migration is a
 > no-op orphan on any already-deployed DB.
 
-**Narrow Neutron chat commands (`/status`).** Beyond the Core `/`-commands
+**Narrow Neutron chat commands (`/status`, `/reset`).** Beyond the Core `/`-commands
 (`/remind`, `/code`, `/cal`, `/email`, `/research`, `/skills`), Neutron ships a
 deliberately narrow set of instance commands — NOT the full Vajra topic-lifecycle
 vocabulary (Ryan 2026-07-21: "only the chat commands that make sense for
@@ -82,10 +82,20 @@ app-ws chat share, so there is one command path. The snapshot itself is an injec
 thunk (the composer binds it — via a `late<T>` two-phase holder — to the live
 projects reader / reminder store / work-board / Trident run store once those stores
 exist), keeping the filter store-free and unit-testable. The command word is exact:
-`/statusfoo` falls through to the LLM (K8 grammar boundary). `/reset` is the
-sibling command still to land — see the M2 task list; its actuation was re-scoped
-after `respawnSupervisedSession` was verified to `--resume` (context-preserving),
-not reset context.
+`/statusfoo` falls through to the LLM (K8 grammar boundary). `/reset` (M2 task 4) is
+the sibling command, built by `buildResetChatCommandFilter` and chained into the
+SAME command path. It behaves like sending Claude Code's own `/clear` to the live
+chat REPL: on a matched `/reset` the composer's injected thunk calls
+`resetPooledSessionContext` (`runtime/adapters/claude-code/persistent/context-reset.ts`),
+which actuates `CONTEXT_RESET_COMMAND` (`/clear`) against the warm `cc-agent-*` REPL
+for the turn's project scope (`'general'` when no project) UNDER the session's
+`acquireTurn` mutex — clearing the model's transcript while the `claude` process
+(its MCP servers / dev-channel / system prompt) stays alive and keeps serving turns.
+It is deliberately NOT a respawn: `respawnSupervisedSession` was verified to always
+`--resume` (context-PRESERVING), the wrong primitive. A reset arriving mid-turn
+waits up to `acquire_wait_ms` (8 s) for the turn to settle; still busy → an honest
+deferral reply that clears nothing (and never wedges the mutex — the abandoned slot
+self-releases); no warm session → an honest `no_live_session` reply.
 
 **Two tool factories per Core.** The install pipeline
 (`gateway/cores/install-bundled.ts → registerCoreTools`) resolves `buildTools`

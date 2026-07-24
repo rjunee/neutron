@@ -304,6 +304,88 @@ export function formatStatusSnapshot(s: StatusSnapshot): string {
 }
 
 /**
+ * M2 task 4 — the `/reset` chat-command filter (narrow Neutron re-map, sibling of
+ * `/status`; Ryan 2026-07-21 "only the chat commands that make sense for Neutron").
+ * `/reset` behaves like sending Claude Code's own `/clear` to the LIVE warm chat
+ * REPL: it wipes the MODEL's conversation transcript so the conversation starts
+ * fresh from the next message, WHILE the underlying `claude` process (and its MCP
+ * servers / dev-channel / system prompt) stays alive and keeps serving turns. It
+ * is NOT a respawn (`respawnSupervisedSession` always `--resume`s, preserving
+ * context — the wrong primitive).
+ *
+ * The reset is an INJECTED thunk: the composer wires it to
+ * `resetPooledSessionContext` (the runtime primitive that actuates
+ * `CONTEXT_RESET_COMMAND` under the session's `acquireTurn` mutex), so this
+ * builder stays free of an eager runtime-module import (keeping this file off the
+ * heavy-import edge — see the module header) and is unit-testable against a
+ * stubbed outcome. The reply text is composed FROM the live outcome via
+ * {@link formatResetOutcome} — never a canned success for a non-success (a `busy`
+ * or `no_live_session` result replies honestly that nothing was cleared).
+ *
+ * STRUCTURAL outcome shape (declared LOCALLY, NOT imported from the runtime
+ * module): the composer's thunk returns `resetPooledSessionContext`'s outcome,
+ * which is structurally compatible with this type — so `/reset` never pulls the
+ * runtime persistent-REPL modules onto this gateway file's import graph.
+ */
+export type ResetChatOutcome =
+  | { ok: true; sessions_reset: number }
+  | { ok: false; reason: 'no_live_session' | 'busy' | 'reset_failed'; detail?: string }
+
+export function buildResetChatCommandFilter(deps: {
+  reset: (input: {
+    user_id: string
+    project_slug: string
+    project_id?: string
+  }) => Promise<ResetChatOutcome>
+}): import('./http/app-ws-surface.ts').ChatCommandFilter {
+  return {
+    async match(input) {
+      // Exact-command boundary (K8 grammar precedent, shared with `/status`): the
+      // command WORD must be `/reset` followed by EOL/whitespace, so `/resetfoo`
+      // and `/resets` are NOT `/reset` and fall through to the LLM instead of
+      // being pre-claimed here. Leading whitespace + trailing args are tolerated.
+      if (!isExactSlashCommand(input.body, '/reset')) return null
+      const out = await deps.reset({
+        user_id: input.user_id,
+        project_slug: input.project_slug,
+        ...(input.project_id !== undefined ? { project_id: input.project_id } : {}),
+      })
+      const result: import('./http/app-ws-surface.ts').ChatCommandFilterResult = {
+        text: formatResetOutcome(out),
+        data: out,
+      }
+      // `busy` / `reset_failed` are genuine command failures → carry a structured
+      // `error` so a client can render them distinctly. `no_live_session` is
+      // INFORMATIONAL (nothing was warm to clear — not an error), so it rides as
+      // plain text with no `error`.
+      if (!out.ok && out.reason !== 'no_live_session') {
+        result.error = {
+          code: out.reason,
+          message: out.detail ?? out.reason,
+        }
+      }
+      return result
+    },
+  }
+}
+
+/** Format a {@link ResetChatOutcome} into the chat reply body. Composed FROM the
+ *  live outcome — never a canned success for a non-success. */
+export function formatResetOutcome(o: ResetChatOutcome): string {
+  if (o.ok) {
+    return '**Reset** — context cleared. This conversation starts fresh from your next message.'
+  }
+  switch (o.reason) {
+    case 'busy':
+      return 'A reply is still in flight — wait for it to finish, then send /reset again. Nothing was cleared.'
+    case 'no_live_session':
+      return 'No live session is warm for this conversation — nothing to clear yet.'
+    case 'reset_failed':
+      return `Reset failed: ${o.detail ?? 'unknown error'}. Nothing was cleared — try again shortly.`
+  }
+}
+
+/**
  * Exact slash-command boundary shared by the narrow Neutron commands (K8 grammar
  * precedent, `parseCodeCommand`): the command word must be followed by
  * end-of-input OR whitespace, so `/status` and `/status now` match but `/statusfoo`
