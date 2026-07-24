@@ -91,8 +91,9 @@ export interface AuthFailureNotice {
 
 /** Record + surface a CLI auth-failure on the rising edge. Sets the session's
  *  `authFailureAt`/`authFailureMatched` (the pool driver's timeout watchdog reads
- *  these to fail the turn FAST + distinctly as `auth_invalid` instead of a generic
- *  freeze-timeout), logs an operator stderr notice, and calls the injected
+ *  these to RECLASSIFY a subsequently-frozen turn as `auth_invalid` instead of a
+ *  generic freeze-timeout — it does not fast-fail a still-streaming turn), logs an
+ *  operator stderr notice, and calls the injected
  *  `onAuthInvalid` hook if wired. The scanner already stamped the per-detector
  *  edge-latch BEFORE this runs, so it is fire-once per rising edge and a hook
  *  failure can NOT un-latch or re-fire (invariant §1/§4). No inline chat push here:
@@ -196,8 +197,8 @@ export interface PersistentReplSubstrateOptions {
    *  status push if a turn is in flight. */
   onRateLimitBanner?: (notice: RateLimitBannerNotice) => void | Promise<void>
   /** CLI auth-failure notice sink. Fired on the rising edge when the output scanner
-   *  sees an invalid/expired-credential banner in the ring (`OAuth access token is
-   *  invalid` / `Please run /login` / a 401·403 `API Error`; see
+   *  sees an invalid/expired-credential banner in the ring (a 401 `API Error`,
+   *  `OAuth access token is invalid`, or `invalid x-api-key`; see
    *  `auth-failure-signature.ts`) — NOTIFY-ONLY, no keystroke, no auto-retry.
    *  Edge-triggered (fire-once per rising edge). The gateway may wire this to a
    *  richer operator alert; the turn-failure classification (via the stamped

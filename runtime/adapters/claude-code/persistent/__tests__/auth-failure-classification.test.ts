@@ -1,14 +1,20 @@
 /**
- * auth-failure-classification.test.ts — end-to-end proof (2026-07-24 dogfood) that a
- * turn whose `claude` child prints an invalid-credential banner then goes SILENT is
- * failed with the DISTINCT `auth_invalid` class, NOT the generic freeze-timeout.
+ * auth-failure-classification.test.ts — end-to-end proof (2026-07-24 dogfood;
+ * hardened after Argus r1) of the auth-invalid RECLASSIFICATION path:
+ *
+ *   1. A turn whose `claude` child prints an invalid-credential banner then goes
+ *      SILENT is failed with the DISTINCT `auth_invalid` class (retryable:false),
+ *      NOT the generic freeze-timeout — the classification is applied WHEN the
+ *      inactivity window trips, i.e. it reclassifies the frozen turn.
+ *   2. THE BLOCKER REGRESSION (Argus r1): a HEALTHY turn whose own reply prose
+ *      merely CONTAINS a credential-shaped string but keeps streaming and completes
+ *      is NOT aborted — it settles as a normal completion. Mere presence of the
+ *      signal must never fast-fail a still-progressing turn.
  *
  * Drives the REAL persistent-REPL substrate with a fake `claude`+dev-channel host:
- * incarnation #1 takes the `/message` inject, feeds the REAL observed auth-failure
- * line into its PTY (via the `onData` seam the substrate scans), then never replies.
- * The output-scan signature fires → `dispatchAuthFailureNotice` stamps the session →
- * the driver's timeout watchdog fast-fails with `code:'auth_invalid'` (retryable:
- * false) rather than waiting out the inactivity window and emitting `turn_timeout`.
+ * the inject feeds the REAL observed auth-failure line into the substrate's `onData`
+ * scan seam (so the output-scan signature fires + stamps the session), then either
+ * hangs (case 1) or posts a normal `/reply` completion (case 2).
  */
 
 import { describe, it, expect, afterEach } from 'bun:test'
@@ -33,10 +39,11 @@ const REAL_401_LINE = '  ⎿  Please run /login · API Error: 401 OAuth access t
 /**
  * A fake `claude`+dev-channel host. On the `/message` inject it feeds the auth-
  * failure line into the substrate's `onData` scan seam (so the output-scan signature
- * fires) and NEVER posts a `/reply` (the headless "printed the error then hung"
- * shape). Captures each spawn's `onData` so the message handler can drive it.
+ * fires + stamps the session). When `reply` is true it then posts a NORMAL `/reply`
+ * completion (the healthy turn that merely echoed a credential string); when false it
+ * STAYS SILENT (the observed headless "printed the error then hung" shape).
  */
-function makeAuthFailingHost(): { host: PtyHost; spawnCount: () => number } {
+function makeAuthLineHost(reply: boolean): { host: PtyHost; spawnCount: () => number } {
   let spawns = 0
   const host: PtyHost = {
     spawn(argv: string[], opts: PtySpawnOpts): PtyChild {
@@ -63,10 +70,20 @@ function makeAuthFailingHost(): { host: PtyHost; spawnCount: () => number } {
           const url = new URL(req.url)
           if (url.pathname === '/health') return Response.json({ ok: true })
           if (req.method === 'POST' && url.pathname === '/message') {
-            await req.json()
-            // Feed the auth-failure banner into the PTY scan seam, then STAY SILENT
-            // (no /reply) — exactly the observed headless 401 shape.
+            const body = (await req.json()) as { text: string; turn_id?: string }
+            // Feed the auth-failure banner into the PTY scan seam (stamps the
+            // session's auth-invalid signal via the output scanner).
             opts.onData?.(new TextEncoder().encode(REAL_401_LINE))
+            if (reply) {
+              // HEALTHY: the turn kept going and actually replied — echo the
+              // injected turn_id so the substrate's correlation accepts it.
+              void post('/reply', {
+                session_id: sid,
+                text: 'here is the real answer',
+                turn_id: body.turn_id,
+              })
+            }
+            // else: STAY SILENT — the observed headless 401 hang.
             return Response.json({ status: 'delivered' })
           }
           return new Response('nf', { status: 404 })
@@ -135,13 +152,13 @@ async function drain(
   return { errored: false }
 }
 
-describe('auth-failure classification — a silent post-401 turn fails as auth_invalid, not turn_timeout', () => {
-  it('stamps code=auth_invalid (retryable:false) and NOT the generic turn timeout', async () => {
-    const { host } = makeAuthFailingHost()
-    // A generous inactivity window so the fast-fail (not the freeze timeout) is what
-    // ends the turn — if this misclassified, the turn would instead run out this
-    // window and emit turn_timeout.
-    const sub = createPersistentReplSubstrate(opts(host, { turnTimeoutMs: 3_000 }))
+describe('auth-failure classification', () => {
+  it('a SILENT post-401 turn is reclassified auth_invalid (retryable:false), not turn_timeout', async () => {
+    const { host } = makeAuthLineHost(false)
+    // A SHORT inactivity window: the turn goes silent after the banner, so the
+    // inactivity gate trips fast and — with the auth signal stamped — reclassifies
+    // the frozen turn as auth_invalid.
+    const sub = createPersistentReplSubstrate(opts(host, { turnTimeoutMs: 250 }))
 
     const r = await drain(sub.start(spec('what is the veeva narrative?')))
     expect(r.errored).toBe(true)
@@ -151,5 +168,17 @@ describe('auth-failure classification — a silent post-401 turn fails as auth_i
     // CRUCIAL: it must NOT read as a generic freeze-timeout.
     expect(r.code).not.toBe('turn_timeout')
     expect(r.message ?? '').not.toMatch(/turn timeout/i)
+  })
+
+  it('BLOCKER regression: a HEALTHY turn that ECHOES a credential string but keeps going COMPLETES (never aborted)', async () => {
+    const { host } = makeAuthLineHost(true)
+    // A generous inactivity window so the freeze gate can NOT trip — the ONLY way
+    // this turn ends as auth_invalid is the (removed) mere-presence fast-fail. With
+    // the fix it settles as a normal completion despite the stamped signal.
+    const sub = createPersistentReplSubstrate(opts(host, { turnTimeoutMs: 3_000 }))
+
+    const r = await drain(sub.start(spec('explain the "OAuth access token is invalid" error')))
+    expect(r.errored).toBe(false) // completion, NOT an auth_invalid abort
+    expect(r.code).toBeUndefined()
   })
 })

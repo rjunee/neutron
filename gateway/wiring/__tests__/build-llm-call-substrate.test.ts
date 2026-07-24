@@ -705,6 +705,42 @@ test('O3 — a stamped code:binary_not_found stays FATAL (no cooldown) + re-emit
   expect(err!.kind === 'error' && err!.code).toBe('binary_not_found')
 })
 
+test('2026-07-24 auth-invalid — a stamped code:auth_invalid passes through (no cooldown), retryable:false + code intact', async () => {
+  // Argus r1 minor (reviewer A): cover the auth_invalid cooldown-SKIP branch in
+  // build-llm-call-substrate (the warm REPL abandoned the turn on an invalid/expired
+  // OAuth token). It must NOT reportFailure a cooldown — a single-credential box
+  // would launder it into "all credentials in cooldown", hiding the real reconnect
+  // fix — and must re-emit UNCHANGED so the live-agent classifier ships the
+  // reconnect bubble.
+  const pool = newCredentialPool({
+    strategy: 'fill_first',
+    credentials: [{ id: 'k1', kind: 'oauth', secret: 'oauth-1' }],
+  })
+  const cap = captureFactory()
+  cap.emitError({
+    retryable: false,
+    message: 'persistent-repl: auth token invalid — reconnect required',
+    code: 'auth_invalid',
+  })
+  const sub = buildLlmCallSubstrate({
+    pool,
+    substrate_instance_id: 'inst-1',
+    cwd: workdir,
+    substrateFactory: cap.substrateFactory,
+  })
+  const handle = sub!.start(runSpec())
+  const events: Event[] = []
+  for await (const ev of handle.events) events.push(ev)
+  // No cooldown laundering.
+  expect(pool.credentials[0]!.cooldown_reason).toBeUndefined()
+  expect(pool.credentials[0]!.consecutive_failures).toBe(0)
+  const err = events.find((e) => e.kind === 'error')
+  expect(err!.kind === 'error' && err!.retryable).toBe(false)
+  expect(err!.kind === 'error' && err!.code).toBe('auth_invalid')
+  // Re-emitted UNCHANGED — the distinctive message the live-agent classifier keys on.
+  expect(err!.kind === 'error' && /auth token invalid|reconnect required/i.test(err!.message)).toBe(true)
+})
+
 test('O3 — a STAMPED code is AUTHORITATIVE: code:turn_timeout with binary-not-found PROSE classifies as turn-timeout, NOT fatal binary (no laundering)', async () => {
   const pool = newCredentialPool({
     strategy: 'fill_first',
@@ -788,6 +824,9 @@ test('O3 — code-authoritative cooldown MATRIX (every taxonomy member): only ra
     { code: 'binary_not_found', retryable: true, message: 'opaque', cools: false },
     { code: 'channel_wedged', retryable: true, message: 'opaque', cools: false },
     { code: 'turn_timeout', retryable: true, message: 'opaque', cools: false },
+    // auth_invalid describes an invalid/expired TOKEN needing reconnect, not a
+    // cooldownable per-credential fault — it must pass through without cooling.
+    { code: 'auth_invalid', retryable: false, message: 'opaque', cools: false },
     { code: 'aborted', retryable: false, message: 'HTTP 401: cancelled', cools: false },
     { code: 'rate_limited', retryable: true, message: 'slow down', cools: true },
     { code: 'http_status', retryable: false, message: 'HTTP 401: bad key', cools: true },

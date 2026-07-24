@@ -18,13 +18,28 @@
  *
  * BEST-EFFORT, HONEST LIMITATION: this is a text-scrape of a human-facing CLI error
  * banner, NOT a structured API. The CLI's exact wording varies by version and error
- * type, and a future release can change it — so this matches a SET of credential-
- * shaped cues (an invalid-OAuth-token line, the `Please run /login` directive, an
- * `invalid x-api-key`, or a 401/403 `API Error`) rather than overfitting the one
- * observed line. It can miss a reworded banner (→ falls back to the generic timeout,
- * i.e. no worse than before) and could in principle over-fire if the agent's own
- * reply echoed one of these strings verbatim in live chrome (mitigated by the
- * framework's doc-quote strip + bottom-N window + the specificity of the cues).
+ * type, and a future release can change it — so this matches a SMALL set of
+ * credential-shaped patterns, EACH anchored to the CLI's own `API Error:` chrome
+ * (the sibling multi-cue rule in `rate-limit-banner.ts`: a bare `401` / `invalid` /
+ * `/login` never fires; it must co-occur with the `API Error` framing on ONE line).
+ * It can miss a reworded banner (→ falls back to the generic timeout, i.e. no worse
+ * than before).
+ *
+ * TWO-STAGE FALSE-POSITIVE DEFENCE (Argus r1 BLOCKER — the detector must NOT abort a
+ * healthy in-flight turn whose OWN reply prose happens to contain credential-shaped
+ * words):
+ *   1. HERE — anchoring every pattern to `API Error` chrome + boundary-matching the
+ *      numeric status (`\b401\b`, not a `.includes('401')` that also hits `4015ms`)
+ *      keeps benign dev-chat prose ("just reconnect if you see an invalid token")
+ *      from even latching the signal.
+ *   2. IN THE WATCHDOG (`pool.ts`) — the DECISIVE guard: a latched auth signal only
+ *      RECLASSIFIES a turn that has ALREADY frozen (the inactivity/ceiling window
+ *      elapsed with no further PTY output). The real failure shape is "banner THEN
+ *      zero further output", so a healthy turn that prints one of these strings and
+ *      keeps streaming never freezes → never gets the auth verdict; only a genuinely
+ *      silent post-banner turn does. Mere presence NO LONGER fast-fails.
+ * `403` is intentionally excluded (a 403 is a policy/authorization error — no
+ * model/org access — that a token reconnect would NOT fix; Argus r1 Verdict C).
  *
  * DISTINCT from the rate-limit BANNER detector: that surfaces a transient/usage-cap
  * limit; THIS surfaces an INVALID CREDENTIAL that needs the owner to reconnect. Like
@@ -46,44 +61,49 @@ export const AUTH_FAILURE_BOTTOM_N = 30
 
 interface AuthFailurePattern {
   readonly id: string
-  /** ALL of these cues must appear on ONE line (whitespace-insensitive, case-
-   *  insensitive). Requiring the multi-cue framing for the generic ones keeps a
-   *  bare "401" / "invalid" from firing on unrelated log noise. */
-  readonly cues: readonly string[]
+  /** ALL of these lower-cased substrings must appear on ONE line (case-insensitive).
+   *  Every pattern includes the `api error` anchor so a bare credential-shaped word
+   *  in benign prose can't fire (the sibling multi-cue rule, `rate-limit-banner.ts`).
+   *  Matched by plain lower-cased `.includes()` — the SAME normalization the sibling
+   *  `API Error` banner detector uses in production (those error lines are plain PTY
+   *  text, not Ink per-word-positioned widget chrome, so no whitespace-strip is
+   *  needed or wanted — stripping whitespace is what let `401` match inside `4015`). */
+  readonly cues?: readonly string[]
+  /** A regex matched against the already-ANSI-stripped, lower-cased line. Used for
+   *  the numeric status, which must appear ADJACENT to the CLI's `API Error:` chrome
+   *  (the CLI prints `API Error: 401 …`) and as a WHOLE token (`\b401\b`, so `4015ms`
+   *  can't match — Argus r1 Verdict B) — NOT merely somewhere on a line that also
+   *  says "api error" (a chatty "…the api error was a 401…" must not fire). Used
+   *  INSTEAD of `cues`. */
+  readonly re?: RegExp
 }
 
 /**
  * The credential-shaped patterns. Any ONE firing marks the session auth-invalid.
- * Deliberately a small, robust set — the two exact CLI strings observed plus the
- * generic `API Error` + 401/403 framing and the classic `invalid x-api-key`.
+ * Deliberately small + robust — every pattern anchored to the CLI's `API Error:`
+ * chrome. `403` is deliberately absent (a policy/authorization 403 is NOT fixed by a
+ * token reconnect — Argus r1 Verdict C).
  */
 export const AUTH_FAILURE_PATTERNS: readonly AuthFailurePattern[] = [
-  // The exact observed OAuth-token rejection (`API Error: 401 OAuth access token
-  // is invalid.`). The token-invalid phrase alone is specific enough to stand.
-  { id: 'oauth-token-invalid', cues: ['OAuth access token is invalid'] },
-  // The CLI's headless-unrunnable directive it prints after an auth error. Only
-  // appears when `claude` has hit a credential problem, so it stands alone.
-  { id: 'please-run-login', cues: ['Please run /login'] },
-  // Anthropic's API-key rejection shape.
-  { id: 'invalid-x-api-key', cues: ['invalid x-api-key'] },
-  // A 401 / 403 credential error surfaced through the CLI's `API Error:` framing.
-  // Both cues required so a conversational "401" or a doc mentioning `API Error`
-  // can't fire on its own.
-  { id: 'api-error-401', cues: ['API Error', '401'] },
-  { id: 'api-error-403', cues: ['API Error', '403'] },
+  // The exact observed OAuth-token rejection: `API Error: 401 OAuth access token
+  // is invalid.` — anchored to `api error` so the phrase alone (e.g. an agent
+  // explaining the error) can't fire.
+  { id: 'api-error-oauth-invalid', cues: ['api error', 'oauth access token is invalid'] },
+  // Anthropic's API-key rejection shape, same anchor.
+  { id: 'api-error-invalid-x-api-key', cues: ['api error', 'invalid x-api-key'] },
+  // A 401 Unauthorized surfaced through the CLI's `API Error: 401 …` framing. 401 is
+  // the definitive "credential rejected" status (reconnect is the right fix); the
+  // status must sit ADJACENT to the `api error` chrome and be a whole token, so
+  // neither `4015ms` nor a chatty "…the api error was a 401…" can fire.
+  { id: 'api-error-401', re: /api error[:\s]+401\b/ },
 ]
 
-/** Collapse a line to bare, escape-free, whitespace-free, lower-cased letters so a
- *  cue survives BOTH a normally-streamed error line AND the Ink TUI's per-word
- *  cursor positioning (the same shredding `normalizePtyText` defeats). */
-function looseLine(line: string): string {
-  return stripAnsi(line).toLowerCase().replace(/\s+/g, '')
-}
-
-/** True iff `line` contains every cue (whitespace/case-insensitive). */
-function lineHasAllCues(line: string, cues: readonly string[]): boolean {
-  const loose = looseLine(line)
-  return cues.every((c) => loose.includes(looseLine(c)))
+/** True iff `lower` (an already-ANSI-stripped, lower-cased line) matches `pattern`:
+ *  its regex tests, OR (when it carries `cues` instead) every cue substring is
+ *  present. */
+function lineMatchesPattern(lower: string, pattern: AuthFailurePattern): boolean {
+  if (pattern.re !== undefined) return pattern.re.test(lower)
+  return (pattern.cues ?? []).every((c) => lower.includes(c))
 }
 
 /**
@@ -96,7 +116,8 @@ function lineHasAllCues(line: string, cues: readonly string[]): boolean {
 export function matchAuthFailure(lines: readonly string[]): string | null {
   for (let i = lines.length - 1; i >= 0; i--) {
     const raw = lines[i] ?? ''
-    if (AUTH_FAILURE_PATTERNS.some((p) => lineHasAllCues(raw, p.cues))) {
+    const lower = stripAnsi(raw).toLowerCase()
+    if (AUTH_FAILURE_PATTERNS.some((p) => lineMatchesPattern(lower, p))) {
       return stripAnsi(raw).trim()
     }
   }

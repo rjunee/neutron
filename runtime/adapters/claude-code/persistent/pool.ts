@@ -584,16 +584,22 @@ export function createPersistentReplSubstrate(options: PersistentReplSubstrateOp
           channel.close()
           turn.settle()
         }
-        // AUTH-INVALID fast-fail (2026-07-24 dogfood). When the auth-failure
-        // output-scan signature fired DURING this turn (the `claude` child printed
-        // an invalid/expired-credential banner then went silent headless), fail the
-        // turn IMMEDIATELY with a DISTINCT `auth_invalid` class rather than waiting
-        // out the full inactivity window and misclassifying the freeze as a generic
-        // timeout ("tap Retry"). NON-retryable — retrying is pointless while the
-        // token is invalid; the gateway surfaces a reconnect bubble on this class.
-        // Poison the warm session like the freeze path so the next dispatch respawns
-        // a clean REPL. The matched CLI line is NOT embedded in the error message
-        // (it is surfaced separately via the notice) so the message stays stable.
+        // AUTH-INVALID reclassification (2026-07-24 dogfood; Argus r1 BLOCKER fix).
+        // When the auth-failure output-scan signature fired DURING this turn (the
+        // `claude` child printed an invalid/expired-credential banner) AND the turn
+        // has since FROZEN (the inactivity or ceiling window elapsed with no further
+        // PTY output — the real "banner THEN silence" shape), classify the frozen
+        // turn with the DISTINCT `auth_invalid` class instead of the generic
+        // freeze-timeout ("tap Retry"). This is a RECLASSIFICATION of an
+        // already-frozen turn, NOT a fast-fail on mere signal presence: a healthy
+        // in-flight turn whose OWN reply prose merely contains a credential-shaped
+        // string keeps streaming, never freezes, and so never gets this verdict
+        // (the false-abort the r1 blocker flagged). NON-retryable — retrying is
+        // pointless while the token is invalid; the gateway surfaces a reconnect
+        // bubble on this class. Poison the warm session like the freeze path so the
+        // next dispatch respawns a clean REPL. The matched CLI line is NOT embedded
+        // in the error message (it is surfaced separately via the notice) so the
+        // message stays stable.
         const failAuthInvalid = (): void => {
           if (turn.settled) return
           turn.settled = true
@@ -610,19 +616,19 @@ export function createPersistentReplSubstrate(options: PersistentReplSubstrateOp
         const watchdog = setInterval(() => {
           if (turn.settled || channel.closed) return
           const nowMs = Date.now()
-          // Auth-invalid takes precedence over the timeout checks: the signal is
-          // cleared at THIS turn's start (before the inject) and re-stamped only if
-          // the scanner sees a credential error on this turn's output, so mere
-          // presence scopes it to this turn (a poisoned/respawned session starts
-          // clean, so there is no cross-turn carryover to filter).
-          if (session !== undefined && session.authFailureAt !== undefined) {
-            clearInterval(watchdog)
-            failAuthInvalid()
-            return
-          }
+          // Auth-invalid is a RECLASSIFICATION of a frozen turn, NOT a fast-fail on
+          // mere presence (Argus r1 BLOCKER). The signal is cleared at THIS turn's
+          // start (before the inject) and re-stamped only if the scanner sees a
+          // credential banner on this turn's output. We consult it ONLY when a
+          // freeze gate below has already tripped — so a healthy turn that merely
+          // printed a credential-shaped string but kept streaming (never froze)
+          // never gets the auth verdict; only the real "banner THEN silence" shape
+          // reaches a freeze gate with the signal set.
+          const authInvalid = session !== undefined && session.authFailureAt !== undefined
           if (nowMs - turnStartedAt >= absoluteCeilingMs) {
             clearInterval(watchdog)
-            failFrozen('ceiling')
+            if (authInvalid) failAuthInvalid()
+            else failFrozen('ceiling')
             return
           }
           // Idle since the later of turn-start and the last PTY byte. Clamping to
@@ -633,7 +639,8 @@ export function createPersistentReplSubstrate(options: PersistentReplSubstrateOp
             session !== undefined ? Math.max(turnStartedAt, session.lastDataAt) : turnStartedAt
           if (nowMs - lastActivity >= inactivityMs) {
             clearInterval(watchdog)
-            failFrozen('inactivity')
+            if (authInvalid) failAuthInvalid()
+            else failFrozen('inactivity')
           }
         }, watchdogTickMs)
         ;(watchdog as { unref?: () => void }).unref?.()

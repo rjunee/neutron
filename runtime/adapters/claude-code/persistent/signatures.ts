@@ -247,10 +247,12 @@ export function runOutputScan(
     } else if (fired.id === AUTH_FAILURE_DETECTOR_ID) {
       // CLI auth-failure crossed the rising edge — the `claude` child reported an
       // invalid/expired credential and (headless) can't self-recover. NOTIFY-ONLY:
-      // record the session's auth-invalid state so the pool driver's timeout
-      // watchdog fails the turn FAST + distinctly (`auth_invalid`) instead of
-      // waiting out the inactivity window and misclassifying it as a generic
-      // timeout. No keystroke (there is nothing to press — the fix is a reconnect).
+      // record the session's auth-invalid state so that WHEN the turn subsequently
+      // freezes (the real "banner THEN silence" shape), the pool driver's timeout
+      // watchdog RECLASSIFIES the frozen turn as `auth_invalid` instead of the
+      // generic freeze-timeout — rather than fast-failing on mere presence, which
+      // would abort a healthy turn that only echoed a credential string (Argus r1).
+      // No keystroke (there is nothing to press — the fix is a reconnect).
       dispatchAuthFailureNotice(session, options, now)
     } else if (fired.keys !== undefined) {
       sendKeys(child, fired.keys)

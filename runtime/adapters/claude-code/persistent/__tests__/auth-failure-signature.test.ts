@@ -41,12 +41,10 @@ describe('auth-failure-signature — matcher', () => {
     expect(matchAuthFailure(pane(REAL_401_LINE).split('\n'))).not.toBeNull()
   })
 
-  test('fires on each credential-shaped variant', () => {
+  test('fires on each credential-shaped variant (all anchored to `API Error`)', () => {
     const variants = [
       '  ⎿  API Error: 401 OAuth access token is invalid.',
-      '  ⎿  Please run /login',
       '  ⎿  API Error: invalid x-api-key',
-      '  ⎿  API Error: 403 Forbidden',
       '  ⎿  API Error: 401 Unauthorized',
     ]
     for (const v of variants) {
@@ -54,11 +52,35 @@ describe('auth-failure-signature — matcher', () => {
     }
   })
 
-  test('survives Ink per-word cursor shredding (whitespace-insensitive cues)', () => {
-    // The Ink TUI can position each word separately; the loose (whitespace-free)
-    // cue comparison must still match a spaced-out `OAuth access token is invalid`.
-    const shredded = 'O A u t h   a c c e s s   t o k e n   i s   i n v a l i d'
-    expect(matchAuthFailure([shredded])).not.toBeNull()
+  test('does NOT fire on a bare credential string WITHOUT the `API Error` anchor', () => {
+    // Argus r1 BLOCKER (Verdict B): benign dev-chat / assistant prose that merely
+    // mentions a credential-shaped phrase must NOT latch the signal — every pattern
+    // requires the CLI's own `API Error:` chrome on the SAME line.
+    const benign = [
+      '  ⎿  Please run /login', // the bare directive is no longer a standalone cue
+      'if your OAuth access token is invalid, just reconnect it',
+      'the fix is to run /login again',
+      'we saw an invalid x-api-key last week in the logs',
+      'earlier the api error was a 401, then it recovered', // `api error` + `401` but
+      // not adjacent — the boundary check needs `API Error: 401`, not a chatty 401.
+    ]
+    for (const line of benign) {
+      expect(matchAuthFailure([line])).toBeNull()
+    }
+  })
+
+  test('does NOT fire on a 403 (policy/authorization — a reconnect would not fix it)', () => {
+    // Argus r1 Verdict C: a 403 is an authorization/policy error (no model/org
+    // access), NOT an invalid credential — excluded so it doesn't mis-surface the
+    // reconnect bubble.
+    expect(matchAuthFailure(['  ⎿  API Error: 403 Forbidden'])).toBeNull()
+  })
+
+  test('boundary-matches the status code — `4015ms` does NOT read as `401`', () => {
+    // Argus r1 Verdict B: the numeric status is `\b401\b`, not a substring hit.
+    expect(matchAuthFailure(['  ⎿  API Error: request timed out after 4015ms'])).toBeNull()
+    // A genuine 401 as a whole token still fires.
+    expect(matchAuthFailure(['  ⎿  API Error: 401 rejected'])).not.toBeNull()
   })
 
   test('does NOT fire on unrelated errors or a bare number', () => {
