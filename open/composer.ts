@@ -1470,18 +1470,22 @@ export function buildOpenGraphComposer(
 
     const resetChatCommandFilter = buildResetChatCommandFilter({
       reset: async (input) => {
-        const outcome = await resetPooledSessionContext({
+        const scope = input.project_id ?? 'general'
+        // Rehydrate PER SESSION, under EACH session's turn mutex, the instant its
+        // `/clear` lands — NOT once on aggregate `outcome.ok`. A multi-session
+        // reset that clears session A then hits `busy`/`reset_failed` on session B
+        // would otherwise leave A's topics warm-marked against an emptied REPL
+        // (aggregate-ok never fires). `emitContextResetScope` is idempotent-safe,
+        // so N emits for N sessions is harmless (each downstream un-mark is
+        // monotone). Same bus + seam the periodic policy uses.
+        return resetPooledSessionContext({
           // MUST match the liveAgentSubstrate id in open/wiring/substrates.ts.
           substrate_instance_id: `cc-agent-${owner_handle}`,
           user_id: OWNER_USER_ID,
           // MUST mirror build-live-agent-turn.ts `turn.project_id ?? 'general'`.
-          project_scope: input.project_id ?? 'general',
+          project_scope: scope,
+          on_reset_under_mutex: () => emitContextResetScope(scope),
         })
-        // On a successful clear, rehydrate through the SAME path the periodic
-        // policy uses (closes the known /reset persona-loss gap: the next turn
-        // re-composes cold instead of the warm session losing its system prefix).
-        if (outcome.ok) emitContextResetScope(input.project_id ?? 'general')
-        return outcome
       },
     })
 

@@ -333,4 +333,92 @@ describe('resetPooledSessionContext — /reset runtime primitive', () => {
     })
     expect(out).toEqual({ ok: false, reason: 'no_live_session' })
   })
+
+  it('partial multi-session reset fires on_reset_under_mutex for each session actually cleared before a busy short-circuit', async () => {
+    // Round-4 fix: two pooled sessions share the (instance, user, project_scope)
+    // prefix but differ in the credential key dim, so a single `/reset` matches
+    // BOTH. Session A is idle (its `/clear` succeeds, hook fires under its mutex);
+    // session B is busy (turn in flight, mutex held) and short-circuits the loop.
+    // The per-session under-mutex hook MUST have fired for A before B's busy return
+    // — otherwise A's already-cleared REPL is stranded with no rehydration (the old
+    // aggregate-ok emit fired NOTHING on a `busy` aggregate). Separate recording
+    // hosts give each session its OWN `/clear` timeline, proving A cleared + B did
+    // not.
+    const a = makeRecordingHost()
+    const b = makeRecordingHost()
+    const subA = createPersistentReplSubstrate(opts(a.host, 'proj-A', { credential_identity: 'cred-A' }))
+    const subB = createPersistentReplSubstrate(opts(b.host, 'proj-A', { credential_identity: 'cred-B' }))
+
+    // Warm A and let it FULLY settle (idle, mutex free). A is inserted into the
+    // pool first, so the reset loop processes it before B.
+    expect(await drain(subA.start(spec('a')))).toBe('seen=0 got=a')
+
+    // Hold B IN FLIGHT: defer its reply so B keeps its turn mutex.
+    b.defer.on = true
+    const inflightB = drain(subB.start(spec('b')))
+    await waitForMessage(b.timeline, 1) // B injected + holds the mutex
+
+    let hookFires = 0
+    const partial = await resetPooledSessionContext({
+      substrate_instance_id: 'cc-agent-acme',
+      user_id: 'u-1',
+      project_scope: 'proj-A',
+      acquire_wait_ms: 50, // tight — can't win B's held mutex → busy
+      ...RESET_ARGS,
+      on_reset_under_mutex: () => {
+        hookFires += 1
+      },
+    })
+
+    // Aggregate outcome is busy (B short-circuited), but A was ALREADY cleared and
+    // its hook fired exactly once — so A rehydrates despite the partial failure.
+    expect(partial).toEqual({ ok: false, reason: 'busy' })
+    expect(hookFires).toBe(1)
+    expect(CLEAR_WRITES(a.timeline).length).toBe(1) // A got its `/clear`
+    expect(CLEAR_WRITES(b.timeline).length).toBe(0) // B did NOT (mutex held)
+
+    // Release B so the suite tears down cleanly.
+    b.defer.on = false
+    b.flushReplies()
+    expect(await inflightB).toBe('seen=0 got=b')
+  })
+
+  it('all-success multi-session reset fires the hook once per session; no live session fires it zero times', async () => {
+    // Both sessions idle ⇒ both clear ⇒ hook fires twice, aggregate ok:2.
+    const a = makeRecordingHost()
+    const b = makeRecordingHost()
+    const subA = createPersistentReplSubstrate(opts(a.host, 'proj-A', { credential_identity: 'cred-A' }))
+    const subB = createPersistentReplSubstrate(opts(b.host, 'proj-A', { credential_identity: 'cred-B' }))
+    expect(await drain(subA.start(spec('a')))).toBe('seen=0 got=a')
+    expect(await drain(subB.start(spec('b')))).toBe('seen=0 got=b')
+
+    let hookFires = 0
+    const out = await resetPooledSessionContext({
+      substrate_instance_id: 'cc-agent-acme',
+      user_id: 'u-1',
+      project_scope: 'proj-A',
+      ...RESET_ARGS,
+      on_reset_under_mutex: () => {
+        hookFires += 1
+      },
+    })
+    expect(out).toEqual({ ok: true, sessions_reset: 2 })
+    expect(hookFires).toBe(2)
+    expect(CLEAR_WRITES(a.timeline).length).toBe(1)
+    expect(CLEAR_WRITES(b.timeline).length).toBe(1)
+
+    // A cold scope with no live session never fires the hook.
+    let coldFires = 0
+    const cold = await resetPooledSessionContext({
+      substrate_instance_id: 'cc-agent-acme',
+      user_id: 'u-1',
+      project_scope: 'proj-NEVER',
+      ...RESET_ARGS,
+      on_reset_under_mutex: () => {
+        coldFires += 1
+      },
+    })
+    expect(cold).toEqual({ ok: false, reason: 'no_live_session' })
+    expect(coldFires).toBe(0)
+  })
 })

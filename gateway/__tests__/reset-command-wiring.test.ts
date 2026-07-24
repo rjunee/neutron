@@ -172,52 +172,70 @@ describe('/reset chained after other filters (the composer wiring shape)', () =>
   })
 })
 
-describe('Layer B — /reset rehydration emit (the composer thunk shape)', () => {
-  // Mirrors `open/composer.ts`'s `/reset` thunk verbatim: the composer wraps the
-  // injected `reset` so that ON A SUCCESSFUL clear it emits the turn's project
-  // scope onto the context-reset bus (the SAME bus the periodic policy uses),
-  // then returns the outcome unchanged. This closes the known /reset persona-loss
-  // gap — the next turn re-composes cold. A NON-ok outcome (busy / no_live_session
-  // / reset_failed) emits NOTHING (nothing was cleared → no rehydration).
+describe('Layer B — /reset rehydration emit (the composer thunk shape, round 4)', () => {
+  // Mirrors `open/composer.ts`'s round-4 `/reset` thunk verbatim: the composer no
+  // longer emits on aggregate `outcome.ok`. Instead it threads an
+  // `on_reset_under_mutex` callback into `resetPooledSessionContext` that emits the
+  // turn's project scope onto the context-reset bus (the SAME bus the periodic
+  // policy uses) the instant EACH session's `/clear` lands, under that session's
+  // mutex. This closes the partial-failure rehydration gap: a multi-session reset
+  // that clears session A then hits `busy`/`reset_failed` on B still rehydrates A
+  // (the old aggregate-ok emit fired NOTHING in that case, stranding A's topics
+  // warm-marked against an emptied REPL). N emits for N sessions is idempotent-safe.
   const buildComposerResetThunk = (
-    reset: () => Promise<ResetChatOutcome>,
+    reset: (opts: { on_reset_under_mutex: () => void }) => Promise<ResetChatOutcome>,
     emit: (scope: string) => void,
   ) => async (input: { user_id: string; project_slug: string; project_id?: string }) => {
-    const outcome = await reset()
-    if (outcome.ok) emit(input.project_id ?? 'general')
-    return outcome
+    const scope = input.project_id ?? 'general'
+    return reset({ on_reset_under_mutex: () => emit(scope) })
   }
 
-  test('emits the project scope on a successful reset', async () => {
+  test('emits the project scope PER cleared session, under mutex, on full success', async () => {
     const emitted: string[] = []
     const filter = buildResetChatCommandFilter({
-      reset: buildComposerResetThunk(async () => ({ ok: true, sessions_reset: 1 }), (s) => emitted.push(s)),
+      // Simulate resetPooledSessionContext clearing two live sessions: it fires the
+      // under-mutex hook once per session as each `/clear` lands, then returns ok.
+      reset: buildComposerResetThunk(async (opts) => {
+        opts.on_reset_under_mutex()
+        opts.on_reset_under_mutex()
+        return { ok: true, sessions_reset: 2 }
+      }, (s) => emitted.push(s)),
     })
     await filter.match(matchInput('/reset', 'proj-A'))
-    expect(emitted).toEqual(['proj-A'])
+    expect(emitted).toEqual(['proj-A', 'proj-A'])
   })
 
-  test('emits "general" on success when the turn has no project_id', async () => {
+  test('emits "general" under mutex when the turn has no project_id', async () => {
     const emitted: string[] = []
     const filter = buildResetChatCommandFilter({
-      reset: buildComposerResetThunk(async () => ({ ok: true, sessions_reset: 1 }), (s) => emitted.push(s)),
+      reset: buildComposerResetThunk(async (opts) => {
+        opts.on_reset_under_mutex()
+        return { ok: true, sessions_reset: 1 }
+      }, (s) => emitted.push(s)),
     })
     await filter.match(matchInput('/reset'))
     expect(emitted).toEqual(['general'])
   })
 
-  test('does NOT emit on busy (nothing was cleared → no rehydration)', async () => {
+  test('PARTIAL FAILURE — rehydrates the already-cleared session even when the aggregate outcome is busy', async () => {
+    // THE round-4 fix: session A cleared (hook fires under mutex), then session B
+    // is busy → aggregate `busy`. The pre-fix aggregate-ok emit would produce [];
+    // per-session under-mutex emit produces ['proj-A'] so A rehydrates.
     const emitted: string[] = []
     const filter = buildResetChatCommandFilter({
-      reset: buildComposerResetThunk(async () => ({ ok: false, reason: 'busy' }), (s) => emitted.push(s)),
+      reset: buildComposerResetThunk(async (opts) => {
+        opts.on_reset_under_mutex() // session A cleared
+        return { ok: false, reason: 'busy' } // session B short-circuits
+      }, (s) => emitted.push(s)),
     })
     await filter.match(matchInput('/reset', 'proj-A'))
-    expect(emitted).toEqual([])
+    expect(emitted).toEqual(['proj-A'])
   })
 
-  test('does NOT emit on no_live_session', async () => {
+  test('emits NOTHING when no session was cleared (no_live_session)', async () => {
     const emitted: string[] = []
     const filter = buildResetChatCommandFilter({
+      // No live session ⇒ the hook never fires.
       reset: buildComposerResetThunk(async () => ({ ok: false, reason: 'no_live_session' }), (s) => emitted.push(s)),
     })
     await filter.match(matchInput('/reset', 'proj-A'))

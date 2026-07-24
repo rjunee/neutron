@@ -50,6 +50,15 @@ export interface ResetPooledContextInput {
   idle_quiet_ms?: number
   /** Cap on the idle wait. Default `DEFAULT_IDLE_MAX_MS` (`signatures.ts`). */
   idle_max_ms?: number
+  /**
+   * Fired SYNCHRONOUSLY under EACH session's turn mutex the instant its `/clear`
+   * lands — the same seam as the sweep's `onResetUnderMutex`. PER SESSION (not once
+   * on aggregate success) so a later `busy`/`reset_failed` short-circuit can never
+   * strand an ALREADY-cleared session without rehydration: the caller emits the
+   * rehydration signal for each session actually cleared, before any short-circuit.
+   * A throwing listener is swallowed by {@link actuateSessionContextReset}.
+   */
+  on_reset_under_mutex?: () => void
 }
 
 export type ResetPooledContextOutcome =
@@ -118,6 +127,13 @@ export async function resetPooledSessionContext(
       acquire_wait_ms: waitMs,
       idle_quiet_ms: quietMs,
       idle_max_ms: maxMs,
+      // Thread the per-session under-mutex hook so rehydration fires the instant
+      // THIS session's `/clear` lands — before any later `busy`/`reset_failed`
+      // short-circuit can return. N emits for N sessions is idempotent-safe
+      // (each downstream bump/un-mark is monotone).
+      ...(input.on_reset_under_mutex !== undefined
+        ? { onResetUnderMutex: input.on_reset_under_mutex }
+        : {}),
     })
     if (outcome.status === 'busy') return { ok: false, reason: 'busy' }
     if (outcome.status === 'failed')

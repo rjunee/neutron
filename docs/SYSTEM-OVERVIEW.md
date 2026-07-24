@@ -95,10 +95,14 @@ It is deliberately NOT a respawn: `respawnSupervisedSession` was verified to alw
 `--resume` (context-PRESERVING), the wrong primitive. A reset arriving mid-turn
 waits up to `acquire_wait_ms` (8 s) for the turn to settle; still busy → an honest
 deferral reply that clears nothing (and never wedges the mutex — the abandoned slot
-self-releases); no warm session → an honest `no_live_session` reply. On a SUCCESSFUL
-clear the composer thunk also emits the turn's project scope on the context-reset
-bus (see **Layer B** below), so the next turn on that scope re-composes COLD — the
-manual `/reset` now rehydrates the full grounding on the following turn instead of
+self-releases); no warm session → an honest `no_live_session` reply. Rehydration is
+per-session UNDER the mutex: the composer threads an `on_reset_under_mutex` callback
+into `resetPooledSessionContext` that emits the turn's project scope on the context-
+reset bus (see **Layer B** below) the instant EACH session's `/clear` lands — so a
+multi-session reset that clears one session then hits `busy`/`reset_failed` on a
+later one STILL rehydrates the already-cleared session (round 4; the earlier
+aggregate-`ok` emit stranded it). The next turn on that scope re-composes COLD — the
+manual `/reset` rehydrates the full grounding on the following turn instead of
 leaving the warm session without its system prefix.
 
 **Layer B — orchestrator context reset + rehydrate (SPEC WAVE 3.5).** The warm

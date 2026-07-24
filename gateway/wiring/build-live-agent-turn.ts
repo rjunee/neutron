@@ -701,14 +701,21 @@ export function buildLiveAgentTurn(
 
   /**
    * Layer B reset-epoch, per scope — a monotonic counter bumped every time a
-   * context-reset signal fires for that scope. A turn captures the epoch at the
-   * moment it decides warm-vs-cold (`isColdFirstTurn`) and re-checks it before the
-   * post-dispatch `contextSent.add`. If the epoch advanced in between, a sweep
-   * `/clear` un-marked this scope WHILE our (already-built) prompt was in flight —
-   * so re-adding `contextSent` here would resurrect the warm mark on an emptied
-   * REPL and defeat the rehydration the reset exists to force (Argus r2 blocker).
-   * The guard leaves the mark OFF so the next turn re-composes cold. Keyed by
-   * scope (not topicKey) because the reset signal + un-mark operate per scope.
+   * context-reset signal fires for that scope. A turn interacts with it via a
+   * THREE-POINT protocol (Argus r2/r3 + codex panel blockers):
+   *   (1) CAPTURE at the warm/cold decision (`resetEpochAtStart`).
+   *   (2) PER-ATTEMPT DISPATCH-TIME RECHECK + RE-ANCHOR: immediately before each
+   *       `dispatchOnce()`, if the epoch advanced since capture a sweep `/clear`
+   *       landed after the decision — recompose COLD (the warm prompt would hit an
+   *       emptied REPL) and re-anchor `resetEpochAtStart` to the dispatch-time
+   *       epoch. This closes the concrete retry-race where attempt-0 warm freezes,
+   *       a reset fires, and attempt-1 would otherwise re-send the stale warm prompt.
+   *   (3) POST-DISPATCH RE-MARK GUARD: re-add `contextSent` warm only if the epoch
+   *       still equals the re-anchored snapshot. If a reset landed WHILE our prompt
+   *       was in flight (or during the cold recompose), the guard leaves the mark
+   *       OFF so the NEXT turn re-composes cold — never resurrecting a warm mark on
+   *       an emptied REPL. Keyed by scope (not topicKey) because the reset signal +
+   *       un-mark operate per scope.
    */
   const contextResetEpoch = new Map<string, number>()
 
@@ -1140,14 +1147,48 @@ export function buildLiveAgentTurn(
     )
     let prompt: string
     const isColdFirstTurn = !contextSent.has(topicKey)
-    // Capture the scope's reset-epoch AT the warm/cold decision. If a sweep
-    // `/clear` fires for this scope after this point but before we re-mark
-    // `contextSent` below, the epoch will have advanced and we skip the re-mark —
-    // otherwise a warm prompt built here, dispatched into a just-emptied REPL,
-    // would resurrect the warm mark and silently lose the Layer B re-grounding
-    // (Argus r2 blocker). Scope MUST equal the dispatch scope (`scope`, below).
+    // THREE-POINT reset-epoch protocol (Argus r2 + r3 blocker). The scope's
+    // reset-epoch is a monotonic counter bumped every time a sweep `/clear` fires
+    // for this scope. We touch it at THREE points:
+    //   (1) CAPTURE here, at the warm/cold decision, into `resetEpochAtStart`.
+    //   (2) PER-ATTEMPT DISPATCH-TIME RECHECK (retry loop, below): immediately
+    //       before each `dispatchOnce()`, if the epoch advanced we recompose COLD
+    //       (a `/clear` landed after the decision, so the warm prompt would hit an
+    //       emptied REPL) and RE-ANCHOR `resetEpochAtStart` to the dispatch-time
+    //       epoch — closing the concrete retry-race (attempt-0 warm freeze → reset
+    //       fires → attempt-1 must not re-send the stale warm prompt).
+    //   (3) POST-DISPATCH RE-MARK GUARD (below): re-mark `contextSent` warm only
+    //       if the epoch still equals the re-anchored snapshot — so a race-
+    //       recomposed cold turn that completes un-raced re-marks warm correctly.
+    // `resetEpochAtStart` + `effectiveCold` are therefore MUTABLE. Scope MUST
+    // equal the dispatch scope (`scope`, below).
     const turnScope = turn.project_id ?? 'general'
-    const resetEpochAtStart = contextResetEpoch.get(turnScope) ?? 0
+    let resetEpochAtStart = contextResetEpoch.get(turnScope) ?? 0
+    // The effective (possibly race-upgraded) cold/warm mode of THIS dispatch.
+    // `isColdFirstTurn` stays const (it drives the cold-start ack arm + the
+    // initial branch); `effectiveCold` is what the per-attempt recheck flips and
+    // what `buildSpec` reads for the inactivity budget.
+    let effectiveCold = isColdFirstTurn
+    // Cold-path prompt assembly, extracted into a closure so the per-attempt
+    // dispatch-time recheck can re-run it verbatim when a reset lands after a warm
+    // decision. Captures the already-resolved fragments; arg order MUST match the
+    // `composeFirstTurnPrompt` signature.
+    const composeCold = async (): Promise<string> => {
+      const onboardingPreamble =
+        onboardingActive && input.onboarding !== undefined ? input.onboarding.systemPreamble() : null
+      return composeFirstTurnPrompt(
+        input,
+        turn,
+        now(),
+        onboardingPreamble,
+        workBoardFragment,
+        onboardingContextFragment,
+        availableServicesFragment,
+        nexusFragment,
+        reflectionFragment,
+        attachmentsFragment,
+      )
+    }
     if (!isColdFirstTurn) {
       // Warm turn: the system prefix is already cached in the REPL's transcript;
       // re-ground by splicing the FRESH board + onboarding-context blocks before
@@ -1165,22 +1206,10 @@ export function buildLiveAgentTurn(
       prompt =
         warmPrefix.length > 0 ? `${warmPrefix.join('\n\n')}\n\n${turn.user_text}` : turn.user_text
     } else {
-      // While onboarding, splice the interview preamble into the first-turn
-      // system prompt so the warm session conducts the interview conversationally.
-      const onboardingPreamble =
-        onboardingActive && input.onboarding !== undefined ? input.onboarding.systemPreamble() : null
-      prompt = await composeFirstTurnPrompt(
-        input,
-        turn,
-        now(),
-        onboardingPreamble,
-        workBoardFragment,
-        onboardingContextFragment,
-        availableServicesFragment,
-        nexusFragment,
-        reflectionFragment,
-        attachmentsFragment,
-      )
+      // Cold first turn: compose the FULL first-turn system prompt (persona +
+      // work board + reflection + memory index + nexus + services). While
+      // onboarding, `composeCold` splices the interview preamble in.
+      prompt = await composeCold()
     }
 
     // Item 12 — cold-start ack. On the first turn into this topic the warm
@@ -1238,27 +1267,35 @@ export function buildLiveAgentTurn(
     // ceiling_ms` is the hard backstop. The composer's own AbortController mirrors
     // the ceiling (below) to bound the cold-spawn phase, which runs before the
     // substrate's watchdog starts.
-    const isColdOrOnboardingTurn = isColdFirstTurn || onboardingActive
-    const inactivityMs = isColdOrOnboardingTurn ? COLD_TURN_INACTIVITY_MS : TURN_INACTIVITY_MS
-    const spec: AgentSpec = {
-      prompt,
-      tools,
-      model_preference: [model],
-      // Per-(instance, topic) warm-session key: the persistent substrate folds
-      // `metering_context.project_id` into its pool key when no
-      // projectIdResolver is wired on this substrate (build-llm-call-
-      // substrate.ts). Per-dispatch ⇒ race-free across concurrent topics.
-      metering_context: { project_id: scope },
-      turn_timeout_ms: inactivityMs,
-      turn_absolute_ceiling_ms: absoluteCeilingMs,
+    // Build the AgentSpec PER ATTEMPT so a race-recomposed cold prompt (and its
+    // larger inactivity budget) actually reaches the substrate: `prompt` and
+    // `effectiveCold` are read at CALL time, after the per-attempt dispatch-time
+    // recheck may have flipped them. A COLD first turn / onboarding turn gets the
+    // larger idle window (heavier initial processing); warm steady-state stays
+    // snappy.
+    const buildSpec = (): AgentSpec => {
+      const s: AgentSpec = {
+        prompt,
+        tools,
+        model_preference: [model],
+        // Per-(instance, topic) warm-session key: the persistent substrate folds
+        // `metering_context.project_id` into its pool key when no
+        // projectIdResolver is wired on this substrate (build-llm-call-
+        // substrate.ts). Per-dispatch ⇒ race-free across concurrent topics.
+        metering_context: { project_id: scope },
+        turn_timeout_ms:
+          effectiveCold || onboardingActive ? COLD_TURN_INACTIVITY_MS : TURN_INACTIVITY_MS,
+        turn_absolute_ceiling_ms: absoluteCeilingMs,
+      }
+      if (input.max_tokens !== undefined) s.max_tokens = input.max_tokens
+      return s
     }
-    if (input.max_tokens !== undefined) spec.max_tokens = input.max_tokens
 
     // Dispatch, collecting the reply text; the composer AbortController is a pure
     // ABSOLUTE-CEILING backstop (the substrate's activity watchdog does freeze
     // detection). Returns the text, or throws the substrate/abort error.
     const dispatchOnce = async (): Promise<string> => {
-      const handle = input.substrate.start(spec)
+      const handle = input.substrate.start(buildSpec())
       const ac = new AbortController()
       const timer = setTimeout(() => ac.abort(), absoluteCeilingMs)
       try {
@@ -1287,6 +1324,45 @@ export function buildLiveAgentTurn(
     let text: string | null = null
     let lastErrMessage = ''
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      // ── THE FIX (Argus r3 + codex panel converged blocker): per-attempt
+      // dispatch-time reset-epoch recheck. Between the warm/cold DECISION and
+      // THIS dispatch, a concurrent idle-sweep can acquire the session mutex,
+      // fire the reset signal, and `/clear` this REPL — leaving a warm prompt
+      // built against a now-emptied transcript. Re-check the epoch here, at the
+      // top of EVERY attempt, immediately before `dispatchOnce()`:
+      //   (a) `epochNow` is captured BEFORE the cold recompose ON PURPOSE — a
+      //       reset firing DURING `composeCold` leaves dispatch-time epoch > the
+      //       re-anchored snapshot, so the post-dispatch guard skips the re-mark
+      //       and the NEXT turn re-composes cold (conservative + correct; a cold
+      //       prompt is self-grounding so THIS dispatch is safe either way).
+      //   (b) Re-anchoring `resetEpochAtStart` makes the post-dispatch re-mark
+      //       guard compare against the epoch at ACTUAL dispatch, so a race-
+      //       recomposed cold turn that completes un-raced re-marks warm correctly
+      //       instead of forcing a redundant second cold turn.
+      //   (c) The recheck runs per ATTEMPT, closing the concrete retry-race
+      //       (attempt-0 warm freezes → reset fires mid-flight/between attempts →
+      //       attempt-1 previously re-sent the stale warm prompt).
+      //   (d) RESIDUAL, documented honestly: a sweep ALREADY holding the session
+      //       mutex when this warm dispatch enters the adapter can still `/clear`
+      //       first (no seam inside the adapter's acquireTurn→inject window) — that
+      //       lone turn runs ungrounded once and SELF-HEALS next turn because the
+      //       re-mark guard leaves the warm mark off. Full closure would need an
+      //       adapter-level pre-inject gate, explicitly out of scope for this
+      //       reviewer-agreed fix shape.
+      const epochNow = contextResetEpoch.get(turnScope) ?? 0
+      if (epochNow !== resetEpochAtStart) {
+        if (!effectiveCold) {
+          moduleLog.info('turn_reset_race_recomposed_cold', {
+            project: turn.project_slug,
+            topic: turn.topic_id,
+            scope,
+            attempt,
+          })
+          effectiveCold = true
+          prompt = await composeCold()
+        }
+        resetEpochAtStart = epochNow
+      }
       const started = now()
       try {
         text = await dispatchOnce()
@@ -1351,13 +1427,16 @@ export function buildLiveAgentTurn(
     // Only mark the context as delivered once a turn actually completed on
     // the warm session — a failed first turn retries with full context.
     //
-    // Layer B race guard (Argus r2 blocker): if a context-reset for this scope
-    // fired WHILE this turn was in flight (epoch advanced since we read
-    // `isColdFirstTurn`), the sweep already `/clear`ed the REPL and un-marked the
-    // scope. Re-marking here would resurrect the warm mark on an emptied REPL and
-    // drop the rehydration the reset exists to force. Skip the re-mark so the NEXT
-    // turn re-composes cold. The reset's own un-mark already cleared any prior
-    // mark, so leaving it off is the correct end state.
+    // Layer B race guard — POINT (3) of the three-point reset-epoch protocol
+    // (Argus r2/r3 blocker): re-mark warm only if the epoch still equals
+    // `resetEpochAtStart` AS RE-ANCHORED by the per-attempt dispatch-time recheck.
+    // Because the recheck re-anchored the snapshot to the epoch at ACTUAL dispatch,
+    // this compares against the dispatch moment — so a race-recomposed cold turn
+    // that completed un-raced re-marks warm correctly, while a reset that fired
+    // DURING our in-flight prompt (or during the cold recompose) advances the epoch
+    // past the snapshot and we skip the re-mark, leaving the mark OFF so the NEXT
+    // turn re-composes cold. The reset's own un-mark already cleared any prior mark,
+    // so leaving it off is the correct end state.
     if ((contextResetEpoch.get(turnScope) ?? 0) === resetEpochAtStart) {
       contextSent.add(topicKey)
       // Layer B — record the scope this warm topic's turns run in so a later

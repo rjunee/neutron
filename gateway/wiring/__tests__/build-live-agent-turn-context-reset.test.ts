@@ -100,6 +100,43 @@ function makeRacingSubstrate(
   }
 }
 
+/**
+ * A substrate whose per-turn generator yields one token, then invokes
+ * `onBeforeCompletion(callIndex)`; if that returns a string the generator THROWS
+ * `new Error(<string>)` INSTEAD of completing — the seam a test uses to fire a
+ * reset signal mid-flight AND then simulate a freeze-timeout on that same dispatch
+ * (so the runner's silent auto-retry re-enters the dispatch loop). A non-string
+ * return completes normally.
+ */
+function makeRacingThrowSubstrate(
+  specs: AgentSpec[],
+  onBeforeCompletion: (callIndex: number) => string | void,
+): Substrate {
+  let calls = 0
+  return {
+    start(spec: AgentSpec): SessionHandle {
+      const callIndex = calls++
+      specs.push(spec)
+      const events = (async function* (): AsyncGenerator<Event, void, void> {
+        yield { kind: 'token', text: 'ok' }
+        const throwMsg = onBeforeCompletion(callIndex)
+        if (typeof throwMsg === 'string') throw new Error(throwMsg)
+        yield {
+          kind: 'completion',
+          usage: { input_tokens: 1, output_tokens: 1 },
+          substrate_instance_id: 'stub',
+        }
+      })()
+      return {
+        events,
+        async respondToTool(): Promise<void> {},
+        async cancel(): Promise<void> {},
+        tool_resolution: 'internal',
+      }
+    },
+  }
+}
+
 function makeTurn(
   sent: ChatOutbound[],
   opts: { user_text: string; topic_id: string; project_id?: string },
@@ -275,5 +312,69 @@ describe('Layer B — context-reset rehydration seam', () => {
     // Still warm — no cold-only block re-composed.
     expect(specs[2]!.prompt).not.toContain('<memory_index>')
     expect(specs[2]!.prompt).toContain('third')
+  })
+
+  test('dispatch-time recheck — a reset landing after a warm decision but before (re)dispatch recomposes COLD; the stale warm prompt is never executed', async () => {
+    // The confirmed round-4 blocker. Turn 2 decides WARM, builds its warm prompt,
+    // then its FIRST dispatch attempt fires a reset for its scope mid-flight and
+    // throws a freeze-timeout (silent auto-retry). WITHOUT the per-attempt dispatch-
+    // time epoch recheck the retry re-sends the STALE warm prompt into a just-
+    // `/clear`ed REPL, silently dropping persona/board/memory grounding. WITH the
+    // fix the retry recomposes COLD (self-grounding) and re-anchors the epoch so the
+    // post-dispatch guard re-marks warm — so turn 3 is warm again.
+    const specs: AgentSpec[] = []
+    const sent: ChatOutbound[] = []
+    let indexCalls = 0
+    const bus = makeSignal()
+    // callIndex 0 (turn 1 cold) → normal. callIndex 1 (turn 2 attempt-0, warm) →
+    // fire the reset mid-flight, then freeze-timeout. callIndex 2+ (turn 2 retry,
+    // turn 3) → normal.
+    const substrate = makeRacingThrowSubstrate(specs, (callIndex) => {
+      if (callIndex === 1) {
+        bus.fire('proj-A')
+        return 'turn timeout: inactivity'
+      }
+    })
+    const run = buildLiveAgentTurn({
+      substrate,
+      personaLoader: { async load() { return '' } },
+      memoryIndexSnapshot: async () => {
+        indexCalls += 1
+        return INDEX
+      },
+      contextResetSignal: bus.signal,
+      buttonStore: store,
+      project_slug: 'alice',
+      owner_home: tmp,
+      model: 'test-model',
+      now: () => now,
+    })
+
+    // Turn 1 (cold) warms scope proj-A.
+    await run(makeTurn(sent, { user_text: 'first', topic_id: 't1', project_id: 'proj-A' }))
+    expect(specs[0]!.prompt).toContain('COLD-ONLY-MARKER')
+    expect(indexCalls).toBe(1)
+
+    // Turn 2 (warm decision): attempt-0 (specs[1]) is the doomed stale warm prompt;
+    // it fires the reset + freezes; the retry (specs[2]) must recompose COLD.
+    const r2 = await run(makeTurn(sent, { user_text: 'second', topic_id: 't1', project_id: 'proj-A' }))
+    expect(r2.outcome).toBe('replied') // silent auto-retry recovered the turn
+
+    // The doomed first attempt: built warm at the decision → no cold-only block.
+    expect(specs[1]!.prompt).not.toContain('<memory_index>')
+    // THE FIX — the retry re-composed COLD instead of re-sending the stale warm
+    // prompt. (This assertion FAILS at ccc00f28: the retry re-sends the same warm
+    // spec.)
+    expect(specs[2]!.prompt).toContain('COLD-ONLY-MARKER')
+    // Two cold composes: turn 1 + the race-recomposed retry. (No warm compose calls
+    // the memory index.)
+    expect(indexCalls).toBe(2)
+
+    // Turn 3: WARM — proves the re-anchor let the post-dispatch guard re-mark warm
+    // after the grounded cold retry (pre-fix would leave it cold because the mid-
+    // flight un-mark was never re-anchored).
+    await run(makeTurn(sent, { user_text: 'third', topic_id: 't1', project_id: 'proj-A' }))
+    expect(specs[3]!.prompt).not.toContain('<memory_index>')
+    expect(indexCalls).toBe(2) // turn 3 warm → no additional cold compose
   })
 })
