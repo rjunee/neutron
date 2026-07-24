@@ -19,6 +19,12 @@
  *      turn's banner still sits in the detector window, the NEXT turn's real 401 is
  *      still caught — the per-turn latch reset lets it re-fire and re-stamp, so the
  *      frozen second turn classifies auth_invalid, not a generic timeout.
+ *   5. THE STALE-BANNER RE-ARM (codex r3 CONFIRMED BLOCKER): the CONVERSE of #4 — on a
+ *      warm REPL whose prior turn printed a transient/recovered 401 then completed
+ *      normally, the NEXT turn that prints NO new 401 and freezes for an UNRELATED
+ *      reason must NOT inherit the stale banner. Per-turn output scoping
+ *      (`ring.textSince(turnOutputMark)`) keeps the stale banner out of this turn's
+ *      window, so it classifies as a RETRYABLE turn_timeout, never auth_invalid.
  *
  * Drives the REAL persistent-REPL substrate with a fake `claude`+dev-channel host:
  * the inject feeds the REAL observed auth-failure line into the substrate's `onData`
@@ -274,6 +280,88 @@ function makeWarmTwoTurnAuthHost(): { host: PtyHost; spawnCount: () => number } 
   return { host, spawnCount: () => spawns }
 }
 
+/**
+ * A fake WARM host serving two sequential turns on ONE REPL for the STALE-BANNER
+ * re-arm regression (codex r3 CONFIRMED BLOCKER). Turn 1 prints the credential
+ * banner into the PTY scan seam then replies HEALTHILY (transient/recovered 401 — the
+ * turn completed normally, so the warm session is NOT poisoned and the banner lingers
+ * in the ring). Turn 2 prints only a BENIGN, non-credential line (so the stale turn-1
+ * banner is still one line up in the bottom-N window) and then STAYS SILENT — a freeze
+ * for a reason UNRELATED to auth. The stale banner must NOT be attributed to turn 2:
+ * turn 2 has to classify as a RETRYABLE generic freeze-timeout, never non-retryable
+ * auth_invalid.
+ */
+function makeStaleBannerThenUnrelatedFreezeHost(): { host: PtyHost; spawnCount: () => number } {
+  let spawns = 0
+  let turns = 0
+  const host: PtyHost = {
+    spawn(argv: string[], opts: PtySpawnOpts): PtyChild {
+      spawns += 1
+      const i = argv.indexOf('--session-id')
+      const r = argv.indexOf('--resume')
+      const sid = (i >= 0 ? argv[i + 1] : r >= 0 ? argv[r + 1] : undefined) as string
+      const { port: sinkPort, token } = getReplSinkInfo()
+      let hasExited = false
+      let exitResolve: (code: number | null) => void = () => {}
+      const exited = new Promise<number | null>((res) => {
+        exitResolve = res
+      })
+      const post = (path: string, body: unknown): Promise<unknown> =>
+        fetch(`http://127.0.0.1:${sinkPort}${path}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-Sink-Token': token },
+          body: JSON.stringify(body),
+        }).catch(() => undefined)
+      const server = Bun.serve({
+        port: 0,
+        hostname: '127.0.0.1',
+        async fetch(req) {
+          const url = new URL(req.url)
+          if (url.pathname === '/health') return Response.json({ ok: true })
+          if (req.method === 'POST' && url.pathname === '/message') {
+            const body = (await req.json()) as { text: string; turn_id?: string }
+            turns += 1
+            if (turns === 1) {
+              // Turn 1: the credential banner prints, THEN a healthy reply — the
+              // transient/recovered 401. The reply is posted over the sink (not the
+              // PTY), so the banner stays in the ring for turn 2's window.
+              opts.onData?.(new TextEncoder().encode(REAL_401_LINE))
+              void post('/reply', { session_id: sid, text: 'first answer', turn_id: body.turn_id })
+            } else {
+              // Turn 2: only benign, non-credential output (the stale turn-1 banner is
+              // still one line up in the bottom-N window), then STAY SILENT — an
+              // unrelated freeze. NO new 401 is printed this turn.
+              opts.onData?.(new TextEncoder().encode('⏺ thinking about your question…\n'))
+            }
+            return Response.json({ status: 'delivered' })
+          }
+          return new Response('nf', { status: 404 })
+        },
+      })
+      void post('/channel-ready', { session_id: sid, channel_port: server.port, pid: 450000 + spawns })
+      void post('/channel-bound', { session_id: sid })
+      return {
+        pid: 450000 + spawns,
+        write() {},
+        resize() {},
+        kill() {
+          if (hasExited) return
+          hasExited = true
+          try {
+            server.stop(true)
+          } catch {
+            /* ignore */
+          }
+          exitResolve(143)
+        },
+        exited,
+        hasExited: () => hasExited,
+      }
+    },
+  }
+  return { host, spawnCount: () => spawns }
+}
+
 function opts(host: PtyHost, extra: Partial<PersistentReplSubstrateOptions> = {}): PersistentReplSubstrateOptions {
   return {
     substrate_instance_id: 'cc-llm-acme',
@@ -387,5 +475,35 @@ describe('auth-failure classification', () => {
     expect(r2.retryable).toBe(false)
     expect(r2.message ?? '').toMatch(/auth token invalid/i)
     expect(r2.message ?? '').not.toMatch(/turn timeout/i)
+  })
+
+  it('STALE-BANNER RE-ARM (codex r3): a warm turn that freezes for an UNRELATED reason with a prior turn\'s banner still in the window is turn_timeout, NOT auth_invalid', async () => {
+    const { host, spawnCount } = makeStaleBannerThenUnrelatedFreezeHost()
+    // Large idle window so the warm REPL survives between turns (turn 2 reuses the
+    // SAME ring, where turn 1's recovered-401 banner still lingers). Short inactivity
+    // so turn 2's UNRELATED silence trips fast.
+    const sub = createPersistentReplSubstrate(
+      opts(host, { turnTimeoutMs: 250, idleMaxMs: 30_000 }),
+    )
+
+    // Turn 1: banner printed, then a healthy reply → completes, warm session intact
+    // (a transient/recovered 401 — NOT poisoned). Its banner stays in the ring.
+    const r1 = await drain(sub.start(spec('first question')))
+    expect(r1.errored).toBe(false)
+
+    // Turn 2 lands on the SAME warm REPL. It prints NO new 401 — only benign output —
+    // then freezes for a reason unrelated to auth. The stale turn-1 banner is still in
+    // the detector's bottom-N window, but per-turn output scoping means it is NOT this
+    // turn's output, so it must NOT re-arm the auth signal. Turn 2 has to read as the
+    // RETRYABLE generic freeze-timeout, never the non-retryable auth verdict.
+    const r2 = await drain(sub.start(spec('second question')))
+    expect(spawnCount()).toBe(1) // proves turn 2 reused the warm session (same ring)
+    expect(r2.errored).toBe(true)
+    // The DECISIVE assertions — real classification state, not a call spy.
+    expect(r2.code).toBe('turn_timeout')
+    expect(r2.retryable).toBe(true)
+    expect(r2.code).not.toBe('auth_invalid')
+    expect(r2.message ?? '').toMatch(/turn timeout/i)
+    expect(r2.message ?? '').not.toMatch(/auth token invalid/i)
   })
 })

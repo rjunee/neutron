@@ -430,6 +430,13 @@ export function createPersistentReplSubstrate(options: PersistentReplSubstrateOp
         // turn also 401" shape the feature exists for.
         session.authFailureAt = undefined
         session.authFailureMatched = undefined
+        // Mark where THIS turn's output begins in the ring. The auth detector matches
+        // only within `ring.textSince(turnOutputMark)` (codex r3 BLOCKER fix), so a
+        // stale banner already in the ring — appended BEFORE this mark on a prior turn
+        // — is excluded from the current-turn window and can't re-arm the latch. Set
+        // BEFORE the inject so everything the child prints in response to this turn's
+        // prompt counts; the prior turn's banner (appended earlier) does not.
+        session.turnOutputMark = session.ring.totalBytesAppended()
         session.scanner.resetLatch(AUTH_FAILURE_DETECTOR_ID)
         // Declare this turn OUTSTANDING to the watchdog. From here until the
         // `finally` settles it, this process has work in flight and its age is

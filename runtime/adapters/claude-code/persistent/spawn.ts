@@ -363,7 +363,17 @@ async function spawnSession(
   // fire to `dispatchAuthFailureNotice`, which records the session's auth-invalid
   // state so the driver's timeout watchdog fails the turn as `auth_invalid` (a
   // reconnect prompt) instead of the useless generic freeze-timeout.
-  session.scanner.register(createAuthFailureDetector())
+  // Scope the auth detector to the CURRENT turn's output (codex r3 BLOCKER fix): it
+  // matches ONLY within `ring.textSince(turnOutputMark)` — the PTY text produced
+  // since this turn's start — so a stale credential banner from a prior (recovered)
+  // turn still sitting in the bottom-N window can't re-arm the latch + re-stamp
+  // `authFailureAt` on a turn that froze for an unrelated reason. `turnOutputMark` is
+  // undefined between turns → the closure returns '' → the detector is inert then.
+  session.scanner.register(
+    createAuthFailureDetector(() =>
+      session.turnOutputMark === undefined ? '' : session.ring.textSince(session.turnOutputMark),
+    ),
+  )
   // The spawn `const child` isn't assigned when the `onData` closure is defined,
   // so route fired-detector keystrokes through this mirror (set right after
   // spawn, before any onData can fire on the event loop).

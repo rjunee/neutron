@@ -104,9 +104,16 @@ export function dispatchAuthFailureNotice(
   options: PersistentReplSubstrateOptions,
   now: number,
 ): void {
-  // Re-derive the matched line from the SAME bottom-N + doc-quote window the
-  // detector saw (the ring is unchanged on this synchronous tick).
-  const ctx = buildDetectorContext(session.ring.text(), AUTH_FAILURE_BOTTOM_N, now)
+  // Re-derive the matched line from the SAME current-turn bottom-N + doc-quote
+  // window the detector saw (the ring is unchanged on this synchronous tick). Scope
+  // to `textSince(turnOutputMark)` so the surfaced line comes from THIS turn's output,
+  // matching what `present` fired on (codex r3 BLOCKER fix); fall back to the whole
+  // ring only if the mark is unset (defensive — a fire implies an active turn).
+  const scanText =
+    session.turnOutputMark === undefined
+      ? session.ring.text()
+      : session.ring.textSince(session.turnOutputMark)
+  const ctx = buildDetectorContext(scanText, AUTH_FAILURE_BOTTOM_N, now)
   const matched = matchAuthFailure(ctx.lines) ?? '(auth failure)'
   session.authFailureAt = now
   session.authFailureMatched = matched

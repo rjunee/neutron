@@ -109,6 +109,15 @@ export class ReplSession {
    *  surfaced in the operator notice for cross-checking WHICH credential error
    *  fired. Never embedded in the user-facing bubble (that stays generic). */
   authFailureMatched: string | undefined
+  /** The ring's {@link PtyRing.totalBytesAppended} snapshot taken at THIS turn's
+   *  start (before the prompt inject). The auth-failure detector matches ONLY
+   *  within `ring.textSince(turnOutputMark)` — the output produced during the
+   *  current turn — so a stale credential banner from a PRIOR turn that is still
+   *  sitting in the detector's bottom-N window can NOT re-arm the latch and
+   *  re-stamp `authFailureAt` (codex r3 CONFIRMED BLOCKER: stale-banner re-arm
+   *  defeated per-turn scoping). Undefined between turns / before the first turn,
+   *  which makes the detector inert then (auth verdicts are per-turn). */
+  turnOutputMark: number | undefined
   /** Vajra port row #13: the warm-session size watchdog. Started right after the
    *  post-spawn assertion passes; measures the POST-COMPACT JSONL size on a
    *  cadence and surfaces a Reset/Compact affordance before the transcript grows

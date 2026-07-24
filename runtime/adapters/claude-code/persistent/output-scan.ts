@@ -182,6 +182,13 @@ export class OutputScanner {
    * this detector's latch at turn start lets the very next scan re-fire and
    * re-stamp the session, so the "warm session, second turn also 401" shape — the
    * feature's actual target — is caught. No-op for an unknown id.
+   *
+   * NOTE (codex r3): resetting the latch alone would ALSO let a STALE banner still in
+   * the window re-fire on a turn that printed no new 401 (defeating per-turn scoping).
+   * That is now prevented at the detector: the auth detector's `present` matches only
+   * within the CURRENT turn's output (`ring.textSince(turnOutputMark)`), so a reset
+   * latch can only re-fire on a banner ACTUALLY printed this turn — the reset supplies
+   * the rising edge, the scoping supplies the "is it new" test. The two compose.
    */
   resetLatch(id: string): void {
     const st = this.state.get(id)

@@ -48,6 +48,7 @@
  */
 
 import { stripAnsi } from './pty-text.ts'
+import { buildDetectorContext } from './output-scan.ts'
 import type { DetectorContext, DetectorSpec } from './output-scan.ts'
 
 /** Stable detector id — the scanner's edge-latch keys on this and the substrate's
@@ -124,7 +125,11 @@ export function matchAuthFailure(lines: readonly string[]): string | null {
   return null
 }
 
-/** Boolean presence wrapper for the {@link DetectorSpec} `present` predicate. */
+/** Boolean presence wrapper for the {@link DetectorSpec} `present` predicate. Matches
+ *  over the WHOLE-ring bottom-N window the framework passes in. Used directly only
+ *  when the detector is built with no turn-scope closure (the unit-test wiring); the
+ *  production detector overrides this to scope the match to the current turn — see
+ *  {@link createAuthFailureDetector}. */
 export function authFailurePresent(ctx: DetectorContext): boolean {
   return matchAuthFailure(ctx.lines) !== null
 }
@@ -134,11 +139,41 @@ export function authFailurePresent(ctx: DetectorContext): boolean {
  * session's auth-invalid state + surfaces a notice when it fires (never a
  * keystroke). The framework's per-detector edge-latch makes it fire-once per rising
  * edge (cross-cutting invariant §1).
+ *
+ * PER-TURN OUTPUT SCOPING (codex r3 CONFIRMED BLOCKER fix). When `getTurnScopedRing`
+ * is supplied (the production wiring — it returns `ring.textSince(turnOutputMark)`,
+ * i.e. ONLY the PTY text produced during the current turn), `present` re-derives its
+ * detection window from THAT slice instead of the whole rolling ring. This is the
+ * decisive guard against the stale-banner re-arm: a credential banner that printed
+ * on an EARLIER turn (and completed normally without poisoning the session) can
+ * still sit inside the detector's bottom-N window when the NEXT turn starts. With
+ * the whole-ring window + the per-turn latch reset, that stale banner would re-fire
+ * on the next turn's first scan and re-stamp `authFailureAt` — so if THAT turn then
+ * froze for an unrelated reason, the watchdog would misclassify it non-retryable
+ * `auth_invalid`. Scoping to the current turn's own output means only a banner
+ * ACTUALLY printed this turn can arm the signal; a stale one is invisible to
+ * `present`, so it falls off (falling edge) and never re-stamps. A genuine NEW 401
+ * on a warm second turn IS in the current-turn slice, so it still fires + re-stamps
+ * (the latch reset guarantees the rising edge) — the feature's real target is
+ * preserved. When the closure is omitted (unit-test scanner wiring, which scans raw
+ * panes directly) it falls back to the whole-window {@link authFailurePresent}.
  */
-export function createAuthFailureDetector(): DetectorSpec {
+export function createAuthFailureDetector(getTurnScopedRing?: () => string): DetectorSpec {
   return {
     id: AUTH_FAILURE_DETECTOR_ID,
     bottomN: AUTH_FAILURE_BOTTOM_N,
-    present: authFailurePresent,
+    present:
+      getTurnScopedRing === undefined
+        ? authFailurePresent
+        : (ctx) => {
+            const turnRing = getTurnScopedRing()
+            if (turnRing === '') return false
+            // Re-window on the current-turn slice with the SAME bottom-N + doc-quote
+            // guards the framework applies, so all the existing false-positive
+            // defences (fenced/quoted lines, bottom-N positional guard) still hold —
+            // we only ADD the "must be this turn's output" constraint.
+            const turnCtx = buildDetectorContext(turnRing, AUTH_FAILURE_BOTTOM_N, ctx.now)
+            return matchAuthFailure(turnCtx.lines) !== null
+          },
   }
 }
