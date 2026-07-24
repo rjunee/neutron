@@ -13,7 +13,8 @@ import { RESUME_PICKER_DETECTOR_ID, runResumePickerRecovery } from './resume-pic
 import { findLatestResumableSession } from './session-disk-recovery.ts'
 import type { SizeSeverity } from './session-size-watchdog.ts'
 import { WEDGED_PROMPT_DETECTOR_ID, runWedgedRecovery } from './interactive-prompt-deadlock-detector.ts'
-import { type PersistentReplSubstrateOptions, dispatchRateLimitBannerNotice } from './types.ts'
+import { type PersistentReplSubstrateOptions, dispatchRateLimitBannerNotice, dispatchAuthFailureNotice } from './types.ts'
+import { AUTH_FAILURE_DETECTOR_ID } from './auth-failure-signature.ts'
 import type { ReplSession } from './repl-session.ts'
 import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
 
@@ -243,6 +244,14 @@ export function runOutputScan(
       // stamped the per-`threadId::severity` latch, so this is fire-once and
       // clears only when the banner falls off — invariant §1/§4).
       dispatchRateLimitBannerNotice(session, options, fired.id, now)
+    } else if (fired.id === AUTH_FAILURE_DETECTOR_ID) {
+      // CLI auth-failure crossed the rising edge — the `claude` child reported an
+      // invalid/expired credential and (headless) can't self-recover. NOTIFY-ONLY:
+      // record the session's auth-invalid state so the pool driver's timeout
+      // watchdog fails the turn FAST + distinctly (`auth_invalid`) instead of
+      // waiting out the inactivity window and misclassifying it as a generic
+      // timeout. No keystroke (there is nothing to press — the fix is a reconnect).
+      dispatchAuthFailureNotice(session, options, now)
     } else if (fired.keys !== undefined) {
       sendKeys(child, fired.keys)
     }

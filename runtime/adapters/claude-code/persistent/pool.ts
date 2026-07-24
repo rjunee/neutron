@@ -413,6 +413,15 @@ export function createPersistentReplSubstrate(options: PersistentReplSubstrateOp
           turn.settle = res
         })
         session.activeTurn = turn
+        // Scope the auth-failure signal to THIS turn: clear it BEFORE the inject
+        // (which is when the child processes the prompt and can print an
+        // invalid-credential banner). The scanner's edge-latch still guards against
+        // a re-fire on a line that lingered from a prior turn; a real auth failure
+        // this turn re-stamps it fresh, and the watchdog then fast-fails on mere
+        // presence (no fragile timestamp compare against the later `turnStartedAt`,
+        // which is set AFTER the inject the banner arrives during).
+        session.authFailureAt = undefined
+        session.authFailureMatched = undefined
         // Declare this turn OUTSTANDING to the watchdog. From here until the
         // `finally` settles it, this process has work in flight and its age is
         // measured from NOW — so a turn that stops progressing is reported even
@@ -575,9 +584,42 @@ export function createPersistentReplSubstrate(options: PersistentReplSubstrateOp
           channel.close()
           turn.settle()
         }
+        // AUTH-INVALID fast-fail (2026-07-24 dogfood). When the auth-failure
+        // output-scan signature fired DURING this turn (the `claude` child printed
+        // an invalid/expired-credential banner then went silent headless), fail the
+        // turn IMMEDIATELY with a DISTINCT `auth_invalid` class rather than waiting
+        // out the full inactivity window and misclassifying the freeze as a generic
+        // timeout ("tap Retry"). NON-retryable — retrying is pointless while the
+        // token is invalid; the gateway surfaces a reconnect bubble on this class.
+        // Poison the warm session like the freeze path so the next dispatch respawns
+        // a clean REPL. The matched CLI line is NOT embedded in the error message
+        // (it is surfaced separately via the notice) so the message stays stable.
+        const failAuthInvalid = (): void => {
+          if (turn.settled) return
+          turn.settled = true
+          if (!ephemeral && session !== undefined) session.poisoned = true
+          channel.push({
+            kind: 'error',
+            message: 'persistent-repl: auth token invalid — reconnect required',
+            retryable: false,
+            code: 'auth_invalid',
+          })
+          channel.close()
+          turn.settle()
+        }
         const watchdog = setInterval(() => {
           if (turn.settled || channel.closed) return
           const nowMs = Date.now()
+          // Auth-invalid takes precedence over the timeout checks: the signal is
+          // cleared at THIS turn's start (before the inject) and re-stamped only if
+          // the scanner sees a credential error on this turn's output, so mere
+          // presence scopes it to this turn (a poisoned/respawned session starts
+          // clean, so there is no cross-turn carryover to filter).
+          if (session !== undefined && session.authFailureAt !== undefined) {
+            clearInterval(watchdog)
+            failAuthInvalid()
+            return
+          }
           if (nowMs - turnStartedAt >= absoluteCeilingMs) {
             clearInterval(watchdog)
             failFrozen('ceiling')

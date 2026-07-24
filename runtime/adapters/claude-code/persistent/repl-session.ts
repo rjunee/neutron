@@ -93,6 +93,20 @@ export class ReplSession {
    *  with resume FORCED OFF — a clean fresh spawn whose `spawnSession` rewrites the
    *  registry `has_session: false`, breaking the stale-resume loop (Codex P2). */
   forceFreshRespawn = false
+  /** Timestamp (ms) the auth-failure output-scan signature last fired on this
+   *  session's PTY ring — the `claude` child reported an invalid/expired credential
+   *  (`OAuth access token is invalid` / `Please run /login` / a 401·403 `API Error`;
+   *  see `auth-failure-signature.ts`). Set by `dispatchAuthFailureNotice` on the
+   *  scanner's rising edge; read by the pool driver's per-turn timeout watchdog,
+   *  which — when this was stamped DURING the current turn — fails the turn FAST with
+   *  a distinct `auth_invalid` class instead of waiting out the full inactivity
+   *  window and misclassifying the freeze as a generic timeout. Undefined until an
+   *  auth failure is observed; a fresh (respawned) session starts clean. */
+  authFailureAt: number | undefined
+  /** The verbatim (trimmed, ANSI-stripped) auth-failure line that last matched —
+   *  surfaced in the operator notice for cross-checking WHICH credential error
+   *  fired. Never embedded in the user-facing bubble (that stays generic). */
+  authFailureMatched: string | undefined
   /** Vajra port row #13: the warm-session size watchdog. Started right after the
    *  post-spawn assertion passes; measures the POST-COMPACT JSONL size on a
    *  cadence and surfaces a Reset/Compact affordance before the transcript grows

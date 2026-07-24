@@ -22,6 +22,7 @@ import {
 import { assertReplAlive } from './post-spawn-assertion.ts'
 import type { PtyChild } from './pty-host.ts'
 import { RATE_LIMIT_BANNER_SEVERITIES, createRateLimitBannerDetector } from './rate-limit-banner.ts'
+import { createAuthFailureDetector } from './auth-failure-signature.ts'
 import { type ReplRegistryRecord, getRecord, patchRecord, withRegistry } from './repl-registry.ts'
 import { resolveRespawnStrategy } from './respawn-strategy.ts'
 import { createResumePickerDetector } from './resume-picker-detector.ts'
@@ -354,6 +355,15 @@ async function spawnSession(
   for (const severity of RATE_LIMIT_BANNER_SEVERITIES) {
     session.scanner.register(createRateLimitBannerDetector(severity))
   }
+  // CLI AUTH-FAILURE signature (2026-07-24 dogfood). DISTINCT from the rate-limit
+  // banner: that surfaces a transient/usage-cap LIMIT; this notices an INVALID /
+  // EXPIRED CREDENTIAL (`OAuth access token is invalid` / `Please run /login` / a
+  // 401·403 `API Error`) the `claude` child prints before going silent headless.
+  // NOTIFY-ONLY (no `keys` — there is nothing to press): `runOutputScan` routes a
+  // fire to `dispatchAuthFailureNotice`, which records the session's auth-invalid
+  // state so the driver's timeout watchdog fails the turn as `auth_invalid` (a
+  // reconnect prompt) instead of the useless generic freeze-timeout.
+  session.scanner.register(createAuthFailureDetector())
   // The spawn `const child` isn't assigned when the `onData` closure is defined,
   // so route fired-detector keystrokes through this mirror (set right after
   // spawn, before any onData can fire on the event loop).

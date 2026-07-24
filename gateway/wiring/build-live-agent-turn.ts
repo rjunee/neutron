@@ -358,6 +358,29 @@ export const TIMEOUT_BODY =
   'That one took too long, so I stopped before finishing. This is usually a temporary hiccup, not a problem with your setup — tap Retry, or just send it again.'
 
 /**
+ * Auth-reconnect bubble (2026-07-24 dogfood). Shown when the turn failed because the
+ * underlying Claude connection reported an invalid/expired credential (the substrate
+ * stamps `auth_invalid`; see `isAuthInvalid`). This is DISTINCT from a freeze-timeout
+ * and from the generic `FAILURE_BODY`: the actionable fix is to reconnect the Claude
+ * token, so the message says exactly that instead of the useless "tap Retry" (which
+ * would just hit the same invalid token). Kept honest + specific: an expired token or
+ * a hit usage limit both surface this way.
+ *
+ * Reconnect story (investigated 2026-07-24): a pure browser-only re-auth is NOT
+ * feasible with what the repo has — `claude setup-token` (the OAuth step) must be run
+ * on the machine and its printed token captured from the CLI's stdout. That capture
+ * is exactly what the existing install-token handoff automates (`open/install-token-
+ * handoff.ts`), and that handoff is already reconnect-capable as-is (its stateless
+ * signup_id → persist-token → restart flow works whether it is a first-time setup or
+ * a token refresh — no changes needed). So the bubble points at the same reconnect
+ * command; a one-click in-chat "reconnect" button that drives the handoff end-to-end
+ * is a follow-up (it needs a client affordance + turn→handoff plumbing), tracked
+ * rather than half-built here.
+ */
+export const AUTH_RECONNECT_BODY =
+  'Your Claude connection needs to be reconnected — the access token has expired or was rejected (this can also happen right after hitting a usage limit). Reconnect it by running `claude setup-token` on the machine running Neutron (or re-running the install command), then send your message again.'
+
+/**
  * Retry-affordance routing value (2026-07-01). Emitted as the Retry button's
  * `value` on the freeze-timeout bubble; a tap routes it back as the next turn.
  * The runner special-cases it: recover the last real user message for this topic
@@ -1266,11 +1289,18 @@ export function buildLiveAgentTurn(
       // stuck error instead of re-firing the welcome. Stay silent — the receiver
       // clears its per-process seeded-topic mark on the 'failed' result so the next
       // reload/re-subscribe regenerates the seed. A real user turn gets a bubble:
+      //   • AUTH-INVALID → the actionable `AUTH_RECONNECT_BODY` (reconnect your
+      //     Claude token) — checked FIRST so an expired-credential turn never
+      //     misreads as a slow turn (its message carries no "turn timeout"/"aborted"
+      //     token, so it wouldn't hit the freeze branch anyway — but ordering makes
+      //     the intent explicit).
       //   • freeze-TIMEOUT → the honest `TIMEOUT_BODY` + a one-click Retry button
       //     (NEVER the misleading "AI connection may need attention" text).
       //   • any other fault → the credential/connection `FAILURE_BODY`.
       if (turn.seed_turn !== true) {
-        if (isFreezeTimeout(lastErrMessage)) {
+        if (isAuthInvalid(lastErrMessage)) {
+          await sendAuthReconnect(input.buttonStore, turn)
+        } else if (isFreezeTimeout(lastErrMessage)) {
           await sendTimeoutRetry(input.buttonStore, turn)
         } else {
           sendSafe(turn.send, { type: 'agent_message', body: FAILURE_BODY, topic_id: turn.topic_id })
@@ -1791,6 +1821,21 @@ export function isFreezeTimeout(message: string): boolean {
 }
 
 /**
+ * Classify a dispatch error as an AUTH-INVALID failure — the underlying `claude`
+ * child reported an invalid/expired credential (the substrate abandons the turn with
+ * the stamped `auth_invalid` class + the distinctive `auth token invalid — reconnect
+ * required` message; see `pool.ts` `failAuthInvalid`). Matched on the message prose
+ * (the classifier sees the thrown Error's `.message`, not its `.code`) — the two
+ * phrases are distinctive and NEITHER contains a `turn timeout` / `aborted` token, so
+ * an auth failure can never also read as a freeze-timeout. Checked BEFORE
+ * `isFreezeTimeout` in the terminal-failure handler so the owner gets the actionable
+ * reconnect bubble instead of a useless "tap Retry".
+ */
+export function isAuthInvalid(message: string): boolean {
+  return /auth token invalid/i.test(message) || /reconnect required/i.test(message)
+}
+
+/**
  * Surface the honest freeze-timeout bubble + a one-click Retry affordance. Persists
  * the reply as a `button_prompt` (so the web client mints a `prompt_id` and the tap
  * routes as a `button_choice`) carrying a single Retry option whose value is
@@ -1827,6 +1872,48 @@ async function sendTimeoutRetry(
     body: TIMEOUT_BODY,
     topic_id: turn.topic_id,
     options,
+    allow_freeform: true,
+    ...(reply_prompt_id !== null ? { prompt_id: reply_prompt_id } : {}),
+  }
+  sendSafe(turn.send, envelope)
+}
+
+/**
+ * Surface the auth-reconnect bubble (`AUTH_RECONNECT_BODY`) when a turn failed on an
+ * invalid/expired Claude credential. Persists it as a durable history row (so a
+ * reload re-hydrates the actionable message, not a ghost) and ships it live. NO
+ * Retry button — retrying is pointless while the token is invalid, and a button that
+ * re-runs the turn would just hit the same auth error; `allow_freeform` stays true so
+ * the owner can send again once they have reconnected. When the persist fails we
+ * still ship the live envelope (the message + freeform re-send still work). Called
+ * ONLY for a real (non-seed) user turn.
+ */
+async function sendAuthReconnect(
+  buttonStore: ButtonStore,
+  turn: LiveAgentTurnRequest,
+): Promise<void> {
+  let reply_prompt_id: string | null = null
+  try {
+    const prompt = buildButtonPrompt({
+      body: AUTH_RECONNECT_BODY,
+      options: [],
+      allow_freeform: true,
+      expires_in_ms: REPLY_ROW_TTL_MS,
+      uuid: randomUUID,
+    })
+    const emitted = await buttonStore.emit(prompt, { topic_id: turn.topic_id })
+    reply_prompt_id = emitted.prompt_id
+  } catch (err) {
+    moduleLog.warn('auth_reconnect_persist_failed', {
+      project: turn.project_slug,
+      topic: turn.topic_id,
+      error: err instanceof Error ? err.message : String(err),
+    })
+  }
+  const envelope: ChatOutbound = {
+    type: 'agent_message',
+    body: AUTH_RECONNECT_BODY,
+    topic_id: turn.topic_id,
     allow_freeform: true,
     ...(reply_prompt_id !== null ? { prompt_id: reply_prompt_id } : {}),
   }

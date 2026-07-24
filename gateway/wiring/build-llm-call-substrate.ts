@@ -859,6 +859,22 @@ export function buildLlmCallSubstrate(
                 yield ev
                 continue
               }
+              // AUTH-INVALID (2026-07-24 dogfood): the warm REPL's `claude` child
+              // reported an invalid/expired OAuth token in its PTY output (the
+              // auth-failure output-scan signature fired) and the turn was abandoned
+              // with the stamped `auth_invalid` class. This is NOT a transient turn
+              // timeout and NOT a healthy-credential fault to cool: the token itself
+              // needs reconnecting. Pass it through UNCHANGED (retryable:false,
+              // code:auth_invalid) so the live-agent turn's classifier surfaces the
+              // reconnect bubble; do NOT `reportFailure` a cooldown — a single-
+              // credential box would only launder it into "all credentials in
+              // cooldown", hiding the real (reconnect) fix behind a quota lie. Code-
+              // stamped only: an UNSTAMPED auth message keeps its existing cooldown
+              // path below (`detectCliAuthFailure` → 401), unchanged.
+              if (stampedCode === 'auth_invalid') {
+                yield ev
+                continue
+              }
               // O3 — the cooldown classification is ALSO code-authoritative: the
               // prose classifiers (`parseHttpStatusFromMessage` / `detectCliAuth
               // Failure`) run ONLY for a legacy/unstamped event. A stamped class
