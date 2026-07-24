@@ -84,33 +84,33 @@ describe('install-token handoff', () => {
   })
 
   test('honours X-Forwarded-Proto/Host so a reverse-proxied HTTPS origin is not downgraded to http', async () => {
-    // Managed's per-tenant Caddy chain terminates TLS and proxies to this
+    // A TLS-terminating reverse proxy (e.g. Caddy/nginx) forwards to this
     // process over plain HTTP on loopback — the raw request `url.origin` is
     // `http://` even though the public client used `https://`. Without
     // honouring the forwarded headers, the emitted CALLBACK_URL is `http://`
-    // and Caddy's http→https redirect (308) breaks the installer's bare
+    // and the proxy's http→https redirect (308) breaks the installer's bare
     // `curl -X POST` (no -L). Regression test for that bug.
     const { handler } = makeHandler()
     const initiateRes = await handler.handle(
       req('POST', '/oauth/max/install-token/initiate', undefined, {
         'x-forwarded-proto': 'https',
-        'x-forwarded-host': 'juno.neutron.computer',
+        'x-forwarded-host': 'neutron.example.com',
       }),
     )
     const j = (await initiateRes!.json()) as { signup_id: string; script_url: string }
     expect(j.script_url).toBe(
-      `https://juno.neutron.computer/oauth/max/install-token/${j.signup_id}.sh`,
+      `https://neutron.example.com/oauth/max/install-token/${j.signup_id}.sh`,
     )
 
     const shRes = await handler.handle(
       req('GET', `/oauth/max/install-token/${j.signup_id}.sh`, undefined, {
         'x-forwarded-proto': 'https',
-        'x-forwarded-host': 'juno.neutron.computer',
+        'x-forwarded-host': 'neutron.example.com',
       }),
     )
     const script = await shRes!.text()
     expect(script).toContain(
-      `CALLBACK_URL='https://juno.neutron.computer/oauth/max/install-token/complete'`,
+      `CALLBACK_URL='https://neutron.example.com/oauth/max/install-token/complete'`,
     )
   })
 

@@ -238,14 +238,14 @@ esac
 
 /**
  * Resolve the origin the client actually requested, honouring
- * `X-Forwarded-Proto` / `X-Forwarded-Host` when a reverse proxy is in front
- * (e.g. Managed's per-tenant Caddy chain, which terminates TLS and forwards
- * to this loopback Bun process over plain HTTP). Without this, `url.origin`
- * reflects the proxy→app hop's scheme (`http:`), not the public one
- * (`https:`) — producing an `http://` callback URL that the installer script
- * POSTs to, which Caddy then 308-redirects to `https://` and a bare
- * `curl -X POST` (no `-L`) fails to follow. Mirrors the same pattern already
- * used in `landing/auth-gate.ts` (`buildOriginalRequestUrl`).
+ * `X-Forwarded-Proto` / `X-Forwarded-Host` when a reverse proxy sits in front
+ * (e.g. Caddy/nginx terminating TLS and forwarding to this process over plain
+ * HTTP on loopback). Without this, `url.origin` reflects the proxy→app hop's
+ * scheme (`http:`), not the public one (`https:`) — producing an `http://`
+ * callback URL that the installer script POSTs to, which a TLS-terminating
+ * proxy then redirects (308) to `https://`, and a bare `curl -X POST`
+ * (no `-L`) fails to follow. Mirrors the same pattern already used in
+ * `landing/auth-gate.ts` (`buildOriginalRequestUrl`).
  */
 function resolveOrigin(req: Request, url: URL): string {
   const xfp = req.headers.get('x-forwarded-proto')
