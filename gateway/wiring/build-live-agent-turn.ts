@@ -378,7 +378,7 @@ export const TIMEOUT_BODY =
  * rather than half-built here.
  */
 export const AUTH_RECONNECT_BODY =
-  'Your Claude connection needs to be reconnected — the access token has expired or was rejected (this can also happen right after hitting a usage limit). Reconnect it by running `claude setup-token` on the machine running Neutron (or re-running the install command), then send your message again.'
+  'Your Claude connection needs to be reconnected. The access token has expired or was rejected (this can also happen right after hitting a usage limit). Reconnect it by running `claude setup-token` on the machine running Neutron (or re-running the install command), then send your message again.'
 
 /**
  * Retry-affordance routing value (2026-07-01). Emitted as the Retry button's

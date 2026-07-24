@@ -44,6 +44,33 @@ describe('OutputScanner — edge-triggered latch (invariant §1)', () => {
     expect(fired).toHaveLength(1)
     expect(fired[0]?.keys).toEqual(['enter'])
   })
+
+  test('resetLatch re-arms a still-present signal so it fires a fresh rising edge (Argus r2 MAJOR)', () => {
+    const s = new OutputScanner()
+    s.register(sigDetector('d', 'SIGNAL'))
+
+    // Rising edge → fire; still present → latched, no re-fire (no falling edge).
+    expect(s.scan('SIGNAL present', 0).map((f) => f.id)).toEqual(['d'])
+    expect(s.scan('SIGNAL present', 1).length).toBe(0)
+
+    // resetLatch clears the latch WITHOUT a falling edge, so the SAME still-present
+    // signal fires again on the next scan — the per-turn re-arm the auth-failure
+    // detector needs so a warm session's second-turn banner isn't swallowed by a
+    // latch left set from the prior turn's lingering banner.
+    s.resetLatch('d')
+    expect(s.scan('SIGNAL present', 2).map((f) => f.id)).toEqual(['d'])
+    // And it re-latches: no double-fire on the immediately-following identical scan.
+    expect(s.scan('SIGNAL present', 3).length).toBe(0)
+  })
+
+  test('resetLatch on an unknown id is a no-op (never throws)', () => {
+    const s = new OutputScanner()
+    s.register(sigDetector('d', 'SIGNAL'))
+    expect(() => s.resetLatch('not-registered')).not.toThrow()
+    // The registered detector is untouched by a reset of a different id.
+    expect(s.scan('SIGNAL present', 0).map((f) => f.id)).toEqual(['d'])
+    expect(s.scan('SIGNAL present', 1).length).toBe(0)
+  })
 })
 
 describe('OutputScanner — fire-once / debounce-before-await (invariant §4)', () => {

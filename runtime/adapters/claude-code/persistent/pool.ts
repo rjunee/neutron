@@ -16,6 +16,7 @@ import { normalizePtyText } from './pty-text.ts'
 import { CONTEXT_RESET_COMMAND, DEFAULT_IDLE_MAX_MS, DEFAULT_IDLE_QUIET_MS, DEFAULT_TURN_ABSOLUTE_CEILING_MS, DEFAULT_TURN_INACTIVITY_MS, REPL_LIVENESS_KEEPALIVE_MS, SESSION_KEY_SEP, runOutputScan } from './signatures.ts'
 import type { ActiveTurn, PersistentReplSubstrateOptions, RecoveredReply } from './types.ts'
 import { ReplSession, terminateChild, unlinkSessionConfigs } from './repl-session.ts'
+import { AUTH_FAILURE_DETECTOR_ID } from './auth-failure-signature.ts'
 import { getOrSpawnSession, injectMessage, spawnWithChannelWedgeRespawn, waitForReplIdle } from './spawn.ts'
 import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
 
@@ -415,13 +416,21 @@ export function createPersistentReplSubstrate(options: PersistentReplSubstrateOp
         session.activeTurn = turn
         // Scope the auth-failure signal to THIS turn: clear it BEFORE the inject
         // (which is when the child processes the prompt and can print an
-        // invalid-credential banner). The scanner's edge-latch still guards against
-        // a re-fire on a line that lingered from a prior turn; a real auth failure
-        // this turn re-stamps it fresh, and the watchdog then fast-fails on mere
-        // presence (no fragile timestamp compare against the later `turnStartedAt`,
-        // which is set AFTER the inject the banner arrives during).
+        // invalid-credential banner) so a stale banner from a PRIOR turn can't leak
+        // into this one's classification. A real auth failure THIS turn re-stamps it
+        // fresh via the scanner, and the watchdog then applies the auth verdict only
+        // once the turn has ALSO frozen (banner THEN silence).
+        //
+        // Also reset the auth-detector's edge-latch (Argus r2 MAJOR): on a WARM
+        // session the prior turn's banner (or an unfenced echo of it) can still sit
+        // in the detector's bottom-N window when this turn's REAL banner prints —
+        // with the latch still set from before, `present` never drops, so no rising
+        // edge fires and the re-stamp above never happens. Clearing the latch lets
+        // the next scan re-fire and re-stamp, catching the "warm session, second
+        // turn also 401" shape the feature exists for.
         session.authFailureAt = undefined
         session.authFailureMatched = undefined
+        session.scanner.resetLatch(AUTH_FAILURE_DETECTOR_ID)
         // Declare this turn OUTSTANDING to the watchdog. From here until the
         // `finally` settles it, this process has work in flight and its age is
         // measured from NOW — so a turn that stops progressing is reported even
@@ -620,24 +629,36 @@ export function createPersistentReplSubstrate(options: PersistentReplSubstrateOp
           // mere presence (Argus r1 BLOCKER). The signal is cleared at THIS turn's
           // start (before the inject) and re-stamped only if the scanner sees a
           // credential banner on this turn's output. We consult it ONLY when a
-          // freeze gate below has already tripped — so a healthy turn that merely
-          // printed a credential-shaped string but kept streaming (never froze)
-          // never gets the auth verdict; only the real "banner THEN silence" shape
-          // reaches a freeze gate with the signal set.
+          // freeze gate below has already tripped AND the turn is CURRENTLY SILENT
+          // — so a healthy turn that merely printed a credential-shaped string but
+          // kept streaming (never froze) never gets the auth verdict; only the real
+          // "banner THEN silence" shape does.
           const authInvalid = session !== undefined && session.authFailureAt !== undefined
-          if (nowMs - turnStartedAt >= absoluteCeilingMs) {
-            clearInterval(watchdog)
-            if (authInvalid) failAuthInvalid()
-            else failFrozen('ceiling')
-            return
-          }
           // Idle since the later of turn-start and the last PTY byte. Clamping to
           // `turnStartedAt` means a turn that begins with a stale `lastDataAt`
           // (e.g. a warm REPL quiet since its prior turn) still gets a full
-          // inactivity window before it can be judged frozen.
+          // inactivity window before it can be judged frozen. Computed up front so
+          // BOTH freeze gates share the same silence measure.
           const lastActivity =
             session !== undefined ? Math.max(turnStartedAt, session.lastDataAt) : turnStartedAt
-          if (nowMs - lastActivity >= inactivityMs) {
+          // The DECISIVE auth guard (Argus r2 BLOCKER): the auth verdict requires
+          // the real "banner THEN silence" shape — the signal latched AND the turn
+          // currently silent (no PTY output for the inactivity window). A turn that
+          // is STILL STREAMING when it trips the absolute ceiling is a livelock, not
+          // an auth freeze; it must get the retryable ceiling-freeze, NEVER the
+          // non-retryable auth verdict + reconnect bubble. (`absoluteCeilingMs` is
+          // coerced ≥ `inactivityMs` at construction, so a genuine post-banner
+          // freeze always trips the inactivity gate below — where `silent` is true
+          // by definition — well before the ceiling; the ceiling's auth branch only
+          // ever engages on the exact-equal-window edge, and only when silent.)
+          const silent = nowMs - lastActivity >= inactivityMs
+          if (nowMs - turnStartedAt >= absoluteCeilingMs) {
+            clearInterval(watchdog)
+            if (authInvalid && silent) failAuthInvalid()
+            else failFrozen('ceiling')
+            return
+          }
+          if (silent) {
             clearInterval(watchdog)
             if (authInvalid) failAuthInvalid()
             else failFrozen('inactivity')

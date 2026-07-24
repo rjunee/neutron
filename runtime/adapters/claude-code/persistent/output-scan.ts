@@ -167,6 +167,28 @@ export class OutputScanner {
   }
 
   /**
+   * Clear a single detector's latch so its signature can fire a FRESH rising edge
+   * on the next `scan()` even if it was already present-and-latched (no falling
+   * edge occurred). The debounce floor (`lastFireAt`) is intentionally preserved.
+   *
+   * WHY (Argus r2 MAJOR): the auth-failure verdict is scoped per-turn — the pool
+   * driver clears `session.authFailureAt` at each turn start so a stale credential
+   * banner from a PRIOR turn can't leak into this one. But on a WARM session the
+   * prior turn's banner (or an agent's unfenced echo of one) can still sit inside
+   * the detector's bottom-N window when the NEXT turn's REAL credential banner
+   * prints. With the edge-latch still set from the prior turn (`present` never
+   * dropped → no falling edge → no rising edge), the real banner would never
+   * re-fire and the frozen turn would misclassify as a generic timeout. Resetting
+   * this detector's latch at turn start lets the very next scan re-fire and
+   * re-stamp the session, so the "warm session, second turn also 401" shape — the
+   * feature's actual target — is caught. No-op for an unknown id.
+   */
+  resetLatch(id: string): void {
+    const st = this.state.get(id)
+    if (st !== undefined) st.latched = false
+  }
+
+  /**
    * Run every detector against the current raw ring text and return those that
    * fired on this tick's rising edge. Side-effect-free w.r.t. the PTY: the
    * caller performs each fired detection's `keys` write.
