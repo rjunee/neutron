@@ -33,12 +33,18 @@ function makeHandler(opts?: { now?: () => number; ttlMs?: number }) {
   }
 }
 
-function req(method: string, path: string, body?: unknown): Request {
+function req(
+  method: string,
+  path: string,
+  body?: unknown,
+  extraHeaders?: Record<string, string>,
+): Request {
+  const headers: Record<string, string> = { ...extraHeaders }
+  if (body !== undefined) headers['content-type'] = 'application/json'
   return new Request(`${ORIGIN}${path}`, {
     method,
-    ...(body !== undefined
-      ? { body: JSON.stringify(body), headers: { 'content-type': 'application/json' } }
-      : {}),
+    ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
+    ...(Object.keys(headers).length > 0 ? { headers } : {}),
   })
 }
 
@@ -75,6 +81,37 @@ describe('install-token handoff', () => {
     expect(script).toContain(`SIGNUP_ID='${j.signup_id}'`)
     expect(script).toContain(`CALLBACK_URL='${ORIGIN}/oauth/max/install-token/complete'`)
     expect(script).toContain('https://claude.ai/install.sh')
+  })
+
+  test('honours X-Forwarded-Proto/Host so a reverse-proxied HTTPS origin is not downgraded to http', async () => {
+    // A TLS-terminating reverse proxy (e.g. Caddy/nginx) forwards to this
+    // process over plain HTTP on loopback — the raw request `url.origin` is
+    // `http://` even though the public client used `https://`. Without
+    // honouring the forwarded headers, the emitted CALLBACK_URL is `http://`
+    // and the proxy's http→https redirect (308) breaks the installer's bare
+    // `curl -X POST` (no -L). Regression test for that bug.
+    const { handler } = makeHandler()
+    const initiateRes = await handler.handle(
+      req('POST', '/oauth/max/install-token/initiate', undefined, {
+        'x-forwarded-proto': 'https',
+        'x-forwarded-host': 'neutron.example.com',
+      }),
+    )
+    const j = (await initiateRes!.json()) as { signup_id: string; script_url: string }
+    expect(j.script_url).toBe(
+      `https://neutron.example.com/oauth/max/install-token/${j.signup_id}.sh`,
+    )
+
+    const shRes = await handler.handle(
+      req('GET', `/oauth/max/install-token/${j.signup_id}.sh`, undefined, {
+        'x-forwarded-proto': 'https',
+        'x-forwarded-host': 'neutron.example.com',
+      }),
+    )
+    const script = await shRes!.text()
+    expect(script).toContain(
+      `CALLBACK_URL='https://neutron.example.com/oauth/max/install-token/complete'`,
+    )
   })
 
   test('GET /<id>.sh for an unknown id → 404', async () => {
