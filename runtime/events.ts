@@ -54,8 +54,8 @@ export interface TokenUsage {
  *   - the credential-resolution reasons (`no_credentials` / `all_cooldown` /
  *     `oauth_refresh` — formerly `ScrubbedAuthEnvError.reason`), and
  *   - the message-regex substrate classifiers (`binary_not_found` /
- *     `channel_wedged` / `turn_timeout` / `http_status` / `rate_limited` /
- *     `aborted`).
+ *     `channel_wedged` / `turn_timeout` / `auth_invalid` / `http_status` /
+ *     `rate_limited` / `aborted`).
  *
  * Additive to the locked Event union: `code` is OPTIONAL, so every existing
  * `{ kind: 'error', … }` literal stays valid and the wire shape is unchanged.
@@ -64,6 +64,7 @@ export type SubstrateErrorClass =
   | 'binary_not_found'
   | 'channel_wedged'
   | 'turn_timeout'
+  | 'auth_invalid'
   | 'http_status'
   | 'rate_limited'
   | 'aborted'

@@ -115,6 +115,11 @@ export const SUBSTRATE_ERROR_CODES: Readonly<Record<SubstrateErrorClass, Substra
     retryable: true,
     description: 'A warm REPL failed to settle a turn in time — the credential is fine.',
   },
+  auth_invalid: {
+    retryable: false,
+    description:
+      'The `claude` child reported an invalid/expired credential (auth-failure output-scan signature) — reconnect the token; retrying is pointless.',
+  },
   http_status: {
     retryable: false,
     description: 'An upstream returned a non-ok HTTP status; the numeric status is in the message.',

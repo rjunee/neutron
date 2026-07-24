@@ -85,4 +85,37 @@ describe('PtyRing', () => {
     r.append(big)
     expect(r.text().length).toBe(DEFAULT_RING_MAX_BYTES)
   })
+
+  test('totalBytesAppended is monotonic and survives rolling eviction', () => {
+    const r = new PtyRing(4)
+    expect(r.totalBytesAppended()).toBe(0)
+    r.append('abcdef') // buffer evicts to 'cdef', but the counter keeps climbing
+    expect(r.totalBytesAppended()).toBe(6)
+    r.append('gh')
+    expect(r.totalBytesAppended()).toBe(8)
+  })
+
+  test('textSince returns only output appended after the mark', () => {
+    const r = new PtyRing()
+    r.append('turn-1 banner\n')
+    const mark = r.totalBytesAppended() // boundary: turn 2 starts here
+    // Nothing appended since the mark yet → empty (the "no new output" case that
+    // keeps a stale banner out of the current-turn window).
+    expect(r.textSince(mark)).toBe('')
+    r.append('turn-2 output')
+    expect(r.textSince(mark)).toBe('turn-2 output')
+    // The mark excludes the earlier turn-1 banner entirely.
+    expect(r.textSince(mark)).not.toContain('banner')
+  })
+
+  test('textSince clamps to the retained buffer when eviction outran the mark', () => {
+    const r = new PtyRing(4)
+    r.append('ab')
+    const mark = r.totalBytesAppended()
+    // Append more than the buffer holds since the mark: newBytes (6) > buf.length (4)
+    // → return the whole retained buffer, not a slice that reaches past its start.
+    r.append('cdefgh')
+    expect(r.textSince(mark)).toBe(r.text())
+    expect(r.text()).toBe('efgh')
+  })
 })

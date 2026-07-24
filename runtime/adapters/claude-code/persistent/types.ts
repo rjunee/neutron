@@ -9,6 +9,7 @@ import { buildDetectorContext } from './output-scan.ts'
 import type { SpawnAssertionConfig } from './post-spawn-assertion.ts'
 import type { PtyHost } from './pty-host.ts'
 import { RATE_LIMIT_BANNER_BOTTOM_N, type RateLimitBannerSeverity, matchRateLimitBanner, severityForBannerDetectorId } from './rate-limit-banner.ts'
+import { AUTH_FAILURE_BOTTOM_N, matchAuthFailure } from './auth-failure-signature.ts'
 import type { CaptureSessionConfig } from './session-capture.ts'
 import type { SizeSeverity } from './session-size-watchdog.ts'
 import type { ReplSession } from './repl-session.ts'
@@ -65,6 +66,64 @@ export function dispatchRateLimitBannerNotice(
       reason: 'rate_limit_banner',
       sessionId: session.sessionId,
       severity,
+      matched,
+    })
+  } catch {
+    // A bad notice hook must never crash the scan tick.
+  }
+}
+
+/** A CLI auth-failure that crossed the rising edge on the PTY ring — the `claude`
+ *  child reported an invalid/expired credential (see `auth-failure-signature.ts`).
+ *  Surfaced through the injected {@link PersistentReplSubstrateOptions.onAuthInvalid}
+ *  seam (the gateway wires real chat delivery; the substrate is a runtime-layer
+ *  module and MUST NOT import the gateway). NOTIFY-ONLY: there is no keystroke and no
+ *  auto-retry — the fix is an out-of-band reconnect of the owner's Claude token. */
+export interface AuthFailureNotice {
+  /** Stable discriminator (mirrors {@link RateLimitBannerNotice.reason}). */
+  reason: 'auth_invalid'
+  /** The owning REPL session. */
+  sessionId: string
+  /** The verbatim (trimmed) CLI error line that matched — surfaced so an operator
+   *  can cross-check which credential error fired. */
+  matched: string
+}
+
+/** Record + surface a CLI auth-failure on the rising edge. Sets the session's
+ *  `authFailureAt`/`authFailureMatched` (the pool driver's timeout watchdog reads
+ *  these to RECLASSIFY a subsequently-frozen turn as `auth_invalid` instead of a
+ *  generic freeze-timeout — it does not fast-fail a still-streaming turn), logs an
+ *  operator stderr notice, and calls the injected
+ *  `onAuthInvalid` hook if wired. The scanner already stamped the per-detector
+ *  edge-latch BEFORE this runs, so it is fire-once per rising edge and a hook
+ *  failure can NOT un-latch or re-fire (invariant §1/§4). No inline chat push here:
+ *  the SINGLE user-facing message is the reconnect bubble the gateway's turn-failure
+ *  classifier ships once the turn actually ends. */
+export function dispatchAuthFailureNotice(
+  session: ReplSession,
+  options: PersistentReplSubstrateOptions,
+  now: number,
+): void {
+  // Re-derive the matched line from the SAME current-turn bottom-N + doc-quote
+  // window the detector saw (the ring is unchanged on this synchronous tick). Scope
+  // to `textSince(turnOutputMark)` so the surfaced line comes from THIS turn's output,
+  // matching what `present` fired on (codex r3 BLOCKER fix); fall back to the whole
+  // ring only if the mark is unset (defensive — a fire implies an active turn).
+  const scanText =
+    session.turnOutputMark === undefined
+      ? session.ring.text()
+      : session.ring.textSince(session.turnOutputMark)
+  const ctx = buildDetectorContext(scanText, AUTH_FAILURE_BOTTOM_N, now)
+  const matched = matchAuthFailure(ctx.lines) ?? '(auth failure)'
+  session.authFailureAt = now
+  session.authFailureMatched = matched
+  process.stderr.write(
+    `[auth-failure] session=${session.sessionId.slice(0, 8)} matched=${matched}\n`,
+  )
+  try {
+    options.onAuthInvalid?.({
+      reason: 'auth_invalid',
+      sessionId: session.sessionId,
       matched,
     })
   } catch {
@@ -144,6 +203,16 @@ export interface PersistentReplSubstrateOptions {
    *  (mirrors `onDeadTurnNotice`). Default: a structured stderr notice + an inline
    *  status push if a turn is in flight. */
   onRateLimitBanner?: (notice: RateLimitBannerNotice) => void | Promise<void>
+  /** CLI auth-failure notice sink. Fired on the rising edge when the output scanner
+   *  sees an invalid/expired-credential banner in the ring (a 401 `API Error`,
+   *  `OAuth access token is invalid`, or `invalid x-api-key`; see
+   *  `auth-failure-signature.ts`) — NOTIFY-ONLY, no keystroke, no auto-retry.
+   *  Edge-triggered (fire-once per rising edge). The gateway may wire this to a
+   *  richer operator alert; the turn-failure classification (via the stamped
+   *  `auth_invalid` error) is what surfaces the owner's reconnect bubble. Runtime-
+   *  layer DI seam (mirrors `onRateLimitBanner`). Default: a structured stderr
+   *  notice. */
+  onAuthInvalid?: (notice: AuthFailureNotice) => void | Promise<void>
   /**
    * STATELESS-ONE-SHOT mode (Argus r4 BLOCKER, 2026-06-08). When `true`, a
    * `start(spec)` dispatch that carries NO `spec.session` gets its OWN fresh,

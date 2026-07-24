@@ -93,6 +93,31 @@ export class ReplSession {
    *  with resume FORCED OFF — a clean fresh spawn whose `spawnSession` rewrites the
    *  registry `has_session: false`, breaking the stale-resume loop (Codex P2). */
   forceFreshRespawn = false
+  /** Timestamp (ms) the auth-failure output-scan signature last fired on this
+   *  session's PTY ring — the `claude` child reported an invalid/expired credential
+   *  through its `API Error:` chrome (a 401 `API Error`, `OAuth access token is
+   *  invalid`, or `invalid x-api-key`; see `auth-failure-signature.ts`). Set by
+   *  `dispatchAuthFailureNotice` on the scanner's rising edge; read by the pool
+   *  driver's per-turn timeout watchdog, which — when this was stamped DURING the
+   *  current turn AND the turn has since FROZEN — RECLASSIFIES the frozen turn as a
+   *  distinct `auth_invalid` class instead of the generic freeze-timeout. It does
+   *  NOT fast-fail on mere presence (that would abort a healthy turn that only echoed
+   *  a credential string — Argus r1). Undefined until an auth failure is observed;
+   *  a fresh (respawned) session starts clean. */
+  authFailureAt: number | undefined
+  /** The verbatim (trimmed, ANSI-stripped) auth-failure line that last matched —
+   *  surfaced in the operator notice for cross-checking WHICH credential error
+   *  fired. Never embedded in the user-facing bubble (that stays generic). */
+  authFailureMatched: string | undefined
+  /** The ring's {@link PtyRing.totalBytesAppended} snapshot taken at THIS turn's
+   *  start (before the prompt inject). The auth-failure detector matches ONLY
+   *  within `ring.textSince(turnOutputMark)` — the output produced during the
+   *  current turn — so a stale credential banner from a PRIOR turn that is still
+   *  sitting in the detector's bottom-N window can NOT re-arm the latch and
+   *  re-stamp `authFailureAt` (codex r3 CONFIRMED BLOCKER: stale-banner re-arm
+   *  defeated per-turn scoping). Undefined between turns / before the first turn,
+   *  which makes the detector inert then (auth verdicts are per-turn). */
+  turnOutputMark: number | undefined
   /** Vajra port row #13: the warm-session size watchdog. Started right after the
    *  post-spawn assertion passes; measures the POST-COMPACT JSONL size on a
    *  cadence and surfaces a Reset/Compact affordance before the transcript grows

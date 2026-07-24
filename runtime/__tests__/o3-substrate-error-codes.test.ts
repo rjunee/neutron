@@ -24,6 +24,7 @@ const ALL_CLASSES: readonly SubstrateErrorClass[] = [
   'binary_not_found',
   'channel_wedged',
   'turn_timeout',
+  'auth_invalid',
   'http_status',
   'rate_limited',
   'aborted',

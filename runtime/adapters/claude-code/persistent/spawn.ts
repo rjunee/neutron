@@ -22,6 +22,7 @@ import {
 import { assertReplAlive } from './post-spawn-assertion.ts'
 import type { PtyChild } from './pty-host.ts'
 import { RATE_LIMIT_BANNER_SEVERITIES, createRateLimitBannerDetector } from './rate-limit-banner.ts'
+import { createAuthFailureDetector } from './auth-failure-signature.ts'
 import { type ReplRegistryRecord, getRecord, patchRecord, withRegistry } from './repl-registry.ts'
 import { resolveRespawnStrategy } from './respawn-strategy.ts'
 import { createResumePickerDetector } from './resume-picker-detector.ts'
@@ -354,6 +355,25 @@ async function spawnSession(
   for (const severity of RATE_LIMIT_BANNER_SEVERITIES) {
     session.scanner.register(createRateLimitBannerDetector(severity))
   }
+  // CLI AUTH-FAILURE signature (2026-07-24 dogfood). DISTINCT from the rate-limit
+  // banner: that surfaces a transient/usage-cap LIMIT; this notices an INVALID /
+  // EXPIRED CREDENTIAL (`OAuth access token is invalid` / `Please run /login` / a
+  // 401·403 `API Error`) the `claude` child prints before going silent headless.
+  // NOTIFY-ONLY (no `keys` — there is nothing to press): `runOutputScan` routes a
+  // fire to `dispatchAuthFailureNotice`, which records the session's auth-invalid
+  // state so the driver's timeout watchdog fails the turn as `auth_invalid` (a
+  // reconnect prompt) instead of the useless generic freeze-timeout.
+  // Scope the auth detector to the CURRENT turn's output (codex r3 BLOCKER fix): it
+  // matches ONLY within `ring.textSince(turnOutputMark)` — the PTY text produced
+  // since this turn's start — so a stale credential banner from a prior (recovered)
+  // turn still sitting in the bottom-N window can't re-arm the latch + re-stamp
+  // `authFailureAt` on a turn that froze for an unrelated reason. `turnOutputMark` is
+  // undefined between turns → the closure returns '' → the detector is inert then.
+  session.scanner.register(
+    createAuthFailureDetector(() =>
+      session.turnOutputMark === undefined ? '' : session.ring.textSince(session.turnOutputMark),
+    ),
+  )
   // The spawn `const child` isn't assigned when the `onData` closure is defined,
   // so route fired-detector keystrokes through this mirror (set right after
   // spawn, before any onData can fire on the event loop).

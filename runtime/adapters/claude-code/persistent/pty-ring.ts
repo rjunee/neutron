@@ -50,6 +50,11 @@ export interface RecentOutputOpts {
 export class PtyRing {
   private buf = ''
   private readonly maxBytes: number
+  /** Monotonic count of characters ever appended (does NOT shrink when the rolling
+   *  buffer evicts). A caller snapshots this at a boundary via
+   *  {@link totalBytesAppended} and later reads {@link textSince} to get only the
+   *  output produced after that boundary. */
+  private totalAppended = 0
 
   constructor(maxBytes: number = DEFAULT_RING_MAX_BYTES) {
     this.maxBytes = maxBytes > 0 ? maxBytes : DEFAULT_RING_MAX_BYTES
@@ -57,12 +62,34 @@ export class PtyRing {
 
   /** Append a freshly-emitted chunk, keeping only the last `maxBytes`. */
   append(chunk: string): void {
+    this.totalAppended += chunk.length
     this.buf = (this.buf + chunk).slice(-this.maxBytes)
   }
 
   /** The whole retained buffer, verbatim (line structure preserved). */
   text(): string {
     return this.buf
+  }
+
+  /** Total characters ever appended (monotonic; ignores rolling eviction).
+   *  Snapshot this at a turn boundary, then pass it to {@link textSince} to read
+   *  only the output produced during that turn. */
+  totalBytesAppended(): number {
+    return this.totalAppended
+  }
+
+  /**
+   * The retained text appended SINCE `mark` (a prior {@link totalBytesAppended}
+   * snapshot) — the last `(now - mark)` characters, clamped to whatever the
+   * rolling buffer still holds. Returns '' when nothing has been appended since
+   * `mark`. Used to scope a detector to the CURRENT turn's output so a stale
+   * banner still sitting in the ring window (from an earlier turn that never
+   * scrolled out) can't re-fire it.
+   */
+  textSince(mark: number): string {
+    const newBytes = this.totalAppended - mark
+    if (newBytes <= 0) return ''
+    return newBytes >= this.buf.length ? this.buf : this.buf.slice(-newBytes)
   }
 
   /**
