@@ -17,6 +17,12 @@
  * `project-card-interactivity.test.ts`), so the DECISION lives in a pure module
  * and is asserted directly; the wiring is source-pinned, in the established
  * style of `server-editor-reachability.test.ts`.
+ *
+ * FIXTURE IDS ARE INVENTED, and hosts are `*.example.com`. This is a PUBLIC repo
+ * and `scripts/ci/leak-gate.sh` matches an owner-PII denylist that only exists as
+ * a CI secret — so a fixture named after one of the owner's real projects passes
+ * locally and fails the `purity` gate. The first draft of this file did exactly
+ * that.
  */
 
 import { describe, expect, it } from 'bun:test';
@@ -55,10 +61,10 @@ describe('the entry route is always a CHAT route', () => {
   it('opens on the MOST RECENTLY ACTIVE project chat', () => {
     const route = entryRouteForProjects([
       project({ id: 'willow', last_activity_ms: 1_000 }),
-      project({ id: 'pristine', last_activity_ms: 9_000 }),
+      project({ id: 'orchard', last_activity_ms: 9_000 }),
       project({ id: 'tabs', last_activity_ms: 5_000 }),
     ]);
-    expect(route).toBe('/projects/pristine/chat');
+    expect(route).toBe('/projects/orchard/chat');
   });
 
   it('never resolves to the deleted list route, whatever the input', () => {
