@@ -1,0 +1,14 @@
+{
+  "name": "@neutronai/jwt-validator",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "./index.ts",
+  "exports": {
+    ".": "./index.ts",
+    "./*": "./*"
+  },
+  "dependencies": {
+    "jose": "^5.9.0",
+    "zod": "^3.23.8"
+  }
+}

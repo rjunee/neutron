@@ -1,0 +1,42 @@
+-- 0096_project_archived.sql
+--
+-- Per-project user-facing ARCHIVE state (archived-projects sprint, M2 Q3).
+--
+-- Distinct from soft-delete. Migration 0053 added `deleted_at` — a project
+-- soft-deleted (delete_project) or absorbed (merge_projects) that is hidden
+-- from EVERY user-facing surface with NO reversible restore path. This adds a
+-- SEPARATE lifecycle state: an ARCHIVED project is hidden from the project rail
+-- (like deleted) but is LISTED in the global Admin tab under "Archived
+-- projects" and can be RESTORED back to the rail with one click. It is the
+-- reversible "put this away for now" the owner reaches for when a project is
+-- done but not deleted.
+--
+--   * `archived_at TEXT` — ISO-8601 UTC timestamp set when a project is
+--     archived (Settings-tab "Archive project", the `/archive` chat affordance,
+--     or the `archive_project` agent tool). NULL means active (in the rail).
+--     Restore clears it back to NULL. Orthogonal to `deleted_at`: a deleted
+--     project stays deleted regardless of `archived_at`; the archived list +
+--     the rail both additionally require `deleted_at IS NULL`, so a soft-delete
+--     always wins over an archive.
+--
+-- The rail / project-list serve path (`gateway/projects/sqlite-store.ts:list` +
+-- the agent-settings `list_projects` backend) filters `archived_at IS NULL`
+-- alongside the existing `deleted_at IS NULL`; the new
+-- `GET /api/app/projects/archived` admin endpoint returns exactly the rows with
+-- `archived_at IS NOT NULL AND deleted_at IS NULL`.
+--
+-- Migration mechanics: same as 0093 / 0094 — a nullable `TEXT` column added to
+-- the STRICT `projects` table (0038 / 0053) via a plain forward-only
+-- `ALTER TABLE ... ADD COLUMN`. SQLite forbids adding a NOT-NULL-without-default
+-- column to a STRICT table; a nullable column with no default is legal + atomic
+-- under the runner's BEGIN/COMMIT wrap, so no table-rebuild dance is needed. ISO
+-- 8601 UTC string, matching the sibling projects timestamps
+-- (`created_at` / `updated_at` / `deleted_at` / `last_activity_at`).
+--
+-- SNAPSHOT REGEN REQUIRED: this ADD COLUMN changes the `projects` table shape,
+-- so `migrations/expected-schema.txt` MUST be regenerated
+-- (`bun run migrations/regen-snapshot.ts`) and committed alongside this file or
+-- `migrations/snapshot.test.ts` fails with schema drift.
+
+ALTER TABLE projects
+    ADD COLUMN archived_at TEXT;

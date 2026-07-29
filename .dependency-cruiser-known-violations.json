@@ -1,0 +1,114 @@
+[
+  {
+    "type": "dependency",
+    "from": "gateway/projects/shared-projects-resolver.ts",
+    "to": "connect/api/mint-instance-token.ts",
+    "unresolvedTo": "@neutronai/connect/api/mint-instance-token.ts",
+    "dependencyTypes": [
+      "undetermined",
+      "import"
+    ],
+    "rule": {
+      "severity": "error",
+      "name": "connect-is-dynamic-only"
+    }
+  },
+  {
+    "type": "dependency",
+    "from": "cores/free/calendar/migrations/runner.ts",
+    "to": "migrations/runner.ts",
+    "unresolvedTo": "../../../../migrations/runner.ts",
+    "dependencyTypes": [
+      "local",
+      "import"
+    ],
+    "rule": {
+      "severity": "error",
+      "name": "cores-use-sdk-only"
+    }
+  },
+  {
+    "type": "dependency",
+    "from": "cores/free/code-gen/src/sidecar/store.ts",
+    "to": "migrations/runner.ts",
+    "unresolvedTo": "../../../../../migrations/runner.ts",
+    "dependencyTypes": [
+      "local",
+      "import"
+    ],
+    "rule": {
+      "severity": "error",
+      "name": "cores-use-sdk-only"
+    }
+  },
+  {
+    "type": "dependency",
+    "from": "cores/free/email/src/cache.ts",
+    "to": "migrations/runner.ts",
+    "unresolvedTo": "../../../../migrations/runner.ts",
+    "dependencyTypes": [
+      "local",
+      "import"
+    ],
+    "rule": {
+      "severity": "error",
+      "name": "cores-use-sdk-only"
+    }
+  },
+  {
+    "type": "dependency",
+    "from": "cores/free/research/src/backend.ts",
+    "to": "runtime/models.ts",
+    "unresolvedTo": "../../../../runtime/models.ts",
+    "dependencyTypes": [
+      "local",
+      "import"
+    ],
+    "rule": {
+      "severity": "error",
+      "name": "cores-use-sdk-only"
+    }
+  },
+  {
+    "type": "dependency",
+    "from": "cores/free/research/src/research-orchestrator.ts",
+    "to": "runtime/models.ts",
+    "unresolvedTo": "../../../../runtime/models.ts",
+    "dependencyTypes": [
+      "local",
+      "import"
+    ],
+    "rule": {
+      "severity": "error",
+      "name": "cores-use-sdk-only"
+    }
+  },
+  {
+    "type": "dependency",
+    "from": "cores/free/research/src/store-resolver.ts",
+    "to": "migrations/runner.ts",
+    "unresolvedTo": "../../../../migrations/runner.ts",
+    "dependencyTypes": [
+      "local",
+      "import"
+    ],
+    "rule": {
+      "severity": "error",
+      "name": "cores-use-sdk-only"
+    }
+  },
+  {
+    "type": "dependency",
+    "from": "cores/free/research/src/substrate-runtime.ts",
+    "to": "runtime/models.ts",
+    "unresolvedTo": "../../../../runtime/models.ts",
+    "dependencyTypes": [
+      "local",
+      "import"
+    ],
+    "rule": {
+      "severity": "error",
+      "name": "cores-use-sdk-only"
+    }
+  }
+]

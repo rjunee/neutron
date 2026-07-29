@@ -1,0 +1,25 @@
+-- 0044_p2_import_jobs_chunk_target_tokens.sql
+--
+-- 2026-05-23 (v0.1.85) — P1 bug fix: Max OAuth instances whose substrate
+-- authenticates via Bearer token were 429'd on every Pass-1 chunk because
+-- the chunker's hard-coded `CHUNK_TARGET_TOKENS = 50_000` per call
+-- exceeds Anthropic's predictive rate-limit gate for Max OAuth. Max
+-- OAuth is designed for interactive Claude Code (1-8K tokens/call), not
+-- bulk 50K-token batches. Diagnosed live 2026-05-23 on a prod
+-- instance: a fresh-signup Claude import 429'd at 0/173 chunks processed.
+--
+-- The fix drops the per-chunk target to `MAX_OAUTH_CHUNK_TARGET_TOKENS`
+-- (4096) when the resolved credential's `kind === 'oauth'`. Owners on
+-- BYO API key keep the 50K default for throughput. The runner picks the
+-- target at job-start time by calling the composer-supplied
+-- `getCurrentCredentialKind()` callback and stamps the resolved value on
+-- this column so operators can grep journald / sqlite for which chunk
+-- size was used per import.
+--
+-- Schema-additive ADD COLUMN — no in-flight row can be stranded. The
+-- column is nullable so legacy rows that predate the v0.1.85 runner
+-- preserve their original UX (status() returns chunk_target_tokens
+-- undefined, the engine's progress-bubble fallback renders without the
+-- Max-OAuth notice). New rows always write a non-null value at
+-- start-time so the operator always knows which path ran.
+ALTER TABLE import_jobs ADD COLUMN chunk_target_tokens INTEGER;

@@ -1,0 +1,13 @@
+{
+  "name": "@neutronai/skill-forge",
+  "type": "module",
+  "main": "./index.ts",
+  "private": true,
+  "dependencies": {
+    "@neutronai/cores-sdk": "workspace:*",
+    "@neutronai/logger": "workspace:*",
+    "@neutronai/migrations": "workspace:*",
+    "@neutronai/persistence": "workspace:*",
+    "@neutronai/tools": "workspace:*"
+  }
+}

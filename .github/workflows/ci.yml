@@ -1,0 +1,203 @@
+name: ci
+
+# Public Neutron Open CI (test-port tranche 1, 2026-06-15; PARALLELISED 2026-07-28).
+# Runs on every PR + push to main.
+#
+# SHAPE. This was ONE job with seven sequential steps, so a ~2-minute typecheck
+# error was reported only after a ~12-minute test run finished, and the local
+# machine became the fast-feedback path by default. The gates are now INDEPENDENT
+# JOBS that run concurrently, and the suite is SHARDED across runners. Each gate
+# reinstalls deps — that is deliberate: a shared-artifact handoff would couple the
+# gates back together and reintroduce the serialisation this change removes, and
+# `bun install --frozen-lockfile` is cheap next to what each gate then does.
+#
+# THE `test` JOB IS LOAD-BEARING AND MUST KEEP THAT EXACT NAME. `test` and
+# `CodeQL` are REQUIRED status checks on `main` with a strict up-to-date policy.
+# A required context that never reports blocks every PR forever, so the shards
+# are named `shard` and `test` is an AGGREGATOR that needs them all. Renaming
+# `test`, or making it anything other than a job that fails when any gate fails,
+# bricks merging on this repo.
+#
+# WHY THE AGGREGATOR IS NOT COSMETIC. A sharded run cannot prove on its own that
+# every test file executed — it proves it ran its own slice. The whole-suite
+# guarantee is: identical deterministic discovery on every shard + a partition
+# with no gaps or overlap (scripts/__tests__/run-tests-shard.test.ts) + EVERY
+# SHARD REQUIRED TO REPORT. The aggregator is that third leg. `if: always()` plus
+# an explicit result check is required — without `always()` the job would be
+# SKIPPED when a shard fails, and a skipped required check does not fail a PR.
+
+# `pull_request` (no `branches`/`types` filter) fires the `test` job for EVERY
+# PR — opened, synchronize, reopened — to any base, so a PR to main can never
+# merge without a `test` signal regardless of head-branch name shape (#321).
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# Least-privilege default token: this workflow only reads the checkout, runs
+# typecheck + tests, and grants no write scopes (fixes the CodeQL alert
+# actions/missing-workflow-permissions).
+permissions:
+  contents: read
+
+# Cancel superseded runs to save runner minutes. Key PR runs on the PR NUMBER
+# (always slash-free) and push runs on the ref, namespaced by workflow. The
+# previous `ci-${{ github.ref }}` group keyed PR runs on a ref that, for some
+# branch-name shapes (e.g. a slashed `feat/...` head), could let the `test` job
+# be superseded/skipped so a PR merged with only CodeQL signal (#321). The
+# `github.event.pull_request.number || github.ref` form is GitHub's documented
+# pattern and guarantees every PR to main gets its own independent `test` run.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ---- fast gates: independent, report in ~1-3 min instead of behind the suite --
+  typecheck:
+    name: typecheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.9
+      # Install BEFORE tsc so the @neutronai/* workspace symlinks exist; a bare
+      # checkout reports phantom TS2307s.
+      - run: bun install --frozen-lockfile
+      # G5 — typecheck completeness: `tsc -p` for EVERY tsconfig.json in the repo,
+      # not just the root config. Discovery is dynamic, so a new package with a
+      # tsconfig is covered automatically; ci-workflow.test.ts guards that.
+      - run: bash scripts/ci/typecheck-all.sh
+
+  lint:
+    name: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.9
+      - run: bun install --frozen-lockfile
+      # L5 — relative cross-workspace import guard (eslint import/no-relative-packages
+      # + a companion type-query check for the `import('...').Foo` form ESLint can't lint).
+      - run: bash scripts/ci/lint.sh
+
+  purity:
+    name: purity
+    runs-on: ubuntu-latest
+    steps:
+      # The leak gate also scans this branch's COMMIT MESSAGES (they are mirrored
+      # to GHArchive permanently and cannot be redacted afterwards), which needs
+      # real history — a depth-1 checkout has neither the PR base sha nor
+      # origin/main, and the gate hard-fails rather than skipping that half.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.9
+      - run: bun install --frozen-lockfile
+      # Fails the build if multi-instance vocabulary, owner PII or a Managed
+      # module ever regresses into this public tree.
+      - name: leak gate
+        env:
+          # BOTH halves are required and neither works alone. The Tier-1 PII rule
+          # had NEVER executed (~3,700 runs) because the secret did not exist AND
+          # nothing passed the variable — and the gate still printed SILENT. It is
+          # now fail-closed: an absent denylist on a run that HAS secret access is
+          # exit 2, so a broken wire is loud instead of invisible.
+          LEAK_GATE_PII_DENYLIST_B64: ${{ secrets.LEAK_GATE_PII_DENYLIST_B64 }}
+          # Fork detection — GITHUB_REPOSITORY is always the BASE repo, so an
+          # inequality here means the head is a fork and GitHub is withholding
+          # secrets by design. That is the ONLY context allowed to skip Tier-1;
+          # leak-gate-nightly.yml re-scans the merged tree with the secret.
+          LEAK_GATE_PR_HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          # Commit-message scan window: the PR base, or the pre-push sha.
+          LEAK_GATE_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          # PR title/body are attacker-controlled text. Passing them through `env:`
+          # is safe; interpolating `${{ github.event… }}` into `run:` would be a
+          # shell-injection sink.
+          LEAK_GATE_PR_TITLE: ${{ github.event.pull_request.title }}
+          LEAK_GATE_PR_BODY: ${{ github.event.pull_request.body }}
+        run: bash scripts/ci/leak-gate.sh --tree .
+
+  layering:
+    name: layering
+    runs-on: ubuntu-latest
+    steps:
+      # G8's ratchet-growth guard diffs the committed baseline against main's, so
+      # it needs main's history — a depth-1 checkout has no origin/main to compare.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.9
+      - run: bun install --frozen-lockfile
+      # G4 — dependency-cruiser layering ratchet (fails on any NEW cross-band
+      # import or cycle; the grandfathered baseline may only shrink).
+      - run: bash scripts/ci/depcruise.sh
+      # G8 — a PR could otherwise grandfather a new cross-band edge just by adding
+      # it to the baseline and stay green.
+      - run: bash scripts/ci/depcruise-ratchet-guard.sh
+
+  # ---- the suite, sharded across runners ---------------------------------------
+  shard:
+    name: shard ${{ matrix.shard }}/4
+    runs-on: ubuntu-latest
+    strategy:
+      # fail-fast: false — one shard failing must not cancel the others. Cancelling
+      # would hide every OTHER failing file behind whichever shard tripped first,
+      # turning a "12 tests broken" signal into "1 test broken" and costing a
+      # round-trip per remaining failure.
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.9
+      - run: bun install --frozen-lockfile
+      - name: Test (shard ${{ matrix.shard }} of 4)
+        env:
+          NEUTRON_TEST_SHARD: ${{ matrix.shard }}/4
+          # Each shard now carries ~1/4 of the files on its own 7 GB runner, so the
+          # OOM pressure that forced concurrency 4→2 and chunk 100→75 (#193) is
+          # divided too. Restored to the documented defaults; peak RSS per runner
+          # is well below where it tipped, because the file COUNT per runner is a
+          # quarter of what it was.
+          NEUTRON_TEST_CONCURRENCY: "4"
+          NEUTRON_TEST_CHUNK_SIZE: "100"
+        run: bash scripts/run-tests.sh
+
+  # ---- required context: keep this job named `test` (see header) ----------------
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    needs: [typecheck, lint, purity, layering, shard]
+    # always() so this job still RUNS when a dependency fails. Without it the job
+    # is skipped, and a skipped required check does not block a PR — the exact
+    # fail-open shape this aggregator exists to prevent.
+    if: always()
+    steps:
+      - name: Assert every gate and every shard succeeded
+        run: |
+          echo "typecheck : ${{ needs.typecheck.result }}"
+          echo "lint      : ${{ needs.lint.result }}"
+          echo "purity    : ${{ needs.purity.result }}"
+          echo "layering  : ${{ needs.layering.result }}"
+          echo "shards    : ${{ needs.shard.result }}"
+          # A matrix job's aggregate result is 'success' only when EVERY leg
+          # succeeded, so this covers all four shards. 'skipped' is treated as a
+          # failure on purpose: a shard that never ran means files that never ran,
+          # which is a coverage hole, not a pass.
+          for r in "${{ needs.typecheck.result }}" "${{ needs.lint.result }}" \
+                   "${{ needs.purity.result }}" "${{ needs.layering.result }}" \
+                   "${{ needs.shard.result }}"; do
+            if [ "$r" != "success" ]; then
+              echo "FAIL — a required gate did not succeed (see above)."
+              exit 1
+            fi
+          done
+          echo "All gates green across 4 shards."

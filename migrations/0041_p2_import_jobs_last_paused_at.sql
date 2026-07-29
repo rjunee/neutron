@@ -1,0 +1,32 @@
+-- 0041_p2_import_jobs_last_paused_at.sql
+--
+-- 2026-05-22 — Argus r1 BLOCKER fix on PR #271 (v0.1.78 import resilience).
+-- Per the resume-on-cooldown design Sam signed off on:
+--
+--   "If there's a rate limit you need to just cool off but keep going."
+--
+-- Pre-fix, when a job's `retryWith429` schedule exhausted (~30 min of 429s),
+-- the runner flipped the row to `status='rate_limit_paused'` and returned
+-- gracefully. The engine's import-running poll emitted a body promising
+-- "I'll keep checking and resume as soon as the limit lifts" — but nothing
+-- actually checked again. The user was stranded in `import_running` forever
+-- with a factually false UX.
+--
+-- The fix is automatic cron-driven resume: the existing per-project
+-- import-running cron (5 s tick) now treats `rate_limit_paused` rows whose
+-- pause is older than COOLDOWN_AFTER_PAUSED_MS (5 min default) as
+-- resumable, dispatching a fresh `runner.start(...)` with the same payload
+-- so the cached Pass-1 chunks reuse at $0 and the next attempt picks up
+-- where the prior one left off. To know WHEN a row entered the paused
+-- state (so the cron can apply the cooldown), we need a persisted
+-- timestamp distinct from `started_at` (which records the original kickoff)
+-- and `completed_at` (which is reserved for terminal states — paused is
+-- explicitly recoverable so we do NOT set completed_at).
+--
+-- Additive ADD COLUMN — no in-flight row can be stranded. `last_paused_at`
+-- is nullable; only `markRateLimitPaused` writes it. Rows that predate this
+-- migration have NULL and the cron interprets NULL as "pause too old to
+-- still be valid → resume on the next tick" (cooldown semantics collapse
+-- to immediate resume, which is the right thing for legacy paused rows
+-- that have already been sitting around past any reasonable cooldown).
+ALTER TABLE import_jobs ADD COLUMN last_paused_at INTEGER;

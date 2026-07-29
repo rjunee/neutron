@@ -1,0 +1,14 @@
+{
+  "name": "@neutronai/channels",
+  "type": "module",
+  "main": "./index.ts",
+  "private": true,
+  "dependencies": {
+    "@neutronai/logger": "workspace:*",
+    "@neutronai/migrations": "workspace:*",
+    "@neutronai/persistence": "workspace:*",
+    "@neutronai/runtime": "workspace:*",
+    "@neutronai/wire-types": "workspace:*",
+    "jose": "^5.9.0"
+  }
+}

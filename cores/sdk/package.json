@@ -1,0 +1,21 @@
+{
+  "name": "@neutronai/cores-sdk",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "./index.ts",
+  "exports": {
+    ".": "./index.ts",
+    "./manifest": "./manifest.ts",
+    "./connector": "./connector.ts",
+    "./auth": "./auth.ts",
+    "./secrets": "./secrets.ts",
+    "./route": "./route.ts",
+    "./reconcile": "./reconcile.ts"
+  },
+  "private": true,
+  "dependencies": {
+    "hono": "^4.6.0",
+    "jose": "^5.9.0",
+    "zod": "^3.23.8"
+  }
+}

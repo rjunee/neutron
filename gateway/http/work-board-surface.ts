@@ -1,0 +1,585 @@
+/**
+ * @neutronai/gateway/http — Expo-app project Work Board surface (Phase 1a).
+ *
+ * The HUMAN read+WRITE path on the Work Board. Owns:
+ *
+ *   - `GET    /api/app/projects/<project_id>/work-board`                 list
+ *   - `POST   /api/app/projects/<project_id>/work-board`                 create
+ *     (a create that omits `task_type` is auto-classified build|research from
+ *      the title — #429 task 3; an explicit task_type always wins)
+ *   - `PATCH  /api/app/projects/<project_id>/work-board/<item_id>`       update
+ *   - `POST   /api/app/projects/<project_id>/work-board/<item_id>/complete`
+ *   - `POST   /api/app/projects/<project_id>/work-board/<item_id>/reorder`
+ *   - `DELETE /api/app/projects/<project_id>/work-board/<item_id>`
+ *
+ * All routes are bearer-authed via the shared `AppWsAuthResolver` (same
+ * dev-bypass + HS256 paths as the tabs/tasks/chat surfaces). It dispatches the
+ * SAME `WorkBoardStore` the agent tools + the per-turn injection use — one code
+ * path, so a write here fires the same `work_board_changed` push.
+ *
+ * Scope: the board is PER-PROJECT. The storage key is
+ * `workBoardScopeKey(resolved.project_slug, <project_id>)` — the bearer-derived
+ * owner slug bounds the scope (single-owner box), and the VALIDATED URL
+ * `<project_id>` selects the project within it (General → the bare owner slug,
+ * which also carries all pre-scoping legacy rows). So project A and project B
+ * read/write DIFFERENT boards. `store.get(scope, id)` returning null is reported
+ * as 404, so a caller can't read or probe an item from another project's scope.
+ *
+ * `design_doc_ref` schemes are allow-listed at the store (https + in-app docs
+ * link only); a rejected scheme surfaces here as a 400, not a 500.
+ */
+
+import { sanitizeProjectId } from '@neutronai/channels/adapters/app-ws/envelope.ts'
+import type { AppWsAuthResolver } from '@neutronai/channels/adapters/app-ws/auth.ts'
+import { jsonError, jsonOk, readJsonBody, resolveBearer } from './surface-kit.ts'
+import {
+  WorkBoardValidationError,
+  workBoardScopeKey,
+  type WorkBoardItem,
+  type WorkBoardStatus,
+  type WorkBoardStore,
+  type WorkBoardTaskType,
+} from '@neutronai/work-board/store.ts'
+import { isTerminalPhase } from '@neutronai/trident/state-machine.ts'
+import { runProgressForItem } from '@neutronai/trident/run-progress.ts'
+import type { TridentPhase, TridentRun } from '@neutronai/trident/store.ts'
+
+/**
+ * The minimal trident-run surface the board needs (M1 trident-UX hardening):
+ * READ a linked run to derive its live progress for the GET payload (item 1),
+ * and CANCEL a linked run when its Plan item is deleted (item 3). `TridentRunStore`
+ * satisfies it structurally (`get` / `update`). Optional — a board-less / trident-
+ * less boot omits it and both features degrade to no-ops.
+ */
+export interface TridentRunAccess {
+  get(id: string): TridentRun | null
+  update(id: string, patch: { phase: TridentPhase }): Promise<unknown>
+  /**
+   * §F6a — the terminal-write CHOKEPOINT. Deleting a board card bound to a LIVE
+   * build cancels the run: this writes the terminal phase AND runs the terminal-
+   * observer chain (delivery + board reconcile) — the SAME chain the tick loop
+   * fires for a loop-reaped run. When absent (board-less / observer-less boots,
+   * unit tests), the delete path falls back to a bare `update`, which flips the
+   * phase but runs no observers (the pre-F6a behaviour).
+   *
+   * Returns `{ won }` — whether the ATOMIC terminal transition actually landed.
+   * A lost race (`won:false`, the run went terminal out-of-band first) cancelled
+   * nothing, so the delete surface must NOT report a `cancelled_run` (Codex r3).
+   */
+  terminate?(id: string, phase: TridentPhase, reason?: string): Promise<{ won: boolean }>
+}
+
+/**
+ * Result of a ▶ start/retry dispatch. Decoupled from `trident/board-dispatch`
+ * so the surface never imports the dispatch internals — the composer maps its
+ * `BoardBoundBuildResult` onto this shape.
+ */
+export type WorkBoardStartResult =
+  | { ok: true; run_id: string }
+  | {
+      ok: false
+      code: 'missing_board_item' | 'unknown_board_item' | 'underspecified' | 'backend_error'
+      message: string
+    }
+
+/**
+ * Create a card, persisting a non-trivial `spec` to a plans/ doc and linking the
+ * card to it (M1 on-disk spec). The composer wires this to
+ * `WorkBoardSpecDocService.createCardWithOptionalSpec`; when absent the surface
+ * falls back to a plain `store.create` (a supplied `spec` is then ignored).
+ */
+export type WorkBoardCreateCardFn = (
+  project_slug: string,
+  input: {
+    title: string
+    status?: WorkBoardStatus
+    task_type?: WorkBoardTaskType
+    design_doc_ref?: string | null
+    spec?: string
+  },
+) => Promise<WorkBoardItem>
+
+/**
+ * ▶ start/retry a build bound to `item`, using the item's SAVED spec (its
+ * design_doc_ref doc, else its title) as the task. The composer wires this to
+ * the `dispatchBoardBoundBuild` chokepoint (required-item + ask-before-acting
+ * gate + attachRun binding). When absent, the start route returns 501.
+ */
+export type WorkBoardStartBuildFn = (
+  project_slug: string,
+  item: WorkBoardItem,
+) => Promise<WorkBoardStartResult>
+
+/**
+ * #379 — ▶ start/retry a RESEARCH card bound to `item`. The composer wires this
+ * to the general agent-dispatch service (Atlas), which delivers the result back
+ * to the chat and marks the card terminal on completion. When absent (LLM-less
+ * box), a research ▶ returns 501, exactly as `start_build` does for a build card.
+ */
+export type WorkBoardStartResearchFn = (
+  project_slug: string,
+  item: WorkBoardItem,
+) => Promise<WorkBoardStartResult>
+
+export interface WorkBoardSurfaceOptions {
+  store: WorkBoardStore
+  auth: AppWsAuthResolver
+  /** Trident run access for live progress (item 1) + delete-cancels-run (item 3). */
+  trident_runs?: TridentRunAccess
+  /** Injectable clock (ms) for the run-progress derivation; defaults to wall-clock. */
+  now?: () => number
+  /** M1 on-disk spec — persist a non-trivial create `spec` to a plans/ doc. */
+  create_card?: WorkBoardCreateCardFn
+  /** M1 ▶ play button — start/retry a BUILD ('build' task_type) from the card's saved spec. */
+  start_build?: WorkBoardStartBuildFn
+  /** #379 ▶ play button — start/retry a RESEARCH ('research' task_type) Atlas dispatch. */
+  start_research?: WorkBoardStartResearchFn
+  /** #379 — cancel a NON-trident (agent-dispatch) run bound to a card being
+   *  deleted, so a research subprocess is not orphaned. Best-effort; a no-op for
+   *  an unknown run id. Wired to `DispatchService.stop`. */
+  cancel_dispatch?: (run_id: string) => Promise<void>
+  /** #429 task 3 — auto-classify build|research from the title when a create
+   *  omits task_type. Absent → store default ('build'), the pre-existing
+   *  behavior. Total (never rejects); an explicit task_type always short-circuits
+   *  it. */
+  classify_task_type?: (title: string) => Promise<WorkBoardTaskType>
+}
+
+export interface WorkBoardSurface {
+  /**
+   * HTTP route dispatcher. Returns the `Response` for an owned route, or
+   * `null` so `compose.ts` falls through to the downstream chain.
+   */
+  handler: (req: Request) => Promise<Response | null>
+}
+
+const PATH_PREFIX = '/api/app/projects/'
+const WORK_BOARD_PATH_RE =
+  /^\/api\/app\/projects\/([^/]+)\/work-board(?:\/([^/]+))?(?:\/([a-z]+))?$/
+
+const MAX_ITEM_ID_LEN = 128
+const VALID_STATUSES: WorkBoardStatus[] = ['upcoming', 'in_progress', 'done']
+const VALID_TASK_TYPES: WorkBoardTaskType[] = ['build', 'research']
+
+export function createWorkBoardSurface(opts: WorkBoardSurfaceOptions): WorkBoardSurface {
+  const { store, auth, trident_runs } = opts
+  const nowMs = opts.now ?? (() => Date.now())
+  const createCard = opts.create_card
+  const startBuild = opts.start_build
+  const startResearch = opts.start_research
+  const cancelDispatch = opts.cancel_dispatch
+  const classifyTaskType = opts.classify_task_type
+
+  /**
+   * Attach each bound item's live run progress (item 1) so the HTTP GET carries
+   * the same phase/round/elapsed/stalled state the `work_board_changed` push
+   * ships. A no-op passthrough when no trident-run access is wired.
+   */
+  const withRunProgress = (items: WorkBoardItem[]): unknown[] => {
+    if (trident_runs === undefined) return items
+    const when = nowMs()
+    const lookup = (id: string): TridentRun | null => trident_runs.get(id)
+    return items.map((it) => {
+      const progress = runProgressForItem(it, lookup, when)
+      return progress === null ? it : { ...it, run_progress: progress }
+    })
+  }
+
+  return {
+    handler: async (req) => {
+      const url = new URL(req.url)
+      const pathname = url.pathname
+      if (!pathname.startsWith(PATH_PREFIX)) return null
+      const match = WORK_BOARD_PATH_RE.exec(pathname)
+      if (match === null) return null
+      const raw_project_id = match[1] ?? ''
+      const raw_item_id = match[2] ?? ''
+      const action = match[3] ?? ''
+      const project_id = sanitizeProjectId(raw_project_id)
+      if (project_id === null) {
+        return jsonError(
+          400,
+          'invalid_project_id',
+          'project_id must be 1-128 chars from [A-Za-z0-9_.-]',
+        )
+      }
+
+      const resolved = await resolveBearer(req, auth)
+      if ('code' in resolved) {
+        return jsonError(401, resolved.code, resolved.message)
+      }
+      // Per-project storage key: the bearer-derived owner slug bounds the scope
+      // (single-owner box) and the validated URL `project_id` selects the project
+      // within it (General → the bare owner slug). Threaded to EVERY store call
+      // so project A and project B are distinct boards; the URL `project_id` is
+      // echoed back to the client verbatim.
+      const scope = workBoardScopeKey(resolved.project_slug, project_id)
+      const method = req.method
+
+      // Bare collection path: `/work-board`.
+      if (raw_item_id === '') {
+        if (method === 'GET') {
+          return jsonOk({ items: withRunProgress(store.list(scope)), project_id })
+        }
+        if (method === 'POST') {
+          return handleCreate(req, store, scope, project_id, createCard, classifyTaskType)
+        }
+        return jsonError(405, 'method_not_allowed', `method '${method}' not allowed on /work-board`)
+      }
+
+      // item_id-scoped routes: `/work-board/<id>[/<verb>]`.
+      const item_id = sanitizeItemId(raw_item_id)
+      if (item_id === null) {
+        return jsonError(400, 'invalid_item_id', 'item_id must be 1-128 chars from [A-Za-z0-9_.-]')
+      }
+
+      if (action === '') {
+        if (method === 'PATCH') {
+          return handleUpdate(req, store, scope, project_id, item_id)
+        }
+        if (method === 'DELETE') {
+          return handleDelete(store, scope, project_id, item_id, trident_runs, cancelDispatch)
+        }
+        return jsonError(
+          405,
+          'method_not_allowed',
+          `method '${method}' not allowed on /work-board/<id>`,
+        )
+      }
+      if (action === 'start' && method === 'POST') {
+        return handleStart(store, scope, project_id, item_id, trident_runs, startBuild, startResearch)
+      }
+      if (action === 'complete' && method === 'POST') {
+        return handleComplete(store, scope, project_id, item_id)
+      }
+      if (action === 'reorder' && method === 'POST') {
+        return handleReorder(req, store, scope, project_id, item_id)
+      }
+      return jsonError(
+        405,
+        'method_not_allowed',
+        `unknown work-board action '${action}' or method '${method}'`,
+      )
+    },
+  }
+}
+
+async function handleCreate(
+  req: Request,
+  store: WorkBoardStore,
+  project_slug: string,
+  project_id: string,
+  createCard: WorkBoardCreateCardFn | undefined,
+  classifyTaskType: ((title: string) => Promise<WorkBoardTaskType>) | undefined,
+): Promise<Response> {
+  const body = await readJsonBody(req)
+  if (body === null) return jsonError(400, 'malformed_json', 'expected JSON body')
+  const fields = body as Record<string, unknown>
+  const title = readTitle(fields['title'])
+  if (title === null) {
+    return jsonError(400, 'invalid_title', 'title must be a non-empty string up to 256 chars')
+  }
+  const status = readStatus(fields['status'])
+  if (status === false) {
+    return jsonError(400, 'invalid_status', `status must be one of ${VALID_STATUSES.join('/')}`)
+  }
+  let task_type = readTaskType(fields['task_type'])
+  if (task_type === false) {
+    return jsonError(400, 'invalid_task_type', `task_type must be one of ${VALID_TASK_TYPES.join('/')}`)
+  }
+  const design_doc_ref = readOptionalString(fields['design_doc_ref'])
+  if (design_doc_ref === false) {
+    return jsonError(400, 'invalid_design_doc_ref', 'design_doc_ref must be a string')
+  }
+  const spec = readOptionalString(fields['spec'])
+  if (spec === false) {
+    return jsonError(400, 'invalid_spec', 'spec must be a string')
+  }
+  // #429 task 3 — the web add-form no longer carries a Build/Research picker, so
+  // a create that OMITS task_type is auto-classified from the title here (before
+  // BOTH the create_card and the store.create branches, so either path persists
+  // the resolved type). An explicit task_type from ANY caller (mobile, agent
+  // tools, ▶ retry) short-circuits this — it's never re-classified. The
+  // classifier contract never rejects, but a defensive catch keeps a create from
+  // failing on a classifier bug: it falls through to the store default ('build').
+  if (task_type === null && classifyTaskType !== undefined) {
+    try {
+      task_type = await classifyTaskType(title)
+    } catch {
+      task_type = null
+    }
+  }
+  try {
+    // M1 on-disk spec: when the spec-doc path is wired, route through it so a
+    // non-trivial `spec` is persisted to a plans/ doc and the card is linked;
+    // else fall back to a plain title-only (+ optional ref) create.
+    const item =
+      createCard !== undefined
+        ? await createCard(project_slug, {
+            title,
+            ...(status !== null ? { status } : {}),
+            ...(task_type !== null ? { task_type } : {}),
+            ...(design_doc_ref !== null ? { design_doc_ref } : {}),
+            ...(spec !== null ? { spec } : {}),
+          })
+        : await store.create(project_slug, {
+            title,
+            ...(status !== null ? { status } : {}),
+            ...(task_type !== null ? { task_type } : {}),
+            ...(design_doc_ref !== null ? { design_doc_ref } : {}),
+          })
+    return jsonOk({ item, project_id }, 201)
+  } catch (err) {
+    return mapWriteError(err)
+  }
+}
+
+/**
+ * ▶ play button — START (a never-dispatched card) or RETRY (a card whose last
+ * run failed/stopped) a build bound to the card, using its SAVED spec (the
+ * design_doc_ref doc, else the title) as the task. Guards against double-firing:
+ * a card that already has a LIVE (non-terminal) linked run returns 409 (the ▶
+ * should not have rendered). An underspecified card (no doc + thin title) is
+ * rejected 409 with the ask-before-acting guidance rather than firing a doomed
+ * build. The dispatch chokepoint itself does the attachRun binding, so the card
+ * flips to in_progress + fork ⑂ and the #174 live progress takes over.
+ */
+async function handleStart(
+  store: WorkBoardStore,
+  project_slug: string,
+  project_id: string,
+  item_id: string,
+  trident_runs: TridentRunAccess | undefined,
+  startBuild: WorkBoardStartBuildFn | undefined,
+  startResearch: WorkBoardStartResearchFn | undefined,
+): Promise<Response> {
+  const item = store.get(project_slug, item_id)
+  if (item === null) return jsonError(404, 'item_not_found', `item_id=${item_id}`)
+  // #379 — ROUTE BY TASK TYPE. A 'research' card dispatches an Atlas
+  // research/analysis agent (agent-dispatch); a 'build' card (the default)
+  // dispatches an autonomous Trident run. The play button no longer stamps a
+  // Trident build on everything.
+  const isResearch = item.task_type === 'research'
+  const dispatch = isResearch ? startResearch : startBuild
+  if (dispatch === undefined) {
+    const what = isResearch ? 'research (agent-dispatch)' : 'trident build'
+    return jsonError(501, 'dispatch_unavailable', `${what} dispatch is not enabled on this instance`)
+  }
+  // Don't start a card that already has a live run (the ▶ is hidden for these,
+  // but a stale client / concurrent request could still hit this). A BUILD card's
+  // liveness is derived from the trident run store; a RESEARCH card's linked run
+  // is an agent-dispatch run (not a trident row), so a still-set linked_run_id
+  // whose trident lookup is null means "a live research run" → also guard it
+  // (the composer's dispatch additionally coalesces a double-▶ via spawn_key).
+  const runId = item.linked_run_id
+  if (runId !== null && runId.length > 0) {
+    if (isResearch) {
+      // A research card keeps its linked_run_id ONLY while the dispatch is live
+      // (the terminal reconcile clears it); a still-set id ⇒ a live research run.
+      return jsonError(409, 'already_running', `item_id=${item_id} already has a live research run (${runId})`)
+    }
+    if (trident_runs !== undefined) {
+      const run = trident_runs.get(runId)
+      if (run !== null && !isTerminalPhase(run.phase)) {
+        return jsonError(409, 'already_running', `item_id=${item_id} already has a live build (${runId})`)
+      }
+    }
+  }
+  const result = await dispatch(project_slug, item)
+  if (!result.ok) {
+    // #337 — an underspecified card is NOT an error to paint in the work pane:
+    // `startBuild` has already posted a clarifying question to the chat and left
+    // the item pending. Return 200 so the client shows no raw-guard banner.
+    if (result.code === 'underspecified') {
+      return jsonOk({ asked_in_chat: true, item_id, project_id })
+    }
+    const status = result.code === 'backend_error' ? 500 : 409
+    return jsonError(status, result.code, result.message)
+  }
+  return jsonOk({ started: item_id, run_id: result.run_id, project_id })
+}
+
+async function handleUpdate(
+  req: Request,
+  store: WorkBoardStore,
+  project_slug: string,
+  project_id: string,
+  item_id: string,
+): Promise<Response> {
+  const owned = store.get(project_slug, item_id)
+  if (owned === null) return jsonError(404, 'item_not_found', `item_id=${item_id}`)
+  const body = await readJsonBody(req)
+  if (body === null) return jsonError(400, 'malformed_json', 'expected JSON body')
+  const fields = body as Record<string, unknown>
+  const patch: { title?: string; status?: WorkBoardStatus; design_doc_ref?: string | null } = {}
+  if (fields['title'] !== undefined) {
+    const title = readTitle(fields['title'])
+    if (title === null) {
+      return jsonError(400, 'invalid_title', 'title must be a non-empty string up to 256 chars')
+    }
+    patch.title = title
+  }
+  if (fields['status'] !== undefined) {
+    const status = readStatus(fields['status'])
+    if (status === false || status === null) {
+      return jsonError(400, 'invalid_status', `status must be one of ${VALID_STATUSES.join('/')}`)
+    }
+    patch.status = status
+  }
+  if (fields['design_doc_ref'] !== undefined) {
+    const ref = readOptionalString(fields['design_doc_ref'])
+    if (ref === false) {
+      return jsonError(400, 'invalid_design_doc_ref', 'design_doc_ref must be a string or null')
+    }
+    patch.design_doc_ref = ref
+  }
+  try {
+    const item = await store.update(project_slug, item_id, patch)
+    return jsonOk({ item, project_id })
+  } catch (err) {
+    return mapWriteError(err)
+  }
+}
+
+async function handleComplete(
+  store: WorkBoardStore,
+  project_slug: string,
+  project_id: string,
+  item_id: string,
+): Promise<Response> {
+  const owned = store.get(project_slug, item_id)
+  if (owned === null) return jsonError(404, 'item_not_found', `item_id=${item_id}`)
+  const item = await store.complete(project_slug, item_id)
+  return jsonOk({ item, project_id })
+}
+
+async function handleReorder(
+  req: Request,
+  store: WorkBoardStore,
+  project_slug: string,
+  project_id: string,
+  item_id: string,
+): Promise<Response> {
+  const owned = store.get(project_slug, item_id)
+  if (owned === null) return jsonError(404, 'item_not_found', `item_id=${item_id}`)
+  const body = (await readJsonBody(req)) ?? {}
+  const fields = body as Record<string, unknown>
+  const before = readOptionalString(fields['before'])
+  const after = readOptionalString(fields['after'])
+  if (before === false || after === false) {
+    return jsonError(400, 'invalid_reorder_target', 'before/after must be item id strings')
+  }
+  await store.reorder(project_slug, item_id, {
+    ...(before !== null ? { before } : {}),
+    ...(after !== null ? { after } : {}),
+  })
+  return jsonOk({ items: store.list(project_slug), project_id })
+}
+
+async function handleDelete(
+  store: WorkBoardStore,
+  project_slug: string,
+  project_id: string,
+  item_id: string,
+  trident_runs: TridentRunAccess | undefined,
+  cancelDispatch: ((run_id: string) => Promise<void>) | undefined,
+): Promise<Response> {
+  const owned = store.get(project_slug, item_id)
+  if (owned === null) return jsonError(404, 'item_not_found', `item_id=${item_id}`)
+  // Item 3 — deleting a card bound to a RUNNING build must not orphan the trident
+  // run (it would keep building headless). Cancel it FIRST: if the item names a
+  // non-terminal `linked_run_id`, set the run's phase to `stopped` (the existing
+  // trident stop path — `code-command.ts` executeStop) so the outer loop stops
+  // harvesting/advancing/merging it. Best-effort: a cancel failure never blocks
+  // the delete (the row is disposable; the run reap backstops liveness). Only
+  // THEN remove the board item.
+  let cancelled_run: string | undefined
+  const runId = owned.linked_run_id
+  // #379 — a RESEARCH card's linked run is an agent-dispatch run (not a trident
+  // row), so the trident cancel below no-ops for it. Cancel it via the dispatch
+  // stop hook so the Atlas subprocess isn't orphaned. Best-effort + a no-op for
+  // an unknown/terminal run id (DispatchService.stop returns false). Fire this
+  // for every bound run — a build run id is unknown to the dispatcher and vice
+  // versa, so exactly one hook actually cancels.
+  if (owned.task_type === 'research' && cancelDispatch !== undefined && runId !== null && runId.length > 0) {
+    try {
+      await cancelDispatch(runId)
+      cancelled_run = runId
+    } catch {
+      // dispatch cancel is best-effort — proceed with the delete
+    }
+  }
+  if (owned.task_type !== 'research' && trident_runs !== undefined && runId !== null && runId.length > 0) {
+    try {
+      const run = trident_runs.get(runId)
+      if (run !== null && !isTerminalPhase(run.phase)) {
+        // §F6a — route the cancel through the ONE `terminate()` chokepoint when
+        // wired, so the terminal-observer chain (delivery + board reconcile) fires
+        // for an X-cancel exactly as it does for a loop-reaped run (the fix — this
+        // path used to bypass the observers). Fall back to a bare `update` for
+        // board-less / observer-less boots (behaviour-identical to pre-F6a there).
+        if (trident_runs.terminate !== undefined) {
+          // Only claim a cancellation the ATOMIC transition actually won — the
+          // pre-check above can go stale in the await gap (the tick loop finishes
+          // the run first), and a lost race cancelled nothing (Codex r3).
+          const { won } = await trident_runs.terminate(runId, 'stopped')
+          if (won) cancelled_run = runId
+        } else {
+          await trident_runs.update(runId, { phase: 'stopped' })
+          cancelled_run = runId
+        }
+      }
+    } catch {
+      // Cancel is best-effort — proceed with the delete regardless.
+    }
+  }
+  await store.delete(project_slug, item_id)
+  return jsonOk({
+    deleted: item_id,
+    project_id,
+    ...(cancelled_run !== undefined ? { cancelled_run } : {}),
+  })
+}
+
+/** Validated non-empty title (<=256 chars) or null when malformed. */
+function readTitle(raw: unknown): string | null {
+  if (typeof raw !== 'string') return null
+  const trimmed = raw.trim()
+  if (trimmed.length === 0 || trimmed.length > 256) return null
+  return trimmed
+}
+
+/** Status enum: a valid status, `null` when absent, or `false` when malformed. */
+function readStatus(raw: unknown): WorkBoardStatus | null | false {
+  if (raw === undefined || raw === null) return null
+  if (typeof raw !== 'string') return false
+  if (!VALID_STATUSES.includes(raw as WorkBoardStatus)) return false
+  return raw as WorkBoardStatus
+}
+
+/** task_type enum: a valid kind, `null` when absent, or `false` when malformed. */
+function readTaskType(raw: unknown): WorkBoardTaskType | null | false {
+  if (raw === undefined || raw === null) return null
+  if (typeof raw !== 'string') return false
+  if (!VALID_TASK_TYPES.includes(raw as WorkBoardTaskType)) return false
+  return raw as WorkBoardTaskType
+}
+
+/** Optional string: the string, `null` when absent/empty, or `false` when malformed. */
+function readOptionalString(raw: unknown): string | null | false {
+  if (raw === undefined || raw === null) return null
+  if (typeof raw !== 'string') return false
+  return raw
+}
+
+function sanitizeItemId(raw: string): string | null {
+  if (raw.length === 0 || raw.length > MAX_ITEM_ID_LEN) return null
+  if (!/^[A-Za-z0-9_.-]+$/.test(raw)) return null
+  return raw
+}
+
+/** Map a store validation error to a 400; rethrow anything else (500). */
+function mapWriteError(err: unknown): Response {
+  if (err instanceof WorkBoardValidationError) return jsonError(400, err.code, err.message)
+  throw err
+}

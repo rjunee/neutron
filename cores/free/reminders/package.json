@@ -1,0 +1,519 @@
+{
+  "name": "@neutronai/reminders-core",
+  "version": "0.2.0",
+  "type": "module",
+  "main": "./index.ts",
+  "exports": {
+    ".": "./index.ts",
+    "./manifest": "./src/manifest.ts",
+    "./backend": "./src/backend.ts",
+    "./tools": "./src/tools.ts",
+    "./mcp-tools-extra": "./src/mcp-tools-extra.ts",
+    "./chat-commands": "./src/chat-commands.ts",
+    "./smart-wrap": "./src/smart-wrap.ts"
+  },
+  "private": true,
+  "dependencies": {
+    "@neutronai/auth": "workspace:*",
+    "@neutronai/cores-runtime": "workspace:*",
+    "@neutronai/cores-sdk": "workspace:*",
+    "@neutronai/cron": "workspace:*",
+    "@neutronai/migrations": "workspace:*",
+    "@neutronai/persistence": "workspace:*",
+    "@neutronai/reminders": "workspace:*",
+    "@neutronai/tasks": "workspace:*"
+  },
+  "neutron": {
+    "capabilities": [
+      "read:reminders_core.db",
+      "write:reminders_core.db"
+    ],
+    "tier_support": [
+      "regular"
+    ],
+    "tools": [
+      {
+        "name": "reminders_create",
+        "description": "Schedule a reminder. One-shot by default; pass `recurrence` (coarse label) OR `recurrence_spec` (exact cron cadence) to make it repeat. Returns the new reminder's id and the persisted fire_at (unix seconds).",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "message": {
+              "type": "string",
+              "description": "Reminder body — composed verbatim or wrapped by the fire-time agent."
+            },
+            "fire_at": {
+              "type": "number",
+              "description": "Unix seconds (UTC) when the reminder should fire (the FIRST occurrence when recurring)."
+            },
+            "project_id": {
+              "type": "string",
+              "description": "Optional project scope; persisted as topic_id under the hood."
+            },
+            "recurrence": {
+              "type": "string",
+              "enum": [
+                "weekly",
+                "monthly",
+                "occasional"
+              ],
+              "description": "Optional COARSE cadence — omit for a one-shot. weekly = every 7 days from fire_at, monthly ≈ every 30 days, occasional ≈ every 14 days. For exact wall-clock cadences (daily at 9am, weekdays, annually) use `recurrence_spec` instead. Mutually exclusive with recurrence_spec."
+            },
+            "recurrence_spec": {
+              "type": "string",
+              "description": "Optional FAITHFUL cron cadence — a standard 5-field cron expression (minute hour day-of-month month day-of-week). Examples: '0 9 * * *' = daily 09:00, '0 9 * * 1-5' = weekdays 09:00, '0 9 7 2 *' = annually on Feb 7, '0 */6 * * *' = every 6 hours. Wall-clock and DST-correct. Mutually exclusive with recurrence."
+            }
+          },
+          "required": [
+            "message",
+            "fire_at"
+          ]
+        },
+        "output_schema": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "fire_at": {
+              "type": "number"
+            }
+          },
+          "required": [
+            "id",
+            "fire_at"
+          ]
+        },
+        "capability_required": "write:reminders_core.db"
+      },
+      {
+        "name": "reminders_list",
+        "description": "List pending reminders for this owner, sorted by fire_at ASCENDING (soonest-firing first). Optional project_id narrows to a single project. v1 only lists pending reminders — fired/cancelled history is not yet exposed; the status field is reserved for forward-compat and may only be set to 'pending'.",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "limit": {
+              "type": "integer",
+              "description": "Maximum number of reminders to return. Backend default applies when omitted."
+            },
+            "project_id": {
+              "type": "string",
+              "description": "Optional project scope; matched against the row's topic_id."
+            },
+            "status": {
+              "type": "string",
+              "enum": [
+                "pending"
+              ],
+              "description": "v1 only supports 'pending'. fired/cancelled history is not yet exposed; the field stays for forward-compat."
+            }
+          }
+        },
+        "output_schema": {
+          "type": "object",
+          "properties": {
+            "results": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "message": {
+                    "type": "string"
+                  },
+                  "fire_at": {
+                    "type": "number"
+                  },
+                  "status": {
+                    "type": "string"
+                  },
+                  "project_id": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "id",
+                  "message",
+                  "fire_at",
+                  "status",
+                  "project_id"
+                ]
+              }
+            }
+          },
+          "required": [
+            "results"
+          ]
+        },
+        "capability_required": "read:reminders_core.db"
+      },
+      {
+        "name": "reminders_snooze",
+        "description": "Move a pending reminder to a later fire_at. Implemented as atomic cancel + re-create against the underlying engine so the engine's public API stays untouched; returns the NEW reminder id (the original id is cancelled).",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "description": "Pending reminder id to snooze."
+            },
+            "new_fire_at": {
+              "type": "number",
+              "description": "Unix seconds (UTC) for the new fire time."
+            }
+          },
+          "required": [
+            "id",
+            "new_fire_at"
+          ]
+        },
+        "output_schema": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "description": "Id of the newly-created reminder carrying the new fire_at."
+            },
+            "cancelled_id": {
+              "type": "string",
+              "description": "Id of the original reminder that was cancelled."
+            },
+            "fire_at": {
+              "type": "number"
+            }
+          },
+          "required": [
+            "id",
+            "cancelled_id",
+            "fire_at"
+          ]
+        },
+        "capability_required": "write:reminders_core.db"
+      },
+      {
+        "name": "reminders_cancel",
+        "description": "Cancel a pending reminder. Returns ok=true when a pending row was cancelled, ok=false when the row was already fired/cancelled or never existed. Returns ok=false for both unknown ids and reminders owned by another owner (info-hiding is intentional — the caller is never told a foreign id exists).",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "description": "Reminder id to cancel."
+            }
+          },
+          "required": [
+            "id"
+          ]
+        },
+        "output_schema": {
+          "type": "object",
+          "properties": {
+            "ok": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "ok"
+          ]
+        },
+        "capability_required": "write:reminders_core.db"
+      },
+      {
+        "name": "reminders_convert_to_task",
+        "description": "Promote a pending reminder into a canonical task. Creates a task with the reminder's message as the title and the reminder's fire_at as the due_date; the task substrate then auto-creates a fresh linked reminder. The original reminder is cancelled so it does not fire twice. Returns the new task_id, the linked_reminder_id (the freshly-created reminder bound to the task), and the cancelled_reminder_id (the original).",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "description": "Pending reminder id to convert."
+            },
+            "project_id": {
+              "type": "string",
+              "description": "Optional project scope for the new task. Defaults to the reminder's project."
+            },
+            "priority": {
+              "type": "integer",
+              "description": "Optional priority 0..3 (3 = highest)."
+            },
+            "title": {
+              "type": "string",
+              "description": "Optional title override; falls back to the reminder's message."
+            }
+          },
+          "required": [
+            "id"
+          ]
+        },
+        "output_schema": {
+          "type": "object",
+          "properties": {
+            "task_id": {
+              "type": "string"
+            },
+            "linked_reminder_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "cancelled_reminder_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "task_id",
+            "linked_reminder_id",
+            "cancelled_reminder_id"
+          ]
+        },
+        "capability_required": "write:reminders_core.db"
+      },
+      {
+        "name": "reminders_update",
+        "description": "Rewrite a pending reminder's message body. Implemented as atomic cancel+create inside projectDb.transaction so the engine surface stays untouched and the audit trail records both writes. Preserves the original row's topic_id + fire_at + recurrence + source (NULL for organic, '@neutronai/reminders-core' for Core-owned). Returns the new id, the replaced id, and the persisted new message body. Throws when id is unknown / belongs to another owner (info-hidden as 'not found') / is not pending.",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "description": "Pending reminder id to rewrite."
+            },
+            "message": {
+              "type": "string",
+              "description": "New message body. Replaces the original verbatim."
+            }
+          },
+          "required": [
+            "id",
+            "message"
+          ]
+        },
+        "output_schema": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "description": "Id of the new reminder carrying the new message."
+            },
+            "replaced_id": {
+              "type": "string",
+              "description": "Id of the original reminder that was cancelled."
+            },
+            "message": {
+              "type": "string",
+              "description": "The new message body (echoed for confirmation)."
+            }
+          },
+          "required": [
+            "id",
+            "replaced_id",
+            "message"
+          ]
+        },
+        "capability_required": "write:reminders_core.db"
+      },
+      {
+        "name": "rituals_propose",
+        "description": "PROPOSE a ritual: a recurring, UNATTENDED sub-agent that runs a fixed prompt on a schedule (e.g. a morning brief that reads your STATUS.md + calendar). IMPORTANT: proposing does NOT schedule or run anything — the ritual only ever fires after the OWNER explicitly APPROVES it in chat (a code-rendered approval message with Approve/Deny buttons is shown; approval is content-hash-bound, so any later edit to the prompt/surface/cadence requires re-approval). Returns an opaque proposal_id and status 'pending_approval'. Read-only tool surfaces (Read/Glob/Grep) and web (WebSearch/WebFetch, which also needs a separate egress approval) are supported; write/exec tools (Bash/Write/Edit) are currently blocked at fire time.",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "description": "Charset-guarded ritual id (lowercase alphanumeric + hyphen, 1-64 chars, starts alnum). Also the prompt file basename. Must not already exist."
+            },
+            "description": {
+              "type": "string",
+              "description": "One-line human capability summary rendered in the approval prompt (non-empty, <= 200 chars)."
+            },
+            "tool_surface": {
+              "type": "array",
+              "items": { "type": "string" },
+              "description": "Built-in tool names the ritual may use at fire time (e.g. ['Read','Glob','Grep'] or ['Read','WebSearch']). Never empty. Web tools require egress:'web'. Write/exec tools are refused at fire time until OS sandboxing ships."
+            },
+            "egress": {
+              "type": "string",
+              "enum": ["none", "web"],
+              "description": "'none' = no internet; 'web' = the ritual may reach the public internet (WebSearch/WebFetch) — a SEPARATE owner approval is required for this."
+            },
+            "silent": {
+              "type": "boolean",
+              "description": "When true, no completion message is posted after a successful run. Defaults false.",
+              "default": false
+            },
+            "prompt": {
+              "type": "string",
+              "description": "The FULL prompt the ritual runs verbatim each fire. NFC-normalized; control/bidi/zero-width characters are rejected; capped at 16 KiB (refused, never truncated). Shown in full inside the approval message."
+            },
+            "schedule": {
+              "type": "object",
+              "description": "When the ritual runs. fire_at is the first occurrence (unix seconds). Pass at most one cadence; omit both for a one-shot.",
+              "properties": {
+                "fire_at": {
+                  "type": "number",
+                  "description": "Unix seconds (UTC) of the FIRST occurrence."
+                },
+                "recurrence": {
+                  "type": "string",
+                  "enum": ["weekly", "monthly", "occasional"],
+                  "description": "Optional coarse cadence. Mutually exclusive with recurrence_spec."
+                },
+                "recurrence_spec": {
+                  "type": "string",
+                  "description": "Optional 5-field cron cadence (e.g. '0 9 * * *'). Mutually exclusive with recurrence."
+                }
+              },
+              "required": ["fire_at"]
+            }
+          },
+          "required": ["id", "description", "tool_surface", "egress", "prompt", "schedule"]
+        },
+        "output_schema": {
+          "type": "object",
+          "properties": {
+            "proposal_id": {
+              "type": "string",
+              "description": "Opaque handle for the pending proposal."
+            },
+            "ritual_id": {
+              "type": "string"
+            },
+            "status": {
+              "type": "string",
+              "description": "Always 'pending_approval' — the ritual will not fire until the owner approves it."
+            },
+            "requires_egress_approval": {
+              "type": "boolean",
+              "description": "True for egress:'web' defs — a SECOND owner approval (network egress) is required before scheduling."
+            }
+          },
+          "required": ["proposal_id", "ritual_id", "status", "requires_egress_approval"]
+        },
+        "capability_required": "write:reminders_core.db"
+      },
+      {
+        "name": "rituals_enable",
+        "description": "ENABLE an already-registered ritual by giving it a schedule. Use this for the BUNDLED example rituals (morning-brief, evening-wrap, daily-delta) and any previously-registered ritual — rituals_propose refuses their ids because their prompt already exists on disk. You supply ONLY the id + schedule; the prompt, tool surface and scope are owned by the registered def (see rituals_status for the ids). IMPORTANT: enabling does NOT run anything — like rituals_propose, the ritual only fires after the OWNER explicitly APPROVES it in chat (a code-rendered Approve/Deny prompt is shown; approval is content-hash-bound to the on-disk prompt bytes). Returns an opaque proposal_id and status 'pending_approval'.",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "description": "The id of an already-registered ritual (from rituals_status) — e.g. 'morning-brief'. Must NOT already be enabled."
+            },
+            "schedule": {
+              "type": "object",
+              "description": "When the ritual runs. fire_at is the first occurrence (unix seconds). Pass at most one cadence; omit both for a one-shot.",
+              "properties": {
+                "fire_at": {
+                  "type": "number",
+                  "description": "Unix seconds (UTC) of the FIRST occurrence."
+                },
+                "recurrence": {
+                  "type": "string",
+                  "enum": ["weekly", "monthly", "occasional"],
+                  "description": "Optional coarse cadence. Mutually exclusive with recurrence_spec."
+                },
+                "recurrence_spec": {
+                  "type": "string",
+                  "description": "Optional 5-field cron cadence (e.g. '0 9 * * *'). Mutually exclusive with recurrence."
+                }
+              },
+              "required": ["fire_at"]
+            }
+          },
+          "required": ["id", "schedule"]
+        },
+        "output_schema": {
+          "type": "object",
+          "properties": {
+            "proposal_id": {
+              "type": "string",
+              "description": "Opaque handle for the pending proposal."
+            },
+            "ritual_id": { "type": "string" },
+            "status": {
+              "type": "string",
+              "description": "Always 'pending_approval' — the ritual will not fire until the owner approves it."
+            },
+            "requires_egress_approval": {
+              "type": "boolean",
+              "description": "True for egress:'web' defs — a SECOND owner approval (network egress) is required before scheduling."
+            }
+          },
+          "required": ["proposal_id", "ritual_id", "status", "requires_egress_approval"]
+        },
+        "capability_required": "write:reminders_core.db"
+      },
+      {
+        "name": "rituals_status",
+        "description": "List every registered ritual with its approval state ('approved' | 'pending' | 'denied' | 'none') and whether it is currently scheduled. Read-only. Use this to see which proposed rituals the owner has approved.",
+        "input_schema": {
+          "type": "object",
+          "properties": {}
+        },
+        "output_schema": {
+          "type": "object",
+          "properties": {
+            "results": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "ritual_id": { "type": "string" },
+                  "description": { "type": "string" },
+                  "scope": { "type": "string" },
+                  "tool_surface": {
+                    "type": "array",
+                    "items": { "type": "string" }
+                  },
+                  "egress": { "type": "string" },
+                  "approval": { "type": "string" },
+                  "scheduled": { "type": "boolean" }
+                },
+                "required": [
+                  "ritual_id",
+                  "description",
+                  "scope",
+                  "tool_surface",
+                  "egress",
+                  "approval",
+                  "scheduled"
+                ]
+              }
+            }
+          },
+          "required": ["results"]
+        },
+        "capability_required": "read:reminders_core.db"
+      }
+    ],
+    "ui_components": [
+      {
+        "name": "RemindersLauncherIcon",
+        "entry_point": "./src/ui/launcher-icon.ts",
+        "surface": "launcher_icon"
+      },
+      {
+        "name": "RemindersAppTab",
+        "entry_point": "./src/ui/app-tab-surface.ts",
+        "surface": "app_tab"
+      }
+    ],
+    "billing_hooks": [],
+    "linked_sources": [],
+    "secrets": [],
+    "compat": {
+      "coreApi": "^0.1.0"
+    },
+    "build": {
+      "neutronVersion": "0.1.0"
+    }
+  }
+}

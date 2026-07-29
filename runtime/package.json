@@ -1,0 +1,25 @@
+{
+  "name": "@neutronai/runtime",
+  "type": "module",
+  "main": "./index.ts",
+  "private": true,
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "@neutronai/app": "workspace:*",
+    "@neutronai/contracts": "workspace:*",
+    "@neutronai/cores-sdk": "workspace:*",
+    "@neutronai/gbrain-memory": "workspace:*",
+    "@neutronai/jwt-validator": "workspace:*",
+    "@neutronai/logger": "workspace:*",
+    "@neutronai/mcp": "workspace:*",
+    "@neutronai/migrations": "workspace:*",
+    "@neutronai/persistence": "workspace:*",
+    "@neutronai/scribe": "workspace:*",
+    "@neutronai/tools": "workspace:*",
+    "@neutronai/wire-types": "workspace:*",
+    "jose": "^5.9.0"
+  },
+  "devDependencies": {
+    "yaml": "2.9.0"
+  }
+}

@@ -1,0 +1,54 @@
+name: leak-gate-nightly
+
+# Scheduled FULL leak-gate scan of the default branch.
+#
+# WHY THIS EXISTS. The Tier-1 owner-PII rule needs a repository secret, and
+# GitHub withholds secrets from `pull_request` runs whose head is a FORK. That is
+# the one context where the gate is allowed to skip Tier-1 — so without a second
+# pass, a fork PR could merge PII into `main` and nothing would ever look again.
+# A `schedule` run always executes on the base repo, so it always has the secret:
+# this job is the pass that closes the fork hole. It also catches the case where
+# the denylist GREW after a tree was already merged.
+#
+# It is a genuinely independent check, not a re-run of `purity`: `purity` proves a
+# CHANGE is clean, this proves the CURRENT TREE is clean under the CURRENT
+# denylist. Keep both.
+#
+# A failure here is a live privacy incident on a public repo — treat it as P0.
+
+on:
+  schedule:
+    # 09:17 UTC daily. Deliberately off the hour: GitHub heavily oversubscribes
+    # :00 cron slots and silently delays them.
+    - cron: '17 9 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  full-scan:
+    name: leak-gate full scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history: the commit-message half of the gate needs a real range.
+          fetch-depth: 0
+
+      - name: Resolve the commit-message scan window
+        id: window
+        run: |
+          # Commit messages are immutable and already mirrored to GHArchive, so
+          # scanning ALL history would only produce a permanently-red gate with no
+          # available remedy. Scan the last day's commits — the window this job
+          # actually adds coverage for.
+          base="$(git rev-list -1 --before='25 hours ago' HEAD 2>/dev/null || true)"
+          echo "base=${base}" >> "$GITHUB_OUTPUT"
+          echo "message-scan base: ${base:-<none: no commits older than the window>}"
+
+      - name: leak gate (Tier-1 denylist REQUIRED — this run has secret access)
+        env:
+          LEAK_GATE_PII_DENYLIST_B64: ${{ secrets.LEAK_GATE_PII_DENYLIST_B64 }}
+          LEAK_GATE_BASE_SHA: ${{ steps.window.outputs.base }}
+        run: bash scripts/ci/leak-gate.sh --tree .

@@ -1,0 +1,24 @@
+-- 0072_secret_audit_author.sql
+--
+-- 2026-06-14 — Connect FEATURES B1 (connect-spec §4.3 layer 3). Multi-author
+-- attribution, the Core-activity layer: when a turn triggers a Core action /
+-- tool call, the Core-activity audit row stamps the TRIGGERING author so the
+-- side-effect is attributable to the collaborator (or the owner) who caused it
+-- ("Bob's turn invoked the Calendar Core to create event Z"), not collapsed to
+-- a single anonymous "the project did X."
+--
+-- The author value is the SAME uniform `author.id` stamped once at the connect
+-- ingress (§4.2) and persisted on the inbound message row (0071). It is the
+-- member's collision-free local_slug, or 'owner' for owner-native turns. Here
+-- it is recorded onto the per-Core-action row in `secret_audit_log` (the table
+-- that already powers the admin "what did this Core ever access?" view + the
+-- Argus tail-of-denials surface), so per-author Core usage is queryable.
+--
+--   author_id   stable, uniform across owner + every collaborator.
+--
+-- Nullable: pre-B1 rows (and any unattributed audit write) carry NULL. Audited
+-- contexts that know the triggering author (Open: owner-native; Connect: the
+-- per-turn member) stamp it. Forward-only; STRICT table ADD COLUMN with a valid
+-- STRICT type (TEXT). Snapshot regen required.
+
+ALTER TABLE secret_audit_log ADD COLUMN author_id TEXT;

@@ -1,0 +1,20 @@
+{
+  "name": "@neutronai/trident",
+  "type": "module",
+  "main": "./index.ts",
+  "private": true,
+  "dependencies": {
+    "@neutronai/auth": "workspace:*",
+    "@neutronai/channels": "workspace:*",
+    "@neutronai/cores-sdk": "workspace:*",
+    "@neutronai/logger": "workspace:*",
+    "@neutronai/loop": "workspace:*",
+    "@neutronai/migrations": "workspace:*",
+    "@neutronai/persistence": "workspace:*",
+    "@neutronai/project-credentials": "workspace:*",
+    "@neutronai/prompts": "workspace:*",
+    "@neutronai/runtime": "workspace:*",
+    "@neutronai/tools": "workspace:*",
+    "@neutronai/work-board": "workspace:*"
+  }
+}

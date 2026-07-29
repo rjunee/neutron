@@ -1,0 +1,6 @@
+{
+  "name": "@neutronai/contracts",
+  "type": "module",
+  "main": "./agent-engagement.ts",
+  "private": true
+}

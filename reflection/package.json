@@ -1,0 +1,10 @@
+{
+  "name": "@neutronai/reflection",
+  "type": "module",
+  "main": "./index.ts",
+  "private": true,
+  "dependencies": {
+    "@neutronai/logger": "workspace:*",
+    "@neutronai/runtime": "workspace:*"
+  }
+}

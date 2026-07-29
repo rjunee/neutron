@@ -1,0 +1,14 @@
+{
+  "name": "@neutronai/work-board",
+  "type": "module",
+  "main": "./store.ts",
+  "private": true,
+  "dependencies": {
+    "@neutronai/contracts": "workspace:*",
+    "@neutronai/cores-sdk": "workspace:*",
+    "@neutronai/logger": "workspace:*",
+    "@neutronai/migrations": "workspace:*",
+    "@neutronai/persistence": "workspace:*",
+    "@neutronai/tools": "workspace:*"
+  }
+}

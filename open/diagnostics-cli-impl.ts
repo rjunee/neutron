@@ -1,0 +1,217 @@
+/**
+ * @neutronai/open — `neutron doctor` diagnostics printer (unit O5).
+ *
+ * The GBrain doctor (`gbrain-memory/gbrain-doctor.ts`) answers "does memory
+ * work?"; this printer extends `neutron doctor` to answer the rest of "why is
+ * memory / chat / import broken?" from the CLI, WITHOUT journalctl. It opens
+ * the per-instance `project.db` READ-ONLY (WAL lets it read alongside the live
+ * server) and composes the on-disk diagnostic sections via the SAME pure
+ * `composeDiagnostics` the admin endpoint uses. In-process-only sections (the
+ * live credential-pool probe) are not visible off-process, so they render
+ * `{ available: false }` here — the running instance's
+ * `GET /api/app/admin/diagnostics` (admin tab) has the full picture. Everything
+ * on disk IS visible, including core-install failures: those land in the
+ * `system_events` journal (`core_install_failed`) and surface in the recent-
+ * events section here just as they do on the endpoint.
+ *
+ * READ-ONLY: opens the DB with `readonly: true` + `create: false` and only
+ * reads. It never migrates, never writes.
+ */
+
+import { ProjectDb } from '@neutronai/persistence/index.ts'
+import { composeDiagnostics, type DiagnosticsReport } from '@neutronai/gateway/diagnostics/diagnostics-report.ts'
+import { buildInstanceDiagnosticsSources } from '@neutronai/gateway/diagnostics/instance-sources.ts'
+import { resolveNeutronHome, resolveOpenDbPath, resolveOwnerSlug } from './owner-identity.ts'
+
+/** Build the report from the on-disk DB. Returns the report or an error note. */
+export function collectCliDiagnostics(env: NodeJS.ProcessEnv = process.env):
+  | { ok: true; report: DiagnosticsReport }
+  | { ok: false; error: string } {
+  const dbPath = resolveOpenDbPath(env)
+  const owner_home = resolveNeutronHome(env)
+  const project_slug = resolveOwnerSlug(env)
+
+  let db: ProjectDb
+  try {
+    db = ProjectDb.open(dbPath, { create: false, readonly: true })
+  } catch (err) {
+    return {
+      ok: false,
+      error: `could not open project.db (read-only) at ${dbPath}: ${err instanceof Error ? err.message : String(err)}`,
+    }
+  }
+  try {
+    const report = composeDiagnostics(
+      buildInstanceDiagnosticsSources({ db, project_slug, owner_home }),
+    )
+    return { ok: true, report }
+  } finally {
+    db.close()
+  }
+}
+
+function fmtTime(ms: number | null | undefined): string {
+  if (ms === null || ms === undefined) return '—'
+  return new Date(ms).toISOString()
+}
+
+/**
+ * Compact one-line render of a system_events payload — the structured "why" behind
+ * a degrade row (`core_slug=email code=manifest_invalid message=boom`), so `doctor`
+ * answers which Core failed and why without journalctl. `k=v` pairs; each value
+ * stringified + length-capped, the whole string bounded. Empty/non-object → ''.
+ */
+export function fmtPayload(payload: unknown): string {
+  if (payload === null || typeof payload !== 'object') return ''
+  // Strip terminal control chars (newlines, ESC/ANSI, C0/C1 + DEL) BEFORE truncating
+  // so a journal payload — which carries attacker-influenceable error text — can't
+  // forge a diagnostics line or emit control sequences (e.g. clear-screen) to the
+  // terminal (Codex). Keeps the "one-line" contract intact.
+  const sanitize = (s: string): string => s.replace(/[\u0000-\u001f\u007f-\u009f]/g, ' ')
+  const cap = (s: string, n: number): string => (s.length > n ? `${s.slice(0, n - 1)}…` : s)
+  // Fail-soft stringify: `JSON.stringify(undefined)` returns `undefined` (not a
+  // string), and BigInt / circular values THROW — a diagnostics render must never
+  // crash on a payload value (Codex). Fall back to `String(v)` in both cases.
+  const stringify = (v: unknown): string => {
+    if (typeof v === 'string') return v
+    try {
+      return JSON.stringify(v) ?? String(v)
+    } catch {
+      return String(v)
+    }
+  }
+  // OUTER guard: a diagnostics render must NEVER throw on any payload shape — even
+  // `Object.entries` / property access can throw for an exotic value (a throwing
+  // Proxy). Any structural failure degrades to a marker, not a crash (Codex).
+  try {
+    const entries = Object.entries(payload as Record<string, unknown>)
+    if (entries.length === 0) return ''
+    const parts = entries.map(([k, v]) => `${sanitize(k)}=${cap(sanitize(stringify(v)), 80)}`)
+    return cap(parts.join(' '), 200)
+  } catch {
+    return '[unrenderable payload]'
+  }
+}
+
+/** Pure text formatter — testable without a DB. */
+export function formatDiagnosticsText(report: DiagnosticsReport): string {
+  const lines: string[] = []
+  lines.push(`── diagnostics ─ instance=${report.project_slug} @ ${fmtTime(report.generated_at)} ──`)
+
+  // memory
+  const g = report.gbrain
+  if (!g.available) {
+    lines.push(`memory (gbrain): unavailable-to-read (${g.note ?? 'n/a'})`)
+  } else if (g.status === undefined) {
+    lines.push(`memory (gbrain): ${g.note ?? 'no sync state recorded'}`)
+  } else {
+    lines.push(
+      `memory (gbrain): status=${g.status}` +
+        (g.status === 'unavailable' ? ` LATCHED reason=${g.latch_reason ?? '?'} at=${g.latched_at ?? '?'}` : '') +
+        ` last_success=${g.last_success_at ?? '—'} deferred=${g.deferred_count ?? 0}`,
+    )
+  }
+
+  // credentials
+  const c = report.credentials
+  if (!c.available) {
+    lines.push(`credentials: ${c.note ?? 'not readable off-process (see admin tab)'}`)
+  } else {
+    lines.push(
+      `credentials: usable=${c.has_usable}` +
+        (c.has_usable ? '' : ` soonest_cooldown=${fmtTime(c.soonest_cooldown_until)}`),
+    )
+  }
+
+  // chat / REPL sessions
+  const r = report.repl_sessions
+  if (!r.available) {
+    lines.push(`chat (REPL sessions): ${r.note ?? 'no registry'}`)
+  } else if ((r.sessions?.length ?? 0) === 0) {
+    lines.push(`chat (REPL sessions): none (${r.registry_path ?? '?'})`)
+  } else {
+    lines.push(`chat (REPL sessions): ${r.sessions!.length} (${r.registry_path ?? '?'})`)
+    for (const s of r.sessions!) {
+      lines.push(
+        `  - ${s.key} model=${s.model ?? '?'} respawns=${s.respawn_count ?? 0}` +
+          (s.capped_at ? ` CAPPED at=${fmtTime(s.capped_at)}` : '') +
+          ` age=${s.age_ms === null || s.age_ms === undefined ? '—' : Math.round(s.age_ms / 1000) + 's'}`,
+      )
+    }
+  }
+
+  // cron
+  const cj = report.cron_jobs
+  if (!cj.available) {
+    lines.push(`cron jobs: ${cj.note ?? 'no cron state'}`)
+  } else if ((cj.jobs?.length ?? 0) === 0) {
+    lines.push(`cron jobs: no runs recorded`)
+  } else {
+    lines.push(`cron jobs: ${cj.jobs!.length}`)
+    for (const j of cj.jobs!) {
+      lines.push(
+        `  - ${j.job_name} last=${fmtTime(j.last_run_at)} status=${j.last_run_status ?? '—'}` +
+          (j.last_run_error ? ` error=${j.last_run_error}` : ''),
+      )
+    }
+  }
+
+  // import
+  const ij = report.import_jobs
+  if (!ij.available) {
+    lines.push(`import jobs: ${ij.note ?? 'no import jobs'}`)
+  } else if ((ij.jobs?.length ?? 0) === 0) {
+    lines.push(`import jobs: none`)
+  } else {
+    lines.push(`import jobs: ${ij.jobs!.length}`)
+    for (const j of ij.jobs!) {
+      lines.push(
+        `  - ${j.job_id} source=${j.source ?? '?'} status=${j.status ?? '?'}` +
+          (j.error_code ? ` error=[${j.error_code}] ${j.error_message ?? ''}` : ''),
+      )
+    }
+  }
+
+  // recent events — source is the operational system_events journal (O4): the
+  // deliberate silent fail-soft / degrade decisions across every band.
+  const ev = report.recent_events
+  if (!ev.available) {
+    lines.push(`recent events (system_events): ${ev.note ?? 'no events'}`)
+  } else if ((ev.events?.length ?? 0) === 0) {
+    lines.push(`recent events (system_events): none`)
+  } else {
+    lines.push(`recent events (system_events, newest first, ${ev.events!.length}):`)
+    for (const e of ev.events!.slice(0, 15)) {
+      const scope = e.project_slug ? ` (${e.project_slug})` : ''
+      const why = fmtPayload(e.payload)
+      lines.push(
+        `  - ${fmtTime(e.ts)} [${e.level ?? '?'}] ${e.module ?? '?'}/${e.event ?? '?'}${scope}${why ? ` — ${why}` : ''}`,
+      )
+    }
+  }
+
+  return lines.join('\n')
+}
+
+/** CLI entry — invoked by `bin/neutron doctor` after the GBrain checks. */
+export function runDiagnosticsCli(argv: string[], env: NodeJS.ProcessEnv = process.env): number {
+  const wantJson = argv.includes('--json')
+  const result = collectCliDiagnostics(env)
+  if (!result.ok) {
+    if (wantJson) {
+      process.stdout.write(JSON.stringify({ ok: false, error: result.error }) + '\n')
+    } else {
+      process.stdout.write(`\n── diagnostics ──\n${result.error}\n`)
+    }
+    // A missing/unreadable DB is not a doctor failure (fresh box, server not yet
+    // booted) — print the note and exit 0 so `neutron doctor` stays green.
+    return 0
+  }
+  if (wantJson) {
+    process.stdout.write(JSON.stringify({ ok: true, diagnostics: result.report }) + '\n')
+  } else {
+    process.stdout.write('\n' + formatDiagnosticsText(result.report) + '\n')
+  }
+  return 0
+}
+

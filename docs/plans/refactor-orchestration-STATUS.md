@@ -1,0 +1,489 @@
+# Refactor Orchestration — STATUS (resume anchor)
+
+> **✅ WINDOW CLOSED — 2026-07-16. This resume anchor is now historical.** The world-class refactor
+> window is COMPLETE: all trident-executed units merged through K10 (#375); the tail landed as
+> #311–#390. Deliberate non-merges in the Open tree: **MG-3 = KEEP** (#374), **N3-credential =
+> DEFERRED**, **W3 = DEFERRED** (+ W4/W6 native-shell slipped post-window; **K4b** slug-flow
+> deletion also deferred) — tracked as GitHub issues. (Separately, the **M-lane M1–M6** is Managed
+> cross-repo in `neutron-managed`, so it stays unchecked in the plan §17 ledger. N2 + the N3 rename
+> landed together in #367; only N3-credential is deferred.) The `SPEC.md` completion section carries
+> the single complete account. For the
+> authoritative current state read `SPEC.md` §"The world-class refactor window — COMPLETE
+> (2026-07-16)" + the `SPEC.md` Decisions Log, and the per-unit ticks in the plan
+> (`docs/plans/2026-07-02-world-class-refactor-plan.md` §17). The orchestration log below is
+> preserved as provenance; only this file's window-state marker has been flipped to CLOSED.
+
+**Purpose (HISTORICAL — window CLOSED; superseded by `SPEC.md`).** While the window was OPEN this
+file was the live resume anchor — the single source of truth for "where are we", read at the top of
+every orchestrator turn alongside the plan (`docs/plans/2026-07-02-world-class-refactor-plan.md`
+§1.5 protocol, §17 checklist). That role has ended: the window is complete, so nothing updates this
+file anymore and a fresh context should resume from `SPEC.md` (see the banner) + the plan §17 ledger.
+The description below is retained as-written for provenance.
+
+---
+
+## Snapshot
+
+- **Window state:** CLOSED 2026-07-16 (kicked off 2026-07-03) — all tail units merged through K10;
+  see the CLOSED banner at the top of this file. Historical snapshot below.
+- **Driver:** this orchestrator session — Opus 4.8, `/effort high`, ultracode OFF.
+  High-judgment/low-token: adjudicates diff-vs-acceptance, reconciles line-drift, ticks
+  §17, merges. Building is delegated to per-unit worktree agents on routed models.
+- **main HEAD:** `817e934` — **FABLE-WINDOW 25 UNITS MERGED (2026-07-09).** Batch-6/7 (3): P8 #307 (single entity-format codec — deleted scribe/gbrain hand-mirrors; orchestrator fixed the pre-existing `splitTopLevelCommas` backslash-escape bug at the now-single seam) · P11 #308 (typed JSON codecs on `*_json` contract columns via P3's `parseJsonColumn`, corrupt-policies byte-preserved) · P9 #309 (persist `gbrain_sync_state` for observability — sink port, fail-soft byte-identical, deferred-edge journal deferred). **P-lane now: P1–P5, P8–P11 done; only P6/P7 (BEHAVIOR + decisions) remain.** Earlier 22-unit history below. Batch-4-tail + batch-5 (5): D9c #300 (ProjectsProposedFlow carve — router core already K11b1-gone) · C5a #302 (landing route-manifest half; **C5b auth-gate unification deferred owner-gated**) · P10 #303 (trident checkpoint.sh busy_timeout hardening) · D9d #305 (PHASE_DESCRIPTORS collapse + exhaustiveness — **D9 phase complete**) · P4 #304 (table-ownership map + CI conformance test). **⚠️ Orchestrator independent-Codex caught 2 real defects the build agents' own Codex missed: P10 `new URL().pathname` left `%20` in space-containing checkout paths (silent checkpoint-write failure) → fileURLToPath; P4 conformance scanner didn't strip comments (commented-out SQL kept a stale allowlist entry alive) → stripComments. Both fixed pre-merge.** Earlier batch-4/17-unit history below. Batch 1 (9): D1 #282 · C4 #283 · P1 #284 · D4 #285 · D9a #286 · RA1 #288 · S0 #287 · D6 #289 · D5 #290. Batch 2/3 (6): P3 #292 (openSidecar) · C6 #293 (credential-resolver unify) · D2 #294 (substrate banner split) · O1 #295 (log-suppression nested-map collision fix — a REAL bug the orchestrator caught) · F7 #296 (liveness timing constants) · P2 #297 (.raw()→typed ProjectDb sweep). Batch 3/4 tail (2): D8 #298 (landing/server dead-helper removal — agent died uncommitted, orchestrator finalized) · P5 #299 (app-chat store fold onto one event-log core). Prior: L5 #280 → **L-PHASE COMPLETE (L1–L7)**; **WAVE 0 COMPLETE** (G1–G10 + W0); **WAVE 1 K-phase** (below).
+- **Managed:** MG-1 ✅ managed#124 (relocation-tolerant contract gate + telegram/gbrain surfaces; 4 Codex rounds) + managed#125 doc-fix; M0 ✅ managed#123. Vendor-bump path unblocked.
+- **⚡ FABLE WINDOW (2026-07-09 → ~07-11):** an owner directive — Fable free → route build+analysis to `fable` (opus for delicate/security, haiku for trivial) + MAXIMIZE PARALLELIZATION (4-6 disjoint-file units concurrently; merge stays serial). See [[refactor-fable-window-2026-07-09]]. **BATCHES 4–7 COMPLETE (25 units). Merge queue EMPTY.** ⚠️ Clean fable-suitable units now THIN — most remaining are opus/behavior/owner-gated → shift to careful serial. Orchestrator independent-Codex caught 3 real defects the build agents missed (P10 `%20`-path, P4 comment-blind scanner, P8 backslash-parser — all fixed pre-merge). NEXT (queued, off 817e934): RA2 (gbrain live-or-loud, substrate — +Managed `open-contract.ts` check if it touches `buildTenantEnv`) · **MG-3** (precond CHECKED 2026-07-09 — `NEUTRON_GRAPH_COMPOSER_MODULE` ∉ Managed `buildTenantEnv` since Managed spawns `open/server.ts` not `gateway/index.ts`; seam deletable + `open-contract.ts:53` confirms the "MG-3 pair"; but boot-shell `gateway/index.ts` + cross-repo → do NON-CONCURRENTLY) · P11 (after P4✓) · F1/F2 (F2 embeds owner-decision D-7). **OWNER-GATED / deferred:** C5b (auth-gate-seam unification — live login path), W3a/P6/P7 (BEHAVIOR + decisions), RA3 (ollama), D7 (browser-smoke), O5 (feature). Re-read §16 for the next disjoint set as the clean fable supply thins.
+- **⚠️ OPERATIONAL (batch 1 lessons):** (1) serial merges off a shared base → every open PR's 2-dot Codex shows already-merged siblings as PHANTOM reverts → false BLOCKERs; rebase-onto-current-main → re-Codex → merge tight (see [[refactor-worktree-shallow-rebase-trap]]). (2) isolation worktrees don't auto-`bun install` → phantom `@neutronai/* cannot find module` typecheck-all fails; agents must install first. (3) S0 flags for the owner: /api/app/* still accepts guessable `dev:owner` (→S1); email core send IS live (gmail.send + email_send tool) — corrected the stale "drafts-only" docs.
+  K1,K2,K3,K4a,K5,K6,K7,K8,K9 merged. **✅ K11b1 DONE (the crown jewel — ~35k LOC of dead
+  onboarding conversational-drive excised):** landed as THREE PRs — **#240 K11b0** (dead ChatBridge
+  prerequisite), **#242 K11a6-completion** (re-anchor ~60 drive tests → survivors + DIE manifest),
+  **#243 K11b1** (the deletion: engine drive methods + llm-router/interaction-mode/resume-cron/
+  start-onboarding whole modules + §7.5 dual-site flag purge + ~70 DIE tests). Remaining: **K10**
+  (docs cluster) + the **K11 TAIL** — D-K11-4 (`rate_limit_paused` rider), K11c (OAuth sources /
+  D-K11-7), K11d (retained-but-dead prune: wow/final-handoff cluster + `engine-agent-name.ts` +
+  suggestion branches + `consumeImportAnalysisPresentedChoice`), K11b2 (`NEUTRON_DEPLOYMENT_MODE`),
+  K11b3 (web:-registry comment-truth). K4b deferred. **CI GREEN.**
+  - **✅ K11b1 (#243, merged 2026-07-07):** coverage preserved by K8 rule, verified via **tsc
+    ground-truth** (the K11a6 DIE manifest over-deleted the final-handoff family — tsc showed the 9
+    builder tests compile; caught 4 survivors needing FIXES the manifest missed). **Codex caught 2
+    real coverage-loss blockers** (round 1): the wow-push idempotency + final-handoff prompt
+    contracts are reachable from the **retained** `emitCurrentPhasePrompt` auto-advance path
+    (`max_oauth_offered` + Max attached) — NOT dead as the manifest assumed. Re-anchored onto that
+    seam (`wow-push-autoadvance-survivor` + `final-handoff-render-survivor`, 19 tests incl. a
+    credential-gate anti-self-fulfilling check) → Codex round-2 APPROVE. **⚠️ K11d must delete those
+    2 survivors WITH the wow/final-handoff cluster prune.**
+  - **✅ K11b0 (#240, merged 2026-07-06):** excised `buildWebChatBridge` + bridge-only helpers
+    (chat-bridge.ts 2522→552 lines); re-pointed 4 live slug-compare sites onto `constantTimeEqual`
+    (the anti-enumeration invariant, ISSUE #34, was previously enforced ONLY on the dead bridge —
+    bridge deletion would have silently dropped it). **Fable liveness adjudication (2026-07-06):**
+    bridge VERIFIED dead-in-prod (landing server reads `options.bridge` zero times, `/ws/chat`→404,
+    every live client on `/ws/app/chat`); K11b0 behavior-preserving (`app-ws-surface.ts` untouched);
+    Managed clean (vendors Open via `vendor/neutron` submodule, zero own-code refs to deleted
+    symbols). Codex's 3 REQUEST_CHANGES findings all describe **pre-existing main drift**, not K11b0
+    regressions → **filed as K11-F1** (engagement-mode unenforced on live app-ws + vestigial
+    `runWithActiveProject`; user-reachable but NOT a security gap — resolver falls back to global).
+  - **Window auxiliary units merged this batch:** FX1 #226 (`/code` pre-check narrow — audit
+    caught the K8 over-broad reject), FX2 #227 (restore K3-deleted import-resume coverage,
+    mutation-proven), RT1 #228 (Ralph/SPEC.md governed-mode tripwire — forces `ralph=false` +
+    leak-gate bans root SPEC.md for the window; **K10 reverts both**), K11-pre #229 (re-anchor
+    the 11 live import-integration tests off the doomed `engine.start`/`advance` — K11a6, no prod
+    code touched). **M0** (Managed CI) = neutron-managed PR **#123** open (public submodule, no
+    PAT); merges in the Managed repo.
+  - **⚠️ K11 GATING — Fable deletion-claim sweep done (`docs/research/fable-k11-deletion-sweep-2026-07-06.md`).**
+    Central premise (`engine.start`/`advance` dead on every live path) VERIFIED-DEAD; the 4 prior
+    load-bearing targets re-confirmed. **7 NEW corrections folded into the plan/exec-plan as ⚠️
+    callouts** — the critical one: K11b3's "delete `open/composer.ts:1926-2060`" pointed at LIVE
+    reminders/brief delivery wiring (served-by-path trap); rescoped to a comment-truth pass. Plus
+    4 missed paired-edits (D-K11-4 `rate_limit_paused` live route, §7.5 flag also in retained
+    resolver, C2 barrel re-exports, D-K11-7 unowned OAuth purge). **Read those callouts before
+    running any K11 sub-unit.**
+  - **RESUMED (2026-07-06/07, autonomy grant):** K11a + K11a6-remainder + K11b0 + K11a6-completion
+    + K11b1 all driven to merge (D-K11-1 cleared — Managed grepped clean, vendors Open via submodule).
+    See [[neutron-open-k11b1-drive-deletion]] memory for the DIE-manifest≠tsc-ground-truth + Codex
+    live-path lessons.
+  - **K11 TAIL progress (2026-07-07):**
+    - **✅ D-K11-4 RESOLVED → KEEP.** The `rate_limit_paused` / `attemptAutoResumeFromPaused`
+      machinery is LIVE (auto-resume of a rate-limit-paused import via the retained
+      `pollImportRunningTick` cron seam). `import-paused-auto-resume.test.ts` already survived K11b1
+      anchored on the retained `buildImportRunningHandler` (3/3 green) — no code change; delete-together
+      was the wrong branch (would kill live behavior + leave the 6 dangling status enumerators). Exec-plan §10 row marked resolved.
+    - **✅ K11b2 DONE (#257, merged 2026-07-08) — OWNER-APPROVED DELETE.** The owner delegated the call
+      2026-07-08 ("if you can't find it in either repo, safe to delete — make the call"). Re-verified
+      exhaustively: every `NEUTRON_DEPLOYMENT_MODE` hit is a test fixture / vendored test; the Managed
+      provisioner (`provision-hetzner.sh`, `neutron-service.sh`, `install.sh`, `.env.example`) sets NEITHER
+      `NEUTRON_ROLE` NOR the alias → removal is behavior-preserving. Alias branch deleted; `NEUTRON_ROLE`
+      is the sole mode key. **Codex 5 rounds** — my first pass added a `console.error` tombstone; Codex
+      correctly called it *worse than a clean delete* (logs but still resolves `open`, so the credential
+      boundary is unchanged — a false protection) + confirmed NO implemented boot tripwire → reverted to a
+      **clean delete** with the accepted trade-off documented plainly (alias-only box → `open` → could use
+      the shared env key; no such box exists; sole residual = untracked hand-set VPS env, owner-accepted).
+      r3/r4 strengthened the boundary test + caught a real `TS2345`. Security pin (`NEUTRON_ROLE=managed`
+      refuses shared key) preserved. Exec-plan §8 rewritten to DONE. **K11 tail now FULLY closed** (only
+      K10 remains, wave 9).
+    - **✅ K11b3 DONE-BY-VERIFICATION (no code change needed).** After K11b0 (bridge) + K11d
+      (build-wow-dispatcher.ts) deletions, the unit is moot: `landing.registry` appears in `open/composer.ts`
+      ONLY in 2 comments (:1875/:1966) that describe the legacy `web:` path in PAST tense ("were delivered…
+      now fixed") — accurate historical rationale, NOT a stale falsehood; the registry instance itself lives
+      on in `build-landing-stack.ts:607` (kept for import-progress/Managed); `registry.register(` has zero
+      live sites in composer; the WowChannelAdapter rewire is moot (its file deleted in K11d). No dead code,
+      no false comments → nothing to change. (Fable had already caught that the original "delete composer
+      :1926-2060" scope pointed at LIVE reminders wiring.)
+    - **✅ K11c DONE (#247, main green 2026-07-07):** dead OAuth import sources purged (`ImportSource`
+      → `chatgpt-zip | claude-zip`), +32/−765. Resolves **D-K11-7 → (a) delete**. Codex r1 boundary
+      fix (parser `default` arm / resume 409 `unsupported_source` / probe — migration 0040 CHECK still
+      permits legacy `-oauth` strings). NOTE: auto-merge fired on required checks before the (non-required)
+      full `test` check finished — harmless (main CI went green after) but **for tail units block on the
+      `test` check explicitly, do NOT use `gh pr merge --auto`.**
+    - **✅ K11d DONE (#248, main green 2026-07-07):** dead wow-push/final-handoff/max_oauth cluster
+      deleted, **~12.7k LOC**. Verified DEAD 3 ways (audit + Fable + grep) — **corrects the #243
+      "live-reachable" mislabel**: `emitCurrentPhasePrompt` was orphaned by #243's own dispatcher
+      deletion (0 prod callers). The 2 #243 survivor tests deleted WITH the cluster. Codex r1: 2 contract-honesty
+      fixes (dead deps on landing-stack/engine contracts) applied; the `max_oauth_offered`/`wow_fired`
+      **phase-prompts "dead CTA" finding DECLINED as pre-existing** (K11d doesn't touch phase-prompts.ts;
+      phases unreachable on main+branch; Fable confirmed behavior-preserving). Full trace in PR #248 comment.
+    - **🆕 K11e FILED (follow-up, exec-plan §8b):** prune the orphaned `max_oauth_offered`/`wow_fired`/etc.
+      phase DEFINITIONS (phase-prompts + enum + transitions). ⚠️ NOT data-only — `POST_MAX_OAUTH_PHASES`
+      (`resolve-onboarding-phase.ts:47-48`) is LIVE creds-gate logic; legacy sqlite rows at these phase
+      strings need a compat decision (served-by-path trap). Needs its own liveness pass; Managed-adjacent.
+    - **✅ K11e DONE (#251, main `f27c66c` 2026-07-08):** pruned the orphaned `max_oauth_offered`/
+      `wow_fired` phase DEFINITIONS (union + `LEGAL_TRANSITIONS` + `ALL_PHASES` + phase-prompts +
+      resolver packs), net −465 LOC. **Served-by-path trap handled atomically:** `POST_MAX_OAUTH_PHASES`
+      widened `ReadonlySet<OnboardingPhase>`→`ReadonlySet<string>` keeping the legacy literals verbatim +
+      `loadCurrentOnboardingPhase` returns the RAW DB string, so stranded pre-#243 legacy `onboarding_state`
+      rows still classify as post-max at the creds gate (new stranded-`wow_fired` compat test proves it).
+      `persona_reviewed` forward chain collapsed → `completed`. **Codex 3 rounds:** r1 blocker (persona_reviewed
+      LLM guidance still NAMING the deleted phases — injected goal + tangent-answer FAQs, a user-visible lie
+      at the final checkpoint) FIXED; r2 two more stale refs (advance_examples summary + enum doc-comments)
+      FIXED + guard broadened to deep-scan the pack; r3 re-raise **DECLINED** (see known-divergence). Verified:
+      root tsc + 44-config matrix clean, 895 onboarding/gateway tests / 0 fail, full `test` check green.
+    - **Remaining autonomous tail:** **K10** (docs cluster, sequenced LAST — Ralph governed-mode landmine).
+      K11b2 owner-gated (above). [✅ K11c #247, K11d #248, K11e #251, K11b3 done-by-verification, D-K11-4 KEEP]
+      → K11 is functionally COMPLETE modulo the owner-gated K11b2; **Wave 1 closed, Wave 2 (L-layering) OPEN
+      now** (K10 stays sequenced last, wave 9 — Ralph landmine).
+
+## Wave 2 (L layering → C → W5 → M1/M2) — IN PROGRESS
+
+- **✅ L1 DONE (#253, main `39a44b2` 2026-07-08):** chat-protocol wire types (`ChatOutbound` + its 10
+  `*Outbound` member interfaces) extracted VERBATIM (JSDoc byte-identical — verified via diff) out of
+  the `landing/server.ts` edge module into the new leaf `landing/chat-protocol.ts`; `server.ts` keeps a
+  re-export barrel (+ a local `import type` for its own `emitSessionReady` signature). 7 PRODUCTION
+  importers flipped to the leaf (gateway/open/reminders — the real inbound edges cut); test-file importers
+  left on the barrel per §2.2 (L5 sweep rewrites them). Scope narrowed: `ChatInbound`/`PendingChatClaim`/
+  `ChatBridge` were already dead (excised in K11b0). Codex found NO code regression; its 2 "blockers" were
+  STATUS.md base-staleness (branch predated #252) → resolved by rebase onto current main. Matrix 44/44,
+  landing+gateway 2638 / reminders+open green, depcruise clean.
+- **✅ L2 DONE (#255, main `703a49a` 2026-07-08):** stranded contract types/constants relocated to a new
+  **node-free `contracts/` leaf** (+ `OutboundSink` unified into `trident/outbound-sink.ts`, which needs a
+  `channels/types.ts` type it can't take into the lowest band) with `export … from` shims at every old
+  site: OnboardingPhase/ALL_PHASES, AgentEngagementMode+defaults, LlmCallFn, ChatCommandFilter,
+  McpToolResolver, MOBILE_APP_URL/TELEGRAM_BIND_TOKEN_TTL_MS, OutboundSink×2→1. **DAG cuts #1/#7/#9
+  landed** (depcruise 21→16, ratchet OK); #10/#11 are type-only (grep-verified). `.dependency-cruiser.cjs`
+  registers `contracts` as a leaf band. **Skipped (already relocated):** ImportJobRunnerHook (K3),
+  WebChatSenderRegistry (alive, node-free); ChatOutbound cut by L1. Codex APPROVE; one comment-truth fix
+  (MOBILE_APP_URL canonical home). matrix 45/45; env-load-order preserved in `contracts/handoff-config.ts`.
+  **⚠️ resume note:** agent worktrees are shallow/grafted — `git rebase origin/main` needs `git fetch
+  --unshallow` first (see [[refactor-worktree-shallow-rebase-trap]]).
+- **✅ L4 DONE (#258, main `83cb8c9`, merged 2026-07-08)** (manifest honesty + workspace promotion ·
+  `sonnet` · lane ci). Promoted the 5 floating dirs (open/, tabs/, work-board/, project-credentials/,
+  **contracts/** [new L2 leaf]) to real workspaces + declared their true deps. **Codex found the real
+  bug:** the AST audit miscounted intra-package `@neutronai/<self>/…` imports, so gateway/runtime/
+  onboarding each declared THEMSELVES as a dependency — removed the 3 self-dep lines. `bun install` +
+  full matrix (47 tsconfigs) + broad tests + app/metro purity all green. Depgraph declared-vs-actual
+  delta = 0.
+  Leak-gate allowlists the tracked refactor docs (plan + STATUS + INVARIANTS, §1.4 / D-11).
+- **Recurring CI flake to watch:** `Argus r2 … concurrent write+delete on same path keeps
+  anchor live` fails intermittently on the throttled runner (hit twice this window; clears on
+  job re-run, 31/31 local). Not a unit defect — a candidate for test hardening / quarantine.
+- **Chat-react async-leak flake (FIXED #222):** `WorkBoardTab.tsx:330` fired setState in async
+  continuations after unmount → CI chunk-7 crash `ReferenceError: window is not defined`. Root fix
+  merged **#222** (`aliveRef` guard on all 9 async→setState sites + a repro test). Wave-1+ CI
+  stopped hitting it.
+  **G5 landed a structural CI change:** the Typecheck step is now a MATRIX
+  (`scripts/ci/typecheck-all.sh` runs `tsc -p` over all 44 tsconfigs; DOM stripped from
+  server configs). Every subsequent unit MUST pass `bash scripts/ci/typecheck-all.sh` on
+  rebase, not just root+leaf tsc.
+- **CI infra:** `.github/workflows/ci.yml` throttled to `NEUTRON_TEST_CONCURRENCY=2`,
+  `CHUNK_SIZE=75` (conservative guaranteed-green; ~2× wall-clock). Raise / set
+  `NEUTRON_TEST_JOBS>1` once a faster runner is wired. Runner-upgrade decision PENDING
+  (see [[neutron-open-ci-baseline-git-identity]] — personal repo → no hosted larger
+  runners; realistic path = self-hosted runner on the owner's Mac, needs his ~3-min reg).
+
+## Done
+
+- **CI baseline repair** (#195, `41b57c0`) — real-git trident tests needed a repo-local
+  git identity on Linux CI (was masquerading as OOM). main green.
+- **F9** (#194, `00bd398`) — `[BEHAVIOR]` trident conflict-resolver tools + humanized
+  delivery + REAL passthrough test. **Orchestration PILOT** — proved the full machine:
+  worktree build-agent → Argus/Codex review → CI green → squash-merge. §17 ticked.
+- **Leak-gate main-red repair** (#198, `5e96e15`) — #196 committed the tracked plan doc
+  WITHOUT its leak-gate allowlist entry (§1.4 / D-11) → Purity gate flagged 34 `tenant-*`
+  hits and main's `ci` push workflow was RED on every push since (STATUS "baseline GREEN"
+  was stale). Fix = allowlist the plan doc for retired-vocab rules only (mirrors
+  AS_BUILT.md); PII/hosted-domain/secret rules stay armed. Unblocked the whole window.
+- **W8** (chat client cheap wins · `sonnet` · lane clients) — **#197, `89728c2`**, §17
+  ticked. 4 items: (a) `[BEHAVIOR]` cache-busting `/chat-react.js` (#353) — escalated by
+  Codex across r1-r3 from ETag-only to airtight **URL versioning** (`?v=<content-hash>` in
+  shell + `no-store` + resolve-before-serve); (b) desktop theme toggle restore (#360);
+  (c) `.car-md` list spacing (#358); (d) code-block copy button (#359). 6 review rounds →
+  Codex APPROVE. **Two CI-caught issues** (both real, both lessons): (1) the `?v=` rewrite
+  broke `open/composer.ts` bootstrap injection — cross-package consumer I'd missed locally
+  → [[refactor-orchestrator-gate-crosspackage]]; (2) the leak-gate main-red above surfaced
+  once an anchor-walker timing flake cleared. Airtight cache-busting is the real #353 win.
+- **W7-crash** (#354 blank-screen crash · `opus` · lane clients) — **RESOLVED-by-batch-PRs;
+  guard = #200, `135c2e1`.** The opus agent REFUTED the crash as already-fixed at HEAD:
+  the load-bearing memo (assistant-ui adapter identity → `setAdapter` early-return) landed
+  in **PR #162**, predating the jank report; the LIVE crash was a **stale cached bundle**
+  replaying pre-#162 code, now closed by W8's #197 cache-busting. #200 adds a zero-behavior
+  extraction (`useChatAdapter`) + a **discriminating** regression test (fails if the memo
+  is removed) + pane-switch coverage. Codex APPROVE; root+leaf tsc + 334 chat-react + 5
+  open tests pass. **Browser-verify is the owner's manual gate** (PR #200 body: hard-refresh,
+  switch ~10× with Work pane open during a live build → DOM survives, zero console errors).
+  §17 W7 stays UNCHECKED — the full mount rebuild (#355 re-slide, #356 typing) is wave-7 W7.
+
+**✅ STEP 0 (Wave −1) COMPLETE** — F9 #194, W8 #197, W7-crash #200. Plus main-red repair #198,
+docs #199. main GREEN @ `135c2e1`.
+
+## Wave 0 (Phase-0 guardrails) — COMPLETE (10/10 + W0; M0 cross-repo deferred)
+
+**Merged:**
+- **G5** (#204, `b38b2f2`) — typecheck-completeness MATRIX + DOM-strip; 47 masked type
+  errors fixed (incl. a real jwt-validator bug). Codex APPROVE. The high-value guardrail.
+- **G1** (#203) — Open route-matrix characterization (ladder + negative space, both
+  directions). **Surfaced a latent prod bug**: `hasAnyChainedSurface` omits
+  `import_resume_handler` → a resume-only composition serves nothing; pinned as a
+  documented known-divergence for a later fix unit.
+- **G10** (#202) — `docs/INVARIANTS.md`, 111 anchored invariants (108 unit-protected,
+  3 review-only). Allowlisted for retired-vocab.
+- **G6** (#206) — substrate error-string classifier conformance (6 classifiers pinned by
+  driving the REAL producer strings per the no-mock rule; tripwire proven on reword).
+- **G3** (#205) — mirror parity (TabDescriptor, AgentEngagementMode) + entity-format golden
+  round-trip. Bidirectional parity via typed-parameter identity fns (catches either-side widening).
+- **G7** (#208, `8eae26f`) — leak-gate NUL tripwire (`binary-hidden` rule, fail-closed) +
+  retire 3 raw-NUL tokens as `\x00` escapes (**byte-identical**, hash-stability golden).
+  Codex REQUEST_CHANGES **DECLINED** (documented): the composite-key collision it flagged
+  (`${emoji}\x00${device_id}` etc.) is PRE-EXISTING (raw-NUL delimiter before, identical
+  `\x00` after) and out of scope for a byte-identical unit — **pinned as a known-divergence**
+  (see below) like G1's `hasAnyChainedSurface`.
+- **G2** (#211, `66a0df3`) — hydration-parity 3-transcript fidelity matrix (HTTP history /
+  WS resume / live push), divergence PINNED as green-today (W3 flips DROPPED→PRESENT). Real
+  seam driven (one SQLite ProjectDb, real ButtonStore + AppWsAdapter). Codex APPROVE (clean).
+  Root cause noted: `AppChatRow`/`button_prompts` have no columns for citations/doc_refs →
+  W3 needs schema work, not a mapping fix.
+- **G9** (#209, `b7c4c1c`) — shared test-isolation testkit (`createIsolatedHome` +
+  `reserveFreePort`), adopted in 3 polluting suites (pass twice consecutively). Codex found
+  FOUR real env-leaks in the testkit's OWN suite across rounds (LIFO restore order,
+  noUncheckedIndexedAccess, ambient-key destruction) — all fixed; final fix is a file-level
+  full-env snapshot/restore so the suite can never leak. Codex APPROVE.
+
+**G4** (#210, `92cf3c7`) — dependency-cruiser five-band layering gate + 21-edge grandfathered baseline + CI gate. Two Codex rounds (r1: 3 rule-correctness gaps — tests invisible to no-cycles, static composition→connect, direct-only app-purity; r2: ratchet-growth + self-tests, ROUTED to G8). Merged on met acceptance.
+- **G8** (#213, `b3bdc63`) — self-tests for run-tests.sh + leak-gate.sh + a CI-enforced depcruise **ratchet-growth guard** (baseline may only shrink vs main). Loud-fatal empty BUN_DISC (override documented). Codex REQUEST_CHANGES (run-tests fatal breaks CI) was a FALSE POSITIVE — empirically BUN_DISC=915 on local AND CI (Codex mis-reproduced with explicit file args vs the script's no-arg full discovery). Separately fixed a real leak-gate-selftest literal-token issue my clean-export re-run caught. Merged.
+
+**Wave-0 remaining:** only M0 (Managed CI — cross-repo neutron-managed, deferred).
+
+## Wave 1 (K = kill / deletions) — merged
+
+- **K1** (#217, `557bdd0`) — delete dead `landing/connect` files + split `escapeHtml` live.
+  **Codex near-live-break catch:** the plan's audit wrongly marked live `connect-accept.ts`
+  dead (confused with the removed orphan `connect-accept-server.ts`); restored the live trio.
+  Lesson → [[refactor-deletion-served-by-path-trap]]. (Plan §K1 corrected in-doc.)
+- **K2** (#215, `44cbf1f`) — delete dead slug-picker from `chat-bridge.ts` (~510 LOC).
+- **K3** (#216, `94c1155`) — evacuate + delete the dead per-chunk import pipeline (−5k+ LOC).
+- **K4a** (#219, `6dd6761`) — delete dead `acceptChoice` (0 prod callers) + pin phase_state
+  contract. K4b (slug-flow) deferred. **Known-divergence pinned:** `__cancel__` advances signup
+  (see below).
+- **K5** (#218, `274ff21`) — misc kill-list sweep (dtc + X5-gated items preserved).
+- **K8** (#221, `53b2844`) — delete Trident v1 remnants + retired code-gen forks (~−4.3k LOC);
+  FIX 9 parity retargeted onto live `inner-workflow.mjs`. Codex found 2 real issues (both
+  fixed): the `/codefoo` gateway-grammar boundary + a stale `codegen_dispatch` MCP manifest.
+- **K9** (#220, `79396a1`) — delete orphaned `router-thinking-budget` (0 callers) + make the
+  substrate/AGENTS comments honest (the `MAX_THINKING_TOKENS=0`/`extra_env` guard was never
+  wired). Codex caught a missed AGENTS.md doc-drift (fixed).
+
+Net wave-1 so far: **~−17.7k LOC** removed behind green gates. Every unit's Codex review found
+≥1 real issue; zero regressions shipped; zero owner-stops triggered.
+
+## Known-divergences (pinned by a guardrail, owned by a later fix unit)
+
+- **G1:** `hasAnyChainedSurface` (`gateway/composition.ts`) omits `import_resume_handler` →
+  a resume-only composition serves nothing. Pinned by G1's route-matrix test.
+- **G7:** composite-key encoders use a NUL delimiter (`parseReactions`, in-mem calendar,
+  `InMemoryOnboardingStateStore`, doc-search per-file collapse) → a component containing NUL
+  collides. Pre-existing (byte-identical through G7). Low severity (needs literal NUL in
+  emoji/slug/id). Owner: a later fix unit adds collision-proof keying + boundary tests.
+- **K4:** `__cancel__` (a NON_ADVANCING sentinel, but NOT in the gateway's
+  `FORBIDDEN_INBOUND_VALUES` = {`__freeform__`,`__timeout__`}) reaches `advance → consumeChoice`
+  on the signup prompt and WRONGLY advances signup — the signup generic route has no
+  NON_ADVANCING guard (the surviving guards are only in `consumeWowFallbackChoice` +
+  `handleFinalHandoffOnCompleted`). Pre-existing: the deleted `acceptChoice`'s guard sat on a
+  dead path, so live behavior is identical pre/post-K4. Pinned by a characterization test in
+  `engine-advance-choice-parity.test.ts` (asserts current buggy `advanced`; flip to
+  `no_active_prompt` + phase `signup` in the fix unit). Owner: a later onboarding fix unit / K11.
+- **K11e:** the LIVE dynamic `buildPersonaReviewedPromptSpec` "Looks good" CTA returns
+  `next_phase_on_default: 'slug_chosen'` (`phase-prompts.ts:1635/1672`), while K11e retargeted the
+  *static* spec + transition table to `completed`. **Byte-identical on main** (K11e never touched the
+  dynamic builder — a definition-prune) and **intentional**: already pinned by
+  `m2-ux-surface-fixes.test.ts:64`. Not the claimed live bug — a backward-to-slug accept would make
+  onboarding un-completable, but it completes in prod; the live "Looks good" is routed by the engine's
+  `consumePersonaReviewedChoice` handler, not this fallback. Codex r3 REQUEST_CHANGES DECLINED
+  (documented on PR #251). Owner: a later onboarding-flow audit unit (align dynamic builder's default
+  with the static spec / finalize routing).
+
+**Review pattern (holding across every unit):** build agent → orchestrator diff review → Codex
+cross-review (EVERY unit found ≥1 real defect: vacuous assertions, one-directional parity holes,
+wrong anchors, boundary gaps, a clipboard sync-throw, the composer-injection regression, a latent
+composition bug) → fix-loop → rebase onto main + `typecheck-all.sh` → CI green → squash-merge.
+
+## Ready-set / queue (order: waves 1–9; K10 LAST)
+
+**Wave 1: DONE** (all K units merged; K10 deferred to wave 9 — Ralph landmine; K11b2 ✅ #257 owner-approved delete).
+
+**Wave 2 ready-set (§16 wave-2 row: L1 L2 L3 L4 L7 · C1 · W5 · W8✓ F9✓ · M1 M2):**
+1. **L1** ✅ #253 · **L2** ✅ #255 · **L4** ✅ #258 · **L7** ✅ #260 · **L3** ✅ #262.
+   - **L7 note:** pure `@neutron/chat-core` → `@neutronai/chat-core` scope rename (the one outlier of 41).
+     Codex caught the agent mechanically renaming the old scope inside **dated point-in-time snapshots**
+     (2026-07-02 audit set, AS-BUILT-archive, dated QA, migration `0079` comment) → corrupted them
+     ("rename X → X"); reverted those, kept the rename only in living current-state docs. Codex #1
+     (plan-docs name old scope) DECLINED — they name it as the unit's OWN spec; grep is code/config-scoped.
+   - **L3 note — ⚠️ NO-CYCLES IS NOW A HARD ERROR (SCC = ∅).** Six injection-shaped edge cuts + two
+     extra intra-package cycles (trident, gbrain-memory) the brief missed; `.dependency-cruiser.cjs`
+     no-cycles flipped `error`, baseline 16→8. **Every future unit must keep the graph acyclic** — a new
+     import cycle now fails CI outright. Codex REQUEST_CHANGES → APPROVE: (a) real manifest-honesty
+     blocker — cut the source edges but left stale workspace deps; fixed (removed migrations→open,
+     connect→onboarding, reminders→gateway/landing, agent-settings→connect; added open→contracts,
+     onboarding→connect). (b) full-suite CI caught the G6 producer-conformance guardrail — the
+     `cc-llm-call: aborted` literal relocated with `collectTokensToString` into `runtime/collect-tokens.ts`;
+     repointed the source-text extraction. **Lesson → [[refactor-lphase-source-text-guardrail-trap]]:
+     relocations pass tsc/matrix/depcruise via shims but break by-path source-text guardrails — run the
+     FULL `test` check on every L-relocation.**
+2. **C1** ✅ #265 (the flagship BootConfig long-pole).
+   - **C1 note:** `config/` leaf resolves+validates env ONCE into a frozen `BootConfig` (68 fields,
+     verbatim defaults, documented scope-exclusions for Expo/OS/subprocess-IPC/test vars); numeric knobs
+     fail LOUD (no silent NaN); dual-entrypoint DB trap fixed; `open/server.ts` env-mutation → a shim
+     writing FROM config; composer sub-builders still read `process.env` via the shim (marked to die —
+     deliberate follow-up). Codex r1 caught 2 real verbatim-fidelity regressions → FIXED: (a) `.url_slug`
+     effective-home desync (raw `config.ownerHome` ignored the rename on an `OWNER_HOME`-unset box — the
+     legacy `open/server.ts` mutated `OWNER_HOME ||= neutronHome` before boot read it; now resolves from
+     `config.ownerHome ?? config.neutronHome`, the value the shim publishes); (b) `NEUTRON_PORT` lost its
+     canonical-decimal guard (`0x10`→16). Codex r2 port-precedence finding DECLINED (fail-loud is the C1
+     mandate; prod passes a resolved config; explicit-port precedence preserved for valid/unset env; all
+     cited `boot({port:0})` callers pass).
+3. **W5** ✅ #263 (chat-core connection resilience `[BEHAVIOR]`).
+   - **W5 note — WAVE 2 LOCAL UNITS COMPLETE.** The 4 shared socket-lifecycle gaps (heartbeat/half-open,
+     reachability reconnect, ack-timeout→`failed`, resume-on-every-reopen) + a fully-wired per-message
+     `failed`/retry affordance on BOTH web and mobile. **7 Codex rounds** — a real defect each round,
+     all fixed: dup-resume on late `session_ready`; fallback-on-closed-socket unhandled rejection; GAP-2
+     web `online` listener; durable-store `failed`→`queued` corruption; native mobile ack-timeout parity
+     (+ 11 pre-existing mobile heartbeat failures round-1's verify missed); deactivated-client revival on
+     late open; heartbeat-not-rearmed-on-foreground; web+mobile retry wiring → per-message `flushOne`
+     (was resending all unacked). Orchestrator merged current `main` (C1) into the branch mid-review to
+     clear branch-lag artifacts — **lesson: a long-running unit's branch goes stale when siblings merge;
+     re-integrate `origin/main` (code + docs) before final review, or Codex flags the missing sibling
+     changes as regressions.**
+4. **Wave 2 status:** LOCAL units DONE (L1 L2 L3 L4 L7 · C1 · W5 · W8✓ F9✓). Only **M1/M2** (Managed,
+   cross-repo neutron-managed) remain from the §16 wave-2 row — deferred to a Managed pass.
+5. **C2** ✅ #268 (boot-helpers split + delete the 8 dead exports + `loadInstanceEnvOverlay`; Codex APPROVE
+   first pass; full suite 807/807; contract-neutral — only dead re-exports removed from the Managed-pinned
+   `gateway/index.ts`; boot-helpers.ts → a `composer-contract.ts` shim).
+6. **L6** ✅ #270 (`@neutronai/wire-types` leaf + option-shape unification). 5 option shapes → 1 canonical
+   `WireAgentMessageOption` + 2 explicit projections (ButtonOption's lossy Telegram `metadata` edge;
+   InlineChoice's render projection + "label carries display text"); ~770 mirror lines deleted; G3 parity
+   tests converted from drift-guards to contract tests. **Codex caught a browser-safety regression** (2
+   rounds): the barrel re-exports `doc-links`, which read `process.env` at module-init → crashed the
+   landing browser bundle; r1 guarded it but the runtime `HAS_PROCESS_ENV` gate then defeated Expo's
+   compile-time inlining (returned `''` on Expo); r2 fixed with **try/catch around DIRECT member reads**
+   (babel inlines for Expo, throws-caught for processless browser, runtime read for server) + config.ts
+   imports topic-id from the narrow subpath so doc-links never enters the browser bundle. **Lesson →
+   [[refactor-lphase-source-text-guardrail-trap]] cousin: a shared leaf imported by browser code must be
+   browser-safe end-to-end; guarding an env read can silently defeat build-time inlining on another
+   surface — verify all three (server / Expo-inlined / processless-browser).** CI flake on `anchor-walker`
+   (unrelated concurrency test) cleared by re-run → [[neutron-open-anchor-walker-ci-flake]].
+7. **C3a** ✅ #272 (first `open/composer.ts` carve → `open/wiring/{context,substrates,memory}.ts`). The
+   4015-line closure's substrate slice (`cc-llm-*` phase-spec + prewarm, `cc-agent-*` live-chat, ephemeral
+   `cc-trident-*` factory, warm-per-cwd `cc-trident-fire-*` cache) + memory slice (`cc-scribe-*` extraction,
+   lazy fail-soft GBrain, `cc-reflection-*` judge, `scribeOnUserTurn`, Cores fan-out) carved VERBATIM into
+   narrow-`OpenWiringContext` leaf modules; composer −326/+49. **Two required deviations only:** `let
+   prewarmSettled` → `prewarmSettledRef: {settled}` **live reference** (cold-window budget elevation reads
+   the live value the never-rejecting prewarm `.then` flips — a snapshot would break it); inline
+   `realmodeCleanups.push` → a returned `cleanups[]` the composer re-registers AT THE SAME SITE (SIGTERM
+   order byte-identical, GBrain-close before fan-out-stop). Characterization snapshot pins Open's
+   `CompositionInput` field-key set. **Codex REQUEST_CHANGES (test-gap, not a defect):** memory tests
+   discarded captured substrate opts → a future `enableToolBridge:true` on `cc-scribe`/`cc-reflection`
+   would slip; FIXED by dispatching each via its consumer (scribe `extractAndWrite`, reflection
+   `onTurnComplete` behind a cue) + asserting no-bridge + ephemeral. **Lesson: `buildLlmCallSubstrate`
+   invokes `substrateFactory` LAZILY (on `start()`) — a boundary test must DISPATCH the substrate, not just
+   build it; and scribe filters text < `SCRIBE_MIN_CHARS` (80) before dispatch.** Local doc-link lane flake
+   (pre-existing, unrelated) did NOT recur on CI (`test` green 8m16s).
+8. **C3b** ✅ #274 (second composer carve → `open/wiring/{landing,uploads}.ts`). The `buildLandingStack({...})`
+   call (onboarding engine + chat UI + WS) → `wireLandingStack(ctx, deps)` (13-field deps bag; all `!==null`
+   / `!==undefined` conditional spreads preserved so an omitted field is never keyed; `importUseSynthesis:true`
+   + per-request `chatAuthGate` via threaded `resolveOpenLlmPool(ctx.env)` verbatim) + the import-upload
+   surface (`import_upload_handler`, chunked handler + `SqliteUploadSessionStore` + `ChunkedUploadSweeper`,
+   `import_resume_handler`) → `wireUploads(ctx, deps)`. Byte-for-byte verbatim; composer −139. **Late-bound
+   `importWatchHolder` kept COMPOSER-OWNED** (composer creates it, threads it into `wireUploads` as the reader;
+   `.watch` setter stays deep in composer — NOT a `late<T>` seam, that's C3d); sweeper `stop()` in returned
+   `cleanups`, re-registered at carve site. **Codex REQUEST_CHANGES (test-gap):** the two-sided resume
+   null-guard (`runner && resolver`) had only a `runner:null` test; added the `resolver:null` arm. First
+   dispatch died (0 tool uses), second died mid-work on an API connection drop — RESUMED via SendMessage from
+   the surviving worktree (landing.ts/uploads.ts already written) → finished clean. **Lesson: an agent that
+   dies mid-flight with a worktree can be resumed with `SendMessage` + a "continue from exactly where you
+   stopped" recap, avoiding a full restart.** Hit the shallow-clone rebase trap (`git fetch --unshallow`).
+9. **C3c** ✅ #276 (third composer carve → `open/wiring/owner-gate.ts`, the security-sensitive http-shell).
+   `buildOpenOwnerGate(ctx, deps)` extracts `coldStartRedirect` + `hasResumableState` + the React-shell
+   bootstrap injection + `openFetch` + the module-level `formatOwnerSetCookie`, VERBATIM. **Verified against
+   the original before merge:** the bootstrap injection is a REGEX (`/chat-react\.js(?:\?v=[^"]*)?`, ISSUES
+   #353 versioning) NOT the plan's stale "exact-string" — the agent correctly preserved CURRENT behavior;
+   the two claim-then-mint blocks (SPA deep-link + `/chat` `?start=`) were byte-identical (only `spaRes` vs
+   `res`) → converged onto `claimAndMintThenServe(startToken, sourceRes, url)` (same `startToken!==null`
+   guard, `withReactBootstrap` then cookie-only-if-minted). `readProjectRows` left composer-owned (shared
+   with the `projects_changed` emit + rail), threaded as the injection reader. 10 security tests pin
+   single-use JTI, cookie-only-on-first-claim (incl. failed-claim), stale-cookie cold-start (null + throw),
+   injection + guard-no-op, cross-slug-cookie-ignored, and a parametrized both-call-sites-identical dedup
+   test. **Codex APPROVE first pass, no findings** (independently verified the security semantics). composer
+   −277. Lesson: when the plan's spec cites an OLD mechanism (exact-string), DIFF the deleted lines to
+   confirm what the code ACTUALLY does now before trusting either the spec or the agent's summary.
+10. **C3d** ✅ #278 (FINAL composer carve → `open/wiring/{late,app-ws}.ts`). **C3 CHAIN COMPLETE** — composer
+   4015→2681 lines across 8 `open/wiring/*` leaves. `late<T>(name)` two-phase seam: deref-before-bind LOGS
+   (`console.error [open] event=late_deref_before_bind`) + bumps an in-process counter (no `system_events`
+   table exists → in-process Map + injectable sink) + NO-OPs in prod (returns undefined, skips fn —
+   byte-identical to the old `holder.x?.foo()`), THROWS only under `NODE_ENV=test`. **Call-site mapping
+   verified correct:** presence-checks (`adapter !== undefined`) → `isBound()` + guarded `get()!` (pure, no
+   log/throw); fire-and-forget `?.send()` → `deref(...)`; bind sites unmoved. `dispatchBoardHolder` +
+   `onboardingMsg` + `appWs` on the seam; **`importWatchHolder` kept a PLAIN object** (converting it would
+   touch the landed C3b `wireUploads` reader contract — plan's lower-risk escape hatch). `wireAppWs(ctx, deps)`
+   carves the app-ws receiver/adapter/delivery-sink (~745 lines). Return typed `OpenComposition = CompositionInput
+   & Required<Pick<…33 unconditional surfaces>>` (excludes the 5 LLM-less-omitted: `doc_search`,
+   `import_resume_handler`, `trident`, `trident_build_dispatch`, `agent_dispatch`) + a `@ts-expect-error`
+   proving a dropped surface fails compile. **Codex APPROVE, no findings.** composer −837.
+11. **L5** ✅ #280 (**L-PHASE COMPLETE**). Sweep grew from the plan's ~795 estimate to **1854 static +
+   ~233 `import()` type-query** cross-workspace relative imports → `@neutronai/*` specifiers. Added root
+   `eslint.config.mjs` (`import/no-relative-packages`) + `eslint-import-resolver-typescript` (so the rule
+   resolves extensionless `.ts` specifiers) + `scripts/ci/type-query-check.mjs` (a comment/string-aware
+   whole-body scanner for the `import('../pkg/x')` type-query form the ESLint rule can't see), both wired into
+   `scripts/ci/lint.sh` + the CI lint step. 5 `package.json` manifest-honesty deps added; 2 source-text
+   guardrail tests repointed ([[refactor-lphase-source-text-guardrail-trap]]). **Codex 3 rounds:** r1 = the
+   two gate holes (extensionless + type-query) → resolver + type-query gate; r2 = the gate scanned line-by-line
+   so a multiline `import(\n'..'\n)` evaded it → rewrote to a string-aware char state machine + whole-body scan;
+   r3 APPROVE. Orchestrator caught 1 real WIP regression on resume (a `connect/agent-engagement` rewrite missing
+   the `.ts` the `./*` exports map needs — matrix caught it). Delivered across a machine-restart pause: WIP was
+   committed locally as a checkpoint, then verified+finished on resume. Lesson: **run the FULL gate set on any
+   resumed WIP before trusting it — an unverified checkpoint had a real matrix-breaking regression.**
+12. **⚡ IN FLIGHT (Fable window — analysis, read-only, conflict-free):** 2 `fable` agents — (a) parallelization/
+   lane map: which remaining units are file-disjoint → concurrent batches + spec re-anchoring for the composer
+   line-drift; (b) M1/M2/M3 Managed cross-repo feasibility + pull-forward adjudication.
+13. **Next (parallel build wave):** off the parallelization map, fan out the first **4–6 concurrent** disjoint-file
+   build units, default model **`fable`** (opus for delicate/security carves, haiku for trivial sweeps). Likely
+   C-tail (**C4** data-driven surface registry → **C5** → **C6** → **C7** → **C8** — composer-lane serial where
+   they share `gateway/composition.ts`/`compose.ts`) PLUS independent phases (**D** data, **P**, **F1–F8**, **O**,
+   **X**, **N**, **S**) that touch disjoint subsystems. Merge stays SERIAL (rebase + Codex + gates each). **M1/M2**
+   Managed = per the Fable M-phase report. **K10 strictly LAST (wave 9).**
+
+**Then waves 3–9** (C → D → P → O → X → W → M → N → S) per §16. K10 strictly LAST (wave 9).
+
+## Protocol (full detail in plan §1.5)
+
+- **Per unit:** one isolated-worktree build → PR, self-driven (no the legacy harness fleet-chat dep).
+  Model routing: **Fable 5** plans/synthesizes the hard units; **routed build** model per
+  the unit's `model` column (opus = judgment, sonnet = recipe-mechanical, haiku = pure
+  sweep); **Argus review never weaker than Sonnet**; **Codex reviews EVERY unit**.
+- **Orchestrator does synthesis itself:** verify diff-vs-acceptance + run Phase-0 guardrail
+  suites (once they exist) + tick §17 + AS_BUILT note, then merge (squash, delete branch).
+- **Ready-set:** a unit is ready when its deps are merged AND its lane is free.
+  **Concurrency cap 3.** Distinct lanes only.
+- **Failure ladder:** 2 build attempts → bump model tier → park the unit (never blocks
+  independents). Treat empty/zero-tool agent returns as spawn flakes → auto-retry.
+- **`bun install` after any main-merge before trusting tsc.** Verify trident via
+  `tsc -p trident/tsconfig.json` (root tsc misses errors).
+
+## STOP-for-owner ONLY on (else stay autonomous to completion)
+
+1. Unresolved scope/behavior decision not already settled in the plan.
+2. Irreversible-beyond-a-unit-PR: force-push to main, data loss, or a Managed-contract
+   break (the 8-surface `open-contract.ts` process contract).
+3. Systemic failure: ≥3 units failing on the same root cause.
+
+## Pointers
+
+- Plan: `docs/plans/2026-07-02-world-class-refactor-plan.md` (§1.5 protocol, §16 waves,
+  §17 checklist, §14.6 Phase R memory).
+- Audit findings: `docs/research/refactor-audit-2026-07-02/verified-findings.json`.
+- Memory: [[neutron-open-refactor-plan]], [[neutron-0703-dogfood-handoff-refactor]],
+  [[neutron-open-ci-baseline-git-identity]], [[neutron-memory-perfect-recall-gap]].

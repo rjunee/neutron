@@ -1,0 +1,9 @@
+# Bun configuration.
+#
+# [test].preload runs once before the test files in every `bun test`
+# invocation. We use it to scrub substrate-credential env vars that Bun
+# auto-loads from `.env`, so the unit suite is hermetic and never inherits
+# a developer's live Claude Max token. See the preload file for the full
+# rationale.
+[test]
+preload = ["./tests/support/scrub-substrate-env.ts"]

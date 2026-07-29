@@ -1,0 +1,259 @@
+# scripts/ci/leak-gate-allowlist.txt
+#
+# The ONLY exception mechanism for the PUBLIC leak-gate subset
+# (scripts/ci/leak-gate.sh). Format, one entry per line:
+#
+#   <path-glob>:<rule-id>
+#
+# A finding is suppressed iff its file path matches <path-glob> AND its rule-id
+# matches <rule-id>. Rule ids are the bracketed names in leak-gate.sh output
+# (tenant-code, secret-file, …). Keep this file SHORT — every entry is a
+# reviewable, committed exception, i.e. a permanent hole in a zero-tolerance gate.
+#
+# THE ENTRY ITSELF IS GATED (2026-07-29). leak-gate.sh audits this file before it
+# scans anything and EXITS 2 on a bad entry:
+#
+#   * NO DIRECTORY GLOBS. `foo/*` is rejected. Name the exact paths. A wide glob
+#     also pre-exempts every file added to that directory in future, which is how
+#     `migrations/*` came to exempt 120 files in order to cover 4, and
+#     `docs/research/…-07-02/*` 35 to cover 22. Both are now listed by exact path.
+#   * NO ENTRY MAY MATCH MORE THAN 3 FILES.
+#   * NO STALE ENTRIES. An entry matching nothing is rejected — it documents an
+#     exception that no longer exists and silently becomes wrong the day some
+#     other file claims that path. (One such entry was live here until the audit
+#     was added: a personality test that had been deleted.)
+#
+# A pseudo-path from the commit-message scan (COMMIT-MESSAGE, PR-TITLE-BODY) can
+# never appear here: it is not a file, so it can never satisfy the stale check.
+# There is no such thing as an allowlisted commit message.
+#
+# The Tier-1 PII denylist entries are NOT here and never will be — the denylist is
+# supplied out-of-band precisely because committing it would name the strings it
+# bans. A legitimate PII collision is exempted by rule id pii-denylist /
+# pii-denylist-word, with the offending file named exactly.
+
+# Migration 0074 backfills onboarding_state rows persisted at the old
+# `tenant_provisioned` onboarding phase value to `instance_provisioned`. Its
+# WHERE clause MUST name the old phase string to find the rows to rename, so the
+# file unavoidably carries the token — the one legitimate, permanent reference in
+# the Open tree. Data migrations are immutable history. Permanent tenant-code FP.
+migrations/0074_rename_tenant_provisioned_phase.sql:tenant-code
+
+# .env.example is the zero-PII self-host env TEMPLATE (every value is a default/
+# empty placeholder — no real secrets). Its name unavoidably collides with the
+# secret-file `.env*` pattern. Carried into Open on purpose (the quickstart's
+# `cp .env.example .env` step needs it). Permanent template false-positive.
+.env.example:secret-file
+
+# This gate's own source (scripts/ci/leak-gate.sh) + this allowlist necessarily
+# NAME the multi-tenant tokens + hosted domain they ban, so they self-match the
+# Tier-2 vocab + neutron-computer rules. Those are the gate's pattern source, not
+# a leak. No Tier-1/secret rule is exempted, so a real secret in either file is
+# still caught.
+scripts/ci/leak-gate.sh:tenant-code
+scripts/ci/leak-gate.sh:tenant-routing-camel
+scripts/ci/leak-gate.sh:tenant-purged
+scripts/ci/leak-gate.sh:workspace-retired
+scripts/ci/leak-gate.sh:cross-tenant-code
+scripts/ci/leak-gate.sh:provision-code
+scripts/ci/leak-gate.sh:tenant-word
+scripts/ci/leak-gate.sh:tenant-docs
+scripts/ci/leak-gate.sh:neutron-computer
+scripts/ci/leak-gate-allowlist.txt:tenant-code
+scripts/ci/leak-gate-allowlist.txt:tenant-purged
+scripts/ci/leak-gate-allowlist.txt:workspace-retired
+scripts/ci/leak-gate-allowlist.txt:tenant-word
+scripts/ci/leak-gate-allowlist.txt:cross-tenant-code
+
+# Migration .sql files are immutable history; a few carry the word "tenant" in
+# their explanatory comments. The build #3 tenant→owner purge does not (and must
+# not) rewrite shipped migration history, so the historic vocab in their comments
+# is a permanent, reviewed false-positive.
+#
+# LISTED BY EXACT PATH (2026-07-29). This was `migrations/*`, which exempted all
+# 120 migration files — and every migration added in future — in order to cover
+# the 4 that actually match. A new migration must be reviewed, not inherit an
+# exemption. The allowlist audit in leak-gate.sh now rejects directory globs.
+migrations/0074_rename_tenant_provisioned_phase.sql:tenant-purged
+migrations/0100_code_subagent_registry.sql:tenant-purged
+migrations/0100_code_subagent_registry.sql:tenant-word
+migrations/0108_work_board_heal_stale_inline_active.sql:tenant-purged
+migrations/0108_work_board_heal_stale_inline_active.sql:tenant-word
+migrations/0109_drop_vestigial_chat_tables.sql:tenant-purged
+migrations/0109_drop_vestigial_chat_tables.sql:tenant-word
+
+# build #3 (2026-06-19) tenant→owner purge left exactly two residual `tenant`
+# SUBSTRINGS, both in test fixtures, both unrelated to multi-tenant vocab:
+#   * "Lieutenant Commander Data" — a Star Trek character name used as a long-name
+#     UX fixture in the onboarding personality tests.
+#   * "xtenant-safety" — a research-core test query literal.
+# Carried by exact file so the zero-tolerance tenant-purged rule stays armed
+# everywhere else. (The third entry here named a test file that no longer
+# exists; the allowlist-stale audit added 2026-07-29 caught it and it is gone.)
+onboarding/interview/__tests__/personality-offered-character-buttons.test.ts:tenant-purged
+gateway/__tests__/research-core-production-composer.test.ts:tenant-purged
+
+# docs/AS_BUILT.md is the public build log / audit trail. It documents the
+# tenant→owner + workspace→instance/worktree renames and therefore unavoidably
+# NAMES the retired vocabulary (exactly like leak-gate.sh self-matches its own
+# patterns). It carries NO real PII and NO hosted-domain address, so it is
+# exempted ONLY from the retired-vocab rules — never from the pii-denylist /
+# hosted-domain / secret rules.
+docs/AS_BUILT.md:tenant-purged
+docs/AS_BUILT.md:tenant-word
+docs/AS_BUILT.md:tenant-code
+docs/AS_BUILT.md:tenant-routing-camel
+docs/AS_BUILT.md:workspace-retired
+
+# The world-class refactor plan is the tracked orchestration source of truth for
+# the refactor window (committed in #196 alongside the §17 checklist + STATUS
+# resume anchor). Like AS_BUILT.md it unavoidably NAMES the retired multi-tenant
+# vocabulary while describing the Managed-vs-Open architecture, the tenant→owner
+# renames, and the D-11 leak-gate hazard itself — but carries NO real PII, NO
+# hosted-domain, NO secret. Exempted ONLY from the retired-vocab rules (per §1.4
+# / decision D-11); the PII / hosted-domain / secret rules stay ARMED on it.
+# (#196 committed the doc WITHOUT this entry → the leak-gate turned main red;
+# this restores the baseline.)
+docs/plans/2026-07-02-world-class-refactor-plan.md:tenant-purged
+docs/plans/2026-07-02-world-class-refactor-plan.md:tenant-word
+docs/plans/2026-07-02-world-class-refactor-plan.md:tenant-code
+
+# refactor-orchestration-STATUS.md is the live resume anchor for the same window
+# (its companion). Documenting leak-gate / vocabulary-sweep units (this very fix,
+# G7, the K/N phases) unavoidably names the retired vocab. Same justification and
+# same scope as the plan doc above: exempt from the retired-vocab rules ONLY;
+# PII / hosted-domain / secret rules stay ARMED. Added in the SAME PR that first
+# introduces the vocab into the file (the D-11 discipline #196 skipped).
+docs/plans/refactor-orchestration-STATUS.md:tenant-purged
+docs/plans/refactor-orchestration-STATUS.md:tenant-word
+docs/plans/refactor-orchestration-STATUS.md:tenant-code
+
+# tasks/history-import-seeder.ts embeds the literal `tenant:` as a FROZEN
+# hash-seed / domain-separation label fed into the SHA-256 that mints every
+# `hi_<sha256>` history-import task id. It predates the tenant→owner purge and is
+# NOT live multi-tenant surface — but changing it would re-mint every existing
+# task id and break the idempotent re-seed guard, so it is locked. Before unit G7
+# the field separator was a RAW 0x00 NUL byte that made grep classify the whole
+# file as binary and skip it, hiding this token entirely; G7 replaced the NUL
+# with the byte-identical `\x00` escape (hash-stability proven by test) so the
+# gate now SEES the file — hence this exact-path exemption for the retired-vocab
+# rules it now legitimately matches (the seed literal + its explanatory comment).
+# PII / hosted-domain / secret rules stay ARMED on the file.
+tasks/history-import-seeder.ts:tenant-purged
+tasks/history-import-seeder.ts:tenant-word
+
+# cores/free/research/migrations/0001_research_claims.sql ships an index named
+# `research_tasks_tenant_project_status_idx`. Migration history is immutable —
+# a shipped migration is never edited — so the historic `tenant` in this index
+# name is a permanent, reviewed false-positive (the `migrations/*` globs above
+# do NOT cover this cores/-nested migration dir, so it is named by exact path).
+# Word-bounded rules do not currently trip on the `_tenant` substring, but the
+# exemption is carried explicitly so the token is documented and stays covered
+# if a rule ever broadens. PII / hosted-domain / secret rules stay ARMED.
+cores/free/research/migrations/0001_research_claims.sql:tenant-purged
+cores/free/research/migrations/0001_research_claims.sql:tenant-word
+cores/free/research/migrations/0001_research_claims.sql:tenant-code
+
+# docs/INVARIANTS.md (unit G10) is the tracked distillation of the audit critic
+# reports' load-bearing-subtleties sections. Quoting the naming-vocab critic's
+# invariants (the frozen `tenant:` hash-seed prefix, migration 0074's
+# `tenant_provisioned` string) unavoidably NAMES the retired vocabulary while
+# describing exactly the invariants that keep it frozen. Carries NO real PII, NO
+# hosted-domain, NO secret. Exempted ONLY from the retired-vocab rules (same
+# scope as docs/AS_BUILT.md and the plan doc above); PII/hosted-domain/secret
+# rules stay ARMED.
+docs/INVARIANTS.md:tenant-purged
+docs/INVARIANTS.md:tenant-word
+docs/INVARIANTS.md:tenant-code
+
+# Fable-authored refactor sub-plans + audit/sweep research (committed in the
+# 2026-07-06 bookkeeping PR). Same scope + rationale as the world-class plan doc
+# above: they describe the Managed-vs-Open architecture and the tenant→owner
+# purge, so they unavoidably NAME the retired multi-tenant vocabulary. Carry NO
+# real PII, NO hosted-domain, NO secret — verified against the git-archive tree.
+# Exempt ONLY from the retired-vocab rules; PII/hosted-domain/secret stay ARMED.
+docs/plans/2026-07-05-k11-execution-plan.md:tenant-purged
+docs/plans/2026-07-05-k11-execution-plan.md:tenant-word
+docs/plans/2026-07-05-k11-execution-plan.md:tenant-code
+docs/plans/2026-07-05-waves-2-9-resequence.md:tenant-purged
+docs/plans/2026-07-05-waves-2-9-resequence.md:tenant-word
+docs/plans/2026-07-05-waves-2-9-resequence.md:tenant-code
+docs/plans/2026-07-05-l-phase-extraction-plan.md:tenant-purged
+docs/plans/2026-07-05-l-phase-extraction-plan.md:tenant-word
+docs/plans/2026-07-05-l-phase-extraction-plan.md:tenant-code
+docs/research/fable-refactor-audit-2026-07-05.md:tenant-purged
+docs/research/fable-refactor-audit-2026-07-05.md:tenant-word
+docs/research/fable-refactor-audit-2026-07-05.md:tenant-code
+docs/research/fable-k11-deletion-sweep-2026-07-06.md:tenant-purged
+docs/research/fable-k11-deletion-sweep-2026-07-06.md:tenant-word
+docs/research/fable-k11-deletion-sweep-2026-07-06.md:tenant-code
+
+# The refactor audit (docs/research/refactor-audit-2026-07-02/, 35 critic-*/map-*
+# reports) is the load-bearing source the tracked world-class plan + k11 exec plan
+# cite as "audit §N" (18 refs). Same scope + rationale as the fable audit docs
+# above: they analyze the Managed-vs-Open architecture and the tenant→owner purge,
+# so they unavoidably NAME the retired multi-tenant vocabulary. Exempt ONLY from the
+# retired-vocab rules; PII-denylist / secret / hosted-domain rules stay ARMED.
+# (The two hosted-domain mentions in map-managed.md + spec-shape.md were REDACTED
+# to a neutral placeholder, NOT allowlisted — the hosted-domain rule is never
+# exempted.)
+# LISTED BY EXACT PATH (2026-07-29) — see the migrations note above; the old
+# `docs/research/refactor-audit-2026-07-02/*` glob exempted all 35 files in the
+# directory to cover the 22 that match.
+
+# legacy-neutron-feature-parity-scan compares the the legacy harness prototype against Neutron
+# and names the retired multi-tenant vocabulary in that comparison. Retired-vocab
+# rules only; PII / secret / hosted-domain stay ARMED. (The sibling legacy docs +
+# the m1-e2e findings + the 2026-06-30 plans are clean — no entry needed.)
+
+# legacy-neutron-parity-audit-2026-07-19 is the next-day companion of the two
+# 2026-06-25 parity audits above — same Managed-vs-Open comparison shape. Its one
+# residual `tenant` mention is a Managed-side issue-tracker note (#365 tenant
+# orphan deploys / #367 tenant root 404) it explicitly scopes OUT of the Open
+# engine table. Retired-vocab rules only; PII / secret / hosted-domain stay ARMED.
+
+# ── Open/Managed deployment-boundary description (prose only, no MT identifiers) ──
+# The files below are Open's OWN source + docs that legitimately DESCRIBE the
+# Open/Managed hosting boundary Open's code reacts to — they carry ZERO live
+# multi-tenant identifiers (the tenant-code/cross-tenant-code/provision-code rules
+# find NOTHING in them); every hit is prose in comments/docs explaining the #371
+# backstop, whereby Open's `resolveDeploymentMode()` / `NEUTRON_ROLE=managed`
+# logic gates the OSS install-token / Claude-auth surface OFF because a MANAGED
+# instance's credential is seeded by the control-plane handoff. That is Open's own
+# code behaving differently under hosted deployment, NOT multi-tenant functionality
+# Open owns. Exempt ONLY from the retired-vocab rules (tenant-word/tenant-purged);
+# the PII / hosted-domain / secret rules stay ARMED (the one hosted-domain
+# mention each in favicon-serving.test.ts + claim-redirect-once.open.test.ts was
+# REDACTED to a neutral placeholder, NOT allowlisted).
+
+# landing/server.ts implements the #371 backstop itself — its doc-comments explain
+# why the tenant-side OSS auth surface is UNREACHABLE under managed deployment.
+landing/server.ts:tenant-word
+landing/server.ts:tenant-purged
+
+# The two landing tests pin the #371 backstop against the REAL servers; their
+# describe() blocks + comments name the managed-instance surface they assert on.
+landing/__tests__/managed-install-token-gate.test.ts:tenant-word
+landing/__tests__/managed-install-token-gate.test.ts:tenant-purged
+landing/__tests__/favicon-serving.test.ts:tenant-word
+landing/__tests__/favicon-serving.test.ts:tenant-purged
+
+# gateway/wiring/build-landing-stack.ts wires the landing stack and comments why
+# `resolveDeploymentMode()` gates the OSS auth surface OFF on a managed instance.
+gateway/wiring/build-landing-stack.ts:tenant-word
+gateway/wiring/build-landing-stack.ts:tenant-purged
+
+# open/wiring/app-ws.ts + the claim-redirect regression test comment the same
+# hosting fact: claiming a personal URL renames url_slug but does NOT change the
+# host process/env — the SAME managed process keeps serving the claimed host.
+open/wiring/app-ws.ts:tenant-word
+open/wiring/app-ws.ts:tenant-purged
+tests/integration/claim-redirect-once.open.test.ts:tenant-word
+tests/integration/claim-redirect-once.open.test.ts:tenant-purged
+
+# docs/SYSTEM-OVERVIEW.md is the authoritative "how it works now" overview; its
+# #371-backstop section describes the Open/Managed auth boundary Open's own
+# deploymentMode logic implements — boundary description, not MT functionality
+# Open owns. Retired-vocab rules only; PII / hosted-domain / secret stay ARMED.
+docs/SYSTEM-OVERVIEW.md:tenant-word
+docs/SYSTEM-OVERVIEW.md:tenant-purged

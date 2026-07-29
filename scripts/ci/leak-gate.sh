@@ -1,0 +1,572 @@
+#!/usr/bin/env bash
+#
+# scripts/ci/leak-gate.sh — the PUBLIC Neutron Open purity gate.
+#
+# This is the ONLY leak gate that exists. There is no private carve-time gate and
+# no Managed nightly backstop: `scripts/sprint-c/leak-gate.sh` (which this header
+# claimed as the Tier-1 backstop until 2026-07-29) is NOT present in the Managed
+# repo, and Managed's `.github/workflows/ci.yml` says in its own header that it
+# runs no leak gate. That claim documented a control that had been silently
+# decommissioned, which is how the Tier-1 rule below sat dead for ~3,700 CI runs
+# without anyone noticing. If you are about to describe a backstop here, verify it
+# exists first.
+#
+# WHAT IT SCANS
+#   * the TREE at --tree <dir> (every file, not just tracked ones), and
+#   * the COMMIT MESSAGES on this branch + the PR title/body, which the tree scan
+#     cannot see. Those are mirrored permanently to GHArchive/BigQuery, where no
+#     deletion is possible — prevention is the only control that exists for them,
+#     so they are in scope. Pre-existing history is deliberately NOT scanned: it
+#     is immutable and already mirrored, so flagging it would only produce a
+#     permanently-red gate with no available remedy. The scan window is
+#     `$LEAK_GATE_BASE_SHA..HEAD` (the workflow supplies the PR base / push
+#     `before` sha), i.e. exactly the commits this change is adding.
+#
+# RULE TIERS
+#   * Tier-1 PII  — owner proper nouns / private paths. The pattern source is
+#                   SUPPLIED OUT-OF-BAND (`LEAK_GATE_PII_DENYLIST_B64`) and is
+#                   NEVER committed: a committed list would itself name the very
+#                   strings it bans. It is therefore the one rule that can be
+#                   absent, and absent means FAIL — see "FAIL-CLOSED" below.
+#   * Tier-1 PATH — a STRUCTURAL companion that needs no secret: a tracked path
+#                   may not carry a private-system token. Paths are public in the
+#                   git tree regardless of file contents, so this rule still runs
+#                   on a fork PR where the denylist is unavailable.
+#   * Tier-2 PROSE— no "tenant"/"multi-tenant" notion in comments/docs.
+#   * Tier-2 CODE — zero-tolerance over the live multi-tenant surface
+#                   (tenant_slug / tenant_home / TenantDb / NEUTRON_TENANT_* /
+#                   tenant_provisioned, cross-tenant, tenant-scoped provisioning).
+#   * neutron.computer — zero-tolerance hosted-domain rule (self-host-only Open).
+#   * Tier-3 STRUCTURAL — no Managed module dir, no tracked secret files, no
+#                   Managed workspace name in the lockfile/manifests, real
+#                   Apache-2.0 LICENSE, no NUL-hidden tokens.
+#
+# FAIL-CLOSED (2026-07-29). The Tier-1 rule used to print a WARNING, skip itself
+# and still exit 0 "SILENT ✅" when the denylist was unset — which it always was,
+# because no workflow ever passed the variable and the secret did not exist. A
+# gate that reports success when its most important rule did not run is worse than
+# no gate. Now: an absent or undecodable denylist is `exit 2` in any context that
+# HAS access to repository secrets. The only skip is a `pull_request` from a FORK,
+# where GitHub withholds secrets by design; the scheduled full scan
+# (.github/workflows/leak-gate-nightly.yml) re-runs the same tree WITH the secret,
+# so a fork PR merged on that skip is still caught. A run outside GitHub Actions
+# (a developer, or this gate's own self-test) is not a merge gate and also skips.
+#
+# USAGE
+#   scripts/ci/leak-gate.sh [dir]          # scan dir (default: .)
+#   scripts/ci/leak-gate.sh --tree <dir>   # same; --tree accepted for parity
+#
+# ENVIRONMENT (all supplied by the workflow — see .github/workflows/ci.yml)
+#   LEAK_GATE_PII_DENYLIST_B64  base64 of the newline-separated denylist. Two
+#                               entry kinds, documented at the compile step below.
+#   LEAK_GATE_PR_HEAD_REPO      head repo `owner/name` of a pull_request; used
+#                               ONLY to detect the fork case.
+#   LEAK_GATE_BASE_SHA          base commit for the message scan window.
+#   LEAK_GATE_PR_TITLE          PR title  (scanned; passed via env, never shell)
+#   LEAK_GATE_PR_BODY           PR body   (scanned; passed via env, never shell)
+#
+# EXIT: 0 = silent (clean), 1 = findings, 2 = usage/config/internal error (which
+# includes "a required rule could not run"). There is no skip flag and no env
+# bypass; the only exception mechanism is the committed, reviewable allowlist
+# (scripts/ci/leak-gate-allowlist.txt, `<path>:<rule-id>`), which is itself
+# constrained — see the allowlist audit below.
+
+set -uo pipefail
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ALLOWLIST_FILE="$HERE/leak-gate-allowlist.txt"
+PROSE_AWK="$HERE/extract-comment-prose.awk"
+
+SCAN_ROOT="."
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --tree)
+      [ $# -ge 2 ] || { echo "leak-gate: --tree requires a directory argument" >&2; exit 2; }
+      SCAN_ROOT="$2"; shift 2 ;;
+    -h|--help) sed -n '2,74p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -*) echo "leak-gate: unknown argument '$1' (the gate is non-skippable)" >&2; exit 2 ;;
+    *) SCAN_ROOT="$1"; shift ;;
+  esac
+done
+SCAN_ROOT="$(cd "$SCAN_ROOT" && pwd)" || { echo "leak-gate: cannot cd to scan root" >&2; exit 2; }
+[ -f "$PROSE_AWK" ] || { echo "leak-gate: missing $PROSE_AWK (prose extractor)" >&2; exit 2; }
+
+FILELIST="$(mktemp)"; PROSE_VIEW="$(mktemp)"; MSG_VIEW="$(mktemp)"
+trap 'rm -f "$FILELIST" "$PROSE_VIEW" "$MSG_VIEW"' EXIT
+
+# ── Secret-access context ─────────────────────────────────────────────────────
+# Derived from variables the GitHub runner sets, which a contributor cannot forge
+# from inside a pull request. Three outcomes:
+#   canonical — GitHub Actions on the base repo (push / schedule /
+#               workflow_dispatch / merge_group / SAME-repo PR). Secrets are
+#               available, so every rule MUST be able to run.
+#   fork      — a pull_request whose head repo != GITHUB_REPOSITORY (which is
+#               always the BASE repo). GitHub withholds secrets by design.
+#   local     — not GitHub Actions at all.
+# NOTE on the fork signal: a fork PR can only ever move ITSELF toward `canonical`
+# (i.e. toward exit 2), never toward a skip it would not otherwise get, because it
+# still cannot obtain the secret. A SAME-repo PR could in principle fake `fork` by
+# editing the workflow — but that is a reviewable diff from a collaborator, and
+# the nightly full scan re-checks the merged tree regardless.
+IN_CI=0
+if [ -n "${GITHUB_ACTIONS:-}" ] || [ -n "${GITHUB_RUN_ID:-}" ] || [ -n "${GITHUB_EVENT_NAME:-}" ]; then
+  IN_CI=1
+fi
+SECRET_CONTEXT=local
+if [ "$IN_CI" = "1" ]; then
+  SECRET_CONTEXT=canonical
+  case "${GITHUB_EVENT_NAME:-}" in
+    pull_request|pull_request_target)
+      if [ -n "${LEAK_GATE_PR_HEAD_REPO:-}" ] \
+         && [ "${LEAK_GATE_PR_HEAD_REPO}" != "${GITHUB_REPOSITORY:-}" ]; then
+        SECRET_CONTEXT=fork
+      fi
+      ;;
+  esac
+fi
+
+# Every file in the tree is in scope.
+(cd "$SCAN_ROOT" && find . -type f \
+   -not -path './.git/*' \
+   -not -path './node_modules/*' -not -path '*/node_modules/*' \
+ | sed 's|^\./||') | sort -u > "$FILELIST"
+
+TOTAL_FILES=$(wc -l < "$FILELIST" | tr -d ' ')
+if [ "$TOTAL_FILES" = "0" ]; then
+  echo "leak-gate: candidate file list is EMPTY — refusing to pass an empty scan" >&2
+  exit 2
+fi
+
+# ── Allowlist ─────────────────────────────────────────────────────────────────
+read_pathlist() { grep -vE '^[[:space:]]*(#|$)' "$1" | sed 's/[[:space:]]*$//'; }
+ALLOW_GLOBS=(); ALLOW_RULES=()
+if [ -f "$ALLOWLIST_FILE" ]; then
+  while IFS= read -r line; do
+    ALLOW_GLOBS+=("${line%:*}"); ALLOW_RULES+=("${line##*:}")
+  done < <(read_pathlist "$ALLOWLIST_FILE")
+fi
+is_allowlisted() {
+  local file="$1" rule="$2" i
+  for i in "${!ALLOW_GLOBS[@]}"; do
+    [ "${ALLOW_RULES[$i]}" = "$rule" ] || continue
+    # shellcheck disable=SC2254
+    case "$file" in ${ALLOW_GLOBS[$i]}) return 0 ;; esac
+  done
+  return 1
+}
+
+# ── Allowlist audit ───────────────────────────────────────────────────────────
+# An allowlist entry is a permanent hole in a zero-tolerance gate, so the entry
+# itself is gated. Before 2026-07-29 two directory globs (`migrations/*` and
+# `docs/research/…-07-02/*`) exempted 155 files in order to cover 26 real ones —
+# and, worse, pre-exempted every file added to those directories in future. PR
+# #245's own commit message ("leak-gate allowlisted") is what a wide glob buys
+# you. Three constraints, each independently fatal (exit 2, not a finding — a bad
+# allowlist is a config error, and reporting it as a finding would let it be
+# suppressed by another allowlist entry):
+#   allowlist-dirglob  — an entry may not be a directory glob (`foo/*`, `*`).
+#                        Name the files. A new file in that directory must be
+#                        reviewed, not inherited.
+#   allowlist-breadth  — no single entry may match more than 3 files.
+#   allowlist-stale    — every entry must match at least 1 file. A stale entry is
+#                        rot: it documents an exception that no longer exists and
+#                        silently becomes wrong when a path is reused. Enforced
+#                        ONLY when the allowlist OWNS the scanned tree (this
+#                        script lives inside it). Pointed at a foreign tree — the
+#                        self-test fixtures — every entry would trivially match
+#                        nothing, and an inert entry there means nothing.
+# Pseudo-paths used by the message scan (COMMIT-MESSAGE, PR-TITLE-BODY) can never
+# be allowlisted, because they are not files and so can never satisfy
+# allowlist-stale.
+ALLOWLIST_MAX_FILES=3
+# glob → ERE. Done in awk, not sed: a `[][...]` character class is accepted by
+# GNU sed and rejected by BSD sed ("unbalanced brackets"), and this gate runs on
+# both. `*` and `?` keep their glob meaning; everything else is literal.
+glob_to_regex() {
+  printf '%s\n' "$1" | awk '
+    { out=""
+      for (i=1;i<=length($0);i++) {
+        c=substr($0,i,1)
+        if (c=="*") out = out ".*"
+        else if (c=="?") out = out "."
+        else if (index("\\^$.[]|()+{}/", c)) out = out "\\" c
+        else out = out c
+      }
+      print out }'
+}
+ALLOWLIST_OWNS_TREE=0
+case "$HERE/" in "$SCAN_ROOT"/*) ALLOWLIST_OWNS_TREE=1 ;; esac
+ALLOWLIST_ERRORS=""
+for i in "${!ALLOW_GLOBS[@]}"; do
+  ag="${ALLOW_GLOBS[$i]}"; ar="${ALLOW_RULES[$i]}"
+  if [ -z "$ag" ] || [ -z "$ar" ]; then
+    ALLOWLIST_ERRORS="${ALLOWLIST_ERRORS}  [allowlist-malformed] '${ag}:${ar}' — need <path>:<rule-id>\n"
+    continue
+  fi
+  case "$ag" in
+    '*'|*'/*')
+      ALLOWLIST_ERRORS="${ALLOWLIST_ERRORS}  [allowlist-dirglob] '${ag}:${ar}' — directory globs are banned; list the exact paths\n"
+      continue ;;
+  esac
+  an=$(grep -cE "^$(glob_to_regex "$ag")$" "$FILELIST" 2>/dev/null || true)
+  an="${an:-0}"
+  if [ "$an" -eq 0 ]; then
+    [ "$ALLOWLIST_OWNS_TREE" = "1" ] || continue
+    ALLOWLIST_ERRORS="${ALLOWLIST_ERRORS}  [allowlist-stale] '${ag}:${ar}' — matches no file in the scanned tree\n"
+  elif [ "$an" -gt "$ALLOWLIST_MAX_FILES" ]; then
+    ALLOWLIST_ERRORS="${ALLOWLIST_ERRORS}  [allowlist-breadth] '${ag}:${ar}' — matches ${an} files (max ${ALLOWLIST_MAX_FILES})\n"
+  fi
+done
+if [ -n "$ALLOWLIST_ERRORS" ]; then
+  echo "leak-gate: the ALLOWLIST is invalid — an exception must be narrow and live:" >&2
+  printf '%b' "$ALLOWLIST_ERRORS" >&2
+  exit 2
+fi
+
+# ── Finding accumulation ──────────────────────────────────────────────────────
+TOTAL_FINDINGS=0; ALLOWLISTED_COUNT=0; SUMMARY=""; MAX_SHOWN_PER_RULE=5
+report_hits() {
+  local rule="$1" shown=0 count=0 hit file rest
+  while IFS= read -r hit; do
+    file="${hit%%:*}"; rest="${hit#*:}"
+    if is_allowlisted "$file" "$rule"; then
+      ALLOWLISTED_COUNT=$((ALLOWLISTED_COUNT + 1)); continue
+    fi
+    count=$((count + 1))
+    if [ "$shown" -lt "$MAX_SHOWN_PER_RULE" ]; then
+      printf '  [%s] %s:%s\n' "$rule" "$file" "$(printf '%s' "$rest" | cut -c1-160)"
+      shown=$((shown + 1))
+    fi
+  done
+  [ "$count" -gt "$shown" ] && printf '  [%s] … and %d more\n' "$rule" $((count - shown))
+  if [ "$count" -gt 0 ]; then
+    SUMMARY="${SUMMARY}    ${rule}: ${count}\n"; TOTAL_FINDINGS=$((TOTAL_FINDINGS + count))
+  fi
+}
+run_grep() {
+  local mode="$1" pattern="$2" flags='-EnHI'
+  [ "$mode" = "ci" ] && flags='-EinHI'
+  (cd "$SCAN_ROOT" && tr '\n' '\0' < "$FILELIST" | xargs -0 grep $flags -e "$pattern" 2>/dev/null) || true
+}
+grep_rule() { local rule="$1"; shift; report_hits "$rule" < <(run_grep "$@"); }
+
+# ── Tier-2 prose view ─────────────────────────────────────────────────────────
+(cd "$SCAN_ROOT" && tr '\n' '\0' < "$FILELIST" | xargs -0 awk -f "$PROSE_AWK" 2>/dev/null) > "$PROSE_VIEW" || true
+run_grep_prose() {
+  local mode="$1" pattern="$2" strip="${3:-}"
+  if [ "$mode" = "ci" ]; then
+    pattern="$(printf '%s' "$pattern" | tr 'A-Z' 'a-z')"
+    strip="$(printf '%s' "$strip" | tr 'A-Z' 'a-z')"
+  fi
+  awk -v pat="$pattern" -v strip="$strip" -v ci="$([ "$mode" = "ci" ] && echo 1 || echo 0)" '
+    { text=$0; sub(/^[^:]*:[0-9]+:/,"",text); probe=text
+      if (ci) probe=tolower(probe)
+      if (strip!="") gsub(strip,"",probe)
+      if (probe ~ pat) print $0 }' "$PROSE_VIEW" 2>/dev/null || true
+}
+grep_rule_prose() { local rule="$1"; shift; report_hits "$rule" < <(run_grep_prose "$@"); }
+
+echo "leak-gate — scan root: $SCAN_ROOT"
+echo "candidate files: $TOTAL_FILES"
+echo "secret context: $SECRET_CONTEXT (event=${GITHUB_EVENT_NAME:-none})"
+echo
+
+# ── Tier 2: vocabulary ────────────────────────────────────────────────────────
+echo "── Tier 2: multi-tenant vocabulary (prose + code) ─────────────────────"
+grep_rule_prose tenant-word ci '(^|[^a-z0-9_])tenant(s|'\''s)?([^a-z0-9_]|$)' '[Cc]ross-?[Tt]enant'
+grep_rule_prose tenant-docs ci 'P1-multi-tenant-base|tenant-boundary-spec'
+grep_rule tenant-code       ci 'tenant_slug|tenant_home|tenant_id|TenantDb|NEUTRON_TENANT_|tenant_?provisioned'
+grep_rule cross-tenant-code ci 'cross[-_]?tenant'
+grep_rule provision-code    ci 'provision[_-]?tenant|per[_-]?tenant[_-]?provision|multi[_-]?tenant[_-]?provision|fleet[_-]?provision'
+# camelCase multi-tenant ROUTING symbols the snake_case rules above miss.
+# These two identifiers were the managed tenant→url_slug routing leak the audit
+# found (2026-06-18); they were the FIRST to go and remain explicit tripwires.
+grep_rule tenant-routing-camel cs 'mintStartTokenForTenant|startTokenSlugBelongsToTenant'
+
+# ZERO-TOLERANCE broad tenant ban (build #3, 2026-06-19). The whole-engine
+# tenant→owner rename is now COMPLETE — the public tree carries ZERO `tenant`
+# anywhere in code (was ~870 refs: TenantsRegistry, tenantDataDir,
+# resolveTenantSlug, PerTenantConcurrencyGate, TenantHandleResolver, …, all
+# collapsed to the single-owner `owner*` vocabulary). So the old "narrow only,
+# a broad rule would flag the engine" caveat no longer holds: any `tenant`
+# substring re-entering the tree is now a regression. The ONLY legitimate
+# residues are the word "Lieutenant" (a Star Trek character name in two UX
+# tests) and the test query literal "xtenant-safety" — both carried in the
+# allowlist by exact file. (Word-bounded so "maintenance" etc. never match.)
+grep_rule tenant-purged ci '(^|[^a-z0-9_])tenant'
+
+# Retired multi-tenant "workspace" identifiers (build #3). The connect/M2
+# substrate still legitimately carries the persisted/wire `workspace` tokens
+# (the membership-kind enum value 'workspace', the workspace_members table, the
+# workspace_instance_slug / source_workspace_* columns, the workspace_unavailable
+# API error code) — those are migration- + JWT-contract-bound and CANNOT be a
+# blanket ban. So this is a NARROW tripwire over the exact non-contract
+# identifiers that WERE renamed away (code-gen worktree, system-prompt
+# context-files, the connect instance-registry helpers + env knob) so they
+# can't silently regress. Also bans `workspace:` proto ONLY outside package
+# manifests is NOT attempted — bun's `workspace:*` is package-manager tooling.
+grep_rule workspace-retired cs 'WorkspaceRegistryRow|lookupWorkspace|workspaceCache|fromWorkspaces|syndicationRelayWorkspaceTemplate|NEUTRON_OPEN_WORKSPACE_BASE_URL|OPEN_WORKSPACE_BASE_URL_ENV|CodegenWorkspace|ResolveWorkspaceInput|ResolvedWorkspace|resolveWorkspace|PROJECT_WORKSPACE_DIRNAME|WORKSPACE_FILES|readOwnerWorkspaceFiles|workspace_path|workspace_file|workspace_not_resolved|workspace-resolver'
+
+echo
+# ── Tier 1 PATH (structural, zero secret): private tokens in tracked PATHS ────
+# The denylist below needs a secret. This rule does not, because a PATH is public
+# in the git tree no matter what the file contains — so it is the half of Tier-1
+# that still runs on a fork PR, and it catches a whole directory of leakage with
+# no pattern source at all. SUBSTRING match, case-insensitive, over the path: a
+# private-system name concatenated into a longer segment must still trip.
+echo "── Tier 1 (structural): private tokens in tracked paths ───────────────"
+# NOTE: the literal is SPLIT deliberately. bash concatenates adjacent quoted strings, so
+# the runtime value is the real private token while the contiguous string never appears
+# in this file — which both keeps the token out of the public tree AND stops the gate
+# flagging itself. Do NOT "tidy" this into one quoted literal, and do NOT let a
+# content scrub rewrite it: on 2026-07-29 a blanket scrub rewrote this value and the
+# gate went green because the rule was searching for the wrong string.
+PRIVATE_PATH_RE='va''jra'
+report_hits private-path < <(
+  grep -iE "$PRIVATE_PATH_RE" "$FILELIST" \
+    | sed 's|$|:1:tracked path carries a private-system token (rename the PATH — scrubbing file contents is not enough)|'
+)
+
+echo
+# ── Tier 1: owner PII denylist (supplied out-of-band — NEVER committed) ───────
+# The public repo carries NO owner PII whatsoever — not in plaintext and not
+# encoded (base64 is trivially reversible, so an embedded blob would itself be
+# the leak). The denylist arrives via `LEAK_GATE_PII_DENYLIST_B64`: newline-
+# separated entries, base64-encoded, set from a repository secret by the
+# workflow. Blank lines and `#` comments are ignored. TWO ENTRY KINDS:
+#
+#   <token>          DEFAULT — case-INSENSITIVE SUBSTRING, separator-flexible.
+#                    Use for anything path-like or identifier-like. The compiler
+#                    below splits the entry on `/`, `-`, `_` and space and
+#                    rejoins with `[/_ -]*`, so ONE entry `/home/alice` matches
+#                    `/home/alice`, `-home-alice-` (the Claude project-dir form),
+#                    `home_alice` and `HomeAlice`. This is the kind that was
+#                    broken: the old rule was case-SENSITIVE and word-bounded, so
+#                    a capitalised proper noun in the list could never match its
+#                    lowercase path form, and `\b<token>\b` never matches a token
+#                    concatenated into a camelCase identifier (both `openAlice`
+#                    and `aliceImport` escape `\balice\b`).
+#
+#   word:<token>     Case-SENSITIVE and word-bounded. Use ONLY for a proper noun
+#                    that is also an ordinary English word or a common substring,
+#                    where the default kind would false-positive on prose. This
+#                    is the narrow exception, not the default — if unsure, don't.
+#
+# Word-bounding is expressed as `(^|[^A-Za-z0-9_])…([^A-Za-z0-9_]|$)` rather than
+# `\b`, because the message scan runs through awk and BSD awk has no `\b`.
+# A legitimate future collision is handled via the reviewable allowlist (rule ids
+# pii-denylist / pii-denylist-word), same as every other rule.
+compile_denylist() {
+  # $1 = "sub" | "word"; reads the raw denylist on stdin, writes an alternation.
+  awk -v kind="$1" '
+    function esc(s,   out,i,c) {
+      out=""
+      for (i=1;i<=length(s);i++) {
+        c=substr(s,i,1)
+        if (index("\\^$.[]|()*+?{}/", c)) out = out "\\" c; else out = out c
+      }
+      return out
+    }
+    { line=$0
+      sub(/^[ \t]+/,"",line); sub(/[ \t\r]+$/,"",line)
+      if (line=="" || substr(line,1,1)=="#") next
+      isword = (substr(line,1,5)=="word:")
+      if (isword) line=substr(line,6)
+      if (line=="") next
+      if ((isword?1:0) != (kind=="word"?1:0)) next
+      if (kind=="word") { printf "%s%s", (n++?"|":""), esc(line); next }
+      gsub("^[/_ -]+","",line); gsub("[/_ -]+$","",line)
+      m=split(line, parts, "[/_ -]+")
+      pat=""
+      for (i=1;i<=m;i++) { if (parts[i]=="") continue
+        pat = pat (pat==""?"":"[/_ -]*") esc(parts[i]) }
+      if (pat=="") next
+      printf "%s%s", (n++?"|":""), pat }
+    END { printf "\n" }'
+}
+echo "── Tier 1: owner PII denylist (env-supplied) ──────────────────────────"
+PII_RAW="$(printf '%s' "${LEAK_GATE_PII_DENYLIST_B64:-}" | base64 -d 2>/dev/null || true)"
+PII_SUB_ALT="$(printf '%s\n' "$PII_RAW" | compile_denylist sub)"
+PII_WORD_ALT="$(printf '%s\n' "$PII_RAW" | compile_denylist word)"
+if [ -n "$PII_SUB_ALT" ] || [ -n "$PII_WORD_ALT" ]; then
+  echo "  denylist loaded (substring entries: $([ -n "$PII_SUB_ALT" ] && echo yes || echo no); word entries: $([ -n "$PII_WORD_ALT" ] && echo yes || echo no))"
+  [ -n "$PII_SUB_ALT" ]  && grep_rule pii-denylist      ci "(${PII_SUB_ALT})"
+  [ -n "$PII_WORD_ALT" ] && grep_rule pii-denylist-word cs "(^|[^A-Za-z0-9_])(${PII_WORD_ALT})([^A-Za-z0-9_]|\$)"
+elif [ "$SECRET_CONTEXT" = "canonical" ]; then
+  cat >&2 <<'EOF'
+leak-gate: FATAL — LEAK_GATE_PII_DENYLIST_B64 is unset, empty or undecodable, but
+this run HAS access to repository secrets, so the Tier-1 PII rule MUST run. A run
+that skips it and still reports success is exactly the failure this gate exists
+to prevent (it did so on every CI run up to 2026-07-29).
+
+Fix BOTH halves — either alone is theatre:
+  * set the `LEAK_GATE_PII_DENYLIST_B64` repository secret, and
+  * pass it into the job's `env:` (see .github/workflows/ci.yml — the secret
+    existing is not enough; nothing delivers it unless the workflow says so).
+EOF
+  exit 2
+else
+  echo "leak-gate: Tier-1 PII denylist SKIPPED — context '$SECRET_CONTEXT' has no access to" >&2
+  echo "           repository secrets. This is the ONLY sanctioned skip. The scheduled full" >&2
+  echo "           scan (leak-gate-nightly.yml) re-runs this tree WITH the denylist." >&2
+fi
+
+echo
+# ── Tier 1 (shape-only, zero PII): hosted-domain rule ─────────────────────────
+echo "── hosted-domain (self-host-only Open) ────────────────────────────────"
+grep_rule neutron-computer ci 'neutron\.computer'
+
+echo
+# ── Commit messages + PR title/body ───────────────────────────────────────────
+# The tree scan can never see these, and they are the one surface with NO
+# remediation: GHArchive/BigQuery mirror every public commit message and PR body
+# within the hour, permanently. Prevention is the entire control.
+echo "── commit messages + PR title/body ────────────────────────────────────"
+build_message_view() {
+  : > "$MSG_VIEW"
+  git -C "$SCAN_ROOT" rev-parse --git-dir >/dev/null 2>&1 || return 1
+  local base="" cand
+  if [ -n "${LEAK_GATE_BASE_SHA:-}" ]; then
+    case "${LEAK_GATE_BASE_SHA}" in
+      0000000*) ;;                                   # push that created the ref
+      *) if git -C "$SCAN_ROOT" cat-file -e "${LEAK_GATE_BASE_SHA}^{commit}" 2>/dev/null; then
+           base="${LEAK_GATE_BASE_SHA}"
+         fi ;;
+    esac
+  fi
+  if [ -z "$base" ]; then
+    for cand in "origin/${GITHUB_BASE_REF:-}" origin/main main; do
+      case "$cand" in 'origin/') continue ;; esac
+      if git -C "$SCAN_ROOT" rev-parse --verify -q "$cand" >/dev/null 2>&1; then base="$cand"; break; fi
+    done
+  fi
+  [ -n "$base" ] || return 1
+  git -C "$SCAN_ROOT" log --no-merges --format='%s%n%b' "${base}..HEAD" 2>/dev/null \
+    | awk '{ printf "COMMIT-MESSAGE:%d:%s\n", NR, $0 }' >> "$MSG_VIEW"
+  # PR title/body arrive via env and are NEVER interpolated into a shell command
+  # (a PR body is attacker-controlled text; `${{ github.event… }}` inside `run:`
+  # is a script-injection sink, inside `env:` it is not).
+  { [ -n "${LEAK_GATE_PR_TITLE:-}" ] && printf '%s\n' "$LEAK_GATE_PR_TITLE"
+    [ -n "${LEAK_GATE_PR_BODY:-}"  ] && printf '%s\n' "$LEAK_GATE_PR_BODY"
+    true
+  } | awk '{ printf "PR-TITLE-BODY:%d:%s\n", NR, $0 }' >> "$MSG_VIEW"
+  return 0
+}
+run_grep_messages() {
+  local mode="$1" pattern="$2"
+  [ "$mode" = "ci" ] && pattern="$(printf '%s' "$pattern" | tr 'A-Z' 'a-z')"
+  awk -v pat="$pattern" -v ci="$([ "$mode" = "ci" ] && echo 1 || echo 0)" '
+    { text=$0; sub(/^[^:]*:[0-9]+:/,"",text)
+      probe = text
+      if (ci) probe = tolower(text)
+      if (probe ~ pat) print $0 }' "$MSG_VIEW" 2>/dev/null || true
+}
+grep_rule_messages() { local rule="$1"; shift; report_hits "$rule" < <(run_grep_messages "$@"); }
+
+if build_message_view; then
+  echo "  message lines in scan window: $(wc -l < "$MSG_VIEW" | tr -d ' ')"
+  grep_rule_messages private-path-msg ci "$PRIVATE_PATH_RE"
+  grep_rule_messages neutron-computer-msg ci 'neutron\.computer'
+  [ -n "$PII_SUB_ALT" ]  && grep_rule_messages pii-denylist-msg      ci "(${PII_SUB_ALT})"
+  [ -n "$PII_WORD_ALT" ] && grep_rule_messages pii-denylist-word-msg cs "(^|[^A-Za-z0-9_])(${PII_WORD_ALT})([^A-Za-z0-9_]|\$)"
+elif [ "$IN_CI" = "1" ]; then
+  cat >&2 <<'EOF'
+leak-gate: FATAL — could not determine a commit range to scan. Commit messages and
+PR bodies are mirrored to GHArchive permanently and cannot be redacted after the
+fact, so skipping them in CI is not an option.
+
+Fix: the purity job needs `fetch-depth: 0` and `LEAK_GATE_BASE_SHA`
+(github.event.pull_request.base.sha || github.event.before). See ci.yml.
+EOF
+  exit 2
+else
+  echo "  (not a git work tree and not in CI — message scan not applicable)"
+fi
+
+echo
+# ── Tier 3: structural ────────────────────────────────────────────────────────
+echo "── Tier 3: structural ─────────────────────────────────────────────────"
+FORBIDDEN_PREFIXES='tenancy/ tenant-provisioning/ signup/ identity/ proxy/'
+# RT1 tripwire — root `SPEC.md` is DELIBERATELY absent from this list as of K10.
+# K10 intentionally introduces a root SPEC.md (the public master spec), which
+# flips the repo into Ralph-governed mode (`detectRalphMode` in
+# trident/git-mode.ts keys off a root SPEC.md). That flip is now INTENDED, so a
+# root SPEC.md must NOT trip forbidden-path. The remaining root files stay
+# banned as carve tripwires against Managed's private root docs re-entering the
+# public tree (STATUS.md/ISSUES.md/CLAUDE.md/AGENTS.md).
+FORBIDDEN_EXACT='STATUS.md ISSUES.md CLAUDE.md AGENTS.md'
+forbidden_path_hits() {
+  local f p
+  while IFS= read -r f; do
+    for p in $FORBIDDEN_PREFIXES; do
+      case "$f" in "$p"*) printf '%s:1:forbidden Managed path (matches "%s")\n' "$f" "$p" ;; esac
+    done
+    for p in $FORBIDDEN_EXACT; do
+      [ "$f" = "$p" ] && printf '%s:1:forbidden root file\n' "$f"
+    done
+  done < "$FILELIST"
+}
+report_hits forbidden-path < <(forbidden_path_hits)
+
+report_hits secret-file < <(
+  grep -E '(^|/)\.env([^/]*)?$|\.pem$|\.key$|\.p12$|\.pfx$' "$FILELIST" \
+    | sed 's/$/:1:secret-material file extension/'
+)
+
+# Managed workspace names must never survive in the lockfile/manifests.
+for cfg in bun.lock tsconfig.json package.json; do
+  [ -f "$SCAN_ROOT/$cfg" ] || continue
+  report_hits config-purity < <(
+    cd "$SCAN_ROOT" && grep -EnH '"(tenant-provisioning|identity|signup|tenancy|proxy)"|tenant-provisioning/|paid-staging|dtc-analytics|@neutron-paid|@neutronai/(tenant-provisioning|identity|signup|tenancy|proxy)' "$cfg" 2>/dev/null || true
+  )
+done
+
+# LICENSE must be the real Apache-2.0 text.
+if [ ! -f "$SCAN_ROOT/LICENSE" ] \
+   || ! grep -q 'Apache License' "$SCAN_ROOT/LICENSE" \
+   || ! grep -q 'Version 2.0, January 2004' "$SCAN_ROOT/LICENSE"; then
+  report_hits license-stub < <(printf 'LICENSE:1:missing or not the full Apache-2.0 text\n')
+fi
+
+# ── Tier 3b: binary-hiding tripwire (unit G7) ──────────────────────────────────
+# EVERY vocab/PII/structural rule above runs through `grep -I`, which SILENTLY
+# skips any file it classifies as binary — i.e. any file that contains a raw NUL
+# (0x00) byte. So a banned token embedded next to a NUL is INVISIBLE to the whole
+# gate, forever. That is not hypothetical: the history-import hash-seed `tenant:`
+# token (tasks/history-import-seeder.ts) and a retired multi-tenant fixture path
+# (…/dead-repl-detector.test.ts) both evaded a "zero-tolerance" gate this exact way
+# until 2026-07-03. This tripwire closes the whole class: any tracked file that
+# contains a NUL byte is a hard finding UNLESS it is a known binary-asset class
+# (images/fonts/archives/compiled — exempt by extension) or is exempted by exact
+# path in the committed allowlist (rule id: binary-hidden). It is FAIL-CLOSED —
+# an UNKNOWN extension carrying a NUL trips — so a new binary asset type must be
+# added to the extension list (or allowlisted) deliberately, and a source file
+# can never re-acquire a hidden NUL. NUL detection is byte-exact and locale-safe
+# (LC_ALL=C tr | cmp), so it never itself trips grep's binary heuristic.
+KNOWN_BINARY_EXT_RE='\.(png|jpe?g|gif|webp|avif|ico|icns|bmp|tiff?|svgz|woff2?|ttf|otf|eot|pdf|zip|gz|tgz|bz2|xz|zst|7z|rar|tar|mp3|mp4|m4a|mov|avi|webm|wav|ogg|oga|flac|aac|wasm|so|dylib|dll|node|jar|class|pyc|pyo|bin|dat|db|sqlite3?|wal|p12|pfx|jks|keystore)$'
+binary_hidden_hits() {
+  local f
+  while IFS= read -r f; do
+    # Known binary-asset extensions legitimately carry NULs — skip them.
+    printf '%s' "$f" | grep -qiE "$KNOWN_BINARY_EXT_RE" && continue
+    # A file is "binary to grep" iff it contains a NUL byte. Strip NULs and
+    # compare to the original: identical ⇒ no NUL ⇒ visible to the gate.
+    if ! LC_ALL=C tr -d '\000' < "$SCAN_ROOT/$f" 2>/dev/null | cmp -s - "$SCAN_ROOT/$f"; then
+      printf '%s:1:tracked file is binary to grep (contains a NUL byte) — hides tokens from every rule above\n' "$f"
+    fi
+  done < "$FILELIST"
+}
+report_hits binary-hidden < <(binary_hidden_hits)
+
+# ── Verdict ───────────────────────────────────────────────────────────────────
+echo
+echo "── Summary ────────────────────────────────────────────────────────────"
+[ -n "$SUMMARY" ] && printf '%b' "$SUMMARY"
+echo "    allowlisted (suppressed): $ALLOWLISTED_COUNT"
+echo "    TOTAL FINDINGS: $TOTAL_FINDINGS"
+if [ "$TOTAL_FINDINGS" -gt 0 ]; then
+  echo "LEAK GATE: FAIL — the public tree must be fully silent."
+  exit 1
+fi
+echo "LEAK GATE: SILENT ✅"
+exit 0

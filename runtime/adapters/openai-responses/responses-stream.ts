@@ -1,0 +1,398 @@
+/**
+ * @neutronai/runtime — OpenAI Responses API SSE consumer.
+ *
+ * POSTs to `/v1/responses` with `stream:true`, parses Server-Sent Events,
+ * yields the substrate `Event` tagged union. Mirrors the CC adapter's
+ * transport-stream architecturally — same SSE frame parser, same coalescing
+ * rule (only `token` events MAY be coalesced), same `iterator.return()` →
+ * `AbortController.abort()` cancellation path.
+ *
+ * Event mapping (Responses API → substrate Event):
+ *
+ *   response.output_text.delta              → token
+ *   response.reasoning_summary.delta        → thinking
+ *   response.function_call.delta            → accumulate args (no emission)
+ *   response.function_call.completed        → tool_call
+ *   response.completed                      → completion (with usage + response.id)
+ *   response.error                          → error
+ *
+ * `response.id` is captured and surfaced as `completion.session.id` so
+ * callers can use it as `previous_response_id` on the next turn — Responses
+ * API's primary session-continuation primitive.
+ *
+ * UPSTREAM `tool_resolution` is `external` (the Responses API surfaces
+ * function calls and waits for `function_call_output` items in the next
+ * turn). The adapter index uses `mcp-shim.ts` to translate that into the
+ * caller-facing `tool_resolution: 'internal'` per § 4.3 of the P1 plan.
+ */
+
+import type { Event, TokenUsage, SubstrateErrorClass } from '../../events.ts'
+
+export interface ResponsesStreamOptions {
+  endpoint: string
+  authHeaders: Record<string, string>
+  body: Record<string, unknown>
+  signal: AbortSignal
+  substrate_instance_id: string
+  fetchImpl?: typeof fetch
+}
+
+interface FunctionCallAccum {
+  call_id: string
+  name: string
+  args_buf: string
+}
+
+const ZERO_USAGE: TokenUsage = { input_tokens: 0, output_tokens: 0 }
+
+export async function* startResponsesStream(
+  opts: ResponsesStreamOptions,
+): AsyncGenerator<Event, void, void> {
+  const fetchImpl = opts.fetchImpl ?? globalThis.fetch
+  const headers: Record<string, string> = {
+    'content-type': 'application/json',
+    ...opts.authHeaders,
+  }
+
+  let response: Response
+  try {
+    response = await fetchImpl(opts.endpoint, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(opts.body),
+      signal: opts.signal,
+    })
+  } catch (err) {
+    if (opts.signal.aborted) {
+      yield { kind: 'error', message: 'cancelled', retryable: false, code: 'aborted' }
+      return
+    }
+    yield { kind: 'error', message: `fetch failed: ${(err as Error).message}`, retryable: true }
+    return
+  }
+
+  if (!response.ok || !response.body) {
+    const status = response.status
+    const text = await response.text().catch(() => '')
+    // PREVIOUS-RESPONSE EXPIRED/INVALID (audit round 15) — the request tried to
+    // resume via `previous_response_id` but the upstream rejected THAT id (expired /
+    // not found), NOT the model. Signal it distinctly (marker `previous_response_
+    // not_found:`) so the adapter can REPLAY the same turn WITHOUT the dead id and
+    // WITH the full `spec.messages` (fresh history) instead of failing. Checked
+    // BEFORE model-not-found so an expiry 404 isn't misread as a bad model id.
+    const sentPreviousId = typeof opts.body['previous_response_id'] === 'string'
+    if (
+      sentPreviousId &&
+      (status === 404 || status === 400) &&
+      /previous[_\s-]?response|previous_response_id|response .*(not found|expired)/i.test(text)
+    ) {
+      yield {
+        kind: 'error',
+        message: `previous_response_not_found: ${truncate(text, 200)}`,
+        retryable: false,
+      }
+      return
+    }
+    // MODEL-NOT-FOUND (audit round 10) — a 404 (or an explicit model_not_found body)
+    // means the requested model id isn't in OpenAI's catalog. Non-retryable (a
+    // rotation won't help if the ids are wrong), but it must be a LOUD, ACTIONABLE
+    // terminal error that NAMES the rejected model and the override env — otherwise
+    // an operator just gets a silent dead turn. Keep the `HTTP <status>:` prefix so
+    // the composer's classifier still reads it (404 → no credential cooldown).
+    if (status === 404 || /model[_\s-]?not[_\s-]?found/i.test(text)) {
+      const model = typeof opts.body['model'] === 'string' ? opts.body['model'] : '(unknown)'
+      yield {
+        kind: 'error',
+        message:
+          `HTTP ${status}: OpenAI does not recognize model '${model}'. If the GA model id ` +
+          `differs, set NEUTRON_OPENAI_MODEL (or NEUTRON_OPENAI_MODEL_PREFERENCE) to the correct ` +
+          `id and retry — this is a configuration error, not a transient failure. Upstream: ${truncate(text, 200)}`,
+        retryable: false,
+        code: 'http_status',
+      }
+      return
+    }
+    const retryable = status === 429 || status === 408 || (status >= 500 && status < 600)
+    const retry_after = parseRetryAfterMs(response.headers.get('retry-after'))
+    // O3 — stamp the typed class: a 429 is the `rate_limited` class, every other
+    // non-ok status is the generic `http_status` class. The numeric status stays
+    // in the `HTTP <status>:` message prefix (the composer's cooldown map needs
+    // the exact number), so the code is an ADDITIVE discriminant, not a replacement.
+    const code: SubstrateErrorClass = status === 429 ? 'rate_limited' : 'http_status'
+    const ev: Event =
+      retry_after !== undefined
+        ? {
+            kind: 'error',
+            message: `HTTP ${status}: ${truncate(text, 400)}`,
+            retryable,
+            retry_after_ms: retry_after,
+            code,
+          }
+        : { kind: 'error', message: `HTTP ${status}: ${truncate(text, 400)}`, retryable, code }
+    yield ev
+    return
+  }
+
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder()
+  let buf = ''
+  let currentEventType = ''
+  const fnAccums = new Map<string, FunctionCallAccum>()
+  let usage: TokenUsage = { ...ZERO_USAGE }
+  let responseId: string | undefined
+  let completionEmitted = false
+  let errorEmitted = false
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      buf += decoder.decode(value, { stream: true })
+      let frameEnd = buf.indexOf('\n\n')
+      while (frameEnd !== -1) {
+        const frame = buf.slice(0, frameEnd)
+        buf = buf.slice(frameEnd + 2)
+        for (const line of frame.split('\n')) {
+          if (line.startsWith('event:')) {
+            currentEventType = line.slice('event:'.length).trim()
+          } else if (line.startsWith('data:')) {
+            const payload = line.slice('data:'.length).trim()
+            if (payload.length === 0) continue
+            let data: unknown
+            try {
+              data = JSON.parse(payload)
+            } catch {
+              continue
+            }
+            for (const ev of mapResponsesEvent(currentEventType, data, fnAccums, (u) => {
+              usage = { ...usage, ...u }
+            }, (id) => {
+              responseId = id
+            })) {
+              if (ev.kind === 'completion') {
+                completionEmitted = true
+                const completion: Event = {
+                  kind: 'completion',
+                  usage,
+                  substrate_instance_id: opts.substrate_instance_id,
+                }
+                if (responseId) {
+                  completion.session = { id: responseId, last_active_at: Date.now() }
+                }
+                yield completion
+              } else {
+                if (ev.kind === 'error') errorEmitted = true
+                yield ev
+              }
+            }
+          }
+        }
+        frameEnd = buf.indexOf('\n\n')
+      }
+    }
+    // Only synthesise a terminal completion when the stream closed cleanly
+    // (no in-stream error). After an error the error IS the terminal event;
+    // emitting a completion would let consumers commit usage / session state
+    // for a failed turn (Codex r1 P1 finding).
+    if (!completionEmitted && !errorEmitted) {
+      const completion: Event = {
+        kind: 'completion',
+        usage,
+        substrate_instance_id: opts.substrate_instance_id,
+      }
+      if (responseId) completion.session = { id: responseId, last_active_at: Date.now() }
+      yield completion
+    }
+  } finally {
+    try {
+      reader.releaseLock()
+    } catch {
+      // best-effort
+    }
+  }
+}
+
+interface ResponsesEnvelope {
+  type?: string
+  delta?: string | { text?: string }
+  text?: string
+  call_id?: string
+  name?: string
+  arguments?: string
+  response?: {
+    id?: string
+    usage?: Partial<TokenUsage>
+  }
+  usage?: Partial<TokenUsage>
+  error?: { message?: string; type?: string }
+}
+
+function mapResponsesEvent(
+  eventType: string,
+  data: unknown,
+  fnAccums: Map<string, FunctionCallAccum>,
+  updateUsage: (u: Partial<TokenUsage>) => void,
+  setResponseId: (id: string) => void,
+): Event[] {
+  if (typeof data !== 'object' || data === null) return []
+  const evt = data as ResponsesEnvelope
+  switch (eventType) {
+    case 'response.created': {
+      if (evt.response?.id) setResponseId(evt.response.id)
+      return []
+    }
+    case 'response.output_text.delta': {
+      const text = typeof evt.delta === 'string' ? evt.delta : evt.delta?.text
+      if (typeof text === 'string') return [{ kind: 'token', text }]
+      return []
+    }
+    case 'response.reasoning_summary.delta':
+    case 'response.reasoning.delta': {
+      const text = typeof evt.delta === 'string' ? evt.delta : evt.delta?.text
+      if (typeof text === 'string') return [{ kind: 'thinking', text }]
+      return []
+    }
+    case 'response.function_call.delta':
+    case 'response.function_call_arguments.delta': {
+      if (typeof evt.call_id !== 'string') return []
+      const accum = fnAccums.get(evt.call_id) ?? {
+        call_id: evt.call_id,
+        name: evt.name ?? '',
+        args_buf: '',
+      }
+      if (typeof evt.arguments === 'string') accum.args_buf += evt.arguments
+      else if (typeof evt.delta === 'string') accum.args_buf += evt.delta
+      if (evt.name) accum.name = evt.name
+      fnAccums.set(evt.call_id, accum)
+      return []
+    }
+    case 'response.function_call.completed':
+    case 'response.function_call_arguments.done': {
+      if (typeof evt.call_id !== 'string') return []
+      const accum = fnAccums.get(evt.call_id)
+      if (!accum) return []
+      fnAccums.delete(evt.call_id)
+      let parsed: unknown = {}
+      if (accum.args_buf.trim().length > 0) {
+        try {
+          parsed = JSON.parse(accum.args_buf)
+        } catch {
+          parsed = { _parse_error: true, _raw: accum.args_buf }
+        }
+      }
+      return [
+        {
+          kind: 'tool_call',
+          tool_name: accum.name,
+          args: parsed,
+          call_id: accum.call_id,
+        },
+      ]
+    }
+    case 'response.completed': {
+      if (evt.response?.id) setResponseId(evt.response.id)
+      if (evt.response?.usage) updateUsage(evt.response.usage)
+      if (evt.usage) updateUsage(evt.usage)
+      return [
+        {
+          kind: 'completion',
+          usage: ZERO_USAGE,
+          substrate_instance_id: '__pending__',
+        },
+      ]
+    }
+    case 'response.error':
+    case 'error': {
+      const rawMessage = evt.error?.message ?? 'unknown openai error'
+      const type = evt.error?.type
+      // UNIFIED CLASSIFICATION (audit BLOCKER): a STREAMED error (HTTP 200 SSE
+      // `response.error`) must yield the SAME durable classification the non-OK
+      // HTTP path produces, so the composer's credential-pool cooldown fires no
+      // matter which surface the error originated on. Map the durable `error.type`
+      // to an HTTP status and PREFIX the message with `HTTP <status>:` (the exact
+      // shape `parseHttpStatusFromMessage` reads), so the classification survives
+      // model rotation/exhaustion instead of collapsing into an unclassifiable
+      // human string.
+      const status = openAiErrorTypeToStatus(type)
+      const retryable =
+        type === 'rate_limit_exceeded' || type === 'server_error' || type === 'timeout'
+      const message = status !== undefined ? `HTTP ${status}: ${rawMessage}` : rawMessage
+      const retry_after = parseRetryAfterFromMessage(rawMessage)
+      // O3 — stamp the SAME typed class the non-OK HTTP path stamps, so a STREAMED
+      // error carries identical durable classification (`rate_limited` for a 429,
+      // else `http_status`). Only when the durable type maps to no HTTP status do
+      // we leave `code` unset (an unclassifiable human string → `unknown`).
+      const code: SubstrateErrorClass | undefined =
+        status === undefined ? undefined : status === 429 ? 'rate_limited' : 'http_status'
+      const ev: Event =
+        retry_after !== undefined
+          ? { kind: 'error', message, retryable, retry_after_ms: retry_after, ...(code !== undefined ? { code } : {}) }
+          : { kind: 'error', message, retryable, ...(code !== undefined ? { code } : {}) }
+      return [ev]
+    }
+    default:
+      return []
+  }
+}
+
+/**
+ * Map a durable OpenAI `error.type` to the HTTP status the credential-pool
+ * cooldown classifier keys on — so a STREAMED `response.error` cools the
+ * credential identically to the non-OK HTTP response path:
+ *   - `rate_limit_exceeded`                         → 429 (rate_limit_429)
+ *   - `insufficient_quota`                          → 402 (billing_402)
+ *   - invalid-auth families                         → 401 (auth_401)
+ *   - server_error / timeout / anything else        → undefined (not a credential
+ *     fault → no cooldown; still surfaced as a retryable error where applicable)
+ */
+export function openAiErrorTypeToStatus(type: string | undefined): number | undefined {
+  if (type === undefined) return undefined
+  if (type === 'rate_limit_exceeded') return 429
+  if (type === 'insufficient_quota') return 402
+  // Auth families (explicit ids + any type mentioning auth / api key). NB
+  // `invalid_request_error` is deliberately NOT auth — it is a request-shape
+  // error and must not cool the credential.
+  if (
+    type === 'invalid_api_key' ||
+    type === 'authentication_error' ||
+    type === 'invalid_authentication'
+  ) {
+    return 401
+  }
+  if (/auth/i.test(type) || /api[_-]?key/i.test(type)) return 401
+  return undefined
+}
+
+/**
+ * Best-effort retry-after extraction from an OpenAI error MESSAGE (streamed
+ * errors carry no `retry-after` HEADER — the header path is the non-OK HTTP
+ * response). OpenAI 429 bodies commonly read "Please try again in 1.2s" /
+ * "try again in 500ms". Returns milliseconds, or undefined when absent.
+ */
+export function parseRetryAfterFromMessage(message: string): number | undefined {
+  const ms = message.match(/try again in\s+([\d.]+)\s*ms/i)
+  if (ms && ms[1]) {
+    const n = Number(ms[1])
+    if (Number.isFinite(n)) return Math.max(0, Math.round(n))
+  }
+  const s = message.match(/try again in\s+([\d.]+)\s*s/i)
+  if (s && s[1]) {
+    const n = Number(s[1])
+    if (Number.isFinite(n)) return Math.max(0, Math.round(n * 1000))
+  }
+  return undefined
+}
+
+function parseRetryAfterMs(value: string | null): number | undefined {
+  if (!value) return undefined
+  const seconds = Number(value)
+  if (Number.isFinite(seconds)) return seconds * 1000
+  const dt = Date.parse(value)
+  if (Number.isFinite(dt)) return Math.max(0, dt - Date.now())
+  return undefined
+}
+
+function truncate(s: string, max: number): string {
+  if (s.length <= max) return s
+  return `${s.slice(0, max)}…`
+}

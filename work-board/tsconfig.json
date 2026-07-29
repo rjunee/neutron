@@ -1,0 +1,7 @@
+{
+  // Server-side work-board store + agent tools. Its own CI step is
+  // `tsc -p work-board/tsconfig.json` (G5 — was previously typechecked by no
+  // CI step at all).
+  "extends": "../tsconfig.base.json",
+  "include": ["./**/*.ts"]
+}

@@ -1,0 +1,8 @@
+{
+  // Composition-layer server entrypoint + boot wiring. Its own CI step is
+  // `tsc -p open/tsconfig.json` (L4 — was previously typechecked only via
+  // the root deploy-gate config's include list, with no standalone leaf
+  // step of its own).
+  "extends": "../tsconfig.base.json",
+  "include": ["./**/*.ts"]
+}

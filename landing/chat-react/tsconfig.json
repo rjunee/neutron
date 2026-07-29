@@ -1,0 +1,10 @@
+{
+  "//": "Leaf tsconfig for the React/assistant-ui web chat client. Isolated from the root deploy gate (which has no JSX + no React types); typecheck with `bunx tsc -p landing/chat-react/tsconfig.json`. The only chat-react file the root gate sees is the pure `landing/web-chat-flag.ts` (imported by server.ts).",
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "jsx": "react-jsx",
+    "types": ["react", "react-dom", "bun"]
+  },
+  "include": ["./**/*.ts", "./**/*.tsx"]
+}

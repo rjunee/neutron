@@ -1,0 +1,25 @@
+{
+  "name": "@neutronai/connect",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "main": "./index.ts",
+  "exports": {
+    ".": "./index.ts",
+    "./*": "./*"
+  },
+  "dependencies": {
+    "@neutronai/channels": "workspace:*",
+    "@neutronai/contracts": "workspace:*",
+    "@neutronai/gbrain-memory": "workspace:*",
+    "@neutronai/jwt-validator": "workspace:*",
+    "@neutronai/logger": "workspace:*",
+    "@neutronai/migrations": "workspace:*",
+    "@neutronai/persistence": "workspace:*",
+    "@neutronai/runtime": "workspace:*",
+    "jose": "^5.9.0"
+  },
+  "devDependencies": {
+    "gbrain": "github:garrytan/gbrain#8058144"
+  }
+}

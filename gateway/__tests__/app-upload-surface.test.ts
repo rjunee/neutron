@@ -1,0 +1,631 @@
+/**
+ * @neutronai/gateway/__tests__ — chat-attachment upload surface (P5.1).
+ *
+ * Closes Argus r1 BLOCKING #1 — the client (`app/lib/upload-client.ts`)
+ * has always POSTed to `${base_url}/api/app/upload` but no production
+ * route existed; every image attach 404'd in real deployments while
+ * the client-side test suite happily passed via `fetch_impl` stubs.
+ *
+ * These tests pin the real route end-to-end against the existing
+ * `composeHttpHandler` so any future regression that unmounts the
+ * upload surface OR drops it out of the compose chain lights up here
+ * BEFORE the client lands on a busted production deploy.
+ */
+import { afterEach, beforeEach, describe, expect, it } from 'bun:test'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+
+import { createAppWsAuthResolver } from '@neutronai/channels/index.ts'
+import { composeHttpHandler } from '../http/compose.ts'
+import {
+  createAppUploadSurface,
+  resolveChatAttachmentLocalPath,
+} from '../http/app-upload-surface.ts'
+
+interface Harness {
+  server: import('bun').Server<unknown>
+  base: string
+  owner_home: string
+  close(): Promise<void>
+}
+
+/**
+ * Real 1x1 PNG (89-50-4E-47 + IHDR + IDAT + IEND). Hex-encoded so the
+ * source diff stays grepable; the bytes round-trip through
+ * `magicByteSniff` → 'image/png' under the surface's image whitelist.
+ */
+const TINY_PNG_HEX =
+  '89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c489' +
+  '0000000d49444154789c63000100000005000100' +
+  '0d0a2db40000000049454e44ae426082'
+
+const TINY_JPEG_HEX = 'ffd8ffe000104a46494600010100000100010000ffd9'
+
+/** A minimal but magic-byte-valid PDF (`%PDF-` prefix → 'application/pdf'). */
+function pdfBytes(): Uint8Array {
+  return new TextEncoder().encode('%PDF-1.4\n1 0 obj\n<< /Type /Catalog >>\nendobj\n%%EOF\n')
+}
+
+/** A magic-byte-valid WAV: 'RIFF' + 4 size bytes + 'WAVE' (+ padding), which
+ *  `magicByteSniff` (binary-types.ts:160-182) returns 'audio/wav' for. */
+function wavBytes(): Uint8Array {
+  const out = new Uint8Array(16)
+  out.set([0x52, 0x49, 0x46, 0x46], 0) // 'RIFF'
+  out.set([0x24, 0x00, 0x00, 0x00], 4) // chunk size (arbitrary)
+  out.set([0x57, 0x41, 0x56, 0x45], 8) // 'WAVE'
+  return out
+}
+
+/** Decode a hex string into a Uint8Array. */
+function fromHex(hex: string): Uint8Array {
+  if (hex.length % 2 !== 0) throw new Error('hex length must be even')
+  const out = new Uint8Array(hex.length / 2)
+  for (let i = 0; i < out.length; i++) {
+    out[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16)
+  }
+  return out
+}
+
+async function startGateway(): Promise<Harness> {
+  const owner_home = mkdtempSync(join(tmpdir(), 'neutron-upload-'))
+  const auth = createAppWsAuthResolver({ project_slug: 'demo', bypass: true })
+  const upload = createAppUploadSurface({ auth, project_slug: 'demo', owner_home })
+  const composed = composeHttpHandler({
+    appUpload: { handler: upload.handler },
+    defaultHandler: () => new Response('not found', { status: 404 }),
+  })
+  const server = Bun.serve({
+    port: 0,
+    fetch: (req, srv) => composed.fetch(req, srv),
+    websocket: composed.websocket,
+  })
+  return {
+    server,
+    base: `http://127.0.0.1:${server.port}`,
+    owner_home,
+    close: async () => {
+      await server.stop(true)
+      try {
+        rmSync(owner_home, { recursive: true, force: true })
+      } catch {
+        /* ignore — test cleanup */
+      }
+    },
+  }
+}
+
+function makeMultipart(bytes: Uint8Array, name: string, type: string): FormData {
+  const form = new FormData()
+  // The DOM `Blob` ctor's `BlobPart` typing under @types/bun isn't
+  // happy with a generic Uint8Array (`SharedArrayBuffer` slots in via
+  // ArrayBufferLike). Round-trip via the underlying ArrayBuffer slice
+  // to land on a plain `ArrayBuffer`.
+  const buf = bytes.buffer.slice(
+    bytes.byteOffset,
+    bytes.byteOffset + bytes.byteLength,
+  ) as ArrayBuffer
+  form.append('file', new Blob([buf], { type }), name)
+  return form
+}
+
+describe('app-upload gateway surface — POST /api/app/upload', () => {
+  let harness: Harness
+
+  beforeEach(async () => {
+    harness = await startGateway()
+  })
+  afterEach(async () => {
+    await harness.close()
+  })
+
+  it('uploads a PNG and returns the canonical URL', async () => {
+    const bytes = fromHex(TINY_PNG_HEX)
+    const form = makeMultipart(bytes, 'pic.png', 'image/png')
+    const res = await fetch(`${harness.base}/api/app/upload`, {
+      method: 'POST',
+      headers: { authorization: 'Bearer dev:sam' },
+      body: form,
+    })
+    expect(res.status).toBe(200)
+    const json = (await res.json()) as {
+      ok: boolean
+      url: string
+      content_type: string
+      size_bytes: number
+    }
+    expect(json.ok).toBe(true)
+    expect(json.content_type).toBe('image/png')
+    expect(json.size_bytes).toBe(bytes.length)
+    expect(json.url.startsWith('/api/app/upload/sam/')).toBe(true)
+    expect(json.url.endsWith('.png')).toBe(true)
+  })
+
+  it('rejects requests without a Bearer token (401)', async () => {
+    const form = makeMultipart(fromHex(TINY_PNG_HEX), 'pic.png', 'image/png')
+    const res = await fetch(`${harness.base}/api/app/upload`, {
+      method: 'POST',
+      body: form,
+    })
+    expect(res.status).toBe(401)
+    const json = (await res.json()) as { code: string }
+    expect(json.code).toBe('missing_bearer')
+  })
+
+  it('rejects non-image MIMEs via magic-byte sniffing (415)', async () => {
+    // Random non-image bytes the sniffer will return null for.
+    const random = new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8, 9, 10])
+    const form = makeMultipart(random, 'pic.png', 'image/png')
+    const res = await fetch(`${harness.base}/api/app/upload`, {
+      method: 'POST',
+      headers: { authorization: 'Bearer dev:sam' },
+      body: form,
+    })
+    expect(res.status).toBe(415)
+    const json = (await res.json()) as { code: string }
+    expect(json.code).toBe('unsupported_type')
+  })
+
+  it('rejects content-type spoofing (PNG bytes declared as JPEG) with 400', async () => {
+    const png = fromHex(TINY_PNG_HEX)
+    const form = makeMultipart(png, 'pic.jpg', 'image/jpeg')
+    const res = await fetch(`${harness.base}/api/app/upload`, {
+      method: 'POST',
+      headers: { authorization: 'Bearer dev:sam' },
+      body: form,
+    })
+    expect(res.status).toBe(400)
+    const json = (await res.json()) as { code: string }
+    expect(json.code).toBe('content_type_spoof')
+  })
+
+  it('round-trips JPEG bytes through the surface', async () => {
+    const bytes = fromHex(TINY_JPEG_HEX)
+    const form = makeMultipart(bytes, 'pic.jpg', 'image/jpeg')
+    const res = await fetch(`${harness.base}/api/app/upload`, {
+      method: 'POST',
+      headers: { authorization: 'Bearer dev:sam' },
+      body: form,
+    })
+    expect(res.status).toBe(200)
+    const json = (await res.json()) as { url: string; content_type: string }
+    expect(json.content_type).toBe('image/jpeg')
+    expect(json.url.endsWith('.jpg')).toBe(true)
+  })
+
+  it('returns a 413 when the body exceeds the wire cap', async () => {
+    // Build a 1MB cap and shove 2MB through — exercises the
+    // Content-Length pre-check.
+    await harness.close()
+    const owner_home = mkdtempSync(join(tmpdir(), 'neutron-upload-'))
+    const auth = createAppWsAuthResolver({ project_slug: 'demo', bypass: true })
+    const upload = createAppUploadSurface({
+      auth,
+      project_slug: 'demo',
+      owner_home,
+      max_bytes: 1024,
+    })
+    const composed = composeHttpHandler({
+      appUpload: { handler: upload.handler },
+      defaultHandler: () => new Response('not found', { status: 404 }),
+    })
+    const server = Bun.serve({
+      port: 0,
+      fetch: (req, srv) => composed.fetch(req, srv),
+      websocket: composed.websocket,
+    })
+    harness = {
+      server,
+      base: `http://127.0.0.1:${server.port}`,
+      owner_home,
+      close: async () => {
+        await server.stop(true)
+        try {
+          rmSync(owner_home, { recursive: true, force: true })
+        } catch {
+          /* ignore */
+        }
+      },
+    }
+    const big = new Uint8Array(64 * 1024)
+    big.set(fromHex(TINY_PNG_HEX), 0)
+    const form = makeMultipart(big, 'pic.png', 'image/png')
+    const res = await fetch(`${harness.base}/api/app/upload`, {
+      method: 'POST',
+      headers: { authorization: 'Bearer dev:sam' },
+      body: form,
+    })
+    expect(res.status).toBe(413)
+    const json = (await res.json()) as { code: string }
+    expect(json.code).toBe('upload_too_large')
+  })
+
+  it('rejects non-POST methods with 405', async () => {
+    const res = await fetch(`${harness.base}/api/app/upload`, { method: 'GET' })
+    expect(res.status).toBe(405)
+  })
+
+  it('falls through to default handler on unrelated paths', async () => {
+    const res = await fetch(`${harness.base}/api/something-else`)
+    expect(res.status).toBe(404)
+  })
+
+  it('streams uploaded bytes back on the auth-gated GET', async () => {
+    const bytes = fromHex(TINY_PNG_HEX)
+    const form = makeMultipart(bytes, 'pic.png', 'image/png')
+    const up = await fetch(`${harness.base}/api/app/upload`, {
+      method: 'POST',
+      headers: { authorization: 'Bearer dev:sam' },
+      body: form,
+    })
+    expect(up.status).toBe(200)
+    const { url } = (await up.json()) as { url: string }
+    // Read back with the matching Bearer.
+    const get = await fetch(`${harness.base}${url}`, {
+      headers: { authorization: 'Bearer dev:sam' },
+    })
+    expect(get.status).toBe(200)
+    expect(get.headers.get('content-type')).toBe('image/png')
+    const round_tripped = new Uint8Array(await get.arrayBuffer())
+    expect(round_tripped.length).toBe(bytes.length)
+    for (let i = 0; i < bytes.length; i++) {
+      expect(round_tripped[i]).toBe(bytes[i])
+    }
+  })
+
+  it('rejects cross-user GET with 403 (token leak doesn\'t enable enumeration)', async () => {
+    const bytes = fromHex(TINY_PNG_HEX)
+    const form = makeMultipart(bytes, 'pic.png', 'image/png')
+    const up = await fetch(`${harness.base}/api/app/upload`, {
+      method: 'POST',
+      headers: { authorization: 'Bearer dev:sam' },
+      body: form,
+    })
+    const { url } = (await up.json()) as { url: string }
+    // Use a different user token to GET — must be 403.
+    const get = await fetch(`${harness.base}${url}`, {
+      headers: { authorization: 'Bearer dev:other' },
+    })
+    expect(get.status).toBe(403)
+    const json = (await get.json()) as { code: string }
+    expect(json.code).toBe('user_mismatch')
+  })
+
+  it('returns 304 on a matching ETag (content-addressed cache)', async () => {
+    const bytes = fromHex(TINY_PNG_HEX)
+    const form = makeMultipart(bytes, 'pic.png', 'image/png')
+    const up = await fetch(`${harness.base}/api/app/upload`, {
+      method: 'POST',
+      headers: { authorization: 'Bearer dev:sam' },
+      body: form,
+    })
+    const { url } = (await up.json()) as { url: string }
+    // url shape: /api/app/upload/sam/<hash>.png
+    const hash = url.split('/').pop()?.replace(/\.png$/, '') ?? ''
+    expect(hash.length).toBe(64)
+    const get = await fetch(`${harness.base}${url}`, {
+      headers: { authorization: 'Bearer dev:sam', 'if-none-match': `"${hash}"` },
+    })
+    expect(get.status).toBe(304)
+  })
+
+  it('is idempotent — same bytes return the same URL', async () => {
+    const bytes = fromHex(TINY_PNG_HEX)
+    const u1 = await fetch(`${harness.base}/api/app/upload`, {
+      method: 'POST',
+      headers: { authorization: 'Bearer dev:sam' },
+      body: makeMultipart(bytes, 'pic.png', 'image/png'),
+    })
+    const u2 = await fetch(`${harness.base}/api/app/upload`, {
+      method: 'POST',
+      headers: { authorization: 'Bearer dev:sam' },
+      body: makeMultipart(bytes, 'pic.png', 'image/png'),
+    })
+    expect(u1.status).toBe(200)
+    expect(u2.status).toBe(200)
+    const j1 = (await u1.json()) as { url: string }
+    const j2 = (await u2.json()) as { url: string }
+    expect(j1.url).toBe(j2.url)
+  })
+
+  // ── M2 modality scope — PDF documents ────────────────────────────────────
+  it('uploads a PDF and returns the canonical .pdf URL', async () => {
+    const bytes = pdfBytes()
+    const form = makeMultipart(bytes, 'doc.pdf', 'application/pdf')
+    const res = await fetch(`${harness.base}/api/app/upload`, {
+      method: 'POST',
+      headers: { authorization: 'Bearer dev:sam' },
+      body: form,
+    })
+    expect(res.status).toBe(200)
+    const json = (await res.json()) as {
+      ok: boolean
+      url: string
+      content_type: string
+      size_bytes: number
+    }
+    expect(json.ok).toBe(true)
+    expect(json.content_type).toBe('application/pdf')
+    expect(json.size_bytes).toBe(bytes.length)
+    expect(json.url.startsWith('/api/app/upload/sam/')).toBe(true)
+    expect(json.url.endsWith('.pdf')).toBe(true)
+  })
+
+  it('rejects PNG bytes declared application/pdf (content_type_spoof, 400)', async () => {
+    const png = fromHex(TINY_PNG_HEX)
+    const form = makeMultipart(png, 'doc.pdf', 'application/pdf')
+    const res = await fetch(`${harness.base}/api/app/upload`, {
+      method: 'POST',
+      headers: { authorization: 'Bearer dev:sam' },
+      body: form,
+    })
+    expect(res.status).toBe(400)
+    const json = (await res.json()) as { code: string }
+    expect(json.code).toBe('content_type_spoof')
+  })
+
+  it('serves an uploaded PDF back with the canonical content-type + ETag', async () => {
+    const bytes = pdfBytes()
+    const up = await fetch(`${harness.base}/api/app/upload`, {
+      method: 'POST',
+      headers: { authorization: 'Bearer dev:sam' },
+      body: makeMultipart(bytes, 'doc.pdf', 'application/pdf'),
+    })
+    const { url } = (await up.json()) as { url: string }
+    const get = await fetch(`${harness.base}${url}`, {
+      headers: { authorization: 'Bearer dev:sam' },
+    })
+    expect(get.status).toBe(200)
+    expect(get.headers.get('content-type')).toBe('application/pdf')
+    // Argus r2 #2 — a served document must pin its declared type (no MIME
+    // sniffing into an executable content-type) and serve inline for preview.
+    expect(get.headers.get('x-content-type-options')).toBe('nosniff')
+    expect(get.headers.get('content-disposition')).toBe('inline')
+    const round = new Uint8Array(await get.arrayBuffer())
+    expect(round.length).toBe(bytes.length)
+    // ETag → content hash; a matching If-None-Match yields 304.
+    const hash = url.split('/').pop()?.replace(/\.pdf$/, '') ?? ''
+    expect(hash.length).toBe(64)
+    const cached = await fetch(`${harness.base}${url}`, {
+      headers: { authorization: 'Bearer dev:sam', 'if-none-match': `"${hash}"` },
+    })
+    expect(cached.status).toBe(304)
+  })
+})
+
+describe('resolveChatAttachmentLocalPath', () => {
+  const HASH = 'a'.repeat(64)
+  let home: string
+
+  // The resolver now does an on-disk existence check before returning a path
+  // (so a resolvable-but-missing blob never gets injected into the agent
+  // prompt), so each positive case seeds a real blob under owner_home.
+  const seedBlob = (user_id: string, hash: string, ext: string): string => {
+    const dir = join(home, 'chat-attachments', user_id)
+    mkdirSync(dir, { recursive: true })
+    const path = join(dir, `${hash}.${ext}`)
+    writeFileSync(path, 'blob')
+    return path
+  }
+
+  beforeEach(() => {
+    home = mkdtempSync(join(tmpdir(), 'neutron-resolve-'))
+  })
+  afterEach(() => {
+    rmSync(home, { recursive: true, force: true })
+  })
+
+  it('maps a relative .pdf upload URL to the local blob path + MIME', () => {
+    const path = seedBlob('sam', HASH, 'pdf')
+    const out = resolveChatAttachmentLocalPath(home, `/api/app/upload/sam/${HASH}.pdf`)
+    expect(out).toEqual({ path, content_type: 'application/pdf' })
+  })
+
+  it('maps an image URL to image/png', () => {
+    const path = seedBlob('sam', HASH, 'png')
+    const out = resolveChatAttachmentLocalPath(home, `/api/app/upload/sam/${HASH}.png`)
+    expect(out).toEqual({ path, content_type: 'image/png' })
+  })
+
+  it('accepts an absolute URL (matches on the pathname only)', () => {
+    const path = seedBlob('sam', HASH, 'pdf')
+    const out = resolveChatAttachmentLocalPath(
+      home,
+      `https://box.example/api/app/upload/sam/${HASH}.pdf`,
+    )
+    expect(out?.content_type).toBe('application/pdf')
+    expect(out?.path).toBe(path)
+  })
+
+  it('returns null for a malformed / non-matching URL (no fs syscall)', () => {
+    expect(resolveChatAttachmentLocalPath(home, '/api/app/upload/sam/short.pdf')).toBeNull()
+    expect(resolveChatAttachmentLocalPath(home, `/api/app/upload/sam/${HASH}.exe`)).toBeNull()
+    expect(resolveChatAttachmentLocalPath(home, '/etc/passwd')).toBeNull()
+    expect(resolveChatAttachmentLocalPath(home, '')).toBeNull()
+  })
+
+  it('returns null for a resolvable URL whose blob is absent on disk (no dead path injected)', () => {
+    // Shape is valid + user_id is fine, but nothing was seeded → existsSync fails.
+    expect(resolveChatAttachmentLocalPath(home, `/api/app/upload/sam/${HASH}.pdf`)).toBeNull()
+  })
+
+  it('rejects a dot-only user_id segment (`.` / `..`) even when a blob exists there', () => {
+    // Prove the traversal is refused: seed a blob one level ABOVE chat-attachments/
+    // (where `..` would resolve) and confirm the resolver still returns null.
+    const traversalDir = join(home, 'chat-attachments')
+    mkdirSync(traversalDir, { recursive: true })
+    writeFileSync(join(home, `${HASH}.pdf`), 'blob') // sibling of chat-attachments/
+    expect(resolveChatAttachmentLocalPath(home, `/api/app/upload/../${HASH}.pdf`)).toBeNull()
+    expect(resolveChatAttachmentLocalPath(home, `/api/app/upload/./${HASH}.pdf`)).toBeNull()
+  })
+
+  // ── M2 task 5 — audio transcript sidecar surfacing ───────────────────────
+  it('surfaces the transcript for an audio URL when the sidecar exists', () => {
+    const path = seedBlob('sam', HASH, 'wav')
+    writeFileSync(join(home, 'chat-attachments', 'sam', `${HASH}.txt`), 'buy milk')
+    const out = resolveChatAttachmentLocalPath(home, `/api/app/upload/sam/${HASH}.wav`)
+    expect(out).toEqual({ path, content_type: 'audio/wav', transcript: 'buy milk' })
+  })
+
+  it('returns transcript:null for an audio URL whose sidecar is absent', () => {
+    const path = seedBlob('sam', HASH, 'wav')
+    const out = resolveChatAttachmentLocalPath(home, `/api/app/upload/sam/${HASH}.wav`)
+    expect(out).toEqual({ path, content_type: 'audio/wav', transcript: null })
+  })
+
+  it('omits the transcript field entirely for a non-audio (PNG) attachment', () => {
+    seedBlob('sam', HASH, 'png')
+    const out = resolveChatAttachmentLocalPath(home, `/api/app/upload/sam/${HASH}.png`)
+    expect(out).not.toBeNull()
+    expect('transcript' in (out as object)).toBe(false)
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// M2 task 5 — voice-note audio upload + ASR sidecar (transcribeAudio seam).
+// ─────────────────────────────────────────────────────────────────────────────
+describe('app-upload gateway surface — audio voice notes (task 5)', () => {
+  interface AudioHarness extends Harness {
+    calls: number
+  }
+
+  /** Start a gateway whose upload surface has a stub transcriber (or none). */
+  async function startAudioGateway(opts: {
+    transcript?: string | null
+    /** When true, no transcribeAudio seam is wired (keyless box). */
+    keyless?: boolean
+  }): Promise<AudioHarness> {
+    const owner_home = mkdtempSync(join(tmpdir(), 'neutron-upload-audio-'))
+    const auth = createAppWsAuthResolver({ project_slug: 'demo', bypass: true })
+    const state = { calls: 0 }
+    const upload = createAppUploadSurface({
+      auth,
+      project_slug: 'demo',
+      owner_home,
+      ...(opts.keyless === true
+        ? {}
+        : {
+            transcribeAudio: async (): Promise<string | null> => {
+              state.calls += 1
+              return opts.transcript ?? null
+            },
+          }),
+    })
+    const composed = composeHttpHandler({
+      appUpload: { handler: upload.handler },
+      defaultHandler: () => new Response('not found', { status: 404 }),
+    })
+    const server = Bun.serve({
+      port: 0,
+      fetch: (req, srv) => composed.fetch(req, srv),
+      websocket: composed.websocket,
+    })
+    return {
+      server,
+      base: `http://127.0.0.1:${server.port}`,
+      owner_home,
+      get calls() {
+        return state.calls
+      },
+      close: async () => {
+        await server.stop(true)
+        try {
+          rmSync(owner_home, { recursive: true, force: true })
+        } catch {
+          /* ignore */
+        }
+      },
+    }
+  }
+
+  async function uploadWav(base: string): Promise<{ url: string; hash: string }> {
+    const res = await fetch(`${base}/api/app/upload`, {
+      method: 'POST',
+      headers: { authorization: 'Bearer dev:sam' },
+      body: makeMultipart(wavBytes(), 'voice.wav', 'audio/wav'),
+    })
+    expect(res.status).toBe(200)
+    const json = (await res.json()) as { url: string; content_type: string }
+    expect(json.content_type).toBe('audio/wav')
+    expect(json.url.endsWith('.wav')).toBe(true)
+    const hash = json.url.split('/').pop()?.replace(/\.wav$/, '') ?? ''
+    return { url: json.url, hash }
+  }
+
+  it('(a) transcribes a WAV upload and writes the <hash>.txt sidecar on disk', async () => {
+    const h = await startAudioGateway({ transcript: 'take out the trash' })
+    try {
+      const { hash } = await uploadWav(h.base)
+      // ARTIFACT-ON-DISK — the transcript sidecar exists beside the blob.
+      const sidecar = join(h.owner_home, 'chat-attachments', 'sam', `${hash}.txt`)
+      expect(existsSync(sidecar)).toBe(true)
+      expect(readFileSync(sidecar, 'utf8')).toBe('take out the trash')
+    } finally {
+      await h.close()
+    }
+  })
+
+  it('(b) is idempotent — re-uploading the same audio never re-calls the transcriber', async () => {
+    const h = await startAudioGateway({ transcript: 'hello again' })
+    try {
+      await uploadWav(h.base)
+      expect(h.calls).toBe(1)
+      await uploadWav(h.base) // same bytes → sidecar exists → no re-transcribe
+      expect(h.calls).toBe(1)
+    } finally {
+      await h.close()
+    }
+  })
+
+  it('(c) keyless (no transcribeAudio seam) → 200 upload, NO sidecar', async () => {
+    const h = await startAudioGateway({ keyless: true })
+    try {
+      const { hash } = await uploadWav(h.base)
+      const sidecar = join(h.owner_home, 'chat-attachments', 'sam', `${hash}.txt`)
+      expect(existsSync(sidecar)).toBe(false)
+    } finally {
+      await h.close()
+    }
+  })
+
+  it('(d) transcriber returns null → 200 upload, NO sidecar', async () => {
+    const h = await startAudioGateway({ transcript: null })
+    try {
+      const { hash } = await uploadWav(h.base)
+      expect(h.calls).toBe(1)
+      const sidecar = join(h.owner_home, 'chat-attachments', 'sam', `${hash}.txt`)
+      expect(existsSync(sidecar)).toBe(false)
+    } finally {
+      await h.close()
+    }
+  })
+
+  it('(e) GET serves the audio blob with Content-Type audio/wav', async () => {
+    const h = await startAudioGateway({ transcript: 'x' })
+    try {
+      const { url } = await uploadWav(h.base)
+      const get = await fetch(`${h.base}${url}`, {
+        headers: { authorization: 'Bearer dev:sam' },
+      })
+      expect(get.status).toBe(200)
+      expect(get.headers.get('content-type')).toBe('audio/wav')
+    } finally {
+      await h.close()
+    }
+  })
+
+  it('(f) a `<hash>.txt` GET does NOT match the route — the sidecar is unreachable', async () => {
+    const h = await startAudioGateway({ transcript: 'secret note' })
+    try {
+      const { url } = await uploadWav(h.base)
+      const txtUrl = url.replace(/\.wav$/, '.txt')
+      const get = await fetch(`${h.base}${txtUrl}`, {
+        headers: { authorization: 'Bearer dev:sam' },
+      })
+      // `.txt` is not in URL_PATH_RE → the surface returns null → default 404.
+      expect(get.status).toBe(404)
+    } finally {
+      await h.close()
+    }
+  })
+})

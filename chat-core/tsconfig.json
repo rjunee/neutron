@@ -1,0 +1,11 @@
+{
+  "extends": "../tsconfig.base.json",
+  "compilerOptions": {
+    // chat-core targets both the browser (WS client + OPFS local store) and
+    // Bun (unit tests), so it needs the DOM lib for WebSocket / OPFS types.
+    // The root deploy-gate tsconfig already supplies DOM; this leaf mirrors
+    // it so editors and a standalone `tsc -p chat-core` agree.
+    "lib": ["ESNext", "DOM"]
+  },
+  "include": ["./**/*.ts"]
+}

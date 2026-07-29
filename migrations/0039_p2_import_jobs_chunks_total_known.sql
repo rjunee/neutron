@@ -1,0 +1,24 @@
+-- 0039_p2_import_jobs_chunks_total_known.sql
+--
+-- 2026-05-22 — UX fix follow-up to PR #264 (v0.1.75 import_progress envelope).
+-- Per docs/plans/2026-05-22-001-fix-import-progress-ux-plan.md.
+--
+-- Problem: pre-fix, `pass1_chunks_total` was incremented inside the chunker
+-- for-await loop alongside `pass1_chunks_done`, so the user saw N/N every
+-- tick with no real progress signal. The fix pre-counts the entire
+-- chunk list before pass1 starts and writes the fixed total once. To
+-- disambiguate "pre-counted, denominator is real" from "still streaming,
+-- denominator grows", this column flags the mode the runner is in.
+--
+--   chunks_total_known = 1 → runner materialized all chunks up front;
+--     pass1_chunks_total is the FINAL count for this job.
+--   chunks_total_known = 0 (default) → runner is streaming the source;
+--     pass1_chunks_total is whatever has been DISCOVERED so far and may
+--     still grow. The client renders a count-only "Pass 1: N batches
+--     processed" body in this mode, no fake denominator.
+--
+-- Additive ADD COLUMN — no in-flight row can be stranded. The column
+-- defaults to 0, which preserves the streaming behavior for any job
+-- that started before the runner upgrade landed (graceful fallback).
+ALTER TABLE import_jobs ADD COLUMN chunks_total_known INTEGER NOT NULL DEFAULT 0
+    CHECK (chunks_total_known IN (0, 1));

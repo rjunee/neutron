@@ -1,0 +1,433 @@
+/**
+ * Open single-owner Claude-Max OAuth install-token handoff.
+ *
+ * AUTH-CORRECTION (Ryan-locked 2026-06-28): a fresh Open install's FIRST chat
+ * screen is the Claude-Max-auth handoff — a copy-paste terminal one-liner that
+ * installs the `claude` CLI, runs `claude setup-token`, captures the
+ * `sk-ant-oat…` OAuth token, and POSTs it back so the page can auto-advance into
+ * onboarding. This REPLACES the dead 503 "Authenticate Claude" page that only
+ * printed manual instructions. The Keychain fast-path (#101,
+ * `open/ambient-claude-auth.ts`) stays as a save-a-step optimisation — when the
+ * box already has an ambient `claude` login, `resolveOpenLlmPool` resolves it
+ * and this gate never renders. The handoff is the DEFAULT (no token + no
+ * Keychain — the default case: Linux/headless boxes, fresh installs).
+ *
+ * This is a faithful but SIMPLIFIED port of the prior monorepo install-token flow
+ * (`neutron-old/identity/oauth/install-token-{handoff,store,page,script}.ts`).
+ * The managed flow is a TWO-service architecture (identity service + signup
+ * landing proxy) that needs an HMAC shared-secret on `/complete` because the
+ * bash callback crosses the public internet. Open is SINGLE-SERVICE +
+ * single-owner on `127.0.0.1`: the page, the `.sh` script, the callback, and
+ * the chat surface are all the SAME localhost process, so the unguessable
+ * `signup_id` (a 128-bit UUID minted at `initiate`) is a sufficient capability
+ * and no shared secret is needed. Managed wires its own HMAC handler at the
+ * same paths.
+ *
+ * Endpoints (mounted ahead of the `/chat` gate via `installTokenHandler`):
+ *   POST /oauth/max/install-token/initiate          → mint signup_id + one-liner
+ *   GET  /oauth/max/install-token/<signup_id>.sh     → the bash installer script
+ *   POST /oauth/max/install-token/complete           → {signup_id, token} → persist
+ *   GET  /oauth/max/install-token/state?signup_id=   → poll status
+ *
+ * Why a restart (not a live env mutation): the Open composer resolves the LLM
+ * substrate ONCE at boot (`resolveOpenLlmPool(env)` → the whole substrate is
+ * gated on a non-null pool). A box that boots with no credential has NO
+ * substrate object, so mutating `process.env` live would clear the gate but
+ * leave chat LLM-less. So `/complete` persists the token to `.env` and asks the
+ * supervisor (launchd `KeepAlive` / systemd `Restart=always`) to respawn the
+ * process — which re-reads `.env` and builds a LIVE substrate. The page detects
+ * the restarted, now-authenticated process by polling `GET /chat` for the
+ * 503 → (restart window) → 200 transition.
+ *
+ * WHERE `.env` is written: `persistOauthTokenToEnv` defaults to `<cwd>/.env`,
+ * which assumes the process runs out of a code dir the owner can WRITE. That
+ * holds for a single-owner install. An operator running MULTIPLE isolated
+ * instances against ONE shared, read-only code checkout (each instance a
+ * distinct OS user that does NOT own the checkout) must set
+ * `NEUTRON_INSTALL_TOKEN_ENV_PATH` per instance to a writable location, or the
+ * `/complete` write throws `EACCES` and activation fails. The next boot restores
+ * the token from that same path via `loadPersistedInstallToken()` (called early
+ * in `open/server.ts`, before the substrate resolves).
+ */
+
+import { createHash, randomUUID } from 'node:crypto'
+
+/** A well-formed Claude Code OAuth setup-token: `sk-ant-oat01-<base64url>`. */
+const SETUP_TOKEN_RE = /^sk-ant-oat[0-9]{2}-[A-Za-z0-9_-]{32,}$/
+
+/** A v4-ish UUID, the shape `randomUUID()` mints (the install capability). */
+const SIGNUP_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
+
+/** 10 minutes — matches the managed monorepo's `DEFAULT_TTL_MS`. */
+const DEFAULT_TTL_MS = 10 * 60 * 1_000
+
+/**
+ * Hard cap on retained rows. `/initiate` is an unauthenticated POST, so a local
+ * page could fire it in a loop; read-time eviction never frees memory, so bound
+ * it. FIFO: the in-flight (newest) handoff is never the one evicted under a
+ * flood until this many NEWER ones arrive — far beyond any real single-owner
+ * use. The cap exists only to make the Map's growth bounded.
+ */
+const MAX_ROWS = 512
+
+export type InstallTokenStatus = 'pending' | 'completed' | 'expired'
+
+export interface InstallTokenRow {
+  signup_id: string
+  status: InstallTokenStatus
+  created_at_ms: number
+  expires_at_ms: number
+  completed_at_ms: number | null
+}
+
+/**
+ * In-memory single-owner handoff store. The whole flow completes inside one
+ * page session (mint → run → callback → restart), so there is no need for a DB
+ * row that survives the restart — after the respawn the box is authenticated
+ * and the gate is gone. Read-time eviction (no background purge), and a
+ * transactional `markCompleted` for idempotency under a retried callback.
+ */
+export class InstallTokenStore {
+  private readonly rows = new Map<string, InstallTokenRow>()
+  private readonly ttlMs: number
+  private readonly now: () => number
+
+  constructor(opts?: { ttlMs?: number; now?: () => number }) {
+    this.ttlMs = opts?.ttlMs ?? DEFAULT_TTL_MS
+    this.now = opts?.now ?? Date.now
+  }
+
+  create(signup_id: string): InstallTokenRow {
+    // FIFO-evict the oldest rows so an unauthenticated /initiate flood can't
+    // grow the Map without bound (Map preserves insertion order).
+    while (this.rows.size >= MAX_ROWS) {
+      const oldest = this.rows.keys().next().value
+      if (oldest === undefined) break
+      this.rows.delete(oldest)
+    }
+    const created = this.now()
+    const row: InstallTokenRow = {
+      signup_id,
+      status: 'pending',
+      created_at_ms: created,
+      expires_at_ms: created + this.ttlMs,
+      completed_at_ms: null,
+    }
+    this.rows.set(signup_id, row)
+    return row
+  }
+
+  /** Read with read-time eviction: a pending row past its TTL reads as expired. */
+  get(signup_id: string): InstallTokenRow | null {
+    const row = this.rows.get(signup_id)
+    if (row === undefined) return null
+    if (row.status === 'pending' && row.expires_at_ms < this.now()) {
+      return { ...row, status: 'expired' }
+    }
+    return { ...row }
+  }
+
+  /** Idempotent: returns the row on the first transition, null on a replay. */
+  markCompleted(signup_id: string): InstallTokenRow | null {
+    const row = this.rows.get(signup_id)
+    if (row === undefined) return null
+    if (row.status !== 'pending') return null
+    if (row.expires_at_ms < this.now()) return null
+    row.status = 'completed'
+    row.completed_at_ms = this.now()
+    return { ...row }
+  }
+}
+
+export interface OpenInstallTokenDeps {
+  /**
+   * Persist the captured OAuth token durably so the NEXT boot resolves it.
+   * Production writes `CLAUDE_CODE_OAUTH_TOKEN=<token>` into the code-dir
+   * `.env` (Bun auto-loads it at startup). Injected so tests can assert without
+   * touching the filesystem.
+   */
+  persistToken: (token: string) => Promise<void> | void
+  /**
+   * Ask the supervisor to respawn this process so the composer re-resolves the
+   * substrate with the freshly-persisted token. Production schedules
+   * `process.exit(0)` shortly after the response flushes (launchd/systemd
+   * respawn). Injected so the in-process test harness can spy without killing
+   * the test runner.
+   */
+  requestRestart: () => void
+  /** Test seam: deterministic clock. */
+  now?: () => number
+  /** Test seam: deterministic signup_id minting. */
+  genSignupId?: () => string
+  /** Override the handoff TTL (default 10 min). */
+  ttlMs?: number
+}
+
+export interface OpenInstallTokenHandler {
+  /** Bun.serve-shaped: returns a Response on a matched route, else null. */
+  handle: (req: Request) => Promise<Response | null>
+  /** Exposed for tests. */
+  store: InstallTokenStore
+}
+
+const ROUTE_PREFIX = '/oauth/max/install-token'
+
+function json(body: unknown, status = 200): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' },
+  })
+}
+
+/**
+ * Render the copy-paste bash installer. Minimal deps (bash/curl/uname/grep/
+ * tee/mktemp) — no node/npm/brew/sudo. Installs `claude` from claude.ai,
+ * runs `claude setup-token` (interactive OAuth browser hop), captures the
+ * token from stdout, and POSTs `{signup_id, token}` to the local callback.
+ */
+export function renderInstallTokenScript(input: {
+  signup_id: string
+  callback_url: string
+}): string {
+  // signup_id is a UUID (validated upstream) and callback_url is a same-origin
+  // URL we built — both safe to embed in single quotes.
+  return `#!/usr/bin/env bash
+# Neutron — Claude Code one-liner installer (signup_id=${input.signup_id}).
+# Installs the official 'claude' CLI, runs 'claude setup-token', captures the
+# Anthropic OAuth token, and hands it back to your local Neutron so chat can run.
+# No Node.js, npm, Homebrew, or sudo required.
+set -euo pipefail
+
+SIGNUP_ID='${input.signup_id}'
+CALLBACK_URL='${input.callback_url}'
+
+case "$(uname -s)" in
+  Darwin|Linux) ;;
+  *) printf 'Unsupported OS: %s\\n' "$(uname -s)" >&2; exit 1 ;;
+esac
+
+export PATH="$HOME/.local/bin:$PATH"
+
+if ! command -v claude >/dev/null 2>&1; then
+  printf '==> Installing Claude Code…\\n'
+  if ! curl -fsSL https://claude.ai/install.sh | bash; then
+    printf 'ERROR: claude install failed.\\n' >&2; exit 1
+  fi
+  export PATH="$HOME/.local/bin:$PATH"
+fi
+
+printf '\\n==> Connecting your Anthropic account…\\n'
+printf '    A browser window opens — sign in to Claude, then return here.\\n\\n'
+
+TMPFILE="$(mktemp -t neutron-claude-XXXXXX)"
+trap 'rm -f "$TMPFILE"' EXIT
+
+if ! claude setup-token 2>&1 | tee "$TMPFILE"; then
+  printf 'ERROR: claude setup-token did not complete.\\n' >&2; exit 1
+fi
+
+TOKEN="$(grep -oE 'sk-ant-oat[0-9]{2}-[A-Za-z0-9_-]+' "$TMPFILE" | tail -n 1 || true)"
+if [ -z "$TOKEN" ]; then
+  printf 'ERROR: could not capture an Anthropic token from setup-token output.\\n' >&2; exit 1
+fi
+
+printf '\\n==> Activating your Neutron workspace…\\n'
+HTTP=$(curl -fsSL -o /dev/null -w '%{http_code}' \\
+  -X POST "$CALLBACK_URL" \\
+  -H 'Content-Type: application/json' \\
+  --data "{\\"signup_id\\":\\"$SIGNUP_ID\\",\\"token\\":\\"$TOKEN\\"}" || echo '000')
+
+case "$HTTP" in
+  200|204) printf '\\n✓ Done. Return to your browser — Neutron is restarting and will continue automatically.\\n' ;;
+  410) printf '\\nERROR: this install link expired. Reload the page and run the new command.\\n' >&2; exit 1 ;;
+  400|401|403) printf '\\nERROR: Anthropic rejected the token. Run the command again.\\n' >&2; exit 1 ;;
+  *) printf '\\nERROR: activation failed (HTTP %s). Try again.\\n' "$HTTP" >&2; exit 1 ;;
+esac
+`
+}
+
+/**
+ * Resolve the origin the client actually requested, honouring
+ * `X-Forwarded-Proto` / `X-Forwarded-Host` when a reverse proxy sits in front
+ * (e.g. Caddy/nginx terminating TLS and forwarding to this process over plain
+ * HTTP on loopback). Without this, `url.origin` reflects the proxy→app hop's
+ * scheme (`http:`), not the public one (`https:`) — producing an `http://`
+ * callback URL that the installer script POSTs to, which a TLS-terminating
+ * proxy then redirects (308) to `https://`, and a bare `curl -X POST`
+ * (no `-L`) fails to follow. Mirrors the same pattern already used in
+ * `landing/auth-gate.ts` (`buildOriginalRequestUrl`).
+ */
+function resolveOrigin(req: Request, url: URL): string {
+  const xfp = req.headers.get('x-forwarded-proto')
+  const xfh = req.headers.get('x-forwarded-host')
+  const proto = (xfp ?? url.protocol.replace(/:$/, '')).split(',')[0]!.trim()
+  const host = (xfh ?? url.host).split(',')[0]!.trim()
+  return `${proto}://${host}`
+}
+
+/**
+ * Build the Open install-token route handler. Pure except for the injected
+ * `persistToken` / `requestRestart` side effects, so the route logic is fully
+ * unit-testable.
+ */
+export function buildOpenInstallTokenHandler(deps: OpenInstallTokenDeps): OpenInstallTokenHandler {
+  const now = deps.now ?? Date.now
+  const genSignupId = deps.genSignupId ?? randomUUID
+  const store = new InstallTokenStore({ now, ...(deps.ttlMs !== undefined ? { ttlMs: deps.ttlMs } : {}) })
+  // Restart is scheduled at most once per process (a retried callback must not
+  // queue a second exit).
+  let restartScheduled = false
+
+  async function handle(req: Request): Promise<Response | null> {
+    const url = new URL(req.url)
+    const path = url.pathname
+    if (!path.startsWith(ROUTE_PREFIX)) return null
+
+    // POST /initiate — mint a signup_id + the one-liner for THIS origin.
+    if (path === `${ROUTE_PREFIX}/initiate` && req.method === 'POST') {
+      const signup_id = genSignupId()
+      const row = store.create(signup_id)
+      const scriptUrl = `${resolveOrigin(req, url)}${ROUTE_PREFIX}/${signup_id}.sh`
+      return json({
+        signup_id,
+        command: `curl -fsSL ${scriptUrl} | bash`,
+        script_url: scriptUrl,
+        expires_at_ms: row.expires_at_ms,
+      })
+    }
+
+    // GET /<signup_id>.sh — render the installer for a pending handoff.
+    if (req.method === 'GET' && path.endsWith('.sh') && path.startsWith(`${ROUTE_PREFIX}/`)) {
+      const signup_id = path.slice(`${ROUTE_PREFIX}/`.length, -'.sh'.length)
+      if (!SIGNUP_ID_RE.test(signup_id)) return new Response('not found', { status: 404 })
+      const row = store.get(signup_id)
+      if (row === null) return new Response('# install link not found\n', { status: 404 })
+      if (row.status !== 'pending') return new Response('# install link expired\n', { status: 410 })
+      // callback_url is derived from the request origin (Host header, honouring
+      // X-Forwarded-Proto/Host — see resolveOrigin). Safe for Open: the server
+      // binds 127.0.0.1 by default (`NEUTRON_HOST`), so the origin is loopback
+      // and a remote attacker can't reach it nor read the minted signup_id (no
+      // CORS). An operator who binds beyond loopback via NEUTRON_HOST owns that
+      // exposure (and would want the callback to match their chosen host
+      // anyway). This loopback threat model assumes ONE process owning its own
+      // cwd; an operator running multiple isolated instances behind a reverse
+      // proxy against one shared code checkout should additionally set
+      // `NEUTRON_INSTALL_TOKEN_ENV_PATH` per instance so `/complete`'s persist
+      // writes to a per-instance writable path (see persistOauthTokenToEnv).
+      // A deployment needing a signed callback wires an HMAC-gated handler.
+      const script = renderInstallTokenScript({
+        signup_id,
+        callback_url: `${resolveOrigin(req, url)}${ROUTE_PREFIX}/complete`,
+      })
+      return new Response(script, {
+        status: 200,
+        headers: { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' },
+      })
+    }
+
+    // POST /complete — validate, persist, mark done, request restart.
+    if (path === `${ROUTE_PREFIX}/complete` && req.method === 'POST') {
+      let parsed: { signup_id?: unknown; token?: unknown }
+      try {
+        parsed = (await req.json()) as { signup_id?: unknown; token?: unknown }
+      } catch {
+        return json({ error: 'invalid_json' }, 400)
+      }
+      const signup_id = typeof parsed.signup_id === 'string' ? parsed.signup_id : ''
+      const token = typeof parsed.token === 'string' ? parsed.token : ''
+      if (!SIGNUP_ID_RE.test(signup_id)) return json({ error: 'invalid_signup_id' }, 400)
+      // Shape validation only — Open's substrate is the `claude` CLI, which
+      // validates the token itself at spawn; the box never calls
+      // api.anthropic.com directly, so a network probe would couple it to an
+      // endpoint it otherwise never touches. (Managed's handler probes.)
+      if (!SETUP_TOKEN_RE.test(token)) return json({ error: 'invalid_token' }, 400)
+
+      const row = store.get(signup_id)
+      if (row === null) return json({ error: 'not_found' }, 404)
+      if (row.status === 'expired') return json({ error: 'expired' }, 410)
+      if (row.status === 'completed') return json({ status: 'already_completed' }, 200)
+
+      await deps.persistToken(token)
+      // Once the token is persisted, the box MUST restart to pick it up — so
+      // request the restart whenever we persisted, regardless of markCompleted's
+      // outcome. (Guarded so a concurrent duplicate callback, or a row that
+      // tipped past its TTL in the get→mark window, can't queue a second exit.)
+      const scheduleRestart = (): void => {
+        if (!restartScheduled) {
+          restartScheduled = true
+          deps.requestRestart()
+        }
+      }
+      const marked = store.markCompleted(signup_id)
+      scheduleRestart()
+      if (marked === null) {
+        // Lost a race to a concurrent callback (or a just-expired row) — the
+        // token is already persisted + a restart is scheduled, so this is
+        // success either way (idempotent).
+        return json({ status: 'already_completed' }, 200)
+      }
+      return new Response(null, { status: 204, headers: { 'cache-control': 'no-store' } })
+    }
+
+    // GET /state?signup_id= — poll status (nice messaging; the page's real
+    // navigation trigger is the /chat 503→200 transition across the restart).
+    if (path === `${ROUTE_PREFIX}/state` && req.method === 'GET') {
+      const signup_id = url.searchParams.get('signup_id') ?? ''
+      if (!SIGNUP_ID_RE.test(signup_id)) return json({ error: 'invalid_signup_id' }, 400)
+      const row = store.get(signup_id)
+      if (row === null) return json({ status: 'not_found' }, 404)
+      return json({ status: row.status, expires_at_ms: row.expires_at_ms })
+    }
+
+    return null
+  }
+
+  return { handle, store }
+}
+
+/**
+ * On-demand reconnect handoff (2026-07-24). Mint a FRESH install-token command by
+ * driving the SAME `installTokenHandler` the first-time auth gate drives, via a
+ * synthetic `POST /oauth/max/install-token/initiate`. Returns the minted copy-paste
+ * command, or `null` when the mint failed (non-200 / missing command / throw) so the
+ * caller can degrade to static instructions rather than dead-end. Factored out of the
+ * composer so the closure (synthetic Request shape, status/JSON handling) has direct
+ * unit coverage.
+ *
+ * ORIGIN CAVEAT — this is NOT byte-for-byte the onboarding command. The first-time
+ * gate mints against the real inbound browser request, so `resolveOrigin` honours
+ * `X-Forwarded-*` and yields the PUBLIC origin (e.g. `https://<host>`). This synthetic
+ * request carries no forwarded headers, so it always yields a LOOPBACK origin
+ * (`http://127.0.0.1:<port>`). That is correct for the intended use — the bubble tells
+ * the owner to run the command IN A SHELL on the machine running Neutron, and the box
+ * reaches its own listener over loopback — but it means the command is only runnable by
+ * someone with a shell on that box. LIMITATION (tracked, not fixed at dogfood stage):
+ * a shell-less remote owner, or a hosted-deployment owner with no SSH to the box, cannot
+ * run a loopback command; a request-origin-derived reconnect for those deployments is
+ * future work. See docs/SYSTEM-OVERVIEW.md § install-token auth surface (Known limits).
+ */
+export function buildReconnectHandoff(
+  installTokenHandler: (req: Request) => Promise<Response | null>,
+  port: number,
+): () => Promise<{ command: string } | null> {
+  return async (): Promise<{ command: string } | null> => {
+    try {
+      const initReq = new Request(`http://127.0.0.1:${port}${ROUTE_PREFIX}/initiate`, {
+        method: 'POST',
+      })
+      const res = await installTokenHandler(initReq)
+      if (res === null || res.status !== 200) return null
+      const parsed = (await res.json()) as { command?: unknown }
+      return typeof parsed.command === 'string' && parsed.command.length > 0
+        ? { command: parsed.command }
+        : null
+    } catch {
+      return null
+    }
+  }
+}
+
+/** Stable export for the gate page's CSP — sha256(inlineScript), base64. */
+export function sha256Base64(s: string): string {
+  return createHash('sha256').update(s, 'utf8').digest('base64')
+}

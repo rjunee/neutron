@@ -1,0 +1,207 @@
+/**
+ * @neutronai/tabs — engine-side TAB DESCRIPTOR + RESOLVER (WAVE 3, PR-1).
+ *
+ * Per `docs/plans/wave3-tabbed-interface-build-plan.md` § 3.1 and SPEC.md
+ * WAVE 3 ("Tabbed project shell + Cores install-scope"). The single source
+ * of truth for which tabs a project (or the global shell) renders is an
+ * engine-side resolver that BOTH clients (mobile RN + web React) consume
+ * over HTTP — tabs are NOT hardcoded in either client.
+ *
+ * ── Scope (PR-1 + PR-2) ─────────────────────────────────────────────────
+ * BUILTIN tabs:
+ *   - per-project (scope='project'): Chat, Work (work_board), Documents
+ *   - global      (scope='global'):  Admin
+ * (Tasks is no longer a builtin — it returns as a Core webview tab, WAVE 3.)
+ * PR-2 adds the CORE union: installed Cores' `project_tab` surfaces are
+ * folded in as `source='core'` descriptors. This file STAYS PURE — it does
+ * NOT read the DB or load packages. The HTTP layer resolves which Cores are
+ * installed (per-project via `core_installations`, global via
+ * `core_global_installations`), reads each Core's manifest, and passes the
+ * resulting `CoreTabContribution[]` into `resolveTabs`. The registry just
+ * prepends the builtins and orders the union — which keeps it trivially
+ * unit-testable and identical across both clients.
+ *
+ * ── Descriptor shape (reconciliation note) ──────────────────────────────
+ * The plan tagged the descriptor shape `[estimate] — confirm in-PR`. Two
+ * reconciliations are confirmed here:
+ *   1. `mount.kind` is `'builtin' | 'webview'` (not the plan's three-value
+ *      `native-route | react-view | webview`). A descriptor is engine-side
+ *      and client-agnostic — it cannot know whether the consumer is mobile
+ *      (RN route) or web (React component). So a builtin tab carries
+ *      `kind:'builtin'` + a stable `target` key, and each client maps that
+ *      key to its own native view. Core tabs (PR-2) carry `kind:'webview'`
+ *      + the core's `project_tab` URL.
+ *   2. `source` is the `'builtin' | 'core'` discriminant (the dispatch brief
+ *      called this `kind`). v2 will add `'custom'` for user-built tabs — the
+ *      union is left open at the type level but no `'custom'` value is
+ *      emitted now.
+ */
+
+// L6 — the descriptor wire shape (`TabDescriptor` + its `TabScope` /
+// `TabSource` / `TabMountKind` / `TabMount` component types) moved to the
+// node-free `@neutronai/wire-types` leaf so BOTH clients import ONE source
+// instead of the hand-mirrored type blocks that used to live in
+// `app/lib/tabs-client.ts` + `landing/chat-react/tabs-client.ts` (deleted in
+// L6). This module KEEPS the resolver logic + `BUILTIN_TABS` +
+// `CoreTabContribution`, and re-exports the types so its existing importers
+// (the HTTP surface, both tab clients) stay valid.
+import type { TabDescriptor, TabScope } from '@neutronai/wire-types'
+
+export type { TabDescriptor, TabMount, TabMountKind, TabScope, TabSource } from '@neutronai/wire-types'
+
+/**
+ * The static builtin tab set. Per-project tabs first
+ * (Chat / Work / Documents), then the global Admin tab. `target` keys match the
+ * existing client routes: mobile `app/app/projects/[id]/{chat,workboard,docs}.tsx`
+ * + the Admin surface.
+ *
+ * Order is spaced by 10 so a tab can slot between two existing ones without
+ * renumbering; the Work (work_board) tab sits at **order 5** — right after Chat,
+ * before Documents — per the Work Board master plan §1/§9 (the live work-tracker
+ * is the orchestrator's external memory, so it ranks just below the
+ * conversation). Tasks is intentionally absent — it returns as a Core-contributed
+ * webview tab (WAVE 3), NOT an engine builtin.
+ */
+const BUILTIN_TABS: readonly TabDescriptor[] = Object.freeze([
+  {
+    key: 'chat',
+    label: 'Chat',
+    scope: 'project',
+    source: 'builtin',
+    order: 0,
+    mount: { kind: 'builtin', target: 'chat' },
+  },
+  {
+    // User-facing label is "Work" (Ryan directive, M1 UX redesign — was "Plan").
+    // The internal key, target, tool names (`work_board_*`), CSS (`cwb-`), and DB
+    // table keep the `work_board` identifier — only the visible label reads "Work".
+    key: 'work_board',
+    label: 'Work',
+    scope: 'project',
+    source: 'builtin',
+    order: 5,
+    mount: { kind: 'builtin', target: 'workboard' },
+  },
+  {
+    key: 'documents',
+    label: 'Documents',
+    scope: 'project',
+    source: 'builtin',
+    order: 10,
+    mount: { kind: 'builtin', target: 'docs' },
+  },
+  {
+    // Per-project Settings — hosts the credentials UI (per-project / global
+    // service tokens), project rename + emoji, and the collaborators
+    // (display-only, M2-gated) scaffold. Order 15 slots it after Documents (10)
+    // and before any Core-contributed tab (base 100), so it's the last builtin
+    // in the per-project set: Chat / Work / Documents / Settings.
+    key: 'settings',
+    label: 'Settings',
+    scope: 'project',
+    source: 'builtin',
+    order: 15,
+    mount: { kind: 'builtin', target: 'settings' },
+  },
+  // NOTE: the builtin `tasks` tab was REMOVED (Ryan directive, WAVE 3) — Tasks
+  // returns as a Core-contributed webview tab via the `CoreTabContribution`
+  // union, NOT as an engine builtin. Do not re-add a hardcoded tasks tab.
+  {
+    key: 'admin',
+    label: 'Admin',
+    scope: 'global',
+    source: 'builtin',
+    order: 0,
+    mount: { kind: 'builtin', target: 'admin' },
+  },
+])
+
+/**
+ * A Core-contributed tab, gathered by the HTTP layer from an installed Core's
+ * manifest `project_tab` ui_component. The registry stays pure — callers
+ * resolve installs + manifests and pass the contributions in.
+ *
+ * For the per-project endpoint, `target` has `<project_id>` already
+ * substituted to the concrete project; for the global endpoint it keeps the
+ * `<project_id>` placeholder (the client substitutes per project at nav time,
+ * mirroring `open_app_tab`).
+ */
+export interface CoreTabContribution {
+  /** Slug of the contributing Core (→ descriptor `core_slug`). */
+  core_slug: string
+  /** Tab label; the HTTP layer falls back to the slug when unnamed. */
+  label: string
+  /** Webview URL/entry the client renders for this Core's tab. */
+  target: string
+}
+
+/**
+ * Base `order` for Core-contributed tabs. Builtins occupy 0/5/10 (project)
+ * and 0 (global); Cores slot AFTER them. Install order is preserved by adding
+ * the contribution index, so two Cores keep a stable relative order.
+ */
+const CORE_TAB_ORDER_BASE = 100
+
+/** Build a Core-contributed descriptor for a given scope + contribution. */
+function coreDescriptor(
+  scope: TabScope,
+  c: CoreTabContribution,
+  index: number,
+): TabDescriptor {
+  return {
+    key: `core:${c.core_slug}`,
+    label: c.label,
+    scope,
+    source: 'core',
+    core_slug: c.core_slug,
+    order: CORE_TAB_ORDER_BASE + index,
+    mount: { kind: 'webview', target: c.target },
+  }
+}
+
+/** Deep-freeze a descriptor so callers can't mutate the shared builtin set. */
+function cloneDescriptor(d: TabDescriptor): TabDescriptor {
+  return {
+    key: d.key,
+    label: d.label,
+    scope: d.scope,
+    source: d.source,
+    ...(d.core_slug !== undefined ? { core_slug: d.core_slug } : {}),
+    order: d.order,
+    mount: { kind: d.mount.kind, target: d.mount.target },
+  }
+}
+
+/**
+ * Resolve the ordered tab descriptors for a scope: the builtin tabs for that
+ * scope, UNIONed with the supplied Core contributions, sorted ascending by
+ * `order` (builtins first, Cores after). The return is a fresh array of fresh
+ * objects every call, so callers (and the HTTP surface that JSON-encodes them)
+ * can never mutate the shared builtin set.
+ *
+ * `cores` defaults to empty — passing no contributions yields the builtin-only
+ * result (the pre-PR-2 behaviour), so callers that don't resolve installs are
+ * unaffected.
+ */
+export function resolveTabs(
+  scope: TabScope,
+  cores: readonly CoreTabContribution[] = [],
+): TabDescriptor[] {
+  const builtins = BUILTIN_TABS.filter((t) => t.scope === scope).map(cloneDescriptor)
+  const coreTabs = cores.map((c, i) => coreDescriptor(scope, c, i))
+  return [...builtins, ...coreTabs].sort((a, b) => a.order - b.order)
+}
+
+/** Per-project tab descriptors: Chat/Work/Documents + per-project Core tabs. */
+export function resolveProjectTabs(
+  cores: readonly CoreTabContribution[] = [],
+): TabDescriptor[] {
+  return resolveTabs('project', cores)
+}
+
+/** Global tab descriptors: builtin Admin + globally-installed Core tabs. */
+export function resolveGlobalTabs(
+  cores: readonly CoreTabContribution[] = [],
+): TabDescriptor[] {
+  return resolveTabs('global', cores)
+}

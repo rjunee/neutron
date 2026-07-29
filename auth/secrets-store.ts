@@ -1,0 +1,558 @@
+/**
+ * @neutronai/auth — multi-secret encrypted-at-rest store.
+ *
+ * Generalizes `EncryptedBotTokenStore` (the per-instance bot token store,
+ * P1 S4) into a multi-secret store keyed by `(owner_handle, kind, label)`.
+ * The AES-256-GCM envelope shape `{ v: 1, iv_b64, ct_b64, tag_b64 }` is
+ * unchanged — a token written by the legacy per-instance bot store decrypts
+ * unchanged via this module.
+ *
+ * **2026-05-12 rename-canonicalisation fix:** the lookup key was previously
+ * the mutable `project_slug` (== `url_slug`). After an instance rename, the
+ * gateway boot canonicalised `project_slug` to the row's NEW `url_slug`,
+ * but secret rows persisted at the ORIGINAL `url_slug` (== initial
+ * `owner_handle`) became invisible — Max OAuth + BYO API key reads
+ * silently returned null, dropping the chat surface to the gate page.
+ *
+ * The fix: callers MUST pass the FROZEN `owner_handle` (the registry
+ * row's PK, locked at provisioning time) as this store's identity
+ * parameter, NOT the mutable `url_slug`. The on-disk SQL column is still
+ * literally named `project_slug` (no migration; the value is just a
+ * string) but every TypeScript API surface in this module uses
+ * `owner_handle` so the contract is explicit.
+ *
+ * Code that does cross-instance API calls / DNS / Caddy routing legitimately
+ * uses the mutable `url_slug`. Anything that hits THIS store must use
+ * `owner_handle`.
+ *
+ * Keyfile path is `<owner_home>/.neutron-aes-key`. The legacy bot-token
+ * store ships its keyfile at the same path (verified in the legacy
+ * per-instance bot token store), so `ensureKey` REUSES
+ * the existing material instead of overwriting it. See
+ * `tests/integration/p15-secrets-store-roundtrip.test.ts` for the locked
+ * forward-compat assertion.
+ *
+ * **S3(a) secrets-at-rest hygiene:** `neutron-backup.sh` deliberately
+ * `.gitignore`s `.neutron-aes-key` — the backup remote must only ever hold
+ * `project.db` ciphertext, never the key that decrypts it. That means a data
+ * dir restored from a backup arrives WITHOUT the keyfile. `ensureKey` detects
+ * that case (existing rows in `secrets`, no keyfile) and throws
+ * `key_missing_after_restore` instead of silently minting a fresh key that
+ * could never decrypt the restored rows.
+ */
+
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  writeFileSync,
+} from 'node:fs'
+import { dirname, join } from 'node:path'
+import { createCipheriv, createDecipheriv, randomUUID } from 'node:crypto'
+import type { ProjectDb, OwnerHandle } from '@neutronai/persistence/index.ts'
+
+const KEY_LENGTH_BYTES = 32 // 256-bit AES
+const IV_LENGTH_BYTES = 12 // GCM standard
+const AUTH_TAG_LENGTH_BYTES = 16
+const KEYFILE_NAME = '.neutron-aes-key'
+
+/**
+ * Every SQLite table whose `ciphertext` column is AES-256-GCM encrypted with
+ * the SHARED `.neutron-aes-key` keyfile. The S3(a) restore guard
+ * (`hasSharedKeyEncryptedRows` → `ensureKey`) treats a restore that carries
+ * ANY of these — rows present, keyfile absent — as a keyless restore and fails
+ * loud, because minting a fresh key would silently orphan those rows forever.
+ *
+ * ⚠️ WHEN YOU ADD A NEW TABLE/COLUMN ENCRYPTED WITH THIS SHARED KEY, ADD IT
+ * HERE. Otherwise a restore carrying only that new table would slip past the
+ * guard, mint a fresh key, and permanently orphan the ciphertext (silent data
+ * loss). Current members:
+ *   - `secrets`             — `auth/secrets-store.ts`, migration 0009. Backs
+ *     bot tokens / OAuth / BYO API keys / webhook secrets; `api_keys` is
+ *     metadata-only and points here via `secret_id`, so it's covered
+ *     transitively.
+ *   - `project_credentials` — `project-credentials/store.ts` (shares this
+ *     module's crypto via `SecretCrypto`), migration 0092. Per-project service
+ *     tokens (Meta/Google Ads, Apify, the Codex OAuth bundle, …).
+ */
+export const SHARED_KEY_ENCRYPTED_TABLES = ['secrets', 'project_credentials'] as const
+
+/**
+ * TRUE when ANY shared-key-encrypted table (`SHARED_KEY_ENCRYPTED_TABLES`) has
+ * ≥1 row. A table this DB's schema does NOT yet have (a database migrated to a
+ * version before that table's migration) is treated as 0 rows — checked via
+ * `sqlite_master` first so the count never errors on a missing table.
+ *
+ * This is the S3(a) restore-detection predicate: rows here + no keyfile ⇒ a
+ * data dir restored from a backup that (correctly) excluded `.neutron-aes-key`.
+ */
+export function hasSharedKeyEncryptedRows(db: Pick<ProjectDb, 'get'>): boolean {
+  for (const table of SHARED_KEY_ENCRYPTED_TABLES) {
+    // Guard: skip a table this DB's schema does not have yet (pre-migration),
+    // so `count(*)` below never hits a "no such table" error.
+    const present = db.get<{ n: number }, [string]>(
+      "SELECT count(*) AS n FROM sqlite_master WHERE type = 'table' AND name = ?",
+      [table],
+    )
+    if (present === null || present.n === 0) continue
+    // Table name is from the hardcoded const list above (never user input), so
+    // the identifier interpolation is injection-safe.
+    const rows = db.get<{ n: number }, []>(`SELECT count(*) AS n FROM "${table}"`, [])
+    if (rows !== null && rows.n > 0) return true
+  }
+  return false
+}
+
+export type SecretKind =
+  | 'max_oauth_refresh'
+  | 'max_oauth_access'
+  | 'chatgpt_oauth'
+  | 'byo_api_key'
+  | 'bot_token'
+  | 'webhook_secret'
+  | 'channel_metadata'
+  // Generic third-party OAuth kinds — Cores declare these in their
+  // manifest's `secrets:` block per § D.10.4. The platform's SDK
+  // wrapper at `cores/sdk/secrets.ts:SecretsAccessor` capability-
+  // gates against the manifest before any value is decrypted.
+  | 'oauth_token'
+  | 'oauth_client'
+
+export interface SecretRecord {
+  id: string
+  /**
+   * Frozen `owner_handle` for the owning project. SQL column is named
+   * `project_slug` for historical reasons; the value is the FROZEN
+   * registry PK, not the mutable url_slug.
+   */
+  owner_handle: string
+  kind: SecretKind
+  label: string
+  ciphertext: string
+  created_at: number
+  rotated_at: number | null
+  expires_at: number | null
+}
+
+export interface SecretsStoreOptions {
+  /** Per-project data dir; the keyfile lives at `<data_dir>/.neutron-aes-key`. */
+  data_dir: string
+  db: ProjectDb
+  now?: () => number
+}
+
+interface EncryptedEnvelope {
+  v: 1
+  iv_b64: string
+  ct_b64: string
+  tag_b64: string
+}
+
+interface SecretRow {
+  id: string
+  /** SQL column name remains `project_slug`; value is the frozen owner_handle. */
+  project_slug: string
+  kind: string
+  label: string
+  ciphertext: string
+  created_at: number
+  rotated_at: number | null
+  expires_at: number | null
+}
+
+export type SecretsStoreErrorCode =
+  | 'not_found'
+  | 'decrypt_failed'
+  | 'duplicate_label'
+  | 'project_mismatch'
+  | 'key_missing_after_restore'
+
+export class SecretsStoreError extends Error {
+  override readonly name = 'SecretsStoreError'
+  constructor(
+    readonly code: SecretsStoreErrorCode,
+    message: string,
+    readonly cause?: unknown,
+  ) {
+    super(message)
+  }
+}
+
+export interface PutInput {
+  /**
+   * Frozen `owner_handle` for the owning project — see file header.
+   * Branded `OwnerHandle`: the compiler rejects a bare/mutable `url_slug`
+   * string here (the 2026-05-12 credential-loss bug is now a type error).
+   */
+  owner_handle: OwnerHandle
+  kind: SecretKind
+  label: string
+  plaintext: string
+  expires_at?: number
+}
+
+export interface GetInput {
+  /** Frozen `owner_handle` (branded `OwnerHandle`) — see file header. */
+  owner_handle: OwnerHandle
+  kind: SecretKind
+  label: string
+}
+
+export interface ListInput {
+  /** Frozen `owner_handle` (branded `OwnerHandle`) — see file header. */
+  owner_handle: OwnerHandle
+  kind?: SecretKind
+}
+
+export class SecretsStore {
+  private readonly key: Buffer
+  private readonly db: ProjectDb
+  private readonly now: () => number
+
+  constructor(options: SecretsStoreOptions) {
+    // S3(a): a restored-without-keyfile data dir must fail loud, not silently
+    // mint a key that can never decrypt the rows the backup already carried
+    // over. The check spans EVERY shared-key-encrypted table (`secrets` AND
+    // `project_credentials`, …), not just `secrets` — a restore carrying only
+    // project credentials would otherwise be orphaned. See `ensureKey`'s doc.
+    this.key = ensureKey(options.data_dir, () => hasSharedKeyEncryptedRows(options.db))
+    this.db = options.db
+    this.now = options.now ?? ((): number => Date.now())
+  }
+
+  async put(input: PutInput): Promise<{ id: string }> {
+    const now = this.now()
+    const id = randomUUID()
+    const ciphertext = encrypt(this.key, input.plaintext)
+    try {
+      await this.db.run(
+        `INSERT INTO secrets
+           (id, project_slug, kind, label, ciphertext, created_at, rotated_at, expires_at)
+         VALUES (?, ?, ?, ?, ?, ?, NULL, ?)`,
+        [
+          id,
+          input.owner_handle,
+          input.kind,
+          input.label,
+          ciphertext,
+          now,
+          input.expires_at ?? null,
+        ],
+      )
+    } catch (err) {
+      if (isUniqueViolation(err)) {
+        throw new SecretsStoreError(
+          'duplicate_label',
+          `secret already exists for instance=${input.owner_handle} kind=${input.kind} label=${input.label}`,
+          err,
+        )
+      }
+      throw err
+    }
+    return { id }
+  }
+
+  async get(input: GetInput): Promise<string | null> {
+    const row = this.db
+      .get<SecretRow, [string, string, string]>(
+        `SELECT id, project_slug, kind, label, ciphertext, created_at, rotated_at, expires_at
+           FROM secrets
+          WHERE project_slug = ? AND kind = ? AND label = ?`,
+        [input.owner_handle, input.kind, input.label],
+      )
+    if (row === null) return null
+    // Codex review fix: honor expires_at — an expired row behaves like a
+    // missing secret. Critical for OAuth access tokens (Max +
+    // ChatGPT) where the caller relies on stale cached tokens being
+    // rejected so the refresh-token path runs.
+    if (row.expires_at !== null && row.expires_at <= this.now()) {
+      return null
+    }
+    try {
+      return decrypt(this.key, row.ciphertext)
+    } catch (err) {
+      throw new SecretsStoreError(
+        'decrypt_failed',
+        `decrypt failed for id=${row.id}`,
+        err,
+      )
+    }
+  }
+
+  async list(input: ListInput): Promise<SecretRecord[]> {
+    const rows: SecretRow[] =
+      input.kind === undefined
+        ? this.db
+            .all<SecretRow, [string]>(
+              `SELECT id, project_slug, kind, label, ciphertext, created_at, rotated_at, expires_at
+                 FROM secrets WHERE project_slug = ? ORDER BY created_at DESC`,
+              [input.owner_handle],
+            )
+        : this.db
+            .all<SecretRow, [string, string]>(
+              `SELECT id, project_slug, kind, label, ciphertext, created_at, rotated_at, expires_at
+                 FROM secrets WHERE project_slug = ? AND kind = ? ORDER BY created_at DESC`,
+              [input.owner_handle, input.kind],
+            )
+    return rows.map(rowToRecord)
+  }
+
+  /**
+   * Sprint 23 r6 P2 — atomically replace a set of `(kind, label)`
+   * rows in a single transaction. Used by `MaxOAuthClient.persistPasteToken`
+   * so a partial failure between the delete + the second insert
+   * cannot leave the owner with a half-written set of paste-token
+   * rows.
+   *
+   * The transaction does, for each input entry:
+   *   1. DELETE any existing rows for `(owner_handle, kind, label)`.
+   *   2. INSERT the new ciphertext.
+   * Wrapped in BEGIN/COMMIT — if any step throws, the whole
+   * transaction rolls back and the previous values stay intact.
+   *
+   * Returns the inserted ids in input order.
+   */
+  async replaceAtomic(
+    input: ReadonlyArray<PutInput>,
+  ): Promise<Array<{ id: string }>> {
+    const now = this.now()
+    const prepared = input.map((entry) => ({
+      entry,
+      id: randomUUID(),
+      ciphertext: encrypt(this.key, entry.plaintext),
+    }))
+    return await this.db.transaction(async (tx) => {
+      for (const { entry } of prepared) {
+        await tx.run(
+          `DELETE FROM secrets WHERE project_slug = ? AND kind = ? AND label = ?`,
+          [entry.owner_handle, entry.kind, entry.label],
+        )
+      }
+      for (const { entry, id, ciphertext } of prepared) {
+        try {
+          await tx.run(
+            `INSERT INTO secrets
+               (id, project_slug, kind, label, ciphertext, created_at, rotated_at, expires_at)
+             VALUES (?, ?, ?, ?, ?, ?, NULL, ?)`,
+            [
+              id,
+              entry.owner_handle,
+              entry.kind,
+              entry.label,
+              ciphertext,
+              now,
+              entry.expires_at ?? null,
+            ],
+          )
+        } catch (err) {
+          if (isUniqueViolation(err)) {
+            throw new SecretsStoreError(
+              'duplicate_label',
+              `secret already exists for instance=${entry.owner_handle} kind=${entry.kind} label=${entry.label}`,
+              err,
+            )
+          }
+          throw err
+        }
+      }
+      return prepared.map(({ id }) => ({ id }))
+    })
+  }
+
+  async rotate(
+    id: string,
+    new_plaintext: string,
+    options?: { expires_at?: number },
+  ): Promise<void> {
+    const now = this.now()
+    const ciphertext = encrypt(this.key, new_plaintext)
+    await this.db.transaction(async (tx) => {
+      const existing = tx
+        .prepare<{ id: string }, [string]>(`SELECT id FROM secrets WHERE id = ?`)
+        .get(id)
+      if (existing === null) {
+        throw new SecretsStoreError('not_found', `secret id=${id} not found`)
+      }
+      // Update expires_at when supplied so OAuth refresh-token flows
+      // reset the access-token validity window each time. Sentinel
+      // value `null` clears the expiry; absent keeps prior value.
+      if (options !== undefined && 'expires_at' in options) {
+        const exp = options.expires_at ?? null
+        await tx.run(
+          `UPDATE secrets SET ciphertext = ?, rotated_at = ?, expires_at = ? WHERE id = ?`,
+          [ciphertext, now, exp, id],
+        )
+      } else {
+        await tx.run(
+          `UPDATE secrets SET ciphertext = ?, rotated_at = ? WHERE id = ?`,
+          [ciphertext, now, id],
+        )
+      }
+    })
+  }
+
+  async delete(id: string): Promise<void> {
+    await this.db.transaction(async (tx) => {
+      const existing = tx
+        .prepare<{ id: string }, [string]>(`SELECT id FROM secrets WHERE id = ?`)
+        .get(id)
+      if (existing === null) {
+        throw new SecretsStoreError('not_found', `secret id=${id} not found`)
+      }
+      await tx.run(`DELETE FROM secrets WHERE id = ?`, [id])
+    })
+  }
+
+  /**
+   * Forward-compat helper: decrypt a ciphertext envelope written by the
+   * legacy `EncryptedBotTokenStore`. Used by the per-instance bot store's
+   * P1.5 wrapper; not part of the public storage surface.
+   */
+  decryptEnvelope(envelope: string): string {
+    return decrypt(this.key, envelope)
+  }
+
+  encryptPlaintext(plaintext: string): string {
+    return encrypt(this.key, plaintext)
+  }
+}
+
+function rowToRecord(row: SecretRow): SecretRecord {
+  if (!isSecretKind(row.kind)) {
+    throw new SecretsStoreError(
+      'decrypt_failed',
+      `unknown secret kind in DB: ${row.kind}`,
+    )
+  }
+  return {
+    id: row.id,
+    owner_handle: row.project_slug,
+    kind: row.kind,
+    label: row.label,
+    ciphertext: row.ciphertext,
+    created_at: row.created_at,
+    rotated_at: row.rotated_at,
+    expires_at: row.expires_at,
+  }
+}
+
+function isSecretKind(value: string): value is SecretKind {
+  return (
+    value === 'max_oauth_refresh' ||
+    value === 'max_oauth_access' ||
+    value === 'chatgpt_oauth' ||
+    value === 'byo_api_key' ||
+    value === 'bot_token' ||
+    value === 'webhook_secret' ||
+    value === 'channel_metadata' ||
+    value === 'oauth_token' ||
+    value === 'oauth_client'
+  )
+}
+
+function isUniqueViolation(err: unknown): boolean {
+  if (err === null || typeof err !== 'object') return false
+  const e = err as { message?: unknown }
+  return typeof e.message === 'string' && /UNIQUE constraint failed/i.test(e.message)
+}
+
+function encrypt(key: Buffer, plaintext: string): string {
+  const iv = crypto.getRandomValues(new Uint8Array(IV_LENGTH_BYTES))
+  const cipher = createCipheriv('aes-256-gcm', key, Buffer.from(iv))
+  const ct = Buffer.concat([cipher.update(plaintext, 'utf8'), cipher.final()])
+  const tag = cipher.getAuthTag()
+  if (tag.length !== AUTH_TAG_LENGTH_BYTES) {
+    throw new Error(`unexpected auth tag length ${tag.length}`)
+  }
+  const env: EncryptedEnvelope = {
+    v: 1,
+    iv_b64: Buffer.from(iv).toString('base64'),
+    ct_b64: ct.toString('base64'),
+    tag_b64: tag.toString('base64'),
+  }
+  return JSON.stringify(env)
+}
+
+function decrypt(key: Buffer, envelope: string): string {
+  let env: EncryptedEnvelope
+  try {
+    env = JSON.parse(envelope) as EncryptedEnvelope
+  } catch (err) {
+    throw new Error(`malformed envelope: ${err instanceof Error ? err.message : 'unknown'}`)
+  }
+  if (env.v !== 1) throw new Error(`unsupported envelope version v=${env.v}`)
+  const decipher = createDecipheriv('aes-256-gcm', key, Buffer.from(env.iv_b64, 'base64'))
+  decipher.setAuthTag(Buffer.from(env.tag_b64, 'base64'))
+  const pt = Buffer.concat([
+    decipher.update(Buffer.from(env.ct_b64, 'base64')),
+    decipher.final(),
+  ])
+  return pt.toString('utf8')
+}
+
+/**
+ * Resolve the AES-256 keyfile for an instance. Locked behavior:
+ *   - If `<data_dir>/.neutron-aes-key` exists, REUSE its bytes verbatim.
+ *     This is the forward-compat hook for instances whose bot-token store
+ *     already created the keyfile in P1 — overwriting would brick every
+ *     existing bot token. See `EncryptedBotTokenStore.ensureKey` in the
+ *     legacy per-instance bot token store for the original writer.
+ *   - S3(a): if the keyfile is ABSENT but `hasExistingEncryptedRows` reports
+ *     that ANY shared-key-encrypted table (`secrets` OR `project_credentials`,
+ *     …) already has rows, this is a data dir restored from a backup
+ *     (`neutron-backup.sh` deliberately excludes `.neutron-aes-key` from the
+ *     bundle, so a fresh clone of the backup remote never carries it) that has
+ *     not yet had its keyfile re-provisioned. Minting a fresh key here would
+ *     silently orphan every one of those encrypted rows — the store would boot
+ *     fine and reads would just start throwing `decrypt_failed` (or worse, GCM
+ *     auth-tag mismatches) the first time something is decrypted. Fail LOUD
+ *     instead, with a message that says exactly what to do.
+ *   - Otherwise generate a fresh 32-byte key, write it with mode 0600,
+ *     and return the bytes.
+ *
+ * `hasExistingEncryptedRows` is injected (rather than querying a `ProjectDb`
+ * directly) so this stays a pure, easily-testable function; `SecretsStore`'s
+ * constructor wires it to `hasSharedKeyEncryptedRows` (which checks EVERY
+ * shared-key table, guarding each with a table-exists check).
+ *
+ * Exported so `__tests__/secrets-store.test.ts` can assert the legacy
+ * keyfile is reused.
+ */
+export function ensureKey(data_dir: string, hasExistingEncryptedRows?: () => boolean): Buffer {
+  const path = join(data_dir, KEYFILE_NAME)
+  if (existsSync(path)) {
+    const buf = readFileSync(path)
+    if (buf.length !== KEY_LENGTH_BYTES) {
+      throw new SecretsStoreError(
+        'decrypt_failed',
+        `aes keyfile at ${path} has wrong length ${buf.length} (expected ${KEY_LENGTH_BYTES})`,
+      )
+    }
+    // Codex follow-up — defense-in-depth: tighten an existing keyfile to
+    // 0600 even on the legacy-reuse path. `writeFileSync({mode:0o600})`
+    // only applies on CREATE, so a copied / manually-placed keyfile at
+    // 0644 would leave every secret in `secrets` decryptable by other
+    // local users. Mirrors the Argus r1 finding 3 chmodSync fix for
+    // `~/.codex/auth.json`.
+    chmodSync(path, 0o600)
+    return buf
+  }
+  if (hasExistingEncryptedRows?.() === true) {
+    throw new SecretsStoreError(
+      'key_missing_after_restore',
+      `no AES keyfile at ${path}, but a shared-key-encrypted table (secrets / ` +
+        `project_credentials) already has rows. This data dir looks restored from a backup — ` +
+        `neutron-backup.sh deliberately excludes ${KEYFILE_NAME} from the bundle (S3: ` +
+        `secrets-at-rest hygiene), so a fresh clone of the backup remote never carries it. ` +
+        `Minting a new key here would silently make every existing secret AND project ` +
+        `credential permanently undecryptable. Copy the ORIGINAL ${KEYFILE_NAME} into ` +
+        `${data_dir} before starting the server (it never left the source machine unless you ` +
+        `provisioned it separately), then restart.`,
+    )
+  }
+  mkdirSync(dirname(path), { recursive: true })
+  const fresh = Buffer.from(crypto.getRandomValues(new Uint8Array(KEY_LENGTH_BYTES)))
+  writeFileSync(path, fresh, { mode: 0o600 })
+  return fresh
+}

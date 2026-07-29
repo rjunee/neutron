@@ -1,0 +1,16 @@
+{
+  "name": "@neutronai/tasks",
+  "type": "module",
+  "main": "./index.ts",
+  "private": true,
+  "dependencies": {
+    "@neutronai/contracts": "workspace:*",
+    "@neutronai/cron": "workspace:*",
+    "@neutronai/logger": "workspace:*",
+    "@neutronai/migrations": "workspace:*",
+    "@neutronai/onboarding": "workspace:*",
+    "@neutronai/persistence": "workspace:*",
+    "@neutronai/reminders": "workspace:*",
+    "@neutronai/runtime": "workspace:*"
+  }
+}

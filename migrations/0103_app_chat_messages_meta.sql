@@ -1,0 +1,39 @@
+-- 0103_app_chat_messages_meta.sql
+--
+-- W3a — resume-fidelity stage-0 (the cheap slice of W3 executable early).
+--
+-- BACKGROUND: `app_chat_messages` (migration 0079) persists only the plain
+-- message envelope — `{ body, role, message_id, seq, client_msg_id,
+-- project_id, attachments, created_at }`. An AGENT reply, however, can carry
+-- structured presentation metadata on the live wire envelope
+-- (`AppWsOutboundAgentMessage`): `options` (button list), `prompt_id`, `kind`,
+-- `citations`, `image_urls`, `doc_refs`, `allow_freeform`,
+-- `upload_affordance`. None of that had a durable slot, so a WS `resume`
+-- replay reconstructed a PLAIN agent bubble — buttons rendered as inert plain
+-- text, citations/doc-links vanished. This is the only user-visible fidelity
+-- gap the app-ws chat-sync log left open (the G2 hydration-parity matrix pins
+-- it: every structured field was DROPPED on the `wsResume` path).
+--
+-- WHAT THIS ADDS: ONE nullable JSON column, `meta_json`, holding the agent
+-- message's structured presentation fields exactly as the live-push envelope
+-- carried them. `AppWsAdapter.send` stamps it from the outbound envelope at
+-- persist time; `appChatRowToEnvelope` re-applies it on replay so a
+-- reconnecting client re-hydrates the SAME structured message it saw live.
+-- This deliberately stops SHORT of the full W3 transcript unification (no
+-- schema widen into per-field columns, no `button_prompts` fold, no
+-- double-write kill) — it is the stage-0 fidelity fix only.
+--
+-- Column rationale:
+--
+-- * `meta_json` — JSON object of the agent-message structured fields (or NULL
+--   for user messages and for agent messages with no structured metadata).
+--   Opaque at the persistence layer: the app-ws adapter owns the shape and
+--   defensively re-validates every field on replay, so a future envelope
+--   field rides along without a schema change and a corrupt blob degrades to
+--   a plain bubble rather than a throw. Mirrors the `attachments_json`
+--   posture.
+--
+-- Forward-only; no down-migration (Neutron OSS contract). ADD COLUMN with a
+-- nullable TEXT type is legal on a STRICT table.
+
+ALTER TABLE app_chat_messages ADD COLUMN meta_json TEXT;

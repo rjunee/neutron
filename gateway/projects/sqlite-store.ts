@@ -1,0 +1,630 @@
+/**
+ * @neutronai/gateway/projects — SQLite-backed project settings store
+ * (ISSUES #9).
+ *
+ * Backs the P5.2 `GET` + `PATCH` `/api/app/projects/<id>/settings`
+ * surface + the new `GET /api/app/projects` list endpoint with the
+ * canonical per-project `projects` + `project_members` tables
+ * (migration `0038_projects_canonical.sql`).
+ *
+ * Replaces `InMemoryProjectSettingsStore` in production
+ * (`gateway/index.ts` boot wiring). The in-memory implementation
+ * stays in the surface module as a test seam — gateway test suites
+ * that boot the surface against a synthetic auth resolver continue to
+ * use it; the production-composer integration test boots this
+ * SQLite-backed store against a real `ProjectDb` + applied migrations
+ * so the wire shape, the surface, and the substrate are exercised
+ * end-to-end (the same anti-pattern guard PR #229/#231/#233 enforce).
+ *
+ * Auto-seed-on-first-access. `get(project_slug, project_id)` upserts
+ * a default row if none exists for the requested project_id —
+ * matching the in-memory store's behaviour so the settings drawer
+ * renders the canonical sections without an explicit "create project"
+ * flow. Every first-access row comes from the generic default builder
+ * (`buildDefaultSettings`): a humanised name + empty fields. There is
+ * no hardcoded demo seed (the `KNOWN_PROJECTS` map was removed in the
+ * R6 refactor — audit P2-11); real projects are written to the table
+ * by the onboarding wow-moment.
+ *
+ * Project scoping. The `projects` + `project_members` tables live in
+ * the per-instance SQLite file already (one DB per instance); the store
+ * does NOT carry a `project_slug` column on either table. The
+ * `project_slug` argument to the methods is interface parity with
+ * `InMemoryProjectSettingsStore` (which keys by
+ * `project_slug::project_id`) — it is not used in any WHERE clause
+ * because the DB itself IS the project scope. Cross-instance audit
+ * tooling that wants to enumerate projects across instances can read
+ * sqlite_master / iterate the instance fleet.
+ */
+
+import type { ProjectDb } from '@neutronai/persistence/index.ts'
+import type { AgentEngagementMode } from '@neutronai/connect/agent-engagement.ts'
+import { appWsProjectTopicId } from '@neutronai/channels/adapters/app-ws/envelope.ts'
+import {
+  type PrivacyMode,
+  type BillingMode,
+  type ProjectMember,
+  type ProjectSettings,
+  type ProjectListEntry,
+  type ProjectSettingsStore,
+  type ArchivedProjectItem,
+  buildDefaultSettings,
+} from '../http/app-projects-surface.ts'
+import { resolveProjectEmoji } from './default-emoji.ts'
+
+interface ProjectRow {
+  id: string
+  name: string
+  description: string | null
+  persona: string | null
+  emoji: string | null
+  privacy_mode: PrivacyMode
+  billing_mode: BillingMode
+  agent_engagement_mode: AgentEngagementMode
+  created_at: string
+  updated_at: string
+  /** ISO-8601; NULL on legacy rows → sort falls back to updated_at. */
+  last_activity_at: string | null
+  /** ISO-8601; NULL = active (in the rail). Set = archived (migration 0095). */
+  archived_at: string | null
+}
+
+interface MemberRow {
+  project_id: string
+  user_id: string
+  name: string
+  role: 'owner' | 'member'
+  joined_at: string
+}
+
+const PROJECT_COLS =
+  'id, name, description, persona, emoji, privacy_mode, billing_mode, agent_engagement_mode, created_at, updated_at, last_activity_at, archived_at'
+
+function nowIso(): string {
+  return new Date().toISOString()
+}
+
+/**
+ * Map a (project row, member rows) pair to the canonical
+ * `ProjectSettings` wire shape used by the HTTP surface. Members are
+ * sorted owner-first, then alphabetic by name, matching the brief's
+ * § 4.5 settings-drawer rendering contract.
+ */
+function rowToSettings(row: ProjectRow, members: MemberRow[]): ProjectSettings {
+  const sorted = [...members].sort((a, b) => {
+    if (a.role === 'owner' && b.role !== 'owner') return -1
+    if (b.role === 'owner' && a.role !== 'owner') return 1
+    return a.name.localeCompare(b.name)
+  })
+  const projectMembers: ProjectMember[] = sorted.map((m) => ({
+    user_id: m.user_id,
+    name: m.name,
+    role: m.role,
+  }))
+  return {
+    id: row.id,
+    name: row.name,
+    description: row.description ?? '',
+    persona: row.persona ?? '',
+    // Resolve a legacy NULL emoji to the deterministic default from the name,
+    // so every row reads back a concrete glyph for the rail.
+    emoji: resolveProjectEmoji(row.emoji, row.name),
+    privacy_mode: row.privacy_mode,
+    billing_mode: row.billing_mode,
+    agent_engagement_mode: row.agent_engagement_mode,
+    members: projectMembers,
+  }
+}
+
+/**
+ * SQLite-backed implementation of `ProjectSettingsStore` + a
+ * `list(project_slug)` extension used by the new
+ * `GET /api/app/projects` route. Mounted in production via
+ * `gateway/index.ts` (replaces `InMemoryProjectSettingsStore` from
+ * the P5.2 substrate stub).
+ */
+export class SqliteProjectSettingsStore implements ProjectSettingsStore {
+  constructor(private readonly db: ProjectDb) {}
+
+  async get(
+    project_slug: string,
+    project_id: string,
+  ): Promise<ProjectSettings | null> {
+    void project_slug
+    const row = this.readRow(project_id)
+    if (row !== null) {
+      const members = this.readMembers(project_id)
+      return rowToSettings(row, members)
+    }
+    // Synthesise-WITHOUT-persisting (ISSUES #412). The settings drawer GETs
+    // project_id N and expects a canonical doc back, so we still synth one via
+    // `buildDefaultSettings` — but a READ must not create a project.
+    //
+    // This used to persist the seed, which made `GET /api/app/projects/<any
+    // id>/settings` a project-CREATION endpoint: `list()` reads this same
+    // table, so one stray navigation manufactured a permanent rail entry. It
+    // happened in production on 2026-07-28 — a single tap on a mobile rail
+    // tile created a real, empty "General" project in Ryan's instance, which
+    // then showed up as a duplicate alongside the synthetic General scope.
+    //
+    // Returning the seed unpersisted is byte-identical to the old
+    // persist-then-reread result: `buildDefaultSettings` sets
+    // `emoji: defaultProjectEmoji(name)` and `rowToSettings` resolves a NULL
+    // emoji column through `resolveProjectEmoji(null, name)`, which is the
+    // same call (`contracts/default-emoji.ts:237`); a freshly seeded row has
+    // no members either way. So the drawer renders exactly as before.
+    //
+    // The row is materialised on the first real WRITE instead — see `update`.
+    // Argus r1 IMPORTANT 3 — `readRow` now filters `deleted_at IS NULL`, so
+    // a soft-deleted project surfaces here as a null row. We MUST NOT
+    // auto-seed in that case: INSERT OR IGNORE would no-op on the existing
+    // (archived) id, the filtered re-read would stay null, and the seed
+    // guard below would throw. More importantly, resurrecting a project the
+    // user asked us to delete/merge is wrong. Distinguish "genuinely-new
+    // id" (seed it) from "soft-deleted id" (return not-found) by probing
+    // for ANY row with this id, deleted or not.
+    if (this.rowExistsIncludingDeleted(project_id)) {
+      return null
+    }
+    return buildDefaultSettings(project_id)
+  }
+
+  /**
+   * Write the two CONTENT columns — `description` and `persona`.
+   *
+   * WHY THIS EXISTS (M2 the legacy harness→Neutron migration). `projects.persona` is READ and
+   * fully WIRED — resolved at `open/composer.ts:1332`, threaded into the live
+   * turn at `:3431` → `gateway/wiring/build-live-agent-turn.ts:1936` — but until
+   * now NOTHING could write it after insert. `update()` accepts only
+   * privacy/engagement/name/emoji, and `upsertSeed` is INSERT-only, so the value
+   * a row was born with was the value it kept forever.
+   *
+   * That made the the legacy harness importer one-shot: a project's `one_liner` and its
+   * `PROMPT.md` persona had to be correct on the FIRST run or be unfixable
+   * without hand-editing SQLite. A dry-run→inspect→real-run flow needs the
+   * importer to CONVERGE on the source, not merely create.
+   *
+   * Deliberately NOT on the `ProjectSettingsStore` interface. No HTTP route
+   * writes these fields; putting it on the interface would advertise a surface
+   * capability that does not exist and force the in-memory test seam to
+   * implement a method nothing exercises. The importer holds a concrete
+   * `SqliteProjectSettingsStore`.
+   *
+   * Semantics mirror `update()`: only the columns PRESENT in the patch are
+   * touched (so clearing one field can never blank the other), a soft-deleted or
+   * absent row returns null rather than being created or resurrected, and an
+   * empty-string value writes SQL NULL to match `upsertSeed`'s convention — a
+   * row whose persona was never set and one explicitly set to "" must not read
+   * back differently.
+   */
+  async setContent(
+    project_slug: string,
+    project_id: string,
+    patch: { description?: string; persona?: string },
+  ): Promise<ProjectSettings | null> {
+    void project_slug
+    if (patch.description === undefined && patch.persona === undefined) {
+      // Nothing asked for is not an error, but it must not stamp `updated_at`
+      // either — a no-op write that bumps the timestamp would reorder the rail.
+      return this.get(project_slug, project_id).then((s) =>
+        this.readRow(project_id) === null ? null : s,
+      )
+    }
+    // Create-nothing, resurrect-nothing: this is a converge-on-existing writer.
+    if (this.readRow(project_id) === null) return null
+
+    const ts = nowIso()
+    const sets: string[] = []
+    const args: Array<string | null> = []
+    if (patch.description !== undefined) {
+      sets.push('description = ?')
+      args.push(patch.description.length > 0 ? patch.description : null)
+    }
+    if (patch.persona !== undefined) {
+      sets.push('persona = ?')
+      args.push(patch.persona.length > 0 ? patch.persona : null)
+    }
+    sets.push('updated_at = ?')
+    args.push(ts)
+    args.push(project_id)
+    await this.db.run(`UPDATE projects SET ${sets.join(', ')} WHERE id = ?`, args)
+
+    const row = this.readRow(project_id)
+    if (row === null) return null
+    return rowToSettings(row, this.readMembers(project_id))
+  }
+
+  async update(
+    project_slug: string,
+    project_id: string,
+    patch: {
+      privacy_mode?: PrivacyMode
+      agent_engagement_mode?: AgentEngagementMode
+      name?: string
+      emoji?: string
+    },
+  ): Promise<ProjectSettings | null> {
+    // Resolve-or-seed so callers always get a coherent doc back. The
+    // surface's PATCH never fabricates a value on the client — an
+    // undefined field in `patch` leaves the existing column in place.
+    const existing = await this.get(project_slug, project_id)
+    if (existing === null) return null
+    if (
+      patch.privacy_mode === undefined &&
+      patch.agent_engagement_mode === undefined &&
+      patch.name === undefined &&
+      patch.emoji === undefined
+    ) {
+      // A no-op PATCH is still a read — it must not create the project either
+      // (ISSUES #412).
+      return existing
+    }
+    // THIS is where a project comes into existence: an actual write. `get`
+    // above returned an unpersisted `buildDefaultSettings` doc if the row was
+    // absent, so materialise it before the UPDATE — otherwise the statement
+    // below would match zero rows and the patch would silently vanish.
+    if (this.readRow(project_id) === null) {
+      await this.upsertSeed(existing)
+    }
+    const ts = nowIso()
+    // Only touch the columns present in `patch` (each independently
+    // optional), mirroring privacy_mode's coalesce-on-undefined contract.
+    const next_privacy = patch.privacy_mode ?? existing.privacy_mode
+    const next_engagement = patch.agent_engagement_mode ?? existing.agent_engagement_mode
+    const next_name = patch.name ?? existing.name
+    // Emoji is written ONLY when the caller explicitly set one — `existing.emoji`
+    // is the RESOLVED glyph (a default when the column is NULL), so coalescing it
+    // into every UPDATE would freeze that default into the row and stop a legacy
+    // row re-deriving as its name changes. Guard the column out otherwise.
+    if (patch.emoji !== undefined) {
+      await this.db.run(
+        `UPDATE projects
+            SET name = ?,
+                emoji = ?,
+                privacy_mode = ?,
+                agent_engagement_mode = ?,
+                updated_at = ?
+          WHERE id = ?`,
+        [next_name, patch.emoji, next_privacy, next_engagement, ts, project_id],
+      )
+    } else {
+      await this.db.run(
+        `UPDATE projects
+            SET name = ?,
+                privacy_mode = ?,
+                agent_engagement_mode = ?,
+                updated_at = ?
+          WHERE id = ?`,
+        [next_name, next_privacy, next_engagement, ts, project_id],
+      )
+    }
+    const row = this.readRow(project_id)
+    if (row === null) return null
+    const members = this.readMembers(project_id)
+    return rowToSettings(row, members)
+  }
+
+  /**
+   * List every project in the instance's DB. Used by the new
+   * `GET /api/app/projects` list endpoint to back the project-list
+   * screen. Members are joined per-row.
+   *
+   * The brief's § 4.14 keeps the project-LIST UI on the dev-stub
+   * (`loadProjects()`) until "production wiring lands in a follow-up
+   * P5.x sprint" — ISSUES #9 IS that sprint. Returns rows in
+   * `updated_at DESC` order so the most-recently-touched project
+   * floats to the top of the list.
+   */
+  async list(project_slug: string, user_id?: string): Promise<ProjectListEntry[]> {
+    void project_slug
+    // 2026-06-03 (onboarding-buttons-only-tweak-later): exclude rows the
+    // settings Core soft-deleted (delete_project / merge_projects set
+    // `deleted_at`, migration 0053). Without this filter `/api/app/projects`
+    // would keep showing a project that `list_projects` already hides — the
+    // user-facing list and the tweak-later tools would disagree (Codex P2).
+    //
+    // Rail-redesign: sort by ACTIVITY (`COALESCE(last_activity_at, updated_at)`
+    // DESC) so a project with new messages pops to the top; a legacy row with a
+    // NULL activity key falls back to updated_at rather than sinking.
+    // Archived-projects (0095): the rail additionally excludes `archived_at IS
+    // NOT NULL` rows — an archived project leaves the rail but survives in the
+    // Admin tab's restorable list. A soft-delete still wins (deleted_at filter).
+    const rows = this.db
+      .prepare<ProjectRow, []>(
+        `SELECT ${PROJECT_COLS}
+           FROM projects
+          WHERE deleted_at IS NULL
+            AND archived_at IS NULL
+          ORDER BY COALESCE(last_activity_at, updated_at) DESC, id ASC`,
+      )
+      .all()
+    if (rows.length === 0) return []
+    const ids = new Set(rows.map((r) => r.id))
+    // Single-shot member read — cheaper than N+1 queries even with
+    // SQLite's in-process cost model.
+    const memberRows = this.db
+      .prepare<MemberRow, []>(
+        `SELECT project_id, user_id, name, role, joined_at FROM project_members`,
+      )
+      .all()
+    const byProject = new Map<string, MemberRow[]>()
+    for (const m of memberRows) {
+      if (!ids.has(m.project_id)) continue
+      const list = byProject.get(m.project_id)
+      if (list === undefined) byProject.set(m.project_id, [m])
+      else list.push(m)
+    }
+    return rows.map((r) => {
+      const settings = rowToSettings(r, byProject.get(r.id) ?? [])
+      return {
+        ...settings,
+        last_activity_at: r.last_activity_at ?? r.updated_at,
+        unread_count: user_id !== undefined ? this.unreadCount(user_id, r.id) : 0,
+      }
+    })
+  }
+
+  /**
+   * Per-project unread count: agent messages on the project's chat topic
+   * (`app:<user>:<project>`) with a seq beyond the highest the owner has a READ
+   * receipt for. Honest — derived from the real chat-log + receipt cursor, so a
+   * caught-up project reads 0 (never a fabricated badge). Best-effort: a read
+   * failure (e.g. the chat tables absent in a minimal test DB) degrades to 0.
+   */
+  private unreadCount(user_id: string, project_id: string): number {
+    const topic = appWsProjectTopicId(user_id, project_id)
+    try {
+      const row = this.db
+        .prepare<{ n: number }, [string, string]>(
+          `SELECT COUNT(*) AS n
+             FROM app_chat_messages m
+            WHERE m.topic_id = ?
+              AND m.role = 'agent'
+              AND m.seq > (
+                SELECT COALESCE(MAX(r.seq), 0)
+                  FROM app_chat_receipts r
+                 WHERE r.topic_id = ? AND r.read_at IS NOT NULL
+              )`,
+        )
+        .get(topic, topic)
+      return row?.n ?? 0
+    } catch {
+      return 0
+    }
+  }
+
+  /**
+   * Stamp a project's `last_activity_at` to `now` (best-effort). Called from the
+   * chat-message fan when a message lands on the project's topic, so the rail
+   * reorders (most-recent-activity first) on the next `projects_changed` frame.
+   * A no-op on a missing/soft-deleted row.
+   */
+  async touchActivity(project_id: string, iso: string = nowIso()): Promise<void> {
+    try {
+      await this.db.run(
+        `UPDATE projects SET last_activity_at = ? WHERE id = ? AND deleted_at IS NULL AND archived_at IS NULL`,
+        [iso, project_id],
+      )
+    } catch {
+      /* activity stamping must never break a message turn */
+    }
+  }
+
+  /**
+   * Stamp `last_activity_at` on any NON-DELETED row — archived rows
+   * INCLUDED (contrast `touchActivity` above, which additionally skips
+   * `archived_at IS NOT NULL` rows). P4 (table-ownership, 2026-07): moved
+   * VERBATIM (SQL byte-identical) from the Open composer's agent-reply fan
+   * (`open/composer.ts`), where an agent reply on a project topic stamps
+   * activity before the `projects_changed` re-fan. The two predicates
+   * differ by the archived filter and converging them was not provably
+   * behaviour-preserving (an archived project's reply-stamp would be
+   * dropped), so the composer's variant keeps its exact SQL as a
+   * dedicated method — flagged as a candidate for deliberate convergence
+   * in migrations/table-ownership.json. Best-effort, never throws:
+   * activity stamping must never break a message turn.
+   */
+  async touchActivityIncludingArchived(
+    project_id: string,
+    iso: string = nowIso(),
+  ): Promise<void> {
+    try {
+      await this.db.run(
+        `UPDATE projects SET last_activity_at = ? WHERE id = ? AND deleted_at IS NULL`,
+        [iso, project_id],
+      )
+    } catch {
+      /* activity stamping must never break a message turn */
+    }
+  }
+
+  /**
+   * Idempotent — insert seed rows for any project_ids in `seeds` that
+   * are not already present. Used at boot by the production composer
+   * to materialize the canonical demo projects (Neutron / Acme /
+   * Northwind) so the project-list screen renders something useful on
+   * a fresh instance. Existing rows are left untouched (PATCH-edited
+   * privacy_mode etc. survives a re-seed).
+   */
+  async seedDefaults(seeds: ReadonlyArray<ProjectSettings>): Promise<void> {
+    for (const seed of seeds) {
+      const existing = this.readRow(seed.id)
+      if (existing !== null) continue
+      await this.upsertSeed(seed)
+    }
+  }
+
+  /** Test helper — wipe every project + member row. */
+  async reset(): Promise<void> {
+    // ON DELETE CASCADE on project_members.project_id cleans up the
+    // join table when we drop the projects rows.
+    await this.db.run('DELETE FROM projects', [])
+  }
+
+  /**
+   * Read a LIVE project row. Argus r1 IMPORTANT 3 (2026-06-03): the
+   * `deleted_at IS NULL` filter is the default so neither `get` nor
+   * `update` (which resolves through `get`) can read OR mutate a
+   * soft-deleted project — `delete_project` / `merge_projects` set
+   * `deleted_at` (migration 0053) and the user-facing list already hides
+   * those rows; GET/PATCH `/api/app/projects/<id>/settings` must agree.
+   * Internal callers that genuinely need an archived row use
+   * `rowExistsIncludingDeleted` (existence only) or a dedicated query.
+   */
+  private readRow(project_id: string): ProjectRow | null {
+    // Archived-projects (0095): `archived_at IS NULL` joins the `deleted_at`
+    // filter so neither `get` nor `update` reads/mutates an ARCHIVED project —
+    // it has left the rail and the per-project Settings tab is unreachable until
+    // it is restored from the Admin tab. Archive/restore go through the
+    // dedicated methods below (which probe by id regardless of archive state).
+    const row = this.db
+      .prepare<ProjectRow, [string]>(
+        `SELECT ${PROJECT_COLS} FROM projects WHERE id = ? AND deleted_at IS NULL AND archived_at IS NULL`,
+      )
+      .get(project_id)
+    return row ?? null
+  }
+
+  /**
+   * Archive a project (archived-projects sprint, migration 0095). Sets
+   * `archived_at` so the project leaves the rail but stays in the Admin tab's
+   * restorable list. Idempotent: archiving an already-archived project reports
+   * success without a second write. Returns `false` only when there is no
+   * non-deleted row for `project_id` (unknown or soft-deleted → never archive a
+   * deleted project). `project_slug` is interface parity (the DB IS the scope).
+   */
+  async archive(project_slug: string, project_id: string): Promise<boolean> {
+    void project_slug
+    const state = this.archiveState(project_id)
+    if (state === 'absent') return false
+    if (state === 'archived') return true
+    await this.db.run(
+      `UPDATE projects SET archived_at = ?, updated_at = ? WHERE id = ? AND deleted_at IS NULL`,
+      [nowIso(), nowIso(), project_id],
+    )
+    return true
+  }
+
+  /**
+   * Restore an archived project (migration 0095): clear `archived_at` so it
+   * returns to the rail. Idempotent: restoring an already-active project reports
+   * success. Returns `false` only when there is no non-deleted row for
+   * `project_id`. Never resurrects a soft-deleted project (the `deleted_at`
+   * guard) — restore is the inverse of archive, not of delete.
+   */
+  async restore(project_slug: string, project_id: string): Promise<boolean> {
+    void project_slug
+    const state = this.archiveState(project_id)
+    if (state === 'absent') return false
+    if (state === 'active') return true
+    await this.db.run(
+      `UPDATE projects SET archived_at = NULL, updated_at = ? WHERE id = ? AND deleted_at IS NULL`,
+      [nowIso(), project_id],
+    )
+    return true
+  }
+
+  /**
+   * List every ARCHIVED (non-deleted) project — backs the Admin tab's
+   * "Archived projects" section (`GET /api/app/projects/archived`). Ordered
+   * most-recently-archived first. Emoji is resolved to a concrete glyph (a
+   * legacy NULL falls back to the deterministic default from the name) so the
+   * admin row renders the same glyph the rail showed.
+   */
+  async listArchived(project_slug: string): Promise<ArchivedProjectItem[]> {
+    void project_slug
+    const rows = this.db
+      .prepare<ProjectRow, []>(
+        `SELECT ${PROJECT_COLS}
+           FROM projects
+          WHERE deleted_at IS NULL
+            AND archived_at IS NOT NULL
+          ORDER BY archived_at DESC, id ASC`,
+      )
+      .all()
+    return rows.map((r) => ({
+      id: r.id,
+      name: r.name,
+      emoji: resolveProjectEmoji(r.emoji, r.name),
+      archived_at: r.archived_at ?? '',
+    }))
+  }
+
+  /**
+   * Classify a project id for the archive/restore path: `absent` (no row, or
+   * soft-deleted — both mean "don't touch"), `active` (live, not archived), or
+   * `archived`. A single probe restricted to `deleted_at IS NULL` so a deleted
+   * project is indistinguishable from a missing one (never archive/restore it).
+   */
+  private archiveState(project_id: string): 'absent' | 'active' | 'archived' {
+    const row = this.db
+      .prepare<{ archived_at: string | null }, [string]>(
+        `SELECT archived_at FROM projects WHERE id = ? AND deleted_at IS NULL LIMIT 1`,
+      )
+      .get(project_id)
+    if (row === undefined || row === null) return 'absent'
+    return row.archived_at === null ? 'active' : 'archived'
+  }
+
+  /**
+   * True when ANY row (live OR soft-deleted) carries this id. Used by
+   * `get` to decide between auto-seeding a genuinely-new project_id and
+   * returning not-found for a soft-deleted one (never resurrect it).
+   */
+  private rowExistsIncludingDeleted(project_id: string): boolean {
+    const row = this.db
+      .prepare<{ id: string }, [string]>(
+        `SELECT id FROM projects WHERE id = ? LIMIT 1`,
+      )
+      .get(project_id)
+    return row !== undefined && row !== null
+  }
+
+  private readMembers(project_id: string): MemberRow[] {
+    return this.db
+      .prepare<MemberRow, [string]>(
+        `SELECT project_id, user_id, name, role, joined_at
+           FROM project_members
+          WHERE project_id = ?`,
+      )
+      .all(project_id)
+  }
+
+  private async upsertSeed(seed: ProjectSettings): Promise<void> {
+    const ts = nowIso()
+    await this.db.transaction(async (tx) => {
+      // INSERT OR IGNORE — `get`'s upstream caller is async + the
+      // store is shared across HTTP requests, so two concurrent
+      // first-access GETs on the same project_id race to seed. The
+      // IGNORE keeps the loser idempotent.
+      await tx.run(
+        `INSERT OR IGNORE INTO projects
+           (id, name, description, persona, emoji, privacy_mode, billing_mode, agent_engagement_mode, created_at, updated_at, last_activity_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          seed.id,
+          seed.name,
+          seed.description.length > 0 ? seed.description : null,
+          seed.persona.length > 0 ? seed.persona : null,
+          // `seed.emoji` is the resolved default from buildDefaultSettings; persist
+          // it so a freshly-seeded row already carries a concrete glyph.
+          seed.emoji.length > 0 ? seed.emoji : null,
+          seed.privacy_mode,
+          seed.billing_mode,
+          seed.agent_engagement_mode,
+          ts,
+          ts,
+          ts,
+        ],
+      )
+      for (const m of seed.members) {
+        await tx.run(
+          `INSERT OR IGNORE INTO project_members
+             (project_id, user_id, name, role, joined_at)
+           VALUES (?, ?, ?, ?, ?)`,
+          [seed.id, m.user_id, m.name, m.role, ts],
+        )
+      }
+    })
+  }
+}

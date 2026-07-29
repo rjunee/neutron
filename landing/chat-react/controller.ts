@@ -1,0 +1,1390 @@
+/**
+ * landing/chat-react — `NeutronChatController`: the framework-agnostic data
+ * layer that bridges `@neutronai/chat-core`'s `WebChatSession` to the
+ * assistant-ui `ExternalStoreRuntime`.
+ *
+ * Why a controller and not "just a hook": the defining Telegram-grade
+ * behaviours (optimistic send, gap-free reconnect, durable transcript) all
+ * live in `WebChatSession` / the sync engine — but assistant-ui needs (a) a
+ * synchronous, snapshot-able view-model and (b) the EPHEMERAL frames the sync
+ * layer deliberately drops: `agent_message_partial` (token streaming) and the
+ * implicit "agent is replying" typing state. This controller owns exactly that
+ * glue:
+ *
+ *   - it subscribes to the session's `onChange` (durable transcript changed),
+ *     `onStatus` (connection), and `onFrame` (raw stream — added additively to
+ *     chat-core for this surface);
+ *   - it accumulates streaming partials into a live, not-yet-persisted agent
+ *     bubble, which the final `agent_message` (persisted via the Store) then
+ *     supersedes — so there is never a duplicate and never a flash;
+ *   - it derives `isRunning` (the typing indicator) from "a send is awaiting a
+ *     reply OR a stream is in flight";
+ *   - it caches a synchronous {@link ChatViewModel} the React layer reads.
+ *
+ * The session is injected via a factory so the whole controller unit-tests
+ * against a fake session + hand-fed frames — i.e. real integration coverage
+ * over the chat-core contract without a DOM or a socket.
+ */
+
+import { groupReactions } from '@neutronai/chat-core'
+
+import type { ProjectTab } from './config.ts'
+import { parseWorkBoardItems, type WorkBoardItem } from './work-board-client.ts'
+import type {
+  ChatMessage,
+  ChatMessageOption,
+  ChatMessageUploadAffordance,
+  ConnStatus,
+  PromptKind,
+  ReactionAction,
+  ReactionChip,
+  SendStatus,
+} from '@neutronai/chat-core'
+
+export type RenderRole = 'user' | 'agent'
+
+/**
+ * Track B Phase 4 — the per-message delivery ladder for an outbound (user)
+ * message: 🕓 pending → ✓ sent → ✓✓ delivered → ✓✓ read (blue). Mirrors the
+ * mobile `DeliveryState`; redefined here so the browser bundle doesn't pull in
+ * the RN `app/` package.
+ */
+export type DeliveryState = 'pending' | 'sent' | 'failed' | 'delivered' | 'read'
+
+/**
+ * BUG 3 (live history-import progress) — the in-flight state of a ChatGPT/Claude
+ * history import, derived from the server's `import_progress` frame (emitted
+ * every ~5s while the job runs). Drives a live spinner + progress line so a long
+ * import visibly works instead of stalling at a one-shot "received" banner.
+ * Null when no import is in flight. There is NO terminal `import_progress` frame
+ * — the engine advances the onboarding phase + sends the analysis `agent_message`
+ * on completion — so the controller clears this on a terminal status (defensive)
+ * OR when frames go stale (no tick for {@link NeutronChatControllerOptions.importProgressStaleMs}).
+ */
+export interface ImportProgressVM {
+  /** `import_jobs.job_id` — correlates to the upload that started the import. */
+  jobId: string
+  /** Raw job status: queued | pass1-running | pass2-running | rate_limit_* . */
+  status: string
+  /** Pass 1 (scan) or Pass 2 (synthesis). */
+  pass: 1 | 2
+  /** 0..1 completion estimate for the current pass. */
+  pct: number
+  /** Human-readable line, e.g. "Pass 1: 47/57 batches · ~3 min remaining". */
+  body: string
+}
+
+export interface RenderMessage {
+  /** Stable identity: client_msg_id for user sends, message_id for agent /
+   *  streaming bubbles. Drives assistant-ui's message keying. */
+  id: string
+  /** Track B Phase 4 — the server message id (null until acked / for a
+   *  streaming bubble). Reactions are keyed by this, NOT the render `id`
+   *  (which is the client_msg_id for user sends). */
+  messageId: string | null
+  role: RenderRole
+  text: string
+  status: SendStatus
+  /** True for an in-flight streamed agent bubble (no persisted row yet). */
+  streaming: boolean
+  attachments: readonly string[] | null
+  createdAt: number
+  /**
+   * FIX #338 — the message's real wall-clock time (ms epoch) for the bubble's
+   * timestamp + date-on-hover + day dividers. Set for DURABLE rows (from
+   * `ChatMessage.created_at`); null for a live streaming bubble / ephemeral
+   * notice (no real time yet — they render no timestamp until they persist).
+   * Distinct from {@link createdAt}, which is a mixed SORT key (real ms for
+   * durable rows, a monotonic seq for the streaming/notice tail).
+   */
+  timestampMs: number | null
+  /** Delivery ladder for user messages (null for agent / streaming bubbles). */
+  delivery: DeliveryState | null
+  /** Track B Phase 4 — per-emoji reaction chips for this message (empty when
+   *  none). `reactedBySelf` marks chips this client added. */
+  reactions: ReactionChip[]
+  /** Track B Phase 4 (edit/delete) — true when this message has been edited
+   *  (shows an "edited" marker). Always false for a deleted message. */
+  edited: boolean
+  /** Track B Phase 4 (edit/delete) — true when this message is tombstoned;
+   *  the UI renders a "message deleted" placeholder instead of the body. */
+  deleted: boolean
+  /** P1b (onboarding / quick-reply buttons) — selectable options below an agent
+   *  message's body (empty/null when none). */
+  options: readonly ChatMessageOption[] | null
+  /** P1b — outstanding-prompt id a chosen option is posted back against. */
+  promptId: string | null
+  /** P1b — whether a free-text reply is allowed alongside the buttons. */
+  allowFreeform: boolean | null
+  /** P1b — render mode for {@link options} (`buttons` default vs gallery). */
+  kind: PromptKind | null
+  /** P1b — upload affordance for an onboarding import phase (null when none). */
+  uploadAffordance: ChatMessageUploadAffordance | null
+  /** P1b — the option `value` this client has tapped (optimistic): the row
+   *  collapses/greys once set. Local-only UI state, never persisted. */
+  chosenValue: string | null
+}
+
+export interface ChatViewModel {
+  messages: RenderMessage[]
+  /** Typing/streaming indicator — true while awaiting or streaming a reply. */
+  isRunning: boolean
+  /**
+   * BUG 7 — true ONLY while a reply is pending and NOTHING has streamed yet
+   * (no live streaming bubble). The typing indicator renders off THIS, not
+   * `isRunning`: once a streaming bubble exists it IS the pending affordance,
+   * so co-rendering the dots would stack an (often momentarily empty) bubble
+   * above the typing dots. Distinct from `isRunning`, which also stays true
+   * during streaming so the composer shows Stop.
+   */
+  awaitingFirstToken: boolean
+  /**
+   * Chat-typing persistence — true while the active project's Work Board has at
+   * least one `in_progress` item (the SAME signal that flashes the Work-tab
+   * active-work dot). The typing indicator ORs this in with `awaitingFirstToken`
+   * so the dots stay visible for the WHOLE processing window — including a long
+   * or background build that continues AFTER the ack turn settles (the agent
+   * acks, dispatches the build, `awaitingReply` clears, but the board still shows
+   * work in flight). Clears the moment the board reports no `in_progress` item
+   * (work marked done), so the dots stop exactly when the work completes.
+   */
+  hasActiveWork: boolean
+  status: ConnStatus
+  /** Count of sends still queued/unacked (offline tail). */
+  pending: number
+  projectId: string | null
+  /**
+   * The owner's project list for the rail. Seeded from the page bootstrap and
+   * refreshed LIVE when the server fans a `projects_changed` frame (FIX 1) — so
+   * projects created mid-onboarding appear without a reload. Reactive (on the
+   * VM) rather than read from the static bootstrap config.
+   */
+  projects: ProjectTab[]
+  /** Track B Phase 4 — delivery state of the most recent user message, for a
+   *  Telegram-style status line under the thread. Null when none sent. */
+  latestUserDelivery: DeliveryState | null
+  /** BUG 3 — live history-import progress (null when no import is in flight). */
+  importProgress: ImportProgressVM | null
+  /**
+   * M1 UX REDESIGN — an ephemeral SYSTEM notification (e.g. the cold-start
+   * "Waking up…" ack, a quota notice). Rendered as a quiet centered PILL, NOT a
+   * chat bubble — errors and command results are chat bubbles; only genuine
+   * notifications use this channel. Null when there's nothing to announce; cleared
+   * the moment a real reply starts streaming (so the pill doesn't linger).
+   */
+  systemNotice: SystemNoticeVM | null
+}
+
+/**
+ * M1 UX REDESIGN — a quiet system notification (cold-start ack / quota). Small,
+ * muted, a spinner/icon + short text; distinct from a chat bubble.
+ */
+export interface SystemNoticeVM {
+  text: string
+}
+
+/**
+ * M1 — recognise the gateway's cold-start acknowledgement so it renders as a
+ * quiet system pill instead of a chat bubble. Mirrors
+ * `gateway/wiring/build-live-agent-turn.ts` `COLD_START_ACK_BODY`
+ * ("⏳ Waking up, one moment…"); matched by its stable leading marker so a minor
+ * copy tweak (trailing punctuation) still routes to the pill. Kept lenient on
+ * purpose — a false positive only restyles a rare, transient ack.
+ */
+function isColdStartAck(body: string): boolean {
+  return /^\s*⏳\s*Waking up\b/i.test(body)
+}
+
+/** The slice of `WebChatSession` the controller depends on (injectable). */
+export interface ControllerSession {
+  start(): void
+  stop(): void
+  setActive(active: boolean): void
+  /** W5 GAP-2 — network-reachability signal: reset backoff + reconnect NOW
+   *  (optional so legacy fakes still satisfy the interface). */
+  notifyReachable?(): void
+  /** W5 GAP-4 — re-drive not-yet-acked sends (a failed message's retry action).
+   *  Idempotent on client_msg_id (optional so legacy fakes still satisfy). */
+  retry?(client_msg_id: string): Promise<void>
+  status(): ConnStatus
+  send(
+    body: string,
+    opts?: { client_msg_id?: string; project_id?: string; attachments?: readonly string[] },
+  ): Promise<void>
+  messages(): Promise<ChatMessage[]>
+  pendingCount(): Promise<number>
+  /** Track B Phase 4 — report read messages (optional so legacy fakes still
+   *  satisfy the interface). */
+  markRead?(messageIds: readonly string[]): void
+  /** Track B Phase 4 — add/remove an emoji reaction (optional so legacy fakes
+   *  still satisfy the interface). */
+  react?(messageId: string, emoji: string, action: ReactionAction): boolean
+  /** Track B Phase 4 (edit/delete) — edit / delete a message the client
+   *  authored (optional so legacy fakes still satisfy the interface). */
+  editMessage?(messageId: string, body: string): boolean
+  deleteMessage?(messageId: string): boolean
+  /** P1b (onboarding / quick-reply buttons) — post a tapped option back to the
+   *  server (optional so legacy fakes still satisfy the interface). */
+  sendButtonChoice?(promptId: string, choiceValue: string, freeformText?: string): boolean
+  /** This client's device id, for read-tick self-exclusion (optional). */
+  readonly device_id?: string
+}
+
+/** Sinks the controller hands to the session factory so it can observe it. */
+export interface ControllerSinks {
+  onChange: () => void
+  onStatus: (status: ConnStatus) => void
+  onFrame: (frame: unknown) => void
+}
+
+/**
+ * The active conversation scope a session is bound to: the durable store key +
+ * WS topic (`topicId`) and the project it represents (`projectId`, null =
+ * General). The controller hands this to the session factory so each project
+ * gets its OWN socket + transcript; switching projects recreates the session
+ * with a new scope.
+ */
+export interface SessionScope {
+  topicId: string
+  projectId: string | null
+}
+
+export interface NeutronChatControllerOptions {
+  /** Build a session bound to `scope` (its topic + project). Called once at
+   *  construction and again on every project switch (a fresh per-project
+   *  socket). */
+  createSession: (sinks: ControllerSinks, scope: SessionScope) => ControllerSession
+  /** Map an active project (null = General) to its durable store key + WS topic
+   *  (`app:<user>` for General, `app:<user>:<project>` for a project). Optional:
+   *  when omitted, a deterministic per-project fallback is used (sufficient for
+   *  tests that inject their own fake session; production wires the real one in
+   *  `main.tsx`). */
+  topicForProject?: (projectId: string | null) => string
+  projectId?: string | null
+  /** Initial project list from the page bootstrap (FIX 1 — kept reactive). */
+  projects?: ProjectTab[]
+  /**
+   * BUG 3 — how long (ms) a live import-progress indicator persists after the
+   * LAST `import_progress` frame before it auto-clears. Frames arrive every ~5s
+   * while the job runs (including during rate-limit pauses), so a gap this long
+   * means `import_running` ended (the analysis message has/will land). Defaults
+   * to 12000 (≈2 missed ticks). Injectable so tests don't wait on a real timer.
+   */
+  importProgressStaleMs?: number
+  /**
+   * Chat-rail stability — how long (ms) the project-switch `connecting` banner
+   * suppression lasts before a still-`connecting` socket surfaces the banner
+   * (Codex P2 — don't hide a genuinely stalled switch connection). A warm switch
+   * resolves to `open` in well under this; the window only matters for a stall.
+   * Defaults to 2500. Injectable so tests don't wait on a real timer.
+   */
+  switchConnectingGraceMs?: number
+  /**
+   * Managed post-onboarding claim redirect target (from the page bootstrap
+   * config's {@link BootstrapConfig.postOnboardingClaimUrl}). When set, the
+   * controller navigates the browser here on the `onboarding_completed` frame;
+   * when omitted (the Open self-host default) the redirect no-ops. ONE code
+   * path — presence/absence is the only branch, never an on/off flag.
+   */
+  postOnboardingClaimUrl?: string
+  /**
+   * Navigation seam for the claim redirect. Defaults to
+   * `window.location.assign` in the browser (a no-op when `window` is absent,
+   * e.g. tests that don't inject one). Injectable so tests can observe the
+   * redirect target without a real navigation.
+   */
+  navigate?: (url: string) => void
+}
+
+interface StreamEntry {
+  text: string
+  createdAt: number
+}
+
+/**
+ * Task 6 (chat render fan-out) — a TOTAL, flat structural comparator over two
+ * {@link RenderMessage}s. Used by {@link NeutronChatController.computeVm} to
+ * REUSE the prior render object (preserving object identity) when a fresh
+ * candidate is byte-identical, so assistant-ui's per-message-identity converter
+ * cache + row memos survive an unrelated `publish()` instead of re-converting +
+ * re-rendering the whole transcript per frame / streaming token.
+ *
+ * Contract: identical output ⇒ identity reuse; ANY content change ⇒ a new
+ * identity (a false "equal" would freeze a real update, so the comparator must
+ * cover every field the VM emits). No JSON.stringify, no deep recursion — flat
+ * `===` on scalars, length + element compare on the array/object fields.
+ */
+function sameRenderMessage(a: RenderMessage, b: RenderMessage): boolean {
+  if (
+    a.id !== b.id ||
+    a.messageId !== b.messageId ||
+    a.role !== b.role ||
+    a.text !== b.text ||
+    a.status !== b.status ||
+    a.streaming !== b.streaming ||
+    a.createdAt !== b.createdAt ||
+    a.timestampMs !== b.timestampMs ||
+    a.delivery !== b.delivery ||
+    a.edited !== b.edited ||
+    a.deleted !== b.deleted ||
+    a.promptId !== b.promptId ||
+    a.allowFreeform !== b.allowFreeform ||
+    a.kind !== b.kind ||
+    a.chosenValue !== b.chosenValue
+  ) {
+    return false
+  }
+  if (!sameStringList(a.attachments, b.attachments)) return false
+  if (!sameReactions(a.reactions, b.reactions)) return false
+  if (!sameOptions(a.options, b.options)) return false
+  if (!sameUploadAffordance(a.uploadAffordance, b.uploadAffordance)) return false
+  return true
+}
+
+function sameStringList(a: readonly string[] | null, b: readonly string[] | null): boolean {
+  if (a === b) return true
+  if (a === null || b === null) return false
+  if (a.length !== b.length) return false
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false
+  return true
+}
+
+function sameReactions(a: readonly ReactionChip[], b: readonly ReactionChip[]): boolean {
+  if (a === b) return true
+  if (a.length !== b.length) return false
+  for (let i = 0; i < a.length; i++) {
+    const x = a[i]
+    const y = b[i]
+    if (x === undefined || y === undefined) return false
+    if (x.emoji !== y.emoji || x.count !== y.count || x.reactedBySelf !== y.reactedBySelf) return false
+  }
+  return true
+}
+
+function sameOptions(
+  a: readonly ChatMessageOption[] | null,
+  b: readonly ChatMessageOption[] | null,
+): boolean {
+  if (a === b) return true
+  if (a === null || b === null) return false
+  if (a.length !== b.length) return false
+  // Options are immutable wire objects held by reference on the ChatMessage;
+  // element reference-equality settles the common (unchanged row) case.
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false
+  return true
+}
+
+function sameUploadAffordance(
+  a: ChatMessageUploadAffordance | null,
+  b: ChatMessageUploadAffordance | null,
+): boolean {
+  if (a === b) return true
+  if (a === null || b === null) return false
+  return a.source === b.source
+}
+
+export class NeutronChatController {
+  /** The live session — REPLACED on every project switch (not readonly). */
+  private session: ControllerSession
+  /** Factory + topic mapper retained so a project switch can stand up a fresh
+   *  per-project session bound to the new scope. */
+  private readonly createSessionFn: (sinks: ControllerSinks, scope: SessionScope) => ControllerSession
+  private readonly topicForProject: (projectId: string | null) => string
+  /** The observer sinks, built ONCE and reused across session recreations. */
+  private readonly sinks: ControllerSinks
+  /** Lifecycle latches so a project switch revives the new session in the same
+   *  started/active state as the one it replaced. */
+  private started = false
+  private activeState = true
+  private msgs: ChatMessage[] = []
+  /** message_id → accumulated streaming text (not yet persisted). */
+  private readonly streaming = new Map<string, StreamEntry>()
+  /**
+   * Ephemeral agent-style notices the sync layer never persists: slash-command
+   * results (`chat_command_result`) and surfaced `error` frames. The app-ws
+   * surface answers a matched chat command with exactly ONE
+   * `chat_command_result` frame and SKIPS the agent dispatch — so no
+   * `agent_message` ever follows. Without rendering it the typing indicator
+   * spins forever (the awaiting bracket is never cleared) AND the command's
+   * output is silently lost. These live only for the controller's lifetime;
+   * the server doesn't persist them to the transcript either, so they vanish
+   * on reload — matching the server's own non-persistence.
+   */
+  private readonly notices: RenderMessage[] = []
+  /**
+   * Task 6 (chat render fan-out) — per-render-id cache of the LAST emitted
+   * {@link RenderMessage} object. `computeVm` reuses the prior object (identity
+   * preserved) when a freshly-built candidate is structurally identical
+   * ({@link sameRenderMessage}), so assistant-ui's per-message-identity
+   * converter cache + row memos survive an unrelated `publish()`. Rebuilt fresh
+   * each `computeVm` (keyed by the current render id set) so vanished ids
+   * auto-prune. Covers durable rows (keyed by render `id`) and live streaming
+   * bubbles (keyed `stream:<messageId>`).
+   */
+  private renderCache = new Map<string, RenderMessage>()
+  private connStatus: ConnStatus = 'idle'
+  /**
+   * Chat-rail stability — true while a project switch's fresh socket is doing its
+   * INITIAL `connecting` handshake. A switch tears down the outgoing per-project
+   * socket and stands up a new one, whose first status is `connecting` — but that
+   * is EXPECTED plumbing, not a network drop, so the connection banner must stay
+   * hidden for it (a warm switch shouldn't flash "Connecting…"). Cleared the
+   * moment the socket resolves (`open`) or genuinely degrades (`reconnecting` /
+   * `closed`), so a REAL disconnect after a switch still surfaces the banner.
+   *
+   * TIME-BOXED (Codex P2) — the suppression is bounded by a grace timer so a
+   * switch whose fresh socket STALLS in `connecting` (captive portal, firewall,
+   * a handshake that never fails promptly) surfaces the banner after the window
+   * instead of hiding a genuinely-disconnected chat forever.
+   */
+  private switchConnecting = false
+  /** Grace timer that drops {@link switchConnecting} if the switch socket is
+   *  still `connecting` after {@link switchConnectingGraceMs}. */
+  private switchConnectingTimer: ReturnType<typeof setTimeout> | null = null
+  private readonly switchConnectingGraceMs: number
+  private awaitingReply = false
+  private pending = 0
+  private projectId: string | null
+  /** FIX 1 — reactive project list (seeded from bootstrap, updated on frame). */
+  private projects: ProjectTab[]
+  private readonly listeners = new Set<(vm: ChatViewModel) => void>()
+  /**
+   * Work Board live-frame subscribers (the `WorkBoardTab`). Kept SEPARATE from
+   * the `vm` listeners so a `work_board_changed` frame re-renders the board tab
+   * out-of-band — mirrors the `projects_changed` apply. The chat ViewModel now
+   * derives ONE field from the board (`hasActiveWork`, for the typing indicator),
+   * so the frame handler ALSO calls `publish()`; everything else about the board
+   * stays out-of-band of the chat vm.
+   */
+  private readonly workBoardListeners = new Set<
+    (items: WorkBoardItem[], projectId: string | undefined) => void
+  >()
+  /** Last board snapshot seen on a frame, replayed to a late subscriber. */
+  private lastWorkBoard: WorkBoardItem[] | null = null
+  /** The project the cached snapshot belongs to (the frame's `project_id`), so a
+   *  late subscriber for a DIFFERENT project isn't replayed the wrong board. */
+  private lastWorkBoardProjectId: string | undefined = undefined
+  /**
+   * The latest board snapshot that pertains to the ACTIVE project — the source
+   * for `hasActiveWork` (the typing indicator). Tracked SEPARATELY from
+   * `lastWorkBoard` (which caches the raw last frame for subscriber replay,
+   * regardless of project) because the per-user app-ws topic can deliver a
+   * sibling project's board on this socket: a foreign frame must NOT clobber the
+   * active project's in-flight signal and stop the dots prematurely. Only a frame
+   * whose `project_id` matches the active scope (or is absent → "this project")
+   * updates this; cleared on project switch.
+   */
+  private activeWorkBoardItems: WorkBoardItem[] | null = null
+  private vm: ChatViewModel
+  private seq = 0
+  /** P1b — render id → the option `value` the user tapped (optimistic collapse). */
+  private readonly chosen = new Map<string, string>()
+  /** This client's device id (for read-tick self-exclusion). */
+  private readonly deviceId: string
+  /** BUG 3 — live import progress (null when no import is in flight). */
+  private importProgress: ImportProgressVM | null = null
+  /** BUG 3 — staleness timer that clears {@link importProgress} when frames stop. */
+  private importProgressTimer: ReturnType<typeof setTimeout> | null = null
+  private readonly importProgressStaleMs: number
+  /** M1 — the current ephemeral system notice (cold-start ack, quota), or null. */
+  private systemNotice: SystemNoticeVM | null = null
+  /** M1 — safety timer so a system notice can't linger if its clearing frame is
+   *  dropped (e.g. the cold-start ack fires but the reply never streams). */
+  private systemNoticeTimer: ReturnType<typeof setTimeout> | null = null
+  /** M1 — grace window a system-notice pill survives before it self-clears. */
+  private readonly systemNoticeStaleMs = 15_000
+  /** FIX #347 — once a REAL reply has begun for the current turn (first stream
+   *  token OR a durable agent_message), a late cold-start "Waking up…" ack must be
+   *  DROPPED rather than re-armed as a pill below the answer. Reset on each user
+   *  send. Guards the duplicate/late-pill race the server timing can't fully
+   *  prevent (the ack is a delayed `setTimeout` on the gateway). */
+  private replyStartedThisTurn = false
+  /** Managed post-onboarding claim redirect target (null = Open self-host / no
+   *  redirect). Read on the `onboarding_completed` frame. */
+  private readonly postOnboardingClaimUrl: string | null
+  /** Navigation seam for the claim redirect (defaults to window.location.assign). */
+  private readonly navigate: (url: string) => void
+  /** Latch so the claim redirect fires at most once even if the server re-sends
+   *  the `onboarding_completed` frame (reconnect replay / defensive re-finalize). */
+  private claimRedirected = false
+
+  constructor(opts: NeutronChatControllerOptions) {
+    this.projectId = opts.projectId ?? null
+    this.projects = opts.projects ?? []
+    this.importProgressStaleMs = opts.importProgressStaleMs ?? 12_000
+    this.switchConnectingGraceMs = opts.switchConnectingGraceMs ?? 2_500
+    this.postOnboardingClaimUrl =
+      typeof opts.postOnboardingClaimUrl === 'string' && opts.postOnboardingClaimUrl.length > 0
+        ? opts.postOnboardingClaimUrl
+        : null
+    this.navigate =
+      opts.navigate ??
+      ((url: string): void => {
+        const w = (globalThis as { window?: { location?: { assign?: (u: string) => void } } })
+          .window
+        w?.location?.assign?.(url)
+      })
+    this.createSessionFn = opts.createSession
+    this.topicForProject =
+      opts.topicForProject ??
+      ((projectId) =>
+        projectId !== null && projectId.length > 0 ? `app:${projectId}` : 'app')
+    this.sinks = {
+      onChange: () => {
+        void this.handleChange()
+      },
+      onStatus: (status) => this.handleStatus(status),
+      onFrame: (frame) => this.handleFrame(frame),
+    }
+    this.session = this.createSessionFn(this.sinks, {
+      projectId: this.projectId,
+      topicId: this.topicForProject(this.projectId),
+    })
+    this.deviceId = this.session.device_id ?? ''
+    this.vm = this.computeVm()
+  }
+
+  start(): void {
+    this.started = true
+    this.session.start()
+    // Cold-open hydration: a durable Store (OPFS) may already hold the
+    // transcript + queued offline sends from a previous session. Read it
+    // immediately so a returning user sees their chat (and pending badge)
+    // instantly on mount — NOT only after the next inbound frame / send. The
+    // live `session_ready` resume still fills any gap once the socket opens.
+    void this.handleChange()
+  }
+
+  stop(): void {
+    this.started = false
+    if (this.importProgressTimer !== null) {
+      clearTimeout(this.importProgressTimer)
+      this.importProgressTimer = null
+    }
+    if (this.systemNoticeTimer !== null) {
+      clearTimeout(this.systemNoticeTimer)
+      this.systemNoticeTimer = null
+    }
+    if (this.switchConnectingTimer !== null) {
+      clearTimeout(this.switchConnectingTimer)
+      this.switchConnectingTimer = null
+    }
+    this.session.stop()
+  }
+
+  setActive(active: boolean): void {
+    this.activeState = active
+    this.session.setActive(active)
+  }
+
+  /**
+   * W5 GAP-2 — the browser regained connectivity (`online` event). Forward to the
+   * session so it resets its reconnect backoff and reconnects immediately instead
+   * of waiting out the dead-air backoff. A no-op against a legacy fake session that
+   * doesn't implement it.
+   */
+  notifyReachable(): void {
+    this.session.notifyReachable?.()
+  }
+
+  /**
+   * W5 GAP-4 — retry a failed send. The web UI's ⚠️ "Failed — retry" affordance
+   * calls this with the failed message's client_msg_id; it re-drives every
+   * not-yet-`acked` send over the current socket, idempotently on client_msg_id
+   * (the server de-dupes and the `was_new` guard means a re-delivery never
+   * re-fires the agent). A no-op against a legacy fake session without `retry`.
+   */
+  async retry(client_msg_id: string): Promise<void> {
+    await this.session.retry?.(client_msg_id)
+  }
+
+  getViewModel(): ChatViewModel {
+    return this.vm
+  }
+
+  /**
+   * Switch the active project. With per-project chat each project owns its OWN
+   * app-ws topic + durable transcript, so a switch RE-SCOPES the session: the
+   * current socket is torn down and a fresh one is bound to the new project's
+   * topic (General = the user-scoped topic), then the new topic's history
+   * hydrates from the shared store. The previous conversation's ephemeral state
+   * (streaming bubble, typing bracket, command/error notices, import progress,
+   * optimistic button choices) is reset so it can't bleed across. A no-op when
+   * the project is unchanged.
+   */
+  setProject(projectId: string | null): void {
+    if (projectId === this.projectId) return
+    // Tear down the outgoing per-project socket.
+    this.session.stop()
+    this.projectId = projectId
+    // Chat-rail stability (unread badge) — VIEWING a project marks it read, so
+    // drop its cached unread count NOW. Without this the badge is permanent: the
+    // server only re-fans `projects_changed` on new agent activity, so a stale
+    // count would keep re-appearing on the rail every time the user switched
+    // AWAY from a project they'd already read. The read receipts that
+    // `markVisibleAgentRead` sends once the transcript hydrates advance the
+    // server-side watermark too, so the next server frame agrees (unread = 0).
+    if (projectId !== null && projectId.length > 0) {
+      this.projects = this.projects.map((p) =>
+        p.id === projectId && (p.unread ?? 0) > 0 ? { ...p, unread: 0 } : p,
+      )
+    }
+    // Reset per-CONVERSATION state — the new topic hydrates its own transcript.
+    this.streaming.clear()
+    this.notices.length = 0
+    this.chosen.clear()
+    this.awaitingReply = false
+    this.msgs = []
+    this.pending = 0
+    this.lastWorkBoard = null
+    this.lastWorkBoardProjectId = undefined
+    this.activeWorkBoardItems = null
+    if (this.importProgressTimer !== null) {
+      clearTimeout(this.importProgressTimer)
+      this.importProgressTimer = null
+    }
+    this.importProgress = null
+    if (this.systemNoticeTimer !== null) {
+      clearTimeout(this.systemNoticeTimer)
+      this.systemNoticeTimer = null
+    }
+    this.systemNotice = null
+    // Stand up the session bound to the new scope, mirroring the current
+    // started/active lifecycle so the new socket opens iff the controller is
+    // running. Arm the switch latch FIRST (after the old socket's `stop()` →
+    // `closed` has already fired) so the fresh socket's initial `connecting` is
+    // recognised as switch plumbing and the banner stays hidden for it.
+    this.switchConnecting = true
+    // Time-box the suppression (Codex P2): if the fresh socket is STILL
+    // `connecting` after the grace window, drop the latch so a genuinely stalled
+    // switch connection surfaces the banner instead of hiding it forever.
+    if (this.switchConnectingTimer !== null) clearTimeout(this.switchConnectingTimer)
+    this.switchConnectingTimer = setTimeout(() => {
+      this.switchConnectingTimer = null
+      if (this.switchConnecting) {
+        this.switchConnecting = false
+        this.publish()
+      }
+    }, this.switchConnectingGraceMs)
+    this.session = this.createSessionFn(this.sinks, {
+      projectId,
+      topicId: this.topicForProject(projectId),
+    })
+    if (this.started) {
+      this.session.start()
+      this.session.setActive(this.activeState)
+    }
+    // Publish the empty/scoped VM immediately (instant switch feel), then
+    // hydrate the new topic's durable transcript.
+    this.publish()
+    void this.handleChange()
+  }
+
+  subscribe(fn: (vm: ChatViewModel) => void): () => void {
+    this.listeners.add(fn)
+    return () => {
+      this.listeners.delete(fn)
+    }
+  }
+
+  /**
+   * Subscribe to live Work Board snapshots (`work_board_changed` frames). The
+   * callback fires with the full board (active+next first, then completed) AND
+   * the frame's `project_id` (or `undefined` when the frame omits it) on every
+   * committed board mutation — agent tool OR human HTTP write, both ride the same
+   * server push. The subscriber MUST drop a snapshot whose project_id doesn't
+   * match the tab it's mounted for (the app-ws topic is per-user, so a sibling
+   * project's board can arrive on this socket). If a snapshot has already
+   * arrived, the new subscriber is replayed it synchronously (with its
+   * project_id) so a tab mounted AFTER the frame doesn't miss it. Returns an
+   * unsubscribe fn. Full-snapshot + idempotent, so the tab can replace its list
+   * outright (no delta merge).
+   */
+  onWorkBoardChanged(
+    fn: (items: WorkBoardItem[], projectId: string | undefined) => void,
+  ): () => void {
+    this.workBoardListeners.add(fn)
+    if (this.lastWorkBoard !== null) fn(this.lastWorkBoard, this.lastWorkBoardProjectId)
+    return () => {
+      this.workBoardListeners.delete(fn)
+    }
+  }
+
+  /**
+   * Optimistically send a user message. Sets the typing indicator immediately
+   * (so the UI feels instant), tags it with the active project, and lets the
+   * session own the durable enqueue + flush. The optimistic bubble renders via
+   * the session's `onChange`.
+   */
+  async send(body: string, attachments?: readonly string[]): Promise<void> {
+    this.awaitingReply = true
+    // FIX #347 — a new turn begins: allow this turn's cold-start pill to show
+    // (until its real reply starts), and clear any stale pill from the prior turn.
+    this.replyStartedThisTurn = false
+    this.clearSystemNotice()
+    this.publish()
+    const opts: { project_id?: string; attachments?: readonly string[] } = {}
+    if (this.projectId !== null && this.projectId.length > 0) opts.project_id = this.projectId
+    if (attachments !== undefined && attachments.length > 0) opts.attachments = attachments
+    await this.session.send(body, opts)
+  }
+
+  private handleStatus(status: ConnStatus): void {
+    this.connStatus = status
+    // Chat-rail stability — the switch latch survives only the fresh socket's
+    // INITIAL `connecting`; any other status means the handshake resolved
+    // (`open`) or genuinely degraded (`reconnecting` / `closed`), so drop it and
+    // let the banner reflect reality again. Cancel the grace timer too — the
+    // switch has resolved, so the time-box no longer applies.
+    if (status !== 'connecting') {
+      this.switchConnecting = false
+      if (this.switchConnectingTimer !== null) {
+        clearTimeout(this.switchConnectingTimer)
+        this.switchConnectingTimer = null
+      }
+    }
+    this.publish()
+  }
+
+  private handleFrame(frame: unknown): void {
+    if (typeof frame !== 'object' || frame === null) return
+    const f = frame as Record<string, unknown>
+    const type = f['type']
+    if (type === 'agent_message_partial') {
+      const messageId = f['message_id']
+      const delta = f['body_delta']
+      if (typeof messageId !== 'string' || messageId.length === 0) return
+      if (typeof delta !== 'string') return
+      const existing = this.streaming.get(messageId)
+      if (existing === undefined) {
+        // BUG 7 — some turns open the stream with a leading ZERO-LENGTH delta.
+        // Materializing a streaming bubble for it renders an EMPTY agent bubble
+        // above the typing indicator. Ignore the empty opener: keep the
+        // "awaiting" bracket (so the typing dots stay) until a real token lands,
+        // and only then create the bubble.
+        if (delta.length === 0) return
+        // A real token has begun — clear the "awaiting" bracket + any lingering
+        // "Waking up…" system pill (the reply is here; the notification is done).
+        // FIX #347 — latch the turn as "reply started" so a LATE ack frame (the
+        // gateway's delayed setTimeout) can't re-arm the pill below the answer.
+        this.awaitingReply = false
+        this.replyStartedThisTurn = true
+        this.clearSystemNotice()
+        this.streaming.set(messageId, { text: delta, createdAt: this.nextSeq() })
+      } else {
+        this.awaitingReply = false
+        existing.text += delta
+      }
+      this.publish()
+      return
+    }
+    if (type === 'agent_message') {
+      // M1 UX REDESIGN — a SYSTEM notification renders as a quiet centered PILL,
+      // NOT a chat bubble (errors + command results ARE chat bubbles; only true
+      // notifications use this channel). Two triggers: an explicit
+      // `system_notice: true` tag (forward-compatible with a first-class server
+      // flag), OR the cold-start acknowledgement — a non-persisted live
+      // `agent_message` the gateway emits while a cold first turn spins up
+      // (`gateway/wiring/build-live-agent-turn.ts` COLD_START_ACK_BODY
+      // = "⏳ Waking up, one moment…"). It self-clears when the real reply streams
+      // (or after a grace window); the awaiting bracket stays so the typing dots
+      // keep spinning while the workspace wakes.
+      const body = typeof f['body'] === 'string' ? (f['body'] as string) : ''
+      if (f['system_notice'] === true || isColdStartAck(body)) {
+        // FIX #347 — DROP a cold-start ack that arrives AFTER the real reply has
+        // already begun for this turn. The gateway's ack is a delayed setTimeout,
+        // so under a slow-then-fast turn it can land just after the answer; re-
+        // arming the pill then leaves a spurious "Waking up…" hanging below the
+        // reply. Never show the pill once the reply has started.
+        if (this.replyStartedThisTurn) return
+        if (body.length > 0) this.setSystemNotice(body)
+        return
+      }
+      // The final message persists via the Store (a following onChange); clear
+      // the awaiting bracket now so the indicator doesn't linger if no stream
+      // ever arrived. The streaming buffer is pruned once the persisted row
+      // shows up (see handleChange). A genuine reply also clears any stale
+      // "Waking up…" pill.
+      // FIX #347 — latch "reply started" so a trailing late ack is dropped.
+      this.awaitingReply = false
+      this.replyStartedThisTurn = true
+      this.clearSystemNotice()
+      this.publish()
+      return
+    }
+    if (type === 'agent_typing') {
+      // Server-authoritative typing indicator (ephemeral, never persisted). The
+      // gateway fans `start` the moment it picks up a live-agent turn and `end`
+      // when the turn settles (on success AND failure) — so a warm turn shows
+      // the dots for its whole 5–240s duration instead of only the optimistic
+      // on-send guess. We drive the SAME `awaiting` bracket the optimistic path
+      // sets, so the existing `car-typing` indicator (keyed off
+      // awaitingFirstToken) lights up; the optimistic-on-send set stays as a
+      // fallback for a missed `start`. A stray frame tagged for a DIFFERENT
+      // project than the active one must not flip this surface's indicator.
+      if (this.isForeignProject(f['project_id'])) return
+      const state = f['state']
+      if (state === 'start') {
+        // Idempotent — back-to-back starts just keep the bracket on.
+        this.awaitingReply = true
+        this.publish()
+      } else if (state === 'end') {
+        // Clear the bracket. A live streaming bubble (if one is in flight)
+        // already supersedes the dots via awaitingFirstToken, so this is a
+        // no-op there; the next `agent_message` clears it regardless, so a
+        // dropped `end` can never wedge the indicator.
+        this.awaitingReply = false
+        this.publish()
+      }
+      return
+    }
+    if (type === 'error') {
+      // Clear the awaiting bracket AND surface the failure as a visible notice.
+      // Previously the spinner cleared but nothing was shown, leaving the user's
+      // message a silent dead-end. The common LLM-failure path ships a friendly
+      // `agent_message` (not an `error` frame), so this only renders the genuine
+      // surface errors (button_choice_failed, dispatch_failed, malformed_envelope,
+      // resume_failed) — matching the Expo native client, which already appends a
+      // system bubble for `error` frames.
+      this.awaitingReply = false
+      const msg = typeof f['message'] === 'string' ? (f['message'] as string) : ''
+      const code = typeof f['code'] === 'string' ? (f['code'] as string) : ''
+      const body =
+        msg.length > 0
+          ? msg
+          : code.length > 0
+            ? `Something went wrong (${code}).`
+            : 'Something went wrong.'
+      this.pushNotice(body)
+      return
+    }
+    if (type === 'chat_command_result') {
+      // A matched slash command (/note, /remind, /cal, /skills, …): the server
+      // answers with exactly ONE result frame and does NOT dispatch the agent,
+      // so no `agent_message` will follow. Clear the awaiting bracket (else the
+      // typing dots spin forever) and render the result text as an agent-style
+      // bubble (else the command's output is silently lost). `text` is set for
+      // both success and error responses; fall back to the error message only
+      // when text is empty.
+      this.awaitingReply = false
+      const text = typeof f['text'] === 'string' ? (f['text'] as string) : ''
+      const err = f['error']
+      const errMsg =
+        typeof err === 'object' && err !== null && typeof (err as Record<string, unknown>)['message'] === 'string'
+          ? ((err as Record<string, unknown>)['message'] as string)
+          : ''
+      const body = text.length > 0 ? text : errMsg.length > 0 ? errMsg : 'Command completed.'
+      this.pushNotice(body)
+      return
+    }
+    if (type === 'import_progress') {
+      // BUG 3 — live history-import progress. The engine emits this every ~5s
+      // while the import job runs; render a live spinner + progress line off it.
+      // Terminal statuses normally DON'T arrive here (the engine advances the
+      // phase + sends the analysis agent_message instead), but clear defensively
+      // if one does. Otherwise refresh the progress + (re)arm the staleness timer.
+      const status = typeof f['status'] === 'string' ? (f['status'] as string) : ''
+      if (status === 'completed' || status === 'failed' || status === 'cancelled') {
+        this.clearImportProgress()
+        return
+      }
+      const jobId = typeof f['job_id'] === 'string' ? (f['job_id'] as string) : ''
+      const pass: 1 | 2 = f['pass'] === 2 ? 2 : 1
+      const rawPct = f['pct']
+      const pct =
+        typeof rawPct === 'number' && Number.isFinite(rawPct) ? Math.min(1, Math.max(0, rawPct)) : 0
+      const body = typeof f['body'] === 'string' ? (f['body'] as string) : ''
+      this.importProgress = { jobId, status, pass, pct, body }
+      this.armImportProgressStaleTimer()
+      this.publish()
+      return
+    }
+    // FIX 1 — a live project-list refresh (projects created/changed mid-session,
+    // e.g. during onboarding). Replace the RAIL's list only — projects appear in
+    // the persistent left rail the moment onboarding mints them. With per-project
+    // chat we deliberately do NOT auto-switch the chat into the new project on
+    // this 0→N transition: the onboarding conversation runs on the General topic,
+    // and re-scoping the socket mid-onboarding would yank the user into an empty
+    // project chat and drop the still-arriving onboarding messages. The user
+    // enters a project by tapping it in the rail (an explicit `setProject`).
+    // Work Board live snapshot — the server fans the FULL board after every
+    // committed mutation (agent tool or human HTTP write). Parse + cache it and
+    // fan it to the board-tab subscribers ONLY (out-of-band of the chat vm).
+    if (type === 'work_board_changed') {
+      const items = parseWorkBoardItems(f['items'])
+      const framePid =
+        typeof f['project_id'] === 'string' && (f['project_id'] as string).length > 0
+          ? (f['project_id'] as string)
+          : undefined
+      this.lastWorkBoard = items
+      this.lastWorkBoardProjectId = framePid
+      // Update the active-project board cache (drives `hasActiveWork`) ONLY when
+      // this frame pertains to the active board — a frame's board is `framePid`
+      // (absent/empty ⇒ the General board, whose `this.projectId` is null/'').
+      // A sibling — or the General board while a project is active — is ignored so
+      // it can't spin/stop the active project's typing dots. Mirrors WorkBoardTab's
+      // per-tab filter, but cached here so `computeHasActiveWork` survives
+      // interleaved foreign frames.
+      if ((framePid ?? '') === (this.projectId ?? '')) {
+        this.activeWorkBoardItems = items
+      }
+      for (const fn of this.workBoardListeners) {
+        try {
+          fn(items, framePid)
+        } catch {
+          /* a throwing tab callback must not wedge the frame loop */
+        }
+      }
+      // The chat typing indicator ORs in `hasActiveWork` (derived from this
+      // board), so a board change can flip the dots on/off — re-render the chat
+      // vm too. Cheap (getViewModel recomputes) and idempotent.
+      this.publish()
+      return
+    }
+    if (type === 'onboarding_completed') {
+      // Managed post-onboarding claim redirect. The server fires this ONCE at the
+      // onboarding→completed transition. IF a claim URL was injected into the page
+      // bootstrap (the Managed overlay sets it), navigate there; on Open self-host
+      // no URL is configured so this no-ops and onboarding completes normally. The latch
+      // guards against a re-sent frame (reconnect replay / defensive re-finalize)
+      // triggering a second navigation.
+      if (this.postOnboardingClaimUrl !== null && !this.claimRedirected) {
+        this.claimRedirected = true
+        try {
+          this.navigate(this.postOnboardingClaimUrl)
+        } catch {
+          /* a throwing navigation seam must not wedge the frame loop */
+        }
+      }
+      return
+    }
+    if (type === 'projects_changed') {
+      const raw = Array.isArray(f['projects']) ? (f['projects'] as unknown[]) : []
+      const projects: ProjectTab[] = []
+      for (const p of raw) {
+        if (typeof p !== 'object' || p === null) continue
+        const rec = p as Record<string, unknown>
+        const id = rec['id']
+        const label = rec['label']
+        if (typeof id === 'string' && id.length > 0 && typeof label === 'string') {
+          const tab: ProjectTab = { id, label }
+          // Rail-redesign fields (emoji / unread / activity). Optional on the
+          // wire; carry them through when present so the rail renders the glyph,
+          // badge, and activity order.
+          if (typeof rec['emoji'] === 'string' && rec['emoji'].length > 0) tab.emoji = rec['emoji']
+          if (typeof rec['unread'] === 'number' && Number.isFinite(rec['unread'])) {
+            tab.unread = Math.max(0, Math.trunc(rec['unread'] as number))
+          }
+          if (typeof rec['last_activity_at'] === 'string') tab.last_activity_at = rec['last_activity_at']
+          // M1 UX REDESIGN — rail activity / preview / live_runs (all optional on
+          // the wire; carried through when present so the redesigned rail renders
+          // the state dot, the preview line, and the Work-tab badge).
+          const activity = rec['activity']
+          if (activity === 'idle' || activity === 'working' || activity === 'attention') {
+            tab.activity = activity
+          }
+          if (typeof rec['preview'] === 'string') tab.preview = rec['preview']
+          else if (rec['preview'] === null) tab.preview = null
+          const from = rec['preview_from']
+          if (from === 'user' || from === 'agent') tab.preview_from = from
+          else if (from === null) tab.preview_from = null
+          if (typeof rec['live_runs'] === 'number' && Number.isFinite(rec['live_runs'])) {
+            tab.live_runs = Math.max(0, Math.trunc(rec['live_runs'] as number))
+          }
+          projects.push(tab)
+        }
+      }
+      // Refresh the rail list; the active conversation is NOT changed here (see
+      // the note above — per-project chat enters a project only via an explicit
+      // `setProject`, which re-scopes the socket).
+      this.projects = projects
+      this.publish()
+    }
+  }
+
+  private async handleChange(): Promise<void> {
+    // Capture the session this read belongs to. A project switch (`setProject`)
+    // can REPLACE `this.session` while we await a slow store read (OPFS), so the
+    // resolved msgs/pending may belong to the PREVIOUS topic. Bail if the session
+    // changed underfoot, else a stale read would clobber the newly-scoped
+    // transcript AND `markVisibleAgentRead` would route old-topic read receipts
+    // through the new project's socket (Codex P2).
+    const session = this.session
+    const [msgs, pending] = await Promise.all([session.messages(), session.pendingCount()])
+    if (this.session !== session) return
+    this.msgs = msgs
+    this.pending = pending
+    // Drop any streaming buffer whose final message has now persisted, so the
+    // durable row (with its seq + metadata) supersedes the live bubble.
+    if (this.streaming.size > 0) {
+      const persistedIds = new Set<string>()
+      for (const m of msgs) if (m.message_id !== null) persistedIds.add(m.message_id)
+      for (const id of [...this.streaming.keys()]) {
+        if (persistedIds.has(id)) this.streaming.delete(id)
+      }
+    }
+    this.markVisibleAgentRead(msgs)
+    this.publish()
+  }
+
+  /**
+   * Track B Phase 4 — report agent messages as read. The web chat is a single
+   * scrolling thread the user is looking at, so a persisted agent message is
+   * "read"; the session de-dups so this only sends one receipt per message.
+   * Reporting ONLY agent messages (never the user's own sends) means a receipt
+   * can't light the sender's own read tick.
+   */
+  private markVisibleAgentRead(msgs: ChatMessage[]): void {
+    if (this.session.markRead === undefined) return
+    const ids: string[] = []
+    for (const m of msgs) {
+      if (m.role === 'agent' && m.message_id !== null) ids.push(m.message_id)
+    }
+    if (ids.length > 0) this.session.markRead(ids)
+  }
+
+  /** Report messages the user has viewed (Track B Phase 4). Exposed for a UI
+   *  that wants finer-grained viewport reporting than the auto-read above. */
+  markRead(messageIds: readonly string[]): void {
+    this.session.markRead?.(messageIds)
+  }
+
+  /**
+   * Track B Phase 4 — toggle an emoji reaction on a message. `add` / `remove`
+   * is sent to the server, which fans the authoritative `reaction_update` back
+   * (applied via the session's `onChange`). A no-op when the session predates
+   * reactions (legacy fake) or the message id is empty.
+   */
+  react(messageId: string, emoji: string, action: ReactionAction): void {
+    if (messageId.length === 0 || emoji.length === 0) return
+    this.session.react?.(messageId, emoji, action)
+  }
+
+  /**
+   * Track B Phase 4 (edit/delete) — edit a message's body. The server
+   * authorizes it against the message's author and fans the authoritative
+   * `edit_update` back (applied via `onChange`). A no-op when the session
+   * predates edits (legacy fake), the id is empty, or the body is blank.
+   */
+  editMessage(messageId: string, body: string): void {
+    if (messageId.length === 0 || body.trim().length === 0) return
+    this.session.editMessage?.(messageId, body.trim())
+  }
+
+  /**
+   * Track B Phase 4 (edit/delete) — delete (tombstone) a message. The server
+   * authorizes + fans an `edit_update` with `deleted:true` back. A no-op when
+   * the session predates edits or the id is empty.
+   */
+  deleteMessage(messageId: string): void {
+    if (messageId.length === 0) return
+    this.session.deleteMessage?.(messageId)
+  }
+
+  /**
+   * P1b (onboarding / quick-reply buttons) — handle a tapped option. Posts the
+   * choice back to the server via {@link ControllerSession.sendButtonChoice}
+   * (when a prompt id is present — the wire frame needs it to route), then
+   * records the chosen `value` locally keyed by the render id so the option row
+   * collapses/greys optimistically on the next render. Mirrors the Expo app's
+   * `record_choice` reducer action. A no-op for an empty value.
+   */
+  onChoose(messageId: string, promptId: string | null, value: string): void {
+    if (messageId.length === 0 || value.length === 0) return
+    if (promptId !== null && promptId.length > 0) {
+      this.session.sendButtonChoice?.(promptId, value)
+    }
+    this.chosen.set(messageId, value)
+    this.publish()
+  }
+
+  /**
+   * Append an ephemeral agent-style notice (slash-command result / surfaced
+   * error) and republish. Ordered with live streams via the shared `seq`
+   * counter so a notice and a streamed reply interleave by arrival.
+   */
+  private pushNotice(text: string): void {
+    const seq = this.nextSeq()
+    this.notices.push({
+      id: `notice:${seq}`,
+      messageId: null,
+      role: 'agent',
+      text,
+      status: 'sent',
+      streaming: false,
+      attachments: null,
+      createdAt: seq,
+      // FIX #338 — an ephemeral notice has no durable wall-clock time.
+      timestampMs: null,
+      delivery: null,
+      reactions: [],
+      edited: false,
+      deleted: false,
+      options: null,
+      promptId: null,
+      allowFreeform: null,
+      kind: null,
+      uploadAffordance: null,
+      chosenValue: null,
+    })
+    this.publish()
+  }
+
+  /**
+   * M1 — show a quiet, ephemeral SYSTEM notification pill (cold-start ack /
+   * quota). Distinct from `pushNotice` (which appends a chat bubble): this is a
+   * centered pill that auto-clears when the real reply arrives or after a grace
+   * window, so a "Waking up…" pill never sticks around behind the answer.
+   */
+  private setSystemNotice(text: string): void {
+    this.systemNotice = { text }
+    if (this.systemNoticeTimer !== null) clearTimeout(this.systemNoticeTimer)
+    this.systemNoticeTimer = setTimeout(() => {
+      this.systemNoticeTimer = null
+      this.clearSystemNotice()
+    }, this.systemNoticeStaleMs)
+    this.publish()
+  }
+
+  /** M1 — clear the system-notice pill (real reply arrived / scope switch / grace). */
+  private clearSystemNotice(): void {
+    if (this.systemNoticeTimer !== null) {
+      clearTimeout(this.systemNoticeTimer)
+      this.systemNoticeTimer = null
+    }
+    if (this.systemNotice !== null) {
+      this.systemNotice = null
+      this.publish()
+    }
+  }
+
+  /** BUG 3 — (re)arm the timer that clears stale import progress once frames
+   *  stop arriving (job ended / socket gap). */
+  private armImportProgressStaleTimer(): void {
+    if (this.importProgressTimer !== null) clearTimeout(this.importProgressTimer)
+    this.importProgressTimer = setTimeout(() => {
+      this.importProgressTimer = null
+      if (this.importProgress !== null) {
+        this.importProgress = null
+        this.publish()
+      }
+    }, this.importProgressStaleMs)
+  }
+
+  /** BUG 3 — clear live import progress + cancel its staleness timer. */
+  private clearImportProgress(): void {
+    if (this.importProgressTimer !== null) {
+      clearTimeout(this.importProgressTimer)
+      this.importProgressTimer = null
+    }
+    if (this.importProgress !== null) {
+      this.importProgress = null
+      this.publish()
+    }
+  }
+
+  private publish(): void {
+    this.vm = this.computeVm()
+    for (const fn of this.listeners) fn(this.vm)
+  }
+
+  private computeVm(): ChatViewModel {
+    // FIX #347 — a cold-start "Waking up…" ack is an EPHEMERAL centered pill
+    // (`systemNotice`), never a chat bubble. It's normally fanned live-only
+    // (no chat_log row), but if one ever reaches the durable store (a legacy
+    // row, or any path that dropped the `system_notice` flag) it would otherwise
+    // hydrate as a timestamped/avatar agent bubble below the answer. Filter it
+    // out of the bubble list unconditionally so the pill is the only surface.
+    // Task 6 — build into a NEW cache keyed by the current render-id set, reusing
+    // the prior object (identity preserved) whenever a candidate is byte-identical
+    // so assistant-ui's converter cache + row memos survive unrelated publishes.
+    const nextCache = new Map<string, RenderMessage>()
+    const durable = this.msgs.filter((m) => !(m.role === 'agent' && isColdStartAck(m.body)))
+    const rendered: RenderMessage[] = durable.map((m) => {
+      const id = m.client_msg_id.length > 0 ? m.client_msg_id : (m.message_id ?? `seq:${m.seq ?? 0}`)
+      const next: RenderMessage = {
+        id,
+        messageId: m.message_id,
+        role: m.role,
+        text: m.body,
+        status: m.status,
+        streaming: false,
+        attachments: m.attachments,
+        createdAt: m.created_at,
+        // FIX #338 — durable rows carry a real ms-epoch time (0 for a not-yet-
+        // acked optimistic send → null, no timestamp until it persists).
+        timestampMs: m.created_at > 0 ? m.created_at : null,
+        delivery: deliveryFor(m, this.deviceId),
+        reactions: groupReactions(m.reactions, this.deviceId),
+        edited: m.deleted !== true && m.edited_at !== null && m.edited_at !== undefined,
+        deleted: m.deleted === true,
+        // P1b (onboarding / quick-reply buttons) — surface the agent-message
+        // option metadata + this client's optimistic choice onto the VM.
+        options: m.options ?? null,
+        promptId: m.prompt_id ?? null,
+        allowFreeform: m.allow_freeform ?? null,
+        kind: m.kind ?? null,
+        uploadAffordance: m.upload_affordance ?? null,
+        chosenValue: this.chosen.get(id) ?? null,
+      }
+      const prev = this.renderCache.get(id)
+      const chosen = prev !== undefined && sameRenderMessage(prev, next) ? prev : next
+      nextCache.set(id, chosen)
+      return chosen
+    })
+    // Append live streaming bubbles whose final message hasn't persisted yet.
+    const persistedIds = new Set<string>()
+    for (const m of this.msgs) if (m.message_id !== null) persistedIds.add(m.message_id)
+    const liveStreams: RenderMessage[] = []
+    for (const [messageId, entry] of this.streaming) {
+      if (persistedIds.has(messageId)) continue
+      // BUG 7 — never render an empty streaming bubble (defensive: handleFrame
+      // already drops the leading empty-delta opener). An empty bubble would
+      // stack above the typing indicator.
+      if (entry.text.length === 0) continue
+      const streamId = `stream:${messageId}`
+      const next: RenderMessage = {
+        id: streamId,
+        messageId,
+        role: 'agent',
+        text: entry.text,
+        status: 'sent',
+        streaming: true,
+        attachments: null,
+        createdAt: entry.createdAt,
+        // FIX #338 — a live streaming bubble has no durable time yet; it renders
+        // no timestamp until its final row persists (which carries created_at).
+        timestampMs: null,
+        delivery: null,
+        reactions: [],
+        edited: false,
+        deleted: false,
+        options: null,
+        promptId: null,
+        allowFreeform: null,
+        kind: null,
+        uploadAffordance: null,
+        chosenValue: null,
+      }
+      // Task 6 — a token append changes `text` → new identity (correct: the
+      // bubble re-renders); an UNRELATED publish mid-stream reuses the prior
+      // bubble object so only the streaming row (not the transcript) churns.
+      const prev = this.renderCache.get(streamId)
+      const chosen = prev !== undefined && sameRenderMessage(prev, next) ? prev : next
+      nextCache.set(streamId, chosen)
+      liveStreams.push(chosen)
+    }
+    // Tail = live streaming bubbles + ephemeral notices (command results /
+    // errors), ordered together by arrival (`seq`) so a streamed reply and a
+    // notice interleave correctly. Both sort AFTER the durable transcript.
+    const tail = [...liveStreams, ...this.notices].sort((a, b) => a.createdAt - b.createdAt)
+    // Task 6 — swap in the freshly-built cache (auto-prunes ids that vanished
+    // this frame). Notices are already stable object refs (built once, held on
+    // `this.notices`), so they need no cache entry.
+    this.renderCache = nextCache
+    const built = [...rendered, ...tail]
+    // Task 6 — ARRAY identity reuse: if the previous vm's messages array is the
+    // same length with every element reference-equal (an unrelated publish that
+    // touched no row), reuse the PRIOR array so assistant-ui's thread-level memo
+    // sees an unchanged reference and skips the whole list. Read `this.vm`
+    // defensively — computeVm first runs from the constructor before it's set.
+    const prevMessages = (this.vm as ChatViewModel | undefined)?.messages
+    let messages = built
+    if (prevMessages !== undefined && prevMessages.length === built.length) {
+      let allSame = true
+      for (let i = 0; i < built.length; i++) {
+        if (prevMessages[i] !== built[i]) {
+          allSame = false
+          break
+        }
+      }
+      if (allSame) messages = prevMessages
+    }
+    // Latest user message's delivery — for a Telegram-style status line.
+    let latestUserDelivery: DeliveryState | null = null
+    for (let i = rendered.length - 1; i >= 0; i--) {
+      const r = rendered[i]
+      if (r !== undefined && r.role === 'user') {
+        latestUserDelivery = r.delivery
+        break
+      }
+    }
+    return {
+      messages,
+      isRunning: this.awaitingReply || liveStreams.length > 0,
+      awaitingFirstToken: this.awaitingReply && liveStreams.length === 0,
+      hasActiveWork: this.computeHasActiveWork(),
+      // Chat-rail stability — present a project-switch's initial `connecting` as
+      // `idle` so `ConnectionBanner` stays hidden across a warm switch. A real
+      // disconnect (which clears `switchConnecting`) still reports its true
+      // status, so the banner shows on genuine reconnects/drops.
+      status: this.switchConnecting && this.connStatus === 'connecting' ? 'idle' : this.connStatus,
+      pending: this.pending,
+      projectId: this.projectId,
+      projects: this.projects,
+      latestUserDelivery,
+      importProgress: this.importProgress,
+      systemNotice: this.systemNotice,
+    }
+  }
+
+  /**
+   * True when the active project's Work Board has an `in_progress` item — the
+   * signal behind the Work-tab flashing active-work dot, reused to keep the chat
+   * typing dots visible while a long/background build runs.
+   *
+   * Reads `activeWorkBoardItems`, which is populated ONLY by live
+   * `work_board_changed` frames that pertain to the active project (the server
+   * pushes on every mutation, never on connect), so this is null until a relevant
+   * mutation lands this session — a lingering item from a prior session can't
+   * spin the dots at load time, and a sibling project's board can't stop them.
+   */
+  private computeHasActiveWork(): boolean {
+    const items = this.activeWorkBoardItems
+    if (items === null || items.length === 0) return false
+    return items.some((it) => it.status === 'in_progress')
+  }
+
+  /** Monotonic local ordering key for streaming bubbles (no wall clock). */
+  private nextSeq(): number {
+    this.seq += 1
+    return this.seq
+  }
+
+  /**
+   * True when a frame is tagged for a DIFFERENT project than the active one.
+   * Only fires when BOTH the frame and this surface carry an explicit project —
+   * an unscoped frame (no `project_id`) or the General view (null active
+   * project) always applies, matching the message frames, which don't scope at
+   * all. Used to keep a stray `agent_typing` from flipping the wrong project's
+   * indicator.
+   */
+  private isForeignProject(rawProjectId: unknown): boolean {
+    if (typeof rawProjectId !== 'string' || rawProjectId.length === 0) return false
+    if (this.projectId === null || this.projectId.length === 0) return false
+    return rawProjectId !== this.projectId
+  }
+}
+
+/**
+ * Track B Phase 4 — derive an outbound message's delivery ladder from its send
+ * status + read aggregate. Mirrors the mobile `deliveryState`: queued→pending,
+ * sent→sent, acked→delivered, and acked→read once any device OTHER than this
+ * one (incl. the synthetic `agent` reader) appears in `read_by`.
+ */
+export function deliveryFor(m: ChatMessage, selfDeviceId: string): DeliveryState | null {
+  if (m.role !== 'user') return null
+  if (m.status === 'queued') return 'pending'
+  if (m.status === 'sent') return 'sent'
+  // W5 GAP-4 — the ack never arrived within the ack-timeout: show a retry
+  // affordance, not a stuck clock (and never a false ✓✓ delivered). Checked
+  // before the read-aggregate fall-through, which assumes an acked row.
+  if (m.status === 'failed') return 'failed'
+  const readBy = m.read_by
+  if (readBy !== null && readBy !== undefined) {
+    for (const id of readBy) {
+      if (id.length > 0 && id !== selfDeviceId) return 'read'
+    }
+  }
+  return 'delivered'
+}

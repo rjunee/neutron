@@ -1,0 +1,17 @@
+{
+  "name": "@neutronai/agent-dispatch",
+  "type": "module",
+  "main": "./index.ts",
+  "private": true,
+  "dependencies": {
+    "@neutronai/cores-sdk": "workspace:*",
+    "@neutronai/logger": "workspace:*",
+    "@neutronai/loop": "workspace:*",
+    "@neutronai/migrations": "workspace:*",
+    "@neutronai/persistence": "workspace:*",
+    "@neutronai/runtime": "workspace:*",
+    "@neutronai/tools": "workspace:*",
+    "@neutronai/trident": "workspace:*",
+    "@neutronai/work-board": "workspace:*"
+  }
+}
