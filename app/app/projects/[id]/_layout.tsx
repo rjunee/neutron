@@ -12,6 +12,11 @@
  *     default. Core tabs route to the generic `cores/[slug]` webview.
  *   - The per-project last-tab persistence write path (the read path
  *     lives in `index.tsx`).
+ *   - CREATE-PROJECT (`<CreateProjectSheet>`, opened by the rail's `+`). The
+ *     projects-list screen owned this and is deleted (SPEC § Decisions Log
+ *     2026-07-27); the sheet is now the only way to create a project on mobile.
+ *   - The app-level entry in the header's left slot (`/settings` → server
+ *     editor, Admin, sign out) — the list header used to be its only home.
  *   - Swapping `<Slot />` children behind a 150ms opacity fade so tab
  *     switches feel responsive without pulling in `react-native-pager-
  *     view`. Disabled under reduce-motion.
@@ -37,6 +42,7 @@ import {
 
 import { ProjectHeader } from '../../../components/ProjectHeader';
 import { ProjectSettingsDrawer } from '../../../components/ProjectSettingsDrawer';
+import { CreateProjectSheet } from '../../../components/CreateProjectSheet';
 import { InviteModal, type InviteModalResult } from '../../../components/InviteModal';
 import { copyToClipboard } from '../../../lib/clipboard';
 import { canInviteToProject } from '../../../lib/invite-helpers';
@@ -48,6 +54,8 @@ import {
 } from '../../../components/ProjectRail';
 import { BREAKPOINTS, MOTION, SPACING, THEME, TYPOGRAPHY } from '../../../lib/composer-constants';
 import { loadAppConfig } from '../../../lib/config';
+import { createProjectErrorCopy } from '../../../lib/create-project-helpers';
+import { chatRouteForProject, GENERAL_CHAT_ROUTE } from '../../../lib/entry-route';
 import { lastTabStorage } from '../../../lib/last-tab-storage';
 import {
   activeTabKeyFromSegments,
@@ -66,6 +74,7 @@ import {
   type RailProjectView,
 } from '../../../lib/project-rail-view';
 import {
+  createProject,
   fetchProjects,
   projectCardInteractivity,
   sortProjectsByActivity,
@@ -134,7 +143,13 @@ export default function ProjectLayout() {
   }
 
   if (project_id.length === 0) {
-    return <ProjectNotFoundFallback id={project_id} onBack={() => router.replace('/projects')} />;
+    // There is no list to go back to any more — General is home.
+    return (
+      <ProjectNotFoundFallback
+        id={project_id}
+        onBack={() => router.replace(GENERAL_CHAT_ROUTE as Parameters<typeof router.replace>[0])}
+      />
+    );
   }
 
   return (
@@ -265,6 +280,14 @@ function ProjectShell({ project_id }: { project_id: string }) {
   const [inviteResult, setInviteResult] = useState<InviteModalResult | null>(null);
   const [inviteError, setInviteError] = useState<string | null>(null);
 
+  // Create-project sheet, opened from the rail's `+`. The affordance used to be
+  // the bottom bar of the projects-list screen; that screen is deleted (SPEC §
+  // Decisions Log 2026-07-27), so this IS create-project on mobile — without it
+  // the rail button would be dead and nothing on the device could make a project.
+  const [createOpen, setCreateOpen] = useState(false);
+  const [createSubmitting, setCreateSubmitting] = useState(false);
+  const [createError, setCreateError] = useState<string | null>(null);
+
   const openInvite = (): void => {
     setInviteResult(null);
     setInviteError(null);
@@ -312,7 +335,7 @@ function ProjectShell({ project_id }: { project_id: string }) {
     return (
       <ProjectNotFoundFallback
         id={project_id}
-        onBack={() => router.replace('/projects')}
+        onBack={() => router.replace(GENERAL_CHAT_ROUTE as Parameters<typeof router.replace>[0])}
         {...(error !== null ? { message: error.message } : {})}
       />
     );
@@ -384,8 +407,33 @@ function ProjectShell({ project_id }: { project_id: string }) {
     // means, and it is idempotent if the chat is already showing.
     router.replace(`/projects/${encodeURIComponent(id)}/chat`);
   };
-  // The `+` affordance jumps to the project list, which owns Create Project.
-  const onRailCreate = (): void => router.push('/projects');
+  // The `+` affordance opens the create sheet OVER the chat — no navigation, no
+  // separate screen (the list screen that used to own "+ Create Project" is gone).
+  const onRailCreate = (): void => {
+    setCreateError(null);
+    setCreateOpen(true);
+  };
+
+  const submitCreate = (name: string): void => {
+    if (user === null || createSubmitting) return;
+    setCreateSubmitting(true);
+    setCreateError(null);
+    createProject({ base_url: config.base_url, token: user.token, name })
+      .then((created) => {
+        setCreateOpen(false);
+        // Straight into the new project's CHAT. The rail list refetches on the
+        // project_id change, so the new entry appears without a manual refresh.
+        router.replace(
+          chatRouteForProject(created.id) as Parameters<typeof router.replace>[0],
+        );
+      })
+      .catch((err: unknown) => {
+        setCreateError(createProjectErrorCopy(err));
+      })
+      .finally(() => {
+        setCreateSubmitting(false);
+      });
+  };
 
   // Show the Invite pill only when the gateway can actually mint a link:
   // the caller is an owner/admin AND the project is a group (not
@@ -400,7 +448,10 @@ function ProjectShell({ project_id }: { project_id: string }) {
     <View style={styles.container}>
       <ProjectHeader
         name={project.name}
-        onBack={() => router.replace('/projects')}
+        // The left slot is the APP-level entry (server editor + Admin + sign
+        // out), not a back arrow: there is no list to go back to, and this
+        // header is now the only place either route is reachable from (#385).
+        onOpenAppSettings={() => router.push('/settings')}
         onOpenSettings={() => setDrawerOpen(true)}
         {...(canInvite ? { onInvite: openInvite } : {})}
       />
@@ -445,6 +496,13 @@ function ProjectShell({ project_id }: { project_id: string }) {
         </View>
       )}
       <ProjectSettingsDrawer open={drawerOpen} onClose={() => setDrawerOpen(false)} />
+      <CreateProjectSheet
+        open={createOpen}
+        submitting={createSubmitting}
+        errorText={createError}
+        onCancel={() => setCreateOpen(false)}
+        onSubmit={submitCreate}
+      />
       <InviteModal
         open={inviteOpen}
         projectName={project.name}
@@ -556,12 +614,12 @@ function ProjectNotFoundFallback({
       </Text>
       <Pressable
         accessibilityRole="button"
-        accessibilityLabel="Back to projects"
+        accessibilityLabel="Go to General chat"
         testID="project-not-found-back"
         onPress={onBack}
         style={({ pressed }) => [styles.backBtn, pressed && styles.pressed]}
       >
-        <Text style={styles.backBtnText}>Back to projects</Text>
+        <Text style={styles.backBtnText}>Go to General chat</Text>
       </Pressable>
     </View>
   );

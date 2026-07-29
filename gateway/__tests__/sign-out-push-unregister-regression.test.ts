@@ -9,7 +9,9 @@
  * leak on a shared device or instance switch.
  *
  * The client fix wires `disablePushForUser({ base_url, token })` into
- * `handleSignOut` at `app/app/projects/index.tsx` BEFORE clearing auth.
+ * `handleSignOut` at `app/app/settings.tsx` BEFORE clearing auth. (It used
+ * to live on `app/app/projects/index.tsx` too; that screen was deleted on
+ * 2026-07-29 — SPEC § Decisions Log 2026-07-27.)
  * This integration test pins down the contract the client now relies on:
  *
  *   1. POST /api/app/devices/register   → row persists in the store
@@ -158,7 +160,7 @@ describe('sign-out flow — device push token regression (P5.6 round 2)', () => 
 
     // Step 2 — Expo client sign-out flow: POST unregister using the
     // SAME bearer token (the unregister has to happen while the token
-    // is still valid, which the projects/index.tsx handler now does
+    // is still valid, which the settings.tsx handler now does
     // BEFORE clearing local auth state).
     const unregRes = await authedFetch(
       harness.base,

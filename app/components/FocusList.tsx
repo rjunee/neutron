@@ -191,12 +191,12 @@ export function FocusList({
         <Text style={styles.emptyBody}>{EMPTY_BODY}</Text>
         <Pressable
           accessibilityRole="link"
-          accessibilityLabel="Open projects"
+          accessibilityLabel="Open chat"
           testID="focus-empty-projects-link"
           onPress={onProjectsLink}
           style={({ pressed }) => [styles.emptyLink, pressed && styles.btnPressed]}
         >
-          <Text style={styles.emptyLinkText}>Open projects →</Text>
+          <Text style={styles.emptyLinkText}>Open chat →</Text>
         </Pressable>
         <Text style={styles.footnote} testID="focus-footnote-empty">
           {FOOTNOTE_COPY}

@@ -42,6 +42,7 @@ import {
 import { useEffect } from 'react';
 
 import { loadAppConfig } from '../lib/config';
+import { GENERAL_CHAT_ROUTE } from '../lib/entry-route';
 import { useAuthSession } from '../lib/session';
 import { AdminClient } from '../lib/admin-client';
 import { AdminPersonalityClient } from '../lib/admin-personality-client';
@@ -114,9 +115,13 @@ export default function AdminScreen() {
       <View style={styles.header}>
         <Pressable
           accessibilityRole="button"
-          accessibilityLabel="Back to projects"
+          accessibilityLabel="Back to chat"
           testID="admin-back"
-          onPress={() => router.replace('/projects')}
+          // The projects list is deleted (SPEC § Decisions Log 2026-07-27);
+          // General is home, and Admin is reached from /settings.
+          onPress={() =>
+            router.replace(GENERAL_CHAT_ROUTE as Parameters<typeof router.replace>[0])
+          }
           style={({ pressed }) => [styles.headerIconBtn, pressed && styles.pressed]}
         >
           <Text style={styles.headerIcon}>←</Text>

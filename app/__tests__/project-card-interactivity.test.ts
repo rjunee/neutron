@@ -4,11 +4,20 @@
  * Convention note (matching `comments-side-pane.test.tsx`): the Neutron
  * app's bun:test suite does NOT mount React Native components. Render-
  * level coverage is provided by the agent-browser smoke pass. This file
- * pins the PURE decision that drives the shared-card disabled state —
- * `projectCardInteractivity(project)` — which the screen
- * (`app/app/projects/index.tsx`) consumes for BOTH the card render
- * (`disabled` / `accessibilityState` / `accessibilityRole` / hint) AND
- * the `handleOpen` navigation guard, so the two can never drift.
+ * pins the PURE decision that drives the shared-project non-navigable
+ * state — `projectCardInteractivity(project)`.
+ *
+ * ITS CONSUMERS CHANGED, THE RULE DID NOT. The card render + `handleOpen`
+ * guard lived on the projects-list screen, which is DELETED (SPEC § Decisions
+ * Log 2026-07-27 — the app opens straight into chat and the rail is the
+ * switcher). The predicate is still the single source of truth for "can this
+ * project be opened", now consumed by `lib/entry-route.ts`
+ * (`entryRouteForProjects` must never enter the app on a shared project) and by
+ * the rail list in `app/app/projects/[id]/_layout.tsx`. The `hint` /
+ * `accessibilityState` / `accessibilityRole` fields no longer have a card to
+ * render them — kept because they are part of one coherent decision and the
+ * shared-project detail view (ISSUES #82) is still the thing that would make
+ * them live; see the note on the hint test below.
  *
  * Argus r2 MINOR #5: the backend timeout regression was tested but the
  * frontend non-navigable shared-card behavior was not. This closes it.
@@ -49,9 +58,12 @@ describe('projectCardInteractivity', () => {
     expect(a11y.hint).toBeNull();
   });
 
-  test('navigable is the single source of truth for the handleOpen guard', () => {
-    // handleOpen early-returns on `!navigable`; assert the contract the
-    // screen relies on rather than re-implementing the predicate there.
+  test('navigable is the single source of truth for every open guard', () => {
+    // Was `handleOpen` on the deleted list screen; now the rail filter
+    // (`railList` in `projects/[id]/_layout.tsx`) and the app's ENTRY route
+    // (`entryRouteForProjects`) both branch on this one predicate rather than
+    // re-implementing it. `mobile-entry-route.test.ts` asserts the entry half
+    // behaviourally.
     expect(projectCardInteractivity({ kind: 'shared', name: 'x' }).navigable).toBe(
       false,
     );
