@@ -5,6 +5,17 @@
  * Time-dependent assertions use `Date.now()`-relative timestamps (per the
  * repo's no-hardcoded-ISO rule) — every call passes an explicit `now` offset
  * from a single `t0` base captured at test start.
+ *
+ * `t0` IS ANCHORED TO UTC MIDDAY, not to the bare wall clock. `tryAcquire`
+ * RESETS `state.daily` on a UTC-day rollover, and the refill test asserts a
+ * counter at `t0 + 60_000`. With `t0 = Date.now()` that assertion silently
+ * crosses midnight whenever the suite runs in the last minute of a UTC day, the
+ * daily counters reset, and `daily.rejected` reads 0 instead of 1 — which is
+ * exactly how CI failed at 23:59:49Z on 2026-07-29 (reproduced locally by
+ * pinning `t0` to that instant). Midday keeps every same-day offset (+60s,
+ * +CB_COOLDOWN_MS = 10min) inside one UTC day while the deliberate `+24h`
+ * rollover test still crosses exactly one boundary. Still derived from
+ * `Date.now()`, so nothing rots.
  */
 
 import { describe, test, expect } from 'bun:test'
@@ -31,7 +42,8 @@ function tmpStatePath(): string {
   return join(dir, '.scribe-budget.json')
 }
 
-const t0 = Date.now()
+const UTC_DAY_MS = 24 * 60 * 60 * 1000
+const t0 = Math.floor(Date.now() / UTC_DAY_MS) * UTC_DAY_MS + UTC_DAY_MS / 2
 
 describe('scribe-budget — per-instance governor', () => {
   test('defaultStatePath is under the instance home', () => {
