@@ -21,6 +21,8 @@ Branch `fix/419-spent-button-server-state`. #415 closed the dangerous half of th
 
 **Not device-verified.** Nothing in this repo's harness renders a real screen; the native test proves wiring, press-reachability and render structure under react-native-web, not pixels on a phone.
 
+**A CI gate this PR turned red, and fixed rather than bypassed.** Adding three test files broke `run-tests.sh shard partition > 4 shards partition the set exactly` — not a gap or an overlap, the BALANCE assertion (`max - min <= 1`). The sharder round-robined each of the three lanes (general / PGLite / device) from index 0 INDEPENDENTLY, so every lane's remainder landed on the same low-index shards and `max - min` could reach 3. It held on main by arithmetic luck and broke the first time a PR added files across two lanes. The round-robin cursor now CARRIES ACROSS lanes (`scripts/run-tests.sh`), making the three lanes one continuous round-robin over a fixed concatenated order — balanced within one file by construction, each lane still spread proportionally, the partition function otherwise unchanged (same gaps/overlap properties, only phase-shifted per lane). Shard sizes went 270/269/268/268 → 269/269/269/268. Mutation-tested so the repair did not trade a false positive for a false negative: a real GAP (drop one file from every slice) → red, the ORIGINAL per-lane-reset imbalance → red, a real OVERLAP (two shards share a slice) → red.
+
 ## 2026-07-30 — mobile chat: the four iMessage defects (composer clipping, bubble rhythm, the inspector, the "Waking up…" bubble)
 
 Branch `fix/imessage-chat-ux`. Ryan asked three times for the chat screen to match iMessage and named four things; all four are addressed here, plus one harness fault found on the way.

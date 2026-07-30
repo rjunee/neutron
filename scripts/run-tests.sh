@@ -265,9 +265,20 @@ done
 # slice of what gets VERIFIED. (Sharding earlier would have made each runner
 # blind to a discovery drift affecting files it does not own.)
 #
-# Round-robin by index, applied to EVERY lane independently, so each shard gets a
+# Round-robin by index across the lanes IN SEQUENCE, so each shard gets a
 # proportional share of the slow PGLite files instead of one runner absorbing the
 # entire serial lane (same for the device-harness lane).
+#
+# The round-robin cursor CARRIES ACROSS lanes rather than resetting to 0 for each
+# one. That is load-bearing for balance, not a tidiness preference: a per-lane
+# reset sends every lane's remainder to the SAME low-index shards, so with three
+# lanes `max - min` can reach 3 while the partition guard
+# (scripts/__tests__/run-tests-shard.test.ts) requires <= 1. It held on main by
+# arithmetic luck and broke the first time a PR added three files. Carrying the
+# cursor makes the three lanes one continuous round-robin over a fixed
+# concatenated order, so the overall split is balanced within one file BY
+# CONSTRUCTION, while each lane is still spread proportionally. Gaps/overlap are
+# unaffected — it is the same partition function, only phase-shifted per lane.
 #
 # The coverage guarantee changes shape and it is worth being explicit: a sharded
 # run can no longer prove on its own that every file ran. It proves it ran
@@ -277,23 +288,34 @@ done
 # aggregator job requiring every shard to report. Drop any one of those three
 # and a silent coverage hole becomes possible.
 if [ -n "$SHARD_SPEC" ]; then
+  # $1 = the round-robin cursor this lane starts at; the rest are its files.
+  # `_slice` runs in a subshell (it is read through a process substitution), so
+  # the cursor cannot be a mutated global — the caller advances it by the lane's
+  # PRE-SLICE length, captured before the array is reassigned.
   _slice() {
+    _k=$1
+    shift
     _out=()
-    _k=0
     for _f in "$@"; do
       if [ "$(( _k % SHARD_N ))" -eq "$(( SHARD_I - 1 ))" ]; then _out+=("$_f"); fi
       _k=$(( _k + 1 ))
     done
     printf '%s\n' ${_out[@]+"${_out[@]}"}
   }
+  _shard_cursor=0
+  _lane_n=${#GENERAL_FILES[@]}
   _tmp=()
-  while IFS= read -r _l; do [ -n "$_l" ] && _tmp+=("$_l"); done < <(_slice ${GENERAL_FILES[@]+"${GENERAL_FILES[@]}"})
+  while IFS= read -r _l; do [ -n "$_l" ] && _tmp+=("$_l"); done < <(_slice "$_shard_cursor" ${GENERAL_FILES[@]+"${GENERAL_FILES[@]}"})
   GENERAL_FILES=( ${_tmp[@]+"${_tmp[@]}"} )
+  _shard_cursor=$(( _shard_cursor + _lane_n ))
+  _lane_n=${#PGLITE_FILES[@]}
   _tmp=()
-  while IFS= read -r _l; do [ -n "$_l" ] && _tmp+=("$_l"); done < <(_slice ${PGLITE_FILES[@]+"${PGLITE_FILES[@]}"})
+  while IFS= read -r _l; do [ -n "$_l" ] && _tmp+=("$_l"); done < <(_slice "$_shard_cursor" ${PGLITE_FILES[@]+"${PGLITE_FILES[@]}"})
   PGLITE_FILES=( ${_tmp[@]+"${_tmp[@]}"} )
+  _shard_cursor=$(( _shard_cursor + _lane_n ))
+  _lane_n=${#DEVICE_FILES[@]}
   _tmp=()
-  while IFS= read -r _l; do [ -n "$_l" ] && _tmp+=("$_l"); done < <(_slice ${DEVICE_FILES[@]+"${DEVICE_FILES[@]}"})
+  while IFS= read -r _l; do [ -n "$_l" ] && _tmp+=("$_l"); done < <(_slice "$_shard_cursor" ${DEVICE_FILES[@]+"${DEVICE_FILES[@]}"})
   DEVICE_FILES=( ${_tmp[@]+"${_tmp[@]}"} )
   echo "run-tests: SHARD ${SHARD_I}/${SHARD_N} — executing ${#GENERAL_FILES[@]} general + ${#PGLITE_FILES[@]} PGLite + ${#DEVICE_FILES[@]} device of ${TOTAL} discovered"
 fi
