@@ -25,6 +25,8 @@ import { join } from 'node:path'
 import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { ButtonStore } from '@neutronai/channels/button-store.ts'
+import { buildButtonPrompt } from '@neutronai/channels/button-primitive.ts'
+import { buildButtonPromptClaim } from '../build-button-prompt-claim.ts'
 import type { ChatOutbound } from '@neutronai/landing/server.ts'
 import type { Event } from '@neutronai/runtime/events.ts'
 import type { AgentSpec, Substrate } from '@neutronai/runtime/substrate.ts'
@@ -211,6 +213,139 @@ describe('build-live-agent-turn — freeze-timeout auto-retry + Retry affordance
     expect(result.outcome).toBe('replied')
     expect(specs[0]!.prompt).not.toContain(RETRY_TURN_VALUE)
     expect(specs[0]!.prompt).toContain('Please try my previous message again.')
+  })
+
+  // ── ISSUES #415 — the Retry prompt's idempotency key.
+  //
+  // `REPLY_ROW_TTL_MS` is ten years, so every Retry row ever emitted stays live
+  // forever. Before the fix the row carried NO idempotency key at all, so each
+  // emit minted another never-expiring live Retry button. These pin BOTH halves
+  // of the contract: the key EXISTS, and its identity term is the dispatch
+  // attempt — never the message text, which would make two distinct failures
+  // collide and silently swallow the second one's bubble.
+
+  test('the Retry prompt row carries an idempotency key', async () => {
+    const specs: AgentSpec[] = []
+    const sent: ChatOutbound[] = []
+    const run = makeRunner(makeSeqSubstrate([{ error: TURN_TIMEOUT_ERR }], specs))
+    await run(makeTurn({ sent }))
+
+    const msg = sent.find((e) => e.type === 'agent_message') as { prompt_id?: string }
+    expect(typeof msg.prompt_id).toBe('string')
+    const row = db
+      .raw()
+      .prepare(`SELECT idempotency_key FROM button_prompts WHERE prompt_id = ?`)
+      .get(msg.prompt_id!) as { idempotency_key: string | null }
+    expect(row.idempotency_key).not.toBeNull()
+    expect(row.idempotency_key!.length).toBeGreaterThan(0)
+  })
+
+  test('two DISTINCT failures of the SAME message text each get their own bubble and their own key', async () => {
+    const specs: AgentSpec[] = []
+    const sent: ChatOutbound[] = []
+    // Both dispatches freeze, so both turns auto-retry then bubble.
+    const run = makeRunner(makeSeqSubstrate([{ error: TURN_TIMEOUT_ERR }], specs))
+    const identical = 'run the full e2e suite'
+    await run(makeTurn({ sent, user_text: identical }))
+    await run(makeTurn({ sent, user_text: identical }))
+
+    const bubbles = sent.filter(
+      (e) => e.type === 'agent_message' && (e as { body: string }).body === TIMEOUT_BODY,
+    ) as Array<{ prompt_id?: string }>
+    // The owner asked twice and it failed twice — they must be TOLD twice. A
+    // text-derived key would collapse these into one and swallow the second.
+    expect(bubbles).toHaveLength(2)
+    expect(bubbles[0]!.prompt_id).not.toBe(bubbles[1]!.prompt_id)
+
+    const keys = bubbles.map(
+      (b) =>
+        (
+          db
+            .raw()
+            .prepare(`SELECT idempotency_key FROM button_prompts WHERE prompt_id = ?`)
+            .get(b.prompt_id!) as { idempotency_key: string | null }
+        ).idempotency_key,
+    )
+    expect(keys[0]).not.toBeNull()
+    expect(keys[0]).not.toBe(keys[1])
+  })
+
+  test('a Retry tap that freezes AGAIN gets its own fresh bubble, never a deduped silence', async () => {
+    const specs: AgentSpec[] = []
+    const sent: ChatOutbound[] = []
+    const run = makeRunner(makeSeqSubstrate([{ error: TURN_TIMEOUT_ERR }], specs))
+    const original = 'weave timer+tracker together then do full e2e testing'
+    await run(makeTurn({ sent, user_text: original }))
+    // The tap re-runs on the RECOVERED text — identical bytes to turn 1 — so a
+    // text-derived key would dedupe and the owner would tap Retry and be met
+    // with silence.
+    await run(makeTurn({ sent, user_text: RETRY_TURN_VALUE }))
+
+    const bubbles = sent.filter(
+      (e) => e.type === 'agent_message' && (e as { body: string }).body === TIMEOUT_BODY,
+    ) as Array<{ prompt_id?: string }>
+    expect(bubbles).toHaveLength(2)
+    expect(bubbles[0]!.prompt_id).not.toBe(bubbles[1]!.prompt_id)
+  })
+
+  test('a Retry tap whose prompt the surface already CLAIMED leaves ONE user line, not two', async () => {
+    const specs: AgentSpec[] = []
+    const sent: ChatOutbound[] = []
+    const run = makeRunner(makeSeqSubstrate([{ reply: 'first' }, { reply: 'second' }], specs))
+    const original = 'weave timer+tracker together then do full e2e testing'
+    await run(makeTurn({ sent, user_text: original }))
+
+    // The Retry bubble a freeze would have left behind.
+    const { prompt_id } = await store.emit(
+      buildButtonPrompt({
+        body: TIMEOUT_BODY,
+        options: [{ label: '1', body: 'Retry', value: RETRY_TURN_VALUE }],
+        allow_freeform: true,
+        expires_in_ms: 10 * 365 * 24 * 60 * 60 * 1_000,
+      }),
+      { topic_id: 'web:u-1' },
+    )
+    // The surface claims it (the REAL claim, not a lookalike) before dispatch —
+    // which resolves the row, stamping the tap as this turn's user line.
+    const claim = buildButtonPromptClaim({ buttonStore: store })
+    expect(
+      await claim({
+        user_id: 'u-1',
+        project_slug: 'alice',
+        prompt_id,
+        choice_value: RETRY_TURN_VALUE,
+        observed_at: now,
+      }),
+    ).toBe(true)
+
+    // Count the inert USER rows (body '', the user line carried in
+    // `resolution_freeform_text`) carrying the original question BEFORE the tap.
+    // Turn 1 legitimately wrote one, so the assertion is on the DELTA.
+    const countUserRows = (): number =>
+      (
+        db
+          .raw()
+          .prepare(
+            `SELECT COUNT(*) AS n FROM button_prompts
+              WHERE topic_id = 'web:u-1' AND body = '' AND resolution_freeform_text = ?`,
+          )
+          .get(original) as { n: number }
+      ).n
+    const before = countUserRows()
+
+    await run(makeTurn({ sent, user_text: RETRY_TURN_VALUE, button_prompt_id: prompt_id }))
+
+    // The runner's step-1 persistence stamps the latest UNRESOLVED row. The
+    // claim already resolved this one, so without the `button_prompt_id`
+    // hand-off the runner would fall through and write a SECOND user row for
+    // the same single tap.
+    expect(countUserRows()).toBe(before)
+    // The tap itself is still on the record — the trace that explains the re-run.
+    const claimed = db
+      .raw()
+      .prepare(`SELECT resolution_freeform_text AS t FROM button_prompts WHERE prompt_id = ?`)
+      .get(prompt_id) as { t: string | null }
+    expect(claimed.t).toBe('Retry')
   })
 
   test('a failed SEED freeze stays silent — no retry, no bubble (reload re-fires)', async () => {
