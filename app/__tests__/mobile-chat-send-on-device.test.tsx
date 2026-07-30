@@ -32,6 +32,7 @@ import { createElement } from 'react';
 import {
   installNativeHarness,
   setHarnessPlatform,
+  resetHarnessGlobals,
   withoutWebCrypto,
 } from './support/native-harness';
 
@@ -74,6 +75,9 @@ afterEach(() => {
 
 afterAll(() => {
   __resetServerConfigForTests();
+  // Bun shares one process across ~100 test files: leaving the faked layout rect
+  // or the WebSocket recorder installed lands them in whatever runs next.
+  resetHarnessGlobals();
 });
 
 async function mountChat(projectId: string) {

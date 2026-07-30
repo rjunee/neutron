@@ -88,7 +88,7 @@ export function installNativeHarness(): void {
   installed = true;
 
   if ((globalThis as { document?: unknown }).document === undefined) {
-    GlobalRegistrator.register({ url: 'http://localhost/' });
+    registerDomKeepingBunNetworking();
   }
   (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
   // Metro defines this; without it expo-modules-core's environment probe throws.
@@ -138,6 +138,58 @@ export function installNativeHarness(): void {
     },
   });
 
+}
+
+/**
+ * Bun globals that happy-dom replaces and that OTHER packages' tests depend on
+ * being Bun's own.
+ *
+ * `GlobalRegistrator.register()` installs a whole browser environment, including
+ * its own `fetch` / `Response` / `Request` / `Headers` / `WebSocket`. Those are
+ * process-global and Bun runs ~100 test FILES per process, so registering them
+ * reaches straight into every gateway/open test that boots a `Bun.serve` — a
+ * handler returning a happy-dom `Response` fails Bun's `Expected a Response
+ * object` check, and a happy-dom `fetch` at a loopback server gives ECONNREFUSED.
+ * On the first CI run of this harness that collateral was 68 unrelated failures
+ * across three shards.
+ *
+ * The DOM is what this harness needs; the network stack is not. So the natives are
+ * captured first and put back immediately after registration. react-dom and
+ * react-native-web touch none of them.
+ */
+const BUN_NATIVE_GLOBALS = [
+  'fetch',
+  'Response',
+  'Request',
+  'Headers',
+  'FormData',
+  'Blob',
+  'File',
+  'WebSocket',
+  'URL',
+  'URLSearchParams',
+  'AbortController',
+  'AbortSignal',
+  'ReadableStream',
+  'WritableStream',
+  'TransformStream',
+  'TextEncoder',
+  'TextDecoder',
+  'crypto',
+] as const;
+
+function registerDomKeepingBunNetworking(): void {
+  const g = globalThis as unknown as Record<string, unknown>;
+  const natives = new Map<string, unknown>();
+  for (const name of BUN_NATIVE_GLOBALS) {
+    if (name in g) natives.set(name, g[name]);
+  }
+
+  GlobalRegistrator.register({ url: 'http://localhost/' });
+
+  for (const [name, value] of natives) {
+    Object.defineProperty(g, name, { value, configurable: true, writable: true });
+  }
 }
 
 /**
@@ -203,10 +255,13 @@ export const HARNESS_SCREEN_WIDTH = 393;
  * by the overlap it measured", and not nearly enough to assert anything about
  * real visual layout.
  */
+let realGetBoundingClientRect: unknown = null;
+
 function installLayoutMetrics(): void {
   const proto = (globalThis as unknown as { Element?: { prototype: Record<string, unknown> } })
     .Element;
   if (proto === undefined) return;
+  realGetBoundingClientRect = proto.prototype['getBoundingClientRect'];
   proto.prototype['getBoundingClientRect'] = function getBoundingClientRect(): DOMRect {
     return {
       x: 0,
@@ -254,4 +309,49 @@ export function withoutWebCrypto(): () => void {
       writable: true,
     });
   };
+}
+
+/**
+ * Undo the process-global side effects a harness file must not leave behind.
+ *
+ * CALL THIS IN `afterAll` OF EVERY HARNESS SUITE. Bun runs ~100 test FILES per
+ * process and the chunk composition is not stable, so anything left installed
+ * here lands in whatever runs next. The first CI run of this harness proved that
+ * the expensive way: 68 failures across three shards in unrelated packages,
+ * because the faked layout rect and the `FakeChatSocket` global were still in
+ * place when gateway/open tests booted real `Bun.serve` instances.
+ *
+ * The DOM registration itself is deliberately NOT undone: unregistering after
+ * react-native-web has already captured browser globals would break the harness
+ * files still to run in this process, and a merely-present `document` is a
+ * condition the suite already tolerates (`landing`'s tests register happy-dom the
+ * same way). The Bun-native network stack is restored at registration time — see
+ * {@link registerDomKeepingBunNetworking}.
+ */
+export function resetHarnessGlobals(): void {
+  const proto = (globalThis as unknown as { Element?: { prototype: Record<string, unknown> } })
+    .Element;
+  if (proto !== undefined && realGetBoundingClientRect !== null) {
+    proto.prototype['getBoundingClientRect'] = realGetBoundingClientRect;
+  }
+  // Hand the real WebSocket back — a live `Bun.serve` WS test in the next file
+  // otherwise connects to a recorder that never opens, and simply times out.
+  if (realWebSocket !== null) {
+    Object.defineProperty(globalThis, 'WebSocket', {
+      value: realWebSocket,
+      configurable: true,
+      writable: true,
+    });
+  }
+  setHarnessPlatform('web');
+}
+
+/** Bun's own `WebSocket`, captured before any test swaps in a recorder. */
+let realWebSocket: unknown = null;
+
+/** Called by `FakeChatSocket.install()` so the real constructor can be restored. */
+export function rememberRealWebSocket(): void {
+  if (realWebSocket === null) {
+    realWebSocket = (globalThis as { WebSocket?: unknown }).WebSocket ?? null;
+  }
 }

@@ -5690,6 +5690,25 @@ prototype value setter, so React sees it), `press(accessibilityLabel)` — which
 THROWS when the control is absent or disabled, so an unreachable button fails the
 test — and `FakeChatSocket`, which records every outbound frame.
 
+**PROCESS HYGIENE IS PART OF THE CONTRACT.** Bun runs ~100 test files per process
+and chunk composition is not stable, so a harness file must leave nothing behind.
+Two rules, both learned from 68 collateral failures across three shards on this
+harness's first CI run:
+
+1. `registerDomKeepingBunNetworking()` captures Bun's `fetch`/`Response`/`Request`/
+   `WebSocket`/`URL`/… before `GlobalRegistrator.register()` and restores them
+   straight after. The harness needs the DOM, not happy-dom's network stack; a
+   gateway test booting a real `Bun.serve` otherwise fails Bun's
+   `Expected a Response object` check.
+2. **Every harness suite MUST call `resetHarnessGlobals()` in `afterAll`** — it
+   restores `getBoundingClientRect`, the real `WebSocket` (a leftover
+   `FakeChatSocket` hangs the next file's real WS test until timeout) and
+   `Platform.OS`.
+
+The DOM registration itself is deliberately not undone: unregistering after
+react-native-web has captured browser globals would break harness files still to
+run in the same process.
+
 **It does not contest the `react-native` specifier.** Four existing app tests own
 it with process-global `mock.module('react-native', () => ({ View, Text, … }))`
 fakes, and Bun runs many test files per process, so whichever loads first breaks

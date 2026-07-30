@@ -20,12 +20,13 @@
  * keyboard. "The composer is visible above the keyboard" stays a DEVICE claim.
  */
 
-import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
+import { afterAll, afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import { createElement } from 'react';
 
 import {
   HARNESS_SCREEN_HEIGHT,
   installNativeHarness,
+  resetHarnessGlobals,
   setHarnessPlatform,
 } from './support/native-harness';
 
@@ -59,6 +60,12 @@ beforeEach(() => {
 afterEach(() => {
   clearSessionCache();
   __resetServerConfigForTests();
+});
+
+afterAll(() => {
+  // Bun shares one process across ~100 test files: leaving the faked layout rect
+  // or the WebSocket recorder installed lands them in whatever runs next.
+  resetHarnessGlobals();
 });
 
 async function mountChat() {

@@ -10,6 +10,8 @@
  */
 
 import { act, type ReactElement } from 'react';
+
+import { rememberRealWebSocket } from './native-harness';
 // eslint-disable-next-line @typescript-eslint/ban-ts-comment
 // @ts-expect-error react-dom ships no bundled types and @types/react-dom is not a
 // dependency of this app; the harness only needs createRoot/unmount.
@@ -152,8 +154,15 @@ export class FakeChatSocket {
       .filter((env) => env['type'] === type);
   }
 
-  /** Install as the global `WebSocket` and reset the recorder. */
+  /**
+   * Install as the global `WebSocket` and reset the recorder.
+   *
+   * Pair with `resetHarnessGlobals()` in `afterAll` — Bun shares one process
+   * across ~100 test files, and a recorder left installed makes the next file's
+   * real `Bun.serve` WebSocket test hang until its timeout.
+   */
   static install(): void {
+    rememberRealWebSocket();
     FakeChatSocket.opened = [];
     (globalThis as { WebSocket?: unknown }).WebSocket = FakeChatSocket;
   }

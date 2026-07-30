@@ -8,13 +8,14 @@
  * instead of turning the device suites into no-ops.
  */
 
-import { describe, expect, it } from 'bun:test';
+import { afterAll, describe, expect, it } from 'bun:test';
 import { createElement } from 'react';
 
 import {
   HARNESS_SCREEN_HEIGHT,
   installNativeHarness,
   setHarnessPlatform,
+  resetHarnessGlobals,
   withoutWebCrypto,
 } from './support/native-harness';
 
@@ -29,6 +30,10 @@ installNativeHarness();
 // asserting on. (Asserting the bare specifier would test another file's fake.)
 const RN = await import('./support/stubs/react-native');
 const { mountScreen } = await import('./support/mount');
+
+afterAll(() => {
+  resetHarnessGlobals();
+});
 
 describe('native harness preconditions', () => {
   it('has a DOM to render into', () => {
