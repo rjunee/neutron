@@ -15,7 +15,12 @@
  *     checkmark ladder (queued → sent → delivered), Telegram-style.
  */
 
-import { groupReactions as groupReactionsCore, type ReactionChip } from '@neutronai/chat-core';
+import {
+  groupReactions as groupReactionsCore,
+  isTransientSystemNotice,
+  systemNoticeText,
+  type ReactionChip,
+} from '@neutronai/chat-core';
 import type { ChatMessage } from '@neutronai/chat-core';
 
 export type { ReactionChip };
@@ -76,6 +81,76 @@ export function foldStreamFrame(state: StreamState, frame: unknown): StreamState
   }
 
   return state;
+}
+
+/**
+ * The TRANSIENT system-notice channel — the native mirror of the web
+ * controller's `systemNotice` view-model field (`landing/chat-react/
+ * controller.ts`). Same mechanism, same clearing rules; the frame predicate
+ * itself is the shared `isTransientSystemNotice` from `@neutronai/chat-core`,
+ * so there is exactly one definition of "this is a pill, not a message".
+ */
+export interface SystemNoticeState {
+  /** What the pill says right now. `null` = no pill. */
+  text: string | null;
+  /**
+   * Has the real reply for THIS turn already begun? A cold-start ack is a
+   * DELAYED `setTimeout` on the gateway, so on a slow-then-fast turn it can land
+   * just after the answer; re-arming the pill then leaves a "Waking up…" hanging
+   * below the reply (web FIX #347). Latched here for the same reason.
+   */
+  replyStarted: boolean;
+}
+
+export function emptySystemNoticeState(): SystemNoticeState {
+  return { text: null, replyStarted: false };
+}
+
+/**
+ * Re-arm for a new turn. Called when the owner sends: the next ack belongs to
+ * the turn that is starting now, not to the one that already answered.
+ */
+export function armSystemNoticeTurn(state: SystemNoticeState): SystemNoticeState {
+  if (state.text === null && !state.replyStarted) return state;
+  return emptySystemNoticeState();
+}
+
+/**
+ * Fold one raw inbound frame into the notice state. Pure; returns the SAME
+ * reference when nothing changed so the caller can skip a re-render.
+ *
+ *   - a transient notice frame → show the pill, unless the reply already began;
+ *   - a real streaming token or a real final `agent_message` → clear the pill
+ *     and latch `replyStarted`;
+ *   - anything else → unchanged.
+ */
+export function foldSystemNoticeFrame(
+  state: SystemNoticeState,
+  frame: unknown,
+): SystemNoticeState {
+  if (typeof frame !== 'object' || frame === null) return state;
+  const f = frame as Record<string, unknown>;
+  const type = f['type'];
+
+  if (isTransientSystemNotice(frame)) {
+    // Drop a LATE ack: never show the pill once this turn's reply has started.
+    if (state.replyStarted) return state;
+    const text = systemNoticeText(frame);
+    if (text === null || text === state.text) return state;
+    return { text, replyStarted: false };
+  }
+
+  if (type === 'agent_message_partial') {
+    // A ZERO-LENGTH opening delta is not a token (web BUG 7) — the stream has
+    // not really begun, so it must not clear a pill that is doing its job.
+    const delta = f['body_delta'];
+    if (typeof delta !== 'string' || delta.length === 0) return state;
+  } else if (type !== 'agent_message') {
+    return state;
+  }
+
+  if (state.text === null && state.replyStarted) return state;
+  return { text: null, replyStarted: true };
 }
 
 /**

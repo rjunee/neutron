@@ -1,5 +1,18 @@
 import { createElement, type ReactNode } from 'react';
-import { View } from 'react-native';
+// SIBLING STUB, NOT THE `react-native` SPECIFIER — deliberately.
+//
+// `mock.module('react-native', …)` is PROCESS-GLOBAL and permanent in Bun, and
+// two app test files register one (`docs-panes-render`, `diagnostics-pane-
+// render`). The harness sidesteps that by rewriting the specifier inside the
+// APP's own sources (`native-harness.ts`), but that rewrite is scoped to
+// `app/{app,components,lib,features}` — it does not cover this directory. Asking
+// the registry for `react-native` from here therefore hands this stub whichever
+// three-export fake loaded first in the process, its `View` renders `null`, and
+// EVERY row of the transcript silently disappears from a mounted chat test that
+// happens to share a chunk with one of those files. That is an order-dependent
+// failure with no relationship to the code under test, which is the worst
+// possible property for the gate meant to catch device bugs.
+import { View } from './react-native';
 export interface FlashListProps<T> {
   data?: readonly T[] | null;
   renderItem?: (info: { item: T; index: number }) => ReactNode;

@@ -89,3 +89,77 @@ export function bubbleMaxWidthPt(row_width: number): number {
 export function bubbleOppositeGutterPt(row_width: number): number {
   return row_width - bubbleMaxWidthPt(row_width);
 }
+
+/* ────────────────────────────────────────────────────────────────────────────
+ * iMessage BUBBLE GEOMETRY (mobile defect 2026-07-30).
+ *
+ * Ryan, three times: *"make the UX of the chat screen look EXACTLY the same as
+ * imessage"*, and specifically *"too much padding at the bottom of each message
+ * bubble"*. The surface was on a uniform `marginVertical: 4` (so 8pt between
+ * EVERY pair of bubbles, whoever sent them) plus an 8pt vertical bubble padding
+ * plus a delivery-tick row rendered INSIDE the bubble on every single outgoing
+ * message. Three separate sources of bottom space, none of them iMessage's.
+ *
+ * iMessage's actual rhythm: bubbles from the same sender are all but touching,
+ * and the visible break in the transcript is the SENDER CHANGE. Everything below
+ * is the geometry that produces that rhythm, owned here for the same reason the
+ * width cap is — one place to read it from, one place a test can pin.
+ * ──────────────────────────────────────────────────────────────────────────── */
+
+/** Who a row is from. `null` = there is no previous row (top of the list). */
+export type BubbleSpeaker = 'user' | 'agent';
+
+/**
+ * Vertical space above a bubble when the PREVIOUS bubble was from the same
+ * sender. iMessage stacks a run this tightly — the bubbles read as one utterance
+ * broken across lines, not as separate turns.
+ */
+export const BUBBLE_GAP_SAME_SENDER_PT = 2;
+
+/**
+ * Vertical space above a bubble when the speaker CHANGED. This is the only gap
+ * in an iMessage transcript that the eye actually registers, so it has to be
+ * several times the same-sender gap or the conversation turns into a wall.
+ */
+export const BUBBLE_GAP_SENDER_CHANGE_PT = 8;
+
+/** Horizontal text inset inside a bubble. */
+export const BUBBLE_PADDING_H_PT = 12;
+
+/**
+ * Vertical text inset inside a bubble. iMessage is TIGHT here: the bubble hugs
+ * the line box. This was 8 (`SPACING.sm`), which with a 22pt line height read as
+ * a visibly padded box rather than a speech bubble.
+ */
+export const BUBBLE_PADDING_V_PT = 6;
+
+/** Bubble corner radius on the three non-tail corners. */
+export const BUBBLE_RADIUS_PT = 18;
+
+/**
+ * The TAIL corner's radius — the bottom corner on the speaker's own side. In
+ * iMessage only the LAST bubble of a same-sender run has a tail; the ones above
+ * it are fully rounded. {@link bubbleHasTail} decides which.
+ */
+export const BUBBLE_TAIL_RADIUS_PT = 4;
+
+/**
+ * The gap above a bubble, given who sent the one before it.
+ *
+ * `null` previous = the first row: no leading gap at all (the list's own
+ * `paddingVertical` already provides the breathing room at the very top, and
+ * adding a sender-change gap there double-spaces the transcript's head).
+ */
+export function bubbleGapPt(previous: BubbleSpeaker | null, current: BubbleSpeaker): number {
+  if (previous === null) return 0;
+  return previous === current ? BUBBLE_GAP_SAME_SENDER_PT : BUBBLE_GAP_SENDER_CHANGE_PT;
+}
+
+/**
+ * Does this bubble get the tail corner? Only the LAST bubble of a same-sender
+ * run does, exactly as iMessage draws it. `null` next = the newest row, which is
+ * always the end of its run.
+ */
+export function bubbleHasTail(current: BubbleSpeaker, next: BubbleSpeaker | null): boolean {
+  return next === null || next !== current;
+}

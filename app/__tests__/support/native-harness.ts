@@ -59,6 +59,11 @@ const ALIASES: ReadonlyArray<readonly [RegExp, string, 'named' | 'both']> = [
   // The whole point: RN primitives that render to DOM.
   [/[\\/]react-native[\\/]index\.js$/, `${STUBS}/react-native.ts`, 'both'],
   [pkg('@react-native-async-storage/async-storage'), `${STUBS}/async-storage.ts`, 'both'],
+  // Safe-area insets: the real `useSafeAreaInsets` THROWS without the native
+  // provider `expo-router` installs, and the composer + the activity drawer both
+  // read it now. The stub's insets are settable so a test can prove the home
+  // indicator is cleared with the keyboard down and NOT double-counted with it up.
+  [pkg('react-native-safe-area-context'), `${STUBS}/safe-area-context.ts`, 'named'],
   // Expo modules with no JS-only implementation. Inert stubs, not fakes with
   // behaviour — a test that needs one of these to DO something should inject its
   // own double rather than grow the stub.

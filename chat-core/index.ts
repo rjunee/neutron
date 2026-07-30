@@ -10,6 +10,9 @@
  */
 
 export {
+  isColdStartAck,
+  isTransientSystemNotice,
+  systemNoticeText,
   normalizeInbound,
   normalizeReceiptUpdate,
   normalizeReactionUpdate,

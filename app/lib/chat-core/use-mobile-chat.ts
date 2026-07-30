@@ -41,12 +41,16 @@ import { railIdToScope } from '../project-rail-view';
 import { buildWsUrl } from './ws-url';
 import { useAuthSession } from '../session';
 import {
+  armSystemNoticeTurn,
   buildRenderRows,
   emptyStreamState,
+  emptySystemNoticeState,
   foldStreamFrame,
+  foldSystemNoticeFrame,
   frameMatchesProject,
   type RenderRow,
   type StreamState,
+  type SystemNoticeState,
 } from './chat-render-model';
 import { createMobileStore } from './op-sqlite-store';
 import { MobileChatSession } from './mobile-session';
@@ -59,6 +63,15 @@ export interface UseMobileChatResult {
   status: ConnStatus;
   /** True while the agent is streaming a reply (typing dots). */
   typing: boolean;
+  /**
+   * The TRANSIENT system notice — the cold-start "⏳ Waking up, one moment…"
+   * ack — as a quiet centered pill, never a chat bubble. `null` when there is
+   * nothing to announce. Same channel, same clearing rules and the same shared
+   * predicate as the web client's `systemNotice`; before this the native surface
+   * had no such channel at all, so the ack was persisted as a real agent message
+   * and stayed in the transcript forever.
+   */
+  systemNotice: string | null;
   /** Count of sends still awaiting delivery (offline queue depth). */
   pendingCount: number;
   /** True until the store + session have finished constructing. */
@@ -151,9 +164,11 @@ export function useMobileChat(railId: string): UseMobileChatResult {
 
   const sessionRef = useRef<MobileChatSession | null>(null);
   const streamRef = useRef<StreamState>(emptyStreamState());
+  const noticeRef = useRef<SystemNoticeState>(emptySystemNoticeState());
 
   const [messages, setMessages] = useState<readonly ChatMessage[]>([]);
   const [stream, setStream] = useState<StreamState>(emptyStreamState());
+  const [notice, setNotice] = useState<SystemNoticeState>(emptySystemNoticeState());
   const [status, setStatus] = useState<ConnStatus>('idle');
   const [pendingCount, setPendingCount] = useState(0);
   const [ready, setReady] = useState(false);
@@ -223,6 +238,17 @@ export function useMobileChat(railId: string): UseMobileChatResult {
           if (!disposed) setStatus(s);
         },
         onFrame: (frame) => {
+          // The transient system-notice pill is folded BEFORE the project
+          // filter, and deliberately so: the gateway emits the cold-start ack
+          // with no `project_id` (`build-live-agent-turn.ts` sends only
+          // `topic_id`), so `frameMatchesProject` would drop it in every project
+          // view. It does not need the filter — this socket is already scoped to
+          // exactly one topic, so a frame arriving here belongs to this scope.
+          const nextNotice = foldSystemNoticeFrame(noticeRef.current, frame);
+          if (nextNotice !== noticeRef.current) {
+            noticeRef.current = nextNotice;
+            if (!disposed) setNotice(nextNotice);
+          }
           // The app WS topic is per-user, so streams for OTHER projects arrive
           // on this socket too. Drop a sibling project's stream before folding
           // so it never renders in this project's view (mirrors the durable
@@ -252,6 +278,7 @@ export function useMobileChat(railId: string): UseMobileChatResult {
     return (): void => {
       disposed = true;
       streamRef.current = emptyStreamState();
+      noticeRef.current = emptySystemNoticeState();
       sessionRef.current = null;
       setHydrated(false);
       // Detach this view, but do NOT stop the session — the cache keeps it warm
@@ -263,6 +290,7 @@ export function useMobileChat(railId: string): UseMobileChatResult {
       setSelfDeviceId('');
       setMessages([]);
       setStream(emptyStreamState());
+      setNotice(emptySystemNoticeState());
     };
   }, [user, projectId, config.base_url, deviceId]);
 
@@ -318,6 +346,14 @@ export function useMobileChat(railId: string): UseMobileChatResult {
         return false;
       }
       setSendError(null);
+      // A new turn begins here. Re-arm the notice channel so the previous turn's
+      // "reply started" latch cannot suppress THIS turn's cold-start ack (web
+      // parity: the controller re-arms on send for the same reason).
+      const armed = armSystemNoticeTurn(noticeRef.current);
+      if (armed !== noticeRef.current) {
+        noticeRef.current = armed;
+        setNotice(armed);
+      }
       // NOT `void`. `send` awaits `queue.enqueue`, which writes the optimistic
       // row; if that rejects there is no bubble, no frame and nothing in the log
       // unless it is caught here. This is the exact hole a `crypto.randomUUID()`
@@ -376,6 +412,7 @@ export function useMobileChat(railId: string): UseMobileChatResult {
     rows,
     status,
     typing: stream.typing,
+    systemNotice: notice.text,
     pendingCount,
     ready,
     hydrated,

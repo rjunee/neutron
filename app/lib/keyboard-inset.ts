@@ -56,3 +56,47 @@ export function keyboardOverlap({
   const overlap = containerBottomY - keyboardScreenY;
   return overlap > 0 ? overlap : 0;
 }
+
+/**
+ * THE COMPOSER'S OWN BOTTOM PADDING — the second half of "the composer and send
+ * button are not fully visible" (Ryan, 2026-07-30).
+ *
+ * {@link keyboardOverlap} handles the keyboard. It does NOT handle the case the
+ * owner is in most of the time: keyboard DOWN. The chat surface runs to the
+ * physical bottom of the screen — the project shell hard-codes a top inset
+ * (`app/app/projects/[id]/_layout.tsx` `container.paddingTop`) and applies no
+ * bottom inset at all, and nothing in the app had ever read
+ * `react-native-safe-area-context` (it was a declared dependency with zero
+ * imports). So the composer's 16pt bottom padding was sitting UNDER an iPhone's
+ * 34pt home indicator: the send button and the bottom of the text field were
+ * genuinely clipped before the keyboard was ever involved.
+ *
+ * AND IT MUST NOT DOUBLE-OFFSET. When the keyboard is up it covers the home
+ * indicator, the surface is already lifted by the full overlap, and adding the
+ * safe-area inset on top of that parks the composer on a dead band of
+ * background — the "accounting for the rail and tab bar" half of the ask. So the
+ * safe-area inset applies ONLY while the keyboard is down. This is the same
+ * either/or `KeyboardAvoidingView` + `SafeAreaView` get wrong together.
+ */
+export interface ComposerBottomInsetInput {
+  /** What {@link keyboardOverlap} returned. `> 0` means the keyboard is up. */
+  keyboardInset: number;
+  /** `useSafeAreaInsets().bottom` — the home indicator / gesture bar. */
+  safeAreaBottom: number;
+}
+
+/**
+ * The composer's resting bottom padding with the keyboard up: iMessage sits the
+ * bar right on the keyboard, with only enough room not to touch it.
+ */
+export const COMPOSER_BOTTOM_PADDING_PT = 8;
+
+export function composerBottomInset({
+  keyboardInset,
+  safeAreaBottom,
+}: ComposerBottomInsetInput): number {
+  const safe =
+    Number.isFinite(safeAreaBottom) && safeAreaBottom > 0 ? safeAreaBottom : 0;
+  if (keyboardInset > 0) return COMPOSER_BOTTOM_PADDING_PT;
+  return COMPOSER_BOTTOM_PADDING_PT + safe;
+}

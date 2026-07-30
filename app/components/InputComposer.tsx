@@ -39,7 +39,7 @@ import {
   View,
 } from 'react-native';
 
-import { MAX_USER_MESSAGE_LEN_CLIENT, DENSITY, SPACING, THEME, TYPOGRAPHY } from '../lib/composer-constants';
+import { MAX_USER_MESSAGE_LEN_CLIENT, SPACING, THEME, TYPOGRAPHY } from '../lib/composer-constants';
 
 export interface ComposerAttachment {
   /** Local URI (file:// on native, blob:/data: on web). */
@@ -98,9 +98,28 @@ export interface InputComposerProps {
    * IGNORED — the user owns the composer state after first paint.
    */
   initial_draft?: string;
+  /**
+   * Bottom padding for the whole bar, in points. The chat surface computes it
+   * with `composerBottomInset` — the home-indicator safe area while the keyboard
+   * is DOWN, a bare resting gap while it is UP (never both, or the bar
+   * double-offsets and floats over dead background). Defaults to the resting
+   * gap for call sites with no safe-area context.
+   */
+  bottom_inset?: number;
 }
 
 const COUNTER_WARN_THRESHOLD = Math.floor(MAX_USER_MESSAGE_LEN_CLIENT * 0.9);
+
+/**
+ * Fallback bottom padding when no `bottom_inset` is supplied. Mirrors
+ * `lib/keyboard-inset.ts` COMPOSER_BOTTOM_PADDING_PT — NOT imported, because
+ * that module is a pure leaf the composer should not pull a dependency edge to;
+ * the chat surface passes the real value on every mount that has a safe area.
+ */
+const COMPOSER_RESTING_BOTTOM_PT = 8;
+
+/** iMessage's send control is a small circle, not a labelled rectangle. */
+const SEND_BUTTON_SIZE_PT = 34;
 
 export function InputComposer({
   onSend,
@@ -112,6 +131,7 @@ export function InputComposer({
   onFilesPicked,
   file_accept,
   initial_draft,
+  bottom_inset,
 }: InputComposerProps) {
   const [draft, setDraft] = useState(initial_draft ?? '');
   const [attachments, setAttachments] = useState<ComposerAttachment[]>([]);
@@ -265,7 +285,10 @@ export function InputComposer({
   }, [isWeb, handleWebFiles]);
 
   return (
-    <View style={styles.wrap}>
+    <View
+      style={[styles.wrap, { paddingBottom: bottom_inset ?? COMPOSER_RESTING_BOTTOM_PT }]}
+      testID="composer-bar"
+    >
       {attachments.length > 0 ? (
         <View style={styles.attachmentRow}>
           {attachments.map((att, i) => (
@@ -320,7 +343,10 @@ export function InputComposer({
           {sending ? (
             <ActivityIndicator color={THEME.background} />
           ) : (
-            <Text style={styles.sendBtnText}>Send</Text>
+            // The iMessage send affordance: an upward chevron in a circle. The
+            // accessibility label stays "Send" — that is what a screen reader
+            // announces and what the device harness presses.
+            <Text style={styles.sendBtnText}>↑</Text>
           )}
         </Pressable>
       </View>
@@ -372,10 +398,12 @@ export function InputComposer({
 
 const styles = StyleSheet.create({
   wrap: {
-    paddingHorizontal: SPACING.md,
+    paddingHorizontal: SPACING.sm,
     paddingTop: SPACING.sm,
-    paddingBottom: SPACING.lg,
-    borderTopWidth: 1,
+    // `paddingBottom` is supplied per-render (`bottom_inset`) — it is the home
+    // indicator when the keyboard is down and a bare gap when it is up, and a
+    // fixed value here is what buried the send button under the home indicator.
+    borderTopWidth: StyleSheet.hairlineWidth,
     borderTopColor: THEME.hairline,
     backgroundColor: THEME.background,
     gap: SPACING.xs,
@@ -419,41 +447,44 @@ const styles = StyleSheet.create({
     alignItems: 'flex-end',
     gap: SPACING.sm,
   },
+  // iMessage's left affordance is a bare glyph on the background, not a boxed
+  // button — the only enclosed shapes in the bar are the field and the send
+  // circle.
   attachBtn: {
-    height: 40,
-    width: 40,
-    borderRadius: 10,
-    backgroundColor: THEME.surface,
+    height: SEND_BUTTON_SIZE_PT,
+    width: SEND_BUTTON_SIZE_PT,
+    borderRadius: SEND_BUTTON_SIZE_PT / 2,
     justifyContent: 'center',
     alignItems: 'center',
-    borderWidth: 1,
-    borderColor: THEME.hairline,
   },
   attachIcon: { fontSize: 18 },
   input: {
     flex: 1,
     color: THEME.text_primary,
     backgroundColor: THEME.surface,
-    borderRadius: DENSITY.composer_radius,
-    paddingHorizontal: SPACING.md + 2,
-    paddingVertical: SPACING.sm + 2,
+    // A PILL, not a rounded rectangle: half the resting height, so a one-line
+    // field is fully round and grows into a rounded box as it wraps.
+    borderRadius: SEND_BUTTON_SIZE_PT / 2,
+    paddingHorizontal: SPACING.md,
+    paddingVertical: SPACING.sm - 1,
     ...TYPOGRAPHY.body,
-    minHeight: 40,
+    minHeight: SEND_BUTTON_SIZE_PT,
     maxHeight: 140,
-    borderWidth: 1,
+    borderWidth: StyleSheet.hairlineWidth,
     borderColor: THEME.hairline,
   },
   sendBtn: {
-    height: 40,
-    paddingHorizontal: SPACING.lg + 2,
-    borderRadius: DENSITY.composer_radius,
+    height: SEND_BUTTON_SIZE_PT,
+    width: SEND_BUTTON_SIZE_PT,
+    borderRadius: SEND_BUTTON_SIZE_PT / 2,
     backgroundColor: THEME.accent,
     justifyContent: 'center',
     alignItems: 'center',
   },
   sendBtnDisabled: { backgroundColor: THEME.surface_raised },
   sendBtnText: {
-    ...TYPOGRAPHY.body_small,
+    fontSize: 18,
+    lineHeight: 20,
     color: THEME.background,
     fontWeight: '700',
   },
