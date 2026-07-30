@@ -77,6 +77,10 @@ export {
 
 export { SyncEngine, type ApplyResult } from './sync-engine.ts'
 
+// THE id generator for every client surface. `crypto` is absent on the mobile
+// runtime — see `ids.ts` for the incident this file exists to prevent.
+export { randomId, prefixedRandomId } from './ids.ts'
+
 export {
   SendQueue,
   type SendQueueOptions,

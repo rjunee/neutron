@@ -15,11 +15,17 @@
  *    racing) never double-sends.
  */
 
+import { randomId } from './ids.ts'
 import type { Store } from './store.ts'
 import type { ChatMessage, OutboundUserMessage } from './types.ts'
 
 export interface SendQueueOptions {
-  /** Override id generation (tests). Default: crypto.randomUUID(). */
+  /**
+   * Override id generation (tests). Default: {@link randomId} — NOT
+   * `crypto.randomUUID()`. `crypto` is not a global on the mobile runtime, so a
+   * direct WebCrypto call threw out of `enqueue()` and silently destroyed every
+   * mobile send; see `ids.ts` for the incident.
+   */
   generateId?: () => string
   /** Override the clock (tests). Default: Date.now(). */
   now?: () => number
@@ -46,7 +52,7 @@ export class SendQueue {
 
   constructor(store: Store, opts: SendQueueOptions = {}) {
     this.store = store
-    this.generateId = opts.generateId ?? (() => crypto.randomUUID())
+    this.generateId = opts.generateId ?? randomId
     this.now = opts.now ?? (() => Date.now())
   }
 

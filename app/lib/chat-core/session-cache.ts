@@ -135,3 +135,13 @@ export function clearSessionCache(): void {
 export function sessionCacheKeys(): readonly string[] {
   return [...entries.keys()];
 }
+
+/**
+ * Test/diagnostic handle on a cached session WITHOUT taking a reference.
+ * Deliberately read-only in intent: the device harness uses it to fault-inject
+ * into the live session the mounted surface is actually using, which is the only
+ * way to prove a send failure becomes visible to the owner rather than vanishing.
+ */
+export function peekSession(key: string): MobileChatSession | null {
+  return entries.get(key)?.session ?? null;
+}

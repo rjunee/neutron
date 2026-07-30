@@ -21,6 +21,7 @@
  * factory defaults to the browser `WebSocket`; tests inject a fake.
  */
 
+import { prefixedRandomId } from './ids.ts'
 import { SendQueue } from './send-queue.ts'
 import { InMemoryStore, type Store } from './store.ts'
 import { SyncEngine } from './sync-engine.ts'
@@ -563,12 +564,10 @@ export class WebChatSession {
   }
 }
 
-/** Mint a device id when the caller didn't supply a stable one. Prefer an
- *  injected generator (tests), then `crypto.randomUUID`, then a cheap fallback
- *  so the session never throws in an environment without WebCrypto. */
+/** Mint a device id when the caller didn't supply a stable one. Prefers an
+ *  injected generator (tests), else the ONE shared `prefixedRandomId` — which is
+ *  WebCrypto-optional by construction (see `ids.ts`). */
 function generateDeviceId(generateId?: () => string): string {
   if (generateId !== undefined) return generateId()
-  const c = (globalThis as { crypto?: { randomUUID?: () => string } }).crypto
-  if (c?.randomUUID !== undefined) return `dev-${c.randomUUID()}`
-  return `dev-${Math.floor(Math.random() * 1e9).toString(36)}`
+  return prefixedRandomId('dev')
 }
