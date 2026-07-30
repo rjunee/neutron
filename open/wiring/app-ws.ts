@@ -66,6 +66,7 @@ import type { AppWsAuthResolver } from '@neutronai/channels/adapters/app-ws/auth
 import type { AppWsSessionRegistry } from '@neutronai/channels/adapters/app-ws/session-registry.ts'
 import type { ChatCommandFilter } from '@neutronai/contracts/chat-command-filter.ts'
 import { buildButtonPrompt, type ButtonPrompt } from '@neutronai/channels/button-primitive.ts'
+import { buildButtonPromptClaim } from '@neutronai/gateway/wiring/build-button-prompt-claim.ts'
 import {
   AppChatStore,
   AppChatReceiptStore,
@@ -997,6 +998,12 @@ export function wireAppWs(ctx: OpenWiringContext, deps: WireAppWsDeps): WiredApp
     // Codex r1 [P2]: route slash commands (/note, /remind, /skills, …) through
     // the SAME chained filter the web chat uses — parity, not a second path.
     chat_command_filter: chatCommandFilter,
+    // ISSUES #415 — the server-side one-shot claim for a button tap. See
+    // `buildButtonPromptClaim`: it is the `button_choice` twin of the typed
+    // path's `was_new` gate, and it is what stops a Retry button resurrected by
+    // a remount (ten-year TTL, no server-side answered mark until now) from
+    // silently re-running the agent with no visible trigger.
+    claim_button_prompt: buildButtonPromptClaim({ buttonStore: landing.buttonStore }),
     // Path 1 auto-start — when the owner hasn't finished onboarding, SEED the
     // first onboarding turn through the live session on connect so Claude opens
     // with the first question under the client's auto-start loader (no user
@@ -1205,12 +1212,17 @@ export function wireAppWs(ctx: OpenWiringContext, deps: WireAppWsDeps): WiredApp
     // Path 1: ONE path — a tapped quick-reply button feeds the live session as
     // the owner's selection (its freeform text, else the choice value),
     // onboarding OR steady-state. No `engine.advance` branch (the engine no
-    // longer drives conversational turns). `prompt_id` is unused now that taps
-    // don't resolve engine button rows; the live runner persists the turn.
+    // longer drives conversational turns).
+    //
+    // ISSUES #415 — `prompt_id` is no longer discarded. `claim_button_prompt`
+    // above already CLAIMED (and so resolved) this row; the runner is told which
+    // row that was so its own user-turn persistence doesn't stamp a second,
+    // duplicate user line onto the same tap.
     on_button_choice: async ({
       user_id,
       channel_topic_id,
       project_id,
+      prompt_id,
       choice_value,
       freeform_text,
     }) => {
@@ -1231,6 +1243,7 @@ export function wireAppWs(ctx: OpenWiringContext, deps: WireAppWsDeps): WiredApp
           topic_id: turnTopicId,
           ...(project_id !== undefined ? { project_id } : {}),
           user_text: replyText,
+          ...(prompt_id.length > 0 ? { button_prompt_id: prompt_id } : {}),
           send: buildAppWsSendReply(channel_topic_id, project_id),
           observed_at: now,
         })

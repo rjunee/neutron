@@ -459,6 +459,34 @@ export interface CreateAppWsSurfaceOptions {
     freeform_text?: string
   }) => Promise<void>
   /**
+   * ISSUES #415 — DOUBLE-DISPATCH GUARD for a button tap, the `button_choice`
+   * twin of the typed path's `was_new` gate below.
+   *
+   * A tap used to be un-gated end to end: the surface decoded `prompt_id` and
+   * threw it away, and nothing marked the prompt answered, so the ONLY re-tap
+   * guard was a session-scoped `chosenByPrompt` React state. Retry prompts
+   * carry a ten-year TTL, so any remount resurrected a live Retry button whose
+   * tap silently re-ran the agent — a second real run with no visible trigger.
+   *
+   * The seam CLAIMS the prompt: `true` = this tap is the FIRST claim, dispatch
+   * it; `false` = the prompt was already answered (a re-tap, a second device,
+   * a resurrected button), so the side-effecting dispatch MUST NOT run again.
+   * Wired in Open to `ButtonStore.resolve`, whose `was_new` is the authority —
+   * storage idempotency alone does not make the surface idempotent, this gate
+   * does. Unwired (or an empty `prompt_id`) leaves the tap ungated.
+   *
+   * A throw is NOT swallowed: it answers the client with `button_choice_failed`
+   * rather than silently dropping a first, legitimate tap.
+   */
+  claim_button_prompt?: (input: {
+    user_id: string
+    project_slug: string
+    prompt_id: string
+    choice_value: string
+    freeform_text?: string
+    observed_at: number
+  }) => Promise<boolean>
+  /**
    * ISSUES #40 (owner-timezone WRITE path) — fired ONCE per WS `open` when the
    * client reported a boundary-valid `tz` on the upgrade query string. The Open
    * wiring binds it to `persistOwnerTimezoneIfChanged(db, project_slug, tz)`
@@ -500,6 +528,7 @@ export function createAppWsSurface(opts: CreateAppWsSurfaceOptions): AppWsSurfac
   const allowedWebOrigins = normalizeWebOrigins(opts.allowed_web_origins ?? [])
   const on_session_open = opts.on_session_open
   const on_button_choice = opts.on_button_choice
+  const claim_button_prompt = opts.claim_button_prompt
   const on_client_timezone = opts.on_client_timezone
 
   return {
@@ -911,6 +940,24 @@ export function createAppWsSurface(opts: CreateAppWsSurfaceOptions): AppWsSurfac
             return
           }
           try {
+            // ISSUES #415 — claim the prompt BEFORE dispatching. A refused claim
+            // means this tap was already answered (re-tap / second device / a
+            // Retry button resurrected by a remount): the client already has the
+            // real answer coming or already got it, so drop the tap silently
+            // rather than run the agent a second time with no visible trigger.
+            if (claim_button_prompt !== undefined && choice.prompt_id.length > 0) {
+              const first = await claim_button_prompt({
+                user_id: data.user_id,
+                project_slug,
+                prompt_id: choice.prompt_id,
+                choice_value: choice.choice_value,
+                ...(choice.freeform_text !== undefined
+                  ? { freeform_text: choice.freeform_text }
+                  : {}),
+                observed_at: Date.now(),
+              })
+              if (!first) return
+            }
             await on_button_choice({
               user_id: data.user_id,
               project_slug,

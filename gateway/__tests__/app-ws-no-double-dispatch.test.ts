@@ -36,6 +36,9 @@ import {
   type ChatCommandFilter,
   type ChatCommandFilterResult,
 } from '../http/app-ws-surface.ts'
+import { ButtonStore } from '@neutronai/channels/button-store.ts'
+import { buildButtonPrompt } from '@neutronai/channels/button-primitive.ts'
+import { buildButtonPromptClaim } from '../wiring/build-button-prompt-claim.ts'
 import { AppChatStore, ProjectDb } from '@neutronai/persistence/index.ts'
 import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { InMemoryStore, SendQueue, SyncEngine, normalizeInbound } from '@neutronai/chat-core/index.ts'
@@ -162,6 +165,169 @@ describe('app-ws — no double dispatch on re-sent client_msg_id (WS)', () => {
     expect(h.receivedEvents[0]?.body.text).toBe('hello')
     // Side-effecting command filter ran EXACTLY ONCE.
     expect(h.commandMatches).toEqual(['hello'])
+
+    ws.close()
+    await new Promise((r) => setTimeout(r, 30))
+  })
+})
+
+/**
+ * ISSUES #415 — the `button_choice` half of the same guarantee.
+ *
+ * The typed path has been gated on `was_new` since PR #6; a TAP was gated by
+ * nothing. `prompt_id` was decoded and thrown away, no server-side mark said
+ * "answered", and reply rows carry a TEN-YEAR TTL — so any remount resurrected
+ * a live Retry button whose tap ran the agent a second time, invisibly. These
+ * wire the REAL surface against the REAL `ButtonStore` and the REAL claim
+ * (`buildButtonPromptClaim` — the same function the Open wiring installs, not a
+ * lookalike) and assert exactly-once dispatch on a re-tap.
+ */
+interface ButtonHarness extends Harness {
+  choices: Array<{ prompt_id: string; choice_value: string }>
+  buttonStore: ButtonStore
+}
+
+async function startGatewayWithButtons(): Promise<ButtonHarness> {
+  const receivedEvents: IncomingEvent[] = []
+  const commandMatches: string[] = []
+  const choices: Array<{ prompt_id: string; choice_value: string }> = []
+  const registry = new InMemoryAppWsSessionRegistry()
+  const adapter = new AppWsAdapter({
+    registry,
+    receiver: { receive: async (e) => { receivedEvents.push(e) } },
+    chat_log: new AppChatStore({ db }),
+  })
+  const auth = createAppWsAuthResolver({ project_slug: 'demo', bypass: true })
+  const buttonStore = new ButtonStore({ db })
+  const surface = createAppWsSurface({
+    adapter,
+    registry,
+    auth,
+    project_slug: 'demo',
+    claim_button_prompt: buildButtonPromptClaim({ buttonStore }),
+    on_button_choice: async ({ prompt_id, choice_value }): Promise<void> => {
+      choices.push({ prompt_id, choice_value })
+    },
+  })
+  const composed = composeHttpHandler({
+    appWs: { handler: surface.handler, websocket: surface.websocket },
+    defaultHandler: () => new Response('not found', { status: 404 }),
+  })
+  const server = Bun.serve({
+    port: 0,
+    fetch: (req, srv) => composed.fetch(req, srv),
+    websocket: composed.websocket,
+  })
+  return {
+    base: `http://127.0.0.1:${server.port}`,
+    receivedEvents,
+    commandMatches,
+    registry,
+    adapter,
+    choices,
+    buttonStore,
+    close: async () => { await server.stop(true) },
+  }
+}
+
+describe('app-ws — no double dispatch on a re-tapped button_choice (ISSUES #415)', () => {
+  let h: ButtonHarness
+  beforeEach(async () => { h = await startGatewayWithButtons() })
+  afterEach(async () => { await h.close() })
+
+  /** Emit a real freeze-timeout-shaped Retry prompt and return its id. */
+  async function emitRetryPrompt(): Promise<string> {
+    const prompt = buildButtonPrompt({
+      body: 'That one took too long, so I stopped before finishing.',
+      options: [{ label: '1', body: 'Retry', value: '__retry_turn__' }],
+      allow_freeform: true,
+      // The real reply-row TTL: ten years. A Retry button never expires, which
+      // is precisely why the server-side claim has to be the guard.
+      expires_in_ms: 10 * 365 * 24 * 60 * 60 * 1_000,
+    })
+    const { prompt_id } = await h.buttonStore.emit(prompt, { topic_id: TOPIC })
+    return prompt_id
+  }
+
+  async function openSocket(): Promise<{ ws: WebSocket; events: AppWsOutbound[] }> {
+    const ws = new WebSocket(`${wsUrl(h.base)}/ws/app/chat?token=sam`)
+    const events: AppWsOutbound[] = []
+    const opened = new Promise<void>((resolve, reject) => {
+      ws.onopen = () => resolve()
+      ws.onerror = (e) => reject(new Error(`ws error: ${JSON.stringify(e)}`))
+    })
+    ws.onmessage = (ev) => {
+      events.push(JSON.parse(typeof ev.data === 'string' ? ev.data : String(ev.data)))
+    }
+    await opened
+    await waitFor(() => events.some((e) => e.type === 'session_ready'))
+    return { ws, events }
+  }
+
+  it('re-tapping the SAME prompt dispatches EXACTLY ONCE', async () => {
+    const prompt_id = await emitRetryPrompt()
+    const { ws } = await openSocket()
+    const frame = JSON.stringify({
+      v: 1,
+      type: 'button_choice',
+      prompt_id,
+      choice_value: '__retry_turn__',
+    })
+    ws.send(frame)
+    await waitFor(() => h.choices.length === 1)
+    // The double-tap / remount-resurrected re-tap.
+    ws.send(frame)
+    // Give an erroneous second dispatch time to land before asserting.
+    await new Promise((r) => setTimeout(r, 120))
+
+    expect(h.choices).toHaveLength(1)
+    expect(h.choices[0]).toEqual({ prompt_id, choice_value: '__retry_turn__' })
+
+    ws.close()
+    await new Promise((r) => setTimeout(r, 30))
+  })
+
+  it('the tap leaves a durable TRACE on the prompt row — the human label, never the routing sentinel', async () => {
+    const prompt_id = await emitRetryPrompt()
+    const { ws } = await openSocket()
+    ws.send(JSON.stringify({
+      v: 1,
+      type: 'button_choice',
+      prompt_id,
+      choice_value: '__retry_turn__',
+    }))
+    await waitFor(() => h.choices.length === 1)
+    await new Promise((r) => setTimeout(r, 60))
+
+    const row = db
+      .raw()
+      .prepare(
+        `SELECT resolved_at, resolution_value, resolution_freeform_text
+           FROM button_prompts WHERE prompt_id = ?`,
+      )
+      .get(prompt_id) as {
+        resolved_at: number | null
+        resolution_value: string | null
+        resolution_freeform_text: string | null
+      }
+    // Answered server-side, so a remount cannot resurrect a LIVE Retry.
+    expect(row.resolved_at).not.toBeNull()
+    // And the trace renders as the owner's words. `__retry_turn__` is a routing
+    // token: without the freeform the history surface would paint a user bubble
+    // saying "__retry_turn__" and splice it into the next prompt.
+    expect(row.resolution_freeform_text).toBe('Retry')
+  })
+
+  it('a tap on a prompt this store never persisted still dispatches (nothing to gate on)', async () => {
+    const { ws } = await openSocket()
+    ws.send(JSON.stringify({
+      v: 1,
+      type: 'button_choice',
+      prompt_id: '11111111-2222-4333-8444-555555555555',
+      choice_value: 'keep-going',
+    }))
+    await waitFor(() => h.choices.length === 1)
+    expect(h.choices[0]?.choice_value).toBe('keep-going')
 
     ws.close()
     await new Promise((r) => setTimeout(r, 30))

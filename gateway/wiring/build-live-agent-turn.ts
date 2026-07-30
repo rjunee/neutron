@@ -55,7 +55,7 @@
  * exists to kill is the silent no-op.
  */
 
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 
 import type { ButtonStore } from '@neutronai/channels/button-store.ts'
 import {
@@ -937,6 +937,11 @@ export function buildLiveAgentTurn(
     // scribe — sees the real question, not the opaque sentinel). Rebind `turn`
     // once, up front, so the rest of the body is retry-agnostic. Fall back to a
     // gentle re-prompt if nothing was recorded (e.g. a restart cleared the map).
+    // ISSUES #415 — identity of THIS dispatch attempt. Minted once per turn-body
+    // invocation, so a Retry tap is a genuinely new attempt. It is the identity
+    // term of the freeze-timeout Retry prompt's idempotency key; see
+    // `timeoutRetrySeed` for why it must not be derived from the message.
+    const attemptId = randomUUID()
     if (turn.user_text === RETRY_TURN_VALUE) {
       const recovered = lastUserText.get(topicKey) ?? RETRY_FALLBACK_TEXT
       const recoveredAttachments = lastAttachments.get(topicKey)
@@ -1541,7 +1546,11 @@ export function buildLiveAgentTurn(
         if (isAuthInvalid(lastErrMessage)) {
           await sendAuthReconnect(input.buttonStore, turn, input.reconnectHandoff !== undefined)
         } else if (isFreezeTimeout(lastErrMessage)) {
-          await sendTimeoutRetry(input.buttonStore, turn)
+          await sendTimeoutRetry(
+            input.buttonStore,
+            turn,
+            timeoutRetrySeed(attemptId, turn.user_text),
+          )
         } else {
           sendSafe(turn.send, { type: 'agent_message', body: FAILURE_BODY, topic_id: turn.topic_id })
         }
@@ -1738,6 +1747,20 @@ async function resolvePreviousRowWithUserText(
       before: wall_now,
       now: wall_now,
     })
+    // ISSUES #415 — the app-ws surface CLAIMS the tapped prompt server-side
+    // before dispatching (one-shot; a re-tap after a remount is refused), which
+    // stamps the owner's choice onto that row as its resolution. So on a tap the
+    // latest row is ALREADY resolved and already carries this turn's user line;
+    // writing an inert row below would double it. Recognised by prompt_id, so a
+    // row resolved by anything ELSE still takes the inert-row path.
+    if (
+      latest !== null &&
+      latest.resolved &&
+      turn.button_prompt_id !== undefined &&
+      latest.prompt_id === turn.button_prompt_id
+    ) {
+      return typeof latest.body === 'string' ? latest.body : null
+    }
     if (latest === null || latest.resolved) {
       // No UNRESOLVED row to stamp the user text onto — either the first turn
       // on this topic, or the latest row is already resolved (e.g. an inert
@@ -2102,9 +2125,42 @@ export function isAuthInvalid(message: string): boolean {
  * on a client that needs a prompt_id, but the message + freeform re-send still
  * work). Called ONLY for a real (non-seed) user turn after the auto-retry.
  */
+/**
+ * ISSUES #415 — the freeze-timeout Retry prompt's idempotency SEED. Two terms,
+ * and the split between them is the whole design.
+ *
+ *   • `attempt_id` is the IDENTITY term — one value per DISPATCH ATTEMPT. This
+ *     is the part the issue warned needs care. The obvious seed is the message
+ *     text alone, and it is WRONG: `ButtonStore.emit` dedupes on the derived
+ *     key, so two genuinely distinct turns carrying the same text would collide
+ *     and the second failure's bubble would be silently swallowed — the system
+ *     would fail and tell the owner nothing, a worse defect than the one being
+ *     fixed. Scoping identity to the attempt makes collision impossible: every
+ *     real failure keeps its own honest bubble, including a Retry that freezes
+ *     again (a tap is a new attempt, so it gets a new key and a new bubble —
+ *     now explained by the tap's own durable trace, see `claim_button_prompt`).
+ *     What the key DOES buy is the guarantee that ONE attempt can mint at most
+ *     ONE never-expiring Retry affordance, however many paths reach the emit.
+ *
+ *   • The sha256 of the message is a SAFETY term, not an identity term. It
+ *     makes the key content-sensitive, so an attempt handle reused against
+ *     DIFFERENT content (a future recovery path; a restart that recovered
+ *     `RETRY_FALLBACK_TEXT` instead of the original question) yields a
+ *     different key and surfaces, rather than deduping into silence.
+ *
+ * Truncated to 32 hex chars — `deriveIdempotencyKey` re-hashes the whole
+ * (instance, topic, seed) triple down to 16 anyway, so more buys nothing.
+ * Versioned (`v1`) so a later change of seed shape cannot alias existing rows.
+ */
+function timeoutRetrySeed(attempt_id: string, text: string): string {
+  const digest = createHash('sha256').update(text).digest('hex').slice(0, 32)
+  return `timeout-retry:v1:${attempt_id}:${digest}`
+}
+
 async function sendTimeoutRetry(
   buttonStore: ButtonStore,
   turn: LiveAgentTurnRequest,
+  seed: string,
 ): Promise<void> {
   const options = [{ label: OPTION_LABELS[0]!, body: 'Retry', value: RETRY_TURN_VALUE }]
   let reply_prompt_id: string | null = null
@@ -2114,10 +2170,29 @@ async function sendTimeoutRetry(
       options,
       allow_freeform: true,
       expires_in_ms: REPLY_ROW_TTL_MS,
+      // ISSUES #415 — dedupe key. `REPLY_ROW_TTL_MS` is ten years, so a Retry
+      // button never expires; without a key, every emit minted ANOTHER
+      // never-expiring live Retry row for the same failure. Keyed on the retry
+      // EPISODE + a hash of the message (see `timeoutRetrySeed`), so one failed
+      // attempt can mint at most one Retry affordance no matter how many
+      // recovery paths reach here, while two distinct failures never collide.
+      idempotency: { project_slug: turn.project_slug, topic_id: turn.topic_id, seed },
       uuid: randomUUID,
     })
     const emitted = await buttonStore.emit(prompt, { topic_id: turn.topic_id })
     reply_prompt_id = emitted.prompt_id
+    if (!emitted.was_new) {
+      // This exact failure already has a live Retry affordance on the owner's
+      // screen. Re-shipping the envelope would paint the SECOND identical
+      // "took too long" bubble #415 is about. Mirrors the `was_new` gate on the
+      // onboarding-message path (`open/wiring/app-ws.ts`).
+      moduleLog.info('timeout_retry_deduped', {
+        project: turn.project_slug,
+        topic: turn.topic_id,
+        prompt_id: emitted.prompt_id,
+      })
+      return
+    }
   } catch (err) {
     moduleLog.warn('timeout_retry_persist_failed', {
       project: turn.project_slug,

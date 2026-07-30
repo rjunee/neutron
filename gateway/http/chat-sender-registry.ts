@@ -117,6 +117,18 @@ export interface LiveAgentTurnRequest {
    * bubble and does NOT run the post-turn scribe over it (nothing to extract).
    */
   seed_turn?: boolean
+  /**
+   * ISSUES #415 — the `button_prompt` row this turn CONSUMED, when the turn was
+   * triggered by a button tap (`button_choice`) rather than a typed message.
+   * The app-ws surface claims that row server-side (one-shot: a second tap on
+   * the same prompt is refused) BEFORE dispatching, which stamps the owner's
+   * choice onto the row as its resolution. The runner needs to know WHICH row
+   * that was: its own step-1 user-turn persistence stamps the latest UNRESOLVED
+   * row, and without this it would see the just-claimed row as "already
+   * resolved" and write a SECOND, duplicate user row for the same tap.
+   * Absent on a typed message (nothing was consumed).
+   */
+  button_prompt_id?: string
 }
 
 export type LiveAgentTurnRunner = (input: LiveAgentTurnRequest) => Promise<unknown>
