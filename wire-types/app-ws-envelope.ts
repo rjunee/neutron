@@ -217,6 +217,19 @@ export interface AppWsOutboundAgentMessage {
    */
   upload_affordance?: AppWsOutboundAgentMessageUploadAffordance
   /**
+   * ISSUES #419 — the option `value` this prompt was ANSWERED with, stamped
+   * server-side by the one-shot claim (ISSUES #415) and carried on every later
+   * replay of this message. Present ONLY on a message whose `prompt_id` has
+   * been resolved; absent while the prompt is still live.
+   *
+   * This is what makes spent-ness SERVER state. Before it, the only record a
+   * button had been answered was a session-scoped React value, so any remount
+   * redrew a tappable Retry on an already-answered prompt (the reply row's TTL
+   * is ten years — these buttons never age out on their own). The tap was
+   * already inert server-side; the surface just lied about it.
+   */
+  chosen_value?: string
+  /**
    * Chat-sync foundation — monotonic per-topic sequence assigned on persist.
    * Absent when the durable log isn't wired.
    */
@@ -339,6 +352,37 @@ export interface AppWsOutboundReactionUpdate {
   rev: number
   /** The active `(emoji, device_id)` reactions on the message. */
   reactions: ReadonlyArray<{ emoji: string; device_id: string }>
+  ts: number
+  /** P5.2 parity — project the underlying message belongs to. */
+  project_id?: string
+}
+
+/**
+ * ISSUES #419 — a prompt has been ANSWERED. Fanned to every device on the topic
+ * the moment the server claims a `button_choice`, so a live second device
+ * collapses its option row immediately instead of waiting for a reconnect
+ * replay to carry the stamped `chosen_value` on the message.
+ *
+ * Keyed by `message_id` (the agent message that carried the prompt) so the
+ * client applies it through the SAME message-lookup path receipt/reaction/edit
+ * updates use; `prompt_id` rides along so a client can verify it is talking
+ * about the prompt it thinks it is, and drop a mismatch.
+ *
+ * First-write-wins: the value is whatever the FIRST accepted tap resolved to,
+ * so re-fanning it (a re-tap on a resurrected button) is idempotent and also
+ * self-healing — the stale surface corrects itself on the tap that does nothing.
+ */
+export interface AppWsOutboundPromptResolved {
+  v: 1
+  type: 'prompt_resolved'
+  /** The agent message that carried the prompt. */
+  message_id: string
+  /** The outstanding-prompt id that was answered. */
+  prompt_id: string
+  /** The option `value` the prompt was answered with. */
+  chosen_value: string
+  /** The message's server seq (lets a client scope/ignore stale updates). */
+  seq?: number
   ts: number
   /** P5.2 parity — project the underlying message belongs to. */
   project_id?: string
@@ -509,6 +553,7 @@ export type AppWsOutbound =
   | AppWsOutboundReceiptUpdate
   | AppWsOutboundReactionUpdate
   | AppWsOutboundEditUpdate
+  | AppWsOutboundPromptResolved
   | AppWsOutboundProjectsChanged
   | AppWsOutboundWorkBoardChanged
   | AppWsOutboundOnboardingCompleted

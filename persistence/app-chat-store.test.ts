@@ -134,3 +134,103 @@ describe('AppChatStore — W3a structured agent meta', () => {
     expect(rows.map((r) => r.meta)).toEqual([null, null, null])
   })
 })
+
+/**
+ * ISSUES #419 — the durable half of button spent-ness.
+ *
+ * #415 made a second tap inert; the clients still DREW the button as live,
+ * because nothing anywhere the client could see said the prompt was answered.
+ * This is where the answer is written: onto the agent message that carried the
+ * prompt, so it rides the ordinary replay path to every device and every future
+ * cold open. Reply rows carry a ten-year TTL, so nothing else ever retires them.
+ */
+describe('AppChatStore — markPromptChosen (ISSUES #419)', () => {
+  const PROMPT = '00000000-0000-4000-8000-0000000004a1'
+
+  async function appendPrompt(message_id: string, prompt_id: string, created_at: number): Promise<void> {
+    await store.append({
+      topic_id: TOPIC,
+      message_id,
+      role: 'agent',
+      body: 'That one took too long.',
+      meta: {
+        prompt_id,
+        options: [{ label: 'Retry', body: 'Retry', value: '__retry_turn__' }],
+      },
+      created_at,
+    })
+  }
+
+  it('stamps the answer onto the message that carries the prompt', async () => {
+    await appendPrompt('m1', PROMPT, 1)
+    const result = await store.markPromptChosen({
+      topic_id: TOPIC,
+      prompt_id: PROMPT,
+      chosen_value: '__retry_turn__',
+    })
+    expect(result).toMatchObject({ message_id: 'm1', seq: 1, chosen_value: '__retry_turn__', was_new: true })
+    const [row] = await store.replayAfter(TOPIC, 0)
+    expect(row?.meta?.['chosen_value']).toBe('__retry_turn__')
+    // Everything else on the blob is left alone.
+    expect(row?.meta?.['prompt_id']).toBe(PROMPT)
+    expect(row?.meta?.['options']).toEqual([{ label: 'Retry', body: 'Retry', value: '__retry_turn__' }])
+  })
+
+  it('is FIRST-WRITE-WINS: a re-tap reports the recorded answer, not the offered one', async () => {
+    await appendPrompt('m1', PROMPT, 1)
+    await store.markPromptChosen({ topic_id: TOPIC, prompt_id: PROMPT, chosen_value: 'yes' })
+    const again = await store.markPromptChosen({ topic_id: TOPIC, prompt_id: PROMPT, chosen_value: 'no' })
+    expect(again).toMatchObject({ message_id: 'm1', chosen_value: 'yes', was_new: false })
+    const [row] = await store.replayAfter(TOPIC, 0)
+    expect(row?.meta?.['chosen_value']).toBe('yes')
+  })
+
+  it('matches the prompt id STRUCTURALLY, not as a substring of the meta blob', async () => {
+    // The prompt id lives inside an opaque JSON blob that also holds citation
+    // titles, doc-ref URLs and option values. A `LIKE '%id%'` lookup would
+    // happily stamp THIS message — whose own prompt is a different one — and
+    // spend the wrong row while leaving the real one live.
+    await store.append({
+      topic_id: TOPIC,
+      message_id: 'decoy',
+      role: 'agent',
+      body: 'here is a link',
+      meta: {
+        prompt_id: 'a-different-prompt',
+        doc_refs: [
+          { label: 'Trace', url: `neutron://docs/${PROMPT}`, project_id: 'p', path: `${PROMPT}.md` },
+        ],
+      },
+      created_at: 1,
+    })
+    const miss = await store.markPromptChosen({
+      topic_id: TOPIC,
+      prompt_id: PROMPT,
+      chosen_value: '__retry_turn__',
+    })
+    expect(miss).toBeNull()
+    const [row] = await store.replayAfter(TOPIC, 0)
+    expect(row?.meta?.['chosen_value']).toBeUndefined()
+  })
+
+  it('is scoped to the topic and returns null when no message carries the prompt', async () => {
+    await appendPrompt('m1', PROMPT, 1)
+    // Same prompt id, a different owner's topic — must not reach across.
+    expect(
+      await store.markPromptChosen({ topic_id: 'app:kim', prompt_id: PROMPT, chosen_value: 'yes' }),
+    ).toBeNull()
+    // An id nothing ever emitted (a failed emit that shipped buttonless, or a
+    // client-minted id): nothing to stamp, and no row is invented.
+    expect(
+      await store.markPromptChosen({ topic_id: TOPIC, prompt_id: 'never-emitted', chosen_value: 'yes' }),
+    ).toBeNull()
+    expect((await store.replayAfter(TOPIC, 0))[0]?.meta?.['chosen_value']).toBeUndefined()
+  })
+
+  it('refuses an empty prompt id or an empty value rather than writing a blank answer', async () => {
+    await appendPrompt('m1', PROMPT, 1)
+    expect(await store.markPromptChosen({ topic_id: TOPIC, prompt_id: '', chosen_value: 'yes' })).toBeNull()
+    expect(await store.markPromptChosen({ topic_id: TOPIC, prompt_id: PROMPT, chosen_value: '' })).toBeNull()
+    expect((await store.replayAfter(TOPIC, 0))[0]?.meta?.['chosen_value']).toBeUndefined()
+  })
+})

@@ -176,6 +176,7 @@ describe('AppWsAdapter.send — outgoing → envelope', () => {
       },
       replayAfter: async () => [],
       maxSeq: async () => 0,
+      markPromptChosen: async () => null,
     }
     const adapter = new AppWsAdapter({
       registry,

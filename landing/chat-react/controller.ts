@@ -26,7 +26,7 @@
  * over the chat-core contract without a DOM or a socket.
  */
 
-import { groupReactions, isColdStartAck } from '@neutronai/chat-core'
+import { groupReactions, isColdStartAck, spentChoiceValue } from '@neutronai/chat-core'
 
 import type { ProjectTab } from './config.ts'
 import { parseWorkBoardItems, type WorkBoardItem } from './work-board-client.ts'
@@ -121,8 +121,13 @@ export interface RenderMessage {
   kind: PromptKind | null
   /** P1b — upload affordance for an onboarding import phase (null when none). */
   uploadAffordance: ChatMessageUploadAffordance | null
-  /** P1b — the option `value` this client has tapped (optimistic): the row
-   *  collapses/greys once set. Local-only UI state, never persisted. */
+  /**
+   * P1b / ISSUES #419 — the option `value` this prompt has been ANSWERED with:
+   * the row collapses/greys once set. Two sources, resolved by the shared
+   * `spentChoiceValue` rule — the server's durable `chosen_value` on the
+   * message (authoritative, survives a reload), falling back to this session's
+   * optimistic memory of a tap that hasn't round-tripped yet.
+   */
   chosenValue: string | null
 }
 
@@ -485,6 +490,14 @@ export class NeutronChatController {
   private vm: ChatViewModel
   private seq = 0
   /** P1b — render id → the option `value` the user tapped (optimistic collapse). */
+  /**
+   * ISSUES #419 — the OPTIMISTIC half of spent-ness, keyed by render id. It
+   * exists to collapse an option row on the same publish as the tap; it is
+   * instance-scoped and a reload (or `reset`) discards it. It used to be the
+   * only guard on this surface, which is why an already-answered prompt drew a
+   * live button again after any remount. The durable half now arrives on the
+   * message as `chosen_value`.
+   */
   private readonly chosen = new Map<string, string>()
   /** This client's device id (for read-tick self-exclusion). */
   private readonly deviceId: string
@@ -1268,7 +1281,8 @@ export class NeutronChatController {
         allowFreeform: m.allow_freeform ?? null,
         kind: m.kind ?? null,
         uploadAffordance: m.upload_affordance ?? null,
-        chosenValue: this.chosen.get(id) ?? null,
+        // ISSUES #419 — server state first, this session's optimistic tap second.
+        chosenValue: spentChoiceValue(m, this.chosen.get(id)),
       }
       const prev = this.renderCache.get(id)
       const chosen = prev !== undefined && sameRenderMessage(prev, next) ? prev : next

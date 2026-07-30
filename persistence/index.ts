@@ -17,6 +17,7 @@ export {
   type AppChatRow,
   type AppChatAppendInput,
   type AppChatAppendResult,
+  type AppChatPromptChoiceResult,
   type AppChatStoreOptions,
 } from './app-chat-store.ts'
 export {

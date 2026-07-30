@@ -3788,6 +3788,20 @@ indicator. No feature flags — one live path.
     reply).
   - **#4 receipts / reactions / edits** — persisted + fanned as `receipt_update`
     / `reaction_update` / `edit_update`, replayed on resume.
+  - **#4b answered prompts (ISSUES #415 + #419)** — a `button_choice` is CLAIMED
+    before it dispatches (`claim_button_prompt` → `ButtonStore.resolve`'s
+    `was_new`), so a re-tap never re-runs the agent; and the claim then STAMPS
+    the answer onto the agent message that carried the prompt
+    (`AppChatStore.markPromptChosen` writes `chosen_value` into the row's `meta`,
+    first-write-wins) and fans a `prompt_resolved` frame
+    (`{v:1,type:'prompt_resolved',message_id,prompt_id,chosen_value,seq?,ts}`).
+    Clients apply it via `SyncEngine.applyPromptResolved` and render spent-ness
+    through the ONE shared `spentChoiceValue` rule in `@neutronai/chat-core`.
+    Both halves are needed: the frame corrects a live device immediately, the
+    stamped `chosen_value` rides the ordinary replay so a remount, cold open,
+    reinstall or second device draws the row spent too. Reply rows carry a
+    TEN-YEAR TTL, so without this a Retry button resurrected by any remount drew
+    as live forever on a prompt the server already refused to honour.
 - **#5 fire-and-forget send (`gateway/http/app-ws-surface.ts`).** The HTTP
   `/api/app/chat/send` fallback used to `await dispatchInbound` (the whole turn,
   up to 240s) before responding, so the optimistic bubble couldn't confirm and an

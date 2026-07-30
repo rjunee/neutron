@@ -53,6 +53,7 @@ export type {
   AppWsOutboundReceiptUpdate,
   AppWsOutboundReactionUpdate,
   AppWsOutboundEditUpdate,
+  AppWsOutboundPromptResolved,
   AppWsWorkBoardItem,
   AppWsRunProgress,
   AppWsOutboundWorkBoardChanged,
