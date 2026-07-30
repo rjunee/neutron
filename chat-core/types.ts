@@ -429,6 +429,57 @@ export function parseSessionReadyMaxSeq(raw: unknown): number | null {
 }
 
 /**
+ * FIX #333 / #348 — recognise the gateway's cold-start acknowledgement so it is
+ * routed to the TRANSIENT pill channel instead of the durable transcript.
+ * Mirrors `gateway/wiring/build-live-agent-turn.ts` `COLD_START_ACK_BODY`
+ * ("⏳ Waking up, one moment…"); matched by its stable leading marker so a minor
+ * copy tweak (trailing punctuation) still routes to the pill. Kept lenient on
+ * purpose — a false positive only restyles a rare, transient ack.
+ *
+ * THE ONE COPY. This predicate used to live only in `landing/chat-react/
+ * controller.ts`, so the web client dropped the ack from its transcript and the
+ * native client — which shares this package but not that file — persisted it as
+ * a real agent bubble. It lives here now precisely so there cannot be a second
+ * mechanism: both surfaces import THIS.
+ */
+export function isColdStartAck(body: string): boolean {
+  return /^\s*⏳\s*Waking up\b/i.test(body)
+}
+
+/**
+ * Is this raw inbound frame a TRANSIENT system notice — a live-only pill that
+ * must NEVER reach the durable transcript?
+ *
+ * Two triggers, exactly as the web controller has always had them: the explicit
+ * server `system_notice: true` tag (`wire-types/app-ws-envelope.ts`, set by
+ * `AppWsAdapter` for `durability: 'none'` sends), OR the cold-start ack body for
+ * a server old enough not to send the flag.
+ *
+ * A caller that persists must consult this BEFORE {@link normalizeInbound}:
+ * `normalizeInbound` deliberately knows nothing about presentation and will
+ * happily turn a pill into a `ChatMessage`.
+ */
+export function isTransientSystemNotice(raw: unknown): boolean {
+  if (typeof raw !== 'object' || raw === null) return false
+  const e = raw as Record<string, unknown>
+  if (e['type'] !== 'agent_message') return false
+  if (e['system_notice'] === true) return true
+  const body = e['body']
+  return typeof body === 'string' && isColdStartAck(body)
+}
+
+/**
+ * The text a transient notice frame should display, or `null` when the frame is
+ * not one (or carries no body worth showing).
+ */
+export function systemNoticeText(raw: unknown): string | null {
+  if (!isTransientSystemNotice(raw)) return null
+  const body = (raw as Record<string, unknown>)['body']
+  if (typeof body !== 'string' || body.length === 0) return null
+  return body
+}
+
+/**
  * Normalize a parsed server frame into an {@link InboundChatMessage}, or
  * `null` when the frame is not a renderable message (control frame, wrong
  * shape, missing required fields). Defensive by design: a malformed field

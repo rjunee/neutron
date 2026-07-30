@@ -36,6 +36,7 @@ import {
   ChatWsClient,
   DEFAULT_ACK_TIMEOUT_MS,
   InMemoryStore,
+  isTransientSystemNotice,
   normalizeEditUpdate,
   normalizeInbound,
   normalizeReactionUpdate,
@@ -349,6 +350,14 @@ export class MobileChatSession {
     for (const l of this.listeners) l.onFrame?.(data);
 
     if (typeof data !== 'object' || data === null) return;
+    // FIX #333 parity — a TRANSIENT system notice (the cold-start "⏳ Waking
+    // up…" ack) is LIVE-ONLY. It has already reached the UI through `onFrame`
+    // above, where the surface renders it as a quiet centered pill; persisting
+    // it here would put it in the durable transcript forever, which is exactly
+    // what the native client was doing while the web client was not. The server
+    // never assigns it a `seq` (`AppWsAdapter.send` skips the chat_log append),
+    // so a persisted copy is also a row the resume replay can never reconcile.
+    if (isTransientSystemNotice(data)) return;
     const env = data as Record<string, unknown>;
     if (env['type'] === 'session_ready') {
       // Stale-store reset detection (M1) — BEFORE resuming, check whether the

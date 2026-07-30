@@ -3849,6 +3849,47 @@ indicator. No feature flags — one live path.
   `SPACING.md` gutter each side, so the percentage applies to a row (297pt on a 393pt
   phone) that is already narrower than an iMessage bubble is allowed to be; 90% keeps
   a ~30pt far-side gutter, which is what carries the left/right speaker distinction.
+- **Bubble RHYTHM is a function of the sender, not a constant (same module, 2026-07-30).**
+  `bubbleWrap` used to carry a uniform `marginVertical`, i.e. identical space between
+  every pair of bubbles — which is exactly what does not happen in iMessage, where the
+  only gap the eye registers is the SENDER CHANGE. `bubbleGapPt(previous, current)`
+  now returns 2pt inside a same-sender run, 8pt at a change, 0 at the head of the list,
+  applied per row as `marginTop`; `bubbleHasTail` gives one tail corner per RUN rather
+  than one per bubble. Bubble padding came down to 6pt vertical, and the delivery tick
+  moved OUT of the bubble and down to the newest outgoing message only (a `failed`
+  send is exempt and always shows, because that glyph is the retry affordance). The
+  tick rendering inside every outgoing bubble was most of the bottom padding Ryan kept
+  pointing at.
+- **The composer clears the keyboard AND the home indicator, never both at once
+  (2026-07-30).** `keyboardOverlap` handles the keyboard (2026-07-29). The other state
+  had no owner: `react-native-safe-area-context` was a declared dependency of `app/`
+  with zero imports, and the project shell hard-codes its top inset and applies no
+  bottom inset, so the surface runs to the physical bottom of the screen and the
+  composer's fixed padding sat under a 34pt home indicator. `composerBottomInset`
+  (`app/lib/keyboard-inset.ts`) adds the safe area ONLY while the keyboard is down —
+  with the keyboard up the surface is already lifted by the full overlap and the
+  keyboard covers the indicator, so adding it again floats the bar over dead
+  background. `InputComposer` takes it as `bottom_inset`.
+- **The cold-start ack is a TRANSIENT pill on mobile too, and the predicate is shared
+  (2026-07-30).** #333 made the "⏳ Waking up…" ack live-only on the wire. The web
+  client routed it to a separate `systemNotice` channel — but via a PRIVATE function
+  inside `landing/chat-react/controller.ts`, so the native client, which shares
+  `chat-core` and not that file, had no such behaviour at all: `normalizeInbound`
+  turned the ack into an ordinary `ChatMessage` and the on-device store kept it
+  forever (it survives a reload, and the resume replay can never reconcile it because
+  the server has no such row). `isColdStartAck` / `isTransientSystemNotice` /
+  `systemNoticeText` now live in `chat-core/types.ts` and BOTH surfaces import them —
+  one mechanism, not two. `MobileChatSession.handleInbound` drops a transient frame
+  before persisting; `foldSystemNoticeFrame` mirrors the web clearing rules including
+  the FIX #347 late-ack latch; `ChatSyncSurface` renders it as a centered pill in the
+  list footer. The fold runs BEFORE the project filter deliberately — the ack carries
+  no `project_id`, so `frameMatchesProject` would drop it in every project view, and
+  the socket is already scoped to one topic.
+- **Activity inspector reachability (2026-07-30).** `ActivityInspectorDrawer`'s header
+  used a hard-coded 32pt top padding — shorter than the notch on every modern iPhone —
+  over a ~24pt close target. Now `safeArea.top + SPACING.sm` and a full 44pt HIG
+  target (`MIN_TAP_TARGET_PT`) with `hitSlop`; event rows came up off 11pt monospace
+  to 13/19, and the row list takes the bottom safe area.
 - **Client ids: `chat-core/ids.ts` `randomId()`, and NOTHING may call WebCrypto
   directly (2026-07-29).** `crypto` IS NOT A GLOBAL on the mobile runtime — RN 0.81
   installs none and Expo SDK 54's WinterCG shim stops at `TextDecoder`/`URL`/
@@ -5684,6 +5725,13 @@ Three capabilities carry most of the value:
 - **A driveable `Keyboard` event bus** (in `support/stubs/react-native.ts`) —
   react-native-web's `Keyboard` never emits, so subscribing to the real one would
   make every keyboard assertion pass for no reason.
+- **Settable safe-area insets** (`support/stubs/safe-area-context.ts`,
+  `setHarnessSafeAreaInsets`) — the real `useSafeAreaInsets` throws without the
+  native provider `expo-router` installs, and it defaults to an iPhone shape
+  (59pt top / 34pt bottom) rather than zero, because a zero default would make an
+  inset regression invisible. The composer must clear the home indicator with the
+  keyboard DOWN and must not add it again with the keyboard up; only a non-zero
+  driveable inset can assert both.
 
 `support/mount.tsx` supplies the interaction vocabulary: `type()` (through the
 prototype value setter, so React sees it), `press(accessibilityLabel)` — which
@@ -5731,10 +5779,28 @@ it order-independent. `native-harness-selfcheck.test.tsx` asserts the harness's 
 preconditions so a degraded harness fails loudly rather than silently turning the
 device suites into no-ops.
 
+**THE REWRITE'S BLIND SPOT — the stubs directory (found 2026-07-30).** That rewrite
+is scoped to `app/{app,components,lib,features}`, so it does NOT cover
+`support/stubs/`. `stubs/flash-list.tsx` imported `View` from the `react-native`
+SPECIFIER and therefore asked the registry — receiving whichever three-export fake
+had loaded first. Its `View` renders `null`, so EVERY transcript row silently
+vanished from a mounted chat test that happened to share a chunk with
+`docs-panes-render.test.ts`: six order-dependent failures with no relationship to
+the code under test. Stubs now import their siblings by path. The residual hazard
+that path cannot fix is an app-MODULE mock — `docs-panes-render.test.ts` also
+registers `mock.module('../lib/markdown-render', …)`, so any agent bubble's body
+renders empty in a co-tenant chunk; a mounted assertion on agent body TEXT is
+therefore order-dependent by construction, and the chat suites assert on rows and
+on user-message text instead.
+
 **HONEST BOUNDARY — it is not a device.** No native layout, no real keyboard, no
 gestures, no Hermes semantics, nothing in the native binary. It proves WIRING and
 ARITHMETIC. Anything visual ("the composer is visible above the keyboard") stays a
 DEVICE claim and must be confirmed on a handset before being called done.
 
 Suites built on it: `mobile-chat-send-on-device.test.tsx` (submit → outbound frame
-+ local bubble, with WebCrypto removed) and `chat-keyboard-avoidance.test.tsx`.
++ local bubble, with WebCrypto removed), `chat-keyboard-avoidance.test.tsx`, and
+`imessage-chat-ux.test.tsx` (the four iMessage defects: the composer clearing both
+the keyboard and the home indicator, the sender-run bubble rhythm, the activity
+inspector's reachability, and the cold-start ack rendering as a transient pill
+instead of a durable message).

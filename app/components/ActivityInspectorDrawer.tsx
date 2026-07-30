@@ -45,6 +45,8 @@ import {
   useWindowDimensions,
 } from 'react-native';
 
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
+
 import { MOTION, SPACING, THEME, TYPOGRAPHY } from '../lib/composer-constants';
 import { PHASE } from '../lib/theme';
 import {
@@ -66,6 +68,15 @@ const ROW_CAP = 200;
  *  event arrives — a frozen "12s ago" on a wedged session would be the same lie as
  *  a frozen dot. */
 const CLOCK_TICK_MS = 1000;
+
+/**
+ * Apple HIG's minimum tappable target. The close ✕ was a 16pt glyph with 4pt of
+ * padding — a ~24pt target, jammed under a hard-coded 32pt top padding that put
+ * it beneath the notch on every modern iPhone. Ryan: the X *"is too close to the
+ * top of the screen to tap"*. Both halves of that are fixed below: the header
+ * takes the real safe-area top inset, and the button is a full 44pt.
+ */
+export const MIN_TAP_TARGET_PT = 44;
 
 const KIND_GLYPH: Record<ActivityRow['kind'], string> = {
   tool_start: '▸',
@@ -130,6 +141,7 @@ export function ActivityInspectorDrawer({
   reduceMotionOverride?: boolean;
 }) {
   const { width } = useWindowDimensions();
+  const safeArea = useSafeAreaInsets();
   const panelWidth = useMemo(() => Math.min(width, 520), [width]);
   const translateX = useRef(new Animated.Value(panelWidth)).current;
   const opacity = useRef(new Animated.Value(0)).current;
@@ -280,21 +292,25 @@ export function ActivityInspectorDrawer({
         accessibilityViewIsModal
         testID="activity-drawer-panel"
       >
-        <View style={styles.header}>
+        <View style={[styles.header, { paddingTop: safeArea.top + SPACING.sm }]}>
           <View style={styles.headerText}>
             <Text style={styles.scope} numberOfLines={1}>
               {label}
             </Text>
-            <Text style={[styles.state, { color: stateColor(state) }]} testID="activity-state">
-              {describeState(state)}
-            </Text>
+            <View style={styles.stateRow}>
+              <View style={[styles.stateDot, { backgroundColor: stateColor(state) }]} />
+              <Text style={[styles.state, { color: stateColor(state) }]} testID="activity-state">
+                {describeState(state)}
+              </Text>
+            </View>
           </View>
           <Pressable
             accessibilityRole="button"
             accessibilityLabel="Close activity"
             testID="activity-drawer-close"
             onPress={close}
-            style={styles.closeBtn}
+            hitSlop={SPACING.sm}
+            style={({ pressed }) => [styles.closeBtn, pressed && styles.closeBtnPressed]}
           >
             <Text style={styles.closeGlyph}>✕</Text>
           </Pressable>
@@ -302,19 +318,25 @@ export function ActivityInspectorDrawer({
         {/* THE ANSWER. Two clocks, always visible, always counting. */}
         <View style={styles.clocks}>
           <View style={styles.clock}>
-            <Text style={styles.clockKey}>last event</Text>
+            <Text style={styles.clockKey}>LAST EVENT</Text>
             <Text style={styles.clockVal} testID="activity-last-event">
               {formatAge(eventAge)}
             </Text>
           </View>
+          <View style={styles.clockDivider} />
           <View style={styles.clock}>
-            <Text style={styles.clockKey}>last activity</Text>
+            <Text style={styles.clockKey}>LAST ACTIVITY</Text>
             <Text style={styles.clockVal} testID="activity-last-activity">
               {formatAge(activityAge)}
             </Text>
           </View>
         </View>
-        <ScrollView contentContainerStyle={styles.list}>
+        <ScrollView
+          contentContainerStyle={[
+            styles.list,
+            { paddingBottom: safeArea.bottom + SPACING.lg },
+          ]}
+        >
           {error !== null ? (
             <Text style={styles.empty} testID="activity-error">
               Could not read activity: {error}
@@ -390,68 +412,103 @@ const styles = StyleSheet.create({
   },
   header: {
     flexDirection: 'row',
-    alignItems: 'flex-start',
+    alignItems: 'center',
     justifyContent: 'space-between',
     gap: SPACING.sm,
     paddingHorizontal: SPACING.lg,
-    paddingTop: SPACING.xxl,
-    paddingBottom: SPACING.sm,
-    borderBottomWidth: 1,
+    // `paddingTop` is supplied per-render from the safe-area inset. A constant
+    // here (it was `SPACING.xxl` = 32) is shorter than the notch on every modern
+    // iPhone, which is what put the close button out of reach.
+    paddingBottom: SPACING.md,
+    borderBottomWidth: StyleSheet.hairlineWidth,
     borderBottomColor: THEME.hairline,
   },
-  headerText: { flex: 1, minWidth: 0, gap: 2 },
+  headerText: { flex: 1, minWidth: 0, gap: SPACING.xs },
   scope: {
-    fontSize: TYPOGRAPHY.body.fontSize,
-    lineHeight: TYPOGRAPHY.body.lineHeight,
+    fontSize: TYPOGRAPHY.h3.fontSize,
+    lineHeight: TYPOGRAPHY.h3.lineHeight,
     fontWeight: '600',
     color: THEME.text_primary,
   },
+  stateRow: { flexDirection: 'row', alignItems: 'center', gap: SPACING.xs + 2 },
+  stateDot: { width: 8, height: 8, borderRadius: 4 },
   state: {
-    fontSize: TYPOGRAPHY.caption.fontSize,
-    lineHeight: TYPOGRAPHY.caption.lineHeight,
+    fontSize: TYPOGRAPHY.body_small.fontSize,
+    lineHeight: TYPOGRAPHY.body_small.lineHeight,
   },
-  closeBtn: { padding: SPACING.xs },
-  closeGlyph: { fontSize: 16, color: THEME.text_muted },
+  // A full HIG-minimum target, not a 16pt glyph with 4pt of padding.
+  closeBtn: {
+    width: MIN_TAP_TARGET_PT,
+    height: MIN_TAP_TARGET_PT,
+    borderRadius: MIN_TAP_TARGET_PT / 2,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: THEME.surface_raised,
+  },
+  closeBtnPressed: { opacity: 0.6 },
+  closeGlyph: { fontSize: 18, lineHeight: 22, color: THEME.text_secondary },
   clocks: {
     flexDirection: 'row',
-    gap: SPACING.xl,
+    alignItems: 'center',
+    gap: SPACING.lg,
     paddingHorizontal: SPACING.lg,
-    paddingVertical: SPACING.sm,
-    borderBottomWidth: 1,
+    paddingVertical: SPACING.md,
+    borderBottomWidth: StyleSheet.hairlineWidth,
     borderBottomColor: THEME.hairline,
   },
-  clock: { gap: 2 },
+  clock: { gap: SPACING.xs },
+  clockDivider: { width: StyleSheet.hairlineWidth, alignSelf: 'stretch', backgroundColor: THEME.hairline },
   clockKey: {
-    fontSize: TYPOGRAPHY.caption.fontSize - 1,
+    fontSize: TYPOGRAPHY.caption.fontSize,
+    lineHeight: TYPOGRAPHY.caption.lineHeight,
+    letterSpacing: 0.6,
     color: THEME.text_muted,
   },
   clockVal: {
-    fontSize: TYPOGRAPHY.caption.fontSize,
+    fontSize: TYPOGRAPHY.h4.fontSize,
+    lineHeight: TYPOGRAPHY.h4.lineHeight,
+    fontWeight: '600',
     color: THEME.text_primary,
     fontVariant: ['tabular-nums'],
   },
   list: {
     paddingHorizontal: SPACING.lg,
-    paddingVertical: SPACING.sm,
-    gap: 2,
+    paddingVertical: SPACING.md,
+    gap: SPACING.xs + 2,
   },
-  row: { flexDirection: 'row', alignItems: 'baseline', gap: SPACING.xs },
+  row: { flexDirection: 'row', alignItems: 'baseline', gap: SPACING.sm },
   // A synthetic keepalive is NOT work — near-invisible so it never reads as
   // progress (that misreading is exactly ISSUES #386).
   rowSynthetic: { opacity: 0.38 },
+  // 11pt monospace was unreadable on a phone. 13 is the smallest size in the
+  // type scale (`TYPOGRAPHY.body_small`) and still fits a timestamp + a label.
   rowTime: {
     fontFamily: MONO,
-    fontSize: 11,
+    fontSize: 13,
+    lineHeight: 19,
     color: THEME.text_muted,
     fontVariant: ['tabular-nums'],
   },
-  rowGlyph: { fontFamily: MONO, fontSize: 11, color: THEME.text_muted, width: 14 },
-  rowLabel: { fontFamily: MONO, fontSize: 11, fontWeight: '600', color: THEME.text_primary },
-  rowDetail: { fontFamily: MONO, fontSize: 11, color: THEME.text_muted, flex: 1, minWidth: 0 },
+  rowGlyph: { fontFamily: MONO, fontSize: 13, lineHeight: 19, color: THEME.text_muted, width: 16 },
+  rowLabel: {
+    fontFamily: MONO,
+    fontSize: 13,
+    lineHeight: 19,
+    fontWeight: '600',
+    color: THEME.text_primary,
+  },
+  rowDetail: {
+    fontFamily: MONO,
+    fontSize: 13,
+    lineHeight: 19,
+    color: THEME.text_muted,
+    flex: 1,
+    minWidth: 0,
+  },
   rowError: { color: THEME.danger },
   empty: {
-    fontSize: TYPOGRAPHY.caption.fontSize,
-    lineHeight: TYPOGRAPHY.caption.lineHeight,
+    fontSize: TYPOGRAPHY.body_small.fontSize,
+    lineHeight: TYPOGRAPHY.body_small.lineHeight,
     color: THEME.text_muted,
   },
 });

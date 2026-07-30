@@ -26,7 +26,7 @@
  * over the chat-core contract without a DOM or a socket.
  */
 
-import { groupReactions } from '@neutronai/chat-core'
+import { groupReactions, isColdStartAck } from '@neutronai/chat-core'
 
 import type { ProjectTab } from './config.ts'
 import { parseWorkBoardItems, type WorkBoardItem } from './work-board-client.ts'
@@ -185,16 +185,12 @@ export interface SystemNoticeVM {
 }
 
 /**
- * M1 — recognise the gateway's cold-start acknowledgement so it renders as a
- * quiet system pill instead of a chat bubble. Mirrors
- * `gateway/wiring/build-live-agent-turn.ts` `COLD_START_ACK_BODY`
- * ("⏳ Waking up, one moment…"); matched by its stable leading marker so a minor
- * copy tweak (trailing punctuation) still routes to the pill. Kept lenient on
- * purpose — a false positive only restyles a rare, transient ack.
+ * M1 — the cold-start-ack predicate now lives in `@neutronai/chat-core`
+ * (`isColdStartAck`, imported above) so the web controller and the native
+ * surface share ONE mechanism. It used to be a private function here, which is
+ * exactly why mobile grew a second (absent) behaviour and rendered the
+ * "Waking up…" ack as a durable chat bubble.
  */
-function isColdStartAck(body: string): boolean {
-  return /^\s*⏳\s*Waking up\b/i.test(body)
-}
 
 /** The slice of `WebChatSession` the controller depends on (injectable). */
 export interface ControllerSession {

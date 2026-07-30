@@ -61,7 +61,19 @@ import { DropZoneOverlay } from './DropZoneOverlay';
 import { useUploadState } from '../lib/use-upload-state';
 import { classifyUploadKind } from '../lib/upload-client';
 import { selectDropFiles, shouldGateUpload } from '../lib/upload-gate';
-import { BUBBLE_MAX_WIDTH } from '../lib/chat-bubble-metrics';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
+
+import {
+  BUBBLE_MAX_WIDTH,
+  BUBBLE_PADDING_H_PT,
+  BUBBLE_PADDING_V_PT,
+  BUBBLE_RADIUS_PT,
+  BUBBLE_TAIL_RADIUS_PT,
+  bubbleGapPt,
+  bubbleHasTail,
+  type BubbleSpeaker,
+} from '../lib/chat-bubble-metrics';
+import { composerBottomInset } from '../lib/keyboard-inset';
 import { useKeyboardInset } from '../lib/use-keyboard-inset';
 
 /** Quick-reaction palette the long-press tray offers (Track B Phase 4). */
@@ -98,6 +110,7 @@ export function ChatSyncSurface({
     rows,
     status,
     typing,
+    systemNotice,
     pendingCount,
     ready,
     hydrated,
@@ -358,14 +371,36 @@ export function ChatSyncSurface({
     return undefined;
   }, [hasPromptWithFreeform, uploadAffordance]);
 
+  // iMessage shows ONE delivery status in the whole thread — under the newest
+  // outgoing message — not a tick on every bubble. Anything else is a Telegram
+  // ladder, and rendering it inside every user bubble is most of the "too much
+  // padding at the bottom of each message bubble" Ryan is looking at. A FAILED
+  // send is exempt: its glyph is the retry affordance and must never be hidden.
+  const lastUserRowKey = useMemo<string | null>(() => {
+    for (let i = rows.length - 1; i >= 0; i--) {
+      const r = rows[i];
+      if (r !== undefined && r.kind === 'message' && r.message.role === 'user') return r.key;
+    }
+    return null;
+  }, [rows]);
+
   const renderItem = useCallback(
-    ({ item }: { item: RenderRow }) => {
+    ({ item, index }: { item: RenderRow; index: number }) => {
       const promptId = item.kind === 'message' ? item.message.prompt_id : null;
       const chosenValue =
         promptId !== null && promptId !== undefined ? chosenByPrompt[promptId] : undefined;
+      // Sender-run grouping: the neighbours decide the gap above this bubble and
+      // whether it wears the tail. Derived here rather than baked into the row
+      // so `buildRenderRows` stays a pure transcript merge.
+      const previous = speakerOf(rows[index - 1]);
+      const next = speakerOf(rows[index + 1]);
+      const speaker = speakerOf(item) ?? 'agent';
       return (
         <ChatRow
           row={item}
+          gapTop={bubbleGapPt(previous, speaker)}
+          hasTail={bubbleHasTail(speaker, next)}
+          showDelivery={item.key === lastUserRowKey}
           selfDeviceId={selfDeviceId}
           auth={attachmentAuth}
           {...(chosenValue !== undefined ? { chosenValue } : {})}
@@ -378,7 +413,7 @@ export function ChatSyncSurface({
         />
       );
     },
-    [selfDeviceId, attachmentAuth, chosenByPrompt, onToggleReaction, editMessage, deleteMessage, onChoose, retry, onDocRef],
+    [rows, lastUserRowKey, selfDeviceId, attachmentAuth, chosenByPrompt, onToggleReaction, editMessage, deleteMessage, onChoose, retry, onDocRef],
   );
 
   const onViewableItemsChanged = useCallback(
@@ -407,6 +442,16 @@ export function ChatSyncSurface({
   // window-space measurement below is depth-independent. See
   // `lib/keyboard-inset.ts` for the arithmetic and the incident.
   const { inset: keyboardInset, containerRef } = useKeyboardInset();
+  // THE OTHER HALF OF "the composer is not fully visible". With the keyboard
+  // DOWN the surface runs to the physical bottom of the screen — the shell
+  // applies no bottom inset anywhere — so the send button sat under the home
+  // indicator. `composerBottomInset` adds the safe area only while the keyboard
+  // is down, so the two lifts can never double-offset each other.
+  const safeArea = useSafeAreaInsets();
+  const composerBottom = composerBottomInset({
+    keyboardInset,
+    safeAreaBottom: safeArea.bottom,
+  });
   const listRef = useRef<FlashListRef<RenderRow> | null>(null);
   // Rising keyboard → stay on the newest message. `maintainVisibleContentPosition`
   // holds position through content changes, which is NOT the same as following
@@ -448,7 +493,7 @@ export function ChatSyncSurface({
             autoscrollToBottomThreshold: 0.2,
           }}
           onViewableItemsChanged={onViewableItemsChanged}
-          ListFooterComponent={typing ? <TypingIndicator /> : null}
+          ListFooterComponent={<TranscriptFooter typing={typing} notice={systemNotice} />}
           // ISSUES #402 — only claim emptiness once history has SETTLED.
           // `ready` flips when the session object is constructed, before the
           // resume replay lands, so gating on it flashed "No messages yet" on
@@ -458,6 +503,7 @@ export function ChatSyncSurface({
       )}
       <InputComposer
         onSend={handleSend}
+        bottom_inset={composerBottom}
         placeholder={hasPromptWithFreeform ? 'Or type a response…' : 'Message'}
         {...(composerHint !== undefined ? { hint: composerHint } : {})}
         {...(initialPrefill !== undefined && initialPrefill.length > 0
@@ -519,9 +565,19 @@ function useLatestUploadAffordance(
   }, [messages]);
 }
 
+/** Which side of the transcript a row is on. `null` when there is no row. */
+function speakerOf(row: RenderRow | undefined): BubbleSpeaker | null {
+  if (row === undefined) return null;
+  if (row.kind === 'streaming') return 'agent';
+  return row.message.role === 'user' ? 'user' : 'agent';
+}
+
 /** One message or streaming bubble. */
 function ChatRow({
   row,
+  gapTop,
+  hasTail,
+  showDelivery,
   selfDeviceId,
   auth,
   chosenValue,
@@ -533,6 +589,12 @@ function ChatRow({
   onDocRef,
 }: {
   row: RenderRow;
+  /** Space above this bubble — 2pt inside a sender run, 8pt at a sender change. */
+  gapTop: number;
+  /** Tail corner: only the LAST bubble of a same-sender run gets one. */
+  hasTail: boolean;
+  /** Is this the newest outgoing message (the only one that shows a tick)? */
+  showDelivery: boolean;
   selfDeviceId: string;
   auth: AttachmentAuthCtx | null;
   chosenValue?: string;
@@ -546,14 +608,18 @@ function ChatRow({
   const [pickerOpen, setPickerOpen] = useState(false);
   const [draft, setDraft] = useState<string | null>(null);
 
+  // The ONE place the run geometry is turned into styles, so every early-return
+  // branch below (streaming / tombstone / edit / settled) gets the same rhythm.
+  const rowGap = { marginTop: gapTop };
+
   if (row.kind === 'streaming') {
     return (
-      <View style={[styles.bubbleWrap, styles.agentWrap]}>
+      <View style={[styles.bubbleWrap, styles.agentWrap, rowGap]} testID="chat-bubble-row">
         {/* Through `bubbleColumn` like every other row: this bubble BECOMES a
             settled one, so rendering it outside the capped column made it snap
             narrower the moment the stream finished. */}
         <View style={styles.bubbleColumn}>
-          <View style={[styles.bubble, styles.agentBubble]}>
+          <View style={[styles.bubble, styles.agentBubble, hasTail ? styles.agentTail : null]}>
             <Text style={styles.agentText}>{row.body}</Text>
           </View>
         </View>
@@ -569,6 +635,10 @@ function ChatRow({
   const canMutate = isUser && canReact && message.deleted !== true;
   const isDeleted = message.deleted === true;
   const wasEdited = !isDeleted && message.edited_at !== null && message.edited_at !== undefined;
+  // iMessage's single status line: only the newest outgoing message reports its
+  // delivery. A FAILED send always reports, wherever it sits in the thread —
+  // that glyph is the retry button, and hiding it would hide the failure.
+  const showMeta = delivery !== null && (showDelivery || delivery === 'failed');
 
   const toggleReact = (emoji: string, reactedBySelf: boolean): void => {
     if (message.message_id === null) return;
@@ -592,7 +662,7 @@ function ChatRow({
 
   if (isDeleted) {
     return (
-      <View style={[styles.bubbleWrap, isUser ? styles.userWrap : styles.agentWrap]}>
+      <View style={[styles.bubbleWrap, isUser ? styles.userWrap : styles.agentWrap, rowGap]} testID="chat-bubble-row">
         <View style={styles.bubbleColumn}>
           <View style={[styles.bubble, styles.tombstoneBubble]}>
             <Text style={styles.tombstoneText}>🚫 This message was deleted</Text>
@@ -604,7 +674,7 @@ function ChatRow({
 
   if (draft !== null) {
     return (
-      <View style={[styles.bubbleWrap, isUser ? styles.userWrap : styles.agentWrap]}>
+      <View style={[styles.bubbleWrap, isUser ? styles.userWrap : styles.agentWrap, rowGap]} testID="chat-bubble-row">
         <View style={styles.bubbleColumn}>
           <View style={[styles.bubble, isUser ? styles.userBubble : styles.agentBubble]}>
             <TextInput
@@ -635,14 +705,20 @@ function ChatRow({
   ];
 
   return (
-    <View style={[styles.bubbleWrap, isUser ? styles.userWrap : styles.agentWrap]}>
+    <View style={[styles.bubbleWrap, isUser ? styles.userWrap : styles.agentWrap, rowGap]} testID="chat-bubble-row">
       <View style={styles.bubbleColumn}>
         <Pressable
           onLongPress={canReact ? () => setPickerOpen((v) => !v) : undefined}
           delayLongPress={250}
           accessibilityLabel={canReact ? 'Long-press for actions' : undefined}
         >
-          <View style={[styles.bubble, isUser ? styles.userBubble : styles.agentBubble]}>
+          <View
+            style={[
+              styles.bubble,
+              isUser ? styles.userBubble : styles.agentBubble,
+              hasTail ? (isUser ? styles.userTail : styles.agentTail) : null,
+            ]}
+          >
             {isUser ? (
               message.body.length > 0 ? <Text style={styles.userText}>{message.body}</Text> : null
             ) : (
@@ -698,37 +774,43 @@ function ChatRow({
                 />
               )
             ) : null}
-            <View style={styles.metaRow}>
-              {wasEdited ? (
-                <Text style={[styles.editedLabel, isUser ? styles.editedLabelUser : null]} accessibilityLabel="edited">
-                  edited
-                </Text>
-              ) : null}
-              {delivery === 'failed' ? (
-                // W5 GAP-4 — a failed send: the ⚠️ glyph is a tappable retry
-                // affordance (per-message, idempotent), not a dead warning.
-                // Parity with the web ⚠️ "Failed — retry" button.
-                <Pressable
-                  onPress={() => onRetry(message.client_msg_id)}
-                  accessibilityRole="button"
-                  accessibilityLabel="Message failed to send — retry"
-                  hitSlop={8}
-                >
-                  <Text style={[styles.delivery, styles.deliveryFailed]}>
-                    {deliveryGlyph(delivery)} retry
-                  </Text>
-                </Pressable>
-              ) : delivery !== null ? (
-                <Text
-                  style={[styles.delivery, delivery === 'read' ? styles.deliveryRead : null]}
-                  accessibilityLabel={`delivery: ${delivery}`}
-                >
-                  {deliveryGlyph(delivery)}
-                </Text>
-              ) : null}
-            </View>
           </View>
         </Pressable>
+        {/* THE META LINE LIVES OUTSIDE THE BUBBLE, iMessage-style. It used to be
+            the bubble's last child, so every outgoing message carried an extra
+            text row INSIDE its own padded box — the bottom space Ryan kept
+            pointing at. Rendered at all only when it has something to say. */}
+        {wasEdited || showMeta ? (
+          <View style={[styles.metaRow, isUser ? styles.trayUser : styles.trayAgent]}>
+            {wasEdited ? (
+              <Text style={styles.editedLabel} accessibilityLabel="edited">
+                edited
+              </Text>
+            ) : null}
+            {showMeta && delivery === 'failed' ? (
+              // W5 GAP-4 — a failed send: the ⚠️ glyph is a tappable retry
+              // affordance (per-message, idempotent), not a dead warning.
+              // Parity with the web ⚠️ "Failed — retry" button.
+              <Pressable
+                onPress={() => onRetry(message.client_msg_id)}
+                accessibilityRole="button"
+                accessibilityLabel="Message failed to send — retry"
+                hitSlop={8}
+              >
+                <Text style={[styles.delivery, styles.deliveryFailed]}>
+                  {deliveryGlyph(delivery)} retry
+                </Text>
+              </Pressable>
+            ) : showMeta && delivery !== null ? (
+              <Text
+                style={[styles.delivery, delivery === 'read' ? styles.deliveryRead : null]}
+                accessibilityLabel={`delivery: ${delivery}`}
+              >
+                {deliveryGlyph(delivery)}
+              </Text>
+            ) : null}
+          </View>
+        ) : null}
         {pickerOpen ? (
           <View style={[styles.reactionTray, isUser ? styles.trayUser : styles.trayAgent]}>
             {QUICK_REACTIONS.map((emoji) => (
@@ -779,11 +861,58 @@ function ChatRow({
   );
 }
 
+/**
+ * The live tail of the transcript: the typing bubble and the TRANSIENT system
+ * pill. Both are ephemeral, neither is a row in `rows`, and the pill is
+ * explicitly NOT a chat bubble — see {@link SystemNoticePill}.
+ */
+function TranscriptFooter({
+  typing,
+  notice,
+}: {
+  typing: boolean;
+  notice: string | null;
+}): React.JSX.Element | null {
+  if (!typing && notice === null) return null;
+  return (
+    <View>
+      {typing ? <TypingIndicator /> : null}
+      <SystemNoticePill text={notice} />
+    </View>
+  );
+}
+
+/**
+ * The cold-start "⏳ Waking up, one moment…" ack, as a quiet centered pill.
+ *
+ * WHY IT IS NOT A BUBBLE. The gateway sends this as a live-only `agent_message`
+ * carrying `system_notice: true` and NO `seq` — it is never written to the
+ * durable chat_log (`AppWsAdapter.send`). The web client has always routed it to
+ * a separate `systemNotice` channel; the native client had no such channel, so
+ * `normalizeInbound` turned it into an ordinary agent message and the local
+ * store kept it forever. Ryan saw "Waking up…" sitting in his transcript as a
+ * thing the agent had apparently said. This is the same mechanism as web, down
+ * to the shared `isTransientSystemNotice` predicate, not a second one.
+ */
+function SystemNoticePill({ text }: { text: string | null }): React.JSX.Element | null {
+  if (text === null) return null;
+  return (
+    <View style={styles.systemNoticeRow} testID="chat-system-notice">
+      <View style={styles.systemNoticePill}>
+        <ActivityIndicator size="small" color={THEME.text_muted} />
+        <Text style={styles.systemNoticeText} accessibilityRole="text">
+          {text}
+        </Text>
+      </View>
+    </View>
+  );
+}
+
 function TypingIndicator(): React.JSX.Element {
   return (
-    <View style={[styles.bubbleWrap, styles.agentWrap]}>
+    <View style={[styles.bubbleWrap, styles.agentWrap, styles.footerGap]}>
       <View style={styles.bubbleColumn}>
-        <View style={[styles.bubble, styles.agentBubble, styles.typingBubble]}>
+        <View style={[styles.bubble, styles.agentBubble, styles.agentTail, styles.typingBubble]}>
           <Text style={styles.typingText}>•••</Text>
         </View>
       </View>
@@ -869,23 +998,30 @@ const styles = StyleSheet.create({
   fill: { flex: 1, backgroundColor: THEME.background },
   center: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: SPACING.xl },
   listContent: { paddingVertical: SPACING.md, paddingHorizontal: SPACING.md },
-  bubbleWrap: { marginVertical: SPACING.xs, flexDirection: 'row' },
+  // NO `marginVertical` HERE. A uniform margin puts identical space between every
+  // pair of bubbles, which is precisely what does NOT happen in iMessage — the
+  // gap is a function of whether the SENDER CHANGED, and it is applied per row as
+  // `marginTop` from `bubbleGapPt` (see `lib/chat-bubble-metrics.ts`).
+  bubbleWrap: { flexDirection: 'row' },
   userWrap: { justifyContent: 'flex-end' },
   agentWrap: { justifyContent: 'flex-start' },
   bubble: {
     // NO maxWidth HERE. `bubbleColumn` owns the ONE cap; a second percentage cap
     // in this chain multiplies with it (see `lib/chat-bubble-metrics.ts`).
-    paddingHorizontal: SPACING.md,
-    paddingVertical: SPACING.sm,
-    borderRadius: 16,
+    paddingHorizontal: BUBBLE_PADDING_H_PT,
+    paddingVertical: BUBBLE_PADDING_V_PT,
+    borderRadius: BUBBLE_RADIUS_PT,
   },
-  userBubble: { backgroundColor: THEME.accent, borderBottomRightRadius: 4 },
+  userBubble: { backgroundColor: THEME.accent },
   agentBubble: {
     backgroundColor: THEME.surface_raised,
-    borderBottomLeftRadius: 4,
     borderWidth: StyleSheet.hairlineWidth,
     borderColor: THEME.hairline,
   },
+  // The tail corner, applied ONLY to the last bubble of a same-sender run —
+  // iMessage draws one tail per run, not one per bubble.
+  userTail: { borderBottomRightRadius: BUBBLE_TAIL_RADIUS_PT },
+  agentTail: { borderBottomLeftRadius: BUBBLE_TAIL_RADIUS_PT },
   userText: { ...TYPOGRAPHY.body, color: THEME.background },
   agentText: { ...TYPOGRAPHY.body, color: THEME.text_primary },
   attachments: {
@@ -924,23 +1060,18 @@ const styles = StyleSheet.create({
   docRefLabel: { ...TYPOGRAPHY.body_small, color: THEME.text_secondary, fontWeight: '600' },
   docRefPath: { ...TYPOGRAPHY.caption, color: THEME.text_muted },
   pressed: { opacity: 0.6 },
-  delivery: {
-    ...TYPOGRAPHY.caption,
-    color: THEME.background,
-    opacity: 0.7,
-    alignSelf: 'flex-end',
-    marginTop: 2,
-  },
-  deliveryRead: { color: THEME.accent, opacity: 1 },
-  deliveryFailed: { color: THEME.warning, opacity: 1 },
-  metaRow: { flexDirection: 'row', alignItems: 'center', alignSelf: 'flex-end', gap: SPACING.xs },
-  editedLabel: { ...TYPOGRAPHY.caption, color: THEME.text_muted, opacity: 0.7, marginTop: 2 },
-  editedLabelUser: { color: THEME.background, opacity: 0.6 },
+  // OUTSIDE the bubble now, so it reads as a status line under the thread rather
+  // than as extra padding inside the message.
+  delivery: { ...TYPOGRAPHY.caption, color: THEME.text_muted },
+  deliveryRead: { color: THEME.accent },
+  deliveryFailed: { color: THEME.warning },
+  metaRow: { flexDirection: 'row', alignItems: 'center', gap: SPACING.xs, marginTop: 2 },
+  editedLabel: { ...TYPOGRAPHY.caption, color: THEME.text_muted },
   tombstoneBubble: {
     backgroundColor: THEME.surface,
     borderWidth: StyleSheet.hairlineWidth,
     borderColor: THEME.hairline,
-    borderBottomLeftRadius: 4,
+    borderBottomLeftRadius: BUBBLE_TAIL_RADIUS_PT,
   },
   tombstoneText: { ...TYPOGRAPHY.body, color: THEME.text_muted, fontStyle: 'italic' },
   editInput: { padding: 0, margin: 0, minWidth: 160 },
@@ -980,6 +1111,23 @@ const styles = StyleSheet.create({
   typingBubble: { paddingVertical: SPACING.xs },
   typingText: { ...TYPOGRAPHY.h2, color: THEME.text_muted, letterSpacing: 2 },
   emptyText: { ...TYPOGRAPHY.body, color: THEME.text_muted },
+  // Footer rows sit at a sender-change distance from the last bubble — they are
+  // the agent about to speak, so they read as a new turn.
+  footerGap: { marginTop: SPACING.sm },
+  // The transient system pill: CENTERED, muted, unmistakably not a bubble.
+  systemNoticeRow: { alignItems: 'center', paddingVertical: SPACING.sm },
+  systemNoticePill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: SPACING.sm,
+    paddingHorizontal: SPACING.md,
+    paddingVertical: SPACING.xs + 2,
+    borderRadius: 999,
+    backgroundColor: THEME.surface,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: THEME.hairline,
+  },
+  systemNoticeText: { ...TYPOGRAPHY.body_small, color: THEME.text_muted },
   dropMultiFileHint: {
     paddingVertical: SPACING.xs,
     paddingHorizontal: SPACING.md,
