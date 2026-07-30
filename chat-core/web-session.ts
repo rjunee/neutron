@@ -28,6 +28,7 @@ import { SyncEngine } from './sync-engine.ts'
 import {
   normalizeEditUpdate,
   normalizeInbound,
+  normalizePromptResolved,
   normalizeReactionUpdate,
   normalizeReceiptUpdate,
   parseSessionReadyMaxSeq,
@@ -348,6 +349,16 @@ export class WebChatSession {
     const edit = normalizeEditUpdate(data)
     if (edit !== null) {
       const { applied } = await this.engine.applyEditUpdate(this.topic_id, edit)
+      if (applied) this.emitChange()
+      return
+    }
+    // ISSUES #419 — a prompt_resolved says an option row has been ANSWERED. Apply
+    // it so the row collapses on THIS device too (a second device, or the tapping
+    // device once the server confirms), and — critically — so the answer lands in
+    // the DURABLE local store, where a later remount will still find it.
+    const resolved = normalizePromptResolved(data)
+    if (resolved !== null) {
+      const { applied } = await this.engine.applyPromptResolved(this.topic_id, resolved)
       if (applied) this.emitChange()
       return
     }

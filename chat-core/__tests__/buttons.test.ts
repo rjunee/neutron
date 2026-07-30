@@ -12,7 +12,7 @@ import { describe, expect, it } from 'bun:test'
 
 import { InMemoryStore } from '../store.ts'
 import { SyncEngine } from '../sync-engine.ts'
-import { normalizeInbound } from '../types.ts'
+import { normalizeInbound, normalizePromptResolved } from '../types.ts'
 import { WebChatSession } from '../web-session.ts'
 import type { SocketLike } from '../ws-client.ts'
 
@@ -138,6 +138,141 @@ describe('SyncEngine — button metadata survives apply → store', () => {
     )
     const [again] = await store.list(TOPIC)
     expect(again?.options?.map((o) => o.value)).toEqual(['yes', 'no'])
+  })
+})
+
+describe('ISSUES #419 — a resolution is TERMINAL and cannot be un-spent', () => {
+  it('a metadata-less re-delivery does not resurrect a live button', async () => {
+    // The merge rule is the last line of defence on the client. Every ordinary
+    // re-upsert of an already-delivered message — a receipt tick, a reaction, an
+    // edit, a resume replay of the ORIGINAL envelope — carries no `chosen_value`.
+    // If the merge took `incoming` unconditionally, each of those would blank the
+    // answer and put the ten-year-TTL Retry button back on screen live.
+    const store = new InMemoryStore()
+    const engine = new SyncEngine(store)
+    const prompt = {
+      v: 1,
+      type: 'agent_message',
+      message_id: 'm1',
+      seq: 1,
+      ts: 1,
+      body: 'That one took too long.',
+      prompt_id: 'p1',
+      options: [{ label: 'Retry', body: 'Retry', value: '__retry_turn__' }],
+    }
+    await engine.applyInbound(TOPIC, normalizeInbound(prompt)!)
+    const { applied } = await engine.applyPromptResolved(TOPIC, {
+      message_id: 'm1',
+      seq: 1,
+      prompt_id: 'p1',
+      chosen_value: '__retry_turn__',
+    })
+    expect(applied).toBe(true)
+    expect((await store.list(TOPIC))[0]?.chosen_value).toBe('__retry_turn__')
+
+    // The SAME original envelope again — no answer on it, because the server
+    // stamped the answer after this envelope was first built.
+    await engine.applyInbound(TOPIC, normalizeInbound(prompt)!)
+    expect((await store.list(TOPIC))[0]?.chosen_value).toBe('__retry_turn__')
+
+    // And a receipt update, which re-upserts the row with no button metadata at all.
+    await engine.applyReceiptUpdate(TOPIC, {
+      message_id: 'm1',
+      seq: 1,
+      delivered_by: ['devA'],
+      read_by: ['devA'],
+    })
+    expect((await store.list(TOPIC))[0]?.chosen_value).toBe('__retry_turn__')
+  })
+
+  it('re-applying the resolution is a no-op, and a mismatched prompt is refused', async () => {
+    const store = new InMemoryStore()
+    const engine = new SyncEngine(store)
+    await engine.applyInbound(
+      TOPIC,
+      normalizeInbound({
+        v: 1,
+        type: 'agent_message',
+        message_id: 'm1',
+        seq: 1,
+        ts: 1,
+        body: 'Pick one',
+        prompt_id: 'p1',
+        options: [
+          { label: 'Yes', body: 'Yes', value: 'yes' },
+          { label: 'No', body: 'No', value: 'no' },
+        ],
+      })!,
+    )
+    await engine.applyPromptResolved(TOPIC, {
+      message_id: 'm1',
+      seq: 1,
+      prompt_id: 'p1',
+      chosen_value: 'yes',
+    })
+    // A second resolution naming a DIFFERENT value loses — terminal, first wins.
+    const second = await engine.applyPromptResolved(TOPIC, {
+      message_id: 'm1',
+      seq: 1,
+      prompt_id: 'p1',
+      chosen_value: 'no',
+    })
+    expect(second.applied).toBe(false)
+    expect((await store.list(TOPIC))[0]?.chosen_value).toBe('yes')
+
+    // A frame naming a message we DO hold but a prompt that message does not
+    // carry is misrouted. Collapsing on it would spend the wrong row.
+    const other = new InMemoryStore()
+    const engine2 = new SyncEngine(other)
+    await engine2.applyInbound(
+      TOPIC,
+      normalizeInbound({
+        v: 1,
+        type: 'agent_message',
+        message_id: 'm2',
+        seq: 1,
+        ts: 1,
+        body: 'Pick one',
+        prompt_id: 'p-mine',
+        options: [{ label: 'Yes', body: 'Yes', value: 'yes' }],
+      })!,
+    )
+    const misrouted = await engine2.applyPromptResolved(TOPIC, {
+      message_id: 'm2',
+      seq: 1,
+      prompt_id: 'p-someone-elses',
+      chosen_value: 'yes',
+    })
+    expect(misrouted.applied).toBe(false)
+    expect((await other.list(TOPIC))[0]?.chosen_value).toBeUndefined()
+
+    // A frame for a message that is not local yet is dropped, not turned into a
+    // bodyless placeholder row.
+    const empty = new SyncEngine(new InMemoryStore())
+    expect(
+      (
+        await empty.applyPromptResolved(TOPIC, {
+          message_id: 'nope',
+          seq: null,
+          prompt_id: 'p1',
+          chosen_value: 'yes',
+        })
+      ).applied,
+    ).toBe(false)
+  })
+
+  it('normalizePromptResolved refuses a frame missing the prompt or the value', () => {
+    const base = { v: 1, type: 'prompt_resolved', message_id: 'm1', prompt_id: 'p1', chosen_value: 'yes', ts: 1 }
+    expect(normalizePromptResolved(base)).toEqual({
+      message_id: 'm1',
+      seq: null,
+      prompt_id: 'p1',
+      chosen_value: 'yes',
+    })
+    expect(normalizePromptResolved({ ...base, chosen_value: '' })).toBeNull()
+    expect(normalizePromptResolved({ ...base, prompt_id: '' })).toBeNull()
+    expect(normalizePromptResolved({ ...base, message_id: '' })).toBeNull()
+    expect(normalizePromptResolved({ ...base, type: 'agent_message' })).toBeNull()
   })
 })
 

@@ -57,6 +57,22 @@ export interface AppChatAppendInput {
   created_at: number
 }
 
+/**
+ * ISSUES #419 — the outcome of stamping a prompt's answer onto its message.
+ * Identifies the row so the caller can fan a `prompt_resolved` frame at it, and
+ * reports the value that is now recorded — which on a re-tap is the FIRST tap's
+ * value, not the one just offered.
+ */
+export interface AppChatPromptChoiceResult {
+  topic_id: string
+  message_id: string
+  seq: number
+  /** The value now durably recorded against this prompt. */
+  chosen_value: string
+  /** false when the row already carried a `chosen_value` (first-write-wins). */
+  was_new: boolean
+}
+
 /** Result of an append: the assigned row plus whether it was newly written. */
 export interface AppChatAppendResult {
   row: AppChatRow
@@ -85,6 +101,33 @@ export interface AppChatMessageLog {
   replayAfter(topic_id: string, after_seq: number, limit?: number): Promise<AppChatRow[]>
   /** Highest seq persisted for a topic, or 0 when the topic has no messages. */
   maxSeq(topic_id: string): Promise<number>
+  /**
+   * ISSUES #419 — record that the prompt carried by an agent message has been
+   * ANSWERED, by stamping `chosen_value` into that row's `meta` blob.
+   *
+   * This is what turns spent-ness into SERVER state. #415 made a second tap
+   * inert (`ButtonStore.resolve`'s `was_new` gates the dispatch) but left the
+   * clients drawing the button as live, because the only record of the answer
+   * was a session-scoped React value that any remount discarded — and a reply
+   * row's TTL is ten years, so the button never ages out on its own. Stamping
+   * it here puts the answer on the message itself, so it rides the ordinary
+   * replay path to every device and every future cold open.
+   *
+   * FIRST-WRITE-WINS: a row that already carries a `chosen_value` is left
+   * exactly as it is and returned with `was_new:false`. A re-tap therefore
+   * cannot rewrite history, and the caller can still fan the recorded value
+   * back — which is what lets a stale surface heal itself on the tap that the
+   * server refuses.
+   *
+   * Returns `null` when no message in this topic carries the prompt (the emit
+   * failed and shipped buttonless, or the id is client-minted): there is
+   * nothing to stamp, and inventing a row would be worse than doing nothing.
+   */
+  markPromptChosen(input: {
+    topic_id: string
+    prompt_id: string
+    chosen_value: string
+  }): Promise<AppChatPromptChoiceResult | null>
 }
 
 /** Default replay page size — bounds a single resume so a long-offline
@@ -193,6 +236,66 @@ export class AppChatStore implements AppChatMessageLog {
 
   async maxSeq(topic_id: string): Promise<number> {
     return this.core.maxTopicSeq(topic_id)
+  }
+
+  /** ISSUES #419 — see {@link AppChatMessageLog.markPromptChosen}. */
+  async markPromptChosen(input: {
+    topic_id: string
+    prompt_id: string
+    chosen_value: string
+  }): Promise<AppChatPromptChoiceResult | null> {
+    if (input.prompt_id.length === 0 || input.chosen_value.length === 0) return null
+    return this.core.transaction<AppChatPromptChoiceResult | null>((tx) => {
+      // The prompt id lives INSIDE the opaque `meta` blob (see
+      // `agentMessageMetaFromEnvelope`), not in a column, so the lookup goes
+      // through SQLite's JSON1 `json_extract` rather than a LIKE over the raw
+      // text — a substring match would happily hit a prompt id embedded in a
+      // doc-ref URL or a citation title.
+      const row = tx
+        .prepare<
+          { seq: number; message_id: string; meta_json: string | null },
+          [string, string]
+        >(
+          `SELECT seq, message_id, meta_json FROM app_chat_messages
+            WHERE topic_id = ?
+              AND meta_json IS NOT NULL
+              AND json_extract(meta_json, '$.prompt_id') = ?
+            ORDER BY seq DESC
+            LIMIT 1`,
+        )
+        .get(input.topic_id, input.prompt_id)
+      if (row === null || row === undefined || row.meta_json === null) return null
+
+      const parsed = parseJsonColumn(row.meta_json, { onCorrupt: 'fallback', fallback: null })
+      if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return null
+      const meta = parsed as Record<string, unknown>
+
+      const existing = meta['chosen_value']
+      if (typeof existing === 'string' && existing.length > 0) {
+        // Already answered. Report the RECORDED value (not the one just
+        // offered) so a re-tap can only ever re-broadcast the truth.
+        return {
+          topic_id: input.topic_id,
+          message_id: row.message_id,
+          seq: row.seq,
+          chosen_value: existing,
+          was_new: false,
+        }
+      }
+
+      meta['chosen_value'] = input.chosen_value
+      tx.runSync(
+        `UPDATE app_chat_messages SET meta_json = ? WHERE topic_id = ? AND seq = ?`,
+        [JSON.stringify(meta), input.topic_id, row.seq],
+      )
+      return {
+        topic_id: input.topic_id,
+        message_id: row.message_id,
+        seq: row.seq,
+        chosen_value: input.chosen_value,
+        was_new: true,
+      }
+    })
   }
 }
 

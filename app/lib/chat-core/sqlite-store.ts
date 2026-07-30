@@ -97,6 +97,7 @@ const SCHEMA = [
      citations         TEXT,
      doc_refs          TEXT,
      deep_link         TEXT,
+     chosen_value      TEXT,
      PRIMARY KEY (topic_id, identity)
    )`,
   `CREATE INDEX IF NOT EXISTS idx_${TABLE}_topic_seq ON ${TABLE} (topic_id, seq)`,
@@ -191,6 +192,12 @@ export class SqliteChatStore implements Store {
     await ensureColumn(db, TABLE, 'citations');
     await ensureColumn(db, TABLE, 'doc_refs');
     await ensureColumn(db, TABLE, 'deep_link');
+    // ISSUES #419 — the server's record that a prompt has been ANSWERED. This
+    // column is the whole point of the fix on native: a REMOUNT re-reads THIS
+    // table, not the socket, so an answer that never reached disk would be lost
+    // the moment the component unmounted and the Retry button would come back
+    // live on a prompt the server already refuses to honour.
+    await ensureColumn(db, TABLE, 'chosen_value');
     if (!ftsPreexisted) {
       await backfillFts(db);
     }
@@ -380,8 +387,8 @@ export class SqliteChatStore implements Store {
   private async write(identity: string, msg: ChatMessage): Promise<void> {
     await this.db.execute(
       `INSERT OR REPLACE INTO ${TABLE}
-         (identity, topic_id, client_msg_id, message_id, seq, role, body, project_id, attachments, created_at, status, delivered_to, read_by, reactions, reactions_rev, edited_at, deleted, edit_rev, options, prompt_id, allow_freeform, prompt_kind, upload_affordance, image_urls, citations, doc_refs, deep_link)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         (identity, topic_id, client_msg_id, message_id, seq, role, body, project_id, attachments, created_at, status, delivered_to, read_by, reactions, reactions_rev, edited_at, deleted, edit_rev, options, prompt_id, allow_freeform, prompt_kind, upload_affordance, image_urls, citations, doc_refs, deep_link, chosen_value)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         identity,
         msg.topic_id,
@@ -410,6 +417,7 @@ export class SqliteChatStore implements Store {
         encodeJson(msg.citations),
         encodeJson(msg.doc_refs),
         msg.deep_link ?? null,
+        msg.chosen_value ?? null,
       ],
     );
   }
@@ -451,6 +459,12 @@ function rowToMessage(row: SqlRow): ChatMessage {
     citations: parseJsonWith(row['citations'], parseCitations),
     doc_refs: parseJsonWith(row['doc_refs'], parseDocRefs),
     deep_link: row['deep_link'] === null || row['deep_link'] === undefined ? null : String(row['deep_link']),
+    // ISSUES #419 — spent-ness read back off disk, so a remount renders an
+    // already-answered prompt as answered.
+    chosen_value:
+      row['chosen_value'] === null || row['chosen_value'] === undefined
+        ? null
+        : String(row['chosen_value']),
   };
 }
 

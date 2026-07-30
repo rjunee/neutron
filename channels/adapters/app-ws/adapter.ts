@@ -63,6 +63,7 @@ import {
   type AppWsOutboundAgentMessageOption,
   type AppWsOutboundAgentMessageUploadAffordance,
   type AppWsOutboundEditUpdate,
+  type AppWsOutboundPromptResolved,
   type AppWsOutboundReactionUpdate,
   type AppWsOutboundReceiptUpdate,
   type AppWsOutboundUserMessageEcho,
@@ -643,6 +644,73 @@ export class AppWsAdapter implements ChannelAdapter {
   }
 
   /**
+   * ISSUES #419 — record that a button/quick-reply prompt has been ANSWERED and
+   * tell every device about it.
+   *
+   * Two halves, and BOTH are needed:
+   *  - it stamps `chosen_value` into the agent message's durable `meta`, so the
+   *    ordinary replay path carries the answer to any future cold open,
+   *    reinstall, or second device;
+   *  - it fans a `prompt_resolved` frame NOW, so a device already connected
+   *    collapses its option row without waiting for a reconnect. A pure
+   *    component remount never reconnects — it re-reads the durable LOCAL store
+   *    — so without this fan-out the local row would still say "live" and the
+   *    resurrected button would come back on the very next remount.
+   *
+   * First-write-wins in the store, so calling this on a REFUSED claim is not
+   * only safe but useful: it re-broadcasts the recorded answer and heals the
+   * stale surface that just sent a tap the server would not honour.
+   *
+   * Returns the fanned envelope, or `null` when the message log isn't wired /
+   * the input is empty / no message in the topic carries the prompt.
+   * Failure-isolated: a persist error returns `null` rather than throwing into
+   * the socket loop.
+   */
+  async recordPromptChoice(input: {
+    channel_topic_id: string
+    prompt_id: string
+    chosen_value: string
+    project_id?: string
+  }): Promise<AppWsOutboundPromptResolved | null> {
+    if (this.chat_log === undefined) return null
+    if (input.prompt_id.length === 0 || input.chosen_value.length === 0) return null
+    let result
+    try {
+      result = await this.chat_log.markPromptChosen({
+        topic_id: input.channel_topic_id,
+        prompt_id: input.prompt_id,
+        chosen_value: input.chosen_value,
+      })
+    } catch (err) {
+      wsLog
+        .rateLimited(
+          `prompt_choice_persist_failed:${input.channel_topic_id}`,
+          PERSIST_WARN_COOLDOWN_MS,
+        )
+        .warn('prompt_choice_persist_failed', {
+          topic: input.channel_topic_id,
+          error: err instanceof Error ? err.message : String(err),
+        })
+      return null
+    }
+    if (result === null) return null
+    const env: AppWsOutboundPromptResolved = {
+      v: 1,
+      type: 'prompt_resolved',
+      message_id: result.message_id,
+      prompt_id: input.prompt_id,
+      // The RECORDED value, never the offered one — a re-tap re-broadcasts the
+      // first answer rather than overwriting it on the clients.
+      chosen_value: result.chosen_value,
+      ts: this.now(),
+    }
+    if (result.seq > 0) env.seq = result.seq
+    if (input.project_id !== undefined) env.project_id = input.project_id
+    this.registry.send(input.channel_topic_id, env)
+    return env
+  }
+
+  /**
    * Track B Phase 4 (message reactions) — replay reaction state to a
    * reconnecting device after the message replay. Returns one `reaction_update`
    * per message (with seq > after_seq) that has any reaction, ascending by seq.
@@ -994,6 +1062,17 @@ const AGENT_META_KEYS = [
 ] as const
 
 /**
+ * ISSUES #419 — `chosen_value` is DELIBERATELY absent from the list above, and
+ * the mutation table says so: adding it changed nothing, because an emit is
+ * always a fresh, unanswered prompt — `outgoingToEnvelope` has no path that sets
+ * `chosen_value`, so projecting it here could never fire. The answer is written
+ * into the SAME `meta` blob later and out of band, by
+ * `AppChatStore.markPromptChosen`, and read back out by
+ * {@link applyPersistedAgentMeta}. A key here would have been an unreachable
+ * line that looked load-bearing.
+ */
+
+/**
  * W3a — project the structured presentation fields off a live-push agent
  * envelope into the opaque `meta` blob persisted on the chat_log row. Returns
  * `null` when the message carries none (a plain agent bubble), so a user echo
@@ -1026,6 +1105,10 @@ function applyPersistedAgentMeta(
 ): void {
   const promptId = meta['prompt_id']
   if (typeof promptId === 'string' && promptId.length > 0) env.prompt_id = promptId
+
+  // ISSUES #419 — a prompt stamped as answered replays as answered.
+  const chosenValue = meta['chosen_value']
+  if (typeof chosenValue === 'string' && chosenValue.length > 0) env.chosen_value = chosenValue
 
   const kind = meta['kind']
   if (kind === 'buttons' || kind === 'image-gallery') env.kind = kind

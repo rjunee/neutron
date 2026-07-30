@@ -225,6 +225,16 @@ export interface ChatMessage {
   kind?: PromptKind | null
   /** P1b — upload affordance for an onboarding import phase (clears on absence). */
   upload_affordance?: ChatMessageUploadAffordance | null
+  /**
+   * ISSUES #419 — the option `value` this prompt was ANSWERED with, as the
+   * SERVER recorded it. Set once (first-write-wins) and carried on every later
+   * delivery of this message, so spent-ness survives a remount / cold open /
+   * reinstall / second device. Null or absent while the prompt is still live.
+   *
+   * Read it through {@link spentChoiceValue}, never directly — that function is
+   * the single spent-ness rule both surfaces share.
+   */
+  chosen_value?: string | null
   /** P7.3 — agent inline image URLs (rendered as a gallery under the body).
    *  Distinct from {@link attachments} (the user's own uploaded images). */
   image_urls?: readonly string[] | null
@@ -267,6 +277,8 @@ export interface InboundChatMessage {
   allow_freeform?: boolean | null
   kind?: PromptKind | null
   upload_affordance?: ChatMessageUploadAffordance | null
+  /** ISSUES #419 — the server-recorded answer to this message's prompt. */
+  chosen_value?: string | null
   image_urls?: readonly string[] | null
   citations?: readonly ChatMessageCitation[] | null
   doc_refs?: readonly ChatMessageDocRef[] | null
@@ -386,6 +398,25 @@ export interface OutboundEdit {
   action: EditAction
   body?: string
   seq?: number
+}
+
+/**
+ * ISSUES #419 — notice that a prompt has been ANSWERED, for a message the client
+ * already holds. Produced by {@link normalizePromptResolved} from a
+ * `prompt_resolved` wire frame.
+ *
+ * Unlike the receipt/reaction/edit aggregates there is no `rev`: a resolution is
+ * terminal and first-write-wins server-side, so re-applying one is a no-op and
+ * two racing devices cannot disagree about the value.
+ */
+export interface InboundPromptResolved {
+  /** The agent message that carried the prompt. */
+  message_id: string
+  seq: number | null
+  /** The prompt that was answered — must match the stored message's own. */
+  prompt_id: string
+  /** The option `value` it was answered with. */
+  chosen_value: string
 }
 
 /**
@@ -554,6 +585,11 @@ export function normalizeInbound(raw: unknown): InboundChatMessage | null {
   if (rawKind === 'buttons' || rawKind === 'image-gallery') out.kind = rawKind
   const upload = parseUploadAffordance(e['upload_affordance'])
   if (upload !== null) out.upload_affordance = upload
+  // ISSUES #419 — the server's record that this prompt was already answered.
+  // Without this the field would be dropped on the socket + resume path and the
+  // client would keep drawing a spent button as live on every remount.
+  const rawChosen = e['chosen_value']
+  if (typeof rawChosen === 'string' && rawChosen.length > 0) out.chosen_value = rawChosen
   // P7.3 — inline agent images, citations, doc references, and the top-level
   // deep-link. All optional + absent on user messages, so a plain message
   // normalizes identically to before.
@@ -723,6 +759,63 @@ export function normalizeEditUpdate(raw: unknown): InboundEditUpdate | null {
   if (typeof rawAt === 'number' && Number.isFinite(rawAt)) edited_at = Math.trunc(rawAt)
 
   return { message_id, seq, rev, body, deleted, edited_at }
+}
+
+/**
+ * Normalize a parsed `prompt_resolved` wire frame into an
+ * {@link InboundPromptResolved}, or `null` when malformed. Defensive (drop,
+ * never throw), matching {@link normalizeEditUpdate}. Both `prompt_id` and
+ * `chosen_value` are REQUIRED: a frame missing either carries no usable
+ * resolution, and inventing an empty one would collapse a live option row into
+ * a blank "→ " summary.
+ */
+export function normalizePromptResolved(raw: unknown): InboundPromptResolved | null {
+  if (typeof raw !== 'object' || raw === null) return null
+  const e = raw as Record<string, unknown>
+  if (e['type'] !== 'prompt_resolved') return null
+  const message_id = e['message_id']
+  if (typeof message_id !== 'string' || message_id.length === 0) return null
+  const prompt_id = e['prompt_id']
+  if (typeof prompt_id !== 'string' || prompt_id.length === 0) return null
+  const chosen_value = e['chosen_value']
+  if (typeof chosen_value !== 'string' || chosen_value.length === 0) return null
+
+  let seq: number | null = null
+  const rawSeq = e['seq']
+  if (typeof rawSeq === 'number' && Number.isFinite(rawSeq)) seq = Math.trunc(rawSeq)
+
+  return { message_id, seq, prompt_id, chosen_value }
+}
+
+/**
+ * ISSUES #419 — THE spent-ness rule for a button/quick-reply prompt. Both chat
+ * surfaces (the native `ChatSyncSurface` and the web `ChatController`) call
+ * THIS; neither may grow its own.
+ *
+ * Returns the option `value` an option row should collapse to, or `null` while
+ * the prompt is genuinely still live.
+ *
+ * Two inputs, and the ORDER matters:
+ *   1. `message.chosen_value` — the server's record, durable, survives a
+ *      remount / cold open / reinstall / second device. Authoritative.
+ *   2. `localChoice` — this session's optimistic memory of a tap that hasn't
+ *      round-tripped yet. It exists ONLY to collapse the row on the same frame
+ *      as the tap; it is discarded by any remount, which is exactly the bug
+ *      (#419) that made it insufficient on its own.
+ *
+ * Deriving from (1) first is the whole fix: before it, a resurrected Retry
+ * button — the reply row's TTL is ten years, so it never ages out — drew as
+ * live on a prompt the server had already answered and refused to re-run. The
+ * owner tapped, and nothing happened.
+ */
+export function spentChoiceValue(
+  message: Pick<ChatMessage, 'chosen_value'>,
+  localChoice?: string | null,
+): string | null {
+  const durable = message.chosen_value
+  if (typeof durable === 'string' && durable.length > 0) return durable
+  if (typeof localChoice === 'string' && localChoice.length > 0) return localChoice
+  return null
 }
 
 /** Parse an untrusted value into a clean `MessageReaction[]` (drops malformed

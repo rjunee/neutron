@@ -956,6 +956,19 @@ export function createAppWsSurface(opts: CreateAppWsSurfaceOptions): AppWsSurfac
                   : {}),
                 observed_at: Date.now(),
               })
+              // ISSUES #419 — record the answer on the MESSAGE and fan it to
+              // every device. #415 made the second tap inert; this is what stops
+              // the surface from continuing to draw the button as live. Run on a
+              // REFUSED claim too (`markPromptChosen` is first-write-wins, so it
+              // re-broadcasts the recorded answer rather than rewriting it) —
+              // that is precisely the tap the server will not honour, and it is
+              // the moment the stale client most needs correcting.
+              await adapter.recordPromptChoice({
+                channel_topic_id: data.channel_topic_id,
+                prompt_id: choice.prompt_id,
+                chosen_value: choice.choice_value,
+                ...(data.project_id !== undefined ? { project_id: data.project_id } : {}),
+              })
               if (!first) return
             }
             await on_button_choice({

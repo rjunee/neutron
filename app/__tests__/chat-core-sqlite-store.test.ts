@@ -184,6 +184,39 @@ describe('SqliteChatStore — Store contract (real bun:sqlite)', () => {
     expect(row?.deep_link).toBe('neutron://docs/spec');
   });
 
+  it('ISSUES #419 — a prompt answer survives a cold open (the on-disk half of spent-ness)', async () => {
+    // The remount fix on native rests on THIS column. A remount re-reads the
+    // on-device store, not the socket, so an answer that never reached disk is
+    // lost the moment the component unmounts — and the ten-year-TTL Retry button
+    // comes back live on a prompt the server already refuses to honour.
+    const db = freshDb();
+    const store = await SqliteChatStore.open(bunExecutor(db));
+    await store.upsert(
+      msg({
+        client_msg_id: '',
+        message_id: 'agent-419',
+        seq: 3,
+        role: 'agent',
+        body: 'That one took too long.',
+        status: 'acked',
+        options: [{ label: 'Retry', body: 'Retry', value: '__retry_turn__' }],
+        prompt_id: 'p-419',
+        chosen_value: '__retry_turn__',
+      }),
+    );
+    const reopened = await SqliteChatStore.open(bunExecutor(db));
+    const [row] = await reopened.list(TOPIC);
+    expect(row?.prompt_id).toBe('p-419');
+    expect(row?.chosen_value).toBe('__retry_turn__');
+    // A prompt that has NOT been answered stays null — the column must not
+    // manufacture spent-ness for a genuinely live button.
+    const other = await SqliteChatStore.open(bunExecutor(freshDb()));
+    await other.upsert(
+      msg({ client_msg_id: '', message_id: 'agent-live', seq: 1, role: 'agent', body: 'q', status: 'acked', prompt_id: 'p-live' }),
+    );
+    expect((await other.list(TOPIC))[0]?.chosen_value).toBeNull();
+  });
+
   it('round-trips + set-unions receipt fields (Track B Phase 4)', async () => {
     const store = await SqliteChatStore.open(bunExecutor(freshDb()));
     await store.upsert(

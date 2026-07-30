@@ -36,6 +36,7 @@ import { FlashList, type FlashListRef } from '@shopify/flash-list';
 import { useRouter } from 'expo-router';
 import * as DocumentPicker from 'expo-document-picker';
 
+import { spentChoiceValue } from '@neutronai/chat-core';
 import type { ChatMessage, ChatMessageDocRef, ConnStatus } from '@neutronai/chat-core';
 
 import {
@@ -170,11 +171,16 @@ export function ChatSyncSurface({
     [react],
   );
 
-  // Record the chosen option per prompt so the row collapses immediately and
-  // can't re-fire (ButtonOptionRow/ImageGalleryRow only latch for MOTION.base;
-  // the legacy surface tracked this as `chosen_value`). Session-scoped — the
-  // server advances the prompt after a choice, so a fresh cold-open never shows
-  // an answered-but-still-open prompt.
+  // ISSUES #419 — the OPTIMISTIC half of spent-ness only. It collapses the row
+  // on the same frame as the tap, before the server round-trip; it is session-
+  // scoped and a remount throws it away. That used to be the ONLY guard, and its
+  // comment claimed "the server advances the prompt after a choice, so a fresh
+  // cold-open never shows an answered-but-still-open prompt" — which was simply
+  // not true: nothing marked the prompt answered anywhere the client could see,
+  // and a reply row lives for TEN YEARS, so every remount redrew a live Retry
+  // button on an already-answered prompt. The durable half now rides on the
+  // message itself (`chosen_value`, stamped server-side); `spentChoiceValue`
+  // combines the two and is THE rule both chat surfaces share.
   const [chosenByPrompt, setChosenByPrompt] = useState<Record<string, string>>({});
   const onChoose = useCallback(
     (value: string, promptId?: string): void => {
@@ -387,8 +393,14 @@ export function ChatSyncSurface({
   const renderItem = useCallback(
     ({ item, index }: { item: RenderRow; index: number }) => {
       const promptId = item.kind === 'message' ? item.message.prompt_id : null;
+      // ISSUES #419 — server state first, this session's optimistic tap second.
       const chosenValue =
-        promptId !== null && promptId !== undefined ? chosenByPrompt[promptId] : undefined;
+        item.kind === 'message'
+          ? (spentChoiceValue(
+              item.message,
+              promptId !== null && promptId !== undefined ? chosenByPrompt[promptId] : null,
+            ) ?? undefined)
+          : undefined;
       // Sender-run grouping: the neighbours decide the gap above this bubble and
       // whether it wears the tail. Derived here rather than baked into the row
       // so `buildRenderRows` stays a pure transcript merge.

@@ -21,6 +21,7 @@ import type {
   ChatMessage,
   InboundChatMessage,
   InboundEditUpdate,
+  InboundPromptResolved,
   InboundReactionUpdate,
   InboundReceiptUpdate,
   OutboundResume,
@@ -84,6 +85,12 @@ export class SyncEngine {
     if (env.upload_affordance !== undefined && env.upload_affordance !== null) {
       msg.upload_affordance = env.upload_affordance
     }
+    // ISSUES #419 — the server's record that this prompt was already answered.
+    // Carried onto the stored row so a REMOUNT (which discards the session's own
+    // memory of the tap) still renders the option row as spent.
+    if (env.chosen_value !== undefined && env.chosen_value !== null) {
+      msg.chosen_value = env.chosen_value
+    }
     // P7.3 — inline images / citations / doc refs / deep-link. Same posture:
     // only set when present so a plain message's row stays unchanged. Without
     // these the socket + resume path would drop them despite the SQLite columns
@@ -117,6 +124,36 @@ export class SyncEngine {
     if (update.delivered_by.length > 0) patch.delivered_to = update.delivered_by
     if (update.read_by.length > 0) patch.read_by = update.read_by
     await this.store.upsert(patch)
+    return { applied: true }
+  }
+
+  /**
+   * ISSUES #419 — apply a prompt RESOLUTION to an already-delivered message.
+   * Looks the message up by `message_id` and writes `chosen_value` through the
+   * same idempotent UPSERT path messages use (NOT a fork), so the option row
+   * collapses on every live device the instant the server claims the tap —
+   * without waiting for a reconnect replay to carry the stamped value.
+   *
+   * Returns `{ applied:false }` when the message isn't local yet (a resolution
+   * can't precede its message on the wire), when the frame's `prompt_id`
+   * disagrees with the stored message's (a stale/misrouted frame must never
+   * collapse the wrong row), or when the message is already resolved — a
+   * resolution is terminal, so re-applying one is a no-op rather than a churn.
+   */
+  async applyPromptResolved(
+    topic_id: string,
+    update: InboundPromptResolved,
+  ): Promise<{ applied: boolean }> {
+    if (update.message_id.length === 0) return { applied: false }
+    const existing = await this.store.getByMessageId(topic_id, update.message_id)
+    if (existing === null) return { applied: false }
+    const promptId = existing.prompt_id
+    if (typeof promptId === 'string' && promptId.length > 0 && promptId !== update.prompt_id) {
+      return { applied: false }
+    }
+    const current = existing.chosen_value
+    if (typeof current === 'string' && current.length > 0) return { applied: false }
+    await this.store.upsert({ ...existing, chosen_value: update.chosen_value })
     return { applied: true }
   }
 

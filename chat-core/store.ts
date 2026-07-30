@@ -143,6 +143,7 @@ type AgentMetaKeys =
   | 'allow_freeform'
   | 'kind'
   | 'upload_affordance'
+  | 'chosen_value'
   | 'image_urls'
   | 'citations'
   | 'doc_refs'
@@ -163,6 +164,12 @@ export function pickAgentMeta(
   if (kind !== null && kind !== undefined) out.kind = kind
   const upload = incoming.upload_affordance ?? existing.upload_affordance
   if (upload !== null && upload !== undefined) out.upload_affordance = upload
+  // ISSUES #419 — a prompt's resolution is TERMINAL and first-write-wins on the
+  // server, so `incoming ?? existing` is the right merge: a later metadata-less
+  // re-delivery (receipt / reaction / edit re-upsert) can never un-spend an
+  // already-answered prompt and resurrect a live button.
+  const chosenValue = incoming.chosen_value ?? existing.chosen_value
+  if (chosenValue !== null && chosenValue !== undefined) out.chosen_value = chosenValue
   const imageUrls = incoming.image_urls ?? existing.image_urls
   if (imageUrls !== null && imageUrls !== undefined) out.image_urls = imageUrls
   const citations = incoming.citations ?? existing.citations
