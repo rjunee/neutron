@@ -5690,10 +5690,23 @@ prototype value setter, so React sees it), `press(accessibilityLabel)` — which
 THROWS when the control is absent or disabled, so an unreachable button fails the
 test — and `FakeChatSocket`, which records every outbound frame.
 
-**PROCESS HYGIENE IS PART OF THE CONTRACT.** Bun runs ~100 test files per process
-and chunk composition is not stable, so a harness file must leave nothing behind.
-Two rules, both learned from 68 collateral failures across three shards on this
-harness's first CI run:
+**IT RUNS IN ITS OWN PROCESS — the device-harness isolation lane.** Registering a
+DOM and aliasing `react-native` are process-global acts that cannot coexist with the
+rest of the suite: `landing`'s happy-dom tests call `GlobalRegistrator.register()`
+unconditionally and it THROWS when a DOM already exists, several app tests own the
+`react-native` specifier with process-global `mock.module` fakes, and a registered
+DOM cannot be unregistered without breaking the harness files still queued in that
+process. Mixed into a general chunk this cost **68 failures across three CI shards**
+in unrelated packages. `scripts/run-tests.sh` therefore runs every file mentioning
+`installNativeHarness` in a dedicated lane, exactly like the PGLite-WASM quarantine
+lane; membership is content-derived so a new harness suite is isolated automatically,
+and lane files still count toward the coverage audit. `NEUTRON_TEST_NO_DEVICE_LANE=1`
+folds them back in and is expected to fail. A bare single-file `bun test` is always
+safe. Details: `docs/testing-runner.md`.
+
+**BELT AND BRACES INSIDE THE LANE.** The lane makes collisions impossible; these two
+rules make a harness file well-behaved anyway, which is what keeps a single-file run
+and any future co-tenant honest:
 
 1. `registerDomKeepingBunNetworking()` captures Bun's `fetch`/`Response`/`Request`/
    `WebSocket`/`URL`/… before `GlobalRegistrator.register()` and restores them

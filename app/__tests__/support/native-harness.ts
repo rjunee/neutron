@@ -80,21 +80,35 @@ function pkg(name: string): RegExp {
   return new RegExp(`[\\\\/]node_modules[\\\\/]${name.replace('/', '[\\\\/]')}[\\\\/]`);
 }
 
-let installed = false;
+let installedOnce = false;
 
-/** Idempotent. Safe to call from every harness test file. */
+/**
+ * Idempotent, and call it in EVERY harness test file.
+ *
+ * Split into two halves on purpose. The IRREVERSIBLE half — registering the DOM
+ * and installing the module-alias plugin — runs once per process, because
+ * unregistering a DOM that react-native-web has already captured globals from
+ * would break every harness file still to run. The REVERSIBLE half re-arms on
+ * every call, because `resetHarnessGlobals()` in a previous file's `afterAll`
+ * deliberately tore it down; without re-arming, the second harness file in a
+ * process runs with no faked layout rect and its layout assertions fail for a
+ * reason that has nothing to do with the code under test.
+ */
 export function installNativeHarness(): void {
-  if (installed) return;
-  installed = true;
-
-  if ((globalThis as { document?: unknown }).document === undefined) {
-    registerDomKeepingBunNetworking();
-  }
+  // ── reversible: re-armed per file ──
   (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
   // Metro defines this; without it expo-modules-core's environment probe throws.
   (globalThis as { __DEV__?: boolean }).__DEV__ = false;
   installExpoGlobal();
   installLayoutMetrics();
+
+  // ── irreversible: once per process ──
+  if (installedOnce) return;
+  installedOnce = true;
+
+  if ((globalThis as { document?: unknown }).document === undefined) {
+    registerDomKeepingBunNetworking();
+  }
 
   plugin({
     name: 'neutron-native-harness',
@@ -261,8 +275,15 @@ function installLayoutMetrics(): void {
   const proto = (globalThis as unknown as { Element?: { prototype: Record<string, unknown> } })
     .Element;
   if (proto === undefined) return;
-  realGetBoundingClientRect = proto.prototype['getBoundingClientRect'];
-  proto.prototype['getBoundingClientRect'] = function getBoundingClientRect(): DOMRect {
+  const current = proto.prototype['getBoundingClientRect'] as
+    | { __neutronHarnessFake?: true }
+    | undefined;
+  // Re-arming must never record the FAKE as the real implementation, or the
+  // restore in `resetHarnessGlobals()` would put the fake back forever.
+  if (current?.__neutronHarnessFake !== true) {
+    realGetBoundingClientRect = current;
+  }
+  const fake = function getBoundingClientRect(): DOMRect {
     return {
       x: 0,
       y: 0,
@@ -275,6 +296,8 @@ function installLayoutMetrics(): void {
       toJSON: () => ({}),
     } as DOMRect;
   };
+  (fake as unknown as { __neutronHarnessFake: true }).__neutronHarnessFake = true;
+  proto.prototype['getBoundingClientRect'] = fake;
 }
 
 /**

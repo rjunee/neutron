@@ -51,6 +51,23 @@
 # so a new PGLite test is quarantined automatically — no allowlist to maintain.
 # Coverage is unchanged: lane files are still counted in the audit (RAN_TOTAL).
 #
+# DEVICE-HARNESS ISOLATION LANE
+# -----------------------------
+# The mobile device harness (`app/__tests__/support/native-harness.ts`) registers a
+# happy-dom DOM and aliases `react-native` for the whole PROCESS. That cannot share
+# a process with the rest of the suite, and the reasons are not fixable from the
+# harness side:
+#   - `landing`'s happy-dom tests call `GlobalRegistrator.register()` unconditionally
+#     and it THROWS if a DOM is already registered, so whichever runs second fails;
+#   - other app tests own the `react-native` specifier with process-global
+#     `mock.module` fakes;
+#   - a DOM registered by the harness cannot be unregistered again without breaking
+#     the harness files still queued in that process.
+# Mixed into a general chunk it produced 68 failures across three CI shards in
+# unrelated packages. So harness files get their OWN process, exactly like the
+# PGLite lane. Membership is content-derived (any test file mentioning
+# `installNativeHarness`), so a new harness suite is isolated automatically.
+#
 # USAGE
 #   scripts/run-tests.sh                 # run the whole suite, bounded memory
 #
@@ -76,6 +93,10 @@
 #                                    the real-WASM boots use 60s timeouts internally)
 #   NEUTRON_TEST_NO_PGLITE_LANE      set =1 to fold PGLite files back into general
 #                                    chunks (the pre-quarantine behaviour)
+#   --- device-harness isolation lane ---
+#   NEUTRON_TEST_NO_DEVICE_LANE      set =1 to fold the mobile-harness files back
+#                                    into general chunks. Expect cross-file DOM /
+#                                    module-registry collisions if you do.
 #
 # TUNING RECIPES (peak RSS ≈ JOBS × CHUNK_SIZE × per-file working set)
 #   Contended 30 GB deploy box / CI (bounded memory is the priority):
@@ -137,6 +158,8 @@ PGLITE_RETRIES="${NEUTRON_TEST_PGLITE_RETRIES:-2}"
 PGLITE_CONCURRENCY="${NEUTRON_TEST_PGLITE_CONCURRENCY:-1}"
 PGLITE_TIMEOUT="${NEUTRON_TEST_PGLITE_TIMEOUT:-90000}"
 NO_PGLITE_LANE="${NEUTRON_TEST_NO_PGLITE_LANE:-0}"
+# Device-harness isolation lane (see header). Its own process; normal timeout.
+NO_DEVICE_LANE="${NEUTRON_TEST_NO_DEVICE_LANE:-0}"
 
 # --- 1. Discover the canonical real-source test set --------------------------
 # Shared with the deploy gate so the two can never drift (the dot-dir exclusion
@@ -211,20 +234,29 @@ fi
 # PGLite test is quarantined automatically. The general chunks run everything
 # else; the lane runs last, serially, with its own retry budget (see header).
 PGLITE_FILES=()
+DEVICE_FILES=()
 GENERAL_FILES=()
-if [ "$NO_PGLITE_LANE" = "1" ]; then
-  GENERAL_FILES=( "${FILES[@]}" )
-else
-  # One batched grep over the discovered set (well under ARG_MAX for ~800 files).
-  # `|| true` so a zero-match grep (exit 1) doesn't trip `set -o pipefail`/`-e`.
+# One batched grep per lane over the discovered set (well under ARG_MAX for ~1100
+# files). `|| true` so a zero-match grep (exit 1) doesn't trip `set -o pipefail`/`-e`.
+PGLITE_MATCH=""
+DEVICE_MATCH=""
+if [ "$NO_PGLITE_LANE" != "1" ]; then
   PGLITE_MATCH="$(LC_ALL=C grep -lEi 'pglite' "${FILES[@]}" 2>/dev/null || true)"
-  for f in "${FILES[@]}"; do
-    case $'\n'"${PGLITE_MATCH}"$'\n' in
-      *$'\n'"$f"$'\n'*) PGLITE_FILES+=("$f") ;;
-      *)                GENERAL_FILES+=("$f") ;;
-    esac
-  done
 fi
+if [ "$NO_DEVICE_LANE" != "1" ]; then
+  DEVICE_MATCH="$(LC_ALL=C grep -lE 'installNativeHarness' "${FILES[@]}" 2>/dev/null || true)"
+fi
+for f in "${FILES[@]}"; do
+  # PGLite wins a tie: a hypothetical file in both would need the WASM lane's
+  # serial execution + retry budget more than it needs DOM isolation.
+  case $'\n'"${PGLITE_MATCH}"$'\n' in
+    *$'\n'"$f"$'\n'*) PGLITE_FILES+=("$f") ; continue ;;
+  esac
+  case $'\n'"${DEVICE_MATCH}"$'\n' in
+    *$'\n'"$f"$'\n'*) DEVICE_FILES+=("$f") ; continue ;;
+  esac
+  GENERAL_FILES+=("$f")
+done
 
 # --- 2c. Cross-runner shard slice (NEUTRON_TEST_SHARD="<i>/<n>") --------------
 # Deliberately placed AFTER discovery, the bun coverage cross-check, and the
@@ -233,9 +265,9 @@ fi
 # slice of what gets VERIFIED. (Sharding earlier would have made each runner
 # blind to a discovery drift affecting files it does not own.)
 #
-# Round-robin by index, applied to BOTH lanes independently, so each shard gets
-# a proportional share of the slow PGLite files instead of one runner absorbing
-# the entire serial lane.
+# Round-robin by index, applied to EVERY lane independently, so each shard gets a
+# proportional share of the slow PGLite files instead of one runner absorbing the
+# entire serial lane (same for the device-harness lane).
 #
 # The coverage guarantee changes shape and it is worth being explicit: a sharded
 # run can no longer prove on its own that every file ran. It proves it ran
@@ -260,10 +292,14 @@ if [ -n "$SHARD_SPEC" ]; then
   _tmp=()
   while IFS= read -r _l; do [ -n "$_l" ] && _tmp+=("$_l"); done < <(_slice ${PGLITE_FILES[@]+"${PGLITE_FILES[@]}"})
   PGLITE_FILES=( ${_tmp[@]+"${_tmp[@]}"} )
-  echo "run-tests: SHARD ${SHARD_I}/${SHARD_N} — executing ${#GENERAL_FILES[@]} general + ${#PGLITE_FILES[@]} PGLite of ${TOTAL} discovered"
+  _tmp=()
+  while IFS= read -r _l; do [ -n "$_l" ] && _tmp+=("$_l"); done < <(_slice ${DEVICE_FILES[@]+"${DEVICE_FILES[@]}"})
+  DEVICE_FILES=( ${_tmp[@]+"${_tmp[@]}"} )
+  echo "run-tests: SHARD ${SHARD_I}/${SHARD_N} — executing ${#GENERAL_FILES[@]} general + ${#PGLITE_FILES[@]} PGLite + ${#DEVICE_FILES[@]} device of ${TOTAL} discovered"
 fi
 
 NPGLITE=${#PGLITE_FILES[@]}
+NDEVICE=${#DEVICE_FILES[@]}
 GEN_TOTAL=${#GENERAL_FILES[@]}
 
 # Plan-only seam — print exactly what THIS invocation would execute, then stop.
@@ -273,21 +309,24 @@ GEN_TOTAL=${#GENERAL_FILES[@]}
 if [ "${NEUTRON_TEST_PLAN_ONLY:-0}" = "1" ]; then
   echo "declared files: ${TOTAL}"
   echo "run-tests: PLAN-ONLY BEGIN"
-  printf '%s\n' ${GENERAL_FILES[@]+"${GENERAL_FILES[@]}"} ${PGLITE_FILES[@]+"${PGLITE_FILES[@]}"}
+  printf '%s\n' ${GENERAL_FILES[@]+"${GENERAL_FILES[@]}"} ${PGLITE_FILES[@]+"${PGLITE_FILES[@]}"} ${DEVICE_FILES[@]+"${DEVICE_FILES[@]}"}
   echo "run-tests: PLAN-ONLY END"
   exit 0
 fi
 
 # What THIS invocation is accountable for executing. Unsharded this is TOTAL, so
 # the audit below is unchanged; sharded it is this shard's slice.
-SHARD_TOTAL=$(( GEN_TOTAL + NPGLITE ))
+SHARD_TOTAL=$(( GEN_TOTAL + NPGLITE + NDEVICE ))
 
 # --- 3. Partition + run -------------------------------------------------------
 NCHUNKS=$(( (GEN_TOTAL + CHUNK_SIZE - 1) / CHUNK_SIZE ))
-echo "run-tests: ${TOTAL} test files (bun-discovered: ${BUN_DISC:-n/a}) → ${NCHUNKS} general chunks of <=${CHUNK_SIZE} + ${NPGLITE}-file PGLite lane"
+echo "run-tests: ${TOTAL} test files (bun-discovered: ${BUN_DISC:-n/a}) → ${NCHUNKS} general chunks of <=${CHUNK_SIZE} + ${NPGLITE}-file PGLite lane + ${NDEVICE}-file device lane"
 echo "run-tests: bun=${BUN} max-concurrency=${CONCURRENCY} timeout=${TIMEOUT}ms jobs=${JOBS}"
 if [ "$NPGLITE" -gt 0 ]; then
   echo "run-tests: PGLite lane → ${NPGLITE} files, serial=${PGLITE_CONCURRENCY}, timeout=${PGLITE_TIMEOUT}ms, retries=${PGLITE_RETRIES}"
+fi
+if [ "$NDEVICE" -gt 0 ]; then
+  echo "run-tests: device-harness lane → ${NDEVICE} files, isolated process (DOM + module-alias globals)"
 fi
 
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/neutron-runtests-XXXXXX")"
@@ -340,6 +379,26 @@ run_pglite_lane() {
   echo "pglite ${rc} ${NPGLITE} ${ran:-$NPGLITE}" >> "$WORK/results"
 }
 
+# Run the mobile device-harness files in their OWN process. They register a
+# happy-dom DOM and alias `react-native` for the whole process, which collides with
+# `landing`'s happy-dom tests (their `GlobalRegistrator.register()` throws when a DOM
+# already exists) and with other app tests' process-global `mock.module('react-native')`
+# fakes. Mixed into a general chunk that cost 68 failures across three CI shards in
+# unrelated packages. No retry budget: these are deterministic, not flaky.
+run_device_lane() {
+  local llog="$WORK/lane-device.log"
+  {
+    echo "==== device-harness isolation lane: ${NDEVICE} files (own process) ===="
+    NO_COLOR=1 "$BUN" test "${DEVICE_FILES[@]}" --timeout="$TIMEOUT" --max-concurrency="$CONCURRENCY" 2>&1
+  } >"$llog" 2>&1
+  local rc=$?
+  local ran; ran="$(LC_ALL=C grep -aoE 'across [0-9]+ file' "$llog" | LC_ALL=C grep -aoE '[0-9]+' | tail -1)"
+  cat "$llog"
+  # Sentinel idx 'device'; `ran` falls back to NDEVICE so the coverage audit still
+  # accounts for the lane files if bun's count line was eaten by log noise.
+  echo "device ${rc} ${NDEVICE} ${ran:-$NDEVICE}" >> "$WORK/results"
+}
+
 idx=0
 while [ "$idx" -lt "$NCHUNKS" ]; do
   if [ "$JOBS" -le 1 ]; then
@@ -371,6 +430,10 @@ if [ "$NPGLITE" -gt 0 ]; then
   run_pglite_lane
 fi
 
+if [ "$NDEVICE" -gt 0 ]; then
+  run_device_lane
+fi
+
 # --- 4. Aggregate + coverage audit -------------------------------------------
 FAILED_CHUNKS=0
 RAN_TOTAL=0
@@ -381,6 +444,8 @@ while read -r r_idx r_rc r_nfiles r_ran; do
     FAILED_CHUNKS=$(( FAILED_CHUNKS + 1 ))
     if [ "$r_idx" = "pglite" ]; then
       FAIL_LIST="${FAIL_LIST} PGLite-lane"
+    elif [ "$r_idx" = "device" ]; then
+      FAIL_LIST="${FAIL_LIST} device-lane"
     else
       FAIL_LIST="${FAIL_LIST} $(( r_idx + 1 ))"
     fi
@@ -393,9 +458,13 @@ if [ "$NPGLITE" -gt 0 ]; then
   LANES=$(( NCHUNKS + 1 ))
   LANE_DESC="${LANE_DESC} + PGLite lane"
 fi
+if [ "$NDEVICE" -gt 0 ]; then
+  LANES=$(( LANES + 1 ))
+  LANE_DESC="${LANE_DESC} + device lane"
+fi
 
 echo "---- run-tests coverage audit ----"
-echo "declared files: ${TOTAL}   bun-discovered: ${BUN_DISC:-n/a}   assigned here: ${SHARD_TOTAL}${SHARD_SPEC:+ (shard ${SHARD_SPEC})}   files executed: ${RAN_TOTAL} (${GEN_TOTAL} general + ${NPGLITE} PGLite)"
+echo "declared files: ${TOTAL}   bun-discovered: ${BUN_DISC:-n/a}   assigned here: ${SHARD_TOTAL}${SHARD_SPEC:+ (shard ${SHARD_SPEC})}   files executed: ${RAN_TOTAL} (${GEN_TOTAL} general + ${NPGLITE} PGLite + ${NDEVICE} device)"
 echo "lanes: ${LANE_DESC}   failed: ${FAILED_CHUNKS}${FAIL_LIST:+ (${FAIL_LIST# })}"
 if [ "$RAN_TOTAL" -lt "$SHARD_TOTAL" ]; then
   echo "run-tests: FATAL — executed ${RAN_TOTAL} files < ${SHARD_TOTAL} assigned (coverage hole)." >&2

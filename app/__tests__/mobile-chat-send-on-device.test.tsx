@@ -26,7 +26,7 @@
  * semantics, anything in the native binary. See `support/native-harness.ts`.
  */
 
-import { afterAll, afterEach, beforeEach, describe, expect, it } from 'bun:test';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'bun:test';
 import { createElement } from 'react';
 
 import {
@@ -72,6 +72,12 @@ afterEach(() => {
   restoreCrypto = null;
   clearSessionCache();
 });
+
+// Bun evaluates EVERY test file's top level before running ANY test, so the
+// top-level call above cannot be the only arming point: a sibling harness file's
+// `afterAll` reset would then run between this file's evaluation and its tests.
+// Re-arm immediately before this suite executes.
+beforeAll(installNativeHarness);
 
 afterAll(() => {
   __resetServerConfigForTests();

@@ -8,7 +8,7 @@
  * instead of turning the device suites into no-ops.
  */
 
-import { afterAll, describe, expect, it } from 'bun:test';
+import { afterAll, beforeAll, describe, expect, it } from 'bun:test';
 import { createElement } from 'react';
 
 import {
@@ -30,6 +30,12 @@ installNativeHarness();
 // asserting on. (Asserting the bare specifier would test another file's fake.)
 const RN = await import('./support/stubs/react-native');
 const { mountScreen } = await import('./support/mount');
+
+// Bun evaluates EVERY test file's top level before running ANY test, so the
+// top-level call above cannot be the only arming point: a sibling harness file's
+// `afterAll` reset would then run between this file's evaluation and its tests.
+// Re-arm immediately before this suite executes.
+beforeAll(installNativeHarness);
 
 afterAll(() => {
   resetHarnessGlobals();
