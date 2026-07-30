@@ -62,6 +62,7 @@ import { DropZoneOverlay } from './DropZoneOverlay';
 import { useUploadState } from '../lib/use-upload-state';
 import { classifyUploadKind } from '../lib/upload-client';
 import { selectDropFiles, shouldGateUpload } from '../lib/upload-gate';
+import { BUBBLE_MAX_WIDTH } from '../lib/chat-bubble-metrics';
 
 /** Quick-reaction palette the long-press tray offers (Track B Phase 4). */
 const QUICK_REACTIONS = ['👍', '❤️', '😂', '🎉', '🙏', '🔥'] as const;
@@ -520,8 +521,13 @@ function ChatRow({
   if (row.kind === 'streaming') {
     return (
       <View style={[styles.bubbleWrap, styles.agentWrap]}>
-        <View style={[styles.bubble, styles.agentBubble]}>
-          <Text style={styles.agentText}>{row.body}</Text>
+        {/* Through `bubbleColumn` like every other row: this bubble BECOMES a
+            settled one, so rendering it outside the capped column made it snap
+            narrower the moment the stream finished. */}
+        <View style={styles.bubbleColumn}>
+          <View style={[styles.bubble, styles.agentBubble]}>
+            <Text style={styles.agentText}>{row.body}</Text>
+          </View>
         </View>
       </View>
     );
@@ -748,8 +754,10 @@ function ChatRow({
 function TypingIndicator(): React.JSX.Element {
   return (
     <View style={[styles.bubbleWrap, styles.agentWrap]}>
-      <View style={[styles.bubble, styles.agentBubble, styles.typingBubble]}>
-        <Text style={styles.typingText}>•••</Text>
+      <View style={styles.bubbleColumn}>
+        <View style={[styles.bubble, styles.agentBubble, styles.typingBubble]}>
+          <Text style={styles.typingText}>•••</Text>
+        </View>
       </View>
     </View>
   );
@@ -819,7 +827,8 @@ const styles = StyleSheet.create({
   userWrap: { justifyContent: 'flex-end' },
   agentWrap: { justifyContent: 'flex-start' },
   bubble: {
-    maxWidth: '82%',
+    // NO maxWidth HERE. `bubbleColumn` owns the ONE cap; a second percentage cap
+    // in this chain multiplies with it (see `lib/chat-bubble-metrics.ts`).
     paddingHorizontal: SPACING.md,
     paddingVertical: SPACING.sm,
     borderRadius: 16,
@@ -891,7 +900,9 @@ const styles = StyleSheet.create({
   editInput: { padding: 0, margin: 0, minWidth: 160 },
   trayAction: { ...TYPOGRAPHY.caption, color: THEME.text_primary, fontWeight: '600' },
   trayActionDanger: { color: THEME.warning },
-  bubbleColumn: { maxWidth: '82%' },
+  // THE single bubble width cap for every row on this surface. See
+  // `lib/chat-bubble-metrics.ts` for why it is 90% and why it lives in one place.
+  bubbleColumn: { maxWidth: BUBBLE_MAX_WIDTH },
   reactionRow: { flexDirection: 'row', flexWrap: 'wrap', gap: SPACING.xs, marginTop: SPACING.xs },
   reactionTray: {
     flexDirection: 'row',

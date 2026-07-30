@@ -107,3 +107,31 @@ export function projectStateReducer(
       return state;
   }
 }
+
+/**
+ * Cross-scope staleness guard (mobile defect, 2026-07-29).
+ *
+ * The provider is mounted ONCE for the whole `/projects/[id]` layout and is
+ * reused across `project_id` changes (keying it would unmount the rail + header,
+ * which is the very teardown we are fixing). So on the render where the route
+ * flips to a new project, this reducer still holds the PREVIOUS scope's result —
+ * and `LOAD_START` deliberately preserves `project` so a `refresh()` does not
+ * blank the UI. Handing that through unchanged means:
+ *
+ *   - project A -> project B renders B's shell with A's NAME and A's members, and
+ *   - General -> a real project renders "Project not found", because the 404 the
+ *     provider collected for `getSettings('general')` is still sitting in `error`.
+ *
+ * Both are wrong-data-for-this-scope, not merely stale. Everything this reducer
+ * holds describes exactly one scope, so when the requested scope is not the
+ * loaded one the only truthful answer is "nothing known yet, and a fetch is
+ * coming" — which is what the content pane renders as a spinner.
+ */
+export function scopedProjectState(
+  state: ProjectState,
+  requested_scope: string,
+  loaded_scope: string | null,
+): ProjectState {
+  if (loaded_scope === requested_scope) return state;
+  return { loading: true, project: null, error: null, pending_privacy: null };
+}
