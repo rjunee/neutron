@@ -1077,6 +1077,43 @@ so the composer stays the single source of truth. A minimal server change makes
 rather than waiting on the global diff-gate. Subscriber:
 `app/lib/projects-rail-live.ts` (mirrors `work-board-live.ts`, injectable socket).
 
+**The chrome is PERSISTENT — it does not unmount on a project switch (2026-07-29).**
+The rail, the header and the tab bar are mounted for the whole life of the
+`/projects/[id]` layout; only the **content pane** has a loading state. `ProjectShell`
+therefore returns UI from exactly ONE place and has no early return above the
+chrome. Until 2026-07-29 it gated the whole shell on the settings fetch
+(`if (project === null) { if (loading) return <spinner/> … }`), so every rail tap
+tore the rail, header and tab bar down and rebuilt them when the fetch resolved —
+which is what Ryan felt on device as flicker and lag, not slow rendering.
+
+Three pieces hold that invariant:
+
+- **`app/lib/project-shell-content.ts`** — the content-pane decision as a pure
+  function (`ready` / `loading` / `not_found`), so it is assertable the way
+  `entry-route.ts` is. The **error**, not `loading`, decides `not_found`: on the
+  render where the route flips the fetch effect has not run yet, so `loading` is
+  still false while `project` is already null for the new scope, and the old gate
+  rendered "Project not found" in exactly that gap. `projectStateReducer` attaches
+  an error to every `LOAD_FAIL`, so a genuinely absent project always reaches the
+  not-found pane — which now renders INSIDE the chrome, leaving the rail available
+  to tap out of the dead end.
+- **`scopedProjectState`** (`app/lib/project-state-reducer.ts`, applied in
+  `project-state.tsx` against a `loadedScope` marker) — the provider is reused
+  across `project_id` changes (keying it would unmount the very chrome this fixes),
+  and `LOAD_START` deliberately preserves `project` so a `refresh()` does not blank
+  the UI. Together that meant project A → B rendered B's shell under **A's name**,
+  and General → a real project flashed "Project not found" from the 404 collected
+  for `getSettings('general')`. Data whose scope is not the requested one now reads
+  as "nothing known yet, fetch in flight".
+- **`SlotFader` takes a `scopeId`** and re-baselines without animating when it
+  changes. The fade is for tab switches within a project; a rail tap travels
+  `/projects/<id>` → `/projects/<id>/chat`, so keying it on the route leaf alone
+  fired two opacity dips per switch on top of the content pane's own spinner.
+
+While the doc is in flight the header names the project from the already-loaded
+rail list (`scopeName`), and the Invite pill is suppressed — the predicate reads
+`billing_mode` + `members` and there is no honest answer without them.
+
 ### Web client consumption (WAVE 3 PR-4)
 
 > **P0b (2026-06-26) — React is the ONLY web chat client.** The vanilla
@@ -3799,6 +3836,19 @@ indicator. No feature flags — one live path.
   affordance) plus the ported input/upload pipeline (InputComposer + UploadModal +
   web drag-drop + ZIP/image upload). Slash-command answers (`chat_command_result`)
   render as agent messages on this surface too.
+- **Bubble width: ONE cap, in one place (`app/lib/chat-bubble-metrics.ts`, 2026-07-29).**
+  `bubbleColumn` carries `maxWidth: BUBBLE_MAX_WIDTH` (90%) and nothing else in the
+  chain does — every row, including the streaming bubble and the typing indicator,
+  renders through that column. Two percentage caps in one chain **multiply** in Yoga:
+  a node's `availableInnerWidth` is clamped by its own resolved `maxWidth` and that
+  clamped value becomes the child's `ownerWidth` for percentage resolution
+  (`react-native/ReactCommon/yoga/.../CalculateLayout.cpp:519-527`, `:1397-1404`), so
+  the shipped `bubbleColumn` 82% wrapping `bubble` 82% was an effective 67% and a
+  reply wrapped after ~5 words on device. 90% rather than the phone-chat-typical ~78%
+  because `ProjectRail` is a permanent 72pt column and the transcript adds a
+  `SPACING.md` gutter each side, so the percentage applies to a row (297pt on a 393pt
+  phone) that is already narrower than an iMessage bubble is allowed to be; 90% keeps
+  a ~30pt far-side gutter, which is what carries the left/right speaker distinction.
 - **Verified on a real instance.** `open/__tests__/open-app-ws-durable-chatlog.test.ts`
   boots the REAL Open composition over `Bun.serve`, opens `/ws/app/chat`, and
   asserts #1–#6 on real (mocked-substrate) turns: echo+reply carry `seq` and

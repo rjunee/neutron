@@ -32,6 +32,7 @@ import {
   useMemo,
   useReducer,
   useRef,
+  useState,
   type PropsWithChildren,
 } from 'react';
 
@@ -39,6 +40,7 @@ import { loadAppConfig } from './config';
 import {
   EMPTY_PROJECT_STATE,
   projectStateReducer,
+  scopedProjectState,
   type ProjectState,
   type ProjectStateError,
 } from './project-state-reducer';
@@ -93,7 +95,16 @@ export function ProjectStateProvider({
   children,
 }: ProjectStateProviderProps) {
   const { user } = useAuthSession();
-  const [state, dispatch] = useReducer(projectStateReducer, EMPTY_PROJECT_STATE);
+  const [rawState, dispatch] = useReducer(projectStateReducer, EMPTY_PROJECT_STATE);
+  // Which `project_id` the reducer's contents describe. The provider is reused
+  // across scope changes (see `scopedProjectState`), so without this the shell
+  // renders the PREVIOUS project's name — or the previous scope's 404 — for the
+  // frames before the new fetch lands.
+  const [loadedScope, setLoadedScope] = useState<string | null>(null);
+  const state = useMemo(
+    () => scopedProjectState(rawState, project_id, loadedScope),
+    [rawState, project_id, loadedScope],
+  );
   const cancelRef = useRef<(() => void) | null>(null);
 
   const client = useMemo<ProjectsClient | null>(() => {
@@ -115,9 +126,13 @@ export function ProjectStateProvider({
     try {
       const project = await client.getSettings(project_id);
       if (cancelled) return;
+      // Stamp the scope in the SAME tick as the result so a render can never see
+      // this scope's doc while `loadedScope` still names the previous one.
+      setLoadedScope(project_id);
       dispatch({ type: 'LOAD_OK', project });
     } catch (err) {
       if (cancelled) return;
+      setLoadedScope(project_id);
       dispatch({ type: 'LOAD_FAIL', error: toStateError(err) });
     }
   }, [client, project_id]);

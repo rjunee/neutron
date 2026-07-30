@@ -89,6 +89,7 @@ import {
   type Project,
 } from '../../../lib/projects';
 import { startProjectsRailLive, type RailProject } from '../../../lib/projects-rail-live';
+import { projectShellContent } from '../../../lib/project-shell-content';
 import { ProjectStateProvider, useProjectState } from '../../../lib/project-state';
 import type { ProjectSettings } from '../../../lib/projects-client';
 import { useAuthSession } from '../../../lib/session';
@@ -179,7 +180,7 @@ function ProjectShell({ project_id }: { project_id: string }) {
     [pathname],
   );
   const { user } = useAuthSession();
-  const { project: fetchedProject, loading, error, generateInvite } = useProjectState();
+  const { project: fetchedProject, error, generateInvite } = useProjectState();
   // General is the NO-PROJECT scope: there is no settings row to fetch, no
   // members, no privacy mode and no Core tabs. Without this the shell 404s on
   // `getSettings('general')` and renders "project not found" for the scope that
@@ -355,26 +356,18 @@ function ProjectShell({ project_id }: { project_id: string }) {
     if (persistable !== null) void lastTabStorage().set(project_id, persistable);
   }, [project_id, slotKey]);
 
-  // One gate, so `project` narrows to non-null for the rest of the render. For
-  // General this can never fire (the synthetic scope above is never null); for a
-  // real project it covers all three prior states — still loading, load failed,
-  // and loaded-but-absent.
-  if (project === null) {
-    if (loading) {
-      return (
-        <View style={[styles.container, styles.centered]}>
-          <ActivityIndicator color={THEME.text_secondary} />
-        </View>
-      );
-    }
-    return (
-      <ProjectNotFoundFallback
-        id={project_id}
-        onBack={() => router.replace(GENERAL_CHAT_ROUTE as Parameters<typeof router.replace>[0])}
-        {...(error !== null ? { message: error.message } : {})}
-      />
-    );
-  }
+  // What the CONTENT PANE shows. There is NO early return here on purpose: the
+  // rail, header and tab bar are persistent chrome and must stay mounted across a
+  // project switch. Returning a bare spinner from the shell (what this file used
+  // to do while the new scope's settings doc was in flight) tore all three down
+  // and rebuilt them on every rail tap — that teardown, not slow rendering, is
+  // why switching projects flickered. Rationale + the loading/not-found rules
+  // live in `lib/project-shell-content.ts`.
+  const content = projectShellContent({
+    is_general: isGeneral,
+    has_project: project !== null,
+    error,
+  });
 
   const handleTabSelect = (key: string): void => {
     if (key === activeTab) return;
@@ -383,11 +376,21 @@ function ProjectShell({ project_id }: { project_id: string }) {
     router.replace(target.route);
   };
 
+  // The name the persistent chrome shows. `project` is null for the frames where
+  // this scope's settings doc is still in flight, and the header must NOT
+  // disappear (or show the previous project's name) in that window — so fall back
+  // to the name the already-loaded rail list carries for this id. Both sources are
+  // the real name; '' is the honest last resort, never a fabricated placeholder
+  // (ISSUES #393).
+  const railEntry = (railProjects ?? []).find((p) => p.id === project_id);
+  const scopeName = project?.name ?? railEntry?.name ?? '';
+  const scopeEmoji = (project?.emoji ?? railEntry?.emoji ?? '').length > 0
+    ? (project?.emoji ?? railEntry?.emoji ?? '')
+    : '📁';
+
   // Rail view list: the navigable (solo) projects, most-recent-first, mapped to
   // the minimal rail shape. Seed with the current project so the rail is never
-  // empty on first paint (before the HTTP list resolves). Computed inline (not a
-  // hook) — this runs only past the early returns above, where `project` is
-  // guaranteed non-null.
+  // empty on first paint (before the HTTP list resolves).
   const railList: RailProjectView[] = (() => {
     const navigable = (railProjects ?? []).filter((p) => projectCardInteractivity(p).navigable);
     const views: RailProjectView[] = sortProjectsByActivity(navigable).map((p) => ({
@@ -400,8 +403,8 @@ function ProjectShell({ project_id }: { project_id: string }) {
     if (!views.some((v) => v.id === project_id)) {
       views.unshift({
         id: project_id,
-        name: project.name,
-        emoji: project.emoji.length > 0 ? project.emoji : '📁',
+        name: scopeName,
+        emoji: scopeEmoji,
         unread_count: 0,
         origin_instance: 'local',
       });
@@ -477,12 +480,35 @@ function ProjectShell({ project_id }: { project_id: string }) {
   // `not_group`/`workspace_unavailable`; surfacing Invite there is a
   // guaranteed dead-end (Argus r1 BLOCKING). The predicate mirrors the
   // gateway resolver + handler authz; see `lib/invite-helpers.ts`.
-  const canInvite = canInviteToProject(project, user?.id ?? null);
+  // Suppressed until this scope's doc has actually loaded: the predicate reads
+  // `billing_mode` + `members`, and there is no honest answer without them.
+  const canInvite = project !== null && canInviteToProject(project, user?.id ?? null);
+
+  // The content pane. Mounted inside the chrome in EVERY state — a scope whose
+  // settings doc has not landed gets a spinner HERE, and one that is genuinely
+  // absent gets the not-found pane HERE, so the rail stays available to tap out
+  // of the dead end instead of the whole shell being replaced.
+  const contentPane =
+    content.kind === 'ready' ? (
+      <SlotFader keyId={slotKey} scopeId={project_id}>
+        <Slot />
+      </SlotFader>
+    ) : content.kind === 'loading' ? (
+      <View style={[styles.contentFill, styles.centered]} testID="project-content-loading">
+        <ActivityIndicator color={THEME.text_secondary} />
+      </View>
+    ) : (
+      <ProjectNotFoundFallback
+        id={project_id}
+        onBack={() => router.replace(GENERAL_CHAT_ROUTE as Parameters<typeof router.replace>[0])}
+        {...(content.message !== undefined ? { message: content.message } : {})}
+      />
+    );
 
   return (
     <View style={styles.container}>
       <ProjectHeader
-        name={project.name}
+        name={scopeName}
         // The left slot is the APP-level entry (server editor + Admin + sign
         // out), not a back arrow: there is no list to go back to, and this
         // header is now the only place either route is reachable from (#385).
@@ -498,11 +524,7 @@ function ProjectShell({ project_id }: { project_id: string }) {
             tabs={displayTabs}
             badges={tabBadges}
           />
-          <View style={styles.wideContent}>
-            <SlotFader keyId={slotKey}>
-              <Slot />
-            </SlotFader>
-          </View>
+          <View style={styles.wideContent}>{contentPane}</View>
         </View>
       ) : (
         // Mobile: Telegram-folder rail on the left, seated tabs + content on the
@@ -530,11 +552,7 @@ function ProjectShell({ project_id }: { project_id: string }) {
               tabs={displayTabs}
               badges={tabBadges}
             />
-            <View style={styles.narrowContent}>
-              <SlotFader keyId={slotKey}>
-                <Slot />
-              </SlotFader>
-            </View>
+            <View style={styles.narrowContent}>{contentPane}</View>
           </View>
         </View>
       )}
@@ -560,7 +578,7 @@ function ProjectShell({ project_id }: { project_id: string }) {
       />
       <InviteModal
         open={inviteOpen}
-        projectName={project.name}
+        projectName={scopeName}
         submitting={inviteSubmitting}
         result={inviteResult}
         errorText={inviteError}
@@ -602,10 +620,26 @@ function inviteErrorCopy(err: unknown): string {
  * when the active tab changes (1.0 → 0.4 → 1.0 over MOTION.fast). No
  * slide. Disabled under reduce-motion. The `keyId` prop drives the
  * fade — anything that re-renders with a new keyId triggers the dip.
+ *
+ * `scopeId` suppresses the dip across a PROJECT switch. `keyId` is the route
+ * leaf, and a rail tap moves through `/projects/<id>` → `/projects/<id>/chat`,
+ * so a switch changed the leaf twice and fired TWO opacity dips on top of the
+ * content pane's own loading state — a visible flicker on the one interaction
+ * that has to feel instant. The dip is for tab switches WITHIN a project; a
+ * scope change re-baselines without animating.
  */
-function SlotFader({ keyId, children }: { keyId: string; children: React.ReactNode }) {
+function SlotFader({
+  keyId,
+  scopeId,
+  children,
+}: {
+  keyId: string;
+  scopeId: string;
+  children: React.ReactNode;
+}) {
   const opacity = useRef(new Animated.Value(1)).current;
   const lastKey = useRef<string>(keyId);
+  const lastScope = useRef<string>(scopeId);
   const [reduceMotion, setReduceMotion] = useState(false);
 
   useEffect(() => {
@@ -623,6 +657,14 @@ function SlotFader({ keyId, children }: { keyId: string; children: React.ReactNo
   }, []);
 
   useEffect(() => {
+    const scopeChanged = lastScope.current !== scopeId;
+    lastScope.current = scopeId;
+    if (scopeChanged) {
+      // A project switch: adopt the new leaf silently, full opacity, no dip.
+      lastKey.current = keyId;
+      opacity.setValue(1);
+      return;
+    }
     if (lastKey.current === keyId) return;
     lastKey.current = keyId;
     if (reduceMotion) {
@@ -643,7 +685,7 @@ function SlotFader({ keyId, children }: { keyId: string; children: React.ReactNo
         useNativeDriver: true,
       }),
     ]).start();
-  }, [keyId, opacity, reduceMotion]);
+  }, [keyId, scopeId, opacity, reduceMotion]);
 
   return <Animated.View style={[styles.fader, { opacity }]}>{children}</Animated.View>;
 }
@@ -659,7 +701,11 @@ function ProjectNotFoundFallback({
 }) {
   const safeId = typeof id === 'string' ? id : String(id ?? '');
   return (
-    <View style={[styles.container, styles.centered]}>
+    // `contentFill`, not `container`: this pane now renders INSIDE the persistent
+    // chrome for a missing project (so the rail is still there to tap out of it),
+    // and the outer full-screen use (`ProjectLayout`, no scope id at all) is
+    // centred either way, so it does not need the shell's status-bar padding.
+    <View style={[styles.contentFill, styles.centered]}>
       <Text style={styles.errorTitle}>Project not found</Text>
       <Text style={styles.errorBody}>
         {message ??
@@ -691,6 +737,9 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     paddingHorizontal: SPACING.xxl,
   },
+  // A pane that fills whatever region it is placed in — the content pane inside
+  // the chrome, or the whole screen when there is no scope to build chrome for.
+  contentFill: { flex: 1, backgroundColor: THEME.background },
   wideBody: {
     flex: 1,
     flexDirection: 'row',
