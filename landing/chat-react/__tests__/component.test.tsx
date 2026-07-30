@@ -1251,14 +1251,55 @@ describe('rail helpers (M1 UX redesign — pure)', () => {
     expect(formatRailTime('not-a-date', now)).toBe('')
   })
 
-  it('railDotClass: working→work, attention→attention, idle/undefined→none, General→none', async () => {
+  // BEHAVIOUR CHANGE (SPEC § WAVE 3.5), not a relaxed assertion. This used to
+  // assert `null` for idle and for General. The dot is now the Activity Inspector's
+  // entry point and the acceptance requires it to stay clickable when idle, because
+  // an idle session must be distinguishable from a wedged one — a dot that vanishes
+  // at rest cannot be clicked to find out which you are looking at. So the function
+  // is now TOTAL. The one piece of the old contract that survives: General never
+  // shows ATTENTION (it has no bound runs) — it degrades to idle.
+  it('railDotClass is TOTAL: working→work, attention→attention, otherwise idle', async () => {
     const { railDotClass } = await import('../ChatApp.tsx')
     expect(railDotClass('working', false)).toBe('car-rail-dot-work')
     expect(railDotClass('attention', false)).toBe('car-rail-dot-attention')
-    expect(railDotClass('idle', false)).toBeNull()
-    expect(railDotClass(undefined, false)).toBeNull()
-    // General never shows a dot even if a stray activity slips through.
-    expect(railDotClass('working', true)).toBeNull()
+    expect(railDotClass('idle', false)).toBe('car-rail-dot-idle')
+    expect(railDotClass(undefined, false)).toBe('car-rail-dot-idle')
+    // General is a real chat scope with its own warm session, so it IS inspectable.
+    expect(railDotClass('working', true)).toBe('car-rail-dot-work')
+    expect(railDotClass('idle', true)).toBe('car-rail-dot-idle')
+    // ...but General's attention degrades to idle (no bound runs to stall).
+    expect(railDotClass('attention', true)).toBe('car-rail-dot-idle')
+    // Never null, on any input — every rail row gets a clickable entry point.
+    for (const a of ['idle', 'working', 'attention', undefined] as const) {
+      for (const g of [true, false]) expect(railDotClass(a, g)).not.toBeNull()
+    }
+  })
+
+  // PARITY with mobile `railDotKind` (`app/lib/project-rail-view.ts`). The two
+  // implementations are deliberate mirrors, but the layering gate forbids importing
+  // across the landing → app package boundary, so parity is pinned by asserting the
+  // SAME truth table on both sides. The identical table lives in
+  // `app/__tests__/project-rail-view.test.ts`; change one and you must change the
+  // other, which is exactly the drift this makes visible.
+  it('matches the shared rail-dot truth table (mobile asserts the same one)', async () => {
+    const { railDotClass } = await import('../ChatApp.tsx')
+    const TABLE: Array<[
+      'idle' | 'working' | 'attention' | undefined,
+      boolean,
+      'work' | 'attention' | 'idle',
+    ]> = [
+      ['working', false, 'work'],
+      ['working', true, 'work'],
+      ['attention', false, 'attention'],
+      ['attention', true, 'idle'],
+      ['idle', false, 'idle'],
+      ['idle', true, 'idle'],
+      [undefined, false, 'idle'],
+      [undefined, true, 'idle'],
+    ]
+    for (const [activity, isGeneral, expected] of TABLE) {
+      expect(railDotClass(activity, isGeneral)).toBe(`car-rail-dot-${expected}`)
+    }
   })
 
   it('railEmojiFor: server emoji wins, generic fallback otherwise', async () => {
@@ -1346,11 +1387,21 @@ describe('TopicRail 2-line rows + branding (M1 UX redesign)', () => {
     const rows = Array.from(container.querySelectorAll('.car-rail-item'))
     // General + 2 projects.
     expect(rows.length).toBe(3)
-    // General (row 0) has no work-activity dot.
-    expect(rows[0]!.querySelector('.car-rail-dot')).toBeNull()
+    // BEHAVIOUR CHANGE (SPEC § WAVE 3.5): this used to assert General had NO dot.
+    // Every row now carries one, because the dot is the Activity Inspector's entry
+    // point and must stay clickable at rest — General included (it is a real chat
+    // scope with its own warm session). General with no activity gets the quiet
+    // `idle` dot.
+    expect(rows[0]!.querySelector('.car-rail-dot-idle')).not.toBeNull()
     // p1 pulses a work dot; p2 shows the static attention dot.
     expect(rows[1]!.querySelector('.car-rail-dot-work')).not.toBeNull()
     expect(rows[2]!.querySelector('.car-rail-dot-attention')).not.toBeNull()
+    // Every dot is a real, labelled control (not `aria-hidden` decoration).
+    for (const row of rows) {
+      const dot = row.querySelector('.car-rail-dot')!
+      expect(dot.getAttribute('role')).toBe('button')
+      expect(dot.getAttribute('aria-label')).toContain('Show activity for')
+    }
     // Names + timestamps on line 1.
     expect(rows[1]!.querySelector('.car-rail-name')!.textContent).toBe('Neutron')
     expect(rows[1]!.querySelector('.car-rail-time')!.textContent).toBe('09:05')

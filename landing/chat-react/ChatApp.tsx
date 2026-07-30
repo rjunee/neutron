@@ -1024,17 +1024,29 @@ export function formatDayDivider(ms: number, now: Date): string {
   return `${wd} ${mon} ${d.getDate()}`
 }
 
-/** The rail avatar's work-activity dot modifier class (or null for no dot):
- *  `working` → pulsing --work, `attention` → static --attention, else none.
- *  General never shows a dot (it has no bound runs). */
+/**
+ * The rail avatar's work-activity dot modifier class: `working` → pulsing --work,
+ * `attention` → static --attention, otherwise the dim static `idle` dot.
+ *
+ * ALWAYS RETURNS A CLASS — never null (SPEC § WAVE 3.5). The dot is now the ENTRY
+ * POINT to the Activity Inspector, and the acceptance is explicit that it stays
+ * clickable when idle, because an idle session must be distinguishable from a
+ * wedged one. A dot that vanishes at rest cannot be clicked to find out which of
+ * the two you are looking at, so the previous `idle → null` (and
+ * `isGeneral → null`) behaviour is deliberately replaced by a dim idle dot.
+ *
+ * General gets one too: it is a real chat scope with its own warm session, so it
+ * is inspectable like any project. `isGeneral` is retained in the signature
+ * because General never shows the ATTENTION state (it has no bound runs) — a
+ * distinction the caller should not have to know.
+ */
 export function railDotClass(
   activity: 'idle' | 'working' | 'attention' | undefined,
   isGeneral: boolean,
-): 'car-rail-dot-work' | 'car-rail-dot-attention' | null {
-  if (isGeneral) return null
+): 'car-rail-dot-work' | 'car-rail-dot-attention' | 'car-rail-dot-idle' {
   if (activity === 'working') return 'car-rail-dot-work'
-  if (activity === 'attention') return 'car-rail-dot-attention'
-  return null
+  if (activity === 'attention' && !isGeneral) return 'car-rail-dot-attention'
+  return 'car-rail-dot-idle'
 }
 
 /** The ⚛ atom mark (accent-lit): 3 rotated ellipses + a center dot. Inline SVG so
@@ -1108,6 +1120,7 @@ function RailItem({
   narrow,
   now,
   onClick,
+  onOpenActivity,
 }: {
   emoji: string
   label: string
@@ -1121,6 +1134,8 @@ function RailItem({
   narrow: boolean
   now: Date
   onClick: () => void
+  /** Open the Activity Inspector for this scope (the dot's action). */
+  onOpenActivity: () => void
 }): React.JSX.Element {
   const dotClass = railDotClass(activity, isGeneral)
   const timeText = formatRailTime(lastActivityAt, now)
@@ -1149,9 +1164,35 @@ function RailItem({
         <span className="car-rail-emoji" aria-hidden="true">
           {emoji}
         </span>
-        {dotClass !== null ? (
-          <span className={`car-rail-dot ${dotClass}`} aria-hidden="true" />
-        ) : null}
+        {/* CLICKABLE ACTIVITY DOT — the Activity Inspector's entry point (SPEC §
+            WAVE 3.5; Ryan-locked: no new icon is added, the existing dot becomes
+            the affordance).
+
+            A `<span role="button">` rather than a real `<button>`: this sits inside
+            the row's own `<button className="car-rail-item">`, and a nested
+            <button> is invalid HTML. `stopPropagation` keeps a dot tap from also
+            selecting the topic, and the keyboard handler gives it real button
+            semantics. No longer `aria-hidden` — it is now an interactive control
+            and must be announced. */}
+        <span
+          className={`car-rail-dot ${dotClass}`}
+          role="button"
+          tabIndex={0}
+          aria-label={`Show activity for ${label}`}
+          title={`Show activity for ${label}`}
+          data-testid="rail-dot"
+          onClick={(e) => {
+            e.stopPropagation()
+            e.preventDefault()
+            onOpenActivity()
+          }}
+          onKeyDown={(e) => {
+            if (e.key !== 'Enter' && e.key !== ' ') return
+            e.stopPropagation()
+            e.preventDefault()
+            onOpenActivity()
+          }}
+        />
         {narrow && unread > 0 ? (
           <span className="car-rail-count" aria-hidden="true">
             {countText}
@@ -1185,6 +1226,7 @@ export function TopicRail({
   creating,
   narrow: narrowOverride,
   now,
+  onOpenActivity,
 }: {
   projects: ProjectTab[]
   activeId: string | null
@@ -1192,6 +1234,10 @@ export function TopicRail({
   /** POSTs the new project; resolves to an error string to show inline, or null on success. */
   onCreate: (name: string) => Promise<string | null>
   creating: boolean
+  /** Open the Activity Inspector for a scope (null ⇒ General). Fired by the
+   *  clickable activity dot on each rail row (SPEC § WAVE 3.5). Optional so the
+   *  many existing TopicRail render tests construct unchanged. */
+  onOpenActivity?: (id: string | null) => void
   /** Test override for the narrow (icon-rail) branch; the live app derives it
    *  from the viewport via `useMediaQuery('(max-width: 1200px)')`. */
   narrow?: boolean
@@ -1201,6 +1247,10 @@ export function TopicRail({
   const autoNarrow = useMediaQuery('(max-width: 1200px)')
   const narrow = narrowOverride ?? autoNarrow
   const nowDate = now ?? new Date()
+  // Default to a no-op so a rail rendered without the inspector wired (tests, and
+  // any embedding that has no panel) still renders a dot that does nothing rather
+  // than throwing on click.
+  const openActivity = onOpenActivity ?? ((): void => {})
   // Inline create-project input (mirrors mobile `app/app/projects`): the header
   // "+" toggles a name field with Enter→submit / Esc→cancel, replacing the
   // native window.prompt. `createError` renders the failure inline instead of a
@@ -1328,6 +1378,7 @@ export function TopicRail({
           narrow={effectiveNarrow}
           now={nowDate}
           onClick={() => onSelect(null)}
+          onOpenActivity={() => openActivity(null)}
         />
         {projects.map((p) => (
           <RailItem
@@ -1347,6 +1398,7 @@ export function TopicRail({
             narrow={effectiveNarrow}
             now={nowDate}
             onClick={() => onSelect(p.id)}
+            onOpenActivity={() => openActivity(p.id)}
           />
         ))}
       </div>

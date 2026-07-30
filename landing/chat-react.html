@@ -859,7 +859,94 @@
      STATIC amber (`--attention`) reserved for a genuine stall/failed-not-done. */
   .car-rail-dot-work { background: var(--phase-build-fg); animation: cwb-pulse 2s ease-in-out infinite; }
   .car-rail-dot-attention { background: var(--attention); }
-  @media (prefers-reduced-motion: reduce) { .car-rail-dot-work { animation: none; } }
+  /* SPEC § WAVE 3.5 — the IDLE dot. Present and clickable at rest (it is the
+     Activity Inspector's entry point, and the acceptance requires an idle session
+     to be distinguishable from a wedged one), but visually quiet: a hollow muted
+     ring, no fill, no pulse. It must read as "nothing happening", never as state. */
+  .car-rail-dot-idle {
+    background: transparent;
+    border: 1.5px solid var(--muted);
+    opacity: .5;
+  }
+  /* The dot is an interactive control now — give it a real hit target and a
+     visible focus ring. The 8px dot is far below the ~24px minimum, so the
+     ::after pad widens the tappable area without changing the painted size. */
+  .car-rail-dot[role="button"] { cursor: pointer; }
+  .car-rail-dot[role="button"]::after {
+    content: ''; position: absolute; inset: -8px; border-radius: 50%;
+  }
+  .car-rail-dot[role="button"]:hover { opacity: 1; transform: scale(1.25); }
+  .car-rail-dot[role="button"]:focus-visible {
+    outline: 2px solid var(--phase-build-fg); outline-offset: 2px; opacity: 1;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .car-rail-dot-work { animation: none; }
+    .car-rail-dot[role="button"]:hover { transform: none; }
+  }
+
+  /* ── ACTIVITY INSPECTOR panel (SPEC § WAVE 3.5) ───────────────────────────
+     The tmux replacement, opened by the rail's activity dot. A centred overlay
+     (NOT the `.car-plans` grid column) so it can sit above the rail + tab band
+     from any tab, and so opening it never reflows the chat the owner is reading.
+     Monospaced rows: this is a machine-output tail, and proportional text makes a
+     scanning eye work harder than it should. */
+  .car-actin-backdrop {
+    position: fixed; inset: 0; z-index: 60;
+    background: rgba(0,0,0,.45);
+    display: flex; align-items: center; justify-content: center;
+    padding: 24px;
+  }
+  .car-actin {
+    display: flex; flex-direction: column;
+    width: min(720px, 100%); max-height: min(640px, 100%);
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 12px; overflow: hidden;
+    box-shadow: 0 24px 64px rgba(0,0,0,.4);
+  }
+  .car-actin-head {
+    display: flex; align-items: center; justify-content: space-between; gap: 12px;
+    padding: 12px 14px; border-bottom: 1px solid var(--border);
+  }
+  .car-actin-title { display: flex; align-items: baseline; gap: 10px; min-width: 0; }
+  .car-actin-scope { font-weight: 650; }
+  .car-actin-state { font-size: 12.5px; }
+  /* The verdict's colour matches the rail dot's language so the panel and the dot
+     never disagree: build-blue = working, amber = stalled, red = not responding. */
+  .car-actin-state-working { color: var(--phase-build-fg); }
+  .car-actin-state-wedged { color: var(--attention); }
+  .car-actin-state-dead { color: var(--phase-failed-fg, #ff8080); }
+  .car-actin-state-idle { color: var(--muted); }
+  .car-actin-close {
+    appearance: none; background: transparent; border: 0; color: var(--muted);
+    cursor: pointer; font-size: 15px; line-height: 1; padding: 4px 6px;
+  }
+  .car-actin-close:hover { color: var(--text, inherit); }
+  /* The two clocks — the actual answer to "hung or working?". Given their own
+     band above the list so they are readable without scrolling. */
+  .car-actin-clocks {
+    display: flex; gap: 24px; padding: 10px 14px;
+    border-bottom: 1px solid var(--border);
+    font-size: 12.5px;
+  }
+  .car-actin-clock { display: flex; flex-direction: column; gap: 2px; }
+  .car-actin-clock-k { color: var(--muted); font-size: 11px; letter-spacing: .02em; }
+  .car-actin-clock-v { font-variant-numeric: tabular-nums; }
+  .car-actin-list {
+    flex: 1 1 auto; overflow-y: auto; padding: 8px 14px 14px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 12px; line-height: 1.55;
+  }
+  .car-actin-row { display: flex; gap: 8px; align-items: baseline; }
+  .car-actin-t { color: var(--muted); font-variant-numeric: tabular-nums; flex: 0 0 auto; }
+  .car-actin-g { flex: 0 0 1.2em; text-align: center; }
+  .car-actin-l { flex: 0 0 auto; font-weight: 600; }
+  .car-actin-d { color: var(--muted); overflow-wrap: anywhere; min-width: 0; }
+  /* A synthetic keepalive is NOT work — render it as a near-invisible tick so it
+     never reads as progress (that misreading is exactly ISSUES #386). */
+  .car-actin-row-synthetic { opacity: .38; }
+  .car-actin-row-error .car-actin-l,
+  .car-actin-row-error .car-actin-d { color: var(--phase-failed-fg, #ff8080); }
+  .car-actin-empty { color: var(--muted); font-size: 12.5px; }
   .car-rail-meta { min-width: 0; }
   .car-rail-line1 { display: flex; align-items: baseline; gap: 8px; }
   .car-rail-name {

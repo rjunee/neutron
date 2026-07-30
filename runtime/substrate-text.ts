@@ -107,6 +107,21 @@ export interface DrainOptions {
   /** Message when `signal` was ALREADY aborted at entry (before dispatch).
    *  Defaults to `abortMessage`. */
   abortBeforeDispatchMessage?: string
+  /**
+   * ACTIVITY-INSPECTOR TEE. Invoked for EVERY event pulled off the stream — in
+   * arrival order, including the ones this drain otherwise discards (`status`,
+   * `thinking`, `tool_call`, `tool_result_ack`) and the terminal
+   * `completion`/`error`. Before this existed the drain was the end of the line:
+   * the informational events fell off the bottom of the if-chain and nothing in
+   * the process ever saw them, so no client could answer "is it alive?".
+   *
+   * Contract: OBSERVE-ONLY. It must not influence the drain, so a throw is
+   * swallowed (same posture as `onFirstToken`) and it is called AFTER the abort
+   * checks so a teed event can never change a terminal classification. Absent ⇒
+   * byte-identical behaviour to before (every non-inspector caller passes
+   * nothing).
+   */
+  onEvent?: (ev: Event) => void
   /** EXEMPT this drain from the keep-warm default: on a watchdog abort, CALL
    *  `handle.cancel()` (intentionally abandon-poisoning a warm CC session so the
    *  next dispatch respawns clean). Default `false` — a default drain NEVER
@@ -172,6 +187,7 @@ export async function drainToOutcome(
   const {
     signal,
     onFirstToken,
+    onEvent,
     errorPrefix = '',
     abortMessage = 'substrate drain: aborted',
     abortBeforeDispatchMessage = abortMessage,
@@ -271,6 +287,19 @@ export async function drainToOutcome(
       }
 
       const ev = res.value
+      // ACTIVITY-INSPECTOR TEE (see `DrainOptions.onEvent`). Fires for EVERY
+      // event in arrival order — crucially including the `status` /`thinking` /
+      // `tool_call` / `tool_result_ack` events the if-chain below drops on the
+      // floor, which are the only live "the session is breathing" signal the
+      // process has. Observe-only: a throw here is swallowed so a broken tee can
+      // never break token collection or reclassify an outcome.
+      if (onEvent !== undefined) {
+        try {
+          onEvent(ev)
+        } catch {
+          /* an inspector tee must never perturb the drain */
+        }
+      }
       if (ev.kind === 'token') {
         // A token that won the race is ACCUMULATED even if the signal also fired
         // this tick — losing partial text would be wrong, and the loop-top
@@ -307,7 +336,10 @@ export async function drainToOutcome(
         settled = true
         return { text, status: 'error', error: errorEventError(ev, errorPrefix) }
       }
-      // thinking / tool_call / tool_result_ack / status — informational, ignored.
+      // thinking / tool_call / tool_result_ack / status — informational: they do
+      // not affect the TEXT outcome, so the loop continues. They are no longer
+      // *discarded* though — `onEvent` above already teed them to the Activity
+      // Inspector, which is the whole point of that seam.
     }
   } finally {
     if (signal !== undefined) signal.removeEventListener('abort', onSignalAbort)

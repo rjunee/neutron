@@ -49,6 +49,9 @@ export {
   setReplTodoSync,
   clearReplTodoSyncIf,
   type ReplTodoSync,
+  setReplActivityTap,
+  clearReplActivityTapIf,
+  type ReplActivityTap,
 } from './repl-sink.ts'
 export { httpHealth, type HttpHealthOptions } from './repl-session.ts'
 export type { ReplSession } from './repl-session.ts'

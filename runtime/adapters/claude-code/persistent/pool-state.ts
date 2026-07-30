@@ -85,6 +85,32 @@ export const todoSyncRef: {
     | undefined
 } = { current: undefined }
 
+/**
+ * Late-bound ACTIVITY INSPECTOR tool tap. Written ONLY by the substrate module's
+ * `setReplActivityTap`/`clearReplActivityTapIf` (wired by
+ * `composeProductionGraph`, which holds the in-memory inspector buffer + the
+ * app-ws fan); read by the sink's `/activity` route, which the Pre/PostToolUse
+ * `activity-tap.ts` hook POSTs to.
+ *
+ * Mirrors `todoSyncRef` exactly, and for the same reason: the hook runs in a
+ * DIFFERENT process from the gateway, so the loopback sink is the only seam, and
+ * this runtime module must not import the Open-band inspector store. Undefined on
+ * an LLM-less boot → the `/activity` route no-ops (503), and the panel simply
+ * shows no tool rows. SYNCHRONOUS + void: recording into a bounded in-memory ring
+ * cannot fail or block, and the hook POST must return fast enough that it never
+ * shows up as latency on the agent's tool call.
+ */
+export const activityTapRef: {
+  current:
+    | ((input: {
+        project_id: string | null
+        phase: 'pre' | 'post'
+        tool_name: string
+        detail: string
+      }) => void)
+    | undefined
+} = { current: undefined }
+
 // ---------------------------------------------------------------------------
 // Reply sink — one loopback HTTP server the dev-channels POST back to.
 // Module singleton so it is shared across every per-turn substrate instance.
@@ -200,6 +226,36 @@ class ReplSink {
           // (unknown tool, capability denied, handler threw) — 200 with ok:false
           // so the bridge returns it as a `tool_result` isError, not an HTTP fault.
           return Response.json({ ok: false, error: msg })
+        }
+      }
+      if (url.pathname === '/activity') {
+        // ACTIVITY INSPECTOR tool tap (Pre/PostToolUse hook → `activity-tap.ts`).
+        // Deliberately handled BEFORE the `no-session` 404 below and resolving its
+        // own project scope the same way `/tool-call` does: a tool call can fire in
+        // the window before/after session registration, and losing an activity row
+        // is worse than attributing it to the General scope (the pre-existing
+        // degradation for `/tool-call`).
+        const tap = activityTapRef.current
+        if (tap === undefined) {
+          return Response.json({ status: 'no-tap' }, { status: 503 })
+        }
+        const phase = body['phase'] === 'pre' ? 'pre' : body['phase'] === 'post' ? 'post' : undefined
+        const toolName = typeof body['tool_name'] === 'string' ? (body['tool_name'] as string) : ''
+        if (phase === undefined || toolName === '') {
+          return Response.json({ status: 'bad-input' }, { status: 400 })
+        }
+        try {
+          tap({
+            project_id: this.sessions.get(sessionId)?.projectId ?? null,
+            phase,
+            tool_name: toolName,
+            detail: typeof body['detail'] === 'string' ? (body['detail'] as string) : '',
+          })
+          return Response.json({ status: 'ok' })
+        } catch (e) {
+          // A recording fault is a best-effort miss the hook ignores — 200 so the
+          // agent's tool call never sees an HTTP fault from the inspector.
+          return Response.json({ status: 'error', error: String(e) })
         }
       }
       const session = this.sessions.get(sessionId)

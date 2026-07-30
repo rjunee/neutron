@@ -46,6 +46,12 @@ const LANDING_DIR = join(HERE, '..', '..', 'landing')
  */
 const EXPECTED_COMPOSITION_KEYS = [
   'agent_dispatch',
+  // SPEC § WAVE 3.5 — the ACTIVITY INSPECTOR snapshot surface
+  // (`GET /api/app/projects/<id>/activity`, `GET /api/app/activity`). Its presence
+  // HERE is the done-means-served proof: this test boots the REAL Open composer, so
+  // the key only appears if `composeOpen` actually constructs the surface and hands
+  // it to the graph — not merely that the module exists.
+  'app_activity_surface',
   'app_codex_credential_surface',
   // O5 — read-only diagnostics surface (`GET /api/app/admin/diagnostics`).
   'app_diagnostics_surface',

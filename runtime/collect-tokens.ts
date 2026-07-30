@@ -20,6 +20,7 @@
  * (the reminders / live-agent callers pass a signal and expect the turn abandoned).
  */
 
+import type { Event } from './events.ts'
 import type { SessionHandle } from './session-handle.ts'
 import { drainToText } from './substrate-text.ts'
 
@@ -38,15 +39,23 @@ import { drainToText } from './substrate-text.ts'
  * `onFirstToken` (FIX #347) is invoked once, the moment the FIRST reply token
  * arrives — lets a caller cancel the delayed cold-start "Waking up…" ack as soon
  * as the reply is actually streaming (not only when the whole turn settles).
+ *
+ * `onEvent` (Activity Inspector) tees EVERY event — including the `status`
+ * keepalive/notice ticks this drain otherwise discards — to an observer, so a
+ * client can answer "is this session alive or wedged?". Observe-only; a throw is
+ * swallowed inside the drain. Absent ⇒ unchanged behaviour for every other
+ * caller.
  */
 export async function collectTokensToString(
   handle: SessionHandle,
   signal?: AbortSignal,
   onFirstToken?: () => void,
+  onEvent?: (ev: Event) => void,
 ): Promise<string> {
   return drainToText(handle, {
     ...(signal !== undefined ? { signal } : {}),
     ...(onFirstToken !== undefined ? { onFirstToken } : {}),
+    ...(onEvent !== undefined ? { onEvent } : {}),
     errorPrefix: 'cc-llm-call: ',
     abortMessage: 'cc-llm-call: aborted',
     abortBeforeDispatchMessage: 'cc-llm-call: aborted before dispatch',

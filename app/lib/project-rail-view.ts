@@ -125,23 +125,33 @@ export interface RailProjectView {
   origin_instance: string;
 }
 
-/** Which corner dot a rail entry renders. `null` ⇒ no dot (idle / General). */
-export type RailDotKind = 'work' | 'attention';
+/** Which corner dot a rail entry renders. Always one of the three — see below. */
+export type RailDotKind = 'work' | 'attention' | 'idle';
 
 /**
- * The activity dot for one rail entry. General never shows a dot (it is the
- * catch-all topic, not a project with its own build state). `working` → the
- * pulsing `work` dot; `attention` → the static `attention` dot; `idle` /
- * absent → no dot.
+ * The activity dot for one rail entry.
+ *
+ * ALWAYS RETURNS A KIND — never null (SPEC § WAVE 3.5). The dot is now the ENTRY
+ * POINT to the Activity Inspector, and the acceptance is explicit that it stays
+ * tappable when idle, because an idle session must be distinguishable from a
+ * wedged one. A dot that disappears at rest cannot be tapped to learn which of the
+ * two you are looking at, so the previous `idle → null` / `isGeneral → null`
+ * behaviour is deliberately replaced by a quiet `idle` dot.
+ *
+ * General gets one too: it is a real chat scope with its own warm session, so it is
+ * inspectable like any project. `isGeneral` stays in the signature because General
+ * never shows ATTENTION (it has no bound runs).
+ *
+ * Exact mirror of the web `railDotClass` (`landing/chat-react/ChatApp.tsx`) — the
+ * two must stay in lockstep.
  */
 export function railDotKind(
   activity: ProjectActivity | undefined,
   isGeneral: boolean,
-): RailDotKind | null {
-  if (isGeneral) return null;
-  if (activity === 'attention') return 'attention';
+): RailDotKind {
   if (activity === 'working') return 'work';
-  return null;
+  if (activity === 'attention' && !isGeneral) return 'attention';
+  return 'idle';
 }
 
 /**

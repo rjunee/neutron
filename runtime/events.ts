@@ -93,4 +93,23 @@ export type Event =
        *  this before falling back to `message` regex. Optional + additive. */
       code?: SubstrateErrorClass
     }
-  | { kind: 'status'; message: string }
+  | {
+      kind: 'status'
+      message: string
+      /**
+       * TRUE only for the pool's periodic LIVENESS KEEPALIVE (`pool.ts`), which
+       * fires on a timer while the turn is unsettled and the `claude` child is
+       * alive — it is a *synthetic* tick that proves the PROCESS exists, NOT that
+       * any work happened. A livelocked / menu-wedged child keeps emitting it
+       * forever, which is precisely how a binary "active" signal comes to lie
+       * (ISSUES #386: the rail dot pulsed for DAYS with nothing running).
+       *
+       * The Activity Inspector keeps TWO clocks off this flag — "last event"
+       * (any, incl. keepalive → process alive) and "last real activity"
+       * (keepalive EXCLUDED → work actually happened) — so a wedge is reported as
+       * a wedge instead of as work. Additive + optional, exactly like `code` on
+       * `error`: every existing `{ kind: 'status', message }` literal stays valid
+       * and the wire shape is unchanged.
+       */
+      keepalive?: boolean
+    }

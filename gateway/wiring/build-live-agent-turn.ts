@@ -565,6 +565,26 @@ export interface BuildLiveAgentTurnInput {
    * is per-dispatch and therefore race-free across concurrent topics.
    */
   substrate: Substrate
+  /**
+   * ACTIVITY INSPECTOR tee (SPEC § WAVE 3.5). When wired by the composer, EVERY
+   * substrate event for this turn is handed over as it arrives — including the
+   * `status` keepalive/notice ticks the drain otherwise discards, which are the
+   * only "this session is breathing" signal that exists. `scope` is the turn's
+   * project id, or `'general'` for the no-project General topic (identical to the
+   * warm-session pool scope on the line below).
+   *
+   * `turn_started` / `turn_finished` bracket the dispatch so the inspector knows a
+   * turn is IN FLIGHT — without which it cannot distinguish a resting `idle`
+   * session (stale clocks, perfectly healthy) from a `wedged` one (stale clocks,
+   * turn running). Observe-only: a throw is swallowed and can never fail a turn.
+   *
+   * Omitted ⇒ no tee at all (byte-identical to the pre-inspector drain).
+   */
+  activityInspector?: {
+    on_event: (scope: string, ev: unknown) => void
+    turn_started: (scope: string) => void
+    turn_finished: (scope: string) => void
+  }
   /** The shared per-owner `PersonaPromptLoader` instance (gateway boot). */
   personaLoader: { load(): Promise<string> }
   /**
@@ -1383,17 +1403,39 @@ export function buildLiveAgentTurn(
     // Dispatch, collecting the reply text; the composer AbortController is a pure
     // ABSOLUTE-CEILING backstop (the substrate's activity watchdog does freeze
     // detection). Returns the text, or throws the substrate/abort error.
+    // ACTIVITY INSPECTOR — observe-only tee for this dispatch. Swallows its own
+    // throws so a broken inspector can never fail a user's turn.
+    const inspector = input.activityInspector
+    const safely = (fn: () => void): void => {
+      try {
+        fn()
+      } catch {
+        /* the activity inspector must never perturb a turn */
+      }
+    }
+    const teeEvent =
+      inspector === undefined
+        ? undefined
+        : (ev: unknown): void => safely(() => inspector.on_event(scope, ev))
+
     const dispatchOnce = async (): Promise<string> => {
       const handle = input.substrate.start(buildSpec())
       const ac = new AbortController()
       const timer = setTimeout(() => ac.abort(), absoluteCeilingMs)
+      // Bracket the dispatch so the inspector can tell a RESTING session from a
+      // WEDGED one. Marked per ATTEMPT (not per turn) so the silent freeze-retry
+      // below re-opens the window rather than leaving the scope permanently
+      // "in flight" — a leak there would make an idle project read as wedged
+      // forever, which is the exact class of lie this feature exists to kill.
+      if (inspector !== undefined) safely(() => inspector.turn_started(scope))
       try {
         // FIX #347 — cancel the pending cold-start ack the moment the FIRST
         // token streams (not only when the whole turn settles below), so a turn
         // that starts replying before the ack delay elapses never fires a
         // spurious "Waking up…" pill after the answer has begun.
-        return await collectTokensToString(handle, ac.signal, clearAckTimer)
+        return await collectTokensToString(handle, ac.signal, clearAckTimer, teeEvent)
       } finally {
+        if (inspector !== undefined) safely(() => inspector.turn_finished(scope))
         clearTimeout(timer)
         // Item 12 — the dispatch settled; cancel the cold-start ack if it
         // hasn't already fired (warm/fast turn → no spurious "waking up").

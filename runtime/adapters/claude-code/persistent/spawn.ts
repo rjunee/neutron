@@ -132,8 +132,16 @@ async function spawnSession(
     // REPL never enable the bridge, so their TodoWrite stays build-internal and
     // never lands on the owner's board. The sink is already started (above), so
     // its port/token are bound here.
+    // ACTIVITY INSPECTOR — the tool tap rides the same gate for the same reason:
+    // it is wired ONLY on the owner's warm conversational REPL (the one that opts
+    // into the Neutron tool bridge), never on the disposable Trident build REPLs or
+    // the untrusted history-import REPL, so a build's internal tool churn never
+    // lands on the owner's project panel.
     ...(options.enableToolBridge === true
-      ? { todoSync: { sinkPort: sink.port, sinkToken: sink.token, sessionId } }
+      ? {
+          todoSync: { sinkPort: sink.port, sinkToken: sink.token, sessionId },
+          activityTap: { sinkPort: sink.port, sinkToken: sink.token, sessionId },
+        }
       : {}),
     ...(options.permissions !== undefined ? { permissions: options.permissions } : {}),
   })

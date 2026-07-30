@@ -58,6 +58,7 @@ export type {
   AppWsOutboundWorkBoardChanged,
   AppWsOutboundImportProgress,
   AppWsOutboundOnboardingCompleted,
+  AppWsOutboundActivityEvent,
   WireAgentMessageOption,
 } from '@neutronai/wire-types'
 
