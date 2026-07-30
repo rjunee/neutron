@@ -103,10 +103,11 @@ export default function SettingsScreen() {
   }, [user]);
 
   const handleSignOut = useCallback(async () => {
-    // Best-effort push-binding revocation BEFORE clearing auth state.
-    // Mirrors the same call from `app/projects/index.tsx` — the
-    // revocation POST is bearer-authenticated, so it has to fire
-    // while the current `user.token` is still valid.
+    // Best-effort push-binding revocation BEFORE clearing auth state. The
+    // revocation POST is bearer-authenticated, so it has to fire while the
+    // current `user.token` is still valid. This is now the ONLY sign-out in the
+    // app besides Focus's — the projects-list screen that carried the other copy
+    // is deleted (SPEC § Decisions Log 2026-07-27).
     if (user !== null) {
       try {
         const cfg = loadAppConfig();
@@ -196,6 +197,27 @@ export default function SettingsScreen() {
             token.
           </Text>
         </View>
+
+        {/* Admin used to be a button in the projects-list header. That screen
+            is deleted (SPEC § Decisions Log 2026-07-27), so /admin lives here —
+            reachable as: chat header ☰ → Settings → Admin. A registered route
+            nothing pushes is the ISSUES #385 defect, guarded by
+            `__tests__/server-editor-reachability.test.ts`. */}
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel="Admin"
+          testID="settings-admin"
+          onPress={() => router.push('/admin')}
+          style={({ pressed }) => [styles.navRow, pressed && styles.pressed]}
+        >
+          <View style={styles.navRowText}>
+            <Text style={styles.navRowTitle}>Admin</Text>
+            <Text style={styles.navRowSubtitle}>
+              Personality, gateway restart, GBrain, Cores, backups.
+            </Text>
+          </View>
+          <Text style={styles.navRowChevron}>›</Text>
+        </Pressable>
 
         <Pressable
           accessibilityRole="button"

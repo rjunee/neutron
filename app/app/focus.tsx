@@ -15,7 +15,9 @@
  *     `<FocusHeader>` + `<FocusList>` (which composes
  *     `<FocusBucketSection>` + `<FocusRow>`).
  *   - Tap-to-jump: tasks → `/projects/<id>/tasks`; reminders →
- *     `/projects/<id>/reminders`; owner-level → `/projects`.
+ *     `/projects/<id>/reminders`; owner-level → the General chat (the
+ *     projects-list screen it used to target is deleted — SPEC § Decisions
+ *     Log 2026-07-27).
  *   - State + load lifecycle + on-tab-focus auto-refresh live in
  *     `<FocusStateProvider>`. Bucket transformation lives in the pure
  *     `focus-state-reducer.ts`. Pure formatters live in
@@ -34,6 +36,7 @@ import { ActivityIndicator, StyleSheet, View } from 'react-native';
 import { FocusHeader } from '../components/FocusHeader';
 import { FocusList } from '../components/FocusList';
 import { signOut } from '../lib/auth';
+import { GENERAL_CHAT_ROUTE } from '../lib/entry-route';
 import type { CurrentFocusPick, FocusItem } from '../lib/focus-client';
 import {
   FocusStateProvider,
@@ -87,36 +90,42 @@ function FocusScreenBody() {
     router.replace('/login');
   }, [clear, router]);
 
-  const handleProjectsLink = useCallback(() => {
-    router.push('/projects');
+  // The projects-list screen is deleted (SPEC § Decisions Log 2026-07-27), so
+  // every "out of Focus" hop lands on the General chat — the app's home, with the
+  // rail on the left for switching. `GENERAL_CHAT_ROUTE` is a runtime string, so
+  // the cast is the expo-router typed-route escape hatch used elsewhere here.
+  const goGeneral = useCallback(() => {
+    router.push(GENERAL_CHAT_ROUTE as Parameters<typeof router.push>[0]);
   }, [router]);
+
+  const handleProjectsLink = goGeneral;
 
   const handleItemPress = useCallback(
     (item: FocusItem) => {
-      // Owner-level items have no originating per-project tab; route
-      // them to the project list so the user can drill in manually.
+      // Owner-level items have no originating per-project tab; route them to
+      // General, where the rail lets the owner drill in manually.
       if (item.project_id.length === 0) {
-        router.push('/projects');
+        goGeneral();
         return;
       }
       const tab = item.kind === 'reminder' ? 'reminders' : 'tasks';
       router.push(`/projects/${encodeURIComponent(item.project_id)}/${tab}`);
     },
-    [router],
+    [goGeneral, router],
   );
 
   const handleHeroPress = useCallback(
     (pick: CurrentFocusPick) => {
-      // Same routing semantics as a FocusRow: owner-level → project
-      // list, per-project → the project's tasks tab.
+      // Same routing semantics as a FocusRow: owner-level → General chat,
+      // per-project → the project's tasks tab.
       const pid = pick.task.project_id;
       if (pid.length === 0) {
-        router.push('/projects');
+        goGeneral();
         return;
       }
       router.push(`/projects/${encodeURIComponent(pid)}/tasks`);
     },
-    [router],
+    [goGeneral, router],
   );
 
   const handleRefresh = useCallback(() => {

@@ -8,7 +8,18 @@
  *   - no server configured → /login   (the app has to DISCOVER, or be told,
  *                                      where its instance lives first)
  *   - no session           → /login
- *   - both                 → /projects
+ *   - both                 → a CHAT route (SPEC § Decisions Log 2026-07-27)
+ *
+ * THE ENTRY IS A CHAT ROUTE, NEVER A LIST. Ryan, on device: *"I don't want this
+ * screen shown. It should just open into the general chat with the rail on the
+ * left. Delete this screen completely."* and *"I want the app to open on the
+ * chat screen. Most recent project. Or general."* `/projects` (the list screen)
+ * is DELETED, so this redirect resolves the most-recently-active project's chat
+ * and falls back to General — the no-project scope, which needs no fetch and
+ * always exists. The choice is `resolveEntryRoute` in `lib/entry-route.ts`, a
+ * pure+testable module rather than a literal here: this decision was recorded on
+ * 2026-07-27 and the code went unchanged for two days because nothing could
+ * assert it.
  *
  * WHY THE SERVER CHECK LIVES HERE. Until 2026-07-25 an unconfigured
  * install never reached the router at all: `app/app/_layout.tsx` rendered
@@ -52,6 +63,7 @@ import { ActivityIndicator, StyleSheet, View } from 'react-native';
 
 import { shouldHoldOnLogin } from '../lib/auth-helpers';
 import { loadAppConfig } from '../lib/config';
+import { resolveEntryRoute } from '../lib/entry-route';
 import { renewInstanceSession } from '../lib/identity-client';
 import { useAuthSession } from '../lib/session';
 import { tokenStorage } from '../lib/token-storage';
@@ -73,12 +85,25 @@ export default function RootRedirect() {
     }
     if (user === null) return; // unreachable given the guard; keeps TS honest.
 
+    let cancelled = false;
+    /**
+     * Open on a CHAT route. `resolveEntryRoute` never throws and never returns a
+     * non-chat route — an offline launch lands on General rather than stranding
+     * the owner on this spinner.
+     */
+    const enterApp = async (token: string): Promise<void> => {
+      const route = await resolveEntryRoute({ base_url: config.base_url, token });
+      if (cancelled) return;
+      router.replace(route as Parameters<typeof router.replace>[0]);
+    };
+
     if (renewAttempted.current) {
-      router.replace('/projects');
-      return;
+      void enterApp(user.token);
+      return () => {
+        cancelled = true;
+      };
     }
     renewAttempted.current = true;
-    let cancelled = false;
     void (async () => {
       const outcome = await renewSession(user.token, config.auth_base_url);
       if (cancelled) return;
@@ -88,12 +113,23 @@ export default function RootRedirect() {
         return;
       }
       if (outcome !== null) setUser({ ...user, token: outcome });
-      router.replace('/projects');
+      // Enter with the FRESH bearer when one was minted — the list fetch that
+      // picks the project is authenticated, and the old token may be spent.
+      await enterApp(outcome ?? user.token);
     })();
     return () => {
       cancelled = true;
     };
-  }, [clear, config.auth_base_url, configured, router, setUser, status, user]);
+  }, [
+    clear,
+    config.auth_base_url,
+    config.base_url,
+    configured,
+    router,
+    setUser,
+    status,
+    user,
+  ]);
 
   return (
     <View style={styles.container}>

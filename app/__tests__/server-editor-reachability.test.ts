@@ -63,11 +63,30 @@ describe('#385 — /settings is navigable (the only signed-in server editor)', (
     expect([...targets].sort()).toContain('/settings');
   });
 
-  it('the projects header carries the entry, beside Admin', () => {
-    const src = read('app', 'projects', 'index.tsx');
-    expect(src).toContain('projects-settings-btn');
-    expect(src).toContain("router.push('/settings')");
-    expect(src).toContain("router.push('/admin')");
+  it('the CHAT header carries the entry (the projects header is deleted)', () => {
+    // Until 2026-07-29 this entry lived in the projects-list header
+    // (`projects-settings-btn`). That screen is DELETED — the app opens straight
+    // into chat with the rail (SPEC § Decisions Log 2026-07-27) — so the ONLY
+    // signed-in path to the server editor is now the project shell's header:
+    // ☰ → /settings. Deleting the screen without re-homing this would have
+    // recreated the exact #385 defect, which is why the assertion moved rather
+    // than being dropped.
+    const shell = read('app', 'projects', '[id]', '_layout.tsx');
+    expect(shell).toContain("router.push('/settings')");
+    const header = read('components', 'ProjectHeader.tsx');
+    expect(header).toContain('project-header-app-settings');
+    expect(header).toContain('onOpenAppSettings');
+    expect(shell).toContain('onOpenAppSettings={');
+  });
+
+  it('/admin is reachable too — one hop further, from inside /settings', () => {
+    // Same story: `/admin` was pushed ONLY from the deleted list header. It now
+    // hangs off Settings (☰ → Settings → Admin), and `navTargets()` above proves
+    // *some* screen pushes it.
+    const settings = read('app', 'settings.tsx');
+    expect(settings).toContain('settings-admin');
+    expect(settings).toContain("router.push('/admin')");
+    expect([...navTargets()]).toContain('/admin');
   });
 
   it('/settings is still registered on the Stack (a push at a dead route routes nowhere)', () => {

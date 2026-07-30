@@ -4,9 +4,18 @@
  * Sticky header sitting above `<ProjectTabBar>` and the tab content
  * area. Three children, row-aligned:
  *
- *   - Left: back-arrow button (48×48 hit target). Tap → onBack().
+ *   - Left: APP-settings button (48×48 hit target). Tap → onOpenAppSettings().
  *   - Center: PROJECT overline + project name (one-line, truncating).
- *   - Right: settings gear button (48×48 hit target). Tap → onOpenSettings().
+ *   - Right: project settings gear (48×48 hit target). Tap → onOpenSettings().
+ *
+ * THE LEFT SLOT USED TO BE A BACK ARROW TO THE PROJECTS LIST. That list screen
+ * is deleted (SPEC § Decisions Log 2026-07-27 — the app opens straight into chat
+ * and the RAIL is the switcher), which left "back" with nowhere to go and left
+ * `/settings` + `/admin` with no entry point at all: the list header was the only
+ * place in the app that pushed either (the exact ISSUES #385 defect class, now
+ * guarded by `__tests__/server-editor-reachability.test.ts`). So the slot became
+ * the app-level entry instead of a second, redundant route to General — the rail's
+ * General tile already goes there.
  *
  * Pure presentation. Reads theme tokens from `lib/theme.ts`; no
  * inline magic numbers. Reused by P5.5 (global Focus shell) and P5.7
@@ -22,8 +31,12 @@ export interface ProjectHeaderProps {
   name: string;
   /** Optional overline text — defaults to "PROJECT". */
   overline?: string;
-  /** Back-arrow handler. Required so the layout can wire router.replace. */
-  onBack: () => void;
+  /**
+   * App-settings handler (left slot). Required so the layout can wire
+   * `router.push('/settings')` — the only signed-in server editor + sign-out +
+   * Admin entry, which must never be unreachable (ISSUES #385).
+   */
+  onOpenAppSettings: () => void;
   /** Settings-gear handler. Required so the layout can flip the drawer open. */
   onOpenSettings: () => void;
   /**
@@ -37,7 +50,7 @@ export interface ProjectHeaderProps {
 export function ProjectHeader({
   name,
   overline = 'PROJECT',
-  onBack,
+  onOpenAppSettings,
   onOpenSettings,
   onInvite,
 }: ProjectHeaderProps) {
@@ -45,13 +58,13 @@ export function ProjectHeader({
     <View style={styles.header}>
       <Pressable
         accessibilityRole="button"
-        accessibilityLabel="Back to projects"
-        testID="project-header-back"
-        onPress={onBack}
+        accessibilityLabel="Open app settings"
+        testID="project-header-app-settings"
+        onPress={onOpenAppSettings}
         style={({ pressed }) => [styles.iconBtn, pressed && styles.pressed]}
         hitSlop={SPACING.sm}
       >
-        <Text style={styles.iconGlyph}>←</Text>
+        <Text style={styles.iconGlyph}>☰</Text>
       </Pressable>
       <View style={styles.center}>
         <Text style={styles.overline} numberOfLines={1}>

@@ -2,7 +2,7 @@
  * @neutronai/app — pure global Focus header (P5.6).
  *
  *   TODAY
- *   Focus                           [ Refresh ] [ Projects ] [ Sign out ]
+ *   Focus                           [ Refresh ] [ Chat ] [ Sign out ]
  *
  * Overline (`TODAY`) + title (`Focus`) on the left; right group hosts
  * three buttons:
@@ -14,7 +14,8 @@
  *     provider `refresh()` action). When `refreshing === true` the
  *     button renders an ActivityIndicator + `accessibilityState=
  *     {{busy: true}}` so the busy state is announced.
- *   - **Projects** — opens the project launcher at `/projects`.
+ *   - **Chat** — opens the General chat (the app's home since the
+ *     projects-list screen was deleted; SPEC § Decisions Log 2026-07-27).
  *   - **Sign out** — clears the session + routes to `/login`.
  *
  * No state lives here; the parent route file wires the
@@ -69,12 +70,12 @@ export function FocusHeader({
         </Pressable>
         <Pressable
           accessibilityRole="button"
-          accessibilityLabel="Projects"
+          accessibilityLabel="Open chat"
           testID="focus-projects-btn"
           onPress={onProjectsLink}
           style={({ pressed }) => [styles.btn, pressed && styles.btnPressed]}
         >
-          <Text style={styles.btnText}>Projects</Text>
+          <Text style={styles.btnText}>Chat</Text>
         </Pressable>
         <Pressable
           accessibilityRole="button"

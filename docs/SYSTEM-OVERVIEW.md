@@ -713,7 +713,8 @@ from.
 
 1. An unconfigured install mounts the Stack and lands on `/login`
    (`app/app/index.tsx` redirects there while there is no server OR no
-   session).
+   session). A CONFIGURED, signed-in install lands on a chat route instead —
+   see § "Mobile ENTRY" (the projects-list screen is deleted).
 2. The owner signs in — EITHER lane:
    - **provider:** `POST {auth_base}/v1/oauth/<google|apple>/start`
      `{redirectUri}` → `{authorizeUrl, state, codeVerifier}`, consent in
@@ -1011,6 +1012,42 @@ registry's project builtins are Chat/Plan/Documents, so the old **Apps
 once the fetch resolves (their routes remain, reachable by deep-link); re-adding a
 builtin is a `BUILTIN_TABS` change in `tabs/registry.ts`. The web shell
 consumption is PR-4 (reworked 2026-06-30 — see below).
+
+### Mobile ENTRY: the app opens in chat, and the projects-list screen is deleted (2026-07-29)
+
+**Ryan-locked, SPEC § Decisions Log 2026-07-27** (recorded then, implemented
+2026-07-29 after he hit the old screen again): *"I don't want this screen shown.
+It should just open into the general chat with the rail on the left. Delete this
+screen completely."* Mobile now has ONE entry path and no list screen.
+
+- **`app/app/index.tsx`** resolves the entry route through
+  `resolveEntryRoute` (`app/lib/entry-route.ts`) instead of redirecting to
+  `/projects`: `GET /api/app/projects` → most-recently-active NAVIGABLE project →
+  `/projects/<id>/chat`. Empty list, an all-`shared` list, or ANY fetch failure
+  resolves to **General** (`/projects/~general/chat`) — the no-project scope needs
+  no fetch, so an offline launch never strands the owner on a spinner. The
+  decision lives in a pure function, not a `router.replace` literal, so
+  `app/__tests__/mobile-entry-route.test.ts` can fail when it drifts (it drifted
+  for two days precisely because nothing asserted it).
+- **`app/app/projects/index.tsx` is DELETED**, along with its
+  `<Stack.Screen name="projects/index" />` registration. Nothing in the app
+  navigates to `/projects` any more; the enumerating test above enforces that.
+- **The rail IS the switcher** (see the next section), and its `+` now opens
+  `<CreateProjectSheet>` (`app/components/CreateProjectSheet.tsx`) OVER the chat
+  — no navigation, no separate screen. Submit → `POST /api/app/projects` →
+  `/projects/<new-id>/chat`. The name rule + error copy are pure
+  (`app/lib/create-project-helpers.ts`). Deleting the list screen without this
+  would have removed the only way to create a project on mobile.
+- **`/settings` and `/admin` were re-homed.** The deleted list header was the ONLY
+  place in the app that pushed either (the ISSUES #385 defect class). The project
+  shell header's LEFT slot is no longer a back arrow to the list — it is the
+  app-level entry (`☰` → `/settings`, testID `project-header-app-settings`), and
+  `/settings` gained an **Admin** row (`settings-admin` → `/admin`). Sign-out
+  already lived on `/settings`. `app/__tests__/server-editor-reachability.test.ts`
+  now pins THAT path.
+- Every remaining ex-`/projects` hop (project-not-found fallbacks, the Focus
+  screen's owner-level items and its header link, Admin's back button) targets the
+  General chat.
 
 ### Mobile rail + seated tabs + Work-badge (M1 UX REDESIGN PR-6)
 
@@ -2524,10 +2561,13 @@ NO native `window.prompt`, which is unstyleable and blocks E2E/CDP automation) �
 navigates in; the live `projects_changed` frame refreshes the list (and 0→N
 auto-selects the new project). A failed POST renders inline (no `window.alert`).
 
-**Mobile rail** (`app/app/projects/index.tsx` + `app/lib/projects.ts`
-`createProject` / `projects-client.ts` `create`). A bottom-pinned `+ Create
-Project` bar reveals an inline name input → `POST /api/app/projects` →
-`router.push('/projects/<id>')`. No migration (the `projects` table already
+**Mobile rail** (`app/components/CreateProjectSheet.tsx` +
+`app/app/projects/[id]/_layout.tsx` + `app/lib/projects.ts` `createProject` /
+`projects-client.ts` `create`). The rail's `+` opens a create SHEET over the chat
+with a name input → `POST /api/app/projects` → `router.replace('/projects/<id>/chat')`.
+(Until 2026-07-29 this was a bottom-pinned `+ Create Project` bar on the
+projects-list screen, and the rail's `+` merely navigated there; that screen is
+deleted — see § "Mobile ENTRY".) No migration (the `projects` table already
 exists, `0038`); the Work Board tab is automatic per-project
 (`tabs/registry.ts`).
 

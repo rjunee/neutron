@@ -45,6 +45,10 @@ describe('projectIdFromPathname', () => {
   });
 
   test('returns null for anything that is not a project route, so the caller can fall back', () => {
+    // `/projects` is no longer a ROUTE (the list screen is deleted — SPEC §
+    // Decisions Log 2026-07-27), but the parser's contract for a bare/short path
+    // still matters: the shell falls back to the `[id]` param when this returns
+    // null, and a two-segment path must not yield a phantom project id.
     expect(projectIdFromPathname('/projects')).toBeNull();
     expect(projectIdFromPathname('/projects/')).toBeNull();
     expect(projectIdFromPathname('/login')).toBeNull();

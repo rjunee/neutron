@@ -87,16 +87,15 @@ P7.0–P7.5 docs interface).
 app/
 ├── app/                              # Expo Router routes (file-based navigation)
 │   ├── _layout.tsx                   # Root Stack + AuthSessionProvider + deep-link routing
-│   ├── index.tsx                     # Session-redirect root (→ /login or → /projects)
+│   ├── index.tsx                     # Session-redirect root (→ /login, or → a CHAT route: most-recent project else General)
 │   ├── login.tsx                     # LOGIN-FIRST entry: provider + password + self-host
 │   ├── focus.tsx                     # Global cross-project Focus view (P5.6) — production refactor
-│   ├── settings.tsx                  # Current-user card + Sign out (P5.0)
+│   ├── settings.tsx                  # Current-user card + server editor + Admin row + Sign out (P5.0)
 │   ├── admin.tsx                     # Admin tab (P5.7 — personality / gateway / Cores)
 │   ├── cores/[slug].tsx              # Per-Core setup screen (Cores admin)
 │   └── projects/
-│       ├── index.tsx                 # Unified project list (P5.2)
-│       └── [id]/
-│           ├── _layout.tsx           # 5-tab navigator + project settings drawer (P5.2)
+│       └── [id]/                     # (no index.tsx — the list screen is DELETED, 2026-07-29)
+│           ├── _layout.tsx           # rail + tab navigator + settings drawer + create-project sheet
 │           ├── chat.tsx              # Chat surface (P5.1)
 │           ├── launcher.tsx          # Launcher with DnD reorder (P5.3)
 │           ├── tasks.tsx             # Project tasks tab (P5.4)
@@ -172,7 +171,7 @@ app/
 │   ├── button-primitives.tsx         # P5.1 <ButtonOptionRow /> + <ImageGalleryRow />
 │   ├── citation-chip-row.tsx         # P5.1 horizontal pill row for citations
 │   ├── upload-client.ts              # P5.1 multipart upload for image attachments
-│   ├── projects.ts                   # Dev-stub project list
+│   ├── projects.ts                   # Project list fetch + create + sort/activity helpers
 │   ├── focus-client.ts               # /api/app/focus (P5.5)
 │   ├── tasks-client.ts               # /api/app/tasks (P5.4)
 │   ├── reminders-client.ts           # /api/app/reminders (P5.4)
@@ -537,11 +536,15 @@ implemented. Three entry points, all sharing the one
    session. Login-first deleted the full-screen gate: `app/_layout.tsx` always
    mounts the `<Stack>` and `app/index.tsx` holds an unconfigured install on
    `/login`.
-2. **Signed in** — Projects header → **Settings** (`projects/index.tsx`
-   `projects-settings-btn` → `/settings`) → the "Neutron server" card.
-   Without this button `/settings` was registered but unreachable, so a
-   persisted-bad host (a DHCP lease change on the LAN) could only be fixed by
-   reinstalling (Argus r2 BLOCKER).
+2. **Signed in** — the chat header's `☰` (`ProjectHeader`,
+   `project-header-app-settings` → `/settings`) → the "Neutron server" card;
+   `/admin` hangs off the same screen (`settings-admin`). This used to be the
+   projects-list header (`projects-settings-btn`); that screen was DELETED on
+   2026-07-29 (SPEC § Decisions Log 2026-07-27 — the app opens straight into chat
+   with the rail), which is exactly why the entry moved instead of vanishing.
+   Without it `/settings` is registered but unreachable, so a persisted-bad host
+   (a DHCP lease change on the LAN) could only be fixed by reinstalling (Argus r2
+   BLOCKER).
 3. **Signed OUT** — the **Change server** card on `/login`
    (`login-change-server`). `/settings` bounces to `/login` whenever auth
    resolves to unauthenticated (`lib/auth-helpers.ts:shouldRedirectToLogin`),

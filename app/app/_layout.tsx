@@ -218,7 +218,6 @@ export default function RootLayout() {
           <Stack.Screen name="login" />
           <Stack.Screen name="index" />
           <Stack.Screen name="focus" />
-          <Stack.Screen name="projects/index" />
           <Stack.Screen name="projects/[id]" />
           <Stack.Screen name="settings" />
           <Stack.Screen name="integrations" />
