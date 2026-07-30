@@ -73,6 +73,10 @@ const EXPECTED_LADDER: ReadonlyArray<[string, string, string | null, boolean]> =
   ['app-reminders', 'appReminders', 'app_reminders_surface', true],
   ['app-tabs', 'appTabs', 'app_tabs_surface', true],
   ['app-work-board', 'appWorkBoard', 'app_work_board_surface', true],
+  // SPEC § WAVE 3.5 — the Activity Inspector snapshot surface. RATCHET EXTENSION
+  // (the documented "adding a surface" step), NOT a relaxed assertion: it sits
+  // between work-board and credentials in the ladder, mirroring its slot order.
+  ['app-activity', 'appActivity', 'app_activity_surface', true],
   ['app-project-credentials', 'appProjectCredentials', 'app_project_credentials_surface', true],
   ['app-codex-credential', 'appCodexCredential', 'app_codex_credential_surface', true],
   ['app-projects', 'appProjects', 'app_projects_surface', true],
@@ -452,6 +456,7 @@ function fullComposition(): RouteSlotComposition {
     app_docs_surface: { handler: h() },
     app_tabs_surface: { handler: h() },
     app_work_board_surface: { handler: h() },
+    app_activity_surface: { handler: h() },
     app_project_credentials_surface: { handler: h() },
     app_codex_credential_surface: { handler: h() },
     app_backups_surface: { handler: h() },
@@ -496,6 +501,8 @@ const GATE_FIELDS: readonly (keyof RouteSlotComposition)[] = [
   'app_docs_surface',
   'app_tabs_surface',
   'app_work_board_surface',
+  // SPEC § WAVE 3.5 — Activity Inspector snapshot surface (ratchet extension).
+  'app_activity_surface',
   'app_project_credentials_surface',
   'app_codex_credential_surface',
   'app_backups_surface',

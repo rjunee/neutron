@@ -283,6 +283,19 @@ export interface AppSurfacesCompositionInput {
     handler: (req: Request) => Promise<Response | null>
   }
   /**
+   * ACTIVITY INSPECTOR snapshot surface (SPEC § WAVE 3.5). Owns
+   * `GET /api/app/projects/<id>/activity` + `GET /api/app/activity` (the General
+   * no-project scope). Read-only; serves the in-memory live-only event ring the
+   * two server-side taps fill (the drain tee + the Pre/PostToolUse tool tap), so a
+   * client opening the panel immediately learns the session's state and how long
+   * ago the last event was — the part a purely live push cannot deliver, because a
+   * wedged session emits nothing. Surface factory:
+   * `gateway/http/activity-surface.ts:createActivitySurface`.
+   */
+  app_activity_surface?: {
+    handler: (req: Request) => Promise<Response | null>
+  }
+  /**
    * Per-project credential CRUD (Settings tab, FOUNDATION). Owns
    * `/api/app/projects/<id>/credentials[/<service>]`. Dispatches the SAME
    * `ProjectCredentialStore` the resolver + per-turn awareness injection use.

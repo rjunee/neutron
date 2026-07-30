@@ -551,7 +551,13 @@ export function createPersistentReplSubstrate(options: PersistentReplSubstrateOp
         const keepalive = setInterval(() => {
           if (turn.settled || channel.closed) return
           if (session === undefined || session.hasChildExited()) return
-          channel.push({ kind: 'status', message: 'working' })
+          // `keepalive: true` — this tick is SYNTHETIC (a timer, not evidence of
+          // work). The Activity Inspector excludes it from its "last real
+          // activity" clock so a livelocked-but-alive child is reported WEDGED
+          // rather than working (ISSUES #386's failure mode). Consumers that only
+          // care about liveness (the synthesis drain's idle timer) ignore the flag
+          // and behave exactly as before.
+          channel.push({ kind: 'status', message: 'working', keepalive: true })
           // P0: a wedged AskUserQuestion / arrow-menu emits NO further output, so
           // the `onData` scan never re-fires to satisfy the 2-tick stability gate.
           // Re-run the output scan on this same keepalive cadence (the wedge can

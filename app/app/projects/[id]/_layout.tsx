@@ -43,6 +43,14 @@ import {
 import { ProjectHeader } from '../../../components/ProjectHeader';
 import { ProjectSettingsDrawer } from '../../../components/ProjectSettingsDrawer';
 import { CreateProjectSheet } from '../../../components/CreateProjectSheet';
+// ACTIVITY INSPECTOR (SPEC § WAVE 3.5) — the drawer behind the clickable rail dot.
+import { ActivityInspectorDrawer } from '../../../components/ActivityInspectorDrawer';
+import {
+  activityScopeKey,
+  AppActivityClient,
+  startActivityLive,
+  type ActivityRow,
+} from '../../../lib/activity-client';
 import { InviteModal, type InviteModalResult } from '../../../components/InviteModal';
 import { copyToClipboard } from '../../../lib/clipboard';
 import { canInviteToProject } from '../../../lib/invite-helpers';
@@ -261,6 +269,28 @@ function ProjectShell({ project_id }: { project_id: string }) {
     return () => live.stop();
   }, [user, config.base_url, deviceId]);
 
+  // ACTIVITY INSPECTOR data source: HTTP snapshot for the backlog + clocks, and a
+  // dedicated read-only app-ws subscription for the live rows. Memoised on the
+  // credential so the drawer's effect doesn't tear down and re-subscribe on every
+  // layout render.
+  const activitySource = useMemo(() => {
+    const token = user?.token ?? '';
+    const client = new AppActivityClient({ base_url: config.base_url, token });
+    return {
+      snapshot: (pid: string | null) => client.snapshot(pid),
+      subscribe: (scope_key: string, onRow: (row: ActivityRow) => void): (() => void) => {
+        const live = startActivityLive({
+          base_url: config.base_url,
+          token,
+          scope_key,
+          device_id: deviceId,
+          onRow,
+        });
+        return () => live.stop();
+      },
+    };
+  }, [config.base_url, user?.token, deviceId]);
+
   // `null` on a non-tab sub-route (chat-sync/notes/backups/bare cores) AND on a
   // legacy leaf no longer in the registry set: no tab is highlighted there and
   // `handleTabSelect` then lets every tab tap navigate. Route-driven against
@@ -270,6 +300,11 @@ function ProjectShell({ project_id }: { project_id: string }) {
   // it animates across non-tab routes too, and never receives a null key.
   const slotKey = segments[segments.length - 1] ?? 'chat';
   const [drawerOpen, setDrawerOpen] = useState(false);
+  // ACTIVITY INSPECTOR (SPEC § WAVE 3.5) — the drawer opened by the rail's activity
+  // dot. `activityOpen` is separate from `activityScope` because General is a real
+  // scope, so no scope value can double as the closed sentinel.
+  const [activityOpen, setActivityOpen] = useState(false);
+  const [activityScope, setActivityScope] = useState<string | null>(null);
   const { width } = useWindowDimensions();
   const wide = Platform.OS === 'web' && width > BREAKPOINTS.narrow_max;
 
@@ -479,6 +514,14 @@ function ProjectShell({ project_id }: { project_id: string }) {
             activeProjectId={project_id}
             onSelect={onRailSelect}
             onCreate={onRailCreate}
+            onOpenActivity={(railId) => {
+              // The rail id is `'~general'` for General, `''`-free otherwise;
+              // `activityScopeKey` normalises it to the SERVER's scope key ('general'
+              // or the project id). See the three-representations note in
+              // `lib/activity-client.ts`.
+              setActivityScope(activityScopeKey(railId));
+              setActivityOpen(true);
+            }}
           />
           <View style={styles.railMain}>
             <ProjectTabBar
@@ -502,6 +545,18 @@ function ProjectShell({ project_id }: { project_id: string }) {
         errorText={createError}
         onCancel={() => setCreateOpen(false)}
         onSubmit={submitCreate}
+      />
+      {/* The Activity Inspector — the tmux replacement, opened by the rail's dot. */}
+      <ActivityInspectorDrawer
+        open={activityOpen}
+        onClose={() => setActivityOpen(false)}
+        source={activitySource}
+        projectId={activityScope}
+        label={
+          activityScope === null || activityScope === 'general'
+            ? 'General'
+            : (railList.find((p) => p.id === activityScope)?.name ?? activityScope)
+        }
       />
       <InviteModal
         open={inviteOpen}

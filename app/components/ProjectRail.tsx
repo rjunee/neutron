@@ -56,6 +56,12 @@ export interface ProjectRailProps {
   activeProjectId: string;
   onSelect: (projectId: string) => void;
   onCreate: () => void;
+  /**
+   * Open the Activity Inspector for a scope (SPEC § WAVE 3.5) — fired by the
+   * clickable activity dot on each rail row. Optional so the existing rail render
+   * tests construct unchanged; absent ⇒ the dot renders but does nothing.
+   */
+  onOpenActivity?: (projectId: string) => void;
   /** Test seam — overrides the async reduce-motion probe. */
   reduceMotionOverride?: boolean;
 }
@@ -88,6 +94,12 @@ function ActivityDot({ kind, reduceMotion }: { kind: RailDotKind; reduceMotion: 
 
   // FIX #335 — the pulsing `work` dot uses the building blue (`PHASE.build.fg`),
   // matching the Work-list building dot exactly; `attention` stays a static amber.
+  // SPEC § WAVE 3.5 — `idle` is a quiet hollow ring: present and tappable (it is
+  // the Activity Inspector's entry point) but it must read as "nothing happening",
+  // never as state.
+  if (kind === 'idle') {
+    return <Animated.View testID="rail-dot-idle" style={[styles.dot, styles.dotIdle]} />;
+  }
   const color = kind === 'attention' ? THEME.attention : PHASE.build.fg;
   return (
     <Animated.View
@@ -103,12 +115,15 @@ function RailItem({
   isActive,
   reduceMotion,
   onSelect,
+  onOpenActivity,
 }: {
   project: RailProjectView;
   overlay: RailOverlayEntry | undefined;
   isActive: boolean;
   reduceMotion: boolean;
   onSelect: (id: string) => void;
+  /** Open the Activity Inspector for this scope (the dot's action, SPEC § WAVE 3.5). */
+  onOpenActivity: (id: string) => void;
 }) {
   const isGeneral = project.id === GENERAL_PROJECT_ID;
   const dot = railDotKind(overlay?.activity, isGeneral);
@@ -138,7 +153,24 @@ function RailItem({
         <Text style={styles.emoji} numberOfLines={1}>
           {project.emoji}
         </Text>
-        {dot !== null ? <ActivityDot kind={dot} reduceMotion={reduceMotion} /> : null}
+        {/* CLICKABLE ACTIVITY DOT — the Activity Inspector's entry point (SPEC §
+            WAVE 3.5; Ryan-locked: no new icon, the EXISTING dot becomes the
+            affordance). A nested Pressable is valid in RN, but the 10px dot is far
+            below a usable touch target, so `hitSlop` widens it to ~30px without
+            changing the painted size. The outer row Pressable still handles a tap
+            anywhere else, and RN's touch resolution gives the inner (deeper)
+            Pressable priority inside the slop area, so a dot tap does not also
+            navigate. */}
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel={`Show activity for ${project.name}`}
+          testID={`rail-dot-press-${project.id}`}
+          hitSlop={10}
+          onPress={() => onOpenActivity(project.id)}
+          style={styles.dotPress}
+        >
+          <ActivityDot kind={dot} reduceMotion={reduceMotion} />
+        </Pressable>
       </View>
       <Text
         style={[styles.name, isActive && styles.nameActive, hasUnread && styles.nameUnread]}
@@ -156,8 +188,12 @@ export function ProjectRail({
   activeProjectId,
   onSelect,
   onCreate,
+  onOpenActivity,
   reduceMotionOverride,
 }: ProjectRailProps) {
+  // No-op default so a rail rendered without the inspector wired still shows a dot
+  // that does nothing, rather than throwing on tap.
+  const openActivity = onOpenActivity ?? ((): void => {});
   const [reduceMotion, setReduceMotion] = useState(reduceMotionOverride ?? false);
   useEffect(() => {
     if (reduceMotionOverride !== undefined) return;
@@ -188,6 +224,7 @@ export function ProjectRail({
             isActive={project.id === activeProjectId}
             reduceMotion={reduceMotion}
             onSelect={onSelect}
+            onOpenActivity={openActivity}
           />
         ))}
         <Pressable
@@ -243,16 +280,30 @@ const styles = StyleSheet.create({
     lineHeight: 30,
     textAlign: 'center',
   },
+  /**
+   * SPEC § WAVE 3.5 — the corner offset moved OFF the dot and ONTO its `dotPress`
+   * wrapper, so the tappable Pressable is what sits in the corner and the dot
+   * paints inside it. Same rendered geometry as before (a DOT-sized circle at
+   * right:2/bottom:2 of `glyphWrap`); the wrapper is what carries `hitSlop`.
+   */
   dot: {
-    position: 'absolute',
-    right: 2,
-    bottom: 2,
     width: DOT,
     height: DOT,
     borderRadius: DOT / 2,
     // Ring that separates the dot from the emoji (rail bg = surface).
     borderWidth: 2,
     borderColor: THEME.surface,
+  },
+  /** The idle dot: hollow muted ring, no fill (mirrors web `.car-rail-dot-idle`). */
+  dotIdle: {
+    backgroundColor: 'transparent',
+    borderColor: THEME.text_muted,
+    opacity: 0.5,
+  },
+  dotPress: {
+    position: 'absolute',
+    right: 2,
+    bottom: 2,
   },
   name: {
     fontSize: TYPOGRAPHY.caption.fontSize,

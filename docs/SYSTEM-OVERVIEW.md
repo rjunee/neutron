@@ -2510,6 +2510,113 @@ already renders are now LIT by real writers:
 
 See `docs/plans/2026-06-29-001-feat-work-board-master-plan.md` (§11 Phase 3/4).
 
+## Activity Inspector — the live under-the-hood panel behind the activity dot
+
+**The gap it closes.** The owner could not tell whether a project's agent session was
+working or hung. In Vajra the escape hatch was attaching to tmux; Neutron's sessions
+are server-side, so there was **no equivalent at all**. And the one signal that did
+exist is known-untrustworthy: ISSUES #386 is the per-project rail dot pulsing for DAYS
+on a real project while nothing ran. A binary "active" dot that has lied trains the
+owner to ignore it. Clicking the dot now opens a panel streaming the raw substrate +
+tool events for that scope in realtime, so "is it alive?" is checkable instead of
+inferred.
+
+**NOT the Work Board.** The board tracks work *items* and their statuses; this shows
+what the agent is doing *right now* and dies with the process. Sibling features, no
+overlap — do not collapse them.
+
+**LIVE-ONLY (Ryan-locked, SPEC § WAVE 3.5).** ~200 rows buffered in memory per scope.
+No persistence, no schema, no migration, no retention policy; scrollback is explicitly
+future scope. A restart legitimately shows an empty panel.
+
+### The two clocks — the design, not an implementation detail
+
+The naive version of this panel would reproduce #386 exactly. `pool.ts` runs a
+**synthetic liveness keepalive** that pushes `{kind:'status', message:'working'}` every
+~10 s for as long as the `claude` child is alive — *including while it is livelocked or
+parked on a wedged menu*. "Events are still arriving" therefore does NOT mean "work is
+happening". So the keepalive push carries an additive `keepalive?: boolean` marker
+(`runtime/events.ts`, same additive shape as `code` on `error`), and every scope keeps
+**two** timestamps:
+
+- `last_event_at` — ANY event, keepalive included ⇒ the **process** is alive.
+- `last_real_activity_at` — keepalive EXCLUDED ⇒ **work** actually happened.
+
+`deriveInspectorState` reads both and returns one of four states: `idle` (no turn in
+flight — the resting state, and it must never look like a hang), `working`, `wedged`
+(breathing but no real activity for `WEDGE_AFTER_MS` = 90 s — the #386 shape, and the
+state the whole feature exists to name), `dead` (not even a keepalive for
+`DEAD_AFTER_MS` = 30 s). `idle` is checked FIRST because a resting scope's clocks are
+stale by definition. `turnStarted` records a NON-synthetic `turn_start` row, which is
+what floors the wedge window: a turn whose only subsequent traffic is keepalives is
+still detectable as stalled. A one-clock inspector can express none of this.
+
+### Two server-side taps, because one is not enough
+
+1. **The substrate event stream**, teed at the ONE drain —
+   `runtime/substrate-text.ts` `DrainOptions.onEvent`. This was previously the end of
+   the line: `status` / `thinking` / `tool_call` / `tool_result_ack` fell off the
+   bottom of the if-chain and were discarded, so nothing in the process ever saw them.
+   Threaded `build-live-agent-turn.ts` → `collectTokensToString` (4th arg) → the drain,
+   scoped to `turn.project_id ?? 'general'` and bracketed by
+   `turn_started`/`turn_finished`. Observe-only: a throw is swallowed at both the
+   runner and the drain, so a broken inspector can never cost the owner a turn.
+2. **A Pre/PostToolUse hook** — `runtime/adapters/claude-code/persistent/hooks/activity-tap.ts`
+   → the loopback sink's `/activity` route → the composer's late-bound
+   `setReplActivityTap` closure. **This is where the panel's real content comes from.**
+   The persistent-REPL adapter's 1:1 bridge emits ONE whole-reply `token` and no tool
+   events whatsoever, so the event stream alone can only ever say "alive", never
+   "running Bash". The hook is wired on both phases with an unscoped matcher
+   (`build-settings.ts` `activityTap`), APPENDING to the TodoWrite→board `PostToolUse`
+   group rather than replacing it. `PreToolUse` gives "started Bash: bun test";
+   `PostToolUse` gives "finished Bash" — and a `pre` with no matching `post` for
+   minutes IS the hang signal. Gated on `enableToolBridge`, so the disposable Trident
+   build REPLs and the untrusted history-import REPL never report onto the owner's
+   panel. Fail-soft throughout: missing env, bad input or a dead sink all exit 0.
+
+### Surfaces
+
+- **Server:** `open/activity-inspector.ts` (the ring + the pure derivations; a `Map`
+  and a few functions, no SQLite), constructed once in `open/composer.ts` and shared by
+  all three seams. Live push: a new `activity_event` app-ws frame
+  (`wire-types/app-ws-envelope.ts`) fanned to the base user topic AND every live
+  `app:<user>:*` topic — the same reason `fanProjectsChanged` does it, since a web
+  client inside a project holds only the project-scoped socket. Web and mobile share
+  the transport (`resolveChannelTopicId` takes no platform argument), so one wire
+  change lands both.
+- **Snapshot read:** `GET /api/app/projects/<id>/activity` + `GET /api/app/activity`
+  (General) — `gateway/http/activity-surface.ts`, bearer-gated, read-only, served via
+  the `appActivity` slot in `gateway/http/route-slots.ts`. Load-bearing, not a
+  convenience: a wedged session emits nothing, so a purely-live panel would open BLANK
+  on exactly the session the owner is worried about and could not say how long ago the
+  last event was.
+- **Web:** `landing/chat-react/ActivityInspectorPanel.tsx` + `activity-client.ts`,
+  mounted at the ProjectShell root (the rail is visible on every tab, so the check must
+  be too). CSS `.car-actin-*` in `landing/chat-react.html`.
+- **Mobile:** `app/components/ActivityInspectorDrawer.tsx` + `app/lib/activity-client.ts`,
+  mounted beside `ProjectSettingsDrawer` in `app/app/projects/[id]/_layout.tsx`, using
+  the locked built-in-`Animated` drawer contract.
+- Both clients subscribe BEFORE fetching (so no row is lost in the gap) and dedupe on
+  `seq` (which is what makes that overlap safe), and both age their clocks forward
+  against the client clock every second — a frozen "12s ago" would be the same lie as
+  a frozen dot.
+
+### The dot is the entry point — and it is now always present
+
+Ryan-locked: **no new icon**. `railDotClass` (web) / `railDotKind` (mobile) are now
+TOTAL — they previously returned `null` for an idle scope and for General, which would
+have made the affordance disappear exactly when the owner wants it. An idle scope gets
+a quiet hollow ring (`.car-rail-dot-idle` / `dotIdle`), so an idle session is visually
+distinct from a wedged one and remains clickable. General gets a dot too: it is a real
+chat scope with its own warm session. General still never shows ATTENTION (no bound
+runs) — it degrades to idle. On web the dot is a `role="button"` span inside the row's
+existing `<button>` (a nested `<button>` would be invalid HTML) with
+`stopPropagation`, so a dot tap inspects and does not also navigate; on mobile it is a
+nested `Pressable` with `hitSlop`.
+
+The chat surface keeps showing only its minimal curated messages — that terseness is
+correct and stays. This is a separate surface.
+
 ## Create Project affordance — project rail + create-project capability
 
 On a fresh install a skip-import owner had **no user-initiated way to create a

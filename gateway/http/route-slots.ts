@@ -482,6 +482,17 @@ export const ROUTE_SLOTS = [
     promote: (c) => pluckHandler(c.app_work_board_surface),
     dispatch: (v: SurfaceHandler, ctx) => v.handler(ctx.req),
   }),
+  // 0h1b2. ACTIVITY INSPECTOR snapshot (SPEC § WAVE 3.5) —
+  //        `GET /api/app/projects/<id>/activity` + `GET /api/app/activity`
+  //        (General). The panel's on-open read; the live rows arrive over app-ws.
+  slot({
+    key: 'appActivity',
+    rung: 'app-activity',
+    composition: 'app_activity_surface',
+    gated: true,
+    promote: (c) => pluckHandler(c.app_activity_surface),
+    dispatch: (v: SurfaceHandler, ctx) => v.handler(ctx.req),
+  }),
   // 0h1c. Per-project credential CRUD (Settings tab) —
   //       `/api/app/projects/<id>/credentials[/<service>]`.
   slot({

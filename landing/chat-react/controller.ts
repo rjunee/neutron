@@ -30,6 +30,7 @@ import { groupReactions } from '@neutronai/chat-core'
 
 import type { ProjectTab } from './config.ts'
 import { parseWorkBoardItems, type WorkBoardItem } from './work-board-client.ts'
+import { parseActivityRow, type ActivityRow } from './activity-client.ts'
 import type {
   ChatMessage,
   ChatMessageOption,
@@ -459,6 +460,16 @@ export class NeutronChatController {
   private readonly workBoardListeners = new Set<
     (items: WorkBoardItem[], projectId: string | undefined) => void
   >()
+  /**
+   * ACTIVITY INSPECTOR live-row subscribers (the `ActivityInspectorPanel`).
+   * Deliberately OUT-OF-BAND of the chat vm and of `publish()`: these rows arrive
+   * on a ~10 s keepalive cadence plus one per tool call, and re-rendering the whole
+   * chat transcript on each would be a real regression for a feature whose only
+   * job is to be watchable. The panel owns its own list.
+   */
+  private readonly activityListeners = new Set<
+    (scopeKey: string, ev: ActivityRow) => void
+  >()
   /** Last board snapshot seen on a frame, replayed to a late subscriber. */
   private lastWorkBoard: WorkBoardItem[] | null = null
   /** The project the cached snapshot belongs to (the frame's `project_id`), so a
@@ -711,6 +722,24 @@ export class NeutronChatController {
   }
 
   /**
+   * ACTIVITY INSPECTOR — subscribe to live `activity_event` rows. The callback
+   * receives the frame's `scope_key` (a project id, or `'general'`) with each row;
+   * the subscriber MUST filter on it, because the app-ws topic is per-user and a
+   * sibling project's rows arrive on this same socket (identical hazard to
+   * `onWorkBoardChanged`).
+   *
+   * NOT replayed to a late subscriber, on purpose: the panel loads its backlog
+   * from the HTTP snapshot on open (which also carries the state + the two clocks),
+   * and replaying one stale row would be strictly worse than nothing.
+   */
+  onActivityEvent(fn: (scopeKey: string, ev: ActivityRow) => void): () => void {
+    this.activityListeners.add(fn)
+    return () => {
+      this.activityListeners.delete(fn)
+    }
+  }
+
+  /**
    * Optimistically send a user message. Sets the typing indicator immediately
    * (so the UI feels instant), tags it with the active project, and lets the
    * session own the durable enqueue + flush. The optimistic bubble renders via
@@ -910,6 +939,24 @@ export class NeutronChatController {
     // Work Board live snapshot — the server fans the FULL board after every
     // committed mutation (agent tool or human HTTP write). Parse + cache it and
     // fan it to the board-tab subscribers ONLY (out-of-band of the chat vm).
+    // ACTIVITY INSPECTOR live row (SPEC § WAVE 3.5). Fanned to the inspector-panel
+    // subscribers ONLY — never `publish()`, so a 10 s keepalive tick cannot
+    // re-render the chat transcript. Validated defensively (the panel renders
+    // `label`/`detail` as text) and dropped outright when malformed.
+    if (type === 'activity_event') {
+      const scopeKey = typeof f['scope_key'] === 'string' ? (f['scope_key'] as string) : ''
+      const row = parseActivityRow(f['event'])
+      if (scopeKey.length > 0 && row !== null) {
+        for (const fn of this.activityListeners) {
+          try {
+            fn(scopeKey, row)
+          } catch {
+            /* a throwing panel subscriber must not wedge the frame loop */
+          }
+        }
+      }
+      return
+    }
     if (type === 'work_board_changed') {
       const items = parseWorkBoardItems(f['items'])
       const framePid =

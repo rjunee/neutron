@@ -207,6 +207,7 @@ export type OpenComposition = CompositionInput &
       | 'app_tabs_surface'
       | 'app_projects_surface'
       | 'app_work_board_surface'
+      | 'app_activity_surface'
       | 'app_project_credentials_surface'
       | 'app_codex_credential_surface'
       | 'codex_credential'
@@ -294,6 +295,20 @@ import {
   type AppWsOutboundWorkBoardChanged,
 } from '@neutronai/channels/adapters/app-ws/envelope.ts'
 import { createWorkBoardSurface } from '@neutronai/gateway/http/work-board-surface.ts'
+// ACTIVITY INSPECTOR (SPEC § WAVE 3.5) — the live-only per-scope event ring, its
+// read surface, and the late-bound runtime tap the Pre/PostToolUse hook reaches.
+import { createActivitySurface } from '@neutronai/gateway/http/activity-surface.ts'
+import {
+  ActivityInspector,
+  activityRowFromSubstrateEvent,
+  activityRowFromToolTap,
+  inspectorScopeKey,
+} from './activity-inspector.ts'
+import type { AppWsOutboundActivityEvent } from '@neutronai/wire-types'
+import {
+  setReplActivityTap,
+  type ReplActivityTap,
+} from '@neutronai/runtime/adapters/claude-code/persistent/persistent-repl-substrate.ts'
 import { classifyWorkBoardTaskType } from '@neutronai/work-board/task-type-classifier.ts'
 import { buildWorkBoardChatAck } from '@neutronai/work-board/chat-ack.ts'
 import { createProjectCredentialsSurface } from '@neutronai/gateway/http/project-credentials-surface.ts'
@@ -2773,6 +2788,61 @@ export function buildOpenGraphComposer(
     // store could exist) to the canonical store now that it's constructed.
     dispatchBoardHolder.bind(workBoardStore)
 
+    // ── ACTIVITY INSPECTOR (SPEC § WAVE 3.5) ──────────────────────────────────
+    // The live-only event ring behind the clickable activity dot. Constructed
+    // HERE, once, and shared by all three of its seams: the substrate drain tee
+    // (`appWsChatTurn`'s `activityInspector`), the Pre/PostToolUse tool tap (via
+    // the late-bound runtime sink ref), and the read surface below. One store, so
+    // the HTTP snapshot and the live push can never disagree.
+    //
+    // NOT the Work Board. The board tracks work ITEMS and their statuses; this
+    // shows what the agent is doing RIGHT NOW and dies with the process.
+    const activityInspector = new ActivityInspector({
+      onRecord: (scope, ev): void => {
+        // Live push. Fanned to the base user topic AND every live project-scoped
+        // topic for the SAME reason `fanProjectsChanged` does it: a web client
+        // sitting inside a project holds only the project-scoped socket, so a
+        // user-topic-only send never reaches it. Mobile shares this transport (the
+        // `platform === 'web'` topic gate was deleted — see
+        // `gateway/http/app-ws-surface.ts` `resolveChannelTopicId`), so one wire
+        // change lands both surfaces.
+        const frame: AppWsOutboundActivityEvent = {
+          v: 1,
+          type: 'activity_event',
+          scope_key: scope,
+          event: ev,
+          ts: ev.at,
+        }
+        try {
+          appWsRegistry.send(appWsTopicId(OWNER_USER_ID), frame)
+          const base = `${appWsTopicId(OWNER_USER_ID)}:`
+          for (const topic of appWsRegistry.topics()) {
+            if (topic.startsWith(base)) appWsRegistry.send(topic, frame)
+          }
+        } catch {
+          // A dead socket must never break the recording path — the buffer is the
+          // source of truth and the panel re-reads it over HTTP on open.
+        }
+      },
+    })
+    // The tool tap: `activity-tap.ts` (a Pre/PostToolUse hook running in the CC
+    // subprocess) POSTs each tool start/finish to the substrate sink's `/activity`
+    // route, which dispatches this closure. THIS is where the panel's real content
+    // comes from — the substrate `Event` stream carries no tool events at all (the
+    // persistent-REPL bridge emits one whole-reply `token` and nothing else), so
+    // without this tap the panel could only say "alive", never "running Bash".
+    const wiredActivityTap: ReplActivityTap = ({ project_id, phase, tool_name, detail }): void => {
+      activityInspector.record(
+        inspectorScopeKey(project_id),
+        activityRowFromToolTap({ phase, tool_name, detail }),
+      )
+    }
+    setReplActivityTap(wiredActivityTap)
+    const activitySurface = createActivitySurface({
+      inspector: activityInspector,
+      auth: appOwnerAuth,
+    })
+
     // Per-project credential store: the ONE canonical instance is constructed
     // above (before mountOpenCores) so the Cores' credential resolver + this
     // CRUD surface + the awareness injection all share it. Mount the CRUD surface.
@@ -3427,6 +3497,24 @@ export function buildOpenGraphComposer(
       liveAgentSubstrate !== null
         ? buildLiveAgentTurn({
             substrate: liveAgentSubstrate,
+            // ACTIVITY INSPECTOR — tee EVERY substrate event for the live chat turn
+            // into the shared ring, and bracket the dispatch so the inspector can
+            // tell a resting `idle` session from a `wedged` one. This is the seam
+            // that was previously the end of the line: the drain consumed the
+            // stream purely to decide alive-vs-wedged and discarded every event, so
+            // nothing forwarded them to any client.
+            activityInspector: {
+              on_event: (scope, ev): void => {
+                const row = activityRowFromSubstrateEvent(
+                  ev as Parameters<typeof activityRowFromSubstrateEvent>[0],
+                )
+                if (row !== null) activityInspector.record(inspectorScopeKey(scope), row)
+              },
+              turn_started: (scope): void =>
+                activityInspector.turnStarted(inspectorScopeKey(scope)),
+              turn_finished: (scope): void =>
+                activityInspector.turnFinished(inspectorScopeKey(scope)),
+            },
             personaLoader,
             projectPersonaResolver,
             reflection,
@@ -4297,6 +4385,12 @@ export function buildOpenGraphComposer(
       // (`/api/app/projects/<id>/work-board`), bearer-gated like the tabs
       // surface, dispatching the same canonical WorkBoardStore the agent uses.
       app_work_board_surface: { handler: workBoardSurface.handler },
+      // ACTIVITY INSPECTOR — the panel's on-open read
+      // (`GET /api/app/projects/<id>/activity`, `GET /api/app/activity` for
+      // General), bearer-gated like the tabs/work-board surfaces. Serving this is
+      // what makes the panel reachable in a real install rather than merely built:
+      // the route reaches the ladder via `route-slots.ts`'s `appActivity` slot.
+      app_activity_surface: { handler: activitySurface.handler },
       // Per-project credential CRUD (`/api/app/projects/<id>/credentials`),
       // bearer-gated, dispatching the canonical ProjectCredentialStore.
       app_project_credentials_surface: { handler: projectCredentialsSurface.handler },

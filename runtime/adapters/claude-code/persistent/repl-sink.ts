@@ -2,7 +2,13 @@
 // Late-bound tool-bridge accessors + the reply-sink coordinates accessor
 // (D2 split). The ReplToolBridge/sink singletons live in pool-state.ts (D1).
 
-import { type ReplToolBridge, replToolBridgeRef, sink, todoSyncRef } from './pool-state.ts'
+import {
+  activityTapRef,
+  type ReplToolBridge,
+  replToolBridgeRef,
+  sink,
+  todoSyncRef,
+} from './pool-state.ts'
 
 // ---------------------------------------------------------------------------
 // P0-1 native-MCP tool bridge — late-bound dispatcher.
@@ -62,6 +68,36 @@ export function setReplTodoSync(fn: ReplTodoSync | undefined): void {
  *  process can't null the live graph's reconciler). */
 export function clearReplTodoSyncIf(fn: ReplTodoSync): void {
   if (todoSyncRef.current === fn) todoSyncRef.current = undefined
+}
+
+// ---------------------------------------------------------------------------
+// Activity Inspector tool tap — late-bound recorder.
+//
+// Third instance of the same accessor pattern as the tool bridge + todo sync
+// above. `composeProductionGraph` wires a closure that records the tool row into
+// the in-memory inspector buffer and fans an app-ws frame; the sink's `/activity`
+// route (POSTed by the Pre/PostToolUse `activity-tap.ts` hook) reads it. Kept as
+// a plain synchronous `void` so the hook POST cannot become tool-call latency.
+// ---------------------------------------------------------------------------
+
+export type ReplActivityTap = (input: {
+  project_id: string | null
+  phase: 'pre' | 'post'
+  tool_name: string
+  detail: string
+}) => void
+
+/** Wire (or clear, with `undefined`) the in-process Activity Inspector recorder
+ *  the `/activity` sink route dispatches to. Called once by the graph compose,
+ *  and with `undefined` on graph shutdown. */
+export function setReplActivityTap(fn: ReplActivityTap | undefined): void {
+  activityTapRef.current = fn
+}
+
+/** Identity-guarded clear (mirrors `clearReplTodoSyncIf`) so a second graph's
+ *  teardown in the same process can't null the live graph's recorder. */
+export function clearReplActivityTapIf(fn: ReplActivityTap): void {
+  if (activityTapRef.current === fn) activityTapRef.current = undefined
 }
 
 // ---------------------------------------------------------------------------

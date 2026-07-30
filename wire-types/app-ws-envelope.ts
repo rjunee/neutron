@@ -463,6 +463,44 @@ export interface AppWsOutboundOnboardingCompleted {
   ts: number
 }
 
+/**
+ * ACTIVITY INSPECTOR — one live event row for a scope's agent session (SPEC §
+ * WAVE 3.5). Emitted as each row is recorded, so the panel ticks in realtime while
+ * a turn runs. LIVE-ONLY: there is no persistence behind this and no scrollback
+ * beyond the server's ~200-row in-memory ring, which the panel fetches once over
+ * HTTP on open (a WEDGED session emits nothing, so the snapshot — not this frame —
+ * is what lets the panel say how long ago the last event was).
+ *
+ * `synthetic: true` marks the substrate's periodic liveness KEEPALIVE. Clients MUST
+ * render it distinctly and MUST NOT treat it as work: it fires for as long as the
+ * `claude` child is alive, including while livelocked, which is exactly how the rail
+ * dot came to pulse for days with nothing running (ISSUES #386).
+ */
+export interface AppWsOutboundActivityEvent {
+  v: 1
+  type: 'activity_event'
+  /** Project id, or `'general'` for the no-project General scope. */
+  scope_key: string
+  event: {
+    seq: number
+    at: number
+    kind:
+      | 'tool_start'
+      | 'tool_end'
+      | 'token'
+      | 'thinking'
+      | 'status'
+      | 'keepalive'
+      | 'completion'
+      | 'error'
+      | 'turn_start'
+    label: string
+    detail?: string
+    synthetic?: boolean
+  }
+  ts: number
+}
+
 export type AppWsOutbound =
   | AppWsOutboundSessionReady
   | AppWsOutboundUserMessageEcho
@@ -474,6 +512,7 @@ export type AppWsOutbound =
   | AppWsOutboundProjectsChanged
   | AppWsOutboundWorkBoardChanged
   | AppWsOutboundOnboardingCompleted
+  | AppWsOutboundActivityEvent
   | AppWsOutboundAgentTyping
   | AppWsOutboundImportProgress
   | AppWsOutboundError

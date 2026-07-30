@@ -55,6 +55,9 @@ import { SettingsTab } from './SettingsTab.tsx'
 import { useTabOverflow, OverflowMenu } from './tab-overflow.tsx'
 import { useWorkActivity, JobStartDrawer } from './work-activity.tsx'
 import { ThemeToggle } from './ThemeToggle.tsx'
+// ACTIVITY INSPECTOR (SPEC § WAVE 3.5) — the panel behind the clickable rail dot.
+import { ActivityInspectorPanel } from './ActivityInspectorPanel.tsx'
+import { WebActivityClient, type ActivityRow } from './activity-client.ts'
 import type { ChatViewModel } from './controller.ts'
 import type { NeutronChatController } from './controller.ts'
 import type { BootstrapConfig } from './config.ts'
@@ -296,6 +299,40 @@ export function ProjectShell({
       ),
     [config.origin, config.token, fetchImpl],
   )
+
+  // ACTIVITY INSPECTOR (SPEC § WAVE 3.5) — the panel opened by the rail's
+  // clickable activity dot. Lives at the SHELL root, not inside the Chat tab body,
+  // because the rail (its entry point) lives here and is visible on every tab: the
+  // owner must be able to check "hung or working?" from Documents or Plan too.
+  //
+  // `activityScope` holds the OPEN scope (a project id, or null for General) and
+  // `activityOpen` distinguishes "open on General" from "closed" — null is a
+  // meaningful scope, so it cannot double as the closed sentinel.
+  const [activityOpen, setActivityOpen] = useState(false)
+  const [activityScope, setActivityScope] = useState<string | null>(null)
+  const activityClient = useMemo(
+    () =>
+      new WebActivityClient(
+        fetchImpl !== undefined
+          ? { base_url: config.origin, token: config.token, fetchImpl }
+          : { base_url: config.origin, token: config.token },
+      ),
+    [config.origin, config.token, fetchImpl],
+  )
+  // The panel's data source: HTTP snapshot from the client + live rows from the
+  // controller's out-of-band `activity_event` subscription.
+  const activitySource = useMemo(
+    () => ({
+      snapshot: (projectId: string | null) => activityClient.snapshot(projectId),
+      onActivityEvent: (fn: (scopeKey: string, ev: ActivityRow) => void) =>
+        controller.onActivityEvent(fn),
+    }),
+    [activityClient, controller],
+  )
+  const activityLabel =
+    activityScope === null
+      ? 'General'
+      : (vm.projects.find((p) => p.id === activityScope)?.label ?? activityScope)
 
   const [tabs, setTabs] = useState<TabDescriptor[]>([CHAT_TAB])
   const [activeKey, setActiveKey] = useState<string>(CHAT_KEY)
@@ -553,6 +590,20 @@ export function ProjectShell({
         onSelect={(id) => controller.setProject(id)}
         onCreate={onCreateProject}
         creating={creatingProject}
+        onOpenActivity={(id) => {
+          setActivityScope(id)
+          setActivityOpen(true)
+        }}
+      />
+      {/* The Activity Inspector overlay. Mounted at the shell root so it can sit
+          above the rail + tab band, and rendered only while open (it discards its
+          rows on close — the server ring is the only history). */}
+      <ActivityInspectorPanel
+        source={activitySource}
+        projectId={activityScope}
+        label={activityLabel}
+        open={activityOpen}
+        onClose={() => setActivityOpen(false)}
       />
       <div className="car-content">
         {/* Tab band (seated tabs): the workspace-identity seat (title), then the
