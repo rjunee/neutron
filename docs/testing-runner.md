@@ -46,6 +46,29 @@ Lane membership is **content-derived** — any test file that mentions `pglite` 
 quarantined automatically, so a new PGLite test needs no allowlist edit. Coverage
 is unchanged: lane files are still counted in the audit (`RAN_TOTAL`).
 
+## The device-harness isolation lane
+
+The mobile device harness (`app/__tests__/support/native-harness.ts`) registers a
+happy-dom DOM and aliases `react-native` for the whole **process**. That cannot
+share a process with the rest of the suite, and none of the reasons are fixable
+from the harness side:
+
+- `landing`'s happy-dom tests call `GlobalRegistrator.register()` unconditionally,
+  and it **throws** when a DOM is already registered — so whichever runs second
+  fails;
+- several app tests own the `react-native` specifier with process-global
+  `mock.module` fakes;
+- a DOM the harness registered cannot be unregistered again without breaking the
+  harness files still queued in that same process.
+
+Mixed into a general chunk this produced **68 failures across three CI shards**, all
+in unrelated packages. So harness files get their own process, exactly like the
+PGLite lane. Membership is content-derived (any file mentioning
+`installNativeHarness`), so a new harness suite is isolated automatically, and lane
+files still count toward the coverage audit.
+
+No retry budget: unlike the WASM lane these are deterministic, not flaky.
+
 ## Knobs
 
 | Env | Default | What it does |
@@ -59,6 +82,7 @@ is unchanged: lane files are still counted in the audit (`RAN_TOTAL`).
 | `NEUTRON_TEST_PGLITE_CONCURRENCY` | `1` | `--max-concurrency` for the lane |
 | `NEUTRON_TEST_PGLITE_TIMEOUT` | `90000` | per-test timeout (ms) for the lane (real-WASM boots use 60s internally) |
 | `NEUTRON_TEST_NO_PGLITE_LANE` | `0` | set `=1` to fold PGLite files back into general chunks |
+| `NEUTRON_TEST_NO_DEVICE_LANE` | `0` | set `=1` to fold the mobile-harness files back into general chunks (expect DOM / module-registry collisions) |
 
 Rough model: **peak RSS ≈ `JOBS` × `CHUNK_SIZE` × per-file working set.**
 Lower `CHUNK_SIZE` and `JOBS` to bound memory; raise `JOBS` to trade memory for
@@ -91,6 +115,14 @@ Lowers intra-chunk parallelism (fewer tests in flight inside one process).
 NEUTRON_TEST_NO_PGLITE_LANE=1 bash scripts/run-tests.sh   # fold back into general
 NEUTRON_TEST_PGLITE_RETRIES=4 bash scripts/run-tests.sh   # more patience on a hot box
 ```
+
+### Running a device-harness file on its own
+```bash
+bun test app/__tests__/mobile-chat-send-on-device.test.tsx
+```
+A bare single-file `bun test` is always safe — the collisions only happen when a
+harness file shares a process with the rest of the suite. Do NOT set
+`NEUTRON_TEST_NO_DEVICE_LANE=1` expecting green.
 
 ## Exit codes
 

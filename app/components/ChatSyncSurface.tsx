@@ -24,7 +24,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
-  KeyboardAvoidingView,
   Linking,
   Platform,
   Pressable,
@@ -33,7 +32,7 @@ import {
   TextInput,
   View,
 } from 'react-native';
-import { FlashList } from '@shopify/flash-list';
+import { FlashList, type FlashListRef } from '@shopify/flash-list';
 import { useRouter } from 'expo-router';
 import * as DocumentPicker from 'expo-document-picker';
 
@@ -63,6 +62,7 @@ import { useUploadState } from '../lib/use-upload-state';
 import { classifyUploadKind } from '../lib/upload-client';
 import { selectDropFiles, shouldGateUpload } from '../lib/upload-gate';
 import { BUBBLE_MAX_WIDTH } from '../lib/chat-bubble-metrics';
+import { useKeyboardInset } from '../lib/use-keyboard-inset';
 
 /** Quick-reaction palette the long-press tray offers (Track B Phase 4). */
 const QUICK_REACTIONS = ['👍', '❤️', '😂', '🎉', '🙏', '🔥'] as const;
@@ -102,6 +102,7 @@ export function ChatSyncSurface({
     ready,
     hydrated,
     send,
+    sendError,
     markRead,
     react,
     editMessage,
@@ -146,7 +147,7 @@ export function ChatSyncSurface({
     if (initialAutosend === undefined || initialAutosend.length === 0) return;
     if (status !== 'open') return;
     autosendDispatched.current = true;
-    send(initialAutosend);
+    void send(initialAutosend);
   }, [initialAutosend, status, send]);
 
   const onToggleReaction = useCallback(
@@ -195,7 +196,7 @@ export function ChatSyncSurface({
     onImageUploaded: async (url: string) => {
       // Canonical image handoff: a user message whose body is empty and whose
       // attachments[] carries the uploaded URL (the gateway echo reconciles).
-      send('', [url]);
+      await send('', [url]);
     },
   });
 
@@ -263,8 +264,12 @@ export function ChatSyncSurface({
     async ({ body }: { body: string; attachments: ComposerAttachment[] }): Promise<boolean> => {
       // Inline composer attachments are routed through the upload modal
       // (`onFilesPicked`), so the send path only carries text here.
-      send(body);
-      return true;
+      //
+      // The RESULT IS RETURNED, not discarded: `InputComposer` clears its draft
+      // only on `true`, so a send that could not be queued leaves the owner's
+      // text in the box. Returning a hardcoded `true` (what this used to do) meant
+      // a dropped message ALSO destroyed what he typed.
+      return await send(body);
     },
     [send],
   );
@@ -395,12 +400,33 @@ export function ChatSyncSurface({
     [markRead],
   );
 
+  // KEYBOARD AVOIDANCE. `KeyboardAvoidingView` cannot do this job here: it
+  // measures itself PARENT-relative, and this surface is nested under the shell's
+  // status-bar padding + the project header + the tab bar, so it under-padded by
+  // exactly that chrome and the keyboard covered the composer outright. The
+  // window-space measurement below is depth-independent. See
+  // `lib/keyboard-inset.ts` for the arithmetic and the incident.
+  const { inset: keyboardInset, containerRef } = useKeyboardInset();
+  const listRef = useRef<FlashListRef<RenderRow> | null>(null);
+  // Rising keyboard → stay on the newest message. `maintainVisibleContentPosition`
+  // holds position through content changes, which is NOT the same as following
+  // the bottom when the viewport itself shrinks.
+  const prevInset = useRef(0);
+  useEffect(() => {
+    const grew = keyboardInset > prevInset.current;
+    prevInset.current = keyboardInset;
+    if (grew) listRef.current?.scrollToEnd?.({ animated: true });
+  }, [keyboardInset]);
+
   return (
-    <KeyboardAvoidingView
-      style={styles.fill}
-      behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-    >
-      <StatusStrip status={status} pendingCount={pendingCount} />
+    // OUTER view: measured, and deliberately NEVER padded — padding it would move
+    // the very edge whose position produced the padding.
+    <View style={styles.fill} ref={containerRef} collapsable={false}>
+      <View
+        style={[styles.fill, keyboardInset > 0 ? { paddingBottom: keyboardInset } : null]}
+        testID="chat-keyboard-inset"
+      >
+      <StatusStrip status={status} pendingCount={pendingCount} sendError={sendError} />
       {dropMultiFileHint !== null ? (
         <View style={styles.dropMultiFileHint} testID="chat-drop-multi-file-hint">
           <Text style={styles.dropMultiFileHintText}>{dropMultiFileHint}</Text>
@@ -412,6 +438,7 @@ export function ChatSyncSurface({
         </View>
       ) : (
         <FlashList
+          ref={listRef}
           data={rows}
           renderItem={renderItem}
           keyExtractor={keyForRow}
@@ -456,7 +483,8 @@ export function ChatSyncSurface({
         onRetry={upload.retry}
         onDismiss={upload.dismiss}
       />
-    </KeyboardAvoidingView>
+      </View>
+    </View>
   );
 }
 
@@ -785,14 +813,32 @@ function EmptyState(): React.JSX.Element {
   );
 }
 
-/** Connection + offline-queue strip. Hidden when fully connected + flushed. */
+/**
+ * Connection + offline-queue strip. Hidden when fully connected + flushed.
+ *
+ * `sendError` OUTRANKS the connection label. A message that could not even be
+ * queued locally produced no bubble at all, so this strip is the ONLY place the
+ * owner can learn it happened — and a cheerful (or absent) connection line over
+ * a silently-dropped message is exactly the lie that let mobile chat ship broken.
+ */
 function StatusStrip({
   status,
   pendingCount,
+  sendError,
 }: {
   status: ConnStatus;
   pendingCount: number;
+  sendError: string | null;
 }): React.JSX.Element | null {
+  if (sendError !== null) {
+    return (
+      <View style={styles.statusStrip} testID="chat-send-error">
+        <Text style={[styles.statusText, { color: THEME.danger }]} accessibilityRole="alert">
+          {sendError}
+        </Text>
+      </View>
+    );
+  }
   const label = statusLabel(status, pendingCount);
   if (label === null) return null;
   const tone = status === 'open' ? THEME.text_muted : THEME.warning;

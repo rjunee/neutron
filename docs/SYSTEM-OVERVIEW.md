@@ -3849,6 +3849,38 @@ indicator. No feature flags — one live path.
   `SPACING.md` gutter each side, so the percentage applies to a row (297pt on a 393pt
   phone) that is already narrower than an iMessage bubble is allowed to be; 90% keeps
   a ~30pt far-side gutter, which is what carries the left/right speaker distinction.
+- **Client ids: `chat-core/ids.ts` `randomId()`, and NOTHING may call WebCrypto
+  directly (2026-07-29).** `crypto` IS NOT A GLOBAL on the mobile runtime — RN 0.81
+  installs none and Expo SDK 54's WinterCG shim stops at `TextDecoder`/`URL`/
+  `structuredClone` (`expo/src/winter/runtime.native.ts`). `SendQueue`'s default id
+  generator called `crypto.randomUUID()`, so `enqueue()` threw before writing the
+  optimistic row and mobile chat had **never delivered a single message** — no
+  bubble, no frame, no server row, no log, because `use-mobile-chat` swallowed the
+  rejection with `void`. Six other client call sites had each hand-rolled the same
+  guard; the seventh, on the send path and shared with the browser where the bug is
+  invisible, did not. Now: one generator
+  (`crypto.randomUUID` → `getRandomValues` → `Math.random`, never throws), and
+  `chat-core/__tests__/no-direct-webcrypto.test.ts` fails the build on any direct
+  WebCrypto call in `chat-core/`, `app/lib`, `app/app`, `app/components` or
+  `landing/chat-react`.
+- **A send that cannot be queued is VISIBLE (2026-07-29).** `useMobileChat.send`
+  returns `Promise<boolean>` and sets `sendError`, which `StatusStrip` renders above
+  the connection label; `InputComposer` keeps the owner's draft when it is false. A
+  null session reports "Still connecting" instead of silently no-oping. The old
+  `void session?.send(...)` made every send failure indistinguishable from success,
+  which is what made the WebCrypto bug undiagnosable rather than merely present.
+- **Keyboard avoidance is MEASURED, not `KeyboardAvoidingView` (2026-07-29).**
+  `app/lib/keyboard-inset.ts` + `use-keyboard-inset.ts`: the surface's bottom edge is
+  read with `measureInWindow` (WINDOW coordinates, same space as the keyboard's
+  `endCoordinates.screenY`) and the overlap is applied as `paddingBottom` on an inner
+  child of the measured view. `KeyboardAvoidingView` measures itself PARENT-relative,
+  so nested under the shell's status-bar padding + `ProjectHeader` + `ProjectTabBar`
+  it under-padded by ~150pt — more than the composer's height, so the keyboard
+  covered the input entirely. The measured form is correct at any nesting depth and
+  self-corrects on Android (`adjustResize` shrinks the window first → overlap ≤ 0 →
+  no padding, no platform branch). iOS subscribes to `keyboardWillChangeFrame`, which
+  covers show/hide/height-change/interactive-dismiss in one listener and fires before
+  the animation.
 - **Verified on a real instance.** `open/__tests__/open-app-ws-durable-chatlog.test.ts`
   boots the REAL Open composition over `Bun.serve`, opens `/ws/app/chat`, and
   asserts #1–#6 on real (mocked-substrate) turns: echo+reply carry `seq` and
@@ -5621,3 +5653,88 @@ silent truncation. For a single file, bare `bun test <file>` is fine.
   per-file working set. Contended box / CI: `CHUNK_SIZE=60 JOBS=1` (bounded
   memory). Quiet dev box: `JOBS=4` (faster, more RAM). Full knob matrix +
   recipes in `docs/testing-runner.md`.
+
+## Mobile device-shaped test harness — `app/__tests__/support/native-harness.ts`
+
+**What it is for.** Until 2026-07-29 the app suite could not mount a single React
+Native component; ~1,200 app tests covered pure helpers and HTTP clients only, so
+the entire React WIRING layer was untested. That is how mobile chat shipped
+green-on-everything while having **never delivered one message from a phone**
+(`crypto.randomUUID()` in `SendQueue` on a runtime with no `crypto` global — see
+`docs/as-built/2026-07-29-mobile-send-webcrypto-and-keyboard-inset.md`). Unit
+tests, typecheck and lint cannot see a keyboard covering an input, a send that
+never fires, or a loading state that is never left. This harness can see two of
+those three.
+
+**How it works.** `installNativeHarness()` at the top of a test file, then load the
+code under test with `await import(...)` (the aliases only apply to imports
+evaluated after the call, so they must be dynamic). It registers happy-dom,
+installs a Bun plugin that aliases `react-native` → `react-native-web` plus inert
+stubs for the expo modules with no JS implementation, shims `globalThis.expo`, and
+fakes a viewport rect (happy-dom reports 0×0, which would make layout assertions
+vacuously green).
+
+Three capabilities carry most of the value:
+
+- **`withoutWebCrypto()`** — deletes `globalThis.crypto`, reproducing the device
+  runtime. Bun HAS WebCrypto, and that single difference is the entire reason the
+  send bug was invisible to every other gate.
+- **Settable `Platform.OS`** (`setHarnessPlatform('ios')`) — `ios`-only branches
+  actually execute instead of falling to the web path.
+- **A driveable `Keyboard` event bus** (in `support/stubs/react-native.ts`) —
+  react-native-web's `Keyboard` never emits, so subscribing to the real one would
+  make every keyboard assertion pass for no reason.
+
+`support/mount.tsx` supplies the interaction vocabulary: `type()` (through the
+prototype value setter, so React sees it), `press(accessibilityLabel)` — which
+THROWS when the control is absent or disabled, so an unreachable button fails the
+test — and `FakeChatSocket`, which records every outbound frame.
+
+**IT RUNS IN ITS OWN PROCESS — the device-harness isolation lane.** Registering a
+DOM and aliasing `react-native` are process-global acts that cannot coexist with the
+rest of the suite: `landing`'s happy-dom tests call `GlobalRegistrator.register()`
+unconditionally and it THROWS when a DOM already exists, several app tests own the
+`react-native` specifier with process-global `mock.module` fakes, and a registered
+DOM cannot be unregistered without breaking the harness files still queued in that
+process. Mixed into a general chunk this cost **68 failures across three CI shards**
+in unrelated packages. `scripts/run-tests.sh` therefore runs every file mentioning
+`installNativeHarness` in a dedicated lane, exactly like the PGLite-WASM quarantine
+lane; membership is content-derived so a new harness suite is isolated automatically,
+and lane files still count toward the coverage audit. `NEUTRON_TEST_NO_DEVICE_LANE=1`
+folds them back in and is expected to fail. A bare single-file `bun test` is always
+safe. Details: `docs/testing-runner.md`.
+
+**BELT AND BRACES INSIDE THE LANE.** The lane makes collisions impossible; these two
+rules make a harness file well-behaved anyway, which is what keeps a single-file run
+and any future co-tenant honest:
+
+1. `registerDomKeepingBunNetworking()` captures Bun's `fetch`/`Response`/`Request`/
+   `WebSocket`/`URL`/… before `GlobalRegistrator.register()` and restores them
+   straight after. The harness needs the DOM, not happy-dom's network stack; a
+   gateway test booting a real `Bun.serve` otherwise fails Bun's
+   `Expected a Response object` check.
+2. **Every harness suite MUST call `resetHarnessGlobals()` in `afterAll`** — it
+   restores `getBoundingClientRect`, the real `WebSocket` (a leftover
+   `FakeChatSocket` hangs the next file's real WS test until timeout) and
+   `Platform.OS`.
+
+The DOM registration itself is deliberately not undone: unregistering after
+react-native-web has captured browser globals would break harness files still to
+run in the same process.
+
+**It does not contest the `react-native` specifier.** Four existing app tests own
+it with process-global `mock.module('react-native', () => ({ View, Text, … }))`
+fakes, and Bun runs many test files per process, so whichever loads first breaks
+any later real component tree on the first omitted export. The harness rewrites
+`from 'react-native'` inside the app's own sources to its stub instead, which makes
+it order-independent. `native-harness-selfcheck.test.tsx` asserts the harness's own
+preconditions so a degraded harness fails loudly rather than silently turning the
+device suites into no-ops.
+
+**HONEST BOUNDARY — it is not a device.** No native layout, no real keyboard, no
+gestures, no Hermes semantics, nothing in the native binary. It proves WIRING and
+ARITHMETIC. Anything visual ("the composer is visible above the keyboard") stays a
+DEVICE claim and must be confirmed on a handset before being called done.
+
+Suites built on it: `mobile-chat-send-on-device.test.tsx` (submit → outbound frame
++ local bubble, with WebCrypto removed) and `chat-keyboard-avoidance.test.tsx`.

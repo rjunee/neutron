@@ -28,7 +28,12 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { AppState, type AppStateStatus } from 'react-native';
 import * as Notifications from 'expo-notifications';
 
-import type { ChatMessage, ConnStatus, ReactionAction } from '@neutronai/chat-core';
+import {
+  prefixedRandomId,
+  type ChatMessage,
+  type ConnStatus,
+  type ReactionAction,
+} from '@neutronai/chat-core';
 
 import { loadAppConfig } from '../config';
 import { appWsProjectTopicId, appWsTopicId } from '@neutronai/wire-types/topic-id.ts';
@@ -71,8 +76,29 @@ export interface UseMobileChatResult {
    * same — that is the whole complaint.
    */
   hydrated: boolean;
-  /** Send a user message (optimistic + offline-safe). */
-  send: (body: string, attachments?: readonly string[]) => void;
+  /**
+   * Send a user message (optimistic + offline-safe). Resolves `true` once the
+   * message is durably QUEUED locally — which is the point at which the owner can
+   * see it and it can no longer be lost — and `false` when it could not be
+   * queued at all.
+   *
+   * The boolean is load-bearing: the composer only clears its draft on `true`, so
+   * a send that fails leaves the typed text where the owner can retry it instead
+   * of destroying it silently.
+   */
+  send: (body: string, attachments?: readonly string[]) => Promise<boolean>;
+  /**
+   * Non-null when the LAST send could not even be queued locally — i.e. it
+   * produced no bubble, no frame and no row anywhere.
+   *
+   * WHY THIS EXISTS. `send` used to be `void session?.send(...)`: a null session
+   * was a silent no-op, and a rejected `enqueue` was an unobserved promise
+   * rejection. Both outcomes looked EXACTLY like a working app to the owner —
+   * which is how a `crypto.randomUUID()` that throws on the device runtime
+   * destroyed every mobile send for the life of the surface without producing
+   * one diagnosable symptom. A send that fails must be visible.
+   */
+  sendError: string | null;
   /** Report messages the user has viewed (Track B Phase 4 read receipts). */
   markRead: (messageIds: readonly string[]) => void;
   /** Add or remove an emoji reaction on a message (Track B Phase 4). */
@@ -98,12 +124,20 @@ export interface UseMobileChatResult {
 /** A per-session device id. Stability across launches isn't required for
  *  correctness here — the mobile UI only reports reads for AGENT messages
  *  (never the user's own sends), so a freshly-minted id can never light a
- *  sender's own read tick. */
+ *  sender's own read tick. Uses the ONE shared generator, which does not assume
+ *  a `crypto` global exists (it does not, on this runtime). */
 function makeDeviceId(): string {
-  const c = (globalThis as { crypto?: { randomUUID?: () => string } }).crypto;
-  if (c?.randomUUID !== undefined) return `dev-${c.randomUUID()}`;
-  return `dev-${Math.floor(Math.random() * 1e9).toString(36)}`;
+  return prefixedRandomId('dev');
 }
+
+/**
+ * What the owner is told when a send could not even be QUEUED. Deliberately
+ * blunt: the failure it reports used to be completely invisible (see
+ * {@link UseMobileChatResult.sendError}).
+ */
+export const SEND_FAILED_MESSAGE = 'Message not sent — your text is still in the box; try again';
+/** Shown when the composer is used before the chat session finished attaching. */
+export const SEND_NOT_READY_MESSAGE = 'Still connecting — message not sent';
 
 export function useMobileChat(railId: string): UseMobileChatResult {
   // The router hands us a RAIL id, which for General is a sentinel that only
@@ -123,6 +157,7 @@ export function useMobileChat(railId: string): UseMobileChatResult {
   const [status, setStatus] = useState<ConnStatus>('idle');
   const [pendingCount, setPendingCount] = useState(0);
   const [ready, setReady] = useState(false);
+  const [sendError, setSendError] = useState<string | null>(null);
   const [hydrated, setHydrated] = useState(false);
   const [selfDeviceId, setSelfDeviceId] = useState('');
 
@@ -264,17 +299,40 @@ export function useMobileChat(railId: string): UseMobileChatResult {
     return () => sub.remove();
   }, []);
 
-  const send = useCallback((body: string, attachments?: readonly string[]): void => {
-    const trimmed = body.trim();
-    const hasAttachments = attachments !== undefined && attachments.length > 0;
-    // An image attachment send carries an empty body (the attachment URL is the
-    // payload), so only bail when there's neither text NOR an attachment.
-    if (trimmed.length === 0 && !hasAttachments) return;
-    const opts: { project_id?: string; attachments?: readonly string[] } = {};
-    if (projectId.length > 0) opts.project_id = projectId;
-    if (hasAttachments) opts.attachments = attachments;
-    void sessionRef.current?.send(trimmed, opts);
-  }, [projectId]);
+  const send = useCallback(
+    async (body: string, attachments?: readonly string[]): Promise<boolean> => {
+      const trimmed = body.trim();
+      const hasAttachments = attachments !== undefined && attachments.length > 0;
+      // An image attachment send carries an empty body (the attachment URL is the
+      // payload), so only bail when there's neither text NOR an attachment.
+      if (trimmed.length === 0 && !hasAttachments) return false;
+      const opts: { project_id?: string; attachments?: readonly string[] } = {};
+      if (projectId.length > 0) opts.project_id = projectId;
+      if (hasAttachments) opts.attachments = attachments;
+      const session = sessionRef.current;
+      // NOT `session?.send(...)`. An absent session means the tap did nothing at
+      // all, and the owner has to be told — an optional chain here is a silent
+      // drop wearing the costume of a working app.
+      if (session === null) {
+        setSendError(SEND_NOT_READY_MESSAGE);
+        return false;
+      }
+      setSendError(null);
+      // NOT `void`. `send` awaits `queue.enqueue`, which writes the optimistic
+      // row; if that rejects there is no bubble, no frame and nothing in the log
+      // unless it is caught here. This is the exact hole a `crypto.randomUUID()`
+      // that throws on the device fell through for the life of the surface.
+      try {
+        await session.send(trimmed, opts);
+        return true;
+      } catch (err) {
+        console.error('[chat] send failed before the message could be queued:', err);
+        setSendError(SEND_FAILED_MESSAGE);
+        return false;
+      }
+    },
+    [projectId],
+  );
 
   const markRead = useCallback((messageIds: readonly string[]): void => {
     if (messageIds.length === 0) return;
@@ -322,6 +380,7 @@ export function useMobileChat(railId: string): UseMobileChatResult {
     ready,
     hydrated,
     send,
+    sendError,
     markRead,
     react,
     editMessage,
