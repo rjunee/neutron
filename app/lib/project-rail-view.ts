@@ -131,12 +131,18 @@ export type RailDotKind = 'work' | 'attention' | 'idle';
 /**
  * The activity dot for one rail entry.
  *
- * ALWAYS RETURNS A KIND — never null (SPEC § WAVE 3.5). The dot is now the ENTRY
+ * ALWAYS RETURNS A KIND — never null (SPEC § WAVE 3.5). The dot is the ENTRY
  * POINT to the Activity Inspector, and the acceptance is explicit that it stays
  * tappable when idle, because an idle session must be distinguishable from a
- * wedged one. A dot that disappears at rest cannot be tapped to learn which of the
- * two you are looking at, so the previous `idle → null` / `isGeneral → null`
- * behaviour is deliberately replaced by a quiet `idle` dot.
+ * wedged one — you have to be able to tap it to learn which of the two you are
+ * looking at. Hence no `idle → null` / `isGeneral → null` here.
+ *
+ * Note the split this function is careful NOT to make: `idle` is a real kind that
+ * keeps its touch target, but the mobile rail RENDERS it as nothing at all (see
+ * `ActivityDot` in `components/ProjectRail.tsx` — Ryan: "the pulsing dot should
+ * only show up if there's activity, otherwise nothing shows"). Tappability lives
+ * here; visibility lives in the component. Do not "simplify" this to return null
+ * for idle — that would delete the inspector's entry point along with the paint.
  *
  * General gets one too: it is a real chat scope with its own warm session, so it is
  * inspectable like any project. `isGeneral` stays in the signature because General

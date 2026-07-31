@@ -84,7 +84,10 @@ describe('the rail activity dot', () => {
     const screen = await mountRail('willow');
     // `acme` is inactive and carries `attention`; its dot must still be visible,
     // it simply must not be tappable. (Losing the dot would lose the at-a-glance
-    // rail state this whole affordance is attached to.)
+    // rail state this whole affordance is attached to.) Note the deliberate
+    // choice of an ACTIVE state here: a row at REST paints nothing at all as of
+    // 2026-07-31 — see `rail-idle-dot-not-painted.test.tsx` — so "inert, not
+    // removed" is a claim about a dot that has something to say, and only that.
     expect(screen.byTestId('rail-dot-attention')).not.toBeNull();
     expect(screen.byTestId('rail-dot-press-acme')).toBeNull();
     screen.unmount();
