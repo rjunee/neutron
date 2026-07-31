@@ -5901,3 +5901,54 @@ FLAGS — transcription is gated only by `OPENAI_API_KEY` presence (credential c
   `open/__tests__/open-wiring-app-ws.test.ts` 20/0 (scribe transcript threading);
   `app/__tests__/upload-client.test.ts` 12/0;
   `landing/chat-react/__tests__/message-adapter.test.ts` 12/0.
+
+## 2026-07-31 — mobile: a project switch can no longer end in an unbounded wait
+
+Third pass on the owner's "spinner in the chat area, rail still tappable, and the
+project I tapped never appears on the server's session log". The two previous
+passes both landed in the chat-session layer and neither moved the symptom.
+
+**NOT the root cause, and now ruled out with evidence.** A new device-harness test
+mounts the REAL chain a rail tap travels — `app/projects/[id]/_layout.tsx` →
+`<Slot/>` → `index.tsx` → `chat.tsx` → `ChatSyncSurface` — over a routing stub, and
+every tapped project reaches the wire on unmodified `main`. So the settings gate
+opens, the redirect fires and the socket is attempted; the shell is not the
+blocker. Separately: the tenant's project ids are all `[a-z0-9-]`, so nothing is
+being rejected on id grounds, and a missing last-tab key resolves `null` rather
+than hanging. The device-only cause is still UNIDENTIFIED.
+
+**What DID change — every unbounded wait on that path is now bounded, and a
+failure is now visible instead of being an indefinite spinner.**
+
+- **`app/lib/projects-client.ts`** — `REQUEST_TIMEOUT_MS` (15 s) + an
+  `AbortController` on every request. `fetch` has no device-side timeout, and the
+  shell blocks its whole content pane on `getSettings`, so a request that never
+  answered was a permanent spinner with no error, no retry and nothing on the wire.
+  A hang is now a `timeout` rejection.
+- **`app/lib/project-shell-content.ts`** — new `unavailable` kind. The production
+  settings store SYNTHESISES defaults rather than 404ing
+  (`gateway/http/app-projects-surface.ts` `buildDefaultSettings`), so the shell's
+  failure branch was effectively unreachable and every stall was terminal. A
+  transport/auth failure is now `unavailable`; only a server-stated absence
+  (`not_found`) is `not_found`.
+- **`app/app/projects/[id]/_layout.tsx`** — renders that state as a
+  "Couldn't load this project" pane with a **Try again** that re-runs the scope's
+  fetch in place. It no longer tells the owner a project they are looking at in the
+  rail is missing when the truth is the connection.
+- **`app/app/projects/[id]/index.tsx`** — the default-tab redirect ALWAYS
+  navigates. The last-tab read is raced against `LAST_TAB_READ_TIMEOUT_MS`
+  (1.2 s; `try/catch` cannot save you from a promise that never settles), and a
+  scope that resolves from neither the path nor the param falls through to General
+  instead of leaving its own spinner up forever.
+- **`index.tsx` + `chat.tsx`** — resolve the scope from
+  `projectIdFromPathname(usePathname())` first, param second: the same precedence
+  the shell already adopted after the route param was observed going stale on
+  device. The shell and the screens inside it can no longer disagree about which
+  project they are rendering.
+
+**Test surface.** `app/__tests__/support/stubs/expo-router.tsx` grows an opt-in
+routing mode (path + route table + `<Slot/>`) and a `paramsBlind` fault; inert by
+default so no existing harness file changes behaviour.
+`app/__tests__/project-switch-reaches-the-wire.test.tsx` (7/0) asserts a SOCKET per
+tapped project, not that a spinner stopped. Six mutations, each proven applied by
+file hash, each failing its paired test.

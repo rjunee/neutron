@@ -179,3 +179,14 @@ export function lastTabStorage(): LastTabStore {
 export function __resetLastTabStorageForTests(): void {
   _defaultInstance = null;
 }
+
+/**
+ * Test-only — install a specific store, so a test can supply a backing that
+ * behaves like the device's: slow, broken, or one that never answers at all.
+ * There is no other seam; `lastTabStorage()` resolves the platform backing
+ * through a `require`, and reaching into that module from a test file breaks
+ * the require itself. Real builds never call this.
+ */
+export function __setLastTabStorageForTests(store: LastTabStore): void {
+  _defaultInstance = store;
+}

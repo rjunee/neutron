@@ -75,14 +75,31 @@ describe('project shell — the content pane decision', () => {
   });
 
   it('reaches not-found — with the reason — for a genuinely absent project', () => {
-    // The trap on the other side: never hang on a spinner forever.
+    // The trap on the other side: never hang on a spinner forever. "Absent" is
+    // what the SERVER said, which is why the code is what decides it.
     expect(
       projectShellContent({
         is_general: false,
         has_project: false,
-        error: { message: 'no such project' },
+        error: { code: 'not_found', message: 'no such project' },
       }),
     ).toEqual({ kind: 'not_found', message: 'no such project' });
+  });
+
+  it('calls a transport failure UNAVAILABLE, not "not found"', () => {
+    // A timeout, an offline radio, a refused credential — none of these are
+    // evidence that the project is gone, and the owner is looking straight at it
+    // in the rail. Blaming the project sends them hunting the wrong problem, and
+    // unlike a missing project this one is worth retrying.
+    for (const code of ['timeout', 'network', 'unauthorized', undefined]) {
+      expect(
+        projectShellContent({
+          is_general: false,
+          has_project: false,
+          error: { ...(code !== undefined ? { code } : {}), message: 'server did not answer' },
+        }),
+      ).toEqual({ kind: 'unavailable', message: 'server did not answer' });
+    }
   });
 
   it('never shows General as loading or missing, even with an error present', () => {

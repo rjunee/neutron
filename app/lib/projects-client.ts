@@ -30,6 +30,15 @@ export type BillingMode = 'personal';
 import type { AgentEngagementMode } from '@neutronai/wire-types';
 export type { AgentEngagementMode } from '@neutronai/wire-types';
 
+/**
+ * How long any one call to this API may take before it is treated as failed.
+ *
+ * Generous — this is a hang detector, not a latency budget. A real answer over a
+ * bad connection must still arrive; only a request that is never coming back
+ * should trip it.
+ */
+export const REQUEST_TIMEOUT_MS = 15_000;
+
 export const ALL_PRIVACY_MODES: readonly PrivacyMode[] = ['private', 'public'];
 
 export const ALL_BILLING_MODES: readonly BillingMode[] = ['personal'];
@@ -271,19 +280,38 @@ export class ProjectsClient {
       headers['content-type'] = 'application/json';
       body = JSON.stringify(init.body);
     }
+    // EVERY REQUEST IS BOUNDED. The project shell blocks its whole content pane
+    // on `getSettings`, and the only way out of that wait is for this promise to
+    // SETTLE — so a request that hangs is not a slow screen, it is a permanent
+    // spinner with no error, no retry and nothing on the wire. `fetch` has no
+    // default timeout on the device, and a captive portal / half-open socket /
+    // suspended radio produces exactly that. A deadline turns a hang into a
+    // rejection, which the surfaces above already know how to show.
+    const controller = new AbortController();
+    const deadline = setTimeout(() => {
+      controller.abort();
+    }, REQUEST_TIMEOUT_MS);
     let res: Response;
     try {
       res = await fetch(`${this.base_url}${path}`, {
         method,
         headers,
+        signal: controller.signal,
         ...(body !== undefined ? { body } : {}),
       });
     } catch (err) {
+      const aborted = controller.signal.aborted;
       throw new ProjectsClientError({
-        code: 'network',
-        message: err instanceof Error ? err.message : 'network error',
+        code: aborted ? 'timeout' : 'network',
+        message: aborted
+          ? `the server did not answer within ${String(Math.round(REQUEST_TIMEOUT_MS / 1000))}s`
+          : err instanceof Error
+            ? err.message
+            : 'network error',
         status: 0,
       });
+    } finally {
+      clearTimeout(deadline);
     }
     let json: unknown = null;
     try {
