@@ -500,7 +500,7 @@ const INCARNATION_SUFFIX = /-[0-9a-f]{8,}$/i
 /**
  * Turn a raw on-wire tool name into something a human can read.
  *
- * THE BUG THIS FIXES. The panel rendered `mcp__neutron-b1c20de7…__reply` — clipped
+ * THE BUG THIS FIXES. The panel rendered `mcp__neutron-<32 hex>…__reply` — clipped
  * mid-id, running off the right edge, with the ONE informative token (`reply`) at
  * the far end where the truncation ate it. That string is not a tool name, it is a
  * transport address: `mcp__<server>__<tool>`, where `<server>` for the dev-channel
@@ -514,7 +514,7 @@ const INCARNATION_SUFFIX = /-[0-9a-f]{8,}$/i
  * random incarnation is stripped so the qualifier is stable across spawns.
  *
  *   `mcp__neutron__memory_search`       → { label: 'memory_search', source: 'neutron' }
- *   `mcp__neutron-b1c20de7…__reply`     → { label: 'reply',         source: 'neutron' }
+ *   `mcp__neutron-<32 hex>…__reply`     → { label: 'reply',         source: 'neutron' }
  *   `Bash`                              → { label: 'Bash' }
  *
  * Anything that does not parse falls through UNCHANGED rather than being mangled:
@@ -556,7 +556,7 @@ function isReplyTool(named: { label: string; source?: string }): boolean {
  * the exact chronological instant the agent produces them. The previous build saw
  * that call and threw the words away twice over: `summarizeToolInput` had no `text`
  * in its pick list, so the row carried NO detail, and the label was the raw
- * transport id. That is the mystery `mcp__neutron-b1c20de7…` row in the screenshot —
+ * transport id. That is the mystery `mcp__neutron-<32 hex>…` row in the screenshot —
  * the whole assistant message, rendered as an opaque id with the content dropped.
  *
  * So a `reply` call becomes an ASSISTANT MESSAGE row (`kind: 'token'`), peer to the
