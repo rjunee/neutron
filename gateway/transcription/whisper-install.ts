@@ -34,7 +34,7 @@
  */
 
 import { createHash } from 'node:crypto'
-import { existsSync, statSync } from 'node:fs'
+import { existsSync, readdirSync, statSync } from 'node:fs'
 import { mkdir, readdir, rename, rm, unlink } from 'node:fs/promises'
 import { join } from 'node:path'
 
@@ -119,9 +119,9 @@ export function resolveWhisperInstall(opts: ResolveWhisperOptions): WhisperInsta
     opts.list_dir ??
     ((p: string): string[] => {
       try {
-        // Sync read: this runs once at composer boot, never per request.
-        return require('node:fs').readdirSync(p) as string[]
+        return readdirSync(p)
       } catch {
+        // No models dir yet — not installed, which the caller handles.
         return []
       }
     })
@@ -354,7 +354,7 @@ export class WhisperInstaller {
       if (!okBin) return
       this.set({ phase: 'extracting_binary' })
       try {
-        await this.extract(tarball, this.paths.root)
+        await this.extract(tarball)
         await unlink(tarball).catch(() => undefined)
       } catch (err) {
         this.fail('extract_failed', err instanceof Error ? err.message : String(err))
@@ -436,9 +436,11 @@ export class WhisperInstaller {
     return true
   }
 
-  private async extract(tarball: string, dest: string): Promise<void> {
+  /** Unpack the release tarball so `whisper-cli` lands exactly where the
+   *  resolver looks for it. */
+  private async extract(tarball: string): Promise<void> {
     if (this.opts.extract_tar !== undefined) {
-      await this.opts.extract_tar(tarball, dest)
+      await this.opts.extract_tar(tarball, this.paths.bin_dir)
       return
     }
     // The upstream tarball unpacks into `whisper-bin-<plat>/`; strip that so the
@@ -453,7 +455,6 @@ export class WhisperInstaller {
       const err = await new Response(proc.stderr).text()
       throw new Error(`tar exited ${code}: ${err.slice(0, 300)}`)
     }
-    void dest
     // Make sure the binary is executable — some tar/umask combinations drop the bit.
     try {
       await Bun.$`chmod +x ${this.paths.binary}`.quiet()
