@@ -19,6 +19,8 @@ import {
   ActivityInspector,
   activityRowFromSubstrateEvent,
   activityRowFromToolTap,
+  BODY_MAX,
+  humanizeToolName,
   DEAD_AFTER_MS,
   deriveInspectorState,
   GENERAL_SCOPE,
@@ -280,12 +282,35 @@ describe('activityRowFromSubstrateEvent — mapping the raw stream', () => {
     })
   })
 
-  it('summarises a token by LENGTH, never echoing the reply body', () => {
+  // REWRITTEN CONTRACT (2026-07-30). This assertion previously pinned
+  // `detail: '5000 chars'` — the SIZE of the reply in place of the reply. Ryan, on
+  // the shipped panel: the inspector should show the actual messages, not the size.
+  // The old expectation is not weakened here, it is inverted on purpose: a length is
+  // the one fact about a reply that is never what you wanted to know.
+  it('carries the ACTUAL reply text, not its length', () => {
+    const row = activityRowFromSubstrateEvent({ kind: 'token', text: 'the quick brown fox' })
+    expect(row).toEqual({ kind: 'token', label: 'assistant', detail: 'the quick brown fox' })
+    // Short single-line content is fully visible collapsed, so no expand affordance.
+    expect(row?.body).toBeUndefined()
+  })
+
+  it('caps a long reply at BODY_MAX rather than fanning an unbounded frame', () => {
     const row = activityRowFromSubstrateEvent({ kind: 'token', text: 'x'.repeat(5_000) })
-    expect(row).toEqual({ kind: 'token', label: 'reply', detail: '5000 chars' })
-    // The reply already renders in chat; duplicating multi-KB text into a fanned
-    // frame would be pure waste.
-    expect(JSON.stringify(row).length).toBeLessThan(80)
+    expect(row?.kind).toBe('token')
+    expect(row?.label).toBe('assistant')
+    expect(row?.body?.length).toBe(BODY_MAX)
+    expect(row?.body?.endsWith('…')).toBe(true)
+    // The collapsed one-liner stays short even when the body is large.
+    expect(row?.detail?.length).toBeLessThanOrEqual(160)
+  })
+
+  it('preserves NEWLINES in a body while flattening them in the detail', () => {
+    // Line structure is most of the meaning of a listing or a stack trace, so the
+    // `detail` flattening must not reach the body.
+    const text = `first line\nsecond line\n${'z'.repeat(400)}`
+    const row = activityRowFromSubstrateEvent({ kind: 'token', text })
+    expect(row?.body).toContain('\n')
+    expect(row?.detail).not.toContain('\n')
   })
 
   it('maps tool + terminal events, and drops unknown kinds', () => {
@@ -320,18 +345,124 @@ describe('activityRowFromSubstrateEvent — mapping the raw stream', () => {
   })
 })
 
+describe('humanizeToolName — never render a transport id as the label', () => {
+  it('reduces a namespaced MCP tool to the TOOL, keeping the server as a qualifier', () => {
+    expect(humanizeToolName('mcp__acme__memory_search')).toEqual({
+      label: 'memory_search',
+      source: 'acme',
+    })
+  })
+
+  it('strips the per-session random incarnation from the server name', () => {
+    // `spawn.ts` names the dev-channel server `<base>-<randomBytes(16).hex>`, so the
+    // qualifier must be stable across spawns or every turn invents a new "source".
+    const a = humanizeToolName(`mcp__acme-${'a1b2c3d4'.repeat(4)}__reply`)
+    const b = humanizeToolName(`mcp__acme-${'9f8e7d6c'.repeat(4)}__reply`)
+    expect(a).toEqual({ label: 'reply', source: 'acme' })
+    expect(b).toEqual(a)
+    // The pre-2026-07-20 4-byte form must resolve identically.
+    expect(humanizeToolName('mcp__acme-0011aabb__reply')).toEqual(a)
+  })
+
+  it('leaves a native tool name completely alone', () => {
+    expect(humanizeToolName('Bash')).toEqual({ label: 'Bash' })
+  })
+
+  it('passes an unparseable name through UNCHANGED rather than mangling it', () => {
+    // Showing an odd name truthfully beats inventing a pretty wrong one.
+    expect(humanizeToolName('mcp__nosep')).toEqual({ label: 'mcp__nosep' })
+    expect(humanizeToolName('mcp____tool')).toEqual({ label: 'mcp____tool' })
+    expect(humanizeToolName('')).toEqual({ label: '' })
+  })
+
+  it('a namespaced tool row NEVER carries the raw id as its label', () => {
+    const raw = `mcp__acme-${'0f'.repeat(16)}__reply`
+    const row = activityRowFromSubstrateEvent({ kind: 'tool_call', tool_name: raw })
+    expect(row?.label).not.toContain('mcp__')
+    expect(row?.label).not.toContain('0f0f')
+  })
+})
+
 describe('activityRowFromToolTap — the Pre/PostToolUse hook rows', () => {
   it('maps pre → tool_start and post → tool_end', () => {
     // Both phases matter: a `pre` with no matching `post` for minutes IS the hang
     // signal, and neither the event stream nor a liveness pulse can express it.
     expect(
-      activityRowFromToolTap({ phase: 'pre', tool_name: 'Bash', detail: 'bun test' }),
-    ).toEqual({ kind: 'tool_start', label: 'Bash', detail: 'bun test' })
+      activityRowFromToolTap({ phase: 'pre', tool_name: 'Bash', detail: 'a-command' }),
+    ).toEqual({ kind: 'tool_start', label: 'Bash', detail: 'a-command' })
     expect(activityRowFromToolTap({ phase: 'post', tool_name: 'Bash', detail: '' })).toEqual({
       kind: 'tool_end',
       label: 'Bash',
-      detail: '',
     })
+  })
+
+  it('carries the ARGUMENTS on a pre row and the RESULT on a post row', () => {
+    // The first build carried neither: a finished `tasks_list` could not say one
+    // word about what it returned.
+    const pre = activityRowFromToolTap({
+      phase: 'pre',
+      tool_name: 'Bash',
+      detail: 'a-command',
+      args: 'a-command --with --flags\nand a second line',
+    })
+    expect(pre?.body).toContain('second line')
+
+    const post = activityRowFromToolTap({
+      phase: 'post',
+      tool_name: 'Bash',
+      detail: 'a-command',
+      args: 'a-command',
+      result: 'line one of output\nline two of output',
+    })
+    expect(post?.kind).toBe('tool_end')
+    expect(post?.body).toContain('line two of output')
+  })
+
+  it('falls back to the arguments when a post row has no result', () => {
+    const row = activityRowFromToolTap({
+      phase: 'post',
+      tool_name: 'Bash',
+      detail: '',
+      args: 'a-command\nsecond line',
+    })
+    expect(row?.body).toContain('second line')
+  })
+
+  it('renders the dev-channel reply CALL as the assistant message, in place', () => {
+    // This is the interleave. The agent's words arrive as a `reply` tool call at
+    // the exact instant it produces them — the previous build rendered that row as
+    // an opaque transport id with the content dropped entirely.
+    const row = activityRowFromToolTap({
+      phase: 'pre',
+      tool_name: `mcp__neutron-${'ab'.repeat(16)}__reply`,
+      detail: 'a synthesised assistant sentence',
+      args: 'a synthesised assistant sentence',
+    })
+    expect(row?.kind).toBe('token')
+    expect(row?.label).toBe('assistant')
+    expect(row?.detail).toBe('a synthesised assistant sentence')
+    expect(row?.source).toBeUndefined()
+  })
+
+  it('DROPS the reply post-ack — the words already landed', () => {
+    expect(
+      activityRowFromToolTap({
+        phase: 'post',
+        tool_name: `mcp__neutron-${'ab'.repeat(16)}__reply`,
+        detail: '',
+        result: '{"status":"ok"}',
+      }),
+    ).toBeNull()
+  })
+
+  it('does NOT treat a same-named tool from another server as the reply', () => {
+    const row = activityRowFromToolTap({
+      phase: 'pre',
+      tool_name: 'mcp__someoneelse__reply',
+      detail: 'x',
+    })
+    expect(row?.kind).toBe('tool_start')
+    expect(row?.source).toBe('someoneelse')
   })
 
   it('a tool row is NOT synthetic — it advances the real-activity clock', () => {
@@ -339,8 +470,66 @@ describe('activityRowFromToolTap — the Pre/PostToolUse hook rows', () => {
     const insp = new ActivityInspector({ now: () => t.v })
     insp.turnStarted('p1')
     t.v = 500_000
-    insp.record('p1', activityRowFromToolTap({ phase: 'pre', tool_name: 'Read', detail: 'a.ts' }))
+    const row = activityRowFromToolTap({ phase: 'pre', tool_name: 'Read', detail: 'a.ts' })
+    expect(row).not.toBeNull()
+    insp.record('p1', row as NonNullable<typeof row>)
     expect(insp.snapshot('p1').last_real_activity_age_ms).toBe(0)
     expect(insp.snapshot('p1').state).toBe('working')
+  })
+})
+
+describe('the two taps see the same reply — it must appear ONCE', () => {
+  const words = 'a synthesised assistant sentence'
+
+  it('collapses the substrate token that repeats the reply tool call', () => {
+    const insp = new ActivityInspector()
+    // 1. the hook sees the `reply` CALL, 2. `onReply` pushes the matching token.
+    const fromHook = activityRowFromToolTap({
+      phase: 'pre',
+      tool_name: `mcp__neutron-${'cd'.repeat(16)}__reply`,
+      detail: words,
+      args: words,
+    })
+    insp.record('p1', fromHook as NonNullable<typeof fromHook>)
+    const fromStream = activityRowFromSubstrateEvent({ kind: 'token', text: words })
+    insp.record('p1', fromStream as NonNullable<typeof fromStream>)
+
+    const events = insp.snapshot('p1').events
+    expect(events.filter((e) => e.kind === 'token')).toHaveLength(1)
+    expect(events[0]?.detail).toBe(words)
+  })
+
+  it('does NOT collapse two assistant rows separated by a tool row', () => {
+    // Real repeated content is always separated by whatever prompted the second
+    // message, so adjacency is the precise discriminator.
+    const insp = new ActivityInspector()
+    const assistant = (): void => {
+      const r = activityRowFromSubstrateEvent({ kind: 'token', text: words })
+      insp.record('p1', r as NonNullable<typeof r>)
+    }
+    assistant()
+    const tool = activityRowFromToolTap({ phase: 'pre', tool_name: 'Read', detail: 'a.ts' })
+    insp.record('p1', tool as NonNullable<typeof tool>)
+    assistant()
+    expect(insp.snapshot('p1').events.filter((e) => e.kind === 'token')).toHaveLength(2)
+  })
+
+  it('does not collapse two DIFFERENT adjacent assistant rows', () => {
+    const insp = new ActivityInspector()
+    for (const t of ['first sentence', 'second sentence']) {
+      const r = activityRowFromSubstrateEvent({ kind: 'token', text: t })
+      insp.record('p1', r as NonNullable<typeof r>)
+    }
+    expect(insp.snapshot('p1').events).toHaveLength(2)
+  })
+
+  it('a collapsed duplicate does not burn a seq or re-fan a frame', () => {
+    const fanned: number[] = []
+    const insp = new ActivityInspector({ onRecord: (_s, ev) => void fanned.push(ev.seq) })
+    for (let i = 0; i < 2; i++) {
+      const r = activityRowFromSubstrateEvent({ kind: 'token', text: words })
+      insp.record('p1', r as NonNullable<typeof r>)
+    }
+    expect(fanned).toEqual([1])
   })
 })

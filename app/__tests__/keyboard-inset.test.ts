@@ -10,7 +10,7 @@
 
 import { describe, expect, it } from 'bun:test';
 
-import { keyboardOverlap } from '../lib/keyboard-inset';
+import { androidKeyboardInset, keyboardOverlap } from '../lib/keyboard-inset';
 
 /** iPhone-15-class logical points. */
 const SCREEN_H = 852;
@@ -75,5 +75,61 @@ describe('keyboardOverlap', () => {
     expect(
       keyboardOverlap({ containerBottomY: Number.POSITIVE_INFINITY, keyboardScreenY: KEYBOARD_TOP }),
     ).toBe(0);
+  });
+});
+
+/**
+ * THE ANDROID HALF (`androidKeyboardInset`).
+ *
+ * `keyboardOverlap` above is an iOS-only subtraction. On Android its two terms
+ * live in different coordinate spaces — `endCoordinates.screenY` is a raw screen
+ * y (`ReactRootView.java:891,913`) while `measureInWindow` is offset by the
+ * status bar (`ReactSurfaceView.kt:93-105`) — so it under-padded by exactly the
+ * status-bar height and the composer stayed behind the keyboard. Owner,
+ * 2026-07-30: *"Text entry window and send button still not visible when
+ * keyboard is showing"*.
+ *
+ * Android therefore adds instead of subtracting, inside ONE space: RN reports
+ * the keyboard NET of the navigation bar it draws over
+ * (`height = imeInsets.bottom - barInsets.bottom`, `ReactRootView.java:904`), so
+ * the bar is added back to reach the window's bottom edge.
+ */
+describe('androidKeyboardInset', () => {
+  /** A gesture-navigation bar, the common case on a modern Android phone. */
+  const NAV_BAR_H = 24;
+
+  it('is zero while the keyboard is down', () => {
+    expect(androidKeyboardInset({ keyboardHeight: 0, safeAreaBottom: NAV_BAR_H })).toBe(0);
+  });
+
+  it('adds the navigation bar back to the keyboard height', () => {
+    // THE DEFECT, as one number. RN hands us 336; the IME actually covers
+    // 336 + 24 of the window, and the missing 24 is the strip the send button
+    // was sitting in.
+    expect(androidKeyboardInset({ keyboardHeight: KEYBOARD_H, safeAreaBottom: NAV_BAR_H })).toBe(
+      KEYBOARD_H + NAV_BAR_H,
+    );
+  });
+
+  it('is exactly the keyboard height on a device with no navigation bar', () => {
+    // The emulator this was measured on reports no `navigationBars` inset
+    // source at all, and there the two agree.
+    expect(androidKeyboardInset({ keyboardHeight: KEYBOARD_H, safeAreaBottom: 0 })).toBe(KEYBOARD_H);
+  });
+
+  it('tracks a keyboard that changes height', () => {
+    expect(androidKeyboardInset({ keyboardHeight: 260, safeAreaBottom: NAV_BAR_H })).toBe(284);
+    expect(androidKeyboardInset({ keyboardHeight: 420, safeAreaBottom: NAV_BAR_H })).toBe(444);
+  });
+
+  it('never returns negative or NaN padding', () => {
+    expect(androidKeyboardInset({ keyboardHeight: -5, safeAreaBottom: NAV_BAR_H })).toBe(0);
+    expect(androidKeyboardInset({ keyboardHeight: Number.NaN, safeAreaBottom: NAV_BAR_H })).toBe(0);
+    expect(androidKeyboardInset({ keyboardHeight: KEYBOARD_H, safeAreaBottom: Number.NaN })).toBe(
+      KEYBOARD_H,
+    );
+    expect(androidKeyboardInset({ keyboardHeight: KEYBOARD_H, safeAreaBottom: -12 })).toBe(
+      KEYBOARD_H,
+    );
   });
 });

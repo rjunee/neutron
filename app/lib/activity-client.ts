@@ -56,8 +56,15 @@ export interface ActivityRow {
   seq: number;
   at: number;
   kind: ActivityRowKind;
+  /** HUMAN tool name or event word — never a raw `mcp__<server>__<tool>` id. */
   label: string;
+  /** The collapsed one-liner. */
   detail?: string;
+  /** The expanded content: the assistant's actual words, a call's full arguments,
+   *  a tool's returned output. Newlines preserved; server-capped. */
+  body?: string;
+  /** The MCP server a namespaced tool came from — a dim qualifier, never the label. */
+  source?: string;
   /** The synthetic liveness keepalive — proves the PROCESS lives, not that work
    *  happened. Rendered faint and excluded from the "last activity" clock. */
   synthetic?: boolean;
@@ -144,6 +151,8 @@ export function parseActivityRow(raw: unknown): ActivityRow | null {
   if (typeof label !== 'string') return null;
   const row: ActivityRow = { seq, at, kind: kind as ActivityRowKind, label };
   if (typeof r['detail'] === 'string' && r['detail'].length > 0) row.detail = r['detail'];
+  if (typeof r['body'] === 'string' && r['body'].length > 0) row.body = r['body'];
+  if (typeof r['source'] === 'string' && r['source'].length > 0) row.source = r['source'];
   if (r['synthetic'] === true) row.synthetic = true;
   return row;
 }

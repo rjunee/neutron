@@ -266,6 +266,107 @@ describe('ActivityInspectorPanel', () => {
     expect(onClose.calls).toBe(0)
     await cleanup()
   })
+
+  // ---- the transcript, not the ticker (Ryan 2026-07-30) --------------------
+
+  it('renders an assistant message as PROSE, showing the words not a size', async () => {
+    // The shipped panel rendered `reply — 29 chars`. A length is the one fact about
+    // a reply that is never what you wanted to know.
+    const words = 'a synthesised assistant sentence'
+    const { container, cleanup } = await renderPanel({
+      snap: snapshot({
+        events: [row({ seq: 1, kind: 'token', label: 'assistant', detail: words })],
+      }),
+    })
+    expect(container.querySelector('[data-testid="activity-row-text-1"]')?.textContent).toBe(words)
+    expect(container.textContent).not.toContain('chars')
+    // And it is marked as a message, not a tool tick.
+    expect(container.querySelector('.car-actin-row-assistant')).not.toBeNull()
+    await cleanup()
+  })
+
+  it('renders a HUMAN tool label and demotes the server to a qualifier', async () => {
+    const { container, cleanup } = await renderPanel({
+      snap: snapshot({
+        events: [row({ seq: 1, kind: 'tool_start', label: 'a_tool', source: 'a-server' })],
+      }),
+    })
+    expect(container.querySelector('[data-testid="activity-row-label-1"]')?.textContent).toBe(
+      'a_tool',
+    )
+    expect(container.querySelector('[data-testid="activity-row-source-1"]')?.textContent).toBe(
+      'a-server',
+    )
+    // The raw transport form must never reach the DOM as the label.
+    expect(container.querySelector('[data-testid="activity-row-label-1"]')?.textContent).not.toContain(
+      'mcp__',
+    )
+    await cleanup()
+  })
+
+  it('a row with a longer BODY expands on click and collapses again', async () => {
+    const { container, act, cleanup } = await renderPanel({
+      snap: snapshot({
+        events: [
+          row({
+            seq: 1,
+            kind: 'tool_end',
+            label: 'a_tool',
+            detail: 'one line summary',
+            body: 'line one\nline two\nline three',
+          }),
+        ],
+      }),
+    })
+    expect(container.querySelector('[data-testid="activity-row-body-1"]')).toBeNull()
+    const target = container.querySelector('[data-testid="activity-row-1"]') as HTMLElement
+    await act(async () => target.click())
+    expect(container.querySelector('[data-testid="activity-row-body-1"]')?.textContent).toContain(
+      'line three',
+    )
+    await act(async () => target.click())
+    expect(container.querySelector('[data-testid="activity-row-body-1"]')).toBeNull()
+    await cleanup()
+  })
+
+  it('offers NO expand affordance when the body would only repeat the detail', async () => {
+    const { container, cleanup } = await renderPanel({
+      snap: snapshot({
+        events: [row({ seq: 1, kind: 'tool_start', label: 'a_tool', detail: 'short' })],
+      }),
+    })
+    expect(container.querySelector('[data-testid="activity-row-more-1"]')).toBeNull()
+    expect(container.querySelector('.car-actin-row-expandable')).toBeNull()
+    await cleanup()
+  })
+
+  it('keeps tool rows AND assistant rows as peers in ONE chronological list', async () => {
+    // "Interleaves with the actual messages the model is outputting" — the unit of
+    // this view is a turn transcript, so ordering across the two sources is the
+    // product, not a detail.
+    const { container, cleanup } = await renderPanel({
+      snap: snapshot({
+        events: [
+          row({ seq: 1, kind: 'turn_start', label: 'turn started' }),
+          row({ seq: 2, kind: 'tool_start', label: 'a_tool', detail: 'an argument' }),
+          row({ seq: 3, kind: 'tool_end', label: 'a_tool', detail: 'a returned value' }),
+          row({ seq: 4, kind: 'token', label: 'assistant', detail: 'a sentence' }),
+          row({ seq: 5, kind: 'completion', label: 'turn complete' }),
+        ],
+      }),
+    })
+    const seqs = [...container.querySelectorAll('[data-testid^="activity-row-"]')]
+      .map((e) => e.getAttribute('data-testid'))
+      .filter((t) => t !== null && /^activity-row-\d+$/.test(t))
+    expect(seqs).toEqual([
+      'activity-row-1',
+      'activity-row-2',
+      'activity-row-3',
+      'activity-row-4',
+      'activity-row-5',
+    ])
+    await cleanup()
+  })
 })
 
 describe('the clickable rail dot — the inspector’s entry point', () => {

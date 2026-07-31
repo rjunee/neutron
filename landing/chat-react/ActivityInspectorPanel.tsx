@@ -79,6 +79,117 @@ function rowTime(at: number): string {
   return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`
 }
 
+/** Collapsed clamps, mirroring the mobile drawer so the two surfaces agree. */
+const COLLAPSED_ASSISTANT_LINES = 8
+const COLLAPSED_DETAIL_LINES = 2
+
+/**
+ * One transcript row — the web twin of the mobile `ActivityRowView`.
+ *
+ * TWO SHAPES, ONE TIMELINE (Ryan 2026-07-30: *"interleaves with the actual messages
+ * the model is outputting"*). An assistant message renders as PROSE — proportional,
+ * wrapped, full width — because it is a message, not a tick. Everything else renders
+ * as a monospace tool line. They are peers in one chronological list, which is what
+ * makes this read like a session transcript rather than an event log.
+ */
+export function ActivityRowView({
+  row,
+  expanded,
+  onToggle,
+}: {
+  row: ActivityRow
+  expanded: boolean
+  onToggle: (seq: number) => void
+}): React.JSX.Element {
+  const isAssistant = row.kind === 'token'
+  const canExpand = row.body !== undefined && row.body !== row.detail
+  // The assistant's words are the full `body` when there is one; `detail` is only
+  // its flattened summary.
+  const prose = row.body ?? row.detail ?? ''
+  const cls = [
+    'car-actin-row',
+    isAssistant ? 'car-actin-row-assistant' : '',
+    row.synthetic === true ? 'car-actin-row-synthetic' : '',
+    row.kind === 'error' ? 'car-actin-row-error' : '',
+    canExpand ? 'car-actin-row-expandable' : '',
+  ]
+    .filter((c) => c !== '')
+    .join(' ')
+
+  return (
+    <div
+      className={cls}
+      data-testid={`activity-row-${row.seq}`}
+      {...(canExpand
+        ? {
+            role: 'button',
+            tabIndex: 0,
+            onClick: () => onToggle(row.seq),
+            onKeyDown: (e: React.KeyboardEvent): void => {
+              if (e.key === 'Enter' || e.key === ' ') {
+                e.preventDefault()
+                onToggle(row.seq)
+              }
+            },
+          }
+        : {})}
+    >
+      <span className="car-actin-t">{rowTime(row.at)}</span>
+      <span className="car-actin-g" aria-hidden="true">
+        {KIND_GLYPH[row.kind]}
+      </span>
+      <span className="car-actin-c">
+        {isAssistant ? (
+          <>
+            <span className="car-actin-who">assistant</span>
+            <span
+              className="car-actin-prose"
+              data-testid={`activity-row-text-${row.seq}`}
+              style={
+                expanded ? undefined : { WebkitLineClamp: COLLAPSED_ASSISTANT_LINES }
+              }
+            >
+              {prose}
+            </span>
+          </>
+        ) : (
+          <>
+            <span className="car-actin-head">
+              <span className="car-actin-l" data-testid={`activity-row-label-${row.seq}`}>
+                {row.label}
+              </span>
+              {row.source !== undefined ? (
+                <span className="car-actin-src" data-testid={`activity-row-source-${row.seq}`}>
+                  {row.source}
+                </span>
+              ) : null}
+            </span>
+            {row.detail !== undefined ? (
+              <span
+                className="car-actin-d"
+                data-testid={`activity-row-detail-${row.seq}`}
+                style={expanded ? undefined : { WebkitLineClamp: COLLAPSED_DETAIL_LINES }}
+              >
+                {row.detail}
+              </span>
+            ) : null}
+            {expanded && row.body !== undefined ? (
+              <span className="car-actin-body" data-testid={`activity-row-body-${row.seq}`}>
+                {row.body}
+              </span>
+            ) : null}
+          </>
+        )}
+        {canExpand ? (
+          <span className="car-actin-more" data-testid={`activity-row-more-${row.seq}`}>
+            {expanded ? 'click to collapse' : 'click to expand'}
+          </span>
+        ) : null}
+      </span>
+    </div>
+  )
+}
+
 /**
  * Panel state machine, split out so the fetch/subscribe ORDER is testable without
  * a DOM.
@@ -179,6 +290,20 @@ export function ActivityInspectorPanel({
 }): React.JSX.Element | null {
   const { rows, snapshot, error, loading, now } = useActivityInspector(source, projectId, open)
   const listRef = React.useRef<HTMLDivElement | null>(null)
+  const [expanded, setExpanded] = React.useState<ReadonlySet<number>>(() => new Set())
+  const toggleRow = React.useCallback((seq: number) => {
+    setExpanded((prev) => {
+      const next = new Set(prev)
+      if (next.has(seq)) next.delete(seq)
+      else next.add(seq)
+      return next
+    })
+  }, [])
+  // Re-opening the panel re-reads the ring from scratch, so held expansions would
+  // point at seqs that no longer exist.
+  React.useEffect(() => {
+    if (!open) setExpanded(new Set())
+  }, [open])
 
   // Follow the tail as rows arrive — the panel is a live tail, so the newest row
   // is the one the owner is looking for.
@@ -256,20 +381,12 @@ export function ActivityInspectorPanel({
             </p>
           ) : (
             rows.map((r) => (
-              <div
+              <ActivityRowView
                 key={r.seq}
-                className={`car-actin-row${r.synthetic === true ? ' car-actin-row-synthetic' : ''}${
-                  r.kind === 'error' ? ' car-actin-row-error' : ''
-                }`}
-                data-testid={`activity-row-${r.seq}`}
-              >
-                <span className="car-actin-t">{rowTime(r.at)}</span>
-                <span className="car-actin-g" aria-hidden="true">
-                  {KIND_GLYPH[r.kind]}
-                </span>
-                <span className="car-actin-l">{r.label}</span>
-                {r.detail !== undefined ? <span className="car-actin-d">{r.detail}</span> : null}
-              </div>
+                row={r}
+                expanded={expanded.has(r.seq)}
+                onToggle={toggleRow}
+              />
             ))
           )}
         </div>
