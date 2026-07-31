@@ -128,6 +128,16 @@ export interface AndroidKeyboardInsetInput {
  * non-optional anyway), so the window now spans the full screen with the
  * keyboard drawn over it. Nothing shrinks on our behalf; the app owes itself
  * this padding.
+ *
+ * KNOWN LIMIT, and it is RN's, not this function's. On SDK >= 30 `ReactRootView`
+ * only emits when the keyboard's VISIBILITY changes — `if (keyboardIsVisible !=
+ * mKeyboardIsVisible)`, `ReactRootView.java:897-901`. A keyboard that changes
+ * HEIGHT while staying visible (switching to the emoji panel, a suggestion strip
+ * appearing) therefore delivers no event at all, and the inset holds its last
+ * value until the keyboard hides. Closing that needs a native `WindowInsets`
+ * listener — a new native module, so a real build rather than an
+ * over-the-air update. Not worth it for the state the owner is actually in;
+ * recorded here so the next reader does not re-derive it.
  */
 export function androidKeyboardInset({
   keyboardHeight,

@@ -171,7 +171,12 @@ describe('chat surface keyboard avoidance (android)', () => {
     screen.unmount();
   });
 
-  it('tracks a keyboard that changes height', async () => {
+  it('tracks a keyboard that changes height, WHEN ANDROID BOTHERS TO SAY SO', async () => {
+    // HONEST SCOPE. This proves the component reacts to a height change; it does
+    // NOT claim Android delivers one. RN only emits when the keyboard's
+    // VISIBILITY flips (`ReactRootView.java:897-901`), so switching to the emoji
+    // panel mid-session fires nothing and the inset holds its last value. That
+    // is an RN limitation and closing it needs a native WindowInsets listener.
     const screen = await mountChat();
     emitKeyboard('keyboardDidShow', KEYBOARD_TOP, KEYBOARD_HEIGHT);
     await screen.settle();
