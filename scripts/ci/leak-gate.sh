@@ -24,10 +24,12 @@
 #
 # RULE TIERS
 #   * Tier-1 PII  — owner proper nouns / private paths. The pattern source is
-#                   SUPPLIED OUT-OF-BAND (`LEAK_GATE_PII_DENYLIST_B64`) and is
-#                   NEVER committed: a committed list would itself name the very
-#                   strings it bans. It is therefore the one rule that can be
-#                   absent, and absent means FAIL — see "FAIL-CLOSED" below.
+#                   SUPPLIED OUT-OF-BAND (`LEAK_GATE_PII_DENYLIST_B64` in CI, a
+#                   local file outside the repo when run by hand — see "LOCAL
+#                   DENYLIST") and is NEVER committed: a committed list would
+#                   itself name the very strings it bans. It is therefore the one
+#                   rule that can be absent, and absent means FAIL — see
+#                   "FAIL-CLOSED" below.
 #   * Tier-1 PATH — a STRUCTURAL companion that needs no secret: a tracked path
 #                   may not carry a private-system token. Paths are public in the
 #                   git tree regardless of file contents, so this rule still runs
@@ -50,23 +52,67 @@
 # where GitHub withholds secrets by design; the scheduled full scan
 # (.github/workflows/leak-gate-nightly.yml) re-runs the same tree WITH the secret,
 # so a fork PR merged on that skip is still caught. A run outside GitHub Actions
-# (a developer, or this gate's own self-test) is not a merge gate and also skips.
+# is not a merge gate, so it cannot exit 2 — but it no longer prints a green
+# verdict either: see "INCOMPLETE" below.
+#
+# LOCAL DENYLIST (2026-07-30). Because the denylist is a repository SECRET, an
+# author working on their own machine had NO pre-push signal for the one class of
+# leak that is unredactable once public — a commit message or PR body, mirrored
+# to GHArchive/BigQuery within the hour. The first feedback arrived from CI,
+# after the push. So the gate now also accepts the denylist from a file OUTSIDE
+# the repository:
+#
+#     $LEAK_GATE_PII_DENYLIST_FILE                        (explicit override)
+#     ${XDG_CONFIG_HOME:-$HOME/.config}/neutron/leak-gate-pii-denylist
+#
+# Plain text, same entry syntax as the base64 payload (it is the same list, just
+# not base64-wrapped — the wrapping exists to survive a CI env var, not for
+# secrecy: base64 is not encryption). Consulted ONLY outside GitHub Actions, and
+# only when the env var is unset, so CI behaviour is bit-for-bit unchanged and a
+# runner-side file can never stand in for the real secret. The file lives outside
+# every working tree precisely so that no `git add` in any repo can ever pick it
+# up. Once resolved it feeds the SAME `compile_denylist` + the SAME rules — there
+# is no second matching implementation to drift.
+#
+# INCOMPLETE (2026-07-30). A run that could not load a denylist used to print
+# "SILENT ✅" and exit 0, which is indistinguishable from "checked and clean" —
+# the same shape of lie the 2026-07-29 fix removed from CI. Outside CI the
+# verdict is now "INCOMPLETE" with exit 3, naming the rules that did not run. The
+# fork-PR path inside CI is deliberately untouched (still exit 0, still covered by
+# the nightly full scan) — changing it would fail every outside contributor's PR
+# for a secret GitHub withholds by design.
 #
 # USAGE
-#   scripts/ci/leak-gate.sh [dir]          # scan dir (default: .)
-#   scripts/ci/leak-gate.sh --tree <dir>   # same; --tree accepted for parity
+#   scripts/ci/leak-gate.sh [dir]            # scan dir (default: .)
+#   scripts/ci/leak-gate.sh --tree <dir>     # same; --tree accepted for parity
+#   scripts/ci/leak-gate.sh --messages-only  # commit messages + PR title/body ONLY
 #
-# ENVIRONMENT (all supplied by the workflow — see .github/workflows/ci.yml)
+# `--messages-only` exists for the pre-push hook (.githooks/pre-push). The full
+# tree scan takes ~100 s on this repo, and a pre-push hook that costs 100 s is a
+# hook that gets `--no-verify`'d — while the surface it would add is the one that
+# CAN still be remediated (a bad tree is force-pushable and is blocked by CI
+# before merge). Messages and PR bodies cannot be remediated at all, so that is
+# what the hook checks, in about a second. The flag REFUSES to run inside GitHub
+# Actions so it can never become a way to skip the tree scan in CI.
+#
+# ENVIRONMENT (the LEAK_GATE_* set is supplied by .github/workflows/ci.yml in CI,
+# and by .githooks/pre-push locally)
 #   LEAK_GATE_PII_DENYLIST_B64  base64 of the newline-separated denylist. Two
 #                               entry kinds, documented at the compile step below.
+#   LEAK_GATE_PII_DENYLIST_FILE path to a PLAIN-TEXT denylist. Non-CI only.
 #   LEAK_GATE_PR_HEAD_REPO      head repo `owner/name` of a pull_request; used
 #                               ONLY to detect the fork case.
 #   LEAK_GATE_BASE_SHA          base commit for the message scan window.
+#   LEAK_GATE_HEAD_SHA          tip of the message scan window (default: HEAD).
+#                               The pre-push hook sets it to the sha it is about
+#                               to publish, which is not always HEAD.
 #   LEAK_GATE_PR_TITLE          PR title  (scanned; passed via env, never shell)
 #   LEAK_GATE_PR_BODY           PR body   (scanned; passed via env, never shell)
 #
 # EXIT: 0 = silent (clean), 1 = findings, 2 = usage/config/internal error (which
-# includes "a required rule could not run"). There is no skip flag and no env
+# includes "a required rule could not run"), 3 = INCOMPLETE — nothing found, but a
+# required rule could not run and this context is not allowed to exit 2. There is
+# no skip flag and no env
 # bypass; the only exception mechanism is the committed, reviewable allowlist
 # (scripts/ci/leak-gate-allowlist.txt, `<path>:<rule-id>`), which is itself
 # constrained — see the allowlist audit below.
@@ -78,12 +124,17 @@ ALLOWLIST_FILE="$HERE/leak-gate-allowlist.txt"
 PROSE_AWK="$HERE/extract-comment-prose.awk"
 
 SCAN_ROOT="."
+MESSAGES_ONLY=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --tree)
       [ $# -ge 2 ] || { echo "leak-gate: --tree requires a directory argument" >&2; exit 2; }
       SCAN_ROOT="$2"; shift 2 ;;
-    -h|--help) sed -n '2,74p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    --messages-only) MESSAGES_ONLY=1; shift ;;
+    # Print the leading comment block. Derived, not a hardcoded line range: the
+    # old `sed -n '2,74p'` silently truncated the moment the header grew.
+    -h|--help)
+      awk 'NR==1 { next } /^#/ { sub(/^# ?/, ""); print; next } { exit }' "$0"; exit 0 ;;
     -*) echo "leak-gate: unknown argument '$1' (the gate is non-skippable)" >&2; exit 2 ;;
     *) SCAN_ROOT="$1"; shift ;;
   esac
@@ -124,6 +175,23 @@ if [ "$IN_CI" = "1" ]; then
       ;;
   esac
 fi
+
+# `--messages-only` is a PRE-PUSH mode, never a CI mode. Refusing it here is what
+# stops it degrading into "the way to get the tree scan to stop failing": a
+# workflow edit that passes the flag fails the job outright instead of quietly
+# scanning a third of what it claims to.
+if [ "$MESSAGES_ONLY" = "1" ] && [ "$IN_CI" = "1" ]; then
+  echo "leak-gate: --messages-only is a pre-push mode and is REFUSED inside GitHub" >&2
+  echo "           Actions. CI must run the full tree scan." >&2
+  exit 2
+fi
+
+# Rules that were REQUESTED but could not run, e.g. the PII denylist with no
+# pattern source. Tracked so the verdict can distinguish "checked and clean" from
+# "could not check" — the distinction whose absence let Tier-1 sit dead for
+# ~3,700 CI runs.
+UNRUN_RULES=""
+note_unrun() { UNRUN_RULES="${UNRUN_RULES}${UNRUN_RULES:+, }$1"; }
 
 # Every file in the tree is in scope.
 (cd "$SCAN_ROOT" && find . -type f \
@@ -251,7 +319,11 @@ run_grep() {
 grep_rule() { local rule="$1"; shift; report_hits "$rule" < <(run_grep "$@"); }
 
 # ── Tier-2 prose view ─────────────────────────────────────────────────────────
-(cd "$SCAN_ROOT" && tr '\n' '\0' < "$FILELIST" | xargs -0 awk -f "$PROSE_AWK" 2>/dev/null) > "$PROSE_VIEW" || true
+# Skipped in --messages-only: this awk pass over every tracked file is a large
+# share of the gate's runtime and nothing in the message scan reads PROSE_VIEW.
+if [ "$MESSAGES_ONLY" = "0" ]; then
+  (cd "$SCAN_ROOT" && tr '\n' '\0' < "$FILELIST" | xargs -0 awk -f "$PROSE_AWK" 2>/dev/null) > "$PROSE_VIEW" || true
+fi
 run_grep_prose() {
   local mode="$1" pattern="$2" strip="${3:-}"
   if [ "$mode" = "ci" ]; then
@@ -269,8 +341,10 @@ grep_rule_prose() { local rule="$1"; shift; report_hits "$rule" < <(run_grep_pro
 echo "leak-gate — scan root: $SCAN_ROOT"
 echo "candidate files: $TOTAL_FILES"
 echo "secret context: $SECRET_CONTEXT (event=${GITHUB_EVENT_NAME:-none})"
+[ "$MESSAGES_ONLY" = "1" ] && echo "mode: --messages-only (commit messages + PR title/body; the TREE is NOT scanned)"
 echo
 
+if [ "$MESSAGES_ONLY" = "0" ]; then
 # ── Tier 2: vocabulary ────────────────────────────────────────────────────────
 echo "── Tier 2: multi-tenant vocabulary (prose + code) ─────────────────────"
 grep_rule_prose tenant-word ci '(^|[^a-z0-9_])tenant(s|'\''s)?([^a-z0-9_]|$)' '[Cc]ross-?[Tt]enant'
@@ -307,6 +381,19 @@ grep_rule tenant-purged ci '(^|[^a-z0-9_])tenant'
 # manifests is NOT attempted — bun's `workspace:*` is package-manager tooling.
 grep_rule workspace-retired cs 'WorkspaceRegistryRow|lookupWorkspace|workspaceCache|fromWorkspaces|syndicationRelayWorkspaceTemplate|NEUTRON_OPEN_WORKSPACE_BASE_URL|OPEN_WORKSPACE_BASE_URL_ENV|CodegenWorkspace|ResolveWorkspaceInput|ResolvedWorkspace|resolveWorkspace|PROJECT_WORKSPACE_DIRNAME|WORKSPACE_FILES|readOwnerWorkspaceFiles|workspace_path|workspace_file|workspace_not_resolved|workspace-resolver'
 
+fi  # ── end tree-only rules (Tier 2) ──────────────────────────────────────────
+
+# NOTE: the literal is SPLIT deliberately. bash concatenates adjacent quoted strings, so
+# the runtime value is the real private token while the contiguous string never appears
+# in this file — which both keeps the token out of the public tree AND stops the gate
+# flagging itself. Do NOT "tidy" this into one quoted literal, and do NOT let a
+# content scrub rewrite it: on 2026-07-29 a blanket scrub rewrote this value and the
+# gate went green because the rule was searching for the wrong string.
+# Defined OUTSIDE the --messages-only guard: the message rule `private-path-msg`
+# below reads the same value, and duplicating it is how the two copies drift.
+PRIVATE_PATH_RE='va''jra'
+
+if [ "$MESSAGES_ONLY" = "0" ]; then
 echo
 # ── Tier 1 PATH (structural, zero secret): private tokens in tracked PATHS ────
 # The denylist below needs a secret. This rule does not, because a PATH is public
@@ -315,17 +402,11 @@ echo
 # no pattern source at all. SUBSTRING match, case-insensitive, over the path: a
 # private-system name concatenated into a longer segment must still trip.
 echo "── Tier 1 (structural): private tokens in tracked paths ───────────────"
-# NOTE: the literal is SPLIT deliberately. bash concatenates adjacent quoted strings, so
-# the runtime value is the real private token while the contiguous string never appears
-# in this file — which both keeps the token out of the public tree AND stops the gate
-# flagging itself. Do NOT "tidy" this into one quoted literal, and do NOT let a
-# content scrub rewrite it: on 2026-07-29 a blanket scrub rewrote this value and the
-# gate went green because the rule was searching for the wrong string.
-PRIVATE_PATH_RE='va''jra'
 report_hits private-path < <(
   grep -iE "$PRIVATE_PATH_RE" "$FILELIST" \
     | sed 's|$|:1:tracked path carries a private-system token (rename the PATH — scrubbing file contents is not enough)|'
 )
+fi
 
 echo
 # ── Tier 1: owner PII denylist (supplied out-of-band — NEVER committed) ───────
@@ -384,14 +465,42 @@ compile_denylist() {
       printf "%s%s", (n++?"|":""), pat }
     END { printf "\n" }'
 }
-echo "── Tier 1: owner PII denylist (env-supplied) ──────────────────────────"
+echo "── Tier 1: owner PII denylist ─────────────────────────────────────────"
+# SOURCE RESOLUTION — the only part of Tier-1 that differs between CI and a
+# developer's machine. Everything downstream (compile_denylist, grep_rule,
+# grep_rule_messages) is the SAME code for both, which is the point: a separate
+# local implementation would drift and the local one would quietly stop matching.
+#
+# 1. `LEAK_GATE_PII_DENYLIST_B64` — the CI secret. Always wins.
+# 2. a PLAIN-TEXT file outside the repo — consulted ONLY when (1) is unset AND
+#    this is not GitHub Actions. Gating on `IN_CI` rather than on emptiness is
+#    deliberate: it makes the CI path provably unchanged by this feature, and
+#    stops a file planted on a runner from ever standing in for the real secret.
+PII_SOURCE=none
 PII_RAW="$(printf '%s' "${LEAK_GATE_PII_DENYLIST_B64:-}" | base64 -d 2>/dev/null || true)"
+[ -n "$PII_RAW" ] && PII_SOURCE=env
+if [ -z "$PII_RAW" ] && [ "$IN_CI" = "0" ]; then
+  PII_FILE="${LEAK_GATE_PII_DENYLIST_FILE:-${XDG_CONFIG_HOME:-$HOME/.config}/neutron/leak-gate-pii-denylist}"
+  if [ -f "$PII_FILE" ] && [ -r "$PII_FILE" ]; then
+    PII_RAW="$(cat "$PII_FILE" 2>/dev/null || true)"
+    # The PATH is safe to print (the operator chose it); the CONTENTS never are.
+    if [ -n "$PII_RAW" ]; then
+      PII_SOURCE="file:$PII_FILE"
+    else
+      echo "  denylist file is EMPTY: $PII_FILE" >&2
+    fi
+  else
+    echo "  no denylist file at: $PII_FILE" >&2
+  fi
+fi
 PII_SUB_ALT="$(printf '%s\n' "$PII_RAW" | compile_denylist sub)"
 PII_WORD_ALT="$(printf '%s\n' "$PII_RAW" | compile_denylist word)"
 if [ -n "$PII_SUB_ALT" ] || [ -n "$PII_WORD_ALT" ]; then
-  echo "  denylist loaded (substring entries: $([ -n "$PII_SUB_ALT" ] && echo yes || echo no); word entries: $([ -n "$PII_WORD_ALT" ] && echo yes || echo no))"
-  [ -n "$PII_SUB_ALT" ]  && grep_rule pii-denylist      ci "(${PII_SUB_ALT})"
-  [ -n "$PII_WORD_ALT" ] && grep_rule pii-denylist-word cs "(^|[^A-Za-z0-9_])(${PII_WORD_ALT})([^A-Za-z0-9_]|\$)"
+  echo "  denylist loaded from ${PII_SOURCE} (substring entries: $([ -n "$PII_SUB_ALT" ] && echo yes || echo no); word entries: $([ -n "$PII_WORD_ALT" ] && echo yes || echo no))"
+  if [ "$MESSAGES_ONLY" = "0" ]; then
+    [ -n "$PII_SUB_ALT" ]  && grep_rule pii-denylist      ci "(${PII_SUB_ALT})"
+    [ -n "$PII_WORD_ALT" ] && grep_rule pii-denylist-word cs "(^|[^A-Za-z0-9_])(${PII_WORD_ALT})([^A-Za-z0-9_]|\$)"
+  fi
 elif [ "$SECRET_CONTEXT" = "canonical" ]; then
   cat >&2 <<'EOF'
 leak-gate: FATAL — LEAK_GATE_PII_DENYLIST_B64 is unset, empty or undecodable, but
@@ -405,16 +514,34 @@ Fix BOTH halves — either alone is theatre:
     existing is not enough; nothing delivers it unless the workflow says so).
 EOF
   exit 2
-else
-  echo "leak-gate: Tier-1 PII denylist SKIPPED — context '$SECRET_CONTEXT' has no access to" >&2
+elif [ "$SECRET_CONTEXT" = "fork" ]; then
+  echo "leak-gate: Tier-1 PII denylist SKIPPED — context 'fork' has no access to" >&2
   echo "           repository secrets. This is the ONLY sanctioned skip. The scheduled full" >&2
   echo "           scan (leak-gate-nightly.yml) re-runs this tree WITH the denylist." >&2
+else
+  # LOCAL, no denylist. Not a merge gate, so not exit 2 — but emphatically not a
+  # pass either. This is the case that has to stay LOUD: it is the state every
+  # developer machine was in, and the silent version of it is why an author had
+  # no signal before publishing a commit message they could never take back.
+  note_unrun "pii-denylist, pii-denylist-msg"
+  cat >&2 <<EOF
+leak-gate: Tier-1 PII COULD NOT RUN — no denylist available in this context.
+           This run does NOT tell you the tree or the messages are clean of owner
+           PII; it tells you nothing about them at all.
+
+           To arm it locally, put the plain-text denylist at
+             ${LEAK_GATE_PII_DENYLIST_FILE:-${XDG_CONFIG_HOME:-\$HOME/.config}/neutron/leak-gate-pii-denylist}
+           (outside every working tree, so no \`git add\` can ever reach it), then
+           run \`bash scripts/install-git-hooks.sh\` to arm the pre-push hook.
+EOF
 fi
 
+if [ "$MESSAGES_ONLY" = "0" ]; then
 echo
 # ── Tier 1 (shape-only, zero PII): hosted-domain rule ─────────────────────────
 echo "── hosted-domain (self-host-only Open) ────────────────────────────────"
 grep_rule neutron-computer ci 'neutron\.computer'
+fi
 
 echo
 # ── Commit messages + PR title/body ───────────────────────────────────────────
@@ -441,7 +568,15 @@ build_message_view() {
     done
   fi
   [ -n "$base" ] || return 1
-  git -C "$SCAN_ROOT" log --no-merges --format='%s%n%b' "${base}..HEAD" 2>/dev/null \
+  # The TIP of the window. Defaults to HEAD, which is right for CI and for a
+  # plain `git push`. The pre-push hook overrides it with the exact sha git is
+  # about to publish, which is NOT always HEAD — `git push origin <sha>:main` and
+  # a push from a detached or non-current branch both publish something else, and
+  # scanning HEAD there would check commits that are not being pushed while
+  # missing the ones that are.
+  local head="${LEAK_GATE_HEAD_SHA:-HEAD}"
+  git -C "$SCAN_ROOT" rev-parse --verify -q "${head}^{commit}" >/dev/null 2>&1 || head=HEAD
+  git -C "$SCAN_ROOT" log --no-merges --format='%s%n%b' "${base}..${head}" 2>/dev/null \
     | awk '{ printf "COMMIT-MESSAGE:%d:%s\n", NR, $0 }' >> "$MSG_VIEW"
   # PR title/body arrive via env and are NEVER interpolated into a shell command
   # (a PR body is attacker-controlled text; `${{ github.event… }}` inside `run:`
@@ -479,10 +614,27 @@ Fix: the purity job needs `fetch-depth: 0` and `LEAK_GATE_BASE_SHA`
 (github.event.pull_request.base.sha || github.event.before). See ci.yml.
 EOF
   exit 2
+elif [ "$MESSAGES_ONLY" = "1" ]; then
+  # In this mode the message scan is the ENTIRE job. Not resolving a range means
+  # the gate checked nothing whatsoever, so it must never look like a pass.
+  echo "leak-gate: FATAL — --messages-only, but no commit range could be resolved." >&2
+  echo "           Nothing was scanned. Is this a git work tree with an 'origin/main'?" >&2
+  exit 2
+elif git -C "$SCAN_ROOT" rev-parse --git-dir >/dev/null 2>&1; then
+  # A git repo whose scan window could not be resolved (no LEAK_GATE_BASE_SHA and
+  # no origin/main). There ARE messages here and they were NOT examined, which is
+  # materially different from the case below.
+  echo "  could not resolve a commit range — messages NOT scanned" >&2
+  note_unrun "private-path-msg, neutron-computer-msg, pii-denylist-msg"
 else
+  # Not a git work tree at all: there are no commit messages in scope, so nothing
+  # went unchecked. An empty surface is not an unexamined one, and conflating the
+  # two would make every non-repo scan permanently INCOMPLETE — noise that trains
+  # people to ignore the verdict that matters.
   echo "  (not a git work tree and not in CI — message scan not applicable)"
 fi
 
+if [ "$MESSAGES_ONLY" = "0" ]; then
 echo
 # ── Tier 3: structural ────────────────────────────────────────────────────────
 echo "── Tier 3: structural ─────────────────────────────────────────────────"
@@ -557,6 +709,7 @@ binary_hidden_hits() {
   done < "$FILELIST"
 }
 report_hits binary-hidden < <(binary_hidden_hits)
+fi  # ── end tree-only rules (Tier 1 PATH / hosted-domain / Tier 3) ─────────────
 
 # ── Verdict ───────────────────────────────────────────────────────────────────
 echo
@@ -564,9 +717,20 @@ echo "── Summary ───────────────────�
 [ -n "$SUMMARY" ] && printf '%b' "$SUMMARY"
 echo "    allowlisted (suppressed): $ALLOWLISTED_COUNT"
 echo "    TOTAL FINDINGS: $TOTAL_FINDINGS"
+[ -n "$UNRUN_RULES" ] && echo "    RULES THAT COULD NOT RUN: $UNRUN_RULES"
 if [ "$TOTAL_FINDINGS" -gt 0 ]; then
   echo "LEAK GATE: FAIL — the public tree must be fully silent."
   exit 1
+fi
+# "Found nothing" and "looked at nothing" are different results and must not
+# share a verdict or an exit code. Canonical CI can never reach here with an
+# unrun rule (that path exits 2 above); a fork PR is exempted by design and keeps
+# its exit 0, covered by the nightly full scan. What is left is a local run,
+# which now says so and exits 3.
+if [ -n "$UNRUN_RULES" ]; then
+  echo "LEAK GATE: INCOMPLETE — 0 findings from the rules that RAN, but the rules"
+  echo "                        above did NOT run. This is not a clean result."
+  exit 3
 fi
 echo "LEAK GATE: SILENT ✅"
 exit 0

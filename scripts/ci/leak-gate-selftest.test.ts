@@ -16,7 +16,7 @@
  */
 import { describe, expect, test } from 'bun:test'
 import { execFileSync } from 'node:child_process'
-import { copyFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { copyFileSync, mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -50,7 +50,17 @@ function gateEnv(extra: Record<string, string> = {}): Record<string, string> {
     if (k.startsWith('GITHUB_') || k.startsWith('LEAK_GATE_') || v === undefined) continue
     env[k] = v
   }
-  return { ...env, ...extra }
+  // Since the 2026-07-30 local-denylist change the gate ALSO reads a file under
+  // `$XDG_CONFIG_HOME`/`$HOME`, neither of which is scrubbed above (nor can be —
+  // git and bash need them). On a maintainer's machine that file exists, so
+  // without this pin every "no denylist available" case below would quietly
+  // become a "denylist loaded" case and stop testing what it says it tests. The
+  // path is pinned to one that cannot exist; cases that WANT a file override it.
+  return {
+    LEAK_GATE_PII_DENYLIST_FILE: '/nonexistent/leak-gate/denylist-absent',
+    ...env,
+    ...extra,
+  }
 }
 
 /** base64 of a newline-separated denylist, the shape the workflow ships. */
@@ -68,7 +78,11 @@ function runGate(
     // success, and the gate announces its sanctioned Tier-1 skip on stderr — so
     // without this merge the success path silently loses the very line that
     // distinguishes "the rule ran" from "the rule was skipped".
-    const out = execFileSync('bash', ['-c', '"$0" --tree "$1" 2>&1', script, dir], {
+    // `LEAK_GATE_MODE_ARGS` is a HARNESS knob, not a gate feature — it lets a
+    // case append a flag (currently only `--messages-only`) without every
+    // existing call site growing a fourth positional argument. The gate itself
+    // never reads the variable.
+    const out = execFileSync('bash', ['-c', '"$0" --tree "$1" ${LEAK_GATE_MODE_ARGS:-} 2>&1', script, dir], {
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'pipe'],
       env: gateEnv(extraEnv),
@@ -142,7 +156,10 @@ describe('G8 leak-gate — clean baseline', () => {
   test('a clean fixture tree is SILENT', () => {
     const dir = freshTree()
     try {
-      const { code, out } = runGate(dir)
+      // A denylist is supplied so this asserts a REAL green. Without one the gate
+      // now (correctly) reports INCOMPLETE — "SILENT" would be a claim about a
+      // rule that never ran.
+      const { code, out } = runGate(dir, { LEAK_GATE_PII_DENYLIST_B64: DENYLIST })
       expect(out).toContain('LEAK GATE: SILENT')
       expect(code).toBe(0)
     } finally {
@@ -251,7 +268,7 @@ describe('G8 leak-gate — planted findings FAIL', () => {
     const dir = freshTree()
     try {
       writeFileSync(join(dir, 'SPEC.md'), '# spec\n')
-      const { code, out } = runGate(dir)
+      const { code, out } = runGate(dir, { LEAK_GATE_PII_DENYLIST_B64: DENYLIST })
       expect(out).not.toContain('[forbidden-path]')
       expect(out).toContain('LEAK GATE: SILENT')
       expect(code).toBe(0)
@@ -269,7 +286,7 @@ describe('G8 leak-gate — planted findings FAIL', () => {
     try {
       mkdirSync(join(dir, 'docs'))
       writeFileSync(join(dir, 'docs', 'SPEC.md'), '# a perfectly fine nested spec\n')
-      const { code, out } = runGate(dir)
+      const { code, out } = runGate(dir, { LEAK_GATE_PII_DENYLIST_B64: DENYLIST })
       expect(out).toContain('LEAK GATE: SILENT')
       expect(code).toBe(0)
     } finally {
@@ -431,17 +448,410 @@ describe('Tier-1 denylist is FAIL-CLOSED where secrets are available', () => {
     }
   })
 
-  test('a local (non-CI) run skips Tier-1 — it is not a merge gate', () => {
+  test('a local run with NO denylist is INCOMPLETE (exit 3), never green', () => {
+    // A local run is not a merge gate, so it cannot exit 2 — but "I could not
+    // check" must not wear the same verdict as "I checked and it was clean".
+    // Until 2026-07-30 it printed SILENT ✅ and exited 0, which is the same lie
+    // the CI half of this gate told for ~3,700 runs.
     const dir = freshTree()
     try {
       const { code, out } = runGate(dir)
       expect(out).toContain('secret context: local')
-      expect(out).toContain('SKIPPED')
-      expect(code).toBe(0)
+      expect(out).toContain('COULD NOT RUN')
+      expect(out).toContain('RULES THAT COULD NOT RUN: pii-denylist')
+      expect(out).toContain('LEAK GATE: INCOMPLETE')
+      expect(out).not.toContain('LEAK GATE: SILENT')
+      expect(code).toBe(3)
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }
   })
+})
+
+/* ────────────────────────────────────────────────────────────────────────────
+ * 2026-07-30 — the LOCAL half of Tier-1.
+ *
+ * The denylist is a repository secret, so it existed only inside CI. An author
+ * therefore had NO pre-push signal for the one class of leak that cannot be
+ * redacted once public: a commit message or PR body, mirrored to GHArchive
+ * within the hour. On 2026-07-30 owner names went out in exactly those two
+ * fields; CI caught them, the branch was scrubbed and force-pushed, and the
+ * original push was already mirrored and unrecoverable.
+ *
+ * The fix is a denylist file OUTSIDE the repo plus a pre-push hook. Every token
+ * used below is a neutral invention (`willow`, `acme`, `orchard`) — the real
+ * list stays out-of-band, which is the entire reason it can be absent.
+ * ──────────────────────────────────────────────────────────────────────────── */
+
+const LOCAL_TERM = 'willow' // neutral stand-in for a real denylist entry
+const PRE_PUSH_HOOK = fileURLToPath(new URL('../../.githooks/pre-push', import.meta.url))
+const INSTALL_HOOKS = fileURLToPath(new URL('../install-git-hooks.sh', import.meta.url))
+
+/** Write a plain-text denylist to a path OUTSIDE the fixture tree. */
+function localDenylistFile(entries: string[]): string {
+  const d = mkdtempSync(join(tmpdir(), 'leak-gate-denylist-'))
+  const f = join(d, 'denylist')
+  writeFileSync(f, `${entries.join('\n')}\n`)
+  return f
+}
+
+describe('local denylist FILE — same rules, no secret', () => {
+  test('a file-supplied denylist RUNS the rule and catches a tree token', () => {
+    const dir = freshTree()
+    const file = localDenylistFile(['# neutral', LOCAL_TERM])
+    try {
+      writeFileSync(join(dir, 'src', 'leak.ts'), `const p = "/opt/${LOCAL_TERM}/data"\n`)
+      const { code, out } = runGate(dir, { LEAK_GATE_PII_DENYLIST_FILE: file })
+      expect(out).toContain('denylist loaded from file:')
+      expect(out).toContain('[pii-denylist]')
+      expect(code).toBe(1)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+      rmSync(file, { force: true })
+    }
+  })
+
+  test('the file source is IGNORED inside CI — the secret is the only CI source', () => {
+    // Load-bearing: if a runner-side file could stand in for the secret, the
+    // 2026-07-29 fail-closed guarantee would be defeated by planting a file.
+    const { dir, base } = gitFixture()
+    const file = localDenylistFile([LOCAL_TERM])
+    try {
+      const { code, out } = runGate(dir, {
+        ...CANONICAL_PUSH,
+        LEAK_GATE_BASE_SHA: base,
+        LEAK_GATE_PII_DENYLIST_FILE: file,
+      })
+      expect(out).toContain('FATAL')
+      expect(out).not.toContain('denylist loaded')
+      expect(code).toBe(2)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+      rmSync(file, { force: true })
+    }
+  })
+
+  test('the env var still WINS over the file', () => {
+    const dir = freshTree()
+    const file = localDenylistFile([LOCAL_TERM])
+    try {
+      // Planted token is in the FILE list only; the env list does not contain it.
+      writeFileSync(join(dir, 'src', 'leak.ts'), `const p = "/opt/${LOCAL_TERM}/data"\n`)
+      const { code, out } = runGate(dir, {
+        LEAK_GATE_PII_DENYLIST_B64: DENYLIST,
+        LEAK_GATE_PII_DENYLIST_FILE: file,
+      })
+      expect(out).toContain('denylist loaded from env')
+      expect(out).not.toContain('[pii-denylist]')
+      expect(code).toBe(0)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+      rmSync(file, { force: true })
+    }
+  })
+
+  test('a MISSING file path is named on stderr, not swallowed', () => {
+    const dir = freshTree()
+    try {
+      const { out } = runGate(dir, { LEAK_GATE_PII_DENYLIST_FILE: '/nope/denylist' })
+      expect(out).toContain('no denylist file at: /nope/denylist')
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('--messages-only (the pre-push mode)', () => {
+  test('RED on a denylisted term in a COMMIT MESSAGE, tree not scanned', () => {
+    const { dir, base } = gitFixture([`feat: migrate the ${LOCAL_TERM} archive`])
+    const file = localDenylistFile([LOCAL_TERM])
+    try {
+      const { code, out } = runGate(dir, {
+        LEAK_GATE_BASE_SHA: base,
+        LEAK_GATE_PII_DENYLIST_FILE: file,
+        LEAK_GATE_MODE_ARGS: '--messages-only',
+      })
+      expect(out).toContain('mode: --messages-only')
+      expect(out).toContain('[pii-denylist-msg]')
+      expect(out).toContain('COMMIT-MESSAGE')
+      expect(code).toBe(1)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+      rmSync(file, { force: true })
+    }
+  })
+
+  test('it does NOT run the tree rules (that is what makes it fast)', () => {
+    // A planted TREE finding that the full gate flags must be invisible here —
+    // otherwise the mode is not doing what its name and its runtime claim.
+    const { dir, base } = gitFixture()
+    const file = localDenylistFile([LOCAL_TERM])
+    try {
+      writeFileSync(join(dir, 'src', 'db.ts'), `export const key = ${CODE_TOKEN}\n`)
+      const full = runGate(dir, { LEAK_GATE_BASE_SHA: base, LEAK_GATE_PII_DENYLIST_FILE: file })
+      expect(full.out).toContain(`[${T2}-code]`)
+      expect(full.code).toBe(1)
+
+      const msgs = runGate(dir, {
+        LEAK_GATE_BASE_SHA: base,
+        LEAK_GATE_PII_DENYLIST_FILE: file,
+        LEAK_GATE_MODE_ARGS: '--messages-only',
+      })
+      expect(msgs.out).not.toContain(`[${T2}-code]`)
+      expect(msgs.code).toBe(0)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+      rmSync(file, { force: true })
+    }
+  }, 60_000)
+
+  test('it is REFUSED inside GitHub Actions — never a way to skip the tree scan', () => {
+    const { dir, base } = gitFixture()
+    try {
+      const { code, out } = runGate(dir, {
+        ...CANONICAL_PUSH,
+        LEAK_GATE_BASE_SHA: base,
+        LEAK_GATE_PII_DENYLIST_B64: DENYLIST,
+        LEAK_GATE_MODE_ARGS: '--messages-only',
+      })
+      expect(out).toContain('REFUSED inside GitHub')
+      expect(code).toBe(2)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('LEAK_GATE_HEAD_SHA bounds the window to what is actually being pushed', () => {
+    // `git push origin <sha>:main`, or a push from a non-current branch,
+    // publishes something other than HEAD. Scanning HEAD there would flag
+    // commits that are staying local while missing the ones going out.
+    const { dir, base } = gitFixture(['chore: a clean subject', `feat: the ${LOCAL_TERM} archive`])
+    const file = localDenylistFile([LOCAL_TERM])
+    try {
+      const firstCommit = execFileSync('git', ['-C', dir, 'rev-parse', 'HEAD~1'], {
+        encoding: 'utf8',
+      }).trim()
+
+      // Pushing only the first (clean) commit: the later bad one is out of window.
+      const partial = runGate(dir, {
+        LEAK_GATE_BASE_SHA: base,
+        LEAK_GATE_HEAD_SHA: firstCommit,
+        LEAK_GATE_PII_DENYLIST_FILE: file,
+        LEAK_GATE_MODE_ARGS: '--messages-only',
+      })
+      expect(partial.out).not.toContain('[pii-denylist-msg]')
+      expect(partial.code).toBe(0)
+
+      // Pushing the tip: the bad commit IS in window.
+      const full = runGate(dir, {
+        LEAK_GATE_BASE_SHA: base,
+        LEAK_GATE_PII_DENYLIST_FILE: file,
+        LEAK_GATE_MODE_ARGS: '--messages-only',
+      })
+      expect(full.out).toContain('[pii-denylist-msg]')
+      expect(full.code).toBe(1)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+      rmSync(file, { force: true })
+    }
+  }, 60_000)
+
+  test('no resolvable commit range ⇒ exit 2 — it scanned NOTHING', () => {
+    const dir = freshTree() // deliberately not a git repo
+    const file = localDenylistFile([LOCAL_TERM])
+    try {
+      const { code, out } = runGate(dir, {
+        LEAK_GATE_PII_DENYLIST_FILE: file,
+        LEAK_GATE_MODE_ARGS: '--messages-only',
+      })
+      expect(out).toContain('Nothing was scanned')
+      expect(code).toBe(2)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+      rmSync(file, { force: true })
+    }
+  })
+})
+
+/**
+ * A throwaway repo wired the way a real clone is: the gate + hook in place, a
+ * bare `origin`, hooks installed via the real installer. Returns a `push()` that
+ * performs a REAL `git push` so the hook is exercised by git, not by us calling
+ * it — a hook that is only ever invoked directly proves nothing about whether it
+ * ever fires.
+ */
+function pushFixture(denylistEntries: string[] | null): {
+  root: string
+  commit: (subject: string) => void
+  install: () => { code: number; out: string }
+  push: () => { code: number; out: string }
+  pushWithoutDenylist: () => { code: number; out: string }
+  cleanup: () => void
+} {
+  const sandbox = mkdtempSync(join(tmpdir(), 'leak-gate-prepush-'))
+  const root = join(sandbox, 'repo')
+  const remote = join(sandbox, 'remote.git')
+  mkdirSync(join(root, 'scripts', 'ci'), { recursive: true })
+  mkdirSync(join(root, '.githooks'), { recursive: true })
+  copyFileSync(LEAK_GATE, join(root, 'scripts', 'ci', 'leak-gate.sh'))
+  copyFileSync(PROSE_AWK, join(root, 'scripts', 'ci', 'extract-comment-prose.awk'))
+  copyFileSync(INSTALL_HOOKS, join(root, 'scripts', 'install-git-hooks.sh'))
+  copyFileSync(PRE_PUSH_HOOK, join(root, '.githooks', 'pre-push'))
+  // The fixture tree is not the real repo, so the real allowlist's entries would
+  // all be `allowlist-stale` here (exit 2, before any rule runs).
+  writeFileSync(join(root, 'scripts', 'ci', 'leak-gate-allowlist.txt'), '')
+  writeFileSync(join(root, 'app.ts'), 'export const ok = true\n')
+
+  const denylistPath =
+    denylistEntries === null ? join(sandbox, 'absent') : localDenylistFile(denylistEntries)
+  const env = gateEnv({ LEAK_GATE_PII_DENYLIST_FILE: denylistPath })
+
+  const git = (...a: string[]): string =>
+    execFileSync('git', ['-C', root, ...a], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })
+  execFileSync('git', ['init', '-q', '--bare', remote], { stdio: 'ignore' })
+  git('init', '-q', '-b', 'main', '.')
+  git('config', 'user.email', 'selftest@example.invalid')
+  git('config', 'user.name', 'leak-gate selftest')
+  git('config', 'commit.gpgsign', 'false')
+  git('add', '-A')
+  git('commit', '-q', '-m', 'chore: base commit')
+  git('remote', 'add', 'origin', remote)
+  git('push', '-q', 'origin', 'main')
+
+  const run = (
+    args: string[],
+    childEnv: Record<string, string> = env,
+  ): { code: number; out: string } => {
+    try {
+      const out = execFileSync('git', ['-C', root, ...args], {
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'pipe'],
+        env: childEnv,
+      })
+      return { code: 0, out }
+    } catch (e: unknown) {
+      const err = e as { status?: number; stdout?: string; stderr?: string }
+      return { code: err.status ?? -1, out: `${err.stdout ?? ''}${err.stderr ?? ''}` }
+    }
+  }
+
+  return {
+    root,
+    commit: (subject: string) => {
+      writeFileSync(join(root, `f${Date.now()}.ts`), 'export const x = 1\n')
+      git('add', '-A')
+      git('commit', '-q', '-m', subject)
+    },
+    install: () => {
+      try {
+        const out = execFileSync('bash', [join(root, 'scripts', 'install-git-hooks.sh')], {
+          encoding: 'utf8',
+          stdio: ['ignore', 'pipe', 'pipe'],
+          env,
+          cwd: root,
+        })
+        return { code: 0, out }
+      } catch (e: unknown) {
+        const err = e as { status?: number; stdout?: string; stderr?: string }
+        return { code: err.status ?? -1, out: `${err.stdout ?? ''}${err.stderr ?? ''}` }
+      }
+    },
+    push: () => run(['push', 'origin', 'main']),
+    /** Push with the denylist pointed somewhere else — "the list went missing". */
+    pushWithoutDenylist: () =>
+      run(['push', 'origin', 'main'], gateEnv({ LEAK_GATE_PII_DENYLIST_FILE: join(sandbox, 'gone') })),
+    cleanup: () => rmSync(sandbox, { recursive: true, force: true }),
+  }
+}
+
+describe('pre-push hook — the control fires before anything is published', () => {
+  test('the COMMITTED hook is executable', () => {
+    // git will not run a hook without the execute bit — it skips it in silence,
+    // which looks exactly like a hook that ran and found nothing. The installer
+    // chmods as a belt-and-braces, so a 0644 in the index would be invisible
+    // until someone wired the hook a different way. Pin the mode in the index.
+    const mode = statSync(PRE_PUSH_HOOK).mode & 0o111
+    expect(mode).not.toBe(0)
+  })
+
+  test('BLOCKS a real `git push` whose COMMIT MESSAGE carries a denylisted term', () => {
+    // THE load-bearing case. Not "the script runs" — an actual push, refused.
+    const fx = pushFixture(['# neutral test list', LOCAL_TERM])
+    try {
+      expect(fx.install().code).toBe(0)
+      fx.commit(`feat: migrate the ${LOCAL_TERM} archive`)
+      const { code, out } = fx.push()
+      expect(out).toContain('[pii-denylist-msg]')
+      expect(out).toContain('PUSH BLOCKED')
+      expect(code).not.toBe(0)
+      // …and the remote must not have moved.
+      const remoteHas = execFileSync('git', ['-C', fx.root, 'ls-remote', 'origin', 'main'], {
+        encoding: 'utf8',
+      })
+      const head = execFileSync('git', ['-C', fx.root, 'rev-parse', 'HEAD'], { encoding: 'utf8' })
+      expect(remoteHas).not.toContain(head.trim())
+    } finally {
+      fx.cleanup()
+    }
+  }, 60_000)
+
+  test('ALLOWS the same push once the message is reworded', () => {
+    // The other direction. Without this, a hook that blocked everything would
+    // also pass the case above.
+    const fx = pushFixture(['# neutral test list', LOCAL_TERM])
+    try {
+      expect(fx.install().code).toBe(0)
+      fx.commit('feat: migrate the archive')
+      const { code, out } = fx.push()
+      expect(out).not.toContain('PUSH BLOCKED')
+      expect(code).toBe(0)
+      const remoteHas = execFileSync('git', ['-C', fx.root, 'ls-remote', 'origin', 'main'], {
+        encoding: 'utf8',
+      })
+      const head = execFileSync('git', ['-C', fx.root, 'rev-parse', 'HEAD'], { encoding: 'utf8' })
+      expect(remoteHas).toContain(head.trim())
+    } finally {
+      fx.cleanup()
+    }
+  }, 60_000)
+
+  test('the installer REFUSES to arm the hook with no denylist', () => {
+    // Gate and pattern source ship together or neither is real (2026-07-29).
+    const fx = pushFixture(null)
+    try {
+      const { code, out } = fx.install()
+      expect(out).toContain('NOT INSTALLED')
+      expect(code).not.toBe(0)
+      // Refusing must leave git untouched, not half-armed.
+      const cfg = execFileSync('bash', ['-c', `git -C "${fx.root}" config --get core.hooksPath || true`], {
+        encoding: 'utf8',
+      })
+      expect(cfg.trim()).toBe('')
+    } finally {
+      fx.cleanup()
+    }
+  }, 60_000)
+
+  test('an ARMED hook BLOCKS when the denylist later disappears', () => {
+    // "Could not check" is not "checked and clean". If the file is deleted or
+    // renamed after install, the push must stop — the silent-skip version of
+    // this is the entire defect being fixed.
+    const fx = pushFixture(['# neutral test list', LOCAL_TERM])
+    try {
+      expect(fx.install().code).toBe(0)
+      fx.commit('chore: a perfectly clean subject')
+      const armed = fx.push()
+      expect(armed.code).toBe(0)
+
+      fx.commit('chore: another perfectly clean subject')
+      const { code, out } = fx.pushWithoutDenylist()
+      expect(out).toContain('COULD NOT RUN')
+      expect(out).toContain('PUSH BLOCKED')
+      expect(code).not.toBe(0)
+    } finally {
+      fx.cleanup()
+    }
+  }, 60_000)
 })
 
 describe('denylist MATCHING — case-insensitive, separator-flexible substring', () => {
@@ -564,7 +974,7 @@ describe('structural private-path rule (needs no secret)', () => {
     try {
       mkdirSync(join(dir, 'archive-import'))
       writeFileSync(join(dir, 'archive-import', 'run.ts'), 'export const x = 1\n')
-      const { code, out } = runGate(dir)
+      const { code, out } = runGate(dir, { LEAK_GATE_PII_DENYLIST_B64: DENYLIST })
       expect(out).not.toContain('[private-path]')
       expect(code).toBe(0)
     } finally {
@@ -703,7 +1113,7 @@ describe('allowlist audit — an exception must be narrow and live', () => {
     const gate = sandboxGate(dir, `src/db.ts:${T2}-code\nsrc/db.ts:${T2}-purged\n`)
     try {
       writeFileSync(join(dir, 'src', 'db.ts'), `export const key = ${CODE_TOKEN}\n`)
-      const { code, out } = runGate(dir, {}, gate)
+      const { code, out } = runGate(dir, { LEAK_GATE_PII_DENYLIST_B64: DENYLIST }, gate)
       expect(out).not.toContain(`[${T2}-code]`)
       expect(out).toContain('LEAK GATE: SILENT')
       expect(code).toBe(0)

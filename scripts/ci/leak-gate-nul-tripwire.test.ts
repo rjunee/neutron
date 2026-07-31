@@ -42,6 +42,14 @@ function runGate(dir: string): { code: number; out: string } {
     if (k.startsWith('GITHUB_') || k.startsWith('LEAK_GATE_') || v === undefined) continue
     env[k] = v
   }
+  // Since 2026-07-30 a run with no denylist reports INCOMPLETE (exit 3) instead
+  // of a green it has not earned, and the gate also looks for a denylist FILE
+  // under $HOME — which exists on a maintainer's machine and would make these
+  // cases machine-dependent. Both are pinned: a SYNTHETIC denylist is supplied
+  // so the green assertions below are real greens, and the file path is pinned
+  // to one that cannot exist so nothing local leaks in.
+  env.LEAK_GATE_PII_DENYLIST_FILE = '/nonexistent/leak-gate/denylist-absent'
+  env.LEAK_GATE_PII_DENYLIST_B64 = Buffer.from('zorblax\n', 'utf8').toString('base64')
   try {
     const out = execFileSync('bash', ['-c', '"$0" --tree "$1" 2>&1', LEAK_GATE, dir], {
       encoding: 'utf8',

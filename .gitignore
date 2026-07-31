@@ -22,3 +22,9 @@ __pycache__/
 
 .worktrees/
 STATUS.md
+
+# Belt-and-braces. The leak gate's PII denylist is supposed to live OUTSIDE every
+# working tree (see CONTRIBUTING.md) precisely so no `git add` can reach it. If a
+# copy ever lands in here anyway, it must not be committable: the list names the
+# exact strings it exists to keep out of a public repo.
+leak-gate-pii-denylist*

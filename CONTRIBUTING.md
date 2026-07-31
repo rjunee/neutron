@@ -75,6 +75,43 @@ actual observable outcome (a rendered result, a row on disk, an HTTP status),
 not just internal bookkeeping. A test that passes while the feature is broken is
 worse than no test.
 
+### Git hooks (maintainers)
+
+```sh
+bash scripts/install-git-hooks.sh    # arm .githooks/ (pre-push leak gate)
+bash scripts/install-git-hooks.sh --uninstall
+```
+
+The pre-push hook runs `scripts/ci/leak-gate.sh --messages-only` over the commit
+messages you are about to publish. It exists because a public push is copied to
+GHArchive/BigQuery within the hour: a bad file can be force-pushed away and is
+blocked by CI before a merge, but **a commit message or PR body can never be
+taken back by anyone**. CI was the first place that check ran, and CI runs after
+the push.
+
+The rule needs a denylist of owner proper nouns, which is a repository secret and
+therefore not in this repo. The hook reads a plain-text copy from
+`${XDG_CONFIG_HOME:-$HOME/.config}/neutron/leak-gate-pii-denylist` — deliberately
+outside every working tree, so that no `git add` in any repository can pick it
+up. The installer refuses to arm the hook without one rather than blocking every
+push with a failure you cannot act on.
+
+**If you are an outside contributor you do not need this hook** — you have
+nothing to put in that file, and CI runs the same gate on your PR.
+
+A leak-gate run that has no denylist now reports `LEAK GATE: INCOMPLETE` and
+exits **3**, not `SILENT ✅`. That is not a failure of your change: it means the
+PII rule could not run, and "I could not check" must not look like "I checked and
+it was clean". Exit codes: `0` clean, `1` findings, `2` config error, `3`
+incomplete.
+
+A PR title/body never passes through git, so no hook can see one. Check it before
+you publish it:
+
+```sh
+LEAK_GATE_PR_BODY="$(cat pr-body.md)" bash scripts/ci/leak-gate.sh --messages-only
+```
+
 ## Pull requests
 
 - Keep PRs focused: one concern per PR.
