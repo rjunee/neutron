@@ -16,13 +16,23 @@
  *      the upload itself as the canonical handoff (matches the landing
  *      chat client's behaviour in `landing/chat.ts:handleUploadFile`).
  *
- * Progress: web uploads stream byte-level progress via XMLHttpRequest
- * so the upload-modal can render a determinate bar. Native uploads stay
- * on `fetch` (RN polyfills don't expose `upload.onprogress`); the modal
- * falls back to an indeterminate shimmer for those.
+ * Progress: uploads stream byte-level progress via XMLHttpRequest so the
+ * upload-modal can render a determinate bar. This applies on native too —
+ * React Native ships an XHR polyfill, so `hasXhr` below is true on device
+ * and `xhr.upload.onprogress` DOES fire for FormData bodies there.
  *
- * Cancellation: every upload accepts an `AbortSignal`. Web aborts via
- * `xhr.abort()`; native aborts via the fetch `AbortController` path.
+ * (Measured on an Android device 2026-07-31: a throttled 25 MB upload drove
+ * the modal's determinate bar to 42% mid-flight, which is only reachable via
+ * `phase:'progress'` events carrying `bytes_sent`/`bytes_total`. An earlier
+ * version of this comment claimed native stayed on `fetch` because RN
+ * "doesn't expose `upload.onprogress`" — that was never true of this RN
+ * version, and the wrong comment cost real investigation time.)
+ *
+ * Cancellation: every upload accepts an `AbortSignal`. Whichever transport
+ * runs honours it — the XHR path calls `xhr.abort()` off an `abort` listener
+ * on the signal, and the `fetch` fallback passes the signal straight through.
+ * Since native takes the XHR path (see above), native cancels via
+ * `xhr.abort()`, not the fetch `AbortController`.
  *
  * Failure semantics:
  *   - 4xx / 5xx → returns `null` (caller marks the attachment failed).
@@ -165,16 +175,16 @@ export async function uploadAttachment(input: UploadAttachmentInput): Promise<Up
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// Image attachment path — POST /api/app/upload, XHR on web for byte
-// progress, fetch on native (RN's XMLHttpRequest polyfill doesn't fire
-// upload.onprogress for FormData blobs).
+// Image attachment path — POST /api/app/upload, XHR wherever XMLHttpRequest
+// exists (web AND React Native, which polyfills it) for byte progress;
+// `fetch` only where it genuinely doesn't.
 // ─────────────────────────────────────────────────────────────────────
 
 async function uploadImageAttachment(
   input: UploadAttachmentInput,
   notify: (p: UploadProgress) => void,
 ): Promise<UploadResult | null> {
-  const isWeb = typeof window !== 'undefined' && typeof XMLHttpRequest !== 'undefined';
+  const hasXhr = typeof window !== 'undefined' && typeof XMLHttpRequest !== 'undefined';
   notify({ phase: 'started', kind: 'image' });
 
   let body: BodyInit;
@@ -193,7 +203,7 @@ async function uploadImageAttachment(
   }
 
   const url = `${input.base_url}/api/app/upload`;
-  const xhrCtor = input.xhr_impl ?? (isWeb ? XMLHttpRequest : undefined);
+  const xhrCtor = input.xhr_impl ?? (hasXhr ? XMLHttpRequest : undefined);
 
   if (xhrCtor !== undefined && body instanceof FormData) {
     return await uploadWithXhr({
@@ -231,7 +241,7 @@ async function uploadHistoryImportZip(
   input: UploadAttachmentInput,
   notify: (p: UploadProgress) => void,
 ): Promise<UploadResult | null> {
-  const isWeb = typeof window !== 'undefined' && typeof XMLHttpRequest !== 'undefined';
+  const hasXhr = typeof window !== 'undefined' && typeof XMLHttpRequest !== 'undefined';
   const source = inferHistoryImportSource(input.name);
   notify({ phase: 'started', kind: 'history-import-zip' });
 
@@ -251,7 +261,7 @@ async function uploadHistoryImportZip(
   }
 
   const url = `${input.base_url}/api/upload/${source}`;
-  const xhrCtor = input.xhr_impl ?? (isWeb ? XMLHttpRequest : undefined);
+  const xhrCtor = input.xhr_impl ?? (hasXhr ? XMLHttpRequest : undefined);
   const extraHeaders: Record<string, string> = {};
   if (typeof input.topic_id === 'string' && input.topic_id.length > 0) {
     extraHeaders['x-neutron-topic-id'] = input.topic_id;
