@@ -347,10 +347,18 @@ export function useMobileChat(railId: string): UseMobileChatResult {
       // A warm session is ALREADY open, so `onStatus` will not fire 'open'
       // again — seed both from the live snapshot or the view would sit in
       // 'idle' showing a hydrating spinner over a fully-loaded transcript.
+      //
+      // SEED, BUT DO NOT SETTLE HERE (instant-switch, 2026-07-31). Settling on
+      // the seeded status alone declared hydration complete while `messages`
+      // was still the empty array this mount started with, so the surface
+      // rendered "No messages yet. Say hello 👋" over a project that has a full
+      // transcript — filmed on device, 2026-07-31, ~70 ms of empty state
+      // between the spinner and the real history on a warm re-attach. `refresh`
+      // settles one store read later, WITH the messages in hand, and the floor
+      // timer still guarantees the spinner comes down regardless.
       const live = active.status();
       setStatus(live);
       liveStatus = live;
-      settleHydration();
       refresh(active); // instant paint from the durable store
       // 2026-07-30 — ALWAYS drive this session onto the wire. This used to be
       // `if (isNew) active.start()`, i.e. only a session this mount had just

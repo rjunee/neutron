@@ -1114,6 +1114,50 @@ While the doc is in flight the header names the project from the already-loaded
 rail list (`scopeName`), and the Invite pill is suppressed — the predicate reads
 `billing_mode` + `members` and there is no honest answer without them.
 
+**A rail tap is a TAP, not a load (2026-07-31).** Keeping the chrome mounted
+stopped the teardown; it did not stop the shell asking the wire for things it was
+already holding. Filmed at 30 fps on the release APK, every switch still produced
+four to six repaints and ~800 ms between finger-up and a settled screen. Three of
+those repaints came from re-resolving known answers, and each is now resolved
+before the tap:
+
+- **The settings doc is already on the device.** `GET /api/app/projects` — the
+  rail's own call — returns `ProjectListEntry extends ProjectSettings` for every
+  solo project, read from the same `projects` table and `project_members` join
+  that the per-project GET uses. `ProjectsClient` files every settings doc it
+  receives (read, privacy, rename, emoji) into
+  **`app/lib/project-settings-cache.ts`**, `fetchProjects` files every **solo**
+  list row, and `ProjectStateProvider` starts a scope from that doc instead of
+  from nothing. The authoritative fetch still runs and still replaces it, and a
+  scope that has genuinely not been fetched still gets the loading pane — the
+  cache removes a wait, it never invents a scope. **Solo only:** a `shared` row's
+  settings fields are gateway-filled defaults, so caching one would be the
+  fabrication ISSUES #393 banned.
+- **The tab set is per scope and is never blanked.** `_layout.tsx` held one
+  `fetchedTabs` that a switch reset to `null`, so the pre-fetch default (Chat /
+  Apps / Tasks / Reminders / Docs) flashed for 3–4 frames of every tap. It is now
+  a `Map<project_id, TabDescriptor[]>`: the reset is gone, and with it the reason
+  for the reset (a lookup by id cannot return the previous project's routes). The
+  shell also prefetches the tab set for the rail's top `TAB_PREFETCH_LIMIT`
+  projects, 600 ms after the list lands so it never contends with the first
+  paint.
+- **The destination route is resolved synchronously.** `LastTabStore` keeps an
+  in-memory mirror of every value it has read or written and exposes
+  `knows()` / `peek()` / `prime()`; `projectTabRouteSync` turns a tapped id into
+  its route with no `await`, so `router.replace` runs in the same tick as the
+  press. A miss returns `null` and the caller falls back to the async read rather
+  than guessing a tab.
+
+Separately, `useMobileChat` no longer settles hydration on the seeded socket
+status at attach time — that declared the transcript loaded while `messages` was
+still empty, so a warm re-attach flashed "No messages yet. Say hello 👋" over a
+project with full history. The store read that follows settles it with the
+messages in hand, and the hydration floor still guarantees the spinner comes
+down.
+
+Pinned by `app/__tests__/project-switch-is-instant.test.tsx`, which forces each
+"already answered" case and then makes the corresponding request never come back.
+
 ### Web client consumption (WAVE 3 PR-4)
 
 > **P0b (2026-06-26) — React is the ONLY web chat client.** The vanilla
