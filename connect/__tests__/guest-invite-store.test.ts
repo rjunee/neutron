@@ -186,6 +186,39 @@ describe('ConnectGuestInviteStore — revocation', () => {
     expect(store.getByHash(issued.token_hash)!.redeemed_at_ms).toBeNull()
   })
 
+  test('the claim UPDATE refuses a revoked invite even when the pre-check read STALE data (the race)', async () => {
+    const db = makeDb()
+    const store = new ConnectGuestInviteStore(db)
+    const issued = await store.issue({ project_id: 'p1', ttl_ms: 60_000, now: NOW })
+    // Capture the row as it looked BEFORE the withdrawal, then withdraw it.
+    const stale = store.getByHash(issued.token_hash)!
+    await store.revoke('p1', issued.token_hash, NOW + 1)
+
+    // A concurrent revoke that commits between `claimInTx`'s SELECT and its
+    // UPDATE is not reproducible on one connection (the ProjectDb mutex holds
+    // the BEGIN→COMMIT window), but it IS reachable from a second connection to
+    // the same file. Simulate its ONE observable consequence — a pre-check fed a
+    // pre-revocation row — by handing `claimInTx` a tx whose read returns the
+    // stale row while every write goes to the real, revoked database. If the
+    // UPDATE's `revoked_at_ms IS NULL` guard is removed, the claim succeeds and
+    // a withdrawn invite mints a member.
+    await expect(
+      db.transaction(async (tx) => {
+        const staleReadingTx = {
+          ...tx,
+          prepare: () => ({ get: () => stale, all: () => [stale] }),
+          runSync: (sql: string, params: unknown[]) =>
+            (tx as unknown as { runSync: (s: string, p: unknown[]) => { changes: number } })
+              .runSync(sql, params),
+        } as unknown as typeof tx
+        return store.claimInTx(staleReadingTx, issued.token, NOW + 10)
+      }),
+    ).rejects.toMatchObject({ reason: 'already_redeemed' })
+
+    // Nothing was claimed — the guard, not the pre-check, is what refused.
+    expect(store.getByHash(issued.token_hash)!.redeemed_at_ms).toBeNull()
+  })
+
   test('revoking an already-SPENT invite is allowed and reports `redeemed` as the prior state', async () => {
     const db = makeDb()
     const store = new ConnectGuestInviteStore(db)
