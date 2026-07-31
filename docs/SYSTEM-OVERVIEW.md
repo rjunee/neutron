@@ -2605,11 +2605,39 @@ still detectable as stalled. A one-clock inspector can express none of this.
    events whatsoever, so the event stream alone can only ever say "alive", never
    "running Bash". The hook is wired on both phases with an unscoped matcher
    (`build-settings.ts` `activityTap`), APPENDING to the TodoWrite→board `PostToolUse`
-   group rather than replacing it. `PreToolUse` gives "started Bash: bun test";
-   `PostToolUse` gives "finished Bash" — and a `pre` with no matching `post` for
+   group rather than replacing it. `PreToolUse` carries the CALL (tool + its full
+   arguments); `PostToolUse` carries the RETURN (`tool_response`, rendered by
+   `renderToolResult` across the string / MCP-content-block / stdout+stderr /
+   file-content / unknown-JSON shapes) — and a `pre` with no matching `post` for
    minutes IS the hang signal. Gated on `enableToolBridge`, so the disposable Trident
    build REPLs and the untrusted history-import REPL never report onto the owner's
    panel. Fail-soft throughout: missing env, bad input or a dead sink all exit 0.
+
+### What a row shows — a transcript, not a ticker
+
+Ryan 2026-07-30, on the first build: *"I like seeing tool calls, but they should be
+human readable names. And interleaves with the actual messages the model is outputting
+not just the size."* So a row carries `label` + `detail` (the collapsed one-liner) +
+`body` (the expanded content, newlines preserved, capped at `BODY_MAX` = 2 000 chars —
+which is also what bounds the ring at ~400 KB/scope and the fanned WS frame) +
+`source`.
+
+- **Names are humanised.** `humanizeToolName` parses `mcp__<server>__<tool>`: the TOOL
+  becomes the label, the server becomes the dim `source` qualifier, and the
+  per-session random incarnation `spawn.ts` appends is stripped so that qualifier is
+  stable across spawns. **A raw transport id must never be a label** — it differs every
+  spawn, so two calls to one tool would look like two different tools.
+- **Assistant messages are rows.** The dev-channel `reply` tool call IS the agent's
+  message (its `text` argument is the complete response), so it records as
+  `kind: 'token'`, label `assistant`, interleaved with the tool rows on the one
+  chronological timeline. Its `post` ack is dropped as noise.
+- **The same reply arrives twice** — once from the hook (the call) and once from the
+  substrate `token` that `onReply` pushes. `record` collapses an assistant row landing
+  immediately after an identical assistant row, on ADJACENCY not a time window, so
+  genuinely repeated content is never swallowed.
+- **`thinking` is still unreachable** on the shipped CC path: the adapter emits no
+  such event, so the intermediate reasoning a real CC transcript shows between tool
+  calls is not on the wire at all. Closing that is an adapter change, not a panel one.
 
 ### Surfaces
 
