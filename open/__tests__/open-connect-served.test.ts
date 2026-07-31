@@ -357,3 +357,137 @@ describe('ISSUES #421 — a self-hosted Open install SERVES Connect, gated on it
     expect((await fetch(`${harness.base}/connect/v1/health`)).status).toBe(404)
   })
 })
+
+/**
+ * ISSUES #421 (residual) — THE PAGE A GUEST ACTUALLY LANDS ON.
+ *
+ * The API above was proven end to end while the guest-facing surface was
+ * unreachable: `landing/connect-accept.ts` + `connect-accept.html` were imported
+ * ONLY by their own jsdom test, and no route mounted them. The owner's invite
+ * link is `<base>/connect/accept#<token>`, so a guest who clicked it got the
+ * default 404 — the same "module exists, its tests pass, the composer never
+ * wires it" defect the API half of #421 fixed.
+ *
+ * A test that imported the module, or asserted a handler was constructed, would
+ * have passed throughout that outage. So these drive a browser-shaped GET at the
+ * REAL composed Open surface over the live `Bun.serve` harness above, and pass
+ * only if a route actually mounts the page.
+ */
+const BROWSER_HEADERS = {
+  accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+  'accept-language': 'en-US,en;q=0.9',
+  'user-agent':
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36',
+} as const
+
+describe('ISSUES #421 residual — the guest accept page is SERVED by the composed surface', () => {
+  test('a browser-shaped GET of the real invite link returns the accept page', async () => {
+    harness = await startHarness()
+    const { token, acceptUrl } = await issueInvite(harness)
+
+    // The link the owner sends. Its path is what a browser requests; the token
+    // is in the FRAGMENT, which is never transmitted — assert the shape rather
+    // than trusting the comment: no query string, token after the `#`.
+    const link = new URL(acceptUrl)
+    expect(link.pathname).toBe('/connect/accept')
+    expect(link.search).toBe('')
+    expect(link.hash).toBe(`#${token}`)
+
+    // Drive the SAME path at the composed surface. `fetch` drops the fragment
+    // exactly as a browser's request line does, so the server sees a bare
+    // `GET /connect/accept`.
+    const res = await fetch(`${harness.base}${link.pathname}`, { headers: BROWSER_HEADERS })
+    expect(res.status).toBe(200)
+    expect(res.headers.get('content-type')).toContain('text/html')
+
+    const html = await res.text()
+    // The real page, not some other surface's shell: its form controls are the
+    // ids `connect-accept.ts:bootConnectAcceptFromHash` looks up, and it loads
+    // the client bundle.
+    for (const id of ['disclosure', 'display-name', 'guest-handle', 'btn-accept', 'status', 'title', 'lede']) {
+      expect(html).toContain(`id="${id}"`)
+    }
+    expect(html).toContain('src="/connect/accept.js"')
+    // The page is token-free: nothing server-side ever saw the token, so it
+    // cannot have been echoed into the bytes.
+    expect(html).not.toContain(token)
+
+    // …and the client bundle it references resolves, or the page is inert.
+    const js = await fetch(`${harness.base}/connect/accept.js`, {
+      headers: { accept: '*/*', 'user-agent': BROWSER_HEADERS['user-agent'] },
+    })
+    expect(js.status).toBe(200)
+    expect(js.headers.get('content-type')).toContain('javascript')
+    const src = await js.text()
+    // The bundle carries the flow: the hash-only preview read, the single-use
+    // handshake, and the disclosure renderer bundled in from connect-disclosure.
+    expect(src).toContain('/connect/v1/connect/invite-preview')
+    expect(src).toContain('/connect/v1/connect/guest-auth')
+    expect(src).toContain('window.location.hash')
+  })
+
+  test('the page is served with the connect surface CLOSED — it is not a state oracle', async () => {
+    harness = await startHarness()
+
+    // Zero invites, zero members: the API prefix is invisible.
+    expect((await fetch(`${harness.base}/connect/v1/health`)).status).toBe(404)
+
+    // The page is static bytes, so it still serves. Gating it would make
+    // `GET /connect/accept` a free, unauthenticated probe of the very state the
+    // surface gate exists to conceal.
+    const closed = await fetch(`${harness.base}/connect/accept`, { headers: BROWSER_HEADERS })
+    expect(closed.status).toBe(200)
+    const closedHtml = await closed.text()
+
+    // Open the surface for real, then re-request: BYTE-IDENTICAL. Observing the
+    // page tells an outsider nothing about whether an invite is live.
+    await issueInvite(harness)
+    expect((await fetch(`${harness.base}/connect/v1/health`)).status).toBe(200)
+    const open = await fetch(`${harness.base}/connect/accept`, { headers: BROWSER_HEADERS })
+    expect(open.status).toBe(200)
+    expect(await open.text()).toBe(closedHtml)
+  })
+
+  test('a dead token gets a useful message, and only from the gated API', async () => {
+    harness = await startHarness()
+    const { token } = await issueInvite(harness)
+    const hashOf = (raw: string): string =>
+      new Bun.CryptoHasher('sha256').update(raw, 'utf8').digest('hex')
+
+    // Redeem it, so the token is now single-use-consumed.
+    const redeem = await fetch(`${harness.base}/connect/v1/connect/guest-auth`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        invite_token: token,
+        display_name: 'Guest Collaborator',
+        guest_handle: 'guest.example.com',
+      }),
+    })
+    expect(redeem.status).toBe(200)
+
+    // The page itself is unchanged — it has no idea which token the guest holds.
+    expect((await fetch(`${harness.base}/connect/accept`, { headers: BROWSER_HEADERS })).status).toBe(200)
+
+    // The verdict comes from the preview read the page performs client-side.
+    // Already-redeemed → 410, which the client renders as "expired or already
+    // been used. Ask the inviter for a fresh link."
+    const spent = await fetch(
+      `${harness.base}/connect/v1/connect/invite-preview?token_hash=${hashOf(token)}`,
+    )
+    expect(spent.status).toBe(410)
+
+    // A token that never existed → an equally detail-free 404, which the client
+    // renders as "This invite link is not valid." Neither response carries a
+    // field about the project, the owner, or the invite.
+    const bogus = await fetch(
+      `${harness.base}/connect/v1/connect/invite-preview?token_hash=${hashOf('no-such-token')}`,
+    )
+    expect(bogus.status).toBe(404)
+    for (const r of [spent, bogus]) {
+      const body = await r.text()
+      expect(body).not.toContain('Connect Test') // the project name
+      expect(body).not.toContain(OWNER)
+    }
+  })
+})

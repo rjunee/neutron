@@ -99,18 +99,23 @@ export function resolveLandingDeploymentMode(
 }
 
 /**
- * Sprint 26 r2 (Argus MINOR fix) — build the CSP header for the
- * Telegram onboarding landing page from SHA-256 hashes of every inline
- * `<script>` and `<style>` block in the HTML payload. Hashes let us
- * keep the inline blocks (the page is fully self-contained — useful
- * for static-CDN deploys) while still dropping `'unsafe-inline'` so a
- * future XSS-injected `<script>` is rejected by the browser.
+ * Sprint 26 r2 (Argus MINOR fix) — build the CSP header for a self-contained
+ * static landing page from SHA-256 hashes of every inline `<script>` and
+ * `<style>` block in the HTML payload. Hashes let us keep the inline blocks
+ * (the page is fully self-contained — useful for static-CDN deploys) while
+ * still dropping `'unsafe-inline'` so a future XSS-injected `<script>` is
+ * rejected by the browser.
  *
  * Order-insensitive: hash digests are content-addressed; the browser
  * matches against the set of declared hashes regardless of source
  * position. Multiple blocks of the same type are supported.
+ *
+ * Used by BOTH self-contained static pages this server ships: the Telegram
+ * onboarding landing page (which carries an inline script) and the Connect
+ * guest accept page (inline `<style>` only, its client loaded from
+ * `/connect/accept.js` — covered by the `script-src 'self'` base).
  */
-function buildOnboardingTelegramCsp(html: string): string {
+function buildStaticPageCsp(html: string): string {
   const scriptHashes = collectInlineHashes(html, 'script')
   const styleHashes = collectInlineHashes(html, 'style')
   const scriptDirective = ["'self'", ...scriptHashes].join(' ')
@@ -697,8 +702,43 @@ export function createLandingServer(options: LandingServerOptions): LandingServe
   // header is built once and cached.
   const onboarding_telegram_csp: string | null =
     onboarding_telegram_html !== null
-      ? buildOnboardingTelegramCsp(onboarding_telegram_html.toString('utf8'))
+      ? buildStaticPageCsp(onboarding_telegram_html.toString('utf8'))
       : null
+  // ISSUES #421 (residual) — the Connect GUEST ACCEPT page. `connect-accept.ts`
+  // + `connect-accept.html` shipped in this package for months with nothing
+  // mounting them: the accept link an owner sends is
+  // `<base>/connect/accept#<token>` (`open/wiring/connect-owner-surface.ts:95`)
+  // and no route served it, so the guest's click landed on the default 404 while
+  // the API behind it was correct end to end.
+  //
+  // ALWAYS SERVED — deliberately NOT behind the Connect surface-state gate
+  // (`connect/surface-gate.ts`). These are static bytes, identical for every
+  // caller in every state; gating them would turn `GET /connect/accept` into a
+  // free, unauthenticated probe of the exact state the gate exists to hide
+  // ("this install currently has a live invite or a live collaborator"), which is
+  // strictly worse than serving an inert page. Everything state-dependent the
+  // page shows comes from `/connect/v1/connect/invite-preview` + `/guest-auth`,
+  // which stay behind the gate: on a closed install the page renders and the
+  // preview fetch 404s, so the guest is told the link is not valid.
+  //
+  // Absent files fall through to the default 404 like the other optional static
+  // pages (a landing dir that predates them still boots).
+  const connect_accept_html_path = join(static_dir, 'connect-accept.html')
+  const connect_accept_html: Buffer | null = existsSync(connect_accept_html_path)
+    ? readFileSync(connect_accept_html_path)
+    : null
+  const connect_accept_csp: string | null =
+    connect_accept_html !== null
+      ? buildStaticPageCsp(connect_accept_html.toString('utf8'))
+      : null
+  const connect_accept_js_prebuilt_path = join(static_dir, 'connect-accept.js')
+  let connect_accept_js_cache: string | null = existsSync(connect_accept_js_prebuilt_path)
+    ? readFileSync(connect_accept_js_prebuilt_path, 'utf8')
+    : null
+  // O4 rising-edge latch for the connect-accept.js bundle_build_failed journal
+  // (see the chat-react latch above for rationale).
+  let connect_accept_build_failed_latched = false
+  const connect_accept_ts_path = join(static_dir, 'connect-accept.ts')
   const invite_js_prebuilt_path = join(invite_assets_dir, 'invite.js')
   let invite_js_cache: string | null = existsSync(invite_js_prebuilt_path)
     ? readFileSync(invite_js_prebuilt_path, 'utf8')
@@ -887,6 +927,54 @@ export function createLandingServer(options: LandingServerOptions): LandingServe
       return null
     }
   }
+  async function resolveConnectAcceptJs(): Promise<string | null> {
+    if (connect_accept_js_cache !== null) return connect_accept_js_cache
+    if (!existsSync(connect_accept_ts_path)) return null
+    try {
+      const result = await Bun.build({
+        entrypoints: [connect_accept_ts_path],
+        target: 'browser',
+        format: 'esm',
+        minify: false,
+        sourcemap: 'none',
+      })
+      if (!result.success || result.outputs.length === 0) {
+        if (!connect_accept_build_failed_latched) {
+          connect_accept_build_failed_latched = true
+          fireAndForget('server.emitSystemEvent', emitSystemEvent({
+            event: 'bundle_build_failed',
+            module: 'landing',
+            payload: {
+              bundle: 'connect-accept.js',
+              entry: connect_accept_ts_path,
+              logs: result.logs.map((l) => String(l)),
+            },
+          }))
+        }
+        return null
+      }
+      const out = result.outputs[0]
+      if (out === undefined) return null
+      connect_accept_js_cache = await out.text()
+      connect_accept_build_failed_latched = false // successful build clears the edge
+      return connect_accept_js_cache
+    } catch (err) {
+      if (!connect_accept_build_failed_latched) {
+        connect_accept_build_failed_latched = true
+        fireAndForget('server.emitSystemEvent', emitSystemEvent({
+          event: 'bundle_build_failed',
+          module: 'landing',
+          level: 'error',
+          payload: {
+            bundle: 'connect-accept.js',
+            entry: connect_accept_ts_path,
+            error: err instanceof Error ? err.message : String(err),
+          },
+        }))
+      }
+      return null
+    }
+  }
   return {
     async fetch(req, server): Promise<Response> {
       const url = new URL(req.url)
@@ -1022,6 +1110,41 @@ export function createLandingServer(options: LandingServerOptions): LandingServe
       if (mobile_html !== null && url.pathname === '/mobile' && req.method === 'GET') {
         return new Response(new Uint8Array(mobile_html), {
           headers: { 'content-type': 'text/html; charset=utf-8' },
+        })
+      }
+      // ISSUES #421 (residual) — the Connect GUEST ACCEPT page, the ONE
+      // user-facing HTML surface Connect serves. This is where the invite link
+      // `<base>/connect/accept#<token>` lands.
+      //
+      // THE TOKEN NEVER REACHES THIS HANDLER, BY DESIGN. It rides in the URL
+      // FRAGMENT, which no browser sends to a server: the request line here is a
+      // bare `GET /connect/accept`, identical for every guest and every token.
+      // The page's client (`connect-accept.ts`) reads `window.location.hash`,
+      // SHA-256s it in the browser, and sends only the hash to the preview
+      // endpoint. Keeping the token out of the query string keeps a LIVE invite
+      // out of access logs, `Referer` headers, and browser history — do not
+      // "simplify" this into `?t=<token>`.
+      //
+      // `no-store` for the same reason: a shared/served copy of this page is
+      // worthless (it carries no token) and caching a pre-auth page that a guest
+      // may open on a borrowed device buys nothing.
+      if (connect_accept_html !== null && url.pathname === '/connect/accept' && req.method === 'GET') {
+        return new Response(new Uint8Array(connect_accept_html), {
+          headers: {
+            'content-type': 'text/html; charset=utf-8',
+            'cache-control': 'no-store',
+            'referrer-policy': 'no-referrer',
+            'content-security-policy': connect_accept_csp ?? "default-src 'self'",
+          },
+        })
+      }
+      // The accept page's client bundle (`connect-accept.ts` + its disclosure
+      // renderer). Lazily built + cached, same shape as `/invite.js`.
+      if (url.pathname === '/connect/accept.js' && req.method === 'GET') {
+        const js = await resolveConnectAcceptJs()
+        if (js === null) return new Response('connect/accept.js unavailable', { status: 404 })
+        return new Response(js, {
+          headers: { 'content-type': 'application/javascript; charset=utf-8' },
         })
       }
       // ISSUES #208 — PWA/brand assets (manifest + icons) so the
