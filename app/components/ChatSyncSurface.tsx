@@ -368,14 +368,20 @@ export function ChatSyncSurface({
     };
   }, [isWeb, uploadAffordance, handleFilesPicked]);
 
+  // NO HINT FOR THE FREEFORM PROMPT. It used to read "Or type a response to the
+  // prompt above." — the same sentence the placeholder already shows (see the
+  // `placeholder` prop below), rendered as a permanent extra line directly above
+  // the keyboard, in the region that has the least room to spare. Owner,
+  // 2026-07-30: *"what is that text at the bottom about typing a response to the
+  // prompt? Unnecessary"*. The prop survives for the upload affordance, which
+  // says something the placeholder does not.
   const composerHint = useMemo<string | undefined>(() => {
-    if (hasPromptWithFreeform) return 'Or type a response to the prompt above.';
     if (uploadAffordance !== null) {
       const label = sourceLabel(uploadAffordance.source);
       return `Drag your ${label} export ZIP here, paste it, or tap 📎 to pick it.`;
     }
     return undefined;
-  }, [hasPromptWithFreeform, uploadAffordance]);
+  }, [uploadAffordance]);
 
   // iMessage shows ONE delivery status in the whole thread — under the newest
   // outgoing message — not a tick on every bubble. Anything else is a Telegram
@@ -453,13 +459,18 @@ export function ChatSyncSurface({
   // exactly that chrome and the keyboard covered the composer outright. The
   // window-space measurement below is depth-independent. See
   // `lib/keyboard-inset.ts` for the arithmetic and the incident.
-  const { inset: keyboardInset, containerRef } = useKeyboardInset();
   // THE OTHER HALF OF "the composer is not fully visible". With the keyboard
   // DOWN the surface runs to the physical bottom of the screen — the shell
   // applies no bottom inset anywhere — so the send button sat under the home
   // indicator. `composerBottomInset` adds the safe area only while the keyboard
   // is down, so the two lifts can never double-offset each other.
   const safeArea = useSafeAreaInsets();
+  // The same inset is ALSO an input to the Android lift: RN reports the Android
+  // keyboard net of the navigation bar it draws over, so the bar has to be added
+  // back to reach the window's bottom edge. See `lib/keyboard-inset.ts`.
+  const { inset: keyboardInset, containerRef } = useKeyboardInset({
+    safeAreaBottom: safeArea.bottom,
+  });
   const composerBottom = composerBottomInset({
     keyboardInset,
     safeAreaBottom: safeArea.bottom,
