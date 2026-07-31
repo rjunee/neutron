@@ -115,7 +115,14 @@ export function sharedMobileStore(): Promise<Store> {
   return sharedStore;
 }
 
-/** Test-only — drop the memoised store so a suite starts on a clean transcript. */
+/**
+ * Test-only — drop the memoised store so a suite starts on a clean transcript.
+ *
+ * Any suite that MOUNTS the chat surface must call this alongside
+ * `clearSessionCache()`: the store is device-wide by design and bun shares one
+ * process across test files, so without it a test inherits the rows (and the
+ * unacked sends) left by the previous test — or the previous FILE.
+ */
 export function __resetSharedMobileStoreForTests(): void {
   sharedStore = null;
 }
