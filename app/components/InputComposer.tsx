@@ -30,6 +30,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
+  Animated,
   Image,
   Platform,
   Pressable,
@@ -106,6 +107,32 @@ export interface InputComposerProps {
    * gap for call sites with no safe-area context.
    */
   bottom_inset?: number;
+  /**
+   * THE VOICE-NOTE SEAM. The composer owns the BUTTON; a separate module owns
+   * the RECORDER (capture, permissions, upload). Everything here is the button
+   * telling that module what the finger did — the composer never records.
+   *
+   * The reference (WhatsApp on Android) supports two interactions, and both are
+   * wired through:
+   *   - HOLD: long-press to start, release to send, or slide away past
+   *     {@link VOICE_CANCEL_SLIDE_PT} and release to discard. `onVoiceHoldEnd`
+   *     receives which of the two happened.
+   *   - TAP: tap to start, tap again to stop, then a preview the recorder owns.
+   *
+   * UNWIRED IS NOT SILENT. With no handlers passed, the button says so on press
+   * rather than pretending to record — see {@link VOICE_UNAVAILABLE_NOTICE}.
+   */
+  onVoiceTap?: () => void;
+  /** Long-press began. The recorder starts capturing. */
+  onVoiceHoldStart?: () => void;
+  /**
+   * The finger moved during a hold. `cancelling` is true once it has slid far
+   * enough that releasing would DISCARD — the button renders that state, and
+   * the recorder can mirror it in its own UI.
+   */
+  onVoiceHoldMove?: (state: { cancelling: boolean }) => void;
+  /** The hold ended. `intent` is what the release position meant. */
+  onVoiceHoldEnd?: (intent: 'send' | 'cancel') => void;
 }
 
 const COUNTER_WARN_THRESHOLD = Math.floor(MAX_USER_MESSAGE_LEN_CLIENT * 0.9);
@@ -118,8 +145,120 @@ const COUNTER_WARN_THRESHOLD = Math.floor(MAX_USER_MESSAGE_LEN_CLIENT * 0.9);
  */
 const COMPOSER_RESTING_BOTTOM_PT = 8;
 
-/** iMessage's send control is a small circle, not a labelled rectangle. */
-const SEND_BUTTON_SIZE_PT = 34;
+/**
+ * THE COMPOSER'S GEOMETRY — WhatsApp on Android (owner, 2026-07-30: *"In that
+ * case we copy Whatsapp on Android"*, choosing the platform-native pattern over
+ * iMessage's because he is on Android).
+ *
+ * THE STRUCTURE, and it is the part that distinguishes WhatsApp from iMessage:
+ * the bar is TWO elements side by side — a filled capsule field, and a circular
+ * action button OUTSIDE it to the right. iMessage puts its send button inside
+ * the field; WhatsApp does not.
+ *
+ * The capsule's radius is always half its resting height, so one line is a true
+ * pill and extra lines grow it into a rounded box. It grows with the text and
+ * stops at {@link FIELD_MAX_LINES}, after which `maxHeight` makes the
+ * `TextInput` scroll INTERNALLY and the bar stops moving.
+ */
+const FIELD_LINE_HEIGHT_PT = TYPOGRAPHY.body.lineHeight ?? 22;
+const FIELD_PADDING_V_PT = 7;
+/** One line of text plus its padding — the resting capsule height. */
+const FIELD_MIN_HEIGHT_PT = FIELD_LINE_HEIGHT_PT + FIELD_PADDING_V_PT * 2;
+/** WhatsApp grows to roughly six lines, then scrolls the field, not the bar. */
+const FIELD_MAX_LINES = 6;
+const FIELD_MAX_HEIGHT_PT = FIELD_LINE_HEIGHT_PT * FIELD_MAX_LINES + FIELD_PADDING_V_PT * 2;
+
+/** The paperclip lives INSIDE the capsule at its trailing edge, as WhatsApp's does. */
+const FIELD_ICON_SIZE_PT = 30;
+
+/**
+ * THE ACTION BUTTON. Deliberately LARGER than the resting capsule so it reads as
+ * a separate control rather than part of the field, and bottom-aligned with it
+ * so that it tracks the LAST line once the field grows. At this size,
+ * bottom-aligned against a one-line field is also within 2pt of vertically
+ * centred, which is the other half of how WhatsApp's looks at rest.
+ */
+const ACTION_BUTTON_SIZE_PT = 40;
+
+/**
+ * Android's Material minimum touch target. The visuals are smaller than this on
+ * purpose, so the difference is made up with `hitSlop` rather than by inflating
+ * the artwork.
+ */
+const MIN_TOUCH_TARGET_PT = 44;
+const ACTION_HIT_SLOP_PT = (MIN_TOUCH_TARGET_PT - ACTION_BUTTON_SIZE_PT) / 2;
+const ICON_HIT_SLOP_PT = (MIN_TOUCH_TARGET_PT - FIELD_ICON_SIZE_PT) / 2;
+
+/**
+ * THE SEND MARK — a paper plane, which is what the reference frame shows inside
+ * the circle (not the up-arrow this used to render as a `Text` glyph).
+ *
+ * There is no icon set in this app's dependency tree — no `@expo/vector-icons`,
+ * no `react-native-svg` (checked `app/package.json`) — and this has to ship
+ * over-the-air, so adding a native font or SVG package was not an option. The
+ * plane is therefore drawn with the zero-size-view border trick, which is the
+ * one way to get a filled triangle out of react-native's box model: a view with
+ * no width or height, a coloured left border and transparent top/bottom borders,
+ * renders as a right-pointing triangle {@link PLANE_W_PT} wide and
+ * {@link GLYPH_BOX_PT} tall. A second triangle in the BUTTON's fill colour is
+ * painted over the left edge to cut the notch that makes it read as a plane
+ * rather than a "play" arrow.
+ *
+ * OPTICAL CENTRING. A right-pointing triangle carries its ink centroid one
+ * third of the way from base to apex — x ≈ 5.3 in a 16-wide box whose geometric
+ * centre is 8 — so a naive centre parks it visibly left. {@link PLANE_NUDGE_PT}
+ * shifts it back by the difference. Vertically it is symmetric and needs
+ * nothing. This control is exactly why the glyph is drawn rather than typed: a
+ * font glyph's position comes from the font's own metrics, which is what left
+ * the old `↑` sitting low in its circle.
+ */
+const GLYPH_BOX_PT = 16;
+const PLANE_W_PT = 16;
+const PLANE_NUDGE_PT = 2;
+/** The notch cut into the plane's trailing edge. */
+const PLANE_NOTCH_W_PT = 6;
+const PLANE_NOTCH_H_PT = 8;
+
+function SendPlane({ color, fill }: { color: string; fill: string }): React.ReactElement {
+  return (
+    <View style={styles.sendGlyph} testID="composer-send-plane">
+      <View style={[styles.sendPlaneBody, { borderLeftColor: color }]} />
+      <View style={[styles.sendPlaneNotch, { borderLeftColor: fill }]} />
+    </View>
+  );
+}
+
+/**
+ * THE MICROPHONE, drawn the same way and for the same reason (no icon set in the
+ * dependency tree, and this has to ship over-the-air). Three parts in an 18×18
+ * box: a capsule head, a U-shaped cradle made from a box with a transparent top
+ * border and rounded bottom corners, and a short stem joining them to the chin.
+ */
+const MIC_BOX_PT = 18;
+
+function MicGlyph({ color }: { color: string }): React.ReactElement {
+  return (
+    <View style={styles.micGlyph} testID="composer-mic-glyph">
+      <View style={[styles.micHead, { backgroundColor: color }]} />
+      <View style={[styles.micCradle, { borderColor: color, borderTopColor: 'transparent' }]} />
+      <View style={[styles.micStem, { backgroundColor: color }]} />
+    </View>
+  );
+}
+
+/**
+ * How far the finger has to travel from where the hold started before releasing
+ * DISCARDS instead of sends. The reference slides left toward a "cancel" label;
+ * the distance is what makes the gesture forgiving enough to use one-handed.
+ */
+const VOICE_CANCEL_SLIDE_PT = 64;
+
+/**
+ * What the button says when it is pressed and no recorder is wired behind it.
+ * The alternative — a control that looks live and does nothing — is the failure
+ * this is here to avoid.
+ */
+const VOICE_UNAVAILABLE_NOTICE = 'Voice messages are not available yet.';
 
 export function InputComposer({
   onSend,
@@ -132,6 +271,10 @@ export function InputComposer({
   file_accept,
   initial_draft,
   bottom_inset,
+  onVoiceTap,
+  onVoiceHoldStart,
+  onVoiceHoldMove,
+  onVoiceHoldEnd,
 }: InputComposerProps) {
   const [draft, setDraft] = useState(initial_draft ?? '');
   const [attachments, setAttachments] = useState<ComposerAttachment[]>([]);
@@ -143,6 +286,91 @@ export function InputComposer({
   const overLimit = length >= MAX_USER_MESSAGE_LEN_CLIENT;
   const showCounter = length > COUNTER_WARN_THRESHOLD;
   const canSend = !disabled && !sending && !overLimit && (draft.trim().length > 0 || attachments.length > 0);
+  // The send control EXISTS only when there is something to send (or a send is
+  // in flight, where it holds the spinner). An over-limit draft still shows it,
+  // disabled, because vanishing the button is the wrong feedback for "too long"
+  // — the counter is what turns red there.
+  const showSend = canSend || sending || (overLimit && draft.length > 0);
+  const sendReveal = useRef(new Animated.Value(0)).current;
+  useEffect(() => {
+    if (!showSend) {
+      // Unmounted below, so there is no exit animation to run — just re-arm.
+      sendReveal.setValue(0);
+      return undefined;
+    }
+    const reveal = Animated.timing(sendReveal, {
+      toValue: 1,
+      duration: 140,
+      // The native driver is unavailable under react-native-web (the device
+      // harness), and opacity + transform are both native-driver-safe.
+      useNativeDriver: Platform.OS !== 'web',
+    });
+    reveal.start();
+    return () => reveal.stop();
+  }, [showSend, sendReveal]);
+
+  // ── THE VOICE BUTTON ──────────────────────────────────────────────────────
+  // The composer drives the gesture and reports it; the recorder module does
+  // the recording. `holding` is null when idle, otherwise the live hold.
+  const [holding, setHolding] = useState<null | { cancelling: boolean }>(null);
+  const holdOriginX = useRef<number | null>(null);
+  const [voiceNotice, setVoiceNotice] = useState<string | null>(null);
+  const voiceWired =
+    onVoiceTap !== undefined || onVoiceHoldStart !== undefined || onVoiceHoldEnd !== undefined;
+
+  const handleVoiceHoldStart = useCallback(() => {
+    if (!voiceWired) {
+      setVoiceNotice(VOICE_UNAVAILABLE_NOTICE);
+      return;
+    }
+    setHolding({ cancelling: false });
+    onVoiceHoldStart?.();
+  }, [voiceWired, onVoiceHoldStart]);
+
+  const handleVoiceTouchMove = useCallback(
+    (e: { nativeEvent: { pageX: number } }) => {
+      if (holding === null) return;
+      const x = e.nativeEvent.pageX;
+      if (holdOriginX.current === null) {
+        holdOriginX.current = x;
+        return;
+      }
+      // Travel in EITHER direction counts. The reference slides left, but a
+      // one-handed thumb arcs, and a gesture that only cancels one way strands
+      // whoever arcs the other.
+      const cancelling = Math.abs(holdOriginX.current - x) > VOICE_CANCEL_SLIDE_PT;
+      if (cancelling === holding.cancelling) return;
+      setHolding({ cancelling });
+      onVoiceHoldMove?.({ cancelling });
+    },
+    [holding, onVoiceHoldMove],
+  );
+
+  const handleVoiceRelease = useCallback(() => {
+    holdOriginX.current = null;
+    if (holding === null) return;
+    const intent = holding.cancelling ? 'cancel' : 'send';
+    setHolding(null);
+    onVoiceHoldEnd?.(intent);
+  }, [holding, onVoiceHoldEnd]);
+
+  const handleVoiceTap = useCallback(() => {
+    // Pressable fires `onPress` after `onPressOut` even when a long-press ran;
+    // a completed hold has already been reported and must not also tap.
+    if (holding !== null) return;
+    if (!voiceWired) {
+      setVoiceNotice(VOICE_UNAVAILABLE_NOTICE);
+      return;
+    }
+    onVoiceTap?.();
+  }, [holding, voiceWired, onVoiceTap]);
+
+  // The notice is transient — it answers one press and then gets out of the way.
+  useEffect(() => {
+    if (voiceNotice === null) return undefined;
+    const t = setTimeout(() => setVoiceNotice(null), 2600);
+    return () => clearTimeout(t);
+  }, [voiceNotice]);
 
   const handleSend = useCallback(async () => {
     if (!canSend) return;
@@ -307,49 +535,109 @@ export function InputComposer({
         </View>
       ) : null}
       <View style={styles.row}>
-        <Pressable
-          accessibilityRole="button"
-          accessibilityLabel="Attach image"
-          onPress={handleAttachPress}
-          disabled={disabled || sending}
-          style={({ pressed }) => [styles.attachBtn, pressed && styles.pressed]}
-          testID="composer-attach"
-        >
-          <Text style={styles.attachIcon}>📎</Text>
-        </Pressable>
-        <TextInput
-          ref={inputRef}
-          accessibilityLabel="Compose message"
-          style={styles.input}
-          placeholder={placeholder}
-          placeholderTextColor={THEME.text_muted}
-          value={draft}
-          editable={!disabled && !sending}
-          onChangeText={(t) => setDraft(t.slice(0, MAX_USER_MESSAGE_LEN_CLIENT))}
-          multiline
-          blurOnSubmit={false}
-        />
-        <Pressable
-          accessibilityRole="button"
-          accessibilityLabel="Send"
-          onPress={handleSend}
-          disabled={!canSend}
-          style={({ pressed }) => [
-            styles.sendBtn,
-            !canSend && styles.sendBtnDisabled,
-            pressed && styles.pressed,
-          ]}
-        >
-          {sending ? (
-            <ActivityIndicator color={THEME.background} />
+        {/* THE CAPSULE. Filled a shade lighter than the bar, radius = half its
+            resting height, and the attachment control lives INSIDE it at the
+            trailing edge — the arrangement the reference frame shows.
+
+            NOT PORTED: the emoji/sticker button the reference carries at the
+            capsule's LEADING edge. This app has no emoji picker to open
+            (searched: no picker component, no such dependency), and a button
+            that opens nothing is the same defect as a microphone that records
+            nothing. The leading edge is plain padding until there is a picker
+            behind it. */}
+        <View style={styles.field}>
+          <TextInput
+            ref={inputRef}
+            accessibilityLabel="Compose message"
+            style={styles.input}
+            placeholder={placeholder}
+            placeholderTextColor={THEME.text_muted}
+            // The reference tints the caret with the app accent. `cursorColor`
+            // is the Android property; `selectionColor` covers both platforms.
+            selectionColor={THEME.accent}
+            cursorColor={THEME.accent}
+            value={draft}
+            editable={!disabled && !sending}
+            onChangeText={(t) => setDraft(t.slice(0, MAX_USER_MESSAGE_LEN_CLIENT))}
+            multiline
+            blurOnSubmit={false}
+          />
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Attach image"
+            onPress={handleAttachPress}
+            disabled={disabled || sending}
+            hitSlop={ICON_HIT_SLOP_PT}
+            style={({ pressed }) => [styles.fieldIcon, pressed && styles.pressed]}
+            testID="composer-attach"
+          >
+            <Text style={styles.attachIcon}>📎</Text>
+          </Pressable>
+        </View>
+        {/* THE ACTION BUTTON — outside the capsule, to its right, and it SWAPS
+            BY CONTENT: microphone while the field is empty, send once there is
+            something to send. That swap is the affordance; the slot itself is
+            always occupied, so the capsule never reflows mid-typing. */}
+        <View style={styles.actionSlot}>
+          {showSend ? (
+            <Animated.View
+              style={[
+                styles.actionFill,
+                { opacity: sendReveal, transform: [{ scale: sendReveal }] },
+              ]}
+            >
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel="Send"
+                onPress={handleSend}
+                disabled={!canSend}
+                hitSlop={ACTION_HIT_SLOP_PT}
+                style={({ pressed }) => [styles.sendBtn, pressed && styles.pressed]}
+              >
+                {sending ? (
+                  <ActivityIndicator size="small" color={THEME.background} />
+                ) : (
+                  // The accessibility label stays "Send" — that is what a screen
+                  // reader announces and what the device harness presses.
+                  <SendPlane color={THEME.background} fill={THEME.accent} />
+                )}
+              </Pressable>
+            </Animated.View>
           ) : (
-            // The iMessage send affordance: an upward chevron in a circle. The
-            // accessibility label stays "Send" — that is what a screen reader
-            // announces and what the device harness presses.
-            <Text style={styles.sendBtnText}>↑</Text>
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel={
+                holding === null
+                  ? 'Record voice message'
+                  : holding.cancelling
+                    ? 'Release to discard voice message'
+                    : 'Release to send voice message'
+              }
+              testID="composer-voice"
+              onPress={handleVoiceTap}
+              onLongPress={handleVoiceHoldStart}
+              onPressOut={handleVoiceRelease}
+              onTouchMove={handleVoiceTouchMove}
+              delayLongPress={250}
+              disabled={disabled || sending}
+              hitSlop={ACTION_HIT_SLOP_PT}
+              style={({ pressed }) => [
+                styles.voiceBtn,
+                holding !== null && styles.voiceBtnHolding,
+                holding?.cancelling === true && styles.voiceBtnCancelling,
+                pressed && styles.pressed,
+              ]}
+            >
+              <MicGlyph color={holding === null ? THEME.text_muted : THEME.background} />
+            </Pressable>
           )}
-        </Pressable>
+        </View>
       </View>
+      {voiceNotice !== null ? (
+        <Text style={styles.hint} testID="composer-voice-notice">
+          {voiceNotice}
+        </Text>
+      ) : null}
       {showCounter ? (
         <Text style={[styles.counter, overLimit && styles.counterOver]}>
           {length} / {MAX_USER_MESSAGE_LEN_CLIENT}
@@ -444,49 +732,144 @@ const styles = StyleSheet.create({
   },
   row: {
     flexDirection: 'row',
+    // BOTTOM-aligned, not centred. Once the field grows past one line the
+    // action button must track the LAST line; centring it against a grown field
+    // is the tell that the pattern was copied from a single-line screenshot.
     alignItems: 'flex-end',
     gap: SPACING.sm,
   },
-  // iMessage's left affordance is a bare glyph on the background, not a boxed
-  // button — the only enclosed shapes in the bar are the field and the send
-  // circle.
-  attachBtn: {
-    height: SEND_BUTTON_SIZE_PT,
-    width: SEND_BUTTON_SIZE_PT,
-    borderRadius: SEND_BUTTON_SIZE_PT / 2,
+  field: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'flex-end',
+    // Filled, not outlined: a shade lighter than the bar behind it.
+    backgroundColor: THEME.surface_raised,
+    // A PILL, not a rounded rectangle: half the RESTING height, so one line is
+    // fully round and extra lines grow it into a rounded box.
+    borderRadius: FIELD_MIN_HEIGHT_PT / 2,
+    minHeight: FIELD_MIN_HEIGHT_PT,
+    paddingRight: SPACING.xs,
+  },
+  fieldIcon: {
+    height: FIELD_ICON_SIZE_PT,
+    width: FIELD_ICON_SIZE_PT,
+    borderRadius: FIELD_ICON_SIZE_PT / 2,
     justifyContent: 'center',
     alignItems: 'center',
+    // Keeps the icon level with the last line as the capsule grows.
+    marginBottom: (FIELD_MIN_HEIGHT_PT - FIELD_ICON_SIZE_PT) / 2,
   },
-  attachIcon: { fontSize: 18 },
+  attachIcon: { fontSize: 17 },
   input: {
     flex: 1,
     color: THEME.text_primary,
-    backgroundColor: THEME.surface,
-    // A PILL, not a rounded rectangle: half the resting height, so a one-line
-    // field is fully round and grows into a rounded box as it wraps.
-    borderRadius: SEND_BUTTON_SIZE_PT / 2,
-    paddingHorizontal: SPACING.md,
-    paddingVertical: SPACING.sm - 1,
+    paddingLeft: SPACING.md,
+    paddingRight: SPACING.xs,
+    paddingVertical: FIELD_PADDING_V_PT,
     ...TYPOGRAPHY.body,
-    minHeight: SEND_BUTTON_SIZE_PT,
-    maxHeight: 140,
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: THEME.hairline,
+    minHeight: FIELD_MIN_HEIGHT_PT,
+    // THE GROWTH CAP. Past this the TextInput scrolls its own content and the
+    // bar stops rising, which is the behaviour the field is supposed to have
+    // and the one most often skipped.
+    maxHeight: FIELD_MAX_HEIGHT_PT,
+  },
+  actionSlot: {
+    height: ACTION_BUTTON_SIZE_PT,
+    width: ACTION_BUTTON_SIZE_PT,
+  },
+  actionFill: {
+    height: '100%',
+    width: '100%',
+  },
+  // The resting mic is quiet — an outlined circle, not a filled one, so the
+  // filled accent circle means "send" and nothing else.
+  voiceBtn: {
+    height: ACTION_BUTTON_SIZE_PT,
+    width: ACTION_BUTTON_SIZE_PT,
+    borderRadius: ACTION_BUTTON_SIZE_PT / 2,
+    backgroundColor: THEME.surface_raised,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  /** Holding: the control fills, the way the reference's does while recording. */
+  voiceBtnHolding: { backgroundColor: THEME.accent },
+  /** Slid far enough that releasing discards. */
+  voiceBtnCancelling: { backgroundColor: THEME.danger },
+  micGlyph: {
+    height: MIC_BOX_PT,
+    width: MIC_BOX_PT,
+  },
+  micHead: {
+    position: 'absolute',
+    left: 5,
+    top: 0,
+    width: 8,
+    height: 11,
+    borderRadius: 4,
+  },
+  // A U: a box with its top border removed and its bottom corners rounded.
+  micCradle: {
+    position: 'absolute',
+    left: 2,
+    top: 7,
+    width: 14,
+    height: 8,
+    borderWidth: 2,
+    borderBottomLeftRadius: 7,
+    borderBottomRightRadius: 7,
+  },
+  micStem: {
+    position: 'absolute',
+    left: 8,
+    top: 15,
+    width: 2,
+    height: 3,
   },
   sendBtn: {
-    height: SEND_BUTTON_SIZE_PT,
-    width: SEND_BUTTON_SIZE_PT,
-    borderRadius: SEND_BUTTON_SIZE_PT / 2,
+    height: ACTION_BUTTON_SIZE_PT,
+    width: ACTION_BUTTON_SIZE_PT,
+    borderRadius: ACTION_BUTTON_SIZE_PT / 2,
     backgroundColor: THEME.accent,
     justifyContent: 'center',
     alignItems: 'center',
   },
-  sendBtnDisabled: { backgroundColor: THEME.surface_raised },
-  sendBtnText: {
-    fontSize: 18,
-    lineHeight: 20,
-    color: THEME.background,
-    fontWeight: '700',
+  sendGlyph: {
+    height: GLYPH_BOX_PT,
+    width: PLANE_W_PT,
+    // The optical-centring shift; see the SendPlane doc comment.
+    marginLeft: PLANE_NUDGE_PT,
+    justifyContent: 'center',
+  },
+  // A right-pointing filled triangle: zero-size box, coloured left border,
+  // transparent top/bottom borders.
+  sendPlaneBody: {
+    width: 0,
+    height: 0,
+    borderStyle: 'solid',
+    borderTopWidth: GLYPH_BOX_PT / 2,
+    borderBottomWidth: GLYPH_BOX_PT / 2,
+    borderLeftWidth: PLANE_W_PT,
+    borderRightWidth: 0,
+    borderTopColor: 'transparent',
+    borderBottomColor: 'transparent',
+    borderRightColor: 'transparent',
+  },
+  // The same triangle in the BUTTON's fill colour, painted over the trailing
+  // edge — that notch is the difference between a paper plane and a play arrow.
+  sendPlaneNotch: {
+    position: 'absolute',
+    left: 0,
+    top: (GLYPH_BOX_PT - PLANE_NOTCH_H_PT) / 2,
+    width: 0,
+    height: 0,
+    borderStyle: 'solid',
+    borderTopWidth: PLANE_NOTCH_H_PT / 2,
+    borderBottomWidth: PLANE_NOTCH_H_PT / 2,
+    borderLeftWidth: PLANE_NOTCH_W_PT,
+    borderRightWidth: 0,
+    borderTopColor: 'transparent',
+    borderBottomColor: 'transparent',
+    borderRightColor: 'transparent',
   },
   pressed: { opacity: 0.7 },
   counter: {
