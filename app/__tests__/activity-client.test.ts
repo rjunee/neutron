@@ -127,6 +127,42 @@ describe('parse helpers', () => {
     ).toEqual({ seq: 1, at: 1, kind: 'keepalive', label: 'alive', synthetic: true });
   });
 
+  test('carries body + source — the expanded content and the tool qualifier', () => {
+    // Without these the drawer is back to showing a size and a transport id.
+    expect(
+      parseActivityRow({
+        seq: 4,
+        at: 9,
+        kind: 'tool_end',
+        label: 'a_tool',
+        detail: 'one line',
+        body: 'line one\nline two',
+        source: 'a-server',
+      }),
+    ).toEqual({
+      seq: 4,
+      at: 9,
+      kind: 'tool_end',
+      label: 'a_tool',
+      detail: 'one line',
+      body: 'line one\nline two',
+      source: 'a-server',
+    });
+  });
+
+  test('omits empty body/source rather than carrying empty strings', () => {
+    const row = parseActivityRow({
+      seq: 1,
+      at: 1,
+      kind: 'status',
+      label: 'x',
+      body: '',
+      source: '',
+    });
+    expect(row?.body).toBeUndefined();
+    expect(row?.source).toBeUndefined();
+  });
+
   test('rejects a snapshot with an unknown state', () => {
     expect(parseActivitySnapshot({ state: 'vibes', events: [] })).toBeNull();
   });

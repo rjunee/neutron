@@ -245,11 +245,20 @@ class ReplSink {
           return Response.json({ status: 'bad-input' }, { status: 400 })
         }
         try {
+          const str = (k: string): string | undefined =>
+            typeof body[k] === 'string' && (body[k] as string) !== ''
+              ? (body[k] as string)
+              : undefined
           tap({
             project_id: this.sessions.get(sessionId)?.projectId ?? null,
             phase,
             tool_name: toolName,
             detail: typeof body['detail'] === 'string' ? (body['detail'] as string) : '',
+            // The expanded view's content (arguments + returned output). Optional:
+            // a hook from an older build posts neither, and the row degrades to the
+            // one-liner rather than failing.
+            ...(str('args') !== undefined ? { args: str('args') as string } : {}),
+            ...(str('result') !== undefined ? { result: str('result') as string } : {}),
           })
           return Response.json({ status: 'ok' })
         } catch (e) {

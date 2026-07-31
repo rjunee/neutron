@@ -71,10 +71,31 @@ export interface ActivityEvent {
   /** Wall clock (ms) the row was recorded. */
   at: number
   kind: ActivityEventKind
-  /** Short bold label — a tool name, or the event kind's word. */
+  /** Short bold label — a HUMAN tool name, or the event kind's word. Never a raw
+   *  MCP transport id; see {@link humanizeToolName}. */
   label: string
-  /** Optional dim detail — a file path, a command, an error message. */
+  /** Optional dim detail — the COLLAPSED one-liner. A file path, a command, the
+   *  first line of a reply. Whitespace-flattened and short by construction, so a
+   *  row stays one line until the owner expands it. */
   detail?: string
+  /**
+   * The EXPANDED content: the assistant's actual words, the tool's full arguments,
+   * the tool's returned output. This is the field that makes the panel a
+   * conversation view rather than a telemetry ticker — `detail` says a Bash call
+   * happened, `body` says what it ran and what came back.
+   *
+   * Newlines are PRESERVED here (unlike `detail`, which is flattened): the shape of
+   * a diff, a stack trace or a file listing is most of its meaning. Capped at
+   * {@link BODY_MAX}.
+   */
+  body?: string
+  /**
+   * Where a namespaced tool came from — the MCP server, with its per-session
+   * random incarnation stripped. Rendered as a dim qualifier BESIDE the label, so
+   * `mcp__neutron__memory_search` reads as `memory_search · neutron` and the
+   * identity is never lost, merely demoted. Absent for a native tool (`Bash`).
+   */
+  source?: string
   /**
    * TRUE for the synthetic liveness keepalive ONLY. The panel renders these
    * differently (a faint tick, not a work row) and `last_real_activity_at`
@@ -242,11 +263,35 @@ export class ActivityInspector {
    * autonomous build cannot grow this without limit (live-only means the buffer is
    * the only copy, and an unbounded "only copy" is a memory leak with extra steps).
    */
-  record(
-    scope: InspectorScopeKey,
-    row: { kind: ActivityEventKind; label: string; detail?: string; synthetic?: boolean },
-  ): ActivityEvent {
+  /**
+   * TWO TAPS SEE THE SAME REPLY. The agent's words reach this ring twice: once as
+   * the `reply` TOOL CALL (the hook, at the instant the agent produces them) and
+   * once as the substrate's end-of-turn `token` event — because `onReply` is what
+   * pushes that token (`repl-session.ts` "the 1:1 bridge: one reply → one token"),
+   * so they are the same string microseconds apart. Rendering the owner's message
+   * twice in a row would make the transcript look broken.
+   *
+   * Collapsed on the ONLY shape that artifact can take: an assistant row landing
+   * immediately after an assistant row with identical content. Two genuinely
+   * repeated assistant messages within one turn would be separated by at least the
+   * tool rows that prompted the second, so this cannot swallow real content.
+   *
+   * Deliberately NOT a time window — the two arrivals are not reliably close (a
+   * slow sink POST can lag), and adjacency is the precise property, not recency.
+   */
+  private isDuplicateAssistantRow(b: ScopeBuffer, row: ActivityRowInput): boolean {
+    if (row.kind !== 'token') return false
+    const last = b.events[b.events.length - 1]
+    if (last === undefined || last.kind !== 'token') return false
+    return last.detail === row.detail && last.body === row.body
+  }
+
+  record(scope: InspectorScopeKey, row: ActivityRowInput): ActivityEvent {
     const b = this.buffer(scope)
+    if (this.isDuplicateAssistantRow(b, row)) {
+      // Return the row already held; it is the same content, already fanned.
+      return b.events[b.events.length - 1] as ActivityEvent
+    }
     const at = this.clock()
     b.seq += 1
     const ev: ActivityEvent = {
@@ -255,6 +300,8 @@ export class ActivityInspector {
       kind: row.kind,
       label: row.label,
       ...(row.detail !== undefined && row.detail !== '' ? { detail: row.detail } : {}),
+      ...(row.body !== undefined && row.body !== '' ? { body: row.body } : {}),
+      ...(row.source !== undefined && row.source !== '' ? { source: row.source } : {}),
       ...(row.synthetic === true ? { synthetic: true } : {}),
     }
     b.events.push(ev)
@@ -325,6 +372,16 @@ export class ActivityInspector {
   }
 }
 
+/** The shape every mapper returns and {@link ActivityInspector.record} accepts. */
+export interface ActivityRowInput {
+  kind: ActivityEventKind
+  label: string
+  detail?: string
+  body?: string
+  source?: string
+  synthetic?: boolean
+}
+
 /**
  * Map a raw substrate `Event` onto an {@link ActivityEvent} row, or `null` for an
  * event with nothing worth showing.
@@ -333,9 +390,18 @@ export class ActivityInspector {
  * importing `Event` from `@neutronai/runtime`, so this Open-band module stays a
  * dependency-free pure leaf that the client-facing wire type can be derived from.
  *
- * `token` is summarised, never echoed in full: the reply body already renders in
- * chat as a message, and duplicating a multi-KB answer into a live-fanned
- * inspector frame would be pure waste.
+ * THE REPLY IS THE POINT, NOT ITS LENGTH. `token` used to render as
+ * `reply — 29 chars`, which reports the SIZE of the answer instead of the answer.
+ * Ryan 2026-07-30, on the shipped panel: *"can we see the actual detailed messages
+ * like would be shown in a Claude Code session instead of these terse tool calls"*.
+ * A character count is the one thing about a reply that is never what you wanted to
+ * know. The text now rides in `body` (capped at {@link BODY_MAX}) with its first
+ * line as the collapsed `detail`.
+ *
+ * The earlier rationale for dropping it — "the reply body already renders in chat"
+ * — does not survive contact with the actual surface: the inspector is read while a
+ * turn is IN FLIGHT, precisely when chat has not rendered anything yet, and it is
+ * read on a WEDGED session, where chat will never render it at all.
  */
 export function activityRowFromSubstrateEvent(ev: {
   kind: string
@@ -343,46 +409,199 @@ export function activityRowFromSubstrateEvent(ev: {
   message?: string
   tool_name?: string
   keepalive?: boolean
-}): { kind: ActivityEventKind; label: string; detail?: string; synthetic?: boolean } | null {
+}): ActivityRowInput | null {
   switch (ev.kind) {
     case 'status':
       return ev.keepalive === true
         ? { kind: 'keepalive', label: 'alive', synthetic: true }
-        : { kind: 'status', label: 'status', detail: ev.message ?? '' }
+        : { kind: 'status', label: 'status', detail: summarize(ev.message ?? '') }
     case 'thinking':
-      return { kind: 'thinking', label: 'thinking', detail: summarize(ev.text ?? '') }
-    case 'tool_call':
-      return { kind: 'tool_start', label: ev.tool_name ?? 'tool' }
+      return withBody({ kind: 'thinking', label: 'thinking' }, ev.text ?? '')
+    case 'tool_call': {
+      const named = humanizeToolName(ev.tool_name ?? 'tool')
+      return { kind: 'tool_start', label: named.label, ...sourceOf(named) }
+    }
     case 'tool_result_ack':
       return { kind: 'tool_end', label: 'tool result' }
     case 'token':
-      return { kind: 'token', label: 'reply', detail: `${(ev.text ?? '').length} chars` }
+      return withBody({ kind: 'token', label: ASSISTANT_LABEL }, ev.text ?? '')
     case 'completion':
       return { kind: 'completion', label: 'turn complete' }
     case 'error':
-      return { kind: 'error', label: 'error', detail: summarize(ev.message ?? '') }
+      return withBody({ kind: 'error', label: 'error' }, ev.message ?? '')
     default:
       return null
   }
 }
 
-/** Max chars of any detail string that reaches a client frame. */
+/**
+ * Max chars of the COLLAPSED one-liner. Sized to fill a phone row without
+ * wrapping past two lines; the full content lives in `body`.
+ */
 const DETAIL_MAX = 160
 
+/**
+ * Max chars of the EXPANDED body that reaches a client frame.
+ *
+ * The buffer is live-only and the ONLY copy (file header), so this cap is what
+ * bounds its memory: {@link INSPECTOR_BUFFER_CAP} rows × this ≈ 400 KB per scope
+ * worst-case, which is the honest price of showing content instead of counts. It
+ * is also the per-frame WS payload ceiling, fanned to every subscribed client.
+ * Big enough for a real reply, a stack trace or a directory listing; small enough
+ * that a 40 KB file read does not become a 40 KB broadcast.
+ */
+export const BODY_MAX = 2_000
+
+/** Collapse whitespace and clip — for the one-line `detail`. */
 function summarize(s: string): string {
   const flat = s.replace(/\s+/g, ' ').trim()
   return flat.length > DETAIL_MAX ? `${flat.slice(0, DETAIL_MAX - 1)}…` : flat
 }
 
-/** Map a tool-tap hook POST onto a row. `pre` ⇒ started, `post` ⇒ finished. */
+/**
+ * Clip for the expanded `body`, PRESERVING newlines. Line structure is most of the
+ * meaning of a diff, a stack trace or a file listing, so the `detail` flattening
+ * must not be applied here.
+ */
+export function clipBody(s: string): string {
+  const trimmed = s.trim()
+  return trimmed.length > BODY_MAX ? `${trimmed.slice(0, BODY_MAX - 1)}…` : trimmed
+}
+
+/**
+ * Attach `content` to a row as BOTH the collapsed one-liner and the expanded body.
+ *
+ * The `body` is omitted when it would merely repeat `detail` (a short single-line
+ * value is already fully visible collapsed), so the expand affordance appears only
+ * where expanding actually reveals something.
+ */
+function withBody(base: { kind: ActivityEventKind; label: string }, content: string): ActivityRowInput {
+  const detail = summarize(content)
+  const body = clipBody(content)
+  return { ...base, detail, ...(body !== detail ? { body } : {}) }
+}
+
+function sourceOf(named: { source?: string }): { source?: string } {
+  return named.source !== undefined ? { source: named.source } : {}
+}
+
+const MCP_PREFIX = 'mcp__'
+
+/**
+ * A per-session MCP server incarnation suffix — `spawn.ts` names the dev-channel
+ * server `neutron-<randomBytes(16).toString('hex')>` (32 hex chars; it was 4 bytes
+ * / 8 hex before the 2026-07-20 security review, and a session spawned by an older
+ * build can still be in the pool). Matching `{8,}` covers both without any
+ * plausible false positive: a human-chosen server name does not end in a long run
+ * of hex preceded by a hyphen.
+ */
+const INCARNATION_SUFFIX = /-[0-9a-f]{8,}$/i
+
+/**
+ * Turn a raw on-wire tool name into something a human can read.
+ *
+ * THE BUG THIS FIXES. The panel rendered `mcp__neutron-b1c20de7…__reply` — clipped
+ * mid-id, running off the right edge, with the ONE informative token (`reply`) at
+ * the far end where the truncation ate it. That string is not a tool name, it is a
+ * transport address: `mcp__<server>__<tool>`, where `<server>` for the dev-channel
+ * is a per-session RANDOM value (`spawn.ts` `channelName`) that is different on
+ * every spawn and means nothing to anyone. Rendering it as the primary label makes
+ * two different calls to the same tool look like two different tools.
+ *
+ * So: the TOOL is the label, the server is demoted to a dim `source` qualifier
+ * (kept, not discarded — `memory_search` from the Neutron bridge and a
+ * same-named tool from some other server must stay distinguishable), and the
+ * random incarnation is stripped so the qualifier is stable across spawns.
+ *
+ *   `mcp__neutron__memory_search`       → { label: 'memory_search', source: 'neutron' }
+ *   `mcp__neutron-b1c20de7…__reply`     → { label: 'reply',         source: 'neutron' }
+ *   `Bash`                              → { label: 'Bash' }
+ *
+ * Anything that does not parse falls through UNCHANGED rather than being mangled:
+ * showing an odd name truthfully beats inventing a pretty wrong one.
+ */
+export function humanizeToolName(raw: string): { label: string; source?: string } {
+  if (!raw.startsWith(MCP_PREFIX)) return { label: raw }
+  const rest = raw.slice(MCP_PREFIX.length)
+  const sep = rest.indexOf('__')
+  // `mcp__` with no `__<tool>` half is not the namespaced form — leave it alone.
+  if (sep <= 0) return { label: raw }
+  const tool = rest.slice(sep + 2)
+  if (tool === '') return { label: raw }
+  const server = rest.slice(0, sep).replace(INCARNATION_SUFFIX, '')
+  return { label: tool, ...(server !== '' ? { source: server } : {}) }
+}
+
+/**
+ * The dev-channel's reply tool — the seam through which the agent's ACTUAL WORDS
+ * reach the owner. `dev-channel-impl.ts` registers it as `reply` with a single
+ * `text` argument ("your COMPLETE response for this turn"), and `spawn.ts` mounts
+ * that server under the per-session random name, so on the wire it is
+ * `mcp__neutron-<incarnation>__reply` — which is exactly the unreadable row in the
+ * screenshot. Matched on the HUMANISED pair so the random half cannot defeat it.
+ */
+const REPLY_TOOL = 'reply'
+const NEUTRON_SOURCE = 'neutron'
+
+function isReplyTool(named: { label: string; source?: string }): boolean {
+  return named.label === REPLY_TOOL && named.source === NEUTRON_SOURCE
+}
+
+/**
+ * Map a tool-tap hook POST onto a row. `pre` ⇒ started, `post` ⇒ finished.
+ *
+ * THE INTERLEAVE (Ryan 2026-07-30: *"interleaved with the actual messages the model
+ * is outputting, not just the size"*). The assistant's words are not a separate
+ * stream that has to be merged in — they arrive HERE, as the `reply` tool call, at
+ * the exact chronological instant the agent produces them. The previous build saw
+ * that call and threw the words away twice over: `summarizeToolInput` had no `text`
+ * in its pick list, so the row carried NO detail, and the label was the raw
+ * transport id. That is the mystery `mcp__neutron-b1c20de7…` row in the screenshot —
+ * the whole assistant message, rendered as an opaque id with the content dropped.
+ *
+ * So a `reply` call becomes an ASSISTANT MESSAGE row (`kind: 'token'`), peer to the
+ * tool rows on one timeline, and its `post` phase is dropped entirely — the tool
+ * returns a bare ack, and "finished replying" is noise next to the reply itself.
+ *
+ * WHICH CONTENT EACH PHASE CARRIES for every other tool. On `pre` the interesting
+ * thing is the CALL — what is about to run, with what arguments. On `post` it is the
+ * RETURN — what came back, which the previous build showed nothing of at all
+ * (`tasks_list` with no hint of what it listed). So `post` prefers the result and
+ * falls back to the arguments when a tool returned nothing, rather than rendering a
+ * bare tool name.
+ *
+ * Returns `null` for a row that should not be shown at all.
+ */
 export function activityRowFromToolTap(input: {
   phase: 'pre' | 'post'
   tool_name: string
   detail: string
-}): { kind: ActivityEventKind; label: string; detail?: string } {
+  /** Full arguments of the call, pre-rendered by the hook. */
+  args?: string
+  /** Full output the tool returned, pre-rendered by the hook (`post` only). */
+  result?: string
+}): ActivityRowInput | null {
+  const named = humanizeToolName(input.tool_name)
+  const isPre = input.phase === 'pre'
+
+  if (isReplyTool(named)) {
+    // The `post` ack carries nothing the owner wants; the words already landed.
+    if (!isPre) return null
+    return withBody({ kind: 'token', label: ASSISTANT_LABEL }, input.args ?? input.detail)
+  }
+
+  const content = isPre ? (input.args ?? '') : (input.result ?? input.args ?? '')
+  const detail = summarize(input.detail !== '' ? input.detail : content)
+  const body = clipBody(content)
   return {
-    kind: input.phase === 'pre' ? 'tool_start' : 'tool_end',
-    label: input.tool_name,
-    detail: summarize(input.detail),
+    kind: isPre ? 'tool_start' : 'tool_end',
+    label: named.label,
+    ...sourceOf(named),
+    ...(detail !== '' ? { detail } : {}),
+    ...(body !== '' && body !== detail ? { body } : {}),
   }
 }
+
+/** The label every assistant-message row carries, from either source. Shared so the
+ *  duplicate-suppression below can recognise the pair. */
+export const ASSISTANT_LABEL = 'assistant'

@@ -538,8 +538,17 @@ export interface AppWsOutboundActivityEvent {
       | 'completion'
       | 'error'
       | 'turn_start'
+    /** HUMAN tool name or event word — never a raw `mcp__<server>__<tool>` id. */
     label: string
+    /** The collapsed one-liner. */
     detail?: string
+    /** The expanded content: the assistant's actual words, a call's full
+     *  arguments, a tool's returned output. Newlines preserved. Capped server-side
+     *  (`BODY_MAX`) so a frame cannot become a file dump. */
+    body?: string
+    /** The MCP server a namespaced tool came from, per-session incarnation
+     *  stripped — a dim qualifier beside the label, never the label itself. */
+    source?: string
     synthetic?: boolean
   }
   ts: number

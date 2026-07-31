@@ -2852,11 +2852,24 @@ export function buildOpenGraphComposer(
     // comes from — the substrate `Event` stream carries no tool events at all (the
     // persistent-REPL bridge emits one whole-reply `token` and nothing else), so
     // without this tap the panel could only say "alive", never "running Bash".
-    const wiredActivityTap: ReplActivityTap = ({ project_id, phase, tool_name, detail }): void => {
-      activityInspector.record(
-        inspectorScopeKey(project_id),
-        activityRowFromToolTap({ phase, tool_name, detail }),
-      )
+    const wiredActivityTap: ReplActivityTap = ({
+      project_id,
+      phase,
+      tool_name,
+      detail,
+      args,
+      result,
+    }): void => {
+      const row = activityRowFromToolTap({
+        phase,
+        tool_name,
+        detail,
+        ...(args !== undefined ? { args } : {}),
+        ...(result !== undefined ? { result } : {}),
+      })
+      // `null` ⇒ a row the transcript is better without (the `reply` tool's bare
+      // post-ack, whose words already landed as the assistant message row).
+      if (row !== null) activityInspector.record(inspectorScopeKey(project_id), row)
     }
     setReplActivityTap(wiredActivityTap)
     const activitySurface = createActivitySurface({

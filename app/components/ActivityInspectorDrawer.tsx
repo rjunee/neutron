@@ -122,6 +122,109 @@ function rowTime(at: number): string {
   return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
 }
 
+/** Collapsed line clamps. Generous enough to be useful at a glance, short enough
+ *  that a long tool result cannot push the next row off the screen. */
+const COLLAPSED_ASSISTANT_LINES = 8;
+const COLLAPSED_DETAIL_LINES = 2;
+
+/**
+ * One transcript row.
+ *
+ * TWO SHAPES, ONE TIMELINE (Ryan 2026-07-30: *"interleaves with the actual messages
+ * the model is outputting"*). An assistant message renders as PROSE — full width,
+ * wrapped, no monospace column — because it is a message, not a tick. Everything
+ * else renders as a tool/telemetry line. They are peers in one chronological list,
+ * which is what makes this read like a session transcript rather than an event log.
+ *
+ * NOTHING RUNS OFF THE RIGHT EDGE. Every text node lives inside a `flex: 1,
+ * minWidth: 0` column and wraps; the old layout let an unconstrained label push the
+ * row wider than the drawer, which is how a 52-char MCP transport id ended up
+ * clipped mid-id with its informative half off-screen.
+ */
+function ActivityRowView({
+  row,
+  expanded,
+  onToggle,
+}: {
+  row: ActivityRow;
+  expanded: boolean;
+  onToggle: (seq: number) => void;
+}) {
+  const isAssistant = row.kind === 'token';
+  const isError = row.kind === 'error';
+  // The assistant's words are the full `body` when there is one; `detail` is only
+  // its flattened first-160-chars summary.
+  const prose = row.body ?? row.detail ?? '';
+  const canExpand = row.body !== undefined && row.body !== row.detail;
+
+  return (
+    <Pressable
+      onPress={canExpand ? () => onToggle(row.seq) : undefined}
+      accessibilityRole={canExpand ? 'button' : undefined}
+      style={[
+        styles.row,
+        isAssistant && styles.rowAssistant,
+        row.synthetic === true && styles.rowSynthetic,
+      ]}
+      testID={`activity-row-${row.seq}`}
+    >
+      <View style={styles.rowGutter}>
+        <Text style={styles.rowTime}>{rowTime(row.at)}</Text>
+        <Text style={styles.rowGlyph}>{KIND_GLYPH[row.kind]}</Text>
+      </View>
+      <View style={styles.rowContent}>
+        {isAssistant ? (
+          <>
+            <Text style={styles.assistantWho}>assistant</Text>
+            <Text
+              style={styles.assistantText}
+              numberOfLines={expanded ? undefined : COLLAPSED_ASSISTANT_LINES}
+              testID={`activity-row-text-${row.seq}`}
+            >
+              {prose}
+            </Text>
+          </>
+        ) : (
+          <>
+            <View style={styles.rowHead}>
+              <Text
+                style={[styles.rowLabel, isError && styles.rowError]}
+                testID={`activity-row-label-${row.seq}`}
+              >
+                {row.label}
+              </Text>
+              {row.source !== undefined ? (
+                <Text style={styles.rowSource} testID={`activity-row-source-${row.seq}`}>
+                  {row.source}
+                </Text>
+              ) : null}
+            </View>
+            {row.detail !== undefined ? (
+              <Text
+                style={[styles.rowDetail, isError && styles.rowError]}
+                numberOfLines={expanded ? undefined : COLLAPSED_DETAIL_LINES}
+                testID={`activity-row-detail-${row.seq}`}
+              >
+                {row.detail}
+              </Text>
+            ) : null}
+            {expanded && row.body !== undefined ? (
+              <Text style={styles.rowBodyText} testID={`activity-row-body-${row.seq}`}>
+                {row.body}
+              </Text>
+            ) : null}
+          </>
+        )}
+        {canExpand ? (
+          <Text style={styles.rowMore} testID={`activity-row-more-${row.seq}`}>
+            {expanded ? 'tap to collapse' : 'tap to expand'}
+          </Text>
+        ) : null}
+      </View>
+    </Pressable>
+  );
+}
+
 export function ActivityInspectorDrawer({
   open,
   onClose,
@@ -152,6 +255,10 @@ export function ActivityInspectorDrawer({
   const [snapshot, setSnapshot] = useState<ActivitySnapshot | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [now, setNow] = useState(() => Date.now());
+  // Which rows are expanded. Held in STATE, never a mutated ref: `reactCompiler`
+  // caches render sub-expressions that have no reactive dependency, so an expansion
+  // tracked outside state would freeze at its first value and rows would never open.
+  const [expanded, setExpanded] = useState<ReadonlySet<number>>(() => new Set());
   const scope = activityScopeKey(projectId);
 
   useEffect(() => {
@@ -180,6 +287,7 @@ export function ActivityInspectorDrawer({
       setRows([]);
       setSnapshot(null);
       setError(null);
+      setExpanded(new Set());
       return;
     }
     let alive = true;
@@ -270,6 +378,15 @@ export function ActivityInspectorDrawer({
 
   const close = useCallback(() => onClose(), [onClose]);
 
+  const toggleRow = useCallback((seq: number) => {
+    setExpanded((prev) => {
+      const next = new Set(prev);
+      if (next.has(seq)) next.delete(seq);
+      else next.add(seq);
+      return next;
+    });
+  }, []);
+
   if (!mounted) return null;
 
   const eventAge = liveAge(rows, snapshot, now, { realOnly: false });
@@ -348,28 +465,12 @@ export function ActivityInspectorDrawer({
             </Text>
           ) : (
             rows.map((r) => (
-              <View
+              <ActivityRowView
                 key={r.seq}
-                style={[styles.row, r.synthetic === true && styles.rowSynthetic]}
-                testID={`activity-row-${r.seq}`}
-              >
-                <Text style={styles.rowTime}>{rowTime(r.at)}</Text>
-                <Text style={styles.rowGlyph}>{KIND_GLYPH[r.kind]}</Text>
-                <Text
-                  style={[styles.rowLabel, r.kind === 'error' && styles.rowError]}
-                  numberOfLines={1}
-                >
-                  {r.label}
-                </Text>
-                {r.detail !== undefined ? (
-                  <Text
-                    style={[styles.rowDetail, r.kind === 'error' && styles.rowError]}
-                    numberOfLines={2}
-                  >
-                    {r.detail}
-                  </Text>
-                ) : null}
-              </View>
+                row={r}
+                expanded={expanded.has(r.seq)}
+                onToggle={toggleRow}
+              />
             ))
           )}
         </ScrollView>
@@ -476,10 +577,28 @@ const styles = StyleSheet.create({
     paddingVertical: SPACING.md,
     gap: SPACING.xs + 2,
   },
-  row: { flexDirection: 'row', alignItems: 'baseline', gap: SPACING.sm },
+  row: { flexDirection: 'row', alignItems: 'flex-start', gap: SPACING.sm },
+  // An assistant message is a MESSAGE, not a tick: it gets breathing room and a
+  // left rule so the eye can find the model's own words in the stream at a glance.
+  rowAssistant: {
+    borderLeftWidth: 2,
+    borderLeftColor: THEME.hairline,
+    paddingLeft: SPACING.sm,
+    marginLeft: -SPACING.sm,
+    paddingVertical: SPACING.xs,
+  },
   // A synthetic keepalive is NOT work — near-invisible so it never reads as
   // progress (that misreading is exactly ISSUES #386).
   rowSynthetic: { opacity: 0.38 },
+  // Time + glyph are a FIXED-WIDTH gutter. Pulling them out of the main flex row
+  // is what lets the content column own all remaining width and wrap inside it.
+  rowGutter: { flexDirection: 'row', alignItems: 'baseline', gap: SPACING.xs, flexShrink: 0 },
+  // THE OVERFLOW FIX. `flex: 1` claims the remaining width and `minWidth: 0` lets
+  // it shrink below its content — without the latter a flex child refuses to go
+  // narrower than its longest word, which is precisely how a 52-character MCP
+  // transport id pushed the row off the right edge of the drawer.
+  rowContent: { flex: 1, minWidth: 0, gap: 2 },
+  rowHead: { flexDirection: 'row', alignItems: 'baseline', gap: SPACING.xs, flexWrap: 'wrap' },
   // 11pt monospace was unreadable on a phone. 13 is the smallest size in the
   // type scale (`TYPOGRAPHY.body_small`) and still fits a timestamp + a label.
   rowTime: {
@@ -496,14 +615,54 @@ const styles = StyleSheet.create({
     lineHeight: 19,
     fontWeight: '600',
     color: THEME.text_primary,
+    flexShrink: 1,
+  },
+  // The MCP server the tool came from — present but demoted, so the identity is
+  // never lost while the TOOL stays the thing you read first.
+  rowSource: {
+    fontFamily: MONO,
+    fontSize: 13,
+    lineHeight: 19,
+    color: THEME.text_muted,
+    flexShrink: 1,
   },
   rowDetail: {
     fontFamily: MONO,
     fontSize: 13,
     lineHeight: 19,
     color: THEME.text_muted,
-    flex: 1,
-    minWidth: 0,
+  },
+  // The expanded payload: full arguments, or what the tool returned. Monospace and
+  // newline-preserving, because the shape of a diff or a listing is its meaning.
+  rowBodyText: {
+    fontFamily: MONO,
+    fontSize: 13,
+    lineHeight: 19,
+    color: THEME.text_secondary,
+    backgroundColor: THEME.surface_raised,
+    borderRadius: 6,
+    paddingHorizontal: SPACING.sm,
+    paddingVertical: SPACING.xs,
+    marginTop: 2,
+  },
+  rowMore: {
+    fontSize: 13,
+    lineHeight: 18,
+    color: THEME.text_muted,
+    marginTop: 1,
+  },
+  // Assistant prose is deliberately NOT monospace — it is language, and the
+  // proportional face is what makes it read as a message beside the mono tool ticks.
+  assistantWho: {
+    fontSize: 13,
+    lineHeight: 18,
+    letterSpacing: 0.6,
+    color: THEME.text_muted,
+  },
+  assistantText: {
+    fontSize: TYPOGRAPHY.body_small.fontSize,
+    lineHeight: TYPOGRAPHY.body_small.lineHeight,
+    color: THEME.text_primary,
   },
   rowError: { color: THEME.danger },
   empty: {

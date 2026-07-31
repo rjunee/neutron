@@ -51,22 +51,50 @@ interface HookInput {
   session_id?: string
   tool_name?: string
   tool_input?: Record<string, unknown>
+  /**
+   * The tool's RETURN VALUE. Present on `PostToolUse` only (CC's payload is
+   * `{ session_id, tool_name, tool_input, tool_response, cwd, ... }` — see
+   * `todo-sync.ts`). The first build of this hook never read this field, which is
+   * why the panel could say `tasks_list` finished but never a word about what it
+   * returned. Ryan 2026-07-30: the panel should read like a Claude Code session,
+   * and half of a session transcript is tool OUTPUT.
+   */
+  tool_response?: unknown
 }
 
-/** Max chars of tool detail forwarded. The inspector is a live glance, not a log;
- *  a 40 KB file write must not become a 40 KB WS frame fanned to every client. */
+/** Max chars of the one-line summary. The row's collapsed form. */
 const DETAIL_MAX = 160
+
+/**
+ * Max chars of the FULL argument / result payloads forwarded for the expanded view.
+ * Mirrors `BODY_MAX` in `open/activity-inspector.ts` (which clips again on the
+ * recording side — this is the transport-side ceiling so an oversized payload never
+ * crosses the loopback at all). The inspector is a live glance, not a log: a 40 KB
+ * file read must not become a 40 KB WS frame fanned to every client.
+ */
+const BODY_MAX = 2_000
+
+function clip(s: string, max: number): string {
+  return s.length > max ? `${s.slice(0, max - 1)}…` : s
+}
 
 /**
  * One-line human summary of a tool call, from the fields that actually identify
  * WHICH call it is. Ordered by how the owner thinks about it: a path for file
  * tools, the command for Bash, the pattern for search tools, the URL for fetches,
- * the prompt for a subagent. Falls back to '' rather than dumping raw JSON —
- * unknown args are frequently large and occasionally sensitive, and a bare tool
- * name is still a useful tick.
+ * the prompt for a subagent.
  *
- * Exported for direct unit testing (the redaction + truncation guarantees below
- * are the load-bearing part, so they get asserted without spawning a subprocess).
+ * TOTAL, deliberately. This used to return '' for a tool whose arguments matched
+ * none of those keys, on the reasoning that unknown args "are frequently large and
+ * occasionally sensitive". Large is handled by the cap; sensitive is not a hazard
+ * worth a blank row here, because this payload's only destination is the OWNER's
+ * own authenticated panel showing the owner's own session — the same content chat
+ * already renders to him. The blank, meanwhile, was a real cost: every MCP tool
+ * whose argument key is not in that list rendered as a bare name with no hint of
+ * what it was called with. So the fallback is now a compact `key=value` render.
+ *
+ * Exported for direct unit testing (the truncation guarantees are load-bearing, so
+ * they get asserted without spawning a subprocess).
  */
 export function summarizeToolInput(input: Record<string, unknown> | undefined): string {
   if (input === undefined || input === null) return ''
@@ -83,9 +111,103 @@ export function summarizeToolInput(input: Record<string, unknown> | undefined): 
     pick('url') ??
     pick('description') ??
     pick('prompt') ??
-    ''
-  const flat = raw.replace(/\s+/g, ' ').trim()
-  return flat.length > DETAIL_MAX ? `${flat.slice(0, DETAIL_MAX - 1)}…` : flat
+    // `text` is the dev-channel `reply` tool's argument — i.e. the agent's entire
+    // message to the owner. Its absence from this list is why the screenshot's
+    // assistant turn rendered as a bare unreadable id with no content at all.
+    pick('text') ??
+    compactArgs(input)
+  return clip(raw.replace(/\s+/g, ' ').trim(), DETAIL_MAX)
+}
+
+/** `a=1 b=hello` for an argument object with no recognised identifying key. */
+function compactArgs(input: Record<string, unknown>): string {
+  const parts: string[] = []
+  for (const [k, v] of Object.entries(input)) {
+    if (v === undefined || v === null) continue
+    const rendered =
+      typeof v === 'string' ? v : typeof v === 'object' ? JSON.stringify(v) : String(v)
+    parts.push(`${k}=${rendered}`)
+    if (parts.join(' ').length > DETAIL_MAX) break
+  }
+  return parts.join(' ')
+}
+
+/**
+ * The FULL arguments, pretty-printed for the expanded view. Newlines preserved —
+ * a multi-line `command` or `prompt` is far easier to read shaped than flattened.
+ */
+export function renderToolArgs(input: Record<string, unknown> | undefined): string {
+  if (input === undefined || input === null) return ''
+  const keys = Object.keys(input)
+  if (keys.length === 0) return ''
+  // A single string argument is its own best rendering — `command` for Bash is the
+  // shell line, and wrapping it in JSON quoting only makes it harder to read.
+  const only = keys[0]
+  if (keys.length === 1 && only !== undefined && typeof input[only] === 'string') {
+    return clip(input[only] as string, BODY_MAX)
+  }
+  try {
+    return clip(JSON.stringify(input, null, 2), BODY_MAX)
+  } catch {
+    // Circular / non-serialisable args are not worth failing a row over.
+    return clip(compactArgs(input), BODY_MAX)
+  }
+}
+
+/**
+ * The tool's OUTPUT, rendered for the expanded view.
+ *
+ * CC's `tool_response` has no single shape — it is whatever the tool returned. The
+ * forms that actually occur, handled in order:
+ *   - a plain string (many MCP tools),
+ *   - `{ content: [{ type: 'text', text }] }` (the MCP content-block form),
+ *   - `{ stdout, stderr }` (Bash),
+ *   - `{ file: { content } }` (Read),
+ *   - anything else ⇒ pretty JSON.
+ * Unknown shapes fall through to JSON rather than to '' — an unfamiliar object is
+ * still the answer to "what did it return?", and guessing wrong here costs nothing
+ * while showing nothing costs the whole feature.
+ */
+export function renderToolResult(response: unknown): string {
+  if (response === undefined || response === null) return ''
+  if (typeof response === 'string') return clip(response, BODY_MAX)
+  if (typeof response !== 'object') return clip(String(response), BODY_MAX)
+
+  const r = response as Record<string, unknown>
+
+  const content = r['content']
+  if (Array.isArray(content)) {
+    const text = content
+      .map((b) => {
+        if (typeof b === 'string') return b
+        if (typeof b === 'object' && b !== null) {
+          const t = (b as Record<string, unknown>)['text']
+          if (typeof t === 'string') return t
+        }
+        return ''
+      })
+      .filter((s) => s !== '')
+      .join('\n')
+    if (text !== '') return clip(text, BODY_MAX)
+  }
+
+  const stdout = typeof r['stdout'] === 'string' ? (r['stdout'] as string) : ''
+  const stderr = typeof r['stderr'] === 'string' ? (r['stderr'] as string) : ''
+  if (stdout !== '' || stderr !== '') {
+    return clip([stdout, stderr].filter((s) => s !== '').join('\n'), BODY_MAX)
+  }
+
+  const file = r['file']
+  if (typeof file === 'object' && file !== null) {
+    const fc = (file as Record<string, unknown>)['content']
+    if (typeof fc === 'string' && fc !== '') return clip(fc, BODY_MAX)
+  }
+
+  try {
+    return clip(JSON.stringify(response, null, 2), BODY_MAX)
+  } catch {
+    return ''
+  }
 }
 
 async function main(): Promise<void> {
@@ -123,6 +245,10 @@ async function main(): Promise<void> {
         phase,
         tool_name: toolName,
         detail: summarizeToolInput(input.tool_input),
+        // The expanded view's content. `args` on both phases (a `post` row still
+        // wants to say WHICH call finished); `result` only where it exists.
+        args: renderToolArgs(input.tool_input),
+        ...(phase === 'post' ? { result: renderToolResult(input.tool_response) } : {}),
       }),
     })
   } catch {
