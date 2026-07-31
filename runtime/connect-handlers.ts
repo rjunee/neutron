@@ -13,9 +13,15 @@
  * aliases — no `extends` relationship needed, TypeScript structural
  * typing closes the gap.
  *
- * Open code never constructs these — the corresponding adapter method
- * on `LocalPlatformAdapter` returns null and the connect API
- * surface never mounts on Open self-hosted single-instance boxes.
+ * ISSUES #421 — this header used to say "Open code never constructs these …
+ * the connect API surface never mounts on Open self-hosted single-instance
+ * boxes." That is no longer true, and it was the bug: `open/wiring/connect-node
+ * .ts` now assembles the bundle and `open/composer.ts` sets
+ * `composition.connect_api`, so a self-hosted box serves the SAME surface
+ * Managed does, gated per request on its own invite/member state
+ * (`connect/surface-gate.ts`). Open reaches the concrete implementations by
+ * DYNAMIC import; these aliases still exist so core composition can describe the
+ * bundle without a static edge into `connect/api/`.
  */
 
 import type { JwksCache } from '@neutronai/jwt-validator/index.ts'

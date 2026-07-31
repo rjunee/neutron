@@ -17,11 +17,24 @@ export interface ConnectCompositionInput {
     auth: JwtBearerMiddlewareOptions
     handlers: ConnectApiHandlers
     /**
+     * ISSUES #421 — the owner's project DB, read by the CONNECT SURFACE STATE
+     * GATE (`connect/surface-gate.ts`) on every inbound `/connect/v1/*` request.
+     * REQUIRED, and deliberately a DB rather than a boolean: reachability is a
+     * function of the instance's own connect state (a live invite, or a
+     * non-revoked collaborator), so no caller — Open, Managed, or a test — can
+     * configure the surface open. Supplying `connect_api` mounts the ONE code
+     * path; the rows decide whether it answers.
+     */
+    owner_db: ProjectDb
+    /**
      * Sprint B (2026-05-20) — boot-shell-supplied factory for the
-     * default `on_inbound_message` handler. Managed boot binds the real
-     * `connect/api/handlers/on-inbound-message.ts:
-     * buildOnInboundMessageHandler` here; Open boot leaves this
-     * undefined since the connect API surface is Managed-only.
+     * default `on_inbound_message` handler, for a caller that wants the
+     * composer to build the handler from the composed graph's router + db
+     * instead of supplying it directly. The Open composer supplies
+     * `handlers.on_inbound_message` outright (`open/wiring/connect-node.ts`)
+     * and leaves this undefined — not because Connect is Managed-only
+     * (ISSUES #421 retired that framing) but because it already holds the
+     * router at assembly time.
      *
      * When `handlers.on_inbound_message` is undefined AND this factory
      * is supplied, the composer auto-overlays the constructed handler

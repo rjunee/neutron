@@ -245,6 +245,15 @@ import { buildProjectPersonaResolver } from './project-persona-resolver.ts'
 import { createOpenChatTopicsSurface } from './chat-topics-surface.ts'
 import { createChatHistorySurface } from '@neutronai/gateway/http/chat-history-surface.ts'
 import { OWNER_USER_ID, resolveNeutronHome, resolveOpenInstanceInfo } from './owner-identity.ts'
+// ISSUES #421 — Neutron Connect, wired for a self-hosted install. `connect/` has
+// always shipped in this repo and no composer ever mounted it, so a self-hoster
+// carried the source of a cross-instance API they could never serve. These three
+// modules are the missing assembly: this install's own signing identity, the
+// cross-boundary node, and the owner-side invite/member surface.
+import { resolveConnectNodeIdentity } from './connect-node-identity.ts'
+import { buildConnectNodeWiring } from './wiring/connect-node.ts'
+import { buildConnectOwnerSurfaceDeps } from './wiring/connect-owner-surface.ts'
+import { connectHostFromBaseUrl, resolveConnectBaseUrl } from './connect-base-url.ts'
 // L3 (2026-07) — build the Open agent-profile backend HERE (composition root)
 // and inject it into `mountOpenCores`, so the gateway core no longer imports the
 // `open` band.
@@ -683,6 +692,18 @@ export function buildOpenGraphComposer(
     // for composer-direct tests — both default 127.0.0.1).
     const bindHost = options.config?.host ?? env['NEUTRON_HOST'] ?? '127.0.0.1'
     const bindIsLoopback = isLoopbackBindHost(bindHost)
+
+    // ISSUES #421 — Neutron Connect. Resolved HERE (early) so both halves share
+    // one origin: the owner-side invite link the app renders, and the
+    // data-locality disclosure the invitee sees before accepting.
+    const connectBaseUrl = resolveConnectBaseUrl({
+      env,
+      bindHost,
+      port: options.config?.port ?? Number(env['NEUTRON_PORT'] ?? 8787),
+    })
+    // This install's OWN Ed25519 identity: it signs the collaborator bearers it
+    // issues and trusts no key but its own. First boot mints + persists it.
+    const connectIdentity = await resolveConnectNodeIdentity(owner_home)
 
     // P1-5 (lift audit § P1-5) — native Claude Code SKILL.md discovery. Materialize
     // the bundled skill packs (`impeccable` + design sub-skills, `agent-browser`,
@@ -2986,6 +3007,15 @@ export function buildOpenGraphComposer(
       // rail-visible — fan a fresh `projects_changed` so every connected rail
       // re-renders the label/glyph live (no reload).
       onRailFieldChanged: ({ user_id }) => emitProjectsChangedNow(user_id),
+      // ISSUES #421 — the owner half of Connect. Without this the route existed
+      // and answered 501 `connect_not_configured`, so the owner had no way to
+      // create the invite that opens the Connect surface, and the mobile app's
+      // connect-members client called a dead endpoint.
+      connect: buildConnectOwnerSurfaceDeps({
+        db,
+        owner_slug: project_slug,
+        connect_base_url: connectBaseUrl,
+      }),
     })
     // Agent-tool service (`create_project`) — same path, owner as the refresh
     // target when the turn has no explicit speaker (solo/system).
@@ -4132,6 +4162,22 @@ export function buildOpenGraphComposer(
       // This is what activates the real delivery seam on Open (the bare router
       // the module would otherwise construct has no adapter and throws on send).
       channel_router: channelRouter,
+      // ISSUES #421 — MOUNT the cross-instance Connect API. Supplying this field
+      // is what puts `/connect/v1/*` on the HTTP ladder; it is the SAME field,
+      // and the same `gateway/composition.ts` block, that Managed uses. Whether
+      // the mounted surface ANSWERS is decided per request by the state gate in
+      // `connect/surface-gate.ts` reading `owner_db`: closed on a fresh install
+      // (the whole prefix falls through to the default 404, indistinguishable
+      // from an instance that never had Connect), open the moment the owner
+      // issues an invite — no restart, no flag, no second code path.
+      connect_api: (await buildConnectNodeWiring({
+        db,
+        owner_slug: project_slug,
+        owner_display: instanceInfo.agent_name ?? project_slug,
+        connect_host: connectHostFromBaseUrl(connectBaseUrl),
+        router: channelRouter,
+        identity: connectIdentity,
+      })) as unknown as NonNullable<CompositionInput['connect_api']>,
       // Task 3 — the FIRST real approval surface, replacing the no-op stub.
       // Consumed by `ApprovalManager` at `build-core-modules.ts:275-278`; the
       // ritual approval path (`reminders/ritual-approval.ts`) is its first

@@ -381,6 +381,8 @@ describe('boot composer with all four surfaces wires precedence chain', () => {
             on_inbound_message: async () => ({ ack_id: 'x' }),
             list_projects: async () => [],
           },
+          // ISSUES #421 — the surface state gate reads this DB on every request.
+          owner_db: db,
         },
       }),
     })
@@ -397,7 +399,22 @@ describe('boot composer with all four surfaces wires precedence chain', () => {
       expect(chatRes.status).toBe(200)
       expect(landing.fetchCalls.map((c) => c.pathname)).toContain('/chat')
 
-      // Cross-instance /health endpoint (unauthed liveness path).
+      // Cross-instance /health endpoint (unauthed liveness path). ISSUES #421 —
+      // mounting is necessary but not sufficient: with no invite and no
+      // collaborator the surface state gate keeps the whole prefix closed, and
+      // the request falls through to the default 404. Issue a live invite and
+      // the SAME process serves it, with no restart.
+      const closedRes = await fetch(`http://127.0.0.1:${handle.server.port}/connect/v1/health`)
+      expect(closedRes.status).toBe(404)
+
+      handle.db.runSync(
+        `INSERT INTO connect_guest_invites
+           (token_hash, project_id, display_name_hint, access,
+            created_at_ms, expires_at_ms, redeemed_at_ms, redeemed_by_slug)
+         VALUES (?, 'proj-1', NULL, 'write', ?, ?, NULL, NULL)`,
+        ['b'.repeat(64), Date.now(), Date.now() + 60_000],
+      )
+
       const ctRes = await fetch(`http://127.0.0.1:${handle.server.port}/connect/v1/health`)
       expect(ctRes.status).toBe(200)
 

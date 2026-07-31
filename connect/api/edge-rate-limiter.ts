@@ -102,13 +102,63 @@ export function createEdgeRateLimiter(
 }
 
 /**
- * Extract the client IP for per-IP limiting at the public edge. The connect
- * node sits behind Caddy, which sets `X-Forwarded-For: <client>, <proxies...>`;
- * the FIRST entry is the originating client. Falls back to a constant bucket
- * when the header is absent (e.g. a direct-to-process test request) so the
- * limiter still fails closed rather than skipping entirely.
+ * True when `ip` is a loopback / link-local / RFC-1918 address — i.e. a peer that
+ * could plausibly be a reverse proxy sharing the host or the local network,
+ * rather than a client dialling in off the internet.
  */
-export function clientIpFromRequest(req: Request): string {
+export function isLocalPeerAddress(ip: string): boolean {
+  const a = ip.trim().toLowerCase()
+  if (a.length === 0) return false
+  // IPv6 loopback / link-local / unique-local, and IPv4-mapped forms of the same.
+  if (a === '::1' || a === '::' || a.startsWith('fe80:') || a.startsWith('fc') || a.startsWith('fd')) {
+    return true
+  }
+  const v4 = a.startsWith('::ffff:') ? a.slice('::ffff:'.length) : a
+  const parts = v4.split('.')
+  if (parts.length !== 4) return false
+  const [o1, o2] = [Number(parts[0]), Number(parts[1])]
+  if (!Number.isInteger(o1) || !Number.isInteger(o2)) return false
+  if (o1 === 127) return true // loopback
+  if (o1 === 10) return true // RFC 1918
+  if (o1 === 192 && o2 === 168) return true // RFC 1918
+  if (o1 === 172 && o2 >= 16 && o2 <= 31) return true // RFC 1918
+  if (o1 === 169 && o2 === 254) return true // link-local
+  return false
+}
+
+/**
+ * Extract the client IP for per-IP limiting at the public edge.
+ *
+ * ISSUES #421 — THE HEADER IS NOT TRUSTED BY DEFAULT ANY MORE. This function
+ * used to read `X-Forwarded-For` unconditionally, on the documented assumption
+ * that "the connect node sits behind Caddy, which sets X-Forwarded-For". That
+ * assumption held on a hosted box behind a known edge and is FALSE for a
+ * self-hosted Neutron on a home network with a port forwarded straight at the
+ * process: there, `X-Forwarded-For` is fully attacker-controlled, so the caller
+ * gets a fresh rate-limit window per request simply by varying the header, and
+ * the per-IP cap on the two UNAUTHENTICATED endpoints (`/connect/guest-auth`,
+ * `/connect/invite-preview`) evaporates. Now that Connect is served from every
+ * install and not only from behind Caddy, that had to change shape too.
+ *
+ * The rule, which needs no configuration and no flag:
+ *
+ *   - `socketIp` (the real TCP peer, from `Bun.Server.requestIP`) is
+ *     AUTHORITATIVE whenever the peer is NOT local. A direct internet client
+ *     cannot forge its own source address on an established TCP connection, so
+ *     its headers are ignored outright.
+ *   - Only when the peer IS loopback / RFC-1918 / link-local — i.e. plausibly a
+ *     reverse proxy on the same host or LAN, which is exactly the Managed Caddy
+ *     deployment — is `X-Forwarded-For` honoured, preserving that posture
+ *     unchanged.
+ *   - With no socket address available at all (a direct-to-handler call), the
+ *     legacy header order applies and finally a constant bucket, so the limiter
+ *     still counts rather than skipping.
+ */
+export function clientIpFromRequest(req: Request, socketIp?: string | null): string {
+  const peer = socketIp?.trim() ?? ''
+  if (peer.length > 0 && !isLocalPeerAddress(peer)) {
+    return peer
+  }
   const xff = req.headers.get('x-forwarded-for')
   if (xff !== null && xff.length > 0) {
     const first = xff.split(',')[0]?.trim()
@@ -116,5 +166,6 @@ export function clientIpFromRequest(req: Request): string {
   }
   const real = req.headers.get('x-real-ip')
   if (real !== null && real.length > 0) return real.trim()
+  if (peer.length > 0) return peer
   return 'unknown'
 }

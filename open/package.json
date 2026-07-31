@@ -9,10 +9,12 @@
     "@neutronai/auth": "workspace:*",
     "@neutronai/channels": "workspace:*",
     "@neutronai/config": "workspace:*",
+    "@neutronai/connect": "workspace:*",
     "@neutronai/contracts": "workspace:*",
     "@neutronai/cron": "workspace:*",
     "@neutronai/doc-search": "workspace:*",
     "@neutronai/gateway": "workspace:*",
+    "@neutronai/jwt-validator": "workspace:*",
     "@neutronai/landing": "workspace:*",
     "@neutronai/logger": "workspace:*",
     "@neutronai/loop": "workspace:*",
@@ -28,6 +30,7 @@
     "@neutronai/tasks": "workspace:*",
     "@neutronai/trident": "workspace:*",
     "@neutronai/wire-types": "workspace:*",
-    "@neutronai/work-board": "workspace:*"
+    "@neutronai/work-board": "workspace:*",
+    "jose": "^5.9.0"
   }
 }

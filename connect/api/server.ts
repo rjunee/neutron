@@ -183,8 +183,8 @@ export interface ConnectApiServerOptions {
  */
 export function createConnectApiHandler(
   options: ConnectApiServerOptions,
-): (req: Request) => Promise<Response | null> {
-  return async (req: Request): Promise<Response | null> => {
+): (req: Request, socketIp?: string | null) => Promise<Response | null> {
+  return async (req: Request, socketIp?: string | null): Promise<Response | null> => {
     const url = new URL(req.url)
     if (!url.pathname.startsWith(CONNECT_API_PREFIX)) {
       return null
@@ -214,7 +214,7 @@ export function createConnectApiHandler(
       }
       if (
         options.rate_limiter !== undefined &&
-        !options.rate_limiter.check('guest-auth', clientIpFromRequest(req))
+        !options.rate_limiter.check('guest-auth', clientIpFromRequest(req, socketIp))
       ) {
         return jsonResponse(429, { error: 'rate_limited', surface: 'guest_auth' })
       }
@@ -232,7 +232,7 @@ export function createConnectApiHandler(
       }
       if (
         options.rate_limiter !== undefined &&
-        !options.rate_limiter.check('invite-preview', clientIpFromRequest(req))
+        !options.rate_limiter.check('invite-preview', clientIpFromRequest(req, socketIp))
       ) {
         return jsonResponse(429, { error: 'rate_limited', surface: 'invite_preview' })
       }

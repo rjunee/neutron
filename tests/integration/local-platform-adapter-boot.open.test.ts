@@ -287,12 +287,20 @@ describe('Sprint B Phase-2 — Local adapter new-capability surface (§ 3.2 addi
     expect(platform.connectApiHandlers).toBeUndefined()
   })
 
-  test('every new Sprint B capability flag is false on Local', () => {
+  test('every Managed-authority Sprint B capability flag is false on Local', () => {
     const platform = buildLocalPlatformAdapter({ selfOwner: SELF_OWNER })
     expect(platform.capabilities.signup_recover).toBe(false)
     expect(platform.capabilities.start_token_verify).toBe(false)
     expect(platform.capabilities.internal_signature).toBe(false)
-    expect(platform.capabilities.connect_api).toBe(false)
+  })
+
+  test('connect_api is TRUE on Local — Open serves Connect (ISSUES #421)', () => {
+    // The `false` this used to assert was the defect, not the contract: Connect
+    // shipped in the public repo and the only platform adapter declared it
+    // unavailable. Open composes a real Connect node now
+    // (`open/composer.ts` → `composition.connect_api`), state-gated per request.
+    const platform = buildLocalPlatformAdapter({ selfOwner: SELF_OWNER })
+    expect(platform.capabilities.connect_api).toBe(true)
   })
 })
 
