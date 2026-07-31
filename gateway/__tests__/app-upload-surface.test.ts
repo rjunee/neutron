@@ -57,6 +57,42 @@ function wavBytes(): Uint8Array {
   return out
 }
 
+/**
+ * A synthetic AUDIO-ONLY MPEG-4 file in the exact shape Android's
+ * MediaRecorder writes a voice note: major brand `mp42` (not `M4A `), and the
+ * `moov` track table trailing the `mdat` payload.
+ *
+ * Header boxes only — the `mdat` body is zero fill. No real audio.
+ */
+function m4aBytes(): Uint8Array {
+  const u32 = (n: number): number[] => [
+    (n >>> 24) & 0xff,
+    (n >>> 16) & 0xff,
+    (n >>> 8) & 0xff,
+    n & 0xff,
+  ]
+  const fourcc = (s: string): number[] => [...s].map((c) => c.charCodeAt(0))
+  const box = (type: string, payload: number[]): number[] => [
+    ...u32(payload.length + 8),
+    ...fourcc(type),
+    ...payload,
+  ]
+  const ftyp = box('ftyp', [...fourcc('mp42'), ...u32(0), ...fourcc('isom'), ...fourcc('mp42')])
+  const mdat = box('mdat', new Array<number>(64).fill(0))
+  // hdlr FullBox: version/flags, pre_defined, handler type, reserved[3], name.
+  const hdlr = box('hdlr', [
+    ...u32(0),
+    ...u32(0),
+    ...fourcc('soun'),
+    ...u32(0),
+    ...u32(0),
+    ...u32(0),
+    0,
+  ])
+  const moov = box('moov', box('trak', box('mdia', hdlr)))
+  return Uint8Array.from([...ftyp, ...mdat, ...moov])
+}
+
 /** Decode a hex string into a Uint8Array. */
 function fromHex(hex: string): Uint8Array {
   if (hex.length % 2 !== 0) throw new Error('hex length must be even')
@@ -624,6 +660,53 @@ describe('app-upload gateway surface — audio voice notes (task 5)', () => {
       })
       // `.txt` is not in URL_PATH_RE → the surface returns null → default 404.
       expect(get.status).toBe(404)
+    } finally {
+      await h.close()
+    }
+  })
+
+  // ── The mobile recorder's own format ──────────────────────────────────────
+  // The app records `.m4a` (AAC/MPEG-4). On Android that file carries the
+  // GENERIC major brand `mp42`, which used to sniff as `video/mp4` — a type
+  // absent from CHAT_UPLOAD_MIME_WHITELIST — so every voice message recorded
+  // on Android 415'd here. These two cases hold that path open.
+
+  it('(g) an audio-only mp42 .m4a uploads as audio/mp4 and is transcribed', async () => {
+    const h = await startAudioGateway({ transcript: 'walk the dog' })
+    try {
+      const res = await fetch(`${h.base}/api/app/upload`, {
+        method: 'POST',
+        headers: { authorization: 'Bearer dev:sam' },
+        body: makeMultipart(m4aBytes(), 'voice-note.m4a', 'audio/mp4'),
+      })
+      expect(res.status).toBe(200)
+      const json = (await res.json()) as { url: string; content_type: string }
+      expect(json.content_type).toBe('audio/mp4')
+      expect(json.url.endsWith('.m4a')).toBe(true)
+
+      // The ASR sidecar fires for it, exactly as it does for WAV.
+      const hash = json.url.split('/').pop()?.replace(/\.m4a$/, '') ?? ''
+      const sidecar = join(h.owner_home, 'chat-attachments', 'sam', `${hash}.txt`)
+      expect(existsSync(sidecar)).toBe(true)
+      expect(readFileSync(sidecar, 'utf8')).toBe('walk the dog')
+    } finally {
+      await h.close()
+    }
+  })
+
+  it('(h) the client-declared audio/mp4 agrees with the sniff (no spoof 400)', async () => {
+    // `app/lib/voice-recording.ts:mimeForRecordingUri` declares audio/mp4 for a
+    // .m4a; the surface cross-checks declared vs sniffed and 400s on a
+    // mismatch. Pin that the two agree so the recorder cannot be broken by a
+    // change on either side.
+    const h = await startAudioGateway({ keyless: true })
+    try {
+      const res = await fetch(`${h.base}/api/app/upload`, {
+        method: 'POST',
+        headers: { authorization: 'Bearer dev:sam' },
+        body: makeMultipart(m4aBytes(), 'voice-note.m4a', 'audio/mp4'),
+      })
+      expect(res.status).toBe(200)
     } finally {
       await h.close()
     }
