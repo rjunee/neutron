@@ -71,14 +71,19 @@ while read -r local_ref local_sha remote_ref remote_sha; do
   base="$remote_sha"
   if [ "$remote_sha" != "$ZERO" ] \
      && ! git -C "$ROOT" merge-base --is-ancestor "$remote_sha" "$local_sha" 2>/dev/null; then
-    mb=$(git -C "$ROOT" merge-base "$remote_sha" "$local_sha" 2>/dev/null || true)
+    # The fork point from MAINLINE, not from the abandoned tip. Merge-base with
+    # the old tip looked right and is not: a branch rebased onto a newer main
+    # forks from the old main, so that range still contains every commit merged
+    # to main in between — exactly the GitHub-stamped squashes this is trying to
+    # exclude. Verified 2026-07-31: the merge-base form still failed the push.
+    mb=$(git -C "$ROOT" merge-base "$local_sha" origin/main 2>/dev/null || true)
     if [ -z "$mb" ]; then
       # Unrelated histories (a recreated repo, an orphan branch): fall back to
       # origin/main rather than scanning from the dawn of time.
       mb=$(git -C "$ROOT" rev-parse origin/main 2>/dev/null || true)
     fi
     if [ -n "$mb" ]; then
-      echo "leak-gate pre-push: rebase detected — scanning $(printf '%.12s' "$mb")..$(printf '%.12s' "$local_sha") (merge-base), not the abandoned remote tip"
+      echo "leak-gate pre-push: rebase detected — scanning $(printf '%.12s' "$mb")..$(printf '%.12s' "$local_sha") (fork point from mainline), not the abandoned remote tip"
       base="$mb"
     fi
   fi
