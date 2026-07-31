@@ -314,18 +314,23 @@ export function InputComposer({
   // the recording. `holding` is null when idle, otherwise the live hold.
   const [holding, setHolding] = useState<null | { cancelling: boolean }>(null);
   const holdOriginX = useRef<number | null>(null);
+  // A completed hold must not ALSO register as a tap. RN suppresses `onPress`
+  // after a long press today, but that is a Pressability implementation detail
+  // and this gesture is about to drive a recorder — a double-fire would start a
+  // second capture. The ref survives the state reset in `handleVoiceRelease`,
+  // which reading `holding` would not.
+  const justHeld = useRef(false);
   const [voiceNotice, setVoiceNotice] = useState<string | null>(null);
-  const voiceWired =
-    onVoiceTap !== undefined || onVoiceHoldStart !== undefined || onVoiceHoldEnd !== undefined;
 
   const handleVoiceHoldStart = useCallback(() => {
-    if (!voiceWired) {
+    if (onVoiceHoldStart === undefined) {
       setVoiceNotice(VOICE_UNAVAILABLE_NOTICE);
       return;
     }
+    justHeld.current = true;
     setHolding({ cancelling: false });
-    onVoiceHoldStart?.();
-  }, [voiceWired, onVoiceHoldStart]);
+    onVoiceHoldStart();
+  }, [onVoiceHoldStart]);
 
   const handleVoiceTouchMove = useCallback(
     (e: { nativeEvent: { pageX: number } }) => {
@@ -355,15 +360,18 @@ export function InputComposer({
   }, [holding, onVoiceHoldEnd]);
 
   const handleVoiceTap = useCallback(() => {
-    // Pressable fires `onPress` after `onPressOut` even when a long-press ran;
-    // a completed hold has already been reported and must not also tap.
-    if (holding !== null) return;
-    if (!voiceWired) {
+    // A hold that just ended has already been reported through
+    // `onVoiceHoldEnd`; it must not also count as a tap.
+    if (justHeld.current) {
+      justHeld.current = false;
+      return;
+    }
+    if (onVoiceTap === undefined) {
       setVoiceNotice(VOICE_UNAVAILABLE_NOTICE);
       return;
     }
-    onVoiceTap?.();
-  }, [holding, voiceWired, onVoiceTap]);
+    onVoiceTap();
+  }, [onVoiceTap]);
 
   // The notice is transient — it answers one press and then gets out of the way.
   useEffect(() => {
