@@ -79,6 +79,17 @@ export const LANDING_ROUTE_MANIFEST = [
   //     declaration order against a frozen pre-C5 snapshot + an append-only
   //     `ADDED_SINCE_C5` list; keep new paths at the end and mirror them there.
   '/favicon.ico',
+  //   - `/connect/accept`, `/connect/accept.js`  ISSUES #421 (residual). The
+  //     guest accept page — the ONE user-facing HTML surface Connect serves.
+  //     The invite link an owner sends is `<base>/connect/accept#<token>`
+  //     (`open/wiring/connect-owner-surface.ts:95`), so without these two paths
+  //     in the manifest the gateway never routes the link anywhere and every
+  //     guest who clicks it gets the default 404 — the API was correct end to
+  //     end while the page a human actually lands on was unreachable.
+  //     DISJOINT from the connect API prefix `/connect/v1/*` (rung 3), and the
+  //     landing rung is consulted BEFORE it, so neither shadows the other.
+  '/connect/accept',
+  '/connect/accept.js',
 ] as const
 
 /**

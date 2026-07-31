@@ -59,8 +59,17 @@ const PRE_C5_LANDING_PATHS: readonly string[] = [
  *     origin automatically and negatively-cache the 404; without the path in
  *     the manifest the gateway never routes it to landing, so adding it to
  *     landing's brand-asset allowlist alone would still have 404'd on Managed.
+ *   - `/connect/accept`, `/connect/accept.js` — ISSUES #421 (residual). The
+ *     guest accept page + its bundled client. The invite link is
+ *     `<base>/connect/accept#<token>`; without these in the manifest the
+ *     gateway never routes the link to landing at all, so the whole by-link
+ *     Connect flow dead-ended at the default 404.
  */
-const ADDED_SINCE_C5: readonly string[] = ['/favicon.ico']
+const ADDED_SINCE_C5: readonly string[] = [
+  '/favicon.ico',
+  '/connect/accept',
+  '/connect/accept.js',
+]
 
 /** The manifest the landing↔gateway contract is expected to carry TODAY. */
 const EXPECTED_LANDING_PATHS: readonly string[] = [

@@ -6,7 +6,11 @@
 <title>Neutron Connect — join a shared project</title>
 <meta name="description" content="Review where this shared project lives, then join." />
 <meta name="robots" content="noindex" />
-<link rel="icon" type="image/png" href="/favicon.png" />
+<!-- `/favicon.svg` is the brand asset this server actually serves
+     (`landing/server.ts` brand_assets allowlist). The page previously pointed at
+     `/favicon.png`, which has never existed in this package — harmless while the
+     page was unmounted, a 404 on every load now that it is served. -->
+<link rel="icon" type="image/svg+xml" href="/favicon.svg" />
 <style>
   :root {
     --bg: #0e0f12;
