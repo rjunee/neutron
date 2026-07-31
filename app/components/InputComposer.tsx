@@ -72,7 +72,12 @@ export interface InputComposerProps {
   disabled?: boolean;
   /** Placeholder text. Defaults to a neutral prompt. */
   placeholder?: string;
-  /** Hint shown under the composer (e.g. "Or type a response…" for freeform prompts). */
+  /**
+   * Hint shown under the composer — currently only the upload affordance's
+   * "drag your export ZIP here". It is NOT for restating the placeholder: the
+   * freeform-prompt hint that used to live here said the same thing the
+   * placeholder does, one line lower, and was removed for it.
+   */
   hint?: string;
   /** Hook the attach button can call to surface platform file pickers. */
   pickAttachments?: () => Promise<ComposerAttachment[]>;
