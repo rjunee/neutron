@@ -69,6 +69,7 @@ const { installRouting, resetRouting, useRouter, currentRouterPath, routerCalls 
 const { LastTabStore, __setLastTabStorageForTests, __resetLastTabStorageForTests } =
   await import('../lib/last-tab-storage');
 const { setRuntimeServerConfig, __resetServerConfigForTests } = await import('../lib/config');
+const { __resetProjectSettingsCacheForTests } = await import('../lib/project-settings-cache');
 const { AuthSessionProvider } = await import('../lib/session');
 const { clearSessionCache } = await import('../lib/chat-core/session-cache');
 const { __resetSharedMobileStoreForTests } = await import('../lib/chat-core/op-sqlite-store');
@@ -156,6 +157,7 @@ beforeEach(() => {
   clearSessionCache();
   __resetSharedMobileStoreForTests();
   __resetLastTabStorageForTests();
+  __resetProjectSettingsCacheForTests();
   __resetServerConfigForTests();
   setRuntimeServerConfig({ gateway_base_url: BASE_URL, auth_base_url: null });
 });
@@ -250,6 +252,17 @@ describe('a scope that is still loading must not tear the navigator down', () =>
     installGateway(['harbor']);
     const screen = await mountShell('/projects/willow/chat');
     await waitReal(60, screen);
+
+    // FORCE THE UN-WARMED PATH. The list call the rail makes now files every
+    // solo row's settings doc (`project-settings-cache.ts`), so a project the
+    // rail can show is normally painted from memory and never reaches this pane
+    // at all — that is the instant-switch behaviour, pinned separately in
+    // `project-switch-is-instant.test.tsx`. The loading pane still exists for
+    // the scopes nothing has been told about yet (a deep link that outruns the
+    // list, a cold launch), and THAT is the state this test is about: whatever
+    // covers the content pane must be drawn OVER a mounted `<Slot/>`, never
+    // instead of it.
+    __resetProjectSettingsCacheForTests();
 
     await screen.press('Open harbor');
     await waitReal(60, screen);

@@ -13,6 +13,8 @@
  * encodes the boundary.
  */
 
+import { rememberProjectSettings } from './project-settings-cache';
+
 // R6 (audit P2-12): collapsed away the legacy `'workspace'` (group-visibility)
 // privacy tier + per-seat/group billing values. Single source of truth on
 // the app side (app/lib/projects.ts imports `PrivacyMode` from here).
@@ -29,6 +31,21 @@ export type BillingMode = 'personal';
  */
 import type { AgentEngagementMode } from '@neutronai/wire-types';
 export type { AgentEngagementMode } from '@neutronai/wire-types';
+
+
+/**
+ * File every settings doc the server hands back, then hand it on unchanged.
+ *
+ * THE SEAM IS HERE, not at the call sites, because a settings doc arrives from
+ * four of them (read, privacy, rename, emoji) and a cache that some writers
+ * forget to update is worse than none: it would repaint a project the owner just
+ * renamed with the name they replaced. One choke point, no writer to forget.
+ * See `project-settings-cache.ts` for why the cache exists at all.
+ */
+function remember(project: ProjectSettings): ProjectSettings {
+  rememberProjectSettings(project);
+  return project;
+}
 
 /**
  * How long any one call to this API may take before it is treated as failed.
@@ -167,7 +184,7 @@ export class ProjectsClient {
     const res = await this.req<SettingsResponse>(
       `/api/app/projects/${encodeURIComponent(project_id)}/settings`,
     );
-    return res.project;
+    return remember(res.project);
   }
 
   async patchPrivacy(
@@ -178,7 +195,7 @@ export class ProjectsClient {
       `/api/app/projects/${encodeURIComponent(project_id)}/settings`,
       { method: 'PATCH', body: { privacy_mode } },
     );
-    return res.project;
+    return remember(res.project);
   }
 
   /**
@@ -192,7 +209,7 @@ export class ProjectsClient {
       `/api/app/projects/${encodeURIComponent(project_id)}/settings`,
       { method: 'PATCH', body: { name } },
     );
-    return res.project;
+    return remember(res.project);
   }
 
   /**
@@ -206,7 +223,7 @@ export class ProjectsClient {
       `/api/app/projects/${encodeURIComponent(project_id)}/settings`,
       { method: 'PATCH', body: { emoji } },
     );
-    return res.project;
+    return remember(res.project);
   }
 
   /**

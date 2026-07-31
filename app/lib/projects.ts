@@ -22,11 +22,13 @@
  * continue to hit the sync stub.
  */
 
+import { rememberProjectSettings } from './project-settings-cache';
 import {
   ProjectsClient,
   type PrivacyMode,
   type ProjectListItem,
   type ProjectOrigin,
+  type ProjectSettings,
   type ProjectSourceError,
 } from './projects-client';
 
@@ -173,6 +175,15 @@ export async function fetchProjects(opts: FetchProjectsOptions): Promise<FetchPr
   });
   const now = opts.now ?? Date.now();
   const { projects, source_errors } = await client.list();
+  // The rail's own list call already carries every field the per-project
+  // settings GET returns, for the owner's own projects — so warm the cache the
+  // project shell paints from and stop making the owner wait for an answer this
+  // response already contained. SOLO ONLY: a shared row's settings fields are
+  // gateway-filled defaults, not that project's truth
+  // (`project-settings-cache.ts`).
+  for (const p of projects) {
+    if (p.kind === 'solo') rememberProjectSettings(listItemToSettings(p));
+  }
   return {
     projects: projects.map((p) => listItemToProject(p, now)),
     sourceErrors: source_errors,
@@ -190,6 +201,25 @@ export async function createProject(
 ): Promise<{ id: string; label: string; created: boolean }> {
   const client = new ProjectsClient({ base_url: opts.base_url, token: opts.token });
   return client.create(opts.name);
+}
+
+/**
+ * Narrow a list row to EXACTLY the settings doc, so nothing list-only
+ * (`kind`, `unread_count`, activity) leaks into the cache the project shell
+ * reads as `ProjectSettings`. Same emoji default as {@link listItemToProject}.
+ */
+function listItemToSettings(p: ProjectListItem): ProjectSettings {
+  return {
+    id: p.id,
+    name: p.name,
+    description: p.description,
+    persona: p.persona,
+    emoji: p.emoji !== undefined && p.emoji.length > 0 ? p.emoji : '📁',
+    privacy_mode: p.privacy_mode,
+    billing_mode: p.billing_mode,
+    agent_engagement_mode: p.agent_engagement_mode,
+    members: p.members,
+  };
 }
 
 function listItemToProject(p: ProjectListItem, now: number): Project {
