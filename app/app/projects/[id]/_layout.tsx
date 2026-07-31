@@ -26,6 +26,7 @@
  */
 
 import { Slot, useLocalSearchParams, usePathname, useRouter } from 'expo-router';
+import { projectTabRoute } from '../../../lib/project-tab-route';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   AccessibilityInfo,
@@ -434,7 +435,30 @@ function ProjectShell({ project_id }: { project_id: string }) {
 
   const onRailSelect = (id: string): void => {
     if (id !== project_id) {
-      router.replace(`/projects/${encodeURIComponent(id)}`);
+      // STRAIGHT TO THE DESTINATION — no `/projects/<id>` hop.
+      //
+      // The waypoint has to ask the ROUTER which project it is standing in, and
+      // across an in-app switch the router can answer with the PREVIOUS one: the
+      // shell is a single root-stack screen named `projects/[id]`, and
+      // expo-router only treats a dynamic segment as diverging when the route
+      // name is exactly `[id]` (`matchDynamicName`, `/^\[([^[\]]+?)\]$/` —
+      // expo-router 6.0.24), so the switch is applied to the CHILD navigator and
+      // the root route keeps the id you came FROM. Instrumented on device 2026-07-31 (project
+      // names neutralised): `rail:tap=harbor:cur=willow; wp:mount=harbor;
+      // wp:mount=willow; wp:go=willow/chat` — every rail tap landed on the
+      // previously-active project, and the tapped one never loaded.
+      //
+      // A tap already carries the id, exactly and unambiguously. Resolving the
+      // last tab HERE and replacing once means nothing downstream has to
+      // re-derive a scope it can get wrong: the id travels in this closure, not
+      // through the router. (General was the one scope that appeared to work,
+      // because it needs no fetch and its handoff usually won the race — the
+      // race is what is deleted here, for every scope alike.)
+      void (async () => {
+        router.replace(
+          (await projectTabRoute(id)) as Parameters<typeof router.replace>[0],
+        );
+      })();
       return;
     }
     // ISSUES #401 — tapping the project you are ALREADY on must still do
@@ -484,16 +508,11 @@ function ProjectShell({ project_id }: { project_id: string }) {
   // `billing_mode` + `members`, and there is no honest answer without them.
   const canInvite = project !== null && canInviteToProject(project, user?.id ?? null);
 
-  // The content pane. Mounted inside the chrome in EVERY state — a scope whose
-  // settings doc has not landed gets a spinner HERE, and one that is genuinely
-  // absent gets the not-found pane HERE, so the rail stays available to tap out
-  // of the dead end instead of the whole shell being replaced.
-  const contentPane =
-    content.kind === 'ready' ? (
-      <SlotFader keyId={slotKey} scopeId={project_id}>
-        <Slot />
-      </SlotFader>
-    ) : content.kind === 'loading' ? (
+  // What covers the content pane while this scope is not ready. `null` once it
+  // is. Every one of these is drawn OVER the slot, never INSTEAD of it — see
+  // below.
+  const contentOverlay =
+    content.kind === 'ready' ? null : content.kind === 'loading' ? (
       <View style={[styles.contentFill, styles.centered]} testID="project-content-loading">
         <ActivityIndicator color={THEME.text_secondary} />
       </View>
@@ -515,6 +534,37 @@ function ProjectShell({ project_id }: { project_id: string }) {
         {...(content.message !== undefined ? { message: content.message } : {})}
       />
     );
+
+  // The content pane. THE SLOT IS MOUNTED IN EVERY STATE; the loading, offline
+  // and not-found panes are drawn on top of it, opaque and full-bleed, instead
+  // of replacing it.
+  //
+  // This is not a cosmetic choice. `<Slot/>` IS the `[id]` group's navigator:
+  // unmounting it destroys that navigator's state, and remounting re-seeds it
+  // from the PARENT route — which, across an in-app project switch, still says
+  // the project you came FROM. (The shell is one root-stack screen named
+  // `projects/[id]`, and expo-router only diverges on a dynamic segment whose
+  // route name is exactly `[id]`; see `lib/project-tab-route.ts` for the full
+  // trace.) The re-seeded navigator opens at its initial route — the
+  // `/projects/<id>` waypoint — carrying the STALE id, and the waypoint's whole
+  // job is to navigate, so the owner was thrown back to the previous project.
+  //
+  // Every real project switch went through `loading` (the new scope's settings
+  // doc is always in flight for a frame), so every real project switch tore the
+  // navigator down. General never does — it has no doc to fetch — which is the
+  // entire reason General was the one scope the rail could reach.
+  const contentPane = (
+    <View style={styles.contentFill}>
+      <SlotFader keyId={slotKey} scopeId={project_id}>
+        <Slot />
+      </SlotFader>
+      {contentOverlay !== null ? (
+        <View style={StyleSheet.absoluteFill} pointerEvents="auto">
+          {contentOverlay}
+        </View>
+      ) : null}
+    </View>
+  );
 
   return (
     <View style={styles.container}>
