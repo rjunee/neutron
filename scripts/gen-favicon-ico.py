@@ -10,63 +10,37 @@ this whenever landing/favicon.svg changes:
 
 Requires Pillow (dev-only; not a runtime dependency of the server).
 
-Geometry is kept in lockstep with landing/favicon.svg by hand — the numbers
-below are the same 0 0 32 32 coordinates, supersampled 16x and downsampled with
-LANCZOS so the 16px entry keeps clean antialiased edges.
+Geometry lives in scripts/lib/atom_mark.py (the ONE mirror of the SVG's
+0 0 32 32 coordinates, shared with scripts/gen-app-icons.py). Here it is
+supersampled 16x and downsampled with LANCZOS so the 16px entry keeps clean
+antialiased edges.
 """
 
+import sys
 from pathlib import Path
 
-from PIL import Image, ImageDraw
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT / "scripts"))
 
-# --- geometry, in the SVG's 0 0 32 32 coordinate space -------------------
-VIEWBOX = 32
-BG = (0x0B, 0x0E, 0x14, 0xFF)  # #0b0e14 — shell theme-color
-ACCENT = (0x4D, 0xA3, 0xFF, 0xFF)  # #4da3ff
-CORNER_RADIUS = 7
-CORE_RADIUS = 3.2
-ORBIT_RX, ORBIT_RY = 11.5, 4.9
-ORBIT_STROKE = 2.6
-ORBIT_ROTATIONS = (0, 60, 120)
+from PIL import Image  # noqa: E402
+
+from lib.atom_mark import (  # noqa: E402
+    BG,
+    CORNER_RADIUS,
+    VIEWBOX,
+    render_master,
+)
 
 SS = 16  # supersample factor
 SIZES = (16, 32, 48, 64, 128, 256)
 
-OUT = Path(__file__).resolve().parent.parent / "landing" / "favicon.ico"
+OUT = ROOT / "landing" / "favicon.ico"
 
 
-def render() -> Image.Image:
-    """Render the atom mark at VIEWBOX * SS px, RGBA."""
-    n = VIEWBOX * SS
-    canvas = Image.new("RGBA", (n, n), (0, 0, 0, 0))
-    draw = ImageDraw.Draw(canvas)
-    draw.rounded_rectangle([0, 0, n - 1, n - 1], radius=CORNER_RADIUS * SS, fill=BG)
-
-    cx = cy = n / 2
-    for angle in ORBIT_ROTATIONS:
-        # Draw each orbit on its own transparent layer, rotate about the
-        # centre, then composite — PIL's ellipse() has no transform argument.
-        layer = Image.new("RGBA", (n, n), (0, 0, 0, 0))
-        ImageDraw.Draw(layer).ellipse(
-            [cx - ORBIT_RX * SS, cy - ORBIT_RY * SS, cx + ORBIT_RX * SS, cy + ORBIT_RY * SS],
-            outline=ACCENT,
-            width=max(1, round(ORBIT_STROKE * SS)),
-        )
-        if angle:
-            layer = layer.rotate(-angle, resample=Image.BICUBIC, center=(cx, cy))
-        canvas.alpha_composite(layer)
-
-    # Solid core last so it sits above the orbits, as in the SVG's paint order.
-    draw.ellipse(
-        [cx - CORE_RADIUS * SS, cy - CORE_RADIUS * SS, cx + CORE_RADIUS * SS, cy + CORE_RADIUS * SS],
-        fill=ACCENT,
-    )
-
-    # Clip back to the rounded tile so rotated orbits can't bleed past the corners.
-    mask = Image.new("L", (n, n), 0)
-    ImageDraw.Draw(mask).rounded_rectangle([0, 0, n - 1, n - 1], radius=CORNER_RADIUS * SS, fill=255)
-    canvas.putalpha(mask)
-    return canvas
+def render():
+    """The atom mark at VIEWBOX * SS px, RGBA — the shared renderer, so this
+    file and the app icons can never disagree about the geometry."""
+    return render_master(VIEWBOX * SS, background=BG, corner_radius=CORNER_RADIUS)
 
 
 def main() -> None:

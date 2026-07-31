@@ -38,6 +38,35 @@ export interface MountedScreen {
   unmount(): void;
 }
 
+/**
+ * Mount and tear down in the SAME synchronous window, letting nothing settle.
+ *
+ * The opposite of {@link mountScreen}, and deliberately: a screen whose effect
+ * awaits something (a native module load, a schema open) is disposed here BEFORE
+ * that promise resolves. That is the real shape of a rail tap outrunning a
+ * session construction, and it is not reachable through `mountScreen`, which
+ * exists to wait for exactly what this has to interrupt.
+ *
+ * It lives in the harness rather than in a test file because `react-dom/client`
+ * imported at a TEST FILE's top level leaks the registered happy-dom into the
+ * next file in the process — measured: a sibling `uploadAttachment` test then
+ * sniffs `typeof window !== 'undefined'`, takes the XMLHttpRequest branch, and
+ * opens a real socket. This module already owns that import; nothing else should
+ * acquire it.
+ */
+export function mountThenAbandon(element: ReactElement): void {
+  const host = document.createElement('div');
+  document.body.appendChild(host);
+  const root = createRoot(host) as Root;
+  act(() => {
+    root.render(element);
+  });
+  act(() => {
+    root.unmount();
+  });
+  host.remove();
+}
+
 export async function mountScreen(element: ReactElement): Promise<MountedScreen> {
   const host = document.createElement('div');
   document.body.appendChild(host);

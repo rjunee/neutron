@@ -137,6 +137,20 @@ export function sessionCacheKeys(): readonly string[] {
 }
 
 /**
+ * How many live views currently hold `key` (0 = idle-but-warm; absent = 0).
+ *
+ * Test/diagnostic, and load-bearing as an assertion: a reference that is taken
+ * and never given back pins its entry above the idle set forever, so it is never
+ * evicted — and the acquisition that leaks it is the one that also never reached
+ * `start()`, which is how a cached-but-dark session came to exist at all
+ * (the permanent project-switch spinner, 2026-07-30). A refcount is the only
+ * place that leak is observable.
+ */
+export function sessionRefCount(key: string): number {
+  return entries.get(key)?.refs ?? 0;
+}
+
+/**
  * Test/diagnostic handle on a cached session WITHOUT taking a reference.
  * Deliberately read-only in intent: the device harness uses it to fault-inject
  * into the live session the mounted surface is actually using, which is the only

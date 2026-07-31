@@ -48,13 +48,15 @@ import {
   foldStreamFrame,
   foldSystemNoticeFrame,
   frameMatchesProject,
+  hydrationSettled,
+  HYDRATION_SETTLE_MS,
   type RenderRow,
   type StreamState,
   type SystemNoticeState,
 } from './chat-render-model';
 import { createMobileStore } from './op-sqlite-store';
 import { MobileChatSession } from './mobile-session';
-import { acquireSession, releaseSession, sessionCacheKeys, setCacheActive } from './session-cache';
+import { acquireSession, releaseSession, setCacheActive } from './session-cache';
 
 export interface UseMobileChatResult {
   /** The merged render list (durable transcript + live streaming bubbles). */
@@ -87,6 +89,9 @@ export interface UseMobileChatResult {
    * "No messages yet" during every project switch, a moment before the history
    * arrived. "Not fetched yet" and "there is nothing here" must never look the
    * same — that is the whole complaint.
+   *
+   * It ALWAYS settles. The rule (and why it needs a floor) is the pure
+   * {@link hydrationSettled}; nothing here may leave the spinner up forever.
    */
   hydrated: boolean;
   /**
@@ -183,6 +188,34 @@ export function useMobileChat(railId: string): UseMobileChatResult {
     let disposed = false;
     let session: MobileChatSession | null = null;
 
+    // ── Hydration bookkeeping (permanent project-switch spinner, 2026-07-30) ──
+    // The two inputs the pure rule needs, tracked as effect-locals so every
+    // signal site evaluates the SAME rule against live values instead of each
+    // one deciding for itself (which is how the gate ended up with no way out).
+    const attachedAt = Date.now();
+    let localCount = 0;
+    let liveStatus: ConnStatus = 'idle';
+    const settleHydration = (elapsed_ms = Date.now() - attachedAt): void => {
+      if (disposed) return;
+      const settled = hydrationSettled({
+        message_count: localCount,
+        status: liveStatus,
+        elapsed_ms,
+      });
+      if (settled) setHydrated(true);
+    };
+    // THE FLOOR. Armed on attach, cleared on detach: whatever else happens —
+    // a socket that never opens, a store that stays empty, a session that was
+    // never driven onto the wire — the spinner comes down here.
+    //
+    // The elapsed time is passed EXPLICITLY rather than re-derived from the wall
+    // clock: this timer having fired IS the evidence that the floor was reached,
+    // and a second source of truth for the same fact is a second thing that can
+    // disagree with it (a suspended device, a stepped clock, a test harness whose
+    // fake timers move the queue but not `Date.now()`). The floor must not be
+    // able to fire and then decide it has not been reached.
+    const settleDeadline = setTimeout(() => settleHydration(HYDRATION_SETTLE_MS), HYDRATION_SETTLE_MS);
+
     const refresh = (s: MobileChatSession): void => {
       void s.messages().then((all) => {
         if (disposed) return;
@@ -192,7 +225,8 @@ export function useMobileChat(railId: string): UseMobileChatResult {
         setMessages(mine);
         // ISSUES #402 — the store already had this scope's history, so there is
         // nothing to wait for and the empty state must not flash.
-        if (mine.length > 0) setHydrated(true);
+        localCount = mine.length;
+        settleHydration();
       });
       void s.pendingCount().then((n) => {
         if (!disposed) setPendingCount(n);
@@ -213,7 +247,6 @@ export function useMobileChat(railId: string): UseMobileChatResult {
       // ISSUES #402 — a warm session is REUSED rather than rebuilt. Switching
       // projects used to open a store, open a socket, handshake and resume every
       // time; now a recently-visited scope re-attaches to a live connection.
-      const isNew = !sessionCacheKeys().includes(topicId);
       session = await acquireSession(topicId, async () => {
         const store = await createMobileStore();
         return new MobileChatSession({
@@ -225,7 +258,20 @@ export function useMobileChat(railId: string): UseMobileChatResult {
         });
       });
       acquiredKey = topicId;
-      if (disposed) return;
+      if (disposed) {
+        // 2026-07-30 — the view unmounted while the session was still being
+        // constructed (`createMobileStore` awaits a native module + a schema
+        // open, and a rail tap can outrun it). The reference was still TAKEN,
+        // and the cleanup already ran back when `acquiredKey` was still null, so
+        // nothing else will ever give it back. Releasing it here is not
+        // housekeeping — an entry stuck at refs > 0 is never idle, so it is never
+        // evicted, and because this path also never reaches `start()` below it is
+        // never CONNECTED either. The next mount finds it in the cache, skips
+        // construction, and attaches to a session with no socket: a scope that
+        // spins forever and cannot recover for the life of the process.
+        releaseSession(topicId);
+        return;
+      }
 
       const active = session;
       unsubscribe = active.subscribe({
@@ -234,7 +280,8 @@ export function useMobileChat(railId: string): UseMobileChatResult {
           // ISSUES #402 — once the socket is open the resume has been sent and
           // its replay applied, so an still-empty transcript is genuinely
           // empty rather than merely un-fetched.
-          if (s === 'open') setHydrated(true);
+          liveStatus = s;
+          settleHydration();
           if (!disposed) setStatus(s);
         },
         onFrame: (frame) => {
@@ -270,13 +317,25 @@ export function useMobileChat(railId: string): UseMobileChatResult {
       // 'idle' showing a hydrating spinner over a fully-loaded transcript.
       const live = active.status();
       setStatus(live);
-      if (live === 'open') setHydrated(true);
+      liveStatus = live;
+      settleHydration();
       refresh(active); // instant paint from the durable store
-      if (isNew) active.start();
+      // 2026-07-30 — ALWAYS drive this session onto the wire. This used to be
+      // `if (isNew) active.start()`, i.e. only a session this mount had just
+      // CONSTRUCTED was ever connected; a cache hit was assumed to be live. It is
+      // not always live: a session abandoned mid-construction by the branch above
+      // is cached and has never had `connect()` called on it, so every later
+      // attach took the "already warm" branch and left it dark forever. `connect()`
+      // is idempotent by construction (it returns early while `connecting`/`open`,
+      // and leaves an in-flight retry handshake alone — `chat-core/ws-client.ts`),
+      // so calling it unconditionally cannot churn a healthy socket and is the
+      // only formulation that has no wedged state.
+      active.start();
     })();
 
     return (): void => {
       disposed = true;
+      clearTimeout(settleDeadline);
       streamRef.current = emptyStreamState();
       noticeRef.current = emptySystemNoticeState();
       sessionRef.current = null;
