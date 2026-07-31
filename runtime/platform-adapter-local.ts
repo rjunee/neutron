@@ -130,13 +130,20 @@ const LOCAL_CAPABILITIES: PlatformCapabilities = {
   // the user wiring a remote via the admin UI.
   project_backup: true,
   // Sprint B (2026-05-20) — Open never runs the Managed signup-recover
-  // / start-token / internal-signature / connect chains. Every
-  // optional hook is omitted on Local; the capability flags stay false
-  // so well-written boot shells never invoke the corresponding methods.
+  // / start-token / internal-signature chains. Those optional hooks are
+  // omitted on Local; the capability flags stay false so well-written boot
+  // shells never invoke the corresponding methods.
   signup_recover: false,
   start_token_verify: false,
   internal_signature: false,
-  connect_api: false,
+  // ISSUES #421 — Open SERVES Connect. This flag was `false`, and the comment
+  // above used to cover "connect" too; that classification is what made Connect
+  // source a self-hoster could never run. `open/composer.ts` now assembles the
+  // node and sets `composition.connect_api`, which is the real mount switch —
+  // this flag documents the deployment's posture. The adapter's own
+  // `connectApiHandlers` hook stays undefined: Open composes the node in the
+  // composition root, not through the platform adapter.
+  connect_api: true,
 }
 
 /** Per-project remote-config filename written under each project root. */

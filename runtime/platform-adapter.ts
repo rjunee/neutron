@@ -410,10 +410,20 @@ export interface PlatformCapabilities {
    */
   readonly internal_signature: boolean
   /**
-   * Sprint B (2026-05-20) — instance ↔ instance connect API
-   * handler bundle is wired. Open: false (Open is single-instance; no
-   * fan-out target, no inbound origin-tagged calls). Managed: true iff
-   * `connectApiHandlers` is wired.
+   * Instance ↔ instance Connect API is SERVED by this deployment.
+   *
+   * ISSUES #421 — this used to read "Open: false (Open is single-instance; no
+   * fan-out target, no inbound origin-tagged calls)". That was the whole bug in
+   * one sentence: a self-hoster shipped Connect source and could never serve it,
+   * violating the rule that ALL functionality lives in Open. Open is now TRUE —
+   * `open/composer.ts` assembles a real Connect node and sets
+   * `composition.connect_api`.
+   *
+   * True means MOUNTED, not open: whether `/connect/v1/*` answers is decided per
+   * request by the state gate (`connect/surface-gate.ts`) from the instance's own
+   * invite/member rows. NOTE this flag is advisory documentation — no production
+   * code branches on it; the real mount switch is `composition.connect_api`
+   * (`gateway/composition.ts`).
    */
   readonly connect_api: boolean
 }
@@ -725,10 +735,17 @@ export interface PlatformAdapter {
   ) => import('./internal-signature.ts').VerifyInternalRequestResult
 
   /**
-   * Sprint B — Managed-only instance ↔ instance connect API
-   * handler bundle. The composer mounts the surface on the per-instance
-   * HTTP listener when this returns a non-null bundle; otherwise the
-   * surface stays unmounted.
+   * Sprint B — ADAPTER-SUPPLIED instance ↔ instance Connect API handler bundle.
+   * The composer mounts the surface on the per-instance HTTP listener when this
+   * returns a non-null bundle; otherwise the surface stays unmounted.
+   *
+   * ISSUES #421 — this is one of TWO ways a deployment can supply the bundle,
+   * not a Managed-vs-Open split. Open assembles its node in the composition root
+   * (`open/wiring/connect-node.ts` → `composition.connect_api`) and leaves this
+   * adapter hook undefined; a deployment whose bundle depends on platform
+   * services can supply it here instead. Either way the SAME
+   * `gateway/composition.ts` block mounts it and the SAME state gate decides
+   * whether it answers.
    *
    * Open: undefined (Open is single-instance; no fan-out target).
    * Managed: present when the boot shell wires the bundle from

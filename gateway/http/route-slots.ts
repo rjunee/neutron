@@ -103,6 +103,20 @@ export interface RouteDispatchContext {
 }
 
 /**
+ * The REAL TCP peer address for this request, or null when the serving runtime
+ * cannot report one (a synthetic `server` in a test, a direct handler call).
+ * Never throws — an unavailable peer degrades the caller to its header-based
+ * fallback rather than failing the request.
+ */
+export function peerAddress(ctx: RouteDispatchContext): string | null {
+  try {
+    return ctx.server?.requestIP?.(ctx.req)?.address ?? null
+  } catch {
+    return null
+  }
+}
+
+/**
  * Optional static precondition for a rung. All present fields must pass;
  * when the match fails the rung is SKIPPED (falls through), exactly like the
  * pre-C4 inline `if (pathname === … && method === …)` guards. Slots without
@@ -682,15 +696,27 @@ export const ROUTE_SLOTS = [
     match: { when: (ctx) => isSpaClientRoute(ctx.pathname, ctx.method) },
     dispatch: (v: LandingHandler, ctx) => v.fetch(ctx.req, ctx.server),
   }),
-  // 3. Cross-instance API — returns null when the request is not
-  //    `/connect/v1/*` so the chain falls through to the default. Promotion
-  //    (the Managed-only dynamic import) stays in `gateway/composition.ts`.
+  // 3. Cross-instance Connect API — returns null when the request is not
+  //    `/connect/v1/*`, OR when the CONNECT SURFACE STATE GATE is closed
+  //    (ISSUES #421), so the chain falls through to the default 404 in both
+  //    cases and a closed instance is externally indistinguishable from one
+  //    that never had Connect. Promotion (the dynamic import + the gate wrap)
+  //    stays in `gateway/composition.ts`.
+  //
+  //    The REAL TCP peer address is threaded in from `Bun.Server.requestIP` so
+  //    the public-edge per-IP rate limiter keys on something the caller cannot
+  //    forge (`connect/api/edge-rate-limiter.ts:clientIpFromRequest`) — required
+  //    now that this surface is served from self-hosted boxes that have no
+  //    reverse proxy rewriting `X-Forwarded-For`.
   slot({
     key: 'connectHandler',
     rung: 'connect',
     composition: 'connect_api',
     gated: true,
-    dispatch: (v: (req: Request) => Promise<Response | null>, ctx) => v(ctx.req),
+    dispatch: (
+      v: (req: Request, socketIp?: string | null) => Promise<Response | null>,
+      ctx,
+    ) => v(ctx.req, peerAddress(ctx)),
   }),
 ] as const
 

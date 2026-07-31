@@ -149,17 +149,30 @@ export type ComposedProductionGraph = GatewayModuleGraph & {
 async function buildComposedHttpFromComposition(
   composition: CompositionInput,
 ): Promise<ComposedHttpHandler | null> {
-  // Cross-instance API construction is Managed-only. The dynamic import
-  // means Open-tier boots (no `connect_api` field set) never load
-  // the Managed-classified `connect/api/server.ts` edge.
-  let connectHandler: ((req: Request) => Promise<Response | null>) | undefined
+  // ISSUES #421 — the cross-instance Connect API. It used to be built here only
+  // for Managed and the comment on this block called `connect/api/server.ts` a
+  // "Managed-classified" edge — a classification applied to a file that
+  // physically ships in the PUBLIC Open repo, which is precisely what made
+  // Connect source a self-hoster could never serve. That classification is gone.
+  // ONE code path, mounted for every tier that supplies `connect_api`; Managed
+  // runs this exact block.
+  //
+  // What decides whether the mounted surface ANSWERS is the CONNECT SURFACE
+  // STATE GATE (`connect/surface-gate.ts`), evaluated PER REQUEST below: open
+  // while the owner has a live invite or a non-revoked collaborator, closed
+  // otherwise. Per-request and not latched here, so the owner's first invite
+  // opens the door without a gateway restart. The dynamic import is retained
+  // purely to keep the connect module off the boot-time import graph of an
+  // instance that never composes it.
+  let connectHandler:
+    | ((req: Request, socketIp?: string | null) => Promise<Response | null>)
+    | undefined
   if (composition.connect_api !== undefined) {
     const ct = composition.connect_api
     // Sprint B (2026-05-20) — `composition.connect_api` carries the
-    // runtime/connect-handlers structural aliases. The Managed
-    // `createConnectApiHandler` accepts its own (wider) shape; both
-    // shapes are field-for-field equivalent so a narrow cast is the
-    // cleanest seam.
+    // runtime/connect-handlers structural aliases. `createConnectApiHandler`
+    // accepts its own (wider) shape; both shapes are field-for-field
+    // equivalent so a narrow cast is the cleanest seam.
     const cross = (
       await import('@neutronai/connect/api/server.ts')
     ).createConnectApiHandler({
@@ -173,7 +186,21 @@ async function buildComposedHttpFromComposition(
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       rate_limiter: ct.rate_limiter as any,
     })
-    connectHandler = cross
+    // ISSUES #421 — THE STATE GATE. Evaluated on EVERY request that reaches the
+    // connect rung, against the instance's live connect state; never latched, so
+    // the owner's first invite opens the surface with no restart, and revoking
+    // the last collaborator (once the invites have lapsed) closes it again.
+    //
+    // A closed gate returns `null` for the WHOLE `/connect/v1` prefix — including
+    // the unauthenticated `/health`, which would otherwise confirm the instance
+    // exists and hand out its slug. `null` means "this rung does not claim the
+    // request", so the ladder falls through to the same default 404 an unrouted
+    // path gets: byte-identical to an instance that never composed Connect.
+    const gate = (await import('@neutronai/connect/surface-gate.ts')).buildConnectSurfaceGate({
+      db: ct.owner_db,
+    })
+    connectHandler = async (req, socketIp) =>
+      gate.isOpen() ? cross(req, socketIp) : null
   }
 
   const defaultHandler: CompositionHttpHandler =
@@ -194,7 +221,7 @@ async function buildComposedHttpFromComposition(
     ...buildComposeSurfaces(composition),
   }
   // The two non-rung promotions stay explicit here:
-  //   - `connectHandler` carries the Managed-only dynamic import above;
+  //   - `connectHandler` carries the dynamic import + state gate built above;
   if (connectHandler !== undefined) {
     composeInput.connectHandler = connectHandler
   }

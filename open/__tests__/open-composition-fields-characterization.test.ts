@@ -76,6 +76,14 @@ const EXPECTED_COMPOSITION_KEYS = [
   'chat_topics_surface',
   'chunked_upload_handler',
   'codex_credential',
+  // ISSUES #421 — the cross-instance Connect API. Its presence HERE is the
+  // done-means-SERVED proof: `connect/` shipped in this repo for months while no
+  // composer ever set this field, so a self-hoster carried Connect source they
+  // could never serve. The key appears only if the REAL Open composer assembles
+  // the connect node and hands it to the graph. Reachability of the mounted
+  // surface is then decided per request by the state gate
+  // (`connect/surface-gate.ts`) — see `open-connect-served.test.ts`.
+  'connect_api',
   'cores',
   'create_project',
   'cron_jobs',

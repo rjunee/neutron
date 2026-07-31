@@ -218,12 +218,17 @@ describe('G1 — Managed-contract: connect_api is the field that mounts the cros
   // ratchet hole: the OMITTED case guards a dropped route binding, the SUPPLIED
   // case guards a dropped field mapping (`composition.ts:111` / `:143`).
   async function withConnectGraph(
-    connect_api: NonNullable<CompositionInput['connect_api']> | undefined,
+    buildConnectApi:
+      | ((db: ProjectDb) => NonNullable<CompositionInput['connect_api']>)
+      | undefined,
     probe: (fetch: NonNullable<Awaited<ReturnType<typeof composeProductionGraph>>['fetch']>) => Promise<void>,
+    seed?: (db: ProjectDb) => void,
   ): Promise<void> {
     const tmp = mkdtempSync(join(tmpdir(), 'neutron-managed-connect-'))
     const db = ProjectDb.open(join(tmp, 'owner.db'))
     applyMigrations(db.raw())
+    seed?.(db)
+    const connect_api = buildConnectApi?.(db)
     const graph = await composeProductionGraph({
       db,
       project_slug: OWNER,
@@ -241,6 +246,29 @@ describe('G1 — Managed-contract: connect_api is the field that mounts the cros
     }
   }
 
+  /** A minimal but STRUCTURALLY REAL connect_api. `auth.jwks` is never touched
+   *  by the health path, so a placeholder suffices there; `owner_db` is real
+   *  because the state gate reads it on every request. */
+  const minimalConnectApi = (db: ProjectDb): NonNullable<CompositionInput['connect_api']> => ({
+    auth: {
+      receiving_instance_slug: OWNER,
+    } as unknown as NonNullable<CompositionInput['connect_api']>['auth'],
+    handlers: {},
+    owner_db: db,
+  })
+
+  /** Issue a live (unredeemed, unexpired) invite — the owner action that OPENS
+   *  the Connect surface (ISSUES #421). */
+  function seedLiveInvite(db: ProjectDb): void {
+    db.runSync(
+      `INSERT INTO connect_guest_invites
+         (token_hash, project_id, display_name_hint, access,
+          created_at_ms, expires_at_ms, redeemed_at_ms, redeemed_by_slug)
+       VALUES (?, 'proj-1', NULL, 'write', ?, ?, NULL, NULL)`,
+      ['a'.repeat(64), Date.now(), Date.now() + 60_000],
+    )
+  }
+
   test('WITHOUT connect_api, /connect/v1/* is unmounted (404) — the route binding is field-gated', async () => {
     // The cross-instance connect API is dynamic-imported ONLY when
     // `composition.connect_api` is supplied — omit it and the route 404s.
@@ -253,28 +281,39 @@ describe('G1 — Managed-contract: connect_api is the field that mounts the cros
     })
   })
 
-  test('WITH connect_api supplied, /connect/v1/health is OWNED (200) — the field mapping mounts the API', async () => {
-    // `/connect/v1/health` is the one intentionally-unauthed connect route
-    // (`connect/api/server.ts` — GET, no bearer), so a minimal connect_api with
-    // empty handlers is enough to prove the cross-instance handler mounted.
-    // `auth.jwks` is never touched by the health path, so a structural
-    // placeholder suffices. If the supplied-field mapping is ever dropped, this
-    // flips to 404.
-    const connect_api: NonNullable<CompositionInput['connect_api']> = {
-      auth: {
-        receiving_instance_slug: OWNER,
-      } as unknown as NonNullable<CompositionInput['connect_api']>['auth'],
-      handlers: {},
-    }
-    await withConnectGraph(connect_api, async (fetch) => {
+  test('WITH connect_api but ZERO invites, the whole prefix is CLOSED (404) — state gate, ISSUES #421', async () => {
+    // Mounted is not served. With no live invite and no collaborator, even the
+    // intentionally-unauthed `/health` — which would otherwise confirm this
+    // instance exists and hand out its slug — falls through to the default 404,
+    // byte-identical to the unmounted case above.
+    await withConnectGraph(minimalConnectApi, async (fetch) => {
       const res = await fetch(
         new Request('http://127.0.0.1/connect/v1/health', { method: 'GET' }),
         FAKE_SERVER,
       )
-      expect(res.status).toBe(200)
-      const body = (await res.json()) as { status?: string; receiving_instance_slug?: string }
-      expect(body.status).toBe('ok')
-      expect(body.receiving_instance_slug).toBe(OWNER)
+      expect(res.status).toBe(404)
     })
+  })
+
+  test('WITH connect_api AND a live invite, /connect/v1/health is OWNED (200) — the field mapping mounts the API', async () => {
+    // `/connect/v1/health` is the one intentionally-unauthed connect route
+    // (`connect/api/server.ts` — GET, no bearer), so a minimal connect_api with
+    // empty handlers is enough to prove the cross-instance handler mounted once
+    // the owner has opened the surface. If the supplied-field mapping is ever
+    // dropped, this flips to 404.
+    await withConnectGraph(
+      minimalConnectApi,
+      async (fetch) => {
+        const res = await fetch(
+          new Request('http://127.0.0.1/connect/v1/health', { method: 'GET' }),
+          FAKE_SERVER,
+        )
+        expect(res.status).toBe(200)
+        const body = (await res.json()) as { status?: string; receiving_instance_slug?: string }
+        expect(body.status).toBe('ok')
+        expect(body.receiving_instance_slug).toBe(OWNER)
+      },
+      seedLiveInvite,
+    )
   })
 })
