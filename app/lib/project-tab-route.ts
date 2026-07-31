@@ -74,11 +74,38 @@ export async function preferredTab(projectId: string): Promise<LastTabValue | nu
   }
 }
 
+/** `/projects/<id>/<tab>`, the only route shape a switch ever navigates to. */
+function routeFor(projectId: string, tab: LastTabValue): string {
+  return `/projects/${encodeURIComponent(projectId)}/${tab}`;
+}
+
 /**
  * The FINAL route for a project id — never a waypoint. The read cannot fail the
  * caller: a missing, illegal, slow or broken preference resolves to Chat.
  */
 export async function projectTabRoute(projectId: string): Promise<string> {
   const stored = await preferredTab(projectId);
-  return `/projects/${encodeURIComponent(projectId)}/${stored ?? DEFAULT_TAB}`;
+  return routeFor(projectId, stored ?? DEFAULT_TAB);
+}
+
+/**
+ * The same route, or `null` when this device's preference is not yet in memory.
+ *
+ * WHY A SECOND ENTRY POINT. `projectTabRoute` is correct but it is a promise,
+ * and a promise means the tap does nothing at all until a microtask (on native,
+ * an AsyncStorage bridge round-trip) has come back. That pause is the whole gap
+ * between "instant" and "it takes a moment": nothing on screen acknowledges the
+ * tap while it runs. The preference is a per-device value only this process
+ * writes, so after the shell has primed it once
+ * (`LastTabStore.prime`, called with the rail's project list) the answer is
+ * simply known, and the navigation can happen in the same tick as the press.
+ *
+ * `null` is honest, not a fallback: it means "not known yet", and the caller
+ * awaits the real read rather than guessing Chat and landing the owner on the
+ * wrong tab.
+ */
+export function projectTabRouteSync(projectId: string): string | null {
+  const store = lastTabStorage();
+  if (!store.knows(projectId)) return null;
+  return routeFor(projectId, store.peek(projectId) ?? DEFAULT_TAB);
 }

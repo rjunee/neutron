@@ -37,6 +37,7 @@ import {
 } from 'react';
 
 import { loadAppConfig } from './config';
+import { warmProjectSettings } from './project-settings-cache';
 import {
   EMPTY_PROJECT_STATE,
   projectStateReducer,
@@ -101,10 +102,24 @@ export function ProjectStateProvider({
   // renders the PREVIOUS project's name — or the previous scope's 404 — for the
   // frames before the new fetch lands.
   const [loadedScope, setLoadedScope] = useState<string | null>(null);
-  const state = useMemo(
-    () => scopedProjectState(rawState, project_id, loadedScope),
-    [rawState, project_id, loadedScope],
-  );
+  // THE FIRST FRAME OF A SWITCH IS PAINTED FROM MEMORY (instant-switch,
+  // 2026-07-31). `scopedProjectState` correctly refuses to hand the previous
+  // scope's doc to this one, which used to mean the shell had NOTHING for the
+  // frames the fetch was in flight and covered the content pane with a spinner
+  // on every rail tap. It does have something: the rail's own list call already
+  // returned this project's settings doc, and `fetchSettings` below files every
+  // answer it gets. So when this scope is unresolved AND nothing has failed,
+  // start from what the server already told us — and keep `loading` true,
+  // because the authoritative fetch really is still running and will replace
+  // this. An error is never papered over: a scope that failed renders its
+  // failure (`project-shell-content.ts`), warm doc or not.
+  const state = useMemo(() => {
+    const scoped = scopedProjectState(rawState, project_id, loadedScope);
+    if (scoped.project !== null || scoped.error !== null) return scoped;
+    const warm = warmProjectSettings(project_id);
+    if (warm === null) return scoped;
+    return { ...scoped, project: warm };
+  }, [rawState, project_id, loadedScope]);
   const cancelRef = useRef<(() => void) | null>(null);
 
   const client = useMemo<ProjectsClient | null>(() => {
