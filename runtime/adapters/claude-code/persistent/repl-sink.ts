@@ -84,7 +84,16 @@ export type ReplActivityTap = (input: {
   project_id: string | null
   phase: 'pre' | 'post'
   tool_name: string
+  /** The collapsed one-liner. */
   detail: string
+  /** The call's FULL arguments, pre-rendered by the hook — the expanded view's
+   *  content for a `pre` row, and what the agent actually said when the tool is
+   *  the dev-channel `reply`. */
+  args?: string
+  /** What the tool RETURNED, pre-rendered by the hook (`post` only). Absent from
+   *  the first build entirely, which is why a finished tool row could never say
+   *  what came back. */
+  result?: string
 }) => void
 
 /** Wire (or clear, with `undefined`) the in-process Activity Inspector recorder

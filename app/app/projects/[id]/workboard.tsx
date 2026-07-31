@@ -14,6 +14,22 @@
  * snapshot, idempotent). After any mutation we also refetch so the acting device
  * feels instant even before the push lands.
  *
+ * ── Scope ───────────────────────────────────────────────────────────────────
+ * The ROUTE gives a RAIL id, which for General is the `~general` sentinel — a
+ * spelling the gateway's project-id alphabet rejects outright. It is collapsed to
+ * the client scope (`railIdToScope`, General ⇒ `''`) ONCE, here at the route
+ * boundary, and every layer below takes the scope: the HTTP client re-spells it
+ * for the URL (`workBoardPathSegment`), the live socket needs `''` to match
+ * General's untagged frames, and the activity tap re-spells it again for the
+ * inspector. Three spellings, one conversion point — never an `id === '~general'`
+ * check sprinkled at the call sites.
+ *
+ * ── Liveness ────────────────────────────────────────────────────────────────
+ * A strip above the board reports whether the SCOPE is working, from the same
+ * `/activity` snapshot + `activity_event` stream the Activity Inspector reads
+ * (`work-board-activity.ts`). The per-item pulse only ever fired for a card bound
+ * to a run, so an ordinary chat turn left this screen completely still.
+ *
  * Structure mirrors `tasks.tsx`: a thin route reading `project_id`, an auth
  * guard, then the body. All sizing flows from `theme.ts` tokens.
  */
@@ -21,7 +37,10 @@
 import { useLocalSearchParams } from 'expo-router';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  AccessibilityInfo,
   ActivityIndicator,
+  Animated,
+  Easing,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -31,12 +50,29 @@ import {
 } from 'react-native';
 
 import { WorkBoardCompletedRow, WorkBoardRow } from '../../../components/WorkBoardRow';
+import {
+  AppActivityClient,
+  mergeActivityRow,
+  type ActivityRow,
+  type ActivitySnapshot,
+  type ActivityState,
+} from '../../../lib/activity-client';
 import { loadAppConfig } from '../../../lib/config';
+import { railIdToScope } from '../../../lib/project-rail-view';
 import { useAuthSession } from '../../../lib/session';
-import { SPACING, THEME, TYPOGRAPHY } from '../../../lib/theme';
+import { MOTION, SPACING, THEME, TYPOGRAPHY } from '../../../lib/theme';
+import {
+  ACTIVITY_POLL_MS,
+  workActivityIndicator,
+  workActivityState,
+} from '../../../lib/work-board-activity';
 import { WorkBoardClient, type WorkBoardItem } from '../../../lib/work-board-client';
-import { dragReorderTarget, splitBoard } from '../../../lib/work-board-helpers';
+import { boardErrorCopy, dragReorderTarget, splitBoard } from '../../../lib/work-board-helpers';
 import { startWorkBoardLive } from '../../../lib/work-board-live';
+
+/** Live rows held for the state derivation. Small on purpose: only the newest
+ *  few matter to `workActivityState`, and this screen is not a log viewer. */
+const ACTIVITY_ROW_CAP = 40;
 
 function makeDeviceId(): string {
   const c = (globalThis as { crypto?: { randomUUID?: () => string } }).crypto;
@@ -46,10 +82,13 @@ function makeDeviceId(): string {
 
 export default function WorkBoardTab() {
   const { id } = useLocalSearchParams<{ id: string }>();
-  const project_id = typeof id === 'string' ? id : '';
+  const railId = typeof id === 'string' ? id : '';
   const { user } = useAuthSession();
 
-  if (user === null || project_id.length === 0) {
+  // The GUARD reads the RAIL id, the BODY takes the scope. They have to be
+  // separate values: General's scope is legitimately `''`, so guarding on the
+  // scope's length would spin forever on the one route that needed fixing.
+  if (user === null || railId.length === 0) {
     return (
       <View style={[styles.container, styles.centered]} testID="workboard-bootstrapping">
         <ActivityIndicator color={THEME.text_secondary} />
@@ -57,7 +96,7 @@ export default function WorkBoardTab() {
     );
   }
 
-  return <WorkBoardBody projectId={project_id} token={user.token} />;
+  return <WorkBoardBody projectId={railIdToScope(railId)} token={user.token} />;
 }
 
 function WorkBoardBody({ projectId, token }: { projectId: string; token: string }) {
@@ -65,6 +104,10 @@ function WorkBoardBody({ projectId, token }: { projectId: string; token: string 
   const deviceId = useMemo(() => makeDeviceId(), []);
   const client = useMemo(
     () => new WorkBoardClient({ base_url: config.base_url, token }),
+    [config.base_url, token],
+  );
+  const activityClient = useMemo(
+    () => new AppActivityClient({ base_url: config.base_url, token }),
     [config.base_url, token],
   );
 
@@ -76,6 +119,14 @@ function WorkBoardBody({ projectId, token }: { projectId: string; token: string 
   const [newTitle, setNewTitle] = useState('');
   const [adding, setAdding] = useState(false);
   const [busyId, setBusyId] = useState<string | null>(null);
+
+  // Scope liveness. All three pieces are REACT STATE, not refs or module
+  // closures: `reactCompiler` memoizes render sub-expressions that have no
+  // reactive dependency, so a signal delivered any other way would freeze at its
+  // first value and the strip would be decoration rather than instrumentation.
+  const [activitySnapshot, setActivitySnapshot] = useState<ActivitySnapshot | null>(null);
+  const [activityRows, setActivityRows] = useState<readonly ActivityRow[]>([]);
+  const [activityNow, setActivityNow] = useState(() => Date.now());
 
   // Monotonic guard so a slow fetch can't land after a fresher live snapshot.
   const seq = useRef(0);
@@ -95,7 +146,9 @@ function WorkBoardBody({ projectId, token }: { projectId: string; token: string 
         if (mine !== seq.current) return;
         setItems([]);
         setLoading(false);
-        setListError(err instanceof Error ? err.message : 'failed to load the board');
+        // NEVER `err.message`. This screen used to paint the raw throw, which is
+        // how a gateway validator string became the entire General pane.
+        setListError(boardErrorCopy(err, 'load'));
       });
   }, [client, projectId]);
 
@@ -107,8 +160,11 @@ function WorkBoardBody({ projectId, token }: { projectId: string; token: string 
     refresh();
   }, [refresh]);
 
-  // Live snapshots — replace the list outright (full-snapshot, idempotent).
+  // Live snapshots — replace the list outright (full-snapshot, idempotent) — and
+  // the activity rows behind the status strip, off the SAME socket.
   useEffect(() => {
+    setActivityRows([]);
+    setActivitySnapshot(null);
     const live = startWorkBoardLive({
       base_url: config.base_url,
       token,
@@ -119,12 +175,62 @@ function WorkBoardBody({ projectId, token }: { projectId: string; token: string 
         setItems(rows);
         setLoading(false);
       },
+      onActivity: (row) => {
+        setActivityRows((prev) => mergeActivityRow(prev, row, ACTIVITY_ROW_CAP));
+      },
     });
     return () => live.stop();
   }, [config.base_url, token, projectId, deviceId]);
 
+  // The AUTHORITATIVE half of the liveness signal: only the server knows
+  // `turns_in_flight`, and only a re-fetch can retire a turn whose `completion`
+  // frame never arrived. Slow poll — the live rows already deliver start/stop
+  // instantly; this just stops the strip lying if one goes missing.
+  useEffect(() => {
+    let alive = true;
+    const fetchSnapshot = (): void => {
+      activityClient
+        .snapshot(projectId.length === 0 ? null : projectId)
+        .then((snap) => {
+          if (alive) setActivitySnapshot(snap);
+        })
+        .catch(() => {
+          // The strip is decoration on a failure: a scope we cannot ask about
+          // reports nothing rather than guessing. The board's own error state
+          // owns telling the owner something is wrong.
+        });
+    };
+    fetchSnapshot();
+    const t = setInterval(fetchSnapshot, ACTIVITY_POLL_MS);
+    return () => {
+      alive = false;
+      clearInterval(t);
+    };
+  }, [activityClient, projectId]);
+
+  const activityState: ActivityState = workActivityState({
+    snapshot: activitySnapshot,
+    rows: activityRows,
+    now: activityNow,
+  });
+
+  // The client clock the wedge/dead thresholds are measured against. Without it
+  // the strip would keep saying "Working" forever on a socket that went silent,
+  // because nothing else would re-render it.
+  //
+  // Ticks ONLY while something is live. An idle scope needs no clock — its state
+  // can change only via a live row or the poll, and both re-render on their own —
+  // so a resting Work tab costs zero timers, and the interval tears down the
+  // moment the turn ends. 5 s is well inside the 30 s / 90 s thresholds it exists
+  // to cross.
+  useEffect(() => {
+    if (activityState === 'idle') return;
+    const t = setInterval(() => setActivityNow(Date.now()), 5000);
+    return () => clearInterval(t);
+  }, [activityState]);
+
   const runMutation = useCallback(
-    (itemId: string | null, op: Promise<unknown>, failMsg: string): void => {
+    (itemId: string | null, op: Promise<unknown>): void => {
       if (itemId !== null) setBusyId(itemId);
       setActionError(null);
       op
@@ -134,7 +240,7 @@ function WorkBoardBody({ projectId, token }: { projectId: string; token: string 
         })
         .catch((err: unknown) => {
           setBusyId(null);
-          setActionError(err instanceof Error ? err.message : failMsg);
+          setActionError(boardErrorCopy(err, 'action'));
         });
     },
     [refresh],
@@ -154,14 +260,23 @@ function WorkBoardBody({ projectId, token }: { projectId: string; token: string 
       })
       .catch((err: unknown) => {
         setAdding(false);
-        setActionError(err instanceof Error ? err.message : 'failed to add item');
+        setActionError(boardErrorCopy(err, 'action'));
       });
   }, [client, projectId, newTitle, adding, refresh]);
 
   const { active, completed } = splitBoard(items);
+  const indicator = workActivityIndicator(activityState);
 
   return (
     <View style={styles.container}>
+      {indicator.visible ? (
+        <WorkActivityStrip
+          label={indicator.label}
+          pulse={indicator.pulse}
+          tone={activityState === 'working' ? THEME.work : THEME.attention}
+        />
+      ) : null}
+
       {actionError !== null ? <Text style={styles.error}>{actionError}</Text> : null}
 
       {loading ? (
@@ -169,8 +284,17 @@ function WorkBoardBody({ projectId, token }: { projectId: string; token: string 
           <ActivityIndicator color={THEME.text_secondary} />
         </View>
       ) : listError !== null ? (
-        <View style={[styles.centered, styles.grow]}>
+        <View style={[styles.centered, styles.grow]} testID="workboard-error">
           <Text style={styles.empty}>{listError}</Text>
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Retry loading the work board"
+            onPress={refresh}
+            style={({ pressed }) => [styles.retryBtn, pressed && styles.pressed]}
+            testID="workboard-retry"
+          >
+            <Text style={styles.retryBtnText}>Retry</Text>
+          </Pressable>
         </View>
       ) : active.length === 0 && completed.length === 0 ? (
         <View style={[styles.centered, styles.grow]} testID="workboard-empty">
@@ -193,24 +317,23 @@ function WorkBoardBody({ projectId, token }: { projectId: string; token: string 
                   it.status === 'in_progress'
                     ? client.complete(projectId, it.id)
                     : client.update(projectId, it.id, { status: 'in_progress' }),
-                  'failed to update item',
                 )
               }
               onRename={(title) =>
-                runMutation(it.id, client.update(projectId, it.id, { title }), 'failed to rename item')
+                runMutation(it.id, client.update(projectId, it.id, { title }))
               }
               onReorderTo={(targetIndex) => {
                 const targetItem = active[targetIndex];
                 if (targetItem === undefined) return;
                 const target = dragReorderTarget(active, it.id, targetItem.id);
                 if (target !== null)
-                  runMutation(it.id, client.reorder(projectId, it.id, target), 'failed to reorder');
+                  runMutation(it.id, client.reorder(projectId, it.id, target));
               }}
               onDelete={() =>
-                runMutation(it.id, client.delete(projectId, it.id), 'failed to delete item')
+                runMutation(it.id, client.delete(projectId, it.id))
               }
               onPlay={() =>
-                runMutation(it.id, client.start(projectId, it.id), 'failed to start build')
+                runMutation(it.id, client.start(projectId, it.id))
               }
             />
           ))}
@@ -237,7 +360,7 @@ function WorkBoardBody({ projectId, token }: { projectId: string; token: string 
                       item={it}
                       busy={busyId === it.id}
                       onDelete={() =>
-                        runMutation(it.id, client.delete(projectId, it.id), 'failed to delete item')
+                        runMutation(it.id, client.delete(projectId, it.id))
                       }
                     />
                   ))}
@@ -277,8 +400,119 @@ function WorkBoardBody({ projectId, token }: { projectId: string; token: string 
   );
 }
 
+/**
+ * The scope's live status strip — a dot and a word, above the board.
+ *
+ * The dot's pulse is driven ONLY by `pulse`, which `workActivityIndicator`
+ * grants only to a genuinely working scope; a stalled or dead session gets the
+ * same dot standing still. An animation that runs regardless of the underlying
+ * state is worse than no animation, because it manufactures the exact reassurance
+ * the owner is trying to verify.
+ *
+ * Same pulse mechanics as `WorkBoardRow`'s per-item dot (opacity loop, native
+ * driver, honours Reduce Motion) so the two read as one system rather than two
+ * different ideas of "busy".
+ */
+function WorkActivityStrip({
+  label,
+  pulse,
+  tone,
+}: {
+  label: string;
+  pulse: boolean;
+  tone: string;
+}) {
+  const [reduceMotion, setReduceMotion] = useState(false);
+  const pulseAnim = useRef(new Animated.Value(1)).current;
+
+  useEffect(() => {
+    let cancelled = false;
+    AccessibilityInfo.isReduceMotionEnabled()
+      .then((rm) => {
+        if (!cancelled) setReduceMotion(rm);
+      })
+      .catch(() => {
+        if (!cancelled) setReduceMotion(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!pulse || reduceMotion) {
+      pulseAnim.setValue(1);
+      return;
+    }
+    const loop = Animated.loop(
+      Animated.sequence([
+        Animated.timing(pulseAnim, {
+          toValue: 0.3,
+          duration: MOTION.pulse,
+          easing: Easing.inOut(Easing.quad),
+          useNativeDriver: true,
+        }),
+        Animated.timing(pulseAnim, {
+          toValue: 1,
+          duration: MOTION.pulse,
+          easing: Easing.inOut(Easing.quad),
+          useNativeDriver: true,
+        }),
+      ]),
+    );
+    loop.start();
+    return () => loop.stop();
+  }, [pulse, reduceMotion, pulseAnim]);
+
+  return (
+    <View
+      style={styles.statusStrip}
+      accessibilityRole="text"
+      accessibilityLabel={`Agent status: ${label}`}
+      testID="workboard-activity-strip"
+    >
+      <Animated.View
+        style={[
+          styles.statusDot,
+          { backgroundColor: tone, opacity: pulse ? pulseAnim : 1 },
+        ]}
+        testID={pulse ? 'workboard-activity-dot-pulsing' : 'workboard-activity-dot'}
+      />
+      <Text style={[styles.statusText, { color: tone }]} testID="workboard-activity-label">
+        {label}
+      </Text>
+    </View>
+  );
+}
+
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: THEME.background, padding: SPACING.md },
+  statusStrip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: SPACING.sm,
+    paddingBottom: SPACING.sm,
+  },
+  statusDot: { width: 8, height: 8, borderRadius: 4 },
+  statusText: {
+    fontSize: TYPOGRAPHY.body_small.fontSize,
+    lineHeight: TYPOGRAPHY.body_small.lineHeight,
+    letterSpacing: 0.3,
+  },
+  retryBtn: {
+    marginTop: SPACING.md,
+    paddingHorizontal: SPACING.lg,
+    paddingVertical: SPACING.sm,
+    borderRadius: SPACING.sm,
+    borderWidth: 1,
+    borderColor: THEME.hairline,
+    backgroundColor: THEME.surface,
+  },
+  retryBtnText: {
+    color: THEME.text_secondary,
+    fontSize: TYPOGRAPHY.body_small.fontSize,
+    fontWeight: '600',
+  },
   centered: { alignItems: 'center', justifyContent: 'center' },
   grow: { flex: 1 },
   listContent: { paddingBottom: SPACING.xl },

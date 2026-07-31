@@ -10,6 +10,10 @@
  * work_board_changed live" calls for, mirroring the web controller's frame
  * apply.
  *
+ * It also optionally taps the `activity_event` frames already flowing over that
+ * same per-user topic (`onActivity`), which is what lets the Work surface show a
+ * live "Working" strip without opening a second socket — see the option's doc.
+ *
  * It NEVER sends anything: the gateway pushes board snapshots to every session
  * on the topic via `InMemoryAppWsSessionRegistry.send`, so a bare connected
  * socket receives them. Reconnect is best-effort with a fixed backoff; on every
@@ -20,6 +24,7 @@
  * socket — no real network.
  */
 
+import { activityScopeKey, decodeActivityFrame, type ActivityRow } from './activity-client';
 import { parseWorkBoardItems, type WorkBoardItem } from './work-board-client';
 
 /**
@@ -52,6 +57,20 @@ export interface WorkBoardLiveOptions {
   device_id: string;
   /** Called with the full parsed board on every `work_board_changed` frame. */
   onSnapshot: (items: WorkBoardItem[]) => void;
+  /**
+   * Called with each `activity_event` row for THIS scope — the signal behind the
+   * Work surface's live status strip (`work-board-activity.ts`).
+   *
+   * Deliberately taps the socket this subscriber ALREADY holds rather than
+   * opening a second one. `/ws/app/chat` is a per-USER topic, so the activity
+   * rows for every scope are already arriving here; `startActivityLive` would
+   * open an identical connection to receive the identical frames. One socket per
+   * screen, two frame types.
+   *
+   * Optional — omit it and this module behaves exactly as it did before (a board
+   * subscriber that ignores everything else on the topic).
+   */
+  onActivity?: (row: ActivityRow) => void;
   /** Injected in tests; defaults to `globalThis.WebSocket`. */
   socketFactory?: SocketFactory;
   /** Reconnect backoff (ms). Default 3000. */
@@ -120,6 +139,11 @@ export function startWorkBoardLive(opts: WorkBoardLiveOptions): { stop: () => vo
   let retryHandle: unknown = null;
 
   const url = buildWsUrl(opts.base_url, opts.token, opts.project_id, opts.device_id);
+  // The INSPECTOR's spelling of this scope ('general' or the project id) — a
+  // third spelling of the same board, and not the one on the wire for the board
+  // frames. See `activity-client.ts` for why the three exist.
+  const activityScope = activityScopeKey(opts.project_id);
+  const onActivity = opts.onActivity;
 
   const connect = (): void => {
     if (stopped) return;
@@ -133,7 +157,13 @@ export function startWorkBoardLive(opts: WorkBoardLiveOptions): { stop: () => vo
     socket = s;
     s.onmessage = (ev) => {
       const items = decodeWorkBoardFrame(ev.data, opts.project_id);
-      if (items !== null) opts.onSnapshot(items);
+      if (items !== null) {
+        opts.onSnapshot(items);
+        return;
+      }
+      if (onActivity === undefined) return;
+      const row = decodeActivityFrame(ev.data, activityScope);
+      if (row !== null) onActivity(row);
     };
     s.onclose = () => {
       if (socket === s) socket = null;

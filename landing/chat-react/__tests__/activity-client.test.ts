@@ -67,6 +67,42 @@ describe('parseActivityRow', () => {
       label: 'x',
     })
   })
+
+  it('carries body + source — the expanded content and the tool qualifier', () => {
+    // Without these the panel is back to showing a size and a transport id.
+    expect(
+      parseActivityRow({
+        seq: 4,
+        at: 9,
+        kind: 'tool_end',
+        label: 'a_tool',
+        detail: 'one line',
+        body: 'line one\nline two',
+        source: 'a-server',
+      }),
+    ).toEqual({
+      seq: 4,
+      at: 9,
+      kind: 'tool_end',
+      label: 'a_tool',
+      detail: 'one line',
+      body: 'line one\nline two',
+      source: 'a-server',
+    })
+  })
+
+  it('omits empty body/source rather than carrying empty strings', () => {
+    const row = parseActivityRow({
+      seq: 1,
+      at: 1,
+      kind: 'status',
+      label: 'x',
+      body: '',
+      source: '',
+    })
+    expect(row?.body).toBeUndefined()
+    expect(row?.source).toBeUndefined()
+  })
 })
 
 describe('parseActivitySnapshot', () => {

@@ -105,6 +105,60 @@ export interface ReorderTarget {
   after?: string;
 }
 
+/**
+ * The id the General board answers to ON THE SERVER.
+ *
+ * General is NOT a project row — it is the no-project scope — but it DOES have a
+ * real, reachable board: `workBoardScopeKey(owner_slug, 'general')` collapses to
+ * the bare owner slug (`work-board/store.ts`), which is also where every
+ * pre-scoping legacy row and every agent `work_board_*` write lands. So the
+ * General Work tab has content to show; it just has to ask for it by the name the
+ * server can spell.
+ */
+export const GENERAL_WORK_BOARD_PROJECT_ID = 'general';
+
+/**
+ * The mobile RAIL id for General (`lib/project-rail-view.ts` `GENERAL_PROJECT_ID`).
+ * Duplicated rather than imported so this module — and its unit test — stay off
+ * the rail-view import chain, exactly as `activity-client.ts` duplicates it; the
+ * parity test in `work-board-general-scope.test.ts` pins the two together.
+ */
+const RAIL_GENERAL_ID = '~general';
+
+/**
+ * Map a client-side scope id to its Work Board HTTP PATH SEGMENT.
+ *
+ * This is the ONE boundary where General changes spelling, and it exists because
+ * the three spellings are genuinely different alphabets:
+ *
+ *   - the mobile rail id / route segment is `'~general'` — `~` is deliberately
+ *     OUTSIDE the gateway's `[A-Za-z0-9_.-]` project-id alphabet so the sentinel
+ *     can never collide with a real project, and deliberately untouched by
+ *     `encodeURIComponent` so it survives being a route segment,
+ *   - the shared client scope is `''` (`railIdToScope`), which the live
+ *     `work_board_changed` filter and the app-ws URL both require,
+ *   - the HTTP surface wants `'general'`, and 400s on anything else:
+ *     `sanitizeProjectId('~general')` → null → `invalid_project_id`, and an empty
+ *     segment produces a `//work-board` double slash that matches no route.
+ *
+ * Sending the raw sentinel is what put a raw validator string where the General
+ * board should be. Mirror of the web twin's `workBoardPathSegment`
+ * (`landing/chat-react/work-board-client.ts`), widened by one case because mobile
+ * has a rail spelling web does not. Named ids — INCLUDING a project that merely
+ * starts with the sentinel — pass through untouched.
+ */
+export function workBoardPathSegment(project_id: string): string {
+  if (project_id.length === 0 || project_id === RAIL_GENERAL_ID) {
+    return GENERAL_WORK_BOARD_PROJECT_ID;
+  }
+  return project_id;
+}
+
+/** The path segment, percent-encoded for interpolation into a URL. */
+function seg(project_id: string): string {
+  return encodeURIComponent(workBoardPathSegment(project_id));
+}
+
 export type WorkBoardClientOptions = GatewayHttpClientOptions;
 
 interface ListResponse {
@@ -132,13 +186,13 @@ export class WorkBoardClient extends GatewayHttpClient {
 
   /** The full board: active+next first (board order), then completed (reverse-chron). */
   async list(project_id: string): Promise<WorkBoardItem[]> {
-    const path = `/api/app/projects/${encodeURIComponent(project_id)}/work-board`;
+    const path = `/api/app/projects/${seg(project_id)}/work-board`;
     const res = await this.req<ListResponse>(path);
     return res.items;
   }
 
   async create(project_id: string, input: CreateWorkBoardItemInput): Promise<WorkBoardItem> {
-    const path = `/api/app/projects/${encodeURIComponent(project_id)}/work-board`;
+    const path = `/api/app/projects/${seg(project_id)}/work-board`;
     const res = await this.req<ItemResponse>(path, { method: 'POST', body: input });
     return res.item;
   }
@@ -148,13 +202,13 @@ export class WorkBoardClient extends GatewayHttpClient {
     item_id: string,
     input: UpdateWorkBoardItemInput,
   ): Promise<WorkBoardItem> {
-    const path = `/api/app/projects/${encodeURIComponent(project_id)}/work-board/${encodeURIComponent(item_id)}`;
+    const path = `/api/app/projects/${seg(project_id)}/work-board/${encodeURIComponent(item_id)}`;
     const res = await this.req<ItemResponse>(path, { method: 'PATCH', body: input });
     return res.item;
   }
 
   async complete(project_id: string, item_id: string): Promise<WorkBoardItem> {
-    const path = `/api/app/projects/${encodeURIComponent(project_id)}/work-board/${encodeURIComponent(item_id)}/complete`;
+    const path = `/api/app/projects/${seg(project_id)}/work-board/${encodeURIComponent(item_id)}/complete`;
     const res = await this.req<ItemResponse>(path, { method: 'POST' });
     return res.item;
   }
@@ -164,13 +218,13 @@ export class WorkBoardClient extends GatewayHttpClient {
     item_id: string,
     target: ReorderTarget,
   ): Promise<WorkBoardItem[]> {
-    const path = `/api/app/projects/${encodeURIComponent(project_id)}/work-board/${encodeURIComponent(item_id)}/reorder`;
+    const path = `/api/app/projects/${seg(project_id)}/work-board/${encodeURIComponent(item_id)}/reorder`;
     const res = await this.req<ListResponse>(path, { method: 'POST', body: target });
     return res.items;
   }
 
   async delete(project_id: string, item_id: string): Promise<void> {
-    const path = `/api/app/projects/${encodeURIComponent(project_id)}/work-board/${encodeURIComponent(item_id)}`;
+    const path = `/api/app/projects/${seg(project_id)}/work-board/${encodeURIComponent(item_id)}`;
     await this.req<{ ok: boolean; deleted: string }>(path, { method: 'DELETE' });
   }
 
@@ -180,7 +234,7 @@ export class WorkBoardClient extends GatewayHttpClient {
    * non-2xx (e.g. `underspecified`, `already_running`).
    */
   async start(project_id: string, item_id: string): Promise<{ ok: boolean; run_id?: string }> {
-    const path = `/api/app/projects/${encodeURIComponent(project_id)}/work-board/${encodeURIComponent(item_id)}/start`;
+    const path = `/api/app/projects/${seg(project_id)}/work-board/${encodeURIComponent(item_id)}/start`;
     return await this.req<{ ok: boolean; run_id?: string }>(path, { method: 'POST' });
   }
 }

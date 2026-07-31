@@ -1,5 +1,14 @@
 ## 2026-07-29 — the Activity Inspector: the tmux replacement, behind the dot that lied
 
+> **Superseded in part by `2026-07-31-activity-inspector-conversation-detail.md`.** The
+> two-clocks design, the two taps and the dot-as-entry-point below all stand. What
+> changed the next day is the CONTENT of a row: `token` no longer renders as a
+> character count, tool labels are humanised rather than raw `mcp__…` transport ids,
+> the hook now reads `tool_response`, and the `reply` tool call renders as the
+> assistant's message interleaved with the tool rows. Where this entry describes row
+> content (notably the `token`-is-summarised note under the mapping section and the
+> `summarizeToolInput` "returns EMPTY for unknown args" note), read the newer entry.
+
 SPEC § WAVE 3.5's M2-blocking step. The owner could not tell whether a project's agent session was working or hung; in Vajra the escape hatch was attaching to tmux, and Neutron's server-side sessions offered no equivalent whatsoever. Clicking the existing per-project activity dot now opens a panel streaming the raw substrate + tool events for that scope in realtime, on both web and mobile. Live-only: ~200 rows in memory per scope, no persistence, no schema, no retention policy, no scrollback.
 
 Three things about the brief turned out to be wrong in the code, and two of them changed the build materially.
