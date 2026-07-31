@@ -94,8 +94,8 @@ describe('resolveWhisperInstall', () => {
     expect(r!.lib_dir).toBeNull()
   })
 
-  test('NEUTRON_WHISPER_MODEL points every tenant at ONE shared copy of the weights', () => {
-    // The Managed case: 600 MB per tenant is absurd when the file is identical.
+  test('NEUTRON_WHISPER_MODEL points several instances at ONE shared copy of the weights', () => {
+    // Hundreds of megabytes per instance is absurd when the file is identical.
     const p = whisperPaths(home)
     mkdirSync(p.bin_dir, { recursive: true })
     writeFileSync(p.binary, 'x')

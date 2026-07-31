@@ -107,9 +107,10 @@ export interface ResolveWhisperOptions {
  *   model  — `NEUTRON_WHISPER_MODEL` → the catalog default under
  *            `<NEUTRON_HOME>/whisper/models` → any other `ggml-*.bin` there
  *
- * The env overrides exist so a MANAGED box can point every tenant at ONE shared
- * copy of the weights (`NEUTRON_WHISPER_MODEL=/opt/whisper/ggml-base.bin`)
- * instead of paying 600 MB of disk per tenant.
+ * The env overrides exist so a machine running several Neutron instances can
+ * point them all at ONE shared copy of the weights
+ * (`NEUTRON_WHISPER_MODEL=/opt/whisper/ggml-base.bin`) instead of paying
+ * hundreds of megabytes of disk for each identical file.
  */
 export function resolveWhisperInstall(opts: ResolveWhisperOptions): WhisperInstall | null {
   const exists = opts.exists ?? ((p: string) => existsSync(p))

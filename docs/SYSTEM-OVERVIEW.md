@@ -2344,8 +2344,8 @@ URL, byte size AND SHA-256. `whisper-install.ts` streams each artifact to a
 digest match, so an interrupted or corrupted download leaves NOTHING installed
 (safely re-runnable rather than byte-range resumable). Disk space is checked
 before the first byte. Assets live at `<NEUTRON_HOME>/whisper/{bin,models}`;
-`NEUTRON_WHISPER_BIN` / `NEUTRON_WHISPER_MODEL` override them, which is how a
-hosted box points every tenant at ONE shared copy of the weights.
+`NEUTRON_WHISPER_BIN` / `NEUTRON_WHISPER_MODEL` override them, so a machine
+running several instances can share ONE copy of the weights.
 
 **Surfaces.** HTTP `gateway/http/voice-transcription-surface.ts` —
 machine-scoped `/api/app/voice-transcription` (GET status + catalog + live job

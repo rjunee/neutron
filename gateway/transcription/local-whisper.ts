@@ -6,9 +6,9 @@
  * it still just calls `transcribeAudio(...)` and gets a string or `null`.
  *
  * WHY THIS EXISTS: transcription used to require the owner to hold an
- * `OPENAI_API_KEY`. Voice notes are a core capability, and a self-hoster —
- * or a Managed tenant — should not need an account with a third party to use
- * one. With whisper.cpp installed, the audio never leaves the machine.
+ * `OPENAI_API_KEY`. Voice notes are a core capability, and nobody running their
+ * own Neutron should need an account with a third party to use one. With
+ * whisper.cpp installed, the audio never leaves the machine.
  *
  * HOW IT RUNS
  *
