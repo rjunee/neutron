@@ -340,6 +340,86 @@ describe('defect 3 — the activity inspector is reachable and legible', () => {
     // scale, and unreadable at arm's length on a phone.
     expect(INSPECTOR_SRC).not.toMatch(/fontSize:\s*1[12]\b/);
   });
+
+  /* ---- the transcript, not the ticker (Ryan 2026-07-30) ------------------ */
+
+  /** A source that serves a fixed row list. Fixtures are SYNTHESISED — this is a
+   *  public repo and the surface under test renders private conversation. */
+  function rowSource(events: unknown[]) {
+    return {
+      snapshot: async () => ({ scope_key: 'general', state: 'working' as const, events }),
+      subscribe: () => () => undefined,
+    };
+  }
+
+  async function mountRows(events: unknown[]): Promise<Screen> {
+    return mountScreen(
+      createElement(ActivityInspectorDrawer, {
+        open: true,
+        onClose: () => undefined,
+        source: rowSource(events) as never,
+        projectId: null,
+        label: 'General',
+        reduceMotionOverride: true,
+      }),
+    );
+  }
+
+  it('shows the assistant WORDS, never a character count', async () => {
+    const words = 'a synthesised assistant sentence';
+    const screen = await mountRows([
+      { seq: 1, at: Date.now(), kind: 'token', label: 'assistant', detail: words },
+    ]);
+    expect(screen.byTestId('activity-row-text-1')?.textContent).toBe(words);
+    expect(document.body.textContent).not.toMatch(/\d+ chars/);
+    screen.unmount();
+  });
+
+  it('renders a HUMAN tool label with the server demoted to a qualifier', async () => {
+    // The device dump showed a 52-char `mcp__…` transport id clipped flush at the
+    // panel edge. The raw form must never be the label again.
+    const screen = await mountRows([
+      { seq: 1, at: Date.now(), kind: 'tool_start', label: 'a_tool', source: 'a-server' },
+    ]);
+    expect(screen.byTestId('activity-row-label-1')?.textContent).toBe('a_tool');
+    expect(screen.byTestId('activity-row-source-1')?.textContent).toBe('a-server');
+    expect(document.body.textContent).not.toContain('mcp__');
+    screen.unmount();
+  });
+
+  it('keeps tool rows and assistant rows as peers in ONE chronological list', async () => {
+    const at = Date.now();
+    const screen = await mountRows([
+      { seq: 1, at, kind: 'turn_start', label: 'turn started' },
+      { seq: 2, at, kind: 'tool_start', label: 'a_tool', detail: 'an argument' },
+      { seq: 3, at, kind: 'tool_end', label: 'a_tool', detail: 'a returned value' },
+      { seq: 4, at, kind: 'token', label: 'assistant', detail: 'a sentence' },
+    ]);
+    for (const seq of [1, 2, 3, 4]) {
+      expect(screen.byTestId(`activity-row-${seq}`)).not.toBeNull();
+    }
+    // The tool row's RESULT is on screen — the first build showed nothing of it.
+    expect(screen.byTestId('activity-row-detail-3')?.textContent).toBe('a returned value');
+    screen.unmount();
+  });
+
+  it('offers an expand affordance only when the body says more than the detail', async () => {
+    const at = Date.now();
+    const screen = await mountRows([
+      { seq: 1, at, kind: 'tool_start', label: 'a_tool', detail: 'short' },
+      {
+        seq: 2,
+        at,
+        kind: 'tool_end',
+        label: 'a_tool',
+        detail: 'one line summary',
+        body: 'line one\nline two\nline three',
+      },
+    ]);
+    expect(screen.byTestId('activity-row-more-1')).toBeNull();
+    expect(screen.byTestId('activity-row-more-2')).not.toBeNull();
+    screen.unmount();
+  });
 });
 
 /* ══ DEFECT 4 — "Waking up…" renders as a real chat message ═════════════════ */
