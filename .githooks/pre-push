@@ -1,0 +1,89 @@
+#!/usr/bin/env bash
+#
+# .githooks/pre-push — run the leak gate's Tier-1 PII rules over the commit
+# messages you are about to publish, BEFORE they leave the machine.
+#
+# WHY THIS EXISTS. A public push is mirrored to GHArchive/BigQuery within the
+# hour. File contents can be force-pushed away and are blocked by CI before a
+# merge; a commit message or PR body cannot be taken back by anyone, including
+# GitHub support. The Tier-1 PII denylist that catches owner proper nouns is a
+# repository SECRET, so until now it could only ever run in CI — i.e. the first
+# signal an author got about the one unredactable class of leak arrived AFTER
+# the content was already public. On 2026-07-30 that is exactly what happened:
+# CI caught owner names in a commit message and PR body, the branch was scrubbed
+# and force-pushed, and the original push was already mirrored. Being careful is
+# not a control. This is.
+#
+# WHAT IT RUNS. `scripts/ci/leak-gate.sh --messages-only` — the SAME script, the
+# same denylist compiler and the same rules CI runs, reading the denylist from a
+# local file outside the repo (see the gate's header, "LOCAL DENYLIST"). It is
+# not a reimplementation, so it cannot drift out of agreement with CI.
+#
+# WHAT IT DOES NOT COVER. A PR title/body typed into `gh pr create` never passes
+# through git, so no git hook can see it. Check one before you publish it:
+#
+#     LEAK_GATE_PR_BODY="$(cat pr-body.md)" \
+#       bash scripts/ci/leak-gate.sh --messages-only
+#
+# FAIL-CLOSED. If the denylist cannot be loaded the gate exits 3 (INCOMPLETE)
+# and this hook BLOCKS. "I could not check" must never be worth less than a
+# failed check — treating it as a pass is the precise defect that let Tier-1 sit
+# dead for ~3,700 CI runs. Install the denylist (scripts/install-git-hooks.sh
+# tells you where) rather than working around this.
+
+set -uo pipefail
+
+ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || exit 0
+GATE="$ROOT/scripts/ci/leak-gate.sh"
+
+# A branch that predates the gate (bisect, an old worktree) has no script. Do not
+# invent a failure the author cannot act on.
+[ -x "$GATE" ] || [ -f "$GATE" ] || exit 0
+
+ZERO='0000000000000000000000000000000000000000'
+STATUS=0
+CHECKED=0
+
+# git feeds one line per ref being pushed: <local_ref> <local_sha> <remote_ref> <remote_sha>
+while read -r local_ref local_sha remote_ref remote_sha; do
+  [ -n "${local_sha:-}" ] || continue
+  # A deletion pushes no commits and no messages.
+  [ "$local_sha" = "$ZERO" ] && continue
+  CHECKED=1
+  echo "leak-gate pre-push: ${local_ref:-?} → ${remote_ref:-?}"
+  # remote_sha is all-zero for a branch the remote has never seen; the gate
+  # already treats that as "no base" and falls back to origin/main, so it is
+  # passed through verbatim rather than second-guessed here.
+  LEAK_GATE_BASE_SHA="$remote_sha" \
+  LEAK_GATE_HEAD_SHA="$local_sha" \
+    bash "$GATE" --tree "$ROOT" --messages-only || STATUS=$?
+  [ "$STATUS" -eq 0 ] || break
+done
+
+# No ref lines at all (git can invoke the hook with empty stdin) — nothing to
+# check, and inventing a block here would only teach people to use --no-verify.
+[ "$CHECKED" = "1" ] || exit 0
+
+if [ "$STATUS" -ne 0 ]; then
+  cat >&2 <<'EOF'
+
+╭──────────────────────────────────────────────────────────────────────────────╮
+│  PUSH BLOCKED — leak gate                                                    │
+╰──────────────────────────────────────────────────────────────────────────────╯
+A commit message you are about to publish either matched the PII denylist, or
+could not be checked against it (see the verdict above — exit 3 means the rule
+did not run, which is not a pass).
+
+Commit messages are mirrored to GHArchive/BigQuery permanently and CANNOT be
+redacted afterwards. Fix the message before it leaves the machine:
+
+    git rebase -i --exec 'true' <base>      # reword the offending commit(s)
+    git commit --amend                      # if it is just the tip
+
+Then push again. If the finding is a false positive, the fix is the reviewable
+allowlist in scripts/ci/leak-gate-allowlist.txt — not skipping the hook.
+EOF
+  exit 1
+fi
+
+exit 0
