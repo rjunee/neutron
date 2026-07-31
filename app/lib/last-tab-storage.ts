@@ -72,6 +72,23 @@ export interface LastTabBacking {
 }
 
 export class LastTabStore {
+  /**
+   * Every answer this store has already given or written, so a rail tap can be
+   * turned into a route WITHOUT awaiting anything (instant-switch, 2026-07-31).
+   *
+   * On native the backing is AsyncStorage — a bridge round-trip. `onRailSelect`
+   * awaited one before it navigated at all, which put a variable, feedback-free
+   * pause between the finger coming off the glass and the first pixel changing:
+   * measured at 70–130 ms typically and 470 ms in one observed case, all of it
+   * spent looking at the project the owner had just left. The value is a
+   * per-device preference that only this process writes, so once it is known it
+   * is known — re-reading it across the bridge on every tap buys nothing.
+   *
+   * A miss is not a failure: {@link knows} reports it and the caller falls back
+   * to the async read. Nothing here invents a preference it was never told.
+   */
+  private readonly mirror = new Map<string, LastTabValue | null>();
+
   constructor(private readonly backing: LastTabBacking) {}
 
   async get(rawProjectId: string): Promise<LastTabValue | null> {
@@ -79,12 +96,21 @@ export class LastTabStore {
     if (projectId === null) return null;
     try {
       const raw = await Promise.resolve(this.backing.getItem(keyFor(projectId)));
-      if (raw === null) return null;
-      if (isLegalTab(raw)) return raw;
+      if (raw === null) {
+        this.mirror.set(projectId, null);
+        return null;
+      }
+      if (isLegalTab(raw)) {
+        this.mirror.set(projectId, raw);
+        return raw;
+      }
       // Stale / corrupted value — proactively self-heal.
       await Promise.resolve(this.backing.removeItem(keyFor(projectId)));
+      this.mirror.set(projectId, null);
       return null;
     } catch {
+      // A backing that threw has told us nothing, so the mirror must not claim
+      // to know: leave it untouched rather than caching a guess.
       return null;
     }
   }
@@ -93,6 +119,7 @@ export class LastTabStore {
     const projectId = sanitizeProjectId(rawProjectId);
     if (projectId === null) return;
     if (!isLegalTab(tab)) return;
+    this.mirror.set(projectId, tab);
     try {
       await Promise.resolve(this.backing.setItem(keyFor(projectId), tab));
     } catch {
@@ -104,11 +131,41 @@ export class LastTabStore {
   async clear(rawProjectId: string): Promise<void> {
     const projectId = sanitizeProjectId(rawProjectId);
     if (projectId === null) return;
+    this.mirror.set(projectId, null);
     try {
       await Promise.resolve(this.backing.removeItem(keyFor(projectId)));
     } catch {
       // ignore
     }
+  }
+
+  /** True when {@link peek} can answer for this project without I/O. */
+  knows(rawProjectId: string): boolean {
+    const projectId = sanitizeProjectId(rawProjectId);
+    return projectId !== null && this.mirror.has(projectId);
+  }
+
+  /**
+   * The known preference, synchronously. `null` means BOTH "no preference
+   * stored" and "never asked" — always gate on {@link knows} first.
+   */
+  peek(rawProjectId: string): LastTabValue | null {
+    const projectId = sanitizeProjectId(rawProjectId);
+    if (projectId === null) return null;
+    return this.mirror.get(projectId) ?? null;
+  }
+
+  /**
+   * Read these projects' preferences once, so a later tap on any of them
+   * resolves synchronously. Called with the rail's own project list; failures
+   * are swallowed by `get`, which simply leaves that id unknown.
+   */
+  async prime(projectIds: readonly string[]): Promise<void> {
+    await Promise.all(
+      projectIds.filter((id) => !this.knows(id)).map(async (id) => {
+        await this.get(id);
+      }),
+    );
   }
 }
 

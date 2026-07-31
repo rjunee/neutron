@@ -26,8 +26,8 @@
  */
 
 import { Slot, useLocalSearchParams, usePathname, useRouter } from 'expo-router';
-import { projectTabRoute } from '../../../lib/project-tab-route';
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { projectTabRoute, projectTabRouteSync } from '../../../lib/project-tab-route';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   AccessibilityInfo,
   ActivityIndicator,
@@ -94,7 +94,19 @@ import { projectShellContent } from '../../../lib/project-shell-content';
 import { ProjectStateProvider, useProjectState } from '../../../lib/project-state';
 import type { ProjectSettings } from '../../../lib/projects-client';
 import { useAuthSession } from '../../../lib/session';
-import { TabsClient } from '../../../lib/tabs-client';
+import { TabsClient, type TabDescriptor } from '../../../lib/tabs-client';
+
+/**
+ * How many rail projects get their tab set fetched ahead of the tap.
+ *
+ * The rail is activity-sorted, so this is the window the owner actually
+ * switches within; beyond it a first visit still resolves its own tabs on
+ * arrival. Bounded because each entry is one small GET and a rail can be long.
+ */
+const TAB_PREFETCH_LIMIT = 12;
+
+/** How long the prefetch waits, so it never contends with the first paint. */
+const TAB_PREFETCH_DELAY_MS = 600;
 
 /** Best-effort random device id for the rail's read-only app-ws socket. */
 function makeRailDeviceId(): string {
@@ -194,40 +206,59 @@ function ProjectShell({ project_id }: { project_id: string }) {
   // WAVE 3 PR-3 — the tab set is REGISTRY-DRIVEN. Fetch the engine-resolved
   // descriptors (`GET /api/app/projects/<id>/tabs`) and render whatever the
   // engine returns: builtin Chat/Documents/Tasks ∪ installed Cores'
-  // `project_tab` surfaces. `null` until the fetch resolves; on error it stays
-  // null and the loading default (the legacy `PROJECT_TABS`, resolved to native
-  // routes) keeps showing — a graceful fallback, NOT a feature-flag alt path.
-  const [fetchedTabs, setFetchedTabs] = useState<ResolvedTab[] | null>(null);
+  // `project_tab` surfaces. A scope with no answer yet shows the loading
+  // default (the legacy `PROJECT_TABS`, resolved to native routes) — a graceful
+  // fallback, NOT a feature-flag alt path.
+  //
+  // KEYED BY SCOPE, AND NEVER CLEARED (instant-switch, 2026-07-31). This used to
+  // be one `ResolvedTab[] | null` that a switch reset to `null`, which made the
+  // bar repaint TWICE on every rail tap: the loading default (Chat / Apps /
+  // Tasks / Reminders / Docs) flashed in for the frames the fetch was in flight,
+  // then the real set replaced it. Filmed on device at 30 fps, 2026-07-31 — the
+  // wrong tab set was on screen for 3–4 frames of every single switch. Holding
+  // the answers per scope removes both the reset and the reason for it: nothing
+  // can render the previous project's routes if the lookup is by project id.
+  // Each visit still REFETCHES (a Core installed since is a real change) — it
+  // just merges the answer in instead of blanking first.
+  const [tabsByScope, setTabsByScope] = useState<ReadonlyMap<string, readonly TabDescriptor[]>>(
+    () => new Map(),
+  );
+  const mergeTabs = useCallback((id: string, descriptors: readonly TabDescriptor[]): void => {
+    setTabsByScope((prev) => {
+      const next = new Map(prev);
+      next.set(id, descriptors);
+      return next;
+    });
+  }, []);
   useEffect(() => {
     if (user === null) return;
     let cancelled = false;
-    // Drop the previous project's tabs immediately on a project switch — this
-    // layout instance is reused across `project_id` changes, so without the
-    // reset `displayTabs` would briefly hold the OLD project's routes (whose
-    // `<id>` is baked in) and a tab tap would navigate back to it.
-    setFetchedTabs(null);
     const client = new TabsClient({ base_url: config.base_url, token: user.token });
     client
       .listProjectTabs(project_id)
       .then((descriptors) => {
-        if (!cancelled) setFetchedTabs(descriptorsToResolvedTabs(descriptors, project_id));
+        if (!cancelled) mergeTabs(project_id, descriptors);
       })
       .catch(() => {
-        // Endpoint absent / offline / auth — keep the loading default visible.
-        if (!cancelled) setFetchedTabs(null);
+        // Endpoint absent / offline / auth — whatever this scope already had
+        // stands, and a scope with nothing keeps the loading default.
       });
     return () => {
       cancelled = true;
     };
-  }, [user, config.base_url, project_id]);
+  }, [user, config.base_url, project_id, mergeTabs]);
 
   // The Work tab is not emitted by the tab registry, so the mobile shell always
   // injects it (after Chat) over BOTH the loading default and the fetched set —
   // one code path, idempotent. This is the tab the live-run badge lands on.
-  const displayTabs = useMemo<ResolvedTab[]>(
-    () => ensureWorkTab(fetchedTabs ?? loadingTabsForProject(project_id), project_id),
-    [fetchedTabs, project_id],
-  );
+  const displayTabs = useMemo<ResolvedTab[]>(() => {
+    const known = tabsByScope.get(project_id);
+    const resolved =
+      known === undefined
+        ? loadingTabsForProject(project_id)
+        : descriptorsToResolvedTabs(known, project_id);
+    return ensureWorkTab(resolved, project_id);
+  }, [tabsByScope, project_id]);
 
   // ── Project rail (M1 UX REDESIGN PR-6) ────────────────────────────────────
   // The rail's project SET comes from the HTTP list; its per-project rail state
@@ -255,6 +286,49 @@ function ProjectShell({ project_id }: { project_id: string }) {
       cancelled = true;
     };
   }, [user, config.base_url, project_id]);
+
+  // ── WARM THE TAP (instant-switch, 2026-07-31) ─────────────────────────────
+  // Everything a rail tap needs to render the destination is knowable BEFORE
+  // the tap: which tabs that project shows, and which one this device left it
+  // on. Resolving them on arrival is what produced the tab-bar flip and the
+  // pause between finger-up and the first repaint. The rail already names every
+  // project, so ask once, here, for the window the owner switches within.
+  // Failures are silent by design — an un-warmed project simply resolves its
+  // own on arrival, exactly as before.
+  const railIds = useMemo(() => (railProjects ?? []).map((p) => p.id), [railProjects]);
+  // A stable dependency for the effect below. The rail list refetches on every
+  // switch and hands back a fresh array even when the projects are identical,
+  // so keying the prefetch on the CONTENT is what keeps it a once-per-session
+  // job rather than a once-per-tap one.
+  const railIdsKey = railIds.join(',');
+  useEffect(() => {
+    if (user === null) return;
+    const ids = railIds;
+    if (ids.length === 0) return;
+    let cancelled = false;
+    void lastTabStorage().prime(ids);
+    // Held off the first paint on purpose: this is work for a tap that has not
+    // happened yet, and it must never compete with the transcript the owner is
+    // waiting to read right now.
+    const handle = setTimeout(() => {
+      const client = new TabsClient({ base_url: config.base_url, token: user.token });
+      const targets = ids.filter((id) => id !== project_id).slice(0, TAB_PREFETCH_LIMIT);
+      void Promise.allSettled(
+        targets.map(async (id) => {
+          const descriptors = await client.listProjectTabs(id);
+          if (!cancelled) mergeTabs(id, descriptors);
+        }),
+      );
+    }, TAB_PREFETCH_DELAY_MS);
+    return () => {
+      cancelled = true;
+      clearTimeout(handle);
+    };
+    // `project_id` is read only to skip the scope its own effect is already
+    // fetching; re-running this whole prefetch on every switch would be pure
+    // waste, so it is deliberately not a dependency.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user, config.base_url, railIdsKey, mergeTabs]);
 
   useEffect(() => {
     if (user === null) return;
@@ -454,6 +528,19 @@ function ProjectShell({ project_id }: { project_id: string }) {
       // through the router. (General was the one scope that appeared to work,
       // because it needs no fetch and its handoff usually won the race — the
       // race is what is deleted here, for every scope alike.)
+      //
+      // AND IN THIS TICK, when the destination is already known. The `await`
+      // below is an AsyncStorage bridge round-trip, and until it came back
+      // NOTHING on screen had acknowledged the tap — the owner sat looking at
+      // the project they had just left. The shell primes this device's last-tab
+      // preference for every rail project when the list lands, so the common
+      // case answers from memory; `null` means genuinely not-yet-known and we
+      // wait for the real read rather than guessing a tab.
+      const known = projectTabRouteSync(id);
+      if (known !== null) {
+        router.replace(known as Parameters<typeof router.replace>[0]);
+        return;
+      }
       void (async () => {
         router.replace(
           (await projectTabRoute(id)) as Parameters<typeof router.replace>[0],
