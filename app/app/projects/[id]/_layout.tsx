@@ -295,10 +295,15 @@ function ProjectShell({ project_id }: { project_id: string }) {
   // project, so ask once, here, for the window the owner switches within.
   // Failures are silent by design — an un-warmed project simply resolves its
   // own on arrival, exactly as before.
-  const railIds = (railProjects ?? []).map((p) => p.id).join(' ');
+  const railIds = useMemo(() => (railProjects ?? []).map((p) => p.id), [railProjects]);
+  // A stable dependency for the effect below. The rail list refetches on every
+  // switch and hands back a fresh array even when the projects are identical,
+  // so keying the prefetch on the CONTENT is what keeps it a once-per-session
+  // job rather than a once-per-tap one.
+  const railIdsKey = railIds.join(',');
   useEffect(() => {
     if (user === null) return;
-    const ids = railIds.length === 0 ? [] : railIds.split(' ');
+    const ids = railIds;
     if (ids.length === 0) return;
     let cancelled = false;
     void lastTabStorage().prime(ids);
@@ -323,7 +328,7 @@ function ProjectShell({ project_id }: { project_id: string }) {
     // fetching; re-running this whole prefetch on every switch would be pure
     // waste, so it is deliberately not a dependency.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [user, config.base_url, railIds, mergeTabs]);
+  }, [user, config.base_url, railIdsKey, mergeTabs]);
 
   useEffect(() => {
     if (user === null) return;
