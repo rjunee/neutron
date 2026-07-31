@@ -478,12 +478,60 @@ export interface ConnectMemberView {
 export type ConnectSurfaceFail = { ok: false; code: string; message: string; status: number }
 
 /**
+ * An outstanding invite as the owner sees it (ISSUES #421 residual). Mirrors
+ * `ConnectGuestInviteStore.OwnerInviteView`.
+ *
+ * `invite_id` IS the invite's `token_hash`, and exposing it here is deliberate,
+ * not an oversight. It is not a credential: redemption requires the RAW token,
+ * which is unrecoverable after issuance, and no amount of hash gets you one.
+ * What the hash CAN do is drive `GET /connect/invite-preview`, which returns the
+ * project name, owner display, host and scope — every one of which this
+ * owner-authenticated response already contains or the owner already knows. The
+ * alternative (a second synthetic id column) buys nothing and adds a schema.
+ */
+export interface ConnectInviteView {
+  invite_id: string
+  access: 'read' | 'write'
+  state: 'live' | 'redeemed' | 'revoked' | 'expired'
+  created_at_ms: number
+  expires_at_ms: number
+  redeemed_at_ms: number | null
+  revoked_at_ms: number | null
+}
+
+/**
  * Owner-side Neutron Connect member-management deps (M2.6 Ph5). Each method owns
  * its own authz (owner/admin gate) + resolves the owner DB; the surface stays a
  * thin router. Revoke is owner-only (§ 11 LOCK).
  */
 export interface AppConnectSurfaceDeps {
   invite: AppConnectInviteDeps
+  /**
+   * The owner's invite ledger for one project (ISSUES #421 residual). Revocation
+   * is unusable without it: the raw token is unrecoverable after issuance, so
+   * this list is the ONLY place an owner gets a handle for the invite they want
+   * to withdraw.
+   */
+  listInvites: (input: {
+    caller_user_id: string
+    caller_instance_slug: string
+    project_id: string
+  }) => Promise<{ ok: true; invites: ConnectInviteView[] } | ConnectSurfaceFail>
+  /**
+   * Withdraw an outstanding invite. Idempotent — re-revoking reports
+   * `revoked:false` rather than failing. When the withdrawn invite was the last
+   * thing holding the Connect surface open, the surface closes on the very next
+   * request (the state gate re-reads per request; nothing here latches).
+   */
+  revokeInvite: (input: {
+    caller_user_id: string
+    caller_instance_slug: string
+    project_id: string
+    invite_id: string
+  }) => Promise<
+    | { ok: true; revoked: boolean; state: ConnectInviteView['state'] }
+    | ConnectSurfaceFail
+  >
   listMembers: (input: {
     caller_user_id: string
     caller_instance_slug: string
@@ -514,6 +562,12 @@ const PATH_RE = /^\/api\/app\/projects\/([^/]+)\/settings$/
 const INVITE_PATH_RE = /^\/api\/app\/projects\/([^/]+)\/invite$/
 // M2.6 Ph5 — connect member-management routes.
 const CONNECT_INVITES_RE = /^\/api\/app\/projects\/([^/]+)\/connect-invites$/
+// ISSUES #421 residual — withdraw an outstanding invite. Same shape as the
+// member-revoke route below, and checked BEFORE `CONNECT_INVITES_RE` would
+// matter: the two patterns are disjoint (that one is anchored with no trailing
+// segment), so order is for readability, not correctness.
+const CONNECT_INVITE_REVOKE_RE =
+  /^\/api\/app\/projects\/([^/]+)\/connect-invites\/([^/]+)\/revoke$/
 const CONNECT_MEMBERS_RE = /^\/api\/app\/projects\/([^/]+)\/connect-members$/
 const CONNECT_REVOKE_RE = /^\/api\/app\/projects\/([^/]+)\/connect-members\/([^/]+)\/revoke$/
 
@@ -635,10 +689,34 @@ export function createAppProjectsSurface(opts: AppProjectsSurfaceOptions): AppPr
         return handleInviteRoute(req, invite, resolved, invite_project_id)
       }
 
+      // ISSUES #421 residual — POST /api/app/projects/<id>/connect-invites/<invite_id>/revoke.
+      // Matched before the bare `connect-invites` route purely for reading order.
+      const connectInviteRevokeMatch = CONNECT_INVITE_REVOKE_RE.exec(pathname)
+      if (connectInviteRevokeMatch !== null) {
+        if (method !== 'POST') {
+          return jsonError(405, 'method_not_allowed', `method '${method}' not allowed on /revoke`)
+        }
+        const cp = sanitizeProjectId(connectInviteRevokeMatch[1] ?? '')
+        const inviteId = (connectInviteRevokeMatch[2] ?? '').trim()
+        // The id is a SHA-256 hex digest. Validating the shape here means a
+        // malformed id never reaches the store, and the 400 is indistinguishable
+        // for every malformed value.
+        if (cp === null || !/^[0-9a-f]{64}$/.test(inviteId)) {
+          return jsonError(400, 'invalid_request', 'project_id + invite_id required')
+        }
+        const resolved = await resolveBearer(req, auth)
+        if ('code' in resolved) return jsonError(401, resolved.code, resolved.message)
+        if (connect === undefined) {
+          return jsonError(501, 'connect_not_configured', 'Neutron Connect is not configured on this gateway')
+        }
+        return handleConnectInviteRevokeRoute(connect, resolved, cp, inviteId)
+      }
+
       // POST /api/app/projects/<id>/connect-invites (delivery: link|email).
+      // GET  /api/app/projects/<id>/connect-invites — the owner's invite ledger.
       const connectInviteMatch = CONNECT_INVITES_RE.exec(pathname)
       if (connectInviteMatch !== null) {
-        if (method !== 'POST') {
+        if (method !== 'POST' && method !== 'GET') {
           return jsonError(405, 'method_not_allowed', `method '${method}' not allowed on /connect-invites`)
         }
         const cp = sanitizeProjectId(connectInviteMatch[1] ?? '')
@@ -649,6 +727,9 @@ export function createAppProjectsSurface(opts: AppProjectsSurfaceOptions): AppPr
         if ('code' in resolved) return jsonError(401, resolved.code, resolved.message)
         if (connect === undefined) {
           return jsonError(501, 'connect_not_configured', 'Neutron Connect is not configured on this gateway')
+        }
+        if (method === 'GET') {
+          return handleConnectInviteListRoute(connect, resolved, cp)
         }
         return handleConnectInviteRoute(req, connect.invite, resolved, cp)
       }
@@ -1113,6 +1194,42 @@ async function handleConnectInviteRoute(
     )
   }
   return jsonError(status, result.code, result.reason)
+}
+
+async function handleConnectInviteListRoute(
+  connect: AppConnectSurfaceDeps,
+  resolved: ResolvedAuth,
+  project_id: string,
+): Promise<Response> {
+  const result = await connect.listInvites({
+    caller_user_id: resolved.user_id,
+    caller_instance_slug: resolved.project_slug,
+    project_id,
+  })
+  if (!result.ok) {
+    return jsonError(result.status, result.code, result.message)
+  }
+  return jsonOk({ invites: result.invites, project_id })
+}
+
+async function handleConnectInviteRevokeRoute(
+  connect: AppConnectSurfaceDeps,
+  resolved: ResolvedAuth,
+  project_id: string,
+  invite_id: string,
+): Promise<Response> {
+  const result = await connect.revokeInvite({
+    caller_user_id: resolved.user_id,
+    caller_instance_slug: resolved.project_slug,
+    project_id,
+    invite_id,
+  })
+  if (!result.ok) {
+    return jsonError(result.status, result.code, result.message)
+  }
+  // `state` is the state the invite was in BEFORE the call, so a UI can say
+  // something true ("withdrawn" vs "that one had already been used").
+  return jsonOk({ revoked: result.revoked, state: result.state, project_id, invite_id })
 }
 
 async function handleConnectMembersRoute(

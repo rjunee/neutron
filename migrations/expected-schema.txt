@@ -103,7 +103,7 @@ CREATE INDEX idx_connect_guest_invites_project
 [index] idx_connect_guest_invites_unredeemed (tbl=connect_guest_invites)
 CREATE INDEX idx_connect_guest_invites_unredeemed
     ON connect_guest_invites (expires_at_ms)
-    WHERE redeemed_at_ms IS NULL
+    WHERE redeemed_at_ms IS NULL AND revoked_at_ms IS NULL
 
 [index] idx_connected_members_active_identity (tbl=connected_members)
 CREATE UNIQUE INDEX idx_connected_members_active_identity
@@ -586,7 +586,7 @@ CREATE TABLE connect_guest_invites (
     expires_at_ms     INTEGER NOT NULL,
     redeemed_at_ms    INTEGER,
     redeemed_by_slug  TEXT
-) STRICT
+, revoked_at_ms INTEGER) STRICT
 
 [table] connected_members (tbl=connected_members)
 CREATE TABLE "connected_members" (

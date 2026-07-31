@@ -18,6 +18,7 @@
  */
 
 import type {
+  ConnectInviteView,
   ConnectMemberStatus,
   ConnectMemberView,
   ConnectMemberRole,
@@ -91,6 +92,26 @@ export function canRevokeConnectMember(
  * UI has one import surface without coupling the two flows.
  */
 export { formatInviteExpiry as formatAcceptLinkExpiry } from './invite-helpers';
+
+/**
+ * The invites the drawer SHOWS, newest first (ISSUES #421 residual).
+ *
+ * Only `live` ones. That is not the drawer hiding history — the server's ledger
+ * is complete and returns every invite ever issued with its state. It is the
+ * drawer showing the invites that are still DOING something: a live invite is
+ * the only kind that can still be redeemed, and it is what holds the whole
+ * cross-instance Connect surface reachable on this install. Redeemed invites are
+ * already represented by the member row they created, and expired/revoked ones
+ * are inert. An owner opening this drawer is asking "what is still outstanding",
+ * and every row here is answerable with one action.
+ */
+export function outstandingConnectInvites(
+  invites: readonly ConnectInviteView[],
+): ConnectInviteView[] {
+  return [...invites]
+    .filter((i) => i.state === 'live')
+    .sort((a, b) => b.created_at_ms - a.created_at_ms);
+}
 
 const ROLE_ORDER: Record<ConnectMemberRole, number> = {
   owner: 0,

@@ -71,6 +71,19 @@ export interface ConnectAcceptOptions {
 const DEFAULT_PREVIEW_URL = '/connect/v1/connect/invite-preview'
 const DEFAULT_ACCEPT_URL = '/connect/v1/connect/guest-auth'
 
+/**
+ * The one message for an invite that will never work again, whatever killed it.
+ *
+ * It used to read "This invite has expired or already been used" — which became
+ * FALSE the moment invites could be REVOKED (ISSUES #421 residual). The public
+ * edge deliberately returns the expired response for a withdrawn invite (see
+ * `connect/guest-auth-handler.ts:publicRefusal`), so the client cannot tell the
+ * three apart and must not claim to. This wording is true for all of them, and
+ * it still gives the guest the only action that helps.
+ */
+const DEAD_INVITE_MESSAGE =
+  'This invite is no longer valid. Ask the inviter for a fresh link.'
+
 /** Default browser SHA-256 hex hasher (SubtleCrypto). */
 async function defaultHashToken(raw: string): Promise<string> {
   const data = new TextEncoder().encode(raw)
@@ -131,7 +144,7 @@ export function initConnectAccept(opts: ConnectAcceptOptions): void {
       return
     }
     if (res.status === 410) {
-      showStatus(opts, 'error', 'This invite has expired or already been used. Ask the inviter for a fresh link.')
+      showStatus(opts, 'error', DEAD_INVITE_MESSAGE)
       return
     }
     if (res.status !== 200) {
@@ -197,8 +210,7 @@ export function initConnectAccept(opts: ConnectAcceptOptions): void {
 
 function acceptError(status: number, body: GuestAuthShape): string {
   if (status === 409) return 'This invite has already been used.'
-  if (status === 410) return 'This invite has expired. Ask the inviter for a fresh link.'
-  if (status === 404) return 'This invite is no longer valid.'
+  if (status === 410 || status === 404) return DEAD_INVITE_MESSAGE
   return body.reason ?? body.error ?? 'Could not join. Try again shortly.'
 }
 

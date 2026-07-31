@@ -114,10 +114,8 @@ export function buildGuestAuthHandler(
       )
     } catch (err) {
       if (err instanceof GuestInviteError) {
-        return json(statusForRefusal(err.reason), {
-          error: 'invite_refused',
-          reason: err.reason,
-        })
+        const pub = publicRefusal(err.reason)
+        return json(pub.status, { error: 'invite_refused', reason: pub.reason })
       }
       return json(500, {
         error: 'guest_accept_failed',
@@ -192,14 +190,41 @@ function parseBody(body: unknown): GuestAuthRequestBody | null {
   }
 }
 
-function statusForRefusal(reason: GuestInviteError['reason']): number {
+/**
+ * Map an internal refusal to what the PUBLIC edge is allowed to say.
+ *
+ * `revoked` is COLLAPSED ONTO `expired` — same 410, same `reason` string, same
+ * bytes. This is deliberate, and it is the one place the decision is made
+ * (ISSUES #421 residual):
+ *
+ *   - It adds NO new distinguishable state to an unauthenticated endpoint. The
+ *     #421 assessment accepted the existing not-found / expired / already-used
+ *     split against 256-bit token entropy; revocation is the owner's private act
+ *     and there is no reason to widen that surface to accommodate it.
+ *   - The only party who can hold a token that hashes to a real row is the
+ *     person the owner sent it to. Telling that person "the owner withdrew you"
+ *     is a social disclosure with no product benefit: the action is identical
+ *     either way — the link is dead, ask the inviter.
+ *   - It is not a lie to a human, because no human reads this JSON. The guest
+ *     reads `landing/connect-accept.ts`, whose copy was reworded alongside this
+ *     to "This invite is no longer valid" — true whether the invite lapsed, was
+ *     spent, or was withdrawn.
+ *
+ * The truthful distinction is kept where it is useful and safe: the owner's own
+ * authenticated invite ledger (`ConnectGuestInviteStore.listByProject`).
+ */
+function publicRefusal(reason: GuestInviteError['reason']): {
+  status: number
+  reason: string
+} {
   switch (reason) {
     case 'not_found':
-      return 404
+      return { status: 404, reason: 'not_found' }
     case 'expired':
-      return 410
+    case 'revoked':
+      return { status: 410, reason: 'expired' }
     case 'already_redeemed':
-      return 409
+      return { status: 409, reason: 'already_redeemed' }
   }
 }
 

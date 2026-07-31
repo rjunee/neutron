@@ -20,6 +20,7 @@ import {
   connectBadge,
   connectMemberSort,
   formatAcceptLinkExpiry,
+  outstandingConnectInvites,
 } from '../lib/connect-member-helpers';
 import {
   ConnectMembersClient,
@@ -350,5 +351,151 @@ describe('ConnectMembersClient', () => {
       code: 'forbidden',
       status: 403,
     });
+  });
+});
+
+/**
+ * ISSUES #421 residual — the OWNER-FACING half of invite revocation.
+ *
+ * A revoke API nobody can reach is the defect this repo keeps hitting, so these
+ * pin the two links in the chain that live in the app: the wire shape the client
+ * sends (method / URL / no body), and the filter that decides which invites the
+ * drawer offers a Withdraw button for.
+ */
+describe('outstandingConnectInvites', () => {
+  const base = {
+    access: 'write' as const,
+    created_at_ms: 0,
+    expires_at_ms: 9_000,
+    redeemed_at_ms: null,
+    revoked_at_ms: null,
+  };
+
+  it('keeps only LIVE invites — the ones still redeemable and still holding the surface open', () => {
+    const got = outstandingConnectInvites([
+      { ...base, invite_id: 'a', state: 'live' },
+      { ...base, invite_id: 'b', state: 'redeemed' },
+      { ...base, invite_id: 'c', state: 'revoked' },
+      { ...base, invite_id: 'd', state: 'expired' },
+    ]);
+    expect(got.map((i) => i.invite_id)).toEqual(['a']);
+  });
+
+  it('orders newest first, so the invite just minted is the one the owner sees', () => {
+    const got = outstandingConnectInvites([
+      { ...base, invite_id: 'old', state: 'live', created_at_ms: 1 },
+      { ...base, invite_id: 'new', state: 'live', created_at_ms: 3 },
+      { ...base, invite_id: 'mid', state: 'live', created_at_ms: 2 },
+    ]);
+    expect(got.map((i) => i.invite_id)).toEqual(['new', 'mid', 'old']);
+  });
+
+  it('is non-mutating', () => {
+    const input = [
+      { ...base, invite_id: 'x', state: 'live' as const, created_at_ms: 1 },
+      { ...base, invite_id: 'y', state: 'live' as const, created_at_ms: 2 },
+    ];
+    const snapshot = JSON.stringify(input);
+    outstandingConnectInvites(input);
+    expect(JSON.stringify(input)).toBe(snapshot);
+  });
+});
+
+describe('ConnectMembersClient — invite ledger + withdrawal', () => {
+  it('lists the ledger with a GET at the connect-invites path', async () => {
+    const stub = makeFetchStub(() => ({
+      status: 200,
+      body: {
+        ok: true,
+        project_id: 'neutron',
+        invites: [
+          {
+            invite_id: 'f'.repeat(64),
+            access: 'write',
+            state: 'live',
+            created_at_ms: 1,
+            expires_at_ms: 2,
+            redeemed_at_ms: null,
+            revoked_at_ms: null,
+          },
+        ],
+      },
+    }));
+    globalThis.fetch = stub.fetch;
+    const client = new ConnectMembersClient({ base_url: 'http://example.test', token: 't' });
+    const got = await client.listInvites('neutron');
+
+    expect(got.map((i) => i.state)).toEqual(['live']);
+    const call = stub.calls[0]!;
+    expect(call.method).toBe('GET');
+    expect(call.url).toBe('http://example.test/api/app/projects/neutron/connect-invites');
+  });
+
+  it('withdraws an invite with a POST to its /revoke path and no body', async () => {
+    const id = 'a'.repeat(64);
+    const stub = makeFetchStub(() => ({
+      status: 200,
+      body: { ok: true, revoked: true, state: 'live', project_id: 'neutron', invite_id: id },
+    }));
+    globalThis.fetch = stub.fetch;
+    const client = new ConnectMembersClient({ base_url: 'http://example.test', token: 't' });
+    const got = await client.revokeInvite('neutron', id);
+
+    expect(got).toEqual({ revoked: true, state: 'live', project_id: 'neutron', invite_id: id });
+    const call = stub.calls[0]!;
+    expect(call.method).toBe('POST');
+    expect(call.url).toBe(
+      `http://example.test/api/app/projects/neutron/connect-invites/${id}/revoke`,
+    );
+    expect(call.body).toBeUndefined();
+  });
+
+  it('maps an unknown invite into a typed 404 error', async () => {
+    const stub = makeFetchStub(() => ({
+      status: 404,
+      body: { ok: false, code: 'invite_not_found', message: 'no such invite on this project' },
+    }));
+    globalThis.fetch = stub.fetch;
+    const client = new ConnectMembersClient({ base_url: 'http://example.test', token: 't' });
+    await expect(client.revokeInvite('neutron', 'b'.repeat(64))).rejects.toMatchObject({
+      code: 'invite_not_found',
+      status: 404,
+    });
+  });
+});
+
+/**
+ * ISSUES #421 residual — THE WIRING PIN.
+ *
+ * The client method and the filter above are both fully unit-tested and both
+ * would stay green if `ProjectSettingsDrawer` never called them — which is
+ * exactly the "module exists, its tests pass, nothing composes it" defect the
+ * whole of #421 is about. There is no render harness for that component in this
+ * repo (nothing under `app/__tests__` mounts it), so this asserts the wiring at
+ * the SOURCE level — the same technique the gateway's cross-surface invariant
+ * guards already use, where the property is "this call site exists everywhere it
+ * must" and no runtime fixture can express it.
+ *
+ * It is a weaker pin than a render test and is not pretending otherwise: it
+ * proves the call sites exist, not that a human can see the button. The
+ * end-to-end proof that revocation reaches the surface lives in
+ * `open/__tests__/open-connect-served.test.ts`, over real HTTP.
+ */
+describe('the drawer actually calls the withdrawal path', () => {
+  it('renders outstanding invites and wires a Withdraw action to revokeInvite', async () => {
+    const src = await Bun.file(
+      new URL('../components/ProjectSettingsDrawer.tsx', import.meta.url).pathname,
+    ).text();
+
+    // The ledger is read and filtered for display…
+    expect(src).toContain('outstandingConnectInvites(connect.invites)');
+    // …the hook exposes the withdrawal…
+    expect(src).toContain('client.revokeInvite(projectId, inviteId)');
+    // …and a control invokes it.
+    expect(src).toContain('connect.revokeInvite(inv.invite_id)');
+    expect(src).toContain('connect-invite-revoke-');
+    // The ledger is fetched at all — a Withdraw button over an always-empty
+    // list is the same defect wearing a different hat.
+    expect(src).toContain('client.listInvites(projectId)');
   });
 });

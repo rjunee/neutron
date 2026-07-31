@@ -359,6 +359,213 @@ describe('ISSUES #421 — a self-hosted Open install SERVES Connect, gated on it
 })
 
 /**
+ * ISSUES #421 residual — AN INVITE CAN BE REVOKED.
+ *
+ * THE DEFECT. `ConnectGuestInviteStore` had no revoke method: an invite closed
+ * when the guest spent it or when the 7-day TTL elapsed, and by no other means.
+ * So an owner who sent a link to the wrong address could not take it back.
+ *
+ * WHY THAT WAS WORSE THAN ONE UNWANTED GUEST. The surface gate opens the WHOLE
+ * `/connect/v1` prefix while a live invite exists. An unwanted outstanding invite
+ * therefore held a cross-boundary API reachable from the internet for a week.
+ *
+ * WHY THESE TESTS ARE SHAPED THIS WAY. A test that called `store.revoke` and
+ * then called `connectSurfaceIsOpen` would prove the predicate and nothing else —
+ * it would have passed just as happily with the owner route unmounted, which is
+ * the "module exists, the composer never wires it" defect this whole issue is
+ * about. So every assertion below drives HTTP at the REAL composed Open surface
+ * over the live `Bun.serve` harness: the owner revokes through the route the app
+ * actually calls, and the surface's closure is observed from outside.
+ */
+describe('ISSUES #421 residual — the owner can WITHDRAW an invite', () => {
+  test('revoking the last live invite CLOSES the composed surface, same process', async () => {
+    harness = await startHarness()
+
+    // Closed before, open after — the precondition, so the closure below cannot
+    // be a surface that was never open.
+    expect((await fetch(`${harness.base}/connect/v1/health`)).status).toBe(404)
+    await issueInvite(harness)
+    expect((await fetch(`${harness.base}/connect/v1/health`)).status).toBe(200)
+
+    // The owner reads their ledger through the real route. This read is what
+    // makes revocation usable at all: the raw token is unrecoverable after
+    // issuance, so without it there is no handle to name.
+    const ledger = await fetch(
+      `${harness.base}/api/app/projects/${PROJECT_ID}/connect-invites`,
+      { headers: { authorization: 'Bearer dev:owner' } },
+    )
+    expect(ledger.status).toBe(200)
+    const { invites } = (await ledger.json()) as {
+      invites: Array<{ invite_id: string; state: string }>
+    }
+    expect(invites.length).toBe(1)
+    expect(invites[0]!.state).toBe('live')
+
+    const revoke = await fetch(
+      `${harness.base}/api/app/projects/${PROJECT_ID}/connect-invites/${invites[0]!.invite_id}/revoke`,
+      { method: 'POST', headers: { authorization: 'Bearer dev:owner' } },
+    )
+    expect(revoke.status).toBe(200)
+    expect((await revoke.json()) as { revoked: boolean; state: string }).toMatchObject({
+      revoked: true,
+      state: 'live',
+    })
+
+    // THE POINT: no live invite, no collaborator → the whole prefix disappears
+    // on the very next request. No restart, no latch.
+    expect((await fetch(`${harness.base}/connect/v1/health`)).status).toBe(404)
+
+    // And closed is still byte-identical to an unrouted path, exactly as it is
+    // for an install that never had Connect.
+    const closed = await fetch(`${harness.base}/connect/v1/health`)
+    const nonsense = await fetch(`${harness.base}/connect/v1/definitely-not-a-route`)
+    expect(await closed.text()).toBe(await nonsense.text())
+  })
+
+  test('a REVOKED token is refused at the handshake, and looks exactly like an expired one', async () => {
+    harness = await startHarness()
+    const { token } = await issueInvite(harness)
+    const hashOf = (raw: string): string =>
+      new Bun.CryptoHasher('sha256').update(raw, 'utf8').digest('hex')
+
+    // A SECOND invite keeps the surface open after the first is withdrawn, so
+    // the handshake below is refused on its own merits rather than by a closed
+    // gate returning 404 for everything.
+    const other = await issueInvite(harness)
+
+    const revoke = await fetch(
+      `${harness.base}/api/app/projects/${PROJECT_ID}/connect-invites/${hashOf(token)}/revoke`,
+      { method: 'POST', headers: { authorization: 'Bearer dev:owner' } },
+    )
+    expect(revoke.status).toBe(200)
+    expect((await fetch(`${harness.base}/connect/v1/health`)).status).toBe(200)
+
+    // The revoked token no longer redeems.
+    const refused = await fetch(`${harness.base}/connect/v1/connect/guest-auth`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        invite_token: token,
+        display_name: 'Guest Collaborator',
+        guest_handle: 'guest.example.com',
+      }),
+    })
+    expect(refused.status).toBe(410)
+
+    // NOT A NEW ORACLE: the response is byte-identical to a genuinely expired
+    // invite's. Seed one directly at the DB (there is no way to age the clock on
+    // a composed surface) and compare the actual bytes.
+    await harness.db.run(
+      `INSERT INTO connect_guest_invites
+         (token_hash, project_id, display_name_hint, access,
+          created_at_ms, expires_at_ms, redeemed_at_ms, redeemed_by_slug)
+       VALUES (?, ?, NULL, 'write', ?, ?, NULL, NULL)`,
+      [hashOf('aged-out-token'), PROJECT_ID, Date.now() - 10_000, Date.now() - 1_000],
+    )
+    const aged = await fetch(`${harness.base}/connect/v1/connect/guest-auth`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        invite_token: 'aged-out-token',
+        display_name: 'Guest Collaborator',
+        guest_handle: 'guest.example.com',
+      }),
+    })
+    expect(aged.status).toBe(refused.status)
+    expect(await aged.text()).toBe(await refused.text())
+
+    // Same collapse on the read side: the preview a revoked holder gets is the
+    // one an already-spent invite gets.
+    const revokedPreview = await fetch(
+      `${harness.base}/connect/v1/connect/invite-preview?token_hash=${hashOf(token)}`,
+    )
+    expect(revokedPreview.status).toBe(410)
+
+    // The UNTOUCHED second invite still works — revocation is per-invite, not a
+    // switch that kills the feature.
+    const ok = await fetch(`${harness.base}/connect/v1/connect/guest-auth`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        invite_token: other.token,
+        display_name: 'Guest Collaborator',
+        guest_handle: 'guest.example.com',
+      }),
+    })
+    expect(ok.status).toBe(200)
+  })
+
+  test('revoking is idempotent and cannot reach an invite on a project the caller did not name', async () => {
+    harness = await startHarness()
+    const { token } = await issueInvite(harness)
+    const inviteId = new Bun.CryptoHasher('sha256').update(token, 'utf8').digest('hex')
+    const revokeUrl = (project: string): string =>
+      `${harness!.base}/api/app/projects/${project}/connect-invites/${inviteId}/revoke`
+    const post = (url: string): Promise<Response> =>
+      fetch(url, { method: 'POST', headers: { authorization: 'Bearer dev:owner' } })
+
+    const first = await post(revokeUrl(PROJECT_ID))
+    expect(((await first.json()) as { revoked: boolean }).revoked).toBe(true)
+
+    // Second call: a no-op that reports it, never an error and never a second
+    // timestamp rewrite.
+    const second = await post(revokeUrl(PROJECT_ID))
+    expect(second.status).toBe(200)
+    expect((await second.json()) as { revoked: boolean; state: string }).toMatchObject({
+      revoked: false,
+      state: 'revoked',
+    })
+
+    // The id is a primary key, so naming the wrong project must not find it.
+    await harness.db.run(
+      `INSERT INTO projects (id, name, description, persona, privacy_mode, billing_mode, created_at, updated_at)
+       VALUES ('proj-other', 'Other', NULL, NULL, 'private', 'personal', ?, ?)`,
+      [new Date().toISOString(), new Date().toISOString()],
+    )
+    expect((await post(revokeUrl('proj-other'))).status).toBe(404)
+
+    // An unauthenticated caller cannot revoke anything.
+    expect(
+      (await fetch(revokeUrl(PROJECT_ID), { method: 'POST' })).status,
+    ).toBe(401)
+  })
+})
+
+/**
+ * ISSUES #421 residual — the accept page pointed guests at `/terms` and
+ * `/privacy`, which no Neutron install serves, under a line asserting agreement
+ * to documents that do not exist. Both were live to every guest from the moment
+ * the page was mounted.
+ */
+describe('ISSUES #421 residual — the accept page cites no absent documents', () => {
+  test('the SERVED page has no /terms or /privacy link', async () => {
+    harness = await startHarness()
+    const html = await (
+      await fetch(`${harness.base}/connect/accept`, { headers: BROWSER_HEADERS })
+    ).text()
+
+    expect(html).not.toContain('href="/terms"')
+    expect(html).not.toContain('href="/privacy"')
+
+    // Stronger than the two literals: the page must not link anywhere this
+    // server does not serve. Assert every href it renders actually resolves.
+    const hrefs = [...html.matchAll(/href="([^"]+)"/g)].map((m) => m[1]!)
+    expect(hrefs.length).toBeGreaterThan(0)
+    for (const href of hrefs) {
+      if (!href.startsWith('/')) continue
+      const res = await fetch(`${harness.base}${href}`, { headers: BROWSER_HEADERS })
+      expect({ href, status: res.status }).toEqual({ href, status: 200 })
+    }
+
+    // The mandatory, project-specific disclosure is still what gates the join —
+    // it was always the real agreement, and it is not being removed with the
+    // dead links.
+    const js = await (await fetch(`${harness.base}/connect/accept.js`)).text()
+    expect(js).toContain('I understand where this project lives')
+  })
+})
+
+/**
  * ISSUES #421 (residual) — THE PAGE A GUEST ACTUALLY LANDS ON.
  *
  * The API above was proven end to end while the guest-facing surface was

@@ -112,6 +112,20 @@ async function start(): Promise<Harness> {
         return { ok: true, inviter_role: 'owner', owner_db: db, project_id }
       },
     },
+    // ISSUES #421 residual — the invite ledger + withdrawal. Wired against the
+    // SAME real store the issuance path above writes to, so the fixture never
+    // pretends an invite exists that the issuance route didn't create.
+    listInvites: async ({ project_id }) => ({
+      ok: true,
+      invites: new ConnectGuestInviteStore(db).listByProject(project_id, Date.now()),
+    }),
+    revokeInvite: async ({ project_id, invite_id }) => {
+      const r = await new ConnectGuestInviteStore(db).revoke(project_id, invite_id, Date.now())
+      if (r.prior_state === null) {
+        return { ok: false, code: 'invite_not_found', message: 'no such invite', status: 404 }
+      }
+      return { ok: true, revoked: r.revoked, state: r.prior_state }
+    },
     listMembers: async () => ({ ok: true, members: [] }),
     revokeMember: async () => ({ ok: true, revoked: true }),
   }

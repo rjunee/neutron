@@ -69,9 +69,14 @@ export function buildInvitePreviewHandler(
     if (row === null) {
       return json(404, { error: 'not_found' })
     }
-    // Already redeemed (single-use consumed) → gone. Expired → gone. Benign,
-    // no field leak in either case.
-    if (row.redeemed_at_ms !== null) {
+    // Already redeemed (single-use consumed) → gone. Revoked by the owner → the
+    // SAME `gone`, byte-identical, on purpose (ISSUES #421 residual): revocation
+    // must not turn this unauthenticated read into a finer-grained oracle than
+    // it already is, and the holder's next action is the same either way. See
+    // `guest-auth-handler.ts:publicRefusal` for the full reasoning — this is the
+    // read-side half of one decision. Expired → gone. Benign, no field leak in
+    // any case.
+    if (row.revoked_at_ms !== null || row.redeemed_at_ms !== null) {
       return json(410, { error: 'gone' })
     }
     if (row.expires_at_ms <= now()) {
