@@ -54,7 +54,7 @@ import {
   type StreamState,
   type SystemNoticeState,
 } from './chat-render-model';
-import { createMobileStore } from './op-sqlite-store';
+import { sharedMobileStore } from './op-sqlite-store';
 import { MobileChatSession } from './mobile-session';
 import { acquireSession, releaseSession, setCacheActive } from './session-cache';
 
@@ -157,6 +157,20 @@ export const SEND_FAILED_MESSAGE = 'Message not sent — your text is still in t
 /** Shown when the composer is used before the chat session finished attaching. */
 export const SEND_NOT_READY_MESSAGE = 'Still connecting — message not sent';
 
+/**
+ * How many times an attach that FAILED is retried before the view gives up and
+ * waits for the owner to act.
+ *
+ * The attach used to run in a bare `void (async () => …)()` with no `catch`: a
+ * construction that rejected produced an unhandled promise rejection and
+ * nothing else — no status, no message, no second attempt — so one bad moment
+ * darkened that project until the app was restarted. Retrying is what makes the
+ * failure transient instead of terminal.
+ */
+export const MAX_ATTACH_ATTEMPTS = 3;
+/** Pause before re-attaching after a failed attempt. */
+export const ATTACH_RETRY_DELAY_MS = 750;
+
 export function useMobileChat(railId: string): UseMobileChatResult {
   // The router hands us a RAIL id, which for General is a sentinel that only
   // looks like a project id. Collapse it once, here, and use the scope
@@ -180,6 +194,15 @@ export function useMobileChat(railId: string): UseMobileChatResult {
   const [sendError, setSendError] = useState<string | null>(null);
   const [hydrated, setHydrated] = useState(false);
   const [selfDeviceId, setSelfDeviceId] = useState('');
+  // Bumping this RE-RUNS the attach effect. It is the retry: an attach that
+  // threw has no other way back onto the wire, and a project that cannot get
+  // onto the wire is a project the owner cannot open.
+  const [attachAttempt, setAttachAttempt] = useState(0);
+  // Failures spent on the CURRENT (identity, scope). Kept in a ref, and reset by
+  // the effect itself when the scope changes, so switching projects starts with
+  // a full budget without a second effect racing the first into a double attach.
+  const attachFailuresRef = useRef(0);
+  const attachScopeRef = useRef<string | null>(null);
 
   // Construct the store + session for this (user, project). Re-runs when the
   // identity or project changes; fully torn down on cleanup.
@@ -187,6 +210,12 @@ export function useMobileChat(railId: string): UseMobileChatResult {
     if (user === null || user.token.length === 0) return;
     let disposed = false;
     let session: MobileChatSession | null = null;
+
+    const attachScope = `${user.id}|${projectId}`;
+    if (attachScopeRef.current !== attachScope) {
+      attachScopeRef.current = attachScope;
+      attachFailuresRef.current = 0;
+    }
 
     // ── Hydration bookkeeping (permanent project-switch spinner, 2026-07-30) ──
     // The two inputs the pure rule needs, tracked as effect-locals so every
@@ -235,8 +264,9 @@ export function useMobileChat(railId: string): UseMobileChatResult {
 
     let acquiredKey: string | null = null;
     let unsubscribe: (() => void) | null = null;
+    let retryHandle: ReturnType<typeof setTimeout> | null = null;
 
-    void (async (): Promise<void> => {
+    const attach = async (): Promise<void> => {
       // ISSUES #399 — the SHARED topic derivation, identical to the web client.
       // General is the user-scoped topic; a project scope gets
       // `app:<user>:<project>`. Uses the shared `wire-types` helpers rather
@@ -248,7 +278,9 @@ export function useMobileChat(railId: string): UseMobileChatResult {
       // projects used to open a store, open a socket, handshake and resume every
       // time; now a recently-visited scope re-attaches to a live connection.
       session = await acquireSession(topicId, async () => {
-        const store = await createMobileStore();
+        // The ONE device-wide store (`sharedMobileStore`), not a fresh
+        // connection per topic — see the rationale on that function.
+        const store = await sharedMobileStore();
         return new MobileChatSession({
           url: buildWsUrl(config.base_url, user.token, projectId, deviceId),
           topic_id: topicId,
@@ -331,11 +363,40 @@ export function useMobileChat(railId: string): UseMobileChatResult {
       // so calling it unconditionally cannot churn a healthy socket and is the
       // only formulation that has no wedged state.
       active.start();
-    })();
+    };
+
+    // THE ATTACH IS NOT ALLOWED TO DIE QUIETLY (2026-07-31). This used to be a
+    // bare `void (async () => …)()`: `acquireSession` rejecting — a store that
+    // never opened, a construction that blew its deadline — produced an
+    // unhandled promise rejection and NOTHING else. No status, no log the owner
+    // could see, no second attempt; the view simply never reached `start()`, so
+    // that project never opened a socket again for the life of the process. The
+    // owner's report was "I can't switch between projects, just seeing spinners",
+    // and the server agreed: fifteen minutes of switching, not one connection
+    // attempted for any scope but the two whose sessions already existed.
+    //
+    // So: surface it, settle the spinner, and RETRY. A failed attach must be a
+    // moment, never a state.
+    void attach().catch((err: unknown) => {
+      if (disposed) return;
+      console.error('[chat] could not attach the chat session:', err);
+      // The transport is definitively not coming up on this attempt, so the
+      // hydrating spinner has nothing left to wait for — settle it rather than
+      // making the owner stare at it until the floor elapses.
+      liveStatus = 'closed';
+      setStatus('closed');
+      settleHydration();
+      attachFailuresRef.current += 1;
+      if (attachFailuresRef.current >= MAX_ATTACH_ATTEMPTS) return;
+      retryHandle = setTimeout(() => {
+        if (!disposed) setAttachAttempt((n) => n + 1);
+      }, ATTACH_RETRY_DELAY_MS);
+    });
 
     return (): void => {
       disposed = true;
       clearTimeout(settleDeadline);
+      if (retryHandle !== null) clearTimeout(retryHandle);
       streamRef.current = emptyStreamState();
       noticeRef.current = emptySystemNoticeState();
       sessionRef.current = null;
@@ -351,7 +412,7 @@ export function useMobileChat(railId: string): UseMobileChatResult {
       setStream(emptyStreamState());
       setNotice(emptySystemNoticeState());
     };
-  }, [user, projectId, config.base_url, deviceId]);
+  }, [user, projectId, config.base_url, deviceId, attachAttempt]);
 
   // AppState → socket activity. Background severs the socket cheaply;
   // foreground reconnects + resumes (research doc §6).

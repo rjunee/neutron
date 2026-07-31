@@ -43,6 +43,9 @@ const { FakeChatSocket, mountScreen } = await import('./support/mount');
 const { setRuntimeServerConfig, __resetServerConfigForTests } = await import('../lib/config');
 const { AuthSessionProvider } = await import('../lib/session');
 const { ChatSyncSurface } = await import('../components/ChatSyncSurface');
+const { __resetSharedMobileStoreForTests } = await import(
+  '../lib/chat-core/op-sqlite-store'
+);
 const { clearSessionCache } = await import('../lib/chat-core/session-cache');
 const { SEND_FAILED_MESSAGE } = await import('../lib/chat-core/use-mobile-chat');
 
@@ -63,6 +66,10 @@ beforeEach(() => {
   restoreCrypto = withoutWebCrypto();
   FakeChatSocket.install();
   clearSessionCache();
+  // The durable store is DEVICE-wide now (`sharedMobileStore`), so a suite that
+  // wants a clean transcript has to say so — otherwise one test's unacked sends
+  // are still queued under the same topic when the next one mounts.
+  __resetSharedMobileStoreForTests();
   __resetServerConfigForTests();
   setRuntimeServerConfig({ gateway_base_url: BASE_URL, auth_base_url: null });
 });
@@ -71,6 +78,7 @@ afterEach(() => {
   restoreCrypto?.();
   restoreCrypto = null;
   clearSessionCache();
+  __resetSharedMobileStoreForTests();
 });
 
 // Bun evaluates EVERY test file's top level before running ANY test, so the

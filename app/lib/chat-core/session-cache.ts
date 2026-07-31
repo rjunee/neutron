@@ -42,14 +42,74 @@ interface Entry {
   lastReleased: number;
 }
 
+/**
+ * How long a session construction may take before the key is FREED for a fresh
+ * attempt.
+ *
+ * WHY A DEADLINE EXISTS AT ALL (the project that could never be opened,
+ * 2026-07-31). `pending` was cleared only when the construction SETTLED. A
+ * factory that neither resolves nor rejects therefore pinned its key forever:
+ * every later mount of that project took the `pending` branch, awaited a promise
+ * that would never answer, and returned nothing — so `start()` was never
+ * reached and the client never even ATTEMPTED a socket for that scope. On the
+ * owner's device that read as a permanent spinner on every project except the
+ * two whose sessions had been built before the wedge, and the server's session
+ * log agreed: across fifteen minutes of switching, not one connection was opened
+ * for any other topic. A cache that can enter a state no later attempt can leave
+ * is not a cache; the deadline is what makes "unconnectable forever" impossible
+ * rather than merely unlikely.
+ *
+ * Generous on purpose — a cold native-module load plus a schema open on a slow
+ * device must NOT be cut off. This bounds a hang, it does not police latency.
+ */
+export const SESSION_BUILD_TIMEOUT_MS = 8_000;
+
 const entries = new Map<string, Entry>();
 /** In-flight constructions, so two simultaneous mounts share one session. */
 const pending = new Map<string, Promise<MobileChatSession>>();
 let tick = 0;
 
 /**
+ * `promise`, but rejecting once `ms` has passed.
+ *
+ * The underlying construction is deliberately NOT cancelled — there is nothing
+ * to cancel a native module load with. If it does eventually resolve, its
+ * session is simply orphaned: it was never `start()`ed and it holds no resource
+ * of its own (the durable store is shared, see `op-sqlite-store.ts`), so letting
+ * it be collected is the whole cleanup.
+ */
+function withDeadline(
+  promise: Promise<MobileChatSession>,
+  ms: number,
+): Promise<MobileChatSession> {
+  return new Promise<MobileChatSession>((resolve, reject) => {
+    const handle: unknown = setTimeout(() => {
+      reject(new Error(`session construction did not settle within ${String(ms)}ms`));
+    }, ms);
+    // A pending deadline must never keep the host process (or a test runner)
+    // alive on its own.
+    (handle as { unref?: () => void }).unref?.();
+    promise.then(
+      (session) => {
+        clearTimeout(handle as never);
+        resolve(session);
+      },
+      (err: unknown) => {
+        clearTimeout(handle as never);
+        reject(err instanceof Error ? err : new Error(String(err)));
+      },
+    );
+  });
+}
+
+/**
  * Acquire the session for `key`, constructing it via `factory` on a miss.
  * Every successful acquire MUST be paired with a {@link releaseSession}.
+ *
+ * Rejects when the construction fails or exceeds {@link SESSION_BUILD_TIMEOUT_MS}
+ * — and leaves NOTHING behind when it does, so the next acquire of the same key
+ * starts from scratch. The caller must handle that rejection; a mount that
+ * swallows it is a project the owner cannot open.
  */
 export async function acquireSession(
   key: string,
@@ -61,6 +121,9 @@ export async function acquireSession(
     return hit.session;
   }
 
+  // A construction already in flight is JOINED rather than duplicated — and the
+  // promise held in `pending` already carries the deadline, so a waiter can
+  // never outlive the attempt it joined.
   const inFlight = pending.get(key);
   if (inFlight !== undefined) {
     const session = await inFlight;
@@ -71,14 +134,16 @@ export async function acquireSession(
     return session;
   }
 
-  const build = factory();
+  const build = withDeadline(factory(), SESSION_BUILD_TIMEOUT_MS);
   pending.set(key, build);
   try {
     const session = await build;
     entries.set(key, { session, refs: 1, lastReleased: 0 });
     return session;
   } finally {
-    pending.delete(key);
+    // Only retract OUR attempt: a later acquire may already have started a fresh
+    // one under this key after our deadline fired.
+    if (pending.get(key) === build) pending.delete(key);
   }
 }
 

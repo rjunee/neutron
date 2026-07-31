@@ -80,3 +80,42 @@ export async function createMobileStore(dbName: string = MOBILE_DB_NAME): Promis
     return new InMemoryStore();
   }
 }
+
+/** The one device-wide store, once it has been built. */
+let sharedStore: Promise<Store> | null = null;
+
+/**
+ * THE device's chat store — built at most once per process, shared by every
+ * chat session.
+ *
+ * WHY THIS IS NOT PER-SESSION. There is exactly one database (`neutron-chat.db`)
+ * holding exactly one per-user transcript; a project view is a FILTER over it
+ * (`use-mobile-chat.ts` renders `all.filter(m => matchesProject(m, projectId))`),
+ * not a separate corpus. Building a store per topic therefore opened another
+ * connection to the same file and re-ran the schema open for every project the
+ * device had not visited yet — the only async native work in the session factory,
+ * done again and again for no gain, inside the warm cache's construction
+ * critical section. Since the cache keeps earlier sessions (and their
+ * connections) ALIVE by design, that per-topic work is also the piece whose cost
+ * and contention grow with the number of projects visited, which is precisely
+ * the population that stopped connecting.
+ *
+ * Sharing it means the first session pays the native load and every session
+ * after it constructs with no native work at all. A failed build is not
+ * memoised — the next caller retries rather than inheriting one bad moment
+ * forever.
+ */
+export function sharedMobileStore(): Promise<Store> {
+  if (sharedStore === null) {
+    sharedStore = createMobileStore().catch((err: unknown) => {
+      sharedStore = null;
+      throw err instanceof Error ? err : new Error(String(err));
+    });
+  }
+  return sharedStore;
+}
+
+/** Test-only — drop the memoised store so a suite starts on a clean transcript. */
+export function __resetSharedMobileStoreForTests(): void {
+  sharedStore = null;
+}
