@@ -135,6 +135,17 @@ export function useVoiceRecorder(input: UseVoiceRecorderInput): VoiceRecorderVal
   // onLongPress, and stops a release racing an in-flight start.
   const busy = useRef(false);
   const unmounted = useRef(false);
+  /**
+   * A release that arrived while `start()` was still awaiting the permission
+   * check and the native prepare. Without this the finger is already gone by
+   * the time capture begins, nobody is left to stop it, and the microphone
+   * stays hot until the 10-minute cap — the classic fast-tap leak.
+   *
+   *   'latch'  the press was a tap; keep capturing hands-free once started
+   *   'finish' the press ended before capture began, so there is nothing to
+   *            send — stop immediately and discard
+   */
+  const pending_release = useRef<null | 'latch' | 'finish'>(null);
 
   // `input` is a fresh object every render; hold the live callbacks in a ref so
   // the returned handlers stay referentially stable and a host can pass them
@@ -187,6 +198,7 @@ export function useVoiceRecorder(input: UseVoiceRecorderInput): VoiceRecorderVal
       setElapsed(0);
       setLatched(false);
       setPreviewUri(null);
+      pending_release.current = null;
 
       let granted = false;
       try {
@@ -242,16 +254,37 @@ export function useVoiceRecorder(input: UseVoiceRecorderInput): VoiceRecorderVal
         if (began === null) return;
         setElapsed(Date.now() - began);
       }, ELAPSED_TICK_MS);
+
+      // The finger left while we were still starting up. Apply what it asked
+      // for now that there is finally a recording to apply it to.
+      const pending = pending_release.current;
+      pending_release.current = null;
+      if (pending === 'latch') {
+        setLatched(true);
+      } else if (pending === 'finish') {
+        // The whole press was shorter than the startup latency, so no speech
+        // was captured — stop and drop it rather than sending a fragment.
+        stopTick();
+        started_at.current = null;
+        void recorder.stop().catch(() => undefined);
+        toIdle();
+      }
     } finally {
       busy.current = false;
     }
-  }, [recorder, stopTick]);
+  }, [recorder, stopTick, toIdle]);
 
   const updateDrag = useCallback((dx: number, dy: number): void => {
     setDrag({ dx, dy });
   }, []);
 
   const latch = useCallback((): void => {
+    // Released before capture began — remember it, and `start()` will latch as
+    // soon as the recorder is live.
+    if (busy.current && started_at.current === null) {
+      pending_release.current = 'latch';
+      return;
+    }
     // Only meaningful while capture is actually running; a latch request after
     // the recorder stopped would strand the UI showing a stop button.
     if (started_at.current === null) return;
@@ -262,6 +295,8 @@ export function useVoiceRecorder(input: UseVoiceRecorderInput): VoiceRecorderVal
   }, []);
 
   const cancel = useCallback(async (): Promise<void> => {
+    // An explicit discard outranks whatever the release was going to do.
+    if (busy.current && started_at.current === null) pending_release.current = 'finish';
     if (started_at.current !== null) await stopCapture();
     else stopTick();
     if (unmounted.current) return;
@@ -304,7 +339,14 @@ export function useVoiceRecorder(input: UseVoiceRecorderInput): VoiceRecorderVal
   const finish = useCallback(async (): Promise<void> => {
     if (started_at.current === null) {
       // Released before capture actually began (permission sheet, or a press
-      // shorter than the native start). Nothing captured, nothing to discard.
+      // shorter than the native start). Leave a note so `start()` tears the
+      // recorder straight back down instead of leaving the mic hot with no
+      // finger on the button.
+      if (busy.current) {
+        pending_release.current = 'finish';
+        return;
+      }
+      // Nothing captured and nothing starting — just clear any recording UI.
       if (phase === 'recording' || phase === 'requesting') toIdle();
       return;
     }
