@@ -472,8 +472,9 @@ describe('ConnectMembersClient — invite ledger + withdrawal', () => {
  * exactly the "module exists, its tests pass, nothing composes it" defect the
  * whole of #421 is about. There is no render harness for that component in this
  * repo (nothing under `app/__tests__` mounts it), so this asserts the wiring at
- * the SOURCE level, the same technique `gateway/http/__tests__/
- * tenant-slug-timing-safe.test.ts` uses to pin a cross-surface invariant.
+ * the SOURCE level — the same technique the gateway's cross-surface invariant
+ * guards already use, where the property is "this call site exists everywhere it
+ * must" and no runtime fixture can express it.
  *
  * It is a weaker pin than a render test and is not pretending otherwise: it
  * proves the call sites exist, not that a human can see the button. The
