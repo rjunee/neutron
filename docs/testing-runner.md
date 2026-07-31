@@ -69,6 +69,30 @@ files still count toward the coverage audit.
 
 No retry budget: unlike the WASM lane these are deterministic, not flaky.
 
+### What it looks like when you bypass the lane
+
+Running a whole directory that spans both lanes — `bun test app/__tests__` is
+the one people reach for — puts the harness back in a shared process and
+reproduces the collision. Measured on `bun test v1.3.9`, 2026-07-31: **1295
+pass / 12 fail across 102 files**, and each of the three affected files passes
+on its own. The three shapes, all the same root cause:
+
+| File | Fails | Mechanism |
+| --- | --- | --- |
+| `app/__tests__/upload-client.test.ts` | 3 | the harness's happy-dom registration (`support/native-harness.ts:207`) leaves `window` + `XMLHttpRequest` defined, so `lib/upload-client.ts:177`'s `isWeb` probe flips and the XHR transport is chosen over the injected `fetch_impl` — the test then makes a real socket call |
+| `app/__tests__/authed-attachment-file-open.test.tsx` | 5 | the harness's source rewrite (`support/native-harness.ts:149`) redirects `app/components/*`'s `react-native` imports to `support/stubs/react-native.ts`, so the component reads that stub's `Platform.OS` (`'web'` unless `__HARNESS_OS__` is set) instead of the `platform` object the test mutates — every native-path assertion fails |
+| `app/__tests__/chat-prompt-spent-after-remount.test.tsx` | 4 | the reverse direction: `docs-panes-render.test.ts:44` registers a process-global `mock.module('../lib/markdown-render')` whose `RenderMarkdown` renders `null`, so the harness's real `ChatSyncSurface` draws every bubble without its body |
+
+Both lanes are individually clean in a single process (verified same day: 1226
+pass / 0 fail across the 92 general files; 81 pass / 0 fail across the 10
+harness files), so this is a process-boundary artifact, not a rotting suite.
+Run the lanes, not the directory:
+
+```bash
+bun test $(grep -LE 'installNativeHarness' app/__tests__/*.test.ts app/__tests__/*.test.tsx)
+bun test $(grep -lE 'installNativeHarness' app/__tests__/*.test.ts app/__tests__/*.test.tsx)
+```
+
 ## Knobs
 
 | Env | Default | What it does |
