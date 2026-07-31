@@ -95,7 +95,17 @@ function cannedHandle(instanceId: string): SessionHandle {
 interface ActivityBody {
   scope_key: string
   project_id: string | null
-  events: Array<{ seq: number; kind: string; label: string; detail?: string; synthetic?: boolean }>
+  events: Array<{
+    seq: number
+    kind: string
+    label: string
+    detail?: string
+    /** The expanded content — assistant words, full arguments, tool output. */
+    body?: string
+    /** The MCP server qualifier, incarnation stripped. */
+    source?: string
+    synthetic?: boolean
+  }>
   state: string
   last_event_age_ms: number | null
   last_real_activity_age_ms: number | null
@@ -210,6 +220,70 @@ describe('Activity Inspector — served end-to-end through the real Open compose
       const body2 = (await res2!.json()) as ActivityBody
       expect(body2.events.map((e) => e.kind)).toEqual(['tool_start', 'tool_end'])
       expect(body2.events.map((e) => e.seq)).toEqual([1, 2])
+    })
+  })
+
+  test('ARGUMENTS and RESULTS survive the whole unmocked chain to the snapshot', async () => {
+    // The content the first build could not show at all: a finished tool row said
+    // nothing about what came back. Fixtures synthesised — public repo.
+    await withComposition(async ({ get }) => {
+      await tapPost({
+        session_id: 'unregistered',
+        phase: 'post',
+        tool_name: 'Bash',
+        detail: 'a-command',
+        args: 'a-command --flag',
+        result: 'first output line\nsecond output line',
+      })
+      const body = (await (await get('/api/app/activity'))!.json()) as ActivityBody
+      const row = body.events[0]
+      expect(row?.kind).toBe('tool_end')
+      expect(row?.label).toBe('Bash')
+      // The RETURN is what a post row leads with.
+      expect(row?.body).toContain('second output line')
+      // Newlines survive: the shape of a listing is most of its meaning.
+      expect(row?.body).toContain('\n')
+    })
+  })
+
+  test('a namespaced MCP tool reaches the client HUMANISED, never as a transport id', async () => {
+    // `spawn.ts` names the dev-channel server with a per-spawn random suffix, so the
+    // raw form is both unreadable and unstable. It must not survive to the wire.
+    await withComposition(async ({ get }) => {
+      await tapPost({
+        session_id: 'unregistered',
+        phase: 'pre',
+        tool_name: `mcp__neutron-${'ab'.repeat(16)}__memory_search`,
+        detail: 'a-query',
+        args: 'a-query',
+      })
+      const body = (await (await get('/api/app/activity'))!.json()) as ActivityBody
+      const row = body.events[0]
+      expect(row?.label).toBe('memory_search')
+      expect(row?.label).not.toContain('mcp__')
+      expect(row?.source).toBe('neutron')
+    })
+  })
+
+  test('the reply tool call arrives as the ASSISTANT MESSAGE, and its ack is dropped', async () => {
+    // The interleave, end to end: the agent's words are a tool call on the wire.
+    await withComposition(async ({ get }) => {
+      const words = 'a synthesised assistant sentence'
+      const server = `mcp__neutron-${'cd'.repeat(16)}__reply`
+      await tapPost({
+        session_id: 'unregistered',
+        phase: 'pre',
+        tool_name: server,
+        detail: words,
+        args: words,
+      })
+      await tapPost({ session_id: 'unregistered', phase: 'post', tool_name: server, detail: '' })
+      const body = (await (await get('/api/app/activity'))!.json()) as ActivityBody
+      // Exactly ONE row: the message. The post-ack is noise and never lands.
+      expect(body.events).toHaveLength(1)
+      expect(body.events[0]?.kind).toBe('token')
+      expect(body.events[0]?.label).toBe('assistant')
+      expect(body.events[0]?.detail).toBe(words)
     })
   })
 
