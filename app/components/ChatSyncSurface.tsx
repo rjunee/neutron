@@ -490,7 +490,7 @@ export function ChatSyncSurface({
         </View>
       ) : null}
       {!ready ? (
-        <View style={styles.center}>
+        <View style={styles.center} testID="chat-attaching">
           <ActivityIndicator color={THEME.accent} />
         </View>
       ) : (
@@ -940,7 +940,7 @@ function TypingIndicator(): React.JSX.Element {
  */
 function HydratingState(): React.JSX.Element {
   return (
-    <View style={styles.center}>
+    <View style={styles.center} testID="chat-hydrating">
       <ActivityIndicator color={THEME.accent} />
     </View>
   )
@@ -948,7 +948,7 @@ function HydratingState(): React.JSX.Element {
 
 function EmptyState(): React.JSX.Element {
   return (
-    <View style={styles.center}>
+    <View style={styles.center} testID="chat-empty">
       <Text style={styles.emptyText}>No messages yet. Say hello 👋</Text>
     </View>
   );

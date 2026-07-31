@@ -155,22 +155,34 @@ function RailItem({
         </Text>
         {/* CLICKABLE ACTIVITY DOT — the Activity Inspector's entry point (SPEC §
             WAVE 3.5; Ryan-locked: no new icon, the EXISTING dot becomes the
-            affordance). A nested Pressable is valid in RN, but the 10px dot is far
-            below a usable touch target, so `hitSlop` widens it to ~30px without
-            changing the painted size. The outer row Pressable still handles a tap
-            anywhere else, and RN's touch resolution gives the inner (deeper)
-            Pressable priority inside the slop area, so a dot tap does not also
-            navigate. */}
-        <Pressable
-          accessibilityRole="button"
-          accessibilityLabel={`Show activity for ${project.name}`}
-          testID={`rail-dot-press-${project.id}`}
-          hitSlop={10}
-          onPress={() => onOpenActivity(project.id)}
-          style={styles.dotPress}
-        >
-          <ActivityDot kind={dot} reduceMotion={reduceMotion} />
-        </Pressable>
+            affordance) — but ONLY on the row the owner is already standing in.
+            A nested Pressable with a generous `hitSlop` is right for reaching a
+            10px target and wrong for a rail whose rows are ~44px tall: the slop
+            around eight dots covered most of the column, and RN gives the deeper
+            Pressable priority inside it, so aiming at a project opened the
+            inspector instead of switching to it. Ryan on device: "the indicator
+            light being tappable is too easy to misclick when trying to switch to
+            another project… make it only work if the project is currently
+            active." So an INACTIVE row's dot is a plain painted glyph with no
+            touch responder at all — every pixel of that row belongs to the switch
+            — and the ACTIVE row keeps the full affordance, slop included, because
+            there is nothing to mis-navigate to from the row you are on. */}
+        {isActive ? (
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel={`Show activity for ${project.name}`}
+            testID={`rail-dot-press-${project.id}`}
+            hitSlop={10}
+            onPress={() => onOpenActivity(project.id)}
+            style={styles.dotPress}
+          >
+            <ActivityDot kind={dot} reduceMotion={reduceMotion} />
+          </Pressable>
+        ) : (
+          <View style={styles.dotInert}>
+            <ActivityDot kind={dot} reduceMotion={reduceMotion} />
+          </View>
+        )}
       </View>
       <Text
         style={[styles.name, isActive && styles.nameActive, hasUnread && styles.nameUnread]}
@@ -304,6 +316,18 @@ const styles = StyleSheet.create({
     position: 'absolute',
     right: 2,
     bottom: 2,
+  },
+  /**
+   * The same corner slot, INERT — what a non-active row's dot paints into. Same
+   * geometry as `dotPress` so the rail looks identical; `pointerEvents: 'none'`
+   * hands every touch straight through to the row's own Pressable, which is the
+   * whole point (a dot you cannot mis-tap on the way to switching projects).
+   */
+  dotInert: {
+    position: 'absolute',
+    right: 2,
+    bottom: 2,
+    pointerEvents: 'none',
   },
   name: {
     fontSize: TYPOGRAPHY.caption.fontSize,

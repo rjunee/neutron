@@ -21,9 +21,67 @@ import {
   systemNoticeText,
   type ReactionChip,
 } from '@neutronai/chat-core';
-import type { ChatMessage } from '@neutronai/chat-core';
+import type { ChatMessage, ConnStatus } from '@neutronai/chat-core';
 
 export type { ReactionChip };
+
+/**
+ * How long a freshly-attached scope may withhold its transcript behind the
+ * hydrating spinner before the UI has to commit to what it actually holds.
+ *
+ * Long enough that a healthy connect + resume replay lands first (so the empty
+ * state never flashes over history that is about to arrive — the whole point of
+ * ISSUES #402), short enough that a wedged scope resolves while the owner is
+ * still looking at it.
+ */
+export const HYDRATION_SETTLE_MS = 4000;
+
+export interface HydrationInput {
+  /** How many rows THIS scope's local store currently holds. */
+  message_count: number;
+  /** The transport's current status. */
+  status: ConnStatus;
+  /** Milliseconds since this view attached to this scope. */
+  elapsed_ms: number;
+}
+
+/**
+ * Has this scope's history SETTLED — i.e. may the UI now show the owner what it
+ * actually has (a transcript, or an honest empty state) instead of a spinner?
+ *
+ * WHY THIS IS A FUNCTION AND NOT TWO `setHydrated(true)` CALLS. The gate used to
+ * be exactly two positive signals, written inline: "the local store already had
+ * rows" and "the socket reached `open`". Both are signals that can legitimately
+ * NEVER ARRIVE — a project whose transcript has not synced to this device yet has
+ * no local rows, and a session that never gets driven onto the wire never reaches
+ * `open` — and there was no third rule, so the two of them together were also the
+ * ONLY way out. A scope that hit neither sat on the hydrating spinner for the life
+ * of the process.
+ *
+ * That is what Ryan hit on-device (2026-07-30): every project whose transcript was
+ * a single seeded agent message — nothing in the local store, so signal one could
+ * not fire — showed a permanent spinner, while the two scopes carrying a real
+ * back-and-forth transcript (already on disk) rendered fine. The message-count
+ * correlation was never about turn-pairing; it was about which scopes could
+ * satisfy signal one.
+ *
+ * So the rule now has a FLOOR. Settled when ANY of:
+ *   - the local store already holds this scope's history (nothing to wait for);
+ *   - the socket reached `open` (the resume has been requested — a still-empty
+ *     transcript is genuinely empty, not merely un-fetched);
+ *   - the socket is `closed` (the attempt TERMINATED; a spinner over a dead
+ *     transport is a lie, and the status strip already reports the connection);
+ *   - {@link HYDRATION_SETTLE_MS} has elapsed — the floor. Nothing may hold the
+ *     spinner open forever, whatever the cause.
+ *
+ * An empty or minimal transcript renders an empty chat. Never an infinite spinner.
+ */
+export function hydrationSettled(input: HydrationInput): boolean {
+  if (input.message_count > 0) return true;
+  if (input.status === 'open') return true;
+  if (input.status === 'closed') return true;
+  return input.elapsed_ms >= HYDRATION_SETTLE_MS;
+}
 
 /** One in-flight agent stream (a sequence of `agent_message_partial`s). */
 export interface StreamingBuffer {
