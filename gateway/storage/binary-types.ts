@@ -118,6 +118,101 @@ export function mimeFromExtension(path: string): string | null {
   return EXTENSION_TO_MIME[lower.slice(dot)] ?? null
 }
 
+/** Which kinds of media track an ISO-BMFF file declares. */
+export interface IsoBmffTrackKinds {
+  audio: boolean
+  video: boolean
+}
+
+/** Guard against a malformed file driving an unbounded walk. */
+const ISO_BMFF_MAX_BOXES = 4096
+
+/**
+ * Read the media handler types out of an ISO base media file (MP4 / M4A), by
+ * walking the box tree to `moov > trak > mdia > hdlr` and collecting each
+ * track's 4-character handler type (`soun` = audio, `vide` = video).
+ *
+ * This is a STRUCTURAL walk, not a byte scan: each box header is a 32-bit
+ * big-endian size followed by a 4-character type, so we step box-to-box by
+ * size and only descend into the four container boxes on the path. That
+ * matters because a naive search for the ASCII bytes `hdlr` would happily hit
+ * a false positive inside compressed `mdat` audio data.
+ *
+ * Handles the two size escapes from ISO/IEC 14496-12: `size == 1` means a
+ * 64-bit size follows the type, `size == 0` means "runs to end of file".
+ * Recorders differ on where they put `moov` — Android's MediaRecorder writes
+ * it AFTER the `mdat` payload — so the walk must be able to skip a large
+ * `mdat` and keep going, which stepping by size does for free.
+ *
+ * Returns all-false when nothing parses; callers treat that as indeterminate.
+ */
+export function isoBmffTrackKinds(bytes: Uint8Array): IsoBmffTrackKinds {
+  const found: IsoBmffTrackKinds = { audio: false, video: false }
+  // Only these boxes are containers on the path to `hdlr`; everything else is
+  // skipped wholesale by its size.
+  const CONTAINERS = new Set(['moov', 'trak', 'mdia'])
+  let budget = ISO_BMFF_MAX_BOXES
+
+  const readType = (at: number): string =>
+    String.fromCharCode(
+      bytes[at] ?? 0,
+      bytes[at + 1] ?? 0,
+      bytes[at + 2] ?? 0,
+      bytes[at + 3] ?? 0,
+    )
+
+  const readU32 = (at: number): number =>
+    ((bytes[at] ?? 0) * 0x1000000 +
+      (bytes[at + 1] ?? 0) * 0x10000 +
+      (bytes[at + 2] ?? 0) * 0x100 +
+      (bytes[at + 3] ?? 0)) >>>
+    0
+
+  /** Walk the sibling boxes in [start, end). */
+  const walk = (start: number, end: number): void => {
+    let offset = start
+    // A box header is 8 bytes minimum (size + type).
+    while (offset + 8 <= end && budget > 0) {
+      budget -= 1
+      const declared = readU32(offset)
+      const type = readType(offset + 4)
+      let header = 8
+      let size = declared
+      if (declared === 1) {
+        // 64-bit `largesize` follows the type. We only care about files well
+        // under 10 MiB, so the high word must be zero for the box to be real.
+        if (offset + 16 > end) return
+        const high = readU32(offset + 8)
+        const low = readU32(offset + 12)
+        if (high !== 0) return
+        size = low
+        header = 16
+      } else if (declared === 0) {
+        // Extends to the end of the enclosing range.
+        size = end - offset
+      }
+      if (size < header || offset + size > end) return
+
+      if (type === 'hdlr') {
+        // FullBox: 1 version + 3 flags, then 4 bytes `pre_defined`, then the
+        // 4-character handler type.
+        const handler_at = offset + header + 8
+        if (handler_at + 4 <= end) {
+          const handler = readType(handler_at)
+          if (handler === 'soun') found.audio = true
+          else if (handler === 'vide') found.video = true
+        }
+      } else if (CONTAINERS.has(type)) {
+        walk(offset + header, offset + size)
+      }
+      offset += size
+    }
+  }
+
+  walk(0, bytes.length)
+  return found
+}
+
 /**
  * Sniff the canonical MIME from the first bytes of a blob. Returns the
  * canonical MIME (matching `BINARY_MIME_WHITELIST`) or `null` if the
@@ -232,6 +327,19 @@ export function magicByteSniff(bytes: Uint8Array): string | null {
       brand === 'iso4' ||
       brand === 'iso5'
     ) {
+      // A GENERIC brand says "ISO base media file", not "video". Android's
+      // MediaRecorder stamps every `MediaRecorder.OutputFormat.MPEG_4` file —
+      // including an audio-only voice note — with the major brand `mp42`
+      // (AOSP `MPEG4Writer::writeFtypBox`), and plenty of desktop muxers write
+      // `isom` for a plain `.m4a`. Reading the brand alone therefore classifies
+      // real voice notes as video and 415s them at the chat-upload whitelist.
+      //
+      // So when the brand is ambiguous, ask the TRACK TABLE instead: an
+      // audio-only file has a `soun` handler and no `vide` handler.
+      // Indeterminate (truncated / no parsable `moov`) keeps the historical
+      // `video/mp4` answer rather than guessing audio.
+      const tracks = isoBmffTrackKinds(bytes)
+      if (!tracks.video && tracks.audio) return 'audio/mp4'
       return 'video/mp4'
     }
   }

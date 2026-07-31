@@ -5705,6 +5705,41 @@ now-nonexistent vanilla client.
   the turn's `user_text` is never mutated. Both clients render a 🎵 chip for a voice
   note (web `message-adapter.ts` `isAudioAttachmentUrl`; native `attachment-url.ts`
   predicate; icon precedent `docs-shared.ts` `treeIconFor`).
+- **Recording a voice note on mobile (2026-07-31):** the half above accepted audio
+  but nothing could CAPTURE it — the app had no audio dependency at all, so a voice
+  message could only be sent by picking an existing file. Recording now lives in
+  four new modules, deliberately split so the gesture rules are testable off-device:
+  `app/lib/voice-recording.ts` (pure — the `M:SS` clock, the slide-to-cancel
+  arithmetic, the min/max duration rules, the capture settings), `app/lib/voice-send.ts`
+  (upload orchestration — validates then calls the EXISTING `uploadAttachment`; no new
+  endpoint), `app/lib/use-voice-recorder.ts` (**the seam**: permission, `expo-audio`
+  lifecycle, elapsed clock, upload handoff), and `app/components/VoiceMicButton.tsx` +
+  `VoiceRecorderOverlay.tsx` (the pixels). The dependency is **`expo-audio@~1.1.1`**
+  (SDK-54-matched; `expo-audio` supersedes `expo-av`), configured via the
+  `expo-audio` config plugin in `app.json`, which adds `RECORD_AUDIO` +
+  `MODIFY_AUDIO_SETTINGS` on Android and `NSMicrophoneUsageDescription` on iOS —
+  **native config, so it ships only in a new BUILD, never an OTA update**.
+  Both iMessage gestures run off one button and one recorder, disambiguated on
+  release by press duration (`LONG_PRESS_MS`): a HOLD sends on release (and
+  discards if the finger slid past `CANCEL_SLIDE_DX`, the glyph flipping mic → send
+  → ✕ as it travels), while a TAP latches capture hands-free and the overlay grows a
+  ■ stop that drops the clip into a play / ✕ / send review row. Capture is
+  22.05kHz mono AAC in `.m4a` at 32kbps — speech settings, since the ASR model
+  resamples anyway — capped at 10 minutes, which stays well inside
+  `MAX_CHAT_UPLOAD_BYTES`.
+- **ISO-BMFF audio is no longer mistaken for video (2026-07-31):** `magicByteSniff`
+  classified `ftyp` files on the major brand alone, so a GENERIC brand meant
+  `video/mp4` — a type absent from `CHAT_UPLOAD_MIME_WHITELIST`. Android's
+  MediaRecorder stamps `mp42` on every MPEG-4 file it writes, audio-only voice notes
+  included (and desktop muxers commonly write `isom` for a plain `.m4a`), so those
+  uploads 415'd. `isoBmffTrackKinds` (`gateway/storage/binary-types.ts`) now walks
+  the box tree to `moov > trak > mdia > hdlr` and reads the track handlers: `soun`
+  with no `vide` ⇒ `audio/mp4`. It is a STRUCTURAL walk stepping box-to-box by size
+  (handling both the `size == 1` 64-bit and `size == 0` to-EOF escapes), not a byte
+  scan, so `hdlr` bytes inside an opaque `mdat` cannot forge a track — and it finds
+  `moov` whether it precedes the payload or trails it, which is the layout
+  MediaRecorder writes. An unparsable file keeps the historical `video/mp4` answer
+  rather than guessing.
 
 **Parity reached:** optimistic send, token streaming, typing indicator,
 reconnect+backoff (all via chat-core), durable cold-open + gap-free reconnect
