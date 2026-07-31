@@ -35,9 +35,17 @@
  * arrives here with an error attached. No error and no project means only that
  * we have not been told yet.
  *
- * This cannot hang on a spinner forever: the caller only reaches this module with
- * a signed-in user and a non-empty scope id, which is exactly the condition under
- * which `fetchSettings` runs rather than returning early.
+ * WHY `loading` IS NOW GUARANTEED TO END. This module leaves `loading` only when
+ * the settings fetch SETTLES, so for a long time the guarantee rested entirely on
+ * "the caller only gets here with a signed-in user and a non-empty scope id,
+ * which is exactly when `fetchSettings` runs rather than returning early". That
+ * covers the fetch being STARTED and says nothing about it FINISHING — and
+ * `fetch` on the device has no timeout, so a request that never answered held
+ * this at `loading` for the life of the process with no error, no retry and
+ * nothing on the wire. `ProjectsClient` now bounds every request
+ * (`REQUEST_TIMEOUT_MS`), which is what actually makes the wait finite: a hang
+ * becomes a rejection, a rejection becomes an `error`, and an error becomes
+ * something the owner can see and retry.
  */
 
 /** What the content pane renders. The chrome is not part of this decision. */
@@ -46,8 +54,17 @@ export type ProjectShellContent =
   | { kind: 'ready' }
   /** This scope's identity is still in flight — spinner, INSIDE the chrome. */
   | { kind: 'loading' }
-  /** Definitively absent or unreachable — the not-found pane, INSIDE the chrome. */
-  | { kind: 'not_found'; message?: string };
+  /** Definitively absent — the not-found pane, INSIDE the chrome. */
+  | { kind: 'not_found'; message?: string }
+  /**
+   * The server was asked and did not give a usable answer — offline, timed out,
+   * refused the credential. Distinct from `not_found` because the copy has to be
+   * distinct: telling the owner a project they can see in the rail "is not
+   * available" when the truth is "this device could not reach the server" sends
+   * them looking for the wrong problem. Carries a RETRY, because unlike a
+   * genuinely missing project this one may work on the next attempt.
+   */
+  | { kind: 'unavailable'; message: string };
 
 export interface ProjectShellContentInput {
   /**
@@ -59,14 +76,26 @@ export interface ProjectShellContentInput {
   /** True once THIS scope's settings doc has resolved. */
   has_project: boolean;
   /** THIS scope's load error, if any. Must not be another scope's. */
-  error: { message: string } | null;
+  error: { code?: string; message: string } | null;
 }
+
+/**
+ * Error codes that mean the PROJECT is gone, as opposed to the SERVER being
+ * unreachable. Everything else is a transport/auth failure about this device's
+ * connection, and saying "project not found" about one of those is a lie the
+ * owner cannot act on.
+ */
+const ABSENT_CODES: ReadonlySet<string> = new Set(['not_found', 'project_not_found']);
 
 export function projectShellContent(input: ProjectShellContentInput): ProjectShellContent {
   // General never fetches, so it is always ready — before any other rule, or a
   // stale error from a previous scope could 404 the scope that cannot 404.
   if (input.is_general) return { kind: 'ready' };
   if (input.has_project) return { kind: 'ready' };
-  if (input.error !== null) return { kind: 'not_found', message: input.error.message };
+  if (input.error !== null) {
+    const code = input.error.code ?? '';
+    if (ABSENT_CODES.has(code)) return { kind: 'not_found', message: input.error.message };
+    return { kind: 'unavailable', message: input.error.message };
+  }
   return { kind: 'loading' };
 }

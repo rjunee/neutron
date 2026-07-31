@@ -180,7 +180,7 @@ function ProjectShell({ project_id }: { project_id: string }) {
     [pathname],
   );
   const { user } = useAuthSession();
-  const { project: fetchedProject, error, generateInvite } = useProjectState();
+  const { project: fetchedProject, error, generateInvite, refresh } = useProjectState();
   // General is the NO-PROJECT scope: there is no settings row to fetch, no
   // members, no privacy mode and no Core tabs. Without this the shell 404s on
   // `getSettings('general')` and renders "project not found" for the scope that
@@ -497,6 +497,17 @@ function ProjectShell({ project_id }: { project_id: string }) {
       <View style={[styles.contentFill, styles.centered]} testID="project-content-loading">
         <ActivityIndicator color={THEME.text_secondary} />
       </View>
+    ) : content.kind === 'unavailable' ? (
+      // The server was asked and could not answer. NOT "project not found" — the
+      // owner is looking at this project in the rail, and blaming the project for
+      // a transport failure sends them hunting the wrong thing. Retry re-runs
+      // THIS scope's fetch in place; the rail stays live either way.
+      <ProjectLoadFailedPane
+        message={content.message}
+        onRetry={() => {
+          void refresh();
+        }}
+      />
     ) : (
       <ProjectNotFoundFallback
         id={project_id}
@@ -688,6 +699,40 @@ function SlotFader({
   }, [keyId, scopeId, opacity, reduceMotion]);
 
   return <Animated.View style={[styles.fader, { opacity }]}>{children}</Animated.View>;
+}
+
+/**
+ * "We asked and could not get an answer" — the honest pane for a scope whose
+ * settings load FAILED for a reason that is not absence.
+ *
+ * It exists because the alternative states are both lies: an indefinite spinner
+ * claims the answer is still coming when nothing is coming, and "Project not
+ * found" blames a project the owner can see in the rail for what is actually
+ * this device's connection. Retry is first-class here — unlike a genuinely
+ * missing project, this one is very likely to work on the next attempt.
+ */
+function ProjectLoadFailedPane({
+  message,
+  onRetry,
+}: {
+  message: string;
+  onRetry: () => void;
+}) {
+  return (
+    <View style={[styles.contentFill, styles.centered]} testID="project-load-failed">
+      <Text style={styles.errorTitle}>Couldn’t load this project</Text>
+      <Text style={styles.errorBody}>{message}</Text>
+      <Pressable
+        accessibilityRole="button"
+        accessibilityLabel="Try loading this project again"
+        testID="project-load-retry"
+        onPress={onRetry}
+        style={({ pressed }) => [styles.backBtn, pressed && styles.pressed]}
+      >
+        <Text style={styles.backBtnText}>Try again</Text>
+      </Pressable>
+    </View>
+  );
 }
 
 function ProjectNotFoundFallback({
