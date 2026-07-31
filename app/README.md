@@ -433,9 +433,36 @@ cd app
 bun run typecheck       # tsc --noEmit
 bun run lint            # expo lint (eslint-config-expo)
 bun run build:web       # expo export --platform web → dist/
+```
 
-# From repo root, run the app unit tests:
-bun test app/__tests__/
+### Running the app unit tests
+
+`bun test app/__tests__/` is **NOT** a supported invocation and will report
+~12 failures that every one of those files passes on its own. The mobile
+device-harness files (the ones that call `installNativeHarness()`) register a
+process-global happy-dom DOM and rewrite the app's own `react-native` imports;
+Bun runs many test *files* per process, so in a shared process that harness
+collides with the sibling files that own the `react-native` specifier with
+`mock.module(…)` and with the `typeof window` / `typeof XMLHttpRequest`
+capability probes in `lib/upload-client.ts`. Neither half is wrong — they are
+two incompatible module graphs, which is why `scripts/run-tests.sh` gives the
+harness its own process (§ device-harness isolation lane, and
+`docs/testing-runner.md`). Nothing is skipped: every file runs, in the lane
+where it is clean.
+
+From the repo root:
+
+```bash
+# The supported whole-suite run (partitions for bounded memory + both lanes).
+# This is what CI runs.
+bash scripts/run-tests.sh
+
+# App-only, the same two lanes, one bun process each:
+bun test $(grep -LE 'installNativeHarness' app/__tests__/*.test.ts app/__tests__/*.test.tsx)
+bun test $(grep -lE 'installNativeHarness' app/__tests__/*.test.ts app/__tests__/*.test.tsx)
+
+# A single file is always safe:
+bun test app/__tests__/upload-client.test.ts
 ```
 
 ## EAS
