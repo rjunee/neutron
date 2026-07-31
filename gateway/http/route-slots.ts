@@ -450,6 +450,16 @@ export const ROUTE_SLOTS = [
     promote: (c) => pluckHandler(c.app_upload_surface),
     dispatch: (v: SurfaceHandler, ctx) => v.handler(ctx.req),
   }),
+  // 0e3. Local voice transcription — `/api/app/voice-transcription`. Owner-gated
+  //      install/remove control for the keyless whisper.cpp ASR backend.
+  slot({
+    key: 'appVoiceTranscription',
+    rung: 'app-voice-transcription',
+    composition: 'app_voice_transcription_surface',
+    gated: true,
+    promote: (c) => pluckHandler(c.app_voice_transcription_surface),
+    dispatch: (v: SurfaceHandler, ctx) => v.handler(ctx.req),
+  }),
   // 0f. Project launcher — P5.3. `/api/app/projects/<id>/launcher[*]`.
   slot({
     key: 'appLauncher',

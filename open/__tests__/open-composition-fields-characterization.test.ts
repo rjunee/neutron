@@ -61,6 +61,11 @@ const EXPECTED_COMPOSITION_KEYS = [
   'app_tabs_surface',
   'app_tasks_surface',
   'app_upload_surface',
+  // Local voice transcription (`/api/app/voice-transcription`) — the Settings
+  // control that installs whisper.cpp so voice notes transcribe with no API key.
+  // Its presence HERE is the done-means-served proof: the REAL Open composer
+  // must construct and hand over the surface, not merely define the module.
+  'app_voice_transcription_surface',
   'app_work_board_surface',
   'app_ws_surface',
   'approval_notifier',

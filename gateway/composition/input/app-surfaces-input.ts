@@ -65,6 +65,20 @@ export interface AppSurfacesCompositionInput {
     handler: (req: Request) => Promise<Response | null>
   }
   /**
+   * Local voice-transcription install surface. When supplied, the composed
+   * HTTP chain mounts `/api/app/voice-transcription` (GET status + catalog,
+   * POST install, DELETE remove) — the Settings-tab control that downloads
+   * whisper.cpp so voice notes transcribe on this machine with no API key.
+   * When omitted the route is unmounted and the Settings section renders its
+   * loading state forever, so it must be wired wherever the React UI is served.
+   *
+   * Surface factory:
+   * `gateway/http/voice-transcription-surface.ts:createVoiceTranscriptionSurface`.
+   */
+  app_voice_transcription_surface?: {
+    handler: (req: Request) => Promise<Response | null>
+  }
+  /**
    * P5.3 — Expo-app project-launcher surface. When supplied, the
    * composed HTTP chain mounts `/api/app/projects/<id>/launcher[*]`.
    * HTTP-only — no websocket multiplexing concerns. When omitted the
