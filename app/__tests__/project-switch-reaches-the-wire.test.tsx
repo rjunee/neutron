@@ -166,7 +166,16 @@ async function waitReal(ms: number, screen?: { settle(): Promise<void> }): Promi
   await screen?.settle();
 }
 
-/** What the rail tap does — the shell's own handler, through the real router. */
+/**
+ * Enter a project through the `/projects/<id>` WAYPOINT, the way a cold start or
+ * a deep link does.
+ *
+ * This used to be what a rail tap did too, and the name is kept because these
+ * cases are about the waypoint chain. A rail tap now replaces straight to
+ * `/projects/<id>/<tab>` — see `rail-tap-lands-on-the-tapped-project.test.tsx`,
+ * which presses the real rail entry — because re-deriving the scope from the
+ * router mid-switch is what sent the owner back to the previous project.
+ */
 async function tapRail(projectId: string): Promise<void> {
   await act(async () => {
     useRouter().replace(`/projects/${encodeURIComponent(projectId)}`);

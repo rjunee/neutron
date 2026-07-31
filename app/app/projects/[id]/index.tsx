@@ -35,47 +35,17 @@
  */
 
 import { useLocalSearchParams, usePathname, useRouter } from 'expo-router';
-import { useEffect } from 'react';
+import { useEffect, useRef } from 'react';
 import { ActivityIndicator, StyleSheet, View } from 'react-native';
 
-import { lastTabStorage, type LastTabValue } from '../../../lib/last-tab-storage';
 import { GENERAL_CHAT_ROUTE } from '../../../lib/entry-route';
 import { projectIdFromPathname } from '../../../lib/project-rail-view';
+import { projectTabRoute } from '../../../lib/project-tab-route';
 import { THEME } from '../../../lib/composer-constants';
 
-const DEFAULT_TAB: LastTabValue = 'chat';
-
-/**
- * How long the last-tab preference may take before the handoff goes ahead
- * without it. Short on purpose: this is the difference between landing on the
- * tab you left and landing on Chat, and no owner would trade a second of
- * staring at a spinner for it.
- */
-export const LAST_TAB_READ_TIMEOUT_MS = 1_200;
-
-/** The stored tab, or `null` if it is missing, illegal, slow, or broken. */
-async function preferredTab(projectId: string): Promise<LastTabValue | null> {
-  const read = (async (): Promise<LastTabValue | null> => {
-    try {
-      return await lastTabStorage().get(projectId);
-    } catch {
-      return null;
-    }
-  })();
-  let handle: ReturnType<typeof setTimeout> | undefined;
-  try {
-    return await Promise.race([
-      read,
-      new Promise<null>((resolve) => {
-        handle = setTimeout(() => {
-          resolve(null);
-        }, LAST_TAB_READ_TIMEOUT_MS);
-      }),
-    ]);
-  } finally {
-    if (handle !== undefined) clearTimeout(handle);
-  }
-}
+// Re-exported so the timeout keeps ONE home while the tests that assert the
+// handoff's deadline keep importing it from the screen that spends it.
+export { DEFAULT_TAB, LAST_TAB_READ_TIMEOUT_MS } from '../../../lib/project-tab-route';
 
 export default function ProjectIndexRedirect() {
   const router = useRouter();
@@ -83,8 +53,20 @@ export default function ProjectIndexRedirect() {
   const { id: paramId } = useLocalSearchParams<{ id: string }>();
   // The PATH first, the param second — the same precedence the shell uses, so
   // the two can never disagree about the scope they are rendering.
-  const id =
+  const read =
     projectIdFromPathname(pathname) ?? (typeof paramId === 'string' ? paramId : '');
+  // …AND THEN NEVER AGAIN. Both of those sources can revert to the PREVIOUS
+  // project while this screen is awaiting the last-tab read: the root-stack
+  // route is named `projects/[id]`, which expo-router's `matchDynamicName`
+  // does not recognise as a dynamic segment, so an in-app switch never updates
+  // the root route's `id` and a later re-derivation can be handed the id we
+  // came from. Device trace, 2026-07-31 (names neutralised): `wp:mount=harbor` → `wp:mount=willow`
+  // → `wp:go=willow/chat` — the owner tapped `harbor` and was returned to
+  // `willow`. This screen exists to hand off ONE scope, so it commits to the
+  // first one it resolves and a later revert has nothing left to steer.
+  const latched = useRef<string | null>(null);
+  if (latched.current === null && read.length > 0) latched.current = read;
+  const id = latched.current ?? '';
 
   useEffect(() => {
     let cancelled = false;
@@ -95,9 +77,9 @@ export default function ProjectIndexRedirect() {
       return;
     }
     void (async () => {
-      const stored = await preferredTab(id);
+      const route = await projectTabRoute(id);
       if (cancelled) return;
-      router.replace(`/projects/${encodeURIComponent(id)}/${stored ?? DEFAULT_TAB}`);
+      router.replace(route as Parameters<typeof router.replace>[0]);
     })();
     return () => {
       cancelled = true;

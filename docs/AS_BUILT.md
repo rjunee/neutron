@@ -2,6 +2,31 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+## 2026-07-31 — a rail tap lands on the project it names
+
+Branch `fix/rail-tap-lands-on-previous-project`. THIS is the root cause of the switch defect the two previous passes bounded but did not find. It is not hydration, not the settings gate, not the socket: the router was told to go somewhere else, and the app obeyed.
+
+**What the owner saw.** Every rail tap on a project landed on the PREVIOUSLY-ACTIVE project. From General with another project previously active, tapping a third one went to that previous project — not to the entry project, not to General. The rail highlight never moved to what was tapped, and the content pane spun during the bounce. General was the one entry that always worked, and nothing explained why.
+
+**How it was found.** The release build routes no console output to logcat, so the trace came out through the accessibility tree: a temporary probe rendered the router's live state and a ring buffer of navigation events into a `testID`, read back with `uiautomator dump` (RN maps `testID` to Android `resource-id`). The probe itself had to be fixed once before it told the truth — this app builds with the React Compiler, which caches any render sub-expression with no reactive dependency, so a module-level `LOG.join()` read at render froze at its first value. The log is delivered through state now. The trace, with project names neutralised:
+
+    press=harbor; rail:tap=harbor:cur=willow;
+    wp:mount=harbor;     ← the waypoint resolved the RIGHT scope
+    shell=harbor;        ← the shell moved to it
+    wp:mount=willow;     ← …then it was re-mounted on the PREVIOUS scope
+    shell=willow;
+    wp:go=willow/chat    ← …and it navigated there
+
+**Three facts compose into that.** (1) The project shell is ONE root-stack screen named `projects/[id]` (`app/app/_layout.tsx`), and expo-router treats a dynamic segment as diverging only when the route NAME is exactly `[id]` — `matchDynamicName` is `/^\[([^[\]]+?)\]$/`, which does not match `projects/[id]` (expo-router 6.0.24, `build/matchers.js`). So an in-app switch is applied to the CHILD navigator and the root route keeps the id you came FROM, permanently. (2) The shell rendered the loading pane INSTEAD of `<Slot/>`; `<Slot/>` IS the `[id]` group's navigator, so that unmounted it, and the remount re-seeded from the stale parent and opened at its initial route — the `/projects/<id>` waypoint — carrying the previous project's id. (3) The waypoint's whole job is to navigate, so it took the owner back. **General's immunity falls out of (2):** General has no settings doc to fetch, so it is never `loading`, so its slot never unmounted.
+
+**The fix is three removals, no timeouts and no retries.** A rail tap now resolves the destination tab AT THE TAP SITE and replaces ONCE, straight to `/projects/<id>/<tab>` — the id travels in a closure instead of being re-derived from a router that can answer with the previous project (`lib/project-tab-route.ts`, new, which owns the last-tab resolution both callers share). The shell now draws the loading, offline and not-found panes as an OPAQUE OVERLAY above a permanently-mounted `<Slot/>` instead of in place of it, so no navigator is ever destroyed mid-switch. And the waypoint — still the entry for a cold start or a deep link to `/projects/<id>` — latches the first scope it resolves, so a router that re-reports the previous project cannot steer it.
+
+**Device-verified, which is the only verification that counts here.** Published to the `preview` channel and run on `emulator-5554` against the owner's live instance. Reproduced first on the shipped bundle (the tap on another project left the shell where it was; a later tap from General landed on the previously-active project). After the fix, eight consecutive switches — including the discriminator case, from General to a third project with another project previously active — each landed on the TAPPED project with the rail highlight moved and the chat surface mounted. Last-tab preservation, tapping the already-active project (ISSUES #401), warm and cold deep links to both `/projects/<id>` and `/projects/<id>/chat`, and cold start all still behave. Bundle identity was proven at RUNTIME, not from APK strings: with the emulator's network cut, the offline pane and the chat surface are now present in the same accessibility dump — they were mutually exclusive on every prior build, so only this code can produce it.
+
+**Tests.** `app/__tests__/rail-tap-lands-on-the-tapped-project.test.tsx` pins each of the three links in the terms the harness speaks: the tap navigates straight to a tab route (never the waypoint), the slot stays mounted under the loading pane, and the waypoint hands off to the scope it was entered with even when the router reverts underneath it mid-read. The harness models the PATH as its single source of truth and so cannot reproduce expo-router's stale route PARAMS (its own header says so) — the third test drives the revert through the path instead, which is the same question asked in the harness's own terms. All four fail on the pre-fix code and pass on this one, verified by stashing the two source files and re-running.
+
+Verified: `tsc --noEmit` unchanged (one pre-existing typed-route error in `handleTabSelect`, untouched); `scripts/ci/lint.sh` clean; the new file 4/0; the eight neighbouring rail/switch suites 69/0; the full app suite unchanged against the branch point (the same 12 in-process cross-test-pollution failures before and after, all passing when their files are run alone). No surface change, so no `SYSTEM-OVERVIEW.md` edit. NO FEATURE FLAGS.
+
 ## 2026-07-31 — every project connects: the scope the warm cache could pin forever
 
 Branch `fix/every-project-connects`. Second attempt at the project-switch defect; the first one made it worse, and the evidence that says so is server-side.
