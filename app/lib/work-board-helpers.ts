@@ -15,6 +15,78 @@ import { resolveStepLabel } from './work-board-client';
 import type { RunPhaseLabel, RunProgress, WorkBoardItem, WorkBoardStatus } from './work-board-client';
 import type { PhaseColor } from './theme';
 
+/* ── owner-facing failure copy ───────────────────────────────────────────── */
+
+/**
+ * Which failure the owner is looking at. A failed LOAD replaces the whole board
+ * pane, so it has to explain what they are looking at; a failed ACTION is a
+ * banner above a board they can still see, so it names the action.
+ */
+export type BoardErrorKind = 'load' | 'action';
+
+/**
+ * Owner-facing copy for a Work Board failure — NEVER the raw error.
+ *
+ * The rule this enforces: an internal validator string is not a user interface.
+ * On device the General Work tab rendered its entire pane as
+ * `invalid_project_id: project_id must be 1-128 chars from [A-Za-z0-9_.-]`,
+ * because the screen painted `err.message` directly. Even with the underlying
+ * scope bug fixed, ANY future server-side rejection would do the same, so the
+ * pane no longer has a path to a raw message at all: it renders only what this
+ * function returns.
+ *
+ * Codes come from the gateway's stable `{ ok:false, code, message }` envelope
+ * (`gateway/http/surface-kit.ts` — the codes are explicitly pinned as wire
+ * contract), so switching on them is safe. Anything unrecognised gets the
+ * generic line rather than leaking the message.
+ *
+ * NO CODE ⇒ TRANSPORT. `GatewayHttpClient.req` throws exactly two shapes: a
+ * coded {@link GatewayClientError} built from the response envelope, or the raw
+ * `fetch` rejection (the mobile client does not set `guardNetworkErrors`). So an
+ * error carrying no `code` is a connection failure, and saying so is accurate
+ * rather than a guess.
+ */
+export function boardErrorCopy(err: unknown, kind: BoardErrorKind): string {
+  const generic =
+    kind === 'load'
+      ? 'Couldn’t load the work board. Pull down or tap Retry.'
+      : 'That didn’t go through. Try again.';
+  const code = readErrorCode(err);
+  if (code === null) {
+    return kind === 'load'
+      ? 'Couldn’t reach your Neutron server. Check the connection and tap Retry.'
+      : 'Couldn’t reach your Neutron server — that change wasn’t saved.';
+  }
+  switch (code) {
+    case 'missing_bearer':
+    case 'invalid_token':
+    case 'expired_token':
+    case 'unauthorized':
+      return 'Your session expired — sign in again.';
+    case 'network':
+      return kind === 'load'
+        ? 'Couldn’t reach your Neutron server. Check the connection and tap Retry.'
+        : 'Couldn’t reach your Neutron server — that change wasn’t saved.';
+    case 'item_not_found':
+      return 'That item is already gone — the board refreshed.';
+    case 'already_running':
+      return 'That item is already running.';
+    case 'dispatch_unavailable':
+      return 'This server can’t run that kind of work yet.';
+    case 'invalid_title':
+      return 'Give the item a shorter title (up to 256 characters).';
+    default:
+      return generic;
+  }
+}
+
+/** The stable server `code` off a thrown client error, or null when absent. */
+function readErrorCode(err: unknown): string | null {
+  if (typeof err !== 'object' || err === null) return null;
+  const code = (err as { code?: unknown }).code;
+  return typeof code === 'string' && code.length > 0 ? code : null;
+}
+
 /** Human label for a status (a11y on the advance control). */
 export function statusLabel(status: WorkBoardStatus): string {
   if (status === 'in_progress') return 'In progress';

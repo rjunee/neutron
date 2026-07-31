@@ -936,11 +936,42 @@
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
     font-size: 12px; line-height: 1.55;
   }
-  .car-actin-row { display: flex; gap: 8px; align-items: baseline; }
+  .car-actin-row { display: flex; gap: 8px; align-items: flex-start; padding: 1px 0; }
   .car-actin-t { color: var(--muted); font-variant-numeric: tabular-nums; flex: 0 0 auto; }
   .car-actin-g { flex: 0 0 1.2em; text-align: center; }
-  .car-actin-l { flex: 0 0 auto; font-weight: 600; }
-  .car-actin-d { color: var(--muted); overflow-wrap: anywhere; min-width: 0; }
+  /* THE OVERFLOW FIX. The content column claims all remaining width and, crucially,
+     `min-width: 0` lets it shrink BELOW its longest word — without that a flex child
+     refuses to narrow, which is how a 52-character MCP transport id used to push the
+     row past the right edge of the panel. Every text node now lives in here. */
+  .car-actin-c { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+  .car-actin-head { display: flex; gap: 6px; align-items: baseline; flex-wrap: wrap; min-width: 0; }
+  .car-actin-l { font-weight: 600; overflow-wrap: anywhere; min-width: 0; }
+  /* The MCP server a tool came from: present but demoted, so identity survives
+     while the TOOL name stays the thing you read first. */
+  .car-actin-src { color: var(--muted); font-size: 10.5px; overflow-wrap: anywhere; }
+  .car-actin-d { color: var(--muted); overflow-wrap: anywhere; min-width: 0;
+    display: -webkit-box; -webkit-box-orient: vertical; overflow: hidden; }
+  /* The expanded payload: full arguments, or what the tool returned. Newlines are
+     preserved because the shape of a diff or a listing is most of its meaning. */
+  .car-actin-body {
+    white-space: pre-wrap; overflow-wrap: anywhere; margin-top: 2px;
+    padding: 5px 7px; border-radius: 5px; font-size: 11.5px;
+    background: var(--surface-raised, rgba(127,127,127,.10));
+    max-height: 22em; overflow-y: auto;
+  }
+  .car-actin-more { color: var(--muted); font-size: 10.5px; }
+  .car-actin-row-expandable { cursor: pointer; }
+  .car-actin-row-expandable:hover { background: rgba(127,127,127,.06); }
+  /* An assistant message is a MESSAGE, not a tick: proportional type and a left
+     rule, so the model's own words are findable at a glance in the stream. */
+  .car-actin-row-assistant { border-left: 2px solid var(--hairline, rgba(127,127,127,.28));
+    padding-left: 8px; margin-left: -8px; }
+  .car-actin-who { color: var(--muted); font-size: 10.5px; letter-spacing: .04em; }
+  .car-actin-prose {
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+    font-size: 13px; line-height: 1.5; overflow-wrap: anywhere; white-space: pre-wrap;
+    display: -webkit-box; -webkit-box-orient: vertical; overflow: hidden;
+  }
   /* A synthetic keepalive is NOT work — render it as a near-invisible tick so it
      never reads as progress (that misreading is exactly ISSUES #386). */
   .car-actin-row-synthetic { opacity: .38; }

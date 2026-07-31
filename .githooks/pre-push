@@ -54,7 +54,40 @@ while read -r local_ref local_sha remote_ref remote_sha; do
   # remote_sha is all-zero for a branch the remote has never seen; the gate
   # already treats that as "no base" and falls back to origin/main, so it is
   # passed through verbatim rather than second-guessed here.
-  LEAK_GATE_BASE_SHA="$remote_sha" \
+  #
+  # AFTER A REBASE, remote_sha is NOT an ancestor of local_sha — the old tip was
+  # discarded. `remote_sha..local_sha` then means "everything reachable from the
+  # new commits but not the abandoned tip", which sweeps in all of main's history
+  # and every commit message on it. GitHub stamps its squash merges with a
+  # `Co-authored-by: <owner>` trailer, so that history legitimately contains the
+  # owner's address — and the gate then fails a push over ALREADY-PUBLIC commits
+  # the author cannot change. Observed 2026-07-31: it blocked every rebased push
+  # to this repo, and three separate agents independently hit it.
+  #
+  # A gate that cannot be satisfied is one people learn to bypass with
+  # --no-verify, which is strictly worse than no gate (ISSUES #432, #384). So
+  # when remote_sha is not an ancestor, fall back to the MERGE-BASE, which is the
+  # honest "what is genuinely new on this branch" boundary.
+  base="$remote_sha"
+  if [ "$remote_sha" != "$ZERO" ] \
+     && ! git -C "$ROOT" merge-base --is-ancestor "$remote_sha" "$local_sha" 2>/dev/null; then
+    # The fork point from MAINLINE, not from the abandoned tip. Merge-base with
+    # the old tip looked right and is not: a branch rebased onto a newer main
+    # forks from the old main, so that range still contains every commit merged
+    # to main in between — exactly the GitHub-stamped squashes this is trying to
+    # exclude. Verified 2026-07-31: the merge-base form still failed the push.
+    mb=$(git -C "$ROOT" merge-base "$local_sha" origin/main 2>/dev/null || true)
+    if [ -z "$mb" ]; then
+      # Unrelated histories (a recreated repo, an orphan branch): fall back to
+      # origin/main rather than scanning from the dawn of time.
+      mb=$(git -C "$ROOT" rev-parse origin/main 2>/dev/null || true)
+    fi
+    if [ -n "$mb" ]; then
+      echo "leak-gate pre-push: rebase detected — scanning $(printf '%.12s' "$mb")..$(printf '%.12s' "$local_sha") (fork point from mainline), not the abandoned remote tip"
+      base="$mb"
+    fi
+  fi
+  LEAK_GATE_BASE_SHA="$base" \
   LEAK_GATE_HEAD_SHA="$local_sha" \
     bash "$GATE" --tree "$ROOT" --messages-only || STATUS=$?
   [ "$STATUS" -eq 0 ] || break
