@@ -2314,6 +2314,56 @@ account) once, then paste the contents of `~/.codex/auth.json`.
   the ONE `CodexCredentialService`. The per-project override UI is in that project's
   Settings tab (`SettingsTab.tsx`), clearly labelled optional.
 
+## Voice-note transcription — local whisper.cpp, hosted API as fallback (`gateway/transcription/`)
+
+A voice note is transcribed at upload-complete time and the transcript is
+persisted as a content-addressed `<hash>.txt` sidecar beside the blob; the live
+turn then inlines that text (the agent cannot read raw audio). The upload surface
+(`gateway/http/app-upload-surface.ts`) owns the sidecar and calls ONE injected
+`transcribeAudio` seam — it knows nothing about which backend answers.
+
+**Two backends, one contract.** `gateway/transcription/types.ts` defines
+`TranscribeResult`; both implementations satisfy it and NEITHER throws (ASR must
+never fail an upload):
+
+- `local-whisper.ts` — spawns `whisper-cli` on this machine. No API key, no
+  network, no per-minute cost, and the audio never leaves the box.
+- `openai-transcription.ts` — the hosted `POST /v1/audio/transcriptions` client.
+
+**Precedence — LOCAL WINS, unconditionally** (`resolve-transcriber.ts`):
+local-if-installed → hosted-if-`OPENAI_API_KEY` → none. Installing local Whisper
+is a deliberate act whose point is that the voice stays on the machine; silently
+preferring a remote service afterwards, because an unrelated key is in the env,
+would undo that and bill for it. Resolution happens PER CALL, not at boot, so an
+install performed in Settings takes effect without a restart.
+
+**Install is opt-in, from Settings — nothing ships in `install.sh`.**
+`whisper-catalog.ts` pins the whisper.cpp release build and each ggml model by
+URL, byte size AND SHA-256. `whisper-install.ts` streams each artifact to a
+`.part` file while hashing it and only `rename()`s it into place on an exact
+digest match, so an interrupted or corrupted download leaves NOTHING installed
+(safely re-runnable rather than byte-range resumable). Disk space is checked
+before the first byte. Assets live at `<NEUTRON_HOME>/whisper/{bin,models}`;
+`NEUTRON_WHISPER_BIN` / `NEUTRON_WHISPER_MODEL` override them, so a machine
+running several instances can share ONE copy of the weights.
+
+**Surfaces.** HTTP `gateway/http/voice-transcription-surface.ts` —
+machine-scoped `/api/app/voice-transcription` (GET status + catalog + live job
+progress, POST install, DELETE remove). POST returns 202 immediately; the client
+(`landing/chat-react/voice-transcription-client.ts`) polls the GET for real
+byte counts, rendered as a progress bar in the Settings tab's "Local voice
+transcription" section.
+
+**Measured cost** (8-core AMD EPYC-Milan @2.4 GHz, AVX2, no GPU, `-t 4`,
+whisper.cpp v1.9.1, 30-second note): `base` 3.8 s / 343 MB RSS; `small` 12.4 s /
+813 MB; `large-v3-turbo` 50.0 s / 1.9 GB. Default is `base` — transcription runs
+INSIDE the upload request, so model choice is felt directly as how long the owner
+waits after speaking. Plain `large-v3` (69.8 s, 3.97 GB RSS) and every q5
+quantization (measured SLOWER than the f16 weights they shrink, on this CPU) are
+deliberately not offered. `whisper-cli` decodes wav/mp3/ogg/flac natively;
+`audio/mp4` (iOS Safari's recorder output) is normalized through `ffmpeg` when
+present and refused with a precise `unsupported_format` when not.
+
 ## Work Board — orchestrator external memory + live work tracker (`work-board/`)
 
 > **M1 UX redesign (2026-07-02).** The Work list (user-facing tab "Work") renders
