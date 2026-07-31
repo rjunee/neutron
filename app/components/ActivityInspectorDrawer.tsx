@@ -593,10 +593,14 @@ const styles = StyleSheet.create({
   // Time + glyph are a FIXED-WIDTH gutter. Pulling them out of the main flex row
   // is what lets the content column own all remaining width and wrap inside it.
   rowGutter: { flexDirection: 'row', alignItems: 'baseline', gap: SPACING.xs, flexShrink: 0 },
-  // THE OVERFLOW FIX. `flex: 1` claims the remaining width and `minWidth: 0` lets
-  // it shrink below its content — without the latter a flex child refuses to go
-  // narrower than its longest word, which is precisely how a 52-character MCP
-  // transport id pushed the row off the right edge of the drawer.
+  // THE OVERFLOW FIX, and mind WHICH property does the work here — this is Yoga,
+  // not CSS. Yoga defaults `flexShrink` to 0 (CSS defaults it to 1), so a Text
+  // given no shrink simply refuses to narrow and pushes the row wider than the
+  // drawer; that is how a 52-character MCP transport id ran off the right edge.
+  // `flex: 1` is the fix because it sets flexShrink to 1 as well as claiming the
+  // remaining width. `minWidth: 0` is belt-and-braces for parity with the web
+  // twin (where the operative rule is CSS's `min-width: auto` content floor,
+  // which Yoga does not implement at all).
   rowContent: { flex: 1, minWidth: 0, gap: 2 },
   rowHead: { flexDirection: 'row', alignItems: 'baseline', gap: SPACING.xs, flexWrap: 'wrap' },
   // 11pt monospace was unreadable on a phone. 13 is the smallest size in the

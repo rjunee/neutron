@@ -53,12 +53,12 @@ The `reply` tool's `post` phase is dropped outright — it returns a bare ack, a
 
 ### Nothing runs off the right edge any more
 
-The overflow was the same bug in both clients, and in both cases it was a missing `min-width: 0`.
+The overflow was the same *symptom* in both clients — a label that would not shrink — but **the operative property differs per engine, and conflating them would mislead the next person to debug this.**
 
-- **Web**: `.car-actin-l { flex: 0 0 auto }` — a label that never shrinks. Replaced with a `.car-actin-c` content column at `flex: 1 1 auto; min-width: 0`, holding every text node.
-- **Mobile**: `rowLabel` had no `flexShrink` and the row had no constrained content column. Time+glyph moved into a fixed `rowGutter`; everything else lives in `rowContent` at `flex: 1, minWidth: 0`.
+- **Web (CSS)**: `.car-actin-l { flex: 0 0 auto }` — explicitly no shrink. Replaced with a `.car-actin-c` content column at `flex: 1 1 auto; min-width: 0`, holding every text node. Here `min-width: 0` is load-bearing: CSS's default `min-width: auto` gives a flex item a min-content floor, so without the override it refuses to narrow below its longest unbroken word — and a 52-character id is one unbroken word.
+- **Mobile (Yoga)**: Yoga does **not** implement the CSS min-content floor, so `minWidth` was never the problem there. What was: Yoga defaults `flexShrink` to **0** where CSS defaults it to 1, so a `Text` with no explicit shrink simply will not narrow. The fix is `flex: 1` on the new `rowContent` column (which sets `flexShrink: 1` as well as claiming the remaining width) plus `flexShrink: 1` on the label; time+glyph moved into a fixed `rowGutter`. `minWidth: 0` is kept for parity with the web twin, not because Yoga needs it.
 
-`min-width: 0` is the load-bearing half: without it a flex child refuses to narrow below its longest word, which is exactly how a 52-character unbroken id pushed the row past the panel edge.
+Same fix shape, two different reasons. Both engines now wrap instead of overflowing.
 
 Long values truncate-with-expand rather than being cut: a row whose `body` says more than its `detail` is tappable/clickable, and the default collapsed state still shows real content (8 lines of prose, 2 lines of detail). `BODY_MAX` is 2 000 chars — the ring holds 200 rows per scope, so this is what bounds the buffer at ~400 KB/scope worst case and caps the WS frame fanned to every client. That is the honest price of content over counts.
 
