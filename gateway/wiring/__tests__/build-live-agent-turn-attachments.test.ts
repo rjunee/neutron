@@ -296,7 +296,13 @@ describe('build-live-agent-turn — attachment threading', () => {
     await run(makeTurn(sent, 'listen to this', [AUDIO_URL]))
     const prompt = specs[0]!.prompt
     expect(prompt).toContain(AUDIO_PATH)
-    expect(prompt).toContain('transcription unavailable — set OPENAI_API_KEY')
+    // The graceful note must point at BOTH ways to enable transcription. Naming
+    // only OPENAI_API_KEY was true until local whisper.cpp shipped, and would now
+    // tell a self-hoster to go get a third-party account they do not need.
+    expect(prompt).toContain('transcription unavailable')
+    expect(prompt).toContain('Settings → Local voice transcription')
+    expect(prompt).toContain('no API key')
+    expect(prompt).toContain('OPENAI_API_KEY')
   })
 
   test('(j) a very long transcript is truncated with a marker', async () => {

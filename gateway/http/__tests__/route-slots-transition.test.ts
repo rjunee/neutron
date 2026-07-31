@@ -68,6 +68,10 @@ const EXPECTED_LADDER: ReadonlyArray<[string, string, string | null, boolean]> =
   ['import-upload', 'importUploadHandler', 'import_upload_handler', true],
   ['app-ws', 'appWs', 'app_ws_surface', true],
   ['app-upload', 'appUpload', 'app_upload_surface', true],
+  // Local voice transcription. RATCHET EXTENSION (the documented "adding a
+  // surface" step), NOT a relaxed assertion: it sits immediately after
+  // app-upload in the ladder, mirroring its slot order.
+  ['app-voice-transcription', 'appVoiceTranscription', 'app_voice_transcription_surface', true],
   ['app-launcher', 'appLauncher', 'app_launcher_surface', true],
   ['app-tasks', 'appTasks', 'app_tasks_surface', true],
   ['app-reminders', 'appReminders', 'app_reminders_surface', true],
@@ -442,6 +446,7 @@ function fullComposition(): RouteSlotComposition {
     import_resume_handler: h(),
     app_ws_surface: { handler: async () => null, websocket: NOOP_WS },
     app_upload_surface: { handler: h() },
+    app_voice_transcription_surface: { handler: h() },
     app_launcher_surface: { handler: h() },
     app_tasks_surface: { handler: h() },
     app_reminders_surface: { handler: h() },
@@ -487,6 +492,8 @@ const GATE_FIELDS: readonly (keyof RouteSlotComposition)[] = [
   'chunked_upload_handler',
   'app_ws_surface',
   'app_upload_surface',
+  // Local voice transcription install surface (ratchet extension).
+  'app_voice_transcription_surface',
   'app_launcher_surface',
   'app_tasks_surface',
   'app_reminders_surface',

@@ -1380,6 +1380,13 @@
   .cset-btn-danger { color: #c0392b; border-color: #c0392b; font-weight: 600; }
   .cset-btn-danger:hover:not(:disabled) { background: #c0392b; color: #fff; border-color: #c0392b; }
   .cset-archive { border-top: 1px solid var(--border); padding-top: 12px; margin-top: 4px; }
+  /* Local voice transcription — status line, download progress bar. */
+  .cset-asr-status { font-size: 13px; color: var(--muted); margin: 0 0 10px; }
+  .cset-asr-status[data-backend="local"] { color: var(--fg); font-weight: 600; }
+  .cset-asr-progress { display: flex; flex-direction: column; gap: 6px; margin: 0 0 12px; }
+  .cset-asr-bar { height: 6px; border-radius: 3px; background: var(--border); overflow: hidden; }
+  .cset-asr-bar-fill { display: block; height: 100%; background: var(--accent); transition: width .3s linear; }
+  .cset-asr-actions { margin-top: 10px; flex-wrap: wrap; gap: 8px; }
   .cint-row-archived .cint-row-label { font-weight: 500; }
   .cset-people-ul { list-style: none; margin: 0 0 12px; padding: 0; display: flex; flex-direction: column; gap: 4px; }
   .cset-person {

@@ -37,20 +37,17 @@ export interface OpenAiTranscriptionOptions {
   timeout_ms?: number
 }
 
-export type TranscribeErrorCode =
-  | 'http_error'
-  | 'network_error'
-  | 'timeout'
-  | 'bad_response'
+// The ASR contract moved to `./types.ts` when a SECOND backend (local
+// whisper.cpp) arrived — both implement the same shape. Re-exported here so
+// every existing `from '.../openai-transcription.ts'` import keeps working.
+export type {
+  TranscribeErrorCode,
+  TranscribeResult,
+  TranscribeInput,
+  TranscriptionClient,
+} from './types.ts'
 
-export type TranscribeResult =
-  | { ok: true; text: string }
-  | { ok: false; code: TranscribeErrorCode; status?: number; message: string }
-
-export interface TranscribeInput {
-  bytes: Uint8Array
-  content_type: string
-}
+import type { TranscribeInput, TranscribeResult } from './types.ts'
 
 /**
  * Map a canonical audio MIME to a filename with a recognized extension.

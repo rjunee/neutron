@@ -33,6 +33,13 @@ import {
   type Rec,
 } from './project-credentials-client.ts'
 import { WebCodexCredentialClient, type CodexStatus } from './codex-credential-client.ts'
+import {
+  WebVoiceTranscriptionClient,
+  describeJob,
+  formatBytes,
+  jobFraction,
+  type VoiceTranscriptionStatus,
+} from './voice-transcription-client.ts'
 
 type FetchImpl = (input: string, init?: RequestInit) => Promise<Response>
 
@@ -178,6 +185,89 @@ export function SettingsTab({
       })
   }, [codexClient, projectId])
 
+  // ── local voice transcription (whisper.cpp) ──
+  // Machine-scoped, not per-project: one install serves every project, so this
+  // client carries no project id.
+  const asrClient = useMemo(
+    () =>
+      new WebVoiceTranscriptionClient({
+        base_url: config.origin,
+        token: config.token,
+        fetchImpl: withSignal,
+      }),
+    [config.origin, config.token, withSignal],
+  )
+  const [asr, setAsr] = useState<VoiceTranscriptionStatus | null>(null)
+  const [asrModel, setAsrModel] = useState<string>('')
+  const [asrBusy, setAsrBusy] = useState(false)
+  const [asrError, setAsrError] = useState<string | null>(null)
+  const [confirmingAsrRemove, setConfirmingAsrRemove] = useState(false)
+
+  const loadAsr = useCallback((): void => {
+    void asrClient
+      .status()
+      .then((s) => {
+        if (!mountedRef.current) return
+        setAsr(s)
+        // Preselect the installed model, else the recommended default. Only seed
+        // the dropdown once so a poll tick can't yank the user's choice mid-pick.
+        setAsrModel((prev) => (prev === '' ? (s.model_id ?? s.default_model_id) : prev))
+      })
+      .catch(() => {
+        if (!mountedRef.current) return
+        setAsr(null)
+      })
+  }, [asrClient])
+
+  // POLL while an install is running. A ~150 MB - 1.6 GB download behind a
+  // button that shows nothing is the exact failure this section exists to avoid,
+  // so the bar moves off real server-side byte counts. The interval is torn down
+  // the moment the job leaves a running phase (or the tab unmounts) — no timer
+  // outlives the work it was watching.
+  const asrPhase = asr?.job?.phase ?? null
+  const asrRunning =
+    asrPhase !== null && asrPhase !== 'done' && asrPhase !== 'failed' && asrPhase !== 'idle'
+  useEffect(() => {
+    if (!asrRunning) return
+    const t = setInterval(loadAsr, 1000)
+    return () => clearInterval(t)
+  }, [asrRunning, loadAsr])
+
+  const startAsrInstall = useCallback((): void => {
+    setAsrBusy(true)
+    setAsrError(null)
+    void asrClient
+      .install(asrModel)
+      .then((s) => {
+        if (!mountedRef.current) return
+        setAsr(s)
+        setAsrBusy(false)
+      })
+      .catch((err: unknown) => {
+        if (!mountedRef.current) return
+        setAsrBusy(false)
+        setAsrError(err instanceof Error ? err.message : 'failed to start the install')
+      })
+  }, [asrClient, asrModel])
+
+  const removeAsr = useCallback((): void => {
+    setAsrBusy(true)
+    setAsrError(null)
+    void asrClient
+      .remove()
+      .then((s) => {
+        if (!mountedRef.current) return
+        setAsr(s)
+        setAsrBusy(false)
+        setConfirmingAsrRemove(false)
+      })
+      .catch((err: unknown) => {
+        if (!mountedRef.current) return
+        setAsrBusy(false)
+        setAsrError(err instanceof Error ? err.message : 'failed to remove')
+      })
+  }, [asrClient])
+
   // ── project name ──
   const [name, setName] = useState('')
   const [nameLoaded, setNameLoaded] = useState(false)
@@ -277,7 +367,8 @@ export function SettingsTab({
     loadCreds()
     loadSettings()
     loadCodex()
-  }, [loadCreds, loadSettings, loadCodex, projectId])
+    loadAsr()
+  }, [loadCreds, loadSettings, loadCodex, loadAsr, projectId])
 
   const addCredential = useCallback((): void => {
     const svc = service.trim()
@@ -609,6 +700,153 @@ export function SettingsTab({
             </button>
           </div>
         </form>
+      </section>
+
+      {/* ── Local voice transcription (whisper.cpp) ──────────────────────────
+          Machine-scoped, not per-project: one install serves every project on
+          this box. Nothing is downloaded until the owner asks for it here, so a
+          fresh install stays lean and never pays for a feature it may not use. */}
+      <section className="cset-section" aria-label="Local voice transcription">
+        <h2 className="cset-h">Local voice transcription</h2>
+        <p className="cset-sub">
+          Transcribe voice notes <strong>on this machine</strong> with whisper.cpp — no API key, no
+          per-minute cost, and the audio never leaves your server. Once installed it takes
+          precedence over the hosted OpenAI transcription, even if{' '}
+          <code>OPENAI_API_KEY</code> is set.
+        </p>
+
+        {asr === null ? (
+          <div className="cset-empty">Loading…</div>
+        ) : (
+          <>
+            <p className="cset-asr-status" data-backend={asr.backend}>
+              {asr.backend === 'local'
+                ? `✓ Running locally — ${asr.model_id ?? 'installed'} model${
+                    asr.installed_bytes > 0 ? ` (${formatBytes(asr.installed_bytes)} on disk)` : ''
+                  }`
+                : asr.backend === 'openai'
+                  ? '○ Using hosted OpenAI transcription (an API key is set)'
+                  : '○ Voice notes are not transcribed on this server'}
+            </p>
+
+            {/* Live progress. Real byte counts from the server, not a spinner. */}
+            {asr.job !== null && asr.job.phase !== 'idle' ? (
+              <div className="cset-asr-progress" role="status" aria-live="polite">
+                <div className="cset-note">{describeJob(asr.job)}</div>
+                {asr.job.phase !== 'failed' ? (
+                  <div
+                    className="cset-asr-bar"
+                    role="progressbar"
+                    aria-valuemin={0}
+                    aria-valuemax={100}
+                    {...(jobFraction(asr.job) !== null
+                      ? { 'aria-valuenow': Math.round((jobFraction(asr.job) ?? 0) * 100) }
+                      : {})}
+                  >
+                    <span
+                      className="cset-asr-bar-fill"
+                      style={{ width: `${Math.round((jobFraction(asr.job) ?? 0) * 100)}%` }}
+                    />
+                  </div>
+                ) : null}
+                {asr.job.phase === 'failed' ? (
+                  <div className="cset-error">
+                    {asr.job.error?.message ?? 'The install failed.'} Nothing was installed — you
+                    can try again.
+                  </div>
+                ) : null}
+              </div>
+            ) : null}
+
+            {asrError !== null ? <div className="cset-error">{asrError}</div> : null}
+
+            {/* macOS ships no upstream whisper-cli build; point at Homebrew
+                rather than downloading weights that cannot be run. */}
+            {!asr.binary_downloadable && !asr.installed ? (
+              <div className="cset-note">
+                No prebuilt whisper.cpp binary is published for this platform. Install it first with
+                your package manager (on macOS: <code>brew install whisper-cpp</code>), then reload
+                this page — the model download below will do the rest.
+              </div>
+            ) : null}
+
+            {asr.installed ? (
+              <div className="cset-inline cset-asr-actions">
+                {confirmingAsrRemove ? (
+                  <>
+                    <span className="cset-note">
+                      Delete the local model and binary ({formatBytes(asr.installed_bytes)})? Voice
+                      notes will fall back to hosted transcription, or none.
+                    </span>
+                    <button
+                      type="button"
+                      className="cset-btn cset-btn-danger"
+                      disabled={asrBusy}
+                      onClick={removeAsr}
+                    >
+                      {asrBusy ? 'Removing…' : 'Delete'}
+                    </button>
+                    <button
+                      type="button"
+                      className="cset-btn"
+                      disabled={asrBusy}
+                      onClick={() => setConfirmingAsrRemove(false)}
+                    >
+                      Cancel
+                    </button>
+                  </>
+                ) : (
+                  <button
+                    type="button"
+                    className="cset-btn cset-btn-danger"
+                    disabled={asrBusy || asrRunning}
+                    onClick={() => setConfirmingAsrRemove(true)}
+                  >
+                    Remove local Whisper
+                  </button>
+                )}
+              </div>
+            ) : (
+              <div className="cset-field">
+                <label className="cset-label" htmlFor="cset-asr-model">
+                  Model
+                </label>
+                <select
+                  id="cset-asr-model"
+                  className="cset-input"
+                  value={asrModel}
+                  disabled={asrBusy || asrRunning}
+                  onChange={(e) => setAsrModel(e.target.value)}
+                >
+                  {asr.models.map((m) => (
+                    <option key={m.id} value={m.id}>
+                      {m.label} — {formatBytes(m.size_bytes)} download
+                    </option>
+                  ))}
+                </select>
+                {/* The honest cost, stated before the click: download size,
+                    measured speed, and RAM. */}
+                {asr.models
+                  .filter((m) => m.id === asrModel)
+                  .map((m) => (
+                    <div className="cset-note" key={m.id}>
+                      {m.note} Uses about {m.peak_rss_mb} MB of RAM while transcribing.
+                    </div>
+                  ))}
+                <div className="cset-form-actions cset-asr-actions">
+                  <button
+                    type="button"
+                    className="cset-btn cset-btn-primary"
+                    disabled={asrBusy || asrRunning || asrModel === ''}
+                    onClick={startAsrInstall}
+                  >
+                    {asrRunning ? 'Installing…' : 'Install local Whisper'}
+                  </button>
+                </div>
+              </div>
+            )}
+          </>
+        )}
       </section>
 
       {/* ── Project ── */}

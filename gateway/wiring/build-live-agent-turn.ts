@@ -272,7 +272,7 @@ export function buildAttachmentsFragment(
         for (const l of capped.split('\n')) lines.push(`  ${l}`)
       } else {
         lines.push(
-          `- ${resolved.path} (${resolved.content_type}) — voice note; transcription unavailable — set OPENAI_API_KEY to enable voice transcription`,
+          `- ${resolved.path} (${resolved.content_type}) — voice note; transcription unavailable — the owner can enable it in Settings → Local voice transcription (runs on this machine, no API key), or by setting OPENAI_API_KEY`,
         )
       }
       continue
