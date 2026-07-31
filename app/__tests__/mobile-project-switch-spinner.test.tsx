@@ -49,6 +49,9 @@ const { FakeChatSocket, mountScreen, mountThenAbandon } = await import('./suppor
 const { setRuntimeServerConfig, __resetServerConfigForTests } = await import('../lib/config');
 const { AuthSessionProvider } = await import('../lib/session');
 const { ChatSyncSurface } = await import('../components/ChatSyncSurface');
+const { __resetSharedMobileStoreForTests } = await import(
+  '../lib/chat-core/op-sqlite-store'
+);
 const { clearSessionCache, peekSession, sessionRefCount } = await import(
   '../lib/chat-core/session-cache'
 );
@@ -79,6 +82,10 @@ beforeEach(() => {
   restoreCrypto = withoutWebCrypto();
   FakeChatSocket.install();
   clearSessionCache();
+  // The durable store is DEVICE-wide now (`sharedMobileStore`), so a suite that
+  // wants a clean transcript has to say so — otherwise one test's unacked sends
+  // are still queued under the same topic when the next one mounts.
+  __resetSharedMobileStoreForTests();
   __resetServerConfigForTests();
   setRuntimeServerConfig({ gateway_base_url: BASE_URL, auth_base_url: null });
 });
@@ -87,6 +94,7 @@ afterEach(() => {
   restoreCrypto?.();
   restoreCrypto = null;
   clearSessionCache();
+  __resetSharedMobileStoreForTests();
 });
 
 beforeAll(installNativeHarness);

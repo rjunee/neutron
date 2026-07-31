@@ -41,6 +41,9 @@ const { FakeChatSocket, mountScreen } = await import('./support/mount');
 const { setRuntimeServerConfig, __resetServerConfigForTests } = await import('../lib/config');
 const { AuthSessionProvider } = await import('../lib/session');
 const { ChatSyncSurface } = await import('../components/ChatSyncSurface');
+const { __resetSharedMobileStoreForTests } = await import(
+  '../lib/chat-core/op-sqlite-store'
+);
 const { clearSessionCache } = await import('../lib/chat-core/session-cache');
 
 const OWNER = {
@@ -61,6 +64,11 @@ const MESSAGE_ID = 'agent-419';
 beforeEach(() => {
   FakeChatSocket.install();
   clearSessionCache();
+  __resetSharedMobileStoreForTests();
+  // The durable store is DEVICE-wide (`sharedMobileStore`), and bun shares one
+  // process across test files — a suite that mounts chat has to say it wants a
+  // clean transcript, or it inherits the previous test's (or file's) rows.
+  __resetSharedMobileStoreForTests();
   __resetServerConfigForTests();
   setRuntimeServerConfig({ gateway_base_url: 'https://harness.example.test', auth_base_url: null });
 });
