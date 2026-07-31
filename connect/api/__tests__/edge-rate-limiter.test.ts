@@ -72,17 +72,22 @@ describe('createEdgeRateLimiter — fixed window', () => {
       max: { 'guest-auth': 1 }, // `messages` not configured
       now: () => 1000,
     })
-    // Exactly DEFAULT_BUCKET_MAX hits allowed, then refused. Driven off the
-    // exported constant so the test cannot drift from the value in force, and
-    // pinned to a finite number so it can never silently become Infinity again.
+    // Finiteness is asserted FIRST and the loop bound is clamped, deliberately:
+    // `for (i = 0; i < DEFAULT_BUCKET_MAX; …)` reads more naturally but HANGS
+    // FOREVER if the constant regresses to Infinity — a test that hangs on the
+    // defect it exists to catch is not a test, it is a stalled CI job. (Found by
+    // mutation: reinstating `Infinity` wedged the run instead of failing it.)
     expect(Number.isFinite(DEFAULT_BUCKET_MAX)).toBe(true)
-    for (let i = 0; i < DEFAULT_BUCKET_MAX; i++) {
+    const probe = Math.min(DEFAULT_BUCKET_MAX, 1_000)
+    for (let i = 0; i < probe; i++) {
       expect(rl.check('messages', 'caller')).toBe(true)
     }
     expect(rl.check('messages', 'caller')).toBe(false)
   })
 
   test('an EMPTY max map caps every bucket at the default — no bucket is born unlimited', () => {
+    expect(Number.isFinite(DEFAULT_BUCKET_MAX)).toBe(true)
+    const probe = Math.min(DEFAULT_BUCKET_MAX, 1_000)
     const rl = createEdgeRateLimiter({ windowMs: 60_000, max: {}, now: () => 1000 })
     for (const bucket of [
       'guest-auth',
@@ -91,7 +96,7 @@ describe('createEdgeRateLimiter — fixed window', () => {
       'invite-preview',
       'guest-refresh',
     ] as const) {
-      for (let i = 0; i < DEFAULT_BUCKET_MAX; i++) {
+      for (let i = 0; i < probe; i++) {
         expect(rl.check(bucket, 'k')).toBe(true)
       }
       expect(rl.check(bucket, 'k')).toBe(false)
