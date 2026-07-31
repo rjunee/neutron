@@ -12,6 +12,7 @@ import { describe, expect, test } from 'bun:test'
 
 import {
   createEdgeRateLimiter,
+  DEFAULT_BUCKET_MAX,
   type RateLimitBucket,
 } from '../edge-rate-limiter.ts'
 
@@ -42,16 +43,58 @@ describe('createEdgeRateLimiter — fixed window', () => {
     expect(rl.check('guest-auth', '1.2.3.4')).toBe(true)
   })
 
-  test('per-bucket caps are independent; an unconfigured bucket is unlimited', () => {
+  test('per-bucket caps are independent', () => {
     const rl = createEdgeRateLimiter({
       windowMs: 60_000,
-      max: { 'guest-auth': 1 }, // `messages` not configured → unlimited
+      max: { 'guest-auth': 1, messages: 50 },
       now: () => 1000,
     })
     expect(rl.check('guest-auth', 'ip')).toBe(true)
     expect(rl.check('guest-auth', 'ip')).toBe(false) // capped at 1
     for (let i = 0; i < 50; i++) {
-      expect(rl.check('messages', 'caller')).toBe(true) // never capped
+      expect(rl.check('messages', 'caller')).toBe(true) // its own, wider cap
+    }
+    expect(rl.check('messages', 'caller')).toBe(false)
+  })
+
+  /**
+   * ISSUES #421 residual — AN UNCONFIGURED BUCKET IS BOUNDED, NOT UNLIMITED.
+   *
+   * This test previously asserted the OPPOSITE ("an unconfigured bucket is
+   * unlimited") and passed for the entire life of the defect, which is exactly
+   * why the defect survived: the wrong default was pinned as intended behaviour.
+   * On a fail-closed limiter guarding two unauthenticated endpoints, a config
+   * value nobody wrote is the case that most needs the conservative answer.
+   */
+  test('an UNCONFIGURED bucket falls back to the bounded default, not Infinity', () => {
+    const rl = createEdgeRateLimiter({
+      windowMs: 60_000,
+      max: { 'guest-auth': 1 }, // `messages` not configured
+      now: () => 1000,
+    })
+    // Exactly DEFAULT_BUCKET_MAX hits allowed, then refused. Driven off the
+    // exported constant so the test cannot drift from the value in force, and
+    // pinned to a finite number so it can never silently become Infinity again.
+    expect(Number.isFinite(DEFAULT_BUCKET_MAX)).toBe(true)
+    for (let i = 0; i < DEFAULT_BUCKET_MAX; i++) {
+      expect(rl.check('messages', 'caller')).toBe(true)
+    }
+    expect(rl.check('messages', 'caller')).toBe(false)
+  })
+
+  test('an EMPTY max map caps every bucket at the default — no bucket is born unlimited', () => {
+    const rl = createEdgeRateLimiter({ windowMs: 60_000, max: {}, now: () => 1000 })
+    for (const bucket of [
+      'guest-auth',
+      'messages',
+      'events',
+      'invite-preview',
+      'guest-refresh',
+    ] as const) {
+      for (let i = 0; i < DEFAULT_BUCKET_MAX; i++) {
+        expect(rl.check(bucket, 'k')).toBe(true)
+      }
+      expect(rl.check(bucket, 'k')).toBe(false)
     }
   })
 })

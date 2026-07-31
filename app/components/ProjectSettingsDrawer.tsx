@@ -53,6 +53,7 @@ import {
   canRevokeConnectMember,
   connectBadge,
   connectMemberSort,
+  outstandingConnectInvites,
   formatAcceptLinkExpiry,
 } from '../lib/connect-member-helpers';
 import {
@@ -61,6 +62,7 @@ import {
   type ConnectInviteDelivery,
   type ConnectInviteResult,
   type ConnectInviteScope,
+  type ConnectInviteView,
   type ConnectMemberView,
 } from '../lib/connect-members-client';
 import { useProjectState } from '../lib/project-state';
@@ -98,6 +100,9 @@ const WIDE_PANEL_WIDTH = 420;
 interface ConnectMembersState {
   loading: boolean;
   members: ConnectMemberView[];
+  /** Outstanding invites (ISSUES #421 residual) — the ones the owner can still
+   *  withdraw, and the ones holding the Connect surface open. */
+  invites: ConnectInviteView[];
   /** Honest error reason (e.g. connect_not_configured); null when ok. */
   error: { code: string; message: string } | null;
   /** True once a fetch has resolved at least once for this open cycle. */
@@ -107,6 +112,7 @@ interface ConnectMembersState {
 const EMPTY_CONNECT_STATE: ConnectMembersState = {
   loading: false,
   members: [],
+  invites: [],
   error: null,
   loaded: false,
 };
@@ -132,12 +138,28 @@ function useConnectMembers(projectId: string | null, enabled: boolean) {
     if (client === null || projectId === null) return;
     setState((prev) => ({ ...prev, loading: true, error: null }));
     try {
-      const members = await client.listMembers(projectId);
-      setState({ loading: false, members, error: null, loaded: true });
+      // Members and invites are two reads of the same subject; a drawer that
+      // showed the roster but not the outstanding invites would still leave the
+      // owner unable to see the thing holding their Connect surface open.
+      // `allSettled`, not `all`: the roster is the primary content and must not
+      // be lost because the ledger read failed.
+      const [membersRes, invitesRes] = await Promise.allSettled([
+        client.listMembers(projectId),
+        client.listInvites(projectId),
+      ]);
+      if (membersRes.status === 'rejected') throw membersRes.reason;
+      setState({
+        loading: false,
+        members: membersRes.value,
+        invites: invitesRes.status === 'fulfilled' ? invitesRes.value : [],
+        error: null,
+        loaded: true,
+      });
     } catch (err) {
       setState({
         loading: false,
         members: [],
+        invites: [],
         error: toConnectError(err),
         loaded: true,
       });
@@ -167,9 +189,37 @@ function useConnectMembers(projectId: string | null, enabled: boolean) {
           status: 0,
         });
       }
-      return client.issueInvite(projectId, input);
+      const result = await client.issueInvite(projectId, input);
+      // The invite the owner just minted is outstanding from this moment; the
+      // ledger must show it without waiting for a drawer reopen.
+      void reload();
+      return result;
     },
-    [client, projectId],
+    [client, projectId, reload],
+  );
+
+  /**
+   * Withdraw an outstanding invite (ISSUES #421 residual). Optimistic — the row
+   * disappears immediately because `outstandingConnectInvites` only renders
+   * `live` ones — and reverts on failure, the same contract as member revoke.
+   */
+  const revokeInvite = useCallback(
+    async (inviteId: string): Promise<void> => {
+      if (client === null || projectId === null) return;
+      const prior = state.invites;
+      setState((p) => ({
+        ...p,
+        invites: p.invites.map((i) =>
+          i.invite_id === inviteId ? { ...i, state: 'revoked' as const } : i,
+        ),
+      }));
+      try {
+        await client.revokeInvite(projectId, inviteId);
+      } catch {
+        setState((p) => ({ ...p, invites: prior }));
+      }
+    },
+    [client, projectId, state.invites],
   );
 
   const revoke = useCallback(
@@ -193,7 +243,7 @@ function useConnectMembers(projectId: string | null, enabled: boolean) {
     [client, projectId, state.members],
   );
 
-  return { ...state, issue, revoke } as const;
+  return { ...state, issue, revoke, revokeInvite } as const;
 }
 
 function toConnectError(err: unknown): { code: string; message: string } {
@@ -525,6 +575,10 @@ function ConnectSection({
   const canManage = canManageConnectMembers(project, currentUserId);
   const canRevoke = canRevokeConnectMember(project, currentUserId);
   const sorted = useMemo(() => connectMemberSort(connect.members), [connect.members]);
+  const outstanding = useMemo(
+    () => outstandingConnectInvites(connect.invites),
+    [connect.invites],
+  );
 
   // Invite composer local state.
   const [composing, setComposing] = useState(false);
@@ -643,6 +697,43 @@ function ConnectSection({
           })}
         </View>
       )}
+
+      {/* ISSUES #421 residual — outstanding invites, and the button that
+          withdraws one. Gated on `canManage`, the SAME gate as issuing: taking
+          back an invite is the inverse of sending it, so anyone trusted to open
+          the door is trusted to close it. (Member revoke stays owner-only under
+          `canRevoke`; that ejects a person, this cancels a piece of paper.) */}
+      {canManage && outstanding.length > 0 ? (
+        <View style={styles.memberList} testID="connect-outstanding-invites">
+          <Text style={styles.composerLabel}>Outstanding invites</Text>
+          <Text style={styles.fieldHint}>
+            Anyone with one of these links can still join. Withdraw one to cancel it.
+          </Text>
+          {outstanding.map((inv: ConnectInviteView) => (
+            <View key={inv.invite_id} style={styles.connectRow}>
+              <View style={styles.connectRowMain}>
+                <Text style={styles.memberName} numberOfLines={1}>
+                  {inv.access === 'write' ? 'Invite link · can edit' : 'Invite link · read only'}
+                </Text>
+                <View style={styles.connectMeta}>
+                  <Text style={styles.connectStatus}>
+                    {formatAcceptLinkExpiry(inv.expires_at_ms, Date.now())}
+                  </Text>
+                </View>
+              </View>
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel="Withdraw this invite link"
+                testID={`connect-invite-revoke-${inv.invite_id}`}
+                onPress={() => void connect.revokeInvite(inv.invite_id)}
+                style={({ pressed }) => [styles.revokeBtn, pressed && styles.pressed]}
+              >
+                <Text style={styles.revokeBtnText}>Withdraw</Text>
+              </Pressable>
+            </View>
+          ))}
+        </View>
+      ) : null}
 
       {canManage ? (
         composing ? (

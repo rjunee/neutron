@@ -15,6 +15,14 @@
  * creates one, so "inert until you deliberately open it" is a promise the
  * product can actually keep.
  *
+ * ISSUES #421 residual — and the only way an owner UNDOES it. Opening the door
+ * was reachable from day one; closing it was not. An invite ended only when the
+ * guest spent it or the 7-day TTL elapsed, so an owner who sent a link to the
+ * wrong address held the entire cross-boundary API open for a week with no
+ * recourse. `listInvites` + `revokeInvite` are the missing half: the ledger
+ * gives the owner a handle on an invite whose raw token is long gone, and the
+ * revoke closes the gate on the next request.
+ *
  * AUTHZ. Single-owner Open has exactly one principal. The surface has already
  * authenticated the caller as the owner (`resolveBearer` against the owner
  * bearer / app-ws token) before any of these run, and each resolver re-asserts
@@ -31,6 +39,7 @@ import type {
 } from '@neutronai/gateway/http/app-projects-surface.ts'
 import type { ConnectInviteContext } from '@neutronai/gateway/http/app-connect-invite.ts'
 import { ConnectedMembersStore } from '@neutronai/connect/connected-members-store.ts'
+import { ConnectGuestInviteStore } from '@neutronai/connect/guest-invite-store.ts'
 import { revokeMember } from '@neutronai/connect/member-join.ts'
 import type { ProjectDb } from '@neutronai/persistence/index.ts'
 
@@ -41,6 +50,8 @@ export interface ConnectOwnerSurfaceDeps {
   /** Public base URL a collaborator can reach this install on (no trailing
    *  slash), e.g. `https://neutron.example.com`. */
   connect_base_url: string
+  /** Clock seam (tests). */
+  now?: () => number
 }
 
 const NOT_FOUND: ConnectSurfaceFail = {
@@ -68,6 +79,8 @@ export function buildConnectOwnerSurfaceDeps(
   deps: ConnectOwnerSurfaceDeps,
 ): AppConnectSurfaceDeps {
   const store = new ConnectedMembersStore(deps.db)
+  const inviteStore = new ConnectGuestInviteStore(deps.db)
+  const now = deps.now ?? ((): number => Date.now())
   const base = deps.connect_base_url.replace(/\/+$/, '')
 
   return {
@@ -95,6 +108,32 @@ export function buildConnectOwnerSurfaceDeps(
         `${base}/connect/accept#${rawToken}`,
       buildTrustedAcceptUrl: (token: string): string =>
         `${base}/invite?invite=${encodeURIComponent(token)}`,
+    },
+
+    // ISSUES #421 residual — the owner's invite ledger. Without it the owner has
+    // no handle to name an invite (the raw token is gone after issuance), so
+    // revocation would exist as an API nobody could drive.
+    listInvites: async ({ project_id }) => {
+      if (!projectExists(deps.db, project_id)) return NOT_FOUND
+      return { ok: true, invites: inviteStore.listByProject(project_id, now()) }
+    },
+
+    // ISSUES #421 residual — withdraw an outstanding invite. Project-scoped for
+    // the same reason member revocation is: the invite id alone is a primary
+    // key, so accepting it without the project the caller NAMED would let a
+    // caller reach an invite on a project they did not ask for.
+    revokeInvite: async ({ project_id, invite_id }) => {
+      if (!projectExists(deps.db, project_id)) return NOT_FOUND
+      const result = await inviteStore.revoke(project_id, invite_id, now())
+      if (result.prior_state === null) {
+        return {
+          ok: false,
+          code: 'invite_not_found',
+          message: 'no such invite on this project',
+          status: 404,
+        }
+      }
+      return { ok: true, revoked: result.revoked, state: result.prior_state }
     },
 
     listMembers: async ({ project_id }) => {

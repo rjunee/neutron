@@ -23,11 +23,14 @@
  *       as long as they are a member — that is what they were admitted FOR.
  *
  * and therefore CLOSED when neither holds: a fresh install, and an install whose
- * invites have all lapsed or been redeemed-and-revoked. Closing is a real,
- * reachable state, not a theoretical one — the owner revokes the last member
- * (`revokeMember`, `member-join.ts`) and lets the outstanding invites expire (they
- * carry a 7-day ceiling, `DEFAULT_CONNECT_INVITE_TTL_MS`), and the surface goes
- * back to being indistinguishable from an install that never had Connect at all.
+ * invites have all lapsed, been redeemed-and-revoked, or been WITHDRAWN. Closing
+ * is a real, reachable state and — since the #421 residual fix — a state the
+ * owner can reach ON DEMAND rather than by waiting: they revoke the last member
+ * (`revokeMember`, `member-join.ts`) and revoke any outstanding invite
+ * (`ConnectGuestInviteStore.revoke`, migration 0110), and the surface goes back
+ * to being indistinguishable from an install that never had Connect at all.
+ * Expiry (the 7-day `DEFAULT_CONNECT_INVITE_TTL_MS` ceiling) is still the
+ * backstop; it is no longer the only exit.
  *
  * WHY THIS IS A STATE GATE AND NOT A FEATURE FLAG (repo rule: no flags, no dual
  * paths). A flag is a second code path chosen by configuration. This is one code
@@ -57,9 +60,20 @@
 
 import type { ProjectDb } from '@neutronai/persistence/index.ts'
 
-/** A live invite: issued, not yet redeemed, not yet expired. */
+/**
+ * A live invite: issued, not yet redeemed, not yet expired, NOT REVOKED.
+ *
+ * `revoked_at_ms IS NULL` is the load-bearing half of the ISSUES #421 residual
+ * fix (migration 0110). Before it, the owner's only way to close a door they had
+ * opened by mistake was to wait out the 7-day TTL — and because this predicate
+ * gates the WHOLE `/connect/v1` prefix, that meant an unwanted invite held a
+ * cross-boundary API reachable from the internet for a week. Revocation is
+ * evaluated here, per request, so withdrawing the last live invite closes the
+ * surface on the very next request with no restart.
+ */
 const LIVE_INVITE_SQL = `SELECT 1 AS present FROM connect_guest_invites
-   WHERE redeemed_at_ms IS NULL AND expires_at_ms > ? LIMIT 1`
+   WHERE redeemed_at_ms IS NULL AND revoked_at_ms IS NULL AND expires_at_ms > ?
+   LIMIT 1`
 
 /**
  * A non-revoked collaborator. `home_instance_slug IS NOT NULL` excludes any

@@ -48,9 +48,9 @@ export interface EdgeRateLimiterOptions {
    * Max allowed hits per key per window. A bare number applies one cap to every
    * bucket; a per-bucket map sets distinct caps (e.g. a strict per-IP cap on the
    * unauthenticated `guest-auth` edge + a generous per-caller cap on `messages`).
-   * The map is PARTIAL — a bucket the caller did not configure is not limited
-   * (treated as unlimited), so adding a new bucket never silently throttles a
-   * caller that hasn't opted into capping it.
+   *
+   * The map is PARTIAL, and an unconfigured bucket falls back to
+   * `DEFAULT_BUCKET_MAX` — NOT to unlimited. See that constant for why.
    */
   max: number | Partial<Record<RateLimitBucket, number>>
   /** Injectable clock (tests). */
@@ -63,6 +63,33 @@ interface WindowState {
 }
 
 /**
+ * The cap applied to a bucket the caller did not configure (ISSUES #421
+ * residual).
+ *
+ * IT USED TO BE `Infinity`. That inverted the safe default on a fail-closed
+ * limiter: the ONLY thing standing between the public edge and an unauthenticated
+ * flood is this cap, and a config value nobody wrote is exactly the case where
+ * you want the conservative answer, not "no limit". The old docblock justified it
+ * as "adding a new bucket never silently throttles a caller" — but the failure it
+ * was avoiding (a legitimate caller gets a 429 and has to have its cap raised,
+ * loudly, once) is strictly less bad than the one it created (a new endpoint
+ * ships with no rate limit at all, silently, forever).
+ *
+ * The value is the TIGHTEST cap the production wiring configures — `guest-auth`'s
+ * 10/min/peer (`open/wiring/connect-node.ts:RATE_MAX`). An unconfigured bucket is
+ * by definition one nobody has reasoned about, so it inherits the posture of the
+ * bucket that was reasoned about most defensively. Any endpoint that genuinely
+ * needs more says so explicitly in its own entry, which is where that decision
+ * belongs and where it is reviewable.
+ *
+ * Nothing in the repo relied on the old behaviour: the sole production caller
+ * (`buildConnectNodeWiring`) configures four of the five buckets, and the fifth
+ * (`events`) has no `check()` call site anywhere in `connect/api/server.ts`, so
+ * it was unlimited-and-unused rather than unlimited-and-load-bearing.
+ */
+export const DEFAULT_BUCKET_MAX = 10
+
+/**
  * Build a fixed-window edge limiter. Per (bucket,key): up to `max` hits per
  * `windowMs`; the (max+1)-th within a window returns `false`.
  */
@@ -71,7 +98,7 @@ export function createEdgeRateLimiter(
 ): EdgeRateLimiter {
   const now = opts.now ?? ((): number => Date.now())
   const capFor = (bucket: RateLimitBucket): number =>
-    typeof opts.max === 'number' ? opts.max : (opts.max[bucket] ?? Infinity)
+    typeof opts.max === 'number' ? opts.max : (opts.max[bucket] ?? DEFAULT_BUCKET_MAX)
   const windows = new Map<string, WindowState>()
   // Sweep expired windows opportunistically so a flood of unique keys (e.g. a
   // spray of distinct IPs at guest-auth) cannot grow the map without bound.

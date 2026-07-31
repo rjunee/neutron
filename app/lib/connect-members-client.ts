@@ -74,6 +74,36 @@ export interface RevokeMemberResult {
   local_slug: string;
 }
 
+/**
+ * An outstanding invite in the owner's ledger (ISSUES #421 residual).
+ *
+ * `state` is DERIVED server-side, never stored. `live` is the one that matters
+ * operationally: a live invite is not just a pending join, it is what holds the
+ * whole cross-instance Connect surface reachable on the owner's install.
+ */
+export type ConnectInviteState = 'live' | 'redeemed' | 'revoked' | 'expired';
+
+export interface ConnectInviteView {
+  /** Stable handle for revocation. Not a credential — redeeming needs the raw
+   *  token, which no longer exists anywhere after issuance. */
+  invite_id: string;
+  access: ConnectInviteScope;
+  state: ConnectInviteState;
+  created_at_ms: number;
+  expires_at_ms: number;
+  redeemed_at_ms: number | null;
+  revoked_at_ms: number | null;
+}
+
+export interface RevokeInviteResult {
+  /** True only when THIS call performed the withdrawal (idempotent server). */
+  revoked: boolean;
+  /** The state the invite was in before the call — so the UI can be specific. */
+  state: ConnectInviteState;
+  project_id: string;
+  invite_id: string;
+}
+
 export interface ConnectMembersClientOptions {
   base_url: string;
   token: string;
@@ -195,6 +225,37 @@ export class ConnectMembersClient {
       revoked: res.revoked,
       project_id: res.project_id,
       local_slug: res.local_slug,
+    };
+  }
+
+  /**
+   * The owner's invite ledger for `project_id`, newest first (ISSUES #421
+   * residual). Carries no raw token — issuance is the only moment one exists.
+   */
+  async listInvites(project_id: string): Promise<ConnectInviteView[]> {
+    const res = await this.req<{ ok: boolean; invites: ConnectInviteView[] }>(
+      `/api/app/projects/${encodeURIComponent(project_id)}/connect-invites`,
+    );
+    return res.invites;
+  }
+
+  /**
+   * Withdraw an outstanding invite. Idempotent — a second call resolves with
+   * `revoked:false` rather than throwing. Withdrawing the LAST live invite on an
+   * install with no collaborators closes the Connect surface entirely.
+   */
+  async revokeInvite(project_id: string, invite_id: string): Promise<RevokeInviteResult> {
+    const res = await this.req<{ ok: boolean } & RevokeInviteResult>(
+      `/api/app/projects/${encodeURIComponent(project_id)}/connect-invites/${encodeURIComponent(
+        invite_id,
+      )}/revoke`,
+      { method: 'POST' },
+    );
+    return {
+      revoked: res.revoked,
+      state: res.state,
+      project_id: res.project_id,
+      invite_id: res.invite_id,
     };
   }
 

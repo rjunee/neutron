@@ -129,7 +129,6 @@
   #status.error { color: var(--error); }
   #status.success { color: var(--success); }
   small { color: var(--faint); display: block; margin-top: var(--space-xl); font-size: 12.5px; }
-  small a { color: var(--muted); }
 </style>
 </head>
 <body>
@@ -153,7 +152,21 @@
 
   <button class="btn" id="btn-accept" type="button" disabled>Join project</button>
   <div id="status" role="status" aria-live="polite"></div>
-  <small>By joining you agree to the <a href="/terms">Terms</a> and <a href="/privacy">Privacy</a>.</small>
+  <!-- ISSUES #421 residual. This line used to assert agreement to a Terms page
+       and a Privacy page, linked by path. Neither path is in `landing/routes.ts`,
+       so both 404 on every install, and Neutron Open is self-hosted software with
+       no service operator to have published them: the line claimed consent to
+       documents that do not exist. Deliberately NOT replaced with drafted legal
+       text — inventing terms on behalf of whoever runs this install would be
+       worse than the dead links. The real agreement is already on this page and
+       is mandatory: `connect-disclosure.ts` discloses who hosts the project, who
+       can see what you contribute, and what write access means, behind an
+       acknowledgement checkbox that gates the Join button. What remains is the
+       one fact the disclosure does not cover — what becomes of the two values
+       this form collects (`member-join.ts` stores both on the owner's
+       `connected_members` row; the name becomes `author_display` on every
+       contributed turn). -->
+  <small>The name and handle you enter are stored on the owner&rsquo;s instance, and your name appears alongside anything you contribute.</small>
 </main>
 <script type="module" src="/connect/accept.js"></script>
 </body>
