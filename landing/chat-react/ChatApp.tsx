@@ -36,7 +36,7 @@ import type { BootstrapConfig, ProjectTab } from './config.ts'
 import type { AttachmentDraft } from './useAttachmentDraft.ts'
 import { fetchAttachmentObjectUrl, isAuthedAttachmentUrl, importHistoryZip, isExportZip } from './uploads.ts'
 import { isAudioAttachmentUrl, isImageAttachmentUrl } from './message-adapter.ts'
-import { claimExclusiveAudio, releaseExclusiveAudio } from './audio-exclusivity.ts'
+import { VoiceNotePlayer } from './VoiceNotePlayer.tsx'
 
 type FetchImpl = (input: string, init?: RequestInit) => Promise<Response>
 
@@ -110,15 +110,15 @@ export function useUploadsCtx(
  * never paints as a broken `<img>` and a voice note is never a filename you
  * cannot listen to.
  *
- * WHY THE WEB PLAYER IS A PLAIN `<audio>` AND THE MOBILE ONE IS NOT. The mobile
- * client hand-builds a transport (`app/components/VoiceNoteBubble.tsx`) because
- * React Native has no audio element — there is nothing there that knows what a
- * play button, a duration or a scrubber are. A browser does, natively, with
- * keyboard access and platform-correct behavior for free. Forcing a shared
- * component would mean reimplementing the browser's control to match, which is
- * more surface for a worse result. The two paths agree on everything that is
- * actually shared: the bearer-authed fetch, the object-URL lifetime, and the
- * rule that only one clip sounds at a time.
+ * WHY THE TWO CLIENTS HAVE SEPARATE PLAYERS. React Native has no audio element
+ * and the browser has no `expo-audio`, so the transport cannot be shared: mobile
+ * hand-builds one on `expo-audio` (`app/components/VoiceNoteBubble.tsx`), the
+ * web keeps the browser's `<audio>` as its decoder. They share a DESIGN and a
+ * set of rules — the bearer-authed fetch, the object-URL lifetime, the measured
+ * iMessage geometry, and the rule that only one clip sounds at a time — not an
+ * implementation. `VoiceNotePlayer` is the web half; its header explains why the
+ * browser's `controls` chrome had to go (it draws its own panel inside the
+ * bubble) and what was done to keep the accessibility that came with it.
  */
 function AttachmentImage({ src }: { src: string }): React.JSX.Element {
   const uploads = useContext(UploadsContext)
@@ -169,23 +169,7 @@ function AttachmentImage({ src }: { src: string }): React.JSX.Element {
     if (needsAuth && href === null) {
       return <span className="car-attach-loading">Loading voice message…</span>
     }
-    return (
-      <audio
-        className="car-attach-audio"
-        src={href ?? src}
-        controls
-        // Fetch enough of the file to know how long it is, so the control shows
-        // a real duration before the first play instead of `0:00`.
-        preload="metadata"
-        // One clip at a time: two voice notes talking over each other is the
-        // first thing anyone notices in a chat client that got this wrong.
-        // Bound to the media EVENTS, not to a click handler, so the keyboard and
-        // the OS media keys are covered too.
-        onPlay={(e) => claimExclusiveAudio(e.currentTarget)}
-        onPause={(e) => releaseExclusiveAudio(e.currentTarget)}
-        onEnded={(e) => releaseExclusiveAudio(e.currentTarget)}
-      />
-    )
+    return <VoiceNotePlayer src={href ?? src} />
   }
 
   // Every other non-image attachment (PDF, …) → a downloadable file chip, never
