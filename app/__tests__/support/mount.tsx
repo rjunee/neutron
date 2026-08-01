@@ -9,9 +9,10 @@
  * Requires `installNativeHarness()` to have run first (see `native-harness.ts`).
  */
 
-import { act, type ReactElement } from 'react';
+import { act, createElement, Fragment, type ReactElement } from 'react';
 
 import { rememberRealWebSocket } from './native-harness';
+import { ComposerDock, ComposerDockProvider } from '../../lib/composer-dock';
 // eslint-disable-next-line @typescript-eslint/ban-ts-comment
 // @ts-expect-error react-dom ships no bundled types and @types/react-dom is not a
 // dependency of this app; the harness only needs createRoot/unmount.
@@ -39,6 +40,25 @@ export interface MountedScreen {
 }
 
 /**
+ * THE SHELL'S COMPOSER DOCK, around whatever a test mounts.
+ *
+ * The chat composer does not render where the chat surface sits — it is
+ * published into the project shell's full-width bottom band
+ * (`lib/composer-dock.tsx`), so a surface mounted with no band in scope throws
+ * by design. Every harness mount therefore gets the same two pieces the real
+ * shell provides: the store, and the band BELOW the screen under test. Tests that
+ * only press Send or read `composer-bar` need to know nothing about it; a test
+ * that cares about the placement asserts against the `composer-dock` testID.
+ */
+function withComposerDock(element: ReactElement): ReactElement {
+  return createElement(
+    ComposerDockProvider,
+    null,
+    createElement(Fragment, null, element, createElement(ComposerDock)),
+  );
+}
+
+/**
  * Mount and tear down in the SAME synchronous window, letting nothing settle.
  *
  * The opposite of {@link mountScreen}, and deliberately: a screen whose effect
@@ -59,7 +79,7 @@ export function mountThenAbandon(element: ReactElement): void {
   document.body.appendChild(host);
   const root = createRoot(host) as Root;
   act(() => {
-    root.render(element);
+    root.render(withComposerDock(element));
   });
   act(() => {
     root.unmount();
@@ -72,7 +92,7 @@ export async function mountScreen(element: ReactElement): Promise<MountedScreen>
   document.body.appendChild(host);
   const root = createRoot(host) as Root;
   await act(async () => {
-    root.render(element);
+    root.render(withComposerDock(element));
   });
 
   const settle = async (): Promise<void> => {

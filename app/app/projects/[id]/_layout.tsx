@@ -62,6 +62,7 @@ import {
   ProjectRail,
   type RailOverlayEntry,
 } from '../../../components/ProjectRail';
+import { ComposerDock, ComposerDockProvider } from '../../../lib/composer-dock';
 import { BREAKPOINTS, MOTION, SPACING, THEME, TYPOGRAPHY } from '../../../lib/composer-constants';
 import { loadAppConfig } from '../../../lib/config';
 import { createProjectErrorCopy } from '../../../lib/create-project-helpers';
@@ -177,7 +178,11 @@ export default function ProjectLayout() {
 
   return (
     <ProjectStateProvider project_id={project_id}>
-      <ProjectShell project_id={project_id} />
+      {/* The composer dock has to be in scope for BOTH the shell's bottom band
+          and the chat surface deep inside `<Slot/>` that publishes into it. */}
+      <ComposerDockProvider>
+        <ProjectShell project_id={project_id} />
+      </ComposerDockProvider>
     </ProjectStateProvider>
   );
 }
@@ -715,6 +720,13 @@ function ProjectShell({ project_id }: { project_id: string }) {
           </View>
         </View>
       )}
+      {/* THE COMPOSER BAND — full viewport width, under BOTH layouts, and the
+          last thing in the column so its bottom edge is the window's. The rail
+          row above is `flex: 1`, so the band takes its natural height out of the
+          row rather than covering it: no rail entry can end up underneath the
+          composer, and the rail's ScrollView simply gets shorter.
+          See `lib/composer-dock.tsx` for why the composer moves in the TREE. */}
+      <ComposerDock />
       <ProjectSettingsDrawer open={drawerOpen} onClose={() => setDrawerOpen(false)} />
       <CreateProjectSheet
         open={createOpen}
