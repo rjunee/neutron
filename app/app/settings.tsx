@@ -44,6 +44,7 @@ import { useAuthSession } from '../lib/session';
 import { THEME } from '../lib/theme';
 import {
   VoiceTranscriptionClient,
+  type TranscriptionBackendChoice,
   type VoiceTranscriptionStatus,
 } from '../lib/voice-transcription-client';
 import {
@@ -84,13 +85,17 @@ export default function SettingsScreen() {
     [clear, router],
   );
 
-  // ── local voice transcription (whisper.cpp) ──
-  // Machine-scoped, not per-project: one install serves the whole server, so
-  // this client carries no project id. The DOWNLOAD runs server-side (the POST
-  // returns 202 immediately — `gateway/http/voice-transcription-surface.ts`
+  // ── voice transcription (which backend, plus local whisper.cpp setup) ──
+  // Machine-scoped, not per-project: one choice and one install serve the whole
+  // server, so this client carries no project id. The DOWNLOAD runs server-side
+  // (the POST returns 202 immediately — `gateway/http/voice-transcription-surface.ts`
   // POST case), which is the only reason this is workable from a phone: the app
   // is watching a job, not hosting one. Backgrounding pauses the polling, never
   // the install.
+  //
+  // The BACKEND CHOICE lives here too, and it is the phone's job more than the
+  // web's: voice notes are recorded on the phone, so the switch that decides
+  // where the audio goes has to be reachable without opening a laptop.
   const asrClient = useMemo(
     () =>
       user === null
@@ -176,6 +181,47 @@ export default function SettingsScreen() {
       setAsrBusy(false);
     }
   }, [asrClient]);
+
+  // The three mutations that share one shape: fire, adopt the returned status,
+  // report the failure in the card. They all answer with the SAME status object
+  // the GET does, so there is never a re-fetch race between "what I just did"
+  // and "what the server thinks".
+  const runAsrMutation = useCallback(
+    async (call: (c: VoiceTranscriptionClient) => Promise<VoiceTranscriptionStatus>): Promise<void> => {
+      if (asrClient === null) return;
+      setAsrBusy(true);
+      setAsrError(null);
+      try {
+        setAsr(await call(asrClient));
+      } catch (err) {
+        setAsrError(describeStatusFailure(err).message);
+      } finally {
+        setAsrBusy(false);
+      }
+    },
+    [asrClient],
+  );
+
+  const handleChooseBackend = useCallback(
+    (backend: TranscriptionBackendChoice): void => {
+      void runAsrMutation((c) => c.chooseBackend(backend));
+    },
+    [runAsrMutation],
+  );
+
+  const handleSaveOpenAiKey = useCallback(
+    (api_key: string): void => {
+      // The key is passed straight through to the client and never stored in
+      // this screen's state, never logged, and never put in an error message —
+      // `describeStatusFailure` only ever renders the server's own text.
+      void runAsrMutation((c) => c.saveOpenAiKey(api_key));
+    },
+    [runAsrMutation],
+  );
+
+  const handleRemoveOpenAiKey = useCallback((): void => {
+    void runAsrMutation((c) => c.removeOpenAiKey());
+  }, [runAsrMutation]);
 
   useEffect(() => {
     // Only redirect to /login once the session provider has finished
@@ -355,6 +401,9 @@ export default function SettingsScreen() {
           onRemove={() => {
             void handleRemoveAsr();
           }}
+          onChooseBackend={handleChooseBackend}
+          onSaveOpenAiKey={handleSaveOpenAiKey}
+          onRemoveOpenAiKey={handleRemoveOpenAiKey}
         />
 
         <View style={styles.serverCard} testID="settings-diagnostics-card">

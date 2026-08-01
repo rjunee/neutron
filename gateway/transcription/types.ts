@@ -3,15 +3,16 @@
  *
  * Voice-note transcription has TWO implementations behind ONE shape:
  *
- *   - `local-whisper.ts`      — whisper.cpp on this machine. No key, no network,
- *                               no per-minute cost. The DEFAULT when installed.
+ *   - `local-whisper.ts`        — whisper.cpp on this machine. No key, no
+ *                                 network, no per-minute cost.
  *   - `openai-transcription.ts` — the hosted `POST /v1/audio/transcriptions`
- *                               endpoint. The FALLBACK when local is absent.
+ *                                 endpoint. Needs an API key.
  *
- * `resolve-transcriber.ts` picks between them; `open/composer.ts` injects the
- * winner into the chat-upload surface's `transcribeAudio` seam. The surface
- * itself knows nothing about either backend — it only sees a function returning
- * a transcript string or `null`.
+ * NEITHER is the default. Which one runs is the owner's SETTING, read by
+ * `resolve-transcriber.ts`; `open/composer.ts` injects the chosen one into the
+ * chat-upload surface's `transcribeAudio` seam. The surface itself knows nothing
+ * about either backend — it only sees a function returning a transcript string
+ * or `null`.
  *
  * The contract's hard rule, inherited from the original OpenAI client: a
  * transcriber NEVER throws. Every failure maps to a typed `{ ok: false, code }`
@@ -56,4 +57,19 @@ export interface TranscribeInput {
 /** The ONE shape every transcription backend satisfies. */
 export interface TranscriptionClient {
   transcribe(input: TranscribeInput): Promise<TranscribeResult>
+}
+
+/**
+ * Which transcriber the owner CHOSE, persisted in
+ * `instance_metadata.transcription_backend` (migration 0111).
+ *
+ * `null` (absent) means "never chosen" — deliberately NOT a synonym for either
+ * value. The resolver treats it as an open question rather than silently
+ * answering it; see `resolve-transcriber.ts`.
+ */
+export type TranscriptionBackendChoice = 'local' | 'openai'
+
+/** Runtime narrowing for a value off the wire or out of the DB. */
+export function isTranscriptionBackendChoice(v: unknown): v is TranscriptionBackendChoice {
+  return v === 'local' || v === 'openai'
 }

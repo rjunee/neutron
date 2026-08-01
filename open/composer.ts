@@ -290,6 +290,11 @@ import {
   resolveChatAttachmentLocalPath,
 } from '@neutronai/gateway/http/app-upload-surface.ts'
 import { resolveTranscriber } from '@neutronai/gateway/transcription/resolve-transcriber.ts'
+import { OpenAiKeyStore } from '@neutronai/gateway/transcription/openai-key-store.ts'
+import {
+  readTranscriptionBackend,
+  writeTranscriptionBackend,
+} from '@neutronai/gateway/storage/owner-metadata.ts'
 import {
   WhisperInstaller,
   freeBytesAt,
@@ -2398,23 +2403,29 @@ export function buildOpenGraphComposer(
     // controls 404. `new TaskStore(db)` reads the SAME canonical project task
     // data the agent's `cores/free/tasks` backend writes. Same owner auth.
     const appTasksSurface = createAppTasksSurface({ store: new TaskStore(db), auth: appOwnerAuth })
-    // M2 task 5 — voice-note ASR. TWO backends behind one seam, picked by
-    // `resolveTranscriber`: LOCAL whisper.cpp when it is installed (keyless, and
-    // the audio never leaves the box), else the hosted API when
-    // `OPENAI_API_KEY` is set, else nothing. Local WINS when both are available
-    // — installing it is a deliberate choice the owner made in Settings, and
-    // quietly shipping their voice to a third party afterwards would undo it.
+    // M2 task 5 — voice-note ASR. TWO backends behind one seam — local
+    // whisper.cpp and the hosted OpenAI endpoint — and the owner's SETTING says
+    // which one runs (`instance_metadata.transcription_backend`, migration
+    // 0111). Neither is preferred by the code: the local-wins precedence that
+    // used to live in `resolveTranscriber` is deleted, because it made an
+    // OpenAI key unreachable on a box with local installed.
     //
-    // Resolved PER CALL, not once at boot: "Install local Whisper" is a button
-    // in the running app, so a box that had no transcriber a minute ago must
-    // start transcribing the moment the download lands — without a restart. The
-    // probe is a couple of `existsSync` calls against a request that is about to
-    // spend seconds in an ASR subprocess, so it costs nothing measurable.
+    // Resolved PER CALL, not once at boot: both the choice and "Install local
+    // Whisper" are controls in the running app, so a box that had no transcriber
+    // a minute ago must start transcribing the moment the setting changes or the
+    // download lands — without a restart. The probe is a couple of `existsSync`
+    // calls plus one indexed row read, against a request that is about to spend
+    // seconds in an ASR subprocess, so it costs nothing measurable.
     //
     // The seam is therefore ALWAYS wired (it was previously omitted on a keyless
     // box, which would have frozen that box as untranscribable for the life of
     // the process); it returns null when no backend resolves, exactly as a
     // failed transcription does, and no sidecar is written.
+    const openAiTranscriptionKeys = new OpenAiKeyStore({
+      store: projectCredentialStore,
+      owner_slug: asOwnerHandle(project_slug),
+      env,
+    })
     const appUploadSurface = createAppUploadSurface({
       auth: appOwnerAuth,
       project_slug,
@@ -2424,8 +2435,23 @@ export function buildOpenGraphComposer(
         content_type: string
         hash: string
       }): Promise<string | null> => {
-        const backend = resolveTranscriber({ env, neutron_home: owner_home })
-        if (backend.client === null) return null
+        const backend = resolveTranscriber({
+          env,
+          neutron_home: owner_home,
+          choice: readTranscriptionBackend(db, project_slug),
+          openai_api_key: openAiTranscriptionKeys.resolve(),
+        })
+        if (backend.client === null) {
+          // NOT silent. A voice note that produces no transcript because the
+          // box is unconfigured, or because both backends are set up and nobody
+          // has said which to use, is otherwise indistinguishable from a
+          // transcription that simply failed.
+          log.warn('voice_transcription_unconfigured', {
+            reason: backend.reason ?? 'unconfigured',
+            hash: i.hash,
+          })
+          return null
+        }
         const r = await backend.client.transcribe({
           bytes: i.bytes,
           content_type: i.content_type,
@@ -2457,6 +2483,12 @@ export function buildOpenGraphComposer(
       installer: whisperInstaller,
       neutron_home: owner_home,
       env,
+      // Read per request, not captured once: the choice is a control in the
+      // running app, so flipping it must take effect on the very next voice
+      // note — no restart, no cache to go stale.
+      readChoice: () => readTranscriptionBackend(db, project_slug),
+      writeChoice: (backend) => writeTranscriptionBackend(db, project_slug, backend),
+      keys: openAiTranscriptionKeys,
     })
 
     // O5 (world-class-refactor) — read-only diagnostics surface. Composes

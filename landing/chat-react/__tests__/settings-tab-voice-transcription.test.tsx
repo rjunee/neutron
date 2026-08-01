@@ -73,6 +73,10 @@ function status(over: Record<string, unknown> = {}): Response {
   return json({
     ok: true,
     backend: 'none',
+    backend_reason: 'unconfigured',
+    choice: null,
+    local_available: false,
+    openai_key: { present: false, source: null, saved_at: null },
     installed: false,
     model_id: null,
     installed_bytes: 0,
@@ -123,11 +127,11 @@ function btn(container: HTMLElement, text: string): HTMLButtonElement {
 
 const ASR = '/api/app/voice-transcription'
 
-describe('SettingsTab — local voice transcription (happy-dom)', () => {
+describe('SettingsTab — voice transcription (happy-dom)', () => {
   it('a bare box offers the install button and names the download size', async () => {
     const { container, root } = await mount((url) => (url.endsWith(ASR) ? status() : null))
-    expect(container.textContent).toContain('Local voice transcription')
-    expect(container.textContent).toContain('Voice notes are not transcribed on this server')
+    expect(container.textContent).toContain('Voice transcription')
+    expect(container.textContent).toContain('Nothing is transcribing — set up one of the options')
     expect(btn(container, 'Install local Whisper')).toBeDefined()
     // The cost is stated BEFORE the click, not discovered during it.
     expect(container.textContent).toContain('141 MB download')
@@ -197,14 +201,21 @@ describe('SettingsTab — local voice transcription (happy-dom)', () => {
     root.unmount()
   })
 
-  it('an installed box reports LOCAL even with an OpenAI key, and offers Remove', async () => {
+  it('a box CHOSEN as local reports it, and offers Remove', async () => {
     const { container, root } = await mount((url) =>
       url.endsWith(ASR)
-        ? status({ backend: 'local', installed: true, model_id: 'base', installed_bytes: 157_000_000 })
+        ? status({
+            backend: 'local',
+            choice: 'local',
+            local_available: true,
+            installed: true,
+            model_id: 'base',
+            installed_bytes: 157_000_000,
+          })
         : null,
     )
-    // The precedence rule, visible to the owner.
-    expect(container.textContent).toContain('Running locally')
+    // The owner's setting, visible to the owner.
+    expect(container.textContent).toContain('Transcribing on this server')
     expect(container.textContent).toContain('base')
     expect(btn(container, 'Remove local Whisper')).toBeDefined()
     // It is gigabytes; say how much before asking them to decide.
@@ -220,7 +231,14 @@ describe('SettingsTab — local voice transcription (happy-dom)', () => {
         deleted = true
         return status()
       }
-      return status({ backend: 'local', installed: true, model_id: 'base', installed_bytes: 157_000_000 })
+      return status({
+        backend: 'local',
+        choice: 'local',
+        local_available: true,
+        installed: true,
+        model_id: 'base',
+        installed_bytes: 157_000_000,
+      })
     })
     await act(async () => {
       btn(container, 'Remove local Whisper').click()
@@ -233,6 +251,116 @@ describe('SettingsTab — local voice transcription (happy-dom)', () => {
       await tick()
     })
     expect(deleted).toBe(true)
+    root.unmount()
+  })
+
+  it('with BOTH set up and nothing chosen, it asks rather than picking one', async () => {
+    // The old rule silently answered this with "local". Deleting it means the
+    // owner is asked — and until they answer, the card says so plainly.
+    const { container, root } = await mount((url) =>
+      url.endsWith(ASR)
+        ? status({
+            backend: 'none',
+            backend_reason: 'unchosen',
+            local_available: true,
+            installed: true,
+            model_id: 'base',
+            openai_key: { present: true, source: 'stored', saved_at: '2026-08-01T00:00:00.000Z' },
+          })
+        : null,
+    )
+    expect(container.textContent).toContain('both options are set up, so pick the one you want')
+    root.unmount()
+  })
+
+  it('picking a backend PUTs the choice', async () => {
+    let put = ''
+    const both = {
+      local_available: true,
+      installed: true,
+      model_id: 'base',
+      openai_key: { present: true, source: 'stored', saved_at: '2026-08-01T00:00:00.000Z' },
+    }
+    const { container, root, act } = await mount((url, init) => {
+      if (url.endsWith(`${ASR}/backend`)) {
+        put = String(init?.body ?? '')
+        return status({ ...both, backend: 'openai', choice: 'openai' })
+      }
+      if (url.endsWith(ASR)) {
+        return status({ ...both, backend: 'none', backend_reason: 'unchosen' })
+      }
+      return null
+    })
+    const radios = [...container.querySelectorAll('input[name="cset-asr-backend"]')]
+    expect(radios.length).toBe(2)
+    await act(async () => {
+      ;(radios[1] as HTMLInputElement).click()
+      await tick()
+    })
+    expect(put).toContain('openai')
+    root.unmount()
+  })
+
+  it('a chosen backend that cannot run says so — and says nothing was substituted', async () => {
+    const { container, root } = await mount((url) =>
+      url.endsWith(ASR)
+        ? status({ backend: 'none', backend_reason: 'openai_key_missing', choice: 'openai' })
+        : null,
+    )
+    expect(container.textContent).toContain('no API key is saved')
+    expect(container.textContent).toContain('nothing has been substituted for it')
+    root.unmount()
+  })
+
+  it('the key field PUTs the key, clears itself, and never renders one back', async () => {
+    const SECRET = 'sk-thisisnotarealkey000000'
+    let sent = ''
+    const { container, root, act } = await mount((url, init) => {
+      if (url.endsWith(`${ASR}/openai-key`)) {
+        sent = String(init?.body ?? '')
+        return status({
+          openai_key: { present: true, source: 'stored', saved_at: '2026-08-02T00:00:00.000Z' },
+        })
+      }
+      if (url.endsWith(ASR)) return status()
+      return null
+    })
+    const input = container.querySelector('#cset-asr-openai-key') as HTMLInputElement
+    // Masked at rest: a key on a shared screen is not a thing to display.
+    expect(input.type).toBe('password')
+    // React tracks the input's value internally, so a plain `.value =` looks
+    // like "unchanged" to it — go through the prototype setter, as
+    // `integrations-tab.test.tsx` does.
+    const setVal = (Object.getOwnPropertyDescriptor(
+      window.HTMLInputElement.prototype,
+      'value',
+    )?.set as (v: string) => void) ?? (() => {})
+    await act(async () => {
+      setVal.call(input, SECRET)
+      input.dispatchEvent(new Event('input', { bubbles: true }))
+      await tick()
+    })
+    await act(async () => {
+      btn(container, 'Save key').click()
+      await tick()
+    })
+    expect(sent).toContain(SECRET)
+    // Gone from the field, and nowhere in the rendered card.
+    expect((container.querySelector('#cset-asr-openai-key') as HTMLInputElement).value).toBe('')
+    expect(container.textContent).not.toContain(SECRET)
+    expect(container.textContent).not.toContain(SECRET.slice(-6))
+    root.unmount()
+  })
+
+  it('an environment key explains where it lives and offers no Remove button', async () => {
+    const { container, root } = await mount((url) =>
+      url.endsWith(ASR)
+        ? status({ openai_key: { present: true, source: 'environment', saved_at: null } })
+        : null,
+    )
+    expect(container.textContent).toContain('OPENAI_API_KEY from the server environment')
+    // Only the server operator can unset it, so there is no button pretending otherwise.
+    expect(btn(container, 'Remove key')).toBeUndefined()
     root.unmount()
   })
 

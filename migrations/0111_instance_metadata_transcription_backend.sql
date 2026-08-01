@@ -1,0 +1,38 @@
+-- 0111_instance_metadata_transcription_backend.sql
+--
+-- The owner's CHOICE of which voice-note transcriber to use.
+--
+-- BACKGROUND: two ASR backends exist — local whisper.cpp (installed from
+-- Settings, keyless, audio never leaves the machine) and the hosted OpenAI
+-- endpoint (needs an API key). Until now nothing recorded a CHOICE between
+-- them: `resolve-transcriber.ts` preferred a local install UNCONDITIONALLY, so
+-- on a box with both, the OpenAI key was unreachable and the only way to switch
+-- was to delete the local install. The owner asked for the switch instead:
+-- "I think it should just be a setting for which transcription tool to use."
+--
+-- This column IS that setting, and it is the ONLY thing that decides. There is
+-- no tiebreaker underneath it: a hidden precedence that quietly reasserted
+-- itself the next time a backend was installed is exactly the surprise being
+-- removed here.
+--
+-- Values: 'local' | 'openai'. NULL = never chosen. A NULL is NOT a synonym for
+-- either value — with only one backend configured the resolver uses it (there
+-- is nothing to choose between), and with BOTH configured it transcribes
+-- nothing and both Settings surfaces ask for the choice. Guessing there would
+-- re-introduce the precedence this migration exists to delete.
+--
+-- Lands on `instance_metadata` (migration 0050) rather than a new table,
+-- exactly as that migration's header prescribes for instance-level config:
+-- "Future fields (e.g. preferred locale, theme, week-start) land here as
+-- additive columns; the table name is intentionally `instance_metadata` so the
+-- column adds read like configuration, not new subsystems."
+--
+-- The OpenAI API KEY itself is NOT here — a secret never lands in a plain
+-- metadata column. It goes in the AES-256-GCM `project_credentials` store under
+-- the reserved service name `openai_transcription` (migration 0092), the same
+-- place the Codex subscription bundle lives.
+--
+-- Forward-only; no down-migration (Neutron OSS contract). ADD COLUMN with a
+-- nullable TEXT type is legal on a STRICT table.
+
+ALTER TABLE instance_metadata ADD COLUMN transcription_backend TEXT;

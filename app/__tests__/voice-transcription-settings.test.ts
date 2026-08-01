@@ -33,8 +33,12 @@ import {
   type WhisperModelOption,
 } from '../lib/voice-transcription-client';
 import {
+  backendBlocker,
+  choiceIsStalled,
   describeBackend,
+  describeBackendOption,
   describeJob,
+  describeKeySource,
   describeModel,
   describeStatusFailure,
   formatBytes,
@@ -92,6 +96,10 @@ function stubFetch(responder: (req: Captured) => { status: number; body: unknown
 function status(overrides: Partial<VoiceTranscriptionStatus> = {}): VoiceTranscriptionStatus {
   return {
     backend: 'none',
+    backend_reason: 'unconfigured',
+    choice: null,
+    local_available: false,
+    openai_key: { present: false, source: null, saved_at: null },
     installed: false,
     model_id: null,
     installed_bytes: 0,
@@ -257,12 +265,65 @@ describe('installBlocker — never ship a dead control', () => {
 });
 
 describe('status + progress copy', () => {
-  it('names the backend actually in use, local first', () => {
+  it('names the backend actually in use', () => {
     expect(describeBackend(status({ backend: 'local', model_id: 'base', installed_bytes: 147_951_465 }))).toBe(
-      'Running on your server — base model (141 MB on disk)',
+      'Transcribing on this server — base model (141 MB on disk)',
     );
-    expect(describeBackend(status({ backend: 'openai' }))).toContain('hosted OpenAI');
-    expect(describeBackend(status({ backend: 'none' }))).toContain('not transcribed');
+    expect(describeBackend(status({ backend: 'openai' }))).toContain('OpenAI API');
+  });
+
+  it('when nothing runs, it says WHICH of the four situations this is', () => {
+    // One generic "not transcribed" line was the original complaint: it left the
+    // owner unable to tell an unconfigured box from a choice that cannot run.
+    expect(describeBackend(status({ backend: 'none', backend_reason: 'unchosen' }))).toContain(
+      'pick the one you want',
+    );
+    expect(
+      describeBackend(status({ backend: 'none', backend_reason: 'local_not_installed' })),
+    ).toContain('not installed yet');
+    expect(
+      describeBackend(status({ backend: 'none', backend_reason: 'openai_key_missing' })),
+    ).toContain('no API key is saved');
+    expect(describeBackend(status({ backend: 'none', backend_reason: 'unconfigured' }))).toContain(
+      'set up one of the options',
+    );
+  });
+
+  it('a choice that is not running is flagged — and nothing was substituted for it', () => {
+    // The server never falls back, so this state means "your choice cannot run",
+    // never "we quietly used the other one".
+    expect(choiceIsStalled(status({ backend: 'none', choice: 'openai' }))).toBe(true);
+    expect(choiceIsStalled(status({ backend: 'openai', choice: 'openai' }))).toBe(false);
+    expect(choiceIsStalled(status({ backend: 'none', choice: null }))).toBe(false);
+  });
+
+  it('each option says why it cannot serve a note yet, before it is picked', () => {
+    const bare = status();
+    expect(backendBlocker(bare, 'local')).toContain('Not installed');
+    expect(backendBlocker(bare, 'openai')).toContain('No API key');
+    const ready = status({
+      local_available: true,
+      openai_key: { present: true, source: 'stored', saved_at: '2026-08-01T00:00:00.000Z' },
+    });
+    expect(backendBlocker(ready, 'local')).toBeNull();
+    expect(backendBlocker(ready, 'openai')).toBeNull();
+  });
+
+  it('a key from the server environment says so — it cannot be removed from here', () => {
+    const env = status({ openai_key: { present: true, source: 'environment', saved_at: null } });
+    expect(describeKeySource(env)).toContain('OPENAI_API_KEY');
+    expect(describeKeySource(status())).toBeNull();
+  });
+
+  it('neither option is sold as the better one, and slowness is blamed on the hardware', () => {
+    // The measured timings in the catalog come from a server with no GPU. Copy
+    // that called local "slower" full stop would be wrong on a Mac with Metal.
+    const local = describeBackendOption('local');
+    expect(local).toContain('no GPU');
+    expect(local).toContain('never leaves the machine');
+    const openai = describeBackendOption('openai');
+    expect(openai).toContain('billed per minute');
+    expect(openai).toContain('leaves your machine');
   });
 
   it('a job is running only in the phases where the server still has work', () => {
@@ -378,6 +439,42 @@ describe('WIRED — the card is mounted on /settings and reads live status', () 
     expect(card).toContain('settings-voice-transcription-install');
     expect(card).toContain('settings-voice-transcription-remove');
     expect(card).toContain('settings-voice-transcription-blocked');
+    // The backend chooser + key field are the point of this screen now. A
+    // control that exists only on the web tab is unreachable for an owner who
+    // records voice notes on a phone, which is how the local-Whisper card came
+    // to be ported in the first place.
+    // Rendered from the `['local', 'openai']` pair, so pin the template AND the
+    // pair — a row that stopped being generated would leave one of them unbuilt.
+    expect(card).toContain('settings-voice-backend-${backend}');
+    expect(card).toMatch(/\(\['local', 'openai'\] as const\)\.map/);
+    expect(card).toContain('settings-voice-openai-key-input');
+    expect(card).toContain('settings-voice-openai-key-save');
+    expect(card).toContain('settings-voice-openai-key-remove');
+  });
+
+  it('the key input is masked and free of keyboard "help" that mangles a key', () => {
+    const card = read(APP_ROOT, 'components', 'VoiceTranscriptionCard.tsx');
+    expect(card).toContain('secureTextEntry');
+    expect(card).toMatch(/autoCapitalize="none"/);
+    expect(card).toMatch(/autoCorrect=\{false\}/);
+  });
+
+  it('the card never renders a stored key back — there is no field that could', () => {
+    // The server sends presence + provenance + a date, never key material, so
+    // nothing in the card may reach for a value-shaped field.
+    const card = read(APP_ROOT, 'components', 'VoiceTranscriptionCard.tsx');
+    expect(card).not.toMatch(/openai_key\.(key|value|plaintext|masked|hint|last4)/);
+  });
+
+  it('/settings wires the three new handlers to the card (built-but-not-wired guard)', () => {
+    const settings = read(APP_ROOT, 'app', 'settings.tsx');
+    expect(settings).toMatch(/onChooseBackend=\{handleChooseBackend\}/);
+    expect(settings).toMatch(/onSaveOpenAiKey=\{handleSaveOpenAiKey\}/);
+    expect(settings).toMatch(/onRemoveOpenAiKey=\{handleRemoveOpenAiKey\}/);
+    // And that each actually calls the client, rather than being a named no-op.
+    expect(settings).toContain('c.chooseBackend(backend)');
+    expect(settings).toContain('c.saveOpenAiKey(api_key)');
+    expect(settings).toContain('c.removeOpenAiKey()');
   });
 });
 
