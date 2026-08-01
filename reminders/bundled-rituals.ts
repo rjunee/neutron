@@ -5,11 +5,25 @@
  * + the deepened build order (lines 42-52: read-only rituals ship first, Layer 1
  * `--tools` default-deny alone contains them) + design §2a/B2. This module ships
  * three GENERIC read-only example rituals (`morning-brief`, `evening-wrap`,
- * `daily-delta`) as ENGINE seeds so a fresh Neutron install has working ritual
- * examples out of the box. `daily-delta` is the time-anchored survivor of Q2's
- * split-by-tier (overturn 2): backlink repair + correction-promotion moved into
- * CORE MEMORY, but a daily memory delta has no in-memory trigger, so it stays a
- * scheduled read-only ritual (design deepened header, "Ryan's Q2, split by tier").
+ * `kaizen`) as ENGINE seeds so a fresh Neutron install has working ritual
+ * examples out of the box.
+ *
+ * `kaizen` is the weekly continuous-improvement pass ported from the legacy
+ * harness: it reads the corrections log, the diary, the standing persona rules,
+ * the sibling ritual prompts, the client diagnostics and the project STATUS
+ * files, notices what the owner has had to correct REPEATEDLY, and proposes a
+ * fix to the SYSTEM rather than to the latest instance. It is the only bundled
+ * def with `egress: 'web'` (one narrow ecosystem scan), which the registration
+ * service surfaces as a SECOND, separately-approved grant
+ * (`reminders/ritual-registration.ts:738`) — approving the content never
+ * implies approving egress.
+ *
+ * `daily-delta` was DROPPED (2026-08-01, owner). Its stated purpose was proving
+ * the system still worked, which the reachability gates now cover directly, and
+ * its inputs (`entities/INDEX.md`, the corrections log, `diary/`) are a strict
+ * subset of what kaizen reads on a cadence that produces an ACTION instead of a
+ * status line. The template, def, wiring and tests were removed together — no
+ * dead template, no orphaned wiring.
  *
  * USER-DATA principle (CLAUDE.md — "Ryan's ritual CONTENT is user data via import,
  * never hardcoded"): what ships here is a GENERIC, instance-agnostic template that
@@ -48,12 +62,27 @@ const HERE = dirname(fileURLToPath(import.meta.url))
 export const BUNDLED_RITUAL_TEMPLATES_DIR: string = join(HERE, 'rituals')
 
 /**
- * The three ENGINE-shipped read-only ritual defs. Surface is EXACTLY
- * `['Read','Glob','Grep']` (no Bash/Write — Layer 1 `--tools` default-deny contains
- * these; the `GATED_WRITE_TOOLS` fire-time gate never trips), egress 'none' (no web
- * tools), scope 'instance' (rooted at owner_home — morning-brief legitimately reads
- * across every project, and the read-only surface grants no write authority at the
- * wider root). `silent: false` — all post their digest.
+ * The three ENGINE-shipped read-only ritual defs. Every surface is READ-ONLY —
+ * zero intersection with `GATED_WRITE_TOOLS`, so the fire-time
+ * `gated_tool_surface` refusal never trips and Layer 1 (`--tools` default-deny)
+ * contains them. Scope is 'instance' for all three (rooted at owner_home —
+ * morning-brief legitimately reads across every project, and a read-only surface
+ * grants no write authority at the wider root). `silent: false` — all post their
+ * digest, so none of them can land in a log and stop there.
+ *
+ * Surfaces differ in exactly one axis: `kaizen` additionally grants `WebSearch`
+ * and therefore declares `egress: 'web'` (the registry enforces that consistency,
+ * `rituals.ts:235-244`). That is a deliberate, load-bearing widening — the
+ * ecosystem scan is half of what kaizen is for — and it costs the owner a second
+ * approval prompt by design. Read + web egress in one agent IS an exfiltration
+ * shape, so the template forbids putting anything read on disk into a query and
+ * the owner grants egress as its own decision.
+ *
+ * NOTE (kaizen has NO write authority): the legacy ritual auto-filed its top
+ * actions into an issues file. `GATED_WRITE_TOOLS` refuses Write/Edit at fire
+ * time (`rituals.ts:107`, enforced at `rituals.ts:396`), so that half does not
+ * port — kaizen PROPOSES in its delivered report and the owner acts. Do not
+ * "fix" this by widening the surface; the gate is the containment.
  *
  * Frozen so a caller cannot mutate a def before/after registration.
  */
@@ -77,12 +106,12 @@ export const BUNDLED_RITUAL_DEFS: readonly RitualDef[] = Object.freeze([
     silent: false,
   }),
   Object.freeze({
-    id: 'daily-delta',
+    id: 'kaizen',
     description:
-      'Reads the memory layer (entities index, corrections log, diary) and posts a short daily delta of what changed in the last day. Read-only: no shell, no writes, no network.',
+      'Weekly improvement pass: reads the corrections log, diary, standing rules and project status, finds what the owner keeps correcting, and proposes system fixes. Read-only, no writes; searches the web.',
     scope: 'instance',
-    tool_surface: Object.freeze(['Read', 'Glob', 'Grep']),
-    egress: 'none',
+    tool_surface: Object.freeze(['Read', 'Glob', 'Grep', 'WebSearch']),
+    egress: 'web',
     silent: false,
   }),
 ]) as readonly RitualDef[]

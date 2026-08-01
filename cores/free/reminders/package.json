@@ -399,7 +399,7 @@
       },
       {
         "name": "rituals_enable",
-        "description": "ENABLE an already-registered ritual by giving it a schedule. Use this for the BUNDLED example rituals (morning-brief, evening-wrap, daily-delta) and any previously-registered ritual — rituals_propose refuses their ids because their prompt already exists on disk. You supply ONLY the id + schedule; the prompt, tool surface and scope are owned by the registered def (see rituals_status for the ids). IMPORTANT: enabling does NOT run anything — like rituals_propose, the ritual only fires after the OWNER explicitly APPROVES it in chat (a code-rendered Approve/Deny prompt is shown; approval is content-hash-bound to the on-disk prompt bytes). Returns an opaque proposal_id and status 'pending_approval'.",
+        "description": "ENABLE an already-registered ritual by giving it a schedule. Use this for the BUNDLED example rituals (morning-brief, evening-wrap, kaizen) and any previously-registered ritual — rituals_propose refuses their ids because their prompt already exists on disk. You supply ONLY the id + schedule; the prompt, tool surface and scope are owned by the registered def (see rituals_status for the ids). IMPORTANT: enabling does NOT run anything — like rituals_propose, the ritual only fires after the OWNER explicitly APPROVES it in chat (a code-rendered Approve/Deny prompt is shown; approval is content-hash-bound to the on-disk prompt bytes). Returns an opaque proposal_id and status 'pending_approval'.",
         "input_schema": {
           "type": "object",
           "properties": {

@@ -48,7 +48,7 @@ fire-time text is composed at fire time, never pre-rendered.
   schedule-on-approve. Surfaced as the reminders-Core `rituals_propose` /
   `rituals_enable` / `rituals_status` MCP tools.
 - `bundled-rituals.ts` + `rituals/*.md` (`morning-brief`, `evening-wrap`,
-  `daily-delta`) — seeded copy-if-absent into `<owner_home>/rituals/`, registered
+  `kaizen`) — seeded copy-if-absent into `<owner_home>/rituals/`, registered
   UNAPPROVED on boot with NO `.def.json` (no schedule). They become usable ONLY
   via `rituals_enable` (the sole approval + scheduling path for a bundled id).
   `ritual-agent-base.md` — the ritual substrate base prompt.
