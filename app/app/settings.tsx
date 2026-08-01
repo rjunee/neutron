@@ -15,9 +15,11 @@
  */
 
 import { useRouter } from 'expo-router';
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
+  AppState,
+  type AppStateStatus,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -26,6 +28,8 @@ import {
 } from 'react-native';
 
 import { ServerConnectForm, type ServerSavedResult } from '../components/ServerConnectForm';
+import { VoiceTranscriptionCard } from '../components/VoiceTranscriptionCard';
+import { appStateBecameActive } from '../lib/app-state-refetch';
 import { signOut } from '../lib/auth';
 import { shouldRedirectToLogin } from '../lib/auth-helpers';
 import { getRuntimeServerConfig, loadAppConfig } from '../lib/config';
@@ -38,6 +42,15 @@ import {
 import { disablePushForUser } from '../lib/push';
 import { useAuthSession } from '../lib/session';
 import { THEME } from '../lib/theme';
+import {
+  VoiceTranscriptionClient,
+  type VoiceTranscriptionStatus,
+} from '../lib/voice-transcription-client';
+import {
+  describeStatusFailure,
+  isJobRunning,
+  type StatusFailure,
+} from '../lib/voice-transcription-view';
 
 export default function SettingsScreen() {
   const router = useRouter();
@@ -70,6 +83,99 @@ export default function SettingsScreen() {
     },
     [clear, router],
   );
+
+  // ── local voice transcription (whisper.cpp) ──
+  // Machine-scoped, not per-project: one install serves the whole server, so
+  // this client carries no project id. The DOWNLOAD runs server-side (the POST
+  // returns 202 immediately — `gateway/http/voice-transcription-surface.ts`
+  // POST case), which is the only reason this is workable from a phone: the app
+  // is watching a job, not hosting one. Backgrounding pauses the polling, never
+  // the install.
+  const asrClient = useMemo(
+    () =>
+      user === null
+        ? null
+        : new VoiceTranscriptionClient({ base_url: loadAppConfig().base_url, token: user.token }),
+    [user],
+  );
+  const [asr, setAsr] = useState<VoiceTranscriptionStatus | null>(null);
+  const [asrFailure, setAsrFailure] = useState<StatusFailure | null>(null);
+  const [asrLoading, setAsrLoading] = useState(true);
+  const [asrBusy, setAsrBusy] = useState(false);
+  const [asrError, setAsrError] = useState<string | null>(null);
+  const [asrModel, setAsrModel] = useState('');
+
+  const loadAsr = useCallback(async (): Promise<void> => {
+    if (asrClient === null) return;
+    try {
+      const next = await asrClient.status();
+      setAsr(next);
+      setAsrFailure(null);
+      // Seed the picker ONCE — with the installed model, else the recommended
+      // default — so a poll tick can never yank a choice out from under a tap.
+      setAsrModel((prev) => (prev === '' ? (next.model_id ?? next.default_model_id) : prev));
+    } catch (err) {
+      setAsrFailure(describeStatusFailure(err));
+    } finally {
+      setAsrLoading(false);
+    }
+  }, [asrClient]);
+
+  useEffect(() => {
+    void loadAsr();
+  }, [loadAsr]);
+
+  // Poll while the server has work in flight. Torn down the moment the job
+  // leaves a running phase or the screen unmounts — no timer outlives what it
+  // was watching.
+  const asrRunning = isJobRunning(asr?.job?.phase ?? null);
+  useEffect(() => {
+    if (!asrRunning) return;
+    const timer = setInterval(() => {
+      void loadAsr();
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [asrRunning, loadAsr]);
+
+  // Foreground refetch. A multi-hundred-megabyte download outlives the app's
+  // foreground time on any real phone; the JS timer above does NOT run while
+  // the app is backgrounded, so without this the owner returns to a bar frozen
+  // at whatever it read when they left — which looks exactly like a stall. The
+  // job itself is unaffected: it lives in the gateway process.
+  const appState = useRef(AppState.currentState);
+  useEffect(() => {
+    const sub = AppState.addEventListener('change', (next: AppStateStatus) => {
+      if (appStateBecameActive(appState.current, next)) void loadAsr();
+      appState.current = next;
+    });
+    return () => sub.remove();
+  }, [loadAsr]);
+
+  const handleInstallAsr = useCallback(async (): Promise<void> => {
+    if (asrClient === null || asrModel === '') return;
+    setAsrBusy(true);
+    setAsrError(null);
+    try {
+      setAsr(await asrClient.install(asrModel));
+    } catch (err) {
+      setAsrError(describeStatusFailure(err).message);
+    } finally {
+      setAsrBusy(false);
+    }
+  }, [asrClient, asrModel]);
+
+  const handleRemoveAsr = useCallback(async (): Promise<void> => {
+    if (asrClient === null) return;
+    setAsrBusy(true);
+    setAsrError(null);
+    try {
+      setAsr(await asrClient.remove());
+    } catch (err) {
+      setAsrError(describeStatusFailure(err).message);
+    } finally {
+      setAsrBusy(false);
+    }
+  }, [asrClient]);
 
   useEffect(() => {
     // Only redirect to /login once the session provider has finished
@@ -234,6 +340,22 @@ export default function SettingsScreen() {
           </View>
           <Text style={styles.navRowChevron}>›</Text>
         </Pressable>
+
+        <VoiceTranscriptionCard
+          status={asr}
+          failure={asrFailure}
+          loading={asrLoading}
+          busy={asrBusy}
+          actionError={asrError}
+          selectedModelId={asrModel}
+          onSelectModel={setAsrModel}
+          onInstall={() => {
+            void handleInstallAsr();
+          }}
+          onRemove={() => {
+            void handleRemoveAsr();
+          }}
+        />
 
         <View style={styles.serverCard} testID="settings-diagnostics-card">
           <Text style={styles.navRowTitle}>Diagnostics</Text>
