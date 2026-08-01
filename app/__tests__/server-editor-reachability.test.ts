@@ -268,17 +268,32 @@ describe('#385 — native cleartext permissions + OTA gate', () => {
     expect(buildProps![1]['android']!['usesCleartextTraffic']).toBe(true);
   });
 
-  it('the app version is BUMPED past 0.0.1 so EAS Update cannot OTA this to old installs', () => {
-    // Argus r2 MAJOR: `runtimeVersion.policy: 'appVersion'` + `updates.url`
-    // means a JS-only change normally reaches installed builds. That would
-    // be wrong here — the mandatory gate depends on the two NATIVE
-    // permissions above, applied by `expo prebuild` at BUILD time, so an
-    // OTA'd install would render a gate whose LAN probe the platform
-    // blocks and never get past it. Bumping `version` changes the derived
-    // runtimeVersion, so 0.0.1 installs are not eligible.
-    expect(appJson.expo['runtimeVersion']).toEqual({ policy: 'appVersion' });
+  it('runtimeVersion is FINGERPRINT, so a native change cannot be OTA\'d to a build that lacks it', () => {
+    // Argus r2 MAJOR, restated under the mechanism that now enforces it.
+    //
+    // The requirement has not changed: the mandatory gate above depends on
+    // two NATIVE permissions applied by `expo prebuild` at BUILD time, so an
+    // OTA'd install would render a gate whose LAN probe the platform blocks
+    // and never get past it. Such a bundle must never reach an older build.
+    //
+    // What changed is HOW that is guaranteed. This test used to assert
+    // `policy: 'appVersion'` plus a hand-bumped `version` — i.e. it pinned a
+    // MANUAL workaround, and the guarantee only held for as long as someone
+    // remembered to bump. Under `appVersion` a native dependency added
+    // WITHOUT a version bump keeps the old runtimeVersion, and expo-updates
+    // then judges the bundle compatible with builds that cannot run it. That
+    // is not hypothetical: it was found the day `expo-audio` was added for
+    // voice messages.
+    //
+    // `fingerprint` hashes the native project, so ANY native change yields a
+    // new runtimeVersion on its own. The gate is now a property of the
+    // tooling rather than of anyone's memory, which is strictly stronger than
+    // what this test previously pinned.
+    expect(appJson.expo['runtimeVersion']).toEqual({ policy: 'fingerprint' });
+
+    // Still pinned: the two version fields must not drift apart. They no
+    // longer gate OTA eligibility, but a mismatch misreports the release.
     const version = appJson.expo['version'] as string;
-    expect(version).not.toBe('0.0.1');
     const pkg = JSON.parse(read('package.json')) as { version: string };
     expect(pkg.version).toBe(version);
   });
