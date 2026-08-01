@@ -2425,7 +2425,7 @@ account) once, then paste the contents of `~/.codex/auth.json`.
   the ONE `CodexCredentialService`. The per-project override UI is in that project's
   Settings tab (`SettingsTab.tsx`), clearly labelled optional.
 
-## Voice-note transcription — local whisper.cpp, hosted API as fallback (`gateway/transcription/`)
+## Voice-note transcription — the owner picks the backend (`gateway/transcription/`)
 
 A voice note is transcribed at upload-complete time and the transcript is
 persisted as a content-addressed `<hash>.txt` sidecar beside the blob; the live
@@ -2441,12 +2441,43 @@ never fail an upload):
   network, no per-minute cost, and the audio never leaves the box.
 - `openai-transcription.ts` — the hosted `POST /v1/audio/transcriptions` client.
 
-**Precedence — LOCAL WINS, unconditionally** (`resolve-transcriber.ts`):
-local-if-installed → hosted-if-`OPENAI_API_KEY` → none. Installing local Whisper
-is a deliberate act whose point is that the voice stays on the machine; silently
-preferring a remote service afterwards, because an unrelated key is in the env,
-would undo that and bill for it. Resolution happens PER CALL, not at boot, so an
-install performed in Settings takes effect without a restart.
+**The SETTING decides — there is NO precedence** (`resolve-transcriber.ts`).
+`instance_metadata.transcription_backend` (migration 0111) holds `'local'` or
+`'openai'`, and that is the only input that ranks the two. The earlier rule
+("local wins when installed, unconditionally") is DELETED, not demoted: it made
+the two mutually exclusive — with local installed there was no way to reach an
+OpenAI key short of deleting the install — and a rule left underneath the setting
+as a hidden tiebreaker would reassert itself the next time a backend was
+installed or a key pasted. Owner's ruling: *"I think it should just be a setting
+for which transcription tool to use."*
+
+Resolution, per call (not at boot, so a change takes effect on the very next
+voice note without a restart):
+
+- **chosen backend can run** → it runs.
+- **chosen backend cannot run** → `none`, with a reason
+  (`local_not_installed` / `openai_key_missing`). NEVER the other backend:
+  substituting would either ship audio off a box whose owner asked for local, or
+  silently downgrade quality for one who asked for OpenAI.
+- **never chosen, exactly one backend configured** → that one. A self-hoster who
+  only ever set `OPENAI_API_KEY`, or only ever installed local Whisper, is
+  unaffected and never has to visit the setting.
+- **never chosen, BOTH configured** → `none` / `unchosen`. The question is real
+  and unanswered, so both Settings surfaces ask it and the composer logs
+  `voice_transcription_unconfigured` rather than guessing where the audio goes.
+
+**The OpenAI API key** is owner-entered in Settings and stored where every other
+owner-entered credential lives: the AES-256-GCM `ProjectCredentialStore`
+(migration 0092, shared `.neutron-aes-key`), GLOBAL scope, reserved service name
+`openai_transcription` — the same shape as the Codex subscription bundle.
+`gateway/transcription/openai-key-store.ts` owns it. The key resolves
+stored-credential → `OPENAI_API_KEY` from the server environment, so a box that
+already had the env var keeps working without a re-paste, and the status object
+reports WHICH source supplied it. **It is write-only**: responses carry
+`{ present, source, saved_at }` and never the key or any slice of it (this repo
+omits secret material rather than masking it), and an environment-supplied key
+cannot be deleted over HTTP — that returns 409 `key_from_environment` pointing at
+the server's `.env`.
 
 **Install is opt-in, from Settings — nothing ships in `install.sh`.**
 `whisper-catalog.ts` pins the whisper.cpp release build and each ggml model by
@@ -2460,14 +2491,19 @@ running several instances can share ONE copy of the weights.
 
 **Surfaces.** HTTP `gateway/http/voice-transcription-surface.ts` —
 machine-scoped `/api/app/voice-transcription` (GET status + catalog + live job
-progress, POST install, DELETE remove). POST returns 202 immediately; the client
-polls the GET for real byte counts, rendered as a progress bar.
+progress, POST install, DELETE remove), plus `PUT …/backend` (choose one) and
+`PUT`/`DELETE …/openai-key`. Every route answers with the SAME status object, so
+a client re-renders from the reply rather than re-fetching. POST returns 202
+immediately; the client polls the GET for real byte counts, rendered as a
+progress bar. `backend` in that object is computed by CALLING `resolveTranscriber`
+— the surface used to carry its own copy of the rule, which is how a status line
+drifts from what the box actually does.
 
 TWO clients drive it, because voice notes are mostly recorded on a phone and a
 switch that only exists on the desktop is, for a mobile owner, unshipped:
 
 - **web** — `landing/chat-react/voice-transcription-client.ts` →
-  `SettingsTab.tsx` § "Local voice transcription".
+  `SettingsTab.tsx` § "Voice transcription".
 - **mobile** — `app/lib/voice-transcription-client.ts` +
   `app/lib/voice-transcription-view.ts` → `app/components/VoiceTranscriptionCard.tsx`,
   mounted on `app/app/settings.tsx`. The wire types are re-declared rather than
@@ -2478,6 +2514,14 @@ switch that only exists on the desktop is, for a mobile owner, unshipped:
   polling after a backgrounded phone (the job is unaffected — it lives in the
   gateway process, so only the WATCHING pauses); a 404 is reported as "this
   server is older than the API" rather than a generic failure.
+
+Both surfaces lead with ONE line naming the backend that is transcribing RIGHT
+NOW — the complaint that produced this feature was not knowing which was in use —
+and when nothing is, they say which of the four situations it is rather than one
+generic "not transcribed". Both clients also normalize a status response from a
+server older than the choice feature, since a store-published app build routinely
+outlives a server version and reading an absent field mid-render takes the whole
+screen down.
 
 `binary_present` (alongside `binary_downloadable`) reports whether a runnable
 `whisper-cli` is already on the box. The pair is the whole truth about whether
@@ -2491,7 +2535,10 @@ whisper.cpp v1.9.1, 30-second note): `base` 3.8 s / 343 MB RSS; `small` 12.4 s /
 INSIDE the upload request, so model choice is felt directly as how long the owner
 waits after speaking. Plain `large-v3` (69.8 s, 3.97 GB RSS) and every q5
 quantization (measured SLOWER than the f16 weights they shrink, on this CPU) are
-deliberately not offered. `whisper-cli` decodes wav/mp3/ogg/flac natively;
+deliberately not offered. Those numbers are CPU-only; GPU-accelerated hardware
+runs the same models far faster, so the Settings copy attributes the slowness to
+the machine rather than presenting local transcription as the worse option.
+`whisper-cli` decodes wav/mp3/ogg/flac natively;
 `audio/mp4` (iOS Safari's recorder output) is normalized through `ffmpeg` when
 present and refused with a precise `unsupported_format` when not.
 
@@ -5981,16 +6028,19 @@ now-nonexistent vanilla client.
   existed in `binary-types.ts`). At upload-complete an audio blob is transcribed by
   `gateway/transcription/openai-transcription.ts` — an OpenAI-compatible `POST
   {base}/v1/audio/transcriptions` Whisper client (`whisper-1`, injectable base_url +
-  fetch; typed error taxonomy; never throws). Transcription is gated ONLY by
-  `OPENAI_API_KEY` presence (credential config, the SAME single var the conversational
-  OpenAI provider pool uses via `resolveOpenOpenAiPool` — NOT a feature flag; it works
-  regardless of which provider drives the conversation). The transcript is persisted as
+  fetch; typed error taxonomy; never throws). Which backend
+  answers is the owner's SETTING — see § "Voice-note transcription", now the
+  authoritative account. (Superseded here: this paragraph originally said
+  transcription was "gated ONLY by `OPENAI_API_KEY` presence". Since migration
+  0111 the gate is `instance_metadata.transcription_backend`, and the key is an
+  owner-entered credential in the encrypted store, with the env var kept only as
+  a fallback SOURCE.) The transcript is persisted as
   a **content-addressed `<hash>.txt` sidecar** beside the blob (atomic tmp+rename,
   idempotent — a re-upload of the same bytes never re-calls the API; `.txt` is
   deliberately NOT in the GET ext-group, so the sidecar is never servable). It is
   injected into the `<user_attachments>` prompt fragment as the voice note's inline
-  transcript (capped at 4000 chars; keyless/failed ASR → a graceful "transcription
-  unavailable — set OPENAI_API_KEY" note), and appended to the SCRIBE text via a new
+  transcript (capped at 4000 chars; unconfigured/failed ASR → a graceful "transcription
+  unavailable" note), and appended to the SCRIBE text via a new
   `attachmentTranscript` app-ws seam so voice → text → gbrain memory reaches parity —
   the turn's `user_text` is never mutated. Both clients render a 🎵 chip for a voice
   note (web `message-adapter.ts` `isAudioAttachmentUrl`; native `attachment-url.ts`

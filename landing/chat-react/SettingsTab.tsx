@@ -38,6 +38,7 @@ import {
   describeJob,
   formatBytes,
   jobFraction,
+  type TranscriptionBackendChoice,
   type VoiceTranscriptionStatus,
 } from './voice-transcription-client.ts'
 
@@ -202,6 +203,10 @@ export function SettingsTab({
   const [asrBusy, setAsrBusy] = useState(false)
   const [asrError, setAsrError] = useState<string | null>(null)
   const [confirmingAsrRemove, setConfirmingAsrRemove] = useState(false)
+  // The pasted key. Never seeded from the server (it never sends one) and
+  // cleared the moment a save is fired, so it lives in memory for as long as it
+  // takes to type it and no longer.
+  const [openAiKeyDraft, setOpenAiKeyDraft] = useState('')
 
   const loadAsr = useCallback((): void => {
     void asrClient
@@ -267,6 +272,50 @@ export function SettingsTab({
         setAsrError(err instanceof Error ? err.message : 'failed to remove')
       })
   }, [asrClient])
+
+  // Choose-a-backend / save-a-key / forget-a-key all share this shape: every
+  // route answers with the SAME status object, so the reply IS the new state and
+  // there is no re-fetch race between what was just done and what the server
+  // thinks. A write is never aborted on unmount (see `withSignal`).
+  const runAsrMutation = useCallback(
+    (call: () => Promise<VoiceTranscriptionStatus>, failure: string): void => {
+      setAsrBusy(true)
+      setAsrError(null)
+      void call()
+        .then((s) => {
+          if (!mountedRef.current) return
+          setAsr(s)
+          setAsrBusy(false)
+        })
+        .catch((err: unknown) => {
+          if (!mountedRef.current) return
+          setAsrBusy(false)
+          setAsrError(err instanceof Error ? err.message : failure)
+        })
+    },
+    [],
+  )
+
+  const chooseAsrBackend = useCallback(
+    (backend: TranscriptionBackendChoice): void => {
+      runAsrMutation(() => asrClient.chooseBackend(backend), 'failed to change the backend')
+    },
+    [asrClient, runAsrMutation],
+  )
+
+  const saveOpenAiKey = useCallback((): void => {
+    const key = openAiKeyDraft.trim()
+    if (key.length === 0) return
+    // Cleared BEFORE the request, not in the `.then`: a failed save must not
+    // leave the key sitting in a DOM input, and the error text the server
+    // returns never echoes what was sent.
+    setOpenAiKeyDraft('')
+    runAsrMutation(() => asrClient.saveOpenAiKey(key), 'failed to save the key')
+  }, [asrClient, openAiKeyDraft, runAsrMutation])
+
+  const removeOpenAiKey = useCallback((): void => {
+    runAsrMutation(() => asrClient.removeOpenAiKey(), 'failed to remove the key')
+  }, [asrClient, runAsrMutation])
 
   // ── project name ──
   const [name, setName] = useState('')
@@ -702,17 +751,20 @@ export function SettingsTab({
         </form>
       </section>
 
-      {/* ── Local voice transcription (whisper.cpp) ──────────────────────────
-          Machine-scoped, not per-project: one install serves every project on
-          this box. Nothing is downloaded until the owner asks for it here, so a
-          fresh install stays lean and never pays for a feature it may not use. */}
-      <section className="cset-section" aria-label="Local voice transcription">
-        <h2 className="cset-h">Local voice transcription</h2>
+      {/* ── Voice transcription ──────────────────────────────────────────────
+          Machine-scoped, not per-project: one choice and one install serve every
+          project on this box. Nothing is downloaded until the owner asks for it
+          here, so a fresh install stays lean and never pays for a feature it may
+          not use.
+
+          The SETTING is the only thing that decides which backend runs. There is
+          no precedence underneath it in either direction — the copy must not
+          imply one, because the server does not implement one. */}
+      <section className="cset-section" aria-label="Voice transcription">
+        <h2 className="cset-h">Voice transcription</h2>
         <p className="cset-sub">
-          Transcribe voice notes <strong>on this machine</strong> with whisper.cpp — no API key, no
-          per-minute cost, and the audio never leaves your server. Once installed it takes
-          precedence over the hosted OpenAI transcription, even if{' '}
-          <code>OPENAI_API_KEY</code> is set.
+          How your voice notes are turned into text. Two options, and this setting is the only
+          thing that decides between them — installing one does not override the other.
         </p>
 
         {asr === null ? (
@@ -721,13 +773,78 @@ export function SettingsTab({
           <>
             <p className="cset-asr-status" data-backend={asr.backend}>
               {asr.backend === 'local'
-                ? `✓ Running locally — ${asr.model_id ?? 'installed'} model${
+                ? `✓ Transcribing on this server — ${asr.model_id ?? 'installed'} model${
                     asr.installed_bytes > 0 ? ` (${formatBytes(asr.installed_bytes)} on disk)` : ''
                   }`
                 : asr.backend === 'openai'
-                  ? '○ Using hosted OpenAI transcription (an API key is set)'
-                  : '○ Voice notes are not transcribed on this server'}
+                  ? '✓ Transcribing with the OpenAI API'
+                  : asr.backend_reason === 'unchosen'
+                    ? '⚠ Nothing is transcribing — both options are set up, so pick the one you want'
+                    : asr.backend_reason === 'local_not_installed'
+                      ? '⚠ Nothing is transcribing — you chose this server, but whisper.cpp is not installed yet'
+                      : asr.backend_reason === 'openai_key_missing'
+                        ? '⚠ Nothing is transcribing — you chose OpenAI, but no API key is saved'
+                        : '○ Nothing is transcribing — set up one of the options below'}
             </p>
+
+            {/* THE CHOICE. Each option states its own honest cost; neither is
+                marked as the default, because there isn't one. */}
+            <fieldset className="cset-field cset-scope" data-testid="voice-backend-choice">
+              <legend className="cset-label">Use</legend>
+              <label className="cset-radio">
+                <input
+                  type="radio"
+                  name="cset-asr-backend"
+                  checked={asr.choice === 'local'}
+                  disabled={asrBusy}
+                  onChange={() => chooseAsrBackend('local' as TranscriptionBackendChoice)}
+                />
+                <span>
+                  <strong>This server</strong>
+                  {asr.backend === 'local' ? <em> — in use</em> : null}
+                  <br />
+                  <small>
+                    Runs on your own server with whisper.cpp. No API key, nothing billed per
+                    minute, and the audio never leaves the machine. Speed is down to the hardware:
+                    the timings below were measured on a server with no GPU, where the large models
+                    take longer than the recording itself. On a GPU-accelerated machine they are
+                    much faster.
+                    {!asr.local_available ? (
+                      <strong> Not installed yet — install a model below.</strong>
+                    ) : null}
+                  </small>
+                </span>
+              </label>
+              <label className="cset-radio">
+                <input
+                  type="radio"
+                  name="cset-asr-backend"
+                  checked={asr.choice === 'openai'}
+                  disabled={asrBusy}
+                  onChange={() => chooseAsrBackend('openai' as TranscriptionBackendChoice)}
+                />
+                <span>
+                  <strong>OpenAI API</strong>
+                  {asr.backend === 'openai' ? <em> — in use</em> : null}
+                  <br />
+                  <small>
+                    Sends the audio to OpenAI. Large-model accuracy in a few seconds whatever your
+                    server is, so it does not slow down on a CPU-only box. Needs an API key, is
+                    billed per minute of audio, and the recording leaves your machine.
+                    {!asr.openai_key.present ? (
+                      <strong> No API key saved yet — add one below.</strong>
+                    ) : null}
+                  </small>
+                </span>
+              </label>
+            </fieldset>
+
+            {asr.choice !== null && asr.backend !== asr.choice ? (
+              <div className="cset-note" data-testid="voice-backend-stalled">
+                Your choice is not running yet, and nothing has been substituted for it — set it up
+                below and it starts on the next voice note.
+              </div>
+            ) : null}
 
             {/* Live progress. Real byte counts from the server, not a spinner. */}
             {asr.job !== null && asr.job.phase !== 'idle' ? (
@@ -770,13 +887,17 @@ export function SettingsTab({
               </div>
             ) : null}
 
+            <h3 className="cset-label">On this server</h3>
+
             {asr.installed ? (
               <div className="cset-inline cset-asr-actions">
                 {confirmingAsrRemove ? (
                   <>
                     <span className="cset-note">
-                      Delete the local model and binary ({formatBytes(asr.installed_bytes)})? Voice
-                      notes will fall back to hosted transcription, or none.
+                      Delete the local model and binary ({formatBytes(asr.installed_bytes)})?{' '}
+                      {asr.choice === 'local'
+                        ? 'On-server transcription is what you chose, so voice notes stop being transcribed until you install it again or switch to OpenAI.'
+                        : 'Voice notes are unaffected — they are not using this.'}
                     </span>
                     <button
                       type="button"
@@ -845,6 +966,67 @@ export function SettingsTab({
                 </div>
               </div>
             )}
+
+            {/* ── OpenAI key ──────────────────────────────────────────────────
+                Write-only. The server returns whether a key exists, where it
+                came from and when it was saved — never the key, and never part
+                of one. There is deliberately nothing here that renders a stored
+                value, so there is nothing to leak into a screenshot or a DOM
+                dump. */}
+            <h3 className="cset-label">OpenAI</h3>
+            <p className="cset-note" data-testid="voice-openai-key-status">
+              {!asr.openai_key.present
+                ? 'Add a key from platform.openai.com to use OpenAI transcription. It is stored encrypted on your own server and is never shown again.'
+                : asr.openai_key.source === 'environment'
+                  ? 'Using OPENAI_API_KEY from the server environment. To change it here, save a key below; to remove it, edit the server.'
+                  : asr.openai_key.saved_at !== null
+                    ? `Key saved ${new Date(asr.openai_key.saved_at).toLocaleDateString()}.`
+                    : 'Key saved.'}
+            </p>
+            <form
+              className="cset-form"
+              onSubmit={(e) => {
+                e.preventDefault()
+                saveOpenAiKey()
+              }}
+            >
+              <div className="cset-field">
+                <label className="cset-label" htmlFor="cset-asr-openai-key">
+                  API key
+                </label>
+                <input
+                  id="cset-asr-openai-key"
+                  className="cset-input"
+                  type="password"
+                  autoComplete="off"
+                  spellCheck={false}
+                  placeholder={
+                    asr.openai_key.present ? 'Replace the saved key' : 'Paste your OpenAI API key'
+                  }
+                  value={openAiKeyDraft}
+                  onChange={(e) => setOpenAiKeyDraft(e.target.value)}
+                />
+              </div>
+              <div className="cset-form-actions cset-asr-actions">
+                <button
+                  type="submit"
+                  className="cset-btn cset-btn-primary"
+                  disabled={asrBusy || openAiKeyDraft.trim().length === 0}
+                >
+                  {asr.openai_key.present ? 'Replace key' : 'Save key'}
+                </button>
+                {asr.openai_key.source === 'stored' ? (
+                  <button
+                    type="button"
+                    className="cset-btn cset-btn-danger"
+                    disabled={asrBusy}
+                    onClick={removeOpenAiKey}
+                  >
+                    Remove key
+                  </button>
+                ) : null}
+              </div>
+            </form>
           </>
         )}
       </section>

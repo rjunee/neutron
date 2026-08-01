@@ -272,7 +272,12 @@ export function buildAttachmentsFragment(
         for (const l of capped.split('\n')) lines.push(`  ${l}`)
       } else {
         lines.push(
-          `- ${resolved.path} (${resolved.content_type}) — voice note; transcription unavailable — the owner can enable it in Settings → Local voice transcription (runs on this machine, no API key), or by setting OPENAI_API_KEY`,
+          // Points at the ONE control that actually fixes this. Naming
+          // `OPENAI_API_KEY` here used to be half the answer and is now the
+          // wrong half: since migration 0111 a key alone does not select the
+          // hosted backend, so an agent repeating that advice would send the
+          // owner to a step that changes nothing.
+          `- ${resolved.path} (${resolved.content_type}) — voice note; transcription unavailable — the owner can set it up in Settings → Voice transcription, by choosing either this server (whisper.cpp, no API key) or OpenAI (needs a key)`,
         )
       }
       continue

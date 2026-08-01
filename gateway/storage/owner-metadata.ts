@@ -10,10 +10,17 @@
  *
  * The `instance_metadata` table is per-project DB (one row per `project_slug`).
  * Migration 0050 creates it; future instance-level fields (locale, week-start,
- * etc.) land as additive columns on the same row.
+ * etc.) land as additive columns on the same row. `transcription_backend`
+ * (migration 0111 — which voice-note transcriber the owner chose) is the second
+ * such field and is read/written here for the same reason: one module owns the
+ * table, so a second reader can't drift from the first on what a NULL means.
  */
 
 import type { ProjectDb } from '@neutronai/persistence/index.ts'
+import {
+  isTranscriptionBackendChoice,
+  type TranscriptionBackendChoice,
+} from '@neutronai/gateway/transcription/types.ts'
 
 /**
  * Read the IANA timezone identifier for `project_slug` from `instance_metadata`.
@@ -52,6 +59,49 @@ export async function writeOwnerTimezone(
     `INSERT INTO instance_metadata (instance_slug, timezone) VALUES (?, ?)
        ON CONFLICT(instance_slug) DO UPDATE SET timezone = excluded.timezone`,
     [project_slug, timezone],
+  )
+}
+
+/**
+ * Read the owner's chosen voice-note transcriber (migration 0111).
+ *
+ * Returns `null` for "never chosen" — which covers no row, a NULL column, AND a
+ * column holding anything other than the two legal values. A stored value the
+ * code no longer recognises must never be coerced into one of the live options:
+ * that would resolve an unanswered question by guessing, which is the whole
+ * behaviour this setting replaces.
+ */
+export function readTranscriptionBackend(
+  db: ProjectDb,
+  project_slug: string,
+): TranscriptionBackendChoice | null {
+  const row = db
+    .prepare<{ transcription_backend: string | null }, [string]>(
+      `SELECT transcription_backend FROM instance_metadata WHERE instance_slug = ? LIMIT 1`,
+    )
+    .get(project_slug)
+  if (row === null || row === undefined) return null
+  return isTranscriptionBackendChoice(row.transcription_backend) ? row.transcription_backend : null
+}
+
+/**
+ * Persist the owner's chosen transcriber. Upserts through `ON CONFLICT` so the
+ * timezone already on the row survives (and vice versa).
+ *
+ * There is deliberately no "clear the choice" path: once the owner has said
+ * which transcriber they want, un-saying it would drop them back into the
+ * unchosen state for no reason they asked for. They change it by choosing the
+ * other one.
+ */
+export async function writeTranscriptionBackend(
+  db: ProjectDb,
+  project_slug: string,
+  backend: TranscriptionBackendChoice,
+): Promise<void> {
+  await db.run(
+    `INSERT INTO instance_metadata (instance_slug, transcription_backend) VALUES (?, ?)
+       ON CONFLICT(instance_slug) DO UPDATE SET transcription_backend = excluded.transcription_backend`,
+    [project_slug, backend],
   )
 }
 
