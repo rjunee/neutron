@@ -59,6 +59,9 @@ import { docLinkToRouterPath, parseDocLink } from '../lib/doc-links';
 import { InputComposer, type ComposerAttachment, type ComposerFileEvent } from './InputComposer';
 import { UploadModal } from './UploadModal';
 import { DropZoneOverlay } from './DropZoneOverlay';
+import { VoiceRecorderOverlay } from './VoiceRecorderOverlay';
+import { useVoiceRecorder } from '../lib/use-voice-recorder';
+import { voiceComposerHandlers } from '../lib/voice-composer-handlers';
 import { useUploadState } from '../lib/use-upload-state';
 import { classifyUploadKind } from '../lib/upload-client';
 import { selectDropFiles, shouldGateUpload } from '../lib/upload-gate';
@@ -218,6 +221,32 @@ export function ChatSyncSurface({
       await send('', [url]);
     },
   });
+
+  // ── Voice messages ────────────────────────────────────────────────────────
+  // The composer draws the mic and reports the gesture; this hook does the
+  // recording. THIS is the connection between them — without it the composer's
+  // mic answered every press with "Voice messages are not available yet."
+  //
+  // A recorded note is not a special kind of message. It uploads through the
+  // same `/api/app/upload` an image does and lands as an ordinary attachment
+  // (`onImageUploaded` above takes the identical handoff), which is why the
+  // gateway needs nothing new to receive one: it already whitelists `audio/mp4`
+  // and transcribes at upload-complete (`gateway/http/app-upload-surface.ts:78`,
+  // `:328`).
+  const voice = useVoiceRecorder({
+    base_url: config.base_url,
+    token: user?.token ?? null,
+    onSend: async (url: string) => {
+      await send('', [url]);
+    },
+    onPermissionBlocked: () => {
+      // Permanently denied — the OS will not ask again, so the only route back
+      // is the app's own settings page. The hook stays out of `Linking` by
+      // design and leaves this to the host.
+      void Linking.openSettings().catch(() => undefined);
+    },
+  });
+  const voiceHandlers = useMemo(() => voiceComposerHandlers(voice), [voice]);
 
   const handleFilesPicked = useCallback(
     (files: ReadonlyArray<ComposerFileEvent>) => {
@@ -524,8 +553,14 @@ export function ChatSyncSurface({
           ListEmptyComponent={hydrated ? <EmptyState /> : <HydratingState />}
         />
       )}
+      {/* Sits directly above the composer bar and only while a note is live —
+          it renders null at rest. The mic button stays mounted underneath on
+          purpose: in long-press mode the finger is still ON it, and the release
+          is what sends. */}
+      <VoiceRecorderOverlay voice={voice} />
       <InputComposer
         onSend={handleSend}
+        {...voiceHandlers}
         bottom_inset={composerBottom}
         placeholder={hasPromptWithFreeform ? 'Or type a response…' : 'Message'}
         {...(composerHint !== undefined ? { hint: composerHint } : {})}

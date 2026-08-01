@@ -5823,20 +5823,43 @@ now-nonexistent vanilla client.
   arithmetic, the min/max duration rules, the capture settings), `app/lib/voice-send.ts`
   (upload orchestration — validates then calls the EXISTING `uploadAttachment`; no new
   endpoint), `app/lib/use-voice-recorder.ts` (**the seam**: permission, `expo-audio`
-  lifecycle, elapsed clock, upload handoff), and `app/components/VoiceMicButton.tsx` +
-  `VoiceRecorderOverlay.tsx` (the pixels). The dependency is **`expo-audio@~1.1.1`**
+  lifecycle, elapsed clock, upload handoff), and `app/components/VoiceRecorderOverlay.tsx`
+  (the pixels — the recording / review / uploading / error row that covers the
+  composer). The dependency is **`expo-audio@~1.1.1`**
   (SDK-54-matched; `expo-audio` supersedes `expo-av`), configured via the
   `expo-audio` config plugin in `app.json`, which adds `RECORD_AUDIO` +
   `MODIFY_AUDIO_SETTINGS` on Android and `NSMicrophoneUsageDescription` on iOS —
   **native config, so it ships only in a new BUILD, never an OTA update**.
-  Both iMessage gestures run off one button and one recorder, disambiguated on
-  release by press duration (`LONG_PRESS_MS`): a HOLD sends on release (and
-  discards if the finger slid past `CANCEL_SLIDE_DX`, the glyph flipping mic → send
-  → ✕ as it travels), while a TAP latches capture hands-free and the overlay grows a
-  ■ stop that drops the clip into a play / ✕ / send review row. Capture is
+  Both iMessage gestures run off one button and one recorder: a HOLD sends on
+  release (and discards if the finger slid past the composer's cancel threshold,
+  the mic filling accent → danger as it travels), while a TAP latches capture
+  hands-free and the overlay grows a ■ stop that drops the clip into a play / ✕ /
+  send review row. Capture is
   22.05kHz mono AAC in `.m4a` at 32kbps — speech settings, since the ASR model
   resamples anyway — capped at 10 minutes, which stays well inside
   `MAX_CHAT_UPLOAD_BYTES`.
+- **…and WIRED into the chat surface (2026-07-31):** everything above shipped
+  unreachable. `ChatSyncSurface` — the one chat screen — passed none of
+  `InputComposer`'s four voice callbacks, so the mic answered every press with
+  "Voice messages are not available yet", and the recorder, the overlay and the
+  upload path had no call site outside their own tests. The join is
+  **`app/lib/voice-composer-handlers.ts`**: a pure `voiceComposerHandlers(voice)`
+  that translates the composer's gesture vocabulary (`onVoiceTap` /
+  `onVoiceHoldStart` / `onVoiceHoldMove` / `onVoiceHoldEnd`) into the recorder's
+  (`start` / `latch` / `updateDrag` / `finish` / `cancel` / `stopForReview`).
+  Being a pure function of the recorder value, the whole mapping is asserted
+  call-for-call in `app/__tests__/voice-composer-handlers.test.ts` without a
+  device or a mounted surface. `ChatSyncSurface` now calls `useVoiceRecorder`
+  (`onSend` → the SAME `send('', [url])` an image upload takes; `onPermissionBlocked`
+  → `Linking.openSettings()`), spreads the handlers onto the composer, and renders
+  `<VoiceRecorderOverlay>` immediately above the composer bar — the mic button
+  stays mounted beneath it because in long-press mode the finger is still on it.
+  A phase that belongs to the overlay (review / uploading / error) makes the mic
+  inert rather than letting a stray tap destroy an unsent clip.
+  `app/components/VoiceMicButton.tsx` was DELETED in the same change: it was a
+  second, never-rendered mic control whose emoji glyph and filled resting circle
+  contradicted the iMessage composer's drawn `MicGlyph`, and two mic buttons is
+  exactly the dual code path this repo forbids. One button, one recorder.
 - **ISO-BMFF audio is no longer mistaken for video (2026-07-31):** `magicByteSniff`
   classified `ftyp` files on the major brand alone, so a GENERIC brand meant
   `video/mp4` — a type absent from `CHAT_UPLOAD_MIME_WHITELIST`. Android's

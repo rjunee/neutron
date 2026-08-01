@@ -37,6 +37,7 @@ const { AuthSessionProvider } = await import('../lib/session');
 const { ChatSyncSurface } = await import('../components/ChatSyncSurface');
 const { __resetSharedMobileStoreForTests } = await import('../lib/chat-core/op-sqlite-store');
 const { clearSessionCache } = await import('../lib/chat-core/session-cache');
+const { harnessAudioState, resetHarnessAudio } = await import('./support/stubs/expo-audio');
 
 const OWNER = {
   id: 'harness-owner',
@@ -154,17 +155,21 @@ describe('the in-field action control swaps by content', () => {
     screen.unmount();
   });
 
-  it('says so rather than pretending, when no recorder is wired behind the mic', async () => {
-    // `ChatSyncSurface` passes the composer no `onVoice*` handlers today, so the
-    // recorder that landed in PR #24 is not reachable from this button yet.
-    // Until it is, pressing the mic has to ADMIT that — a control that looks
-    // live and silently does nothing is the failure being avoided.
+  it('has a real recorder behind the mic — no "not available yet" notice', async () => {
+    // THE INVERSE OF WHAT THIS CASE USED TO ASSERT. It previously pinned the
+    // composer's honesty while `ChatSyncSurface` passed no `onVoice*` handlers:
+    // an unwired mic had to ADMIT it. The handlers are wired now, so the notice
+    // appearing would mean the wiring had been lost again — which is precisely
+    // the regression worth a test, since nothing else about the button changes.
+    resetHarnessAudio();
     const screen = await mountChat();
 
     expect(screen.byTestId('composer-voice-notice')).toBeNull();
     await screen.press('Record voice message');
+    await screen.settle();
 
-    expect(screen.byTestId('composer-voice-notice')).not.toBeNull();
+    expect(screen.byTestId('composer-voice-notice')).toBeNull();
+    expect(harnessAudioState().record_calls).toBe(1);
 
     screen.unmount();
   });
