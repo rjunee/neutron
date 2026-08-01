@@ -345,6 +345,34 @@ describe('the player is the bubble content, not a panel inside it', () => {
     screen.unmount();
   });
 
+  it('plays ONCE — a finished clip is PAUSED, not merely rewound', async () => {
+    // THE REGRESSION THIS PINS. `didJustFinish` does not leave the player
+    // paused; it is still in a playing state. Rewinding to 0 without pausing
+    // therefore hands it a fresh position to play FROM, and the clip loops
+    // forever. That shipped, and the owner reported it within the hour: "the
+    // playback of the voice note loops. can you have it just play once".
+    //
+    // Asserting the seek alone would NOT catch it — the buggy build seeks too.
+    // The pause is the whole fix, so the pause is what is asserted.
+    const screen = await mountScreen(bubble(CLIP_URL));
+    await reportStatus(0, { is_loaded: true, duration: 7.4 });
+    await screen.settle();
+    await screen.press('Play 0:07 voice message');
+    expect(harnessPlayers()[0]?.play_calls).toBe(1);
+
+    const pauses_before = harnessPlayers()[0]?.pause_calls ?? 0;
+    await reportStatus(0, { did_just_finish: true, playing: false, current_time: 7.4 });
+    await screen.settle();
+
+    const player = harnessPlayers()[0];
+    expect(player?.pause_calls ?? 0).toBeGreaterThan(pauses_before);
+    // Still rewound, so the next tap replays from the top rather than sitting
+    // dead at the end — the behaviour the original handler was reaching for.
+    expect(player?.seeks).toContain(0);
+
+    screen.unmount();
+  });
+
   it('reaches 44pt even though it paints the reference 30', async () => {
     const { CONTROL_DIAMETER_PT, CONTROL_HIT_SLOP_PT, TAP_TARGET_PT } = await import(
       '../components/VoiceNoteBubble'
