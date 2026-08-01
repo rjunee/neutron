@@ -176,12 +176,18 @@ export function VoiceNoteBubble({ url, auth }: VoiceNoteBubbleProps): React.Reac
   const fraction = playbackFraction(status.currentTime, duration);
 
   // Load deadline — see LOAD_DEADLINE_MS. Armed only while a source exists and
-  // has not loaded, so a slow-but-successful load simply disarms it.
+  // NOTHING about the clip has come back, so a slow-but-successful load simply
+  // disarms it. Deliberately three ways to disarm rather than one: platforms
+  // disagree about when `isLoaded` flips for a streamed source, and a known
+  // duration or audible playback both prove the bytes are reachable, which is
+  // the only thing this deadline is trying to find out. Calling a clip that is
+  // ALREADY PLAYING "unavailable" would be a worse bug than the one this
+  // guards against.
   useEffect(() => {
-    if (failed || source === null || status.isLoaded) return undefined;
+    if (failed || source === null || status.isLoaded || has_length || playing) return undefined;
     const timer = setTimeout(() => setFailed(true), LOAD_DEADLINE_MS);
     return () => clearTimeout(timer);
-  }, [failed, source, status.isLoaded]);
+  }, [failed, source, status.isLoaded, has_length, playing]);
 
   // Finished: give the speaker back and rewind, so the next tap replays from
   // the top rather than sitting dead at the end.

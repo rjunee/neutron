@@ -89,9 +89,29 @@ mock.module('expo-sharing', () => ({
   isAvailableAsync: async () => true,
   shareAsync: async () => {},
 }));
+// The audio leaf (`VoiceNoteBubble`) statically imports `expo-audio`, a native
+// module bun cannot load — so importing the dispatcher drags it into this
+// process even though no test here renders the leaf. Inert stub: the dispatcher
+// never invokes the leaf, so nothing in this file can observe a player.
+//
+// Process-global, and deliberately safe: the DEVICE-HARNESS files that need the
+// real observable stub run in their own process (`scripts/run-tests.sh`
+// device-harness isolation lane), so this registration can never reach them.
+mock.module('expo-audio', () => ({
+  useAudioPlayer: () => ({ play: () => {}, pause: () => {}, seekTo: async () => {} }),
+  useAudioPlayerStatus: () => ({
+    playing: false,
+    currentTime: 0,
+    duration: 0,
+    didJustFinish: false,
+    isLoaded: false,
+  }),
+  setAudioModeAsync: async () => {},
+}));
 
 const IMAGE_URL = '/api/app/upload/sam/photo.png';
 const PDF_URL = '/api/app/upload/sam/report.pdf';
+const VOICE_URL = '/api/app/upload/sam/note.m4a';
 
 describe('AuthedAttachmentImage — rules-of-hooks (Argus r3 MAJOR)', () => {
   it('dispatches an IMAGE url to the hook-owning leaf without calling any hook itself', async () => {
@@ -111,6 +131,19 @@ describe('AuthedAttachmentImage — rules-of-hooks (Argus r3 MAJOR)', () => {
       type: unknown;
     };
     expect(el.type).toBe(mod.AuthedAttachmentFile);
+  });
+
+  it('dispatches an AUDIO url to the voice-note player, not the file chip', async () => {
+    const mod = await import('../components/AuthedAttachmentImage');
+    const { VoiceNoteBubble } = await import('../components/VoiceNoteBubble');
+    const el = mod.AuthedAttachmentImage({ url: VOICE_URL, auth: null }) as { type: unknown };
+    // A voice note used to land on the file chip and render as a 🎵 glyph plus
+    // the clip's storage hash — unlistenable in the app that recorded it. The
+    // audio branch must be checked BEFORE the non-image branch, and (like the
+    // others) it must dispatch to a distinct TYPE rather than being handled
+    // inline, so a recycled row flipping between attachment kinds remounts.
+    expect(el.type).toBe(VoiceNoteBubble);
+    expect(el.type).not.toBe(mod.AuthedAttachmentFile);
   });
 
   it('image and non-image URLs resolve to DIFFERENT component types (url flip → React remounts, no hook-count mismatch)', async () => {

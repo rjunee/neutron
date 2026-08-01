@@ -25,6 +25,8 @@
  * one in any test that only queries the view hierarchy.
  */
 
+import { useEffect, useMemo, useState } from 'react';
+
 /** Everything the harness saw, for assertions. Reset per test. */
 export interface VoiceHarnessState {
   permission_checks: number;
@@ -270,34 +272,17 @@ export function setHarnessPlayback(index: number, next: Partial<HarnessPlaybackS
   player.emit();
 }
 
-interface HookRuntime {
-  useState: <T>(initial: T | (() => T)) => [T, (v: T | ((prev: T) => T)) => void];
-  useEffect: (fn: () => void | (() => void), deps?: unknown[]) => void;
-  useMemo: <T>(fn: () => T, deps?: unknown[]) => T;
-}
-
-/**
- * React is imported lazily so this stub stays loadable in the non-harness unit
- * tests that only want the recorder half (they never render anything).
- */
-function react(): HookRuntime {
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
-  return require('react') as HookRuntime;
-}
-
 export function useAudioPlayer(source?: unknown): HarnessPlayer {
-  const { useMemo, useEffect } = react();
   const uri = readSourceUri(source ?? null);
   const headers = readSourceHeaders(source ?? null);
-  // Keyed on the uri exactly like the real hook (which keys a releasing shared
-  // object on `JSON.stringify(source)`), so a source swap really does hand the
-  // component a NEW player rather than mutating the old one.
+  // Keyed on the source exactly like the real hook (which keys a releasing
+  // shared object on `JSON.stringify(source)`), so a source swap really does
+  // hand the component a NEW player rather than mutating the old one.
   const player = useMemo(() => {
     const created = new HarnessPlayer(uri, headers);
     players.push(created);
     return created;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [uri]);
+  }, [uri, headers]);
   useEffect(
     () => () => {
       player.state.released = true;
@@ -314,7 +299,6 @@ export function useAudioPlayerStatus(player: HarnessPlayer): {
   didJustFinish: boolean;
   isLoaded: boolean;
 } {
-  const { useState, useEffect } = react();
   const [, bump] = useState(0);
   useEffect(() => player.subscribe(() => bump((n) => n + 1)), [player]);
   return {
