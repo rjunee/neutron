@@ -14,7 +14,7 @@
  * is skipped (logged). This matches Nova's reminder-tick behavior.
  */
 
-import { hostTimeZone, nextCronFire, parseCron } from '@neutronai/cron'
+import { nextCronFire, parseCron } from '@neutronai/cron'
 import { createLogger } from '@neutronai/logger'
 import { SupervisedLoop, type LoopDescriptor } from '@neutronai/loop'
 
@@ -22,6 +22,23 @@ import { isRecurring, type Reminder, type ReminderRecurrence, type ReminderStore
 import type { RitualExecutor } from './ritual-executor.ts'
 
 const log = createLogger('reminder-tick')
+
+/**
+ * The zone a cron cadence is resolved in when the owner's own zone is not known
+ * yet (no client has ever reported one — see `resolve_time_zone`).
+ *
+ * UTC is chosen because it is the only honest answer available: it is explicit,
+ * identical on every machine, and has no DST transitions, so an unknown-zone
+ * reminder means exactly one thing and means it everywhere. The alternative —
+ * inheriting the host's zone — makes the SAME reminder mean different times on a
+ * laptop and on a server, and quietly re-times every recurring reminder if the
+ * instance is ever migrated between boxes. A wrong-but-stable default the owner
+ * can see and correct beats a right-looking one that depends on the machine.
+ *
+ * This is a fallback, not a preference: every client (web + mobile) reports its
+ * IANA zone on connect, so a real instance leaves this state on first connect.
+ */
+export const REMINDER_FALLBACK_TIME_ZONE = 'UTC'
 
 export interface ReminderDispatcher {
   /**
@@ -60,12 +77,25 @@ export interface ReminderTickOptions {
   /** Injectable clock for tests. Default Date.now. */
   now?: () => number
   /**
-   * IANA timezone for cron-cadence wall-clock resolution ("09:00" means 09:00
-   * in this zone, DST-correct). Defaults to the host zone — matching the intent
-   * that a user's `0 9 * * *` fires at 9am their local time. Coarse-label
-   * cadences are timezone-agnostic fixed deltas and ignore this.
+   * Resolve the OWNER's IANA timezone for cron-cadence wall-clock resolution
+   * ("09:00" means 09:00 in the OWNER's zone, DST-correct). Called PER FIRE with
+   * the row's `owner_slug`, so a zone learned (or changed) after the loop was
+   * constructed takes effect on the next tick without a restart — the same
+   * resolve-at-invocation contract the nudge engine's `resolveTimezone` uses.
+   *
+   * Returning `null` / `undefined` means "the owner's zone is not known yet";
+   * the loop then falls back to {@link REMINDER_FALLBACK_TIME_ZONE}.
+   *
+   * There is deliberately NO host-zone fallback. A recurring reminder means a
+   * wall-clock time in the OWNER's life; resolving it against whatever zone the
+   * SERVER happens to be set to silently mistimes every recurring reminder by
+   * the offset between them, and reports no error while doing it — the reminder
+   * still arrives, just at the wrong hour. Production wires this to the stored
+   * per-instance zone (`instance_metadata.timezone`, ISSUES #40).
+   *
+   * Coarse-label cadences are timezone-agnostic fixed deltas and ignore this.
    */
-  time_zone?: string
+  resolve_time_zone?: (owner_slug: string) => string | null | undefined
   /**
    * P5.6 — optional post-dispatch hook fired AFTER markFired /
    * advanceRecurrence. Production wires this to the push dispatcher
@@ -96,7 +126,7 @@ export class ReminderTickLoop {
   private readonly interval_ms: number
   private readonly per_tick_limit: number
   private readonly now: () => number
-  private readonly time_zone: string
+  private readonly resolve_time_zone: (owner_slug: string) => string | null | undefined
   private readonly on_fired: ReminderFiredHook | null
   private readonly ritual_executor: RitualExecutor | null
   /** Loop scaffolding — single-flight, per-tick catch-all, quiescing stop (§F1). */
@@ -109,7 +139,7 @@ export class ReminderTickLoop {
     this.interval_ms = options.tick_interval_ms ?? 30_000
     this.per_tick_limit = options.per_tick_limit ?? 50
     this.now = options.now ?? Date.now
-    this.time_zone = options.time_zone ?? hostTimeZone()
+    this.resolve_time_zone = options.resolve_time_zone ?? (() => null)
     this.on_fired = options.on_fired ?? null
     this.ritual_executor = options.ritual_executor ?? null
     this.loop = new SupervisedLoop({
@@ -189,7 +219,7 @@ export class ReminderTickLoop {
         // corrupt cron that can never fire); we degrade that row to a one-shot
         // so a poison expression can't wedge the tick loop re-throwing forever.
         const next_fire_at_sec = isRecurring(reminder)
-          ? computeNextFire(reminder, this.now() / 1000, this.time_zone)
+          ? computeNextFire(reminder, this.now() / 1000, this.ownerTimeZone(reminder.owner_slug))
           : null
         if (next_fire_at_sec !== null) {
           const advanced = await this.store.advanceRecurrence(reminder.id, next_fire_at_sec)
@@ -318,6 +348,36 @@ export class ReminderTickLoop {
       }
       this.firedCount += fired
     }
+  }
+
+  /**
+   * The zone a cron cadence for `owner_slug` resolves in, asked FRESH at every
+   * fire so a zone the owner's client reports after boot applies immediately.
+   *
+   * A resolver that returns nothing — or throws, which a DB-backed resolver can
+   * do — degrades to {@link REMINDER_FALLBACK_TIME_ZONE} and says so in the log,
+   * because a reminder firing in the wrong zone is invisible to the owner and so
+   * has to be visible to whoever reads the logs. It never degrades to the host
+   * zone: that is the failure this resolver exists to remove.
+   */
+  private ownerTimeZone(owner_slug: string): string {
+    let resolved: string | null | undefined
+    try {
+      resolved = this.resolve_time_zone(owner_slug)
+    } catch (err) {
+      log.warn('owner_timezone_resolver_threw', {
+        owner: owner_slug,
+        fallback: REMINDER_FALLBACK_TIME_ZONE,
+        error: err instanceof Error ? err.message : String(err),
+      })
+      return REMINDER_FALLBACK_TIME_ZONE
+    }
+    if (typeof resolved === 'string' && resolved.length > 0) return resolved
+    log.warn('owner_timezone_unknown_using_fallback', {
+      owner: owner_slug,
+      fallback: REMINDER_FALLBACK_TIME_ZONE,
+    })
+    return REMINDER_FALLBACK_TIME_ZONE
   }
 
   stats(): { fired: number; skipped_ticks: number } {
