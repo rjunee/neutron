@@ -215,8 +215,22 @@ export function VoiceNoteBubble({ url, auth }: VoiceNoteBubbleProps): React.Reac
   const toggle = useCallback((): void => {
     if (failed) {
       setFailed(false);
-      setWebUri(null);
       setAttempt((n) => n + 1);
+      if (needsWebFetch) {
+        // Web: drop the object URL so the effect re-fetches the bytes.
+        setWebUri(null);
+      } else if (source !== null) {
+        // Native: the source is unchanged, so nothing would re-load on its own
+        // (`useAudioPlayer` keys its player on the serialized source). Ask the
+        // existing player to load it again — otherwise "tap to retry" would
+        // clear the message and then sit there, which is the dead control this
+        // state exists to avoid.
+        try {
+          player.replace(source);
+        } catch {
+          setFailed(true);
+        }
+      }
       return;
     }
     if (playing) {
@@ -249,7 +263,7 @@ export function VoiceNoteBubble({ url, auth }: VoiceNoteBubbleProps): React.Reac
         setFailed(true);
       }
     })();
-  }, [failed, playing, player, handle]);
+  }, [failed, playing, player, handle, needsWebFetch, source]);
 
   const seek = useCallback(
     (x: number): void => {
