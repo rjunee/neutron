@@ -274,7 +274,7 @@ describe('SettingsTab — voice transcription (happy-dom)', () => {
   })
 
   it('picking a backend PUTs the choice', async () => {
-    let put: string | null = null
+    let put = ''
     const both = {
       local_available: true,
       installed: true,
@@ -314,7 +314,7 @@ describe('SettingsTab — voice transcription (happy-dom)', () => {
 
   it('the key field PUTs the key, clears itself, and never renders one back', async () => {
     const SECRET = 'sk-thisisnotarealkey000000'
-    let sent: string | null = null
+    let sent = ''
     const { container, root, act } = await mount((url, init) => {
       if (url.endsWith(`${ASR}/openai-key`)) {
         sent = String(init?.body ?? '')
