@@ -13,6 +13,12 @@
  *     sidebar on the left of the tab content area. Each tab is a full-
  *     width row.
  *
+ * BOTH layouts terminate in the usage meter. The reading belongs to the
+ * credential, not to a viewport, so neither branch is allowed to be the one
+ * without it — the `usage` prop's "unknown" default made a call site that forgot
+ * to pass it look deliberate rather than broken, and the wide branch shipped
+ * with no meter at all for exactly that reason.
+ *
  * Pure presentation — receives the active tab + an `onSelect` callback.
  * The opacity-fade Slot transition lives in the layout (so the fade
  * survives across `<Slot />` child swaps); the tab bar only signals
@@ -73,7 +79,7 @@ export function ProjectTabBar({
   const { width } = useWindowDimensions();
   const wide = Platform.OS === 'web' && width > BREAKPOINTS.narrow_max;
   return wide ? (
-    <WideTabBar tabs={tabs} active={active} onSelect={onSelect} badges={badges} />
+    <WideTabBar tabs={tabs} active={active} onSelect={onSelect} badges={badges} usage={usage} />
   ) : (
     <NarrowTabBar
       tabs={tabs}
@@ -159,39 +165,48 @@ function WideTabBar({
   active,
   onSelect,
   badges,
+  usage,
 }: {
   tabs: readonly ProjectTabSpec[];
   active: string | null;
   onSelect: (key: string) => void;
   badges?: ReadonlyMap<string, number>;
+  usage: UsagePayload;
 }) {
   return (
     <View style={styles.wideBar} testID="project-tab-bar-wide">
-      {tabs.map((tab) => {
-        const isActive = tab.key === active;
-        const badge = badgeCountFor(badges, tab.key);
-        return (
-          <Pressable
-            key={tab.key}
-            accessibilityRole="tab"
-            accessibilityLabel={`${tab.label} tab${badge > 0 ? `, ${badge} running` : ''}`}
-            accessibilityState={{ selected: isActive }}
-            testID={`tab-${tab.key}`}
-            onPress={() => {
-              if (!isActive) onSelect(tab.key);
-            }}
-            style={({ pressed }) => [
-              styles.wideItem,
-              isActive && styles.wideItemActive,
-              pressed && styles.pressed,
-            ]}
-          >
-            <View style={[styles.wideAccent, isActive && styles.wideAccentActive]} />
-            <Text style={[styles.wideLabel, isActive && styles.wideLabelActive]}>{tab.label}</Text>
-            {badge > 0 ? <TabBadge count={badge} /> : null}
-          </Pressable>
-        );
-      })}
+      <View style={styles.wideItems}>
+        {tabs.map((tab) => {
+          const isActive = tab.key === active;
+          const badge = badgeCountFor(badges, tab.key);
+          return (
+            <Pressable
+              key={tab.key}
+              accessibilityRole="tab"
+              accessibilityLabel={`${tab.label} tab${badge > 0 ? `, ${badge} running` : ''}`}
+              accessibilityState={{ selected: isActive }}
+              testID={`tab-${tab.key}`}
+              onPress={() => {
+                if (!isActive) onSelect(tab.key);
+              }}
+              style={({ pressed }) => [
+                styles.wideItem,
+                isActive && styles.wideItemActive,
+                pressed && styles.pressed,
+              ]}
+            >
+              <View style={[styles.wideAccent, isActive && styles.wideAccentActive]} />
+              <Text style={[styles.wideLabel, isActive && styles.wideLabelActive]}>{tab.label}</Text>
+              {badge > 0 ? <TabBadge count={badge} /> : null}
+            </Pressable>
+          );
+        })}
+      </View>
+      {/* The sidebar's bottom edge, same object as the narrow band's: the reading
+          belongs to the credential, not to a viewport, so it is drawn wherever
+          the tab band is. Full sidebar width — the item padding moved inside
+          `wideItems` so this line is not inset from the rail it terminates. */}
+      <UsageMeter usage={usage} />
     </View>
   );
 }
@@ -268,13 +283,17 @@ const styles = StyleSheet.create({
   },
   wideBar: {
     width: WIDE_SIDEBAR_WIDTH,
+    backgroundColor: THEME.background,
+    borderRightWidth: 1,
+    borderRightColor: THEME.hairline,
+  },
+  // The tab rows own the sidebar's padding so the meter beneath them can run the
+  // full width of the rail rather than sitting inset inside it.
+  wideItems: {
     paddingTop: SPACING.sm,
     paddingHorizontal: SPACING.sm,
     paddingBottom: SPACING.md,
     gap: SPACING.xs,
-    backgroundColor: THEME.background,
-    borderRightWidth: 1,
-    borderRightColor: THEME.hairline,
   },
   wideItem: {
     flexDirection: 'row',

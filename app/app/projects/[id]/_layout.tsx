@@ -685,6 +685,7 @@ function ProjectShell({ project_id }: { project_id: string }) {
             onSelect={handleTabSelect}
             tabs={displayTabs}
             badges={tabBadges}
+            usage={usage}
           />
           <View style={styles.wideContent}>{contentPane}</View>
         </View>
