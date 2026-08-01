@@ -24,6 +24,8 @@ import { Platform, Pressable, ScrollView, StyleSheet, Text, View, useWindowDimen
 import { BREAKPOINTS, DENSITY, SPACING, THEME, TYPOGRAPHY } from '../lib/composer-constants';
 import { PHASE } from '../lib/theme';
 import { PROJECT_TABS, type ProjectTabSpec } from '../lib/project-tabs';
+import { UsageMeter } from './UsageMeter';
+import { USAGE_UNKNOWN, type UsagePayload } from '../lib/usage-client';
 
 /**
  * The builtin native-tab keys the loading default ({@link PROJECT_TABS})
@@ -52,15 +54,34 @@ export interface ProjectTabBarProps {
    * absent → no badge. Keyed by tab `key` so it stays generic.
    */
   badges?: ReadonlyMap<string, number>;
+  /**
+   * The active credential's usage standing. Drawn as the band's bottom seam.
+   * Defaults to "unknown", which renders as the plain hairline — so a caller
+   * that has not wired the meter yet gets exactly the divider that was there
+   * before it existed.
+   */
+  usage?: UsagePayload;
 }
 
-export function ProjectTabBar({ active, onSelect, tabs = PROJECT_TABS, badges }: ProjectTabBarProps) {
+export function ProjectTabBar({
+  active,
+  onSelect,
+  tabs = PROJECT_TABS,
+  badges,
+  usage = USAGE_UNKNOWN,
+}: ProjectTabBarProps) {
   const { width } = useWindowDimensions();
   const wide = Platform.OS === 'web' && width > BREAKPOINTS.narrow_max;
   return wide ? (
     <WideTabBar tabs={tabs} active={active} onSelect={onSelect} badges={badges} />
   ) : (
-    <NarrowTabBar tabs={tabs} active={active} onSelect={onSelect} badges={badges} />
+    <NarrowTabBar
+      tabs={tabs}
+      active={active}
+      onSelect={onSelect}
+      badges={badges}
+      usage={usage}
+    />
   );
 }
 
@@ -86,11 +107,13 @@ function NarrowTabBar({
   active,
   onSelect,
   badges,
+  usage,
 }: {
   tabs: readonly ProjectTabSpec[];
   active: string | null;
   onSelect: (key: string) => void;
   badges?: ReadonlyMap<string, number>;
+  usage: UsagePayload;
 }) {
   return (
     <View style={styles.narrowBand} testID="project-tab-bar-narrow">
@@ -124,6 +147,9 @@ function NarrowTabBar({
           );
         })}
       </ScrollView>
+      {/* The band's bottom edge. Two 1px lines when there is a reading, a plain
+          hairline when there is not. */}
+      <UsageMeter usage={usage} />
     </View>
   );
 }
@@ -179,11 +205,12 @@ const styles = StyleSheet.create({
   // Seated tab band (M1 UX REDESIGN PR-6, mirror of PR-3 web `.tabs`): a
   // `surface` band with a bottom hairline; tabs sit on it as top-rounded
   // sheets, the active one fused to the content sheet below.
+  // The band no longer draws its own bottom hairline: `UsageMeter` renders as
+  // the band's last child and IS that seam, whether or not there is a reading to
+  // show. One line, one owner.
   narrowBand: {
     flexGrow: 0,
     backgroundColor: THEME.surface,
-    borderBottomWidth: 1,
-    borderBottomColor: THEME.hairline,
   },
   narrowContent: {
     paddingHorizontal: SPACING.sm,
@@ -205,13 +232,13 @@ const styles = StyleSheet.create({
     borderColor: 'transparent',
     borderBottomWidth: 0,
   },
-  // Active tab (prototype `.tab.active`): fuses to the content sheet — content
-  // `background`, hairline border, and a -1px bottom margin so it overlaps the
-  // band's bottom hairline (the seated "fused" look).
+  // Active tab (prototype `.tab.active`): seats onto the content sheet — content
+  // `background`, hairline border. The old -1px overhang is gone: the seam it
+  // used to notch out is now the usage meter, and a gap in a fill bar reads as a
+  // wrong number rather than as a fused tab.
   seatTabActive: {
     backgroundColor: THEME.background,
     borderColor: THEME.hairline,
-    marginBottom: -1,
   },
   seatLabel: {
     color: THEME.text_muted,

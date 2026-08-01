@@ -310,6 +310,18 @@ export interface AppSurfacesCompositionInput {
     handler: (req: Request) => Promise<Response | null>
   }
   /**
+   * Active-credential usage meter. Owns `GET /api/app/usage` — the 5-hour and
+   * 7-day utilization of the ONE credential the box is currently dispatching
+   * with, served from `CredentialUsageMonitor`'s in-memory snapshot. Both
+   * clients draw the tab-bar/chat divider from it. When omitted the route is
+   * unmounted, the clients' fetch fails, and each renders the plain divider it
+   * had before the meter existed. Surface factory:
+   * `gateway/http/app-usage-surface.ts:createAppUsageSurface`.
+   */
+  app_usage_surface?: {
+    handler: (req: Request) => Promise<Response | null>
+  }
+  /**
    * Per-project credential CRUD (Settings tab, FOUNDATION). Owns
    * `/api/app/projects/<id>/credentials[/<service>]`. Dispatches the SAME
    * `ProjectCredentialStore` the resolver + per-turn awareness injection use.

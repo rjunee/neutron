@@ -58,6 +58,9 @@ import { ThemeToggle } from './ThemeToggle.tsx'
 // ACTIVITY INSPECTOR (SPEC § WAVE 3.5) — the panel behind the clickable rail dot.
 import { ActivityInspectorPanel } from './ActivityInspectorPanel.tsx'
 import { WebActivityClient, type ActivityRow } from './activity-client.ts'
+// The tab-band/stage divider IS the active credential's usage meter.
+import { UsageMeter } from './UsageMeter.tsx'
+import { WebUsageClient, USAGE_UNKNOWN, type UsagePayload } from './usage-client.ts'
 import type { ChatViewModel } from './controller.ts'
 import type { NeutronChatController } from './controller.ts'
 import type { BootstrapConfig } from './config.ts'
@@ -74,6 +77,11 @@ type FetchImpl = (input: string, init?: RequestInit) => Promise<Response>
 
 /** The Chat tab key — kept mounted and the default active tab. */
 const CHAT_KEY = CHAT_TAB.key
+
+/** How often the shell re-reads the cached usage snapshot. Matched to the
+ *  server's own measurement interval — polling faster only re-serves a value
+ *  that has not changed. */
+const USAGE_POLL_MS = 60_000
 
 /** The horizontal tab bar. Pure presentation over the resolved descriptors.
  *
@@ -333,6 +341,39 @@ export function ProjectShell({
     activityScope === null
       ? 'General'
       : (vm.projects.find((p) => p.id === activityScope)?.label ?? activityScope)
+
+  // USAGE METER — the divider between the tab band and the stage. Polled here at
+  // the shell root because the divider is shell chrome: it belongs to no tab and
+  // must keep ticking while the owner sits on Documents or Plan.
+  //
+  // The server caches its reading and re-measures on its own minute-long timer,
+  // so this poll is a cheap local read and never a round-trip to Anthropic. The
+  // starting state is "unknown", which renders as the plain divider — so a slow
+  // or missing first response looks like the app always did, not like 0% used.
+  const [usage, setUsage] = useState<UsagePayload>(USAGE_UNKNOWN)
+  const usageClient = useMemo(
+    () =>
+      new WebUsageClient(
+        fetchImpl !== undefined
+          ? { base_url: config.origin, token: config.token, fetchImpl }
+          : { base_url: config.origin, token: config.token },
+      ),
+    [config.origin, config.token, fetchImpl],
+  )
+  useEffect(() => {
+    let cancelled = false
+    const pull = (): void => {
+      void usageClient.fetchUsage().then((next) => {
+        if (!cancelled) setUsage(next)
+      })
+    }
+    pull()
+    const handle = setInterval(pull, USAGE_POLL_MS)
+    return () => {
+      cancelled = true
+      clearInterval(handle)
+    }
+  }, [usageClient])
 
   const [tabs, setTabs] = useState<TabDescriptor[]>([CHAT_TAB])
   const [activeKey, setActiveKey] = useState<string>(CHAT_KEY)
@@ -628,6 +669,10 @@ export function ProjectShell({
           />
           {isDesktop ? <ThemeToggle /> : null}
         </div>
+        {/* The seam between the band and the stage. It is the usage meter — two
+            1px lines, session over weekly — or, when there is nothing measured,
+            the plain 2px divider it looks like anyway. */}
+        <UsageMeter usage={usage} />
         {/* The chat STAGE (below the band): the tab panels. The desktop Work
             slide-out no longer lives here — it's mounted INSIDE the Chat view
             (`ChatApp`) so it's scoped to the Chat tab and never bleeds onto

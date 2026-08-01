@@ -56,6 +56,7 @@ import { InviteModal, type InviteModalResult } from '../../../components/InviteM
 import { copyToClipboard } from '../../../lib/clipboard';
 import { canInviteToProject } from '../../../lib/invite-helpers';
 import { PROJECT_TABS, ProjectTabBar } from '../../../components/ProjectTabBar';
+import { useCredentialUsage } from '../../../lib/usage-client';
 import {
   GENERAL_PROJECT_ID,
   ProjectRail,
@@ -366,6 +367,14 @@ function ProjectShell({ project_id }: { project_id: string }) {
       },
     };
   }, [config.base_url, user?.token, deviceId]);
+
+  // USAGE METER — the tab band's bottom seam. Read here (rather than inside the
+  // bar) so the bar stays pure presentation, matching every other datum it
+  // renders. Unknown until the first response, which draws the plain hairline.
+  const usage = useCredentialUsage({
+    base_url: config.base_url,
+    token: user?.token ?? null,
+  });
 
   // `null` on a non-tab sub-route (chat-sync/notes/backups/bare cores) AND on a
   // legacy leaf no longer in the registry set: no tab is highlighted there and
@@ -699,6 +708,7 @@ function ProjectShell({ project_id }: { project_id: string }) {
               onSelect={handleTabSelect}
               tabs={displayTabs}
               badges={tabBadges}
+              usage={usage}
             />
             <View style={styles.narrowContent}>{contentPane}</View>
           </View>
