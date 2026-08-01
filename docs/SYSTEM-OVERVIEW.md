@@ -6360,6 +6360,97 @@ silent truncation. For a single file, bare `bun test <file>` is fine.
   memory). Quiet dev box: `JOBS=4` (faster, more RAM). Full knob matrix +
   recipes in `docs/testing-runner.md`.
 
+## Reachability gate — can the owner still DO it? (`*/__tests__/reachability*`)
+
+**The class of bug it exists for.** Every regression that has reached the owner in
+a green build had one shape: **a part worked, and the product could not reach
+it.** A voice recorder whose host screen never passed it its props, so the mic
+answered "not available yet". A usage meter absent from the wide layout because
+the wide branch stopped passing `usage` — and no test had ever rendered a wide
+layout. A `/code` command that was written, unit-tested and merged, and never
+added to the composer's filter chain, so every `/code` went to the model. A unit
+test asserts that a PART works; nothing asserted that the PRODUCT still reaches
+it, and unit coverage is structurally blind to the difference.
+
+**What the gate does.** It declares, as data, what the owner must be able to do —
+and proves each one against the real thing, in the owner's language.
+
+- **`landing/chat-react/__tests__/reachability-inventory.ts` + `reachability.test.tsx`** —
+  mounts the REAL app shell (`ProjectShell`, the component `main.tsx` renders,
+  with the real controller, chat session, tab resolver and usage client; fake
+  socket, injected fetch, no model) at **every layout the product ships** (narrow
+  390px, wide 1440px) and probes each affordance: compose, send, send-becomes-
+  usable-once-typed, attach, project rail, tabs, usage meter, theme control.
+- **`open/__tests__/reachability-inventory.ts` + `reachability.test.ts`** — boots
+  the REAL Open composition over a live `Bun.serve`, opens the unified
+  `/ws/app/chat` socket and TYPES each declared command with a mocked substrate.
+  A command must be **claimed** by the composed chain (a `chat_command_result`
+  correlated to the message id) and must **not** reach the model. Currently
+  probed: `/status`, `/reset`, `/code`.
+- **`open/__tests__/reachability-inventory-complete.test.ts`** — the piece that
+  makes it self-extending. It reads the product's real command factories out of
+  `gateway/boot-chat-command-filters.ts` and fails when one is neither probed nor
+  excluded **in writing, with a reason**. A new `/`-command turns this red on the
+  PR that adds it.
+
+**Two design rules it is built on.**
+
+1. **Layout parity.** Beyond per-layout probes there is a harder assertion: an
+   affordance reachable at one width and missing at another fails, unless the
+   inventory carries a written `absentIn` reason (today exactly one — the theme
+   toggle, deliberately narrow-absent per #350/#360). That is what turns "we
+   remembered to test the wide usage meter" into "a capability cannot silently
+   vanish from a layout again".
+2. **A failure names what the owner lost.** "You cannot attach a file — the attach
+   control is missing from the composer", not "expected 200, got 500". The
+   owner-facing sentence is the asserted VALUE, so it lands in any runner's diff,
+   and a healthy run prints nothing at all.
+
+**Where it runs, and why there.** In CI, in the ordinary sharded suite — no
+workflow change, no schedule, no notifier. All four incidents above were
+*regressions introduced by a merge*, so the moment that matters is before the
+merge, and a red required check is already the signal the owner watches. It is
+also silent when healthy by construction, which a periodic "everything is fine"
+post is not. Deliberately NOT a runtime monitor: there is no network, no model
+and no clock anywhere in it, which is exactly why a red can be believed.
+
+**Mutation-tested** (per the "prove the gate still fails on a real violation"
+rule): reintroducing the wide-branch `usage` omission reds the wide layout AND
+the parity check; renaming the attach control reds both layouts; removing
+`statusChatCommandFilter` / `tridentCodeChatCommandFilter` from the composer's
+chain names `/status` and `/code` as lost; adding an unaccounted-for filter
+factory reds the completeness gate.
+
+**What it does NOT cover — the honest list.**
+
+- **The mobile app.** All of the above probes the web shell and the server. The
+  voice-props incident was a mobile host screen, and this gate would not have
+  caught it. The device harness that could (`app/__tests__/support/native-harness.ts`,
+  next section) is fixed at one screen size — `HARNESS_SCREEN_WIDTH` 393 — so the
+  mobile wide/tablet branch remains untestable, and mobile has no inventory yet.
+  This is the largest gap and the obvious next slice.
+- **Anything time-based or media-based.** The voice note that looped forever is a
+  playback-behaviour bug, not a reachability one; nothing here would see it.
+- **CSS.** happy-dom renders the tree React produced, not a layout. An affordance
+  that renders and is then covered, clipped or `display:none`d by a stylesheet
+  still reads as reachable. Only a real browser closes that, and the one browser
+  script in the repo (`tests/e2e-browser/onboarding_walkthrough.py`) is orphaned:
+  not discovered by `scripts/run-tests.sh` (it globs `.test.*`/`.spec.*` only, so
+  a `.py` file is invisible), not referenced by CI, and it prints `E2E SKIP` and
+  **exits 0** when no server answers — so it can prove nothing indefinitely
+  without anyone noticing.
+- **`/remind` and `/cal`.** Excluded with reasons in
+  `open/__tests__/reachability-inventory.ts`: both claim conditionally (on a parse
+  succeeding, on an integration being connected), so a red would be ambiguous
+  between "unwired" and "not applicable on this box". A gate that fires on a
+  healthy install teaches everyone to ignore it, and this repo has already lived
+  through a permanently-red check hiding a second dead one (#384/#388).
+- **Runtime and post-deploy breaks.** This is a pre-merge gate. It says nothing
+  about the running instance. The natural home for that is a seventh watchdog
+  detector — every existing detector (`watchdog/detectors.ts`) watches process
+  liveness, none exercises product functionality — reusing the notifier that
+  already broadcasts supervisor alerts to the chat surface. Not built.
+
 ## Mobile device-shaped test harness — `app/__tests__/support/native-harness.ts`
 
 **What it is for.** Until 2026-07-29 the app suite could not mount a single React
