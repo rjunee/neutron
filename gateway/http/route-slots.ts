@@ -517,6 +517,16 @@ export const ROUTE_SLOTS = [
     promote: (c) => pluckHandler(c.app_activity_surface),
     dispatch: (v: SurfaceHandler, ctx) => v.handler(ctx.req),
   }),
+  // 0h1b3. Active-credential usage meter — `GET /api/app/usage`. The two clients
+  //        draw the tab-bar divider from this; unknown is a 200, not a 404.
+  slot({
+    key: 'appUsage',
+    rung: 'app-usage',
+    composition: 'app_usage_surface',
+    gated: true,
+    promote: (c) => pluckHandler(c.app_usage_surface),
+    dispatch: (v: SurfaceHandler, ctx) => v.handler(ctx.req),
+  }),
   // 0h1c. Per-project credential CRUD (Settings tab) —
   //       `/api/app/projects/<id>/credentials[/<service>]`.
   slot({

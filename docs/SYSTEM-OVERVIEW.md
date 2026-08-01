@@ -3833,6 +3833,74 @@ ADDITIVELY activates a capability.
   argv / free-port dev run is the one unshipped case where the minted port can
   diverge from the bound port.
 
+## Usage meter — the active credential's two ceilings, drawn as the tab-bar divider
+
+A Claude subscription is metered against a rolling **5-hour session** window and a
+rolling **7-day** window. Neutron surfaces both as the line that separates the tab
+bar from the chat: two 1px rules, session on top, weekly below, each filling from
+the left, the whole fill green under 85%, amber to 95%, red past it. It is the
+divider, not a widget beside one — so it costs no layout and no attention until
+the colour changes.
+
+**Exactly ONE credential is described.** The reading is always the credential the
+box is dispatching with right now. There is no pooling, no averaging, and no
+multi-account concept anywhere in this path — a deployment that swaps credentials
+underneath simply gets the new one measured on the next tick.
+
+- **Where the numbers come from — `auth/credential-usage-probe.ts`.** Anthropic
+  reports utilization on the response headers of an authenticated API call
+  (`anthropic-ratelimit-unified-5h-utilization` / `…-7d-utilization`, plus the
+  matching `…-reset` epoch-seconds headers, normalised to ms at the boundary).
+  Turns are dispatched by spawning the `claude` binary, which surfaces no response
+  headers to us, so the figures cannot be observed by watching normal traffic —
+  they are asked for, with a one-token `POST /v1/messages` whose body is never
+  read. This is an auth-tier probe in the same class as `auth/max-oauth.ts`'s
+  token check, not an LLM call site; it carries no owner content, no `system`
+  field and no signature. `parseUnifiedRateLimitHeaders` is exported as a pure
+  function so any other consumer of these headers shares one definition of which
+  header means what.
+- **Which credential — `open/active-credential.ts`.** Walks the same precedence
+  `resolveOpenLlmPool` uses, resolving one tier further than dispatch needs:
+  `CLAUDE_CODE_OAUTH_TOKEN`, then `ANTHROPIC_API_KEY` (per-token billing — no
+  windows, so no meter), then the token in
+  `<CLAUDE_CONFIG_DIR|~>/.claude/.credentials.json`, which is where the `claude`
+  CLI keeps a subscription login and therefore where a hosted deployment installs
+  and rotates the credential it has chosen. Reading that file is what makes the meter
+  correct on a hosted instance with no hosting-side code. A macOS Keychain-only
+  login cannot be read from a background loop and reports unsupported.
+- **When — `open/credential-usage-monitor.ts`.** A `SupervisedLoop` measures every
+  60 s (immediate at boot) and caches the reading; the HTTP handler always answers
+  from memory. A reading older than `USAGE_MAX_AGE_MS` (5 min) stops being quoted
+  — a utilization figure describes a rolling window, so a stale one is wrong, not
+  merely old. A transient probe failure keeps the last good reading until that
+  ceiling; an unauthorized or window-less credential drops it immediately. An
+  unmeasurable credential generates NO upstream traffic at all.
+- **Serving — `gateway/http/app-usage-surface.ts`, `GET /api/app/usage`.**
+  Owner-gated. Always 200 on an authenticated request: either a reading with its
+  `measured_at`, or `{available:false, reason}` where the reason is
+  `no_credential` / `not_measured_yet` / `unsupported_credential` / `probe_failed`.
+  "Unknown" is a legitimate answer, not an error — making each client infer a
+  display state from a status code is how two clients drift apart.
+- **Contract — `contracts/credential-usage.ts`.** The payload shape, the 0.85 /
+  0.95 thresholds and `usageBand()` live here and are imported by the gateway, the
+  web bundle and the RN app, so the three cannot disagree about where amber starts.
+- **Web — `landing/chat-react/UsageMeter.tsx` + `usage-client.ts`.** Rendered by
+  `ProjectShell` between `.car-topbar` and `.car-stage`; the topbar no longer draws
+  its own `border-bottom` and the active tab no longer overhangs it by -1px (a
+  notch in a fill bar reads as a wrong number, not as a fused tab). Polled every
+  60 s. Colours are the `--usage-nominal` / `--usage-warning` / `--usage-critical`
+  tokens, defined for both themes.
+- **Mobile — `app/components/UsageMeter.tsx` + `app/lib/usage-client.ts`.** The RN
+  twin, rendered as the last child of `ProjectTabBar`'s `narrowBand` (which
+  likewise dropped its `borderBottomWidth`). `useCredentialUsage` polls on the same
+  interval and refetches on foreground; it stays idle without a runtime-configured
+  server and a token, so an unconnected device issues nothing.
+- **Degradation is the point.** No credential, no measurement yet, an API key, or
+  an unreachable/unmounted route all render as the plain divider that was there
+  before the meter existed. The clients never coerce a missing number to zero: an
+  empty coloured track would assert "0% used", which is a claim, and the whole
+  purpose of the unavailable state is that there is none to make.
+
 ## Message search (chat-history FTS) — `@neutronai/chat-core` + `@neutronai/message-search`
 
 The chat-history twin of doc-search: full-text search over the user's CHAT
