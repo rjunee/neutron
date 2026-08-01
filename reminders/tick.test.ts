@@ -607,7 +607,7 @@ describe('ReminderTickLoop — ritual executor branch', () => {
       message: 'daily ritual',
       recurrence: 'weekly',
     })
-    tagRitual(row.id, 'daily-delta')
+    tagRitual(row.id, 'kaizen')
     const originalFireAt = row.fire_at
 
     // fire() REJECTS = a STARTUP loss (no durable code_ritual_runs row landed). The

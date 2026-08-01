@@ -3504,18 +3504,53 @@ ritual content in chat.
   register-and-fire in one turn, and surface/cadence widening drops approval via
   the content hash.
 - **Bundled defs** (`reminders/bundled-rituals.ts`). `morning-brief`,
-  `evening-wrap`, and `daily-delta` templates ship in-repo, are seeded
+  `evening-wrap`, and `kaizen` templates ship in-repo, are seeded
   copy-if-absent into `<owner_home>/rituals/` (`seedBundledRituals`,
-  `reminders/bundled-rituals.ts:108` — an owner-edited file is never clobbered),
-  and register UNAPPROVED on boot (`registerBundledRituals`,
-  `reminders/bundled-rituals.ts:149`) inside the composer's
-  `ritual_executor_factory` (`open/composer.ts:1911`). A bundled ritual has a
+  `reminders/bundled-rituals.ts` — an owner-edited file is never clobbered),
+  and register UNAPPROVED on boot (`registerBundledRituals`) inside the composer's
+  `ritual_executor_factory` (`open/composer.ts:2182`). A bundled ritual has a
   seeded `<id>.md` but NO `<id>.def.json`, so it starts with no schedule and no
   approval — it does nothing until the owner ENABLES it. `rituals_propose` cannot
   enable a bundled id (its `<id>.md` already exists → `exists_on_disk`); the owner
   (via the agent) uses `rituals_enable(id, schedule)`, which writes the missing
   `<id>.def.json` and requests the approval prompt. Approving that prompt schedules
   the reminder row and the ritual begins firing on its cadence.
+- **`kaizen` — the weekly continuous-improvement pass** (`reminders/rituals/kaizen.md`).
+  Ported from the legacy harness 2026-08-01, replacing `daily-delta` (dropped by the
+  owner: its job was proving the system still worked, which the reachability gates now
+  do directly). Kaizen exists for ONE judgement the rest of the system cannot make —
+  *this has been corrected four times, so the bug is in the system, not in the
+  instance.* On its cadence it reads `corrections/corrections-log.md` (the spine),
+  `diary/*.md`, `persona/SOUL.md` (where a missing rule would live),
+  `Projects/*/ACTIONS.md` + `STATUS.md`, the sibling `rituals/*.md`,
+  `logs/server.log` (grepped, never read whole) and
+  `diagnostics/client-reports.jsonl`, groups the week's corrections by LESSON rather
+  than wording, labels any lesson seen 3+ times SYSTEMIC, and ends with three
+  concrete changes each naming the file that would change.
+  - **It PROPOSES; it cannot act.** `GATED_WRITE_TOOLS` refuses Write/Edit at fire
+    time (`reminders/rituals.ts`), so the legacy ritual's "auto-file the top 3 into
+    an issues list" half does NOT port — and Open has no owner-side issues file to
+    file into (`SPEC.md`: the defect tracker is GitHub Issues). The owner acts on
+    the report.
+  - **It is the only bundled def with `egress: 'web'`**, for one narrow ecosystem
+    scan. That costs a SECOND approval prompt by design
+    (`reminders/ritual-registration.ts` emits a separate `ritual-egress:<id>` grant;
+    approving the content never implies approving egress), and it is the first
+    shipped def to exercise that path. Read-broadly + network-reach in one agent is
+    an exfiltration shape, so the template forbids putting anything read on disk
+    into a query and forbids opening `.env` / `.secrets` / `*.db` at all.
+  - **The report reaches the owner or the ritual has failed.** `silent: false`, so
+    the final reply posts through `ReminderOutbound` →
+    `deliver(topic, { durability: 'reply' })` (`gateway/proactive/reminder-outbound.ts`)
+    as a durable history row on the owner's chat topic — present on the next
+    hydration even though it fires from a timer with no socket open. A weekly report
+    that settled into a log would be the Skill Forge notifier defect (#51) again, so
+    the unit test asserts the POST, not the flag.
+  - **Two inputs the legacy ritual had do not exist here**, and kaizen is written to
+    do without them rather than pretend: reminder/ritual FIRE HISTORY is SQLite-only
+    (`code_ritual_runs`, no file surface), so kaizen can see which rituals exist by
+    globbing `rituals/*.md` but not whether they ran; and live session transcripts
+    are SQLite-only, so it reasons from the corrections log and diary instead.
 
 ## Proactive messaging — daily brief + idle-nudge sweep (`gateway/proactive/`)
 
@@ -3953,9 +3988,13 @@ optional operator `GBRAIN_SOURCE` / `GBRAIN_BRAIN_ID`.
     cycle.
   - **Correction-pattern promotion runs INSIDE the 6h loop** (reflect-pass step 4,
     above).
-  - **Daily-delta notes stay a RITUAL** — the time-anchored survivor of the split,
-    the third bundled read-only ritual (`reminders/rituals/daily-delta.md`), since
-    nothing in memory triggers a daily delta. See the Ritual executor section.
+  - **Daily-delta notes are GONE** (2026-08-01). They were the time-anchored
+    survivor of the split and shipped as a third bundled ritual, but the owner
+    dropped them: the delta existed mostly to show the memory layer was alive, and
+    proving the system still works is now the reachability gates' job, not a daily
+    message. The bundled slot it occupied is `kaizen` — which reads the same
+    corrections log and diary, weekly, and produces an ACTION rather than a status
+    line. See the Ritual executor section.
 
 ## Credential management — onboarding OPTIONAL keys (WAVE 1) — `onboarding/optional-keys.ts`
 

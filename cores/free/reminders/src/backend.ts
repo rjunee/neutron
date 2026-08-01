@@ -294,7 +294,7 @@ export interface RemindersBackend {
    * Argus r2 BLOCKER fix — ENABLE an already-registered ritual (bundled example
    * or persisted def) by writing its schedule + requesting the owner's approval.
    * The ONLY path by which a bundled ritual (morning-brief/evening-wrap/
-   * daily-delta) becomes approvable + schedulable; `proposeRitual` refuses their
+   * kaizen) becomes approvable + schedulable; `proposeRitual` refuses their
    * ids. OPTIONAL, same gating as `proposeRitual`. */
   enableRitual?(input: RitualEnableInput): Promise<RitualProposeResult>
   /** Plan task 8 — the ritual approval/schedule status snapshot. OPTIONAL. */

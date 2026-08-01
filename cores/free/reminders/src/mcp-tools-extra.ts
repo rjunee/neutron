@@ -102,7 +102,7 @@ export function buildExtraTools(deps: ExtraToolDeps): BuiltExtraTools {
   })
 
   // Argus r2 BLOCKER fix — ENABLE a bundled/already-registered ritual. The three
-  // bundled examples (morning-brief/evening-wrap/daily-delta) are seeded +
+  // bundled examples (morning-brief/evening-wrap/kaizen) are seeded +
   // registered at boot but `rituals_propose` refuses their ids as
   // duplicate/exists-on-disk; this is the path that gives them an approval +
   // schedule. Same owner-approval gate as propose (nothing fires until the owner

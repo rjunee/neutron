@@ -2,6 +2,58 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+## 2026-08-01 — kaizen: the weekly pass that notices you have corrected this four times
+
+Branch `feat/kaizen-ritual`. New: `reminders/rituals/kaizen.md`. Removed:
+`reminders/rituals/daily-delta.md`. Changed: `reminders/bundled-rituals.ts`,
+`open/composer.ts` (comment), `reminders/AGENTS.md`,
+`cores/free/reminders/{package.json,src/mcp-tools-extra.ts,src/backend.ts}` (tool
+copy), tests in `reminders/`. Doc: `docs/SYSTEM-OVERVIEW.md`.
+
+**Why.** Nothing in this system was responsible for noticing a pattern ACROSS
+time. The corrections log has recorded every correction since it shipped, the
+reflect pass promotes individual ones, and nothing ever stood back and said: this
+same lesson has landed four times, so the defect is in the system and not in the
+instance. That judgement is the entire ritual, ported from the owner's legacy
+harness.
+
+**What landed.** `kaizen`, the third bundled ritual, replacing `daily-delta`.
+Weekly, it reads `corrections/corrections-log.md`, `diary/*.md`,
+`persona/SOUL.md`, `Projects/*/ACTIONS.md` + `STATUS.md`, the sibling
+`rituals/*.md`, a grepped `logs/server.log` and
+`diagnostics/client-reports.jsonl`; groups corrections by LESSON rather than
+wording; labels anything seen 3+ times SYSTEMIC and refuses an instance-level fix
+for it; and ends with three changes each naming the file that would change.
+
+**What did NOT port, stated rather than silently dropped.** The legacy ritual
+auto-filed its top three into an issues list. `GATED_WRITE_TOOLS` refuses
+Write/Edit at fire time, and Open has no owner-side issues file by policy, so
+kaizen PROPOSES and the owner acts. Its cron-health section had gateway log files
+to read; here the ritual log (`code_ritual_runs`) and the chat history are
+SQLite-only, so kaizen can see which rituals EXIST but not whether they ran, and
+reasons from the corrections log, the server log and the client reports instead.
+
+**Egress.** kaizen is the first shipped def to declare `egress: 'web'` — the
+ecosystem scan is half of what it is for. The separate `ritual-egress:<id>` grant
+path existed and had never been exercised by anything a fresh install ships; a
+new test drives it end to end and proves approving the CONTENT leaves the ritual
+unscheduled until egress is approved on its own. Read-broadly plus network-reach
+in one agent is an exfiltration shape, so the template forbids putting anything
+read on disk into a query and forbids opening `.env` / `.secrets` / `*.db`.
+`WebFetch` is deliberately not granted.
+
+**It reaches him.** `silent: false`, so the report posts through
+`ReminderOutbound` → `deliver(durability:'reply')` as a durable history row.
+Skill Forge spent months persisting proposals into a `log.info` and telling nobody
+(#51); the unit test therefore asserts the POST, not the flag. Mutation-verified
+three ways: flipping `silent` to true fails it, dropping `WebSearch` from the
+surface fails it, and deleting the template while keeping the def fails it.
+
+**daily-delta removed cleanly.** Template, def, wiring, Core tool copy and tests
+went together, and a test pins the absence so a def can never outlive its
+template. The owner dropped it because its job was proving the system worked,
+which the reachability gates now do directly.
+
 ## 2026-08-01 — the reachability gate: coverage that asks whether the owner can still DO it
 
 Branch `feat/reachability-gate`. New:

@@ -853,7 +853,7 @@ describe('Argus r1 minor — status reports denied', () => {
 })
 
 // ── enable — bundled ritual approval + schedule path (Argus r2 BLOCKER) ────────
-// The three bundled rituals (morning-brief/evening-wrap/daily-delta) are seeded +
+// The three bundled rituals (morning-brief/evening-wrap/kaizen) are seeded +
 // registered at boot but propose() refuses their ids (exists_on_disk); enable() is
 // the ONLY path that gives them an approval prompt + a def.json schedule.
 
@@ -947,13 +947,62 @@ describe('enable — bundled ritual approval + schedule path', () => {
     expect(row.scheduled).toBe(true)
   })
 
+  // kaizen is the FIRST bundled def to declare `egress: 'web'`. The separate
+  // egress-grant path existed and had never been exercised by anything a fresh
+  // install actually ships, so this pins that enabling kaizen really does put a
+  // SECOND, independent decision in front of the owner — and that approving the
+  // content alone leaves it unscheduled.
+  test('enabling kaizen requires a SEPARATE egress grant — content approval alone does not schedule it', async () => {
+    const h = makeHarness()
+    seedAndRegisterBundled(h)
+
+    const res = await h.service.enable({
+      id: 'kaizen',
+      schedule: { fire_at: 1_900_000_000, recurrence_spec: '0 17 * * 5' },
+    })
+    await settle()
+
+    expect(res.requires_egress_approval).toBe(true)
+    // TWO prompts, not one: the content grant and the network-egress grant.
+    expect(h.emitted).toHaveLength(2)
+    expect(h.emitted.map((e) => e.metadata['kind'])).toEqual([
+      'ritual-approval',
+      'ritual-egress-approval',
+    ])
+
+    // Approve ONLY the content. The ritual must NOT be scheduled — a read-broadly
+    // agent does not acquire network reach as a side effect of the owner saying
+    // yes to its prompt text.
+    const contentApprove = h.emitted[0]!.options.find((o) => o.value.endsWith(':a'))!.value
+    const out = await h.service.handleOwnerButtonAnswer({
+      user_id: OWNER,
+      user_text: contentApprove,
+      topic_id: TOPIC,
+      prior_option_values: h.emitted[0]!.options.map((o) => o.value),
+    })
+    expect(out?.body).toMatch(/network-egress/)
+    expect(countReminderRows()).toBe(0)
+    expect(h.service.status().find((r) => r.ritual_id === 'kaizen')!.scheduled).toBe(false)
+
+    // Approve the egress grant too → now it schedules and will fire.
+    const egressApprove = h.emitted[1]!.options.find((o) => o.value.endsWith(':a'))!.value
+    await h.service.handleOwnerButtonAnswer({
+      user_id: OWNER,
+      user_text: egressApprove,
+      topic_id: TOPIC,
+      prior_option_values: h.emitted[1]!.options.map((o) => o.value),
+    })
+    expect(countReminderRows()).toBe(1)
+    expect(h.service.status().find((r) => r.ritual_id === 'kaizen')!.scheduled).toBe(true)
+  })
+
   test('enable is idempotency-guarded — a second enable REFUSES (already_enabled)', async () => {
     const h = makeHarness()
     seedAndRegisterBundled(h)
-    await h.service.enable({ id: 'daily-delta', schedule: { fire_at: 1_900_000_000 } })
+    await h.service.enable({ id: 'kaizen', schedule: { fire_at: 1_900_000_000 } })
     await settle()
     await expect(
-      h.service.enable({ id: 'daily-delta', schedule: { fire_at: 1_900_000_000 } }),
+      h.service.enable({ id: 'kaizen', schedule: { fire_at: 1_900_000_000 } }),
     ).rejects.toMatchObject({ code: 'already_enabled' })
   })
 
