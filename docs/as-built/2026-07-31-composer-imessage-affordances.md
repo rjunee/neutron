@@ -68,6 +68,41 @@ possible if the head is two strokes rather than a filled wedge, and the shaft is
 width as the arms. The solid-triangle version is the common wrong one and is exactly what
 makes iMessage clones look cheap.
 
+### The measured numbers
+
+Scale-calibrated off Apple's own iPhone User Guide screenshots and Send-button asset. The
+glyph ratios are expressed against the button's DIAMETER so they hold at any size, and the
+code derives every value from them rather than hardcoding a point size:
+
+| | Measured (iOS 17/18) | Implemented |
+|---|---|---|
+| Field height | 36–37 pt | 36 |
+| Field radius | 18 pt (= height/2, arc-fitted) | `FIELD_MIN_HEIGHT_PT / 2` |
+| Field border | 1 px hairline, fill = background | `StyleSheet.hairlineWidth`, transparent |
+| `+` circle | Ø 35 pt (≈95% of field height) | `FIELD_MIN_HEIGHT_PT * 0.95` |
+| `+` glyph | 13–14 pt | 13.5 |
+| Gap `+` → field | 12 pt | `SPACING.md` |
+| Text leading inset | ≈15 pt | `SPACING.lg` (16) |
+| Arrow shaft width | 0.069 × D | `ARROW_SHAFT_RATIO` |
+| Arrow glyph height | 0.52 × D | `ARROW_HEIGHT_RATIO` |
+| Arrowhead width | 0.41 × D (≈6× shaft) | `ARROW_HEAD_RATIO` — verifies at 5.9× |
+| Chevron included angle | ≈80° (40° per side) | `ARROW_ANGLE_DEG = 40` |
+
+The 80° head is the detail a naive build gets wrong: rotating the arms a convenient 45°
+gives a 90° head that reads as too pointy. The arm length is solved from the head's
+half-width and the angle, so the tips land exactly on the measured head width and the arms
+meet the shaft exactly at the apex — checked numerically, not by eye.
+
+A rotated bar's layout box extends past its parent, so both the glyph and the send button
+are explicitly `overflow: 'visible'`; without that Android would clip the arms.
+
+**One number is NOT measured: the send circle's diameter.** No Apple iOS 17/18 screenshot
+with text typed could be found, so the on-screen diameter is unconfirmed — the pixel pass
+could only extrapolate (≈28 pt) from iOS 26's uniform 6 pt inset. The value here is instead
+DERIVED from the field's inner height, on instruction, so there is no arbitrary constant to
+rot. If it reads too large on a device, it is a one-line change and the extrapolated ≈28 pt
+is the alternative to try.
+
 **The up-arrow stays.** The owner asked *"Is this up arrow for send how imessage does it? It
 looks kinda ugly."* The honest answer is yes — that is the mark iMessage uses — and "copy it
 exactly" means keeping it. What was actually ugly was the *rendering*: the pre-#29 code drew
@@ -164,7 +199,7 @@ has no call site anywhere outside its own test. So the mic still falls through t
 
 That is a real "built but never wired" gap, but it is a FEATURE change with permissions,
 capture and upload behind it — not a restyle — and it could not have been exercised here
-anyway (recording on the owner's live tenant was out of bounds, and then the emulator was
+anyway (recording against the owner's live instance was out of bounds, and then the emulator was
 withdrawn). It needs its own change and its own verification. Left untouched and reported
 rather than half-wired.
 
@@ -173,5 +208,5 @@ rather than half-wired.
 JS only — no `app.json`, manifest, or native-module change, so this ships over the air.
 
 **SYSTEM-OVERVIEW.md changes: none.** This is a visual restyle of an existing component — no
-new module, HTTP surface, tenant lifecycle behaviour, deploy step, Core tier mechanic,
+new module, HTTP surface, lifecycle behaviour, deploy step, Core tier mechanic,
 onboarding phase, or env flag. The doc does not describe the input composer's appearance.

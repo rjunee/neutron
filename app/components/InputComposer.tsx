@@ -201,7 +201,7 @@ const FIELD_BORDER_PT = StyleSheet.hairlineWidth;
  * nothing would be the no-op-control defect this composer already refuses to
  * ship elsewhere.
  */
-const LEADING_BUTTON_SIZE_PT = 32;
+const LEADING_BUTTON_SIZE_PT = FIELD_MIN_HEIGHT_PT * 0.95;
 
 /**
  * THE IN-FIELD ACTION BUTTON. Its diameter is the field's INNER height — not an
@@ -237,27 +237,53 @@ const LEADING_HIT_SLOP_PT = (MIN_TOUCH_TARGET_PT - LEADING_BUTTON_SIZE_PT) / 2;
  * this change; `expo-audio` was the only dependency PR #24 added) — and this
  * ships over the air, so a native font or SVG package remains unavailable.
  *
- * THE CONSTRUCTION. A vertical shaft plus a two-armed chevron head, all three
- * bars {@link ARROW_STROKE_PT} thick with `borderRadius` half that, which gives
- * the round caps and the round apex join that SF Symbols' arrows have. The arms
- * are the shaft's bar rotated ±45°, positioned by their CENTRES: an arm running
- * from the apex at 45° has its centre half its length along that diagonal, hence
- * the `Math.SQRT1_2` terms. Deriving the offsets rather than hardcoding them is
- * what keeps the head attached to the shaft if the box size is ever retuned.
+ * THE CONSTRUCTION. A vertical shaft plus a two-armed chevron head — an OPEN V,
+ * not a solid triangle. That is settled evidence, not a guess: row-scanning
+ * Apple's own Send-button asset returns THREE separate ink runs across the head
+ * (left arm, background, shaft, background, right arm), which is only possible
+ * if the head is two strokes of the same width as the shaft. The solid-wedge
+ * version is the common wrong one and is what makes clones look cheap.
  *
- * Apple's SF Pro and the exact `arrow.up` outline are proprietary, so this is an
- * approximation of that glyph's proportions, not a copy of the asset.
+ * THE PROPORTIONS BELOW ARE MEASURED off that asset and expressed as ratios of
+ * the BUTTON'S DIAMETER, so they hold at any size:
+ *
+ *   shaft width      0.069 × D
+ *   glyph height     0.52  × D   (vertically centred in the circle)
+ *   arrowhead width  0.41  × D   (≈ 6 × the shaft width)
+ *   included angle   ≈ 80°       — a WIDE head, ≈40° off vertical per side,
+ *                                  not the 45° a naive diagonal would give
+ *
+ * All three bars carry `borderRadius` half their width, which gives the round
+ * caps and the round apex join the asset shows (its tip and its shaft's foot
+ * each taper to a single pixel).
+ *
+ * The arms are the shaft's bar rotated ±{@link ARROW_ANGLE_DEG}, positioned by
+ * their CENTRES — an arm running from the apex at that angle has its centre half
+ * its length along that diagonal, hence the trig below. Deriving every offset
+ * rather than hardcoding it is what keeps the head attached to the shaft if the
+ * button is ever resized. A rotated bar's layout box legitimately extends past
+ * its parent, so the glyph is explicitly `overflow: visible`.
+ *
+ * Apple's SF Pro and the exact `arrow.up` outline are proprietary, so this is a
+ * reconstruction from measured proportions, not a copy of the asset.
  */
-const ARROW_BOX_PT = 16;
-const ARROW_STROKE_PT = 2;
-/** The apex sits this far below the box top; the shaft runs to the same inset above the bottom. */
-const ARROW_INSET_PT = 2;
-const ARROW_SHAFT_H_PT = ARROW_BOX_PT - ARROW_INSET_PT * 2;
-/** Each chevron arm's length. ~0.75 of the head-to-tail run reads as iMessage's proportions. */
-const ARROW_ARM_PT = 6;
-/** Half an arm's diagonal run, in each axis — where its centre lands from the apex. */
-const ARROW_ARM_HALF_PT = (ARROW_ARM_PT / 2) * Math.SQRT1_2;
+const ARROW_SHAFT_RATIO = 0.069;
+const ARROW_HEIGHT_RATIO = 0.52;
+const ARROW_HEAD_RATIO = 0.41;
+const ARROW_ANGLE_DEG = 40;
+
+const ARROW_STROKE_PT = ACTION_BUTTON_SIZE_PT * ARROW_SHAFT_RATIO;
+/** The glyph's box is square at its measured height; the head is narrower, so it fits. */
+const ARROW_BOX_PT = ACTION_BUTTON_SIZE_PT * ARROW_HEIGHT_RATIO;
 const ARROW_APEX_X_PT = ARROW_BOX_PT / 2;
+/** Half the head's width — how far each arm's tip reaches from the shaft. */
+const ARROW_HEAD_HALF_PT = (ACTION_BUTTON_SIZE_PT * ARROW_HEAD_RATIO) / 2;
+const ARROW_ANGLE_RAD = (ARROW_ANGLE_DEG * Math.PI) / 180;
+/** Arm length that puts its tip exactly at the head's half-width, at that angle. */
+const ARROW_ARM_PT = ARROW_HEAD_HALF_PT / Math.sin(ARROW_ANGLE_RAD);
+/** Where an arm's CENTRE lands from the apex, per axis. */
+const ARROW_ARM_DX_PT = (ARROW_ARM_PT / 2) * Math.sin(ARROW_ANGLE_RAD);
+const ARROW_ARM_DY_PT = (ARROW_ARM_PT / 2) * Math.cos(ARROW_ANGLE_RAD);
 
 function SendArrow({ color }: { color: string }): React.ReactElement {
   return (
@@ -275,7 +301,8 @@ function SendArrow({ color }: { color: string }): React.ReactElement {
  */
 const PLUS_BOX_PT = 16;
 const PLUS_STROKE_PT = 2;
-const PLUS_ARM_PT = 14;
+/** Measured at 13–14pt against a ~35pt circle. */
+const PLUS_ARM_PT = 13.5;
 
 function PlusGlyph({ color }: { color: string }): React.ReactElement {
   return (
@@ -814,7 +841,8 @@ const styles = StyleSheet.create({
     // field is the tell that the pattern was copied from a single-line
     // screenshot.
     alignItems: 'flex-end',
-    gap: SPACING.sm,
+    // Measured at ~12pt between the `+` circle and the field's leading edge.
+    gap: SPACING.md,
   },
   /** iMessage's + — a filled grey circle OUTSIDE the field, on the leading side. */
   leadingBtn: {
@@ -866,8 +894,9 @@ const styles = StyleSheet.create({
   input: {
     flex: 1,
     color: THEME.text_primary,
-    paddingLeft: SPACING.md,
-    // Clears the in-field action button, which is inset from the trailing edge.
+    // Measured at ~15pt from the field's leading edge to the first glyph.
+    paddingLeft: SPACING.lg,
+    // Clears the in-field action button, which occupies the trailing end.
     paddingRight: SPACING.xs,
     paddingVertical: FIELD_PADDING_V_PT,
     ...TYPOGRAPHY.body,
@@ -941,19 +970,26 @@ const styles = StyleSheet.create({
     backgroundColor: THEME.accent,
     justifyContent: 'center',
     alignItems: 'center',
+    // The arrow's rotated arms extend past the glyph's layout box; this is the
+    // ancestor that would otherwise clip them.
+    overflow: 'visible',
   },
   arrowGlyph: {
     height: ARROW_BOX_PT,
     width: ARROW_BOX_PT,
+    // A rotated bar's layout box legitimately extends past this one; nothing
+    // here may clip it.
+    overflow: 'visible',
   },
+  // The shaft spans the glyph's full measured height, apex to tail.
   arrowShaft: {
     position: 'absolute',
     left: ARROW_APEX_X_PT - ARROW_STROKE_PT / 2,
-    top: ARROW_INSET_PT,
+    top: 0,
     width: ARROW_STROKE_PT,
-    height: ARROW_SHAFT_H_PT,
-    // Round caps, as SF Symbols' arrows have — and what makes the apex join
-    // read as one continuous mark rather than three sticks.
+    height: ARROW_BOX_PT,
+    // Round caps, as the asset has — and what makes the apex join read as one
+    // continuous mark rather than three sticks.
     borderRadius: ARROW_STROKE_PT / 2,
   },
   arrowArm: {
@@ -962,17 +998,18 @@ const styles = StyleSheet.create({
     height: ARROW_ARM_PT,
     borderRadius: ARROW_STROKE_PT / 2,
   },
-  // Each arm is the shaft's bar rotated ±45° about its own centre, so it is
-  // POSITIONED by that centre: half its length down the diagonal from the apex.
+  // Each arm is the shaft's bar rotated ±ARROW_ANGLE_DEG about its own centre,
+  // so it is POSITIONED by that centre: half its length down the diagonal from
+  // the apex, which sits at the top of the shaft.
   arrowArmLeft: {
-    left: ARROW_APEX_X_PT - ARROW_ARM_HALF_PT - ARROW_STROKE_PT / 2,
-    top: ARROW_INSET_PT + ARROW_ARM_HALF_PT - ARROW_ARM_PT / 2,
-    transform: [{ rotate: '45deg' }],
+    left: ARROW_APEX_X_PT - ARROW_ARM_DX_PT - ARROW_STROKE_PT / 2,
+    top: ARROW_ARM_DY_PT - ARROW_ARM_PT / 2,
+    transform: [{ rotate: `${ARROW_ANGLE_DEG}deg` }],
   },
   arrowArmRight: {
-    left: ARROW_APEX_X_PT + ARROW_ARM_HALF_PT - ARROW_STROKE_PT / 2,
-    top: ARROW_INSET_PT + ARROW_ARM_HALF_PT - ARROW_ARM_PT / 2,
-    transform: [{ rotate: '-45deg' }],
+    left: ARROW_APEX_X_PT + ARROW_ARM_DX_PT - ARROW_STROKE_PT / 2,
+    top: ARROW_ARM_DY_PT - ARROW_ARM_PT / 2,
+    transform: [{ rotate: `-${ARROW_ANGLE_DEG}deg` }],
   },
   pressed: { opacity: 0.7 },
   counter: {
