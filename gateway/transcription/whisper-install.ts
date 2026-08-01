@@ -82,6 +82,39 @@ export interface WhisperInstall {
   model_id: string
 }
 
+export interface WhisperBinaryProbeOptions {
+  /** Process env — honours `NEUTRON_WHISPER_BIN`. */
+  env: Record<string, string | undefined>
+  /** Resolved data dir. */
+  neutron_home: string
+  /** PATH lookup, injected in tests. Defaults to `Bun.which`. */
+  which?: (cmd: string) => string | null
+  /** Existence probe, injected in tests. Defaults to `existsSync`. */
+  exists?: (p: string) => boolean
+}
+
+/**
+ * Is a runnable `whisper-cli` already on this machine?
+ *
+ * Separate from `resolveWhisperInstall` because the two answer different
+ * questions: that one asks "can we transcribe RIGHT NOW" (binary AND model),
+ * this one asks "if the owner presses Install, can the binary half succeed".
+ * On a platform with no prebuilt tarball (macOS) the answer decides whether the
+ * button can work at all — and a mobile client cannot run `brew` for the owner,
+ * so the button has to say so rather than fail after the fact.
+ *
+ * Same resolution order as the binary half of `resolveWhisperInstall`.
+ */
+export function whisperBinaryPresent(opts: WhisperBinaryProbeOptions): boolean {
+  const exists = opts.exists ?? ((p: string) => existsSync(p))
+  const which = opts.which ?? ((c: string) => Bun.which(c))
+  const pinned = (opts.env['NEUTRON_WHISPER_BIN'] ?? '').trim()
+  if (pinned.length > 0) return exists(pinned)
+  if (exists(whisperPaths(opts.neutron_home).binary)) return true
+  const onPath = which('whisper-cli')
+  return onPath !== null && onPath.length > 0
+}
+
 export interface ResolveWhisperOptions {
   /** Process env — honours the `NEUTRON_WHISPER_*` operator overrides. */
   env: Record<string, string | undefined>
@@ -322,7 +355,9 @@ export class WhisperInstaller {
     // A macOS box has no upstream CLI build; the binary must already be on PATH
     // (Homebrew). Say so precisely instead of downloading a model that cannot run.
     const which = this.opts.which ?? ((c: string) => Bun.which(c))
-    const haveBinary = existsSync(this.paths.binary) || which('whisper-cli') !== null
+    // Same probe the status surface reports as `binary_present`, so what the
+    // Settings button promises and what this run does can never disagree.
+    const haveBinary = whisperBinaryPresent({ env: {}, neutron_home: this.opts.neutron_home, which })
     if (binAsset === null && !haveBinary) {
       this.fail(
         'unsupported_platform',

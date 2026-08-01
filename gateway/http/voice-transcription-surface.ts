@@ -32,6 +32,7 @@ import {
 import {
   installedBytes,
   resolveWhisperInstall,
+  whisperBinaryPresent,
   type WhisperInstaller,
 } from '@neutronai/gateway/transcription/whisper-install.ts'
 import { jsonError, jsonOk, readJsonBody, resolveBearer } from './surface-kit.ts'
@@ -47,6 +48,10 @@ export interface VoiceTranscriptionSurfaceOptions {
   /** Injected in tests. Defaults to `process.platform` / `process.arch`. */
   platform?: string
   arch?: string
+  /** PATH lookup for the `binary_present` probe. Injected in tests; defaults to
+   *  `Bun.which`, so a dev box that happens to have Homebrew's `whisper-cli`
+   *  cannot make a test claiming "bare box" pass for the wrong reason. */
+  which?: (cmd: string) => string | null
 }
 
 export interface VoiceTranscriptionSurface {
@@ -68,6 +73,18 @@ export function createVoiceTranscriptionSurface(
     // on PATH — the model download still works, hence a distinct field rather
     // than a flat "unsupported".
     const binary_downloadable = binaryAssetFor(platform, arch) !== null
+    // Whether a runnable `whisper-cli` is ALREADY here (unpacked, Homebrew, or
+    // operator-pinned). Together with the flag above this is the whole truth
+    // about whether pressing Install can work: `!binary_downloadable &&
+    // !binary_present` means the owner must install the binary ON THE SERVER
+    // first, which no client — least of all a phone — can do for them. The web
+    // tab could get away with implying "run brew, then reload"; a mobile client
+    // has to disable the control and say why, so the fact is on the wire.
+    const binary_present = whisperBinaryPresent({
+      env,
+      neutron_home,
+      ...(opts.which !== undefined ? { which: opts.which } : {}),
+    })
     return {
       /** Which backend would transcribe a voice note right now. */
       backend: install !== null ? 'local' : (env['OPENAI_API_KEY'] ?? '').trim().length > 0 ? 'openai' : 'none',
@@ -75,6 +92,7 @@ export function createVoiceTranscriptionSurface(
       model_id: install?.model_id ?? null,
       installed_bytes: install !== null ? await installedBytes(neutron_home) : 0,
       binary_downloadable,
+      binary_present,
       whisper_version: WHISPER_CPP_VERSION,
       default_model_id: DEFAULT_WHISPER_MODEL_ID,
       models: WHISPER_MODELS.map((m) => ({
