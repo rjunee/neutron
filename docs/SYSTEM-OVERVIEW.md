@@ -6485,15 +6485,52 @@ and proves each one against the real thing, in the owner's language.
   `gateway/boot-chat-command-filters.ts` and fails when one is neither probed nor
   excluded **in writing, with a reason**. A new `/`-command turns this red on the
   PR that adds it.
+- **`app/__tests__/reachability-inventory.ts` + `reachability.test.tsx`** — the
+  MOBILE half, and the one that covers the voice incident directly. It mounts the
+  REAL project shell (`app/projects/[id]/_layout.tsx` over the routing harness,
+  with the real header, rail, tab bar, usage client and the real
+  `ChatSyncSurface` inside `<Slot/>`) on **every platform the app ships** (ios,
+  android) and probes eleven affordances: compose, send, tap-to-record,
+  hold-to-talk-and-slide-to-cancel, attach, switch project, create project, tabs,
+  project settings, app settings, usage meter.
+  **It PRESSES rather than queries, and that is the whole design.** A presence
+  probe ("is the mic in the tree?") PASSES on the build that shipped broken — the
+  mic was in the tree, it rendered perfectly, and it did nothing, because
+  `ChatSyncSurface` mounted `<InputComposer>` without its `onVoice*` props. So
+  every probe ends at an effect a missing handler cannot fake: a microphone that
+  opened, a frame on the socket, an OS picker that ran, a route that changed, a
+  measured meter. Each affordance gets a FRESH shell (a recording replaces the
+  composer, a tap changes the route, a drawer covers the screen — sharing a mount
+  would make results order-dependent, and an intermittent gate gets muted).
+- **`app/__tests__/reachability-inventory-complete.test.ts`** — mobile's
+  self-extension, two source scans. (1) Every OPTIONAL callback `InputComposer`
+  accepts must be exercised by an affordance or excluded in writing — an optional
+  callback a host forgets is *exactly* the voice defect, so the next one cannot
+  ship the way `onVoiceTap` did. (2) Every width branch in the app must be
+  `Platform.OS === 'web'`-gated, or recorded with a reason; see the parity note
+  below for why that matters.
 
 **Two design rules it is built on.**
 
-1. **Layout parity.** Beyond per-layout probes there is a harder assertion: an
-   affordance reachable at one width and missing at another fails, unless the
-   inventory carries a written `absentIn` reason (today exactly one — the theme
-   toggle, deliberately narrow-absent per #350/#360). That is what turns "we
-   remembered to test the wide usage meter" into "a capability cannot silently
-   vanish from a layout again".
+1. **Parity across everything the product ships.** On web that axis is layout
+   width: an affordance reachable at one width and missing at another fails,
+   unless the inventory carries a written `absentIn` reason (today exactly one —
+   the theme toggle, deliberately narrow-absent per #350/#360).
+   **On mobile the axis is PLATFORM, not width, and that is a verified finding
+   rather than a shortcut.** Every width branch in the app is
+   `Platform.OS === 'web' && width > BREAKPOINTS.narrow_max`
+   (`app/projects/[id]/_layout.tsx:417`, `ProjectTabBar.tsx:80`,
+   `ProjectSettingsDrawer.tsx:263`, `CommentsSidePane.tsx:143`,
+   `FocusList.tsx:97`, `ReminderList.tsx:81`, `TaskList.tsx:65`) and `web` is not
+   a shipped platform (`app/app.json` → `ios`, `android`), so the app renders ONE
+   layout at every size on a phone or a tablet; a width matrix there would be two
+   identical runs wearing a matrix's clothes. What the app does branch on is the
+   platform (`use-keyboard-inset.ts:127`, `ActivityInspectorDrawer.tsx:371`,
+   `ProjectSettingsDrawer.tsx:329`), so parity is enforced across ios/android
+   instead. Nobody has to remember this: the completeness gate re-derives it from
+   the source every run and reds the day a non-web-gated width branch appears,
+   demanding the width axis back. (The only one today —
+   `app/projects/[id]/backups.tsx:97` — is recorded with its reason.)
 2. **A failure names what the owner lost.** "You cannot attach a file — the attach
    control is missing from the composer", not "expected 200, got 500". The
    owner-facing sentence is the asserted VALUE, so it lands in any runner's diff,
@@ -6508,22 +6545,46 @@ post is not. Deliberately NOT a runtime monitor: there is no network, no model
 and no clock anywhere in it, which is exactly why a red can be believed.
 
 **Mutation-tested** (per the "prove the gate still fails on a real violation"
-rule): reintroducing the wide-branch `usage` omission reds the wide layout AND
-the parity check; renaming the attach control reds both layouts; removing
-`statusChatCommandFilter` / `tridentCodeChatCommandFilter` from the composer's
-chain names `/status` and `/code` as lost; adding an unaccounted-for filter
-factory reds the completeness gate.
+rule).
+
+*Web + server:* reintroducing the wide-branch `usage` omission reds the wide
+layout AND the parity check; renaming the attach control reds both layouts;
+removing `statusChatCommandFilter` / `tridentCodeChatCommandFilter` from the
+composer's chain names `/status` and `/code` as lost; adding an unaccounted-for
+filter factory reds the completeness gate.
+
+*Mobile:* deleting `{...voiceHandlers}` from `ChatSyncSurface` — the LITERAL
+omission that shipped — reds both platforms with *"You cannot record a voice
+message…"* and *"You cannot use hold-to-talk…"*. Dropping ONE of the five voice
+callbacks (`onVoiceHoldMove`) reds hold-to-talk alone, so the gate catches a
+partial forget, not just an all-or-nothing one. Dropping
+`pickAttachments` reds attach; dropping `usage=` from the narrow tab band reds
+the meter. On the completeness side: adding an unprobed optional callback to
+`InputComposerProps` reds it by name; removing the `Platform.OS === 'web' &&`
+guard from the shell's width branch reds it with the file and line; renaming the
+props interface trips the "the scan is alive" assertion rather than passing
+vacuously.
 
 **What it does NOT cover — the honest list.**
 
-- **The mobile app.** All of the above probes the web shell and the server. The
-  voice-props incident was a mobile host screen, and this gate would not have
-  caught it. The device harness that could (`app/__tests__/support/native-harness.ts`,
-  next section) is fixed at one screen size — `HARNESS_SCREEN_WIDTH` 393 — so the
-  mobile wide/tablet branch remains untestable, and mobile has no inventory yet.
-  This is the largest gap and the obvious next slice.
 - **Anything time-based or media-based.** The voice note that looped forever is a
-  playback-behaviour bug, not a reachability one; nothing here would see it.
+  playback-behaviour bug, not a reachability one; nothing here would see it. Nor
+  would anything here notice that a clip contains no audio, that it sounds wrong,
+  or that playback drifts — the harness's microphone and player are counting
+  stubs with no clock and no samples in them. That is deliberate: those are
+  behaviour questions, they belong to the voice-playback suites next door, and
+  half-covering them here would put a timing assertion inside the one gate that
+  has to stay believable when it goes red.
+- **The mobile app's remaining surfaces.** The mobile gate probes the project
+  shell and the chat surface — the owner's daily path. Admin, onboarding, the
+  docs/work/launcher tab bodies, the backups sub-route and the settings screens
+  have no inventory entries, so a control can still die inside one of them
+  unnoticed.
+- **A real device.** The mobile gate is react-native-web under happy-dom: real
+  components, real handlers, real state — but not Hermes, not a native gesture
+  recogniser, not a real microphone, not a native layout. Everything visual, and
+  anything the native binary owns, stays UNVERIFIED until it runs on a phone
+  (bounds: `app/__tests__/support/native-harness.ts`).
 - **CSS.** happy-dom renders the tree React produced, not a layout. An affordance
   that renders and is then covered, clipped or `display:none`d by a stylesheet
   still reads as reachable. Only a real browser closes that, and the one browser
@@ -6563,6 +6624,19 @@ installs a Bun plugin that aliases `react-native` → `react-native-web` plus in
 stubs for the expo modules with no JS implementation, shims `globalThis.expo`, and
 fakes a viewport rect (happy-dom reports 0×0, which would make layout assertions
 vacuously green).
+
+**A correction worth keeping, because the wrong version was written down once.**
+The rect the harness fakes (`HARNESS_SCREEN_WIDTH` = 393) feeds
+`getBoundingClientRect` and NOTHING ELSE — it never reaches `Dimensions` or
+`useWindowDimensions`, so it does not "pin the harness to one screen width". What
+a width-dependent branch actually reads is `useWindowDimensions()`, which
+react-native-web derives from `document.documentElement.clientWidth`; happy-dom
+reports **0**, which is why an untouched harness renders every narrow branch.
+Widening it is already solved by `withWideViewport()` in
+`app/__tests__/usage-meter.test.tsx`, which sets `clientWidth`/`clientHeight` +
+the visual viewport and fires `resize`, with a guard test asserting
+`Dimensions.get('window').width > BREAKPOINTS.narrow_max` so the block cannot go
+vacuous. Reach for that rather than inventing a second mechanism.
 
 Three capabilities carry most of the value:
 

@@ -2,6 +2,57 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+## 2026-08-01 — the reachability gate reaches the phone
+
+Branch `test/reachability-mobile`. New: `app/__tests__/reachability-inventory.ts`,
+`app/__tests__/reachability.test.tsx`,
+`app/__tests__/reachability-inventory-complete.test.ts`. Changed:
+`app/__tests__/support/stubs/expo-document-picker.ts` (now counts its calls).
+Doc: `docs/SYSTEM-OVERVIEW.md`. **Test-side only — no production code changed.**
+
+**Why.** The gate merged the day before (#52) reported its own scorecard
+honestly: it caught two of the five features that shipped unreachable in one day,
+and named mobile as the largest remaining gap. The most expensive of the five was
+mobile — `ChatSyncSurface` rendered `<InputComposer>` without its four `onVoice*`
+props, so the mic rendered perfectly, took every press, and answered "Voice
+messages are not available yet." Five green unit files agreed everything was
+fine, because a unit test asserts a PART works and none of them asserted the
+product still reached it.
+
+**What landed.** Mobile's half of the inventory: eleven things the owner must be
+able to do, probed against the REAL project shell (`app/projects/[id]/_layout.tsx`
+over the routing harness, with the real header, rail, tab bar, usage client and
+the real `ChatSyncSurface` inside `<Slot/>`) on both shipped platforms. Every
+probe PRESSES and then demands an effect a missing handler cannot fake — a
+microphone that opened, a frame on the socket, an OS picker that ran, a route that
+changed, a measured meter — because a presence probe passes on the broken build.
+Plus a completeness gate that reads the composer's own optional callbacks out of
+the source and reds when one is neither probed nor excluded in writing.
+
+**A verified correction to #52's stated obstacle.** It reported the harness
+"fixed at one screen size — `HARNESS_SCREEN_WIDTH` 393 — so the mobile
+wide/tablet branch remains untestable". That constant only feeds
+`getBoundingClientRect`; `useWindowDimensions()` comes from
+`documentElement.clientWidth`, which happy-dom reports as **0**, and widening it
+was already solved by `withWideViewport()` in `usage-meter.test.tsx`. The deeper
+finding is that width is the wrong axis for mobile at all: all seven width
+branches in the app are `Platform.OS === 'web'`-gated and web is not a shipped
+platform, so the phone renders ONE layout. Parity therefore runs across
+ios/android, and the completeness gate re-derives that claim from source each run
+so it reds the day a real tablet layout appears.
+
+**Mutation-tested.** Deleting `{...voiceHandlers}` — the literal shipped omission
+— reds both platforms with the owner's sentence; dropping one of the five voice
+callbacks reds hold-to-talk alone; dropping `pickAttachments` reds attach;
+dropping `usage=` reds the meter; an unprobed new optional callback, an
+un-web-gated width branch and a renamed props interface each red the completeness
+gate.
+
+**Deliberately not covered**, in `docs/SYSTEM-OVERVIEW.md` § Reachability gate
+alongside #52's list: playback behaviour and anything about audio actually
+sounding (behaviour, not reachability), the mobile surfaces outside the shell and
+chat, and a real device.
+
 ## 2026-08-01 — kaizen: the weekly pass that notices you have corrected this four times
 
 Branch `feat/kaizen-ritual`. New: `reminders/rituals/kaizen.md`. Removed:
