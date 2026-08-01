@@ -616,6 +616,36 @@ first-run surface.
   selected by each profile's `"environment"` in `app/eas.json` — never
   literals in the repo. See `app/README.md` § "Build-time server URL".
 
+## OTA updates vs real builds — the runtime-version boundary (`app/app.json`)
+
+An `expo-updates` bundle may only be handed to an installed app whose **native**
+side can actually run it. `runtimeVersion` is the token that encodes that
+compatibility, and its POLICY decides whether the encoding is honest.
+
+This project uses **`{"policy": "fingerprint"}`**. Expo hashes the native
+project — installed native modules, config plugins, native config — so any
+change to the native side yields a different runtime version automatically, and
+an older build simply stops being offered bundles it could not execute.
+
+It previously used `{"policy": "appVersion"}`, which derives the runtime version
+from `expo.version` alone. That is a **silent footgun**: adding a native module
+does not change the app version, so the new JS bundle keeps the OLD runtime
+version and `expo-updates` judges it compatible with builds that do not contain
+the module. The update ships, the import resolves to nothing, and the failure
+lands on the owner's device rather than in CI. It was caught the day
+`expo-audio` was added for voice messages — under `appVersion` that bundle would
+have been delivered straight to an installed build with no audio native code.
+
+Operational consequence, and it is the whole point of the change: **you can no
+longer decide "OTA or real build?" from memory.** A JS-only change fingerprints
+identically and goes out over the air; anything touching the native side
+fingerprints differently and requires a real build plus a fresh install. The
+tooling now enforces the distinction instead of relying on someone remembering
+it.
+
+Note that switching policies is itself a runtime-version change, so every build
+produced under the old policy stops receiving updates and must be replaced once.
+
 ## App remote diagnostics — `app/lib/diagnostic-*.ts` + `gateway/http/app-diagnostics-surface.ts`
 
 When the mobile app misbehaves on the owner's phone, the error and its recent
