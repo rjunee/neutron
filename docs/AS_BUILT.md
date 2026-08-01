@@ -14,7 +14,7 @@ The obvious implementation — return `null` for idle — would have done the vi
 
 **Tests.** `app/__tests__/rail-idle-dot-not-painted.test.tsx` (new, 6 tests) pins all three halves: nothing is painted (asserted on computed fill and border width, not just on the absence of a testID, so "make it very subtle instead" fails too); the corner box matches a painted dot's geometry exactly; and pressing the active row's invisible corner still opens the inspector without also switching project. The geometry assertion was mutation-tested — collapsing `dotSlot` to 0×0 reds it. `rail-dot-misclick.test.tsx` is unchanged in behaviour; its "inert, not removed" case is annotated to say it is about a dot that has something to report.
 
-**Verified.** Typecheck and ESLint clean on the app package; the three rail test files green (22 tests). JS-only — no native module, no manifest change, so it ships over-the-air ahead of the next binary. No feature flags.
+**Verified, and not.** Typecheck and ESLint clean on the app package; the three rail test files green (22 tests). The PRE-change rail was reproduced on an emulator — a ring in the corner of every row. The AFTER state was **not** confirmed visually: the emulator was stopped part-way through (it was bogging down the owner's laptop), so what backs this is the harness and the component, not a screenshot of the result. Worth a glance on device. JS-only — no native module, no manifest change, so it ships over-the-air ahead of the next binary. No feature flags.
 
 ## 2026-07-31 — a rail tap is a tap, not a load
 
