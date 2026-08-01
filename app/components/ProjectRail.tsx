@@ -211,6 +211,60 @@ function RailItem({
   );
 }
 
+/**
+ * THE CREATE CONTROL'S MARK — TWO PLUSES, ONE SCREEN (owner report, on device).
+ *
+ * The rail's create control and the composer's attachment control ended up as
+ * near-identical bare `+` glyphs a thumb apart. That is a collision the composer
+ * did not have before #40: the composer used to be inset in the rail's column,
+ * and widening it to the viewport — correct on its own terms — walked its
+ * leading `+` down to the screen's left edge, directly under the rail's `+`.
+ *
+ * WHICH ONE MOVES. The composer's, not this one. A `+` at the leading edge of a
+ * message composer is what iMessage, WhatsApp and Telegram all put there, and
+ * this composer is a deliberate iMessage reconstruction (see `InputComposer`).
+ * That mark is spoken for. So the rail differentiates.
+ *
+ * WHAT THE MARK IS. Still a plus — a rail that ends in "add one more of these"
+ * is the Discord/Slack/Telegram idiom and swapping in an exotic glyph would
+ * import a visual language this app does not otherwise speak. What changes is
+ * everything AROUND the plus, because a glyph alone was never going to carry it:
+ *
+ *   1. CONTAINER. A dashed, outlined, rounded SQUARE — the empty slot at the end
+ *      of a run of filled tiles. The composer's is a SOLID FILLED CIRCLE
+ *      (`leadingBtn`: `surface_raised`, fully round). Outline-vs-fill and
+ *      square-vs-round are the two strongest silhouette cues available at this
+ *      size, and they now both point the same way.
+ *   2. LABEL. "New", in the same caption type every project name uses. The
+ *      composer's control is unlabelled and structurally always will be. This
+ *      also closes an inconsistency that predates the complaint: every other
+ *      rail row is a glyph over a name, and this row was the only bare one.
+ *   3. WEIGHT. Drawn from views at a 1.5pt stroke in `text_muted`, against the
+ *      composer's 2pt in the brighter `text_secondary`. Quieter mark, quieter
+ *      colour — the rail's create is not competing for the same attention.
+ *   4. SEPARATION. A hairline rule above it, so it reads as the end of the list
+ *      rather than as another project.
+ *
+ * Drawn from `View`s rather than set as text for the same reason `SendArrow` and
+ * `PlusGlyph` are in `InputComposer`: there is no icon set in this app's
+ * dependency tree (no `@expo/vector-icons`, no `react-native-svg` — re-checked
+ * `app/package.json` this change) and this has to ship over the air. A `<Text>`
+ * `+` also took its size, weight and baseline from whatever the system font
+ * happened to be, which is why the old one sat optically low in its box.
+ */
+const PLUS_BOX = 14;
+const PLUS_STROKE = 1.5;
+const PLUS_ARM = 12;
+
+function PlusMark({ color }: { color: string }) {
+  return (
+    <View style={styles.plusMark} testID="rail-create-plus">
+      <View style={[styles.plusBarH, { backgroundColor: color }]} />
+      <View style={[styles.plusBarV, { backgroundColor: color }]} />
+    </View>
+  );
+}
+
 export function ProjectRail({
   projects,
   overlay,
@@ -256,14 +310,24 @@ export function ProjectRail({
             onOpenActivity={openActivity}
           />
         ))}
+        {/* THE END OF THE LIST, not another entry in it. The rule is what stops
+            the create control reading as one more project. */}
+        <View style={styles.createDivider} />
         <Pressable
           accessibilityRole="button"
-          accessibilityLabel="Add a project"
+          accessibilityLabel="New project"
           testID="rail-create"
           onPress={onCreate}
-          style={({ pressed }) => [styles.item, styles.createItem, pressed && styles.pressed]}
+          style={({ pressed }) => [styles.item, pressed && styles.pressed]}
         >
-          <Text style={styles.createGlyph}>+</Text>
+          <View style={styles.glyphWrap}>
+            <View style={styles.createTile} testID="rail-create-tile">
+              <PlusMark color={THEME.text_muted} />
+            </View>
+          </View>
+          <Text style={styles.createLabel} numberOfLines={1}>
+            New
+          </Text>
         </Pressable>
       </ScrollView>
     </View>
@@ -274,6 +338,8 @@ const RAIL_WIDTH = 72;
 const RAIL_PULSE_MS = 2400;
 const GLYPH = 44;
 const DOT = 10;
+/** The create tile, inset inside a project row's 44pt glyph box. */
+const CREATE_TILE = 32;
 
 const styles = StyleSheet.create({
   rail: {
@@ -366,14 +432,67 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     color: THEME.text_secondary,
   },
-  createItem: {
-    marginTop: SPACING.xs,
+  /**
+   * The rule that ends the project list. Short of the rail's full width so it
+   * reads as a separator inside the column, not as the column's own edge.
+   */
+  createDivider: {
+    width: CREATE_TILE,
+    height: StyleSheet.hairlineWidth,
+    backgroundColor: THEME.text_muted,
+    opacity: 0.35,
+    marginTop: SPACING.sm,
+    marginBottom: SPACING.xs,
   },
-  createGlyph: {
-    fontSize: 26,
-    lineHeight: GLYPH,
+  /**
+   * The empty slot. Smaller than `glyphWrap` and centred in it, so the create
+   * row keeps EXACTLY the height and rhythm of a project row while the tile
+   * itself stays visibly lighter than a project's 24pt emoji.
+   *
+   * `borderStyle: 'dashed'` is the mark of a slot waiting to be filled. Verified
+   * rendering dashed on Android 14 (Pixel 9, Genymotion) before merge — RN has
+   * historically flattened dashed borders to solid when combined with
+   * `borderRadius` on Android, so this is checked, not assumed. Even flattened
+   * it would still read as an outlined square against a filled circle; the dash
+   * is the bonus, the outline is the load-bearing part.
+   */
+  createTile: {
+    width: CREATE_TILE,
+    height: CREATE_TILE,
+    borderRadius: SPACING.sm,
+    borderWidth: 1,
+    borderStyle: 'dashed',
+    borderColor: THEME.text_muted,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  /** Same caption type as a project name, one step quieter. */
+  createLabel: {
+    fontSize: TYPOGRAPHY.caption.fontSize,
+    lineHeight: TYPOGRAPHY.caption.lineHeight,
+    fontWeight: '500',
     color: THEME.text_muted,
-    height: GLYPH,
     textAlign: 'center',
+    maxWidth: RAIL_WIDTH - SPACING.xs,
+  },
+  plusMark: {
+    width: PLUS_BOX,
+    height: PLUS_BOX,
+  },
+  plusBarH: {
+    position: 'absolute',
+    left: (PLUS_BOX - PLUS_ARM) / 2,
+    top: (PLUS_BOX - PLUS_STROKE) / 2,
+    width: PLUS_ARM,
+    height: PLUS_STROKE,
+    borderRadius: PLUS_STROKE / 2,
+  },
+  plusBarV: {
+    position: 'absolute',
+    left: (PLUS_BOX - PLUS_STROKE) / 2,
+    top: (PLUS_BOX - PLUS_ARM) / 2,
+    width: PLUS_STROKE,
+    height: PLUS_ARM,
+    borderRadius: PLUS_STROKE / 2,
   },
 });
