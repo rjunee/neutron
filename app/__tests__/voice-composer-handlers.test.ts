@@ -23,7 +23,10 @@ import type { InputComposerProps } from '../components/InputComposer';
 /** Every recorder call, in order, as `name` or `name(args)`. */
 type CallLog = string[];
 
-function fakeRecorder(phase: VoicePhase): { voice: VoiceRecorderValue; calls: CallLog } {
+function fakeRecorder(
+  phase: VoicePhase,
+  latched = false,
+): { voice: VoiceRecorderValue; calls: CallLog } {
   const calls: CallLog = [];
   const voice: VoiceRecorderValue = {
     phase,
@@ -32,7 +35,7 @@ function fakeRecorder(phase: VoicePhase): { voice: VoiceRecorderValue; calls: Ca
     elapsed_label: '0:00',
     intent: 'send',
     cancel_progress: 0,
-    latched: false,
+    latched,
     preview_uri: null,
     error_message: null,
     error_reason: null,
@@ -73,29 +76,76 @@ describe('voiceComposerHandlers — it fits the composer', () => {
     const props: Required<
       Pick<
         InputComposerProps,
-        'onVoiceTap' | 'onVoiceHoldStart' | 'onVoiceHoldMove' | 'onVoiceHoldEnd'
+        | 'onVoiceTap'
+        | 'onVoicePressIn'
+        | 'onVoiceHoldStart'
+        | 'onVoiceHoldMove'
+        | 'onVoiceHoldEnd'
       >
     > = voiceComposerHandlers(voice);
     expect(typeof props.onVoiceTap).toBe('function');
+    expect(typeof props.onVoicePressIn).toBe('function');
     expect(typeof props.onVoiceHoldStart).toBe('function');
     expect(typeof props.onVoiceHoldMove).toBe('function');
     expect(typeof props.onVoiceHoldEnd).toBe('function');
   });
 });
 
-describe('voiceComposerHandlers — tap mode', () => {
-  it('a tap at rest starts capture AND latches it, in that order', () => {
+describe('voiceComposerHandlers — capture opens on touch-down', () => {
+  it('a press at rest starts capture immediately, without waiting for the verdict', () => {
     const { voice, calls } = fakeRecorder('idle');
-    voiceComposerHandlers(voice).onVoiceTap();
-    // Latching second is what grows the overlay's stop control. Without it the
-    // finger is gone with a live recording and nothing on screen stops it.
-    expect(calls).toEqual(['start', 'latch']);
+    voiceComposerHandlers(voice).onVoicePressIn();
+    // THE FIX. If this edge stops starting the recorder, capture falls back to
+    // the long-press edge a quarter-second later and every held message loses
+    // its opening syllable again.
+    expect(calls).toEqual(['start']);
   });
 
-  it('a second tap while recording stops for review rather than starting again', () => {
-    const { voice, calls } = fakeRecorder('recording');
+  it('a press landing on a live take, a review clip or an upload opens nothing', () => {
+    for (const phase of ['requesting', 'recording', 'review', 'uploading', 'error'] as const) {
+      const { voice, calls } = fakeRecorder(phase);
+      voiceComposerHandlers(voice).onVoicePressIn();
+      expect(calls).toEqual([]);
+    }
+  });
+});
+
+describe('voiceComposerHandlers — tap mode', () => {
+  it('a tap latches the take its own touch-down already opened', () => {
+    // The realistic sequence: press-in started capture, the finger came off
+    // before the hold threshold, and the tap edge now decides its fate.
+    const { voice, calls } = fakeRecorder('idle');
+    voiceComposerHandlers(voice).onVoicePressIn();
+    const live = fakeRecorder('recording', false);
+    voiceComposerHandlers(live.voice).onVoiceTap();
+    // Latching is what grows the overlay's stop control. Without it the finger
+    // is gone with a live recording and nothing on screen stops it.
+    expect(calls).toEqual(['start']);
+    expect(live.calls).toEqual(['latch']);
+    expect(live.calls).not.toContain('stopForReview');
+  });
+
+  it('a tap released while start() is still in flight still latches — no hot mic', () => {
+    const { voice, calls } = fakeRecorder('requesting');
+    voiceComposerHandlers(voice).onVoiceTap();
+    // The recorder defers this until capture is live. Doing nothing here is the
+    // race PR #24 closed: the recorder comes up running with no finger down.
+    expect(calls).toEqual(['latch']);
+    expect(calls).not.toContain('start');
+  });
+
+  it('a second tap, once the take is latched, stops for review rather than starting again', () => {
+    const { voice, calls } = fakeRecorder('recording', true);
     voiceComposerHandlers(voice).onVoiceTap();
     expect(calls).toEqual(['stopForReview']);
+  });
+
+  it('a tap with nothing running at all opens the take — the screen-reader path', () => {
+    // A screen reader activates the button through `onPress` alone, with no
+    // touch-down behind it, so this edge has to be able to start from rest.
+    const { voice, calls } = fakeRecorder('idle');
+    voiceComposerHandlers(voice).onVoiceTap();
+    expect(calls).toEqual(['start', 'latch']);
   });
 
   it('a tap on a clip awaiting review does NOTHING — it cannot destroy an unsent note', () => {
@@ -111,12 +161,6 @@ describe('voiceComposerHandlers — tap mode', () => {
       expect(calls).toEqual([]);
     }
   });
-
-  it('a tap while the permission sheet is up does not start a second capture', () => {
-    const { voice, calls } = fakeRecorder('requesting');
-    voiceComposerHandlers(voice).onVoiceTap();
-    expect(calls).toEqual([]);
-  });
 });
 
 describe('voiceComposerHandlers — long-press mode', () => {
@@ -124,6 +168,15 @@ describe('voiceComposerHandlers — long-press mode', () => {
     const { voice, calls } = fakeRecorder('idle');
     voiceComposerHandlers(voice).onVoiceHoldStart();
     expect(calls).toEqual(['start']);
+  });
+
+  it('the hold verdict does not restart the take touch-down already opened', () => {
+    // The realistic sequence on a device: press-in opened capture, and 250ms
+    // later the recogniser calls it a hold. A second `start()` here would be a
+    // no-op in the recorder, but the mapping should not be asking for one.
+    const { voice, calls } = fakeRecorder('recording');
+    voiceComposerHandlers(voice).onVoiceHoldStart();
+    expect(calls).toEqual([]);
   });
 
   it('a hold that begins on a clip awaiting review is refused', () => {

@@ -30,6 +30,16 @@ export interface VoiceHarnessState {
   audio_mode_calls: number;
   /** True between `record()` and `stop()` — a hot mic is a leak if it outlives a test. */
   recording: boolean;
+  /**
+   * `Date.now()` when the microphone actually opened, and when it closed.
+   *
+   * Here so the head of a recording can be MEASURED rather than reasoned about:
+   * subtract the moment the finger landed and you have the audio a held message
+   * loses before capture begins. That number was the defect
+   * (`voice-capture-starts-on-touch-down.test.tsx`), so it is observable.
+   */
+  record_at_ms: number | null;
+  stop_at_ms: number | null;
 }
 
 interface VoiceHarnessConfig {
@@ -59,6 +69,8 @@ function freshState(): VoiceHarnessState {
     stop_calls: 0,
     audio_mode_calls: 0,
     recording: false,
+    record_at_ms: null,
+    stop_at_ms: null,
   };
 }
 
@@ -95,9 +107,11 @@ const recorder: HarnessRecorder = {
   record: (): void => {
     state.record_calls += 1;
     state.recording = true;
+    state.record_at_ms = Date.now();
   },
   stop: async (): Promise<void> => {
     state.stop_calls += 1;
+    if (state.recording) state.stop_at_ms = Date.now();
     state.recording = false;
   },
 };

@@ -17,16 +17,21 @@
  *
  * and then drives it from the mic button's gesture responder:
  *
- *   LONG-PRESS   onPressIn → voice.start()
- *                onMove    → voice.updateDrag(dx, dy)   // flips voice.intent
+ *   BOTH         onPressIn → voice.start()              // touch-down, before
+ *                                                       // tap-vs-hold is known
+ *   LONG-PRESS   onMove    → voice.updateDrag(dx, dy)   // flips voice.intent
  *                onRelease → voice.finish()             // sends, or discards
  *                                                       // if intent==='cancel'
- *   TAP          onPress   → voice.start()
+ *   TAP          onPress   → voice.latch()              // keeps the take the
+ *                                                       // press already opened
  *                stop tap  → voice.stopForReview()      // phase → 'review'
  *                then      → voice.send() | voice.cancel()
  *
- * Both modes share one recorder; they differ only in which transitions the host
- * drives. `VoiceRecorderOverlay` renders the standard UI for both.
+ * `start()` deliberately sits on touch-down for BOTH modes: the gesture
+ * recogniser needs a quarter-second to classify the press, and a microphone that
+ * waits for that verdict has already missed the first syllable. Both modes share
+ * one recorder; they differ only in which transitions the host drives afterwards.
+ * `VoiceRecorderOverlay` renders the standard UI for both.
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
