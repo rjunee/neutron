@@ -183,11 +183,23 @@ async function waitFor(pred: () => boolean, timeoutMs: number): Promise<boolean>
  * A fresh owner's `on_session_open` seeds an onboarding opener turn that lands its
  * own agent row AND its own frames asynchronously. Wait until both stop moving, so
  * nothing from onboarding is mistaken for a probe's answer.
+ *
+ * HARD DEADLINE, deliberately. The natural way to write this is "loop until it
+ * settles", and on a contended runner a background tick that keeps writing would
+ * make that loop never end — turning a gate that is supposed to say yes or no into
+ * one that hangs. A hang is the worst outcome available here: it is not a pass, it
+ * is not a red anyone can read, and it burns a runner until something else kills
+ * it. So settling is best-effort with a ceiling; past the ceiling we take the
+ * current marks and carry on, and every probe below measures from ITS OWN mark
+ * anyway, so an unsettled start costs precision, not correctness.
  */
+const QUIESCE_CEILING_MS = 20_000
+
 async function quiesce(db: ProjectDb, sock: OpenSocket): Promise<void> {
+  const deadline = Date.now() + QUIESCE_CEILING_MS
   let rows = agentRowCount(db)
   let frames = sock.frames.length
-  for (;;) {
+  while (Date.now() < deadline) {
     await sleep(700)
     const nextRows = agentRowCount(db)
     const nextFrames = sock.frames.length
@@ -206,7 +218,18 @@ let socket: OpenSocket | null = null
 /** id → the owner-facing reason it is unreachable, or null when it is fine. */
 const outcome = new Map<string, string | null>()
 
-beforeAll(async () => {
+/**
+ * Env setup ONLY. Everything that can block — composing the graph, opening the
+ * socket, typing the commands — lives in the test below rather than here.
+ *
+ * WHY THAT SPLIT MATTERS. Bun enforces the per-test timeout on `test()`, and a
+ * `beforeAll` that never resolves has nothing stopping it: the file would hang
+ * rather than fail, burning a CI runner and reporting neither green nor red. A
+ * gate whose failure mode is "hangs forever" is worse than no gate — it is the
+ * permanently-inconclusive check that trains everyone to stop looking. So the
+ * blocking work sits under a deadline the runner actually enforces.
+ */
+beforeAll(() => {
   savedEnv = {}
   for (const k of SAVED_ENV_KEYS) savedEnv[k] = process.env[k]
   tmpDir = mkdtempSync(join(tmpdir(), 'neutron-reachability-'))
@@ -220,7 +243,10 @@ beforeAll(async () => {
   delete process.env['CLAUDE_CODE_OAUTH_TOKEN']
   process.env['NEUTRON_DISABLE_AMBIENT_CLAUDE_AUTH'] = '1'
   delete process.env['NOTIFY_SOCKET']
+})
 
+/** Boot the instance and type every command. Bounded at every step. */
+async function probeEveryCommand(): Promise<void> {
   harness = await startHarness()
   socket = await openSocket(harness.base)
   await waitFor(() => framesOfType(socket!.frames, 'session_ready').length > 0, 15_000)
@@ -270,7 +296,7 @@ beforeAll(async () => {
         : null,
     )
   }
-}, 180_000)
+}
 
 afterAll(async () => {
   socket?.close()
@@ -287,15 +313,20 @@ afterAll(async () => {
 })
 
 describe('reachability — the chat commands, on a real running instance', () => {
-  test('every command the owner can type is still claimed by the composed chain', () => {
+  test('every command the owner can type is still claimed by the composed chain', async () => {
+    await probeEveryCommand()
     const lost = CHAT_COMMANDS.map((c) => outcome.get(c.id)).filter(
       (v): v is string => typeof v === 'string',
     )
     // The asserted VALUE is the owner-facing report, so it lands in the diff of
     // any runner and a green run prints nothing at all.
-    const report = lost.length === 0 ? '' : ['Commands the owner has lost:', ...lost.map((l) => `  • ${l}`)].join('\n')
+    const report =
+      lost.length === 0 ? '' : ['Commands the owner has lost:', ...lost.map((l) => `  • ${l}`)].join('\n')
     expect(report).toBe('')
-  })
+    // Composing the graph, booting the server and typing three commands settles in
+    // ~10s locally; the ceiling is loose enough that a contended runner is not a
+    // false red, and tight enough that a wedge is reported rather than hung on.
+  }, 150_000)
 
   test('every command in the inventory was actually probed', () => {
     // Without this, a probe that silently never ran would read as a pass — the
