@@ -209,6 +209,7 @@ export type OpenComposition = CompositionInput &
       | 'app_work_board_surface'
       | 'app_activity_surface'
       | 'app_usage_surface'
+      | 'app_system_notice_surface'
       | 'app_project_credentials_surface'
       | 'app_codex_credential_surface'
       | 'codex_credential'
@@ -315,6 +316,7 @@ import { createWorkBoardSurface } from '@neutronai/gateway/http/work-board-surfa
 // read surface, and the late-bound runtime tap the Pre/PostToolUse hook reaches.
 import { createActivitySurface } from '@neutronai/gateway/http/activity-surface.ts'
 import { createAppUsageSurface } from '@neutronai/gateway/http/app-usage-surface.ts'
+import { createSystemNoticeSurface } from '@neutronai/gateway/http/system-notice-surface.ts'
 import { CredentialUsageMonitor } from './credential-usage-monitor.ts'
 import {
   ActivityInspector,
@@ -2927,6 +2929,21 @@ export function buildOpenGraphComposer(
       snapshot: () => credentialUsageMonitor.snapshot(),
     })
 
+    // `POST /api/app/system-notice` — the seam an out-of-process caller uses to
+    // put a durable system message in the owner's chat. It is handed the SAME
+    // `deliver` built above (the ONE out-of-turn delivery seam) and the SAME
+    // `ownerNoticeTopic` the substrate bubbles post to — the bare `app:<owner>`
+    // topic the live client actually binds and hydrates. The topic is fixed at
+    // composition, so a caller chooses the words and nothing else; and the auth
+    // is `appOwnerAuth`, the same instance-scoped bearer resolver the rest of
+    // `/api/app/*` gates on, because a route that writes to the transcript as
+    // the system is a message-injection hole if it accepts anything weaker.
+    const systemNoticeSurface = createSystemNoticeSurface({
+      deliver,
+      owner_topic_id: ownerNoticeTopic,
+      auth: appOwnerAuth,
+    })
+
     // Per-project credential store: the ONE canonical instance is constructed
     // above (before mountOpenCores) so the Cores' credential resolver + this
     // CRUD surface + the awareness injection all share it. Mount the CRUD surface.
@@ -4511,6 +4528,11 @@ export function buildOpenGraphComposer(
       // the route reaches the ladder via `route-slots.ts`'s `appActivity` slot.
       app_activity_surface: { handler: activitySurface.handler },
       app_usage_surface: { handler: appUsageSurface.handler },
+      // External system notice (`POST /api/app/system-notice`) — the ONE HTTP
+      // way into the `deliver` seam. Mounting it here is what makes it reachable
+      // in a real install rather than merely written: the route reaches the
+      // ladder via `route-slots.ts`'s `appSystemNotice` slot.
+      app_system_notice_surface: { handler: systemNoticeSurface.handler },
       // Per-project credential CRUD (`/api/app/projects/<id>/credentials`),
       // bearer-gated, dispatching the canonical ProjectCredentialStore.
       app_project_credentials_surface: { handler: projectCredentialsSurface.handler },

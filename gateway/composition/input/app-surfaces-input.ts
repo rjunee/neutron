@@ -322,6 +322,22 @@ export interface AppSurfacesCompositionInput {
     handler: (req: Request) => Promise<Response | null>
   }
   /**
+   * External system notice. Owns `POST /api/app/system-notice` — the ONE way a
+   * caller OUTSIDE this process (a control plane, a monitoring job, an operator
+   * script) can put a message in front of the owner. Bearer-authed against the
+   * same instance-scoped credential every `/api/app/*` surface accepts, and the
+   * body is delivered verbatim: the surface carries no vocabulary of its own for
+   * what may be announced. Persisted `durability: 'inert'` through the ONE
+   * out-of-turn `deliver` seam, so the notice survives until the owner next
+   * opens the app rather than existing only for whoever is connected at that
+   * instant. When omitted the route is unmounted and such a caller has no path
+   * into the chat at all. Surface factory:
+   * `gateway/http/system-notice-surface.ts:createSystemNoticeSurface`.
+   */
+  app_system_notice_surface?: {
+    handler: (req: Request) => Promise<Response | null>
+  }
+  /**
    * Per-project credential CRUD (Settings tab, FOUNDATION). Owns
    * `/api/app/projects/<id>/credentials[/<service>]`. Dispatches the SAME
    * `ProjectCredentialStore` the resolver + per-turn awareness injection use.

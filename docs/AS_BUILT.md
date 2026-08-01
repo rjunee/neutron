@@ -2,6 +2,60 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+## 2026-07-31 — an authenticated caller outside the process can put a message in the owner's chat
+
+Branch `feat/system-notice-route`. `POST /api/app/system-notice`
+(`gateway/http/system-notice-surface.ts`, `appSystemNotice` slot in
+`route-slots.ts`, wired in `open/composer.ts`).
+
+**The gap was a missing seam, not a missing mechanism.** `gateway/http/deliver.ts`
+already calls itself "the ONE out-of-turn delivery seam" and already does the hard
+part — durable row first, best-effort live push routed by topic grammar. What it
+had was three callers, all of them inside this process:
+`substrate-notice-sink.ts:134`, `recovered-reply-store.ts:236`, and the
+reminder/brief/ritual wiring in `open/composer.ts`. Nothing exposed it over HTTP,
+so anything running outside the gateway could act on the owner's box but could not
+tell him it had. This route is that one missing entry point; it authenticates,
+validates, and calls `deliver`. No second delivery path was built.
+
+**`durability: 'inert'`, and the choice is the substance of the feature.** The
+transient `'none'` pill the substrate sink uses writes no row, so it exists only
+for whoever is connected at that instant. An out-of-band announcement is by
+definition the case where the owner is elsewhere — that is why something else had
+to speak — so a live-only bubble would be gone by the moment it was needed.
+`'inert'` persists an already-resolved agent history turn (speaker `__system__`),
+which is in the transcript when he next opens the app and never becomes the active
+prompt his next message attaches to.
+
+**It is the system talking, not the owner.** Routing this through
+`POST /api/app/chat/send` was rejected: that path persists a `role: 'user'` turn
+and dispatches an agent turn from it, which would both fabricate words the owner
+never said and spend a model turn to relay a sentence that needs no reasoning.
+
+**Auth reuses the instance-scoped bearer and adds nothing.** The same
+`AppWsAuthResolver` the rest of `/api/app/*` gates on. In production `jwks` mode
+that is RS256 against the identity service's published keys, unexpired, non-empty
+`sub`, and a `slug` claim constant-time-equal to this instance's — an
+account-scoped bearer with no `slug` is refused outright, which is what stops a
+token minted for one install from posting into another. No shared secret and no
+new token type were introduced. The tests run that real mode against a generated
+key pair and assert both halves of every rejection: 401 AND `deliver` never
+touched, because a 401 returned after the message was already posted is still a
+hole. Mutation-tested — deleting the `resolveBearer` branch turns six of the
+fifteen red.
+
+**Deliberately contentless.** The caller supplies the finished sentence. There is
+no `reason` enum and no event taxonomy: the route knows how to post a notice and
+nothing about what any particular deployment might want to announce. The topic is
+fixed at composition to the owner's bare `app:<owner>` topic, so a caller chooses
+words and nothing else.
+
+**Not verified:** no live end-to-end call against a running instance with a real
+identity-service bearer; the route is proven by the surface tests plus the
+composition characterization test that pins `app_system_notice_surface` into the
+real `composeOpen` output (the done-means-served proof that it is mounted, not
+merely written).
+
 ## 2026-07-31 — the tab-bar divider is now the usage meter
 
 Branch `feat/usage-meter`. Ryan: *"two very thin lines … the line that separates the

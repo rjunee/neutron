@@ -3944,6 +3944,55 @@ the existing per-platform durable store without forking the engine.
   can recall earlier turns mid-conversation. Server search is per-topic by
   design; cross-topic global search is the client store's job.
 
+## External system notice — `POST /api/app/system-notice` → the `deliver` seam
+
+`gateway/http/deliver.ts` is the ONE out-of-turn delivery seam: everything that
+posts to the owner OUTSIDE a request/response turn — fired reminders, the morning
+brief, idle nudges, ritual-approval prompts, the substrate notice bubbles — goes
+through `deliver(topic_id, envelope)`, which owns durable-row-first persistence
+and a best-effort live push routed by topic grammar. Every one of those producers
+is IN-PROCESS. Until this surface existed, **nothing could reach that seam from
+outside the process**, so a caller that knew something the owner needed to know
+had no way to say it: it could restart the box, but not explain why.
+
+`POST /api/app/system-notice` (`gateway/http/system-notice-surface.ts`, served via
+the `appSystemNotice` slot in `route-slots.ts`) is that one route. It adds a
+caller to the existing seam and builds no delivery mechanism of its own.
+
+- **Request.** `{"body": "<text>"}` with `Authorization: Bearer <token>`. The
+  body is the finished sentence and is delivered verbatim. Capped at the same
+  16 384 chars the chat transport enforces on a user message.
+- **Response.** `200 {ok, prompt_id, delivered_live}`. `delivered_live: false` is
+  still a success — it means no socket was open, which the durable row covers.
+  A durable-persist failure is a `503 delivery_failed`, never a 200 for a message
+  the owner will never see.
+- **Auth is the existing instance-scoped bearer, with nothing added.** The same
+  `AppWsAuthResolver` every other `/api/app/*` surface uses. In the production
+  `jwks` mode: RS256 against the identity service's published keys, unexpired, a
+  non-empty `sub`, and a `slug` claim constant-time-equal to THIS instance's slug
+  — an account-scoped bearer carrying no `slug` is refused outright. That slug
+  check is the authorization; a token minted for another install cannot post here.
+  The bar is higher than on a read surface because a caller who reaches this route
+  writes a durable line into the transcript that renders as the system speaking.
+- **Durability is `'inert'`, deliberately not `'none'`.** The substrate sink's
+  transient `'none'` pill writes no row, so a client not connected at that instant
+  never learns it happened — and an out-of-band announcement is precisely the case
+  where the owner is not watching. `'inert'` persists an already-resolved agent
+  history turn (`ButtonStore.persistInertAgentTurn`, speaker `__system__`), so the
+  notice is in the transcript when he next opens the app, and it never becomes the
+  active prompt his next message attaches to.
+- **It is a system message, not the owner speaking.** It does NOT route through
+  `POST /api/app/chat/send`, which would persist a `role: 'user'` turn and
+  dispatch an agent turn from it — fabricating words the owner never said and
+  spending a model turn to announce something that needs no reasoning.
+- **The topic is fixed at composition.** `open/composer.ts` hands the surface the
+  bare `app:<owner>` topic (the one the live client binds AND hydrates); the
+  caller supplies text and nothing else, so the route cannot be aimed anywhere but
+  the owner's own chat.
+- **It carries no vocabulary of its own.** There is no `reason` enum, no event
+  taxonomy, no per-source formatting. Whatever a given deployment wants to
+  announce is that deployment's concern, not the engine's.
+
 ## Delivery + read receipts (Track B Phase 4) — `@neutronai/chat-core` + app-ws
 
 The per-message delivery ladder — **`pending → sent → delivered → read`** —
