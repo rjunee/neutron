@@ -59,7 +59,7 @@ sitting there looking available.
 ### Verification
 
 **On a device.** A cloud Genymotion Pixel 9 (Android 14) — a clean instance, not the owner's
-phone and not the local emulator, never pointed at a production tenant. An EAS development
+phone and not the local emulator, never pointed at any production instance. An EAS development
 client running THIS branch's JS from Metro, writing to a throwaway local Open instance over
 `adb reverse`. Tapping the real controls, in order: the mic prompted for microphone access
 (`RECORD_AUDIO` went `granted=false` → `granted=true`); the recording row appeared with a live
