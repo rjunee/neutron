@@ -815,6 +815,12 @@ export function buildOpenGraphComposer(
     // React/Expo client binds + hydrates (the legacy `web:` registry reaches NO
     // client; see the reminder/brief delivery note below). Skipped LLM-less (no
     // conversational REPL).
+    //
+    // SECOND CONSUMER — the skill-forge proposal notifier (below) reads this same
+    // holder. It is NOT llmPool-gated the way the notice sinks are (skill-forge is
+    // built unconditionally), which is fine: the holder itself is populated
+    // unconditionally, and an LLM-less box never produces a proposal anyway
+    // because the auto-propose trigger hangs off the Trident terminal hook.
     const noticeDeliverHolder: { deliver?: Deliver } = {}
     // O6 — the recovered-reply sink/drain need the REAL (async) app-ws delivery
     // result, not the fire-and-forget bridge's unconditional `true`. Bound after
@@ -996,10 +1002,59 @@ export function buildOpenGraphComposer(
     // itself only advances when `tridentDispatch !== null` (i.e. llmPool exists),
     // so an LLM-less box simply never produces a proposal.
     //
-    // Notifier mirrors agent-dispatch's report sink (Open is WS-native +
-    // single-owner, no Telegram channel): it logs the proposal. The proposal is
-    // PERSISTED regardless of delivery (the store row is the source of truth),
-    // so `/skills list` surfaces it even if the notify is a no-op log.
+    // NOTIFIER — THE PROPOSAL IS DELIVERED, NOT JUST LOGGED.
+    //
+    // This notifier's body used to be a lone `log.info('skill_forge_proposal')`,
+    // justified by a comment reading "Open is WS-native + single-owner, no
+    // Telegram channel … so `/skills list` surfaces it even if the notify is a
+    // no-op log." That premise WAS true and is now FALSE, which is the whole
+    // reason this changed. Open has had one canonical out-of-turn delivery seam
+    // since F5 — `deliver(topic_id, envelope)` (`gateway/http/deliver.ts`, "the
+    // ONE out-of-turn delivery seam") — already carrying fired reminders, the
+    // morning brief, the substrate notice bubbles, the recovered-reply store and
+    // the external `/api/app/system-notice` route. There was a channel; the
+    // notifier just wasn't on it.
+    //
+    // The consequence of the log-only sink was that the system watched the owner
+    // work, noticed a repeated pattern, drafted an offer, persisted it — and told
+    // nobody. The only way to see a proposal was to type `/skills`, i.e. to
+    // already suspect one existed. An offer nobody is told about is not an offer.
+    //
+    // WHY `durability: 'inert'` AND NOT `'none'`. A proposal is produced by the
+    // Trident terminal hook — it fires when a run FINISHES, which is precisely
+    // when the owner is not watching (that is what made the run worth automating).
+    // `'none'` is the transient live-only pill the substrate notice sink uses
+    // (`gateway/http/substrate-notice-sink.ts`): it writes no row, so a client
+    // that isn't connected at that instant never learns the notice happened — the
+    // bubble would be gone by the time he opened the app, the one moment it needed
+    // to exist. `'inert'` persists an already-resolved agent history turn, so the
+    // proposal is in the transcript whenever he next hydrates, and it never
+    // becomes the topic's active prompt that his next message attaches to. Same
+    // reasoning, same durability, as the system-notice route.
+    //
+    // NOT `'reply'` + options: this is the system telling him something, not the
+    // owner speaking and not an agent turn. The decision surface already exists
+    // (`/skills approve|decline <id>` + the `skill_forge_*` MCP tools over ONE
+    // `SkillForgeBackend`) and the message quotes it, so there is nothing to
+    // rebuild here.
+    //
+    // ONE MESSAGE PER PROPOSAL, AND A RUN YIELDS AT MOST ONE. No batching is
+    // needed and no burst is possible: `SkillForge.onWorkflowCompleted` audits a
+    // single completed workflow and creates AT MOST ONE proposal (`skill-forge/
+    // forge.ts`), and it returns early when `getActiveBySignature` already has a
+    // live proposal for that workflow signature — so a repeated workflow re-notifies
+    // zero times, not once per run.
+    //
+    // DELIVERY IS ADDITIVE — THE STORE ROW REMAINS THE SOURCE OF TRUTH. The
+    // proposal is persisted BEFORE `notify` is called, and `forge.ts` wraps the
+    // notify in try/catch (`proposal_persisted_but_notify_failed`), so a delivery
+    // failure can never cost the proposal. `/skills list` keeps working exactly as
+    // it did. The `log.info` is KEPT alongside the delivery for operators.
+    //
+    // The deliver seam is constructed far below (it needs the landing stack), so
+    // this reads it through the SAME lazy `noticeDeliverHolder` the substrate
+    // notice sinks use — populated unconditionally once `deliver` exists, and
+    // dereferenced only when a proposal actually fires, long after boot.
     const skillForgeStore = new SkillForgeProposalsStore({ db })
     const skillForge = new SkillForge({
       store: skillForgeStore,
@@ -1009,6 +1064,25 @@ export function buildOpenGraphComposer(
             id: proposal.id,
             proposed_name: proposal.proposed_name,
             message,
+          })
+          const deliverNow = noticeDeliverHolder.deliver
+          if (deliverNow === undefined) {
+            // Only reachable if a proposal somehow fires before the seam exists
+            // (composition-time). The row is already persisted; `/skills` has it.
+            log.warn('skill_forge_proposal_undelivered', {
+              id: proposal.id,
+              reason: 'deliver_seam_not_ready',
+            })
+            return
+          }
+          const result = await deliverNow(ownerNoticeTopic, {
+            body: message,
+            durability: 'inert',
+          })
+          log.info('skill_forge_proposal_delivered', {
+            id: proposal.id,
+            persisted: result.persisted,
+            delivered_live: result.delivered_live,
           })
         },
       },
@@ -2036,7 +2110,9 @@ export function buildOpenGraphComposer(
     // size / rate-limit system bubble lands on the owner's live `app:<owner>`
     // socket + durable-skips as a transient pill (durability 'none'), exactly like
     // the cold-start ack. Runs long after boot wired the substrate; the holder
-    // deref only happens when a notice actually fires.
+    // deref only happens when a notice actually fires. The skill-forge proposal
+    // notifier resolves the same holder (durability 'inert' — a proposal must
+    // survive until he opens the app, unlike a transient notice pill).
     noticeDeliverHolder.deliver = deliver
     // Resolve every fired reminder/brief to the app-ws topic the client binds:
     // the owner's BARE `app:<user>`.
