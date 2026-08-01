@@ -341,12 +341,18 @@ export function VoiceNoteBubble({
     return () => clearTimeout(timer);
   }, [failed, source, status.isLoaded, has_length, playing]);
 
-  // Finished: give the speaker back and rewind, so the next tap replays from
-  // the top rather than sitting dead at the end.
+  // Finished: stop, give the speaker back, and rewind, so the next tap replays
+  // from the top rather than sitting dead at the end.
+  //
+  // PAUSE BEFORE SEEKING. `didJustFinish` does not leave the player paused — it
+  // is still in a playing state, so seeking to 0 on its own hands it a fresh
+  // position to play FROM and the clip loops forever. That shipped, and the
+  // owner reported it within the hour.
   useEffect(() => {
     if (!status.didJustFinish) return;
     releaseVoicePlayback(handle);
     try {
+      player.pause();
       void player.seekTo(0)?.catch?.(() => undefined);
     } catch {
       // A player released between the status event and this effect.
