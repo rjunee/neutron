@@ -170,6 +170,10 @@ const CLI_ENTRYPOINTS = new Set([
   'open/server.ts', // `import.meta.main` boot shell — the console.info block IS a user-facing boot banner.
   'migrations/runner.ts',
   'migrations/regen-snapshot.ts',
+  // `neutron memory-restore` — its stdout IS the product (the owner-facing list
+  // of merged-away memory pages + the restore result). Structured log lines
+  // would make the undo path unreadable to the person using it.
+  'scribe/reflect/memory-restore-cli.ts',
 ])
 
 // TEMPORARY O2 baseline — product files whose console.* sweep was deferred past

@@ -14,6 +14,9 @@
 #   neutron backup           run one data-backup pass now
 #   neutron doctor           verify GBrain memory works (binary + round-trip)
 #   neutron doctor --upgrade re-install latest GBrain if upstream advanced, then verify
+#   neutron memory-restore   list memory pages the consolidation pass merged away
+#   neutron memory-restore <slug> [--force]
+#                            put one of those pages back, exactly as it was
 #   neutron url              print the local chat URL
 #
 # The CLI resolves the checkout it belongs to from its own location (it lives at
@@ -45,6 +48,7 @@ SERVICE="$CODE_DIR/neutron-service.sh"
 BACKUP="$CODE_DIR/neutron-backup.sh"
 DOCTOR="$CODE_DIR/gbrain-memory/gbrain-doctor.ts"
 DIAGNOSTICS="$CODE_DIR/open/diagnostics-cli.ts"
+MEMORY_RESTORE="$CODE_DIR/scribe/reflect/memory-restore-cli.ts"
 
 NEUTRON_SERVICE_CODE_DIR=$CODE_DIR
 export NEUTRON_SERVICE_CODE_DIR
@@ -127,13 +131,25 @@ case "$cmd" in
     # --upgrade path: re-install + verify only (no diagnostics dump).
     # shellcheck disable=SC2086
     exec "$_bun" run "$DOCTOR" "$_sub" $_rest ;;
+  memory-restore)
+    # Undo a wrong auto-merge. The consolidation pass fuses near-duplicate memory
+    # pages and removes the loser — but archives its exact bytes first, so the
+    # removal is reversible.
+    #   neutron memory-restore                 list every page merged away
+    #   neutron memory-restore <slug>          put that page back
+    #   neutron memory-restore <slug> --force  put it back over a live page
+    shift
+    [ -f "$MEMORY_RESTORE" ] || { printf 'neutron: memory-restore helper missing at %s\n' "$MEMORY_RESTORE" >&2; exit 1; }
+    _bun=${BUN_BIN:-$(command -v bun 2>/dev/null || true)}
+    [ -n "$_bun" ] || { printf 'neutron: bun not found — cannot run memory-restore (set BUN_BIN or install bun)\n' >&2; exit 1; }
+    exec "$_bun" run "$MEMORY_RESTORE" "$@" ;;
   url)
     printf 'http://127.0.0.1:%s/chat\n' "$(_port)" ;;
   ""|--help|-h)
     if [ "$_B" != "" ]; then
       printf '%s⚛ neutron%s  %sthe single-owner Open control CLI%s\n' "$_B" "$_R" "$_M" "$_R"
     fi
-    printf 'usage: neutron {start|stop|restart|status|logs|backup|doctor|url}\n' ;;
+    printf 'usage: neutron {start|stop|restart|status|logs|backup|doctor|memory-restore|url}\n' ;;
   *)
     printf 'neutron: unknown command: %s (try --help)\n' "$cmd" >&2; exit 1 ;;
 esac

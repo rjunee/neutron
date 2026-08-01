@@ -52,6 +52,11 @@ import { createLogger } from '@neutronai/logger'
 import { slugify } from '../write-to-gbrain.ts'
 import { extractTypedLinks } from '@neutronai/runtime/auto-link.ts'
 import { deleteEntity as realDeleteEntity, type SyncHook } from '@neutronai/runtime/entity-writer.ts'
+import {
+  archiveMergedPage as realArchiveMergedPage,
+  pruneMergeArchive,
+  type ReflectArchivePage,
+} from './merge-archive.ts'
 
 /**
  * Atomic entity-page delete surface (RB3). Shares the entity-writer's per-key
@@ -174,6 +179,19 @@ export interface ReflectPassDeps {
    * counted as merged).
    */
   deleteEntity?: ReflectDeleteEntity
+  /**
+   * Merge-loser ARCHIVE seam. Defaults to
+   * `./merge-archive.ts:archiveMergedPage`, which copies the loser's exact bytes
+   * to `<ownerDataDir>/memory-archive/` and records the merge in the ledger
+   * BEFORE the delete. A THROW here BLOCKS the delete (the loser is retained) —
+   * no page is ever removed without a recoverable copy. Injected in tests.
+   */
+  archivePage?: ReflectArchivePage
+  /**
+   * Retention horizon for archived merge losers (ms). Defaults to
+   * `MERGE_ARCHIVE_RETENTION_MS` (90 days). Injected in tests to drive pruning.
+   */
+  mergeArchiveRetentionMs?: number
   /** Clock injection for determinism. Defaults to `Date.now`. */
   now?: () => number
   /** Failure sink. Defaults to a structured warn. */
@@ -203,6 +221,14 @@ export interface ReflectReport {
   scanned: number
   /** Near-duplicate pages merged AWAY (losers deleted). */
   merged: number
+  /**
+   * Merged-away losers whose byte-exact copy was written to
+   * `<ownerDataDir>/memory-archive/` before the delete. Equals `merged` on a
+   * healthy pass — every deleted loser is archived first, and a loser whose
+   * archive FAILED is retained rather than deleted, so `merged` can never exceed
+   * this. Observable so "is my undo actually being written?" is answerable.
+   */
+  archived: number
   /**
    * Candidate clusters HELD by the §7.2 merge-safety gate (`isMergeSafeCluster`)
    * — reached the Jaccard bar but were NOT fused because the similarity was
@@ -282,6 +308,7 @@ export async function runReflectPass(deps: ReflectPassDeps): Promise<ReflectRepo
   const report: ReflectReport = {
     scanned: 0,
     merged: 0,
+    archived: 0,
     held: 0,
     resynthesized: 0,
     reservedWritten: 0,
@@ -314,6 +341,21 @@ export async function runReflectPass(deps: ReflectPassDeps): Promise<ReflectRepo
   // ── Step 1 — DEDUP (deterministic, no LLM). Do it FIRST so re-synthesis + the
   //    reserved digest see the collapsed set.
   const survivors = await dedupPages(pages, deps, report, logFailure)
+
+  // ── Retention: the merge archive is a FIXED-HORIZON undo, not a second copy of
+  //    the corpus. Drop archived losers past the horizon so the safety net can't
+  //    grow without bound alongside the memory it protects. Best-effort.
+  try {
+    await pruneMergeArchive({
+      ownerDataDir: deps.ownerDataDir,
+      now: now(),
+      ...(deps.mergeArchiveRetentionMs !== undefined
+        ? { retentionMs: deps.mergeArchiveRetentionMs }
+        : {}),
+    })
+  } catch (err) {
+    logFailure('reflect: merge-archive prune failed', err)
+  }
 
   // ── Step 2 — RE-SYNTHESIZE compiled-truth from timelines (LLM, edge-guarded).
   if (deps.substrate !== undefined) {
@@ -677,6 +719,7 @@ async function dedupPages(
         // consolidation that left both files on disk (a later pass retries it).
         for (const r of merged.retained) survivors.push(r)
         report.merged += merged.deleted
+        report.archived += merged.archived
       } catch (err) {
         // Merge failed — keep every member as its own survivor (no data lost).
         logFailure('reflect: merge failed', err)
@@ -701,7 +744,7 @@ async function mergeCluster(
   members: LoadedPage[],
   deps: ReflectPassDeps,
   logFailure: (msg: string, err: unknown) => void,
-): Promise<{ survivor: LoadedPage; retained: LoadedPage[]; deleted: number } | null> {
+): Promise<{ survivor: LoadedPage; retained: LoadedPage[]; deleted: number; archived: number } | null> {
   // EARLY ABORT (optimization): if any member changed on disk since the snapshot,
   // skip the whole cluster now — a later pass re-clusters the fresh content. Not
   // the safety mechanism (that is the atomic precondition on the survivor write +
@@ -710,6 +753,8 @@ async function mergeCluster(
   for (const m of members) {
     if ((await reloadRawBody(deps.ownerDataDir, m.kind, m.slug)) !== m.raw) return null
   }
+  // Injected clock (deterministic archive stamps under test).
+  const nowMs = (deps.now ?? ((): number => Date.now()))()
   const ranked = [...members].sort((a, b) => {
     if (b.timeline.length !== a.timeline.length) return b.timeline.length - a.timeline.length
     if (b.compiledTruth.length !== a.compiledTruth.length) {
@@ -786,9 +831,46 @@ async function mergeCluster(
   // (its content is durably in the survivor, so no loss; a later pass reconciles).
   // Only a confirmed delete counts + fans the best-effort brain-mirror removal.
   const deleteEntityFn = deps.deleteEntity ?? realDeleteEntity
+  const archivePageFn = deps.archivePage ?? realArchiveMergedPage
   const retained: LoadedPage[] = []
   let deleted = 0
+  let archived = 0
   for (const l of losers) {
+    // ARCHIVE BEFORE DELETE — the undo. Jaccard similarity is a HEURISTIC, so
+    // this merge may be wrong, and the loser may well have been the BETTER page.
+    // Nothing downstream assumes the survivor was chosen correctly: the loser's
+    // exact bytes are copied to `<ownerDataDir>/memory-archive/` and the merge is
+    // recorded in the ledger BEFORE the unlink, so `neutron memory-restore` can
+    // put the page back exactly as it was.
+    //
+    // A FAILED archive BLOCKS the delete: the loser is RETAINED (both pages stay
+    // on disk, not counted as merged, a later pass retries) rather than removed
+    // irreversibly. "Couldn't write the backup" must never degrade into
+    // "deleted it anyway".
+    let archivePath: string
+    try {
+      archivePath = (
+        await archivePageFn({
+          ownerDataDir: deps.ownerDataDir,
+          kind: l.kind,
+          slug: l.slug,
+          raw: l.raw,
+          mergedIntoKind: survivor.kind,
+          mergedIntoSlug: survivor.slug,
+          now: nowMs,
+        })
+      ).path
+    } catch (err) {
+      logFailure(
+        `reflect: merge archive FAILED for ${l.kind}/${l.slug} — page KEPT (not merged away); ` +
+          `a loser is never deleted without a recoverable copy`,
+        err,
+      )
+      retained.push(l)
+      continue
+    }
+    archived += 1
+
     let removed = false
     try {
       const del = await deleteEntityFn({
@@ -806,6 +888,16 @@ async function mergeCluster(
       continue
     }
     deleted += 1
+    // The merge is otherwise INVISIBLE (the pass's report is not surfaced
+    // anywhere the owner reads). Log the one line that makes a bad merge both
+    // noticeable and undoable, and name the copy — the moment he wants a page
+    // back is the moment he notices it went missing.
+    log.info('reflect: merged away a near-duplicate page (recoverable)', {
+      removed: `${l.kind}/${l.slug}`,
+      merged_into: `${survivor.kind}/${survivor.slug}`,
+      archived_to: archivePath,
+      restore_with: `neutron memory-restore ${l.slug}`,
+    })
     if (deps.deletePage !== undefined) {
       // KIND-QUALIFY the GBrain page deletion. GBrain keys pages by slug ALONE
       // (kind-blind), so a bare-slug `delete_page(loserSlug)` could EVICT a live
@@ -852,6 +944,7 @@ async function mergeCluster(
     },
     retained,
     deleted,
+    archived,
   }
 }
 

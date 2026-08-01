@@ -3935,10 +3935,19 @@ optional operator `GBRAIN_SOURCE` / `GBRAIN_BRAIN_ID`.
 
     A held cluster is a deliberate MISSED merge (the always-safe direction — never
     an irreversible false fusion); the loud log lets the owner hand-merge a genuine
-    duplicate the gate was conservative on. Merge-loser quarantine under
-    `entities/.quarantine/` is not implemented and is no longer an arming blocker —
-    the gate prevents the false identity-fusion outright, and genuine near-duplicate
-    losers are absorbed into the survivor before deletion (no content loss).
+    duplicate the gate was conservative on.
+  - **The merge is REVERSIBLE — merged-away losers are archived, never hard-deleted**
+    (`scribe/reflect/merge-archive.ts`). The gate above prevents the *identity*
+    fusion, but Jaccard is still a heuristic and any merge it does allow may be
+    wrong — so no loser is unlinked until its EXACT bytes are copied to
+    `<ownerDataDir>/memory-archive/<kind-dir>/<slug>.<stamp>.md` and the merge is
+    recorded in `<ownerDataDir>/memory-archive/merges.jsonl` (when, which page,
+    which survivor absorbed it). **A failed archive BLOCKS the delete**: the loser
+    is retained, not counted as merged, and a later pass retries — "couldn't write
+    the backup" never degrades into "deleted it anyway". `report.archived` makes
+    that observable, and every merge now emits an owner-readable log line naming
+    the archive path + the restore command (previously a successful merge was
+    logged nowhere at all). Details in § Memory archive below.
   - **Supersede is keyed on the graph TRIPLE, not sentence shape**
     (`stripSupersededSentences`, `scribe/write-to-gbrain.ts`). A superseded
     relation's sentence is retired whenever it asserts exactly one graph relation
@@ -3995,6 +4004,51 @@ optional operator `GBRAIN_SOURCE` / `GBRAIN_BRAIN_ID`.
     message. The bundled slot it occupied is `kaizen` — which reads the same
     corrections log and diary, weekly, and produces an ACTION rather than a status
     line. See the Ritual executor section.
+
+## Memory archive — undoing a wrong auto-merge (`scribe/reflect/merge-archive.ts`)
+
+The reflect pass's dedup step is the only thing in Neutron that DELETES an
+owner memory page, and it decides what to delete from a similarity heuristic.
+The archive makes that decision reversible.
+
+- **Layout.** `<ownerDataDir>/memory-archive/` — a sibling of `entities/`,
+  `diary/` and `corrections/`, deliberately OUTSIDE the tree the reflect pass and
+  `runtime/memory-index.ts` enumerate. An archived page is INERT: never scanned,
+  never re-merged, never surfaced as live memory until it is restored.
+  - `<kind-dir>/<slug>.<stamp>.md` — the loser's raw body, BYTE-EXACT. No injected
+    frontmatter, no header, no reformatting; restoring reproduces the deleted page
+    exactly. All merge context lives in the ledger, never in the copy.
+  - `merges.jsonl` — append-only, one JSON row per merge: `archived_at`, `kind`,
+    `slug`, `merged_into`, `merged_into_kind`, `file`, `bytes`. Malformed lines
+    are skipped, so a torn tail never makes the archive unreadable.
+  - `README.md` — written on first use: plain-English restore instructions for
+    someone who just opens the folder.
+- **Archive BEFORE delete, and a failed archive BLOCKS the delete.** In
+  `mergeCluster` the copy is written first; if it throws, the loser is RETAINED
+  (both pages stay on disk, `report.merged` does not count it, a later pass
+  retries). There is no path that removes a page without a recoverable copy.
+- **Content-idempotent.** Re-archiving bytes already stored for a (kind, slug)
+  reuses the existing file and writes no new ledger row — so a loser whose delete
+  keeps conflicting (re-archived every 6h) cannot accrete copies.
+- **Recovery — `neutron memory-restore`** (`scribe/reflect/memory-restore-cli.ts`,
+  dispatched from `bin/neutron`). No argument lists every page merged away and
+  what absorbed it; `neutron memory-restore <slug>` writes it back to
+  `entities/<kind>/<slug>.md` byte-for-byte. It REFUSES to clobber a live page
+  unless `--force` — recovering a bad merge must never be able to destroy a good
+  page. After a restore the survivor still carries the folded copy under a
+  `## Merged` heading; that section has to be deleted from the survivor or the
+  next pass re-merges the pair (the CLI says so).
+- **Retention — 90 days** (`MERGE_ARCHIVE_RETENTION_MS`). `pruneMergeArchive`
+  runs once per reflect pass: copies past the horizon are unlinked and their
+  ledger rows compacted away. The archive is a fixed-horizon undo, not a second
+  permanent copy of the corpus — unbounded retention would silently double a
+  growing memory corpus on disk and in every backup.
+- **Discoverability.** A successful merge previously logged NOTHING (the pass's
+  report is a return value nobody reads — `open/wiring/memory.ts` discards it).
+  It now emits one `scribe` log line per merged-away page naming the removed
+  page, the survivor, the archive path and `neutron memory-restore <slug>`, so
+  the moment the owner notices a page missing, the log (`neutron logs`) tells him
+  how to get it back.
 
 ## Credential management — onboarding OPTIONAL keys (WAVE 1) — `onboarding/optional-keys.ts`
 
