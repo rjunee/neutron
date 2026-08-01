@@ -190,3 +190,47 @@ export function sanitizeCoreTabUrl(raw: unknown): string | null {
   if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return null
   return trimmed
 }
+
+/**
+ * The `app_route` view keys this client implements, keyed by the TERMINAL
+ * segment of the descriptor's route path (`/projects/p1/tasks` → `tasks`).
+ *
+ * An `app_route` tab is a Core-contributed screen that lives IN the client, so
+ * the engine cannot know whether a given client ships it — web has no Apps
+ * launcher, and a future Core may target only mobile. This set is the web's
+ * half of the renderability rule (see `TabMountKind`).
+ */
+const APP_ROUTE_VIEWS: ReadonlySet<string> = new Set(['tasks'])
+
+/** The `builtin` view targets this client renders (see `TabContent`). */
+const BUILTIN_VIEWS: ReadonlySet<string> = new Set([
+  'chat',
+  'docs',
+  'workboard',
+  'admin',
+  'settings',
+])
+
+/** The terminal path segment of an `app_route` target, ignoring any query. */
+export function appRouteView(target: string): string {
+  const bare = target.split('?')[0] ?? ''
+  const parts = bare.split('/').filter((p) => p.length > 0)
+  return parts[parts.length - 1] ?? ''
+}
+
+/**
+ * True when this client can actually render the descriptor's body. Webview tabs
+ * always qualify (any http(s) URL can be framed); `builtin` and `app_route`
+ * tabs must name a view this bundle ships.
+ *
+ * Filtering here rather than rendering a placeholder is deliberate: the engine
+ * serves ONE tab set to both clients, and a tab that opens onto an empty pane
+ * is worse for the owner than a tab that isn't offered.
+ */
+export function canRenderTab(descriptor: TabDescriptor): boolean {
+  if (descriptor.mount.kind === 'webview') return true
+  if (descriptor.mount.kind === 'app_route') {
+    return APP_ROUTE_VIEWS.has(appRouteView(descriptor.mount.target))
+  }
+  return BUILTIN_VIEWS.has(descriptor.mount.target)
+}

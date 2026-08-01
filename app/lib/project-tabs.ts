@@ -100,15 +100,60 @@ export function resolveTabRoute(descriptor: TabDescriptor, project_id: string): 
     });
     return `${base}/${CORE_ROUTE_SEGMENT}/${encodeURIComponent(slug)}?${params.toString()}`;
   }
+  // `app_route` — a Core-contributed screen that lives IN this client. The
+  // engine already substituted `<project_id>` on the project-scope endpoint, so
+  // the target is a complete expo-router path and is used verbatim. (The
+  // launcher's tap handler resolves the same manifest path the same way.)
+  if (descriptor.mount.kind === 'app_route') {
+    return descriptor.mount.target;
+  }
   return `${base}/${descriptor.mount.target}`;
 }
 
-/** Map an ordered descriptor list to the shell's `ResolvedTab[]`. */
+/**
+ * The route leaves this client actually implements under `app/app/projects/[id]/`.
+ * Used to enforce the renderability rule (see `TabMountKind`): the engine
+ * resolves one tab set for every client, so a descriptor naming a screen this
+ * app does not ship must be DROPPED rather than rendered as a dead tab that
+ * navigates to a "route not found" page.
+ */
+const RENDERABLE_ROUTE_LEAVES: ReadonlySet<string> = new Set([
+  'chat',
+  'workboard',
+  'docs',
+  'settings',
+  'launcher',
+  'tasks',
+  'reminders',
+]);
+
+/** The trailing path segment of a route path, ignoring any query string. */
+function pathLeaf(path: string): string {
+  const bare = path.split('?')[0] ?? '';
+  const parts = bare.split('/').filter((p) => p.length > 0);
+  return parts[parts.length - 1] ?? '';
+}
+
+/**
+ * True when this client can actually render the descriptor's body. Webview
+ * tabs always qualify (the generic `cores/[slug]` route frames any URL);
+ * `builtin` and `app_route` tabs must name a screen this app ships.
+ */
+export function canRenderTab(descriptor: TabDescriptor): boolean {
+  if (descriptor.mount.kind === 'webview') return true;
+  if (descriptor.mount.kind === 'app_route') {
+    return RENDERABLE_ROUTE_LEAVES.has(pathLeaf(descriptor.mount.target));
+  }
+  return RENDERABLE_ROUTE_LEAVES.has(descriptor.mount.target);
+}
+
+/** Map an ordered descriptor list to the shell's `ResolvedTab[]`, dropping any
+ *  tab whose screen this client doesn't implement. */
 export function descriptorsToResolvedTabs(
   descriptors: readonly TabDescriptor[],
   project_id: string,
 ): ResolvedTab[] {
-  return descriptors.map((d) => ({
+  return descriptors.filter(canRenderTab).map((d) => ({
     key: d.key,
     label: d.label,
     route: resolveTabRoute(d, project_id),

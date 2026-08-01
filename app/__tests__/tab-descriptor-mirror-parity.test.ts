@@ -165,8 +165,8 @@ describe('component union literals agree across all three declarations', () => {
     }
   })
 
-  test('TabMountKind: builtin | webview', () => {
-    const values: readonly EngineTabMountKind[] = ['builtin', 'webview']
+  test('TabMountKind: builtin | webview | app_route', () => {
+    const values: readonly EngineTabMountKind[] = ['builtin', 'webview', 'app_route']
     for (const v of values) {
       const asApp: AppTabMountKind = v
       const asWeb: WebTabMountKind = v

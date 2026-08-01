@@ -275,6 +275,8 @@ import type { AppWsAuthResolver } from '@neutronai/channels/adapters/app-ws/auth
 import { DocStore } from '@neutronai/gateway/http/doc-store.ts'
 import { createAppDocsSurface } from '@neutronai/gateway/http/app-docs-surface.ts'
 import { createAppTabsSurface } from '@neutronai/gateway/http/app-tabs-surface.ts'
+import { CoreInstallationsStore } from '@neutronai/cores-runtime/installations-store.ts'
+import type { CoresModuleState } from '@neutronai/gateway/cores/composer-state.ts'
 import { createAppProjectsSurface } from '@neutronai/gateway/http/app-projects-surface.ts'
 import { SqliteProjectSettingsStore } from '@neutronai/gateway/projects/sqlite-store.ts'
 import { resolveProjectEmoji } from '@neutronai/contracts/default-emoji.ts'
@@ -2391,15 +2393,31 @@ export function buildOpenGraphComposer(
       project_slug,
     })
 
+    // Late-bound Cores registry. Assigned ONCE by the `on_cores_ready` hook
+    // that `wireCoresSurfaces` fires after `graph.compose()`; read per-request
+    // by the tabs surface below.
+    let coresState: CoresModuleState | null = null
+
     // P1b — app TABS resolver (`/api/app/projects/<id>/tabs` + `/api/app/tabs`).
     // The React `ProjectShell` fetches this BEFORE rendering non-chat tabs; when
     // it 404s the shell falls back to a Chat-only view and the Documents/Tasks
     // tabs stay HIDDEN even though `/docs/*` is mounted (Codex r1 [P2]). A
     // builtin-only surface (auth only) returns the per-project Chat/Documents/
     // Tasks + global Admin descriptors from `tabs/registry.ts`, so the Documents
-    // tab actually renders. (Core-contributed project tabs would need
-    // cores+installations; the builtins cover the parity gate.)
-    const appTabsSurface = createAppTabsSurface({ auth: appOwnerAuth })
+    // tab actually renders.
+    //
+    // Core-contributed tabs need `cores` + `installations`. The installations
+    // store is constructible now; the Cores REGISTRY is not — it only exists
+    // after `graph.compose()`, which runs far below this line. So the surface
+    // takes a GETTER over a ref that `on_cores_ready` fills in post-compose
+    // (see the composition input below). Reading `coresState` here instead
+    // would latch `null` forever, which is exactly why every Core tab resolved
+    // to `[]` and Tasks was unreachable from either client.
+    const appTabsSurface = createAppTabsSurface({
+      auth: appOwnerAuth,
+      cores: () => coresState,
+      installations: new CoreInstallationsStore({ db }),
+    })
 
     // P1b — Tasks tab backend (`/api/app/projects/<id>/tasks*`) + chat upload
     // surface (`/api/app/upload`), the remaining app-API endpoints the React UI
@@ -4416,6 +4434,13 @@ export function buildOpenGraphComposer(
         // (API-key collection). Without it the surface was never mounted in Open
         // → the admin/integrations routes 404'd. Single-owner localhost trust.
         auth: appOwnerAuth,
+      },
+      // Hand the composed Cores registry back up to the tab resolver built
+      // above. This is the only moment the registry exists AND the surface is
+      // still upstream of any request, so it is the seam that makes
+      // Core-contributed tabs (Tasks) resolvable at all.
+      on_cores_ready: (state) => {
+        coresState = state
       },
       // Doc-search agent tools (doc_search / doc_read) — registered by the
       // `tools` module when a runtime is present. Omitted if the index

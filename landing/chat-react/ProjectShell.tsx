@@ -69,9 +69,12 @@ import {
   CHAT_TAB,
   GENERAL_WORK_TAB,
   WebTabsClient,
+  appRouteView,
+  canRenderTab,
   sanitizeCoreTabUrl,
   type TabDescriptor,
 } from './tabs-client.ts'
+import { TasksTab } from './TasksTab.tsx'
 
 type FetchImpl = (input: string, init?: RequestInit) => Promise<Response>
 
@@ -226,6 +229,25 @@ function TabContent({
         sandbox="allow-scripts allow-forms allow-same-origin allow-popups"
       />
     )
+  }
+  // `app_route` — a Core-contributed screen that lives IN this client. The
+  // descriptor carries a route PATH (`/projects/<id>/tasks`); web has no router
+  // inside the shell, so the terminal segment selects the React view. Anything
+  // unrecognised was already filtered out by `canRenderTab`, so there is no
+  // placeholder branch to fall into here.
+  if (tab.mount.kind === 'app_route') {
+    if (appRouteView(tab.mount.target) === 'tasks') {
+      return (
+        <PaneErrorBoundary label="Tasks">
+          <TasksTab
+            projectId={projectId}
+            config={config}
+            {...(fetchImpl !== undefined ? { fetchImpl } : {})}
+          />
+        </PaneErrorBoundary>
+      )
+    }
+    return <TabPlaceholder label={tab.label} />
   }
   // Builtin Documents — the Obsidian-replacement read+comment surface (PR-5).
   if (tab.mount.target === 'docs') {
@@ -450,7 +472,7 @@ export function ProjectShell({
           // The engine's global set is Admin-only, so General had no `workboard`
           // descriptor and thus no Work view (the gap this closes). Mirrors the
           // mobile shell's `ensureWorkTab` injection — one code path, no branch.
-          setTabs([CHAT_TAB, GENERAL_WORK_TAB, ...globalTabs])
+          setTabs([CHAT_TAB, GENERAL_WORK_TAB, ...globalTabs.filter(canRenderTab)])
           setTabsScope('')
         })
         .catch(() => {
@@ -466,8 +488,12 @@ export function ProjectShell({
     void client
       .listProjectTabs(scope)
       .then((projectTabs) => {
+        // Drop tabs this client has no view for (the renderability rule) BEFORE
+        // they reach the bar — e.g. the Apps launcher, which is a real mobile
+        // screen and has no web equivalent.
+        const renderable = projectTabs.filter(canRenderTab)
         if (cancelled) return
-        setTabs(projectTabs.length > 0 ? projectTabs : [CHAT_TAB])
+        setTabs(renderable.length > 0 ? renderable : [CHAT_TAB])
         setTabsScope(scope)
       })
       .catch(() => {
