@@ -42,6 +42,12 @@
       "expo-notifications",
       "expo-web-browser",
       [
+        "expo-audio",
+        {
+          "microphonePermission": "Neutron uses the microphone to record the voice messages you send in chat."
+        }
+      ],
+      [
         "expo-build-properties",
         {
           "android": {
@@ -62,7 +68,7 @@
     },
     "owner": "ryan-junee",
     "runtimeVersion": {
-      "policy": "appVersion"
+      "policy": "fingerprint"
     },
     "updates": {
       "url": "https://u.expo.dev/249b0dcd-0e8d-4918-824d-355dac5f548f"

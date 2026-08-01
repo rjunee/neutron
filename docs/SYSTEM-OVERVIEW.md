@@ -616,6 +616,36 @@ first-run surface.
   selected by each profile's `"environment"` in `app/eas.json` — never
   literals in the repo. See `app/README.md` § "Build-time server URL".
 
+## OTA updates vs real builds — the runtime-version boundary (`app/app.json`)
+
+An `expo-updates` bundle may only be handed to an installed app whose **native**
+side can actually run it. `runtimeVersion` is the token that encodes that
+compatibility, and its POLICY decides whether the encoding is honest.
+
+This project uses **`{"policy": "fingerprint"}`**. Expo hashes the native
+project — installed native modules, config plugins, native config — so any
+change to the native side yields a different runtime version automatically, and
+an older build simply stops being offered bundles it could not execute.
+
+It previously used `{"policy": "appVersion"}`, which derives the runtime version
+from `expo.version` alone. That is a **silent footgun**: adding a native module
+does not change the app version, so the new JS bundle keeps the OLD runtime
+version and `expo-updates` judges it compatible with builds that do not contain
+the module. The update ships, the import resolves to nothing, and the failure
+lands on the owner's device rather than in CI. It was caught the day
+`expo-audio` was added for voice messages — under `appVersion` that bundle would
+have been delivered straight to an installed build with no audio native code.
+
+Operational consequence, and it is the whole point of the change: **you can no
+longer decide "OTA or real build?" from memory.** A JS-only change fingerprints
+identically and goes out over the air; anything touching the native side
+fingerprints differently and requires a real build plus a fresh install. The
+tooling now enforces the distinction instead of relying on someone remembering
+it.
+
+Note that switching policies is itself a runtime-version change, so every build
+produced under the old policy stops receiving updates and must be replaced once.
+
 ## App remote diagnostics — `app/lib/diagnostic-*.ts` + `gateway/http/app-diagnostics-surface.ts`
 
 When the mobile app misbehaves on the owner's phone, the error and its recent
@@ -2313,6 +2343,56 @@ account) once, then paste the contents of `~/.codex/auth.json`.
   global-scoped: the tool context carries only the owner boundary), all dispatching
   the ONE `CodexCredentialService`. The per-project override UI is in that project's
   Settings tab (`SettingsTab.tsx`), clearly labelled optional.
+
+## Voice-note transcription — local whisper.cpp, hosted API as fallback (`gateway/transcription/`)
+
+A voice note is transcribed at upload-complete time and the transcript is
+persisted as a content-addressed `<hash>.txt` sidecar beside the blob; the live
+turn then inlines that text (the agent cannot read raw audio). The upload surface
+(`gateway/http/app-upload-surface.ts`) owns the sidecar and calls ONE injected
+`transcribeAudio` seam — it knows nothing about which backend answers.
+
+**Two backends, one contract.** `gateway/transcription/types.ts` defines
+`TranscribeResult`; both implementations satisfy it and NEITHER throws (ASR must
+never fail an upload):
+
+- `local-whisper.ts` — spawns `whisper-cli` on this machine. No API key, no
+  network, no per-minute cost, and the audio never leaves the box.
+- `openai-transcription.ts` — the hosted `POST /v1/audio/transcriptions` client.
+
+**Precedence — LOCAL WINS, unconditionally** (`resolve-transcriber.ts`):
+local-if-installed → hosted-if-`OPENAI_API_KEY` → none. Installing local Whisper
+is a deliberate act whose point is that the voice stays on the machine; silently
+preferring a remote service afterwards, because an unrelated key is in the env,
+would undo that and bill for it. Resolution happens PER CALL, not at boot, so an
+install performed in Settings takes effect without a restart.
+
+**Install is opt-in, from Settings — nothing ships in `install.sh`.**
+`whisper-catalog.ts` pins the whisper.cpp release build and each ggml model by
+URL, byte size AND SHA-256. `whisper-install.ts` streams each artifact to a
+`.part` file while hashing it and only `rename()`s it into place on an exact
+digest match, so an interrupted or corrupted download leaves NOTHING installed
+(safely re-runnable rather than byte-range resumable). Disk space is checked
+before the first byte. Assets live at `<NEUTRON_HOME>/whisper/{bin,models}`;
+`NEUTRON_WHISPER_BIN` / `NEUTRON_WHISPER_MODEL` override them, so a machine
+running several instances can share ONE copy of the weights.
+
+**Surfaces.** HTTP `gateway/http/voice-transcription-surface.ts` —
+machine-scoped `/api/app/voice-transcription` (GET status + catalog + live job
+progress, POST install, DELETE remove). POST returns 202 immediately; the client
+(`landing/chat-react/voice-transcription-client.ts`) polls the GET for real
+byte counts, rendered as a progress bar in the Settings tab's "Local voice
+transcription" section.
+
+**Measured cost** (8-core AMD EPYC-Milan @2.4 GHz, AVX2, no GPU, `-t 4`,
+whisper.cpp v1.9.1, 30-second note): `base` 3.8 s / 343 MB RSS; `small` 12.4 s /
+813 MB; `large-v3-turbo` 50.0 s / 1.9 GB. Default is `base` — transcription runs
+INSIDE the upload request, so model choice is felt directly as how long the owner
+waits after speaking. Plain `large-v3` (69.8 s, 3.97 GB RSS) and every q5
+quantization (measured SLOWER than the f16 weights they shrink, on this CPU) are
+deliberately not offered. `whisper-cli` decodes wav/mp3/ogg/flac natively;
+`audio/mp4` (iOS Safari's recorder output) is normalized through `ffmpeg` when
+present and refused with a precise `unsupported_format` when not.
 
 ## Work Board — orchestrator external memory + live work tracker (`work-board/`)
 
@@ -5667,6 +5747,41 @@ now-nonexistent vanilla client.
   the turn's `user_text` is never mutated. Both clients render a 🎵 chip for a voice
   note (web `message-adapter.ts` `isAudioAttachmentUrl`; native `attachment-url.ts`
   predicate; icon precedent `docs-shared.ts` `treeIconFor`).
+- **Recording a voice note on mobile (2026-07-31):** the half above accepted audio
+  but nothing could CAPTURE it — the app had no audio dependency at all, so a voice
+  message could only be sent by picking an existing file. Recording now lives in
+  four new modules, deliberately split so the gesture rules are testable off-device:
+  `app/lib/voice-recording.ts` (pure — the `M:SS` clock, the slide-to-cancel
+  arithmetic, the min/max duration rules, the capture settings), `app/lib/voice-send.ts`
+  (upload orchestration — validates then calls the EXISTING `uploadAttachment`; no new
+  endpoint), `app/lib/use-voice-recorder.ts` (**the seam**: permission, `expo-audio`
+  lifecycle, elapsed clock, upload handoff), and `app/components/VoiceMicButton.tsx` +
+  `VoiceRecorderOverlay.tsx` (the pixels). The dependency is **`expo-audio@~1.1.1`**
+  (SDK-54-matched; `expo-audio` supersedes `expo-av`), configured via the
+  `expo-audio` config plugin in `app.json`, which adds `RECORD_AUDIO` +
+  `MODIFY_AUDIO_SETTINGS` on Android and `NSMicrophoneUsageDescription` on iOS —
+  **native config, so it ships only in a new BUILD, never an OTA update**.
+  Both iMessage gestures run off one button and one recorder, disambiguated on
+  release by press duration (`LONG_PRESS_MS`): a HOLD sends on release (and
+  discards if the finger slid past `CANCEL_SLIDE_DX`, the glyph flipping mic → send
+  → ✕ as it travels), while a TAP latches capture hands-free and the overlay grows a
+  ■ stop that drops the clip into a play / ✕ / send review row. Capture is
+  22.05kHz mono AAC in `.m4a` at 32kbps — speech settings, since the ASR model
+  resamples anyway — capped at 10 minutes, which stays well inside
+  `MAX_CHAT_UPLOAD_BYTES`.
+- **ISO-BMFF audio is no longer mistaken for video (2026-07-31):** `magicByteSniff`
+  classified `ftyp` files on the major brand alone, so a GENERIC brand meant
+  `video/mp4` — a type absent from `CHAT_UPLOAD_MIME_WHITELIST`. Android's
+  MediaRecorder stamps `mp42` on every MPEG-4 file it writes, audio-only voice notes
+  included (and desktop muxers commonly write `isom` for a plain `.m4a`), so those
+  uploads 415'd. `isoBmffTrackKinds` (`gateway/storage/binary-types.ts`) now walks
+  the box tree to `moov > trak > mdia > hdlr` and reads the track handlers: `soun`
+  with no `vide` ⇒ `audio/mp4`. It is a STRUCTURAL walk stepping box-to-box by size
+  (handling both the `size == 1` 64-bit and `size == 0` to-EOF escapes), not a byte
+  scan, so `hdlr` bytes inside an opaque `mdat` cannot forge a track — and it finds
+  `moov` whether it precedes the payload or trails it, which is the layout
+  MediaRecorder writes. An unparsable file keeps the historical `video/mp4` answer
+  rather than guessing.
 
 **Parity reached:** optimistic send, token streaming, typing indicator,
 reconnect+backoff (all via chat-core), durable cold-open + gap-free reconnect

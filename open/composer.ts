@@ -213,6 +213,7 @@ export type OpenComposition = CompositionInput &
       | 'codex_credential'
       | 'app_tasks_surface'
       | 'app_upload_surface'
+      | 'app_voice_transcription_surface'
     >
   >
 import { buildLlmNudgeRater } from '@neutronai/gateway/proactive/idle-nudge-sweep.ts'
@@ -285,7 +286,12 @@ import {
   createAppUploadSurface,
   resolveChatAttachmentLocalPath,
 } from '@neutronai/gateway/http/app-upload-surface.ts'
-import { createOpenAiTranscriptionClient } from '@neutronai/gateway/transcription/openai-transcription.ts'
+import { resolveTranscriber } from '@neutronai/gateway/transcription/resolve-transcriber.ts'
+import {
+  WhisperInstaller,
+  freeBytesAt,
+} from '@neutronai/gateway/transcription/whisper-install.ts'
+import { createVoiceTranscriptionSurface } from '@neutronai/gateway/http/voice-transcription-surface.ts'
 import { createAppDiagnosticsSurface } from '@neutronai/gateway/http/app-diagnostics-surface.ts'
 import { composeDiagnostics } from '@neutronai/gateway/diagnostics/diagnostics-report.ts'
 import { buildInstanceDiagnosticsSources } from '@neutronai/gateway/diagnostics/instance-sources.ts'
@@ -2329,42 +2335,65 @@ export function buildOpenGraphComposer(
     // controls 404. `new TaskStore(db)` reads the SAME canonical project task
     // data the agent's `cores/free/tasks` backend writes. Same owner auth.
     const appTasksSurface = createAppTasksSurface({ store: new TaskStore(db), auth: appOwnerAuth })
-    // M2 task 5 — voice-note ASR. BYO `OPENAI_API_KEY` — the SAME single env
-    // var `resolveOpenOpenAiPool` (:474) reads; its presence turns transcription
-    // ON (credential config, NOT a feature flag) and works regardless of which
-    // provider drives the conversation. Keyless ⇒ no seam is passed and audio
-    // still uploads, just without a transcript.
-    const openaiKey = (env['OPENAI_API_KEY'] ?? '').trim()
-    const transcriptionClient =
-      openaiKey.length > 0 ? createOpenAiTranscriptionClient({ api_key: openaiKey }) : null
+    // M2 task 5 — voice-note ASR. TWO backends behind one seam, picked by
+    // `resolveTranscriber`: LOCAL whisper.cpp when it is installed (keyless, and
+    // the audio never leaves the box), else the hosted API when
+    // `OPENAI_API_KEY` is set, else nothing. Local WINS when both are available
+    // — installing it is a deliberate choice the owner made in Settings, and
+    // quietly shipping their voice to a third party afterwards would undo it.
+    //
+    // Resolved PER CALL, not once at boot: "Install local Whisper" is a button
+    // in the running app, so a box that had no transcriber a minute ago must
+    // start transcribing the moment the download lands — without a restart. The
+    // probe is a couple of `existsSync` calls against a request that is about to
+    // spend seconds in an ASR subprocess, so it costs nothing measurable.
+    //
+    // The seam is therefore ALWAYS wired (it was previously omitted on a keyless
+    // box, which would have frozen that box as untranscribable for the life of
+    // the process); it returns null when no backend resolves, exactly as a
+    // failed transcription does, and no sidecar is written.
     const appUploadSurface = createAppUploadSurface({
       auth: appOwnerAuth,
       project_slug,
       owner_home,
-      ...(transcriptionClient !== null
-        ? {
-            transcribeAudio: async (i: {
-              bytes: Uint8Array
-              content_type: string
-              hash: string
-            }): Promise<string | null> => {
-              const r = await transcriptionClient.transcribe({
-                bytes: i.bytes,
-                content_type: i.content_type,
-              })
-              if (!r.ok) {
-                log.warn('voice_transcription_failed', {
-                  code: r.code,
-                  ...(r.status !== undefined ? { status: r.status } : {}),
-                  hash: i.hash,
-                })
-                return null
-              }
-              const t = r.text.trim()
-              return t.length > 0 ? t : null
-            },
-          }
-        : {}),
+      transcribeAudio: async (i: {
+        bytes: Uint8Array
+        content_type: string
+        hash: string
+      }): Promise<string | null> => {
+        const backend = resolveTranscriber({ env, neutron_home: owner_home })
+        if (backend.client === null) return null
+        const r = await backend.client.transcribe({
+          bytes: i.bytes,
+          content_type: i.content_type,
+        })
+        if (!r.ok) {
+          log.warn('voice_transcription_failed', {
+            backend: backend.kind,
+            ...(backend.model_id !== undefined ? { model: backend.model_id } : {}),
+            code: r.code,
+            ...(r.status !== undefined ? { status: r.status } : {}),
+            hash: i.hash,
+          })
+          return null
+        }
+        const t = r.text.trim()
+        return t.length > 0 ? t : null
+      },
+    })
+
+    // The Settings-tab installer for the local backend. ONE machine-scoped
+    // installer instance so a second click joins the running download rather
+    // than racing it.
+    const whisperInstaller = new WhisperInstaller({
+      neutron_home: owner_home,
+      free_bytes: freeBytesAt,
+    })
+    const voiceTranscriptionSurface = createVoiceTranscriptionSurface({
+      auth: appOwnerAuth,
+      installer: whisperInstaller,
+      neutron_home: owner_home,
+      env,
     })
 
     // O5 (world-class-refactor) — read-only diagnostics surface. Composes
@@ -4461,6 +4490,9 @@ export function buildOpenGraphComposer(
       // control has a live backend (no 404s behind a shown tab/button).
       app_tasks_surface: { handler: appTasksSurface.handler },
       app_upload_surface: { handler: appUploadSurface.handler },
+      // Local voice transcription (`/api/app/voice-transcription`) — the
+      // Settings-tab install/remove control for the keyless whisper.cpp backend.
+      app_voice_transcription_surface: { handler: voiceTranscriptionSurface.handler },
       // O5 — read-only diagnostics (`GET /api/app/admin/diagnostics`),
       // owner-gated. Additive; mounts no write route.
       app_diagnostics_surface: { handler: appDiagnosticsSurface.handler },
