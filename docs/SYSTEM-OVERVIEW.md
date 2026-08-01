@@ -4219,9 +4219,20 @@ indicator. No feature flags — one live path.
   `chat-core/__tests__/no-direct-webcrypto.test.ts` fails the build on any direct
   WebCrypto call in `chat-core/`, `app/lib`, `app/app`, `app/components` or
   `landing/chat-react`.
+- **The connection is ASSUMED GOOD until it has been bad for a while (2026-07-31).**
+  `app/components/ConnectionNotice.tsx` replaced the strip that transcribed the
+  `ConnStatus` machine ("Connecting…" on every mount, i.e. on every project switch).
+  It now renders nothing for a connect or a reconnect, and shows a single quiet
+  `Offline` line (with the queue depth, when sends are stacked up) only after
+  `OFFLINE_NOTICE_AFTER_MS` — 15 s, matching `ChatWsClient`'s `maxBackoffMs`, so five
+  backoff rounds have failed before the owner is told anything. The deadline keys on
+  boolean health, never the status string, so a flapping outage still surfaces and a
+  recovered socket clears the notice on the same render. Per-message truth stays on
+  the bubble's 🕓/✓/⚠️ delivery glyph.
 - **A send that cannot be queued is VISIBLE (2026-07-29).** `useMobileChat.send`
-  returns `Promise<boolean>` and sets `sendError`, which `StatusStrip` renders above
-  the connection label; `InputComposer` keeps the owner's draft when it is false. A
+  returns `Promise<boolean>` and sets `sendError`, which `ConnectionNotice` renders
+  above the transcript, instantly and undelayed; `InputComposer` keeps the owner's
+  draft when it is false. A
   null session reports "Still connecting" instead of silently no-oping. The old
   `void session?.send(...)` made every send failure indistinguishable from success,
   which is what made the WebCrypto bug undiagnosable rather than merely present.

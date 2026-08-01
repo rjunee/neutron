@@ -37,7 +37,7 @@ import { useRouter } from 'expo-router';
 import * as DocumentPicker from 'expo-document-picker';
 
 import { spentChoiceValue } from '@neutronai/chat-core';
-import type { ChatMessage, ChatMessageDocRef, ConnStatus } from '@neutronai/chat-core';
+import type { ChatMessage, ChatMessageDocRef } from '@neutronai/chat-core';
 
 import {
   deliveryGlyph,
@@ -52,6 +52,7 @@ import { useAuthSession } from '../lib/session';
 import { loadAppConfig } from '../lib/config';
 import { RenderMarkdown } from '../lib/markdown-render';
 import { AuthedAttachmentImage } from './AuthedAttachmentImage';
+import { ConnectionNotice } from './ConnectionNotice';
 import type { AttachmentAuthCtx } from '../lib/attachment-url';
 import { ButtonOptionRow, ImageGalleryRow } from '../lib/button-primitives';
 import { CitationChipRow } from '../lib/citation-chip-row';
@@ -144,11 +145,6 @@ export function ChatSyncSurface({
     [rows],
   );
   const uploadAffordance = useLatestUploadAffordance(messages);
-
-  const hasPromptWithFreeform = useMemo(
-    () => messages.some((m) => m.role === 'agent' && m.allow_freeform === true),
-    [messages],
-  );
 
   // ISSUE #18 — single client-side consumer of the top-level `deep_link`.
   const seenDeepLinks = useRef<Set<string>>(new Set());
@@ -548,11 +544,20 @@ export function ChatSyncSurface({
             purpose: in long-press mode the finger is still ON it, and the release
             is what sends. */}
         <VoiceRecorderOverlay voice={voice} />
+        {/* ONE CONSTANT PLACEHOLDER. `placeholder` used to swap to "Or type a
+            response…" whenever an agent prompt allowed freeform — the same
+            sentence the owner had already had removed from the hint line above
+            the composer (see the note on `composerHint`), so his complaint stayed
+            on screen, just in the ghost text instead. The affordance it reached
+            for is real, but "you may type instead of tapping" belongs in the
+            prompt that offers the buttons, not in the input's ghost text: every
+            messaging app this is measured against keeps one fixed placeholder,
+            and text that mutates under the cursor reads as a glitch. */}
         <InputComposer
           onSend={handleSend}
           {...voiceHandlers}
           bottom_inset={composerBottom}
-          placeholder={hasPromptWithFreeform ? 'Or type a response…' : 'Message'}
+          placeholder="Message"
           {...(composerHint !== undefined ? { hint: composerHint } : {})}
           {...(initialPrefill !== undefined && initialPrefill.length > 0
             ? { initial_draft: initialPrefill }
@@ -566,7 +571,7 @@ export function ChatSyncSurface({
 
   return (
     <View style={styles.fill}>
-      <StatusStrip status={status} pendingCount={pendingCount} sendError={sendError} />
+      <ConnectionNotice status={status} pendingCount={pendingCount} sendError={sendError} />
       {dropMultiFileHint !== null ? (
         <View style={styles.dropMultiFileHint} testID="chat-drop-multi-file-hint">
           <Text style={styles.dropMultiFileHintText}>{dropMultiFileHint}</Text>
@@ -1025,57 +1030,11 @@ function EmptyState(): React.JSX.Element {
   );
 }
 
-/**
- * Connection + offline-queue strip. Hidden when fully connected + flushed.
- *
- * `sendError` OUTRANKS the connection label. A message that could not even be
- * queued locally produced no bubble at all, so this strip is the ONLY place the
- * owner can learn it happened — and a cheerful (or absent) connection line over
- * a silently-dropped message is exactly the lie that let mobile chat ship broken.
- */
-function StatusStrip({
-  status,
-  pendingCount,
-  sendError,
-}: {
-  status: ConnStatus;
-  pendingCount: number;
-  sendError: string | null;
-}): React.JSX.Element | null {
-  if (sendError !== null) {
-    return (
-      <View style={styles.statusStrip} testID="chat-send-error">
-        <Text style={[styles.statusText, { color: THEME.danger }]} accessibilityRole="alert">
-          {sendError}
-        </Text>
-      </View>
-    );
-  }
-  const label = statusLabel(status, pendingCount);
-  if (label === null) return null;
-  const tone = status === 'open' ? THEME.text_muted : THEME.warning;
-  return (
-    <View style={styles.statusStrip}>
-      <Text style={[styles.statusText, { color: tone }]}>{label}</Text>
-    </View>
-  );
-}
-
-function statusLabel(status: ConnStatus, pendingCount: number): string | null {
-  if (status === 'open') {
-    return pendingCount > 0 ? `Sending ${pendingCount}…` : null;
-  }
-  switch (status) {
-    case 'connecting':
-      return 'Connecting…';
-    case 'reconnecting':
-      return pendingCount > 0 ? `Offline — ${pendingCount} queued` : 'Reconnecting…';
-    case 'closed':
-      return 'Disconnected';
-    case 'idle':
-      return null;
-  }
-}
+// THE CONNECTION STRIP LIVES IN `./ConnectionNotice`. It used to be here, and it
+// used to narrate the socket state machine — "Connecting…" on every mount, which
+// meant on every project switch. It now says nothing unless the connection has
+// actually been down long enough to matter; the reasoning, and where the
+// per-message truth is carried instead, is documented in that file.
 
 const styles = StyleSheet.create({
   fill: { flex: 1, backgroundColor: THEME.background },
@@ -1219,13 +1178,4 @@ const styles = StyleSheet.create({
     borderBottomColor: THEME.hairline,
   },
   dropMultiFileHintText: { ...TYPOGRAPHY.body_small, color: THEME.text_secondary },
-  statusStrip: {
-    paddingVertical: SPACING.xs,
-    paddingHorizontal: SPACING.md,
-    alignItems: 'center',
-    backgroundColor: THEME.surface,
-    borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: THEME.hairline,
-  },
-  statusText: { ...TYPOGRAPHY.caption },
 });
